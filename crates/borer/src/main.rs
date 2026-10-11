@@ -34,6 +34,7 @@ mod params;
 mod recall;
 mod relay;
 mod resources;
+mod setup;
 mod strwalk;
 mod symsrv;
 

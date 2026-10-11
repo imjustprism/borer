@@ -81,6 +81,7 @@ commands:
   read <binary> <address> [kind] [count]   typed values (u8..u64, f32, f64, ptr, cstr, wstr); off:<n> reads by file offset
   fingerprint <binary> [out]               function fingerprints; with out, write the sidecar borer://diff reads
   doctor [offline]                         the local setup, one line each: version and commit, toolchain, symbol cache and server (offline skips the server), index cache, .mcp.json
+  setup [--apply]                          register this binary as the MCP server borer with every agent client installed (Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Gemini CLI, Codex CLI, Zed); a dry run that shows each file and entry unless --apply, which keeps a .bak of each file it changes
   fetch-pdb <binary> [server]              fetch the companion PDB the debug record names from a symbol server (default msdl) into the local cache, kept only if its guid+age match; reload to apply
   pack <file>                              read a pack and report its name, its keys by section and what borer does not read
   pack-keys                                every key a pack can set, with its default and meaning
@@ -128,6 +129,9 @@ enum Command {
     Packs,
     /// `doctor [offline]`: the local setup, one line per item; no binary.
     Doctor,
+    /// `setup [--apply]`: register this binary with the installed agent
+    /// clients; no binary.
+    Setup,
     /// `fetch-pdb <binary> [server]`: fetch the companion PDB the debug
     /// record names; no query.
     FetchPdb,
@@ -152,6 +156,7 @@ impl Command {
             "sigmake" => Self::Sigmake,
             "packs" => Self::Packs,
             "doctor" => Self::Doctor,
+            "setup" => Self::Setup,
             "fetch-pdb" => Self::FetchPdb,
             query => Self::Query(Query::parse(query)?),
         })
@@ -1042,6 +1047,18 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
                 Some(other) => bail!("doctor takes `offline` or nothing, not {}", quoted(other)),
             };
             print!("{}", crate::doctor::doctor(offline)?);
+        }
+        Some(Command::Setup) => {
+            let apply = match args.get(1).map(String::as_str) {
+                None => false,
+                Some("--apply") => true,
+                Some(other) => bail!("setup takes `--apply` or nothing, not {}", quoted(other)),
+            };
+            let (report, failed) = crate::setup::setup(apply)?;
+            print!("{report}");
+            if failed > 0 {
+                bail!("{failed} client(s) could not be set up; their lines say why");
+            }
         }
         Some(Command::FetchPdb) => {
             let path = args.get(1).with_context(|| {
