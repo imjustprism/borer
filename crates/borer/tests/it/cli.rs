@@ -297,6 +297,106 @@ fn cli_refuses_unknown_words_precisely() {
     }
 }
 
+/// Every command refuses an argument past the ones its usage lists, by
+/// name and before it loads the binary, where some answered as if it were
+/// not there.
+///
+/// # Panics
+///
+/// When an extra argument is accepted or refused with another reason.
+#[test]
+fn cli_refuses_an_argument_too_many() {
+    for (args, reason) in [
+        (
+            &["info", "x", "junk"][..],
+            "info takes nothing after the binary, not 'junk'",
+        ),
+        (
+            &["functions", "x", "", "0", "5", "extra"][..],
+            "functions takes at most 3 arguments after the binary, not also 'extra'",
+        ),
+        (
+            &["disasm", "x", "0x1000", "4", "junk"][..],
+            "disasm takes at most 2 arguments after the binary, not also 'junk'",
+        ),
+        (
+            &["pack-keys", "extra"][..],
+            "pack-keys takes nothing, not 'extra'",
+        ),
+        (
+            &["help", "info", "extra"][..],
+            "help takes one command, not also 'extra'",
+        ),
+    ] {
+        let (ok, out) = run_all(args);
+        assert!(!ok, "{args:?} succeeded: {out}");
+        assert!(out.contains(reason), "{args:?}: {out}");
+        assert!(!out.contains("loading"), "{args:?} loaded a file: {out}");
+    }
+}
+
+/// `hexdump`, `read` and `disasm` take a name where an address goes, as the
+/// tools of the same names do, where they took numbers alone.
+///
+/// # Panics
+///
+/// When a name is refused, or the three commands read it at different
+/// addresses.
+#[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
+fn cli_addresses_take_names() {
+    let exe = env!("CARGO_BIN_EXE_borer");
+    let (ok, dump) = run(&["hexdump", exe, "GetLastError", "8"]);
+    assert!(ok, "{dump}");
+    let at = dump
+        .strip_prefix("# ")
+        .and_then(|l| l.split("..").next())
+        .expect("a range header")
+        .to_owned();
+    let (ok, out) = run(&["read", exe, "GetLastError", "u8", "1"]);
+    assert!(ok && out.starts_with(&at), "{at}: {out}");
+    let (ok, out) = run(&["disasm", exe, "GetLastError", "1"]);
+    assert!(ok && out.lines().any(|l| l.starts_with(&at)), "{at}: {out}");
+}
+
+/// `disasm` and `read` refuse a count of zero as `hexdump` refuses a
+/// length of zero, where they read one; `snapshot` refuses a device as
+/// every other command that writes a file does, before its analysis.
+///
+/// # Panics
+///
+/// When a zero count is read, or the device is written.
+#[test]
+fn cli_counts_and_devices_are_refused_alike() {
+    let exe = std::env::current_exe().expect("the test binary has a path");
+    let exe = exe.to_string_lossy().to_string();
+    let mut cases = vec![
+        (
+            vec!["disasm", exe.as_str(), "0x0", "0"],
+            "disasm count must be at least 1",
+        ),
+        (
+            vec!["read", exe.as_str(), "0x0", "u8", "0"],
+            "read count must be at least 1",
+        ),
+        (
+            vec!["hexdump", exe.as_str(), "0x0", "0"],
+            "hexdump length must be at least 1",
+        ),
+    ];
+    if cfg!(windows) {
+        cases.push((vec!["snapshot", exe.as_str(), "NUL"], "nothing was written"));
+    }
+    for (args, reason) in cases {
+        let (ok, out) = run_all(&args);
+        assert!(!ok, "{args:?} succeeded: {out}");
+        assert!(out.contains(reason), "{args:?}: {out}");
+    }
+}
+
 /// `--help` lists the commands and mentions the MCP server mode.
 #[test]
 fn cli_help_lists_commands() {

@@ -25,6 +25,7 @@
 use std::fmt::Write as _;
 
 use crate::analysis::sigs::{SIG_MAX, format_signature, parse_signature};
+use crate::text::one_line;
 
 /// The 32-bit x86 COFF machine.
 const I386: u16 = 0x14c;
@@ -64,7 +65,11 @@ impl LibFunction {
 /// Reads the functions a COFF object or an archive of objects defines.
 ///
 /// Only x86 and x64 objects are read; an archive's import members and
-/// objects of other machines are passed over.
+/// objects of other machines are passed over. A damaged member is said so:
+/// a header that does not parse, or a member (the linker's own included)
+/// running past the end of the file, ends the walk there, and a member
+/// holding no COFF object is skipped. A damaged archive read as one with
+/// no functions, which wrote an empty pack and succeeded.
 ///
 /// # Arguments
 ///
@@ -72,30 +77,43 @@ impl LibFunction {
 ///
 /// # Returns
 ///
-/// Every function with a name, in file order.
+/// Every function with a name, in file order, and one line per damaged
+/// member saying what was wrong with it.
 ///
 /// # Errors
 ///
 /// When the bytes are neither an archive nor a COFF object.
-pub fn read(bytes: &[u8]) -> anyhow::Result<Vec<LibFunction>> {
+pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
     let mut out = Vec::new();
+    let mut damaged = Vec::new();
     if bytes.starts_with(b"!<arch>\n") {
         let mut offset = 8usize;
         while offset + goblin::archive::SIZEOF_HEADER <= bytes.len() {
             if offset % 2 == 1 {
                 offset += 1;
             }
-            let Ok(member) = goblin::archive::Member::parse(bytes, &mut offset) else {
-                break;
-            };
-            let Ok(start) = usize::try_from(member.offset) else {
+            let at = offset;
+            let Some((start, member)) = goblin::archive::Member::parse(bytes, &mut offset)
+                .ok()
+                .and_then(|m| Some((usize::try_from(m.offset).ok()?, m)))
+            else {
+                damaged.push(format!(
+                    "the member header at {at:#x} does not read; the rest of the archive is not read"
+                ));
                 break;
             };
             let size = member.size();
             offset = start.saturating_add(size);
+            let name = member.header.name;
+            let Some(data) = bytes.get(start..offset) else {
+                damaged.push(format!(
+                    "member {} at {at:#x} runs past the end of the file; the rest of the archive is not read",
+                    one_line(name)
+                ));
+                break;
+            };
             // SPEC: the linker members (`/`) and the long-name table (`//`)
             // are not objects.
-            let name = member.header.name;
             if name.starts_with('/')
                 && name
                     .get(1..)
@@ -103,17 +121,17 @@ pub fn read(bytes: &[u8]) -> anyhow::Result<Vec<LibFunction>> {
             {
                 continue;
             }
-            if let Some(data) = bytes.get(start..start.saturating_add(size)) {
-                object_functions(data, &mut out);
+            if let Err(why) = object_functions(data, &mut out) {
+                damaged.push(format!("member {} at {at:#x}: {why}", one_line(name)));
             }
         }
-        return Ok(out);
+        return Ok((out, damaged));
     }
     if goblin::pe::Coff::parse(bytes).is_err() {
         anyhow::bail!("neither an archive (.lib) nor a COFF object (.obj)");
     }
-    object_functions(bytes, &mut out);
-    Ok(out)
+    object_functions(bytes, &mut out).map_err(anyhow::Error::msg)?;
+    Ok((out, damaged))
 }
 
 /// How many bytes a relocation of `kind` rewrites.
@@ -143,20 +161,23 @@ fn reloc_width(machine: u16, kind: u16) -> usize {
 ///
 /// * `bytes` - The object.
 /// * `out` - Where the functions go.
-fn object_functions(bytes: &[u8], out: &mut Vec<LibFunction>) {
+///
+/// # Errors
+///
+/// When the bytes are not a COFF object; an import object, a big object
+/// and an object of another machine are passed over without one.
+fn object_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'static str> {
     // SPEC: an import object and a big object both open `0000 FFFF`.
     if bytes.get(..4) == Some(&[0, 0, 0xff, 0xff][..]) {
-        return;
+        return Ok(());
     }
-    let Ok(coff) = goblin::pe::Coff::parse(bytes) else {
-        return;
-    };
+    let coff = goblin::pe::Coff::parse(bytes).map_err(|_| "not a COFF object")?;
     let machine = coff.header.machine;
     if !matches!(machine, I386 | AMD64) {
-        return;
+        return Ok(());
     }
     let (Some(symbols), Some(strings)) = (&coff.symbols, &coff.strings) else {
-        return;
+        return Ok(());
     };
     // Names by symbol index, and whether a reference to it says anything
     // another object could say too.
@@ -192,6 +213,7 @@ fn object_functions(bytes: &[u8], out: &mut Vec<LibFunction>) {
         section_functions(bytes, &coff, machine, &names, &functions[at..end], out);
         at = end;
     }
+    Ok(())
 }
 
 /// Adds the functions of one section to `out`.
@@ -442,7 +464,8 @@ mod tests {
                 ("Sleep", 0, 0, 0x20, 2),
             ],
         );
-        let found = read(&obj).expect("reads");
+        let (found, damaged) = read(&obj).expect("reads");
+        assert!(damaged.is_empty(), "{damaged:?}");
         assert_eq!(found.len(), 2);
         let caller = &found[0];
         assert_eq!(caller.name, "?caller@@YAXXZ");
@@ -457,6 +480,59 @@ mod tests {
             .find_map(|l| l.strip_prefix("lib ").filter(|l| l.contains("caller")))
             .expect("a lib line");
         assert_eq!(parse_line(line), Some(caller.clone()));
+    }
+
+    /// An archive's damaged members are named, not read as members with no
+    /// functions: a member that holds no object is skipped and said so, and
+    /// a header that does not read ends the walk and says so.
+    ///
+    /// # Panics
+    ///
+    /// When a damaged member goes unreported or a sound one is lost.
+    #[test]
+    fn an_archive_names_its_damaged_members() {
+        /// An archive member: its 60-byte header, then its bytes, padded
+        /// to an even length.
+        fn member(name: &str, data: &[u8]) -> Vec<u8> {
+            let mut m = format!("{name:<16}{:<12}{:<6}{:<6}{:<8}", 0, 0, 0, 644).into_bytes();
+            m.extend_from_slice(format!("{:<10}`\n", data.len()).as_bytes());
+            m.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                m.push(b'\n');
+            }
+            m
+        }
+        let obj = object(0x8664, &[0xc3], &[], &[("f", 1, 0, 0x20, 2)]);
+        let mut lib = b"!<arch>\n".to_vec();
+        lib.extend(member("good.obj/", &obj));
+        lib.extend(member("bad.obj/", b"not an object at all"));
+        let (found, damaged) = read(&lib).expect("reads");
+        assert_eq!(found.len(), 1, "the sound member is read");
+        assert_eq!(damaged.len(), 1, "{damaged:?}");
+        assert!(
+            damaged[0].starts_with("member bad.obj") && damaged[0].ends_with(": not a COFF object"),
+            "{damaged:?}"
+        );
+        let mut short = b"!<arch>\n".to_vec();
+        short.extend(member("/", &[0; 64]));
+        short.truncate(short.len() - 32);
+        let (found, damaged) = read(&short).expect("reads");
+        assert!(found.is_empty());
+        assert_eq!(damaged.len(), 1, "{damaged:?}");
+        assert!(
+            damaged[0].ends_with(
+                " at 0x8 runs past the end of the file; the rest of the archive is not read"
+            ),
+            "a cut linker member is named: {damaged:?}"
+        );
+        let mut cut = b"!<arch>\n".to_vec();
+        cut.extend_from_slice(&[b'#'; 60]);
+        let (found, damaged) = read(&cut).expect("reads");
+        assert!(found.is_empty());
+        assert_eq!(
+            damaged,
+            vec!["the member header at 0x8 does not read; the rest of the archive is not read"]
+        );
     }
 
     /// Bytes that are neither an archive nor an object are refused.

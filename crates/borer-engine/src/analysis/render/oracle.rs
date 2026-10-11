@@ -2,6 +2,9 @@
 //! they produce.
 
 use super::*;
+use crate::analysis::decompile::decompile_named;
+use crate::analysis::decompile::signature::printed;
+use crate::text::one_line;
 
 /// Check values a standard checksum produces for the probe string.
 ///
@@ -68,7 +71,8 @@ pub(super) struct Candidate {
 /// the report says nothing was distinguished rather than inventing a value.
 /// An argument index that cannot be read is refused rather than taken as the
 /// first argument, so a caller who asked about `a2` and mistyped it does not
-/// read a report about `a1` with nothing to say the question changed.
+/// read a report about `a1` with nothing to say the question changed; so is
+/// one the function's signature does not list ([`beyond_parameters`]).
 ///
 /// # Arguments
 ///
@@ -86,7 +90,8 @@ pub(super) struct Candidate {
 /// # Errors
 ///
 /// When the address does not resolve or is in no function, the argument
-/// index does not read, or the architecture is not emulated.
+/// index does not read or names no parameter, or the architecture is not
+/// emulated.
 pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     /// Candidate values tried, so one function cannot run for ever.
     const CANDIDATES_MAX: usize = 48;
@@ -98,13 +103,17 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     const VALUES_MAX: usize = 8;
     let (where_, mut rest) = spec_head(spec);
     let start = locate(a, o, where_).ok_or_else(|| unresolved(where_))?;
-    let slot = match rest.next().map(str::trim).filter(|t| !t.is_empty()) {
+    let named = rest.next().map(str::trim).filter(|t| !t.is_empty());
+    let slot = match named {
         None => 0,
         Some(t) => t
-            .trim_start_matches('a')
-            .parse::<usize>()
-            .map_err(|_| {
-                format!("cannot read the argument {t}; use a1, a2, ... counting from one")
+            .strip_prefix('a')
+            .and_then(|n| n.parse::<usize>().ok())
+            .ok_or_else(|| {
+                format!(
+                    "cannot read the argument {}; use a1, a2, ... counting from one",
+                    one_line(t)
+                )
             })?
             .checked_sub(1)
             .ok_or_else(|| String::from("arguments count from one; a1 is the first"))?,
@@ -113,6 +122,9 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         .function_at(start)
         .ok_or_else(|| format!("no function contains {start:#x}"))?;
     let entry = f.entry;
+    if named.is_some() {
+        beyond_parameters(p, a, o, entry, slot)?;
+    }
     let instrs = function_instructions(p, a, entry);
     let mut candidates: Vec<Candidate> = [0, 1, u64::MAX]
         .iter()
@@ -217,6 +229,52 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     }
     more_line(&mut out, grouped.len(), GROUPS_MAX, "answers not listed");
     Ok(out)
+}
+
+/// Refuses an argument the function's recovered signature does not list.
+///
+/// `solve 0x401000,a99` ran 48 emulations varying a register no
+/// convention passes anything in and reported `argument 99` as if it were
+/// one. A signature that does not print, or a variadic one, refuses
+/// nothing: the argument may be real where the text cannot say.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `entry` - The function's entry.
+/// * `slot` - The argument asked for, from zero.
+///
+/// # Errors
+///
+/// When the signature lists fewer arguments than `slot + 1`, naming it.
+fn beyond_parameters(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    slot: usize,
+) -> Result<(), String> {
+    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let Some(sig) = decompile_named(p, a, o, entry).and_then(|t| printed(&t, word).ok()) else {
+        return Ok(());
+    };
+    let count = sig.parameter_kinds().len();
+    if slot < count || sig.text.contains("...") {
+        return Ok(());
+    }
+    Err(format!(
+        "{} takes {} ({}); a{} is not one of them",
+        short_name(a, o, entry),
+        match count {
+            0 => "no parameters".to_owned(),
+            1 => "1 parameter".to_owned(),
+            n => format!("{n} parameters"),
+        },
+        sig.text,
+        slot + 1
+    ))
 }
 
 /// Runs a function on one prepared input and reports what came back.
@@ -519,6 +577,10 @@ mod tests {
                 "cannot read the argument ax; use a1, a2, ... counting from one",
             ),
             ("0x1000,a0", "arguments count from one; a1 is the first"),
+            (
+                "0x1000,aaa2",
+                "cannot read the argument aaa2; use a1, a2, ... counting from one",
+            ),
             ("0x5000", "no function contains 0x5000"),
         ] {
             assert_eq!(solve_tsv(&p, &a, &o, spec).unwrap_err(), message, "{spec}");
@@ -527,6 +589,32 @@ mod tests {
             oracle_tsv(&p, &a, &o, "").unwrap_err(),
             "no discovered function at ''"
         );
+    }
+
+    /// A solve refuses an argument the function's signature does not list,
+    /// naming the signature, and answers one it lists.
+    ///
+    /// `a99` ran every candidate through a register nothing passes and
+    /// reported `argument 99` as an answer.
+    ///
+    /// # Panics
+    ///
+    /// When an argument past the signature answers, or one in it is refused.
+    #[test]
+    fn solve_refuses_an_argument_the_signature_does_not_list() {
+        let o = Overlay::default();
+        let read = Program::raw_x64(&[
+            0x8b, 0x01, // ASM: mov eax,[rcx]
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&read);
+        let refused = solve_tsv(&read, &a, &o, "0x1000,a99").unwrap_err();
+        assert!(
+            refused.starts_with("sub_1000 takes 1 parameter (")
+                && refused.ends_with("); a99 is not one of them"),
+            "{refused}"
+        );
+        assert!(solve_tsv(&read, &a, &o, "0x1000,a1").is_ok());
     }
 
     /// A flat solve calls an argument a pointer only when read through.

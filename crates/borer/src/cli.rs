@@ -31,12 +31,12 @@ commands:
   function <binary> <address|name>         one function's ranges, blocks and edges
   summary <binary> <address|name>          one-call function triage
   symbols <binary> [filter] [offset] [limit]  imports, exports and locals (50 a page, max 1000)
-  hexdump <binary> <address> [length]      bytes at a virtual address, or at off:<n> in the file (default 64)
+  hexdump <binary> <address|name> [length]  bytes at a virtual address or name, or at off:<n> in the file (default 64, max 4096)
   entropy <binary> [threshold]             high-entropy regions (default 7.2)
   search <binary> <pattern> [text] [offset]  AOB hex with ?? wildcards, or a substring; 500 a page
   fstrings <binary> <address|name>         string literals one function references
   findstr <binary> <filter>                functions referencing a matching string
-  disasm <binary> <address> [count]        disassemble at a virtual address
+  disasm <binary> <address|name> [count]   disassemble at a virtual address or name (default 32, max 256)
   disasmfn <binary> <address|name>         a whole function, block by block
   decompile <binary> <address|name> [skeleton|full] [offset] [limit]  structured pseudo-C (skeleton: flow and calls only); 300 lines a page, limit 0 for all
   class <binary> <class|method address>    class layout from its methods' field accesses
@@ -79,7 +79,7 @@ commands:
   emulate <binary> <spec>                  run code and read it back; spec: addr[,reg=v,aN=v,w<addr>=<hex>,stop=<addr>,steps=<n>,trace=<n>,origin=<v>,dump=<addr>:<len>]; aN is the decompiler's aN, a1 the first
   run <binary> <function>[,steps=N]/<input>[;<input>...]  call a function on typed inputs (each: comma-separated 5, -1, \"text\", hex:0102, out:16) and check its decompiled text gives the same
   hidden <binary> [filter]                 strings the program generates instead of storing
-  read <binary> <address> [kind] [count]   typed values (u8..u64, f32, f64, ptr, cstr, wstr); off:<n> reads by file offset
+  read <binary> <address|name> [kind] [count]  typed values (u8..u64, f32, f64, ptr, cstr, wstr; default 1, max 256); off:<n> reads by file offset
   fingerprint <binary> [out]               function fingerprints; with out, write the sidecar borer://diff reads
   doctor [offline]                         the local setup, one line each: version and commit, toolchain, symbol cache and server (offline skips the server), index cache, .mcp.json
   setup [--apply]                          register this binary as the MCP server borer with every agent client installed (Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Gemini CLI, Codex CLI, Zed); a dry run that shows each file and entry unless --apply, which keeps a .bak of each file it changes
@@ -162,6 +162,27 @@ impl Command {
             query => Self::Query(Query::parse(query)?),
         })
     }
+
+    /// The most arguments the command reads after its word, or after the
+    /// binary for a query, as the usage text lists them.
+    ///
+    /// Some commands ignored what came after the arguments they read and
+    /// others refused it, so `info x junk` answered as if `junk` were not
+    /// there while `index x junk` was an error.
+    ///
+    /// # Returns
+    ///
+    /// The count, or `None` for a command that reads any number
+    /// (`sigmake`, `script`, `set-type`).
+    fn most_args(self) -> Option<usize> {
+        match self {
+            Self::PackKeys => Some(0),
+            Self::Pack | Self::Packs | Self::Doctor | Self::Setup => Some(1),
+            Self::FetchPdb => Some(2),
+            Self::Sigmake => None,
+            Self::Query(q) => q.most_args(),
+        }
+    }
 }
 
 /// A query against one binary, by its command word; the order is the usage text's.
@@ -177,7 +198,7 @@ enum Query {
     Summary,
     /// `symbols [filter] [offset] [limit]`: imports, exports and locals, a page at a time.
     Symbols,
-    /// `hexdump <address> [length]`: bytes at a virtual address.
+    /// `hexdump <address|name> [length]`: bytes at a virtual address or name.
     Hexdump,
     /// `entropy [threshold]`: high-entropy regions.
     Entropy,
@@ -187,7 +208,7 @@ enum Query {
     Fstrings,
     /// `findstr <filter>`: the functions referencing a matching string.
     Findstr,
-    /// `disasm <address> [count]`: instructions at a virtual address.
+    /// `disasm <address|name> [count]`: instructions at a virtual address or name.
     Disasm,
     /// `disasmfn <address|name>`: a whole function, block by block.
     Disasmfn,
@@ -274,7 +295,7 @@ enum Query {
     Run,
     /// `hidden [filter]`: strings the program generates instead of storing.
     Hidden,
-    /// `read <address> [kind] [count]`: typed values.
+    /// `read <address|name> [kind] [count]`: typed values.
     Read,
     /// `fingerprint [out]`: one line per function, megabytes on a real client, so `out` writes the file beside a build that `borer://diff` reads.
     Fingerprint,
@@ -369,6 +390,70 @@ impl Query {
             "set-type" => Self::SetType,
             "verify" => Self::Verify,
             _ => return None,
+        })
+    }
+
+    /// The most arguments the query reads after the binary, as the usage
+    /// text lists them ([`Command::most_args`]).
+    ///
+    /// # Returns
+    ///
+    /// The count, or `None` for a query that reads any number.
+    fn most_args(self) -> Option<usize> {
+        Some(match self {
+            Self::Info | Self::Index | Self::Crypto | Self::Qt | Self::Triage => 0,
+            Self::Function
+            | Self::Summary
+            | Self::Symbols
+            | Self::Entropy
+            | Self::Fstrings
+            | Self::Findstr
+            | Self::Disasmfn
+            | Self::Class
+            | Self::Schema
+            | Self::Encode
+            | Self::About
+            | Self::Snapshot
+            | Self::Changes
+            | Self::Anchors
+            | Self::Xrefs
+            | Self::Cfg
+            | Self::Taint
+            | Self::Layout
+            | Self::Why
+            | Self::Solve
+            | Self::Flat
+            | Self::Vm
+            | Self::Devirt
+            | Self::Oracle
+            | Self::Emulate
+            | Self::Run
+            | Self::Hidden
+            | Self::Fingerprint => 1,
+            Self::Hexdump
+            | Self::Disasm
+            | Self::Shape
+            | Self::Messages
+            | Self::Map
+            | Self::Attrs
+            | Self::Ports
+            | Self::Callgraph
+            | Self::Unpack
+            | Self::Scenario
+            | Self::Scenarios => 2,
+            Self::Functions
+            | Self::Search
+            | Self::Vslot
+            | Self::Schemas
+            | Self::Encodes
+            | Self::Senders
+            | Self::Protocol
+            | Self::Hooks
+            | Self::Strings
+            | Self::Read
+            | Self::ExportPack => 3,
+            Self::Decompile | Self::Fieldrefs | Self::Grep | Self::Types | Self::Verify => 4,
+            Self::Script | Self::SetType => return None,
         })
     }
 }
@@ -514,22 +599,6 @@ fn search_args(words: &[String]) -> anyhow::Result<(SearchKind, usize)> {
 /// With `missing`, when the line has no argument `i`.
 fn arg<'a>(args: &'a [String], i: usize, missing: &'static str) -> anyhow::Result<&'a str> {
     args.get(i).map(String::as_str).context(missing)
-}
-
-/// Reads a positional argument as a virtual address.
-///
-/// # Arguments
-///
-/// * `args` - The command line.
-/// * `i` - The argument's index.
-/// * `missing` - The error when the line is shorter.
-///
-/// # Errors
-///
-/// When the argument is missing, or not `0x`-hex, decimal or bare hex.
-fn addr_arg(args: &[String], i: usize, missing: &'static str) -> anyhow::Result<u64> {
-    let text = arg(args, i, missing)?;
-    parse_addr(text).with_context(|| format!("bad address {}", quoted(text)))
 }
 
 /// Reads an optional numeric argument.
@@ -716,10 +785,25 @@ fn entry_at(p: &Program, a: &Analysis, va: u64) -> anyhow::Result<u64> {
 ///
 /// When the path names a device rather than a file, or the write fails.
 fn write_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    writable(path)?;
+    std::fs::write(path, bytes).with_context(|| format!("writing {}", short_path(path)))
+}
+
+/// Refuses a path that names a device rather than a file, before a
+/// command spends an analysis on what it would write there.
+///
+/// # Arguments
+///
+/// * `path` - Where the command will write, as the caller gave it.
+///
+/// # Errors
+///
+/// When the path is empty or names a device (`NUL`, `CON`, `COM1`).
+fn writable(path: &str) -> anyhow::Result<()> {
     if let Some(why) = borer_engine::program::unusable_path(std::path::Path::new(path)) {
         bail!("{why}; nothing was written");
     }
-    std::fs::write(path, bytes).with_context(|| format!("writing {}", short_path(path)))
+    Ok(())
 }
 
 /// Writes the functions of static libraries or objects as a pack of library
@@ -731,8 +815,9 @@ fn write_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// When an argument is missing, a library cannot be read or is neither an
-/// archive nor an object, or the pack cannot be written.
+/// When an argument is missing, a library cannot be read, is neither an
+/// archive nor an object, or gives no function while members of it are
+/// damaged (each is named on stderr), or the pack cannot be written.
 fn sigmake(args: &[String]) -> anyhow::Result<()> {
     let out = arg(args, 1, "sigmake needs an output file")?;
     let name = args
@@ -748,7 +833,17 @@ fn sigmake(args: &[String]) -> anyhow::Result<()> {
     for library in libraries {
         let bytes =
             std::fs::read(library).with_context(|| format!("reading {}", short_path(library)))?;
-        let found = libsig::read(&bytes).with_context(|| short_path(library))?;
+        let (found, damaged) = libsig::read(&bytes).with_context(|| short_path(library))?;
+        for why in &damaged {
+            eprintln!("borer: {}: {why}", short_path(library));
+        }
+        if found.is_empty() && !damaged.is_empty() {
+            bail!(
+                "{}: no function was read and {} member(s) are damaged (see above); nothing was written",
+                short_path(library),
+                damaged.len()
+            );
+        }
         println!("# {}: {} functions", short_path(library), found.len());
         functions.extend(found);
         files.push(
@@ -1010,6 +1105,29 @@ impl Session {
         resolve(&self.program, a, &self.overlay, text).map_err(anyhow::Error::msg)
     }
 
+    /// Resolves an address argument as the MCP tools do: `0x`-hex text
+    /// at once, anything else as a name first (through the analysis when
+    /// the architecture has one, else the symbols), then as a number.
+    ///
+    /// `disasm`, `hexdump` and `read` took numbers alone, where the tools
+    /// of the same names take a function, an import or an export by name.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The argument.
+    ///
+    /// # Errors
+    ///
+    /// When the text is neither an address nor a known name.
+    fn address(&self, text: &str) -> anyhow::Result<u64> {
+        if borer_engine::analysis::hex_prefixed(text)
+            && let Some(va) = parse_addr(text)
+        {
+            return Ok(va);
+        }
+        self.resolve(&self.analysis_or_empty(), text)
+    }
+
     /// Computes the analysis and finds the function a positional argument
     /// names.
     ///
@@ -1118,10 +1236,10 @@ const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
 
 /// Runs one CLI command against a binary, sharing the engine with the server.
 ///
-/// The command word is read first, so a word that is no command or an
-/// option borer does not know is refused before any binary is loaded;
-/// then the pack tools run on pack files alone, and every other command
-/// opens the binary.
+/// The command word is read first, so a word that is no command, an
+/// option borer does not know or an argument too many is refused before
+/// any binary is loaded; then the pack tools run on pack files alone, and
+/// every other command opens the binary.
 ///
 /// # Arguments
 ///
@@ -1129,9 +1247,9 @@ const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
 ///
 /// # Errors
 ///
-/// For an unknown command, option or help topic, a missing or unloadable
-/// binary, a bad address, or an engine failure; the message carries the
-/// command's usage lines where it helps.
+/// For an unknown command, option or help topic, an argument too many, a
+/// missing or unloadable binary, a bad address, or an engine failure; the
+/// message carries the command's usage lines where it helps.
 pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
     let (owned, pack_files, auto, pdb) = split_pack_args(args)?;
     let args = owned.as_slice();
@@ -1139,6 +1257,9 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         bail!("an option was given but no command; `borer help` lists the commands");
     };
     if matches!(word.as_str(), "help" | "--help" | "-h") {
+        if let Some(extra) = args.get(2) {
+            bail!("help takes one command, not also {}", quoted(extra));
+        }
         match args.get(1) {
             Some(topic) => {
                 println!(
@@ -1165,6 +1286,30 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         })
     {
         bail!("{}", unknown_word(flag));
+    }
+    let (first, after) = match command {
+        Command::Query(_) => (2, " after the binary"),
+        Command::PackKeys
+        | Command::Pack
+        | Command::Sigmake
+        | Command::Packs
+        | Command::Doctor
+        | Command::Setup
+        | Command::FetchPdb => (1, ""),
+    };
+    if let Some(most) = command.most_args()
+        && let Some(extra) = args.get(first + most)
+    {
+        let takes = match most {
+            0 => format!("nothing{after}, not"),
+            1 => format!("one argument{after}, not also"),
+            n => format!("at most {n} arguments{after}, not also"),
+        };
+        bail!(
+            "{word} takes {takes} {}\n{}",
+            quoted(extra),
+            command_usage(USAGE, word).unwrap_or_default()
+        );
     }
     match command {
         Command::PackKeys => print!("{}", borer_engine::pack::keys_tsv()),
@@ -1305,7 +1450,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 print!("{dump}");
                 return Ok(());
             }
-            let va = addr_arg(args, 2, "hexdump needs an address")?;
+            let va = s.address(arg(args, 2, "hexdump needs an address")?)?;
             let code = s.program.read_va_upto(va, n).with_context(|| {
                 format!(
                     "address {va:#x} not mapped{}",
@@ -1367,8 +1512,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Disasm => {
-            let va = addr_arg(args, 2, "disasm needs an address")?;
-            let count: usize = num_arg(args, 3, 32, "disasm count")?.clamp(1, 256);
+            let va = s.address(arg(args, 2, "disasm needs an address")?)?;
+            let count: usize = num_arg(args, 3, 32, "disasm count")?;
+            if count == 0 {
+                bail!("disasm count must be at least 1");
+            }
+            let count = count.min(256);
             let bitness = s
                 .program
                 .arch
@@ -1434,12 +1583,6 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Index => {
-            if let Some(extra) = args.get(2) {
-                bail!(
-                    "index takes nothing after the binary, not {}",
-                    quoted(extra)
-                );
-            }
             let a = s.analysis()?;
             #[expect(
                 clippy::disallowed_methods,
@@ -1592,11 +1735,11 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", about::about_tsv(&s.program, &a, &s.overlay, name));
         }
         Query::Snapshot => {
-            let a = s.analysis()?;
             let out = path_arg(args, 2, "snapshot needs a file to write")?;
+            writable(out)?;
+            let a = s.analysis()?;
             let facts = snapshot::facts(&s.program, &a, &s.overlay);
-            std::fs::write(out, snapshot::write(&facts))
-                .with_context(|| format!("writing {}", short_path(out)))?;
+            write_file(out, snapshot::write(&facts).as_bytes())?;
             println!(
                 "wrote {} facts to {}; `borer changes <binary> {}` after the next update lists what changed",
                 facts.len(),
@@ -1838,7 +1981,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let off = args.get(2).and_then(|t| parse_off(t));
             let start = match off {
                 Some(off) => off,
-                None => addr_arg(args, 2, "read needs an address")?,
+                None => s.address(arg(args, 2, "read needs an address")?)?,
             };
             let kind_text = args.get(3).map_or("u64", String::as_str);
             let kind = memory::Kind::parse(kind_text).with_context(|| {
@@ -1847,7 +1990,11 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     memory::Kind::NAMES
                 )
             })?;
-            let count: usize = num_arg(args, 4, 1, "read count")?.clamp(1, 256);
+            let count: usize = num_arg(args, 4, 1, "read count")?;
+            if count == 0 {
+                bail!("read count must be at least 1");
+            }
+            let count = count.min(256);
             let (values, place) = match off {
                 Some(off) => (
                     memory::read_values_at_offset(&s.program, off, kind, count),
