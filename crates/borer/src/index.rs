@@ -5,7 +5,8 @@
 //! The engine stays pure; this module owns the file. An index is keyed by
 //! the program's bytes and the borer executable that produced it, so a
 //! rebuilt borer or a patched program never reads a stale one, and a corrupt
-//! file is treated as absent and rebuilt.
+//! file is treated as absent and rebuilt: its header carries a digest of
+//! every record, so an edited text is caught as surely as a cut one.
 //!
 //! The file is named `<program>-<engine>.pcidx`, so every index of one
 //! program shares a prefix: saving a new one removes the others, which
@@ -26,7 +27,7 @@ use borer_engine::program::Program;
 /// Magic bytes opening an index file.
 const MAGIC: &[u8; 8] = b"BORERIDX";
 /// Layout version of the file; bump when the record shape changes.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 /// Longest name or text one record may carry, a bound on a corrupt length.
 const RECORD_MAX: usize = 64 << 20;
 /// Environment variable naming the directory indexes live in.
@@ -308,8 +309,48 @@ pub fn build(program: &Program, analysis: &Analysis, overlay: &Overlay) -> CodeI
     }
 }
 
+/// The FNV-1a digest of an index's records, exactly as [`encode`] writes
+/// them: per function its entry, then its name and text each behind its
+/// length.
+///
+/// The header carries it and [`read`] checks it, since a record that still
+/// parses after an edit (a changed byte of a text) changed every grep over
+/// it, and a cache that answers differently from a fresh build breaks the
+/// promise that the same query answers the same.
+///
+/// # Arguments
+///
+/// * `functions` - The records, in file order.
+fn digest(functions: &[IndexedFunction]) -> u64 {
+    functions.iter().fold(FNV_SEED, |h, f| {
+        let h = fnv1a(h, &f.entry.to_le_bytes());
+        [&f.name, &f.text].iter().fold(h, |h, field| {
+            let (len, bytes) = clipped(field);
+            fnv1a(fnv1a(h, &len.to_le_bytes()), bytes)
+        })
+    })
+}
+
+/// A record field as the file holds it: its length as a `u32` and as many
+/// of its bytes as that length counts.
+///
+/// # Arguments
+///
+/// * `field` - A function's name or text.
+fn clipped(field: &str) -> (u32, &[u8]) {
+    let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
+    let bytes = field.as_bytes();
+    (
+        len,
+        bytes
+            .get(..usize::try_from(len).unwrap_or(usize::MAX))
+            .unwrap_or(bytes),
+    )
+}
+
 /// Serializes an index: the magic, the format, the key's two halves, a
-/// count, then per function its entry and length-prefixed name and text.
+/// count, the records' [`digest`], then per function its entry and
+/// length-prefixed name and text.
 ///
 /// The bytes go straight to `out`: an index is as large as all of a
 /// program's pseudo-C, and a copy of it in memory beside the index itself
@@ -333,14 +374,13 @@ pub fn encode(index: &CodeIndex, out: &mut impl std::io::Write) -> std::io::Resu
             .unwrap_or(u32::MAX)
             .to_le_bytes(),
     )?;
+    out.write_all(&digest(&index.functions).to_le_bytes())?;
     for f in &index.functions {
         out.write_all(&f.entry.to_le_bytes())?;
         for field in [&f.name, &f.text] {
-            let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
+            let (len, bytes) = clipped(field);
             out.write_all(&len.to_le_bytes())?;
-            out.write_all(
-                &field.as_bytes()[..field.len().min(usize::try_from(len).unwrap_or(usize::MAX))],
-            )?;
+            out.write_all(bytes)?;
         }
     }
     Ok(())
@@ -413,8 +453,9 @@ impl<R: Read> Reader<R> {
 ///
 /// # Returns
 ///
-/// The index, or `None` when the bytes are not an index of this format or
-/// are cut short or corrupt anywhere.
+/// The index, or `None` when the bytes are not an index of this format,
+/// are cut short or corrupt anywhere, or their records do not hash to the
+/// header's [`digest`].
 fn read(input: impl Read, len: u64) -> Option<CodeIndex> {
     let mut r = Reader { input, left: len };
     if r.take::<8>()? != *MAGIC || r.u32()? != FORMAT {
@@ -428,6 +469,7 @@ fn read(input: impl Read, len: u64) -> Option<CodeIndex> {
     if u64::try_from(count).ok()? > len {
         return None;
     }
+    let stored = r.u64()?;
     let mut functions = Vec::with_capacity(count);
     for _ in 0..count {
         let entry = r.u64()?;
@@ -435,7 +477,7 @@ fn read(input: impl Read, len: u64) -> Option<CodeIndex> {
         let text = r.string()?;
         functions.push(IndexedFunction { entry, name, text });
     }
-    Some(CodeIndex { key, functions })
+    (digest(&functions) == stored).then_some(CodeIndex { key, functions })
 }
 
 /// Parses an index from its encoding.
@@ -824,6 +866,30 @@ mod tests {
         let path = dir.join("t.pcidx");
         save_to(&index, &path).expect("writes");
         assert_eq!(load_from(&path), Some(index));
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+    }
+
+    /// An index whose text was edited still parses, so the header's digest
+    /// is what refuses it, and the cache reads it as absent, which rebuilds
+    /// it: an edited cache answered a grep the program does not hold.
+    ///
+    /// # Panics
+    ///
+    /// When the edited file is read, or the edit does not land in a text.
+    #[test]
+    fn an_edited_record_is_refused_so_the_index_is_rebuilt() {
+        let index = sample();
+        let mut bytes = Vec::new();
+        encode(&index, &mut bytes).expect("encodes");
+        let at = bytes
+            .windows(13)
+            .position(|w| w == b"AppendCommand")
+            .expect("a text is in the file");
+        bytes[at] = b'X';
+        assert_eq!(decode(&bytes), None, "an edited text is not read");
+        let dir = scratch("edited_index");
+        std::fs::write(dir.join(index.key.file_name()), &bytes).expect("writes");
+        assert_eq!(load_in(&dir, index.key), None, "the cache rebuilds it");
         std::fs::remove_dir_all(&dir).expect("cleans up");
     }
 
