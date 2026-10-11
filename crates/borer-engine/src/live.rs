@@ -601,10 +601,12 @@ pub fn object(
             let _ = writeln!(out, "+{off:#05x}  {name:<24} {ty:<17} (not readable)");
             continue;
         }
-        let raw = le_word(&bytes[start..start + width]);
+        let field = &bytes[start..start + width];
+        let raw = le_word(field);
         let value = match (f.float, bits) {
             (true, 32) => scalar_text(Kind::F32, raw).0,
             (true, 64) => scalar_text(Kind::F64, raw).0,
+            _ if width > 8 => wide_hex(field),
             _ if width == word => format!("{raw:#x}"),
             _ => format!("{raw:#x} ({raw})"),
         };
@@ -616,6 +618,21 @@ pub fn object(
         let _ = writeln!(out, "+{off:#05x}  {name:<24} {ty:<17} {value} {note}");
     }
     Ok(out)
+}
+
+/// Spells a value wider than a `u64` as one hex number.
+///
+/// A `u128` field or a vector reads most significant byte first, as
+/// `{:#x}` spells a narrower one; [`le_word`] keeps only the low eight
+/// bytes.
+///
+/// # Arguments
+///
+/// * `bytes` - The value's bytes, least significant first.
+fn wide_hex(bytes: &[u8]) -> String {
+    let digits: String = bytes.iter().rev().map(|b| format!("{b:02x}")).collect();
+    let digits = digits.trim_start_matches('0');
+    format!("0x{}", if digits.is_empty() { "0" } else { digits })
 }
 
 /// What a scan of a process found.
@@ -676,6 +693,107 @@ pub fn instances(
         return Err(format!("the analysis knows no vtable for {class}"));
     }
     Ok(find_words(mem, &targets, word, limit))
+}
+
+/// Most instances a count of a class's objects collects before it says
+/// "at least".
+pub const COUNT_MAX: usize = 1 << 20;
+
+/// Renders a scan for a class's objects as a page of their addresses.
+///
+/// # Arguments
+///
+/// * `scan` - What the scan found.
+/// * `class` - The class, for the header.
+/// * `offset` - Addresses to skip first.
+/// * `limit` - Most addresses shown.
+/// * `count_only` - The header alone.
+///
+/// # Returns
+///
+/// A `# showing N of M` header (`at least M` when the scan stopped at its
+/// limit or budget), then one address per row.
+pub fn instances_page(
+    scan: &Scan,
+    class: &str,
+    offset: usize,
+    limit: usize,
+    count_only: bool,
+) -> String {
+    let total = if scan.truncated {
+        format!("at least {}", scan.hits.len())
+    } else {
+        scan.hits.len().to_string()
+    };
+    let read = format!(
+        "{} MiB read over {} regions",
+        scan.bytes >> 20,
+        scan.regions
+    );
+    if count_only {
+        return format!("# {total} instance(s) of {class}; {read}\n");
+    }
+    let rows: Vec<&u64> = scan.hits.iter().skip(offset).take(limit).collect();
+    let mut out = format!(
+        "# showing {} of {total} instance(s) of {class}; {read}\n",
+        rows.len()
+    );
+    for h in rows {
+        let _ = writeln!(out, "{h:#x}");
+    }
+    out
+}
+
+/// Renders a process's modules as a page of rows: base, size, file name
+/// and path, with the module the loaded binary is mapped onto marked.
+///
+/// # Arguments
+///
+/// * `modules` - The modules, in the order the system lists them.
+/// * `filter` - A lowercase substring of the name or path a row must
+///   hold; `None` keeps every row.
+/// * `offset` - Matching rows to skip first.
+/// * `limit` - Most rows shown.
+/// * `image` - Base of the module the loaded binary is mapped onto.
+///
+/// # Returns
+///
+/// The number of matching rows, and the page under a `# showing N of M`
+/// header.
+pub fn modules_page(
+    modules: &[Module],
+    filter: Option<&str>,
+    offset: usize,
+    limit: usize,
+    image: Option<u64>,
+) -> (usize, String) {
+    let hits: Vec<&Module> = modules
+        .iter()
+        .filter(|m| {
+            filter.is_none_or(|f| {
+                m.name.to_lowercase().contains(f) || m.path.to_lowercase().contains(f)
+            })
+        })
+        .collect();
+    let rows: Vec<&&Module> = hits.iter().skip(offset).take(limit).collect();
+    let mut out = format!(
+        "# showing {} of {} modules\n# base size name path\n",
+        rows.len(),
+        hits.len()
+    );
+    for m in rows {
+        let mark = if Some(m.base) == image {
+            "  <- the loaded binary"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "{:#x} {:#x} {} {}{mark}",
+            m.base, m.size, m.name, m.path
+        );
+    }
+    (hits.len(), out)
 }
 
 /// Finds every aligned word of a process's data regions equal to one of
@@ -1134,6 +1252,59 @@ mod tests {
         assert_eq!(
             short,
             "fewer than 8 bytes are readable at 0x1ffc in the process"
+        );
+    }
+
+    /// A value wider than eight bytes spells all of its bytes, not the low
+    /// eight.
+    #[test]
+    fn a_wide_value_spells_every_byte() {
+        let mut v = [0u8; 16];
+        v[0] = 0x01;
+        v[15] = 0x80;
+        assert_eq!(wide_hex(&v), "0x80000000000000000000000000000001");
+        assert_eq!(wide_hex(&[0u8; 16]), "0x0");
+    }
+
+    /// Instances page with offset and limit, say "at least" when the scan
+    /// stopped early, and count alone on request.
+    #[test]
+    fn instances_page_and_count() {
+        let scan = Scan {
+            hits: vec![0x10, 0x20, 0x30],
+            bytes: 3 << 20,
+            regions: 2,
+            truncated: true,
+        };
+        assert_eq!(
+            instances_page(&scan, "Foo", 1, 1, false),
+            "# showing 1 of at least 3 instance(s) of Foo; 3 MiB read over 2 regions\n0x20\n"
+        );
+        assert_eq!(
+            instances_page(&scan, "Foo", 0, 10, true),
+            "# at least 3 instance(s) of Foo; 3 MiB read over 2 regions\n"
+        );
+    }
+
+    /// Modules page by filter, offset and limit, the loaded binary marked.
+    #[test]
+    fn modules_page_and_filter() {
+        let module = |name: &str, base| Module {
+            name: name.to_owned(),
+            path: format!("C:\\w\\{name}"),
+            base,
+            size: 0x1000,
+        };
+        let all = [
+            module("a.exe", 0x1000),
+            module("ntdll.dll", 0x2000),
+            module("kernel32.dll", 0x3000),
+        ];
+        let (n, page) = modules_page(&all, Some("dll"), 1, 5, Some(0x3000));
+        assert_eq!(n, 2);
+        assert_eq!(
+            page,
+            "# showing 1 of 2 modules\n# base size name path\n0x3000 0x1000 kernel32.dll C:\\w\\kernel32.dll  <- the loaded binary\n"
         );
     }
 

@@ -68,11 +68,11 @@ use params::{
     DecompileParams, Detail, DisassembleFunctionParams, DisassembleParams, EntropyParams,
     ExplainFunctionArgs, FetchPdbParams, Filter, FindCheckArgs, FindFunctionByStringParams,
     FunctionDetailParams, FunctionParams, FunctionsParams, HexdumpParams, LiveAttachParams,
-    LiveInstancesParams, LiveObjectParams, LiveReadParams, LiveWatchParams, LoadBinaryParams,
-    LoadProjectParams, Page, QueryParams, ReachesParams, ReadParams, SaveProjectParams,
-    ScriptParams, SearchKind, SearchParams, SetCommentParams, SetNameParams, SetTypeParams,
-    StringEncoding, StringsParams, SymbolsParams, TypesParams, XrefsParams, count_param,
-    must_be_in_a_section, must_fit_a_row, to_usize,
+    LiveInstancesParams, LiveModulesParams, LiveObjectParams, LiveReadParams, LiveWatchParams,
+    LoadBinaryParams, LoadProjectParams, Page, QueryParams, ReachesParams, ReadParams,
+    SaveProjectParams, ScriptParams, SearchKind, SearchParams, SetCommentParams, SetNameParams,
+    SetTypeParams, StringEncoding, StringsParams, SymbolsParams, TypesParams, XrefsParams,
+    count_param, must_be_in_a_section, must_fit_a_row, to_usize,
 };
 use recall::{FRESH_SUFFIX, Recall, SINCE_ARG, SINCE_SUFFIX, Tag, budgeted};
 
@@ -237,6 +237,16 @@ struct Watch {
 
 /// Bytes a watch covers when neither a length nor a class's fields say.
 const WATCH_DEFAULT: usize = 256;
+
+/// The prefix that makes a live tool take a number as a process address
+/// as it is, never rebased from the loaded binary's static range.
+const LIVE_PREFIX: &str = "live:";
+
+/// Modules `live_attach` lists before pointing at `live_modules`.
+const ATTACH_MODULES: usize = 16;
+
+/// Watch names a re-attach lists when it drops them.
+const DROPPED_NAMES: usize = 8;
 
 /// The refusal every tool answers before `load_binary`.
 const NO_BINARY: &str = "no binary loaded; call load_binary first";
@@ -1314,7 +1324,9 @@ impl BorerServer {
 
     /// Resolves an address an agent gave for the process: a name or a
     /// static address of the loaded binary moves into the process, any
-    /// other number is taken as live.
+    /// other number is taken as live, and a number after `live:` is live
+    /// even inside the image's static range (a heap the process placed
+    /// there).
     ///
     /// A singleton the analysis placed in thread-local storage has no
     /// static address: its slot is at the offset in the thread's block.
@@ -1341,6 +1353,11 @@ impl BorerServer {
             return block
                 .checked_add(*off)
                 .ok_or_else(|| format!("{text}: the TLS offset overflows"));
+        }
+        if let Some(live) = text.trim().strip_prefix(LIVE_PREFIX) {
+            return parse_addr(live).ok_or_else(|| {
+                format!("{text}: after {LIVE_PREFIX} comes a number (0x-hex or decimal)")
+            });
         }
         if let Some(va) = parse_addr(text) {
             return Ok(session.rebase.as_ref().map_or(va, |r| r.live_of(va)));
@@ -1425,14 +1442,47 @@ impl BorerServer {
         let mut session = LiveSession::new(proc);
         out.push_str(&session.map(self.loaded().as_deref()));
         out.push_str("modules:\n");
-        for m in modules.iter().take(16) {
+        for m in modules.iter().take(ATTACH_MODULES) {
             let _ = writeln!(out, "  {:#x} {:>10} {}", m.base, m.size, m.name);
         }
-        if modules.len() > 16 {
-            let _ = writeln!(out, "  ... {} more", modules.len() - 16);
+        if modules.len() > ATTACH_MODULES {
+            let _ = writeln!(
+                out,
+                "  ... {} more: live_modules(offset={ATTACH_MODULES}) lists them, live_modules(filter=...) finds one",
+                modules.len() - ATTACH_MODULES
+            );
         }
         out.push_str("next: live_object(address or singleton name), live_instances(class), live_read(address, kind), live_watch(name, address)\n");
-        *lock(&self.live) = Some(session);
+        if let Some(was) = lock(&self.live).replace(session) {
+            let _ = write!(
+                out,
+                "note: detached from {} (pid {}) first",
+                was.process.name(),
+                was.process.pid()
+            );
+            if was.snapshots.is_empty() {
+                out.push('\n');
+            } else {
+                let names: Vec<&str> = was
+                    .snapshots
+                    .keys()
+                    .take(DROPPED_NAMES)
+                    .map(String::as_str)
+                    .collect();
+                let more = was.snapshots.len() - names.len();
+                let _ = writeln!(
+                    out,
+                    "; its {} watch(es) are dropped: {}{}",
+                    was.snapshots.len(),
+                    names.join(", "),
+                    if more > 0 {
+                        format!(", +{more} more")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+        }
         Ok(out)
     }
 
@@ -1465,6 +1515,54 @@ impl BorerServer {
             ),
             None => "no process was attached".to_owned(),
         })
+    }
+
+    /// Lists the attached process's modules, a page at a time.
+    ///
+    /// # Arguments
+    ///
+    /// * `LiveModulesParams` - Destructured tool parameters (see its field docs).
+    ///
+    /// # Errors
+    ///
+    /// Invalid params for a zero limit; internal error when no process is
+    /// attached or it has exited.
+    #[tool(
+        description = "List the attached process's modules.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    fn live_modules(
+        &self,
+        Parameters(LiveModulesParams {
+            filter,
+            offset,
+            limit,
+            count_only,
+        }): Parameters<LiveModulesParams>,
+    ) -> Result<String, ErrorData> {
+        let page = Page::new(offset, limit, count_only, 50, 500)?;
+        let filter = Filter::new(filter.as_deref());
+        self.with_live(|s| {
+            let image = s.rebase.as_ref().ok().map(|r| r.live_base);
+            let (total, table) = live::modules_page(
+                &s.process.modules(),
+                filter.needle(),
+                page.offset,
+                page.limit.n,
+                image,
+            );
+            Ok(if page.count_only {
+                format!("# {total} modules\n")
+            } else {
+                table
+            })
+        })
+        .map(|text| page.limit.noted(text))
     }
 
     /// Reads typed values from the process.
@@ -1601,31 +1699,38 @@ impl BorerServer {
     )]
     fn live_instances(
         &self,
-        Parameters(LiveInstancesParams { class, limit }): Parameters<LiveInstancesParams>,
+        Parameters(LiveInstancesParams {
+            class,
+            offset,
+            limit,
+            count_only,
+        }): Parameters<LiveInstancesParams>,
     ) -> Result<String, ErrorData> {
-        let limit = count_param(limit, 64, 4096, "limit")?;
+        let page = Page::new(offset, limit, count_only, 64, 512)?;
+        let collect = if page.count_only {
+            live::COUNT_MAX
+        } else {
+            page.offset.saturating_add(page.limit.n)
+        };
         self.with_analysis(|_, a, _| {
             self.with_live(|s| {
                 let r = s.mapped()?;
-                let scan = live::instances(&s.process, &r, a, &class, s.word, limit.n)?;
-                let mut out = format!(
-                    "# {} instance(s) of {class}{}; {} MiB read over {} regions\n",
-                    scan.hits.len(),
-                    if scan.truncated { " (stopped at the limit)" } else { "" },
-                    scan.bytes >> 20,
-                    scan.regions
+                let scan = live::instances(&s.process, &r, a, &class, s.word, collect)?;
+                let mut out = live::instances_page(
+                    &scan,
+                    &class,
+                    page.offset,
+                    page.limit.n,
+                    page.count_only,
                 );
-                for h in &scan.hits {
-                    let _ = writeln!(out, "{h:#x}");
-                }
-                if !scan.hits.is_empty() {
+                if !scan.hits.is_empty() && !page.count_only {
                     out.push_str("next: live_object(address) for the fields; live_watch(name, address), then live_watch(name) for what changes\n");
                 }
                 Ok(out)
             })
             .map_err(|e| e.message.to_string())
         })
-        .map(|text| limit.noted(text))
+        .map(|text| page.limit.noted(text))
     }
 
     /// Watches memory of the process: starts a watch, or lists what changed.
@@ -1639,7 +1744,7 @@ impl BorerServer {
     /// When no process is attached, the address does not resolve or is not
     /// readable, the class given is unknown, or no watch has the name.
     #[tool(
-        description = "Watch attached-process memory: with an address, keep its bytes under the name; without, list what changed since the last call, one whole value per row (the class's field, else the aligned word), and which bytes stopped or started being readable.",
+        description = "Watch attached-process memory: with an address, keep its bytes under the name; without, list what changed, naming fields when the class is known.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1758,6 +1863,10 @@ impl BorerServer {
     /// again, which resumes the session ([`relay`]). A request the client
     /// sends as soon as the reply arrives waits in the relay for it.
     ///
+    /// An attached process is not carried over: its handle and watches end
+    /// with this worker, and the reply says so, so the agent attaches again
+    /// rather than meeting "no process attached" on its next live call.
+    ///
     /// # Errors
     ///
     /// Never.
@@ -1773,8 +1882,16 @@ impl BorerServer {
     fn reload(&self) -> Result<String, ErrorData> {
         let exe = std::env::args().next().unwrap_or_default();
         let loaded = self.loaded().map(|p| p.path.display().to_string());
+        let live = lock(&self.live).as_ref().map_or_else(String::new, |s| {
+            format!(
+                "; the live session with {} (pid {}) and its {} watch(es) end with this server: live_attach again once it is up",
+                s.process.name(),
+                s.process.pid(),
+                s.snapshots.len()
+            )
+        });
         Ok(format!(
-            "reloading borer from {exe}{}; the tool list is announced again once the new server is up",
+            "reloading borer from {exe}{}{live}; the tool list is announced again once the new server is up",
             loaded.map_or_else(String::new, |p| format!(", reloading {p}"))
         ))
     }
@@ -6055,7 +6172,8 @@ mod tests {
     fn every_list_tool_refuses_a_zero_limit_alike() {
         use super::{
             DecompileParams, FindFunctionByStringParams, FunctionsParams, LiveInstancesParams,
-            LiveWatchParams, Parameters, SearchParams, StringsParams, SymbolsParams, XrefsParams,
+            LiveModulesParams, LiveWatchParams, Parameters, SearchParams, StringsParams,
+            SymbolsParams, XrefsParams,
         };
         let server = super::BorerServer::default();
         let refusals = [
@@ -6101,7 +6219,15 @@ mod tests {
             })),
             server.live_instances(Parameters(LiveInstancesParams {
                 class: "Player".to_owned(),
+                offset: None,
                 limit: Some(0),
+                count_only: None,
+            })),
+            server.live_modules(Parameters(LiveModulesParams {
+                filter: None,
+                offset: None,
+                limit: Some(0),
+                count_only: None,
             })),
         ];
         for refused in refusals {
@@ -6436,6 +6562,20 @@ mod tests {
             }))
             .expect("the entry is readable");
         assert!(read.contains(&format!("(= static {entry:#x})")), "{read}");
+        let unrebased = server.live_read(Parameters(LiveReadParams {
+            address: format!("live:{entry:#x}"),
+            kind: Some(super::params::ReadKind::U8),
+            count: None,
+        }));
+        assert!(
+            unrebased.as_ref().map_or_else(
+                |e| e
+                    .message
+                    .starts_with(&format!("{entry:#x} is not readable")),
+                |text| text.starts_with(&format!("# 1 u8 value(s) at live {entry:#x}\n"))
+            ),
+            "live: is taken as it is: {unrebased:?}"
+        );
 
         let dir = std::env::temp_dir().join(format!("borer-live-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temp directory");
@@ -6455,6 +6595,64 @@ mod tests {
                 .as_ref()
                 .is_some_and(|s| s.rebase.is_err()),
             "the impostor is not mapped"
+        );
+        server.live_detach().expect("detach");
+    }
+
+    /// A second attach says it drops the first one's watches, `reload` says
+    /// the live session ends with the server, and the module list pages.
+    ///
+    /// # Panics
+    ///
+    /// When a drop goes unsaid or the module list does not page.
+    #[cfg(windows)]
+    #[test]
+    fn the_live_session_says_what_it_drops_and_pages_modules() {
+        use super::{LiveAttachParams, LiveModulesParams, LiveWatchParams, Parameters};
+        let server = raw_server();
+        let attach = || {
+            server
+                .live_attach(Parameters(LiveAttachParams {
+                    process: std::process::id().to_string(),
+                }))
+                .expect("attach to self")
+        };
+        attach();
+        server
+            .live_watch(Parameters(LiveWatchParams {
+                name: "w".to_owned(),
+                address: Some("0x7ffe0000".to_owned()),
+                length: Some(8),
+                class: None,
+            }))
+            .expect("the shared user page is readable");
+        let again = attach();
+        assert!(
+            again.contains("its 1 watch(es) are dropped: w\n"),
+            "{again}"
+        );
+        let reload = server.reload().expect("reload answers");
+        assert!(
+            reload.contains("and its 0 watch(es) end with this server: live_attach again"),
+            "{reload}"
+        );
+        let modules = |filter: Option<&str>, count_only| {
+            server
+                .live_modules(Parameters(LiveModulesParams {
+                    filter: filter.map(str::to_owned),
+                    offset: None,
+                    limit: Some(1),
+                    count_only,
+                }))
+                .expect("the module list")
+        };
+        let page = modules(Some(".dll"), None);
+        assert!(page.starts_with("# showing 1 of "), "{page}");
+        assert_eq!(page.lines().count(), 3, "{page}");
+        let count = modules(None, Some(true));
+        assert!(
+            count.ends_with(" modules\n") && count.lines().count() == 1,
+            "{count}"
         );
         server.live_detach().expect("detach");
     }

@@ -154,7 +154,7 @@ reading, `function_summary` to size it up, `decompile` to read it, and
 `xrefs`, `cfg` or `callgraph` to see how it connects. Any `address`
 argument takes hex, decimal or a name.
 
-There are 40 tools:
+There are 41 tools:
 
 | area | tools |
 | --- | --- |
@@ -163,7 +163,7 @@ There are 40 tools:
 | reading code | `function_summary`, `function_strings`, `decompile`, `decompile_batch`, `disassemble`, `disassemble_function`, `cfg`, `callgraph`, `reaches`, `xrefs`, `class_layout` |
 | reading data | `read`, `hexdump` |
 | annotating | `set_name`, `set_comment`, `set_type`, `types`, `annotations`, `save_project`, `load_project` |
-| live process | `live_attach`, `live_detach`, `live_read`, `live_object`, `live_instances`, `live_watch` |
+| live process | `live_attach`, `live_detach`, `live_modules`, `live_read`, `live_object`, `live_instances`, `live_watch` |
 | everything else | `query`, `script` |
 
 Annotation tools are dry-run unless told otherwise. `save_project` writes
@@ -199,8 +199,10 @@ borer strings   sample.exe
 
 On Windows, `live_attach` opens a running process with `PROCESS_VM_READ`
 and nothing else: no writes, no breakpoints, no injected code. It maps the
-loaded binary onto the live module, so the live tools take the same
-addresses and names as the static ones. `live_object` reads an object using
+loaded binary onto the live module whose headers match the file (a module
+that only shares the file's name is refused, with what differs), so the
+live tools take the same addresses and names as the static ones; a later
+`load_binary` maps the new binary, and `reload` detaches. `live_object` reads an object using
 the field layout borer recovered for its class, `live_instances` finds a
 class's objects by vtable, and `live_watch` shows which fields changed
 between two reads.

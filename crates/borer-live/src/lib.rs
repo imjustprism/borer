@@ -322,7 +322,11 @@ mod os {
         Ok(out)
     }
 
-    /// Lists a process's modules.
+    /// Lists a process's modules, each once.
+    ///
+    /// The snapshot takes both the 64-bit and the 32-bit module lists, and
+    /// a WOW64 process's executable is in both at one base; a base is a
+    /// module, so the second listing of it is dropped.
     ///
     /// # Arguments
     ///
@@ -364,6 +368,8 @@ mod os {
                 // SAFETY: as for Module32FirstW.
                 more = unsafe { Module32NextW(snap.0, &mut entry) } != 0;
             }
+            let mut seen = std::collections::HashSet::new();
+            out.retain(|m| seen.insert(m.base));
             return Ok(out);
         }
         Err(format!(
@@ -947,6 +953,57 @@ mod tests {
         assert_eq!(class, BELOW_NORMAL_PRIORITY_CLASS);
     }
 
+    /// Attaches to a child just started, waiting out the moments its loader
+    /// has not yet listed its modules.
+    ///
+    /// # Errors
+    ///
+    /// The last refusal, when the child is still refused after ten seconds.
+    fn attach_child(child: &std::process::Child) -> Result<Process, String> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test bounds how long a starting process may refuse its module list"
+        )]
+        let since = Instant::now();
+        loop {
+            match Process::attach(&child.id().to_string()) {
+                Err(_) if since.elapsed() < Duration::from_secs(10) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                attached => return attached,
+            }
+        }
+    }
+
+    /// A WOW64 process lists its executable once, though the system's
+    /// 64-bit and 32-bit module lists both hold it, and reads as 32-bit.
+    #[test]
+    fn a_wow64_process_lists_each_module_once() {
+        let cmd32 = std::path::Path::new(r"C:\Windows\SysWOW64\cmd.exe");
+        if !cmd32.exists() {
+            return;
+        }
+        let mut child = Command::new(cmd32)
+            .args(["/q", "/k"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cmd starts");
+        std::thread::sleep(Duration::from_millis(500));
+        let process = attach_child(&child).expect("the child attaches");
+        let modules = process.modules();
+        let width = process.pointer_width();
+        child.kill().expect("end cmd");
+        child.wait().expect("cmd ended");
+        let mut bases: Vec<u64> = modules.iter().map(|m| m.base).collect();
+        bases.sort_unstable();
+        let listed = bases.len();
+        bases.dedup();
+        assert_eq!(bases.len(), listed, "{modules:?}");
+        assert_eq!(width, 4);
+    }
+
     /// A process that ends says so through the handle opened while it ran,
     /// with its exit code, so a live tool can tell an ended process from
     /// an unreadable address.
@@ -957,19 +1014,7 @@ mod tests {
             .stdout(Stdio::null())
             .spawn()
             .expect("ping starts");
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the test bounds how long a starting process may refuse its module list"
-        )]
-        let since = Instant::now();
-        let process = loop {
-            match Process::attach(&child.id().to_string()) {
-                Err(_) if since.elapsed() < Duration::from_secs(10) => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                attached => break attached.expect("the child attaches"),
-            }
-        };
+        let process = attach_child(&child).expect("the child attaches");
         assert_eq!(process.exit_code(), None, "still running");
         child.kill().expect("end ping");
         child.wait().expect("ping ended");

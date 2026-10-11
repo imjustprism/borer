@@ -8,9 +8,6 @@ use rmcp::{ErrorData, schemars};
 use super::err_params;
 
 /// What `read` and `live_read` decode the bytes as.
-///
-/// The schema lists the canonical names; the aliases a reader might
-/// type (`dword`, `string`, `pointer`) are accepted too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(transform = names_only)]
@@ -632,7 +629,7 @@ pub(crate) struct LiveAttachParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LiveReadParams {
-    /// Live or static address, or a name.
+    /// Live or static address, or a name; `live:0x..` is never rebased.
     pub(crate) address: String,
     /// What to decode the bytes as (default u64).
     pub(crate) kind: Option<ReadKind>,
@@ -656,8 +653,26 @@ pub(crate) struct LiveObjectParams {
 pub(crate) struct LiveInstancesParams {
     /// Class name.
     pub(crate) class: String,
-    /// Max instances (default 64, max 4096).
+    /// Instances to skip.
+    pub(crate) offset: Option<u32>,
+    /// Max instances (default 64, max 512).
     pub(crate) limit: Option<u32>,
+    /// Header line only.
+    pub(crate) count_only: Option<bool>,
+}
+
+/// Parameters for `live_modules`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveModulesParams {
+    /// Substring of name or path.
+    pub(crate) filter: Option<String>,
+    /// Rows to skip.
+    pub(crate) offset: Option<u32>,
+    /// Max rows (default 50, max 500).
+    pub(crate) limit: Option<u32>,
+    /// Header line only.
+    pub(crate) count_only: Option<bool>,
 }
 
 /// Parameters for `live_watch`.
@@ -666,7 +681,7 @@ pub(crate) struct LiveInstancesParams {
 pub(crate) struct LiveWatchParams {
     /// Watch name.
     pub(crate) name: String,
-    /// Address to start watching; omit to list what changed since the last call.
+    /// Address to start watching; omit to diff.
     pub(crate) address: Option<String>,
     /// Bytes (default: the class's size, else 256; max 65536).
     pub(crate) length: Option<u32>,
