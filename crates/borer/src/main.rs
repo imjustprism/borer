@@ -2949,7 +2949,8 @@ impl BorerServer {
             text.push_str("# dry-run: pass dry_run=false to apply these\n");
             return Ok(text);
         }
-        let (mut named, mut commented) = (0usize, 0usize);
+        let (mut named, mut commented) = (HashSet::new(), HashSet::new());
+        let mut skipped = 0usize;
         {
             let mut overlay = write_lock(&self.overlay);
             for (at, name) in &run.names {
@@ -2958,7 +2959,9 @@ impl BorerServer {
                 {
                     let target = analysis.function_at(*at).map_or(*at, |f| f.entry);
                     overlay.names.insert(target, name.clone());
-                    named += 1;
+                    named.insert(target);
+                } else {
+                    skipped += 1;
                 }
             }
             for (at, comment) in &run.comments {
@@ -2966,17 +2969,20 @@ impl BorerServer {
                     && must_be_in_a_section(&program, *at, Annotation::Comment).is_ok()
                 {
                     overlay.comments.insert(*at, comment.clone());
-                    commented += 1;
+                    commented.insert(*at);
+                } else {
+                    skipped += 1;
                 }
             }
         }
-        if named + commented > 0 {
+        if !named.is_empty() || !commented.is_empty() {
             self.names_changed();
         }
         let _ = writeln!(
             text,
-            "# applied {named} names and {commented} comments; {} skipped (empty, unprintable, or in no section)",
-            proposed - named - commented
+            "# applied names at {} addresses and comments at {}, the last proposal for an address winning; {skipped} skipped (empty, unprintable, or in no section)",
+            named.len(),
+            commented.len()
         );
         Ok(text)
     }
@@ -5234,7 +5240,7 @@ mod tests {
         assert!(super::read_lock(&server.overlay).names.is_empty());
         let out = script(propose, Some(false));
         assert!(
-            out.contains("# applied 1 names and 1 comments; 1 skipped"),
+            out.contains("# applied names at 1 addresses and comments at 1, the last proposal for an address winning; 1 skipped"),
             "{out}"
         );
         let overlay = super::read_lock(&server.overlay);

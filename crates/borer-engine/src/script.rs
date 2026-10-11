@@ -7,8 +7,9 @@
 //! program through the functions below and proposes names and comments,
 //! which a front end prints, saves as a project or applies. It cannot touch
 //! a file, the network, a process or the clock (`import` and `eval` are
-//! gone and there is no such function to call), and it runs under an
-//! operation budget, so a pack's script from anyone is safe to run.
+//! gone, `sleep` throws, and there is no such function to call), it runs
+//! under an operation budget, and what it prints and proposes is kept only
+//! up to fixed caps, so a pack's script from anyone is safe to run.
 //!
 //! What a script sees:
 //!
@@ -76,10 +77,20 @@ const STRING_CAP: usize = 512;
 pub const DECOMPILES_MAX: u32 = 2_000;
 /// Most `query` calls one run may make.
 pub const QUERIES_MAX: u32 = 200;
-/// Most printed lines [`run_tsv`] shows.
+/// Most printed lines a run keeps, and so [`run_tsv`] shows; the rest are
+/// counted ([`ScriptRun::printed`]).
 const PRINTED_SHOWN: usize = 500;
+/// Longest printed line a run keeps, in characters; a longer one is cut.
+const LINE_KEPT_MAX: usize = 4096;
 /// Most proposals [`run_tsv`] lists.
 const PROPOSALS_SHOWN: usize = 500;
+/// Most names and comments together a run keeps; the rest are counted
+/// ([`ScriptRun::dropped`]), so a script proposing in a loop cannot exhaust
+/// memory before its operation budget stops it.
+const PROPOSALS_MAX: usize = 100_000;
+/// Longest name or comment a run keeps, in characters; no listing row shows
+/// more.
+const PROPOSAL_TEXT_MAX: usize = 1024;
 
 /// What `help()` returns: every function a script can call, one line each,
 /// for an agent that has the tool's short description and nothing else.
@@ -107,12 +118,18 @@ pub type Query = Rc<dyn Fn(&str) -> Result<String, String>>;
 /// What a script printed and proposed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptRun {
-    /// What it printed, a line per `print`.
+    /// The first [`PRINTED_SHOWN`] lines it printed, a line per `print`,
+    /// each cut at [`LINE_KEPT_MAX`] characters.
     pub output: Vec<String>,
+    /// Every line it printed, kept or not.
+    pub printed: usize,
     /// The names it proposed, in the order it proposed them.
     pub names: Vec<(u64, String)>,
     /// The comments it proposed.
     pub comments: Vec<(u64, String)>,
+    /// Names and comments it proposed past [`PROPOSALS_MAX`] or longer than
+    /// [`PROPOSAL_TEXT_MAX`], counted and not kept.
+    pub dropped: usize,
     /// Operations it ran.
     pub operations: u64,
     /// Its error, with the line, when it failed; what it printed and
@@ -265,6 +282,48 @@ impl Host {
         resolve(&self.program, &self.analysis, &self.overlay, &text).ok()
     }
 
+    /// Records a printed line: kept, cut to [`LINE_KEPT_MAX`] characters,
+    /// while fewer than [`PRINTED_SHOWN`] are kept, and counted always.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - What the script printed.
+    fn printed(&self, line: &str) {
+        let mut run = self.run.borrow_mut();
+        run.printed += 1;
+        if run.output.len() < PRINTED_SHOWN {
+            let kept = match line.char_indices().nth(LINE_KEPT_MAX) {
+                Some((cut, _)) => {
+                    format!("{} ... (cut at {LINE_KEPT_MAX} characters)", &line[..cut])
+                }
+                None => line.to_owned(),
+            };
+            run.output.push(kept);
+        }
+    }
+
+    /// Keeps a proposed name or comment, or counts it as dropped when the
+    /// run already keeps [`PROPOSALS_MAX`] or the text is longer than
+    /// [`PROPOSAL_TEXT_MAX`] characters.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address it is for.
+    /// * `text` - The name or comment.
+    /// * `comment` - Whether it is a comment rather than a name.
+    fn propose(&self, at: u64, text: String, comment: bool) {
+        let mut run = self.run.borrow_mut();
+        if run.names.len() + run.comments.len() >= PROPOSALS_MAX
+            || text.chars().count() > PROPOSAL_TEXT_MAX
+        {
+            run.dropped += 1;
+        } else if comment {
+            run.comments.push((at, text));
+        } else {
+            run.names.push((at, text));
+        }
+    }
+
     /// Counts one call against a budget, or refuses it once the budget is
     /// spent.
     ///
@@ -378,9 +437,9 @@ pub fn run_with(
         .set_max_map_size(ARRAY_MAX);
     engine.disable_symbol("eval");
     let h = Rc::clone(&host);
-    engine.on_print(move |s| h.run.borrow_mut().output.push(s.to_owned()));
+    engine.on_print(move |s| h.printed(s));
     let h = Rc::clone(&host);
-    engine.on_debug(move |s, _, _| h.run.borrow_mut().output.push(s.to_owned()));
+    engine.on_debug(move |s, _, _| h.printed(s));
     let seen = Rc::clone(&ops);
     engine.on_progress(move |n| {
         seen.set(n);
@@ -644,19 +703,21 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
     engine.register_fn("rename", move |entry: INT, name: &str| {
         let name = name.trim();
         if !name.is_empty() && !name.contains(['\t', '\n', '\r']) {
-            h.run
-                .borrow_mut()
-                .names
-                .push((addr(entry), name.to_owned()));
+            h.propose(addr(entry), name.to_owned(), false);
         }
     });
     let h = Rc::clone(host);
     engine.register_fn("comment", move |at: INT, text: &str| {
         let text = text.replace(['\t', '\n', '\r'], " ");
         if !text.trim().is_empty() {
-            h.run.borrow_mut().comments.push((addr(at), text));
+            h.propose(addr(at), text, true);
         }
     });
+    let no_clock = || -> Result<(), Box<EvalAltResult>> {
+        Err("sleep is not available: a script has no clock".into())
+    };
+    engine.register_fn("sleep", move |_: INT| no_clock());
+    engine.register_fn("sleep", move |_: rhai::FLOAT| no_clock());
 }
 
 /// Runs every pack script over an analysis and names what they propose.
@@ -790,14 +851,15 @@ pub fn pack_scripts_tsv(scripts: &[PackScript]) -> String {
 #[must_use]
 pub fn run_tsv(run: &ScriptRun) -> String {
     let mut out = String::new();
-    for line in run.output.iter().take(PRINTED_SHOWN) {
+    for line in &run.output {
         let _ = writeln!(out, "{line}");
     }
-    if run.output.len() > PRINTED_SHOWN {
+    if run.printed > run.output.len() {
         let _ = writeln!(
             out,
-            "# showing {PRINTED_SHOWN} of {} printed lines; print less, or filter in the script",
-            run.output.len()
+            "# showing {} of {} printed lines; print less, or filter in the script",
+            run.output.len(),
+            run.printed
         );
     }
     if let Some(e) = &run.error {
@@ -821,6 +883,13 @@ pub fn run_tsv(run: &ScriptRun) -> String {
         if proposals > PROPOSALS_SHOWN {
             let _ = writeln!(out, "# showing {PROPOSALS_SHOWN} of {proposals} proposals");
         }
+    }
+    if run.dropped > 0 {
+        let _ = writeln!(
+            out,
+            "# {} proposals dropped: longer than {PROPOSAL_TEXT_MAX} characters, or past the {PROPOSALS_MAX} a run keeps",
+            run.dropped
+        );
     }
     out
 }
@@ -962,6 +1031,42 @@ mod tests {
         assert!(err.contains("operations"), "{err}");
         let err = go("\n\nno_such_function();").expect_err("an unknown call fails");
         assert!(err.contains("line 3"), "{err}");
+        for call in ["sleep(1);", "sleep(1e30);", "sleep(-1.5);"] {
+            let err = go(call).expect_err("a script has no clock");
+            assert!(err.contains("a script has no clock"), "{call}: {err}");
+        }
+    }
+
+    /// What a run keeps is bounded whatever the script does: a long line is
+    /// cut, and a proposal too long for a listing row is counted, not kept.
+    ///
+    /// # Panics
+    ///
+    /// When a cap does not hold.
+    #[test]
+    fn a_run_keeps_bounded_text() {
+        let run = go(r#"
+            let s = "x";
+            for i in 0..13 { s += s; }
+            print(s);
+            rename(0x1010, s);
+            comment(0x1010, "fits");
+        "#)
+        .expect("the script runs");
+        assert_eq!(run.printed, 1);
+        assert!(
+            run.output[0].ends_with("... (cut at 4096 characters)"),
+            "{}",
+            run.output[0].len()
+        );
+        assert_eq!(
+            run.output[0].chars().count(),
+            LINE_KEPT_MAX + " ... (cut at 4096 characters)".len()
+        );
+        assert!(run.names.is_empty());
+        assert_eq!(run.comments, vec![(0x1010, "fits".to_owned())]);
+        assert_eq!(run.dropped, 1);
+        assert!(run_tsv(&run).contains("# 1 proposals dropped: longer than 1024 characters"));
     }
 
     /// Runs a script over the fixture with a `query` that answers
