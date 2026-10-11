@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 use crate::analysis::classes::class_layout;
 use crate::analysis::{Analysis, Overlay, name_of};
 use crate::memory::{Kind, Value, decode, le_word, not_text, scalar_text};
-use crate::num::{lo16, lo32};
+use crate::num::{from_usize, lo16, lo32};
 use crate::program::Program;
 use crate::search::demangled_name;
 use crate::strings::cstr_at;
@@ -733,24 +733,92 @@ pub fn find_words(mem: &dyn Memory, targets: &[u64], word: usize, limit: usize) 
     scan
 }
 
+/// A field of the object a watch holds: what a diff names a change by,
+/// and the bytes it reads the change's value from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    /// The name the class's asserts gave it, else `field_0x..`.
+    pub name: String,
+    /// Width in bytes, at least one.
+    pub len: usize,
+}
+
+/// The fields of a class by offset, for a watch on one of its objects.
+///
+/// # Arguments
+///
+/// * `program` - The analysed image.
+/// * `analysis` - Its analysis.
+/// * `overlay` - User names.
+/// * `class` - Qualified class name.
+///
+/// # Returns
+///
+/// The fields, or `None` when no function belongs to the class (the
+/// analysis does not know it).
+pub fn fields_of(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    class: &str,
+) -> Option<BTreeMap<u64, Field>> {
+    let layout = class_layout(program, analysis, overlay, class)?;
+    Some(
+        layout
+            .fields
+            .iter()
+            .map(|(off, f)| {
+                let bits = f.widths.iter().max().copied().unwrap_or(64).max(8);
+                let name = layout
+                    .labels
+                    .get(off)
+                    .map_or_else(|| format!("field_{off:#x}"), ToString::to_string);
+                (
+                    *off,
+                    Field {
+                        name,
+                        len: usize::from(bits / 8),
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
 /// Bytes of a process kept to diff against a later read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// First address.
     pub va: u64,
-    /// The bytes as they were.
+    /// Bytes the watch covers, at most [`READ_MAX`].
+    pub len: usize,
+    /// The bytes as they were: all `len` of them, or the readable start of
+    /// the range when its end was not readable.
     pub bytes: Vec<u8>,
 }
 
-/// One run of bytes that changed between a snapshot and now.
+/// One value that changed between a snapshot and now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
-    /// Offset of the run from the snapshot's first address.
+    /// Offset of the value from the snapshot's first address.
     pub offset: u64,
-    /// The bytes as they were.
+    /// The value's bytes as they were.
     pub old: Vec<u8>,
-    /// The bytes as they are.
+    /// The value's bytes as they are.
     pub new: Vec<u8>,
+    /// The bytes are a whole value - a field, or an aligned word inside the
+    /// watch - so the number they make is the value's; `false` for a word
+    /// the watch's ends cut.
+    pub whole: bool,
+}
+
+/// What a second read of a snapshot's range found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diff {
+    /// The values that changed, in offset order.
+    pub changes: Vec<Change>,
+    /// The range as read now: what a later diff compares against.
+    pub now: Snapshot,
 }
 
 impl Snapshot {
@@ -766,88 +834,177 @@ impl Snapshot {
     ///
     /// When the first byte is not readable.
     pub fn take(mem: &dyn Memory, va: u64, len: usize) -> Result<Snapshot, String> {
+        let len = len.clamp(1, READ_MAX);
         let bytes = mem
-            .read(va, len.clamp(1, READ_MAX))
+            .read(va, len)
             .ok_or_else(|| format!("{va:#x} is not readable in the process"))?;
-        Ok(Snapshot { va, bytes })
+        Ok(Snapshot { va, len, bytes })
     }
 
-    /// Reads the same bytes again and lists the runs that changed.
+    /// Reads the range again and lists the values that changed.
     ///
-    /// Changed bytes a byte apart are one run; a run is cut at an
-    /// eight-byte boundary so each reads as at most one word.
+    /// Each change is one whole value, so its bytes make its number: the
+    /// field that holds the changed bytes when the object's fields are
+    /// known, else the naturally aligned word that does (aligned in the
+    /// process, not from the watch's start). Bytes readable at only one of
+    /// the two reads are not compared; the new snapshot says how many are
+    /// readable now, and [`render_changes`] says what was lost or gained.
     ///
     /// # Arguments
     ///
     /// * `mem` - The process.
+    /// * `fields` - The object's fields by offset; empty when unknown.
+    /// * `word` - The process's word width in bytes.
     ///
     /// # Errors
     ///
-    /// When the range is no longer readable.
-    pub fn diff(&self, mem: &dyn Memory) -> Result<Vec<Change>, String> {
-        let now = mem
-            .read(self.va, self.bytes.len())
-            .ok_or_else(|| format!("{:#x} is no longer readable in the process", self.va))?;
+    /// When not even the first byte is readable now.
+    pub fn diff(
+        &self,
+        mem: &dyn Memory,
+        fields: &BTreeMap<u64, Field>,
+        word: usize,
+    ) -> Result<Diff, String> {
+        let now = mem.read(self.va, self.len).ok_or_else(|| {
+            format!(
+                "none of the {} bytes at {:#x} is readable now; the watch keeps the bytes it had",
+                self.len, self.va
+            )
+        })?;
         let n = now.len().min(self.bytes.len());
+        let changed = |i: usize| self.bytes[i] != now[i];
         let mut changes: Vec<Change> = Vec::new();
+        let mut floor = 0usize;
         let mut i = 0usize;
         while i < n {
-            if self.bytes[i] == now[i] {
+            if !changed(i) {
                 i += 1;
                 continue;
             }
-            let start = i;
-            let boundary = (start / 8 + 1) * 8;
-            while i < n
-                && i < boundary
-                && (self.bytes[i] != now[i] || (i + 1 < n && self.bytes[i + 1] != now[i + 1]))
-            {
-                i += 1;
-            }
+            let (start, end, whole) = value_at(self.va, i, floor, n, fields, word);
             changes.push(Change {
-                offset: start as u64,
-                old: self.bytes[start..i].to_vec(),
-                new: now[start..i].to_vec(),
+                offset: from_usize(start),
+                old: self.bytes[start..end].to_vec(),
+                new: now[start..end].to_vec(),
+                whole,
             });
+            floor = end;
+            i = end;
         }
-        Ok(changes)
+        Ok(Diff {
+            changes,
+            now: Snapshot {
+                va: self.va,
+                len: self.len,
+                bytes: now,
+            },
+        })
     }
 }
 
-/// Renders changes as rows: offset, the field name when one is known, the
-/// bytes before and after, and the words they make.
+/// The value a changed byte belongs to, as offsets from a watch's start.
 ///
 /// # Arguments
 ///
-/// * `snapshot` - What the changes are relative to.
-/// * `changes` - The runs that changed.
-/// * `names` - Field names by offset, from the object's class.
-pub fn render_changes(
-    snapshot: &Snapshot,
-    changes: &[Change],
-    names: &BTreeMap<u64, String>,
-) -> String {
+/// * `va` - The watch's first address, which aligns the words.
+/// * `at` - Offset of the changed byte.
+/// * `floor` - Where the previous change ended; a value starts no earlier.
+/// * `n` - Bytes compared; a value ends no later.
+/// * `fields` - The object's fields by offset.
+/// * `word` - The word width in bytes.
+///
+/// # Returns
+///
+/// `(start, end, whole)`: the field holding the byte, else the aligned word
+/// (stopping short of the next field); `whole` is false when the watch's
+/// ends or a neighbour cut the value.
+fn value_at(
+    va: u64,
+    at: usize,
+    floor: usize,
+    n: usize,
+    fields: &BTreeMap<u64, Field>,
+    word: usize,
+) -> (usize, usize, bool) {
+    let at64 = from_usize(at);
+    if let Some((off, f)) = fields.range(..=at64).next_back()
+        && let Ok(start) = usize::try_from(*off)
+        && start.saturating_add(f.len) > at
+    {
+        let (s, e) = (start.max(floor), start.saturating_add(f.len).min(n));
+        return (s, e, s == start && e == start.saturating_add(f.len));
+    }
+    let next = fields
+        .range(at64.saturating_add(1)..)
+        .next()
+        .and_then(|(off, _)| usize::try_from(*off).ok())
+        .unwrap_or(usize::MAX);
+    let skip = usize::try_from(va.wrapping_add(at64) % from_usize(word.max(1))).unwrap_or(0);
+    let (start, end) = (at.wrapping_sub(skip), at + (word.max(1) - skip));
+    let (s, e) = (
+        if skip > at { 0 } else { start }.max(floor),
+        end.min(n).min(next),
+    );
+    (s, e, skip <= at && s == start && e == end)
+}
+
+/// Renders a diff as rows, one changed value each.
+///
+/// A row holds the offset, the field name when one is known, the value's
+/// bytes before and after, and the numbers a whole value makes; lines
+/// before the rows say which bytes stopped or started being readable.
+///
+/// # Arguments
+///
+/// * `was` - The snapshot the diff was taken against.
+/// * `diff` - What the second read found.
+/// * `fields` - The object's fields by offset, from its class.
+pub fn render_changes(was: &Snapshot, diff: &Diff, fields: &BTreeMap<u64, Field>) -> String {
+    let (before, now) = (was.bytes.len(), diff.now.bytes.len());
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "# {} change(s) in {} bytes at {:#x}",
-        changes.len(),
-        snapshot.bytes.len(),
-        snapshot.va
+        "# {} change(s) in {} of {} bytes at {:#x}",
+        diff.changes.len(),
+        before.min(now),
+        was.len,
+        was.va
     );
-    if changes.is_empty() {
+    if now < before {
+        let _ = writeln!(
+            out,
+            "# +{now:#x}..+{before:#x}: {} byte(s) were readable and are not now",
+            before - now
+        );
+    } else if now > before {
+        let _ = writeln!(
+            out,
+            "# +{before:#x}..+{now:#x}: {} byte(s) are readable now that were not; compared from the next diff",
+            now - before
+        );
+    }
+    let from = now.max(before);
+    if now < was.len && from < was.len {
+        let _ = writeln!(
+            out,
+            "# +{from:#x}..+{:#x}: not readable, then or now",
+            was.len
+        );
+    }
+    if diff.changes.is_empty() {
         return out;
     }
     let _ = writeln!(out, "offset  field                    was -> now");
-    for c in changes {
-        let field = names
+    for c in &diff.changes {
+        let field = fields
             .range(..=c.offset)
             .next_back()
-            .map(|(off, name)| {
+            .filter(|(off, f)| c.offset - **off < from_usize(f.len))
+            .map(|(off, f)| {
                 if *off == c.offset {
-                    name.clone()
+                    f.name.clone()
                 } else {
-                    format!("{name}+{:#x}", c.offset - off)
+                    format!("{}+{:#x}", f.name, c.offset - off)
                 }
             })
             .unwrap_or_default();
@@ -857,7 +1014,7 @@ pub fn render_changes(
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let words = if c.old.len() <= 8 {
+        let words = if c.whole && c.old.len() <= 8 {
             format!(" ({} -> {})", le_word(&c.old), le_word(&c.new))
         } else {
             String::new()
@@ -996,29 +1153,102 @@ mod tests {
         assert!(scan.truncated);
     }
 
-    /// A snapshot diff lists the runs that changed, cut at word boundaries,
-    /// and names the field a run falls in.
+    /// A snapshot diff lists each changed value whole: the field that holds
+    /// the changed bytes, named, with the number the whole field makes.
     #[test]
-    fn snapshots_diff_by_run() {
+    fn snapshots_diff_by_field() {
         let mut data = vec![0u8; 32];
         data[4..8].copy_from_slice(&100u32.to_le_bytes());
         let mut mem = Fake::new(0x3000, data);
+        let mut fields = BTreeMap::new();
+        for (off, name, len) in [(4u64, "Gold", 4), (16, "Pos", 8)] {
+            fields.insert(
+                off,
+                Field {
+                    name: name.to_owned(),
+                    len,
+                },
+            );
+        }
         let snap = Snapshot::take(&mem, 0x3000, 32).unwrap();
-        assert!(snap.diff(&mem).unwrap().is_empty());
+        assert!(snap.diff(&mem, &fields, 8).unwrap().changes.is_empty());
         mem.data[4..8].copy_from_slice(&101u32.to_le_bytes());
         mem.data[20] = 9;
-        let changes = snap.diff(&mem).unwrap();
-        assert_eq!(changes.len(), 2, "{changes:?}");
-        assert_eq!(changes[0].offset, 4);
-        assert_eq!(le_word(&changes[0].new), 101);
-        assert_eq!(changes[1].offset, 20);
-        let mut names = BTreeMap::new();
-        names.insert(4u64, "Gold".to_owned());
-        names.insert(16u64, "Pos".to_owned());
-        let text = render_changes(&snap, &changes, &names);
-        assert!(text.contains("Gold"), "{text}");
-        assert!(text.contains("Pos+0x4"), "{text}");
+        let diff = snap.diff(&mem, &fields, 8).unwrap();
+        assert_eq!(diff.changes.len(), 2, "{diff:?}");
+        assert_eq!(diff.changes[0].offset, 4);
+        assert_eq!(le_word(&diff.changes[0].new), 101);
+        assert_eq!(diff.changes[1].offset, 16);
+        assert_eq!(diff.changes[1].new.len(), 8);
+        let text = render_changes(&snap, &diff, &fields);
+        assert!(text.contains("+0x004  Gold"), "{text}");
         assert!(text.contains("(100 -> 101)"), "{text}");
+        assert!(text.contains("+0x010  Pos"), "{text}");
+        assert!(text.contains("(0 -> 38654705664)"), "{text}");
+    }
+
+    /// Without fields a change is the aligned word holding it.
+    ///
+    /// The word is aligned in the process, not from an unaligned watch's
+    /// start; a word the watch's start cuts shows its bytes but no number.
+    #[test]
+    fn snapshots_diff_by_aligned_word() {
+        let mem = Fake::new(0x3000, vec![0u8; 32]);
+        let snap = Snapshot::take(&mem, 0x3003, 24).unwrap();
+        let mut mem = mem;
+        mem.data[0x5] = 1;
+        mem.data[0x12] = 2;
+        mem.data[0x15] = 3;
+        let none = BTreeMap::new();
+        let diff = snap.diff(&mem, &none, 8).unwrap();
+        assert_eq!(diff.changes.len(), 2, "{diff:?}");
+        assert_eq!((diff.changes[0].offset, diff.changes[0].new.len()), (0, 5));
+        assert!(!diff.changes[0].whole);
+        assert_eq!(
+            (diff.changes[1].offset, diff.changes[1].new.len()),
+            (0xd, 8)
+        );
+        assert!(diff.changes[1].whole);
+        let text = render_changes(&snap, &diff, &none);
+        assert!(
+            text.contains(" 00 00 00 00 00 -> 00 00 01 00 00\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("-> 00 00 02 00 00 03 00 00 (0 -> 3298535014400)"),
+            "{text}"
+        );
+    }
+
+    /// A range that stops being readable says so rather than shrinking the
+    /// watch silently, and one that becomes readable again says that too.
+    #[test]
+    fn a_diff_says_what_stopped_being_readable() {
+        let mut mem = Fake::new(0x3000, vec![0u8; 32]);
+        let none = BTreeMap::new();
+        let snap = Snapshot::take(&mem, 0x3000, 64).unwrap();
+        assert_eq!((snap.len, snap.bytes.len()), (64, 32));
+        mem.data.truncate(20);
+        let diff = snap.diff(&mem, &none, 8).unwrap();
+        let text = render_changes(&snap, &diff, &none);
+        assert!(
+            text.starts_with("# 0 change(s) in 20 of 64 bytes at 0x3000\n# +0x14..+0x20: 12 byte(s) were readable and are not now\n# +0x20..+0x40: not readable, then or now\n"),
+            "{text}"
+        );
+        assert_eq!(diff.now.len, 64, "the watch keeps its length");
+        mem.data.resize(32, 0);
+        let again = diff.now.diff(&mem, &none, 8).unwrap();
+        let text = render_changes(&diff.now, &again, &none);
+        assert!(
+            text.contains("# +0x14..+0x20: 12 byte(s) are readable now that were not"),
+            "{text}"
+        );
+        mem.data.clear();
+        let gone = again.now.diff(&mem, &none, 8).unwrap_err();
+        assert!(
+            gone.starts_with("none of the 64 bytes at 0x3000 is readable now"),
+            "{gone}"
+        );
     }
 
     /// Addresses move between the file and the process and back.

@@ -230,10 +230,13 @@ impl LiveSession {
 struct Watch {
     /// The bytes as they were when the watch was set or last reported.
     snapshot: Snapshot,
-    /// The class of the object the bytes are, when one is known, so a diff
-    /// names the fields that changed.
-    class: Option<String>,
+    /// The object's fields by offset, empty when its class is unknown; a
+    /// diff names a change by them. Taken when the watch is set.
+    fields: std::collections::BTreeMap<u64, live::Field>,
 }
+
+/// Bytes a watch covers when neither a length nor a class's fields say.
+const WATCH_DEFAULT: usize = 256;
 
 /// The refusal every tool answers before `load_binary`.
 const NO_BINARY: &str = "no binary loaded; call load_binary first";
@@ -1606,9 +1609,9 @@ impl BorerServer {
     /// # Errors
     ///
     /// When no process is attached, the address does not resolve or is not
-    /// readable, or no watch has the name.
+    /// readable, the class given is unknown, or no watch has the name.
     #[tool(
-        description = "Watch attached-process memory: with an address, keep its bytes under the name; without, list what changed, naming fields when the class is known.",
+        description = "Watch attached-process memory: with an address, keep its bytes under the name; without, list what changed since the last call, one whole value per row (the class's field, else the aligned word), and which bytes stopped or started being readable.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1630,71 +1633,86 @@ impl BorerServer {
             .map(|n| count_param(Some(n), 1, live::READ_MAX, "length"))
             .transpose()?;
         let program = self.loaded();
-        let analysis = program.as_ref().and_then(|_| self.ensure_analysis().ok());
         let overlay = self.overlay();
         self.with_live(|s| {
-            let word = s.word;
             let Some(address) = address else {
-                let Watch {
-                    snapshot: snap,
-                    class,
-                } = s
+                let watch = s
                     .snapshots
                     .get(&name)
                     .cloned()
                     .ok_or_else(|| format!("no watch is named {name}; pass an address to start one"))?;
-                let changes = snap.diff(&s.process)?;
-                let names = match (&class, &program, &analysis) {
-                    (Some(c), Some(p), Some(a)) => {
-                        borer_engine::analysis::classes::field_labels(p, a, &overlay, c)
-                            .into_iter()
-                            .map(|(off, label)| (off, label.to_string()))
-                            .collect()
-                    }
-                    _ => std::collections::BTreeMap::new(),
-                };
-                let mut out = live::render_changes(&snap, &changes, &names);
-                if !changes.is_empty() {
-                    let snapshot = Snapshot::take(&s.process, snap.va, snap.bytes.len())?;
-                    s.snapshots.insert(name.clone(), Watch { snapshot, class });
+                let diff = watch.snapshot.diff(&s.process, &watch.fields, s.word)?;
+                let mut out = live::render_changes(&watch.snapshot, &diff, &watch.fields);
+                if diff.now != watch.snapshot {
                     out.push_str("(the watch now holds these bytes)\n");
+                    s.snapshots.insert(
+                        name.clone(),
+                        Watch {
+                            snapshot: diff.now,
+                            fields: watch.fields,
+                        },
+                    );
                 }
                 return Ok(out);
             };
             let va = self.live_addr(s, &address)?;
-            let class = class.or_else(|| {
-                let (r, a) = (s.rebase.as_ref().ok()?, analysis.as_ref()?);
-                live::class_at(&s.process, &r, a, va, word)
-            });
-            let size = match (&class, &program, &analysis) {
-                (Some(c), Some(p), Some(a)) => {
-                    borer_engine::analysis::classes::class_layout(p, a, &overlay, c).map(|l| {
-                        l.fields
-                            .iter()
-                            .map(|(off, f)| {
-                                off + u64::from(f.widths.iter().max().copied().unwrap_or(64) / 8)
-                            })
-                            .max()
-                            .unwrap_or(256)
-                    })
-                }
+            let analysis = match (&program, &class) {
+                (Some(_), Some(_)) => Some(self.ensure_analysis()?),
+                (Some(_), None) if s.rebase.is_ok() => self.ensure_analysis().ok(),
                 _ => None,
             };
-            let len = length.map_or_else(
-                || {
-                    usize::try_from(size.unwrap_or(256))
-                        .unwrap_or(256)
-                        .clamp(8, live::READ_MAX)
-                },
-                |asked| asked.n,
-            );
+            let (class, fields) = match (class, &program, &analysis) {
+                (Some(c), None, _) => {
+                    return Err(format!(
+                        "class {c} names fields of a loaded binary, and none is loaded"
+                    ));
+                }
+                (Some(c), Some(p), Some(a)) => {
+                    let fields = live::fields_of(p, a, &overlay, &c)
+                        .ok_or_else(|| format!("no function belongs to class {c}"))?;
+                    (Some(c), fields)
+                }
+                (Some(c), Some(_), None) => {
+                    return Err(format!("no function belongs to class {c}"));
+                }
+                (None, Some(p), Some(a)) => {
+                    let found = s
+                        .rebase
+                        .as_ref()
+                        .ok()
+                        .and_then(|r| live::class_at(&s.process, r, a, va, s.word));
+                    let fields = found
+                        .as_deref()
+                        .and_then(|c| live::fields_of(p, a, &overlay, c))
+                        .unwrap_or_default();
+                    (found, fields)
+                }
+                (None, None, _) | (None, Some(_), None) => (None, std::collections::BTreeMap::new()),
+            };
+            let size = fields
+                .iter()
+                .map(|(off, f)| {
+                    usize::try_from(*off)
+                        .unwrap_or(live::READ_MAX)
+                        .saturating_add(f.len)
+                })
+                .max()
+                .unwrap_or(WATCH_DEFAULT);
+            let len = length.map_or(size.clamp(8, live::READ_MAX), |asked| asked.n);
             let snapshot = Snapshot::take(&s.process, va, len)?;
+            let readable = if snapshot.bytes.len() < snapshot.len {
+                format!("{} of {} bytes readable", snapshot.bytes.len(), snapshot.len)
+            } else {
+                format!("{} bytes", snapshot.len)
+            };
             let out = format!(
-                "watch {name}: {} bytes at {va:#x}{}; live_watch(\"{name}\") after the change you want to see",
-                snapshot.bytes.len(),
-                class.as_ref().map_or_else(String::new, |c| format!(" ({c})"))
+                "watch {name}: {readable} at {va:#x}{}; live_watch(\"{name}\") after the change you want to see",
+                class
+                    .as_ref()
+                    .map_or_else(String::new, |c| format!(" ({c}, {} fields)", fields.len()))
             );
-            s.snapshots.insert(name.clone(), Watch { snapshot, class });
+            s.snapshots
+                .insert(name.clone(), Watch { snapshot, fields });
             Ok(out)
         })
         .map(|text| match length {
@@ -6410,6 +6428,45 @@ mod tests {
                 .is_some_and(|s| s.rebase.is_err()),
             "the impostor is not mapped"
         );
+        server.live_detach().expect("detach");
+    }
+
+    /// A watch refuses a class the analysis does not know, as `live_object`
+    /// does.
+    ///
+    /// A watch without a class reports a change as the whole aligned word.
+    ///
+    /// # Panics
+    ///
+    /// When the unknown class is accepted or the change is not reported
+    /// as the word's value.
+    #[cfg(windows)]
+    #[test]
+    fn a_watch_refuses_an_unknown_class_and_reports_whole_words() {
+        use super::{LiveAttachParams, LiveWatchParams, Parameters};
+        let server = raw_server();
+        server
+            .live_attach(Parameters(LiveAttachParams {
+                process: std::process::id().to_string(),
+            }))
+            .expect("attach to self");
+        let cell = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0xff));
+        let at = format!("{:#x}", cell.as_ptr() as usize);
+        let watch = |class: Option<&str>, address: Option<&str>| {
+            server.live_watch(Parameters(LiveWatchParams {
+                name: "w".to_owned(),
+                address: address.map(str::to_owned),
+                length: Some(8),
+                class: class.map(str::to_owned),
+            }))
+        };
+        let refused = watch(Some("Nope"), Some(&at)).expect_err("no such class");
+        assert_eq!(refused.message, "no function belongs to class Nope");
+        let started = watch(None, Some(&at)).expect("a watch of a heap word");
+        assert!(started.starts_with("watch w: 8 bytes at "), "{started}");
+        cell.store(0x100, std::sync::atomic::Ordering::SeqCst);
+        let diff = watch(None, None).expect("the diff");
+        assert!(diff.contains("(255 -> 256)"), "{diff}");
         server.live_detach().expect("detach");
     }
 }
