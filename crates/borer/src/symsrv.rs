@@ -8,11 +8,11 @@
 //! public Microsoft store and by any store that speaks its layout.
 //!
 //! A download lands in the cache only after the engine's identity check
-//! ([`borer_engine::pdb::identifies`]) confirms its information stream
-//! states the loaded image's GUID and age, so a wrong or hostile file is
-//! discarded, never cached, never applied; the engine then finds the
-//! cached entry as the last of its three candidate places on any later
-//! load that names the cache root ([`borer_engine::program::Program`]).
+//! ([`borer_engine::pdb::identifies`]) confirms it states the loaded
+//! image's GUID and age, so a wrong or hostile file is discarded, never
+//! cached, never applied; the engine then finds the cached entry as the
+//! last of its three candidate places on any later load that names the
+//! cache root ([`borer_engine::program::Program`]).
 //!
 //! The fetch is `curl` run as a process, the one
 //! `crates/borer-engine/examples/fnscore.rs` already shells out to: it
@@ -20,13 +20,11 @@
 //! TLS stack added to the dependency tree (rules: keep dependency surface
 //! minimal). Its absence is a clean error, not a crash.
 //!
-//! One limitation the strict gate implies: the public store's PDBs are
-//! post-processed after linking and carry an age past the one the image's
-//! `CodeView` record states (observed: an `ntdll` record age of 1 against
-//! a store file aged 4, same GUID), so even a GUID-exact download from it
-//! is discarded. A server that serves the linker's own file, the way a
-//! private store does, matches and lands; relaxing the check would be a
-//! policy change in [`borer_engine::pdb`], not in this client.
+//! The public store's PDBs are post-processed after linking and their
+//! information stream carries an age past the one the image's `CodeView`
+//! record states (an `ntdll` record age of 1 against a store file aged 4,
+//! same GUID); the identity is the DBI stream's age, the one the linker
+//! wrote, so they match the way a debugger matches them.
 
 use borer_engine::pdb::{self, Record};
 use std::path::{Path, PathBuf};
@@ -175,7 +173,8 @@ pub(crate) fn curl(address: &str, dest: &Path) -> Result<(), String> {
 /// `.download` sibling first, the engine's identity check reads that file,
 /// and only one that names the loaded image's build is renamed into place;
 /// anything else is deleted, so a wrong or hostile download never becomes
-/// the cached PDB a later load would apply.
+/// the cached PDB a later load would apply, and the directories made for it
+/// go with it when they are left empty.
 ///
 /// # Arguments
 ///
@@ -232,17 +231,27 @@ pub(crate) fn obtain(
     let mut partial = dest.as_os_str().to_os_string();
     partial.push(".download");
     let partial = PathBuf::from(partial);
-    if let Err(why) = fetch(&address, &partial) {
+    let discard = || {
         std::fs::remove_file(&partial).ok();
+        std::fs::remove_dir(dir).ok();
+        if let Some(up) = dir.parent() {
+            std::fs::remove_dir(up).ok();
+        }
+    };
+    if let Err(why) = fetch(&address, &partial) {
+        discard();
         return Err(why);
     }
     let bytes = std::fs::read(&partial)
         .map_err(|e| format!("reading the download {}: {e}", partial.display()))?;
-    if !pdb::identifies(&bytes, record).is_some_and(|yes| yes) {
-        std::fs::remove_file(&partial).ok();
-        return Err(format!(
-            "the downloaded {name} is not this binary's build (guid+age mismatch or no pdb): discarded"
-        ));
+    let why = match pdb::identifies(&bytes, record) {
+        Some(true) => None,
+        Some(false) => Some("another build's pdb (its guid+age are not this binary's)"),
+        None => Some("no pdb a parser reads"),
+    };
+    if let Some(why) = why {
+        discard();
+        return Err(format!("the downloaded {name} is {why}: discarded"));
     }
     std::fs::rename(&partial, &dest)
         .map_err(|e| format!("moving the download into {}: {e}", dest.display()))?;
@@ -435,6 +444,11 @@ mod tests {
         })
         .expect_err("a non-pdb download is refused");
         assert!(wrong.contains("discarded"), "{wrong}");
+        assert!(wrong.contains("no pdb a parser reads"), "{wrong}");
+        assert!(
+            !root.join(name).exists(),
+            "a discarded download left its directories"
+        );
         let key = record.symsrv_key();
         let dest = root.join(name).join(&key).join(name);
         assert!(!dest.exists(), "a discarded download left {dest:?}");

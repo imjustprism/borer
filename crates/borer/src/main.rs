@@ -667,7 +667,10 @@ impl BorerServer {
     /// Fetches the loaded PE's missing companion PDB from a symbol server.
     ///
     /// Off by default like every side effect: a dry run says the URL and
-    /// the cache destination and touches nothing. A confirmed fetch checks
+    /// the cache destination and touches nothing. A PDB of this build
+    /// already on disk (beside the binary, at its recorded path, or in the
+    /// cache) is named instead of fetched: a load with `pdb=false` leaves
+    /// it unapplied. A confirmed fetch checks
     /// the cache first (a hit answers without the network), downloads with
     /// `curl`, and keeps the file only when its GUID and age name this
     /// binary, so a wrong or hostile download is discarded, never cached.
@@ -713,6 +716,12 @@ impl BorerServer {
                     symsrv::CACHE_ENV
                 ));
             };
+            if let Some(found) = borer_engine::pdb::resolved(&p.path, record, Some(&root)) {
+                return Ok(format!(
+                    "{} is this build's pdb and did not apply to this load (load_binary passed pdb=false, or it landed since): load_binary with pdb=true applies it; nothing to fetch",
+                    found.display()
+                ));
+            }
             symsrv::obtain(
                 record,
                 &root,
@@ -4864,6 +4873,45 @@ mod tests {
         );
         assert_eq!(*super::read_lock(&server.entry_file_offset), None);
         assert!(server.loaded().is_some(), "the program was dropped");
+    }
+
+    /// `fetch_pdb` names this build's PDB when one is on disk instead of
+    /// offering to fetch it.
+    ///
+    /// A load with `pdb=false` leaves the PDB beside the binary unapplied, and
+    /// the dry run offered a download of the file already there. A build
+    /// without its PDB on disk has nothing to ask about, and nothing is
+    /// asserted.
+    ///
+    /// # Panics
+    ///
+    /// When the dry run offers a fetch of a PDB on disk.
+    #[test]
+    fn fetch_pdb_names_a_pdb_already_on_disk() {
+        let exe = std::env::current_exe().expect("the test binary has a path");
+        let server = super::BorerServer::default();
+        server
+            .load_binary(super::Parameters(super::LoadBinaryParams {
+                path: exe.display().to_string(),
+                entry_file_offset: None,
+                pdb: Some(false),
+            }))
+            .expect("the test binary loads");
+        let on_disk = server.loaded().and_then(|p| {
+            let record = p.pdb_record.as_ref()?;
+            borer_engine::pdb::resolved(&p.path, record, None)
+        });
+        if on_disk.is_none() {
+            return;
+        }
+        let said = server
+            .fetch_pdb(super::Parameters(super::FetchPdbParams {
+                dry_run: None,
+                server: None,
+            }))
+            .expect("the dry run answers");
+        assert!(said.contains("nothing to fetch"), "{said}");
+        assert!(!said.contains("would fetch"), "{said}");
     }
 
     /// A fresh session renders constants by the binary's name tables, as a

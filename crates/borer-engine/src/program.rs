@@ -1074,8 +1074,8 @@ impl Program {
     /// slot address, exports their entry; x64 exception-table entries whose
     /// unwind info is not chained become [`Program::function_ranges`]. The
     /// debug directory's `CodeView` record names a PDB, applied when it is on
-    /// disk at the recorded path or beside the loaded file and its
-    /// information stream states the record's GUID and age: its function
+    /// disk at the recorded path, beside the loaded file or in the symbol
+    /// cache and states the record's GUID and age (the DBI age): its function
     /// symbols become [`SymbolKind::Local`] symbols, its procedure extents
     /// join [`Program::function_ranges`] where an executable section holds
     /// them whole, the signatures its type stream states become

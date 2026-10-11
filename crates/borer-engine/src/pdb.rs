@@ -240,12 +240,64 @@ fn matches_record(guid: (u32, u16, u16, &[u8; 8]), age: u32, record: &Record) ->
         && *d4 == g[8..16]
 }
 
+/// Whether an open PDB names the build a record does.
+///
+/// The GUID is the information stream's and the age the DBI stream's: the
+/// linker writes the same age there and in the image's record, while the
+/// information stream's age is bumped by the tools that post-process a
+/// PDB, as the public symbol store's are, so a store file of the image's
+/// own build stated a later age there and was refused as another build's.
+/// Symbol servers and debuggers match on the DBI age for that reason. An
+/// old PDB whose DBI stream states no age is held to the information
+/// stream's.
+///
+/// # Arguments
+///
+/// * `db` - The PDB, open.
+/// * `record` - The image's debug record.
+///
+/// # Returns
+///
+/// Whether the GUID and age are the record's ([`matches_record`]), or
+/// `None` when the information stream does not read.
+fn same_build<'s, S: pdb::Source<'s> + 's>(
+    db: &mut pdb::PDB<'s, S>,
+    record: &Record,
+) -> Option<bool> {
+    let info = db.pdb_information().ok()?;
+    let age = db
+        .debug_information()
+        .ok()
+        .and_then(|d| d.age())
+        .unwrap_or(info.age);
+    Some(matches_record(info.guid.as_fields(), age, record))
+}
+
+/// Whether the PDB file at a path names the build a record does.
+///
+/// Reads only the streams the identity lives in ([`same_build`]), not the
+/// whole file.
+///
+/// # Arguments
+///
+/// * `path` - The candidate file.
+/// * `record` - The image's debug record.
+///
+/// # Returns
+///
+/// As [`same_build`], `None` also when the file does not open as a PDB.
+fn file_names_build(path: &Path, record: &Record) -> Option<bool> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut db = pdb::PDB::open(file).ok()?;
+    same_build(&mut db, record)
+}
+
 /// Whether a PDB's bytes name the build a record does, without applying it.
 ///
 /// The gate a symbol-server download is held to: the file is worth caching
 /// only when it is the build the image's record names, so a wrong or
 /// hostile download is refused before anything reads its symbols. The
-/// check is [`matches_record`], the one [`apply`] runs on a companion it
+/// check is [`same_build`], the one [`apply`] runs on a companion it
 /// found on disk.
 ///
 /// # Arguments
@@ -260,16 +312,15 @@ fn matches_record(guid: (u32, u16, u16, &[u8; 8]), age: u32, record: &Record) ->
 /// is no PDB a parser can read.
 pub fn identifies(bytes: &[u8], record: &Record) -> Option<bool> {
     let mut db = pdb::PDB::open(Cursor::new(bytes)).ok()?;
-    let info = db.pdb_information().ok()?;
-    Some(matches_record(info.guid.as_fields(), info.age, record))
+    same_build(&mut db, record)
 }
 
 /// Applies the PDB a debug record names, when one is on disk to apply.
 ///
-/// The PDB is resolved through [`resolved`] and read whole; its
-/// information stream must state the record's GUID and age
-/// ([`matches_record`]), and one that does not is skipped with a note
-/// rather than applied to an image it does not describe. A walk that runs
+/// The PDB is the first candidate that is the record's build
+/// ([`resolved`]), read whole; when files are there and none is, the load
+/// is skipped with a note rather than applied to an image it does not
+/// describe. A walk that runs
 /// into a damaged stream keeps the symbols gathered so far: a corrupt PDB
 /// answers with part of the truth, never a panic. The line programs are
 /// left for [`sources`]: no load answers from them, and every one of them
@@ -317,9 +368,26 @@ pub(crate) fn apply(
     subs: &mut Vec<crate::dwarf::Subprogram>,
 ) -> Option<Outcome> {
     let mut phases = crate::timing::Phases::new();
-    let path = candidates(record, binary, symsrv)
+    let mut skip: Option<Skip> = None;
+    let mut chosen = None;
+    for p in candidates(record, binary, symsrv)
         .into_iter()
-        .find(|p| p.is_file())?;
+        .filter(|p| p.is_file())
+    {
+        match file_names_build(&p, record) {
+            Some(true) => {
+                chosen = Some(p);
+                break;
+            }
+            Some(false) => skip = Some(Skip::Mismatch),
+            None => {
+                skip.get_or_insert(Skip::Unreadable);
+            }
+        }
+    }
+    let Some(path) = chosen else {
+        return skip.map(Outcome::Skipped);
+    };
     let unreadable = || Some(Outcome::Skipped(Skip::Unreadable));
     let Ok(bytes) = std::fs::read(&path) else {
         return unreadable();
@@ -329,11 +397,10 @@ pub(crate) fn apply(
         return unreadable();
     };
     phases.mark("pdb open");
-    let Ok(info) = db.pdb_information() else {
-        return unreadable();
-    };
-    if !matches_record(info.guid.as_fields(), info.age, record) {
-        return Some(Outcome::Skipped(Skip::Mismatch));
+    match same_build(&mut db, record) {
+        Some(true) => {}
+        Some(false) => return Some(Outcome::Skipped(Skip::Mismatch)),
+        None => return unreadable(),
     }
     let Ok(map) = db.address_map() else {
         return unreadable();
@@ -381,20 +448,28 @@ pub(crate) fn apply(
     })
 }
 
-/// The path a record's PDB resolved to, when one is on disk to apply.
+/// The path of the record's own PDB, when one is on disk to apply.
+///
+/// The candidates are tried in order ([`candidates`]) and the first that is
+/// the record's build wins: another build's PDB left beside the image no
+/// longer hides the matching one a symbol server fetch put in the cache.
 ///
 /// # Arguments
 ///
 /// * `binary` - The path the image was loaded from.
 /// * `record` - The image's `CodeView` PDB70 debug record.
+/// * `symsrv` - The root of a symbol-server cache, `None` for the two
+///   on-disk places alone.
 ///
 /// # Returns
 ///
-/// The first candidate that names a file, or `None` when none does.
-pub(crate) fn resolved(binary: &Path, record: &Record, symsrv: Option<&Path>) -> Option<PathBuf> {
+/// The first candidate whose PDB names the record's GUID and age
+/// ([`same_build`]), or `None` when none does.
+#[must_use]
+pub fn resolved(binary: &Path, record: &Record, symsrv: Option<&Path>) -> Option<PathBuf> {
     candidates(record, binary, symsrv)
         .into_iter()
-        .find(|p| p.is_file())
+        .find(|p| p.is_file() && file_names_build(p, record) == Some(true))
 }
 
 /// Reads the source file and line each named procedure starts at, the
@@ -437,10 +512,7 @@ pub(crate) fn sources(
     let Ok(mut db) = pdb::PDB::open(Cursor::new(bytes.as_slice())) else {
         return unreadable();
     };
-    let Ok(info) = db.pdb_information() else {
-        return unreadable();
-    };
-    if !matches_record(info.guid.as_fields(), info.age, record) {
+    if same_build(&mut db, record) != Some(true) {
         return unreadable();
     }
     let Ok(map) = db.address_map() else {
@@ -1813,6 +1885,80 @@ mod tests {
         record.guid[0] ^= 1;
         assert_eq!(identifies(&own, &record), Some(false));
         assert_eq!(identifies(b"not a pdb", &record), None);
+    }
+
+    /// Adds `by` to the age a PDB's information stream states, in place.
+    ///
+    /// This is the edit a symbol store's post-processing makes, leaving the DBI
+    /// stream's age as the linker wrote it.
+    ///
+    /// # Returns
+    ///
+    /// `None` when the file is no MSF this reads.
+    fn bump_info_age(pdb: &mut [u8], by: u32) -> Option<()> {
+        let word = |b: &[u8], at: usize| -> Option<usize> {
+            let v = u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?);
+            usize::try_from(v).ok()
+        };
+        // SPEC: the MSF superblock holds the block size at 32, the
+        // directory's byte count at 44 and the block of the directory's
+        // block list at 52; the directory is the stream count, each
+        // stream's size, then each stream's blocks.
+        let block = word(pdb, 32)?;
+        let list = word(pdb, 52)? * block;
+        let mut dir = Vec::new();
+        for k in 0..word(pdb, 44)?.div_ceil(block) {
+            let at = word(pdb, list + 4 * k)? * block;
+            dir.extend_from_slice(pdb.get(at..at + block)?);
+        }
+        let streams = word(&dir, 0)?;
+        let size0 = word(&dir, 4)?;
+        let blocks0 = if size0 == 0xffff_ffff {
+            0
+        } else {
+            size0.div_ceil(block)
+        };
+        // SPEC: the information stream is stream 1: version, signature, age.
+        let at = word(&dir, 4 + 4 * streams + 4 * blocks0)? * block + 8;
+        let age = u32::from_le_bytes(pdb.get(at..at + 4)?.try_into().ok()?);
+        pdb.get_mut(at..at + 4)?
+            .copy_from_slice(&(age + by).to_le_bytes());
+        Some(())
+    }
+
+    /// A PDB whose information stream states a later age than its DBI stream is
+    /// still its own build's.
+    ///
+    /// The DBI age is the one the linker and the image's record agree on, and
+    /// the public symbol store's files carry a bumped information age (ntdll's
+    /// record age 1 against a store file aged 4), so every download from it was
+    /// refused.
+    #[test]
+    fn the_dbi_age_names_the_build() {
+        let exe = std::env::current_exe().expect("the test binary has a path");
+        let Ok(program) = Program::load_with(&exe, false) else {
+            return;
+        };
+        let Some(record) = program.pdb_record else {
+            return;
+        };
+        let Some(mut own) = candidates(&record, &exe, None)
+            .into_iter()
+            .find(|p| p.is_file())
+            .and_then(|p| std::fs::read(p).ok())
+        else {
+            return;
+        };
+        let dbi_age = pdb::PDB::open(std::io::Cursor::new(own.as_slice()))
+            .ok()
+            .and_then(|mut db| db.debug_information().ok().and_then(|d| d.age()));
+        if dbi_age != Some(record.age) || bump_info_age(&mut own, 3).is_none() {
+            return;
+        }
+        assert_eq!(identifies(&own, &record), Some(true));
+        let mut later = record;
+        later.age += 3;
+        assert_eq!(identifies(&own, &later), Some(false));
     }
 
     /// A signature the running binary states, for the end-to-end test.
