@@ -23,6 +23,7 @@ use crate::analysis::{Analysis, Overlay, name_of};
 use crate::memory::{Kind, Value, decode, le_word, not_text, scalar_text};
 use crate::num::{lo16, lo32};
 use crate::program::Program;
+use crate::search::demangled_name;
 use crate::strings::cstr_at;
 
 /// Most bytes one read of values, an object or a snapshot takes.
@@ -306,8 +307,11 @@ impl Rebase {
         self.to_live(va).unwrap_or(va)
     }
 
-    /// Says what the file has at a process address: a function, a vtable,
-    /// a named global, a string literal, or a section.
+    /// Says what the file has at a process address, as its reader would.
+    ///
+    /// That is a function, a vtable, a user-named global, a symbol (an
+    /// export, a data record), a string literal, or the offset into its
+    /// section (into the image for the headers).
     ///
     /// # Arguments
     ///
@@ -341,11 +345,16 @@ impl Rebase {
         if let Some(name) = overlay.names.get(&va) {
             return Some(name.clone());
         }
+        if let Some(symbol) = analysis.symbol_at(program, va) {
+            return Some(demangled_name(&symbol.name));
+        }
         if let Some((_, text)) = cstr_at(program, va, 4, STR_CAP) {
             return Some(format!("\"{}\"", text.replace('"', "\\\"")));
         }
-        let section = program.section_at(va).map_or("image", |s| s.name.as_str());
-        Some(format!("{section}+{:#x}", va - self.static_base))
+        Some(match program.section_at(va) {
+            Some(s) => format!("{}+{:#x}", s.name, va - s.va),
+            None => format!("image+{:#x}", va - self.static_base),
+        })
     }
 }
 
@@ -1025,6 +1034,40 @@ mod tests {
         assert_eq!(r.to_live(0x1_4010_0000), None);
         assert_eq!(r.live_of(0x7ff6_0000_1234), 0x7ff6_0000_1234);
         assert_eq!(r.live_of(0x1_4000_1234), 0x7ff6_0000_1234);
+    }
+
+    /// A pointer into the image is named as the file's reader names it.
+    ///
+    /// The symbol at it names it, else its offset into its section, never
+    /// its offset from the image base under a section's name.
+    #[test]
+    fn a_pointer_note_names_symbols_and_section_offsets() {
+        use crate::program::{Arch, Section, Symbol, SymbolKind};
+        let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
+        let data = Section::mapped(".data", 0x2000, 0x100, 0x100, true, false);
+        let mut program = Program::raw(
+            vec![0xc3; 0x200],
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![text, data],
+        );
+        program.symbols.push(Symbol {
+            name: "g_state".to_owned(),
+            addr: 0x2040,
+            kind: SymbolKind::Data,
+        });
+        let analysis = Analysis::compute(&program);
+        let overlay = Overlay::default();
+        let r = Rebase {
+            static_base: 0,
+            static_end: 0x2100,
+            live_base: 0x7000_0000,
+        };
+        let note = |live| r.describe(&program, &analysis, &overlay, live);
+        assert_eq!(note(0x7000_2040).as_deref(), Some("g_state"));
+        assert_eq!(note(0x7000_2010).as_deref(), Some(".data+0x10"));
+        assert_eq!(note(0x7000_0040).as_deref(), Some("image+0x40"));
     }
 
     /// PE headers for a test image: `MZ`, the PE signature at `0x80`, the
