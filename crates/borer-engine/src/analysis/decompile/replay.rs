@@ -100,6 +100,8 @@ pub const ANSWER_BLOCKS: usize = 256;
 pub const ANSWER_SEED: u64 = 1;
 /// Disagreements a report lists.
 pub const LISTED_MAX: usize = 400;
+/// Instructions of disagreeing statements an answer's header names.
+const DISAGREE_SHOWN: usize = 4;
 
 /// What the lifter knew about a function's blocks when it wrote the text:
 /// the relation between machine and text that [`replay`] checks the text
@@ -491,25 +493,43 @@ impl TextCheck {
     }
 
     /// The header line: what of the answer was checked against the binary,
-    /// and what was not.
+    /// what the binary contradicts, and what was not checked.
     ///
-    /// It names the coverage only. Checked means the statements as the
-    /// lifter emitted them were replayed from [`TRIALS`] states per block
-    /// (one random, the others drawn from the block's own constants and
-    /// their neighbors) and agreed with the emulator; the blocks left out
-    /// are counted by why. What a statement computes is checked, not how its
-    /// C is spelled (a cast that makes C's `>>` the signed one, a constant
-    /// written as a literal), and the text passes after the emission are not
-    /// checked either, which the line says too. One line on every answer
-    /// costs tokens, so it is terse: `// checked vs binary: statements as
-    /// emitted, 41/44 blocks x3 states; unchecked: 2 float/vector,
-    /// 1 over budget, C spelling, later text passes`.
+    /// Checked means the statements as the lifter emitted them were
+    /// replayed from [`TRIALS`] states per block (one random, the others
+    /// drawn from the block's own constants and their neighbors) and
+    /// compared with the emulator. A statement the machine does not bear
+    /// out is named by its instruction, the first [`DISAGREE_SHOWN`] of
+    /// them, so a block that was compared and found wrong never reads as
+    /// agreement; the blocks left out are counted by why. What a statement
+    /// computes is checked, not how its C is spelled (a cast that makes C's
+    /// `>>` the signed one, a constant written as a literal), and the text
+    /// passes after the emission are not checked either, which the line
+    /// says too. One line on every answer costs tokens, so it is terse:
+    /// `// checked vs binary: statements as emitted, 41/44 blocks x3
+    /// states; disagree at 0x401a2c; unchecked: 2 float/vector, 1 over
+    /// budget, C spelling, later text passes`.
     #[must_use]
     pub fn header(&self) -> String {
         let mut out = format!(
-            "// checked vs binary: statements as emitted, {}/{} blocks x{TRIALS} states; unchecked: ",
+            "// checked vs binary: statements as emitted, {}/{} blocks x{TRIALS} states; ",
             self.checked, self.blocks
         );
+        if !self.disagree.is_empty() {
+            let shown: Vec<String> = self
+                .disagree
+                .iter()
+                .take(DISAGREE_SHOWN)
+                .map(|a| format!("{a:#x}"))
+                .collect();
+            let _ = write!(out, "disagree at {}", shown.join(", "));
+            let more = self.disagree.len().saturating_sub(DISAGREE_SHOWN);
+            if more > 0 {
+                let _ = write!(out, " (+{more} more)");
+            }
+            out.push_str("; ");
+        }
+        out.push_str("unchecked: ");
         for (label, n) in &self.unchecked {
             let _ = write!(out, "{n} {label}, ");
         }
@@ -4796,6 +4816,32 @@ mod tests {
         let header = checked_header(&p, &a, &Overlay::default(), 0x1000).expect("checked");
         assert!(header.contains("1 fs/gs access"), "{header}");
         assert!(!header.contains("float/vector"), "{header}");
+    }
+
+    /// A statement the machine does not bear out is named in the header by
+    /// its instruction, so a block compared and found wrong never reads as
+    /// agreement; past a few, the rest are counted.
+    #[test]
+    fn the_header_names_the_statements_the_binary_contradicts() {
+        let check = TextCheck {
+            blocks: 8,
+            checked: 8,
+            unchecked: Vec::new(),
+            disagree: vec![0x404171],
+        };
+        assert_eq!(
+            check.header(),
+            "// checked vs binary: statements as emitted, 8/8 blocks x3 states; disagree at 0x404171; unchecked: C spelling, later text passes"
+        );
+        let many = TextCheck {
+            disagree: (0..6).map(|i| 0x401000 + i).collect(),
+            unchecked: vec![("float/vector", 1)],
+            ..check
+        };
+        assert_eq!(
+            many.header(),
+            "// checked vs binary: statements as emitted, 8/8 blocks x3 states; disagree at 0x401000, 0x401001, 0x401002, 0x401003 (+2 more); unchecked: 1 float/vector, C spelling, later text passes"
+        );
     }
 
     /// A text memoized before any answer's check, without the lifter's
