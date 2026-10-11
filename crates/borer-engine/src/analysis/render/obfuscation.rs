@@ -304,6 +304,57 @@ pub(super) struct DispatchLoop {
     pub(super) back: usize,
 }
 
+/// Finds the program's dispatch loops, as [`vm_dispatch_tsv`] judges them.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for reading a dispatch's block.
+/// * `a` - The analysis: functions, blocks and resolved jump tables.
+///
+/// # Returns
+///
+/// The loops, the most handlers first, then by site.
+pub(super) fn dispatch_loops(p: &Program, a: &Analysis) -> Vec<DispatchLoop> {
+    let bits = p.arch.bitness();
+    let mut found: Vec<DispatchLoop> = Vec::new();
+    for f in &a.functions {
+        for b in &f.blocks {
+            if b.term != BlockTerm::Indirect {
+                continue;
+            }
+            let Some((site, targets)) = a.jump_tables.range(b.start..b.end).next() else {
+                continue;
+            };
+            let mut seen: BTreeSet<u64> = BTreeSet::new();
+            let handlers: Vec<u64> = targets
+                .iter()
+                .copied()
+                .filter(|t| seen.insert(*t))
+                .collect();
+            if handlers.len() < VM_MIN_FETCHED {
+                continue;
+            }
+            let back = handlers.iter().filter(|t| reaches(f, **t, b.start)).count();
+            if back * 2 < handlers.len() {
+                continue;
+            }
+            if handlers.len() < VM_MIN_HANDLERS
+                && !bits.is_some_and(|bits| fetches_index_from_memory(p, f, b, bits))
+            {
+                continue;
+            }
+            found.push(DispatchLoop {
+                site: *site,
+                entry: f.entry,
+                handlers,
+                back,
+            });
+        }
+    }
+    found.sort_by_key(|d| (std::cmp::Reverse(d.handlers.len()), d.site));
+    found
+}
+
 /// Finds the dispatch loops in the program, or describes one of them.
 ///
 /// An interpreter runs one loop: fetch the next operation, jump through a
@@ -349,43 +400,7 @@ pub fn vm_dispatch_tsv(
     } else {
         Some(locate(a, o, filter).ok_or_else(|| unresolved(filter))?)
     };
-    let bits = p.arch.bitness();
-    let mut found: Vec<DispatchLoop> = Vec::new();
-    for f in &a.functions {
-        for b in &f.blocks {
-            if b.term != BlockTerm::Indirect {
-                continue;
-            }
-            let Some((site, targets)) = a.jump_tables.range(b.start..b.end).next() else {
-                continue;
-            };
-            let mut seen: BTreeSet<u64> = BTreeSet::new();
-            let handlers: Vec<u64> = targets
-                .iter()
-                .copied()
-                .filter(|t| seen.insert(*t))
-                .collect();
-            if handlers.len() < VM_MIN_FETCHED {
-                continue;
-            }
-            let back = handlers.iter().filter(|t| reaches(f, **t, b.start)).count();
-            if back * 2 < handlers.len() {
-                continue;
-            }
-            if handlers.len() < VM_MIN_HANDLERS
-                && !bits.is_some_and(|bits| fetches_index_from_memory(p, f, b, bits))
-            {
-                continue;
-            }
-            found.push(DispatchLoop {
-                site: *site,
-                entry: f.entry,
-                handlers,
-                back,
-            });
-        }
-    }
-    found.sort_by_key(|d| (std::cmp::Reverse(d.handlers.len()), d.site));
+    let found = dispatch_loops(p, a);
     let Some(want) = wanted else {
         let mut out = format!(
             "# {} dispatch loop{} found; borer://vm/<address> for the handlers\n",

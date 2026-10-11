@@ -18,7 +18,12 @@ pub(super) const DEVIRT_TRACE_MAX: usize = 2000;
 /// the sequence of operations the original function performed, read off the
 /// machine rather than reconstructed by hand. The dispatch is the indirect
 /// jump taken most, since the interpreter loops on it once per virtual
-/// instruction. Each distinct handler is given a name and summarized once;
+/// instruction, among those that are a real dispatch loop: a site
+/// `borer://vm` finds ([`dispatch_loops`]), or one the run took to at least
+/// [`VM_MIN_FETCHED`] distinct handlers, the least `borer://vm` takes for a
+/// dispatch. An import thunk or a two-way branch jumps through one site to
+/// one or two targets and is no machine, and a run with no such site says
+/// so rather than tracing one. Each distinct handler is given a name and summarized once;
 /// the trace is then that alphabet. A handler is summarized from the bytes
 /// the run executed, which are the image's for a static VM and the run's
 /// memory where the protector decrypted them into a section the file does
@@ -115,14 +120,42 @@ pub fn devirtualize_tsv(
             run.steps
         ));
     }
-    let mut from_counts: BTreeMap<u64, usize> = BTreeMap::new();
-    for (from, _) in jumps {
-        *from_counts.entry(*from).or_default() += 1;
+    let mut sites: BTreeMap<u64, (usize, BTreeSet<u64>)> = BTreeMap::new();
+    for (from, to) in jumps {
+        let site = sites.entry(*from).or_default();
+        site.0 += 1;
+        site.1.insert(*to);
     }
-    let dispatch = from_counts
+    let loops = dispatch_loops(p, a);
+    let Some(dispatch) = sites
         .iter()
-        .max_by_key(|(_, n)| **n)
-        .map_or(0, |(from, _)| *from);
+        .filter(|(from, (_, targets))| {
+            targets.len() >= VM_MIN_FETCHED || loops.iter().any(|d| d.site == **from)
+        })
+        .max_by_key(|(_, (n, _))| *n)
+        .map(|(from, _)| *from)
+    else {
+        let widest = sites.values().map(|(_, t)| t.len()).max().unwrap_or(0);
+        let why = loops.iter().find(|d| d.entry == entry).map_or_else(
+            || "a thunk or a switch is no interpreter".to_owned(),
+            |d| {
+                format!(
+                    "the run stopped before the dispatch borer://vm finds at {:#x}",
+                    d.site
+                )
+            },
+        );
+        return Ok(format!(
+            "# {}: no dispatch loop ran ({} after {} steps): {} indirect jump{} from {} site{}, none a dispatch borer://vm finds and none reaching {VM_MIN_FETCHED} handlers (the most was {widest}); {why}\n",
+            name_of(a, o, entry),
+            run.stop,
+            run.steps,
+            jumps.len(),
+            plural(jumps.len()),
+            sites.len(),
+            plural(sites.len())
+        ));
+    };
     let trace: Vec<u64> = jumps
         .iter()
         .filter(|(from, _)| *from == dispatch)
@@ -928,21 +961,33 @@ mod tests {
     /// A handler the image cannot read but the run decrypted is summarized
     /// from the run's memory, where it read `unreadable`.
     ///
-    /// The program writes a two-byte handler (`jmp rbx`) into a section the
-    /// file does not back, then jumps to it, so the dispatch loop runs
-    /// entirely in memory the emulator materialized; the handler's effect
-    /// must come from those bytes.
+    /// The program writes three two-byte handlers (`jmp rdi`, back to the
+    /// dispatch) into a section the file does not back, then dispatches to
+    /// each in turn, so every handler runs in memory the emulator
+    /// materialized; their effect must come from those bytes. It wrote one
+    /// handler that jumped to itself, which a dispatch needs three of.
     ///
     /// # Panics
     ///
     /// When the dispatch is not found or the handler reads unreadable.
     #[test]
     fn a_handler_decrypted_by_the_run_is_summarized_from_its_memory() {
-        /// `mov rbx,0x2000; mov word [rbx],0xe3ff; jmp rbx`: hand-assembled.
-        const CODE: [u8; 17] = [
+        /// Writes the handlers, then dispatches through `rax` to each.
+        const CODE: [u8; 59] = [
             0x48, 0xbb, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ASM: mov rbx,0x2000
-            0x66, 0xc7, 0x03, 0xff, 0xe3, // ASM: mov word ptr [rbx],0xe3ff
-            0xff, 0xe3, // ASM: jmp rbx
+            0x66, 0xc7, 0x03, 0xff, 0xe7, // ASM: mov word ptr [rbx],0xe7ff
+            0x66, 0xc7, 0x43, 0x10, 0xff, 0xe7, // ASM: mov word ptr [rbx+0x10],0xe7ff
+            0x66, 0xc7, 0x43, 0x20, 0xff, 0xe7, // ASM: mov word ptr [rbx+0x20],0xe7ff
+            0x48, 0xbf, 0x27, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ASM: mov rdi,0x1027
+            0x31, 0xc9, // ASM: xor ecx,ecx
+            0x83, 0xf9, 0x03, // ASM: cmp ecx,3
+            0x73, 0x0e, // ASM: jae 0x103a
+            0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+            0x48, 0xc1, 0xe0, 0x04, // ASM: shl rax,4
+            0xff, 0xc1, // ASM: inc ecx
+            0x48, 0x01, 0xd8, // ASM: add rax,rbx
+            0xff, 0xe0, // ASM: jmp rax
+            0xc3, // ASM: ret
         ];
         let text = Section::mapped(".text", 0x1000, 0, CODE.len() as u64, false, true);
         let empty = Section {
@@ -964,8 +1009,39 @@ mod tests {
         );
         let a = Analysis::compute(&p);
         let out = devirtualize_tsv(&p, &a, &Overlay::default(), "0x1000,budget=1000").unwrap();
-        assert!(out.contains("over 1 handlers"), "{out}");
+        assert!(
+            out.contains("3 virtual instructions over 3 handlers, dispatch at 0x1038"),
+            "{out}"
+        );
         assert!(!out.contains("unreadable"), "{out}");
         assert!(!out.contains(" 0 instrs"), "{out}");
+    }
+
+    /// A lone indirect jump is no dispatch loop and is not traced as one.
+    ///
+    /// It reaches one target, as an import thunk does; any indirect jump was
+    /// taken for the dispatch, so a `jmp [memset]` thunk read as a
+    /// one-handler machine.
+    ///
+    /// # Panics
+    ///
+    /// When the lone jump is traced as a dispatch.
+    #[test]
+    fn a_lone_indirect_jump_is_not_a_dispatch() {
+        let mut code = vec![0x48, 0xb8, 0x10, 0x10, 0, 0, 0, 0, 0, 0]; // ASM: mov rax,0x1010
+        code.extend([0xff, 0xe0]); // ASM: jmp rax
+        code.resize(0x10, 0xcc);
+        code.push(0xc3); // ASM: ret
+        let p = Program::raw_x64(&code);
+        let a = Analysis::compute(&p);
+        let out = devirtualize_tsv(&p, &a, &Overlay::default(), "0x1000").unwrap();
+        assert!(out.contains(": no dispatch loop ran ("), "{out}");
+        assert!(
+            out.contains(
+                "1 indirect jump from 1 site, none a dispatch borer://vm finds and none reaching 3 handlers (the most was 1)"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("virtual instructions"), "{out}");
     }
 }
