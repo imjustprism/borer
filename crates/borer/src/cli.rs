@@ -14,12 +14,13 @@ use borer_engine::analysis::{
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::Program;
 use borer_engine::text::{quoted, short_path};
-use borer_engine::{
-    disasm, entropy, hexdump as hexfmt, libsig, memory, script, search, strings as strscan,
-};
+use borer_engine::{disasm, hexdump as hexfmt, libsig, memory, script, search};
 
-use super::{env_pack_files, parse_field_offset, read_packs, render_hits};
-use crate::params::{Detail, SearchKind};
+use super::{
+    entropy_answer, entropy_threshold, env_pack_files, parse_field_offset, read_packs, render_hits,
+    strings_page, walk_strings,
+};
+use crate::params::{Detail, Filter, SearchKind, StringEncoding};
 use crate::resources::ABOUT_NEEDS_A_NAME;
 
 /// Usage text printed by `help` and on argument errors.
@@ -1187,24 +1188,9 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", hexfmt::hexdump(code, va));
         }
         Query::Entropy => {
-            let threshold: f64 = num_arg(args, 2, 7.2, "entropy threshold")?;
-            let regions = entropy::high_entropy_regions(&s.program, ENTROPY_WINDOW, threshold);
-            println!(
-                "# {} high-entropy regions (window={ENTROPY_WINDOW}, threshold={threshold:.2}){}",
-                regions.len(),
-                if regions.len() >= entropy::REGIONS_MAX {
-                    " (cap reached)"
-                } else {
-                    ""
-                }
-            );
-            let ceiling = entropy::ceiling(ENTROPY_WINDOW);
-            if threshold > ceiling {
-                println!(
-                    "# note: random data averages about {ceiling:.2} bits in a {ENTROPY_WINDOW}-byte window; above that only windows that beat chance pass, so lower the threshold"
-                );
-            }
-            print!("{}", entropy::regions_tsv(&s.program, &regions));
+            let threshold = entropy_threshold(num_arg(args, 2, 7.2, "entropy threshold")?)
+                .map_err(anyhow::Error::msg)?;
+            print!("{}", entropy_answer(&s.program, ENTROPY_WINDOW, threshold));
         }
         Query::Search => {
             let pattern = arg(args, 2, "search needs a pattern")?;
@@ -1573,37 +1559,21 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Strings => {
-            let filter = args
-                .get(2)
-                .map(|f| f.to_lowercase())
-                .filter(|f| !f.is_empty());
-            let (offset, limit) = cli_page(args, 3, 100, 500)?;
-            let mut hits = strscan::find_strings(&s.program.bytes, 5);
-            hits.extend(strscan::find_wide_strings(&s.program.bytes, 5));
-            hits.sort_by_key(|h| h.off);
-            let matched: Vec<_> = hits
-                .into_iter()
-                .filter(|h| {
-                    filter
-                        .as_ref()
-                        .is_none_or(|f| h.text.to_lowercase().contains(f.as_str()))
-                })
-                .collect();
-            let total = matched.len();
-            let shown = total.saturating_sub(offset).min(limit);
-            println!("# showing {shown} of {total} strings");
-            for h in matched.into_iter().skip(offset).take(limit) {
-                let va = s
-                    .program
-                    .offset_to_va(h.off)
-                    .map_or_else(|| "-".to_owned(), |v| format!("{v:#x}"));
-                println!(
-                    "off={:#08x} va={va} {} \"{}\"",
-                    h.off,
-                    h.encoding.name(),
-                    h.text
-                );
-            }
+            let filter = Filter::new(args.get(2).map(String::as_str).filter(|f| !f.is_empty()));
+            let window = cli_page(args, 3, 100, 500)?;
+            let walk = (crate::strwalk::WALK_MIN, StringEncoding::Both);
+            let rows = walk_strings(&s.program, walk.1, walk.0);
+            print!(
+                "{}",
+                strings_page(
+                    &s.program,
+                    rows.iter().collect(),
+                    &filter,
+                    walk,
+                    window,
+                    false
+                )
+            );
         }
         Query::Crypto => {
             let a = s.analysis_or_empty();

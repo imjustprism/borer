@@ -983,29 +983,8 @@ impl BorerServer {
         Parameters(EntropyParams { window, threshold }): Parameters<EntropyParams>,
     ) -> Result<String, ErrorData> {
         let window = to_usize(window.unwrap_or(1024).max(64));
-        let threshold = threshold.unwrap_or(7.2);
-        if !(0.0..=8.0).contains(&threshold) {
-            return Err(err_params(format!(
-                "threshold {threshold} is outside 0..8 bits per byte"
-            )));
-        }
-        let ceiling = entropy::ceiling(window);
-        let unreachable = if threshold > ceiling {
-            format!(
-                "# note: random data averages about {ceiling:.2} bits in a {window}-byte window; above that only windows that beat chance pass, so widen the window or lower the threshold\n"
-            )
-        } else {
-            String::new()
-        };
-        self.with_program(|p| {
-            let regions = entropy::high_entropy_regions(p, window, threshold);
-            Ok(format!(
-                "# {} high-entropy regions (window={window}, threshold={threshold:.2}){}\n{unreachable}{}",
-                regions.len(),
-                if regions.len() >= entropy::REGIONS_MAX { " (cap reached)" } else { "" },
-                entropy::regions_tsv(p, &regions)
-            ))
-        })
+        let threshold = entropy_threshold(threshold.unwrap_or(7.2)).map_err(err_params)?;
+        self.with_program(|p| Ok(entropy_answer(p, window, threshold)))
     }
 
     /// Scans every section for known crypto and hash constants.
@@ -1714,43 +1693,17 @@ impl BorerServer {
                 walks = strwalk::load_or_build(&self.strings, p);
                 walks.rows(encoding, min)
             } else {
-                fresh = match encoding {
-                    StringEncoding::Ascii => strscan::find_strings(&p.bytes, min),
-                    StringEncoding::Utf16 => strscan::find_wide_strings(&p.bytes, min),
-                    StringEncoding::Both => {
-                        let mut all = strscan::find_strings(&p.bytes, min);
-                        all.extend(strscan::find_wide_strings(&p.bytes, min));
-                        all.sort_by_key(|h| h.off);
-                        all
-                    }
-                };
+                fresh = walk_strings(p, encoding, min);
                 fresh.iter().collect()
             };
-            let matched: Vec<_> = rows
-                .into_iter()
-                .filter(|h| filter.accepts(&h.full_text(&p.bytes)))
-                .collect();
-            let total = matched.len();
-            if page.count_only {
-                return Ok(format!(
-                    "# {total} matches (min_len={min}, encoding={encoding})\n"
-                ));
-            }
-            let shown = total.saturating_sub(page.offset).min(page.limit.n);
-            let mut out = format!(
-                "# showing {shown} of {total} matches (min_len={min}, encoding={encoding}; filter=/offset= to narrow)\n# va len enc text\n"
-            );
-            for h in matched.into_iter().skip(page.offset).take(page.limit.n) {
-                let va = p
-                    .offset_to_va(h.off).map_or_else(|| format!("off={:#x}", h.off), |v| format!("{v:#x}"));
-                out.push_str(&format!(
-                    "{va} {} {} \"{}\"\n",
-                    h.len,
-                    h.encoding.name(),
-                    h.text
-                ));
-            }
-            Ok(out)
+            Ok(strings_page(
+                p,
+                rows,
+                &filter,
+                (min, encoding),
+                (page.offset, page.limit.n),
+                page.count_only,
+            ))
         })
         .map(|text| page.limit.noted(text))
     }
@@ -3066,6 +3019,135 @@ fn percent_decode(text: &str) -> String {
         }
     }
     String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+}
+
+/// Walks a program's strings of one encoding, without the session's cache.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `encoding` - Which walks: ASCII, UTF-16LE, or both merged by offset.
+/// * `min` - Shortest run kept.
+///
+/// # Returns
+///
+/// The rows in offset order.
+fn walk_strings(p: &Program, encoding: StringEncoding, min: usize) -> Vec<strscan::StringHit> {
+    match encoding {
+        StringEncoding::Ascii => strscan::find_strings(&p.bytes, min),
+        StringEncoding::Utf16 => strscan::find_wide_strings(&p.bytes, min),
+        StringEncoding::Both => {
+            let mut all = strscan::find_strings(&p.bytes, min);
+            all.extend(strscan::find_wide_strings(&p.bytes, min));
+            all.sort_by_key(|h| h.off);
+            all
+        }
+    }
+}
+
+/// Renders one page of string rows, the answer `strings` gives and the
+/// command line prints alike.
+///
+/// The filter tests a row's whole text ([`strscan::StringHit::full_text`]),
+/// not the display text a long string is cut to.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program, for the addresses and the whole texts.
+/// * `rows` - The walked rows, in offset order.
+/// * `filter` - Keeps the rows whose text contains it.
+/// * `walk` - The shortest run kept and the encoding, for the header.
+/// * `window` - Rows to skip and most rows shown.
+/// * `count_only` - Answer the header's count alone.
+///
+/// # Returns
+///
+/// A `# showing N of M matches` header, a column header and one
+/// `va len enc "text"` row per string, `off=<n>` for bytes no section maps.
+fn strings_page(
+    p: &Program,
+    rows: Vec<&strscan::StringHit>,
+    filter: &Filter,
+    walk: (usize, StringEncoding),
+    window: (usize, usize),
+    count_only: bool,
+) -> String {
+    let (min, encoding) = walk;
+    let (offset, limit) = window;
+    let matched: Vec<_> = rows
+        .into_iter()
+        .filter(|h| filter.accepts(&h.full_text(&p.bytes)))
+        .collect();
+    let total = matched.len();
+    if count_only {
+        return format!("# {total} matches (min_len={min}, encoding={encoding})\n");
+    }
+    let shown = total.saturating_sub(offset).min(limit);
+    let mut out = format!(
+        "# showing {shown} of {total} matches (min_len={min}, encoding={encoding}; filter=/offset= to narrow)\n# va len enc text\n"
+    );
+    for h in matched.into_iter().skip(offset).take(limit) {
+        let va = p
+            .offset_to_va(h.off)
+            .map_or_else(|| format!("off={:#x}", h.off), |v| format!("{v:#x}"));
+        let _ = writeln!(out, "{va} {} {} \"{}\"", h.len, h.encoding.name(), h.text);
+    }
+    out
+}
+
+/// Reads an entropy threshold, the same for `entropy` and the command line.
+///
+/// # Arguments
+///
+/// * `threshold` - Minimum bits per byte, as given.
+///
+/// # Errors
+///
+/// When the threshold is outside `0..=8` bits per byte: no window holds
+/// more than eight, and a negative one would report every window.
+fn entropy_threshold(threshold: f64) -> Result<f64, String> {
+    if (0.0..=8.0).contains(&threshold) {
+        Ok(threshold)
+    } else {
+        Err(format!(
+            "threshold {threshold} is outside 0..8 bits per byte"
+        ))
+    }
+}
+
+/// Renders the high-entropy regions at or above a threshold, the answer
+/// `entropy` gives and the command line prints alike.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `window` - Window size in bytes.
+/// * `threshold` - Minimum bits per byte, read by [`entropy_threshold`].
+///
+/// # Returns
+///
+/// A count header, a note when the threshold is above what random data
+/// reaches in the window, then the region rows.
+fn entropy_answer(p: &Program, window: usize, threshold: f64) -> String {
+    let ceiling = entropy::ceiling(window);
+    let unreachable = if threshold > ceiling {
+        format!(
+            "# note: random data averages about {ceiling:.2} bits in a {window}-byte window; above that only windows that beat chance pass, so widen the window or lower the threshold\n"
+        )
+    } else {
+        String::new()
+    };
+    let regions = entropy::high_entropy_regions(p, window, threshold);
+    format!(
+        "# {} high-entropy regions (window={window}, threshold={threshold:.2}){}\n{unreachable}{}",
+        regions.len(),
+        if regions.len() >= entropy::REGIONS_MAX {
+            " (cap reached)"
+        } else {
+            ""
+        },
+        entropy::regions_tsv(p, &regions)
+    )
 }
 
 /// Renders one page of search hits, one `function: va va` row per run of
