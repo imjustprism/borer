@@ -398,7 +398,8 @@ fn ordinal_name(dll: &str, ordinal: u16) -> String {
 /// table order, comma-joined, and the digest is MD5 of that string. The
 /// loader names an import by ordinal `ORDINAL <n>` and keeps the table's
 /// order. An import whose name entry is empty is skipped; non-PE imports
-/// carry no module and are skipped too.
+/// carry no module and are skipped too, and so are the delay-load imports
+/// ([`crate::headers::Headers::delay_imports`]), which `pefile` leaves out.
 ///
 /// # Arguments
 ///
@@ -413,7 +414,14 @@ pub fn imphash(program: &Program) -> Option<[u8; 16]> {
     let names: Vec<String> = program
         .symbols
         .iter()
-        .filter(|s| s.kind == SymbolKind::Import)
+        .filter(|s| {
+            s.kind == SymbolKind::Import
+                && program
+                    .headers
+                    .delay_imports
+                    .binary_search(&s.addr)
+                    .is_err()
+        })
         .filter_map(|s| s.name.rsplit_once('!'))
         .filter(|&(_, func)| func != "(unnamed)")
         .map(|(dll, func)| {

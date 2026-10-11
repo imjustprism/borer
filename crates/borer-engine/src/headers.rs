@@ -140,6 +140,10 @@ pub struct Headers {
     /// past the end of the file: the file is truncated, and each such
     /// section keeps only the bytes the file holds.
     pub truncated: Option<u64>,
+    /// The address-table slots of a PE's delay-load imports, sorted: the
+    /// imports a DLL linked `/DELAYLOAD` binds on first call, which the
+    /// import hash leaves out as `pefile` does.
+    pub delay_imports: Vec<u64>,
     /// What the loader read past to load the file at all: a header the
     /// strict parse refused, a field the operating system's loader ignores,
     /// each said in a line the summary shows as a warning.

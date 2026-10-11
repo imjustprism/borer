@@ -566,6 +566,15 @@ fn delay_loaded_imports_are_imports() {
             ("DLY.dll!ORDINAL 7".to_owned(), IMAGE_BASE + 0x2208)
         ]
     );
+    assert!(
+        p.summary().contains("imports: 2 (2 delay-loaded)"),
+        "{}",
+        p.summary()
+    );
+    assert!(
+        borer_engine::hashing::imphash(&p).is_none(),
+        "the import hash reads the import table alone, as pefile's does"
+    );
     let a = Analysis::compute(&p);
     let o = borer_engine::analysis::Overlay::default();
     let text = borer_engine::analysis::decompile::decompile(&p, &a, &o, IMAGE_BASE + 0x1000)

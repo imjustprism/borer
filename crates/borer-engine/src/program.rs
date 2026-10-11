@@ -1499,9 +1499,14 @@ impl Program {
                     });
                 }
                 symbols.extend(ordinal_exports(pe));
-                if refused_imports.is_none() {
-                    symbols.extend(delay_imports(&bytes, pe.image_base, pe.is_64));
-                }
+                let delayed = if refused_imports.is_none() {
+                    delay_imports(&bytes, pe.image_base, pe.is_64)
+                } else {
+                    Vec::new()
+                };
+                let mut delay_slots: Vec<u64> = delayed.iter().map(|s| s.addr).collect();
+                delay_slots.sort_unstable();
+                symbols.extend(delayed);
                 if arch == Arch::X86_64
                     && let Some(ex) = &pe.exception_data
                 {
@@ -1575,6 +1580,7 @@ impl Program {
                 .unwrap_or_default();
                 headers.exception_handlers = exception_handlers;
                 headers.chained_chunks = chained_chunks;
+                headers.delay_imports = delay_slots;
                 pdb_record = pe
                     .debug_data
                     .as_ref()
@@ -2322,6 +2328,12 @@ impl Program {
             .filter(|s| matches!(s.kind, SymbolKind::Export | SymbolKind::Forwarder))
             .collect();
         out.push_str(&format!("imports: {}", imports.len()));
+        if !self.headers.delay_imports.is_empty() {
+            out.push_str(&format!(
+                " ({} delay-loaded)",
+                self.headers.delay_imports.len()
+            ));
+        }
         if !imports.is_empty() {
             let sample: Vec<String> = imports
                 .iter()
