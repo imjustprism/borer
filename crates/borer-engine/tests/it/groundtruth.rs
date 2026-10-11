@@ -53,6 +53,10 @@ fn crackme_exe() -> Option<std::path::PathBuf> {
     not(debug_assertions),
     ignore = "the crackme's shape is that of its dev build; a release build links it with LTO"
 )]
+#[cfg_attr(
+    all(debug_assertions, not(windows)),
+    ignore = "the crackme's shape is that of its Windows x64 dev build"
+)]
 fn decompiled_serial_check_matches_source_shape() {
     let Some(exe) = crackme_exe() else {
         panic!("crackme example not built; run cargo build -p borer-fixtures --examples");
@@ -139,6 +143,10 @@ fn decompiled_serial_check_matches_source_shape() {
 #[cfg_attr(
     not(debug_assertions),
     ignore = "the crackme's shape is that of its dev build; a release build links it with LTO"
+)]
+#[cfg_attr(
+    all(debug_assertions, not(windows)),
+    ignore = "the crackme's shape is that of its Windows x64 dev build"
 )]
 fn the_serial_check_runs_and_its_text_is_read() {
     let Some(exe) = crackme_exe() else {

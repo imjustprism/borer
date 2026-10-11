@@ -142,6 +142,10 @@ fn run_raw(args: &[&str]) -> (bool, String) {
 ///
 /// When the process cannot be spawned or waited for.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_ends_quietly_when_stdout_closes() {
     use std::process::{Command, Stdio};
     let exe = env!("CARGO_BIN_EXE_borer");
@@ -165,6 +169,10 @@ fn cli_ends_quietly_when_stdout_closes() {
 
 /// `info` on the binary itself reports the PE format and its sections.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_info_on_own_pe() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["info", exe]);
@@ -184,6 +192,10 @@ fn cli_info_on_own_pe() {
 ///
 /// When the PDB outcome line is missing.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_info_applies_the_companion_pdb() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run_raw(&["info", exe]);
@@ -202,6 +214,10 @@ fn cli_info_applies_the_companion_pdb() {
 /// `functions` lists discovered functions with default names, and `disasm`
 /// at the entry reported by `info` prints addressed instructions.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_functions_and_disasm() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["functions", exe]);
@@ -401,6 +417,10 @@ fn cli_help_for_one_command() {
 /// `fieldrefs` lists the instructions touching an offset with their
 /// functions, and an empty paging argument means the default.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_fieldrefs_names_each_site() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["fieldrefs", exe, "0x8", "", "", "5"]);
@@ -416,6 +436,10 @@ fn cli_fieldrefs_names_each_site() {
 
 /// `search` hits name the function each one lands in.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_search_hits_carry_functions() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["search", exe, "c3"]);
@@ -426,6 +450,10 @@ fn cli_search_hits_carry_functions() {
 /// `vslot` answers with the table header even when no class has a literal
 /// virtual at the slot, and refuses a slot that is not an index.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_vslot_lists_constant_virtuals() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["vslot", exe, "0"]);
@@ -442,6 +470,10 @@ fn cli_vslot_lists_constant_virtuals() {
 /// `grep` refuses an empty text before it touches the index, and `index`
 /// and `grep` have usage lines of their own.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_grep_refuses_an_empty_text() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, _) = run(&["grep", exe, ""]);
@@ -455,6 +487,10 @@ fn cli_grep_refuses_an_empty_text() {
 /// `schema` has a usage line, and refuses a name that is neither a function
 /// nor a class.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_schema_refuses_what_reads_nothing() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["help", "schema"]);
@@ -466,6 +502,10 @@ fn cli_schema_refuses_what_reads_nothing() {
 /// `schemas` answers with its table header even when no class carries a
 /// constant at the slot, and has a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_schemas_lists_a_protocol() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["schemas", exe, "0"]);
@@ -485,6 +525,10 @@ fn cli_schemas_lists_a_protocol() {
 
 /// `shape` lists at least the function itself, with the table header.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_shape_lists_siblings() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, fns) = run(&["functions", exe, "", "0", "1"]);
@@ -508,6 +552,10 @@ fn cli_shape_lists_siblings() {
 /// `messages` answers with its table header even when nothing registered a
 /// wire id.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_messages_lists_registered_classes() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["messages", exe]);
@@ -523,6 +571,10 @@ fn cli_messages_lists_registered_classes() {
 /// `anchors` re-derives a function anchor to held, reports an unknown name
 /// gone, and fails when anything did not hold.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_anchors_judges_a_manifest() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, fns) = run(&["functions", exe, "", "0", "1"]);
@@ -565,6 +617,10 @@ fn cli_anchors_judges_a_manifest() {
 /// `grep` refuses an expression that does not parse before it analyses or
 /// indexes anything, quoting the parser.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_grep_refuses_a_broken_expression() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run_all(&["grep", exe, "re:["]);
@@ -576,6 +632,10 @@ fn cli_grep_refuses_a_broken_expression() {
 /// function nor a class; `encodes` answers with its table header even when
 /// no class carries a constant at the slot.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_encodes_lists_the_outbound_protocol() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["help", "encode"]);
@@ -598,6 +658,10 @@ fn cli_encodes_lists_the_outbound_protocol() {
 /// `senders` answers with its table header even when no class carries a
 /// constant at the slot, and has a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_senders_lists_who_constructs() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["senders", exe, "0"]);
@@ -618,6 +682,10 @@ fn cli_senders_lists_who_constructs() {
 /// `protocol` answers with its table header even when no class carries a
 /// constant at the slot, and has a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_protocol_joins_the_tables() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["protocol", exe, "0"]);
@@ -638,6 +706,10 @@ fn cli_protocol_joins_the_tables() {
 /// `hooks` answers with its table header even when no class carries a
 /// constant at the slot, and has a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_hooks_lists_addresses() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["hooks", exe, "0"]);
@@ -658,6 +730,10 @@ fn cli_hooks_lists_addresses() {
 /// `attrs` answers with its table header on a binary with no attribute
 /// registry, and has a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_attrs_lists_the_registry() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["attrs", exe]);
@@ -674,6 +750,10 @@ fn cli_attrs_lists_the_registry() {
 /// `ports` answers with its table header on a binary with no message
 /// ports, and has a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_ports_lists_routes() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["ports", exe]);
@@ -692,6 +772,10 @@ fn cli_ports_lists_routes() {
 /// lines fit, `packs` says which do and why, and `--no-auto-packs` keeps
 /// the directory out.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_packs_load_themselves_by_their_match() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let dir = std::env::temp_dir().join(format!("borer_packdir_{}", std::process::id()));
@@ -750,6 +834,10 @@ fn cli_packs_load_themselves_by_their_match() {
 /// batches of three until a batch exports; the round trip it then asserts is
 /// the same one.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_export_pack_round_trips() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["functions", exe, "", "0", "400"]);
@@ -820,6 +908,10 @@ fn cli_export_pack_round_trips() {
 /// import's callers, one groups imports for triage and comments their
 /// users, and `--save` writes the proposals as a project.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_script_runs_the_examples() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packs/scripts/");
@@ -859,6 +951,10 @@ fn cli_script_runs_the_examples() {
 /// A directory pack's script runs with the analysis: it names the entry
 /// function, `functions` lists the name, and `packs` reports the run.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_a_pack_script_names_with_the_analysis() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let dir = std::env::temp_dir().join(format!("borer_scriptpack_{}", std::process::id()));
@@ -902,6 +998,10 @@ fn cli_a_pack_script_names_with_the_analysis() {
 /// `scenario` decompiles under assumptions and says what it cut, and
 /// refuses a scenario that names no parameter.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_scenario_states_its_assumptions() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, info) = run(&["info", exe]);
@@ -927,6 +1027,10 @@ fn cli_scenario_states_its_assumptions() {
 /// `verify` checks functions' blocks against the emulator and reports
 /// what it compared, with a row per disagreement.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_verify_checks_the_lifter() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["verify", exe, "all", "40"]);
@@ -952,6 +1056,10 @@ function	block	fact	place	emulated	lifted	bits	expression
 /// and reports what it compared, with a row per disagreement; it fails
 /// only on a disagreement, and says so.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_verify_text_checks_the_statements() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["verify", exe, "all", "40", "1", "text"]);
@@ -972,6 +1080,10 @@ fn cli_verify_text_checks_the_statements() {
 /// `map` answers with its overview header, a column per role found, and
 /// has a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_map_lays_out_namespaces() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["map", exe]);
@@ -989,6 +1101,10 @@ fn cli_map_lays_out_namespaces() {
 /// `about` finds a function by its name and says so, says when nothing has
 /// the name, and has a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_about_answers_one_name() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let (ok, out) = run(&["about", exe, "no_such_name_xyz"]);
@@ -1015,6 +1131,10 @@ fn cli_about_answers_one_name() {
 /// nothing defined are refused with nothing written, and each command has
 /// a usage line.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_set_type_defines_applies_and_refuses() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let dir = std::env::temp_dir().join(format!("borer-settype-{}", std::process::id()));
@@ -1091,6 +1211,10 @@ fn cli_set_type_defines_applies_and_refuses() {
 /// `types` lists its values in value order; duplicate names, duplicate
 /// values and a width that is not 4 or 8 are refused with nothing written.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_set_type_defines_enums_and_refuses() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let dir = std::env::temp_dir().join(format!("borer-setenum-{}", std::process::id()));
@@ -1150,6 +1274,10 @@ fn cli_set_type_defines_enums_and_refuses() {
 /// A snapshot of a binary compared with the same binary changes nothing,
 /// and a file that is not a snapshot is refused.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_snapshot_compares_to_itself() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let file = std::env::temp_dir().join(format!("borer_snapshot_{}.tsv", std::process::id()));
@@ -1169,6 +1297,10 @@ fn cli_snapshot_compares_to_itself() {
 /// pack can set; `--pack` loads one for any command and a file that is not
 /// a pack is refused.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn cli_packs_read_list_and_load() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let dir = std::env::temp_dir();

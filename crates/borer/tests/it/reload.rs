@@ -196,6 +196,10 @@ impl Client {
 /// reload request until the old worker has ended, and gives the request to
 /// the new one.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn a_request_sent_right_after_the_reload_reply_is_answered() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let mut client = Client::start(exe);
@@ -221,6 +225,10 @@ fn a_request_sent_right_after_the_reload_reply_is_answered() {
 /// compute: that is how the test sees that the new worker, not the old,
 /// had it.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn a_request_pipelined_behind_the_reload_is_answered() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let mut client = Client::start(exe);
@@ -293,6 +301,10 @@ fn a_request_pipelined_behind_the_reload_is_answered() {
 /// answered "no binary loaded". The relay keeps the launched process up and
 /// replaces only the worker behind it, which announces the tools again.
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
 fn the_launched_process_serves_the_session_through_reloads() {
     let exe = env!("CARGO_BIN_EXE_borer");
     let mut client = Client::start(exe);
