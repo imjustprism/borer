@@ -878,9 +878,9 @@ impl BorerServer {
     fn binary_info(&self) -> Result<String, ErrorData> {
         self.with_program(|p| {
             let more = if p.no_code().is_some() {
-                "borer://triage reads the whole file in one call"
+                "borer://triage reads the whole file in one call".to_owned()
             } else {
-                "templated resources read by URI (resources/templates/list): why, taint, layout, emulate, solve, devirt, unpack, flat, vm, fields, diff, difffn, carry, migrate"
+                template_names()
             };
             Ok(format!("{}# more: {more}\n", p.summary()))
         })
@@ -4376,11 +4376,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
     ),
     (
         "borer://emulate/{address}",
-        "Run code and read the result. The address carries an experiment: comma-separated reg=val, aN=val (the argument the decompiler names aN; a1 is the first), w<addr>=<hexbytes> (set data or patch code), stop=<addr>, steps=<n> (at most 20000000), trace=<n> (what each of the first n instructions changed), dump=<addr>:<len> (at most 4096 bytes, ?? where nothing is mapped). Reports final registers, the call trace, decoded text and each dump.",
+        "Run code and read the result. The address carries an experiment: comma-separated reg=val, aN=val (the argument the decompiler names aN; a1 is the first), w<addr>=<hexbytes> (set data or patch code), stop=<addr>, steps=<n> (at most 20000000), trace=<n> (what each of the last n instructions changed; a small steps= watches the start instead), origin=<v> (the instruction that first put the value v in a register or in memory), profile=<n> (the n most-run addresses and most-read pages, where the steps went; at most 64), dump=<addr>:<len> (at most 4096 bytes, ?? where nothing is mapped). Reports final registers, the call trace, decoded text and each dump.",
     ),
     (
         "borer://devirt/{address}",
-        "Run a virtualized function and recover the sequence of virtual instructions it executes",
+        "Run a virtualized function and recover the sequence of virtual instructions it executes. The address carries comma-separated settings: budget=<n> raises the step cap (2000000 by default, at most 200000000) for a protector whose dispatch starts after a long bootstrap; strict faults on the first read of an import or of memory the loader would fill, where by default it reads zero and goes on; reg=<value> presets a register, such as the VM's context pointer the entry does not build",
     ),
     (
         "borer://unpack/{address}",
@@ -4435,6 +4435,14 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
         "Classes with a registered wire id whose name contains the filter, each with its named fields and the handlers testing for the id (200 a page)",
     ),
     (
+        "borer://map/{namespace}",
+        "One namespace's classes, each with its role, parent, methods and instance (5000 rows at most)",
+    ),
+    (
+        "borer://ports/{filter}",
+        "The messages ports accept and their handlers, for the components or messages whose name contains the filter (5000 rows at most)",
+    ),
+    (
         "borer://attrs/{filter}",
         "Registered attributes whose name or code contains the filter (200 a page); one exact match lists every function reading or writing it with the definition global",
     ),
@@ -4486,7 +4494,8 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
     ),
     (
         "borer://schema/{function}",
-        "The record a deserializer reads off its stream (fields, widths, nesting,                      repeats), for a function by address or name, or the reading virtual of a class",
+        "The record a deserializer reads off its stream (fields, widths, nesting, \
+                     repeats), for a function by address or name, or the reading virtual of a class",
     ),
     (
         "borer://schemas/{slot}",
@@ -4558,6 +4567,23 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
                      everything once into the index on first use; 200 matching lines at most",
     ),
 ];
+
+/// The `# more:` line of `binary_info`: every resource template by name,
+/// from [`RESOURCE_TEMPLATES`] itself.
+///
+/// The line was written by hand and named 14 of 45 templates, so an agent
+/// reading it never learned of the rest.
+fn template_names() -> String {
+    let names: Vec<&str> = RESOURCE_TEMPLATES
+        .iter()
+        .map(|&(uri, _)| resource_name(uri))
+        .collect();
+    format!(
+        "{} templated resources read by URI through resources/read or the query tool, each described by resources/templates/list: {}",
+        names.len(),
+        names.join(", ")
+    )
+}
 
 /// The name a resource is listed under: the first segment of its path,
 /// `vslot` for `borer://vslot/{slot}`.
@@ -5452,6 +5478,58 @@ mod tests {
             )))),
             pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
             ..super::BorerServer::default()
+        }
+    }
+
+    /// The resource documentation says what the resources do.
+    ///
+    /// Every template the dispatcher answers is listed, `binary_info`
+    /// names every template, no description carries a run of spaces from a
+    /// broken line, and `emulate` and `devirt` describe every setting they
+    /// read, `trace=` as the last steps it keeps.
+    ///
+    /// # Panics
+    ///
+    /// When a template is unlisted or unnamed, or a description misleads.
+    #[test]
+    fn the_resource_docs_say_what_the_resources_do() {
+        let info = raw_server().binary_info().expect("info");
+        let more = info
+            .lines()
+            .find_map(|l| l.strip_prefix("# more: "))
+            .expect("a more line");
+        for &(uri, _) in super::RESOURCE_TEMPLATES {
+            let name = super::resource_name(uri);
+            assert!(more.split([' ', ',']).any(|w| w == name), "{name}: {more}");
+        }
+        for uri in ["borer://map/{namespace}", "borer://ports/{filter}"] {
+            assert!(
+                super::RESOURCE_TEMPLATES.iter().any(|&(u, _)| u == uri),
+                "{uri} is answered but not listed"
+            );
+        }
+        for &(uri, text) in super::RESOURCES.iter().chain(super::RESOURCE_TEMPLATES) {
+            assert!(!text.contains("  "), "{uri}: {text}");
+        }
+        let described = |uri: &str| {
+            super::RESOURCE_TEMPLATES
+                .iter()
+                .find(|&&(u, _)| u == uri)
+                .map(|&(_, text)| text)
+                .expect("listed")
+        };
+        let emulate = described("borer://emulate/{address}");
+        assert!(
+            emulate.contains("each of the last n instructions"),
+            "{emulate}"
+        );
+        assert!(
+            emulate.contains("origin=") && emulate.contains("profile="),
+            "{emulate}"
+        );
+        let devirt = described("borer://devirt/{address}");
+        for setting in ["budget=", "strict", "reg="] {
+            assert!(devirt.contains(setting), "{setting}: {devirt}");
         }
     }
 
