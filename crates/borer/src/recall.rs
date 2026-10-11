@@ -440,6 +440,36 @@ mod tests {
         Tag::parse(digits).expect("the tag line reads back")
     }
 
+    /// A long mermaid graph carries its tag as a `%%` comment, so the
+    /// whole answer still parses as a diagram; other answers keep `#`.
+    ///
+    /// # Panics
+    ///
+    /// When a graph's tag line is not a mermaid comment.
+    #[test]
+    fn a_mermaid_answer_carries_its_tag_as_a_comment() {
+        let mut r = Recall::default();
+        let graph: String = std::iter::once("graph TD\n".to_owned())
+            .chain((0..60).map(|i| format!("  n{i}[\"sub_{i:x}\"]\n")))
+            .collect();
+        let sent = r.answer("g", None, AGAIN, graph);
+        let last = sent.lines().last().unwrap_or_default();
+        assert!(last.starts_with("%% since="), "{sent}");
+        let capped = format!(
+            "%% max_nodes 200 capped at 100\n{}",
+            "graph TD\n".repeat(60)
+        );
+        assert!(
+            r.answer("h", None, AGAIN, capped)
+                .lines()
+                .last()
+                .unwrap_or_default()
+                .starts_with("%% since=")
+        );
+        let table = "# rows\n".repeat(100);
+        assert!(tag_line(&r.answer("t", None, AGAIN, table)) != Tag::of(""));
+    }
+
     /// A long answer goes out whole with its tag to every request passing
     /// no tag, however often the session sent it before.
     ///
