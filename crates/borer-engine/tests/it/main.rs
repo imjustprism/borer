@@ -1,7 +1,8 @@
 //! The engine's integration tests as one binary: every file here is a
 //! module, so the engine is linked once for all of them instead of once
 //! per file. `dogfood` and `bench` stay binaries of their own, since the
-//! gate and the benchmark run them by name.
+//! gate and the benchmark run them by name, and so does `hostile`, whose
+//! counting allocator measures a process's whole heap.
 #[path = "../common/mod.rs"]
 mod common;
 #[path = "../common/decompiled.rs"]
@@ -21,7 +22,6 @@ mod engine;
 mod families;
 mod groundtruth;
 mod hashing;
-mod hostile;
 mod lsda;
 mod macho;
 mod protection;
