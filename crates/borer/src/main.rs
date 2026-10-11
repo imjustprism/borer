@@ -5540,6 +5540,47 @@ mod tests {
         );
     }
 
+    /// `set_type` refuses a type with more pointers than the language
+    /// holds, on a dry run too, rather than building a chain of boxes whose
+    /// spelling and drop overflowed the stack and took the server down.
+    ///
+    /// # Panics
+    ///
+    /// When a deep type is accepted or the refusal does not say why.
+    #[test]
+    fn set_type_refuses_a_type_too_deep_to_walk() {
+        use super::{Parameters, SetTypeParams};
+        use borer_engine::program::{Arch, Program, Section};
+        let data = Section::mapped(".data", 0x2000, 0, 0x100, true, false);
+        let program = Program::raw(vec![0; 0x100], Arch::X86_64, 0, None, vec![data]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let stars = format!("u8 {}", "*".repeat(20_000));
+        for (name, address) in [(Some("Stars".to_owned()), None), (None, Some("0x2000"))] {
+            let refused = server
+                .set_type(Parameters(SetTypeParams {
+                    name,
+                    fields: None,
+                    values: None,
+                    size: None,
+                    address: address.map(str::to_owned),
+                    r#type: Some(stars.clone()),
+                    dry_run: None,
+                }))
+                .expect_err("a type of twenty thousand pointers was accepted");
+            assert!(
+                refused.message.contains("stacks 20000 pointers"),
+                "{}",
+                refused.message
+            );
+        }
+    }
+
     /// The `script` tool runs inline code and applies only on request.
     ///
     /// Its `query` calls are answered from the resources, `borer://script`

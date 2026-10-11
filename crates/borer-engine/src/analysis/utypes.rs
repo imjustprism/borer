@@ -63,6 +63,15 @@ const SCALARS: [(&str, u64); 11] = [
     ("char", 1),
 ];
 
+/// Most pointers one type stacks over its base word.
+///
+/// A [`TypeExpr`] is a chain of boxes, one per pointer, and spelling,
+/// hashing, comparing and dropping one walk the chain by recursion; a cap
+/// where a type enters (from a tool's text or a project file) keeps every
+/// one of those walks shallow. Sixteen is the depth the debug-information
+/// reader follows a chain to, and far past any pointer a program declares.
+pub const PTR_DEPTH_MAX: usize = 16;
+
 /// Tells whether `text` is an identifier a name may take: a letter or `_`
 /// first, then letters, digits or `_`.
 ///
@@ -80,7 +89,8 @@ pub(crate) fn is_ident(text: &str) -> bool {
 /// One scalar (`u32`, `f64`, `char`), one user type name (`Player`), or any
 /// of those under pointers: `Player *`, `Player*`, `Player **`, `ptr Player`
 /// and `ptr ptr u8` all parse. Two bases (`u32 u64`), a stray `*`, an empty
-/// text and a word that is not an identifier are refused.
+/// text, a word that is not an identifier and more than [`PTR_DEPTH_MAX`]
+/// pointers are refused.
 ///
 /// # Arguments
 ///
@@ -92,8 +102,9 @@ pub(crate) fn is_ident(text: &str) -> bool {
 ///
 /// # Errors
 ///
-/// When the text is empty or is not a type the language spells; the message
-/// names the offending word so the caller can retry.
+/// When the text is empty, is not a type the language spells, or stacks
+/// more pointers than [`PTR_DEPTH_MAX`]; the message names the offending
+/// word so the caller can retry.
 pub fn parse_type(text: &str) -> anyhow::Result<TypeExpr> {
     let mut bases: Vec<&str> = Vec::new();
     let mut stars: usize = 0;
@@ -122,6 +133,13 @@ pub fn parse_type(text: &str) -> anyhow::Result<TypeExpr> {
             crate::text::quoted(text)
         ));
     };
+    let depth = stars.saturating_add(ptrs);
+    if depth > PTR_DEPTH_MAX {
+        return Err(anyhow::anyhow!(
+            "the type stacks {depth} pointers over {}; {PTR_DEPTH_MAX} is the most",
+            crate::text::quoted(base)
+        ));
+    }
     let ty = match SCALARS.iter().find(|(word, _)| base == *word) {
         Some((word, _)) => scalar(word),
         None => {
@@ -134,7 +152,7 @@ pub fn parse_type(text: &str) -> anyhow::Result<TypeExpr> {
             TypeExpr::Named(base.to_owned())
         }
     };
-    Ok((0..stars + ptrs).fold(ty, |t, _| TypeExpr::Ptr(Box::new(t))))
+    Ok((0..depth).fold(ty, |t, _| TypeExpr::Ptr(Box::new(t))))
 }
 
 /// The scalar a word of the language spells.
@@ -750,10 +768,11 @@ pub fn named_enum<'t>(
 
 /// Checks a whole overlay's types and applications.
 ///
-/// Every name a type or an application references must be defined, and no
-/// chain of aliases may loop; a project file is edited by hand and passed
-/// around, so this is where garbage in it is refused rather than silently
-/// dropping a rendering.
+/// Every name a type or an application references must be defined, no
+/// chain of aliases may loop, and no type may stack more pointers than
+/// [`PTR_DEPTH_MAX`]; a project file is edited by hand and passed around,
+/// so this is where garbage in it is refused rather than silently dropping
+/// a rendering.
 ///
 /// # Arguments
 ///
@@ -762,8 +781,8 @@ pub fn named_enum<'t>(
 ///
 /// # Errors
 ///
-/// When a reference is undefined or a chain loops; the message names the
-/// type and the name that failed.
+/// When a reference is undefined, a chain loops or a type is too deep; the
+/// message names the type and the name that failed.
 pub fn validate(
     types: &BTreeMap<String, UserType>,
     applied: &BTreeMap<u64, TypeExpr>,
@@ -790,6 +809,7 @@ pub fn validate(
                             crate::text::quoted(&f.name)
                         ));
                     }
+                    check_depth(&f.ty, &format!("field {} at {off:#x}", f.name))?;
                     if width_of(types, &f.ty, 8).is_none() {
                         return Err(anyhow::anyhow!(
                             "field {} at {off:#x} has type {}, which resolves to no size",
@@ -843,6 +863,7 @@ pub fn validate(
                 }
             }
             UserType::Alias(inner) => {
+                check_depth(inner, &format!("typedef {name}"))?;
                 if width_of(types, inner, 8).is_none() {
                     return Err(anyhow::anyhow!(
                         "typedef {name} is {}, which resolves to no size",
@@ -853,12 +874,40 @@ pub fn validate(
         }
     }
     for (addr, ty) in applied {
+        check_depth(ty, &format!("the type applied at {addr:#x}"))?;
         if width_of(types, ty, 8).is_none() {
             return Err(anyhow::anyhow!(
                 "the type applied at {addr:#x}, {}, resolves to no size",
                 ty.spell()
             ));
         }
+    }
+    Ok(())
+}
+
+/// Refuses a type that stacks more pointers than [`PTR_DEPTH_MAX`], the
+/// cap [`parse_type`] holds a tool's text to, so a hand-edited project
+/// cannot state a deeper type than a tool call can.
+///
+/// # Arguments
+///
+/// * `ty` - The type.
+/// * `what` - What the type is of, for the message (`typedef PS`).
+///
+/// # Errors
+///
+/// When the type is deeper than the cap; the message names `what`.
+fn check_depth(ty: &TypeExpr, what: &str) -> anyhow::Result<()> {
+    let mut depth = 0usize;
+    let mut current = ty;
+    while let TypeExpr::Ptr(inner) = current {
+        depth += 1;
+        current = inner;
+    }
+    if depth > PTR_DEPTH_MAX {
+        return Err(anyhow::anyhow!(
+            "{what} stacks {depth} pointers; {PTR_DEPTH_MAX} is the most"
+        ));
     }
     Ok(())
 }
@@ -986,6 +1035,43 @@ mod tests {
         for bad in ["", "u32 u64", "* Player", "not-a-type!", "u32 * extra"] {
             assert!(parse_type(bad).is_err(), "{bad} parsed");
         }
+    }
+
+    /// A type deeper than [`super::PTR_DEPTH_MAX`] pointers is refused where
+    /// it enters, from a tool's text and from a project's types alike.
+    ///
+    /// Twenty thousand stars once parsed into a chain of boxes whose
+    /// recursive spelling and drop overflowed the stack, even on a dry run.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_type_deeper_than_the_cap_is_refused() {
+        let max = super::PTR_DEPTH_MAX;
+        let deepest = format!("u8 {}", "*".repeat(max));
+        assert_eq!(
+            parse_type(&deepest).map(|t| t.spell()).ok(),
+            Some(deepest.clone())
+        );
+        let err = parse_type(&format!("u8 {}", "*".repeat(20_000)))
+            .expect_err("twenty thousand pointers parsed");
+        assert!(
+            err.to_string().contains(&format!(
+                "stacks 20000 pointers over 'u8'; {max} is the most"
+            )),
+            "{err}"
+        );
+        assert!(parse_type(&format!("{}u8", "ptr ".repeat(max + 1))).is_err());
+        assert!(parse_type(&format!("u8 {}", "* ".repeat(max + 1))).is_err());
+        let deep = (0..=max).fold(TypeExpr::U8, |t, _| TypeExpr::Ptr(Box::new(t)));
+        let mut types = BTreeMap::new();
+        types.insert("Deep".to_owned(), super::UserType::Alias(deep.clone()));
+        let err = validate(&types, &BTreeMap::new()).expect_err("a deep typedef validated");
+        assert!(err.to_string().contains("typedef Deep stacks"), "{err}");
+        let mut applied = BTreeMap::new();
+        applied.insert(0x3000, deep);
+        assert!(validate(&BTreeMap::new(), &applied).is_err());
     }
 
     /// A struct builds with its fields by offset and its size covering
