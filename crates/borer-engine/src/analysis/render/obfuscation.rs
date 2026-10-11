@@ -69,6 +69,8 @@ pub fn flattening_tsv(
 ) -> Result<String, String> {
     /// Cases listed when describing one dispatcher.
     const CASES_MAX: usize = 256;
+    /// Dispatchers listed when describing them all.
+    const DISPATCHERS_MAX: usize = 400;
     /// Steps of the recovered order shown before the rest are counted.
     const ORDER_MAX: usize = 64;
     let filter = filter.trim();
@@ -122,7 +124,7 @@ pub fn flattening_tsv(
             plural(found.len())
         );
         out.push_str("# dispatch      cases  return  function\n");
-        for d in &found {
+        for d in found.iter().take(DISPATCHERS_MAX) {
             let _ = writeln!(
                 out,
                 "{:<#14x} {:<6} {:<7} {}",
@@ -132,6 +134,12 @@ pub fn flattening_tsv(
                 short_name(a, o, d.entry)
             );
         }
+        more_line(
+            &mut out,
+            found.len(),
+            DISPATCHERS_MAX,
+            "dispatchers not listed",
+        );
         return Ok(out);
     };
     let &Dispatcher {
@@ -418,6 +426,12 @@ pub fn vm_dispatch_tsv(
                 name_of(a, o, d.entry)
             );
         }
+        more_line(
+            &mut out,
+            found.len(),
+            VM_HANDLERS_MAX,
+            "dispatch loops not listed",
+        );
         return Ok(out);
     };
     let d = found

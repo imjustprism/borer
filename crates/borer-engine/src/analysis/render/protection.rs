@@ -724,12 +724,14 @@ pub fn dynamic_imports_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         for d in dlls.iter().take(DYNIMPORTS_MAX) {
             let _ = writeln!(out, "  {d}");
         }
+        elided_line(&mut out, dlls.len(), DYNIMPORTS_MAX, " libraries");
     }
     if !apis.is_empty() {
         out.push_str("# resolved functions:\n");
         for f in apis.iter().take(DYNIMPORTS_MAX) {
             let _ = writeln!(out, "  {f}");
         }
+        elided_line(&mut out, apis.len(), DYNIMPORTS_MAX, " functions");
     }
     out
 }
@@ -764,7 +766,7 @@ pub(super) fn collect_resolved(
                 if library_name(&name) {
                     dlls.insert(name);
                 }
-            } else {
+            } else if function_name(&name) {
                 apis.insert(name);
             }
         }
@@ -827,6 +829,54 @@ pub(super) fn library_name(name: &str) -> bool {
             && name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+}
+
+/// Whether a string looks like an exported function's name, not the bytes
+/// of a structure the decompiler printed as a literal.
+///
+/// `LdrGetProcedureAddress` takes the name as an `ANSI_STRING`, whose
+/// first four bytes are two lengths: `0x25, 0x26` printed as `L"%&"` and
+/// was listed as a function resolved at run time. An export name is an
+/// identifier, a C++ decorated one included (`?`, `@`, `$`).
+///
+/// # Arguments
+///
+/// * `name` - The literal's text.
+pub(super) fn function_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || matches!(c, '_' | '?' | '@'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '?' | '@' | '$' | '.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::collect_resolved;
+
+    /// A structure the decompiler printed as a wide literal is not taken
+    /// for the name of a function resolved at run time, and a decorated
+    /// name is.
+    ///
+    /// # Panics
+    ///
+    /// When the structure's bytes are listed, or the name is not.
+    #[test]
+    fn a_structure_printed_as_a_literal_names_no_function() {
+        let (mut apis, mut dlls) = (BTreeSet::new(), BTreeSet::new());
+        for (line, api) in [
+            (
+                "s = LdrGetProcedureAddress(h, L\"%&\", 0, &p);",
+                "LdrGetProcedureAddress",
+            ),
+            ("p = GetProcAddress(h, \"?Run@@YAXXZ\");", "GetProcAddress"),
+        ] {
+            collect_resolved(line, api, false, &mut apis, &mut dlls);
+        }
+        assert_eq!(apis.into_iter().collect::<Vec<_>>(), ["?Run@@YAXXZ"]);
+        assert!(dlls.is_empty());
+    }
 }
 
 /// Section names a packer or protector writes, and what it is called.
