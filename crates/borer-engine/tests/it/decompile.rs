@@ -135,6 +135,39 @@ fn a_32_bit_load_feeding_a_64_bit_subtract_widens() {
     );
 }
 
+/// A logical shift or an unsigned division of a sign-extended value works
+/// on its unsigned bits, which C's `>>` and `/` on the `int64_t` the
+/// extension spells would not.
+///
+/// # Panics
+///
+/// When the text shifts or divides the signed value.
+#[test]
+fn an_unsigned_operation_on_a_sign_extension_casts_it_unsigned() {
+    let shift = [
+        0x48, 0x63, 0xc1, // ASM: movsxd rax,ecx
+        0x48, 0xd1, 0xe8, // ASM: shr rax,1
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&shift), 0x1_4000_1000);
+    assert!(
+        text.contains("(uint64_t)") && text.contains(">> 1"),
+        "{text}"
+    );
+    let division = [
+        0x48, 0x63, 0xc1, // ASM: movsxd rax,ecx
+        0x48, 0x63, 0xca, // ASM: movsxd rcx,edx
+        0x33, 0xd2, // ASM: xor edx,edx
+        0x48, 0xf7, 0xf1, // ASM: div rcx
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&division), 0x1_4000_1000);
+    assert!(
+        text.contains("(uint64_t)") && text.contains(" / "),
+        "{text}"
+    );
+}
+
 /// A 32-bit load widened into a 64-bit range ladder keeps its unsigned
 /// reading.
 ///

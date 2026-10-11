@@ -3009,7 +3009,10 @@ impl Expr {
     /// upper bits are read and the text's shift or product would lose them
     /// ([`computes_narrow`]), its left operand is cast to `uint64_t`; under
     /// a mask to 32 bits or fewer they are not read, and the text stays as
-    /// it is.
+    /// it is. C's `>>`, `/` and `%` on a signed operand are the signed
+    /// ones, so a logical shift, quotient or remainder whose operand's text
+    /// is signed ([`signed_text`]) casts it to the unsigned word first:
+    /// `(uint64_t)(int64_t)(int32_t)x >> 1`.
     ///
     /// # Arguments
     ///
@@ -3143,10 +3146,14 @@ impl Expr {
                     }
                     _ => false,
                 };
-                let ls = if lp < p || other_family(l) {
-                    format!("({ls})")
-                } else {
-                    ls
+                let wrapped = lp < p || other_family(l);
+                let ls = if wrapped { format!("({ls})") } else { ls };
+                let cast = |ty: &str, ls: String| {
+                    if wrapped || lp >= UNARY {
+                        format!("({ty}){ls}")
+                    } else {
+                        format!("({ty})({ls})")
+                    }
                 };
                 let rs = if rp < p || (rp == p && !op.commutative()) || other_family(r) {
                     format!("({rs})")
@@ -3180,6 +3187,16 @@ impl Expr {
                             p,
                         )
                     }
+                    Op::Shr | Op::Div | Op::Rem
+                        if signed_text(l) || (*op != Op::Shr && signed_text(r)) =>
+                    {
+                        let rs = match **r {
+                            Expr::Const(c) if *op != Op::Shr => c.to_string(),
+                            _ => rs,
+                        };
+                        let unsigned = if n.word == 4 { "uint32_t" } else { "uint64_t" };
+                        (format!("{} {} {rs}", cast(unsigned, ls), op.sym()), p)
+                    }
                     Op::Div | Op::Rem if matches!(**r, Expr::Const(_)) => {
                         let rs = match **r {
                             Expr::Const(c) => c.to_string(),
@@ -3195,7 +3212,7 @@ impl Expr {
                         let ls = if ls.starts_with("(int64_t)") {
                             ls
                         } else {
-                            format!("(int64_t){ls}")
+                            cast("int64_t", ls)
                         };
                         (format!("{ls} >> {rs}"), p)
                     }
@@ -3884,6 +3901,34 @@ fn int_difference(e: &Expr) -> bool {
         _ => false,
     };
     differs && (c_narrow(e) == Some(Narrow::Int) || widened_difference(e))
+}
+
+/// Tells whether the text of an expression is of a signed C type and may
+/// be negative, so that C's `>>`, `/` and `%` on it are the signed ones.
+///
+/// A sign extension renders as `(int64_t)(intN_t)x`, an arithmetic shift
+/// and a signed quotient or remainder as an `int64_t` operation, and an
+/// `int` difference goes below zero ([`int_difference`]); a sum, product
+/// or bitwise operation keeps the sign when its other operand is no
+/// unsigned 64-bit value, by the usual conversions.
+///
+/// # Arguments
+///
+/// * `e` - The expression.
+fn signed_text(e: &Expr) -> bool {
+    match e {
+        Expr::Sext(..) | Expr::Bin(Op::Sar | Op::SDiv | Op::SRem, ..) => true,
+        Expr::Bin(op @ (Op::Add | Op::Sub | Op::Mul | Op::And | Op::Or | Op::Xor), l, r) => {
+            let keeps = |e: &Expr| match e {
+                Expr::Const(c) => !op.hex_operands() || *c >> 63 == 0,
+                other => signed_text(other) || c_narrow(other).is_some(),
+            };
+            (signed_text(l) && keeps(r)) || (signed_text(r) && keeps(l)) || int_difference(e)
+        }
+        Expr::Bin(Op::Shl, l, _) => signed_text(l),
+        Expr::Un(UnOp::Neg | UnOp::Not, x) => signed_text(x) || int_difference(e),
+        _ => false,
+    }
 }
 
 /// Tells whether a difference widens a value a 32-bit write zero-extended.
