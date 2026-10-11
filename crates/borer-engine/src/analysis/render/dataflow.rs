@@ -683,6 +683,12 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
         if p.entry == Some(va) {
             how.push(String::from("the image's entry point"));
         }
+        if p.symbols
+            .iter()
+            .any(|s| s.addr == va && s.kind == SymbolKind::Export)
+        {
+            how.push(String::from("an export"));
+        }
         if p.function_ranges.iter().any(|(s, _)| *s == va) {
             how.push(String::from("an entry in the exception or symbol table"));
         }

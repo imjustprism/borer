@@ -2266,6 +2266,21 @@ fn why_names_an_import_slot() {
     }
 }
 
+/// An export is a reason a function was discovered, and `why` gives it:
+/// the image's exports seed discovery, and the answer left them out.
+#[test]
+fn why_counts_an_export_among_the_discovery_reasons() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let out = borer_engine::analysis::render::why_tsv(&p, &a, &Overlay::default(), "0x1040")
+        .expect("the export resolves");
+    let how = out
+        .lines()
+        .find(|l| l.starts_with("# discovered by: "))
+        .unwrap_or_default();
+    assert!(how.contains("an export"), "{out}");
+}
+
 /// A summary lists the imports its function calls straight through the slot.
 #[test]
 fn summary_callees_name_a_directly_called_import() {
