@@ -4584,6 +4584,27 @@ fn function_summary_carries_effects() {
     assert!(s.contains("effects:  writes a1+8"), "{s}");
 }
 
+/// The function summary shows the comment the overlay holds at the entry,
+/// and only that one: a comment inside the body stays with its
+/// instruction.
+///
+/// `LK` gets a comment at its entry, then one at its second instruction.
+#[test]
+fn function_summary_shows_the_entry_comment() {
+    use borer_engine::analysis::render::function_summary;
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.comments.insert(0x4791, "inside the body".to_owned());
+    let s = function_summary(&p, &a, &o, 0x4790).expect("summary");
+    assert!(!s.contains("comment:"), "{s}");
+    o.comments.insert(0x4790, "? drops a reference".to_owned());
+    let s = function_summary(&p, &a, &o, 0x4790).expect("summary");
+    let range = s.lines().position(|l| l.starts_with("range:"));
+    let comment = s.lines().position(|l| l == "comment:  ? drops a reference");
+    assert_eq!(comment, range.map(|r| r + 1), "{s}");
+}
+
 /// Overrides of one virtual method share its return verdict.
 ///
 /// `CB` reads the result of `BF1`, so slot 1 of `class_2970` returns a

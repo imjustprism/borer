@@ -150,7 +150,9 @@ fn capped(items: &[String], sep: &str) -> String {
 /// same function right after pays only for the naming and the polish.
 ///
 /// Cheaper than a decompile and usually enough to decide whether to read one:
-/// identity, size and shape (loops, jump tables), what it writes, what it
+/// identity, the comment the overlay holds at the entry (what an agent
+/// concluded about the function last time), size and shape (loops, jump
+/// tables), what it writes, what it
 /// asserts about its inputs, the source file it came from, the constants
 /// its callers pass it, the wire format when it serializes, callers and
 /// callees by name, and the strings and data the function touches. A
@@ -163,12 +165,13 @@ fn capped(items: &[String], sep: &str) -> String {
 ///
 /// * `p` - The loaded image, read for string literals and section names.
 /// * `a` - The analysis.
-/// * `o` - User names.
+/// * `o` - User names and comments.
 /// * `entry` - The function's entry address.
 ///
 /// # Returns
 ///
-/// The `name/entry/range/shape/callers/callees/strings/data` block, or
+/// The `name/entry/range/shape/callers/callees/strings/data` block, with a
+/// `comment:` line after the range when the overlay comments the entry, or
 /// `None` when no function starts at `entry`.
 pub fn function_summary(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<String> {
     a.derived
@@ -375,8 +378,12 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
     } else {
         String::new()
     };
+    let comment = o
+        .comments
+        .get(&f.entry)
+        .map_or(String::new(), |c| format!("comment:  {c}\n"));
     Some(format!(
-        "name:     {}\nentry:    {:#x}\nrange:    {:#x}..{:#x} ({} bytes)\n{declared}{hints}{class}{source}{returns}{throws}{scattered}{clones}{effects}{asserts}{passed}{wire}shape:    {} blocks, {} instrs{}{}\ncallers:  {} [{}]\ncallees:  {} [{}]\n{virt}strings:  {}\ndata:     {}\n",
+        "name:     {}\nentry:    {:#x}\nrange:    {:#x}..{:#x} ({} bytes)\n{comment}{declared}{hints}{class}{source}{returns}{throws}{scattered}{clones}{effects}{asserts}{passed}{wire}shape:    {} blocks, {} instrs{}{}\ncallers:  {} [{}]\ncallees:  {} [{}]\n{virt}strings:  {}\ndata:     {}\n",
         name_of(a, o, f.entry),
         f.entry,
         f.start,
