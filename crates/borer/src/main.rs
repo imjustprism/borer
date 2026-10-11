@@ -5680,4 +5680,51 @@ mod tests {
             assert!(refused.message.contains("device"), "{}", refused.message);
         }
     }
+
+    /// `borer://anchors` refuses a manifest past its size or anchor cap by
+    /// name and lists at most a page of rows, saying so; a 200 MB manifest
+    /// ran for minutes and every row came back.
+    ///
+    /// # Panics
+    ///
+    /// When an oversized manifest is judged or the rows are not capped.
+    #[test]
+    fn the_anchors_resource_caps_its_manifest_and_rows() {
+        let server = tiny_server();
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let write = |name: &str, lines: usize| {
+            let path = dir.join(format!("borer-anchors-{id}-{name}.txt"));
+            std::fs::write(&path, "function nosuch 0x1\n".repeat(lines))
+                .expect("the manifest is written");
+            path
+        };
+        let huge = write("huge", 60_000);
+        let many = write("many", 5001);
+        let page = write("page", 600);
+        let answers: Vec<_> = [&huge, &many, &page]
+            .iter()
+            .map(|p| server.anchors_text(&p.to_string_lossy()))
+            .collect();
+        for p in [&huge, &many, &page] {
+            std::fs::remove_file(p).expect("the manifest is removed");
+        }
+        let [huge, many, page] = <[_; 3]>::try_from(answers).expect("three answers");
+        let huge = huge.expect_err("past the size cap");
+        assert!(huge.message.contains("bytes, past the"), "{}", huge.message);
+        let many = many.expect_err("past the anchor cap");
+        assert!(
+            many.message.contains("has 5001 anchors, past the 5000"),
+            "{}",
+            many.message
+        );
+        let page = page.expect("a page of rows");
+        assert!(
+            page.starts_with(
+                "# 600 anchors: 0 held, 0 moved, 0 changed, 600 gone, showing 500 of 600"
+            ),
+            "{page}"
+        );
+        assert_eq!(page.lines().count(), 502, "{page}");
+    }
 }

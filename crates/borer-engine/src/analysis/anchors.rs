@@ -363,12 +363,17 @@ pub fn verify(
 /// Renders the verdicts as a `#`-headed table, and says whether every
 /// anchor held.
 ///
+/// The counts cover every anchor. Past `limit` rows the held ones are left
+/// out first, since a held anchor says only what the manifest already
+/// says, and the header says how many rows it shows.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
 /// * `analysis` - Discovery results.
 /// * `overlay` - Names in force.
 /// * `anchors` - The manifest's anchors.
+/// * `limit` - Most rows listed.
 ///
 /// # Returns
 ///
@@ -379,6 +384,7 @@ pub fn verify_tsv(
     analysis: &Analysis,
     overlay: &Overlay,
     anchors: &[Anchor],
+    limit: usize,
 ) -> (String, bool) {
     let judged = verify(program, analysis, overlay, anchors);
     let held = judged.iter().filter(|(_, v)| *v == Verdict::Held).count();
@@ -391,12 +397,34 @@ pub fn verify_tsv(
         .filter(|(_, v)| matches!(v, Verdict::Changed(_)))
         .count();
     let gone = judged.len() - held - moved - changed;
+    let mut held_room = limit.saturating_sub(judged.len() - held);
+    let shown: Vec<&(Anchor, Verdict)> = judged
+        .iter()
+        .filter(|(_, v)| {
+            if *v != Verdict::Held {
+                return true;
+            }
+            let room = held_room > 0;
+            held_room = held_room.saturating_sub(1);
+            room
+        })
+        .take(limit)
+        .collect();
     let mut out = format!(
-        "# {} anchors: {held} held, {moved} moved, {changed} changed, {gone} gone\n",
+        "# {} anchors: {held} held, {moved} moved, {changed} changed, {gone} gone",
         judged.len()
     );
+    if shown.len() < judged.len() {
+        let _ = write!(
+            out,
+            ", showing {} of {}, held ones left out first",
+            shown.len(),
+            judged.len()
+        );
+    }
+    out.push('\n');
     out.push_str("kind\tsubject\tmember\texpected\tfound\tverdict\n");
-    for (a, v) in &judged {
+    for (a, v) in shown {
         let expected = if a.kind.is_text() {
             a.layout.clone()
         } else {
@@ -466,7 +494,7 @@ mod tests {
             "function sub_1000 0x1000\nfunction sub_1000 0x1010\nfunction nosuch 0x1\nencode No::Class u32@+0x20\n",
         )
         .expect("parses");
-        let (text, all_held) = verify_tsv(&p, &a, &Overlay::default(), &anchors);
+        let (text, all_held) = verify_tsv(&p, &a, &Overlay::default(), &anchors, 100);
         assert!(!all_held);
         assert!(
             text.starts_with("# 4 anchors: 1 held, 1 moved, 0 changed, 2 gone\n"),
@@ -484,5 +512,34 @@ mod tests {
             text.contains("function\tnosuch\t\t0x1\t-\tgone\n"),
             "{text}"
         );
+    }
+
+    /// Past the row limit the table says how many rows it shows and leaves
+    /// the held anchors out first, while the counts still cover every
+    /// anchor; it listed every row of any manifest.
+    ///
+    /// # Panics
+    ///
+    /// When the cap is not stated, a held row beats one that moved, or a
+    /// row past the limit is listed.
+    #[test]
+    fn the_verdict_table_is_capped_held_rows_first() {
+        let p = Program::raw_x64(&[0xc3]);
+        let a = Analysis::compute(&p);
+        let anchors = parse_manifest(
+            "function sub_1000 0x1000\nfunction sub_1000 0x1010\nfunction nosuch 0x1\nfunction gone2 0x2\n",
+        )
+        .expect("parses");
+        let (text, _) = verify_tsv(&p, &a, &Overlay::default(), &anchors, 2);
+        assert!(
+            text.starts_with(
+                "# 4 anchors: 1 held, 1 moved, 0 changed, 2 gone, showing 2 of 4, held ones left out first\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), 4, "{text}");
+        assert!(text.contains("\t0x1010\t0x1000\tmoved\n"), "{text}");
+        assert!(text.contains("\tnosuch\t"), "{text}");
+        assert!(!text.contains("\theld\n"), "{text}");
     }
 }

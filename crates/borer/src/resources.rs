@@ -1183,6 +1183,11 @@ impl BorerServer {
 
     /// Judges every anchor in a manifest file against the loaded binary.
     ///
+    /// A manifest pins hundreds of facts, and each is derived again by a
+    /// walk of the analysis, so one read takes a manifest of at most
+    /// `MANIFEST_MAX` bytes and `ANCHORS_MAX` anchors and lists at most
+    /// `PAGE` rows; the CLI's `anchors` judges a bigger one.
+    ///
     /// # Arguments
     ///
     /// * `path` - The manifest, as the URI carried it (decoded once at
@@ -1190,13 +1195,35 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, the file cannot be read, or a line is not
-    /// an anchor.
+    /// When no binary is loaded, the file cannot be read or is too big, a
+    /// line is not an anchor, or there are too many anchors.
     pub(crate) fn anchors_text(&self, path: &str) -> Result<String, ErrorData> {
+        /// Largest manifest one read takes, in bytes.
+        const MANIFEST_MAX: u64 = 1 << 20;
+        /// Most anchors one read judges.
+        const ANCHORS_MAX: usize = 5000;
+        /// Most rows one read lists.
+        const PAGE: usize = 500;
+        let short = borer_engine::text::short_path(path);
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.is_file()
+            && meta.len() > MANIFEST_MAX
+        {
+            return Err(err_params(format!(
+                "{short} is {} bytes, past the {MANIFEST_MAX} one read takes; split the manifest or judge it with the CLI's anchors",
+                meta.len()
+            )));
+        }
         let text = read_spec_file(path, "a manifest file")?;
         let anchors = borer_engine::analysis::anchors::parse_manifest(&text).map_err(err_params)?;
+        if anchors.len() > ANCHORS_MAX {
+            return Err(err_params(format!(
+                "{short} has {} anchors, past the {ANCHORS_MAX} one read judges; split the manifest or judge it with the CLI's anchors",
+                anchors.len()
+            )));
+        }
         self.with_analysis(|p, a, o| {
-            let (table, _) = borer_engine::analysis::anchors::verify_tsv(p, a, o, &anchors);
+            let (table, _) = borer_engine::analysis::anchors::verify_tsv(p, a, o, &anchors, PAGE);
             Ok(table)
         })
     }

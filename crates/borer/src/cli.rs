@@ -1529,7 +1529,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let text = std::fs::read_to_string(manifest)
                 .with_context(|| format!("reading {}", short_path(manifest)))?;
             let pinned = anchors::parse_manifest(&text).map_err(anyhow::Error::msg)?;
-            let (table, all_held) = anchors::verify_tsv(&s.program, &a, &s.overlay, &pinned);
+            let (table, all_held) =
+                anchors::verify_tsv(&s.program, &a, &s.overlay, &pinned, pinned.len());
             print!("{table}");
             if !all_held {
                 bail!("anchors moved, changed or gone; see the table above");
