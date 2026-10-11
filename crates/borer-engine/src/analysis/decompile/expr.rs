@@ -2761,7 +2761,8 @@ impl Names<'_> {
     /// machine reads `mov edx, [rsp+4]` over a byte slot and the three
     /// bytes above it: `*(uint32_t*)&local_c`, not `local_c`. A stack
     /// parameter read narrower than the word is its low bytes, `(uint16_t)
-    /// a1`.
+    /// a1`, and an access to bytes past its first reaches them through its
+    /// address, `*(uint16_t*)((uint8_t*)&a2 + 2)`.
     ///
     /// # Arguments
     ///
@@ -2772,6 +2773,23 @@ impl Names<'_> {
     ///
     /// `(text, precedence)`.
     pub(super) fn slot_at(&self, off: i64, ty: Ty) -> (String, u8) {
+        // INVARIANT: an access inside a stack parameter's word, past its
+        // first byte, reaches those bytes of the parameter: `movzx ecx,
+        // word [ebp+0xe]` reads the high half of `_finite`'s double, which
+        // read as a variable of its own was never set.
+        let past = off - self.first_stack;
+        let within = past.rem_euclid(self.word.max(1));
+        if past > 0
+            && within > 0
+            && within + i64::from(ty.bits() / 8) <= self.word
+            && let Some(i) = self.stack_param(off - within)
+        {
+            let param = self.key(Key::Param(i));
+            return (
+                format!("*({}*)((uint8_t*)&{param} + {within})", ty.name()),
+                UNARY,
+            );
+        }
         let name = self.slot(off);
         // INVARIANT: a stack parameter is a value of the machine's word; a
         // narrower read of it is its low bytes (`mov cx, [ebp+8]`).

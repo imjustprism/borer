@@ -492,6 +492,30 @@ fn an_internal_thiscall_callee_takes_ecx() {
     assert!(text.contains("sub_401040(5)"), "{text}");
 }
 
+/// A read inside a stack parameter's word reaches those bytes of the
+/// parameter.
+///
+/// msvcrt's `_finite` is `push ebp; mov ebp,esp; movzx ecx,word [ebp+0xe];
+/// xor eax,eax; and ecx,0x7ff0; cmp ecx,0x7ff0; setne al; pop ebp; ret`:
+/// the word is the top of its double's high half, the second stack word.
+/// The text read it as `arg_6`, a variable of its own nothing set.
+#[test]
+fn a_read_inside_a_stack_parameter_reads_the_parameter() {
+    let text = dc(&[
+        0x55, // ASM: push ebp
+        0x8b, 0xec, // ASM: mov ebp, esp
+        0x0f, 0xb7, 0x4d, 0x0e, // ASM: movzx ecx, word [ebp+0xe]
+        0x33, 0xc0, // ASM: xor eax, eax
+        0x81, 0xe1, 0xf0, 0x7f, 0x00, 0x00, // ASM: and ecx, 0x7ff0
+        0x81, 0xf9, 0xf0, 0x7f, 0x00, 0x00, // ASM: cmp ecx, 0x7ff0
+        0x0f, 0x95, 0xc0, // ASM: setne al
+        0x5d, // ASM: pop ebp
+        0xc3, // ASM: ret
+    ]);
+    assert!(text.contains("*(uint16_t*)((uint8_t*)&a2 + 2)"), "{text}");
+    assert!(!text.contains("arg_6"), "{text}");
+}
+
 /// An instruction the lifter does not model keeps the `asm` marker on its
 /// comment, so a count of unmodeled instructions counts it: the port read
 /// `in al,dx; ret`.
