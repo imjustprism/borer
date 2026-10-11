@@ -63,14 +63,16 @@ The capability groups are a first guess from imports, not a verdict:
 ```text
 $ borer decompile C:/Windows/System32/whoami.exe 0x140002528
 // sub_140002528 @ 0x140002528: 317 instructions, 20 blocks
-// checked vs binary: statements as emitted, 20/20 blocks x3 states; unchecked: later text passes
+// checked vs binary: statements as emitted, 20/20 blocks x3 states; unchecked: C spelling, later text passes
 ...
 ```
 
 That second line is the part worth knowing about. borer runs each block of
 the function in its own emulator from three seeded states and compares the
 machine state with what the pseudo-C says happened. Here all 20 blocks
-agreed. When some don't, or can't be checked, the header says which and
+agreed. It checks what each statement computes, not how its C is spelled
+or what the later text passes rewrote, and the header says so. When some
+blocks don't agree, or can't be checked, the header says which and
 why. The body itself is rough: on optimized code like this you get a long
 list of stack locals and globals before the first real statement.
 

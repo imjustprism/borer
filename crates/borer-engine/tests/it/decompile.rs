@@ -1656,13 +1656,13 @@ fn scalar_float_blocks_are_checked_not_counted() {
     for entry in [0x1300, 0x1320] {
         assert_eq!(
             header(entry),
-            "// checked vs binary: statements as emitted, 1/1 blocks x3 states; unchecked: later text passes",
+            "// checked vs binary: statements as emitted, 1/1 blocks x3 states; unchecked: C spelling, later text passes",
             "{entry:#x}"
         );
     }
     assert_eq!(
         header(0x13f0),
-        "// checked vs binary: statements as emitted, 2/2 blocks x3 states; unchecked: later text passes",
+        "// checked vs binary: statements as emitted, 2/2 blocks x3 states; unchecked: C spelling, later text passes",
         "FR"
     );
     let fl3 = header(0x1340);

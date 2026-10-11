@@ -497,11 +497,13 @@ impl TextCheck {
     /// lifter emitted them were replayed from [`TRIALS`] states per block
     /// (one random, the others drawn from the block's own constants and
     /// their neighbors) and agreed with the emulator; the blocks left out
-    /// are counted by why, and the text passes after the emission are not
-    /// checked, which the line says too. One line on every answer costs
-    /// tokens, so it is terse: `// checked vs binary: statements as
+    /// are counted by why. What a statement computes is checked, not how its
+    /// C is spelled (a cast that makes C's `>>` the signed one, a constant
+    /// written as a literal), and the text passes after the emission are not
+    /// checked either, which the line says too. One line on every answer
+    /// costs tokens, so it is terse: `// checked vs binary: statements as
     /// emitted, 41/44 blocks x3 states; unchecked: 2 float/vector,
-    /// 1 over budget, later text passes`.
+    /// 1 over budget, C spelling, later text passes`.
     #[must_use]
     pub fn header(&self) -> String {
         let mut out = format!(
@@ -511,7 +513,7 @@ impl TextCheck {
         for (label, n) in &self.unchecked {
             let _ = write!(out, "{n} {label}, ");
         }
-        out.push_str("later text passes");
+        out.push_str("C spelling, later text passes");
         out
     }
 }
@@ -4731,7 +4733,7 @@ mod tests {
         let header = checked_header(&p, &a, &o, 0x1000).expect("checked");
         assert_eq!(
             header,
-            "// checked vs binary: statements as emitted, 3/3 blocks x3 states; unchecked: later text passes"
+            "// checked vs binary: statements as emitted, 3/3 blocks x3 states; unchecked: C spelling, later text passes"
         );
         let text = decompile_named(&p, &a, &o, 0x1000).expect("text");
         assert!(!text.contains("checked vs binary"), "{text}");
@@ -4839,7 +4841,7 @@ mod tests {
         );
         assert_eq!(
             TextCheck::of(&r).header(),
-            "// checked vs binary: statements as emitted, 1/3 blocks x3 states; unchecked: 2 over budget, later text passes"
+            "// checked vs binary: statements as emitted, 1/3 blocks x3 states; unchecked: 2 over budget, C spelling, later text passes"
         );
     }
 
