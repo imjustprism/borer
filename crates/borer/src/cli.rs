@@ -890,6 +890,19 @@ fn packs_report(program: &Program, named: &Packs, auto: bool) -> String {
     out
 }
 
+/// The refusal of a command given no binary: what it needs, then its own
+/// usage lines rather than every command's.
+///
+/// # Arguments
+///
+/// * `word` - The command word.
+fn needs_a_binary(word: &str) -> String {
+    format!(
+        "{word} needs a binary path\n{}",
+        command_usage(USAGE, word).unwrap_or_default()
+    )
+}
+
 /// Reads the named packs and loads the binary the command line names.
 ///
 /// # Arguments
@@ -913,7 +926,7 @@ fn open(
     let named = read_packs(pack_files)?;
     let path = args
         .get(1)
-        .with_context(|| format!("missing binary path\n{USAGE}"))?;
+        .with_context(|| needs_a_binary(args.first().map_or("", String::as_str)))?;
     let symsrv = crate::symsrv::cache_dir().filter(|_| apply_pdb);
     let program =
         Program::load_with_symsrv(std::path::Path::new(path), apply_pdb, symsrv.as_deref())
@@ -1074,11 +1087,41 @@ fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
 
 // ---- running ----
 
+/// The refusal of a word that names no command: an option borer does not
+/// know when it opens with a dash, else a command.
+///
+/// The whole usage text came with it, 4 KB of it, and a word in the
+/// command's place was first loaded as the binary, so `--bogus info x`
+/// said the file `info` was not there.
+///
+/// # Arguments
+///
+/// * `word` - The word.
+fn unknown_word(word: &str) -> String {
+    if word.starts_with('-') {
+        format!(
+            "unknown option {}; the options are --pack <file>, --no-auto-packs and --no-pdb",
+            quoted(word)
+        )
+    } else {
+        format!(
+            "unknown command {}; `borer help` lists the commands",
+            quoted(word)
+        )
+    }
+}
+
+/// The words beginning `--` that queries read themselves, beside the
+/// options [`split_pack_args`] takes off the line; `setup` and `doctor`
+/// refuse any other word with their own message.
+const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
+
 /// Runs one CLI command against a binary, sharing the engine with the server.
 ///
-/// The pack tools run on pack files alone; every other command opens the
-/// binary first, so a word that is no command is reported after a missing
-/// path or a file that does not load.
+/// The command word is read first, so a word that is no command or an
+/// option borer does not know is refused before any binary is loaded;
+/// then the pack tools run on pack files alone, and every other command
+/// opens the binary.
 ///
 /// # Arguments
 ///
@@ -1086,22 +1129,28 @@ fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
 ///
 /// # Errors
 ///
-/// For an unknown command, a missing or unloadable binary, a bad address, or
-/// an engine failure; the message carries the usage text where it helps.
+/// For an unknown command, option or help topic, a missing or unloadable
+/// binary, a bad address, or an engine failure; the message carries the
+/// command's usage lines where it helps.
 pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
     let (owned, pack_files, auto, pdb) = split_pack_args(args)?;
     let args = owned.as_slice();
     let Some(word) = args.first() else {
-        eprintln!("{USAGE}");
-        bail!("an option was given but no command");
+        bail!("an option was given but no command; `borer help` lists the commands");
     };
     if matches!(word.as_str(), "help" | "--help" | "-h") {
-        match args.get(1).and_then(|c| command_usage(USAGE, c)) {
-            Some(text) => println!("{text}"),
+        match args.get(1) {
+            Some(topic) => {
+                println!(
+                    "{}",
+                    command_usage(USAGE, topic).with_context(|| unknown_word(topic))?
+                );
+            }
             None => println!("{USAGE}"),
         }
         return Ok(());
     }
+    let command = Command::parse(word).with_context(|| unknown_word(word))?;
     if args.iter().skip(1).any(|a| a == "--help" || a == "-h") {
         println!(
             "{}",
@@ -1109,9 +1158,17 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    match Command::parse(word) {
-        Some(Command::PackKeys) => print!("{}", borer_engine::pack::keys_tsv()),
-        Some(Command::Pack) => {
+    if let Command::Query(q) = command
+        && let Some(flag) = args.iter().enumerate().skip(1).find_map(|(i, a)| {
+            let handed_on = q == Query::Script && i > 2;
+            (a.starts_with("--") && !COMMAND_FLAGS.contains(&a.as_str()) && !handed_on).then_some(a)
+        })
+    {
+        bail!("{}", unknown_word(flag));
+    }
+    match command {
+        Command::PackKeys => print!("{}", borer_engine::pack::keys_tsv()),
+        Command::Pack => {
             let file = arg(args, 1, "pack needs a file")?;
             let text = std::fs::read_to_string(file)
                 .with_context(|| format!("reading {}", short_path(file)))?;
@@ -1119,12 +1176,12 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
                 Pack::parse(&text, &short_path(file)).map_err(anyhow::Error::msg)?;
             print!("{}", pack_report(&pack, &warnings));
         }
-        Some(Command::Sigmake) => sigmake(args)?,
-        Some(Command::Packs) => {
+        Command::Sigmake => sigmake(args)?,
+        Command::Packs => {
             let (named, program) = open(args, &pack_files, pdb)?;
             print!("{}", packs_report(&program, &named, auto));
         }
-        Some(Command::Doctor) => {
+        Command::Doctor => {
             let offline = match args.get(1).map(String::as_str) {
                 None => false,
                 Some("offline") => true,
@@ -1132,7 +1189,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
             };
             print!("{}", crate::doctor::doctor(offline)?);
         }
-        Some(Command::Setup) => {
+        Command::Setup => {
             let apply = match args.get(1).map(String::as_str) {
                 None => false,
                 Some("--apply") => true,
@@ -1144,13 +1201,8 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
                 bail!("{failed} client(s) could not be set up; their lines say why");
             }
         }
-        Some(Command::FetchPdb) => {
-            let path = args.get(1).with_context(|| {
-                format!(
-                    "missing binary path
-{USAGE}"
-                )
-            })?;
+        Command::FetchPdb => {
+            let path = args.get(1).with_context(|| needs_a_binary(word))?;
             let program = Program::load_with(std::path::Path::new(path), false)
                 .with_context(|| format!("loading {}", short_path(path)))?;
             let record = program.pdb_record.as_ref().with_context(|| {
@@ -1172,13 +1224,9 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
                 .map_err(|e| anyhow!("{e}"))?;
             println!("{said}");
         }
-        Some(Command::Query(q)) => {
+        Command::Query(q) => {
             let (named, program) = open(args, &pack_files, pdb)?;
             query(q, args, &Session::fit(program, &named, auto))?;
-        }
-        None => {
-            open(args, &pack_files, pdb)?;
-            bail!("unknown command '{word}'\n{USAGE}");
         }
     }
     Ok(())

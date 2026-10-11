@@ -252,6 +252,51 @@ fn cli_unknown_command_fails() {
     assert!(out.contains("usage:") || out.is_empty());
 }
 
+/// An unknown command, option or help topic is refused by name with a
+/// non-zero exit.
+///
+/// Each is refused before any file is loaded and without the whole usage
+/// text; a command given no binary says so with its own usage lines.
+/// `--bogus info x` loaded `info` as the binary, `bogus` alone said a
+/// binary path was missing, and `help nosuch` printed every command and
+/// exited 0.
+///
+/// # Panics
+///
+/// When a refusal succeeds, words its reason otherwise, or carries the
+/// whole usage text.
+#[test]
+fn cli_refuses_unknown_words_precisely() {
+    for (args, reason) in [
+        (
+            &["--bogus", "info", "x"][..],
+            "unknown option '--bogus'; the options are --pack <file>, --no-auto-packs and --no-pdb",
+        ),
+        (&["info", "--bogus", "x"][..], "unknown option '--bogus'"),
+        (
+            &["bogus", "x"][..],
+            "unknown command 'bogus'; `borer help` lists the commands",
+        ),
+        (&["bogus"][..], "unknown command 'bogus'"),
+        (&["help", "nosuch"][..], "unknown command 'nosuch'"),
+        (&["nosuch", "--help"][..], "unknown command 'nosuch'"),
+        (
+            &["info"][..],
+            "info needs a binary path\nusage:\n  info <binary>",
+        ),
+        (&[][..], "an option was given but no command"),
+    ] {
+        let (ok, out) = run_all(args);
+        assert!(!ok, "{args:?} succeeded: {out}");
+        assert!(out.contains(reason), "{args:?}: {out}");
+        assert!(!out.contains("loading"), "{args:?} loaded a file: {out}");
+        assert!(
+            !out.contains("functions <binary>"),
+            "{args:?} printed the whole usage: {out}"
+        );
+    }
+}
+
 /// `--help` lists the commands and mentions the MCP server mode.
 #[test]
 fn cli_help_lists_commands() {
