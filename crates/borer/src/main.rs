@@ -499,10 +499,11 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// Internal error when no binary is loaded or its architecture has no
-    /// code analysis.
+    /// Invalid params when no binary is loaded or its architecture has no
+    /// code analysis, as [`Self::with_analysis`] refuses both: the request
+    /// came too early or asked the wrong file, and the server did not fail.
     fn analysis(&self) -> Result<Arc<Analysis>, ErrorData> {
-        self.ensure_analysis().map_err(err_internal)
+        self.ensure_analysis().map_err(err_params)
     }
 
     /// Runs `f` against the loaded program.
@@ -5238,6 +5239,43 @@ mod tests {
         assert_eq!(refused.code, sibling.code);
         assert_eq!(refused.message, sibling.message);
         assert_eq!(refused.message, super::NO_BINARY);
+    }
+
+    /// Every resource read before a binary is loaded is refused as invalid
+    /// params, the code every tool answers then.
+    ///
+    /// `qt`, `map`, `classes`, `singletons` and `enums` answered an
+    /// internal error, which reads as the server failing rather than the
+    /// request coming too early.
+    ///
+    /// # Panics
+    ///
+    /// When a resource answers an internal error, or one of the five does
+    /// not refuse with [`super::NO_BINARY`].
+    #[test]
+    fn every_resource_refuses_without_a_binary_as_invalid_params() {
+        let server = super::BorerServer::default();
+        for uri in ["qt", "map", "classes", "singletons", "enums"] {
+            let refused = server
+                .resource_text(&format!("borer://{uri}"))
+                .expect_err("nothing is loaded");
+            assert_eq!(refused.code, super::ErrorCode::INVALID_PARAMS, "{uri}");
+            assert_eq!(refused.message, super::NO_BINARY, "{uri}");
+        }
+        let uris = super::RESOURCES
+            .iter()
+            .chain(super::RESOURCE_TEMPLATES)
+            .map(|&(uri, _)| {
+                uri.split('/')
+                    .map(|part| if part.starts_with('{') { "x" } else { part })
+                    .collect::<Vec<_>>()
+                    .join("/")
+            });
+        for uri in uris {
+            if let Err(e) = server.resource_text(&uri) {
+                assert_ne!(e.code, super::ErrorCode::INTERNAL_ERROR, "{uri}: {e:?}");
+            }
+        }
     }
 
     /// Asking for nothing returns a function that fits the page exactly as
