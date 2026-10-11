@@ -2435,7 +2435,7 @@ mod tests {
         let whole = decompiled(&line("decompile", &["0x1000"]), &short).expect("decompiles");
         assert!(!whole.contains("// showing"), "{whole}");
         let bad =
-            decompiled(&line("decompile", &["0x1000", "skelton"]), &s).expect_err("not a detail");
+            decompiled(&line("decompile", &["0x1000", "outline"]), &s).expect_err("not a detail");
         assert!(bad.to_string().starts_with("unknown detail"), "{bad}");
         let bad =
             decompiled(&line("decompile", &["0x1000", "full", "x"]), &s).expect_err("not a number");
