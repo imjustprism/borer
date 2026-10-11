@@ -126,15 +126,103 @@ struct BorerServer {
 struct LiveSession {
     /// The process, open with read rights only.
     process: borer_live::Process,
-    /// Where the loaded binary's image sits in the process; `None` when the
-    /// binary is not one of its modules (addresses are then taken as live).
-    rebase: Option<Rebase>,
+    /// Where the loaded binary's image sits in the process, or why it is
+    /// not mapped there; unmapped, addresses are taken as live.
+    rebase: Result<Rebase, String>,
     /// Watches by name, so a diff names the fields that changed.
     snapshots: std::collections::BTreeMap<String, Watch>,
     /// The main thread's block of the image's thread-local storage, where
     /// the singletons the analysis placed at TLS offsets live; `None` when
     /// the image has no TLS or the block could not be read.
     tls_block: Option<u64>,
+    /// The pointer width live reads use, in bytes: the mapped image's, else
+    /// the process's own.
+    word: usize,
+}
+
+impl LiveSession {
+    /// Opens a session on a process with nothing mapped onto it yet.
+    ///
+    /// # Arguments
+    ///
+    /// * `process` - The process, open for reading.
+    fn new(process: borer_live::Process) -> LiveSession {
+        LiveSession {
+            word: process.pointer_width(),
+            process,
+            rebase: Err(NO_BINARY.to_owned()),
+            snapshots: std::collections::BTreeMap::new(),
+            tls_block: None,
+        }
+    }
+
+    /// Maps a binary onto the process.
+    ///
+    /// It finds the image among the modules by its headers
+    /// ([`Rebase::of`]), the main thread's block of its thread-local
+    /// storage, and the pointer width reads use. Called on attach and again
+    /// on every `load_binary`, so the mapping is always the loaded binary's.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded binary, `None` when nothing is loaded.
+    ///
+    /// # Returns
+    ///
+    /// The lines saying where the image sits, or why it is not mapped.
+    fn map(&mut self, program: Option<&Program>) -> String {
+        self.tls_block = None;
+        self.word = self.process.pointer_width();
+        let Some(p) = program else {
+            self.rebase = Err(NO_BINARY.to_owned());
+            return "no binary loaded: load_binary the process's executable so live memory is named and typed\n".to_owned();
+        };
+        let file = p
+            .path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        self.rebase = Rebase::of(p, &self.process);
+        let r = match &self.rebase {
+            Ok(r) => *r,
+            Err(why) => {
+                return format!(
+                    "the loaded binary {file} is not mapped onto this process: {why}; static addresses and names do not apply, numbers are taken as live addresses, and reads use the process's {}-byte pointers\n",
+                    self.word
+                );
+            }
+        };
+        self.word = word_size(Some(p));
+        let mut out = format!(
+            "image {file} at live {:#x} = static {:#x} ({:#x} bytes), its headers match the file: static addresses and names rebase automatically\n",
+            r.live_base,
+            r.static_base,
+            r.static_end - r.static_base
+        );
+        self.tls_block = p.headers.tls_index.and_then(|index| {
+            let tid = self.process.threads().ok()?.into_iter().next()?;
+            let teb = self.process.teb_of(tid).ok()?;
+            live::tls_block(&self.process, &r, index, teb)
+        });
+        if let Some(b) = self.tls_block {
+            let _ = writeln!(
+                out,
+                "thread-local storage: the main thread's block is at {b:#x}; a class's singleton there reads as Class::instance"
+            );
+        }
+        out
+    }
+
+    /// The mapping, for a tool that types memory by the loaded binary.
+    ///
+    /// # Errors
+    ///
+    /// When the loaded binary is not mapped onto the process, saying why.
+    fn mapped(&self) -> Result<Rebase, String> {
+        self.rebase
+            .as_ref()
+            .copied()
+            .map_err(|why| format!("{NOT_A_MODULE}: {why}"))
+    }
 }
 
 /// Bytes of the process kept under a watch name.
@@ -587,6 +675,9 @@ impl BorerServer {
     ///
     /// A session's names must not leak into another image, so the overlay
     /// is cleared; a session that has not saved them is told what it lost.
+    /// An attached process is mapped onto the new binary
+    /// ([`LiveSession::map`]), so live addresses never rebase by a binary
+    /// no longer loaded.
     ///
     /// # Arguments
     ///
@@ -657,6 +748,15 @@ impl BorerServer {
         }
         *write_lock(&self.pdb_applied) = apply_pdb;
         *write_lock(&self.entry_file_offset) = entry_file_offset;
+        if let Some(s) = lock(&self.live).as_mut() {
+            let mapped = s.map(Some(&program));
+            let _ = write!(
+                summary,
+                "live {} (pid {}): {mapped}",
+                s.process.name(),
+                s.process.pid()
+            );
+        }
         *write_lock(&self.program_packs) = packs;
         *write_lock(&self.program) = Some(Arc::new(program));
         *write_lock(&self.analysis) = None;
@@ -1216,13 +1316,19 @@ impl BorerServer {
                 .checked_add(*off)
                 .ok_or_else(|| format!("{text}: the TLS offset overflows"));
         }
-        let va = match program {
-            Some(p) => self.addr(&p, text)?,
-            None => parse_addr(text).ok_or_else(|| {
-                format!("{text} is not an address, and no binary is loaded to look the name up in")
-            })?,
+        if let Some(va) = parse_addr(text) {
+            return Ok(session.rebase.as_ref().map_or(va, |r| r.live_of(va)));
+        }
+        let Some(p) = program else {
+            return Err(format!(
+                "{text} is not an address, and no binary is loaded to look the name up in"
+            ));
         };
-        Ok(session.rebase.map_or(va, |r| r.live_of(va)))
+        let va = self.addr(&p, text)?;
+        let r = session.rebase.as_ref().map_err(|why| {
+            format!("{text} is {va:#x} in the loaded binary, which is not mapped onto the process ({why}), so it has no live address")
+        })?;
+        Ok(r.live_of(va))
     }
 
     /// Follows a singleton's slot to its object: `Class::instance` names
@@ -1284,38 +1390,14 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let proc = borer_live::Process::attach(&process).map_err(err_internal)?;
         let modules = proc.modules();
-        let program = self.loaded();
-        let rebase = program.as_ref().and_then(|p| Rebase::of(p, &modules));
         let mut out = format!(
             "attached to {} (pid {}), {} modules, read-only\n",
             proc.name(),
             proc.pid(),
             modules.len()
         );
-        match (&program, rebase) {
-            (Some(p), Some(r)) => {
-                let _ = writeln!(
-                    out,
-                    "image {} at live {:#x} = static {:#x} ({:#x} bytes): static addresses and names rebase automatically",
-                    p.path
-                        .file_name()
-                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-                    r.live_base,
-                    r.static_base,
-                    r.static_end - r.static_base
-                );
-            }
-            (Some(p), None) => {
-                let _ = writeln!(
-                    out,
-                    "the loaded binary {} is not a module of this process: addresses are taken as live and nothing is named",
-                    p.path.display()
-                );
-            }
-            (None, _) => {
-                out.push_str("no binary loaded: load_binary the process's executable so live memory is named and typed\n");
-            }
-        }
+        let mut session = LiveSession::new(proc);
+        out.push_str(&session.map(self.loaded().as_deref()));
         out.push_str("modules:\n");
         for m in modules.iter().take(16) {
             let _ = writeln!(out, "  {:#x} {:>10} {}", m.base, m.size, m.name);
@@ -1323,27 +1405,8 @@ impl BorerServer {
         if modules.len() > 16 {
             let _ = writeln!(out, "  ... {} more", modules.len() - 16);
         }
-        let tls_block = match (&program, rebase) {
-            (Some(p), Some(r)) => p.headers.tls_index.and_then(|index| {
-                let tid = proc.threads().ok()?.into_iter().next()?;
-                let teb = proc.teb_of(tid).ok()?;
-                live::tls_block(&proc, &r, index, teb)
-            }),
-            _ => None,
-        };
-        if let Some(b) = tls_block {
-            let _ = writeln!(
-                out,
-                "thread-local storage: the main thread's block is at {b:#x}; a class's singleton there reads as Class::instance"
-            );
-        }
         out.push_str("next: live_object(address or singleton name), live_instances(class), live_read(address, kind), live_watch(name, address)\n");
-        *lock(&self.live) = Some(LiveSession {
-            process: proc,
-            rebase,
-            snapshots: std::collections::BTreeMap::new(),
-            tls_block,
-        });
+        *lock(&self.live) = Some(session);
         Ok(out)
     }
 
@@ -1405,14 +1468,17 @@ impl BorerServer {
         let count = count_param(count, 1, 256, "count")?;
         let n = count.n;
         let program = self.loaded();
-        let analysis = program.as_ref().and_then(|_| self.ensure_analysis().ok());
         let overlay = self.overlay();
         self.with_live(|s| {
             let va = self.live_addr(s, &address)?;
-            let word = word_size(program.as_deref());
+            let word = s.word;
             let values = live::read_values(&s.process, va, kind, n, word)?;
-            let origin = s
-                .rebase
+            let rebase = s.rebase.as_ref().ok().copied();
+            let analysis = match (rebase, values.iter().any(|v| v.target.is_some())) {
+                (Some(_), true) => self.ensure_analysis().ok(),
+                _ => None,
+            };
+            let origin = rebase
                 .and_then(|r| r.to_static(va))
                 .map_or_else(String::new, |st| format!(" (= static {st:#x})"));
             let mut out = format!(
@@ -1425,7 +1491,7 @@ impl BorerServer {
                 }
             );
             for v in &values {
-                let note = match (v.target, &program, &analysis, s.rebase) {
+                let note = match (v.target, &program, &analysis, rebase) {
                     (Some(t), Some(p), Some(a), Some(r)) => r
                         .describe(p, a, &overlay, t)
                         .map(|d| format!("  -> {d}"))
@@ -1468,9 +1534,9 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         self.with_analysis(|p, a, o| {
             self.with_live(|s| {
-                let r = s.rebase.ok_or(NOT_A_MODULE)?;
+                let r = s.mapped()?;
                 let va = self.live_addr(s, &address)?;
-                let (va, via) = Self::through_singleton(s, &address, va, word_size(Some(p)))?;
+                let (va, via) = Self::through_singleton(s, &address, va, s.word)?;
                 let text = live::object(&s.process, p, a, o, &r, va, class.as_deref())?;
                 Ok(format!("{via}{text}"))
             })
@@ -1502,11 +1568,10 @@ impl BorerServer {
         Parameters(LiveInstancesParams { class, limit }): Parameters<LiveInstancesParams>,
     ) -> Result<String, ErrorData> {
         let limit = count_param(limit, 64, 4096, "limit")?;
-        self.with_analysis(|p, a, _| {
+        self.with_analysis(|_, a, _| {
             self.with_live(|s| {
-                let r = s.rebase.ok_or(NOT_A_MODULE)?;
-                let scan =
-                    live::instances(&s.process, &r, a, &class, word_size(Some(p)), limit.n)?;
+                let r = s.mapped()?;
+                let scan = live::instances(&s.process, &r, a, &class, s.word, limit.n)?;
                 let mut out = format!(
                     "# {} instance(s) of {class}{}; {} MiB read over {} regions\n",
                     scan.hits.len(),
@@ -1562,8 +1627,8 @@ impl BorerServer {
         let program = self.loaded();
         let analysis = program.as_ref().and_then(|_| self.ensure_analysis().ok());
         let overlay = self.overlay();
-        let word = word_size(program.as_deref());
         self.with_live(|s| {
+            let word = s.word;
             let Some(address) = address else {
                 let Watch {
                     snapshot: snap,
@@ -1593,7 +1658,7 @@ impl BorerServer {
             };
             let va = self.live_addr(s, &address)?;
             let class = class.or_else(|| {
-                let (r, a) = (s.rebase?, analysis.as_ref()?);
+                let (r, a) = (s.rebase.as_ref().ok()?, analysis.as_ref()?);
                 live::class_at(&s.process, &r, a, va, word)
             });
             let size = match (&class, &program, &analysis) {
@@ -6264,5 +6329,82 @@ mod tests {
             "{page}"
         );
         assert_eq!(page.lines().count(), 502, "{page}");
+    }
+
+    /// Loads a file into a server, without its PDB, and returns the summary.
+    ///
+    /// # Panics
+    ///
+    /// When the file does not load.
+    #[cfg(windows)]
+    fn load_into(server: &super::BorerServer, path: &std::path::Path) -> String {
+        use super::{LoadBinaryParams, Parameters};
+        server
+            .load_binary(Parameters(LoadBinaryParams {
+                path: path.display().to_string(),
+                entry_file_offset: None,
+                pdb: Some(false),
+            }))
+            .expect("the file loads")
+    }
+
+    /// A process attached before `load_binary` is mapped onto the binary
+    /// the load brings.
+    ///
+    /// A static address then reads at its live place; a file that only
+    /// shares the module's name is another build, refused with what
+    /// differs and never mapped.
+    ///
+    /// # Panics
+    ///
+    /// When the load leaves the process unmapped, the read is not rebased,
+    /// or the impostor is mapped.
+    #[cfg(windows)]
+    #[test]
+    fn the_live_mapping_follows_load_binary_and_checks_headers() {
+        use super::{LiveAttachParams, LiveReadParams, Parameters};
+        let exe = std::env::current_exe().expect("the test binary has a path");
+        let server = super::BorerServer::default();
+        let attached = server
+            .live_attach(Parameters(LiveAttachParams {
+                process: std::process::id().to_string(),
+            }))
+            .expect("attach to self");
+        assert!(attached.contains("no binary loaded"), "{attached}");
+        let loaded = load_into(&server, &exe);
+        assert!(loaded.contains("its headers match the file"), "{loaded}");
+        let entry = server
+            .loaded()
+            .and_then(|p| p.entry)
+            .expect("the test binary has an entry");
+        let read = server
+            .live_read(Parameters(LiveReadParams {
+                address: format!("{entry:#x}"),
+                kind: Some(super::params::ReadKind::U8),
+                count: None,
+            }))
+            .expect("the entry is readable");
+        assert!(read.contains(&format!("(= static {entry:#x})")), "{read}");
+
+        let dir = std::env::temp_dir().join(format!("borer-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let impostor = dir.join(exe.file_name().expect("a file name"));
+        let mut bytes = std::fs::read(&exe).expect("read the test binary");
+        let pe = usize::try_from(u32::from_le_bytes(
+            bytes[0x3c..0x40].try_into().expect("four bytes"),
+        ))
+        .expect("fits");
+        bytes[pe + 8] ^= 0xff;
+        std::fs::write(&impostor, &bytes).expect("write the impostor");
+        let loaded = load_into(&server, &impostor);
+        std::fs::remove_dir_all(&dir).expect("remove the temp directory");
+        assert!(loaded.contains("is another build (timestamp"), "{loaded}");
+        assert!(
+            super::lock(&server.live)
+                .as_ref()
+                .is_some_and(|s| s.rebase.is_err()),
+            "the impostor is not mapped"
+        );
+        server.live_detach().expect("detach");
     }
 }

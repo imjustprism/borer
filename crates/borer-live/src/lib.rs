@@ -104,10 +104,10 @@ mod os {
         PAGE_WRITECOPY, VirtualQueryEx,
     };
     use windows_sys::Win32::System::Threading::{
-        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, MEMORY_PRIORITY_BELOW_NORMAL,
-        MEMORY_PRIORITY_INFORMATION, OpenProcess, OpenThread, PROCESS_QUERY_INFORMATION,
-        PROCESS_VM_READ, ProcessMemoryPriority, SetPriorityClass, SetProcessInformation,
-        THREAD_QUERY_INFORMATION,
+        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, IsWow64Process,
+        MEMORY_PRIORITY_BELOW_NORMAL, MEMORY_PRIORITY_INFORMATION, OpenProcess, OpenThread,
+        PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, ProcessMemoryPriority, SetPriorityClass,
+        SetProcessInformation, THREAD_QUERY_INFORMATION,
     };
 
     /// What `NtQueryInformationThread(ThreadBasicInformation)` fills: the
@@ -467,6 +467,22 @@ mod os {
             &self.name
         }
 
+        /// The process's pointer width in bytes: 4 for a 32-bit process
+        /// (one running under WOW64, or any process when borer itself is
+        /// 32-bit), 8 otherwise.
+        #[must_use]
+        pub fn pointer_width(&self) -> usize {
+            let mut wow64 = 0;
+            // SAFETY: `wow64` outlives the call and the handle is open with
+            // QUERY_INFORMATION, which IsWow64Process requires.
+            let ok = unsafe { IsWow64Process(self.handle.0, &mut wow64) } != 0;
+            if cfg!(target_pointer_width = "64") && !(ok && wow64 != 0) {
+                8
+            } else {
+                4
+            }
+        }
+
         /// The process's thread ids, in the order the system lists them
         /// (creation order, the main thread first, as a rule).
         ///
@@ -754,6 +770,12 @@ mod os {
             &self.name
         }
 
+        /// The process's pointer width in bytes, taken as borer's own.
+        #[must_use]
+        pub fn pointer_width(&self) -> usize {
+            size_of::<usize>()
+        }
+
         /// The process's thread ids.
         ///
         /// # Errors
@@ -938,6 +960,7 @@ mod tests {
     fn the_current_process_reads_itself() {
         let me = Process::attach(&std::process::id().to_string()).expect("attach to self");
         assert_eq!(me.pid(), std::process::id());
+        assert_eq!(me.pointer_width(), size_of::<usize>());
         let planted: Vec<u64> = vec![0x5a5a_1234_abcd_0001, 0, 0x5a5a_1234_abcd_0001];
         let at = planted.as_ptr() as usize as u64;
         let bytes = me.read(at, 24).expect("read own heap");

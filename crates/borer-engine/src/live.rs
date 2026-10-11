@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use crate::analysis::classes::class_layout;
 use crate::analysis::{Analysis, Overlay, name_of};
 use crate::memory::{Kind, Value, le_word, scalar_text};
-use crate::num::lo32;
+use crate::num::{lo16, lo32};
 use crate::program::Program;
 use crate::strings::cstr_at;
 
@@ -95,32 +95,176 @@ pub struct Rebase {
     pub live_base: u64,
 }
 
+/// The header fields that tell one build of a PE image from another.
+///
+/// The loader leaves them in memory as the file has them; the image base,
+/// which a relocated module's header no longer holds, is not one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PeStamp {
+    /// COFF `Machine`: `0x14c` for x86, `0x8664` for x64.
+    machine: u16,
+    /// COFF `TimeDateStamp`, the link time or a reproducible build's hash.
+    timestamp: u32,
+    /// Optional-header `Magic`: `0x10b` for a 32-bit image, `0x20b` for 64.
+    magic: u16,
+    /// Optional-header `AddressOfEntryPoint`, an RVA.
+    entry: u32,
+    /// Optional-header `SizeOfImage`, in bytes.
+    image_size: u32,
+    /// Optional-header `CheckSum`.
+    checksum: u32,
+}
+
+/// Bytes of a module's first page read for its headers.
+const HEADER_READ: usize = 0x1000;
+
+impl PeStamp {
+    /// Reads the stamp from the start of an image, the file's or a
+    /// module's in memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The image from its first byte.
+    ///
+    /// # Returns
+    ///
+    /// The stamp, or `None` when the bytes do not start with PE headers.
+    fn of(bytes: &[u8]) -> Option<PeStamp> {
+        let at = |off: usize, len: usize| bytes.get(off..off.checked_add(len)?);
+        let u16_at = |off: usize| at(off, 2).map(|b| lo16(le_word(b)));
+        let u32_at = |off: usize| at(off, 4).map(|b| lo32(le_word(b)));
+        if at(0, 2)? != b"MZ" {
+            return None;
+        }
+        let pe = usize::try_from(u32_at(0x3c)?).ok()?;
+        if at(pe, 4)? != b"PE\0\0" {
+            return None;
+        }
+        let coff = pe.checked_add(4)?;
+        let opt = coff.checked_add(20)?;
+        Some(PeStamp {
+            machine: u16_at(coff)?,
+            timestamp: u32_at(coff.checked_add(4)?)?,
+            magic: u16_at(opt)?,
+            entry: u32_at(opt.checked_add(16)?)?,
+            image_size: u32_at(opt.checked_add(56)?)?,
+            checksum: u32_at(opt.checked_add(64)?)?,
+        })
+    }
+
+    /// Says how a module's stamp differs from the file's: its bitness alone
+    /// when that differs, which makes every other field moot.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The file's stamp.
+    ///
+    /// # Returns
+    ///
+    /// The differences, comma separated; empty when there are none.
+    fn differences(&self, file: &PeStamp) -> String {
+        let bits = |magic: u16| if magic == 0x20b { "64-bit" } else { "32-bit" };
+        if self.magic != file.magic || self.machine != file.machine {
+            return format!(
+                "it is {} (machine {:#x}), the file {} (machine {:#x})",
+                bits(self.magic),
+                self.machine,
+                bits(file.magic),
+                file.machine
+            );
+        }
+        let mut out = Vec::new();
+        for (what, module, file) in [
+            ("timestamp", self.timestamp, file.timestamp),
+            ("image size", self.image_size, file.image_size),
+            ("checksum", self.checksum, file.checksum),
+            ("entry RVA", self.entry, file.entry),
+        ] {
+            if module != file {
+                out.push(format!("{what} {module:#x}, the file's {file:#x}"));
+            }
+        }
+        out.join(", ")
+    }
+}
+
 impl Rebase {
-    /// Finds the analysed image among a process's modules, by file name.
+    /// Finds the analysed image among a process's modules: one with the
+    /// image's file name whose headers in memory are the file's.
+    ///
+    /// A file name alone does not identify the image. A WOW64 process
+    /// holds a 64-bit and a 32-bit `ntdll.dll`, and another build or an
+    /// unrelated file can carry the same name; mapping one of those reads
+    /// every static address at the wrong place and every pointer at the
+    /// wrong width. So each module with the name is checked against the
+    /// file's machine, bitness, link timestamp, image size, checksum and
+    /// entry point, read from the module's first page in the process, and
+    /// only one that agrees on all of them is the image.
     ///
     /// # Arguments
     ///
     /// * `program` - The analysed image.
-    /// * `modules` - The process's modules.
+    /// * `mem` - The process, with its modules.
     ///
     /// # Returns
     ///
-    /// The mapping, or `None` when no module has the image's file name.
-    pub fn of(program: &Program, modules: &[Module]) -> Option<Rebase> {
-        let file = program.path.file_name()?.to_string_lossy().to_lowercase();
-        let module = modules.iter().find(|m| m.name.to_lowercase() == file)?;
-        let end = program
-            .sections
+    /// The mapping.
+    ///
+    /// # Errors
+    ///
+    /// When the file is not a PE image, no module has its file name, or
+    /// none of those that do has its headers; the message says what
+    /// differs in each.
+    pub fn of(program: &Program, mem: &dyn Memory) -> Result<Rebase, String> {
+        let file = program
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let want = PeStamp::of(&program.bytes).ok_or_else(|| {
+            format!("{file} is not a PE image, so no module can be checked to be it")
+        })?;
+        let modules = mem.modules();
+        let named: Vec<&Module> = modules
             .iter()
-            .map(|s| s.va.saturating_add(s.vsize))
-            .max()
-            .unwrap_or(program.image_base.saturating_add(module.size))
-            .max(program.image_base.saturating_add(module.size));
-        Some(Rebase {
-            static_base: program.image_base,
-            static_end: end,
-            live_base: module.base,
-        })
+            .filter(|m| m.name.eq_ignore_ascii_case(&file))
+            .collect();
+        if named.is_empty() {
+            return Err(format!("no module of the process is named {file}"));
+        }
+        let mut differs = Vec::with_capacity(named.len());
+        for module in named {
+            let found = mem
+                .read(module.base, HEADER_READ)
+                .and_then(|b| PeStamp::of(&b));
+            match found {
+                Some(stamp) if stamp == want => {
+                    let end = program
+                        .sections
+                        .iter()
+                        .map(|s| s.va.saturating_add(s.vsize))
+                        .max()
+                        .unwrap_or(program.image_base.saturating_add(module.size))
+                        .max(program.image_base.saturating_add(module.size));
+                    return Ok(Rebase {
+                        static_base: program.image_base,
+                        static_end: end,
+                        live_base: module.base,
+                    });
+                }
+                Some(stamp) => differs.push(format!(
+                    "{} at {:#x} is another build ({})",
+                    module.name,
+                    module.base,
+                    stamp.differences(&want)
+                )),
+                None => differs.push(format!(
+                    "{} at {:#x} has no readable PE headers",
+                    module.name, module.base
+                )),
+            }
+        }
+        Err(differs.join("; "))
     }
 
     /// Moves an address of the file into the process.
@@ -785,10 +929,23 @@ pub fn render_changes(
 mod tests {
     use super::*;
 
-    /// A process that is one buffer at one address.
+    /// A process that is one buffer at one address, with the modules it
+    /// says are loaded in it.
     struct Fake {
         base: u64,
         data: Vec<u8>,
+        modules: Vec<Module>,
+    }
+
+    impl Fake {
+        /// A process of one buffer and no modules.
+        fn new(base: u64, data: Vec<u8>) -> Fake {
+            Fake {
+                base,
+                data,
+                modules: Vec::new(),
+            }
+        }
     }
 
     impl Memory for Fake {
@@ -812,7 +969,7 @@ mod tests {
         }
 
         fn modules(&self) -> Vec<Module> {
-            Vec::new()
+            self.modules.clone()
         }
     }
 
@@ -825,7 +982,7 @@ mod tests {
         data[4..8].copy_from_slice(&1.5f32.to_bits().to_le_bytes());
         data[16..19].copy_from_slice(b"ab\0");
         data[20..23].copy_from_slice(b"cd\0");
-        let mem = Fake { base: 0x1000, data };
+        let mem = Fake::new(0x1000, data);
         let v = read_values(&mem, 0x1000, Kind::U32, 1, 8).unwrap();
         assert_eq!(v[0].text, "0x7");
         let v = read_values(&mem, 0x1004, Kind::F32, 1, 8).unwrap();
@@ -844,7 +1001,7 @@ mod tests {
         data[8..16].copy_from_slice(&0x1122_3344u64.to_le_bytes());
         data[40..48].copy_from_slice(&0x1122_3344u64.to_le_bytes());
         data[49..57].copy_from_slice(&0x1122_3344u64.to_le_bytes());
-        let mem = Fake { base: 0x2000, data };
+        let mem = Fake::new(0x2000, data);
         let scan = find_words(&mem, &[0x1122_3344], 8, 10);
         assert_eq!(scan.hits, vec![0x2008, 0x2028], "unaligned copy is no hit");
         assert!(!scan.truncated);
@@ -859,7 +1016,7 @@ mod tests {
     fn snapshots_diff_by_run() {
         let mut data = vec![0u8; 32];
         data[4..8].copy_from_slice(&100u32.to_le_bytes());
-        let mut mem = Fake { base: 0x3000, data };
+        let mut mem = Fake::new(0x3000, data);
         let snap = Snapshot::take(&mem, 0x3000, 32).unwrap();
         assert!(snap.diff(&mem).unwrap().is_empty());
         mem.data[4..8].copy_from_slice(&101u32.to_le_bytes());
@@ -891,5 +1048,77 @@ mod tests {
         assert_eq!(r.to_live(0x1_4010_0000), None);
         assert_eq!(r.live_of(0x7ff6_0000_1234), 0x7ff6_0000_1234);
         assert_eq!(r.live_of(0x1_4000_1234), 0x7ff6_0000_1234);
+    }
+
+    /// PE headers for a test image: `MZ`, the PE signature at `0x80`, the
+    /// COFF machine and timestamp, and the optional header's magic and
+    /// image size.
+    fn headers(machine: u16, magic: u16, timestamp: u32, image_size: u32) -> Vec<u8> {
+        let mut b = vec![0u8; 0x200];
+        b[..2].copy_from_slice(b"MZ");
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+        b[0x88..0x8c].copy_from_slice(&timestamp.to_le_bytes());
+        b[0x98..0x9a].copy_from_slice(&magic.to_le_bytes());
+        b[0xd0..0xd4].copy_from_slice(&image_size.to_le_bytes());
+        b
+    }
+
+    /// The image is the module whose headers in memory are the file's.
+    ///
+    /// Of three modules with its name, the 64-bit one and another build are
+    /// passed over, and a file no module agrees with is refused with what
+    /// differs in each.
+    #[test]
+    fn the_image_is_matched_by_its_headers_not_its_name() {
+        let file = headers(0x14c, 0x10b, 0x1234, 0x5000);
+        let mut program = Program::raw(
+            file.clone(),
+            crate::program::Arch::X86,
+            0x40_0000,
+            None,
+            Vec::new(),
+        );
+        program.path = std::path::PathBuf::from("C:/w/ntdll.dll");
+        let mut data = vec![0u8; 0x3000];
+        data[..0x200].copy_from_slice(&headers(0x8664, 0x20b, 0x9999, 0x8000));
+        data[0x1000..0x1200].copy_from_slice(&headers(0x14c, 0x10b, 0x7777, 0x5000));
+        data[0x2000..0x2200].copy_from_slice(&file);
+        let module = |base, size| Module {
+            name: "NTDLL.DLL".to_owned(),
+            path: String::new(),
+            base,
+            size,
+        };
+        let mut mem = Fake {
+            base: 0x10_0000,
+            data,
+            modules: vec![
+                module(0x10_0000, 0x8000),
+                module(0x10_1000, 0x5000),
+                module(0x10_2000, 0x5000),
+            ],
+        };
+        let r = Rebase::of(&program, &mem).unwrap();
+        assert_eq!(r.live_base, 0x10_2000);
+        assert_eq!(r.to_live(0x40_1000), Some(0x10_3000));
+        mem.modules.pop();
+        let refused = Rebase::of(&program, &mem).unwrap_err();
+        assert!(
+            refused.contains("NTDLL.DLL at 0x100000 is another build (it is 64-bit (machine 0x8664), the file 32-bit (machine 0x14c));"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(
+                "NTDLL.DLL at 0x101000 is another build (timestamp 0x7777, the file's 0x1234)"
+            ),
+            "{refused}"
+        );
+        program.path = std::path::PathBuf::from("other.dll");
+        assert_eq!(
+            Rebase::of(&program, &mem).unwrap_err(),
+            "no module of the process is named other.dll"
+        );
     }
 }
