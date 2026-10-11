@@ -82,28 +82,58 @@ each a fresh process:
 | `borer functions` | 11,499 functions | 1.3 s |
 | `borer triage` | full triage report | 3.4 s |
 
-## Build
+## Install
+
+Download the archive for your machine from the
+[latest release](https://github.com/imjustprism/borer/releases/latest):
+Windows x64 (`.zip`), Linux x64 (glibc 2.35 or newer), macOS on Apple
+silicon or Intel (`.tar.gz`). `SHA256SUMS` lists their checksums. Unpack
+it where the binary can stay, then let it register itself with your agent
+clients:
+
+```bash
+tar -xzf borer-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+cd borer-v0.1.0-x86_64-unknown-linux-gnu
+./borer setup           # what it would change, client by client
+./borer setup --apply   # change it
+```
+
+On Windows, unzip the archive and run `borer.exe setup` the same way.
+`setup` looks for Claude Code, Claude Desktop, Cursor, Windsurf, VS Code,
+Gemini CLI, Codex CLI and Zed by their configuration directories and adds
+a server named `borer` that runs the binary you started. Claude Code is
+registered with `claude mcp add --scope user` when `claude` is on `PATH`.
+Every file it changes is first copied to `<file>.bak`, the entry is
+inserted without touching the rest of the file, and a client that already
+has a `borer` server is left alone. Restart a client to pick it up.
+
+The macOS binaries are not notarized; if Gatekeeper stops one, run
+`xattr -d com.apple.quarantine borer` once.
+
+### From source
 
 ```bash
 git clone https://github.com/imjustprism/borer
 cd borer
 cargo build --release
+target/release/borer setup --apply
 ```
 
 `rust-toolchain.toml` pins Rust 1.96.1 and rustup picks it up on its own.
-The binary lands in `target/release/`. `cargo build --profile dist` makes a
-stripped, `panic=abort` build, which is what you'd ship.
+`cargo build --profile dist` makes the stripped, `panic=abort` build the
+releases ship.
 
-CI builds and tests on Windows only. The engine has no OS-specific code and
-the live-process crate has a non-Windows stub, but Linux and macOS builds
-aren't covered by CI yet.
+CI runs the full gate on Windows, and clippy and the tests on Linux and
+macOS. The tests that analyze borer's own build run on Windows only, and
+live process access is Windows only.
 
 ## Using it from an agent
 
-With no arguments, `borer` speaks MCP over stdio. In Claude Code:
+With no arguments, `borer` speaks MCP over stdio. `borer setup` registers
+it with the clients it knows; by hand, in Claude Code:
 
 ```bash
-claude mcp add borer -- /path/to/borer
+claude mcp add --scope user borer -- /path/to/borer
 ```
 
 For other clients, the usual config block:
