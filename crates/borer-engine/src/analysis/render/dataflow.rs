@@ -143,7 +143,7 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             let mut reads: Vec<Register> = Vec::new();
             let mut writes: Vec<Register> = Vec::new();
             for ur in info.used_registers() {
-                let r = ur.register().full_register();
+                let r = canonical(ur.register(), bitness);
                 match ur.access() {
                     OpAccess::Read | OpAccess::CondRead => reads.push(r),
                     OpAccess::ReadWrite | OpAccess::ReadCondWrite => {
@@ -174,7 +174,7 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
                 FlowControl::Call | FlowControl::IndirectCall
             ) {
                 let preserves = preserves_registers(a, o, i);
-                let passed: Vec<String> = ARGUMENT_REGISTERS
+                let passed: Vec<String> = argument_registers(bitness)
                     .iter()
                     .enumerate()
                     .filter(|(_, name)| {
@@ -183,9 +183,7 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
                     .map(|(k, _)| format!("argument {}", k + 1))
                     .collect();
                 if !passed.is_empty() && !preserves {
-                    let target = (i.op0_kind() == OpKind::NearBranch64).then(|| i.near_branch64());
-                    let callee = target
-                        .map_or_else(|| String::from("an indirect call"), |t| short_name(a, o, t));
+                    let callee = callee_name(a, o, i);
                     let note = format!(
                         "{:<#12x} {callee} takes it as {}",
                         i.ip(),
@@ -302,7 +300,9 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
 /// eight-byte field read as two fields, and the output says how often each
 /// was seen so a reader can judge. Several widths at one offset is what the
 /// code did, so all are reported: a byte write into an eight-byte field is a
-/// flag in it.
+/// flag in it. An instruction counts once however many passes read it, an
+/// offset below the pointer (an embedded member's container) reads `-0x8`,
+/// and the header counts every row, a field only handed to a call included.
 ///
 /// # Arguments
 ///
@@ -349,7 +349,7 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
             if i.ip() < start {
                 continue;
             }
-            if let Some(base) = holds.get(&i.memory_base()).copied()
+            if let Some(base) = holds.get(&canonical(i.memory_base(), bitness)).copied()
                 && i.memory_base() != Register::None
             {
                 let at = base.saturating_add(disasm::displacement(i, bitness));
@@ -371,7 +371,7 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
                     let slot = fields.entry(at).or_default();
                     slot.read |= read;
                     slot.written |= write;
-                    slot.sites += 1;
+                    slot.sites.insert(i.ip());
                     let width = u32::try_from(size).unwrap_or(0);
                     if !slot.widths.contains(&width) {
                         slot.widths.push(width);
@@ -379,19 +379,19 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
                 }
             }
             if i.mnemonic() == Mnemonic::Lea
-                && let Some(base) = holds.get(&i.memory_base()).copied()
+                && let Some(base) = holds.get(&canonical(i.memory_base(), bitness)).copied()
             {
                 let at = base.saturating_add(i.memory_displacement64().cast_signed());
                 if i.op0_kind() == OpKind::Register && at.abs() < SPAN_MAX {
-                    holds.insert(i.op0_register().full_register(), at);
+                    holds.insert(canonical(i.op0_register(), bitness), at);
                     continue;
                 }
             }
             let moved = i.mnemonic() == Mnemonic::Mov
                 && i.op0_kind() == OpKind::Register
                 && i.op1_kind() == OpKind::Register;
-            if moved && let Some(base) = holds.get(&i.op1_register().full_register()).copied() {
-                holds.insert(i.op0_register().full_register(), base);
+            if moved && let Some(base) = holds.get(&canonical(i.op1_register(), bitness)).copied() {
+                holds.insert(canonical(i.op0_register(), bitness), base);
                 continue;
             }
             if matches!(
@@ -399,7 +399,7 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
                 FlowControl::Call | FlowControl::IndirectCall
             ) {
                 let preserves = preserves_registers(a, o, i);
-                for (k, name) in ARGUMENT_REGISTERS.iter().enumerate() {
+                for (k, name) in argument_registers(bitness).iter().enumerate() {
                     if preserves {
                         break;
                     }
@@ -409,12 +409,7 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
                     else {
                         continue;
                     };
-                    let callee = if i.op0_kind() == OpKind::NearBranch64 {
-                        short_name(a, o, i.near_branch64())
-                    } else {
-                        String::from("an indirect call")
-                    };
-                    let note = format!("passed to {callee} as argument {}", k + 1);
+                    let note = format!("passed to {} as argument {}", callee_name(a, o, i), k + 1);
                     taken.entry(at).or_insert(note);
                 }
                 if !preserves {
@@ -432,10 +427,7 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
                     ur.access(),
                     OpAccess::Write | OpAccess::ReadWrite | OpAccess::CondWrite
                 ) {
-                    let r = ur.register().full_register();
-                    if !(moved || i.mnemonic() == Mnemonic::Lea) {
-                        holds.remove(&r);
-                    }
+                    holds.remove(&canonical(ur.register(), bitness));
                 }
             }
         }
@@ -443,23 +435,41 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
     let mut out = format!(
         "# structure through {wanted} of {}, from {} access site(s)\n",
         short_name(a, o, entry),
-        fields.values().map(|f| f.sites).sum::<usize>()
+        fields.values().map(|f| f.sites.len()).sum::<usize>()
     );
     if fields.is_empty() && taken.is_empty() {
         out.push_str("# nothing is accessed through it in this function\n");
         return Ok(out);
     }
-    let span = fields
+    let offsets: BTreeSet<i64> = fields.keys().chain(taken.keys()).copied().collect();
+    let width = |at: &i64| {
+        fields.get(at).map_or(0, |f| {
+            i64::from(f.widths.iter().copied().max().unwrap_or(0))
+        })
+    };
+    let low = offsets.first().copied().unwrap_or(0).min(0);
+    let high = offsets
         .iter()
-        .map(|(at, f)| at.saturating_add(i64::from(f.widths.iter().copied().max().unwrap_or(0))))
+        .map(|at| at.saturating_add(width(at)))
         .max()
         .unwrap_or(0);
     let _ = writeln!(
         out,
-        "# {} field(s) over {span:#x} bytes\n# offset  size  access        seen",
-        fields.len()
+        "# {} field(s) over {:#x} bytes\n# offset  size  access        seen",
+        offsets.len(),
+        high.saturating_sub(low)
     );
-    for (at, f) in fields.iter().take(FIELDS_MAX) {
+    for at in offsets.iter().take(FIELDS_MAX) {
+        let shown = if *at < 0 {
+            format!("-{:#x}", at.unsigned_abs())
+        } else {
+            format!("{at:#x}")
+        };
+        let note = taken.get(at).map_or(String::new(), |n| format!("  {n}"));
+        let Some(f) = fields.get(at) else {
+            let _ = writeln!(out, "{shown:<8} {:<5} {:<13} -{note}", "-", "addressed");
+            continue;
+        };
         let access = match (f.read, f.written) {
             (true, true) => "read, written",
             (true, false) => "read",
@@ -473,15 +483,13 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join("/");
-        let note = taken.get(at).map_or(String::new(), |n| format!("  {n}"));
-        let _ = writeln!(out, "{at:<#8x} {size:<5} {access:<13} {}x{note}", f.sites);
+        let _ = writeln!(
+            out,
+            "{shown:<8} {size:<5} {access:<13} {}x{note}",
+            f.sites.len()
+        );
     }
-    more_line(&mut out, fields.len(), FIELDS_MAX, "fields not listed");
-    for (at, note) in &taken {
-        if !fields.contains_key(at) {
-            let _ = writeln!(out, "{at:<#8x} {:<5} {note}", "-");
-        }
-    }
+    more_line(&mut out, offsets.len(), FIELDS_MAX, "fields not listed");
     Ok(out)
 }
 
@@ -494,8 +502,9 @@ pub(super) struct Field {
     pub(super) read: bool,
     /// The offset is written.
     pub(super) written: bool,
-    /// How many instructions touched it.
-    pub(super) sites: usize,
+    /// The instructions that touched it, each once however many passes
+    /// read it.
+    pub(super) sites: BTreeSet<u64>,
 }
 
 /// Decodes every instruction of a function, in address order.
@@ -787,6 +796,42 @@ pub(super) fn parse_count(text: &str) -> Option<usize> {
 /// The argument registers, in convention order.
 pub(super) const ARGUMENT_REGISTERS: [&str; 4] = ["rcx", "rdx", "r8", "r9"];
 
+/// The registers a call's arguments travel in, in convention order, as the
+/// value passes read them.
+///
+/// On a 64-bit target they are [`ARGUMENT_REGISTERS`]. A 32-bit `cdecl` or
+/// `stdcall` call passes every argument on the stack, so a value left in
+/// `edx` is not an argument, and only `ecx` is taken: where a `thiscall`
+/// method takes `this` and a `fastcall` callee its first argument, as the
+/// vtable scans read 32-bit code.
+///
+/// # Arguments
+///
+/// * `bitness` - Decoder bitness of the program.
+pub(super) fn argument_registers(bitness: u32) -> &'static [&'static str] {
+    if bitness == 32 {
+        &["ecx"]
+    } else {
+        &ARGUMENT_REGISTERS
+    }
+}
+
+/// Names what a call goes to: the target of a direct call of any width,
+/// `an indirect call` otherwise.
+///
+/// # Arguments
+///
+/// * `a` - The analysis, to name the target.
+/// * `o` - User names.
+/// * `i` - The call instruction.
+pub(super) fn callee_name(a: &Analysis, o: &Overlay, i: &Instruction) -> String {
+    if is_near_call(i) {
+        short_name(a, o, i.near_branch_target())
+    } else {
+        String::from("an indirect call")
+    }
+}
+
 /// Registers a called function is free to destroy.
 pub(super) const VOLATILE_REGISTERS: [&str; 7] = ["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"];
 
@@ -909,6 +954,25 @@ impl RegisterNames {
                 range: "rax..r15",
             }
         }
+    }
+}
+
+/// The key a value pass files a register under.
+///
+/// That is the whole register in the target's width, `ecx` for `cl` or
+/// `ecx` on a 32-bit target and `rcx` on a 64-bit one, the form
+/// [`iced_register`] hands back for a seed. Keying a 32-bit operand by its 64-bit parent missed the seed, so a value
+/// never spread and a write never cleared what it overwrote.
+///
+/// # Arguments
+///
+/// * `r` - A register an instruction names.
+/// * `bitness` - Decoder bitness of the program.
+pub(super) fn canonical(r: Register, bitness: u32) -> Register {
+    if bitness == 32 {
+        r.full_register32()
+    } else {
+        r.full_register()
     }
 }
 
@@ -1156,7 +1220,99 @@ pub(super) fn parse_hex_bytes(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::{ExperimentSpec, layout_tsv, parse_count, taint_tsv, why_tsv};
     use crate::analysis::{Analysis, Overlay};
-    use crate::program::Program;
+    use crate::program::{Arch, Program, Section};
+
+    /// A 32-bit program whose one page of code at `0x1000` starts with
+    /// `code`, padded with `int3`.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The first bytes of the page.
+    fn raw_x86(code: &[u8]) -> Program {
+        let mut bytes = vec![0xcc; 0x1000];
+        bytes[..code.len()].copy_from_slice(code);
+        let text = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
+        Program::raw(bytes, Arch::X86, 0, Some(0x1000), vec![text])
+    }
+
+    /// A layout stops following a register an untracked move or `lea`
+    /// overwrites, counts each access once over both passes, prints an
+    /// offset below the pointer as negative, and counts its rows in the
+    /// header.
+    ///
+    /// It kept the stale offset, so the stack writes through `rax` and
+    /// `rdx` read as fields at 0x18 and 0x0, every access was seen twice,
+    /// and -8 printed as `0xfffffffffffffff8`.
+    ///
+    /// # Panics
+    ///
+    /// When a stack access reads as a field or a count or offset is off.
+    #[test]
+    fn a_layout_drops_a_register_an_untracked_write_overwrites() {
+        let p = Program::raw_x64(&[
+            0x48, 0x8d, 0x41, 0x10, // ASM: lea rax,[rcx+0x10]
+            0x48, 0x89, 0xe0, // ASM: mov rax,rsp
+            0x48, 0x89, 0x58, 0x08, // ASM: mov [rax+8],rbx
+            0x8b, 0x41, 0x08, // ASM: mov eax,[rcx+8]
+            0x48, 0x89, 0xca, // ASM: mov rdx,rcx
+            0x48, 0x8d, 0x54, 0x24, 0x20, // ASM: lea rdx,[rsp+0x20]
+            0x89, 0x1a, // ASM: mov [rdx],ebx
+            0x89, 0x59, 0xf8, // ASM: mov [rcx-8],ebx
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let out = layout_tsv(&p, &a, &Overlay::default(), "0x1000").expect("a layout");
+        assert_eq!(
+            out,
+            "# structure through rcx of sub_1000, from 2 access site(s)\n\
+             # 2 field(s) over 0x14 bytes\n\
+             # offset  size  access        seen\n\
+             -0x8     4     written       1x\n\
+             0x8      4     read          1x\n"
+        );
+    }
+
+    /// A 32-bit call is direct and takes only `ecx`.
+    ///
+    /// A value spreads through 32-bit registers, a direct call is named, not
+    /// an indirect call, and only `ecx` is an argument register: a `cdecl` or
+    /// `stdcall` callee takes its arguments on the stack, so `edx` reaching
+    /// the call is not one. Operands were keyed by
+    /// their 64-bit parents and never met the seed, only a 64-bit branch
+    /// was read as direct, and `edx` was the second argument.
+    ///
+    /// # Panics
+    ///
+    /// When a direct call reads as indirect or `edx` as an argument.
+    #[test]
+    fn a_32_bit_call_is_direct_and_takes_only_ecx() {
+        let p = raw_x86(&[
+            0x8b, 0x41, 0x04, // ASM: mov eax,[ecx+4]
+            0x8d, 0x51, 0x08, // ASM: lea edx,[ecx+8]
+            0xe8, 0x05, 0x00, 0x00, 0x00, // ASM: call 0x1010
+            0xc3, // ASM: ret
+            0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 padding
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let layout = layout_tsv(&p, &a, &o, "0x1000").expect("a layout");
+        assert!(
+            layout.contains("0x0      -     addressed     -  passed to sub_1010 as argument 1\n"),
+            "{layout}"
+        );
+        assert!(!layout.contains("argument 2"), "{layout}");
+        assert!(!layout.contains("\n0x8 "), "{layout}");
+        let taint = taint_tsv(&p, &a, &o, "0x1003,edx").expect("a taint");
+        assert!(!taint.contains("takes it"), "{taint}");
+        let taint = taint_tsv(&p, &a, &o, "0x1000,ecx").expect("a taint");
+        assert!(taint.contains("now in edx\n"), "{taint}");
+        assert!(
+            taint.contains("sub_1010 takes it as argument 1\n"),
+            "{taint}"
+        );
+        assert!(!taint.contains("indirect"), "{taint}");
+    }
 
     /// A count is `0x`-hex or decimal; a word is not read as bare hex.
     ///
