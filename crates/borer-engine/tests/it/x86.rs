@@ -637,6 +637,37 @@ fn a_callee_popping_nothing_takes_no_stack_argument() {
     assert!(text.contains("sub_401040(5);"), "{text}");
 }
 
+/// A 32-bit function whose exits all leave a double in `xmm0`, which its
+/// caller reads, returns it there.
+///
+/// `test ecx,ecx; je L; movsd xmm0,[0x402000]; ret; L: xorps xmm0,xmm0;
+/// ret`, called by `call 0x401040; movsd [0x402010],xmm0; ret`: the
+/// convention a whole-program compiler gives such a function. The text
+/// read it as returning nothing, `void` and two bare `return;`s, while
+/// its caller assigned `xmm0` from the call.
+#[test]
+fn a_32_bit_double_returned_in_xmm0_is_its_result() {
+    let mut code = vec![
+        0xe8, 0x3b, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0xf2, 0x0f, 0x11, 0x05, 0x10, 0x20, 0x40, 0x00, // ASM: movsd [0x402010], xmm0
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x74, 0x09, // ASM: je 0x40104d
+        0xf2, 0x0f, 0x10, 0x05, 0x00, 0x20, 0x40, 0x00, // ASM: movsd xmm0, [0x402000]
+        0xc3, // ASM: ret
+        0x0f, 0x57, 0xc0, // ASM: xorps xmm0, xmm0
+        0xc3, // ASM: ret
+    ]);
+    let p = image_with_data(&code, &2.5f64.to_bits().to_le_bytes());
+    let text = decompiled(&p, 0x401040);
+    assert!(text.contains("// signature: double sub_401040("), "{text}");
+    assert!(!text.contains("return;"), "{text}");
+    assert!(text.contains("return 0;"), "{text}");
+}
+
 /// A read inside a stack parameter's word reaches those bytes of the
 /// parameter.
 ///

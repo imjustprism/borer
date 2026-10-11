@@ -2433,7 +2433,7 @@ impl<'a> Exec<'_, 'a> {
         match after {
             x87::After::Drops => Some(false),
             x87::After::Reads => Some(true),
-            x87::After::Returns if ctx.ret_float => Some(true),
+            x87::After::Returns if ctx.ret_float && !ctx.ret_sse => Some(true),
             x87::After::Returns | x87::After::Neither => declared.then_some(true),
         }
     }

@@ -273,18 +273,31 @@ impl<'a> Exec<'_, 'a> {
     /// bits is dropped and the function's return width recorded. A function
     /// whose return is floating point hands the value back in `xmm0`
     /// instead, or in `st0` on a 32-bit target, where the top of the x87
-    /// stack is the result whatever wrote it.
+    /// stack is the result whatever wrote it, unless the function returns
+    /// in `xmm0` there too ([`Ctx::ret_sse`]), whose width a `float` value
+    /// returned sets.
     pub(super) fn ret(&mut self) {
         if !self.emit {
             return;
         }
-        let x87 = self.ctx.ret_float && self.bitness() == 32;
+        let x87 = self.ctx.ret_float && self.bitness() == 32 && !self.ctx.ret_sse;
         let rax = match (self.ctx.ret_float, x87) {
             (true, true) => Key::Reg(Register::ST0),
             (true, false) => Key::Reg(Register::XMM0),
             (false, _) => self.canon(self.rax()),
         };
         let (line, value) = match self.env.vals.get(&rax).cloned() {
+            Some(v) if self.ctx.ret_sse => {
+                let bits = match v {
+                    Expr::Deref(_, Ty::F32) | Expr::Cast(_, Ty::F32) | Expr::FConst(_, Ty::F32) => {
+                        32
+                    }
+                    Expr::Const(_) => 0,
+                    _ => 64,
+                };
+                self.ctx.ret_bits = self.ctx.ret_bits.max(bits);
+                (format!("return {};", v.render(&self.names())), Some(v))
+            }
             Some(v) => {
                 let (v, bits) = strip_partial_result(v);
                 self.ctx.ret_bits = self.ctx.ret_bits.max(bits.min(self.ctx.ret_lane));

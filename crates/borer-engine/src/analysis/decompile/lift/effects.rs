@@ -1104,7 +1104,7 @@ pub(super) fn reg_effects(
         }
         FlowControl::Return if !ctx.unused_result => {
             let back = match (ctx.ret_float, ctx.bitness) {
-                (true, 32) => Register::ST0,
+                (true, 32) if !ctx.ret_sse => Register::ST0,
                 (true, _) => Register::XMM0,
                 (false, _) => canon(Register::RAX, ctx.bitness),
             };

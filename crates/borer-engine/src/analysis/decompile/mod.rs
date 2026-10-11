@@ -174,6 +174,10 @@ struct Ctx<'a> {
     /// The declared return type is floating point, so the value comes
     /// back in `xmm0` and reading `rax` at the return would kill it.
     ret_float: bool,
+    /// A 32-bit function hands its float back in `xmm0`, not `st0`: every
+    /// exit leaves one there and a caller reads it
+    /// ([`lift::sse_callee`]). Implies [`Ctx::ret_float`].
+    ret_sse: bool,
     /// Parameter index to the class it points at, from the declared
     /// signature (`this`, `Foo *`, `const Foo &`), for virtual calls.
     param_class: BTreeMap<u8, String>,
@@ -671,6 +675,7 @@ fn new_ctx<'a>(
         ret_bits: 0,
         ret_lane: 64,
         ret_float: false,
+        ret_sse: false,
         param_class: BTreeMap::new(),
         own_name: std::sync::Arc::from(expr::bare(&name_of(analysis, overlay, f.entry))),
         debug_ret: program
@@ -1258,9 +1263,22 @@ fn decompile_with(
         .signature
         .as_ref()
         .map_or(f.ret_float.is_some(), |s| float_return(&s.ret));
-    // INVARIANT: a 64-bit float result is the register `ret` hands back,
-    // written on the way to every exit.
-    ctx.rax_written |= ctx.ret_float && bitness == 64;
+    // INVARIANT: a 32-bit function a whole-program compiler gave a
+    // convention of its own hands its double back in `xmm0` (`movsd xmm0,
+    // [ebp-0x10]` on one exit, `xorps xmm0, xmm0` on the other), where its
+    // callers read it; read as returning nothing, its every `return` lost
+    // the value.
+    ctx.ret_sse = bitness == 32
+        && f.signature.is_none()
+        && f.ret_float.is_none()
+        && lift::sse_callee(&ctx, Some(f.entry)).returns;
+    if ctx.ret_sse {
+        ctx.ret_float = true;
+        ctx.unused_result = false;
+    }
+    // INVARIANT: a float result in `xmm0` is the register `ret` hands
+    // back, written on the way to every exit.
+    ctx.rax_written |= ctx.ret_float && (bitness == 64 || ctx.ret_sse);
     if let Some(sig) = &f.signature {
         if ctx.this_param
             && let Some(c) = classes::class_of(&sig.name)
@@ -1411,7 +1429,9 @@ fn decompile_with(
             follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
         }
     }
-    let body = if f.returns_value == Some(false) && f.signature.is_none() {
+    // INVARIANT: a float handed back in `xmm0` is read by callers that
+    // read no `eax` ([`Ctx::ret_sse`]), whatever the verdict on `eax` says.
+    let body = if f.returns_value == Some(false) && f.signature.is_none() && !ctx.ret_sse {
         drop_returned_values(&body)
     } else {
         body
@@ -1476,6 +1496,8 @@ fn decompile_with(
         (false, _) => "void",
         (true, _) if f.ret_float == Some(32) => "float",
         (true, _) if f.ret_float.is_some() => "double",
+        (true, 32) if ctx.ret_sse => "float",
+        (true, _) if ctx.ret_sse => "double",
         (true, 8) => "uint8_t",
         (true, 16) => "uint16_t",
         (true, 32) => "uint32_t",
