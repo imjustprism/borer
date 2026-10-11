@@ -2610,15 +2610,26 @@ impl Names<'_> {
     /// without the `dll!` prefix, so a call through the slot reads as
     /// `QString::QString` and not `??0QString@@QAE@PBD@Z`.
     ///
+    /// A wrapper exporting the name of the import it forwards to (kernel32's
+    /// `Beep` calling KERNELBASE's) would read as calling itself, so an
+    /// import of the function's own name keeps the linker's name for its
+    /// slot, `__imp_Beep`.
+    ///
     /// # Arguments
     ///
     /// * `addr` - A candidate IAT slot address.
     pub(super) fn import_at(&self, addr: u64) -> Option<String> {
-        self.program
+        let name = self
+            .program
             .symbols
             .iter()
             .find(|s| s.kind == SymbolKind::Import && s.addr == addr && s.addr != 0)
-            .map(|s| bare(&crate::search::demangled_name(&s.name)).to_owned())
+            .map(|s| bare(&crate::search::demangled_name(&s.name)).to_owned())?;
+        Some(if name == *self.own_name {
+            format!("__imp_{name}")
+        } else {
+            name
+        })
     }
 
     /// Renders the text name of a variable.

@@ -4673,6 +4673,35 @@ fn an_import_call_takes_its_declared_arity() {
     assert!(text.contains("sin(") && !text.contains("sin()"), "{text}");
 }
 
+/// A wrapper named like the import it forwards to calls the import's slot,
+/// not itself: kernel32's `Beep` jumps to KERNELBASE's.
+///
+/// `jmp [Beep]` at the export `Beep`.
+///
+/// # Panics
+///
+/// When the call reads as recursion.
+#[test]
+fn a_wrapper_named_like_its_import_does_not_call_itself() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let code = [
+        0xff, 0x25, 0xfa, 0x0f, 0x00, 0x00, // ASM: jmp [rip+0xffa]
+    ];
+    let mut p = program64_with_imports(
+        &code,
+        &[0u8; 0x10],
+        &[(0x1_4000_2000, "api-ms-win-core-misc-l1-1-0.dll!Beep")],
+    );
+    p.symbols.push(Symbol {
+        name: "Beep".to_owned(),
+        addr: 0x1_4000_1000,
+        kind: SymbolKind::Export,
+    });
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("return __imp_Beep(a1, a2);"), "{text}");
+    assert!(!text.contains("return Beep("), "{text}");
+}
+
 /// A register a call clobbered is no argument of a later call.
 ///
 /// `mov rax,rdx; sub rsp,0x28; call leaf; mov ecx,87; call
@@ -4708,7 +4737,9 @@ fn a_clobbered_register_is_no_argument() {
 ///
 /// `jmp [MultiByteToWideChar]` takes the import's six arguments, four in
 /// registers and two on the stack above the return address the jump
-/// leaves, and its signature lists the same six.
+/// leaves, and its signature lists the same six. The thunk is named for
+/// the import, so the call goes through the slot's own name rather than
+/// reading as a call to itself.
 #[test]
 fn a_forwarder_passes_its_parameters_through() {
     let code = [0xff, 0x25, 0xfa, 0x0f, 0x00, 0x00];
@@ -4719,7 +4750,7 @@ fn a_forwarder_passes_its_parameters_through() {
     );
     let text = decompiled(&p, 0x1_4000_1000);
     assert!(
-        text.contains("return MultiByteToWideChar(a1, a2, a3, a4, a5, a6);"),
+        text.contains("return __imp_MultiByteToWideChar(a1, a2, a3, a4, a5, a6);"),
         "{text}"
     );
     assert!(text.contains("uint64_t a6)"), "{text}");

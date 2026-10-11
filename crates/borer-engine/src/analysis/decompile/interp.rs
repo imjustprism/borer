@@ -1393,7 +1393,8 @@ fn thread_block(program: &Program) -> Option<u64> {
 ///
 /// The image base, the functions (in address order, where several share a
 /// name), the vtables, the known tables and the symbols, in that order of
-/// precedence.
+/// precedence; an import's slot also answers to its linker name
+/// `__imp_name`, which a wrapper of the same name calls it by.
 ///
 /// # Arguments
 ///
@@ -1429,9 +1430,9 @@ fn names(
     for s in program.symbols.iter().filter(|s| s.addr != 0) {
         let n = crate::search::demangled_name(&s.name);
         if s.kind == SymbolKind::Import {
-            out.entry(bare_name(&n).to_owned())
-                .or_default()
-                .push(Known::Slot(s.addr));
+            for name in [bare_name(&n).to_owned(), format!("__imp_{}", bare_name(&n))] {
+                out.entry(name).or_default().push(Known::Slot(s.addr));
+            }
         } else {
             out.entry(n).or_default().push(Known::Address(s.addr));
         }
