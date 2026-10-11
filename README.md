@@ -306,3 +306,8 @@ Mode is on and `core.symlinks` is `true`. A flat link holds just the path
 ## License
 
 [MIT](LICENSE)
+
+The imphash's ordinal name tables come from
+[pefile](https://github.com/erocarrera/pefile) (MIT, Copyright (c) 2004-2024
+Ero Carrera); its notice is at the top of
+[`ordinals.tsv`](crates/borer-engine/src/ordinals.tsv).
