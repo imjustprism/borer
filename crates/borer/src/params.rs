@@ -277,6 +277,10 @@ pub(crate) struct EntropyParams {
     pub(crate) window: Option<u32>,
     /// Minimum bits per byte to report (default 7.2, max 8.0).
     pub(crate) threshold: Option<f64>,
+    /// Regions to skip first (paging).
+    pub(crate) offset: Option<u32>,
+    /// Most regions listed (default 200, max 200).
+    pub(crate) limit: Option<u32>,
 }
 
 /// Parameters for `find_function_by_string`.

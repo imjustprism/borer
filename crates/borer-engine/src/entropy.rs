@@ -30,7 +30,9 @@ pub fn shannon(data: &[u8]) -> f64 {
 ///
 /// # Returns
 ///
-/// A value in `0.0..=8.0`.
+/// A value in `0.0..=8.0`, never `-0.0`: the terms are folded from `+0.0`,
+/// since a float sum starts from `-0.0` and a histogram of one byte value
+/// (one term of `-0.0`) printed as `-0.00`.
 fn of_counts(counts: &[usize; 256], n: usize) -> f64 {
     if n == 0 {
         return 0.0;
@@ -43,7 +45,7 @@ fn of_counts(counts: &[usize; 256], n: usize) -> f64 {
             let p = usize_f64(c) / n;
             -p * p.log2()
         })
-        .sum()
+        .fold(0.0, |sum, term| sum + term)
 }
 
 /// A text encoding that carries binary data in printable characters.
@@ -75,8 +77,9 @@ pub struct Region {
     /// Virtual address of the first window; `None` when no section maps
     /// those bytes (headers, gaps, an overlay, a file with no sections).
     pub va: Option<u64>,
-    /// Length in bytes of the file: a whole number of windows, or the whole
-    /// encoded text with its line breaks and padding.
+    /// Length in bytes of the file: whole windows, the last one cut short
+    /// where a section or an uncovered run ends, or the whole encoded text
+    /// with its line breaks and padding.
     pub len: u64,
     /// Mean entropy of the windows making up the region, or of the decoded
     /// bytes of encoded text (bits per byte).
@@ -117,8 +120,8 @@ pub fn ceiling(window: usize) -> f64 {
 /// Finds the high-entropy regions of every byte of the file.
 ///
 /// Each section's file extent is cut into non-overlapping `window`-byte
-/// chunks; adjacent chunks at or above `threshold` merge into one
-/// [`Region`]. The bytes no section covers are then scanned the same way,
+/// chunks, the last one cut short where the extent ends; adjacent chunks
+/// at or above `threshold` merge into one [`Region`]. The bytes no section covers are then scanned the same way,
 /// one uncovered range at a time: the headers, gaps between sections, an
 /// overlay appended after the last section (where installers and packers
 /// keep their payload), and the whole of a file with no sections. The scan
@@ -286,6 +289,12 @@ fn decode(text: &[u8], encoding: Encoding, mut emit: impl FnMut(u8)) {
 
 /// Scans one run of file bytes and appends its high-entropy regions.
 ///
+/// The bytes after the last whole window are a chunk of their own, judged
+/// over the last `window` bytes of the run (the whole run when it is
+/// shorter), so their entropy is measured on as many samples as a whole
+/// window's and meets the same threshold: a payload in the last kilobyte
+/// of a section or of the file was never measured at all.
+///
 /// # Arguments
 ///
 /// * `data` - The bytes, cut into `window`-byte chunks from its start.
@@ -307,17 +316,21 @@ fn scan(
     regions: &mut Vec<Region>,
 ) -> bool {
     let step = from_usize(window);
+    let whole = data.chunks_exact(window);
+    let cut = whole.remainder().len();
+    let last = (cut > 0).then(|| (cut, &data[data.len().saturating_sub(window)..]));
     let mut open: Option<(u64, u64, f64, u32)> = None;
-    for (i, chunk) in (0u64..).zip(data.chunks_exact(window)) {
+    for (i, (len, chunk)) in (0u64..).zip(whole.map(|c| (window, c)).chain(last)) {
         let e = shannon(chunk);
+        let len = from_usize(len);
         if e >= threshold {
             match open.as_mut() {
-                Some((_, len, sum, n)) => {
-                    *len += step;
+                Some((_, total, sum, n)) => {
+                    *total += len;
                     *sum += e;
                     *n += 1;
                 }
-                None => open = Some((off + i * step, step, e, 1)),
+                None => open = Some((off + i * step, len, e, 1)),
             }
         } else if let Some(r) = open.take() {
             regions.push(close(r, &va_of));
@@ -350,6 +363,84 @@ fn close((off, len, sum, n): (u64, u64, f64, u32), va_of: impl Fn(u64) -> Option
         entropy: sum / f64::from(n),
         encoding: None,
     }
+}
+
+/// Says why a threshold cannot be met, when it cannot.
+///
+/// Shared by the `entropy` tool and the `entropy` command, so the command
+/// line refuses what the tool refuses. The value is echoed in exponent form
+/// when it is huge or not finite: `1e308` echoed as its 309 digits.
+///
+/// # Arguments
+///
+/// * `threshold` - Bits per byte, as given.
+///
+/// # Returns
+///
+/// The message, or `None` for a value in `0..=8`.
+#[must_use]
+pub fn threshold_error(threshold: f64) -> Option<String> {
+    /// Largest magnitude echoed in plain digits.
+    const PLAIN_MAX: f64 = 1e6;
+    (!(0.0..=8.0).contains(&threshold)).then(|| {
+        let shown = if threshold.abs() < PLAIN_MAX {
+            threshold.to_string()
+        } else {
+            format!("{threshold:e}")
+        };
+        format!("threshold {shown} is outside 0..8 bits per byte")
+    })
+}
+
+/// Scans for high-entropy regions and renders one page of them.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image whose bytes are scanned.
+/// * `window` - Chunk size in bytes; values below [`WINDOW_MIN`] are raised to it.
+/// * `threshold` - Minimum entropy in bits per byte, already checked
+///   ([`threshold_error`]).
+/// * `offset` - Regions to skip first (paging).
+/// * `limit` - Most regions listed.
+///
+/// # Returns
+///
+/// A `# showing N of M high-entropy regions (window, threshold)` header,
+/// saying when the scan stopped at [`REGIONS_MAX`] and where the next page
+/// starts, a note when no window of that size can reach the threshold
+/// ([`ceiling`]), then [`regions_tsv`] of the page.
+#[must_use]
+pub fn report(
+    program: &Program,
+    window: usize,
+    threshold: f64,
+    offset: usize,
+    limit: usize,
+) -> String {
+    let window = window.max(WINDOW_MIN);
+    let regions = high_entropy_regions(program, window, threshold);
+    let total = regions.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    let mut out = format!(
+        "# showing {} of {total} high-entropy regions (window={window}, threshold={threshold:.2})",
+        end - start
+    );
+    if total >= REGIONS_MAX {
+        out.push_str(&format!("; the scan stops at {REGIONS_MAX}"));
+    }
+    if end < total {
+        out.push_str(&format!("; offset={end} for the next page"));
+    }
+    out.push('\n');
+    let most = ceiling(window);
+    if threshold > most {
+        out.push_str(&format!(
+            "# note: random data averages about {most:.2} bits in a {window}-byte window; above that only windows that beat chance pass, so widen the window or lower the threshold\n"
+        ));
+    }
+    out.push_str(&regions_tsv(program, &regions[start..end]));
+    out
 }
 
 /// Renders regions as `off va len entropy` rows under their column header.
@@ -406,7 +497,10 @@ pub fn regions_tsv(program: &Program, regions: &[Region]) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Encoding, ceiling, decode, high_entropy_regions, regions_tsv};
+    use super::{
+        Encoding, ceiling, decode, high_entropy_regions, regions_tsv, report, shannon,
+        threshold_error,
+    };
     use crate::num::from_usize;
     use crate::program::{Arch, Program, Section};
 
@@ -583,6 +677,76 @@ mod tests {
         assert_eq!(regions.len(), 1, "{regions:?}");
         assert_eq!((regions[0].off, regions[0].va), (0x400, Some(0x40_1000)));
         assert_eq!(regions[0].len, 0x1000);
+    }
+
+    /// Random bytes after a section's last whole window are measured.
+    ///
+    /// The scan cut the extent into whole windows and never read the rest, so a
+    /// payload in a section's last kilobyte was no region at all.
+    #[test]
+    fn the_bytes_after_the_last_whole_window_are_measured() {
+        let mut bytes = vec![0u8; 0x1000];
+        bytes.extend(noise(1000));
+        let len = from_usize(bytes.len());
+        let p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0x40_0000,
+            None,
+            vec![Section::mapped(".data", 0x40_1000, 0, len, true, false)],
+        );
+        let regions = high_entropy_regions(&p, 1024, 7.2);
+        assert_eq!(regions.len(), 1, "{regions:?}");
+        assert_eq!((regions[0].off, regions[0].len), (0x1000, 1000));
+        assert_eq!(regions[0].va, Some(0x40_2000));
+        assert!(regions[0].entropy > 7.5, "{regions:?}");
+    }
+
+    /// A run of one byte value has no entropy and prints as `0.00`, never
+    /// `-0.00`.
+    #[test]
+    fn one_byte_value_reads_positive_zero() {
+        let e = shannon(&[7; 64]);
+        assert!(e == 0.0 && e.is_sign_positive(), "{e}");
+        assert_eq!(format!("{e:.2}"), "0.00");
+    }
+
+    /// A threshold outside 0..8 is refused in words that fit a line, whatever
+    /// its size.
+    ///
+    /// The report pages its regions under a `showing` header.
+    #[test]
+    fn thresholds_are_checked_and_regions_paged() {
+        assert_eq!(threshold_error(7.2), None);
+        assert_eq!(
+            threshold_error(9.0).as_deref(),
+            Some("threshold 9 is outside 0..8 bits per byte")
+        );
+        assert_eq!(
+            threshold_error(1e308).as_deref(),
+            Some("threshold 1e308 is outside 0..8 bits per byte")
+        );
+        assert!(threshold_error(f64::NAN).is_some());
+        assert!(threshold_error(-1.0).is_some());
+        let mut bytes = Vec::new();
+        for _ in 0..3 {
+            bytes.extend(noise(0x400));
+            bytes.extend(vec![0u8; 0x400]);
+        }
+        let p = Program::raw(bytes, Arch::Unknown, 0, None, Vec::new());
+        let first = report(&p, 1024, 7.2, 0, 2);
+        assert!(
+            first.starts_with(
+                "# showing 2 of 3 high-entropy regions (window=1024, threshold=7.20); offset=2 for the next page\n"
+            ),
+            "{first}"
+        );
+        let rest = report(&p, 1024, 7.2, 2, 2);
+        assert!(
+            rest.starts_with("# showing 1 of 3 high-entropy regions"),
+            "{rest}"
+        );
+        assert!(rest.contains("\n0x1000 "), "{rest}");
     }
 
     /// A 256-byte window of random bytes reads about 7.28 bits, and the

@@ -968,9 +968,10 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded.
+    /// When no binary is loaded, the threshold is outside 0..8 or the
+    /// limit is zero.
     #[tool(
-        description = "High-entropy regions (packed/encrypted data) as `off va len entropy` rows at or above threshold bits/byte (default 7.2, window 1024, max 200).",
+        description = "High-entropy regions (packed/encrypted data) as `off va len entropy` rows at or above threshold bits/byte (default 7.2, window 1024) under a `# showing N of M` header; paging (200, max 200; the scan stops at 200 regions).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -980,11 +981,32 @@ impl BorerServer {
     )]
     fn entropy(
         &self,
-        Parameters(EntropyParams { window, threshold }): Parameters<EntropyParams>,
+        Parameters(EntropyParams {
+            window,
+            threshold,
+            offset,
+            limit,
+        }): Parameters<EntropyParams>,
     ) -> Result<String, ErrorData> {
-        let window = to_usize(window.unwrap_or(1024).max(64));
+        let window = to_usize(window.unwrap_or(1024));
         let threshold = entropy_threshold(threshold.unwrap_or(7.2)).map_err(err_params)?;
-        self.with_program(|p| Ok(entropy_answer(p, window, threshold)))
+        let page = Page::new(
+            offset,
+            limit,
+            None,
+            entropy::REGIONS_MAX,
+            entropy::REGIONS_MAX,
+        )?;
+        self.with_program(|p| {
+            Ok(entropy::report(
+                p,
+                window,
+                threshold,
+                page.offset,
+                page.limit.n,
+            ))
+        })
+        .map(|text| page.limit.noted(text))
     }
 
     /// Scans every byte of the file for known crypto and hash constants,
@@ -3149,50 +3171,10 @@ fn strings_page(
 /// # Errors
 ///
 /// When the threshold is outside `0..=8` bits per byte: no window holds
-/// more than eight, and a negative one would report every window.
+/// more than eight, and a negative one would report every window
+/// ([`entropy::threshold_error`]).
 fn entropy_threshold(threshold: f64) -> Result<f64, String> {
-    if (0.0..=8.0).contains(&threshold) {
-        Ok(threshold)
-    } else {
-        Err(format!(
-            "threshold {threshold} is outside 0..8 bits per byte"
-        ))
-    }
-}
-
-/// Renders the high-entropy regions at or above a threshold, the answer
-/// `entropy` gives and the command line prints alike.
-///
-/// # Arguments
-///
-/// * `p` - The loaded program.
-/// * `window` - Window size in bytes.
-/// * `threshold` - Minimum bits per byte, read by [`entropy_threshold`].
-///
-/// # Returns
-///
-/// A count header, a note when the threshold is above what random data
-/// reaches in the window, then the region rows.
-fn entropy_answer(p: &Program, window: usize, threshold: f64) -> String {
-    let ceiling = entropy::ceiling(window);
-    let unreachable = if threshold > ceiling {
-        format!(
-            "# note: random data averages about {ceiling:.2} bits in a {window}-byte window; above that only windows that beat chance pass, so widen the window or lower the threshold\n"
-        )
-    } else {
-        String::new()
-    };
-    let regions = entropy::high_entropy_regions(p, window, threshold);
-    format!(
-        "# {} high-entropy regions (window={window}, threshold={threshold:.2}){}\n{unreachable}{}",
-        regions.len(),
-        if regions.len() >= entropy::REGIONS_MAX {
-            " (cap reached)"
-        } else {
-            ""
-        },
-        entropy::regions_tsv(p, &regions)
-    )
+    entropy::threshold_error(threshold).map_or(Ok(threshold), Err)
 }
 
 /// Renders one page of search hits, one `function: va va` row per run of

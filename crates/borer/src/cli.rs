@@ -14,11 +14,11 @@ use borer_engine::analysis::{
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::Program;
 use borer_engine::text::{quoted, short_path};
-use borer_engine::{disasm, hexdump as hexfmt, libsig, memory, script, search};
+use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, script, search};
 
 use super::{
-    entropy_answer, entropy_threshold, env_pack_files, parse_field_offset, read_packs, render_hits,
-    strings_page, walk_strings,
+    entropy_threshold, env_pack_files, parse_field_offset, read_packs, render_hits, strings_page,
+    walk_strings,
 };
 use crate::params::{Detail, Filter, SearchKind, StringEncoding};
 use crate::resources::ABOUT_NEEDS_A_NAME;
@@ -1191,7 +1191,16 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         Query::Entropy => {
             let threshold = entropy_threshold(num_arg(args, 2, 7.2, "entropy threshold")?)
                 .map_err(anyhow::Error::msg)?;
-            print!("{}", entropy_answer(&s.program, ENTROPY_WINDOW, threshold));
+            print!(
+                "{}",
+                entropy::report(
+                    &s.program,
+                    ENTROPY_WINDOW,
+                    threshold,
+                    0,
+                    entropy::REGIONS_MAX
+                )
+            );
         }
         Query::Search => {
             let pattern = arg(args, 2, "search needs a pattern")?;

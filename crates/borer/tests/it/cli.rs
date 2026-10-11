@@ -261,6 +261,24 @@ fn cli_help_lists_commands() {
     assert!(out.contains("MCP stdio server"));
 }
 
+/// `entropy` refuses a threshold outside 0..8 bits per byte as the MCP tool does.
+///
+/// It scanned for what no window can reach (or every window, below zero);
+/// it now refuses, and answers under a `showing` header.
+#[test]
+fn cli_entropy_checks_its_threshold() {
+    let exe = env!("CARGO_BIN_EXE_borer");
+    for bad in ["9", "-1", "NaN", "1e308"] {
+        let (ok, out) = run_all(&["entropy", exe, bad]);
+        assert!(!ok, "{bad} accepted:\n{out}");
+        assert!(out.contains("is outside 0..8 bits per byte"), "{out}");
+        assert!(out.len() < 400, "{out}");
+    }
+    let (ok, out) = run(&["entropy", exe, "7.9"]);
+    assert!(ok, "{out}");
+    assert!(out.starts_with("# showing "), "{out}");
+}
+
 /// `symbols` pages the way the MCP tool does.
 ///
 /// It lists 50 rows unless a limit says otherwise, and its header names the
