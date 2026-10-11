@@ -2,6 +2,7 @@
 //! rebuilt image.
 
 use super::*;
+use crate::text::one_line;
 
 /// Instructions the devirtualizer runs before giving up.
 pub(super) const DEVIRT_BUDGET: usize = 2_000_000;
@@ -77,14 +78,14 @@ pub fn devirtualize_tsv(
         if addr.is_empty() {
             unresolved(addr)
         } else {
-            format!("no function {addr}")
+            format!("no function {}", one_line(addr))
         }
     })?;
     let rest: Vec<&str> = parts.map(str::trim).filter(|t| !t.is_empty()).collect();
     let budget = match budget_token(rest.iter().copied()) {
         None => DEVIRT_BUDGET,
         Some(v) => parse_count(v)
-            .ok_or_else(|| format!("bad budget in budget={v}"))?
+            .ok_or_else(|| format!("bad budget in budget={}", one_line(v)))?
             .min(UNPACK_BUDGET_MAX),
     };
     let mut emu = Emulator::new(p, budget).ok_or_else(|| String::from("unknown architecture"))?;
@@ -96,17 +97,22 @@ pub fn devirtualize_tsv(
         .filter(|t| !matches!(**t, "strict" | "nobesteffort"))
     {
         let (reg, value) = token.split_once('=').ok_or_else(|| {
-            format!("cannot read the directive {token}; use strict, budget=N, or reg=value")
+            format!(
+                "cannot read the directive {}; use strict, budget=N, or reg=value",
+                one_line(token)
+            )
         })?;
         let reg = reg.trim();
         if reg.eq_ignore_ascii_case("budget") {
             continue;
         }
-        let v = parse_addr(value.trim()).ok_or_else(|| format!("bad value in {token}"))?;
+        let v =
+            parse_addr(value.trim()).ok_or_else(|| format!("bad value in {}", one_line(token)))?;
         let reg = reg.trim();
         if !emu.set_register(reg.to_lowercase().as_str(), v) {
             return Err(format!(
-                "{reg} is not a register this can set; use rax..r15 or rsp"
+                "{} is not a register this can set; use rax..r15 or rsp",
+                one_line(reg)
             ));
         }
     }
@@ -289,13 +295,13 @@ impl UnpackSpec {
             p.entry
                 .ok_or_else(|| String::from("the image has no entry point; give a start address"))?
         } else {
-            resolve(a, o, addr).ok_or_else(|| format!("no start address {addr}"))?
+            resolve(a, o, addr).ok_or_else(|| format!("no start address {}", one_line(addr)))?
         };
         let pairs: Vec<&str> = parts.collect();
         let budget = match budget_token(pairs.iter().copied()) {
             None => UNPACK_BUDGET,
             Some(v) => parse_count(v)
-                .ok_or_else(|| format!("bad budget in budget={v}"))?
+                .ok_or_else(|| format!("bad budget in budget={}", one_line(v)))?
                 .min(UNPACK_BUDGET_MAX),
         };
         let strict = pairs
@@ -308,13 +314,17 @@ impl UnpackSpec {
                 continue;
             }
             let (key, value) = token.split_once('=').ok_or_else(|| {
-                format!("cannot read the directive {token}; use budget=N, strict, or reg=value")
+                format!(
+                    "cannot read the directive {}; use budget=N, strict, or reg=value",
+                    one_line(token)
+                )
             })?;
             let key = key.trim();
             if key.eq_ignore_ascii_case("budget") {
                 continue;
             }
-            let v = parse_addr(value.trim()).ok_or_else(|| format!("bad value in {token}"))?;
+            let v = parse_addr(value.trim())
+                .ok_or_else(|| format!("bad value in {}", one_line(token)))?;
             presets.push((key.to_owned(), v));
         }
         Ok(Self {
@@ -403,7 +413,8 @@ pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resul
     for (name, v) in &spec.presets {
         if !emu.set_register(name.to_lowercase().as_str(), *v) {
             return Err(format!(
-                "{name} is not a register this can set; use rax..r15 or rsp"
+                "{} is not a register this can set; use rax..r15 or rsp",
+                one_line(name)
             ));
         }
     }

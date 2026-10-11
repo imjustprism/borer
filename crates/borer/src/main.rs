@@ -2796,6 +2796,14 @@ impl BorerServer {
                 "set_type needs `name` (+ `fields`, `values` or `type`) to define a type, or `address` + `type` to apply one",
             ));
         }
+        for text in name
+            .iter()
+            .chain(&ty)
+            .chain(fields.iter().flatten())
+            .chain(values.iter().flatten())
+        {
+            must_fit_a_row(text, Annotation::Type)?;
+        }
         self.with_analysis(|p, a, o| {
             let word: u64 = if p.is_64 { 8 } else { 4 };
             // The definition half: built and validated against the types

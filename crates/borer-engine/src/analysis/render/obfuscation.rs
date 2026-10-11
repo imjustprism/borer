@@ -423,7 +423,7 @@ pub fn vm_dispatch_tsv(
     let d = found
         .iter()
         .find(|d| d.site == want || d.entry == want)
-        .ok_or_else(|| format!("no dispatch loop at {filter}"))?;
+        .ok_or_else(|| format!("no dispatch loop at {}", crate::text::one_line(filter)))?;
     let mut out = format!(
         "# {} handlers of the dispatch at {:#x} in {}, {} of them return to it\n",
         d.handlers.len(),

@@ -303,7 +303,11 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
         return out;
     }
     rows.sort_by_key(|r| (std::cmp::Reverse(r.functions), r.path.clone()));
-    let mut out = format!("# {} files match '{filter}'\n{base}", rows.len());
+    let mut out = format!(
+        "# {} files match {}\n{base}",
+        rows.len(),
+        crate::text::quoted(filter)
+    );
     out.push_str("# functions\tfirst\tfile\n");
     for r in rows.iter().take(SOURCES_MAX) {
         let _ = writeln!(out, "{}\t{:#x}\t{}", r.functions, r.first, r.path);

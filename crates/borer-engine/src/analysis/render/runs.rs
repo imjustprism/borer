@@ -5,6 +5,7 @@ use super::*;
 use crate::analysis::decompile::interp::{End, Script, TextRun};
 use crate::analysis::decompile::signature::{Kind, Passing, Signature, passing, printed};
 use crate::analysis::decompile::{decompile_named, traces, verify};
+use crate::text::one_line;
 
 /// Most input sets one request runs.
 const INPUTS_MAX: usize = 64;
@@ -246,14 +247,16 @@ fn argument(t: &str) -> Result<Arg, String> {
         Arg::Bytes(text_bytes(body)?)
     } else if let Some(h) = t.strip_prefix("hex:") {
         Arg::Bytes(
-            parse_hex_bytes(h).ok_or_else(|| format!("{t}: hex: takes pairs of hex digits"))?,
+            parse_hex_bytes(h)
+                .ok_or_else(|| format!("{}: hex: takes pairs of hex digits", one_line(t)))?,
         )
     } else if let Some(n) = t.strip_prefix("out:") {
-        Arg::Out(parse_count(n).ok_or_else(|| format!("{t}: out: takes a size"))?)
+        Arg::Out(parse_count(n).ok_or_else(|| format!("{}: out: takes a size", one_line(t)))?)
     } else {
         Arg::Int(integer(t).ok_or_else(|| {
             format!(
-                "cannot read the argument {t}; use a number, \"text\", hex:<bytes> or out:<size>"
+                "cannot read the argument {}; use a number, \"text\", hex:<bytes> or out:<size>",
+                one_line(t)
             )
         })?)
     };
@@ -263,7 +266,10 @@ fn argument(t: &str) -> Result<Arg, String> {
         Arg::Out(n) => *n,
     };
     if len > BUFFER_MAX {
-        return Err(format!("{t}: a buffer is at most {BUFFER_MAX:#x} bytes"));
+        return Err(format!(
+            "{}: a buffer is at most {BUFFER_MAX:#x} bytes",
+            one_line(t)
+        ));
     }
     Ok(arg)
 }
@@ -295,7 +301,7 @@ fn parse_run(a: &Analysis, o: &Overlay, spec: &str) -> Result<RunSpec, String> {
         let n = option
             .strip_prefix("steps=")
             .and_then(parse_count)
-            .ok_or_else(|| format!("cannot read {option}; use steps=N"))?;
+            .ok_or_else(|| format!("cannot read {}; use steps=N", one_line(option)))?;
         if n == 0 || n > BUDGET_MAX {
             return Err(format!("steps is 1 to {BUDGET_MAX}"));
         }

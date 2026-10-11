@@ -362,7 +362,8 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
     for &(ref reg, v) in &spec.regs {
         if !emu.set_register(reg, v) {
             return Err(format!(
-                "{reg} is not a register this can set; use rax..r15, rsp, or aN for the argument the decompiler names aN (a1 is the first)"
+                "{} is not a register this can set; use rax..r15, rsp, or aN for the argument the decompiler names aN (a1 is the first)",
+                crate::text::one_line(reg)
             ));
         }
     }

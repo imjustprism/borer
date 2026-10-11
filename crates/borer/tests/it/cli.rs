@@ -397,6 +397,35 @@ fn cli_counts_and_devices_are_refused_alike() {
     }
 }
 
+/// An error quotes a 30 KB argument cut short on one row, where it came
+/// back whole.
+///
+/// # Panics
+///
+/// When an error runs past a row.
+#[test]
+fn cli_errors_quote_a_long_argument_cut_short() {
+    let exe = std::env::current_exe().expect("the test binary has a path");
+    let exe = exe.to_string_lossy().to_string();
+    let long = "A".repeat(30_000);
+    for args in [
+        vec!["read", exe.as_str(), "0x0", long.as_str()],
+        vec!["search", exe.as_str(), "41", long.as_str()],
+        vec!["types", exe.as_str(), long.as_str()],
+        vec![
+            "set-type",
+            exe.as_str(),
+            "C:/borer-no-such/p.json",
+            long.as_str(),
+        ],
+        vec![long.as_str(), exe.as_str()],
+    ] {
+        let (ok, out) = run_all(&args);
+        assert!(!ok, "{} succeeded", args[0].len());
+        assert!(out.len() < 1500, "{} bytes: {}", out.len(), &out[..120]);
+    }
+}
+
 /// `--help` lists the commands and mentions the MCP server mode.
 #[test]
 fn cli_help_lists_commands() {

@@ -13,7 +13,7 @@ use borer_engine::analysis::{
 };
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::Program;
-use borer_engine::text::{quoted, short_path};
+use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, script, search};
 
 use super::{
@@ -576,7 +576,8 @@ fn search_args(words: &[String]) -> anyhow::Result<(SearchKind, usize)> {
                     offset.get_or_insert(n);
                 }
                 Err(_) => bail!(
-                    "search takes `text`, `bytes` or a page offset after the pattern, not '{other}'"
+                    "search takes `text`, `bytes` or a page offset after the pattern, not {}",
+                    quoted(other)
                 ),
             },
         }
@@ -664,7 +665,7 @@ fn cli_limit(args: &[String], at: usize, default: usize, max: usize) -> anyhow::
     let limit = match args.get(at).filter(|l| !l.is_empty()) {
         Some(l) => l
             .parse::<usize>()
-            .with_context(|| format!("limit '{l}' is not a number"))?,
+            .with_context(|| format!("limit {} is not a number", quoted(l)))?,
         None => default,
     };
     if limit == 0 {
@@ -697,7 +698,7 @@ fn cli_page(
     let offset = match args.get(at).filter(|o| !o.is_empty()) {
         Some(o) => o
             .parse::<usize>()
-            .with_context(|| format!("offset '{o}' is not a number"))?,
+            .with_context(|| format!("offset {} is not a number", quoted(o)))?,
         None => 0,
     };
     Ok((offset, cli_limit(args, at + 1, default, max)?))
@@ -1634,7 +1635,9 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let text = match s.resolve(&a, what) {
                 Ok(va) => {
                     schema::schema_tsv(&s.program, &a, &s.overlay, entry_at(&s.program, &a, va)?)
-                        .with_context(|| format!("{what} hands no stream to its calls"))?
+                        .with_context(|| {
+                            format!("{} hands no stream to its calls", one_line(what))
+                        })?
                 }
                 Err(_) => schema::class_schema_tsv(&s.program, &a, &s.overlay, what).with_context(
                     || {
@@ -1665,7 +1668,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let text = match s.resolve(&a, what) {
                 Ok(va) => {
                     encode::encoding_tsv(&s.program, &a, &s.overlay, entry_at(&s.program, &a, va)?)
-                        .with_context(|| format!("{what} hands its stream nothing"))?
+                        .with_context(|| format!("{} hands its stream nothing", one_line(what)))?
                 }
                 Err(_) => encode::class_encoding_tsv(&s.program, &a, &s.overlay, what)
                     .with_context(|| {
@@ -1933,8 +1936,9 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                         ""
                     };
                     println!(
-                        "wrote {} bytes to {out}{entry_note}{partial_note}",
-                        bytes.len()
+                        "wrote {} bytes to {}{entry_note}{partial_note}",
+                        bytes.len(),
+                        short_path(out)
                     );
                 }
                 None => print!(
@@ -1986,7 +1990,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let kind_text = args.get(3).map_or("u64", String::as_str);
             let kind = memory::Kind::parse(kind_text).with_context(|| {
                 format!(
-                    "unknown kind '{kind_text}'; use one of: {}",
+                    "unknown kind {}; use one of: {}",
+                    quoted(kind_text),
                     memory::Kind::NAMES
                 )
             })?;
@@ -2023,9 +2028,11 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 Some(out) => {
                     write_file(out, text.as_bytes())?;
                     println!(
-                        "wrote {} fingerprints to {out} ({} bytes); borer://diff/{out} reads it",
+                        "wrote {} fingerprints to {} ({} bytes); borer://diff/{} reads it",
                         a.functions.len(),
-                        text.len()
+                        short_path(out),
+                        text.len(),
+                        short_path(out)
                     );
                 }
                 None => print!("{text}"),
@@ -2169,17 +2176,24 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                         let (Some(off), Some(field), Some(ty)) =
                             (parts.next(), parts.next(), parts.next())
                         else {
-                            bail!("field {spec} is not off:name:type");
+                            bail!("field {} is not off:name:type", one_line(spec));
                         };
                         let off = parse_addr(off).with_context(|| {
-                            format!("field {field}'s offset {off} is not a number")
+                            format!(
+                                "field {}'s offset {} is not a number",
+                                one_line(field),
+                                one_line(off)
+                            )
                         })?;
                         let ty = utypes::parse_type(ty)
-                            .with_context(|| format!("field {field}'s type"))?;
+                            .with_context(|| format!("field {}'s type", one_line(field)))?;
                         stated.push((off, field.to_owned(), ty));
                     }
                     if stated.is_empty() {
-                        bail!("struct {name} states no fields; give them as off:name:type");
+                        bail!(
+                            "struct {} states no fields; give them as off:name:type",
+                            one_line(name)
+                        );
                     }
                     let built = utypes::build_struct(name, size, &stated, &overlay.types, word)
                         .map_err(anyhow::Error::msg)?;
@@ -2206,15 +2220,22 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     let mut stated: Vec<(u64, String)> = Vec::new();
                     for spec in args.iter().skip(at) {
                         let Some((value_name, value)) = spec.split_once(':') else {
-                            bail!("value {spec} is not name:value");
+                            bail!("value {} is not name:value", one_line(spec));
                         };
                         let value = parse_addr(value).with_context(|| {
-                            format!("value {value_name}: {value} is not a number")
+                            format!(
+                                "value {}: {} is not a number",
+                                one_line(value_name),
+                                one_line(value)
+                            )
                         })?;
                         stated.push((value, value_name.to_owned()));
                     }
                     if stated.is_empty() {
-                        bail!("enum {name} states no values; give them as name:value");
+                        bail!(
+                            "enum {} states no values; give them as name:value",
+                            one_line(name)
+                        );
                     }
                     let built = utypes::build_enum(name, size.unwrap_or(4), &stated)
                         .map_err(anyhow::Error::msg)?;
@@ -2275,12 +2296,15 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     );
                     overlay.applied.insert(va, ty);
                 }
-                other => bail!("set-type takes struct, enum, typedef or apply, not {other}"),
+                other => bail!(
+                    "set-type takes struct, enum, typedef or apply, not {}",
+                    one_line(other)
+                ),
             }
             borer::project::ProjectFile::from_overlay(&program, &overlay)
                 .save(project)
                 .map_err(anyhow::Error::msg)?;
-            println!("{say}; written to {project}");
+            println!("{say}; written to {}", short_path(project));
         }
         Query::Verify => {
             let a = s.analysis()?;

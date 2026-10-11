@@ -51,8 +51,13 @@ impl ValueSpec {
         let bitness = bitness.ok_or_else(|| String::from("unknown architecture"))?;
         let names = RegisterNames::for_bitness(bitness);
         let wanted = rest.next().unwrap_or(default(&names)).trim().to_lowercase();
-        let seed = iced_register(&wanted, bitness)
-            .ok_or_else(|| format!("{wanted} is not a general register; use {}", names.range))?;
+        let seed = iced_register(&wanted, bitness).ok_or_else(|| {
+            format!(
+                "{} is not a general register; use {}",
+                crate::text::one_line(&wanted),
+                names.range
+            )
+        })?;
         let entry = a
             .function_at(start)
             .ok_or_else(|| format!("no function contains {start:#x}"))?
@@ -773,7 +778,7 @@ pub(super) fn unresolved(token: &str) -> String {
     if token.is_empty() {
         String::from("no address or name given")
     } else {
-        format!("cannot resolve {token}")
+        format!("cannot resolve {}", crate::text::one_line(token))
     }
 }
 
@@ -1113,11 +1118,12 @@ impl ExperimentSpec {
             ..Self::default()
         };
         for raw in parts {
-            let token = raw.trim();
-            if token.is_empty() {
+            let text = raw.trim();
+            if text.is_empty() {
                 continue;
             }
-            let (key, value) = token.split_once('=').ok_or_else(|| {
+            let token = crate::text::one_line(text);
+            let (key, value) = text.split_once('=').ok_or_else(|| {
                 format!(
                     "cannot read the directive {token}; use reg=v, aN=v, w<addr>=<hex>, stop=<addr>, steps=N, trace=N, origin=v, profile=N or dump=<addr>:<len>"
                 )

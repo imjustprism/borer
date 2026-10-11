@@ -4,7 +4,7 @@
 use super::*;
 use crate::analysis::decompile::decompile_named;
 use crate::analysis::decompile::signature::printed;
-use crate::text::one_line;
+use crate::text::{one_line, quoted};
 
 /// Check values a standard checksum produces for the probe string.
 ///
@@ -487,7 +487,7 @@ pub fn oracle_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resul
                 .find(|f| name_of(a, o, f.entry) == target)
         })
         .map(|f| f.entry)
-        .ok_or_else(|| format!("no discovered function at '{target}'"))?;
+        .ok_or_else(|| format!("no discovered function at {}", quoted(target)))?;
     let mut attempts: Vec<Attempt> = Vec::new();
     for (shape, order) in SHAPES {
         for permissive in [false, true] {
@@ -589,6 +589,56 @@ mod tests {
             oracle_tsv(&p, &a, &o, "").unwrap_err(),
             "no discovered function at ''"
         );
+    }
+
+    /// A refusal quotes the caller's text cut to one row: every spec
+    /// renderer echoed a 30 KB spec whole in its error.
+    ///
+    /// # Panics
+    ///
+    /// When a refusal runs past a row.
+    #[test]
+    fn a_refusal_quotes_a_long_spec_cut_short() {
+        use crate::analysis::render::{
+            devirtualize_tsv, emulate_tsv, run_tsv, taint_tsv, unpack_tsv, vm_dispatch_tsv,
+        };
+        /// Longest refusal a row of quoted text makes.
+        const ROW: usize = 600;
+        let p = Program::raw_x64(&[0xc3]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let long = "A".repeat(30_000);
+        let specs = [
+            long.clone(),
+            format!("0x1000,{long}"),
+            format!("0x1000,steps={long}"),
+            format!("0x1000,{long}=1"),
+            format!("0x1000/{long}"),
+            format!("0x1000,budget={long}"),
+        ];
+        type Renderer = fn(&Program, &Analysis, &Overlay, &str) -> Result<String, String>;
+        let renderers: [(&str, Renderer); 8] = [
+            ("solve", solve_tsv),
+            ("oracle", oracle_tsv),
+            ("emulate", emulate_tsv),
+            ("run", run_tsv),
+            ("taint", taint_tsv),
+            ("devirt", devirtualize_tsv),
+            ("unpack", unpack_tsv),
+            ("vm", vm_dispatch_tsv),
+        ];
+        for (name, render) in renderers {
+            for spec in &specs {
+                if let Err(why) = render(&p, &a, &o, spec) {
+                    assert!(
+                        why.len() < ROW,
+                        "{name}: {} bytes: {}",
+                        why.len(),
+                        &why[..80]
+                    );
+                }
+            }
+        }
     }
 
     /// A solve refuses an argument the function's signature does not list,

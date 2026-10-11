@@ -209,8 +209,12 @@ pub(crate) fn obtain(
         )
     })?;
     let key = record.symsrv_key();
-    let address = url(server, name, &key)
-        .ok_or_else(|| format!("server '{server}' is not an absolute http(s) URL"))?;
+    let address = url(server, name, &key).ok_or_else(|| {
+        format!(
+            "server {} is not an absolute http(s) URL",
+            borer_engine::text::quoted(server)
+        )
+    })?;
     let dest = cache_path(root, name, &key);
     if dest.is_file() {
         return Ok(format!(

@@ -269,7 +269,8 @@ impl ProjectFile {
         if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
             return Err(format!("{why}; nothing was written"));
         }
-        std::fs::write(Path::new(path), json).map_err(|e| format!("write {path}: {e}"))
+        std::fs::write(Path::new(path), json)
+            .map_err(|e| format!("write {}: {e}", borer_engine::text::short_path(path)))
     }
 
     /// Reads and parses a project file.
@@ -285,8 +286,9 @@ impl ProjectFile {
         if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
             return Err(why);
         }
+        let shown = borer_engine::text::short_path(path);
         let text =
-            std::fs::read_to_string(Path::new(path)).map_err(|e| format!("read {path}: {e}"))?;
-        serde_json::from_str(&text).map_err(|e| format!("parse {path}: {e}"))
+            std::fs::read_to_string(Path::new(path)).map_err(|e| format!("read {shown}: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("parse {shown}: {e}"))
     }
 }

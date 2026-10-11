@@ -276,15 +276,18 @@ pub fn explode_tsv(cases: &[ScenarioCase], slot: u8, tried: usize) -> String {
 /// When the spec does not read, or asks for more than [`EXPLODE_MAX`]
 /// values.
 pub fn parse_explosion(spec: &str) -> Result<(u8, Vec<u64>), String> {
-    let (name, values) = spec
-        .split_once('=')
-        .ok_or_else(|| format!("`{spec}` is not a<n>=<from>..<to> or a<n>=<v>|<v>"))?;
+    let (name, values) = spec.split_once('=').ok_or_else(|| {
+        format!(
+            "`{}` is not a<n>=<from>..<to> or a<n>=<v>|<v>",
+            crate::text::one_line(spec)
+        )
+    })?;
     let one = |v: &str| -> Result<u64, String> {
         let pairs = parse_scenario(&format!("{}={}", name.trim(), v.trim()))?;
         pairs
             .first()
             .map(|&(_, v)| v)
-            .ok_or_else(|| format!("`{v}` is not a number"))
+            .ok_or_else(|| format!("`{}` is not a number", crate::text::one_line(v)))
     };
     let slot = parse_scenario(&format!("{}=0", name.trim()))?
         .first()
@@ -326,13 +329,18 @@ pub fn parse_scenario(spec: &str) -> Result<Vec<(u8, u64)>, String> {
         .map(|part| {
             let (name, value) = part
                 .split_once('=')
-                .ok_or_else(|| format!("`{part}` is not a<n>=<value>"))?;
+                .ok_or_else(|| format!("`{}` is not a<n>=<value>", crate::text::one_line(part)))?;
             let n: u8 = name
                 .trim()
                 .strip_prefix('a')
                 .and_then(|d| d.parse().ok())
                 .filter(|n| *n >= 1)
-                .ok_or_else(|| format!("`{}` is not a parameter (a1, a2, ...)", name.trim()))?;
+                .ok_or_else(|| {
+                    format!(
+                        "`{}` is not a parameter (a1, a2, ...)",
+                        crate::text::one_line(name.trim())
+                    )
+                })?;
             let value = value.trim();
             let (negative, digits) = value
                 .strip_prefix('-')
@@ -344,7 +352,7 @@ pub fn parse_scenario(spec: &str) -> Result<Vec<(u8, u64)>, String> {
                     || digits.parse::<u64>().ok(),
                     |h| u64::from_str_radix(h, 16).ok(),
                 )
-                .ok_or_else(|| format!("`{value}` is not a number"))?;
+                .ok_or_else(|| format!("`{}` is not a number", crate::text::one_line(value)))?;
             Ok((n - 1, if negative { v.wrapping_neg() } else { v }))
         })
         .collect::<Result<_, String>>()?;

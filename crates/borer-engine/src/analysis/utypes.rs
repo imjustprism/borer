@@ -73,14 +73,20 @@ const SCALARS: [(&str, u64); 11] = [
 pub const PTR_DEPTH_MAX: usize = 16;
 
 /// Tells whether `text` is an identifier a name may take: a letter or `_`
-/// first, then letters, digits or `_`.
+/// first, then letters, digits or `_`, at most [`crate::text::OUTSIDE_MAX`]
+/// of them.
+///
+/// The bound is what keeps a type or field name in a message on one row:
+/// every refusal that names one (`struct X states two fields named Y`,
+/// `X resolves to no size`) echoed a 30 KB name whole.
 ///
 /// # Arguments
 ///
 /// * `text` - The candidate name.
 pub(crate) fn is_ident(text: &str) -> bool {
     let mut chars = text.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+    text.len() <= crate::text::OUTSIDE_MAX
+        && matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 

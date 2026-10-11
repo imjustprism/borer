@@ -331,7 +331,7 @@ pub fn map_tsv(analysis: &Analysis, overlay: &Overlay, namespace: &str, limit: u
         out,
         "# {} classes under {}: {}, showing {}",
         picked.len(),
-        prefix.trim_end_matches("::"),
+        crate::text::one_line(prefix.trim_end_matches("::")),
         if summary.is_empty() {
             "none".to_owned()
         } else {
