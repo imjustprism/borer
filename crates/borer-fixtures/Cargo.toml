@@ -1,0 +1,12 @@
+[package]
+name = "borer-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Programs compiled as test fixtures for borer: binaries whose source shape the tests check the decompiler against."
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+# Pinned toolchain: the gate (fmt, clippy -D warnings, doc lints) is only
+# reproducible when everyone runs the same lint set. Bump deliberately, with
+# the gate green, and keep rust-version in Cargo.toml in step.
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy", "rust-docs"]
+profile = "minimal"

@@ -1,0 +1,26 @@
+[package]
+name = "borer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "borer MCP server: exposes the borer-engine over stdio JSON-RPC for AI agents."
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+borer-engine = { version = "0.1.0", path = "../borer-engine" }
+borer-live = { version = "0.1.0", path = "../borer-live" }
+mimalloc = "0.1.52"
+rayon = "1.12.0"
+regex = "1.13.1"
+rmcp = { version = "3.2.0", features = ["server", "transport-io"] }
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }

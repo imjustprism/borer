@@ -1,0 +1,9 @@
+# rustfmt: stable options only, so `cargo fmt` behaves the same on every
+# stable toolchain (unstable options are rejected there).
+style_edition = "2024"
+max_width = 100
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true
+reorder_imports = true
+reorder_modules = true

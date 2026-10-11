@@ -1,0 +1,14 @@
+/target
+# side build directories (CARGO_TARGET_DIR=target-live and friends)
+/target*/
+
+# local MCP registration (absolute path, machine-specific)
+.mcp.json
+
+# Python bytecode from the helper scripts.
+__pycache__/
+
+# Per-user agent and editor state.
+.claude/settings.local.json
+CLAUDE.local.md
+.cache/

@@ -1,0 +1,23 @@
+# clippy configuration (lint levels live in Cargo.toml [workspace.lints]).
+
+# Documentation discipline applies to private items too: `missing_errors_doc`,
+# `missing_panics_doc` and `missing_safety_doc` then check every function.
+check-private-items = true
+
+# Tests may unwrap; engine and server code never does.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+
+# Words `doc_markdown` must not ask us to backtick (".." keeps clippy's list).
+doc-valid-idents = ["SysV", "AArch64", "MinGW", "WinDbg", "GitHub", "ChaCha", ".."]
+
+# Determinism is a contract, so no answer may depend on the time.
+# The engine budgets work in steps; only the server's own timing line, the
+# benchmarks and the timing tests read the clock, each saying why.
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "the engine is deterministic: bound work in steps, not time" },
+  { path = "std::time::SystemTime::now", reason = "the engine is deterministic: no answer depends on the time" },
+]

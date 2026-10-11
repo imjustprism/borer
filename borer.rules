@@ -1,0 +1,169 @@
+# borer development rules.
+#
+# One file for every contributor and every coding agent. Each name a coding
+# agent looks for is a symlink to it: AGENTS.md (Codex, Cursor, Copilot,
+# Jules, Windsurf, Zed, Aider, Devin and most others), AGENT.md (Amp, Zed),
+# CLAUDE.md (Claude Code), GEMINI.md (Gemini CLI), QWEN.md (Qwen Code),
+# .rules (Zed), .cursorrules, .windsurfrules, .clinerules, .roorules,
+# .junie/guidelines.md (JetBrains Junie) and .github/copilot-instructions.md.
+# Edit this file, never a link. It is valid YAML.
+
+title: borer development rules
+
+about: >
+  borer is an agent-native reverse-engineering engine: a pure Rust core with
+  an MCP-first interface, no GUI, no host tool, no JVM. The AI agent is the
+  user, and every output is designed for a context window, not a screen.
+  borer-engine is a sync, pure, wasm-buildable library; borer is a thin MCP
+  server and CLI on top of it. Read the code around a change before writing
+  it. Where a rule and the code disagree, settle it in the same change
+  instead of papering over it.
+
+workspace:
+  crates/borer-engine: the analysis core. Loading, disassembly, lifting, emulation, decompilation, queries.
+  crates/borer: the MCP server over stdio and the CLI, both thin adapters over the engine.
+  crates/borer-live: read-only access to a running process, the only crate that calls the OS process API.
+  crates/borer-fixtures: small programs the tests compile, decompile and check against their source.
+  packs: target knowledge (engine conventions, signatures) and example Rhai scripts.
+  scripts: the gate, the smoke test and measurement helpers, all Python.
+
+rules:
+  product:
+    - MCP-native, not MCP-wrapped. borer owns its loader, IR and analysis; never bridge to another reverse-engineering tool as an engine backend.
+    - The agent is the user, so token economy is a feature. Plain-text tables, server-side filtering, hard caps, `showing N of M` headers, count-only modes. Never dump a JSON blob or an unbounded list into a context window.
+    - Determinism is a contract. Same binary, same query, same answer, byte for byte. Nothing in the engine depends on the time, a random seed or the environment.
+    - Honest scope. Loading and disassembly are the easy part and the decompiler is where the work is. Never claim quality the engine does not have; rough output says it is rough.
+    - No GUI, ever. No web UI, no TUI, no image renderer. Interfaces are the library API, the CLI, MCP and WASM; a feature that only makes sense on a screen is out of scope.
+
+  critical:
+    - The engine crate is pure. No async, no tokio, no MCP types and no filesystem writes in borer-engine, only sync functions of explicit inputs. That is what keeps it testable and wasm-buildable, and breaking it is never worth it.
+    - Untrusted input is the norm. The bytes may be malformed, packed or hostile. Every read is bounds-checked, every scan capped, every walk fuel-limited. Fed garbage, the server answers or returns an error; it never panics.
+    - Never guess a crate API. Check docs.rs or the source in ~/.cargo/registry before writing the call; code that compiles from a guess is still a guess.
+    - Piped exit codes lie. `cargo build 2>&1 | tail` returns the status of tail, so check the command's own exit status before claiming a pass.
+    - Done means a command says done. The gate is the termination test (see toolchain). Never edit a test to make it pass; a wrong test is reported, not silenced.
+    - Make the smallest change that solves the problem, with no drive-by refactors. If a helper or type already exists, use it instead of writing a second one.
+    - Push back when an idea is wrong, whoever it comes from. Say why, then do the right thing or ask.
+
+  code:
+    - Less code is better code. The same behavior in fewer lines wins; nothing clever, nothing cute.
+    - No speculative abstraction. No trait for one call site, no generic parameter just in case, no wrapper function that adds nothing.
+    - Delete dead code, never comment it out. No backwards-compatibility shims, no dead feature flags.
+    - Parse at the boundary into typed structs, then trust them; do not re-validate downstream.
+    - Matches are exhaustive. Never a catch-all `_ =>` that silently hides a new enum variant.
+    - Derive Debug, Clone, Copy, PartialEq, Eq and Hash rather than hand-writing them; use newtypes over bare primitives where a value has domain meaning.
+    - One module, one responsibility. Keep the pub surface minimal, pub(crate) by default.
+    - Inline single-use bindings, hoist constants out of loops, no magic numbers.
+
+  docs:
+    - Every item is documented. fn, method, struct, field, enum, variant, const, static, type alias and module (`//!`). missing_docs and clippy::missing_docs_in_private_items enforce it, and cargo doc with -D warnings checks the links.
+    - Doc blocks follow JSDoc discipline in rustdoc form. Line 1 is one sentence in third-person present ("Returns ...", "Decompiles ..."), never "This function". A blank `///` line follows when more comes.
+    - Sections come in this order, each only when it applies. Details prose, then `# Arguments` (one bullet per parameter other than self with its meaning, unit and accepted forms, mandatory when the fn has parameters), `# Returns` (mandatory for a non-unit return, saying what None or Err mean), `# Errors` (mandatory for Result), `# Panics` (mandatory when reachable, and engine or server code must have none, so one is a bug report), `# Safety` (unsafe only) and `# Examples` (public entry points, as a doctest).
+    - Fields, variants and consts get one `///` line each with meaning, unit and invariant.
+    - Identifiers in prose are backticked and items are intra-doc links like [`Analysis::compute`], never bare CamelCase (clippy::doc_markdown).
+    - No `//` prose comments and no commented-out code. The only `//` lines are single-line tagged notes, namely `// SAFETY:`, `// SPEC:` with a citation, `// INVARIANT:`, `// PERF:`, `// ASM:` with the instruction a hand-assembled byte literal encodes, and `// ---- name ----` section dividers in files over 500 lines. The reason for a block of code belongs in the enclosing item's doc block.
+    - JSDoc tags map to rustdoc like this. @param becomes an `# Arguments` bullet, @returns `# Returns`, @throws `# Errors`, @example `# Examples`, @see a [`link`], @deprecated `#[deprecated(note)]`, @typedef and @property struct and field docs, @internal a private item that is still documented, and @todo an issue, never a comment in code.
+
+  typesafety:
+    - An address is a u64 virtual address everywhere. A u64 that means a file offset or a size says so in its name (`off`, `len`, `size`) and becomes an address only through `Program::offset_to_va` and `Program::va_to_offset`.
+    - Functions, blocks and xref targets are named by their start address. Functions stay sorted by entry and are found through `Analysis::function` or `Analysis::function_at`, never by an index held across calls.
+    - Make illegal states unrepresentable. Enums over bool soup, Option over sentinel values, lengths that cannot be negative as usize at the parse boundary.
+    - Lifted expressions carry their width (`expr::Ty`), and a width change is an explicit `Cast` or `Sext` node.
+    - A width conversion says what it keeps. `crate::num::lo32` for the low bits, `cast_signed` or `cast_unsigned` for the same bits with the other sign, `u64::from` to widen, `try_from` where a value may not fit, `num::as_f64` for a statistic. Never a bare `as` between integer widths; the cast lints are errors in the gate, and an `#[expect]` on one names what guarantees the cast cannot lose.
+    - A tool parameter that takes one of a few words is an enum in the schema (`params::ReadKind`, `SymbolKind`, `SearchKind`, `StringEncoding`, `Detail`). The agent sees the choices before it calls, serde refuses anything else, and no handler matches on strings.
+
+  architecture:
+    - iced-x86 decodes, and the decompiler lifts x86/x64 straight into its own expression tree (`decompile::lift`, `decompile::expr`). `decompile::verify` checks the lift against the emulator block by block, and any lifter change keeps it green.
+    - Analysis is pure, derived and immutable. Program is immutable and `Analysis::compute` runs once per Program. Every result derived later is memoized in `Analysis::derived`, keyed by what it depends on (the overlay's fingerprint when names matter), and kept while it can still be asked for. `Derived::forget_names_but` drops results read under names that changed, on every rename, comment and project load, and per-function results also live within a byte budget, least recently asked first.
+    - A memoized value is a pure function of its key and is never compared by address, so dropping one costs time, never a different answer. There is one memo store; never add a second Mutex-guarded map beside it, and never add global state.
+    - Output conventions are load-bearing. Tables with a `#` header line, filter, offset, limit and count parameters on every list tool, hard caps with `showing N of M`, and dry-run by default on every tool that changes state.
+    - Program holds only facts derived from the file. User annotations (names, comments, types) live in a separate `Overlay`, identified by its fingerprint.
+    - Knowledge about one target (an engine's class conventions, registrars, message ports) lives in packs (`packs/*.borer`), never as a hard-coded name in engine code. Tests may use real names as fixtures.
+    - The MCP server is a thin adapter, and interesting logic belongs in borer-engine behind a test. In the server crate, `main.rs` holds the tool router and resource dispatch only; params, resource handlers, the answer memory (`recall`) and the CLI each live in their own module.
+
+  mcp:
+    - stdout belongs to the protocol. No println, no banners, no progress output in the server; diagnostics go to stderr or into tool results.
+    - Errors are ErrorData results so clients see isError, never error text inside a success.
+    - Tool descriptions and parameter docs are written for an agent that has never seen the project. Say what the tool returns, its caps and its defaults.
+    - Addresses accept 0x-hex, decimal or a name at the boundary (`parse_addr`, `resolve`); inside, they are u64 virtual addresses.
+
+  errors:
+    - Never .unwrap(), .expect(), panic!, unreachable! or todo!() in engine or server code. Tests may unwrap.
+    - The engine returns Option where not-found is the only failure and anyhow::Result where a message must reach the agent (loading, parsing a spec). No error enum until a caller needs to match on a variant.
+    - Attach context to every error (which address, which section, what the mapping expected) so an agent can correct itself from the message alone.
+    - Never swallow a Result with `let _ =` or .ok() when the outcome matters.
+
+  perf:
+    - Prefer borrows, and never .clone() to silence the borrow checker.
+    - Iterators over index loops, no needless intermediate collects, with_capacity when the size is known.
+    - Cap scans by design, not by hope. Sample entropy over huge sections, window the disassembler, page the string list.
+    - Parallel per-function work in the engine uses `std::thread::scope` over stripes (`analysis::striped`), with results put back in address order; rayon stays in the server. Never parallelize anything order-sensitive.
+    - Async only in the server transport, where I/O actually happens; the engine stays sync.
+    - Builds and tests use every core for minutes and a borer process can take hundreds of MB. Keep at most two borer processes alive per task, push many functions through one process (`decompile_batch`, a dogfood test) rather than a loop of CLI calls, and run one gate at a time; gate.py takes a machine-wide lock for that.
+
+  rust:
+    - Prefer ?, let-else, matches!, map_or and iterator combinators, plus destructuring and .. rest patterns.
+    - Trust inference for locals; annotate public signatures and exported types.
+    - From and TryFrom for conversions, `#[must_use]` on builders and results.
+
+  testing:
+    - cargo test --workspace covers the units; scripts/smoke.py drives the real server over JSON-RPC stdio and must exit 0. Both run inside the gate.
+    - Engine tests are pure. Known byte sequences and hand-built structs; no fixtures on disk unless tiny and license-free.
+    - The test binary is itself a real PE, so parsing current_exe() is the end-to-end loader test on Windows.
+    - Determinism tests come before convenience features. Same input, two runs, identical bytes.
+    - Every fix comes with a test. A decompiler fix extends crates/borer-engine/tests/decompile.rs; a lifter fix adds a test that checks the lift against the emulator, like the existing *_agrees_with_the_emulator ones.
+
+  toolchain:
+    - The gate is one command, `python scripts/gate.py`. It runs the commit message check, cargo fmt, cargo clippy --workspace --all-targets with -D warnings, cargo test, cargo doc with private items and warnings as errors, cargo deny (bans, licenses, sources), the dogfood sweep, typos, ruff check and ruff format --check, and scripts/smoke.py. --check is what CI runs and --fast skips the slow tail. Green before every commit; say "gate not run" when it was not.
+    - Check the gate's own exit status, never a pipeline's. Write `python scripts/gate.py > log 2>&1 && git commit ...`, not `gate.py | tail`.
+    - Lint levels live in Cargo.toml [workspace.lints], and every crate sets `[lints] workspace = true`. Tool settings live in rustfmt.toml, clippy.toml, deny.toml, typos.toml, ruff.toml and .editorconfig. rust-toolchain.toml pins the toolchain, and rust-version in Cargo.toml moves with it.
+    - Never silence a lint to pass the gate. Fix the code, or put `#[expect(lint, reason = "...")]` on the one site with the reason spelled out; a bare `#[allow]` is a review failure.
+    - Keep the dependency surface small; deny.toml bans an async runtime inside the engine. The engine uses anyhow, goblin, iced-x86, pdb, three demanglers, rhai and serde; the server adds rmcp, tokio, rayon, regex, schemars, serde_json and mimalloc. A new dependency needs a reason no existing one covers.
+
+  forbidden:
+    - async, tokio or MCP types inside borer-engine.
+    - Unbounded output, meaning a list tool without a cap or a scan without fuel.
+    - Panics reachable from malformed input.
+    - Bridging to another reverse-engineering tool as an engine backend.
+    - Writing to stdout from the server process outside the protocol.
+    - Editing a test to make it pass, or a benchmark to look fast.
+    - .clone() to dodge the borrow checker, catch-all matches that hide variants, stringly-typed flags where an enum fits.
+
+  prefer:
+    - avoid: 'match opt { Some(x) => x, None => return }'
+      use: 'let Some(x) = opt else { return };'
+    - avoid: 'vec.len() > 0'
+      use: '!vec.is_empty()'
+    - avoid: 'fn f(s: String)'
+      use: 'fn f(s: &str)'
+    - avoid: 'x as u32'
+      use: 'u32::try_from(x)?'
+    - avoid: 'let _ = fallible();'
+      use: 'fallible()?;'
+    - avoid: 'format!("{}", x)'
+      use: 'x.to_string()'
+    - avoid: 'return a JSON array of 10k strings'
+      use: 'strings(filter=.., limit=200) with showing N of M'
+    - avoid: 'a Mutex<HashMap> memo field on Analysis'
+      use: 'analysis.derived.get_or_build(kind, key, || ...)'
+
+git:
+  - 'Commit titles are one line, `type: summary`, lowercase and imperative, no scope in parentheses, no trailing period, 72 characters at most. A blank line and `Co-Authored-By:` trailers are the only things allowed below it.'
+  - The types are add, fix, improve, refactor, perf, docs, test, chore and revert.
+  - Plain ASCII, no em or en dashes, no emoji.
+  - One commit, one concern, and the tree builds green at every commit. Work that touches several concerns is several commits, each with its own tests.
+  - Never commit build output or anything .gitignore covers.
+  - scripts/commits.py checks every unpushed commit message, and the gate runs it first.
+  - Parallel agents never share a working tree. Each works in its own git worktree on its own branch and keeps work in progress as commits there, never in git stash, since every worktree of a repository shares one stash stack.
+
+roadmap:
+  about: >
+    Directions borer may take. None of these is a rule for today's code, and
+    none is started without discussing it first; new code matches the code
+    around it, not this list.
+  items:
+    - An arm64 decoder and lifter behind the `isa` seam, so Apple silicon, Android and Windows on ARM binaries decompile.
+    - Newtypes for domain units (VirtAddr, FileOff, Rva, SectionIndex) across the engine API.
+    - Typed arena ids (BlockId, InstrId, ValueId) and typestate on pipeline stages (Disassembled, Lifted, SsaForm).
+    - p-code as the IR with SLEIGH (through icicle-emu) as the lifter, for many architectures without hand-written lifters.
+    - salsa for incremental recomputation behind `Analysis::derived`.
+    - Error enums (thiserror) in the engine once callers need to match on failures.

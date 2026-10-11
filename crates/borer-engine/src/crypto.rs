@@ -1,0 +1,309 @@
+//! Known-constant scan: cryptographic tables, hash initial states and other
+//! magic byte sequences that identify an algorithm at a glance.
+//!
+//! One linear pass over every mapped section; candidates are keyed on their
+//! first byte, so the pass costs `O(bytes)` regardless of the table size.
+
+use crate::program::Program;
+
+/// Hard cap on reported hits.
+pub const HITS_MAX: usize = 200;
+
+/// `(algorithm, byte signature as it appears in memory, little-endian)`.
+const SIGNATURES: &[(&str, &str)] = &[
+    (
+        "AES forward S-box",
+        "63 7c 77 7b f2 6b 6f c5 30 01 67 2b fe d7 ab 76",
+    ),
+    (
+        "AES inverse S-box",
+        "52 09 6a d5 30 36 a5 38 bf 40 a3 9e 81 f3 d7 fb",
+    ),
+    (
+        "AES Te0 T-table",
+        "c6 63 63 a5 f8 7c 7c 84 ee 77 77 99 f6 7b 7b 8d",
+    ),
+    (
+        "AES Td0 T-table",
+        "51 f4 a7 50 7e 41 65 53 1a 17 a4 c3 3a 27 5e 96",
+    ),
+    (
+        "AES round constants (rcon)",
+        "01 02 04 08 10 20 40 80 1b 36",
+    ),
+    (
+        "SHA-256 K constants",
+        "98 2f 8a 42 91 44 37 71 cf fb c0 b5 a5 db b5 e9",
+    ),
+    (
+        "SHA-256 initial hash",
+        "67 e6 09 6a 85 ae 67 bb 72 f3 6e 3c 3a f5 4f a5",
+    ),
+    (
+        "SHA-512 K constants",
+        "22 ae 28 d7 98 2f 8a 42 cd 65 ef 23 91 44 37 71",
+    ),
+    (
+        "SHA-512 / BLAKE2b initial hash",
+        "08 c9 bc f3 67 e6 09 6a 3b a7 ca 84 85 ae 67 bb",
+    ),
+    (
+        "MD5 / MD4 / RIPEMD initial state",
+        "01 23 45 67 89 ab cd ef fe dc ba 98 76 54 32 10",
+    ),
+    (
+        "SHA-1 initial state",
+        "01 23 45 67 89 ab cd ef fe dc ba 98 76 54 32 10 f0 e1 d2 c3",
+    ),
+    (
+        "MD5 T constants",
+        "78 a4 6a d7 56 b7 c7 e8 db 70 20 24 ee ce bd c1",
+    ),
+    (
+        "CRC-32 (IEEE 802.3) table",
+        "00 00 00 00 96 30 07 77 2c 61 0e ee ba 51 09 99",
+    ),
+    (
+        "CRC-32C (Castagnoli) table",
+        "00 00 00 00 03 83 6b f2 f7 70 3b e1 f4 f3 50 13",
+    ),
+    (
+        "ChaCha20 / Salsa20 sigma (\"expand 32-byte k\")",
+        "65 78 70 61 6e 64 20 33 32 2d 62 79 74 65 20 6b",
+    ),
+    (
+        "Salsa20 tau (\"expand 16-byte k\")",
+        "65 78 70 61 6e 64 20 31 36 2d 62 79 74 65 20 6b",
+    ),
+    (
+        "Blowfish P-array (pi digits)",
+        "88 6a 3f 24 d3 08 a3 85 2e 8a 19 13 44 73 70 03",
+    ),
+    (
+        "RC5 / RC6 magic constants (P32, Q32)",
+        "63 51 e1 b7 b9 79 37 9e",
+    ),
+    ("xxHash64 PRIME64_1", "87 ca eb 85 b1 79 37 9e"),
+    // A protector generates its strings rather than storing them, and the
+    // generator is almost always one of these mixers. On a binary whose
+    // endpoint is XORed against a splitmix64 keystream, these constants are
+    // the only marks that say so: the cipher tables above protect nothing.
+    (
+        "splitmix64 multiplier 1 (string obfuscation)",
+        "b9 e5 e4 1c 6d 47 58 bf",
+    ),
+    (
+        "splitmix64 multiplier 2 (string obfuscation)",
+        "eb 11 31 13 bb 49 d0 94",
+    ),
+    (
+        "splitmix64 / xoshiro golden gamma",
+        "15 7c 4a 7f b9 79 37 9e",
+    ),
+    ("xoshiro256 jump constant", "5b 01 9b 8d cd 27 0f 18"),
+    ("PCG64 multiplier", "4d ec 89 5c 2f f7 f9 47"),
+    ("MurmurHash3 x64 finalizer 1", "d1 d5 b5 f9 5b d0 6f ff"),
+    ("MurmurHash3 x64 finalizer 2", "45 21 87 c2 17 c6 a5 c4"),
+    ("FNV-1 64-bit offset basis", "25 23 22 84 e4 9c f2 cb"),
+    ("FNV-1 64-bit prime", "b3 01 00 00 00 01 00 00"),
+    (
+        "SipHash initial state (\"somepseu\")",
+        "75 65 73 70 65 6d 6f 73",
+    ),
+    (
+        "SipHash initial state (\"dorandom\")",
+        "6d 6f 64 6e 61 72 6f 64",
+    ),
+    (
+        "Base64 alphabet",
+        "41 42 43 44 45 46 47 48 49 4a 4b 4c 4d 4e 4f 50 51 52 53 54 55 56 57 58 59 5a 61 62 63 64 65 66 67 68 69 6a 6b 6c 6d 6e 6f 70 71 72 73 74 75 76 77 78 79 7a 30 31 32 33 34 35 36 37 38 39 2b 2f",
+    ),
+];
+
+/// One recognized constant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptoHit {
+    /// Virtual address of the constant's first byte.
+    pub va: u64,
+    /// File offset of the constant's first byte.
+    pub file_off: u64,
+    /// Algorithm name from [`SIGNATURES`].
+    pub name: &'static str,
+    /// Name of the section holding the constant.
+    pub section: String,
+}
+
+/// The names of the slicing-by-N tables that may follow a CRC-32 table.
+const CRC32_SLICES: [&str; 7] = [
+    "CRC-32 slicing table 1",
+    "CRC-32 slicing table 2",
+    "CRC-32 slicing table 3",
+    "CRC-32 slicing table 4",
+    "CRC-32 slicing table 5",
+    "CRC-32 slicing table 6",
+    "CRC-32 slicing table 7",
+];
+
+/// Finds the slicing-by-N tables laid out after a CRC-32 table.
+///
+/// A slicing implementation keeps up to eight tables of 256 words back to
+/// back, each derived from the one before: `t[k][i] = (t[k-1][i] >> 8) ^
+/// t[0][t[k-1][i] & 0xff]`. Each following kilobyte is accepted while its
+/// first eight entries satisfy that, so a table of another kind laid out
+/// next is not taken for one.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `table` - Address of a CRC-32 table's first word.
+///
+/// # Returns
+///
+/// `(address, name)` per slicing table found, in order.
+#[must_use]
+pub fn crc32_slices(program: &Program, table: u64) -> Vec<(u64, &'static str)> {
+    /// Entries of each table checked against the derivation.
+    const CHECKED: usize = 8;
+    let word = |at: u64| -> Option<u32> {
+        let bytes = program.read_va(at, 4)?;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+    };
+    let entry = |t: u64, i: u32| word(t.checked_add(u64::from(i) * 4)?);
+    let mut out = Vec::new();
+    let mut previous = table;
+    for name in CRC32_SLICES {
+        let Some(next) = previous.checked_add(1024) else {
+            break;
+        };
+        let derived = (0..CHECKED).all(|i| {
+            let i = u32::try_from(i).unwrap_or(0);
+            let (Some(before), Some(here)) = (entry(previous, i), entry(next, i)) else {
+                return false;
+            };
+            entry(table, before & 0xff).is_some_and(|low| (before >> 8) ^ low == here)
+        });
+        if !derived {
+            break;
+        }
+        out.push((next, name));
+        previous = next;
+    }
+    out
+}
+
+/// Makes a signature's name an identifier the decompiler can use.
+///
+/// Parenthesised asides go, the rest is lowercased and every run of other
+/// characters becomes one underscore: `CRC-32 (IEEE 802.3) table` is
+/// `crc_32_table`, `SHA-256 K constants` is `sha_256_k_constants`.
+///
+/// # Arguments
+///
+/// * `name` - The signature's name from [`SIGNATURES`].
+#[must_use]
+pub fn identifier(name: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for c in name.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            _ if c.is_ascii_alphanumeric() => out.extend(c.to_lowercase()),
+            _ if !out.ends_with('_') => out.push('_'),
+            _ => {}
+        }
+    }
+    out.trim_matches('_').to_owned()
+}
+
+/// Parses a signature's hex text into bytes.
+///
+/// # Arguments
+///
+/// * `sig` - Whitespace-separated two-digit hex tokens; malformed tokens are skipped.
+fn parse(sig: &str) -> Vec<u8> {
+    sig.split_whitespace()
+        .filter_map(|t| u8::from_str_radix(t, 16).ok())
+        .collect()
+}
+
+/// Scans every mapped section for the known constants.
+///
+/// Signatures are bucketed by their first byte, so each position compares
+/// against the few candidates that can start there. The scan stops after
+/// [`HITS_MAX`] hits.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image whose sections are scanned.
+///
+/// # Returns
+///
+/// Hits in a deterministic order: section, then offset, then table order.
+pub fn find_crypto_constants(program: &Program) -> Vec<CryptoHit> {
+    let sigs: Vec<(&'static str, Vec<u8>)> = SIGNATURES
+        .iter()
+        .map(|(name, sig)| (*name, parse(sig)))
+        .collect();
+    let mut by_first: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    for (i, (_, bytes)) in sigs.iter().enumerate() {
+        if let Some(&b) = bytes.first() {
+            by_first[usize::from(b)].push(i);
+        }
+    }
+    let mut hits = Vec::new();
+    'outer: for s in &program.sections {
+        let Some(data) = program.section_bytes(s) else {
+            continue;
+        };
+        for (i, &b) in data.iter().enumerate() {
+            for &si in &by_first[usize::from(b)] {
+                let sig = &sigs[si].1;
+                if data.get(i..i + sig.len()) == Some(sig.as_slice()) {
+                    hits.push(CryptoHit {
+                        va: s.va + i as u64,
+                        file_off: s.file_off + i as u64,
+                        name: sigs[si].0,
+                        section: s.name.clone(),
+                    });
+                    if hits.len() >= HITS_MAX {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// Renders hits as the agent-facing table.
+///
+/// # Arguments
+///
+/// * `hits` - The hits from [`find_crypto_constants`].
+///
+/// # Returns
+///
+/// A `# N crypto/hash constant hits` header (noting when the cap was
+/// reached), a column header, then one `va  section  algorithm` row per hit.
+pub fn render(hits: &[CryptoHit]) -> String {
+    let mut out = format!(
+        "# {} crypto/hash constant hits{}\n# va          section   algorithm\n",
+        hits.len(),
+        if hits.len() >= HITS_MAX {
+            " (cap reached)"
+        } else {
+            ""
+        }
+    );
+    for h in hits {
+        out.push_str(&format!(
+            "{:<12} {:<9} {}\n",
+            format!("{:#x}", h.va),
+            h.section,
+            h.name
+        ));
+    }
+    out
+}

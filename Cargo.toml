@@ -1,0 +1,125 @@
+[workspace]
+resolver = "2"
+members = ["crates/borer", "crates/borer-engine", "crates/borer-fixtures", "crates/borer-live"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/imjustprism/borer"
+description = "Reverse-engineering engine for AI agents: Rust core, MCP server, no GUI"
+keywords = ["reverse-engineering", "decompiler", "disassembler", "mcp", "binary-analysis"]
+categories = ["development-tools", "parsing"]
+
+# Lint policy for every crate (each crate opts in with `[lints] workspace = true`).
+# Levels are `warn`: the gate runs clippy with `-D warnings`, so a warning is a
+# failure there while `cargo build` stays quiet during development.
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.rustdoc]
+all = { level = "warn", priority = -1 }
+private_intra_doc_links = "allow"
+
+[workspace.lints.clippy]
+# documentation: JSDoc discipline in rustdoc form
+missing_docs_in_private_items = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+missing_safety_doc = "warn"
+unnecessary_safety_doc = "warn"
+doc_markdown = "warn"
+doc_link_with_quotes = "warn"
+doc_lazy_continuation = "warn"
+too_long_first_doc_paragraph = "warn"
+empty_docs = "warn"
+empty_line_after_doc_comments = "warn"
+empty_line_after_outer_attr = "warn"
+tabs_in_doc_comments = "warn"
+suspicious_doc_comments = "warn"
+needless_doctest_main = "warn"
+# Casts: a width conversion says what it keeps (crate::num), never an `as`
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+# Errors: engine and server never panic on input (tests may, see clippy.toml)
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+dbg_macro = "warn"
+# Idioms: the small, always-right idioms
+redundant_clone = "warn"
+needless_pass_by_value = "warn"
+explicit_iter_loop = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+cast_lossless = "warn"
+str_to_string = "warn"
+inefficient_to_string = "warn"
+map_unwrap_or = "warn"
+manual_let_else = "warn"
+if_not_else = "warn"
+unnested_or_patterns = "warn"
+implicit_clone = "warn"
+cloned_instead_of_copied = "warn"
+needless_continue = "warn"
+unused_self = "warn"
+ref_option = "warn"
+return_self_not_must_use = "warn"
+inconsistent_struct_constructor = "warn"
+large_types_passed_by_value = "warn"
+
+# Tests run the analysis on real binaries, borer's own build among them;
+# unoptimized, one `functions` call on it took 32 s and the test step most of
+# the gate. Dependencies (the decoder above all) build optimized once and stay
+# cached; the workspace's own crates get the cheap level, which keeps debug
+# assertions and overflow checks.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# The crackme is a test of how unoptimized code decompiles: its source shape,
+# down to the constant its check compares with, survives only at level 0.
+[profile.dev.package.borer-fixtures]
+opt-level = 0
+
+# The binary the dogfood sweep and smoke read: borer built entirely
+# unoptimized, as the dev profile once built it, because that debug codegen
+# is where the sweep keeps finding lifter bugs. `cargo build --profile corpus`
+# writes it to target/corpus.
+[profile.corpus]
+inherits = "dev"
+opt-level = 0
+
+[profile.corpus.package."*"]
+opt-level = 0
+
+# the shipped server is the release binary: whole-program optimization is
+# worth the longer build (decompile-all on a 25k-function PE runs ~2x faster)
+[profile.release]
+lto = true
+codegen-units = 1
+
+# The shipped server: everything release does, plus no unwinding tables and no
+# symbols. Kept separate from `release` because `cargo test --release` needs
+# unwinding for libtest to report which test failed, and the dogfood sweep
+# runs there.
+[profile.dist]
+inherits = "release"
+panic = "abort"
+strip = true

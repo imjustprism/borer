@@ -1,0 +1,1012 @@
+//! Tool and prompt parameters: what each MCP call accepts, as the JSON
+//! schema an agent reads before it calls.
+
+use borer_engine::analysis::render;
+use borer_engine::program;
+use rmcp::{ErrorData, schemars};
+
+use super::err_params;
+
+/// What `read` and `live_read` decode the bytes as.
+///
+/// The schema lists the canonical names; the aliases a reader might
+/// type (`dword`, `string`, `pointer`) are accepted too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(transform = names_only)]
+pub(crate) enum ReadKind {
+    /// One unsigned byte.
+    #[serde(alias = "byte")]
+    U8,
+    /// An unsigned 16-bit word.
+    #[serde(alias = "word")]
+    U16,
+    /// An unsigned 32-bit word.
+    #[serde(alias = "dword")]
+    U32,
+    /// An unsigned 64-bit word.
+    #[default]
+    #[serde(alias = "qword")]
+    U64,
+    /// A signed byte.
+    I8,
+    /// A signed 16-bit word.
+    I16,
+    /// A signed 32-bit word.
+    #[serde(alias = "int")]
+    I32,
+    /// A signed 64-bit word.
+    I64,
+    /// A single-precision float.
+    #[serde(alias = "float")]
+    F32,
+    /// A double-precision float.
+    #[serde(alias = "double")]
+    F64,
+    /// A pointer of the image's width, with what it points at.
+    #[serde(alias = "pointer")]
+    Ptr,
+    /// A NUL-terminated byte string.
+    #[serde(alias = "str", alias = "string", alias = "ascii")]
+    CStr,
+    /// A NUL-terminated UTF-16 string.
+    #[serde(alias = "utf16", alias = "wide")]
+    WStr,
+}
+
+/// Folds a unit enum's schema, a `oneOf` of documented constants, into a
+/// plain `enum` of its names.
+///
+/// A variant's rustdoc is for the code. In the schema it repeated what the
+/// name already says (`u8`: "One unsigned byte."), once in every tool taking
+/// the enum, and tools/list is read in full by every agent that connects.
+/// A schema with any variant that is not a bare constant is left as it is.
+///
+/// # Arguments
+///
+/// * `schema` - The derived schema, rewritten in place.
+fn names_only(schema: &mut schemars::Schema) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    let Some(serde_json::Value::Array(variants)) = object.get("oneOf") else {
+        return;
+    };
+    let names: Option<Vec<serde_json::Value>> =
+        variants.iter().map(|v| v.get("const").cloned()).collect();
+    if let Some(names) = names {
+        object.remove("oneOf");
+        object.insert("type".to_owned(), "string".into());
+        object.insert("enum".to_owned(), serde_json::Value::Array(names));
+    }
+}
+
+impl ReadKind {
+    /// The canonical name, as the schema lists it.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            Self::Ptr => "ptr",
+            Self::CStr => "cstr",
+            Self::WStr => "wstr",
+        }
+    }
+}
+
+impl std::fmt::Display for ReadKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.word())
+    }
+}
+
+impl From<ReadKind> for borer_engine::memory::Kind {
+    fn from(k: ReadKind) -> Self {
+        use borer_engine::memory::Kind;
+        match k {
+            ReadKind::U8 => Kind::U8,
+            ReadKind::U16 => Kind::U16,
+            ReadKind::U32 => Kind::U32,
+            ReadKind::U64 => Kind::U64,
+            ReadKind::I8 => Kind::I8,
+            ReadKind::I16 => Kind::I16,
+            ReadKind::I32 => Kind::I32,
+            ReadKind::I64 => Kind::I64,
+            ReadKind::F32 => Kind::F32,
+            ReadKind::F64 => Kind::F64,
+            ReadKind::Ptr => Kind::Ptr,
+            ReadKind::CStr => Kind::CStr,
+            ReadKind::WStr => Kind::WStr,
+        }
+    }
+}
+
+/// Which strings `strings` scans for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(transform = names_only)]
+pub(crate) enum StringEncoding {
+    /// Byte strings only.
+    Ascii,
+    /// UTF-16 strings only.
+    Utf16,
+    /// Both, in address order.
+    #[default]
+    Both,
+}
+
+impl StringEncoding {
+    /// The canonical name, as the schema lists it.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Ascii => "ascii",
+            Self::Utf16 => "utf16",
+            Self::Both => "both",
+        }
+    }
+}
+
+impl std::fmt::Display for StringEncoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.word())
+    }
+}
+
+/// Which symbols `symbols` lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(transform = names_only)]
+pub(crate) enum SymbolKind {
+    /// Imported functions and data.
+    Import,
+    /// Exported functions and data.
+    Export,
+    /// Local symbols the file names.
+    Local,
+    /// Named data at an address (an applied PDB's data records).
+    Data,
+}
+
+impl From<SymbolKind> for program::SymbolKind {
+    fn from(k: SymbolKind) -> Self {
+        match k {
+            SymbolKind::Import => program::SymbolKind::Import,
+            SymbolKind::Export => program::SymbolKind::Export,
+            SymbolKind::Local => program::SymbolKind::Local,
+            SymbolKind::Data => program::SymbolKind::Data,
+        }
+    }
+}
+
+/// How much of a function `decompile` returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Detail {
+    /// The whole function.
+    #[default]
+    Full,
+    /// The flow and the calls only.
+    Skeleton,
+}
+
+/// What `search` looks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(transform = names_only)]
+pub(crate) enum SearchKind {
+    /// Hex bytes with `??` wildcards.
+    #[default]
+    Bytes,
+    /// A literal substring, ASCII or UTF-16.
+    Text,
+}
+
+/// Parameters for `load_binary`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LoadBinaryParams {
+    /// Path to the binary on disk (PE, ELF, or raw file).
+    pub(crate) path: String,
+    /// File offset to use as the entry point when the section table is corrupt.
+    pub(crate) entry_file_offset: Option<u64>,
+    /// Whether a companion PDB the debug record names may apply its symbols
+    /// (default true); false analyzes the image alone, whatever sits beside
+    /// it or at the recorded path.
+    pub(crate) pdb: Option<bool>,
+}
+
+/// Parameters for `fetch_pdb`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FetchPdbParams {
+    /// Preview only (default true); false fetches.
+    pub(crate) dry_run: Option<bool>,
+    /// Symbol-server base URL, overriding the default msdl.
+    pub(crate) server: Option<String>,
+}
+
+/// Parameters for `disassemble`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DisassembleParams {
+    /// Address or a function/symbol name.
+    pub(crate) address: String,
+    /// Max instructions (default 32, max 256).
+    pub(crate) count: Option<u32>,
+    /// Add the raw-bytes column (default false).
+    pub(crate) bytes: Option<bool>,
+}
+
+/// Parameters for `disassemble_function`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DisassembleFunctionParams {
+    /// Entry, any address inside it, or a name.
+    pub(crate) address: String,
+    /// Maximum instructions to return (default 400, max 2000).
+    pub(crate) max_instrs: Option<u32>,
+    /// Add the raw-bytes column (default false).
+    pub(crate) bytes: Option<bool>,
+}
+
+/// Parameters for `read`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReadParams {
+    /// Address (0x-hex/decimal), a name, or `off:<n>`, a file offset (for
+    /// overlay and unmapped bytes).
+    pub(crate) address: String,
+    /// What to decode the bytes as (default u64).
+    pub(crate) kind: Option<ReadKind>,
+    /// Values to read (default 1, max 256).
+    pub(crate) count: Option<u32>,
+}
+
+/// Parameters for `entropy`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EntropyParams {
+    /// Window size in bytes (default 1024, minimum 64).
+    pub(crate) window: Option<u32>,
+    /// Minimum bits per byte to report (default 7.2, max 8.0).
+    pub(crate) threshold: Option<f64>,
+}
+
+/// Parameters for `find_function_by_string`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FindFunctionByStringParams {
+    /// Case-insensitive substring of the referenced string.
+    #[serde(alias = "query")]
+    pub(crate) filter: String,
+    /// Most function rows, and most legend strings (default 50, max 300).
+    pub(crate) limit: Option<u32>,
+}
+
+/// Parameters for `hexdump`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HexdumpParams {
+    /// Address (0x-hex/decimal), a name, or `off:<n>`, a file offset (for
+    /// overlay and unmapped bytes).
+    pub(crate) address: String,
+    /// Number of bytes (default 64, max 4096).
+    pub(crate) length: Option<u32>,
+}
+
+/// Parameters for `strings`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StringsParams {
+    /// Minimum length (default 5, min 4).
+    pub(crate) min_length: Option<u32>,
+    /// Case-insensitive substring filter.
+    pub(crate) filter: Option<String>,
+    /// Which strings to scan for (default both).
+    pub(crate) encoding: Option<StringEncoding>,
+    /// Matches to skip first (paging).
+    pub(crate) offset: Option<u32>,
+    /// Max rows (default 200, max 500).
+    pub(crate) limit: Option<u32>,
+    /// Header line only (default false).
+    pub(crate) count_only: Option<bool>,
+}
+
+/// Parameters for `symbols`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SymbolsParams {
+    /// One kind of symbol only (default every kind); drops the kind column.
+    pub(crate) kind: Option<SymbolKind>,
+    /// Case-insensitive substring filter, module included.
+    pub(crate) filter: Option<String>,
+    /// Matches to skip first (paging).
+    pub(crate) offset: Option<u32>,
+    /// Max rows (default 50, max 1000).
+    pub(crate) limit: Option<u32>,
+    /// Header line only (default false).
+    pub(crate) count_only: Option<bool>,
+}
+
+/// The order `functions` lists in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum FunctionSort {
+    /// By entry address.
+    #[default]
+    Address,
+    /// By size, the largest first.
+    Size,
+}
+
+impl From<FunctionSort> for render::FunctionOrder {
+    fn from(s: FunctionSort) -> Self {
+        match s {
+            FunctionSort::Address => render::FunctionOrder::Address,
+            FunctionSort::Size => render::FunctionOrder::Size,
+        }
+    }
+}
+
+/// Parameters for `functions`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FunctionsParams {
+    /// Case-insensitive filter on name or entry hex; `thunk` or `funclet` lists what is otherwise left out.
+    pub(crate) filter: Option<String>,
+    /// `address` (default) or `size` for the largest first.
+    pub(crate) sort: Option<FunctionSort>,
+    /// Matches to skip first (paging).
+    pub(crate) offset: Option<u32>,
+    /// Max rows (default 50, max 300).
+    pub(crate) limit: Option<u32>,
+    /// Header line only (default false).
+    pub(crate) count_only: Option<bool>,
+}
+
+/// Arguments for the `find_check` prompt.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FindCheckArgs {
+    /// What is being validated: "serial", "license key", "password", "signature", ...
+    pub(crate) what: String,
+}
+
+/// Arguments for the `explain_function` prompt.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExplainFunctionArgs {
+    /// Function entry (0x-hex or decimal) or a name.
+    pub(crate) address: String,
+}
+
+/// Parameters for `function_summary` and `function_strings`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FunctionParams {
+    /// Entry, any address inside it, or a name.
+    pub(crate) address: String,
+}
+
+/// Parameters for `function`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FunctionDetailParams {
+    /// Entry, any address inside it, or a name.
+    pub(crate) address: String,
+    /// Blocks to skip first (300 a page).
+    pub(crate) offset: Option<u32>,
+}
+
+/// Parameters for `xrefs`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct XrefsParams {
+    /// Address or name (function, import, overlay name), or Class+offset.
+    pub(crate) address: String,
+    /// Groups to skip first (paging).
+    pub(crate) offset: Option<u32>,
+    /// Max groups (default 60, max 500).
+    pub(crate) limit: Option<u32>,
+    /// Header line only (default false).
+    pub(crate) count_only: Option<bool>,
+}
+
+/// Parameters for `class_layout`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClassLayoutParams {
+    /// Class name or a method address.
+    pub(crate) class: String,
+}
+
+/// Parameters for `callgraph`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CallgraphParams {
+    /// Root function entry address.
+    pub(crate) address: String,
+    /// Maximum graph nodes (default 30, max 100).
+    pub(crate) max_nodes: Option<u32>,
+    /// Walk callers instead of callees: what reaches this function.
+    pub(crate) callers: Option<bool>,
+}
+
+/// Parameters for `reaches`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReachesParams {
+    /// Function the call chain starts at.
+    pub(crate) from: String,
+    /// Function to look for.
+    pub(crate) to: String,
+    /// Longest chain to follow (default 24, max 64).
+    pub(crate) depth: Option<u32>,
+}
+
+/// Parameters for `cfg`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CfgParams {
+    /// Function entry or any address inside it.
+    pub(crate) address: String,
+}
+
+/// Parameters for `decompile`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DecompileParams {
+    /// Function entry or any address inside it.
+    pub(crate) address: String,
+    /// `skeleton` for flow and calls only; `full` or absent for all of it.
+    pub(crate) detail: Option<Detail>,
+    /// Keep only lines containing this text, case-insensitively.
+    pub(crate) filter: Option<String>,
+    /// Skip this many lines of the answer.
+    pub(crate) offset: Option<u32>,
+    /// Return at most this many lines (default 300; 0 for all).
+    pub(crate) limit: Option<u32>,
+}
+
+/// Parameters for `query`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QueryParams {
+    /// A borer:// resource URI.
+    pub(crate) uri: String,
+}
+
+/// Parameters for `decompile_batch`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DecompileBatchParams {
+    /// Case-insensitive filter on function name or entry hex.
+    pub(crate) filter: Option<String>,
+    /// Maximum functions to decompile (default 10, max 50).
+    pub(crate) max_functions: Option<u32>,
+}
+
+/// Parameters for `search`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SearchParams {
+    /// Hex bytes with ?? wildcards (kind=bytes) or a literal substring (kind=text).
+    pub(crate) query: String,
+    /// What the query is (default bytes).
+    pub(crate) kind: Option<SearchKind>,
+    /// Hits to skip (default 0).
+    pub(crate) offset: Option<usize>,
+    /// Max hits (default 200, max 500).
+    pub(crate) limit: Option<u32>,
+    /// Only the count (default false).
+    pub(crate) count_only: Option<bool>,
+}
+
+/// Parameters for `set_name`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetNameParams {
+    /// Function entry, any address inside it, or a data address.
+    pub(crate) address: String,
+    /// New name.
+    pub(crate) name: String,
+    /// Preview only (default true); false applies.
+    pub(crate) dry_run: Option<bool>,
+}
+
+/// Parameters for `set_comment`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetCommentParams {
+    /// Address the comment attaches to.
+    pub(crate) address: String,
+    /// Comment text.
+    pub(crate) comment: String,
+    /// Preview only (default true); false applies.
+    pub(crate) dry_run: Option<bool>,
+}
+
+/// Parameters for `set_type`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetTypeParams {
+    /// Name to define (struct/enum/typedef with `fields`/`values`/`type`).
+    pub(crate) name: Option<String>,
+    /// The struct's fields, each `offset:name:type` (`0x1c:mp:u32`).
+    pub(crate) fields: Option<Vec<String>>,
+    /// The enum's values, each `name:value` (`Run:1`); width 4 by default.
+    pub(crate) values: Option<Vec<String>>,
+    /// Size past the last field, or an enum's width (4 or 8).
+    pub(crate) size: Option<u64>,
+    /// Address of a data global to type (decompile names its fields).
+    pub(crate) address: Option<String>,
+    /// The type to apply, or a typedef's target (`Player *`).
+    pub(crate) r#type: Option<String>,
+    /// Preview only; false applies.
+    pub(crate) dry_run: Option<bool>,
+}
+
+/// Parameters for `types`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TypesParams {
+    /// Substring filter on name or applied address.
+    pub(crate) filter: Option<String>,
+    /// Rows to skip first (paging).
+    pub(crate) offset: Option<u32>,
+    /// Max rows (default 50, max 500).
+    pub(crate) limit: Option<u32>,
+    /// Header line only (default false).
+    pub(crate) count_only: Option<bool>,
+}
+
+/// Parameters for `save_project`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SaveProjectParams {
+    /// Output JSON path.
+    pub(crate) path: String,
+}
+
+/// Parameters for `load_project`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LoadProjectParams {
+    /// Project JSON path.
+    pub(crate) path: String,
+}
+
+/// Parameters for `live_attach`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveAttachParams {
+    /// Executable name or pid.
+    pub(crate) process: String,
+}
+
+/// Parameters for `live_read`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveReadParams {
+    /// Live or static address, or a name.
+    pub(crate) address: String,
+    /// What to decode the bytes as (default u64).
+    pub(crate) kind: Option<ReadKind>,
+    /// Values (default 1, max 256).
+    pub(crate) count: Option<u32>,
+}
+
+/// Parameters for `live_object`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveObjectParams {
+    /// Object address: live, static, or a name.
+    pub(crate) address: String,
+    /// Class; default: the one its vtable names.
+    pub(crate) class: Option<String>,
+}
+
+/// Parameters for `live_instances`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveInstancesParams {
+    /// Class name.
+    pub(crate) class: String,
+    /// Max instances (default 64, max 4096).
+    pub(crate) limit: Option<u32>,
+}
+
+/// Parameters for `live_watch`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveWatchParams {
+    /// Watch name.
+    pub(crate) name: String,
+    /// Address to start watching; omit to list what changed since the last call.
+    pub(crate) address: Option<String>,
+    /// Bytes (default: the class's size, else 256; max 65536).
+    pub(crate) length: Option<u32>,
+    /// Class naming the fields (default: from the vtable).
+    pub(crate) class: Option<String>,
+}
+
+/// Widens a count parameter to the index type.
+///
+/// A `u32` fits a 32-bit or wider `usize`, so nothing is lost on any
+/// target borer builds for; the saturation only states the rule.
+///
+/// # Arguments
+///
+/// * `n` - The parameter as given.
+pub(crate) fn to_usize(n: u32) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+/// A count parameter the cap cut: its name, what was asked, and the cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Capped {
+    /// The parameter's name (`limit`, `count`, ...).
+    what: &'static str,
+    /// The value the caller passed, above `max`.
+    asked: u32,
+    /// The cap the value was cut to.
+    max: usize,
+}
+
+/// A count parameter as read: the value in force, and the cut when the cap
+/// made one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Count {
+    /// The value in force, at or under the cap.
+    pub(crate) n: usize,
+    /// What the cap cut, `None` when the value was taken as asked.
+    pub(crate) capped: Option<Capped>,
+}
+
+impl Count {
+    /// Puts the line saying what the cap cut ahead of an answer, so a
+    /// caller who asked for more learns it got the cap and not everything;
+    /// an answer within the cap is returned as it is.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The answer.
+    pub(crate) fn noted(self, text: String) -> String {
+        match self.capped {
+            Some(Capped { what, asked, max }) => {
+                format!("# {what} {asked} capped at {max}\n{text}")
+            }
+            None => text,
+        }
+    }
+}
+
+/// Reads a count parameter: the default when absent, an error at zero, the
+/// cap above it.
+///
+/// A zero count would answer nothing and read as a failure of the tool
+/// rather than of the call, so it is refused; a value above the cap is what
+/// the cap is for, and [`Count::noted`] says so in the answer, where a
+/// silent cut read as the whole of what there was.
+///
+/// # Arguments
+///
+/// * `v` - The parameter as given.
+/// * `default` - The value when the parameter is absent.
+/// * `max` - The cap.
+/// * `what` - The parameter's name, for the message and the note.
+///
+/// # Errors
+///
+/// When the parameter is zero.
+pub(crate) fn count_param(
+    v: Option<u32>,
+    default: usize,
+    max: usize,
+    what: &'static str,
+) -> Result<Count, ErrorData> {
+    match v {
+        None => Ok(Count {
+            n: default,
+            capped: None,
+        }),
+        Some(0) => Err(err_params(format!("{what} must be at least 1"))),
+        Some(asked) => Ok(Count {
+            n: to_usize(asked).min(max),
+            capped: (to_usize(asked) > max).then_some(Capped { what, asked, max }),
+        }),
+    }
+}
+
+/// One page of a listing: where it starts, how many rows it holds, and
+/// whether only the header is wanted.
+///
+/// Built once at the boundary from the three paging parameters every list
+/// tool takes, so a handler reads typed fields rather than defaulting each
+/// `Option` where it is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Page {
+    /// Matches to skip first.
+    pub(crate) offset: usize,
+    /// Most rows shown, at or under the tool's cap, with the cut when the
+    /// cap made one.
+    pub(crate) limit: Count,
+    /// Header line only.
+    pub(crate) count_only: bool,
+}
+
+impl Page {
+    /// Reads the paging parameters as given.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Matches to skip; absent skips none.
+    /// * `limit` - Most rows; absent is `default`, above `max` is `max`
+    ///   and noted ([`Count::noted`]).
+    /// * `count_only` - Header only; absent is false.
+    /// * `default` - The tool's default row count.
+    /// * `max` - The tool's cap.
+    ///
+    /// # Errors
+    ///
+    /// When `limit` is zero.
+    pub(crate) fn new(
+        offset: Option<u32>,
+        limit: Option<u32>,
+        count_only: Option<bool>,
+        default: usize,
+        max: usize,
+    ) -> Result<Page, ErrorData> {
+        Ok(Page {
+            offset: to_usize(offset.unwrap_or(0)),
+            limit: count_param(limit, default, max, "limit")?,
+            count_only: count_only.unwrap_or(false),
+        })
+    }
+}
+
+/// A case-insensitive substring filter, lowered once at the boundary.
+///
+/// Every list tool narrows by one: absent keeps every row, present keeps
+/// the rows whose text contains it in any case.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct Filter(Option<String>);
+
+impl Filter {
+    /// Lowers the filter as given.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The filter parameter; `None` keeps everything.
+    pub(crate) fn new(text: Option<&str>) -> Filter {
+        Filter(text.map(str::to_lowercase))
+    }
+
+    /// Whether a row passes: its text contains the filter in any case, or
+    /// there is no filter.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The row's text as printed.
+    pub(crate) fn accepts(&self, text: &str) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|f| text.to_lowercase().contains(f.as_str()))
+    }
+
+    /// The lowered filter, `None` when there is none.
+    pub(crate) fn needle(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+/// Which annotation a call carries, for the message that refuses one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Annotation {
+    /// A name set by `set_name`.
+    Name,
+    /// A comment set by `set_comment`.
+    Comment,
+    /// A type applied by `set_type`.
+    Type,
+}
+
+impl std::fmt::Display for Annotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Name => "name",
+            Self::Comment => "comment",
+            Self::Type => "type",
+        })
+    }
+}
+
+/// Refuses a name or comment the line-oriented listings could not show.
+///
+/// Every place an annotation is printed is one line of a table, so a
+/// control character would break the table for every reader after it, and
+/// an empty name would name nothing. A name is the caller's to retry, so
+/// this refuses where [`borer_engine::text::one_line`] escapes: that one
+/// takes names out of the file, which cannot be handed back for a second
+/// try, and both go by the same rule about what a row can hold.
+///
+/// # Arguments
+///
+/// * `text` - The annotation as given.
+/// * `what` - Which annotation it is, for the message.
+///
+/// # Errors
+///
+/// When the text is empty, blank, longer than a row can show, or holds
+/// anything that would end its line or move what is printed around it.
+pub(crate) fn must_fit_a_row(text: &str, what: Annotation) -> Result<(), ErrorData> {
+    if text.trim().is_empty() {
+        return Err(err_params(format!("the {what} is empty")));
+    }
+    if text.chars().any(char::is_control) {
+        return Err(err_params(format!(
+            "the {what} holds a control character; annotations are one line each"
+        )));
+    }
+    let width = text.chars().count();
+    if width > borer_engine::text::OUTSIDE_MAX {
+        return Err(err_params(format!(
+            "the {what} is {width} characters; {} is the most a listing row shows",
+            borer_engine::text::OUTSIDE_MAX
+        )));
+    }
+    if borer_engine::text::one_line(text) != text {
+        return Err(err_params(format!(
+            "the {what} holds text that reorders what is printed around it"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses an annotation at an address no section maps.
+///
+/// Nothing borer lists lives outside the image, so a name or comment there
+/// would sit in the overlay and the project file and never be shown; `0x1`
+/// is a typo, not a place. Both annotating tools refuse it alike.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `va` - The address the annotation is for.
+/// * `what` - Which annotation it is, for the message.
+///
+/// # Errors
+///
+/// When no section contains `va`, listing the sections that exist.
+pub(crate) fn must_be_in_a_section(
+    program: &program::Program,
+    va: u64,
+    what: Annotation,
+) -> Result<(), String> {
+    if program.section_at(va).is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "{va:#x} is in no section, so nothing there can take a {what}; sections: {}",
+        program.section_list()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Annotation, Filter, Page, count_param, must_be_in_a_section, must_fit_a_row};
+
+    /// An annotation that a listing row could not show is refused.
+    ///
+    /// A name the caller passes is theirs to retry, so this refuses where the
+    /// engine escapes a name it read out of a binary. What both go by is the
+    /// same: one record to a line, and a bounded amount of it. An ordinary
+    /// non-ASCII name stays allowed; a right-to-left override, which prints
+    /// the rest of the row backwards without showing anything, does not.
+    ///
+    /// # Panics
+    ///
+    /// When text that would break a row is accepted, or an ordinary name is
+    /// refused.
+    #[test]
+    fn an_annotation_that_breaks_a_row_is_refused() {
+        assert!(must_fit_a_row("parse_header", Annotation::Name).is_ok());
+        assert!(must_fit_a_row("lire_entête", Annotation::Name).is_ok());
+
+        assert!(must_fit_a_row("", Annotation::Name).is_err());
+        assert!(must_fit_a_row("   ", Annotation::Name).is_err());
+        assert!(must_fit_a_row("two\nlines", Annotation::Name).is_err());
+        assert!(must_fit_a_row("txet\u{202e}", Annotation::Name).is_err());
+
+        let max = borer_engine::text::OUTSIDE_MAX;
+        assert!(must_fit_a_row(&"a".repeat(max), Annotation::Name).is_ok());
+        assert!(must_fit_a_row(&"a".repeat(max + 1), Annotation::Name).is_err());
+    }
+
+    /// A page defaults, caps and refuses zero the way every list tool does;
+    /// a filter matches in any case and absent keeps everything.
+    ///
+    /// # Panics
+    ///
+    /// When a page or a filter reads differently from the parameters.
+    #[test]
+    fn a_page_and_a_filter_read_the_parameters() {
+        let page = Page::new(None, None, None, 50, 300).expect("defaults");
+        assert_eq!((page.offset, page.limit.n, page.count_only), (0, 50, false));
+        let page = Page::new(Some(7), Some(9_000), Some(true), 50, 300).expect("caps");
+        assert_eq!((page.offset, page.limit.n, page.count_only), (7, 300, true));
+        let zero = Page::new(None, Some(0), None, 50, 300).expect_err("refused");
+        assert_eq!(zero.message, "limit must be at least 1");
+
+        let filter = Filter::new(Some("ThUnK"));
+        assert!(filter.accepts("entry_THUNK"));
+        assert!(!filter.accepts("main"));
+        assert_eq!(filter.needle(), Some("thunk"));
+        assert!(Filter::new(None).accepts("anything"));
+    }
+
+    /// A count the cap cut says so ahead of the answer, naming the
+    /// parameter, what was asked and the cap; one at or under the cap, or
+    /// absent, leaves the answer as it was.
+    ///
+    /// # Panics
+    ///
+    /// When a cut goes unsaid or an uncut count is noted.
+    #[test]
+    fn a_count_the_cap_cut_says_so() {
+        let cut = count_param(Some(99_999), 50, 300, "limit").expect("caps");
+        assert_eq!(cut.n, 300);
+        assert_eq!(
+            cut.noted("# 300 rows\n".to_owned()),
+            "# limit 99999 capped at 300\n# 300 rows\n"
+        );
+        for whole in [
+            count_param(Some(300), 50, 300, "limit"),
+            count_param(Some(7), 50, 300, "limit"),
+            count_param(None, 50, 300, "limit"),
+        ] {
+            let whole = whole.expect("in range");
+            assert_eq!(whole.capped, None);
+            assert_eq!(whole.noted("# rows\n".to_owned()), "# rows\n");
+        }
+        let page = Page::new(None, Some(1_000), None, 200, 500).expect("caps");
+        assert_eq!(
+            page.limit.noted(String::new()),
+            "# limit 1000 capped at 500\n"
+        );
+        let zero = count_param(Some(0), 32, 256, "count").expect_err("refused");
+        assert_eq!(zero.message, "count must be at least 1");
+    }
+
+    /// An annotation for an address no section holds is refused, naming
+    /// the address and the sections there are; one inside a section passes.
+    ///
+    /// # Panics
+    ///
+    /// When an address outside the image is accepted or one inside refused.
+    #[test]
+    fn an_annotation_outside_every_section_is_refused() {
+        use borer_engine::program::{Arch, Program, Section};
+        let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
+        let p = Program::raw(vec![0xc3; 0x100], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        assert_eq!(
+            must_be_in_a_section(&p, 0x1010, Annotation::Comment),
+            Ok(())
+        );
+        let name = must_be_in_a_section(&p, 0x1, Annotation::Name).expect_err("refused");
+        let comment = must_be_in_a_section(&p, 0x1, Annotation::Comment).expect_err("refused");
+        assert!(
+            name.starts_with("0x1 is in no section, so nothing there can take a name; sections: "),
+            "{name}"
+        );
+        assert_eq!(comment, name.replace("a name", "a comment"));
+    }
+}

@@ -1,0 +1,52 @@
+//! borer-engine: the analysis core of borer.
+//!
+//! The crate is pure and synchronous: no async runtime, no MCP types, no
+//! filesystem writes. Every function is a deterministic function of its
+//! inputs, so results are reproducible byte for byte and the crate can later
+//! compile to WASM. [`program::Program`] holds only facts derived from the
+//! file; user annotations live in a separate [`analysis::Overlay`]. Every
+//! potentially unbounded output is capped or paged by its caller.
+//!
+//! # Examples
+//!
+//! Any PE or ELF works; the running binary itself is a convenient fixture.
+//!
+//! ```
+//! use borer_engine::analysis::Analysis;
+//! use borer_engine::program::Program;
+//!
+//! let path = std::env::current_exe()?;
+//! let program = Program::load(&path)?;
+//! let analysis = Analysis::compute(&program);
+//! assert!(!analysis.functions.is_empty());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+
+pub mod analysis;
+pub mod crypto;
+pub mod disasm;
+pub mod dwarf;
+mod eh_frame;
+pub mod emulate;
+pub mod entropy;
+pub mod fxmap;
+pub mod hashing;
+pub mod headers;
+pub mod hexdump;
+pub mod isa;
+pub mod libsig;
+pub mod live;
+mod lsda;
+pub mod macho;
+pub mod memory;
+pub mod num;
+pub mod pack;
+pub mod pdb;
+pub mod program;
+pub mod script;
+pub mod search;
+pub mod strings;
+pub mod text;
+pub(crate) mod timing;
+pub mod unwind;
+pub mod winconst;

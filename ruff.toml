@@ -1,0 +1,19 @@
+# ruff: lint + format for the Python helper scripts (scripts/).
+line-length = 100
+target-version = "py311"
+extend-exclude = ["target"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "W"]
+ignore = [
+  # the smoke script is a linear procedure by design; long asserts read fine
+  "E501",
+]
+
+[lint.per-file-ignores]
+# smoke.py is one long top-level procedure: late imports mark its sections
+"scripts/smoke.py" = ["E402"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

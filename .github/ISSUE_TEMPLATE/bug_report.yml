@@ -1,0 +1,39 @@
+name: Bug report
+description: Wrong output, a crash, a hang, or a tool that misbehaves.
+labels: [bug]
+body:
+  - type: textarea
+    id: ran
+    attributes:
+      label: What you ran
+      description: The CLI command or MCP tool call, with its arguments.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: The output, trimmed to the part that is wrong.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: target
+    attributes:
+      label: The binary
+      description: >
+        Format, architecture and compiler if you know them. Attach or link
+        the file only if you are allowed to share it; a small program that
+        reproduces the problem is even better.
+  - type: input
+    id: version
+    attributes:
+      label: borer version
+      description: The first line of `borer doctor offline`.

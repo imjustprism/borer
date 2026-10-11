@@ -1,0 +1,41 @@
+# typos (https://github.com/crate-ci/typos): spelling in code, docs, comments.
+[files]
+extend-exclude = [
+  "target/",
+  "Cargo.lock",
+]
+
+[default]
+# hex byte strings ("fe dc ba 98") are data, not words
+extend-ignore-re = ["(?i)\\b[0-9a-f]{2}( [0-9a-f]{2}){3,}\\b"]
+
+[default.extend-words]
+# ELF relocation sections (.rela.plt) and Windows structured exception handling.
+rela = "rela"
+# the DWARF address-range section is spelled .debug_aranges
+aranges = "aranges"
+seh = "seh"
+SEH = "SEH"
+# plural of `va` (virtual address), used throughout the tests
+vas = "vas"
+# a Windows DLL (AcGenral.dll) that is spelled that way
+Genral = "Genral"
+# the x86 `setp` (set if parity) mnemonic, and `andn`, which ands
+setp = "setp"
+ands = "ands"
+# Qt's Q_INVOKABLE macro, which moc metadata names
+INVOKABLE = "INVOKABLE"
+# the CRT's x87 helper _ftol2_sse_excpt, spelled that way
+excpt = "excpt"
+
+[default.extend-identifiers]
+# iced-x86 operand kind
+Immediate8_2nd = "Immediate8_2nd"
+# the x86 BCD adjust mnemonics, as iced-x86 spells them
+Daa = "Daa"
+Das = "Das"
+Aaa = "Aaa"
+Aas = "Aas"
+Aad = "Aad"
+Aam = "Aam"
+Setp = "Setp"

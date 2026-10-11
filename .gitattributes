@@ -1,0 +1,18 @@
+# Normalize line endings: LF in the repository and in every checkout, so a
+# Windows clone never produces CRLF churn in diffs (git warned about exactly
+# that on this tree).
+* text=auto eol=lf
+
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# Binary fixtures and outputs
+*.exe binary
+*.dll binary
+*.bin binary
+*.png binary

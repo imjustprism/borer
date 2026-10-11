@@ -1,0 +1,1381 @@
+//! Typed runs: a function called on the inputs a reader names, in the
+//! emulator, and its answer checked against the function's printed text.
+
+use super::*;
+use crate::analysis::decompile::interp::{End, Script, TextRun};
+use crate::analysis::decompile::signature::{Kind, Passing, Signature, passing, printed};
+use crate::analysis::decompile::{decompile_named, traces, verify};
+
+/// Most input sets one request runs.
+const INPUTS_MAX: usize = 64;
+
+/// Most arguments one input passes.
+const ARGS_MAX: usize = 16;
+
+/// Largest buffer one argument sets up, in bytes.
+const BUFFER_MAX: usize = 0x8000;
+
+/// Steps each run is given unless the spec says otherwise.
+const BUDGET: usize = 1_000_000;
+
+/// Most steps a spec may ask for.
+const BUDGET_MAX: usize = 20_000_000;
+
+/// Bytes of a buffer a report spells before the rest are counted.
+const SHOWN_MAX: usize = 48;
+
+/// Distance between two buffers' addresses: room for the largest buffer
+/// and the guard after it.
+const BUFFER_STRIDE: u64 = 0x1_0000;
+
+/// Bytes above the stack pointer at entry a returned stack address may lie:
+/// the return address and the stack arguments.
+const STACK_ABOVE: u64 = 0x1000;
+
+/// Bytes below the stack pointer at entry a returned stack address may lie:
+/// the frames of the function and its callees.
+const STACK_BELOW: u64 = 0x100_0000;
+
+/// Zero bytes past each buffer, so a routine that reads a word past a
+/// string's end reads zeros, as it would in a real allocation, and a write
+/// there shows as one past the end.
+const GUARD: usize = 16;
+
+/// One argument of a run, as the reader writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Arg {
+    /// An integer: its bits, two's complement for a negative one.
+    Int(u64),
+    /// A buffer holding these bytes, whose address is passed: `"text"`
+    /// (its terminating zero included) or `hex:<bytes>`.
+    Bytes(Vec<u8>),
+    /// A zeroed buffer of this many bytes the function writes into:
+    /// `out:<size>`.
+    Out(usize),
+}
+
+impl Arg {
+    /// Tells whether the argument passes a buffer's address.
+    fn is_buffer(&self) -> bool {
+        matches!(self, Self::Bytes(_) | Self::Out(_))
+    }
+
+    /// The buffer's bytes as the run starts.
+    fn initial(&self) -> Vec<u8> {
+        match self {
+            Self::Int(_) => Vec::new(),
+            Self::Bytes(b) => b.clone(),
+            Self::Out(n) => vec![0; *n],
+        }
+    }
+
+    /// The argument as a report's row spells it.
+    fn shown(&self) -> String {
+        match self {
+            Self::Int(v) => small_hex(*v),
+            Self::Bytes(b) => bytes_shown(b),
+            Self::Out(n) => format!("out:{n}"),
+        }
+    }
+}
+
+/// A value spelled decimal under ten, hex otherwise, a negative one with
+/// its sign.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+fn small_hex(v: u64) -> String {
+    let s = v.cast_signed();
+    if (-9..=9).contains(&s) {
+        s.to_string()
+    } else if s < 0 && s > -0x1_0000 {
+        format!("-{:#x}", s.unsigned_abs())
+    } else {
+        format!("{v:#x}")
+    }
+}
+
+/// Bytes as a report spells them: a quoted string when they are text up
+/// to their terminator, else hex, cut at [`SHOWN_MAX`].
+///
+/// # Arguments
+///
+/// * `b` - The bytes.
+fn bytes_shown(b: &[u8]) -> String {
+    if b == [0] {
+        return "\"\"".to_owned();
+    }
+    let end = b.iter().position(|c| *c == 0).unwrap_or(b.len());
+    let (text, rest) = b.split_at(end);
+    let tail_zero = rest.iter().all(|c| *c == 0);
+    if !text.is_empty() && tail_zero && text.iter().all(|c| (0x20..0x7f).contains(c)) {
+        let shown: String = text
+            .iter()
+            .take(SHOWN_MAX)
+            .map(|c| char::from(*c))
+            .collect();
+        let more = if text.len() > SHOWN_MAX {
+            format!("...+{}", text.len() - SHOWN_MAX)
+        } else {
+            String::new()
+        };
+        return format!("{shown:?}{more}");
+    }
+    let hex: Vec<String> = b
+        .iter()
+        .take(SHOWN_MAX)
+        .map(|c| format!("{c:02x}"))
+        .collect();
+    let more = if b.len() > SHOWN_MAX {
+        format!("...+{}", b.len() - SHOWN_MAX)
+    } else {
+        String::new()
+    };
+    format!("hex:{}{more}", hex.join(""))
+}
+
+/// A parsed run request: the function, the budget, and the inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunSpec {
+    /// The function's entry.
+    entry: u64,
+    /// Steps each run is given.
+    budget: usize,
+    /// The inputs, each its arguments in order.
+    inputs: Vec<Vec<Arg>>,
+}
+
+/// Splits text at a separator outside double quotes, a backslash escaping
+/// the character after it inside them.
+///
+/// # Arguments
+///
+/// * `text` - The text.
+/// * `sep` - The separator.
+fn split_unquoted(text: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut quoted, mut escaped, mut from) = (false, false, 0);
+    for (k, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if quoted && c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        } else if c == sep && !quoted {
+            out.push(&text[from..k]);
+            from = k + c.len_utf8();
+        }
+    }
+    out.push(&text[from..]);
+    out
+}
+
+/// Reads a quoted text argument's bytes, its terminating zero added.
+///
+/// # Arguments
+///
+/// * `body` - The text between the quotes.
+///
+/// # Errors
+///
+/// A bad escape.
+fn text_bytes(body: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(body.len() + 1);
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        let e = chars.next().ok_or("a text argument ends in a backslash")?;
+        out.push(match e {
+            'n' => b'\n',
+            'r' => b'\r',
+            't' => b'\t',
+            '0' => 0,
+            '\\' => b'\\',
+            '"' => b'"',
+            'x' => {
+                let h: String = chars.by_ref().take(2).collect();
+                u8::from_str_radix(&h, 16).map_err(|_| format!("\\x{h} is not two hex digits"))?
+            }
+            other => {
+                return Err(format!(
+                    "\\{other} is no escape; use \\n \\r \\t \\0 \\\\ \\\" or \\xNN"
+                ));
+            }
+        });
+    }
+    out.push(0);
+    Ok(out)
+}
+
+/// Reads an integer argument: decimal or `0x`-hex, negative ones in two's
+/// complement.
+///
+/// # Arguments
+///
+/// * `t` - The token.
+fn integer(t: &str) -> Option<u64> {
+    let (negative, digits) = t.strip_prefix('-').map_or((false, t), |d| (true, d));
+    let v = match digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        Some(h) => u64::from_str_radix(h, 16).ok()?,
+        None => digits.parse::<u64>().ok()?,
+    };
+    Some(if negative { v.wrapping_neg() } else { v })
+}
+
+/// Reads one argument.
+///
+/// # Arguments
+///
+/// * `t` - The argument as written.
+///
+/// # Errors
+///
+/// When it is none of the forms, or a buffer is past [`BUFFER_MAX`].
+fn argument(t: &str) -> Result<Arg, String> {
+    let t = t.trim();
+    let arg = if let Some(body) = t.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        Arg::Bytes(text_bytes(body)?)
+    } else if let Some(h) = t.strip_prefix("hex:") {
+        Arg::Bytes(
+            parse_hex_bytes(h).ok_or_else(|| format!("{t}: hex: takes pairs of hex digits"))?,
+        )
+    } else if let Some(n) = t.strip_prefix("out:") {
+        Arg::Out(parse_count(n).ok_or_else(|| format!("{t}: out: takes a size"))?)
+    } else {
+        Arg::Int(integer(t).ok_or_else(|| {
+            format!(
+                "cannot read the argument {t}; use a number, \"text\", hex:<bytes> or out:<size>"
+            )
+        })?)
+    };
+    let len = match &arg {
+        Arg::Int(_) => 0,
+        Arg::Bytes(b) => b.len(),
+        Arg::Out(n) => *n,
+    };
+    if len > BUFFER_MAX {
+        return Err(format!("{t}: a buffer is at most {BUFFER_MAX:#x} bytes"));
+    }
+    Ok(arg)
+}
+
+/// Reads a run request: `<function>[,steps=N]/<input>[;<input>...]`, each
+/// input its arguments in order, separated by commas.
+///
+/// # Arguments
+///
+/// * `a` - The analysis, to resolve the function.
+/// * `o` - User names.
+/// * `spec` - The request.
+///
+/// # Errors
+///
+/// When the function does not resolve or an input does not read.
+fn parse_run(a: &Analysis, o: &Overlay, spec: &str) -> Result<RunSpec, String> {
+    let (head, inputs) = spec
+        .split_once('/')
+        .ok_or("run takes <function>[,steps=N]/<input>[;<input>...]")?;
+    let (target, mut rest) = spec_head(head);
+    let start = locate(a, o, target).ok_or_else(|| unresolved(target))?;
+    let entry = a
+        .function_at(start)
+        .ok_or_else(|| format!("no function contains {start:#x}"))?
+        .entry;
+    let mut budget = BUDGET;
+    if let Some(option) = rest.next().map(str::trim) {
+        let n = option
+            .strip_prefix("steps=")
+            .and_then(parse_count)
+            .ok_or_else(|| format!("cannot read {option}; use steps=N"))?;
+        if n == 0 || n > BUDGET_MAX {
+            return Err(format!("steps is 1 to {BUDGET_MAX}"));
+        }
+        budget = n;
+    }
+    let mut out = Vec::new();
+    for set in split_unquoted(inputs, ';') {
+        let args: Vec<Arg> = if set.trim().is_empty() {
+            Vec::new()
+        } else {
+            split_unquoted(set, ',')
+                .into_iter()
+                .map(argument)
+                .collect::<Result<_, _>>()?
+        };
+        if args.len() > ARGS_MAX {
+            return Err(format!("an input passes at most {ARGS_MAX} arguments"));
+        }
+        out.push(args);
+    }
+    if out.len() > INPUTS_MAX {
+        return Err(format!("at most {INPUTS_MAX} inputs a run"));
+    }
+    Ok(RunSpec {
+        entry,
+        budget,
+        inputs: out,
+    })
+}
+
+/// Where the buffers of a run go: a region no section of the image takes,
+/// one [`BUFFER_STRIDE`] apart.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `count` - How many buffers.
+fn buffer_base(p: &Program, count: usize) -> u64 {
+    let (mut base, step): (u64, u64) = if p.is_64 {
+        (0x0000_5000_0000_0000, 0x0000_0100_0000_0000)
+    } else {
+        (0x5000_0000, 0x0100_0000)
+    };
+    let span = from_usize(count.max(1)).saturating_mul(BUFFER_STRIDE);
+    for _ in 0..8 {
+        let clash = p.sections.iter().any(|s| {
+            let end = s.va.saturating_add(s.vsize.max(s.file_size));
+            s.va < base.saturating_add(span) && base < end
+        });
+        if !clash {
+            break;
+        }
+        base = base.saturating_add(step);
+    }
+    base
+}
+
+/// What one input sets up: the argument values and the memory behind the
+/// buffers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Layout {
+    /// The argument values, in order.
+    values: Vec<u64>,
+    /// Each argument's buffer address, `None` for an integer.
+    at: Vec<Option<u64>>,
+    /// The bytes to write first, each buffer with its guard.
+    pokes: Vec<(u64, Vec<u8>)>,
+}
+
+/// The argument values and the memory one input sets up.
+///
+/// # Arguments
+///
+/// * `base` - Where the first buffer goes.
+/// * `input` - The arguments.
+fn lay_out(base: u64, input: &[Arg]) -> Layout {
+    let mut values = Vec::with_capacity(input.len());
+    let mut at = Vec::with_capacity(input.len());
+    let mut pokes = Vec::new();
+    for (k, arg) in input.iter().enumerate() {
+        match arg {
+            Arg::Int(v) => {
+                values.push(*v);
+                at.push(None);
+            }
+            Arg::Bytes(_) | Arg::Out(_) => {
+                let addr = base.wrapping_add(from_usize(k).wrapping_mul(BUFFER_STRIDE));
+                let mut bytes = arg.initial();
+                bytes.resize(bytes.len() + GUARD, 0);
+                values.push(addr);
+                at.push(Some(addr));
+                pokes.push((addr, bytes));
+            }
+        }
+    }
+    Layout { values, at, pokes }
+}
+
+/// What a run of the binary did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Machine {
+    /// How it ended.
+    stop: Stop,
+    /// Steps taken.
+    steps: usize,
+    /// What it returned at the declared width, or `rax` with no
+    /// declaration; `None` when it did not return.
+    value: Option<u64>,
+    /// Each buffer argument's bytes after the run, guard included.
+    buffers: Vec<Option<Vec<u8>>>,
+    /// The imports it called, in order.
+    calls: Vec<String>,
+}
+
+/// The register value a return of `bits` hands back: `rax`'s low bits,
+/// or `edx:eax` for a 64-bit value on a 32-bit target.
+///
+/// # Arguments
+///
+/// * `emu` - The machine after the run.
+/// * `bits` - The declared width.
+/// * `word` - The machine word in bits.
+fn returned_value(emu: &Emulator<'_>, bits: u8, word: u32) -> u64 {
+    let rax = emu.register("rax").unwrap_or(0);
+    if word == 32 && bits > 32 {
+        let rdx = emu.register("rdx").unwrap_or(0);
+        return (rdx << 32) | (rax & 0xffff_ffff);
+    }
+    if bits >= 64 {
+        rax
+    } else {
+        rax & ((1u64 << bits) - 1)
+    }
+}
+
+/// Reads a buffer back, `0xff` for a byte nothing backs.
+///
+/// # Arguments
+///
+/// * `emu` - The machine.
+/// * `at` - The buffer's address.
+/// * `len` - Its length.
+fn read_back(emu: &Emulator<'_>, at: u64, len: usize) -> Vec<u8> {
+    (0..from_usize(len))
+        .map(|k| emu.byte_at(at.wrapping_add(k)).unwrap_or(0xff))
+        .collect()
+}
+
+/// Runs the binary's function on one input.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `entry` - The function.
+/// * `pass` - How it takes its arguments.
+/// * `ret_bits` - The declared return width, `None` to report `rax`.
+/// * `input` - The arguments.
+/// * `layout` - The values, buffer addresses and setup of the input.
+/// * `budget` - Steps.
+fn run_machine(
+    p: &Program,
+    entry: u64,
+    pass: &Passing,
+    ret_bits: Option<u8>,
+    input: &[Arg],
+    layout: &Layout,
+    budget: usize,
+) -> Option<Machine> {
+    let Layout { values, at, pokes } = layout;
+    let mut emu = Emulator::new(p, budget)?;
+    emu.install_imports();
+    for (addr, bytes) in pokes {
+        poke_all(&mut emu, *addr, bytes);
+    }
+    let sp = emu.register("rsp")?;
+    pass.place(&mut emu, sp, values);
+    let run = emu.run(entry);
+    let word = p.arch.bitness().unwrap_or(64);
+    let value = matches!(run.stop, Stop::Returned)
+        .then(|| returned_value(&emu, ret_bits.unwrap_or(64), word));
+    let buffers = input
+        .iter()
+        .zip(at)
+        .map(|(arg, addr)| addr.map(|a| read_back(&emu, a, arg.initial().len() + GUARD)))
+        .collect();
+    Some(Machine {
+        stop: run.stop,
+        steps: run.steps,
+        value,
+        buffers,
+        calls: emu.api_calls().to_vec(),
+    })
+}
+
+/// What the printed text said against the binary on one input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Both returned the same value and left the same bytes in every
+    /// buffer, calling the same imports in the same order; or both stopped
+    /// alike.
+    Agrees,
+    /// They differ: the text's line and what differs there.
+    Differs(usize, String),
+    /// Nothing is claimed: the line the text stopped at, if any, and why.
+    Unchecked(Option<usize>, String),
+}
+
+/// One input's answer: the binary's run and the text's verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Outcome {
+    /// How the binary's run ended, in words.
+    stop: String,
+    /// Steps the binary took.
+    steps: usize,
+    /// What it returned, `None` when it did not.
+    value: Option<u64>,
+    /// Each buffer argument the run changed, by position from zero, with
+    /// its bytes after, and how many bytes it wrote past the end.
+    writes: Vec<(usize, Vec<u8>, usize)>,
+    /// The text against the binary.
+    verdict: Verdict,
+    /// Statements the text ran, its callees' steps included.
+    text_steps: usize,
+}
+
+impl Outcome {
+    /// Bytes the outcome holds, for the memo's budget.
+    fn bytes(&self) -> usize {
+        self.stop.capacity()
+            + self
+                .writes
+                .iter()
+                .map(|(_, b, _)| b.capacity() + size_of::<(usize, Vec<u8>, usize)>())
+                .sum::<usize>()
+            + match &self.verdict {
+                Verdict::Agrees => 0,
+                Verdict::Differs(_, s) | Verdict::Unchecked(_, s) => s.capacity(),
+            }
+    }
+}
+
+/// Compares the text's run with the binary's on one input.
+///
+/// # Arguments
+///
+/// * `m` - The binary's run.
+/// * `t` - The text's run.
+/// * `at` - Each buffer argument's address.
+/// * `ret` - The declared return kind and width, `None` for `void`.
+fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8)>) -> Verdict {
+    let line = t.line;
+    if m.value.is_none() {
+        return match (&t.end, &m.stop) {
+            (End::Fault(x), Stop::Fault(y)) if x == y => Verdict::Agrees,
+            (End::Budget, Stop::Budget) => Verdict::Agrees,
+            _ => Verdict::Unchecked(None, format!("the binary did not return: {}", m.stop)),
+        };
+    }
+    let returned = match &t.end {
+        End::Returned(v) => *v,
+        End::Unchecked(why) => return Verdict::Unchecked(Some(line), why.clone()),
+        End::Trap => {
+            return Verdict::Differs(line, "the text stops here; the binary returned".to_owned());
+        }
+        End::Fault(x) => {
+            return Verdict::Differs(
+                line,
+                format!(
+                    "the text reads or writes {}, which nothing set; the binary returned",
+                    whose(*x, at, &m.buffers, t.entry_sp)
+                ),
+            );
+        }
+        End::Budget => {
+            return Verdict::Differs(
+                line,
+                format!(
+                    "the text is still running after {} steps; the binary returned after {}",
+                    t.steps, m.steps
+                ),
+            );
+        }
+        End::Callee(name, stop) => {
+            let stop = match stop {
+                Stop::Fault(x) => format!(
+                    "it reads or writes {}, which nothing set",
+                    whose(*x, at, &m.buffers, t.entry_sp)
+                ),
+                other => other.to_string(),
+            };
+            return Verdict::Differs(
+                line,
+                format!("the call to {name} does not return: {stop}; in the binary it does"),
+            );
+        }
+    };
+    if let (Some((Kind::Int(..) | Kind::Pointer, bits)), Some(text), Some(machine)) =
+        (ret, returned, m.value)
+        && text != machine
+    {
+        let stack = |v: u64| {
+            v <= t.entry_sp.wrapping_add(STACK_ABOVE)
+                && t.entry_sp - v.min(t.entry_sp) <= STACK_BELOW
+        };
+        if t.literals.contains(&text) {
+            return Verdict::Unchecked(
+                Some(line),
+                "the text returns a string literal, and which copy of its bytes it means the text does not say".to_owned(),
+            );
+        }
+        if stack(text) && stack(machine) {
+            return Verdict::Unchecked(
+                Some(line),
+                "both return an address on the stack, which differs with the depth a call is made from".to_owned(),
+            );
+        }
+        let low = if bits > 32 && machine >> 32 == 0 && text & 0xffff_ffff == machine {
+            " (the low 32 bits agree)"
+        } else {
+            ""
+        };
+        let sources: Vec<String> = t
+            .sources
+            .iter()
+            .map(|(n, l)| {
+                if *l == 0 {
+                    format!("{n} never set before it")
+                } else {
+                    format!("{n} set at line {l}")
+                }
+            })
+            .collect();
+        let from = if sources.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", sources.join(", "))
+        };
+        return Verdict::Differs(
+            line,
+            format!("the text returns {text:#x}, the binary {machine:#x}{low}{from}"),
+        );
+    }
+    for (k, addr) in at.iter().enumerate() {
+        let (Some(addr), Some(Some(after))) = (addr, m.buffers.get(k)) else {
+            continue;
+        };
+        let text = read_back(&t.emu, *addr, after.len());
+        if let Some(i) = text.iter().zip(after).position(|(x, y)| x != y) {
+            let place = from_usize(i);
+            let writer = t.writers.get(&addr.wrapping_add(place)).copied();
+            let what = format!(
+                "a{}[{i}] is {:#04x} after the text, {:#04x} after the binary{}",
+                k + 1,
+                text.get(i).copied().unwrap_or(0),
+                after.get(i).copied().unwrap_or(0),
+                if writer.is_some() {
+                    ""
+                } else {
+                    "; no line of the text writes it"
+                }
+            );
+            return Verdict::Differs(writer.unwrap_or(line), what);
+        }
+    }
+    let (machine_calls, text_calls) = (&m.calls, t.emu.api_calls());
+    if let Some(i) = (0..machine_calls.len().max(text_calls.len()))
+        .find(|&i| machine_calls.get(i) != text_calls.get(i))
+    {
+        let say = |c: Option<&String>| c.map_or_else(|| "nothing".to_owned(), Clone::clone);
+        return Verdict::Differs(
+            line,
+            format!(
+                "call {} of an import is {} in the text, {} in the binary",
+                i + 1,
+                say(text_calls.get(i)),
+                say(machine_calls.get(i))
+            ),
+        );
+    }
+    match ret {
+        Some((Kind::Float | Kind::Other, _)) => Verdict::Unchecked(
+            Some(line),
+            "the result is not an integer, so only memory and calls were compared".to_owned(),
+        ),
+        _ => Verdict::Agrees,
+    }
+}
+
+/// Says where an address the text faulted on is: in or past a buffer
+/// argument, in the stack frame (as an offset from the stack pointer at
+/// entry), or just the address.
+///
+/// # Arguments
+///
+/// * `x` - The address.
+/// * `at` - Each buffer argument's address.
+/// * `buffers` - Each buffer argument's bytes, guard included.
+/// * `entry_sp` - The stack pointer at entry.
+fn whose(x: u64, at: &[Option<u64>], buffers: &[Option<Vec<u8>>], entry_sp: u64) -> String {
+    /// Bytes below the stack pointer at entry read as the frame.
+    const FRAME: u64 = 0x1_0000;
+    for (k, (addr, bytes)) in at.iter().zip(buffers).enumerate() {
+        let (Some(addr), Some(bytes)) = (addr, bytes) else {
+            continue;
+        };
+        if let Some(off) = x.checked_sub(*addr).filter(|o| *o < BUFFER_STRIDE) {
+            let past = if off >= from_usize(bytes.len().saturating_sub(GUARD)) {
+                ", past its end"
+            } else {
+                ""
+            };
+            return format!("a{}+{off:#x}{past}", k + 1);
+        }
+    }
+    if x < entry_sp && entry_sp - x <= FRAME {
+        return format!("the frame at entry-{:#x}", entry_sp - x);
+    }
+    if x >= entry_sp && x - entry_sp <= FRAME {
+        return format!("the frame at entry+{:#x}", x - entry_sp);
+    }
+    format!("{x:#x}")
+}
+
+/// The parts of one request every input shares: the signature and the
+/// text read once, and how the function takes its arguments.
+struct Shared<'p> {
+    /// The signature the text prints, or why there is none.
+    sig: Result<Signature, String>,
+    /// The function's text, read, or why it could not be.
+    script: Result<Script<'p>, String>,
+    /// How the function takes its arguments.
+    pass: Passing,
+}
+
+/// Runs one input: the binary, then the text, and the verdict.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `shared` - The text and the convention.
+/// * `entry` - The function.
+/// * `input` - The arguments.
+/// * `budget` - Steps.
+fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: usize) -> Outcome {
+    let buffers = input.iter().filter(|a| a.is_buffer()).count();
+    let layout = lay_out(buffer_base(p, buffers.max(input.len())), input);
+    let ret = shared.sig.as_ref().ok().and_then(Signature::return_kind);
+    let Some(m) = run_machine(
+        p,
+        entry,
+        &shared.pass,
+        ret.map(|(_, bits)| bits),
+        input,
+        &layout,
+        budget,
+    ) else {
+        return Outcome {
+            stop: "this architecture is not emulated".to_owned(),
+            steps: 0,
+            value: None,
+            writes: Vec::new(),
+            verdict: Verdict::Unchecked(None, "nothing ran".to_owned()),
+            text_steps: 0,
+        };
+    };
+    let writes = input
+        .iter()
+        .zip(&m.buffers)
+        .enumerate()
+        .filter_map(|(k, (arg, after))| {
+            let after = after.as_ref()?;
+            let initial = arg.initial();
+            let (body, guard) = after.split_at(initial.len().min(after.len()));
+            let past = guard.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+            (body != initial.as_slice() || past > 0).then(|| (k, body.to_vec(), past))
+        })
+        .collect();
+    let (verdict, text_steps) = match &shared.script {
+        Err(why) => (Verdict::Unchecked(None, why.clone()), 0),
+        Ok(script) => match script.run(&layout.values, &layout.pokes, budget) {
+            None => (Verdict::Unchecked(None, "nothing ran".to_owned()), 0),
+            Some(t) => (judge(&m, &t, &layout.at, ret), t.steps),
+        },
+    };
+    Outcome {
+        stop: m.stop.to_string(),
+        steps: m.steps,
+        value: m.value,
+        writes,
+        verdict,
+        text_steps,
+    }
+}
+
+/// Runs a function on each input, in the emulator and through its printed
+/// text, and tabulates both.
+///
+/// Each input is typed by the decompiler's recovered signature: an integer
+/// for an integer parameter, a buffer (`"text"`, `hex:<bytes>`) or an
+/// `out:<size>` buffer for a pointer, whose address is passed. An input
+/// giving fewer arguments than the signature lists, or a floating one, is
+/// refused; a buffer for an integer parameter, or more arguments than the
+/// signature lists, is passed and said so. Every run starts from the same
+/// state, the registers zero but for the arguments, memory the image's
+/// and the buffers', with the step budget and no permissive mode, so the
+/// same request answers the same, byte for byte.
+///
+/// The binary's row says what it returned (at the declared width), how it
+/// stopped, the steps, and what it left in each buffer it changed. The
+/// text column says whether the decompiled text, run as C on the same
+/// inputs ([`Script`]), returned the same, left the same bytes and called
+/// the same imports: `agrees`, `differs@L<n>` with the line, or
+/// `unchecked` with why. Each input's result is memoized through
+/// [`Analysis::derived`] under the names in force.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `spec` - `<function>[,steps=N]/<input>[;<input>...]` ([`parse_run`]).
+///
+/// # Returns
+///
+/// The table, a line per input that differs or could not be checked, and
+/// when one differs, what the structure check and the lifter's check say
+/// of the function.
+///
+/// # Errors
+///
+/// When the spec does not read, or an input does not fit the signature.
+pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
+    let req = parse_run(a, o, spec)?;
+    let entry = req.entry;
+    let text = decompile_named(p, a, o, entry);
+    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let shared = Shared {
+        sig: text
+            .as_deref()
+            .ok_or_else(|| "the function does not decompile".to_owned())
+            .and_then(|t| printed(t, word)),
+        script: text
+            .as_deref()
+            .ok_or_else(|| "the function does not decompile".to_owned())
+            .and_then(|t| Script::read(p, a, o, entry, t)),
+        pass: passing(p, a, o, entry),
+    };
+    let mut notes: Vec<String> = Vec::new();
+    if let Ok(sig) = &shared.sig {
+        let kinds = sig.parameter_kinds();
+        for (n, input) in req.inputs.iter().enumerate() {
+            if input.len() < kinds.len() {
+                return Err(format!(
+                    "input {} gives {} argument{}; the signature {} takes {}",
+                    n + 1,
+                    input.len(),
+                    plural(input.len()),
+                    sig.text,
+                    kinds.len()
+                ));
+            }
+            for (k, (arg, kind)) in input.iter().zip(&kinds).enumerate() {
+                match (arg, kind) {
+                    (_, Kind::Float) => {
+                        return Err(format!(
+                            "a{} is a floating parameter; a run passes integers and buffers",
+                            k + 1
+                        ));
+                    }
+                    (Arg::Bytes(_) | Arg::Out(_), Kind::Int(..)) => {
+                        let note = format!("a{} is an integer, given a buffer: its address", k + 1);
+                        if !notes.contains(&note) {
+                            notes.push(note);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if input.len() > kinds.len() {
+                let note = format!(
+                    "the signature lists {}; the rest pass where the convention puts them",
+                    kinds.len()
+                );
+                if !notes.contains(&note) {
+                    notes.push(note);
+                }
+            }
+        }
+    }
+    let names = o.fingerprint();
+    let outcomes: Vec<Arc<Outcome>> = req
+        .inputs
+        .iter()
+        .map(|input| {
+            a.derived.get_or_build_item(
+                "fn_run",
+                names,
+                (entry, req.budget, input.clone()),
+                || run_one(p, &shared, entry, input, req.budget),
+                Outcome::bytes,
+            )
+        })
+        .collect();
+    Ok(render_runs(
+        p,
+        a,
+        o,
+        &req,
+        &shared,
+        text.as_deref(),
+        &outcomes,
+        &notes,
+    ))
+}
+
+/// Writes the report of a run request.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `req` - The request.
+/// * `shared` - Its text and convention.
+/// * `text` - The decompiled text, for the lines a verdict names.
+/// * `outcomes` - Each input's outcome.
+/// * `notes` - What the typing said of the inputs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the report reads every part of the request it answers"
+)]
+fn render_runs(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    req: &RunSpec,
+    shared: &Shared<'_>,
+    text: Option<&str>,
+    outcomes: &[Arc<Outcome>],
+    notes: &[String],
+) -> String {
+    let lines: Vec<&str> = text.map_or_else(Vec::new, |t| t.lines().collect());
+    let signature = shared.sig.as_ref().map_or_else(
+        |_| {
+            format!(
+                "{} (no signature: it does not decompile)",
+                short_name(a, o, req.entry)
+            )
+        },
+        |s| s.text.clone(),
+    );
+    let count = |f: fn(&Verdict) -> bool| outcomes.iter().filter(|x| f(&x.verdict)).count();
+    let agree = count(|v| matches!(v, Verdict::Agrees));
+    let differ = count(|v| matches!(v, Verdict::Differs(..)));
+    let unchecked = outcomes.len() - agree - differ;
+    let mut out = format!(
+        "# run {signature}: {} input{}, at most {} steps each; the text agrees on {agree}, differs on {differ}, unchecked on {unchecked}\n",
+        outcomes.len(),
+        plural(outcomes.len()),
+        req.budget
+    );
+    for n in notes {
+        let _ = writeln!(out, "# {n}");
+    }
+    out.push_str("# args\treturns\tstop\tsteps\twrites\ttext\n");
+    for (input, x) in req.inputs.iter().zip(outcomes) {
+        let args: Vec<String> = input.iter().map(Arg::shown).collect();
+        let args = if args.is_empty() {
+            "-".to_owned()
+        } else {
+            args.join(" ")
+        };
+        let returns = x.value.map_or_else(|| "-".to_owned(), small_hex);
+        let writes: Vec<String> = x
+            .writes
+            .iter()
+            .map(|(k, b, past)| {
+                let tail = if *past > 0 {
+                    format!(" +{past} past the end")
+                } else {
+                    String::new()
+                };
+                format!("a{}={}{tail}", k + 1, bytes_shown(b))
+            })
+            .collect();
+        let writes = if writes.is_empty() {
+            "-".to_owned()
+        } else {
+            writes.join(" ")
+        };
+        let verdict = match &x.verdict {
+            Verdict::Agrees => "agrees".to_owned(),
+            Verdict::Differs(l, _) => format!("differs@L{l}"),
+            Verdict::Unchecked(..) => "unchecked".to_owned(),
+        };
+        let _ = writeln!(
+            out,
+            "{args}\t{returns}\t{}\t{}\t{writes}\t{verdict}",
+            x.stop, x.steps
+        );
+    }
+    let line_text = |l: usize| {
+        lines.get(l.wrapping_sub(1)).map_or_else(String::new, |t| {
+            let t = t.trim();
+            let cut: String = t.chars().take(80).collect();
+            format!(" `{cut}`")
+        })
+    };
+    for (n, x) in outcomes.iter().enumerate() {
+        match &x.verdict {
+            Verdict::Agrees => {}
+            Verdict::Differs(l, what) => {
+                let _ = writeln!(
+                    out,
+                    "# input {} differs at line {l}{}: {what}",
+                    n + 1,
+                    line_text(*l)
+                );
+            }
+            Verdict::Unchecked(Some(l), why) => {
+                let _ = writeln!(
+                    out,
+                    "# input {} unchecked at line {l}{}: {why}",
+                    n + 1,
+                    line_text(*l)
+                );
+            }
+            Verdict::Unchecked(None, why) => {
+                let _ = writeln!(out, "# input {} unchecked: {why}", n + 1);
+            }
+        }
+    }
+    if differ > 0 {
+        let structure = match text {
+            Some(t) => match traces::check_structure(p, a, o, req.entry, t) {
+                traces::Structure::Agrees => "agrees".to_owned(),
+                traces::Structure::Disagrees(d) => format!(
+                    "the {} has a path the other lacks at {} ({})",
+                    match d.side {
+                        traces::Side::Text => "text",
+                        traces::Side::Binary => "binary",
+                    },
+                    d.at,
+                    d.step
+                ),
+                traces::Structure::Unchecked(why) => format!("unchecked: {why}"),
+            },
+            None => "unchecked: no text".to_owned(),
+        };
+        let _ = writeln!(out, "# structure check: {structure}");
+        let v = verify::verify(p, a, &[req.entry], VERIFY_SEED);
+        let lifter = match v.mismatches.first() {
+            None => format!(
+                "agrees on {} of {} blocks ({} facts)",
+                v.checked, v.blocks, v.compared
+            ),
+            Some(m) => format!(
+                "{} mismatch{}, first in block {:#x}: {} {} is {:#x} lifted, {:#x} emulated",
+                v.mismatches.len(),
+                if v.mismatches.len() == 1 { "" } else { "es" },
+                m.block,
+                m.fact,
+                m.place,
+                m.lifted,
+                m.emulated
+            ),
+        };
+        let _ = writeln!(out, "# lifter check: {lifter}");
+    }
+    out
+}
+
+/// The seed the lifter's check runs from when a run differs, fixed so the
+/// report is the same every time.
+const VERIFY_SEED: u64 = 1;
+
+/// The values a generated integer argument is drawn from besides random
+/// ones: the edges a check compares against.
+const EDGES: [u64; 12] = [
+    0,
+    1,
+    2,
+    7,
+    0x10,
+    0x7f,
+    0x80,
+    0xff,
+    0x7fff_ffff,
+    0x8000_0000,
+    0xffff_ffff,
+    u64::MAX,
+];
+
+/// Bytes a generated buffer argument holds.
+const GENERATED_BUFFER: usize = 64;
+
+/// Longest text a generated buffer argument holds before its zeros.
+const GENERATED_TEXT: u64 = 40;
+
+/// The characters a generated text is spelled with.
+const GENERATED_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789 ,.-_/";
+
+/// Inputs generated for a function from the kinds of its parameters.
+///
+/// Each input is a pure function of the seed, the function's entry and the
+/// input's position: an integer is an edge value, a small number, a small
+/// negative one or a random word, cut to the parameter's width and extended
+/// as its sign says; a pointer is a buffer of [`GENERATED_BUFFER`] bytes
+/// holding a short text, random bytes, or zeros.
+///
+/// # Arguments
+///
+/// * `kinds` - The parameters' kinds, in order.
+/// * `count` - How many inputs.
+/// * `seed` - The seed.
+/// * `entry` - The function's entry, stirred into the seed.
+///
+/// # Errors
+///
+/// When a parameter is floating, or of a type a run does not pass.
+fn generated(kinds: &[Kind], count: usize, seed: u64, entry: u64) -> Result<Vec<Vec<Arg>>, String> {
+    /// Stirs the seed, as `splitmix64` does.
+    const GOLDEN: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut out = Vec::with_capacity(count);
+    for j in 0..count {
+        let mut state = seed ^ entry.wrapping_mul(GOLDEN) ^ from_usize(j).wrapping_mul(GOLDEN << 1);
+        let mut next = move || {
+            state = state.wrapping_add(GOLDEN);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut input = Vec::with_capacity(kinds.len());
+        for (k, kind) in kinds.iter().enumerate() {
+            input.push(match *kind {
+                Kind::Int(bits, signed) => {
+                    let v = match next() % 4 {
+                        0 => EDGES
+                            .get(usize::try_from(next() % from_usize(EDGES.len())).unwrap_or(0))
+                            .copied()
+                            .unwrap_or(0),
+                        1 => next() % 16,
+                        2 => (next() % 16).wrapping_neg(),
+                        _ => next(),
+                    };
+                    let shift = 64 - u32::from(bits.clamp(1, 64));
+                    Arg::Int(if signed {
+                        ((v << shift).cast_signed() >> shift).cast_unsigned()
+                    } else {
+                        (v << shift) >> shift
+                    })
+                }
+                Kind::Pointer => match next() % 3 {
+                    0 => {
+                        let mut b = vec![0u8; GENERATED_BUFFER];
+                        for slot in b
+                            .iter_mut()
+                            .take(usize::try_from(next() % GENERATED_TEXT).unwrap_or(0))
+                        {
+                            let c = usize::try_from(next() % from_usize(GENERATED_CHARS.len()))
+                                .unwrap_or(0);
+                            *slot = GENERATED_CHARS.get(c).copied().unwrap_or(b'a');
+                        }
+                        Arg::Bytes(b)
+                    }
+                    1 => Arg::Bytes(
+                        (0..GENERATED_BUFFER)
+                            .map(|_| crate::num::lo8(next()))
+                            .collect(),
+                    ),
+                    _ => Arg::Out(GENERATED_BUFFER),
+                },
+                Kind::Float => {
+                    return Err(format!("a{} is floating, which a run does not pass", k + 1));
+                }
+                Kind::Other => {
+                    return Err(format!("a{} is of a type a run does not pass", k + 1));
+                }
+            });
+        }
+        out.push(input);
+    }
+    Ok(out)
+}
+
+/// Checks a function's printed text against the binary on inputs generated
+/// from its signature.
+///
+/// The text the tools print ([`decompile_named`]) runs as C on each input
+/// beside the binary in the emulator, as [`run_tsv`] runs them, from inputs
+/// that are a pure function of `seed` and the function ([`generated`]):
+/// the same call answers the same.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `entry` - The function's entry.
+/// * `count` - How many inputs.
+/// * `seed` - The inputs' seed.
+/// * `budget` - Steps each run is given, on either side.
+///
+/// # Returns
+///
+/// Each input's arguments as a report row spells them, with the text's
+/// verdict on it.
+///
+/// # Errors
+///
+/// When the function does not decompile, its signature does not read, or a
+/// parameter is of a type a run does not pass.
+pub fn check_generated(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    count: usize,
+    seed: u64,
+    budget: usize,
+) -> Result<Vec<(String, Verdict)>, String> {
+    let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
+    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let sig = printed(&text, word)?;
+    let inputs = generated(&sig.parameter_kinds(), count, seed, entry)?;
+    let shared = Shared {
+        script: Script::read(p, a, o, entry, &text),
+        sig: Ok(sig),
+        pass: passing(p, a, o, entry),
+    };
+    Ok(inputs
+        .iter()
+        .map(|input| {
+            let shown: Vec<String> = input.iter().map(Arg::shown).collect();
+            let outcome = run_one(p, &shared, entry, input, budget);
+            (shown.join(" "), outcome.verdict)
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arg, Kind, generated, parse_run, run_tsv};
+    use crate::analysis::{Analysis, Overlay};
+    use crate::program::{Arch, Program, Section};
+
+    /// The forms of an argument read, and a malformed one is refused naming
+    /// it.
+    ///
+    /// # Panics
+    ///
+    /// When an argument reads otherwise or a malformed one is taken.
+    #[test]
+    fn arguments_read_in_every_form() {
+        let p = Program::raw_x64(&[0xc3]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let spec = parse_run(&a, &o, "0x1000,steps=500/1,-1,\"a,b\\n\",hex:0102,out:4;").unwrap();
+        assert_eq!(spec.budget, 500);
+        assert_eq!(
+            spec.inputs[0],
+            vec![
+                Arg::Int(1),
+                Arg::Int(u64::MAX),
+                Arg::Bytes(b"a,b\n\0".to_vec()),
+                Arg::Bytes(vec![1, 2]),
+                Arg::Out(4),
+            ]
+        );
+        assert_eq!(spec.inputs[1], Vec::new());
+        for (bad, says) in [
+            ("0x1000/zz", "cannot read the argument zz"),
+            ("0x1000/hex:1", "hex: takes pairs"),
+            ("0x1000,foo/1", "cannot read foo"),
+            ("nowhere/1", "cannot resolve nowhere"),
+            ("0x1000", "run takes"),
+        ] {
+            let err = parse_run(&a, &o, bad).unwrap_err();
+            assert!(err.contains(says), "{bad}: {err}");
+        }
+    }
+
+    /// A callee's stack address is no answer to compare: the text calls it
+    /// from another depth than the binary does.
+    ///
+    /// # Panics
+    ///
+    /// When the run says the text differs.
+    #[test]
+    fn a_returned_stack_address_is_unchecked() {
+        let mut code = vec![0xccu8; 0x20];
+        code[..6].copy_from_slice(&[
+            0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x1010
+            0xc3, // ASM: ret
+        ]);
+        code[0x10..0x16].copy_from_slice(&[
+            0x48, 0x8d, 0x44, 0x24, 0x08, // ASM: lea rax,[rsp+8]
+            0xc3, // ASM: ret
+        ]);
+        let p = Program::raw_x64(&code);
+        let a = Analysis::compute(&p);
+        let out = run_tsv(&p, &a, &Overlay::default(), "0x1000/").unwrap();
+        assert!(
+            out.contains(
+                "	unchecked
+"
+            ),
+            "{out}"
+        );
+    }
+
+    /// A returned string literal is no answer to compare by its address:
+    /// the text spells its bytes, not which copy of them it means.
+    ///
+    /// # Panics
+    ///
+    /// When the run says the text differs.
+    #[test]
+    fn a_returned_literal_is_unchecked_by_its_address() {
+        let mut bytes = vec![0xccu8; 0x200];
+        bytes[..8].copy_from_slice(&[
+            0x48, 0x8d, 0x05, 0x09, 0x10, 0x00, 0x00, // ASM: lea rax,[rip+0x1009]
+            0xc3, // ASM: ret
+        ]);
+        bytes[0x100..0x120].fill(0);
+        bytes[0x100..0x104].copy_from_slice(b"abcd");
+        bytes[0x110..0x114].copy_from_slice(b"abcd");
+        let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
+        let rdata = Section::mapped(".rdata", 0x2000, 0x100, 0x100, false, false);
+        let p = Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![text, rdata]);
+        let a = Analysis::compute(&p);
+        let out = run_tsv(&p, &a, &Overlay::default(), "0x1000/").unwrap();
+        assert!(
+            out.contains(
+                "	unchecked
+"
+            ),
+            "{out}"
+        );
+    }
+
+    /// Generated inputs are typed by the signature and the same for the same
+    /// seed, and a parameter a run cannot pass is refused.
+    ///
+    /// # Panics
+    ///
+    /// When an input has another shape, a repeat differs, or a floating
+    /// parameter is taken.
+    #[test]
+    fn generated_inputs_follow_the_signature_and_the_seed() {
+        let kinds = [Kind::Int(8, true), Kind::Pointer, Kind::Int(32, false)];
+        let one = generated(&kinds, 16, 7, 0x1000).unwrap();
+        assert_eq!(one, generated(&kinds, 16, 7, 0x1000).unwrap());
+        assert_ne!(one, generated(&kinds, 16, 8, 0x1000).unwrap());
+        for input in &one {
+            let [Arg::Int(a), b, Arg::Int(c)] = input.as_slice() else {
+                panic!("{input:?}")
+            };
+            assert!(*a < 0x80 || *a >= 0xffff_ffff_ffff_ff80, "{a:#x}");
+            assert!(matches!(b, Arg::Bytes(v) if v.len() == 64) || *b == Arg::Out(64));
+            assert!(*c <= 0xffff_ffff);
+        }
+        assert!(generated(&[Kind::Float], 1, 7, 0x1000).is_err());
+    }
+
+    /// A run of a function that returns its argument tabulates each input,
+    /// and the same request answers the same.
+    ///
+    /// # Panics
+    ///
+    /// When a row is missing or a repeat answers otherwise.
+    #[test]
+    fn a_run_tabulates_and_repeats() {
+        let p = Program::raw_x64(&[0x48, 0x89, 0xc8, 0xc3]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let out = run_tsv(&p, &a, &o, "0x1000/5;0x10").unwrap();
+        assert!(out.contains("\n5\t5\treturned\t2\t-\t"), "{out}");
+        assert!(out.contains("\n0x10\t0x10\treturned\t2\t-\t"), "{out}");
+        assert_eq!(out, run_tsv(&p, &a, &o, "0x1000/5;0x10").unwrap());
+    }
+}

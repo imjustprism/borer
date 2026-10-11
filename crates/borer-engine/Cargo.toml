@@ -1,0 +1,24 @@
+[package]
+name = "borer-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "borer analysis core: binary loading, disassembly, queries. Sync, pure, MCP-free (wasm-friendly)."
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+cpp_demangle = "0.5.1"
+goblin = "0.10.7"
+iced-x86 = { version = "1.21.0", features = ["code_asm"] }
+msvc-demangler = "0.11.0"
+pdb = "0.8"
+rustc-demangle = "0.1.27"
+rhai = { version = "1.26.1", default-features = false, features = ["std", "no_module", "no_custom_syntax", "no_time"] }
+serde = { version = "1.0.229", features = ["derive"] }
