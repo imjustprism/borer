@@ -3145,6 +3145,17 @@ fn walk_function(
             None => h,
         }
     });
+    // INVARIANT: a function that is one jump through a slot is that slot,
+    // so the slot stays in its fingerprint: left out, every such thunk ran
+    // the same code, and `memcpy`'s was called a clone of 24 thunks to
+    // other imports.
+    let body_hash = match recs.as_slice() {
+        [(addr, r)] if r.flow == FlowControl::IndirectBranch => cursors
+            .decode(*addr)
+            .filter(|i| i.op0_kind() == OpKind::Memory && i.memory_base() == Register::RIP)
+            .map_or(body_hash, |i| mix(body_hash, i.memory_displacement64())),
+        _ => body_hash,
+    };
     let shape_hash = recs
         .iter()
         .fold(0xcbf2_9ce4_8422_2325, |h, (_, r)| mix(h, r.shape));

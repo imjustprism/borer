@@ -204,7 +204,9 @@ pub struct Function {
     /// name came from, when it had one.
     pub signature: Option<Signature>,
     /// Fingerprint of the instructions, with the addresses they name left
-    /// out, so two copies of one function agree ([`Analysis::clones_of`]).
+    /// out, so two copies of one function agree ([`Analysis::clones_of`]);
+    /// the slot a function that is one jump through it jumps through stays
+    /// in, since that slot is all such a thunk is.
     pub body_hash: u64,
     /// Fingerprint of the instruction shape alone, mnemonics and operand
     /// kinds, so functions differing only in registers, constants or

@@ -4508,6 +4508,43 @@ fn copies_of_one_function_share_a_fingerprint() {
     assert!(a.clones_of(0x4260).is_empty());
 }
 
+/// Thunks through different slots are no clones; thunks through one are.
+///
+/// The entry calls three functions of one `jmp [rip+slot]` each, the first
+/// and the last through one slot and the middle through another: every
+/// such thunk had one fingerprint, so a binary's thunks to different
+/// imports were reported as running the same code.
+#[test]
+fn thunks_through_different_slots_are_no_clones() {
+    let mut code = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0xe8, 0x26, 0x00, 0x00, 0x00, // ASM: call 0x401030
+        0xe8, 0x31, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0xff, 0x25, 0xda, 0x0f, 0x00, 0x00]); // ASM: jmp [rip+0xfda]
+    code.resize(0x30, 0xcc);
+    code.extend_from_slice(&[0xff, 0x25, 0xd2, 0x0f, 0x00, 0x00]); // ASM: jmp [rip+0xfd2]
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[0xff, 0x25, 0xba, 0x0f, 0x00, 0x00]); // ASM: jmp [rip+0xfba]
+    let mut bytes = vec![0u8; 0x2000];
+    bytes[..code.len()].copy_from_slice(&code);
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400_000,
+        Some(0x401_000),
+        vec![
+            Section::mapped(".text", 0x401_000, 0, 0x1000, false, true),
+            Section::mapped(".rdata", 0x402_000, 0x1000, 0x1000, false, false),
+        ],
+    );
+    let a = Analysis::compute(&p);
+    assert_eq!(a.clones_of(0x401_020), [0x401_020, 0x401_040]);
+    assert!(a.clones_of(0x401_030).is_empty());
+}
+
 /// The function summary lists the other functions running the same code.
 ///
 /// `CL_A` and `CL_B` are clones, so each summary names the other.
