@@ -1779,6 +1779,43 @@ pub fn parse_off(s: &str) -> Option<u64> {
     parse_addr(t.strip_prefix("off:").or_else(|| t.strip_prefix("off="))?)
 }
 
+/// Returns the entry of the discovered function containing an address.
+///
+/// An import's slot holds a pointer to code in another module, so asking
+/// for the function there (`decompile GetLastError` where no thunk wraps
+/// it) is answered with what the slot is, not as a function not found.
+///
+/// # Arguments
+///
+/// * `program` - Supplies the symbol table.
+/// * `analysis` - Supplies the functions.
+/// * `va` - The address.
+///
+/// # Returns
+///
+/// The function's entry.
+///
+/// # Errors
+///
+/// Says the address is an import's slot, or that no discovered function
+/// contains it.
+pub fn function_entry(program: &Program, analysis: &Analysis, va: u64) -> Result<u64, String> {
+    if let Some(f) = analysis.function_at(va) {
+        return Ok(f.entry);
+    }
+    match program
+        .symbols
+        .iter()
+        .find(|s| s.kind == SymbolKind::Import && s.addr == va && va != 0)
+    {
+        Some(s) => Err(format!(
+            "{va:#x} is the import slot of {}: its code is in another module, so no function here; xrefs {va:#x} lists its callers",
+            s.name
+        )),
+        None => Err(format!("no discovered function contains {va:#x}")),
+    }
+}
+
 /// Resolves an address or a name to a virtual address.
 ///
 /// Names match case-insensitively against overlay names, discovered function

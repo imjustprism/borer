@@ -552,12 +552,12 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When the text does not resolve or no function contains the address.
+    /// When the text does not resolve or no function contains the address
+    /// ([`borer_engine::analysis::function_entry`] says an import's slot is
+    /// one).
     fn function_entry(&self, p: &Program, a: &Analysis, text: &str) -> Result<u64, String> {
         let va = self.addr(p, text)?;
-        a.function_at(va)
-            .map(|f| f.entry)
-            .ok_or_else(|| format!("no discovered function contains {va:#x}"))
+        borer_engine::analysis::function_entry(p, a, va)
     }
 }
 

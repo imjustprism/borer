@@ -2536,6 +2536,45 @@ fn resolve_names_and_addresses() {
     assert!(resolve(&p, &a, &o, "no_such_thing").is_err());
 }
 
+/// Asking for the function at an import's slot is answered with what the
+/// slot is: the import's code lives in another module.
+///
+/// # Panics
+///
+/// When the slot reads as a function not found, or the function in the
+/// image is not found.
+#[test]
+fn an_import_slot_is_no_function_and_says_so() {
+    use borer_engine::analysis::function_entry;
+    let mut bytes = vec![0u8; 0x2000];
+    bytes[0] = 0xc3; // ASM: ret
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x1_4000_0000,
+        Some(0x1_4000_1000),
+        vec![
+            Section::mapped(".text", 0x1_4000_1000, 0, 0x1000, false, true),
+            Section::mapped(".rdata", 0x1_4000_2000, 0x1000, 0x1000, false, false),
+        ],
+    );
+    p.format = BinaryFormat::Pe;
+    p.symbols.push(Symbol {
+        name: "KERNEL32.dll!GetLastError".to_owned(),
+        addr: 0x1_4000_2000,
+        kind: SymbolKind::Import,
+    });
+    let a = Analysis::compute(&p);
+    assert_eq!(function_entry(&p, &a, 0x1_4000_1000), Ok(0x1_4000_1000));
+    let err = function_entry(&p, &a, 0x1_4000_2000).unwrap_err();
+    assert!(
+        err.contains("import slot of KERNEL32.dll!GetLastError"),
+        "{err}"
+    );
+    let err = function_entry(&p, &a, 0x1_4000_2100).unwrap_err();
+    assert!(err.contains("no discovered function contains"), "{err}");
+}
+
 /// A call to a noreturn import ends the path: `Y` stops at its call to
 /// `ExitProcess` and `Z`, which starts right after it, stays a function of its own.
 #[test]

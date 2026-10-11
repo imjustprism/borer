@@ -652,16 +652,16 @@ impl<'a> SlotQuery<'a> {
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded program.
 /// * `a` - The analysis.
 /// * `va` - The address.
 ///
 /// # Errors
 ///
-/// When no discovered function contains `va`.
-fn entry_at(a: &Analysis, va: u64) -> anyhow::Result<u64> {
-    a.function_at(va)
-        .map(|f| f.entry)
-        .with_context(|| format!("no discovered function contains {va:#x}"))
+/// When no discovered function contains `va`, saying so of an import's
+/// slot ([`borer_engine::analysis::function_entry`]).
+fn entry_at(p: &Program, a: &Analysis, va: u64) -> anyhow::Result<u64> {
+    borer_engine::analysis::function_entry(p, a, va).map_err(anyhow::Error::msg)
 }
 
 // ---- files and packs ----
@@ -983,7 +983,7 @@ impl Session {
     ) -> anyhow::Result<(Analysis, u64)> {
         let a = self.analysis()?;
         let va = self.resolve(&a, arg(args, i, missing)?)?;
-        let entry = entry_at(&a, va)?;
+        let entry = entry_at(&self.program, &a, va)?;
         Ok((a, entry))
     }
 }
@@ -1297,7 +1297,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let what = arg(args, 2, "class needs a class name or a method address")?;
             let class = match s.resolve(&a, what) {
                 Ok(va) => {
-                    let name = name_of(&a, &s.overlay, entry_at(&a, va)?);
+                    let name = name_of(&a, &s.overlay, entry_at(&s.program, &a, va)?);
                     classes::class_of(&name)
                         .with_context(|| format!("{} is not a class method", quoted(&name)))?
                         .to_owned()
@@ -1382,8 +1382,10 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 "schema needs a function (address or name) or a class name",
             )?;
             let text = match s.resolve(&a, what) {
-                Ok(va) => schema::schema_tsv(&s.program, &a, &s.overlay, entry_at(&a, va)?)
-                    .with_context(|| format!("{what} hands no stream to its calls"))?,
+                Ok(va) => {
+                    schema::schema_tsv(&s.program, &a, &s.overlay, entry_at(&s.program, &a, va)?)
+                        .with_context(|| format!("{what} hands no stream to its calls"))?
+                }
                 Err(_) => schema::class_schema_tsv(&s.program, &a, &s.overlay, what).with_context(
                     || {
                         format!(
@@ -1411,8 +1413,10 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 "encode needs a function (address or name) or a class name",
             )?;
             let text = match s.resolve(&a, what) {
-                Ok(va) => encode::encoding_tsv(&s.program, &a, &s.overlay, entry_at(&a, va)?)
-                    .with_context(|| format!("{what} hands its stream nothing"))?,
+                Ok(va) => {
+                    encode::encoding_tsv(&s.program, &a, &s.overlay, entry_at(&s.program, &a, va)?)
+                        .with_context(|| format!("{what} hands its stream nothing"))?
+                }
                 Err(_) => encode::class_encoding_tsv(&s.program, &a, &s.overlay, what)
                     .with_context(|| {
                         format!(
@@ -1560,7 +1564,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let entry = if referenced {
                 a.function_at(va).map_or(va, |f| f.entry)
             } else {
-                entry_at(&a, va)?
+                entry_at(&s.program, &a, va)?
             };
             let callers = direction? == Direction::Callers;
             print!(
@@ -1859,7 +1863,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 "scenario needs assumptions, such as a2=5",
             )?)
             .map_err(anyhow::Error::msg)?;
-            let entry = entry_at(&a, va)?;
+            let entry = entry_at(&s.program, &a, va)?;
             let text = decompile::decompile_scenario(&s.program, &a, &s.overlay, entry, &assume)
                 .context("the function does not decompile")?;
             print!("{text}");
@@ -1873,7 +1877,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 "scenarios needs a parameter and values, such as a2=0..32",
             )?)
             .map_err(anyhow::Error::msg)?;
-            let entry = entry_at(&a, va)?;
+            let entry = entry_at(&s.program, &a, va)?;
             let cases = decompile::explode(&s.program, &a, &s.overlay, entry, slot, &values);
             print!("{}", decompile::explode_tsv(&cases, slot, values.len()));
         }
@@ -2062,7 +2066,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     .map(|f| f.entry)
                     .take(limit)
                     .collect(),
-                Some(which) => vec![entry_at(&a, s.resolve(&a, which)?)?],
+                Some(which) => vec![entry_at(&s.program, &a, s.resolve(&a, which)?)?],
             };
             if args.get(5).is_some_and(|m| m == "text") {
                 let r = decompile::replay::replay(&s.program, &a, &entries, seed);
