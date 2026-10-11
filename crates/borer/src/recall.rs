@@ -401,19 +401,30 @@ impl Recall {
     }
 }
 
+/// How the reader of an answer asks for less of it, for the note under a
+/// cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Narrow {
+    /// A tool call, which takes a filter, an offset and a limit.
+    Tool,
+    /// A resource URI, which takes no paging: only what the URI names.
+    Uri,
+}
+
 /// Caps an answer at the byte budget `BORER_BUDGET` sets, cut at the last
-/// line that fits, with a note on what was left out.
+/// line that fits, with a note on what was left out ([`cut_to`]).
 ///
 /// # Arguments
 ///
 /// * `text` - The answer.
-pub(crate) fn budgeted(text: String) -> String {
+/// * `narrow` - How its reader asks for less.
+pub(crate) fn budgeted(text: String, narrow: Narrow) -> String {
     match std::env::var(BUDGET_ENV)
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&b| b > 0)
     {
-        Some(budget) => cut_to(text, budget),
+        Some(budget) => cut_to(text, budget, narrow),
         None => text,
     }
 }
@@ -421,31 +432,50 @@ pub(crate) fn budgeted(text: String) -> String {
 /// Cuts an answer to `budget` bytes at the last whole line, with a note on
 /// what was left out; an answer within the budget is kept whole.
 ///
+/// The answer's `# since=` (or `%% since=`) line stays last, since the
+/// reader passes it back to be told nothing changed: the cut took it with
+/// the rest of the tail. The note says how this reader narrows: a URI has
+/// no offset to page with, and the note told a resource reader to use one.
+///
 /// # Arguments
 ///
 /// * `text` - The answer.
-/// * `budget` - Most bytes kept.
-fn cut_to(text: String, budget: usize) -> String {
+/// * `budget` - Most bytes kept, the tag line included.
+/// * `narrow` - How its reader asks for less.
+fn cut_to(text: String, budget: usize, narrow: Narrow) -> String {
     if text.len() <= budget {
         return text;
     }
-    let mut end = budget;
-    while !text.is_char_boundary(end) {
+    let last_at = text.trim_end_matches('\n').rfind('\n').map_or(0, |i| i + 1);
+    let last = &text[last_at..];
+    let (body, tag, mark) = if last.starts_with("# since=") {
+        (&text[..last_at], last, "#")
+    } else if last.starts_with("%% since=") {
+        (&text[..last_at], last, "%%")
+    } else {
+        (text.as_str(), "", "#")
+    };
+    let mut end = budget.saturating_sub(tag.len()).min(body.len());
+    while !body.is_char_boundary(end) {
         end -= 1;
     }
-    let cut = text[..end].rfind('\n').map_or(0, |i| i + 1);
-    let kept = text[..cut].lines().count();
-    let total = text.lines().count();
+    let cut = body[..end].rfind('\n').map_or(0, |i| i + 1);
+    let kept = body[..cut].lines().count();
+    let total = body.lines().count();
+    let how = match narrow {
+        Narrow::Tool => "narrow with a filter or page with an offset",
+        Narrow::Uri => "narrow the URI, by its filter where the resource takes one",
+    };
     format!(
-        "{}# cut at {cut} of {} bytes ({kept} of {total} lines) by {BUDGET_ENV}; narrow with a filter or page with an offset\n",
-        &text[..cut],
+        "{}{mark} cut at {cut} of {} bytes ({kept} of {total} lines) by {BUDGET_ENV}; {how}\n{tag}",
+        &body[..cut],
         text.len()
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Recall, Tag};
+    use super::{Narrow, Recall, Tag};
 
     /// How the tests word the request that returns a text whole.
     const AGAIN: &str = "calling f {}";
@@ -641,12 +671,33 @@ mod tests {
     #[test]
     fn an_answer_is_cut_at_a_line_within_the_budget() {
         let text = "one\ntwo\nthree\n".to_owned();
-        assert_eq!(super::cut_to(text.clone(), 100), text);
-        let cut = super::cut_to(text, 9);
+        assert_eq!(super::cut_to(text.clone(), 100, Narrow::Tool), text);
+        let cut = super::cut_to(text, 9, Narrow::Tool);
         assert!(
             cut.starts_with("one\ntwo\n# cut at 8 of 14 bytes (2 of 3 lines)"),
             "{cut}"
         );
+    }
+
+    /// A cut keeps the answer's tag line last, so the reader can still pass
+    /// it back, and tells a resource reader to narrow the URI: a URI takes
+    /// no offset.
+    ///
+    /// # Panics
+    ///
+    /// When the tag line is lost or a URI reader is told to page.
+    #[test]
+    fn a_cut_keeps_the_tag_and_words_its_note_for_the_reader() {
+        let text = "one\ntwo\nthree\n# since=0000beef\n".to_owned();
+        let cut = super::cut_to(text, 30, Narrow::Uri);
+        assert_eq!(
+            cut,
+            "one\ntwo\n# cut at 8 of 31 bytes (2 of 3 lines) by BORER_BUDGET; narrow the URI, by its filter where the resource takes one\n# since=0000beef\n"
+        );
+        let graph = "graph TD\n  a\n  b\n%% since=0000beef\n".to_owned();
+        let cut = super::cut_to(graph, 30, Narrow::Tool);
+        assert!(cut.starts_with("graph TD\n%% cut at 9 of "), "{cut}");
+        assert!(cut.ends_with("\n%% since=0000beef\n"), "{cut}");
     }
 
     /// A `since` passed beside a `query` URI goes where a URI's own tag

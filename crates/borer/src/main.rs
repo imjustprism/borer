@@ -74,7 +74,7 @@ use params::{
     SetTypeParams, StringEncoding, StringsParams, SymbolsParams, TypesParams, XrefsParams,
     count_param, must_be_in_a_section, must_fit_a_row, to_usize,
 };
-use recall::{FRESH_SUFFIX, Recall, SINCE_ARG, SINCE_SUFFIX, Tag, budgeted};
+use recall::{FRESH_SUFFIX, Narrow, Recall, SINCE_ARG, SINCE_SUFFIX, Tag, budgeted};
 
 // ---------------------------------------------------------------- server ----
 
@@ -3871,7 +3871,7 @@ impl ServerHandler for BorerServer {
                         Ok(mut recall) => recall.answer(&key, since, &again, full),
                         Err(_) => full,
                     };
-                    t.text = budgeted(sent);
+                    t.text = budgeted(sent, Narrow::Tool);
                 }
                 CallToolResponse::Complete(result)
             }
@@ -4091,7 +4091,7 @@ impl BorerServer {
             Ok(mut recall) => recall.answer(&uri, since, &again, text),
             Err(_) => text,
         };
-        Ok((uri, budgeted(text)))
+        Ok((uri, budgeted(text, Narrow::Uri)))
     }
 
     /// The text of one resource, as its handler answers it: no answer
