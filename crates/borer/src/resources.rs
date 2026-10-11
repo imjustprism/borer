@@ -122,11 +122,16 @@ impl BorerServer {
     ///
     /// * `path` - Path of the other build.
     ///
+    /// No binary loaded is refused first: the other build was loaded and
+    /// analysed, which takes minutes on a large one, only to be told then
+    /// that there was nothing to compare it with.
+    ///
     /// # Errors
     ///
-    /// When the other build does not load, has no code analysis, or is not
-    /// the loaded program's architecture.
+    /// When no binary is loaded, or the other build does not load, has no
+    /// code analysis, or is not the loaded program's architecture.
     fn other_build(&self, path: &str) -> Result<OtherBuild, ErrorData> {
+        self.require_loaded()?;
         let program = self.load_other(path)?;
         let analysis = Analysis::compute_with(&program, self.packs_for(&program).0);
         let label = file_label(&program.path);
@@ -718,11 +723,18 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded or the name is empty or has a space.
+    /// When no binary is loaded, the name is empty or has a space, or what
+    /// follows a comma is not `all`: `x,y` named a pack `x,y`.
     pub(crate) fn export_pack_text(&self, spec: &str) -> Result<String, ErrorData> {
         let (name, all) = match spec.split_once(',') {
+            None => (spec, false),
             Some((name, "all")) => (name, true),
-            _ => (spec, false),
+            Some((_, other)) => {
+                return Err(err_params(format!(
+                    "after the pack name comes ,all or nothing, not {}",
+                    borer_engine::text::quoted(other)
+                )));
+            }
         };
         if name.is_empty() || name.contains(char::is_whitespace) {
             return Err(err_params(format!(
@@ -1246,7 +1258,9 @@ impl BorerServer {
     ///
     /// The listing reads every table-shaped function of the binary, the
     /// one answer that waits for them all; every other tool reads only the
-    /// tables of the functions it decompiles.
+    /// tables of the functions it decompiles. A table named by an enum
+    /// type is written `enum <type>` once, where the type's own `enum`
+    /// made it `enum enum <type>`.
     ///
     /// # Errors
     ///
@@ -1258,24 +1272,42 @@ impl BorerServer {
         let tables = borer_engine::analysis::decompile::enum_tables(&p, &a, &o);
         let mut out = format!("# {} name tables\n", tables.len());
         for (entry, table) in &tables {
-            let members: Vec<String> = table
-                .members
-                .iter()
-                .map(|(k, lit)| format!("{lit} = {k}"))
-                .collect();
-            let name = if table.name.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", table.name)
-            };
-            out.push_str(&format!(
-                "{} @ {entry:#x}: enum{name}: {}\n",
-                borer_engine::analysis::name_of(&a, &o, *entry),
-                members.join(", ")
+            out.push_str(&enum_row(
+                &borer_engine::analysis::name_of(&a, &o, *entry),
+                *entry,
+                table,
             ));
         }
         Ok(out)
     }
+}
+
+/// One `borer://enums` row: the function, its entry, `enum` and the
+/// table's name, then its members.
+///
+/// # Arguments
+///
+/// * `function` - The function's name.
+/// * `entry` - Its entry.
+/// * `table` - The name table it encodes.
+fn enum_row(
+    function: &str,
+    entry: u64,
+    table: &borer_engine::analysis::decompile::EnumTable,
+) -> String {
+    let members: Vec<String> = table
+        .members
+        .iter()
+        .map(|(k, lit)| format!("{lit} = {k}"))
+        .collect();
+    let name = match table.name.strip_prefix("enum ").unwrap_or(&table.name) {
+        "" => String::new(),
+        bare => format!(" {bare}"),
+    };
+    format!(
+        "{function} @ {entry:#x}: enum{name}: {}\n",
+        members.join(", ")
+    )
 }
 
 #[cfg(test)]
@@ -1415,6 +1447,47 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    /// The comparison resources refuse a session with no binary before
+    /// they load the other build, `exportpack` refuses a part after the
+    /// name that is not `all`, and an enum table's row says `enum` once.
+    ///
+    /// # Panics
+    ///
+    /// When a refusal differs or a row repeats `enum`.
+    #[test]
+    fn resources_refuse_what_they_would_drop_or_waste() {
+        let server = BorerServer::default();
+        let nowhere = "C:/borer-no-such-dir/other.exe";
+        for refused in [
+            server.diff_text(nowhere),
+            server.carry_text(nowhere),
+            server.diff_function_text(&format!("f/{nowhere}")),
+            server.migrate_text(&format!("f/{nowhere}")),
+        ] {
+            let e = refused.expect_err("nothing is loaded");
+            assert_eq!(e.message, crate::NO_BINARY);
+        }
+        let e = server.export_pack_text("x,y").expect_err("not all");
+        assert_eq!(e.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            e.message,
+            "after the pack name comes ,all or nothing, not 'y'"
+        );
+        let table = |name: &str| borer_engine::analysis::decompile::EnumTable {
+            name: name.to_owned(),
+            members: vec![(0, "S".to_owned()), (1, "X".to_owned())],
+            param: Some(0),
+        };
+        assert_eq!(
+            super::enum_row("f", 0x10, &table("enum mi_chunkbin_e")),
+            "f @ 0x10: enum mi_chunkbin_e: S = 0, X = 1\n"
+        );
+        assert_eq!(
+            super::enum_row("f", 0x10, &table("")),
+            "f @ 0x10: enum: S = 0, X = 1\n"
+        );
     }
 
     /// A resource argument is decoded once, at the URI boundary.

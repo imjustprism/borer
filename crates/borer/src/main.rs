@@ -48,11 +48,11 @@ use rayon::prelude::*;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, ClientNotification, CompleteRequestParams,
-    CompleteResult, CompletionInfo, ContentBlock, ErrorCode, InitializeRequestParams,
-    JsonRpcMessage, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
-    ReadResourceResponse, ReadResourceResult, Reference, RequestId, Resource, ResourceContents,
-    ResourceTemplate, ResultType, Role, Tool,
+    CompleteResult, CompletionInfo, ContentBlock, CustomRequest, CustomResult, ErrorCode,
+    InitializeRequestParams, JsonRpcMessage, ListResourceTemplatesResult, ListResourcesResult,
+    ListToolsResult, PaginatedRequestParams, PromptMessage, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Reference, RequestId,
+    Resource, ResourceContents, ResourceTemplate, ResultType, Role, Tool,
 };
 use rmcp::service::{RequestContext, RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::Transport;
@@ -4011,8 +4011,10 @@ impl ServerHandler for BorerServer {
 
     /// Completes prompt and resource-template arguments.
     ///
-    /// Any `address` argument completes to function names; `find_check`'s
-    /// `what` completes to the usual validation targets.
+    /// Any `address` or `function` argument (the `{function}` of
+    /// `borer://difffn`, `migrate`, `schema`, `encode` and `shape`)
+    /// completes to function names; `find_check`'s `what` completes to the
+    /// usual validation targets.
     ///
     /// # Arguments
     ///
@@ -4034,7 +4036,7 @@ impl ServerHandler for BorerServer {
                 .filter(|k| k.starts_with(&prefix))
                 .map(|k| (*k).to_owned())
                 .collect(),
-            (_, "address") => self.complete_names(&prefix),
+            (_, "address" | "function") => self.complete_names(&prefix),
             _ => Vec::new(),
         };
         let total = all.len();
@@ -4045,7 +4047,58 @@ impl ServerHandler for BorerServer {
         info.has_more = Some(has_more);
         Ok(CompleteResult::new(info))
     }
+
+    /// Answers a request no typed handler took: a method rmcp does not
+    /// know, or one it knows whose params do not parse, which it hands
+    /// over the same way.
+    ///
+    /// Both were answered method-not-found, so a `resources/read` sent
+    /// without its `uri` read as a server with no resources at all. A
+    /// method borer serves is refused as invalid params, with the shape
+    /// its params take.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The method and its params as sent.
+    /// * `_context` - Request context (unused).
+    ///
+    /// # Errors
+    ///
+    /// Always: invalid params for a method borer serves, method-not-found
+    /// for any other.
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, ErrorData> {
+        match PARAMS_SHAPES
+            .iter()
+            .find(|(method, _)| *method == request.method)
+        {
+            Some((method, shape)) => Err(err_params(format!(
+                "{method} needs params of the form {shape}"
+            ))),
+            None => Err(ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                request.method,
+                None,
+            )),
+        }
+    }
 }
+
+/// The methods borer serves that take params, each with the shape they
+/// take, for the refusal of one sent without them
+/// ([`BorerServer::on_custom_request`]).
+const PARAMS_SHAPES: &[(&str, &str)] = &[
+    ("resources/read", r#"{"uri": "borer://info"}"#),
+    ("tools/call", r#"{"name": "<tool>", "arguments": {...}}"#),
+    ("prompts/get", r#"{"name": "<prompt>", "arguments": {...}}"#),
+    (
+        "completion/complete",
+        r#"{"ref": {...}, "argument": {"name": "...", "value": "..."}}"#,
+    ),
+];
 
 impl BorerServer {
     /// Reads a `borer://` resource: the text its handler answers, through

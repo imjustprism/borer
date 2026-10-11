@@ -586,6 +586,18 @@ comp2 = wait_for(
     )
 )
 assert comp2["completion"]["values"] == ["license key"], comp2
+comp3 = wait_for(
+    send(
+        "completion/complete",
+        {
+            "ref": {"type": "ref/resource", "uri": "borer://shape/{function}"},
+            "argument": {"name": "function", "value": "entry_"},
+        },
+    )
+)
+assert "entry_thunk" in comp3["completion"]["values"], comp3
+noparams = wait_for(send("resources/read"), allow_error=True)
+assert noparams.get("error", {}).get("code") == -32602, noparams
 print(f"protocol surface OK (tools/list {len(raw_tools)} bytes, resources, completions)")
 
 proc.stdin.close()
