@@ -1161,6 +1161,10 @@ impl<'a> WalkState<'a> {
     /// handlers, made before the function was found, is evicted: the
     /// handler is this function's code.
     ///
+    /// A conditional branch is a reference when its target is not one of
+    /// the function's own instructions: `jne other` is a conditional tail
+    /// call, and the function it enters listed no reference from it.
+    ///
     /// # Arguments
     ///
     /// * `entry` - The function's entry.
@@ -1257,6 +1261,11 @@ impl<'a> WalkState<'a> {
             let kind = match rec.flow {
                 FlowControl::Call => RefKind::Call,
                 FlowControl::UnconditionalBranch => RefKind::Jmp,
+                FlowControl::ConditionalBranch
+                    if recs.binary_search_by_key(&target, |(a, _)| *a).is_err() =>
+                {
+                    RefKind::Jmp
+                }
                 FlowControl::ConditionalBranch
                 | FlowControl::IndirectBranch
                 | FlowControl::IndirectCall
@@ -1608,7 +1617,12 @@ pub(crate) fn discover(program: &Program) -> Analysis {
     st.functions.retain(|f| f.instr_count > 0);
     st.functions.shrink_to_fit();
     let entries: BTreeSet<u64> = st.functions.iter().map(|f| f.entry).collect();
-    record_table_refs(program, &entries, &mut st.xrefs);
+    record_table_refs(
+        program,
+        &entries,
+        &Covered::new(&st.functions),
+        &mut st.xrefs,
+    );
     analysis.functions = st.functions;
     analysis.xrefs = st.xrefs;
     analysis.jump_tables = st.jump_tables;
@@ -5127,19 +5141,24 @@ fn pointer_section_bytes<'a>(program: &'a Program, s: &Section, word: usize) -> 
 /// functions with no reference at all until the tables are read. A word
 /// that lands in a data section is a `ptr` site the same way: the locator
 /// naming a type descriptor, a table of string pointers, a static holding
-/// the address of another. Every non-executable section is scanned a word
-/// at a time, skipping those that describe addresses rather than use them
-/// ([`describes_addresses`]).
+/// the address of another. So is a word that lands in an executable
+/// section where no block covers it, the data a linker merged into `.text`
+/// (32-bit system binaries keep their strings and tables there). Every
+/// non-executable section is scanned a word at a time, skipping those that
+/// describe addresses rather than use them ([`describes_addresses`]).
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
 /// * `entries` - Function entry addresses; most words in a data section
 ///   are not addresses at all, so a range check comes before the lookup.
+/// * `covered` - The functions' blocks, which tell code from data in an
+///   executable section.
 /// * `xrefs` - Reference sites, extended in place.
 fn record_table_refs(
     program: &Program,
     entries: &BTreeSet<u64>,
+    covered: &Covered,
     xrefs: &mut BTreeMap<u64, Vec<RefSite>>,
 ) {
     let word = saturating_usize(pointer_size(program));
@@ -5157,7 +5176,10 @@ fn record_table_refs(
             let slot = s.va + from_usize(i * word);
             if sorted.binary_search(&v).is_ok() {
                 push_site(xrefs, v, slot, RefKind::Table, None);
-            } else if program.section_at(v).is_some_and(|t| !t.executable) {
+            } else if program
+                .section_at(v)
+                .is_some_and(|t| !t.executable || !covered.contains(v))
+            {
                 push_site(xrefs, v, slot, RefKind::Ptr, None);
             }
         }
@@ -5320,9 +5342,13 @@ fn pointer_seeds(program: &Program, sites: Option<&FxHashSet<u64>>) -> Vec<u64> 
     out
 }
 
-/// Records the immediate and memory operands of `instr` that land in mapped sections.
+/// Records the immediate and memory operands of `instr` that land in mapped
+/// sections or in a PE's mapped headers.
 ///
-/// A memory operand counts when it has no effective base: a bare
+/// The headers count because `lea rcx, [__ImageBase]` is how x64 code finds
+/// its own image (the base of every RVA table it reads), and that
+/// reference was dropped for want of a section. A memory operand counts
+/// when it has no effective base: a bare
 /// displacement (iced pre-computes rip-relative ones into absolute targets,
 /// so the raw displacement is the address in both cases), or a scaled index
 /// on a displacement, `[esi*4 + table]`, which is how 32-bit code reads a
@@ -5349,7 +5375,8 @@ fn record_data_refs(
     out: &mut Vec<DataRef>,
     patched: Option<(&AddrSet, crate::isa::ConstantOffsets)>,
 ) {
-    let in_image = |v: u64| mapped.contains(&v) && program.section_at(v).is_some();
+    let in_image =
+        |v: u64| (mapped.contains(&v) && program.section_at(v).is_some()) || program.in_headers(v);
     let relocated = |offset: usize, size: usize| {
         patched.is_none_or(|(sites, _)| size >= 4 && sites.contains(va + offset as u64))
     };

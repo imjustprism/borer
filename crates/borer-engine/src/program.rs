@@ -1648,6 +1648,17 @@ impl Program {
             .get(usize::try_from(off).ok()?..usize::try_from(end).ok()?)
     }
 
+    /// Tells whether `va` lies in a PE's mapped headers: the image's first
+    /// bytes, up to its first section, which no section maps.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - A virtual address.
+    #[must_use]
+    pub fn in_headers(&self, va: u64) -> bool {
+        self.header_slice(va, 1).is_some()
+    }
+
     /// Says why the code tools have nothing to read here, when they have not.
     ///
     /// An unrecognized file loads as raw bytes of no architecture, and a

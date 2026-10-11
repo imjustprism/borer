@@ -564,6 +564,65 @@ fn an_indexed_table_read_is_a_reference_to_the_table() {
     assert!(refs.contains("sub_401000: 0x401000 index\n"), "{refs}");
 }
 
+/// A conditional tail call, `jne` into another function, is a reference to
+/// that function, like the `call` beside it.
+///
+/// `call 0x401010; test ecx,ecx; jne 0x401010; ret`, padding, then
+/// `xor eax,eax; ret` at 0x401010: only the call was listed.
+#[test]
+fn a_conditional_tail_call_is_a_reference() {
+    use borer_engine::analysis::render::xrefs_tsv;
+    let mut code = vec![0xe8, 0x0b, 0x00, 0x00, 0x00, 0x85, 0xc9, 0x75, 0x07, 0xc3];
+    code.extend_from_slice(&[0xcc; 6]);
+    code.extend_from_slice(&[0x31, 0xc0, 0xc3]);
+    let a = Analysis::compute(&image(&code));
+    assert!(a.function(0x401010).is_some(), "the callee is missing");
+    let refs = xrefs_tsv(&a, &Overlay::default(), 0x401010, 0, 60, false);
+    assert!(
+        refs.contains("0x401000 call, 0x401007 jmp"),
+        "the conditional tail call is missing: {refs}"
+    );
+}
+
+/// An operand naming the mapped headers is a reference to them: `mov eax,
+/// 0x400000` names the image base, which no section maps.
+#[test]
+fn an_operand_naming_the_headers_is_a_reference() {
+    use borer_engine::analysis::render::xrefs_tsv;
+    let mut bytes = vec![0u8; 0x400];
+    bytes.extend_from_slice(&[0xb8, 0x00, 0x00, 0x40, 0x00, 0xc3]);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86,
+        0x400000,
+        Some(0x401000),
+        vec![Section::mapped(".text", 0x401000, 0x400, 6, false, true)],
+    );
+    p.format = BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    let refs = xrefs_tsv(&a, &Overlay::default(), 0x400000, 0, 60, false);
+    assert!(
+        refs.contains("sub_401000: 0x401000 imm/mem"),
+        "the header reference is missing: {refs}"
+    );
+}
+
+/// A pointer in data to data a linker merged into `.text` is a reference,
+/// as one to data in a data section is: the word at 0x402000 names zero
+/// bytes at 0x401100 that no block covers.
+#[test]
+fn a_pointer_to_data_in_an_executable_section_is_a_reference() {
+    use borer_engine::analysis::render::xrefs_tsv;
+    let p = image_with_data(&[0xc3], &[0x00, 0x11, 0x40, 0x00]);
+    let a = Analysis::compute(&p);
+    assert!(a.function_at(0x401100).is_none(), "the data became code");
+    let refs = xrefs_tsv(&a, &Overlay::default(), 0x401100, 0, 60, false);
+    assert!(
+        refs.contains("-: 0x402000 ptr"),
+        "the pointer is missing: {refs}"
+    );
+}
+
 /// Two reads of one table from one function are two sites on the
 /// function's row, not one site folded with "1 more running the same code":
 /// `mov eax,[ecx*4+0x402000]; add eax,[edx*4+0x402000]; ret`.
