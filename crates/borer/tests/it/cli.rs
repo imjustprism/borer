@@ -261,6 +261,27 @@ fn cli_help_lists_commands() {
     assert!(out.contains("MCP stdio server"));
 }
 
+/// `symbols` pages the way the MCP tool does.
+///
+/// It lists 50 rows unless a limit says otherwise, and its header names the
+/// next page's offset: it printed every symbol of the binary in one answer.
+#[test]
+fn cli_symbols_page() {
+    let exe = env!("CARGO_BIN_EXE_borer");
+    let (ok, out) = run(&["symbols", exe, "", "1", "3"]);
+    assert!(ok, "{out}");
+    let header = out.lines().next().unwrap_or_default();
+    assert!(
+        header.starts_with("# showing 3 of ") && header.ends_with("; offset=4 for the next page"),
+        "{out}"
+    );
+    let rows = |text: &str| text.lines().filter(|l| !l.starts_with('#')).count();
+    assert_eq!(rows(&out), 3, "{out}");
+    let (ok, out) = run(&["symbols", exe]);
+    assert!(ok, "{out}");
+    assert_eq!(rows(&out), 50, "{out}");
+}
+
 /// An architecture with no disassembler still answers what the headers say.
 ///
 /// The symbol table is parsed out of the file, not recovered from its code,

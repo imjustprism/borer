@@ -314,6 +314,11 @@ const SECTION_ROW: usize = 40;
 /// Largest section size a sane image carries (1 GiB), in memory or in the file.
 const SANE_MAX: u64 = 1 << 30;
 
+/// Most sections the summary's table and [`Program::section_list`] name.
+///
+/// A damaged count of 65,535 rows made one `binary_info` answer 4.6 MB.
+const SECTIONS_SHOWN: usize = 64;
+
 /// What fitting a section table to its file left out or cut short.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Fit {
@@ -1774,13 +1779,16 @@ impl Program {
     ///
     /// Error messages about unmapped addresses append it so an agent can
     /// correct the address without another call; `none` for a file with no
-    /// sections, so the message does not end on an empty list.
+    /// sections, so the message does not end on an empty list. At most
+    /// [`SECTIONS_SHOWN`] are named, then `... N more`.
     pub fn section_list(&self) -> String {
         if self.sections.is_empty() {
             return "none".to_owned();
         }
+        let more = self.sections.len().saturating_sub(SECTIONS_SHOWN);
         self.sections
             .iter()
+            .take(SECTIONS_SHOWN)
             .map(|s| {
                 format!(
                     "{}({:#x}..{:#x})",
@@ -1789,6 +1797,7 @@ impl Program {
                     s.va.saturating_add(s.vsize.max(s.file_size))
                 )
             })
+            .chain((more > 0).then(|| format!("... {more} more")))
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -1801,7 +1810,9 @@ impl Program {
     /// architecture is known), why no code analysis applies and the
     /// container magic when there are, base and entry, a flat-mapping
     /// warning when it applies, the section table with permissions and
-    /// entropy, and import/export counts with up to ten sample names each.
+    /// entropy (at most [`SECTIONS_SHOWN`] rows, under a `# showing N of M
+    /// sections` line when there are more), and import/export counts with
+    /// up to ten sample names each.
     pub fn summary(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("path:    {}\n", self.path.display()));
@@ -1848,8 +1859,14 @@ impl Program {
             ));
         }
         out.push_str(&format!("sections ({}):\n", self.sections.len()));
+        if self.sections.len() > SECTIONS_SHOWN {
+            out.push_str(&format!(
+                "# showing {SECTIONS_SHOWN} of {} sections\n",
+                self.sections.len()
+            ));
+        }
         out.push_str("  name           va            vsize     file_off  size      rwx  entropy\n");
-        for s in &self.sections {
+        for s in self.sections.iter().take(SECTIONS_SHOWN) {
             // A `/NN` name is a COFF string-table offset this file no
             // longer resolves, so the content is asked what it is.
             let guess = if s.name.starts_with('/') {
@@ -2001,6 +2018,34 @@ mod tests {
         assert!(
             !code.contains("code:") && !code.contains("magic:"),
             "{code}"
+        );
+    }
+
+    /// A section table of thousands of rows is listed up to the cap.
+    ///
+    /// The summary and the compact list error messages append both stop
+    /// there, under a line that says how many there are: 65,535 rows made one
+    /// `binary_info` answer 4.6 MB.
+    ///
+    /// # Panics
+    ///
+    /// When a row past the cap is listed or the counts are not said.
+    #[test]
+    fn a_huge_section_table_is_listed_up_to_the_cap() {
+        let sections = (0u64..1000)
+            .map(|i| super::Section::mapped(&format!("s{i}"), 0x1000 * (i + 1), 0, 1, false, false))
+            .collect();
+        let p = Program::raw(vec![0xc3], Arch::X86_64, 0, None, sections);
+        let s = p.summary();
+        assert!(
+            s.contains("sections (1000):\n# showing 64 of 1000 sections\n"),
+            "{s}"
+        );
+        assert!(s.contains("  s63 ") && !s.contains("  s64 "), "{s}");
+        let list = p.section_list();
+        assert!(
+            list.ends_with("s63(0x40000..0x40001) ... 936 more"),
+            "{list}"
         );
     }
 

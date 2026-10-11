@@ -30,7 +30,7 @@ commands:
   functions <binary> [filter] [offset] [limit]  discovered functions (100 a page, max 300; \"\" for no filter)
   function <binary> <address|name>         one function's ranges, blocks and edges
   summary <binary> <address|name>          one-call function triage
-  symbols <binary> [filter]                imports, exports and locals
+  symbols <binary> [filter] [offset] [limit]  imports, exports and locals (50 a page, max 1000)
   hexdump <binary> <address> [length]      bytes at a virtual address, or at off:<n> in the file (default 64)
   entropy <binary> [threshold]             high-entropy regions (default 7.2)
   search <binary> <pattern> [text] [offset]  AOB hex with ?? wildcards, or a substring; 500 a page
@@ -175,7 +175,7 @@ enum Query {
     Function,
     /// `summary <address|name>`: one-call function triage.
     Summary,
-    /// `symbols [filter]`: imports, exports and locals.
+    /// `symbols [filter] [offset] [limit]`: imports, exports and locals, a page at a time.
     Symbols,
     /// `hexdump <address> [length]`: bytes at a virtual address.
     Hexdump,
@@ -1153,13 +1153,14 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Symbols => {
             let a = s.analysis_or_empty();
+            let (offset, limit) = cli_page(args, 3, 50, 1000)?;
             let (_, _, text) = render::symbols_tsv(
                 &s.program,
                 &a,
                 None,
-                args.get(2).map(String::as_str),
-                0,
-                usize::MAX,
+                args.get(2).map(String::as_str).filter(|f| !f.is_empty()),
+                offset,
+                limit,
             );
             print!("{text}");
         }

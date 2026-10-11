@@ -348,9 +348,9 @@ pub fn function_detail(a: &Analysis, o: &Overlay, entry: u64, offset: usize) -> 
 /// # Returns
 ///
 /// `(shown, total, text)`: the text starts with `# showing N of M symbols`
-/// and a column header, then one `kind addr name` row per symbol (`addr
-/// name` under one kind), each run of one module's imports under its
-/// `# module:` line.
+/// (and the next page's offset when more follow) and a column header, then
+/// one `kind addr name` row per symbol (`addr name` under one kind), each
+/// run of one module's imports under its `# module:` line.
 pub fn symbols_tsv(
     p: &Program,
     a: &Analysis,
@@ -371,7 +371,12 @@ pub fn symbols_tsv(
         .collect();
     let total = matched.len();
     let shown = total.saturating_sub(offset).min(limit);
-    let mut out = format!("# showing {shown} of {total} symbols\n");
+    let mut out = format!("# showing {shown} of {total} symbols");
+    let next = offset.saturating_add(shown);
+    if next < total {
+        let _ = write!(out, "; offset={next} for the next page");
+    }
+    out.push('\n');
     out.push_str(if kind.is_some() {
         "# addr name\n"
     } else {
