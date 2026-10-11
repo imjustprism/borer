@@ -1213,7 +1213,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
             let (kind, offset) = search_args(args.get(3..).unwrap_or_default())?;
             let hits = match kind {
-                SearchKind::Text => search::find_text(&s.program, pattern.as_bytes(), offset),
+                SearchKind::Text => search::find_text(&s.program, pattern, offset),
                 SearchKind::Bytes => {
                     let pat = search::parse_pattern(pattern)
                         .context("bad AOB pattern; use hex bytes with ?? wildcards")?;

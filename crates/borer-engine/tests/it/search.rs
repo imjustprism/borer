@@ -85,10 +85,10 @@ fn find_bytes_exact() {
 #[test]
 fn find_text_hits() {
     let p = fixture();
-    let hits = find_text(&p, b"needle", 0).hits;
+    let hits = find_text(&p, "needle", 0).hits;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].va, Some(0x1020));
-    assert!(find_text(&p, b"absent", 0).hits.is_empty());
+    assert!(find_text(&p, "absent", 0).hits.is_empty());
 }
 
 /// Text search folds case and finds the UTF-16LE spelling, like `strings`.
@@ -102,16 +102,16 @@ fn find_text_folds_case_and_finds_wide() {
     let mut p = fixture();
     p.bytes = bytes;
     // A lower-case query finds the capitalized literal.
-    let n = find_text(&p, b"needle", 0);
+    let n = find_text(&p, "needle", 0);
     assert_eq!(n.total, 1);
     assert_eq!(n.hits[0].va, Some(0x1000));
     // An ASCII query finds the wide string, case-folded.
     assert_eq!(
-        find_text(&p, b"wide", 0).hits.first().and_then(|h| h.va),
+        find_text(&p, "wide", 0).hits.first().and_then(|h| h.va),
         Some(0x1010)
     );
-    assert_eq!(find_text(&p, b"WIDE", 0).total, 1);
-    assert!(find_text(&p, b"absent", 0).hits.is_empty());
+    assert_eq!(find_text(&p, "WIDE", 0).total, 1);
+    assert!(find_text(&p, "absent", 0).hits.is_empty());
 }
 
 /// Text search answers what a compare at every window answers, on data built
@@ -159,16 +159,9 @@ fn find_text_matches_the_naive_scan_on_adversarial_data() {
             true,
         )],
     );
-    let needles: [&[u8]; 6] = [
-        b"a",
-        b"Nee",
-        b"needle",
-        b"Needle",
-        b"7",
-        b"0123456789abcdef",
-    ];
+    let needles: [&str; 6] = ["a", "Nee", "needle", "Needle", "7", "0123456789abcdef"];
     for needle in needles {
-        let want = naive_text_hits(&bytes, needle);
+        let want = naive_text_hits(&bytes, needle.as_bytes());
         let got = find_text(&p, needle, 0);
         let offs: Vec<u64> = got.hits.iter().map(|h| h.file_off).collect();
         assert_eq!(offs, want, "needle {needle:?}");
@@ -207,6 +200,58 @@ fn naive_text_hits(data: &[u8], needle: &[u8]) -> Vec<u64> {
     here.sort_unstable();
     here.dedup();
     here
+}
+
+/// A text needle outside ASCII is found as its UTF-16LE code units, not as
+/// its UTF-8 bytes spread over zero high halves, and a high byte that spells
+/// a letter is not case-folded.
+#[test]
+fn find_text_finds_the_wide_spelling_of_non_ascii_text() {
+    let mut bytes = vec![0u8; 0x40];
+    bytes[0x00..0x02].copy_from_slice("\u{e9}".as_bytes());
+    bytes[0x08..0x0c].copy_from_slice(&[0xe9, 0x00, 0x2d, 0x4e]);
+    bytes[0x10..0x12].copy_from_slice(&[0x2d, 0x6e]);
+    let mut p = fixture();
+    p.bytes = bytes;
+    let found = |needle: &str| -> Vec<u64> {
+        find_text(&p, needle, 0)
+            .hits
+            .iter()
+            .map(|h| h.file_off)
+            .collect()
+    };
+    assert_eq!(found("\u{e9}"), [0x00, 0x08]);
+    assert_eq!(found("\u{e9}\u{4e2d}"), [0x08]);
+    assert_eq!(found("\u{4e2d}"), [0x0a]);
+}
+
+/// A match that starts in one section and runs on into the next one's
+/// file bytes is found, at the address it starts at; so is one running
+/// from the bytes no section maps into a section.
+#[test]
+fn a_match_across_a_section_boundary_is_found() {
+    let mut bytes = vec![0u8; 0x40];
+    bytes[0x0e..0x12].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    bytes[0x1e..0x24].copy_from_slice(b"needle");
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0x10, 0x10, false, true),
+            Section::mapped(".data", 0x2000, 0x20, 0x20, true, false),
+        ],
+    );
+    let aob = find_bytes(&p, &parse_pattern("de ad be ef").unwrap(), 0);
+    assert_eq!(aob.total, 1);
+    assert_eq!((aob.hits[0].va, aob.hits[0].file_off), (None, 0x0e));
+    let text = find_text(&p, "needle", 0);
+    assert_eq!(text.total, 1);
+    assert_eq!(
+        (text.hits[0].va, text.hits[0].file_off),
+        (Some(0x100e), 0x1e)
+    );
 }
 
 /// MSVC-mangled names demangle; plain C names pass through.
@@ -282,13 +327,13 @@ fn bytes_no_section_maps_are_searched() {
     let mut bytes = vec![0u8; 0x40];
     bytes[0x30..0x36].copy_from_slice(b"needle");
     let raw = Program::raw(bytes, Arch::Unknown, 0, None, Vec::new());
-    let hits = find_text(&raw, b"needle", 0);
+    let hits = find_text(&raw, "needle", 0);
     assert_eq!(hits.total, 1);
     assert_eq!((hits.hits[0].va, hits.hits[0].file_off), (None, 0x30));
 
     let mut p = fixture();
     p.bytes.extend_from_slice(b"\0\0overlay needle\0");
-    let hits = find_text(&p, b"needle", 0).hits;
+    let hits = find_text(&p, "needle", 0).hits;
     let found: Vec<_> = hits.iter().map(|h| (h.va, h.file_off)).collect();
     assert_eq!(found, [(Some(0x1020), 0x20), (None, 0x4a)]);
     let aob = find_bytes(&raw, &parse_pattern("6e 65 ?? 64").unwrap(), 0);

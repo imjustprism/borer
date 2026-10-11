@@ -595,7 +595,7 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
     let h = Rc::clone(host);
     engine.register_fn("find_text", move |text: &str| -> Array {
         addrs(
-            crate::search::find_text(&h.program, text.as_bytes(), 0)
+            crate::search::find_text(&h.program, text, 0)
                 .hits
                 .iter()
                 .filter_map(|hit| hit.va),

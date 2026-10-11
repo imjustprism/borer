@@ -66,69 +66,136 @@ pub fn find_bytes(program: &Program, pattern: &[Option<u8>], offset: usize) -> H
     })
 }
 
-/// Scans every section, then the bytes no section maps, for an ASCII needle,
-/// folding case and finding its UTF-16LE spelling too.
+/// Scans every section, then the bytes no section maps, for a text needle,
+/// folding ASCII case and finding its UTF-16LE spelling too.
 ///
-/// Matching is case-insensitive, like the `strings` filter, so a lower-case
-/// query finds a capitalized identifier. Each match is sought both as the
-/// bytes themselves (ASCII/UTF-8) and as UTF-16LE (each byte followed by a
-/// zero), because Qt and Nebula hold UI and locale keys as wide strings that
-/// an ASCII-only scan never sees. Hits stay in section-then-address order.
+/// Matching is case-insensitive for ASCII letters, like the `strings`
+/// filter, so a lower-case query finds a capitalized identifier. Each match
+/// is sought both as the needle's UTF-8 bytes and as its UTF-16LE code
+/// units, because Qt and Nebula hold UI and locale keys as wide strings that
+/// a byte-only scan never sees. A needle outside ASCII is encoded as UTF-16
+/// itself: spreading its UTF-8 bytes over zero high halves spelled no wide
+/// string at all. Hits stay in section-then-address order.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image whose bytes are scanned.
-/// * `needle` - The ASCII bytes to find.
+/// * `needle` - The text to find.
 /// * `offset` - Matches to skip before the page starts.
 ///
 /// # Returns
 ///
 /// The page after `offset` and the total, both empty for an empty needle.
-pub fn find_text(program: &Program, needle: &[u8], offset: usize) -> Hits {
+pub fn find_text(program: &Program, needle: &str, offset: usize) -> Hits {
     let mut out = Hits::default();
-    if needle.is_empty() {
+    let narrow = needle.as_bytes();
+    let wide: Vec<u8> = needle.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let Some(reach) = narrow.len().max(wide.len()).checked_sub(1) else {
         return out;
-    }
-    for (data, off, va) in spans(program) {
+    };
+    for span in spans(program, reach) {
         // Collect both encodings' offsets, then report them in address order.
         let mut here: Vec<u64> = Vec::new();
-        ascii_hits(data, needle, &mut here);
-        wide_hits(data, needle, &mut here);
+        ascii_hits(span.data, narrow, &mut here);
+        wide_hits(span.data, &wide, &mut here);
+        here.retain(|&i| i < span.own);
         here.sort_unstable();
         here.dedup();
         for i in here {
-            if out.total >= offset && out.hits.len() < HITS_MAX {
-                out.hits.push(Hit {
-                    va: va.map(|v| v + i),
-                    file_off: off + i,
-                });
-            }
-            out.total += 1;
+            out.push(&span, i, offset);
         }
     }
     out
 }
 
+impl Hits {
+    /// Counts one match and keeps it when it falls on the page.
+    ///
+    /// # Arguments
+    ///
+    /// * `span` - The run the match starts in.
+    /// * `i` - The match's offset inside the run.
+    /// * `offset` - Matches to skip before the page starts.
+    fn push(&mut self, span: &Span<'_>, i: u64, offset: usize) {
+        if self.total >= offset && self.hits.len() < HITS_MAX {
+            self.hits.push(Hit {
+                va: span.va.map(|v| v + i),
+                file_off: span.off + i,
+            });
+        }
+        self.total += 1;
+    }
+}
+
 /// Collects the offsets where `data` holds `needle` under ASCII case folding.
-///
-/// The needle's first byte, in either spelling, picks the positions the full
-/// folded compare runs at ([`folded_pair`]): a text search tests every byte
-/// offset of every section, and the folded compare at every window was the
-/// whole cost of the query. The candidate scan reads eight bytes at a time
-/// ([`eq_mask`]), the tail byte by byte.
 ///
 /// # Arguments
 ///
 /// * `data` - The bytes searched.
-/// * `needle` - The ASCII bytes sought; non-empty.
+/// * `needle` - The bytes sought; nothing is collected for an empty one.
 /// * `out` - Where the matching offsets go, ascending.
 fn ascii_hits(data: &[u8], needle: &[u8], out: &mut Vec<u64>) {
-    let n = needle.len();
-    if data.len() < n {
+    let Some(&first) = needle.first() else {
         return;
-    }
-    let last = data.len() - n;
-    let (lo, hi) = folded_pair(needle[0]);
+    };
+    candidate_hits(
+        data,
+        needle.len(),
+        folded_pair(first),
+        |w| w.eq_ignore_ascii_case(needle),
+        out,
+    );
+}
+
+/// Collects the offsets where `data` holds the UTF-16LE code units `wide`,
+/// an ASCII unit's letter compared under case folding.
+///
+/// # Arguments
+///
+/// * `data` - The bytes searched.
+/// * `wide` - The code units sought, low byte first; nothing is collected
+///   for an empty one.
+/// * `out` - Where the matching offsets go, ascending.
+fn wide_hits(data: &[u8], wide: &[u8], out: &mut Vec<u64>) {
+    let [lo, hi, ..] = *wide else {
+        return;
+    };
+    let first = if hi == 0 { folded_pair(lo) } else { (lo, lo) };
+    candidate_hits(
+        data,
+        wide.len(),
+        first,
+        |w| utf16le_eq_ignore_ascii_case(w, wide),
+        out,
+    );
+}
+
+/// Collects the offsets of every window of `data` that `matches` accepts,
+/// testing only the windows whose first byte is one of `first`.
+///
+/// The first byte picks the positions the full compare runs at: a text
+/// search tests every byte offset of every section, and the compare at
+/// every window was the whole cost of the query. The candidate scan reads
+/// eight bytes at a time ([`eq_mask`]), the tail byte by byte.
+///
+/// # Arguments
+///
+/// * `data` - The bytes searched.
+/// * `n` - The window length.
+/// * `first` - The two spellings of the window's first byte.
+/// * `matches` - The full compare of one window.
+/// * `out` - Where the matching offsets go, ascending.
+fn candidate_hits(
+    data: &[u8],
+    n: usize,
+    first: (u8, u8),
+    matches: impl Fn(&[u8]) -> bool,
+    out: &mut Vec<u64>,
+) {
+    let Some(last) = data.len().checked_sub(n) else {
+        return;
+    };
+    let (lo, hi) = first;
     let (words, _tail) = data.as_chunks::<8>();
     for (k, w) in words.iter().enumerate() {
         let word = u64::from_le_bytes(*w);
@@ -136,63 +203,14 @@ fn ascii_hits(data: &[u8], needle: &[u8], out: &mut Vec<u64>) {
         while m != 0 {
             let i = k * 8 + m.trailing_zeros() as usize / 8;
             m &= m - 1;
-            if i <= last && data[i..i + n].eq_ignore_ascii_case(needle) {
+            if i <= last && matches(&data[i..i + n]) {
                 out.push(i as u64);
             }
         }
     }
     for i in words.len() * 8..=last {
         let b = data[i];
-        if (b == lo || b == hi) && data[i..i + n].eq_ignore_ascii_case(needle) {
-            out.push(i as u64);
-        }
-    }
-}
-
-/// Collects the offsets where `data` holds the UTF-16LE spelling of `needle`
-/// under ASCII case folding.
-///
-/// A match's second byte is always zero, the high half of an ASCII code
-/// point, so the candidate scan flags zero bytes ([`eq_mask`]) and tests the
-/// byte before each as the code unit's low half; only a low byte that folds
-/// to the needle's first byte runs [`utf16le_eq_ignore_ascii_case`].
-///
-/// # Arguments
-///
-/// * `data` - The bytes searched.
-/// * `needle` - The ASCII bytes sought; non-empty.
-/// * `out` - Where the matching offsets go, ascending.
-fn wide_hits(data: &[u8], needle: &[u8], out: &mut Vec<u64>) {
-    let wide = needle.len() * 2;
-    if data.len() < wide {
-        return;
-    }
-    let last = data.len() - wide;
-    let (lo, hi) = folded_pair(needle[0]);
-    let (words, tail) = data.as_chunks::<8>();
-    for (k, w) in words.iter().enumerate() {
-        let mut m = eq_mask(u64::from_le_bytes(*w), 0);
-        while m != 0 {
-            let z = k * 8 + m.trailing_zeros() as usize / 8;
-            m &= m - 1;
-            let Some(i) = z.checked_sub(1).filter(|i| *i <= last) else {
-                continue;
-            };
-            let b = data[i];
-            if (b == lo || b == hi) && utf16le_eq_ignore_ascii_case(&data[i..i + wide], needle) {
-                out.push(i as u64);
-            }
-        }
-    }
-    for (z, &high_byte) in tail.iter().enumerate() {
-        if high_byte != 0 {
-            continue;
-        }
-        let Some(i) = (words.len() * 8 + z).checked_sub(1).filter(|i| *i <= last) else {
-            continue;
-        };
-        let b = data[i];
-        if (b == lo || b == hi) && utf16le_eq_ignore_ascii_case(&data[i..i + wide], needle) {
+        if (b == lo || b == hi) && matches(&data[i..i + n]) {
             out.push(i as u64);
         }
     }
@@ -241,59 +259,104 @@ fn folded_pair(b: u8) -> (u8, u8) {
     (b.to_ascii_lowercase(), b.to_ascii_uppercase())
 }
 
+/// One run of bytes a search walks, with the bytes after it that a match
+/// starting inside it may run on into.
+#[derive(Debug, Clone, Copy)]
+struct Span<'a> {
+    /// The run's bytes, then up to the search's reach of the file's next
+    /// bytes.
+    data: &'a [u8],
+    /// Length of the run itself in bytes; a match must start before it.
+    own: u64,
+    /// File offset of the run's first byte.
+    off: u64,
+    /// Virtual address of the run's first byte; `None` where no section
+    /// maps it.
+    va: Option<u64>,
+}
+
 /// Returns the bytes a search walks: each section's file extent with its
 /// address, then the runs no section maps ([`Program::unmapped`]), which
 /// have none.
 ///
 /// An overlay, the headers and a file with no sections at all hold bytes
 /// worth finding; a search confined to the sections would skip every byte
-/// of a file that has none.
+/// of a file that has none. Each run carries the `reach` bytes the file
+/// holds after it, so a match that starts in one section and ends in the
+/// next is found where it starts: cut at the section's end, it was found
+/// nowhere.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
+/// * `reach` - Bytes past a run's end a match may cover: the pattern's
+///   length less one.
 ///
 /// # Returns
 ///
-/// `(bytes, file offset, virtual address)` per run.
-fn spans(program: &Program) -> Vec<(&[u8], u64, Option<u64>)> {
-    let mut spans: Vec<(&[u8], u64, Option<u64>)> = program
+/// One [`Span`] per run.
+fn spans(program: &Program, reach: usize) -> Vec<Span<'_>> {
+    let file = program.bytes.as_slice();
+    let span = |run: &[u8], off: u64, va: Option<u64>| -> Option<Span<'_>> {
+        let start = usize::try_from(off).ok()?;
+        let end = start
+            .checked_add(run.len())?
+            .saturating_add(reach)
+            .min(file.len());
+        Some(Span {
+            data: file.get(start..end)?,
+            own: crate::num::from_usize(run.len()),
+            off,
+            va,
+        })
+    };
+    let mut spans: Vec<Span<'_>> = program
         .sections
         .iter()
         .filter(|s| s.file_size > 0)
-        .filter_map(|s| Some((program.section_bytes(s)?, s.file_off, Some(s.va))))
+        .filter_map(|s| span(program.section_bytes(s)?, s.file_off, Some(s.va)))
         .collect();
     spans.extend(
         program
             .unmapped()
             .into_iter()
-            .map(|(off, b)| (b, off, None)),
+            .filter_map(|(off, b)| span(b, off, None)),
     );
     spans
 }
 
-/// Whether `window` is the UTF-16LE spelling of the ASCII `needle`, case-folded.
+/// Whether `window` holds the UTF-16LE code units `wide`, case-folded where
+/// a unit is ASCII.
 ///
-/// Each needle byte must appear low-byte-first with a zero high byte, the
-/// layout of an ASCII code point in UTF-16LE.
+/// A unit with a zero high byte compares its low byte under ASCII case
+/// folding; any other unit compares exactly, so a high byte that happens to
+/// spell a letter is never folded.
 ///
 /// # Arguments
 ///
-/// * `window` - A slice exactly twice the needle's length.
-/// * `needle` - The ASCII bytes.
-fn utf16le_eq_ignore_ascii_case(window: &[u8], needle: &[u8]) -> bool {
-    window.len() == needle.len() * 2
-        && needle
-            .iter()
-            .enumerate()
-            .all(|(k, n)| window[k * 2].eq_ignore_ascii_case(n) && window[k * 2 + 1] == 0)
+/// * `window` - A slice exactly as long as `wide`.
+/// * `wide` - The code units, low byte first.
+fn utf16le_eq_ignore_ascii_case(window: &[u8], wide: &[u8]) -> bool {
+    window.len() == wide.len()
+        && window
+            .chunks_exact(2)
+            .zip(wide.chunks_exact(2))
+            .all(|(w, n)| {
+                w[1] == n[1]
+                    && if n[1] == 0 {
+                        w[0].eq_ignore_ascii_case(&n[0])
+                    } else {
+                        w[0] == n[0]
+                    }
+            })
 }
 
 /// Walks every window of every section and of the bytes no section maps,
 /// counting the matches and keeping the page of them after `offset`.
 ///
 /// The walk never stops early: the total is what tells a caller how far
-/// the pages go, and a section is a memory compare per window.
+/// the pages go, and a section is a memory compare per window. A window may
+/// run past its run's end into the file's next bytes ([`spans`]).
 ///
 /// # Arguments
 ///
@@ -303,21 +366,14 @@ fn utf16le_eq_ignore_ascii_case(window: &[u8], needle: &[u8]) -> bool {
 /// * `matches` - Tells whether one window is a hit.
 fn scan(program: &Program, len: usize, offset: usize, matches: impl Fn(&[u8]) -> bool) -> Hits {
     let mut out = Hits::default();
-    if len == 0 {
+    let Some(reach) = len.checked_sub(1) else {
         return out;
-    }
-    for (data, off, va) in spans(program) {
-        for (i, w) in (0u64..).zip(data.windows(len)) {
-            if !matches(w) {
-                continue;
+    };
+    for span in spans(program, reach) {
+        for (i, w) in (0..span.own).zip(span.data.windows(len)) {
+            if matches(w) {
+                out.push(&span, i, offset);
             }
-            if out.total >= offset && out.hits.len() < HITS_MAX {
-                out.hits.push(Hit {
-                    va: va.map(|v| v + i),
-                    file_off: off + i,
-                });
-            }
-            out.total += 1;
         }
     }
     out

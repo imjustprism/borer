@@ -2340,7 +2340,7 @@ impl BorerServer {
                     })?;
                     borer_engine::search::find_bytes(p, &pattern, offset)
                 }
-                SearchKind::Text => borer_engine::search::find_text(p, query.as_bytes(), offset),
+                SearchKind::Text => borer_engine::search::find_text(p, &query, offset),
             };
             hits.hits.truncate(limit.n);
             let a = self.analysis_or_empty();
