@@ -64,7 +64,7 @@ use rmcp::{
 
 use borer_engine::live::{self as live, Memory as _, Rebase, Snapshot};
 use params::{
-    Annotation, CallgraphParams, CfgParams, ClassLayoutParams, DecompileBatchParams,
+    Annotation, CallgraphParams, CfgParams, ClassLayoutParams, CryptoParams, DecompileBatchParams,
     DecompileParams, Detail, DisassembleFunctionParams, DisassembleParams, EntropyParams,
     ExplainFunctionArgs, FetchPdbParams, Filter, FindCheckArgs, FindFunctionByStringParams,
     FunctionDetailParams, FunctionParams, FunctionsParams, HexdumpParams, LiveAttachParams,
@@ -987,13 +987,21 @@ impl BorerServer {
         self.with_program(|p| Ok(entropy_answer(p, window, threshold)))
     }
 
-    /// Scans every section for known crypto and hash constants.
+    /// Scans every byte of the file for known crypto and hash constants,
+    /// grouped by algorithm, with one page of the per-site rows.
+    ///
+    /// The tool takes paging parameters and so refuses one it does not
+    /// know, where it took no parameters and ignored any it was given.
+    ///
+    /// # Arguments
+    ///
+    /// * `CryptoParams` - Destructured tool parameters (see its field docs).
     ///
     /// # Errors
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Crypto tables and constants (AES, SHA-1/2, MD5, CRC-32, ChaCha, Blowfish, RC5/6, xxHash/FNV/SipHash, Base64) as `va section algorithm` rows (max 200).",
+        description = "Crypto tables and constants (AES, SHA-1/2, MD5, CRC-32, ChaCha, Blowfish, RC5/6, xxHash/FNV/SipHash, Base64) in every byte of the file, overlay included: a group per algorithm, then `va section algorithm` rows (`off=<n>` where unmapped) paged by offset/limit (200, max 500).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1001,14 +1009,21 @@ impl BorerServer {
             open_world_hint = false
         )
     )]
-    fn find_crypto_constants(&self) -> Result<String, ErrorData> {
+    fn find_crypto_constants(
+        &self,
+        Parameters(CryptoParams { offset, limit }): Parameters<CryptoParams>,
+    ) -> Result<String, ErrorData> {
+        let page = Page::new(offset, limit, None, 200, 500)?;
         self.with_program(|p| {
             Ok(render::crypto_tsv(
                 p,
                 &self.analysis_or_empty(),
                 &self.overlay(),
+                page.offset,
+                page.limit.n,
             ))
         })
+        .map(|text| page.limit.noted(text))
     }
 
     /// Returns the one-call triage of a function.

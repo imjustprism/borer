@@ -377,16 +377,12 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
         if !hit.name.contains("obfuscation") && !hit.name.contains("gamma") {
             continue;
         }
-        let Some(f) = a.function_at(hit.va) else {
+        let Some((va, f)) = hit.va.and_then(|va| Some((va, a.function_at(va)?))) else {
             continue;
         };
         funcs.insert(f.entry);
         seeds.insert(f.entry);
-        if let Some(i) = f
-            .blocks
-            .iter()
-            .position(|b| b.start <= hit.va && hit.va < b.end)
-        {
+        if let Some(i) = f.blocks.iter().position(|b| b.start <= va && va < b.end) {
             for back in 0..=BLOCKS_BACK {
                 if let Some(b) = i.checked_sub(back).and_then(|j| f.blocks.get(j)) {
                     seeds.insert(b.start);

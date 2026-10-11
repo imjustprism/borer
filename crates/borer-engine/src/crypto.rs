@@ -1,12 +1,16 @@
 //! Known-constant scan: cryptographic tables, hash initial states and other
 //! magic byte sequences that identify an algorithm at a glance.
 //!
-//! One linear pass over every mapped section; candidates are keyed on their
-//! first byte, so the pass costs `O(bytes)` regardless of the table size.
+//! One linear pass over every mapped section and every byte no section maps;
+//! candidates are keyed on their first byte, so the pass costs `O(bytes)`
+//! regardless of the table size.
+
+use std::ops::ControlFlow;
 
 use crate::program::Program;
 
-/// Hard cap on reported hits.
+/// Hits [`find_crypto_constants`] keeps; a full listing pages through
+/// [`scan`] instead.
 pub const HITS_MAX: usize = 200;
 
 /// `(algorithm, byte signature as it appears in memory, little-endian)`.
@@ -123,13 +127,15 @@ const SIGNATURES: &[(&str, &str)] = &[
 /// One recognized constant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CryptoHit {
-    /// Virtual address of the constant's first byte.
-    pub va: u64,
+    /// Virtual address of the constant's first byte; `None` in bytes no
+    /// section maps (an overlay, the headers).
+    pub va: Option<u64>,
     /// File offset of the constant's first byte.
     pub file_off: u64,
     /// Algorithm name from [`SIGNATURES`].
     pub name: &'static str,
-    /// Name of the section holding the constant.
+    /// Name of the section holding the constant, [`UNMAPPED`] for bytes no
+    /// section maps.
     pub section: String,
 }
 
@@ -228,20 +234,53 @@ fn parse(sig: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Scans every mapped section for the known constants.
+/// What the section column says for a hit in bytes no section maps.
+pub const UNMAPPED: &str = "(unmapped)";
+
+/// One hit as [`scan`] meets it, before a caller keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Seen<'p> {
+    /// Virtual address of the constant's first byte; `None` in bytes no
+    /// section maps.
+    pub va: Option<u64>,
+    /// File offset of the constant's first byte.
+    pub file_off: u64,
+    /// Algorithm name from [`SIGNATURES`].
+    pub name: &'static str,
+    /// Name of the section holding the constant, [`UNMAPPED`] for bytes no
+    /// section maps.
+    pub section: &'p str,
+}
+
+impl Seen<'_> {
+    /// Returns the hit as a [`CryptoHit`] a caller keeps.
+    #[must_use]
+    pub fn kept(&self) -> CryptoHit {
+        CryptoHit {
+            va: self.va,
+            file_off: self.file_off,
+            name: self.name,
+            section: self.section.to_owned(),
+        }
+    }
+}
+
+/// Scans every mapped section, then the bytes no section maps, for the
+/// known constants, handing each hit to `visit` until it says stop.
 ///
 /// Signatures are bucketed by their first byte, so each position compares
-/// against the few candidates that can start there. The scan stops after
-/// [`HITS_MAX`] hits.
+/// against the few candidates that can start there. An overlay, the
+/// headers and a file with no sections hold bytes worth scanning, as
+/// `search` scans them: a table appended after the last section was found
+/// by `search` and missed here.
 ///
 /// # Arguments
 ///
-/// * `program` - The loaded image whose sections are scanned.
-///
-/// # Returns
-///
-/// Hits in a deterministic order: section, then offset, then table order.
-pub fn find_crypto_constants(program: &Program) -> Vec<CryptoHit> {
+/// * `program` - The loaded image whose bytes are scanned.
+/// * `visit` - Receives every hit in a deterministic order: section, then
+///   offset, then table order, then the unmapped runs in file order; it
+///   returns [`ControlFlow::Break`] to end the scan.
+pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<()>) {
     let sigs: Vec<(&'static str, Vec<u8>)> = SIGNATURES
         .iter()
         .map(|(name, sig)| (*name, parse(sig)))
@@ -252,28 +291,65 @@ pub fn find_crypto_constants(program: &Program) -> Vec<CryptoHit> {
             by_first[usize::from(b)].push(i);
         }
     }
-    let mut hits = Vec::new();
-    'outer: for s in &program.sections {
-        let Some(data) = program.section_bytes(s) else {
-            continue;
-        };
-        for (i, &b) in data.iter().enumerate() {
+    let runs = program
+        .sections
+        .iter()
+        .filter_map(|s| {
+            Some((
+                program.section_bytes(s)?,
+                s.file_off,
+                Some(s.va),
+                s.name.as_str(),
+            ))
+        })
+        .chain(
+            program
+                .unmapped()
+                .into_iter()
+                .map(|(off, data)| (data, off, None, UNMAPPED)),
+        );
+    for (data, off, va, section) in runs {
+        for (i, &b) in (0u64..).zip(data.iter()) {
             for &si in &by_first[usize::from(b)] {
-                let sig = &sigs[si].1;
-                if data.get(i..i + sig.len()) == Some(sig.as_slice()) {
-                    hits.push(CryptoHit {
-                        va: s.va + i as u64,
-                        file_off: s.file_off + i as u64,
-                        name: sigs[si].0,
-                        section: s.name.clone(),
-                    });
-                    if hits.len() >= HITS_MAX {
-                        break 'outer;
-                    }
+                let (name, sig) = (sigs[si].0, &sigs[si].1);
+                let at = crate::num::saturating_usize(i);
+                if data.get(at..at.saturating_add(sig.len())) != Some(sig.as_slice()) {
+                    continue;
+                }
+                let seen = Seen {
+                    va: va.map(|v| v + i),
+                    file_off: off + i,
+                    name,
+                    section,
+                };
+                if visit(&seen).is_break() {
+                    return;
                 }
             }
         }
     }
+}
+
+/// Scans the image for the known constants ([`scan`]), keeping the first
+/// [`HITS_MAX`].
+///
+/// # Arguments
+///
+/// * `program` - The loaded image whose bytes are scanned.
+///
+/// # Returns
+///
+/// Hits in [`scan`]'s order.
+pub fn find_crypto_constants(program: &Program) -> Vec<CryptoHit> {
+    let mut hits = Vec::new();
+    scan(program, |seen| {
+        hits.push(seen.kept());
+        if hits.len() >= HITS_MAX {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
     hits
 }
 
@@ -289,7 +365,7 @@ pub fn find_crypto_constants(program: &Program) -> Vec<CryptoHit> {
 /// reached), a column header, then one `va  section  algorithm` row per hit.
 pub fn render(hits: &[CryptoHit]) -> String {
     let mut out = format!(
-        "# {} crypto/hash constant hits{}\n# va          section   algorithm\n",
+        "# {} crypto/hash constant hits{}\n",
         hits.len(),
         if hits.len() >= HITS_MAX {
             " (cap reached)"
@@ -297,13 +373,23 @@ pub fn render(hits: &[CryptoHit]) -> String {
             ""
         }
     );
+    out.push_str(&rows(hits));
+    out
+}
+
+/// Renders the column header and one `va  section  algorithm` row per
+/// hit, `off=<n>` in the address column for bytes no section maps.
+///
+/// # Arguments
+///
+/// * `hits` - The hits to list.
+#[must_use]
+pub fn rows(hits: &[CryptoHit]) -> String {
+    let mut out = String::from("# va          section   algorithm\n");
     for h in hits {
-        out.push_str(&format!(
-            "{:<12} {:<9} {}\n",
-            format!("{:#x}", h.va),
-            h.section,
-            h.name
-        ));
+        let at =
+            h.va.map_or_else(|| format!("off={:#x}", h.file_off), |va| format!("{va:#x}"));
+        out.push_str(&format!("{at:<12} {:<9} {}\n", h.section, h.name));
     }
     out
 }

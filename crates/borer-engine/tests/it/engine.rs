@@ -499,9 +499,48 @@ fn crypto_constant_scan() {
         names.iter().any(|n| n.starts_with("ChaCha20 / Salsa20")),
         "{names:?}"
     );
-    assert_eq!(hits[0].va, 0x2008);
+    assert_eq!(hits[0].va, Some(0x2008));
     assert!(render(&hits).starts_with("# 2 crypto/hash constant hits"));
     assert!(find_crypto_constants(&two_section_program(vec![0x90; 16], vec![0; 64])).is_empty());
+}
+
+/// A constant in bytes no section maps is found by its file offset, as
+/// `search` finds it: a table appended after the last section was missed.
+#[test]
+fn crypto_constants_past_the_sections_are_found() {
+    use borer_engine::crypto::{UNMAPPED, find_crypto_constants, rows};
+    let mut p = two_section_program(vec![0x90; 16], vec![0; 16]);
+    p.bytes.extend_from_slice(b"\0\0\0\0expand 32-byte k");
+    let hits = find_crypto_constants(&p);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!((hits[0].va, hits[0].file_off), (None, 0x24));
+    assert_eq!(hits[0].section, UNMAPPED);
+    assert!(rows(&hits).contains("off=0x24"), "{}", rows(&hits));
+}
+
+/// The per-site rows of the crypto table page, under a `showing N of M`
+/// header, while the groups count every hit.
+#[test]
+fn the_crypto_table_pages_its_rows() {
+    use borer_engine::analysis::{Analysis, Overlay, render::crypto_tsv};
+    let data: Vec<u8> = b"expand 32-byte k".repeat(3);
+    let p = two_section_program(vec![0x90; 16], data);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let first = crypto_tsv(&p, &a, &o, 0, 2);
+    assert!(
+        first.starts_with("# 3 crypto/hash constant hits"),
+        "{first}"
+    );
+    assert!(first.contains("# showing 2 of 3 hits from 0\n"), "{first}");
+    assert!(
+        first.contains("# 1 more hits; offset=2 for the next page"),
+        "{first}"
+    );
+    let last = crypto_tsv(&p, &a, &o, 2, 2);
+    assert!(last.contains("# showing 1 of 3 hits from 2\n"), "{last}");
+    assert!(last.contains("0x2020"), "{last}");
+    assert!(!last.contains("more hits"), "{last}");
 }
 
 /// A PE whose exception directory points nowhere still loads.

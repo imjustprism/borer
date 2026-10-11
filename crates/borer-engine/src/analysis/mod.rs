@@ -1199,7 +1199,7 @@ impl Analysis {
         phases.mark("analysis eh");
         analysis.crypto = crate::crypto::find_crypto_constants(program)
             .into_iter()
-            .map(|hit| (hit.va, hit.name))
+            .filter_map(|hit| Some((hit.va?, hit.name)))
             .collect();
         let crc_tables: Vec<u64> = analysis
             .crypto

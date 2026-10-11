@@ -454,6 +454,16 @@ pub(crate) struct ReachesParams {
     pub(crate) depth: Option<u32>,
 }
 
+/// Parameters for `find_crypto_constants`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CryptoParams {
+    /// Per-site rows to skip first (paging).
+    pub(crate) offset: Option<u32>,
+    /// Max per-site rows (default 200, max 500).
+    pub(crate) limit: Option<u32>,
+}
+
 /// Parameters for `cfg`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

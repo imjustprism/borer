@@ -1577,7 +1577,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Crypto => {
             let a = s.analysis_or_empty();
-            print!("{}", render::crypto_tsv(&s.program, &a, &s.overlay));
+            print!("{}", render::crypto_tsv(&s.program, &a, &s.overlay, 0, 200));
         }
         Query::Qt => {
             let a = s.analysis()?;

@@ -241,8 +241,8 @@ fn the_same_binary_answers_the_same_bytes_twice() {
         ),
         (
             "crypto",
-            render::crypto_tsv(&p, &first, &o),
-            render::crypto_tsv(&p, &second, &o),
+            render::crypto_tsv(&p, &first, &o, 0, 200),
+            render::crypto_tsv(&p, &second, &o, 0, 200),
         ),
         (
             "decompile",

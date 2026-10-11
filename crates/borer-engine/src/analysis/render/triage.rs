@@ -539,34 +539,41 @@ pub(super) struct Group {
 /// it, which the reference index knows and the address alone does not, and
 /// its section is where it lives whether or not something indexes it.
 ///
+/// The groups count every hit in the image; the per-site rows page by
+/// `offset` and `limit`, where they stopped at the first 200 hits with no
+/// way past them.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
 /// * `a` - The analysis, for the function containing a hit.
 /// * `o` - User names.
+/// * `offset` - Per-site rows to skip first (paging).
+/// * `limit` - Most per-site rows listed.
 ///
 /// # Returns
 ///
 /// A group per algorithm with its site and function counts and the
-/// functions it appears in, then the per-site table.
-pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
+/// functions it appears in, then a `# showing N of M hits from O` header
+/// over one page of the per-site table.
+pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: usize) -> String {
     /// Functions named in a group's `where` column before the rest are counted.
     const NAMED_MAX: usize = 8;
-    let hits = crate::crypto::find_crypto_constants(p);
-    if hits.is_empty() {
-        return crate::crypto::render(&hits);
-    }
     let mut groups: Vec<Group> = Vec::new();
     let mut owned: BTreeSet<(&str, u64)> = BTreeSet::new();
-    for h in &hits {
+    let mut page: Vec<crate::crypto::CryptoHit> = Vec::new();
+    let mut total = 0usize;
+    crate::crypto::scan(p, |h| {
+        if total >= offset && page.len() < limit {
+            page.push(h.kept());
+        }
+        total += 1;
         let family = h.name.split_whitespace().next().unwrap_or(h.name);
-        let owners: Vec<u64> = match a.function_at(h.va) {
-            Some(f) => vec![f.entry],
-            None => a
-                .xrefs_to(h.va)
-                .iter()
-                .filter_map(|s| s.from_entry)
-                .collect(),
+        let inside = h.va.and_then(|va| a.function_at(va));
+        let owners: Vec<u64> = match (inside, h.va) {
+            (Some(f), _) => vec![f.entry],
+            (None, Some(va)) => a.xrefs_to(va).iter().filter_map(|s| s.from_entry).collect(),
+            (None, None) => Vec::new(),
         };
         let at = match groups.iter().position(|g| g.family == family) {
             Some(k) => k,
@@ -587,13 +594,13 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
                 slot.owners.push(entry);
             }
         }
-        match a.function_at(h.va) {
-            Some(_) => {}
-            None if !slot.sections.contains(&h.section) => {
-                slot.sections.push(h.section.clone());
-            }
-            None => {}
+        if inside.is_none() && !slot.sections.iter().any(|s| s == h.section) {
+            slot.sections.push(h.section.to_owned());
         }
+        std::ops::ControlFlow::Continue(())
+    });
+    if total == 0 {
+        return crate::crypto::render(&[]);
     }
     groups.sort_by(|l, r| r.sites.cmp(&l.sites).then(l.family.cmp(r.family)));
     let functions: usize = {
@@ -606,8 +613,7 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         all.len()
     };
     let mut out = format!(
-        "# {} crypto/hash constant hits: {} algorithm(s) across {functions} function(s)\n",
-        hits.len(),
+        "# {total} crypto/hash constant hits: {} algorithm(s) across {functions} function(s)\n",
         groups.len()
     );
     out.push_str("# algorithm        sites  functions  where\n");
@@ -636,11 +642,22 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
             g.owners.len()
         );
     }
-    out.push('\n');
-    out.push_str(&crate::crypto::render(&hits));
+    let _ = writeln!(
+        out,
+        "\n# showing {} of {total} hits from {offset}",
+        page.len()
+    );
+    out.push_str(&crate::crypto::rows(&page));
+    let next = offset.saturating_add(page.len());
+    if next < total {
+        let _ = writeln!(
+            out,
+            "# {} more hits; offset={next} for the next page",
+            total - next
+        );
+    }
     out
 }
-
 /// Answers the first question about a binary in one call.
 ///
 /// The procedure this replaces is ten calls in a fixed order: what format is
@@ -757,7 +774,7 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let _ = writeln!(out, "# protection: {}", headline(&protection, "protection"));
     let anti = anti_analysis_tsv(p, a, o);
     let _ = writeln!(out, "# anti-analysis: {}", headline(&anti, "anti-analysis"));
-    let crypto = crypto_tsv(p, a, o);
+    let crypto = crypto_tsv(p, a, o, 0, 1);
     let _ = writeln!(out, "# crypto: {}", headline(&crypto, "crypto"));
     let dynamic = dynamic_imports_tsv(p, a, o);
     let _ = writeln!(
@@ -793,7 +810,7 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         }
     }
     for hit in crate::crypto::find_crypto_constants(p) {
-        if let Some(f) = a.function_at(hit.va) {
+        if let Some(f) = hit.va.and_then(|va| a.function_at(va)) {
             let entry = reasons.entry(f.entry).or_default();
             let note = format!("holds {}", hit.name);
             if !entry.contains(&note) {
