@@ -834,3 +834,36 @@ fn bytes_after_the_certificate_table_are_overlay() {
         "{notes}"
     );
 }
+
+/// Header fields the Windows loader ignores do not refuse the file.
+///
+/// A damaged Rich header in the DOS stub and a data directory count past
+/// sixteen each failed the parse, permissive mode included. The file loads, the
+/// summary says what was read past, and the bytes are put back.
+#[test]
+fn fields_the_loader_ignores_do_not_refuse_the_file() {
+    let _serial = serial();
+    let mut bytes = pe(&[Sec::sound(".text", 0x1000, text(), CODE)], &[]);
+    // SPEC: a Rich marker and its key in the DOS stub, with no `DanS`
+    // before it that the key decodes.
+    bytes[0x60..0x64].copy_from_slice(b"Rich");
+    put32(&mut bytes, 0x64, 0x1234_5678);
+    // SPEC: `NumberOfRvaAndSizes` sits 108 bytes into a PE32+ optional header.
+    put32(&mut bytes, PE_AT + 24 + 108, 17);
+    let original = bytes.clone();
+    let p = load(bytes);
+    assert!(
+        p.bytes == original,
+        "the file was not put back after the parse"
+    );
+    let summary = p.summary();
+    assert!(
+        summary.contains("# warning: the Rich header in the DOS stub is damaged; it is not read"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("# warning: the header states 17 data directories; the loader reads 16"),
+        "{summary}"
+    );
+    assert_eq!(p.sections.len(), 1);
+}

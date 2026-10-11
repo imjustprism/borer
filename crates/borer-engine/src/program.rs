@@ -254,14 +254,41 @@ pub struct Program {
     pub flat_fallback: bool,
 }
 
-/// Parses a byte image into a goblin object, retrying a PE permissively.
+/// The container a file's first bytes name, for a parse that fails.
+///
+/// # Arguments
+///
+/// * `bytes` - The file.
+///
+/// # Returns
+///
+/// `a PE`, `an ELF image`, `a Mach-O image`, `a fat Mach-O (or a Java
+/// class file)` or `an archive`, or `None` when the magic is none of them.
+fn magic_name(bytes: &[u8]) -> Option<&'static str> {
+    // SPEC: the Mach-O magics in either byte order, the fat magic (which a
+    // Java class file shares), and the `ar` signature.
+    let word = bytes.first_chunk::<4>().map(|b| u32::from_be_bytes(*b));
+    match word {
+        _ if bytes.first_chunk::<2>() == Some(b"MZ") => Some("a PE"),
+        Some(0x7f45_4c46) => Some("an ELF image"),
+        Some(0xfeed_face | 0xfeed_facf | 0xcefa_edfe | 0xcffa_edfe) => Some("a Mach-O image"),
+        Some(0xcafe_babe) => Some("a fat Mach-O (or a Java class file)"),
+        _ if bytes.starts_with(b"!<arch>\n") => Some("an archive"),
+        _ => None,
+    }
+}
+
+/// Parses a byte image into a goblin object, retrying a damaged one leniently.
 ///
 /// A protector rewrites the section table and data directories so a strict
 /// parse of the exception, import or relocation directory can fail on a file
-/// that still loads and runs. When the standard parse fails on something
-/// that begins with `MZ`, the PE is parsed again in permissive mode, which
-/// keeps what it can read and drops what it cannot, so the code is available
-/// to analyze even when the headers lie.
+/// that still loads and runs, and one bad byte in a header the loader never
+/// reads (a section name that is not UTF-8, a symbol table offset past the
+/// end) failed the whole file. When the strict parse fails, an `MZ` file
+/// is parsed again in permissive mode, an ELF image in permissive mode and
+/// a Mach-O image lossily: each keeps what it can read and drops what it
+/// cannot, so the code is available to analyze even when the headers lie,
+/// and what the strict parse said is kept for the summary to show.
 ///
 /// # Arguments
 ///
@@ -269,23 +296,146 @@ pub struct Program {
 /// * `parse_imports` - Whether a PE's import directory is read; `false`
 ///   when [`implausible_imports`] refused it.
 ///
+/// # Returns
+///
+/// The object, with what the strict parse said when only the lenient one
+/// read the file. A file whose magic names no format is
+/// [`goblin::Object::Unknown`], however short.
+///
 /// # Errors
 ///
-/// When neither the strict parse of any format nor the permissive PE parse
-/// succeeds.
-fn parse_object(bytes: &[u8], parse_imports: bool) -> anyhow::Result<goblin::Object<'_>> {
+/// When a file whose magic names a format fails both parses, with what
+/// each said.
+fn parse_object(
+    bytes: &[u8],
+    parse_imports: bool,
+) -> anyhow::Result<(goblin::Object<'_>, Option<String>)> {
     use goblin::pe::options::{ParseMode, ParseOptions};
-    if bytes.first_chunk::<2>() != Some(b"MZ") {
-        return caught(|| goblin::Object::parse(bytes))?.map_err(|e| anyhow!("{e}"));
+    if bytes.first_chunk::<2>() == Some(b"MZ") {
+        let strict = ParseOptions::default().with_parse_imports(parse_imports);
+        return match caught(|| goblin::pe::PE::parse_with_opts(bytes, &strict))? {
+            Ok(pe) => Ok((goblin::Object::PE(pe), None)),
+            Err(strict_err) => {
+                let permissive = strict.with_parse_mode(ParseMode::Permissive);
+                let pe = caught(|| goblin::pe::PE::parse_with_opts(bytes, &permissive))?
+                    .map_err(|permissive| anyhow!("{strict_err}; permissive: {permissive}"))?;
+                Ok((goblin::Object::PE(pe), Some(strict_err.to_string())))
+            }
+        };
     }
-    let strict = ParseOptions::default().with_parse_imports(parse_imports);
-    match caught(|| goblin::pe::PE::parse_with_opts(bytes, &strict))? {
-        Ok(pe) => Ok(goblin::Object::PE(pe)),
-        Err(strict_err) => {
-            let permissive = strict.with_parse_mode(ParseMode::Permissive);
-            let pe = caught(|| goblin::pe::PE::parse_with_opts(bytes, &permissive))?
-                .map_err(|permissive| anyhow!("{strict_err}; permissive: {permissive}"))?;
-            Ok(goblin::Object::PE(pe))
+    let strict_err = match caught(|| goblin::Object::parse(bytes))? {
+        Ok(obj) => return Ok((obj, None)),
+        Err(e) => e,
+    };
+    let lenient = match bytes.first_chunk::<4>().map(|b| u32::from_be_bytes(*b)) {
+        Some(0x7f45_4c46) => caught(|| {
+            goblin::elf::Elf::parse_with_opts(bytes, &goblin::options::ParseOptions::permissive())
+        })?
+        .map(goblin::Object::Elf),
+        Some(0xfeed_face | 0xfeed_facf | 0xcefa_edfe | 0xcffa_edfe | 0xcafe_babe) => {
+            caught(|| goblin::mach::Mach::parse_lossy(bytes))?.map(goblin::Object::Mach)
+        }
+        _ if magic_name(bytes).is_none() => return Ok((goblin::Object::Unknown(0), None)),
+        _ => return Err(anyhow!("{strict_err}")),
+    };
+    lenient
+        .map(|obj| (obj, Some(strict_err.to_string())))
+        .map_err(|lenient| anyhow!("{strict_err}; lenient: {lenient}"))
+}
+
+/// Loosens the PE header fields the Windows loader ignores and the parser
+/// refuses outright, for the length of a parse.
+///
+/// The loader never reads the DOS stub, where a linker leaves its Rich
+/// header, and reads at most sixteen data directories whatever
+/// `NumberOfRvaAndSizes` states; the parser refused a whole file for one
+/// flipped bit in the Rich header's `DanS` marker or a count of seventeen.
+/// The Rich marker is hidden and the count capped at sixteen in place;
+/// [`restore`] puts both back after the parse.
+///
+/// # Arguments
+///
+/// * `bytes` - The whole file, patched in place.
+///
+/// # Returns
+///
+/// What was patched, and a note for each change.
+fn loosen_pe(bytes: &mut [u8]) -> (Vec<Patch>, Vec<String>) {
+    /// The data directories a PE optional header has room for.
+    const DIRECTORIES_MAX: u32 = 16;
+    /// The Rich header's end marker.
+    const RICH: [u8; 4] = *b"Rich";
+    /// Bytes of the DOS header; the stub, and any Rich header, follow it.
+    const DOS_HEADER: usize = 0x40;
+    let mut patches = Vec::new();
+    let mut notes = Vec::new();
+    let Some(pe) = pe_signature(bytes) else {
+        return (patches, notes);
+    };
+    let damaged = caught(|| goblin::pe::header::RichHeader::parse(bytes).is_err()).unwrap_or(true);
+    if damaged
+        && let Some(at) = bytes
+            .get(DOS_HEADER..pe)
+            .and_then(|stub| stub.windows(4).position(|w| w == RICH))
+            .map(|k| DOS_HEADER + k)
+        && let Some(slot) = bytes.get_mut(at..at + 4)
+    {
+        patches.push(Patch::zeroed(at, slot));
+        notes.push("the Rich header in the DOS stub is damaged; it is not read".to_owned());
+    }
+    let opt = pe + 24;
+    let count_at = match le_u16(bytes, opt) {
+        Some(0x10b) => opt + 92,
+        Some(0x20b) => opt + 108,
+        _ => return (patches, notes),
+    };
+    if let Some(count) = le_u32(bytes, count_at).filter(|&c| c > DIRECTORIES_MAX)
+        && let Some(slot) = bytes.get_mut(count_at..count_at + 4)
+    {
+        let saved = Patch::zeroed(count_at, slot);
+        slot.copy_from_slice(&DIRECTORIES_MAX.to_le_bytes());
+        patches.push(saved);
+        notes.push(format!(
+            "the header states {count} data directories; the loader reads {DIRECTORIES_MAX}"
+        ));
+    }
+    (patches, notes)
+}
+
+/// Four bytes of the file changed for the length of a parse.
+#[derive(Debug, Clone, Copy)]
+struct Patch {
+    /// File offset of the first byte.
+    at: usize,
+    /// What the bytes held.
+    saved: [u8; 4],
+}
+
+impl Patch {
+    /// Saves four bytes and zeroes them.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The bytes' file offset.
+    /// * `slot` - The four bytes, zeroed in place.
+    fn zeroed(at: usize, slot: &mut [u8]) -> Patch {
+        let mut saved = [0u8; 4];
+        saved.copy_from_slice(slot);
+        slot.fill(0);
+        Patch { at, saved }
+    }
+}
+
+/// Puts back what [`loosen_pe`] changed.
+///
+/// # Arguments
+///
+/// * `bytes` - The whole file.
+/// * `patches` - What was changed.
+fn restore(bytes: &mut [u8], patches: &[Patch]) {
+    for p in patches {
+        if let Some(slot) = bytes.get_mut(p.at..p.at + 4) {
+            slot.copy_from_slice(&p.saved);
         }
     }
 }
@@ -890,7 +1040,7 @@ fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
     PARSING.with(|p| p.set(was));
     out.map_err(|_| {
         anyhow!(
-            "the file's headers name offsets outside it, and reading them faulted: it is              truncated or damaged rather than a program this can load"
+            "the file's headers name offsets outside it, and reading them faulted: it is truncated or damaged rather than a program this can load"
         )
     })
 }
@@ -1130,6 +1280,9 @@ impl Program {
     /// Mach-O: the segments' sections, the symbol table with the import
     /// slots the indirect symbols name, and the linker's function starts as
     /// the ranges ([`crate::macho`]); of a fat file, the x86-64 slice.
+    /// An ELF file with no section table to read (stripped, or past the
+    /// end) maps its `PT_LOAD` segments in its place, as the system loader
+    /// does, and says so.
     /// ELF and Mach-O section tables are fitted to the file
     /// ([`fit_sections`]): a row the file cannot hold is dropped
     /// ([`Headers::dropped_sections`]) and one it ends inside keeps what it
@@ -1170,10 +1323,26 @@ impl Program {
         symsrv: Option<&Path>,
     ) -> anyhow::Result<Program> {
         let mut phases = crate::timing::Phases::new();
+        if bytes.is_empty() {
+            return Err(anyhow!("the file is empty: there is nothing to load"));
+        }
         let refused_imports = implausible_imports(&bytes);
         let disarmed = disarm_exports(&mut bytes);
-        let obj = parse_object(&bytes, refused_imports.is_none())
-            .map_err(|e| anyhow!("unrecognized format: {e}"))?;
+        let (patches, mut lenient) = loosen_pe(&mut bytes);
+        let (obj, strict) = parse_object(&bytes, refused_imports.is_none()).map_err(|e| {
+            match magic_name(&bytes) {
+                Some(kind) => anyhow!(
+                    "the file starts like {kind} but its headers do not parse, even leniently: it is truncated or damaged ({} bytes; {e})",
+                    bytes.len()
+                ),
+                None => anyhow!("unrecognized format: {e}"),
+            }
+        })?;
+        if let Some(why) = strict {
+            lenient.push(format!(
+                "the headers do not all parse ({why}); read leniently, what does not parse is skipped"
+            ));
+        }
         phases.mark("load parse");
 
         let mut format = BinaryFormat::Raw;
@@ -1420,7 +1589,7 @@ impl Program {
                     183 => Arch::Arm64,
                     _ => Arch::Unknown,
                 };
-                entry = Some(elf.entry);
+                entry = (elf.entry != 0).then_some(elf.entry);
 
                 /// `SHF_WRITE`.
                 const WRITE: u64 = 0x1;
@@ -1456,6 +1625,35 @@ impl Program {
                         writable: sh.sh_flags & WRITE != 0,
                         executable: sh.sh_flags & EXEC != 0,
                     });
+                }
+                if elf.section_headers.is_empty() {
+                    /// `PT_LOAD`.
+                    const PT_LOAD: u32 = 1;
+                    /// `PF_X`, `PF_W`, `PF_R`.
+                    const PF: (u32, u32, u32) = (1, 2, 4);
+                    for (i, ph) in elf
+                        .program_headers
+                        .iter()
+                        .filter(|p| p.p_type == PT_LOAD)
+                        .enumerate()
+                    {
+                        sections.push(Section {
+                            name: format!("LOAD{i}"),
+                            va: ph.p_vaddr,
+                            vsize: ph.p_memsz,
+                            file_off: ph.p_offset,
+                            file_size: ph.p_filesz,
+                            readable: ph.p_flags & PF.2 != 0,
+                            writable: ph.p_flags & PF.1 != 0,
+                            executable: ph.p_flags & PF.0 != 0,
+                        });
+                    }
+                    if !sections.is_empty() {
+                        lenient.push(
+                            "no section table to read; the PT_LOAD segments are mapped in its place"
+                                .to_owned(),
+                        );
+                    }
                 }
                 fit.add(fit_sections(&mut sections, file_len));
                 fit.add(fit_sections(&mut unmapped, file_len));
@@ -1549,16 +1747,18 @@ impl Program {
             }
             goblin::Object::Mach(mach) => {
                 format = BinaryFormat::MachO;
-                if let Some(loaded) = crate::macho::load(&bytes, mach) {
-                    arch = loaded.arch;
-                    is_64 = loaded.is_64;
-                    entry = loaded.entry;
-                    image_base = loaded.image_base;
-                    sections = loaded.sections;
-                    symbols = loaded.symbols;
-                    function_ranges = loaded.function_ranges;
-                    headers = loaded.headers;
-                    fit.add(loaded.fit);
+                let loaded = crate::macho::load(&bytes, mach)?;
+                arch = loaded.arch;
+                is_64 = loaded.is_64;
+                entry = loaded.entry;
+                image_base = loaded.image_base;
+                sections = loaded.sections;
+                symbols = loaded.symbols;
+                function_ranges = loaded.function_ranges;
+                headers = loaded.headers;
+                fit.add(loaded.fit);
+                if let Some(why) = loaded.lenient {
+                    lenient.push(why);
                 }
             }
             goblin::Object::Archive(_) => format = BinaryFormat::Archive,
@@ -1571,6 +1771,8 @@ impl Program {
         {
             slot.copy_from_slice(&d.saved);
         }
+        restore(&mut bytes, &patches);
+        headers.lenient = lenient;
         headers.dropped_sections = fit.dropped;
         headers.truncated = fit.cut;
         headers.implausible_imports = refused_imports;
@@ -2057,6 +2259,15 @@ impl Program {
         if self.flat_fallback {
             out.push_str("# warning: section table corrupt; using a flat file mapping\n");
         }
+        for note in &self.headers.lenient {
+            out.push_str(&format!("# warning: {note}\n"));
+        }
+        if self.format == BinaryFormat::Elf
+            && self.sections.is_empty()
+            && self.headers.kind == Some("ET_REL")
+        {
+            out.push_str("# note: a relocatable object (ET_REL): its sections have no load addresses, so none is mapped and there is no code to analyze until it is linked; strings, entropy and symbols still read it\n");
+        }
         if self.headers.dropped_sections > 0 {
             out.push_str(&format!(
                 "# warning: {} section(s) dropped: the table states offsets or sizes the file cannot hold (past its end, or over 1 GiB)\n",
@@ -2394,6 +2605,39 @@ mod tests {
             said.contains("truncated or damaged"),
             "the error does not say what happened: {said}"
         );
+        assert!(
+            !said.contains("  "),
+            "the message reads as one line: {said}"
+        );
+    }
+
+    /// A file too short or too damaged to parse says what it is.
+    ///
+    /// An empty file is refused in those words, a few bytes of no known
+    /// format load as raw bytes as a longer one does, and a file whose magic
+    /// names a format but whose headers do not parse is called truncated or
+    /// damaged, not an unrecognized format.
+    ///
+    /// # Panics
+    ///
+    /// When a file loads or is refused otherwise.
+    #[test]
+    fn a_short_file_says_what_it_is() {
+        let load = |b: &[u8]| Program::from_bytes(std::path::PathBuf::from("short"), b.to_vec());
+        let empty = load(b"").expect_err("an empty file is no program");
+        assert!(empty.to_string().contains("the file is empty"), "{empty}");
+        let one = load(b"x").expect("one byte of nothing known loads raw");
+        assert_eq!(one.format, super::BinaryFormat::Raw);
+        for (bytes, kind) in [(&b"MZ"[..], "a PE"), (b"ELF", "an ELF image")] {
+            let said = load(bytes).expect_err("a header too short").to_string();
+            assert!(
+                said.starts_with(&format!(
+                    "the file starts like {kind} but its headers do not parse"
+                )),
+                "{said}"
+            );
+            assert!(said.contains("truncated or damaged"), "{said}");
+        }
     }
 
     /// A parse that does not fault is returned untouched.

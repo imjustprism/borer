@@ -140,6 +140,10 @@ pub struct Headers {
     /// past the end of the file: the file is truncated, and each such
     /// section keeps only the bytes the file holds.
     pub truncated: Option<u64>,
+    /// What the loader read past to load the file at all: a header the
+    /// strict parse refused, a field the operating system's loader ignores,
+    /// each said in a line the summary shows as a warning.
+    pub lenient: Vec<String>,
 }
 
 /// Names a section from the shape of its bytes.

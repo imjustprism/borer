@@ -773,3 +773,82 @@ fn a_section_the_file_ends_inside_keeps_only_what_the_file_holds() {
     let a = Analysis::compute(&p);
     assert!(a.function(MAIN).is_some(), "main is still found");
 }
+
+/// A section name that is not UTF-8 no longer refuses the file.
+///
+/// The strict parse fails, the lenient one reads the rest, and the summary says
+/// what was skipped. One bad byte in a name the system loader never reads made
+/// borer refuse the whole program.
+#[test]
+fn a_name_that_is_not_utf8_loads_leniently() {
+    let mut bytes = elf_bytes(false);
+    let at = bytes
+        .windows(8)
+        .position(|w| w == b".rodata\0")
+        .expect("the name is in .shstrtab");
+    bytes[at + 1] = 0xff;
+    let p = Program::from_bytes(std::path::PathBuf::from("utf8.elf"), bytes)
+        .expect("the file loads leniently");
+    let summary = p.summary();
+    assert!(
+        summary.contains("# warning: the headers do not all parse ("),
+        "{summary}"
+    );
+    let a = Analysis::compute(&p);
+    assert!(a.function(MAIN).is_some(), "main is still found");
+}
+
+/// A section header table past the end of the file leaves the segments.
+///
+/// The file still runs, so its `PT_LOAD` segments are mapped in the table's
+/// place and the code is analyzed.
+#[test]
+fn a_section_table_past_the_end_maps_the_segments() {
+    let mut bytes = elf_bytes(false);
+    bytes[0x28..0x30].copy_from_slice(&0x7fff_ffffu64.to_le_bytes());
+    let p = Program::from_bytes(std::path::PathBuf::from("shoff.elf"), bytes)
+        .expect("the file loads leniently");
+    let names: Vec<&str> = p.sections.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["LOAD0"], "{:?}", p.sections);
+    let summary = p.summary();
+    assert!(
+        summary.contains(
+            "# warning: no section table to read; the PT_LOAD segments are mapped in its place"
+        ),
+        "{summary}"
+    );
+    let a = Analysis::compute(&p);
+    assert!(a.function(MAIN).is_some(), "main is still found");
+}
+
+/// An entry point of zero is no entry point, as a PE's is.
+///
+/// The summary said `entry: 0x0`, an address with nothing at it.
+#[test]
+fn an_entry_of_zero_is_no_entry() {
+    let mut bytes = elf_bytes(false);
+    bytes[0x18..0x20].fill(0);
+    let p = Program::from_bytes(std::path::PathBuf::from("noentry.elf"), bytes).expect("loads");
+    assert_eq!(p.entry, None);
+    assert!(p.summary().contains("entry: -"), "{}", p.summary());
+}
+
+/// A relocatable object maps no section, and the summary says why.
+///
+/// It listed an empty table and said nothing more.
+#[test]
+fn a_relocatable_object_says_why_nothing_is_mapped() {
+    let mut bytes = elf_bytes(false);
+    bytes[0x10] = 1;
+    for index in 1..16 {
+        let addr = SHOFF + index * 64 + 16;
+        bytes[addr..addr + 8].fill(0);
+    }
+    let p = Program::from_bytes(std::path::PathBuf::from("object.o"), bytes).expect("loads");
+    assert!(p.sections.is_empty(), "{:?}", p.sections);
+    let summary = p.summary();
+    assert!(
+        summary.contains("# note: a relocatable object (ET_REL)"),
+        "{summary}"
+    );
+}

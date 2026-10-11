@@ -360,3 +360,46 @@ fn a_section_count_past_the_command_reads_no_phantoms() {
     assert_eq!(names, ["__TEXT,__text", "__DATA_CONST,__got"]);
     assert_eq!(p.headers.dropped_sections, 0);
 }
+
+/// A symbol table offset past the end of the file loads the rest of the image
+/// leniently.
+///
+/// The summary says so; the strict parse refused the whole file.
+#[test]
+fn a_symbol_table_past_the_end_loads_leniently() {
+    let mut bytes = thin();
+    let at = bytes
+        .windows(8)
+        .position(|w| w == [0x02, 0, 0, 0, 24, 0, 0, 0])
+        .expect("the image has an LC_SYMTAB");
+    bytes[at + 8..at + 12].copy_from_slice(&0x1000_0000u32.to_le_bytes());
+    let p = load(&bytes, "symoff");
+    let names: Vec<&str> = p.sections.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["__TEXT,__text", "__DATA_CONST,__got"]);
+    let summary = p.summary();
+    assert!(
+        summary.contains("# warning: the headers do not all parse ("),
+        "{summary}"
+    );
+}
+
+/// A fat file whose slice runs past the end of the file is refused in words
+/// that say so.
+///
+/// It loaded as an image of no architecture, with nothing to say why.
+#[test]
+fn a_fat_slice_past_the_end_says_so() {
+    let mut bytes = fat();
+    bytes[20..24].copy_from_slice(&0x0010_0000u32.to_be_bytes());
+    let path = std::env::temp_dir().join(format!("borer-macho-cut-{}", std::process::id()));
+    std::fs::write(&path, &bytes).expect("temp file");
+    let refused = Program::load(&path).expect_err("a cut slice is refused");
+    drop(std::fs::remove_file(&path));
+    let said = format!("{refused:#}");
+    assert!(
+        said.contains(
+            "the fat file's x86-64 slice at 0x1000 runs to 0x101000, past the end of the file"
+        ),
+        "{said}"
+    );
+}

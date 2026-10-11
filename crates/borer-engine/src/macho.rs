@@ -79,6 +79,9 @@ pub(crate) struct Loaded {
     pub headers: Headers,
     /// What fitting the sections to the file dropped or cut short.
     pub fit: Fit,
+    /// What the strict parse of a fat file's slice said when only the
+    /// lossy parse read it.
+    pub lenient: Option<String>,
 }
 
 /// A section's raw header, read from its segment command.
@@ -109,10 +112,17 @@ struct RawSection {
 ///
 /// # Returns
 ///
-/// The image, or `None` when neither the file nor any slice reads.
-pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> Option<Loaded> {
+/// The image.
+///
+/// # Errors
+///
+/// When a fat file's architecture table names no slice, the chosen slice
+/// runs past the end of the file, or it does not parse even lossily, each
+/// said in words: a slice past the end loaded as an image of no
+/// architecture, with nothing to say why.
+pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
     match mach {
-        Mach::Binary(m) => image(file, m, 0),
+        Mach::Binary(m) => Ok(image(file, m, 0)),
         Mach::Fat(multi) => {
             let arches: Vec<goblin::mach::fat::FatArch> =
                 multi.iter_arches().filter_map(Result::ok).collect();
@@ -122,12 +132,48 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> Option<Loaded> {
                 .or_else(|| arches.iter().position(|a| a.cputype == CPU_ARM64))
                 .or_else(|| arches.iter().position(|a| a.cputype == CPU_X86))
                 .unwrap_or(0);
-            let arch = arches.get(pick)?;
-            let start = usize::try_from(arch.offset).ok()?;
-            let end = start.checked_add(usize::try_from(arch.size).ok()?)?;
-            let slice = file.get(start..end)?;
-            let m = MachO::parse(slice, 0).ok()?;
-            image(file, &m, start)
+            let arch = arches.get(pick).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "a fat Mach-O file whose architecture table names no slice it can read: it is truncated or damaged"
+                )
+            })?;
+            let name = match arch.cputype {
+                CPU_X86_64 => "x86-64",
+                CPU_ARM64 => "arm64",
+                CPU_X86 => "x86",
+                _ => "first",
+            };
+            let start = u64::from(arch.offset);
+            let end = start.saturating_add(u64::from(arch.size));
+            let slice = usize::try_from(start)
+                .ok()
+                .zip(usize::try_from(end).ok())
+                .and_then(|(s, e)| file.get(s..e))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "the fat file's {name} slice at {start:#x} runs to {end:#x}, past the end of the file at {:#x}: it is truncated",
+                        file.len()
+                    )
+                })?;
+            let (m, lenient) = match MachO::parse(slice, 0) {
+                Ok(m) => (m, None),
+                Err(strict) => {
+                    let m = MachO::parse_lossy(slice, 0).map_err(|lossy| {
+                        anyhow::anyhow!(
+                            "the fat file's {name} slice at {start:#x} does not parse ({strict}; lossy: {lossy})"
+                        )
+                    })?;
+                    (
+                        m,
+                        Some(format!(
+                            "the {name} slice's headers do not all parse ({strict}); read leniently, what does not parse is skipped"
+                        )),
+                    )
+                }
+            };
+            let mut loaded = image(file, &m, crate::num::saturating_usize(start));
+            loaded.lenient = lenient;
+            Ok(loaded)
         }
     }
 }
@@ -341,7 +387,7 @@ fn plain(name: &str) -> &str {
 /// * `file` - The whole file.
 /// * `m` - The image.
 /// * `base` - Where the image begins in the file: zero for a thin file.
-fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Option<Loaded> {
+fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
     let arch = match m.header.cputype {
         CPU_X86_64 => Arch::X86_64,
         CPU_X86 => Arch::X86,
@@ -556,7 +602,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Option<Loaded> {
             _ => {}
         }
     }
-    Some(Loaded {
+    Loaded {
         arch,
         is_64,
         entry,
@@ -566,5 +612,6 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Option<Loaded> {
         function_ranges,
         headers,
         fit,
-    })
+        lenient: None,
+    }
 }
