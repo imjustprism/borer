@@ -287,6 +287,8 @@ pub(crate) struct FindFunctionByStringParams {
     /// Case-insensitive substring of the referenced string.
     #[serde(alias = "query")]
     pub(crate) filter: String,
+    /// Function rows to skip first (paging).
+    pub(crate) offset: Option<u32>,
     /// Most function rows, and most legend strings (default 50, max 300).
     pub(crate) limit: Option<u32>,
 }

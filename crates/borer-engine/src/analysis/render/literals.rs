@@ -22,11 +22,13 @@ const STRINGS_PER_FUNCTION: usize = 20;
 /// thunks that all name the same string, so listing every one is a wall a
 /// reader cannot use: the functions whose code and matched strings are the
 /// same are one row, the lowest entry standing for them, with how many more
-/// there are. An answer lists at most `limit` functions and numbers at most
-/// `limit` strings, the rows cut where the legend would overflow, so a
-/// broad filter on a program whose every function matches is one page
-/// either way; the first row is listed even when its strings alone exceed
-/// the cap.
+/// there are. An answer lists at most `limit` rows from `offset` and
+/// numbers at most `limit` strings, the rows cut where the legend would
+/// overflow: a first row with more strings than the legend holds shows the
+/// first that many and counts the rest.
+///
+/// The filter matches a string's text, not the quoted form it is printed
+/// in: `L"` matched every wide string and `"` every string.
 ///
 /// A protected binary does not store the strings that matter, it computes
 /// them, so when nothing in the table matches the generators are asked
@@ -40,30 +42,33 @@ const STRINGS_PER_FUNCTION: usize = 20;
 /// * `a` - Cross-references, functions and their shapes.
 /// * `o` - User names.
 /// * `filter` - Case-insensitive substring of the string.
-/// * `limit` - Most function rows listed, and most strings numbered.
+/// * `offset` - Rows to skip first (paging).
+/// * `limit` - Most rows listed, and most strings numbered.
 ///
 /// # Returns
 ///
-/// A `# P function/string pairs match 'f' across S strings in F functions`
-/// header, the `# strings: 1="..." 2="..."` legend of the page, a column
-/// header, then one `entry name: 1 2 5` row per function in entry order
-/// with its strings' numbers in address order, and a `# N more functions
-/// not listed` line when the rows were cut.
+/// A `# showing N of R rows: P function/string pairs match 'f' across S
+/// strings in F functions` header, the `# strings: 1="..." 2="..."` legend
+/// of the page, a column header, then one `entry name: 1 2 5` row per
+/// function in entry order with its strings' numbers in address order, and
+/// a `# N more rows; offset=K for the next page` line when rows remain.
 pub fn functions_by_string_tsv(
     p: &Program,
     a: &Analysis,
     o: &Overlay,
     filter: &str,
+    offset: usize,
     limit: usize,
 ) -> String {
     let q = filter.to_lowercase();
+    let shown_filter = crate::text::quoted(filter);
     let mut texts: BTreeMap<u64, String> = BTreeMap::new();
     let mut by_function: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
     for (target, sites) in &a.xrefs {
         let Some((start, lit)) = referenced_literal(p, a, *target, STRING_MATCH_CAP) else {
             continue;
         };
-        if !lit.to_lowercase().contains(&q) {
+        if !unquoted(&lit).to_lowercase().contains(&q) {
             continue;
         }
         for e in sites.iter().filter_map(|s| s.from_entry) {
@@ -75,12 +80,14 @@ pub fn functions_by_string_tsv(
     if pairs == 0 && !q.is_empty() {
         let found = recovered_matching(p, a, filter).found;
         if !found.is_empty() {
+            let shown = found.len().saturating_sub(offset).min(limit);
             let mut out = format!(
-                "# no function references '{filter}' directly; {} generate it at run time\n",
+                "# showing {shown} of {}: no function references {shown_filter} directly; {} generate it at run time\n",
+                found.len(),
                 found.len()
             );
             out.push_str("# built_by                     written_at      text\n");
-            for g in found.iter().take(limit) {
+            for g in found.iter().skip(offset).take(limit) {
                 let _ = writeln!(
                     out,
                     "{:<28} {:<#15x} {:?}",
@@ -89,7 +96,7 @@ pub fn functions_by_string_tsv(
                     g.text
                 );
             }
-            more_line(&mut out, found.len(), limit, "not listed");
+            next_page_line(&mut out, found.len(), offset, shown, "texts");
             return out;
         }
     }
@@ -110,7 +117,7 @@ pub fn functions_by_string_tsv(
     let mut legend: Vec<u64> = Vec::new();
     let mut body = String::new();
     let mut listed = 0usize;
-    for &(e, more, strings) in rows.iter().take(limit) {
+    for &(e, more, strings) in rows.iter().skip(offset).take(limit) {
         let fresh = strings
             .iter()
             .take(STRINGS_PER_FUNCTION)
@@ -121,19 +128,25 @@ pub fn functions_by_string_tsv(
         }
         listed += 1;
         let _ = write!(body, "{e:#x} {}:", name_of(a, o, e));
+        let mut unnumbered = 0usize;
         for start in strings.iter().take(STRINGS_PER_FUNCTION) {
-            let number = *numbers.entry(*start).or_insert_with(|| {
-                legend.push(*start);
-                legend.len()
-            });
+            let number = match numbers.get(start) {
+                Some(&n) => n,
+                None if legend.len() < limit => {
+                    legend.push(*start);
+                    numbers.insert(*start, legend.len());
+                    legend.len()
+                }
+                None => {
+                    unnumbered += 1;
+                    continue;
+                }
+            };
             let _ = write!(body, " {number}");
         }
-        if strings.len() > STRINGS_PER_FUNCTION {
-            let _ = write!(
-                body,
-                " (+{} more strings)",
-                strings.len() - STRINGS_PER_FUNCTION
-            );
+        let rest = unnumbered + strings.len().saturating_sub(STRINGS_PER_FUNCTION);
+        if rest > 0 {
+            let _ = write!(body, " (+{rest} more strings)");
         }
         if more > 0 {
             let _ = write!(
@@ -145,7 +158,9 @@ pub fn functions_by_string_tsv(
         body.push('\n');
     }
     let mut out = format!(
-        "# {pairs} function/string pairs match '{filter}' across {} string{} in {} function{}\n# strings:",
+        "# showing {listed} of {} row{}: {pairs} function/string pairs match {shown_filter} across {} string{} in {} function{}\n# strings:",
+        rows.len(),
+        plural(rows.len()),
         texts.len(),
         plural(texts.len()),
         by_function.len(),
@@ -161,8 +176,42 @@ pub fn functions_by_string_tsv(
     }
     out.push_str("\n# entry name: string numbers\n");
     out.push_str(&body);
-    more_line(&mut out, rows.len(), listed, "functions not listed");
+    next_page_line(&mut out, rows.len(), offset, listed, "rows");
     out
+}
+
+/// The text of a quoted literal, without the quotes and the `L` of a wide
+/// one, which a filter matches.
+///
+/// # Arguments
+///
+/// * `lit` - A literal as `string_literal` quotes it: `"..."` or `L"..."`.
+fn unquoted(lit: &str) -> &str {
+    lit.strip_prefix("L\"")
+        .or_else(|| lit.strip_prefix('"'))
+        .and_then(|body| body.strip_suffix('"'))
+        .unwrap_or(lit)
+}
+
+/// Writes `# N more <what>; offset=K for the next page` when a page did not
+/// reach the end.
+///
+/// # Arguments
+///
+/// * `out` - The answer.
+/// * `total` - How many there are.
+/// * `offset` - Where the page started.
+/// * `shown` - How many the page listed.
+/// * `what` - The noun, plural.
+fn next_page_line(out: &mut String, total: usize, offset: usize, shown: usize, what: &str) {
+    let next = offset.saturating_add(shown);
+    if next < total {
+        let _ = writeln!(
+            out,
+            "# {} more {what}; offset={next} for the next page",
+            total - next
+        );
+    }
 }
 
 /// Returns the import an instruction's memory operand names, if it names one.

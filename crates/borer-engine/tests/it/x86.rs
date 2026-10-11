@@ -607,6 +607,73 @@ fn an_operand_naming_the_headers_is_a_reference() {
     );
 }
 
+/// Builds an image whose 0x401000 references `"alpha one"` and `"beta two"`
+/// and calls 0x401020, which references the middle of `L"widestring"`.
+fn strings_image() -> Program {
+    let mut code = vec![0u8; 0x26];
+    code[..0x10].copy_from_slice(&[
+        0xb8, 0x00, 0x20, 0x40, 0x00, 0xb9, 0x10, 0x20, 0x40, 0x00, 0xe8, 0x11, 0x00, 0x00, 0x00,
+        0xc3,
+    ]);
+    code[0x20..0x26].copy_from_slice(&[0xba, 0x24, 0x20, 0x40, 0x00, 0xc3]);
+    let mut data = vec![0u8; 0x40];
+    data[..9].copy_from_slice(b"alpha one");
+    data[0x10..0x18].copy_from_slice(b"beta two");
+    for (k, b) in b"widestring".iter().enumerate() {
+        data[0x20 + k * 2] = *b;
+    }
+    image_with_data(&code, &data)
+}
+
+/// A reference into the middle of a wide string reads the whole string, as
+/// one into an ASCII string does, and the filter matches a string's text,
+/// not the quotes it is printed in.
+#[test]
+fn a_string_search_reads_wide_strings_whole_and_ignores_quotes() {
+    use borer_engine::analysis::render::functions_by_string_tsv;
+    let p = strings_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let wide = functions_by_string_tsv(&p, &a, &o, "widestring", 0, 50);
+    assert!(wide.contains("L\"widestring\""), "{wide}");
+    assert!(wide.contains("sub_401020: 1"), "{wide}");
+    let quote = functions_by_string_tsv(&p, &a, &o, "\"", 0, 50);
+    assert!(quote.contains(": 0 function/string pairs"), "{quote}");
+    let broken = functions_by_string_tsv(&p, &a, &o, "x\ny", 0, 50);
+    let head = broken.lines().next().unwrap_or_default();
+    assert!(
+        head.contains("match 'x") && head.contains("across"),
+        "the echoed filter broke the header line: {broken}"
+    );
+}
+
+/// A string search pages its rows and numbers at most `limit` strings,
+/// the first row included, counting what it leaves out.
+#[test]
+fn a_string_search_pages_and_keeps_its_legend_within_the_limit() {
+    use borer_engine::analysis::render::functions_by_string_tsv;
+    let p = strings_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let one = functions_by_string_tsv(&p, &a, &o, "a", 0, 1);
+    assert!(
+        one.starts_with("# showing 1 of 1 row: 2 function/string pairs"),
+        "{one}"
+    );
+    assert!(one.contains("# strings: 1=\"alpha one\"\n"), "{one}");
+    assert!(one.contains("sub_401000: 1 (+1 more strings)"), "{one}");
+    let all = functions_by_string_tsv(&p, &a, &o, "", 0, 1);
+    assert!(all.starts_with("# showing 1 of 2 rows"), "{all}");
+    assert!(
+        all.contains("# 1 more rows; offset=1 for the next page"),
+        "{all}"
+    );
+    let second = functions_by_string_tsv(&p, &a, &o, "", 1, 50);
+    assert!(second.starts_with("# showing 1 of 2 rows"), "{second}");
+    assert!(second.contains("sub_401020: 1\n"), "{second}");
+    assert!(!second.contains("sub_401000"), "{second}");
+}
+
 /// A pointer in data to data a linker merged into `.text` is a reference,
 /// as one to data in a data section is: the word at 0x402000 names zero
 /// bytes at 0x401100 that no block covers.

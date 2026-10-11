@@ -1222,7 +1222,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let filter = arg(args, 2, "findstr needs a filter")?;
             print!(
                 "{}",
-                render::functions_by_string_tsv(&s.program, &a, &s.overlay, filter, 50)
+                render::functions_by_string_tsv(&s.program, &a, &s.overlay, filter, 0, 50)
             );
         }
         Query::Disasm => {

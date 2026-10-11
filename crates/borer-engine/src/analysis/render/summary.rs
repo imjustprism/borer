@@ -57,7 +57,9 @@ pub(super) fn referenced_literal(
 ///
 /// Walking back only relocates a reference that already resolves to a
 /// string; starting the walk from bytes that are not one would invent
-/// literals out of binary data that happens to end in printable bytes.
+/// literals out of binary data that happens to end in printable bytes. A
+/// wide string walks back a code unit at a time, as an ASCII one walks
+/// back a byte: a reference into the middle of `L"..."` reported its tail.
 ///
 /// # Arguments
 ///
@@ -83,7 +85,19 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
             return Some((start, format!("\"{t}\"")));
         }
     }
-    wstr_at(p, va, 4, cap).map(|(_, t)| (va, format!("L\"{t}\"")))
+    wstr_at(p, va, 4, cap)?;
+    let floor = va.saturating_sub(WINDOW).max(sec.va);
+    let mut start = va;
+    while start >= floor.saturating_add(2)
+        && p.read_va_upto(start - 2, 2)
+            .is_some_and(|u| matches!(u, [lo, 0] if crate::strings::printable(*lo)))
+    {
+        start -= 2;
+    }
+    if start < va && !crate::strings::wide_run_start(p, start) {
+        start += 2;
+    }
+    wstr_at(p, start, 4, cap).map(|(_, t)| (start, format!("L\"{t}\"")))
 }
 
 /// Whether a function's code is scattered far across its address span.

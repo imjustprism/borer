@@ -648,7 +648,7 @@ fn a_string_search_sees_past_a_long_path_prefix() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let hit = functions_by_string_tsv(&p, &a, &o, "needle.h", 5);
+    let hit = functions_by_string_tsv(&p, &a, &o, "needle.h", 0, 5);
     assert!(hit.contains("1 function/string pairs"), "{hit}");
     assert!(hit.contains("sub_5080"), "{hit}");
     assert!(hit.contains("probe/needle.h"), "{hit}");
@@ -2657,7 +2657,7 @@ fn refs_from_and_summary() {
         !alone.contains("running the same code"),
         "a lone referrer was collapsed: {refs}"
     );
-    let by_string = functions_by_string_tsv(&p, &a, &o, "BORER", 10);
+    let by_string = functions_by_string_tsv(&p, &a, &o, "BORER", 0, 10);
     assert!(by_string.contains("exported_s"), "{by_string}");
     assert!(
         by_string.contains("across 1 string in 4 functions\n"),

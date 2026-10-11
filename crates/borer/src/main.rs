@@ -1080,7 +1080,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Functions referencing a string containing `filter`: a numbered `# strings:` legend, then one `entry name: 1 2 5` row per function (limit default 50, max 300, caps both rows and legend).",
+        description = "Functions referencing a string whose text contains `filter`: a `# showing N of M rows` header, a numbered `# strings:` legend, then one `entry name: 1 2 5` row per function; offset pages the rows (limit default 50, max 300, caps both rows and legend).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1090,13 +1090,20 @@ impl BorerServer {
     )]
     fn find_function_by_string(
         &self,
-        Parameters(FindFunctionByStringParams { filter, limit }): Parameters<
-            FindFunctionByStringParams,
-        >,
+        Parameters(FindFunctionByStringParams {
+            filter,
+            offset,
+            limit,
+        }): Parameters<FindFunctionByStringParams>,
     ) -> Result<String, ErrorData> {
+        let offset = to_usize(offset.unwrap_or(0));
         let limit = count_param(limit, 50, 300, "limit")?;
-        self.with_analysis(|p, a, o| Ok(render::functions_by_string_tsv(p, a, o, &filter, limit.n)))
-            .map(|text| limit.noted(text))
+        self.with_analysis(|p, a, o| {
+            Ok(render::functions_by_string_tsv(
+                p, a, o, &filter, offset, limit.n,
+            ))
+        })
+        .map(|text| limit.noted(text))
     }
 
     /// Runs `f` with the attached process.
@@ -5637,6 +5644,7 @@ mod tests {
             })),
             server.find_function_by_string(Parameters(FindFunctionByStringParams {
                 filter: "x".to_owned(),
+                offset: None,
                 limit: Some(0),
             })),
             server.live_instances(Parameters(LiveInstancesParams {

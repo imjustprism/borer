@@ -750,7 +750,7 @@ if (a1 != 0) {
         let p = rodata(b"stored text here\0");
         let a = crate::analysis::Analysis::compute(&p);
         let o = crate::analysis::Overlay::default();
-        let out = super::functions_by_string_tsv(&p, &a, &o, "absent", 10);
+        let out = super::functions_by_string_tsv(&p, &a, &o, "absent", 0, 10);
         assert!(out.contains("0 function/string pairs"), "{out}");
     }
 
@@ -1130,7 +1130,7 @@ if (a1 != 0) {
         let o = crate::analysis::Overlay::default();
         let all = super::hidden_strings_tsv(&p, &a, &o, "");
         let some = super::hidden_strings_tsv(&p, &a, &o, "text");
-        let _ = super::functions_by_string_tsv(&p, &a, &o, "absent", 10);
+        let _ = super::functions_by_string_tsv(&p, &a, &o, "absent", 0, 10);
         assert_eq!(a.derived.held("generated_strings"), 1);
         let direct = super::generated_strings(&p, &a, "text");
         let (found, _, runs, generators) = super::hidden_strings(&p, &a, "text");
