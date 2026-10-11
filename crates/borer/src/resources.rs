@@ -688,20 +688,23 @@ impl BorerServer {
     /// the CLI's `script`: what it printed and the names and comments it
     /// proposes, which are not applied.
     ///
+    /// A script that fails answers as the `script` tool answers one: what it
+    /// printed and proposed before the error, then a `# script failed:`
+    /// line, since the lines before the error say how far it got.
+    ///
     /// # Arguments
     ///
     /// * `path` - The script file.
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, the path is a device or does not read, or
-    /// the script fails.
+    /// When no binary is loaded, or the path is a device or does not read.
     pub(crate) fn script_text(&self, path: &str) -> Result<String, ErrorData> {
         let code = read_spec_file(path, "a Rhai script")?;
         let program = self.require_loaded()?;
         let a = self.ensure_analysis().map_err(err_params)?;
-        let run = borer_engine::script::run(program, a, Arc::new(self.overlay()), &code, &[])
-            .map_err(err_params)?;
+        let run =
+            borer_engine::script::run_with(program, a, Arc::new(self.overlay()), &code, &[], None);
         Ok(borer_engine::script::run_tsv(&run))
     }
 

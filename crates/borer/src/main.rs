@@ -5681,6 +5681,25 @@ mod tests {
         }
     }
 
+    /// A failing script file answers as the `script` tool answers one:
+    /// what it printed before the error, then the error; the resource
+    /// answered the error alone and the printed lines were lost.
+    ///
+    /// # Panics
+    ///
+    /// When the failure loses its output or its error.
+    #[test]
+    fn a_failing_script_resource_keeps_what_it_printed() {
+        let path = std::env::temp_dir().join(format!("borer-fail-{}.rhai", std::process::id()));
+        std::fs::write(&path, "print(\"before the error\");\nlet x = 1 / 0;\n")
+            .expect("the script is written");
+        let answer = tiny_server().script_text(&path.to_string_lossy());
+        std::fs::remove_file(&path).expect("the script is removed");
+        let text = answer.expect("a failed script still answers");
+        assert!(text.starts_with("before the error\n"), "{text}");
+        assert!(text.contains("\n# script failed: "), "{text}");
+    }
+
     /// `borer://anchors` refuses a manifest past its size or anchor cap by
     /// name and lists at most a page of rows, saying so; a 200 MB manifest
     /// ran for minutes and every row came back.
