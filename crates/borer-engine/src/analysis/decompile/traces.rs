@@ -847,6 +847,9 @@ pub(super) fn blank(line: &str) -> String {
 /// once the parenthesis closing its arguments is reached, so an argument's
 /// call runs first.
 ///
+/// A name spelled through its import slot (`__imp_Beep`, as the text calls
+/// an import from a wrapper named like it) is a call to that import.
+///
 /// # Arguments
 ///
 /// * `t` - The stretch, blanked.
@@ -866,6 +869,7 @@ fn calls_in(t: &str, names: &Names) -> Vec<u32> {
             .filter_map(|&k| Some((k, names.names.get(k as usize)?)))
             .filter(|(_, n)| {
                 before.strip_suffix(n.as_str()).is_some_and(|head| {
+                    let head = head.strip_suffix("__imp_").unwrap_or(head);
                     head.chars()
                         .next_back()
                         .is_none_or(|c| !(c.is_alphanumeric() || "_:~>.$@?".contains(c)))
@@ -1594,4 +1598,25 @@ pub fn check_all(
     .into_iter()
     .map(Option::flatten)
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A call written through its import slot is the call to that import,
+    /// and a longer name ending in the callee's is not.
+    ///
+    /// # Panics
+    ///
+    /// When the calls read differ.
+    #[test]
+    fn a_call_through_its_import_slot_is_the_import() {
+        let mut names = Names::default();
+        let k = names.intern("_set_app_type");
+        assert_eq!(calls_in("return __imp__set_app_type(a1);", &names), vec![k]);
+        assert_eq!(calls_in("return _set_app_type(a1);", &names), vec![k]);
+        assert!(calls_in("return my_set_app_type(a1);", &names).is_empty());
+        assert!(calls_in("return x__imp__set_app_type(a1);", &names).is_empty());
+    }
 }
