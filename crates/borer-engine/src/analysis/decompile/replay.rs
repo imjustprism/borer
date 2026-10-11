@@ -31,8 +31,10 @@
 //! or converted from an integer, memory a store at an unknown address may
 //! have changed, an access past the top of the address space) is counted,
 //! not compared; blocks outside the checked subset (an x87 one, a form
-//! the emulator or the lifter leaves alone), and blocks with a statement
-//! no effect models or a call the text leaves out, are not checked. What
+//! the emulator or the lifter leaves alone), blocks with a statement no
+//! effect models or a call the text leaves out, and blocks whose flags
+//! reach a condition the text writes over unknown flags (their compare has
+//! no statement), are not checked. What
 //! the text leaves out on
 //! purpose makes no claim: a register's save, a push that only makes room,
 //! the try level of a registered exception handler, a store pending at a
@@ -74,8 +76,14 @@ const TRIALS: u64 = 3;
 const RULED_OUT_RETRIES: u64 = 9;
 /// Why a state is not tried: the branch into the block rules it out.
 const RULED_OUT: &str = "a state the branch into the block rules out";
+/// Why a block is not checked: a float or vector instruction outside the
+/// checked subset ([`outside_subset`]).
+const OUTSIDE_FLOAT: &str = "an instruction outside the checked subset";
 /// Blocks that only jump on followed back to the branch a block runs under.
 const GUARD_JUMPS: usize = 4;
+/// Blocks followed forward from one that sets flags to the block reading
+/// them ([`Function::flags_lost`]).
+const FLAG_HOPS: usize = 4;
 /// Fewest functions worth a thread of their own.
 const PAR_MIN: usize = 16;
 /// Why a block is not tried in an answer's check: the blocks before it
@@ -516,11 +524,13 @@ impl TextCheck {
 fn unchecked_label(reason: &str) -> &'static str {
     match reason {
         "not in the text" => "not in text",
-        "an instruction outside the checked subset" => "float/vector",
+        OUTSIDE_FLOAT => "float/vector",
+        "a read or write through the thread block" => "fs/gs access",
         OVER_BUDGET => "over budget",
         "a call the text leaves out or reads in place" => "call left out",
         "a statement no effect models"
         | "an instruction the emulator does not model"
+        | "an instruction outside every checked form"
         | "a trap or a branch with no model" => "unmodeled",
         "flags set in another block" => "flags across blocks",
         "the stack pointer unknown at its start" | "a frame alignment" => "stack unknown",
@@ -1216,6 +1226,42 @@ fn integer_or_zero_fill(code: &[Instruction], info: &mut InstructionInfoFactory)
             _ => packed_integer(i, info),
         }
     })
+}
+
+/// Why a block outside the checked subset ([`integer_or_zero_fill`]) is not
+/// checked, by its first instruction outside it.
+///
+/// A memory access through `fs` or `gs` reads the thread block (the
+/// exception chain, the stack bounds, thread-local storage), which is no
+/// float; an instruction naming a floating-point or vector register, or an
+/// x87 one, is the float/vector form the replay leaves alone; anything
+/// else is an instruction no model covers.
+///
+/// # Arguments
+///
+/// * `code` - The block's instructions.
+/// * `info` - Register-access facts.
+fn outside_subset(code: &[Instruction], info: &mut InstructionInfoFactory) -> &'static str {
+    let Some(i) = code
+        .iter()
+        .find(|i| !(integer(i, info) || scalar_float(i, info) || packed_integer(i, info)))
+    else {
+        return OUTSIDE_FLOAT;
+    };
+    let memory = (0..i.op_count()).any(|n| i.op_kind(n) == OpKind::Memory);
+    if memory && matches!(i.memory_segment(), Register::FS | Register::GS) {
+        return "a read or write through the thread block";
+    }
+    let float = format!("{:?}", i.mnemonic()).starts_with('F')
+        || info.info(i).used_registers().iter().any(|u| {
+            let r = u.register();
+            r.is_vector_register() || r.is_st() || r.is_mm() || r.is_k()
+        });
+    if float {
+        OUTSIDE_FLOAT
+    } else {
+        "an instruction outside every checked form"
+    }
 }
 
 /// Tells whether a block reads whole vector lanes: any of its instructions
@@ -2451,7 +2497,7 @@ impl Function<'_, '_> {
         if !w.processed.get(b).copied().unwrap_or(false) {
             return Err("not run by the dataflow");
         }
-        if w.flag_readers.get(b).copied().unwrap_or(true) {
+        if w.flag_readers.get(b).copied().unwrap_or(true) || self.flags_lost(b) {
             return Err("flags set in another block");
         }
         let inn = w.ins.get(b).ok_or("no witness")?;
@@ -2467,7 +2513,7 @@ impl Function<'_, '_> {
         }
         let mut info = InstructionInfoFactory::new();
         if !integer_or_zero_fill(code, &mut info) {
-            return Err("an instruction outside the checked subset");
+            return Err(outside_subset(code, &mut info));
         }
         if code.iter().any(aligns_stack) {
             return Err("a frame alignment");
@@ -2499,6 +2545,45 @@ impl Function<'_, '_> {
         }
         out.trials += compared;
         if compared == 0 { Err(why) } else { Ok(()) }
+    }
+
+    /// Tells whether the flags a block leaves reach a reader whose condition
+    /// the text writes over unknown flags.
+    ///
+    /// Past blocks that leave the flags alone, a successor that reads them
+    /// with none known on entry renders `FLAGS_UNKNOWN`, so the compare that
+    /// set them has no statement anywhere in the text, and agreeing on the
+    /// rest of the block says nothing about it.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The block's index.
+    fn flags_lost(&self, b: usize) -> bool {
+        let w = self.w;
+        let sets = |c: usize| {
+            w.code
+                .get(c)
+                .is_some_and(|code| code.iter().any(|i| i.rflags_modified() != 0))
+        };
+        if !sets(b) {
+            return false;
+        }
+        let mut next = self.succs.get(b).cloned().unwrap_or_default();
+        let mut seen = BTreeSet::new();
+        while let Some(s) = next.pop() {
+            if !seen.insert(s) {
+                continue;
+            }
+            if w.flag_readers.get(s).copied().unwrap_or(false)
+                && w.ins.get(s).is_some_and(|env| env.flags == Flags::Unknown)
+            {
+                return true;
+            }
+            if !sets(s) && seen.len() <= FLAG_HOPS {
+                next.extend(self.succs.get(s).into_iter().flatten());
+            }
+        }
+        false
     }
 
     /// The condition a block is entered under: the text's branch ending its
@@ -4659,6 +4744,56 @@ mod tests {
         let memo = crate::analysis::decompiled_cached(&p, &a, &o, o.fingerprint(), 0x1000);
         let d = memo.as_ref().as_ref().expect("memoized");
         assert!(d.take_witness().is_none(), "the check took the witness");
+    }
+
+    /// A block whose compare reaches a condition the text writes over
+    /// unknown flags is not counted as agreeing: the compare has no
+    /// statement, so nothing of it was checked.
+    ///
+    /// `J2`'s `je` reads the zero flag of `cmp r9d, 9` on one edge and, past
+    /// `J1`'s `jb`, of `cmp edx, 5` or `cmp r8d, 7` on the other.
+    #[test]
+    fn a_compare_whose_flags_the_text_loses_is_unchecked() {
+        use crate::analysis::decompile::{checked_header, decompile_named};
+        let p = Program::raw_x64(&[
+            0x85, 0xc9, // ASM: test ecx, ecx
+            0x78, 0x0f, // ASM: js P3
+            0x74, 0x05, // ASM: je P2
+            0x83, 0xfa, 0x05, // ASM: P1: cmp edx, 5
+            0xeb, 0x04, // ASM: jmp J1
+            0x41, 0x83, 0xf8, 0x07, // ASM: P2: cmp r8d, 7
+            0x72, 0x0b, // ASM: J1: jb OUT1
+            0xeb, 0x04, // ASM: jmp J2
+            0x41, 0x83, 0xf9, 0x09, // ASM: P3: cmp r9d, 9
+            0x74, 0x09, // ASM: J2: je OUT2
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+            0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: OUT1: mov eax, 1
+            0xc3, // ASM: ret
+            0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: OUT2: mov eax, 2
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let text = decompile_named(&p, &a, &o, 0x1000).expect("text");
+        let header = checked_header(&p, &a, &o, 0x1000).expect("checked");
+        assert!(text.contains("FLAGS_UNKNOWN"), "{text}");
+        assert!(header.contains("6 flags across blocks"), "{header}\n{text}");
+    }
+
+    /// A block reading the thread block is counted unchecked as what it is,
+    /// not as a float or vector form.
+    #[test]
+    fn a_thread_block_read_is_no_float() {
+        use crate::analysis::decompile::checked_header;
+        let p = Program::raw_x64(&[
+            0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x30]
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let header = checked_header(&p, &a, &Overlay::default(), 0x1000).expect("checked");
+        assert!(header.contains("1 fs/gs access"), "{header}");
+        assert!(!header.contains("float/vector"), "{header}");
     }
 
     /// A text memoized before any answer's check, without the lifter's
