@@ -704,6 +704,65 @@ fn a_call_path_reaches_an_import_through_its_slot() {
     assert!(out.contains("  2  0x402000  GetTickCount\n"), "{out}");
 }
 
+/// Walking the callers of an import labels the root by the import, drawn
+/// as the stadium an import is, where it read `sub_<slot>`; the count line
+/// is a mermaid comment.
+#[test]
+fn a_callgraph_over_an_import_names_its_root() {
+    use borer_engine::analysis::render::callgraph_mermaid;
+    let p = import_call_image();
+    let a = Analysis::compute(&p);
+    let out = callgraph_mermaid(&p, &a, &Overlay::default(), 0x402000, 30, true);
+    assert!(out.contains("  n0([\"GetTickCount\"])\n"), "{out}");
+    assert!(!out.contains("sub_402000"), "{out}");
+    assert!(out.lines().all(|l| !l.starts_with('#')), "{out}");
+    assert!(
+        out.lines().last().unwrap_or_default().starts_with("%% "),
+        "{out}"
+    );
+}
+
+/// A callgraph cut by its node budget counts every callee it left out,
+/// those the first round refused included: three callees under a budget
+/// of two nodes drew one and said nothing of the other two.
+#[test]
+fn a_callgraph_counts_every_callee_it_leaves_out() {
+    use borer_engine::analysis::render::callgraph_mermaid;
+    let mut code = vec![0xcc; 0x41];
+    code[..0x10].copy_from_slice(&[
+        0xe8, 0x1b, 0x00, 0x00, 0x00, 0xe8, 0x26, 0x00, 0x00, 0x00, 0xe8, 0x31, 0x00, 0x00, 0x00,
+        0xc3,
+    ]);
+    for at in [0x20, 0x30, 0x40] {
+        code[at] = 0xc3;
+    }
+    let p = image(&code);
+    let a = Analysis::compute(&p);
+    assert_eq!(a.function(0x401000).map(|f| f.callees.len()), Some(3));
+    let out = callgraph_mermaid(&p, &a, &Overlay::default(), 0x401000, 2, false);
+    assert!(
+        out.contains("(callees of the root; cap 2, 2 callees not shown)"),
+        "{out}"
+    );
+}
+
+/// A control-flow graph pages its blocks by offset and says which it drew
+/// on a mermaid comment line.
+///
+/// `test ecx,ecx; je +1; nop; ret` is three blocks; from the second, two
+/// are drawn.
+#[test]
+fn a_cfg_pages_its_blocks_on_a_mermaid_comment() {
+    use borer_engine::analysis::render::cfg_mermaid;
+    let p = image(&[0x85, 0xc9, 0x74, 0x01, 0x90, 0xc3]);
+    let a = Analysis::compute(&p);
+    let out = cfg_mermaid(&a, &Overlay::default(), 0x401000, 1).unwrap_or_default();
+    assert!(out.contains("%% showing 2 of 3 blocks from 1\n"), "{out}");
+    assert!(out.contains("[\"0x401004 "), "{out}");
+    assert!(!out.contains("[\"0x401000 "), "{out}");
+    assert!(out.lines().all(|l| !l.starts_with('#')), "{out}");
+}
+
 /// A pointer in data to data a linker merged into `.text` is a reference,
 /// as one to data in a data section is: the word at 0x402000 names zero
 /// bytes at 0x401100 that no block covers.
