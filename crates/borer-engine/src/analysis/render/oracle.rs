@@ -90,8 +90,8 @@ pub(super) struct Candidate {
 /// # Errors
 ///
 /// When the address does not resolve or is in no function, the argument
-/// index does not read or names no parameter, or the architecture is not
-/// emulated.
+/// index does not read or names no parameter, a part follows it (it was
+/// dropped unread), or the architecture is not emulated.
 pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     /// Candidate values tried, so one function cannot run for ever.
     const CANDIDATES_MAX: usize = 48;
@@ -118,6 +118,12 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             .checked_sub(1)
             .ok_or_else(|| String::from("arguments count from one; a1 is the first"))?,
     };
+    if let Some(extra) = rest.next() {
+        return Err(format!(
+            "solve takes <address>[,aN]; {} is one part too many",
+            quoted(extra.trim())
+        ));
+    }
     let f = a
         .function_at(start)
         .ok_or_else(|| format!("no function contains {start:#x}"))?;
@@ -582,6 +588,10 @@ mod tests {
                 "cannot read the argument aaa2; use a1, a2, ... counting from one",
             ),
             ("0x5000", "no function contains 0x5000"),
+            (
+                "0x1000,a1,a2",
+                "solve takes <address>[,aN]; 'a2' is one part too many",
+            ),
         ] {
             assert_eq!(solve_tsv(&p, &a, &o, spec).unwrap_err(), message, "{spec}");
         }

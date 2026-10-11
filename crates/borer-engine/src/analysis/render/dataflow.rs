@@ -37,8 +37,9 @@ impl ValueSpec {
     /// # Errors
     ///
     /// Why the pass is refused: the address does not resolve, the
-    /// architecture is unknown, the register is not one the target has, or
-    /// no function contains the address.
+    /// architecture is unknown, a part follows the register (it was dropped
+    /// unread), the register is not one the target has, or no function
+    /// contains the address.
     pub(super) fn parse(
         a: &Analysis,
         o: &Overlay,
@@ -51,6 +52,12 @@ impl ValueSpec {
         let bitness = bitness.ok_or_else(|| String::from("unknown architecture"))?;
         let names = RegisterNames::for_bitness(bitness);
         let wanted = rest.next().unwrap_or(default(&names)).trim().to_lowercase();
+        if let Some(extra) = rest.next() {
+            return Err(format!(
+                "the spec is <address>[,<register>]; {} is one part too many",
+                crate::text::quoted(extra.trim())
+            ));
+        }
         let seed = iced_register(&wanted, bitness).ok_or_else(|| {
             format!(
                 "{} is not a general register; use {}",
@@ -1389,6 +1396,32 @@ mod tests {
         assert_eq!(
             layout_tsv(&p, &a, &o, "0x5000").unwrap_err(),
             "no function contains 0x5000"
+        );
+    }
+
+    /// A part after the ones a spec takes is refused, where `taint`,
+    /// `layout` and `run` dropped it unread and answered another question.
+    ///
+    /// # Panics
+    ///
+    /// When the extra part is accepted or refused with another reason.
+    #[test]
+    fn a_spec_part_too_many_is_refused() {
+        let p = Program::raw_x64(&[0xc3]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let refusal = "the spec is <address>[,<register>]; 'rdx' is one part too many";
+        assert_eq!(
+            taint_tsv(&p, &a, &o, "0x1000,rcx,rdx").unwrap_err(),
+            refusal
+        );
+        assert_eq!(
+            layout_tsv(&p, &a, &o, "0x1000,rcx,rdx").unwrap_err(),
+            refusal
+        );
+        assert_eq!(
+            crate::analysis::render::run_tsv(&p, &a, &o, "0x1000,steps=5,x/1").unwrap_err(),
+            "run takes <function>[,steps=N]/<input>[;<input>...]; 'x' is one part too many"
         );
     }
 }

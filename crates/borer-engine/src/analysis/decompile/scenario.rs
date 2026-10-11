@@ -273,8 +273,9 @@ pub fn explode_tsv(cases: &[ScenarioCase], slot: u8, tried: usize) -> String {
 ///
 /// # Errors
 ///
-/// When the spec does not read, or asks for more than [`EXPLODE_MAX`]
-/// values.
+/// When the spec does not read, names a second parameter after a comma
+/// (`a2=0..4,a3=1` read as `a2=0..4` with `a3` dropped unread), or asks
+/// for more than [`EXPLODE_MAX`] values.
 pub fn parse_explosion(spec: &str) -> Result<(u8, Vec<u64>), String> {
     let (name, values) = spec.split_once('=').ok_or_else(|| {
         format!(
@@ -282,6 +283,12 @@ pub fn parse_explosion(spec: &str) -> Result<(u8, Vec<u64>), String> {
             crate::text::one_line(spec)
         )
     })?;
+    if values.contains(',') {
+        return Err(format!(
+            "`{}` names more than one parameter; scenarios varies one, a<n>=<from>..<to> or a<n>=<v>|<v>",
+            crate::text::one_line(spec)
+        ));
+    }
     let one = |v: &str| -> Result<u64, String> {
         let pairs = parse_scenario(&format!("{}={}", name.trim(), v.trim()))?;
         pairs
@@ -320,7 +327,9 @@ pub fn parse_explosion(spec: &str) -> Result<(u8, Vec<u64>), String> {
 ///
 /// # Errors
 ///
-/// When a pair does not read, names no parameter, or there is none.
+/// When a pair does not read, names no parameter, or there is none, or
+/// one parameter is fixed twice (`a2=5,a2=6` kept one value and dropped
+/// the other unread).
 pub fn parse_scenario(spec: &str) -> Result<Vec<(u8, u64)>, String> {
     let out: Vec<(u8, u64)> = spec
         .split(',')
@@ -359,5 +368,39 @@ pub fn parse_scenario(spec: &str) -> Result<Vec<(u8, u64)>, String> {
     if out.is_empty() {
         return Err("a scenario fixes at least one parameter, such as a2=5".to_owned());
     }
+    if let Some(&(slot, _)) = out
+        .iter()
+        .enumerate()
+        .find_map(|(i, pair)| out[..i].iter().any(|p| p.0 == pair.0).then_some(pair))
+    {
+        return Err(format!(
+            "a{} is fixed twice; a scenario gives each parameter one value",
+            u16::from(slot) + 1
+        ));
+    }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_explosion, parse_scenario};
+
+    /// A spec part that would be dropped unread is refused: a second
+    /// parameter after an explosion's values, and a parameter fixed twice.
+    ///
+    /// # Panics
+    ///
+    /// When either reads.
+    #[test]
+    fn a_part_that_would_be_dropped_is_refused() {
+        assert_eq!(
+            parse_explosion("a1=0..4,a2=1"),
+            Err("`a1=0..4,a2=1` names more than one parameter; scenarios varies one, a<n>=<from>..<to> or a<n>=<v>|<v>".to_owned())
+        );
+        assert_eq!(
+            parse_scenario("a2=5,a2=6"),
+            Err("a2 is fixed twice; a scenario gives each parameter one value".to_owned())
+        );
+        assert_eq!(parse_scenario("a2=5,a3=6"), Ok(vec![(1, 5), (2, 6)]));
+    }
 }

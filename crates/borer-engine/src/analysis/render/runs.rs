@@ -285,7 +285,8 @@ fn argument(t: &str) -> Result<Arg, String> {
 ///
 /// # Errors
 ///
-/// When the function does not resolve or an input does not read.
+/// When the function does not resolve, a part follows `steps=N` (it was
+/// dropped unread), or an input does not read.
 fn parse_run(a: &Analysis, o: &Overlay, spec: &str) -> Result<RunSpec, String> {
     let (head, inputs) = spec
         .split_once('/')
@@ -306,6 +307,12 @@ fn parse_run(a: &Analysis, o: &Overlay, spec: &str) -> Result<RunSpec, String> {
             return Err(format!("steps is 1 to {BUDGET_MAX}"));
         }
         budget = n;
+    }
+    if let Some(extra) = rest.next() {
+        return Err(format!(
+            "run takes <function>[,steps=N]/<input>[;<input>...]; {} is one part too many",
+            crate::text::quoted(extra.trim())
+        ));
     }
     let mut out = Vec::new();
     for set in split_unquoted(inputs, ';') {
