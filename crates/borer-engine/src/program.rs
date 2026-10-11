@@ -906,10 +906,13 @@ fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
 ///
 /// Windows resolves a handful of names to character devices in every
 /// directory and under any extension, so `con`, `C:/tmp/con` and `con.exe`
-/// are all the console. Reading one is not reading a file: `con` blocks on
-/// console input, and inside the MCP server - whose stdin carries the
-/// protocol - that took the session's own stream and ended it silently, with
-/// no reply to the call that asked.
+/// are all the console, and `CONIN$`/`CONOUT$` its two halves. Reading one
+/// is not reading a file: `con` blocks on console input, and inside the MCP
+/// server - whose stdin carries the protocol - that took the session's own
+/// stream and ended it silently, with no reply to the call that asked. A
+/// path in the device namespace (`\\.\pipe\x`, `\\.\PhysicalDrive0`, the
+/// same with `/`) is refused whole unless it spells a drive path, and so is
+/// an unparsed `\\?\` path that is neither a drive nor a `UNC` path.
 ///
 /// # Arguments
 ///
@@ -928,9 +931,28 @@ pub fn unusable_path(path: &Path) -> Option<String> {
     if !cfg!(windows) {
         return None;
     }
+    let spelled = path.as_os_str().to_string_lossy().replace('/', "\\");
+    // SPEC: `\\.\` opens the device namespace and `\\?\` hands the rest to
+    // the object manager unparsed; either reaches a file only through a
+    // drive (`X:\`) or, for `\\?\`, a `UNC\` share.
+    let drive = |rest: &str| {
+        let b = rest.as_bytes();
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
+    };
+    let device = spelled
+        .strip_prefix("\\\\.\\")
+        .is_some_and(|rest| !drive(rest))
+        || spelled
+            .strip_prefix("\\\\?\\")
+            .is_some_and(|rest| !drive(rest) && !rest.to_ascii_uppercase().starts_with("UNC\\"));
+    if device {
+        return Some(format!("{spelled} names a device, not a file"));
+    }
     // SPEC: the reserved names, matched on the stem so `con.txt` is caught,
     // and case-insensitively because the filesystem is.
-    const DEVICES: [&str; 6] = ["con", "prn", "aux", "nul", "com", "lpt"];
+    const DEVICES: [&str; 9] = [
+        "con", "prn", "aux", "nul", "com", "lpt", "conin$", "conout$", "clock$",
+    ];
     let stem = path.file_stem()?.to_str()?;
     let lower = stem.to_lowercase();
     let named = DEVICES.iter().any(|d| {
@@ -993,8 +1015,8 @@ impl Program {
     /// # Errors
     ///
     /// Returns the I/O error of reading the file, the refusal of a name that
-    /// is a device rather than a file, or the parse error from
-    /// [`Program::from_bytes`].
+    /// is a device, a directory or anything else that is not a regular
+    /// file, or the parse error from [`Program::from_bytes`].
     pub fn load(path: &Path) -> anyhow::Result<Program> {
         Self::load_with(path, true)
     }
@@ -1046,12 +1068,26 @@ impl Program {
         if let Some(why) = unusable_path(path) {
             return Err(anyhow!("{why}; give a path to a program to analyze"));
         }
-        let bytes = std::fs::read(path).with_context(|| {
-            format!(
-                "reading {}",
-                crate::text::short_path(&path.display().to_string())
-            )
-        })?;
+        let shown = crate::text::short_path(&path.display().to_string());
+        if path.is_dir() {
+            return Err(anyhow!(
+                "{shown} is a directory; give the path of a program file inside it"
+            ));
+        }
+        let mut file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
+        // INVARIANT: only a regular file is read: a handle that reaches a
+        // device or a pipe under another spelling reads forever or blocks.
+        let meta = file
+            .metadata()
+            .with_context(|| format!("reading {shown}"))?;
+        if !meta.is_file() {
+            return Err(anyhow!(
+                "{shown} is not a regular file (a device or a pipe); give a path to a program to analyze"
+            ));
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes)
+            .with_context(|| format!("reading {shown}"))?;
         Self::from_bytes_with(path.to_path_buf(), bytes, apply_pdb, symsrv)
     }
 
@@ -2251,6 +2287,25 @@ mod tests {
             assert!(is_device(r"C:\tmp\con"), "nor does a directory");
             assert!(is_device("com1") && is_device("LPT9"), "the numbered ports");
             assert!(Program::load(std::path::Path::new("con")).is_err());
+            assert!(
+                is_device("CONIN$") && is_device("conout$"),
+                "the console halves"
+            );
+            assert!(is_device(r"\\.\pipe\borer"), "a pipe");
+            assert!(
+                is_device("//./PhysicalDrive0"),
+                "a disk, spelled with slashes"
+            );
+            assert!(is_device(r"\\?\GLOBALROOT\Device\Null"), "an object path");
+            assert!(!is_device(r"\\?\C:\tmp\a.exe"), "a long drive path");
+            assert!(!is_device(r"\\?\UNC\host\share\a.exe"), "a long share path");
+            assert!(
+                !is_device(r"\\.\C:\tmp\a.exe"),
+                "a drive path in the device space"
+            );
+            let dir = std::env::temp_dir();
+            let refused = Program::load(&dir).expect_err("a directory is no program");
+            assert!(refused.to_string().contains("is a directory"), "{refused}");
         }
         // Names that only look like one.
         assert!(!is_device("control.dll"), "a real name starting with con");
