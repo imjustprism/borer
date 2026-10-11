@@ -683,15 +683,10 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, the file does not read, or the script
-    /// fails.
+    /// When no binary is loaded, the path is a device or does not read, or
+    /// the script fails.
     pub(crate) fn script_text(&self, path: &str) -> Result<String, ErrorData> {
-        let code = std::fs::read_to_string(path).map_err(|e| {
-            err_params(format!(
-                "reading {}: {e}",
-                borer_engine::text::short_path(path)
-            ))
-        })?;
+        let code = read_spec_file(path, "a Rhai script")?;
         let program = self.require_loaded()?;
         let a = self.ensure_analysis().map_err(err_params)?;
         let run = borer_engine::script::run(program, a, Arc::new(self.overlay()), &code, &[])

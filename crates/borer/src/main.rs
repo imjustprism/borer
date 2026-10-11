@@ -5650,4 +5650,34 @@ mod tests {
         assert_eq!(percent_decode("%2"), "%2");
         assert_eq!(percent_decode("a%%20b"), "a% b");
     }
+
+    /// A server with a one-instruction program loaded, for a handler test
+    /// that needs an analysis but not a real binary.
+    fn tiny_server() -> super::BorerServer {
+        use borer_engine::program::{Arch, Program, Section};
+        let text = Section::mapped(".text", 0x1000, 0, 1, false, true);
+        let program = Program::raw(vec![0xc3], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        }
+    }
+
+    /// `borer://script` refuses a device by name, as the other file
+    /// resources do, where reading `CON` waited on the console forever.
+    ///
+    /// # Panics
+    ///
+    /// When a device is read.
+    #[test]
+    fn a_script_resource_refuses_a_device() {
+        if cfg!(windows) {
+            let refused = tiny_server().script_text("CON").expect_err("a device");
+            assert_eq!(refused.code, super::ErrorCode::INVALID_PARAMS);
+            assert!(refused.message.contains("device"), "{}", refused.message);
+        }
+    }
 }
