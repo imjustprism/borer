@@ -1109,6 +1109,12 @@ pub(super) fn reg_effects(
                 (false, _) => canon(Register::RAX, ctx.bitness),
             };
             reads.push((Key::Reg(back), ctx.ret_lane));
+            if ctx.ret_rdx {
+                reads.push((Key::Reg(canon(Register::RDX, ctx.bitness)), 64));
+            }
+        }
+        FlowControl::Return if ctx.ret_rdx => {
+            reads.push((Key::Reg(canon(Register::RDX, ctx.bitness)), 64));
         }
         FlowControl::Return => {}
         FlowControl::UnconditionalBranch => {

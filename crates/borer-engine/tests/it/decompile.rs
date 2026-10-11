@@ -139,6 +139,101 @@ fn a_32_bit_callee_hands_back_edx() {
     assert!(!pair.contains("rdx"), "{pair}");
 }
 
+/// A function handing a second result back in `rdx` says what it is
+/// before its `return`.
+///
+/// `mov eax,1; mov edx,2; ret`, whose caller reads `rdx` after the call:
+/// the text said only `return 1;`, and the `2` the caller reads as
+/// `sub_401020__rdx()` was nowhere in it.
+#[test]
+fn a_second_result_handed_back_is_in_the_text() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut code = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0x48, 0x89, 0xd3, // ASM: mov rbx,rdx
+        0x48, 0x89, 0xd8, // ASM: mov rax,rbx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xba, 0x02, 0x00, 0x00, 0x00, // ASM: mov edx,2
+        0xc3, // ASM: ret
+    ]);
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400_000,
+        Some(0x401_000),
+        vec![Section::mapped(".text", 0x401_000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Pe;
+    let pair = decompiled(&p, 0x401_020);
+    assert!(pair.contains("rdx = 2;\nreturn 1;"), "{pair}");
+}
+
+/// A result read through the register the second result comes back in is
+/// taken before the line that replaces that register.
+///
+/// `mov rdx,[rcx]; lea rax,[rdx+16]; mov [rcx],rax; mov rax,[rdx]; mov
+/// rdx,[rdx+8]; ret` pops a 128-bit value off an argument list, and its
+/// caller reads `rdx` after the call: written `rdx = *(uint64_t*)(rdx +
+/// 8); return *(uint64_t*)rdx;`, the return read the new `rdx`, which
+/// the check of the text names as a disagreement.
+///
+/// # Panics
+///
+/// When the return reads `rdx` after the line that replaces it.
+#[test]
+fn a_result_read_through_the_second_one_is_taken_first() {
+    use borer_engine::analysis::decompile::checked_header;
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut code = vec![
+        0xe8, 0x3b, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x48, 0x89, 0xd3, // ASM: mov rbx,rdx
+        0x48, 0x89, 0xd8, // ASM: mov rax,rbx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x48, 0x8b, 0x11, // ASM: mov rdx,[rcx]
+        0x48, 0x8d, 0x42, 0x10, // ASM: lea rax,[rdx+16]
+        0x48, 0x89, 0x01, // ASM: mov [rcx],rax
+        0x48, 0x8b, 0x02, // ASM: mov rax,[rdx]
+        0x48, 0x8b, 0x52, 0x08, // ASM: mov rdx,[rdx+8]
+        0xc3, // ASM: ret
+    ]);
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400_000,
+        Some(0x401_000),
+        vec![Section::mapped(".text", 0x401_000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile(&p, &a, &o, 0x401_040).unwrap_or_default();
+    let header = checked_header(&p, &a, &o, 0x401_040).unwrap_or_default();
+    assert!(!header.contains("disagree"), "{header}\n{text}");
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .rposition(|l| l.starts_with("return "))
+        .unwrap_or(0);
+    assert!(lines[at].starts_with("return tmp_"), "{text}");
+    assert!(
+        at.checked_sub(1)
+            .and_then(|i| lines.get(i))
+            .is_some_and(|l| l.starts_with("rdx = ")),
+        "{text}"
+    );
+}
+
 /// A 32-bit load feeding a 64-bit subtract keeps the machine's borrow
 /// width: the load widens, and `0 - 4` is `0xffff_ffff_ffff_fffc`.
 ///
@@ -327,6 +422,62 @@ fn a_second_result_renders_as_its_own_assignment() {
     assert!(
         text.contains("sub_401020__rdx"),
         "the second result: {text}"
+    );
+}
+
+/// A second result's line reads the arguments the call was made with, not
+/// the first result that replaced one of them.
+///
+/// `call 0x401040; mov rcx,rax; call 0x401020; add rax,rdx; ret`, where
+/// 0x401020 (`lea rax,[rcx+1]; lea rdx,[rcx+2]; ret`) hands back `rdx`:
+/// the text wrote `rax = sub_401020(rax); rdx = sub_401020__rdx(rax);`,
+/// whose second line reads the `rax` the first just assigned, like a
+/// second call on the first one's result.
+///
+/// # Panics
+///
+/// When the second result's line follows an assignment of its argument.
+#[test]
+fn a_second_result_reads_the_arguments_before_the_call() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut code = vec![
+        0xe8, 0x3b, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x48, 0x89, 0xc1, // ASM: mov rcx,rax
+        0xe8, 0x13, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0x48, 0x01, 0xd0, // ASM: add rax,rdx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0x48, 0x8d, 0x41, 0x01, // ASM: lea rax,[rcx+1]
+        0x48, 0x8d, 0x51, 0x02, // ASM: lea rdx,[rcx+2]
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0xb8, 0x07, 0x00, 0x00, 0x00, // ASM: mov eax,7
+        0xc3, // ASM: ret
+    ]);
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400_000,
+        Some(0x401_000),
+        vec![Section::mapped(".text", 0x401_000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Pe;
+    let text = decompiled(&p, 0x401_000);
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == "rdx = sub_401020__rdx(rax);")
+        .expect("the second result reads the argument rax");
+    let before = at.checked_sub(1).and_then(|i| lines.get(i)).copied();
+    assert!(
+        before.is_some_and(|l| l.starts_with("tmp_") && l.ends_with("= sub_401020(rax);")),
+        "{text}"
     );
 }
 

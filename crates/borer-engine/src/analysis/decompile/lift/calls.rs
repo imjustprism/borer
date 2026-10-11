@@ -2244,7 +2244,63 @@ impl<'a> Exec<'_, 'a> {
             None if float_result => Some(xmm0),
             None => uses_result.then_some(rax),
         };
+        // INVARIANT: a direct callee whose callers read `rdx` after the
+        // call hands a second result back there (`edx`, the high half of a
+        // 64-bit integer, on a 32-bit target), so the call renders its own
+        // second assignment under the callee's name with a `__rdx` suffix,
+        // and the register is the variable it lands in. It renders when
+        // this caller reads either result: one read the same
+        // instruction-scan that gates `rax` answers for its own key. On a
+        // 32-bit target, where `edx` is scratch a caller rarely reads, only
+        // a caller that reads it renders it.
+        let rdxk = self.canon(Register::RDX);
+        let next_rdx = next.is_some_and(|n| self.reads_register(n, rdxk));
+        let uses_rdx = if rest.is_empty() {
+            match self.regs_needed.as_ref() {
+                Some(m) => m.contains_key(&rdxk),
+                None if next.is_some() => next_rdx,
+                None => false,
+            }
+        } else {
+            self.result_use(rest, rdxk, xmm0).0
+        };
+        let mut second = (direct.is_some()
+            && virt.is_none()
+            && (uses_rdx || (uses_result && self.bitness() == 64))
+            && target.is_some_and(|t| {
+                self.ctx
+                    .analysis
+                    .function(t)
+                    .is_some_and(|f| f.hands_back_rdx)
+            }))
+        .then(|| {
+            let n = self.names();
+            format!("{} = {callee}__rdx({});", n.key(rdxk), args.join(", "))
+        });
+        let result2 = second.is_some().then(|| {
+            self.declare(rdxk, self.word_ty());
+            rdxk
+        });
         let call = format!("{callee}({})", args.join(", "));
+        // INVARIANT: the second result's line repeats the arguments, which
+        // the machine read before the call; where one names the variable
+        // the first result lands in (`rax = f(rax); rdx = f__rdx(rax);`
+        // read the new `rax`), the call's result goes to a temporary first
+        // and the variable takes it after both lines, so neither line
+        // reads a value the other replaced.
+        let call = match (second.take(), result) {
+            (Some(line), Some(k)) if names_variable(&args, &self.names().key(k)) => {
+                let t = self.fresh_tmp(if k == xmm0 { Ty::F64 } else { self.word_ty() });
+                let n = self.names();
+                emit_line!(self, format!("{} = {call};", n.key(t)));
+                emit_line!(self, line);
+                n.key(t)
+            }
+            (line, _) => {
+                second = line;
+                call
+            }
+        };
         if !preserves {
             self.env.result_in_rax = uses_result && self.callee_returns_value(target);
         }
@@ -2300,39 +2356,9 @@ impl<'a> Exec<'_, 'a> {
         } else {
             emit_line!(self, format!("{call};"));
         }
-        // INVARIANT: a direct 64-bit callee whose callers read `rdx` after
-        // the call hands a second result back there, so the call renders
-        // its own second assignment under the callee's name with a
-        // `__rdx` suffix, and the register is the variable it lands in.
-        // It renders when this caller reads either result: one read the
-        // same instruction-scan that gates `rax` answers for its own key.
-        let rdxk = Key::Reg(Register::RDX);
-        let next_rdx = next.is_some_and(|n| self.reads_register(n, rdxk));
-        let uses_rdx = if rest.is_empty() {
-            match self.regs_needed.as_ref() {
-                Some(m) => m.contains_key(&rdxk),
-                None if next.is_some() => next_rdx,
-                None => false,
-            }
-        } else {
-            self.result_use(rest, rdxk, xmm0).0
-        };
-        let result2 = (direct.is_some()
-            && virt.is_none()
-            && self.bitness() == 64
-            && (uses_result || uses_rdx)
-            && target.is_some_and(|t| {
-                self.ctx
-                    .analysis
-                    .function(t)
-                    .is_some_and(|f| f.hands_back_rdx)
-            }))
-        .then(|| {
-            let rdx = Key::Reg(Register::RDX);
-            self.declare(rdx, self.word_ty());
-            emit_line!(self, format!("rdx = {callee}__rdx({});", args.join(", ")));
-            rdx
-        });
+        if let Some(line) = second {
+            emit_line!(self, line);
+        }
         if let Some(c) = callee_value {
             self.record_call(c, values, result, result2, noreturn, Shown::Statement);
         }
@@ -2871,6 +2897,19 @@ impl<'a> Exec<'_, 'a> {
         }
         Some((*recv, usize::try_from(k / word).ok()?))
     }
+}
+
+/// Tells whether any rendered argument names a variable, as a whole word.
+///
+/// # Arguments
+///
+/// * `args` - The rendered arguments.
+/// * `name` - The variable's rendered name.
+fn names_variable(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| {
+        a.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|w| w == name)
+    })
 }
 
 /// Finds the functions that stand in vtables for a pure virtual slot.

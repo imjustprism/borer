@@ -178,6 +178,9 @@ struct Ctx<'a> {
     /// exit leaves one there and a caller reads it
     /// ([`lift::sse_callee`]). Implies [`Ctx::ret_float`].
     ret_sse: bool,
+    /// The 64-bit function hands a second result back in `rdx`
+    /// ([`Function::hands_back_rdx`]): a `return` shows it too.
+    ret_rdx: bool,
     /// Parameter index to the class it points at, from the declared
     /// signature (`this`, `Foo *`, `const Foo &`), for virtual calls.
     param_class: BTreeMap<u8, String>,
@@ -676,6 +679,7 @@ fn new_ctx<'a>(
         ret_lane: 64,
         ret_float: false,
         ret_sse: false,
+        ret_rdx: false,
         param_class: BTreeMap::new(),
         own_name: std::sync::Arc::from(expr::bare(&name_of(analysis, overlay, f.entry))),
         debug_ret: program
@@ -1279,6 +1283,11 @@ fn decompile_with(
     // INVARIANT: a float result in `xmm0` is the register `ret` hands
     // back, written on the way to every exit.
     ctx.rax_written |= ctx.ret_float && (bitness == 64 || ctx.ret_sse);
+    // INVARIANT: on a 32-bit target `edx` is scratch a caller reading it
+    // after the call often only finds left over, and a function said to
+    // hand it back would make it live at every return and behind every
+    // call; only a 64-bit function's own text shows its second result.
+    ctx.ret_rdx = bitness == 64 && f.hands_back_rdx;
     if let Some(sig) = &f.signature {
         if ctx.this_param
             && let Some(c) = classes::class_of(&sig.name)
@@ -1447,7 +1456,11 @@ fn decompile_with(
         },
         |s| s.ret == "void",
     );
-    let body = if cleanup { cleanup_text(&body) } else { body };
+    let body = if cleanup {
+        cleanup_text(&body, ctx.ret_rdx.then_some("rdx"))
+    } else {
+        body
+    };
     let body = if returns_nothing {
         drop_dead_results(&body, if bitness == 64 { "rax" } else { "eax" })
     } else {

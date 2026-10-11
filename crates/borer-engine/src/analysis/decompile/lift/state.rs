@@ -1712,6 +1712,28 @@ impl<'a> Exec<'_, 'a> {
         self.tmp_of(&e, self.word_ty())
     }
 
+    /// Declares a fresh temporary of type `ty`, numbered for the pass.
+    ///
+    /// # Arguments
+    ///
+    /// * `ty` - The temporary's declared type.
+    ///
+    /// # Returns
+    ///
+    /// The temporary's key.
+    pub(super) fn fresh_tmp(&mut self, ty: Ty) -> Key {
+        let id = if self.emit {
+            self.ctx.tmp_count += 1;
+            self.ctx.tmp_count
+        } else {
+            self.tmp_local += 1;
+            self.tmp_local
+        };
+        let key = Key::Tmp(id);
+        self.declare(key, ty);
+        key
+    }
+
     /// Copies `e` into a fresh temporary of type `ty`.
     ///
     /// # Arguments
@@ -1723,18 +1745,10 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// The temporary's variable.
     pub(super) fn tmp_of(&mut self, e: &Expr, ty: Ty) -> Expr {
-        let id = if self.emit {
-            self.ctx.tmp_count += 1;
-            self.ctx.tmp_count
-        } else {
-            self.tmp_local += 1;
-            self.tmp_local
-        };
-        if let Some(p) = &mut self.ctx.probe {
+        let key = self.fresh_tmp(ty);
+        if let (Some(p), Key::Tmp(id)) = (&mut self.ctx.probe, key) {
             p.temp(id, e);
         }
-        let key = Key::Tmp(id);
-        self.declare(key, ty);
         let n = self.names();
         emit_line!(self, format!("{} = {};", n.key(key), e.render(&n)));
         if self.emit {

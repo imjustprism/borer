@@ -569,7 +569,7 @@ pub(super) fn flatten_early_exits(lines: &mut Vec<String>) -> bool {
 ///
 /// The cleaned text.
 pub fn cleanup(body: &str) -> String {
-    cleanup_text(body)
+    cleanup_text(body, None)
 }
 
 /// The passes behind [`cleanup`], run to a fixpoint or to the pass budget
@@ -595,14 +595,16 @@ pub fn cleanup(body: &str) -> String {
 /// # Arguments
 ///
 /// * `body` - Pseudo-C lines as the emitter writes them.
+/// * `live_out` - The register the function hands a second result back
+///   in, whose assignments its callers read ([`drop_dead_assignments`]).
 ///
 /// # Returns
 ///
 /// The cleaned body, newline-terminated.
-pub(super) fn cleanup_text(body: &str) -> String {
+pub(super) fn cleanup_text(body: &str, live_out: Option<&str>) -> String {
     let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
     let fuel = CLEANUP_PASSES.saturating_add(lines.len());
-    cleanup_passes(&mut lines, fuel);
+    cleanup_passes(&mut lines, fuel, live_out);
     let mut text = lines.join("\n");
     text.push('\n');
     text
@@ -626,11 +628,16 @@ pub(super) const CLEANUP_PASSES: usize = 64;
 ///
 /// * `lines` - The body lines, rewritten in place.
 /// * `fuel` - Most passes run.
+/// * `live_out` - The register a second result comes back in, if any.
 ///
 /// # Returns
 ///
 /// How many passes ran.
-pub(super) fn cleanup_passes(lines: &mut Vec<String>, fuel: usize) -> usize {
+pub(super) fn cleanup_passes(
+    lines: &mut Vec<String>,
+    fuel: usize,
+    live_out: Option<&str>,
+) -> usize {
     let mut passes = 0;
     while passes < fuel {
         passes += 1;
@@ -665,7 +672,7 @@ pub(super) fn cleanup_passes(lines: &mut Vec<String>, fuel: usize) -> usize {
         changed |= flatten_early_exits(lines);
         changed |= absorb_else(lines);
         changed |= fold_unordered_compares(lines);
-        if let Some(kept) = drop_dead_assignments(lines) {
+        if let Some(kept) = drop_dead_assignments(lines, live_out) {
             *lines = kept;
             changed = true;
         }
@@ -744,13 +751,13 @@ mod fuel_tests {
         ];
         let lines = || -> Vec<String> { body.iter().map(|l| (*l).to_owned()).collect() };
         let mut settled = lines();
-        let passes = cleanup_passes(&mut settled, usize::MAX);
+        let passes = cleanup_passes(&mut settled, usize::MAX, None);
         assert!(passes >= 3, "{passes} passes: {settled:?}");
         let mut again = lines();
-        assert_eq!(cleanup_passes(&mut again, passes), passes);
+        assert_eq!(cleanup_passes(&mut again, passes, None), passes);
         assert_eq!(again, settled);
         let mut one = lines();
-        assert_eq!(cleanup_passes(&mut one, 1), 1);
+        assert_eq!(cleanup_passes(&mut one, 1, None), 1);
         assert_ne!(one, settled);
         assert!(one.iter().any(|l| l.contains("goto ")), "{one:?}");
     }
@@ -783,7 +790,7 @@ mod dead_tests {
             "}\n",
             "return rdi;\n",
         );
-        let text = cleanup_text(body);
+        let text = cleanup_text(body, None);
         assert!(text.contains("rbx = rdi = a1;"), "{text}");
         assert!(!text.contains("rcx"), "{text}");
     }

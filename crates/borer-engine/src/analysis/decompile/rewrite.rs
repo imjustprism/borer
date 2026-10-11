@@ -845,16 +845,23 @@ pub(super) fn split_pair(inner: &str) -> Option<(&str, &str)> {
 /// declaration follows on its own, since only names the body still
 /// mentions are declared. A register or stack slot assigned its own value
 /// (`local_4 = local_4;`, a saved register pushed back where it was
-/// popped from) changes nothing and goes too.
+/// popped from) changes nothing and goes too. The register a function
+/// hands a second result back in is read by its callers, so its
+/// assignments stay.
 ///
 /// # Arguments
 ///
 /// * `lines` - The body lines.
+/// * `live_out` - The register the function hands a second result back
+///   in, if any (`rdx`).
 ///
 /// # Returns
 ///
 /// The lines without the dead assignments, or `None` when there were none.
-pub(super) fn drop_dead_assignments(lines: &[String]) -> Option<Vec<String>> {
+pub(super) fn drop_dead_assignments(
+    lines: &[String],
+    live_out: Option<&str>,
+) -> Option<Vec<String>> {
     let mut mentions: BTreeMap<&str, usize> = BTreeMap::new();
     for line in lines {
         for word in tokens(line).filter(|w| is_register_name(w)) {
@@ -884,8 +891,10 @@ pub(super) fn drop_dead_assignments(lines: &[String]) -> Option<Vec<String>> {
             .iter()
             .copied()
             .filter(|name| {
-                let unread =
-                    is_register_name(name) && !impure(rhs) && mentions.get(name) == Some(&1);
+                let unread = is_register_name(name)
+                    && !impure(rhs)
+                    && mentions.get(name) == Some(&1)
+                    && live_out != Some(*name);
                 let itself = local(name) && name == rhs;
                 !(unread || itself)
             })

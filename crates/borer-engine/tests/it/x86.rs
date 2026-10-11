@@ -668,6 +668,43 @@ fn a_32_bit_double_returned_in_xmm0_is_its_result() {
     assert!(text.contains("return 0;"), "{text}");
 }
 
+/// A 32-bit caller renders the `edx` a callee hands back only where it
+/// reads it.
+///
+/// `mov eax,1; mov edx,2; ret` is called by the entry, which stores `edx`
+/// after the call, and by a function that only reads `eax`: the first
+/// shows `edx = sub_401040__rdx();`, the second no such line, where the
+/// text read the `edx` a call clobbered by its stale name.
+#[test]
+fn a_32_bit_second_result_renders_where_it_is_read() {
+    let mut code = vec![
+        0xe8, 0x3b, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x89, 0x15, 0x00, 0x21, 0x40, 0x00, // ASM: mov [0x402100], edx
+        0xe8, 0x10, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x40, // ASM: inc eax
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xba, 0x02, 0x00, 0x00, 0x00, // ASM: mov edx, 2
+        0xc3, // ASM: ret
+    ]);
+    let p = image(&code);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = |e| decompile(&p, &a, &o, e).unwrap_or_default();
+    let reader = text(0x401000);
+    assert!(reader.contains("edx = sub_401040__rdx();"), "{reader}");
+    let other = text(0x401020);
+    assert!(!other.contains("__rdx"), "{other}");
+}
+
 /// A read inside a stack parameter's word reaches those bytes of the
 /// parameter.
 ///

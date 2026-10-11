@@ -314,6 +314,30 @@ impl<'a> Exec<'_, 'a> {
             }
             None => ("return;".to_owned(), None),
         };
+        // INVARIANT: a function whose callers read `rdx` after calling it
+        // hands a second result back there ([`Ctx::ret_rdx`]), which they
+        // read as `f__rdx(...)`; its own text says what that is before
+        // each `return`, or the value the callers read is nowhere in it. A
+        // result that reads `rdx` itself (`eax = [edx]; edx = [edx+4]`) is
+        // taken into a temporary before the line replaces `rdx`.
+        let rdx = self.canon(Register::RDX);
+        let (line, value) = match self.env.vals.get(&rdx).cloned() {
+            Some(second) if self.ctx.ret_rdx && second != Expr::Var(rdx) => {
+                let (line, value) = match value {
+                    Some(v) if v.mentions(rdx) => {
+                        let t = self.tmp_of(&v, self.word_ty());
+                        (format!("return {};", t.render(&self.names())), Some(t))
+                    }
+                    other => (line, other),
+                };
+                self.declare(rdx, self.word_ty());
+                let n = self.names();
+                emit_line!(self, format!("{} = {};", n.key(rdx), second.render(&n)));
+                self.record(EffectKind::Assign(rdx, second, 64));
+                (line, value)
+            }
+            Some(_) | None => (line, value),
+        };
         emit_line!(self, line);
         self.record(EffectKind::Return(value));
     }
