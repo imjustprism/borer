@@ -94,6 +94,25 @@ fn wide_strings_do_not_start_on_an_ascii_tail() {
     assert_eq!(hits[0].off, 7);
 }
 
+/// A long string's display text is cut, and its whole text still holds
+/// what lies past the cut, in either encoding: a filter tested against the
+/// cut text missed it.
+#[test]
+fn a_long_string_keeps_its_whole_text_past_the_display_cut() {
+    let mut long = vec![b'a'; 300];
+    long.extend_from_slice(b"needle\0");
+    let ascii = strings::find_strings(&long, 5);
+    assert_eq!(ascii.len(), 1);
+    assert!(!ascii[0].text.contains("needle"), "{}", ascii[0].text);
+    assert!(ascii[0].full_text(&long).ends_with("needle"));
+    let wide: Vec<u8> = long.iter().flat_map(|b| [*b, 0]).collect();
+    let utf16 = strings::find_wide_strings(&wide, 5);
+    assert_eq!(utf16.len(), 1);
+    assert!(utf16[0].full_text(&wide).ends_with("needle"));
+    let short = strings::find_strings(b"\0short\0", 5);
+    assert_eq!(short[0].full_text(b"\0short\0"), "short");
+}
+
 /// Both walks answer what a per-byte state machine answers.
 ///
 /// The data stresses them: runs planted across the eight-byte word

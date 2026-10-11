@@ -35,6 +35,45 @@ pub struct StringHit {
     pub encoding: Encoding,
 }
 
+impl StringHit {
+    /// Returns the whole text of the string, past the cut its display text
+    /// makes.
+    ///
+    /// A filter tests this: one tested against the display text missed
+    /// every match past the [`DISPLAY_MAX`]th character of a long string.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes the hit was found in, which [`StringHit::off`]
+    ///   indexes.
+    ///
+    /// # Returns
+    ///
+    /// The display text itself when it was not cut, else the text decoded
+    /// again from `bytes`; the display text when `bytes` no longer holds
+    /// the run.
+    #[must_use]
+    pub fn full_text<'a>(&'a self, bytes: &[u8]) -> std::borrow::Cow<'a, str> {
+        if self.len <= DISPLAY_MAX {
+            return std::borrow::Cow::Borrowed(&self.text);
+        }
+        let units = match self.encoding {
+            Encoding::Ascii => 1,
+            Encoding::Utf16 => 2,
+        };
+        let run = usize::try_from(self.off)
+            .ok()
+            .and_then(|start| bytes.get(start..start.checked_add(self.len.checked_mul(units)?)?));
+        match run {
+            Some(raw) => {
+                let text: Vec<u8> = raw.iter().step_by(units).copied().collect();
+                std::borrow::Cow::Owned(String::from_utf8_lossy(&text).into_owned())
+            }
+            None => std::borrow::Cow::Borrowed(&self.text),
+        }
+    }
+}
+
 /// Longest text rendered in full; longer hits are cut with `...`.
 const DISPLAY_MAX: usize = 200;
 /// How far [`cstr_at`] / [`wstr_at`] look for a terminator, in bytes.

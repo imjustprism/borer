@@ -1728,7 +1728,7 @@ impl BorerServer {
             };
             let matched: Vec<_> = rows
                 .into_iter()
-                .filter(|h| filter.accepts(&h.text))
+                .filter(|h| filter.accepts(&h.full_text(&p.bytes)))
                 .collect();
             let total = matched.len();
             if page.count_only {
