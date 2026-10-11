@@ -10,14 +10,13 @@
 //!
 //! * **imphash** is Mandiant's published construction ("Tracking Malware with
 //!   Import Hashing", 2014), the one `pefile` and `VirusTotal` compute: every
-//!   *named* import becomes `dll.function`, the dll lowercased with its final
-//!   extension stripped (`KERNEL32.dll` and `kernel32.DLL` both become
-//!   `kernel32`), the function lowercased, the list sorted and joined with
-//!   commas, MD5 over the joined string. Borer hashes `dll.function`, not the
-//!   bare function name, because the module is what the convention keeps:
-//!   name-only hashes collide across DLLs that share an export. Ordinal-only
-//!   imports carry no name and are skipped, as are non-PE imports, which have
-//!   no module to strip.
+//!   import becomes `dll.function` in import table order, the dll lowercased
+//!   with a final `.dll`, `.ocx` or `.sys` stripped (`KERNEL32.dll` and
+//!   `kernel32.DLL` both become `kernel32`), the function lowercased, the
+//!   list joined with commas, MD5 over the joined string. An import by
+//!   ordinal is named as `pefile`'s `ordlookup` names it: from its table for
+//!   `oleaut32.dll`, `ws2_32.dll` and `wsock32.dll` ([`ORDINALS`]), else
+//!   `ord<n>`. Non-PE imports have no module and are skipped.
 //! * **authentihash** is the PE file hash of Authenticode's `calc-file-hash`
 //!   (the `CodeString` spec): SHA-256 over the image with the four-byte
 //!   checksum, the eight-byte security directory entry and the certificate
@@ -343,11 +342,17 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
 // ---- imphash ----
 
-/// The dll name lowercased with its final extension removed.
+/// The names `pefile`'s `ordlookup` gives three DLLs' ordinal exports.
 ///
-/// `KERNEL32.dll` and `kernel32.DLL` both become `kernel32`; a name whose
-/// only dot leads it (`.dll`) keeps its whole text, since an empty stem
-/// would merge every such module.
+/// One `dll<TAB>ordinal<TAB>name` line each, the dll lowercased with its
+/// extension as the import table spells it.
+const ORDINALS: &str = include_str!("ordinals.tsv");
+
+/// The dll name lowercased with a final `.dll`, `.ocx` or `.sys` removed,
+/// as `pefile` strips it.
+///
+/// `KERNEL32.dll` and `kernel32.DLL` both become `kernel32`; any other
+/// extension stays, and `.dll` alone becomes empty.
 ///
 /// # Arguments
 ///
@@ -355,18 +360,44 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 #[must_use]
 fn dll_stem(dll: &str) -> String {
     let lower = dll.to_lowercase();
-    match lower.rfind('.') {
-        Some(at) if at > 0 => lower[..at].to_owned(),
+    match lower.rsplit_once('.') {
+        Some((stem, "dll" | "ocx" | "sys")) => stem.to_owned(),
         _ => lower,
     }
 }
 
-/// Mandiant's import hash of the program's import table.
+/// The name an import by ordinal takes in the hash, as `pefile`'s
+/// `ordlookup` makes one: the export's name where [`ORDINALS`] lists the
+/// dll and the ordinal, else `ord<n>`.
 ///
-/// See the module docs for the exact variant: every named import becomes
-/// `dll.function` (dll lowercased, extension stripped; function lowercased),
-/// the list is sorted and comma-joined, and the digest is MD5 of that
-/// string. Ordinal imports carry no name and are skipped; non-PE imports
+/// # Arguments
+///
+/// * `dll` - The module name as the import table states it.
+/// * `ordinal` - The ordinal imported.
+fn ordinal_name(dll: &str, ordinal: u16) -> String {
+    let dll = dll.to_lowercase();
+    let ordinal = ordinal.to_string();
+    ORDINALS
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(d, _)| *d == dll)
+        .find_map(|(_, rest)| {
+            rest.split_once('\t')
+                .filter(|(n, _)| *n == ordinal)
+                .map(|(_, name)| name.to_owned())
+        })
+        .unwrap_or_else(|| format!("ord{ordinal}"))
+}
+
+/// Mandiant's import hash of the program's import table, as `pefile` and
+/// `VirusTotal` compute it.
+///
+/// See the module docs for the exact variant: every import becomes
+/// `dll.function` (dll lowercased, `.dll`, `.ocx` or `.sys` stripped;
+/// function lowercased, an ordinal named by [`ordinal_name`]), in import
+/// table order, comma-joined, and the digest is MD5 of that string. The
+/// loader names an import by ordinal `ORDINAL <n>` and keeps the table's
+/// order. An import whose name entry is empty is skipped; non-PE imports
 /// carry no module and are skipped too.
 ///
 /// # Arguments
@@ -375,22 +406,27 @@ fn dll_stem(dll: &str) -> String {
 ///
 /// # Returns
 ///
-/// The 16-byte imphash, or `None` when no import is named — every such file
-/// would share the hash of an empty list.
+/// The 16-byte imphash, or `None` when nothing is imported — every such
+/// file would share the hash of an empty list.
 #[must_use]
 pub fn imphash(program: &Program) -> Option<[u8; 16]> {
-    let mut names: Vec<String> = program
+    let names: Vec<String> = program
         .symbols
         .iter()
         .filter(|s| s.kind == SymbolKind::Import)
         .filter_map(|s| s.name.rsplit_once('!'))
         .filter(|&(_, func)| func != "(unnamed)")
-        .map(|(dll, func)| format!("{}.{}", dll_stem(dll), func.to_lowercase()))
+        .map(|(dll, func)| {
+            let func = func
+                .strip_prefix("ORDINAL ")
+                .and_then(|n| n.parse().ok())
+                .map_or_else(|| func.to_owned(), |n| ordinal_name(dll, n));
+            format!("{}.{}", dll_stem(dll), func.to_lowercase())
+        })
         .collect();
     if names.is_empty() {
         return None;
     }
-    names.sort();
     let joined = names.join(",");
     Some(md5(joined.as_bytes()))
 }
@@ -751,8 +787,9 @@ mod tests {
         assert_eq!(stream, one);
     }
 
-    /// The dll stem strips one extension, case-insensitively, and keeps a
-    /// name whose only dot leads it.
+    /// The dll stem strips one `.dll`, `.ocx` or `.sys`, case-insensitively,
+    /// and nothing else, as `pefile` does: `.dll` alone strips to nothing
+    /// there, where it kept its text here and hashed unlike `pefile`.
     #[test]
     fn dll_stem_strips_one_extension() {
         assert_eq!(dll_stem("KERNEL32.dll"), "kernel32");
@@ -762,7 +799,23 @@ mod tests {
             "api-ms-win-crt-runtime-l1-1-0"
         );
         assert_eq!(dll_stem("noext"), "noext");
-        assert_eq!(dll_stem(".dll"), ".dll");
+        assert_eq!(dll_stem(".dll"), "");
+        assert_eq!(dll_stem("Driver.SYS"), "driver");
+        assert_eq!(dll_stem("ctl.ocx"), "ctl");
+        assert_eq!(dll_stem("helper.exe"), "helper.exe");
+    }
+
+    /// An import by ordinal is named as `pefile`'s `ordlookup` names it:
+    /// from its table for the three DLLs it knows, `ord<n>` otherwise and
+    /// for an ordinal the table lacks.
+    #[test]
+    fn an_ordinal_is_named_as_pefile_names_it() {
+        assert_eq!(ordinal_name("WS2_32.dll", 115), "WSAStartup");
+        assert_eq!(ordinal_name("wsock32.dll", 1), "accept");
+        assert_eq!(ordinal_name("OLEAUT32.dll", 2), "SysAllocString");
+        assert_eq!(ordinal_name("oleaut32.dll", 1), "ord1");
+        assert_eq!(ordinal_name("ws2_32", 115), "ord115");
+        assert_eq!(ordinal_name("mfc140u.dll", 2345), "ord2345");
     }
 
     /// Pinned against an independent model of the variant: the same input

@@ -27,6 +27,8 @@ ands = "ands"
 INVOKABLE = "INVOKABLE"
 # the CRT's x87 helper _ftol2_sse_excpt, spelled that way
 excpt = "excpt"
+# OLE Automation's UDATE, in oleaut32's VarDateFromUdate
+Udate = "Udate"
 
 [default.extend-identifiers]
 # iced-x86 operand kind

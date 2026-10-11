@@ -83,13 +83,52 @@ fn rdata() -> Vec<u8> {
     r
 }
 
+/// The `.rdata` bytes of a table out of name order with imports by ordinal.
+///
+/// `USER32.DLL` (`MessageBoxA`), then `WS2_32.dll` (ordinal 115, which
+/// `pefile` names `WSAStartup`; ordinal 999, which it does not name; and
+/// `send` by name).
+fn rdata_by_ordinal() -> Vec<u8> {
+    /// The lookup entry's flag for an import by ordinal.
+    const BY_ORDINAL: u64 = 1 << 63;
+    let mut r = vec![0u8; 0x400];
+    descriptor(&mut r, 0, RDATA + 0x100, RDATA + 0xa0, RDATA + 0x200);
+    descriptor(&mut r, 20, RDATA + 0x120, RDATA + 0xb0, RDATA + 0x220);
+    r[0xa0..0xab].copy_from_slice(b"USER32.DLL\0");
+    r[0xb0..0xbb].copy_from_slice(b"WS2_32.dll\0");
+    for (table, entries) in [
+        (0x100, vec![u64::from(RDATA + 0x320)]),
+        (
+            0x120,
+            vec![BY_ORDINAL | 115, BY_ORDINAL | 999, u64::from(RDATA + 0x300)],
+        ),
+    ] {
+        for (k, v) in entries.iter().enumerate() {
+            put64(&mut r, table + k * 8, *v);
+            put64(&mut r, table + 0x100 + k * 8, *v);
+        }
+    }
+    r[0x300..0x307].copy_from_slice(b"\0\0send\0");
+    r[0x320..0x32e].copy_from_slice(b"\0\0MessageBoxA\0");
+    r
+}
+
+/// Builds the PE32+ image both hashes read, with the first import table.
+fn image() -> Vec<u8> {
+    image_with(&rdata())
+}
+
 /// Builds the PE32+ image both hashes read.
 ///
 /// Headers with a junk checksum, an import directory for the `.rdata`
-/// below, a security directory naming a certificate table appended after
+/// given, a security directory naming a certificate table appended after
 /// the sections, a `.text` of `int3` padding entered by `mov eax, 1; ret`,
 /// and the `.rdata` itself.
-fn image() -> Vec<u8> {
+///
+/// # Arguments
+///
+/// * `rdata` - The `.rdata` bytes, `0x400` of them, descriptors first.
+fn image_with(rdata: &[u8]) -> Vec<u8> {
     let mut b = vec![0u8; HEADERS];
     b[..2].copy_from_slice(b"MZ");
     put32(&mut b, 0x3c, u32::try_from(PE_AT).expect("fits"));
@@ -143,7 +182,7 @@ fn image() -> Vec<u8> {
     let mut text = vec![0xccu8; 0x200];
     text[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
     b.extend_from_slice(&text);
-    b.extend_from_slice(&rdata());
+    b.extend_from_slice(rdata);
     assert_eq!(
         b.len(),
         CERT_AT,
@@ -165,7 +204,7 @@ fn hex(d: &[u8]) -> String {
 }
 
 /// The import hash of the crafted table, against the digest an independent
-/// MD5 computed over the normalized sorted list
+/// MD5 computed over the normalized list, in table order,
 /// `kernel32.createfilew,kernel32.readfile,user32.messageboxa`.
 #[test]
 fn imphash_matches_the_hand_computed_table() {
@@ -188,6 +227,37 @@ fn imphash_matches_the_hand_computed_table() {
     assert_eq!(
         hex(&imphash(&p).expect("named imports")),
         "5d2b76cc545b1b171b01d814385ec978"
+    );
+}
+
+/// The import hash keeps the table's order and names ordinals as `pefile`.
+///
+/// Pinned to the digest `pefile` 2024.8.26's `get_imphash` computed over
+/// the same file:
+/// `user32.messageboxa,ws2_32.wsastartup,ws2_32.ord999,ws2_32.send`. It
+/// sorted the list and hashed `ORDINAL 115` as a name.
+#[test]
+fn imphash_keeps_table_order_and_names_ordinals_as_pefile_does() {
+    let p = load(image_with(&rdata_by_ordinal()));
+    let imports: Vec<&str> = p
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(
+        imports,
+        vec![
+            "USER32.DLL!MessageBoxA",
+            "WS2_32.dll!ORDINAL 115",
+            "WS2_32.dll!ORDINAL 999",
+            "WS2_32.dll!send",
+        ],
+        "the loader read the crafted table"
+    );
+    assert_eq!(
+        hex(&imphash(&p).expect("imports")),
+        "c7216ad5d21e0b14fa56758a6344ebe0"
     );
 }
 
