@@ -341,3 +341,22 @@ fn a_thin_image_reads_whole() {
 fn a_fat_file_reads_its_x86_64_slice() {
     check(&load(&fat(), "fat"), 0x1000);
 }
+
+/// A segment whose `nsects` claims more sections than its load command holds
+/// reads only the ones it holds.
+///
+/// The count past them read the next load commands as sections, phantoms that
+/// became fake code.
+#[test]
+fn a_section_count_past_the_command_reads_no_phantoms() {
+    let mut bytes = thin();
+    // SPEC: `__LINKEDIT` is the third segment command, after two 152-byte
+    // ones from offset 32; its `nsects` sits 64 bytes in, and its
+    // `cmdsize` of 72 holds no section header.
+    let nsects = 32 + 152 + 152 + 64;
+    bytes[nsects..nsects + 4].copy_from_slice(&2u32.to_le_bytes());
+    let p = load(&bytes, "phantom");
+    let names: Vec<&str> = p.sections.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["__TEXT,__text", "__DATA_CONST,__got"]);
+    assert_eq!(p.headers.dropped_sections, 0);
+}

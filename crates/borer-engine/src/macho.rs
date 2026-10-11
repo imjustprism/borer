@@ -168,6 +168,11 @@ fn name16(raw: &[u8]) -> String {
 
 /// Reads the section headers of every segment command.
 ///
+/// A segment's section headers follow it inside its own load command, so
+/// the command's size bounds how many there are, whatever `nsects` says: a
+/// count past that read the next load commands as sections, phantoms with
+/// sizes of gigabytes that became fake code.
+///
 /// # Arguments
 ///
 /// * `file` - The whole file.
@@ -176,18 +181,23 @@ fn name16(raw: &[u8]) -> String {
 fn raw_sections(file: &[u8], m: &MachO<'_>, base: usize) -> Vec<RawSection> {
     let mut out = Vec::new();
     for lc in &m.load_commands {
-        let (nsects, prot, header, entry, wide) = match &lc.command {
-            CommandVariant::Segment64(s) => (s.nsects, s.initprot, 72usize, 80usize, true),
-            CommandVariant::Segment32(s) => (s.nsects, s.initprot, 56usize, 68usize, false),
+        let (nsects, prot, cmdsize, header, entry, wide) = match &lc.command {
+            CommandVariant::Segment64(s) => {
+                (s.nsects, s.initprot, s.cmdsize, 72usize, 80usize, true)
+            }
+            CommandVariant::Segment32(s) => {
+                (s.nsects, s.initprot, s.cmdsize, 56usize, 68usize, false)
+            }
             _ => continue,
         };
+        let room = usize::try_from(cmdsize).unwrap_or(0).saturating_sub(header) / entry;
         let Some(first) = base
             .checked_add(lc.offset)
             .and_then(|o| o.checked_add(header))
         else {
             continue;
         };
-        for k in 0..usize::try_from(nsects).unwrap_or(0).min(4096) {
+        for k in 0..usize::try_from(nsects).unwrap_or(0).min(room).min(4096) {
             let Some(at) = first.checked_add(k * entry) else {
                 break;
             };
