@@ -7,6 +7,7 @@
 
 use crate::isa::{ConditionCode, Register};
 
+use super::opaque::Evidence;
 use crate::analysis::Overlay;
 use crate::num::{lo16, lo32};
 use crate::program::{BinaryFormat, Program, SymbolKind};
@@ -1658,25 +1659,30 @@ fn select_idiom(op: Op, l: &Expr, r: &Expr) -> Option<Expr> {
     None
 }
 
-/// The note for a condition whose outcome never varied while sampling.
+/// The note for a condition whose outcome never varied.
 ///
-/// Naming the outcome names the dead branch: a condition that is always true
+/// A proven outcome names the dead branch: a condition that is always true
 /// makes its `else` unreachable, and a reader can stop following the half of
-/// the function that never runs. The condition itself is kept, because this
-/// is a sample rather than a proof.
+/// the function that never runs. A sampled one only says how many inputs
+/// agreed, since a real check failing one input in thousands agrees on all
+/// of them. The condition itself is kept either way.
 ///
 /// # Arguments
 ///
-/// * `outcome` - What the condition evaluated to on every sampled input.
+/// * `outcome` - What the condition evaluated to on every input tried.
 /// * `inverted` - Whether the condition is being rendered negated.
+/// * `evidence` - What the verdict rests on.
 ///
 /// # Returns
 ///
 /// The comment to append.
-pub(super) fn opaque_note(outcome: bool, inverted: bool) -> String {
+pub(super) fn opaque_note(outcome: bool, inverted: bool, evidence: Evidence) -> String {
     let taken = outcome != inverted;
     let dead = if taken { "else" } else { "body" };
-    format!("/* opaque: always {taken} on every sampled input, so the {dead} never runs */")
+    match evidence {
+        Evidence::Proven => format!("/* opaque: always {taken}, so the {dead} never runs */"),
+        Evidence::Sampled(n) => format!("/* {taken} on all {n} sampled inputs, not proven */"),
+    }
 }
 
 /// Reads the count-leading-zeros idiom a compiler writes with a bit scan.
@@ -3327,9 +3333,9 @@ impl Cond {
     pub(super) fn render(&self, n: &Names<'_>, inverted: bool) -> String {
         let text = self.render_plain(n, inverted);
         if self.eval().is_none()
-            && let Some(outcome) = super::opaque::constant_outcome(self)
+            && let Some((outcome, evidence)) = super::opaque::constant_outcome(self)
         {
-            return format!("{text} {}", opaque_note(outcome, inverted));
+            return format!("{text} {}", opaque_note(outcome, inverted, evidence));
         }
         text
     }

@@ -6,15 +6,21 @@
 //! block count and defeats structuring, so a reader sees ten times the flow
 //! the program actually has.
 //!
-//! The test here is evidence, not proof. A condition is evaluated over a
-//! fixed spread of inputs, and one that never changes its answer is
-//! reported as constant on that evidence. The sample set is fixed, so the
-//! verdict is deterministic for a given condition, and every rendering that
-//! uses it says what it rests on rather than presenting it as fact.
+//! A condition is first evaluated over a fixed spread of inputs; one that
+//! changes its answer is ordinary logic. One that never changes it is
+//! proven constant only when its outcome depends on few enough low bits of
+//! its variables ([`demand`]) that every value of those bits is tried, or
+//! when the low bits of an equality's two sides never agree, which no
+//! value can then make equal. Otherwise the samples are all there is: a
+//! key check that fails one input in 4919 agrees on every sample, so such
+//! a verdict says how many inputs it rests on and claims no dead branch.
+//! The sample set is fixed, so the verdict is deterministic for a given
+//! condition.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::expr::{Cond, Expr, Flags, Key, Op, fold};
+use super::expr::{Cc, Cond, Expr, Flags, Key, Op, fold};
+use crate::isa::ConditionCode;
 
 /// Values a free variable is given, in this order, across the samples.
 ///
@@ -56,7 +62,34 @@ const VARS_MAX: usize = 3;
 /// Largest condition tested, in expression nodes.
 const SIZE_MAX: usize = 24;
 
-/// Returns the outcome a condition always produced, if it never varied.
+/// Most input bits a proof enumerates: every value of up to this many
+/// bits, across all the condition's variables, is tried.
+const PROOF_BITS: u32 = 12;
+
+/// What a verdict that a condition never varies rests on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Evidence {
+    /// Every value of the bits the outcome depends on was tried, or the
+    /// low bits of an equality's sides never agree: the outcome is fixed.
+    Proven,
+    /// This many sampled assignments agreed; others may not.
+    Sampled(usize),
+}
+
+/// What trying every value of the bits a condition depends on found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exhaustive {
+    /// Every value gave this outcome.
+    Always(bool),
+    /// Two values gave different outcomes.
+    Varies,
+    /// The condition depends on too many bits, or on an operation whose low
+    /// bits a higher operand bit reaches, to be enumerated.
+    Unknown,
+}
+
+/// Returns the outcome a condition always produced, if it never varied,
+/// with what that rests on.
 ///
 /// # Arguments
 ///
@@ -64,11 +97,12 @@ const SIZE_MAX: usize = 24;
 ///
 /// # Returns
 ///
-/// `Some(outcome)` when every sampled assignment agreed, `None` when the
-/// condition varied, when it reads memory or anything else the evaluator
-/// cannot give a value, or when it is too large or reads too many variables
-/// to be an opaque predicate.
-pub(super) fn constant_outcome(cond: &Cond) -> Option<bool> {
+/// `Some((outcome, evidence))` when every sampled assignment agreed and no
+/// enumeration found one that disagrees, `None` when the condition varied,
+/// when it reads memory or anything else the evaluator cannot give a value,
+/// or when it is too large or reads too many variables to be an opaque
+/// predicate.
+pub(super) fn constant_outcome(cond: &Cond) -> Option<(bool, Evidence)> {
     if cond.size() > SIZE_MAX {
         return None;
     }
@@ -104,8 +138,9 @@ pub(super) fn constant_outcome(cond: &Cond) -> Option<bool> {
     }
     let vars: Vec<Key> = vars.into_iter().collect();
     let pool = pool_for(cond);
+    let samples = pool.len().clamp(SAMPLES, SAMPLES_MAX);
     let mut agreed: Option<bool> = None;
-    for s in 0..pool.len().clamp(SAMPLES, SAMPLES_MAX) {
+    for s in 0..samples {
         let mut c = cond.clone();
         // Every fourth sample gives all variables one value. Spreading them
         // apart on every sample means two variables never hold the same
@@ -139,7 +174,177 @@ pub(super) fn constant_outcome(cond: &Cond) -> Option<bool> {
             Some(_) => return None,
         }
     }
-    agreed
+    let sampled = agreed?;
+    match proven(cond, &vars) {
+        Exhaustive::Always(outcome) if outcome == sampled => Some((outcome, Evidence::Proven)),
+        Exhaustive::Always(_) | Exhaustive::Varies => None,
+        Exhaustive::Unknown => Some((sampled, Evidence::Sampled(samples))),
+    }
+}
+
+/// Decides a condition's outcome for every input, where that takes few
+/// enough evaluations.
+///
+/// The outcome is a function of the low bits [`demand`] finds, so trying
+/// every value of those bits, the rest zero, tries every input. An
+/// equality whose sides depend on too many bits is still never true when
+/// the sides' low `k` bits never agree, for some `k` small enough to
+/// enumerate: `7 * y * y - 1 == z * z` differs in its low three bits for
+/// every `y` and `z`.
+///
+/// # Arguments
+///
+/// * `cond` - The branch condition.
+/// * `vars` - Every variable it reads.
+fn proven(cond: &Cond, vars: &[Key]) -> Exhaustive {
+    let found = exhaust(cond, vars);
+    if found != Exhaustive::Unknown {
+        return found;
+    }
+    let (Flags::Cmp(l, r, w), ConditionCode::e | ConditionCode::ne) = (&cond.flags, cond.cc.0)
+    else {
+        return Exhaustive::Unknown;
+    };
+    let low = |e: &Expr, m: u64| Expr::Bin(Op::And, Box::new(e.clone()), Box::new(Expr::Const(m)));
+    for k in 1..(*w).min(63) {
+        let m = (1u64 << k) - 1;
+        let equal = Cond {
+            cc: Cc(ConditionCode::e),
+            flags: Flags::Cmp(low(l, m), low(r, m), *w),
+        };
+        match exhaust(&equal, vars) {
+            Exhaustive::Always(false) => return Exhaustive::Always(cond.cc.0 == ConditionCode::ne),
+            Exhaustive::Unknown => break,
+            Exhaustive::Always(true) | Exhaustive::Varies => {}
+        }
+    }
+    Exhaustive::Unknown
+}
+
+/// Evaluates a condition on every value of the low bits its outcome
+/// depends on.
+///
+/// # Arguments
+///
+/// * `cond` - The branch condition.
+/// * `vars` - Every variable it reads; one whose bits do not matter is zero.
+fn exhaust(cond: &Cond, vars: &[Key]) -> Exhaustive {
+    let mut need = BTreeMap::new();
+    if depends(cond, &mut need).is_none() {
+        return Exhaustive::Unknown;
+    }
+    let total: u32 = need.values().map(|b: &u8| u32::from(*b)).sum();
+    if total > PROOF_BITS {
+        return Exhaustive::Unknown;
+    }
+    let mut agreed = None;
+    for i in 0..1u64 << total {
+        let mut c = cond.clone();
+        let mut at = 0u32;
+        for k in vars {
+            let bits = need.get(k).copied().map_or(0, u32::from);
+            let v = (i >> at) & ((1u64 << bits) - 1);
+            at += bits;
+            c = c.subst(&Expr::Var(*k), &Expr::Const(v));
+        }
+        let Some(outcome) = folded(&c).eval() else {
+            return Exhaustive::Unknown;
+        };
+        match agreed {
+            None => agreed = Some(outcome),
+            Some(a) if a == outcome => {}
+            Some(_) => return Exhaustive::Varies,
+        }
+    }
+    agreed.map_or(Exhaustive::Unknown, Exhaustive::Always)
+}
+
+/// Gathers how many low bits of each variable a condition's outcome
+/// depends on.
+///
+/// The flags a compare, a test or an operation's result leaves are a
+/// function of the low `w` bits of what it computed, at its width `w`.
+///
+/// # Arguments
+///
+/// * `cond` - The branch condition.
+/// * `need` - Receives each variable's count of low bits, the most asked.
+///
+/// # Returns
+///
+/// `None` when the flags read something [`demand`] cannot bound.
+fn depends(cond: &Cond, need: &mut BTreeMap<Key, u8>) -> Option<()> {
+    match &cond.flags {
+        Flags::Cmp(l, r, w) | Flags::Add(l, r, w) => {
+            demand(l, *w, need)?;
+            demand(r, *w, need)
+        }
+        Flags::Test(l, r, w) => {
+            let both = Expr::Bin(Op::And, Box::new(l.clone()), Box::new(r.clone()));
+            demand(&both, *w, need)
+        }
+        Flags::Result(e, w) => demand(e, *w, need),
+        Flags::Carry(_) | Flags::Truth(..) | Flags::Shift(..) | Flags::Unknown => None,
+    }
+}
+
+/// Gathers how many low bits of each variable the low `k` bits of an
+/// expression depend on.
+///
+/// The low bits of a sum, a difference, a product and a bitwise operation
+/// are a function of the low bits of their operands alone; a constant mask
+/// clears the bits above its highest, and a left shift by a constant moves
+/// the operand's bits up past the low ones. Anything else (a right shift,
+/// a division, a rotate) lets a high bit reach the low ones.
+///
+/// # Arguments
+///
+/// * `e` - The expression.
+/// * `k` - How many of its low bits are read.
+/// * `need` - Receives each variable's count of low bits, the most asked.
+///
+/// # Returns
+///
+/// `None` when a higher bit of an operand can reach the low `k` bits.
+fn demand(e: &Expr, k: u8, need: &mut BTreeMap<Key, u8>) -> Option<()> {
+    if k == 0 {
+        return Some(());
+    }
+    let top = |m: u64| u8::try_from(64 - m.leading_zeros()).unwrap_or(64);
+    match e {
+        Expr::Const(_) => Some(()),
+        Expr::Var(key) => {
+            let bits = need.entry(*key).or_default();
+            *bits = (*bits).max(k);
+            Some(())
+        }
+        Expr::Bin(Op::And, l, r) => match (&**l, &**r) {
+            (x, Expr::Const(m)) | (Expr::Const(m), x) => demand(x, k.min(top(*m)), need),
+            _ => {
+                demand(l, k, need)?;
+                demand(r, k, need)
+            }
+        },
+        Expr::Bin(Op::Add | Op::Sub | Op::Mul | Op::Or | Op::Xor, l, r) => {
+            demand(l, k, need)?;
+            demand(r, k, need)
+        }
+        Expr::Bin(Op::Shl, l, r) => match **r {
+            Expr::Const(c) if c < 64 => demand(l, k.saturating_sub(u8::try_from(c).ok()?), need),
+            _ => None,
+        },
+        Expr::Bin(..)
+        | Expr::Un(..)
+        | Expr::Sext(..)
+        | Expr::Cast(..)
+        | Expr::Deref(..)
+        | Expr::Cond(_)
+        | Expr::Ternary(..)
+        | Expr::Call(..)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::FConst(..) => None,
+    }
 }
 
 /// Tells whether a condition computes anything before comparing.
@@ -363,8 +568,8 @@ fn reads_memory(e: &Expr) -> bool {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::constant_outcome;
-    use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, Op};
+    use super::{Evidence, constant_outcome};
+    use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, Op, opaque_note};
     use crate::isa::{ConditionCode, Register};
 
     /// Builds `x` as a register variable.
@@ -405,13 +610,14 @@ mod tests {
     /// A predicate true for every input is reported as never varying.
     ///
     /// `(x | 1) & 1` is one whatever `x` holds, which is the shape an
-    /// obfuscator emits to make a branch that is not a decision.
+    /// obfuscator emits to make a branch that is not a decision; it reads
+    /// one bit of `x`, so both of its values prove it.
     #[test]
     fn an_always_true_predicate_is_found() {
         let e = bin(Op::And, bin(Op::Or, x(), Expr::Const(1)), Expr::Const(1));
         assert_eq!(
             constant_outcome(&cmp(ConditionCode::e, e, Expr::Const(1))),
-            Some(true)
+            Some((true, Evidence::Proven))
         );
     }
 
@@ -424,14 +630,72 @@ mod tests {
     fn the_note_names_the_dead_branch() {
         let e = bin(Op::And, bin(Op::Or, x(), Expr::Const(1)), Expr::Const(1));
         let cond = cmp(ConditionCode::e, e, Expr::Const(1));
-        assert_eq!(constant_outcome(&cond), Some(true));
-        let note = crate::analysis::decompile::expr::opaque_note(true, false);
+        assert_eq!(constant_outcome(&cond), Some((true, Evidence::Proven)));
+        let note = opaque_note(true, false, Evidence::Proven);
         assert!(note.contains("always true"), "{note}");
         assert!(note.contains("the else never runs"), "{note}");
         // Rendered negated, the same condition kills the body instead.
-        let flipped = crate::analysis::decompile::expr::opaque_note(true, true);
+        let flipped = opaque_note(true, true, Evidence::Proven);
         assert!(flipped.contains("always false"), "{flipped}");
         assert!(flipped.contains("the body never runs"), "{flipped}");
+    }
+
+    /// A key check that fails one input in 4919 agrees on every sample,
+    /// and its 32 bits are too many to try: the note says what it rests
+    /// on and names no dead branch.
+    ///
+    /// `(uint32_t)(x * 0x3c441287 + 0x76733932) >= 0xd52b3` is a remainder
+    /// by `0x1337` tested against `0x42`, as a compiler writes it.
+    #[test]
+    fn a_rare_failure_past_enumeration_is_only_sampled() {
+        let e = bin(
+            Op::Add,
+            bin(Op::Mul, x(), Expr::Const(0x3c44_1287)),
+            Expr::Const(0x7673_3932),
+        );
+        let cond = Cond {
+            cc: Cc(ConditionCode::ae),
+            flags: Flags::Cmp(e, Expr::Const(0xd52b3), 32),
+        };
+        let Some((true, evidence @ Evidence::Sampled(_))) = constant_outcome(&cond) else {
+            panic!("{:?}", constant_outcome(&cond));
+        };
+        let note = opaque_note(true, false, evidence);
+        assert!(
+            note.contains("sampled") && !note.contains("never runs"),
+            "{note}"
+        );
+    }
+
+    /// A condition whose one exception lies within the bits it reads is
+    /// found to vary, however the samples fell.
+    ///
+    /// `(x * 5) & 0xfff != 0x5a5` is false only where the low twelve bits
+    /// of `x` are `0x121`.
+    #[test]
+    fn an_exception_within_enumeration_varies() {
+        let e = bin(
+            Op::And,
+            bin(Op::Mul, x(), Expr::Const(5)),
+            Expr::Const(0xfff),
+        );
+        assert_eq!(
+            constant_outcome(&cmp(ConditionCode::ne, e, Expr::Const(0x5a5))),
+            None
+        );
+    }
+
+    /// An equality whose sides never agree in their low bits is proven
+    /// false: `7 * y * y - 1` is 2 or 3 modulo 4, a square 0 or 1.
+    #[test]
+    fn low_bits_that_never_agree_prove_an_inequality() {
+        let left = bin(
+            Op::Sub,
+            bin(Op::Mul, bin(Op::Mul, Expr::Const(7), x()), x()),
+            Expr::Const(1),
+        );
+        let cond = cmp(ConditionCode::e, left, bin(Op::Mul, y(), y()));
+        assert_eq!(constant_outcome(&cond), Some((false, Evidence::Proven)));
     }
 
     /// An ordinary comparison against a constant is not reported.
