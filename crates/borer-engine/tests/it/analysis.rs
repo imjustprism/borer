@@ -1982,7 +1982,8 @@ fn the_per_function_diff_shows_the_changed_line() {
     let o = Overlay::default();
     let text = borer_engine::analysis::render::diff_function_tsv(
         &old, &oa, &o, &new, &na, &o, "check", "old", "new",
-    );
+    )
+    .expect("check is a baseline function");
     assert!(
         text.contains("0xdeadbeef"),
         "the old constant is missing: {text}"

@@ -420,14 +420,37 @@ pub(super) const DIFF_FN_CONTEXT: usize = 3;
 pub(super) struct Paired<'a> {
     /// The baseline function's entry.
     pub(super) entry: u64,
-    /// The baseline function's fingerprint.
-    pub(super) old_print: FuncPrint,
-    /// The other version's fingerprints, in its order.
-    pub(super) new_prints: Vec<FuncPrint>,
     /// The counterpart.
     pub(super) new: &'a Function,
     /// How the two were paired.
     pub(super) found: Match,
+}
+
+/// Finds the baseline function a per-function comparison names.
+///
+/// # Arguments
+///
+/// * `old_a` / `old_o` - Analysis and names of the baseline.
+/// * `target` - The baseline function, by address (an interior one names
+///   its function) or name.
+/// * `old_name` - The baseline's label.
+///
+/// # Returns
+///
+/// The function.
+///
+/// # Errors
+///
+/// The refusal, when no baseline function answers to the target.
+pub(super) fn baseline_function<'a>(
+    old_a: &'a Analysis,
+    old_o: &Overlay,
+    target: &str,
+    old_name: &str,
+) -> Result<&'a Function, String> {
+    resolve(old_a, old_o, target)
+        .and_then(|va| old_a.function(va).or_else(|| old_a.function_at(va)))
+        .ok_or_else(|| format!("no function {target} in {old_name}"))
 }
 
 /// Pairs a baseline function with its counterpart in the other version, the
@@ -437,8 +460,8 @@ pub(super) struct Paired<'a> {
 ///
 /// * `old_a` / `old_o` - Analysis and names of the baseline.
 /// * `new_a` - The other version's analysis.
-/// * `target` - The baseline function, by address or name.
-/// * `old_name` / `new_name` - Labels for the two versions.
+/// * `old_f` - The baseline function, from [`baseline_function`].
+/// * `new_name` - The other version's label.
 ///
 /// # Returns
 ///
@@ -446,21 +469,16 @@ pub(super) struct Paired<'a> {
 ///
 /// # Errors
 ///
-/// The report line to return: the target is not a baseline function, or it
-/// has no counterpart.
+/// The report line to return when the function has no counterpart, an
+/// answer rather than a refusal.
 pub(super) fn pair<'a>(
     old_a: &Analysis,
     old_o: &Overlay,
     new_a: &'a Analysis,
-    target: &str,
-    old_name: &str,
+    old_f: &Function,
     new_name: &str,
 ) -> Result<Paired<'a>, String> {
-    let entry = resolve(old_a, old_o, target)
-        .ok_or_else(|| format!("# no function {target} in {old_name}\n"))?;
-    let old_f = old_a
-        .function(entry)
-        .ok_or_else(|| format!("# {target} is not a function in {old_name}\n"))?;
+    let entry = old_f.entry;
     let new_prints = prints_of(new_a);
     let taken = vec![false; new_prints.len()];
     let old_print = FuncPrint::from(old_f);
@@ -469,13 +487,11 @@ pub(super) fn pair<'a>(
         .ok_or_else(|| {
             format!(
                 "# {}: no match in {new_name} (removed, or changed past recognition)\n",
-                fn_label(&old_print)
+                name_of(old_a, old_o, entry)
             )
         })?;
     Ok(Paired {
         entry,
-        old_print,
-        new_prints,
         new: &new_a.functions[found.index],
         found,
     })
@@ -499,8 +515,13 @@ pub(super) fn pair<'a>(
 ///
 /// # Returns
 ///
-/// The per-function diff as text.
-#[must_use]
+/// The per-function diff as text, its header naming each side as its own
+/// names do (a name the user set first); a function with no counterpart is
+/// an answer that says so.
+///
+/// # Errors
+///
+/// When no baseline function answers to `target`.
 #[expect(
     clippy::too_many_arguments,
     reason = "two builds, each as image, analysis and names, and the target between them"
@@ -515,33 +536,32 @@ pub fn diff_function_tsv(
     target: &str,
     old_name: &str,
     new_name: &str,
-) -> String {
+) -> Result<String, String> {
+    let old_f = baseline_function(old_a, old_o, target, old_name)?;
     let Paired {
         entry,
-        old_print,
-        new_prints,
         new: new_f,
         found,
-    } = match pair(old_a, old_o, new_a, target, old_name, new_name) {
+    } = match pair(old_a, old_o, new_a, old_f, new_name) {
         Ok(paired) => paired,
-        Err(report) => return report,
+        Err(report) => return Ok(report),
     };
     let mut out = format!(
         "# difffn: {} ({old_name}) vs {} ({new_name})  [{}]\n",
-        fn_label(&old_print),
-        fn_label(&new_prints[found.index]),
+        name_of(old_a, old_o, entry),
+        name_of(new_a, new_o, new_f.entry),
         found.why
     );
     if found.identical {
         out.push_str("# identical body: the code did not change\n");
-        return out;
+        return Ok(out);
     }
     let (Some(old_c), Some(new_c)) = (
         crate::analysis::decompile::decompile(old_p, old_a, old_o, entry),
         crate::analysis::decompile::decompile(new_p, new_a, new_o, new_f.entry),
     ) else {
         out.push_str("# one side did not decompile; bodies differ\n");
-        return out;
+        return Ok(out);
     };
     let old_lines: Vec<&str> = old_c.lines().take(DIFF_FN_MAX_LINES).collect();
     let new_lines: Vec<&str> = new_c.lines().take(DIFF_FN_MAX_LINES).collect();
@@ -555,7 +575,7 @@ pub fn diff_function_tsv(
         });
     let _ = writeln!(out, "# {dels} line(s) removed, {adds} added");
     render_collapsed(&mut out, &diff);
-    out
+    Ok(out)
 }
 
 /// A field access aggregated over every base a function reads it through: the
@@ -753,8 +773,13 @@ pub fn carry_names_tsv(
 ///
 /// # Returns
 ///
-/// The offset migration as text.
-#[must_use]
+/// The offset migration as text, its header naming each side as its own
+/// names do (a name the user set first); a function with no counterpart is
+/// an answer that says so.
+///
+/// # Errors
+///
+/// When no baseline function answers to `target`.
 #[expect(
     clippy::too_many_arguments,
     reason = "two builds, each as image, analysis and names, and the target between them"
@@ -769,22 +794,22 @@ pub fn migrate_function_tsv(
     target: &str,
     old_name: &str,
     new_name: &str,
-) -> String {
+) -> Result<String, String> {
+    let old_f = baseline_function(old_a, old_o, target, old_name)?;
     let Paired {
         entry,
-        old_print,
-        new_prints,
         new: new_f,
         found,
-    } = match pair(old_a, old_o, new_a, target, old_name, new_name) {
+    } = match pair(old_a, old_o, new_a, old_f, new_name) {
         Ok(paired) => paired,
-        Err(report) => return report,
+        Err(report) => return Ok(report),
     };
+    let old_label = name_of(old_a, old_o, entry);
     let (Some(old_sites), Some(new_sites)) = (
         crate::analysis::classes::field_accesses(old_p, old_a, old_o, entry),
         crate::analysis::classes::field_accesses(new_p, new_a, new_o, new_f.entry),
     ) else {
-        return format!("# {}: one side did not decompile\n", fn_label(&old_print));
+        return Ok(format!("# {old_label}: one side did not decompile\n"));
     };
     let old_off = offsets_of(&old_sites);
     let new_off = offsets_of(&new_sites);
@@ -821,9 +846,8 @@ pub fn migrate_function_tsv(
         }
     }
     let mut out = format!(
-        "# migrate {} ({old_name}) -> {} ({new_name})  [matched by {}]\n",
-        fn_label(&old_print),
-        fn_label(&new_prints[found.index]),
+        "# migrate {old_label} ({old_name}) -> {} ({new_name})  [{}]\n",
+        name_of(new_a, new_o, new_f.entry),
         found.why
     );
     let _ = writeln!(
@@ -852,7 +876,7 @@ pub fn migrate_function_tsv(
         };
         let _ = writeln!(out, "{off:#x}\t{old_cell}\t{new_cell}\t{status}");
     }
-    out
+    Ok(out)
 }
 
 /// A line-level diff of `old` to `new` via a longest-common-subsequence walk.

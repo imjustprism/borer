@@ -65,9 +65,19 @@ struct OtherBuild {
 }
 
 /// A surface that renders one function of the loaded build against the
-/// same function in another: `difffn` and `migrate`.
-type AcrossBuilds =
-    fn(&Program, &Analysis, &Overlay, &Program, &Analysis, &Overlay, &str, &str, &str) -> String;
+/// same function in another: `difffn` and `migrate`. Its `Err` refuses a
+/// function the loaded build lacks.
+type AcrossBuilds = fn(
+    &Program,
+    &Analysis,
+    &Overlay,
+    &Program,
+    &Analysis,
+    &Overlay,
+    &str,
+    &str,
+    &str,
+) -> Result<String, String>;
 
 /// The file name of a path, for a readable label; the whole path if it has no
 /// final component.
@@ -139,8 +149,9 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When the spec lacks a path, no binary is loaded, or the other build
-    /// cannot be loaded or analyzed.
+    /// When the spec lacks a path, no binary is loaded, the other build
+    /// cannot be loaded or analyzed, or the loaded build has no such
+    /// function.
     fn across_builds(
         &self,
         spec: &str,
@@ -153,8 +164,8 @@ impl BorerServer {
             )));
         };
         let other = self.other_build(other)?;
-        self.with_analysis(|p, a, o| {
-            Ok(render(
+        self.refusing(|p, a, o| {
+            render(
                 p,
                 a,
                 o,
@@ -164,7 +175,7 @@ impl BorerServer {
                 function,
                 &file_label(&p.path),
                 &other.label,
-            ))
+            )
         })
     }
 

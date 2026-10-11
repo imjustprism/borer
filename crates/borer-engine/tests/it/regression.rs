@@ -151,7 +151,8 @@ fn migrate_reports_a_field_that_moved_between_builds() {
     let new = build(0x28);
     let (oa, na) = (Analysis::compute(&old), Analysis::compute(&new));
     let o = Overlay::default();
-    let out = migrate_function_tsv(&old, &oa, &o, &new, &na, &o, "0x1000", "old", "new");
+    let out = migrate_function_tsv(&old, &oa, &o, &new, &na, &o, "0x1000", "old", "new")
+        .expect("0x1000 is a baseline function");
     assert!(
         out.contains("0x10\tr/4\tr/4\tsame"),
         "the unmoved field was not reported same:\n{out}"
@@ -164,4 +165,42 @@ fn migrate_reports_a_field_that_moved_between_builds() {
         out.contains("0x28\t-\tr/4\tmoved <- 0x20"),
         "the destination was not tracked:\n{out}"
     );
+}
+
+/// A per-function comparison refuses an unknown function and uses set names.
+///
+/// Its header names each side as its own names do, the user's first, and
+/// says how the two were paired once. It answered `# no function` as a
+/// success, named the baseline by the analysis over the user's name, and
+/// read `[matched by by name]`.
+#[test]
+fn per_function_comparisons_refuse_an_unknown_function_and_use_set_names() {
+    use borer_engine::analysis::render::{diff_function_tsv, migrate_function_tsv};
+    let build = |off: u8| {
+        let mut code = vec![0xccu8; 8];
+        code[..7].copy_from_slice(&[0x8b, 0x41, 0x10, 0x03, 0x41, off, 0xc3]);
+        raw_program(&code)
+    };
+    let old = build(0x20);
+    let new = build(0x28);
+    let (oa, na) = (Analysis::compute(&old), Analysis::compute(&new));
+    let plain = Overlay::default();
+    for render in [diff_function_tsv, migrate_function_tsv] {
+        assert_eq!(
+            render(&old, &oa, &plain, &new, &na, &plain, "nosuch", "old", "new"),
+            Err("no function nosuch in old".to_owned())
+        );
+    }
+    let mut named = Overlay::default();
+    named.names.insert(0x1000, "Player::Update".to_owned());
+    for render in [diff_function_tsv, migrate_function_tsv] {
+        let out = render(&old, &oa, &named, &new, &na, &plain, "0x1004", "old", "new")
+            .expect("an interior address names its function");
+        let header = out.lines().next().unwrap_or_default();
+        assert!(
+            header.contains(" Player::Update (old) ") && header.contains(" sub_1000 (new) "),
+            "{out}"
+        );
+        assert!(!header.contains("matched by"), "{out}");
+    }
 }
