@@ -540,7 +540,7 @@ impl Writer<'_> {
             }
             None => self.byte(0),
         }
-        self.byte(u8::from(c.noreturn) | (shown_code(c.shown) << 1));
+        self.byte(u8::from(c.noreturn) | (shown_code(c.shown) << 1) | (u8::from(c.short) << 3));
     }
 
     /// Writes an effect: its distance from the one before, then what it does.
@@ -807,7 +807,8 @@ impl Reader<'_> {
             result,
             result2,
             noreturn: bits & 1 != 0,
-            shown: *SHOWNS.get(usize::from(bits >> 1))?,
+            shown: *SHOWNS.get(usize::from((bits >> 1) & 3))?,
+            short: bits & 8 != 0,
         })
     }
 
@@ -948,6 +949,7 @@ mod tests {
                     result2: None,
                     noreturn: true,
                     shown: Shown::InPlace,
+                    short: true,
                 })),
             },
             Effect {
@@ -974,6 +976,7 @@ mod tests {
                     result2: None,
                     noreturn: false,
                     shown: Shown::Tail,
+                    short: false,
                 })),
             },
             Effect {
@@ -1002,6 +1005,7 @@ mod tests {
                 result2: None,
                 noreturn: false,
                 shown: Shown::Elided,
+                short: false,
             })),
         }];
         let (mut first, mut second) = (Vec::new(), Vec::new());

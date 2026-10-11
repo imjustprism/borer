@@ -1870,6 +1870,9 @@ fn decompile_with(
             conv: ctx.conv,
             ret_bits: ctx.ret_bits,
             ret_float: ctx.ret_float,
+            ret_xmm: ctx.ret_float && (bitness == 64 || ctx.ret_sse),
+            ret_rdx: ctx.ret_rdx,
+            result_read: f.returns_value == Some(true) || ctx.ret_float,
             dispatches: std::mem::take(&mut ctx.pointer_dispatches)
                 .into_iter()
                 .chain(std::mem::take(&mut ctx.dispatches))

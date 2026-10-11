@@ -79,6 +79,12 @@ const RULED_OUT: &str = "a state the branch into the block rules out";
 /// Why a block is not checked: a float or vector instruction outside the
 /// checked subset ([`outside_subset`]).
 const OUTSIDE_FLOAT: &str = "an instruction outside the checked subset";
+/// Why a block is not checked: a call in it renders fewer stack words than
+/// its callee reads ([`Call::short`](super::lift::Call::short)).
+const SHORT_CALL: &str = "a call the text passes fewer words than its callee reads";
+/// Why a block is not checked: it returns nothing where the function's
+/// callers read a result ([`Witness::result_read`]).
+const BARE_RETURN: &str = "a return of nothing the callers read a result from";
 /// Blocks that only jump on followed back to the branch a block runs under.
 const GUARD_JUMPS: usize = 4;
 /// Blocks followed forward from one that sets flags to the block reading
@@ -127,6 +133,13 @@ pub(super) struct Witness {
     pub(super) ret_bits: u8,
     /// The result comes back in a floating-point register.
     pub(super) ret_float: bool,
+    /// That register is `xmm0`, not the x87 stack's top.
+    pub(super) ret_xmm: bool,
+    /// A second result comes back in `rdx`.
+    pub(super) ret_rdx: bool,
+    /// The function's callers read what it hands back: some caller reads
+    /// the return register after the call, or the result is a float.
+    pub(super) result_read: bool,
     /// Callees that only jump through a register, with the register: a
     /// call to one goes where the register points.
     pub(super) dispatches: BTreeMap<u64, Register>,
@@ -550,6 +563,8 @@ fn unchecked_label(reason: &str) -> &'static str {
         "a read or write through the thread block" => "fs/gs access",
         OVER_BUDGET => "over budget",
         "a call the text leaves out or reads in place" => "call left out",
+        SHORT_CALL => "call args dropped",
+        BARE_RETURN => "result dropped",
         "a statement no effect models"
         | "an instruction the emulator does not model"
         | "an instruction outside every checked form"
@@ -2533,6 +2548,21 @@ impl Function<'_, '_> {
         }) {
             return Err("a call the text leaves out or reads in place");
         }
+        // INVARIANT: the arguments a call shows are compared with what the
+        // machine passes there, and the result a return shows with what it
+        // hands back; what the text leaves out is compared with nothing, so
+        // a block that drops a stack argument its callee reads, or returns
+        // nothing where the callers read a result, makes no claim of
+        // agreement.
+        if effects
+            .iter()
+            .any(|e| matches!(&e.kind, EffectKind::Call(c) if c.short))
+        {
+            return Err(SHORT_CALL);
+        }
+        if w.result_read && effects.iter().any(|e| e.kind == EffectKind::Return(None)) {
+            return Err(BARE_RETURN);
+        }
         let mut info = InstructionInfoFactory::new();
         if !integer_or_zero_fill(code, &mut info) {
             return Err(outside_subset(code, &mut info));
@@ -3065,6 +3095,51 @@ impl Function<'_, '_> {
                             || format!("{v:?}"),
                         );
                     }
+                }
+                // INVARIANT: a second result in `rdx` is what the text's
+                // `rdx` holds at the return, the line before it says what.
+                if self.w.ret_rdx
+                    && let Some(m) = t.emu.register("rdx")
+                {
+                    let rdx = Expr::Var(Key::Reg(Register::RDX));
+                    let text = t.text.eval(&rdx);
+                    self.compare(
+                        t,
+                        out,
+                        start,
+                        e.at,
+                        Claim::Return,
+                        "rdx".to_owned(),
+                        text,
+                        m,
+                        64,
+                        false,
+                        || format!("{rdx:?}"),
+                    );
+                }
+                // INVARIANT: a float result is the low lane of `xmm0`, at the
+                // width its expression computes, the whole low quadword where
+                // it names none; one left on the x87 stack is not compared.
+                if let Some(v) = v
+                    && self.w.ret_xmm
+                {
+                    let float = t.text.float_bits(v);
+                    let bits = float.unwrap_or(64);
+                    let machine = low64(t.emu.xmm().first().copied().unwrap_or(0)) & low(bits);
+                    let text = t.text.eval(v);
+                    self.compare(
+                        t,
+                        out,
+                        start,
+                        e.at,
+                        Claim::Return,
+                        "result".to_owned(),
+                        text,
+                        machine,
+                        bits,
+                        float.is_some(),
+                        || format!("{v:?}"),
+                    );
                 }
                 self.memory(t, start, e.at, usize::MAX, out);
                 t.settled = true;

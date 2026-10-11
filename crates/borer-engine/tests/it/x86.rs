@@ -705,6 +705,36 @@ fn a_32_bit_second_result_renders_where_it_is_read() {
     assert!(!other.contains("__rdx"), "{other}");
 }
 
+/// A block whose call renders fewer stack words than its callee reads is
+/// not counted as agreeing with the binary: the words the text leaves out
+/// are compared with nothing.
+///
+/// `push esi; push 5; call 0x401040; pop esi; ret` against a callee that
+/// reads two words, `mov eax,[esp+4]; add eax,[esp+8]; ret 8`: the word
+/// above the `5` is `esi`'s save, which the text never passes, and the
+/// header counted the block as checked all the same.
+#[test]
+fn a_call_dropping_an_argument_is_left_unchecked() {
+    use borer_engine::analysis::decompile::checked_header;
+    let mut code = vec![
+        0x56, // ASM: push esi
+        0x6a, 0x05, // ASM: push 5
+        0xe8, 0x38, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x5e, // ASM: pop esi
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x8b, 0x44, 0x24, 0x04, // ASM: mov eax, [esp+4]
+        0x03, 0x44, 0x24, 0x08, // ASM: add eax, [esp+8]
+        0xc2, 0x08, 0x00, // ASM: ret 8
+    ]);
+    let p = image(&code);
+    let a = Analysis::compute(&p);
+    let header = checked_header(&p, &a, &Overlay::default(), 0x401000).unwrap_or_default();
+    assert!(header.contains("1 call args dropped"), "{header}");
+}
+
 /// A read inside a stack parameter's word reaches those bytes of the
 /// parameter.
 ///

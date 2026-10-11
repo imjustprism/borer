@@ -239,6 +239,13 @@ impl<'a> Exec<'_, 'a> {
             }
         }
         let rendered = if open { stack.len() } else { 0 };
+        // INVARIANT: a list that renders fewer stack words than the callee
+        // reads leaves out arguments the machine passes, which no check of
+        // the ones it shows can vouch for; the recorded call says so.
+        self.args_short = self
+            .call_stack_args(target)
+            .and_then(|c| usize::try_from(c).ok())
+            .is_some_and(|c| rendered < c);
         if open {
             out.extend(stack.iter().map(|e| e.render(&n)));
             if emit {
@@ -1250,6 +1257,7 @@ impl<'a> Exec<'_, 'a> {
     pub(super) fn after_call(&mut self, keep_rax: bool) {
         self.env.df = Some(false);
         self.env.fresh.clear();
+        self.args_short = false;
         for k in self.clobbered(keep_rax) {
             self.env.vals.remove(&k);
             self.env.narrow.remove(&k);

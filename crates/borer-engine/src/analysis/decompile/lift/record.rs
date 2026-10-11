@@ -65,6 +65,10 @@ pub(in crate::analysis::decompile) struct Call {
     pub(in crate::analysis::decompile) noreturn: bool,
     /// How the text shows it.
     pub(in crate::analysis::decompile) shown: Shown,
+    /// The text passes fewer stack words than the callee is stated to
+    /// read: the arguments it shows are checked, the ones it leaves out
+    /// cannot be.
+    pub(in crate::analysis::decompile) short: bool,
 }
 
 /// What a call calls.
@@ -136,6 +140,10 @@ impl Exec<'_, '_> {
 
     /// Records a call, in the emission pass only.
     ///
+    /// A call shown as a statement or a tail call carries whether the
+    /// arguments rendered for it ([`Exec::args_for`]) fall short of what
+    /// its callee reads; any other call renders none.
+    ///
     /// # Arguments
     ///
     /// * `callee` - What it calls.
@@ -154,6 +162,9 @@ impl Exec<'_, '_> {
         noreturn: bool,
         shown: Shown,
     ) {
+        let short = std::mem::take(&mut self.args_short)
+            && matches!(shown, Shown::Statement | Shown::Tail)
+            && !matches!(callee, Callee::Builtin(..));
         self.record(EffectKind::Call(Box::new(Call {
             callee,
             args,
@@ -161,6 +172,7 @@ impl Exec<'_, '_> {
             result2,
             noreturn,
             shown,
+            short,
         })));
     }
 

@@ -676,6 +676,11 @@ pub(super) struct Exec<'c, 'a> {
     /// be more than the callee's body reads by name (a variable list past
     /// its `va_start`). `None` when nothing cleans them up there.
     cleaned: Option<u32>,
+    /// The call being lifted renders fewer stack words than its callee is
+    /// stated to read ([`Exec::args_for`]): its text leaves out arguments
+    /// the machine passes, which the next recorded call carries
+    /// ([`Call::short`]).
+    args_short: bool,
     /// A tail jump is being lifted: the callee's stack arguments are the
     /// caller's own, above the return address the jump leaves in place.
     forwarding: bool,
@@ -779,6 +784,7 @@ pub(super) fn exec_block(
         seh_registered,
         args_pushed: 0,
         cleaned: None,
+        args_short: false,
         forwarding: false,
         in_place: false,
         arity_floor: 0,
