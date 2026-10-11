@@ -3785,7 +3785,8 @@ impl ServerHandler for BorerServer {
     /// until this worker has ended, so a worker that stayed would hold them
     /// for good. A `query` answer has been through both already, keyed by
     /// its URI as a resource read is ([`BorerServer::read_uri`]), so its tag
-    /// goes on the URI. An argument the parser refuses is named in the
+    /// goes on the URI, where a URI's own tag goes ([`recall::tagged_uri`]).
+    /// An argument the parser refuses is named in the
     /// message, from the tool's schema ([`params::misfit`]): serde words
     /// the value alone.
     ///
@@ -3819,7 +3820,7 @@ impl ServerHandler for BorerServer {
             && let Some(serde_json::Value::String(uri)) =
                 request.arguments.as_mut().and_then(|a| a.get_mut("uri"))
         {
-            let _ = write!(uri, "{SINCE_SUFFIX}{tag}");
+            *uri = recall::tagged_uri(uri, tag);
         }
         let args = request
             .arguments

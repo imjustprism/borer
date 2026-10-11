@@ -90,6 +90,31 @@ impl std::fmt::Display for Tag {
     }
 }
 
+/// Puts a tag on a resource URI where a URI reader takes it off.
+///
+/// The tag goes before a trailing [`FRESH_SUFFIX`], and in place of a
+/// [`SINCE_SUFFIX`] tag the URI already carries, so the tag passed beside
+/// the URI is the one read. Appended after either suffix, the tag left the
+/// suffix inside the URI, which then named no resource.
+///
+/// # Arguments
+///
+/// * `uri` - The URI as the reader wrote it, with or without either suffix.
+/// * `tag` - The tag of the answer the reader holds.
+///
+/// # Returns
+///
+/// The URI with the tag in the place a URI's own tag goes.
+pub(crate) fn tagged_uri(uri: &str, tag: Tag) -> String {
+    let (core, fresh) = uri
+        .strip_suffix(FRESH_SUFFIX)
+        .map_or((uri, ""), |core| (core, FRESH_SUFFIX));
+    let core = core
+        .rsplit_once(SINCE_SUFFIX)
+        .map_or(core, |(core, _)| core);
+    format!("{core}{SINCE_SUFFIX}{tag}{fresh}")
+}
+
 /// The text a reader may hold for each request, so a reader that says it
 /// holds it can be sent a note or the lines that changed instead.
 ///
@@ -622,5 +647,30 @@ mod tests {
             cut.starts_with("one\ntwo\n# cut at 8 of 14 bytes (2 of 3 lines)"),
             "{cut}"
         );
+    }
+
+    /// A `since` passed beside a `query` URI goes where a URI's own tag
+    /// goes: before `!fresh`, and in place of a tag the URI carries.
+    ///
+    /// Appended after either, it left `!fresh` or the first tag inside the
+    /// URI, which then named no resource.
+    ///
+    /// # Panics
+    ///
+    /// When a tagged URI differs.
+    #[test]
+    fn a_tag_goes_where_a_uri_reader_takes_it_off() {
+        let tag = Tag::parse("1234abcd").expect("a tag");
+        for (uri, tagged) in [
+            ("borer://qt", "borer://qt!since=1234abcd"),
+            ("borer://qt!fresh", "borer://qt!since=1234abcd!fresh"),
+            ("borer://qt!since=0000beef", "borer://qt!since=1234abcd"),
+            (
+                "borer://qt!since=0000beef!fresh",
+                "borer://qt!since=1234abcd!fresh",
+            ),
+        ] {
+            assert_eq!(super::tagged_uri(uri, tag), tagged, "{uri}");
+        }
     }
 }
