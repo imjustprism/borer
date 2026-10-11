@@ -168,6 +168,48 @@ fn an_unsigned_operation_on_a_sign_extension_casts_it_unsigned() {
     );
 }
 
+/// A term of an address that lands on a zero byte keeps its number: a
+/// table's leading zero is no empty string, and even a real one holds a
+/// single byte no index reads text past.
+///
+/// `lea rdx,[0x140002011]; movzx eax,byte [rcx+rdx-1]; ret` reads the byte
+/// table at `0x140002011` from one byte before it: once a zero then `03 00
+/// 5a`, and once the empty string the literal `"AB"` ends just before.
+///
+/// # Panics
+///
+/// When the address renders as `""`.
+#[test]
+fn an_address_term_on_a_zero_byte_is_no_empty_string() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let code = [
+        0x48, 0x8d, 0x15, 0x0a, 0x10, 0x00, 0x00, // ASM: lea rdx,[rip+0x100a]
+        0x0f, 0xb6, 0x44, 0x11, 0xff, // ASM: movzx eax,byte [rcx+rdx-1]
+        0xc3, // ASM: ret
+    ];
+    let tables: [(usize, &[u8]); 2] = [(0x1010, &[0, 3, 0, 0x5a]), (0x100d, b"AB\0\0\x03")];
+    for (at, table) in tables {
+        let mut bytes = vec![0u8; 0x2000];
+        bytes[..code.len()].copy_from_slice(&code);
+        bytes[at..at + table.len()].copy_from_slice(table);
+        let mut p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0x1_4000_0000,
+            Some(0x1_4000_1000),
+            vec![
+                Section::mapped(".text", 0x1_4000_1000, 0, 0x1000, false, true),
+                Section::mapped(".rdata", 0x1_4000_2000, 0x1000, 0x1000, false, false),
+            ],
+        );
+        p.format = BinaryFormat::Pe;
+        let a = Analysis::compute(&p);
+        let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+        assert!(!text.contains("\"\""), "{table:?}: {text}");
+        assert!(text.contains("0x140002010"), "{table:?}: {text}");
+    }
+}
+
 /// A 32-bit load widened into a 64-bit range ladder keeps its unsigned
 /// reading.
 ///

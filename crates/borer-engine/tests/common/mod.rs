@@ -542,8 +542,9 @@ use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 /// * `NR` 0x4da0: `mov eax, 5; imul eax, ecx; ret`, called only by `NRC`
 ///   0x4dc0: `call NR; xor eax, eax; ret` (pointer-seeded from 0x2d88).
 ///   The one caller drops the result `NR` computes itself.
-/// * `ES` 0x4de0: `lea rax, [0x2f60]; ret` over a lone terminator in
-///   read-only data (pointer-seeded from 0x2d90): the empty string.
+/// * `ES` 0x4de0: `lea rax, [0x2f60]; ret` over a lone terminator the
+///   literal `"ok"` follows in read-only data, as in a string pool
+///   (pointer-seeded from 0x2d90): the empty string.
 /// * `TB` 0x4e00: `lea rax, [0x2f80]; ret` over `" \t-+0"` (pointer-seeded
 ///   from 0x2d98): a charset table, the shape a number parser carries.
 /// * `LKC` 0x4e20 (`Lk::Chk`): `DC2`'s shape with the condition
@@ -3721,7 +3722,7 @@ fn data_bytes(bytes: &mut [u8]) {
     put_rdata(bytes, 0x2d78, &0x4d80u64.to_le_bytes());
     put_rdata(bytes, 0x2d80, &0x4d90u64.to_le_bytes());
     put_rdata(bytes, 0x2d88, &0x4dc0u64.to_le_bytes());
-    put_rdata(bytes, 0x2f60, b"\0");
+    put_rdata(bytes, 0x2f60, b"\0ok\0");
     put_rdata(bytes, 0x2d90, &0x4de0u64.to_le_bytes());
     put_rdata(bytes, 0x2da0, &0x4e20u64.to_le_bytes());
     put_rdata(bytes, 0x2da8, &0x4e50u64.to_le_bytes());

@@ -369,8 +369,10 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
             .is_some_and(|b| {
                 b.first().is_some_and(|c| (0x20..0x7f).contains(c)) && b.get(1) == Some(&0)
             });
-        return (head.get(1).is_some_and(|b| *b != 0) || after_a_literal)
-            .then(|| String::from("\"\""));
+        let before_a_literal = head
+            .get(1)
+            .is_some_and(|b| crate::strings::literal_byte(*b));
+        return (before_a_literal || after_a_literal).then(|| String::from("\"\""));
     }
     let min = if section.writable { MIN } else { MIN_RODATA };
     // A C string is null-terminated; a printable run that ends on a non-zero
@@ -2505,6 +2507,25 @@ g(tmp_5);";
             "a pointer's printable low bytes rendered as a string"
         );
         assert_eq!(super::string_at(&p, 0x2010).as_deref(), Some("\"hello\""));
+    }
+
+    /// A zero byte is the empty string only beside another literal.
+    ///
+    /// The last byte of a pointer followed by a bytecode table (`00 03 00
+    /// 5a`) is no string pool, so it keeps its address; a terminator the
+    /// next literal follows (`00 "AB" 00`) or the previous one ends is `""`.
+    #[test]
+    fn a_zero_before_a_table_is_no_empty_string() {
+        use crate::program::{Arch, Program, Section};
+        let mut bytes = vec![0u8; 0x1000];
+        bytes[0x10..0x14].copy_from_slice(&[0x00, 0x03, 0x00, 0x5a]);
+        bytes[0x20..0x24].copy_from_slice(b"\0AB\0");
+        bytes[0x30..0x34].copy_from_slice(b"AB\0\0");
+        let rdata = Section::mapped(".rdata", 0x2000, 0, 0x1000, false, false);
+        let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
+        assert_eq!(super::string_at(&p, 0x2010), None);
+        assert_eq!(super::string_at(&p, 0x2020).as_deref(), Some("\"\""));
+        assert_eq!(super::string_at(&p, 0x2033).as_deref(), Some("\"\""));
     }
 
     /// The accesses through a pointer name what it points at.

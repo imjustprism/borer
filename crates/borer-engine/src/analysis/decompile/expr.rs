@@ -2590,6 +2590,16 @@ impl Names<'_> {
                 .is_some_and(|l| !matches!(l.as_str(), "\"\"" | "L\"\""))
     }
 
+    /// Tells whether the literal at a constant is the empty string.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The constant.
+    fn empty_literal(&self, v: u64) -> bool {
+        super::literal_at(self.program, v, &self.own_name)
+            .is_some_and(|l| matches!(l.as_str(), "\"\"" | "L\"\""))
+    }
+
     /// Returns the bare import name whose IAT slot is `addr`: demangled,
     /// without the `dll!` prefix, so a call through the slot reads as
     /// `QString::QString` and not `??0QString@@QAE@PBD@Z`.
@@ -3121,13 +3131,15 @@ impl Expr {
                 // any other operator applies is no string literal unless it
                 // is a term of an address loaded through, or the first
                 // character of a string a sum indexes (`i * 3 +
-                // "SunMonTue"`).
+                // "SunMonTue"`); the empty string is a lone terminator no
+                // sum indexes, so a term landing on one keeps its address.
                 let indexes = |v: u64| matches!(op, Op::Add | Op::Sub) && n.starts_string(v);
                 let operand = |e: &Expr| match e {
                     Expr::Const(v) if op.hex_operands() => {
                         (render_const_in(*v, true, n.word), ATOM)
                     }
                     Expr::Const(v) if !sum && !indexes(*v) => number(e, n, hexo),
+                    Expr::Const(v) if sum && n.empty_literal(*v) => number(e, n, hexo),
                     _ => e.render_in(n, hexo, sum, inner),
                 };
                 let (ls, lp) = match (op, &**l) {
