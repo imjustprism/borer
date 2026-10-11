@@ -6011,23 +6011,29 @@ mod tests {
             pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
             ..super::BorerServer::default()
         };
-        let stars = format!("u8 {}", "*".repeat(20_000));
-        for (name, address) in [(Some("Stars".to_owned()), None), (None, Some("0x2000"))] {
-            let refused = server
+        let refuse = |name: Option<&str>, address: Option<&str>, ty: &str| {
+            server
                 .set_type(Parameters(SetTypeParams {
-                    name,
+                    name: name.map(str::to_owned),
                     fields: None,
                     values: None,
                     size: None,
                     address: address.map(str::to_owned),
-                    r#type: Some(stars.clone()),
+                    r#type: Some(ty.to_owned()),
                     dry_run: None,
                 }))
-                .expect_err("a type of twenty thousand pointers was accepted");
+                .expect_err("a type too deep to walk was accepted")
+                .message
+        };
+        let deep = format!("u8 {}", "*".repeat(17));
+        let long = format!("u8 {}", "*".repeat(20_000));
+        for (name, address) in [(Some("Stars"), None), (None, Some("0x2000"))] {
+            let refused = refuse(name, address, &deep);
+            assert!(refused.contains("stacks 17 pointers"), "{refused}");
+            let refused = refuse(name, address, &long);
             assert!(
-                refused.message.contains("stacks 20000 pointers"),
-                "{}",
-                refused.message
+                refused.contains("the type is 20003 characters"),
+                "{refused}"
             );
         }
     }
