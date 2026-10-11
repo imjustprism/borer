@@ -5,10 +5,13 @@ use std::path::Path;
 
 use borer_engine::analysis::Overlay;
 use borer_engine::analysis::utypes::UserType;
+use borer_engine::program::Program;
 
 /// A saved annotation overlay: the binary it belongs to, its names,
 /// comments and user-defined types, keyed by `0x`-hex address text where an
 /// address keys them (editable by hand).
+///
+/// A key may also be decimal; one that is not an address refuses the file.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProjectFile {
     /// Path of the binary the annotations belong to.
@@ -40,7 +43,67 @@ fn by_hex(map: &BTreeMap<u64, String>) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Keys annotations by address again; an unparsable key maps to `0`.
+/// Most keys a refusal of unreadable keys names before it counts the rest.
+const BAD_KEYS_SHOWN: usize = 8;
+
+/// Reads a table's address keys, refusing any key that is not an address.
+///
+/// A key reads as an address argument does
+/// ([`borer_engine::analysis::parse_addr`]): `0x`-hex as [`by_hex`] writes
+/// it, plain digits as decimal, bare hex with a letter as hex. A key that
+/// reads as none of those, or two keys that name one address, refuse the
+/// file: mapping either to some address anyway would put an annotation
+/// where nobody stated one.
+///
+/// # Arguments
+///
+/// * `table` - Which table the keys key (`names`), for the message.
+/// * `map` - Entries by address text.
+///
+/// # Returns
+///
+/// Each entry's key text and value by the address the key names.
+///
+/// # Errors
+///
+/// Naming the keys that are not addresses, or the two keys that name one
+/// address.
+fn keyed<'m>(
+    table: &str,
+    map: &'m BTreeMap<String, String>,
+) -> Result<BTreeMap<u64, (&'m str, &'m str)>, String> {
+    let mut out: BTreeMap<u64, (&str, &str)> = BTreeMap::new();
+    let mut bad: Vec<String> = Vec::new();
+    for (k, v) in map {
+        let Some(va) = borer_engine::analysis::parse_addr(k) else {
+            bad.push(borer_engine::text::quoted(k));
+            continue;
+        };
+        if let Some((first, _)) = out.insert(va, (k, v)) {
+            return Err(format!(
+                "{table} keys {} and {} both name {va:#x}; keep one",
+                borer_engine::text::quoted(first),
+                borer_engine::text::quoted(k)
+            ));
+        }
+    }
+    if bad.is_empty() {
+        return Ok(out);
+    }
+    let more = bad.len().saturating_sub(BAD_KEYS_SHOWN);
+    let tail = match (bad.len(), more) {
+        (1, _) => " is".to_owned(),
+        (_, 0) => " are".to_owned(),
+        (_, more) => format!(" and {more} more are"),
+    };
+    Err(format!(
+        "{table} key{} {}{tail} not an address; a key is 0x-hex as save_project writes it, or decimal",
+        if bad.len() == 1 { "" } else { "s" },
+        bad[..bad.len().min(BAD_KEYS_SHOWN)].join(", "),
+    ))
+}
+
+/// Keys annotations by address again ([`keyed`]), escaping their text.
 ///
 /// A project file is edited and passed around like any other file, so the
 /// text in it comes from outside and is escaped the way the names in a
@@ -48,16 +111,62 @@ fn by_hex(map: &BTreeMap<u64, String>) -> BTreeMap<String, String> {
 ///
 /// # Arguments
 ///
-/// * `map` - Annotations by `0x`-hex address text.
-fn by_address(map: &BTreeMap<String, String>) -> BTreeMap<u64, String> {
-    map.iter()
-        .map(|(k, v)| {
-            (
-                u64::from_str_radix(k.trim_start_matches("0x"), 16).unwrap_or(0),
-                borer_engine::text::one_line(v),
-            )
-        })
-        .collect()
+/// * `table` - Which table it is (`names`, `comments`), for the message.
+/// * `map` - Annotations by address text.
+///
+/// # Returns
+///
+/// The annotations by address.
+///
+/// # Errors
+///
+/// As [`keyed`].
+fn by_address(
+    table: &str,
+    map: &BTreeMap<String, String>,
+) -> Result<BTreeMap<u64, String>, String> {
+    Ok(keyed(table, map)?
+        .into_iter()
+        .map(|(va, (_, v))| (va, borer_engine::text::one_line(v)))
+        .collect())
+}
+
+/// Leaves out of an overlay what `set_name`, `set_comment` and `set_type`
+/// refuse of the loaded binary: an annotation at an address no section
+/// holds, and a blank name or comment.
+///
+/// A project file is edited by hand and may be loaded into a binary other
+/// than the one it was saved for; an annotation outside every section would
+/// sit in the overlay and never be shown, and a blank name names nothing.
+///
+/// # Arguments
+///
+/// * `o` - The overlay a project file rebuilt; left holding what fits.
+/// * `program` - The loaded binary.
+///
+/// # Returns
+///
+/// What was left out, one `name at 0x0 (in no section)` entry per
+/// annotation: names, then comments, then applied types, each in address
+/// order.
+pub fn keep_placeable(o: &mut Overlay, program: &Program) -> Vec<String> {
+    let mut left_out: Vec<String> = Vec::new();
+    let mut keep = |what: &str, va: u64, text: Option<&str>| {
+        let why = if program.section_at(va).is_none() {
+            "in no section"
+        } else if text.is_some_and(|t| t.trim().is_empty()) {
+            "blank"
+        } else {
+            return true;
+        };
+        left_out.push(format!("{what} at {va:#x} ({why})"));
+        false
+    };
+    o.names.retain(|&va, n| keep("name", va, Some(n.as_str())));
+    o.comments
+        .retain(|&va, c| keep("comment", va, Some(c.as_str())));
+    o.applied.retain(|&va, _| keep("type", va, None));
+    left_out
 }
 
 impl ProjectFile {
@@ -83,12 +192,13 @@ impl ProjectFile {
 
     /// Rebuilds the overlay.
     ///
-    /// An unparsable address key maps to `0` and the annotation text is
-    /// escaped to one line ([`by_address`]); the applied types are parsed
-    /// and the whole set of types checked ([`borer_engine::analysis::utypes::validate`]),
-    /// so a hand-edited file that names a type nothing states, or states
-    /// one in a form the language does not spell, is refused here with a
-    /// message naming it rather than silently naming no fields.
+    /// Every address key must read as an address and no two may name one
+    /// ([`keyed`]), and the annotation text is escaped to one line
+    /// ([`by_address`]); the applied types are parsed and the whole set of
+    /// types checked ([`borer_engine::analysis::utypes::validate`]), so a
+    /// hand-edited file that names a type nothing states, or states one in
+    /// a form the language does not spell, is refused here with a message
+    /// naming it rather than silently naming no fields.
     ///
     /// # Returns
     ///
@@ -96,21 +206,22 @@ impl ProjectFile {
     ///
     /// # Errors
     ///
-    /// When an applied type does not parse or a defined type's references
-    /// do not resolve.
+    /// When a key is not an address or two keys name one, an applied type
+    /// does not parse, or a defined type's references do not resolve.
     pub fn to_overlay(&self) -> Result<Overlay, String> {
         let mut applied: BTreeMap<u64, borer_engine::analysis::utypes::TypeExpr> = BTreeMap::new();
-        for (k, v) in &self.applied {
-            let ty = borer_engine::analysis::utypes::parse_type(v)
-                .map_err(|e| format!("the type applied at {k}, {v}, {e}"))?;
-            applied.insert(
-                u64::from_str_radix(k.trim_start_matches("0x"), 16).unwrap_or(0),
-                ty,
-            );
+        for (va, (_, v)) in keyed("applied", &self.applied)? {
+            let ty = borer_engine::analysis::utypes::parse_type(v).map_err(|e| {
+                format!(
+                    "the type applied at {va:#x}, {}, {e}",
+                    borer_engine::text::quoted(v)
+                )
+            })?;
+            applied.insert(va, ty);
         }
         let o = Overlay {
-            names: by_address(&self.names),
-            comments: by_address(&self.comments),
+            names: by_address("names", &self.names)?,
+            comments: by_address("comments", &self.comments)?,
             types: self.types.clone(),
             applied,
             ..Overlay::default()
@@ -118,6 +229,26 @@ impl ProjectFile {
         borer_engine::analysis::utypes::validate(&o.types, &o.applied)
             .map_err(|e| e.to_string())
             .map(|_| o)
+    }
+
+    /// Tells whether the project was saved for the binary at `path`.
+    ///
+    /// The file records the path its binary was loaded from, so the two
+    /// match when the text is the same or both name one file on disk (one
+    /// path spelled two ways). A device in the file is never opened.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Where the loaded binary was loaded from.
+    #[must_use]
+    pub fn is_for(&self, path: &Path) -> bool {
+        let saved = Path::new(&self.program);
+        saved == path
+            || (borer_engine::program::unusable_path(saved).is_none()
+                && matches!(
+                    (std::fs::canonicalize(saved), std::fs::canonicalize(path)),
+                    (Ok(a), Ok(b)) if a == b
+                ))
     }
 
     /// Writes the file as pretty-printed JSON.

@@ -2837,7 +2837,17 @@ impl BorerServer {
         ))
     }
 
-    /// Loads a JSON project file into the overlay.
+    /// Loads a JSON project file into the overlay, replacing it.
+    ///
+    /// A project's addresses belong to the binary it was saved for, and
+    /// loading replaces every annotation the session holds, so a project
+    /// saved for another binary ([`borer::project::ProjectFile::is_for`]) is
+    /// refused, leaving the overlay as it was, unless `force` says to load
+    /// it anyway. Either way the annotations `set_name`, `set_comment` and
+    /// `set_type` would refuse of the loaded binary, at an address no
+    /// section holds or with blank text, are skipped and listed
+    /// ([`borer::project::keep_placeable`]), and the counts said are of what
+    /// the overlay then holds.
     ///
     /// # Arguments
     ///
@@ -2845,9 +2855,11 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// Invalid params when no binary is loaded or the file does not parse.
+    /// Invalid params when no binary is loaded, the file does not parse or
+    /// states something the overlay cannot hold, or it was saved for
+    /// another binary and `force` is not set.
     #[tool(
-        description = "Load a JSON project file into the annotation overlay (warns when it was saved for another binary).",
+        description = "Load a JSON project file into the annotation overlay, replacing it. A project saved for another binary (by path) is refused unless force=true; names, comments and types at addresses no section holds, or blank, are skipped and listed.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2857,25 +2869,47 @@ impl BorerServer {
     )]
     fn load_project(
         &self,
-        Parameters(LoadProjectParams { path }): Parameters<LoadProjectParams>,
+        Parameters(LoadProjectParams { path, force }): Parameters<LoadProjectParams>,
     ) -> Result<String, ErrorData> {
+        /// Most left-out annotations the answer names before counting the rest.
+        const LEFT_OUT_SHOWN: usize = 8;
         let program = self.require_loaded()?;
         let pf = borer::project::ProjectFile::load(&path).map_err(err_params)?;
-        let n = pf.names.len();
-        let c = pf.comments.len();
-        let t = pf.types.len();
-        let note = if pf.program == program.path.display().to_string() {
-            String::new()
-        } else {
-            format!(
-                " (note: project was saved for {})",
-                borer_engine::text::one_line(&pf.program)
-            )
-        };
-        let loaded = pf.to_overlay().map_err(err_params)?;
+        let foreign = !pf.is_for(&program.path);
+        let saved_for = borer_engine::text::short_path(&pf.program);
+        if foreign && !force.unwrap_or(false) {
+            return Err(err_params(format!(
+                "the project was saved for {saved_for}, but {} is loaded; nothing was loaded. Its addresses belong to that binary: load it first, or pass force=true to load the project anyway",
+                borer_engine::text::short_path(&program.path.display().to_string())
+            )));
+        }
+        let mut loaded = pf.to_overlay().map_err(err_params)?;
+        let left_out = borer::project::keep_placeable(&mut loaded, &program);
+        let mut said = format!(
+            "loaded {} names + {} comments + {} types + {} applied\n",
+            loaded.names.len(),
+            loaded.comments.len(),
+            loaded.types.len(),
+            loaded.applied.len()
+        );
+        if !left_out.is_empty() {
+            let shown = left_out.len().min(LEFT_OUT_SHOWN);
+            let _ = writeln!(
+                said,
+                "# skipped {total} (showing {shown} of {total}): {}",
+                left_out[..shown].join(", "),
+                total = left_out.len()
+            );
+        }
+        if foreign {
+            let _ = writeln!(
+                said,
+                "# forced: the project was saved for {saved_for}, so its names may sit on other code here"
+            );
+        }
         *write_lock(&self.overlay) = loaded;
         self.names_changed();
-        Ok(format!("loaded {n} names + {c} comments + {t} types{note}"))
+        Ok(said)
     }
 
     /// Lists every overlay entry.
@@ -5579,6 +5613,97 @@ mod tests {
                 refused.message
             );
         }
+    }
+
+    /// `load_project` holds a project to what the annotating tools accept
+    /// and refuses one saved for another binary unless forced.
+    ///
+    /// A name or comment at an address no section holds, a blank one and a
+    /// type applied outside every section are skipped and listed, and the
+    /// counts said are of what the overlay then holds; a project saved for
+    /// another path is refused and leaves the overlay as it was, and with
+    /// `force` it loads and says so.
+    ///
+    /// # Panics
+    ///
+    /// When an entry no section holds is loaded, the counts miss, or a
+    /// foreign project loads unforced.
+    #[test]
+    fn load_project_skips_what_set_name_refuses_and_guards_another_binary() {
+        use super::{LoadProjectParams, Parameters};
+        use borer_engine::program::{Arch, Program, Section};
+        let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
+        let data = Section::mapped(".data", 0x2000, 0x100, 0x100, true, false);
+        let program = Program::raw(
+            vec![0xcc; 0x200],
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![text, data],
+        );
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let dir = std::env::temp_dir().join(format!("borer-load-project-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let write = |name: &str, program: &str| {
+            let path = dir.join(name);
+            let json = format!(
+                r#"{{"program":"{program}","names":{{"0x1010":"f","0x0":"zero","0x5000":"far"}},"comments":{{"0x2000":"c","0x2004":"   "}},"applied":{{"0x9000":"u32"}}}}"#
+            );
+            std::fs::write(&path, json).expect("the project is written");
+            path.display().to_string()
+        };
+        let load = |path: String, force: Option<bool>| {
+            server.load_project(Parameters(LoadProjectParams { path, force }))
+        };
+        let out = load(write("same.json", ""), None).expect("loads");
+        assert!(
+            out.starts_with("loaded 1 names + 1 comments + 0 types + 0 applied\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "# skipped 4 (showing 4 of 4): name at 0x0 (in no section), name at 0x5000 (in no section), comment at 0x2004 (blank), type at 0x9000 (in no section)"
+            ),
+            "{out}"
+        );
+        let held = || {
+            let o = super::read_lock(&server.overlay);
+            (
+                o.names.keys().copied().collect::<Vec<_>>(),
+                o.comments.keys().copied().collect::<Vec<_>>(),
+                o.applied.len(),
+            )
+        };
+        assert_eq!(held(), (vec![0x1010], vec![0x2000], 0));
+        super::write_lock(&server.overlay).names.clear();
+        let foreign = write("foreign.json", "C:/elsewhere/other.exe");
+        let refused = load(foreign.clone(), None).expect_err("a foreign project loaded");
+        assert!(
+            refused
+                .message
+                .contains("the project was saved for C:/elsewhere/other.exe"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("force=true"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(held(), (vec![], vec![0x2000], 0));
+        let forced = load(foreign, Some(true)).expect("a forced load loads");
+        assert!(forced.starts_with("loaded 1 names"), "{forced}");
+        assert!(
+            forced.contains("# forced: the project was saved for C:/elsewhere/other.exe"),
+            "{forced}"
+        );
+        assert_eq!(held(), (vec![0x1010], vec![0x2000], 0));
     }
 
     /// The `script` tool runs inline code and applies only on request.

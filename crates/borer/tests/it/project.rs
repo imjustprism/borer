@@ -136,3 +136,79 @@ fn a_hostile_project_refuses_its_types() {
         assert!(err.contains(names_garbage), "{name}: {err}");
     }
 }
+
+/// Address keys read as an address argument does: `0x`-hex, or plain
+/// digits as decimal. A key that is not an address, or two keys naming one
+/// address, refuse the file with a message naming the keys.
+///
+/// An unparsable key once loaded as `0x0` and a decimal one as hex, and the
+/// load reported every entry of the file as loaded.
+#[test]
+fn a_project_refuses_keys_that_are_not_addresses() {
+    let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let load = |name: &str, json: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, json).unwrap();
+        ProjectFile::load(path.to_str().unwrap())
+            .unwrap()
+            .to_overlay()
+    };
+    let decimal = load(
+        "decimal.json",
+        r#"{"program":"b","names":{"5368713316":"dec","0x140001070":"hex"},"comments":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        decimal.names.into_iter().collect::<Vec<_>>(),
+        vec![
+            (0x1_4000_1064, "dec".to_owned()),
+            (0x1_4000_1070, "hex".to_owned())
+        ]
+    );
+    let bad = load(
+        "badkey.json",
+        r#"{"program":"b","names":{"notanaddr":"n1","0xZZZ":"n2","":"n3","0x10":"ok"},"comments":{}}"#,
+    )
+    .expect_err("unparsable keys loaded");
+    assert!(
+        bad.contains("names keys '', '0xZZZ', 'notanaddr' are not an address"),
+        "{bad}"
+    );
+    let comment = load(
+        "badcomment.json",
+        r#"{"program":"b","names":{},"comments":{"here":"c"}}"#,
+    )
+    .expect_err("an unparsable comment key loaded");
+    assert!(
+        comment.contains("comments key 'here' is not an address"),
+        "{comment}"
+    );
+    let applied = load(
+        "badapplied.json",
+        r#"{"program":"b","names":{},"comments":{},"applied":{"g_x":"u32"}}"#,
+    )
+    .expect_err("an unparsable applied key loaded");
+    assert!(applied.contains("applied key 'g_x'"), "{applied}");
+    let twice = load(
+        "twice.json",
+        r#"{"program":"b","names":{"0x140001064":"hex","5368713316":"dec"},"comments":{}}"#,
+    )
+    .expect_err("two keys naming one address loaded");
+    assert!(twice.contains("both name 0x140001064"), "{twice}");
+}
+
+/// A project is for the binary at the path it records, however that path
+/// is spelled, and for no other.
+#[test]
+fn a_project_is_for_the_file_it_was_saved_for() {
+    let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let bin = dir.join("bin.exe");
+    std::fs::write(&bin, b"MZ").unwrap();
+    let pf = ProjectFile::from_overlay(&bin.display().to_string(), &Overlay::default());
+    assert!(pf.is_for(&bin));
+    assert!(pf.is_for(&dir.join("sub").join("..").join("bin.exe")));
+    assert!(!pf.is_for(&dir.join("other.exe")));
+    assert!(!ProjectFile::from_overlay("con", &Overlay::default()).is_for(&bin));
+}

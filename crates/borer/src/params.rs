@@ -615,6 +615,9 @@ pub(crate) struct SaveProjectParams {
 pub(crate) struct LoadProjectParams {
     /// Project JSON path.
     pub(crate) path: String,
+    /// Load a project saved for another binary anyway (default false, which
+    /// refuses one and leaves the overlay as it was).
+    pub(crate) force: Option<bool>,
 }
 
 /// Parameters for `live_attach`.
