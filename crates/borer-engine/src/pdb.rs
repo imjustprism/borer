@@ -183,7 +183,9 @@ impl Outcome {
 /// server client caches under a root the caller names, last, so a build
 /// tree or a shipped file always wins over a download. Nothing relative to
 /// the working directory is tried, which would make the answer depend on
-/// where the engine was run from.
+/// where the engine was run from. The file name is what follows the last
+/// `\` or `/`, since a record written on Windows names a Windows path that
+/// another host's [`Path`] reads as one component.
 ///
 /// # Arguments
 ///
@@ -202,7 +204,8 @@ fn candidates(record: &Record, binary: &Path, symsrv: Option<&Path>) -> Vec<Path
     if recorded.is_absolute() {
         out.push(recorded.to_path_buf());
     }
-    if let Some(name) = recorded.file_name() {
+    let name = record.path.rsplit(['/', '\\']).next().unwrap_or_default();
+    if !matches!(name, "" | "." | "..") {
         if let Some(dir) = binary.parent() {
             out.push(dir.join(name));
         }
@@ -1462,36 +1465,42 @@ mod tests {
     /// The recorded path, the binary's directory and the cache are the
     /// candidates, in that order.
     ///
+    /// A recorded Windows path is absolute only where Windows reads it, and
+    /// the sibling takes its file name from it on every host.
+    ///
     /// # Panics
     ///
     /// When the order differs or a working-directory-relative path sneaks
     /// in.
     #[test]
     fn the_record_names_three_places_and_no_others() {
-        let binary = Path::new(r"D:\bin\app.exe");
+        let dir = Path::new("bin");
+        let binary = dir.join("app.exe");
         let record = Record {
             path: r"C:\build\app.pdb".to_owned(),
             guid: [0; 16],
             age: 1,
         };
-        assert_eq!(
-            candidates(&record, binary, None),
-            vec![
-                Path::new(r"C:\build\app.pdb").to_path_buf(),
-                Path::new(r"D:\bin\app.pdb").to_path_buf(),
-            ]
-        );
+        let mut expected = Vec::new();
+        if cfg!(windows) {
+            expected.push(Path::new(r"C:\build\app.pdb").to_path_buf());
+        }
+        expected.push(dir.join("app.pdb"));
+        assert_eq!(candidates(&record, &binary, None), expected);
         // A relative record names only the sibling and the cache, never a
         // working directory, which would make the answer depend on where
         // the engine ran from.
         let mut relative = record;
         relative.path = r"build\app.pdb".to_owned();
+        let cache = Path::new("cache");
         assert_eq!(
-            candidates(&relative, binary, Some(Path::new(r"D:\cache"))),
+            candidates(&relative, &binary, Some(cache)),
             vec![
-                Path::new(r"D:\bin\app.pdb").to_path_buf(),
-                Path::new(r"D:\cache\app.pdb\000000000000000000000000000000001\app.pdb")
-                    .to_path_buf(),
+                dir.join("app.pdb"),
+                cache
+                    .join("app.pdb")
+                    .join("000000000000000000000000000000001")
+                    .join("app.pdb"),
             ]
         );
     }
