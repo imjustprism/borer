@@ -2819,19 +2819,29 @@ impl Names<'_> {
 
 /// Renders an IEEE-754 constant as a C literal (`0.5f`, `2.0`, `NAN`, `-INFINITY`).
 ///
+/// A value whose decimal digits run long is written with an exponent
+/// (`6.02e23`). One far outside any quantity a program computes with, a
+/// subnormal or an exponent of 2 past +-256 for a `double` (+-64 for a
+/// `float`), is almost always other bytes moved through a float register
+/// (eight bytes of a wide string copied with `movsd`), so it is written as
+/// the C99 hexadecimal literal of its exact bits, `0x1.0074006e0065p-1016`,
+/// where the bytes still show.
+///
 /// # Arguments
 ///
 /// * `bits` - The bit pattern (low 32 bits for a `float`).
 /// * `ty` - [`Ty::F32`] or [`Ty::F64`]; anything else renders the bits in hex.
 fn render_fconst(bits: u64, ty: Ty) -> String {
-    let (value, text, suffix) = match ty {
+    /// Longest decimal spelling kept without an exponent.
+    const DECIMAL_MAX: usize = 24;
+    let (value, text, sci, suffix) = match ty {
         Ty::F32 => {
-            let f = f32::from_bits(u32::try_from(bits & 0xffff_ffff).unwrap_or(0));
-            (f64::from(f), format!("{f}"), "f")
+            let f = f32::from_bits(lo32(bits));
+            (f64::from(f), format!("{f}"), format!("{f:e}"), "f")
         }
         Ty::F64 => {
             let f = f64::from_bits(bits);
-            (f, format!("{f}"), "")
+            (f, format!("{f}"), format!("{f:e}"), "")
         }
         Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => return format!("{bits:#x}"),
     };
@@ -2841,12 +2851,67 @@ fn render_fconst(bits: u64, ty: Ty) -> String {
     if value.is_infinite() {
         return if value > 0.0 { "INFINITY" } else { "-INFINITY" }.to_owned();
     }
-    let mut s = text;
-    if !s.contains(['.', 'e']) {
+    let mut s = match wild_float(bits, ty) {
+        Some(hex) => hex,
+        None if text.len() > DECIMAL_MAX => sci,
+        None => text,
+    };
+    if !s.contains(['.', 'e', 'p']) {
         s.push_str(".0");
     }
     s.push_str(suffix);
     s
+}
+
+/// The C99 hexadecimal literal of a finite float far outside any quantity
+/// a program computes with ([`render_fconst`]).
+///
+/// # Arguments
+///
+/// * `bits` - The bit pattern (low 32 bits for a `float`).
+/// * `ty` - [`Ty::F32`] or [`Ty::F64`].
+///
+/// # Returns
+///
+/// `0x1.<fraction>p<exponent>`, or `0x0.<fraction>p<exponent>` for a
+/// subnormal; `None` for zero, a value within reach of 1, or an integer
+/// type.
+fn wild_float(bits: u64, ty: Ty) -> Option<String> {
+    let (negative, exp, frac, digits, bias, reach) = match ty {
+        Ty::F32 => {
+            let b = u64::from(lo32(bits));
+            (
+                b >> 31 != 0,
+                (b >> 23) & 0xff,
+                (b & 0x7f_ffff) << 1,
+                6,
+                127,
+                64,
+            )
+        }
+        Ty::F64 => (
+            bits >> 63 != 0,
+            (bits >> 52) & 0x7ff,
+            bits & 0xf_ffff_ffff_ffff,
+            13,
+            1023,
+            256,
+        ),
+        Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => return None,
+    };
+    if (exp == 0 && frac == 0) || (exp != 0 && exp.abs_diff(bias) <= reach) {
+        return None;
+    }
+    let (lead, power) = if exp == 0 {
+        (0, 1 - bias.cast_signed())
+    } else {
+        (1, exp.cast_signed() - bias.cast_signed())
+    };
+    let fraction = format!("{frac:0digits$x}");
+    let fraction = fraction.trim_end_matches('0');
+    let dot = if fraction.is_empty() { "" } else { "." };
+    let sign = if negative { "-" } else { "" };
+    Some(format!("{sign}0x{lead}{dot}{fraction}p{power}"))
 }
 
 /// Returns the C type a cast to `ty` spells: floats by name, integers as
@@ -4473,6 +4538,29 @@ mod tests {
     }
 
     use super::{Expr, Key, Op, compact_literal, vector_equality};
+
+    /// A float constant renders compactly, never as a 336-character decimal.
+    ///
+    /// A value with many digits takes an exponent, and the bytes of a wide
+    /// string moved through `movsd` (or a subnormal) take the exact
+    /// hexadecimal literal.
+    #[test]
+    fn float_constants_render_compactly() {
+        use super::{Ty, render_fconst};
+        let f64s = |v: f64| render_fconst(v.to_bits(), Ty::F64);
+        assert_eq!(f64s(2.0), "2.0");
+        assert_eq!(f64s(0.1), "0.1");
+        assert_eq!(f64s(-1.5), "-1.5");
+        assert_eq!(f64s(1e30), "1e30");
+        assert_eq!(f64s(1.25e-25), "1.25e-25");
+        assert_eq!(
+            render_fconst(0x0073_0074_006e_0065, Ty::F64),
+            "0x1.30074006e0065p-1016"
+        );
+        assert_eq!(render_fconst(1, Ty::F64), "0x0.0000000000001p-1022");
+        assert_eq!(render_fconst(0x41, Ty::F32), "0x0.000082p-126f");
+        assert_eq!(render_fconst(0x3f80_0000, Ty::F32), "1.0f");
+    }
 
     /// Builds the gathered-mask expression a fixed string compare produces.
     ///

@@ -350,10 +350,13 @@ pub(super) fn tokens(text: &str) -> Result<Vec<Tok>, String> {
             let hex = rest.starts_with("0x") || rest.starts_with("0X");
             let mut len = 0;
             while let Some(&d) = bytes.get(len) {
-                let exponent_sign = !hex
-                    && matches!(d, b'+' | b'-')
+                let exponent_sign = matches!(d, b'+' | b'-')
                     && len > 0
-                    && matches!(bytes.get(len - 1), Some(b'e' | b'E'));
+                    && match bytes.get(len - 1) {
+                        Some(b'p' | b'P') => hex,
+                        Some(b'e' | b'E') => !hex,
+                        _ => false,
+                    };
                 if !(d.is_ascii_alphanumeric() || d == b'.' || d == b'_' || exponent_sign) {
                     break;
                 }
@@ -407,6 +410,46 @@ pub(super) fn tokens(text: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
+/// Reads a C99 hexadecimal floating literal from its parts: `1.8` and `-3`
+/// of `0x1.8p-3`.
+///
+/// The digits are an integer of at most 53 bits, exact as a `double`, and
+/// each step scaling it is a power of two, exact while the value is one a
+/// `double` holds, which every literal borer prints is.
+///
+/// # Arguments
+///
+/// * `mantissa` - The hexadecimal digits, with at most one `.`.
+/// * `exponent` - The binary exponent, signed decimal.
+///
+/// # Returns
+///
+/// The value, or `None` when a part does not read or the digits pass 53
+/// bits.
+fn hex_float(mantissa: &str, exponent: &str) -> Option<f64> {
+    /// The largest power of two one scaling step multiplies by.
+    const STEP: i32 = 1000;
+    /// The widest scaling read: past it every `double` is zero or infinite.
+    const SCALE_MAX: u32 = 1 << 12;
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let m = u64::from_str_radix(&format!("{int}{frac}"), 16).ok()?;
+    if m >> 53 != 0 {
+        return None;
+    }
+    let shift = i32::try_from(frac.len()).ok()?.checked_mul(4)?;
+    let mut e = exponent.parse::<i32>().ok()?.checked_sub(shift)?;
+    if e.unsigned_abs() > SCALE_MAX {
+        return None;
+    }
+    let mut v = f64::from(lo32(m >> 32)) * 4_294_967_296.0 + f64::from(lo32(m));
+    while e != 0 {
+        let step = e.clamp(-STEP, STEP);
+        v *= f64::from_bits(u64::try_from(1023 + step).ok()? << 52);
+        e -= step;
+    }
+    Some(v)
+}
+
 /// Reads a numeric literal.
 ///
 /// # Arguments
@@ -420,6 +463,14 @@ fn number(lit: &str) -> Result<Tok, String> {
     let bad = || format!("cannot read the number {lit}");
     let lower = lit.to_ascii_lowercase();
     if let Some(hex) = lower.strip_prefix("0x") {
+        if let Some((mantissa, exponent)) = hex.split_once('p') {
+            let (exponent, ty) = match exponent.strip_suffix('f') {
+                Some(e) => (e, CTy::of(Base::Float(32))),
+                None => (exponent, CTy::of(Base::Float(64))),
+            };
+            let v = hex_float(mantissa, exponent).ok_or_else(bad)?;
+            return Ok(Tok::Float(v, ty));
+        }
         let digits = hex.trim_end_matches(['u', 'l']);
         let suffix = &hex[digits.len()..];
         let v = u64::from_str_radix(digits, 16).map_err(|_| bad())?;
@@ -1130,6 +1181,29 @@ mod tests {
         assert_eq!(
             tokens("operator delete(p)").unwrap()[0],
             Tok::Name("operator delete".to_owned())
+        );
+    }
+
+    /// A hexadecimal float, the spelling of a value no program computes
+    /// with, reads back to its exact bits, a subnormal and a `float` too.
+    ///
+    /// # Panics
+    ///
+    /// When one reads as another value.
+    #[test]
+    fn hexadecimal_floats_read_exactly() {
+        let toks =
+            tokens("0x1.8p-3 0x1.0074006e0065p-1016 0x0.0000000000001p-1022 -0x1p100f").unwrap();
+        let f64_ty = CTy::of(Base::Float(64));
+        assert_eq!(toks[0], Tok::Float(0.1875, f64_ty));
+        assert_eq!(
+            toks[1],
+            Tok::Float(f64::from_bits(0x0070_0740_06e0_0650), f64_ty)
+        );
+        assert_eq!(toks[2], Tok::Float(f64::from_bits(1), f64_ty));
+        assert_eq!(
+            toks[4],
+            Tok::Float(2f64.powi(100), CTy::of(Base::Float(32)))
         );
     }
 
