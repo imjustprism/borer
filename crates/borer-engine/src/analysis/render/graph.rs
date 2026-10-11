@@ -24,25 +24,47 @@ pub(super) const REACH_DEPTH_MAX: usize = 64;
 /// whether "no" means no. The parent of each function on the way is kept, which is what
 /// turns a visit into the chain that reached it.
 ///
+/// The goal may be an import called through its slot with no thunk, which no function is
+/// the body of: each function that calls or jumps through the slot has it as one more
+/// callee, so the chain's last call is the call of the import.
+///
 /// # Arguments
 ///
+/// * `p` - The loaded image, for an import's name.
 /// * `a` - The analysis.
 /// * `o` - The annotation overlay, for names.
 /// * `from` - Entry of the function to start at.
-/// * `to` - Entry of the function to look for.
+/// * `to` - Entry of the function to look for, or an import's slot.
 /// * `depth` - Longest chain to follow, capped at [`REACH_DEPTH_MAX`].
 ///
 /// # Returns
 ///
 /// The chain, one call per line, or a statement that none was found and how far it looked.
-pub fn call_path(a: &Analysis, o: &Overlay, from: u64, to: u64, depth: usize) -> String {
+pub fn call_path(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    from: u64,
+    to: u64,
+    depth: usize,
+) -> String {
     let limit = depth.clamp(1, REACH_DEPTH_MAX);
+    let label = |va: u64| node_label(p, a, o, va);
     if from == to {
         return format!(
             "# {} reaches itself: it is the function asked about\n",
-            name_of(a, o, from)
+            label(from)
         );
     }
+    let through_slot: BTreeSet<u64> = if a.function(to).is_some() {
+        BTreeSet::new()
+    } else {
+        a.xrefs_to(to)
+            .iter()
+            .filter(|s| s.is_branch())
+            .filter_map(|s| s.from_entry)
+            .collect()
+    };
     let mut came_from: BTreeMap<u64, u64> = BTreeMap::new();
     let mut frontier = vec![from];
     let mut seen: BTreeSet<u64> = BTreeSet::new();
@@ -54,7 +76,8 @@ pub fn call_path(a: &Analysis, o: &Overlay, from: u64, to: u64, depth: usize) ->
         let mut next = Vec::new();
         for cur in frontier {
             let Some(f) = a.function(cur) else { continue };
-            for &callee in &f.callees {
+            let slot = through_slot.contains(&cur).then_some(to);
+            for callee in f.callees.iter().copied().chain(slot) {
                 if !seen.insert(callee) {
                     continue;
                 }
@@ -71,8 +94,8 @@ pub fn call_path(a: &Analysis, o: &Overlay, from: u64, to: u64, depth: usize) ->
     if !found {
         return format!(
             "# {} does not reach {} within {levels} call(s); {} function(s) looked at\n",
-            name_of(a, o, from),
-            name_of(a, o, to),
+            label(from),
+            label(to),
             seen.len()
         );
     }
@@ -88,13 +111,13 @@ pub fn call_path(a: &Analysis, o: &Overlay, from: u64, to: u64, depth: usize) ->
     chain.reverse();
     let mut out = format!(
         "# {} reaches {} in {} call(s); {} function(s) looked at\n",
-        name_of(a, o, from),
-        name_of(a, o, to),
+        label(from),
+        label(to),
         chain.len() - 1,
         seen.len()
     );
     for (i, &entry) in chain.iter().enumerate() {
-        let _ = writeln!(out, "{:>3}  {:#x}  {}", i, entry, name_of(a, o, entry));
+        let _ = writeln!(out, "{:>3}  {:#x}  {}", i, entry, label(entry));
     }
     out
 }

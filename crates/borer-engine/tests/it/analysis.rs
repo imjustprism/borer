@@ -291,7 +291,7 @@ fn a_call_path_finds_the_chain_between_two_functions() {
         .find(|f| !f.callees.is_empty())
         .expect("a fixture function that calls something");
     let callee = caller.callees[0];
-    let out = borer_engine::analysis::render::call_path(&a, &o, caller.entry, callee, 24);
+    let out = borer_engine::analysis::render::call_path(&p, &a, &o, caller.entry, callee, 24);
     assert!(out.contains("reaches"), "{out}");
     assert!(out.contains("in 1 call(s)"), "{out}");
     assert!(
@@ -307,8 +307,14 @@ fn a_call_path_to_itself_is_answered_without_a_search() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let f = a.functions.first().expect("a fixture function");
-    let out =
-        borer_engine::analysis::render::call_path(&a, &Overlay::default(), f.entry, f.entry, 24);
+    let out = borer_engine::analysis::render::call_path(
+        &p,
+        &a,
+        &Overlay::default(),
+        f.entry,
+        f.entry,
+        24,
+    );
     assert!(out.contains("itself"), "{out}");
 }
 
@@ -330,7 +336,7 @@ fn a_call_path_that_finds_nothing_says_how_far_it_looked() {
         .iter()
         .find(|f| f.entry != leaf.entry)
         .expect("a second fixture function");
-    let out = borer_engine::analysis::render::call_path(&a, &o, leaf.entry, other.entry, 24);
+    let out = borer_engine::analysis::render::call_path(&p, &a, &o, leaf.entry, other.entry, 24);
     assert!(out.contains("does not reach"), "{out}");
     assert!(out.contains("function(s) looked at"), "{out}");
 }

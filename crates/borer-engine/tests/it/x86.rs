@@ -674,6 +674,36 @@ fn a_string_search_pages_and_keeps_its_legend_within_the_limit() {
     assert!(!second.contains("sub_401000"), "{second}");
 }
 
+/// Builds an image whose 0x401000 calls 0x401010, which calls the import
+/// `GetTickCount` through its slot at 0x402000, with no thunk.
+fn import_call_image() -> Program {
+    let mut code = vec![0xcc; 0x17];
+    code[..6].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x10..0x17].copy_from_slice(&[0xff, 0x15, 0x00, 0x20, 0x40, 0x00, 0xc3]);
+    let mut p = image_with_data(&code, &[0u8; 4]);
+    p.symbols = vec![Symbol {
+        name: "KERNEL32.dll!GetTickCount".to_owned(),
+        addr: 0x402000,
+        kind: SymbolKind::Import,
+    }];
+    p
+}
+
+/// A call chain reaches an import called through its slot, the call of
+/// the import its last link: with no function at the slot it was refused.
+#[test]
+fn a_call_path_reaches_an_import_through_its_slot() {
+    use borer_engine::analysis::render::call_path;
+    let p = import_call_image();
+    let a = Analysis::compute(&p);
+    let out = call_path(&p, &a, &Overlay::default(), 0x401000, 0x402000, 24);
+    assert!(
+        out.starts_with("# sub_401000 reaches GetTickCount in 2 call(s)"),
+        "{out}"
+    );
+    assert!(out.contains("  2  0x402000  GetTickCount\n"), "{out}");
+}
+
 /// A pointer in data to data a linker merged into `.text` is a reference,
 /// as one to data in a data section is: the word at 0x402000 names zero
 /// bytes at 0x401100 that no block covers.

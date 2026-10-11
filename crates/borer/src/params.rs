@@ -448,7 +448,7 @@ pub(crate) struct CallgraphParams {
 pub(crate) struct ReachesParams {
     /// Function the call chain starts at.
     pub(crate) from: String,
-    /// Function to look for.
+    /// Function to look for, or an import (by name or slot address).
     pub(crate) to: String,
     /// Longest chain to follow (default 24, max 64).
     pub(crate) depth: Option<u32>,

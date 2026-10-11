@@ -2031,16 +2031,19 @@ impl BorerServer {
 
     /// Answers whether one function reaches another through calls.
     ///
+    /// The goal may be an import with no thunk, called through its slot:
+    /// it was refused for want of a function containing the slot.
+    ///
     /// # Arguments
     ///
     /// * `ReachesParams` - Destructured tool parameters (see its field docs).
     ///
     /// # Errors
     ///
-    /// When no binary is loaded or either address is not inside a discovered
-    /// function.
+    /// When no binary is loaded, `from` is not inside a discovered function,
+    /// or `to` is neither inside one nor an import.
     #[tool(
-        description = "Shortest call chain from one function to another, or that there is none and how far it looked: answers \"does this ever reach the send / this check\" on a whole binary.",
+        description = "Shortest call chain from one function to another (or to an import, called through its slot or a thunk), or that there is none and how far it looked: answers \"does this ever reach the send / this check\" on a whole binary.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2055,8 +2058,20 @@ impl BorerServer {
         let deep = count_param(depth, 24, 64, "depth")?;
         self.with_analysis(|p, a, o| {
             let start = self.function_entry(p, a, &from)?;
-            let goal = self.function_entry(p, a, &to)?;
-            Ok(render::call_path(a, o, start, goal, deep.n))
+            let goal = match self.function_entry(p, a, &to) {
+                Ok(goal) => goal,
+                Err(e) => {
+                    let va = self.addr(p, &to)?;
+                    if a.symbol_at(p, va)
+                        .is_some_and(|s| s.kind == borer_engine::program::SymbolKind::Import)
+                    {
+                        va
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            Ok(render::call_path(p, a, o, start, goal, deep.n))
         })
         .map(|text| deep.noted(text))
     }
