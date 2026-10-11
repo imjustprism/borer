@@ -87,7 +87,7 @@ mod os {
     use borer_engine::live::{Memory, Module, Region};
     use windows_sys::Wdk::System::Threading::{NtQueryInformationThread, ThreadBasicInformation};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+        CloseHandle, ERROR_PARTIAL_COPY, GetLastError, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
     };
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -372,9 +372,13 @@ mod os {
             out.retain(|m| seen.insert(m.base));
             return Ok(out);
         }
-        Err(format!(
-            "cannot list the modules of process {pid}: Win32 error {error}"
-        ))
+        Err(if error == ERROR_PARTIAL_COPY {
+            format!(
+                "cannot list the modules of process {pid} yet: its loader has not finished starting it (Win32 error 299, as for a process created suspended); resume it or wait a moment, then attach again"
+            )
+        } else {
+            format!("cannot list the modules of process {pid}: Win32 error {error}")
+        })
     }
 
     /// A process opened for reading.
@@ -395,18 +399,31 @@ mod os {
         ///
         /// # Arguments
         ///
-        /// * `spec` - A process id, or an executable name (`notepad` or
-        ///   `notepad.exe`, case does not matter).
+        /// * `spec` - A process id in decimal or `0x` hex, or an executable
+        ///   name (`notepad` or `notepad.exe`, case does not matter).
         ///
         /// # Errors
         ///
-        /// When no process matches, several do, or the system refuses the
-        /// handle (another user's process, or one protected by its
-        /// anti-tamper, needs rights this never asks for).
+        /// When the spec is empty, no process matches, several do, the
+        /// system refuses the handle (another user's process, or one
+        /// protected by its anti-tamper, needs rights this never asks for),
+        /// or the process has not finished starting.
         pub fn attach(spec: &str) -> Result<Process, String> {
             let spec = spec.trim();
-            let (pid, name) = match spec.parse::<u32>() {
-                Ok(pid) => {
+            if spec.is_empty() {
+                return Err(
+                    "no process given: pass an executable name (notepad or notepad.exe) or a process id"
+                        .to_owned(),
+                );
+            }
+            let id = spec.parse::<u32>().ok().or_else(|| {
+                let hex = spec
+                    .strip_prefix("0x")
+                    .or_else(|| spec.strip_prefix("0X"))?;
+                u32::from_str_radix(hex, 16).ok()
+            });
+            let (pid, name) = match id {
+                Some(pid) => {
                     let name = processes()?
                         .into_iter()
                         .find(|(p, _)| *p == pid)
@@ -414,7 +431,7 @@ mod os {
                         .ok_or_else(|| format!("no process has id {pid}"))?;
                     (pid, name)
                 }
-                Err(_) => {
+                None => {
                     let want = spec.to_lowercase();
                     let want_exe = if want.ends_with(".exe") {
                         want.clone()
@@ -967,7 +984,8 @@ mod tests {
         let since = Instant::now();
         loop {
             match Process::attach(&child.id().to_string()) {
-                Err(_) if since.elapsed() < Duration::from_secs(10) => {
+                Err(e) if since.elapsed() < Duration::from_secs(10) => {
+                    assert!(e.contains("not finished starting"), "{e}");
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 attached => return attached,
@@ -1058,6 +1076,12 @@ mod tests {
         let me = Process::attach(&std::process::id().to_string()).expect("attach to self");
         assert_eq!(me.pid(), std::process::id());
         assert_eq!(me.pointer_width(), size_of::<usize>());
+        let by_hex = Process::attach(&format!("{:#x}", std::process::id())).expect("a hex pid");
+        assert_eq!(by_hex.pid(), std::process::id());
+        for blank in ["", "   "] {
+            let refused = Process::attach(blank).expect_err("nothing named");
+            assert!(refused.starts_with("no process given: "), "{refused}");
+        }
         let planted: Vec<u64> = vec![0x5a5a_1234_abcd_0001, 0, 0x5a5a_1234_abcd_0001];
         let at = planted.as_ptr() as usize as u64;
         let bytes = me.read(at, 24).expect("read own heap");

@@ -1300,14 +1300,20 @@ impl BorerServer {
     /// memory is gone, and a read, a scan or a diff would otherwise answer
     /// "not readable" or "0 instances" as if the address were the problem.
     ///
+    /// Every refusal is invalid params, as [`Self::with_program`]'s are: a
+    /// body refuses what it was asked (an address not readable, a name or
+    /// class that is not there, a process that is gone), and the agent's
+    /// next move is to change the call, so one code says so for every live
+    /// tool and for the static ones alike.
+    ///
     /// # Arguments
     ///
     /// * `f` - The tool body over the session.
     ///
     /// # Errors
     ///
-    /// Internal error when no process is attached, it has exited, or `f`
-    /// fails.
+    /// Invalid params when no process is attached, it has exited, or `f`
+    /// refuses the request.
     fn with_live(
         &self,
         f: impl FnOnce(&mut LiveSession) -> Result<String, String>,
@@ -1315,11 +1321,11 @@ impl BorerServer {
         let mut guard = lock(&self.live);
         let session = guard
             .as_mut()
-            .ok_or_else(|| err_internal("no process attached: live_attach first"))?;
+            .ok_or_else(|| err_params("no process attached: live_attach first"))?;
         if let Some(code) = session.process.exit_code() {
-            return Err(err_internal(exited(&session.process, code)));
+            return Err(err_params(exited(&session.process, code)));
         }
-        f(session).map_err(err_internal)
+        f(session).map_err(err_params)
     }
 
     /// Resolves an address an agent gave for the process: a name or a
@@ -1431,7 +1437,7 @@ impl BorerServer {
         &self,
         Parameters(LiveAttachParams { process }): Parameters<LiveAttachParams>,
     ) -> Result<String, ErrorData> {
-        let proc = borer_live::Process::attach(&process).map_err(err_internal)?;
+        let proc = borer_live::Process::attach(&process).map_err(err_params)?;
         let modules = proc.modules();
         let mut out = format!(
             "attached to {} (pid {}), {} modules, read-only\n",
@@ -1525,8 +1531,8 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// Invalid params for a zero limit; internal error when no process is
-    /// attached or it has exited.
+    /// Invalid params for a zero limit, or when no process is attached or
+    /// it has exited.
     #[tool(
         description = "List the attached process's modules.",
         annotations(
@@ -1573,8 +1579,8 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// Invalid params for an unknown kind; internal error when no process is
-    /// attached, the address does not resolve or is not readable.
+    /// Invalid params for an unknown kind, or when no process is attached,
+    /// the address does not resolve, or its first value does not read.
     #[tool(
         description = "Read typed values from the attached process; pointers say what they point at.",
         annotations(
@@ -6597,6 +6603,50 @@ mod tests {
             "the impostor is not mapped"
         );
         server.live_detach().expect("detach");
+    }
+
+    /// Every live refusal is invalid params, as a static one is, so one code
+    /// tells the agent to change the call: nothing attached, an address not
+    /// readable, a process name that is empty.
+    ///
+    /// # Panics
+    ///
+    /// When a refusal comes back as an internal error or says the wrong thing.
+    #[test]
+    fn a_live_refusal_is_invalid_params() {
+        use super::{ErrorCode, LiveAttachParams, LiveReadParams, Parameters};
+        let server = super::BorerServer::default();
+        let read = |address: &str| {
+            server
+                .live_read(Parameters(LiveReadParams {
+                    address: address.to_owned(),
+                    kind: None,
+                    count: None,
+                }))
+                .expect_err("refused")
+        };
+        let none = read("0x10");
+        assert_eq!(none.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(none.message, "no process attached: live_attach first");
+        let attach = |process: &str| {
+            server.live_attach(Parameters(LiveAttachParams {
+                process: process.to_owned(),
+            }))
+        };
+        let blank = attach("").expect_err("no process named");
+        assert_eq!(blank.code, ErrorCode::INVALID_PARAMS);
+        if cfg!(windows) {
+            assert!(
+                blank.message.starts_with("no process given: "),
+                "{}",
+                blank.message
+            );
+            attach(&std::process::id().to_string()).expect("attach to self");
+            let unreadable = read("0x10");
+            assert_eq!(unreadable.code, ErrorCode::INVALID_PARAMS);
+            assert_eq!(unreadable.message, "0x10 is not readable in the process");
+            server.live_detach().expect("detach");
+        }
     }
 
     /// A second attach says it drops the first one's watches, `reload` says
