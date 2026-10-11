@@ -319,6 +319,21 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Says that the attached process has exited, for every live tool asked
+/// after it did.
+///
+/// # Arguments
+///
+/// * `process` - The attached process.
+/// * `code` - Its exit code.
+fn exited(process: &borer_live::Process, code: u32) -> String {
+    format!(
+        "{} (pid {}) has exited (exit code {code:#x}), so nothing of it is left to read; live_attach a running process",
+        process.name(),
+        process.pid()
+    )
+}
+
 /// The pointer width in bytes of a program, or of the host when none is
 /// loaded.
 ///
@@ -1271,13 +1286,18 @@ impl BorerServer {
 
     /// Runs `f` with the attached process.
     ///
+    /// A process that has exited is said to have, before `f` runs: its
+    /// memory is gone, and a read, a scan or a diff would otherwise answer
+    /// "not readable" or "0 instances" as if the address were the problem.
+    ///
     /// # Arguments
     ///
     /// * `f` - The tool body over the session.
     ///
     /// # Errors
     ///
-    /// Internal error when no process is attached or `f` fails.
+    /// Internal error when no process is attached, it has exited, or `f`
+    /// fails.
     fn with_live(
         &self,
         f: impl FnOnce(&mut LiveSession) -> Result<String, String>,
@@ -1286,6 +1306,9 @@ impl BorerServer {
         let session = guard
             .as_mut()
             .ok_or_else(|| err_internal("no process attached: live_attach first"))?;
+        if let Some(code) = session.process.exit_code() {
+            return Err(err_internal(exited(&session.process, code)));
+        }
         f(session).map_err(err_internal)
     }
 
@@ -1431,9 +1454,14 @@ impl BorerServer {
         let was = lock(&self.live).take();
         Ok(match was {
             Some(s) => format!(
-                "detached from {} (pid {})",
+                "detached from {} (pid {}){}",
                 s.process.name(),
-                s.process.pid()
+                s.process.pid(),
+                s.process
+                    .exit_code()
+                    .map_or_else(String::new, |code| format!(
+                        ", which had exited (exit code {code:#x})"
+                    ))
             ),
             None => "no process was attached".to_owned(),
         })
@@ -6429,6 +6457,62 @@ mod tests {
             "the impostor is not mapped"
         );
         server.live_detach().expect("detach");
+    }
+
+    /// Once the attached process exits, every live tool says it has exited
+    /// instead of blaming the address, and so does the detach.
+    ///
+    /// # Panics
+    ///
+    /// When a tool answers after the exit, or blames the address.
+    #[cfg(windows)]
+    #[test]
+    fn every_live_tool_says_the_process_exited() {
+        use super::{LiveAttachParams, LiveReadParams, LiveWatchParams, Parameters};
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("ping starts");
+        let server = super::BorerServer::default();
+        let mut tries = 0;
+        while let Err(e) = server.live_attach(Parameters(LiveAttachParams {
+            process: child.id().to_string(),
+        })) {
+            tries += 1;
+            assert!(tries < 500, "{}", e.message);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let watch = |address: Option<&str>| {
+            server.live_watch(Parameters(LiveWatchParams {
+                name: "w".to_owned(),
+                address: address.map(str::to_owned),
+                length: Some(8),
+                class: None,
+            }))
+        };
+        watch(Some("0x7ffe0000")).expect("the shared user page is readable");
+        child.kill().expect("end ping");
+        child.wait().expect("ping ended");
+        let read = server
+            .live_read(Parameters(LiveReadParams {
+                address: "0x7ffe0000".to_owned(),
+                kind: None,
+                count: None,
+            }))
+            .expect_err("the process is gone");
+        assert!(
+            read.message.contains("has exited (exit code 0x1)"),
+            "{}",
+            read.message
+        );
+        let diff = watch(None).expect_err("the process is gone");
+        assert!(diff.message.contains("has exited"), "{}", diff.message);
+        let detached = server.live_detach().expect("detach");
+        assert!(
+            detached.ends_with(", which had exited (exit code 0x1)"),
+            "{detached}"
+        );
     }
 
     /// A watch refuses a class the analysis does not know, as `live_object`

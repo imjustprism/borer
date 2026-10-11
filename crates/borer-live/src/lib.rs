@@ -86,7 +86,9 @@ mod os {
 
     use borer_engine::live::{Memory, Module, Region};
     use windows_sys::Wdk::System::Threading::{NtQueryInformationThread, ThreadBasicInformation};
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    };
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, PROCESSENTRY32W,
@@ -104,7 +106,7 @@ mod os {
         PAGE_WRITECOPY, VirtualQueryEx,
     };
     use windows_sys::Win32::System::Threading::{
-        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, IsWow64Process,
+        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetExitCodeProcess, IsWow64Process,
         MEMORY_PRIORITY_BELOW_NORMAL, MEMORY_PRIORITY_INFORMATION, OpenProcess, OpenThread,
         PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, ProcessMemoryPriority, SetPriorityClass,
         SetProcessInformation, THREAD_QUERY_INFORMATION,
@@ -483,6 +485,21 @@ mod os {
             }
         }
 
+        /// The process's exit code once it has exited.
+        ///
+        /// # Returns
+        ///
+        /// The code, or `None` while the process runs (or when the system
+        /// does not say, which is then taken as running).
+        #[must_use]
+        pub fn exit_code(&self) -> Option<u32> {
+            let mut code = 0u32;
+            // SAFETY: `code` outlives the call and the handle is open with
+            // QUERY_INFORMATION, which GetExitCodeProcess requires.
+            let ok = unsafe { GetExitCodeProcess(self.handle.0, &mut code) } != 0;
+            (ok && code.cast_signed() != STILL_ACTIVE).then_some(code)
+        }
+
         /// The process's thread ids, in the order the system lists them
         /// (creation order, the main thread first, as a rule).
         ///
@@ -776,6 +793,12 @@ mod os {
             size_of::<usize>()
         }
 
+        /// The process's exit code; none is known off Windows.
+        #[must_use]
+        pub fn exit_code(&self) -> Option<u32> {
+            None
+        }
+
         /// The process's thread ids.
         ///
         /// # Errors
@@ -922,6 +945,35 @@ mod tests {
         // SAFETY: the pseudo-handle names this process and needs no closing.
         let class = unsafe { GetPriorityClass(GetCurrentProcess()) };
         assert_eq!(class, BELOW_NORMAL_PRIORITY_CLASS);
+    }
+
+    /// A process that ends says so through the handle opened while it ran,
+    /// with its exit code, so a live tool can tell an ended process from
+    /// an unreadable address.
+    #[test]
+    fn an_ended_process_says_so_with_its_exit_code() {
+        let mut child = Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("ping starts");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test bounds how long a starting process may refuse its module list"
+        )]
+        let since = Instant::now();
+        let process = loop {
+            match Process::attach(&child.id().to_string()) {
+                Err(_) if since.elapsed() < Duration::from_secs(10) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                attached => break attached.expect("the child attaches"),
+            }
+        };
+        assert_eq!(process.exit_code(), None, "still running");
+        child.kill().expect("end ping");
+        child.wait().expect("ping ended");
+        assert_eq!(process.exit_code(), Some(1), "TerminateProcess's code");
     }
 
     /// A process tied to a tether ends when the tether is dropped.
