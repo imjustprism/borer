@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(spec.writes, vec![(0x3000, vec![0xde, 0xad, 0xbe, 0xef])]);
         assert_eq!(spec.stop, Some(0x1020));
         assert_eq!(spec.budget, 5000);
-        assert_eq!(spec.dumps, vec![(0x3000, 8)]);
+        assert_eq!(spec.dumps, vec![(0x3000, 8, 8)]);
     }
 
     /// A malformed directive names itself in the error.
@@ -509,7 +509,7 @@ mod tests {
         let o = crate::analysis::Overlay::default();
         let spec = super::ExperimentSpec::parse(&a, &o, "0x1000,dump=0xffffffffffffffff:64")
             .expect("spec parses");
-        assert_eq!(spec.dumps, vec![(u64::MAX, 1)]);
+        assert_eq!(spec.dumps, vec![(u64::MAX, 1, 64)]);
     }
 
     /// A dump length takes hex or decimal, like every other value in a spec.
@@ -525,8 +525,41 @@ mod tests {
             .expect("hex length parses");
         let dec = super::ExperimentSpec::parse(&a, &o, "0x1000,dump=0x3000:128")
             .expect("decimal length parses");
-        assert_eq!(hex.dumps, vec![(0x3000, 128)]);
+        assert_eq!(hex.dumps, vec![(0x3000, 128, 128)]);
         assert_eq!(dec.dumps, hex.dumps);
+    }
+
+    /// A dump reads memory as a load reads it.
+    ///
+    /// The image's bytes where the run wrote none, `??` where nothing is
+    /// mapped, and a length past the cap is cut and said to be; it read every
+    /// byte the run did not write as `00`, mapped or not, and cut silently.
+    #[test]
+    fn a_dump_reads_the_image_and_marks_what_is_unmapped() {
+        let p = Program::raw_x64(&[0xc3, 0x41, 0x42]);
+        let a = crate::analysis::Analysis::compute(&p);
+        let o = crate::analysis::Overlay::default();
+        let out = super::emulate_tsv(
+            &p,
+            &a,
+            &o,
+            "0x1000,dump=0x1000:3,dump=0x50000000:2,dump=0x1000:5000",
+        )
+        .expect("the run answers");
+        assert!(
+            out.contains("# dump 0x1000..0x1003\n0x0000001000  c3 41 42 "),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "# dump 0x50000000..0x50000002, ?? where nothing is mapped\n0x0050000000  ?? ?? "
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("# dump 0x1000..0x2000, 4096 of the 5000 bytes asked"),
+            "{out}"
+        );
     }
 
     /// Scattered code over enough blocks reads as control-flow obfuscation.

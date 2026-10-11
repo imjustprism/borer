@@ -470,16 +470,26 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
             let _ = writeln!(out, "{addr:<#15x} {text:?}");
         }
     }
-    for &(addr, len) in &spec.dumps {
-        let _ = writeln!(
+    for &(addr, len, asked) in &spec.dumps {
+        let bytes: Vec<Option<u8>> = (0..len)
+            .map(|k| emu.byte_at(addr.wrapping_add(from_usize(k))))
+            .collect();
+        let _ = write!(
             out,
             "# dump {addr:#x}..{:#x}",
             addr.saturating_add(from_usize(len))
         );
-        let bytes: Vec<u8> = (0..len)
-            .map(|k| emu.peek(addr.wrapping_add(from_usize(k))).unwrap_or(0))
-            .collect();
-        out.push_str(&crate::hexdump::hexdump(&bytes, addr));
+        if len < asked {
+            let _ = write!(
+                out,
+                ", {len} of the {asked} bytes asked: a dump reads at most {DUMP_MAX} and stops at the end of memory"
+            );
+        }
+        if bytes.contains(&None) {
+            out.push_str(", ?? where nothing is mapped");
+        }
+        out.push('\n');
+        out.push_str(&crate::hexdump::hexdump_sparse(&bytes, addr));
     }
     Ok(out)
 }

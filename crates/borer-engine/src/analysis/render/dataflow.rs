@@ -953,6 +953,9 @@ pub(super) fn iced_register(name: &str, bitness: u32) -> Option<Register> {
     }
 }
 
+/// Largest region a single experiment dump reads back, in bytes.
+pub(super) const DUMP_MAX: usize = 4096;
+
 /// A parsed experiment: where to start, what state to set, what to read back.
 ///
 /// The surface an agent drives to change how a routine behaves and see the
@@ -970,8 +973,10 @@ pub(super) struct ExperimentSpec {
     pub(super) args: Vec<(usize, u64)>,
     /// Bytes to write before the run, as `(address, bytes)`.
     pub(super) writes: Vec<(u64, Vec<u8>)>,
-    /// Regions to hexdump after the run, as `(address, length)`.
-    pub(super) dumps: Vec<(u64, usize)>,
+    /// Regions to hexdump after the run, as `(address, length read, length
+    /// asked)`: the read stops at [`DUMP_MAX`] bytes and at the end of the
+    /// address space.
+    pub(super) dumps: Vec<(u64, usize, usize)>,
     /// Address to halt at, if any.
     pub(super) stop: Option<u64>,
     /// Instruction budget.
@@ -996,13 +1001,16 @@ impl ExperimentSpec {
     /// `aN`, counting from one as it does (`a1` is the first, so a name copied
     /// out of the pseudo-C sets that argument; `a0` names none and is refused
     /// rather than read as the first), `w<addr>=<hex>`
-    /// writes bytes, `stop=<addr>` halts there, `steps=<n>` sets the budget,
-    /// `trace=<n>` records what each of the last `n` instructions changed
+    /// writes bytes, `stop=<addr>` halts there, `steps=<n>` sets the budget
+    /// (at most [`BUDGET_MAX`], as `run` takes; more is refused, not run for
+    /// hours), `trace=<n>` records what each of the last `n` instructions changed
     /// (the run's head is watched by giving it a small `steps=`),
     /// `origin=<v>` names the instruction that first produced `v` in a
     /// register or in memory, `profile=<n>` reports the `n` most-executed
     /// addresses and most-read pages off the stack (where a budget went),
-    /// and `dump=<addr>:<len>` reads a region back. A bare `reg=val` stays
+    /// and `dump=<addr>:<len>` reads a region back as a load reads it (what
+    /// the run wrote over the image's bytes, `??` where a load faults), at
+    /// most [`DUMP_MAX`] bytes, saying when it read fewer. A bare `reg=val` stays
     /// backward compatible with the older register-only form. Every count
     /// and length is `0x`-hex or decimal ([`parse_count`]): `dump=0x3000:0x80`
     /// is as natural as `:128` next to the addresses around it, and a word
@@ -1024,8 +1032,6 @@ impl ExperimentSpec {
     ///
     /// When the start token does not resolve, or a directive is malformed.
     pub(super) fn parse(a: &Analysis, o: &Overlay, target: &str) -> Result<Self, String> {
-        /// Largest region a single dump reads back.
-        const DUMP_MAX: usize = 4096;
         /// Most rows a profile reports of each kind.
         const PROFILE_MAX: usize = 64;
         let (addr, parts) = spec_head(target);
@@ -1069,6 +1075,9 @@ impl ExperimentSpec {
             } else if key == "steps" {
                 spec.budget =
                     parse_count(value).ok_or_else(|| format!("bad step count in {token}"))?;
+                if spec.budget > BUDGET_MAX {
+                    return Err(format!("{token}: steps is at most {BUDGET_MAX}"));
+                }
             } else if key == "dump" {
                 let (addr, len) = value
                     .split_once(':')
@@ -1078,7 +1087,7 @@ impl ExperimentSpec {
                 let len = parse_count(len).ok_or_else(|| format!("bad dump length in {token}"))?;
                 let room =
                     usize::try_from((u64::MAX - addr).saturating_add(1)).unwrap_or(usize::MAX);
-                spec.dumps.push((addr, len.min(DUMP_MAX).min(room)));
+                spec.dumps.push((addr, len.min(DUMP_MAX).min(room), len));
             } else if let Some(n) = key.strip_prefix('a').filter(|n| !n.is_empty()) {
                 if let Ok(number) = n.parse::<usize>() {
                     let position = number.checked_sub(1).ok_or_else(|| {
@@ -1175,6 +1184,7 @@ mod tests {
         let o = Overlay::default();
         for (spec, token) in [
             ("0x1000,steps=abc", "steps=abc"),
+            ("0x1000,steps=99999999999", "steps is at most 20000000"),
             ("0x1000,trace=zz", "trace=zz"),
             ("0x1000,dump=0x1000:abc", "dump=0x1000:abc"),
             ("0x1000,foo", "directive foo"),

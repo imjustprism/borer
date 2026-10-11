@@ -18,8 +18,8 @@ const BUFFER_MAX: usize = 0x8000;
 /// Steps each run is given unless the spec says otherwise.
 const BUDGET: usize = 1_000_000;
 
-/// Most steps a spec may ask for.
-const BUDGET_MAX: usize = 20_000_000;
+/// Most steps a spec may ask for, of `run` and of `emulate`.
+pub(super) const BUDGET_MAX: usize = 20_000_000;
 
 /// Bytes of a buffer a report spells before the rest are counted.
 const SHOWN_MAX: usize = 48;

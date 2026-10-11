@@ -14,6 +14,27 @@
 ///
 /// The rendered rows, each terminated by a newline; empty for empty input.
 pub fn hexdump(bytes: &[u8], base: u64) -> String {
+    let known: Vec<Option<u8>> = bytes.iter().copied().map(Some).collect();
+    hexdump_sparse(&known, base)
+}
+
+/// Renders bytes some of which nothing backs as a hexdump whose first byte
+/// sits at address `base`.
+///
+/// A known byte renders as [`hexdump`] renders it; an unknown one renders
+/// as `??` in the hex column and a space in the ASCII column, so an
+/// unmapped address never reads as a zero byte.
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes to render, 16 per row, `None` where nothing backs
+///   the address.
+/// * `base` - Virtual address of `bytes[0]`, printed as the row address.
+///
+/// # Returns
+///
+/// The rendered rows, each terminated by a newline; empty for empty input.
+pub fn hexdump_sparse(bytes: &[Option<u8>], base: u64) -> String {
     let mut out = String::with_capacity(bytes.len() / 16 * 80 + 80);
     for (row, chunk) in bytes.chunks(16).enumerate() {
         // A dump at the very top of the address space wraps rather than
@@ -24,16 +45,17 @@ pub fn hexdump(bytes: &[u8], base: u64) -> String {
             if i == 8 {
                 hexpart.push(' ');
             }
-            hexpart.push_str(&format!("{b:02x} "));
+            match b {
+                Some(b) => hexpart.push_str(&format!("{b:02x} ")),
+                None => hexpart.push_str("?? "),
+            }
         }
         let ascii: String = chunk
             .iter()
-            .map(|&b| {
-                if (0x20..=0x7e).contains(&b) {
-                    b as char
-                } else {
-                    '.'
-                }
+            .map(|b| match *b {
+                Some(b) if (0x20..=0x7e).contains(&b) => b as char,
+                Some(_) => '.',
+                None => ' ',
             })
             .collect();
         out.push_str(&format!("{addr:#012x}  {hexpart:<49} |{ascii}|\n"));

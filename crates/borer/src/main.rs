@@ -3906,7 +3906,7 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
     ),
     (
         "borer://emulate/{address}",
-        "Run code and read the result. The address carries an experiment: comma-separated reg=val, aN=val (the argument the decompiler names aN; a1 is the first), w<addr>=<hexbytes> (set data or patch code), stop=<addr>, steps=<n>, trace=<n> (what each of the first n instructions changed), dump=<addr>:<len>. Reports final registers, the call trace, decoded text and each dump.",
+        "Run code and read the result. The address carries an experiment: comma-separated reg=val, aN=val (the argument the decompiler names aN; a1 is the first), w<addr>=<hexbytes> (set data or patch code), stop=<addr>, steps=<n> (at most 20000000), trace=<n> (what each of the first n instructions changed), dump=<addr>:<len> (at most 4096 bytes, ?? where nothing is mapped). Reports final registers, the call trace, decoded text and each dump.",
     ),
     (
         "borer://devirt/{address}",
