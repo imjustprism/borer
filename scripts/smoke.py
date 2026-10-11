@@ -7,11 +7,13 @@ itself (a real PE, self-contained fixture).
 """
 
 import atexit
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,11 +26,40 @@ EXE = (
 )
 TARGET = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else EXE
 
+# The servers' stderr goes to a file, not a pipe nobody reads: a fault
+# answers the call with its message alone, and the panic location the hook
+# writes to stderr was lost with the pipe (a run under load once failed on
+# "attempt to subtract with overflow" with no file or line to go on).
+STDERR, STDERR_PATH = tempfile.mkstemp(prefix="borer-smoke-", suffix=".log")
+STDERR_TAIL = 60
+passed = False
+
+
+def stderr_tail(lines=STDERR_TAIL):
+    """Return the last `lines` lines the servers wrote to stderr."""
+    with open(STDERR_PATH, encoding="utf-8", errors="replace") as f:
+        return "".join(f.readlines()[-lines:])
+
+
+def dump_stderr_on_failure():
+    """Print the servers' stderr tail when the smoke test did not pass, then
+    remove the file."""
+    tail = "" if passed else stderr_tail()
+    if tail:
+        print(f"--- last {STDERR_TAIL} lines of the server's stderr ---", file=sys.stderr)
+        print(tail, end="" if tail.endswith("\n") else "\n", file=sys.stderr)
+    os.close(STDERR)
+    with contextlib.suppress(OSError):
+        os.remove(STDERR_PATH)
+
+
+atexit.register(dump_stderr_on_failure)
+
 proc = subprocess.Popen(
     [EXE],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
+    stderr=STDERR,
     text=True,
     encoding="utf-8",
 )
@@ -65,8 +96,7 @@ def wait_for(rid, allow_error=False):
     while True:
         line = proc.stdout.readline()
         if not line:
-            err = proc.stderr.read()
-            raise SystemExit(f"server closed stdout; stderr tail: {err[-2000:]}")
+            raise SystemExit("server closed stdout; its stderr follows")
         msg = json.loads(line)
         if msg.get("id") == rid:
             if "error" in msg and not allow_error:
@@ -570,7 +600,7 @@ p2 = subprocess.Popen(
     [EXE],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
+    stderr=STDERR,
     text=True,
     encoding="utf-8",
 )
@@ -595,9 +625,7 @@ def rpc2(i, method, params):
     while True:
         line = p2.stdout.readline()
         if not line:
-            raise SystemExit(
-                f"2026-07-28 session: server closed stdout; stderr: {p2.stderr.read()[-1500:]}"
-            )
+            raise SystemExit("2026-07-28 session: server closed stdout; its stderr follows")
         r = json.loads(line)
         if r.get("id") == i:
             if "error" in r:
@@ -627,5 +655,6 @@ p2.stdin.close()
 p2.wait(timeout=10)
 watchdog2.cancel()
 print("2026-07-28 lifecycle OK (discover, cache hints, per-request _meta)")
+passed = True
 print("SMOKE OK")
 watchdog.cancel()
