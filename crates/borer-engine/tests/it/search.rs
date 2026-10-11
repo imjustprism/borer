@@ -38,6 +38,15 @@ fn parse_pattern_forms() {
     assert_eq!(parse_pattern("123"), None);
 }
 
+/// A sign is not a hex digit: `+1` was read as the byte `01`.
+#[test]
+fn parse_pattern_refuses_signed_tokens() {
+    assert_eq!(parse_pattern("+1"), None);
+    assert_eq!(parse_pattern("48 +2"), None);
+    assert_eq!(parse_pattern("-1"), None);
+    assert_eq!(parse_pattern("0a"), Some(vec![Some(0x0a)]));
+}
+
 /// A wildcard matches both encodings.
 #[test]
 fn find_bytes_with_wildcard() {

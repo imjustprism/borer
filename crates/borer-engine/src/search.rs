@@ -14,12 +14,15 @@ pub const HITS_MAX: usize = 500;
 /// # Returns
 ///
 /// One entry per token (`None` is a wildcard), or `None` when any token is
-/// malformed.
+/// malformed: a sign is not a hex digit, though `u8::from_str_radix` takes
+/// `+1` for `01`.
 pub fn parse_pattern(s: &str) -> Option<Vec<Option<u8>>> {
     s.split_whitespace()
         .map(|tok| match tok {
             "?" | "??" => Some(None),
-            t if t.len() == 2 => u8::from_str_radix(t, 16).ok().map(Some),
+            t if t.len() == 2 && t.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                u8::from_str_radix(t, 16).ok().map(Some)
+            }
             _ => None,
         })
         .collect()
