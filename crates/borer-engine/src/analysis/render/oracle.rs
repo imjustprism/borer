@@ -176,20 +176,21 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             out,
             "# every candidate {same}, so none of its own constants decides this"
         );
-        let register = ["rcx", "rdx", "r8", "r9"]
+        let register = ARGUMENT_REGISTERS
             .get(slot)
-            .and_then(|n| iced_register(n, p.arch.bitness().unwrap_or(64)));
+            .filter(|_| p.arch.bitness() == Some(64))
+            .and_then(|n| iced_register(n, 64));
         let dereferenced = register.is_some_and(|r| {
-            instrs
-                .iter()
-                .any(|i| i.memory_base() == r || i.memory_base().full_register() == r)
+            instrs.iter().any(|i| {
+                !matches!(i.mnemonic(), Mnemonic::Lea | Mnemonic::Nop)
+                    && i.memory_base().full_register() == r
+            })
         });
         if dereferenced {
             let _ = writeln!(
                 out,
-                "# argument {} is read through, so it is a pointer: a constant in it is an address, not a value. Set up a buffer instead, with emulate {entry:#x},a{}=<addr>,w<addr>=<bytes>",
-                slot + 1,
-                slot
+                "# argument {0} is read through, so it is a pointer: a constant in it is an address, not a value. Set up a buffer instead, with emulate {entry:#x},a{0}=<addr>,w<addr>=<bytes>",
+                slot + 1
             );
         }
         return Ok(out);
@@ -526,5 +527,35 @@ mod tests {
             oracle_tsv(&p, &a, &o, "").unwrap_err(),
             "no discovered function at ''"
         );
+    }
+
+    /// A flat solve calls an argument a pointer only when read through.
+    ///
+    /// Something must load or store through it, not a `lea` compute from it,
+    /// and the hint names the argument as `emulate` reads it, from one; the
+    /// hint said `a0=`, which `emulate` refuses, and any `lea` made a pointer.
+    ///
+    /// # Panics
+    ///
+    /// When a `lea` makes a pointer, a load does not, or the hint is
+    /// zero-based.
+    #[test]
+    fn a_flat_solve_calls_an_argument_a_pointer_only_when_read_through() {
+        let o = Overlay::default();
+        let read = Program::raw_x64(&[
+            0x8b, 0x01, // ASM: mov eax,[rcx]
+            0xc3, // ASM: ret
+        ]);
+        let out = solve_tsv(&read, &Analysis::compute(&read), &o, "0x1000").unwrap();
+        assert!(out.contains("argument 1 is read through"), "{out}");
+        assert!(out.contains("emulate 0x1000,a1=<addr>,"), "{out}");
+        let computed = Program::raw_x64(&[
+            0x48, 0x8d, 0x41, 0x08, // ASM: lea rax,[rcx+8]
+            0x31, 0xc0, // ASM: xor eax,eax
+            0xc3, // ASM: ret
+        ]);
+        let out = solve_tsv(&computed, &Analysis::compute(&computed), &o, "0x1000").unwrap();
+        assert!(out.contains("every candidate returns 0x0"), "{out}");
+        assert!(!out.contains("read through"), "{out}");
     }
 }
