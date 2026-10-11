@@ -671,6 +671,11 @@ pub(super) struct Exec<'c, 'a> {
     /// record left out: the arguments an indirect call to an unknown callee
     /// takes, and what it pops when no `add esp` follows.
     args_pushed: u32,
+    /// Words the caller cleans up right after the `__cdecl` call being
+    /// lifted ([`Exec::stack_after`]): the arguments it passes, which may
+    /// be more than the callee's body reads by name (a variable list past
+    /// its `va_start`). `None` when nothing cleans them up there.
+    cleaned: Option<u32>,
     /// A tail jump is being lifted: the callee's stack arguments are the
     /// caller's own, above the return address the jump leaves in place.
     forwarding: bool,
@@ -773,6 +778,7 @@ pub(super) fn exec_block(
         entry: facts.entry,
         seh_registered,
         args_pushed: 0,
+        cleaned: None,
         forwarding: false,
         in_place: false,
         arity_floor: 0,

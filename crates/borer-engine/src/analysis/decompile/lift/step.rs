@@ -1197,6 +1197,7 @@ impl<'a> Exec<'_, 'a> {
                     if self.makes_room(&v) {
                         self.env.vals.remove(&Key::Slot(sp));
                         self.env.slot_bits.remove(&sp);
+                        self.env.fresh.insert(Key::Slot(sp));
                     } else {
                         if self.seh_registered && !self.is_register_save(sp, self.word_ty(), &v) {
                             self.args_pushed += 1;

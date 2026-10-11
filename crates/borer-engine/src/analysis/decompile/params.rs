@@ -334,7 +334,9 @@ impl Shape {
 /// of a variadic function. The stack words are the most the frame scan
 /// found, the body reads through the stack pointer followed from the
 /// entry ([`stack_params_read`]), or a tail jump hands on to a callee that
-/// takes them ([`forwarded_stack`]). A declaration ([`declared_arity`])
+/// takes them ([`forwarded_stack`]); a 32-bit `__thiscall` or `__fastcall`
+/// that reads none and whose `ret` pops nothing hands none on. A
+/// declaration ([`declared_arity`])
 /// lists `this`, the hidden result and its parameters: the SDK's prototype
 /// for the function's own name fixes the count, an attributed signature
 /// sets its least. On a 32-bit target the convention is chosen first, from
@@ -377,10 +379,22 @@ pub(super) fn shape_of(
         .filter_map(|r| ctx.conv.param_pos(*r, &params))
         .max()
         .map_or(0, |p| p + 1);
-    let stack = f
-        .stack_args
-        .max(forwarded_stack(ctx, code))
-        .max(stack_params_read(ctx, code, succs, entry));
+    // INVARIANT: a 32-bit function reading `ecx` or `edx` first is a
+    // `__thiscall` or `__fastcall`, whose callee pops its own stack
+    // arguments, so one that reads none itself and whose `ret` pops
+    // nothing hands none on through its tail jump either:
+    // `__security_check_cookie` is `cmp ecx, [cookie]; jne fail; ret`, and
+    // the word above the return address that `fail` (`__report_gsfailure`,
+    // capturing the frame) takes the address of is no argument its callers
+    // pass. A word the body reads itself stays an argument, whatever
+    // convention a whole-program compiler chose.
+    let own = f.stack_args.max(stack_params_read(ctx, code, succs, entry));
+    let pops_own = ctx.bitness == 32 && !ctx.conv.args.is_empty();
+    let stack = if own == 0 && pops_own && lift::function_pop(ctx, f, lift::TAIL_DEPTH) == Some(0) {
+        0
+    } else {
+        own.max(forwarded_stack(ctx, code))
+    };
     // INVARIANT: the positions are counted under the convention as it
     // stands when they are counted: a method read as a thiscall below has
     // `this` in `ecx` ahead of its stack words.

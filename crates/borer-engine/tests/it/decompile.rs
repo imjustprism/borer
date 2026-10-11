@@ -4645,6 +4645,31 @@ fn program64_with_imports(
     p
 }
 
+/// A callee nothing states the arity of takes the caller's own registers
+/// up to the last one set for the call, so it is not shown taking nothing.
+///
+/// `sub rsp,0x28; mov rax,rcx; add rax,r8; mov edx,5; lea r9,[rsp+0x50];
+/// call [frob]; add rsp,0x28; ret`, as `_vsnwprintf` is called: `rcx` and
+/// `r8` still hold the caller's `a1` and `a3`, and `rdx` and `r9` were set
+/// for the call. The text closed the list at `rcx`, which the caller did
+/// not write, and showed `frob()`.
+#[test]
+fn an_unknown_arity_call_takes_the_registers_up_to_the_last_set() {
+    let code = [
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp, 0x28
+        0x48, 0x89, 0xc8, // ASM: mov rax, rcx
+        0x4c, 0x01, 0xc0, // ASM: add rax, r8
+        0xba, 0x05, 0x00, 0x00, 0x00, // ASM: mov edx, 5
+        0x4c, 0x8d, 0x4c, 0x24, 0x50, // ASM: lea r9, [rsp+0x50]
+        0xff, 0x15, 0xe6, 0x0f, 0x00, 0x00, // ASM: call [rip+0xfe6]
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp, 0x28
+        0xc3, // ASM: ret
+    ];
+    let p = program64_with_imports(&code, &[0u8; 8], &[(0x1_4000_2000, "Foo.dll!frob")]);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("frob(a1, 5, a3, "), "{text}");
+}
+
 /// An import call passes what the SDK declares: `SetLastError` takes one
 /// argument though `edx` was set too, and `sin` takes its `double` in
 /// `xmm0`.

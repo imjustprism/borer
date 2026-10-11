@@ -59,6 +59,9 @@ impl<'a> Exec<'_, 'a> {
     /// list while a later slot carries a value: the unnamed register is
     /// declared under its own name instead, because an earlier call's
     /// unknown second result must not drop the arguments set behind it.
+    /// On a 32-bit target the stack words count as later slots, so a
+    /// `__thiscall` callee whose `ecx` a call clobbered gets `ecx` first
+    /// and its stack arguments after it, never shifted into `this`.
     ///
     /// A callee of unknown arity without a body gets only the registers
     /// written for it, in the call's own block since the last call, the
@@ -127,12 +130,23 @@ impl<'a> Exec<'_, 'a> {
                 Some(p) => usize::from(p.this),
                 None => cap.unwrap_or(usize::from(target.is_none() || method)),
             };
-            for (i, r) in FASTCALL_X86.args.iter().take(regs32).enumerate() {
+            let known = cap.is_some() || prototype.is_some();
+            let regs = FASTCALL_X86.args.get(..regs32).unwrap_or(FASTCALL_X86.args);
+            for (i, r) in regs.iter().enumerate() {
                 let k = Key::Reg(*r);
                 let value = self.env.vals.get(&k).cloned();
-                let passed = cap.is_some()
-                    || prototype.is_some()
-                    || self.passes(k, value.as_ref(), i == 0 && method);
+                let passed = known || self.passes(k, value.as_ref(), i == 0 && method);
+                // INVARIANT: a register slot the callee takes that holds
+                // nothing the text names does not close the list while an
+                // argument follows it, a later register or a stack word:
+                // `sub_405146(g, n)` for a `__thiscall` callee whose `ecx`
+                // a call clobbered reads `g` as `this`. The register is
+                // named for what it is and the arguments keep their places.
+                let follows = !stack.is_empty()
+                    || regs.iter().skip(i + 1).any(|r| {
+                        let k = Key::Reg(*r);
+                        self.env.vals.contains_key(&k) || self.names_register(k)
+                    });
                 match value {
                     Some(e) if passed => {
                         self.note_escape(&e);
@@ -142,6 +156,13 @@ impl<'a> Exec<'_, 'a> {
                         }
                     }
                     None if passed && self.names_register(k) => {
+                        out.push(n.key(k));
+                        if emit {
+                            values.push((ArgAt::Reg(*r), Expr::Var(k)));
+                        }
+                    }
+                    None if known && follows => {
+                        self.declare(k, self.word_ty());
                         out.push(n.key(k));
                         if emit {
                             values.push((ArgAt::Reg(*r), Expr::Var(k)));
@@ -172,6 +193,13 @@ impl<'a> Exec<'_, 'a> {
             if !open || (takes == Some(false) && !variadic) {
                 continue;
             }
+            // INVARIANT: a callee nothing states the arity of takes a slot
+            // the caller did not set for it while a later slot was set for
+            // the call: `mov rdx, rsi; lea r9, [rsp+0x78]; call
+            // [_vsnwprintf]` passes the caller's own `rcx` and `r8` too,
+            // and closing the list at `rcx` showed the call taking nothing.
+            let bridged = stated.is_none() && self.later_set_here(i, floats);
+            let takes = if bridged { Some(true) } else { takes };
             if takes != Some(true) && !self.passes(k, value.as_ref(), i == 0 && method) {
                 open = false;
                 continue;
@@ -259,6 +287,29 @@ impl<'a> Exec<'_, 'a> {
             let k = Key::Reg(r);
             self.env.vals.contains_key(&k) || self.names_register(k)
         })
+    }
+
+    /// Tells whether an argument slot after `from` holds a register the
+    /// caller wrote for the call being lifted, in its block since the last
+    /// call, short of the register the call goes through: a callee of
+    /// unknown arity takes every slot up to it.
+    ///
+    /// # Arguments
+    ///
+    /// * `from` - The slot the list is at.
+    /// * `floats` - The callee's float slots, as [`Self::args_for`] read them.
+    fn later_set_here(&self, from: usize, floats: u8) -> bool {
+        (from + 1..self.ctx.conv.reg_args())
+            .map_while(|j| {
+                self.ctx
+                    .conv
+                    .arg_reg(j, floats)
+                    .filter(|r| self.call_through != Some(*r))
+            })
+            .any(|r| {
+                let k = Key::Reg(r);
+                self.env.fresh.contains(&k) && self.written_here.contains(&k)
+            })
     }
 
     /// Tells whether an argument register still holds the caller's own
@@ -359,9 +410,7 @@ impl<'a> Exec<'_, 'a> {
     pub(super) fn outgoing_stack_args(&mut self, target: Option<u64>) -> Vec<Expr> {
         // INVARIANT: an unknown callee on a 32-bit target takes what was
         // pushed for it since the last call; nothing else says its arity.
-        let stated = self.callee_stack_args(target).or_else(|| {
-            (self.bitness() == 32 && self.bodyless(target)).then_some(self.args_pushed)
-        });
+        let stated = self.call_stack_args(target);
         let Some(sp) = self.env.sp else {
             return Vec::new();
         };
@@ -423,6 +472,27 @@ impl<'a> Exec<'_, 'a> {
             out.push(e);
         }
         out
+    }
+
+    /// Returns how many stack words the call being lifted passes.
+    ///
+    /// What the callee is stated to read ([`Exec::callee_stack_args`]),
+    /// or the words its caller cleans up after it when those are more
+    /// ([`Exec::cleaned`]); for an unknown callee on a 32-bit target, what
+    /// was pushed for it since the last call.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The callee's entry when the call is direct, or the
+    ///   import slot it calls through.
+    ///
+    /// # Returns
+    ///
+    /// The count, or `None` when nothing states it.
+    fn call_stack_args(&self, target: Option<u64>) -> Option<u32> {
+        self.callee_stack_args(target)
+            .map(|c| self.cleaned.map_or(c, |n| c.max(n)))
+            .or_else(|| (self.bitness() == 32 && self.bodyless(target)).then_some(self.args_pushed))
     }
 
     /// Returns the declared argument count of the import a call reaches.
@@ -1964,6 +2034,20 @@ impl<'a> Exec<'_, 'a> {
             self.args_pushed = args;
             popped
         });
+        // INVARIANT: a 32-bit callee whose `ret` pops nothing is `__cdecl`,
+        // so the words its caller cleans up right after the call are the
+        // arguments it was passed, however many its body reads by name:
+        // `push`ing twelve words to a `StringCchPrintf` that reads three
+        // before its `va_start` passes twelve, not three and nine dead
+        // stores. A call that pops what it was handed states no cleanup.
+        let cdecl = target
+            .filter(|_| self.bitness() == 32 && stated == Some(0) && !self.bodyless(target))
+            .and_then(|t| callee_shape(self.ctx, t))
+            .is_some_and(|s| s.conv.args.is_empty());
+        self.cleaned = cdecl
+            .then(|| self.stack_after(instr))
+            .filter(|(args, popped)| *popped == 0 && *args > 0)
+            .map(|(args, _)| args);
         self.call_through = direct
             .is_none()
             .then(|| self.through_register(instr))
@@ -2001,9 +2085,7 @@ impl<'a> Exec<'_, 'a> {
         // INVARIANT: the argument window of an unknown callee on a 32-bit
         // target is what was pushed for it, the same words the call renders,
         // so their slots are not written out a second time before it.
-        let arity = self.callee_stack_args(reached).or_else(|| {
-            (self.bitness() == 32 && self.bodyless(reached)).then_some(self.args_pushed)
-        });
+        let arity = self.call_stack_args(reached);
         let preserves = self.callee_preserves_rax(target);
         let mut held = self.target_registers(instr);
         held.extend_from_slice(&operands);
@@ -2279,6 +2361,7 @@ impl<'a> Exec<'_, 'a> {
             (None, _) => 0,
         };
         self.args_pushed = 0;
+        self.cleaned = None;
         if let Some(sp) = self.env.sp.filter(|_| popped > 0) {
             let gone: Vec<i64> = self
                 .env

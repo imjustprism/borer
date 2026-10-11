@@ -852,9 +852,14 @@ impl<'a> Exec<'_, 'a> {
     /// holds nothing on any path here ([`Env::unset`]): the last call
     /// clobbered it, or the function neither set nor received it. The slot
     /// gets no value, so the push never renders as the store of an unset
-    /// register nor counts as an argument of the next call. A register
-    /// written out under its own name is set, and its push is the argument
-    /// it is, as is a push of the `eax` a call just returned.
+    /// register nor counts among the words pushed for a callee of unknown
+    /// arity. It is still pushed for the next call ([`Env::fresh`]): MSVC
+    /// fills a parameter the callee ignores the same way (`push ecx; push
+    /// [ebp+8]; push ecx; call f` for an `f` reading only its second word),
+    /// and a callee stated to take the word reads it as the slot it is, so
+    /// the arguments above it keep their places. A register written out
+    /// under its own name is set, and its push is the argument it is, as is
+    /// a push of the `eax` a call just returned.
     ///
     /// # Arguments
     ///

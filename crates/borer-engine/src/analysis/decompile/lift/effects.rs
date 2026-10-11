@@ -170,8 +170,6 @@ pub(in crate::analysis::decompile) fn stated_pop(
     target: Option<u64>,
     reached: Option<u64>,
 ) -> Option<u32> {
-    /// Most tail jumps followed to the `ret` that pops for a function.
-    const TAIL_DEPTH: u8 = 4;
     let bits32 = ctx.bitness == 32;
     if let Some(f) = target.and_then(|t| ctx.analysis.function(t)) {
         if !bits32 {
@@ -190,6 +188,10 @@ pub(in crate::analysis::decompile) fn stated_pop(
     }
 }
 
+/// Most tail jumps followed to the `ret` that pops for a function
+/// ([`function_pop`]).
+pub(in crate::analysis::decompile) const TAIL_DEPTH: u8 = 4;
+
 /// Returns the bytes a function pops on return, as its own `ret imm16`
 /// says, or as the functions it ends in a jump to say alike.
 ///
@@ -206,7 +208,11 @@ pub(in crate::analysis::decompile) fn stated_pop(
 /// # Returns
 ///
 /// The bytes, or `None` when no `ret` is reached.
-fn function_pop(ctx: &Ctx<'_>, f: &crate::analysis::Function, depth: u8) -> Option<u32> {
+pub(in crate::analysis::decompile) fn function_pop(
+    ctx: &Ctx<'_>,
+    f: &crate::analysis::Function,
+    depth: u8,
+) -> Option<u32> {
     use crate::analysis::BlockTerm;
     if f.blocks.iter().any(|b| b.term == BlockTerm::Ret) {
         return Some(f.stack_pop);

@@ -492,6 +492,151 @@ fn an_internal_thiscall_callee_takes_ecx() {
     assert!(text.contains("sub_401040(5)"), "{text}");
 }
 
+/// A `__thiscall` callee whose `ecx` an earlier call clobbered still
+/// takes `ecx` first, so its stack arguments keep their places.
+///
+/// `call 0x401060; push 7; push 9; call 0x401040; ret`, where 0x401040 is
+/// `mov eax,[ecx]; add eax,[esp+4]; add eax,[esp+8]; ret 8` and 0x401060
+/// `xor eax,eax; ret`: the text named the two pushes as the callee's
+/// first two arguments, `this` and `a2`, where the machine passes them as
+/// `a2` and `a3` with whatever `ecx` holds as `this`.
+#[test]
+fn a_clobbered_this_keeps_the_stack_arguments_in_place() {
+    let mut code = vec![
+        0xe8, 0x5b, 0x00, 0x00, 0x00, // ASM: call 0x401060
+        0x6a, 0x07, // ASM: push 7
+        0x6a, 0x09, // ASM: push 9
+        0xe8, 0x32, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x8b, 0x01, // ASM: mov eax, [ecx]
+        0x03, 0x44, 0x24, 0x04, // ASM: add eax, [esp+4]
+        0x03, 0x44, 0x24, 0x08, // ASM: add eax, [esp+8]
+        0xc2, 0x08, 0x00, // ASM: ret 8
+    ]);
+    code.resize(0x60, 0xcc);
+    code.extend_from_slice(&[
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ]);
+    let text = dc(&code);
+    assert!(text.contains("sub_401040(ecx, 9, 7)"), "{text}");
+}
+
+/// A word a push only made room for still reaches a callee stated to read
+/// it, so the argument pushed above it keeps its place.
+///
+/// `call 0x401060; push ecx; push 5; push ecx; call 0x401040; ret`, where
+/// 0x401040 is `mov eax,[esp+8]; ret 0xc` and 0x401060 `xor eax,eax;
+/// ret`: `ecx` holds nothing after the first call, so each `push ecx`
+/// only fills a word the callee ignores, the way MSVC passes a parameter
+/// nobody reads. The text dropped all three arguments and left the `5` as
+/// a dead store, where the machine passes it as the second.
+#[test]
+fn a_room_making_push_keeps_its_place_among_the_arguments() {
+    let mut code = vec![
+        0xe8, 0x5b, 0x00, 0x00, 0x00, // ASM: call 0x401060
+        0x51, // ASM: push ecx
+        0x6a, 0x05, // ASM: push 5
+        0x51, // ASM: push ecx
+        0xe8, 0x32, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x8b, 0x44, 0x24, 0x08, // ASM: mov eax, [esp+8]
+        0xc2, 0x0c, 0x00, // ASM: ret 0xc
+    ]);
+    code.resize(0x60, 0xcc);
+    code.extend_from_slice(&[
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ]);
+    let text = dc(&code);
+    let call = text
+        .lines()
+        .find(|l| l.contains("sub_401040("))
+        .unwrap_or_default();
+    let args = call
+        .split_once("sub_401040(")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(args, _)| args.split(", ").collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert_eq!(args.len(), 3, "{text}");
+    assert_eq!(args.get(1), Some(&"5"), "{text}");
+}
+
+/// A `__cdecl` call passes every word its caller cleans up after it, past
+/// the ones the callee's body reads by name.
+///
+/// `push 3; push 2; push 1; call 0x401040; add esp,0xc; ret`, where
+/// 0x401040 is `mov eax,[esp+4]; lea ecx,[esp+8]; add eax,[ecx]; ret`: a
+/// variadic callee that names one argument and walks the rest through
+/// its `va_start` pointer. The text passed it two and left the third push
+/// as a dead store.
+#[test]
+fn a_cdecl_call_passes_what_its_caller_cleans_up() {
+    let mut code = vec![
+        0x6a, 0x03, // ASM: push 3
+        0x6a, 0x02, // ASM: push 2
+        0x6a, 0x01, // ASM: push 1
+        0xe8, 0x35, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x83, 0xc4, 0x0c, // ASM: add esp, 0xc
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x8b, 0x44, 0x24, 0x04, // ASM: mov eax, [esp+4]
+        0x8d, 0x4c, 0x24, 0x08, // ASM: lea ecx, [esp+8]
+        0x03, 0x01, // ASM: add eax, [ecx]
+        0xc3, // ASM: ret
+    ]);
+    let text = dc(&code);
+    assert!(text.contains("sub_401040(1, 2, 3)"), "{text}");
+}
+
+/// A `__fastcall` or `__thiscall` function whose `ret` pops nothing takes
+/// no stack argument, whatever the function it tail-jumps to reads.
+///
+/// `sub esp,8; mov dword [esp],9; mov ecx,5; call 0x401040; add esp,8;
+/// ret` calls a `__security_check_cookie`: `cmp ecx,[0x402000]; jne F;
+/// ret 0; F: jmp 0x401060`, where 0x401060 captures the frame like
+/// `__report_gsfailure` (`push ebp; mov ebp,esp; mov [0x402004],ecx; lea
+/// eax,[ebp+8]; mov [0x402008],eax; ud2`). Its address of the word above
+/// the return address made the check take a stack argument, and the call
+/// passed the caller's local at the top of the stack as one.
+#[test]
+fn a_callee_popping_nothing_takes_no_stack_argument() {
+    let mut code = vec![
+        0x83, 0xec, 0x08, // ASM: sub esp, 8
+        0xc7, 0x04, 0x24, 0x09, 0x00, 0x00, 0x00, // ASM: mov dword [esp], 9
+        0xb9, 0x05, 0x00, 0x00, 0x00, // ASM: mov ecx, 5
+        0xe8, 0x2c, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x83, 0xc4, 0x08, // ASM: add esp, 8
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x3b, 0x0d, 0x00, 0x20, 0x40, 0x00, // ASM: cmp ecx, [0x402000]
+        0x75, 0x03, // ASM: jne 0x40104b
+        0xc2, 0x00, 0x00, // ASM: ret 0
+        0xe9, 0x10, 0x00, 0x00, 0x00, // ASM: jmp 0x401060
+    ]);
+    code.resize(0x60, 0xcc);
+    code.extend_from_slice(&[
+        0x55, // ASM: push ebp
+        0x8b, 0xec, // ASM: mov ebp, esp
+        0x89, 0x0d, 0x04, 0x20, 0x40, 0x00, // ASM: mov [0x402004], ecx
+        0x8d, 0x45, 0x08, // ASM: lea eax, [ebp+8]
+        0xa3, 0x08, 0x20, 0x40, 0x00, // ASM: mov [0x402008], eax
+        0x0f, 0x0b, // ASM: ud2
+    ]);
+    let text = dc(&code);
+    assert!(text.contains("sub_401040(5);"), "{text}");
+}
+
 /// A read inside a stack parameter's word reaches those bytes of the
 /// parameter.
 ///
