@@ -2011,7 +2011,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Callgraph from a function as mermaid, callees breadth-first, imports as leaves (max_nodes default 30, max 100).",
+        description = "Callgraph from a function as mermaid: its callees (callers=true: what reaches it) breadth-first, at most six per function until the rest of the budget is shared out, imports as leaves; a trailing %% line counts what was not shown (max_nodes default 30, max 100).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2043,7 +2043,7 @@ impl BorerServer {
             };
             Ok(render::callgraph_mermaid(p, a, o, root, max.n, callers))
         })
-        .map(|text| max.noted(text))
+        .map(|text| max.noted_with("%%", text))
     }
 
     /// Answers whether one function reaches another through calls.
@@ -2088,7 +2088,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Control-flow graph of a function as mermaid: basic blocks (start, terminator) and successor edges; the first 300 blocks.",
+        description = "Control-flow graph of a function as mermaid: basic blocks (start, terminator) and successor edges, 300 blocks a page by offset; a trailing %% line says when blocks were cut.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2098,11 +2098,13 @@ impl BorerServer {
     )]
     fn cfg(
         &self,
-        Parameters(CfgParams { address }): Parameters<CfgParams>,
+        Parameters(CfgParams { address, offset }): Parameters<CfgParams>,
     ) -> Result<String, ErrorData> {
+        let offset = to_usize(offset.unwrap_or(0));
         self.with_analysis(|p, a, o| {
             let entry = self.function_entry(p, a, &address)?;
-            render::cfg_mermaid(a, o, entry).ok_or_else(|| format!("no function at {entry:#x}"))
+            render::cfg_mermaid(a, o, entry, offset)
+                .ok_or_else(|| format!("no function at {entry:#x}"))
         })
     }
     /// Returns the pseudo-C of one function.
@@ -3336,7 +3338,8 @@ impl ServerHandler for BorerServer {
              their fields, and save_project persists the overlay. For anything no single tool \
              answers, script runs a sandboxed Rhai script over the program in one call; its \
              query(uri) reads any resource. Outputs are capped and paged; count_only and \
-             filter keep them small. An answer of 512 bytes or more ends with `# since=<tag>`; \
+             filter keep them small. An answer of 512 bytes or more ends with `# since=<tag>` (a mermaid graph: \
+             `%% since=<tag>`); \
              the same request with \"since\": \"<tag>\" added (on a URI: !since=<tag>) answers \
              with a one-line note if nothing changed, else only the changed lines. \
              Prompts: triage, find_check(what), explain_function(address). \

@@ -3,7 +3,8 @@
 //!
 //! An agent re-reads: after a detour it asks for the function it already
 //! has, and a decompile or a table costs it thousands of tokens each time.
-//! A long answer ends with a `# since=<tag>` line; the same request with
+//! A long answer ends with a `# since=<tag>` line (`%% since=<tag>` after
+//! a mermaid graph, so it stays one); the same request with
 //! the tag passed back ([`SINCE_ARG`] on a tool call, [`SINCE_SUFFIX`] on a
 //! resource URI) is answered by a one-line note when nothing changed, or by
 //! the lines that differ ([`Recall`]). [`budgeted`] caps what goes out.
@@ -318,9 +319,26 @@ impl Recall {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        let _ = writeln!(text, "# {SINCE_ARG}={tag}");
+        let mark = if mermaid(&text) { "%%" } else { "#" };
+        let _ = writeln!(text, "{mark} {SINCE_ARG}={tag}");
         text
     }
+}
+
+/// Whether an answer is a mermaid graph, whose tag line must be a `%%`
+/// comment for the answer to parse as a diagram.
+///
+/// # Arguments
+///
+/// * `text` - The answer.
+///
+/// # Returns
+///
+/// `true` when its first line that is not a `%%` comment opens a `graph`.
+fn mermaid(text: &str) -> bool {
+    text.lines()
+        .find(|l| !l.starts_with("%%"))
+        .is_some_and(|l| l.starts_with("graph "))
 }
 
 impl Recall {

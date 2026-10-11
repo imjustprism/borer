@@ -153,7 +153,14 @@ pub fn callgraph_mermaid(
 /// Walking callers answers what reaches a function: an import has none and
 /// a caller carries no slot name, so the targets are plain entries, and an
 /// import or a data symbol, which has no body, is reached by every function
-/// that references it.
+/// that references it. Such a root is labelled by its symbol, an import
+/// drawn as the stadium it is everywhere else, where `sub_<hex>` named a
+/// function that is not there.
+///
+/// The count of what is not shown is of distinct functions and imports a
+/// drawn node calls (or is called by) that the graph does not hold, every
+/// node's included: counting only the second round's refusals missed the
+/// first round's and those of the nodes the second round added.
 ///
 /// # Arguments
 ///
@@ -166,7 +173,8 @@ pub fn callgraph_mermaid(
 ///
 /// # Returns
 ///
-/// A `graph TD` document and a trailing count line.
+/// A `graph TD` document and a trailing `%%` count line, a mermaid
+/// comment, so the whole answer parses as a diagram.
 pub fn callgraph(
     p: &Program,
     a: &Analysis,
@@ -188,12 +196,14 @@ pub fn callgraph(
         max_nodes,
         walk,
     };
-    let mut held: Vec<(u64, Vec<Callee>)> = Vec::new();
-    let mut head = 0;
-    while head < g.nodes.len() {
-        let cur = g.nodes[head];
-        head += 1;
-        let targets = match walk {
+    if a.function(root).is_none()
+        && let Some(raw) = slots.get(&root)
+    {
+        let name = crate::search::demangled_name(raw);
+        g.imports.insert(root, bare_name(&name).to_owned());
+    }
+    let targets_of = |cur: u64| -> Vec<Callee> {
+        match walk {
             Walk::Callers => match a.function(cur) {
                 Some(f) => f.callers.iter().map(|&c| Callee::near(c)).collect(),
                 None => {
@@ -210,7 +220,14 @@ pub fn callgraph(
                 }
             },
             Walk::Callees => callees_of(a, &slots, cur),
-        };
+        }
+    };
+    let mut held: Vec<(u64, Vec<Callee>)> = Vec::new();
+    let mut head = 0;
+    while head < g.nodes.len() {
+        let cur = g.nodes[head];
+        head += 1;
+        let targets = targets_of(cur);
         let split = targets.len().min(CallGraph::FANOUT);
         for t in &targets[..split] {
             g.link(cur, t);
@@ -219,14 +236,19 @@ pub fn callgraph(
             held.push((cur, targets[split..].to_vec()));
         }
     }
-    let mut elided = 0usize;
     for (cur, rest) in held {
         for t in rest {
-            if !g.link(cur, &t) {
-                elided += 1;
-            }
+            g.link(cur, &t);
         }
     }
+    let drawn: BTreeSet<u64> = g.nodes.iter().copied().collect();
+    let hidden: BTreeSet<u64> = g
+        .nodes
+        .iter()
+        .flat_map(|&n| targets_of(n))
+        .map(|t| t.target)
+        .filter(|t| !drawn.contains(t))
+        .collect();
     let mut out = String::from("graph TD\n");
     for (i, &n) in g.nodes.iter().enumerate() {
         match g.imports.get(&n) {
@@ -234,7 +256,11 @@ pub fn callgraph(
                 let _ = writeln!(out, "  n{i}([\"{}\"])", sanitize_label(name));
             }
             None => {
-                let _ = writeln!(out, "  n{i}[\"{}\"]", sanitize_label(&name_of(a, o, n)));
+                let _ = writeln!(
+                    out,
+                    "  n{i}[\"{}\"]",
+                    sanitize_label(&node_label(p, a, o, n))
+                );
             }
         }
     }
@@ -246,14 +272,14 @@ pub fn callgraph(
             let _ = writeln!(out, "  n{i} --> n{j}");
         }
     }
-    let spill = if elided > 0 {
+    let spill = if hidden.is_empty() {
+        String::new()
+    } else {
         let what = match walk {
             Walk::Callers => "callers",
             Walk::Callees => "callees",
         };
-        format!(", {elided} {what} not shown")
-    } else {
-        String::new()
+        format!(", {} {what} not shown", hidden.len())
     };
     let dir = match walk {
         Walk::Callers => "callers of the root, transitively",
@@ -261,11 +287,31 @@ pub fn callgraph(
     };
     let _ = writeln!(
         out,
-        "# {} nodes, {} imports ({dir}; cap {max_nodes}{spill}); use function(address) for details",
+        "%% {} nodes, {} imports ({dir}; cap {max_nodes}{spill}); use function(address) for details",
         g.nodes.len(),
         g.imports.len()
     );
     out
+}
+
+/// Labels a node that is not drawn as an import: its user or function
+/// name, else the symbol at it (a data root walked for its callers), else
+/// its address.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for the symbols.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `n` - The node's address.
+fn node_label(p: &Program, a: &Analysis, o: &Overlay, n: u64) -> String {
+    if o.names.contains_key(&n) || a.function(n).is_some() {
+        return name_of(a, o, n);
+    }
+    a.symbol_at(p, n).map_or_else(
+        || format!("{n:#x}"),
+        |s| bare_name(&crate::search::demangled_name(&s.name)).to_owned(),
+    )
 }
 
 /// A call target and, when it is an import slot, the import's name.
@@ -314,21 +360,17 @@ impl CallGraph {
     /// leave none for depth.
     pub(super) const FANOUT: usize = 6;
 
-    /// Draws an edge, adding the target as a node when the budget allows.
+    /// Draws an edge, adding the target as a node when the budget allows;
+    /// a new target past the budget is left out, edge and all.
     ///
     /// # Arguments
     ///
     /// * `from` - The node the walk reached the target from.
     /// * `to` - The target: a function entry or an import slot.
-    ///
-    /// # Returns
-    ///
-    /// Whether the edge was drawn; it is not when `to` is a new node and
-    /// the budget is spent.
-    pub(super) fn link(&mut self, from: u64, to: &Callee) -> bool {
+    pub(super) fn link(&mut self, from: u64, to: &Callee) {
         if !self.nodes.contains(&to.target) {
             if self.nodes.len() >= self.max_nodes {
-                return false;
+                return;
             }
             self.nodes.push(to.target);
             if let Some(n) = &to.import {
@@ -339,7 +381,6 @@ impl CallGraph {
             Walk::Callers => self.edges.push((to.target, from)),
             Walk::Callees => self.edges.push((from, to.target)),
         }
-        true
     }
 }
 
@@ -386,28 +427,35 @@ pub const CFG_BLOCKS_MAX: usize = 300;
 ///
 /// A node is labelled by its block's start and terminator; the end is the
 /// next block's start, and `function` lists the sizes. A function of more
-/// than [`CFG_BLOCKS_MAX`] blocks draws the first that many in address
-/// order with the edges among them and says so on the last line: a
-/// 2,900-block dispatcher drew 89 KB of mermaid at once.
+/// than [`CFG_BLOCKS_MAX`] blocks draws that many in address order from
+/// `offset`, with the edges among them, and says so on the last line: a
+/// 2,900-block dispatcher drew 89 KB of mermaid at once, and the blocks
+/// past the first page are read by paging. The line is a `%%` comment, so
+/// the whole answer parses as a diagram.
 ///
 /// # Arguments
 ///
 /// * `a` - The analysis.
 /// * `o` - User names for the title.
 /// * `entry` - The function's entry address.
+/// * `offset` - Blocks to skip, in address order, before the page drawn.
 ///
 /// # Returns
 ///
 /// A `graph TD` document with one node per drawn block (`start term`) and
-/// one edge per successor among them, then a `# N blocks, showing 300; the
-/// rest elided` line when the function was cut; `None` when no function
-/// starts at `entry`.
-pub fn cfg_mermaid(a: &Analysis, o: &Overlay, entry: u64) -> Option<String> {
+/// one edge per successor among them, then a `%% showing N of M blocks
+/// from O` line when the function was cut; `None` when no function starts
+/// at `entry`.
+pub fn cfg_mermaid(a: &Analysis, o: &Overlay, entry: u64, offset: usize) -> Option<String> {
     let f = a.function(entry)?;
-    let drawn = f.blocks.get(..CFG_BLOCKS_MAX).unwrap_or(&f.blocks);
+    let drawn = f
+        .blocks
+        .iter()
+        .skip(offset)
+        .take(CFG_BLOCKS_MAX)
+        .collect::<Vec<_>>();
     let mut out = format!(
-        "graph TD; title[\"{} CFG {} blocks\"]
-",
+        "graph TD; title[\"{} CFG {} blocks\"]\n",
         sanitize_label(&name_of(a, o, entry)),
         f.blocks.len()
     );
@@ -426,12 +474,18 @@ pub fn cfg_mermaid(a: &Analysis, o: &Overlay, entry: u64) -> Option<String> {
             }
         }
     }
-    if f.blocks.len() > CFG_BLOCKS_MAX {
-        let _ = writeln!(
+    if drawn.len() < f.blocks.len() {
+        let _ = write!(
             out,
-            "# {} blocks, showing {CFG_BLOCKS_MAX}; the rest elided",
+            "%% showing {} of {} blocks from {offset}",
+            drawn.len(),
             f.blocks.len()
         );
+        let next = offset.saturating_add(drawn.len());
+        if next < f.blocks.len() {
+            let _ = write!(out, "; offset={next} for the next page");
+        }
+        out.push('\n');
     }
     Some(out)
 }

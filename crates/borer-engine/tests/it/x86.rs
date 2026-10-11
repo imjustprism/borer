@@ -1139,7 +1139,7 @@ fn an_import_is_a_leaf_of_the_callgraph() {
     let out = callgraph_mermaid(&p, &a, &Overlay::default(), 0x401000, 30, false);
     assert!(out.contains("([\"QString::QString\"])"), "{out}");
     assert!(out.contains("[\"sub_401010\"]"), "{out}");
-    assert!(out.contains("# 3 nodes, 1 imports"), "{out}");
+    assert!(out.contains("%% 3 nodes, 1 imports"), "{out}");
     assert_eq!(out.matches(" --> ").count(), 2, "{out}");
     let mut o = Overlay::default();
     o.names

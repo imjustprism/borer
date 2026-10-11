@@ -1552,7 +1552,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let (a, entry) = s.function_arg(args, 2, "cfg/callgraph needs an address")?;
             print!(
                 "{}",
-                render::cfg_mermaid(&a, &s.overlay, entry).context("no function at address")?
+                render::cfg_mermaid(&a, &s.overlay, entry, 0).context("no function at address")?
             );
         }
         Query::Callgraph => {

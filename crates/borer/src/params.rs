@@ -458,6 +458,8 @@ pub(crate) struct ReachesParams {
 pub(crate) struct CfgParams {
     /// Function entry or any address inside it.
     pub(crate) address: String,
+    /// Blocks to skip first, in address order (paging, 300 a page).
+    pub(crate) offset: Option<u32>,
 }
 
 /// Parameters for `decompile`.
@@ -690,9 +692,20 @@ impl Count {
     ///
     /// * `text` - The answer.
     pub(crate) fn noted(self, text: String) -> String {
+        self.noted_with("#", text)
+    }
+
+    /// [`Count::noted`] with the line opened by `mark`: `%%` ahead of a
+    /// mermaid graph, where a `#` line does not parse.
+    ///
+    /// # Arguments
+    ///
+    /// * `mark` - What opens a comment line in the answer's language.
+    /// * `text` - The answer.
+    pub(crate) fn noted_with(self, mark: &str, text: String) -> String {
         match self.capped {
             Some(Capped { what, asked, max }) => {
-                format!("# {what} {asked} capped at {max}\n{text}")
+                format!("{mark} {what} {asked} capped at {max}\n{text}")
             }
             None => text,
         }
