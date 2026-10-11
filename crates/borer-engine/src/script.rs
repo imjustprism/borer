@@ -28,8 +28,17 @@
 //!   with those parameters fixed).
 //! * `imports()`, `exports()` (`name`, `at`), `sections()` (`name`, `at`,
 //!   `size`, `r`, `w`, `x`).
-//! * `hex(n)`, `args()` (the words after the script on the command line).
+//! * `hex(n)`, `args()` (the words after the script on the command line),
+//!   `help()` (this list, short, for an agent).
+//! * `query(uri)`: the text of any `borer://` resource (`borer://taint/...`,
+//!   `borer://grep/...`, `borer://classes`), where the front end running
+//!   the script answers resources ([`Query`]); elsewhere it throws.
 //! * `rename(entry, name)`, `comment(addr, text)`: proposals.
+//!
+//! Native calls do not count against the operation budget, so the costly
+//! ones have budgets of their own: [`DECOMPILES_MAX`] `decompile` and
+//! `scenario` calls and [`QUERIES_MAX`] `query` calls per run. A call past
+//! its budget throws, naming the budget.
 //!
 //! A pack's `[scripts] run <file>` lines run at the end of every analysis
 //! the pack takes part in ([`run_pack_scripts`]): the names a script
@@ -42,7 +51,7 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rhai::{Array, Blob, Dynamic, Engine, INT, Map, Scope};
+use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, INT, Map, Scope};
 
 use crate::analysis::{Analysis, Function, NameSource, Overlay, decompile, name_of, resolve};
 use crate::program::{Program, SymbolKind};
@@ -63,6 +72,37 @@ const DISASM_MAX: usize = 4096;
 const STRING_MIN: usize = 4;
 /// Longest text read as a string a function references.
 const STRING_CAP: usize = 512;
+/// Most `decompile` and `scenario` calls one run may make.
+pub const DECOMPILES_MAX: u32 = 2_000;
+/// Most `query` calls one run may make.
+pub const QUERIES_MAX: u32 = 200;
+/// Most printed lines [`run_tsv`] shows.
+const PRINTED_SHOWN: usize = 500;
+/// Most proposals [`run_tsv`] lists.
+const PROPOSALS_SHOWN: usize = 500;
+
+/// What `help()` returns: every function a script can call, one line each,
+/// for an agent that has the tool's short description and nothing else.
+const HELP: &str = "\
+functions() / functions(filter): maps of entry, name, size, instrs, blocks, source
+function(entry or name): one function's map plus callers, callees; () when none
+callers(e), callees(e): entries; name(e): the name in force
+strings(e): strings a function references, maps of at, text
+xrefs(addr): references to an address, maps of from, kind, function
+read_u8/read_u16/read_u32/read_u64(addr), bytes(addr, n), cstr(addr): () where unmapped
+find_bytes(\"48 8b ?? ff\"), find_text(text): addresses
+decompile(e), scenario(e, \"a2=5\"): pseudo-C text; 2000 calls per run
+disasm(addr, n): maps of at, bytes, text
+imports(), exports(): maps of name, at; sections(): name, at, size, r, w, x
+program(): path, format, arch, bits, base, entry
+query(uri): text of any borer:// resource, e.g. query(\"borer://grep/CreateFileA\"); 200 calls per run
+hex(n), args(), print(x)
+rename(e, name), comment(addr, text): proposals, applied only with dry_run=false
+example: for f in functions(\"crypt\") { if callers(f.entry).len > 3 { print(`${hex(f.entry)} ${f.name}`); } }";
+
+/// Answers a script's `query(uri)` with the resource's text, or the
+/// resource's error.
+pub type Query = Rc<dyn Fn(&str) -> Result<String, String>>;
 
 /// What a script printed and proposed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -75,6 +115,9 @@ pub struct ScriptRun {
     pub comments: Vec<(u64, String)>,
     /// Operations it ran.
     pub operations: u64,
+    /// Its error, with the line, when it failed; what it printed and
+    /// proposed before that stays above.
+    pub error: Option<String>,
 }
 
 /// What one pack script did at the end of an analysis.
@@ -112,6 +155,12 @@ struct Host {
     run: RefCell<ScriptRun>,
     /// The words after the script on the command line.
     args: Vec<String>,
+    /// Who answers `query`, `None` where nothing does.
+    query: Option<Query>,
+    /// `decompile` and `scenario` calls made so far.
+    decompiles: Cell<u32>,
+    /// `query` calls made so far.
+    queries: Cell<u32>,
 }
 
 /// An address as a script's integer; one above `i64::MAX` wraps, and
@@ -216,6 +265,26 @@ impl Host {
         resolve(&self.program, &self.analysis, &self.overlay, &text).ok()
     }
 
+    /// Counts one call against a budget, or refuses it once the budget is
+    /// spent.
+    ///
+    /// # Arguments
+    ///
+    /// * `used` - The calls made so far.
+    /// * `max` - The budget.
+    /// * `what` - The calls the budget is for, as the error names them.
+    ///
+    /// # Errors
+    ///
+    /// When `max` calls were already made.
+    fn spend(used: &Cell<u32>, max: u32, what: &str) -> Result<(), Box<EvalAltResult>> {
+        if used.get() >= max {
+            return Err(format!("{what} budget spent: {max} calls per run").into());
+        }
+        used.set(used.get() + 1);
+        Ok(())
+    }
+
     /// Reads `N` bytes at an address as a little-endian integer.
     ///
     /// # Arguments
@@ -233,7 +302,7 @@ impl Host {
     }
 }
 
-/// Runs a script over a program.
+/// Runs a script over a program, with no `query`.
 ///
 /// # Arguments
 ///
@@ -250,7 +319,7 @@ impl Host {
 /// # Errors
 ///
 /// The script's own error, with its line, when it does not parse, calls
-/// what does not exist, fails, or runs past its operation budget.
+/// what does not exist, fails, or runs past one of its budgets.
 pub fn run(
     program: Arc<Program>,
     analysis: Arc<Analysis>,
@@ -258,12 +327,46 @@ pub fn run(
     code: &str,
     args: &[String],
 ) -> Result<ScriptRun, String> {
+    let done = run_with(program, analysis, overlay, code, args, None);
+    match done.error {
+        Some(e) => Err(e),
+        None => Ok(done),
+    }
+}
+
+/// Runs a script over a program, answering its `query` calls with `query`.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - What borer recovered.
+/// * `overlay` - The names in force.
+/// * `code` - The script.
+/// * `args` - The words after the script on the command line.
+/// * `query` - Who answers `query(uri)`; `None` makes it throw.
+///
+/// # Returns
+///
+/// What the script printed and proposed, and its error when it failed
+/// ([`ScriptRun::error`]).
+#[must_use]
+pub fn run_with(
+    program: Arc<Program>,
+    analysis: Arc<Analysis>,
+    overlay: Arc<Overlay>,
+    code: &str,
+    args: &[String],
+    query: Option<Query>,
+) -> ScriptRun {
     let host = Rc::new(Host {
         program,
         analysis,
         overlay,
         run: RefCell::new(ScriptRun::default()),
         args: args.to_vec(),
+        query,
+        decompiles: Cell::new(0),
+        queries: Cell::new(0),
     });
     let ops = Rc::new(Cell::new(0u64));
     let mut engine = Engine::new();
@@ -284,13 +387,12 @@ pub fn run(
         None
     });
     register(&mut engine, &host);
-    let result = engine
-        .run_with_scope(&mut Scope::new(), code)
-        .map_err(|e| e.to_string());
+    let result = engine.run_with_scope(&mut Scope::new(), code);
     drop(engine);
     let mut out = host.run.borrow().clone();
     out.operations = ops.get();
-    result.map(|()| out)
+    out.error = result.err().map(|e| e.to_string());
+    out
 }
 
 /// Registers every function a script can call.
@@ -441,22 +543,41 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
         )
     });
     let h = Rc::clone(host);
-    engine.register_fn("decompile", move |target: Dynamic| {
-        h.entry_of(&target)
-            .and_then(|e| decompile::decompile(&h.program, &h.analysis, &h.overlay, e))
-            .map_or(Dynamic::UNIT, Dynamic::from)
-    });
+    engine.register_fn(
+        "decompile",
+        move |target: Dynamic| -> Result<Dynamic, Box<EvalAltResult>> {
+            Host::spend(&h.decompiles, DECOMPILES_MAX, "decompile")?;
+            Ok(h.entry_of(&target)
+                .and_then(|e| decompile::decompile(&h.program, &h.analysis, &h.overlay, e))
+                .map_or(Dynamic::UNIT, Dynamic::from))
+        },
+    );
     let h = Rc::clone(host);
-    engine.register_fn("scenario", move |target: Dynamic, spec: &str| {
-        let Ok(assume) = decompile::parse_scenario(spec) else {
-            return Dynamic::UNIT;
-        };
-        h.entry_of(&target)
-            .and_then(|e| {
-                decompile::decompile_scenario(&h.program, &h.analysis, &h.overlay, e, &assume)
-            })
-            .map_or(Dynamic::UNIT, Dynamic::from)
-    });
+    engine.register_fn(
+        "scenario",
+        move |target: Dynamic, spec: &str| -> Result<Dynamic, Box<EvalAltResult>> {
+            Host::spend(&h.decompiles, DECOMPILES_MAX, "decompile")?;
+            let Ok(assume) = decompile::parse_scenario(spec) else {
+                return Ok(Dynamic::UNIT);
+            };
+            Ok(h.entry_of(&target)
+                .and_then(|e| {
+                    decompile::decompile_scenario(&h.program, &h.analysis, &h.overlay, e, &assume)
+                })
+                .map_or(Dynamic::UNIT, Dynamic::from))
+        },
+    );
+    let h = Rc::clone(host);
+    engine.register_fn(
+        "query",
+        move |uri: &str| -> Result<String, Box<EvalAltResult>> {
+            let Some(answer) = &h.query else {
+                return Err("query is not available here: no front end answers resources".into());
+            };
+            Host::spend(&h.queries, QUERIES_MAX, "query")?;
+            answer(uri).map_err(Into::into)
+        },
+    );
     let h = Rc::clone(host);
     engine.register_fn("disasm", move |at: INT, n: INT| -> Array {
         let Some(bits) = h.program.arch.bitness() else {
@@ -514,6 +635,7 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
             .collect()
     });
     engine.register_fn("hex", |v: INT| format!("{:#x}", addr(v)));
+    engine.register_fn("help", || -> String { HELP.to_owned() });
     let h = Rc::clone(host);
     engine.register_fn("args", move || -> Array {
         h.args.iter().map(|a| a.clone().into()).collect()
@@ -655,8 +777,12 @@ pub fn pack_scripts_tsv(scripts: &[PackScript]) -> String {
     out
 }
 
-/// What a script printed, then its proposals as a table: a `#` summary
-/// and a row per name or comment.
+/// What a script printed, its error if it failed, then its proposals as a
+/// table: a `#` summary and a row per name or comment.
+///
+/// The first [`PRINTED_SHOWN`] printed lines and [`PROPOSALS_SHOWN`]
+/// proposals are shown, each with a `# showing N of M` line when there
+/// were more, so a script that prints per function still fits an answer.
 ///
 /// # Arguments
 ///
@@ -664,8 +790,18 @@ pub fn pack_scripts_tsv(scripts: &[PackScript]) -> String {
 #[must_use]
 pub fn run_tsv(run: &ScriptRun) -> String {
     let mut out = String::new();
-    for line in &run.output {
+    for line in run.output.iter().take(PRINTED_SHOWN) {
         let _ = writeln!(out, "{line}");
+    }
+    if run.output.len() > PRINTED_SHOWN {
+        let _ = writeln!(
+            out,
+            "# showing {PRINTED_SHOWN} of {} printed lines; print less, or filter in the script",
+            run.output.len()
+        );
+    }
+    if let Some(e) = &run.error {
+        let _ = writeln!(out, "# script failed: {}", e.replace('\n', " "));
     }
     let _ = writeln!(
         out,
@@ -674,13 +810,16 @@ pub fn run_tsv(run: &ScriptRun) -> String {
         run.comments.len(),
         run.operations
     );
-    if !run.names.is_empty() || !run.comments.is_empty() {
+    let proposals = run.names.len() + run.comments.len();
+    if proposals > 0 {
         out.push_str("what\tat\ttext\n");
-        for (at, name) in &run.names {
-            let _ = writeln!(out, "name\t{at:#x}\t{name}");
+        let names = run.names.iter().map(|(at, t)| ("name", at, t));
+        let comments = run.comments.iter().map(|(at, t)| ("comment", at, t));
+        for (what, at, text) in names.chain(comments).take(PROPOSALS_SHOWN) {
+            let _ = writeln!(out, "{what}\t{at:#x}\t{text}");
         }
-        for (at, text) in &run.comments {
-            let _ = writeln!(out, "comment\t{at:#x}\t{text}");
+        if proposals > PROPOSALS_SHOWN {
+            let _ = writeln!(out, "# showing {PROPOSALS_SHOWN} of {proposals} proposals");
         }
     }
     out
@@ -823,5 +962,88 @@ mod tests {
         assert!(err.contains("operations"), "{err}");
         let err = go("\n\nno_such_function();").expect_err("an unknown call fails");
         assert!(err.contains("line 3"), "{err}");
+    }
+
+    /// Runs a script over the fixture with a `query` that answers
+    /// `borer://echo/<text>` with the text and refuses everything else.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The script.
+    fn go_with_query(code: &str) -> ScriptRun {
+        let (p, a) = fixture();
+        let query: Query = Rc::new(|uri: &str| {
+            uri.strip_prefix("borer://echo/")
+                .map(str::to_owned)
+                .ok_or_else(|| format!("unknown resource {uri}"))
+        });
+        run_with(p, a, Arc::default(), code, &[], Some(query))
+    }
+
+    /// `query` returns the front end's answer, throws its error, and
+    /// throws where no front end answers resources.
+    ///
+    /// # Panics
+    ///
+    /// When an answer or an error differs.
+    #[test]
+    fn a_script_queries_resources_through_its_front_end() {
+        let run = go_with_query(r#"print(query("borer://echo/hello"));"#);
+        assert_eq!(run.error, None);
+        assert_eq!(run.output, vec!["hello"]);
+        let run = go_with_query(r#"query("borer://nope");"#);
+        let err = run.error.expect("an unknown resource throws");
+        assert!(err.contains("unknown resource borer://nope"), "{err}");
+        let err = go(r#"query("borer://echo/x");"#).expect_err("no front end");
+        assert!(err.contains("query is not available here"), "{err}");
+    }
+
+    /// A run stops at its `query` and `decompile` budgets with an error
+    /// naming the budget, and keeps what it printed before.
+    ///
+    /// # Panics
+    ///
+    /// When a budget does not stop the run or the output is lost.
+    #[test]
+    fn a_script_stops_at_its_call_budgets() {
+        let run = go_with_query(&format!(
+            r#"print("before"); for i in 0..{} {{ query("borer://echo/x"); }}"#,
+            QUERIES_MAX + 1
+        ));
+        assert_eq!(run.output, vec!["before"]);
+        let err = run.error.expect("the query budget stops it");
+        assert!(
+            err.contains("query budget spent: 200 calls per run"),
+            "{err}"
+        );
+        let err = go(&format!(
+            r#"for i in 0..{} {{ decompile(0x1010); }}"#,
+            DECOMPILES_MAX + 1
+        ))
+        .expect_err("the decompile budget stops it");
+        assert!(err.contains("decompile budget spent"), "{err}");
+    }
+
+    /// The text of a run shows its error and caps what it printed and
+    /// proposed, saying how much was left out.
+    ///
+    /// # Panics
+    ///
+    /// When the error or a cap line is missing.
+    #[test]
+    fn a_long_run_is_capped_in_its_text() {
+        let run = go_with_query(&format!(
+            r#"for i in 0..{n} {{ print(`line ${{i}}`); rename(0x1010, `n${{i}}`); }} oops();"#,
+            n = PRINTED_SHOWN + 5
+        ));
+        let text = run_tsv(&run);
+        assert!(text.contains("line 499\n"), "{text}");
+        assert!(!text.contains("line 500\n"), "{text}");
+        assert!(
+            text.contains("# showing 500 of 505 printed lines"),
+            "{text}"
+        );
+        assert!(text.contains("# script failed: "), "{text}");
+        assert!(text.contains("# showing 500 of 505 proposals"), "{text}");
     }
 }

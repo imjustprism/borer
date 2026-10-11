@@ -68,10 +68,10 @@ use params::{
     ExplainFunctionArgs, FetchPdbParams, Filter, FindCheckArgs, FindFunctionByStringParams,
     FunctionDetailParams, FunctionParams, FunctionsParams, HexdumpParams, LiveAttachParams,
     LiveInstancesParams, LiveObjectParams, LiveReadParams, LiveWatchParams, LoadBinaryParams,
-    LoadProjectParams, Page, QueryParams, ReachesParams, ReadParams, SaveProjectParams, SearchKind,
-    SearchParams, SetCommentParams, SetNameParams, SetTypeParams, StringEncoding, StringsParams,
-    SymbolsParams, TypesParams, XrefsParams, count_param, must_be_in_a_section, must_fit_a_row,
-    to_usize,
+    LoadProjectParams, Page, QueryParams, ReachesParams, ReadParams, SaveProjectParams,
+    ScriptParams, SearchKind, SearchParams, SetCommentParams, SetNameParams, SetTypeParams,
+    StringEncoding, StringsParams, SymbolsParams, TypesParams, XrefsParams, count_param,
+    must_be_in_a_section, must_fit_a_row, to_usize,
 };
 use recall::{FRESH_SUFFIX, Recall, SINCE_ARG, SINCE_SUFFIX, Tag, budgeted};
 
@@ -2881,6 +2881,105 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         self.read_uri(&uri).map(|(_, text)| text)
     }
+
+    /// Runs an agent's Rhai script against the loaded program in borer's
+    /// sandbox, answering its `query` calls from the resources.
+    ///
+    /// The script runs on a snapshot of the analysis and the overlay and
+    /// holds no lock while it runs, so each `query` takes the locks any
+    /// request does. A `query` of `borer://script/...` is refused, since a
+    /// script that ran scripts could recurse without end. A failed script
+    /// still answers what it printed and proposed before its error, and
+    /// applies nothing; a proposal the listings could not show, or at an
+    /// address no section holds, is skipped and counted.
+    ///
+    /// # Arguments
+    ///
+    /// * `ScriptParams` - Destructured tool parameters (see its field docs).
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded or the analysis fails; a failing script is
+    /// an answer, not an error.
+    #[tool(
+        description = "Run a sandboxed Rhai script over the loaded program, for what no single tool answers: what it printed, then the names and comments it proposed (dry-run unless dry_run=false). print(help()) lists every call; query(uri) reads any borer:// resource.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn script(
+        &self,
+        Parameters(ScriptParams { code, dry_run }): Parameters<ScriptParams>,
+    ) -> Result<String, ErrorData> {
+        let program = self.require_loaded()?;
+        let analysis = self.ensure_analysis().map_err(err_params)?;
+        let server = self.clone();
+        let query: borer_engine::script::Query = std::rc::Rc::new(move |uri: &str| {
+            if uri.starts_with("borer://script/") {
+                return Err(
+                    "a script cannot query borer://script/...: scripts do not run scripts"
+                        .to_owned(),
+                );
+            }
+            server
+                .resource_text(uri)
+                .map_err(|e| e.message.into_owned())
+        });
+        let run = borer_engine::script::run_with(
+            Arc::clone(&program),
+            Arc::clone(&analysis),
+            Arc::new(self.overlay()),
+            &code,
+            &[],
+            Some(query),
+        );
+        let mut text = borer_engine::script::run_tsv(&run);
+        let proposed = run.names.len() + run.comments.len();
+        if proposed == 0 {
+            return Ok(text);
+        }
+        if run.error.is_some() {
+            text.push_str("# nothing applied: the script failed\n");
+            return Ok(text);
+        }
+        if dry_run.unwrap_or(true) {
+            text.push_str("# dry-run: pass dry_run=false to apply these\n");
+            return Ok(text);
+        }
+        let (mut named, mut commented) = (0usize, 0usize);
+        {
+            let mut overlay = write_lock(&self.overlay);
+            for (at, name) in &run.names {
+                if must_fit_a_row(name, Annotation::Name).is_ok()
+                    && must_be_in_a_section(&program, *at, Annotation::Name).is_ok()
+                {
+                    let target = analysis.function_at(*at).map_or(*at, |f| f.entry);
+                    overlay.names.insert(target, name.clone());
+                    named += 1;
+                }
+            }
+            for (at, comment) in &run.comments {
+                if must_fit_a_row(comment, Annotation::Comment).is_ok()
+                    && must_be_in_a_section(&program, *at, Annotation::Comment).is_ok()
+                {
+                    overlay.comments.insert(*at, comment.clone());
+                    commented += 1;
+                }
+            }
+        }
+        if named + commented > 0 {
+            self.names_changed();
+        }
+        let _ = writeln!(
+            text,
+            "# applied {named} names and {commented} comments; {} skipped (empty, unprintable, or in no section)",
+            proposed - named - commented
+        );
+        Ok(text)
+    }
 }
 
 /// Percent-decodes a resource URI argument.
@@ -3203,7 +3302,9 @@ impl ServerHandler for BorerServer {
              hexdump for data. Every `address` accepts 0x-hex, decimal, or a name (function, \
              import, overlay name). set_name/set_comment annotate (dry-run by default), \
              set_type defines user structs and applies them at globals so decompile names \
-             their fields, and save_project persists the overlay. Outputs are capped and paged; count_only and \
+             their fields, and save_project persists the overlay. For anything no single tool \
+             answers, script runs a sandboxed Rhai script over the program in one call; its \
+             query(uri) reads any resource. Outputs are capped and paged; count_only and \
              filter keep them small. An answer of 512 bytes or more ends with `# since=<tag>`; \
              the same request with \"since\": \"<tag>\" added (on a URI: !since=<tag>) answers \
              with a one-line note if nothing changed, else only the changed lines. \
@@ -3507,10 +3608,35 @@ impl BorerServer {
             ),
             None => (uri.to_owned(), None),
         };
+        let text = self.resource_text(&uri)?;
+        let again = format!("reading {uri} (resources/read or the query tool)");
+        let text = match self.recall.lock() {
+            Ok(mut recall) => recall.answer(&uri, since, &again, text),
+            Err(_) => text,
+        };
+        Ok((uri, budgeted(text)))
+    }
+
+    /// The text of one resource, as its handler answers it: no answer
+    /// memory, no byte budget, no `!since` or `!fresh` suffix.
+    ///
+    /// [`BorerServer::read_uri`] wraps it for `resources/read` and the
+    /// `query` tool, and a script's `query(uri)` calls it directly
+    /// ([`BorerServer::script`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The URI, suffixes already taken off.
+    ///
+    /// # Errors
+    ///
+    /// Resource-not-found for an unknown URI, naming every resource there
+    /// is; otherwise the handler's error.
+    fn resource_text(&self, uri: &str) -> Result<String, ErrorData> {
         let not_found = || {
             err_not_found(format!(
                 "unknown resource {}; the resources are {}",
-                borer_engine::text::one_line(&uri),
+                borer_engine::text::one_line(uri),
                 RESOURCES
                     .iter()
                     .chain(RESOURCE_TEMPLATES)
@@ -3616,12 +3742,7 @@ impl BorerServer {
             }
             _ => return Err(not_found()),
         };
-        let again = format!("reading {uri} (resources/read or the query tool)");
-        let text = match self.recall.lock() {
-            Ok(mut recall) => recall.answer(&uri, since, &again, text),
-            Err(_) => text,
-        };
-        Ok((uri, budgeted(text)))
+        Ok(text)
     }
 }
 
@@ -5057,6 +5178,73 @@ mod tests {
             bad.message.contains("both fields and values"),
             "{}",
             bad.message
+        );
+    }
+
+    /// The `script` tool runs inline code and applies only on request.
+    ///
+    /// Its `query` calls are answered from the resources, `borer://script`
+    /// refused; proposals stay a preview until `dry_run=false`, and then
+    /// only those the listings can show at an address a section holds land.
+    ///
+    /// # Panics
+    ///
+    /// When an answer, a refusal or the overlay differs.
+    #[test]
+    fn script_runs_inline_code_queries_resources_and_applies_on_request() {
+        use super::{Parameters, ScriptParams};
+        use borer_engine::program::{Arch, Program, Section};
+        let mut code = vec![0x90; 0x20];
+        code.push(0xc3);
+        let text = Section::mapped(".text", 0x1000, 0, 0x21, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let script = |code: &str, dry_run: Option<bool>| {
+            server
+                .script(Parameters(ScriptParams {
+                    code: code.to_owned(),
+                    dry_run,
+                }))
+                .expect("a script answers")
+        };
+        let out = script(
+            r#"print(functions().len);
+               print(query("borer://disasm/0x1000").contains("nop"));
+               print(help().contains("query(uri)"));"#,
+            None,
+        );
+        assert!(out.starts_with("1\ntrue\ntrue\n"), "{out}");
+        let out = script(r#"query("borer://script/x.rhai");"#, None);
+        assert!(out.contains("scripts do not run scripts"), "{out}");
+        let out = script(r#"query("borer://nope");"#, None);
+        assert!(
+            out.contains("# script failed: Runtime error: unknown resource borer://nope"),
+            "{out}"
+        );
+        let propose =
+            r#"rename(0x1000, "start"); rename(0x9000, "gone"); comment(0x1001, "here");"#;
+        let out = script(propose, None);
+        assert!(out.contains("# dry-run: pass dry_run=false"), "{out}");
+        assert!(super::read_lock(&server.overlay).names.is_empty());
+        let out = script(propose, Some(false));
+        assert!(
+            out.contains("# applied 1 names and 1 comments; 1 skipped"),
+            "{out}"
+        );
+        let overlay = super::read_lock(&server.overlay);
+        assert_eq!(
+            overlay.names.get(&0x1000).map(String::as_str),
+            Some("start")
+        );
+        assert_eq!(
+            overlay.comments.get(&0x1001).map(String::as_str),
+            Some("here")
         );
     }
 

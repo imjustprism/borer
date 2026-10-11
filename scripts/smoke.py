@@ -116,6 +116,7 @@ for expected in (
     "decompile",
     "decompile_batch",
     "query",
+    "script",
 ):
     assert expected in names, f"missing tool: {expected}"
 
@@ -320,10 +321,10 @@ assert "format:" in after, "server did not survive an erroring tool call"
 print("post-error call OK (server alive)")
 
 # 9. protocol surface: the tool list stays lean (every session pays for it:
-#    36 tools at about 680 bytes each, the live family and query included),
-#    discover answers, resources and argument completion work
+#    40 tools at about 650 bytes each, the live family, query and script
+#    included), discover answers, resources and argument completion work
 raw_tools = json.dumps(tools)
-assert len(raw_tools) < 25000, (
+assert len(raw_tools) < 26000, (
     f"tools/list is {len(raw_tools)} bytes; keep descriptions and schemas lean"
 )
 for t in tools["tools"]:
@@ -512,6 +513,13 @@ qmissing = wait_for(
 )
 assert qmissing.get("error") == missing["error"], (qmissing, missing)
 assert "borer://scenarios/{spec}" in missing["error"]["message"], missing
+# script runs inline Rhai over the loaded binary, and its query() reads any
+# resource through the same handlers resources/read uses
+ran = call_tool(
+    "script",
+    {"code": 'print(functions().len > 0); print(query("borer://info").contains("format"));'},
+)
+assert ran.startswith("true\ntrue\n"), ran
 # a repeated tool call is whole every time; the call with its tag passed back as
 # `since` is a note naming the call that returns the text; a tag that is not one
 # is refused

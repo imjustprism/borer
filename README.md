@@ -122,7 +122,7 @@ reading, `function_summary` to size it up, `decompile` to read it, and
 `xrefs`, `cfg` or `callgraph` to see how it connects. Any `address`
 argument takes hex, decimal or a name.
 
-There are 39 tools:
+There are 40 tools:
 
 | area | tools |
 | --- | --- |
@@ -132,7 +132,7 @@ There are 39 tools:
 | reading data | `read`, `hexdump` |
 | annotating | `set_name`, `set_comment`, `set_type`, `types`, `annotations`, `save_project`, `load_project` |
 | live process | `live_attach`, `live_detach`, `live_read`, `live_object`, `live_instances`, `live_watch` |
-| everything else | `query` |
+| everything else | `query`, `script` |
 
 Annotation tools are dry-run unless told otherwise. `save_project` writes
 names, comments and types to a separate project file; the binary itself is
@@ -195,9 +195,29 @@ borer functions sample.exe --pack msvc-x64.borer
 
 ## Scripting
 
-[Rhai](https://rhai.rs/) scripts run in a sandbox. They can read functions,
-strings, bytes and xrefs and propose names and comments. A few examples are
-in [`packs/scripts`](packs/scripts):
+[Rhai](https://rhai.rs/) scripts run in a sandbox: no files, no network,
+no clock, and an operation budget. They can read functions, strings, bytes
+and xrefs, decompile, and propose names and comments.
+
+An agent sends one through the `script` tool when no single tool answers
+its question; `print(help())` lists everything a script can call. Inside a
+script, `query(uri)` returns the text of any `borer://` resource, so a few
+lines can combine taint, layout, grep and the rest:
+
+```rhai
+for f in functions("crypt") {
+    if callers(f.entry).len > 3 {
+        print(`${hex(f.entry)} ${f.name}`);
+    }
+}
+```
+
+A run may make 2,000 `decompile` calls and 200 `query` calls. A failed
+script still returns what it printed before the error, with the line that
+failed. Proposed names and comments stay a preview until `dry_run=false`.
+
+From the command line, scripts are files. A few examples are in
+[`packs/scripts`](packs/scripts):
 
 ```bash
 borer script sample.exe packs/scripts/suspicious_apis.rhai
