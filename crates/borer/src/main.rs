@@ -2504,18 +2504,6 @@ impl BorerServer {
                 a.dedupe_clones(&all).into_iter().take(max).collect();
             let matched: Vec<u64> = classes.iter().map(|(e, _)| *e).collect();
             let skipped: std::collections::BTreeMap<u64, Vec<u64>> = classes.into_iter().collect();
-            let folded: usize = skipped.values().map(Vec::len).sum();
-            let mut out = format!(
-                "# decompiled {} of {} matching functions (max {max}){}
-",
-                matched.len(),
-                total_matching,
-                if folded > 0 {
-                    format!("; {folded} more are clones of these")
-                } else {
-                    String::new()
-                }
-            );
             // PERF: functions decompile independently; fan out, then emit in order.
             let texts: Vec<(u64, String)> = matched
                 .par_iter()
@@ -2527,50 +2515,62 @@ impl BorerServer {
                     )
                 })
                 .collect();
-            let mut used = 0usize;
-            for (entry, text) in texts {
+            // INVARIANT: the header counts the functions the body prints and
+            // the clones of those alone, so a body the total cap cut short
+            // never claims the functions it left out.
+            let mut body = String::new();
+            let (mut used, mut shown, mut folded) = (0usize, 0usize, 0usize);
+            for (entry, text) in &texts {
                 if used >= TOTAL {
-                    out.push_str(
-                        "# total output cap reached
-",
-                    );
                     break;
                 }
-                let name = borer_engine::analysis::name_of(&a, &o, entry);
-                let clones =
-                    skipped
-                        .get(&entry)
-                        .filter(|c| !c.is_empty())
-                        .map_or(String::new(), |c| {
-                            let shown: Vec<String> = c
-                                .iter()
-                                .take(6)
-                                .map(|e| borer_engine::analysis::name_of(&a, &o, *e))
-                                .collect();
-                            let more = c.len().saturating_sub(6);
-                            if more > 0 {
-                                format!(" (same code: {}, +{more} more)", shown.join(", "))
-                            } else {
-                                format!(" (same code: {})", shown.join(", "))
-                            }
-                        });
-                out.push_str(&format!(
-                    "
+                let name = borer_engine::analysis::name_of(&a, &o, *entry);
+                let same = skipped.get(entry).filter(|c| !c.is_empty());
+                let clones = same.map_or(String::new(), |c| {
+                    let named: Vec<String> = c
+                        .iter()
+                        .take(6)
+                        .map(|e| borer_engine::analysis::name_of(&a, &o, *e))
+                        .collect();
+                    let more = c.len().saturating_sub(6);
+                    if more > 0 {
+                        format!(" (same code: {}, +{more} more)", named.join(", "))
+                    } else {
+                        format!(" (same code: {})", named.join(", "))
+                    }
+                });
+                let _ = write!(body, "
 ==== {name} @ {entry:#x} ===={clones}
-"
-                ));
+");
                 if text.len() > PER_FN {
-                    out.push_str(&text[..PER_FN]);
-                    out.push_str(
-                        "
+                    body.push_str(&text[..text.floor_char_boundary(PER_FN)]);
+                    body.push_str("
 // truncated
-",
-                    );
+");
                     used += PER_FN;
                 } else {
-                    out.push_str(&text);
+                    body.push_str(text);
                     used += text.len();
                 }
+                shown += 1;
+                folded += same.map_or(0, Vec::len);
+            }
+            let mut out = format!(
+                "# decompiled {shown} of {total_matching} matching functions (max {max}){}
+",
+                if folded > 0 {
+                    format!("; {folded} more are clones of these")
+                } else {
+                    String::new()
+                }
+            );
+            out.push_str(&body);
+            let cut = texts.len().saturating_sub(shown);
+            if cut > 0 {
+                let _ = writeln!(
+                    out,
+                    "# total output cap of {TOTAL} chars reached: {cut} more decompiled, not shown; narrow the filter or lower max_functions"
+                );
             }
             Ok(out)
         })
@@ -5635,6 +5635,75 @@ mod tests {
             })
             .expect("text");
         assert!(!plain.contains("checked vs binary"), "{plain}");
+    }
+
+    /// A batch the total output cap cuts short counts in its header the
+    /// functions it prints, not the ones it decompiled and left out, and
+    /// says how many those are.
+    ///
+    /// The image's entry calls twelve functions of 150 stores each, whose
+    /// texts run past the total long before the twelfth.
+    ///
+    /// # Panics
+    ///
+    /// When the header counts a function the body does not print.
+    #[test]
+    fn a_batch_cut_by_the_total_cap_counts_what_it_prints() {
+        use super::{DecompileBatchParams, Parameters};
+        use borer_engine::program::{Arch, Program, Section};
+        /// Functions the entry calls.
+        const CALLEES: u32 = 12;
+        /// Bytes between two callees.
+        const STRIDE: u32 = 0x800;
+        let mut code = Vec::new();
+        for k in 0..CALLEES {
+            let at = u32::try_from(code.len()).expect("small") + 5;
+            // ASM: call 0x1000 + STRIDE * (k + 1)
+            code.push(0xe8);
+            code.extend_from_slice(&(STRIDE * (k + 1) - at).to_le_bytes());
+        }
+        code.push(0xc3); // ASM: ret
+        for k in 0..CALLEES {
+            code.resize(usize::try_from(STRIDE * (k + 1)).expect("small"), 0xcc);
+            for n in 0u32..150 {
+                // ASM: mov dword [rcx + n*8 + k], n
+                code.extend_from_slice(&[0xc7, 0x81]);
+                code.extend_from_slice(&(n * 8 + k).to_le_bytes());
+                code.extend_from_slice(&n.to_le_bytes());
+            }
+            code.push(0xc3); // ASM: ret
+        }
+        let len = u64::try_from(code.len()).expect("small");
+        let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let batch = server
+            .decompile_batch(Parameters(DecompileBatchParams {
+                filter: None,
+                max_functions: Some(50),
+            }))
+            .expect("batch");
+        let printed = batch.lines().filter(|l| l.starts_with("==== ")).count();
+        assert!(printed < 13, "the cap cuts the batch short: {batch}");
+        let header = batch.lines().next().unwrap_or_default();
+        assert_eq!(
+            header,
+            format!("# decompiled {printed} of 13 matching functions (max 50)"),
+            "{batch}"
+        );
+        assert!(
+            batch.contains(&format!(
+                "# total output cap of 40000 chars reached: {} more decompiled, not shown",
+                13 - printed
+            )),
+            "{batch}"
+        );
     }
 
     /// A rename and a comment each let go of the text read under the names
