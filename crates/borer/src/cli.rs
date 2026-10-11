@@ -404,7 +404,6 @@ impl Query {
             Self::Info | Self::Index | Self::Crypto | Self::Qt | Self::Triage => 0,
             Self::Function
             | Self::Summary
-            | Self::Symbols
             | Self::Entropy
             | Self::Fstrings
             | Self::Findstr
@@ -450,6 +449,7 @@ impl Query {
             | Self::Protocol
             | Self::Hooks
             | Self::Strings
+            | Self::Symbols
             | Self::Read
             | Self::ExportPack => 3,
             Self::Decompile | Self::Fieldrefs | Self::Grep | Self::Types | Self::Verify => 4,
