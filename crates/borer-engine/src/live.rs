@@ -14,12 +14,13 @@
 //! implements over the operating system and the tests over a buffer, so
 //! nothing here opens a handle.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::analysis::classes::class_layout;
 use crate::analysis::{Analysis, Overlay, name_of};
-use crate::memory::{Kind, Value, le_word, scalar_text};
+use crate::memory::{Kind, Value, decode, le_word, not_text, scalar_text};
 use crate::num::{lo16, lo32};
 use crate::program::Program;
 use crate::strings::cstr_at;
@@ -35,9 +36,6 @@ const CHUNK: usize = 1 << 20;
 
 /// Longest string a pointer is followed into.
 const STR_CAP: usize = 120;
-
-/// Longest string read as a value.
-const VALUE_STR_CAP: usize = 200;
 
 /// A process's memory as the engine reads it.
 pub trait Memory {
@@ -383,8 +381,10 @@ pub fn tls_block(mem: &dyn Memory, rebase: &Rebase, tls_index_va: u64, teb: u64)
 /// Reads `count` values of a kind from a process, as [`crate::memory::read_values`]
 /// reads them from the file.
 ///
-/// Strings are read one after another, stepping over the padding between
-/// them; integers, floats and pointers are consecutive.
+/// Both go through one decoder ([`crate::memory::decode`]), so a value
+/// reads the same from the process as from the file: a string runs to its
+/// terminator whatever `count` is, the first one starts at the address
+/// given, and padding is stepped over only between strings.
 ///
 /// # Arguments
 ///
@@ -396,7 +396,9 @@ pub fn tls_block(mem: &dyn Memory, rebase: &Rebase, tls_index_va: u64, teb: u64)
 ///
 /// # Errors
 ///
-/// When the first value is not readable.
+/// When not even the first value reads: its first byte is not readable,
+/// fewer bytes than one value are, or the bytes there are not text for a
+/// string kind; the message says which.
 pub fn read_values(
     mem: &dyn Memory,
     va: u64,
@@ -404,80 +406,21 @@ pub fn read_values(
     count: usize,
     word: usize,
 ) -> Result<Vec<Value>, String> {
-    let size = kind.size(word);
-    let span = match kind {
-        Kind::CStr | Kind::WStr => (VALUE_STR_CAP + 16) * count * size,
-        _ => size * count,
+    let read = |at: u64, max: usize| mem.read(at, max.min(READ_MAX)).map(Cow::Owned);
+    let out = decode(read, word == 8, va, kind, count);
+    if !out.is_empty() {
+        return Ok(out);
     }
-    .min(READ_MAX);
-    let bytes = mem
-        .read(va, span)
-        .ok_or_else(|| format!("{va:#x} is not readable in the process"))?;
-    let mut out = Vec::with_capacity(count);
-    let mut at = 0usize;
-    for _ in 0..count {
-        if at + size > bytes.len() {
-            break;
-        }
-        let cur = va + at as u64;
-        match kind {
-            Kind::CStr | Kind::WStr => {
-                let unit = size;
-                while at + unit <= bytes.len() && bytes[at..at + unit].iter().all(|b| *b == 0) {
-                    at += unit;
-                }
-                let (len, text) = if kind == Kind::CStr {
-                    let len = bytes[at..]
-                        .iter()
-                        .position(|b| !(0x20..0x7f).contains(b))
-                        .unwrap_or(bytes.len() - at);
-                    (
-                        len,
-                        String::from_utf8_lossy(&bytes[at..at + len]).into_owned(),
-                    )
-                } else {
-                    let mut units: Vec<u16> = Vec::new();
-                    let mut i = at;
-                    while i + 2 <= bytes.len() {
-                        let u = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
-                        if !(0x20..0x7f).contains(&u) {
-                            break;
-                        }
-                        units.push(u);
-                        i += 2;
-                    }
-                    (units.len(), String::from_utf16_lossy(&units))
-                };
-                if len == 0 {
-                    break;
-                }
-                let shown: String = text.chars().take(VALUE_STR_CAP).collect();
-                let prefix = if kind == Kind::WStr { "L" } else { "" };
-                out.push(Value {
-                    at: va + at as u64,
-                    text: format!("{prefix}\"{}\" (len {len})", shown.replace('"', "\\\"")),
-                    target: None,
-                    size: (len + 1) * unit,
-                });
-                at += (len + 1) * unit;
-            }
-            _ => {
-                let raw = le_word(&bytes[at..at + size]);
-                let (text, target) = scalar_text(kind, raw);
-                out.push(Value {
-                    at: cur,
-                    text,
-                    target,
-                    size,
-                });
-                at += size;
-            }
-        }
-    }
-    if out.is_empty() {
+    let Some(first) = mem.read(va, 1).and_then(|b| b.first().copied()) else {
         return Err(format!("{va:#x} is not readable in the process"));
-    }
-    Ok(out)
+    };
+    Err(match kind {
+        Kind::CStr | Kind::WStr => not_text(kind, first, &format!("{va:#x}")),
+        _ => format!(
+            "fewer than {} bytes are readable at {va:#x} in the process",
+            kind.size(word)
+        ),
+    })
 }
 
 /// The class of the object at a process address, by its vtable.
@@ -992,6 +935,40 @@ mod tests {
         assert_eq!(v[1].at, 0x1014);
         assert!(v[1].text.starts_with("\"cd\""), "{}", v[1].text);
         assert!(read_values(&mem, 0x5000, Kind::U8, 1, 8).is_err());
+    }
+
+    /// A process string reads as the file's reader reads one.
+    ///
+    /// It runs to its terminator whatever the count asked, a leading NUL is
+    /// no string, and bytes that are there but are not text are refused as
+    /// not text rather than as unreadable.
+    #[test]
+    fn process_strings_read_as_the_files_do() {
+        let mut data = vec![0u8; 4096];
+        data[1..1001].fill(b'A');
+        data[1100] = 0x90;
+        for unit in data[2000..2600].chunks_mut(2) {
+            unit[0] = b'W';
+        }
+        let mem = Fake::new(0x1000, data);
+        let v = read_values(&mem, 0x1001, Kind::CStr, 1, 8).unwrap();
+        assert!(v[0].text.ends_with("...\" (len 1000)"), "{}", v[0].text);
+        let v = read_values(&mem, 0x17d0, Kind::WStr, 1, 8).unwrap();
+        assert!(v[0].text.ends_with("(len 300)"), "{}", v[0].text);
+        let lead = read_values(&mem, 0x1000, Kind::CStr, 2, 8).unwrap_err();
+        assert_eq!(
+            lead,
+            "no CStr at 0x1000: the byte there is 0x00, not printable text; read it as u8 or hexdump it"
+        );
+        let code = read_values(&mem, 0x144c, Kind::CStr, 1, 8).unwrap_err();
+        assert!(code.contains("the byte there is 0x90"), "{code}");
+        let gone = read_values(&mem, 0x9000, Kind::CStr, 1, 8).unwrap_err();
+        assert_eq!(gone, "0x9000 is not readable in the process");
+        let short = read_values(&mem, 0x1ffc, Kind::U64, 1, 8).unwrap_err();
+        assert_eq!(
+            short,
+            "fewer than 8 bytes are readable at 0x1ffc in the process"
+        );
     }
 
     /// A word found in a region is an instance; the scan stops at its limit.

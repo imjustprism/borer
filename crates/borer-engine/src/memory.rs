@@ -1,6 +1,8 @@
 //! Typed memory reads: integers, floats, pointers and strings at an address,
 //! rendered one value per row for an agent that asks "what is at X as T".
 
+use std::borrow::Cow;
+
 use crate::num::{from_usize, lo8, lo16, lo32};
 use crate::program::Program;
 use crate::strings::{SCAN_MAX, cstr_in, wstr_in};
@@ -166,7 +168,7 @@ pub fn read_values(
     kind: Kind,
     count: usize,
 ) -> Result<Vec<Value>, String> {
-    let read = |at: u64, max: usize| program.read_va_upto(at, max);
+    let read = |at: u64, max: usize| program.read_va_upto(at, max).map(Cow::Borrowed);
     let out = decode(read, program.is_64, va, kind, count);
     if !out.is_empty() {
         return Ok(out);
@@ -212,7 +214,7 @@ pub fn read_values_at_offset(
     kind: Kind,
     count: usize,
 ) -> Result<Vec<Value>, String> {
-    let read = |at: u64, max: usize| program.read_off_upto(at, max);
+    let read = |at: u64, max: usize| program.read_off_upto(at, max).map(Cow::Borrowed);
     let out = decode(read, program.is_64, off, kind, count);
     if !out.is_empty() {
         return Ok(out);
@@ -279,9 +281,7 @@ fn refusal(
     room: impl FnOnce() -> String,
 ) -> String {
     match kind {
-        Kind::CStr | Kind::WStr => format!(
-            "no {kind:?} at {at}: the byte there is {first:#04x}, not printable text; read it as u8 or hexdump it"
-        ),
+        Kind::CStr | Kind::WStr => not_text(kind, first, at),
         _ => format!(
             "fewer than {} bytes are mapped at {at}{}",
             kind.size(if program.is_64 { 8 } else { 4 }),
@@ -290,12 +290,35 @@ fn refusal(
     }
 }
 
-/// Decodes up to `count` values from the bytes `read` returns.
+/// The refusal of a string read whose first byte is there but is not text.
 ///
 /// # Arguments
 ///
-/// * `read` - Reads up to a number of bytes at a position; `None` where
-///   nothing is readable.
+/// * `kind` - The string kind asked for.
+/// * `first` - The byte at the start.
+/// * `at` - The start as the caller wrote it.
+///
+/// # Returns
+///
+/// The message.
+pub(crate) fn not_text(kind: Kind, first: u8, at: &str) -> String {
+    format!(
+        "no {kind:?} at {at}: the byte there is {first:#04x}, not printable text; read it as u8 or hexdump it"
+    )
+}
+
+/// Decodes up to `count` values from the bytes `read` returns.
+///
+/// The file's bytes and a running process's both decode here, so a value
+/// reads the same from either: a string runs to its terminator up to
+/// [`SCAN_MAX`] bytes whatever `count` is, the first string starts at the
+/// first byte (a leading NUL is no string), and padding is stepped over
+/// only between strings.
+///
+/// # Arguments
+///
+/// * `read` - Reads up to a number of bytes at a position, borrowed from
+///   the file or read from a process; `None` where nothing is readable.
 /// * `is_64` - Pointers are eight bytes, not four.
 /// * `start` - Position of the first value, in `read`'s terms.
 /// * `kind` - How to interpret the bytes.
@@ -304,8 +327,8 @@ fn refusal(
 /// # Returns
 ///
 /// The values in order; empty when not even the first decodes.
-fn decode<'a>(
-    read: impl Fn(u64, usize) -> Option<&'a [u8]>,
+pub(crate) fn decode<'a>(
+    read: impl Fn(u64, usize) -> Option<Cow<'a, [u8]>>,
     is_64: bool,
     start: u64,
     kind: Kind,
@@ -328,7 +351,7 @@ fn decode<'a>(
             }
         }
         let v = match kind {
-            Kind::CStr => match read(cur, SCAN_MAX).and_then(|raw| cstr_in(raw, 1, STR_CAP)) {
+            Kind::CStr => match read(cur, SCAN_MAX).and_then(|raw| cstr_in(&raw, 1, STR_CAP)) {
                 Some((len, text)) => Value {
                     at: cur,
                     text: format!("\"{}\" (len {len})", text.replace('"', "\\\"")),
@@ -337,7 +360,7 @@ fn decode<'a>(
                 },
                 None => break,
             },
-            Kind::WStr => match read(cur, SCAN_MAX * 2).and_then(|raw| wstr_in(raw, 1, STR_CAP)) {
+            Kind::WStr => match read(cur, SCAN_MAX * 2).and_then(|raw| wstr_in(&raw, 1, STR_CAP)) {
                 Some((len, text)) => Value {
                     at: cur,
                     text: format!("L\"{}\" (len {len})", text.replace('"', "\\\"")),
@@ -350,7 +373,7 @@ fn decode<'a>(
                 let Some(bytes) = exact(cur) else {
                     break;
                 };
-                let (text, target) = scalar_text(kind, le_word(bytes));
+                let (text, target) = scalar_text(kind, le_word(&bytes));
                 Value {
                     at: cur,
                     text,

@@ -1482,14 +1482,19 @@ impl BorerServer {
                 .and_then(|r| r.to_static(va))
                 .map_or_else(String::new, |st| format!(" (= static {st:#x})"));
             let mut out = format!(
-                "# {} {kind_text} value(s) at live {va:#x}{origin}{}\n",
-                values.len(),
-                if values.len() < n {
-                    ", fewer than asked: the rest is not readable"
-                } else {
-                    ""
-                }
+                "# {} {kind_text} value(s) at live {va:#x}{origin}",
+                values.len()
             );
+            if values.len() < n {
+                let next = values
+                    .last()
+                    .map_or(va, |v| v.at.wrapping_add(num::from_usize(v.size)));
+                let _ = write!(
+                    out,
+                    "; asked for {n}, nothing readable as {kind_text} at {next:#x}"
+                );
+            }
+            out.push('\n');
             for v in &values {
                 let note = match (v.target, &program, &analysis, rebase) {
                     (Some(t), Some(p), Some(a), Some(r)) => r
