@@ -103,6 +103,42 @@ fn a_callee_whose_callers_read_rdx_hands_it_back() {
     assert!(!solo.contains("hands back rdx"), "{solo}");
 }
 
+/// On a 32-bit target the second value a callee hands back is in `edx`,
+/// and the note names that register.
+///
+/// # Panics
+///
+/// When the note names `rdx` or is missing.
+#[test]
+fn a_32_bit_callee_hands_back_edx() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut code = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0x89, 0xd3, // ASM: mov ebx,edx
+        0x89, 0xd8, // ASM: mov eax,ebx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xba, 0x02, 0x00, 0x00, 0x00, // ASM: mov edx,2
+        0xc3, // ASM: ret
+    ]);
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86,
+        0x400_000,
+        Some(0x401_000),
+        vec![Section::mapped(".text", 0x401_000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Pe;
+    let pair = decompiled(&p, 0x401_020);
+    assert!(pair.contains("// hands back edx"), "{pair}");
+    assert!(!pair.contains("rdx"), "{pair}");
+}
+
 /// A 32-bit load feeding a 64-bit subtract keeps the machine's borrow
 /// width: the load widens, and `0 - 4` is `0xffff_ffff_ffff_fffc`.
 ///

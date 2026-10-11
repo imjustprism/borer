@@ -1629,7 +1629,8 @@ fn decompile_with(
         let _ = writeln!(out, "// effects: {effects}");
     }
     if f.hands_back_rdx {
-        let _ = writeln!(out, "// hands back rdx: a caller reads it after the call");
+        let rdx = if ctx.bitness == 64 { "rdx" } else { "edx" };
+        let _ = writeln!(out, "// hands back {rdx}: a caller reads it after the call");
     }
     if let Some(asserts) = asserts_of(&body) {
         let _ = writeln!(out, "// asserts: {asserts}");
