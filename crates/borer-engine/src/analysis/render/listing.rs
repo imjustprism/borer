@@ -611,7 +611,7 @@ pub fn xrefs_tsv(
 ///
 /// # Returns
 ///
-/// A `# N xrefs to <target> in G groups, showing S from O` header, a column
+/// A `# N xrefs to <target> in G groups, showing S of G from O` header, a column
 /// header, then one `function: site kind, site kind` row per group of the
 /// page, ending with how many more functions run the same code when the
 /// group folds several; a pointer stored in data is in function `-`. The
@@ -661,8 +661,9 @@ pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
     let page_end = offset.saturating_add(limit).min(ordered.len());
     let shown = page_end.saturating_sub(offset.min(page_end));
     let mut out = format!(
-        "# {} xrefs to {target:#x} in {} {groups_word}, showing {shown} from {offset}\n# function: site kind, ...\n",
+        "# {} xrefs to {target:#x} in {} {groups_word}, showing {shown} of {} from {offset}\n# function: site kind, ...\n",
         sites.len(),
+        ordered.len(),
         ordered.len()
     );
     for g in ordered.iter().skip(offset).take(limit) {

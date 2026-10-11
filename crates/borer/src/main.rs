@@ -1766,6 +1766,10 @@ impl BorerServer {
     }
     /// Lists discovered functions with filtering and paging.
     ///
+    /// The count alone is the table's header without its page: `filter=thunk`
+    /// counts import thunks and says so, where a bare `functions` read as
+    /// though it counted every function.
+    ///
     /// # Arguments
     ///
     /// * `FunctionsParams` - Destructured tool parameters (see its field docs).
@@ -1795,10 +1799,14 @@ impl BorerServer {
         let page = Page::new(offset, limit, count_only, 50, 300)?;
         let order = sort.unwrap_or_default().into();
         self.with_analysis(|_, a, o| {
-            let (_, total, text) =
+            let (shown, _, text) =
                 render::functions_tsv(a, o, filter.as_deref(), order, page.offset, page.limit.n);
             if page.count_only {
-                return Ok(format!("# {total} functions\n"));
+                let head = text.lines().next().unwrap_or_default();
+                let counted = head
+                    .strip_prefix(&format!("# showing {shown} of "))
+                    .unwrap_or(head);
+                return Ok(format!("# {counted}\n"));
             }
             Ok(text)
         })
@@ -3173,12 +3181,13 @@ fn entropy_answer(p: &Program, window: usize, threshold: f64) -> String {
 ///
 /// * `page` - The page and the total.
 /// * `offset` - Where the page starts, for the header.
-/// * `count_only` - Stop after the header.
+/// * `count_only` - Answer the count alone, with no page to speak of.
 /// * `names` - The analysis and the overlay, for the function names.
 ///
 /// # Returns
 ///
-/// The rendered rows.
+/// A `# N hits, showing S of N from O` header, a column header and the
+/// rows; `# N hits` alone for a count.
 fn render_hits(
     page: &borer_engine::search::Hits,
     offset: usize,
@@ -3186,15 +3195,15 @@ fn render_hits(
     names: (&Analysis, &Overlay),
 ) -> String {
     let (a, o) = names;
-    let mut out = format!(
-        "# {} hits, showing {} from {offset}\n",
-        page.total,
-        page.hits.len()
-    );
     if count_only {
-        return out;
+        return format!("# {} hits\n", page.total);
     }
-    out.push_str("# function: va ...\n");
+    let mut out = format!(
+        "# {} hits, showing {} of {} from {offset}\n# function: va ...\n",
+        page.total,
+        page.hits.len(),
+        page.total
+    );
     let entry_of =
         |h: &borer_engine::search::Hit| h.va.and_then(|v| a.function_at(v)).map(|f| f.entry);
     for run in page.hits.chunk_by(|x, y| entry_of(x) == entry_of(y)) {
@@ -5094,6 +5103,34 @@ mod tests {
             }))
             .expect("comments");
         assert_eq!(held(), 0, "the text without the comment is let go");
+    }
+
+    /// A search page says `showing N of M`, and a count states no page.
+    ///
+    /// # Panics
+    ///
+    /// When either header is worded otherwise.
+    #[test]
+    fn a_search_page_says_showing_n_of_m() {
+        use super::{Parameters, SearchParams};
+        let server = raw_server();
+        let search = |count_only| {
+            server
+                .search(Parameters(SearchParams {
+                    query: "c3".to_owned(),
+                    kind: None,
+                    offset: None,
+                    limit: None,
+                    count_only: Some(count_only),
+                }))
+                .expect("searches")
+        };
+        let page = search(false);
+        assert!(
+            page.starts_with("# 256 hits, showing 200 of 256 from 0\n"),
+            "{page}"
+        );
+        assert_eq!(search(true), "# 256 hits\n");
     }
 
     /// A name that reads as a number is noted when set and reaches its
