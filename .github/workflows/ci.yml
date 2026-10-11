@@ -1,9 +1,10 @@
 name: ci
 
-# One job, the project's own gate, on Windows: the same `scripts/gate.py
-# --check` a commit passes locally, so CI and the local gate cannot drift
-# apart. It runs on what lands on main, on every pull request into main,
-# and on demand; a newer run on the same ref cancels the older one.
+# The project's own gate on Windows: the same `scripts/gate.py --check` a
+# commit passes locally, so CI and the local gate cannot drift apart; and
+# clippy and the tests on Linux and macOS. It runs on what lands on main,
+# on every pull request into main, and on demand; a newer run on the same
+# ref cancels the older one.
 
 on:
   push:
@@ -71,3 +72,31 @@ jobs:
           # Where the commits under test start: a pull request's base, or
           # the commit a push started from (empty on a manual run).
           BORER_COMMITS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+  # The same workspace built, linted and tested on Linux and macOS, so an
+  # assumption that only holds on Windows fails here. The tests that read
+  # borer's own build pin it as the Windows x64 PE and are ignored off
+  # Windows; macos-latest is Apple silicon, whose arm64 binaries borer
+  # loads but does not disassemble. Doctests are left out for the same
+  # reason: they decompile the running binary.
+  portable:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: toolchain
+        run: rustup toolchain install --no-self-update
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --lib --bins --tests
