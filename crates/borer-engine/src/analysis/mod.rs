@@ -1741,6 +1741,11 @@ pub(crate) fn is_executable_va(program: &Program, va: u64) -> bool {
 
 /// Parses an address as typed by an agent.
 ///
+/// Bare digits are decimal: `140001064` is `0x8583f28`, and hex takes its
+/// `0x`. Text with a hex letter and no `0x` (`14000106a`) can only be hex,
+/// so it reads as hex. A name that spells a number (`cafe`, `1234`) is
+/// [`resolve`]'s to find before this reading applies.
+///
 /// # Arguments
 ///
 /// * `s` - `0x`-prefixed hex, plain decimal, or bare hex; surrounding whitespace is ignored.
@@ -1756,6 +1761,18 @@ pub fn parse_addr(s: &str) -> Option<u64> {
     t.parse::<u64>()
         .ok()
         .or_else(|| u64::from_str_radix(t, 16).ok())
+}
+
+/// Tells whether address text carries a `0x` prefix, the one spelling that
+/// is an address whatever names exist.
+///
+/// # Arguments
+///
+/// * `s` - The text as typed; surrounding whitespace is ignored.
+#[must_use]
+pub fn hex_prefixed(s: &str) -> bool {
+    let t = s.trim();
+    t.starts_with("0x") || t.starts_with("0X")
 }
 
 /// Parses a file offset as typed by an agent: `off:` or `off=` before a
@@ -1826,6 +1843,11 @@ pub fn function_entry(program: &Program, analysis: &Analysis, va: u64) -> Result
 /// import named by both its IAT slot and a thunk function resolves to the
 /// function, the thing tools decompile, graph and cross-reference.
 ///
+/// `0x`-prefixed text is always an address. Any other text is looked up as
+/// a name first and read as a number ([`parse_addr`]) only when no name
+/// matches: a function named `add`, `cafe` or `1234` was unreachable by
+/// name while the number reading came first.
+///
 /// # Arguments
 ///
 /// * `program` - Supplies the symbol table.
@@ -1847,7 +1869,9 @@ pub fn resolve(
     overlay: &Overlay,
     text: &str,
 ) -> Result<u64, String> {
-    if let Some(va) = parse_addr(text) {
+    if hex_prefixed(text)
+        && let Some(va) = parse_addr(text)
+    {
         return Ok(va);
     }
     let want = text.trim().to_lowercase();
@@ -1901,10 +1925,12 @@ pub fn resolve(
         hits.retain(|(va, _)| analysis.function(*va).is_some());
     }
     match hits.len() {
-        0 => Err(format!(
-            "{} is neither an address nor a known name; try functions(filter=...) or symbols(filter=...)",
-            crate::text::quoted(text)
-        )),
+        0 => parse_addr(text).ok_or_else(|| {
+            format!(
+                "{} is neither an address nor a known name; try functions(filter=...) or symbols(filter=...)",
+                crate::text::quoted(text)
+            )
+        }),
         1 => Ok(hits[0].0),
         _ => Err(format!(
             "{} is ambiguous: {}",

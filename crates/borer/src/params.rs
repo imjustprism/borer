@@ -261,7 +261,7 @@ pub(crate) struct DisassembleFunctionParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadParams {
-    /// Address (0x-hex/decimal), a name, or `off:<n>`, a file offset (for
+    /// Address (0x-hex, or bare decimal digits), a name, or `off:<n>`, a file offset (for
     /// overlay and unmapped bytes).
     pub(crate) address: String,
     /// What to decode the bytes as (default u64).
@@ -295,7 +295,7 @@ pub(crate) struct FindFunctionByStringParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HexdumpParams {
-    /// Address (0x-hex/decimal), a name, or `off:<n>`, a file offset (for
+    /// Address (0x-hex, or bare decimal digits), a name, or `off:<n>`, a file offset (for
     /// overlay and unmapped bytes).
     pub(crate) address: String,
     /// Number of bytes (default 64, max 4096).
@@ -384,7 +384,7 @@ pub(crate) struct FindCheckArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExplainFunctionArgs {
-    /// Function entry (0x-hex or decimal) or a name.
+    /// Function entry (0x-hex, or bare decimal digits) or a name.
     pub(crate) address: String,
 }
 

@@ -522,9 +522,14 @@ impl BorerServer {
         }
     }
 
-    /// Resolves an address argument: `0x`-hex or decimal text, else a name
-    /// looked up through the analysis, symbols and overlay (agents name
-    /// things).
+    /// Resolves an address argument: `0x`-hex text, else a name looked up
+    /// through the analysis, symbols and overlay (agents name things), else
+    /// decimal or bare-hex text ([`resolve`]).
+    ///
+    /// A name comes before the number reading, so a function named `cafe`
+    /// or `1234` is reachable by its name; only `0x` text skips the lookup.
+    /// A program with no code analysis looks names up in its symbols and
+    /// the overlay alone.
     ///
     /// # Arguments
     ///
@@ -535,11 +540,12 @@ impl BorerServer {
     ///
     /// When the text is neither an address nor a known name.
     fn addr(&self, p: &Program, text: &str) -> Result<u64, String> {
-        if let Some(va) = parse_addr(text) {
+        if borer_engine::analysis::hex_prefixed(text)
+            && let Some(va) = parse_addr(text)
+        {
             return Ok(va);
         }
-        let a = self.ensure_analysis()?;
-        resolve(p, &a, &self.overlay(), text)
+        resolve(p, &self.analysis_or_empty(), &self.overlay(), text)
     }
 
     /// Resolves an argument to the entry of the discovered function containing it.
@@ -557,7 +563,18 @@ impl BorerServer {
     /// one).
     fn function_entry(&self, p: &Program, a: &Analysis, text: &str) -> Result<u64, String> {
         let va = self.addr(p, text)?;
-        borer_engine::analysis::function_entry(p, a, va)
+        borer_engine::analysis::function_entry(p, a, va).map_err(|e| {
+            let digits = text.trim();
+            let hint = u64::from_str_radix(digits, 16)
+                .ok()
+                .filter(|hex| {
+                    digits.bytes().all(|b| b.is_ascii_digit()) && a.function_at(*hex).is_some()
+                })
+                .map_or_else(String::new, |hex| {
+                    format!("; bare digits are decimal, write {hex:#x} for the hex address")
+                });
+            format!("{e}{hint}")
+        })
     }
 }
 
@@ -2372,16 +2389,22 @@ impl BorerServer {
             } else {
                 "data"
             };
+            let numeric = parse_addr(&name).map_or_else(String::new, |n| {
+                format!(
+                    "
+# note: '{name}' also reads as the number {n:#x}; an address argument finds the name first, and 0x-prefixed text is always an address"
+                )
+            });
             if dry {
                 return Ok(format!(
-                    "dry-run: would set name of {what} {target:#x} ({old}) to '{name}'. pass dry_run=false to apply."
+                    "dry-run: would set name of {what} {target:#x} ({old}) to '{name}'. pass dry_run=false to apply.{numeric}"
                 ));
             }
             write_lock(&self.overlay)
                 .names
                 .insert(target, name.clone());
             self.names_changed();
-            Ok(format!("renamed {what} {target:#x}: {old} -> {name}"))
+            Ok(format!("renamed {what} {target:#x}: {old} -> {name}{numeric}"))
         })
     }
 
@@ -3306,8 +3329,9 @@ impl ServerHandler for BorerServer {
              binary_info; find_function_by_string / strings / symbols / find_crypto_constants to \
              locate interesting code; function_summary to triage a function; decompile for \
              pseudo-C; disassemble_function / cfg / callgraph / xrefs to go deeper; read and \
-             hexdump for data. Every `address` accepts 0x-hex, decimal, or a name (function, \
-             import, overlay name). set_name/set_comment annotate (dry-run by default), \
+             hexdump for data. Every `address` accepts 0x-hex (always the address), a name \
+             (function, import, overlay name), or bare decimal digits; a name wins over bare \
+             text that also reads as a number. set_name/set_comment annotate (dry-run by default), \
              set_type defines user structs and applies them at globals so decompile names \
              their fields, and save_project persists the overlay. For anything no single tool \
              answers, script runs a sandboxed Rhai script over the program in one call; its \
@@ -4953,6 +4977,47 @@ mod tests {
             }))
             .expect("comments");
         assert_eq!(held(), 0, "the text without the comment is let go");
+    }
+
+    /// A name that reads as a number is noted when set and reaches its
+    /// function afterwards.
+    ///
+    /// `0x` text stays the address, and bare digits naming nothing are
+    /// decimal, with the hex spelling suggested when that is the function
+    /// meant.
+    ///
+    /// # Panics
+    ///
+    /// When the note is missing, the name does not resolve, or the decimal
+    /// reading is not explained.
+    #[test]
+    fn a_name_that_reads_as_a_number_is_noted_and_reachable() {
+        use super::{FunctionDetailParams, Parameters, SetNameParams};
+        let server = raw_server();
+        let set = server
+            .set_name(Parameters(SetNameParams {
+                address: "0x1000".to_owned(),
+                name: "cafe".to_owned(),
+                dry_run: Some(false),
+            }))
+            .expect("renames");
+        assert!(set.contains("also reads as the number 0xcafe"), "{set}");
+        let function = |address: &str| {
+            server.function(Parameters(FunctionDetailParams {
+                address: address.to_owned(),
+                offset: None,
+            }))
+        };
+        let by_name = function("cafe").expect("the name resolves");
+        assert!(by_name.contains("cafe"), "{by_name}");
+        assert!(function("0xcafe").is_err(), "0x text is the address");
+        let decimal = function("1000").expect_err("decimal 1000 is 0x3e8");
+        assert!(
+            decimal
+                .message
+                .contains("bare digits are decimal, write 0x1000"),
+            "{decimal:?}"
+        );
     }
 
     /// `set_type` dry-runs by default, defines a struct and applies it at a

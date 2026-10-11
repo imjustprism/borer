@@ -2575,6 +2575,28 @@ fn an_import_slot_is_no_function_and_says_so() {
     assert!(err.contains("no discovered function contains"), "{err}");
 }
 
+/// A name that spells a number resolves to what it names; `0x` text is
+/// always the address, and text no name matches reads as a number.
+///
+/// `add`, `cafe` and `1234` read as hex or decimal before any name was
+/// looked up, so a function given one of them could not be reached by it.
+#[test]
+fn a_name_that_reads_as_a_number_resolves_by_name() {
+    use borer_engine::analysis::resolve;
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names.insert(0x1000, "cafe".to_owned());
+    o.names.insert(0x1020, "1234".to_owned());
+    assert_eq!(resolve(&p, &a, &o, "cafe"), Ok(0x1000));
+    assert_eq!(resolve(&p, &a, &o, "CAFE"), Ok(0x1000));
+    assert_eq!(resolve(&p, &a, &o, "1234"), Ok(0x1020));
+    assert_eq!(resolve(&p, &a, &o, "0xcafe"), Ok(0xcafe));
+    assert_eq!(resolve(&p, &a, &o, "0x1234"), Ok(0x1234));
+    assert_eq!(resolve(&p, &a, &o, "4160"), Ok(4160));
+    assert_eq!(resolve(&p, &a, &o, "f00d"), Ok(0xf00d));
+}
+
 /// A call to a noreturn import ends the path: `Y` stops at its call to
 /// `ExitProcess` and `Z`, which starts right after it, stays a function of its own.
 #[test]

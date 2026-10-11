@@ -282,6 +282,9 @@ pub fn capability_map_tsv(p: &Program) -> String {
 
 /// Resolves a function name or address string to an entry address.
 ///
+/// `0x`-hex is an address; any other text is a function's name before it
+/// is a number, as [`crate::analysis::resolve`] reads it.
+///
 /// # Arguments
 ///
 /// * `a` - The analysis, for its functions.
@@ -292,15 +295,16 @@ pub fn capability_map_tsv(p: &Program) -> String {
 ///
 /// The entry address, or `None` when nothing matches.
 pub(super) fn resolve(a: &Analysis, o: &Overlay, target: &str) -> Option<u64> {
-    if let Some(va) = parse_addr(target)
-        && (a.function(va).is_some() || a.function_at(va).is_some())
-    {
-        return Some(va);
+    let number =
+        parse_addr(target).filter(|&va| a.function(va).is_some() || a.function_at(va).is_some());
+    if crate::analysis::hex_prefixed(target) && number.is_some() {
+        return number;
     }
     a.functions
         .iter()
         .find(|f| name_of(a, o, f.entry) == target)
         .map(|f| f.entry)
+        .or(number)
 }
 
 /// Instructions the emulator runs before giving up on a routine.

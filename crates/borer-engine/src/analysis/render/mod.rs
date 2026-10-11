@@ -169,6 +169,9 @@ pub(super) fn recovered_strings(p: &Program, a: &Analysis) -> Arc<Recovery> {
 
 /// Resolves a spec's address token: `0x`-hex, decimal, or a function name.
 ///
+/// A name wins over bare text that also reads as a number, as in
+/// [`crate::analysis::resolve`]; `0x`-hex is always the address.
+///
 /// # Arguments
 ///
 /// * `a` - The analysis, for its functions.
@@ -179,7 +182,10 @@ pub(super) fn recovered_strings(p: &Program, a: &Analysis) -> Arc<Recovery> {
 ///
 /// The address, or `None` when the token is neither a number nor a name.
 pub(super) fn locate(a: &Analysis, o: &Overlay, text: &str) -> Option<u64> {
-    parse_addr(text).or_else(|| resolve(a, o, text))
+    if crate::analysis::hex_prefixed(text) {
+        return parse_addr(text);
+    }
+    resolve(a, o, text).or_else(|| parse_addr(text))
 }
 
 /// Splits a comma-separated spec into its address token and the directives
