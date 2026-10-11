@@ -1765,7 +1765,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Imports/exports/locals/data as `kind addr name` rows under `# module:` lines, demangled; xrefs(import) lists its call sites.",
+        description = "Imports/exports/forwards/locals/data as `kind addr name` rows under `# module:` lines, demangled (a forward ends `-> MODULE.name`); xrefs(import) lists its call sites.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

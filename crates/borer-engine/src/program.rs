@@ -2087,6 +2087,13 @@ impl Program {
         }
         out.push('\n');
         out.push_str(&format!("exports: {}", exports.len()));
+        let forwarded = exports
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Forwarder)
+            .count();
+        if forwarded > 0 {
+            out.push_str(&format!(" ({forwarded} forwarded)"));
+        }
         if !exports.is_empty() {
             let sample: Vec<String> = exports
                 .iter()

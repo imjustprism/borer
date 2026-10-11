@@ -171,6 +171,9 @@ pub(crate) enum SymbolKind {
     Export,
     /// Local symbols the file names.
     Local,
+    /// Exports forwarded to another module (`NTDLL.RtlX`); the row names
+    /// the target.
+    Forward,
     /// Named data at an address (an applied PDB's data records).
     Data,
 }
@@ -181,6 +184,7 @@ impl From<SymbolKind> for program::SymbolKind {
             SymbolKind::Import => program::SymbolKind::Import,
             SymbolKind::Export => program::SymbolKind::Export,
             SymbolKind::Local => program::SymbolKind::Local,
+            SymbolKind::Forward => program::SymbolKind::Forwarder,
             SymbolKind::Data => program::SymbolKind::Data,
         }
     }
@@ -330,7 +334,8 @@ pub(crate) struct StringsParams {
 pub(crate) struct SymbolsParams {
     /// One kind of symbol only (default every kind); drops the kind column.
     pub(crate) kind: Option<SymbolKind>,
-    /// Case-insensitive substring filter, module included.
+    /// Case-insensitive substring of the raw name (module included) or of
+    /// the demangled name a row shows.
     pub(crate) filter: Option<String>,
     /// Matches to skip first (paging).
     pub(crate) offset: Option<u32>,

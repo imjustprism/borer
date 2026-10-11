@@ -325,15 +325,21 @@ pub fn function_detail(a: &Analysis, o: &Overlay, entry: u64, offset: usize) -> 
     Some(out)
 }
 
+/// Longest forwarding text a forwarded export's row reads.
+const FORWARD_MAX: usize = 256;
+
 /// Renders the paged symbol table.
 ///
 /// A PE import is `module!name`, and a page of three hundred imports from
 /// a dozen modules spelled the module on every row: a `# module: X` line
 /// opens each run of imports from one module and the rows carry the bare
-/// name. The `kind` column is left out when one kind was asked for, since
+/// name; a `# module: -` line closes the run when rows without a module
+/// follow, so an export is not read as one more import of the module above
+/// it. The `kind` column is left out when one kind was asked for, since
 /// every row would say it. An import nothing references is a redirected or
 /// leftover slot, the shape a patched binary leaves behind, so its row says
-/// so.
+/// so. A forwarded export's address holds the name of the export it
+/// forwards to, not code, so its row ends with `-> MODULE.name`.
 ///
 /// # Arguments
 ///
@@ -341,7 +347,7 @@ pub fn function_detail(a: &Analysis, o: &Overlay, entry: u64, offset: usize) -> 
 /// * `a` - The analysis, for which import slots are referenced.
 /// * `kind` - One kind of symbol, or every kind.
 /// * `filter` - Case-insensitive substring of the full name, module
-///   included.
+///   included, or of the demangled name a row shows.
 /// * `offset` - Matches to skip first (paging).
 /// * `limit` - Maximum rows to render.
 ///
@@ -365,8 +371,12 @@ pub fn symbols_tsv(
         .iter()
         .filter(|s| {
             kind.is_none_or(|k| s.kind == k)
-                && q.as_ref()
-                    .is_none_or(|q| s.name.to_lowercase().contains(q.as_str()))
+                && q.as_ref().is_none_or(|q| {
+                    s.name.to_lowercase().contains(q.as_str())
+                        || demangled_or_raw(bare_name(&s.name))
+                            .to_lowercase()
+                            .contains(q.as_str())
+                })
         })
         .collect();
     let total = matched.len();
@@ -386,10 +396,8 @@ pub fn symbols_tsv(
     for s in matched.into_iter().skip(offset).take(limit) {
         let bare = bare_name(&s.name);
         let owner = s.name.strip_suffix(bare).and_then(|m| m.strip_suffix('!'));
-        if let Some(m) = owner
-            && owner != module
-        {
-            let _ = writeln!(out, "# module: {m}");
+        if owner != module {
+            let _ = writeln!(out, "# module: {}", owner.unwrap_or("-"));
         }
         module = owner;
         let dead = s.kind == SymbolKind::Import
@@ -398,9 +406,17 @@ pub fn symbols_tsv(
         if kind.is_none() {
             let _ = write!(out, "{} ", s.kind.name());
         }
+        let target = (s.kind == SymbolKind::Forwarder)
+            .then(|| p.read_va_upto(s.addr, FORWARD_MAX))
+            .flatten()
+            .map(|b| b.split(|&c| c == 0).next().unwrap_or_default())
+            .filter(|b| !b.is_empty())
+            .map_or_else(String::new, |b| {
+                format!(" -> {}", crate::text::one_line(&String::from_utf8_lossy(b)))
+            });
         let _ = writeln!(
             out,
-            "{:#x} {}{}",
+            "{:#x} {}{target}{}",
             s.addr,
             demangled_or_raw(bare),
             if dead { "  unreferenced" } else { "" }
@@ -1156,5 +1172,53 @@ mod tests {
             let n = hex_written(v, &mut buf);
             assert_eq!(&buf[..n], format!("{v:x}").as_bytes(), "value {v}");
         }
+    }
+
+    /// The symbol table closes a module's run of imports before the rows that
+    /// have no module.
+    ///
+    /// It also names what a forwarded export forwards to, and filters on the demangled
+    /// name a row shows as well as the raw one.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn symbols_close_modules_name_forwards_and_filter_demangled() {
+        use crate::program::{Arch, Section, Symbol};
+        let mut bytes = vec![0u8; 0x100];
+        bytes[0x40..0x4d].copy_from_slice(b"NTDLL.RtlFoo\0");
+        let mut p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0x1000,
+            None,
+            vec![Section::mapped(".rdata", 0x1000, 0, 0x100, false, false)],
+        );
+        let symbol = |name: &str, addr: u64, kind: SymbolKind| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind,
+        };
+        p.symbols = vec![
+            symbol("KERNEL32.dll!GetTickCount", 0, SymbolKind::Import),
+            symbol("AcquireLock", 0x1040, SymbolKind::Forwarder),
+            symbol("_ZN3foo3barEv", 0x1080, SymbolKind::Export),
+        ];
+        let a = Analysis::default();
+        let (_, _, all) = symbols_tsv(&p, &a, None, None, 0, 50);
+        assert!(
+            all.contains(
+                "# module: KERNEL32.dll\nimport 0x0 GetTickCount\n# module: -\nforward 0x1040 AcquireLock -> NTDLL.RtlFoo\n"
+            ),
+            "{all}"
+        );
+        let (shown, total, found) = symbols_tsv(&p, &a, None, Some("foo::bar"), 0, 50);
+        assert_eq!((shown, total), (1, 1), "{found}");
+        assert!(found.contains("export 0x1080 foo::bar()"), "{found}");
+        let (_, forwards, _) = symbols_tsv(&p, &a, Some(SymbolKind::Forwarder), None, 0, 50);
+        assert_eq!(forwards, 1);
+        let summary = p.summary();
+        assert!(summary.contains("exports: 2 (1 forwarded)"), "{summary}");
     }
 }
