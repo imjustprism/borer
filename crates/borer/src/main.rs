@@ -600,7 +600,7 @@ impl BorerServer {
     /// Invalid params when the file does not load, or the entry offset is
     /// past its end or in no section's file bytes.
     #[tool(
-        description = "Load a PE/ELF (or raw) file as the current program; returns its summary.",
+        description = "Load a PE, ELF or Mach-O file (a fat Mach-O: its x86-64 slice), or any other file as raw bytes, as the current program; returns its summary. pdb=false skips the companion PDB; entry_file_offset overrides the entry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3468,7 +3468,7 @@ impl ServerHandler for BorerServer {
             env!("CARGO_PKG_VERSION"),
         ))
         .with_instructions(
-            "borer: agent-native binary analysis (x86/x64 PE/ELF). Workflow: load_binary, then \
+            "borer: agent-native binary analysis (x86/x64 PE/ELF/Mach-O). Workflow: load_binary, then \
              binary_info; find_function_by_string / strings / symbols / find_crypto_constants to \
              locate interesting code; function_summary to triage a function; decompile for \
              pseudo-C; disassemble_function / cfg / callgraph / xrefs to go deeper; read and \

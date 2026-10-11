@@ -217,7 +217,7 @@ pub(crate) enum SearchKind {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LoadBinaryParams {
-    /// Path to the binary on disk (PE, ELF, or raw file).
+    /// Path to the binary on disk (PE, ELF, Mach-O, or any file as raw bytes).
     pub(crate) path: String,
     /// File offset of the entry point to use instead of the header's,
     /// mapped to its address through the section table (a corrupt table is

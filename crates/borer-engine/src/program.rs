@@ -1160,7 +1160,8 @@ impl Program {
     ///
     /// # Arguments
     ///
-    /// * `path` - A PE, ELF or other file; unknown formats load as [`BinaryFormat::Raw`].
+    /// * `path` - A PE, ELF, Mach-O or other file; unknown formats load as
+    ///   [`BinaryFormat::Raw`].
     ///
     /// # Errors
     ///
