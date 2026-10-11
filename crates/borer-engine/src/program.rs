@@ -631,6 +631,177 @@ fn implausible_imports(bytes: &[u8]) -> Option<u64> {
     None
 }
 
+/// Reads a NUL-terminated name at a file offset.
+///
+/// # Arguments
+///
+/// * `bytes` - The whole file.
+/// * `at` - The offset of the name's first byte.
+///
+/// # Returns
+///
+/// The name, at most 512 bytes, invalid UTF-8 replaced; `None`
+/// when the offset is past the end of the file or the name is empty.
+fn c_name(bytes: &[u8], at: usize) -> Option<String> {
+    /// Longest name read.
+    const NAME_MAX: usize = 512;
+    let rest = bytes.get(at..)?;
+    let len = rest
+        .iter()
+        .take(NAME_MAX)
+        .position(|&b| b == 0)
+        .unwrap_or(rest.len().min(NAME_MAX));
+    (len > 0).then(|| String::from_utf8_lossy(&rest[..len]).into_owned())
+}
+
+/// Reads a PE's delay-load import table as imports.
+///
+/// A DLL linked `/DELAYLOAD` is named in its own directory, not the import
+/// directory: its descriptors give the module name, the address table the
+/// code calls through and the name table, the same shape as an import
+/// descriptor's. Each slot of the address table becomes an import
+/// `module!name` (or `module!ORDINAL n`, the import table's spelling) at
+/// the slot's address, so a call through it is named as a call through an
+/// import slot is. The walk stops at a zeroed descriptor and holds the
+/// same total bound the import table does, [`IMPORTS_MAX`].
+///
+/// # Arguments
+///
+/// * `bytes` - The whole file.
+/// * `image_base` - The preferred load base: an old descriptor states
+///   virtual addresses, a current one relative ones.
+/// * `is_64` - Whether the image is PE32+ (eight-byte slots).
+///
+/// # Returns
+///
+/// The imports in table order; empty when the image has no delay-load
+/// directory or it maps nowhere.
+fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
+    /// Bytes of one `ImgDelayDescr`.
+    const DESCRIPTOR: usize = 32;
+    /// `dlattrRva`: the descriptor's addresses are relative to the base.
+    const RVA_ATTR: u32 = 1;
+    /// The delay-load directory's slot.
+    const DELAY_DIR: usize = 13;
+    let mut out = Vec::new();
+    let Some((entry, _)) = directory_entry(bytes, DELAY_DIR) else {
+        return out;
+    };
+    let (Some(rva), Some(sections)) = (le_u32(bytes, entry), raw_sections(bytes)) else {
+        return out;
+    };
+    let Some(mut at) = file_offset(&sections, u64::from(rva)).filter(|_| rva != 0) else {
+        return out;
+    };
+    let (word, ordinal_bit) = if is_64 {
+        (8u64, 1u64 << 63)
+    } else {
+        (4, 1 << 31)
+    };
+    let limit = crate::num::from_usize(bytes.len() / 4).min(IMPORTS_MAX);
+    while let Some(descriptor) = bytes.get(at..at + DESCRIPTOR) {
+        let field = |k: usize| le_u32(descriptor, k).unwrap_or(0);
+        // SPEC: ImgDelayDescr is grAttrs, rvaDLLName, rvaHmod, rvaIAT,
+        // rvaINT, rvaBoundIAT, rvaUnloadIAT, dwTimeStamp; a zeroed one
+        // ends the table.
+        let (attrs, name, iat, names) = (field(0), field(4), field(12), field(16));
+        if name == 0 || iat == 0 {
+            break;
+        }
+        let rva_of = |v: u64| {
+            if attrs & RVA_ATTR != 0 {
+                Some(v)
+            } else {
+                v.checked_sub(image_base)
+            }
+        };
+        let module = rva_of(u64::from(name))
+            .and_then(|r| file_offset(&sections, r))
+            .and_then(|o| c_name(bytes, o))
+            .unwrap_or_else(|| "(unnamed)".to_owned());
+        let table = rva_of(u64::from(names)).and_then(|r| file_offset(&sections, r));
+        if let (Some(iat), Some(table)) = (rva_of(u64::from(iat)), table) {
+            for i in 0u64.. {
+                if crate::num::from_usize(out.len()) >= limit {
+                    return out;
+                }
+                let Some(thunk) = usize::try_from(i * word)
+                    .ok()
+                    .and_then(|k| table.checked_add(k))
+                    .and_then(|k| {
+                        if is_64 {
+                            let b = bytes.get(k..k + 8)?;
+                            Some(u64::from_le_bytes(b.try_into().ok()?))
+                        } else {
+                            le_u32(bytes, k).map(u64::from)
+                        }
+                    })
+                    .filter(|&t| t != 0)
+                else {
+                    break;
+                };
+                let import = if thunk & ordinal_bit != 0 {
+                    format!("ORDINAL {}", thunk & 0xffff)
+                } else {
+                    // SPEC: a name entry is a two-byte hint and the name.
+                    rva_of(u64::from(crate::num::lo32(thunk)))
+                        .and_then(|r| file_offset(&sections, r))
+                        .and_then(|o| c_name(bytes, o.saturating_add(2)))
+                        .unwrap_or_else(|| "(unnamed)".to_owned())
+                };
+                out.push(Symbol {
+                    name: format!("{module}!{import}"),
+                    addr: image_base.wrapping_add(iat).wrapping_add(i * word),
+                    kind: SymbolKind::Import,
+                });
+            }
+        }
+        at += DESCRIPTOR;
+    }
+    out
+}
+
+/// The exports a PE names by ordinal alone, which the parser leaves out.
+///
+/// The parser reads the exports through the name table, so an
+/// address-table entry no name points at, a `NONAME` export reached only
+/// by its ordinal, was never listed: a DLL exporting by ordinal showed no
+/// exports at all. Each such entry is an export named `Ordinal_<n>` with
+/// `n` its ordinal (the address-table index plus the ordinal base), a
+/// forwarder when its address holds the forwarding text. Empty slots
+/// (address zero) are not exports.
+///
+/// # Arguments
+///
+/// * `pe` - The parsed image.
+///
+/// # Returns
+///
+/// The ordinal-only exports, in ordinal order.
+fn ordinal_exports(pe: &goblin::pe::PE<'_>) -> Vec<Symbol> {
+    use goblin::pe::export::ExportAddressTableEntry::{ExportRVA, ForwarderRVA};
+    let Some(data) = &pe.export_data else {
+        return Vec::new();
+    };
+    let named: BTreeSet<u16> = data.export_ordinal_table.iter().copied().collect();
+    let base = u64::from(data.export_directory_table.ordinal_base);
+    (0u16..=u16::MAX)
+        .zip(&data.export_address_table)
+        .filter(|(index, _)| !named.contains(index))
+        .filter_map(|(index, entry)| {
+            let (rva, kind) = match *entry {
+                ExportRVA(rva) => (rva, SymbolKind::Export),
+                ForwarderRVA(rva) => (rva, SymbolKind::Forwarder),
+            };
+            (rva != 0).then(|| Symbol {
+                name: format!("Ordinal_{}", base + u64::from(index)),
+                addr: pe.image_base.wrapping_add(u64::from(rva)),
+                kind,
+            })
+        })
+        .collect()
+}
+
 /// A data directory entry zeroed for the length of a parse.
 #[derive(Debug, Clone, Copy)]
 struct Disarmed {
@@ -1120,6 +1291,10 @@ impl Program {
                             SymbolKind::Export
                         },
                     });
+                }
+                symbols.extend(ordinal_exports(pe));
+                if refused_imports.is_none() {
+                    symbols.extend(delay_imports(&bytes, pe.image_base, pe.is_64));
                 }
                 if arch == Arch::X86_64
                     && let Some(ex) = &pe.exception_data

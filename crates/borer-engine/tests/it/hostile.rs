@@ -477,6 +477,102 @@ fn a_sound_export_table_is_still_read() {
     assert_eq!(exports, vec![("Exp".to_owned(), IMAGE_BASE + 0x1000)]);
 }
 
+/// An export reached by its ordinal alone is listed as `Ordinal_<n>` beside the
+/// named one.
+///
+/// An empty address-table slot is not one: the parser reads exports through the
+/// name table, so a `NONAME` export was never listed at all.
+#[test]
+fn an_export_by_ordinal_alone_is_listed() {
+    let _serial = serial();
+    const RDATA: u32 = 0x2000;
+    let mut rdata = vec![0u8; 0x400];
+    export_directory(&mut rdata, 0, RDATA, 3, 1);
+    // SPEC: the address table sits at +0x40; slot 0 is the named `Exp`,
+    // slot 1 an export by ordinal (base 1, so ordinal 2), slot 2 empty.
+    put32(&mut rdata, 0x44, 0x1010);
+    let bytes = pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", RDATA, rdata, DATA),
+        ],
+        &[(EXPORT_DIR, RDATA, 0x100)],
+    );
+    let p = load(bytes);
+    let exports: Vec<(String, u64)> = p
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Export)
+        .map(|s| (s.name.clone(), s.addr))
+        .collect();
+    assert_eq!(
+        exports,
+        vec![
+            ("Exp".to_owned(), IMAGE_BASE + 0x1000),
+            ("Ordinal_2".to_owned(), IMAGE_BASE + 0x1010)
+        ]
+    );
+    assert!(p.summary().contains("exports: 2"), "{}", p.summary());
+}
+
+/// A DLL linked `/DELAYLOAD` is read out of the delay-load directory.
+///
+/// Each slot of its address table is an import `module!name` at the slot, by
+/// name or by ordinal, so the call through it is named as a call through an
+/// import is. The directory was never read, so a delay-loaded API was missing
+/// from the imports and its call sites named a thunk.
+#[test]
+fn delay_loaded_imports_are_imports() {
+    let _serial = serial();
+    /// The delay-load directory's slot.
+    const DELAY_DIR: usize = 13;
+    const RDATA: u32 = 0x2000;
+    let mut rdata = vec![0u8; 0x400];
+    // SPEC: ImgDelayDescr is grAttrs (1, RVAs), name, module handle, IAT, INT.
+    put32(&mut rdata, 0x100, 1);
+    put32(&mut rdata, 0x104, RDATA + 0x180);
+    put32(&mut rdata, 0x108, RDATA + 0x1f0);
+    put32(&mut rdata, 0x10c, RDATA + 0x200);
+    put32(&mut rdata, 0x110, RDATA + 0x220);
+    rdata[0x180..0x188].copy_from_slice(b"DLY.dll\0");
+    put64(&mut rdata, 0x200, IMAGE_BASE + 0x1100);
+    put64(&mut rdata, 0x208, IMAGE_BASE + 0x1100);
+    put64(&mut rdata, 0x220, u64::from(RDATA + 0x240));
+    put64(&mut rdata, 0x228, (1 << 63) | 7);
+    rdata[0x242..0x247].copy_from_slice(b"Late\0");
+    let mut code = text();
+    // ASM: sub rsp, 0x28; call [rip+0x11f6] -> the first slot; add rsp, 0x28; ret
+    code[..15].copy_from_slice(&[
+        0x48, 0x83, 0xec, 0x28, 0xff, 0x15, 0xf6, 0x11, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x28, 0xc3,
+    ]);
+    let bytes = pe(
+        &[
+            Sec::sound(".text", 0x1000, code, CODE),
+            Sec::sound(".rdata", RDATA, rdata, DATA),
+        ],
+        &[(DELAY_DIR, RDATA + 0x100, 0x40)],
+    );
+    let p = load(bytes);
+    let imports: Vec<(String, u64)> = p
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import)
+        .map(|s| (s.name.clone(), s.addr))
+        .collect();
+    assert_eq!(
+        imports,
+        vec![
+            ("DLY.dll!Late".to_owned(), IMAGE_BASE + 0x2200),
+            ("DLY.dll!ORDINAL 7".to_owned(), IMAGE_BASE + 0x2208)
+        ]
+    );
+    let a = Analysis::compute(&p);
+    let o = borer_engine::analysis::Overlay::default();
+    let text = borer_engine::analysis::decompile::decompile(&p, &a, &o, IMAGE_BASE + 0x1000)
+        .expect("the caller decompiles");
+    assert!(text.contains("Late("), "{text}");
+}
+
 /// A section whose stated sizes the file cannot hold is left out of the
 /// map, and costs nothing: a memory size of two gigabytes is never
 /// materialized, since no read goes through a table row that lies.
