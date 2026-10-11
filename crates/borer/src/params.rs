@@ -923,9 +923,145 @@ pub(crate) fn must_be_in_a_section(
     ))
 }
 
+/// What the parameter parser starts a refused argument's message with.
+pub(crate) const DESERIALIZE_PREFIX: &str = "failed to deserialize parameters:";
+
+/// Names the argument a tool's input schema does not admit.
+///
+/// serde words a wrong value without the field it was in (`invalid type:
+/// string "5", expected u32`), and a call with five arguments leaves the
+/// caller to guess which; the schema the tool list publishes says what
+/// each one takes, so the first argument it refuses is the one named.
+///
+/// # Arguments
+///
+/// * `schema` - The tool's input schema as generated: `properties`, each
+///   with its `type` and, for a count, its `format` and `minimum`, and the
+///   `required` list.
+/// * `args` - The arguments the call passed.
+///
+/// # Returns
+///
+/// The first refused argument's name, or `None` when the schema admits
+/// every argument (the message then names its own culprit, an unknown
+/// field or a missing one).
+pub(crate) fn misfit(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    args: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    use serde_json::Value;
+    let props = schema.get("properties")?.as_object()?;
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    args.iter()
+        .find(|(key, value)| {
+            props
+                .get(key.as_str())
+                .and_then(Value::as_object)
+                .is_some_and(|prop| !admits(prop, value, required.contains(&key.as_str())))
+        })
+        .map(|(key, _)| key.clone())
+}
+
+/// Whether one property of a schema admits a value.
+///
+/// # Arguments
+///
+/// * `prop` - The property's schema.
+/// * `value` - The value passed.
+/// * `required` - The property must be present, so null is no value for
+///   it.
+fn admits(
+    prop: &serde_json::Map<String, serde_json::Value>,
+    value: &serde_json::Value,
+    required: bool,
+) -> bool {
+    use serde_json::Value;
+    if value.is_null() {
+        return !required;
+    }
+    let kinds: Vec<&str> = match prop.get("type") {
+        Some(Value::String(kind)) => vec![kind.as_str()],
+        Some(Value::Array(kinds)) => kinds.iter().filter_map(Value::as_str).collect(),
+        Some(_) | None => return true,
+    };
+    let typed = kinds.iter().any(|kind| match *kind {
+        "integer" => value.is_u64() || value.is_i64(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "string" => value.is_string(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => false,
+    });
+    let above_minimum = prop
+        .get("minimum")
+        .and_then(Value::as_f64)
+        .is_none_or(|min| value.as_f64().is_none_or(|v| v >= min));
+    let fits_format = match prop.get("format").and_then(Value::as_str) {
+        Some("uint32") => value.as_u64().is_some_and(|n| u32::try_from(n).is_ok()),
+        Some(_) | None => true,
+    };
+    typed && above_minimum && fits_format
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Annotation, Filter, Page, count_param, must_be_in_a_section, must_fit_a_row};
+    use super::{
+        Annotation, Filter, Page, count_param, misfit, must_be_in_a_section, must_fit_a_row,
+    };
+
+    /// A refused argument is named from the tool's schema: a string where a
+    /// count goes, a negative count, a count past `u32`, null for a required
+    /// field; a value the schema admits names nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the wrong argument, or none, is named.
+    #[test]
+    fn a_refused_argument_is_named_from_the_schema() {
+        let schema = serde_json::json!({
+            "properties": {
+                "address": {"type": "string"},
+                "offset": {"type": ["integer", "null"], "format": "uint32", "minimum": 0},
+                "count_only": {"type": ["boolean", "null"]}
+            },
+            "required": ["address"]
+        });
+        let schema = schema.as_object().expect("an object");
+        let named = |args: serde_json::Value| misfit(schema, args.as_object().expect("an object"));
+        assert_eq!(
+            named(serde_json::json!({"address": "f", "offset": "5"})).as_deref(),
+            Some("offset")
+        );
+        assert_eq!(
+            named(serde_json::json!({"address": "f", "offset": -5})).as_deref(),
+            Some("offset")
+        );
+        assert_eq!(
+            named(serde_json::json!({"address": "f", "offset": 5.5})).as_deref(),
+            Some("offset")
+        );
+        assert_eq!(
+            named(serde_json::json!({"address": "f", "offset": 4_294_967_296_u64})).as_deref(),
+            Some("offset")
+        );
+        assert_eq!(
+            named(serde_json::json!({"address": null})).as_deref(),
+            Some("address")
+        );
+        assert_eq!(
+            named(serde_json::json!({"address": "f", "count_only": "yes"})).as_deref(),
+            Some("count_only")
+        );
+        assert_eq!(
+            named(serde_json::json!({"address": "f", "offset": 5, "count_only": null})),
+            None
+        );
+    }
 
     /// An annotation that a listing row could not show is refused.
     ///

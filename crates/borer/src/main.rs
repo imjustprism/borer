@@ -2296,13 +2296,17 @@ impl BorerServer {
     /// Searches every section, then the bytes no section maps, for a byte
     /// pattern or a text substring.
     ///
+    /// A text query of spaces or a tab is text to find; only a byte
+    /// pattern with no token is empty.
+    ///
     /// # Arguments
     ///
     /// * `SearchParams` - Destructured tool parameters (see its field docs).
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, the pattern does not parse, or the kind is unknown.
+    /// When no binary is loaded, the query is empty, the pattern does not
+    /// parse, or the kind is unknown.
     #[tool(
         description = "Search the whole file for bytes (AOB hex, ?? wildcards) or kind=text substring; hits as `function: va va ...` rows, `off=<n>` where unmapped; offset/limit (200, max 500).",
         annotations(
@@ -2326,7 +2330,11 @@ impl BorerServer {
         let offset = offset.unwrap_or(0);
         let limit = count_param(limit, 200, borer_engine::search::HITS_MAX, "limit")?;
         let count_only = count_only.unwrap_or(false);
-        if query.trim().is_empty() {
+        let empty = match kind {
+            SearchKind::Bytes => query.trim().is_empty(),
+            SearchKind::Text => query.is_empty(),
+        };
+        if empty {
             return Err(err_params(
                 "the query is empty: give hex bytes with ?? wildcards, or kind=text and a substring",
             ));
@@ -3365,12 +3373,15 @@ impl ServerHandler for BorerServer {
     /// Any tool takes a `since` argument the schemas leave out (every tool
     /// would pay for it in the tool list): the tag of the answer the reader
     /// holds, taken off here before the tool parses its arguments
-    /// ([`recall::Recall`]). A `reload` call schedules the hand-over whatever
+    /// ([`recall::Recall`]); `"since": null` is no tag, as null is no value
+    /// for every other parameter. A `reload` call schedules the hand-over whatever
     /// it answers: the relay holds the client's lines from that call on
     /// until this worker has ended, so a worker that stayed would hold them
     /// for good. A `query` answer has been through both already, keyed by
     /// its URI as a resource read is ([`BorerServer::read_uri`]), so its tag
-    /// goes on the URI.
+    /// goes on the URI. An argument the parser refuses is named in the
+    /// message, from the tool's schema ([`params::misfit`]): serde words
+    /// the value alone.
     ///
     /// # Arguments
     ///
@@ -3390,9 +3401,10 @@ impl ServerHandler for BorerServer {
             .arguments
             .as_mut()
             .and_then(|a| a.remove(SINCE_ARG))
-            .map(|v| match v {
-                serde_json::Value::String(s) => Tag::parse(&s),
-                other => Tag::parse(&other.to_string()),
+            .and_then(|v| match v {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(s) => Some(Tag::parse(&s)),
+                other => Some(Tag::parse(&other.to_string())),
             })
             .transpose()
             .map_err(err_params)?;
@@ -3416,6 +3428,7 @@ impl ServerHandler for BorerServer {
         let remembered = request.name != "query";
         let reloading = request.name == "reload";
         let peer_info = context.peer.peer_info();
+        let named = (request.name.clone(), request.arguments.clone());
         let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let response = Self::tool_router().call(call).await;
         if reloading {
@@ -3441,6 +3454,18 @@ impl ServerHandler for BorerServer {
                         Err(_) => full,
                     };
                     t.text = budgeted(sent);
+                }
+                CallToolResponse::Complete(result)
+            }
+            CallToolResponse::Complete(mut result) if result.is_error == Some(true) => {
+                if let [ContentBlock::Text(t)] = result.content.as_mut_slice()
+                    && let Some(rest) = t.text.strip_prefix(params::DESERIALIZE_PREFIX)
+                    && let (name, Some(args)) = &named
+                    && let Some(field) = Self::tool_router()
+                        .get(name)
+                        .and_then(|tool| params::misfit(&tool.input_schema, args))
+                {
+                    t.text = format!("{} field `{field}`:{rest}", params::DESERIALIZE_PREFIX);
                 }
                 CallToolResponse::Complete(result)
             }
