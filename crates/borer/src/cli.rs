@@ -18,7 +18,7 @@ use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, script, s
 
 use super::{
     entropy_threshold, env_pack_files, parse_field_offset, read_packs, render_hits, strings_page,
-    walk_strings,
+    walk_strings, window,
 };
 use crate::params::{Detail, Filter, SearchKind, StringEncoding};
 use crate::resources::ABOUT_NEEDS_A_NAME;
@@ -38,7 +38,7 @@ commands:
   findstr <binary> <filter>                functions referencing a matching string
   disasm <binary> <address> [count]        disassemble at a virtual address
   disasmfn <binary> <address|name>         a whole function, block by block
-  decompile <binary> <address|name> [skeleton|full]  structured pseudo-C (skeleton: flow and calls only)
+  decompile <binary> <address|name> [skeleton|full] [offset] [limit]  structured pseudo-C (skeleton: flow and calls only); 300 lines a page, limit 0 for all
   class <binary> <class|method address>    class layout from its methods' field accesses
   fieldrefs <binary> <offset> [filter] [skip] [limit]  every instruction touching [reg+offset]; filter names the function (100 a page, max 500)
   vslot <binary> <slot> [filter] [limit]   classes whose virtual at a slot returns a constant (a wire id, a type tag); filter names the class (max 2000)
@@ -191,7 +191,8 @@ enum Query {
     Disasm,
     /// `disasmfn <address|name>`: a whole function, block by block.
     Disasmfn,
-    /// `decompile <address|name> [skeleton|full]`: structured pseudo-C.
+    /// `decompile <address|name> [skeleton|full] [offset] [limit]`: structured
+    /// pseudo-C, paged by line as the `decompile` tool pages it.
     Decompile,
     /// `class <class|method address>`: a class layout from its methods' field accesses.
     Class,
@@ -422,6 +423,43 @@ fn detail(word: Option<&str>) -> anyhow::Result<Detail> {
             quoted(other)
         ),
     }
+}
+
+/// Reads `decompile`'s words after the function: an optional detail word,
+/// then the line to start from and the lines to show, as the `decompile`
+/// tool's `offset` and `limit` page.
+///
+/// A word that is a number opens the page, so `decompile <binary> f 300`
+/// reads the second page; an empty word is the default.
+///
+/// # Arguments
+///
+/// * `words` - The arguments after the function.
+///
+/// # Returns
+///
+/// The detail, the offset and the limit; zero for the limit is every line.
+///
+/// # Errors
+///
+/// For a first word that is neither a detail word nor a number, or an
+/// offset or limit that is not a number.
+fn decompile_args(words: &[String]) -> anyhow::Result<(Detail, Option<u32>, Option<u32>)> {
+    let paging = |w: &String| w.is_empty() || w.parse::<u32>().is_ok();
+    let (detail, page) = match words.split_first() {
+        Some((first, rest)) if !paging(first) => (detail(Some(first))?, rest),
+        Some(_) | None => (Detail::Full, words),
+    };
+    let number = |i: usize, what: &str| -> anyhow::Result<Option<u32>> {
+        page.get(i)
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                w.parse::<u32>()
+                    .map_err(|_| anyhow!("decompile {what} {} is not a number", quoted(w)))
+            })
+            .transpose()
+    };
+    Ok((detail, number(0, "offset")?, number(1, "limit")?))
 }
 
 /// Reads `search`'s words after the pattern: `text`, `bytes` or a page
@@ -989,6 +1027,51 @@ impl Session {
     }
 }
 
+/// Answers `decompile <binary> <address|name> [skeleton|full] [offset]
+/// [limit]`: the function's pseudo-C, paged by line as the `decompile`
+/// tool pages it ([`window`]).
+///
+/// The CLI printed every line, 6,610 of them for one function of a
+/// system program, where the tool shows 300 under a `// showing N of M`
+/// line saying how to read the rest.
+///
+/// # Arguments
+///
+/// * `args` - The command line, the command first and the binary second.
+/// * `s` - The binary with its packs.
+///
+/// # Returns
+///
+/// The page of pseudo-C to print.
+///
+/// # Errors
+///
+/// For a bad detail, offset or limit, a function argument that is missing
+/// or names no function, or a function that does not decompile.
+fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
+    let (detail, offset, limit) = decompile_args(args.get(3..).unwrap_or_default())?;
+    let (a, entry) = s.function_arg(args, 2, "decompile needs an address or name")?;
+    // SPEC: BORER_RAW=1 shows the structurer's output before text cleanup.
+    let raw = std::env::var_os("BORER_RAW").is_some();
+    // PERF: the check first, so the decompilation it memoizes keeps
+    // the lifter's witness and the text below reads the same cell.
+    let header = (!raw)
+        .then(|| decompile::checked_header(&s.program, &a, &s.overlay, entry))
+        .flatten();
+    let text = if raw {
+        decompile::decompile_raw(&s.program, &a, &s.overlay, entry)
+    } else {
+        decompile::decompile_named(&s.program, &a, &s.overlay, entry)
+    }
+    .with_context(|| format!("decompilation failed at {entry:#x}"))?;
+    let text = match detail {
+        Detail::Skeleton => decompile::skeleton(&text),
+        Detail::Full => text,
+    };
+    let text = decompile::with_header(&text, header.as_deref());
+    Ok(window(&text, None, offset, limit))
+}
+
 // ---- running ----
 
 /// Runs one CLI command against a binary, sharing the engine with the server.
@@ -1267,27 +1350,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     .context("no function at address")?
             );
         }
-        Query::Decompile => {
-            let (a, entry) = s.function_arg(args, 2, "decompile needs an address or name")?;
-            // SPEC: BORER_RAW=1 shows the structurer's output before text cleanup.
-            let raw = std::env::var_os("BORER_RAW").is_some();
-            // PERF: the check first, so the decompilation it memoizes keeps
-            // the lifter's witness and the text below reads the same cell.
-            let header = (!raw)
-                .then(|| decompile::checked_header(&s.program, &a, &s.overlay, entry))
-                .flatten();
-            let text = if raw {
-                decompile::decompile_raw(&s.program, &a, &s.overlay, entry)
-            } else {
-                decompile::decompile_named(&s.program, &a, &s.overlay, entry)
-            }
-            .with_context(|| format!("decompilation failed at {entry:#x}"))?;
-            let text = match detail(args.get(3).map(String::as_str))? {
-                Detail::Skeleton => decompile::skeleton(&text),
-                Detail::Full => text,
-            };
-            print!("{}", decompile::with_header(&text, header.as_deref()));
-        }
+        Query::Decompile => print!("{}", decompiled(args, s)?),
         Query::Class => {
             let a = s.analysis()?;
             let what = arg(args, 2, "class needs a class name or a method address")?;
@@ -2068,7 +2131,97 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Query, USAGE, command_usage};
+    use std::sync::Arc;
+
+    use borer_engine::analysis::Overlay;
+    use borer_engine::program::{Arch, Program, Section};
+
+    use super::{Query, Session, USAGE, command_usage, decompiled};
+
+    /// A command line: the command, a binary, then `rest`.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command word.
+    /// * `rest` - The arguments after the binary.
+    fn line(command: &str, rest: &[&str]) -> Vec<String> {
+        [command, "x"]
+            .iter()
+            .chain(rest)
+            .map(|w| (*w).to_owned())
+            .collect()
+    }
+
+    /// A session over one function at 0x1000 of `stores` stores through
+    /// its first argument, one pseudo-C line each.
+    ///
+    /// # Arguments
+    ///
+    /// * `stores` - The stores the function makes before it returns.
+    ///
+    /// # Panics
+    ///
+    /// When the code does not fit a `u64` size.
+    fn session(stores: u32) -> Session {
+        let mut code = Vec::new();
+        for n in 0..stores {
+            code.extend_from_slice(&[0xc7, 0x81]); // ASM: mov dword [rcx+disp32],imm32
+            code.extend_from_slice(&(n * 4).to_le_bytes());
+            code.extend_from_slice(&n.to_le_bytes());
+        }
+        code.push(0xc3); // ASM: ret
+        let size = u64::try_from(code.len()).expect("fits");
+        let text = Section::mapped(".text", 0x1000, 0, size, false, true);
+        Session {
+            program: Arc::new(Program::raw(
+                code,
+                Arch::X86_64,
+                0,
+                Some(0x1000),
+                vec![text],
+            )),
+            packs: Arc::default(),
+            overlay: Overlay::default(),
+        }
+    }
+
+    /// `decompile` pages a long function as the `decompile` tool does: 300
+    /// lines under a `// showing` line, an offset and a limit after the
+    /// function (zero for every line), and a short one untouched.
+    ///
+    /// # Panics
+    ///
+    /// When a page differs from the tool's.
+    #[test]
+    fn decompile_pages_a_long_function_as_the_tool_does() {
+        let s = session(400);
+        let page = decompiled(&line("decompile", &["0x1000"]), &s).expect("decompiles");
+        let head = page.lines().next().unwrap_or_default();
+        assert!(head.starts_with("// showing 300 of "), "{head}");
+        assert_eq!(page.lines().count(), 301, "{head}");
+        let next = decompiled(&line("decompile", &["0x1000", "300", "5"]), &s).expect("pages");
+        let head = next.lines().next().unwrap_or_default();
+        assert!(
+            head.starts_with("// showing 5 of ") && head.contains(" lines from 300"),
+            "{head}"
+        );
+        let all = decompiled(&line("decompile", &["0x1000", "full", "", "0"]), &s).expect("all");
+        let total: usize = head
+            .strip_prefix("// showing 5 of ")
+            .and_then(|r| r.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .expect("a total");
+        assert_eq!(all.lines().count(), total, "every line, untouched");
+        let short = session(3);
+        let whole = decompiled(&line("decompile", &["0x1000"]), &short).expect("decompiles");
+        assert!(!whole.contains("// showing"), "{whole}");
+        let bad =
+            decompiled(&line("decompile", &["0x1000", "skelton"]), &s).expect_err("not a detail");
+        assert!(bad.to_string().starts_with("unknown detail"), "{bad}");
+        let bad =
+            decompiled(&line("decompile", &["0x1000", "full", "x"]), &s).expect_err("not a number");
+        assert_eq!(bad.to_string(), "decompile offset 'x' is not a number");
+    }
 
     /// The vm and devirt words parse, and each carries its own usage lines.
     ///
