@@ -132,6 +132,14 @@ pub struct Headers {
     pub interpreter: Option<String>,
     /// ELF: the static symbol table is absent (`Some(true)` means stripped).
     pub stripped: Option<bool>,
+    /// Section table rows the loader dropped because the file cannot hold
+    /// what they state: bytes past its end, a size past 1 GiB, an end past
+    /// the top of the address space.
+    pub dropped_sections: usize,
+    /// The furthest file offset a kept section's bytes reach when that is
+    /// past the end of the file: the file is truncated, and each such
+    /// section keeps only the bytes the file holds.
+    pub truncated: Option<u64>,
 }
 
 /// Names a section from the shape of its bytes.

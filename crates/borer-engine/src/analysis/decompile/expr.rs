@@ -2536,7 +2536,7 @@ impl Names<'_> {
             .program
             .sections
             .iter()
-            .any(|s| v >= s.va && v < s.va + s.vsize.max(s.file_size));
+            .any(|s| v >= s.va && v < s.va.saturating_add(s.vsize.max(s.file_size)));
         if mapped && let Some(n) = self.overlay.names.get(&v) {
             return Some(format!("&{n}"));
         }

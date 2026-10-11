@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::isa::{FlowControl, Mnemonic, OpKind, Register};
 
 use super::{Analysis, NameSource, RefKind, pointer_size, read_u32, read_word, unique_name};
+use crate::num::from_usize;
 use crate::program::Program;
 
 /// Most headers one string table may hold.
@@ -108,6 +109,10 @@ impl QtMethodKind {
 
 /// Reads every class `moc` described and names the functions it maps.
 ///
+/// The string-table walk covers each data section's bytes as the file
+/// holds them, never the size its header states: a damaged header states
+/// sizes no file holds, and a walk of those reads nothing for hours.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -119,12 +124,15 @@ pub(super) fn infer(program: &Program, analysis: &mut Analysis) {
     let word = pointer_size(program);
     let mut tables: Vec<(u64, Vec<String>)> = Vec::new();
     for s in &program.sections {
-        if s.executable || s.file_size < 16 {
+        if s.executable {
             continue;
         }
-        let end = s.va + s.file_size;
+        let Some(held) = program.section_bytes(s).filter(|b| b.len() >= 16) else {
+            continue;
+        };
+        let end = s.va.saturating_add(from_usize(held.len()));
         let mut va = s.va;
-        while va + 16 <= end {
+        while va.saturating_add(16) <= end {
             match string_table(program, va, word) {
                 Some(names) => {
                     let span = names.len() as u64 * entry_size(word);

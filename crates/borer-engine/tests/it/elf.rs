@@ -707,3 +707,69 @@ fn decompile_names_the_import_and_the_tail_call() {
     assert!(wrapper.contains("return helper("), "{wrapper}");
     assert!(wrapper.contains('7'), "{wrapper}");
 }
+
+/// The fixture with `.rodata`'s `sh_size` rewritten.
+///
+/// # Arguments
+///
+/// * `size` - The size the header states.
+#[expect(
+    clippy::expect_used,
+    reason = "a fixture that does not parse has no useful recovery"
+)]
+fn with_rodata_size(size: u64) -> Program {
+    let mut bytes = elf_bytes(false);
+    let at = SHOFF + 6 * 64 + 32;
+    bytes[at..at + 8].copy_from_slice(&size.to_le_bytes());
+    Program::from_bytes(std::path::PathBuf::from("sized.elf"), bytes).expect("parses")
+}
+
+/// A section whose header states a size no file could hold is dropped and said
+/// to be.
+///
+/// The analysis of what is left finishes: a `.rodata` of 2^55 bytes kept
+/// the walk over its file bytes reading nothing for hours.
+#[test]
+fn a_section_no_file_could_hold_is_dropped_and_analysis_finishes() {
+    let p = with_rodata_size(1 << 55);
+    assert!(
+        !p.sections.iter().any(|s| s.name == ".rodata"),
+        "{:?}",
+        p.sections
+    );
+    assert_eq!(p.headers.dropped_sections, 1);
+    let summary = p.summary();
+    assert!(
+        summary.contains("# warning: 1 section(s) dropped"),
+        "{summary}"
+    );
+    let a = Analysis::compute(&p);
+    assert!(a.function(MAIN).is_some(), "main is still found");
+}
+
+/// A section the end of the file cuts keeps the bytes the file holds, no more.
+///
+/// The summary says the file is truncated, and every walk over its file bytes
+/// is then bounded by the file.
+#[test]
+fn a_section_the_file_ends_inside_keeps_only_what_the_file_holds() {
+    let size = 0x1000_0000u64;
+    let p = with_rodata_size(size);
+    let rodata = p
+        .sections
+        .iter()
+        .find(|s| s.name == ".rodata")
+        .expect("the section is kept");
+    let file_len = u64::try_from(FILE_SIZE).expect("fits");
+    assert_eq!(rodata.file_size, file_len - 0x1d0);
+    assert_eq!(rodata.vsize, size, "the memory size is what the row states");
+    assert_eq!(p.headers.truncated, Some(0x1d0 + size));
+    let summary = p.summary();
+    assert!(
+        summary.contains("# warning: truncated: the sections state bytes up to file offset 0x100001d0 and the file ends at 0xb00"),
+        "{summary}"
+    );
+    assert!(p.read_va(BASE + 0x1d0, 11) == Some(&b"hello, elf\0"[..]));
+    let a = Analysis::compute(&p);
+    assert!(a.function(MAIN).is_some(), "main is still found");
+}

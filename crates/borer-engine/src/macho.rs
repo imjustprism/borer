@@ -22,7 +22,7 @@ use goblin::mach::load_command::CommandVariant;
 use goblin::mach::{Mach, MachO};
 
 use crate::headers::Headers;
-use crate::program::{Arch, Section, Symbol, SymbolKind};
+use crate::program::{Arch, Fit, Section, Symbol, SymbolKind, fit_sections};
 
 /// `CPU_TYPE_X86`.
 const CPU_X86: u32 = 7;
@@ -77,6 +77,8 @@ pub(crate) struct Loaded {
     pub function_ranges: Vec<(u64, u64)>,
     /// The header facts.
     pub headers: Headers,
+    /// What fitting the sections to the file dropped or cut short.
+    pub fit: Fit,
 }
 
 /// A section's raw header, read from its segment command.
@@ -355,6 +357,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Option<Loaded> {
             executable: s.prot & PROT.2 != 0 && s.flags & INSTRUCTIONS != 0,
         });
     }
+    let fit = fit_sections(&mut sections, crate::num::from_usize(file.len()));
 
     let mut symbols: Vec<Symbol> = Vec::new();
     let mut seen: BTreeSet<(u64, String)> = BTreeSet::new();
@@ -552,5 +555,6 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Option<Loaded> {
         symbols,
         function_ranges,
         headers,
+        fit,
     })
 }

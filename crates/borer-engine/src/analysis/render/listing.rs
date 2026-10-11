@@ -915,7 +915,7 @@ pub fn listing_caveat(p: &Program, a: &Analysis, va: u64) -> String {
     let covering = p
         .sections
         .iter()
-        .find(|s| va >= s.va && va < s.va + s.vsize.max(s.file_size));
+        .find(|s| va >= s.va && va < s.va.saturating_add(s.vsize.max(s.file_size)));
     if let Some(s) = covering {
         if !s.executable {
             return format!(

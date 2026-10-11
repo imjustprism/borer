@@ -1902,7 +1902,10 @@ impl AddrSet {
             .iter()
             .filter(|s| s.executable && s.file_size > 0)
             .fold((u64::MAX, 0), |(lo, hi), s| {
-                (lo.min(s.va), hi.max(s.va + s.vsize.max(s.file_size)))
+                (
+                    lo.min(s.va),
+                    hi.max(s.va.saturating_add(s.vsize.max(s.file_size))),
+                )
             });
         let span = hi.saturating_sub(lo);
         let words = if span > ADDR_BITS_MAX {
@@ -5065,13 +5068,17 @@ pub(crate) fn string_at(program: &Program, va: u64) -> bool {
 ///
 /// * `program` - The loaded image.
 fn mapped_range(program: &Program) -> std::ops::Range<u64> {
-    let (lo, hi) = program
-        .sections
-        .iter()
-        .filter(|s| s.file_size > 0)
-        .fold((u64::MAX, 0), |(lo, hi), s| {
-            (lo.min(s.va), hi.max(s.va + s.vsize.max(s.file_size)))
-        });
+    let (lo, hi) =
+        program
+            .sections
+            .iter()
+            .filter(|s| s.file_size > 0)
+            .fold((u64::MAX, 0), |(lo, hi), s| {
+                (
+                    lo.min(s.va),
+                    hi.max(s.va.saturating_add(s.vsize.max(s.file_size))),
+                )
+            });
     lo..hi.max(lo)
 }
 

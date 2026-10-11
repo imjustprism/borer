@@ -311,6 +311,83 @@ const DIRECTORY_ENTRY: usize = 8;
 /// Bytes of one section table row.
 const SECTION_ROW: usize = 40;
 
+/// Largest section size a sane image carries (1 GiB), in memory or in the file.
+const SANE_MAX: u64 = 1 << 30;
+
+/// What fitting a section table to its file left out or cut short.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Fit {
+    /// Rows dropped because the file cannot hold what they state.
+    pub dropped: usize,
+    /// The furthest file offset a kept row states, when that is past the end
+    /// of the file: the file is truncated, and the row keeps what it holds.
+    pub cut: Option<u64>,
+}
+
+impl Fit {
+    /// Adds what fitting another table found.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other table's fit.
+    fn add(&mut self, other: Fit) {
+        self.dropped += other.dropped;
+        if let Some(end) = other.cut {
+            self.note_cut(end);
+        }
+    }
+
+    /// Records a row that states file bytes up to `end`, past the end of the file.
+    ///
+    /// # Arguments
+    ///
+    /// * `end` - The file offset the row's bytes end at.
+    fn note_cut(&mut self, end: u64) {
+        self.cut = Some(self.cut.map_or(end, |c| c.max(end)));
+    }
+}
+
+/// Fits a section table to the file that states it.
+///
+/// A section's sizes are numbers in a header, and a damaged or hostile one
+/// states sizes the file has never held: an ELF `.data` of 2^55 bytes made
+/// every walk over a section's file bytes run for hours, reading nothing.
+/// A row is dropped when it is not a section any image could hold: its
+/// bytes start past the end of the file, a size passes [`SANE_MAX`], or its
+/// end passes the top of the address space. A row that starts inside the
+/// file and runs past its end is the section a truncated file cuts, and
+/// keeps the bytes the file holds. Afterwards every kept row's file extent
+/// lies inside the file, so a walk over it is bounded by the file's length.
+///
+/// # Arguments
+///
+/// * `sections` - The rows as the format states them, fitted in place.
+/// * `file_len` - The file's length in bytes.
+///
+/// # Returns
+///
+/// How many rows were dropped and how far the furthest cut one reached.
+pub(crate) fn fit_sections(sections: &mut Vec<Section>, file_len: u64) -> Fit {
+    let mut fit = Fit::default();
+    sections.retain_mut(|s| {
+        let sane = s.vsize <= SANE_MAX
+            && s.file_size <= SANE_MAX
+            && (s.file_size == 0 || s.file_off < file_len)
+            && s.va.checked_add(s.vsize.max(s.file_size)).is_some();
+        if !sane {
+            fit.dropped += 1;
+            return false;
+        }
+        let end = s.file_off.saturating_add(s.file_size);
+        if end > file_len {
+            fit.note_cut(end);
+            s.file_size = file_len - s.file_off;
+        }
+        true
+    });
+    fit
+}
+
 /// Reads a little-endian `u16` at a file offset.
 ///
 /// # Arguments
@@ -841,6 +918,10 @@ impl Program {
     /// Mach-O: the segments' sections, the symbol table with the import
     /// slots the indirect symbols name, and the linker's function starts as
     /// the ranges ([`crate::macho`]); of a fat file, the x86-64 slice.
+    /// ELF and Mach-O section tables are fitted to the file
+    /// ([`fit_sections`]): a row the file cannot hold is dropped
+    /// ([`Headers::dropped_sections`]) and one it ends inside keeps what it
+    /// holds ([`Headers::truncated`]).
     /// Archives are detected but not parsed.
     ///
     /// # Arguments
@@ -896,6 +977,8 @@ impl Program {
         let mut chained_chunks: Vec<(u64, u64)> = Vec::new();
         let mut headers = Headers::default();
         let mut flat_fallback = false;
+        let file_len = crate::num::from_usize(bytes.len());
+        let mut fit = Fit::default();
         let mut pdb_record: Option<crate::pdb::Record> = None;
 
         match &obj {
@@ -910,7 +993,7 @@ impl Program {
                 is_64 = pe.is_64;
                 image_base = pe.image_base;
                 if pe.entry != 0 {
-                    entry = Some(pe.image_base + u64::from(pe.entry));
+                    entry = pe.image_base.checked_add(u64::from(pe.entry));
                 }
 
                 /// `IMAGE_SCN_MEM_EXECUTE`.
@@ -919,10 +1002,6 @@ impl Program {
                 const READ: u32 = 0x4000_0000;
                 /// `IMAGE_SCN_MEM_WRITE`.
                 const WRITE: u32 = 0x8000_0000;
-                /// Largest section size a sane PE would carry (1 GiB).
-                const SANE_MAX: u64 = 1 << 30;
-                let file_len = crate::num::from_usize(bytes.len());
-                let mut corrupt_sections = false;
                 let sound = pe.header.optional_header.is_some_and(|o| {
                     sound_section_table(&bytes, &pe.sections, o.windows_fields.size_of_headers)
                 });
@@ -941,13 +1020,17 @@ impl Program {
                         // file and runs past its end is a truncated section,
                         // kept with the bytes the file holds.
                         let cut = !fits && sound && rawoff < file_len;
+                        let va = pe.image_base.checked_add(u64::from(s.virtual_address));
                         let sane = rawsz <= SANE_MAX
                             && u64::from(s.virtual_size) <= SANE_MAX
                             && rawoff <= file_len
                             && (fits || cut);
-                        if !sane {
-                            corrupt_sections = true;
+                        let Some(va) = va.filter(|_| sane) else {
+                            fit.dropped += 1;
                             return None;
+                        };
+                        if cut {
+                            fit.note_cut(rawoff + rawsz);
                         }
                         Some(Section {
                             // SPEC: PE/COFF section names over 8 bytes are stored as `/NN`,
@@ -961,7 +1044,7 @@ impl Program {
                                 },
                                 str::to_owned,
                             ),
-                            va: pe.image_base + u64::from(s.virtual_address),
+                            va,
                             vsize: u64::from(s.virtual_size),
                             file_off: rawoff,
                             file_size: if cut { file_len - rawoff } else { rawsz },
@@ -971,7 +1054,7 @@ impl Program {
                         })
                     })
                     .collect();
-                if corrupt_sections && sections.is_empty() && pe.entry != 0 {
+                if fit.dropped > 0 && sections.is_empty() && pe.entry != 0 {
                     sections.push(Section {
                         name: "<flat>".to_owned(),
                         va: pe.image_base,
@@ -1009,7 +1092,7 @@ impl Program {
                     let dll = imp.dll.trim_end_matches('\0');
                     // SPEC: goblin's `Import::offset` is the IAT slot RVA; `rva` is the hint/name entry.
                     let addr = if imp.offset != 0 {
-                        pe.image_base + imp.offset as u64
+                        pe.image_base.wrapping_add(imp.offset as u64)
                     } else {
                         va_of_off(imp.rva as u64)
                     };
@@ -1025,7 +1108,7 @@ impl Program {
                         .map_or_else(|| format!("sub_{:x}", exp.rva), |n| n.to_owned());
                     symbols.push(Symbol {
                         name,
-                        addr: pe.image_base + exp.rva as u64,
+                        addr: pe.image_base.wrapping_add(exp.rva as u64),
                         kind: if exp.reexport.is_some() {
                             SymbolKind::Forwarder
                         } else {
@@ -1158,6 +1241,8 @@ impl Program {
                         executable: sh.sh_flags & EXEC != 0,
                     });
                 }
+                fit.add(fit_sections(&mut sections, file_len));
+                fit.add(fit_sections(&mut unmapped, file_len));
 
                 let mut slot_of: BTreeMap<usize, u64> = BTreeMap::new();
                 for r in elf
@@ -1257,6 +1342,7 @@ impl Program {
                     symbols = loaded.symbols;
                     function_ranges = loaded.function_ranges;
                     headers = loaded.headers;
+                    fit.add(loaded.fit);
                 }
             }
             goblin::Object::Archive(_) => format = BinaryFormat::Archive,
@@ -1269,6 +1355,8 @@ impl Program {
         {
             slot.copy_from_slice(&d.saved);
         }
+        headers.dropped_sections = fit.dropped;
+        headers.truncated = fit.cut;
         headers.implausible_imports = refused_imports;
         headers.implausible_exports = disarmed.map(|d| d.count);
         // The compiler's own names, where it left them. These are facts from
@@ -1446,7 +1534,7 @@ impl Program {
     pub fn section_at(&self, va: u64) -> Option<&Section> {
         self.sections.iter().find(|s| {
             let span = s.vsize.max(s.file_size);
-            s.file_size > 0 && va >= s.va && va < s.va + span
+            s.file_size > 0 && va >= s.va && va < s.va.saturating_add(span)
         })
     }
 
@@ -1475,7 +1563,8 @@ impl Program {
     /// The address, or `None` when no section's file extent covers `off`.
     pub fn offset_to_va(&self, off: u64) -> Option<u64> {
         self.sections.iter().find_map(|s| {
-            if s.file_size > 0 && off >= s.file_off && off < s.file_off + s.file_size {
+            if s.file_size > 0 && off >= s.file_off && off < s.file_off.saturating_add(s.file_size)
+            {
                 Some(s.va + (off - s.file_off))
             } else {
                 None
@@ -1550,7 +1639,7 @@ impl Program {
     /// The bytes, or `None` when the extent runs past the end of the file.
     pub fn section_bytes(&self, s: &Section) -> Option<&[u8]> {
         let start = usize::try_from(s.file_off).ok()?;
-        let end = usize::try_from(s.file_off + s.file_size).ok()?;
+        let end = usize::try_from(s.file_off.checked_add(s.file_size)?).ok()?;
         self.bytes.get(start..end)
     }
 
@@ -1697,7 +1786,7 @@ impl Program {
                     "{}({:#x}..{:#x})",
                     s.name,
                     s.va,
-                    s.va + s.vsize.max(s.file_size)
+                    s.va.saturating_add(s.vsize.max(s.file_size))
                 )
             })
             .collect::<Vec<_>>()
@@ -1745,6 +1834,18 @@ impl Program {
         }
         if self.flat_fallback {
             out.push_str("# warning: section table corrupt; using a flat file mapping\n");
+        }
+        if self.headers.dropped_sections > 0 {
+            out.push_str(&format!(
+                "# warning: {} section(s) dropped: the table states offsets or sizes the file cannot hold (past its end, or over 1 GiB)\n",
+                self.headers.dropped_sections
+            ));
+        }
+        if let Some(end) = self.headers.truncated {
+            out.push_str(&format!(
+                "# warning: truncated: the sections state bytes up to file offset {end:#x} and the file ends at {:#x}; what it does not hold is not analyzed\n",
+                self.bytes.len()
+            ));
         }
         out.push_str(&format!("sections ({}):\n", self.sections.len()));
         out.push_str("  name           va            vsize     file_off  size      rwx  entropy\n");
