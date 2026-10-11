@@ -1,5 +1,6 @@
-//! Content hashes of a crafted PE: imphash against a hand-computed import
-//! table, authentihash against a file with a checksum, a security directory
+//! Content hashes of a crafted PE.
+//!
+//! Imphash against a hand-computed import table, authentihash against a file with a checksum, a security directory
 //! and a certificate table, both pinned to values an independent
 //! implementation computed over the same bytes.
 //!

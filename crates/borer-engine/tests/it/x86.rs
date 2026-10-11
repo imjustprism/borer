@@ -1,5 +1,7 @@
-//! 32-bit x86 decompilation: the frame, the arguments and the calls of a
-//! `cdecl`/`stdcall`/`thiscall` program, where every argument travels on the
+//! 32-bit x86 decompilation.
+//!
+//! The frame, the arguments and the calls of a `cdecl`/`stdcall`/`thiscall`
+//! program, where every argument travels on the
 //! stack, the return address is four bytes and `ecx` may be `this`.
 //!
 //! Every fixture is hand-assembled and lives in a raw image, so each test
@@ -10,10 +12,8 @@
     reason = "assertions are the point of a test"
 )]
 
-#[path = "common/decompiled.rs"]
-mod decompiled;
-#[path = "common/raw.rs"]
-mod raw;
+use crate::decompiled;
+use crate::raw;
 
 use borer_engine::analysis::decompile::{decompile, decompile_named};
 use borer_engine::analysis::{Analysis, Overlay, RefKind, name_of};

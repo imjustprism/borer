@@ -138,7 +138,13 @@ def main(argv: list[str]) -> int:
             None,
             None,
         ),
-        ("test", ["cargo", "test", "--workspace"], None, None),
+        # The crackme the ground-truth test decompiles is an example; the
+        # engine's own examples are left to clippy, which compiles them
+        # (--all-targets), since linking them in the test build bought
+        # nothing but three more executables.
+        ("examples", ["cargo", "build", "-p", "borer-fixtures", "--examples"], None, None),
+        ("test", ["cargo", "test", "--workspace", "--lib", "--bins", "--tests"], None, None),
+        ("doctest", ["cargo", "test", "--workspace", "--doc"], None, None),
     ]
     if not fast:
         # Named by platform, not by presence: the build step before the
@@ -153,7 +159,14 @@ def main(argv: list[str]) -> int:
             # built before (a fresh worktree), and the dogfood sweep and
             # the smoke test both load one.
             ("build", ["cargo", "build", "-p", "borer"], None, None),
-            ("build corpus", ["cargo", "build", "-p", "borer", "--profile", "corpus"], None, None),
+            # link.exe, not the rust-lld .cargo/config.toml names: the binary
+            # the sweep reads stays linked as it always was.
+            (
+                "build corpus",
+                ["cargo", "build", "-p", "borer", "--profile", "corpus"],
+                {"CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER": "link.exe"},
+                None,
+            ),
             (
                 "dogfood",
                 [
@@ -161,7 +174,8 @@ def main(argv: list[str]) -> int:
                     "test",
                     "-p",
                     "borer-engine",
-                    "--release",
+                    "--profile",
+                    "sweep",
                     "--test",
                     "dogfood",
                     "--",
@@ -189,7 +203,8 @@ def main(argv: list[str]) -> int:
                     "test",
                     "-p",
                     "borer-engine",
-                    "--release",
+                    "--profile",
+                    "sweep",
                     "--test",
                     "dogfood",
                     "--",
@@ -214,7 +229,8 @@ def main(argv: list[str]) -> int:
                         "test",
                         "-p",
                         "borer-engine",
-                        "--release",
+                        "--profile",
+                        "sweep",
                         "--test",
                         "dogfood",
                         "--",

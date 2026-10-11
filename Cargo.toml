@@ -87,27 +87,42 @@ large_types_passed_by_value = "warn"
 # the gate. Dependencies (the decoder above all) build optimized once and stay
 # cached; the workspace's own crates get the cheap level, which keeps debug
 # assertions and overflow checks.
+#
+# Debug info is most of what a test build writes (a test binary's PDB ran to
+# 250 MB, most of it the dependencies' types), so it is kept only where a
+# test reads it: line tables everywhere, so a panic still names its line;
+# nothing for dependencies; full for the engine, whose PDB tests read their
+# own locals, types and statics, and for the fixtures.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
+
+[profile.dev.package.borer-engine]
+debug = "full"
 
 # The crackme is a test of how unoptimized code decompiles: its source shape,
 # down to the constant its check compares with, survives only at level 0.
 [profile.dev.package.borer-fixtures]
 opt-level = 0
+debug = "full"
 
 # The binary the dogfood sweep and smoke read: borer built entirely
-# unoptimized, as the dev profile once built it, because that debug codegen
-# is where the sweep keeps finding lifter bugs. `cargo build --profile corpus`
-# writes it to target/corpus.
+# unoptimized with full debug info, as the dev profile once built it, because
+# that debug codegen is where the sweep keeps finding lifter bugs and its PDB
+# names what the sweep reads. `cargo build --profile corpus` writes it to
+# target/corpus.
 [profile.corpus]
 inherits = "dev"
 opt-level = 0
+debug = "full"
 
 [profile.corpus.package."*"]
 opt-level = 0
+debug = "full"
 
 # the shipped server is the release binary: whole-program optimization is
 # worth the longer build (decompile-all on a 25k-function PE runs ~2x faster)
@@ -115,10 +130,19 @@ opt-level = 0
 lto = true
 codegen-units = 1
 
+# The dogfood sweep's build: release optimization with thin LTO and parallel
+# codegen. Fat LTO over one codegen unit compiled the engine on a single LLVM
+# thread for minutes every gate; the sweep checks what the engine answers,
+# which no optimization level may change.
+[profile.sweep]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
 # The shipped server: everything release does, plus no unwinding tables and no
-# symbols. Kept separate from `release` because `cargo test --release` needs
-# unwinding for libtest to report which test failed, and the dogfood sweep
-# runs there.
+# symbols. Kept separate from `release` because tests built from it (the
+# sweep profile inherits it) need unwinding for libtest to report which test
+# failed.
 [profile.dist]
 inherits = "release"
 panic = "abort"

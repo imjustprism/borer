@@ -5,11 +5,9 @@
     reason = "assertions are the point of a test"
 )]
 
-mod common;
-#[path = "common/decompiled.rs"]
-mod decompiled;
-#[path = "common/nebula.rs"]
-mod nebula;
+use crate::common;
+use crate::decompiled;
+use crate::nebula;
 
 use borer_engine::analysis::decompile::enum_table;
 use borer_engine::analysis::{

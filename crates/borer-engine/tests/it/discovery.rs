@@ -10,8 +10,7 @@
     reason = "assertions are the point of a test"
 )]
 
-#[path = "common/raw.rs"]
-mod raw;
+use crate::raw;
 
 use borer_engine::analysis::Analysis;
 use borer_engine::program::Arch;

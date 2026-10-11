@@ -1,5 +1,6 @@
-//! ELF tests on a hand-built dynamically linked x86-64 executable: GOT slots
-//! on imports, PLT stub naming, `.symtab` locals with sizes, `.eh_frame`
+//! ELF tests on a hand-built dynamically linked x86-64 executable.
+//!
+//! GOT slots on imports, PLT stub naming, `.symtab` locals with sizes, `.eh_frame`
 //! extents on a stripped copy, tail-call splitting, header facts, a
 //! decompile that names `puts`, and `.debug_info` frame locals.
 

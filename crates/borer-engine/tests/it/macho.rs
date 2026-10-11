@@ -1,5 +1,6 @@
-//! Mach-O tests on a hand-built x86-64 executable: the sections by segment
-//! and name, the symbol table's exports and locals, an import slot named
+//! Mach-O tests on a hand-built x86-64 executable.
+//!
+//! The sections by segment and name, the symbol table's exports and locals, an import slot named
 //! through the indirect symbol table, the linker's function starts as
 //! function ranges, the header facts (linked libraries, heap NX, `FairPlay`
 //! encryption), a decompile that names the import, and the same image

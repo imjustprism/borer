@@ -6,11 +6,9 @@
     reason = "assertions are the point of a test"
 )]
 
-mod common;
-#[path = "common/decompiled.rs"]
-mod decompiled;
-#[path = "common/nebula.rs"]
-mod nebula;
+use crate::common;
+use crate::decompiled;
+use crate::nebula;
 
 use borer_engine::analysis::{Analysis, NameSource, Overlay, RefKind, name_of};
 use borer_engine::num::from_usize;

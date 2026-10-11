@@ -1,0 +1,8 @@
+# Link with the LLD that ships in every Rust toolchain (rust-lld.exe in the
+# sysroot) instead of MSVC's link.exe: a test build links two dozen
+# executables, and LLD writes them and their PDBs much faster. It still uses
+# the MSVC and Windows SDK libraries. The gate builds the corpus binary with
+# link.exe (CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER), so the binary the
+# dogfood sweep reads is linked as before.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

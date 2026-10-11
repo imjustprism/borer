@@ -10,8 +10,7 @@
     reason = "assertions are the point of a test"
 )]
 
-#[path = "common/gotos.rs"]
-mod gotos;
+use crate::gotos;
 
 use borer_engine::analysis::{Analysis, Overlay, decompile::decompile_raw};
 use borer_engine::num::saturating_usize;
