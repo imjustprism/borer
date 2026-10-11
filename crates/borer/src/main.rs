@@ -96,6 +96,9 @@ struct BorerServer {
     /// comparison build loads the same way, or a diff of a binary against
     /// itself pairs functions a PDB names with ones it does not.
     pdb_applied: Arc<RwLock<bool>>,
+    /// The `entry_file_offset` the loaded program was loaded with, so a
+    /// reload loads it the same way.
+    entry_file_offset: Arc<RwLock<Option<u64>>>,
     /// Derived analysis of `program`, computed on first use and reset by `load_binary`.
     analysis: Arc<RwLock<Option<Arc<Analysis>>>>,
     /// The loaded program's string walks, computed on the first `strings`
@@ -589,9 +592,13 @@ impl BorerServer {
     ///
     /// * `LoadBinaryParams` - Destructured tool parameters (see its field docs).
     ///
+    /// A refused load changes nothing: the program, its names and the
+    /// load options of the session stay what they were.
+    ///
     /// # Errors
     ///
-    /// Invalid params when the file does not load or the entry offset is past its end.
+    /// Invalid params when the file does not load, or the entry offset is
+    /// past its end or in no section's file bytes.
     #[tool(
         description = "Load a PE/ELF (or raw) file as the current program; returns its summary.",
         annotations(
@@ -610,7 +617,6 @@ impl BorerServer {
         }): Parameters<LoadBinaryParams>,
     ) -> Result<String, ErrorData> {
         let apply_pdb = pdb.unwrap_or(true);
-        *write_lock(&self.pdb_applied) = apply_pdb;
         let mut program = Program::load_with_symsrv(
             &PathBuf::from(&path),
             apply_pdb,
@@ -624,7 +630,13 @@ impl BorerServer {
                     program.bytes.len()
                 )));
             }
-            program.entry = Some(program.image_base + off);
+            let va = program.offset_to_va(off).ok_or_else(|| {
+                err_params(format!(
+                    "entry_file_offset {off:#x} is in no section's file bytes, so it maps to no address; sections: {}",
+                    program.section_list()
+                ))
+            })?;
+            program.entry = Some(va);
         }
         let mut summary = program.summary();
         let dropped = std::mem::take(&mut *write_lock(&self.overlay));
@@ -643,6 +655,8 @@ impl BorerServer {
         for note in notes {
             let _ = writeln!(summary, "{note}");
         }
+        *write_lock(&self.pdb_applied) = apply_pdb;
+        *write_lock(&self.entry_file_offset) = entry_file_offset;
         *write_lock(&self.program_packs) = packs;
         *write_lock(&self.program) = Some(Arc::new(program));
         *write_lock(&self.analysis) = None;
@@ -3550,6 +3564,8 @@ impl ServerHandler for BorerServer {
                         &read_lock(&self.overlay),
                     )
                 }),
+                pdb: Some(*read_lock(&self.pdb_applied)),
+                entry_file_offset: *read_lock(&self.entry_file_offset),
             });
         }
         let response = response?;
@@ -4450,9 +4466,11 @@ impl BorerServer {
         }
     }
 
-    /// Loads the file the worker before this one had loaded, with its names
-    /// and comments; a file that no longer loads is said on stderr and the
-    /// session goes on without it.
+    /// Loads the file the worker before this one had loaded, the way it was
+    /// loaded (its `pdb` and `entry_file_offset`), with its names and comments.
+    ///
+    /// A file that no longer loads is said on stderr and the session goes on
+    /// without it.
     ///
     /// # Arguments
     ///
@@ -4462,13 +4480,21 @@ impl BorerServer {
     ///
     /// What the client sent at initialize, for this worker to serve the
     /// session with; `None` when the state does not hold it.
-    fn resume(&self, Resume { peer_info, project }: Resume) -> Option<InitializeRequestParams> {
+    fn resume(
+        &self,
+        Resume {
+            peer_info,
+            project,
+            pdb,
+            entry_file_offset,
+        }: Resume,
+    ) -> Option<InitializeRequestParams> {
         if let Some(project) = project {
             let overlay = project.to_overlay();
             let reloaded = self.load_binary(Parameters(LoadBinaryParams {
                 path: project.program,
-                entry_file_offset: None,
-                pdb: None,
+                entry_file_offset,
+                pdb,
             }));
             if let Err(e) = reloaded {
                 eprintln!(
@@ -4497,6 +4523,12 @@ struct Resume {
     /// The loaded file with its names and comments, for the next worker to
     /// load again; `None` when nothing was loaded.
     project: Option<borer::project::ProjectFile>,
+    /// Whether the loaded file's companion PDB applied (`load_binary`'s
+    /// `pdb`), for the next worker to load it the same way.
+    pdb: Option<bool>,
+    /// The `entry_file_offset` the file was loaded with, for the next
+    /// worker to load it the same way.
+    entry_file_offset: Option<u64>,
 }
 
 impl Resume {
@@ -4791,6 +4823,47 @@ mod tests {
             "the message is lost: {err}"
         );
         assert!(sound.is_ok(), "the next call failed too");
+    }
+
+    /// A refused `load_binary` changes nothing.
+    ///
+    /// The session keeps the program it had and the load options it was loaded
+    /// with. The `pdb` setting was written before the load was tried, so a
+    /// failed load with `pdb=false` made the next comparison build skip its
+    /// PDB.
+    ///
+    /// # Panics
+    ///
+    /// When a refused load changes the session.
+    #[test]
+    fn a_refused_load_changes_nothing() {
+        let exe = std::env::current_exe().expect("the test binary has a path");
+        let exe = exe.display().to_string();
+        let load = |path: &str, pdb: Option<bool>, entry_file_offset: Option<u64>| {
+            super::LoadBinaryParams {
+                path: path.to_owned(),
+                entry_file_offset,
+                pdb,
+            }
+        };
+        let server = super::BorerServer::default();
+        server
+            .load_binary(super::Parameters(load(&exe, Some(true), None)))
+            .expect("the test binary loads");
+        let missing = server.load_binary(super::Parameters(load(
+            "no/such/file.exe",
+            Some(false),
+            Some(0),
+        )));
+        assert!(missing.is_err());
+        let past = server.load_binary(super::Parameters(load(&exe, Some(false), Some(u64::MAX))));
+        assert!(past.is_err());
+        assert!(
+            *super::read_lock(&server.pdb_applied),
+            "the pdb setting moved"
+        );
+        assert_eq!(*super::read_lock(&server.entry_file_offset), None);
+        assert!(server.loaded().is_some(), "the program was dropped");
     }
 
     /// A fresh session renders constants by the binary's name tables, as a

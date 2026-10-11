@@ -219,7 +219,9 @@ pub(crate) enum SearchKind {
 pub(crate) struct LoadBinaryParams {
     /// Path to the binary on disk (PE, ELF, or raw file).
     pub(crate) path: String,
-    /// File offset to use as the entry point when the section table is corrupt.
+    /// File offset of the entry point to use instead of the header's,
+    /// mapped to its address through the section table (a corrupt table is
+    /// mapped flat, so any offset in the file has one).
     pub(crate) entry_file_offset: Option<u64>,
     /// Whether a companion PDB the debug record names may apply its symbols
     /// (default true); false analyzes the image alone, whatever sits beside

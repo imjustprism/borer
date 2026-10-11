@@ -340,3 +340,55 @@ fn the_launched_process_serves_the_session_through_reloads() {
     }
     client.finish();
 }
+
+/// A reload loads the file the way it was loaded.
+///
+/// It keeps the `pdb` and the `entry_file_offset` the session gave, the offset
+/// mapped to its address through the section table. The hand-over loaded with
+/// the defaults, so a session that had turned the PDB off or moved the entry
+/// got them back, and the offset was added to the image base as if it were an
+/// address.
+#[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "reads borer's own build, pinned as the Windows x64 PE"
+)]
+fn a_reload_keeps_the_load_options() {
+    let exe = env!("CARGO_BIN_EXE_borer");
+    let mut client = Client::start(exe);
+    let info = client.text("binary_info", "{}");
+    let text = info
+        .lines()
+        .find(|l| l.trim_start().starts_with(".text "))
+        .unwrap_or_else(|| panic!("no .text row in {info}"));
+    let hex = |field: Option<&str>| {
+        field
+            .and_then(|f| f.strip_prefix("0x"))
+            .and_then(|f| u64::from_str_radix(f, 16).ok())
+            .unwrap_or_else(|| panic!("no number in {text}"))
+    };
+    let mut fields = text.split_whitespace().skip(1);
+    let va = hex(fields.next());
+    let off = hex(fields.nth(1));
+    let loaded = client.text(
+        "load_binary",
+        &format!(
+            r#"{{"path":{exe:?},"pdb":false,"entry_file_offset":{}}}"#,
+            off + 0x10
+        ),
+    );
+    let entry = format!("entry: {:#x}", va + 0x10);
+    assert!(loaded.contains(&entry), "{entry} not in {loaded}");
+    assert!(!loaded.contains("pdb:"), "{loaded}");
+    let before = client.text("binary_info", "{}");
+    client.passed.clear();
+    let reload = client.text("reload", "{}");
+    assert!(reload.contains("reloading borer"), "{reload}");
+    client.next_with(
+        "notifications/tools/list_changed",
+        "tool list announced after the reload",
+    );
+    let after = client.text("binary_info", "{}");
+    assert_eq!(after, before, "the reload loaded the file another way");
+    client.finish();
+}
