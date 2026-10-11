@@ -145,7 +145,11 @@ const DELTA_SHARE: (usize, usize) = (1, 2);
 /// The lines of `new` that differ from `old`, as `@@ -a,n +b,m @@` hunks.
 ///
 /// The hunks come from the shortest edit script (Myers); `None` when it
-/// takes more than [`DELTA_EDITS_MAX`] edits.
+/// takes more than [`DELTA_EDITS_MAX`] edits. They are numbered as a
+/// unified diff numbers them: a range of lines by its first line, an empty
+/// range by the line before it, so a line added after old line 4 is
+/// `-4,0`, where it read `-5,0` and a reader applying the hunk the way
+/// `patch` does put it one line late.
 ///
 /// # Arguments
 ///
@@ -234,12 +238,14 @@ fn line_delta(old: &str, new: &str) -> Option<String> {
             }
             i += 1;
         }
+        // SPEC: GNU diffutils manual, "Detailed Unified": an empty range names the line before it.
+        let start = |at: usize, lines: &[&str]| if lines.is_empty() { at } else { at + 1 };
         let _ = writeln!(
             out,
             "@@ -{},{} +{},{} @@",
-            x0 + 1,
+            start(x0, &removed),
             removed.len(),
-            y0 + 1,
+            start(y0, &added),
             added.len()
         );
         for line in removed {
@@ -494,7 +500,12 @@ mod tests {
         let new = "a\nB\nc\nd\ne\n";
         assert_eq!(
             super::line_delta(old, new).as_deref(),
-            Some("@@ -2,1 +2,1 @@\n-b\n+B\n@@ -5,0 +5,1 @@\n+e\n")
+            Some("@@ -2,1 +2,1 @@\n-b\n+B\n@@ -4,0 +5,1 @@\n+e\n")
+        );
+        assert_eq!(
+            super::line_delta(old, "a\nc\nd\n").as_deref(),
+            Some("@@ -2,1 +1,0 @@\n-b\n"),
+            "an empty range is named by the line before it, as in a unified diff"
         );
         assert_eq!(super::line_delta(old, old).as_deref(), Some(""));
         let mut r = Recall::default();
