@@ -753,6 +753,34 @@ mod os {
         pub fn name(&self) -> &str {
             &self.name
         }
+
+        /// The process's thread ids.
+        ///
+        /// # Errors
+        ///
+        /// Always: live access is not available in this build.
+        pub fn threads(&self) -> Result<Vec<u32>, String> {
+            Err(format!(
+                "cannot list the threads of pid {}: live process access is available on Windows only",
+                self.pid
+            ))
+        }
+
+        /// The address of a thread's environment block.
+        ///
+        /// # Arguments
+        ///
+        /// * `tid` - A thread of the process.
+        ///
+        /// # Errors
+        ///
+        /// Always: live access is not available in this build.
+        pub fn teb_of(&self, tid: u32) -> Result<u64, String> {
+            Err(format!(
+                "cannot query thread {tid} of pid {}: live process access is available on Windows only",
+                self.pid
+            ))
+        }
     }
 
     impl Memory for Process {
