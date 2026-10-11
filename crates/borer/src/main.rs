@@ -1001,7 +1001,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Crypto tables and constants (AES, SHA-1/2, MD5, CRC-32, ChaCha, Blowfish, RC5/6, xxHash/FNV/SipHash, Base64) in every byte of the file, overlay included: a group per algorithm, then `va section algorithm` rows (`off=<n>` where unmapped) paged by offset/limit (200, max 500).",
+        description = "Crypto tables and constants (AES, SHA-1/2, MD5, CRC-32, ChaCha, Blowfish, RC5/6, xxHash/FNV/SipHash, Base64) anywhere in the file: `va section algorithm` rows per algorithm (`off=<n>` if unmapped), offset/limit (200, max 500).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1095,7 +1095,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Functions referencing a string whose text contains `filter`: a `# showing N of M rows` header, a numbered `# strings:` legend, then one `entry name: 1 2 5` row per function; offset pages the rows (limit default 50, max 300, caps both rows and legend).",
+        description = "Functions referencing strings containing `filter`: a `# showing N of M` header, a numbered `# strings:` legend, then `entry name: 1 2 5` rows; offset/limit page rows and legend (50, max 300).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1682,7 +1682,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the encoding is unknown.
     #[tool(
-        description = "Printable ASCII/UTF-16LE strings as `off va len enc \"text\"` rows; encoding, min_length (5), filter, paging (200, max 500), count_only.",
+        description = "Printable ASCII/UTF-16LE strings as `off va len enc \"text\"` rows.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1743,7 +1743,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Imports/exports/locals/data as `kind addr name` rows under `# module:` lines, demangled; kind (drops the column), filter, paging (50, max 1000), count_only; xrefs(import) lists its call sites.",
+        description = "Imports/exports/locals/data as `kind addr name` rows under `# module:` lines, demangled; xrefs(import) lists its call sites.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1793,7 +1793,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Discovered functions as `entry size blocks instrs callers callees src name` rows; filter on name or entry hex, sort=size for the largest first, paging (50, max 300), count_only.",
+        description = "Discovered functions as `entry size blocks instrs callers callees src name` rows; filter on name or entry hex, sort=size for the largest first.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1994,7 +1994,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Callgraph from a function as mermaid: its callees (callers=true: what reaches it) breadth-first, at most six per function until the rest of the budget is shared out, imports as leaves; a trailing %% line counts what was not shown (max_nodes default 30, max 100).",
+        description = "Callgraph from a function as mermaid: callees (callers=true: what reaches it), six per function before the rest is shared out, imports as leaves; a trailing %% line counts what was hidden (max_nodes 30, max 100).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2126,7 +2126,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not inside a discovered function,
     /// or the decompiler produces nothing.
     #[tool(
-        description = "Pseudo-C with locals local_N/arg_N, named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked. detail=skeleton: flow and calls only; filter keeps lines carrying the text; offset/limit page by line (300, 0 for all).",
+        description = "Pseudo-C with locals local_N/arg_N, named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

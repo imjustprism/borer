@@ -261,8 +261,7 @@ pub(crate) struct DisassembleFunctionParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadParams {
-    /// Address (0x-hex, or bare decimal digits), a name, or `off:<n>`, a file offset (for
-    /// overlay and unmapped bytes).
+    /// Address (0x-hex or decimal), a name, or `off:<n>` for a file offset.
     pub(crate) address: String,
     /// What to decode the bytes as (default u64).
     pub(crate) kind: Option<ReadKind>,
@@ -289,7 +288,7 @@ pub(crate) struct FindFunctionByStringParams {
     pub(crate) filter: String,
     /// Function rows to skip first (paging).
     pub(crate) offset: Option<u32>,
-    /// Most function rows, and most legend strings (default 50, max 300).
+    /// Max rows and legend strings (default 50, max 300).
     pub(crate) limit: Option<u32>,
 }
 
@@ -297,8 +296,7 @@ pub(crate) struct FindFunctionByStringParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HexdumpParams {
-    /// Address (0x-hex, or bare decimal digits), a name, or `off:<n>`, a file offset (for
-    /// overlay and unmapped bytes).
+    /// Address (0x-hex or decimal), a name, or `off:<n>` for a file offset.
     pub(crate) address: String,
     /// Number of bytes (default 64, max 4096).
     pub(crate) length: Option<u32>,
@@ -438,7 +436,7 @@ pub(crate) struct CallgraphParams {
     pub(crate) address: String,
     /// Maximum graph nodes (default 30, max 100).
     pub(crate) max_nodes: Option<u32>,
-    /// Walk callers instead of callees: what reaches this function.
+    /// What reaches it instead of what it calls.
     pub(crate) callers: Option<bool>,
 }
 
@@ -448,7 +446,7 @@ pub(crate) struct CallgraphParams {
 pub(crate) struct ReachesParams {
     /// Function the call chain starts at.
     pub(crate) from: String,
-    /// Function to look for, or an import (by name or slot address).
+    /// Target function, or an import by name or slot.
     pub(crate) to: String,
     /// Longest chain to follow (default 24, max 64).
     pub(crate) depth: Option<u32>,
@@ -458,9 +456,9 @@ pub(crate) struct ReachesParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CryptoParams {
-    /// Per-site rows to skip first (paging).
+    /// Rows to skip (paging).
     pub(crate) offset: Option<u32>,
-    /// Max per-site rows (default 200, max 500).
+    /// Max rows (default 200, max 500).
     pub(crate) limit: Option<u32>,
 }
 
@@ -470,7 +468,7 @@ pub(crate) struct CryptoParams {
 pub(crate) struct CfgParams {
     /// Function entry or any address inside it.
     pub(crate) address: String,
-    /// Blocks to skip first, in address order (paging, 300 a page).
+    /// Blocks to skip, 300 a page.
     pub(crate) offset: Option<u32>,
 }
 
