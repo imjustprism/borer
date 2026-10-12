@@ -43,6 +43,7 @@ mod libsig;
 mod lsda;
 mod macho;
 mod next;
+mod noise;
 mod objc;
 mod protection;
 mod protos;

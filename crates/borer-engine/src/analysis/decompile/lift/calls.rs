@@ -2279,11 +2279,11 @@ impl<'a> Exec<'_, 'a> {
         // call hands a second result back there (`edx`, the high half of a
         // 64-bit integer, on a 32-bit target), so the call renders its own
         // second assignment under the callee's name with a `__rdx` suffix,
-        // and the register is the variable it lands in. It renders when
-        // this caller reads either result: one read the same
-        // instruction-scan that gates `rax` answers for its own key. On a
-        // 32-bit target, where `edx` is scratch a caller rarely reads, only
-        // a caller that reads it renders it.
+        // and the register is the variable it lands in. It renders only
+        // where this caller reads `rdx`: a read of `rax` alone says nothing
+        // of the second register. A callee the type library declares hands
+        // back what its declaration says, one register unless the type is
+        // wider than the word.
         let rdxk = self.canon(Register::RDX);
         let next_rdx = next.is_some_and(|n| self.reads_register(n, rdxk));
         let uses_rdx = if rest.is_empty() {
@@ -2293,7 +2293,7 @@ impl<'a> Exec<'_, 'a> {
                 None => false,
             }
         } else {
-            self.result_use(rest, rdxk, xmm0).0
+            self.second_read(rest, rdxk)
         };
         let hands_back_rdx = target.is_some_and(|t| {
             self.ctx
@@ -2308,10 +2308,14 @@ impl<'a> Exec<'_, 'a> {
         if stated_callee && hands_back_rdx && uses_rdx {
             self.stated_contradicted = true;
         }
+        let word = u8::try_from(self.bitness()).unwrap_or(64);
+        let declared_one =
+            declared.is_some_and(|r| !matches!(r, Returns::Int(bits) if bits > word));
         let mut second = (direct.is_some()
             && virt.is_none()
             && !stated_callee
-            && (uses_rdx || (uses_result && self.bitness() == 64))
+            && !declared_one
+            && uses_rdx
             && hands_back_rdx)
             .then(|| {
                 let n = self.names();
@@ -2613,6 +2617,41 @@ impl<'a> Exec<'_, 'a> {
             }
         });
         (rax, xmm && !rax)
+    }
+
+    /// Tells whether the instructions after a call read the register a
+    /// second result comes back in.
+    ///
+    /// The block's remaining instructions are scanned in order: a read
+    /// before a full write or another call means it is read; a `ret`
+    /// hands it on only when the function itself hands a second result
+    /// back ([`Ctx::ret_rdx`]); a block that ends undecided follows the
+    /// liveness after the call.
+    ///
+    /// # Arguments
+    ///
+    /// * `rest` - The instructions after the call in its block.
+    /// * `rdx` - The second result's register.
+    fn second_read(&mut self, rest: &[Instruction], rdx: Key) -> bool {
+        for i in rest {
+            if matches!(i.flow_control(), FlowControl::Return) {
+                return self.ctx.ret_rdx;
+            }
+            if self.reads_register(i, rdx) {
+                return true;
+            }
+            if self.writes_register(i, rdx)
+                || matches!(
+                    i.flow_control(),
+                    FlowControl::Call | FlowControl::IndirectCall
+                )
+            {
+                return false;
+            }
+        }
+        self.regs_needed
+            .as_ref()
+            .is_none_or(|m| m.contains_key(&rdx))
     }
 
     /// Tells whether `instr` fully writes canonical register `key` (a whole

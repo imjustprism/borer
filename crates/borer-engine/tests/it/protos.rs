@@ -117,7 +117,7 @@ fn pair() -> Program {
 fn a_stated_prototype_rules_out_a_second_result() {
     let p = pair();
     let plain = Overlay::default();
-    let (before, _) = decompiled(&p, &plain, 0x401_040);
+    let (before, _) = decompiled(&p, &plain, 0x401_000);
     assert!(before.contains("sub_401020__rdx"), "{before}");
     let o = stating(0x401_020, "int f(int n)");
     let (after, header) = decompiled(&p, &o, 0x401_040);
@@ -269,11 +269,11 @@ fn stated_annotations_key_the_memo() {
     vars.insert(VarKey::Param(0), Var::parse("count").expect("a name"));
     renamed.vars.insert(0x401_020, vars);
     assert_ne!(o.fingerprint(), renamed.fingerprint());
-    let first = decompile(&p, &a, &plain, 0x401_040);
-    let stated = decompile(&p, &a, &o, 0x401_040);
+    let first = decompile(&p, &a, &plain, 0x401_000);
+    let stated = decompile(&p, &a, &o, 0x401_000);
     assert_ne!(first, stated);
-    assert_eq!(decompile(&p, &a, &o, 0x401_040), stated);
-    assert_eq!(decompile(&p, &a, &plain, 0x401_040), first);
+    assert_eq!(decompile(&p, &a, &o, 0x401_000), stated);
+    assert_eq!(decompile(&p, &a, &plain, 0x401_000), first);
 }
 
 /// A `void` prototype on a function whose caller reads its result leaves

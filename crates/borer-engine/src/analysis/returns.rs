@@ -398,11 +398,16 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         f.ret_width = width;
         f.ret_partial = partial;
         f.preserves_rax = facts.preserves;
+        // INVARIANT: a second result is the callers' word alone, so only a
+        // read seen at a call site makes one; a site the scan lost is no
+        // evidence (every call site of a `free` wrapper whose scan ran out
+        // rendered a phantom `rdx = f__rdx(..)` line), unlike for `rax`,
+        // where a lost site keeps the one result the function has.
         f.hands_back_rdx = !facts.preserves_rdx
             && facts
                 .sites_rdx
                 .iter()
-                .any(|site| matches!(site, Site::Used(_) | Site::Unknown));
+                .any(|site| matches!(site, Site::Used(_)));
         f.ret_float = float;
     }
 }

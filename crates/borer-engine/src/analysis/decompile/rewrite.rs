@@ -836,10 +836,14 @@ pub(super) fn split_pair(inner: &str) -> Option<(&str, &str)> {
 /// The lifter writes a register out when the block's liveness says a
 /// successor may read it; when the structuring that follows leaves no
 /// reader at all, the assignment is a value computed for nobody. Such a
-/// target goes when its variable appears exactly once in the whole body,
-/// which covers loops (a back edge's read is a mention) and address-taken
-/// stack slots (`&local_18` mentions it), and when its right side is pure:
-/// a call may do more than return a value, so a call result stays. In a
+/// target goes when its variable appears nowhere in the whole body but on
+/// its own line, which covers loops (a back edge's read is a mention) and
+/// address-taken stack slots (`&local_18` mentions it); a right side that
+/// reads the target itself (`rdx = f__rdx(rsi, rdx)`) only feeds a value
+/// nothing reads. Its right side must be pure: a call may do more than
+/// return a value, so a call result stays, except a second result
+/// (`f__rdx(..)`), which only names what the call on the line before left
+/// in a register. In a
 /// chain, `rcx = rbx = rdi = a1;`, only the dead targets go and the copies
 /// something reads stay; the line goes with its last target. The
 /// declaration follows on its own, since only names the body still
@@ -887,13 +891,15 @@ pub(super) fn drop_dead_assignments(
         let local = |name: &str| {
             is_register_name(name) || ["local_", "home_", "arg_"].iter().any(|p| own(name, p))
         };
+        let pure = !impure(rhs) || second_result(rhs);
         let kept: Vec<&str> = targets
             .iter()
             .copied()
             .filter(|name| {
+                let here = tokens(line).filter(|w| w == name).count();
                 let unread = is_register_name(name)
-                    && !impure(rhs)
-                    && mentions.get(name) == Some(&1)
+                    && pure
+                    && mentions.get(name) == Some(&here)
                     && live_out != Some(*name);
                 let itself = local(name) && name == rhs;
                 !(unread || itself)
@@ -909,6 +915,26 @@ pub(super) fn drop_dead_assignments(
         }
     }
     changed.then_some(out)
+}
+
+/// Tells whether a right side is a second result, `f__rdx(args)` with pure
+/// arguments: no call of its own, only the register the call on the line
+/// before left a value in.
+///
+/// # Arguments
+///
+/// * `rhs` - The text after the last ` = `, without the `;`.
+fn second_result(rhs: &str) -> bool {
+    let Some((callee, rest)) = rhs.split_once('(') else {
+        return false;
+    };
+    let args = rest.strip_suffix(')').unwrap_or(rest);
+    callee.ends_with("__rdx")
+        && callee
+            .chars()
+            .all(|c| is_ident_char(c) || matches!(c, ':' | '~'))
+        && rest.ends_with(')')
+        && !impure(args)
 }
 
 /// Turns the trailing `goto` of an `if` arm into an `else` around the run
