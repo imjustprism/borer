@@ -443,10 +443,10 @@ pub(super) fn shape_of(
             own.is_some() && own == f.param_hints.get(&0).map(String::as_str)
         }
     };
-    if ctx.bitness == 32 && this_param && std::ptr::eq(ctx.conv, &lift::CDECL_X86) {
+    if ctx.bitness == 32 && this_param && *ctx.conv == lift::CDECL_X86 {
         ctx.conv = &lift::THISCALL_X86;
     }
-    if std::ptr::eq(ctx.conv, &lift::THISCALL_X86) && stated.is_none() {
+    if *ctx.conv == lift::THISCALL_X86 && stated.is_none() {
         this_param = true;
     }
     let result_param = (hidden == 1).then_some(u8::from(this_param));

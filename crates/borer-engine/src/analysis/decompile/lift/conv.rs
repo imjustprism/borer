@@ -4,7 +4,11 @@
 use super::*;
 
 /// Calling-convention facts the lifter needs.
-#[derive(Debug)]
+///
+/// Two conventions are told apart by value, never by the address of the
+/// constant one came from: a `const` has no address of its own, and each
+/// use may promote it to a different one.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Conv {
     /// Argument registers in order.
     pub args: &'static [Register],
@@ -501,4 +505,34 @@ pub(in crate::analysis::decompile) fn is_seh_link(instr: &Instruction) -> bool {
         && instr.memory_base() == Register::None
         && instr.memory_index() == Register::None
         && instr.memory_displacement64() == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CDECL_X86, FASTCALL_X86, MS_X64, SYSV_X64, THISCALL_X86, conv};
+    use crate::program::{Arch, BinaryFormat, Program};
+
+    /// Conventions compare by value: the one a program picks equals the
+    /// constant it came from wherever that constant was promoted, and two
+    /// conventions that pass arguments differently never compare equal.
+    ///
+    /// The thiscall promotion compared the addresses of `CDECL_X86` and
+    /// `THISCALL_X86`, which a `const` does not guarantee to keep.
+    ///
+    /// # Panics
+    ///
+    /// When a convention differs from itself or equals another.
+    #[test]
+    fn conventions_compare_by_value() {
+        let mut p = Program::raw(vec![0xc3], Arch::X86, 0, None, Vec::new());
+        assert_eq!(conv(&p, 32), &CDECL_X86);
+        p.format = BinaryFormat::Elf;
+        assert_eq!(conv(&p, 64), &SYSV_X64);
+        let all = [&MS_X64, &SYSV_X64, &CDECL_X86, &THISCALL_X86, &FASTCALL_X86];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                assert_eq!(i == j, a == b, "{i} against {j}");
+            }
+        }
+    }
 }
