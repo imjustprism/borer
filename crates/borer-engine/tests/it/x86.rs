@@ -217,7 +217,7 @@ fn asserts_name_the_variables_they_test() {
     );
     let a = Analysis::compute(&p);
     let text = decompile_named(&p, &a, &Overlay::default(), 0x401000).unwrap_or_default();
-    assert!(text.contains("eax = reader;"), "{text}");
+    assert!(text.contains("var1 = reader;"), "{text}");
     assert!(
         text.contains(
             "reader)
@@ -703,7 +703,7 @@ fn a_32_bit_second_result_renders_where_it_is_read() {
     let o = Overlay::default();
     let text = |e| decompile(&p, &a, &o, e).unwrap_or_default();
     let reader = text(0x401000);
-    assert!(reader.contains("edx = sub_401040__rdx();"), "{reader}");
+    assert!(reader.contains("var1 = sub_401040__rdx();"), "{reader}");
     let other = text(0x401020);
     assert!(!other.contains("__rdx"), "{other}");
 }
@@ -1959,10 +1959,10 @@ fn a_copy_into_ecx_for_a_thiscall_callee_survives_the_sources_write() {
     let text = decompiled(&p, 0x401000);
     assert!(
         text.lines()
-            .any(|l| l.trim().starts_with("ecx = ") && l.trim().ends_with("= esi;")),
+            .any(|l| l.trim().starts_with("var2 = ") && l.trim().ends_with("= var1;")),
         "{text}"
     );
-    assert!(text.contains("sub_401040(ecx)"), "{text}");
+    assert!(text.contains("sub_401040(var2)"), "{text}");
 }
 
 /// `push ecx` after a call, the register clobbered and holding nothing,
@@ -2004,8 +2004,11 @@ fn a_push_of_a_written_out_register_is_an_argument() {
     code.resize(0x30, 0xcc);
     code.extend_from_slice(&[0x8b, 0x44, 0x24, 0x04, 0x03, 0x44, 0x24, 0x08, 0xc3]);
     let text = dc(&code);
-    assert!(text.contains("ecx = ((uint32_t*)(a1 + 8))[a2];"), "{text}");
-    assert!(text.contains("sub_401030(*(uint32_t*)ecx, ecx)"), "{text}");
+    assert!(text.contains("var1 = ((uint32_t*)(a1 + 8))[a2];"), "{text}");
+    assert!(
+        text.contains("sub_401030(*(uint32_t*)var1, var1)"),
+        "{text}"
+    );
 }
 
 /// A function that passes `ecx` on untouched is a method.
@@ -2450,7 +2453,7 @@ fn a_countdown_reads_the_counter_it_just_wrote() {
     code.resize(0x20, 0xcc);
     code.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
     let text = dc(&code);
-    assert!(text.contains("while (ebx != 0)"), "{text}");
+    assert!(text.contains("while (var1 != 0)"), "{text}");
     assert!(!text.contains("tmp_"), "{text}");
 }
 
@@ -3458,10 +3461,10 @@ fn a_locked_dec_then_jl_reads_the_overflow() {
         0x00, 0x00, 0xc3,
     ]);
     assert!(
-        text.contains("tmp_1 = atomic_sub32(*(uint32_t*)a1, 1);"),
+        text.contains("var1 = atomic_sub32(*(uint32_t*)a1, 1);"),
         "{text}"
     );
-    assert!(text.contains("if ((int32_t)(tmp_1 + 1) < 1) {"), "{text}");
+    assert!(text.contains("if ((int32_t)(var1 + 1) < 1) {"), "{text}");
 }
 
 /// `movss xmm0, [esp+4]; comiss xmm0, [-1.0]; jb` jumps on below or
@@ -3678,9 +3681,9 @@ fn a_stored_value_survives_the_write_out_of_its_index() {
         0x8b, 0x4c, 0x24, 0x04, 0x8b, 0x54, 0x24, 0x08, 0x85, 0xc9, 0x74, 0x01, 0x41, 0x8b, 0x0c,
         0x8a, 0x89, 0x4a, 0x24, 0x85, 0xd2, 0x74, 0x02, 0x8b, 0xc1, 0xc3,
     ]);
-    assert!(text.contains("ecx = ((uint32_t*)a2)[ecx];"), "{text}");
-    assert!(text.contains("*(uint32_t*)(a2 + 0x24) = ecx;"), "{text}");
-    assert_eq!(text.matches("((uint32_t*)a2)[ecx]").count(), 1, "{text}");
+    assert!(text.contains("var2 = ((uint32_t*)a2)[var1];"), "{text}");
+    assert!(text.contains("*(uint32_t*)(a2 + 0x24) = var2;"), "{text}");
+    assert_eq!(text.matches("((uint32_t*)a2)[var1]").count(), 1, "{text}");
 }
 
 /// A `rep movsd` over the frame lands after the stores it overwrites, so
@@ -3863,7 +3866,7 @@ fn a_value_kept_on_the_x87_stack_is_read_where_it_was_written() {
         0xd8, 0xe1, 0xdd, 0x58, 0x08, 0xdc, 0x40, 0x10, 0x8b, 0x40, 0x30, 0xeb, 0xec, 0xdd, 0xd8,
         0xc3,
     ]);
-    assert!(text.contains("*(double*)(eax + 8)"), "{text}");
+    assert!(text.contains("*(double*)(var1 + 8)"), "{text}");
     assert_st_written(&text);
 }
 
@@ -4039,8 +4042,8 @@ fn a_32_bit_callee_returning_in_xmm0_binds_it() {
         0xc3, // ASM: ret
     ]);
     let text = dc(&code);
-    assert!(text.contains("xmm0 = sub_401020(a1);"), "{text}");
-    assert!(text.contains("*(double*)a3 = xmm0;"), "{text}");
+    assert!(text.contains("var1 = sub_401020(a1);"), "{text}");
+    assert!(text.contains("*(double*)a3 = var1;"), "{text}");
 }
 
 /// A 32-bit call clobbers the vector registers.
@@ -4093,8 +4096,8 @@ fn an_sse2_helper_takes_and_returns_its_doubles_in_vector_registers() {
         0xc3, // ASM: ret
     ];
     let text = dc_with(&code, &[(0x402000, "msvcrt.dll!__libm_sse2_pow")]);
-    assert!(text.contains("xmm0 = __libm_sse2_pow(a1, a3);"), "{text}");
-    assert!(text.contains("*(double*)a5 = xmm0;"), "{text}");
+    assert!(text.contains("var1 = __libm_sse2_pow(a1, a3);"), "{text}");
+    assert!(text.contains("*(double*)a5 = var1;"), "{text}");
 }
 
 /// `fsincos`, `fptan` and `frndint` lift to the sine and cosine, the
@@ -4188,8 +4191,8 @@ fn a_callee_popping_the_x87_stack_takes_its_operand() {
         0xc3, // ASM: ret
     ]);
     let text = decompiled(&image(&code), 0x401000);
-    assert!(text.contains("eax = sub_401020(a1);"), "{text}");
-    assert!(text.contains("*(float*)eax = a2;"), "{text}");
+    assert!(text.contains("var1 = sub_401020(a1);"), "{text}");
+    assert!(text.contains("*(float*)var1 = a2;"), "{text}");
 }
 
 /// A word read of a slot a dword store wrote reads the low half of that
@@ -4394,10 +4397,10 @@ fn a_vector_store_keeps_the_register_its_value_read() {
     );
     let text = decompiled(&p, 0x401000);
     let reload = text
-        .find("xmm1 = *(uint128_t*)(a2 + 0x10);")
+        .find("var3 = *(uint128_t*)(a2 + 0x10);")
         .expect("the reload is written out");
     let sqrt = text
-        .find("sqrtps(xmm1)")
+        .find("sqrtps(var1)")
         .expect("the square root is printed");
     assert!(sqrt < reload, "{text}");
     assert_eq!(text.matches("sqrtps(").count(), 1, "{text}");

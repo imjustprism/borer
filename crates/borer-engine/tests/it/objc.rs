@@ -477,7 +477,7 @@ fn arm64_methods_are_named_and_sends_read_as_messages() {
         "{text}"
     );
     assert!(
-        text.contains("x0 = objc_msgSend(Foo, @selector(shared));\n"),
+        text.contains("var1 = objc_msgSend(Foo, @selector(shared));\n"),
         "the class and selector references read by name: {text}"
     );
     let objc = objc_tsv(&a, "", Window::first(50));
@@ -521,7 +521,7 @@ fn x86_64_sends_read_their_selector_from_rsi() {
         "{text}"
     );
     assert!(
-        text.contains("rax = objc_msgSend(Foo, @selector(shared));\n"),
+        text.contains("var1 = objc_msgSend(Foo, @selector(shared));\n"),
         "the class and selector references read by name: {text}"
     );
 }

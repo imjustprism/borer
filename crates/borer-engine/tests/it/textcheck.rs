@@ -281,7 +281,8 @@ fn a_second_result_is_passed_on_in_rdx() {
     let p = program(&code, &[]);
     let (text, unset) = text_of(&p, TEXT);
     assert!(unset.is_empty(), "{text}\n{unset:?}");
-    assert!(text.contains(", rdx)"), "{text}");
+    assert!(text.contains("var2 = sub_1040__rdx(a1);"), "{text}");
+    assert!(text.contains("sub_1060(var1, var2)"), "{text}");
     runs_alike(&p, TEXT);
 }
 

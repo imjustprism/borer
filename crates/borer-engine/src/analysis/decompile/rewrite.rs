@@ -1010,7 +1010,7 @@ fn dead_after(lines: &[String], at: usize, name: &str, live_out: Option<&str>) -
 /// # Arguments
 ///
 /// * `rhs` - The text after the last ` = `, without the `;`.
-fn lone_call(rhs: &str) -> bool {
+pub(super) fn lone_call(rhs: &str) -> bool {
     let Some(open) = rhs
         .len()
         .checked_sub(1)
@@ -1058,7 +1058,7 @@ fn lone_call(rhs: &str) -> bool {
 /// # Arguments
 ///
 /// * `rhs` - The text after the last ` = `, without the `;`.
-fn second_result(rhs: &str) -> bool {
+pub(super) fn second_result(rhs: &str) -> bool {
     let Some((callee, rest)) = rhs.split_once('(') else {
         return false;
     };

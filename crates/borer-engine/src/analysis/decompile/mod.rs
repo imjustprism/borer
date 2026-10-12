@@ -56,6 +56,7 @@ mod structure;
 mod tidy;
 pub mod traces;
 mod types;
+mod vars;
 pub mod verify;
 pub mod verify_a64;
 mod wire;
@@ -2526,7 +2527,7 @@ mod tests {
         let mut o = crate::analysis::Overlay::default();
         o.names.insert(0x1038, "Sum::Add".to_owned());
         let text = super::decompile(&p, &a, &o, 0x1000).expect("decompiles");
-        assert!(text.contains("Sum::Add(rax, 7);"), "{text}");
+        assert!(text.contains("Sum::Add(sub_1020(a1), 7);"), "{text}");
         assert!(!text.contains("sub_1028("), "{text}");
         assert!(text.contains("sub_1028 is read in place"), "{text}");
     }

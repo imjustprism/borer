@@ -150,8 +150,9 @@ fn table_shaped(f: &Function) -> bool {
 /// once per function and overlay through [`Analysis::derived`].
 ///
 /// A function referencing fewer than three distinct string literals
-/// encodes none and is not decompiled; any other is decompiled as
-/// [`decompile_all`] renders it and its text read by [`enum_of`]. Callers
+/// encodes none and is not decompiled; any other is decompiled before the
+/// final text passes ([`decompile_plain_full`]), which fold a compared
+/// result into its test, and its text read by [`enum_of`]. Callers
 /// pass an overlay without tables ([`Overlay::without_tables`]), so reading
 /// a table never needs another.
 ///
@@ -188,8 +189,9 @@ fn table_at(
                 .filter(|&target| cstr_at(program, target, 1, 64).is_some())
                 .collect();
             (strings.len() >= LITERALS_MIN)
-                .then(|| decompile_afresh(program, analysis, overlay, entry))
+                .then(|| decompile_plain_full(program, analysis, overlay, entry))
                 .flatten()
+                .map(|d| d.text)
                 .and_then(|text| enum_of(&text))
         },
         |table| {

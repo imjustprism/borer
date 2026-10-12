@@ -5469,7 +5469,7 @@ mod tests {
         let a = Analysis::compute(&p);
         let text = decompile(&p, &a, &Overlay::default(), 0x1000).expect("text");
         assert!(
-            text.contains("goto *rax;") && !text.contains("return (*"),
+            text.contains("goto *var1;") && !text.contains("return (*"),
             "{text}"
         );
         agrees(&p, 0x1000);

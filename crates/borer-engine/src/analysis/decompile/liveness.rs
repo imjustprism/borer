@@ -981,7 +981,7 @@ mod tests {
         super::CAPPED.with(|c| c.set(0));
         let text = decompile(&p, &a, &Overlay::default(), 0x40_1000).unwrap_or_default();
         assert_eq!(super::CAPPED.with(std::cell::Cell::get), 0, "{text}");
-        assert!(!text.contains("ecx -= 2"), "{text}");
-        assert_eq!(text.matches("ecx -= 1;").count(), 2, "{text}");
+        assert!(!text.contains("var1 -= 2"), "{text}");
+        assert_eq!(text.matches("var1 -= 1;").count(), 2, "{text}");
     }
 }

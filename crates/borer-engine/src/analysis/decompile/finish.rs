@@ -3,8 +3,11 @@
 
 use super::*;
 
-/// The text passes every decompile ends with: layouts, then parameter
-/// types, then the byte arithmetic those types would otherwise scale.
+/// The text passes every decompile ends with.
+///
+/// The header lines the text's own calls give, one variable per register
+/// web ([`vars::split_webs`]), layouts, then parameter types, then the
+/// byte arithmetic those types would otherwise scale.
 ///
 /// For callers that assemble the text themselves; [`decompile`] and
 /// [`decompile_named`] already apply it.
@@ -27,7 +30,10 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
     let word = word_type(bitness);
     let text = normalize_temps(&byte_arithmetic(
         &type_locals(&type_parameters(
-            &apply_layouts(&wire_format(&source_file(&name_own_fields(text)), &streams)),
+            &apply_layouts(&vars::split_webs(&wire_format(
+                &source_file(&name_own_fields(text)),
+                &streams,
+            ))),
             word,
         )),
         word,

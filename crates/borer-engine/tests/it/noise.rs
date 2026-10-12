@@ -178,7 +178,7 @@ fn a_float_callee_still_binds_its_result() {
     ]);
     let p = image(Arch::X86_64, &code, &2.5f64.to_bits().to_le_bytes());
     let text = decompiled(&p, 0x401000);
-    assert_eq!(text.matches("xmm0 = sub_401020();").count(), 2, "{text}");
+    assert_eq!(text.matches("var1 = sub_401020();").count(), 2, "{text}");
 }
 
 /// An import slot the code reads as a value is named for its import and

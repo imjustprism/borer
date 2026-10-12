@@ -877,8 +877,9 @@ fn in_literal(head: &str) -> bool {
 /// off the `uint64_t` line onto one of its own type, dropping that line
 /// when nothing is left on it, and its casts and
 /// masks go, since C promotes the declared type the same way. Only register
-/// names move; a stack slot keeps the width its accesses gave it, which the
-/// overlap notes depend on.
+/// names and the variables a register's webs became
+/// ([`super::vars::split_webs`]) move; a stack slot keeps the width its
+/// accesses gave it, which the overlap notes depend on.
 ///
 /// # Arguments
 ///
@@ -902,7 +903,7 @@ pub(super) fn type_locals(text: &str) -> String {
             .map(|r| {
                 r.split(", ")
                     .map(str::trim)
-                    .filter(|n| is_register_name(n))
+                    .filter(|n| is_register_name(n) || vars::is_var_name(n))
                     .map(str::to_owned)
                     .collect::<Vec<String>>()
             })
@@ -1517,7 +1518,7 @@ mod pointer_tests {
             "rax = sub_1(this + 0x48, rcx - a3, a2 - a3 + rcx, *(uint64_t*)a6 + 1);\n",
             "rax = sub_2(\"a2 + 1\", *(uint64_t*)(a6 + rcx * 8));\n",
             "a3 -= a6;\n",
-            "rcx = -a3 + *(uint8_t*)(&local_28 + rcx) + *(uint8_t*)(&local_8 + rcx);\n",
+            "local_8 = -a3 + *(uint8_t*)(&local_28 + rcx) + *(uint8_t*)(&local_8 + rcx);\n",
             "return *(uint8_t*)(a4 + 3) + *(uint32_t*)(a5 + 8) + this->field_0x10;\n",
         );
         let out = polish(text, 64, &Packs::default());
@@ -1526,10 +1527,10 @@ mod pointer_tests {
             "  return *(uint16_t*)((uintptr_t)a2 + 6);",
             "a3 += 1;",
             "a6 = (uint64_t *)((uintptr_t)a6 + rcx);",
-            "rax = sub_1((uintptr_t)this + 0x48, rcx - (uintptr_t)a3, (uintptr_t)a2 - (uintptr_t)a3 + rcx, *(uint64_t*)a6 + 1);",
-            "rax = sub_2(\"a2 + 1\", a6[rcx]);",
+            "sub_1((uintptr_t)this + 0x48, rcx - (uintptr_t)a3, (uintptr_t)a2 - (uintptr_t)a3 + rcx, *(uint64_t*)a6 + 1);",
+            "sub_2(\"a2 + 1\", a6[rcx]);",
             "a3 = (uint16_t *)((uintptr_t)a3 - (uintptr_t)a6);",
-            "rcx = -(uintptr_t)a3 + *(uint8_t*)((uintptr_t)&local_28 + rcx) + *(uint8_t*)(&local_8 + rcx);",
+            "local_8 = -(uintptr_t)a3 + *(uint8_t*)((uintptr_t)&local_28 + rcx) + *(uint8_t*)(&local_8 + rcx);",
             "return *(uint8_t*)(a4 + 3) + *(uint32_t*)(a5 + 8) + this->field_0x10;",
         ] {
             assert!(out.lines().any(|l| l == want), "{want}\n{out}");

@@ -225,7 +225,7 @@ fn a_result_read_through_the_second_one_is_taken_first() {
         .iter()
         .rposition(|l| l.starts_with("return "))
         .unwrap_or(0);
-    assert!(lines[at].starts_with("return tmp_"), "{text}");
+    assert!(lines[at].starts_with("return var"), "{text}");
     assert!(
         at.checked_sub(1)
             .and_then(|i| lines.get(i))
@@ -601,11 +601,11 @@ fn a_second_result_reads_the_arguments_before_the_call() {
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
     let at = lines
         .iter()
-        .position(|l| *l == "rdx = sub_401020__rdx(rax);")
-        .expect("the second result reads the argument rax");
+        .position(|l| *l == "var3 = sub_401020__rdx(var1);")
+        .expect("the second result reads the argument");
     let before = at.checked_sub(1).and_then(|i| lines.get(i)).copied();
     assert!(
-        before.is_some_and(|l| l.starts_with("tmp_") && l.ends_with("= sub_401020(rax);")),
+        before.is_some_and(|l| l.starts_with("var2 = ") && l.ends_with("= sub_401020(var1);")),
         "{text}"
     );
 }
@@ -651,7 +651,7 @@ fn an_unknown_second_result_does_not_drop_the_set_arguments_behind_it() {
     );
     p.format = BinaryFormat::Pe;
     let text = decompiled(&p, 0x401_000);
-    assert!(text.contains("sub_401030(rax, rdx, -1)"), "{text}");
+    assert!(text.contains("sub_401030(sub_401020(), rdx, -1)"), "{text}");
 }
 
 /// A register written out under its own name, because its value is long
@@ -691,10 +691,10 @@ fn a_register_written_out_before_the_call_is_still_its_argument() {
     p.format = BinaryFormat::Pe;
     let text = decompiled(&p, 0x1_4000_1000);
     assert!(
-        text.contains("rdx = ((uint64_t*)(a1 + 0x10))[a3];"),
+        text.contains("var1 = ((uint64_t*)(a1 + 0x10))[a3];"),
         "{text}"
     );
-    assert!(text.contains("sub_140001040(7, rdx)"), "{text}");
+    assert!(text.contains("sub_140001040(7, var1)"), "{text}");
 }
 
 /// A class's field names are read from its methods once: the second
@@ -1105,8 +1105,8 @@ fn a_double_past_a_check_types_its_function() {
     assert_eq!(wrapper, Some(Some(64)));
     let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1020).unwrap_or_default();
     assert!(text.contains("// signature: double "), "{text}");
-    assert!(text.contains("xmm0 = sub_140001040("), "{text}");
-    assert!(text.contains("return xmm0;"), "{text}");
+    assert!(text.contains("var1 = sub_140001040("), "{text}");
+    assert!(text.contains("return var1;"), "{text}");
 }
 
 /// What a float function's callee leaves in rax is no result.
@@ -1694,16 +1694,16 @@ fn const_survives_join() {
 fn while_loop_structured() {
     let out = dc(0x1100);
     assert!(
-        out.contains("for (rcx = 0; (int32_t)rcx < 5; rcx += 1)"),
+        out.contains("for (var2 = 0; (int32_t)var2 < 5; var2 += 1)"),
         "no for sugar:\n{out}"
     );
-    assert!(out.contains("rax += rcx;"), "loop body missing:\n{out}");
+    assert!(out.contains("var1 += var2;"), "loop body missing:\n{out}");
     assert!(!out.contains("tmp_"), "spurious temporaries:\n{out}");
     assert!(
         !out.contains("goto L_1107;"),
         "back-edge goto survived structuring:\n{out}"
     );
-    assert!(out.contains("return rax;"), "return missing:\n{out}");
+    assert!(out.contains("return var1;"), "return missing:\n{out}");
 }
 
 /// Decompiling the same function twice yields byte-identical text.
@@ -1726,7 +1726,7 @@ fn deterministic_output() {
 fn nested_if_inside_while() {
     let out = dc(0x1180);
     assert!(
-        out.contains("for (rax = 0; (int32_t)rax < 5") || out.contains("while ("),
+        out.contains("for (var1 = 0; (int32_t)var1 < 5") || out.contains("while ("),
         "no loop:
 {out}"
     );
@@ -1741,7 +1741,7 @@ fn nested_if_inside_while() {
 {out}"
     );
     assert!(
-        out.contains("return rax;"),
+        out.contains("return var1;"),
         "no return:
 {out}"
     );
@@ -1989,11 +1989,9 @@ fn scalar_float_blocks_are_checked_not_counted() {
 fn memory_exchange_bit_set_and_avx_moves() {
     let out = dc(0x1360);
     assert!(out.contains("a1->field_0x0 = a2;"), "{out}");
-    assert!(out.contains("return tmp_"), "old value lost:\n{out}");
+    assert!(out.contains("return var1"), "old value lost:\n{out}");
     assert!(
-        out.contains(
-            "((uint64_t*)(a1 + 8))[(int64_t)tmp_1 >> 6] |= (uint64_t)1 << (tmp_1 & 0x3f);"
-        ),
+        out.contains("((uint64_t*)(a1 + 8))[(int64_t)var1 >> 6] |= (uint64_t)1 << (var1 & 0x3f);"),
         "{out}"
     );
     assert!(out.contains("a1->field_0x20 = a1->field_0x10;"), "{out}");
@@ -2042,9 +2040,9 @@ fn equality_branch_makes_the_variable_a_constant_inside() {
 #[test]
 fn float_call_result_is_bound_to_xmm0() {
     let out = dc(0x13f0);
-    assert!(out.contains("xmm0 = sub_1400();"), "{out}");
-    assert!(out.contains("*(float*)rcx = xmm0;"), "{out}");
-    assert!(out.contains("float xmm0;"), "{out}");
+    assert!(out.contains("var1 = sub_1400();"), "{out}");
+    assert!(out.contains("*(float*)rcx = var1;"), "{out}");
+    assert!(out.contains("float var1;"), "{out}");
 }
 
 /// `CS`: the prologue save of `rbx` and its epilogue restore never render,
@@ -2105,7 +2103,7 @@ fn constant_condition_block_is_not_merged_into_a_guard() {
 fn same_comparison_on_both_edges_survives_the_join() {
     let out = dc(0x1450);
     assert!(!out.contains("/* sete"), "{out}");
-    assert!(out.contains("rax == 0"), "{out}");
+    assert!(out.contains("var1 == 0"), "{out}");
 }
 
 /// `E2`: the fall-through edge of `test eax, eax; jne` makes `rax` zero, but
@@ -2114,7 +2112,7 @@ fn same_comparison_on_both_edges_survives_the_join() {
 #[test]
 fn equality_assumption_ends_when_the_register_is_written_out() {
     let out = dc(0x14b0);
-    assert!(out.contains("rax + 25"), "{out}");
+    assert!(out.contains("var1 + 25"), "{out}");
     assert!(!out.contains("return 25;"), "{out}");
 }
 
@@ -2125,8 +2123,8 @@ fn equality_assumption_ends_when_the_register_is_written_out() {
 fn byte_comparison_on_both_edges_survives_the_join() {
     let out = dc(0x1490);
     assert!(!out.contains("/* sete"), "{out}");
-    assert!(out.contains("return rax == 0;"), "{out}");
-    assert!(!out.contains("(rax & 0xff) == 0"), "{out}");
+    assert!(out.contains("return var1 == 0;"), "{out}");
+    assert!(!out.contains("(var1 & 0xff) == 0"), "{out}");
 }
 
 /// `FM`: the edges compare memory at different addresses, so no register can
@@ -2157,7 +2155,7 @@ fn differing_comparisons_reach_the_join_as_a_truth_temporary() {
 fn flags_over_a_rewritten_register_reach_the_next_block_as_a_truth() {
     let out = dc(0x14f0);
     assert!(!out.contains("/* setl"), "{out}");
-    assert!(out.contains("tmp_1 = "), "{out}");
+    assert!(out.contains("var3 = var1 < 5;"), "{out}");
 }
 
 /// `AC2`: the carry an `adc` reads after a join comes from a different
@@ -2168,7 +2166,7 @@ fn carry_from_different_additions_reaches_the_adc_as_a_truth() {
     let out = dc(0x1510);
     assert!(!out.contains("/* adc"), "{out}");
     assert!(out.contains("uaddo64("), "{out}");
-    assert!(out.contains("+ tmp_1;"), "{out}");
+    assert!(out.contains("+ var2;"), "{out}");
 }
 
 /// `ADC3`: a multiword add chains its carry through two `adc` into memory
@@ -2194,13 +2192,16 @@ fn dec_chain_comparison_folds_onto_the_variable() {
 /// `LD`: a ladder split in two by an ordered compare, both halves sharing
 /// the default arm, is one `switch` whose default is that arm, written
 /// once, and every arm reaches the one tail with no goto.
+///
+/// The `rdx` each arm sets is a value the tail's call does not take, so no
+/// arm keeps it.
 #[test]
 fn shared_default_arm_is_copied_so_the_ladder_structures() {
     let out = dc(0x1550);
     assert!(!out.contains("goto"), "{out}");
-    assert_eq!(out.matches("rdx = 0;").count(), 1, "{out}");
+    assert_eq!(out.matches("default: {").count(), 1, "{out}");
     assert!(
-        out.contains("rdx = 60;") && out.contains("rdx = 20;"),
+        out.contains("case 1: {") && out.contains("case 2: {"),
         "{out}"
     );
     assert!(out.contains("Base::vfunc_1("), "{out}");
@@ -2238,7 +2239,7 @@ fn shared_block_heads_an_arm_and_its_copy_keeps_its_jump() {
 fn loop_exit_shared_with_the_other_arm_is_a_break() {
     let out = dc(0x15b0);
     assert!(
-        out.contains("} while (*(uint8_t*)(a1 + rax) != 32);"),
+        out.contains("} while (*(uint8_t*)(a1 + var1) != 32);"),
         "{out}"
     );
     assert!(
@@ -2277,16 +2278,16 @@ fn tail_return_after_a_call_is_void_when_the_callers_result_is_unused() {
     assert!(!out.contains("return rax"), "{out}");
 }
 
-/// The skeleton of the ladder `LD` keeps its switch and the tail call and
-/// elides the assignments.
+/// The skeleton of `sub_4930`'s guarded stores keeps its tests and the
+/// calls in them and elides the stores.
 #[test]
 fn skeleton_keeps_flow_and_calls_only() {
-    let out = dc(0x1550);
+    let out = dc(0x4930);
     let sk = skeleton(&out);
-    assert!(sk.contains("switch (a1) {"), "{sk}");
-    assert!(sk.contains("case 6: {"), "{sk}");
+    assert!(sk.contains("if (a1 != 0) {"), "{sk}");
     assert!(sk.contains("Base::vfunc_1("), "{sk}");
-    assert!(!sk.contains("rdx = 60;"), "{sk}");
+    assert!(sk.contains("return 13;"), "{sk}");
+    assert!(!sk.contains("*(uint32_t*)a2 = a1;"), "{sk}");
     assert!(sk.contains("..."), "{sk}");
     assert!(sk.len() < out.len(), "{sk}");
 }
@@ -2389,11 +2390,11 @@ fn virtual_calls_resolve_through_the_receiver_class() {
     let callee = borer_engine::analysis::name_of(&a, &o, 0x1200);
     assert!(text.contains(&format!("this->{callee}(")), "{text}");
     let vr2 = decompile(&p, &a, &o, 0x1780).unwrap_or_default();
-    assert!(vr2.contains("rax = Fac::Get();"), "{vr2}");
-    assert!(vr2.contains(&format!("rax->{callee}(")), "{vr2}");
+    assert!(vr2.contains("var1 = Fac::Get();"), "{vr2}");
+    assert!(vr2.contains(&format!("var1->{callee}(")), "{vr2}");
     let pu = decompile(&p, &a, &o, 0x17b0).unwrap_or_default();
-    assert!(pu.contains("rax = *(uint64_t*)a2;"), "{pu}");
-    assert!(pu.contains(&format!("rax->{callee}(")), "{pu}");
+    assert!(pu.contains("var1 = *(uint64_t*)a2;"), "{pu}");
+    assert!(pu.contains(&format!("var1->{callee}(")), "{pu}");
 }
 
 /// A word of data between a vtable's methods does not end the table: the
@@ -2661,8 +2662,8 @@ fn shared_one_way_block_is_copied_into_the_other_arm() {
         out.contains("if (a1 == 0 || Base::vfunc_1() != 0) {"),
         "{out}"
     );
-    assert_eq!(out.matches("rdi = 0;").count(), 1, "{out}");
-    assert!(out.contains("return rdi"), "{out}");
+    assert_eq!(out.matches("var1 = 0;").count(), 1, "{out}");
+    assert!(out.contains("return var1"), "{out}");
 }
 
 /// A result every caller tests as a byte reads without a mask.
@@ -2721,7 +2722,7 @@ fn results_wide_only_when_null_read_without_a_mask() {
 #[test]
 fn written_out_truth_values_read_without_a_mask() {
     let out = dc(0x1fe4);
-    assert!(out.contains("rbx = *(uint32_t*)a1 == 1;"), "{out}");
+    assert!(out.contains("var1 = *(uint32_t*)a1 == 1;"), "{out}");
     assert!(!out.contains("& 0xff"), "{out}");
 }
 
@@ -2772,7 +2773,8 @@ fn calls_preserving_rax_do_not_replace_the_result() {
 /// test skips to a block an outer guard reaches too: the arms are the cases,
 /// the skip's target the default, and the tail follows the switch once. The
 /// tail's callee is a bare `ret` and `rcx` still holds the caller's own
-/// `a1`, so the call passes nothing.
+/// `a1`, so the call passes nothing, and the `rdx` the arms set is a value
+/// nothing reads.
 #[test]
 fn ladders_with_a_shared_tail_and_an_escape_structure_around_the_tail() {
     let out = dc(0x4090);
@@ -2782,7 +2784,7 @@ fn ladders_with_a_shared_tail_and_an_escape_structure_around_the_tail() {
     assert!(out.contains("default: {"), "{out}");
     assert_eq!(out.matches("Base::vfunc_1()").count(), 1, "{out}");
     assert!(
-        out.contains("rdx = 1;") && out.contains("rdx = 3;"),
+        out.contains("case 1: {") && out.contains("case 3: {"),
         "{out}"
     );
 }
@@ -2812,7 +2814,7 @@ fn declared_return_types_keep_their_result() {
     let flag2 = dc(0x4130);
     assert!(flag2.contains("// signature: bool Ns::Flag2("), "{flag2}");
     assert!(!flag2.contains("return;"), "{flag2}");
-    assert!(flag2.contains("return rbx"), "{flag2}");
+    assert!(flag2.contains("return var1"), "{flag2}");
 }
 
 /// A short literal in read-only data renders as a string when a terminator
@@ -2951,11 +2953,11 @@ fn compare_ladders_render_as_early_returns() {
 fn locked_read_modify_writes_render_as_atomics() {
     let out = dc(0x4790);
     assert!(
-        out.contains("tmp_1 = atomic_sub32(*(uint32_t*)(a1 + 8), 1);"),
+        out.contains("var1 = atomic_sub32(*(uint32_t*)(a1 + 8), 1);"),
         "{out}"
     );
     assert!(
-        out.contains("if (tmp_1 == 0)") || out.contains("if (tmp_1 != 0)"),
+        out.contains("if (var1 == 0)") || out.contains("if (var1 != 0)"),
         "{out}"
     );
 }
@@ -2999,7 +3001,7 @@ fn an_xadd_branch_reads_the_additions_flags() {
 fn a_cmpxchg_branch_reads_the_compares_zero_flag() {
     let out = dc(0x5930);
     assert!(out.contains("cmpxchg32(*(uint32_t*)a1, 5, a2);"), "{out}");
-    assert!(out.contains("rax == 5"), "{out}");
+    assert!(out.contains("var1 == 5"), "{out}");
 }
 
 /// Decompiling every fixture function at once matches doing it one by one.
@@ -3032,11 +3034,11 @@ fn parallel_decompile_matches_sequential() {
 fn loops_headed_by_the_entry_block_carry_their_parameter() {
     let out = dc(0x47a0);
     assert!(!out.contains("goto"), "{out}");
-    assert!(out.contains("rcx = a1;"), "{out}");
+    assert!(out.contains("var1 = a1;"), "{out}");
     assert!(out.contains("do {"), "{out}");
-    assert!(out.contains("} while (rcx != 0);"), "{out}");
-    assert!(out.contains("rcx = *(uint64_t*)rcx;"), "{out}");
-    assert!(out.contains("*(uint8_t*)(rcx + 0x34) ^= 1;"), "{out}");
+    assert!(out.contains("} while (var1 != 0);"), "{out}");
+    assert!(out.contains("var1 = *(uint64_t*)var1;"), "{out}");
+    assert!(out.contains("*(uint8_t*)(var1 + 0x34) ^= 1;"), "{out}");
 }
 
 /// A block nothing reaches inside a loop's address range does not keep the
@@ -3630,10 +3632,10 @@ fn pointers_read_often_get_a_layout() {
         "{out}"
     );
     assert!(
-        out.contains("rax = a1->field_0x18 + a1->field_0x1c;"),
+        out.contains("var1 = a1->field_0x18 + a1->field_0x1c;"),
         "{out}"
     );
-    assert!(out.contains("a1->field_0x20 = rax;"), "{out}");
+    assert!(out.contains("a1->field_0x20 = var1;"), "{out}");
     assert!(!out.contains("*(uint32_t*)"), "{out}");
 }
 
@@ -3781,7 +3783,7 @@ fn declared_parameter_types_drop_their_casts() {
 fn values_read_twice_are_written_once() {
     let out = dc(0x4c40);
     assert_eq!(out.matches("a2 * 8").count(), 1, "{out}");
-    assert_eq!(out.matches("= rax;").count(), 2, "{out}");
+    assert_eq!(out.matches("= var1;").count(), 2, "{out}");
 }
 
 /// The trailing jump of an `if` arm becomes the `else` around what it skips.
@@ -4654,7 +4656,7 @@ fn hinted_results_and_fields_resolve_virtual_calls() {
     let der_slot1 = method(0x1200);
     assert!(wait.contains(&format!("->{der_slot1}(")), "{wait}");
     let peek = decompile(&p, &a, &o, 0x1960).unwrap_or_default();
-    assert!(peek.contains(&format!("rax->{der_slot1}(")), "{peek}");
+    assert!(peek.contains(&format!("var1->{der_slot1}(")), "{peek}");
     let local = decompile(&p, &a, &o, 0x1a00).unwrap_or_default();
     assert!(local.contains("Fac::Make(&local_"), "{local}");
     assert!(local.contains(&format!("->{der_slot1}(")), "{local}");
@@ -4771,7 +4773,7 @@ fn embedded_field_receivers_resolve_their_virtual_calls() {
 }
 
 /// A call result read two instructions later is still the call's result:
-/// `UR` assigns `rax = P();` before `mov edx, 5` and passes it to `Q`.
+/// `UR` passes `P()` to `Q` though `mov edx, 5` comes between.
 #[test]
 fn call_results_read_later_are_assigned() {
     let p = fixture();
@@ -4779,7 +4781,7 @@ fn call_results_read_later_are_assigned() {
     let o = Overlay::default();
     let text = decompile(&p, &a, &o, 0x17d0).unwrap_or_default();
     let callee = borer_engine::analysis::name_of(&a, &o, 0x1200);
-    assert!(text.contains(&format!("rax = {callee}(")), "{text}");
+    assert!(text.contains(&format!("({callee}(), 5)")), "{text}");
 }
 
 /// `FA`: one edge compares `eax` while `edx` holds the same value, the other
@@ -4788,7 +4790,7 @@ fn call_results_read_later_are_assigned() {
 fn aliased_comparison_on_both_edges_survives_the_join() {
     let out = dc(0x1470);
     assert!(!out.contains("/* setl"), "{out}");
-    assert!(out.contains("rdx < 5"), "{out}");
+    assert!(out.contains("var1 < 5"), "{out}");
 }
 
 /// `Y` and `W3` end at their noreturn calls: nothing after the call is rendered.
@@ -5428,8 +5430,8 @@ fn an_argument_reads_the_text_its_call_leaves() {
     code.extend_from_slice(&[0x48, 0x89, 0xc8, 0xc3]);
     let p = program64(&code);
     let text = decompiled(&p, 0x1_4000_1000);
-    assert!(text.contains("rdi += rax;"), "{text}");
-    assert!(!text.contains("sub_140001050(rdi + rax)"), "{text}");
+    assert!(text.contains("var2 += var3;"), "{text}");
+    assert!(!text.contains("sub_140001050(var2 + var3)"), "{text}");
 }
 
 /// A home slot whose address escaped is written out before the call that
@@ -5476,8 +5478,8 @@ fn a_float_argument_keeps_its_value_up_to_the_call() {
     code.extend_from_slice(&[0x0f, 0x28, 0xc1, 0xc3]);
     let p = program64(&code);
     let text = decompiled(&p, 0x1_4000_1000);
-    assert!(text.contains("xmm1 = a1->field_0x10;"), "{text}");
-    assert!(text.contains("sub_140001040(a1, xmm1);"), "{text}");
+    assert!(text.contains("var1 = a1->field_0x10;"), "{text}");
+    assert!(text.contains("sub_140001040(a1, var1);"), "{text}");
 }
 
 /// A stack parameter loaded through the stack pointer and dereferenced is
@@ -6412,10 +6414,20 @@ fn a_switchtofiber_call_keeps_its_tail_under_one_argument() {
         .unwrap_or_default();
     let args = swap
         .split_once("SwitchToFiber(")
-        .and_then(|(_, rest)| rest.split_once(')'))
-        .map_or("", |(inside, _)| inside);
+        .map_or("", |(_, rest)| rest);
+    let mut depth = 0usize;
+    let mut padded = false;
+    for c in args.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => break,
+            ')' => depth -= 1,
+            ',' if depth == 0 => padded = true,
+            _ => {}
+        }
+    }
     assert!(!swap.is_empty(), "{text}");
-    assert!(!args.contains(','), "padded arguments: {swap}");
+    assert!(!padded, "padded arguments: {swap}");
     assert!(
         text.contains("return 7;"),
         "the tail after the swap was dropped:\n{text}"
