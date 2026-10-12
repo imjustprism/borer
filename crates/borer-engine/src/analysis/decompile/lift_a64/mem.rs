@@ -114,6 +114,26 @@ impl Lift<'_, '_> {
         })
     }
 
+    /// The index a jump table's entry is loaded at: the index register,
+    /// extended but not scaled, so case `k` is entry `k`; the base when it
+    /// is the index register that holds the table's address.
+    ///
+    /// # Arguments
+    ///
+    /// * `o` - The load's memory operand.
+    fn table_index(&self, o: Opnd) -> Option<Expr> {
+        let Opnd::Mem(m) = o else {
+            return None;
+        };
+        let (reg, bits) = m.index?;
+        let index = self.read(reg);
+        let base = self.read(m.base);
+        Some(match (&index, &base) {
+            (Expr::Const(_), b) if !matches!(b, Expr::Const(_)) => base,
+            _ => shifted(index, bits, m.extend, 0, 64),
+        })
+    }
+
     /// A load of one register (`ldr`, `ldur`, `ldar`, `ldxr`, `ldraa`, the
     /// literal form, and the narrow and signed forms).
     ///
@@ -124,6 +144,9 @@ impl Lift<'_, '_> {
     pub(super) fn load(&mut self, i: &Insn, width: Width) -> Option<()> {
         let (rt, bits) = register(i, 0)?;
         let (addr, back) = self.address(i.operands[1])?;
+        if self.table_load == Some(i.va) {
+            self.ex.switch_idx = self.table_index(i.operands[1]);
+        }
         let (ty, signed) = access(width, bits);
         let v = self.ex.read_at(addr, ty);
         let v = if signed { sign_extend(v, ty.bits()) } else { v };

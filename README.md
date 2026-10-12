@@ -273,17 +273,18 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
 
 ## Limits
 
-- Only x86 and x86-64 are decompiled. An arm64 Mach-O, ELF or PE loads
-  its sections and symbols, disassembles, and has its functions, blocks,
-  calls, jump tables, import stubs and data references discovered
-  (`functions`, `function`, `disassemble_function`, `cfg`, `callgraph`,
-  `xrefs`, `find_function_by_string`). Its code runs under
-  `borer://emulate` and `borer://run` in an arm64 machine that models the
-  integer, memory and branch instructions and stops on anything else (no
-  floating-point arithmetic, no vector lanes, no system calls but exit);
-  the tools that decompile it, and those built on the x86 machine
-  (`oracle`, `solve`, `unpack`, `devirt`, `hidden`), refuse it. Other
-  machines are not decoded.
+- x86, x86-64 and arm64 are decompiled. An arm64 Mach-O, ELF or PE
+  decompiles under the arm64 procedure call standard (arguments in `x0`
+  to `x7` and `v0` to `v7`, a result in `x0`, `x0:x1` or `v0`, a large
+  one through `x8`), its code runs under `borer://emulate` and
+  `borer://run` in an arm64 machine that models the integer, memory and
+  branch instructions and stops on anything else (no floating-point
+  arithmetic, no vector lanes, no system calls but exit), and its text is
+  checked block by block against that machine. The readings that follow
+  x86 instructions (`taint`, `layout`, `stackstrings`) and the tools built
+  on the x86 machine (`oracle`, `solve`, `unpack`, `devirt`, `hidden`)
+  refuse it, and a `run`'s text column stays unchecked. Other machines
+  are not decoded.
 - Decompiler output is structured but rough, as the example above shows.
   Shapes it can't prove come out as labels and gotos rather than a guess.
 - An ELF's dynamic relocations (`.rela.dyn`, `.rel.dyn`, `DT_RELR`, the

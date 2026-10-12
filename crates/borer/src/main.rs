@@ -7444,19 +7444,19 @@ mod tests {
         assert_eq!(held(), (vec![0x1010], vec![0x2000], 0));
     }
 
-    /// An arm64 program disassembles and lists its functions, and a tool
-    /// that decompiles refuses it.
+    /// An arm64 program disassembles, lists its functions and decompiles.
     ///
     /// The `disassemble` tool lists from the word an address falls inside,
     /// a script's `disasm` reads the same words and its `functions` the one
-    /// function, the `functions` tool lists it, and `decompile` says what
-    /// applies.
+    /// function, the `functions` tool lists it, and `decompile` writes it,
+    /// with the line saying what of it was checked against the arm64
+    /// machine.
     ///
     /// # Panics
     ///
-    /// When a listing or the refusal differs.
+    /// When a listing or the text differs.
     #[test]
-    fn an_arm64_program_lists_its_functions_and_refuses_the_decompiler() {
+    fn an_arm64_program_lists_and_decompiles_its_functions() {
         use super::{
             DecompileParams, DisassembleParams, FunctionsParams, Parameters, ScriptParams,
         };
@@ -7509,7 +7509,7 @@ mod tests {
             }))
             .expect("arm64 functions are discovered");
         assert!(listed.lines().any(|l| l.starts_with("0x1000 ")), "{listed}");
-        let refused = server
+        let text = server
             .decompile(Parameters(DecompileParams {
                 address: "0x1000".to_owned(),
                 detail: None,
@@ -7517,14 +7517,12 @@ mod tests {
                 offset: None,
                 limit: None,
             }))
-            .expect_err("arm64 does not decompile yet");
+            .expect("arm64 decompiles");
         assert!(
-            refused
-                .message
-                .contains("borer disassembles arm64 code and discovers its functions")
-                && refused.message.contains("does not yet decompile it"),
-            "{}",
-            refused.message
+            text.contains("// signature: void sub_1000()")
+                && text.contains("// checked vs binary: statements as emitted, 1/1 blocks")
+                && text.contains("return;"),
+            "{text}"
         );
     }
 
@@ -7568,7 +7566,7 @@ mod tests {
             .expect("an arm64 function runs on an input");
         assert!(
             table.contains("\t0x2a\treturned\t2\t-\tunchecked\n")
-                && table.contains("arm64 code does not decompile yet"),
+                && table.contains("a run's text is checked for x86 code only"),
             "{table}"
         );
         let refused = server

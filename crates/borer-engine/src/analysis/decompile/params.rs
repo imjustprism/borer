@@ -284,6 +284,11 @@ pub(super) struct Shape {
     /// the arguments a call following the prototype leaves out, which the
     /// callee reads all the same.
     pub(super) stated_short: Option<usize>,
+    /// A bit per position passed in a vector register, when the
+    /// instruction set states them outright (arm64, whose registers no x86
+    /// [`Conv`] lists); `None` reads them off the parameter registers
+    /// ([`Shape::floats`]).
+    pub(super) float_mask: Option<u8>,
 }
 
 impl Shape {
@@ -295,6 +300,9 @@ impl Shape {
     /// The argument positions the function reads in their floating-point
     /// register and not their integer one: a bit per position.
     pub(super) fn floats(&self) -> u8 {
+        if let Some(mask) = self.float_mask {
+            return mask;
+        }
         if self.conv.float_seq {
             // INVARIANT: the floating parameters list past the integer ones
             // the body reads, and every float argument below the highest
@@ -508,13 +516,14 @@ pub(super) fn shape_of(
         count,
         stack,
         stated_short,
+        float_mask: None,
     }
 }
 
 /// Where the arity a function is declared with comes from
 /// ([`declared_arity`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Declaration {
+pub(super) enum Declaration {
     /// The SDK's prototype for the function's own name: exact.
     Prototype,
     /// A `__FUNCSIG__` text attributed to the function by the strings it
@@ -547,7 +556,7 @@ enum Declaration {
 /// passed in a vector register, whether a variable list follows, and where
 /// the declaration comes from; on a 32-bit target an SDK prototype counts
 /// stack words.
-fn declared_arity(
+pub(super) fn declared_arity(
     ctx: &Ctx<'_>,
     f: &Function,
     lead: usize,

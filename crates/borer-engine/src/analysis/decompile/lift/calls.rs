@@ -967,7 +967,7 @@ impl<'a> Exec<'_, 'a> {
                 .iter()
                 .filter_map(|(at, _)| match at {
                     ArgAt::Reg(r) => Some(Key::Reg(*r)),
-                    ArgAt::Stack(..) | ArgAt::Operand => None,
+                    ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A64(_) => None,
                 })
                 .collect()
         } else {

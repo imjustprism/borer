@@ -225,7 +225,7 @@ impl Exec<'_, '_> {
     /// * `reached` - The callee's entry or the import slot the call goes
     ///   through.
     /// * `callee` - The callee as the call renders it.
-    pub(super) fn note_result_type(
+    pub(in crate::analysis::decompile) fn note_result_type(
         &mut self,
         target: Option<u64>,
         reached: Option<u64>,
@@ -279,7 +279,11 @@ impl Exec<'_, '_> {
     /// * `reached` - The callee's entry or the import slot the call goes
     ///   through.
     /// * `args` - The rendered arguments, in order.
-    pub(super) fn name_arguments(&self, reached: Option<u64>, args: &mut [String]) {
+    pub(in crate::analysis::decompile) fn name_arguments(
+        &self,
+        reached: Option<u64>,
+        args: &mut [String],
+    ) {
         let Some(decl) = library_decl(self.ctx, reached) else {
             return;
         };

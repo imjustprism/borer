@@ -19,10 +19,11 @@
 //! rework the text. [`outline`] and [`scenario`] are other views of the
 //! same function; [`opaque`] spots conditions that always go one way;
 //! [`traces`] checks the text's control flow against the binary's.
-//! [`lift_a64`] lifts arm64 blocks into the same expressions and
-//! [`verify_a64`] checks it against the arm64 machine. The pipeline itself
-//! is written against [`arch::Lifter`], what it asks of an instruction set;
-//! only x86 implements it yet, so arm64 functions do not decompile yet.
+//! [`lift_a64`] lifts arm64 blocks into the same expressions,
+//! [`verify_a64`] checks it against the arm64 machine and [`replay_a64`]
+//! checks an arm64 text there. The pipeline itself is written against
+//! [`arch::Lifter`], what it asks of an instruction set, which x86 and
+//! arm64 both answer.
 
 mod arch;
 mod asserts;
@@ -43,6 +44,7 @@ mod opaque;
 mod outline;
 mod params;
 pub mod replay;
+mod replay_a64;
 mod rewrite;
 mod scenario;
 pub(crate) mod signature;
@@ -282,6 +284,14 @@ struct Ctx<'a> {
     /// order, and code a function jumps back to (a shared tail, a chunk the
     /// compiler placed first) can lie below its entry.
     entry_block: usize,
+    /// Positions the signature lists ([`Shape::count`]), which the arm64
+    /// lifter's entry state places in their registers.
+    arg_count: usize,
+    /// A bit per position passed in a vector register ([`Shape::floats`]).
+    arg_floats: u8,
+    /// Whether the function hands a value back, as its callers say
+    /// ([`Function::returns_value`](super::Function::returns_value)).
+    returns_value: Option<bool>,
 }
 
 impl<'a> Ctx<'a> {
@@ -310,7 +320,19 @@ impl<'a> Ctx<'a> {
     }
 
     /// Returns the name resolver for rendering.
+    ///
+    /// An x86 function's stack arguments sit above its return address and
+    /// shadow space and continue the numbering its convention's registers
+    /// start; an arm64 function's sit at the stack pointer it is entered
+    /// with, past the eight registers the standard passes in.
     fn names(&self) -> Names<'a> {
+        let (first_stack, reg_params) = match self.program.arch.isa() {
+            Some(crate::isa::Isa::A64) => (0, u32::from(lift_a64::INT_ARGS)),
+            Some(crate::isa::Isa::X86 { .. }) | None => (
+                self.conv.word + self.conv.shadow,
+                u32::try_from(self.conv.args.len()).unwrap_or(0),
+            ),
+        };
         Names {
             program: self.program,
             analysis: self.analysis,
@@ -320,9 +342,9 @@ impl<'a> Ctx<'a> {
             own_name: self.own_name.clone(),
             debug_params: self.debug_params.clone(),
             debug_locals: self.debug_locals.clone(),
-            first_stack: self.conv.word + self.conv.shadow,
+            first_stack,
             stack_params: self.stack_params,
-            reg_params: u32::try_from(self.conv.args.len()).unwrap_or(0),
+            reg_params,
             word: self.conv.word,
             slot_types: self.slot_types.clone(),
         }
@@ -743,6 +765,9 @@ fn new_ctx<'a>(
             .iter()
             .position(|b| b.start == f.entry)
             .unwrap_or(0),
+        arg_count: 0,
+        arg_floats: 0,
+        returns_value: f.returns_value,
     }
 }
 
@@ -1225,11 +1250,12 @@ fn decompile_with(
     assume: &[(u8, u64)],
     witness: bool,
 ) -> Option<Decompiled> {
+    let run = (program, analysis, overlay, entry);
     match program.arch.isa()? {
-        crate::isa::Isa::X86 { .. } => {
-            decompile_in::<arch::X86>(program, analysis, overlay, entry, cleanup, assume, witness)
+        crate::isa::Isa::X86 { bits } => {
+            decompile_in::<arch::X86>(run, bits, cleanup, assume, witness)
         }
-        crate::isa::Isa::A64 => None,
+        crate::isa::Isa::A64 => decompile_in::<arch::A64>(run, 64, cleanup, assume, witness),
     }
 }
 
@@ -1237,10 +1263,9 @@ fn decompile_with(
 ///
 /// # Arguments
 ///
-/// * `program` - The loaded image.
-/// * `analysis` - Discovery results.
-/// * `overlay` - User names and comments.
-/// * `entry` - The function's entry address.
+/// * `run` - The loaded image, its discovery results, the user names and
+///   comments, and the function's entry address.
+/// * `bitness` - The register width in bits: 32 or 64.
 /// * `cleanup` - Run [`cleanup_text`] on the body.
 /// * `assume` - Parameter slots a scenario fixes, and their values.
 /// * `witness` - Keep what the lifter knew about each block beside the
@@ -1250,16 +1275,14 @@ fn decompile_with(
 ///
 /// The pseudo-C, or `None` when there is no such function.
 fn decompile_in<L: Lifter>(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
+    run: (&Program, &Analysis, &Overlay, u64),
+    bitness: u32,
     cleanup: bool,
     assume: &[(u8, u64)],
     witness: bool,
 ) -> Option<Decompiled> {
+    let (program, analysis, overlay, entry) = run;
     let f = analysis.function(entry)?;
-    let bitness = program.arch.bitness()?;
     let blocks = &f.blocks;
     let n = blocks.len();
 
@@ -1306,6 +1329,8 @@ fn decompile_in<L: Lifter>(
     ctx.this_param = shape.this_param;
     ctx.result_param = shape.result_param;
     ctx.stack_params = shape.stack;
+    ctx.arg_count = shape.count;
+    ctx.arg_floats = shape.floats();
     ctx.rax_written = L::writes_result(&ctx, &code);
     let word = u8::try_from(bitness).unwrap_or(64);
     // INVARIANT: a stated prototype says what the function hands back,
@@ -1535,13 +1560,14 @@ fn decompile_in<L: Lifter>(
             |s| s.ret == "void",
         ),
     };
+    let (result_reg, second_reg) = L::result_names(bitness);
     let body = if cleanup {
-        cleanup_text(&body, ctx.ret_rdx.then_some("rdx"))
+        cleanup_text(&body, ctx.ret_rdx.then_some(second_reg))
     } else {
         body
     };
     let body = if returns_nothing {
-        drop_dead_results(&body, if bitness == 64 { "rax" } else { "eax" })
+        drop_dead_results(&body, result_reg)
     } else {
         body
     };
@@ -1645,7 +1671,13 @@ fn decompile_in<L: Lifter>(
         Some(_) => ctx.debug_ret.clone().unwrap_or_else(|| "void".to_owned()),
         None => ret_ty,
     };
-    let lead = usize::from(ctx.this_param) + usize::from(ctx.result_param.is_some());
+    // INVARIANT: the hidden result pointer leads the declared parameters
+    // where it sits right after `this`, as an x86 caller passes it; an
+    // arm64 one travels in `x8`, outside the positions, and the signature
+    // lists it last.
+    let result_at = ctx.result_param.map(usize::from);
+    let lead = usize::from(ctx.this_param)
+        + usize::from(result_at.is_some_and(|r| r <= usize::from(ctx.this_param)));
     // INVARIANT: the shape's count is what every call passes, so it is
     // what the signature lists; a stack slot the body reads past it reads
     // as the `arg_` slot it is.
@@ -1681,7 +1713,7 @@ fn decompile_in<L: Lifter>(
                 };
                 return format!("{this_class} *this");
             }
-            if ctx.result_param.is_some() && i + 1 == lead {
+            if result_at == Some(i) {
                 return format!("{ret_ty} *result");
             }
             let hint = u8::try_from(i).ok().and_then(|p| f.param_hints.get(&p));
@@ -1706,7 +1738,9 @@ fn decompile_in<L: Lifter>(
             // what the callers hint, as a declaration does.
             let stated_ty = recorded.clone().filter(|_| var_typed.contains(&i));
             match (
-                stated_ty.as_ref().or(declared.get(i - lead)),
+                stated_ty
+                    .as_ref()
+                    .or_else(|| i.checked_sub(lead).and_then(|j| declared.get(j))),
                 hint,
                 recorded,
             ) {
@@ -1784,8 +1818,10 @@ fn decompile_in<L: Lifter>(
         let _ = writeln!(out, "// effects: {effects}");
     }
     if f.hands_back_rdx {
-        let rdx = if ctx.bitness == 64 { "rdx" } else { "edx" };
-        let _ = writeln!(out, "// hands back {rdx}: a caller reads it after the call");
+        let _ = writeln!(
+            out,
+            "// hands back {second_reg}: a caller reads it after the call"
+        );
     }
     let against: Vec<String> = stated_returns
         .map(|r| declared::contradictions(f, &shape, r, bitness))

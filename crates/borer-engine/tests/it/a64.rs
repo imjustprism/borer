@@ -675,16 +675,13 @@ fn check_disassembles(p: &Program, entry: u64) {
     assert_eq!(p.isa_for(Feature::Disasm), Ok(Isa::A64));
     assert_eq!(p.isa_for(Feature::Discover), Ok(Isa::A64));
     assert_eq!(p.isa_for(Feature::Emulate), Ok(Isa::A64));
-    let why = p
-        .refuses(Feature::Decompile)
-        .expect("arm64 does not decompile yet");
+    assert_eq!(p.isa_for(Feature::Decompile), Ok(Isa::A64));
+    assert!(p.refuses(Feature::Decompile).is_none());
     assert!(
-        why.contains("arch 'arm64': borer disassembles arm64 code and discovers its functions")
-            && why.contains("runs it in the emulator (borer://emulate, borer://run)")
-            && why.contains("does not yet decompile it"),
-        "{why}"
+        !p.summary().contains("does not yet decompile"),
+        "{}",
+        p.summary()
     );
-    assert!(p.summary().contains(&why), "{}", p.summary());
     let a = Analysis::compute(p);
     assert!(a.function(entry).is_some() && a.function(entry + 0x18).is_some());
     assert_eq!(

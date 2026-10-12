@@ -303,10 +303,10 @@ impl Env {
     fn set(&mut self, k: Key, v: Expr) {
         self.unset.remove(&k);
         self.clobbered.remove(&k);
-        if matches!(k, Key::Reg(_)) {
+        if matches!(k, Key::Reg(_) | Key::A64(_)) {
             self.touched.insert(k);
         }
-        if matches!(k, Key::Reg(_) | Key::Slot(_)) {
+        if matches!(k, Key::Reg(_) | Key::Slot(_) | Key::A64(_)) {
             self.fresh.insert(k);
         }
         let bits = match &v {
@@ -634,7 +634,7 @@ pub(super) struct Exec<'c, 'a> {
     /// What the flags register holds right now.
     pub(super) flags: Flags,
     /// Switch index captured at a jump-table dispatch (protected like flags).
-    switch_idx: Option<Expr>,
+    pub(in crate::analysis::decompile) switch_idx: Option<Expr>,
     /// Recording declarations and temporaries only in the emission pass.
     pub(super) emit: bool,
     /// Temporary counter of the dataflow pass (the emission pass counts in
@@ -725,7 +725,7 @@ pub(super) struct Exec<'c, 'a> {
     status_ah: Option<(Expr, Flags)>,
     /// Registers some later instruction reads once the current one has run,
     /// with the lane width needed; `None` when unknown (everything is needed).
-    regs_needed: Option<FxHashMap<Key, u8>>,
+    pub(in crate::analysis::decompile) regs_needed: Option<FxHashMap<Key, u8>>,
     /// For the current instruction, how many later instructions of the
     /// block read each register it writes ([`read_counts`]).
     reads_ahead: FxHashMap<Key, u32>,

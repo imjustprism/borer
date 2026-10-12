@@ -91,7 +91,13 @@ pub(crate) fn call_sites(
     overlay: &Overlay,
     caller: u64,
 ) -> Option<Vec<CallSite>> {
-    let bitness = program.arch.bitness()?;
+    let (bitness, first_stack) = match program.arch.isa()? {
+        crate::isa::Isa::X86 { bits } => {
+            let conv = lift::conv(program, bits);
+            (bits, conv.word + conv.shadow)
+        }
+        crate::isa::Isa::A64 => (64, 0),
+    };
     let f = analysis.function(caller)?;
     let memo = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), caller);
     let d = memo.as_ref().as_ref()?;
@@ -107,7 +113,7 @@ pub(crate) fn call_sites(
         ))),
         debug_params: Arc::from(Vec::new()),
         debug_locals: Arc::default(),
-        first_stack: conv.word + conv.shadow,
+        first_stack,
         stack_params: 0,
         reg_params: u32::try_from(conv.args.len()).unwrap_or(0),
         word: conv.word,
@@ -165,7 +171,20 @@ fn positioned(c: &Call, conv: &Conv, bitness: u32, n: &Names<'_>) -> Vec<CallArg
         .iter()
         .filter(|(at, _)| matches!(at, ArgAt::Reg(_)))
         .count();
-    let base = conv.shadow + if c.shown == Shown::Tail { word } else { 0 };
+    // INVARIANT: an arm64 call records its register arguments in position
+    // order, so its stack words (a variadic call's on an Apple platform)
+    // follow them; no return address sits under a tail jump's.
+    let regs_a64 = c
+        .args
+        .iter()
+        .filter(|(at, _)| matches!(at, ArgAt::A64(_)))
+        .count();
+    let base = conv.shadow
+        + if c.shown == Shown::Tail && regs_a64 == 0 {
+            word
+        } else {
+            0
+        };
     let mut placed: Vec<Option<CallArg>> = Vec::new();
     let mut regs_seen = 0usize;
     for (at, e) in &c.args {
@@ -178,10 +197,12 @@ fn positioned(c: &Call, conv: &Conv, bitness: u32, n: &Names<'_>) -> Vec<CallArg
             ArgAt::Reg(r) if conv.args.contains(&r) || !conv.float_seq => {
                 conv.slot(r).unwrap_or(next)
             }
-            ArgAt::Reg(_) | ArgAt::Operand => next,
+            ArgAt::Reg(_) | ArgAt::Operand | ArgAt::A64(_) => next,
             ArgAt::Stack(off, _) => {
                 let first = if bitness == 32 {
                     regs32
+                } else if regs_a64 > 0 {
+                    regs_a64
                 } else {
                     conv.args.len()
                 };

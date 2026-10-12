@@ -63,6 +63,11 @@ pub fn next_steps(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Arc<Vec
 ///
 /// As [`next_steps`].
 fn steps_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Vec<String> {
+    // INVARIANT: the rules read x86 instructions; arm64 code, which
+    // decompiles too, gets no step rather than its words read as x86.
+    if !matches!(p.arch.isa(), Some(crate::isa::Isa::X86 { .. })) {
+        return Vec::new();
+    }
     let (Some(f), Some(bits)) = (a.function(entry), p.arch.bitness()) else {
         return Vec::new();
     };

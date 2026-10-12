@@ -180,6 +180,7 @@ impl std::fmt::Debug for Witness {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let blocks = match &self.code {
             Code::X86(code) => code.len(),
+            Code::A64(code) => code.len(),
         };
         f.debug_struct("Witness")
             .field("blocks", &blocks)
@@ -192,6 +193,8 @@ impl std::fmt::Debug for Witness {
 pub(super) enum Code {
     /// x86 or x86-64 instructions, per block.
     X86(Vec<Vec<Instruction>>),
+    /// arm64 instructions, per block.
+    A64(Vec<Vec<crate::isa::a64::Insn>>),
 }
 
 /// A machine the replay runs blocks on: what the replay asks of it beyond
@@ -476,6 +479,7 @@ impl Replay for arch::X86 {
     fn code(w: &Witness) -> Option<&[Vec<Instruction>]> {
         match &w.code {
             Code::X86(code) => Some(code.as_slice()),
+            Code::A64(_) => None,
         }
     }
 
@@ -564,7 +568,7 @@ impl Replay for arch::X86 {
     fn register_value(emu: &Emulator<'_>, at: ArgAt, width: u8) -> Option<u64> {
         match at {
             ArgAt::Reg(r) if r.is_gpr() => reg_value(emu, r, width),
-            ArgAt::Reg(_) | ArgAt::Stack(..) | ArgAt::Operand => None,
+            ArgAt::Reg(_) | ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A64(_) => None,
         }
     }
 
@@ -752,7 +756,8 @@ impl Replayed {
 pub fn replay(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Replayed {
     match program.arch.isa() {
         Some(Isa::X86 { .. }) => replay_in::<arch::X86>(program, analysis, entries, seed),
-        Some(Isa::A64) | None => Replayed::default(),
+        Some(Isa::A64) => replay_in::<arch::A64>(program, analysis, entries, seed),
+        None => Replayed::default(),
     }
 }
 
@@ -806,7 +811,10 @@ pub fn replay_function(program: &Program, analysis: &Analysis, entry: u64, seed:
         Some(Isa::X86 { .. }) => arch::X86::rig(program)
             .map(|t| replay_one::<arch::X86>(program, analysis, &t, entry, seed))
             .unwrap_or_default(),
-        Some(Isa::A64) | None => Replayed::default(),
+        Some(Isa::A64) => arch::A64::rig(program)
+            .map(|t| replay_one::<arch::A64>(program, analysis, &t, entry, seed))
+            .unwrap_or_default(),
+        None => Replayed::default(),
     }
 }
 
@@ -877,7 +885,7 @@ pub(crate) fn check_answer(
 ) -> Option<TextCheck> {
     match program.arch.isa()? {
         Isa::X86 { .. } => check_answer_in::<arch::X86>(program, analysis, overlay, entry),
-        Isa::A64 => None,
+        Isa::A64 => check_answer_in::<arch::A64>(program, analysis, overlay, entry),
     }
 }
 
@@ -1812,16 +1820,7 @@ fn wide_value<M: Bench>(text: &Text<'_, M>, v: &Expr, n: u64) -> Option<u128> {
 /// * `width` - The register width, 32 or 64.
 fn comparands(code: &[Instruction], width: u8) -> Vec<u64> {
     let mask = low(width);
-    let mut pool = vec![
-        0,
-        1,
-        mask,
-        0x7fff_ffff,
-        0x8000_0000,
-        0xffff_ffff,
-        mask >> 1,
-        (mask >> 1).wrapping_add(1),
-    ];
+    let mut pool = word_limits(width);
     for i in code {
         for n in 0..i.op_count() {
             if let Ok(k) = i.try_immediate(n) {
@@ -1833,6 +1832,26 @@ fn comparands(code: &[Instruction], width: u8) -> Vec<u64> {
     pool.sort_unstable();
     pool.dedup();
     pool
+}
+
+/// The values every block's comparisons may turn on: zero, one, and the
+/// signed and unsigned limits at the register width.
+///
+/// # Arguments
+///
+/// * `width` - The register width, 32 or 64.
+pub(super) fn word_limits(width: u8) -> Vec<u64> {
+    let mask = low(width);
+    vec![
+        0,
+        1,
+        mask,
+        0x7fff_ffff,
+        0x8000_0000,
+        0xffff_ffff,
+        mask >> 1,
+        (mask >> 1).wrapping_add(1),
+    ]
 }
 
 /// Mixes bits, so neighbouring inputs give unrelated outputs.
@@ -3277,14 +3296,16 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         // own text value's, which stays until the copy is written out,
         // whatever the variable holds pending since.
         for (k, e) in &inn.vals {
-            if let (Expr::Var(src @ (Key::Reg(_) | Key::Tmp(_) | Key::Param(_))), Some(nb)) =
-                (e, inn.narrow.get(k))
+            if let (
+                Expr::Var(src @ (Key::Reg(_) | Key::A64(_) | Key::Tmp(_) | Key::Param(_))),
+                Some(nb),
+            ) = (e, inn.narrow.get(k))
                 && let Some(v) = text.var(*src)
             {
                 text.vars.insert(*src, v & low(*nb));
             }
         }
-        if let Some((k @ (Key::Reg(_) | Key::Tmp(_) | Key::Param(_)), c)) =
+        if let Some((k @ (Key::Reg(_) | Key::A64(_) | Key::Tmp(_) | Key::Param(_)), c)) =
             w.assumes.get(b).copied().flatten()
         {
             text.vars.insert(k, c & mask);
@@ -3508,7 +3529,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                             ),
                             *bits,
                         ),
-                        ArgAt::Reg(_) | ArgAt::Operand => {
+                        ArgAt::Reg(_) | ArgAt::Operand | ArgAt::A64(_) => {
                             (L::register_value(&t.emu, *at, self.width), 64)
                         }
                     };

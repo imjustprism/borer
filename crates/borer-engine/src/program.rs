@@ -111,8 +111,7 @@ impl Arch {
         match self.isa() {
             Some(Isa::X86 { .. }) => true,
             Some(Isa::A64) => match feature {
-                Feature::Disasm | Feature::Discover | Feature::Emulate => true,
-                Feature::Decompile => false,
+                Feature::Disasm | Feature::Discover | Feature::Emulate | Feature::Decompile => true,
             },
             None => false,
         }

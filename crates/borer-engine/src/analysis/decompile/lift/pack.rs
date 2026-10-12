@@ -527,6 +527,10 @@ impl Writer<'_> {
                     self.byte(*bits);
                 }
                 ArgAt::Operand => self.byte(2),
+                ArgAt::A64(r) => {
+                    self.byte(3);
+                    self.byte(a64_code(*r));
+                }
             }
             self.expr(e);
         }
@@ -796,6 +800,7 @@ impl Reader<'_> {
                     ArgAt::Stack(o, self.byte()?)
                 }
                 2 => ArgAt::Operand,
+                3 => ArgAt::A64(a64_reg(self.byte()?)?),
                 _ => return None,
             };
             args.push((at, self.expr()?));

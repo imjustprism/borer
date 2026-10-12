@@ -113,6 +113,9 @@ pub(in crate::analysis::decompile) enum ArgAt {
     /// Nowhere in particular: the operand of a routine the text names for
     /// an instruction.
     Operand,
+    /// In this arm64 register: an `x` register whole, a `v` register's low
+    /// lane.
+    A64(crate::isa::a64::Reg),
 }
 
 /// How the text shows a call.

@@ -909,8 +909,9 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
 /// [`Analysis::derived`] under the names in force.
 ///
 /// An arm64 function runs in its own machine ([`A64Machine`]), its
-/// arguments in `x0`..`x7` and then on the stack; it has no text yet, so
-/// every row is `unchecked` and no signature types the inputs.
+/// arguments in `x0`..`x7` and then on the stack; its text is not run as C
+/// here (the decompile answer checks it block by block instead), so every
+/// row is `unchecked` and no signature types the inputs.
 ///
 /// # Arguments
 ///
@@ -936,7 +937,7 @@ pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Str
     let (text, why) = if a64 {
         (
             None,
-            "arm64 code does not decompile yet, so there is no text to check",
+            "a run's text is checked for x86 code only; an arm64 text is checked block by block against the arm64 machine (decompile's checked line)",
         )
     } else {
         (
@@ -1052,11 +1053,15 @@ fn render_runs(
 ) -> String {
     let lines: Vec<&str> = text.map_or_else(Vec::new, |t| t.lines().collect());
     let signature = shared.sig.as_ref().map_or_else(
-        |_| {
-            format!(
+        |_| match p.arch.isa() {
+            Some(Isa::A64) => format!(
+                "{} (no signature: an arm64 run passes its inputs untyped)",
+                short_name(a, o, req.entry)
+            ),
+            Some(Isa::X86 { .. }) | None => format!(
                 "{} (no signature: it does not decompile)",
                 short_name(a, o, req.entry)
-            )
+            ),
         },
         |s| s.text.clone(),
     );

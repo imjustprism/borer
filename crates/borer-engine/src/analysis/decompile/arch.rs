@@ -8,9 +8,11 @@
 //! instruction reads and writes, how flags cross blocks and which reads are
 //! parameters, and that is what [`Lifter`] names. [`X86`] hands every
 //! question to the x86 functions the pipeline called before it was generic,
-//! so the compiled x86 path is the same code.
+//! so the compiled x86 path is the same code; [`A64`] hands it to the arm64
+//! lifter ([`lift_a64`]) and the arm64 procedure call standard.
 
 use super::*;
+use crate::isa::a64;
 
 /// What the decompiler's pipeline asks of an instruction set.
 ///
@@ -269,6 +271,14 @@ pub(super) trait Lifter {
     ///
     /// * `code` - Each block's instructions.
     fn witness(code: Vec<Vec<Self::Insn>>) -> replay::Code;
+
+    /// Names the registers a result and a second result come back in, as
+    /// the text names them.
+    ///
+    /// # Arguments
+    ///
+    /// * `bitness` - The register width: 32 or 64.
+    fn result_names(bitness: u32) -> (&'static str, &'static str);
 }
 
 /// x86 and x86-64, decoded by iced-x86 and lifted by [`lift`].
@@ -385,5 +395,141 @@ impl Lifter for X86 {
 
     fn witness(code: Vec<Vec<Instruction>>) -> replay::Code {
         replay::Code::X86(code)
+    }
+
+    fn result_names(bitness: u32) -> (&'static str, &'static str) {
+        if bitness == 64 {
+            ("rax", "rdx")
+        } else {
+            ("eax", "edx")
+        }
+    }
+}
+
+/// AArch64, decoded by [`crate::isa::a64`] and lifted by [`lift_a64`]
+/// under the arm64 procedure call standard.
+pub(super) struct A64;
+
+impl Lifter for A64 {
+    type Insn = a64::Insn;
+
+    fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<a64::Insn>> {
+        lift_a64::decode_blocks(ctx, f)
+    }
+
+    fn start(i: &a64::Insn) -> u64 {
+        i.va
+    }
+
+    fn exec_block(
+        ctx: &mut Ctx<'_>,
+        instrs: &[a64::Insn],
+        _prev: Option<&[a64::Insn]>,
+        env: &mut Env,
+        pass: lift::Pass,
+        phi: Option<(&lift::PhiFn<'_>, &lift::LiveFn<'_>)>,
+        facts: BlockFacts<'_>,
+    ) -> BlockOut {
+        lift_a64::exec_block_a64(ctx, instrs, env, pass, phi, facts)
+    }
+
+    fn reads_inherited_flags(instrs: &[a64::Insn]) -> bool {
+        lift_a64::reads_inherited_flags(instrs)
+    }
+
+    fn join_reader_cc(_instrs: &[a64::Insn]) -> Option<Cc> {
+        None
+    }
+
+    fn live_in(
+        ctx: &Ctx<'_>,
+        code: &[Vec<a64::Insn>],
+        succs: &[Vec<usize>],
+    ) -> Vec<FxHashMap<Key, u8>> {
+        let effects: Vec<Vec<lift::Effects>> = code
+            .iter()
+            .map(|b| b.iter().map(|i| lift_a64::effects(ctx, i)).collect())
+            .collect();
+        lift::live_from(&effects, succs)
+    }
+
+    fn need_after(
+        ctx: &Ctx<'_>,
+        instrs: &[a64::Insn],
+        out: &FxHashMap<Key, u8>,
+    ) -> Vec<FxHashMap<Key, u8>> {
+        let effects: Vec<lift::Effects> =
+            instrs.iter().map(|i| lift_a64::effects(ctx, i)).collect();
+        lift::need_from(&effects, out)
+    }
+
+    fn after(_code: &[Vec<a64::Insn>], _s: usize) -> Option<Instruction> {
+        None
+    }
+
+    fn prologue_block(ctx: &Ctx<'_>, _code: &[Vec<a64::Insn>], b: usize) -> bool {
+        b == ctx.entry_block
+    }
+
+    fn body_len(instrs: &[a64::Insn]) -> usize {
+        lift_a64::body_len(instrs)
+    }
+
+    fn seh_frame(_ctx: &Ctx<'_>, _code: &[Vec<a64::Insn>]) -> bool {
+        false
+    }
+
+    fn go_check(
+        _ctx: &Ctx<'_>,
+        _entry: u64,
+        _code: &[Vec<a64::Insn>],
+        _idx: &BTreeMap<u64, usize>,
+    ) -> Option<(u64, String)> {
+        None
+    }
+
+    fn shape(
+        ctx: &mut Ctx<'_>,
+        f: &Function,
+        code: &[Vec<a64::Insn>],
+        succs: &[Vec<usize>],
+        entry: usize,
+    ) -> std::sync::Arc<Shape> {
+        lift_a64::callee_shape(ctx, f.entry)
+            .unwrap_or_else(|| std::sync::Arc::new(lift_a64::shape(ctx, f, code, succs, entry)))
+    }
+
+    fn entry_env(ctx: &Ctx<'_>) -> Env {
+        lift_a64::entry_env(ctx)
+    }
+
+    fn writes_result(ctx: &Ctx<'_>, code: &[Vec<a64::Insn>]) -> bool {
+        lift_a64::writes_result(ctx, code)
+    }
+
+    fn ret_lane(
+        code: &[Vec<a64::Insn>],
+        succs: &[Vec<usize>],
+        declared: Option<&str>,
+        _analysis: &Analysis,
+    ) -> u8 {
+        lift_a64::ret_lane(code, succs, declared)
+    }
+
+    fn param_types(
+        ctx: &Ctx<'_>,
+        code: &[Vec<a64::Insn>],
+        _succs: &[Vec<usize>],
+        entry: usize,
+    ) -> BTreeMap<usize, String> {
+        lift_a64::param_types(ctx, code, entry)
+    }
+
+    fn witness(code: Vec<Vec<a64::Insn>>) -> replay::Code {
+        replay::Code::A64(code)
+    }
+
+    fn result_names(_bitness: u32) -> (&'static str, &'static str) {
+        ("x0", "x1")
     }
 }

@@ -182,15 +182,15 @@ fn a_stated_entry_and_a_32_bit_arch_are_kept() {
 }
 
 /// arm64 code maps as a 64-bit arm64 program that disassembles, with the
-/// call's target read off the word; the stages arm64 does not have yet
-/// say so instead of reading the bytes as x86.
+/// call's target read off the word, and that every stage reads as arm64,
+/// never as x86.
 #[test]
 fn arm64_code_at_a_stated_base_disassembles() {
     let p = map("arm64", Some("0x20000"), None, None, A64_CODE).expect("it maps");
     assert_eq!(p.arch, Arch::Arm64);
     assert!(p.is_64);
     assert_eq!(p.isa_for(Feature::Disasm), Ok(Isa::A64));
-    assert!(p.refuses(Feature::Decompile).is_some());
+    assert_eq!(p.isa_for(Feature::Decompile), Ok(Isa::A64));
     let code = p.read_va_upto(0x20000, A64_CODE.len()).expect("mapped");
     let lines = disasm::disassemble_isa(code, 0x20000, Isa::A64, 4);
     assert_eq!(lines.len(), 4);

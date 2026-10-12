@@ -253,6 +253,23 @@ pub(in crate::analysis::decompile) const GO_X64: Conv = Conv {
     float_seq: true,
 };
 
+/// The arm64 procedure call standard (AAPCS64), as far as the shared
+/// executor reads a convention.
+///
+/// That is an eight-byte word and no shadow space. Its registers are arm64
+/// ones, which the arm64 lifter names
+/// ([`crate::analysis::decompile::lift_a64`]), so the x86 register lists
+/// are empty.
+pub(crate) const AAPCS64: Conv = Conv {
+    args: &[],
+    float_args: &[],
+    float_seq: true,
+    volatile: &[],
+    callee_saved: &[],
+    word: 8,
+    shadow: 0,
+};
+
 impl Conv {
     /// The argument slot a register carries, if it carries one.
     ///
@@ -374,13 +391,17 @@ impl Conv {
 
 /// Picks the calling convention for a program.
 ///
-/// Raw images default to the Microsoft x64 convention (borer is PE-first).
+/// Raw images default to the Microsoft x64 convention (borer is PE-first);
+/// arm64 code follows [`AAPCS64`] in every format.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image; its format selects the convention.
 /// * `bitness` - `32` selects cdecl regardless of format.
 pub(crate) fn conv(program: &Program, bitness: u32) -> &'static Conv {
+    if program.arch.isa() == Some(crate::isa::Isa::A64) {
+        return &AAPCS64;
+    }
     if bitness == 32 {
         return &CDECL_X86;
     }

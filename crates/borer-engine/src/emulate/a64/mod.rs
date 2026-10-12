@@ -425,6 +425,18 @@ impl<'a> Machine<'a> {
         self.vregs
     }
 
+    /// Sets a SIMD and floating-point register whole before a run.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The register's number, 0 to 31; any other is ignored.
+    /// * `value` - All 128 bits.
+    pub fn set_vreg(&mut self, n: u8, value: u128) {
+        if let Some(slot) = self.vregs.get_mut(usize::from(n)) {
+            *slot = value;
+        }
+    }
+
     /// Sets the address the next run halts at before executing it.
     ///
     /// # Arguments

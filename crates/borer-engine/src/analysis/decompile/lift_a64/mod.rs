@@ -16,26 +16,33 @@
 //! must preserve ([`callee_saved`]) is a save, as the x86 lifter reads a
 //! push. An instruction without a model (floating-point and vector
 //! arithmetic, system registers, atomics) stays an `/* asm */` comment and
-//! forgets what it writes. Calls, returns and jumps are lifted only as far
-//! as a block's own effects need: which registers carry a call's arguments
-//! and results is the arm64 decompiler's to read.
+//! forgets what it writes. A call passes its callee the arguments the
+//! arm64 procedure call standard puts in registers and assigns its result
+//! ([`call`]); what a function itself takes and hands back is read from
+//! its code and its declarations ([`shape`]); which registers each
+//! instruction reads and writes is [`live`]'s.
 
+mod call;
 mod conv;
 mod flags;
+mod live;
 mod mem;
+mod shape;
 mod step;
 
-pub(in crate::analysis::decompile) use conv::callee_saved;
+pub(in crate::analysis::decompile) use conv::{callee_saved, clobbered};
+pub(in crate::analysis::decompile) use live::effects;
+pub(in crate::analysis::decompile) use shape::{
+    INT_ARGS, callee_shape, decode_blocks, entry_env, param_types, ret_lane, shape, writes_result,
+};
 
 use std::collections::btree_map::Entry;
 
 use super::Ctx;
 use super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, fold, mask, sign_extend};
-use super::lift::{
-    BlockFacts, BlockOut, Branch, Callee, EffectKind, Env, Exec, LiveFn, Pass, PhiFn, Shown, pack,
-};
-use crate::analysis::name_of;
-use crate::isa::a64::{self, Flow, Insn, Opnd, Reg, Shift};
+use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn, pack};
+use crate::fxmap::FxHashMap;
+use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg, Shift};
 use crate::isa::x86::ConditionCode;
 use crate::program::Program;
 use flags::Test;
@@ -96,8 +103,10 @@ pub(in crate::analysis::decompile) fn exec_block_a64(
     facts: BlockFacts<'_>,
 ) -> BlockOut {
     let start = instrs.first().map_or(0, |i| i.va);
+    let table_load = table_load(ctx, instrs);
     let mut lift = Lift {
         ex: Exec::new(ctx, env, pass, &facts, start),
+        table_load,
     };
     let live = flags::live_after(instrs, facts.flags_out);
     let mut out = BlockOut::default();
@@ -108,6 +117,10 @@ pub(in crate::analysis::decompile) fn exec_block_a64(
             lift.ex.lines.push(format!("// {c}"));
         }
         lift.ex.flags_needed = live.get(idx).copied().unwrap_or(u32::MAX);
+        lift.ex.regs_needed = facts
+            .need
+            .and_then(|n| n.get(idx))
+            .map(|after| needed_by(&*lift.ex.ctx, i, after));
         let later = instrs.get(idx + 1..).unwrap_or(&[]);
         match i.flow {
             Flow::Next => lift.step(i, later),
@@ -128,6 +141,58 @@ pub(in crate::analysis::decompile) fn exec_block_a64(
     lift.finish(out, jcc, facts.flags_out, phi, start)
 }
 
+/// The load of a jump table's entry in a block that dispatches through a
+/// table the analysis resolved.
+///
+/// It is the last load before the `br` indexed by a register, which every
+/// compiler's dispatch ends with ([`crate::analysis::a64`]'s switch
+/// shapes).
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state: the analysis's jump tables.
+/// * `instrs` - The block's instructions.
+fn table_load(ctx: &Ctx<'_>, instrs: &[Insn]) -> Option<u64> {
+    let br = instrs.last()?;
+    if br.flow != Flow::Jump
+        || br.target().is_some()
+        || !ctx.analysis.jump_tables.contains_key(&br.va)
+    {
+        return None;
+    }
+    instrs
+        .iter()
+        .rev()
+        .find(|i| {
+            matches!(i.mnemonic, Mnemonic::Ldr(_))
+                && matches!(i.operands[1], Opnd::Mem(m) if m.index.is_some())
+        })
+        .map(|i| i.va)
+}
+
+/// The registers needed while an instruction is lifted: those some later
+/// instruction reads, and those it reads itself.
+///
+/// The lifter may write values out before it reads an instruction's
+/// operands (a call writes out what the callee may change before it reads
+/// the arguments), and a value written out first protects its readers; a
+/// register the instruction reads is no dead reader to forget, though no
+/// later instruction reads it.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state.
+/// * `i` - The instruction.
+/// * `after` - The registers read after it, with their lanes.
+fn needed_by(ctx: &Ctx<'_>, i: &Insn, after: &FxHashMap<Key, u8>) -> FxHashMap<Key, u8> {
+    let mut need = after.clone();
+    for (k, lane) in effects(ctx, i).0 {
+        let held = need.entry(k).or_insert(lane);
+        *held = (*held).max(lane);
+    }
+    need
+}
+
 /// The address after an instruction.
 ///
 /// # Arguments
@@ -135,6 +200,71 @@ pub(in crate::analysis::decompile) fn exec_block_a64(
 /// * `i` - The instruction.
 fn next(i: &Insn) -> u64 {
     i.va.wrapping_add(crate::num::from_usize(a64::INSN_LEN))
+}
+
+/// Tells whether an instruction sets the flags, a call among them.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+pub(in crate::analysis::decompile) fn flags_set(i: &Insn) -> bool {
+    flags::writes(i)
+}
+
+/// Tells whether an instruction reads the flags.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+pub(in crate::analysis::decompile) fn flags_read(i: &Insn) -> bool {
+    flags::reads(i).is_some()
+}
+
+/// Tells whether a block reads the flags before it sets them, so depends on
+/// flags a predecessor left (`cmp; b.eq A; ... A: b.lt B`).
+///
+/// # Arguments
+///
+/// * `instrs` - The block's instructions.
+pub(in crate::analysis::decompile) fn reads_inherited_flags(instrs: &[Insn]) -> bool {
+    for i in instrs {
+        if flags::reads(i).is_some() {
+            return true;
+        }
+        if flags::writes(i) {
+            return false;
+        }
+    }
+    false
+}
+
+/// Counts the instructions of a block that render as statements, which the
+/// structurer weighs copying a block by.
+///
+/// The epilogue renders as nothing: the return, the stack adjustment, the
+/// reloads of the registers the function preserves for its caller from the
+/// frame, and the landing pads and pointer authentication around them.
+///
+/// # Arguments
+///
+/// * `instrs` - The block's instructions.
+pub(in crate::analysis::decompile) fn body_len(instrs: &[Insn]) -> usize {
+    let quiet = |i: &Insn| {
+        let restores = matches!(i.mnemonic, Mnemonic::Ldr(_) | Mnemonic::Ldp(_))
+            && i.registers()
+                .writes
+                .iter()
+                .all(|r| *r == Reg::Sp || callee_saved(*r));
+        let moves_sp = matches!(i.mnemonic, Mnemonic::Add | Mnemonic::Sub)
+            && matches!(i.operands[0], Opnd::Reg { reg: Reg::Sp, .. });
+        restores
+            || moves_sp
+            || matches!(
+                i.op,
+                a64::Op::Ret | a64::Op::Nop | a64::Op::Bti | a64::Op::Pac
+            )
+    };
+    instrs.iter().filter(|i| !quiet(i)).count()
 }
 
 /// Cuts a value to its low `bits`; from 64 bits up it is kept whole.
@@ -210,6 +340,9 @@ fn shifted(raw: Expr, bits: u16, shift: Shift, amount: u8, width: u16) -> Expr {
 struct Lift<'c, 'a> {
     /// The executor: the environment, the function's state and the lines.
     ex: Exec<'c, 'a>,
+    /// The load of the entry of the jump table the block dispatches
+    /// through, whose index is the switch's ([`table_load`]).
+    table_load: Option<u64>,
 }
 
 impl Lift<'_, '_> {
@@ -340,7 +473,7 @@ impl Lift<'_, '_> {
             | Opnd::Mem(_)
             | Opnd::Cond(_) => {}
         }
-        if let (a64::Mnemonic::Atomic(..), Opnd::Reg { reg, .. }) = (i.mnemonic, i.operands[1]) {
+        if let (Mnemonic::Atomic(..), Opnd::Reg { reg, .. }) = (i.mnemonic, i.operands[1]) {
             written.push(reg);
         }
         let mut memory = false;
@@ -376,69 +509,6 @@ impl Lift<'_, '_> {
         }
     }
 
-    /// Lifts a call: writes out everything pending, since the callee may
-    /// read any register, slot or memory, records the call with its result
-    /// in `x0`, and forgets the registers and flags the call may change.
-    ///
-    /// # Arguments
-    ///
-    /// * `i` - The `bl` or `blr`.
-    fn call(&mut self, i: &Insn) {
-        let callee = match (i.target(), i.operands[0]) {
-            (Some(t), _) => Callee::Direct(t),
-            (None, Opnd::Reg { reg, .. }) => Callee::Through(self.read(reg)),
-            (None, _) => return self.unmodeled(i),
-        };
-        let pending: Vec<Key> = self.ex.env.vals.keys().copied().collect();
-        for k in pending {
-            self.ex.materialize(k, &mut Vec::new(), None);
-        }
-        if self.ex.emit {
-            let text = self.callee_text(&callee);
-            self.ex.lines.push(format!("x0 = {text}();"));
-        }
-        self.ex.record_call(
-            callee,
-            Vec::new(),
-            Some(Key::A64(Reg::X(0))),
-            None,
-            false,
-            Shown::Statement,
-        );
-        for r in conv::clobbered() {
-            self.ex.clobber(Key::A64(r));
-        }
-        self.ex.flags = Flags::Unknown;
-    }
-
-    /// The text a call names its callee by.
-    ///
-    /// # Arguments
-    ///
-    /// * `callee` - What it calls.
-    fn callee_text(&self, callee: &Callee) -> String {
-        match callee {
-            Callee::Direct(t) => name_of(self.ex.ctx.analysis, self.ex.ctx.overlay, *t),
-            Callee::Through(e) => format!("(*{})", e.render(&self.ex.names())),
-            Callee::Builtin(..) => String::new(),
-        }
-    }
-
-    /// Lifts a jump out of the function as a tail call.
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - Where it goes.
-    fn tail_call(&mut self, target: u64) {
-        let callee = Callee::Direct(target);
-        if self.ex.emit {
-            let text = self.callee_text(&callee);
-            self.ex.lines.push(format!("return {text}();"));
-        }
-        self.ex
-            .record_call(callee, Vec::new(), None, None, false, Shown::Tail);
-    }
-
     /// Lifts a jump through a register: the dispatch of a jump table the
     /// analysis resolved, else a computed `goto`.
     ///
@@ -462,29 +532,25 @@ impl Lift<'_, '_> {
         self.ex.record(EffectKind::Jump(target));
     }
 
-    /// Lifts a return of `x0`.
-    fn ret(&mut self) {
-        let value = self.read(Reg::X(0));
-        if self.ex.emit {
-            let line = format!("return {};", value.render(&self.ex.names()));
-            self.ex.lines.push(line);
-        }
-        self.ex.record(EffectKind::Return(Some(value)));
-    }
-
     /// The condition a conditional branch is taken under, read where the
     /// block ends.
     ///
     /// # Arguments
     ///
     /// * `test` - What the branch tests.
-    fn branch_cond(&self, test: Test) -> Cond {
+    /// * `tested` - The value of the register a `cbz` or `tbz` tests, read
+    ///   before the phis; read now when `None`.
+    fn branch_cond(&self, test: Test, tested: Option<Expr>) -> Cond {
         use ConditionCode as C;
         match test {
             Test::Flags(c) => flags::condition(&self.ex.flags, c),
             Test::Zero { reg, bits, zero } => Cond {
                 cc: Cc(if zero { C::e } else { C::ne }),
-                flags: Flags::Cmp(self.read(reg), Expr::Const(0), width8(bits)),
+                flags: Flags::Cmp(
+                    tested.unwrap_or_else(|| self.read(reg)),
+                    Expr::Const(0),
+                    width8(bits),
+                ),
             },
             Test::Bit {
                 reg,
@@ -493,7 +559,11 @@ impl Lift<'_, '_> {
                 set,
             } => Cond {
                 cc: Cc(if set { C::ne } else { C::e }),
-                flags: Flags::Test(self.read(reg), Expr::Const(1 << bit), width8(bits)),
+                flags: Flags::Test(
+                    tested.unwrap_or_else(|| self.read(reg)),
+                    Expr::Const(1 << bit),
+                    width8(bits),
+                ),
             },
         }
     }
@@ -523,18 +593,40 @@ impl Lift<'_, '_> {
             self.ex.flags = Flags::Unknown;
         }
         self.ex.flags_needed = u32::MAX;
+        // INVARIANT: a `cbz` or `tbz` reads its register where the block
+        // ends, after the phis, whose write-outs may change what its value
+        // reads and forget a register no successor reads; read first, the
+        // value is held where they protect it, as a jump table's index is,
+        // a block ending in a branch having none.
+        let tested = match jcc {
+            Some((Test::Zero { reg, .. } | Test::Bit { reg, .. }, ..)) => Some(self.read(reg)),
+            Some((Test::Flags(_), ..)) | None => None,
+        };
+        let holds = tested.is_some();
+        if holds {
+            self.ex.switch_idx = tested;
+        }
         if let Some((phi, live)) = phi {
             for k in phi(self.ex.env) {
                 self.ex.materialize_phi(k, live);
             }
         }
+        let tested = if holds {
+            self.ex.switch_idx.take()
+        } else {
+            None
+        };
         if let Some((test, target, fall)) = jcc {
-            let cond = self.branch_cond(test);
+            let cond = self.branch_cond(test, tested);
             out.branch_const = cond.eval().map(|taken| (taken, target, fall));
             self.ex.record(EffectKind::Branch(cond.clone()));
             out.branch = Some(Branch { cond, target, fall });
         }
-        let ex = self.ex;
+        let mut ex = self.ex;
+        out.switch_idx = ex.switch_idx.take();
+        if let Some(idx) = out.switch_idx.as_ref().filter(|_| ex.emit) {
+            ex.record(EffectKind::Switch(idx.clone()));
+        }
         let crosses = matches!(ex.flags, Flags::Truth(..))
             || !ex.flags.any_var(&|k| matches!(k, Key::Tmp(_)));
         out.tmp_flags = flags_out && !crosses;

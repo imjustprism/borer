@@ -21,6 +21,10 @@ const SAVED_V: (u8, u8) = (8, 15);
 /// The highest `v` register number.
 const LAST_V: u8 = 31;
 
+/// The register a Darwin system call takes its number in; Linux takes it
+/// in `x8`, which a call reads as an argument register already.
+pub(super) const SYSCALL_NUMBER: u8 = 16;
+
 /// Tells whether a function must give `r` back to its caller as it found
 /// it.
 ///
@@ -44,7 +48,7 @@ pub(in crate::analysis::decompile) fn callee_saved(r: Reg) -> bool {
 /// They are `x0` to `x18`, the link register the call writes, and every
 /// `v` register but `v8` to `v15`, whose upper halves the lifter does not
 /// track apart.
-pub(super) fn clobbered() -> impl Iterator<Item = Reg> {
+pub(in crate::analysis::decompile) fn clobbered() -> impl Iterator<Item = Reg> {
     (0..=SCRATCH_X)
         .chain(std::iter::once(LINK))
         .map(Reg::X)

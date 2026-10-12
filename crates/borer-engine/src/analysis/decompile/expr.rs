@@ -2819,6 +2819,12 @@ impl Names<'_> {
         if let Some(name) = self.debug_locals.get(&off) {
             return name.clone();
         }
+        // INVARIANT: a convention whose stack arguments start at the stack
+        // pointer the function is entered with (arm64) leaves no return
+        // address there: every slot from it up is the caller's.
+        if self.first_stack == 0 && off >= 0 {
+            return format!("arg_{off:x}");
+        }
         slot_name(off, self.word, self.first_stack - self.word)
     }
 

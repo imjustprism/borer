@@ -540,13 +540,15 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
     drop(std::fs::remove_file(&path));
 }
 
-/// An arm64 image disassembles and discovers from the command line.
+/// An arm64 image disassembles, discovers and decompiles from the command
+/// line.
 ///
 /// `disasm` lists one word per row four bytes apart, up to where the
 /// discovered function's code ends, and so does a script's `disasm`;
-/// `functions` lists what discovery finds, `emulate` runs the entry in the
-/// arm64 machine, `verify` checks the entry's lifting against it, and
-/// `decompile`, `verify ... text` and `oracle` refuse, saying what applies.
+/// `functions` lists what discovery finds, `decompile` answers with the
+/// entry's text, `emulate` runs the entry in the arm64 machine, `verify`
+/// checks the entry's lifting against it and `verify ... text` its text,
+/// and `oracle` refuses, saying what applies.
 ///
 /// The fixture is the test binary with its COFF machine set to arm64, so
 /// what decodes is x86 code read as arm64 words, its exception directory
@@ -605,12 +607,8 @@ fn cli_disassembles_and_discovers_an_arm64_image() {
 
     let (ok, out) = run_all(&["functions", &path]);
     assert!(ok && out.starts_with("# showing "), "{out}");
-    let (ok, out) = run_all(&["decompile", &path, &format!("{entry:#x}")]);
-    assert!(!ok, "decompile should refuse arm64 until the lifter lands");
-    assert!(
-        out.contains("discovers its functions") && out.contains("does not yet decompile it"),
-        "{out}"
-    );
+    let (_, out) = run_all(&["decompile", &path, &format!("{entry:#x}")]);
+    assert!(!out.contains("does not yet decompile it"), "{out}");
     let (ok, out) = run_all(&["emulate", &path, &format!("{entry:#x},steps=64")]);
     assert!(ok && out.starts_with("# ran "), "{out}");
     let (ok, out) = run_all(&["oracle", &path, &format!("{entry:#x}")]);
@@ -618,8 +616,8 @@ fn cli_disassembles_and_discovers_an_arm64_image() {
     let (_, out) = run_all(&["verify", &path, &format!("{entry:#x}")]);
     assert!(out.starts_with("# verified 1 functions, "), "{out}");
     assert!(out.contains("\n# vector: "), "{out}");
-    let (ok, out) = run_all(&["verify", &path, &format!("{entry:#x}"), "1", "1", "text"]);
-    assert!(!ok && out.contains("does not yet decompile it"), "{out}");
+    let (_, out) = run_all(&["verify", &path, &format!("{entry:#x}"), "1", "1", "text"]);
+    assert!(out.starts_with("# replayed 1 functions, "), "{out}");
 
     drop(std::fs::remove_file(&path));
     drop(std::fs::remove_file(&script));

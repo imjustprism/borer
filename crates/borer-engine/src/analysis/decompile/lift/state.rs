@@ -3,6 +3,34 @@
 
 use super::*;
 
+/// Tells whether an address adds a sign-extended term to its base, an
+/// index that may be negative.
+///
+/// # Arguments
+///
+/// * `addr` - The address.
+fn signed_index(addr: &Expr) -> bool {
+    match addr {
+        Expr::Sext(..) => true,
+        Expr::Bin(Op::Add, l, r) => signed_index(l) || signed_index(r),
+        _ => false,
+    }
+}
+
+/// Tells whether a variable is a machine register whose pending value
+/// liveness may drop: an x86 register, or an arm64 general or `v`
+/// register (the stack pointer is tracked as an offset, not a value).
+///
+/// # Arguments
+///
+/// * `k` - The variable.
+fn is_register(k: Key) -> bool {
+    matches!(
+        k,
+        Key::Reg(_) | Key::A64(crate::isa::a64::Reg::X(_) | crate::isa::a64::Reg::V(_))
+    )
+}
+
 impl<'a> Exec<'_, 'a> {
     /// Returns the name resolver for rendering.
     pub(in crate::analysis::decompile) fn names(&self) -> Names<'a> {
@@ -607,7 +635,7 @@ impl<'a> Exec<'_, 'a> {
     /// # Arguments
     ///
     /// * `e` - The value that escaped (an argument, a stored value, a store address).
-    pub(super) fn note_escape(&mut self, e: &Expr) {
+    pub(in crate::analysis::decompile) fn note_escape(&mut self, e: &Expr) {
         if let Some(k) = e.min_sp() {
             self.ctx.escape_floor = Some(self.ctx.escape_floor.map_or(k, |f| f.min(k)));
         }
@@ -686,8 +714,11 @@ impl<'a> Exec<'_, 'a> {
     /// and a value that reads a slot would read what the write left. A
     /// region at a known slot with a known length covers what it spans; any
     /// other may cover every slot from its base up, or, copying backward,
-    /// any slot at all. The verifier's symbolic pass writes nothing out; it
-    /// forgets what the written slots held.
+    /// any slot at all. An arm64 address adding a sign-extended index to
+    /// its base may cover any slot as well: `va_arg` reads the register
+    /// save area below the `__gr_top` it adds a negative offset to. The
+    /// verifier's symbolic pass writes nothing out; it forgets what the
+    /// written slots held.
     ///
     /// # Arguments
     ///
@@ -712,6 +743,8 @@ impl<'a> Exec<'_, 'a> {
             }
             _ => None,
         };
+        let below = backward
+            || (self.ctx.program.arch.isa() == Some(crate::isa::Isa::A64) && signed_index(addr));
         // INVARIANT: a read through a frame address reads the slots it may
         // cover for slot liveness, as a call reads its window: the zeros
         // eight `push eax` leave for a `bts [esp], eax` live to the loop
@@ -719,7 +752,7 @@ impl<'a> Exec<'_, 'a> {
         if !writes {
             let seen = match span {
                 Some((a, b)) => SlotUse::Window(a, b),
-                None if backward => SlotUse::All,
+                None if below => SlotUse::All,
                 None => SlotUse::Window(lo, i64::MAX),
             };
             let before = self.written_slots();
@@ -727,7 +760,7 @@ impl<'a> Exec<'_, 'a> {
         }
         let covers = |o: i64, end: i64| match span {
             Some((a, b)) => o < b && a < end,
-            None => backward || end > lo,
+            None => below || end > lo,
         };
         let stores: Vec<i64> = self
             .env
@@ -1386,7 +1419,7 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `key` - The variable.
     /// * `ty` - Its type.
-    pub(super) fn declare(&mut self, key: Key, ty: Ty) {
+    pub(in crate::analysis::decompile) fn declare(&mut self, key: Key, ty: Ty) {
         if self.emit && !self.ctx.declared.contains_key(&key) {
             self.ctx.declared.insert(key, ty);
             if let Key::Slot(k) = key {
@@ -1421,7 +1454,7 @@ impl<'a> Exec<'_, 'a> {
             .collect();
         for x in readers {
             let dead = match live {
-                Some(l) => matches!(x, Key::Reg(_)) && !l(x),
+                Some(l) => is_register(x) && !l(x),
                 None => self.dead_reg(x),
             };
             if dead {
@@ -1545,7 +1578,7 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `k` - The variable; only registers can be dead here.
     pub(super) fn dead_reg(&self, k: Key) -> bool {
-        matches!(k, Key::Reg(_))
+        is_register(k)
             && !k.is_x87()
             && self
                 .regs_needed
@@ -1776,7 +1809,7 @@ impl<'a> Exec<'_, 'a> {
     /// # Returns
     ///
     /// The temporary's variable.
-    pub(super) fn tmp_of(&mut self, e: &Expr, ty: Ty) -> Expr {
+    pub(in crate::analysis::decompile) fn tmp_of(&mut self, e: &Expr, ty: Ty) -> Expr {
         let key = self.fresh_tmp(ty);
         if let (Some(p), Key::Tmp(id)) = (&mut self.ctx.probe, key) {
             p.temp(id, e);

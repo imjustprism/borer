@@ -2500,10 +2500,9 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Verify => {
             let text = args.get(5).is_some_and(|m| m == "text");
-            // INVARIANT: arm64 blocks lift and their lifting is checked
-            // against the arm64 machine, but arm64 functions do not
-            // decompile yet, so the text's check refuses them as decompile
-            // does.
+            // INVARIANT: an arm64 lifting is checked against the arm64
+            // machine block by block, which needs only the functions; its
+            // text's check decompiles them, as for x86.
             let a64 = !text && s.program.arch.isa() == Some(Isa::A64);
             let a = s.analysis(if a64 {
                 Feature::Discover

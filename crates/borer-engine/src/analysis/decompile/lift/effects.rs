@@ -24,9 +24,9 @@ pub(super) fn lane_bits(r: Register) -> u8 {
 }
 
 /// Canonical registers with the lane width (in bits) accessed.
-pub(super) type Lanes = Vec<(Key, u8)>;
+pub(in crate::analysis::decompile) type Lanes = Vec<(Key, u8)>;
 /// One instruction's register reads and writes for liveness.
-pub(super) type Effects = (Lanes, Lanes);
+pub(in crate::analysis::decompile) type Effects = (Lanes, Lanes);
 
 /// Per instruction, how many later instructions of the block read each
 /// register it writes before the register is written again.
@@ -1144,7 +1144,7 @@ pub(super) fn reg_effects(
 ///
 /// 8 for `bool` and the byte types, 16 for the 16-bit integer and character
 /// types, 64 for anything else.
-pub(super) fn declared_bits(declared: &str) -> u8 {
+pub(in crate::analysis::decompile) fn declared_bits(declared: &str) -> u8 {
     match declared {
         "bool" | "char" | "unsigned char" | "signed char" | "int8_t" | "uint8_t" => 8,
         "short" | "unsigned short" | "int16_t" | "uint16_t" | "wchar_t" | "char16_t" => 16,
@@ -1290,7 +1290,6 @@ pub(in crate::analysis::decompile) fn live_in(
     code: &[Vec<Instruction>],
     succs: &[Vec<usize>],
 ) -> Vec<FxHashMap<Key, u8>> {
-    let n = code.len();
     let mut factory = InstructionInfoFactory::new();
     let effects: Vec<Vec<Effects>> = code
         .iter()
@@ -1301,6 +1300,25 @@ pub(in crate::analysis::decompile) fn live_in(
                 .collect()
         })
         .collect();
+    live_from(&effects, succs)
+}
+
+/// Computes register liveness per block from each instruction's reads and
+/// writes, whatever instruction set they were read from ([`live_in`]).
+///
+/// # Arguments
+///
+/// * `effects` - Per block and instruction, the register reads and writes.
+/// * `succs` - Successor block indices per block.
+///
+/// # Returns
+///
+/// For every block, the registers live at its entry with the lane width needed.
+pub(in crate::analysis::decompile) fn live_from(
+    effects: &[Vec<Effects>],
+    succs: &[Vec<usize>],
+) -> Vec<FxHashMap<Key, u8>> {
+    let n = effects.len();
     let mut live: Vec<FxHashMap<Key, u8>> = vec![FxHashMap::default(); n];
     loop {
         let mut changed = false;
@@ -1347,6 +1365,33 @@ pub(in crate::analysis::decompile) fn need_after(
         after[idx] = need.clone();
         let (reads, writes) = reg_effects(ctx, &mut factory, instr);
         transfer(&mut need, &reads, &writes);
+    }
+    after
+}
+
+/// Computes, for every instruction of a block, the registers some later
+/// instruction reads once it has executed.
+///
+/// It reads each instruction's reads and writes, whatever instruction set
+/// they were read from ([`need_after`]).
+///
+/// # Arguments
+///
+/// * `effects` - The block's instructions' register reads and writes.
+/// * `out` - Registers live at the block's exit.
+///
+/// # Returns
+///
+/// One need map per instruction, indexed like `effects`.
+pub(in crate::analysis::decompile) fn need_from(
+    effects: &[Effects],
+    out: &FxHashMap<Key, u8>,
+) -> Vec<FxHashMap<Key, u8>> {
+    let mut need = out.clone();
+    let mut after = vec![FxHashMap::default(); effects.len()];
+    for (idx, (reads, writes)) in effects.iter().enumerate().rev() {
+        after[idx] = need.clone();
+        transfer(&mut need, reads, writes);
     }
     after
 }

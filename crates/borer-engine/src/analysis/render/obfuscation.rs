@@ -143,8 +143,13 @@ pub fn flattening_tsv(
         let block = f.blocks.iter().find(|b| b.start == *t);
         let instrs = block.map_or(0, |b| {
             let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
-            p.read_va_upto(b.start, len.max(1))
-                .map_or(0, |code| disasm::disassemble(code, b.start, 64, 64).len())
+            p.read_va_upto(b.start, len.max(1)).map_or(0, |code| {
+                if p.arch.isa() == Some(crate::isa::Isa::A64) {
+                    disasm::disassemble_isa(code, b.start, crate::isa::Isa::A64, 64).len()
+                } else {
+                    disasm::disassemble(code, b.start, 64, 64).len()
+                }
+            })
         });
         let ends = block.map_or("unknown", |b| match b.term {
             BlockTerm::Ret => "returns",
@@ -1039,6 +1044,9 @@ pub(super) fn stack_strings(p: &Program, a: &Analysis, want: &str) -> Vec<StackS
 ///
 /// The listing as text.
 pub fn stack_strings_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> String {
+    if let Err(why) = x86_reading(p, "stackstrings") {
+        return format!("# {why}\n");
+    }
     if p.arch.bitness().is_none() {
         return "# unknown architecture\n".to_owned();
     }

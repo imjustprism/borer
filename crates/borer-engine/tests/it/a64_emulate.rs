@@ -1402,8 +1402,9 @@ fn a_fill_answers_a_load_nothing_backs() {
 /// The experiment and typed-run surfaces run arm64 code.
 ///
 /// `emulate` reports the stop, the registers and the text the routine
-/// wrote, and `run` tabulates the call on its inputs, unchecked for want
-/// of text; the surfaces built on the x86 machine refuse it.
+/// wrote, and `run` tabulates the call on its inputs, unchecked (the
+/// decompile answer checks an arm64 text block by block instead); the
+/// surfaces built on the x86 machine refuse it.
 #[test]
 fn emulate_and_run_answer_for_arm64() {
     let p = image(&XOR_DECRYPT);
@@ -1436,7 +1437,9 @@ fn emulate_and_run_answer_for_arm64() {
         "{table}"
     );
     assert!(
-        table.contains("arm64 code does not decompile yet"),
+        table.contains("an arm64 text is checked block by block against the arm64 machine")
+            && table.contains("(no signature: an arm64 run passes its inputs untyped)")
+            && !table.contains("does not decompile"),
         "{table}"
     );
     for refused in [

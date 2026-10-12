@@ -160,6 +160,7 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     const LINES_MAX: usize = 80;
     /// Passes over the function, so a loop's back edge is followed once.
     const PASSES: usize = 2;
+    x86_reading(p, "taint")?;
     let ValueSpec {
         start,
         entry,
@@ -535,6 +536,7 @@ fn accesses(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Access
     const PASSES: usize = 2;
     /// Largest offset treated as a field rather than an unrelated pointer.
     const SPAN_MAX: i64 = 1 << 16;
+    x86_reading(p, "layout")?;
     let parsed = ValueSpec::parse(
         p,
         a,
@@ -928,6 +930,28 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
         }
     }
     Ok(out)
+}
+
+/// Refuses an arm64 program for a reading that follows x86 instructions.
+///
+/// The agent learns it is the instruction set, not the address.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `what` - The reading, as its resource names it.
+///
+/// # Errors
+///
+/// The sentence for an arm64 program.
+pub(super) fn x86_reading(p: &Program, what: &str) -> Result<(), String> {
+    match p.arch.isa() {
+        Some(crate::isa::Isa::A64) => Err(format!(
+            "{what} follows x86 and x86-64 instructions only; this {} file's arm64 code decompiles (decompile) but is not followed this way yet",
+            p.format.name()
+        )),
+        Some(crate::isa::Isa::X86 { .. }) | None => Ok(()),
+    }
 }
 
 /// Says why a spec's address token was refused.
