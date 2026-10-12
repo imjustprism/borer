@@ -2239,6 +2239,18 @@ impl<'a> Exec<'_, 'a> {
         let rax = self.canon(self.rax());
         let xmm0 = Key::Reg(Register::XMM0);
         let (uses_result, float_result) = self.result_read(next, rest, rax, xmm0);
+        // INVARIANT: a callee known to return a float leaves one in `xmm0`
+        // for a call in a later block to take as its argument, which the
+        // liveness reads only at [`VECTOR_ARG_LANE`].
+        let float_result = float_result
+            || (!uses_result
+                && rest.is_empty()
+                && self.bitness() == 64
+                && self
+                    .regs_needed
+                    .as_ref()
+                    .is_some_and(|m| m.contains_key(&xmm0))
+                && self.callee_returns_float(target));
         let st0 = match x87 {
             x87::Call::Helper(e) => (e.gives > 0).then_some(true),
             x87::Call::Plain => self.leaves_x87_float(instr, target),
@@ -2466,6 +2478,27 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
+    /// Tells whether a callee is known to return a `float` or a `double`:
+    /// its stated prototype or the type library declares one, else its
+    /// signature does, else every exit leaves one
+    /// ([`Function::ret_float`](crate::analysis::Function::ret_float)).
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The callee's entry when known.
+    fn callee_returns_float(&self, target: Option<u64>) -> bool {
+        match stated_returns(self.ctx, target, target) {
+            Some(r) => matches!(r, Returns::Float(_)),
+            None => target
+                .and_then(|t| self.ctx.analysis.function(t))
+                .is_some_and(|f| {
+                    f.signature.as_ref().map_or(f.ret_float.is_some(), |s| {
+                        crate::analysis::decompile::float_return(&s.ret)
+                    })
+                }),
+        }
+    }
+
     /// Tells whether a plain call being lifted leaves a float in `st0` on a
     /// 32-bit target, and whether the text shows it.
     ///
@@ -2488,16 +2521,7 @@ impl<'a> Exec<'_, 'a> {
     /// `None` when the call leaves nothing, else whether the text binds
     /// the float it leaves.
     fn leaves_x87_float(&mut self, instr: &Instruction, target: Option<u64>) -> Option<bool> {
-        let declared = match stated_returns(self.ctx, target, target) {
-            Some(r) => matches!(r, Returns::Float(_)),
-            None => target
-                .and_then(|t| self.ctx.analysis.function(t))
-                .is_some_and(|f| {
-                    f.signature.as_ref().map_or(f.ret_float.is_some(), |s| {
-                        crate::analysis::decompile::float_return(&s.ret)
-                    })
-                }),
-        };
+        let declared = self.callee_returns_float(target);
         let ctx = &*self.ctx;
         let after = x87::after_call(
             &|va| ctx.decode(va),
@@ -2519,7 +2543,9 @@ impl<'a> Exec<'_, 'a> {
     /// The same decision the emission of the call binds by, callable
     /// before the call clears the environment: whether the instruction
     /// after it, the rest of its block, or the successors' liveness reads
-    /// `rax`, and whether the float register alone is read instead.
+    /// `rax`, and whether the float register alone is read instead. A
+    /// later call's read of the float register ([`VECTOR_ARG_LANE`]) is no
+    /// read of a result here.
     ///
     /// # Arguments
     ///
@@ -2546,7 +2572,8 @@ impl<'a> Exec<'_, 'a> {
                 Some(_) if next_float => (false, true),
                 Some(m) => {
                     let r = m.contains_key(&rax);
-                    (r, m.contains_key(&xmm0) && !r)
+                    let float = m.get(&xmm0).is_some_and(|lane| *lane > VECTOR_ARG_LANE);
+                    (r, float && !r)
                 }
                 None if next.is_some() => (next_rax, next_float),
                 None => (self.rax_live_out.unwrap_or(true), false),

@@ -23,6 +23,18 @@ pub(super) fn lane_bits(r: Register) -> u8 {
     }
 }
 
+/// The lane, below any real one, a call's or a tail jump's read of a
+/// vector argument register carries in the liveness ([`reg_effects`]).
+///
+/// The convention lets any callee take a float in `xmm0`..`xmm3` (`xmm7`
+/// on System V), so the register stays live up to the call and a value
+/// pending in it is kept; but every call reads it so, whether its callee
+/// takes a float or not, so the read says nothing of the value there: a
+/// call before it binds its result in `xmm0` only for a read above this
+/// lane, or when the callee is known to return a float. Any write clears
+/// it ([`transfer`]) and any real read outranks it.
+pub(in crate::analysis::decompile) const VECTOR_ARG_LANE: u8 = 1;
+
 /// Canonical registers with the lane width (in bits) accessed.
 pub(in crate::analysis::decompile) type Lanes = Vec<(Key, u8)>;
 /// One instruction's register reads and writes for liveness.
@@ -1060,12 +1072,15 @@ pub(super) fn reg_effects(
     // INVARIANT: a call or a jump out may pass any argument register, a
     // float one in its vector register as well (`xmm1` for a callee that
     // takes a `float` second), so a value pending in one is kept for it.
+    // The vector ones are read at [`VECTOR_ARG_LANE`]: live, but no
+    // evidence that a call before it left a float there.
     let args = || {
-        ctx.conv
-            .args
-            .iter()
-            .chain(ctx.conv.float_args)
-            .map(|r| (Key::Reg(*r), 64u8))
+        ctx.conv.args.iter().map(|r| (Key::Reg(*r), 64u8)).chain(
+            ctx.conv
+                .float_args
+                .iter()
+                .map(|r| (Key::Reg(*r), VECTOR_ARG_LANE)),
+        )
     };
     match instr.flow_control() {
         // A stack probe or a cookie check reads and writes nothing the
