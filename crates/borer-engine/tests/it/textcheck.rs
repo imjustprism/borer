@@ -193,3 +193,63 @@ fn a_parameter_a_function_only_hands_on_is_named() {
     assert!(unset.is_empty(), "{text}\n{unset:?}");
     assert!(text.contains("(a1, a2, a3, "), "{text}");
 }
+
+/// A function one of whose exits hands back a void callee's leftover in
+/// `rax` returns nothing itself, whatever its other exits write.
+///
+/// Rust's drop glue sets `eax` testing a discriminant and calls a drop on
+/// the other path, and the text claimed the drop's leftover as a value it
+/// then compared with the binary's.
+///
+/// `f` is `mov eax,1; xor edx,edx; cmp qword [rcx],2; cmove eax,edx; test
+/// eax,eax; jne .call; ret; .call: sub rsp,0x28; call g; add rsp,0x28;
+/// ret`; `g` is `test rcx,rcx; je .out; call h; .out: ret`, which reaches
+/// its `ret` without writing `rax`; `h` is `mov [rcx],rdx; ret`.
+#[test]
+fn an_exit_handing_back_a_void_callees_leftover_returns_nothing() {
+    let mut code = vec![
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0x31, 0xd2, // ASM: xor edx,edx
+        0x48, 0x83, 0x39, 0x02, // ASM: cmp qword [rcx],2
+        0x0f, 0x44, 0xc2, // ASM: cmove eax,edx
+        0x85, 0xc0, // ASM: test eax,eax
+        0x75, 0x01, // ASM: jne 0x1013
+        0xc3, // ASM: ret
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x24, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([
+        0x48, 0x85, 0xc9, // ASM: test rcx,rcx
+        0x74, 0x05, // ASM: je 0x104a
+        0xe8, 0x16, 0x00, 0x00, 0x00, // ASM: call 0x1060
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x60, 0xcc);
+    code.extend([0x48, 0x89, 0x11, 0xc3]); // ASM: mov [rcx],rdx; ret
+    let p = program(&code, &[]);
+    let (text, _) = text_of(&p, TEXT);
+    assert!(text.contains("// signature: void sub_1000("), "{text}");
+}
+
+/// A function that returns what it calls returns what its callee does.
+///
+/// `call g; ret` with `g` handing back a byte (`mov al,[rcx+4]; ret`)
+/// returns a byte, and the bits above it are the caller's leftovers, which
+/// the text compared as part of a 64-bit value.
+#[test]
+fn a_call_returned_as_it_stands_has_its_callees_width() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x37, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0x8a, 0x41, 0x04, 0xc3]); // ASM: mov al,[rcx+4]; ret
+    let p = program(&code, &[]);
+    let (text, _) = text_of(&p, TEXT);
+    assert!(text.contains("// signature: uint8_t sub_1000("), "{text}");
+}

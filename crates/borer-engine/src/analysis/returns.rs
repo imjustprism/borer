@@ -1064,11 +1064,15 @@ fn x87_results(program: &Program, analysis: &Analysis, kept: &BTreeSet<u64>) -> 
 /// Tells, per function, whether its body returns nothing.
 ///
 /// A function returns nothing when it reaches a `ret` without writing rax
-/// ([`Handed::nothing`]), or when every exit hands back what a callee left
-/// in rax and every such callee leaves nothing there itself, by its
-/// declared signature or by these rules without a signature saying
-/// otherwise: a call or a jump to a function that produces no value, or
-/// hands a float back in xmm0 ([`float_results`]), produces none in rax.
+/// ([`Handed::nothing`]), or when some exit hands back what a callee left
+/// in rax and that callee leaves nothing there itself, by its declared
+/// signature or by these rules without a signature saying otherwise: a
+/// call or a jump to a function that produces no value, or hands a float
+/// back in xmm0 ([`float_results`]), produces none in rax. A function
+/// with a value hands one back on every path, so one path handing back a
+/// leftover says it has none, whatever its other exits write (Rust's drop
+/// glue sets `eax` to test a discriminant, then calls a drop that
+/// returns nothing on the other path).
 /// The second rule runs to a fixpoint over chains of wrappers, capped at
 /// [`PASS_ROUNDS_MAX`] rounds. A function some caller reads the result of,
 /// one that hands rax back untouched and one that hands a float back in
@@ -1113,10 +1117,10 @@ fn produces_nothing(
     for _ in 0..PASS_ROUNDS_MAX {
         let mut changed = false;
         for (i, h) in handed.iter().enumerate() {
-            if nothing[i] || !open[i] || h.own || h.unknown || h.calls.is_empty() {
+            if nothing[i] || !open[i] {
                 continue;
             }
-            let all_void = h.calls.iter().all(|c| {
+            let void = |c: &u64| {
                 analysis
                     .entry_index
                     .get(c)
@@ -1124,8 +1128,8 @@ fn produces_nothing(
                         Some(void) => void,
                         None => nothing[j] || floats[j].is_some(),
                     })
-            });
-            if all_void {
+            };
+            if h.calls.iter().any(void) {
                 nothing[i] = true;
                 changed = true;
             }

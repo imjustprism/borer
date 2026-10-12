@@ -1380,12 +1380,16 @@ pub(in crate::analysis::decompile) fn declared_bits(declared: &str) -> u8 {
 /// are dead; when every one ends with a write of `eax` or narrower, the
 /// value is 32 bits wide. A returning block without a rax write asks its
 /// predecessors, up to [`RET_LANE_DEPTH`] blocks back (`mov al, 0; jmp
-/// done` shares its `ret`). Anything else, a call as the last rax writer
-/// included, is the whole register. A jump out of the function hands back
-/// what the function it enters returns, so a 32-bit lane holds only when
-/// that is no wider: the lane its signature or its own exits give it
+/// done` shares its `ret`). A call as the last rax writer hands back what
+/// its callee returns: the lane its signature or its own exits give it
 /// ([`Function::ret_width`](crate::analysis::Function::ret_width)), nothing
-/// when it returns nothing, and the whole register when that is not known.
+/// when it returns nothing, and the whole register when that is not known,
+/// so `call is_digit; ret` returns the byte `is_digit` does and the bits
+/// above it are the caller's leftovers; a call to a callee that hands `rax`
+/// back untouched (a cookie check before the `ret`) writes nothing, and the
+/// write before it decides. Anything else is the whole register. A jump out
+/// of the function hands back what the function it enters returns the same
+/// way, so a 32-bit lane holds only when that is no wider.
 ///
 /// # Arguments
 ///
@@ -1411,10 +1415,37 @@ pub(in crate::analysis::decompile) fn ret_lane(
             }
         }
     }
+    let handed_by = |i: &Instruction| match near_target(i)
+        .and_then(|t| analysis.function(t))
+        .map(|g| (g.signature.as_ref(), g))
+    {
+        Some((Some(sig), _)) if sig.ret == "void" => 0,
+        Some((Some(sig), _)) => declared_bits(&sig.ret),
+        Some((None, g)) if g.returns_value == Some(false) => 0,
+        Some((None, g)) => g.ret_width.unwrap_or(64),
+        None => 64,
+    };
     let mut factory = InstructionInfoFactory::new();
     let written: Vec<Option<u8>> = code
         .iter()
-        .map(|instrs| last_rax_write(&mut factory, instrs).map(|(written, _)| written))
+        .map(|instrs| {
+            instrs.iter().rev().find_map(|i| {
+                let (written, _) = last_rax_write(&mut factory, std::slice::from_ref(i))?;
+                match i.flow_control() {
+                    FlowControl::Call | FlowControl::IndirectCall
+                        if near_target(i).is_some_and(|t| {
+                            analysis
+                                .function(t)
+                                .is_some_and(|g| g.entry == t && g.preserves_rax)
+                        }) =>
+                    {
+                        None
+                    }
+                    FlowControl::Call | FlowControl::IndirectCall => Some(handed_by(i)),
+                    _ => Some(written),
+                }
+            })
+        })
         .collect();
     let mut known = |b: usize, from: Option<usize>| match from {
         None => written.get(b).copied().flatten(),
@@ -1429,18 +1460,7 @@ pub(in crate::analysis::decompile) fn ret_lane(
                 lane = lane.max(lane_before(b, &mut known, &preds, RET_LANE_DEPTH));
             }
             Some(FlowControl::UnconditionalBranch | FlowControl::IndirectBranch) if leaves => {
-                let entered = instrs
-                    .last()
-                    .and_then(near_target)
-                    .and_then(|t| analysis.function(t));
-                let handed = match entered.map(|g| (g.signature.as_ref(), g)) {
-                    Some((Some(sig), _)) if sig.ret == "void" => 0,
-                    Some((Some(sig), _)) => declared_bits(&sig.ret),
-                    Some((None, g)) if g.returns_value == Some(false) => 0,
-                    Some((None, g)) => g.ret_width.unwrap_or(64),
-                    None => 64,
-                };
-                tail = tail.max(handed);
+                tail = tail.max(instrs.last().map_or(64, handed_by));
             }
             _ => {}
         }
