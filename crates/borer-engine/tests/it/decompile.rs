@@ -234,6 +234,42 @@ fn a_result_read_through_the_second_one_is_taken_first() {
     );
 }
 
+/// A register whose dead load a store dropped is not passed by its stale
+/// name to the jump the text reads as a tail call.
+///
+/// `mov rdx,[rcx+16]; mov [r8+32],rdx; mov rax,[rcx]; mov ecx,[r9]; jmp
+/// rax`: the liveness sees no read of `rdx` at the indirect jump, so the
+/// store dropped its pending load unwritten, and the tail call then named
+/// `rdx`, whose text variable held an older value; the check of the text
+/// disagreed on the argument, as on a jump through a table the corpus
+/// binary's `build_blocks` takes.
+///
+/// # Panics
+///
+/// When the call passes `rdx` or the check disagrees.
+#[test]
+fn a_register_dropped_dead_is_not_passed_by_its_stale_name() {
+    use borer_engine::analysis::decompile::checked_header;
+    let code = [
+        0x48, 0x8b, 0x51, 0x10, // ASM: mov rdx,[rcx+16]
+        0x49, 0x89, 0x50, 0x20, // ASM: mov [r8+32],rdx
+        0x48, 0x8b, 0x01, // ASM: mov rax,[rcx]
+        0x41, 0x8b, 0x09, // ASM: mov ecx,[r9]
+        0xff, 0xe0, // ASM: jmp rax
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile(&p, &a, &o, 0x1_4000_1000).unwrap_or_default();
+    let header = checked_header(&p, &a, &o, 0x1_4000_1000).unwrap_or_default();
+    assert!(!header.contains("disagree"), "{header}\n{text}");
+    let call = text
+        .lines()
+        .find(|l| l.contains("return (*"))
+        .unwrap_or_default();
+    assert!(!call.contains("rdx"), "{text}");
+}
+
 /// A 32-bit load feeding a 64-bit subtract keeps the machine's borrow
 /// width: the load widens, and `0 - 4` is `0xffff_ffff_ffff_fffc`.
 ///

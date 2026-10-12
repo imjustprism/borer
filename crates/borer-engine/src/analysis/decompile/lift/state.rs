@@ -762,7 +762,7 @@ impl<'a> Exec<'_, 'a> {
             .collect();
         for r in readers {
             if self.dead_reg(r) {
-                self.env.vals.remove(&r);
+                self.forget_dead(r);
             } else {
                 self.materialize(r, &mut Vec::new(), None);
             }
@@ -1413,7 +1413,7 @@ impl<'a> Exec<'_, 'a> {
                 None => self.dead_reg(x),
             };
             if dead {
-                self.env.vals.remove(&x);
+                self.forget_dead(x);
             } else if stack.contains(&x) {
                 self.park(x);
             } else {
@@ -1515,7 +1515,7 @@ impl<'a> Exec<'_, 'a> {
             .collect();
         for r in readers {
             if self.dead_reg(r) {
-                self.env.vals.remove(&r);
+                self.forget_dead(r);
             } else {
                 self.materialize(r, &mut Vec::new(), None);
             }
@@ -1539,6 +1539,26 @@ impl<'a> Exec<'_, 'a> {
                 .regs_needed
                 .as_ref()
                 .is_some_and(|m| !m.contains_key(&k))
+    }
+
+    /// Drops the pending value of a dead register ([`Exec::dead_reg`])
+    /// without writing it out.
+    ///
+    /// Its text variable then holds no value the machine does, so the
+    /// register is no longer named as one, nor counted as set for the next
+    /// call ([`Env::clobbered`], [`Env::fresh`]): a computed
+    /// jump the text reads as a tail call (`jmp rax` through a table the
+    /// analysis could not bound) reads arguments the liveness never saw,
+    /// and passed `rdx` by its stale name after a store dropped the load
+    /// it held.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The register.
+    pub(super) fn forget_dead(&mut self, k: Key) {
+        self.env.vals.remove(&k);
+        self.env.fresh.remove(&k);
+        self.env.clobbered.insert(k);
     }
 
     /// Copies pending flag operands matching `pred` into temporaries so the

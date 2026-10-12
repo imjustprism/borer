@@ -1081,7 +1081,7 @@ impl<'a> Exec<'_, 'a> {
             return;
         }
         if self.dead_reg(k) {
-            self.env.vals.remove(&k);
+            self.forget_dead(k);
             return;
         }
         let rebased = self.rebase_arguments(k, held);
@@ -1105,7 +1105,7 @@ impl<'a> Exec<'_, 'a> {
         }
         for k in self.argument_registers().iter().chain(operands) {
             if self.dead_reg(*k) {
-                self.env.vals.remove(k);
+                self.forget_dead(*k);
             }
         }
         match self.env.sp {
@@ -1671,7 +1671,7 @@ impl<'a> Exec<'_, 'a> {
             // (`cmovne rbx, rax; mov rdx, rbx` passes the selection, not
             // the `rbx` from before it).
             if self.dead_reg(k) {
-                self.env.vals.remove(&k);
+                self.forget_dead(k);
             } else {
                 let rebased = self.rebase_arguments(k, &args);
                 self.materialize(k, &mut Vec::new(), None);

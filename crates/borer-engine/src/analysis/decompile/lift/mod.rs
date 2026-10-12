@@ -142,14 +142,17 @@ pub(super) struct Env {
     /// Registers and stack slots some instruction wrote since the last
     /// call, on every path here; empty at the entry, where a register holds
     /// only what the caller left. A call whose callee states no arity passes
-    /// these and nothing a register merely inherited.
+    /// these and nothing a register merely inherited. A register whose dead
+    /// value was dropped unwritten ([`Exec::forget_dead`]) leaves it.
     pub fresh: BTreeSet<Key>,
     /// Registers some instruction wrote on some path here since the entry:
     /// a callee-saved register outside it still holds the caller's value,
     /// and a push of it is a save, no argument.
     pub touched: BTreeSet<Key>,
-    /// Volatile registers a call clobbered on some path here and nothing
-    /// wrote since: their text variables name no value the machine holds.
+    /// Volatile registers a call clobbered on some path here, and registers
+    /// whose dead pending value was dropped unwritten ([`Exec::forget_dead`]),
+    /// that nothing wrote since: their text variables name no value the
+    /// machine holds.
     pub clobbered: BTreeSet<Key>,
 }
 
