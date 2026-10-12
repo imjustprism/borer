@@ -35,6 +35,9 @@ pub const SCAN_MAX: u64 = 4 << 30;
 /// Bytes read from a process in one piece while scanning.
 const CHUNK: usize = 1 << 20;
 
+/// A page of process memory: the unit a read that fails is stepped over by.
+const PAGE: u64 = 0x1000;
+
 /// Longest string a pointer is followed into.
 const STR_CAP: usize = 120;
 
@@ -821,12 +824,14 @@ pub fn find_words(mem: &dyn Memory, targets: &[u64], word: usize, limit: usize) 
                 break 'regions;
             }
             let len = usize::try_from(end - at).unwrap_or(CHUNK).min(CHUNK);
-            let Some(bytes) = mem.read(at, len) else {
-                // A page inside a region can stop being readable while the
-                // scan runs - a live process decommits and recommits - and
-                // the words past it still stand, so the chunk is stepped
-                // over instead of ending the region.
-                at = at.saturating_add(len as u64);
+            // A page inside a region can stop being readable while the scan
+            // runs - a live process decommits and recommits - and the words
+            // around it still stand. A read stops at the first such page, so
+            // the scan resumes right there and, when even that page does not
+            // read, steps over that one page rather than the chunk or the
+            // rest of the region.
+            let Some(bytes) = mem.read(at, len).filter(|b| !b.is_empty()) else {
+                at = (at | (PAGE - 1)).saturating_add(1);
                 continue;
             };
             scan.bytes += bytes.len() as u64;
@@ -842,10 +847,7 @@ pub fn find_words(mem: &dyn Memory, targets: &[u64], word: usize, limit: usize) 
                 }
                 off += word;
             }
-            if bytes.len() < len {
-                break;
-            }
-            at += bytes.len() as u64;
+            at = at.saturating_add(bytes.len() as u64);
         }
     }
     scan
@@ -1155,6 +1157,75 @@ pub fn render_changes(was: &Snapshot, diff: &Diff, fields: &BTreeMap<u64, Field>
 )]
 mod tests {
     use super::*;
+
+    /// A process of one writable region whose listed pages do not read, as
+    /// a live heap's do once decommitted mid-scan.
+    struct Holey {
+        /// Where the region starts.
+        base: u64,
+        /// Its bytes.
+        data: Vec<u8>,
+        /// Start addresses of the pages that do not read.
+        holes: Vec<u64>,
+    }
+
+    impl Memory for Holey {
+        fn read(&self, va: u64, len: usize) -> Option<Vec<u8>> {
+            let end = self.base + self.data.len() as u64;
+            if va < self.base || va >= end || self.holes.contains(&(va & !(PAGE - 1))) {
+                return None;
+            }
+            let mut stop = (va + len as u64).min(end);
+            for &h in &self.holes {
+                if h > va && h < stop {
+                    stop = h;
+                }
+            }
+            let from = usize::try_from(va - self.base).ok()?;
+            let to = usize::try_from(stop - self.base).ok()?;
+            Some(self.data[from..to].to_vec())
+        }
+
+        fn regions(&self) -> Vec<Region> {
+            vec![Region {
+                base: self.base,
+                size: self.data.len() as u64,
+                writable: true,
+                executable: false,
+                image: false,
+            }]
+        }
+
+        fn modules(&self) -> Vec<Module> {
+            Vec::new()
+        }
+    }
+
+    /// A page that does not read costs the scan that page only: words past
+    /// a hole inside the region, and after a hole at its start, are found.
+    #[test]
+    fn a_scan_steps_over_only_the_pages_that_do_not_read() {
+        const WORD: u64 = 0x5a5a_1234_abcd_0001;
+        let base = 0x10_000;
+        let mut data = vec![0u8; 4 * 0x1000];
+        for off in [0x10usize, 0x2020, 0x3008] {
+            data[off..off + 8].copy_from_slice(&WORD.to_le_bytes());
+        }
+        let middle = Holey {
+            base,
+            data: data.clone(),
+            holes: vec![base + 0x1000],
+        };
+        let scan = find_words(&middle, &[WORD], 8, 16);
+        assert_eq!(scan.hits, vec![base + 0x10, base + 0x2020, base + 0x3008]);
+        let first = Holey {
+            base,
+            data,
+            holes: vec![base],
+        };
+        let scan = find_words(&first, &[WORD], 8, 16);
+        assert_eq!(scan.hits, vec![base + 0x2020, base + 0x3008]);
+    }
 
     /// A process that is one buffer at one address, with the modules it
     /// says are loaded in it.
