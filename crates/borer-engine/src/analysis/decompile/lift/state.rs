@@ -944,11 +944,19 @@ impl<'a> Exec<'_, 'a> {
     /// * `ty` - Store type.
     /// * `v` - The stored value; a value computed from the destination
     ///   itself (`*p = *p + 1`) renders as a compound assignment (`*p += 1`),
-    ///   as a register's does.
+    ///   as a register's does. A store narrower than a word keeps only the
+    ///   value's low bits, so the masks those bits pass through are dropped
+    ///   ([`crate::analysis::decompile::expr::low_bits_read`]).
     pub(super) fn emit_store(&mut self, addr: Expr, ty: Ty, v: &Expr) {
         self.note_escape(v);
         self.note_escape(&addr);
-        let (mut addr, mut v) = (addr, v.clone());
+        let v = match ty {
+            Ty::U8 | Ty::U16 | Ty::U32 => {
+                crate::analysis::decompile::expr::low_bits_read(v.clone(), ty.bits())
+            }
+            Ty::U64 | Ty::U128 | Ty::F32 | Ty::F64 => v.clone(),
+        };
+        let (mut addr, mut v) = (addr, v);
         let word = self.word_ty();
         self.protect_memory_around(&mut [(&mut addr, word), (&mut v, ty)]);
         let v = &v;
@@ -1095,6 +1103,19 @@ impl<'a> Exec<'_, 'a> {
                 .copied()
                 .unwrap_or_else(|| self.ty_of(key).bits()),
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => self.ty_of(key).bits(),
+        };
+        // INVARIANT: a slot or global narrower than a word keeps only the
+        // value's low bits, as a store to memory does.
+        let val = &match key {
+            Key::Slot(_) | Key::Global(..) if bits < 64 && !val.is_float() => {
+                crate::analysis::decompile::expr::low_bits_read(val.clone(), bits)
+            }
+            Key::Slot(_)
+            | Key::Global(..)
+            | Key::Reg(_)
+            | Key::Tmp(_)
+            | Key::Param(_)
+            | Key::A64(_) => val.clone(),
         };
         self.record(EffectKind::Assign(key, val.clone(), bits));
         let n = self.names();

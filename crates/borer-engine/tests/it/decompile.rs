@@ -5633,6 +5633,25 @@ fn a_remainder_through_a_32_bit_negative_multiplier_reads_as_the_remainder() {
     assert!(!text.contains("mulhi"), "{text}");
 }
 
+/// A store narrower than a word keeps the value's low bits without a mask.
+///
+/// The byte `lea eax, [rcx+rdx]; mov [r8], al` stores and the swapped word
+/// `bswap ecx; mov [r8+4], ecx` stores truncate as C's assignment does,
+/// so neither shows the `& 0xff` or `& 0xffffffff` the register reads
+/// carried.
+#[test]
+fn a_narrow_store_shows_no_mask_of_what_it_drops() {
+    let code = [
+        0x8d, 0x04, 0x11, // ASM: lea eax, [rcx + rdx]
+        0x41, 0x88, 0x00, // ASM: mov byte ptr [r8], al
+        0x0f, 0xc9, // ASM: bswap ecx
+        0x41, 0x89, 0x48, 0x04, // ASM: mov dword ptr [r8 + 0x4], ecx
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(!text.contains("& 0xff"), "{text}");
+}
+
 /// A 16-bit rotate by 8 swaps the half word's bytes and reads as `bswap`.
 #[test]
 fn a_half_word_rotate_by_eight_reads_as_a_byte_swap() {

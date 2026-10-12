@@ -2320,8 +2320,13 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
         },
         Expr::Ternary(_, a, b) => known_bits(a) | known_bits(b),
         // INVARIANT: the unsigned high half of a product at a width, and a
-        // rotate within a width, are no wider than that width.
+        // rotate within a width, are no wider than that width; a byte swap
+        // works at its operand's type and is no wider either.
         Expr::Bin(Op::MulHi(w) | Op::Rol(w) | Op::Ror(w), ..) => mask_bits(*w),
+        Expr::Un(UnOp::Bswap, x) => match x.as_ref() {
+            Expr::Cast(_, ty) | Expr::Deref(_, ty) if ty.bits() < 64 => mask_bits(ty.bits()),
+            _ => u64::MAX,
+        },
         // INVARIANT: only 32-bit code keys a register by its 32-bit name
         // (64-bit code keys every one at full width), and there it holds no
         // more than 32 bits.
@@ -2576,7 +2581,7 @@ pub(super) fn sign_extend(e: Expr, from_bits: u8) -> Expr {
 ///
 /// * `e` - The value.
 /// * `bits` - How many low bits are read, below 64.
-fn low_bits_read(e: Expr, bits: u8) -> Expr {
+pub(super) fn low_bits_read(e: Expr, bits: u8) -> Expr {
     let keep = mask_bits(bits);
     let go = |x: Box<Expr>| Box::new(low_bits_read(*x, bits));
     match e {
