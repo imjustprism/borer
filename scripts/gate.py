@@ -8,7 +8,8 @@
 
 Steps, in order: the unpushed commits' messages (scripts/commits.py), cargo fmt, cargo clippy -D warnings, cargo test, cargo doc
 with warnings as errors (private items included), cargo deny (offline subset),
-the dogfood sweep over a real binary, typos, ruff check + format,
+the dogfood sweep over a real binary, typos, ruff check + format, the type
+library regenerated (scripts/typelib.py --check),
 scripts/smoke.py, scripts/agent_eval.py. The first failure stops the run and the exit status is
 non-zero. Tools that are not installed are reported and skipped, never
 silently passed.
@@ -257,6 +258,12 @@ def main(argv: list[str]) -> int:
         ("typos", ["typos"], None, "typos"),
         ("ruff check", ["ruff", "check", "scripts"], None, "ruff"),
         ("ruff format", ["ruff", "format", "--check", "scripts"], None, "ruff"),
+        (
+            "typelib",
+            [sys.executable, os.path.join("scripts", "typelib.py"), "--check"],
+            None,
+            None,
+        ),
     ]
     if not fast:
         steps.append(

@@ -1,0 +1,177 @@
+CheckRemoteDebuggerPresent	win	BOOL	-	HANDLE hProcess|PBOOL pbDebuggerPresent	-
+CloseHandle	win	BOOL	-	HANDLE hObject	-
+CoCreateInstance	win	HRESULT	-	REFCLSID rclsid|LPUNKNOWN pUnkOuter|DWORD dwClsContext|REFIID riid|LPVOID *ppv	-|-|clsctx|-|-
+CopyFileW	win	BOOL	-	LPCWSTR lpExistingFileName|LPCWSTR lpNewFileName|BOOL bFailIfExists	-|-|bool
+CreateDirectoryW	win	BOOL	-	LPCWSTR lpPathName|LPSECURITY_ATTRIBUTES lpSecurityAttributes	-
+CreateEventW	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpEventAttributes|BOOL bManualReset|BOOL bInitialState|LPCWSTR lpName	-|bool|bool|-
+CreateFileA	win	HANDLE	handle	LPCSTR lpFileName|DWORD dwDesiredAccess|DWORD dwShareMode|LPSECURITY_ATTRIBUTES lpSecurityAttributes|DWORD dwCreationDisposition|DWORD dwFlagsAndAttributes|HANDLE hTemplateFile	-|file_access|file_share|-|file_disposition|file_flags|-
+CreateFileMappingW	win	HANDLE	-	HANDLE hFile|LPSECURITY_ATTRIBUTES lpFileMappingAttributes|DWORD flProtect|DWORD dwMaximumSizeHigh|DWORD dwMaximumSizeLow|LPCWSTR lpName	-|-|page_protect|-|-|-
+CreateFileW	win	HANDLE	handle	LPCWSTR lpFileName|DWORD dwDesiredAccess|DWORD dwShareMode|LPSECURITY_ATTRIBUTES lpSecurityAttributes|DWORD dwCreationDisposition|DWORD dwFlagsAndAttributes|HANDLE hTemplateFile	-|file_access|file_share|-|file_disposition|file_flags|-
+CreateMutexW	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpMutexAttributes|BOOL bInitialOwner|LPCWSTR lpName	-|bool|-
+CreateProcessA	win	BOOL	-	LPCSTR lpApplicationName|LPSTR lpCommandLine|LPSECURITY_ATTRIBUTES lpProcessAttributes|LPSECURITY_ATTRIBUTES lpThreadAttributes|BOOL bInheritHandles|DWORD dwCreationFlags|LPVOID lpEnvironment|LPCSTR lpCurrentDirectory|LPSTARTUPINFOA lpStartupInfo|LPPROCESS_INFORMATION lpProcessInformation	-|-|-|-|bool|process_creation|-|-|-|-
+CreateProcessW	win	BOOL	-	LPCWSTR lpApplicationName|LPWSTR lpCommandLine|LPSECURITY_ATTRIBUTES lpProcessAttributes|LPSECURITY_ATTRIBUTES lpThreadAttributes|BOOL bInheritHandles|DWORD dwCreationFlags|LPVOID lpEnvironment|LPCWSTR lpCurrentDirectory|LPSTARTUPINFOW lpStartupInfo|LPPROCESS_INFORMATION lpProcessInformation	-|-|-|-|bool|process_creation|-|-|-|-
+CreateRemoteThread	win	HANDLE	-	HANDLE hProcess|LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPDWORD lpThreadId	-|-|-|-|-|thread_creation|-
+CreateThread	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPDWORD lpThreadId	-|-|-|-|thread_creation|-
+CreateToolhelp32Snapshot	win	HANDLE	handle	DWORD dwFlags|DWORD th32ProcessID	snapshot|-
+DeleteCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
+DeleteFileA	win	BOOL	-	LPCSTR lpFileName	-
+DeleteFileW	win	BOOL	-	LPCWSTR lpFileName	-
+DuplicateHandle	win	BOOL	-	HANDLE hSourceProcessHandle|HANDLE hSourceHandle|HANDLE hTargetProcessHandle|LPHANDLE lpTargetHandle|DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwOptions	-|-|-|-|-|bool|duplicate
+EnterCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
+ExitProcess	win	void	-	UINT uExitCode	-
+ExitThread	win	void	-	DWORD dwExitCode	-
+FindClose	win	BOOL	-	HANDLE hFindFile	-
+FindFirstFileW	win	HANDLE	handle	LPCWSTR lpFileName|LPWIN32_FIND_DATAW lpFindFileData	-
+FindNextFileW	win	BOOL	-	HANDLE hFindFile|LPWIN32_FIND_DATAW lpFindFileData	-
+FreeLibrary	win	BOOL	-	HMODULE hLibModule	-
+GetAsyncKeyState	win	SHORT	-	int vKey	-
+GetCurrentProcess	win	HANDLE	-	-	-
+GetCurrentProcessId	win	DWORD	-	-	-
+GetCurrentThreadId	win	DWORD	-	-	-
+GetFileAttributesW	win	DWORD	-	LPCWSTR lpFileName	-
+GetFileSize	win	DWORD	-	HANDLE hFile|LPDWORD lpFileSizeHigh	-
+GetLastError	win	DWORD	-	-	-
+GetModuleFileNameW	win	DWORD	-	HMODULE hModule|LPWSTR lpFilename|DWORD nSize	-
+GetModuleHandleA	win	HMODULE	-	LPCSTR lpModuleName	-
+GetModuleHandleW	win	HMODULE	-	LPCWSTR lpModuleName	-
+GetProcAddress	win	FARPROC	-	HMODULE hModule|LPCSTR lpProcName	-
+GetProcessHeap	win	HANDLE	-	-	-
+GetStdHandle	win	HANDLE	handle	DWORD nStdHandle	std_handle
+GetTickCount	win	DWORD	-	-	-
+GetTickCount64	win	ULONGLONG	-	-	-
+HeapAlloc	win	LPVOID	-	HANDLE hHeap|DWORD dwFlags|SIZE_T dwBytes	-|heap_flags|-
+HeapFree	win	BOOL	-	HANDLE hHeap|DWORD dwFlags|LPVOID lpMem	-|heap_flags|-
+InitializeCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
+InternetCloseHandle	win	BOOL	-	HINTERNET hInternet	-
+InternetOpenUrlW	win	HINTERNET	-	HINTERNET hInternet|LPCWSTR lpszUrl|LPCWSTR lpszHeaders|DWORD dwHeadersLength|DWORD dwFlags|DWORD_PTR dwContext	-|-|-|-|internet_flags|-
+InternetOpenW	win	HINTERNET	-	LPCWSTR lpszAgent|DWORD dwAccessType|LPCWSTR lpszProxy|LPCWSTR lpszProxyBypass|DWORD dwFlags	-|internet_open|-|-|internet_flags
+InternetReadFile	win	BOOL	-	HINTERNET hFile|LPVOID lpBuffer|DWORD dwNumberOfBytesToRead|LPDWORD lpdwNumberOfBytesRead	-
+IsDebuggerPresent	win	BOOL	-	-	-
+LeaveCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
+LoadLibraryA	win	HMODULE	-	LPCSTR lpLibFileName	-
+LoadLibraryExW	win	HMODULE	-	LPCWSTR lpLibFileName|HANDLE hFile|DWORD dwFlags	-|-|load_library
+LoadLibraryW	win	HMODULE	-	LPCWSTR lpLibFileName	-
+MapViewOfFile	win	LPVOID	-	HANDLE hFileMappingObject|DWORD dwDesiredAccess|DWORD dwFileOffsetHigh|DWORD dwFileOffsetLow|SIZE_T dwNumberOfBytesToMap	-|file_map|-|-|-
+MessageBoxA	win	int	dialog_result	HWND hWnd|LPCSTR lpText|LPCSTR lpCaption|UINT uType	-|-|-|message_box
+MessageBoxW	win	int	dialog_result	HWND hWnd|LPCWSTR lpText|LPCWSTR lpCaption|UINT uType	-|-|-|message_box
+MoveFileExW	win	BOOL	-	LPCWSTR lpExistingFileName|LPCWSTR lpNewFileName|DWORD dwFlags	-|-|move_file
+OpenProcess	win	HANDLE	-	DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwProcessId	process_access|bool|-
+OpenProcessToken	win	BOOL	-	HANDLE ProcessHandle|DWORD DesiredAccess|PHANDLE TokenHandle	-|token_access|-
+OpenThread	win	HANDLE	-	DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwThreadId	thread_access|bool|-
+OutputDebugStringA	win	void	-	LPCSTR lpOutputString	-
+OutputDebugStringW	win	void	-	LPCWSTR lpOutputString	-
+ReadFile	win	BOOL	-	HANDLE hFile|LPVOID lpBuffer|DWORD nNumberOfBytesToRead|LPDWORD lpNumberOfBytesRead|LPOVERLAPPED lpOverlapped	-
+ReadProcessMemory	win	BOOL	-	HANDLE hProcess|LPCVOID lpBaseAddress|LPVOID lpBuffer|SIZE_T nSize|SIZE_T *lpNumberOfBytesRead	-
+RegCloseKey	win	LSTATUS	-	HKEY hKey	hkey
+RegCreateKeyExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpSubKey|DWORD Reserved|LPWSTR lpClass|DWORD dwOptions|REGSAM samDesired|LPSECURITY_ATTRIBUTES lpSecurityAttributes|PHKEY phkResult|LPDWORD lpdwDisposition	hkey|-|-|-|reg_options|reg_sam|-|-|-
+RegDeleteValueW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName	hkey|-
+RegOpenKeyExA	win	LSTATUS	-	HKEY hKey|LPCSTR lpSubKey|DWORD ulOptions|REGSAM samDesired|PHKEY phkResult	hkey|-|reg_options|reg_sam|-
+RegOpenKeyExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpSubKey|DWORD ulOptions|REGSAM samDesired|PHKEY phkResult	hkey|-|reg_options|reg_sam|-
+RegQueryValueExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName|LPDWORD lpReserved|LPDWORD lpType|LPBYTE lpData|LPDWORD lpcbData	hkey|-|-|-|-|-
+RegSetValueExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName|DWORD Reserved|DWORD dwType|const BYTE *lpData|DWORD cbData	hkey|-|-|reg_type|-|-
+ResumeThread	win	DWORD	-	HANDLE hThread	-
+SHGetFolderPathW	win	HRESULT	-	HWND hwnd|int csidl|HANDLE hToken|DWORD dwFlags|LPWSTR pszPath	-|csidl|-|-|-
+SetFileAttributesW	win	BOOL	-	LPCWSTR lpFileName|DWORD dwFileAttributes	-|file_flags
+SetFilePointer	win	DWORD	-	HANDLE hFile|LONG lDistanceToMove|PLONG lpDistanceToMoveHigh|DWORD dwMoveMethod	-|-|-|move_method
+SetLastError	win	void	-	DWORD dwErrCode	-
+SetWindowsHookExW	win	HHOOK	-	int idHook|HOOKPROC lpfn|HINSTANCE hmod|DWORD dwThreadId	hook|-|-|-
+ShowWindow	win	BOOL	-	HWND hWnd|int nCmdShow	-|show_window
+Sleep	win	void	-	DWORD dwMilliseconds	timeout
+SuspendThread	win	DWORD	-	HANDLE hThread	-
+TerminateProcess	win	BOOL	-	HANDLE hProcess|UINT uExitCode	-
+UnmapViewOfFile	win	BOOL	-	LPCVOID lpBaseAddress	-
+VirtualAlloc	win	LPVOID	-	LPVOID lpAddress|SIZE_T dwSize|DWORD flAllocationType|DWORD flProtect	-|-|mem_type|page_protect
+VirtualAllocEx	win	LPVOID	-	HANDLE hProcess|LPVOID lpAddress|SIZE_T dwSize|DWORD flAllocationType|DWORD flProtect	-|-|-|mem_type|page_protect
+VirtualFree	win	BOOL	-	LPVOID lpAddress|SIZE_T dwSize|DWORD dwFreeType	-|-|mem_type
+VirtualProtect	win	BOOL	-	LPVOID lpAddress|SIZE_T dwSize|DWORD flNewProtect|PDWORD lpflOldProtect	-|-|page_protect|-
+VirtualProtectEx	win	BOOL	-	HANDLE hProcess|LPVOID lpAddress|SIZE_T dwSize|DWORD flNewProtect|PDWORD lpflOldProtect	-|-|-|page_protect|-
+VirtualQuery	win	SIZE_T	-	LPCVOID lpAddress|PMEMORY_BASIC_INFORMATION lpBuffer|SIZE_T dwLength	-
+WSAStartup	win	int	-	WORD wVersionRequested|LPWSADATA lpWSAData	-
+WaitForSingleObject	win	DWORD	wait_result	HANDLE hHandle|DWORD dwMilliseconds	-|timeout
+WriteFile	win	BOOL	-	HANDLE hFile|LPCVOID lpBuffer|DWORD nNumberOfBytesToWrite|LPDWORD lpNumberOfBytesWritten|LPOVERLAPPED lpOverlapped	-
+WriteProcessMemory	win	BOOL	-	HANDLE hProcess|LPVOID lpBaseAddress|LPCVOID lpBuffer|SIZE_T nSize|SIZE_T *lpNumberOfBytesWritten	-
+_exit	posix	void	-	int status	-
+abort	c	void	-	-	-
+accept	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
+access	posix	int	-	const char *pathname|int mode	-|access_mode
+atoi	c	int	-	const char *nptr	-
+bind	posix	int	-	int sockfd|const struct sockaddr *addr|socklen_t addrlen	-
+calloc	c	void *	-	size_t nmemb|size_t size	-
+chmod	posix	int	-	const char *pathname|mode_t mode	-
+close	posix	int	-	int fd	-
+closesocket	win	int	-	SOCKET s	-
+connect	posix	int	-	int sockfd|const struct sockaddr *addr|socklen_t addrlen	-
+connect	win	int	-	SOCKET s|const struct sockaddr *name|int namelen	-
+dlclose	posix	int	-	void *handle	-
+dlerror	posix	char *	-	-	-
+dlopen	posix	void *	-	const char *filename|int flags	-|dlopen
+dlsym	posix	void *	-	void *handle|const char *symbol	dl_handle|-
+execve	posix	int	-	const char *pathname|char *const *argv|char *const *envp	-
+exit	c	void	-	int status	-
+fclose	c	int	-	FILE *stream	-
+fcntl	posix	int	-	int fd|int cmd|...	-|fcntl|-
+fopen	c	FILE *	-	const char *pathname|const char *mode	-
+fork	posix	pid_t	-	-	-
+fprintf	c	int	-	FILE *stream|const char *format|...	-
+fread	c	size_t	-	void *ptr|size_t size|size_t nmemb|FILE *stream	-
+free	c	void	-	void *ptr	-
+fseek	c	int	-	FILE *stream|long offset|int whence	-|-|seek
+ftell	c	long	-	FILE *stream	-
+fwrite	c	size_t	-	const void *ptr|size_t size|size_t nmemb|FILE *stream	-
+getenv	c	char *	-	const char *name	-
+getpid	posix	pid_t	-	-	-
+getppid	posix	pid_t	-	-	-
+getuid	posix	uid_t	-	-	-
+kill	posix	int	-	pid_t pid|int sig	-|signal
+listen	posix	int	-	int sockfd|int backlog	-
+lseek	posix	off_t	-	int fd|off_t offset|int whence	-|-|seek
+malloc	c	void *	-	size_t size	-
+memcmp	c	int	-	const void *s1|const void *s2|size_t n	-
+memcpy	c	void *	-	void *dest|const void *src|size_t n	-
+memmove	c	void *	-	void *dest|const void *src|size_t n	-
+memset	c	void *	-	void *s|int c|size_t n	-
+mmap	posix	void *	map_result	void *addr|size_t length|int prot|int flags|int fd|off_t offset	-|-|prot|map_flags|-|-
+mprotect	posix	int	-	void *addr|size_t len|int prot	-|-|prot
+munmap	posix	int	-	void *addr|size_t length	-
+open	posix	int	-	const char *pathname|int flags|...	-|open_flags|-
+openat	posix	int	-	int dirfd|const char *pathname|int flags|...	-|-|open_flags|-
+prctl	posix	int	-	int option|...	prctl|-
+printf	c	int	-	const char *format|...	-
+pthread_create	posix	int	-	pthread_t *thread|const pthread_attr_t *attr|void *start_routine|void *arg	-
+pthread_join	posix	int	-	pthread_t thread|void **retval	-
+pthread_mutex_lock	posix	int	-	pthread_mutex_t *mutex	-
+pthread_mutex_unlock	posix	int	-	pthread_mutex_t *mutex	-
+ptrace	posix	long	-	int request|pid_t pid|void *addr|void *data	ptrace|-|-|-
+putchar	c	int	-	int c	-
+puts	c	int	-	const char *s	-
+raise	posix	int	-	int sig	signal
+rand	c	int	-	-	-
+read	posix	ssize_t	-	int fd|void *buf|size_t count	-
+realloc	c	void *	-	void *ptr|size_t size	-
+recv	posix	ssize_t	-	int sockfd|void *buf|size_t len|int flags	-
+recv	win	int	-	SOCKET s|char *buf|int len|int flags	-
+send	posix	ssize_t	-	int sockfd|const void *buf|size_t len|int flags	-
+send	win	int	-	SOCKET s|const char *buf|int len|int flags	-
+signal	posix	sighandler_t	-	int signum|sighandler_t handler	signal|-
+sleep	posix	unsigned int	-	unsigned int seconds	-
+snprintf	c	int	-	char *str|size_t size|const char *format|...	-
+socket	posix	int	-	int domain|int type|int protocol	af_posix|sock_type_posix|ipproto
+socket	win	SOCKET	-	int af|int type|int protocol	af_win|sock_type_win|ipproto
+sprintf	c	int	-	char *str|const char *format|...	-
+srand	c	void	-	unsigned int seed	-
+strcat	c	char *	-	char *dest|const char *src	-
+strchr	c	char *	-	const char *s|int c	-
+strcmp	c	int	-	const char *s1|const char *s2	-
+strcpy	c	char *	-	char *dest|const char *src	-
+strlen	c	size_t	-	const char *s	-
+strncmp	c	int	-	const char *s1|const char *s2|size_t n	-
+strncpy	c	char *	-	char *dest|const char *src|size_t n	-
+strstr	c	char *	-	const char *haystack|const char *needle	-
+strtol	c	long	-	const char *nptr|char **endptr|int base	-
+system	c	int	-	const char *command	-
+time	c	time_t	-	time_t *tloc	-
+unlink	posix	int	-	const char *pathname	-
+usleep	posix	int	-	useconds_t usec	-
+waitpid	posix	pid_t	-	pid_t pid|int *wstatus|int options	-|-|wait_options
+wcslen	c	size_t	-	const wchar_t *s	-
+write	posix	ssize_t	-	int fd|const void *buf|size_t count	-

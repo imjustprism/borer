@@ -1,0 +1,127 @@
+ACCESS_MASK	u32
+ATOM	u16
+BOOL	i32
+BOOLEAN	u8
+BYTE	u8
+CHAR	char
+DIR	word
+DWORD	u32
+DWORD64	u64
+DWORD_PTR	word
+FARPROC	ptr
+FILE	word
+HANDLE	ptr
+HDC	ptr
+HHOOK	ptr
+HINSTANCE	ptr
+HINTERNET	ptr
+HKEY	ptr
+HMODULE	ptr
+HOOKPROC	ptr
+HRESULT	i32
+HWND	ptr
+INT	i32
+INT_PTR	sword
+LARGE_INTEGER	i64
+LONG	i32
+LONGLONG	i64
+LONG_PTR	sword
+LPARAM	sword
+LPBYTE	ptr
+LPCRITICAL_SECTION	ptr
+LPCSTR	ptr
+LPCVOID	ptr
+LPCWSTR	ptr
+LPDWORD	ptr
+LPHANDLE	ptr
+LPOVERLAPPED	ptr
+LPPROCESS_INFORMATION	ptr
+LPSECURITY_ATTRIBUTES	ptr
+LPSTARTUPINFOA	ptr
+LPSTARTUPINFOW	ptr
+LPSTR	ptr
+LPTHREAD_START_ROUTINE	ptr
+LPUNKNOWN	ptr
+LPVOID	ptr
+LPWIN32_FIND_DATAA	ptr
+LPWIN32_FIND_DATAW	ptr
+LPWSADATA	ptr
+LPWSTR	ptr
+LRESULT	sword
+LSTATUS	i32
+NTSTATUS	i32
+PBOOL	ptr
+PBYTE	ptr
+PDWORD	ptr
+PHANDLE	ptr
+PHKEY	ptr
+PLARGE_INTEGER	ptr
+PLONG	ptr
+PMEMORY_BASIC_INFORMATION	ptr
+PSIZE_T	ptr
+PVOID	ptr
+REFCLSID	ptr
+REFIID	ptr
+REGSAM	u32
+SHORT	i16
+SIZE_T	word
+SOCKET	word
+SSIZE_T	sword
+UCHAR	u8
+UINT	u32
+UINT_PTR	word
+ULONG	u32
+ULONG64	u64
+ULONGLONG	u64
+ULONG_PTR	word
+USHORT	u16
+WCHAR	u16
+WORD	u16
+WPARAM	word
+_Bool	u8
+__int64	i64
+bool	u8
+char	char
+double	f64
+float	f32
+gid_t	u32
+int	i32
+int16_t	i16
+int32_t	i32
+int64_t	i64
+int8_t	i8
+intptr_t	sword
+long	long
+long int	long
+long long	i64
+mode_t	u32
+off_t	i64
+pid_t	i32
+pthread_t	word
+ptrdiff_t	sword
+short	i16
+short int	i16
+sighandler_t	ptr
+signed	i32
+signed char	i8
+signed int	i32
+size_t	word
+socklen_t	u32
+ssize_t	sword
+time_t	i64
+uid_t	u32
+uint16_t	u16
+uint32_t	u32
+uint64_t	u64
+uint8_t	u8
+uintptr_t	word
+unsigned	u32
+unsigned __int64	u64
+unsigned char	u8
+unsigned int	u32
+unsigned long	ulong
+unsigned long long	u64
+unsigned short	u16
+useconds_t	u32
+void	void
+wchar_t	u16
