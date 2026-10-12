@@ -519,6 +519,9 @@ pub(super) enum Expr {
 const ATOM: u8 = 13;
 /// Precedence of the prefix operators (`-`, `~`, `*`, casts).
 const UNARY: u8 = 12;
+/// Precedence of a `&&` or `||` chain: below every operator a value takes
+/// part in, so any operand position parenthesizes it.
+const LOGICAL: u8 = 1;
 
 /// Returns the mask of the low `bits` bits (all ones for 64 or more).
 ///
@@ -915,22 +918,30 @@ impl Cond {
     /// (`test al, al` after `setcc`, `cmp al, 0`, or the result itself), else
     /// `None`.
     fn bool_operand(&self) -> Option<&Cond> {
-        let inner = match &self.flags {
-            Flags::Test(l, r, _) if l == r || matches!(r, Expr::Const(1)) => l,
-            Flags::Result(e, _) | Flags::Shift(e, _, _) => e,
-            Flags::Cmp(l, Expr::Const(0), _) => l,
+        match self.tested()? {
+            Expr::Cond(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Returns the value an `e`/`ne` test of these flags compares with
+    /// zero: what `test x, x`, `test x, 1` or `cmp x, 0` reads, or the
+    /// result an operation set the flags from.
+    ///
+    /// # Returns
+    ///
+    /// The value, or `None` for flags that compare anything else.
+    fn tested(&self) -> Option<&Expr> {
+        match &self.flags {
+            Flags::Test(l, r, _) if l == r || matches!(r, Expr::Const(1)) => Some(l),
+            Flags::Result(e, _) | Flags::Shift(e, _, _) => Some(e),
+            Flags::Cmp(l, Expr::Const(0), _) => Some(l),
             Flags::Cmp(..)
             | Flags::Test(..)
             | Flags::Add(..)
             | Flags::Carry(_)
             | Flags::Truth(..)
-            | Flags::Unknown => {
-                return None;
-            }
-        };
-        match inner {
-            Expr::Cond(c) => Some(c),
-            _ => None,
+            | Flags::Unknown => None,
         }
     }
 
@@ -3655,10 +3666,19 @@ impl Expr {
             }
             Expr::Cond(c) => match &c.flags {
                 Flags::Truth(e, tcc) if c.cc == *tcc => e.render_prec(n, hex, false),
-                Flags::Truth(e, tcc) if c.cc == tcc.invert() && equality(e).is_none() => {
-                    (c.render(n, false), UNARY)
+                flags => {
+                    let text = c.render(n, false);
+                    let prec = if super::structure::logical_operands(&text).is_some() {
+                        LOGICAL
+                    } else if matches!(flags, Flags::Truth(e, tcc)
+                        if c.cc == tcc.invert() && equality(e).is_none())
+                    {
+                        UNARY
+                    } else {
+                        6
+                    };
+                    (text, prec)
                 }
-                _ => (c.render(n, false), 6),
             },
             Expr::Ternary(c, a, b) => (
                 format!(
@@ -3722,7 +3742,8 @@ impl Cond {
     /// Flags set in another block or by an unmodeled instruction render as
     /// the obviously symbolic `FLAGS_UNKNOWN`, never as a fake constant. A
     /// `test` can never set CF, so `b`/`ae` after it are the constants `0`
-    /// and `1` with a comment.
+    /// and `1` with a comment. A test of `setcc` results joined by `|` or
+    /// `&` reads as the `||` or `&&` chain it is ([`render_truth_chain`]).
     ///
     /// # Arguments
     ///
@@ -3754,6 +3775,13 @@ impl Cond {
             match cc.0 {
                 C::e => return inner.render(n, true),
                 C::ne => return inner.render(n, false),
+                _ => {}
+            }
+        }
+        if let Some(chain) = self.tested().filter(|e| is_truth_chain(e)) {
+            match cc.0 {
+                C::e => return render_truth_chain(chain, n, true),
+                C::ne => return render_truth_chain(chain, n, false),
                 _ => {}
             }
         }
@@ -3792,6 +3820,9 @@ impl Cond {
                     _ => Flags::Result(e.clone(), *bits),
                 };
                 Cond { cc: self.cc, flags }.render(n, inverted)
+            }
+            Flags::Truth(e, tcc) if is_truth_chain(e) && (cc == *tcc || cc == tcc.invert()) => {
+                render_truth_chain(e, n, cc != *tcc)
             }
             Flags::Truth(e, tcc) if cc == *tcc => e.render(n),
             Flags::Truth(e, tcc) if cc == tcc.invert() => match equality(e) {
@@ -3937,6 +3968,61 @@ impl Cond {
                 }
             },
         }
+    }
+}
+
+/// Tells whether a value is truth values joined by `|` and `&`: what
+/// `setcc` results combined before one test leave (`sete al; setle cl; or
+/// al, cl`), each leaf a condition's 0 or 1.
+///
+/// # Arguments
+///
+/// * `e` - The value.
+fn is_truth_chain(e: &Expr) -> bool {
+    match e {
+        Expr::Bin(Op::Or | Op::And, a, b) => [a.as_ref(), b.as_ref()]
+            .into_iter()
+            .all(|x| matches!(x, Expr::Cond(_)) || is_truth_chain(x)),
+        _ => false,
+    }
+}
+
+/// Renders truth values joined by `|` and `&` ([`is_truth_chain`]) as the
+/// `||` and `&&` they mean, or their negation by De Morgan.
+///
+/// Both sides of `|` are 0 or 1, so the value is nonzero exactly when
+/// either condition holds; `||` reads that way, and the operand it may now
+/// skip is a condition, which computes nothing the text needs. A nested
+/// chain of the other operator keeps its parentheses.
+///
+/// # Arguments
+///
+/// * `e` - The chain.
+/// * `n` - Name resolution.
+/// * `negate` - Render the chain being zero instead.
+fn render_truth_chain(e: &Expr, n: &Names<'_>, negate: bool) -> String {
+    match e {
+        Expr::Bin(op @ (Op::Or | Op::And), a, b) => {
+            let joint = if (*op == Op::Or) == negate {
+                "&&"
+            } else {
+                "||"
+            };
+            let side = |x: &Expr| {
+                let text = render_truth_chain(x, n, negate);
+                match super::structure::logical_operands(&text) {
+                    Some((o, _)) if o != joint => format!("({text})"),
+                    Some(_) | None => text,
+                }
+            };
+            format!("{} {joint} {}", side(a), side(b))
+        }
+        Expr::Cond(c) => c.render(n, negate),
+        other => format!(
+            "{} {} 0",
+            paren_if_lower(other, n, 6),
+            if negate { "==" } else { "!=" }
+        ),
     }
 }
 
@@ -5630,7 +5716,43 @@ mod cond_tests {
         let x = Expr::Var(Key::Reg(Register::RAX));
         let y = Expr::Var(Key::Reg(Register::RCX));
         let low_bit = Expr::Bin(Op::And, Box::new(y.clone()), Box::new(Expr::Const(1)));
+        let truth =
+            |cc: ConditionCode, flags: Flags| Expr::Cond(Box::new(Cond { cc: Cc(cc), flags }));
+        let below = truth(ConditionCode::b, Flags::Cmp(x.clone(), y.clone(), 32));
+        let five = truth(ConditionCode::e, Flags::Cmp(x.clone(), Expr::Const(5), 32));
+        let none = truth(ConditionCode::e, Flags::Test(y.clone(), y.clone(), 32));
+        let either = Expr::Bin(Op::Or, Box::new(below.clone()), Box::new(five.clone()));
+        let both = Expr::Bin(
+            Op::And,
+            Box::new(below),
+            Box::new(Expr::Bin(Op::Or, Box::new(five), Box::new(none))),
+        );
+        let bits = |a: u32, b: u32| (u32::from(a < b), u32::from(a == 5), u32::from(b == 0));
         vec![
+            (
+                Flags::Result(either.clone(), 32),
+                sets(move |a, b| {
+                    let (l, f, _) = bits(a, b);
+                    Machine::of_result(l | f, None, None)
+                }),
+            ),
+            (
+                Flags::Test(both.clone(), both, 32),
+                sets(move |a, b| {
+                    let (l, f, z) = bits(a, b);
+                    Machine::of_result(l & (f | z), Some(false), Some(false))
+                }),
+            ),
+            (
+                Flags::Truth(either, Cc(ConditionCode::ne)),
+                sets(move |a, b| {
+                    let (l, f, _) = bits(a, b);
+                    Machine {
+                        zf: Some((l | f) == 0),
+                        ..Machine::default()
+                    }
+                }),
+            ),
             (Flags::Cmp(x.clone(), y.clone(), 32), sets(sub)),
             (
                 Flags::Cmp(x.clone(), Expr::Const(5), 32),
@@ -5821,6 +5943,45 @@ mod cond_tests {
                 }
             }
         }
+    }
+
+    /// A guard chain a text pass negates reads as each operand negated
+    /// under the other operator, and means the chain's negation.
+    ///
+    /// Nested chains keep their parentheses, a negated operand loses its
+    /// `!`, and an ordered comparison of floats, which NaN keeps from
+    /// flipping, keeps the whole chain under one `!`.
+    #[test]
+    fn a_negated_chain_negates_each_operand() {
+        use super::super::rewrite::invert_condition;
+        let ints: [u32; 6] = [0, 1, 2, 5, 9, 0xffff_ffff];
+        for chain in [
+            "rax < rcx && rax != 5",
+            "rax == 0 || rcx > 3 || rax >= rcx",
+            "(rax == 0 || rcx > 3) && rax < 7",
+            "rax != 1 && (rcx == 2 || (rax > rcx && rcx != 0))",
+            "!(rax < rcx) || rcx == 9",
+        ] {
+            let negated = invert_condition(chain);
+            assert!(!negated.starts_with("!("), "{chain}: {negated}");
+            for &x in &ints {
+                for &y in &ints {
+                    assert_ne!(
+                        eval(chain, (x, y), (0.0, 0.0)),
+                        eval(&negated, (x, y), (0.0, 0.0)),
+                        "{chain} vs {negated} at {x:#x}, {y:#x}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            invert_condition("rax < rcx && rax != 5"),
+            "rax >= rcx || rax == 5"
+        );
+        assert_eq!(
+            invert_condition("xmm0 < xmm1 && rax == 0"),
+            "!(xmm0 < xmm1 && rax == 0)"
+        );
     }
 }
 

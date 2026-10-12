@@ -573,8 +573,9 @@ pub(super) fn falls_to_label(lines: &[String], from: usize, label: &str) -> bool
 /// One comparison outside every bracket and string flips its operator,
 /// unless it is an ordered comparison of floating-point operands
 /// ([`float_like`]): `a < b` is false on NaN and so is `a >= b`, so its
-/// negation is `!(a < b)`. Anything else (a guard chain, a template name's
-/// angle brackets, a bare value) is negated as a whole.
+/// negation is `!(a < b)`. A guard chain negates operand by operand
+/// ([`de_morgan`]) where each operand does; anything else (a template
+/// name's angle brackets, a bare value) is negated as a whole.
 ///
 /// # Arguments
 ///
@@ -634,7 +635,7 @@ pub(super) fn invert_condition(cond: &str) -> String {
             }
             format!("{}{}{}", &cond[..at], flip(op), &cond[at + len..])
         }
-        _ => format!("!({cond})"),
+        _ => de_morgan(cond).unwrap_or_else(|| format!("!({cond})")),
     }
 }
 

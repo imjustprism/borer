@@ -3032,6 +3032,65 @@ fn a_dead_block_inside_a_loop_does_not_veto_it() {
     assert_eq!(text.matches("rcx += 1;").count(), 1, "{text}");
 }
 
+/// A range test joined to a bit test of a constant reads as the values it
+/// lists.
+///
+/// `lea eax,[rcx-5]; cmp eax,54; ja N; mov rdx,0x40000008000001; bt
+/// rdx,rax; jae N; mov eax,1; ret; N: xor eax,eax; ret` is `x == 5 || x ==
+/// 32 || x == 59` as a compiler writes it, and the guard that returns 0 is
+/// its negation, one comparison per member with no shift left. A range
+/// that lets everything above it through keeps its test in front of the
+/// members.
+#[test]
+fn a_bit_test_of_a_constant_reads_as_its_members() {
+    let code = [
+        0x8d, 0x41, 0xfb, 0x83, 0xf8, 0x36, 0x77, 0x16, 0x48, 0xba, 0x01, 0x00, 0x00, 0x08, 0x00,
+        0x00, 0x40, 0x00, 0x48, 0x0f, 0xa3, 0xc2, 0x73, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+        0x31, 0xc0, 0xc3,
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains(">>"), "{text}");
+    assert!(text.contains("a1 != 5 && "), "{text}");
+    assert!(text.contains("a1 != 32 && "), "{text}");
+    assert!(text.contains("a1 != 59) {"), "{text}");
+    // ASM: cmp cl,28; ja Y; mov eax,0x1410004; bt eax,ecx; jb Y; xor eax,eax; ret; Y: mov eax,1; ret
+    let code = [
+        0x80, 0xf9, 0x1c, 0x77, 0x0d, 0xb8, 0x04, 0x00, 0x41, 0x01, 0x0f, 0xa3, 0xc8, 0x72, 0x03,
+        0x31, 0xc0, 0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains(">>"), "{text}");
+    assert!(text.contains(" > 28 || "), "{text}");
+    for member in ["== 2 || ", "== 16 || ", "== 22 || ", "== 24) {"] {
+        assert!(text.contains(member), "{member}: {text}");
+    }
+}
+
+/// Conditions a text pass negates, and `setcc` results joined before one
+/// test, read as `&&` and `||` chains.
+///
+/// `test ecx,ecx; sete al; test edx,edx; setle dl; or al,dl; jne Z; ...`
+/// is one test of `a1 == 0 | a2 <= 0`, which reads `a1 == 0 || a2 <= 0`
+/// in the guard and `a1 != 0 && a2 > 0` in its negation, never as a `|`
+/// of truth values or under a `!`.
+#[test]
+fn joined_truth_values_read_as_a_chain() {
+    let code = [
+        0x85, 0xc9, 0x0f, 0x94, 0xc0, 0x85, 0xd2, 0x0f, 0x9e, 0xc2, 0x08, 0xd0, 0x75, 0x06, 0xb8,
+        0x07, 0x00, 0x00, 0x00, 0xc3, 0x31, 0xc0, 0xc3,
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains(" | "), "{text}");
+    assert!(!text.contains("!("), "{text}");
+    assert!(
+        text.contains("if (a1 == 0 || a2 <= 0) {") || text.contains("if (a1 != 0 && a2 > 0) {"),
+        "{text}"
+    );
+}
+
 /// A loop whose body ends `if (c) break;` is a `do`/`while` on `!c`.
 ///
 /// `xor eax,eax; xor ecx,ecx; test r8d,r8d; je X; L: cmp byte [rdx+rcx],0;

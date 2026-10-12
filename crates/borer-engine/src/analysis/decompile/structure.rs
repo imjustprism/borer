@@ -311,9 +311,12 @@ impl Guard {
     /// * `side` - The side the arm is on; the fall-through side renders
     ///   the negation.
     pub(super) fn render(&self, n: &Names<'_>, side: Side) -> String {
+        if let Some(members) = self.bit_set(n, side) {
+            return members;
+        }
         let part = |g: &Guard| -> String {
             let text = g.render(n, side);
-            if matches!(g, Guard::One(_)) {
+            if matches!(g, Guard::One(_)) && logical_operands(&text).is_none() {
                 text
             } else {
                 format!("({text})")
@@ -329,6 +332,295 @@ impl Guard {
             }
         }
     }
+
+    /// Renders a range test joined to a bit test of a constant as the set
+    /// of values it admits.
+    ///
+    /// A compiler turns `x == 5 || x == 32 || x == 59` into `x - 5 <= 54
+    /// && bt(0x40000008000001, x - 5)`: the range keeps the bit index
+    /// inside the constant, whose set bits are the members. The pair reads
+    /// as the list it came from, `x == 5 || x == 32 || x == 59`, and its
+    /// negation as `x != 5 && ...`. A range that lets everything outside
+    /// it through (`x > 28 || bit set`) keeps its test in front of the
+    /// list, as does one that requires the inside with the bit clear. Up
+    /// to [`BIT_SET_MAX`] members; the range and the bit index must test
+    /// the same value ([`same_index`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Name resolution.
+    /// * `side` - The side the arm is on, as for [`Guard::render`].
+    ///
+    /// # Returns
+    ///
+    /// The comparisons, or `None` when the guard is no such pair.
+    fn bit_set(&self, n: &Names<'_>, side: Side) -> Option<String> {
+        let (Guard::And(a, b) | Guard::Or(a, b)) = self else {
+            return None;
+        };
+        let (Guard::One(range), Guard::One(bit)) = (a.as_ref(), b.as_ref()) else {
+            return None;
+        };
+        let inverted = side == Side::Fall;
+        let joins_and = matches!(
+            (self, side),
+            (Guard::And(..), Side::Target) | (Guard::Or(..), Side::Fall)
+        );
+        let (x, bits, max, inside) = range_test(range, inverted)?;
+        let (index, mask, set, when_set) = bit_test(bit, inverted)?;
+        let (member, keep_range) = match (joins_and, inside, when_set) {
+            (true, true, true) => (true, false),
+            (false, false, false) => (false, false),
+            (false, false, true) => (true, true),
+            (true, true, false) => (false, true),
+            (true, false, _) | (false, true, _) => return None,
+        };
+        if max > mask || !same_index(index, x, max, mask) {
+            return None;
+        }
+        let values: Vec<u64> = (0..=max).filter(|v| (set >> v) & 1 == 1).collect();
+        if values.is_empty() || values.len() > BIT_SET_MAX {
+            return None;
+        }
+        let cc = Cc(if member {
+            ConditionCode::e
+        } else {
+            ConditionCode::ne
+        });
+        let tests: Vec<String> = keep_range
+            .then(|| range.render(n, inverted))
+            .into_iter()
+            .chain(values.iter().map(|v| {
+                expr::Cond {
+                    cc,
+                    flags: Flags::Cmp(x.clone(), Expr::Const(*v), bits),
+                }
+                .render(n, false)
+            }))
+            .collect();
+        Some(tests.join(if member { " || " } else { " && " }))
+    }
+}
+
+/// Tells whether a bit index reads the value a range test bounds.
+///
+/// The index may be the value itself, the value before a mask the range
+/// test applies (`(x & 0xff) <= 13` against bit `x & 0x1f`: a value the
+/// range admits has no bits the mask would clear), or its sign extension
+/// when the range admits no value with the sign bit set.
+///
+/// # Arguments
+///
+/// * `index` - The bit index, its own mask removed.
+/// * `x` - The value the range test bounds.
+/// * `max` - The largest value the range admits.
+/// * `mask` - The mask the bit test wraps the index with.
+fn same_index(index: &Expr, x: &Expr, max: u64, mask: u64) -> bool {
+    let index = match index {
+        Expr::Sext(e, b) if b.checked_sub(1).is_some_and(|s| max < 1u64 << s.min(63)) => e.as_ref(),
+        other => other,
+    };
+    index == x
+        || matches!(x, Expr::Bin(expr::Op::And, inner, m)
+            if inner.as_ref() == index
+                && matches!(**m, Expr::Const(k) if k >= mask && k & k.wrapping_add(1) == 0))
+}
+
+/// Most members a range and bit test is listed as ([`Guard::bit_set`]).
+pub(super) const BIT_SET_MAX: usize = 8;
+
+/// Reads a condition as an unsigned bound on a value: `x <= max` holding
+/// (inside) or failing (outside).
+///
+/// # Arguments
+///
+/// * `c` - The condition.
+/// * `inverted` - Read its negation.
+///
+/// # Returns
+///
+/// The value, its width, the largest value inside, and whether the
+/// condition holds inside; `None` for any other condition.
+fn range_test(c: &expr::Cond, inverted: bool) -> Option<(&Expr, u8, u64, bool)> {
+    let Flags::Cmp(x, Expr::Const(k), bits) = &c.flags else {
+        return None;
+    };
+    let cc = if inverted { c.cc.invert() } else { c.cc };
+    match cc.0 {
+        ConditionCode::be => Some((x, *bits, *k, true)),
+        ConditionCode::b => Some((x, *bits, k.checked_sub(1)?, true)),
+        ConditionCode::a => Some((x, *bits, *k, false)),
+        ConditionCode::ae => Some((x, *bits, k.checked_sub(1)?, false)),
+        ConditionCode::None
+        | ConditionCode::o
+        | ConditionCode::no
+        | ConditionCode::e
+        | ConditionCode::ne
+        | ConditionCode::s
+        | ConditionCode::ns
+        | ConditionCode::p
+        | ConditionCode::np
+        | ConditionCode::l
+        | ConditionCode::ge
+        | ConditionCode::le
+        | ConditionCode::g => None,
+    }
+}
+
+/// Reads a condition as a test of one bit of a constant, `bt` style: bit
+/// `index & mask` of `set`.
+///
+/// # Arguments
+///
+/// * `c` - The condition.
+/// * `inverted` - Read its negation.
+///
+/// # Returns
+///
+/// The index, the mask the instruction wraps it with, the constant, and
+/// whether the condition holds when the bit is set; `None` for any other
+/// condition.
+fn bit_test(c: &expr::Cond, inverted: bool) -> Option<(&Expr, u64, u64, bool)> {
+    let Flags::Carry(Expr::Bin(expr::Op::And, shifted, one)) = &c.flags else {
+        return None;
+    };
+    let (Expr::Bin(expr::Op::Shr, set, index), Expr::Const(1)) = (shifted.as_ref(), one.as_ref())
+    else {
+        return None;
+    };
+    let (Expr::Const(set), Expr::Bin(expr::Op::And, index, mask)) = (set.as_ref(), index.as_ref())
+    else {
+        return None;
+    };
+    let Expr::Const(mask @ (31 | 63)) = mask.as_ref() else {
+        return None;
+    };
+    let cc = if inverted { c.cc.invert() } else { c.cc };
+    let when_set = match cc.0 {
+        ConditionCode::b => true,
+        ConditionCode::ae => false,
+        ConditionCode::None
+        | ConditionCode::o
+        | ConditionCode::no
+        | ConditionCode::e
+        | ConditionCode::ne
+        | ConditionCode::be
+        | ConditionCode::a
+        | ConditionCode::s
+        | ConditionCode::ns
+        | ConditionCode::p
+        | ConditionCode::np
+        | ConditionCode::l
+        | ConditionCode::ge
+        | ConditionCode::le
+        | ConditionCode::g => return None,
+    };
+    Some((index, *mask, *set, when_set))
+}
+
+/// Splits a rendered condition at its top-level `&&` or `||`.
+///
+/// Brackets, string literals and character literals are skipped, so only
+/// the operators that join the whole condition count. A condition joined by
+/// both operators is not split, since its precedence would have to be read
+/// too.
+///
+/// # Arguments
+///
+/// * `cond` - The rendered condition.
+///
+/// # Returns
+///
+/// The operator (`"&&"` or `"||"`) and the operands in order, or `None`
+/// when the condition is no such chain.
+pub(super) fn logical_operands(cond: &str) -> Option<(&'static str, Vec<&str>)> {
+    let bytes = cond.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut esc = false;
+    let mut op: Option<&'static str> = None;
+    let mut parts = Vec::new();
+    let mut from = 0;
+    let mut i = 0;
+    while let Some(&c) = bytes.get(i) {
+        i += 1;
+        if let Some(q) = quote {
+            match c {
+                _ if esc => esc = false,
+                b'\\' => esc = true,
+                _ if c == q => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            b'"' | b'\'' => quote = Some(c),
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b' ' if depth == 0 => {
+                let found = match bytes.get(i..i + 3) {
+                    Some(b"&& ") => "&&",
+                    Some(b"|| ") => "||",
+                    _ => continue,
+                };
+                if op.is_some_and(|o| o != found) {
+                    return None;
+                }
+                op = Some(found);
+                parts.push(cond.get(from..i - 1)?);
+                from = i + 3;
+                i += 3;
+            }
+            _ => {}
+        }
+    }
+    parts.push(cond.get(from..)?);
+    Some((op?, parts))
+}
+
+/// Negates a rendered `&&` or `||` chain by De Morgan's law.
+///
+/// `!(a != 0 && b < c)` reads as `a == 0 || b >= c`: each operand is
+/// negated on its own ([`invert_condition`]) and the operator turns into
+/// the other one, in the order the operands were evaluated, so a short
+/// circuit still skips what it skipped. An operand that is a parenthesized
+/// chain is negated the same way and keeps its parentheses. The chain stays
+/// whole when an operand would only negate as `!(...)`: a bare value, or an
+/// ordered comparison of floating-point operands, which NaN keeps from
+/// flipping.
+///
+/// # Arguments
+///
+/// * `cond` - The rendered condition.
+///
+/// # Returns
+///
+/// The negation, or `None` when the condition is no chain or an operand
+/// does not negate by itself.
+pub(super) fn de_morgan(cond: &str) -> Option<String> {
+    let (op, parts) = logical_operands(cond)?;
+    let dual = if op == "&&" { " || " } else { " && " };
+    let mut out = Vec::with_capacity(parts.len());
+    for p in parts {
+        let inner = p
+            .strip_prefix('(')
+            .and_then(|r| r.strip_suffix(')'))
+            .filter(|r| matching_paren(p, 0) == Some(r.len() + 1));
+        let negated = match inner {
+            Some(r) if logical_operands(r).is_some() => de_morgan(r)?,
+            Some(r) => invert_condition(r),
+            None => invert_condition(p),
+        };
+        if negated.starts_with("!(") {
+            return None;
+        }
+        out.push(if logical_operands(&negated).is_some() {
+            format!("({negated})")
+        } else {
+            negated
+        });
+    }
+    Some(out.join(dual))
 }
 
 /// Recognizes a block that only decides, so its condition can fold into the
