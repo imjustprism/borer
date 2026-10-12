@@ -5,7 +5,7 @@ use yaxpeax_arm::armv8::a64::{
     InstDecoder, Instruction, Opcode, Operand, SIMDSizeCode, ShiftStyle, SizeCode,
 };
 
-use super::{Cond, Insn, Mem, Mode, Op, Opnd, Reg, Shift};
+use super::{Cond, Insn, Mem, Mnemonic, Mode, Op, Opnd, Reg, Rmw, Shift, Width};
 use crate::num::lo8;
 
 /// The top-level encoding group (`op1`, bits 25 to 28) of the SVE space.
@@ -45,6 +45,7 @@ pub fn decode(word: u32, va: u64) -> Insn {
         va,
         word,
         op,
+        mnemonic: mnemonic(inst.opcode),
         operands: inst.operands.map(|o| operand(o, inst.opcode, va)),
         flow: op.flow(),
     }
@@ -66,6 +67,7 @@ fn undecoded(word: u32, va: u64) -> Insn {
         va,
         word,
         op,
+        mnemonic: Mnemonic::Other,
         operands: [Opnd::None; 4],
         flow: op.flow(),
     }
@@ -158,6 +160,170 @@ fn class(inst: &Instruction) -> Op {
         | Opcode::PACM => Op::Pac,
         Opcode::Invalid => Op::Invalid,
         _ => Op::Other,
+    }
+}
+
+/// Returns the base instruction of a decoded opcode.
+///
+/// Every opcode not named here is [`Mnemonic::Other`], as in [`class`].
+///
+/// # Arguments
+///
+/// * `opcode` - The decoder's opcode.
+fn mnemonic(opcode: Opcode) -> Mnemonic {
+    use Width::{Byte, Half, Reg, SByte, SHalf, SWord};
+    match opcode {
+        Opcode::MOVZ => Mnemonic::Movz,
+        Opcode::MOVN => Mnemonic::Movn,
+        Opcode::MOVK => Mnemonic::Movk,
+        Opcode::ADD => Mnemonic::Add,
+        Opcode::ADDS => Mnemonic::Adds,
+        Opcode::SUB => Mnemonic::Sub,
+        Opcode::SUBS => Mnemonic::Subs,
+        Opcode::ADC => Mnemonic::Adc,
+        Opcode::ADCS => Mnemonic::Adcs,
+        Opcode::SBC => Mnemonic::Sbc,
+        Opcode::SBCS => Mnemonic::Sbcs,
+        Opcode::AND => Mnemonic::And,
+        Opcode::ANDS => Mnemonic::Ands,
+        Opcode::ORR => Mnemonic::Orr,
+        Opcode::ORN => Mnemonic::Orn,
+        Opcode::EOR => Mnemonic::Eor,
+        Opcode::EON => Mnemonic::Eon,
+        Opcode::BIC => Mnemonic::Bic,
+        Opcode::BICS => Mnemonic::Bics,
+        Opcode::UBFM => Mnemonic::Ubfm,
+        Opcode::SBFM => Mnemonic::Sbfm,
+        Opcode::BFM => Mnemonic::Bfm,
+        Opcode::EXTR => Mnemonic::Extr,
+        Opcode::LSLV => Mnemonic::Lslv,
+        Opcode::LSRV => Mnemonic::Lsrv,
+        Opcode::ASRV => Mnemonic::Asrv,
+        Opcode::RORV => Mnemonic::Rorv,
+        Opcode::MADD => Mnemonic::Madd,
+        Opcode::MSUB => Mnemonic::Msub,
+        Opcode::SMADDL => Mnemonic::Smaddl,
+        Opcode::SMSUBL => Mnemonic::Smsubl,
+        Opcode::UMADDL => Mnemonic::Umaddl,
+        Opcode::UMSUBL => Mnemonic::Umsubl,
+        Opcode::SMULH => Mnemonic::Smulh,
+        Opcode::UMULH => Mnemonic::Umulh,
+        Opcode::UDIV => Mnemonic::Udiv,
+        Opcode::SDIV => Mnemonic::Sdiv,
+        Opcode::CLZ => Mnemonic::Clz,
+        Opcode::CLS => Mnemonic::Cls,
+        Opcode::RBIT => Mnemonic::Rbit,
+        Opcode::REV => Mnemonic::Rev,
+        Opcode::REV16 => Mnemonic::Rev16,
+        Opcode::REV32 => Mnemonic::Rev32,
+        Opcode::CSEL => Mnemonic::Csel,
+        Opcode::CSINC => Mnemonic::Csinc,
+        Opcode::CSINV => Mnemonic::Csinv,
+        Opcode::CSNEG => Mnemonic::Csneg,
+        Opcode::CCMP => Mnemonic::Ccmp,
+        Opcode::CCMN => Mnemonic::Ccmn,
+        Opcode::LDR
+        | Opcode::LDUR
+        | Opcode::LDTR
+        | Opcode::LDAR
+        | Opcode::LDLAR
+        | Opcode::LDAPR
+        | Opcode::LDAPUR
+        | Opcode::LDXR
+        | Opcode::LDAXR
+        | Opcode::LDRAA
+        | Opcode::LDRAB => Mnemonic::Ldr(Reg),
+        Opcode::LDRB
+        | Opcode::LDURB
+        | Opcode::LDTRB
+        | Opcode::LDARB
+        | Opcode::LDLARB
+        | Opcode::LDAPRB
+        | Opcode::LDAPURB
+        | Opcode::LDXRB
+        | Opcode::LDAXRB => Mnemonic::Ldr(Byte),
+        Opcode::LDRH
+        | Opcode::LDURH
+        | Opcode::LDTRH
+        | Opcode::LDARH
+        | Opcode::LDLARH
+        | Opcode::LDAPRH
+        | Opcode::LDAPURH
+        | Opcode::LDXRH
+        | Opcode::LDAXRH => Mnemonic::Ldr(Half),
+        Opcode::LDRSB | Opcode::LDURSB | Opcode::LDTRSB | Opcode::LDAPURSB => Mnemonic::Ldr(SByte),
+        Opcode::LDRSH | Opcode::LDURSH | Opcode::LDTRSH | Opcode::LDAPURSH => Mnemonic::Ldr(SHalf),
+        Opcode::LDRSW | Opcode::LDURSW | Opcode::LDTRSW | Opcode::LDAPURSW => Mnemonic::Ldr(SWord),
+        Opcode::STR
+        | Opcode::STUR
+        | Opcode::STTR
+        | Opcode::STLR
+        | Opcode::STLLR
+        | Opcode::STLUR => Mnemonic::Str(Reg),
+        Opcode::STRB
+        | Opcode::STURB
+        | Opcode::STTRB
+        | Opcode::STLRB
+        | Opcode::STLLRB
+        | Opcode::STLURB => Mnemonic::Str(Byte),
+        Opcode::STRH
+        | Opcode::STURH
+        | Opcode::STTRH
+        | Opcode::STLRH
+        | Opcode::STLLRH
+        | Opcode::STLURH => Mnemonic::Str(Half),
+        Opcode::LDP | Opcode::LDNP | Opcode::LDXP | Opcode::LDAXP => Mnemonic::Ldp(Reg),
+        Opcode::LDPSW => Mnemonic::Ldp(SWord),
+        Opcode::STP | Opcode::STNP => Mnemonic::Stp,
+        Opcode::STXR | Opcode::STLXR => Mnemonic::Stxr(Reg),
+        Opcode::STXRB | Opcode::STLXRB => Mnemonic::Stxr(Byte),
+        Opcode::STXRH | Opcode::STLXRH => Mnemonic::Stxr(Half),
+        Opcode::STXP | Opcode::STLXP => Mnemonic::Stxp,
+        Opcode::LDADD(_) => Mnemonic::Atomic(Rmw::Add, Reg),
+        Opcode::LDADDB(_) => Mnemonic::Atomic(Rmw::Add, Byte),
+        Opcode::LDADDH(_) => Mnemonic::Atomic(Rmw::Add, Half),
+        Opcode::LDCLR(_) => Mnemonic::Atomic(Rmw::Clr, Reg),
+        Opcode::LDCLRB(_) => Mnemonic::Atomic(Rmw::Clr, Byte),
+        Opcode::LDCLRH(_) => Mnemonic::Atomic(Rmw::Clr, Half),
+        Opcode::LDEOR(_) => Mnemonic::Atomic(Rmw::Eor, Reg),
+        Opcode::LDEORB(_) => Mnemonic::Atomic(Rmw::Eor, Byte),
+        Opcode::LDEORH(_) => Mnemonic::Atomic(Rmw::Eor, Half),
+        Opcode::LDSET(_) => Mnemonic::Atomic(Rmw::Set, Reg),
+        Opcode::LDSETB(_) => Mnemonic::Atomic(Rmw::Set, Byte),
+        Opcode::LDSETH(_) => Mnemonic::Atomic(Rmw::Set, Half),
+        Opcode::LDSMAX(_) => Mnemonic::Atomic(Rmw::Smax, Reg),
+        Opcode::LDSMAXB(_) => Mnemonic::Atomic(Rmw::Smax, Byte),
+        Opcode::LDSMAXH(_) => Mnemonic::Atomic(Rmw::Smax, Half),
+        Opcode::LDSMIN(_) => Mnemonic::Atomic(Rmw::Smin, Reg),
+        Opcode::LDSMINB(_) => Mnemonic::Atomic(Rmw::Smin, Byte),
+        Opcode::LDSMINH(_) => Mnemonic::Atomic(Rmw::Smin, Half),
+        Opcode::LDUMAX(_) => Mnemonic::Atomic(Rmw::Umax, Reg),
+        Opcode::LDUMAXB(_) => Mnemonic::Atomic(Rmw::Umax, Byte),
+        Opcode::LDUMAXH(_) => Mnemonic::Atomic(Rmw::Umax, Half),
+        Opcode::LDUMIN(_) => Mnemonic::Atomic(Rmw::Umin, Reg),
+        Opcode::LDUMINB(_) => Mnemonic::Atomic(Rmw::Umin, Byte),
+        Opcode::LDUMINH(_) => Mnemonic::Atomic(Rmw::Umin, Half),
+        Opcode::SWP(_) => Mnemonic::Atomic(Rmw::Swp, Reg),
+        Opcode::SWPB(_) => Mnemonic::Atomic(Rmw::Swp, Byte),
+        Opcode::SWPH(_) => Mnemonic::Atomic(Rmw::Swp, Half),
+        Opcode::CAS(_) => Mnemonic::Cas(Reg),
+        Opcode::CASB(_) => Mnemonic::Cas(Byte),
+        Opcode::CASH(_) => Mnemonic::Cas(Half),
+        Opcode::PRFM | Opcode::PRFUM => Mnemonic::Prfm,
+        Opcode::FMOV => Mnemonic::Fmov,
+        Opcode::MOVI => Mnemonic::Movi,
+        Opcode::MVNI => Mnemonic::Mvni,
+        Opcode::SVC => Mnemonic::Svc,
+        Opcode::MRS => Mnemonic::Mrs,
+        Opcode::MSR => Mnemonic::Msr,
+        Opcode::DMB(_)
+        | Opcode::DSB(_)
+        | Opcode::ISB
+        | Opcode::SB
+        | Opcode::SSBB
+        | Opcode::PSSBB
+        | Opcode::CLREX => Mnemonic::Barrier,
+        _ => Mnemonic::Other,
     }
 }
 

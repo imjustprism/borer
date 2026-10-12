@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use borer_engine::analysis::{Analysis, BlockTerm, NameSource, RefKind, render};
 use borer_engine::disasm;
 use borer_engine::isa::Isa;
-use borer_engine::isa::a64::{self, Flow, Mem, Mode, Op, Opnd, Reg, Shift};
+use borer_engine::isa::a64::{self, Flow, Mem, Mnemonic, Mode, Op, Opnd, Reg, Rmw, Shift, Width};
 use borer_engine::program::{Arch, BinaryFormat, Feature, Program, Symbol, SymbolKind};
 
 /// Where the first word of [`WORDS`] sits; each next word is four bytes on.
@@ -326,6 +326,239 @@ fn authenticated_branches_keep_the_plain_branch_class() {
     assert_eq!(a64::decode(0xd71f_0a11, 0).op, Op::Br);
     // ASM: blraa x8, sp
     assert_eq!(a64::decode(0xd73f_091f, 0).op, Op::Blr);
+}
+
+/// Words assembled by LLVM and checked against `llvm-objdump`, each with
+/// the base instruction it encodes: aliases, ordered and exclusive forms
+/// and narrow loads named by what they compute.
+const MNEMONICS: &[(u32, Mnemonic)] = &[
+    // ASM: mov x0, #0x12340000
+    (0xd2a2_4680, Mnemonic::Movz),
+    // ASM: mov w1, #-0x1
+    (0x1280_0001, Mnemonic::Movn),
+    // ASM: movk x2, #0xbeef, lsl #48
+    (0xf2f7_dde2, Mnemonic::Movk),
+    // ASM: add x0, x1, #0x10
+    (0x9100_4020, Mnemonic::Add),
+    // ASM: adds w0, w1, w2
+    (0x2b02_0020, Mnemonic::Adds),
+    // ASM: sub sp, sp, #0x20
+    (0xd100_83ff, Mnemonic::Sub),
+    // ASM: cmp x1, x2
+    (0xeb02_003f, Mnemonic::Subs),
+    // ASM: add x0, x1, w2, sxtw #2
+    (0x8b22_c820, Mnemonic::Add),
+    // ASM: adc x0, x1, x2
+    (0x9a02_0020, Mnemonic::Adc),
+    // ASM: adcs w0, w1, w2
+    (0x3a02_0020, Mnemonic::Adcs),
+    // ASM: sbc x0, x1, x2
+    (0xda02_0020, Mnemonic::Sbc),
+    // ASM: sbcs w0, w1, w2
+    (0x7a02_0020, Mnemonic::Sbcs),
+    // ASM: and x0, x1, #0xff
+    (0x9240_1c20, Mnemonic::And),
+    // ASM: tst w1, #0x1
+    (0x7200_003f, Mnemonic::Ands),
+    // ASM: mov x0, x1
+    (0xaa01_03e0, Mnemonic::Orr),
+    // ASM: orn w0, w1, w2
+    (0x2a22_0020, Mnemonic::Orn),
+    // ASM: eor x0, x1, x2, lsr #3
+    (0xca42_0c20, Mnemonic::Eor),
+    // ASM: eon x0, x1, x2
+    (0xca22_0020, Mnemonic::Eon),
+    // ASM: bic w0, w1, w2
+    (0x0a22_0020, Mnemonic::Bic),
+    // ASM: bics x0, x1, x2
+    (0xea22_0020, Mnemonic::Bics),
+    // ASM: lsl x0, x1, #3
+    (0xd37d_f020, Mnemonic::Ubfm),
+    // ASM: sxtw x0, w1
+    (0x9340_7c20, Mnemonic::Sbfm),
+    // ASM: bfi w0, w1, #8, #4
+    (0x3318_0c20, Mnemonic::Bfm),
+    // ASM: ror x0, x1, #0x7
+    (0x93c1_1c20, Mnemonic::Extr),
+    // ASM: lsl x0, x1, x2
+    (0x9ac2_2020, Mnemonic::Lslv),
+    // ASM: lsr w0, w1, w2
+    (0x1ac2_2420, Mnemonic::Lsrv),
+    // ASM: asr x0, x1, x2
+    (0x9ac2_2820, Mnemonic::Asrv),
+    // ASM: ror w0, w1, w2
+    (0x1ac2_2c20, Mnemonic::Rorv),
+    // ASM: mul x0, x1, x2
+    (0x9b02_7c20, Mnemonic::Madd),
+    // ASM: msub w0, w1, w2, w3
+    (0x1b02_8c20, Mnemonic::Msub),
+    // ASM: smull x0, w1, w2
+    (0x9b22_7c20, Mnemonic::Smaddl),
+    // ASM: umull x0, w1, w2
+    (0x9ba2_7c20, Mnemonic::Umaddl),
+    // ASM: smsubl x0, w1, w2, x3
+    (0x9b22_8c20, Mnemonic::Smsubl),
+    // ASM: umsubl x0, w1, w2, x3
+    (0x9ba2_8c20, Mnemonic::Umsubl),
+    // ASM: smulh x0, x1, x2
+    (0x9b42_7c20, Mnemonic::Smulh),
+    // ASM: umulh x0, x1, x2
+    (0x9bc2_7c20, Mnemonic::Umulh),
+    // ASM: udiv w0, w1, w2
+    (0x1ac2_0820, Mnemonic::Udiv),
+    // ASM: sdiv x0, x1, x2
+    (0x9ac2_0c20, Mnemonic::Sdiv),
+    // ASM: clz x0, x1
+    (0xdac0_1020, Mnemonic::Clz),
+    // ASM: cls w0, w1
+    (0x5ac0_1420, Mnemonic::Cls),
+    // ASM: rbit x0, x1
+    (0xdac0_0020, Mnemonic::Rbit),
+    // ASM: rev x0, x1
+    (0xdac0_0c20, Mnemonic::Rev),
+    // ASM: rev16 w0, w1
+    (0x5ac0_0420, Mnemonic::Rev16),
+    // ASM: rev32 x0, x1
+    (0xdac0_0820, Mnemonic::Rev32),
+    // ASM: csel x0, x1, x2, eq
+    (0x9a82_0020, Mnemonic::Csel),
+    // ASM: cset w0, ne
+    (0x1a9f_07e0, Mnemonic::Csinc),
+    // ASM: csetm x0, lt
+    (0xda9f_a3e0, Mnemonic::Csinv),
+    // ASM: cneg w0, w1, mi
+    (0x5a81_5420, Mnemonic::Csneg),
+    // ASM: ccmp x0, #0x3, #0x4, ne
+    (0xfa43_1804, Mnemonic::Ccmp),
+    // ASM: ccmn w0, w1, #0x0, eq
+    (0x3a41_0000, Mnemonic::Ccmn),
+    // ASM: ldr x0, [x1, #0x8]
+    (0xf940_0420, Mnemonic::Ldr(Width::Reg)),
+    // ASM: ldur w0, [x1, #-0x4]
+    (0xb85f_c020, Mnemonic::Ldr(Width::Reg)),
+    // ASM: ldrb w0, [x1], #0x1
+    (0x3840_1420, Mnemonic::Ldr(Width::Byte)),
+    // ASM: ldrh w0, [x1, x2, lsl #1]
+    (0x7862_7820, Mnemonic::Ldr(Width::Half)),
+    // ASM: ldrsb x0, [x1]
+    (0x3980_0020, Mnemonic::Ldr(Width::SByte)),
+    // ASM: ldrsh w0, [x1, #0x2]!
+    (0x78c0_2c20, Mnemonic::Ldr(Width::SHalf)),
+    // ASM: ldrsw x0, [x1, w2, sxtw #2]
+    (0xb8a2_d820, Mnemonic::Ldr(Width::SWord)),
+    // ASM: ldr x0, 0xe4
+    (0x5800_0000, Mnemonic::Ldr(Width::Reg)),
+    // ASM: ldrsw x0, 0xe8
+    (0x9800_0000, Mnemonic::Ldr(Width::SWord)),
+    // ASM: ldraa x0, [x1, #0x8]!
+    (0xf820_1c20, Mnemonic::Ldr(Width::Reg)),
+    // ASM: ldar w0, [x1]
+    (0x88df_fc20, Mnemonic::Ldr(Width::Reg)),
+    // ASM: ldaxr x0, [x1]
+    (0xc85f_fc20, Mnemonic::Ldr(Width::Reg)),
+    // ASM: ldxrb w0, [x1]
+    (0x085f_7c20, Mnemonic::Ldr(Width::Byte)),
+    // ASM: ldapr x0, [x1]
+    (0xf8bf_c020, Mnemonic::Ldr(Width::Reg)),
+    // ASM: ldr q0, [x0]
+    (0x3dc0_0000, Mnemonic::Ldr(Width::Reg)),
+    // ASM: ldr d1, [sp, #0x8]
+    (0xfd40_07e1, Mnemonic::Ldr(Width::Reg)),
+    // ASM: str x0, [x1, #0x8]
+    (0xf900_0420, Mnemonic::Str(Width::Reg)),
+    // ASM: stur w0, [x1, #-0x4]
+    (0xb81f_c020, Mnemonic::Str(Width::Reg)),
+    // ASM: strb w0, [x1, #0x1]
+    (0x3900_0420, Mnemonic::Str(Width::Byte)),
+    // ASM: strh w0, [x1], #0x2
+    (0x7800_2420, Mnemonic::Str(Width::Half)),
+    // ASM: stlr x0, [x1]
+    (0xc89f_fc20, Mnemonic::Str(Width::Reg)),
+    // ASM: stlrb w0, [x1]
+    (0x089f_fc20, Mnemonic::Str(Width::Byte)),
+    // ASM: ldp x29, x30, [sp], #0x10
+    (0xa8c1_7bfd, Mnemonic::Ldp(Width::Reg)),
+    // ASM: ldpsw x0, x1, [x2]
+    (0x6940_0440, Mnemonic::Ldp(Width::SWord)),
+    // ASM: stp x29, x30, [sp, #-0x10]!
+    (0xa9bf_7bfd, Mnemonic::Stp),
+    // ASM: ldnp q0, q1, [x0]
+    (0xac40_0400, Mnemonic::Ldp(Width::Reg)),
+    // ASM: ldxp x0, x1, [x2]
+    (0xc87f_0440, Mnemonic::Ldp(Width::Reg)),
+    // ASM: stxp w3, x0, x1, [x2]
+    (0xc823_0440, Mnemonic::Stxp),
+    // ASM: stxr w3, x1, [x2]
+    (0xc803_7c41, Mnemonic::Stxr(Width::Reg)),
+    // ASM: stlxrh w3, w1, [x2]
+    (0x4803_fc41, Mnemonic::Stxr(Width::Half)),
+    // ASM: ldadd x0, x1, [x2]
+    (0xf820_0041, Mnemonic::Atomic(Rmw::Add, Width::Reg)),
+    // ASM: ldaddal w0, w1, [x2]
+    (0xb8e0_0041, Mnemonic::Atomic(Rmw::Add, Width::Reg)),
+    // ASM: ldclr x0, x1, [x2]
+    (0xf820_1041, Mnemonic::Atomic(Rmw::Clr, Width::Reg)),
+    // ASM: ldeor w0, w1, [x2]
+    (0xb820_2041, Mnemonic::Atomic(Rmw::Eor, Width::Reg)),
+    // ASM: ldset x0, x1, [x2]
+    (0xf820_3041, Mnemonic::Atomic(Rmw::Set, Width::Reg)),
+    // ASM: ldsmax w0, w1, [x2]
+    (0xb820_4041, Mnemonic::Atomic(Rmw::Smax, Width::Reg)),
+    // ASM: ldumin x0, x1, [x2]
+    (0xf820_7041, Mnemonic::Atomic(Rmw::Umin, Width::Reg)),
+    // ASM: swp x0, x1, [x2]
+    (0xf820_8041, Mnemonic::Atomic(Rmw::Swp, Width::Reg)),
+    // ASM: swpalb w0, w1, [x2]
+    (0x38e0_8041, Mnemonic::Atomic(Rmw::Swp, Width::Byte)),
+    // ASM: ldaddh w0, w1, [x2]
+    (0x7820_0041, Mnemonic::Atomic(Rmw::Add, Width::Half)),
+    // ASM: cas x0, x1, [x2]
+    (0xc8a0_7c41, Mnemonic::Cas(Width::Reg)),
+    // ASM: casal w0, w1, [x2]
+    (0x88e0_fc41, Mnemonic::Cas(Width::Reg)),
+    // ASM: casb w0, w1, [x2]
+    (0x08a0_7c41, Mnemonic::Cas(Width::Byte)),
+    // ASM: prfm pldl1keep, [x0]
+    (0xf980_0000, Mnemonic::Prfm),
+    // ASM: fmov d0, x1
+    (0x9e67_0020, Mnemonic::Fmov),
+    // ASM: fmov d0, #1.00000000
+    (0x1e6e_1000, Mnemonic::Fmov),
+    // ASM: movi v0.16b, #0xff
+    (0x4f07_e7e0, Mnemonic::Movi),
+    // ASM: movi d0, #0xff00ff00ff00ff00
+    (0x2f05_e540, Mnemonic::Movi),
+    // ASM: mvni v0.4s, #0x1
+    (0x6f00_0420, Mnemonic::Mvni),
+    // ASM: svc #0
+    (0xd400_0001, Mnemonic::Svc),
+    // ASM: mrs x0, TPIDR_EL0
+    (0xd53b_d040, Mnemonic::Mrs),
+    // ASM: msr TPIDR_EL0, x0
+    (0xd51b_d040, Mnemonic::Msr),
+    // ASM: dmb ish
+    (0xd503_3bbf, Mnemonic::Barrier),
+    // ASM: isb
+    (0xd503_3fdf, Mnemonic::Barrier),
+    // ASM: clrex
+    (0xd503_3f5f, Mnemonic::Barrier),
+    // ASM: nop
+    (0xd503_201f, Mnemonic::Other),
+    // ASM: b 0x1a8
+    (0x1400_0000, Mnemonic::Other),
+];
+
+/// Every word of the table names its base instruction, and an undecodable
+/// word names none.
+#[test]
+fn words_name_their_base_instruction() {
+    for &(word, mnemonic) in MNEMONICS {
+        assert_eq!(a64::decode(word, 0).mnemonic, mnemonic, "{word:#010x}");
+    }
+    // ASM: add z0.d, z1.d, z2.d (SVE, which the decoder does not model)
+    assert_eq!(a64::decode(0x04e2_0020, 0).mnemonic, Mnemonic::Other);
+    // ASM: an unallocated branch-register word
+    assert_eq!(a64::decode(0xd600_0000, 0).mnemonic, Mnemonic::Other);
 }
 
 /// The code every image fixture holds at its entry: a guarded frame that

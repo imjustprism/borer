@@ -1,8 +1,8 @@
 //! AArch64 (arm64): engine-owned instruction types over the yaxpeax-arm
 //! decoder.
 //!
-//! [`decode()`] turns one four-byte word into an [`Insn`] whose class,
-//! operands, condition and control flow are engine types, and [`text`]
+//! [`decode()`] turns one four-byte word into an [`Insn`] whose class, base
+//! instruction, operands, condition and control flow are engine types, and [`text`]
 //! renders one as assembly. This module's three files are the only ones
 //! that name the decoder crate; everything downstream reads the types
 //! below.
@@ -290,6 +290,210 @@ impl Op {
     }
 }
 
+/// How many bytes a load or store moves, and how a load narrower than its
+/// register fills the rest of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Width {
+    /// The register's own width: 4 or 8 bytes for a `w` or `x` register, 1
+    /// to 16 for a `v` register at the width its operand names.
+    Reg,
+    /// One byte, zero-extended into the register.
+    Byte,
+    /// Two bytes, zero-extended into the register.
+    Half,
+    /// One byte, sign-extended to the register's width.
+    SByte,
+    /// Two bytes, sign-extended to the register's width.
+    SHalf,
+    /// Four bytes, sign-extended to 64 bits.
+    SWord,
+}
+
+/// What an atomic read-modify-write leaves in memory, from the old value
+/// and the register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rmw {
+    /// `ldadd`: their sum.
+    Add,
+    /// `ldclr`: the old value with the register's set bits cleared.
+    Clr,
+    /// `ldeor`: their exclusive or.
+    Eor,
+    /// `ldset`: their inclusive or.
+    Set,
+    /// `ldsmax`: the larger, signed.
+    Smax,
+    /// `ldsmin`: the smaller, signed.
+    Smin,
+    /// `ldumax`: the larger, unsigned.
+    Umax,
+    /// `ldumin`: the smaller, unsigned.
+    Umin,
+    /// `swp`: the register.
+    Swp,
+}
+
+/// The base instruction a word encodes, for the instructions the engine
+/// computes with: data processing, loads and stores, and the system
+/// instructions a user-mode routine runs.
+///
+/// An alias is its base instruction: `mov x0, x1` is [`Mnemonic::Orr`],
+/// `cmp` is [`Mnemonic::Subs`], `lsl x0, x1, #3` is [`Mnemonic::Ubfm`] and
+/// `mul` is [`Mnemonic::Madd`]. The ordered, exclusive, unprivileged,
+/// unscaled and pointer-authenticated forms of a load or store share its
+/// mnemonic (`ldar`, `ldxr`, `ldur` and `ldraa` are all [`Mnemonic::Ldr`]).
+/// A vector form shares its scalar form's mnemonic where the decoder names
+/// them alike (`orr v0.16b, v1.16b, v2.16b` is [`Mnemonic::Orr`]), with its
+/// arrangement operands [`Opnd::Other`]. Branches are [`Mnemonic::Other`],
+/// since their [`Op`] says all there is to say, as is every instruction
+/// outside these classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Mnemonic {
+    /// `movz`: a shifted 16-bit immediate.
+    Movz,
+    /// `movn`: the inverse of a shifted 16-bit immediate.
+    Movn,
+    /// `movk`: 16 bits of the register replaced, the rest kept.
+    Movk,
+    /// `add`.
+    Add,
+    /// `adds`, and `cmn`.
+    Adds,
+    /// `sub`, and `neg`.
+    Sub,
+    /// `subs`, and `cmp` and `negs`.
+    Subs,
+    /// `adc`: add with the carry flag.
+    Adc,
+    /// `adcs`.
+    Adcs,
+    /// `sbc`: subtract with the carry flag as not-borrow.
+    Sbc,
+    /// `sbcs`.
+    Sbcs,
+    /// `and`.
+    And,
+    /// `ands`, and `tst`.
+    Ands,
+    /// `orr`, and `mov` between registers.
+    Orr,
+    /// `orn`, and `mvn`.
+    Orn,
+    /// `eor`.
+    Eor,
+    /// `eon`.
+    Eon,
+    /// `bic`.
+    Bic,
+    /// `bics`.
+    Bics,
+    /// `ubfm`, and `lsl`, `lsr`, `ubfx`, `ubfiz`, `uxtb` and `uxth`.
+    Ubfm,
+    /// `sbfm`, and `asr`, `sbfx`, `sbfiz`, `sxtb`, `sxth` and `sxtw`.
+    Sbfm,
+    /// `bfm`, and `bfi`, `bfxil` and `bfc`.
+    Bfm,
+    /// `extr`, and `ror` by an immediate.
+    Extr,
+    /// `lslv`: shift left by a register.
+    Lslv,
+    /// `lsrv`: logical shift right by a register.
+    Lsrv,
+    /// `asrv`: arithmetic shift right by a register.
+    Asrv,
+    /// `rorv`: rotate right by a register.
+    Rorv,
+    /// `madd`, and `mul`.
+    Madd,
+    /// `msub`, and `mneg`.
+    Msub,
+    /// `smaddl`, and `smull`.
+    Smaddl,
+    /// `smsubl`, and `smnegl`.
+    Smsubl,
+    /// `umaddl`, and `umull`.
+    Umaddl,
+    /// `umsubl`, and `umnegl`.
+    Umsubl,
+    /// `smulh`: the high 64 bits of a signed 128-bit product.
+    Smulh,
+    /// `umulh`: the high 64 bits of an unsigned 128-bit product.
+    Umulh,
+    /// `udiv`.
+    Udiv,
+    /// `sdiv`.
+    Sdiv,
+    /// `clz`: count leading zeros.
+    Clz,
+    /// `cls`: count leading sign bits.
+    Cls,
+    /// `rbit`: reverse the bits.
+    Rbit,
+    /// `rev`: reverse the bytes of the register.
+    Rev,
+    /// `rev16`: reverse the bytes of each halfword.
+    Rev16,
+    /// `rev32`: reverse the bytes of each word.
+    Rev32,
+    /// `csel`.
+    Csel,
+    /// `csinc`, and `cinc` and `cset`.
+    Csinc,
+    /// `csinv`, and `cinv` and `csetm`.
+    Csinv,
+    /// `csneg`, and `cneg`.
+    Csneg,
+    /// `ccmp`: a compare when the condition holds, else flags from an
+    /// immediate.
+    Ccmp,
+    /// `ccmn`: likewise with an add.
+    Ccmn,
+    /// A load of one register: `ldr` in every addressing form, the literal
+    /// form among them, `ldur`, `ldtr`, `ldar`, `ldlar`, `ldapr`, `ldapur`,
+    /// `ldxr`, `ldaxr`, `ldraa` and `ldrab`, with their narrow and signed
+    /// forms.
+    Ldr(Width),
+    /// A store of one register: `str`, `stur`, `sttr`, `stlr`, `stllr` and
+    /// `stlur`, with their narrow forms.
+    Str(Width),
+    /// A load of two registers: `ldp`, `ldnp`, `ldxp` and `ldaxp`
+    /// ([`Width::Reg`]), and `ldpsw` ([`Width::SWord`]).
+    Ldp(Width),
+    /// A store of two registers: `stp` and `stnp`.
+    Stp,
+    /// A store-exclusive of one register, `stxr` or `stlxr`, which writes
+    /// its status to its first operand.
+    Stxr(Width),
+    /// A store-exclusive of two registers, `stxp` or `stlxp`.
+    Stxp,
+    /// An atomic read-modify-write (`ldadd`, `ldclr`, `ldeor`, `ldset`,
+    /// `ldsmax`, `ldsmin`, `ldumax`, `ldumin`, `swp`, in every ordering):
+    /// the old value goes to the second operand.
+    Atomic(Rmw, Width),
+    /// `cas` in every ordering: a compare-and-swap of one register.
+    Cas(Width),
+    /// `prfm` and `prfum`: a prefetch hint, with no effect on data.
+    Prfm,
+    /// `fmov`: a move to, from or between floating-point registers, or of a
+    /// floating-point immediate.
+    Fmov,
+    /// `movi`: a vector or 64-bit scalar immediate.
+    Movi,
+    /// `mvni`: the inverse of a vector immediate.
+    Mvni,
+    /// `svc`: a supervisor call.
+    Svc,
+    /// `mrs`: a system register read.
+    Mrs,
+    /// `msr`: a system register or processor state write.
+    Msr,
+    /// A barrier (`dmb`, `dsb`, `isb`, `sb`, `ssbb`, `pssbb`) or `clrex`:
+    /// orders memory and execution but changes no register.
+    Barrier,
+    /// Every other instruction, the branches among them.
+    Other,
+}
+
 /// How an instruction moves control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Flow {
@@ -317,6 +521,8 @@ pub struct Insn {
     pub word: u32,
     /// What it does.
     pub op: Op,
+    /// The base instruction, for the instructions the engine computes with.
+    pub mnemonic: Mnemonic,
     /// Its operands in assembly order, [`Opnd::None`] past the last.
     pub operands: [Opnd; 4],
     /// How it moves control; [`Op::flow`] of `op`.
