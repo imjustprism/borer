@@ -4822,7 +4822,7 @@ fn table_targets(program: &Program, table: u64, entries: usize) -> Option<Vec<u6
 /// # Returns
 ///
 /// `true` when at least three quarters of the sample lie in executable memory.
-fn accept_table(program: &Program, targets: &[u64]) -> bool {
+pub(super) fn accept_table(program: &Program, targets: &[u64]) -> bool {
     let sample = targets.len().min(16);
     if sample == 0 {
         return false;

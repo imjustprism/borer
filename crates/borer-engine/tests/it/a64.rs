@@ -1859,6 +1859,8 @@ const REFS: [u32; 110] = [
 
 /// Where `hello` lies in [`refs_data`].
 const HELLO: u64 = 0x40_2010;
+/// Where `clang_switch`'s byte table lies in [`refs_data`].
+const CLANG_TABLE: u64 = 0x40_2020;
 /// The import slots of [`REFS`], in `.rodata` from 0x402040, eight bytes
 /// apart.
 const SLOTS: [&str; 6] = ["puts", "malloc", "strlen", "abort", "free", "exit"];
@@ -1996,4 +1998,108 @@ fn calls_to_imports_that_never_return_end_their_path() {
     };
     assert_eq!(extent(0x9c), (0xa4, 2));
     assert_eq!(extent(0xac), (0xbc, 4));
+}
+
+/// The cases of three compilers' jump tables are walked as their
+/// function's code, in table order.
+///
+/// clang's byte table in `.rodata`, whose address the function formed
+/// before a branch, scaled from a label; MSVC's word table kept in the
+/// code after the function, which is no function's code and leaves the
+/// function after it to be found; and GCC's signed byte table with a case
+/// before its base. The load of each entry is an index reference to its
+/// table.
+#[test]
+fn jump_tables_of_three_styles_have_their_cases_walked() {
+    let a = Analysis::compute(&refs_image(&REFS, &refs_data()));
+    let at = |offs: &[u64]| -> Vec<u64> { offs.iter().map(|o| TEXT + o).collect() };
+    assert_eq!(
+        a.jump_tables.get(&(TEXT + 0xec)),
+        Some(&at(&[0xf0, 0xf8, 0x100, 0x108]))
+    );
+    assert_eq!(
+        a.jump_tables.get(&(TEXT + 0x134)),
+        Some(&at(&[0x138, 0x140, 0x148]))
+    );
+    assert_eq!(
+        a.jump_tables.get(&(TEXT + 0x19c)),
+        Some(&at(&[0x178, 0x1a0]))
+    );
+    let extent = |off: u64| {
+        let f = a.function(TEXT + off).expect("a function");
+        (f.start - TEXT, f.end - TEXT, f.instr_count)
+    };
+    assert_eq!(extent(0xc4), (0xc4, 0x118, 21));
+    assert_eq!(extent(0x118), (0x118, 0x158, 16));
+    assert_eq!(extent(0x174), (0x174, 0x1b0, 15));
+    assert!(a.function_at(TEXT + 0x15c).is_none());
+    assert_eq!(extent(0x164), (0x164, 0x174, 4));
+    let clang = a.function(TEXT + 0xc4).expect("clang_switch");
+    let dispatch = clang
+        .blocks
+        .iter()
+        .find(|b| b.end == TEXT + 0xf0)
+        .expect("the dispatch block");
+    assert_eq!(
+        (dispatch.term, dispatch.successors.clone()),
+        (BlockTerm::Indirect, at(&[0xf0, 0xf8, 0x100, 0x108]))
+    );
+    assert!(
+        a.xrefs_to(CLANG_TABLE)
+            .iter()
+            .any(|s| s.va == TEXT + 0xe4 && s.kind == RefKind::Index)
+    );
+}
+
+/// A `br` through a register no table explains stays an indirect jump
+/// with no successors.
+#[test]
+fn an_unresolved_br_stays_indirect() {
+    let a = Analysis::compute(&refs_image(&REFS, &refs_data()));
+    let f = a.function(TEXT + 0x1b0).expect("indirect");
+    let terms: Vec<(BlockTerm, usize)> = f
+        .blocks
+        .iter()
+        .map(|b| (b.term, b.successors.len()))
+        .collect();
+    assert_eq!(terms, [(BlockTerm::Indirect, 0)]);
+    assert!(!a.jump_tables.contains_key(&(TEXT + 0x1b4)));
+}
+
+/// A hostile jump table resolves to nothing and the walk goes on.
+///
+/// A bound past the image's bytes, entries that land outside the code or
+/// on words that are not code, and a table in an unmapped page. The answer
+/// is the same twice.
+#[test]
+fn hostile_jump_tables_resolve_to_nothing() {
+    let word = |off: u64| usize::try_from(off / 4).expect("small");
+    let mut huge = REFS;
+    // ASM: cmp w0, #0xfff
+    huge[word(0xd8)] = 0x713f_fc1f;
+    let mut away = REFS;
+    // ASM: adrp x9, 0x7ff000
+    away[word(0xc4)] = 0xd000_1fe9;
+    let mut outside = refs_data();
+    outside[0x20..0x24].copy_from_slice(&[0xff; 4]);
+    outside[0x24..0x26].copy_from_slice(&[0x80, 0x80]);
+    for (code, data) in [(huge, refs_data()), (away, refs_data()), (REFS, outside)] {
+        let p = refs_image(&code, &data);
+        let a = Analysis::compute(&p);
+        assert!(!a.jump_tables.contains_key(&(TEXT + 0xec)));
+        let clang = a.function(TEXT + 0xc4).expect("clang_switch");
+        assert!(
+            clang
+                .blocks
+                .iter()
+                .all(|b| b.term != BlockTerm::Indirect || b.successors.is_empty())
+        );
+        let shape = |a: &Analysis| -> Vec<(u64, u64, usize)> {
+            a.functions
+                .iter()
+                .map(|f| (f.entry, f.end, f.instr_count))
+                .collect()
+        };
+        assert_eq!(shape(&a), shape(&Analysis::compute(&p)));
+    }
 }

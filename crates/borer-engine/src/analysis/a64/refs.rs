@@ -143,6 +143,28 @@ impl<'a> Tracker<'a> {
         }
     }
 
+    /// Returns the constants the registers hold right before `va`.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - An instruction of the function.
+    ///
+    /// # Returns
+    ///
+    /// The registers, or `None` when no block holds `va`.
+    pub(super) fn before(&self, va: u64) -> Option<Regs> {
+        let k = self
+            .blocks
+            .partition_point(|b| b.start <= va)
+            .checked_sub(1)?;
+        let b = self.blocks.get(k).filter(|b| va < b.end)?;
+        let mut regs = *self.entry.get(k)?;
+        for i in block_insns(self.insns, b).iter().take_while(|i| i.va < va) {
+            step(&mut regs, i, &mut |_, _| {});
+        }
+        Some(regs)
+    }
+
     /// Calls `found` with every reference the function's instructions make
     /// through the constants: target, site and kind.
     ///

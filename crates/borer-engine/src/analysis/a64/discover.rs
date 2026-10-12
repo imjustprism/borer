@@ -9,16 +9,18 @@
 //! and stops after a call that never returns: one to a function named as
 //! never returning (or to an import named so, through its stub or its
 //! slot), or one followed by another function's start or by a word only a
-//! function opens with. An indirect `br` ends the path; jump tables are not
-//! resolved yet. A jump to a stub after an import is a tail call. A
-//! function whose walk followed a jump into what later proved a start, a
-//! call into what later proved never to return, or the fall-through of a
-//! call to where another function later proved to start, is walked again,
-//! round after round. Phase 2 guesses: every gap no block covers is swept a
-//! word at a time, and where it opens (its first word, or the word after
-//! padding or after an instruction control does not fall through) on a word
-//! a function opens with ([`prologue::opens`]), or on any word outside the
-//! extents of a file that declares them, the word is walked as a guess
+//! function opens with. An indirect `br` ends the path; once the path ends,
+//! a `br` that dispatches through a bounded jump table ([`switch`]) has its
+//! cases walked, round after round, since a case may reach another switch.
+//! A jump to a stub after an import is a tail call. A function whose walk
+//! followed a jump into what later proved a start, a call into what later
+//! proved never to return, or the fall-through of a call to where another
+//! function later proved to start, is walked again, round after round.
+//! Phase 2 guesses: every gap no block covers is swept a word at a time,
+//! and where it opens (its first word, or the word after padding or after
+//! an instruction control does not fall through) on a word a function opens
+//! with ([`prologue::opens`]), or on any word outside the extents of a file
+//! that declares them, the word is walked as a guess
 //! ([`Discovery::gap_seeds`]), kept only when the walk decodes nothing that
 //! is not code, finds a way out, does not run into another function or into
 //! code one covers, and does not lie inside a guess kept before it. Each
@@ -33,7 +35,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{prologue, refs, stubs};
+use super::refs::{self, Tracker};
+use super::switch::{self, Shape, Table};
+use super::{prologue, stubs};
 use crate::analysis::functions::{
     GAP_ROUNDS_MAX, GUESS_WALK_MAX, SEEDS_MAX, SPLIT_ROUNDS_MAX, build_callers_and_names, fuel_for,
     is_noreturn_name, mix, push_site,
@@ -52,6 +56,10 @@ const STEP: u64 = 4;
 /// past any function a compiler emits, so a walk through a sled of
 /// hostile words ends.
 const WALK_MAX: u64 = 1 << 18;
+/// Most rounds of jump-table resolution one walk makes: each resolves the
+/// `br`s the code walked so far reaches, and walks their cases, which may
+/// reach a nested switch's `br`.
+const TABLE_ROUNDS_MAX: usize = 32;
 /// Walks committed per batch of a wave; only one batch's results are held
 /// at a time.
 const WAVE_BATCH: usize = 4096;
@@ -131,6 +139,8 @@ impl<'a> Text<'a> {
 /// What every walk of a wave reads and none writes.
 #[derive(Clone, Copy)]
 struct Known<'a> {
+    /// The loaded image, for the bytes of a jump table.
+    program: &'a Program,
     /// The code.
     text: &'a Text<'a>,
     /// The slots the file names imports in.
@@ -309,6 +319,8 @@ struct Walked {
     /// Callees found never to return here: another function starts right
     /// after the call.
     found_noreturn: Vec<u64>,
+    /// The jump tables its `br`s dispatch through, resolved.
+    tables: Vec<Table>,
     /// Instructions decoded, charged to the fuel.
     spent: u64,
     /// A fall-through landed on a word that is not code.
@@ -340,6 +352,8 @@ struct Kept {
     followed_calls: Vec<u64>,
     /// [`Walked::after_calls`].
     after_calls: Vec<u64>,
+    /// [`Walked::tables`].
+    tables: Vec<Table>,
 }
 
 /// Tells what a direct `b` to `t` in the function at `entry` is.
@@ -404,107 +418,151 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
     let (mut junk, mut terminated, mut fell_into_start, mut bad_entry, mut overlong) =
         (false, false, false, false, false);
     let mut enters_covered = false;
-    while let Some((va, via)) = pending.pop() {
-        if seen.contains(&va) {
-            continue;
-        }
-        if from_usize(words.len()) >= cap {
-            overlong = true;
-            break;
-        }
-        let insn = known
-            .text
-            .word(va)
-            .filter(|&w| w != 0)
-            .map(|w| a64::decode(w, va))
-            .filter(|i| i.op != Op::Invalid);
-        let Some(insn) = insn else {
-            junk |= via == Via::Fall;
-            bad_entry |= words.is_empty();
-            continue;
-        };
-        seen.insert(va);
-        words.push((va, insn.word));
-        let next = va.wrapping_add(STEP);
-        if prologue::tears_down(insn.word) {
-            torn_down.insert(next);
-        }
-        let falls_into_start = next != entry && known.starts.contains(&next);
-        let falls_into_covered = guess && known.covers(next);
-        match insn.flow {
-            Flow::Next => {
-                if falls_into_start {
-                    fell_into_start = true;
-                } else if falls_into_covered {
-                    enters_covered = true;
-                } else {
-                    pending.push((next, Via::Fall));
-                }
+    let mut dispatches: Vec<Shape> = Vec::new();
+    let mut tables: Vec<Table> = Vec::new();
+    let mut rounds = 0;
+    loop {
+        while let Some((va, via)) = pending.pop() {
+            if seen.contains(&va) {
+                continue;
             }
-            Flow::CondJump => {
-                if let Some(t) = insn.target() {
-                    if t == entry {
-                        pending.push((t, Via::Branch));
-                    } else if known.leaves(entry, t) {
-                        callees.insert(t);
-                    } else if guess && known.covers(t) {
+            if from_usize(words.len()) >= cap {
+                overlong = true;
+                break;
+            }
+            let insn = known
+                .text
+                .word(va)
+                .filter(|&w| w != 0)
+                .map(|w| a64::decode(w, va))
+                .filter(|i| i.op != Op::Invalid);
+            let Some(insn) = insn else {
+                junk |= via == Via::Fall;
+                bad_entry |= words.is_empty();
+                continue;
+            };
+            seen.insert(va);
+            words.push((va, insn.word));
+            let next = va.wrapping_add(STEP);
+            if prologue::tears_down(insn.word) {
+                torn_down.insert(next);
+            }
+            let falls_into_start = next != entry && known.starts.contains(&next);
+            let falls_into_covered = guess && known.covers(next);
+            match insn.flow {
+                Flow::Next => {
+                    if falls_into_start {
+                        fell_into_start = true;
+                    } else if falls_into_covered {
                         enters_covered = true;
                     } else {
-                        followed.insert(t);
-                        pending.push((t, Via::Branch));
+                        pending.push((next, Via::Fall));
                     }
                 }
-                if falls_into_start {
-                    fell_into_start = true;
-                } else if falls_into_covered {
+                Flow::CondJump => {
+                    if let Some(t) = insn.target() {
+                        if t == entry {
+                            pending.push((t, Via::Branch));
+                        } else if known.leaves(entry, t) {
+                            callees.insert(t);
+                        } else if guess && known.covers(t) {
+                            enters_covered = true;
+                        } else {
+                            followed.insert(t);
+                            pending.push((t, Via::Branch));
+                        }
+                    }
+                    if falls_into_start {
+                        fell_into_start = true;
+                    } else if falls_into_covered {
+                        enters_covered = true;
+                    } else {
+                        pending.push((next, Via::Fall));
+                    }
+                }
+                Flow::Jump => match insn.target() {
+                    None => {
+                        terminated = true;
+                        if insn.op == Op::Br {
+                            dispatches.extend(switch::shape(known.text, &insn));
+                        }
+                    }
+                    Some(t) if t == entry => pending.push((t, Via::Branch)),
+                    Some(t) => match jump_kind(known, entry, t, torn_down.contains(&va)) {
+                        Jump::Within if guess && known.covers(t) => enters_covered = true,
+                        Jump::Within => {
+                            followed.insert(t);
+                            pending.push((t, Via::Branch));
+                        }
+                        Jump::Tail => {
+                            callees.insert(t);
+                            terminated = true;
+                        }
+                        Jump::Unless => {
+                            unless_reached.push(t);
+                            terminated = true;
+                        }
+                    },
+                },
+                Flow::Call => {
+                    let callee = insn.target().filter(|&t| known.text.word(t).is_some());
+                    if let Some(t) = callee {
+                        callees.insert(t);
+                    }
+                    if next != entry && known.start_at(next) {
+                        found_noreturn.extend(callee);
+                        terminated = true;
+                    } else if callee.is_some_and(|t| known.noreturn.contains(&t))
+                        || known.noreturn_import(&insn, insn.target())
+                    {
+                        terminated = true;
+                    } else {
+                        followed_calls.extend(callee);
+                        after_calls.insert(next);
+                        pending.push((next, Via::Fall));
+                    }
+                }
+                Flow::Return | Flow::Invalid => terminated = true,
+            }
+        }
+        if dispatches.is_empty() || overlong || rounds == TABLE_ROUNDS_MAX {
+            break;
+        }
+        rounds += 1;
+        let mut sorted = words.clone();
+        sorted.sort_unstable_by_key(|w| w.0);
+        let insns: Vec<Insn> = sorted.iter().map(|&(va, w)| a64::decode(w, va)).collect();
+        let present = |va: u64| insns.binary_search_by_key(&va, |i| i.va).is_ok();
+        let graph = blocks(entry, &insns, &present, &tables);
+        let tracker = Tracker::new(&insns, &graph);
+        let before = tables.len();
+        dispatches.retain(|d| {
+            let Some(table) = switch::resolve(known.program, known.text, &tracker, d) else {
+                return true;
+            };
+            for &t in &table.targets {
+                if t == entry {
+                    pending.push((t, Via::Branch));
+                } else if known.leaves(entry, t) {
+                    callees.insert(t);
+                } else if guess && known.covers(t) {
                     enters_covered = true;
                 } else {
-                    pending.push((next, Via::Fall));
+                    followed.insert(t);
+                    pending.push((t, Via::Branch));
                 }
             }
-            Flow::Jump => match insn.target() {
-                None => terminated = true,
-                Some(t) if t == entry => pending.push((t, Via::Branch)),
-                Some(t) => match jump_kind(known, entry, t, torn_down.contains(&va)) {
-                    Jump::Within if guess && known.covers(t) => enters_covered = true,
-                    Jump::Within => {
-                        followed.insert(t);
-                        pending.push((t, Via::Branch));
-                    }
-                    Jump::Tail => {
-                        callees.insert(t);
-                        terminated = true;
-                    }
-                    Jump::Unless => {
-                        unless_reached.push(t);
-                        terminated = true;
-                    }
-                },
-            },
-            Flow::Call => {
-                let callee = insn.target().filter(|&t| known.text.word(t).is_some());
-                if let Some(t) = callee {
-                    callees.insert(t);
-                }
-                if next != entry && known.start_at(next) {
-                    found_noreturn.extend(callee);
-                    terminated = true;
-                } else if callee.is_some_and(|t| known.noreturn.contains(&t))
-                    || known.noreturn_import(&insn, insn.target())
-                {
-                    terminated = true;
-                } else {
-                    followed_calls.extend(callee);
-                    after_calls.insert(next);
-                    pending.push((next, Via::Fall));
-                }
-            }
-            Flow::Return | Flow::Invalid => terminated = true,
+            tables.push(table);
+            false
+        });
+        if tables.len() == before {
+            break;
         }
+        tables.sort_unstable_by_key(|t| t.site);
     }
     callees.extend(unless_reached.into_iter().filter(|t| !seen.contains(t)));
     let spent = from_usize(words.len());
-    let (func, sites) = assemble(entry, words, callees);
+    let (func, sites) = assemble(entry, words, callees, &tables);
     Walked {
         func,
         sites,
@@ -512,6 +570,7 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
         followed_calls: followed_calls.into_iter().collect(),
         after_calls: after_calls.into_iter().collect(),
         found_noreturn: found_noreturn.into_iter().collect(),
+        tables,
         spent,
         junk,
         terminated,
@@ -561,6 +620,7 @@ fn merged(mut extents: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
 /// * `entry` - The function's entry.
 /// * `words` - The decoded words and their addresses, in walk order.
 /// * `callees` - The functions it calls or tail-calls.
+/// * `tables` - The jump tables its `br`s dispatch through, by site.
 ///
 /// # Returns
 ///
@@ -569,6 +629,7 @@ fn assemble(
     entry: u64,
     mut words: Vec<(u64, u32)>,
     callees: BTreeSet<u64>,
+    tables: &[Table],
 ) -> (Function, Vec<(u64, u64, RefKind)>) {
     words.sort_unstable_by_key(|w| w.0);
     let insns: Vec<Insn> = words.iter().map(|&(va, w)| a64::decode(w, va)).collect();
@@ -602,7 +663,7 @@ fn assemble(
         start,
         end,
         instr_count: insns.len(),
-        blocks: blocks(entry, &insns, &present),
+        blocks: blocks(entry, &insns, &present, tables),
         callees: callees.into_iter().collect(),
         callers: Vec::new(),
         name: None,
@@ -629,28 +690,38 @@ fn assemble(
 
 /// Splits a function's instructions into basic blocks.
 ///
-/// A block starts at the entry, at every branch target the walk decoded,
-/// after every instruction control does not simply fall through, and
-/// wherever the instructions stop being contiguous. A call ends a block,
-/// and its fall-through is a successor only when the walk followed it; a
-/// branch's target is a successor wherever it lies, a tail call's
-/// included.
+/// A block starts at the entry, at every branch target and jump-table
+/// case the walk decoded, after every instruction control does not simply
+/// fall through, and wherever the instructions stop being contiguous. A
+/// call ends a block, and its fall-through is a successor only when the
+/// walk followed it; a branch's target is a successor wherever it lies, a
+/// tail call's included, and a `br` through a resolved table has its cases
+/// as successors, in table order.
 ///
 /// # Arguments
 ///
 /// * `entry` - The function's entry.
 /// * `insns` - Its instructions, in address order.
 /// * `present` - Whether the walk decoded an address.
+/// * `tables` - The resolved jump tables, sorted by site.
 ///
 /// # Returns
 ///
 /// The blocks in address order.
-fn blocks(entry: u64, insns: &[Insn], present: &dyn Fn(u64) -> bool) -> Vec<BasicBlock> {
+fn blocks(
+    entry: u64,
+    insns: &[Insn],
+    present: &dyn Fn(u64) -> bool,
+    tables: &[Table],
+) -> Vec<BasicBlock> {
     let mut leaders: Vec<u64> = vec![entry];
     for i in insns {
         if matches!(i.flow, Flow::CondJump | Flow::Jump) {
             leaders.extend(i.target().filter(|&t| present(t)));
         }
+    }
+    for t in tables {
+        leaders.extend(t.targets.iter().copied().filter(|&t| present(t)));
     }
     leaders.sort_unstable();
     leaders.dedup();
@@ -693,7 +764,16 @@ fn blocks(entry: u64, insns: &[Insn], present: &dyn Fn(u64) -> bool) -> Vec<Basi
                     b.term = BlockTerm::Jmp;
                     b.successors.push(t);
                 }
-                None => b.term = BlockTerm::Indirect,
+                None => {
+                    b.term = BlockTerm::Indirect;
+                    if let Some(t) = tables
+                        .binary_search_by_key(&i.va, |t| t.site)
+                        .ok()
+                        .and_then(|k| tables.get(k))
+                    {
+                        b.successors.extend(t.targets.iter().copied());
+                    }
+                }
             },
             Flow::Call => {
                 b.term = BlockTerm::Call;
@@ -924,6 +1004,7 @@ impl Discovery<'_> {
             };
             let program = self.program;
             let known = Known {
+                program,
                 text,
                 import_slots: self.import_slots,
                 noreturn_slots: self.noreturn_slots,
@@ -1003,6 +1084,7 @@ impl Discovery<'_> {
                 followed: w.followed,
                 followed_calls: w.followed_calls,
                 after_calls: w.after_calls,
+                tables: w.tables,
             },
         );
     }
@@ -1032,13 +1114,20 @@ impl Discovery<'_> {
         }
     }
 
-    /// The code the kept functions' blocks cover, as sorted, disjoint
-    /// extents.
+    /// The code the kept functions' blocks cover and the jump tables they
+    /// dispatch through, as sorted, disjoint extents: a table kept in the
+    /// code is no gap to guess at.
     fn covered(&self) -> Vec<(u64, u64)> {
         merged(
             self.walked
                 .values()
-                .flat_map(|k| k.func.blocks.iter().map(|b| (b.start, b.end)))
+                .flat_map(|k| {
+                    k.func
+                        .blocks
+                        .iter()
+                        .map(|b| (b.start, b.end))
+                        .chain(k.tables.iter().map(|t| (t.at, t.at.saturating_add(t.len))))
+                })
                 .collect(),
         )
     }
@@ -1199,6 +1288,9 @@ pub(crate) fn discover(program: &Program) -> Analysis {
     for (&entry, k) in &d.walked {
         for &(target, va, kind) in &k.sites {
             push_site(&mut analysis.xrefs, target, va, kind, Some(entry));
+        }
+        for t in &k.tables {
+            analysis.jump_tables.insert(t.site, t.targets.clone());
         }
     }
     analysis.functions = d
