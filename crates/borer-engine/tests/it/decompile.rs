@@ -5575,7 +5575,8 @@ fn a_narrow_load_shifted_into_the_high_half_keeps_its_bits() {
 ///
 /// `mov eax,[rcx+8]; imul rax,rax,0x431bde83; shr rax,0x32; ret` divides
 /// the field by a magic multiply whose product needs 63 bits, where the
-/// text's `*(uint32_t*)(a1 + 8) * 0x431bde83` wrapped in `unsigned int`.
+/// text's `*(uint32_t*)(a1 + 8) * 0x431bde83` wrapped in `unsigned int`;
+/// the high word of the whole product is the division it computes.
 #[test]
 fn a_32_bit_load_multiplied_in_64_bits_keeps_the_high_half() {
     let code = [
@@ -5585,7 +5586,64 @@ fn a_32_bit_load_multiplied_in_64_bits_keeps_the_high_half() {
         0xc3, // ASM: ret
     ];
     let text = runs_agree(&program64(&code), 0x1_4000_1000);
-    assert!(text.contains("(uint64_t)"), "{text}");
+    assert!(text.contains("*(uint32_t*)(a1 + 8) / 1000000"), "{text}");
+}
+
+/// clang's signed division by a constant reads as the division.
+///
+/// The whole product of the sign-extended word is formed once, its high
+/// word shifted arithmetically and its sign added; the high word read off
+/// the product is the quotient's magic multiply, and the sum of it and
+/// the product's sign is `(int32_t)a1 / 10`.
+#[test]
+fn clangs_wide_product_division_reads_as_the_division() {
+    let code = [
+        0x48, 0x63, 0xc1, // ASM: movsxd rax, ecx
+        0x48, 0x69, 0xc0, 0x67, 0x66, 0x66, 0x66, // ASM: imul rax, rax, 0x66666667
+        0x48, 0x89, 0xc1, // ASM: mov rcx, rax
+        0x48, 0xc1, 0xe9, 0x3f, // ASM: shr rcx, 0x3f
+        0x48, 0xc1, 0xf8, 0x22, // ASM: sar rax, 0x22
+        0x01, 0xc8, // ASM: add eax, ecx
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("/ 10;"), "{text}");
+    assert!(!text.contains("0x66666667"), "{text}");
+}
+
+/// A remainder whose quotient is subtracted through a negative multiplier
+/// at 32 bits reads as the remainder.
+///
+/// adler32's `a %= 65521` multiplies the quotient by `0xffff000f`, minus
+/// 65521 in the low word only, and adds.
+#[test]
+fn a_remainder_through_a_32_bit_negative_multiplier_reads_as_the_remainder() {
+    let code = [
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0xba, 0x71, 0x80, 0x07, 0x80, // ASM: mov edx, 0x80078071
+        0xf7, 0xe2, // ASM: mul edx
+        0xc1, 0xea, 0x0f, // ASM: shr edx, 0xf
+        0x69, 0xd2, 0x0f, 0x00, 0xff, 0xff, // ASM: imul edx, edx, 0xffff000f
+        0x01, 0xd1, // ASM: add ecx, edx
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("% 65521"), "{text}");
+    assert!(!text.contains("mulhi"), "{text}");
+}
+
+/// A 16-bit rotate by 8 swaps the half word's bytes and reads as `bswap`.
+#[test]
+fn a_half_word_rotate_by_eight_reads_as_a_byte_swap() {
+    let code = [
+        0x0f, 0xb7, 0x01, // ASM: movzx eax, word ptr [rcx]
+        0x66, 0xc1, 0xc0, 0x08, // ASM: rol ax, 0x8
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("bswap("), "{text}");
+    assert!(!text.contains("rotl16"), "{text}");
 }
 
 /// A logical shift of all ones shifts its unsigned bits.

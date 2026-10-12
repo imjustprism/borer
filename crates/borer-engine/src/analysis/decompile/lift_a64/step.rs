@@ -4,13 +4,13 @@
 //!
 //! Each handler computes every value before it writes anything, and
 //! answers `None` for an operand it does not model, which leaves the
-//! instruction unmodeled. A value is built at 64 bits from the registers'
-//! values as the instruction reads them and left uncut by a `w` write,
-//! which holds the register narrow instead: an add, a subtract, a multiply
-//! or a logical operation needs no bit of a `w` operand above its 32, so
-//! only an operation that does (a right shift, a divide, a rotate, an
-//! extension) cuts or sign-extends its operand first, and a compare's
-//! flags carry their width.
+//! instruction unmodeled. A value is built from the registers' values as
+//! the instruction reads them, folded at the operation's width, and left
+//! uncut by a `w` write, which holds the register narrow instead: an add,
+//! a subtract, a multiply or a logical operation needs no bit of a `w`
+//! operand above its 32, so only an operation that does (a right shift, a
+//! divide, a rotate, an extension) cuts or sign-extends its operand first,
+//! and a compare's flags carry their width.
 
 use super::super::expr::{Expr, Flags, Op, Ty, UnOp, fold, mask, sign_extend, ternary, unary};
 use super::flags::{self, holds, next_reader};
@@ -386,25 +386,21 @@ impl Lift<'_, '_> {
             (!matches!(self.ex.flags, Flags::Unknown))
                 .then(|| flags::value(&self.ex.flags, a64::Cond::Hs))
         };
+        let w = width8(bits);
         let v = match form {
-            Form::Add => fold(Op::Add, x.clone(), y.clone(), 64),
-            Form::Sub => fold(Op::Sub, x.clone(), y.clone(), 64),
-            Form::Adc => fold(
-                Op::Add,
-                fold(Op::Add, x.clone(), y.clone(), 64),
-                carry()?,
-                64,
-            ),
+            Form::Add => fold(Op::Add, x.clone(), y.clone(), w),
+            Form::Sub => fold(Op::Sub, x.clone(), y.clone(), w),
+            Form::Adc => fold(Op::Add, fold(Op::Add, x.clone(), y.clone(), w), carry()?, w),
             Form::Sbc => fold(
                 Op::Add,
                 fold(
                     Op::Sub,
-                    fold(Op::Sub, x.clone(), y.clone(), 64),
+                    fold(Op::Sub, x.clone(), y.clone(), w),
                     Expr::Const(1),
-                    64,
+                    w,
                 ),
                 carry()?,
-                64,
+                w,
             ),
         };
         if sets {
@@ -436,7 +432,7 @@ impl Lift<'_, '_> {
         let x = self.source(i, 1, bits)?;
         let y = self.source(i, 2, bits)?;
         let y = if invert { unary(UnOp::Not, y, 64) } else { y };
-        let v = fold(op, x.clone(), y.clone(), 64);
+        let v = fold(op, x.clone(), y.clone(), width8(bits));
         if sets {
             self.ex.flags = Flags::Test(x, y, width8(bits));
         }
@@ -567,7 +563,8 @@ impl Lift<'_, '_> {
         let n = widen(self.source(i, 1, 64)?);
         let m = widen(self.source(i, 2, 64)?);
         let a = self.source(i, 3, bits)?;
-        let v = fold(op, a, fold(Op::Mul, n, m, 64), 64);
+        let product = if long.is_some() { 64 } else { width8(bits) };
+        let v = fold(op, a, fold(Op::Mul, n, m, product), width8(bits));
         self.write(rd, bits, v);
         Some(())
     }

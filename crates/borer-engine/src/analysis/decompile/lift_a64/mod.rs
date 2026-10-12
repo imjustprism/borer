@@ -582,6 +582,20 @@ impl Lift<'_, '_> {
                     width8(bits),
                 ),
             },
+            // INVARIANT: the sign bit tested alone is the sign, `x < 0`,
+            // which a test of the value with itself reads as.
+            Test::Bit {
+                reg,
+                bits,
+                bit,
+                set,
+            } if u16::from(bit) + 1 == bits => {
+                let v = tested.unwrap_or_else(|| self.reg_at(reg, bits));
+                Cond {
+                    cc: Cc(if set { C::s } else { C::ns }),
+                    flags: Flags::Test(v.clone(), v, width8(bits)),
+                }
+            }
             Test::Bit {
                 reg,
                 bits,

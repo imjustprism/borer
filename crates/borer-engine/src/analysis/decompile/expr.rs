@@ -1500,25 +1500,130 @@ fn overflow_division(l: &Expr, s: u64) -> Option<Expr> {
         let d = wide_magic_divisor(w, u128::from(m) + (1u128 << w), s + 1)?;
         return Some(Expr::Bin(
             Op::Div,
-            Box::new(dividend),
+            Box::new(mask(dividend, mask_bits(w))),
             Box::new(Expr::Const(d)),
         ));
     }
     None
 }
 
+/// Reads a shift of the whole product of two 32-bit values as the high
+/// multiply it shifts.
+///
+/// `smull` and `umull`, and an `imul` of a sign-extended word, form the
+/// 64-bit product of two words; shifted right by 32 or more it is the
+/// product's high word shifted by the rest, which is the shape
+/// [`division_idiom`] reads a quotient's magic multiply in: `(sext(x) *
+/// M) >> 34` is `smulhi32(x, M) >> 2`. A logical shift reads the high word
+/// as it is, an arithmetic one through its sign extension.
+///
+/// # Arguments
+///
+/// * `op` - The shift, [`Op::Shr`] or [`Op::Sar`].
+/// * `l` - The product: a sign-extended word times a constant that fits a
+///   signed word, or a word cut to its low 32 bits times one that fits an
+///   unsigned word.
+/// * `r` - The shift, 32 to 63.
+///
+/// # Returns
+///
+/// The shift of the high multiply, or `None` when the operands are not
+/// that shape.
+fn wide_high(op: Op, l: &Expr, r: &Expr) -> Option<Expr> {
+    /// The mask of a word's bits.
+    const WORD: u64 = 0xffff_ffff;
+    if !matches!(op, Op::Shr | Op::Sar) {
+        return None;
+    }
+    let k = const_of(r).filter(|k| (32..64).contains(k))?;
+    let Expr::Bin(Op::Mul, a, b) = l else {
+        return None;
+    };
+    let (x, c, signed) = [(a, b), (b, a)].into_iter().find_map(|(v, c)| {
+        let c = const_of(c)?;
+        match v.as_ref() {
+            Expr::Sext(x, 32) if sext(c & WORD, 32) == c => Some((x.as_ref(), c & WORD, true)),
+            other if known_bits(other) <= WORD && c <= WORD => Some((other, c, false)),
+            _ => None,
+        }
+    })?;
+    let high = |hi: Op| fold(hi, x.clone(), Expr::Const(c), 32);
+    let rest = Expr::Const(k - 32);
+    // INVARIANT: the signed high word is shifted as it stands: a shift by
+    // 31 read as the sign of the dividend is that sign at 32 bits only,
+    // and this one is at 64.
+    match (op, signed) {
+        (Op::Shr, true) if k == 32 => Some(high(Op::SMulHi(32))),
+        (Op::Shr, true) => Some(Expr::Bin(
+            Op::Shr,
+            Box::new(high(Op::SMulHi(32))),
+            Box::new(rest),
+        )),
+        (Op::Shr, false) => Some(fold(Op::Shr, high(Op::MulHi(32)), rest, 64)),
+        (Op::Sar, true) => Some(fold(
+            Op::Sar,
+            Expr::Sext(Box::new(high(Op::SMulHi(32))), 32),
+            rest,
+            64,
+        )),
+        _ => None,
+    }
+}
+
+/// The value a signed quotient shifts arithmetically, its lane's sign
+/// extension taken off: the high multiply, or its sum with the dividend.
+///
+/// Its sign is the quotient's, since an arithmetic shift keeps the sign.
+///
+/// # Arguments
+///
+/// * `q` - The quotient, as [`signed_quotient_of`] reads it.
+fn quotient_operand(q: &Expr) -> &Expr {
+    let inner = match q {
+        Expr::Bin(Op::Sar, inner, _) => inner.as_ref(),
+        other => other,
+    };
+    match inner {
+        Expr::Sext(e, _) => e.as_ref(),
+        other => other,
+    }
+}
+
+/// `e` with its outer cut to the low word taken off: a sign extension of
+/// it or a mask of it (a cast stays, which from a float converts).
+///
+/// Two values the same below that cut agree in every bit an operation of
+/// 32 bits or fewer reads.
+///
+/// # Arguments
+///
+/// * `e` - The value.
+fn low_word(e: &Expr) -> &Expr {
+    match e {
+        Expr::Sext(x, 32) => x.as_ref(),
+        Expr::Bin(Op::And, x, m) if const_of(m) == Some(0xffff_ffff) => x.as_ref(),
+        other => other,
+    }
+}
+
 /// Reverses the strength reduction of a division or remainder by a constant.
 ///
-/// Unsigned `x / d` comes back as `mulhi(M, x) >> s` (or the shape of
-/// [`overflow_division`] when the magic needs a bit more); signed as the quotient
-/// of [`signed_quotient_of`] plus its own sign bit (`q + (q >>> (w - 1))`);
-/// `x % d` as `x - (x / d) * d` or `x + (x / d) * -d` once the division is
-/// back. Each is rendered as the operator it was, the divisor recovered by
-/// [`magic_divisor`] or [`signed_magic_divisor`]. The sign bit of such a
-/// quotient on its own, that is `q >>> (w - 1)` for a quotient the compiler
-/// kept in a register and fixed up elsewhere, is the sign bit of the
-/// dividend, since the divisor is positive; the fix-up then matches either
-/// spelling.
+/// Unsigned `x / d` comes back as `mulhi(M, x) >> s`, or `mulhi(M, x)`
+/// alone when no shift is needed (a quotient shifted further is a larger
+/// divisor's), or the shape of [`overflow_division`] when the magic needs a
+/// bit more; signed as the quotient of [`signed_quotient_of`] plus its own
+/// sign bit (`q + (q >>> (w - 1))`), the sign read off the quotient, the
+/// dividend or the value the quotient shifts, a 32-bit lane's through its
+/// 64-bit extension; `x % d` as `x - (x / d) * d` or `x + (x / d) * -d` once
+/// the division is back, and `x - (x / y) * y` by a divisor that is no
+/// constant (`sdiv; msub`), the dividend at 32 bits or fewer matched through
+/// its cut to the low word ([`low_word`]). Each is rendered as the operator
+/// it was, the divisor recovered by [`magic_divisor`] or
+/// [`signed_magic_divisor`], a dividend the multiply read at fewer bits
+/// than the register holds cut to those bits. The sign bit of such a quotient on its own,
+/// that is `q >>> (w - 1)` for a quotient the compiler kept in a register and
+/// fixed up elsewhere, is the sign bit of the dividend, since the divisor is
+/// positive; the fix-up then matches either spelling.
 ///
 /// # Arguments
 ///
@@ -1543,14 +1648,38 @@ fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
             }
             .or_else(|| signed_power_quotient(l, k, bits))
         }
+        Op::MulHi(w) => {
+            let (m, x) = match (const_of(l), const_of(r)) {
+                (Some(m), None) => (m, r),
+                (None, Some(m)) => (m, l),
+                _ => return None,
+            };
+            // INVARIANT: a power of two's high half is an overflow test
+            // (`mul_sat`), never a division a compiler would multiply for.
+            let d = magic_divisor(w, m, 0).filter(|d| !d.is_power_of_two())?;
+            Some(Expr::Bin(
+                Op::Div,
+                Box::new(mask(x.clone(), mask_bits(w))),
+                Box::new(Expr::Const(d)),
+            ))
+        }
         Op::Shr => {
             let s = const_of(r)?;
+            if let Expr::Bin(Op::Div, x, d) = l
+                && let Some(d) = const_of(d).filter(|d| *d > 0)
+                && let Some(wider) = d.checked_shl(u32::try_from(s).ok()?)
+                && wider >> s == d
+                && wider <= mask_bits(bits)
+                && known_bits(x) <= mask_bits(bits)
+            {
+                return Some(Expr::Bin(Op::Div, x.clone(), Box::new(Expr::Const(wider))));
+            }
             if let Some((w, m, x)) = mulhi_of(l, false)
                 && let Some(d) = magic_divisor(w, m, s)
             {
                 return Some(Expr::Bin(
                     Op::Div,
-                    Box::new(x.clone()),
+                    Box::new(mask(x.clone(), mask_bits(w))),
                     Box::new(Expr::Const(d)),
                 ));
             }
@@ -1560,7 +1689,7 @@ fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
             {
                 return Some(Expr::Bin(
                     Op::Shr,
-                    Box::new(x.clone()),
+                    Box::new(mask(x.clone(), mask_bits(w))),
                     Box::new(Expr::Const(s)),
                 ));
             }
@@ -1575,12 +1704,20 @@ fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
                     continue;
                 };
                 // A 32-bit copy of the quotient masks it to its lane before
-                // its sign bit is shifted down.
-                let sign_of = match sign_of.as_ref() {
-                    Expr::Bin(Op::And, v, k) if const_of(k) == Some(mask_bits(w)) => v.as_ref(),
-                    other => other,
+                // its sign bit is shifted down, and a 64-bit shift reads a
+                // 32-bit lane's sign through its extension.
+                let top = u64::from(w) - 1;
+                let sign_of = match (const_of(amount), sign_of.as_ref()) {
+                    (Some(a), Expr::Bin(Op::And, v, k))
+                        if a == top && const_of(k) == Some(mask_bits(w)) =>
+                    {
+                        v.as_ref()
+                    }
+                    (Some(63), Expr::Sext(v, b)) if *b == w => v.as_ref(),
+                    (Some(a), other) if a == top => other,
+                    _ => continue,
                 };
-                if const_of(amount) != Some(u64::from(w) - 1) || (sign_of != q && sign_of != x) {
+                if sign_of != q && sign_of != x && sign_of != quotient_operand(q) {
                     continue;
                 }
                 let d = signed_magic_divisor(w, m, s, negative)?;
@@ -1599,7 +1736,19 @@ fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         }
         Op::Sub | Op::Add => {
             let negated = op == Op::Add;
-            for (x, product) in [(l, r), (r, l)] {
+            let lane = mask_bits(bits);
+            // INVARIANT: at 32 bits or fewer a value and its cut to the low
+            // word agree in every bit read, so `x - (sext(x) / d) * d` is
+            // the remainder `sdiv; msub` leaves.
+            let same = |a: &Expr, b: &Expr| a == b || (bits <= 32 && low_word(a) == low_word(b));
+            // INVARIANT: a difference is the remainder only as `x - q * d`;
+            // `q * d - x` is its negation.
+            let orders: &[(&Expr, &Expr)] = if negated {
+                &[(l, r), (r, l)]
+            } else {
+                &[(l, r)]
+            };
+            for &(x, product) in orders {
                 let Expr::Bin(Op::Mul, a, b) = product else {
                     continue;
                 };
@@ -1612,14 +1761,16 @@ fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
                         Op::SDiv => Op::SRem,
                         _ => continue,
                     };
-                    let Some(dc) = const_of(d2) else { continue };
-                    let factor = if negated { dc.wrapping_neg() } else { dc };
-                    if x2.as_ref() == x && const_of(d) == Some(factor) {
-                        return Some(Expr::Bin(rem, Box::new(x.clone()), d2.clone()));
+                    let divides = match const_of(d2) {
+                        Some(dc) => {
+                            let factor = if negated { dc.wrapping_neg() } else { dc };
+                            const_of(d).is_some_and(|c| (c ^ factor) & lane == 0)
+                        }
+                        None => !negated && same(d, d2),
+                    };
+                    if divides && same(x2, x) {
+                        return Some(Expr::Bin(rem, x2.clone(), d2.clone()));
                     }
-                }
-                if op == Op::Sub {
-                    break;
                 }
             }
             None
@@ -1916,6 +2067,9 @@ pub(super) fn fold(op: Op, l: Expr, r: Expr, bits: u8) -> Expr {
     if op.is_float() {
         return Expr::Bin(op, Box::new(l), Box::new(r));
     }
+    if let Some(e) = wide_high(op, &l, &r) {
+        return e;
+    }
     if let Some(e) = division_idiom(op, &l, &r, bits) {
         return e;
     }
@@ -2165,6 +2319,9 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
             _ => u64::MAX,
         },
         Expr::Ternary(_, a, b) => known_bits(a) | known_bits(b),
+        // INVARIANT: the unsigned high half of a product at a width, and a
+        // rotate within a width, are no wider than that width.
+        Expr::Bin(Op::MulHi(w) | Op::Rol(w) | Op::Ror(w), ..) => mask_bits(*w),
         // INVARIANT: only 32-bit code keys a register by its 32-bit name
         // (64-bit code keys every one at full width), and there it holds no
         // more than 32 bits.
@@ -2259,14 +2416,21 @@ pub(super) fn ternary(cond: Cond, a: Expr, b: Expr) -> Expr {
 ///
 /// The mask is dropped when `e` provably fits in it, the result is `0` when no
 /// bit of `e` survives it (including `(x << s) & m` when the shift moves
-/// everything past the mask), nested masks combine, and a mask distributes
-/// over `|`.
+/// everything past the mask), nested masks combine, a mask distributes
+/// over `|`, and a mask of low bits takes the cuts inside `e` those bits
+/// pass through ([`low_bits_read`]).
 ///
 /// # Arguments
 ///
 /// * `e` - The value.
 /// * `m` - The mask.
 pub(super) fn mask(e: Expr, m: u64) -> Expr {
+    let e = match m.checked_add(1) {
+        Some(p) if p.is_power_of_two() => {
+            low_bits_read(e, u8::try_from(p.trailing_zeros()).unwrap_or(64))
+        }
+        Some(_) | None => e,
+    };
     let known = known_bits(&e);
     if known & !m == 0 {
         return e;
@@ -2394,7 +2558,38 @@ pub(super) fn sign_extend(e: Expr, from_bits: u8) -> Expr {
     match e {
         Expr::Const(c) => Expr::Const(sext(c & mask_bits(from_bits), from_bits)),
         Expr::Sext(inner, b) if b <= from_bits => Expr::Sext(inner, b),
-        other => Expr::Sext(Box::new(other), from_bits),
+        other => Expr::Sext(Box::new(low_bits_read(other, from_bits)), from_bits),
+    }
+}
+
+/// `e` without the cuts its low `bits` bits pass through unchanged, for a
+/// reader of those bits alone.
+///
+/// The low bits of a sum, a difference, a product, a left shift, a bitwise
+/// operation, a negation or a complement depend only on the low bits of
+/// their operands, so a mask keeping all of them and a sign extension from
+/// at least as many change none of them: `(int32_t)((x & 0xffffffff) + y)`
+/// is `(int32_t)(x + y)`, the shape a whole read of a `w` register leaves
+/// inside a 32-bit operation. A cast stays: from a float it converts.
+///
+/// # Arguments
+///
+/// * `e` - The value.
+/// * `bits` - How many low bits are read, below 64.
+fn low_bits_read(e: Expr, bits: u8) -> Expr {
+    let keep = mask_bits(bits);
+    let go = |x: Box<Expr>| Box::new(low_bits_read(*x, bits));
+    match e {
+        Expr::Bin(Op::And, x, m) if const_of(&m).is_some_and(|c| c & keep == keep) => {
+            low_bits_read(*x, bits)
+        }
+        Expr::Bin(op @ (Op::Add | Op::Sub | Op::Mul | Op::And | Op::Or | Op::Xor), a, b) => {
+            Expr::Bin(op, go(a), go(b))
+        }
+        Expr::Bin(Op::Shl, a, s) => Expr::Bin(Op::Shl, go(a), s),
+        Expr::Un(op @ (UnOp::Neg | UnOp::Not), a) => Expr::Un(op, go(a)),
+        Expr::Sext(x, b) if b >= bits => low_bits_read(*x, bits),
+        other => other,
     }
 }
 
@@ -3263,6 +3458,16 @@ impl Expr {
                 if let Op::FMin | Op::FMax = op {
                     let name = if *op == Op::FMin { "fmin" } else { "fmax" };
                     return (format!("{name}({}, {})", l.render(n), r.render(n)), ATOM);
+                }
+                // INVARIANT: a rotate of 16 bits by 8 swaps its two bytes,
+                // which `bswap` of the half word says as C's readers know it.
+                if let (Op::Rol(16) | Op::Ror(16), Expr::Const(8)) = (op, r.as_ref()) {
+                    let half = match l.as_ref() {
+                        Expr::Deref(_, Ty::U16) | Expr::Cast(_, Ty::U16) => l.render(n),
+                        other => Expr::Cast(Box::new(low_bits_read(other.clone(), 16)), Ty::U16)
+                            .render(n),
+                    };
+                    return (format!("bswap({half})"), ATOM);
                 }
                 if let Op::Rol(w)
                 | Op::Ror(w)
@@ -4507,7 +4712,8 @@ mod tests {
     /// error too large: at `0xfffffffb` the high half shifted is
     /// `0x24924924`, one more than the quotient by seven. Compilers divide by
     /// seven with the 33-bit magic instead; `0xaaaaaaab >> 1`, a third,
-    /// holds everywhere and still reads as the division.
+    /// holds everywhere and still reads as the division, of the 32 bits the
+    /// multiply read.
     #[test]
     fn a_magic_that_misses_a_dividend_is_no_division() {
         let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
@@ -4520,12 +4726,35 @@ mod tests {
             "{:?}",
             shifted(0x9249_2493, 2)
         );
+        let word = Expr::Bin(
+            Op::And,
+            Box::new(x.clone()),
+            Box::new(Expr::Const(0xffff_ffff)),
+        );
         assert_eq!(
             shifted(0xaaaa_aaab, 1),
-            Expr::Bin(Op::Div, Box::new(x), Box::new(Expr::Const(3)))
+            Expr::Bin(Op::Div, Box::new(word), Box::new(Expr::Const(3)))
         );
         let wrong = (0x9249_2493u128 * 0xffff_fffb) >> 34;
         assert_eq!((wrong, 0xffff_fffbu128 / 7), (0x2492_4924, 0x2492_4923));
+    }
+
+    /// A quotient times its divisor less the dividend is the remainder's
+    /// negation, no remainder: `7 * (x / 7) - x` stays as it is.
+    #[test]
+    fn a_product_less_its_dividend_is_no_remainder() {
+        let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
+        let q = Expr::Bin(Op::SDiv, Box::new(x.clone()), Box::new(Expr::Const(7)));
+        let product = Expr::Bin(Op::Mul, Box::new(q), Box::new(Expr::Const(7)));
+        for bits in [32, 64] {
+            let folded = super::fold(Op::Sub, product.clone(), x.clone(), bits);
+            assert!(
+                !matches!(folded, Expr::Bin(Op::SRem | Op::Rem, ..)),
+                "{folded:?}"
+            );
+            let rem = super::fold(Op::Sub, x.clone(), product.clone(), bits);
+            assert!(matches!(rem, Expr::Bin(Op::SRem, ..)), "{rem:?}");
+        }
     }
 
     /// A signed magic quotient is a division only when its magic has the
@@ -5553,8 +5782,8 @@ mod fold_tests {
     use crate::isa::x86::{ConditionCode as C, Register};
 
     use super::{
-        Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, fold, lo64, merge_bits, sign_extend, ternary,
-        unary, without_addend,
+        Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, fold, lo64, mask, merge_bits, sign_extend,
+        ternary, unary, without_addend,
     };
     use crate::num::{lo16, lo32};
 
@@ -5624,7 +5853,9 @@ mod fold_tests {
             Op::Rol(hw) => rotl(hw, b),
             Op::Ror(hw) => rotl(hw, u64::from(hw) - b % u64::from(hw)),
             Op::MulHi(hw) => (own(hw).0 * own(hw).1) >> hw,
-            Op::SMulHi(hw) => ((signed(a, hw) * signed(b, hw)) >> hw).cast_unsigned(),
+            Op::SMulHi(hw) => {
+                ((signed(a, hw) * signed(b, hw)) >> hw).cast_unsigned() & u128::from(lane(hw))
+            }
             Op::SMulO(hw) => {
                 let p = signed(a, hw) * signed(b, hw);
                 u128::from(p < -(1i128 << (hw - 1)) || p >= 1i128 << (hw - 1))
@@ -6128,6 +6359,37 @@ mod fold_tests {
                 );
             }
         }
+        let word = |e: &Expr| Expr::Sext(Box::new(e.clone()), 32);
+        for (name, div) in [("x - x / y * y", Op::Div), ("x - x sdiv y * y", Op::SDiv)] {
+            let rem = b(Op::Sub, &X, &b(Op::Mul, &b(div, &X, &Y), &Y));
+            if let Expr::Bin(op, l, r) = rem {
+                t.fold(name, (op, *l, *r), w, xs, ys);
+            }
+        }
+        if w <= 32 {
+            let quot = b(Op::SDiv, &word(&X), &word(&Y));
+            t.fold(
+                "x - sext(x) sdiv sext(y) * y",
+                (Op::Sub, X, b(Op::Mul, &quot, &Y)),
+                w,
+                xs,
+                ys,
+            );
+            for &c in &d.cs {
+                let quot = b(Op::SDiv, &word(&X), &k(c));
+                t.fold(
+                    "x + sext(x) sdiv c * -c",
+                    (
+                        Op::Add,
+                        X,
+                        b(Op::Mul, &quot, &k(c.wrapping_neg() & lane(w))),
+                    ),
+                    w,
+                    xs,
+                    one,
+                );
+            }
+        }
         for (name, op, l, r) in [
             (
                 "(x ^ y) + (x & y) * 2",
@@ -6218,6 +6480,8 @@ mod fold_tests {
         for &(m, s) in magics {
             let hi = b(Op::MulHi(w), &k(m), &X);
             t.fold("mulhi(m, x) >> s", (Op::Shr, hi.clone(), k(s)), w, xs, &one);
+            let quot = fold(Op::MulHi(w), k(m), X, w);
+            t.fold("x / d >> s", (Op::Shr, quot, k(s)), w, xs, &one);
             t.fold(
                 "mulhi(x, m) >> s",
                 (Op::Shr, b(Op::MulHi(w), &X, &k(m)), k(s)),
@@ -6304,6 +6568,50 @@ mod fold_tests {
         }
     }
 
+    /// The quotients read off the whole 64-bit product of a word.
+    ///
+    /// As [`fold`] reverses them: clang's `imul` of a sign-extended word,
+    /// its high word shifted and its sign added, and arm64's `smull` and
+    /// `umull`, the dividend added back to a negative magic's high word.
+    ///
+    /// # Arguments
+    ///
+    /// * `t` - The tally.
+    /// * `magics` - The 32-bit multipliers and shifts to try.
+    /// * `xs` - The dividends.
+    fn wide_quotients(t: &mut Tally, magics: &[(u64, u64)], xs: &[u64]) {
+        let one = [0u64];
+        let word = 0xffff_ffff;
+        for &(m, s) in magics {
+            let c = lo64(signed(m, 32).cast_unsigned());
+            let p = b(Op::Mul, &Expr::Sext(Box::new(X), 32), &k(c));
+            t.fold(
+                "sext(x) * c >> k",
+                (Op::Shr, p.clone(), k(32 + s)),
+                64,
+                xs,
+                &one,
+            );
+            t.fold(
+                "sext(x) * c sar k",
+                (Op::Sar, p.clone(), k(32 + s)),
+                64,
+                xs,
+                &one,
+            );
+            let u = b(Op::Mul, &b(Op::And, &X, &k(word)), &k(m));
+            t.fold("(x & word) * c >> k", (Op::Shr, u, k(32 + s)), 64, xs, &one);
+            let q = fold(Op::Sar, p.clone(), k(32 + s), 64);
+            let sign = fold(Op::Shr, p.clone(), k(63), 64);
+            t.fold("q + (p >> 63)", (Op::Add, q, sign), 64, xs, &one);
+            let hi = fold(Op::Shr, p, k(32), 64);
+            let sum = fold(Op::Add, b(Op::And, &X, &k(word)), hi, 64);
+            let q = fold(Op::Sar, sign_extend(sum.clone(), 32), k(s), 64);
+            let fix = fold(Op::Shr, mask(sum, word), k(31), 64);
+            t.fold("q + ((x + hi) >> 31)", (Op::Add, q, fix), 32, xs, &one);
+        }
+    }
+
     /// The signed divisions by powers of two a compiler writes as shifts,
     /// as [`fold`] reverses them.
     ///
@@ -6378,6 +6686,41 @@ mod fold_tests {
     /// * `d` - The values.
     fn builders(t: &mut Tally, d: &Domain) {
         let (w, xs, ys, one) = (d.w, d.xs.as_slice(), d.ys.as_slice(), &[0u64][..]);
+        let cut = |e: &Expr, m: u64| b(Op::And, e, &k(m));
+        let inner = b(
+            Op::Add,
+            &cut(&X, 0xffff_ffff),
+            &b(Op::Mul, &cut(&Y, 0xffff), &k(3)),
+        );
+        t.same(
+            "sext(x) reads through low cuts",
+            &Expr::Sext(Box::new(inner.clone()), 16),
+            &sign_extend(inner.clone(), 16),
+            w,
+            xs,
+            ys,
+        );
+        t.same(
+            "mask reads through low cuts",
+            &cut(&inner, 0xff),
+            &mask(inner, 0xff),
+            w,
+            xs,
+            ys,
+        );
+        for (name, e) in [
+            ("mulhi fits its width", b(Op::MulHi(w), &X, &Y)),
+            ("rotate fits its width", b(Op::Rol(w), &X, &k(3))),
+        ] {
+            t.same(
+                name,
+                &cut(&e, lane(w)),
+                &mask(e.clone(), lane(w)),
+                w,
+                xs,
+                ys,
+            );
+        }
         let unops = [
             UnOp::Neg,
             UnOp::Not,
@@ -6662,6 +7005,12 @@ mod fold_tests {
                         magics.push((m, s));
                     }
                 }
+            }
+            if w == 32 {
+                wide_quotients(&mut t, &magics, &xs);
+            }
+            for &(m, _) in &magics {
+                t.fold("mulhi(m, x)", (Op::MulHi(w), k(m), X), w, &xs, &[0]);
             }
             divisions(&mut t, w, &magics, &xs);
         }

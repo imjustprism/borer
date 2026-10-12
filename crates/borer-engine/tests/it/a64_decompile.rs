@@ -244,6 +244,74 @@ const ROUTINES3: [u32; 10] = [
     0xd65f_03c0, // ASM: ret
 ];
 
+/// Where the fourth set of routines is placed.
+const BASE4: u64 = 0x4_0000;
+
+/// A signed remainder by a constant through `smull` and a negative magic, a
+/// remainder by a register through `sdiv; msub`, and a branch on the sign
+/// bit, at [`BASE4`]:
+///
+/// ```text
+/// rem(a)    : (int32_t)a % 127                 at +0x00
+/// vrem(a, b): (int32_t)a % (int32_t)b          at +0x24
+/// sign(a)   : (int64_t)a >= 0 ? 2 : 1          at +0x30
+/// ```
+const ROUTINES4: [u32; 17] = [
+    0x5280_8128, // ASM: mov w8, #0x409 (rem)
+    0x72b0_2048, // ASM: movk w8, #0x8102, lsl #16
+    0x9b28_7c08, // ASM: smull x8, w0, w8
+    0x8b48_8008, // ASM: add x8, x0, x8, lsr #32
+    0x1306_7d09, // ASM: asr w9, w8, #6
+    0x0b48_7d28, // ASM: add w8, w9, w8, lsr #31
+    0x4b08_1d08, // ASM: sub w8, w8, w8, lsl #7
+    0x0b08_0000, // ASM: add w0, w0, w8
+    0xd65f_03c0, // ASM: ret
+    0x1ac1_0c08, // ASM: sdiv w8, w0, w1 (vrem)
+    0x1b01_8100, // ASM: msub w0, w8, w1, w0
+    0xd65f_03c0, // ASM: ret
+    0xb6f8_0060, // ASM: tbz x0, #63, sign+0xc (sign)
+    0x5280_0020, // ASM: mov w0, #0x1
+    0xd65f_03c0, // ASM: ret
+    0x5280_0040, // ASM: mov w0, #0x2
+    0xd65f_03c0, // ASM: ret
+];
+
+/// arm64's division idioms read as the operators they compute.
+///
+/// The high word of `smull`'s whole product is the quotient's magic
+/// multiply, the dividend added back for a magic stored negative, and the
+/// sign added after the shift makes the quotient; the dividend less the
+/// quotient times the divisor, by a constant or a register, is the
+/// remainder; a `tbz` of the sign bit is the sign. Every text agrees with
+/// the arm64 machine.
+#[test]
+fn arm64_division_idioms_read_as_their_operators() {
+    let code: Vec<u8> = ROUTINES4.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let len = u64::try_from(code.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE4, 0, len, false, true);
+    let mut p = Program::raw(code, Arch::Arm64, 0, Some(BASE4), vec![text]);
+    p.symbols = vec![
+        local("rem", BASE4),
+        local("vrem", BASE4 + 0x24),
+        local("sign", BASE4 + 0x30),
+    ];
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let rem = decompile(&p, &a, &o, BASE4).expect("decompiles");
+    assert!(rem.contains("% 127"), "{rem}");
+    assert!(!rem.contains("smulhi"), "{rem}");
+    let vrem = decompile(&p, &a, &o, BASE4 + 0x24).expect("decompiles");
+    assert!(vrem.contains(" % "), "{vrem}");
+    let sign = decompile(&p, &a, &o, BASE4 + 0x30).expect("decompiles");
+    assert!(sign.contains(" >= 0") || sign.contains(" < 0"), "{sign}");
+    assert!(!sign.contains("0x8000000000000000"), "{sign}");
+    for off in [0, 0x24, 0x30] {
+        let r = replay_function(&p, &a, BASE4 + off, 1);
+        assert!(r.checked > 0, "+{off:#x}: {}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "+{off:#x}: {}", replay_tsv(&r));
+    }
+}
+
 /// A `w` write leaves no mask where every reader takes 32 bits, and a whole
 /// read of the register is cut to the 32 bits the machine kept.
 ///
