@@ -385,6 +385,9 @@ pub(super) fn offset_text(off: u64) -> String {
 /// toward that total, so naming two of a base's three fields does not cost
 /// the third the offset it would otherwise have had. An offset accessed at two widths stays as it was
 /// (a signed and an unsigned read of one width count as the signed one),
+/// and so does one read both as an integer and as a float: a `double`
+/// copied out of a `uint64_t` field would convert the value where the
+/// machine moves the bits,
 /// as do the segment bases and runs of consecutive same-width offsets long
 /// enough to be an array ([`drop_array_runs`]).
 ///
@@ -441,12 +444,11 @@ pub(super) fn apply_layouts(text: &str) -> String {
         for (off, letters) in offsets {
             let letter = match letters.iter().copied().collect::<Vec<_>>().as_slice() {
                 [one] => *one,
-                [a, b] if a.get(1..) == b.get(1..) => {
-                    if a.starts_with('i') {
-                        *a
-                    } else {
-                        *b
-                    }
+                [a, b]
+                    if a.get(1..) == b.get(1..)
+                        && [a, b].iter().all(|l| l.starts_with(['i', 'u'])) =>
+                {
+                    if a.starts_with('i') { *a } else { *b }
                 }
                 _ => continue,
             };

@@ -373,3 +373,31 @@ fn a_32_bit_sum_is_passed_with_its_upper_half_clear() {
     assert!(text.contains("sub_1040((a1 - 1) & 0xffffffff)"), "{text}");
     runs_alike(&p, TEXT);
 }
+
+/// A field read both as a `double` and as an integer keeps its casts: named
+/// as one integer field, the `double` copied out of it converted the value
+/// where the machine moves the bits.
+///
+/// `f(dst, src)` copies `src`'s two words to `dst` through `xmm0` when the
+/// first is not 3, through `rax` when it is.
+#[test]
+fn a_field_read_as_float_and_integer_keeps_its_casts() {
+    let code = [
+        0x48, 0x8b, 0x02, // ASM: mov rax,[rdx]
+        0x48, 0x83, 0xf8, 0x03, // ASM: cmp rax,3
+        0x74, 0x0f, // ASM: je 0x1018
+        0xf2, 0x0f, 0x10, 0x42, 0x08, // ASM: movsd xmm0,[rdx+8]
+        0x48, 0x89, 0x01, // ASM: mov [rcx],rax
+        0xf2, 0x0f, 0x11, 0x41, 0x08, // ASM: movsd [rcx+8],xmm0
+        0xeb, 0x0f, // ASM: jmp 0x1027
+        0x48, 0x8b, 0x42, 0x08, // ASM: mov rax,[rdx+8]
+        0x48, 0x89, 0x41, 0x08, // ASM: mov [rcx+8],rax
+        0x48, 0xc7, 0x01, 0x03, 0x00, 0x00, 0x00, // ASM: mov qword [rcx],3
+        0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+        0xc3, // ASM: ret
+    ];
+    let p = program(&code, &[]);
+    let (text, _) = text_of(&p, TEXT);
+    assert!(text.contains("*(double*)(a2 + 8)"), "{text}");
+    runs_alike(&p, TEXT);
+}
