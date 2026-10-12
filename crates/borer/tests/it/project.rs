@@ -5,11 +5,16 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer::project::ProjectFile;
+use borer::project::{Identity, ProjectFile, identity};
 use borer_engine::analysis::Overlay;
 use borer_engine::analysis::utypes::{build_enum, build_struct, parse_type};
+use borer_engine::program::{Arch, Program};
 
-/// Names and comments survive a save/load round trip along with the program path.
+use crate::contract::tiny_pe;
+use crate::reload::Client;
+
+/// Names and comments survive a save/load round trip along with the
+/// program path and its SHA-256.
 #[test]
 fn overlay_round_trip_through_json() {
     let mut o = Overlay::default();
@@ -23,11 +28,12 @@ fn overlay_round_trip_through_json() {
     let path = dir.join("t.json");
     let path = path.to_str().unwrap();
 
-    let pf = ProjectFile::from_overlay("D:/some/binary.exe", &o);
+    let pf = ProjectFile::from_overlay("D:/some/binary.exe", Some(identity(b"abc")), &o);
     pf.save(path).unwrap();
 
     let loaded = ProjectFile::load(path).unwrap();
     assert_eq!(loaded.program, "D:/some/binary.exe");
+    assert_eq!(loaded.sha256, Some(identity(b"abc")));
     let restored = loaded.to_overlay().unwrap();
     assert_eq!(restored.names, o.names);
     assert_eq!(restored.comments, o.comments);
@@ -36,7 +42,7 @@ fn overlay_round_trip_through_json() {
 /// An empty overlay round-trips to an empty overlay.
 #[test]
 fn empty_overlay_round_trip() {
-    let pf = ProjectFile::from_overlay("x", &Overlay::default());
+    let pf = ProjectFile::from_overlay("x", None, &Overlay::default());
     let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("empty.json");
@@ -63,7 +69,7 @@ fn types_round_trip_through_json() {
     let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("types.json");
-    ProjectFile::from_overlay("bin", &o)
+    ProjectFile::from_overlay("bin", None, &o)
         .save(path.to_str().unwrap())
         .unwrap();
     let loaded = ProjectFile::load(path.to_str().unwrap()).unwrap();
@@ -96,7 +102,7 @@ fn an_enum_round_trips_through_json() {
     let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("enum.json");
-    ProjectFile::from_overlay("bin", &o)
+    ProjectFile::from_overlay("bin", None, &o)
         .save(path.to_str().unwrap())
         .unwrap();
     let loaded = ProjectFile::load(path.to_str().unwrap()).unwrap();
@@ -206,9 +212,196 @@ fn a_project_is_for_the_file_it_was_saved_for() {
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     let bin = dir.join("bin.exe");
     std::fs::write(&bin, b"MZ").unwrap();
-    let pf = ProjectFile::from_overlay(&bin.display().to_string(), &Overlay::default());
+    let pf = ProjectFile::from_overlay(&bin.display().to_string(), None, &Overlay::default());
     assert!(pf.is_for(&bin));
     assert!(pf.is_for(&dir.join("sub").join("..").join("bin.exe")));
     assert!(!pf.is_for(&dir.join("other.exe")));
-    assert!(!ProjectFile::from_overlay("con", &Overlay::default()).is_for(&bin));
+    assert!(!ProjectFile::from_overlay("con", None, &Overlay::default()).is_for(&bin));
+}
+
+/// A binary is identified by the SHA-256 of its bytes, FIPS 180-4's
+/// vector for `abc`.
+#[test]
+fn identity_is_the_sha256_of_the_bytes() {
+    assert_eq!(
+        identity(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+/// A project with a hash belongs to the same bytes wherever they were
+/// loaded from, and to no other bytes at its path.
+///
+/// One without a hash, as a project saved before the hash reads, is
+/// judged by its path. Saving twice writes the same bytes.
+#[test]
+fn a_project_is_identified_by_its_binarys_bytes() {
+    let at = |bytes: Vec<u8>, path: &str| {
+        let mut p = Program::raw(bytes, Arch::X86_64, 0, None, Vec::new());
+        p.path = path.into();
+        p
+    };
+    let bytes = vec![0xc3u8; 64];
+    let mut rebuilt = bytes.clone();
+    rebuilt[10] = 0x90;
+    let hashed = ProjectFile::from_overlay("a.exe", Some(identity(&bytes)), &Overlay::default());
+    assert_eq!(hashed.identify(&at(bytes.clone(), "a.exe")), Identity::Same);
+    assert_eq!(
+        hashed.identify(&at(bytes.clone(), "copy.exe")),
+        Identity::Same
+    );
+    assert_eq!(
+        hashed.identify(&at(rebuilt.clone(), "a.exe")),
+        Identity::Other
+    );
+    let by_path = ProjectFile::from_overlay("a.exe", None, &Overlay::default());
+    assert_eq!(by_path.identify(&at(rebuilt, "a.exe")), Identity::PathOnly);
+    assert_eq!(
+        by_path.identify(&at(bytes, "copy.exe")),
+        Identity::OtherPath
+    );
+    let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (one, two) = (dir.join("one.json"), dir.join("two.json"));
+    hashed.save(one.to_str().unwrap()).unwrap();
+    hashed.save(two.to_str().unwrap()).unwrap();
+    assert_eq!(std::fs::read(one).unwrap(), std::fs::read(two).unwrap());
+}
+
+/// Calls a tool over the session.
+///
+/// # Arguments
+///
+/// * `client` - The session.
+/// * `name` - The tool.
+/// * `arguments` - Its arguments.
+///
+/// # Returns
+///
+/// The text the tool answered.
+///
+/// # Errors
+///
+/// The error's message, when the tool refuses.
+fn answer(
+    client: &mut Client,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<String, String> {
+    let params = serde_json::json!({ "name": name, "arguments": arguments }).to_string();
+    let line = client.call("tools/call", &params);
+    let reply: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+    match reply["result"]["content"][0]["text"].as_str() {
+        Some(text) if reply["result"]["isError"] != true => Ok(text.to_owned()),
+        Some(text) => Err(text.to_owned()),
+        None => Err(reply["error"]["message"]
+            .as_str()
+            .unwrap_or(&line)
+            .to_owned()),
+    }
+}
+
+/// Over the server, projects are keyed by hash and the ledger pages.
+///
+/// A project loads into a copy of its binary at another path, a rebuilt
+/// binary at the same path refuses it with the carry hint until forced, a
+/// project saved before the hash loads by its path and says so, and
+/// `annotations` pages with `# showing N of M`. A rebuild at the same path
+/// took the old names silently while the path was the identity, and
+/// `annotations` listed every entry with no cap.
+#[test]
+fn the_server_keys_projects_by_hash_and_pages_the_ledger() {
+    let dir = std::env::temp_dir().join(format!("borer-project-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (original, copy) = (dir.join("a.exe"), dir.join("copy.exe"));
+    let pe = tiny_pe();
+    let mut rebuild = pe.clone();
+    rebuild[0x201] = 0x90;
+    std::fs::write(&original, &pe).unwrap();
+    std::fs::write(&copy, &pe).unwrap();
+    let project = dir.join("p.json").display().to_string();
+    let path = |p: &std::path::Path| p.display().to_string();
+    let mut client = Client::start(&path(&original));
+    let mut call = |name: &str, arguments: serde_json::Value| answer(&mut client, name, &arguments);
+    for (va, name) in [("0x140001000", "kept"), ("0x140001001", "second")] {
+        let args = serde_json::json!({"address": va, "name": name, "dry_run": false});
+        call("set_name", args).unwrap();
+    }
+    let guess =
+        serde_json::json!({"address": "0x140001000", "comment": "? a guess", "dry_run": false});
+    call("set_comment", guess).unwrap();
+    let page = call("annotations", serde_json::json!({"limit": 1})).unwrap();
+    assert!(
+        page.starts_with(
+            "# showing 1 of 3 annotations (2 names, 0 findings, 1 open question(s))\n"
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains("0x140001000  name: kept\n") && !page.contains("second"),
+        "{page}"
+    );
+    let next = call("annotations", serde_json::json!({"offset": 2, "limit": 1})).unwrap();
+    assert!(next.contains("open:  a guess"), "{next}");
+    let only = call(
+        "annotations",
+        serde_json::json!({"count_only": true, "filter": "SECOND"}),
+    )
+    .unwrap();
+    assert_eq!(
+        only,
+        "# 1 annotations (2 names, 0 findings, 1 open question(s))\n"
+    );
+    let saved = call("save_project", serde_json::json!({"path": project})).unwrap();
+    assert!(saved.starts_with("saved 2 names"), "{saved}");
+    assert!(
+        std::fs::read_to_string(&project)
+            .unwrap()
+            .contains(&identity(&pe))
+    );
+
+    call("load_binary", serde_json::json!({"path": path(&copy)})).unwrap();
+    let moved = call("load_project", serde_json::json!({"path": project})).unwrap();
+    assert!(moved.starts_with("loaded 2 names + 1 comments"), "{moved}");
+    assert!(!moved.contains('#'), "a copy loads without a note: {moved}");
+
+    std::fs::write(&original, &rebuild).unwrap();
+    call("load_binary", serde_json::json!({"path": path(&original)})).unwrap();
+    let refused = call("load_project", serde_json::json!({"path": project})).unwrap_err();
+    assert!(
+        refused.starts_with("the project was saved for another build (sha-256 "),
+        "{refused}"
+    );
+    let carry = format!(
+        "then borer://carry/{} carries",
+        path(&original).replace('\\', "/")
+    );
+    assert!(refused.contains(&carry), "{refused}");
+    let ledger = call("annotations", serde_json::json!({})).unwrap();
+    assert!(
+        ledger.starts_with("# showing 0 of 0 annotations"),
+        "nothing was loaded: {ledger}"
+    );
+    let forced = call(
+        "load_project",
+        serde_json::json!({"path": project, "force": true}),
+    )
+    .unwrap();
+    assert!(forced.contains("# forced: "), "{forced}");
+
+    let old = dir.join("old.json").display().to_string();
+    let legacy = serde_json::json!({
+        "program": path(&original),
+        "names": {"0x140001000": "legacy"},
+        "comments": {}
+    });
+    std::fs::write(&old, legacy.to_string()).unwrap();
+    let by_path = call("load_project", serde_json::json!({"path": old})).unwrap();
+    assert!(by_path.starts_with("loaded 1 names"), "{by_path}");
+    assert!(
+        by_path.contains("# the project names its binary by path alone"),
+        "{by_path}"
+    );
+    client.finish();
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -598,6 +598,20 @@ pub(crate) struct TypesParams {
     pub(crate) count_only: Option<bool>,
 }
 
+/// Parameters for `annotations`.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AnnotationsParams {
+    /// Case-insensitive substring of a row (address, kind or text).
+    pub(crate) filter: Option<String>,
+    /// Rows to skip first (paging).
+    pub(crate) offset: Option<u32>,
+    /// Max rows (default 200, max 1000).
+    pub(crate) limit: Option<u32>,
+    /// Header line only (default false).
+    pub(crate) count_only: Option<bool>,
+}
+
 /// Parameters for `save_project`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -14,8 +14,15 @@ use borer_engine::program::Program;
 /// A key may also be decimal; one that is not an address refuses the file.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProjectFile {
-    /// Path of the binary the annotations belong to.
+    /// Path of the binary the annotations belong to, for the reader: the
+    /// binary is identified by [`ProjectFile::sha256`] when the file has it.
     pub program: String,
+    /// The binary's SHA-256, lowercase hex ([`identity`]): what identifies
+    /// it, so a copy at another path loads and a rebuild at the same path
+    /// is refused. Absent in a project saved before projects recorded it,
+    /// which is identified by its path alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     /// "0x..." address -> function name.
     pub names: BTreeMap<String, String>,
     /// "0x..." address -> comment.
@@ -30,6 +37,34 @@ pub struct ProjectFile {
     /// refuses the file.
     #[serde(default)]
     pub applied: BTreeMap<String, String>,
+}
+
+/// How a project file's binary compares with the loaded one
+/// ([`ProjectFile::identify`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Identity {
+    /// The project records the loaded binary's SHA-256.
+    Same,
+    /// The project records another SHA-256: another build or another file.
+    Other,
+    /// The project records no hash, and its path is the loaded binary's.
+    PathOnly,
+    /// The project records no hash, and its path is another file's.
+    OtherPath,
+}
+
+/// Returns what identifies a binary in a project file: the SHA-256 of its
+/// bytes, as lowercase hex.
+///
+/// # Arguments
+///
+/// * `bytes` - The whole file.
+#[must_use]
+pub fn identity(bytes: &[u8]) -> String {
+    borer_engine::hashing::sha256(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Keys annotations by `0x`-hex address text, the form the file holds.
@@ -175,10 +210,14 @@ impl ProjectFile {
     /// # Arguments
     ///
     /// * `program` - Path of the binary the annotations belong to.
+    /// * `sha256` - The binary's [`identity`]; `None` leaves the file
+    ///   identifying it by path, for a file that is only read back by the
+    ///   session that wrote it.
     /// * `o` - The overlay.
-    pub fn from_overlay(program: &str, o: &Overlay) -> ProjectFile {
+    pub fn from_overlay(program: &str, sha256: Option<String>, o: &Overlay) -> ProjectFile {
         ProjectFile {
             program: program.to_owned(),
+            sha256,
             names: by_hex(&o.names),
             comments: by_hex(&o.comments),
             types: o.types.clone(),
@@ -229,6 +268,27 @@ impl ProjectFile {
         borer_engine::analysis::utypes::validate(&o.types, &o.applied)
             .map_err(|e| e.to_string())
             .map(|_| o)
+    }
+
+    /// Judges whether the project was saved for the loaded binary.
+    ///
+    /// A project with its binary's SHA-256 belongs to the same bytes
+    /// wherever they were loaded from, and to nothing else: a rebuild at
+    /// the same path has other addresses, and took the old names silently
+    /// while the path was the identity. One saved before projects recorded
+    /// the hash is judged by its path ([`ProjectFile::is_for`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded binary.
+    #[must_use]
+    pub fn identify(&self, program: &Program) -> Identity {
+        match &self.sha256 {
+            Some(saved) if saved.eq_ignore_ascii_case(&identity(&program.bytes)) => Identity::Same,
+            Some(_) => Identity::Other,
+            None if self.is_for(&program.path) => Identity::PathOnly,
+            None => Identity::OtherPath,
+        }
     }
 
     /// Tells whether the project was saved for the binary at `path`.

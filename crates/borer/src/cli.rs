@@ -2089,6 +2089,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 overlay.comments.extend(run.comments.iter().cloned());
                 borer::project::ProjectFile::from_overlay(
                     &s.program.path.display().to_string(),
+                    Some(borer::project::identity(&s.program.bytes)),
                     &overlay,
                 )
                 .save(&path)
@@ -2152,13 +2153,16 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         Query::SetType => {
             let project = path_arg(args, 2, "set-type needs a project file")?;
             let word: u64 = if s.program.is_64 { 8 } else { 4 };
-            let (program, mut overlay) = if std::path::Path::new(project).exists() {
+            let (program, sha256, mut overlay) = if std::path::Path::new(project).exists() {
                 let pf = borer::project::ProjectFile::load(project).map_err(anyhow::Error::msg)?;
-                let program = pf.program.clone();
                 let overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
-                (program, overlay)
+                (pf.program, pf.sha256, overlay)
             } else {
-                (s.program.path.display().to_string(), Overlay::default())
+                (
+                    s.program.path.display().to_string(),
+                    Some(borer::project::identity(&s.program.bytes)),
+                    Overlay::default(),
+                )
             };
             let mut say = String::new();
             match arg(args, 3, "set-type needs struct, enum, typedef or apply")? {
@@ -2303,7 +2307,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     one_line(other)
                 ),
             }
-            borer::project::ProjectFile::from_overlay(&program, &overlay)
+            borer::project::ProjectFile::from_overlay(&program, sha256, &overlay)
                 .save(project)
                 .map_err(anyhow::Error::msg)?;
             println!("{say}; written to {}", short_path(project));

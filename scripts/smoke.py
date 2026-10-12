@@ -327,6 +327,9 @@ cm = call_tool("set_comment", {"address": m.group(1), "comment": "entry point", 
 assert "comment set" in cm, cm
 an = call_tool("annotations", {})
 assert "name: entry_thunk" in an and "found: entry point" in an, an
+# the ledger pages like every list
+first_row = call_tool("annotations", {"limit": 1})
+assert first_row.startswith("# showing 1 of 2 annotations"), first_row
 batch = call_tool("decompile_batch", {"filter": "entry_thunk", "max_functions": 1})
 assert "==== entry_thunk" in batch, batch[:300]
 # A comment opening with ? is an open question, and the ledger has to keep

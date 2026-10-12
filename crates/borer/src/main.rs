@@ -63,17 +63,18 @@ use rmcp::{
     tool_handler, tool_router,
 };
 
+use borer::project::Identity;
 use borer_engine::live::{self as live, Memory as _, Rebase, Snapshot};
 use params::{
-    Annotation, CallgraphParams, CfgParams, ClassLayoutParams, CryptoParams, DecompileBatchParams,
-    DecompileParams, Detail, DisassembleFunctionParams, DisassembleParams, EntropyParams,
-    ExplainFunctionArgs, FetchPdbParams, Filter, FindCheckArgs, FindFunctionByStringParams,
-    FunctionDetailParams, FunctionParams, FunctionsParams, HexdumpParams, LiveAttachParams,
-    LiveInstancesParams, LiveModulesParams, LiveObjectParams, LiveReadParams, LiveWatchParams,
-    LoadBinaryParams, LoadProjectParams, Page, QueryParams, ReachesParams, ReadParams,
-    SaveProjectParams, ScriptParams, SearchKind, SearchParams, SetCommentParams, SetNameParams,
-    SetTypeParams, StringEncoding, StringsParams, SymbolsParams, TypesParams, XrefsParams,
-    count_param, must_be_in_a_section, must_fit_a_row, to_usize,
+    Annotation, AnnotationsParams, CallgraphParams, CfgParams, ClassLayoutParams, CryptoParams,
+    DecompileBatchParams, DecompileParams, Detail, DisassembleFunctionParams, DisassembleParams,
+    EntropyParams, ExplainFunctionArgs, FetchPdbParams, Filter, FindCheckArgs,
+    FindFunctionByStringParams, FunctionDetailParams, FunctionParams, FunctionsParams,
+    HexdumpParams, LiveAttachParams, LiveInstancesParams, LiveModulesParams, LiveObjectParams,
+    LiveReadParams, LiveWatchParams, LoadBinaryParams, LoadProjectParams, Page, QueryParams,
+    ReachesParams, ReadParams, SaveProjectParams, ScriptParams, SearchKind, SearchParams,
+    SetCommentParams, SetNameParams, SetTypeParams, StringEncoding, StringsParams, SymbolsParams,
+    TypesParams, XrefsParams, count_param, must_be_in_a_section, must_fit_a_row, to_usize,
 };
 use recall::{FRESH_SUFFIX, Narrow, Recall, SINCE_ARG, SINCE_SUFFIX, Tag, budgeted};
 
@@ -3065,7 +3066,7 @@ impl BorerServer {
     /// Invalid params when no binary is loaded; internal error when the file cannot
     /// be written.
     #[tool(
-        description = "Save the annotation overlay (names + comments) to a JSON project file.",
+        description = "Save the annotation overlay (names, comments, types) to a JSON project file, keyed to the binary by its SHA-256.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3080,6 +3081,7 @@ impl BorerServer {
         let program = self.require_loaded()?;
         let pf = borer::project::ProjectFile::from_overlay(
             &program.path.display().to_string(),
+            Some(borer::project::identity(&program.bytes)),
             &read_lock(&self.overlay),
         );
         pf.save(&path).map_err(err_internal)?;
@@ -3095,9 +3097,12 @@ impl BorerServer {
     ///
     /// A project's addresses belong to the binary it was saved for, and
     /// loading replaces every annotation the session holds, so a project
-    /// saved for another binary ([`borer::project::ProjectFile::is_for`]) is
+    /// saved for another binary ([`borer::project::ProjectFile::identify`]:
+    /// by its SHA-256, or by its path in a project older than the hash) is
     /// refused, leaving the overlay as it was, unless `force` says to load
-    /// it anyway. Either way the annotations `set_name`, `set_comment` and
+    /// it anyway; a rebuild is pointed at `borer://carry`, which moves the
+    /// names to it, and a project judged by path says so. Either way the
+    /// annotations `set_name`, `set_comment` and
     /// `set_type` would refuse of the loaded binary, at an address no
     /// section holds or with blank text, are skipped and listed
     /// ([`borer::project::keep_placeable`]), and the counts said are of what
@@ -3113,7 +3118,7 @@ impl BorerServer {
     /// states something the overlay cannot hold, or it was saved for
     /// another binary and `force` is not set.
     #[tool(
-        description = "Load a JSON project file into the annotation overlay, replacing it. A project saved for another binary (by path) is refused unless force=true; names, comments and types at addresses no section holds, or blank, are skipped and listed.",
+        description = "Load a JSON project file into the annotation overlay, replacing it. A project saved for another binary (by SHA-256) is refused unless force=true; names, comments and types at addresses no section holds, or blank, are skipped and listed.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3127,15 +3132,29 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         /// Most left-out annotations the answer names before counting the rest.
         const LEFT_OUT_SHOWN: usize = 8;
+        /// Hex digits of a SHA-256 a message shows.
+        const HASH_SHOWN: usize = 12;
         let program = self.require_loaded()?;
         let pf = borer::project::ProjectFile::load(&path).map_err(err_params)?;
-        let foreign = !pf.is_for(&program.path);
+        let identity = pf.identify(&program);
+        let foreign = matches!(identity, Identity::Other | Identity::OtherPath);
         let saved_for = borer_engine::text::short_path(&pf.program);
+        let loaded_path = program.path.display().to_string();
         if foreign && !force.unwrap_or(false) {
-            return Err(err_params(format!(
-                "the project was saved for {saved_for}, but {} is loaded; nothing was loaded. Its addresses belong to that binary: load it first, or pass force=true to load the project anyway",
-                borer_engine::text::short_path(&program.path.display().to_string())
-            )));
+            let short = |hash: &str| hash.chars().take(HASH_SHOWN).collect::<String>();
+            return Err(err_params(match &pf.sha256 {
+                Some(saved) => format!(
+                    "the project was saved for another build (sha-256 {}... at {saved_for}), but {} is sha-256 {}...; nothing was loaded. Its addresses belong to that build: load it with this project, then borer://carry/{} carries the names to this one; or pass force=true to load the project anyway",
+                    short(&borer_engine::text::one_line(saved)),
+                    borer_engine::text::short_path(&loaded_path),
+                    short(&borer::project::identity(&program.bytes)),
+                    borer_engine::text::short_path(&loaded_path.replace('\\', "/"))
+                ),
+                None => format!(
+                    "the project was saved for {saved_for}, but {} is loaded; nothing was loaded. Its addresses belong to that binary: load it first, or pass force=true to load the project anyway",
+                    borer_engine::text::short_path(&loaded_path)
+                ),
+            }));
         }
         let mut loaded = pf.to_overlay().map_err(err_params)?;
         let left_out = borer::project::keep_placeable(&mut loaded, &program);
@@ -3161,23 +3180,33 @@ impl BorerServer {
                 "# forced: the project was saved for {saved_for}, so its names may sit on other code here"
             );
         }
+        if matches!(identity, Identity::PathOnly | Identity::OtherPath) {
+            said.push_str("# the project names its binary by path alone (saved before projects recorded its sha-256), so a rebuild at that path loads it too; save_project records the hash\n");
+        }
         *write_lock(&self.overlay) = loaded;
         self.names_changed();
         Ok(said)
     }
 
-    /// Lists every overlay entry.
+    /// Lists the overlay's entries: names, then findings, then open
+    /// questions, a page at a time.
     ///
     /// A comment opening with a question mark is a hypothesis, not a
     /// finding. Separating the two is what makes the overlay a ledger an
     /// agent can return to: a conclusion it proved is worth building on,
-    /// and one it guessed at is worth checking before it does.
+    /// and one it guessed at is worth checking before it does. The ledger
+    /// grows with the session, so it pages like every list: the header
+    /// says `showing N of M` of the rows the filter keeps.
+    ///
+    /// # Arguments
+    ///
+    /// * `AnnotationsParams` - Destructured tool parameters (see its field docs).
     ///
     /// # Errors
     ///
-    /// Never; the signature matches the other tools.
+    /// When `limit` is zero.
     #[tool(
-        description = "List current annotation-overlay entries (names + comments).",
+        description = "List the annotation overlay: names, findings and open questions (comments opening with ?); filter pages like every list.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -3185,34 +3214,65 @@ impl BorerServer {
             open_world_hint = false
         )
     )]
-    fn annotations(&self) -> Result<String, ErrorData> {
+    fn annotations(
+        &self,
+        Parameters(AnnotationsParams {
+            filter,
+            offset,
+            limit,
+            count_only,
+        }): Parameters<AnnotationsParams>,
+    ) -> Result<String, ErrorData> {
+        /// Rows a page holds when `limit` is absent.
+        const ROWS_DEFAULT: usize = 200;
+        /// Most rows a page holds.
+        const ROWS_MAX: usize = 1000;
+        let page = Page::new(offset, limit, count_only, ROWS_DEFAULT, ROWS_MAX)?;
+        let filter = Filter::new(filter.as_deref());
         let o = read_lock(&self.overlay);
         let (open, settled): (Vec<_>, Vec<_>) = o
             .comments
             .iter()
             .partition(|(_, c)| c.trim_start().starts_with('?'));
-        let mut out = format!(
-            "# {} names, {} findings, {} open question(s)\n# addr annotation\n",
+        let rows: Vec<String> = o
+            .names
+            .iter()
+            .map(|(va, name)| format!("{:<12} name: {name}", format!("{va:#x}")))
+            .chain(
+                settled
+                    .iter()
+                    .map(|(va, c)| format!("{:<12} found: {c}", format!("{va:#x}"))),
+            )
+            .chain(open.iter().map(|(va, c)| {
+                let claim = c.trim_start().trim_start_matches('?').trim_start();
+                format!("{:<12} open:  {claim}", format!("{va:#x}"))
+            }))
+            .filter(|row| filter.accepts(row))
+            .collect();
+        let counts = format!(
+            "{} names, {} findings, {} open question(s)",
             o.names.len(),
             settled.len(),
             open.len()
         );
-        for (va, name) in &o.names {
-            let _ = writeln!(out, "{:<12} name: {name}", format!("{va:#x}"));
+        let total = rows.len();
+        if page.count_only {
+            return Ok(format!("# {total} annotations ({counts})\n"));
         }
-        for (va, c) in settled {
-            let _ = writeln!(out, "{:<12} found: {c}", format!("{va:#x}"));
-        }
-        for (va, c) in open {
-            let claim = c.trim_start().trim_start_matches('?').trim_start();
-            let _ = writeln!(out, "{:<12} open:  {claim}", format!("{va:#x}"));
+        let shown: Vec<&String> = rows.iter().skip(page.offset).take(page.limit.n).collect();
+        let mut out = format!(
+            "# showing {} of {total} annotations ({counts})\n# addr annotation\n",
+            shown.len()
+        );
+        for row in shown {
+            let _ = writeln!(out, "{row}");
         }
         if !o.comments.is_empty() {
             out.push_str(
                 "# a comment opening with ? is an open question; drop the ? once it is proved\n",
             );
         }
-        Ok(out)
+        Ok(page.limit.noted(out))
     }
 
     /// Reads a `borer://` resource by URI, for an agent whose host has no
@@ -3777,6 +3837,7 @@ impl ServerHandler for BorerServer {
                 project: self.loaded().map(|p| {
                     borer::project::ProjectFile::from_overlay(
                         &p.path.display().to_string(),
+                        None,
                         &read_lock(&self.overlay),
                     )
                 }),
@@ -4099,7 +4160,7 @@ impl BorerServer {
         };
         let text = match (kind, arg) {
             ("info", None) => self.binary_info()?,
-            ("annotations", None) => self.annotations()?,
+            ("annotations", None) => self.annotations(Parameters(AnnotationsParams::default()))?,
             ("enums", None) => self.enums_text()?,
             ("dynimports", None) => self.dynamic_imports_text()?,
             ("checks", None) => self.checks_text()?,
