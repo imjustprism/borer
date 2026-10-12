@@ -856,18 +856,15 @@ fn a_relocatable_object_says_why_nothing_is_mapped() {
     );
 }
 
-/// A local function symbol whose value plus size runs past the top of the
-/// address space adds no function range and does not fault the load (a
-/// fuzzed file's symbol at `u64::MAX - 1` with a size overflowed the sum).
+/// A symbol running past the top of the address space adds no range.
+///
+/// A fuzzed file's local function at `u64::MAX - 1` with a size overflowed
+/// the sum of its value and size and faulted the load.
 ///
 /// # Panics
 ///
 /// When the load fails or a range ends before it starts.
 #[test]
-#[expect(
-    clippy::expect_used,
-    reason = "a fixture that does not parse has no useful recovery"
-)]
 fn a_symbol_running_past_the_address_space_is_no_range() {
     let mut bytes = elf_bytes(false);
     let value = 0x300 + 24 + 8;
