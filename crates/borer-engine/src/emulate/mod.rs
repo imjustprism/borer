@@ -16,6 +16,7 @@ use crate::num::{from_usize, lo8, lo16, lo32};
 use crate::program::Program;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+pub mod a64;
 mod bits;
 mod loader;
 mod sse;
@@ -455,6 +456,61 @@ pub fn fill_byte(seed: u64, a: u64) -> u8 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     lo8(z ^ (z >> 31))
+}
+
+/// One image byte as the OS loader would map it, before the run's writes.
+///
+/// The static image backs only section file bytes. The loader maps more:
+/// a section's virtual size beyond its file bytes is zero-filled, and the
+/// PE headers are mapped at the image base below the first section. A
+/// packer's bootstrap reads both (the headers to walk its own imports, the
+/// zero-filled tail as scratch), so serving them lets the run continue
+/// where a file-only view would fault.
+///
+/// The headers are the file bytes before the first section's, padded to
+/// a page; the rest of the gap below the first section is not mapped.
+/// Reading on through the file there served a section's bytes at an
+/// address nothing loads them at: with sections 64 KiB apart, `[ebp +
+/// 0x14]` 0x3468 bytes into the image read code from file offset
+/// 0x3468, where the process would fault.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `va` - The address.
+///
+/// # Returns
+///
+/// The byte, or `None` when no mapping the loader would make covers `va`.
+fn image_byte(program: &Program, va: u64) -> Option<u8> {
+    if let Some(b) = program.read_va_upto(va, 1).and_then(|s| s.first().copied()) {
+        return Some(b);
+    }
+    if program.sections.iter().any(|s| {
+        let mapped = s.vsize.max(s.file_size).wrapping_add(PAGE - 1) & !(PAGE - 1);
+        va >= s.va && va - s.va < mapped
+    }) {
+        return Some(0);
+    }
+    let base = program.image_base;
+    let first = program.sections.iter().map(|s| s.va).min();
+    if va < base || first.is_none_or(|f| va >= f) {
+        return None;
+    }
+    let headers = program
+        .sections
+        .iter()
+        .filter(|s| s.file_size > 0)
+        .map(|s| s.file_off)
+        .min()
+        .unwrap_or(0);
+    let off = va - base;
+    if off < headers {
+        return usize::try_from(off)
+            .ok()
+            .and_then(|o| program.bytes.get(o).copied());
+    }
+    (off < headers.wrapping_add(PAGE - 1) & !(PAGE - 1)).then_some(0)
 }
 
 /// Base address of the scratch stack the emulator gives a routine.
@@ -1981,7 +2037,7 @@ impl<'a> Emulator<'a> {
     ///
     /// The byte, or `None` when neither memory nor the image backs it.
     fn byte(&self, a: u64) -> Option<u8> {
-        self.mem.get(a).or_else(|| self.image_byte(a))
+        self.mem.get(a).or_else(|| image_byte(self.program, a))
     }
 
     /// Runs from `entry` until it returns, exhausts the budget, or stops.
@@ -3238,65 +3294,6 @@ impl<'a> Emulator<'a> {
             _ => 0,
         };
         Ok(self.narrow(offset.wrapping_add(segment)))
-    }
-
-    /// One image byte as the OS loader would map it, before the run's writes.
-    ///
-    /// The static image backs only section file bytes. The loader maps more:
-    /// a section's virtual size beyond its file bytes is zero-filled, and the
-    /// PE headers are mapped at the image base below the first section. A
-    /// packer's bootstrap reads both (the headers to walk its own imports, the
-    /// zero-filled tail as scratch), so serving them lets the run continue
-    /// where a file-only view would fault.
-    ///
-    /// The headers are the file bytes before the first section's, padded to
-    /// a page; the rest of the gap below the first section is not mapped.
-    /// Reading on through the file there served a section's bytes at an
-    /// address nothing loads them at: with sections 64 KiB apart, `[ebp +
-    /// 0x14]` 0x3468 bytes into the image read code from file offset
-    /// 0x3468, where the process would fault.
-    ///
-    /// # Arguments
-    ///
-    /// * `va` - The address.
-    ///
-    /// # Returns
-    ///
-    /// The byte, or `None` when no mapping the loader would make covers `va`.
-    fn image_byte(&self, va: u64) -> Option<u8> {
-        if let Some(b) = self
-            .program
-            .read_va_upto(va, 1)
-            .and_then(|s| s.first().copied())
-        {
-            return Some(b);
-        }
-        if self.program.sections.iter().any(|s| {
-            let mapped = s.vsize.max(s.file_size).wrapping_add(PAGE - 1) & !(PAGE - 1);
-            va >= s.va && va - s.va < mapped
-        }) {
-            return Some(0);
-        }
-        let base = self.program.image_base;
-        let first = self.program.sections.iter().map(|s| s.va).min();
-        if va < base || first.is_none_or(|f| va >= f) {
-            return None;
-        }
-        let headers = self
-            .program
-            .sections
-            .iter()
-            .filter(|s| s.file_size > 0)
-            .map(|s| s.file_off)
-            .min()
-            .unwrap_or(0);
-        let off = va - base;
-        if off < headers {
-            return usize::try_from(off)
-                .ok()
-                .and_then(|o| self.program.bytes.get(o).copied());
-        }
-        (off < headers.wrapping_add(PAGE - 1) & !(PAGE - 1)).then_some(0)
     }
 
     /// Whether anything backs `addr`: a written byte or the mapped image.

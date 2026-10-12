@@ -15,6 +15,7 @@ mod nebula;
 mod raw;
 
 mod a64;
+mod a64_emulate;
 mod analysis;
 mod calls;
 mod decompile;
