@@ -289,6 +289,10 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
   PIE's pointer tables read as pointers; Android's packed `APS2` tables are
   not read. A PE's base relocations are read for analysis. Mach-O chained
   fixups aren't read at all.
+- A Go binary's functions are named from its `pclntab` (Go 1.2 on, found
+  by magic when stripped), and on x86-64 a table from Go 1.18 on reads
+  them with Go's register ABI and folds the stack-growth check. Its source
+  lines and ABI0 assembly functions are not told apart yet.
 - DWARF support covers function names, parameters, frame locals and types,
   not line tables or inlined frames.
 - Live process access is Windows only.

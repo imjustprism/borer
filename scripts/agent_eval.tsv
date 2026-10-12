@@ -16,4 +16,5 @@ raw_code	2	593	1
 emulate_syscall	2	719	1
 emulate_elf_args	2	660	1
 pie_table_xref	2	816	1
+go_names	2	828	1
 decoded_strings	2	885	1

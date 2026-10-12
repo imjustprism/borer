@@ -1274,6 +1274,66 @@ pub(super) fn seh_frame(ctx: &Ctx<'_>, code: &[Vec<Instruction>]) -> bool {
             .any(|i| lift::is_seh_link(i) && !registers(i)))
 }
 
+/// Finds a Go function's stack-growth check, to fold it.
+///
+/// Every Go function the compiler did not mark `NOSPLIT` opens comparing
+/// the stack pointer, or a register `lea`'d below it for a large frame,
+/// with the goroutine's stack guard (`cmp rsp, [r14+0x10]`), and jumps
+/// below-or-equal to a block that calls `runtime.morestack` and starts
+/// over. It is the runtime's bookkeeping, not the function's logic: read
+/// as a branch it doubles every body with a path that re-enters it. Only
+/// a function taking Go's arguments ([`lift::takes_go_registers`]) is
+/// looked at, and only when the slow path's call is named
+/// `runtime.morestack*`.
+///
+/// # Arguments
+///
+/// * `ctx` - The function's context: its names.
+/// * `entry` - The function's entry.
+/// * `code` - Decoded instructions per block.
+/// * `idx` - Block index by start address.
+///
+/// # Returns
+///
+/// The `jbe`'s address and the note the header prints, or `None` when the
+/// function has no such check.
+pub(super) fn go_stack_check(
+    ctx: &Ctx<'_>,
+    entry: u64,
+    code: &[Vec<Instruction>],
+    idx: &BTreeMap<u64, usize>,
+) -> Option<(u64, String)> {
+    /// The stack guard's offset in the goroutine (`g.stackguard0`).
+    const STACKGUARD: u64 = 0x10;
+    if !lift::takes_go_registers(ctx.program, entry) {
+        return None;
+    }
+    let [.., cmp, jbe] = code.get(ctx.entry_block)?.as_slice() else {
+        return None;
+    };
+    let guard = cmp.mnemonic() == Mnemonic::Cmp
+        && cmp.op0_kind() == OpKind::Register
+        && cmp.op1_kind() == OpKind::Memory
+        && cmp.memory_base() == Register::R14
+        && cmp.memory_index() == Register::None
+        && cmp.memory_displacement64() == STACKGUARD;
+    if !guard || jbe.condition_code() != ConditionCode::be {
+        return None;
+    }
+    let slow = code.get(*idx.get(&lift::near_target(jbe)?)?)?;
+    let callee = slow
+        .iter()
+        .filter(|i| i.flow_control() == FlowControl::Call)
+        .filter_map(lift::near_target)
+        .map(|t| name_of(ctx.analysis, ctx.overlay, t))
+        .find(|name| name.starts_with("runtime.morestack"))?;
+    let reg = format!("{:?}", cmp.op0_register()).to_lowercase();
+    Some((
+        jbe.ip(),
+        format!("cmp {reg}, [r14+{STACKGUARD:#x}]; jbe {callee}"),
+    ))
+}
+
 /// Tells whether any non-call instruction writes the return register.
 ///
 /// # Arguments

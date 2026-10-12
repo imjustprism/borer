@@ -30,6 +30,7 @@ mod eh_frame;
 pub mod emulate;
 pub mod entropy;
 pub mod fxmap;
+pub mod go;
 pub mod hashing;
 pub mod headers;
 pub mod hexdump;

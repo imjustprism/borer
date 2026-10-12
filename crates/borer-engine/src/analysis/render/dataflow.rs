@@ -754,12 +754,22 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
         );
     }
 
+    let go = p.go.as_ref().filter(|g| g.lists(va));
     let origin = if let Some(n) = o.names.get(&va) {
         format!("you set it: {n}")
     } else if let Some(d) = debug {
         format!(
             "the debug information records it as {}, so it is what the compiler called it",
             d.name
+        )
+    } else if let (Some(g), Some(s)) = (
+        go,
+        symbol.filter(|s| s.addr == va && s.kind == SymbolKind::Local),
+    ) {
+        format!(
+            "the Go function table (pclntab, {}) records it: {}",
+            g.version.releases(),
+            s.name
         )
     } else if let Some(s) = symbol.filter(|s| s.addr == va) {
         format!(
@@ -815,6 +825,9 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
         }
         if debug.is_some() {
             how.push(String::from("the debug information"));
+        }
+        if go.is_some() {
+            how.push(String::from("the Go function table"));
         }
         if !f.callers.is_empty() {
             how.push(format!("{} call site(s)", f.callers.len()));

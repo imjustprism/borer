@@ -691,6 +691,7 @@ mod tests {
             pdb_source: None,
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
+            go: None,
         }
     }
 

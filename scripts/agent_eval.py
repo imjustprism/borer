@@ -217,6 +217,47 @@ def _pie_blob() -> bytes:
 
 PIE_CODE = _pie_blob()
 
+
+def _go_blob() -> bytes:
+    """A stripped Go 1.20 executable: no symbol table, only the pclntab in
+    .gopclntab naming main.main (0x1000) and main.add (0x1010, `lea rax,
+    [rax+rbx]; ret`, Go's a + b in its register ABI)."""
+    text = bytearray(b"\xcc" * 0x20)
+    text[0:3] = bytes.fromhex("31c0c3")  # xor eax, eax; ret
+    text[0x10:0x15] = bytes.fromhex("488d0418c3")  # lea rax, [rax+rbx]; ret
+    funcs = [(0x00, "main.main"), (0x10, "main.add")]
+    names = b"".join(n.encode() + b"\0" for _, n in funcs)
+    pcln = (72 + len(names) + 7) & ~7
+    functab = (len(funcs) + 1) * 8
+    table = bytearray(pcln + functab + len(funcs) * 44)
+    table[0:8] = bytes.fromhex("f1ffffff00000108")
+    for k, v in enumerate([len(funcs), 0, 0x1000, 72, pcln, pcln, pcln, pcln]):
+        table[8 + k * 8 : 16 + k * 8] = v.to_bytes(8, "little")
+    table[72 : 72 + len(names)] = names
+    name_off = 0
+    for i, (entry, name) in enumerate(funcs):
+        record = functab + i * 44
+        table[pcln + i * 8 : pcln + i * 8 + 8] = entry.to_bytes(4, "little") + record.to_bytes(
+            4, "little"
+        )
+        table[pcln + record : pcln + record + 8] = entry.to_bytes(4, "little") + name_off.to_bytes(
+            4, "little"
+        )
+        name_off += len(name) + 1
+    end = pcln + len(funcs) * 8
+    table[end : end + 4] = (0x20).to_bytes(4, "little")
+    return _elf(
+        2,
+        0x1000,
+        [
+            (".text", 1, 6, 0x1000, bytes(text), 0, 0),
+            (".gopclntab", 1, 2, 0x2000, bytes(table), 0, 0),
+        ],
+    )
+
+
+GO_CODE = _go_blob()
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
@@ -225,6 +266,7 @@ BLOBS = {
     "decoder": (DECODER_CODE, "<decoder>"),
     "elfargs": (ELF_ARG_CODE, "<elfargs>"),
     "pie": (PIE_CODE, "<pie>"),
+    "go": (GO_CODE, "<go>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -346,6 +388,15 @@ TASKS = [
             ("xrefs", {"address": "0x1010"}),
         ],
         "-: 0x2000 table",
+    ),
+    (
+        "go_names",
+        "what a stripped Go binary's function computes, named by its pclntab",
+        [
+            ("load_binary", {"path": "{go}"}),
+            ("decompile", {"address": "main.add"}),
+        ],
+        "return a1 + a2;",
     ),
     (
         "decoded_strings",

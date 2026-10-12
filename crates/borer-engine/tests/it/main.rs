@@ -28,6 +28,7 @@ mod elf;
 mod emulate_calls;
 mod engine;
 mod families;
+mod go;
 mod groundtruth;
 mod hashing;
 mod iocs;

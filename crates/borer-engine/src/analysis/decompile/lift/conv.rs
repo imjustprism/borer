@@ -178,6 +178,77 @@ pub(in crate::analysis::decompile) const FASTCALL_X86: Conv = Conv {
     ..CDECL_X86
 };
 
+/// Go's register ABI on amd64 (`ABIInternal`, Go 1.17 on).
+///
+/// Nine integer argument registers and fifteen floating ones, each counted
+/// on its own, no shadow space, and every register the callee's to clobber
+/// but the frame pointer, `r14` (the goroutine) and `r15`.
+///
+/// SPEC: Go's src/cmd/compile/abi-internal.md, amd64 architecture.
+pub(in crate::analysis::decompile) const GO_X64: Conv = Conv {
+    args: &[
+        Register::RAX,
+        Register::RBX,
+        Register::RCX,
+        Register::RDI,
+        Register::RSI,
+        Register::R8,
+        Register::R9,
+        Register::R10,
+        Register::R11,
+    ],
+    float_args: &[
+        Register::XMM0,
+        Register::XMM1,
+        Register::XMM2,
+        Register::XMM3,
+        Register::XMM4,
+        Register::XMM5,
+        Register::XMM6,
+        Register::XMM7,
+        Register::XMM8,
+        Register::XMM9,
+        Register::XMM10,
+        Register::XMM11,
+        Register::XMM12,
+        Register::XMM13,
+        Register::XMM14,
+    ],
+    callee_saved: &[Register::RBP, Register::R14, Register::R15],
+    volatile: &[
+        Register::RAX,
+        Register::RBX,
+        Register::RCX,
+        Register::RDX,
+        Register::RSI,
+        Register::RDI,
+        Register::R8,
+        Register::R9,
+        Register::R10,
+        Register::R11,
+        Register::R12,
+        Register::R13,
+        Register::XMM0,
+        Register::XMM1,
+        Register::XMM2,
+        Register::XMM3,
+        Register::XMM4,
+        Register::XMM5,
+        Register::XMM6,
+        Register::XMM7,
+        Register::XMM8,
+        Register::XMM9,
+        Register::XMM10,
+        Register::XMM11,
+        Register::XMM12,
+        Register::XMM13,
+        Register::XMM14,
+    ],
+    word: 8,
+    shadow: 0,
+    float_seq: true,
+};
+
 impl Conv {
     /// The argument slot a register carries, if it carries one.
     ///
@@ -313,6 +384,41 @@ pub(crate) fn conv(program: &Program, bitness: u32) -> &'static Conv {
         BinaryFormat::Pe | BinaryFormat::Raw | BinaryFormat::Archive => &MS_X64,
         BinaryFormat::Elf | BinaryFormat::MachO => &SYSV_X64,
     }
+}
+
+/// Picks the calling convention of one function.
+///
+/// A function the Go function table lists takes Go's register ABI
+/// ([`GO_X64`]) on x86-64, when the table's layout says the releases that
+/// wrote it pass arguments in registers; every other function takes the
+/// program's ([`conv()`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `entry` - The function's entry.
+/// * `bitness` - `32` or `64`.
+pub(crate) fn conv_at(program: &Program, entry: u64, bitness: u32) -> &'static Conv {
+    if takes_go_registers(program, entry) {
+        &GO_X64
+    } else {
+        conv(program, bitness)
+    }
+}
+
+/// Whether a function takes Go's register ABI: x86-64 code the Go function
+/// table lists, written by releases that pass arguments in registers.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `entry` - The function's entry.
+pub(crate) fn takes_go_registers(program: &Program, entry: u64) -> bool {
+    program.arch == crate::program::Arch::X86_64
+        && program
+            .go
+            .as_ref()
+            .is_some_and(|g| g.version.register_abi() && g.lists(entry))
 }
 
 /// Returns the canonical register a text variable is named after.

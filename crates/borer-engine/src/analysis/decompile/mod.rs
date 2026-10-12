@@ -148,6 +148,10 @@ struct Ctx<'a> {
     /// restores `fs:[0]` before every return, is the compiler's and renders
     /// as nothing ([`lift::Exec::store`]).
     seh_frame: bool,
+    /// A Go function's stack-growth check ([`go_stack_check`]): the address
+    /// of its `jbe` to the `runtime.morestack` call, which the lifter takes
+    /// as never taken, and the header's note of what was folded.
+    go_check: Option<(u64, String)>,
     /// Parameters detected from calling-convention registers read first.
     params: Vec<Register>,
     /// Text variables assigned somewhere in the body, with their type.
@@ -674,24 +678,23 @@ fn new_ctx<'a>(
     let debug = program.debug_functions.iter().find(|d| d.low_pc == f.entry);
     let stated = overlay.prototypes.get(&f.entry);
     let vars = overlay.vars.get(&f.entry);
+    let conv = lift::conv_at(program, f.entry, bitness);
     Ctx {
         program,
         analysis,
         overlay,
         overlay_key: overlay.fingerprint(),
         bitness,
-        conv: lift::conv(program, bitness),
-        assume: {
-            let conv = lift::conv(program, bitness);
-            assume
-                .iter()
-                .filter_map(|&(slot, v)| Some((*conv.args.get(usize::from(slot))?, v)))
-                .collect()
-        },
+        conv,
+        assume: assume
+            .iter()
+            .filter_map(|&(slot, v)| Some((*conv.args.get(usize::from(slot))?, v)))
+            .collect(),
         block_starts,
         symbolic_only: false,
         probe: None,
         seh_frame: false,
+        go_check: None,
         params: Vec::new(),
         declared: BTreeMap::new(),
         slot_types: std::sync::Arc::default(),
@@ -1255,6 +1258,7 @@ fn decompile_with(
     );
     let code = decode_blocks(&ctx, f);
     ctx.seh_frame = seh_frame(&ctx, &code);
+    ctx.go_check = go_stack_check(&ctx, f.entry, &code, &idx);
     // INVARIANT: the parameters are read once per function and overlay
     // ([`callee_shape`]), so the signature below lists exactly what every
     // call to the function passes.
@@ -1709,6 +1713,9 @@ fn decompile_with(
     );
     if let Some((file, line)) = &ctx.debug_source {
         let _ = writeln!(out, "// source: {file}:{line}");
+    }
+    if let Some((_, folded)) = &ctx.go_check {
+        let _ = writeln!(out, "// go stack check folded: {folded}");
     }
     if let Some(table) = enum_table(&body, &params) {
         /// Most members written into the header line.
@@ -2586,6 +2593,7 @@ g(tmp_5);";
             pdb_source: None,
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
+            go: None,
         };
         let a = crate::analysis::Analysis::compute(&p);
         let o = crate::analysis::Overlay::default();
@@ -2646,6 +2654,7 @@ g(tmp_5);";
             pdb_source: None,
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
+            go: None,
         };
         assert_eq!(
             super::string_at(&p, 0x2000),

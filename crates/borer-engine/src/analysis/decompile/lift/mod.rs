@@ -852,6 +852,7 @@ pub(super) fn exec_block(
     }
     let mut out = BlockOut::default();
     let mut jcc: Option<(Cc, u64, u64)> = None;
+    let mut go_folded = false;
     let reads_ahead = read_counts(&*ex.ctx, &mut ex.info, instrs);
     for (idx, instr) in instrs.iter().enumerate() {
         ex.at = instr.ip();
@@ -866,6 +867,11 @@ pub(super) fn exec_block(
             FlowControl::ConditionalBranch => {
                 if let Some(t) = near_target(instr) {
                     jcc = Some((Cc(instr.condition_code()), t, instr.next_ip()));
+                    go_folded = ex
+                        .ctx
+                        .go_check
+                        .as_ref()
+                        .is_some_and(|(at, _)| *at == instr.ip());
                 } else {
                     ex.unmodeled(instr);
                 }
@@ -940,6 +946,11 @@ pub(super) fn exec_block(
     }
     if let Some((cc, target, fall)) = jcc {
         let flags = match &ex.flags {
+            // INVARIANT: a Go stack check's `jbe` is never taken in the
+            // text ([`super::go_stack_check`]): `1 <= 0` folds the branch
+            // the way a constant condition folds, so its slow path is
+            // unreachable and drops out with its edges.
+            _ if go_folded => Flags::Cmp(Expr::Const(1), Expr::Const(0), 64),
             Flags::Truth(_, tcc) if *tcc != cc && tcc.invert() != cc => branch_flags,
             _ => ex.flags.clone(),
         };

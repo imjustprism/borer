@@ -30,6 +30,8 @@ pub(crate) const WA: u64 = 3;
 pub(crate) const A: u64 = 2;
 /// `SHF_ALLOC | SHF_EXECINSTR`.
 pub(crate) const AX: u64 = 6;
+/// `ET_EXEC`.
+pub(crate) const ET_EXEC: u16 = 2;
 /// `ET_DYN`.
 pub(crate) const ET_DYN: u16 = 3;
 /// `EM_X86_64`.

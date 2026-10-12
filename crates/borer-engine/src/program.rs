@@ -312,6 +312,10 @@ pub struct Program {
     /// of the mapped image ([`Program::read_va`], [`Program::section_bytes`])
     /// sees the relocated words, while [`Program::bytes`] stays the file.
     pub relocs: crate::reloc::Relocs,
+    /// The Go function table, when the program carries one that validates:
+    /// the provenance of the names it gave [`Program::symbols`], and the
+    /// mark of which functions take Go's arguments ([`crate::go`]).
+    pub go: Option<crate::go::Pclntab>,
 }
 
 /// The container a file's first bytes name, for a parse that fails.
@@ -1322,6 +1326,7 @@ impl Program {
             pdb_source: None,
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
+            go: None,
         }
     }
 
@@ -2064,7 +2069,7 @@ impl Program {
         function_ranges.dedup();
         phases.mark("load finish");
 
-        Ok(Program {
+        let mut program = Program {
             path,
             bytes,
             format,
@@ -2083,7 +2088,33 @@ impl Program {
             pdb_source,
             flat_fallback,
             relocs,
-        })
+            go: None,
+        };
+        program.read_go();
+        phases.mark("load go");
+        Ok(program)
+    }
+
+    /// Reads the Go function table and names the functions it lists where
+    /// nothing else in the file does ([`crate::go`]).
+    ///
+    /// It runs on the image as loaded, its relocations applied, since a
+    /// PIE's table states its text start through one.
+    fn read_go(&mut self) {
+        let Some(word) = self
+            .arch
+            .bitness()
+            .map(|b| crate::num::saturating_usize(u64::from(b / 8)))
+        else {
+            return;
+        };
+        let Some((table, funcs)) = crate::go::find(&self.sections, |s| self.section_bytes(s), word)
+        else {
+            return;
+        };
+        let named = crate::go::symbols(&funcs, &self.symbols);
+        self.symbols.extend(named);
+        self.go = Some(table);
     }
 
     /// The addresses of the pointer-sized words a PE's base relocation
@@ -2642,6 +2673,9 @@ impl Program {
             out.push_str(&format!("locals:  {locals} named functions\n"));
         }
         out.push_str(&self.relocs.render());
+        if let Some(go) = &self.go {
+            out.push_str(&go.render());
+        }
         if let Some(outcome) = &self.pdb {
             out.push_str(&format!("pdb:     {}\n", outcome.render()));
         }
