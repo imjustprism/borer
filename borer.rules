@@ -72,7 +72,7 @@ rules:
     - A tool parameter that takes one of a few words is an enum in the schema (`params::ReadKind`, `SymbolKind`, `SearchKind`, `StringEncoding`, `Detail`). The agent sees the choices before it calls, serde refuses anything else, and no handler matches on strings.
 
   architecture:
-    - iced-x86 decodes, and the decompiler lifts x86/x64 straight into its own expression tree (`decompile::lift`, `decompile::expr`). `decompile::verify` checks the lift against the emulator block by block, and any lifter change keeps it green.
+    - iced-x86 decodes x86/x64 and yaxpeax-arm decodes arm64, each behind the engine's isa module. The decompiler lifts x86/x64 straight into its own expression tree (`decompile::lift`, `decompile::expr`). `decompile::verify` checks the lift against the emulator block by block, and any lifter change keeps it green.
     - Analysis is pure, derived and immutable. Program is immutable and `Analysis::compute` runs once per Program. Every result derived later is memoized in `Analysis::derived`, keyed by what it depends on (the overlay's fingerprint when names matter), and kept while it can still be asked for. `Derived::forget_names_but` drops results read under names that changed, on every rename, comment and project load, and per-function results also live within a byte budget, least recently asked first.
     - A memoized value is a pure function of its key and is never compared by address, so dropping one costs time, never a different answer. There is one memo store; never add a second Mutex-guarded map beside it, and never add global state.
     - Output conventions are load-bearing. Tables with a `#` header line, filter, offset, limit and count parameters on every list tool, hard caps with `showing N of M`, and dry-run by default on every tool that changes state.
@@ -117,7 +117,7 @@ rules:
     - Check the gate's own exit status, never a pipeline's. Write `python scripts/gate.py > log 2>&1 && git commit ...`, not `gate.py | tail`.
     - Lint levels live in Cargo.toml [workspace.lints], and every crate sets `[lints] workspace = true`. Tool settings live in rustfmt.toml, clippy.toml, deny.toml, typos.toml, ruff.toml and .editorconfig. rust-toolchain.toml pins the toolchain, and rust-version in Cargo.toml moves with it.
     - Never silence a lint to pass the gate. Fix the code, or put `#[expect(lint, reason = "...")]` on the one site with the reason spelled out; a bare `#[allow]` is a review failure.
-    - Keep the dependency surface small; deny.toml bans an async runtime inside the engine. The engine uses anyhow, goblin, iced-x86, pdb, three demanglers, rhai and serde; the server adds rmcp, tokio, rayon, regex, schemars, serde_json and mimalloc. A new dependency needs a reason no existing one covers.
+    - Keep the dependency surface small; deny.toml bans an async runtime inside the engine. The engine uses anyhow, goblin, iced-x86 (x86/x64), yaxpeax-arm and yaxpeax-arch (arm64, named only in isa/a64/decode.rs), pdb, three demanglers, rhai and serde; the server adds rmcp, tokio, rayon, regex, schemars, serde_json and mimalloc. A new dependency needs a reason no existing one covers.
 
   forbidden:
     - async, tokio or MCP types inside borer-engine.
