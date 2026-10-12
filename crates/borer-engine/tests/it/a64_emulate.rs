@@ -6,13 +6,15 @@
 //! with the registers set before and the registers, memory and vector
 //! registers expected after; the flag truth tables of the adds, subtracts
 //! and conditional compares; every way a run stops; an XOR decryption loop
-//! end to end; and random words, which run to a stop without a panic.
+//! end to end, alone and through the `emulate` and `run` surfaces; and
+//! random words, which run to a stop without a panic.
 #![expect(
     clippy::missing_panics_doc,
     clippy::expect_used,
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::emulate::Stop;
 use borer_engine::emulate::a64::Machine;
 use borer_engine::program::{Arch, Program, Section};
@@ -1351,6 +1353,61 @@ fn an_xor_loop_decrypts_its_blob() {
     assert!(trace[0].starts_with("0x10028  b.ne 0x10014"), "{trace:?}");
     assert!(trace[1].contains("x29=0x0 sp=0x7fff00000000"), "{trace:?}");
     assert!(trace[2].ends_with("stopped: returned"), "{trace:?}");
+}
+
+/// The experiment and typed-run surfaces run arm64 code.
+///
+/// `emulate` reports the stop, the registers and the text the routine
+/// wrote, and `run` tabulates the call on its inputs, unchecked for want
+/// of text; the surfaces built on the x86 machine refuse it.
+#[test]
+fn emulate_and_run_answer_for_arm64() {
+    let p = image(&XOR_DECRYPT);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let out = render::emulate_tsv(&p, &a, &o, &format!("{BASE:#x},x0={OUT_AT:#x},a2=16"))
+        .expect("an arm64 routine runs");
+    assert!(
+        out.starts_with(&format!(
+            "# ran sub_10000 from 0x10000 with x0={OUT_AT:#x} a2=0x10: returned after {XOR_STEPS} steps, 32 bytes written\n# registers: x0={:#x} x1=0x0 ",
+            OUT_AT + 16
+        )),
+        "{out}"
+    );
+    assert!(out.contains("\"borer runs arm64\""), "{out}");
+    let traced = render::emulate_tsv(&p, &a, &o, "0x10000,x0=0x40000,x1=2,trace=2,dump=0x40000:2")
+        .expect("a traced run");
+    assert!(
+        traced.contains("# trace: address, instruction, registers it changed\n0x1002c  ldp"),
+        "{traced}"
+    );
+    assert!(traced.contains("# dump 0x40000..0x40002\n"), "{traced}");
+    let refused = render::emulate_tsv(&p, &a, &o, "0x10000,rax=1").expect_err("an x86 name");
+    assert!(refused.contains("use x0..x30"), "{refused}");
+    let refused = render::emulate_tsv(&p, &a, &o, "0x10000,profile=4").expect_err("x86 only");
+    assert!(refused.contains("x86 run only"), "{refused}");
+    let table = render::run_tsv(&p, &a, &o, "0x10000/out:16,16").expect("a typed run");
+    assert!(
+        table.contains("returned\t103\ta1=\"borer runs arm64\"") && table.contains("\tunchecked\n"),
+        "{table}"
+    );
+    assert!(
+        table.contains("arm64 code does not decompile yet"),
+        "{table}"
+    );
+    for refused in [
+        render::oracle_tsv(&p, &a, &o, "0x10000"),
+        render::solve_tsv(&p, &a, &o, "0x10000"),
+        render::unpack_tsv(&p, &a, &o, "0x10000"),
+        render::devirtualize_tsv(&p, &a, &o, "0x10000"),
+    ] {
+        let why = refused.expect_err("x86 only");
+        assert!(
+            why.contains("runs x86 and x86-64 code only for now"),
+            "{why}"
+        );
+    }
+    assert!(render::hidden_strings_tsv(&p, &a, &o, "").contains("only for now"));
 }
 
 /// Random words, with every register pointing into them, run to a stop

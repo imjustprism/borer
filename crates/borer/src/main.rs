@@ -6719,6 +6719,61 @@ mod tests {
         );
     }
 
+    /// An arm64 function runs under `borer://emulate` and `borer://run`,
+    /// and a surface built on the x86 machine refuses it as an invalid
+    /// request.
+    ///
+    /// # Panics
+    ///
+    /// When a run answers otherwise, or the refusal does not come.
+    #[test]
+    fn an_arm64_function_runs_under_emulate_and_run() {
+        use borer_engine::program::{Arch, Program, Section};
+        let code: Vec<u8> = [
+            // ASM: add x0, x0, #0x1
+            0x9100_0400u32,
+            // ASM: ret
+            0xd65f_03c0,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let text = Section::mapped(".text", 0x1000, 0, 8, false, true);
+        let program = Program::raw(code, Arch::Arm64, 0, Some(0x1000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let out = server
+            .resource_text("borer://emulate/0x1000,x0=0x29")
+            .expect("an arm64 routine runs");
+        assert!(
+            out.contains("returned after 2 steps") && out.contains("# registers: x0=0x2a x1=0x0"),
+            "{out}"
+        );
+        let table = server
+            .resource_text("borer://run/0x1000/41")
+            .expect("an arm64 function runs on an input");
+        assert!(
+            table.contains("\t0x2a\treturned\t2\t-\tunchecked\n")
+                && table.contains("arm64 code does not decompile yet"),
+            "{table}"
+        );
+        let refused = server
+            .resource_text("borer://oracle/0x1000")
+            .expect_err("the oracle drives the x86 machine");
+        assert!(
+            refused
+                .message
+                .contains("oracle runs x86 and x86-64 code only for now"),
+            "{}",
+            refused.message
+        );
+    }
+
     /// The `script` tool runs inline code and applies only on request.
     ///
     /// Its `query` calls are answered from the resources, `borer://script`

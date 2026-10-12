@@ -111,8 +111,8 @@ impl Arch {
         match self.isa() {
             Some(Isa::X86 { .. }) => true,
             Some(Isa::A64) => match feature {
-                Feature::Disasm | Feature::Discover => true,
-                Feature::Emulate | Feature::Decompile => false,
+                Feature::Disasm | Feature::Discover | Feature::Emulate => true,
+                Feature::Decompile => false,
             },
             None => false,
         }
@@ -2354,7 +2354,8 @@ impl Program {
     /// An unrecognized file loads as raw bytes of no architecture, and a
     /// program for another instruction set loads with its sections and
     /// symbols; neither has code borer can read. An arm64 program is
-    /// disassembled and its functions discovered, and nothing more yet. The
+    /// disassembled, its functions discovered and its code emulated, and
+    /// nothing more yet. The
     /// refusal names the format so the reader knows which case it has, says
     /// what does apply, and points at the tools that read any file.
     ///
@@ -2377,8 +2378,16 @@ impl Program {
                     Feature::Emulate => "emulate it",
                     Feature::Decompile => "decompile it",
                 };
+                let (runs, beyond) = if self.arch.supports(Feature::Emulate) {
+                    (
+                        " and runs it in the emulator (borer://emulate, borer://run),",
+                        "its functions, blocks, calls and runs",
+                    )
+                } else {
+                    ("", "its functions, blocks and calls")
+                };
                 Err(format!(
-                    "{format} file, arch '{arch}': borer disassembles {arch} code and discovers its functions (functions, function, disassemble_function, cfg, callgraph, xrefs) but does not yet {stage}, so no code analysis beyond its functions, blocks and calls applies; triage, entropy and strings read any file"
+                    "{format} file, arch '{arch}': borer disassembles {arch} code and discovers its functions (functions, function, disassemble_function, cfg, callgraph, xrefs){runs} but does not yet {stage}, so no code analysis beyond {beyond} applies; triage, entropy and strings read any file"
                 ))
             }
             Some(_) | None => Err(format!(

@@ -54,6 +54,30 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+/// Refuses, on an arm64 program, a surface built on the x86 machine.
+///
+/// The arm64 machine runs code under `emulate` and `run`; the surfaces
+/// that drive the x86 one further, through its import stubs, its thread
+/// block, a calling convention or the lifter, answer this rather than run
+/// arm64 bytes as x86.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `surface` - The surface's name, as the agent asked for it.
+///
+/// # Errors
+///
+/// The refusal, for an arm64 program.
+pub(super) fn x86_only(p: &Program, surface: &str) -> Result<(), String> {
+    match p.arch.isa() {
+        Some(crate::isa::Isa::A64) => Err(format!(
+            "{surface} runs x86 and x86-64 code only for now; arm64 code runs under emulate and run"
+        )),
+        Some(crate::isa::Isa::X86 { .. }) | None => Ok(()),
+    }
+}
+
 /// `s` when `n` is not one, so a count reads `1 string` and `2 strings`.
 ///
 /// # Arguments

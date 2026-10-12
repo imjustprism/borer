@@ -97,6 +97,7 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     const CANDIDATES_MAX: usize = 48;
     /// Instructions each run is given.
     const BUDGET: usize = 50_000;
+    x86_only(p, "solve")?;
     /// Groups of answers listed before the rest are counted.
     const GROUPS_MAX: usize = 6;
     /// Values spelled per answer before the rest are counted.
@@ -473,6 +474,7 @@ pub(super) struct Attempt {
 pub fn oracle_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<String, String> {
     /// Instructions one run is given.
     const BUDGET: usize = 200_000;
+    x86_only(p, "oracle")?;
     /// Argument shapes tried, as `(description, arguments)`.
     ///
     /// A checksum is written `f(buffer, length)` as often as `f(length,

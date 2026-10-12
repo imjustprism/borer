@@ -265,13 +265,17 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
 
 ## Limits
 
-- Only x86 and x86-64 are decompiled and emulated. An arm64 Mach-O, ELF
-  or PE loads its sections and symbols, disassembles, and has its
-  functions, blocks and calls discovered (`functions`, `function`,
-  `disassemble_function`, `cfg`, `callgraph`, `xrefs` on calls), but jump
-  tables, data references and import stubs are not resolved yet, and the
-  tools that decompile or run code refuse it. Other machines are not
-  decoded.
+- Only x86 and x86-64 are decompiled. An arm64 Mach-O, ELF or PE loads
+  its sections and symbols, disassembles, and has its functions, blocks
+  and calls discovered (`functions`, `function`, `disassemble_function`,
+  `cfg`, `callgraph`, `xrefs` on calls), but jump tables, data references
+  and import stubs are not resolved yet. Its code runs under
+  `borer://emulate` and `borer://run` in an arm64 machine that models the
+  integer, memory and branch instructions and stops on anything else (no
+  floating-point arithmetic, no vector lanes, no system calls but exit);
+  the tools that decompile it, and those built on the x86 machine
+  (`oracle`, `solve`, `unpack`, `devirt`, `hidden`), refuse it. Other
+  machines are not decoded.
 - Decompiler output is structured but rough, as the example above shows.
   Shapes it can't prove come out as labels and gotos rather than a guess.
 - Relocations are read for analysis, not applied. Mach-O chained fixups

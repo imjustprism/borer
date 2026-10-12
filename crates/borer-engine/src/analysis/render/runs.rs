@@ -5,6 +5,8 @@ use super::*;
 use crate::analysis::decompile::interp::{End, Script, TextRun};
 use crate::analysis::decompile::signature::{Kind, Passing, Signature, passing, printed};
 use crate::analysis::decompile::{decompile_named, traces, verify};
+use crate::emulate::a64::Machine as A64Machine;
+use crate::isa::Isa;
 use crate::text::one_line;
 
 /// Most input sets one request runs.
@@ -448,12 +450,13 @@ fn returned_value(emu: &Emulator<'_>, bits: u8, word: u32) -> u64 {
 ///
 /// # Arguments
 ///
-/// * `emu` - The machine.
+/// * `byte_at` - Reads a byte as the machine's loads do, `None` where one
+///   faults.
 /// * `at` - The buffer's address.
 /// * `len` - Its length.
-fn read_back(emu: &Emulator<'_>, at: u64, len: usize) -> Vec<u8> {
+fn read_back(byte_at: impl Fn(u64) -> Option<u8>, at: u64, len: usize) -> Vec<u8> {
     (0..from_usize(len))
-        .map(|k| emu.byte_at(at.wrapping_add(k)).unwrap_or(0xff))
+        .map(|k| byte_at(at.wrapping_add(k)).unwrap_or(0xff))
         .collect()
 }
 
@@ -463,7 +466,8 @@ fn read_back(emu: &Emulator<'_>, at: u64, len: usize) -> Vec<u8> {
 ///
 /// * `p` - The loaded image.
 /// * `entry` - The function.
-/// * `pass` - How it takes its arguments.
+/// * `pass` - How it takes its arguments on x86; `None` on arm64, whose
+///   machine places them by the procedure call standard ([`run_a64`]).
 /// * `ret_bits` - The declared return width, `None` to report `rax`.
 /// * `input` - The arguments.
 /// * `layout` - The values, buffer addresses and setup of the input.
@@ -471,12 +475,15 @@ fn read_back(emu: &Emulator<'_>, at: u64, len: usize) -> Vec<u8> {
 fn run_machine(
     p: &Program,
     entry: u64,
-    pass: &Passing,
+    pass: Option<&Passing>,
     ret_bits: Option<u8>,
     input: &[Arg],
     layout: &Layout,
     budget: usize,
 ) -> Option<Machine> {
+    let Some(pass) = pass else {
+        return run_a64(p, entry, ret_bits, input, layout, budget);
+    };
     let Layout { values, at, pokes } = layout;
     let mut emu = Emulator::new(p, budget)?;
     emu.install_imports();
@@ -492,7 +499,9 @@ fn run_machine(
     let buffers = input
         .iter()
         .zip(at)
-        .map(|(arg, addr)| addr.map(|a| read_back(&emu, a, arg.initial().len() + GUARD)))
+        .map(|(arg, addr)| {
+            addr.map(|a| read_back(|b| emu.byte_at(b), a, arg.initial().len() + GUARD))
+        })
         .collect();
     Some(Machine {
         stop: run.stop,
@@ -500,6 +509,63 @@ fn run_machine(
         value,
         buffers,
         calls: emu.api_calls().to_vec(),
+    })
+}
+
+/// Runs an arm64 function on one input, its arguments in `x0`..`x7` and
+/// then on the stack, and its value read from `x0`.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `entry` - The function.
+/// * `ret_bits` - The declared return width, `None` for all of `x0`.
+/// * `input` - The arguments.
+/// * `layout` - The values, buffer addresses and setup of the input.
+/// * `budget` - Steps.
+///
+/// # Returns
+///
+/// The run, which calls no imports; `None` when the image is not arm64.
+fn run_a64(
+    p: &Program,
+    entry: u64,
+    ret_bits: Option<u8>,
+    input: &[Arg],
+    layout: &Layout,
+    budget: usize,
+) -> Option<Machine> {
+    let Layout { values, at, pokes } = layout;
+    let mut emu = A64Machine::new(p, budget)?;
+    for (addr, bytes) in pokes {
+        for (k, b) in (0u64..).zip(bytes) {
+            emu.poke(addr.wrapping_add(k), *b);
+        }
+    }
+    for (k, v) in values.iter().enumerate() {
+        emu.set_arg(k, *v);
+    }
+    let run = emu.run(entry);
+    let value = matches!(run.stop, Stop::Returned).then(|| {
+        let x0 = emu.register("x0").unwrap_or(0);
+        match ret_bits {
+            Some(bits) if bits < 64 => x0 & ((1u64 << bits) - 1),
+            Some(_) | None => x0,
+        }
+    });
+    let buffers = input
+        .iter()
+        .zip(at)
+        .map(|(arg, addr)| {
+            addr.map(|a| read_back(|b| emu.byte_at(b), a, arg.initial().len() + GUARD))
+        })
+        .collect();
+    Some(Machine {
+        stop: run.stop,
+        steps: run.steps,
+        value,
+        buffers,
+        calls: Vec::new(),
     })
 }
 
@@ -655,7 +721,7 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
         let (Some(addr), Some(Some(after))) = (addr, m.buffers.get(k)) else {
             continue;
         };
-        let text = read_back(&t.emu, *addr, after.len());
+        let text = read_back(|b| t.emu.byte_at(b), *addr, after.len());
         if let Some(i) = text.iter().zip(after).position(|(x, y)| x != y) {
             let place = from_usize(i);
             let writer = t.writers.get(&addr.wrapping_add(place)).copied();
@@ -739,8 +805,9 @@ struct Shared<'p> {
     sig: Result<Signature, String>,
     /// The function's text, read, or why it could not be.
     script: Result<Script<'p>, String>,
-    /// How the function takes its arguments.
-    pass: Passing,
+    /// How the function takes its arguments on x86; `None` on arm64,
+    /// whose machine places them itself.
+    pass: Option<Passing>,
 }
 
 /// Runs one input: the binary, then the text, and the verdict.
@@ -759,7 +826,7 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
     let Some(m) = run_machine(
         p,
         entry,
-        &shared.pass,
+        shared.pass.as_ref(),
         ret.map(|(_, bits)| bits),
         input,
         &layout,
@@ -824,6 +891,10 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
 /// `unchecked` with why. Each input's result is memoized through
 /// [`Analysis::derived`] under the names in force.
 ///
+/// An arm64 function runs in its own machine ([`A64Machine`]), its
+/// arguments in `x0`..`x7` and then on the stack; it has no text yet, so
+/// every row is `unchecked` and no signature types the inputs.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
@@ -843,18 +914,29 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
 pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     let req = parse_run(a, o, spec)?;
     let entry = req.entry;
-    let text = decompile_named(p, a, o, entry);
+    let a64 = matches!(p.arch.isa(), Some(Isa::A64));
+    let (text, why) = if a64 {
+        (
+            None,
+            "arm64 code does not decompile yet, so there is no text to check",
+        )
+    } else {
+        (
+            decompile_named(p, a, o, entry),
+            "the function does not decompile",
+        )
+    };
     let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
     let shared = Shared {
         sig: text
             .as_deref()
-            .ok_or_else(|| "the function does not decompile".to_owned())
+            .ok_or_else(|| why.to_owned())
             .and_then(|t| printed(t, word)),
         script: text
             .as_deref()
-            .ok_or_else(|| "the function does not decompile".to_owned())
+            .ok_or_else(|| why.to_owned())
             .and_then(|t| Script::read(p, a, o, entry, t)),
-        pass: passing(p, a, o, entry),
+        pass: (!a64).then(|| passing(p, a, o, entry)),
     };
     let mut notes: Vec<String> = Vec::new();
     if let Ok(sig) = &shared.sig {
@@ -1238,7 +1320,7 @@ pub fn check_generated(
     let shared = Shared {
         script: Script::read(p, a, o, entry, &text),
         sig: Ok(sig),
-        pass: passing(p, a, o, entry),
+        pass: Some(passing(p, a, o, entry)),
     };
     Ok(inputs
         .iter()

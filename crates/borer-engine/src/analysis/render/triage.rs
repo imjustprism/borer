@@ -4,6 +4,9 @@
 use super::calls::{Reach, gather};
 use super::iocs::iocs_line;
 use super::*;
+use crate::emulate::Run;
+use crate::emulate::a64::Machine as A64Machine;
+use crate::isa::Isa;
 
 /// A capability and the API-name fragments that give it away.
 ///
@@ -328,6 +331,9 @@ pub(super) const EMULATE_STRING_LEN: usize = 5;
 /// there. A routine that needs state nothing set stops and says so rather
 /// than inventing an answer.
 ///
+/// An arm64 program runs in its own machine ([`A64Machine`]), which takes
+/// the same directives but `profile` and `origin`, and reports alike.
+///
 /// A register name that sets nothing stops the run instead of being echoed
 /// in the header as a setting that was applied, since the run would answer
 /// a different question than the one asked. A start that neither the image
@@ -355,6 +361,9 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
     /// API calls named in the header before the rest are counted.
     const CALLS_MAX: usize = 24;
     let spec = ExperimentSpec::parse(a, o, target)?;
+    if matches!(p.arch.isa(), Some(Isa::A64)) {
+        return emulate_a64(p, a, o, &spec);
+    }
     let mut emu =
         Emulator::new(p, spec.budget).ok_or_else(|| String::from("unknown architecture"))?;
     emu.install_imports();
@@ -376,40 +385,10 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
         poke_all(&mut emu, addr, bytes);
     }
     if emu.code_at(spec.entry, 1).is_empty() {
-        return Err(format!(
-            "nothing is mapped at {:#x}; start in the image, or write code there first with w<addr>=<hex>",
-            spec.entry
-        ));
+        return Err(nothing_mapped(spec.entry));
     }
     let run = emu.run(spec.entry);
-    let ran = match a.function_at(spec.entry) {
-        Some(f) if f.entry != spec.entry => {
-            format!("{}+{:#x}", name_of(a, o, f.entry), spec.entry - f.entry)
-        }
-        _ => name_of(a, o, spec.entry),
-    };
-    let mut out = format!(
-        "# ran {} from {:#x}{}: {} after {} steps, {} bytes written\n",
-        ran,
-        spec.entry,
-        spec.setup_note(),
-        run.stop,
-        run.steps,
-        run.written
-    );
-    out.push_str("# registers: ");
-    out.push_str(
-        &emu.registers()
-            .iter()
-            .map(|(n, v)| format!("{n}={v:#x}"))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    out.push('\n');
-    if matches!(run.stop, Stop::Budget) {
-        let at = emu.last_ip();
-        let _ = writeln!(out, "# at: {at:#x}{}", where_in(a, o, at));
-    }
+    let mut out = run_head(a, o, &spec, &run, &emu.registers(), emu.last_ip());
     if spec.profile > 0 {
         let (hot, pages) = emu.profile(spec.profile);
         out.push_str("# hot: where control landed, times\n");
@@ -463,7 +442,146 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
             neutralized.join(", ")
         );
     }
-    let traced = emu.trace();
+    run_tail(&mut out, &spec, &run, &emu.trace(), |at| emu.byte_at(at));
+    Ok(out)
+}
+
+/// Runs an arm64 experiment for [`emulate_tsv`] in [`A64Machine`].
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, to name the start.
+/// * `o` - User names.
+/// * `spec` - The parsed experiment.
+///
+/// # Returns
+///
+/// The report [`emulate_tsv`] gives an x86 run, without the profile, the
+/// origin watch and the API calls, which the arm64 machine does not keep.
+///
+/// # Errors
+///
+/// When the spec asks for a profile or an origin watch, a register cannot
+/// be set, or the start is unmapped.
+fn emulate_a64(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    spec: &ExperimentSpec,
+) -> Result<String, String> {
+    if spec.profile > 0 || spec.origin.is_some() {
+        return Err(String::from(
+            "profile= and origin= watch an x86 run only for now; an arm64 run takes xN=, aN=, w<addr>=, stop=, steps=, trace= and dump=",
+        ));
+    }
+    let mut emu =
+        A64Machine::new(p, spec.budget).ok_or_else(|| String::from("unknown architecture"))?;
+    emu.stop_at(spec.stop);
+    emu.set_trace(spec.trace);
+    for &(ref reg, v) in &spec.regs {
+        if !emu.set_register(reg, v) {
+            return Err(format!(
+                "{} is not a register this can set; use x0..x30, sp, fp, lr, nzcv, tpidr_el0, or aN for the argument the decompiler names aN (a1 is the first)",
+                crate::text::one_line(reg)
+            ));
+        }
+    }
+    for &(i, v) in &spec.args {
+        emu.set_arg(i, v);
+    }
+    for &(addr, ref bytes) in &spec.writes {
+        for (k, b) in (0u64..).zip(bytes) {
+            emu.poke(addr.wrapping_add(k), *b);
+        }
+    }
+    if emu.code_at(spec.entry, 1).is_empty() {
+        return Err(nothing_mapped(spec.entry));
+    }
+    let run = emu.run(spec.entry);
+    let mut out = run_head(a, o, spec, &run, &emu.registers(), emu.last_ip());
+    run_tail(&mut out, spec, &run, &emu.trace(), |at| emu.byte_at(at));
+    Ok(out)
+}
+
+/// The refusal of an experiment whose start nothing maps.
+///
+/// # Arguments
+///
+/// * `entry` - The start.
+fn nothing_mapped(entry: u64) -> String {
+    format!(
+        "nothing is mapped at {entry:#x}; start in the image, or write code there first with w<addr>=<hex>"
+    )
+}
+
+/// The head of an experiment's report: what ran and how it ended, the
+/// registers after, and where a run that ran out of steps was.
+///
+/// # Arguments
+///
+/// * `a` - The analysis, to name the start.
+/// * `o` - User names.
+/// * `spec` - The experiment.
+/// * `run` - The run.
+/// * `registers` - The general registers after it, in the machine's order.
+/// * `last_ip` - The last instruction it decoded.
+fn run_head(
+    a: &Analysis,
+    o: &Overlay,
+    spec: &ExperimentSpec,
+    run: &Run,
+    registers: &[(&str, u64)],
+    last_ip: u64,
+) -> String {
+    let ran = match a.function_at(spec.entry) {
+        Some(f) if f.entry != spec.entry => {
+            format!("{}+{:#x}", name_of(a, o, f.entry), spec.entry - f.entry)
+        }
+        _ => name_of(a, o, spec.entry),
+    };
+    let mut out = format!(
+        "# ran {} from {:#x}{}: {} after {} steps, {} bytes written\n",
+        ran,
+        spec.entry,
+        spec.setup_note(),
+        run.stop,
+        run.steps,
+        run.written
+    );
+    out.push_str("# registers: ");
+    out.push_str(
+        &registers
+            .iter()
+            .map(|(n, v)| format!("{n}={v:#x}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    out.push('\n');
+    if matches!(run.stop, Stop::Budget) {
+        let _ = writeln!(out, "# at: {last_ip:#x}{}", where_in(a, o, last_ip));
+    }
+    out
+}
+
+/// The tail of an experiment's report: the trace, the text the run wrote,
+/// and the asked dumps.
+///
+/// # Arguments
+///
+/// * `out` - The report so far.
+/// * `spec` - The experiment.
+/// * `run` - The run.
+/// * `traced` - The machine's trace lines.
+/// * `byte_at` - Reads a byte as a load does after the run, `None` where
+///   it faults.
+fn run_tail(
+    out: &mut String,
+    spec: &ExperimentSpec,
+    run: &Run,
+    traced: &[String],
+    byte_at: impl Fn(u64) -> Option<u8>,
+) {
     if !traced.is_empty() {
         out.push_str("# trace: address, instruction, registers it changed\n");
         for line in traced {
@@ -479,7 +597,7 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
     }
     for &(addr, len, asked) in &spec.dumps {
         let bytes: Vec<Option<u8>> = (0..len)
-            .map(|k| emu.byte_at(addr.wrapping_add(from_usize(k))))
+            .map(|k| byte_at(addr.wrapping_add(from_usize(k))))
             .collect();
         let _ = write!(
             out,
@@ -498,7 +616,6 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
         out.push('\n');
         out.push_str(&crate::hexdump::hexdump_sparse(&bytes, addr));
     }
-    Ok(out)
 }
 
 /// Names the function an address falls in, as `  (name+0xoff)`, or nothing

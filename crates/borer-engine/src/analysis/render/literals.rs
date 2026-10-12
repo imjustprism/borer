@@ -520,6 +520,9 @@ pub fn hidden_strings(
 pub fn hidden_strings_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> String {
     /// Rows reported.
     const ROWS_MAX: usize = 300;
+    if let Err(why) = x86_only(p, "hidden") {
+        return format!("# {why}\n");
+    }
     let Recovery {
         found,
         stops,

@@ -73,6 +73,7 @@ pub fn devirtualize_tsv(
     o: &Overlay,
     target: &str,
 ) -> Result<String, String> {
+    x86_only(p, "devirt")?;
     let (addr, parts) = spec_head(target);
     let entry = resolve(a, o, addr).ok_or_else(|| {
         if addr.is_empty() {
@@ -405,6 +406,7 @@ fn budget_token<'s>(mut directives: impl Iterator<Item = &'s str>) -> Option<&'s
 /// When the spec is refused, as [`UnpackSpec::parse`] says why, a preset
 /// sets nothing, or the architecture is not emulated.
 pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<String, String> {
+    x86_only(p, "unpack")?;
     let spec = UnpackSpec::parse(p, a, o, target)?;
     let mut emu =
         Emulator::new(p, spec.budget).ok_or_else(|| String::from("unknown architecture"))?;
@@ -638,6 +640,7 @@ pub fn unpack_start(
     o: &Overlay,
     spec: &str,
 ) -> Result<(u64, usize), String> {
+    x86_only(p, "unpack")?;
     let spec = UnpackSpec::parse(p, a, o, spec)?;
     if spec.strict || !spec.presets.is_empty() {
         return Err(String::from(
