@@ -155,7 +155,8 @@ fn capped(items: &[String], sep: &str) -> String {
 /// tables), what it writes, what it
 /// asserts about its inputs, the source file it came from, the constants
 /// its callers pass it, the wire format when it serializes, callers and
-/// callees by name, and the strings and data the function touches. A
+/// callees by name, the Objective-C messages it sends as `[recv sel]`, and
+/// the strings and data the function touches. A
 /// function with Itanium throw sites says what their landing pads catch. A
 /// function whose code is scattered across a span far larger than the code
 /// itself is reported as control-flow obfuscated (a VM, a flattened
@@ -282,6 +283,12 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
     } else {
         format!("virtual:  {} [{}]\n", virtuals.len(), names(&virtuals))
     };
+    let sent = crate::analysis::objc::sent_by(a, f);
+    let msgs = if sent.is_empty() {
+        String::new()
+    } else {
+        format!("messages: {} [{}]\n", sent.len(), capped(&sent, ", "))
+    };
     let declared = f.signature.as_ref().map_or(String::new(), |s| {
         format!(
             "declared: {} {}({}){}\n",
@@ -395,7 +402,7 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
         .map(|step| format!("# next: {step}\n"))
         .collect();
     Some(format!(
-        "name:     {}\nentry:    {:#x}\nrange:    {:#x}..{:#x} ({} bytes)\n{comment}{declared}{hints}{class}{source}{returns}{throws}{scattered}{clones}{effects}{asserts}{passed}{wire}shape:    {} blocks, {} instrs{}{}\ncallers:  {} [{}]\ncallees:  {} [{}]\n{virt}strings:  {}\ndata:     {}\n{next}",
+        "name:     {}\nentry:    {:#x}\nrange:    {:#x}..{:#x} ({} bytes)\n{comment}{declared}{hints}{class}{source}{returns}{throws}{scattered}{clones}{effects}{asserts}{passed}{wire}shape:    {} blocks, {} instrs{}{}\ncallers:  {} [{}]\ncallees:  {} [{}]\n{virt}{msgs}strings:  {}\ndata:     {}\n{next}",
         name_of(a, o, f.entry),
         f.entry,
         f.start,

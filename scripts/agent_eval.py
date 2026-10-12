@@ -356,40 +356,98 @@ def _macho(cpu: int, segs: list[tuple], extra: list[bytes]) -> bytes:
     return bytes(out)
 
 
+def _chained_pie(text: bytes, code: tuple, data: bytes, sections: list[tuple], name: str) -> bytes:
+    """An x86-64 Mach-O PIE at 0x100000000: __TEXT is `text`, its code in
+    __text at `code` (offset past the base, size), entered at its start;
+    __DATA_CONST at 0x100001000 is `data`, which holds one
+    DYLD_CHAINED_PTR_64_OFFSET chain starting at its first word; `sections`
+    (name, address, size, flags) lie in either; the one import, `name`,
+    comes from libSystem."""
+    entry, size = code
+    base = 0x100000000
+    starts = _le((24, 4), (0x1000, 2), (6, 2), (0x1000, 8), (0, 4), (1, 2), (0, 2))
+    image = _le((3, 4), (0, 4), (16, 4), (0, 4)) + starts
+    names = b"\0" + name.encode() + b"\0"
+    fixups = _le((0, 4), (32, 4), (72, 4), (76, 4), (1, 4), (1, 4), (0, 4), (0, 4))
+    fixups += image + _le((1 | 1 << 9, 4)) + names
+    lib = b"/usr/lib/libSystem.B.dylib".ljust(32, b"\0")
+    dylib = _le((0xC, 4), (56, 4), (24, 4), (0, 12)) + lib
+    at = 0x1000 + len(data)
+    text_sections = [("__text", base + entry, size, 0x80000400)]
+    text_sections += [s for s in sections if s[1] < base + 0x1000]
+    return _macho(
+        0x01000007,
+        [
+            ("__TEXT", base, 0, text, 5, text_sections),
+            (
+                "__DATA_CONST",
+                base + 0x1000,
+                0x1000,
+                data,
+                3,
+                [s for s in sections if s[1] >= base + 0x1000],
+            ),
+            ("__LINKEDIT", base + 0x10000, at, fixups, 1, []),
+        ],
+        [
+            _le((0x80000028, 4), (24, 4), (entry, 8), (0, 8)),
+            _le((0x80000034, 4), (16, 4), (at, 4), (len(fixups), 4)),
+            dylib,
+        ],
+    )
+
+
 def _macho_blob() -> bytes:
     """An x86-64 Mach-O PIE with chained fixups as ld64 writes them for
     macOS 12: the function at 0x100000410 (`mov eax,42; ret`) is reached
     only through the __DATA_CONST slot at 0x100001000, which on disk holds
     its DYLD_CHAINED_PTR_64_OFFSET rebase (offset 0x410, next 2 strides),
     and the slot after it binds _malloc."""
-    base = 0x100000000
     text = bytearray(0x1000)
     text[0x400:0x403] = bytes.fromhex("31c0c3")  # xor eax, eax; ret
     text[0x410:0x416] = bytes.fromhex("b82a000000c3")  # mov eax, 42; ret
     data = _le((0x410 | 2 << 51, 8), (1 << 63, 8))
-    starts = _le((24, 4), (0x1000, 2), (6, 2), (0x1000, 8), (0, 4), (1, 2), (0, 2))
-    image = _le((3, 4), (0, 4), (16, 4), (0, 4)) + starts
-    names = b"\0_malloc\0"
-    fixups = _le((0, 4), (32, 4), (72, 4), (76, 4), (1, 4), (1, 4), (0, 4), (0, 4))
-    fixups += image + _le((1 | 1 << 9, 4)) + names
-    lib = b"/usr/lib/libSystem.B.dylib".ljust(32, b"\0")
-    dylib = _le((0xC, 4), (56, 4), (24, 4), (0, 12)) + lib
-    return _macho(
-        0x01000007,
-        [
-            ("__TEXT", base, 0, bytes(text), 5, [("__text", base + 0x400, 0x20, 0x80000400)]),
-            ("__DATA_CONST", base + 0x1000, 0x1000, data, 3, [("__const", base + 0x1000, 16, 0)]),
-            ("__LINKEDIT", base + 0x10000, 0x1010, fixups, 1, []),
-        ],
-        [
-            _le((0x80000028, 4), (24, 4), (0x400, 8), (0, 8)),
-            _le((0x80000034, 4), (16, 4), (0x1010, 4), (len(fixups), 4)),
-            dylib,
-        ],
-    )
+    const = [("__const", 0x100001000, 16, 0)]
+    return _chained_pie(bytes(text), (0x400, 0x20), data, const, "_malloc")
+
+
+def _objc_blob() -> bytes:
+    """An x86-64 Mach-O PIE sending Objective-C messages: main (0x100000800)
+    loads the class reference to Foo into rdi and the selector reference to
+    `shared` into rsi and calls objc_msgSend through its slot, then sends
+    `bar` to the result. The references, Foo's class_t and its class_ro_t
+    are pointers only the chained fixups make."""
+    text = bytearray(0x1000)
+    main = bytes.fromhex("488b3d31080000")  # mov rdi, [rip+0x831] -> classref
+    main += bytes.fromhex("488b351a080000")  # mov rsi, [rip+0x81a] -> selref shared
+    main += bytes.fromhex("ff15ec070000")  # call [rip+0x7ec] -> objc_msgSend
+    main += bytes.fromhex("4889c7")  # mov rdi, rax
+    main += bytes.fromhex("488b3502080000")  # mov rsi, [rip+0x802] -> selref bar
+    main += bytes.fromhex("ff15dc070000")  # call [rip+0x7dc] -> objc_msgSend
+    main += b"\xc3"  # ret
+    text[0x800 : 0x800 + len(main)] = main
+    text[0xC00:0xC0B] = b"bar\0shared\0"
+    text[0xC40:0xC44] = b"Foo\0"
+    data = bytearray(0xC0)
+    chain = [(0x00, 1 << 63), (0x20, 0xC00), (0x28, 0xC04), (0x38, 0x1040)]
+    chain += [(0x60, 0x1070), (0x88, 0xC40)]
+    for k, (at, word) in enumerate(chain):
+        nxt = (chain[k + 1][0] - at) // 4 if k + 1 < len(chain) else 0
+        data[at : at + 8] = (word | nxt << 51).to_bytes(8, "little")
+    sections = [
+        ("__objc_methname", 0x100000C00, 0x10, 2),
+        ("__objc_classname", 0x100000C40, 0x10, 2),
+        ("__got", 0x100001000, 8, 6),
+        ("__objc_selrefs", 0x100001020, 0x10, 5),
+        ("__objc_classrefs", 0x100001038, 8, 0),
+        ("__objc_data", 0x100001040, 0x28, 0),
+        ("__objc_const", 0x100001070, 0x48, 0),
+    ]
+    return _chained_pie(bytes(text), (0x800, 0x30), bytes(data), sections, "_objc_msgSend")
 
 
 MACHO_CODE = _macho_blob()
+OBJC_CODE = _objc_blob()
 
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
@@ -403,6 +461,7 @@ BLOBS = {
     "children": (CHILDREN_BLOB, "<children>"),
     "static": (STATIC_CODE, "<static>"),
     "macho": (MACHO_CODE, "<macho>"),
+    "objc": (OBJC_CODE, "<objc>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -585,6 +644,15 @@ TASKS = [
             ("xrefs", {"address": "0x100000410"}),
         ],
         "-: 0x100001000 table",
+    ),
+    (
+        "objc_messages",
+        "which Objective-C messages a stripped Mach-O's entry sends, read from its selector and class references",
+        [
+            ("load_binary", {"path": "{objc}"}),
+            ("function_summary", {"address": "0x100000800"}),
+        ],
+        "messages: 2 [[Foo shared], [[Foo shared] bar]]",
     ),
 ]
 

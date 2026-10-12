@@ -26,5 +26,5 @@ mod stubs;
 mod switch;
 
 pub(crate) use discover::discover;
-pub(crate) use refs::constant_in;
+pub(crate) use refs::{calls, constant_in};
 pub(crate) use returns::infer as infer_returns;

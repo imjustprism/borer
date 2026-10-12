@@ -96,7 +96,7 @@ impl<'a> Text<'a> {
     /// # Arguments
     ///
     /// * `program` - The loaded image.
-    fn new(program: &'a Program) -> Self {
+    pub(super) fn new(program: &'a Program) -> Self {
         let mut sections: Vec<(u64, &'a [u8])> = program
             .sections
             .iter()

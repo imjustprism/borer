@@ -243,6 +243,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "sources",
             "enums",
             "qt",
+            "objc",
         ],
     ),
     (

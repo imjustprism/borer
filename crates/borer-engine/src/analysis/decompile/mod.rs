@@ -1817,6 +1817,19 @@ fn decompile_in<L: Lifter>(
     if let Some(effects) = effects_line(&body) {
         let _ = writeln!(out, "// effects: {effects}");
     }
+    let sent = crate::analysis::objc::sent_by(analysis, f);
+    if !sent.is_empty() {
+        /// Most messages written into the header line.
+        const SENT_SHOWN: usize = 8;
+        let more = sent.len().saturating_sub(SENT_SHOWN);
+        let tail = if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        };
+        let shown: Vec<&str> = sent.iter().take(SENT_SHOWN).map(String::as_str).collect();
+        let _ = writeln!(out, "// messages: {}{tail}", shown.join(", "));
+    }
     if f.hands_back_rdx {
         let _ = writeln!(
             out,

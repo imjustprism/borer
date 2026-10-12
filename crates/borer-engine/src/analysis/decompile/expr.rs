@@ -2637,6 +2637,21 @@ impl Names<'_> {
         })
     }
 
+    /// Names an Objective-C reference ([`crate::analysis::objc`]):
+    /// `@selector(sel)` for a selector reference, the class's name for a
+    /// class reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - A candidate reference's address.
+    fn objc_ref(&self, addr: u64) -> Option<String> {
+        let objc = &self.analysis.objc;
+        objc.selrefs
+            .get(&addr)
+            .map(|sel| format!("@selector({sel})"))
+            .or_else(|| objc.classrefs.get(&addr).cloned())
+    }
+
     /// Renders the text name of a variable.
     ///
     /// # Arguments
@@ -2646,7 +2661,8 @@ impl Names<'_> {
     /// # Returns
     ///
     /// The lowercase register name, `local_N`/`arg_N`, the overlay, import or
-    /// data-symbol name of a global, `Class::Id` for the id a registered
+    /// data-symbol name of a global, `@selector(sel)` or the class for an
+    /// Objective-C reference, `Class::Id` for the id a registered
     /// message class hands out, `Class::RTTI` for a class's type descriptor
     /// (else `g{bits}_{addr}`), `tmp_N`, or `aN` for an incoming argument.
     pub(super) fn key(&self, k: Key) -> String {
@@ -2662,6 +2678,9 @@ impl Names<'_> {
                 }
                 if let Some(n) = self.overlay.names.get(&addr) {
                     return n.clone();
+                }
+                if let Some(n) = self.objc_ref(addr) {
+                    return n;
                 }
                 if let Some(n) = self.import_at(addr) {
                     return n;

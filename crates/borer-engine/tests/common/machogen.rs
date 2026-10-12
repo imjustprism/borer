@@ -150,6 +150,37 @@ pub(crate) fn dyld_info(rebase: (u64, usize), bind: (u64, usize), lazy: (u64, us
     out
 }
 
+/// One fixup of a `DYLD_CHAINED_PTR_64_OFFSET` chain.
+#[derive(Clone, Copy)]
+pub(crate) enum Fix {
+    /// A pointer to this offset from the image base.
+    Rebase(u64),
+    /// A slot bound to the import at this index.
+    Bind(u64),
+}
+
+/// Encodes one page's `DYLD_CHAINED_PTR_64_OFFSET` chain into its
+/// segment's bytes, each word's next field pointing at the following
+/// fixup.
+///
+/// # Arguments
+///
+/// * `bytes` - The segment's bytes.
+/// * `fixups` - `(offset in the segment, fixup)` in address order, each
+///   8-byte aligned and within 16 KiB of the next.
+pub(crate) fn chain(bytes: &mut [u8], fixups: &[(usize, Fix)]) {
+    for (k, (at, fix)) in fixups.iter().enumerate() {
+        let next = fixups
+            .get(k + 1)
+            .map_or(0, |(n, _)| u64::try_from((n - at) / 4).expect("fits"));
+        let word = match fix {
+            Fix::Rebase(target) => *target,
+            Fix::Bind(ordinal) => ordinal | (1 << 63),
+        } | (next << 51);
+        bytes[*at..at + 8].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
 /// One segment's chain starts in a chained fixups payload.
 pub(crate) struct Starts {
     /// The segment's index in load-command order.
@@ -281,6 +312,20 @@ pub(crate) fn build(cpu: u32, flags: u32, segs: &[Seg], extra: &[Vec<u8>]) -> Ve
     for c in extra {
         cmds.extend_from_slice(c);
     }
+    let first = segs
+        .iter()
+        .flat_map(|s| {
+            s.sections
+                .iter()
+                .map(|sect| s.fileoff + (sect.addr - s.vmaddr))
+        })
+        .min()
+        .unwrap_or(u64::MAX);
+    assert!(
+        u64::try_from(32 + cmds.len()).expect("fits") <= first,
+        "the load commands run to {:#x}, over the first section at {first:#x}",
+        32 + cmds.len()
+    );
     let ncmds = segs.len() + extra.len();
     put(&mut out, 0, 0xfeed_facf, 4);
     put(&mut out, 4, u64::from(cpu), 4);

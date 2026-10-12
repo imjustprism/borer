@@ -411,6 +411,7 @@ assert uris == [
     "borer://iocs",
     "borer://map",
     "borer://messages",
+    "borer://objc",
     "borer://packs",
     "borer://ports",
     "borer://protection",

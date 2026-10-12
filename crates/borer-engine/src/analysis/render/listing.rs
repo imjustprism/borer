@@ -826,7 +826,8 @@ pub fn disasm_function(
 /// `; name` suffix: an x86 near call or jmp, whose target is read from its
 /// text, and any direct arm64 branch, whose decoder states it. A Linux
 /// syscall site is tagged with its call the same way, `; syscall socket`
-/// ([`crate::analysis::syscalls`]).
+/// ([`crate::analysis::syscalls`]), and a call that sends an Objective-C
+/// message gets the message, `; [recv sel]`, instead of its target.
 ///
 /// # Arguments
 ///
@@ -883,7 +884,9 @@ pub fn disasm_function_with(
                     None
                 }
             });
-            if let Some(target) = target
+            if let Some(message) = a.objc.messages.get(&l.va) {
+                let _ = write!(text, "  ; {}", message.text());
+            } else if let Some(target) = target
                 && (a.function(target).is_some() || o.names.contains_key(&target))
             {
                 let _ = write!(text, "  ; {}", short_name(a, o, target));

@@ -1,5 +1,5 @@
 # task	calls	bytes	found
-front_door	3	31976	1
+front_door	3	31988	1
 orient	2	3918	1
 serial_constant	2	4043	1
 marker_user	2	1959	1
@@ -11,7 +11,7 @@ name_typo	2	1851	1
 playbook	2	3041	1
 call_args	2	1926	1
 next_hint	2	2649	1
-resume	3	3801	1
+resume	3	3795	1
 raw_code	2	593	1
 emulate_syscall	2	719	1
 emulate_elf_args	2	660	1
@@ -23,3 +23,4 @@ test_vectors	2	4574	1
 tlsh_digest	2	2217	1
 child_program	3	1270	1
 macho_chained_xref	2	778	1
+objc_messages	2	1528	1

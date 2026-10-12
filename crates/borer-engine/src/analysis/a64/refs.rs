@@ -18,12 +18,14 @@
 //! base names a table ([`RefKind::Index`]), a literal load names its
 //! literal, and `blr` or `br` through a register loaded from a known slot
 //! calls or jumps through that slot ([`RefKind::Call`], [`RefKind::Jmp`]),
-//! which is how code calls an import without a stub.
+//! which is how code calls an import without a stub. [`calls`] reads, at
+//! each call, where its first argument registers got their values.
 
 use std::collections::BTreeMap;
 
 use super::discover::Text;
 use crate::analysis::functions::push_site;
+use crate::analysis::objc::{Arg, Call, Callee, falls_through};
 use crate::analysis::{BasicBlock, Function, RefKind, RefSite, striped};
 use crate::isa::a64::{self, Insn, Mem, Mnemonic, Mode, Op, Opnd, Reg, Shift, Width};
 use crate::program::Program;
@@ -740,6 +742,79 @@ pub(super) fn decode_function(text: &Text<'_>, f: &Function) -> Vec<Insn> {
     }
     out.sort_unstable_by_key(|i| i.va);
     out.dedup_by_key(|i| i.va);
+    out
+}
+
+/// Reads where the first argument registers of each call a function makes
+/// got their values.
+///
+/// A register loaded from a constant address on every path into the call
+/// ([`Tracker`]) names that slot; otherwise one last written by an earlier
+/// call holds that call's result (`x0`), and one not written since the
+/// function's entry holds what the caller passed, each read within the
+/// call's block and the blocks it is entered from only by falling through
+/// ([`falls_through`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// The calls (`bl`, and `blr` through a slot) in block then address
+/// order, with `x0`, `x1` and `x2`.
+pub(crate) fn calls(program: &Program, f: &Function) -> Vec<Call> {
+    let text = Text::new(program);
+    let insns = decode_function(&text, f);
+    let tracker = Tracker::new(&insns, &f.blocks);
+    let mut out = Vec::new();
+    let carried = falls_through(&f.blocks);
+    let mut last = [Arg::Unknown; 3];
+    for ((b, start), carry) in f.blocks.iter().zip(&tracker.entry).zip(carried) {
+        let mut regs = *start;
+        if !carry {
+            last = [if b.start == f.entry {
+                Arg::Entry
+            } else {
+                Arg::Unknown
+            }; 3];
+        }
+        for i in block_insns(&insns, b) {
+            let call = matches!(i.op, Op::Bl | Op::Blr);
+            let callee = if i.op == Op::Bl {
+                i.target().map(Callee::Direct)
+            } else if let (true, Some(Val::Loaded(slot))) =
+                (call, value(&regs, any_reg(&i.operands[0])))
+            {
+                Some(Callee::Slot(slot))
+            } else {
+                None
+            };
+            if let Some(callee) = callee {
+                let args = std::array::from_fn(|n| match value(&regs, Some(n)) {
+                    Some(Val::Loaded(slot)) => Arg::Slot(slot),
+                    Some(Val::Addr(_)) | None => last.get(n).copied().unwrap_or(Arg::Unknown),
+                });
+                out.push(Call {
+                    site: i.va,
+                    callee,
+                    args,
+                });
+            }
+            let mask = writes(i);
+            for (n, a) in last.iter_mut().enumerate() {
+                if mask & (1u32 << n) != 0 {
+                    *a = if call && n == 0 {
+                        Arg::Result(i.va)
+                    } else {
+                        Arg::Unknown
+                    };
+                }
+            }
+            step(&mut regs, i, &mut |_, _| {});
+        }
+    }
     out
 }
 

@@ -202,6 +202,20 @@ impl Relocs {
         }
     }
 
+    /// Finds the import a Mach-O bind names at a slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - The slot's address.
+    ///
+    /// # Returns
+    ///
+    /// The import, or `None` when no bind names the slot.
+    pub(crate) fn bound_at(&self, slot: u64) -> Option<&Import> {
+        let k = self.binds.binary_search_by_key(&slot, |b| b.slot).ok()?;
+        self.imports.get(self.binds.get(k)?.import)
+    }
+
     /// Renders what was applied as a summary line, empty when the image has
     /// no dynamic relocations or fixups this applies.
     pub(crate) fn render(&self) -> String {

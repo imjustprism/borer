@@ -4667,6 +4667,8 @@ impl BorerServer {
             ("children", None) => self.children_text()?,
             ("capabilities", None) => self.capabilities_text()?,
             ("qt", None) => self.qt_text()?,
+            ("objc", None) => return self.objc_text("", asked),
+            ("objc", Some(filter)) => return self.objc_text(&filter, asked),
             ("stackstrings", None) => self.stack_strings_text("")?,
             ("stackstrings", Some(filter)) => self.stack_strings_text(&filter)?,
             ("emulate", Some(address)) => self.emulate_text(&address)?,
@@ -4846,6 +4848,10 @@ const RESOURCES: &[(&str, &str)] = &[
     (
         "borer://qt",
         "Qt classes from moc metadata: signals, slots, methods and properties, each mapped to its function",
+    ),
+    (
+        "borer://objc",
+        "Objective-C classes and categories from a Mach-O's runtime metadata, a row per method with its implementation (named -[Class sel]), 200 a page; borer://objc/<filter> narrows by class or selector",
     ),
     (
         "borer://capabilities",

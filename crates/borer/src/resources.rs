@@ -346,6 +346,31 @@ impl BorerServer {
         Ok(render::qt_tsv(&a))
     }
 
+    /// Lists the Objective-C classes and categories a Mach-O's metadata
+    /// describes, a row per method with its implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Case-insensitive substring of the class or selector;
+    ///   empty for all.
+    /// * `asked` - The read, for its page.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded or its functions are not discovered.
+    pub(crate) fn objc_text(&self, filter: &str, asked: &Asked) -> Result<String, ErrorData> {
+        /// Most rows one read returns, where the renderer pages too.
+        const PAGE: usize = 200;
+        let again = asked.again();
+        self.with_analysis(Feature::Discover, |_, a, _| {
+            Ok(borer_engine::analysis::objc::objc_tsv(
+                a,
+                filter.trim(),
+                asked.window(PAGE, &again),
+            ))
+        })
+    }
+
     /// Recovers the strings functions build on their stacks.
     ///
     /// # Arguments

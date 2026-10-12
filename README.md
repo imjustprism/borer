@@ -303,6 +303,13 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
   (`syscall`, `int 0x80`, arm64 `svc #0`), named only where the number is
   set in the same block as the call; one set elsewhere is counted as
   unresolved.
+- A 64-bit Mach-O's Objective-C metadata names its methods `-[Class sel]`
+  and `+[Class sel]` (categories and `__objc_stubs` entries too), and a
+  call to `objc_msgSend` whose selector was loaded from a selector
+  reference reads as `[recv sel]` in summaries, listings and a
+  decompile's `// messages:` line (`borer://objc` lists the classes); the
+  decompiled call names the selector and class references but stays a
+  call. Swift metadata is not read.
 - DWARF support covers function names, parameters, frame locals and types,
   not line tables or inlined frames.
 - Live process access is Windows only.

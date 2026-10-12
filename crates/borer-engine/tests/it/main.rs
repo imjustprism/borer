@@ -42,6 +42,7 @@ mod libsig;
 mod lsda;
 mod macho;
 mod next;
+mod objc;
 mod protection;
 mod protos;
 mod regression;

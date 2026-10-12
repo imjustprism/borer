@@ -22,6 +22,7 @@ pub mod libnames;
 pub mod map;
 pub mod messages;
 mod naming;
+pub mod objc;
 pub mod ports;
 pub mod protocol;
 pub mod protos;
@@ -133,11 +134,14 @@ pub enum NameSource {
     /// A library signature (a pack's `lib` line): the function's bytes as
     /// the library's object has them, and what they reference.
     Library,
+    /// Objective-C runtime metadata naming a method's implementation or a
+    /// message-send stub ([`objc`]).
+    ObjC,
 }
 
 impl NameSource {
     /// The short tag listings print: `-`, `sym`, `hlp`, `sig`, `hnd`,
-    /// `slot`, `qt`, `fnl`, `pack`, `lib`.
+    /// `slot`, `qt`, `fnl`, `pack`, `lib`, `objc`.
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
@@ -151,6 +155,7 @@ impl NameSource {
             NameSource::Funclet => "fnl",
             NameSource::Pack => "pack",
             NameSource::Library => "lib",
+            NameSource::ObjC => "objc",
         }
     }
 
@@ -170,6 +175,7 @@ impl NameSource {
             NameSource::Library => {
                 "a library signature: the function's bytes and what they reference, as the library's object has them"
             }
+            NameSource::ObjC => "Objective-C runtime metadata",
         }
     }
 }
@@ -1046,6 +1052,9 @@ pub struct Analysis {
     /// The `QObject` subclasses `moc` described, with their signals, slots
     /// and properties and the functions its dispatchers map them to.
     pub qt: Vec<qt::QtClass>,
+    /// What a Mach-O image's Objective-C metadata says: its classes,
+    /// categories and protocols, and the messages its code sends.
+    pub objc: objc::ObjcFacts,
     /// The constant tables and magic numbers of known algorithms found in
     /// the image ([`crate::crypto::find_crypto_constants`]), by address,
     /// each with the algorithm's name, so a read through one renders by
@@ -1215,6 +1224,8 @@ impl Analysis {
         phases.mark("analysis messages");
         qt::infer(program, &mut analysis);
         phases.mark("analysis qt");
+        objc::infer(program, &mut analysis);
+        phases.mark("analysis objc");
         eh::infer(program, &mut analysis);
         phases.mark("analysis eh");
         analysis.crypto = crate::crypto::find_crypto_constants(program)
