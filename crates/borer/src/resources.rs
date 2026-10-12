@@ -1586,25 +1586,35 @@ fn example(shown: &str, program: Option<&Program>) -> String {
     shown.replace("{entry}", &entry).replace("{path}", &path)
 }
 
-/// Lists every resource with what it answers, one line each.
+/// Lists every resource with what it answers, one line each, a template's
+/// with an example URI built from the loaded binary ([`example`]).
 ///
 /// This is the `borer://help` answer, the whole list for an agent whose
-/// host lists no resources. Each description is cut to its first sentence and [`SUMMARY_MAX`]
+/// host lists no resources, and what a script's `help("query")` returns.
+/// Each description is cut to its first sentence and [`SUMMARY_MAX`]
 /// characters; `borer://help/<name>` gives the whole of one.
-pub(crate) fn help_index() -> String {
-    let rows: Vec<(&str, &str)> = RESOURCES
-        .iter()
-        .copied()
-        .chain(RESOURCE_TEMPLATES.iter().map(|&(uri, what, _)| (uri, what)))
-        .collect();
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary, for the examples; `None` leaves their
+///   `<entry>` and `<path>` for the reader.
+pub(crate) fn help_index(program: Option<&Program>) -> String {
     let mut out = format!(
         "# {} resources ({} fixed, {} templates); a template read without its argument, or borer://help/<name>, gives its grammar and an example\n",
-        rows.len(),
+        RESOURCES.len() + RESOURCE_TEMPLATES.len(),
         RESOURCES.len(),
         RESOURCE_TEMPLATES.len()
     );
-    for (uri, what) in rows {
+    for &(uri, what) in RESOURCES {
         let _ = writeln!(out, "{uri}\t{}", summary(what));
+    }
+    for &(uri, what, shown) in RESOURCE_TEMPLATES {
+        let _ = writeln!(
+            out,
+            "{uri}\t{}\te.g. {}",
+            summary(what),
+            example(shown, program)
+        );
     }
     out
 }

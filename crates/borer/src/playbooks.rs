@@ -144,7 +144,8 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 PE/ELF/Mach
      (one opening with ? is an open question) and {set_type} (user structs whose \
      fields decompile then names) annotate, dry-run by default; {save_project} \
      persists them. For anything no single tool answers, {script} runs a sandboxed \
-     Rhai script over the program in one call; its query(uri) reads any resource. \
+     Rhai script over the program in one call; its query(uri) reads any resource, \
+     rows(uri) its table as maps, and help(\"query\") lists every resource. \
      Outputs are capped and paged; count_only and filter keep them small. An answer of \
      512 bytes or more ends with `# since=<tag>` (a mermaid graph: `%% since=<tag>`); \
      the same request with \"since\": \"<tag>\" added (on a URI: !since=<tag>) answers \

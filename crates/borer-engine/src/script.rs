@@ -30,16 +30,26 @@
 //! * `imports()`, `exports()` (`name`, `at`), `sections()` (`name`, `at`,
 //!   `size`, `r`, `w`, `x`).
 //! * `hex(n)`, `args()` (the words after the script on the command line),
-//!   `help()` (this list, short, for an agent).
+//!   `help()` (this list, short, for an agent), `help("query")` (every
+//!   resource with an example URI, from the front end) and `help(name)`
+//!   (one call's line).
 //! * `query(uri)`: the text of any `borer://` resource (`borer://taint/...`,
 //!   `borer://grep/...`, `borer://classes`), where the front end running
 //!   the script answers resources ([`Query`]); elsewhere it throws.
+//!   `rows(uri)` reads the same text as a table ([`crate::table::records`]):
+//!   a map per row, keyed by the column header, a cell that reads as a
+//!   number an integer.
+//! * `layout(e)`, `layout(e, reg)`: the fields a function accesses or
+//!   passes on through a pointer ([`render::layout_fields`]), maps of
+//!   `offset`, `size` (the widest access, 0 for a field only passed on)
+//!   and `addressed`.
 //! * `rename(entry, name)`, `comment(addr, text)`: proposals.
 //!
 //! Native calls do not count against the operation budget, so the costly
 //! ones have budgets of their own: [`DECOMPILES_MAX`] `decompile` and
-//! `scenario` calls and [`QUERIES_MAX`] `query` calls per run. A call past
-//! its budget throws, naming the budget.
+//! `scenario` calls and [`QUERIES_MAX`] `query`, `rows`, `layout` and
+//! `help("query")` calls per run. A call past its budget throws, naming
+//! the budget.
 //!
 //! A pack's `[scripts] run <file>` lines run at the end of every analysis
 //! the pack takes part in ([`run_pack_scripts`]): the names a script
@@ -54,7 +64,9 @@ use std::sync::Arc;
 
 use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, INT, Map, Scope};
 
-use crate::analysis::{Analysis, Function, NameSource, Overlay, decompile, name_of, resolve};
+use crate::analysis::{
+    Analysis, Function, NameSource, Overlay, decompile, name_of, render, resolve,
+};
 use crate::isa::Isa;
 use crate::program::{Feature, Program, SymbolKind};
 
@@ -76,7 +88,8 @@ const STRING_MIN: usize = 4;
 const STRING_CAP: usize = 512;
 /// Most `decompile` and `scenario` calls one run may make.
 pub const DECOMPILES_MAX: u32 = 2_000;
-/// Most `query` calls one run may make.
+/// Most `query`, `rows`, `layout` and `help("query")` calls one run may
+/// make.
 pub const QUERIES_MAX: u32 = 200;
 /// Most printed lines a run keeps, and so [`run_tsv`] shows; the rest are
 /// counted ([`ScriptRun::printed`]).
@@ -107,8 +120,11 @@ decompile(e), scenario(e, \"a2=5\"): pseudo-C text; 2000 calls per run
 disasm(addr, n): maps of at, bytes, text
 imports(), exports(): maps of name, at; sections(): name, at, size, r, w, x
 program(): path, format, arch, bits, base, entry
-query(uri): text of any borer:// resource, e.g. query(\"borer://grep/CreateFileA\"); 200 calls per run
-hex(n), args(), print(x)
+query(uri): text of any borer:// resource, e.g. query(\"borer://grep/CreateFileA\"); !offset=N!limit=N page a listing
+rows(uri): the resource's table, a map per row keyed by its column header (else one key, text), numbers as integers
+layout(e), layout(e, reg): fields through a pointer (reg, else the first argument), maps of offset, size, addressed
+query, rows, layout and help(\"query\"): 200 calls per run together
+hex(n), args(), print(x), help(\"query\"): every resource with an example URI, help(\"name\"): one call's line
 rename(e, name), comment(addr, text): proposals, applied only with dry_run=false
 example: for f in functions(\"crypt\") { if callers(f.entry).len > 3 { print(`${hex(f.entry)} ${f.name}`); } }";
 
@@ -119,8 +135,9 @@ pub type Query = Rc<dyn Fn(&str) -> Result<String, String>>;
 /// What a script printed and proposed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptRun {
-    /// The first [`PRINTED_SHOWN`] lines it printed, a line per `print`,
-    /// each cut at [`LINE_KEPT_MAX`] characters.
+    /// The first [`PRINTED_SHOWN`] lines it printed, a `print` of several
+    /// lines counted as that many, each cut at [`LINE_KEPT_MAX`]
+    /// characters.
     pub output: Vec<String>,
     /// Every line it printed, kept or not.
     pub printed: usize,
@@ -230,6 +247,29 @@ fn addrs(list: impl IntoIterator<Item = u64>) -> Array {
         .collect()
 }
 
+/// A table cell as a script's value: an integer when it reads as one
+/// (decimal, or hex after `0x`, either with a leading `-`), else its text.
+///
+/// # Arguments
+///
+/// * `text` - The cell.
+fn cell(text: &str) -> Dynamic {
+    let (negative, digits) = text
+        .strip_prefix('-')
+        .map_or((false, text), |rest| (true, rest));
+    let value = if let Some(hex) = digits.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).ok().map(int)
+    } else if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        digits.parse::<INT>().ok()
+    } else {
+        None
+    };
+    value.map_or_else(
+        || text.into(),
+        |v| Dynamic::from_int(if negative { v.wrapping_neg() } else { v }),
+    )
+}
+
 /// Whether a function's map carries its call edges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Edges {
@@ -283,23 +323,28 @@ impl Host {
         resolve(&self.program, &self.analysis, &self.overlay, &text).ok()
     }
 
-    /// Records a printed line: kept, cut to [`LINE_KEPT_MAX`] characters,
-    /// while fewer than [`PRINTED_SHOWN`] are kept, and counted always.
+    /// Records what one `print` printed, a line at a time: each kept, cut
+    /// to [`LINE_KEPT_MAX`] characters, while fewer than [`PRINTED_SHOWN`]
+    /// are kept, and counted always. A print of several lines (a table a
+    /// `query` returned, `help("query")`) counts as that many, where it
+    /// was one line cut short at the cap.
     ///
     /// # Arguments
     ///
-    /// * `line` - What the script printed.
-    fn printed(&self, line: &str) {
+    /// * `text` - What the script printed, a final newline dropped.
+    fn printed(&self, text: &str) {
         let mut run = self.run.borrow_mut();
-        run.printed += 1;
-        if run.output.len() < PRINTED_SHOWN {
-            let kept = match line.char_indices().nth(LINE_KEPT_MAX) {
-                Some((cut, _)) => {
-                    format!("{} ... (cut at {LINE_KEPT_MAX} characters)", &line[..cut])
-                }
-                None => line.to_owned(),
-            };
-            run.output.push(kept);
+        for line in text.strip_suffix('\n').unwrap_or(text).split('\n') {
+            run.printed += 1;
+            if run.output.len() < PRINTED_SHOWN {
+                let kept = match line.char_indices().nth(LINE_KEPT_MAX) {
+                    Some((cut, _)) => {
+                        format!("{} ... (cut at {LINE_KEPT_MAX} characters)", &line[..cut])
+                    }
+                    None => line.to_owned(),
+                };
+                run.output.push(kept);
+            }
         }
     }
 
@@ -343,6 +388,66 @@ impl Host {
         }
         used.set(used.get() + 1);
         Ok(())
+    }
+
+    /// Asks the front end for a resource's text, against the query budget.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The resource.
+    ///
+    /// # Errors
+    ///
+    /// When no front end answers resources, the budget is spent, or the
+    /// front end refuses the URI.
+    fn ask(&self, uri: &str) -> Result<String, Box<EvalAltResult>> {
+        let Some(answer) = &self.query else {
+            return Err("query is not available here: no front end answers resources".into());
+        };
+        Host::spend(&self.queries, QUERIES_MAX, "query")?;
+        answer(uri).map_err(Into::into)
+    }
+
+    /// The fields a function accesses or passes on through a pointer, as a
+    /// script's maps by offset, against the query budget.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The function: an entry or a name.
+    /// * `register` - The register holding the pointer; `None` for the
+    ///   first argument's.
+    ///
+    /// # Errors
+    ///
+    /// When the budget is spent, the target names no function, or the
+    /// layout is refused ([`render::layout_fields`]).
+    fn layout(
+        &self,
+        target: &Dynamic,
+        register: Option<&str>,
+    ) -> Result<Array, Box<EvalAltResult>> {
+        Host::spend(&self.queries, QUERIES_MAX, "query")?;
+        let entry = self
+            .entry_of(target)
+            .ok_or_else(|| format!("layout: {target} names no function"))?;
+        let spec = match register {
+            Some(r) => format!("{entry:#x},{r}"),
+            None => format!("{entry:#x}"),
+        };
+        let found = render::layout_fields(&self.program, &self.analysis, &self.overlay, &spec)?;
+        let mut fields: Vec<(i64, u32)> = found.widths.into_iter().collect();
+        fields.extend(found.addressed.into_iter().map(|at| (at, 0)));
+        fields.sort_unstable();
+        Ok(fields
+            .into_iter()
+            .map(|(offset, size)| {
+                map(vec![
+                    ("offset", Dynamic::from_int(offset)),
+                    ("size", Dynamic::from_int(INT::from(size))),
+                    ("addressed", (size == 0).into()),
+                ])
+            })
+            .collect())
     }
 
     /// Reads `N` bytes at an address as a little-endian integer.
@@ -634,12 +739,34 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
     let h = Rc::clone(host);
     engine.register_fn(
         "query",
-        move |uri: &str| -> Result<String, Box<EvalAltResult>> {
-            let Some(answer) = &h.query else {
-                return Err("query is not available here: no front end answers resources".into());
-            };
-            Host::spend(&h.queries, QUERIES_MAX, "query")?;
-            answer(uri).map_err(Into::into)
+        move |uri: &str| -> Result<String, Box<EvalAltResult>> { h.ask(uri) },
+    );
+    let h = Rc::clone(host);
+    engine.register_fn(
+        "rows",
+        move |uri: &str| -> Result<Array, Box<EvalAltResult>> {
+            Ok(crate::table::records(&h.ask(uri)?)
+                .into_iter()
+                .map(|record| {
+                    let m: Map = record
+                        .into_iter()
+                        .map(|(column, text)| (column.into(), cell(&text)))
+                        .collect();
+                    Dynamic::from_map(m)
+                })
+                .collect())
+        },
+    );
+    let h = Rc::clone(host);
+    engine.register_fn(
+        "layout",
+        move |target: Dynamic| -> Result<Array, Box<EvalAltResult>> { h.layout(&target, None) },
+    );
+    let h = Rc::clone(host);
+    engine.register_fn(
+        "layout",
+        move |target: Dynamic, register: &str| -> Result<Array, Box<EvalAltResult>> {
+            h.layout(&target, Some(register))
         },
     );
     let h = Rc::clone(host);
@@ -700,6 +827,22 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
     });
     engine.register_fn("hex", |v: INT| format!("{:#x}", addr(v)));
     engine.register_fn("help", || -> String { HELP.to_owned() });
+    let h = Rc::clone(host);
+    engine.register_fn(
+        "help",
+        move |topic: &str| -> Result<String, Box<EvalAltResult>> {
+            if topic == "query" {
+                return h.ask("borer://help");
+            }
+            let call = format!("{topic}(");
+            let lines: Vec<&str> = HELP.lines().filter(|l| l.contains(&call)).collect();
+            Ok(if lines.is_empty() {
+                format!("no call {topic}; help() lists the calls, help(\"query\") every resource")
+            } else {
+                lines.join("\n")
+            })
+        },
+    );
     let h = Rc::clone(host);
     engine.register_fn("args", move || -> Array {
         h.args.iter().map(|a| a.clone().into()).collect()
@@ -1083,6 +1226,11 @@ mod tests {
     fn go_with_query(code: &str) -> ScriptRun {
         let (p, a) = fixture();
         let query: Query = Rc::new(|uri: &str| {
+            if uri == "borer://help" {
+                return Ok(
+                    "# 1 resources\nborer://echo/{text}\tEchoes\te.g. borer://echo/hi\n".to_owned(),
+                );
+            }
             uri.strip_prefix("borer://echo/")
                 .map(str::to_owned)
                 .ok_or_else(|| format!("unknown resource {uri}"))
@@ -1132,6 +1280,79 @@ mod tests {
         ))
         .expect_err("the decompile budget stops it");
         assert!(err.contains("decompile budget spent"), "{err}");
+    }
+
+    /// `rows` reads a resource's table as maps, and `help` names what to
+    /// read.
+    ///
+    /// A row is keyed by the column header, a number is an integer, and a
+    /// text with no header is one `text` key; `help("query")` is the front
+    /// end's resource list and `help(name)` one call's line.
+    ///
+    /// # Panics
+    ///
+    /// When a row, a cell or a help line differs.
+    #[test]
+    fn rows_read_a_table_and_help_names_the_resources() {
+        let run = go_with_query(
+            r#"
+            let t = rows("borer://echo/# 2 rows\nva\tname\n0x10\tmain\n-8\tf\n");
+            print(`${t.len} ${hex(t[0].va)} ${t[0].name} ${t[1].va} ${t[1].name}`);
+            print(rows("borer://echo/just text")[0].text);
+            print(help("query"));
+            print(help("rows"));
+            print(help("nope"));
+        "#,
+        );
+        assert_eq!(run.error, None);
+        assert_eq!(run.output[0], "2 0x10 main -8 f");
+        assert_eq!(run.output[1], "just text");
+        assert_eq!(
+            run.output[2..4],
+            [
+                "# 1 resources",
+                "borer://echo/{text}\tEchoes\te.g. borer://echo/hi"
+            ]
+        );
+        assert!(run.output[4].starts_with("rows(uri): "), "{:?}", run.output);
+        assert!(
+            run.output[5].starts_with("no call nope; "),
+            "{:?}",
+            run.output
+        );
+        assert_eq!(run.printed, 6);
+        let err = go(r#"rows("borer://echo/x");"#).expect_err("no front end");
+        assert!(err.contains("query is not available here"), "{err}");
+    }
+
+    /// `layout` lists the fields a function touches through a pointer as
+    /// maps, and spends the query budget.
+    ///
+    /// # Panics
+    ///
+    /// When a field differs or the budget does not stop the run.
+    #[test]
+    fn layout_lists_fields_as_maps() {
+        let mut code = vec![0x8b, 0x41, 0x08]; // ASM: mov eax, [rcx+8]
+        code.extend([0x03, 0x41, 0x10]); // ASM: add eax, [rcx+0x10]
+        code.extend([0x89, 0x41, 0x18]); // ASM: mov [rcx+0x18], eax
+        code.push(0xc3); // ASM: ret
+        let p = Arc::new(Program::raw_x64(&code));
+        let a = Arc::new(Analysis::compute(&p));
+        let script = r#"
+            for f in layout(0x1000) { print(`${hex(f.offset)} ${f.size} ${f.addressed}`); }
+            print(`${layout(0x1000, "rdx").len}`);
+        "#;
+        let run = run(Arc::clone(&p), Arc::clone(&a), Arc::default(), script, &[]).expect("runs");
+        assert_eq!(
+            run.output,
+            ["0x8 4 false", "0x10 4 false", "0x18 4 false", "0"]
+        );
+        let spent = format!("for i in 0..{} {{ layout(0x1000); }}", QUERIES_MAX + 1);
+        let err = run_with(p, a, Arc::default(), &spent, &[], None)
+            .error
+            .expect("the budget stops it");
+        assert!(err.contains("query budget spent"), "{err}");
     }
 
     /// The text of a run shows its error and caps what it printed and

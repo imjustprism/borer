@@ -244,8 +244,11 @@ and xrefs, decompile, and propose names and comments.
 
 An agent sends one through the `script` tool when no single tool answers
 its question; `print(help())` lists everything a script can call. Inside a
-script, `query(uri)` returns the text of any `borer://` resource, so a few
-lines can combine taint, layout, grep and the rest:
+script, `query(uri)` returns the text of any `borer://` resource, `rows(uri)`
+the same as a list of maps keyed by its columns, `help("query")` every
+resource with an example URI, and `layout(e)` the fields a function reads
+through a pointer, so a few lines can combine taint, layout, grep and the
+rest:
 
 ```rhai
 for f in functions("crypt") {

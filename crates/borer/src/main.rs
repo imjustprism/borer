@@ -3782,7 +3782,7 @@ impl BorerServer {
     /// When no binary is loaded or borer does not disassemble its
     /// architecture; a failing script is an answer, not an error.
     #[tool(
-        description = "Run a sandboxed Rhai script over the loaded program, for what no single tool answers: what it printed, then the names and comments it proposed (dry-run unless dry_run=false). print(help()) lists every call; query(uri) reads any borer:// resource.",
+        description = "Run a sandboxed Rhai script over the loaded program, for what no single tool answers: what it printed, then the names and comments it proposed (dry-run unless dry_run=false). print(help()) lists every call; query(uri) reads any borer:// resource, rows(uri) its table.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -4742,7 +4742,7 @@ impl BorerServer {
                 }))?
             }
             ("playbook", Some(spec)) => resources::playbook_text(&spec)?,
-            ("help", None) => resources::help_index(),
+            ("help", None) => resources::help_index(self.loaded().as_deref()),
             ("session", None) => self.session_text(),
             ("help", Some(name)) => self.help_text(&name)?,
             (name, None)
@@ -7626,6 +7626,37 @@ mod tests {
             overlay.comments.get(&0x1001).map(String::as_str),
             Some("here")
         );
+    }
+
+    /// A script's `help("query")` lists every template with an example
+    /// built from the loaded binary, and `rows` reads a page of a listing
+    /// as maps.
+    ///
+    /// # Panics
+    ///
+    /// When a template is missing, its example is not filled in, or the
+    /// rows differ.
+    #[test]
+    fn a_script_reads_every_resource_by_help_and_tables_by_rows() {
+        use super::{Parameters, ScriptParams};
+        let server = raw_server();
+        let out = server
+            .script(Parameters(ScriptParams {
+                code: r#"print(help("query"));
+                         let r = rows("borer://help!offset=1!limit=2");
+                         print(`${r.len} ${r[0].text}`);"#
+                    .to_owned(),
+                dry_run: None,
+            }))
+            .expect("a script answers");
+        for &(uri, _, _) in super::RESOURCE_TEMPLATES {
+            assert!(out.contains(&format!("\n{uri}\t")), "{uri}: {out}");
+        }
+        assert!(
+            out.contains("\te.g. borer://emulate/0x1000,a1=5,steps=10000\n"),
+            "{out}"
+        );
+        assert!(out.contains("\n2 borer://info\t"), "{out}");
     }
 
     /// `query` answers a URI exactly as `resources/read` does.
