@@ -264,7 +264,8 @@ pub struct Program {
     pub entry: Option<u64>,
     /// Preferred load base (PE); `0` for formats whose addresses are absolute (ELF).
     pub image_base: u64,
-    /// Mapped sections in file order.
+    /// Mapped sections in file order; a stated layout's in the order it
+    /// names them ([`crate::layout::Layout::program`]).
     pub sections: Vec<Section>,
     /// Imports, exports, local and data symbols in file order.
     pub symbols: Vec<Symbol>,
@@ -317,7 +318,7 @@ pub struct Program {
 ///
 /// `a PE`, `an ELF image`, `a Mach-O image`, `a fat Mach-O (or a Java
 /// class file)` or `an archive`, or `None` when the magic is none of them.
-fn magic_name(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn magic_name(bytes: &[u8]) -> Option<&'static str> {
     // SPEC: the Mach-O magics in either byte order, the fat magic (which a
     // Java class file shares), and the `ar` signature.
     let word = bytes.first_chunk::<4>().map(|b| u32::from_be_bytes(*b));
@@ -1169,6 +1170,48 @@ pub fn unusable_path(path: &Path) -> Option<String> {
     named.then(|| format!("{stem} is a device, not a file"))
 }
 
+/// Reads a program file whole, refusing what is not a regular file.
+///
+/// # Arguments
+///
+/// * `path` - The file to read.
+///
+/// # Returns
+///
+/// The file's bytes.
+///
+/// # Errors
+///
+/// Returns the I/O error of reading the file, or the refusal of a name
+/// that is a device, a directory or anything else that is not a regular
+/// file.
+fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    if let Some(why) = unusable_path(path) {
+        return Err(anyhow!("{why}; give a path to a program to analyze"));
+    }
+    let shown = crate::text::short_path(&path.display().to_string());
+    if path.is_dir() {
+        return Err(anyhow!(
+            "{shown} is a directory; give the path of a program file inside it"
+        ));
+    }
+    let mut file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
+    // INVARIANT: only a regular file is read: a handle that reaches a
+    // device or a pipe under another spelling reads forever or blocks.
+    let meta = file
+        .metadata()
+        .with_context(|| format!("reading {shown}"))?;
+    if !meta.is_file() {
+        return Err(anyhow!(
+            "{shown} is not a regular file (a device or a pipe); give a path to a program to analyze"
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)
+        .with_context(|| format!("reading {shown}"))?;
+    Ok(bytes)
+}
+
 impl Program {
     /// A program built from bytes in memory, with no symbols, ranges,
     /// headers or debug information: a fixture, or a dump that has no file.
@@ -1269,30 +1312,29 @@ impl Program {
         apply_pdb: bool,
         symsrv: Option<&Path>,
     ) -> anyhow::Result<Program> {
-        if let Some(why) = unusable_path(path) {
-            return Err(anyhow!("{why}; give a path to a program to analyze"));
-        }
-        let shown = crate::text::short_path(&path.display().to_string());
-        if path.is_dir() {
-            return Err(anyhow!(
-                "{shown} is a directory; give the path of a program file inside it"
-            ));
-        }
-        let mut file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
-        // INVARIANT: only a regular file is read: a handle that reaches a
-        // device or a pipe under another spelling reads forever or blocks.
-        let meta = file
-            .metadata()
-            .with_context(|| format!("reading {shown}"))?;
-        if !meta.is_file() {
-            return Err(anyhow!(
-                "{shown} is not a regular file (a device or a pipe); give a path to a program to analyze"
-            ));
-        }
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut bytes)
-            .with_context(|| format!("reading {shown}"))?;
+        let bytes = read_program_file(path)?;
         Self::from_bytes_with(path.to_path_buf(), bytes, apply_pdb, symsrv)
+    }
+
+    /// Loads the file at `path` as raw bytes mapped where a caller-stated
+    /// layout says, its headers unread.
+    ///
+    /// The same file checks as [`Program::load`], then
+    /// [`crate::layout::Layout::program`].
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The file to read.
+    /// * `layout` - Where its bytes go.
+    ///
+    /// # Errors
+    ///
+    /// As [`Program::load`] for the file, and as
+    /// [`crate::layout::Layout::program`] for a layout the file cannot
+    /// hold.
+    pub fn load_layout(path: &Path, layout: &crate::layout::Layout) -> anyhow::Result<Program> {
+        let bytes = read_program_file(path)?;
+        layout.program(path.to_path_buf(), bytes)
     }
 
     /// Parses an in-memory file image.

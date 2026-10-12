@@ -146,7 +146,8 @@ pub struct Headers {
     pub delay_imports: Vec<u64>,
     /// What the loader read past to load the file at all: a header the
     /// strict parse refused, a field the operating system's loader ignores,
-    /// each said in a line the summary shows as a warning.
+    /// a container's headers a stated layout left unread, each said in a
+    /// line the summary shows as a warning.
     pub lenient: Vec<String>,
 }
 
