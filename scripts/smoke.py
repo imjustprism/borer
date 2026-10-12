@@ -315,12 +315,15 @@ assert "error" in bad_name or bad_name.get("isError"), (
 
 import tempfile
 
-proj = os.path.join(tempfile.gettempdir(), "borer_smoke_project.json")
+# One project file per run: every agent runs smoke, and a shared name let a
+# concurrent run's save land between this run's save and its load.
+proj = os.path.join(tempfile.gettempdir(), f"borer_smoke_project_{os.getpid()}.json")
 sv = call_tool("save_project", {"path": proj})
 assert "saved" in sv, sv
 call_tool("set_name", {"address": m.group(1), "name": "clobbered", "dry_run": False})
 ld = call_tool("load_project", {"path": proj})
 assert "loaded" in ld, ld
+os.remove(proj)
 fn2 = call_tool("functions", {"filter": "entry_thunk"})
 assert "entry_thunk" in fn2, "project load did not restore names"
 cm = call_tool("set_comment", {"address": m.group(1), "comment": "entry point", "dry_run": False})

@@ -1700,6 +1700,55 @@ fn the_unpacker_maps_the_header_page() {
     );
 }
 
+/// A run that writes only data is not analyzed again; one that writes into
+/// an executable section is.
+///
+/// The second analysis of the rebuilt image cost as much as the first, a
+/// plain program's startup writes only its globals, and the code it would
+/// analyze is byte for byte the original's; on borer's own build under load
+/// the unpack request spent minutes there. The same store into a section
+/// that is executable may be code, so that image is analyzed again.
+#[test]
+fn an_unpack_that_writes_only_data_is_not_analyzed_again() {
+    let code: [u8; 17] = [
+        0x0f, 0xb6, 0x05, 0x35, 0xf0, 0xff, 0xff, 0x48, 0x8d, 0x3d, 0xf2, 0x1f, 0x00, 0x00, 0x88,
+        0x07, 0xc3,
+    ];
+    let mut bytes = vec![0u8; 0x4000];
+    bytes[0x3c] = 0x40;
+    bytes[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    for (executable, again) in [(false, false), (true, true)] {
+        let p = packed_pe(
+            bytes.clone(),
+            code.len(),
+            vec![Section::mapped(
+                ".data",
+                0x1_4000_3000,
+                0x3000,
+                0x1000,
+                true,
+                executable,
+            )],
+        );
+        let a = Analysis::compute(&p);
+        let text = borer_engine::analysis::render::unpack_tsv(&p, &a, &Overlay::default(), "")
+            .expect("the stub runs");
+        assert!(text.contains("1 region"), "{text}");
+        assert_eq!(
+            text.contains("re-analyzed the materialized image"),
+            again,
+            "{text}"
+        );
+        assert_eq!(
+            text.contains(
+                "# not re-analyzed: every byte the run wrote is data, outside the image's executable sections, and none of it ran"
+            ),
+            !again,
+            "{text}"
+        );
+    }
+}
+
 /// The emulator services an imported call the OS loader would have resolved.
 ///
 /// The stub calls `GetModuleHandleA` through its import-address-table slot. On

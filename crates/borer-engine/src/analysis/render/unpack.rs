@@ -387,7 +387,13 @@ fn budget_token<'s>(mut directives: impl Iterator<Item = &'s str>) -> Option<&'s
 /// decrypts later. Analyzing the image the run built is the point: a packed
 /// program's own sections hold a decryptor and a blob, so discovery over
 /// them finds a handful of functions, and discovery over what the decryptor
-/// produced finds the program.
+/// produced finds the program. The image is analyzed again only when the
+/// run may have written code there: a byte landed in an executable section,
+/// or written bytes ran ([`writes_code`]). A run that wrote only data, such
+/// as a plain program's startup setting its globals, leaves the code byte
+/// for byte the original's, and analyzing it again was a second whole
+/// analysis of the program, minutes on a large one under load, that never
+/// found a function the first did not.
 ///
 /// # Arguments
 ///
@@ -539,7 +545,11 @@ pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resul
             "# no written code was executed: the writes were data, or the run ended before reaching them\n",
         );
     }
-    if let Some(rebuilt) = rebuild(p, &emu, &regions) {
+    if !writes_code(p, &regions, oep) {
+        out.push_str(
+            "# not re-analyzed: every byte the run wrote is data, outside the image's executable sections, and none of it ran\n",
+        );
+    } else if let Some(rebuilt) = rebuild(p, &emu, &regions) {
         let after = Analysis::compute(&rebuilt);
         let _ = writeln!(
             out,
@@ -569,6 +579,24 @@ pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resul
         }
     }
     Ok(out)
+}
+
+/// Whether a run may have written code into the image: a written byte in an
+/// executable section, or written bytes it executed.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `regions` - The materialized regions, as `(start, length)`.
+/// * `oep` - The first written address the run executed, if any.
+fn writes_code(p: &Program, regions: &[(u64, u64)], oep: Option<u64>) -> bool {
+    oep.is_some()
+        || regions.iter().any(|&(start, len)| {
+            let end = start.saturating_add(len);
+            p.sections.iter().any(|s| {
+                s.executable && s.va < end && start < s.va.saturating_add(s.vsize.max(s.file_size))
+            })
+        })
 }
 
 /// Runs a program's unpacking and returns the image it materialized.
