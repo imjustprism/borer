@@ -182,11 +182,18 @@ impl Lift<'_, '_> {
     pub(super) fn store_pair(&mut self, i: &Insn) -> Option<()> {
         let (first, bits) = register(i, 0)?;
         let (second, _) = register(i, 1)?;
-        let (addr, back) = self.address(i.operands[2])?;
         let (ty, _) = access(Width::Reg, bits);
         let step = Expr::Const(from_usize(usize::from(bits / 8)));
-        let (a, b) = (stored(self.read(first), ty), stored(self.read(second), ty));
-        self.ex.store_at(addr.clone(), ty, a);
+        let (addr, _) = self.address(i.operands[2])?;
+        let a = stored(self.read(first), ty);
+        self.ex.store_at(addr, ty, a);
+        // INVARIANT: the first store may write a register out under its
+        // own name (one whose value reads the memory stored to), which
+        // leaves an expression read before it naming the register's new
+        // value; the second half's address and value are read again after
+        // it, so they name what the registers hold now.
+        let (addr, back) = self.address(i.operands[2])?;
+        let b = stored(self.read(second), ty);
         self.ex.store_at(fold(Op::Add, addr, step, 64), ty, b);
         if let Some((r, a)) = back {
             self.write(r, 64, a);
