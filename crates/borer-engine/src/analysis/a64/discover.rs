@@ -16,10 +16,13 @@
 //! round. Phase 2 guesses: every gap no block covers is swept a word at a
 //! time, and where it opens (its first word, or the word after padding or
 //! after an instruction control does not fall through) on a word a
-//! function opens with ([`prologue::opens`]), the word is walked as a
-//! guess, kept only when the walk decodes nothing that is not code, finds
-//! a way out and does not run into another function. Each accepted guess
-//! shrinks its gap, so rounds go on until one adds nothing.
+//! function opens with ([`prologue::opens`]), or on any word outside the
+//! extents of a file that declares them, the word is walked as a guess
+//! ([`Discovery::gap_seeds`]), kept only when the walk decodes nothing that
+//! is not code, finds a way out, does not run into another function or
+//! into code one covers, and does not lie inside a guess kept before it.
+//! Each accepted guess shrinks its gap, so rounds go on until one adds
+//! nothing.
 //!
 //! Every walk of a wave reads the starts and the functions known never to
 //! return as they stood when the wave began, so the walks of a wave run
@@ -193,6 +196,41 @@ impl Known<'_> {
         };
         Some((start..end).contains(&t) || in_fragment)
     }
+
+    /// Tells whether the file declares a function starting between `entry`
+    /// and `t`: past `entry` up to `t` for a forward branch, from `t` up to
+    /// `entry` for a backward one. A function's code does not straddle
+    /// another's start, so a branch across one leaves the function.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The walked function's entry.
+    /// * `t` - A branch target.
+    fn declared_between(&self, entry: u64, t: u64) -> bool {
+        let (lo, hi) = match t.cmp(&entry) {
+            std::cmp::Ordering::Greater => (entry.saturating_add(1), t),
+            std::cmp::Ordering::Less => (t, entry.saturating_sub(1)),
+            std::cmp::Ordering::Equal => return false,
+        };
+        let k = self.declared.partition_point(|r| r.0 < lo);
+        self.declared.get(k).is_some_and(|r| r.0 <= hi)
+    }
+
+    /// Tells whether a branch from the function at `entry` to `t` leaves
+    /// it: `t` is a known start, lies outside the extent the file declares
+    /// for the function, or, where it declares none, past another function
+    /// the file declares ([`Known::declared_between`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The walked function's entry.
+    /// * `t` - A branch target.
+    fn leaves(&self, entry: u64, t: u64) -> bool {
+        self.starts.contains(&t)
+            || self
+                .within_extent(entry, t)
+                .map_or_else(|| self.declared_between(entry, t), |inside| !inside)
+    }
 }
 
 /// What a direct `b` is, as far as the walk can tell at the jump.
@@ -275,11 +313,13 @@ struct Kept {
 /// A jump into a known start is a tail call. Where the file declares the
 /// function's extent, the extent decides: a target outside it (and outside
 /// the function's fragments) is a tail call, one inside a jump. Where it
-/// declares none, a target right after zero padding (which only separates
-/// functions) or on a word only a function opens with is a tail call, and
+/// declares none, a target past another declared function, right after
+/// zero padding (which only separates functions) or on a word only a
+/// function opens with is a tail call, and
 /// one right after the frame was torn down is one unless the walk reaches
 /// it another way ([`Jump::Unless`]). A conditional branch is held to the
-/// start and the extent alone: a function that shrink-wraps its prologue
+/// start, the extent and the declared functions alone
+/// ([`Known::leaves`]): a function that shrink-wraps its prologue
 /// branches to it past an early return.
 ///
 /// # Arguments
@@ -289,7 +329,7 @@ struct Kept {
 /// * `t` - The target.
 /// * `torn_down` - Whether the instruction before the jump undid the frame.
 fn jump_kind(known: &Known<'_>, entry: u64, t: u64, torn_down: bool) -> Jump {
-    if known.starts.contains(&t) {
+    if known.leaves(entry, t) {
         return Jump::Tail;
     }
     match known.within_extent(entry, t) {
@@ -371,9 +411,7 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
                 if let Some(t) = insn.target() {
                     if t == entry {
                         pending.push((t, Via::Branch));
-                    } else if known.starts.contains(&t)
-                        || known.within_extent(entry, t) == Some(false)
-                    {
+                    } else if known.leaves(entry, t) {
                         callees.insert(t);
                     } else if guess && known.covers(t) {
                         enters_covered = true;
@@ -769,6 +807,10 @@ struct Discovery<'a> {
     /// The extents the file declares, merged: no guess is made inside one,
     /// where the code is the declared function's own.
     declared: Vec<(u64, u64)>,
+    /// The blocks of the guesses kept in this gap round, start to end: a
+    /// guess inside one is the rest of that function (code after an early
+    /// return), not a function of its own.
+    guessed_blocks: BTreeMap<u64, u64>,
 }
 
 impl Discovery<'_> {
@@ -879,7 +921,10 @@ impl Discovery<'_> {
     }
 
     /// Records one walk: rejected, or kept with its callees made starts
-    /// and queued.
+    /// and queued. A guess is rejected too when it lies inside a guess
+    /// kept before it in the round ([`Discovery::guessed_blocks`]); the
+    /// guesses commit in address order, so a function's own start comes
+    /// first.
     ///
     /// # Arguments
     ///
@@ -887,9 +932,19 @@ impl Discovery<'_> {
     /// * `w` - The walk.
     fn commit(&mut self, entry: u64, w: Walked) {
         let guess = self.guessed.contains(&entry);
-        if rejected(&w, guess) {
+        let inside_guess = guess
+            && self
+                .guessed_blocks
+                .range(..=entry)
+                .next_back()
+                .is_some_and(|(_, &end)| entry < end);
+        if rejected(&w, guess) || inside_guess {
             self.rejected.insert(entry);
             return;
+        }
+        if guess {
+            self.guessed_blocks
+                .extend(w.func.blocks.iter().map(|b| (b.start, b.end)));
         }
         self.incomplete |= w.overlong;
         self.done.insert(entry);
@@ -953,9 +1008,13 @@ impl Discovery<'_> {
     /// follows padding or an instruction control does not fall through (a
     /// jump, a return, a trap); one that opens it the way a function opens
     /// ([`prologue::opens`]) is a guess, unless it was walked or lies inside
-    /// an extent the file declares. A word opening like no function is not
-    /// guessed at: in a binary that declares nothing, the unreached blocks
-    /// of a function that was never found open that way too.
+    /// an extent the file declares. Where the file declares extents (an
+    /// arm64 PE's `.pdata` leaves out the leaf functions that keep no
+    /// frame), any word opening a gap outside them is a guess, since the
+    /// unreached blocks of a declared function lie inside its extent. In a
+    /// file that declares nothing, a word opening like no function is not
+    /// guessed at: the unreached blocks of a function never found open that
+    /// way too.
     ///
     /// # Arguments
     ///
@@ -1010,7 +1069,8 @@ impl Discovery<'_> {
                 break;
             };
             if opening
-                && prologue::opens(word)
+                && !prologue::is_padding(word)
+                && (prologue::opens(word) || !self.declared.is_empty())
                 && !self.done.contains(&va)
                 && !self.rejected.contains(&va)
                 && !inside(&self.declared, va)
@@ -1059,6 +1119,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         guessed: FxHashSet::default(),
         walked: BTreeMap::new(),
         declared: merged(program.function_ranges.clone()),
+        guessed_blocks: BTreeMap::new(),
     };
     d.run(&text);
     for _ in 0..GAP_ROUNDS_MAX {
@@ -1071,6 +1132,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         d.queue = guesses;
         d.run(&text);
         d.guessed.clear();
+        d.guessed_blocks.clear();
         if d.walked.len() == before {
             break;
         }

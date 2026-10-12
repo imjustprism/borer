@@ -1255,6 +1255,59 @@ fn shrink_wrapped_tails_stay_and_guesses_stop_at_covered_code() {
     assert_eq!(a.function(TEXT + 0x30).map(|f| f.start), Some(TEXT + 0x2c));
 }
 
+/// A file that declares its framed functions has its leaves guessed.
+///
+/// An arm64 PE's `.pdata` leaves out a leaf that keeps no frame: the gap
+/// after a declared function is guessed at whatever it opens with, a word
+/// after the leaf's early return is the leaf's own code and no second
+/// function, and the leaf's jump past the next declared function is a tail
+/// call to the code it enters.
+#[test]
+fn declared_files_have_their_leaves_guessed() {
+    let code = [
+        // ASM: stp x29, x30, [sp, #-16]! (declared, 0x1000)
+        0xa9bf_7bfd,
+        // ASM: mov x29, sp
+        0x9100_03fd,
+        // ASM: ldp x29, x30, [sp], #16
+        0xa8c1_7bfd,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: cbnz w0, 0x101c (the leaf, 0x1010)
+        0x3500_0060,
+        // ASM: mov w0, #1
+        0x5280_0020,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: add w0, w0, #2 (0x101c)
+        0x1100_0800,
+        // ASM: b 0x1034
+        0x1400_0005,
+        // ASM: stp x29, x30, [sp, #-16]! (declared, 0x1024)
+        0xa9bf_7bfd,
+        // ASM: mov x29, sp
+        0x9100_03fd,
+        // ASM: ldp x29, x30, [sp], #16
+        0xa8c1_7bfd,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: mov w0, #3 (0x1034)
+        0x5280_0060,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    let pdata = [(0x1000, 1 | 4 << 2), (0x1024, 1 | 4 << 2)];
+    let bytes = arm64_pe_bytes(&code, &pdata, &[0]);
+    let p = Program::from_bytes(PathBuf::from("leaves.exe"), bytes).expect("parses");
+    let a = Analysis::compute(&p);
+    let at = |off: u64| crate::protection::IMAGE_BASE + 0x1000 + off;
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    assert_eq!(entries, [at(0), at(0x10), at(0x24), at(0x34)]);
+    let leaf = a.function(at(0x10)).expect("the leaf");
+    assert_eq!((leaf.end, leaf.instr_count), (at(0x24), 5));
+    assert_eq!(leaf.callees, [at(0x34)]);
+}
+
 /// Hostile code gives an answer, the same one twice.
 ///
 /// Pseudo-random words, a `nop` sled, words all zero or all ones, and jumps
