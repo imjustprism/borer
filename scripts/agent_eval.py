@@ -112,12 +112,89 @@ DECODER_CODE = _decoder_blob()
 # 0x20000, so the ciphertext pointer is a data pointer.
 DECODER_REGIONS = "0x10000@0:0x200:rx,0x20000@0x200:0x20:rw"
 
+
+def _elf(e_type: int, entry: int, sections: list[tuple]) -> bytes:
+    """A little-endian x86-64 ELF64: each section (name, sh_type, flags,
+    addr, data, link, entsize) at the file offset equal to its address, one
+    RWX PT_LOAD over the file from address 0, and a PT_DYNAMIC over the
+    SHT_DYNAMIC section when there is one."""
+    out = bytearray(0x1000)
+    for _, _, _, addr, data, _, _ in sections:
+        if len(out) < addr + len(data):
+            out += bytes(addr + len(data) - len(out))
+        out[addr : addr + len(data)] = data
+    loaded = len(out)
+    shstr = bytearray(b"\0")
+    names = []
+    for name in [s[0] for s in sections] + [".shstrtab"]:
+        names.append(len(shstr))
+        shstr += name.encode() + b"\0"
+    shstr_off = len(out)
+    out += shstr
+    shoff = (len(out) + 7) & ~7
+    count = len(sections) + 2
+    out += bytes(shoff + count * 64 - len(out))
+    rows = [(0, 0, 0, 0, 0, 0, 0, 0)]
+    for i, (_, ty, flags, addr, data, link, entsize) in enumerate(sections):
+        rows.append((names[i], ty, flags, addr, addr, len(data), link, entsize))
+    rows.append((names[-1], 3, 0, 0, shstr_off, len(shstr), 0, 0))
+    for i, (name, ty, flags, addr, off, size, link, entsize) in enumerate(rows):
+        out[shoff + i * 64 : shoff + i * 64 + 64] = (
+            name.to_bytes(4, "little")
+            + ty.to_bytes(4, "little")
+            + flags.to_bytes(8, "little")
+            + addr.to_bytes(8, "little")
+            + off.to_bytes(8, "little")
+            + size.to_bytes(8, "little")
+            + link.to_bytes(4, "little")
+            + bytes(4)
+            + (8).to_bytes(8, "little")
+            + entsize.to_bytes(8, "little")
+        )
+    dynamic = [s for s in sections if s[1] == 6]
+    out[0:16] = b"\x7fELF\x02\x01\x01" + bytes(9)
+    out[16:64] = (
+        e_type.to_bytes(2, "little")
+        + (62).to_bytes(2, "little")
+        + (1).to_bytes(4, "little")
+        + entry.to_bytes(8, "little")
+        + (64).to_bytes(8, "little")
+        + shoff.to_bytes(8, "little")
+        + bytes(4)
+        + (64).to_bytes(2, "little")
+        + (56).to_bytes(2, "little")
+        + (1 + len(dynamic)).to_bytes(2, "little")
+        + (64).to_bytes(2, "little")
+        + count.to_bytes(2, "little")
+        + (count - 1).to_bytes(2, "little")
+    )
+
+    def phdr(ty: int, at: int, size: int) -> bytes:
+        return (
+            ty.to_bytes(4, "little")
+            + (7).to_bytes(4, "little")
+            + at.to_bytes(8, "little") * 3
+            + size.to_bytes(8, "little") * 2
+            + (0x1000).to_bytes(8, "little")
+        )
+
+    out[64:120] = phdr(1, 0, loaded)
+    for _, _, _, addr, data, _, _ in dynamic:
+        out[120:176] = phdr(2, addr, len(data))
+    return bytes(out)
+
+
+# An ELF whose entry is `lea eax, [rdi+1]; ret`: the System V first argument
+# is rdi, which `emulate`'s a1= sets on an ELF.
+ELF_ARG_CODE = _elf(2, 0x1000, [(".text", 1, 6, 0x1000, bytes.fromhex("8d4701c3"), 0, 0)])
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
     "blob": (RAW_CODE, "<blob>"),
     "syscall": (SYSCALL_CODE, "<syscall>"),
     "decoder": (DECODER_CODE, "<decoder>"),
+    "elfargs": (ELF_ARG_CODE, "<elfargs>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -221,6 +298,15 @@ TASKS = [
             ("query", {"uri": "borer://emulate/0x10000"}),
         ],
         'syscall 2 open("/tmp/x"',
+    ),
+    (
+        "emulate_elf_args",
+        "what an ELF function returns for a1=5, its first argument in rdi",
+        [
+            ("load_binary", {"path": "{elfargs}"}),
+            ("query", {"uri": "borer://emulate/0x1000,a1=5"}),
+        ],
+        "rax=0x6 ",
     ),
     (
         "decoded_strings",

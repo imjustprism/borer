@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::analysis::decompile::decompile_named;
-use crate::analysis::decompile::signature::printed;
+use crate::analysis::decompile::signature::{passing, printed};
 use crate::text::{one_line, quoted};
 
 /// Check values a standard checksum produces for the probe string.
@@ -167,13 +167,15 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             break;
         }
     }
+    let pass = passing(p, a, o, entry);
     let mut answers: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
     for c in &candidates {
         let mut emu = Emulator::new(p, BUDGET)
             .ok_or_else(|| String::from("this architecture is not emulated yet"))?;
         emu.install_imports();
         emu.set_permissive(true);
-        emu.set_arg(slot, c.value);
+        let sp = emu.register("rsp").unwrap_or(0);
+        pass.place_arg(&mut emu, sp, slot, c.value);
         let run = emu.run(entry);
         let answer = match run.stop {
             Stop::Returned => {
@@ -195,10 +197,7 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             out,
             "# every candidate {same}, so none of its own constants decides this"
         );
-        let register = ARGUMENT_REGISTERS
-            .get(slot)
-            .filter(|_| p.arch.bitness() == Some(64))
-            .and_then(|n| iced_register(n, 64));
+        let register = pass.regs.get(slot).map(|r| r.full_register());
         let dereferenced = register.is_some_and(|r| {
             instrs.iter().any(|i| {
                 !matches!(i.mnemonic(), Mnemonic::Lea | Mnemonic::Nop)

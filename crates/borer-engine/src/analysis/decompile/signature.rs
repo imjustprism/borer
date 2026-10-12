@@ -39,14 +39,27 @@ impl Passing {
     /// * `args` - The argument values, in order.
     pub(crate) fn place(&self, emu: &mut Emulator<'_>, sp: u64, args: &[u64]) {
         for (i, v) in args.iter().enumerate() {
-            match self.regs.get(i) {
-                Some(r) => {
-                    emu.set_register(register_name(*r), *v);
-                }
-                None => {
-                    let at = sp.wrapping_add(self.stack_offset(i));
-                    poke_word(emu, at, *v, self.word);
-                }
+            self.place_arg(emu, sp, i, *v);
+        }
+    }
+
+    /// Puts one argument where a callee entered with the stack pointer at
+    /// `sp` reads it, leaving the others as they are.
+    ///
+    /// # Arguments
+    ///
+    /// * `emu` - The machine.
+    /// * `sp` - The stack pointer the callee is entered with.
+    /// * `i` - The argument's position from zero: `a1` is 0.
+    /// * `v` - The value.
+    pub(crate) fn place_arg(&self, emu: &mut Emulator<'_>, sp: u64, i: usize, v: u64) {
+        match self.regs.get(i) {
+            Some(r) => {
+                emu.set_register(register_name(*r), v);
+            }
+            None => {
+                let at = sp.wrapping_add(self.stack_offset(i));
+                poke_word(emu, at, v, self.word);
             }
         }
     }

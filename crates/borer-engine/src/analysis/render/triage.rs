@@ -4,6 +4,7 @@
 use super::calls::{Reach, gather};
 use super::iocs::iocs_line;
 use super::*;
+use crate::analysis::decompile::signature::passing;
 use crate::emulate::Run;
 use crate::emulate::a64::Machine as A64Machine;
 use crate::emulate::calls::ApiCall;
@@ -377,8 +378,12 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
             ));
         }
     }
-    for &(i, v) in &spec.args {
-        emu.set_arg(i, v);
+    if !spec.args.is_empty() {
+        let pass = passing(p, a, o, spec.entry);
+        let sp = emu.register("rsp").unwrap_or(0);
+        for &(i, v) in &spec.args {
+            pass.place_arg(&mut emu, sp, i, v);
+        }
     }
     for &(addr, ref bytes) in &spec.writes {
         poke_all(&mut emu, addr, bytes);

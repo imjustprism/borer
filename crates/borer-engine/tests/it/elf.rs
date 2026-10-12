@@ -711,6 +711,31 @@ fn decompile_names_the_import_and_the_tail_call() {
     assert!(wrapper.contains('7'), "{wrapper}");
 }
 
+/// `emulate`'s `a1=` sets `rdi` on an ELF, the register the decompiler
+/// names `a1` there.
+///
+/// System V passes the first argument in `rdi`, not the Microsoft x64
+/// `rcx`, so `helper` (`lea eax,[rdi+1]`) given `a1=5` returns 6, and
+/// `solve` varies the same register. It set `rcx` on every 64-bit target,
+/// so the ELF run read a zero `rdi` and returned 1.
+#[test]
+fn emulate_sets_a1_in_rdi_on_an_elf() {
+    let p = elf_fixture();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile(&p, &a, &o, HELPER).expect("helper decompiles");
+    assert!(text.contains("a1"), "{text}");
+    let out = borer_engine::analysis::render::emulate_tsv(&p, &a, &o, "helper,a1=5")
+        .expect("helper runs");
+    assert!(out.contains(" with a1=0x5: returned"), "{out}");
+    assert!(out.contains("rax=0x6 "), "{out}");
+    assert!(out.contains("rdi=0x5"), "{out}");
+    assert!(out.contains("rcx=0x0 "), "{out}");
+    let solved =
+        borer_engine::analysis::render::solve_tsv(&p, &a, &o, "helper,a1").expect("helper solves");
+    assert!(solved.contains("returns 0x2"), "{solved}");
+}
+
 /// The fixture with `.rodata`'s `sh_size` rewritten.
 ///
 /// # Arguments

@@ -8,6 +8,7 @@
 //! full CPU: a routine that calls out, uses vector math, or faults is left to
 //! a real debugger.
 
+use crate::analysis::decompile::lift;
 use crate::isa::x86::{
     Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register, gpr_bank_index,
     st_depth_mod8, xmm_slot,
@@ -696,12 +697,12 @@ fn readout_order(bitness: u32) -> &'static [&'static str] {
     }
 }
 
-/// Where an argument lives on entry: the Microsoft x64 convention puts the
-/// first four in registers and the rest on the stack, a 32-bit convention
-/// all of them on the stack.
+/// Where an argument lives on entry: a 64-bit convention puts the first few
+/// in registers and the rest on the stack, a 32-bit convention all of them
+/// on the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArgSlot {
-    /// One of `rcx`, `rdx`, `r8` and `r9`.
+    /// One of the convention's argument registers.
     Register(Register),
     /// A stack address past the return address the call pushed.
     Stack(u64),
@@ -1331,14 +1332,17 @@ impl<'a> Emulator<'a> {
         self.last_ip
     }
 
-    /// Sets an argument where the Microsoft x64 convention puts it.
+    /// Sets an argument where the program's calling convention puts it.
     ///
-    /// The first four arguments live in `rcx`, `rdx`, `r8` and `r9`. The rest
-    /// are on the stack, at `[rsp + 8 * (index + 1)]` as the callee sees it on
-    /// entry, past the slot the return address occupies. Writing those is what
-    /// lets a routine of more than four arguments be set up at all, and the
-    /// write is setup rather than something the code did, so it stays out of
-    /// the write history a recovered string is read from.
+    /// The convention is the one the decompiler names `a1`..`aN` by on this
+    /// program ([`lift::conv`]): on a PE the first four arguments live in
+    /// `rcx`, `rdx`, `r8` and `r9`, on an ELF or Mach-O the first six in
+    /// `rdi`, `rsi`, `rdx`, `rcx`, `r8` and `r9`, and in 32-bit code none.
+    /// The rest are on the stack as the callee sees it on entry, past the
+    /// slot the return address occupies and any shadow space. Writing those
+    /// is what lets a routine of more arguments than registers be set up at
+    /// all, and the write is setup rather than something the code did, so
+    /// it stays out of the write history a recovered string is read from.
     ///
     /// # Arguments
     ///
@@ -1353,10 +1357,10 @@ impl<'a> Emulator<'a> {
 
     /// Reads the `n`th argument of the API being serviced.
     ///
-    /// On a 64-bit target the first four travel in registers; on a 32-bit
-    /// one every argument sits on the stack above the return address the
-    /// call pushed, which the stack pointer still points at when the stub
-    /// is entered.
+    /// On a 64-bit target the first few travel in the registers of the
+    /// program's convention; on a 32-bit one every argument sits on the
+    /// stack above the return address the call pushed, which the stack
+    /// pointer still points at when the stub is entered.
     ///
     /// # Arguments
     ///
@@ -1370,23 +1374,25 @@ impl<'a> Emulator<'a> {
 
     /// Where the `n`th argument lives as the callee sees it on entry.
     ///
-    /// The stack slots count from the one past the return address, which
-    /// the stack pointer still points at.
+    /// The registers are those of the program's convention ([`lift::conv`]);
+    /// the stack slots count from the one past the return address, which
+    /// the stack pointer still points at, and past any shadow space.
     ///
     /// # Arguments
     ///
     /// * `n` - Argument index from zero.
     fn arg_slot(&self, n: usize) -> ArgSlot {
-        let regs = [Register::RCX, Register::RDX, Register::R8, Register::R9];
-        if self.bitness == 64
-            && let Some(r) = regs.get(n)
-        {
+        let conv = lift::conv(self.program, self.bitness);
+        if let Some(r) = conv.args.get(n) {
             return ArgSlot::Register(*r);
         }
         let word = from_usize(self.word);
+        let past = from_usize(n.saturating_sub(conv.args.len()));
         ArgSlot::Stack(
             self.reg(Register::RSP)
-                .wrapping_add(from_usize(n).wrapping_add(1).wrapping_mul(word)),
+                .wrapping_add(word)
+                .wrapping_add(conv.shadow.unsigned_abs())
+                .wrapping_add(past.wrapping_mul(word)),
         )
     }
 
