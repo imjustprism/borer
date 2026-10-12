@@ -284,3 +284,92 @@ fn a_second_result_is_passed_on_in_rdx() {
     assert!(text.contains(", rdx)"), "{text}");
     runs_alike(&p, TEXT);
 }
+
+/// A narrow operand C would compute narrower than the machine keeps its
+/// width.
+///
+/// A sum of two 32-bit values carries past 32 bits, a byte shifted past
+/// `int`'s width keeps its bit, while a narrow operand beside a 64-bit one
+/// needs no cast.
+#[test]
+fn narrow_operands_keep_the_machines_width() {
+    use borer_engine::analysis::decompile::polish;
+    let packs = borer_engine::pack::Packs::default();
+    let sum = polish(
+        concat!(
+            "// signature: uint64_t f(uint64_t a1, uint64_t a2)\n",
+            "uint64_t rax;\n",
+            "rax = (a1 & 0xffffffff) + (a2 & 0xffffffff);\n",
+            "return rax;\n",
+        ),
+        64,
+        &packs,
+    );
+    assert!(sum.contains("uint32_t a1, uint32_t a2)"), "{sum}");
+    assert!(sum.contains("rax = (uint64_t)a1 + a2;"), "{sum}");
+    let shifted = polish(
+        concat!(
+            "// signature: uint64_t f(uint64_t a1)\n",
+            "return (a1 & 0xff) >> 7 << 0x3f;\n",
+        ),
+        64,
+        &packs,
+    );
+    assert!(shifted.contains("(uint64_t)a1 >> 7 << 0x3f"), "{shifted}");
+}
+
+/// A byte-swapped 32-bit value shifted into the upper half is shifted as a
+/// 64-bit value: `mov eax,ecx; bswap eax; shl rax,0x20; ret`, where C's
+/// 32-bit `bswap(..) << 32` lost every bit.
+#[test]
+fn a_narrow_value_shifted_into_the_upper_half_is_widened() {
+    let code = [
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0x0f, 0xc8, // ASM: bswap eax
+        0x48, 0xc1, 0xe0, 0x20, // ASM: shl rax,0x20
+        0xc3, // ASM: ret
+    ];
+    let p = program(&code, &[]);
+    runs_alike(&p, TEXT);
+}
+
+/// A register a 32-bit write left is passed with its upper half clear to a
+/// callee that reads it whole: `mov eax,ecx; mov ecx,eax; call g` hands `g`
+/// the low half of `a1`, where the text passed all of it.
+#[test]
+fn a_32_bit_register_is_passed_with_its_upper_half_clear() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0x89, 0xc1, // ASM: mov ecx,eax
+        0xe8, 0x33, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0x48, 0x89, 0xc8, 0xc3]); // ASM: mov rax,rcx; ret
+    let p = program(&code, &[]);
+    runs_alike(&p, TEXT);
+}
+
+/// A 32-bit sum is passed with its upper half clear.
+///
+/// `lea ecx,[rcx-1]; call g` hands a callee that reads the whole register
+/// the low half of `a1 - 1`, which wraps at 32 bits where the 64-bit sum
+/// does not.
+#[test]
+fn a_32_bit_sum_is_passed_with_its_upper_half_clear() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x8d, 0x49, 0xff, // ASM: lea ecx,[rcx-1]
+        0xe8, 0x34, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0x48, 0x89, 0xc8, 0xc3]); // ASM: mov rax,rcx; ret
+    let p = program(&code, &[]);
+    let (text, _) = text_of(&p, TEXT);
+    assert!(text.contains("sub_1040((a1 - 1) & 0xffffffff)"), "{text}");
+    runs_alike(&p, TEXT);
+}

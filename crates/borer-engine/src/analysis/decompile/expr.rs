@@ -4131,8 +4131,9 @@ fn converted(a: Option<Narrow>, b: Option<Narrow>) -> Option<Narrow> {
 /// call). A `uint8_t` or `uint16_t` load promotes to `int` and a `uint32_t` one
 /// is `unsigned int`; a constant is the type its literal is (a negative one
 /// renders as `-m`, an `int`, except in a bitwise operation, which spells
-/// it in hex); an operation that would lose bits is widened when it renders
-/// ([`computes_narrow`]), so it is 64 bits wide.
+/// it in hex); a cast to a narrow type is that signed type, and `bswap` and
+/// the bit counts are their operand's; an operation that would lose bits
+/// is widened when it renders ([`computes_narrow`]), so it is 64 bits wide.
 ///
 /// # Arguments
 ///
@@ -4150,7 +4151,18 @@ fn c_narrow(e: &Expr) -> Option<Narrow> {
         },
         Expr::Deref(_, Ty::U8 | Ty::U16) | Expr::Cond(_) => Some(Narrow::Int),
         Expr::Deref(_, Ty::U32) => Some(Narrow::UInt),
-        Expr::Un(UnOp::Neg | UnOp::Not, x) => c_narrow(x),
+        Expr::Cast(_, Ty::U8 | Ty::U16 | Ty::U32) => Some(Narrow::Int),
+        Expr::Un(
+            UnOp::Neg
+            | UnOp::Not
+            | UnOp::Bswap
+            | UnOp::Tzcnt
+            | UnOp::Lzcnt
+            | UnOp::Popcnt
+            | UnOp::Bsf
+            | UnOp::Bsr,
+            x,
+        ) => c_narrow(x),
         Expr::Bin(op @ (Op::Shl | Op::Mul), l, r) => {
             if computes_narrow(*op, l, r) {
                 None

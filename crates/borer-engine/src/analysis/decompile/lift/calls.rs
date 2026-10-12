@@ -182,7 +182,22 @@ impl<'a> Exec<'_, 'a> {
                 continue;
             };
             let k = Key::Reg(r);
-            let value = self.env.vals.get(&k).cloned();
+            // INVARIANT: a callee that reads the whole register gets a value
+            // a 32-bit write left there with its upper half clear
+            // ([`Exec::full_value`]): `mov ecx, eax` hands a `uint64_t`
+            // parameter the low half of `a1`, not all of it. One that reads
+            // its low half alone needs no mask the text would only print.
+            let value = match self.env.vals.get(&k) {
+                Some(Expr::Var(Key::Slot(o)))
+                    if self.env.slot_bits.get(o).is_some_and(|b| *b <= 32) =>
+                {
+                    Some(Expr::Var(Key::Slot(*o)))
+                }
+                Some(_) if r.is_gpr() && target.is_some_and(|t| reads_whole(self.ctx, t, r)) => {
+                    Some(self.full_value(k))
+                }
+                held => held.cloned(),
+            };
             if let Some(e) = &value {
                 self.note_escape(e);
             }
@@ -3028,6 +3043,50 @@ impl<'a> Exec<'_, 'a> {
         }
         Some((*recv, usize::try_from(k / word).ok()?))
     }
+}
+
+/// Most instructions [`reads_whole`] reads from a callee's entry.
+const WHOLE_SCAN: usize = 16;
+
+/// Tells whether a direct callee's first use of an argument register reads
+/// all of it, its upper half included.
+///
+/// The entry's straight-line instructions are read up to the first that
+/// touches the register, a branch, or [`WHOLE_SCAN`] of them: Rust's debug
+/// code spills a `usize` it was handed whole (`mov [rsp+38h], rcx`), where a
+/// 32-bit parameter is read or spilled as `ecx`.
+///
+/// # Arguments
+///
+/// * `ctx` - The program and the decoder.
+/// * `target` - The callee's entry.
+/// * `r` - The argument register.
+fn reads_whole(ctx: &Ctx<'_>, target: u64, r: Register) -> bool {
+    let full = r.full_register();
+    let mut factory = InstructionInfoFactory::new();
+    let mut va = target;
+    for _ in 0..WHOLE_SCAN {
+        let Some(i) = ctx.decode(va) else {
+            return false;
+        };
+        if let Some(u) = factory
+            .info(&i)
+            .used_registers()
+            .iter()
+            .find(|u| u.register().full_register() == full)
+        {
+            return u.register() == full
+                && matches!(
+                    u.access(),
+                    OpAccess::Read | OpAccess::ReadWrite | OpAccess::ReadCondWrite
+                );
+        }
+        if i.flow_control() != FlowControl::Next {
+            return false;
+        }
+        va = i.next_ip();
+    }
+    false
 }
 
 /// Tells whether any rendered argument names a variable, as a whole word.

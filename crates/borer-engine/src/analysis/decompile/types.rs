@@ -1084,9 +1084,10 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
 /// Tells whether a narrow operand computes in C other than in the machine.
 ///
 /// An operand of `bits` bits that C computes in a type whose values stop
-/// at `limit` bits loses bits where the text shifts it left or multiplies
-/// it by a constant, and turns negative where the text compares a
-/// difference of it.
+/// at `limit` bits loses bits where the text shifts it left (after any
+/// constant shifts right) or multiplies it by a constant, turns negative
+/// where the text compares a difference of it, and wraps, when it is 32
+/// bits wide, where the text adds to it or subtracts from it.
 ///
 /// The count of a shift is read when it is a constant (`<< 0x20` of a word
 /// does, `<< 8` of a byte does not); any other count may. A product by a
@@ -1117,12 +1118,53 @@ fn loses_bits(before: &str, after: &str, bits: u32, limit: u32) -> bool {
     // and not in the machine's 64 bits.
     if let Some(rest) = after.strip_prefix(" - ") {
         let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
-        return [" < ", " <= ", " > ", " >= "]
+        if [" < ", " <= ", " > ", " >= "]
             .iter()
-            .any(|rel| rest.starts_with(rel));
+            .any(|rel| rest.starts_with(rel))
+        {
+            return true;
+        }
     }
-    if let Some(count) = after.strip_prefix(" << ") {
-        return constant(count).is_none_or(|c| u64::from(bits) + c > u64::from(limit));
+    // INVARIANT: a sum or a difference of two 32-bit operands carries past
+    // 32 bits in the machine and wraps in C: `(a1 & 0xffffffff) + (a2 &
+    // 0xffffffff)` is `a1 + a2` only when nothing reads its upper half,
+    // which the line does not say. A 64-bit operand on the other side
+    // converts the narrow one, so `(int64_t)(int32_t)rbx + a1` is `rbx +
+    // a1`; only a constant or another masked or cast operand is narrow.
+    if bits >= 32
+        && [" + ", " - "].iter().any(|op| {
+            after
+                .strip_prefix(op)
+                .is_some_and(|t| narrow_operand(t, true))
+                || before
+                    .strip_suffix(op)
+                    .is_some_and(|t| narrow_operand(t, false))
+        })
+    {
+        return true;
+    }
+    // INVARIANT: shifts by constants chain left to right, so `a1 >> 7 <<
+    // 0x3f` keeps one bit of a byte and moves it to bit 63.
+    let mut shifted = u64::from(bits);
+    let mut rest = after;
+    loop {
+        let (count, left) = match (rest.strip_prefix(" >> "), rest.strip_prefix(" << ")) {
+            (Some(c), _) => (c, false),
+            (None, Some(c)) => (c, true),
+            (None, None) => break,
+        };
+        let Some(k) = constant(count) else {
+            return left;
+        };
+        shifted = if left {
+            shifted.saturating_add(k)
+        } else {
+            shifted.saturating_sub(k)
+        };
+        if left && shifted > u64::from(limit) {
+            return true;
+        }
+        rest = count.trim_start_matches(|c: char| c.is_ascii_alphanumeric());
     }
     let factor = after.strip_prefix(" * ").and_then(constant).or_else(|| {
         let head = before.strip_suffix(" * ")?;
@@ -1130,6 +1172,74 @@ fn loses_bits(before: &str, after: &str, bits: u32, limit: u32) -> bool {
         constant(token)
     });
     factor.is_some_and(|k| bits + length(k) > limit)
+}
+
+/// Tells whether the operand next to a `+` or `-` computes in C no wider
+/// than 32 bits.
+///
+/// A constant that fits 32 bits is, and so is a parenthesized operand a
+/// narrow mask or cast makes narrow (`(a2 & 0xffffffff)`, `(uint32_t)x`).
+/// A name is taken as wide: its declaration is not on the line.
+///
+/// # Arguments
+///
+/// * `text` - The line's text after the operator, or before it.
+/// * `forward` - The operand starts `text` (it follows the operator);
+///   otherwise it ends `text`.
+fn narrow_operand(text: &str, forward: bool) -> bool {
+    let operand = if forward {
+        match text.strip_prefix('(') {
+            Some(_) => text
+                .char_indices()
+                .scan(0i32, |depth, (k, c)| {
+                    *depth += match c {
+                        '(' => 1,
+                        ')' => -1,
+                        _ => 0,
+                    };
+                    Some((k, *depth))
+                })
+                .find(|&(_, depth)| depth == 0)
+                .and_then(|(k, _)| text.get(..=k)),
+            None => text.split([' ', ')', ';', ',']).next(),
+        }
+    } else if text.ends_with(')') {
+        let mut depth = 0i32;
+        text.char_indices().rev().find_map(|(k, c)| {
+            depth += match c {
+                ')' => 1,
+                '(' => -1,
+                _ => 0,
+            };
+            (depth == 0).then(|| text.get(k..)).flatten()
+        })
+    } else {
+        text.rsplit([' ', '(', ',']).next()
+    };
+    let Some(operand) = operand.filter(|o| !o.is_empty()) else {
+        return false;
+    };
+    let constant = match operand.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => operand.parse::<u64>().ok(),
+    };
+    if let Some(c) = constant {
+        return c <= 0xffff_ffff;
+    }
+    operand.starts_with('(')
+        && ([" & 0xffffffff)", " & 0xffff)", " & 0xff)"]
+            .iter()
+            .any(|m| operand.ends_with(m))
+            || [
+                "(uint32_t)",
+                "(int32_t)",
+                "(uint16_t)",
+                "(int16_t)",
+                "(uint8_t)",
+                "(int8_t)",
+            ]
+            .iter()
+            .any(|c| operand.starts_with(c)))
 }
 
 /// Drops the parentheses left around a bare `name` once its cast or mask
