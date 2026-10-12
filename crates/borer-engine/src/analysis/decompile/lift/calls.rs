@@ -2426,6 +2426,16 @@ impl<'a> Exec<'_, 'a> {
             None
         };
         self.after_call(preserves);
+        // INVARIANT: a second result the text assigns lands in `rdx` under
+        // its own name, as a write of it would: the next call passes it
+        // there (`rax = f(); rdx = f__rdx(); g(rax, rdx)`, a Rust slice
+        // handed on whole), where a register the call only clobbered ends
+        // the argument list. On a 32-bit target `edx` is the high half of a
+        // 64-bit result, which no convention passes on as an argument.
+        if let Some(k) = result2.filter(|_| self.bitness() == 64) {
+            self.env.clobbered.remove(&k);
+            self.env.touched.insert(k);
+        }
         self.preserved.clear();
         // INVARIANT: the merged value spans the whole register, so it is
         // no narrow lane a later byte copy can drop the mask for.

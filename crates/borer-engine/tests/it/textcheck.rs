@@ -253,3 +253,34 @@ fn a_call_returned_as_it_stands_has_its_callees_width() {
     let (text, _) = text_of(&p, TEXT);
     assert!(text.contains("// signature: uint8_t sub_1000("), "{text}");
 }
+
+/// A second result a callee hands back in `rdx` is passed on in `rdx` to
+/// the next call that takes it: a Rust slice returned in `rax:rdx` and
+/// handed on whole, where the text passed only `rax`.
+///
+/// `f` is `sub rsp,0x28; call g; mov rcx,rax; call h; add rsp,0x28; ret`;
+/// `g` is `mov rax,rcx; mov edx,5; ret`; `h` is `lea rax,[rcx+rdx]; ret`.
+#[test]
+fn a_second_result_is_passed_on_in_rdx() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x37, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x48, 0x89, 0xc1, // ASM: mov rcx,rax
+        0xe8, 0x4f, 0x00, 0x00, 0x00, // ASM: call 0x1060
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([
+        0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+        0xba, 0x05, 0x00, 0x00, 0x00, // ASM: mov edx,5
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x60, 0xcc);
+    code.extend([0x48, 0x8d, 0x04, 0x11, 0xc3]); // ASM: lea rax,[rcx+rdx]; ret
+    let p = program(&code, &[]);
+    let (text, unset) = text_of(&p, TEXT);
+    assert!(unset.is_empty(), "{text}\n{unset:?}");
+    assert!(text.contains(", rdx)"), "{text}");
+    runs_alike(&p, TEXT);
+}
