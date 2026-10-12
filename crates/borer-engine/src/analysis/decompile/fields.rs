@@ -610,7 +610,7 @@ pub(super) fn deref_cast_start(head: &str) -> Option<usize> {
 /// width a load must read for the name to be true. A field of an enum
 /// type states the enum's width (4 or 8), since its members are that
 /// wide.
-type TypedFields = BTreeMap<u64, (String, &'static str)>;
+pub(super) type TypedFields = BTreeMap<u64, (String, &'static str)>;
 
 /// The user-typed globals of a function: the variable each renders as, with
 /// the fields its applied type states and the letter of each field's width.
@@ -649,27 +649,7 @@ pub(super) fn typed_globals(
         let Some(s) = crate::analysis::utypes::pointee_struct(&overlay.types, expr) else {
             continue;
         };
-        let mut fields: TypedFields = BTreeMap::new();
-        for (off, f) in &s.fields {
-            // A named field is an enum ([`TypeExpr::c_name`] spells no
-            // name); its width is the enum's, the one every member holds.
-            let letter =
-                f.ty.c_name(word)
-                    .as_deref()
-                    .and_then(layout_type)
-                    .or_else(|| {
-                        let e = crate::analysis::utypes::named_enum(&overlay.types, &f.ty)?;
-                        match e.size {
-                            4 => Some("u32"),
-                            8 => Some("u64"),
-                            _ => None,
-                        }
-                    });
-            let Some(letter) = letter else {
-                continue;
-            };
-            fields.insert(*off, (f.name.clone(), letter));
-        }
+        let fields = struct_fields(overlay, s, word);
         if fields.is_empty() {
             continue;
         }
@@ -677,6 +657,44 @@ pub(super) fn typed_globals(
             .or_insert(fields);
     }
     out.into_iter().collect()
+}
+
+/// The fields of a user struct a typed pointer names, by offset, each with
+/// the letter of its width; a field that renders as no one access (an
+/// embedded struct) is left out.
+///
+/// # Arguments
+///
+/// * `overlay` - The user types, for an enum field's width.
+/// * `s` - The struct.
+/// * `word` - The image's pointer width in bytes (4 or 8).
+pub(super) fn struct_fields(
+    overlay: &Overlay,
+    s: &crate::analysis::utypes::UserStruct,
+    word: u64,
+) -> TypedFields {
+    let mut fields: TypedFields = BTreeMap::new();
+    for (off, f) in &s.fields {
+        // A named field is an enum ([`TypeExpr::c_name`] spells no
+        // name); its width is the enum's, the one every member holds.
+        let letter =
+            f.ty.c_name(word)
+                .as_deref()
+                .and_then(layout_type)
+                .or_else(|| {
+                    let e = crate::analysis::utypes::named_enum(&overlay.types, &f.ty)?;
+                    match e.size {
+                        4 => Some("u32"),
+                        8 => Some("u64"),
+                        _ => None,
+                    }
+                });
+        let Some(letter) = letter else {
+            continue;
+        };
+        fields.insert(*off, (f.name.clone(), letter));
+    }
+    fields
 }
 
 /// Names the fields of user-typed globals through a whole text

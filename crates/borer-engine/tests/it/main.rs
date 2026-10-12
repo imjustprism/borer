@@ -29,6 +29,7 @@ mod layout;
 mod lsda;
 mod macho;
 mod protection;
+mod protos;
 mod regression;
 mod search;
 mod structure;

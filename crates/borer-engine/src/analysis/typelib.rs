@@ -152,6 +152,21 @@ impl Pass {
     }
 }
 
+/// Counts the stack words a value takes on a 32-bit target: two for a
+/// 64-bit integer or a `double`, one for anything else.
+///
+/// # Arguments
+///
+/// * `pass` - What the machine passes the value as, if known.
+#[must_use]
+pub fn words32(pass: Option<Pass>) -> usize {
+    if matches!(pass, Some(Pass::Int { bits: 64, .. } | Pass::Float(64))) {
+        2
+    } else {
+        1
+    }
+}
+
 /// Splits a C type into its base words and the pointers over them.
 ///
 /// Qualifiers and tags (`const`, `volatile`, `struct`, `union`, `enum`)

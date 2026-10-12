@@ -2,6 +2,8 @@
 //! as arguments, and its prologue.
 
 use super::*;
+use crate::analysis::protos::CallConv;
+use crate::analysis::typelib::Pass;
 
 /// Infers which parameters are pointers, from the function dereferencing
 /// them, and which stack parameters are floating point, from the function
@@ -278,6 +280,10 @@ pub(super) struct Shape {
     pub(super) count: usize,
     /// Stack words its parameters past the register ones take.
     pub(super) stack: u32,
+    /// The positions the body reads, when a stated prototype lists fewer:
+    /// the arguments a call following the prototype leaves out, which the
+    /// callee reads all the same.
+    pub(super) stated_short: Option<usize>,
 }
 
 impl Shape {
@@ -358,15 +364,23 @@ pub(super) fn shape_of(
     succs: &[Vec<usize>],
     entry: usize,
 ) -> Shape {
+    let stated = ctx.overlay.prototypes.get(&f.entry);
     if ctx.bitness == 32 {
-        ctx.conv = &lift::FASTCALL_X86;
-        let regs = detect_params(ctx, code, succs, entry);
-        ctx.conv = if regs.contains(&Register::EDX) {
-            &lift::FASTCALL_X86
-        } else if regs.contains(&Register::ECX) {
-            &lift::THISCALL_X86
-        } else {
-            &lift::CDECL_X86
+        ctx.conv = match stated.and_then(|p| p.conv) {
+            Some(CallConv::Fastcall) => &lift::FASTCALL_X86,
+            Some(CallConv::Thiscall) => &lift::THISCALL_X86,
+            Some(CallConv::Cdecl | CallConv::Stdcall) => &lift::CDECL_X86,
+            None => {
+                ctx.conv = &lift::FASTCALL_X86;
+                let regs = detect_params(ctx, code, succs, entry);
+                if regs.contains(&Register::EDX) {
+                    &lift::FASTCALL_X86
+                } else if regs.contains(&Register::ECX) {
+                    &lift::THISCALL_X86
+                } else {
+                    &lift::CDECL_X86
+                }
+            }
         };
     }
     let mut params = detect_params(ctx, code, succs, entry);
@@ -404,7 +418,8 @@ pub(super) fn shape_of(
             .filter(|n| *n > 0)
             .map_or(0, |n| conv.args.len() + n)
     };
-    let hidden = usize::from(f.signature.as_ref().is_some_and(|s| s.by_pointer));
+    let hidden =
+        usize::from(stated.is_none() && f.signature.as_ref().is_some_and(|s| s.by_pointer));
     // INVARIANT: a method's positions are `this`, the hidden result and
     // the declared parameters; the registers read show the first four,
     // and a stack argument the frame scan found shows the rest, so a
@@ -412,7 +427,10 @@ pub(super) fn shape_of(
     // `this` though only four registers are read. An assert that says
     // `this->` says the same outright.
     let positions = used.max(positions_of(ctx.conv, stack));
+    // INVARIANT: a stated prototype lists every position itself, `this`
+    // among them when the agent writes one.
     let mut this_param = match &f.signature {
+        _ if stated.is_some() => false,
         Some(s) => {
             s.is_const
                 || (classes::class_of(&s.name).is_some()
@@ -428,12 +446,14 @@ pub(super) fn shape_of(
     if ctx.bitness == 32 && this_param && std::ptr::eq(ctx.conv, &lift::CDECL_X86) {
         ctx.conv = &lift::THISCALL_X86;
     }
-    if std::ptr::eq(ctx.conv, &lift::THISCALL_X86) {
+    if std::ptr::eq(ctx.conv, &lift::THISCALL_X86) && stated.is_none() {
         this_param = true;
     }
     let result_param = (hidden == 1).then_some(u8::from(this_param));
     let lead = usize::from(this_param) + hidden;
     let regs = ctx.conv.args.len();
+    let read = used.max(positions_of(ctx.conv, stack));
+    let mut stated_short = None;
     let (count, stack, variadic) = match declared_arity(ctx, f, lead) {
         Some((count, floats, variadic, source)) => {
             // INVARIANT: a declared parameter sits in its register at the
@@ -446,6 +466,11 @@ pub(super) fn shape_of(
             // undefined.
             let count = match source {
                 Declaration::Prototype => {
+                    params.retain(|r| ctx.conv.slot(*r).is_some_and(|s| s < count));
+                    count
+                }
+                Declaration::Stated => {
+                    stated_short = (read > count).then_some(read);
                     params.retain(|r| ctx.conv.slot(*r).is_some_and(|s| s < count));
                     count
                 }
@@ -482,6 +507,7 @@ pub(super) fn shape_of(
         result_param,
         count,
         stack,
+        stated_short,
     }
 }
 
@@ -494,11 +520,16 @@ enum Declaration {
     /// A `__FUNCSIG__` text attributed to the function by the strings it
     /// references: the least arity, which a wrong attribution understates.
     Attributed,
+    /// The prototype an agent stated ([`Overlay::prototypes`]): exact, the
+    /// way the text renders the function and every call to it, which the
+    /// shape notes when the body reads past it ([`Shape::stated_short`]).
+    Stated,
 }
 
 /// Returns the arity a declaration states for a function, when one does.
 ///
-/// The declaration is the function's signature (a `__FUNCSIG__` text
+/// The declaration is the prototype an agent stated for the function,
+/// else its signature (a `__FUNCSIG__` text
 /// attributed to it), else the SDK's prototype for its own name: an export
 /// such as kernel32's `SetLastError` is the API it is named after, whatever
 /// its one jump shows.
@@ -522,6 +553,31 @@ fn declared_arity(
     lead: usize,
 ) -> Option<(usize, u8, bool, Declaration)> {
     let shifted = |floats: u8| floats.checked_shl(u32::try_from(lead).ok()?);
+    if let Some(p) = ctx.overlay.prototypes.get(&f.entry) {
+        let word = u8::try_from(ctx.bitness).unwrap_or(64);
+        let passes: Vec<Option<Pass>> = p
+            .params
+            .iter()
+            .map(|q| q.ty.pass(&ctx.overlay.types, word, ctx.program.format))
+            .collect();
+        let floats = passes
+            .iter()
+            .take(8)
+            .enumerate()
+            .filter(|(_, q)| matches!(q, Some(Pass::Float(_))))
+            .fold(0u8, |m, (j, _)| m | (1 << j));
+        // INVARIANT: on a 32-bit target a position is a stack word past
+        // the convention's registers, and a 64-bit value takes two.
+        let count = if ctx.bitness == 32 {
+            passes
+                .iter()
+                .map(|q| crate::analysis::typelib::words32(*q))
+                .sum()
+        } else {
+            passes.len()
+        };
+        return Some((count, floats, p.variadic, Declaration::Stated));
+    }
     match &f.signature {
         Some(s) => {
             let floats = s

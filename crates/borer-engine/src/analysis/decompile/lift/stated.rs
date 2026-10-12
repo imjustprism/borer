@@ -1,6 +1,10 @@
-//! What a declaration states of a callee: the type library's declaration
-//! of an import ([`crate::analysis::typelib`]), which says what the call
-//! hands back and what its constant arguments name.
+//! What a declaration states of a callee.
+//!
+//! The prototype an agent stated for a function of the program
+//! ([`Overlay::prototypes`](crate::analysis::Overlay::prototypes)), else
+//! the type library's declaration of an import
+//! ([`crate::analysis::typelib`]), say what the call hands back and, for
+//! an import, what its constant arguments name.
 //!
 //! A call's shape is otherwise read from the code: the registers set before
 //! it, the registers read after it. A declaration is a claim about the
@@ -112,13 +116,7 @@ pub(in crate::analysis::decompile) fn library_prototype(
         .map(|p| typelib::pass_of(p.ty, word, format))
         .collect();
     let params = if bitness == 32 {
-        passes
-            .iter()
-            .map(|p| match p {
-                Some(Pass::Int { bits: 64, .. } | Pass::Float(64)) => 2usize,
-                _ => 1,
-            })
-            .sum()
+        passes.iter().map(|p| typelib::words32(*p)).sum()
     } else {
         passes.len()
     };
@@ -138,11 +136,14 @@ pub(in crate::analysis::decompile) fn library_prototype(
     }
 }
 
-/// Returns what a declaration states a callee hands back.
+/// Returns what a declaration states a callee hands back: the prototype
+/// stated for the function the call enters, else the library's
+/// declaration of the import it reaches.
 ///
 /// # Arguments
 ///
-/// * `ctx` - The program and its analysis.
+/// * `ctx` - The program, its analysis and the overlay.
+/// * `target` - The callee's entry when the call names a function.
 /// * `reached` - The callee's entry or the import slot the call goes
 ///   through.
 ///
@@ -151,9 +152,15 @@ pub(in crate::analysis::decompile) fn library_prototype(
 /// What it hands back, or `None` when nothing declares the callee.
 pub(in crate::analysis::decompile) fn stated_returns(
     ctx: &Ctx<'_>,
+    target: Option<u64>,
     reached: Option<u64>,
 ) -> Option<Returns> {
     let word = u8::try_from(ctx.bitness).unwrap_or(64);
+    if let Some(p) = target.and_then(|t| ctx.overlay.prototypes.get(&t)) {
+        return Some(p.ret.as_ref().map_or(Returns::Nothing, |ty| {
+            Returns::of(ty.pass(&ctx.overlay.types, word, ctx.program.format), word)
+        }));
+    }
     library_decl(ctx, reached)
         .map(|d| Returns::of(typelib::pass_of(d.ret, word, ctx.program.format), word))
 }
@@ -208,26 +215,41 @@ fn negative(v: u64, bits: u8) -> Option<String> {
 
 impl Exec<'_, '_> {
     /// Notes the type a declared callee whose result the text binds
-    /// returns, when the type is as wide as the word and no float: the
-    /// variable holding only such results is declared of it
-    /// ([`Ctx::result_types`]).
+    /// returns (its stated prototype's, else the library's), when the type
+    /// is as wide as the word and no float: the variable holding only such
+    /// results is declared of it ([`Ctx::result_types`]).
     ///
     /// # Arguments
     ///
+    /// * `target` - The callee's entry when the call names a function.
     /// * `reached` - The callee's entry or the import slot the call goes
     ///   through.
     /// * `callee` - The callee as the call renders it.
-    pub(super) fn note_result_type(&mut self, reached: Option<u64>, callee: &str) {
-        let Some(decl) = library_decl(self.ctx, reached) else {
+    pub(super) fn note_result_type(
+        &mut self,
+        target: Option<u64>,
+        reached: Option<u64>,
+        callee: &str,
+    ) {
+        let word = u8::try_from(self.ctx.bitness).unwrap_or(64);
+        let format = self.ctx.program.format;
+        let stated = target
+            .and_then(|t| self.ctx.overlay.prototypes.get(&t))
+            .map(|p| {
+                p.ret
+                    .as_ref()
+                    .map(|ty| (ty.spell(), ty.pass(&self.ctx.overlay.types, word, format)))
+            });
+        let declared = match stated {
+            Some(ret) => ret,
+            None => library_decl(self.ctx, reached)
+                .map(|d| (d.ret.to_owned(), typelib::pass_of(d.ret, word, format))),
+        };
+        let Some((spelled, pass)) = declared else {
             return;
         };
-        let word = u8::try_from(self.ctx.bitness).unwrap_or(64);
-        let wide = typelib::pass_of(decl.ret, word, self.ctx.program.format)
-            .is_some_and(|p| p.bits(word) == word && !matches!(p, Pass::Float(_)));
-        if wide {
-            self.ctx
-                .result_types
-                .insert(callee.to_owned(), decl.ret.to_owned());
+        if pass.is_some_and(|p| p.bits(word) == word && !matches!(p, Pass::Float(_))) {
+            self.ctx.result_types.insert(callee.to_owned(), spelled);
         }
     }
 

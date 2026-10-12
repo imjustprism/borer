@@ -2253,7 +2253,15 @@ impl<'a> Exec<'_, 'a> {
         // says, so a register it says holds no result binds none; where the
         // code reads one anyway, the text follows the declaration and the
         // call says the code contradicts it.
-        let declared = stated_returns(self.ctx, reached).filter(|_| st0.is_none());
+        // INVARIANT: a call following a stated prototype passes the
+        // arguments it lists; where the callee's body reads past them, the
+        // ones the text leaves out are passed all the same.
+        if let Some(t) = target.filter(|t| self.ctx.overlay.prototypes.contains_key(t))
+            && callee_shape(self.ctx, t).is_some_and(|s| s.stated_short.is_some())
+        {
+            self.stated_contradicted = true;
+        }
+        let declared = stated_returns(self.ctx, target, reached).filter(|_| st0.is_none());
         let (uses_result, float_result) = match declared {
             Some(r) => {
                 let (rax, float, contradicted) = r.filter(uses_result, float_result);
@@ -2287,19 +2295,28 @@ impl<'a> Exec<'_, 'a> {
         } else {
             self.result_use(rest, rdxk, xmm0).0
         };
+        let hands_back_rdx = target.is_some_and(|t| {
+            self.ctx
+                .analysis
+                .function(t)
+                .is_some_and(|f| f.hands_back_rdx)
+        });
+        // INVARIANT: a stated prototype returns one value, so a callee
+        // stated with one hands nothing back in `rdx`; a caller that reads
+        // it anyway contradicts the prototype.
+        let stated_callee = target.is_some_and(|t| self.ctx.overlay.prototypes.contains_key(&t));
+        if stated_callee && hands_back_rdx && uses_rdx {
+            self.stated_contradicted = true;
+        }
         let mut second = (direct.is_some()
             && virt.is_none()
+            && !stated_callee
             && (uses_rdx || (uses_result && self.bitness() == 64))
-            && target.is_some_and(|t| {
-                self.ctx
-                    .analysis
-                    .function(t)
-                    .is_some_and(|f| f.hands_back_rdx)
-            }))
-        .then(|| {
-            let n = self.names();
-            format!("{} = {callee}__rdx({});", n.key(rdxk), args.join(", "))
-        });
+            && hands_back_rdx)
+            .then(|| {
+                let n = self.names();
+                format!("{} = {callee}__rdx({});", n.key(rdxk), args.join(", "))
+            });
         let result2 = second.is_some().then(|| {
             self.declare(rdxk, self.word_ty());
             rdxk
@@ -2351,7 +2368,7 @@ impl<'a> Exec<'_, 'a> {
         } else if uses_result {
             self.declare(rax, self.word_ty());
             if self.emit {
-                self.note_result_type(reached, &callee);
+                self.note_result_type(target, reached, &callee);
             }
             let n = self.names();
             // INVARIANT: a narrow result merges into the caller's `rax`,
@@ -2467,13 +2484,16 @@ impl<'a> Exec<'_, 'a> {
     /// `None` when the call leaves nothing, else whether the text binds
     /// the float it leaves.
     fn leaves_x87_float(&mut self, instr: &Instruction, target: Option<u64>) -> Option<bool> {
-        let declared = target
-            .and_then(|t| self.ctx.analysis.function(t))
-            .is_some_and(|f| {
-                f.signature.as_ref().map_or(f.ret_float.is_some(), |s| {
-                    crate::analysis::decompile::float_return(&s.ret)
-                })
-            });
+        let declared = match stated_returns(self.ctx, target, target) {
+            Some(r) => matches!(r, Returns::Float(_)),
+            None => target
+                .and_then(|t| self.ctx.analysis.function(t))
+                .is_some_and(|f| {
+                    f.signature.as_ref().map_or(f.ret_float.is_some(), |s| {
+                        crate::analysis::decompile::float_return(&s.ret)
+                    })
+                }),
+        };
         let ctx = &*self.ctx;
         let after = x87::after_call(
             &|va| ctx.decode(va),
@@ -2612,8 +2632,9 @@ impl<'a> Exec<'_, 'a> {
         })
     }
 
-    /// Tells whether a callee is known to return a value: its signature
-    /// declares a non-`void` return, or some caller reads its result.
+    /// Tells whether a callee is known to return a value: its stated
+    /// prototype or its signature declares a non-`void` return, or some
+    /// caller reads its result.
     ///
     /// An unknown callee is not, so a function ending in `f(); ret` stays
     /// `void` until something shows `f` produces a value.
@@ -2622,6 +2643,9 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `target` - The callee's entry when known.
     pub(super) fn callee_returns_value(&self, target: Option<u64>) -> bool {
+        if let Some(p) = target.and_then(|t| self.ctx.overlay.prototypes.get(&t)) {
+            return p.ret.is_some();
+        }
         let Some(f) = target.and_then(|t| self.ctx.analysis.function(t)) else {
             return false;
         };
@@ -2645,8 +2669,8 @@ impl<'a> Exec<'_, 'a> {
 
     /// Width in bits of a callee's result when it is narrower than the register.
     ///
-    /// The declared return type decides when there is one; otherwise the
-    /// widest read any caller makes of the result
+    /// The stated prototype's or the declared return type decides when
+    /// there is one; otherwise the widest read any caller makes of the result
     /// ([`Function::ret_width`](crate::analysis::Function::ret_width)).
     ///
     /// # Arguments
@@ -2658,6 +2682,12 @@ impl<'a> Exec<'_, 'a> {
     /// 8 or 16, or `None` when the result fills the register or nothing is
     /// known about it.
     pub(super) fn callee_return_bits(&self, target: Option<u64>) -> Option<u8> {
+        if target.is_some_and(|t| self.ctx.overlay.prototypes.contains_key(&t)) {
+            return match stated_returns(self.ctx, target, target)? {
+                Returns::Int(bits) if bits <= 16 => Some(bits),
+                Returns::Int(_) | Returns::Float(_) | Returns::Nothing => None,
+            };
+        }
         let f = target.and_then(|t| self.ctx.analysis.function(t))?;
         let bits = match &f.signature {
             Some(sig) => declared_bits(&sig.ret),

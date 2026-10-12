@@ -84,9 +84,12 @@ const OUTSIDE_FLOAT: &str = "an instruction outside the checked subset";
 /// Why a block is not checked: a call in it renders fewer stack words than
 /// its callee reads ([`Call::short`](super::lift::Call::short)).
 const SHORT_CALL: &str = "a call the text passes fewer words than its callee reads";
-/// Why a block is not checked: a call in it follows a declaration that the
-/// code around it contradicts ([`Call::contradicted`](super::lift::Call::contradicted)).
-const CONTRADICTED: &str = "a call whose declaration the code contradicts";
+/// Why a block is not checked: a declaration the code contradicts.
+///
+/// A call in it follows one ([`Call::contradicted`](super::lift::Call::contradicted)),
+/// or it returns from a function following a stated prototype the binary
+/// contradicts ([`Witness::stated_contradicted`]).
+const CONTRADICTED: &str = "a declaration the code contradicts";
 /// Why a block is not checked: it returns nothing where the function's
 /// callers read a result ([`Witness::result_read`]).
 const BARE_RETURN: &str = "a return of nothing the callers read a result from";
@@ -143,6 +146,11 @@ pub(super) struct Witness {
     /// The function's callers read what it hands back: some caller reads
     /// the return register after the call, or the result is a float.
     pub(super) result_read: bool,
+    /// The function follows a stated prototype the binary contradicts
+    /// ([`super::declared::contradictions`]): what its returns hand back
+    /// is the prototype's, which nothing compares with what the callers
+    /// read.
+    pub(super) stated_contradicted: bool,
     /// Callees that only jump through a register, with the register: a
     /// call to one goes where the register points.
     pub(super) dispatches: BTreeMap<u64, Register>,
@@ -2567,6 +2575,10 @@ impl Function<'_, '_> {
         if effects
             .iter()
             .any(|e| matches!(&e.kind, EffectKind::Call(c) if c.contradicted))
+            || (w.stated_contradicted
+                && code
+                    .last()
+                    .is_some_and(|i| i.flow_control() == FlowControl::Return))
         {
             return Err(CONTRADICTED);
         }

@@ -22,6 +22,7 @@ pub mod messages;
 mod naming;
 pub mod ports;
 pub mod protocol;
+pub mod protos;
 pub mod prototypes;
 pub mod qt;
 pub mod render;
@@ -1454,6 +1455,19 @@ pub struct Overlay {
     /// name. Structs reach the rendering as pointers; the types
     /// themselves live in [`Overlay::types`].
     pub applied: BTreeMap<u64, utypes::TypeExpr>,
+    /// Function entry to the prototype an agent stated for it: the
+    /// function's signature, its parameters' names and types, and the
+    /// arity and the result every call to it shows, ahead of what debug
+    /// information states. Part of [`Overlay::fingerprint`]; saved with a
+    /// project, which spells each one ([`protos::Proto::spell`]).
+    #[serde(default, skip)]
+    pub prototypes: BTreeMap<u64, protos::Proto>,
+    /// Function entry to the variables an agent named or typed in it: a
+    /// parameter renders by the name and the type everywhere, a stack slot
+    /// by the name, declared of the type where it is as wide. Part of
+    /// [`Overlay::fingerprint`]; saved with a project like the prototypes.
+    #[serde(default, skip)]
+    pub vars: BTreeMap<u64, BTreeMap<protos::VarKey, protos::Var>>,
     /// Name tables by the display name of the function encoding each
     /// ([`decompile::enum_tables`]); a caller comparing that function's
     /// result, or passing a constant to it, renders the constant by its
@@ -1580,7 +1594,8 @@ pub fn plain_text_cached(
 
 impl Overlay {
     /// A fingerprint of everything that changes a decompilation's text: the
-    /// names and the comments, folded in address order, then the name
+    /// names and the comments, folded in address order, the user types,
+    /// their applications, the stated prototypes and variables, then the name
     /// tables, folded by the function each is keyed under, then where the
     /// tables come from.
     ///
@@ -1641,6 +1656,27 @@ impl Overlay {
             fold(ty.spell().as_bytes());
             fold(&[0]);
         }
+        for (addr, proto) in &self.prototypes {
+            fold(&[3]);
+            fold(&addr.to_le_bytes());
+            fold(proto.spell().as_bytes());
+            fold(&[0]);
+        }
+        for (addr, vars) in &self.vars {
+            for (key, var) in vars {
+                fold(&[4]);
+                fold(&addr.to_le_bytes());
+                match key {
+                    protos::VarKey::Param(i) => fold(&[0, *i]),
+                    protos::VarKey::Slot(off) => {
+                        fold(&[1]);
+                        fold(&off.to_le_bytes());
+                    }
+                }
+                fold(var.spell().as_bytes());
+                fold(&[0]);
+            }
+        }
         for (function, table) in &self.enums {
             fold(function.as_bytes());
             fold(&[0]);
@@ -1660,9 +1696,9 @@ impl Overlay {
         h
     }
 
-    /// Returns the names, comments, types and applications alone, without
-    /// name tables: the overlay the binary's own tables are read under, so
-    /// reading one table never needs another.
+    /// Returns the names, comments, types, applications, prototypes and
+    /// variables alone, without name tables: the overlay the binary's own
+    /// tables are read under, so reading one table never needs another.
     #[must_use]
     pub(crate) fn without_tables(&self) -> Self {
         Self {
@@ -1670,6 +1706,8 @@ impl Overlay {
             comments: self.comments.clone(),
             types: self.types.clone(),
             applied: self.applied.clone(),
+            prototypes: self.prototypes.clone(),
+            vars: self.vars.clone(),
             ..Self::default()
         }
     }

@@ -22,6 +22,7 @@
 
 mod asserts;
 mod ctext;
+mod declared;
 mod emit;
 mod enums;
 mod expr;
@@ -189,10 +190,16 @@ struct Ctx<'a> {
     /// Bare name of the function, so its own `__FUNCSIG__` literal renders
     /// as the macro.
     own_name: std::sync::Arc<str>,
-    /// The return type the debug information recorded, `None` for `void` or
-    /// when the program carries none.
+    /// The prototype an agent stated for the function
+    /// ([`Overlay::prototypes`]), which the signature, the parameters and
+    /// the return shape follow ahead of debug information and inference.
+    stated: Option<&'a crate::analysis::protos::Proto>,
+    /// The return type the stated prototype gives, else the one the debug
+    /// information recorded; `None` for `void` or when nothing states one.
     debug_ret: Option<String>,
-    /// Parameters the debug information recorded, in order.
+    /// Parameters the stated prototype lists, else the ones the debug
+    /// information recorded, in order, each stated variable's name and
+    /// type over its position ([`declared::params`]).
     ///
     /// The compiler wrote these down, so they beat `a1`, `a2`, `a3` and
     /// `uint64_t` in both the signature and the body: a condition on
@@ -206,10 +213,11 @@ struct Ctx<'a> {
     /// so the first header that states one pays their walk once.
     debug_source: Option<(String, u32)>,
     /// The frame-relative locals the debug information states, as slot
-    /// offset to name; the names render where the synthesized `local_N`
-    /// would. The offsets are facts the file states, so they name slots
-    /// without touching their widths, which the lifting's own declarations
-    /// keep stating.
+    /// offset to name, each stated variable's name over its slot
+    /// ([`declared::locals`]); the names render where the synthesized
+    /// `local_N` would. The offsets are facts the file or the agent states,
+    /// so they name slots without touching their widths, which the
+    /// lifting's own declarations keep stating.
     debug_locals: std::sync::Arc<BTreeMap<i64, String>>,
     /// Entries the function's virtual calls resolved to (emission pass).
     vcalls: BTreeSet<u64>,
@@ -653,6 +661,9 @@ fn new_ctx<'a>(
     block_starts: BTreeSet<u64>,
     assume: &[(u8, u64)],
 ) -> Ctx<'a> {
+    let debug = program.debug_functions.iter().find(|d| d.low_pc == f.entry);
+    let stated = overlay.prototypes.get(&f.entry);
+    let vars = overlay.vars.get(&f.entry);
     Ctx {
         program,
         analysis,
@@ -688,27 +699,14 @@ fn new_ctx<'a>(
         ret_rdx: false,
         param_class: BTreeMap::new(),
         own_name: std::sync::Arc::from(expr::bare(&name_of(analysis, overlay, f.entry))),
-        debug_ret: program
-            .debug_functions
-            .iter()
-            .find(|d| d.low_pc == f.entry)
-            .and_then(|d| d.return_type.clone()),
-        debug_params: program
-            .debug_functions
-            .iter()
-            .find(|d| d.low_pc == f.entry)
-            .map_or_else(
-                || std::sync::Arc::from([]),
-                |d| std::sync::Arc::from(d.parameters.clone()),
-            ),
+        stated,
+        debug_ret: match stated {
+            Some(p) => p.ret.as_ref().map(crate::analysis::protos::CType::spell),
+            None => debug.and_then(|d| d.return_type.clone()),
+        },
+        debug_params: std::sync::Arc::from(declared::params(stated, debug, vars)),
         debug_source: pdb_sources(program, analysis).get(&f.entry).cloned(),
-        debug_locals: program
-            .debug_functions
-            .iter()
-            .find(|d| d.low_pc == f.entry)
-            .map_or_else(std::sync::Arc::default, |d| {
-                std::sync::Arc::new(d.locals.clone())
-            }),
+        debug_locals: std::sync::Arc::new(declared::locals(debug, vars)),
         vcalls: BTreeSet::new(),
         empty_calls: BTreeSet::new(),
         read_in_place: BTreeSet::new(),
@@ -1259,27 +1257,44 @@ fn decompile_with(
     ctx.result_param = shape.result_param;
     ctx.stack_params = shape.stack;
     ctx.rax_written = writes_rax(&ctx, &code);
-    ctx.unused_result = match &f.signature {
-        Some(s) => s.ret == "void",
-        None => f.returns_value == Some(false),
+    let word = u8::try_from(bitness).unwrap_or(64);
+    // INVARIANT: a stated prototype says what the function hands back,
+    // ahead of a signature string and of what its callers and exits show.
+    let stated_returns = ctx.stated.map(|p| match &p.ret {
+        None => lift::Returns::Nothing,
+        Some(ty) => lift::Returns::of(ty.pass(&overlay.types, word, program.format), word),
+    });
+    ctx.unused_result = match (stated_returns, &f.signature) {
+        (Some(r), _) => r == lift::Returns::Nothing,
+        (None, Some(s)) => s.ret == "void",
+        (None, None) => f.returns_value == Some(false),
     };
-    let hidden = usize::from(f.signature.as_ref().is_some_and(|s| s.by_pointer));
-    ctx.ret_lane = lift::ret_lane(
-        &code,
-        &succs,
-        f.signature.as_ref().map(|s| s.ret.as_str()),
-        analysis,
-    );
-    ctx.ret_float = f
-        .signature
-        .as_ref()
-        .map_or(f.ret_float.is_some(), |s| float_return(&s.ret));
+    let hidden =
+        usize::from(ctx.stated.is_none() && f.signature.as_ref().is_some_and(|s| s.by_pointer));
+    ctx.ret_lane = match stated_returns {
+        Some(lift::Returns::Int(bits @ (8 | 16))) => bits,
+        Some(_) => 64,
+        None => lift::ret_lane(
+            &code,
+            &succs,
+            f.signature.as_ref().map(|s| s.ret.as_str()),
+            analysis,
+        ),
+    };
+    ctx.ret_float = match stated_returns {
+        Some(r) => matches!(r, lift::Returns::Float(_)),
+        None => f
+            .signature
+            .as_ref()
+            .map_or(f.ret_float.is_some(), |s| float_return(&s.ret)),
+    };
     // INVARIANT: a 32-bit function a whole-program compiler gave a
     // convention of its own hands its double back in `xmm0` (`movsd xmm0,
     // [ebp-0x10]` on one exit, `xorps xmm0, xmm0` on the other), where its
     // callers read it; read as returning nothing, its every `return` lost
     // the value.
     ctx.ret_sse = bitness == 32
+        && ctx.stated.is_none()
         && f.signature.is_none()
         && f.ret_float.is_none()
         && lift::sse_callee(&ctx, Some(f.entry)).returns;
@@ -1293,7 +1308,7 @@ fn decompile_with(
     // INVARIANT: on a 32-bit target `edx` is scratch a caller reading it
     // after the call often only finds left over; only a 64-bit function's
     // own text shows its second result.
-    ctx.ret_rdx = bitness == 64 && f.hands_back_rdx;
+    ctx.ret_rdx = bitness == 64 && f.hands_back_rdx && ctx.stated.is_none();
     if let Some(sig) = &f.signature {
         if ctx.this_param
             && let Some(c) = classes::class_of(&sig.name)
@@ -1446,7 +1461,11 @@ fn decompile_with(
     }
     // INVARIANT: a float handed back in `xmm0` is read by callers that
     // read no `eax` ([`Ctx::ret_sse`]), whatever the verdict on `eax` says.
-    let body = if f.returns_value == Some(false) && f.signature.is_none() && !ctx.ret_sse {
+    let body = if f.returns_value == Some(false)
+        && f.signature.is_none()
+        && ctx.stated.is_none()
+        && !ctx.ret_sse
+    {
         drop_returned_values(&body)
     } else {
         body
@@ -1454,14 +1473,17 @@ fn decompile_with(
     // INVARIANT: a function whose every `return` is bare returns nothing,
     // and so a call's result assigned to the return register right before
     // one is dead: kept on one path for a join that hands back nothing.
-    let returns_nothing = f.signature.as_ref().map_or_else(
-        || {
-            !body
-                .lines()
-                .any(|l| matches!(l.trim().strip_prefix("return "), Some(v) if v != ";"))
-        },
-        |s| s.ret == "void",
-    );
+    let returns_nothing = match stated_returns {
+        Some(r) => r == lift::Returns::Nothing,
+        None => f.signature.as_ref().map_or_else(
+            || {
+                !body
+                    .lines()
+                    .any(|l| matches!(l.trim().strip_prefix("return "), Some(v) if v != ";"))
+            },
+            |s| s.ret == "void",
+        ),
+    };
     let body = if cleanup {
         cleanup_text(&body, ctx.ret_rdx.then_some("rdx"))
     } else {
@@ -1481,12 +1503,20 @@ fn decompile_with(
     // every reader of the memo gets, so the layout pass below counts them
     // the way it counts a class-named field, and before the user enums
     // below, whose entries key the access a renamed field renders.
-    let user_typed = typed_globals(
+    let mut user_typed = typed_globals(
         overlay,
         &ctx.globals,
         &names,
         u64::try_from(ctx.conv.word).unwrap_or(8),
     );
+    // The fields read through a parameter or a local a stated type points
+    // at a user struct, named the way a typed global's are.
+    user_typed.extend(declared::typed_pointers(
+        overlay,
+        f.entry,
+        &names,
+        u64::try_from(ctx.conv.word).unwrap_or(8),
+    ));
     let body = if user_typed.is_empty() {
         body
     } else {
@@ -1526,11 +1556,29 @@ fn decompile_with(
     let ret_ty = recorded_ret.unwrap_or(inferred);
     let typed = param_types(&ctx, &code, &succs, entry_block);
     let name = name_of(analysis, overlay, f.entry);
-    let declared: Vec<String> = f
-        .signature
-        .as_ref()
-        .map(|s| s.params.clone())
-        .unwrap_or_default();
+    let declared: Vec<String> = match ctx.stated {
+        Some(_) => ctx
+            .debug_params
+            .iter()
+            .map(|p| p.type_name.clone().unwrap_or_default())
+            .collect(),
+        None => f
+            .signature
+            .as_ref()
+            .map(|s| s.params.clone())
+            .unwrap_or_default(),
+    };
+    let var_typed: BTreeSet<usize> = overlay
+        .vars
+        .get(&f.entry)
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| match (k, &v.ty) {
+            (crate::analysis::protos::VarKey::Param(i), Some(_)) => Some(usize::from(*i)),
+            (crate::analysis::protos::VarKey::Param(_), None)
+            | (crate::analysis::protos::VarKey::Slot(_), _) => None,
+        })
+        .collect();
     let class = classes::class_of(expr::bare(&name)).unwrap_or("");
     let ret_ty = f.signature.as_ref().map_or_else(
         || {
@@ -1541,6 +1589,10 @@ fn decompile_with(
         },
         |s| s.ret.clone(),
     );
+    let ret_ty = match ctx.stated {
+        Some(_) => ctx.debug_ret.clone().unwrap_or_else(|| "void".to_owned()),
+        None => ret_ty,
+    };
     let lead = usize::from(ctx.this_param) + usize::from(ctx.result_param.is_some());
     // INVARIANT: the shape's count is what every call passes, so it is
     // what the signature lists; a stack slot the body reads past it reads
@@ -1598,7 +1650,14 @@ fn decompile_with(
                 .get(i)
                 .and_then(|p| p.type_name.clone())
                 .or_else(|| typed.get(&i).cloned());
-            match (declared.get(i - lead), hint, recorded) {
+            // INVARIANT: a type an agent stated for the parameter beats
+            // what the callers hint, as a declaration does.
+            let stated_ty = recorded.clone().filter(|_| var_typed.contains(&i));
+            match (
+                stated_ty.as_ref().or(declared.get(i - lead)),
+                hint,
+                recorded,
+            ) {
                 (Some(ty), _, _) if ty.ends_with('*') || ty.ends_with('&') => {
                     format!("{ty}{key}")
                 }
@@ -1672,6 +1731,16 @@ fn decompile_with(
     if f.hands_back_rdx {
         let rdx = if ctx.bitness == 64 { "rdx" } else { "edx" };
         let _ = writeln!(out, "// hands back {rdx}: a caller reads it after the call");
+    }
+    let against: Vec<String> = stated_returns
+        .map(|r| declared::contradictions(f, &shape, r, bitness))
+        .unwrap_or_default();
+    if !against.is_empty() {
+        let _ = writeln!(
+            out,
+            "// stated prototype contradicted: {}",
+            against.join("; ")
+        );
     }
     if let Some(asserts) = asserts_of(&body) {
         let _ = writeln!(out, "// asserts: {asserts}");
@@ -1774,6 +1843,7 @@ fn decompile_with(
     let mut by_type: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
     let result_typed = typed_results(&body, &ctx.result_types);
+    let slot_stated = declared::slot_types(overlay, f.entry, &ctx.declared, word, program.format);
     for (k, ty) in &ctx.declared {
         if matches!(k, Key::Slot(o) if names.stack_param(*o).is_some()) {
             continue;
@@ -1798,7 +1868,8 @@ fn decompile_with(
         }
         let stated = match k {
             Key::Reg(_) => result_typed.get(&name).cloned(),
-            Key::Slot(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
+            Key::Slot(o) => slot_stated.get(o).cloned(),
+            Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
         };
         by_type
             .entry(stated.unwrap_or_else(|| ty.name().to_owned()))
@@ -1892,6 +1963,7 @@ fn decompile_with(
             ret_float: ctx.ret_float,
             ret_xmm: ctx.ret_float && (bitness == 64 || ctx.ret_sse),
             result_read: f.returns_value == Some(true) || ctx.ret_float,
+            stated_contradicted: !against.is_empty(),
             dispatches: std::mem::take(&mut ctx.pointer_dispatches)
                 .into_iter()
                 .chain(std::mem::take(&mut ctx.dispatches))

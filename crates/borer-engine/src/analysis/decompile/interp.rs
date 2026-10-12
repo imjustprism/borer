@@ -422,6 +422,32 @@ fn debug_local(program: &Program, entry: u64, name: &str) -> Option<i64> {
         })
 }
 
+/// The frame offset a local an agent named stands for
+/// ([`Overlay::vars`]), read back from the overlay the text was written
+/// under, as [`debug_local`] reads a debug-named one.
+///
+/// # Arguments
+///
+/// * `overlay` - The overlay the text was written under.
+/// * `entry` - The function the text decompiled.
+/// * `name` - The declared name.
+///
+/// # Returns
+///
+/// The slot offset, or `None` when no stated variable of the function is
+/// a stack slot so named.
+fn stated_local(overlay: &Overlay, entry: u64, name: &str) -> Option<i64> {
+    overlay
+        .vars
+        .get(&entry)?
+        .iter()
+        .find_map(|(key, var)| match key {
+            crate::analysis::protos::VarKey::Slot(off) if var.name == name => Some(*off),
+            crate::analysis::protos::VarKey::Param(_)
+            | crate::analysis::protos::VarKey::Slot(_) => None,
+        })
+}
+
 /// The type a layout line's width letter spells.
 ///
 /// # Arguments
@@ -1140,8 +1166,9 @@ impl<'p> Script<'p> {
         for (name, ty, at) in &head.declared {
             let slot = if let Some(addr) = at {
                 Slot::Mem(*addr)
-            } else if let Some(off) =
-                slot_offset(name, wbytes).or_else(|| debug_local(program, entry, name))
+            } else if let Some(off) = slot_offset(name, wbytes)
+                .or_else(|| stated_local(overlay, entry, name))
+                .or_else(|| debug_local(program, entry, name))
             {
                 let addr = entry_sp.wrapping_add_signed(off);
                 frame_low = frame_low.min(addr);
