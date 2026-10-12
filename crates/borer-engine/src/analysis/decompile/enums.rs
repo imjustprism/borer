@@ -315,7 +315,8 @@ pub(super) fn called_tables(
 ///
 /// Two shapes, each read off the cleaned body: `v = f(x, "LIT"); if (v != 0)
 /// { return K; }` repeated with one comparator `f` (or, for a ladder's last
-/// level, `if (v == 0) { return d; } return K;`) maps strings to constants
+/// level, `if (v == 0) { return d; } return K;`; either with the call in
+/// the condition, `if (f(x, "LIT") != 0)`) maps strings to constants
 /// (a parser); `if (v == K) { return "LIT"; }` or `... { t =
 /// "LIT"; }` arms, as a run or an `else if` chain (and `case K:` labels,
 /// a last level inverted to `if (v != K) { return d; } return "LIT";`, and
@@ -347,8 +348,27 @@ pub fn enum_table(body: &str, params: &[String]) -> Option<EnumTable> {
     let mut tested: Option<String> = None;
     for (i, line) in lines.iter().enumerate() {
         let next = |k: usize| lines.get(i + k).copied().unwrap_or("");
-        if let Some((var, call)) = line.split_once(" = ")
-            && let Some(args) = call.strip_suffix(");")
+        let assigned = || {
+            let (var, call) = line.split_once(" = ")?;
+            let test = |op: &str| next(1) == format!("if ({var} {op} 0) {{");
+            let unequal = if test("!=") {
+                true
+            } else if test("==") {
+                false
+            } else {
+                return None;
+            };
+            Some((call.strip_suffix(';')?, unequal, 1))
+        };
+        let in_test = || {
+            let cond = line.strip_prefix("if (")?.strip_suffix(") {")?;
+            match cond.strip_suffix(" != 0") {
+                Some(call) => Some((call, true, 0)),
+                None => Some((cond.strip_suffix(" == 0")?, false, 0)),
+            }
+        };
+        if let Some((call, unequal, o)) = assigned().or_else(in_test)
+            && let Some(args) = call.strip_suffix(')')
             && let Some((callee, args)) = args.split_once('(')
             && let Some((_, lit)) = args.rsplit_once(", ")
             && let Some(lit) = literal_of(lit)
@@ -359,13 +379,10 @@ pub fn enum_table(body: &str, params: &[String]) -> Option<EnumTable> {
                     .and_then(|r| r.strip_suffix(';'))
                     .and_then(parse_const)
             };
-            let hit = if next(1) == format!("if ({var} != 0) {{") && next(3) == "}" {
-                ret(next(2))
-            } else if next(1) == format!("if ({var} == 0) {{")
-                && ret(next(2)).is_some()
-                && next(3) == "}"
-            {
-                ret(next(4))
+            let hit = if unequal && next(o + 2) == "}" {
+                ret(next(o + 1))
+            } else if !unequal && ret(next(o + 1)).is_some() && next(o + 2) == "}" {
+                ret(next(o + 3))
             } else {
                 None
             };
@@ -526,8 +543,12 @@ pub fn apply_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
             text = rename_compared(&text, var, table);
         }
         for (callee, table) in enums {
-            if let Some(pos) = table.param {
-                text = rename_argument(&text, callee, pos, table);
+            match table.param {
+                Some(pos) => text = rename_argument(&text, callee, pos, table),
+                None => {
+                    text =
+                        rename_call_compared(&text, callee, |k| table.member(k).map(str::to_owned));
+                }
             }
         }
         if let Some((lhs, rhs)) = t.split_once(" = ")
@@ -582,6 +603,13 @@ pub(super) fn apply_results(body: &str, groups: &BTreeMap<String, (&'static str,
                 crate::analysis::typelib::render(group, v, *bits)
             });
         }
+        for (callee, (g, bits)) in groups {
+            if let Some(group) = crate::analysis::typelib::group(g) {
+                text = rename_call_compared(&text, callee, |v| {
+                    crate::analysis::typelib::render(group, v, *bits)
+                });
+            }
+        }
         let t = line.trim();
         if let Some((lhs, rhs)) = t.split_once(" = ")
             && is_ident(lhs)
@@ -603,6 +631,50 @@ pub(super) fn apply_results(body: &str, groups: &BTreeMap<String, (&'static str,
         out.push('\n');
     }
     out
+}
+
+/// Names the numbers a call's own result is compared with on one line:
+/// `callee(...) == K`, where a condition took the call in rather than
+/// assigning its result first.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `callee` - The function called.
+/// * `name` - Names a value, or says it has no name.
+fn rename_call_compared(line: &str, callee: &str, name: impl Fn(u64) -> Option<String>) -> String {
+    let mut text = line.to_owned();
+    for at in word_positions(line, callee).into_iter().rev() {
+        let open = at + callee.len();
+        if text.as_bytes().get(open) != Some(&b'(') {
+            continue;
+        }
+        let Some(after) = matching_paren(&text, open).map(|close| close + 1) else {
+            continue;
+        };
+        for op in [" == ", " != "] {
+            let Some(rest) = text.get(after..).and_then(|r| r.strip_prefix(op)) else {
+                continue;
+            };
+            let sign = usize::from(rest.starts_with('-'));
+            let len = sign
+                + rest
+                    .get(sign..)
+                    .unwrap_or("")
+                    .find(|c: char| !c.is_ascii_alphanumeric())
+                    .unwrap_or(rest.len() - sign);
+            let token = rest.get(..len).unwrap_or("");
+            let value = token.strip_prefix('-').map_or_else(
+                || parse_const(token),
+                |m| parse_const(m).map(u64::wrapping_neg),
+            );
+            if let Some(named) = value.and_then(&name) {
+                let start = after + op.len();
+                text.replace_range(start..start + len, &named);
+            }
+        }
+    }
+    text
 }
 
 /// Names the numbers compared against `var` on one line by `name`.

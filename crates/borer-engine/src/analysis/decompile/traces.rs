@@ -813,6 +813,23 @@ fn simple(t: &str, line: usize) -> Result<Stmt, &'static str> {
     })
 }
 
+/// The condition in the parentheses after `kw` on a line.
+///
+/// # Arguments
+///
+/// * `line` - The line, blanked.
+/// * `kw` - What stands before the parenthesis: `if (` or `while (`.
+///
+/// # Returns
+///
+/// The text between the parentheses, or `None` when the line has no such
+/// condition.
+fn condition<'l>(line: &'l str, kw: &str) -> Option<&'l str> {
+    let open = line.find(kw)? + kw.len() - 1;
+    let close = matching_paren(line, open)?;
+    line.get(open + 1..close)
+}
+
 /// Blanks the parts of a line no step can come from: the contents of its
 /// string literals, and its comments.
 ///
@@ -934,9 +951,13 @@ impl Builder<'_> {
     /// * `next` - The node after the calls.
     fn chain(&mut self, line: usize, part: Option<&str>, next: u32) -> u32 {
         let text = part.unwrap_or_else(|| {
-            self.lines
+            let whole = self
+                .lines
                 .get(line.saturating_sub(self.base + 1))
-                .map_or("", String::as_str)
+                .map_or("", String::as_str);
+            condition(whole, "if (")
+                .filter(|_| whole.starts_with("if ("))
+                .map_or(whole, |c| whole.get(c.len() + 5..).unwrap_or(""))
         });
         let calls = calls_in(text, self.names);
         let site = u64::try_from(line).unwrap_or(0);
@@ -956,6 +977,58 @@ impl Builder<'_> {
             node = self.g.add(Node::Call(callee, node), site);
         }
         node
+    }
+
+    /// The test a condition makes, its calls run as C runs them: the
+    /// operands of a top-level `&&` or `||` one at a time, a later one only
+    /// when the earlier ones left the outcome open.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The 1-based line number.
+    /// * `cond` - The condition.
+    /// * `t` - Where the text goes when it holds.
+    /// * `f` - Where it goes otherwise.
+    ///
+    /// # Returns
+    ///
+    /// The node that starts the test.
+    fn test(&mut self, line: usize, cond: &str, t: u32, f: u32) -> u32 {
+        let cond = cond.trim();
+        let inner = cond
+            .strip_prefix('(')
+            .and_then(|r| r.strip_suffix(')'))
+            .filter(|_| matching_paren(cond, 0) == Some(cond.len() - 1))
+            .unwrap_or(cond);
+        if let Some((op, parts)) = super::structure::logical_operands(inner) {
+            let mut entry: Option<u32> = None;
+            for part in parts.iter().rev() {
+                entry = Some(match entry {
+                    None => self.test(line, part, t, f),
+                    Some(rest) if op == "||" => self.test(line, part, t, rest),
+                    Some(rest) => self.test(line, part, rest, f),
+                });
+            }
+            if let Some(e) = entry {
+                return e;
+            }
+        }
+        let go = self.g.add(Node::Go(vec![t, f]), 0);
+        self.chain(line, Some(cond), go)
+    }
+
+    /// The condition of the structure that opens or closes on a line.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The 1-based line number.
+    /// * `kw` - What stands before its parenthesis: `if (` or `while (`.
+    fn condition_at(&self, line: usize, kw: &str) -> String {
+        self.lines
+            .get(line.saturating_sub(self.base + 1))
+            .and_then(|l| condition(l, kw))
+            .unwrap_or("")
+            .to_owned()
     }
 
     /// A silent node with no successor yet.
@@ -1036,8 +1109,8 @@ impl Builder<'_> {
             Stmt::If(line, then, other) => {
                 let t = self.run(then, next, brk, cont)?;
                 let f = self.run(other, next, brk, cont)?;
-                let test = self.g.add(Node::Go(vec![t, f]), 0);
-                self.chain(*line, None, test)
+                let cond = self.condition_at(*line, "if (");
+                self.test(*line, &cond, t, f)
             }
             Stmt::Loop(body) => {
                 let head = self.hole();
@@ -1046,11 +1119,12 @@ impl Builder<'_> {
                 head
             }
             Stmt::While(line, body) => {
-                let test = self.hole();
-                let cond = self.chain(*line, None, test);
-                let entry = self.run(body, cond, Some(next), Some(cond))?;
-                self.fill(test, vec![entry, next]);
-                cond
+                let start = self.hole();
+                let entry = self.run(body, start, Some(next), Some(start))?;
+                let cond = self.condition_at(*line, "while (");
+                let test = self.test(*line, &cond, entry, next);
+                self.fill(start, vec![test]);
+                start
             }
             Stmt::For(line, body) => {
                 let header = self
@@ -1065,18 +1139,19 @@ impl Builder<'_> {
                 let [init, test_part, step] = parts.as_slice() else {
                     return Err("for header without three parts");
                 };
-                let test = self.hole();
-                let cond = self.chain(*line, Some(test_part), test);
-                let inc = self.chain(*line, Some(step), cond);
+                let start = self.hole();
+                let inc = self.chain(*line, Some(step), start);
                 let entry = self.run(body, inc, Some(next), Some(inc))?;
-                self.fill(test, vec![entry, next]);
-                self.chain(*line, Some(init), cond)
+                let test = self.test(*line, test_part, entry, next);
+                self.fill(start, vec![test]);
+                self.chain(*line, Some(init), start)
             }
             Stmt::Do(body, line) => {
-                let test = self.hole();
-                let cond = self.chain(*line, None, test);
-                let entry = self.run(body, cond, Some(next), Some(cond))?;
-                self.fill(test, vec![entry, next]);
+                let start = self.hole();
+                let entry = self.run(body, start, Some(next), Some(start))?;
+                let cond = self.condition_at(*line, "while (");
+                let test = self.test(*line, &cond, entry, next);
+                self.fill(start, vec![test]);
                 entry
             }
             Stmt::Switch(line, arms) => {

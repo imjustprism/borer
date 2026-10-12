@@ -10,6 +10,11 @@ use super::*;
 /// the block as written either way and a label nobody wrote is a goto that
 /// lands nowhere.
 ///
+/// A call whose result only the block's branch reads is written inside the
+/// condition rather than on a line before it ([`call_in_cond`]); a block
+/// ending in such a call takes the test it falls into as its own branch
+/// ([`call_then_test`]).
+///
 /// In order: a natural loop headed here ([`try_loop`]); the block's label and
 /// lines; a jump-table dispatch as a `switch` ([`try_switch`]) or, when that
 /// fails, a switch of gotos; an unconditional jump; a block that simply
@@ -73,7 +78,7 @@ pub(super) fn emit_block<L: Lifter>(
     if let Some(next) = try_loop(ctx, st, i, out, depth) {
         return next;
     }
-    let block_out = run_block(ctx, st, i);
+    let mut block_out = run_block(ctx, st, i);
     let _ = writeln!(out, "{}", label(st.blocks[i].start));
     let lines_at = out.len();
     for l in &block_out.lines {
@@ -108,6 +113,19 @@ pub(super) fn emit_block<L: Lifter>(
         let _ = writeln!(out, "{}", jump_to(st, t));
         return i + 1;
     }
+    let mut call = block_out
+        .branch
+        .as_ref()
+        .and_then(|br| call_in_cond(ctx, st, i, &block_out, &br.cond));
+    let tested = match &block_out.branch {
+        Some(_) => None,
+        None => call_then_test(ctx, st, i, &block_out),
+    };
+    if let Some((s, br, in_cond)) = tested {
+        consume(st, i, s, &mut Journal::default());
+        call = Some(in_cond);
+        block_out.branch = Some(br);
+    }
     let Some(br) = block_out.branch else {
         if matches!(st.blocks[i].term, BlockTerm::Fall | BlockTerm::Call)
             && let Some(&s) = st.succs[i].first()
@@ -136,13 +154,32 @@ pub(super) fn emit_block<L: Lifter>(
     if let Some(next) = ladder::try_ladder(ctx, st, i, &br.cond, t, f, out, depth) {
         return next;
     }
+    let kept = call
+        .as_ref()
+        .map_or(block_out.lines.len(), |(kept, _)| *kept);
+    let header_lines = block_out.lines.get(..kept).unwrap_or(&[]);
+    if kept < block_out.lines.len() {
+        out.truncate(lines_at);
+        for l in header_lines {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
     let mut journal = Journal::default();
     let t = follow_trampoline(ctx, st, i, t, &mut journal);
     let f = follow_trampoline(ctx, st, i, f, &mut journal);
-    let (guard, t, f) = merge_guard(ctx, st, i, br.cond, t, f);
+    let (guard, t, f) = merge_guard(ctx, st, i, (br.cond, call.map(|(_, c)| c)), t, f);
     let t = follow_trampoline(ctx, st, i, t, &mut journal);
     let f = follow_trampoline(ctx, st, i, f, &mut journal);
     if t == f {
+        if guard.calls() {
+            let _ = writeln!(
+                out,
+                "if ({}) {{
+}}",
+                guard.render(&names, Side::Target)
+            );
+        }
         let _ = writeln!(out, "{}", goto(st.start(t)));
         return i + 1;
     }
@@ -170,7 +207,6 @@ pub(super) fn emit_block<L: Lifter>(
             &mut buf,
             depth + 1,
         );
-        let header_lines = &block_out.lines;
         if !header_lines.is_empty() && buf.contains("continue;") {
             out.truncate(lines_at);
             let _ = writeln!(out, "while (1) {{");
@@ -192,11 +228,11 @@ pub(super) fn emit_block<L: Lifter>(
             buf.push('\n');
         }
         let var = match &guard {
-            Guard::One(c) => match &c.flags {
+            Guard::One(c, None) => match &c.flags {
                 Flags::Cmp(Expr::Var(v), _, _) => Some(names.key(*v)),
                 _ => None,
             },
-            Guard::Or(..) | Guard::And(..) => None,
+            Guard::One(_, Some(_)) | Guard::Or(..) | Guard::And(..) => None,
         };
         let mut for_sugar = false;
         if let Some(v) = var
@@ -302,21 +338,31 @@ pub(super) fn emit_block<L: Lifter>(
             if then_first {
                 let mut buf = String::new();
                 emit_run(ctx, st, &then, st.start_of(f), None, &mut buf, depth + 1);
-                push_if(out, &guard.render(&names, Side::Target), &buf);
+                push_if(
+                    out,
+                    &guard.render(&names, Side::Target),
+                    &buf,
+                    guard.calls(),
+                );
                 let _ = writeln!(out, "{}", goto(st.start(f)));
                 return f;
             }
             if els_ok {
                 let mut buf = String::new();
                 emit_run(ctx, st, &els, st.start_of(t), None, &mut buf, depth + 1);
-                push_if(out, &guard.render(&names, Side::Fall), &buf);
+                push_if(out, &guard.render(&names, Side::Fall), &buf, guard.calls());
                 let _ = writeln!(out, "{}", goto(st.start(t)));
                 return t;
             }
             if then_ok {
                 let mut buf = String::new();
                 emit_run(ctx, st, &then, st.start_of(f), None, &mut buf, depth + 1);
-                push_if(out, &guard.render(&names, Side::Target), &buf);
+                push_if(
+                    out,
+                    &guard.render(&names, Side::Target),
+                    &buf,
+                    guard.calls(),
+                );
                 let _ = writeln!(out, "{}", goto(st.start(f)));
                 return f;
             }
@@ -374,9 +420,19 @@ pub(super) fn emit_block<L: Lifter>(
                     }
                 }
                 if is_dead_body(&else_buf) {
-                    push_if(out, &guard.render(&names, Side::Target), &then_buf);
+                    push_if(
+                        out,
+                        &guard.render(&names, Side::Target),
+                        &then_buf,
+                        guard.calls(),
+                    );
                 } else if is_dead_body(&then_buf) {
-                    push_if(out, &guard.render(&names, Side::Fall), &else_buf);
+                    push_if(
+                        out,
+                        &guard.render(&names, Side::Fall),
+                        &else_buf,
+                        guard.calls(),
+                    );
                 } else {
                     let _ = writeln!(out, "if ({}) {{", guard.render(&names, Side::Target));
                     out.push_str(&indent(&then_buf));
@@ -410,7 +466,7 @@ pub(super) fn emit_block<L: Lifter>(
             // A copy that is nothing but a jump (a trampoline) gains nothing
             // as an arm: it stays a goto either way.
             if body.lines().any(|l| !is_goto(l.trim_start())) {
-                push_if(out, &guard.render(&names, side), &body);
+                push_if(out, &guard.render(&names, side), &body, guard.calls());
                 let _ = writeln!(out, "{}", goto(st.start(other)));
                 return i + 1;
             }
@@ -1084,15 +1140,17 @@ pub(super) fn is_dead_body(buf: &str) -> bool {
     buf.lines().all(|l| l.trim().is_empty() || is_label(l))
 }
 
-/// Emits `if (cond) { body }`, or nothing for a dead body.
+/// Emits `if (cond) { body }`, or nothing for a dead body unless the
+/// condition calls something, which runs whatever the arm holds.
 ///
 /// # Arguments
 ///
 /// * `out` - Receives the text.
 /// * `cond` - The rendered condition.
 /// * `body` - The arm's text.
-pub(super) fn push_if(out: &mut String, cond: &str, body: &str) {
-    if is_dead_body(body) {
+/// * `calls` - Whether the condition calls a function ([`Guard::calls`]).
+pub(super) fn push_if(out: &mut String, cond: &str, body: &str, calls: bool) {
+    if is_dead_body(body) && !calls {
         return;
     }
     let _ = writeln!(out, "if ({cond}) {{");

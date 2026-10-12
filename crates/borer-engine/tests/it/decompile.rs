@@ -2622,18 +2622,22 @@ fn rotated_loops_structure_from_their_header() {
     assert!(out.contains("Base::vfunc_1("), "{out}");
 }
 
-/// A small one-way block two guards share is copied into each guard's arm,
-/// the other arm's start included.
+/// Two guards that share a small one-way block are one guard when the
+/// second tests a call's result alone.
 ///
 /// `GX`'s guards both jump to `X: rdi = 0;`, which leads into the join the
-/// main path falls into; `X` starts the first guard's arm and is reached
-/// again inside the other arm, where it is copied rather than absorbed, so
-/// both arms meet at the join and no `goto` remains.
+/// main path falls into; the second guard tests what a call returned, so
+/// it is the first one's second term, `X` is the one arm the pair guards,
+/// written once, and no `goto` remains.
 #[test]
 fn shared_one_way_block_is_copied_into_the_other_arm() {
     let out = dc(0x1f00);
     assert!(!out.contains("goto "), "{out}");
-    assert_eq!(out.matches("rdi = 0;").count(), 2, "{out}");
+    assert!(
+        out.contains("if (a1 == 0 || Base::vfunc_1() != 0) {"),
+        "{out}"
+    );
+    assert_eq!(out.matches("rdi = 0;").count(), 1, "{out}");
     assert!(out.contains("return rdi"), "{out}");
 }
 
@@ -2646,7 +2650,7 @@ fn byte_wide_call_results_read_without_a_mask() {
     let out = dc(0x1f40);
     assert!(!out.contains("& 0xff"), "{out}");
     assert!(
-        out.contains("rax == 0") || out.contains("rax != 0"),
+        out.contains("sub_1f30() == 0") || out.contains("sub_1f30() != 0"),
         "{out}"
     );
 }
@@ -2811,21 +2815,22 @@ fn wide_read_only_literals_render_wide() {
     assert!(out.contains("L\"AES\""), "{out}");
 }
 
-/// A conditional `goto` over a short flat run becomes an `if` around it.
+/// A guard whose arm has two exits structures once its call is a term.
 ///
-/// `GC`'s guarded arm has two exits, so neither side structures and the
-/// guard is emitted as a jump over the arm's two lines to the join's
-/// label; the run becomes the arm of the inverted guard, and the arm's own
-/// escape, a jump to a returning line, is copied in place. The callee is a
-/// bare `ret`, which leaves `rcx` and `rdx` as it found them, so the stores
-/// after the join still read the parameters.
+/// `GC`'s guarded arm calls and leaves both to the join `J` and to `F`, the
+/// join falling into `F`. The call's result decides alone, so it is the
+/// guard's second term and the two tests guard the stores together, with
+/// no jump over a run left. The callee is a bare `ret`, which leaves `rcx`
+/// and `rdx` as it found them, so the stores still read the parameters.
 #[test]
 fn conditional_gotos_over_a_short_run_become_an_if() {
     let out = dc(0x4180);
-    assert!(out.contains("if (a1 != 0) {"), "{out}");
-    assert!(out.contains("  rax = Base::vfunc_1("), "{out}");
+    assert!(
+        out.contains("if (a1 == 0 || Base::vfunc_1() != 0) {"),
+        "{out}"
+    );
     assert_eq!(out.matches("goto ").count(), 0, "{out}");
-    assert!(out.contains("    return 13;"), "{out}");
+    assert_eq!(out.matches("return 13;").count(), 1, "{out}");
     assert!(out.contains("*(uint32_t*)a2 = a1;"), "{out}");
 }
 
@@ -3091,6 +3096,31 @@ fn joined_truth_values_read_as_a_chain() {
     );
 }
 
+/// A call whose result only the branch after it reads is written inside
+/// the condition, and a guard chain takes it in as one of its terms.
+///
+/// `test rcx,rcx; je N; call F; test eax,eax; je N; mov eax,7; ret; N: xor
+/// eax,eax; ret` with `F: mov eax,1; ret`: neither side reads `eax` after
+/// the test, so the call is the second term of the guard, after the test
+/// of `a1` that skips it, and no line assigns its result.
+#[test]
+fn a_call_tested_once_is_written_in_its_condition() {
+    let mut code = vec![
+        0x48, 0x85, 0xc9, 0x74, 0x0f, 0xe8, 0x36, 0x00, 0x00, 0x00, 0x85, 0xc0, 0x74, 0x06, 0xb8,
+        0x07, 0x00, 0x00, 0x00, 0xc3, 0x31, 0xc0, 0xc3,
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains("= sub_140001040("), "{text}");
+    assert!(
+        text.contains("if (a1 != 0 && sub_140001040() != 0) {")
+            || text.contains("if (a1 == 0 || sub_140001040() == 0) {"),
+        "{text}"
+    );
+}
+
 /// A loop whose body ends `if (c) break;` is a `do`/`while` on `!c`.
 ///
 /// `xor eax,eax; xor ecx,ecx; test r8d,r8d; je X; L: cmp byte [rdx+rcx],0;
@@ -3179,19 +3209,23 @@ fn headers_summarize_effects() {
     );
 }
 
-/// A loop's escapes to one returning tail each carry the tail.
+/// A loop's escapes to one returning tail carry the tail.
 ///
-/// `ET3`'s loop escapes twice to one error tail holding a call. The loop
-/// emitter copies such a tail into every escape (`if (rax == 0) {
-/// Base::vfunc_1(rcx); return 7; }`), so this pins that no jump is left; the
-/// text-level copy of returning tails covers the jumps the structurer
-/// leaves elsewhere (`GC`, `LD3`).
+/// `ET3`'s loop escapes twice to one error tail holding a call, each escape
+/// a test of a call's result; with the calls in the tests the two escapes
+/// are one guard, `Base::vfunc_1() == 0 || Base::vfunc_1() == 0`, the
+/// second call made only when the first returned nonzero, and the tail is
+/// written once inside it with no jump left.
 #[test]
 fn loop_escapes_to_a_returning_tail_carry_it() {
     let out = dc(0x4900);
     assert!(!out.contains("goto"), "{out}");
     assert!(out.contains("while"), "{out}");
-    assert_eq!(out.matches("return 7;").count(), 2, "{out}");
+    assert!(
+        out.contains("if (Base::vfunc_1() == 0 || Base::vfunc_1() == 0) {"),
+        "{out}"
+    );
+    assert_eq!(out.matches("return 7;").count(), 1, "{out}");
 }
 
 /// A conditional `goto` over a run holding a nested block becomes an `if`
@@ -3206,7 +3240,7 @@ fn conditional_gotos_over_nested_blocks_become_an_if() {
     let out = dc(0x4930);
     assert!(!out.contains("goto"), "{out}");
     assert!(out.contains("if (a1 != 0) {"), "{out}");
-    assert!(out.contains("  if (rax != 0) {"), "{out}");
+    assert!(out.contains("  if (Base::vfunc_1() != 0) {"), "{out}");
     assert!(out.contains("    *(uint32_t*)a2 = a1;"), "{out}");
 }
 
@@ -3300,7 +3334,7 @@ fn callers_render_constants_by_their_enum_names() {
     let pass = decompile(&p, &a, &o, 0x4a40).expect("decompile");
     assert!(pass.contains("sub_4830(Over)"), "{pass}");
     let plain = decompile(&p, &a, &Overlay::default(), 0x4a20).expect("decompile");
-    assert!(plain.contains("rax != 3"), "{plain}");
+    assert!(plain.contains("sub_47b0(a1) != 3)"), "{plain}");
 }
 
 /// The binary's own tables, each read when a body names its function,
@@ -3352,7 +3386,7 @@ fn tables_read_on_demand_render_as_the_whole_binarys() {
     let compare = decompile(&p, &a, &binary, 0x4a20).expect("decompile");
     assert!(compare.contains("Clear"), "{compare}");
     let plain = decompile(&p, &a, &Overlay::default(), 0x4a20).expect("decompile");
-    assert!(plain.contains("rax != 3"), "{plain}");
+    assert!(plain.contains("sub_47b0(a1) != 3)"), "{plain}");
 }
 
 /// A decompilation reads the tables of the functions it calls and no
@@ -6239,8 +6273,7 @@ fn a_setjmp_call_still_returns_a_result() {
         &[(0x1_4000_2008, "api-ms-win-crt-runtime-l1-1-0.dll!_setjmp")],
     );
     let text = decompiled(&p, 0x1_4000_1000);
-    assert!(text.contains("rax = _setjmp("), "{text}");
-    assert!(text.contains("rax != 0"), "{text}");
+    assert!(text.contains("if (_setjmp(0x140002018) != 0) {"), "{text}");
     assert!(text.contains("return 100;"), "{text}");
     assert!(text.contains("return 200;"), "{text}");
 }

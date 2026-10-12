@@ -281,20 +281,153 @@ pub(super) fn case_labels(ns: &[usize]) -> Vec<String> {
 /// A branch condition, possibly a short-circuit chain merged from several
 /// pure condition blocks (`if a goto X; if b goto X;` is `a || b`).
 pub(super) enum Guard {
-    /// One block's condition.
-    One(expr::Cond),
+    /// One block's condition, with the call it takes in, if any
+    /// ([`call_in_cond`]).
+    One(expr::Cond, Option<InCond>),
     /// Either side holds.
     Or(Box<Guard>, Box<Guard>),
     /// Both sides hold.
     And(Box<Guard>, Box<Guard>),
 }
 
+/// A call whose result only its block's branch reads, written inside the
+/// branch's condition instead of on a line of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InCond {
+    /// The variable the result was assigned to, as the condition names it.
+    pub(super) var: String,
+    /// The call as its line wrote it.
+    pub(super) call: String,
+}
+
+/// The integer types a condition casts its operands to: words that name
+/// no variable.
+const CAST_TYPES: [&str; 10] = [
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "intptr_t",
+    "uintptr_t",
+];
+
+/// Finds the call a block's branch alone reads the result of.
+///
+/// `rax = strcmp(a, b); if (rax != 0)` is `if (strcmp(a, b) != 0)` when
+/// the call is the block's last statement (its second result right after
+/// it, if the text shows one), no successor reads the result (nor the
+/// second one), and the condition names the result once and reads nothing
+/// else but constants: an operand read after the call might be one the
+/// call changes, where C leaves the order of the two open. The call is
+/// evaluated where the condition is, as it was, and a guard chain that
+/// holds it skips it on the paths the blocks did.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state (names).
+/// * `st` - Emission state (liveness, successors).
+/// * `b` - The block.
+/// * `out` - What the block wrote.
+/// * `cond` - Its branch condition.
+///
+/// # Returns
+///
+/// How many of the block's lines stay, and the call the condition takes
+/// in; `None` when it takes in none.
+pub(super) fn call_in_cond<L: Lifter>(
+    ctx: &Ctx<'_>,
+    st: &Emit<'_, L>,
+    b: usize,
+    out: &BlockOut,
+    cond: &expr::Cond,
+) -> Option<(usize, InCond)> {
+    let lift::EffectKind::Call(call) = &out
+        .effects
+        .iter()
+        .rev()
+        .find(|e| !matches!(e.kind, lift::EffectKind::Branch(_)))?
+        .kind
+    else {
+        return None;
+    };
+    let lift::Call {
+        result: Some(k),
+        result2,
+        noreturn: false,
+        shown: lift::Shown::Statement,
+        ..
+    } = call.as_ref()
+    else {
+        return None;
+    };
+    let dead = |k: Key| {
+        st.succs.get(b).is_some_and(|ss| {
+            ss.iter().all(|&s| {
+                !st.live.is_live(s, k)
+                    && st.in_envs.get(s).is_some_and(|env| {
+                        !env.flags.mentions(k) && env.vals.values().all(|v| !v.mentions(k))
+                    })
+            })
+        })
+    };
+    if !dead(*k) || result2.is_some_and(|k2| !dead(k2)) {
+        return None;
+    }
+    let names = ctx.names();
+    let var = names.key(*k);
+    let kept = out
+        .lines
+        .len()
+        .checked_sub(1 + usize::from(result2.is_some()))?;
+    let text = out
+        .lines
+        .get(kept)?
+        .strip_prefix(&format!("{var} = "))?
+        .strip_suffix(';')?;
+    let open = text.strip_suffix(')').and_then(|_| {
+        text.match_indices('(')
+            .map(|(o, _)| o)
+            .find(|&o| matching_paren(text, o) == Some(text.len() - 1))
+    })?;
+    let callee = text.get(..open)?;
+    let operators = [
+        " | ", " & ", " ^ ", " + ", " - ", " * ", " / ", " % ", " << ", " >> ", " ? ", " == ",
+        " != ", " < ", " > ", " <= ", " >= ", " && ", " || ",
+    ];
+    if callee.is_empty() || callee.starts_with('(') || operators.iter().any(|o| callee.contains(o))
+    {
+        return None;
+    }
+    let text = text.to_owned();
+    let reads_only_var = |inverted: bool| {
+        let rendered = cond.render(&names, inverted);
+        word_positions(&rendered, &var).len() == 1
+            && tokens(&rendered).all(|w| {
+                w == var || CAST_TYPES.contains(&w) || w.starts_with(|c: char| c.is_ascii_digit())
+            })
+    };
+    (reads_only_var(false) && reads_only_var(true)).then_some((kept, InCond { var, call: text }))
+}
+
 impl Guard {
+    /// Tells whether the guard calls a function: a term takes in its
+    /// block's call, so the test is a statement even with nothing to guard.
+    pub(super) fn calls(&self) -> bool {
+        match self {
+            Guard::One(_, call) => call.is_some(),
+            Guard::Or(a, b) | Guard::And(a, b) => a.calls() || b.calls(),
+        }
+    }
+
     /// Returns the negated guard (De Morgan), for merging a chain whose own
     /// target is the outer guard's fall-through side.
     pub(super) fn invert(self) -> Guard {
         match self {
-            Guard::One(c) => Guard::One(c.invert()),
+            Guard::One(c, call) => Guard::One(c.invert(), call),
             Guard::Or(a, b) => Guard::And(Box::new(a.invert()), Box::new(b.invert())),
             Guard::And(a, b) => Guard::Or(Box::new(a.invert()), Box::new(b.invert())),
         }
@@ -303,7 +436,8 @@ impl Guard {
     /// Renders the guard as a C boolean expression.
     ///
     /// De Morgan keeps the inverted form readable (`!(a || b)` renders as
-    /// `!a && !b`); compound operands are parenthesized.
+    /// `!a && !b`); compound operands are parenthesized. A condition that
+    /// takes in its block's call names the call where it named the result.
     ///
     /// # Arguments
     ///
@@ -316,14 +450,17 @@ impl Guard {
         }
         let part = |g: &Guard| -> String {
             let text = g.render(n, side);
-            if matches!(g, Guard::One(_)) && logical_operands(&text).is_none() {
+            if matches!(g, Guard::One(..)) && logical_operands(&text).is_none() {
                 text
             } else {
                 format!("({text})")
             }
         };
         match (self, side) {
-            (Guard::One(c), _) => c.render(n, side == Side::Fall),
+            (Guard::One(c, None), _) => c.render(n, side == Side::Fall),
+            (Guard::One(c, Some(call)), _) => {
+                rename_word(&c.render(n, side == Side::Fall), &call.var, &call.call)
+            }
             (Guard::Or(a, b), Side::Fall) | (Guard::And(a, b), Side::Target) => {
                 format!("{} && {}", part(a), part(b))
             }
@@ -358,7 +495,7 @@ impl Guard {
         let (Guard::And(a, b) | Guard::Or(a, b)) = self else {
             return None;
         };
-        let (Guard::One(range), Guard::One(bit)) = (a.as_ref(), b.as_ref()) else {
+        let (Guard::One(range, None), Guard::One(bit, None)) = (a.as_ref(), b.as_ref()) else {
             return None;
         };
         let inverted = side == Side::Fall;
@@ -623,12 +760,31 @@ pub(super) fn de_morgan(cond: &str) -> Option<String> {
     Some(out.join(dual))
 }
 
+/// A block's decision as a term of a guard ([`pure_condition`]).
+pub(super) struct Decision {
+    /// The condition.
+    pub(super) cond: expr::Cond,
+    /// The call the condition takes in, if any.
+    pub(super) call: Option<InCond>,
+    /// The block the condition branches to when it holds.
+    pub(super) t: usize,
+    /// The block it falls through to otherwise.
+    pub(super) f: usize,
+    /// The block that tests, when it is not the candidate itself: the
+    /// test a block ending in a call falls into ([`call_then_test`]), which
+    /// the guard consumes with it.
+    pub(super) test: Option<usize>,
+}
+
 /// Recognizes a block that only decides, so its condition can fold into the
 /// predecessor's guard.
 ///
 /// Lazy register and slot copies the block leaves in the environment are
 /// consistent whoever prints the decision (every successor's entry state
-/// came from the dataflow); only statements and frame changes are not.
+/// came from the dataflow); only statements and frame changes are not. A
+/// block whose one statement is a call its test takes in ([`call_in_cond`],
+/// [`call_then_test`]) only decides too: the call moves into the guard
+/// term, which the chain evaluates exactly when the block ran.
 ///
 /// # Arguments
 ///
@@ -639,8 +795,8 @@ pub(super) fn de_morgan(cond: &str) -> Option<String> {
 ///
 /// # Returns
 ///
-/// The condition and its `(target, fall)` block indices, or `None` when the
-/// block is not a conditional entered only from `from`, has statements, a
+/// The decision, or `None` when the block is not a conditional (or a call
+/// falling into one) entered only from `from`, has other statements, a
 /// switch dispatch, changes the stack pointer, or has a constant condition
 /// (its dead edge was pruned, so it is a plain jump, not a guard term).
 pub(super) fn pure_condition<L: Lifter>(
@@ -648,27 +804,93 @@ pub(super) fn pure_condition<L: Lifter>(
     st: &mut Emit<'_, L>,
     from: usize,
     b: usize,
-) -> Option<(expr::Cond, usize, usize)> {
-    if b == from
-        || st.outside(b)
-        || st.emitted[b]
-        || st.preds[b].as_slice() != [from]
-        || st.blocks[b].term != BlockTerm::Cond
+) -> Option<Decision> {
+    if b == from || st.outside(b) || st.emitted[b] || st.preds[b].as_slice() != [from] {
+        return None;
+    }
+    let (out, env) = match st.blocks[b].term {
+        BlockTerm::Cond | BlockTerm::Call => run_block_env(ctx, st, b),
+        BlockTerm::Fall
+        | BlockTerm::Jmp
+        | BlockTerm::Ret
+        | BlockTerm::Indirect
+        | BlockTerm::Invalid => return None,
+    };
+    if out.switch_idx.is_some() || env.sp != st.in_envs[b].sp {
+        return None;
+    }
+    let (test, br, call) = match &out.branch {
+        Some(br) => {
+            let call = if out.lines.is_empty() {
+                None
+            } else {
+                Some(call_in_cond(ctx, st, b, &out, &br.cond)?)
+            };
+            (None, br.clone(), call)
+        }
+        None => {
+            let (s, br, call) = call_then_test(ctx, st, b, &out)?;
+            (Some(s), br, Some(call))
+        }
+    };
+    if br.cond.eval().is_some() || call.as_ref().is_some_and(|(kept, _)| *kept != 0) {
+        return None;
+    }
+    Some(Decision {
+        t: st.index_of(br.target)?,
+        f: st.index_of(br.fall)?,
+        cond: br.cond,
+        call: call.map(|(_, c)| c),
+        test,
+    })
+}
+
+/// Finds the test a block ending in a call falls into, when the test
+/// decides on the call's result alone ([`call_in_cond`]).
+///
+/// The call ends its block, so `rax = f(); if (rax != 0)` is two blocks:
+/// the call's, and the test entered only from it, which writes nothing.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state.
+/// * `st` - Emission state.
+/// * `p` - The block ending in the call.
+/// * `out` - What `p` wrote.
+///
+/// # Returns
+///
+/// The test block, its branch, and how many of `p`'s lines stay with the
+/// call the test takes in; `None` when `p` is no such block.
+pub(super) fn call_then_test<L: Lifter>(
+    ctx: &mut Ctx<'_>,
+    st: &Emit<'_, L>,
+    p: usize,
+    out: &BlockOut,
+) -> Option<(usize, Branch, (usize, InCond))> {
+    let &[s] = st.succs.get(p)?.as_slice() else {
+        return None;
+    };
+    if st.blocks[p].term != BlockTerm::Call
+        || s == p
+        || st.outside(s)
+        || st.emitted[s]
+        || st.preds[s].as_slice() != [p]
+        || st.blocks[s].term != BlockTerm::Cond
     {
         return None;
     }
-    let (out, env) = run_block_env(ctx, st, b);
-    let br = out.branch?;
-    if !out.lines.is_empty()
-        || out.switch_idx.is_some()
-        || env.sp != st.in_envs[b].sp
+    let (test, env) = run_block_env(ctx, st, s);
+    let br = test.branch?;
+    if !test.lines.is_empty()
+        || test.switch_idx.is_some()
+        || env.sp != st.in_envs[s].sp
         || br.cond.eval().is_some()
     {
         return None;
     }
-    let t = st.index_of(br.target)?;
-    let f = st.index_of(br.fall)?;
-    Some((br.cond, t, f))
+    let call = call_in_cond(ctx, st, s, out, &br.cond)?;
+    Some((s, br, call))
 }
 
 /// Merges the pure condition blocks hanging off `i`'s branch into one guard.
@@ -681,6 +903,7 @@ pub(super) fn pure_condition<L: Lifter>(
 /// * `st` - Emission state.
 /// * `i` - The header block.
 /// * `cond` - Its own condition.
+/// * `call` - The call its condition takes in, if any.
 /// * `t` - Its branch target block.
 /// * `f` - Its fall-through block.
 ///
@@ -691,12 +914,12 @@ pub(super) fn merge_guard<L: Lifter>(
     ctx: &mut Ctx<'_>,
     st: &mut Emit<'_, L>,
     i: usize,
-    cond: expr::Cond,
+    (cond, call): (expr::Cond, Option<InCond>),
     t: usize,
     f: usize,
 ) -> (Guard, usize, usize) {
     let mut journal = Journal::default();
-    merge_chain(ctx, st, i, Guard::One(cond), t, f, 0, &mut journal)
+    merge_chain(ctx, st, i, Guard::One(cond, call), t, f, 0, &mut journal)
 }
 
 /// Deepest chain of pure condition blocks merged into one guard.
@@ -791,7 +1014,7 @@ impl Journal {
 /// * `ctx` - Per-function state.
 /// * `st` - Emission state.
 /// * `block` - The pure condition block heading the chain.
-/// * `cond` - Its condition.
+/// * `cond` - Its condition, with the call it takes in, if any.
 /// * `t` - Its branch target block.
 /// * `f` - Its fall-through block.
 /// * `depth` - Current nesting; [`MAX_GUARD_DEPTH`] stops the recursion.
@@ -801,16 +1024,25 @@ pub(super) fn sub_chain<L: Lifter>(
     ctx: &mut Ctx<'_>,
     st: &mut Emit<'_, L>,
     block: usize,
-    cond: expr::Cond,
+    (cond, call): (expr::Cond, Option<InCond>),
     t: usize,
     f: usize,
     depth: usize,
     journal: &mut Journal,
 ) -> (Guard, usize, usize) {
     if depth + 1 >= MAX_GUARD_DEPTH {
-        return (Guard::One(cond), t, f);
+        return (Guard::One(cond, call), t, f);
     }
-    merge_chain(ctx, st, block, Guard::One(cond), t, f, depth + 1, journal)
+    merge_chain(
+        ctx,
+        st,
+        block,
+        Guard::One(cond, call),
+        t,
+        f,
+        depth + 1,
+        journal,
+    )
 }
 
 /// Merges pure condition blocks into `guard` while they chain over one target.
@@ -851,12 +1083,14 @@ pub(super) fn merge_chain<L: Lifter>(
     let mut fuel = 8;
     while fuel > 0 {
         fuel -= 1;
-        if let Some((c2, t2, f2)) = pure_condition(ctx, st, header, f) {
+        if let Some(d) = pure_condition(ctx, st, header, f) {
             let consumed = f;
+            let decides = d.test.unwrap_or(consumed);
             let mark = journal.mark();
-            let t2 = follow_trampoline(ctx, st, consumed, t2, journal);
-            let f2 = follow_trampoline(ctx, st, consumed, f2, journal);
-            let (g2, t2, f2) = sub_chain(ctx, st, consumed, c2, t2, f2, depth, journal);
+            let t2 = follow_trampoline(ctx, st, decides, d.t, journal);
+            let f2 = follow_trampoline(ctx, st, decides, d.f, journal);
+            let (g2, t2, f2) =
+                sub_chain(ctx, st, decides, (d.cond, d.call), t2, f2, depth, journal);
             let (g, nt, nf) = if t2 == t {
                 (Guard::Or(Box::new(guard), Box::new(g2)), t, f2)
             } else if f2 == t {
@@ -866,17 +1100,22 @@ pub(super) fn merge_chain<L: Lifter>(
                 return (guard, t, f);
             };
             consume(st, header, consumed, journal);
+            if let Some(test) = d.test {
+                consume(st, header, test, journal);
+            }
             guard = g;
             t = nt;
             f = nf;
             continue;
         }
-        if let Some((c2, t2, f2)) = pure_condition(ctx, st, header, t) {
+        if let Some(d) = pure_condition(ctx, st, header, t) {
             let consumed = t;
+            let decides = d.test.unwrap_or(consumed);
             let mark = journal.mark();
-            let t2 = follow_trampoline(ctx, st, consumed, t2, journal);
-            let f2 = follow_trampoline(ctx, st, consumed, f2, journal);
-            let (g2, t2, f2) = sub_chain(ctx, st, consumed, c2, t2, f2, depth, journal);
+            let t2 = follow_trampoline(ctx, st, decides, d.t, journal);
+            let f2 = follow_trampoline(ctx, st, decides, d.f, journal);
+            let (g2, t2, f2) =
+                sub_chain(ctx, st, decides, (d.cond, d.call), t2, f2, depth, journal);
             let (g, nt, nf) = if f2 == f {
                 (Guard::And(Box::new(guard), Box::new(g2)), t2, f)
             } else if t2 == f {
@@ -886,6 +1125,9 @@ pub(super) fn merge_chain<L: Lifter>(
                 return (guard, t, f);
             };
             consume(st, header, consumed, journal);
+            if let Some(test) = d.test {
+                consume(st, header, test, journal);
+            }
             guard = g;
             t = nt;
             f = nf;

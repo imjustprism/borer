@@ -171,7 +171,13 @@ pub(super) fn try_ladder<L: Lifter>(
         if b != i
             && !nodes.contains(&b)
             && nodes.len() < LADDER_MAX_NODES
-            && let Some((c2, t2, f2)) = pure_condition(ctx, st, from, b)
+            && let Some(Decision {
+                cond: c2,
+                call: None,
+                test: None,
+                t: t2,
+                f: f2,
+            }) = pure_condition(ctx, st, from, b)
             && let Some(test) = test_of(&c2)
             && *test.value() == v
         {
