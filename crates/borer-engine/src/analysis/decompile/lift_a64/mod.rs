@@ -19,7 +19,7 @@
 //! forgets what it writes. A call passes its callee the arguments the
 //! arm64 procedure call standard puts in registers and assigns its result
 //! ([`call`]); what a function itself takes and hands back is read from
-//! its code and its declarations ([`shape`]); which registers each
+//! its code and its declarations ([`mod@shape`]); which registers each
 //! instruction reads and writes is [`live`]'s.
 
 mod call;

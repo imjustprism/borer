@@ -1,7 +1,7 @@
 //! The instruction sets the decompiler lifts, behind the one trait its
 //! pipeline is written against.
 //!
-//! [`decompile_with`](super::decompile_with) runs the same pipeline for every
+//! [`decompile_with`] runs the same pipeline for every
 //! instruction set: decode the blocks, read the parameters, compute register
 //! liveness, run the dataflow, structure and emit. What differs is how a
 //! block's instructions are decoded and executed, which registers an
