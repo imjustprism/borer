@@ -3607,17 +3607,19 @@ fn half_idioms_are_not_written_out_early() {
     assert!(!out.contains("mulhi"), "{out}");
 }
 
-/// A value computed for nobody goes, and a call's result stays.
+/// A value computed for nobody goes, and a call whose result nobody reads
+/// stays as a call.
 ///
 /// `r9` is assigned once and never read, so the line is noise; `rax` holds
-/// a call's result, which is dropped only if the call goes with it, and
-/// `rcx` is read by the loop's back edge.
+/// a call's result nothing reads, so the call stands alone, and `rcx` is
+/// read by the loop's back edge.
 #[test]
 fn assignments_nothing_reads_are_dropped() {
     let text = "r9 = a2 - a1;\nrax = sub_1000(a1);\nrcx = 0;\ndo {\n  rcx += 1;\n} while (rcx != a2);\nreturn a1;\n";
     let out = cleanup(text);
     assert!(!out.contains("r9"), "{out}");
-    assert!(out.contains("rax = sub_1000(a1);"), "{out}");
+    assert!(out.contains("sub_1000(a1);"), "{out}");
+    assert!(!out.contains("rax"), "{out}");
     assert!(out.contains("rcx = 0;"), "{out}");
     let escaped = "rdx = &local_18;\nsub_1000(rdx);\nreturn 0;\n";
     assert!(cleanup(escaped).contains("rdx = &local_18;"), "{escaped}");

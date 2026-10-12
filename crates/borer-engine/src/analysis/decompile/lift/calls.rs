@@ -2240,11 +2240,10 @@ impl<'a> Exec<'_, 'a> {
         let xmm0 = Key::Reg(Register::XMM0);
         let (uses_result, float_result) = self.result_read(next, rest, rax, xmm0);
         // INVARIANT: a callee known to return a float leaves one in `xmm0`
-        // for a call in a later block to take as its argument, which the
-        // liveness reads only at [`VECTOR_ARG_LANE`].
+        // for a later call to take as its argument, which the liveness
+        // reads only at [`VECTOR_ARG_LANE`].
         let float_result = float_result
             || (!uses_result
-                && rest.is_empty()
                 && self.bitness() == 64
                 && self
                     .regs_needed

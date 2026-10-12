@@ -831,22 +831,25 @@ pub(super) fn split_pair(inner: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Drops an assignment to a register variable nothing else mentions.
+/// Drops an assignment to a register variable nothing reads.
 ///
 /// The lifter writes a register out when the block's liveness says a
 /// successor may read it; when the structuring that follows leaves no
 /// reader at all, the assignment is a value computed for nobody. Such a
-/// target goes when its variable appears nowhere in the whole body but on
-/// its own line, which covers loops (a back edge's read is a mention) and
-/// address-taken stack slots (`&local_18` mentions it); a right side that
-/// reads the target itself (`rdx = f__rdx(rsi, rdx)`) only feeds a value
-/// nothing reads. Its right side must be pure: a call may do more than
-/// return a value, so a call result stays, except a second result
-/// (`f__rdx(..)`), which only names what the call on the line before left
-/// in a register. In a
-/// chain, `rcx = rbx = rdi = a1;`, only the dead targets go and the copies
-/// something reads stay; the line goes with its last target. The
-/// declaration follows on its own, since only names the body still
+/// target is dead when its variable appears nowhere in the whole body but
+/// on its own line, which covers loops (a back edge's read is a mention)
+/// and address-taken stack slots (`&local_18` mentions it), and a right
+/// side that reads the target itself (`rdx = f__rdx(rsi, rdx)`) only feeds
+/// a value nothing reads; or when the lines that follow it in order
+/// replace or abandon the value before anything can read it
+/// ([`dead_after`]). A dead target goes when its right side is pure, or a
+/// second result (`f__rdx(..)`), which only names what the call on the
+/// line before left in a register; a call may do more than return a
+/// value, so a lone call whose every target is dead stays as a statement
+/// of its own (`f(x);`), and any other right side with a call keeps its
+/// line. In a chain, `rcx = rbx = rdi = a1;`, only the dead targets go and
+/// the copies something reads stay; the line goes with its last target.
+/// The declaration follows on its own, since only names the body still
 /// mentions are declared. A register or stack slot assigned its own value
 /// (`local_4 = local_4;`, a saved register pushed back where it was
 /// popped from) changes nothing and goes too. The register a function
@@ -878,7 +881,7 @@ pub(super) fn drop_dead_assignments(
     };
     let mut changed = false;
     let mut out = Vec::with_capacity(lines.len());
-    for line in lines {
+    for (at, line) in lines.iter().enumerate() {
         let parts: Vec<&str> = line
             .trim()
             .strip_suffix(';')
@@ -892,15 +895,16 @@ pub(super) fn drop_dead_assignments(
             is_register_name(name) || ["local_", "home_", "arg_"].iter().any(|p| own(name, p))
         };
         let pure = !impure(rhs) || second_result(rhs);
+        let call = !pure && lone_call(rhs);
         let kept: Vec<&str> = targets
             .iter()
             .copied()
             .filter(|name| {
-                let here = tokens(line).filter(|w| w == name).count();
-                let unread = is_register_name(name)
-                    && pure
-                    && mentions.get(name) == Some(&here)
-                    && live_out != Some(*name);
+                let unread = (pure || call)
+                    && is_register_name(name)
+                    && live_out != Some(*name)
+                    && (mentions.get(name) == Some(&tokens(line).filter(|w| w == name).count())
+                        || dead_after(lines, at, name, live_out));
                 let itself = local(name) && name == rhs;
                 !(unread || itself)
             })
@@ -912,9 +916,122 @@ pub(super) fn drop_dead_assignments(
         changed = true;
         if !kept.is_empty() {
             out.push(format!("{}{} = {rhs};", pad_of(line), kept.join(" = ")));
+        } else if call {
+            out.push(format!("{}{rhs};", pad_of(line)));
         }
     }
     changed.then_some(out)
+}
+
+/// Tells whether the value line `at` gives `name` is replaced or left
+/// behind before anything can read it.
+///
+/// The lines after it are followed at its own depth while they run in
+/// order: one that assigns `name` without reading it, or a `return` that
+/// does not read it (nor hands it back as a second result), settles that
+/// nothing does; a line that mentions it, or one that may leave the run (a
+/// block opening or closing, a jump, a `case`, an unmodelled instruction),
+/// settles nothing. A label on the way is passed: a path that enters there
+/// does not carry this value.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `at` - The assignment's line.
+/// * `name` - The register it assigns.
+/// * `live_out` - The register a second result comes back in, if any.
+fn dead_after(lines: &[String], at: usize, name: &str, live_out: Option<&str>) -> bool {
+    let Some(first) = lines.get(at) else {
+        return false;
+    };
+    let depth = indent_of(first);
+    for line in lines.iter().skip(at + 1) {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("//") || is_label(line) {
+            continue;
+        }
+        let reads = tokens(t).filter(|w| *w == name).count();
+        let leaves = t.starts_with(['{', '}', '/'])
+            || tokens(t).next().is_some_and(|w| {
+                matches!(
+                    w,
+                    "if" | "else"
+                        | "while"
+                        | "for"
+                        | "do"
+                        | "switch"
+                        | "case"
+                        | "default"
+                        | "goto"
+                        | "break"
+                        | "continue"
+                )
+            });
+        if indent_of(line) != depth || leaves {
+            return false;
+        }
+        if t == "return;" || t.starts_with("return ") {
+            return reads == 0 && live_out != Some(name);
+        }
+        let Some(stmt) = t.strip_suffix(';') else {
+            return false;
+        };
+        let parts: Vec<&str> = stmt.split(" = ").collect();
+        let assigned = parts.split_last().map_or(0, |(_, targets)| {
+            targets.iter().filter(|w| **w == name).count()
+        });
+        if reads > 0 {
+            return assigned == reads;
+        }
+    }
+    false
+}
+
+/// Tells whether a right side is one call and nothing else, which stands
+/// as a statement of its own: `f(x)`, `a1->vtable[2](x)`, `(*rax)(x)`.
+///
+/// # Arguments
+///
+/// * `rhs` - The text after the last ` = `, without the `;`.
+fn lone_call(rhs: &str) -> bool {
+    let Some(open) = rhs
+        .len()
+        .checked_sub(1)
+        .filter(|_| rhs.ends_with(')'))
+        .and_then(|close| opening_paren(rhs, close))
+    else {
+        return false;
+    };
+    let callee = rhs.get(..open).unwrap_or("");
+    if callee.starts_with('(') {
+        return callee.ends_with(')')
+            && callee
+                .len()
+                .checked_sub(1)
+                .and_then(|c| opening_paren(callee, c))
+                == Some(0);
+    }
+    let mut depth = 0i32;
+    let mut prev = ' ';
+    for c in callee.chars() {
+        let fits = match c {
+            '(' | '[' => {
+                depth += 1;
+                true
+            }
+            ')' | ']' => {
+                depth -= 1;
+                true
+            }
+            '>' => depth > 0 || prev == '-',
+            _ => depth > 0 || is_ident_char(c) || matches!(c, ':' | '~' | '.' | '-'),
+        };
+        if !fits {
+            return false;
+        }
+        prev = c;
+    }
+    !callee.is_empty() && depth == 0
 }
 
 /// Tells whether a right side is a second result, `f__rdx(args)` with pure

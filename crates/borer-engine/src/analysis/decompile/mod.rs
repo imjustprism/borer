@@ -1561,8 +1561,11 @@ fn decompile_in<L: Lifter>(
         ),
     };
     let (result_reg, second_reg) = L::result_names(bitness);
+    // INVARIANT: a 32-bit function's text shows no second result of its
+    // own, but the `edx` its callers read is still no dead value.
+    let live_out = ctx.ret_rdx || (bitness == 32 && f.hands_back_rdx);
     let body = if cleanup {
-        cleanup_text(&body, ctx.ret_rdx.then_some(second_reg))
+        cleanup_text(&body, live_out.then_some(second_reg))
     } else {
         body
     };

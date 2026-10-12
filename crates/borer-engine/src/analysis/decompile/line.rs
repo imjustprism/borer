@@ -70,6 +70,10 @@ pub(super) fn is_temp_name(w: &str) -> bool {
 
 /// Tells whether a name is one of the machine's registers or a temporary.
 ///
+/// The names are the ones the lifters give their registers: x64's `rax`
+/// to `r15` and `xmm<n>`, x86's `eax` to `edi`, and arm64's `x0` to `x30`
+/// and `v0` to `v31`.
+///
 /// # Arguments
 ///
 /// * `name` - The left side of an assignment.
@@ -79,10 +83,44 @@ pub(super) fn is_register_name(name: &str) -> bool {
     }
     matches!(
         name,
-        "rax" | "rbx" | "rcx" | "rdx" | "rsi" | "rdi" | "rbp" | "rsp"
-    ) || name
-        .strip_prefix('r')
-        .is_some_and(|n| matches!(n.parse::<u8>(), Ok(8..=15)))
+        "rax"
+            | "rbx"
+            | "rcx"
+            | "rdx"
+            | "rsi"
+            | "rdi"
+            | "rbp"
+            | "rsp"
+            | "eax"
+            | "ebx"
+            | "ecx"
+            | "edx"
+            | "esi"
+            | "edi"
+            | "ebp"
+            | "esp"
+    ) || register_number(name, 'r').is_some_and(|n| (8..=15).contains(&n))
+        || register_number(name, 'x').is_some_and(|n| n <= 30)
+        || register_number(name, 'v').is_some_and(|n| n <= 31)
+}
+
+/// Reads the number of a register name `<prefix><n>`, written as the
+/// lifters write it: decimal, without a leading zero.
+///
+/// # Arguments
+///
+/// * `name` - The word.
+/// * `prefix` - The register bank's letter.
+fn register_number(name: &str, prefix: char) -> Option<u8> {
+    let digits = name.strip_prefix(prefix)?;
+    if digits.len() > 1 && digits.starts_with('0') {
+        return None;
+    }
+    digits
+        .bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| digits.parse().ok())
+        .flatten()
 }
 
 /// Tells whether a word names a hoisted global, `g<bits>_<hex address>`.
@@ -754,7 +792,7 @@ pub(super) fn impure(rhs: &str) -> bool {
 ///
 /// * `text` - The line.
 /// * `close` - Index of the closing parenthesis.
-fn opening_paren(text: &str, close: usize) -> Option<usize> {
+pub(super) fn opening_paren(text: &str, close: usize) -> Option<usize> {
     let mut depth = 0i32;
     for (i, c) in text.get(..=close)?.char_indices().rev() {
         match c {

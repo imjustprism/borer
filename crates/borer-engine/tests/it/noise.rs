@@ -138,22 +138,38 @@ fn a_call_before_another_binds_no_float_result() {
     assert!(!text.contains("xmm0"), "{text}");
 }
 
-/// A callee known to return a float still binds its result where a call
-/// in a later block may take it.
+/// A callee known to return a float still binds its result where a later
+/// call takes it.
 ///
-/// [`FLOAT_CALLER`] calls `movsd xmm0,[2.5]; ret`, whose other caller
-/// converts the `xmm0` it leaves (`call; cvttsd2si eax,xmm0; ret`), so it
-/// returns a `double`.
+/// `sub rsp,0x28; test ecx,ecx; je E; call F; jmp J; E: call F; J: call
+/// G; add rsp,0x28; ret`, where `F` is `movsd xmm0,[2.5]; ret`, whose other
+/// caller converts the `xmm0` it leaves (`call F; cvttsd2si eax,xmm0;
+/// ret`), so it returns a `double`, and `G` is that conversion: both arms
+/// bind the result, the first though only the jump after its call is left
+/// in its block.
 #[test]
 fn a_float_callee_still_binds_its_result() {
-    let mut code = FLOAT_CALLER.to_vec();
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp, 0x28
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x74, 0x07, // ASM: je 0x40100f
+        0xe8, 0x13, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0xeb, 0x05, // ASM: jmp 0x401014
+        0xe8, 0x0c, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0xe8, 0x27, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp, 0x28
+        0xc3, // ASM: ret
+    ];
     pad(&mut code, 0x20);
     code.extend_from_slice(&[
         0xf2, 0x0f, 0x10, 0x05, 0xd8, 0x0f, 0x00, 0x00, // ASM: movsd xmm0, [rip+0xfd8]
         0xc3, // ASM: ret
     ]);
     pad(&mut code, 0x40);
-    code.extend_from_slice(&FLOAT_NEXT);
+    code.extend_from_slice(&[
+        0xf2, 0x0f, 0x2c, 0xc0, // ASM: cvttsd2si eax, xmm0
+        0xc3, // ASM: ret
+    ]);
     pad(&mut code, 0x60);
     code.extend_from_slice(&[
         0xe8, 0xbb, 0xff, 0xff, 0xff, // ASM: call 0x401020
@@ -162,7 +178,7 @@ fn a_float_callee_still_binds_its_result() {
     ]);
     let p = image(Arch::X86_64, &code, &2.5f64.to_bits().to_le_bytes());
     let text = decompiled(&p, 0x401000);
-    assert!(text.contains("xmm0 = sub_401020();"), "{text}");
+    assert_eq!(text.matches("xmm0 = sub_401020();").count(), 2, "{text}");
 }
 
 /// An import slot the code reads as a value is named for its import and
@@ -188,4 +204,45 @@ fn an_import_slot_is_declared_as_no_variable() {
     let text = decompiled(&p, 0x401000);
     assert!(text.contains("= frob;"), "{text}");
     assert!(!text.contains("// @ 0x402000"), "{text}");
+}
+
+/// A value the next lines replace before anything reads it goes, also on
+/// x86 and arm64, whose register names the cleanup did not know.
+#[test]
+fn a_store_replaced_before_any_read_goes() {
+    for (reg, ret) in [("rax", "rax"), ("eax", "eax"), ("x10", "x0")] {
+        let body = format!(
+            "{reg} = a1 + 8;\n*a2 = 1;\nL_401010:\n{reg} = 5;\n{ret} = {reg};\nreturn {ret};\n"
+        );
+        let text = cleanup(&body);
+        assert!(!text.contains("a1 + 8"), "{reg}: {text}");
+    }
+    let text = cleanup("x8 = a1;\nreturn 0;\n");
+    assert!(!text.contains("x8"), "{text}");
+}
+
+/// A value a branch may read, or a later line reads, stays.
+#[test]
+fn a_store_read_on_some_path_stays() {
+    let text = cleanup("rax = 1;\nif (a1 != 0) {\n  rax = 2;\n}\nreturn rax;\n");
+    assert!(text.contains("rax = 1;"), "{text}");
+    let text = cleanup("eax = 1;\n*a2 = eax;\neax = 2;\nreturn eax;\n");
+    assert!(
+        text.contains("*a2 = eax;") || text.contains("*a2 = 1;"),
+        "{text}"
+    );
+}
+
+/// A call whose result nothing reads stays as a statement of its own; a
+/// right side that does more than call keeps its line.
+#[test]
+fn a_dead_call_result_leaves_the_call() {
+    let text = cleanup("eax = f(a1);\neax = 0;\nreturn eax;\n");
+    assert!(text.contains("f(a1);"), "{text}");
+    assert!(!text.contains("eax = f(a1);"), "{text}");
+    let text = cleanup("x0 = a1->vtable[2](a1);\nreturn;\n");
+    assert!(text.contains("a1->vtable[2](a1);"), "{text}");
+    assert!(!text.contains("x0 ="), "{text}");
+    let text = cleanup("rax = f(a1) + 1;\nrax = 0;\nreturn rax;\n");
+    assert!(text.contains("rax = f(a1) + 1;"), "{text}");
 }
