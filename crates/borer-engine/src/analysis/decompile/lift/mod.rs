@@ -1264,13 +1264,14 @@ fn float_store(ty: Ty, v: &Expr) -> Option<(Ty, Expr)> {
 ///
 /// A function taking a variable list stores every argument register from
 /// the first variable one on into its home slot and takes that slot's
-/// address for `va_start` ([`Homes::fixed`]).
+/// address for `va_start`, or on System V into its register save area
+/// ([`Homes::fixed`]).
 ///
 /// # Arguments
 ///
 /// * `program` - Its format selects the convention.
-/// * `bitness` - 32 or 64; only the Microsoft x64 convention has home
-///   slots.
+/// * `bitness` - 32 or 64; only the 64-bit conventions keep their
+///   argument registers so.
 /// * `prologue` - The function's first instructions, up to its first call.
 ///
 /// # Returns

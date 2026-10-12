@@ -1990,7 +1990,10 @@ fn full_names(reg: Register) -> [Register; 2] {
 /// A callee that never reads its second argument was not handed the value
 /// the lane carried to its boundary, so a call to it is no read of the
 /// caller's `rdx`; one that does read it was, whether the read names a
-/// value the caller set or one an earlier callee left there.
+/// value the caller set or one an earlier callee left there. A variadic
+/// function's store of `rdx` with its other variable arguments
+/// ([`rdx_variable`]) is no such read: a caller passes the register only
+/// when it sets it.
 ///
 /// # Arguments
 ///
@@ -2034,7 +2037,7 @@ fn reads_rdx_arg(
                 }
             }
             if read {
-                return true;
+                return !rdx_variable(program, bitness, f);
             }
             if wrote {
                 return false;
@@ -2051,4 +2054,35 @@ fn reads_rdx_arg(
         }
     }
     false
+}
+
+/// Tells whether `rdx` is one of a variadic function's variable arguments.
+///
+/// Its prologue keeps the argument registers from a fixed count on for
+/// `va_arg` ([`vararg_fixed`](super::decompile::lift::vararg_fixed)), and
+/// that count does not reach the slot `rdx` passes.
+///
+/// # Arguments
+///
+/// * `program` - The image the body is decoded from.
+/// * `bitness` - Decoder bitness.
+/// * `f` - The function.
+fn rdx_variable(program: &Program, bitness: u32, f: &Function) -> bool {
+    use super::decompile::lift;
+    /// Most instructions of a prologue read before its first call.
+    const PROLOGUE_MAX: usize = 64;
+    let mut prologue = Vec::new();
+    'blocks: for b in &f.blocks {
+        let mut va = b.start;
+        while va < b.end && prologue.len() < PROLOGUE_MAX {
+            let Some(i) = decode_at(program, bitness, va).filter(|i| !is_call(i)) else {
+                break 'blocks;
+            };
+            va = i.next_ip();
+            prologue.push(i);
+        }
+    }
+    lift::vararg_fixed(program, bitness, &prologue)
+        .zip(lift::conv(program, bitness).slot(Register::RDX))
+        .is_some_and(|(fixed, rdx)| fixed <= rdx)
 }

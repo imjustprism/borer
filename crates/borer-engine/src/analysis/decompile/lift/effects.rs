@@ -459,7 +459,8 @@ pub(super) enum Home {
     VaStart,
 }
 
-/// Tracks the Microsoft x64 home slots through a prologue.
+/// Tracks the Microsoft x64 home slots, or the System V register save
+/// area, through a prologue.
 ///
 /// It follows where the stack pointer stands and which registers alias
 /// it, so a store to `[rsp+8+8k]`, to `[rax+8+8k]` after `mov rax, rsp`
@@ -470,9 +471,27 @@ pub(super) enum Home {
 /// variable one through `r9` and takes the address of the first variable
 /// slot for `va_start`; a function that homes its arguments for their
 /// addresses stops short of `r9` unless it has four.
+///
+/// System V has no home slots: a variadic function stores the argument
+/// registers from the first variable one through `r9` into a save area of
+/// its own frame, eight bytes apiece in register order, and the vector
+/// ones (`xmm0` to `xmm7`, sixteen bytes apiece) after them behind a `test
+/// al, al`, since `al` counts the vector registers its caller filled.
 pub(super) struct Homes {
     /// Whether the convention has home slots at all.
     pub(super) active: bool,
+    /// Whether the convention has a register save area instead (System V
+    /// x64).
+    save_area: bool,
+    /// Where each argument register, by slot, was first stored, in bytes
+    /// from the entry stack pointer.
+    saved: BTreeMap<usize, i64>,
+    /// Where each vector argument register, by position, was first stored.
+    saved_vectors: BTreeMap<usize, i64>,
+    /// The vector argument registers in order.
+    vectors: Vec<Register>,
+    /// A `test al, al` was seen: the count of vector arguments was read.
+    counts_vectors: bool,
     /// Bytes the stack pointer stands below its entry value.
     pub(super) below: i64,
     /// Bytes below the entry stack pointer that `rax` stands for.
@@ -499,6 +518,11 @@ impl Homes {
     pub(super) fn new(bitness: u32, conv: &Conv) -> Homes {
         Homes {
             active: bitness == 64 && conv.shadow > 0,
+            save_area: bitness == 64 && conv.float_seq,
+            saved: BTreeMap::new(),
+            saved_vectors: BTreeMap::new(),
+            vectors: conv.float_args.to_vec(),
+            counts_vectors: false,
             below: 0,
             rax: None,
             rbp: None,
@@ -519,7 +543,9 @@ impl Homes {
     ///
     /// What it did with a home slot, if anything.
     pub(super) fn step(&mut self, i: &Instruction, bitness: u32) -> Option<Home> {
-        if !self.active {
+        if self.save_area {
+            self.save(i, bitness);
+        } else if !self.active {
             return None;
         }
         let word = 8i64;
@@ -548,11 +574,12 @@ impl Homes {
         };
         let slot_of = |h: &Homes, i: &Instruction| arg_slot(h, i).filter(|k| *k < h.args.len());
         let mut out = None;
-        let is_mov = i.mnemonic() == Mnemonic::Mov;
-        let is_store = matches!(
-            i.mnemonic(),
-            Mnemonic::Mov | Mnemonic::Movss | Mnemonic::Movsd | Mnemonic::Movd | Mnemonic::Movq
-        );
+        let is_mov = self.active && i.mnemonic() == Mnemonic::Mov;
+        let is_store = self.active
+            && matches!(
+                i.mnemonic(),
+                Mnemonic::Mov | Mnemonic::Movss | Mnemonic::Movsd | Mnemonic::Movd | Mnemonic::Movq
+            );
         if is_store && i.op0_kind() == OpKind::Memory && i.op1_kind() == OpKind::Register {
             if let Some(k) = slot_of(self, i) {
                 let r = i.op1_register().full_register();
@@ -567,7 +594,8 @@ impl Homes {
                     self.stored.get(&k).copied().unwrap_or(self.args[k]),
                 ));
             }
-        } else if i.mnemonic() == Mnemonic::Lea
+        } else if self.active
+            && i.mnemonic() == Mnemonic::Lea
             && i.op0_kind() == OpKind::Register
             && let Some(k) = arg_slot(self, i)
         {
@@ -629,11 +657,88 @@ impl Homes {
     /// function that only parks its parameters home, for their addresses
     /// or a debug build's habit, takes no address past them and is not
     /// variadic.
+    ///
+    /// On System V the save area says it ([`Homes::save_area_fixed`]).
     pub(super) fn fixed(&self) -> Option<usize> {
+        if self.save_area {
+            return self.save_area_fixed();
+        }
         let first = self.va_start?;
         let own = |k: usize| self.stored.get(&k) == self.args.get(k);
         let last = self.args.len().checked_sub(1)?;
         ((first..self.args.len()).all(own) && (first <= last || own(last))).then_some(first)
+    }
+
+    /// Notes a store of an argument register into what may be the System V
+    /// register save area, and the `test al, al` that guards its vector
+    /// half.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `bitness` - 32 or 64.
+    fn save(&mut self, i: &Instruction, bitness: u32) {
+        if i.mnemonic() == Mnemonic::Test
+            && i.op0_kind() == OpKind::Register
+            && i.op1_kind() == OpKind::Register
+            && i.op0_register() == Register::AL
+            && i.op1_register() == Register::AL
+        {
+            self.counts_vectors = true;
+            return;
+        }
+        if i.op0_kind() != OpKind::Memory
+            || i.op1_kind() != OpKind::Register
+            || i.memory_index() != Register::None
+        {
+            return;
+        }
+        let Some(base) = base_below_of(self.below, self.rax, self.rbp, i.memory_base()) else {
+            return;
+        };
+        let at = crate::disasm::displacement(i, bitness) - base;
+        let r = i.op1_register();
+        let (bank, found) = match i.mnemonic() {
+            Mnemonic::Mov => (&mut self.saved, self.args.iter().position(|a| *a == r)),
+            Mnemonic::Movaps
+            | Mnemonic::Movups
+            | Mnemonic::Movdqa
+            | Mnemonic::Movdqu
+            | Mnemonic::Vmovaps
+            | Mnemonic::Vmovups => (
+                &mut self.saved_vectors,
+                self.vectors.iter().position(|v| *v == r),
+            ),
+            _ => return,
+        };
+        if let Some(k) = found {
+            bank.entry(k).or_insert(at);
+        }
+    }
+
+    /// The fixed argument count a System V register save area shows.
+    ///
+    /// The integer registers from the first variable one through `r9` are
+    /// stored eight bytes apart in register order, the last two at least,
+    /// and the vector half is there too: `al` was tested for it, or a
+    /// vector register was stored where the area puts it, past the integer
+    /// ones. A function that spills its own parameters for a debug build
+    /// stores them in no such run and tests no `al`.
+    fn save_area_fixed(&self) -> Option<usize> {
+        /// Bytes of one integer register's place in the save area.
+        const GPR: i64 = 8;
+        /// Bytes of one vector register's place in the save area.
+        const VECTOR: i64 = 16;
+        let step = |n: usize, size: i64| i64::try_from(n).ok().map(|n| n * size);
+        let last = self.args.len().checked_sub(1)?;
+        let area = self.saved.get(&last)? - step(last, GPR)?;
+        let at = |k: usize| step(k, GPR).is_some_and(|o| self.saved.get(&k) == Some(&(area + o)));
+        let first = (0..=last).rev().take_while(|k| at(*k)).last()?;
+        let vectors = step(self.args.len(), GPR)? + area;
+        let vector_at = |j: usize, o: i64| step(j, VECTOR).is_some_and(|s| o == vectors + s);
+        (first < last
+            && (self.counts_vectors || self.saved_vectors.iter().any(|(j, o)| vector_at(*j, *o))))
+        .then_some(first)
     }
 }
 

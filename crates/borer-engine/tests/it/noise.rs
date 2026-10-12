@@ -246,3 +246,99 @@ fn a_dead_call_result_leaves_the_call() {
     let text = cleanup("rax = f(a1) + 1;\nrax = 0;\nreturn rax;\n");
     assert!(text.contains("rax = f(a1) + 1;"), "{text}");
 }
+
+/// A System V variadic function at 0x401000 with two fixed arguments.
+///
+/// As clang builds one, it stores `rdx` to `r9` into its register save
+/// area, then `xmm0` behind `test al, al`, and returns `a1 + a2`.
+const SYSV_VARIADIC: [u8; 47] = [
+    0x48, 0x81, 0xec, 0xd8, 0x00, 0x00, 0x00, // ASM: sub rsp, 0xd8
+    0x48, 0x89, 0x54, 0x24, 0x30, // ASM: mov [rsp+0x30], rdx
+    0x48, 0x89, 0x4c, 0x24, 0x38, // ASM: mov [rsp+0x38], rcx
+    0x4c, 0x89, 0x44, 0x24, 0x40, // ASM: mov [rsp+0x40], r8
+    0x4c, 0x89, 0x4c, 0x24, 0x48, // ASM: mov [rsp+0x48], r9
+    0x84, 0xc0, // ASM: test al, al
+    0x74, 0x05, // ASM: je 0x401024
+    0x0f, 0x29, 0x44, 0x24, 0x50, // ASM: movaps [rsp+0x50], xmm0
+    0x8d, 0x04, 0x37, // ASM: lea eax, [rdi+rsi]
+    0x48, 0x81, 0xc4, 0xd8, 0x00, 0x00, 0x00, // ASM: add rsp, 0xd8
+    0xc3, // ASM: ret
+];
+
+/// Builds an ELF-convention image of [`SYSV_VARIADIC`] followed, at
+/// 0x401040, by `tail`.
+///
+/// # Arguments
+///
+/// * `tail` - The code of the functions after the variadic one.
+fn sysv_image(tail: &[u8]) -> borer_engine::program::Program {
+    let mut code = SYSV_VARIADIC.to_vec();
+    pad(&mut code, 0x40);
+    code.extend_from_slice(tail);
+    let mut p = image(Arch::X86_64, &code, &[]);
+    p.format = borer_engine::program::BinaryFormat::Elf;
+    p
+}
+
+/// A System V variadic function takes its fixed arguments and `...`, and a
+/// caller passes what it set: the save area's stores are no reads of
+/// parameters.
+///
+/// The caller at 0x401040 is `sub rsp,8; mov edi,1; mov esi,2; mov edx,3;
+/// xor eax,eax; call 0x401000; add rsp,8; ret`. Every store read as a
+/// parameter gave the function fourteen, eight of them `float`, and every
+/// caller as many arguments.
+#[test]
+fn a_sysv_variadic_function_takes_its_fixed_arguments() {
+    let p = sysv_image(&[
+        0x48, 0x83, 0xec, 0x08, // ASM: sub rsp, 8
+        0xbf, 0x01, 0x00, 0x00, 0x00, // ASM: mov edi, 1
+        0xbe, 0x02, 0x00, 0x00, 0x00, // ASM: mov esi, 2
+        0xba, 0x03, 0x00, 0x00, 0x00, // ASM: mov edx, 3
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xe8, 0xa6, 0xff, 0xff, 0xff, // ASM: call 0x401000
+        0x48, 0x83, 0xc4, 0x08, // ASM: add rsp, 8
+        0xc3, // ASM: ret
+    ]);
+    let callee = decompiled(&p, 0x401000);
+    let signature = callee
+        .lines()
+        .find(|l| l.starts_with("// signature:"))
+        .unwrap_or_default();
+    assert!(signature.contains(" a2, ...)"), "{callee}");
+    assert!(
+        !signature.contains("a3") && !signature.contains("float"),
+        "{callee}"
+    );
+    let caller = decompiled(&p, 0x401040);
+    assert!(caller.contains("sub_401000(1, 2, 3)"), "{caller}");
+}
+
+/// A call to a System V variadic function that does not set `rdx` is no
+/// read of a second result an earlier call left there.
+///
+/// `call PAIR; mov edi,1; mov esi,2; xor eax,eax; call 0x401000; ret`,
+/// where `PAIR` is `mov eax,1; mov edx,2; ret`: the save area's store of
+/// `rdx` read as the variadic function's own parameter made `PAIR` hand
+/// back `rdx`.
+#[test]
+fn a_variadic_save_area_reads_no_second_result() {
+    let mut tail = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401060
+        0xbf, 0x01, 0x00, 0x00, 0x00, // ASM: mov edi, 1
+        0xbe, 0x02, 0x00, 0x00, 0x00, // ASM: mov esi, 2
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xe8, 0xaa, 0xff, 0xff, 0xff, // ASM: call 0x401000
+        0xc3, // ASM: ret
+    ];
+    tail.resize(0x20, 0xcc);
+    tail.extend_from_slice(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xba, 0x02, 0x00, 0x00, 0x00, // ASM: mov edx, 2
+        0xc3, // ASM: ret
+    ]);
+    let p = sysv_image(&tail);
+    let a = Analysis::compute(&p);
+    let pair = a.function(0x401060).expect("the callee");
+    assert!(!pair.hands_back_rdx, "the save area read rdx");
+}
