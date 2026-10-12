@@ -5,6 +5,7 @@
 //! a code/data cross-reference index. Everything here is a deterministic
 //! function of the program bytes: same input, same output, byte-identical.
 
+mod a64;
 pub mod about;
 pub mod anchors;
 pub mod attributes;
@@ -1183,7 +1184,8 @@ impl Analysis {
         let mut phases = crate::timing::Phases::new();
         let mut analysis = match program.arch.isa() {
             Some(Isa::X86 { bits }) => functions::discover(program, bits),
-            Some(Isa::A64) | None => {
+            Some(Isa::A64) => a64::discover(program),
+            None => {
                 let mut empty = Analysis::default();
                 empty.finish_index(program);
                 empty

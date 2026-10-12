@@ -87,7 +87,7 @@ const FINALLY_REACH: u64 = 0x80;
 /// string literals decoded 275 thousand instructions each and spent the
 /// whole budget, and 1,795 real functions were never reached. No function
 /// a compiler emits comes near this many.
-const GUESS_WALK_MAX: u64 = 1 << 16;
+pub(super) const GUESS_WALK_MAX: u64 = 1 << 16;
 /// Cap on recorded reference sites per target.
 ///
 /// A hub such as the security cookie check is called from nearly every
@@ -115,10 +115,10 @@ const WAVE_BATCH: usize = 64;
 /// runs again for its funclets, and a round that stops collecting at
 /// twenty thousand never reaches the end of the section. The fuel bounds
 /// the walking; this only bounds the list.
-const SEEDS_MAX: usize = 250_000;
+pub(super) const SEEDS_MAX: usize = 250_000;
 /// Longest chain of tail-call splits, and of code-seed rounds; every split
 /// round only shrinks functions, and every seed round only adds them.
-const SPLIT_ROUNDS_MAX: usize = 8;
+pub(super) const SPLIT_ROUNDS_MAX: usize = 8;
 /// Largest jump table accepted (bound immediate).
 pub(super) const TABLE_ENTRIES_MAX: u64 = 4096;
 /// Farthest a case may lie from its jump in a table sized loosely.
@@ -130,7 +130,7 @@ pub(super) const TABLE_ENTRIES_MAX: u64 = 4096;
 /// instructions.
 const LOOSE_REACH: u64 = 0x10_0000;
 /// Most rounds of gap seeding; each round only ever adds functions.
-const GAP_ROUNDS_MAX: usize = 64;
+pub(super) const GAP_ROUNDS_MAX: usize = 64;
 /// Fewest functions a round of gap seeding must add for another to follow.
 const ROUND_ADDS_MIN: usize = 4;
 
@@ -233,7 +233,7 @@ const NORETURN_NAMES: &[&str] = &[
 /// # Arguments
 ///
 /// * `name` - The name as [`crate::search::demangled_name`] renders it, without a `dll!` prefix.
-fn is_noreturn_name(name: &str) -> bool {
+pub(super) fn is_noreturn_name(name: &str) -> bool {
     NORETURN_NAMES.contains(&name)
         || name.starts_with("core::panicking::")
         || name.starts_with("std::panicking::begin_panic")
@@ -384,7 +384,7 @@ impl Recorded {
 ///
 /// * `h` - The hash so far.
 /// * `v` - The value to fold in.
-fn mix(h: u64, v: u64) -> u64 {
+pub(super) fn mix(h: u64, v: u64) -> u64 {
     let mut h = h;
     for b in v.to_le_bytes() {
         h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
@@ -1310,7 +1310,7 @@ impl<'a> WalkState<'a> {
 ///
 /// [`FUEL_PER_CODE_BYTE`] per executable file byte, clamped to
 /// [`FUEL_MIN`]..=[`FUEL_MAX`].
-fn fuel_for(program: &Program) -> u64 {
+pub(super) fn fuel_for(program: &Program) -> u64 {
     let code: u64 = program
         .sections
         .iter()
@@ -5602,7 +5602,7 @@ fn build_blocks(
 ///
 /// * `program` - The loaded image, for symbols and thunk decoding.
 /// * `functions` - The functions, updated in place.
-fn build_callers_and_names(program: &Program, functions: &mut [Function]) {
+pub(super) fn build_callers_and_names(program: &Program, functions: &mut [Function]) {
     let mut callers: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for f in functions.iter() {
         for c in &f.callees {
@@ -5691,7 +5691,7 @@ fn build_callers_and_names(program: &Program, functions: &mut [Function]) {
 /// * `va` - Address of the referencing instruction.
 /// * `kind` - How the site uses the target.
 /// * `from_entry` - Entry of the function containing `va`.
-fn push_site(
+pub(super) fn push_site(
     map: &mut BTreeMap<u64, Vec<RefSite>>,
     target: u64,
     va: u64,

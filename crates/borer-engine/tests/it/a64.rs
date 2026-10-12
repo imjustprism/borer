@@ -14,11 +14,11 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use borer_engine::analysis::{Analysis, render};
+use borer_engine::analysis::{Analysis, BlockTerm, NameSource, RefKind, render};
 use borer_engine::disasm;
 use borer_engine::isa::Isa;
 use borer_engine::isa::a64::{self, Flow, Mem, Mode, Op, Opnd, Reg, Shift};
-use borer_engine::program::{Arch, BinaryFormat, Feature, Program};
+use borer_engine::program::{Arch, BinaryFormat, Feature, Program, Symbol, SymbolKind};
 
 /// Where the first word of [`WORDS`] sits; each next word is four bytes on.
 const BASE: u64 = 0x10000;
@@ -354,9 +354,11 @@ fn block_bytes() -> Vec<u8> {
     BLOCK.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-/// Checks that an arm64 program disassembles [`BLOCK`] at its entry, word
-/// by word with the call's target, that an address inside a word lists
-/// from the word, and that disassembly is all that applies yet.
+/// Checks that an arm64 program disassembles and discovers [`BLOCK`].
+///
+/// It disassembles at its entry word by word with the call's target, an
+/// address inside a word lists from the word, discovery finds the entry and
+/// the function it calls, and the tools still refuse discovery.
 fn check_disassembles(p: &Program, entry: u64) {
     assert_eq!((p.arch, p.is_64, p.entry), (Arch::Arm64, true, Some(entry)));
     let code = p.read_va(entry, 32).expect("the block is mapped");
@@ -394,7 +396,7 @@ fn check_disassembles(p: &Program, entry: u64) {
     );
     assert!(p.summary().contains(&why), "{}", p.summary());
     let a = Analysis::compute(p);
-    assert!(a.functions.is_empty());
+    assert!(a.function(entry).is_some() && a.function(entry + 0x18).is_some());
     assert_eq!(
         render::instruction_at_or_before(p, &a, entry + 6),
         Some(entry + 4)
@@ -841,4 +843,433 @@ fn hostile_unwind_info_names_nothing_past_its_end() {
     unwind[21] = 8 | 0xffff << 16;
     let p = arm64_macho(&LEAVES, &unwind, &LEAF_STARTS);
     assert_eq!(starts(&p), [at(0), at(8), at(0x10), at(0x18)]);
+}
+
+// ---- discovery ----
+
+/// Where [`crate::raw::image`] puts `.text`, and the entry with it.
+const TEXT: u64 = 0x40_1000;
+
+/// Functions of every shape discovery tells apart, laid out from [`TEXT`]
+/// as the assembler placed them.
+///
+/// `main` (0x00) calls the rest. `leaf` (0x30) has no frame; `framed`
+/// (0x38) has one; `tail` (0x4c) tears its frame down and jumps to
+/// `tailee` (0x60), which only that jump reaches and which jumps on to
+/// `leaf`. `jumpover` (0x68) jumps over a data word to its own return.
+/// `noret` (0x80) calls `abort` (0xa8), named as never returning, and is
+/// followed by dead code and then `after_abort` (0x94), which nothing
+/// calls and which opens with a push. `noret2` (0xac) calls `fatal` (0xd4)
+/// right before the start of `known_after` (0xb4), a symbol; `noret3`
+/// (0xbc) calls it right before `signed` (0xc4), which nothing calls and
+/// which opens by signing its return address. Zero padding and `orphan`
+/// (0xe0), which opens like no function, end the code.
+const DISCOVERY: [u32; 58] = [
+    // ASM: paciasp
+    0xd503_233f,
+    // ASM: stp x29, x30, [sp, #-16]!
+    0xa9bf_7bfd,
+    // ASM: mov x29, sp
+    0x9100_03fd,
+    // ASM: bl framed
+    0x9400_000b,
+    // ASM: bl tail
+    0x9400_000f,
+    // ASM: bl jumpover
+    0x9400_0015,
+    // ASM: cbz w0, 0x28
+    0x3400_0080,
+    // ASM: bl noret
+    0x9400_0019,
+    // ASM: bl noret2
+    0x9400_0023,
+    // ASM: bl noret3
+    0x9400_0026,
+    // ASM: ldp x29, x30, [sp], #16
+    0xa8c1_7bfd,
+    // ASM: retaa
+    0xd65f_0bff,
+    // ASM: add w0, w0, #1 (leaf)
+    0x1100_0400,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: stp x29, x30, [sp, #-16]! (framed)
+    0xa9bf_7bfd,
+    // ASM: mov x29, sp
+    0x9100_03fd,
+    // ASM: bl leaf
+    0x97ff_fffc,
+    // ASM: ldp x29, x30, [sp], #16
+    0xa8c1_7bfd,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: stp x29, x30, [sp, #-16]! (tail)
+    0xa9bf_7bfd,
+    // ASM: mov x29, sp
+    0x9100_03fd,
+    // ASM: bl leaf
+    0x97ff_fff7,
+    // ASM: ldp x29, x30, [sp], #16
+    0xa8c1_7bfd,
+    // ASM: b tailee
+    0x1400_0001,
+    // ASM: sub w0, w0, #1 (tailee)
+    0x5100_0400,
+    // ASM: b leaf
+    0x17ff_fff3,
+    // ASM: cmp w0, #3 (jumpover)
+    0x7100_0c1f,
+    // ASM: b.hi 0x7c
+    0x5400_0088,
+    // ASM: b 0x78
+    0x1400_0002,
+    // ASM: .word 0xdeadbeef
+    0xdead_beef,
+    // ASM: mov w0, #1
+    0x5280_0020,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: stp x29, x30, [sp, #-16]! (noret)
+    0xa9bf_7bfd,
+    // ASM: mov x29, sp
+    0x9100_03fd,
+    // ASM: bl abort
+    0x9400_0008,
+    // ASM: mov w0, #1
+    0x5280_0020,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: stp x29, x30, [sp, #-32]! (after_abort)
+    0xa9be_7bfd,
+    // ASM: mov x29, sp
+    0x9100_03fd,
+    // ASM: mov w0, #7
+    0x5280_00e0,
+    // ASM: ldp x29, x30, [sp], #32
+    0xa8c2_7bfd,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: brk #0x3e8 (abort)
+    0xd420_7d00,
+    // ASM: stp x29, x30, [sp, #-16]! (noret2)
+    0xa9bf_7bfd,
+    // ASM: bl fatal
+    0x9400_0009,
+    // ASM: mov w0, #9 (known_after)
+    0x5280_0120,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: stp x29, x30, [sp, #-16]! (noret3)
+    0xa9bf_7bfd,
+    // ASM: bl fatal
+    0x9400_0005,
+    // ASM: paciasp (signed)
+    0xd503_233f,
+    // ASM: mov w0, #3
+    0x5280_0060,
+    // ASM: autiasp
+    0xd503_23bf,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: udf #1 (fatal)
+    0x0000_0001,
+    // ASM: .word 0
+    0x0000_0000,
+    // ASM: .word 0
+    0x0000_0000,
+    // ASM: mov w0, #5 (orphan)
+    0x5280_00a0,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// A local symbol naming a function.
+fn local(name: &str, addr: u64) -> Symbol {
+    Symbol {
+        name: name.to_owned(),
+        addr,
+        kind: SymbolKind::Local,
+    }
+}
+
+/// [`DISCOVERY`] as a raw arm64 image with `abort` and `known_after`
+/// named, analyzed.
+fn discovered() -> Analysis {
+    let mut p = crate::raw::image(Arch::Arm64, &le_words(&DISCOVERY), &[]);
+    p.symbols = vec![
+        local("abort", TEXT + 0xa8),
+        local("known_after", TEXT + 0xb4),
+    ];
+    Analysis::compute(&p)
+}
+
+/// Discovery finds every function of [`DISCOVERY`] with its extent.
+///
+/// Leaf and framed functions, a function reached only by a tail call, one
+/// jumping over data, calls that never return by name, by the start after
+/// them and by the push or signing after them, and the functions only a
+/// gap guess finds; dead code and code that opens like no function are
+/// no functions.
+#[test]
+fn discovery_finds_every_shape_of_function() {
+    let a = discovered();
+    let extents: Vec<(u64, u64, u64)> = a
+        .functions
+        .iter()
+        .map(|f| {
+            (
+                f.entry - TEXT,
+                f.end - TEXT,
+                u64::try_from(f.instr_count).expect("few"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        extents,
+        [
+            (0x00, 0x30, 12),
+            (0x30, 0x38, 2),
+            (0x38, 0x4c, 5),
+            (0x4c, 0x60, 5),
+            (0x60, 0x68, 2),
+            (0x68, 0x80, 5),
+            (0x80, 0x8c, 3),
+            (0x94, 0xa8, 5),
+            (0xa8, 0xac, 1),
+            (0xac, 0xb4, 2),
+            (0xb4, 0xbc, 2),
+            (0xbc, 0xc4, 2),
+            (0xc4, 0xd4, 4),
+            (0xd4, 0xd8, 1),
+        ]
+    );
+    assert!(!a.incomplete);
+    let f = |off: u64| a.function(TEXT + off).expect("a function");
+    assert_eq!(f(0x4c).callees, [TEXT + 0x30, TEXT + 0x60]);
+    assert_eq!(f(0x60).callees, [TEXT + 0x30]);
+    assert_eq!(
+        f(0).callees,
+        [0x38, 0x4c, 0x68, 0x80, 0xac, 0xbc].map(|off| TEXT + off)
+    );
+    let terms = |off: u64| -> Vec<BlockTerm> { f(off).blocks.iter().map(|b| b.term).collect() };
+    assert_eq!(terms(0).last(), Some(&BlockTerm::Ret));
+    assert_eq!(
+        terms(0x68),
+        [
+            BlockTerm::Cond,
+            BlockTerm::Jmp,
+            BlockTerm::Fall,
+            BlockTerm::Ret
+        ]
+    );
+    assert_eq!(terms(0x80), [BlockTerm::Call]);
+    assert!(f(0x80).blocks[0].successors.is_empty());
+    assert_eq!(terms(0xa8), [BlockTerm::Invalid]);
+    assert_eq!(terms(0xd4), [BlockTerm::Invalid]);
+    assert_eq!(
+        (f(0xa8).name.as_deref(), f(0xa8).name_source),
+        (Some("abort"), NameSource::Symbol)
+    );
+}
+
+/// Calls reach the cross-reference index and the caller lists: a function
+/// called and tail-called lists every site with its kind, and each caller.
+#[test]
+fn discovery_indexes_calls_and_tail_calls() {
+    let a = discovered();
+    let sites: Vec<(u64, RefKind, Option<u64>)> = a
+        .xrefs_to(TEXT + 0x30)
+        .iter()
+        .map(|s| (s.va - TEXT, s.kind, s.from_entry.map(|e| e - TEXT)))
+        .collect();
+    assert_eq!(
+        sites,
+        [
+            (0x40, RefKind::Call, Some(0x38)),
+            (0x54, RefKind::Call, Some(0x4c)),
+            (0x64, RefKind::Jmp, Some(0x60)),
+        ]
+    );
+    let leaf = a.function(TEXT + 0x30).expect("leaf");
+    assert_eq!(leaf.callers, [0x38, 0x4c, 0x60].map(|off| TEXT + off));
+}
+
+/// Two copies of one function that address different pages and load
+/// their literal from different distances fingerprint alike; one adding
+/// another offset does not.
+#[test]
+fn fingerprints_leave_pages_and_offsets_out() {
+    let code = [
+        // ASM: stp x29, x30, [sp, #-16]!
+        0xa9bf_7bfd,
+        // ASM: bl one
+        0x9400_0005,
+        // ASM: bl two
+        0x9400_0008,
+        // ASM: bl three
+        0x9400_000b,
+        // ASM: ldp x29, x30, [sp], #16
+        0xa8c1_7bfd,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: adrp x0, 0x402000 (one)
+        0xb000_0000,
+        // ASM: add x0, x0, #0x10
+        0x9100_4000,
+        // ASM: ldr w1, 0x401048
+        0x1800_0141,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: adrp x0, 0x404000 (two)
+        0xf000_0000,
+        // ASM: add x0, x0, #0x10
+        0x9100_4000,
+        // ASM: ldr w1, 0x401048
+        0x1800_00c1,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: adrp x0, 0x402000 (three)
+        0xb000_0000,
+        // ASM: add x0, x0, #0x18
+        0x9100_6000,
+        // ASM: ldr w1, 0x401048
+        0x1800_0041,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: .word 7
+        0x0000_0007,
+    ];
+    let a = Analysis::compute(&crate::raw::image(Arch::Arm64, &le_words(&code), &[]));
+    assert_eq!(a.clones_of(TEXT + 0x18), [TEXT + 0x18, TEXT + 0x28]);
+    assert!(a.clones_of(TEXT + 0x38).is_empty());
+    assert_eq!(
+        a.shapes_of(TEXT + 0x18),
+        [TEXT + 0x18, TEXT + 0x28, TEXT + 0x38]
+    );
+}
+
+/// A Mach-O's function starts and compact unwind table make functions of
+/// code nothing calls and that opens like no function.
+#[test]
+fn macho_tables_make_functions_of_uncalled_code() {
+    let p = arm64_macho(&LEAVES, &LEAF_UNWIND, &LEAF_STARTS);
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    let at = |off: u64| MACHO_TEXT + 0x400 + off;
+    assert_eq!(entries, [at(0), at(8), at(0x10), at(0x18)]);
+    assert!(a.functions.iter().all(|f| f.instr_count == 2));
+}
+
+/// Code a PE's `.pdata` declares: a function that branches into its own
+/// fragment and jumps out of its extent, a leaf only its `.xdata` record
+/// declares, the fragment, and the function the jump enters.
+const PDATA_DISCOVERY: [u32; 10] = [
+    // ASM: cmp w0, #0
+    0x7100_001f,
+    // ASM: b.ne 0x1018
+    0x5400_00a1,
+    // ASM: b 0x1020
+    0x1400_0006,
+    // ASM: nop
+    0xd503_201f,
+    // ASM: add w0, w0, #1 (0x1010)
+    0x1100_0400,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0 (0x1018, the fragment)
+    0x5280_0000,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #2 (0x1020)
+    0x5280_0040,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// An arm64 PE's `.pdata` makes functions of what it declares.
+///
+/// A branch into a declared fragment stays in its function, and a jump out
+/// of a function's declared extent is a tail call to a function of its
+/// own.
+#[test]
+fn pdata_makes_functions_and_bounds_them() {
+    let bytes = arm64_pe_bytes(&PDATA_DISCOVERY, &PDATA, &XDATA);
+    let p = Program::from_bytes(PathBuf::from("pdata.exe"), bytes).expect("parses");
+    let a = Analysis::compute(&p);
+    let at = |off: u64| crate::protection::IMAGE_BASE + 0x1000 + off;
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    assert_eq!(entries, [at(0), at(0x10), at(0x20)]);
+    let first = a.function(at(0)).expect("the declared function");
+    assert_eq!((first.end, first.instr_count), (at(0x20), 5));
+    assert_eq!(first.callees, [at(0x20)]);
+}
+
+/// Hostile code gives an answer, the same one twice.
+///
+/// Pseudo-random words, a `nop` sled, words all zero or all ones, and jumps
+/// to themselves and out of the section, with symbols and declared extents
+/// unaligned, inverted, past the section or at its last word, each give
+/// functions that decode.
+#[test]
+fn discovery_survives_hostile_code() {
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let random: Vec<u32> = (0..1024)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            u32::try_from(x >> 32).expect("the high half")
+        })
+        .collect();
+    let jumps = vec![
+        // ASM: b .
+        0x1400_0000,
+        // ASM: cbz x0, .
+        0xb400_0000,
+        // ASM: bl .+0x1000000
+        0x9440_0000,
+        // ASM: b .-4
+        0x17ff_ffff,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for code in [
+        random,
+        vec![0xd503_201f; 1024],
+        vec![0; 1024],
+        vec![u32::MAX; 1024],
+        jumps,
+    ] {
+        let mut p = crate::raw::image(Arch::Arm64, &le_words(&code), &[]);
+        p.symbols = [
+            TEXT + 1,
+            TEXT + 0x1ffc,
+            TEXT + 0xffc,
+            0x40_2000,
+            u64::MAX - 3,
+        ]
+        .into_iter()
+        .map(|addr| local("odd", addr))
+        .collect();
+        p.function_ranges = vec![
+            (TEXT, TEXT - 0x1000),
+            (TEXT + 0x10, TEXT + 0x14),
+            (TEXT + 0xffc, u64::MAX),
+        ];
+        let a = Analysis::compute(&p);
+        let shape = |a: &Analysis| -> Vec<(u64, u64, usize, u64)> {
+            a.functions
+                .iter()
+                .map(|f| (f.entry, f.end, f.instr_count, f.body_hash))
+                .collect()
+        };
+        assert_eq!(shape(&a), shape(&Analysis::compute(&p)));
+        for f in &a.functions {
+            assert!(
+                f.instr_count > 0 && f.start <= f.entry && f.entry < f.end && !f.blocks.is_empty(),
+                "{:#x}",
+                f.entry
+            );
+        }
+    }
 }
