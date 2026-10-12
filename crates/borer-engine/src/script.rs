@@ -74,8 +74,12 @@ use crate::program::{Feature, Program, SymbolKind};
 pub const OPS_MAX: u64 = 200_000_000;
 /// Deepest call nesting a script may reach.
 const CALLS_MAX: usize = 64;
-/// Longest string a script may build.
-const STRING_MAX: usize = 1 << 22;
+/// Most string bytes one value may hold.
+///
+/// Rhai counts every string inside an array or map together, so this also
+/// bounds a whole listing such as `functions()`: borer's own build has
+/// about 160,000 functions whose names pass 4 MiB.
+const STRING_MAX: usize = 1 << 26;
 /// Most elements in one array or blob a script may build.
 const ARRAY_MAX: usize = 1 << 21;
 /// Most bytes one `bytes` call reads.
