@@ -46,6 +46,11 @@
 //! pass says the text agreed on the states tried, not that it is right; the
 //! statements it checks are the ones the emission wrote, before the text
 //! passes rewrote them.
+//!
+//! The replay is written against [`Replay`], what it asks of an
+//! instruction set (its machine, its registers, how its blocks end and
+//! which of them it can check), and [`Rig`], what it asks of that
+//! instruction set's machine.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -54,21 +59,23 @@ use crate::isa::x86::{
     FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
 };
 
+use super::arch::{self, Lifter};
 use super::expr::{Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, a64_code, fold, known_bits, unary};
 use super::lift::{
     ArgAt, Callee, Conv, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
 };
 use super::liveness::Live;
 use super::verify::{
-    EVAL_DEPTH, FRAME_SPAN, GOLDEN, REGION_MAX, REGS, REGS_32, Rng, STACK_WORDS, XMMS, agree,
-    aligns_stack, convert_float, float_arith, float_cc, float_of, float_to_int, float_un, low,
-    sext, word,
+    Bench, EVAL_DEPTH, FRAME_SPAN, GOLDEN, REGION_MAX, REGS, REGS_32, Rng, STACK_WORDS, XMMS,
+    agree, aligns_stack, convert_float, float_arith, float_cc, float_of, float_to_int, float_un,
+    low, sext, word,
 };
 use super::{decompile_with, table_target};
 use crate::analysis::decompiled_witnessed;
 use crate::analysis::{Analysis, BasicBlock, Overlay, striped_with};
 use crate::emulate::{Emulator, Stop, fill_byte};
 use crate::fxmap::{FxHashMap, FxHashSet};
+use crate::isa::Isa;
 use crate::num::{from_usize, lo8};
 use crate::program::Program;
 
@@ -80,7 +87,7 @@ const RULED_OUT_RETRIES: u64 = 9;
 const RULED_OUT: &str = "a state the branch into the block rules out";
 /// Why a block is not checked: a float or vector instruction outside the
 /// checked subset ([`outside_subset`]).
-const OUTSIDE_FLOAT: &str = "an instruction outside the checked subset";
+pub(super) const OUTSIDE_FLOAT: &str = "an instruction outside the checked subset";
 /// Why a block is not checked: a call in it renders fewer stack words than
 /// its callee reads ([`Call::short`](super::lift::Call::short)).
 const SHORT_CALL: &str = "a call the text passes fewer words than its callee reads";
@@ -185,6 +192,407 @@ impl std::fmt::Debug for Witness {
 pub(super) enum Code {
     /// x86 or x86-64 instructions, per block.
     X86(Vec<Vec<Instruction>>),
+}
+
+/// A machine the replay runs blocks on: what the replay asks of it beyond
+/// what the verifier does ([`Bench`]).
+pub(super) trait Rig: Bench {
+    /// Writes a byte of memory before a run.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address.
+    /// * `byte` - The byte.
+    fn poke(&mut self, at: u64, byte: u8);
+
+    /// Sets a register named as text.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The register's name, as [`Replay::regs`] names it.
+    /// * `value` - The value.
+    ///
+    /// # Returns
+    ///
+    /// Whether the name was a register.
+    fn set_register(&mut self, name: &str, value: u64) -> bool;
+
+    /// Fills memory nothing backs with bytes drawn from a seed
+    /// ([`fill_byte`]), as the text's state reads it.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - The seed, or `None` for a fault there.
+    fn set_fill(&mut self, seed: Option<u64>);
+
+    /// Lets a run go on past what the machine models where it can, as the
+    /// replay wants of the x86 emulator; a machine without the setting
+    /// does nothing.
+    fn set_permissive(&mut self);
+
+    /// Reads a vector register whole.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Its number, as [`Replay::vectors`] lists it.
+    fn vector(&self, n: usize) -> u128;
+
+    /// Sets a vector register whole.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Its number, as [`Replay::vectors`] lists it.
+    /// * `v` - The value.
+    fn set_vector(&mut self, n: usize, v: u128);
+}
+
+impl Rig for Emulator<'_> {
+    fn poke(&mut self, at: u64, byte: u8) {
+        Emulator::poke(self, at, byte);
+    }
+
+    fn set_register(&mut self, name: &str, value: u64) -> bool {
+        Emulator::set_register(self, name, value)
+    }
+
+    fn set_fill(&mut self, seed: Option<u64>) {
+        Emulator::set_fill(self, seed);
+    }
+
+    fn set_permissive(&mut self) {
+        Emulator::set_permissive(self, true);
+    }
+
+    fn vector(&self, n: usize) -> u128 {
+        self.xmm().get(n).copied().unwrap_or(0)
+    }
+
+    fn set_vector(&mut self, n: usize, v: u128) {
+        self.set_xmm(n, v);
+    }
+}
+
+/// How an instruction moves control, as the replay reads a block's end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Transfer {
+    /// On to the next instruction, at this address.
+    Next(u64),
+    /// A conditional branch to `target`, else on to `next`.
+    Branch {
+        /// Where it goes when taken.
+        target: u64,
+        /// Where it goes when not.
+        next: u64,
+    },
+    /// A direct unconditional jump.
+    Jump,
+    /// A jump through a register or memory.
+    Indirect,
+    /// A call.
+    Call,
+    /// A return.
+    Return,
+    /// A trap, or a branch the replay has no model of.
+    Trap,
+}
+
+/// What the replay asks of an instruction set: its machine, its registers,
+/// how its blocks end and which it can check.
+pub(super) trait Replay: Lifter {
+    /// The machine a block runs on.
+    type Rig<'p>: Rig;
+
+    /// Builds the image's machine before any run.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image.
+    ///
+    /// # Returns
+    ///
+    /// The machine, or `None` when the image is not this instruction
+    /// set's.
+    fn rig(program: &Program) -> Option<Self::Rig<'_>>;
+
+    /// Returns the register width in bits the image runs at.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image.
+    fn width(program: &Program) -> Option<u8>;
+
+    /// Returns the witness's blocks, when they are this instruction set's.
+    ///
+    /// # Arguments
+    ///
+    /// * `w` - The witness.
+    fn code(w: &Witness) -> Option<&[Vec<Self::Insn>]>;
+
+    /// Returns the general registers the replay seeds and compares, by the
+    /// machine's names, the one a result comes back in first.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - The register width.
+    fn regs(width: u8) -> Vec<(&'static str, Key)>;
+
+    /// Returns the vector registers, by the machine's numbering.
+    fn vectors() -> Vec<Key>;
+
+    /// Returns the registers a call may change.
+    ///
+    /// # Arguments
+    ///
+    /// * `w` - The witness, holding the convention.
+    fn volatile(w: &Witness) -> Vec<Key>;
+
+    /// Reads how an instruction moves control.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    fn transfer(i: &Self::Insn) -> Transfer;
+
+    /// Tells whether the replay can check a block's instructions.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The block's instructions.
+    ///
+    /// # Errors
+    ///
+    /// Why it cannot.
+    fn subset(code: &[Self::Insn]) -> Result<(), &'static str>;
+
+    /// Tells whether a block reads whole vector lanes, which its states
+    /// then draw.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The block's instructions.
+    fn whole_lanes(code: &[Self::Insn]) -> bool;
+
+    /// Returns the values a block's comparisons turn on ([`comparands`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The block's instructions.
+    /// * `width` - The register width.
+    fn comparands(code: &[Self::Insn], width: u8) -> Vec<u64>;
+
+    /// Returns the instructions of a block that set the flags, each with
+    /// whether it was a float compare, beside those that read them
+    /// ([`flag_setters`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The block's instructions.
+    fn flag_setters(code: &[Self::Insn]) -> (Vec<(u64, bool)>, Vec<u64>);
+
+    /// Tells whether an instruction sets the flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    fn sets_flags(i: &Self::Insn) -> bool;
+
+    /// Tells whether a block scans for a bit, which a scan of zero leaves
+    /// undefined, so a state the branch into it rules out is not tried.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The block's instructions.
+    fn scans(code: &[Self::Insn]) -> bool;
+
+    /// Returns the steps a run of the block takes at most.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The block's instructions.
+    fn budget(code: &[Self::Insn]) -> usize;
+
+    /// Reads where a call or a jump through a register or memory goes on
+    /// the machine stopped before it.
+    ///
+    /// # Arguments
+    ///
+    /// * `emu` - The machine.
+    /// * `i` - The call or jump.
+    /// * `width` - The register width.
+    fn target_value(emu: &Self::Rig<'_>, i: &Self::Insn, width: u8) -> Option<u64>;
+
+    /// Reads the register an argument travels in on the machine.
+    ///
+    /// # Arguments
+    ///
+    /// * `emu` - The machine.
+    /// * `at` - Where the argument travels.
+    /// * `width` - The register width.
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for an argument in no general register.
+    fn register_value(emu: &Self::Rig<'_>, at: ArgAt, width: u8) -> Option<u64>;
+
+    /// Follows a call through a dispatch thunk ([`Witness::dispatches`]) to
+    /// where it goes.
+    ///
+    /// # Arguments
+    ///
+    /// * `emu` - The machine.
+    /// * `w` - The witness.
+    /// * `to` - Where the call goes.
+    /// * `width` - The register width.
+    fn dispatch(emu: &Self::Rig<'_>, w: &Witness, to: u64, width: u8) -> Option<u64>;
+
+    /// Returns the frame bytes a block writes as the compiler's own
+    /// bookkeeping, which the text leaves out on purpose.
+    ///
+    /// # Arguments
+    ///
+    /// * `emu` - The machine after the block.
+    /// * `code` - The block's instructions.
+    /// * `w` - The witness.
+    /// * `width` - The register width.
+    fn kept(
+        emu: &Self::Rig<'_>,
+        code: Option<&Vec<Self::Insn>>,
+        w: &Witness,
+        width: u8,
+    ) -> Vec<u64>;
+}
+
+impl Replay for arch::X86 {
+    type Rig<'p> = Emulator<'p>;
+
+    fn rig(program: &Program) -> Option<Emulator<'_>> {
+        Emulator::new(program, 0)
+    }
+
+    fn width(program: &Program) -> Option<u8> {
+        program.arch.bitness().and_then(|b| u8::try_from(b).ok())
+    }
+
+    fn code(w: &Witness) -> Option<&[Vec<Instruction>]> {
+        match &w.code {
+            Code::X86(code) => Some(code.as_slice()),
+        }
+    }
+
+    fn regs(width: u8) -> Vec<(&'static str, Key)> {
+        let regs: &[(&str, Register)] = if width == 32 { &REGS_32 } else { &REGS };
+        regs.iter().map(|&(n, r)| (n, Key::Reg(r))).collect()
+    }
+
+    fn vectors() -> Vec<Key> {
+        XMMS.iter().map(|&x| Key::Reg(x)).collect()
+    }
+
+    fn volatile(w: &Witness) -> Vec<Key> {
+        w.conv.volatile.iter().map(|&r| Key::Reg(r)).collect()
+    }
+
+    fn transfer(i: &Instruction) -> Transfer {
+        match i.flow_control() {
+            FlowControl::ConditionalBranch
+                if matches!(
+                    i.op0_kind(),
+                    OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+                ) =>
+            {
+                Transfer::Branch {
+                    target: i.near_branch_target(),
+                    next: i.next_ip(),
+                }
+            }
+            FlowControl::Next => Transfer::Next(i.next_ip()),
+            FlowControl::UnconditionalBranch => Transfer::Jump,
+            FlowControl::IndirectBranch => Transfer::Indirect,
+            FlowControl::Call | FlowControl::IndirectCall => Transfer::Call,
+            FlowControl::Return => Transfer::Return,
+            FlowControl::ConditionalBranch
+            | FlowControl::Interrupt
+            | FlowControl::Exception
+            | FlowControl::XbeginXabortXend => Transfer::Trap,
+        }
+    }
+
+    fn subset(code: &[Instruction]) -> Result<(), &'static str> {
+        let mut info = InstructionInfoFactory::new();
+        if !integer_or_zero_fill(code, &mut info) {
+            return Err(outside_subset(code, &mut info));
+        }
+        if code.iter().any(aligns_stack) {
+            return Err("a frame alignment");
+        }
+        Ok(())
+    }
+
+    fn whole_lanes(code: &[Instruction]) -> bool {
+        reads_whole_lanes(code, &mut InstructionInfoFactory::new())
+    }
+
+    fn comparands(code: &[Instruction], width: u8) -> Vec<u64> {
+        comparands(code, width)
+    }
+
+    fn flag_setters(code: &[Instruction]) -> (Vec<(u64, bool)>, Vec<u64>) {
+        flag_setters(code)
+    }
+
+    fn sets_flags(i: &Instruction) -> bool {
+        i.rflags_modified() != 0
+    }
+
+    fn scans(code: &[Instruction]) -> bool {
+        code.iter()
+            .any(|i| matches!(i.mnemonic(), Mnemonic::Bsf | Mnemonic::Bsr))
+    }
+
+    fn budget(code: &[Instruction]) -> usize {
+        let reps = code
+            .iter()
+            .filter(|i| i.has_rep_prefix() || i.has_repe_prefix() || i.has_repne_prefix())
+            .count();
+        code.len() + 1 + reps * REGION_MAX
+    }
+
+    fn target_value(emu: &Emulator<'_>, i: &Instruction, width: u8) -> Option<u64> {
+        operand(emu, i, width)
+    }
+
+    fn register_value(emu: &Emulator<'_>, at: ArgAt, width: u8) -> Option<u64> {
+        match at {
+            ArgAt::Reg(r) if r.is_gpr() => reg_value(emu, r, width),
+            ArgAt::Reg(_) | ArgAt::Stack(..) | ArgAt::Operand => None,
+        }
+    }
+
+    fn dispatch(emu: &Emulator<'_>, w: &Witness, to: u64, width: u8) -> Option<u64> {
+        match w.dispatches.get(&to) {
+            Some(r) => reg_value(emu, *r, width),
+            None => Some(to),
+        }
+    }
+
+    fn kept(
+        emu: &Emulator<'_>,
+        code: Option<&Vec<Instruction>>,
+        w: &Witness,
+        width: u8,
+    ) -> Vec<u64> {
+        // INVARIANT: the try level at `[ebp-4]` is the compiler's
+        // bookkeeping, which the text leaves out on purpose.
+        let mask = low(width);
+        let bitness = u32::from(width);
+        if w.seh_frame
+            && code.is_some_and(|c| c.iter().any(|i| try_level_store(i, bitness)))
+            && let Some(ebp) = reg_value(emu, Register::EBP, width)
+        {
+            return (1..=4).map(|i| ebp.wrapping_sub(i) & mask).collect();
+        }
+        Vec::new()
+    }
 }
 
 /// What a statement or a block's end claims, as compared with the machine.
@@ -342,14 +750,34 @@ impl Replayed {
 /// What was compared and every disagreement, in the entries' order.
 #[must_use]
 pub fn replay(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Replayed {
+    match program.arch.isa() {
+        Some(Isa::X86 { .. }) => replay_in::<arch::X86>(program, analysis, entries, seed),
+        Some(Isa::A64) | None => Replayed::default(),
+    }
+}
+
+/// [`replay`] for one instruction set.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - Its functions.
+/// * `entries` - The functions to check.
+/// * `seed` - The states' seed.
+fn replay_in<L: Replay>(
+    program: &Program,
+    analysis: &Analysis,
+    entries: &[u64],
+    seed: u64,
+) -> Replayed {
     let parts = striped_with(
         entries,
         PAR_MIN,
-        || Emulator::new(program, 0),
+        || L::rig(program),
         |template, &entry| {
             template
                 .as_ref()
-                .map(|t| replay_one(program, analysis, t, entry, seed))
+                .map(|t| replay_one::<L>(program, analysis, t, entry, seed))
         },
     );
     let mut out = Replayed::default();
@@ -374,9 +802,12 @@ pub fn replay(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64
 /// no emulator.
 #[must_use]
 pub fn replay_function(program: &Program, analysis: &Analysis, entry: u64, seed: u64) -> Replayed {
-    Emulator::new(program, 0)
-        .map(|t| replay_one(program, analysis, &t, entry, seed))
-        .unwrap_or_default()
+    match program.arch.isa() {
+        Some(Isa::X86 { .. }) => arch::X86::rig(program)
+            .map(|t| replay_one::<arch::X86>(program, analysis, &t, entry, seed))
+            .unwrap_or_default(),
+        Some(Isa::A64) | None => Replayed::default(),
+    }
 }
 
 /// [`replay_function`] over a template emulator a thread keeps.
@@ -388,10 +819,10 @@ pub fn replay_function(program: &Program, analysis: &Analysis, entry: u64, seed:
 /// * `template` - The image's emulator before any run, cloned per state.
 /// * `entry` - The function's entry.
 /// * `seed` - The states' seed.
-fn replay_one(
+fn replay_one<L: Replay>(
     program: &Program,
     analysis: &Analysis,
-    template: &Emulator<'_>,
+    template: &L::Rig<'_>,
     entry: u64,
     seed: u64,
 ) -> Replayed {
@@ -411,7 +842,7 @@ fn replay_one(
         .enumerate()
         .map(|(i, b)| d.effects.block(i, b.start).unwrap_or_default())
         .collect();
-    replay_effects(
+    replay_effects::<L>(
         program,
         analysis,
         template,
@@ -444,8 +875,28 @@ pub(crate) fn check_answer(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<TextCheck> {
+    match program.arch.isa()? {
+        Isa::X86 { .. } => check_answer_in::<arch::X86>(program, analysis, overlay, entry),
+        Isa::A64 => None,
+    }
+}
+
+/// [`check_answer`] for one instruction set.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - Its functions.
+/// * `overlay` - The names the answer is decompiled under.
+/// * `entry` - The function's entry.
+fn check_answer_in<L: Replay>(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> Option<TextCheck> {
     let f = analysis.function(entry)?;
-    let template = Emulator::new(program, 0)?;
+    let template = L::rig(program)?;
     // PERF: the text the answer shows comes from the memo; built here first,
     // it keeps the lifter's witness for this check to take, so the answer
     // pays for one decompilation. A text someone else memoized first kept
@@ -466,7 +917,7 @@ pub(crate) fn check_answer(
         .enumerate()
         .map(|(i, b)| d.effects.block(i, b.start).unwrap_or_default())
         .collect();
-    let r = replay_effects(
+    let r = replay_effects::<L>(
         program,
         analysis,
         &template,
@@ -615,10 +1066,10 @@ fn unchecked_label(reason: &str) -> &'static str {
     clippy::too_many_arguments,
     reason = "one function's facts, threaded through"
 )]
-fn replay_effects(
+fn replay_effects<L: Replay>(
     program: &Program,
     analysis: &Analysis,
-    template: &Emulator<'_>,
+    template: &L::Rig<'_>,
     entry: u64,
     seed: u64,
     witnessed: (&Witness, &[Vec<usize>]),
@@ -627,13 +1078,14 @@ fn replay_effects(
 ) -> Replayed {
     let mut out = Replayed::default();
     let (w, succs) = witnessed;
-    let (Some(f), Some(bitness)) = (analysis.function(entry), program.arch.bitness()) else {
+    let (Some(f), Some(width), Some(code)) =
+        (analysis.function(entry), L::width(program), L::code(w))
+    else {
         return out;
     };
-    let Code::X86(code) = &w.code;
     out.functions = 1;
-    let named = named_slots(effects, if bitness == 32 { 4 } else { 8 });
-    let function = Function {
+    let named = named_slots(effects, u64::from(width / 8));
+    let function = Function::<L> {
         analysis,
         template,
         entry,
@@ -643,8 +1095,10 @@ fn replay_effects(
         succs,
         effects,
         named: &named,
-        regs: if bitness == 32 { &REGS_32 } else { &REGS },
-        width: if bitness == 32 { 32 } else { 64 },
+        regs: L::regs(width),
+        vectors: L::vectors(),
+        volatile: L::volatile(w),
+        width,
     };
     let mut room = budget;
     for (b, block) in f.blocks.iter().enumerate() {
@@ -906,17 +1360,17 @@ pub fn replay_tsv(r: &Replayed) -> String {
 
 /// How a block ends, which says where its run stops.
 #[derive(Debug, Clone, Copy)]
-enum End {
+enum End<I> {
     /// A conditional branch: the run stops before it, then steps it.
-    Branch(Instruction),
+    Branch(I),
     /// A call, a return, or a jump (to a block, a tail call, a jump
     /// table, a computed `goto`): the run stops before it.
-    Before(Instruction),
+    Before(I),
     /// Into the block at this address.
     Fall(u64),
 }
 
-impl End {
+impl<I: Copy> End<I> {
     /// How a block's instructions end.
     ///
     /// # Arguments
@@ -926,40 +1380,30 @@ impl End {
     /// # Errors
     ///
     /// Why the end cannot be checked: a trap.
-    fn of(code: &[Instruction]) -> Result<Self, &'static str> {
+    fn of<L: Replay<Insn = I>>(code: &[I]) -> Result<Self, &'static str> {
         let last = *code.last().ok_or("no instructions")?;
-        Ok(match last.flow_control() {
-            FlowControl::ConditionalBranch
-                if matches!(
-                    last.op0_kind(),
-                    OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
-                ) && last.near_branch_target() != last.ip() =>
-            {
-                Self::Branch(last)
+        Ok(match L::transfer(&last) {
+            Transfer::Branch { target, .. } if target != L::start(&last) => Self::Branch(last),
+            Transfer::Call | Transfer::Return | Transfer::Jump | Transfer::Indirect => {
+                Self::Before(last)
             }
-            FlowControl::Call
-            | FlowControl::IndirectCall
-            | FlowControl::Return
-            | FlowControl::UnconditionalBranch
-            | FlowControl::IndirectBranch => Self::Before(last),
-            FlowControl::Next => Self::Fall(last.next_ip()),
-            FlowControl::ConditionalBranch
-            | FlowControl::Interrupt
-            | FlowControl::Exception
-            | FlowControl::XbeginXabortXend => return Err("a trap or a branch with no model"),
+            Transfer::Next(at) => Self::Fall(at),
+            Transfer::Branch { .. } | Transfer::Trap => {
+                return Err("a trap or a branch with no model");
+            }
         })
     }
 
     /// Where the run stops.
-    fn stop(self) -> u64 {
+    fn stop<L: Replay<Insn = I>>(self) -> u64 {
         match self {
-            Self::Branch(i) | Self::Before(i) => i.ip(),
+            Self::Branch(i) | Self::Before(i) => L::start(&i),
             Self::Fall(at) => at,
         }
     }
 
     /// The instruction the run stops before, if the block ends in one.
-    fn last(self) -> Option<Instruction> {
+    fn last(self) -> Option<I> {
         match self {
             Self::Branch(i) | Self::Before(i) => Some(i),
             Self::Fall(_) => None,
@@ -1348,7 +1792,7 @@ fn reads_whole_lanes(code: &[Instruction], info: &mut InstructionInfoFactory) ->
 /// * `text` - The text's state.
 /// * `v` - The value.
 /// * `n` - Its width in bytes.
-fn wide_value(text: &Text<'_, '_>, v: &Expr, n: u64) -> Option<u128> {
+fn wide_value<M: Bench>(text: &Text<'_, M>, v: &Expr, n: u64) -> Option<u128> {
     if n <= 8 {
         return text.eval(v).map(u128::from);
     }
@@ -1604,7 +2048,7 @@ fn value_lane(e: &Expr, width: u8) -> u8 {
 /// * `at` - The address, wrapped at the register width.
 /// * `n` - Bytes, at most 8.
 /// * `width` - The register width, 32 or 64.
-fn machine_word(emu: &Emulator<'_>, at: u64, n: u64, width: u8) -> Option<u64> {
+fn machine_word<M: Bench>(emu: &M, at: u64, n: u64, width: u8) -> Option<u64> {
     let mut v = 0u64;
     for i in (0..n.min(8)).rev() {
         v = (v << 8) | u64::from(emu.byte_at(at.wrapping_add(i) & low(width))?);
@@ -1613,7 +2057,7 @@ fn machine_word(emu: &Emulator<'_>, at: u64, n: u64, width: u8) -> Option<u64> {
 }
 
 /// The text's state: its variables and memory, as the replay leaves them.
-struct Text<'t, 'p> {
+struct Text<'t, M> {
     /// Variables held outside memory: registers' and temporaries'.
     vars: FxHashMap<Key, u64>,
     /// Variables last assigned a value the replay cannot evaluate.
@@ -1632,7 +2076,7 @@ struct Text<'t, 'p> {
     /// variable in memory the block's equality fixes.
     base: &'t FxHashMap<u64, u8>,
     /// The image's memory before any run.
-    template: &'t Emulator<'p>,
+    template: &'t M,
     /// The seed of the bytes nothing backs ([`fill_byte`]).
     fill: u64,
     /// The stack pointer at the function's entry: where slot 0 is.
@@ -1676,7 +2120,7 @@ struct Text<'t, 'p> {
     flag_setters: (Vec<(u64, bool)>, Vec<u64>),
 }
 
-impl Text<'_, '_> {
+impl<M: Bench> Text<'_, M> {
     /// The starting value of a variable not in memory: a hash of the
     /// trial's seed and the variable, three times in four one of the
     /// pool's values when there is a pool.
@@ -1824,7 +2268,9 @@ impl Text<'_, '_> {
             Key::Global(a, bits) => (a < TLS_BASE)
                 .then_some(())
                 .and_then(|()| self.read(a, u64::from(bits / 8).max(1))),
-            Key::Reg(Register::RSP | Register::ESP) => self.rsp,
+            Key::Reg(Register::RSP | Register::ESP) | Key::A64(crate::isa::a64::Reg::Sp) => {
+                self.rsp
+            }
             // INVARIANT: the x87 stack registers hold their values on a
             // stack the machine runs and the text's state never seeded, so
             // an expression reading one stays unevaluated; an xmm
@@ -2477,11 +2923,11 @@ impl Text<'_, '_> {
 }
 
 /// A function being replayed: what all its blocks share.
-struct Function<'f, 'p> {
+struct Function<'f, 'p, L: Replay> {
     /// The functions, for a jump table's targets.
     analysis: &'f Analysis,
-    /// The image's emulator before any run, cloned per state.
-    template: &'f Emulator<'p>,
+    /// The image's machine before any run, cloned per state.
+    template: &'f L::Rig<'p>,
     /// The function's entry.
     entry: u64,
     /// The replay's seed.
@@ -2489,26 +2935,31 @@ struct Function<'f, 'p> {
     /// The lifter's witness.
     w: &'f Witness,
     /// Each block's instructions, from the witness.
-    code: &'f [Vec<Instruction>],
+    code: &'f [Vec<L::Insn>],
     /// The successors of each block in the graph the text was written for.
     succs: &'f [Vec<usize>],
     /// Each block's effects.
     effects: &'f [Vec<Effect>],
     /// The stack slots the text names, with their widest access in bytes.
     named: &'f BTreeMap<i64, u64>,
-    /// The general registers, named as the emulator names them.
-    regs: &'static [(&'static str, Register)],
+    /// The general registers, named as the machine names them, the one a
+    /// result comes back in first.
+    regs: Vec<(&'static str, Key)>,
+    /// The vector registers, by the machine's numbering.
+    vectors: Vec<Key>,
+    /// The registers a call may change.
+    volatile: Vec<Key>,
     /// The register width, 32 or 64.
     width: u8,
 }
 
 /// One state a block is tried from, part way through: the emulator stopped
 /// where the block ends, the text replayed so far.
-struct Trial<'t, 'p> {
-    /// The emulator.
-    emu: Emulator<'p>,
+struct Trial<'t, M> {
+    /// The machine.
+    emu: M,
     /// The text's state.
-    text: Text<'t, 'p>,
+    text: Text<'t, M>,
     /// The stack pointer where the block starts on the emulator.
     rsp: u64,
     /// Bytes the emulator wrote.
@@ -2529,7 +2980,7 @@ struct Trial<'t, 'p> {
     seen: BTreeSet<(Claim, String)>,
 }
 
-impl Function<'_, '_> {
+impl<'p, L: Replay> Function<'_, 'p, L> {
     /// Checks one block from each of its states.
     ///
     /// # Arguments
@@ -2593,23 +3044,17 @@ impl Function<'_, '_> {
             || (w.stated_contradicted
                 && code
                     .last()
-                    .is_some_and(|i| i.flow_control() == FlowControl::Return))
+                    .is_some_and(|i| L::transfer(i) == Transfer::Return))
         {
             return Err(CONTRADICTED);
         }
         if w.result_read && effects.iter().any(|e| e.kind == EffectKind::Return(None)) {
             return Err(BARE_RETURN);
         }
-        let mut info = InstructionInfoFactory::new();
-        if !integer_or_zero_fill(code, &mut info) {
-            return Err(outside_subset(code, &mut info));
-        }
-        if code.iter().any(aligns_stack) {
-            return Err("a frame alignment");
-        }
-        let end = End::of(code)?;
+        L::subset(code)?;
+        let end = End::of::<L>(code)?;
         *room = room.checked_sub(1).ok_or(OVER_BUDGET)?;
-        let pool = comparands(code, self.width);
+        let pool = L::comparands(code, self.width);
         let mut seen = BTreeSet::new();
         let mut why = "no state compared";
         let mut compared = 0;
@@ -2652,7 +3097,7 @@ impl Function<'_, '_> {
         let sets = |c: usize| {
             self.code
                 .get(c)
-                .is_some_and(|code| code.iter().any(|i| i.rflags_modified() != 0))
+                .is_some_and(|code| code.iter().any(L::sets_flags))
         };
         if !sets(b) {
             return false;
@@ -2693,17 +3138,20 @@ impl Function<'_, '_> {
                 return None;
             }
             let jcc = self.code.get(p)?.last()?;
-            if jcc.flow_control() == FlowControl::UnconditionalBranch
-                && self.effects.get(p).is_some_and(Vec::is_empty)
-            {
-                b = p;
-                continue;
-            }
-            if jcc.flow_control() != FlowControl::ConditionalBranch {
-                return None;
-            }
-            let start = self.code.get(b)?.first()?.ip();
-            let (target, fall) = (jcc.near_branch_target(), jcc.next_ip());
+            let (target, fall) = match L::transfer(jcc) {
+                Transfer::Jump if self.effects.get(p).is_some_and(Vec::is_empty) => {
+                    b = p;
+                    continue;
+                }
+                Transfer::Branch { target, next } => (target, next),
+                Transfer::Jump
+                | Transfer::Next(_)
+                | Transfer::Indirect
+                | Transfer::Call
+                | Transfer::Return
+                | Transfer::Trap => return None,
+            };
+            let start = L::start(self.code.get(b)?.first()?);
             let taken = match start {
                 _ if target == fall => return None,
                 s if s == target => true,
@@ -2746,9 +3194,9 @@ impl Function<'_, '_> {
         &self,
         b: usize,
         block: &BasicBlock,
-        code: &[Instruction],
+        code: &[L::Insn],
         sp: i64,
-        end: End,
+        end: End<L::Insn>,
         pool: &[u64],
         trial: u64,
         seen: &mut BTreeSet<(Claim, String)>,
@@ -2761,14 +3209,12 @@ impl Function<'_, '_> {
         let _ = rng.next();
         let fill = rng.next();
         let mut emu = self.template.clone();
-        let reps = code
-            .iter()
-            .filter(|i| i.has_rep_prefix() || i.has_repe_prefix() || i.has_repne_prefix())
-            .count();
-        emu.set_budget(code.len() + 1 + reps * REGION_MAX);
-        emu.set_permissive(true);
+        emu.set_budget(L::budget(code));
+        emu.set_permissive();
         emu.set_fill(Some(fill));
-        let rsp = emu.register("rsp").ok_or("no stack pointer")?;
+        let rsp = emu
+            .register(<L::Rig<'p> as Bench>::SP)
+            .ok_or("no stack pointer")?;
         let sp0 = rsp.wrapping_sub(sp.cast_unsigned()) & mask;
         let mut base: FxHashMap<u64, u8> = FxHashMap::default();
         for word in -STACK_WORDS..STACK_WORDS {
@@ -2815,10 +3261,9 @@ impl Function<'_, '_> {
             names: FxHashMap::default(),
             slot_bits: &w.slot_bits,
             reg_ty: &w.reg_ty,
-            flag_setters: flag_setters(code),
+            flag_setters: L::flag_setters(code),
         };
-        for &(_, r) in self.regs {
-            let k = Key::Reg(r);
+        for &(_, k) in &self.regs {
             let mut v = text.drawn(k);
             if !inn.vals.contains_key(&k)
                 && let Some(nb) = inn.narrow.get(&k)
@@ -2851,17 +3296,14 @@ impl Function<'_, '_> {
         // it was; so a block that scans is tried only from states its branch
         // lets in, moved across where the condition compares a variable
         // with a constant, and not tried where it cannot be.
-        if code
-            .iter()
-            .any(|i| matches!(i.mnemonic(), Mnemonic::Bsf | Mnemonic::Bsr))
+        if L::scans(code)
             && let Some((c, taken)) = self.guard(b)
             && text.cond(c) == Some(!taken)
             && !text.steer(c, taken, &inn.narrow)
         {
             return Err(RULED_OUT);
         }
-        for &(name, r) in self.regs {
-            let k = Key::Reg(r);
+        for &(name, k) in &self.regs {
             let v = match inn.vals.get(&k) {
                 Some(e) => match text.eval(e) {
                     Some(v) => v & low(inn.narrow.get(&k).copied().unwrap_or(64)),
@@ -2881,10 +3323,8 @@ impl Function<'_, '_> {
         // into the machine alone, the relation the block runs under: the
         // text's own lane keeps the drawn entry value, which the pending
         // expressions, built over entry variables, still read.
-        let mut packed_info = InstructionInfoFactory::new();
-        let whole = reads_whole_lanes(code, &mut packed_info);
-        for (n, &x) in XMMS.iter().enumerate() {
-            let k = Key::Reg(x);
+        let whole = L::whole_lanes(code);
+        for (n, &k) in self.vectors.iter().enumerate() {
             let lo = text.drawn(k);
             let v = if whole {
                 u128::from(lo) | u128::from(mix(lo)) << 64
@@ -2893,13 +3333,12 @@ impl Function<'_, '_> {
             };
             text.vars.insert(k, lo);
             text.vecs.insert(k, v);
-            emu.set_xmm(n, v);
+            emu.set_vector(n, v);
         }
-        for (n, &x) in XMMS.iter().enumerate() {
-            let k = Key::Reg(x);
+        for (n, &k) in self.vectors.iter().enumerate() {
             let Some(e) = inn.vals.get(&k) else { continue };
             if let Some(v) = text.vec(e).or_else(|| text.eval(e).map(u128::from)) {
-                emu.set_xmm(n, v);
+                emu.set_vector(n, v);
             }
         }
         let mut pending = FxHashSet::default();
@@ -2932,17 +3371,17 @@ impl Function<'_, '_> {
                 }
             }
         }
-        emu.stop_at(Some(end.stop()));
+        emu.stop_at(Some(end.stop::<L>()));
         let run = emu.run(block.start);
         match run.stop {
-            Stop::Stopped(at) if at == end.stop() => {}
+            Stop::Stopped(at) if at == end.stop::<L>() => {}
             Stop::Unmodeled(_) => return Err("an instruction the emulator does not model"),
             Stop::Fault(_) => return Err("a fault on the emulator"),
             Stop::Budget => return Err("a repeat past the regions compared"),
             _ => return Err("the emulator stopped early"),
         }
         let written: FxHashSet<u64> = run.history.iter().map(|x| x.addr).collect();
-        text.rsp = emu.register("rsp");
+        text.rsp = emu.register(<L::Rig<'p> as Bench>::SP);
         // INVARIANT: a register's save and a push that only makes room store
         // no value of the text's: what they leave in the frame is no
         // variable's, and a statement reading it reads a variable never set.
@@ -2957,18 +3396,20 @@ impl Function<'_, '_> {
                 text.lost.insert(x);
             }
         }
-        let taken = match end {
-            End::Branch(jcc) if jcc.near_branch_target() != jcc.next_ip() => {
+        let taken = match end.last().map(|jcc| (jcc, L::transfer(&jcc))) {
+            Some((jcc, Transfer::Branch { target, next }))
+                if matches!(end, End::Branch(_)) && target != next =>
+            {
                 let mut step = emu.clone();
                 step.set_budget(1);
-                step.stop_at(Some(jcc.near_branch_target()));
-                match step.run(jcc.ip()).stop {
+                step.stop_at(Some(target));
+                match step.run(L::start(&jcc)).stop {
                     Stop::Stopped(_) => Some(true),
                     Stop::Budget => Some(false),
                     _ => None,
                 }
             }
-            End::Branch(_) | End::Before(_) | End::Fall(_) => None,
+            Some(_) | None => None,
         };
         let mut t = Trial {
             emu,
@@ -2990,13 +3431,10 @@ impl Function<'_, '_> {
         // by an instruction of an earlier block, which this block's flag
         // setters say nothing about.
         t.text.flag_setters = (Vec::new(), Vec::new());
-        let last = end.last().map_or(start, |i| i.ip());
-        t.called |= end.last().is_some_and(|i| {
-            matches!(
-                i.flow_control(),
-                FlowControl::Call | FlowControl::IndirectCall
-            )
-        });
+        let last = end.last().map_or(start, |i| L::start(&i));
+        t.called |= end
+            .last()
+            .is_some_and(|i| L::transfer(&i) == Transfer::Call);
         if !t.called && !t.settled {
             self.memory(&mut t, start, last, b, out);
         }
@@ -3021,9 +3459,9 @@ impl Function<'_, '_> {
     /// * `out` - Where the counts and disagreements go.
     fn replay_effect(
         &self,
-        t: &mut Trial<'_, '_>,
+        t: &mut Trial<'_, L::Rig<'p>>,
         start: u64,
-        end: End,
+        end: End<L::Insn>,
         block: &BasicBlock,
         e: &Effect,
         out: &mut Replayed,
@@ -3039,13 +3477,8 @@ impl Function<'_, '_> {
                 }
                 let Some(instr) = end.last() else { return };
                 if let Callee::Through(target) = &c.callee {
-                    let machine = match operand(&t.emu, &instr, self.width) {
-                        Some(to) => match self.w.dispatches.get(&to) {
-                            Some(r) => reg_value(&t.emu, *r, self.width),
-                            None => Some(to),
-                        },
-                        None => None,
-                    };
+                    let machine = L::target_value(&t.emu, &instr, self.width)
+                        .and_then(|to| L::dispatch(&t.emu, self.w, to, self.width));
                     if let Some(m) = machine {
                         let text = t.text.eval(target);
                         self.compare(
@@ -3063,10 +3496,9 @@ impl Function<'_, '_> {
                         );
                     }
                 }
-                let rsp_now = t.emu.register("rsp").unwrap_or(t.rsp);
+                let rsp_now = t.emu.register(<L::Rig<'p> as Bench>::SP).unwrap_or(t.rsp);
                 for (at, arg) in &c.args {
                     let (machine, stored) = match at {
-                        ArgAt::Reg(r) if r.is_gpr() => (reg_value(&t.emu, *r, self.width), 64),
                         ArgAt::Stack(off, bits) => (
                             machine_word(
                                 &t.emu,
@@ -3076,7 +3508,9 @@ impl Function<'_, '_> {
                             ),
                             *bits,
                         ),
-                        ArgAt::Reg(_) | ArgAt::Operand => (None, 64),
+                        ArgAt::Reg(_) | ArgAt::Operand => {
+                            (L::register_value(&t.emu, *at, self.width), 64)
+                        }
                     };
                     let Some(m) = machine else { continue };
                     let bits = value_lane(arg, self.width).min(stored.max(8));
@@ -3099,8 +3533,8 @@ impl Function<'_, '_> {
                 t.settled = true;
                 t.called = true;
                 t.text.lost_all = true;
-                for r in self.w.conv.volatile {
-                    t.text.unknown.insert(Key::Reg(*r));
+                for k in &self.volatile {
+                    t.text.unknown.insert(*k);
                 }
                 if let Some(k) = c.result {
                     t.text.unknown.insert(k);
@@ -3143,7 +3577,7 @@ impl Function<'_, '_> {
                 {
                     let float = t.text.float_bits(v);
                     let bits = float.unwrap_or(64);
-                    let machine = low64(t.emu.xmm().first().copied().unwrap_or(0)) & low(bits);
+                    let machine = low64(t.emu.vector(0)) & low(bits);
                     let text = t.text.eval(v);
                     self.compare(
                         t,
@@ -3183,7 +3617,7 @@ impl Function<'_, '_> {
             }
             EffectKind::Switch(idx) => {
                 let Some(jmp) = end.last() else { return };
-                let Some(m) = operand(&t.emu, &jmp, self.width) else {
+                let Some(m) = L::target_value(&t.emu, &jmp, self.width) else {
                     return;
                 };
                 // INVARIANT: the text switches on what the structurer renders:
@@ -3212,7 +3646,7 @@ impl Function<'_, '_> {
             }
             EffectKind::Jump(target) => {
                 let Some(jmp) = end.last() else { return };
-                let Some(m) = operand(&t.emu, &jmp, self.width) else {
+                let Some(m) = L::target_value(&t.emu, &jmp, self.width) else {
                     return;
                 };
                 let text = t.text.eval(target);
@@ -3246,7 +3680,14 @@ impl Function<'_, '_> {
     /// * `b` - The block's index, whose successors' pending globals are
     ///   left out; `usize::MAX` at a call or a return, where none may be.
     /// * `out` - Where the counts and disagreements go.
-    fn memory(&self, t: &mut Trial<'_, '_>, start: u64, at: u64, b: usize, out: &mut Replayed) {
+    fn memory(
+        &self,
+        t: &mut Trial<'_, L::Rig<'p>>,
+        start: u64,
+        at: u64,
+        b: usize,
+        out: &mut Replayed,
+    ) {
         let mask = low(self.width);
         // INVARIANT: in 32-bit code an address past the low four gigabytes
         // is one the emulator reached without the wrap the processor makes,
@@ -3255,25 +3696,15 @@ impl Function<'_, '_> {
             *out.unreadable.entry(Claim::Memory).or_default() += 1;
             return;
         }
-        let now = t.emu.register("rsp").unwrap_or(t.rsp);
+        let now = t.emu.register(<L::Rig<'p> as Bench>::SP).unwrap_or(t.rsp);
         let frame = |x: u64| {
             [t.rsp, now, t.text.sp0]
                 .iter()
                 .any(|sp| (x.wrapping_sub(*sp).wrapping_add(FRAME_SPAN) & mask) < 2 * FRAME_SPAN)
         };
-        let mut kept: FxHashSet<u64> = FxHashSet::default();
-        // INVARIANT: the try level at `[ebp-4]` is the compiler's
-        // bookkeeping, which the text leaves out on purpose.
-        let bitness = u32::from(self.width);
-        if self.w.seh_frame
-            && self
-                .code
-                .get(t.b)
-                .is_some_and(|c| c.iter().any(|i| try_level_store(i, bitness)))
-            && let Some(ebp) = reg_value(&t.emu, Register::EBP, self.width)
-        {
-            kept.extend((1..=4).map(|i| ebp.wrapping_sub(i) & mask));
-        }
+        let mut kept: FxHashSet<u64> = L::kept(&t.emu, self.code.get(t.b), self.w, self.width)
+            .into_iter()
+            .collect();
         for &s in self.succs.get(b).map_or(&[][..], Vec::as_slice) {
             for k in self
                 .w
@@ -3356,21 +3787,23 @@ impl Function<'_, '_> {
     /// * `at` - The block's last instruction.
     /// * `s` - The successor's index.
     /// * `out` - Where the counts and disagreements go.
-    fn successor(&self, t: &mut Trial<'_, '_>, start: u64, at: u64, s: usize, out: &mut Replayed) {
+    fn successor(
+        &self,
+        t: &mut Trial<'_, L::Rig<'p>>,
+        start: u64,
+        at: u64,
+        s: usize,
+        out: &mut Replayed,
+    ) {
         let w = self.w;
         let Some(sin) = w.ins.get(s) else { return };
-        let succ = self
-            .code
-            .get(s)
-            .and_then(|c| c.first())
-            .map_or(0, Instruction::ip);
+        let succ = self.code.get(s).and_then(|c| c.first()).map_or(0, L::start);
         let mask = low(self.width);
-        for &(name, r) in self.regs {
-            let k = Key::Reg(r);
+        for &(name, k) in &self.regs {
             let Some(&need) = w.live.regs.get(s).and_then(|m| m.get(&k)) else {
                 continue;
             };
-            if t.called && w.conv.volatile.contains(&r) {
+            if t.called && self.volatile.contains(&k) {
                 continue;
             }
             let Some(m) = t.emu.register(name) else {
@@ -3424,12 +3857,11 @@ impl Function<'_, '_> {
                 },
             );
         }
-        for (n, &x) in XMMS.iter().enumerate() {
-            let k = Key::Reg(x);
+        for (n, &k) in self.vectors.iter().enumerate() {
             if w.live.regs.get(s).and_then(|m| m.get(&k)).is_none() {
                 continue;
             }
-            if t.called && w.conv.volatile.contains(&x) {
+            if t.called && self.volatile.contains(&k) {
                 continue;
             }
             let held = sin.vals.get(&k);
@@ -3455,7 +3887,7 @@ impl Function<'_, '_> {
                     None => t.text.vec_var(k),
                 };
                 if let Some(v) = whole {
-                    let machine = t.emu.xmm()[n];
+                    let machine = t.emu.vector(n);
                     if let Some(nb) = narrow {
                         self.compare(
                             t,
@@ -3511,7 +3943,7 @@ impl Function<'_, '_> {
                 clippy::cast_possible_truncation,
                 reason = "the lane is masked to the compared width first, so the cast drops no bit"
             )]
-            let machine = (t.emu.xmm()[n] & u128::from(low(bits))) as u64;
+            let machine = (t.emu.vector(n) & u128::from(low(bits))) as u64;
             self.compare(
                 t,
                 out,
@@ -3705,7 +4137,7 @@ impl Function<'_, '_> {
                 }
             }
         }
-        if let (Some(ssp), Some(now)) = (sin.sp, t.emu.register("rsp")) {
+        if let (Some(ssp), Some(now)) = (sin.sp, t.emu.register(<L::Rig<'p> as Bench>::SP)) {
             let expected = t.text.sp0.wrapping_add_signed(ssp) & mask;
             self.compare(
                 t,
@@ -3746,7 +4178,7 @@ impl Function<'_, '_> {
     )]
     fn compare(
         &self,
-        t: &mut Trial<'_, '_>,
+        t: &mut Trial<'_, L::Rig<'p>>,
         out: &mut Replayed,
         start: u64,
         at: u64,
@@ -3824,7 +4256,7 @@ mod tests {
         effects.iter_mut().flatten().for_each(change);
         let template = Emulator::new(p, 0).expect("emulator");
         let w = d.take_witness().expect("witness");
-        replay_effects(
+        replay_effects::<crate::analysis::decompile::arch::X86>(
             p,
             &a,
             &template,
@@ -4967,7 +5399,7 @@ mod tests {
             .collect();
         let template = Emulator::new(&p, 0).expect("emulator");
         let w = d.take_witness().expect("witness");
-        let r = replay_effects(
+        let r = replay_effects::<crate::analysis::decompile::arch::X86>(
             &p,
             &a,
             &template,
