@@ -1,6 +1,8 @@
 //! Program triage: capabilities from imports, emulation runs, crypto constants
 //! and the one-call overview.
 
+use super::calls::{Reach, gather};
+use super::iocs::iocs_line;
 use super::*;
 
 /// A capability and the API-name fragments that give it away.
@@ -680,6 +682,11 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: 
 /// binary can answer, the strings and imports each function references
 /// ([`everyday_reading_list`]), and the header says so.
 ///
+/// An `iocs` line counts the indicators by kind ([`iocs_tsv`] lists them),
+/// and a `blind spot` line says each thing the report could not see
+/// ([`blind_spots`]): a confident "nothing found" on a packed or thin
+/// sample is the most dangerous answer a triage gives.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
@@ -801,6 +808,10 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     for line in capabilities.lines().skip(1).take(6) {
         let _ = writeln!(out, "#   {}", line.trim());
     }
+    let _ = writeln!(out, "# iocs: {}", iocs_line(p, a, o));
+    for spot in blind_spots(p, a, o, headline(&protection, "protection")) {
+        let _ = writeln!(out, "# blind spot: {spot}");
+    }
     let mut reasons: BTreeMap<u64, Vec<String>> = BTreeMap::new();
     let mut score: BTreeMap<u64, usize> = BTreeMap::new();
     for g in &recovered.found {
@@ -874,6 +885,161 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     }
     out.push_str("# next: function_summary(addr), then decompile(addr); emulate/<addr> runs one\n");
     out
+}
+
+/// Least file bytes a section needs before its entropy or its lack of code
+/// is worth a line: below it, a section is a stub's padding or a handful
+/// of constants.
+const SPOT_SECTION_MIN: u64 = 0x200;
+
+/// Says what the triage could not see, one line each, so a quiet report on
+/// a packed or thin sample is not read as a clean one.
+///
+/// Each line fires on a signal already computed and names what it hides:
+/// a packed verdict (what the report describes is the stub), sections at
+/// packed entropy (read as neither code nor text), executable sections with
+/// no function found in them, an import table too thin to run a program (or
+/// none, for a static image), `GetProcAddress` calls whose name argument
+/// the decompiler cannot read (the imports they resolve stay unseen), TLS
+/// callbacks (they run before the entry point, which emulation starts
+/// from) and .NET metadata (managed code is not machine code).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - Names in force, which the decompiled callers are read under.
+/// * `verdict` - The protection report's headline.
+///
+/// # Returns
+///
+/// The lines, without their `# blind spot: ` prefix; none for a plain image.
+fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, verdict: &str) -> Vec<String> {
+    let mut spots = Vec::new();
+    if verdict.starts_with("packed") || verdict.starts_with("protected") {
+        spots.push(format!(
+            "{}: the strings, imports and capabilities above describe the stub, not the payload; borer://unpack/{} runs the stub",
+            verdict.split(':').next().unwrap_or(verdict),
+            hex_or_dash(p.entry)
+        ));
+    }
+    let sized = || {
+        p.sections
+            .iter()
+            .filter(|s| s.file_size >= SPOT_SECTION_MIN)
+    };
+    let dense: Vec<&str> = sized()
+        .filter(|s| {
+            let len = usize::try_from(s.file_size).unwrap_or(0);
+            p.read_va(s.va, len)
+                .is_some_and(|b| crate::entropy::shannon(b) >= PACKED_ENTROPY)
+        })
+        .map(|s| s.name.as_str())
+        .collect();
+    if !dense.is_empty() {
+        spots.push(format!(
+            "{} section{} at entropy {PACKED_ENTROPY:.1} or above ({}): compressed or encrypted bytes, read as neither code nor text until unpacked",
+            dense.len(),
+            plural(dense.len()),
+            dense.join(", ")
+        ));
+    }
+    let bare: Vec<&str> = sized()
+        .filter(|s| s.executable)
+        .filter(|s| {
+            let end = s.va.saturating_add(s.vsize.max(s.file_size));
+            !a.functions.iter().any(|f| f.entry >= s.va && f.entry < end)
+        })
+        .map(|s| s.name.as_str())
+        .collect();
+    if !bare.is_empty() {
+        spots.push(format!(
+            "{} executable section{} with no function found ({}): code reached only by a computed jump, or bytes that are not code, were not read",
+            bare.len(),
+            plural(bare.len()),
+            bare.join(", ")
+        ));
+    }
+    let imports = p
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import)
+        .count();
+    match p.format {
+        BinaryFormat::Raw | BinaryFormat::Archive => {}
+        BinaryFormat::Elf | BinaryFormat::MachO if imports == 0 => spots.push(
+            "no imports (statically linked): capabilities, read from import names, say nothing about this file".to_owned(),
+        ),
+        BinaryFormat::Pe | BinaryFormat::Elf | BinaryFormat::MachO if imports < THIN_IMPORTS => {
+            spots.push(format!(
+                "{imports} import{} only: capabilities are likely understated; what the program resolves at runtime is seen only as far as borer://dynimports recovers its names",
+                plural(imports)
+            ));
+        }
+        BinaryFormat::Pe | BinaryFormat::Elf | BinaryFormat::MachO => {}
+    }
+    if let Some((unread, total)) = unread_lookups(p, a, o)
+        && unread > 0
+    {
+        spots.push(format!(
+            "{unread} of {total} GetProcAddress call{} {} a name the decompiler cannot read (computed, hashed or decrypted): the imports resolved there stay unseen",
+            plural(total),
+            if unread == 1 { "passes" } else { "pass" }
+        ));
+    }
+    let tls = p.headers.tls_callbacks.len();
+    if tls > 0 {
+        spots.push(format!(
+            "{tls} TLS callback{} run before the entry point: emulation from the entry (unpack, emulate/<entry>) skips {}",
+            plural(tls),
+            if tls == 1 { "it" } else { "them" }
+        ));
+    }
+    if p.headers.directories.contains(&"clr") {
+        spots.push(
+            ".NET metadata: managed methods are CIL, which borer does not disassemble; only the native code is read".to_owned(),
+        );
+    }
+    spots
+}
+
+/// Counts the `GetProcAddress` calls whose name argument the decompiler
+/// cannot read: not a string literal, and not an ordinal.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - Names in force.
+///
+/// # Returns
+///
+/// `(unread, total)` call sites, or `None` when the program does not
+/// import `GetProcAddress` or does not decompile.
+fn unread_lookups(p: &Program, a: &Analysis, o: &Overlay) -> Option<(usize, usize)> {
+    /// Most callers decompiled for the count.
+    const CALLERS: usize = 100;
+    /// Values below this passed as the name are ordinals.
+    const ORDINAL_END: u64 = 0x1_0000;
+    if p.refuses(Feature::Decompile).is_some() {
+        return None;
+    }
+    let sym = p.symbols.iter().find(|s| {
+        s.kind == SymbolKind::Import && s.addr != 0 && bare_name(&s.name) == "GetProcAddress"
+    })?;
+    let reach = Reach::import(a, sym.addr, &sym.name);
+    let found = gather(p, a, o, &reach, CALLERS).found;
+    let unread = found
+        .iter()
+        .filter(|f| {
+            f.site.as_ref().is_none_or(|s| {
+                s.args
+                    .get(1)
+                    .is_none_or(|n| n.string.is_none() && n.value.is_none_or(|v| v >= ORDINAL_END))
+            })
+        })
+        .count();
+    Some((unread, found.len()))
 }
 
 /// Renders the triage of a file with no code to analyze.

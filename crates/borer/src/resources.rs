@@ -585,6 +585,20 @@ impl BorerServer {
         self.with_analysis(|p, a, _| Ok(render::protection_tsv(p, a)))
     }
 
+    /// Lists the indicators the program holds, each with where it came from.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Kind words, text the value contains and `offset=<n>`,
+    ///   comma-separated; empty for every indicator.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or the offset does not read.
+    pub(crate) fn iocs_text(&self, filter: &str) -> Result<String, ErrorData> {
+        self.refusing(|p, a, o| render::iocs_tsv(p, a, o, filter))
+    }
+
     /// Lists every call site of a function or import with its arguments.
     ///
     /// # Arguments

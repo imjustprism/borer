@@ -266,7 +266,7 @@ fn sextet(b: u8) -> Option<u8> {
 /// * `text` - Characters of `encoding`'s alphabet and line breaks.
 /// * `encoding` - How the text encodes its bytes.
 /// * `emit` - Receives the decoded bytes in order.
-fn decode(text: &[u8], encoding: Encoding, mut emit: impl FnMut(u8)) {
+pub(crate) fn decode(text: &[u8], encoding: Encoding, mut emit: impl FnMut(u8)) {
     let (bits, value): (u32, fn(u8) -> Option<u8>) = match encoding {
         Encoding::Base64 => (6, sextet),
         Encoding::Hex => (4, |b| {

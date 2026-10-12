@@ -24,6 +24,7 @@ mod engine;
 mod families;
 mod groundtruth;
 mod hashing;
+mod iocs;
 mod lsda;
 mod macho;
 mod protection;

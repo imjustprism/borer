@@ -33,6 +33,7 @@ pub mod fxmap;
 pub mod hashing;
 pub mod headers;
 pub mod hexdump;
+pub mod ioc;
 pub mod isa;
 pub mod libsig;
 pub mod live;

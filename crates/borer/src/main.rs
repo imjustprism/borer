@@ -4166,6 +4166,8 @@ impl BorerServer {
             ("checks", None) => self.checks_text()?,
             ("antianalysis", None) => self.anti_analysis_text()?,
             ("protection", None) => self.protection_text()?,
+            ("iocs", None) => self.iocs_text("")?,
+            ("iocs", Some(filter)) => self.iocs_text(&filter)?,
             ("calls", Some(spec)) => self.calls_text(&spec)?,
             ("triage", None) => self.triage_text()?,
             ("fingerprint", None) => self.fingerprint_text()?,
@@ -4362,6 +4364,10 @@ const RESOURCES: &[(&str, &str)] = &[
         "Whether the image is packed or protected, which protector the section names give away, and the evidence",
     ),
     (
+        "borer://iocs",
+        "Indicators to block or hunt: URLs, domains, IP and e-mail addresses, registry keys, file paths, pipe, mutex and kernel object names, user agents, each with where it came from (a stored string's address, a stack string, a generated string, decoded base64, an API call's argument), the function using it and a confidence, benign-common marking what every program carries; 200 rows a page, borer://iocs/<filter> narrows by type or text",
+    ),
+    (
         "borer://fingerprint",
         "The identity of this build's fingerprints: a digest, the counts, and how to write the sidecar a later borer://diff reads. The manifest itself is a file, written by the CLI, because one line per function is megabytes",
     ),
@@ -4456,6 +4462,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://calls/{callee}",
         "Every call site of a function or import (direct, through its slot or a thunk) with the arguments the decompiler resolves at each: a constant in hex, a string quoted, a global by name, else the expression, ? where the lifter saw none (an import is padded to its declared parameters). <callee>[,aN=<value>]...: aN=0x40 keeps the calls whose argument aN is that number, aN=text the ones whose argument or string contains it, aN=? the unseen ones; aN!=, aN> and aN< too; offset=<n> for the next page (200 rows a page, 500 callers decompiled at most)",
         "borer://calls/{entry}",
+    ),
+    (
+        "borer://iocs/{filter}",
+        "Indicators of one type (url, domain, ip, ipv4, ipv6, email, registry, path, pipe, mutex, object, useragent) or whose value contains the text, comma-separated; offset=<n> for the next page",
+        "borer://iocs/url",
     ),
     (
         "borer://hidden/{filter}",

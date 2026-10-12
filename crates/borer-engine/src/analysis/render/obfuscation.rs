@@ -925,18 +925,81 @@ pub(super) const STACK_STRINGS_MAX: usize = 400;
 pub(super) struct StackString {
     /// Entry of the function that builds it.
     pub(super) entry: u64,
+    /// The store that writes its first character.
+    pub(super) at: u64,
     /// The text its stores spell.
     pub(super) text: String,
+}
+
+/// Recovers the strings functions assemble on their stacks.
+///
+/// The stores are immediates to a base register plus a displacement;
+/// grouped by base and read in offset order they spell the text. A run
+/// counts only when several separate stores build it, since one four-byte
+/// store of a constant like `DXT1` is not a hidden string.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: functions and their blocks.
+/// * `want` - Lowercase substring the text must contain, or empty.
+///
+/// # Returns
+///
+/// The strings by function in address order, each function's by base
+/// register and offset; empty for an architecture with no decoder width.
+pub(super) fn stack_strings(p: &Program, a: &Analysis, want: &str) -> Vec<StackString> {
+    let Some(bitness) = p.arch.bitness() else {
+        return Vec::new();
+    };
+    let mut rows: Vec<StackString> = Vec::new();
+    for f in &a.functions {
+        let mut frames: BTreeMap<Register, BTreeMap<i64, u8>> = BTreeMap::new();
+        let mut store_of: BTreeMap<(Register, i64), usize> = BTreeMap::new();
+        let mut stores: Vec<u64> = Vec::new();
+        each_instruction(p, f, bitness, |i| {
+            if let Some((base, disp, bytes)) = immediate_store(i, bitness) {
+                for (k, byte) in bytes.iter().enumerate() {
+                    let off = disp + i64::try_from(k).unwrap_or(0);
+                    frames.entry(base).or_default().insert(off, *byte);
+                    store_of.insert((base, off), stores.len());
+                }
+                stores.push(i.ip());
+            }
+        });
+        for (base, slots) in &frames {
+            let placed = slots.iter().map(|(off, b)| (off.cast_unsigned(), *b));
+            for (start, text) in printable_runs(placed) {
+                let used = slots
+                    .range(start.cast_signed()..)
+                    .take(text.len())
+                    .filter_map(|(off, _)| store_of.get(&(*base, *off)))
+                    .collect::<BTreeSet<_>>()
+                    .len();
+                if text.chars().count() >= STACK_STRING_LEN
+                    && used >= STACK_STRING_STORES
+                    && text.to_lowercase().contains(want)
+                {
+                    let first = store_of
+                        .get(&(*base, start.cast_signed()))
+                        .and_then(|n| stores.get(*n));
+                    rows.push(StackString {
+                        entry: f.entry,
+                        at: first.copied().unwrap_or(f.entry),
+                        text,
+                    });
+                }
+            }
+        }
+    }
+    rows
 }
 
 /// Recovers the strings a function assembles on its stack.
 ///
 /// Malware keeps a string out of the data sections by writing it onto the
 /// stack a byte, word or dword at a time and using it in place, so it never
-/// appears in a strings dump. The stores are immediates to a base register
-/// plus a displacement; grouped by base and read in offset order they spell
-/// the text. A run counts only when several separate stores build it, since
-/// one four-byte store of a constant like `DXT1` is not a hidden string.
+/// appears in a strings dump. The strings are those of [`stack_strings`].
 ///
 /// # Arguments
 ///
@@ -949,46 +1012,10 @@ pub(super) struct StackString {
 ///
 /// The listing as text.
 pub fn stack_strings_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> String {
-    let want = filter.to_lowercase();
-    let Some(bitness) = p.arch.bitness() else {
+    if p.arch.bitness().is_none() {
         return "# unknown architecture\n".to_owned();
-    };
-    let mut rows: Vec<StackString> = Vec::new();
-    for f in &a.functions {
-        let mut frames: BTreeMap<Register, BTreeMap<i64, u8>> = BTreeMap::new();
-        let mut store_of: BTreeMap<(Register, i64), usize> = BTreeMap::new();
-        let mut store = 0usize;
-        each_instruction(p, f, bitness, |i| {
-            if let Some((base, disp, bytes)) = immediate_store(i, bitness) {
-                for (k, byte) in bytes.iter().enumerate() {
-                    let off = disp + i64::try_from(k).unwrap_or(0);
-                    frames.entry(base).or_default().insert(off, *byte);
-                    store_of.insert((base, off), store);
-                }
-                store += 1;
-            }
-        });
-        for (base, slots) in &frames {
-            let placed = slots.iter().map(|(off, b)| (off.cast_unsigned(), *b));
-            for (start, text) in printable_runs(placed) {
-                let stores = slots
-                    .range(start.cast_signed()..)
-                    .take(text.len())
-                    .filter_map(|(off, _)| store_of.get(&(*base, *off)))
-                    .collect::<BTreeSet<_>>()
-                    .len();
-                if text.chars().count() >= STACK_STRING_LEN
-                    && stores >= STACK_STRING_STORES
-                    && text.to_lowercase().contains(&want)
-                {
-                    rows.push(StackString {
-                        entry: f.entry,
-                        text,
-                    });
-                }
-            }
-        }
     }
+    let rows = stack_strings(p, a, &filter.to_lowercase());
     let mut out = format!(
         "# {} stack string{}{}\n",
         rows.len().min(STACK_STRINGS_MAX),

@@ -183,6 +183,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "checks",
             "capabilities",
             "dynimports",
+            "iocs",
             "hashes",
         ],
     ),

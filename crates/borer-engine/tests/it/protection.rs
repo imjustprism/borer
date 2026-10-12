@@ -257,3 +257,92 @@ fn a_changed_first_stub_byte_matches_nothing() {
     let out = report(bytes);
     assert!(out.contains("# plain:"), "{out}");
 }
+
+/// Fills `n` bytes with a xorshift stream, which reads at near-maximal
+/// entropy, standing in for a compressed or encrypted section.
+///
+/// # Arguments
+///
+/// * `n` - How many bytes.
+/// * `seed` - The stream's seed, so two sections differ.
+fn high_entropy(n: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            u8::try_from(x >> 56).expect("a byte")
+        })
+        .collect()
+}
+
+/// Triage states its blind spots: a packed verdict says the report
+/// describes the stub, a high-entropy section is called out, and a TLS
+/// callback is named as running before the entry.
+///
+/// # Panics
+///
+/// When a caveat the fixture should raise is missing.
+#[test]
+fn triage_states_its_blind_spots() {
+    use borer_engine::analysis::Overlay;
+    use borer_engine::analysis::render::triage_tsv;
+
+    let mut stub = vec![0xcc; 0x40];
+    stub[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let bytes = pe(
+        &[
+            sec(".text", 0x1000, stub),
+            Sec {
+                name: ".data",
+                rva: 0x2000,
+                data: high_entropy(0x800, 0x1234),
+                vsize: 0x800,
+                chars: WX,
+            },
+        ],
+        0x1000,
+    );
+    let mut p = Program::from_bytes(PathBuf::from("packed.exe"), bytes).expect("a PE loads");
+    p.headers.tls_callbacks.push(0x1_4000_1000);
+    let a = Analysis::compute(&p);
+    let out = triage_tsv(&p, &a, &Overlay::default());
+    assert!(
+        out.contains("# blind spot: packed") || out.contains("# blind spot: protected"),
+        "{out}"
+    );
+    assert!(out.contains("describe the stub, not the payload"), "{out}");
+    assert!(
+        out.contains("compressed or encrypted bytes") && out.contains(".data"),
+        "{out}"
+    );
+    assert!(
+        out.contains("imports resolved there stay unseen") || out.contains("import"),
+        "{out}"
+    );
+    assert!(out.contains("TLS callback"), "{out}");
+    assert!(out.contains("run before the entry point"), "{out}");
+}
+
+/// A plain, low-entropy image raises no entropy or packed blind spot, so
+/// the caveat fires only where it should.
+///
+/// # Panics
+///
+/// When a plain image is called packed or its sections encrypted.
+#[test]
+fn a_plain_image_raises_no_entropy_blind_spot() {
+    use borer_engine::analysis::Overlay;
+    use borer_engine::analysis::render::triage_tsv;
+
+    let mut code = vec![0x90u8; 0x400];
+    code[0x3ff] = 0xc3;
+    let bytes = pe(&[sec(".text", 0x1000, code)], 0x1000);
+    let p = Program::from_bytes(PathBuf::from("plain.exe"), bytes).expect("a PE loads");
+    let a = Analysis::compute(&p);
+    let out = triage_tsv(&p, &a, &Overlay::default());
+    assert!(!out.contains("compressed or encrypted bytes"), "{out}");
+    assert!(!out.contains("# blind spot: packed"), "{out}");
+    assert!(!out.contains("TLS callback"), "{out}");
+}

@@ -406,6 +406,7 @@ assert uris == [
     "borer://hidden",
     "borer://index",
     "borer://info",
+    "borer://iocs",
     "borer://map",
     "borer://messages",
     "borer://packs",
