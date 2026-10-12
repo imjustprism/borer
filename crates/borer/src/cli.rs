@@ -20,8 +20,8 @@ use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, script, search};
 
 use super::{
-    entropy_threshold, env_pack_files, parse_field_offset, read_packs, render_hits, strings_page,
-    walk_strings, window,
+    entropy_threshold, env_pack_files, marked, parse_field_offset, read_packs, render_hits,
+    strings_page, walk_strings, window,
 };
 use crate::params::{Detail, Filter, SearchKind, StringEncoding};
 use crate::resources::ABOUT_NEEDS_A_NAME;
@@ -1322,7 +1322,8 @@ fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
     .with_context(|| format!("decompilation failed at {entry:#x}"))?;
     let text = match detail {
         Detail::Skeleton => decompile::skeleton(&text),
-        Detail::Full => text,
+        Detail::Full if raw => text,
+        Detail::Full => marked(&s.program, &a, &s.overlay, entry, &text),
     };
     let text = decompile::with_header(&text, header.as_deref());
     Ok(window(&text, None, offset, limit))

@@ -893,6 +893,87 @@ run {took:.1?}; one function: p50 {:.1?}, p90 {:.1?}, p99 {:.1?}, most {:.1?} at
     );
 }
 
+/// Reads every function's text of the `BORER_DOGFOOD` binary and requires
+/// each value it reads to come from a line of it or be an input.
+///
+/// A register variable that no line sets before a read holds only what the
+/// register held at entry: unless it is a parameter, the text lost the
+/// value on its way ([`decompile::unset_reads`]). The per-block replay
+/// cannot see it, since it rebuilds each block's inputs from the machine.
+/// It prints each flagged line (`entry`, line, names, the line itself), the
+/// tally by the name read (`r10`, `tmp_N`, ...), and why texts went
+/// unread, the first `BORER_DOGFOOD_SHOW` rows (40) in full.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn every_value_the_text_reads_is_set_or_an_input() {
+    use borer_engine::analysis::decompile;
+    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
+    let show: usize = std::env::var("BORER_DOGFOOD_SHOW")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40);
+    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
+    // dev build's PDB sits beside the corpus binary.
+    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let entries: Vec<u64> = a
+        .functions
+        .iter()
+        .filter(|f| f.thunk.is_none() && f.funclet.is_none())
+        .map(|f| f.entry)
+        .collect();
+    let texts = decompile_named_all(&p, &a, &o, &entries);
+    let started = std::time::Instant::now();
+    let (mut read, mut flagged) = (0usize, Vec::new());
+    let mut unread: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut by_name: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (e, text) in entries.iter().zip(&texts) {
+        let Some(text) = text else { continue };
+        match decompile::unset_reads(&p, &a, &o, *e, text) {
+            Ok(rows) => {
+                read += 1;
+                for (line, names) in rows {
+                    for n in &names {
+                        let class = n.trim_end_matches(|c: char| c.is_ascii_digit());
+                        *by_name.entry(class.to_owned()).or_default() += 1;
+                    }
+                    let shown = text.lines().nth(line - 1).unwrap_or("").trim();
+                    flagged.push(format!("{e:#x}	L{line}	{}	{shown}", names.join(",")));
+                }
+            }
+            Err(why) => *unread.entry(why).or_default() += 1,
+        }
+    }
+    for f in flagged.iter().take(show) {
+        eprintln!("UNSET	{f}");
+    }
+    for (n, k) in &by_name {
+        eprintln!("NAME	{k}	{n}");
+    }
+    for (why, k) in &unread {
+        eprintln!("UNREAD	{k}	{why}");
+    }
+    let functions: BTreeSet<&str> = flagged
+        .iter()
+        .filter_map(|f| f.split('\t').next())
+        .collect();
+    eprintln!(
+        "binary: {path}
+texts read {read} of {}; lines reading an unset value {} in {} functions; check {:.1?}",
+        entries.len(),
+        flagged.len(),
+        functions.len(),
+        started.elapsed()
+    );
+    assert!(read > 0, "no text was read");
+    assert!(
+        flagged.is_empty(),
+        "{} lines read a value no line sets",
+        flagged.len()
+    );
+}
+
 /// Checks the text of every function of the `BORER_DOGFOOD` binary against
 /// the graph its structurer was handed and requires each to agree.
 ///

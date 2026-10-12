@@ -52,6 +52,7 @@ mod reloc;
 mod search;
 mod structure;
 mod syscalls;
+mod textcheck;
 mod typelib;
 mod types;
 mod x86;

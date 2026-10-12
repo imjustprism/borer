@@ -16,6 +16,7 @@ raw_code	2	593	1
 emulate_syscall	2	719	1
 emulate_elf_args	2	660	1
 pie_table_xref	2	816	1
+unset_read	2	593	1
 go_names	2	828	1
 static_capabilities	2	599	1
 dotnet_pinvoke	2	1337	1

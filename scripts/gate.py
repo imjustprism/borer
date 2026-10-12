@@ -192,6 +192,13 @@ def main(argv: list[str]) -> int:
                     # functions and 7 of msvcrt; it joins when both reach 0.
                     "--skip",
                     "the_final_text_agrees_with_the_emulator_on_small_functions",
+                    # Not a gate yet: the closure sweep lists the lines that
+                    # read a value no line sets (the decompile answer marks
+                    # them `// !unset:`); most pass a register to a callee
+                    # whose signature lists more parameters than the caller
+                    # sets, which the arity work owns.
+                    "--skip",
+                    "every_value_the_text_reads_is_set_or_an_input",
                     # The arm64 sweeps read their own binary
                     # (BORER_DOGFOOD_A64), which a fresh clone does not have:
                     # set it to an arm64 build and run them by name.
@@ -248,6 +255,8 @@ def main(argv: list[str]) -> int:
                         "--ignored",
                         "--skip",
                         "the_final_text_agrees_with_the_emulator_on_small_functions",
+                        "--skip",
+                        "every_value_the_text_reads_is_set_or_an_input",
                         "--skip",
                         "the_arm64_lifter_agrees_with_the_emulator_on_every_block",
                         "--skip",

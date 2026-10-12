@@ -52,6 +52,10 @@ const CALL_GAP: u64 = 0x100;
 /// Most bytes a modeled `memset`, `memcpy` or `strlen` touches.
 const BUILTIN_MAX: u64 = 1 << 20;
 
+/// Most steps the closure check ([`Script::unset_reads`]) takes before it
+/// gives up and flags nothing.
+const UNSET_ROUNDS: usize = 1 << 20;
+
 /// Bytes below a callee's frame its own stack reaches: a read there that
 /// nothing set is the leftovers of earlier calls, not an argument.
 const STACK_REACH: u64 = 1 << 20;
@@ -1380,6 +1384,258 @@ impl<'p> Script<'p> {
             entry_sp: self.entry_sp,
             literals: self.literals.values().flatten().copied().collect(),
         })
+    }
+
+    /// The reads of a variable that no line of the text sets before them
+    /// on any path: each line and the names it reads so.
+    ///
+    /// The text's closure: every value it reads must come from a line of
+    /// it or be an input, a parameter or a global. A register variable
+    /// that no line sets holds only what its register held at entry, so a
+    /// read of one that is no parameter shows a value the text lost: whoami
+    /// read `a1 - r10 + 1` where the `mov r10d,eax` setting it was dropped.
+    /// A forward pass over the compiled body keeps the variables some path
+    /// sets; a read outside that set is flagged. Taking a variable's
+    /// address sets it (a callee may write it), and a line this reader does
+    /// not read sets them all, so a flag is never a guess. Only variables
+    /// held as C values are read so (register names, temporaries), never a
+    /// stack slot or a global, which live in memory others may write; a
+    /// register the text names without declaring it is one too.
+    ///
+    /// # Returns
+    ///
+    /// The 1-based lines in order, each with the names it reads unset, in
+    /// the order read.
+    pub(crate) fn unset_reads(&self) -> Vec<(usize, Vec<String>)> {
+        let mut named: Vec<&str> = Vec::new();
+        for op in &self.ops {
+            match &op.step {
+                Step::Eval(e)
+                | Step::Test(e, _)
+                | Step::Switch(e, _, _)
+                | Step::Return(Some(e)) => {
+                    names_in(e, &mut named);
+                }
+                Step::Jump(_)
+                | Step::Return(None)
+                | Step::Unreadable(_)
+                | Step::Halt
+                | Step::Leave => {}
+            }
+        }
+        let mut undeclared: Vec<String> = named
+            .into_iter()
+            .filter(|n| {
+                !self.vars.contains_key(*n) && named_register(n).is_some_and(|r| r != Register::RSP)
+            })
+            .map(str::to_owned)
+            .collect();
+        undeclared.sort_unstable();
+        undeclared.dedup();
+        let undeclared = undeclared.as_slice();
+        let cells = self.cells.len() + undeclared.len();
+        let mut given: Vec<bool> = self
+            .cells
+            .iter()
+            .map(|(name, reg, _)| {
+                *reg == Some(Register::RSP) || self.sig.params.iter().any(|(p, _)| p == name)
+            })
+            .collect();
+        given.resize(cells, false);
+        let target = |l: &usize| self.targets.get(*l).copied().unwrap_or(usize::MAX);
+        let mut ins: Vec<Option<Vec<bool>>> = vec![None; self.ops.len()];
+        let Some(first) = ins.first_mut() else {
+            return Vec::new();
+        };
+        *first = Some(given);
+        let mut todo: Vec<usize> = vec![0];
+        let mut flags: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        let mut rounds = 0usize;
+        while let Some(pc) = todo.pop() {
+            rounds += 1;
+            if rounds > UNSET_ROUNDS {
+                return Vec::new();
+            }
+            let (Some(op), Some(Some(state))) = (self.ops.get(pc), ins.get(pc)) else {
+                continue;
+            };
+            let mut set = state.clone();
+            let next: Vec<usize> = match &op.step {
+                Step::Eval(e) => {
+                    self.reads(e, undeclared, &mut set, &mut |_| {});
+                    vec![pc + 1]
+                }
+                Step::Test(c, l) => {
+                    self.reads(c, undeclared, &mut set, &mut |_| {});
+                    vec![pc + 1, target(l)]
+                }
+                Step::Jump(l) => vec![target(l)],
+                Step::Switch(v, cases, default) => {
+                    self.reads(v, undeclared, &mut set, &mut |_| {});
+                    cases
+                        .iter()
+                        .map(|(_, l)| target(l))
+                        .chain([target(default)])
+                        .collect()
+                }
+                Step::Return(e) => {
+                    if let Some(e) = e {
+                        self.reads(e, undeclared, &mut set, &mut |_| {});
+                    }
+                    Vec::new()
+                }
+                Step::Unreadable(_) => {
+                    set = vec![true; cells];
+                    vec![pc + 1]
+                }
+                Step::Halt | Step::Leave => Vec::new(),
+            };
+            for n in next {
+                let Some(slot) = ins.get_mut(n) else { continue };
+                let grew = match slot {
+                    None => {
+                        *slot = Some(set.clone());
+                        true
+                    }
+                    Some(old) => {
+                        let mut grew = false;
+                        for (o, s) in old.iter_mut().zip(&set) {
+                            if *s && !*o {
+                                *o = true;
+                                grew = true;
+                            }
+                        }
+                        grew
+                    }
+                };
+                if grew {
+                    todo.push(n);
+                }
+            }
+        }
+        for (op, state) in self.ops.iter().zip(&ins) {
+            let Some(state) = state else { continue };
+            let mut set = state.clone();
+            let mut found: Vec<String> = Vec::new();
+            let mut note = |n: &str| {
+                if !found.iter().any(|f| f == n) {
+                    found.push(n.to_owned());
+                }
+            };
+            match &op.step {
+                Step::Eval(e)
+                | Step::Test(e, _)
+                | Step::Switch(e, _, _)
+                | Step::Return(Some(e)) => {
+                    self.reads(e, undeclared, &mut set, &mut note);
+                }
+                Step::Jump(_)
+                | Step::Return(None)
+                | Step::Unreadable(_)
+                | Step::Halt
+                | Step::Leave => {}
+            }
+            if !found.is_empty() {
+                let at = flags.entry(op.line).or_default();
+                for n in found {
+                    if !at.contains(&n) {
+                        at.push(n);
+                    }
+                }
+            }
+        }
+        flags.into_iter().collect()
+    }
+
+    /// Walks an expression in evaluation order: notes each C variable it
+    /// reads that `set` does not hold, and adds each it sets.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The expression.
+    /// * `undeclared` - The register names the text reads without declaring
+    ///   them, sorted: each is a cell past the declared ones.
+    /// * `set` - The variables some path has set, by cell; updated.
+    /// * `note` - Called with each name read unset.
+    fn reads(&self, e: &Ast, undeclared: &[String], set: &mut [bool], note: &mut dyn FnMut(&str)) {
+        let cell = |n: &str| match self.vars.get(n) {
+            Some(Variable {
+                slot: Slot::Var(k), ..
+            }) => Some(*k),
+            Some(_) => None,
+            None => undeclared
+                .binary_search_by(|u| u.as_str().cmp(n))
+                .ok()
+                .map(|k| self.cells.len() + k),
+        };
+        let define = |set: &mut [bool], k: usize| {
+            if let Some(s) = set.get_mut(k) {
+                *s = true;
+            }
+        };
+        match e {
+            Ast::Name(n) => {
+                if let Some(k) = cell(n)
+                    && set.get(k) == Some(&false)
+                {
+                    note(n);
+                }
+            }
+            Ast::Int(..) | Ast::Float(..) | Ast::Str(_) => {}
+            Ast::Un(Un::Addr, a) => match a.as_ref() {
+                Ast::Name(n) if cell(n).is_some() => {
+                    if let Some(k) = cell(n) {
+                        define(set, k);
+                    }
+                }
+                other => self.reads(other, undeclared, set, note),
+            },
+            Ast::Un(_, a) | Ast::Cast(_, a) | Ast::Arrow(a, _) => {
+                self.reads(a, undeclared, set, note);
+            }
+            Ast::Bin(_, a, b) | Ast::Index(a, b) | Ast::Logic(_, a, b) => {
+                self.reads(a, undeclared, set, note);
+                self.reads(b, undeclared, set, note);
+            }
+            Ast::Pick(c, m, o) => {
+                self.reads(c, undeclared, set, note);
+                let mut other = set.to_vec();
+                if let Some(m) = m {
+                    self.reads(m, undeclared, set, note);
+                }
+                self.reads(o, undeclared, &mut other, note);
+                for (s, o) in set.iter_mut().zip(other) {
+                    *s |= o;
+                }
+            }
+            Ast::Call(f, args) => {
+                self.reads(f, undeclared, set, note);
+                for a in args {
+                    self.reads(a, undeclared, set, note);
+                }
+            }
+            Ast::Assign(op, lhs, rhs) => {
+                let target = match lhs.as_ref() {
+                    Ast::Name(n) => cell(n),
+                    _ => None,
+                };
+                if op.is_some() || target.is_none() {
+                    self.reads(lhs, undeclared, set, note);
+                }
+                self.reads(rhs, undeclared, set, note);
+                if let Some(k) = target {
+                    define(set, k);
+                }
+            }
+            Ast::Step(_, _, a) => {
+                self.reads(a, undeclared, set, note);
+                if let Ast::Name(n) = a.as_ref()
+                    && let Some(k) = cell(n)
+                {
+                    define(set, k);
+                }
+            }
+        }
     }
 }
 

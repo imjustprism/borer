@@ -544,6 +544,32 @@ fn decompile_header(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Optio
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
+/// A function's text with each line that reads a variable no line sets
+/// first marked ([`borer_engine::analysis::decompile::mark_unset`]).
+///
+/// A text the closure check cannot read is left as it is: its lines are no
+/// more proven for it, and the check's line says later text passes went
+/// unchecked.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `a` - Its analysis.
+/// * `o` - Names in force.
+/// * `entry` - The function's entry.
+/// * `text` - Its text as `decompile_named` wrote it.
+///
+/// # Returns
+///
+/// The text, its flagged lines marked.
+fn marked(p: &Program, a: &Analysis, o: &Overlay, entry: u64, text: &str) -> String {
+    use borer_engine::analysis::decompile;
+    match decompile::unset_reads(p, a, o, entry, text) {
+        Ok(reads) => decompile::mark_unset(text, &reads),
+        Err(_) => text.to_owned(),
+    }
+}
+
 impl BorerServer {
     /// The packs an analysis of a program runs with: the pack directories'
     /// packs that fit it, then the named ones.
@@ -2753,7 +2779,7 @@ impl BorerServer {
             let text = decompile::decompile_named(p, &a, &o, entry)
                 .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
             let text = match detail.unwrap_or_default() {
-                Detail::Full => text,
+                Detail::Full => marked(p, &a, &o, entry, &text),
                 Detail::Skeleton => decompile::skeleton(&text),
             };
             let text = decompile::with_header(&text, header.as_deref());
