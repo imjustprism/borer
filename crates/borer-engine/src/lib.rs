@@ -48,6 +48,7 @@ pub mod program;
 pub mod script;
 pub mod search;
 pub mod strings;
+pub mod table;
 pub mod text;
 pub(crate) mod timing;
 pub mod unwind;

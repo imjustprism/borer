@@ -132,6 +132,16 @@ TASKS = [
         "# next: borer://solve/",
     ),
     (
+        "resume",
+        "where the session stands after a paged read: what it read, cut and paged",
+        [
+            LOAD,
+            ("query", {"uri": "borer://help!offset=10!limit=5"}),
+            ("query", {"uri": "borer://session"}),
+        ],
+        "capped paged  borer://help!offset=10!limit=5",
+    ),
+    (
         "raw_code",
         "what headerless code loaded at a stated base returns",
         [

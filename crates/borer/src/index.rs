@@ -23,6 +23,7 @@ use borer_engine::analysis::decompile::decompile_named_all;
 use borer_engine::analysis::{Analysis, Overlay, name_of, render};
 use borer_engine::pack::Packs;
 use borer_engine::program::Program;
+use borer_engine::table::Window;
 
 /// Magic bytes opening an index file.
 const MAGIC: &[u8; 8] = b"BORERIDX";
@@ -745,8 +746,7 @@ pub fn grep(index: &CodeIndex, matcher: &Matcher, function_filter: &str) -> Vec<
 /// * `overlay` - Names in force; a renamed function shows its new name.
 /// * `pattern` - The text matched, or `re:` and an expression.
 /// * `function_filter` - The function-name filter applied.
-/// * `skip` - Hits to skip.
-/// * `limit` - Hits shown at most.
+/// * `window` - The hits shown, and the URI naming the next page.
 ///
 /// # Errors
 ///
@@ -757,9 +757,9 @@ pub fn grep_tsv(
     overlay: &Overlay,
     pattern: &str,
     function_filter: &str,
-    skip: usize,
-    limit: usize,
+    window: Window<'_>,
 ) -> Result<String, String> {
+    let Window { skip, limit, .. } = window;
     let matcher = Matcher::parse(pattern)?;
     let hits = grep(index, &matcher, function_filter);
     let functions = {
@@ -811,6 +811,7 @@ pub fn grep_tsv(
     );
     out.push_str("entry\tfunction\tline\ttext\n");
     out.push_str(&body);
+    out.push_str(&window.next_page(total, shown));
     Ok(out)
 }
 
@@ -1036,7 +1037,19 @@ mod tests {
             "an empty pattern matches nothing"
         );
         let a = Analysis::default();
-        let text = grep_tsv(&index, &a, &Overlay::default(), "return", "", 1, 5).expect("parses");
+        let text = grep_tsv(
+            &index,
+            &a,
+            &Overlay::default(),
+            "return",
+            "",
+            Window {
+                skip: 1,
+                limit: 5,
+                again: None,
+            },
+        )
+        .expect("parses");
         assert!(
             text.starts_with("# 2 lines in 2 functions contain 'return', showing 1 from 1\n"),
             "{text}"
@@ -1072,7 +1085,19 @@ mod tests {
         let note = render::SCOPE_NOTE;
         let rows = "entry\tfunction\tline\ttext\n";
         assert_eq!(
-            grep_tsv(&index, &a, &o, "Send(", "", 0, 10).expect("parses"),
+            grep_tsv(
+                &index,
+                &a,
+                &o,
+                "Send(",
+                "",
+                Window {
+                    skip: 0,
+                    limit: 10,
+                    again: None
+                }
+            )
+            .expect("parses"),
             format!(
                 "# 4 lines in 1 functions contain 'Send(', showing 4 from 0{note}\n{rows}\
                  0x1000\tsub_1000\t^3\tif (a1 != 0) {{\n\
@@ -1085,7 +1110,19 @@ mod tests {
             )
         );
         assert_eq!(
-            grep_tsv(&index, &a, &o, "Send(", "", 2, 1).expect("parses"),
+            grep_tsv(
+                &index,
+                &a,
+                &o,
+                "Send(",
+                "",
+                Window {
+                    skip: 2,
+                    limit: 1,
+                    again: None
+                }
+            )
+            .expect("parses"),
             format!(
                 "# 4 lines in 1 functions contain 'Send(', showing 1 from 2{note}\n{rows}\
                  0x1000\tsub_1000\t^3\tif (a1 != 0) {{\n\
@@ -1114,8 +1151,19 @@ mod tests {
         let err = Matcher::parse("re:[").expect_err("refused");
         assert!(err.starts_with("bad regular expression: "), "{err}");
         let a = Analysis::default();
-        let text =
-            grep_tsv(&index, &a, &Overlay::default(), "re:^return", "", 0, 5).expect("parses");
+        let text = grep_tsv(
+            &index,
+            &a,
+            &Overlay::default(),
+            "re:^return",
+            "",
+            Window {
+                skip: 0,
+                limit: 5,
+                again: None,
+            },
+        )
+        .expect("parses");
         assert!(
             text.starts_with("# 2 lines in 2 functions match 're:^return', showing 2 from 0\n"),
             "{text}"

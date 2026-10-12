@@ -25,6 +25,7 @@ use super::schema::{ident_char, split_args};
 use super::{Analysis, Overlay, RefKind, name_of, plain_text_cached};
 use crate::program::Program;
 use crate::strings::cstr_at;
+use crate::table::Window;
 
 /// Fewest registration sites worth a worker each.
 const PAR_MIN: usize = 64;
@@ -565,15 +566,17 @@ fn taken_by(analysis: &Analysis, function: u64, site: u64) -> bool {
 /// * `analysis` - Discovery results.
 /// * `overlay` - Names in force.
 /// * `filter` - Substring of the name or code; empty for all.
-/// * `limit` - Rows shown at most, [`PAGE`] when it allows more.
+/// * `window` - The rows shown, at most [`PAGE`] whatever its limit
+///   allows, and the URI naming the next page.
 #[must_use]
 pub fn catalog_tsv(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     filter: &str,
-    limit: usize,
+    window: Window<'_>,
 ) -> String {
+    let Window { skip, limit, .. } = window;
     let cat = analysis
         .derived
         .get_or_build_named("attrs", overlay.fingerprint(), (), || {
@@ -604,7 +607,7 @@ pub fn catalog_tsv(
         picked
     };
     let used = picked.iter().filter(|a| !a.users.is_empty()).count();
-    let shown = picked.len().min(limit).min(PAGE);
+    let shown = picked.len().saturating_sub(skip).min(limit).min(PAGE);
     let one = match picked.as_slice() {
         [one] => Some(*one),
         _ => None,
@@ -626,7 +629,10 @@ pub fn catalog_tsv(
         out,
         ", {used} used by code outside their registration, showing {shown}"
     );
-    if shown < picked.len() {
+    if skip > 0 {
+        let _ = write!(out, " from {skip}");
+    }
+    if skip + shown < picked.len() {
         if shown == PAGE {
             let _ = write!(out, " ({PAGE} per answer)");
         }
@@ -651,6 +657,7 @@ pub fn catalog_tsv(
     }
     let rows: Vec<(&AttrDef, Vec<String>)> = picked
         .iter()
+        .skip(skip)
         .take(shown)
         .map(|&a| {
             let users = if one.is_some() {
@@ -702,6 +709,7 @@ pub fn catalog_tsv(
             a.default
         );
     }
+    out.push_str(&window.next_page(picked.len(), shown));
     if let Some(one) = one {
         let overlay_key = overlay.fingerprint();
         let listed = &one.users[..one.users.len().min(USERS_ONE_MAX)];
@@ -951,7 +959,7 @@ rax = Attr::AttributeTable::GetInt(rax, rdx, 0);
     fn an_image_without_a_registry_has_an_empty_table() {
         let p = Program::raw_x64(&[0xc3]);
         let a = Analysis::compute(&p);
-        let text = catalog_tsv(&p, &a, &Overlay::default(), "", 10);
+        let text = catalog_tsv(&p, &a, &Overlay::default(), "", Window::first(10));
         assert!(
             text.starts_with("# 0 attributes registered through 0 typed registrars"),
             "{text}"

@@ -179,7 +179,10 @@ binary diffing and carrying names over to a new build, wire protocol
 recovery, and more. Clients that can't read resources can pass the same URI
 to the `query` tool. A template read without its argument (`borer://emulate`)
 returns its grammar and an example, an unknown URI the nearest names, and
-`borer://help` the full list. The prompts are resources too,
+`borer://help` the full list. A listing pages with `!offset=<n>` and
+`!limit=<n>` on its URI, and `borer://session` says what the session loaded,
+named, commented and typed and which answers it holds, cut or paged. The
+prompts are resources too,
 `borer://playbook/<name>`, for agents whose client offers prompts only to
 the user.
 

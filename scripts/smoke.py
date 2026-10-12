@@ -413,6 +413,7 @@ assert uris == [
     "borer://ports",
     "borer://protection",
     "borer://qt",
+    "borer://session",
     "borer://singletons",
     "borer://sources",
     "borer://stackstrings",
@@ -428,6 +429,14 @@ assert triage.startswith("# triage:"), triage[:200]
 for want in ("# protection:", "# capabilities:", "# next:"):
     assert want in triage, (want, triage[:400])
 print("triage resource OK:", triage.splitlines()[1])
+
+paged = wait_for(send("resources/read", {"uri": "borer://help!offset=3!limit=3"}))
+page = paged["contents"][0]["text"]
+assert page.startswith("# showing 3 of "), page[:200]
+assert "borer://help!limit=3!offset=6 for the next page" in page, page[-300:]
+ledger = wait_for(send("resources/read", {"uri": "borer://session"}))["contents"][0]["text"]
+assert "capped paged  borer://help!offset=3!limit=3" in ledger, ledger[-600:]
+print("paged resource and session ledger OK:", page.splitlines()[0])
 
 enums = wait_for(send("resources/read", {"uri": "borer://enums"}))["contents"][0]["text"]
 assert enums.startswith("# ") and "name tables" in enums, enums[:200]

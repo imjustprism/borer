@@ -434,7 +434,7 @@ pub(super) fn listed_args(site: &CallSite, declared: Option<usize>) -> Vec<CallA
 
 /// Lists every call site of a function or an import with its arguments.
 ///
-/// The spec is `<callee>[,aN<op><value>]...[,offset=<n>]`. The callee is a
+/// The spec is `<callee>[,aN<op><value>]...[,offset=<n>][,limit=<n>]`. The callee is a
 /// function or an import by name or address; a call is counted whether it
 /// is made directly, through a thunk, through the import slot, or through a
 /// register loaded from the slot. Each row is a call as the pseudo-C makes
@@ -445,7 +445,8 @@ pub(super) fn listed_args(site: &CallSite, declared: Option<usize>) -> Vec<CallA
 /// the calls whose argument `aN` equals a number, contains a text (as
 /// written or in the string it points at), is `?`, differs (`!=`), or is a
 /// constant above or below a number (`>`, `<`). Rows are in address order,
-/// [`CALLS_PAGE`] a page; at most [`CALLERS_MAX`] callers are decompiled.
+/// [`CALLS_PAGE`] a page at most, `limit=` a smaller one; at most
+/// [`CALLERS_MAX`] callers are decompiled.
 ///
 /// # Arguments
 ///
@@ -461,7 +462,8 @@ pub(super) fn listed_args(site: &CallSite, declared: Option<usize>) -> Vec<CallA
 /// # Errors
 ///
 /// When the program does not decompile, the spec names no callee, a
-/// filter or the offset does not read, or the callee is not an entry.
+/// filter, the offset or the limit does not read, or the callee is not an
+/// entry.
 pub fn calls_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     if let Some(why) = p.refuses(Feature::Decompile) {
         return Err(why);
@@ -469,11 +471,14 @@ pub fn calls_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     let mut name_parts: Vec<&str> = Vec::new();
     let mut filters: Vec<Predicate> = Vec::new();
     let mut offset = 0usize;
+    let mut limit: Option<usize> = None;
     for token in spec.split(',').map(str::trim) {
         if let Some(n) = token.strip_prefix("offset=") {
             offset = n
                 .parse()
                 .map_err(|_| format!("bad offset {n:?}: a row count"))?;
+        } else if let Some(n) = token.strip_prefix("limit=") {
+            limit = Some(crate::table::row_limit(n)?);
         } else if let Some(filter) = Predicate::parse(token) {
             filters.push(filter?);
         } else {
@@ -555,7 +560,8 @@ pub fn calls_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     }
     let total = rows.len();
     let start = offset.min(total);
-    let page = &rows[start..total.min(start.saturating_add(CALLS_PAGE))];
+    let size = limit.map_or(CALLS_PAGE, |n| n.min(CALLS_PAGE));
+    let page = &rows[start..total.min(start.saturating_add(size))];
     let _ = writeln!(out, "# showing {} of {total} from {offset}", page.len());
     if page.is_empty() {
         return Ok(out);
@@ -585,6 +591,7 @@ pub fn calls_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         let mut again: Vec<String> = vec![name];
         again.extend(filters.iter().map(|w| w.shown.clone()));
         again.push(format!("offset={next}"));
+        again.extend(limit.map(|n| format!("limit={n}")));
         let _ = writeln!(
             out,
             "# {} more; borer://calls/{} for the next page",

@@ -30,11 +30,13 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod cli;
 mod doctor;
+mod paging;
 mod params;
 mod playbooks;
 mod recall;
 mod relay;
 mod resources;
+mod session;
 mod setup;
 mod strwalk;
 mod symsrv;
@@ -78,7 +80,7 @@ use params::{
     TypesParams, XrefsParams, count_param, frame_words, must_be_in_a_section, must_fit_a_row,
     plan_var, to_usize,
 };
-use recall::{FRESH_SUFFIX, Narrow, Recall, SINCE_ARG, SINCE_SUFFIX, Tag, budgeted};
+use recall::{Narrow, Recall, SINCE_ARG, Tag, budgeted};
 
 // ---------------------------------------------------------------- server ----
 
@@ -94,6 +96,8 @@ struct BorerServer {
     /// What this session was last answered for each request, so an
     /// identical answer repeated is a one-line note, not the text again.
     recall: Arc<Mutex<Recall>>,
+    /// What this session changed and asked, for `borer://session`.
+    ledger: Arc<Mutex<session::Ledger>>,
     /// The loaded program, `None` before `load_binary`.
     program: Arc<RwLock<Option<Arc<Program>>>>,
     /// Whether the loaded program's companion PDB was applied: a
@@ -3741,7 +3745,7 @@ impl BorerServer {
     /// As `resources/read`: resource-not-found for an unknown URI, naming
     /// the resources nearest it; otherwise the resource's own error.
     #[tool(
-        description = "Read a borer:// resource as resources/read does (same text, errors and memory), for hosts that cannot read resources, e.g. borer://triage or borer://scenarios/0x401000/a1=0..8; a template read bare (borer://emulate) says its grammar; borer://help lists all.",
+        description = "Read a borer:// resource as resources/read does (same text, errors and memory), for hosts that cannot read resources, e.g. borer://triage or borer://scenarios/0x401000/a1=0..8; a template read bare (borer://emulate) says its grammar; !offset=N!limit=N page a listing; borer://help lists all.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -3810,7 +3814,7 @@ impl BorerServer {
                 );
             }
             server
-                .resource_text(uri)
+                .listing(&paging::Asked::read(uri)?)
                 .map_err(|e| e.message.into_owned())
         });
         let run = borer_engine::script::run_with(
@@ -4307,8 +4311,18 @@ impl ServerHandler for BorerServer {
             CallToolResponse::Complete(mut result)
                 if remembered && result.is_error != Some(true) =>
             {
+                self.note_change(&named.0, named.1.as_ref(), &args);
                 if let [ContentBlock::Text(t)] = result.content.as_mut_slice() {
                     let full = std::mem::take(&mut t.text);
+                    let paged = named
+                        .1
+                        .as_ref()
+                        .is_some_and(|a| a.contains_key("offset") || a.contains_key("limit"));
+                    lock(&self.ledger).answered(
+                        &key,
+                        session::shows_fewer(&full) || recall::over_budget(full.len()),
+                        paged,
+                    );
                     let sent = match self.recall.lock() {
                         Ok(mut recall) => recall.answer(&key, since, &again, full),
                         Err(_) => full,
@@ -4548,66 +4562,87 @@ impl BorerServer {
     ///
     /// `resources/read` and the `query` tool both come here, so a URI is
     /// answered alike either way: the same text, the same errors, and one
-    /// answer memory keyed by the URI. The argument is percent-decoded: a
-    /// client is free to escape the reserved characters an argument uses,
-    /// and an experiment spec is full of them. An unknown URI is refused
-    /// with the few resources nearest it, and `borer://help` lists every
-    /// one, which is how an agent whose host lists no resources finds them.
+    /// answer memory keyed by the URI and the page it asks for. The
+    /// argument is percent-decoded: a client is free to escape the reserved
+    /// characters an argument uses, and an experiment spec is full of them.
+    /// An unknown URI is refused with the few resources nearest it, and
+    /// `borer://help` lists every one, which is how an agent whose host
+    /// lists no resources finds them.
     ///
     /// # Arguments
     ///
-    /// * `uri` - The URI as the client sent it; a trailing `!since=<tag>`
-    ///   passes back the tag of the answer the reader holds, and a trailing
-    ///   `!fresh` asks for the text whole whatever tag comes before it.
+    /// * `uri` - The URI as the client sent it, with any suffixes
+    ///   ([`paging::Asked`]): `!offset=<n>` and `!limit=<n>` page a
+    ///   listing, `!since=<tag>` passes back the tag of the answer the
+    ///   reader holds, and `!fresh` asks for the text whole whatever tag
+    ///   comes with it.
     ///
     /// # Returns
     ///
-    /// The URI without either suffix, and the text to send.
+    /// The URI with only its page suffixes, and the text to send.
     ///
     /// # Errors
     ///
-    /// Resource-not-found for an unknown URI; invalid-params for a tag that
-    /// is not one; otherwise the handler's error.
+    /// Resource-not-found for an unknown URI; invalid-params for a suffix
+    /// that does not read; otherwise the handler's error.
     fn read_uri(&self, uri: &str) -> Result<(String, String), ErrorData> {
-        let (uri, fresh) = match uri.strip_suffix(FRESH_SUFFIX) {
-            Some(core) => (core, true),
-            None => (uri, false),
-        };
-        let (uri, since) = match uri.rsplit_once(SINCE_SUFFIX) {
-            Some((core, tag)) => (
-                core.to_owned(),
-                Some(Tag::parse(tag).map_err(err_params)?).filter(|_| !fresh),
-            ),
-            None => (uri.to_owned(), None),
-        };
-        let text = self.resource_text(&uri)?;
-        let again = format!("reading {uri} (resources/read or the query tool)");
+        let asked = paging::Asked::read(uri).map_err(err_params)?;
+        let text = self.listing(&asked)?;
+        let key = asked.key();
+        if asked.core != SESSION_URI {
+            lock(&self.ledger).answered(
+                &key,
+                session::shows_fewer(&text) || recall::over_budget(text.len()),
+                asked.paged(),
+            );
+        }
+        let again = format!("reading {key} (resources/read or the query tool)");
         let text = match self.recall.lock() {
-            Ok(mut recall) => recall.answer(&uri, since, &again, text),
+            Ok(mut recall) => recall.answer(&key, asked.since, &again, text),
             Err(_) => text,
         };
-        Ok((uri, budgeted(text, Narrow::Uri)))
+        Ok((key, budgeted(text, Narrow::Uri)))
     }
 
     /// The text of one resource, as its handler answers it: no answer
-    /// memory, no byte budget, no `!since` or `!fresh` suffix.
-    ///
-    /// [`BorerServer::read_uri`] wraps it for `resources/read` and the
-    /// `query` tool, and a script's `query(uri)` calls it directly
-    /// ([`BorerServer::script`]).
+    /// memory, no byte budget, no suffix; what the tests read.
     ///
     /// # Arguments
     ///
     /// * `uri` - The URI, suffixes already taken off.
     ///
+    /// # Errors
+    ///
+    /// As [`BorerServer::listing`].
+    #[cfg(test)]
+    fn resource_text(&self, uri: &str) -> Result<String, ErrorData> {
+        self.listing(&paging::Asked::whole(uri))
+    }
+
+    /// The text of one resource, paged as its URI asks: no answer memory
+    /// and no byte budget.
+    ///
+    /// [`BorerServer::read_uri`] wraps it for `resources/read` and the
+    /// `query` tool, and a script's `query(uri)` calls it directly
+    /// ([`BorerServer::script`]). A listing that pages itself
+    /// (`attrs`, `messages`, `fieldrefs`, `grep`, `iocs`, `calls`) is
+    /// handed the page; any other answer's rows are paged here
+    /// ([`borer_engine::table::page`]), under a `# showing N of M from K`
+    /// line and over the URI that reads the next page.
+    ///
     /// A template named without its argument (`borer://emulate`) answers
     /// how to read it ([`BorerServer::help_text`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `asked` - The URI with its suffixes read off.
     ///
     /// # Errors
     ///
     /// Resource-not-found for an unknown URI, naming the resources nearest
     /// it ([`resources::unknown_resource`]); otherwise the handler's error.
-    fn resource_text(&self, uri: &str) -> Result<String, ErrorData> {
+    fn listing(&self, asked: &paging::Asked) -> Result<String, ErrorData> {
+        let uri = asked.core.as_str();
         let Some(path) = uri.strip_prefix("borer://") else {
             return Err(resources::unknown_resource(uri));
         };
@@ -4623,9 +4658,9 @@ impl BorerServer {
             ("checks", None) => self.checks_text()?,
             ("antianalysis", None) => self.anti_analysis_text()?,
             ("protection", None) => self.protection_text()?,
-            ("iocs", None) => self.iocs_text("")?,
-            ("iocs", Some(filter)) => self.iocs_text(&filter)?,
-            ("calls", Some(spec)) => self.calls_text(&spec)?,
+            ("iocs", None) => return self.iocs_text(&asked.spec_words("")),
+            ("iocs", Some(filter)) => return self.iocs_text(&asked.spec_words(&filter)),
+            ("calls", Some(spec)) => return self.calls_text(&asked.spec_words(&spec)),
             ("triage", None) => self.triage_text()?,
             ("fingerprint", None) => self.fingerprint_text()?,
             ("hashes", None) => self.hashes_text()?,
@@ -4661,9 +4696,9 @@ impl BorerServer {
             ("singletons", None) => self.singletons_text("")?,
             ("singletons", Some(filter)) => self.singletons_text(&filter)?,
             ("fields", Some(address)) => self.fields_text(&address)?,
-            ("fieldrefs", Some(spec)) => self.fieldrefs_text(&spec)?,
+            ("fieldrefs", Some(spec)) => return self.fieldrefs_text(&spec, asked),
             ("vslot", Some(spec)) => self.vslot_text(&spec)?,
-            ("grep", Some(text)) => self.grep_text(&text)?,
+            ("grep", Some(text)) => return self.grep_text(&text, asked),
             ("packs", None) => self.packs_text()?,
             ("exportpack", Some(spec)) => self.export_pack_text(&spec)?,
             ("script", Some(path)) => self.script_text(&path)?,
@@ -4678,16 +4713,16 @@ impl BorerServer {
             ("protocol", Some(spec)) => self.protocol_text(&spec)?,
             ("hooks", Some(spec)) => self.hooks_text(&spec)?,
             ("shape", Some(address)) => self.shape_text(&address)?,
-            ("messages", None) => self.messages_text("")?,
-            ("attrs", None) => self.attrs_text("")?,
+            ("messages", None) => return self.messages_text("", asked),
+            ("attrs", None) => return self.attrs_text("", asked),
             ("map", None) => self.map_text("")?,
             ("about", Some(name)) => self.about_text(&name)?,
             ("changes", Some(path)) => self.changes_text(&path)?,
             ("map", Some(namespace)) => self.map_text(&namespace)?,
             ("ports", None) => self.ports_text("")?,
             ("ports", Some(filter)) => self.ports_text(&filter)?,
-            ("attrs", Some(filter)) => self.attrs_text(&filter)?,
-            ("messages", Some(filter)) => self.messages_text(&filter)?,
+            ("attrs", Some(filter)) => return self.attrs_text(&filter, asked),
+            ("messages", Some(filter)) => return self.messages_text(&filter, asked),
             ("anchors", Some(path)) => self.anchors_text(&path)?,
             ("function", Some(address)) => {
                 self.function_summary(Parameters(FunctionParams { address }))?
@@ -4708,6 +4743,7 @@ impl BorerServer {
             }
             ("playbook", Some(spec)) => resources::playbook_text(&spec)?,
             ("help", None) => resources::help_index(),
+            ("session", None) => self.session_text(),
             ("help", Some(name)) => self.help_text(&name)?,
             (name, None)
                 if RESOURCE_TEMPLATES
@@ -4718,7 +4754,54 @@ impl BorerServer {
             }
             _ => return Err(resources::unknown_resource(uri)),
         };
-        Ok(text)
+        if !asked.paged() {
+            return Ok(text);
+        }
+        Ok(borer_engine::table::page(
+            &text,
+            asked.offset.unwrap_or(0),
+            asked.limit.unwrap_or(usize::MAX),
+            &asked.again(),
+        ))
+    }
+}
+
+/// The session ledger's URI, whose reads the ledger does not list.
+const SESSION_URI: &str = "borer://session";
+
+impl BorerServer {
+    /// Records in the ledger a tool call that changed what the session
+    /// holds: a load or a save, or a name, comment, type or script applied
+    /// with `dry_run=false` ([`session::changes`]), and what a save or a
+    /// load leaves saved.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool's name.
+    /// * `arguments` - Its arguments, `None` for none.
+    /// * `args` - The same as JSON, as the ledger lists them.
+    fn note_change(
+        &self,
+        tool: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+        args: &str,
+    ) {
+        let dry_run = arguments
+            .and_then(|a| a.get("dry_run"))
+            .and_then(serde_json::Value::as_bool);
+        if !session::changes(tool, dry_run) {
+            return;
+        }
+        let saved = match tool {
+            "save_project" | "load_project" => Some(Some(read_lock(&self.overlay).fingerprint())),
+            "load_binary" => Some(None),
+            _ => None,
+        };
+        let mut ledger = lock(&self.ledger);
+        ledger.changed(tool, args);
+        if let Some(saved) = saved {
+            ledger.saved(saved);
+        }
     }
 }
 
@@ -4747,6 +4830,10 @@ const RESOURCES: &[(&str, &str)] = &[
     (
         "borer://info",
         "Summary of the loaded program (binary_info)",
+    ),
+    (
+        "borer://session",
+        "Where this session stands: what is loaded, the overlay's counts and whether it is saved, the names, comments, types and loads it applied, and the requests it answered, each marked held (since=<tag> answers what changed), capped or paged",
     ),
     (
         "borer://annotations",
@@ -7621,6 +7708,94 @@ mod tests {
             "{}",
             refused.message
         );
+    }
+
+    /// The rows of a listing's URI read whole, its page suffixes taken off.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - A listing.
+    fn listed_rows(text: &str) -> Vec<String> {
+        borer_engine::table::classify(text)
+            .into_iter()
+            .filter(|(kind, _)| *kind == borer_engine::table::Line::Row)
+            .map(|(_, line)| line.to_owned())
+            .collect()
+    }
+
+    /// Page one and page two of a listing hold its first rows, in order.
+    ///
+    /// So they do whether the server pages the rows (`borer://help`) or
+    /// the listing pages itself (`borer://fieldrefs`, `borer://calls`);
+    /// each page says what it shows and names the next.
+    ///
+    /// # Panics
+    ///
+    /// When a page drops, repeats or reorders a row, or misnames the next.
+    #[test]
+    fn page_one_and_page_two_are_the_first_rows_of_the_whole() {
+        use borer_engine::program::{Arch, Program, Section};
+        let mut code = vec![
+            0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x1020
+            0xe8, 0x16, 0x00, 0x00, 0x00, // ASM: call 0x1020
+            0xe8, 0x11, 0x00, 0x00, 0x00, // ASM: call 0x1020
+            0xc3, // ASM: ret
+        ];
+        code.resize(0x20, 0xcc);
+        for n in 0u8..8 {
+            code.extend_from_slice(&[0x89, 0x41, 0x10 + n * 8]); // ASM: mov [rcx+0x10+n*8], eax
+        }
+        code.extend_from_slice(&[0x89, 0x41, 0x10, 0x89, 0x41, 0x10, 0xc3]); // ASM: mov [rcx+0x10], eax (twice); ret
+        let len = u64::try_from(code.len()).expect("small");
+        let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let read = |uri: &str| server.read_uri(uri).expect("reads").1;
+        for (uri, size) in [
+            ("borer://help", 10),
+            ("borer://fieldrefs/0x10", 1),
+            ("borer://calls/0x1020", 1),
+        ] {
+            let whole = listed_rows(&server.resource_text(uri).expect("reads whole"));
+            let one = read(&format!("{uri}!limit={size}"));
+            let two = read(&format!("{uri}!offset={size}!limit={size}"));
+            let paged: Vec<String> = listed_rows(&one)
+                .into_iter()
+                .chain(listed_rows(&two))
+                .collect();
+            assert!(whole.len() > 2 * size, "{uri}: {whole:?}");
+            assert_eq!(paged, whole[..2 * size], "{uri}");
+            assert!(
+                one.contains(&format!("# showing {size} of {} from 0", whole.len()))
+                    || one.contains(&format!("# {} sites touch", whole.len())),
+                "{one}"
+            );
+            assert!(two.contains(" for the next page\n"), "{two}");
+        }
+        let help = read("borer://help!limit=10");
+        assert!(
+            help.contains("borer://help!limit=10!offset=10 for the next page"),
+            "{help}"
+        );
+        let calls = read("borer://calls/0x1020!limit=1");
+        assert!(
+            calls.contains(",offset=1,limit=1 for the next page"),
+            "{calls}"
+        );
+        let (asked, _) = server
+            .read_uri("borer://help!limit=3!offset=1")
+            .expect("reads");
+        assert_eq!(asked, "borer://help!offset=1!limit=3");
+        let refused = server
+            .read_uri("borer://help!limit=0")
+            .expect_err("no rows");
+        assert_eq!(refused.code, super::ErrorCode::INVALID_PARAMS);
     }
 
     /// Every template read without its argument says how to read it.

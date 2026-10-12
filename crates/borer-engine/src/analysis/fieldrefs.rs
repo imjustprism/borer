@@ -15,6 +15,7 @@ use crate::isa::x86::{Instruction, InstructionInfoFactory, Mnemonic, OpAccess, R
 use super::functions::decode_block;
 use super::{Analysis, Function, Overlay, is_imm, name_of, striped};
 use crate::program::Program;
+use crate::table::Window;
 
 /// How one site uses the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -190,8 +191,7 @@ fn signed_hex(offset: i64) -> String {
 /// * `overlay` - Names in force.
 /// * `offset` - The field's byte offset.
 /// * `filter` - Case-insensitive substring of the function name; empty for all.
-/// * `skip` - Rows to skip.
-/// * `limit` - Rows shown at most.
+/// * `window` - The rows shown, and the URI naming the next page.
 #[must_use]
 pub fn field_refs_tsv(
     program: &Program,
@@ -199,9 +199,9 @@ pub fn field_refs_tsv(
     overlay: &Overlay,
     offset: i64,
     filter: &str,
-    skip: usize,
-    limit: usize,
+    window: Window<'_>,
 ) -> String {
+    let Window { skip, limit, .. } = window;
     let q = filter.to_lowercase();
     let rows: Vec<(FieldRef, String)> = field_refs(program, analysis, offset)
         .into_iter()
@@ -230,6 +230,7 @@ pub fn field_refs_tsv(
             r.access.code()
         );
     }
+    out.push_str(&window.next_page(total, shown));
     out
 }
 
@@ -283,7 +284,7 @@ mod tests {
             field_refs(&p, &a, 8).is_empty(),
             "[rsp+8] is a local, not a field"
         );
-        let text = field_refs_tsv(&p, &a, &Overlay::default(), 0x551, "", 0, 100);
+        let text = field_refs_tsv(&p, &a, &Overlay::default(), 0x551, "", Window::first(100));
         assert!(text.starts_with("# 4 sites touch [reg+0x551], showing 4 from 0\n"));
         assert!(
             text.contains("0x1000\tsub_1000\tmov\trcx\t1\tw\t0x1\n"),
@@ -293,7 +294,14 @@ mod tests {
             text.contains("0x100d\tsub_1000\tlea\trcx\t0\t&\t\n"),
             "{text}"
         );
-        let none = field_refs_tsv(&p, &a, &Overlay::default(), 0x551, "nomatch", 0, 100);
+        let none = field_refs_tsv(
+            &p,
+            &a,
+            &Overlay::default(),
+            0x551,
+            "nomatch",
+            Window::first(100),
+        );
         assert!(none.starts_with("# 0 sites touch"));
     }
 

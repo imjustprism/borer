@@ -27,6 +27,7 @@ use super::render::Legend;
 use super::{Analysis, Overlay, dedup_sorted, name_of, single};
 use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::program::Program;
+use crate::table::Window;
 
 /// Fewest classes worth a worker each when the catalog is built.
 const PAR_MIN: usize = 8;
@@ -414,15 +415,17 @@ pub(crate) fn name_id_accessors(program: &Program, analysis: &mut Analysis) {
 /// * `analysis` - Discovery results.
 /// * `overlay` - Names in force.
 /// * `filter` - Case-insensitive substring of the class name; empty for all.
-/// * `limit` - Rows shown at most, [`PAGE`] when it allows more.
+/// * `window` - The rows shown, at most [`PAGE`] whatever its limit
+///   allows, and the URI naming the next page.
 #[must_use]
 pub fn catalog_tsv(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     filter: &str,
-    limit: usize,
+    window: Window<'_>,
 ) -> String {
+    let Window { skip, limit, .. } = window;
     let all = analysis
         .derived
         .get_or_build_named("messages", overlay.fingerprint(), (), || {
@@ -434,7 +437,7 @@ pub fn catalog_tsv(
         .filter(|e| q.is_empty() || e.class.to_lowercase().contains(&q))
         .collect();
     let total = entries.len();
-    let shown = total.min(limit).min(PAGE);
+    let shown = total.saturating_sub(skip).min(limit).min(PAGE);
     let named = |entries: &[u64]| -> Named {
         let names = entries
             .iter()
@@ -445,6 +448,7 @@ pub fn catalog_tsv(
     };
     let rows: Vec<(&MessageEntry, Named, Named)> = entries
         .iter()
+        .skip(skip)
         .take(shown)
         .map(|&e| (e, named(&e.handlers), named(&e.referrers)))
         .collect();
@@ -465,7 +469,10 @@ pub fn catalog_tsv(
         let _ = write!(out, " and match {}", crate::text::quoted(filter));
     }
     let _ = write!(out, ", showing {shown}");
-    if shown < total {
+    if skip > 0 {
+        let _ = write!(out, " from {skip}");
+    }
+    if skip + shown < total {
         if shown == PAGE {
             let _ = write!(out, " ({PAGE} per answer)");
         }
@@ -491,6 +498,7 @@ pub fn catalog_tsv(
             cell(referrers)
         );
     }
+    out.push_str(&window.next_page(total, shown));
     out
 }
 

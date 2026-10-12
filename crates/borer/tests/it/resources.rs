@@ -121,3 +121,53 @@ fn every_template_example_reads() {
     std::fs::remove_file(&file).ok();
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// `borer://session` lists what the session did.
+///
+/// That is the load and the comment it applied, not the name it only
+/// tried, the open question in the overlay, which is not saved, and each
+/// request it answered with the flags it earned: a page asked for is
+/// listed with its page, as capped and paged.
+#[test]
+fn the_session_ledger_lists_what_the_session_did() {
+    let file = std::env::temp_dir().join(format!("borer_session_{}.exe", std::process::id()));
+    std::fs::write(&file, tiny_pe()).expect("the fixture is writable");
+    let mut client = Client::start(&file.to_string_lossy());
+    client.text(
+        "set_comment",
+        r#"{"address":"0x140001000","comment":"?what does it return","dry_run":false}"#,
+    );
+    client.text("set_name", r#"{"address":"0x140001000","name":"tried"}"#);
+    let page = read(&mut client, "borer://help!offset=2!limit=2").expect("pages");
+    assert!(page.starts_with("# showing 2 of "), "{page}");
+    assert!(
+        page.contains("borer://help!limit=2!offset=4 for the next page"),
+        "{page}"
+    );
+    let session = read(&mut client, "borer://session").expect("answers");
+    client.finish();
+    std::fs::remove_file(&file).ok();
+    assert!(
+        session.starts_with("# session: borer_session_"),
+        "{session}"
+    );
+    assert!(session.contains("\nload_binary {"), "{session}");
+    assert!(
+        session.contains("\nset_comment {\"address\":\"0x140001000\",\"comment\":\"?what does it return\",\"dry_run\":false}\n"),
+        "{session}"
+    );
+    assert!(!session.contains("\nset_name {"), "a dry run: {session}");
+    assert!(
+        session.contains("1 comments (1 open questions)") && session.contains("not saved"),
+        "{session}"
+    );
+    assert!(
+        session.contains("capped paged  borer://help!offset=2!limit=2\n"),
+        "{session}"
+    );
+    assert!(
+        session.contains("set_name {\"address\":\"0x140001000\",\"name\":\"tried\"}\n"),
+        "an answer: {session}"
+    );
+    assert!(!session.contains("borer://session"), "{session}");
+}

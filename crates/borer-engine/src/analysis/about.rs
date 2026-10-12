@@ -194,7 +194,11 @@ pub fn about_tsv(program: &Program, analysis: &Analysis, overlay: &Overlay, name
         found.push("attribute");
         let _ = writeln!(out, "## attribute {name}");
         out.push_str(&super::attributes::catalog_tsv(
-            program, analysis, overlay, name, 1,
+            program,
+            analysis,
+            overlay,
+            name,
+            crate::table::Window::first(1),
         ));
     }
     let all_routes = analysis

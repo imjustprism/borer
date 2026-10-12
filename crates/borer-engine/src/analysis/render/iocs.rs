@@ -391,11 +391,14 @@ struct Filter {
     text: String,
     /// Rows to skip first.
     offset: usize,
+    /// Most rows shown, when `limit=` asked for fewer than a page.
+    limit: Option<usize>,
 }
 
 impl Filter {
     /// Reads a filter: comma-separated kind words (`ip` for both address
-    /// kinds), `offset=<n>`, and any other text the value must contain.
+    /// kinds), `offset=<n>`, `limit=<n>`, and any other text the value must
+    /// contain.
     ///
     /// # Arguments
     ///
@@ -403,7 +406,7 @@ impl Filter {
     ///
     /// # Errors
     ///
-    /// When the offset is not a number.
+    /// When the offset or the limit is not a number.
     fn parse(spec: &str) -> Result<Filter, String> {
         let mut filter = Filter::default();
         let mut text: Vec<&str> = Vec::new();
@@ -412,6 +415,8 @@ impl Filter {
                 filter.offset = n
                     .parse()
                     .map_err(|_| format!("bad offset {n:?}: a row count"))?;
+            } else if let Some(n) = token.strip_prefix("limit=") {
+                filter.limit = Some(crate::table::row_limit(n)?);
             } else if token.eq_ignore_ascii_case("ip") {
                 filter.kinds.extend([Kind::Ipv4, Kind::Ipv6]);
             } else if let Some(kind) = Kind::ALL
@@ -511,8 +516,9 @@ pub(super) fn iocs_line(p: &Program, a: &Analysis, o: &Overlay) -> String {
 /// * `o` - User names.
 /// * `spec` - The filter: kind words (`url`, `domain`, `ip`, `ipv4`,
 ///   `ipv6`, `email`, `registry`, `path`, `pipe`, `mutex`, `object`,
-///   `useragent`), `offset=<n>`, and any other text the value contains,
-///   comma-separated; empty for every row.
+///   `useragent`), `offset=<n>`, `limit=<n>` (fewer rows than a page), and
+///   any other text the value contains, comma-separated; empty for every
+///   row.
 ///
 /// # Returns
 ///
@@ -521,19 +527,24 @@ pub(super) fn iocs_line(p: &Program, a: &Analysis, o: &Overlay) -> String {
 ///
 /// # Errors
 ///
-/// When the offset is not a number.
+/// When the offset or the limit is not a number.
 pub fn iocs_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     let filter = Filter::parse(spec)?;
     let all = collected(p, a, o);
     let rows: Vec<&Row> = all.rows.iter().filter(|r| filter.keeps(r)).collect();
     let total = rows.len();
-    let mut out = if spec.trim().is_empty() {
+    let narrowed: Vec<&str> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && !t.starts_with("offset=") && !t.starts_with("limit="))
+        .collect();
+    let mut out = if narrowed.is_empty() {
         format!("# {total} indicator{}: {}\n", plural(total), by_kind(&rows))
     } else {
         format!(
             "# {total} of {} indicators where {}: {}\n",
             all.rows.len(),
-            spec.trim(),
+            narrowed.join(","),
             by_kind(&rows)
         )
     };
@@ -551,7 +562,8 @@ pub fn iocs_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
         );
     }
     let start = filter.offset.min(total);
-    let page = &rows[start..total.min(start.saturating_add(IOCS_PAGE))];
+    let size = filter.limit.map_or(IOCS_PAGE, |n| n.min(IOCS_PAGE));
+    let page = &rows[start..total.min(start.saturating_add(size))];
     let _ = writeln!(
         out,
         "# showing {} of {total} from {}",

@@ -13,9 +13,10 @@ use borer_engine::program::{Feature, Program};
 use rmcp::ErrorData;
 
 use super::{
-    BorerServer, RESOURCE_TEMPLATES, RESOURCES, err_not_found, err_params, parse_field_offset,
-    resource_name,
+    BorerServer, RESOURCE_TEMPLATES, RESOURCES, err_not_found, err_params, lock,
+    parse_field_offset, read_lock, resource_name,
 };
+use crate::paging::Asked;
 
 /// Most rows one listing keyed by a vtable slot returns.
 const SLOT_PAGE: usize = 2000;
@@ -904,15 +905,17 @@ impl BorerServer {
     /// * `spec` - `<offset>[,<name-filter>]`: the field offset as hex or
     ///   decimal with an optional minus sign, then a case-insensitive
     ///   substring of the function name.
+    /// * `asked` - The URI as asked, for the page it asks for.
     ///
     /// # Errors
     ///
     /// When no binary is loaded or the offset does not parse.
-    pub(crate) fn fieldrefs_text(&self, spec: &str) -> Result<String, ErrorData> {
+    pub(crate) fn fieldrefs_text(&self, spec: &str, asked: &Asked) -> Result<String, ErrorData> {
         /// Most rows one read returns.
         const PAGE: usize = 500;
         let (offset_text, filter) = spec.split_once(',').unwrap_or((spec, ""));
         let offset = parse_field_offset(offset_text.trim()).map_err(err_params)?;
+        let again = asked.again();
         self.with_analysis(Feature::Decompile, |p, a, o| {
             Ok(borer_engine::analysis::fieldrefs::field_refs_tsv(
                 p,
@@ -920,8 +923,7 @@ impl BorerServer {
                 o,
                 offset,
                 filter.trim(),
-                0,
-                PAGE,
+                asked.window(PAGE, &again),
             ))
         })
     }
@@ -955,12 +957,13 @@ impl BorerServer {
     ///
     /// * `text` - The text a line must contain, as the URI carried it
     ///   (decoded once at [`super::BorerServer::read_uri`]).
+    /// * `asked` - The URI as asked, for the page it asks for.
     ///
     /// # Errors
     ///
     /// When no binary is loaded, the text is empty, the expression does not
     /// parse, or the index cannot be written.
-    pub(crate) fn grep_text(&self, text: &str) -> Result<String, ErrorData> {
+    pub(crate) fn grep_text(&self, text: &str, asked: &Asked) -> Result<String, ErrorData> {
         /// Most matching lines one read returns; the headers enclosing them
         /// come beside them.
         const PAGE: usize = 200;
@@ -972,9 +975,10 @@ impl BorerServer {
                 "grep needs a non-empty text; an empty one would match nothing",
             ));
         }
+        let again = asked.again();
         self.with_analysis(Feature::Decompile, |p, a, o| {
             let (index, _, _) = borer::index::load_or_build(p, a)?;
-            borer::index::grep_tsv(&index, a, o, text, "", 0, PAGE)
+            borer::index::grep_tsv(&index, a, o, text, "", asked.window(PAGE, &again))
         })
     }
 
@@ -1273,20 +1277,22 @@ impl BorerServer {
     /// # Arguments
     ///
     /// * `filter` - Substring of the name or the code; empty for all.
+    /// * `asked` - The URI as asked, for the page it asks for.
     ///
     /// # Errors
     ///
     /// When no binary is loaded.
-    pub(crate) fn attrs_text(&self, filter: &str) -> Result<String, ErrorData> {
+    pub(crate) fn attrs_text(&self, filter: &str, asked: &Asked) -> Result<String, ErrorData> {
         /// Most rows one read returns, where the renderer pages too.
         const PAGE: usize = 200;
+        let again = asked.again();
         self.with_analysis(Feature::Decompile, |p, a, o| {
             Ok(borer_engine::analysis::attributes::catalog_tsv(
                 p,
                 a,
                 o,
                 filter.trim(),
-                PAGE,
+                asked.window(PAGE, &again),
             ))
         })
     }
@@ -1297,20 +1303,22 @@ impl BorerServer {
     /// # Arguments
     ///
     /// * `filter` - Case-insensitive substring of the class name; empty for all.
+    /// * `asked` - The URI as asked, for the page it asks for.
     ///
     /// # Errors
     ///
     /// When no binary is loaded.
-    pub(crate) fn messages_text(&self, filter: &str) -> Result<String, ErrorData> {
+    pub(crate) fn messages_text(&self, filter: &str, asked: &Asked) -> Result<String, ErrorData> {
         /// Most rows one read returns, where the renderer pages too.
         const PAGE: usize = 200;
+        let again = asked.again();
         self.with_analysis(Feature::Decompile, |p, a, o| {
             Ok(borer_engine::analysis::messages::catalog_tsv(
                 p,
                 a,
                 o,
                 filter.trim(),
-                PAGE,
+                asked.window(PAGE, &again),
             ))
         })
     }
@@ -1359,6 +1367,69 @@ impl BorerServer {
         self.with_analysis(Feature::Decompile, |p, a, o| {
             let (table, _) = borer_engine::analysis::anchors::verify_tsv(p, a, o, &anchors, PAGE);
             Ok(table)
+        })
+    }
+
+    /// Renders the session ledger ([`crate::session::Ledger`]): what is
+    /// loaded, the overlay and whether it is saved, the changes the
+    /// session applied and the requests it answered.
+    ///
+    /// It answers with nothing loaded too, since where a session stands is
+    /// worth knowing before its first load.
+    pub(crate) fn session_text(&self) -> String {
+        let loaded = self.loaded().map(|p| {
+            let file = p.path.file_name().map_or_else(
+                || p.path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            let functions = read_lock(&self.analysis).as_ref().map_or_else(
+                || "not analyzed yet".to_owned(),
+                |a| format!("{} functions", a.functions.len()),
+            );
+            let packs: Vec<String> = read_lock(&self.program_packs)
+                .packs
+                .iter()
+                .map(|pack| pack.name.clone())
+                .collect();
+            format!(
+                "{file} ({} {}), {functions}; packs: {}",
+                p.format.name(),
+                p.arch.name(),
+                if packs.is_empty() {
+                    "none".to_owned()
+                } else {
+                    packs.join(", ")
+                }
+            )
+        });
+        let (counts, fingerprint) = {
+            let o = read_lock(&self.overlay);
+            let open = o
+                .comments
+                .values()
+                .filter(|c| c.trim_start().starts_with('?'))
+                .count();
+            let empty = o.names.is_empty()
+                && o.comments.is_empty()
+                && o.types.is_empty()
+                && o.applied.is_empty()
+                && o.prototypes.is_empty()
+                && o.vars.is_empty();
+            (
+                format!(
+                    "{} names, {} comments ({open} open questions), {} types, {} typed globals, {} prototypes",
+                    o.names.len(),
+                    o.comments.len(),
+                    o.types.len(),
+                    o.applied.len(),
+                    o.prototypes.len()
+                ),
+                (!empty).then(|| o.fingerprint()),
+            )
+        };
+        let recall = lock(&self.recall);
+        lock(&self.ledger).render(loaded.as_deref(), (&counts, fingerprint), |key| {
+            recall.holds(key)
         })
     }
 
@@ -1647,7 +1718,7 @@ mod tests {
     use rmcp::ErrorData;
     use rmcp::model::ErrorCode;
 
-    use super::{ABOUT_NEEDS_A_NAME, BorerServer};
+    use super::{ABOUT_NEEDS_A_NAME, Asked, BorerServer};
 
     /// A resource handler, as `read_resource` calls it with the URI's argument.
     type Handler = fn(&BorerServer, &str) -> Result<String, ErrorData>;
@@ -1757,7 +1828,7 @@ mod tests {
             ),
             (
                 "grep",
-                BorerServer::grep_text,
+                |server, text| server.grep_text(text, &Asked::whole("borer://grep/")),
                 "",
                 "grep needs a non-empty text",
             ),

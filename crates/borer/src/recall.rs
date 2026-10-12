@@ -373,6 +373,16 @@ fn mermaid(text: &str) -> bool {
 }
 
 impl Recall {
+    /// Whether the text last sent whole for a request is still kept, so a
+    /// reader passing its tag back is sent only the lines that changed.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The request, keyed as [`Recall::answer`] keys it.
+    pub(crate) fn holds(&self, request: &str) -> bool {
+        self.texts.contains_key(request)
+    }
+
     /// Lets go of the least recently asked texts until those kept fit in
     /// three quarters of `budget`, once they no longer fit in all of it.
     ///
@@ -407,7 +417,8 @@ impl Recall {
 pub(crate) enum Narrow {
     /// A tool call, which takes a filter, an offset and a limit.
     Tool,
-    /// A resource URI, which takes no paging: only what the URI names.
+    /// A resource URI, which pages a listing by `!offset=` and `!limit=`
+    /// and narrows by its filter where the resource takes one.
     Uri,
 }
 
@@ -419,14 +430,28 @@ pub(crate) enum Narrow {
 /// * `text` - The answer.
 /// * `narrow` - How its reader asks for less.
 pub(crate) fn budgeted(text: String, narrow: Narrow) -> String {
-    match std::env::var(BUDGET_ENV)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&b| b > 0)
-    {
+    match budget() {
         Some(budget) => cut_to(text, budget, narrow),
         None => text,
     }
+}
+
+/// The byte budget `BORER_BUDGET` sets, `None` when it sets none.
+fn budget() -> Option<usize> {
+    std::env::var(BUDGET_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&b| b > 0)
+}
+
+/// Whether an answer of `len` bytes is past the byte budget, and so cut
+/// ([`budgeted`]).
+///
+/// # Arguments
+///
+/// * `len` - The answer's length in bytes.
+pub(crate) fn over_budget(len: usize) -> bool {
+    budget().is_some_and(|b| len > b)
 }
 
 /// Cuts an answer to `budget` bytes at the last whole line, with a note on
@@ -434,8 +459,8 @@ pub(crate) fn budgeted(text: String, narrow: Narrow) -> String {
 ///
 /// The answer's `# since=` (or `%% since=`) line stays last, since the
 /// reader passes it back to be told nothing changed: the cut took it with
-/// the rest of the tail. The note says how this reader narrows: a URI has
-/// no offset to page with, and the note told a resource reader to use one.
+/// the rest of the tail. The note says how this reader narrows: a tool by
+/// its parameters, a URI by its suffixes and its filter.
 ///
 /// # Arguments
 ///
@@ -464,7 +489,9 @@ fn cut_to(text: String, budget: usize, narrow: Narrow) -> String {
     let total = body.lines().count();
     let how = match narrow {
         Narrow::Tool => "narrow with a filter or page with an offset",
-        Narrow::Uri => "narrow the URI, by its filter where the resource takes one",
+        Narrow::Uri => {
+            "page with !offset=<n> and !limit=<n> on the URI, or narrow it by its filter where the resource takes one"
+        }
     };
     format!(
         "{}{mark} cut at {cut} of {} bytes ({kept} of {total} lines) by {BUDGET_ENV}; {how}\n{tag}",
@@ -680,8 +707,8 @@ mod tests {
     }
 
     /// A cut keeps the answer's tag line last, so the reader can still pass
-    /// it back, and tells a resource reader to narrow the URI: a URI takes
-    /// no offset.
+    /// it back, and tells a resource reader to page the URI with its
+    /// suffixes or narrow it by its filter.
     ///
     /// # Panics
     ///
@@ -692,7 +719,7 @@ mod tests {
         let cut = super::cut_to(text, 30, Narrow::Uri);
         assert_eq!(
             cut,
-            "one\ntwo\n# cut at 8 of 31 bytes (2 of 3 lines) by BORER_BUDGET; narrow the URI, by its filter where the resource takes one\n# since=0000beef\n"
+            "one\ntwo\n# cut at 8 of 31 bytes (2 of 3 lines) by BORER_BUDGET; page with !offset=<n> and !limit=<n> on the URI, or narrow it by its filter where the resource takes one\n# since=0000beef\n"
         );
         let graph = "graph TD\n  a\n  b\n%% since=0000beef\n".to_owned();
         let cut = super::cut_to(graph, 30, Narrow::Tool);

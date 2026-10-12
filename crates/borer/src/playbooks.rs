@@ -154,7 +154,9 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 PE/ELF/Mach
 /// in [`WORKFLOW`].
 const RESOURCES_LEAD: &str = "Resources are read by URI through resources/read or {query}; a \
      template read without its argument (borer://emulate) gives its grammar and an \
-     example, and borer://help lists every one. By intent:";
+     example, and borer://help lists every one. A listing pages with !offset=<n> and \
+     !limit=<n> on its URI, and borer://session says what this session loaded, \
+     annotated and was answered. By intent:";
 
 /// The instructions after the resources: the live tools and the reload.
 const LIVE: &str = "Live: {live_attach}(process) opens the running program read-only and \
@@ -229,7 +231,7 @@ const INTENTS: &[(&str, &[&str])] = &[
         "code",
         &["function", "decompile", "disasm", "grep", "index"],
     ),
-    ("session", &["annotations", "packs", "script"]),
+    ("session", &["session", "annotations", "packs", "script"]),
 ];
 
 /// Every resource name the tables list, fixed and template, each once, in

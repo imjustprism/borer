@@ -15,6 +15,7 @@ use borer_engine::isa::Isa;
 use borer_engine::layout::{self, Layout};
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
+use borer_engine::table::Window;
 use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, script, search};
 
@@ -1730,7 +1731,18 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let (skip, limit) = cli_page(args, 4, 100, 500)?;
             print!(
                 "{}",
-                fieldrefs::field_refs_tsv(&s.program, &a, &s.overlay, offset, filter, skip, limit)
+                fieldrefs::field_refs_tsv(
+                    &s.program,
+                    &a,
+                    &s.overlay,
+                    offset,
+                    filter,
+                    Window {
+                        skip,
+                        limit,
+                        again: None
+                    }
+                )
             );
         }
         Query::Vslot => {
@@ -1779,8 +1791,19 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
             print!(
                 "{}",
-                borer::index::grep_tsv(&index, &a, &s.overlay, pattern, filter, skip, limit)
-                    .map_err(anyhow::Error::msg)?
+                borer::index::grep_tsv(
+                    &index,
+                    &a,
+                    &s.overlay,
+                    pattern,
+                    filter,
+                    Window {
+                        skip,
+                        limit,
+                        again: None
+                    }
+                )
+                .map_err(anyhow::Error::msg)?
             );
         }
         Query::Schema => {
@@ -1885,7 +1908,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let (filter, limit) = filter_limit(args, PAGE_ROWS)?;
             print!(
                 "{}",
-                messages::catalog_tsv(&s.program, &a, &s.overlay, filter, limit)
+                messages::catalog_tsv(&s.program, &a, &s.overlay, filter, Window::first(limit))
             );
         }
         Query::About => {
@@ -1928,7 +1951,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let (filter, limit) = filter_limit(args, PAGE_ROWS)?;
             print!(
                 "{}",
-                attributes::catalog_tsv(&s.program, &a, &s.overlay, filter, limit)
+                attributes::catalog_tsv(&s.program, &a, &s.overlay, filter, Window::first(limit))
             );
         }
         Query::Ports => {
