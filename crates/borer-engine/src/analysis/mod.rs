@@ -1204,7 +1204,10 @@ impl Analysis {
         phases.mark("analysis naming handlers");
         descriptors::qualify_registrations(&mut analysis);
         phases.mark("analysis descriptors");
-        returns::infer(program, &mut analysis);
+        match program.arch.isa() {
+            Some(Isa::A64) => a64::infer_returns(program, &mut analysis),
+            Some(Isa::X86 { .. }) | None => returns::infer(program, &mut analysis),
+        }
         phases.mark("analysis returns");
         vtables::infer(program, &mut analysis);
         phases.mark("analysis vtables");

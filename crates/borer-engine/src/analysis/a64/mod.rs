@@ -12,16 +12,19 @@
 //! through the import's slot, that never returns ends its path, and the
 //! stubs are named after their imports ([`stubs`]). Once the functions are
 //! final, the constants their registers hold give the data, table and slot
-//! references ([`refs`]). It shares the seeds, the fuel, the never-returning
-//! names, the naming pass, the jump-table checks and the reference index
-//! with the x86 walk, and reads instructions only through
-//! [`crate::isa::a64`].
+//! references ([`refs`]), and what the callers do after a call says which
+//! functions hand a result back ([`returns`]). It shares the seeds, the
+//! fuel, the never-returning names, the naming pass, the jump-table checks
+//! and the reference index with the x86 walk, and reads instructions only
+//! through [`crate::isa::a64`].
 
 mod discover;
 mod prologue;
 mod refs;
+mod returns;
 mod stubs;
 mod switch;
 
 pub(crate) use discover::discover;
 pub(crate) use refs::constant_in;
+pub(crate) use returns::infer as infer_returns;
