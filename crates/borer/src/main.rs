@@ -456,6 +456,35 @@ fn window(text: &str, filter: Option<&str>, offset: Option<u32>, limit: Option<u
     out
 }
 
+/// The lines a `decompile` answer puts under its first line: what of the
+/// text was checked against the binary, then a `// next:` line per resource
+/// the function's facts point at ([`render::next_steps`]).
+///
+/// The check is read first, so the decompilation it memoizes keeps the
+/// lifter's witness, and the text the answer shows reads the same cell.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `a` - Its analysis.
+/// * `o` - Names in force.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The lines without a final newline, or `None` when there are none.
+fn decompile_header(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<String> {
+    let mut lines: Vec<String> = borer_engine::analysis::decompile::checked_header(p, a, o, entry)
+        .into_iter()
+        .collect();
+    lines.extend(
+        render::next_steps(p, a, o, entry)
+            .iter()
+            .map(|step| format!("// next: {step}")),
+    );
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 impl BorerServer {
     /// The packs an analysis of a program runs with: the pack directories'
     /// packs that fit it, then the named ones.
@@ -1419,7 +1448,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "One-call triage of a function: shape, loops, jump tables, callers/callees by name, strings and data it references.",
+        description = "One-call triage of a function: shape, loops, jump tables, callers/callees by name, strings and data it references; `# next:` lines name what to read next.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2635,7 +2664,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not inside a discovered function,
     /// or the decompiler produces nothing.
     #[tool(
-        description = "Pseudo-C with locals local_N/arg_N, named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked.",
+        description = "Pseudo-C with locals local_N/arg_N, named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked, `// next:` lines what to read next.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2661,9 +2690,7 @@ impl BorerServer {
             let a = self.ensure_analysis()?;
             let entry = self.function_entry(p, &a, &address)?;
             let o = self.overlay();
-            // PERF: the check first, so the decompilation it memoizes keeps
-            // the lifter's witness and the text below reads the same cell.
-            let header = decompile::checked_header(p, &a, &o, entry);
+            let header = decompile_header(p, &a, &o, entry);
             let text = decompile::decompile_named(p, &a, &o, entry)
                 .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
             let text = match detail.unwrap_or_default() {
@@ -6123,6 +6150,63 @@ mod tests {
             })
             .expect("text");
         assert!(!plain.contains("checked vs binary"), "{plain}");
+    }
+
+    /// The `decompile` answer lists, under the line saying what was
+    /// checked, a `// next:` line per resource the function's facts point
+    /// at, and the summary ends with the same steps as `# next:` lines.
+    ///
+    /// # Panics
+    ///
+    /// When a step is missing from either answer.
+    #[test]
+    fn a_decompile_answer_names_the_next_reads() {
+        use super::{DecompileParams, FunctionParams, Parameters};
+        use borer_engine::program::{Arch, Program, Section};
+        let mut code = vec![
+            0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+            0x0f, 0x94, 0xc0, // ASM: sete al
+            0x0f, 0xb6, 0xc0, // ASM: movzx eax, al
+            0xc3, // ASM: ret
+        ];
+        code.resize(0x10, 0xcc);
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let step = "borer://solve/0x1000 (compares against 0x1337abcd: the a1 it accepts)";
+        let answer = server
+            .decompile(Parameters(DecompileParams {
+                address: "0x1000".to_owned(),
+                detail: None,
+                filter: None,
+                offset: None,
+                limit: Some(0),
+            }))
+            .expect("decompiles");
+        let lines: Vec<&str> = answer.lines().collect();
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|l| l.starts_with("// checked vs binary")),
+            "{answer}"
+        );
+        assert_eq!(
+            lines.get(2).copied(),
+            Some(format!("// next: {step}").as_str()),
+            "{answer}"
+        );
+        let summary = server
+            .function_summary(Parameters(FunctionParams {
+                address: "0x1000".to_owned(),
+            }))
+            .expect("summarizes");
+        assert!(summary.ends_with(&format!("# next: {step}\n")), "{summary}");
     }
 
     /// A batch the total output cap cuts short counts in its header the

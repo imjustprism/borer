@@ -942,6 +942,12 @@ fn a_dispatch_loop_is_found_with_its_handlers() {
     assert!(list.contains("      16 "), "{list}");
     let one = borer_engine::analysis::render::vm_dispatch_tsv(&p, &a, &o, "0x1000").unwrap();
     assert!(one.contains("16 handlers"), "{one}");
+    let next = borer_engine::analysis::render::next_steps(&p, &a, &o, 0x1000);
+    assert!(
+        next.first()
+            .is_some_and(|s| s.starts_with("borer://vm/0x1000 (a dispatch loop of 16 handlers")),
+        "{next:?}"
+    );
     assert!(
         one.contains("add"),
         "the handlers say nothing about what they do: {one}"

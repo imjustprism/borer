@@ -134,7 +134,8 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 PE/ELF/Mach
      functions, calls, references, disassembly and emulate/run, no decompile yet). Start: {load_binary}, then query borer://triage: what the file is, how it is \
      protected, what it can do, and the functions to read first ({load_binary} already \
      answers the summary {binary_info} repeats). Then {function_summary} triages a \
-     function and {decompile} gives pseudo-C; {find_function_by_string}, {strings}, \
+     function and {decompile} gives pseudo-C, both ending with the resources its facts \
+     point at next (`# next: borer://solve/<addr>`); {find_function_by_string}, {strings}, \
      {symbols}, {search}, {find_crypto_constants} and {xrefs} locate code; {disassemble_function}, {cfg} and \
      {callgraph} go deeper; {read} and {hexdump} read data. Every `address` accepts \
      0x-hex (always the address), a name (function, import, overlay name), or bare \
@@ -411,6 +412,41 @@ mod tests {
             assert!(listed.contains(name), "{name} is grouped but not listed");
         }
         assert!(!text.contains("other: "), "{text}");
+    }
+
+    /// Every template is reachable from a `# next:` hint, a playbook or the
+    /// instructions, so no template is one an agent can only find by
+    /// listing resources; and every resource a hint names is a template.
+    ///
+    /// # Panics
+    ///
+    /// When a template is reachable from nothing, or a hint names a
+    /// resource the tables lack.
+    #[test]
+    fn every_template_is_reachable_from_a_hint_a_playbook_or_the_instructions() {
+        let hinted = borer_engine::analysis::render::NEXT_RESOURCES;
+        let templates: Vec<&str> = crate::RESOURCE_TEMPLATES
+            .iter()
+            .map(|t| crate::resource_name(t.0))
+            .collect();
+        for name in hinted {
+            assert!(templates.contains(&name), "a hint names borer://{name}");
+        }
+        let text = instructions(&tools(), &BorerServer::prompt_router().list_all());
+        let words: Vec<&str> = text
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .collect();
+        let cited: Vec<String> = PLAYBOOKS
+            .iter()
+            .flat_map(|&(_, playbook, _)| playbook.split("borer://").skip(1))
+            .map(|rest| rest.chars().take_while(char::is_ascii_lowercase).collect())
+            .collect();
+        for name in &templates {
+            assert!(
+                hinted.contains(name) || cited.iter().any(|c| c == name) || words.contains(name),
+                "borer://{name} is reachable from nothing"
+            );
+        }
     }
 
     /// A playbook cites only tools and resources the server has.

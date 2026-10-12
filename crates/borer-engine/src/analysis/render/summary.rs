@@ -160,6 +160,8 @@ fn capped(items: &[String], sep: &str) -> String {
 /// function whose code is scattered across a span far larger than the code
 /// itself is reported as control-flow obfuscated (a VM, a flattened
 /// dispatcher or a junk-jump chain), since ordinary code is contiguous.
+/// It ends with a `# next:` line per resource its facts point at
+/// ([`next_steps`]).
 ///
 /// # Arguments
 ///
@@ -382,8 +384,12 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
         .comments
         .get(&f.entry)
         .map_or(String::new(), |c| format!("comment:  {c}\n"));
+    let next: String = next_steps(p, a, o, entry)
+        .iter()
+        .map(|step| format!("# next: {step}\n"))
+        .collect();
     Some(format!(
-        "name:     {}\nentry:    {:#x}\nrange:    {:#x}..{:#x} ({} bytes)\n{comment}{declared}{hints}{class}{source}{returns}{throws}{scattered}{clones}{effects}{asserts}{passed}{wire}shape:    {} blocks, {} instrs{}{}\ncallers:  {} [{}]\ncallees:  {} [{}]\n{virt}strings:  {}\ndata:     {}\n",
+        "name:     {}\nentry:    {:#x}\nrange:    {:#x}..{:#x} ({} bytes)\n{comment}{declared}{hints}{class}{source}{returns}{throws}{scattered}{clones}{effects}{asserts}{passed}{wire}shape:    {} blocks, {} instrs{}{}\ncallers:  {} [{}]\ncallees:  {} [{}]\n{virt}strings:  {}\ndata:     {}\n{next}",
         name_of(a, o, f.entry),
         f.entry,
         f.start,

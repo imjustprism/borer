@@ -30,6 +30,7 @@ mod iocs;
 mod layout;
 mod lsda;
 mod macho;
+mod next;
 mod protection;
 mod protos;
 mod regression;

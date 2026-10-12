@@ -79,38 +79,11 @@ pub fn flattening_tsv(
     } else {
         Some(locate(a, o, filter).ok_or_else(|| unresolved(filter))?)
     };
-    let mut found: Vec<Dispatcher> = Vec::new();
-    for (site, cases) in &a.jump_tables {
-        if cases.len() < FLAT_MIN_CASES {
-            continue;
-        }
-        let Some(f) = a.function_at(*site) else {
-            continue;
-        };
-        let Some(head) = f
-            .blocks
-            .iter()
-            .filter(|b| b.start <= *site && *site < b.end)
-            .map(|b| b.start)
-            .next()
-        else {
-            continue;
-        };
-        let back = cases
-            .iter()
-            .filter(|t| **t != head && reaches(f, **t, head))
-            .count();
-        if back * 2 <= cases.len() {
-            continue;
-        }
-        found.push(Dispatcher {
-            site: *site,
-            head,
-            entry: f.entry,
-            cases: cases.len(),
-            back,
-        });
-    }
+    let mut found: Vec<Dispatcher> = a
+        .jump_tables
+        .iter()
+        .filter_map(|(site, cases)| flattened(a, *site, cases))
+        .collect();
     found.sort_by(|l, r| r.cases.cmp(&l.cases).then(l.site.cmp(&r.site)));
     let Some(target) = wanted else {
         if found.is_empty() {
@@ -222,6 +195,41 @@ pub fn flattening_tsv(
     Ok(out)
 }
 
+/// Judges one resolved jump table as [`flattening_tsv`] does: a switch of
+/// at least [`FLAT_MIN_CASES`] cases most of which come back to it.
+///
+/// # Arguments
+///
+/// * `a` - The analysis: functions and blocks.
+/// * `site` - The indirect jump through the table.
+/// * `cases` - The table's targets.
+///
+/// # Returns
+///
+/// The dispatcher, or `None` when the switch is not one.
+pub(super) fn flattened(a: &Analysis, site: u64, cases: &[u64]) -> Option<Dispatcher> {
+    if cases.len() < FLAT_MIN_CASES {
+        return None;
+    }
+    let f = a.function_at(site)?;
+    let head = f
+        .blocks
+        .iter()
+        .find(|b| b.start <= site && site < b.end)?
+        .start;
+    let back = cases
+        .iter()
+        .filter(|t| **t != head && reaches(f, **t, head))
+        .count();
+    (back * 2 > cases.len()).then_some(Dispatcher {
+        site,
+        head,
+        entry: f.entry,
+        cases: cases.len(),
+        back,
+    })
+}
+
 /// Runs a flattened function and records the cases its dispatch took.
 ///
 /// Flattening destroys the block order and keeps the program counter in a
@@ -323,43 +331,62 @@ pub(super) struct DispatchLoop {
 ///
 /// The loops, the most handlers first, then by site.
 pub(super) fn dispatch_loops(p: &Program, a: &Analysis) -> Vec<DispatchLoop> {
+    let mut found: Vec<DispatchLoop> = a
+        .functions
+        .iter()
+        .flat_map(|f| dispatch_loops_in(p, a, f))
+        .collect();
+    found.sort_by_key(|d| (std::cmp::Reverse(d.handlers.len()), d.site));
+    found
+}
+
+/// Finds the dispatch loops of one function, as [`dispatch_loops`] judges
+/// them, in block order.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for reading a dispatch's block.
+/// * `a` - The analysis: blocks and resolved jump tables.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// Its loops, none for an ordinary function.
+pub(super) fn dispatch_loops_in(p: &Program, a: &Analysis, f: &Function) -> Vec<DispatchLoop> {
     let bits = p.arch.bitness();
     let mut found: Vec<DispatchLoop> = Vec::new();
-    for f in &a.functions {
-        for b in &f.blocks {
-            if b.term != BlockTerm::Indirect {
-                continue;
-            }
-            let Some((site, targets)) = a.jump_tables.range(b.start..b.end).next() else {
-                continue;
-            };
-            let mut seen: BTreeSet<u64> = BTreeSet::new();
-            let handlers: Vec<u64> = targets
-                .iter()
-                .copied()
-                .filter(|t| seen.insert(*t))
-                .collect();
-            if handlers.len() < VM_MIN_FETCHED {
-                continue;
-            }
-            let back = handlers.iter().filter(|t| reaches(f, **t, b.start)).count();
-            if back * 2 < handlers.len() {
-                continue;
-            }
-            if handlers.len() < VM_MIN_HANDLERS
-                && !bits.is_some_and(|bits| fetches_index_from_memory(p, f, b, bits))
-            {
-                continue;
-            }
-            found.push(DispatchLoop {
-                site: *site,
-                entry: f.entry,
-                handlers,
-                back,
-            });
+    for b in &f.blocks {
+        if b.term != BlockTerm::Indirect {
+            continue;
         }
+        let Some((site, targets)) = a.jump_tables.range(b.start..b.end).next() else {
+            continue;
+        };
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let handlers: Vec<u64> = targets
+            .iter()
+            .copied()
+            .filter(|t| seen.insert(*t))
+            .collect();
+        if handlers.len() < VM_MIN_FETCHED {
+            continue;
+        }
+        let back = handlers.iter().filter(|t| reaches(f, **t, b.start)).count();
+        if back * 2 < handlers.len() {
+            continue;
+        }
+        if handlers.len() < VM_MIN_HANDLERS
+            && !bits.is_some_and(|bits| fetches_index_from_memory(p, f, b, bits))
+        {
+            continue;
+        }
+        found.push(DispatchLoop {
+            site: *site,
+            entry: f.entry,
+            handlers,
+            back,
+        });
     }
-    found.sort_by_key(|d| (std::cmp::Reverse(d.handlers.len()), d.site));
     found
 }
 

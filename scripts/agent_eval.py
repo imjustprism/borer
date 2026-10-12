@@ -126,6 +126,12 @@ TASKS = [
         "crackme::check_serial(",
     ),
     (
+        "next_hint",
+        "which resource the serial check's summary says to read next",
+        [LOAD, ("function_summary", {"address": "crackme::check_serial"})],
+        "# next: borer://solve/",
+    ),
+    (
         "raw_code",
         "what headerless code loaded at a stated base returns",
         [
