@@ -4,3 +4,4 @@ mod cli;
 mod contract;
 mod project;
 mod reload;
+mod resources;

@@ -31,7 +31,7 @@ fn put(b: &mut [u8], at: usize, bytes: &[u8]) {
 /// # Panics
 ///
 /// When a header field falls outside the header page.
-fn tiny_pe() -> Vec<u8> {
+pub(crate) fn tiny_pe() -> Vec<u8> {
     /// The PE signature's file offset.
     const PE_AT: usize = 0x80;
     /// The optional header's file offset, after the signature and COFF header.

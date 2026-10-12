@@ -1,8 +1,10 @@
-//! The handlers behind the `borer://` resource templates.
+//! The handlers behind the `borer://` resource templates, and the help
+//! that says how to read each one.
 //!
 //! One method per template, each answering in the same table conventions as
 //! the tools; `read_resource` in `main.rs` parses the URI and dispatches here.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -10,7 +12,10 @@ use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::program::{Feature, Program};
 use rmcp::ErrorData;
 
-use super::{BorerServer, err_params, parse_field_offset};
+use super::{
+    BorerServer, RESOURCE_TEMPLATES, RESOURCES, err_not_found, err_params, parse_field_offset,
+    resource_name,
+};
 
 /// Most rows one listing keyed by a vtable slot returns.
 const SLOT_PAGE: usize = 2000;
@@ -1312,6 +1317,200 @@ fn enum_row(
         "{function} @ {entry:#x}: enum{name}: {}\n",
         members.join(", ")
     )
+}
+
+// ---- help ----
+
+/// Most resources the refusal of an unknown URI names.
+const NEAREST_RESOURCES: usize = 3;
+
+/// Longest description `borer://help` gives a resource, in characters.
+const SUMMARY_MAX: usize = 72;
+
+/// Where the refusal of an unknown URI sends the reader for the rest.
+const EVERY_RESOURCE: &str = "borer://help lists every resource";
+
+impl BorerServer {
+    /// Answers how to read one resource.
+    ///
+    /// The answer is its URI and what it answers, and for a template an
+    /// example built from the loaded binary ([`example`]). A template read
+    /// without its argument answers this, so the grammar a description
+    /// holds reaches an agent whose host only has the `query` tool.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The resource's name (`emulate`).
+    ///
+    /// # Errors
+    ///
+    /// Resource-not-found for a name no resource has, naming the nearest.
+    pub(crate) fn help_text(&self, name: &str) -> Result<String, ErrorData> {
+        let program = self.loaded();
+        let mut out = String::new();
+        for &(uri, what) in RESOURCES.iter().filter(|r| resource_name(r.0) == name) {
+            let _ = writeln!(out, "# {uri}\n{what}");
+        }
+        for &(uri, what, shown) in RESOURCE_TEMPLATES
+            .iter()
+            .filter(|t| resource_name(t.0) == name)
+        {
+            let _ = writeln!(
+                out,
+                "# {uri}\n{what}\n# example: {}",
+                example(shown, program.as_deref())
+            );
+        }
+        if out.is_empty() {
+            return Err(unknown_name(&format!("borer://help/{name}"), name));
+        }
+        Ok(out)
+    }
+}
+
+/// Fills a template's example from the loaded binary.
+///
+/// `{entry}` becomes its entry point (else its first section's address)
+/// and `{path}` its file, which a comparison against itself reads.
+///
+/// # Arguments
+///
+/// * `shown` - The example as [`RESOURCE_TEMPLATES`] writes it.
+/// * `program` - The loaded binary; `None` leaves `<entry>` and `<path>`
+///   for the reader to fill.
+fn example(shown: &str, program: Option<&Program>) -> String {
+    let entry = program
+        .and_then(|p| p.entry.or_else(|| p.sections.first().map(|s| s.va)))
+        .map_or_else(|| "<entry>".to_owned(), |va| format!("{va:#x}"));
+    let path = program
+        .map(|p| p.path.display().to_string().replace('\\', "/"))
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "<path>".to_owned());
+    shown.replace("{entry}", &entry).replace("{path}", &path)
+}
+
+/// Lists every resource with what it answers, one line each.
+///
+/// This is the `borer://help` answer, the whole list for an agent whose
+/// host lists no resources. Each description is cut to its first sentence and [`SUMMARY_MAX`]
+/// characters; `borer://help/<name>` gives the whole of one.
+pub(crate) fn help_index() -> String {
+    let rows: Vec<(&str, &str)> = RESOURCES
+        .iter()
+        .copied()
+        .chain(RESOURCE_TEMPLATES.iter().map(|&(uri, what, _)| (uri, what)))
+        .collect();
+    let mut out = format!(
+        "# {} resources ({} fixed, {} templates); a template read without its argument, or borer://help/<name>, gives its grammar and an example\n",
+        rows.len(),
+        RESOURCES.len(),
+        RESOURCE_TEMPLATES.len()
+    );
+    for (uri, what) in rows {
+        let _ = writeln!(out, "{uri}\t{}", summary(what));
+    }
+    out
+}
+
+/// The first sentence of a description, cut at a word to at most
+/// [`SUMMARY_MAX`] characters with `...` where it was cut.
+///
+/// # Arguments
+///
+/// * `description` - A description from the resource tables.
+fn summary(description: &str) -> String {
+    let end = [". ", "; "]
+        .iter()
+        .filter_map(|sep| description.find(sep))
+        .min()
+        .unwrap_or(description.len());
+    let sentence = description.get(..end).unwrap_or(description);
+    if sentence.chars().count() <= SUMMARY_MAX {
+        return sentence.to_owned();
+    }
+    let mut cut = String::new();
+    for word in sentence.split(' ') {
+        if cut.chars().count() + word.chars().count() + 1 > SUMMARY_MAX {
+            break;
+        }
+        if !cut.is_empty() {
+            cut.push(' ');
+        }
+        cut.push_str(word);
+    }
+    cut.push_str("...");
+    cut
+}
+
+/// Refuses a URI no resource answers, with the few resources nearest it.
+///
+/// The refusal says where the rest are listed; a fixed resource given an
+/// argument is told it takes none. It listed every resource, about 2 KB a
+/// miss, and taught names without saying which was meant.
+///
+/// # Arguments
+///
+/// * `uri` - The URI as asked, its suffixes taken off.
+///
+/// # Returns
+///
+/// A resource-not-found error.
+pub(crate) fn unknown_resource(uri: &str) -> ErrorData {
+    let Some(path) = uri.strip_prefix("borer://") else {
+        return err_not_found(format!(
+            "unknown resource {}; a resource's URI starts with borer://; {EVERY_RESOURCE}",
+            borer_engine::text::one_line(uri)
+        ));
+    };
+    let (name, argument) = path
+        .split_once('/')
+        .map_or((path, false), |(n, _)| (n, true));
+    let template = RESOURCE_TEMPLATES
+        .iter()
+        .any(|t| resource_name(t.0) == name);
+    if argument
+        && !template
+        && let Some(&(fixed, _)) = RESOURCES.iter().find(|r| resource_name(r.0) == name)
+    {
+        return err_not_found(format!("{fixed} takes no argument; read {fixed}"));
+    }
+    unknown_name(uri, name)
+}
+
+/// Refuses a resource name nothing lists, with the nearest names' URIs.
+///
+/// # Arguments
+///
+/// * `uri` - The URI as asked, for the message.
+/// * `name` - The name in it that nothing lists.
+///
+/// # Returns
+///
+/// A resource-not-found error.
+fn unknown_name(uri: &str, name: &str) -> ErrorData {
+    let names = RESOURCES
+        .iter()
+        .map(|r| resource_name(r.0))
+        .chain(RESOURCE_TEMPLATES.iter().map(|t| resource_name(t.0)));
+    let near: Vec<&str> = borer_engine::text::nearest(name, names, NEAREST_RESOURCES)
+        .into_iter()
+        .filter_map(|n| {
+            RESOURCES
+                .iter()
+                .map(|r| r.0)
+                .chain(RESOURCE_TEMPLATES.iter().map(|t| t.0))
+                .find(|uri| resource_name(uri) == n)
+        })
+        .collect();
+    let near = if near.is_empty() {
+        "no resource is near it".to_owned()
+    } else {
+        format!("nearest: {}", near.join(", "))
+    };
+    err_not_found(format!(
+        "unknown resource {}; {near}; {EVERY_RESOURCE}",
+        borer_engine::text::one_line(uri)
+    ))
 }
 
 #[cfg(test)]

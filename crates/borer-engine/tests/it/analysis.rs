@@ -2557,6 +2557,37 @@ fn resolve_names_and_addresses() {
     assert!(resolve(&p, &a, &o, "no_such_thing").is_err());
 }
 
+/// A name nothing matches is answered with the names nearest it when an
+/// agent asked (`resolve_suggesting`).
+///
+/// A near spelling finds the name, and a part of a thunk's name finds it
+/// without its DLL; plain `resolve` stays without the search, and a word
+/// nothing resembles gets no list.
+///
+/// # Panics
+///
+/// When a miss names the wrong names, or a hit or a plain miss changed.
+#[test]
+fn a_missed_name_suggests_the_nearest_names() {
+    use borer_engine::analysis::{resolve, resolve_suggesting};
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names.insert(0x1000, "check_serial".to_owned());
+    let miss = resolve_suggesting(&p, &a, &o, "chk_serial").unwrap_err();
+    assert!(
+        miss.starts_with("'chk_serial' is neither an address nor a known name; nearest: check_serial; try functions(filter=...)"),
+        "{miss}"
+    );
+    let part = resolve_suggesting(&p, &a, &o, "ReportAssert").unwrap_err();
+    assert!(part.contains("; nearest: ReportAssertFailure; "), "{part}");
+    let plain = resolve(&p, &a, &o, "chk_serial").unwrap_err();
+    assert!(!plain.contains("nearest"), "{plain}");
+    let far = resolve_suggesting(&p, &a, &o, "zzzzqqqq").unwrap_err();
+    assert!(!far.contains("nearest"), "{far}");
+    assert_eq!(resolve_suggesting(&p, &a, &o, "check_serial"), Ok(0x1000));
+}
+
 /// Asking for the function at an import's slot is answered with what the
 /// slot is: the import's code lives in another module.
 ///

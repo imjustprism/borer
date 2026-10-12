@@ -652,14 +652,20 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When the text is neither an address nor a known name.
+    /// When the text is neither an address nor a known name, naming the
+    /// names nearest it ([`borer_engine::analysis::resolve_suggesting`]).
     fn addr(&self, p: &Program, text: &str) -> Result<u64, String> {
         if borer_engine::analysis::hex_prefixed(text)
             && let Some(va) = parse_addr(text)
         {
             return Ok(va);
         }
-        resolve(p, &self.analysis_or_empty(), &self.overlay(), text)
+        borer_engine::analysis::resolve_suggesting(
+            p,
+            &self.analysis_or_empty(),
+            &self.overlay(),
+            text,
+        )
     }
 
     /// Resolves an argument to the entry of the discovered function containing it.
@@ -3214,9 +3220,9 @@ impl BorerServer {
     /// # Errors
     ///
     /// As `resources/read`: resource-not-found for an unknown URI, naming
-    /// every resource there is; otherwise the resource's own error.
+    /// the resources nearest it; otherwise the resource's own error.
     #[tool(
-        description = "Read a borer:// resource as resources/read does (same text, errors and memory), for hosts that cannot read resources, e.g. borer://grep/CreateFileA or borer://scenarios/0x401000/a1=0..8; an unknown URI's error lists them all.",
+        description = "Read a borer:// resource as resources/read does (same text, errors and memory), for hosts that cannot read resources, e.g. borer://triage or borer://scenarios/0x401000/a1=0..8; a template read bare (borer://emulate) says its grammar; borer://help lists all.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -3993,7 +3999,7 @@ impl ServerHandler for BorerServer {
         Ok(ListResourceTemplatesResult::with_all_items(
             RESOURCE_TEMPLATES
                 .iter()
-                .map(|&(uri, description)| {
+                .map(|&(uri, description, _)| {
                     ResourceTemplate::new(uri, resource_name(uri))
                         .with_description(description)
                         .with_mime_type(TEXT_PLAIN)
@@ -4121,8 +4127,8 @@ impl BorerServer {
     /// answer memory keyed by the URI. The argument is percent-decoded: a
     /// client is free to escape the reserved characters an argument uses,
     /// and an experiment spec is full of them. An unknown URI is refused
-    /// with every resource there is, which is how an agent whose host lists
-    /// no resources finds them.
+    /// with the few resources nearest it, and `borer://help` lists every
+    /// one, which is how an agent whose host lists no resources finds them.
     ///
     /// # Arguments
     ///
@@ -4170,25 +4176,16 @@ impl BorerServer {
     ///
     /// * `uri` - The URI, suffixes already taken off.
     ///
+    /// A template named without its argument (`borer://emulate`) answers
+    /// how to read it ([`BorerServer::help_text`]).
+    ///
     /// # Errors
     ///
-    /// Resource-not-found for an unknown URI, naming every resource there
-    /// is; otherwise the handler's error.
+    /// Resource-not-found for an unknown URI, naming the resources nearest
+    /// it ([`resources::unknown_resource`]); otherwise the handler's error.
     fn resource_text(&self, uri: &str) -> Result<String, ErrorData> {
-        let not_found = || {
-            err_not_found(format!(
-                "unknown resource {}; the resources are {}",
-                borer_engine::text::one_line(uri),
-                RESOURCES
-                    .iter()
-                    .chain(RESOURCE_TEMPLATES)
-                    .map(|&(known, _)| known)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-        };
         let Some(path) = uri.strip_prefix("borer://") else {
-            return Err(not_found());
+            return Err(resources::unknown_resource(uri));
         };
         let (kind, arg) = match path.split_once('/') {
             Some((k, a)) => (k, Some(percent_decode(a))),
@@ -4282,7 +4279,16 @@ impl BorerServer {
                     bytes: None,
                 }))?
             }
-            _ => return Err(not_found()),
+            ("help", None) => resources::help_index(),
+            ("help", Some(name)) => self.help_text(&name)?,
+            (name, None)
+                if RESOURCE_TEMPLATES
+                    .iter()
+                    .any(|t| resource_name(t.0) == name) =>
+            {
+                self.help_text(name)?
+            }
+            _ => return Err(resources::unknown_resource(uri)),
         };
         Ok(text)
     }
@@ -4306,6 +4312,10 @@ const TEXT_PLAIN: &str = "text/plain";
 /// The fixed resources: URI and description. Each is listed under the name
 /// its URI's path spells ([`resource_name`]).
 const RESOURCES: &[(&str, &str)] = &[
+    (
+        "borer://help",
+        "Every resource with what it answers, one line each; a template read without its argument (borer://emulate), or borer://help/<name>, gives its grammar and an example",
+    ),
     (
         "borer://info",
         "Summary of the loaded program (binary_info)",
@@ -4412,196 +4422,247 @@ const RESOURCES: &[(&str, &str)] = &[
     ),
 ];
 
-/// The resource templates: URI template and description. Each is listed
-/// under the name its first path segment spells ([`resource_name`]).
-const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
+/// The resource templates: URI template, description, and an example.
+///
+/// The example is read with `{entry}` and `{path}` filled in from the
+/// loaded binary ([`resources::example`]). Each is listed under the name
+/// its first path segment spells ([`resource_name`]).
+const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
+    (
+        "borer://help/{name}",
+        "How to read one resource: its URI, what it answers and, for a template, an example built from the loaded binary",
+        "borer://help/emulate",
+    ),
     (
         "borer://stackstrings/{filter}",
         "Stack strings whose text contains the filter",
+        "borer://stackstrings/http",
     ),
     (
         "borer://flat/{address}",
         "Cases of one flattening dispatcher, in table order, each with where it ends. The table order is not the order they run",
+        "borer://flat/{entry}",
     ),
     (
         "borer://solve/{spec}",
         "Find an argument value that makes a check answer differently: spec is <address>[,aN] (the decompiler's aN, a1 by default). Every constant the function compares against is tried and the answers grouped, so a value standing apart is the one it wants, with the comparison it came from",
+        "borer://solve/{entry},a1",
     ),
     (
         "borer://why/{address}",
         "What is at an address and how borer knows: where its name came from (the compiler's debug information, a symbol, inferred from code, or nothing), why the function was discovered, what refers to it, and any value recovered by running the code that builds it",
+        "borer://why/{entry}",
     ),
     (
         "borer://layout/{spec}",
         "Propose a structure from what a function does through one pointer: spec is <address>[,<register>] (default rcx, the first argument). Each row is a field with the width of the access and what it is passed to",
+        "borer://layout/{entry},rcx",
     ),
     (
         "borer://taint/{spec}",
         "Follow a value forward through its function: spec is <address>[,<register>] (default rax, where a call leaves its result). Reports the instructions that carry it, the calls it is passed to and as which argument, the memory it is stored into, and where it still is at the end",
+        "borer://taint/{entry},rax",
     ),
     (
         "borer://emulate/{address}",
         "Run code and read the result. The address carries an experiment: comma-separated reg=val, aN=val (the argument the decompiler names aN; a1 is the first), w<addr>=<hexbytes> (set data or patch code), stop=<addr>, steps=<n> (at most 20000000), trace=<n> (what each of the last n instructions changed; a small steps= watches the start instead), origin=<v> (the instruction that first put the value v in a register or in memory), profile=<n> (the n most-run addresses and most-read pages, where the steps went; at most 64), dump=<addr>:<len> (at most 4096 bytes, ?? where nothing is mapped). Reports final registers, the call trace, decoded text and each dump.",
+        "borer://emulate/{entry},a1=5,steps=10000",
     ),
     (
         "borer://devirt/{address}",
         "Run a virtualized function and recover the sequence of virtual instructions it executes. The address carries comma-separated settings: budget=<n> raises the step cap (2000000 by default, at most 200000000) for a protector whose dispatch starts after a long bootstrap; strict faults on the first read of an import or of memory the loader would fill, where by default it reads zero and goes on; reg=<value> presets a register, such as the VM's context pointer the entry does not build",
+        "borer://devirt/{entry},budget=4000000",
     ),
     (
         "borer://unpack/{address}",
         "Run a packer's bootstrap and report the code it decrypts into memory, with the original entry point. Append ,budget=N to raise the step cap toward a fuller unpack",
+        "borer://unpack/{entry}",
     ),
     (
         "borer://hidden/{filter}",
         "Run-time generated strings whose text or generator matches {filter}",
+        "borer://hidden/http",
     ),
     (
         "borer://oracle/{address}",
         "Run the function at {address} over a probe string in every argument shape and report what it does with it",
+        "borer://oracle/{entry}",
     ),
     (
         "borer://run/{spec}",
         "Call a function on inputs typed by its recovered signature and check its decompiled text on them: <function>[,steps=N]/<input>[;<input>...], each input its arguments in order: 5, -1, \"text\", hex:0102 or out:16 (a zeroed buffer). A row per input: the return value, the stop, the steps, the bytes each buffer holds after, and whether the text run as C agrees, differs (at a line) or is unchecked (at most 64 inputs, 1000000 steps each by default)",
+        "borer://run/{entry}/5;-1",
     ),
     (
         "borer://diff/{path}",
         "Compare the loaded binary against another version at {path} and report which functions changed, were added or removed",
+        "borer://diff/{path}",
     ),
     (
         "borer://difffn/{function}/{path}",
         "Show how one function changed between the loaded binary and another version at {path}, as a diff of the decompilations",
+        "borer://difffn/{entry}/{path}",
     ),
     (
         "borer://carry/{path}",
         "Carry this project's names to another build of the same program: each name with its new address and how the function was paired, by identical body or by shape. An update moves every address, and the fingerprints do not move",
+        "borer://carry/{path}",
     ),
     (
         "borer://migrate/{function}/{path}",
         "Migrate the field offsets a function reads from the loaded build to the version at {path}: which offsets are unchanged, removed, added, or moved",
+        "borer://migrate/{entry}/{path}",
     ),
     (
         "borer://vm/{address}",
         "The handlers of one dispatch loop, each with what it does",
+        "borer://vm/{entry}",
     ),
     (
         "borer://asserts/{filter}",
         "Asserted fields whose name or class contains the filter",
+        "borer://asserts/count",
     ),
     (
         "borer://sources/{filter}",
         "Source files whose path contains the filter, with their function counts",
+        "borer://sources/net",
     ),
     (
         "borer://classes/{filter}",
         "Registered classes whose name or code contains the filter",
+        "borer://classes/player",
     ),
     (
         "borer://messages/{filter}",
         "Classes with a registered wire id whose name contains the filter, each with its named fields and the handlers testing for the id (200 a page)",
+        "borer://messages/move",
     ),
     (
         "borer://map/{namespace}",
         "One namespace's classes, each with its role, parent, methods and instance (5000 rows at most)",
+        "borer://map/net",
     ),
     (
         "borer://ports/{filter}",
         "The messages ports accept and their handlers, for the components or messages whose name contains the filter (5000 rows at most)",
+        "borer://ports/move",
     ),
     (
         "borer://attrs/{filter}",
         "Registered attributes whose name or code contains the filter (200 a page); one exact match lists every function reading or writing it with the definition global",
+        "borer://attrs/health",
     ),
     (
         "borer://exportpack/{spec}",
         "The session's names as a pack that names the same functions in another build by their first bytes: <name>, or <name>,all to add the names borer recovered",
+        "borer://exportpack/mine,all",
     ),
     (
         "borer://scenario/{spec}",
         "A function decompiled under assumptions, <function>/<a2=5,a3=0>: branches and switches on them fold, only the code that can run is written, and the first line counts the blocks cut",
+        "borer://scenario/{entry}/a1=5",
     ),
     (
         "borer://scenarios/{spec}",
         "A dispatcher exploded, <function>/<a2=0..32> or <function>/<a2=1|5>: a scenario per value, the values that behave alike grouped, each row with its blocks kept, calls and returns",
+        "borer://scenarios/{entry}/a1=0..8",
     ),
     (
         "borer://script/{path}",
         "Runs a Rhai script file against the loaded program in borer's sandbox: what it printed, and the names and comments it proposes (set_name applies one)",
+        "borer://script/scan.rhai",
     ),
     (
         "borer://singletons/{filter}",
         "Singletons whose class name contains the filter",
+        "borer://singletons/manager",
     ),
     (
         "borer://function/{address}",
         "function_summary at an address or name",
+        "borer://function/{entry}",
     ),
     (
         "borer://decompile/{address}",
         "Pseudo-C of the function at an address or name",
+        "borer://decompile/{entry}",
     ),
     (
         "borer://disasm/{address}",
         "Disassembly of the function at an address or name",
+        "borer://disasm/{entry}",
     ),
     (
         "borer://fields/{address}",
         "Field offsets the function at an address or name dereferences, by (base, offset)",
+        "borer://fields/{entry}",
     ),
     (
         "borer://fieldrefs/{offset}",
         "Every instruction program-wide that reads, writes or takes the address of \
                      [reg+offset], with its function; `offset[,name-filter]`, 500 rows at most",
+        "borer://fieldrefs/0x10",
     ),
     (
         "borer://vslot/{slot}",
         "Every recovered class whose virtual at a zero-based vtable slot returns a \
                      constant (a wire id, a type tag), by value; `slot[,class-filter]`",
+        "borer://vslot/3",
     ),
     (
         "borer://schema/{function}",
         "The record a deserializer reads off its stream (fields, widths, nesting, \
                      repeats), for a function by address or name, or the reading virtual of a class",
+        "borer://schema/{entry}",
     ),
     (
         "borer://schemas/{slot}",
         "Every class with a constant at a zero-based vtable slot and the record its \
                      reading virtual decodes, one line each: a protocol as a table; `slot[,class-filter]`",
+        "borer://schemas/3",
     ),
     (
         "borer://encode/{function}",
         "What a serializer writes onto its stream (fields in wire order, widths, the \
                      object field each came from, helpers followed into the members they write), \
                      for a function by address or name, or the writing virtual of a class",
+        "borer://encode/{entry}",
     ),
     (
         "borer://hooks/{slot}",
         "Every class with a constant at a zero-based vtable slot with the addresses \
                      a binding hooks: its encoder, its decoder, its handler and each call site \
                      the client sends it from; `slot[,class-filter]`",
+        "borer://hooks/3",
     ),
     (
         "borer://protocol/{slot}",
         "Every class with a constant at a zero-based vtable slot on one row with \
                      who constructs it, the handler receiving it, what it writes onto the wire \
                      and what it reads back: the whole protocol as one table; `slot[,class-filter]`",
+        "borer://protocol/3",
     ),
     (
         "borer://senders/{slot}",
         "Every class with a constant at a zero-based vtable slot and the functions \
                      calling its factory or constructors: who sends each command, as a table; \
                      `slot[,class-filter]`",
+        "borer://senders/3",
     ),
     (
         "borer://encodes/{slot}",
         "Every class with a constant at a zero-based vtable slot and what its writing \
                      virtual puts on the wire, one line each: the outbound protocol as a table; \
                      `slot[,class-filter]`",
+        "borer://encodes/3",
     ),
     (
         "borer://shape/{function}",
         "Every function running the same code as the one at an address or name over \
                      other operands, with the strings and data addresses that differ: a \
                      registration family as a table",
+        "borer://shape/{entry}",
     ),
     (
         "borer://anchors/{path}",
@@ -4609,12 +4670,14 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
                      `vconst <slot> <class> <value>`, `function <name> <rva>`, `encode <class> \
                      <layout>`, `decode <class> <layout>` lines) derived again from the loaded \
                      binary and reported held, moved, changed or gone",
+        "borer://anchors/client.anchors",
     ),
     (
         "borer://changes/{path}",
         "What changed since a snapshot file of an earlier build (written by the CLI's \
                      `borer snapshot <binary> <file>`): commands, packet layouts, attributes, \
                      message routes and ids added, removed or changed, by stable name",
+        "borer://changes/before.snapshot",
     ),
     (
         "borer://about/{name}",
@@ -4622,6 +4685,7 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
                      (with each user reading or writing it), the class (role, parent, instance, \
                      virtuals, the messages it accepts or the components handling it, the wire \
                      for a command), and the function summary; start here with any name",
+        "borer://about/{entry}",
     ),
     (
         "borer://grep/{text}",
@@ -4630,6 +4694,7 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
                      signature and the if/else/loop/switch/case lines enclosing them \
                      (numbered ^N); decompiles \
                      everything once into the index on first use; 200 matching lines at most",
+        "borer://grep/memcpy",
     ),
 ];
 
@@ -4641,10 +4706,10 @@ const RESOURCE_TEMPLATES: &[(&str, &str)] = &[
 fn template_names() -> String {
     let names: Vec<&str> = RESOURCE_TEMPLATES
         .iter()
-        .map(|&(uri, _)| resource_name(uri))
+        .map(|&(uri, _, _)| resource_name(uri))
         .collect();
     format!(
-        "{} templated resources read by URI through resources/read or the query tool, each described by resources/templates/list: {}",
+        "{} templated resources read by URI through resources/read or the query tool, each described by resources/templates/list or read without its argument: {}",
         names.len(),
         names.join(", ")
     )
@@ -5363,8 +5428,9 @@ mod tests {
         }
         let uris = super::RESOURCES
             .iter()
-            .chain(super::RESOURCE_TEMPLATES)
-            .map(|&(uri, _)| {
+            .map(|r| r.0)
+            .chain(super::RESOURCE_TEMPLATES.iter().map(|t| t.0))
+            .map(|uri| {
                 uri.split('/')
                     .map(|part| if part.starts_with('{') { "x" } else { part })
                     .collect::<Vec<_>>()
@@ -5563,24 +5629,28 @@ mod tests {
             .lines()
             .find_map(|l| l.strip_prefix("# more: "))
             .expect("a more line");
-        for &(uri, _) in super::RESOURCE_TEMPLATES {
+        for &(uri, _, _) in super::RESOURCE_TEMPLATES {
             let name = super::resource_name(uri);
             assert!(more.split([' ', ',']).any(|w| w == name), "{name}: {more}");
         }
         for uri in ["borer://map/{namespace}", "borer://ports/{filter}"] {
             assert!(
-                super::RESOURCE_TEMPLATES.iter().any(|&(u, _)| u == uri),
+                super::RESOURCE_TEMPLATES.iter().any(|&(u, _, _)| u == uri),
                 "{uri} is answered but not listed"
             );
         }
-        for &(uri, text) in super::RESOURCES.iter().chain(super::RESOURCE_TEMPLATES) {
+        let described_all = super::RESOURCES
+            .iter()
+            .copied()
+            .chain(super::RESOURCE_TEMPLATES.iter().map(|&(u, d, _)| (u, d)));
+        for (uri, text) in described_all {
             assert!(!text.contains("  "), "{uri}: {text}");
         }
         let described = |uri: &str| {
             super::RESOURCE_TEMPLATES
                 .iter()
-                .find(|&&(u, _)| u == uri)
-                .map(|&(_, text)| text)
+                .find(|&&(u, _, _)| u == uri)
+                .map(|&(_, text, _)| text)
                 .expect("listed")
         };
         let emulate = described("borer://emulate/{address}");
@@ -6419,12 +6489,158 @@ mod tests {
         assert!(
             refused
                 .message
-                .starts_with("unknown resource borer://nope; the resources are borer://info, "),
+                .starts_with("unknown resource borer://nope; ")
+                && refused
+                    .message
+                    .ends_with("; borer://help lists every resource"),
             "{}",
             refused.message
         );
+    }
+
+    /// Every template read without its argument says how to read it.
+    ///
+    /// The answer is its URI, its description with the grammar in it, and
+    /// an example built from the loaded binary, the same bytes each time;
+    /// `borer://help/<name>` says the same of any resource, and
+    /// `borer://help` lists each one once.
+    ///
+    /// # Panics
+    ///
+    /// When a template's bare read refuses or lacks a part, the example is
+    /// not filled in, or the list misses or repeats a resource.
+    #[test]
+    fn a_template_read_bare_says_its_grammar_and_an_example() {
+        let server = raw_server();
+        for &(uri, description, _) in super::RESOURCE_TEMPLATES {
+            let name = super::resource_name(uri);
+            let fixed = super::RESOURCES
+                .iter()
+                .any(|r| super::resource_name(r.0) == name);
+            let bare = if fixed {
+                format!("borer://help/{name}")
+            } else {
+                format!("borer://{name}")
+            };
+            let help = server
+                .resource_text(&bare)
+                .expect("a bare template answers");
+            assert!(
+                help.contains(&format!("# {uri}\n{description}\n")),
+                "{help}"
+            );
+            let example = help
+                .lines()
+                .find_map(|l| l.strip_prefix("# example: "))
+                .unwrap_or_else(|| panic!("{uri} has no example: {help}"));
+            assert!(
+                example.starts_with(&format!("borer://{name}/")) && !example.contains('{'),
+                "{uri}: {example}"
+            );
+            assert_eq!(server.resource_text(&bare).expect("again"), help);
+        }
+        let emulate = server.resource_text("borer://emulate").expect("answers");
         assert!(
-            refused.message.contains("borer://scenarios/{spec}"),
+            emulate.contains("# example: borer://emulate/0x1000,a1=5,steps=10000\n"),
+            "{emulate}"
+        );
+        let triage = server
+            .resource_text("borer://help/triage")
+            .expect("answers");
+        assert!(triage.starts_with("# borer://triage\n"), "{triage}");
+        let index = server.resource_text("borer://help").expect("answers");
+        let listed: Vec<&str> = index
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split('\t').next())
+            .collect();
+        let every: Vec<&str> = super::RESOURCES
+            .iter()
+            .map(|r| r.0)
+            .chain(super::RESOURCE_TEMPLATES.iter().map(|t| t.0))
+            .collect();
+        assert_eq!(listed, every, "{index}");
+    }
+
+    /// An unknown URI is refused with at most three resources nearest it.
+    ///
+    /// The refusal says where every resource is listed, in a few hundred
+    /// bytes where the list of every resource took two thousand; a fixed
+    /// resource given an argument is told it takes none, and a name nothing
+    /// resembles says so.
+    ///
+    /// # Panics
+    ///
+    /// When a refusal is long, names the wrong resources, or reads as
+    /// another error.
+    #[test]
+    fn an_unknown_uri_names_the_nearest_resources() {
+        let server = raw_server();
+        let refused = |uri: &str| {
+            let e = server.resource_text(uri).expect_err("unknown");
+            assert_eq!(e.code, super::ErrorCode::RESOURCE_NOT_FOUND, "{uri}");
+            e.message.into_owned()
+        };
+        let typo = refused("borer://emulat");
+        assert!(typo.len() < 600, "{} bytes: {typo}", typo.len());
+        assert_eq!(
+            typo,
+            "unknown resource borer://emulat; nearest: borer://emulate/{address}; borer://help lists every resource"
+        );
+        let guessed = refused("borer://disassemble/0x1000");
+        assert!(
+            guessed.contains("; nearest: borer://disasm/{address}; "),
+            "{guessed}"
+        );
+        let wide = refused("borer://ma");
+        assert!(
+            wide.contains("nearest: borer://map, ") && wide.matches(", ").count() == 2,
+            "three at most: {wide}"
+        );
+        assert!(
+            refused("borer://emulat/0x1000").contains("nearest: borer://emulate/{address}"),
+            "the name is matched without its argument"
+        );
+        assert_eq!(
+            refused("borer://triage/0x1000"),
+            "borer://triage takes no argument; read borer://triage"
+        );
+        assert!(
+            refused("borer://zzzzqqqq").contains("; no resource is near it; "),
+            "nothing near"
+        );
+        assert!(
+            refused("http://emulate").contains("a resource's URI starts with borer://"),
+            "not a borer URI"
+        );
+        assert!(
+            refused("borer://help/emulat").starts_with(
+                "unknown resource borer://help/emulat; nearest: borer://emulate/{address}"
+            ),
+            "help for a misspelled name"
+        );
+    }
+
+    /// A name nothing matches is refused with the names nearest it,
+    /// wherever a tool takes an address or a name.
+    ///
+    /// # Panics
+    ///
+    /// When the refusal leaves the nearest name out.
+    #[test]
+    fn a_misspelled_name_is_refused_with_the_nearest() {
+        use super::{FunctionParams, Parameters};
+        let server = raw_server();
+        super::write_lock(&server.overlay)
+            .names
+            .insert(0x1000, "check_serial".to_owned());
+        let refused = server
+            .function_summary(Parameters(FunctionParams {
+                address: "chk_serial".to_owned(),
+            }))
+            .expect_err("no such name");
+        assert!(
+            refused.message.contains("; nearest: check_serial; "),
             "{}",
             refused.message
         );

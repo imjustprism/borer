@@ -18,7 +18,7 @@ use std::time::Duration;
 
 /// A client on the server's pipes, reading replies on a thread so a lost
 /// reply is a failure after a timeout rather than a hang.
-struct Client {
+pub(crate) struct Client {
     /// The process the client launched, as a host launches its server: the
     /// relay, which must serve the whole session through every reload.
     child: Child,
@@ -43,7 +43,7 @@ impl Client {
     /// # Arguments
     ///
     /// * `load` - The file the session loads.
-    fn start(load: &str) -> Client {
+    pub(crate) fn start(load: &str) -> Client {
         let exe = env!("CARGO_BIN_EXE_borer");
         let mut child = Command::new(exe)
             .stdin(Stdio::piped())
@@ -118,7 +118,7 @@ impl Client {
     ///
     /// * `method` - The JSON-RPC method.
     /// * `params` - Its params, as JSON.
-    fn call(&mut self, method: &str, params: &str) -> String {
+    pub(crate) fn call(&mut self, method: &str, params: &str) -> String {
         self.id += 1;
         let id = self.id;
         self.write(&format!(
@@ -149,7 +149,7 @@ impl Client {
     ///
     /// * `name` - The tool.
     /// * `arguments` - Its arguments, as a JSON object.
-    fn text(&mut self, name: &str, arguments: &str) -> String {
+    pub(crate) fn text(&mut self, name: &str, arguments: &str) -> String {
         let line = self.tool(name, arguments);
         let reply: serde_json::Value = serde_json::from_str(&line).expect("a reply is JSON");
         reply["result"]["content"][0]["text"]
@@ -175,7 +175,7 @@ impl Client {
 
     /// Ends the session as a host does, by closing the server's input, and
     /// fails unless the launched process then exits successfully.
-    fn finish(self) {
+    pub(crate) fn finish(self) {
         let Client {
             mut child, stdin, ..
         } = self;

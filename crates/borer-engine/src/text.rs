@@ -10,6 +10,10 @@
 //!
 //! So text from outside is escaped before it is rendered, at the point it is
 //! adopted rather than at each of the places that print it.
+//!
+//! A name the caller misspells is answered with the names nearest it
+//! ([`nearest`]), so a miss teaches the right name instead of costing a
+//! listing to find it.
 
 /// Longest run of outside text any single row or message keeps.
 ///
@@ -126,6 +130,130 @@ pub fn quoted(text: &str) -> String {
     format!("'{}'", one_line(text))
 }
 
+/// How near a candidate is to a word nothing matched, nearest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Near {
+    /// The candidate contains the word; the value is the candidate's length
+    /// in bytes, so the shortest container comes first.
+    Contains(usize),
+    /// The candidate, or its last `::` segment, is this many single
+    /// character edits from the word.
+    Edits(usize),
+    /// The candidate, or its last `::` segment, opens with the same
+    /// characters as the word, this many, the most first.
+    Prefix(std::cmp::Reverse<usize>),
+}
+
+/// Returns the candidates nearest a word nothing matched, nearest first.
+///
+/// A candidate containing the word ranks first, the shortest first; then
+/// a candidate a few single-character edits from it, whole or by its last
+/// `::` segment, so `chk_serial` finds `crackme::check_serial`; then one
+/// opening with the word's first four characters or more, so the
+/// abbreviation `disasm` is found for `disassemble`. A word shorter than
+/// three characters is in too many names to find containers by, and the
+/// edits allowed are a third of the word's length, at least two, so a
+/// word nothing resembles finds nothing. Case is ignored, and ties go by
+/// the candidate's text, so the answer is deterministic.
+///
+/// # Arguments
+///
+/// * `want` - The word that matched nothing.
+/// * `candidates` - The names it could have meant; a name given twice is
+///   returned once.
+/// * `n` - Most candidates returned.
+///
+/// # Returns
+///
+/// At most `n` candidates, nearest first; empty for a blank word.
+#[must_use]
+pub fn nearest<'a>(
+    want: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+    n: usize,
+) -> Vec<&'a str> {
+    /// Shortest word a containing candidate is suggested for.
+    const CONTAINED_MIN: usize = 3;
+    /// The edits allowed are the word's length divided by this.
+    const EDITS_PER: usize = 3;
+    /// Fewest edits allowed, for a short word.
+    const EDITS_MIN: usize = 2;
+    /// Fewest opening characters a candidate shares with the word to rank
+    /// by them.
+    const PREFIX_MIN: usize = 4;
+    let want = want.trim().to_lowercase();
+    let len = want.chars().count();
+    if len == 0 {
+        return Vec::new();
+    }
+    let limit = (len / EDITS_PER).max(EDITS_MIN);
+    let mut ranked: Vec<(Near, &str)> = candidates
+        .into_iter()
+        .filter_map(|c| {
+            let lower = c.to_lowercase();
+            if len >= CONTAINED_MIN && lower.contains(&want) {
+                return Some((Near::Contains(lower.len()), c));
+            }
+            let tail = lower.rsplit("::").next().unwrap_or(&lower);
+            let forms = [lower.as_str(), tail];
+            let edits = forms
+                .iter()
+                .filter_map(|t| edits_within(&want, t, limit))
+                .min()
+                .map(Near::Edits);
+            let shared = forms
+                .iter()
+                .map(|t| {
+                    t.chars()
+                        .zip(want.chars())
+                        .take_while(|(a, b)| a == b)
+                        .count()
+                })
+                .max()
+                .filter(|&shared| shared >= PREFIX_MIN)
+                .map(|shared| Near::Prefix(std::cmp::Reverse(shared)));
+            edits.or(shared).map(|near| (near, c))
+        })
+        .collect();
+    ranked.sort_unstable();
+    ranked.dedup();
+    ranked.into_iter().take(n).map(|(_, c)| c).collect()
+}
+
+/// Counts the single-character edits (insertions, deletions and
+/// substitutions) that turn `a` into `b`, when there are at most `limit`.
+///
+/// # Arguments
+///
+/// * `a` - One word.
+/// * `b` - The other.
+/// * `limit` - Most edits worth counting; past it the count stops.
+///
+/// # Returns
+///
+/// The edit count, or `None` when it is above `limit`.
+fn edits_within(a: &str, b: &str, limit: usize) -> Option<usize> {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > limit {
+        return None;
+    }
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = diagonal + usize::from(ca != cb);
+            diagonal = row[j + 1];
+            row[j + 1] = substitute.min(row[j] + 1).min(diagonal + 1);
+        }
+        if row.iter().min().is_some_and(|&least| least > limit) {
+            return None;
+        }
+    }
+    row.last().copied().filter(|&d| d <= limit)
+}
+
 /// Tells whether `c` must be escaped to stay on its own line and in place.
 ///
 /// # Arguments
@@ -142,7 +270,7 @@ fn needs_escape(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{OUTSIDE_MAX, PATH_MAX, one_line, quoted, short_path};
+    use super::{OUTSIDE_MAX, PATH_MAX, edits_within, nearest, one_line, quoted, short_path};
 
     /// A name with nothing wrong with it comes back untouched.
     ///
@@ -266,5 +394,63 @@ mod tests {
         assert_eq!(quoted("sub_401000"), "'sub_401000'");
         let huge = quoted(&"z".repeat(20_000));
         assert!(huge.chars().count() < OUTSIDE_MAX + 8, "{}", huge.len());
+    }
+
+    /// Edits count insertions, deletions and substitutions, and stop
+    /// counting past the limit.
+    ///
+    /// # Panics
+    ///
+    /// When a count is wrong or one past the limit is returned.
+    #[test]
+    fn edits_count_what_turns_one_word_into_the_other() {
+        assert_eq!(edits_within("emulat", "emulate", 2), Some(1));
+        assert_eq!(edits_within("chk_serial", "check_serial", 2), Some(2));
+        assert_eq!(edits_within("kitten", "sitting", 3), Some(3));
+        assert_eq!(edits_within("same", "same", 0), Some(0));
+        assert_eq!(edits_within("kitten", "sitting", 2), None);
+        assert_eq!(edits_within("a", "abcdef", 2), None);
+    }
+
+    /// A misspelled name finds the names it meant, nearest first.
+    ///
+    /// A container comes before an edit, the qualified name is found by its
+    /// last segment and an abbreviation by its opening, case ignored, each
+    /// once; a word nothing resembles finds nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the order, the matching or the cap is wrong.
+    #[test]
+    fn a_misspelled_name_finds_the_names_nearest_it() {
+        let names = [
+            "crackme::main",
+            "crackme::check_serial",
+            "emulate",
+            "enums",
+            "encode",
+            "Emulate",
+            "check_serial_twice",
+        ];
+        assert_eq!(
+            nearest("chk_serial", names, 3),
+            vec!["crackme::check_serial"]
+        );
+        assert_eq!(
+            nearest("check_serial", names, 3),
+            vec!["check_serial_twice", "crackme::check_serial"]
+        );
+        assert_eq!(nearest("emulat", names, 3), vec!["Emulate", "emulate"]);
+        assert_eq!(nearest("EMULATE", names, 1), vec!["Emulate"]);
+        assert_eq!(
+            nearest("emulate", ["emulate", "emulate", "emulates"], 3),
+            vec!["emulate", "emulates"]
+        );
+        assert_eq!(
+            nearest("disassemble", ["dis", "decompile", "disasm"], 3),
+            vec!["disasm"]
+        );
+        assert!(nearest("zzzzqqqq", names, 3).is_empty());
+        assert!(nearest("  ", names, 3).is_empty());
     }
 }

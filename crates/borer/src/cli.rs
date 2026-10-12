@@ -8,8 +8,8 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow, bail};
 use borer_engine::analysis::{
     Analysis, Overlay, about, anchors, attributes, classes, decompile, encode, fieldrefs, libnames,
-    map, messages, name_of, parse_addr, parse_off, ports, protocol, render, resolve, schema,
-    senders, sigs, snapshot, utypes, vtables,
+    map, messages, name_of, parse_addr, parse_off, ports, protocol, render, resolve_suggesting,
+    schema, senders, sigs, snapshot, utypes, vtables,
 };
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
@@ -1101,9 +1101,9 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// When the text is neither.
+    /// When the text is neither, naming the nearest names.
     fn resolve(&self, a: &Analysis, text: &str) -> anyhow::Result<u64> {
-        resolve(&self.program, a, &self.overlay, text).map_err(anyhow::Error::msg)
+        resolve_suggesting(&self.program, a, &self.overlay, text).map_err(anyhow::Error::msg)
     }
 
     /// Resolves an address argument as the MCP tools do: `0x`-hex text

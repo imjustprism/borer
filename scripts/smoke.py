@@ -377,6 +377,7 @@ assert uris == [
     "borer://fingerprint",
     "borer://flat",
     "borer://hashes",
+    "borer://help",
     "borer://hidden",
     "borer://index",
     "borer://info",
@@ -543,7 +544,16 @@ qmissing = wait_for(
     send("tools/call", {"name": "query", "arguments": {"uri": "borer://nope"}}), allow_error=True
 )
 assert qmissing.get("error") == missing["error"], (qmissing, missing)
-assert "borer://scenarios/{spec}" in missing["error"]["message"], missing
+assert missing["error"]["message"].endswith("borer://help lists every resource"), missing
+# a miss names the nearest resources, not all of them; a template read bare
+# says its grammar with an example, and borer://help lists every resource
+typo = wait_for(send("resources/read", {"uri": "borer://emulat"}), allow_error=True)
+assert "nearest: borer://emulate/{address}" in typo["error"]["message"], typo
+assert len(typo["error"]["message"]) < 600, typo
+grammar = call_tool("query", {"uri": "borer://emulate"})
+assert "aN=val" in grammar and "# example: borer://emulate/0x" in grammar, grammar[:400]
+helped = call_tool("query", {"uri": "borer://help"})
+assert "borer://emulate/{address}\t" in helped and "borer://triage\t" in helped, helped[:400]
 # script runs inline Rhai over the loaded binary, and its query() reads any
 # resource through the same handlers resources/read uses
 ran = call_tool(

@@ -1909,6 +1909,120 @@ pub fn resolve(
     overlay: &Overlay,
     text: &str,
 ) -> Result<u64, String> {
+    resolve_noting(program, analysis, overlay, text, String::new)
+}
+
+/// Resolves an address or a name as [`resolve`] does, and a name nothing
+/// matches is answered with the names nearest it ([`nearest_names`]).
+///
+/// For an agent's argument, where the right name one edit away saves a
+/// listing; [`resolve`] stays without the search for callers that try
+/// many names and use only the hits.
+///
+/// # Arguments
+///
+/// * `program` - Supplies the symbol table.
+/// * `analysis` - Supplies function names and entries.
+/// * `overlay` - Supplies user names.
+/// * `text` - An address in any form [`parse_addr`] accepts, or a name.
+///
+/// # Returns
+///
+/// The unique address the text denotes.
+///
+/// # Errors
+///
+/// As [`resolve`], a miss naming up to [`NEAREST_NAMES`] names.
+pub fn resolve_suggesting(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    text: &str,
+) -> Result<u64, String> {
+    resolve_noting(program, analysis, overlay, text, || {
+        let near = nearest_names(program, analysis, overlay, text);
+        if near.is_empty() {
+            String::new()
+        } else {
+            format!("; nearest: {}", near.join(", "))
+        }
+    })
+}
+
+/// Most names a miss suggests ([`resolve_suggesting`]).
+pub const NEAREST_NAMES: usize = 3;
+
+/// Returns the names nearest one that names nothing.
+///
+/// The candidates are the overlay's names, and the functions' and mapped
+/// symbols' names without their `dll!` prefix, as [`resolve`] matches
+/// them, ranked by [`crate::text::nearest`].
+///
+/// # Arguments
+///
+/// * `program` - Supplies the symbol table.
+/// * `analysis` - Supplies function names.
+/// * `overlay` - Supplies user names.
+/// * `text` - The name that matched nothing.
+///
+/// # Returns
+///
+/// At most [`NEAREST_NAMES`] names, nearest first, each escaped to one line.
+#[must_use]
+pub fn nearest_names(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    text: &str,
+) -> Vec<String> {
+    let names = overlay
+        .names
+        .values()
+        .map(String::as_str)
+        .chain(
+            analysis
+                .functions
+                .iter()
+                .filter_map(|f| f.name.as_deref().map(bare_name)),
+        )
+        .chain(
+            program
+                .symbols
+                .iter()
+                .filter(|s| s.addr != 0)
+                .map(|s| bare_name(&s.name)),
+        );
+    crate::text::nearest(text, names, NEAREST_NAMES)
+        .into_iter()
+        .map(crate::text::one_line)
+        .collect()
+}
+
+/// [`resolve`], with `miss` saying more about a name nothing matches.
+///
+/// # Arguments
+///
+/// * `program` - Supplies the symbol table.
+/// * `analysis` - Supplies function names and entries.
+/// * `overlay` - Supplies user names.
+/// * `text` - An address or a name.
+/// * `miss` - Builds what a miss says after its first clause; called only
+///   on a miss.
+///
+/// # Returns
+///
+/// The unique address the text denotes.
+///
+/// # Errors
+///
+/// As [`resolve`].
+fn resolve_noting(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    text: &str,
+    miss: impl FnOnce() -> String,
+) -> Result<u64, String> {
     if hex_prefixed(text)
         && let Some(va) = parse_addr(text)
     {
@@ -1967,8 +2081,9 @@ pub fn resolve(
     match hits.len() {
         0 => parse_addr(text).ok_or_else(|| {
             format!(
-                "{} is neither an address nor a known name; try functions(filter=...) or symbols(filter=...)",
-                crate::text::quoted(text)
+                "{} is neither an address nor a known name{}; try functions(filter=...) or symbols(filter=...)",
+                crate::text::quoted(text),
+                miss()
             )
         }),
         1 => Ok(hits[0].0),
