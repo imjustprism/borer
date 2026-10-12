@@ -855,3 +855,32 @@ fn a_relocatable_object_says_why_nothing_is_mapped() {
         "{summary}"
     );
 }
+
+/// A local function symbol whose value plus size runs past the top of the
+/// address space adds no function range and does not fault the load (a
+/// fuzzed file's symbol at `u64::MAX - 1` with a size overflowed the sum).
+///
+/// # Panics
+///
+/// When the load fails or a range ends before it starts.
+#[test]
+#[expect(
+    clippy::expect_used,
+    reason = "a fixture that does not parse has no useful recovery"
+)]
+fn a_symbol_running_past_the_address_space_is_no_range() {
+    let mut bytes = elf_bytes(false);
+    let value = 0x300 + 24 + 8;
+    bytes[value..value + 8].copy_from_slice(&(u64::MAX - 1).to_le_bytes());
+    let p = Program::from_bytes(std::path::PathBuf::from("wrap.elf"), bytes).expect("loads");
+    assert!(
+        p.function_ranges.iter().all(|&(start, end)| end >= start),
+        "{:x?}",
+        p.function_ranges
+    );
+    assert!(
+        !p.function_ranges
+            .iter()
+            .any(|&(start, _)| start == u64::MAX - 1)
+    );
+}

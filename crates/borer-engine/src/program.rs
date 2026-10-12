@@ -1767,8 +1767,10 @@ impl Program {
                     if name.is_empty() {
                         continue;
                     }
-                    if sym.st_size != 0 {
-                        function_ranges.push((sym.st_value, sym.st_value + sym.st_size));
+                    if sym.st_size != 0
+                        && let Some(end) = sym.st_value.checked_add(sym.st_size)
+                    {
+                        function_ranges.push((sym.st_value, end));
                     }
                     if !exported.contains(&(sym.st_value, name)) {
                         locals.push(Symbol {
