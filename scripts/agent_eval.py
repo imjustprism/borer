@@ -545,6 +545,74 @@ def _dotnet_blob() -> bytes:
 
 DOTNET_CODE = _dotnet_blob()
 
+# Headerless x86-64 code under the /GS cookie, loaded at 0x10000: the
+# prologue stores the cookie (at 0x10100) mixed with rsp, the epilogue hands
+# it back to the cookie check at 0x10040, which is named by its shape.
+GS_CODE = (
+    bytes.fromhex(
+        "4883ec28"  # sub rsp, 0x28
+        "488b05f5000000"  # mov rax, [rip+0xf5] -> the cookie
+        "4831e0"  # xor rax, rsp
+        "4889442420"  # mov [rsp+0x20], rax
+        "488d4101"  # lea rax, [rcx+1]
+        "488b4c2420"  # mov rcx, [rsp+0x20]
+        "4831e1"  # xor rcx, rsp
+        "e81c000000"  # call 0x10040
+        "4883c428"  # add rsp, 0x28
+        "c3"  # ret
+    ).ljust(0x40, b"\xcc")
+    + bytes.fromhex(
+        "483b0db9000000"  # cmp rcx, [rip+0xb9] -> the cookie
+        "7510"  # jne fail
+        "48c1c110"  # rol rcx, 16
+        "66f7c1ffff"  # test cx, 0xffff
+        "7501"  # jne fail2
+        "c3"  # ret
+        "48c1c910"  # ror rcx, 16 (fail2)
+        "cc"  # int3 (fail)
+    ).ljust(0xC0, b"\xcc")
+    + (0x2B992DDFA232).to_bytes(8, "little")
+)
+
+
+def _panic_blob() -> bytes:
+    """Headerless x86-64 code, loaded at 0x10000, whose bounds check raises
+    a Rust panic: `panic_bounds_check` at 0x10040, named by the message it
+    formats (at 0x10200), is handed the `core::panic::Location` at 0x10300,
+    which names a crate file (at 0x10110), line 1015, column 32."""
+    path = (
+        b"C:\\Users\\me\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f"
+        b"\\rhai-1.26.1\\src\\parser.rs"
+    )
+    code = (
+        bytes.fromhex(
+            "4839d1"  # cmp rcx, rdx
+            "7305"  # jae fail
+            "498b04c8"  # mov rax, [r8+rcx*8]
+            "c3"  # ret
+            "4c8d05ef020000"  # lea r8, [rip+0x2ef] -> the location
+            "e82a000000"  # call 0x10040
+        ).ljust(0x40, b"\xcc")
+        + bytes.fromhex(
+            "55"  # push rbp
+            "4883ec50"  # sub rsp, 0x50
+            "48894c2448"  # mov [rsp+0x48], rcx
+            "4889542440"  # mov [rsp+0x40], rdx
+            "4c89442438"  # mov [rsp+0x38], r8
+            "488d0da5010000"  # lea rcx, [rip+0x1a5] -> the message
+            "e820000000"  # call 0x10080
+        ).ljust(0x40, b"\xcc")
+        + bytes.fromhex("0f0b")  # ud2
+    )
+    blob = code.ljust(0x110, b"\xcc") + path
+    blob = blob.ljust(0x200, b"\x00") + b"\x20index out of bounds: the len is \xc0\x12 but"
+    blob = blob.ljust(0x300, b"\x00") + (0x10110).to_bytes(8, "little")
+    blob += len(path).to_bytes(8, "little") + (1015).to_bytes(4, "little")
+    return blob + (32).to_bytes(4, "little")
+
+
+PANIC_CODE = _panic_blob()
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
@@ -559,6 +627,8 @@ BLOBS = {
     "macho": (MACHO_CODE, "<macho>"),
     "objc": (OBJC_CODE, "<objc>"),
     "dotnet": (DOTNET_CODE, "<dotnet>"),
+    "gs": (GS_CODE, "<gs>"),
+    "panic": (PANIC_CODE, "<panic>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -759,6 +829,24 @@ TASKS = [
             ("function_summary", {"address": "0x100000800"}),
         ],
         "messages: 2 [[Foo shared], [[Foo shared] bar]]",
+    ),
+    (
+        "gs_cookie_folded",
+        "what a function under the /GS cookie computes, its cookie left out",
+        [
+            ("load_binary", {"path": "{gs}", "arch": "x64", "base": "0x10000"}),
+            ("decompile", {"address": "0x10000"}),
+        ],
+        "// folded: /GS cookie, 1 check",
+    ),
+    (
+        "rust_panic_location",
+        "where in the source a Rust function's bounds check panics",
+        [
+            ("load_binary", {"path": "{panic}", "arch": "x64", "base": "0x10000"}),
+            ("decompile", {"address": "0x10000"}),
+        ],
+        "// at rhai-1.26.1/src/parser.rs:1015:32",
     ),
 ]
 
