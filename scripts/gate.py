@@ -9,7 +9,7 @@
 Steps, in order: the unpushed commits' messages (scripts/commits.py), cargo fmt, cargo clippy -D warnings, cargo test, cargo doc
 with warnings as errors (private items included), cargo deny (offline subset),
 the dogfood sweep over a real binary, typos, ruff check + format,
-scripts/smoke.py. The first failure stops the run and the exit status is
+scripts/smoke.py, scripts/agent_eval.py. The first failure stops the run and the exit status is
 non-zero. Tools that are not installed are reported and skipped, never
 silently passed.
 
@@ -263,6 +263,15 @@ def main(argv: list[str]) -> int:
             (
                 "smoke",
                 [sys.executable, os.path.join("scripts", "smoke.py"), server, dogfood],
+                None,
+                None,
+            )
+        )
+        # Seconds: the tasks replay on the crackme the examples step built.
+        steps.append(
+            (
+                "agent eval",
+                [sys.executable, os.path.join("scripts", "agent_eval.py"), server],
                 None,
                 None,
             )

@@ -1,0 +1,11 @@
+# task	calls	bytes	found
+front_door	3	30289	0
+orient	2	3669	1
+serial_constant	2	3797	1
+marker_user	2	1901	1
+caller	2	1778	1
+emulate_serial	2	1932	1
+emulate_grammar	2	3337	0
+uri_typo	2	3336	1
+name_typo	2	1761	0
+playbook	2	3345	0

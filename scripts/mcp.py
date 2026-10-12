@@ -66,6 +66,7 @@ class Client:
             },
         )
         self.server = r["serverInfo"]
+        self.instructions = r.get("instructions", "")
         self.notify("notifications/initialized")
 
     def notify(self, method, params=None):
@@ -75,7 +76,8 @@ class Client:
         self.proc.stdin.write(json.dumps(msg) + "\n")
         self.proc.stdin.flush()
 
-    def call(self, method, params=None):
+    def request(self, method, params=None):
+        """Send a request and return its whole reply, `result` or `error`."""
         self.next_id += 1
         rid = self.next_id
         msg = {"jsonrpc": "2.0", "id": rid, "method": method}
@@ -89,11 +91,14 @@ class Client:
                 err = self.proc.stderr.read()
                 raise SystemExit(f"server closed the pipe; stderr: {err[-1500:]}")
             reply = json.loads(line)
-            if reply.get("id") != rid:
-                continue
-            if "error" in reply:
-                raise SystemExit(f"rpc error: {json.dumps(reply['error'])}")
-            return reply["result"]
+            if reply.get("id") == rid:
+                return reply
+
+    def call(self, method, params=None):
+        reply = self.request(method, params)
+        if "error" in reply:
+            raise SystemExit(f"rpc error: {json.dumps(reply['error'])}")
+        return reply["result"]
 
     def tool(self, name, args):
         res = self.call("tools/call", {"name": name, "arguments": args})
