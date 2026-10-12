@@ -6,6 +6,7 @@ use super::iocs::iocs_line;
 use super::*;
 use crate::emulate::Run;
 use crate::emulate::a64::Machine as A64Machine;
+use crate::emulate::calls::ApiCall;
 use crate::isa::Isa;
 
 /// A capability and the API-name fragments that give it away.
@@ -358,8 +359,6 @@ pub(super) const EMULATE_STRING_LEN: usize = 5;
 /// When the spec does not read, the start is unmapped, a register cannot
 /// be set, or the architecture is not emulated.
 pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<String, String> {
-    /// API calls named in the header before the rest are counted.
-    const CALLS_MAX: usize = 24;
     let spec = ExperimentSpec::parse(a, o, target)?;
     if matches!(p.arch.isa(), Some(Isa::A64)) {
         return emulate_a64(p, a, o, &spec);
@@ -424,16 +423,7 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
             }
         }
     }
-    let calls = emu.api_calls();
-    if !calls.is_empty() {
-        let shown: Vec<&str> = calls.iter().take(CALLS_MAX).map(String::as_str).collect();
-        let _ = writeln!(
-            out,
-            "# calls: {}{}",
-            shown.join(" -> "),
-            plus_more(calls.len(), CALLS_MAX)
-        );
-    }
+    api_calls_section(&mut out, a, o, emu.api_calls());
     let neutralized = emu.neutralized();
     if !neutralized.is_empty() {
         let _ = writeln!(
@@ -444,6 +434,37 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
     }
     run_tail(&mut out, &spec, &run, &emu.trace(), |at| emu.byte_at(at));
     Ok(out)
+}
+
+/// Writes the trace of the imported APIs and syscalls a run serviced, each
+/// as `api(args) -> ret` with the function it was called from.
+///
+/// The arguments are decoded by the type library ([`crate::emulate::calls`]):
+/// a string pointer as its text, a flag or handle by name, any other pointer
+/// as `ptr 0x...`, so the line reads as a call site. The list is capped, with
+/// a `# showing N of M` count, since a long run can service thousands.
+///
+/// # Arguments
+///
+/// * `out` - The report so far.
+/// * `a` - The analysis, to name the calling function.
+/// * `o` - User names.
+/// * `calls` - The serviced calls, in order.
+fn api_calls_section(out: &mut String, a: &Analysis, o: &Overlay, calls: &[ApiCall]) {
+    /// Call rows listed before the rest are counted.
+    const CALLS_SHOWN: usize = 64;
+    if calls.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "# api calls: showing {} of {}, api(args) -> ret, by caller",
+        calls.len().min(CALLS_SHOWN),
+        calls.len()
+    );
+    for call in calls.iter().take(CALLS_SHOWN) {
+        let _ = writeln!(out, "{}{}", call.call_text(), where_in(a, o, call.caller));
+    }
 }
 
 /// Runs an arm64 experiment for [`emulate_tsv`] in [`A64Machine`].
@@ -457,8 +478,9 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
 ///
 /// # Returns
 ///
-/// The report [`emulate_tsv`] gives an x86 run, without the profile, the
-/// origin watch and the API calls, which the arm64 machine does not keep.
+/// The report [`emulate_tsv`] gives an x86 run, without the profile and the
+/// origin watch, which the arm64 machine does not keep; it does keep the
+/// serviced syscalls, which the behavior trace lists.
 ///
 /// # Errors
 ///
@@ -500,6 +522,7 @@ fn emulate_a64(
     }
     let run = emu.run(spec.entry);
     let mut out = run_head(a, o, spec, &run, &emu.registers(), emu.last_ip());
+    api_calls_section(&mut out, a, o, emu.api_calls());
     run_tail(&mut out, spec, &run, &emu.trace(), |at| emu.byte_at(at));
     Ok(out)
 }

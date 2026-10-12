@@ -18,10 +18,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub mod a64;
 mod bits;
+pub mod calls;
 mod loader;
 mod sse;
 mod store;
 
+use calls::ApiCall;
 use sse::{Rounding, Width};
 use store::Store;
 
@@ -346,9 +348,10 @@ pub struct Emulator<'a> {
     /// prefilled so each slot holds its stub; a call to a stub is modeled as
     /// that API rather than executed, the way the OS would service it.
     apis: BTreeMap<u64, String>,
-    /// The imported APIs the run called, in order: what the bootstrap asked
-    /// the operating system to do as it rebuilt the program.
-    api_calls: Vec<String>,
+    /// The imported APIs and syscalls the run serviced, in order, each with
+    /// its decoded arguments and result: what the program asked the
+    /// operating system to do as it ran.
+    calls: Vec<ApiCall>,
     /// Next address a modeled allocator hands out ([`Emulator::allocate`]).
     alloc_next: u64,
     /// Best-effort mode: a call or jump to memory nothing maps is skipped
@@ -1127,7 +1130,7 @@ impl<'a> Emulator<'a> {
             oep: None,
             last_ip: 0,
             apis: BTreeMap::new(),
-            api_calls: Vec::new(),
+            calls: Vec::new(),
             alloc_next,
             permissive: false,
             fill: None,
@@ -1741,10 +1744,34 @@ impl<'a> Emulator<'a> {
         base.wrapping_add(from_usize(index) * 8)
     }
 
-    /// The imported APIs the run called, in order.
+    /// The imported APIs and syscalls the run serviced, in order, each with
+    /// its decoded arguments and result.
     #[must_use]
-    pub fn api_calls(&self) -> &[String] {
-        &self.api_calls
+    pub fn api_calls(&self) -> &[ApiCall] {
+        &self.calls
+    }
+
+    /// The names of the serviced calls, in order: the order and names a
+    /// check compares and a count sums, without the decoded arguments.
+    #[must_use]
+    pub fn api_names(&self) -> Vec<&str> {
+        self.calls.iter().map(|c| c.api.as_str()).collect()
+    }
+
+    /// Reads a printable string from memory as a load reads it, for decoding
+    /// a string argument of a serviced call.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The pointer.
+    /// * `wide` - Whether the characters are 16-bit.
+    ///
+    /// # Returns
+    ///
+    /// The text, or `None` when the address is zero, nothing is mapped, or
+    /// no printable character is there ([`calls::read_text`]).
+    fn read_memory_text(&self, addr: u64, wide: bool) -> Option<String> {
+        calls::read_text(addr, wide, calls::TEXT_MAX, |a| self.byte_at(a))
     }
 
     /// Services a call that reached an imported function's stub.
@@ -1771,7 +1798,17 @@ impl<'a> Emulator<'a> {
     fn service_api(&mut self, stub: u64) -> Result<u64, Stop> {
         let full = self.apis.get(&stub).cloned().unwrap_or_default();
         let api = crate::analysis::bare_name(&full);
-        self.api_calls.push(api.to_owned());
+        let format = self.program.format;
+        let bits = u8::try_from(self.bitness).unwrap_or(64);
+        let caller = self.load(self.reg(Register::RSP), self.word).unwrap_or(0);
+        let args = calls::decode_api_args(
+            api,
+            format,
+            bits,
+            |n| self.api_arg(n),
+            |addr, wide| self.read_memory_text(addr, wide),
+        );
+        let void = calls::returns_void(api, format);
         let rcx = self.api_arg(0);
         let rv: u64 = if api.starts_with("GetModuleHandle") || api.starts_with("LoadLibrary") {
             // A module handle is the image base; a loaded library, a non-null
@@ -1799,6 +1836,13 @@ impl<'a> Emulator<'a> {
             self.neutralize(api).unwrap_or_default()
         };
         self.set_reg(Register::RAX, rv);
+        self.calls.push(ApiCall {
+            api: api.to_owned(),
+            syscall: None,
+            args,
+            ret: (!void).then_some(rv),
+            caller,
+        });
         let ret = self.pop()?;
         if self.bitness == 32 {
             // INVARIANT: a 32-bit Win32 API pops its own arguments, and a
@@ -1931,7 +1975,9 @@ impl<'a> Emulator<'a> {
     /// count it was asked to write, and `exit`/`exit_group` end the program;
     /// every other number returns zero so the run continues, as an unlisted
     /// Windows API does. Each number seen is recorded with the neutralized
-    /// answers, so a report names what the program asked the kernel for.
+    /// answers, and each serviced call in order with its number, name and
+    /// arguments ([`calls::decode_syscall_args`]), so a report names what the
+    /// program asked the kernel for.
     ///
     /// # Arguments
     ///
@@ -1951,8 +1997,18 @@ impl<'a> Emulator<'a> {
             self.reg(Register::RDI),
             self.reg(Register::RDX),
         );
-        let named = linux_syscall_name(nr).map_or_else(String::new, |n| format!(" {n}"));
+        let name = linux_syscall_name(nr);
+        let named = name.map_or_else(String::new, |n| format!(" {n}"));
         self.neutralized.insert(format!("syscall({nr}{named})"));
+        let api = name.map_or_else(|| format!("sys_{nr}"), ToOwned::to_owned);
+        let args = name.map_or_else(Vec::new, |n| {
+            calls::decode_syscall_args(
+                n,
+                u8::try_from(self.bitness).unwrap_or(64),
+                |k| self.syscall_arg(k),
+                |addr, wide| self.read_memory_text(addr, wide),
+            )
+        });
         let rv = match nr {
             // mmap: a fresh mapped region, or the address it hinted at.
             9 => {
@@ -1969,12 +2025,42 @@ impl<'a> Emulator<'a> {
             _ => 0,
         };
         self.set_reg(Register::RAX, rv);
+        self.calls.push(ApiCall {
+            api,
+            syscall: Some(nr),
+            args,
+            ret: Some(rv),
+            caller: i.ip(),
+        });
         if self.bitness == 64 {
             // SPEC: Intel SDM Vol. 2B, SYSCALL: RCX takes the return address and R11 RFLAGS.
             self.set_reg(Register::RCX, i.next_ip());
             self.set_reg(Register::R11, self.rflags());
         }
         Ok(None)
+    }
+
+    /// Reads the `n`th argument of a Linux `syscall` from the register the
+    /// kernel ABI puts it in.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Argument index from zero.
+    ///
+    /// # Returns
+    ///
+    /// The register value, or zero past the sixth argument.
+    fn syscall_arg(&self, n: usize) -> u64 {
+        // SPEC: Linux x86-64 syscall ABI: rdi, rsi, rdx, r10, r8, r9.
+        let regs = [
+            Register::RDI,
+            Register::RSI,
+            Register::RDX,
+            Register::R10,
+            Register::R8,
+            Register::R9,
+        ];
+        regs.get(n).map_or(0, |r| self.reg(*r))
     }
 
     /// The anti-analysis APIs this run answered benignly, in name order.

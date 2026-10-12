@@ -658,7 +658,7 @@ fn a_32_bit_call_through_an_import_slot_reaches_the_api() {
     emu.install_imports();
     let run = emu.run(0x1000);
     assert_eq!(run.stop, Stop::Returned, "{run:?}");
-    assert_eq!(emu.api_calls(), ["IsDebuggerPresent"]);
+    assert_eq!(emu.api_names(), ["IsDebuggerPresent"]);
     assert_eq!(emu.neutralized(), vec!["IsDebuggerPresent"]);
 }
 
@@ -716,7 +716,7 @@ fn a_32_bit_allocation_returns_a_pointer_the_image_can_hold() {
     emu.install_imports();
     let run = emu.run(0x1000);
     assert_eq!(run.stop, Stop::Returned, "{run:?}");
-    assert_eq!(emu.api_calls(), ["VirtualAlloc", "malloc"]);
+    assert_eq!(emu.api_names(), ["VirtualAlloc", "malloc"]);
     let block = emu.register("rsi").expect("rsi");
     let heap = emu.register("rax").expect("rax");
     for ptr in [block, heap] {

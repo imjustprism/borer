@@ -22,6 +22,7 @@ mod calls;
 mod decompile;
 mod discovery;
 mod elf;
+mod emulate_calls;
 mod engine;
 mod families;
 mod groundtruth;

@@ -644,7 +644,7 @@ mod tests {
         emu.install_imports();
         let run = emu.run(0x1_4000_1000);
         assert!(
-            emu.api_calls().iter().any(|c| c.contains("VirtualAlloc")),
+            emu.api_names().iter().any(|c| c.contains("VirtualAlloc")),
             "{}, {} steps",
             run.stop,
             run.steps
@@ -664,7 +664,7 @@ mod tests {
         emu.install_imports();
         let run = emu.run(0x401_000);
         assert!(
-            emu.api_calls().iter().any(|c| c.contains("VirtualAlloc")),
+            emu.api_names().iter().any(|c| c.contains("VirtualAlloc")),
             "{}, {} steps",
             run.stop,
             run.steps

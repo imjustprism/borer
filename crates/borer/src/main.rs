@@ -4909,7 +4909,7 @@ const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://iocs",
-        "Indicators to block or hunt: URLs, domains, IP and e-mail addresses, registry keys, file paths, pipe, mutex and kernel object names, user agents, each with where it came from (a stored string's address, a stack string, a generated string, decoded base64, an API call's argument), the function using it and a confidence, benign-common marking what every program carries; 200 rows a page, borer://iocs/<filter> narrows by type or text",
+        "Indicators to block or hunt: URLs, domains, IP and e-mail addresses, registry keys, file paths, pipe, mutex and kernel object names, user agents, each with where it came from (a stored string's address, a stack string, a generated string, decoded base64, an emulated API or syscall argument, an API call's argument), the function using it and a confidence, benign-common marking what every program carries; 200 rows a page, borer://iocs/<filter> narrows by type or text",
     ),
     (
         "borer://fingerprint",
@@ -4989,7 +4989,7 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://emulate/{address}",
-        "Run code and read the result. The address carries an experiment: comma-separated reg=val, aN=val (the argument the decompiler names aN; a1 is the first), w<addr>=<hexbytes> (set data or patch code), stop=<addr>, steps=<n> (at most 20000000), trace=<n> (what each of the last n instructions changed; a small steps= watches the start instead), origin=<v> (the instruction that first put the value v in a register or in memory), profile=<n> (the n most-run addresses and most-read pages, where the steps went; at most 64), dump=<addr>:<len> (at most 4096 bytes, ?? where nothing is mapped). Reports final registers, the call trace, decoded text and each dump.",
+        "Run code and read the result. The address carries an experiment: comma-separated reg=val, aN=val (the argument the decompiler names aN; a1 is the first), w<addr>=<hexbytes> (set data or patch code), stop=<addr>, steps=<n> (at most 20000000), trace=<n> (what each of the last n instructions changed; a small steps= watches the start instead), origin=<v> (the instruction that first put the value v in a register or in memory), profile=<n> (the n most-run addresses and most-read pages, where the steps went; at most 64), dump=<addr>:<len> (at most 4096 bytes, ?? where nothing is mapped). Reports final registers, the imported APIs and syscalls it serviced as api(args) -> ret with each argument decoded (a string as text, a flag or handle named, an unknown pointer as ptr 0x...), decoded text and each dump.",
         "borer://emulate/{entry},a1=5,steps=10000",
     ),
     (
@@ -5024,7 +5024,7 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://run/{spec}",
-        "Call a function on inputs typed by its recovered signature and check its decompiled text on them: <function>[,steps=N]/<input>[;<input>...], each input its arguments in order: 5, -1, \"text\", hex:0102 or out:16 (a zeroed buffer). A row per input: the return value, the stop, the steps, the bytes each buffer holds after, and whether the text run as C agrees, differs (at a line) or is unchecked (at most 64 inputs, 1000000 steps each by default)",
+        "Call a function on inputs typed by its recovered signature and check its decompiled text on them: <function>[,steps=N]/<input>[;<input>...], each input its arguments in order: 5, -1, \"text\", hex:0102 or out:16 (a zeroed buffer). A row per input: the return value, the stop, the steps, the bytes each buffer holds after, and whether the text run as C agrees, differs (at a line) or is unchecked (at most 64 inputs, 1000000 steps each by default); then the imported APIs and syscalls the runs serviced as api(args) -> ret with each argument decoded",
         "borer://run/{entry}/5;-1",
     ),
     (

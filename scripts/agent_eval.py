@@ -14,7 +14,8 @@ it. A task starts with load_binary, as a fresh session does, except
 `front_door`, which is what a session is handed before its first call (the
 instructions, tools/list and prompts/list), and `raw_code`, which loads a
 few bytes of hand-assembled x86-64 (RAW_CODE, written to a temporary file
-counted as `<blob>`) at a stated base instead of the crackme.
+counted as `<blob>`) at a stated base instead of the crackme; the other
+blob tasks load their own hand-assembled bytes the same way (BLOBS).
 
 A row per task: the calls, the bytes returned (tool text, error messages,
 or the protocol JSON, with the fixture's path counted as `<bin>` and the
@@ -56,6 +57,24 @@ RAW_CODE = bytes.fromhex(
     "b82a000000"  # mov eax, 42
     "c3"  # ret
 )
+
+# Headerless x86-64 code that opens a path through a Linux syscall: the
+# emulator records it by name with the path decoded. Loaded at 0x10000, the
+# path "/tmp/x" sits just past the `ret`.
+SYSCALL_CODE = bytes.fromhex(
+    "b802000000"  # mov eax, 2 (open)
+    "488d3d03000000"  # lea rdi, [rip+3] -> the path
+    "0f05"  # syscall
+    "c3"  # ret
+    "2f746d702f7800"  # "/tmp/x\0"
+)
+
+# Each extra blob the tasks load: its bytes and the marker a path counts as,
+# so the directory a checkout sits in does not move the byte count.
+BLOBS = {
+    "blob": (RAW_CODE, "<blob>"),
+    "syscall": (SYSCALL_CODE, "<syscall>"),
+}
 
 # (task, the question it answers, calls, the fact the answers must hold)
 TASKS = [
@@ -150,6 +169,15 @@ TASKS = [
         ],
         "rax=0x2b ",
     ),
+    (
+        "emulate_syscall",
+        "which syscall emulated headerless code makes, with its path decoded",
+        [
+            ("load_binary", {"path": "{syscall}", "arch": "x64", "base": "0x10000"}),
+            ("query", {"uri": "borer://emulate/0x10000"}),
+        ],
+        'syscall 2 open("/tmp/x"',
+    ),
 ]
 
 
@@ -193,31 +221,39 @@ def spellings(path: str) -> list[str]:
 
 def run(exe: str, binary: str) -> list[tuple[str, int, int, int]]:
     """Every task's (name, calls, bytes, found), in task order."""
-    with tempfile.NamedTemporaryFile(prefix="borer-eval-", suffix=".bin", delete=False) as f:
-        f.write(RAW_CODE)
-        blob = f.name
+    paths = {}
     try:
-        return run_tasks(exe, binary, blob)
+        for key, (code, _) in BLOBS.items():
+            with tempfile.NamedTemporaryFile(
+                prefix="borer-eval-", suffix=".bin", delete=False
+            ) as f:
+                f.write(code)
+                paths[key] = f.name
+        return run_tasks(exe, binary, paths)
     finally:
-        os.remove(blob)
+        for p in paths.values():
+            os.remove(p)
 
 
-def run_tasks(exe: str, binary: str, blob: str) -> list[tuple[str, int, int, int]]:
-    """Every task's row, the crackme at `binary` and RAW_CODE at `blob`."""
-    paths = (
-        [(f, "<bin>") for f in spellings(binary)]
-        + [(f, "<blob>") for f in spellings(blob)]
-        + [(f, "<root>") for f in spellings(ROOT)]
-    )
+def run_tasks(exe: str, binary: str, blobs: dict[str, str]) -> list[tuple[str, int, int, int]]:
+    """Every task's row, the crackme at `binary` and each blob at its path."""
+    paths = [(f, "<bin>") for f in spellings(binary)]
+    for key, path in blobs.items():
+        paths += [(f, BLOBS[key][1]) for f in spellings(path)]
+    paths += [(f, "<root>") for f in spellings(ROOT)]
+    paths.sort(key=lambda fm: len(fm[0]), reverse=True)
     rows = []
     client = Client(exe)
     try:
         for name, _, calls, fact in TASKS:
             texts = []
             for tool, args in calls:
-                filled = {
-                    k: v.replace("{bin}", binary).replace("{blob}", blob) for k, v in args.items()
-                }
+                filled = {}
+                for k, v in args.items():
+                    v = v.replace("{bin}", binary)
+                    for key, path in blobs.items():
+                        v = v.replace("{" + key + "}", path)
+                    filled[k] = v
                 text = answer(client, tool, filled)
                 for form, mark in paths:
                     text = text.replace(form, mark)

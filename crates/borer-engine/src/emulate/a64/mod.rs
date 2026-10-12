@@ -21,6 +21,7 @@
 
 use std::collections::VecDeque;
 
+use super::calls::{self, ApiCall};
 use super::store::Store;
 use super::{
     Run, STACK_BASE, STACK_SPAN, Stop, TRACE_MAX, fill_byte, image_byte, lo64, mask, rotate_right,
@@ -64,6 +65,90 @@ const SYSCALL_NR: usize = 8;
 /// return.
 // SPEC: Linux include/uapi/asm-generic/unistd.h, __NR_exit 93 and __NR_exit_group 94.
 const EXIT_CALLS: [u64; 2] = [93, 94];
+
+/// Returns the Linux arm64 name of a syscall number.
+///
+/// arm64 uses the architecture-generic numbering, so the numbers differ
+/// from the x86-64 table ([`super::linux_syscall_name`]): there is no
+/// `open` or `stat`, only `openat` and `newfstatat`. The table holds the
+/// calls a static ELF reaches for, in the order of
+/// `include/uapi/asm-generic/unistd.h`; unlisted numbers are reported bare.
+///
+/// # Arguments
+///
+/// * `nr` - The number in `x8` at the `svc #0`.
+///
+/// # Returns
+///
+/// The name, or `None` for a number this table does not list.
+#[must_use]
+pub fn a64_syscall_name(nr: u64) -> Option<&'static str> {
+    // SPEC: Linux include/uapi/asm-generic/unistd.h.
+    Some(match nr {
+        17 => "getcwd",
+        19 => "eventfd2",
+        23 => "dup",
+        24 => "dup3",
+        25 => "fcntl",
+        29 => "ioctl",
+        32 => "flock",
+        34 => "mkdirat",
+        35 => "unlinkat",
+        37 => "linkat",
+        38 => "renameat",
+        48 => "faccessat",
+        49 => "chdir",
+        56 => "openat",
+        57 => "close",
+        59 => "pipe2",
+        61 => "getdents64",
+        62 => "lseek",
+        63 => "read",
+        64 => "write",
+        66 => "writev",
+        78 => "readlinkat",
+        79 => "newfstatat",
+        80 => "fstat",
+        93 => "exit",
+        94 => "exit_group",
+        98 => "futex",
+        101 => "nanosleep",
+        115 => "clock_nanosleep",
+        116 => "syslog",
+        117 => "ptrace",
+        129 => "kill",
+        134 => "rt_sigaction",
+        135 => "rt_sigprocmask",
+        160 => "uname",
+        172 => "getpid",
+        173 => "getppid",
+        174 => "getuid",
+        178 => "gettid",
+        198 => "socket",
+        199 => "socketpair",
+        200 => "bind",
+        201 => "listen",
+        202 => "accept",
+        203 => "connect",
+        206 => "sendto",
+        207 => "recvfrom",
+        214 => "brk",
+        215 => "munmap",
+        216 => "mremap",
+        220 => "clone",
+        221 => "execve",
+        222 => "mmap",
+        226 => "mprotect",
+        233 => "madvise",
+        260 => "wait4",
+        261 => "prlimit64",
+        278 => "getrandom",
+        279 => "memfd_create",
+        281 => "execveat",
+        435 => "clone3",
+        _ => return None,
+    })
+}
 
 /// The system register field (bits 5 to 20) of `TPIDR_EL0`, the thread
 /// pointer: `op0` 3, `op1` 3, `CRn` 13, `CRm` 0, `op2` 2.
@@ -195,6 +280,9 @@ pub struct Machine<'a> {
     history: Vec<super::Written>,
     /// The address of the last instruction the run decoded.
     last_ip: u64,
+    /// The Linux syscalls the run serviced, in order, each with its decoded
+    /// arguments and result: what an ELF asked the kernel for.
+    calls: Vec<ApiCall>,
 }
 
 impl<'a> Machine<'a> {
@@ -240,6 +328,7 @@ impl<'a> Machine<'a> {
             step_memory: Vec::new(),
             history: Vec::new(),
             last_ip: 0,
+            calls: Vec::new(),
         })
     }
 
@@ -460,6 +549,19 @@ impl<'a> Machine<'a> {
     #[must_use]
     pub fn last_ip(&self) -> u64 {
         self.last_ip
+    }
+
+    /// The Linux syscalls the run serviced, in order, each with its decoded
+    /// arguments and result.
+    #[must_use]
+    pub fn api_calls(&self) -> &[ApiCall] {
+        &self.calls
+    }
+
+    /// The names of the serviced syscalls, in order.
+    #[must_use]
+    pub fn api_names(&self) -> Vec<&str> {
+        self.calls.iter().map(|c| c.api.as_str()).collect()
     }
 
     /// Runs from `entry` until it returns, exhausts the budget, or stops.
@@ -729,8 +831,12 @@ impl<'a> Machine<'a> {
         .map(|()| None)
     }
 
-    /// `svc #0`: a Linux system call, of which only the two that end the
-    /// process are modeled.
+    /// `svc #0`: a Linux system call, modeled the way the x86 emulator
+    /// models one ([`super::Emulator::linux_syscall`]): the exit numbers end
+    /// the run, `write` returns its count, and every other number returns
+    /// zero so the run continues. Each is recorded in order with its number,
+    /// name and arguments ([`calls::decode_syscall_args`]), so an ELF's
+    /// behavior trace names what it asked the kernel for.
     ///
     /// # Arguments
     ///
@@ -738,22 +844,56 @@ impl<'a> Machine<'a> {
     ///
     /// # Errors
     ///
-    /// [`Stop::Exited`] for `exit` and `exit_group`; an unmodeled stop
-    /// naming the call for every other call, and for `hvc`, `smc` and an
-    /// `svc` with another immediate (Apple's `svc #0x80`).
-    fn syscall(&self, i: &Insn) -> Result<Option<u64>, Stop> {
+    /// [`Stop::Exited`] for `exit` and `exit_group`; an unmodeled stop for
+    /// `hvc`, `smc` and an `svc` with another immediate (Apple's
+    /// `svc #0x80`).
+    fn syscall(&mut self, i: &Insn) -> Result<Option<u64>, Stop> {
         if i.mnemonic != Mnemonic::Svc || i.operands[0] != Opnd::Imm(0) {
             return Err(unmodeled(i));
         }
         let nr = self.x.get(SYSCALL_NR).copied().unwrap_or(0);
-        Err(if EXIT_CALLS.contains(&nr) {
-            Stop::Exited
+        if EXIT_CALLS.contains(&nr) {
+            return Err(Stop::Exited);
+        }
+        let name = a64_syscall_name(nr);
+        let api = name.map_or_else(|| format!("sys_{nr}"), ToOwned::to_owned);
+        let args = name.map_or_else(Vec::new, |n| {
+            calls::decode_syscall_args(
+                n,
+                64,
+                |k| self.x.get(k).copied().unwrap_or(0),
+                |addr, wide| self.read_text(addr, wide),
+            )
+        });
+        // write returns the count it was asked to write (x2); every other
+        // number returns zero, as an unmodeled call does.
+        let rv = if nr == 64 {
+            self.x.get(2).copied().unwrap_or(0)
         } else {
-            Stop::Unmodeled(format!(
-                "{} with x8={nr} (only exit and exit_group are modeled)",
-                a64::text(i)
-            ))
-        })
+            0
+        };
+        if let Some(x0) = self.x.first_mut() {
+            *x0 = rv;
+        }
+        self.calls.push(ApiCall {
+            api,
+            syscall: Some(nr),
+            args,
+            ret: Some(rv),
+            caller: i.va,
+        });
+        Ok(None)
+    }
+
+    /// Reads a printable string from memory as a load reads it, for decoding
+    /// a path argument of a serviced syscall ([`calls::read_text`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The pointer.
+    /// * `wide` - Whether the characters are 16-bit.
+    fn read_text(&self, addr: u64, wide: bool) -> Option<String> {
+        calls::read_text(addr, wide, calls::TEXT_MAX, |a| self.byte_at(a))
     }
 
     /// `mrs` and `msr` of the thread pointer and the flags, the system

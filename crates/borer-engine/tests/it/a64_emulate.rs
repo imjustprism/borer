@@ -1263,9 +1263,18 @@ fn every_stop_is_named() {
     }
     assert_eq!(stop(&[EXIT, SVC], &[], BUDGET), (Stop::Exited, 2, BASE + 4));
     assert_eq!(stop(&[EXIT_GROUP, SVC], &[], BUDGET).0, Stop::Exited);
-    match stop(&[WRITE, SVC], &[], BUDGET).0 {
-        Stop::Unmodeled(what) => assert!(what.starts_with("svc #0x0 with x8=64"), "{what}"),
-        other => panic!("write: {other:?}"),
+    // A non-exit syscall is serviced and the run continues: write is
+    // recorded by name, returns its count (x2), and the `ret` after it ends
+    // the run.
+    {
+        let p = image(&[WRITE, SVC, RET]);
+        let mut m = machine(&p);
+        m.set_budget(BUDGET);
+        assert!(m.set_register("x2", 7));
+        let run = m.run(BASE);
+        assert_eq!(run.stop, Stop::Returned, "{run:?}");
+        assert_eq!(m.api_names(), ["write"]);
+        assert_eq!(m.register("x0"), Some(7));
     }
     // ASM: an unallocated branch-register word
     match stop(&[0xd600_0000], &[], BUDGET).0 {

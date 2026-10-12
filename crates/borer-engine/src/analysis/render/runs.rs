@@ -6,6 +6,7 @@ use crate::analysis::decompile::interp::{End, Script, TextRun};
 use crate::analysis::decompile::signature::{Kind, Passing, Signature, passing, printed};
 use crate::analysis::decompile::{decompile_named, traces, verify};
 use crate::emulate::a64::Machine as A64Machine;
+use crate::emulate::calls::ApiCall;
 use crate::isa::Isa;
 use crate::text::one_line;
 
@@ -421,8 +422,11 @@ struct Machine {
     value: Option<u64>,
     /// Each buffer argument's bytes after the run, guard included.
     buffers: Vec<Option<Vec<u8>>>,
-    /// The imports it called, in order.
+    /// The names of the imports it called, in order.
     calls: Vec<String>,
+    /// Each serviced call rendered as `api(args) -> ret`, in order: the
+    /// behavior trace the arguments decode to.
+    call_lines: Vec<String>,
 }
 
 /// The register value a return of `bits` hands back: `rax`'s low bits,
@@ -508,7 +512,8 @@ fn run_machine(
         steps: run.steps,
         value,
         buffers,
-        calls: emu.api_calls().to_vec(),
+        calls: emu.api_names().iter().map(|s| (*s).to_owned()).collect(),
+        call_lines: emu.api_calls().iter().map(ApiCall::call_text).collect(),
     })
 }
 
@@ -566,6 +571,7 @@ fn run_a64(
         value,
         buffers,
         calls: Vec::new(),
+        call_lines: emu.api_calls().iter().map(ApiCall::call_text).collect(),
     })
 }
 
@@ -598,6 +604,9 @@ struct Outcome {
     verdict: Verdict,
     /// Statements the text ran, its callees' steps included.
     text_steps: usize,
+    /// The imports and syscalls the binary's run serviced, each rendered
+    /// `api(args) -> ret`, in order.
+    call_lines: Vec<String>,
 }
 
 impl Outcome {
@@ -608,6 +617,11 @@ impl Outcome {
                 .writes
                 .iter()
                 .map(|(_, b, _)| b.capacity() + size_of::<(usize, Vec<u8>, usize)>())
+                .sum::<usize>()
+            + self
+                .call_lines
+                .iter()
+                .map(|l| l.capacity() + size_of::<String>())
                 .sum::<usize>()
             + match &self.verdict {
                 Verdict::Agrees => 0,
@@ -739,18 +753,18 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
             return Verdict::Differs(writer.unwrap_or(line), what);
         }
     }
-    let (machine_calls, text_calls) = (&m.calls, t.emu.api_calls());
+    let (machine_calls, text_calls) = (&m.calls, t.emu.api_names());
     if let Some(i) = (0..machine_calls.len().max(text_calls.len()))
-        .find(|&i| machine_calls.get(i) != text_calls.get(i))
+        .find(|&i| machine_calls.get(i).map(String::as_str) != text_calls.get(i).copied())
     {
-        let say = |c: Option<&String>| c.map_or_else(|| "nothing".to_owned(), Clone::clone);
+        let say = |c: Option<&str>| c.map_or_else(|| "nothing".to_owned(), ToOwned::to_owned);
         return Verdict::Differs(
             line,
             format!(
                 "call {} of an import is {} in the text, {} in the binary",
                 i + 1,
-                say(text_calls.get(i)),
-                say(machine_calls.get(i))
+                say(text_calls.get(i).copied()),
+                say(machine_calls.get(i).map(String::as_str))
             ),
         );
     }
@@ -839,6 +853,7 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
             writes: Vec::new(),
             verdict: Verdict::Unchecked(None, "nothing ran".to_owned()),
             text_steps: 0,
+            call_lines: Vec::new(),
         };
     };
     let writes = input
@@ -867,6 +882,7 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
         writes,
         verdict,
         text_steps,
+        call_lines: m.call_lines,
     }
 }
 
@@ -904,9 +920,10 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
 ///
 /// # Returns
 ///
-/// The table, a line per input that differs or could not be checked, and
-/// when one differs, what the structure check and the lifter's check say
-/// of the function.
+/// The table, a line per input that differs or could not be checked, when
+/// one differs what the structure check and the lifter's check say of the
+/// function, and the imported APIs and syscalls the runs serviced, each
+/// `api(args) -> ret` with its arguments decoded by the type library.
 ///
 /// # Errors
 ///
@@ -1160,7 +1177,52 @@ fn render_runs(
         };
         let _ = writeln!(out, "# lifter check: {lifter}");
     }
+    api_calls_section(&mut out, req, outcomes);
     out
+}
+
+/// Call rows one run request lists before the rest are counted.
+const RUN_CALLS_SHOWN: usize = 48;
+
+/// Writes the imports and syscalls the runs serviced, grouped by input,
+/// each call `api(args) -> ret` with its arguments decoded by the type
+/// library ([`crate::emulate::calls`]).
+///
+/// A pure function calls nothing, so the section is written only when a run
+/// serviced a call; it is capped at [`RUN_CALLS_SHOWN`] lines with a
+/// `# showing N of M` count, since a long run can service many.
+///
+/// # Arguments
+///
+/// * `out` - The report so far.
+/// * `req` - The request, for the inputs the rows belong to.
+/// * `outcomes` - Each input's outcome, holding its serviced calls.
+fn api_calls_section(out: &mut String, req: &RunSpec, outcomes: &[Arc<Outcome>]) {
+    let total: usize = outcomes.iter().map(|o| o.call_lines.len()).sum();
+    if total == 0 {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "# api calls: showing {} of {total}, api(args) -> ret, by input",
+        total.min(RUN_CALLS_SHOWN)
+    );
+    let mut shown = 0usize;
+    for (input, outcome) in req.inputs.iter().zip(outcomes) {
+        for line in &outcome.call_lines {
+            if shown >= RUN_CALLS_SHOWN {
+                return;
+            }
+            let args: Vec<String> = input.iter().map(Arg::shown).collect();
+            let args = if args.is_empty() {
+                "-".to_owned()
+            } else {
+                args.join(" ")
+            };
+            let _ = writeln!(out, "{args}\t{line}");
+            shown += 1;
+        }
+    }
 }
 
 /// The seed the lifter's check runs from when a run differs, fixed so the

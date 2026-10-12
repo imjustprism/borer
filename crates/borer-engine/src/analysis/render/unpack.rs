@@ -456,13 +456,13 @@ pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resul
              anti-emulation guard; static emulation stops at this layer.\n",
         );
     }
-    let calls = emu.api_calls();
+    let calls = emu.api_names();
     if !calls.is_empty() {
-        let mut counts: Vec<(String, usize)> = Vec::new();
+        let mut counts: Vec<(&str, usize)> = Vec::new();
         for name in calls {
-            match counts.iter_mut().find(|(n, _)| n == name) {
+            match counts.iter_mut().find(|(n, _)| *n == name) {
                 Some((_, c)) => *c += 1,
-                None => counts.push((name.clone(), 1)),
+                None => counts.push((name, 1)),
             }
         }
         let shown: Vec<String> = counts
@@ -471,7 +471,7 @@ pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resul
                 if *c > 1 {
                     format!("{n} x{c}")
                 } else {
-                    n.clone()
+                    (*n).to_owned()
                 }
             })
             .collect();

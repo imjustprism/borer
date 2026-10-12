@@ -312,12 +312,34 @@ pub struct Generated {
     pub text: String,
 }
 
+/// One string a generator run passed to an imported API or syscall.
+///
+/// A generator does not always leave its plaintext in memory for
+/// [`written_text`] to read; sometimes it hands it straight to a call
+/// (`InternetOpenUrlW(url)`). The emulator decodes that argument when it
+/// services the call ([`crate::emulate::calls`]), which is a second place
+/// a run-time string shows up, and an indicator the run proves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmulatedArg {
+    /// The function whose run serviced the call.
+    pub built_by: u64,
+    /// Where the call was made: the return address or the syscall site.
+    pub at: u64,
+    /// The called function's name.
+    pub api: String,
+    /// The decoded string argument.
+    pub text: String,
+}
+
 /// What running a program's string generators recovered, and how the runs
 /// went.
 #[derive(Debug, Clone, Default)]
 pub struct Recovery {
     /// The strings recovered, in the order the runs found them.
     pub found: Vec<Generated>,
+    /// The string arguments the runs passed to imported APIs and syscalls,
+    /// in the order they were serviced.
+    pub emulated: Vec<EmulatedArg>,
     /// How many runs ended each way, by stop reason.
     pub stops: BTreeMap<String, usize>,
     /// Start points run.
@@ -391,6 +413,7 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
         }
     }
     let mut found: Vec<Generated> = Vec::new();
+    let mut emulated: Vec<EmulatedArg> = Vec::new();
     let mut stops: BTreeMap<String, usize> = BTreeMap::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut runs = 0usize;
@@ -398,6 +421,7 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
         let Some(mut emu) = Emulator::new(p, BUDGET) else {
             return Recovery {
                 found: Vec::new(),
+                emulated: Vec::new(),
                 stops,
                 runs,
                 generators: funcs.len(),
@@ -408,6 +432,16 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
         let run = emu.run(entry);
         runs += 1;
         *stops.entry(run.stop.to_string()).or_default() += 1;
+        for call in emu.api_calls() {
+            for text in call.strings() {
+                emulated.push(EmulatedArg {
+                    built_by: entry,
+                    at: call.caller,
+                    api: call.api.clone(),
+                    text: text.to_owned(),
+                });
+            }
+        }
         for (written_at, text) in written_text(&run.history, MIN_LEN) {
             if !want.is_empty() && !text.to_lowercase().contains(&want) {
                 continue;
@@ -422,6 +456,8 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
             });
         }
     }
+    emulated.sort_by(|l, r| (&l.text, l.at, &l.api).cmp(&(&r.text, r.at, &r.api)));
+    emulated.dedup();
     let texts: Vec<String> = found.iter().map(|g| g.text.clone()).collect();
     found.retain(|g| {
         !texts
@@ -430,6 +466,7 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
     });
     Recovery {
         found,
+        emulated,
         stops,
         runs,
         generators: funcs.len(),
@@ -464,6 +501,7 @@ fn recovered_matching(p: &Program, a: &Analysis, filter: &str) -> Recovery {
             .filter(|g| want.is_empty() || g.text.to_lowercase().contains(&want))
             .cloned()
             .collect(),
+        emulated: all.emulated.clone(),
         stops: all.stops.clone(),
         runs: all.runs,
         generators: all.generators,
@@ -496,6 +534,7 @@ pub fn hidden_strings(
         stops,
         runs,
         generators,
+        ..
     } = recovered_matching(p, a, filter);
     (found, stops, runs, generators)
 }
@@ -528,6 +567,7 @@ pub fn hidden_strings_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) 
         stops,
         runs,
         generators,
+        ..
     } = recovered_matching(p, a, filter);
     let total = found.len();
     let mut out = format!(
