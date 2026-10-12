@@ -294,3 +294,67 @@ fn a_void_prototype_whose_result_is_read_is_contradicted() {
     assert!(caller.contains("sub_401020(3);"), "{caller}");
     assert!(header.contains("declaration contradicted"), "{header}");
 }
+
+/// A layout recovered through a pointer parameter, applied, makes the
+/// re-decompiled text name the fields read through it.
+///
+/// The plan defines `Rec` from the accesses (a dword at 0x10, a qword at
+/// 0x18, a byte at 0x20) and states the signature the text already prints
+/// with `a1` typed `Rec *`; the body then reads `a1->f_10`, the text stays
+/// fully checked, and the caller's call is unchanged. A spec that starts
+/// inside the function, or names a register no access goes through, is
+/// refused rather than typing the wrong value.
+#[test]
+fn an_applied_layout_names_the_fields_read_through_its_pointer() {
+    use borer_engine::analysis::apply::from_pointer;
+    let mut code = vec![
+        0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+        0x48, 0x03, 0x41, 0x18, // ASM: add rax, [rcx+0x18]
+        0xc6, 0x41, 0x20, 0x01, // ASM: mov byte [rcx+0x20], 1
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0x48, 0x8d, 0x0d, 0xd9, 0x0f, 0x00, 0x00, // ASM: lea rcx, [rip+0xfd9]
+        0xe8, 0xd4, 0xff, 0xff, 0xff, // ASM: call 0x401000
+        0xc3, // ASM: ret
+    ]);
+    let p = image(&code);
+    let a = Analysis::compute(&p);
+    let plain = Overlay::default();
+    let (before, _) = decompiled(&p, &plain, 0x401_000);
+    assert!(before.contains("sub_401000(void *a1)"), "{before}");
+    assert!(before.contains("a1->field_0x10"), "{before}");
+    let (caller_before, _) = decompiled(&p, &plain, 0x401_020);
+    let plan = from_pointer(&p, &a, &plain, "0x401000,rcx", "Rec").expect("a plan");
+    assert_eq!(
+        plan.describe(&a, &plain),
+        [
+            "struct Rec (0x21 bytes): 0x10 f_10 u32, 0x18 f_18 u64, 0x20 f_20 u8",
+            "prototype sub_401000 (0x401000): uint64_t (Rec *)",
+        ]
+    );
+    let mut o = plain.clone();
+    plan.apply(&mut o);
+    let (after, header) = decompiled(&p, &o, 0x401_000);
+    assert!(
+        after.contains("// signature: uint64_t sub_401000(Rec *a1)"),
+        "{after}"
+    );
+    assert!(after.contains("a1->f_10"), "{after}");
+    assert!(after.contains("a1->f_18"), "{after}");
+    assert!(after.contains("a1->f_20 = 1;"), "{after}");
+    assert!(fully_checked(&header), "{header}");
+    let (caller_after, _) = decompiled(&p, &o, 0x401_020);
+    let body = |t: &str| {
+        t.lines()
+            .filter(|l| !l.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(body(&caller_after), body(&caller_before));
+    let inside = from_pointer(&p, &a, &plain, "0x401003,rcx", "Rec").expect_err("mid-function");
+    assert!(inside.contains("carries no parameter"), "{inside}");
+    let unused = from_pointer(&p, &a, &plain, "0x401000,rdx", "Rec").expect_err("no access");
+    assert!(unused.contains("no struct to apply"), "{unused}");
+}

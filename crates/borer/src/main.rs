@@ -747,6 +747,54 @@ impl BorerServer {
         })
     }
 
+    /// Answers a recovered layout's plan: what it would define and state,
+    /// or, applied, what it did.
+    ///
+    /// The struct and the prototypes are written to the overlay unless
+    /// `dry`, as `class_layout` and `borer://layout/...,apply=<Name>` do.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan ([`borer_engine::analysis::apply`]).
+    /// * `a` - The analysis, to name the functions.
+    /// * `o` - The overlay the plan was made under.
+    /// * `dry` - Say what would be done and write nothing.
+    ///
+    /// # Returns
+    ///
+    /// A line saying what was (or would be) done, then the plan's lines.
+    fn answer_plan(
+        &self,
+        plan: borer_engine::analysis::apply::Plan,
+        a: &Analysis,
+        o: &Overlay,
+        dry: bool,
+    ) -> String {
+        let head = format!(
+            "{} struct {} and {} {} prototype(s); decompile then names the fields:\n",
+            if dry {
+                "dry-run: would define"
+            } else {
+                "defined"
+            },
+            plan.name,
+            if dry { "state" } else { "stated" },
+            plan.prototypes.len()
+        );
+        let mut out = head;
+        for line in plan.describe(a, o) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        if dry {
+            out.push_str("pass dry_run=false to apply.\n");
+            return out;
+        }
+        plan.apply(&mut write_lock(&self.overlay));
+        self.names_changed();
+        out
+    }
+
     /// Defines the types C declarations state, laid out by the loaded
     /// binary's ABI ([`borer_engine::analysis::cdecl`]): `set_type` with
     /// `type` alone.
@@ -2386,7 +2434,9 @@ impl BorerServer {
         .map(|text| page.limit.noted(text))
     }
 
-    /// Renders a class layout recovered from its methods' field accesses.
+    /// Renders a class layout recovered from its methods' field accesses,
+    /// or with `apply` defines it as a user struct and types each method's
+    /// object with it ([`borer_engine::analysis::apply::from_class`]).
     ///
     /// # Arguments
     ///
@@ -2394,12 +2444,12 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, the address is not a class method, or nothing
-    /// belongs to the class.
+    /// When no binary is loaded, the address is not a class method, nothing
+    /// belongs to the class, or the struct to apply is refused.
     #[tool(
-        description = "Class layout from its methods: field offset, width, reads/writes, methods, vftable; takes a class name or a method address.",
+        description = "Class layout from its methods: field offset, width, reads/writes, methods, vftable; takes a class name or a method address; apply=Name defines it as a struct typing each method's object (dry-run unless dry_run=false).",
         annotations(
-            read_only_hint = true,
+            read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = false
@@ -2407,7 +2457,11 @@ impl BorerServer {
     )]
     fn class_layout(
         &self,
-        Parameters(ClassLayoutParams { class }): Parameters<ClassLayoutParams>,
+        Parameters(ClassLayoutParams {
+            class,
+            apply,
+            dry_run,
+        }): Parameters<ClassLayoutParams>,
     ) -> Result<String, ErrorData> {
         self.with_analysis(Feature::Decompile, |p, a, o| {
             let name = match self.function_entry(p, a, &class) {
@@ -2426,9 +2480,13 @@ impl BorerServer {
                         borer_engine::text::quoted(&name)
                     )
                 })?;
-            Ok(borer_engine::analysis::classes::render_layout(
-                &layout, a, o,
-            ))
+            let Some(apply) = &apply else {
+                return Ok(borer_engine::analysis::classes::render_layout(
+                    &layout, a, o,
+                ));
+            };
+            let plan = borer_engine::analysis::apply::from_class(p, a, o, &layout, apply)?;
+            Ok(self.answer_plan(plan, a, o, dry_run.unwrap_or(true)))
         })
     }
 
@@ -3604,7 +3662,9 @@ impl BorerServer {
     /// The script runs on a snapshot of the analysis and the overlay and
     /// holds no lock while it runs, so each `query` takes the locks any
     /// request does. A `query` of `borer://script/...` is refused, since a
-    /// script that ran scripts could recurse without end. A failed script
+    /// script that ran scripts could recurse without end, and so is one
+    /// saying `dry_run=false` (a layout applied), since a script only
+    /// proposes and `dry_run` here decides what is applied. A failed script
     /// still answers what it printed and proposed before its error, and
     /// applies nothing; a proposal the listings could not show, or at an
     /// address no section holds, is skipped and counted.
@@ -3640,6 +3700,12 @@ impl BorerServer {
             if uri.starts_with("borer://script/") {
                 return Err(
                     "a script cannot query borer://script/...: scripts do not run scripts"
+                        .to_owned(),
+                );
+            }
+            if uri.contains("dry_run=false") {
+                return Err(
+                    "a script proposes and applies nothing through query: drop dry_run=false"
                         .to_owned(),
                 );
             }
@@ -4726,7 +4792,7 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://layout/{spec}",
-        "Propose a structure from what a function does through one pointer: spec is <address>[,<register>] (default rcx, the first argument). Each row is a field with the width of the access and what it is passed to",
+        "Propose a structure from what a function does through one pointer: spec is <address>[,<register>] (default rcx, the first argument). Each row is a field with the width of the access and what it is passed to. Add ,apply=<Name> at a function's entry to define the fields as struct Name and type that parameter with it, so decompile names them (a dry run; add ,dry_run=false to apply)",
         "borer://layout/{entry},rcx",
     ),
     (
@@ -6389,6 +6455,112 @@ mod tests {
             bad.message.contains("types apply to data globals"),
             "{}",
             bad.message
+        );
+    }
+
+    /// `borer://layout/...,apply=Name` and `class_layout(apply=)` define a
+    /// struct and type the parameter, dry-run by default.
+    ///
+    /// The dry run names the struct and the prototype and writes nothing;
+    /// `dry_run=false` writes both and the re-decompiled function reads
+    /// `a1->f_10`; a script cannot apply through `query`.
+    ///
+    /// # Panics
+    ///
+    /// When the dry run writes, the applied text misses a field, or a
+    /// refusal accepts.
+    #[test]
+    fn a_layout_applies_as_a_struct_on_request() {
+        use super::{ClassLayoutParams, DecompileParams, Parameters, ScriptParams, TypesParams};
+        use borer_engine::program::{Arch, Program, Section};
+        let mut bytes = vec![0xccu8; 0x1000];
+        bytes[..12].copy_from_slice(&[
+            0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+            0x48, 0x03, 0x41, 0x18, // ASM: add rax, [rcx+0x18]
+            0xc6, 0x41, 0x20, 0x01, // ASM: mov byte [rcx+0x20], 1
+            0xc3, // ASM: ret
+        ]);
+        let text = Section::mapped(".text", 0x401_000, 0, 0x1000, false, true);
+        let program = Program::raw(bytes, Arch::X86_64, 0x400_000, Some(0x401_000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let types = || {
+            server
+                .types(Parameters(TypesParams {
+                    filter: None,
+                    offset: None,
+                    limit: None,
+                    count_only: Some(true),
+                }))
+                .expect("lists")
+        };
+        let dry = server
+            .resource_text("borer://layout/0x401000,rcx,apply=Rec")
+            .expect("a dry run");
+        assert_eq!(
+            dry,
+            "dry-run: would define struct Rec and state 1 prototype(s); decompile then names the fields:\nstruct Rec (0x21 bytes): 0x10 f_10 u32, 0x18 f_18 u64, 0x20 f_20 u8\nprototype sub_401000 (0x401000): uint64_t (Rec *)\npass dry_run=false to apply.\n"
+        );
+        assert!(types().starts_with("# 0 rows"), "{}", types());
+        let scripted = server
+            .script(Parameters(ScriptParams {
+                code: "print(query(\"borer://layout/0x401000,apply=Rec,dry_run=false\"));"
+                    .to_owned(),
+                dry_run: None,
+            }))
+            .expect("a script answers");
+        assert!(
+            scripted.contains("applies nothing through query"),
+            "{scripted}"
+        );
+        assert!(types().starts_with("# 0 rows"), "{}", types());
+        let done = server
+            .resource_text("borer://layout/0x401000,apply=Rec,dry_run=false")
+            .expect("applies");
+        assert!(
+            done.starts_with("defined struct Rec and stated 1 prototype(s)"),
+            "{done}"
+        );
+        assert!(
+            types().starts_with("# 2 rows (1 type(s), 0 applied)"),
+            "{}",
+            types()
+        );
+        let text = server
+            .decompile(Parameters(DecompileParams {
+                address: "0x401000".to_owned(),
+                detail: None,
+                filter: None,
+                offset: None,
+                limit: None,
+            }))
+            .expect("decompiles");
+        assert!(text.contains("a1->f_10"), "{text}");
+        assert!(text.contains("a1->f_20 = 1;"), "{text}");
+        let bad = server
+            .resource_text("borer://layout/0x401003,apply=Rec")
+            .expect_err("mid-function");
+        assert!(
+            bad.message.contains("carries no parameter"),
+            "{}",
+            bad.message
+        );
+        let no_class = server
+            .class_layout(Parameters(ClassLayoutParams {
+                class: "Nope".to_owned(),
+                apply: Some("N".to_owned()),
+                dry_run: None,
+            }))
+            .expect_err("no such class");
+        assert!(
+            no_class.message.contains("no function belongs"),
+            "{}",
+            no_class.message
         );
     }
 

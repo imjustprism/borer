@@ -5100,3 +5100,43 @@ fn the_oracle_lists_each_failed_shape_once() {
         "{out}"
     );
 }
+
+/// A class layout, applied, defines its struct and types each method's
+/// object with it, so the re-decompiled methods name the fields.
+///
+/// `Cls` reads a qword at 0, a dword at 8 and writes a qword at 0x10, and
+/// hands the address of an embedded `Other` at 0x20 on: the struct takes
+/// the three, notes the embedded one it cannot size, and every method's
+/// first parameter becomes a `ClsS *`.
+#[test]
+fn an_applied_class_layout_types_each_methods_object() {
+    use borer_engine::analysis::apply::from_class;
+    use borer_engine::analysis::classes::class_layout;
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let plain = Overlay::default();
+    let layout = class_layout(&p, &a, &plain, "Cls").expect("class found");
+    let plan = from_class(&p, &a, &plain, &layout, "ClsS").expect("a plan");
+    assert_eq!(
+        plan.describe(&a, &plain),
+        [
+            "struct ClsS (0x18 bytes): 0x0 f_0 u64, 0x8 f_8 u32, 0x10 f_10 u64",
+            "prototype Cls::Set (0x1640): void (ClsS *this, int)",
+            "prototype Cls::Has (0x1660): bool (ClsS *this, int)",
+            "prototype sub_40f4 (0x40f4): uint32_t (ClsS *)",
+            "# 0x20 is only addressed (an embedded object), so it states no width; left out",
+        ]
+    );
+    let before =
+        borer_engine::analysis::decompile::decompile(&p, &a, &plain, 0x1640).expect("text");
+    assert!(before.contains("this->field_0x8 = a2;"), "{before}");
+    let mut o = plain;
+    plan.apply(&mut o);
+    let set = borer_engine::analysis::decompile::decompile(&p, &a, &o, 0x1640).expect("text");
+    assert!(
+        set.contains("// signature: void Cls::Set(ClsS *this, int a2)"),
+        "{set}"
+    );
+    assert!(set.contains("this->f_8 = a2;"), "{set}");
+    assert!(set.contains("this->f_10 = "), "{set}");
+}

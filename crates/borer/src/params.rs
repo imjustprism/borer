@@ -470,6 +470,10 @@ pub(crate) struct XrefsParams {
 pub(crate) struct ClassLayoutParams {
     /// Class name or a method address.
     pub(crate) class: String,
+    /// Struct name to define the layout as.
+    pub(crate) apply: Option<String>,
+    /// Preview only; false applies.
+    pub(crate) dry_run: Option<bool>,
 }
 
 /// Parameters for `callgraph`.
@@ -614,7 +618,7 @@ pub(crate) struct SetTypeParams {
     pub(crate) size: Option<u64>,
     /// Data global to type, or a function for a prototype or `var`.
     pub(crate) address: Option<String>,
-    /// The type to apply, a typedef's target (`Player *`), a prototype (`int f(Player *p)`), or alone C declarations (struct/enum/typedef, #pragma pack; `// @0x10` after a field or `static_assert(offsetof(S,f)==N)` asserts offsets).
+    /// The type to apply, a typedef's target (`Player *`), a prototype (`int f(Player *p)`), or alone C declarations (struct/enum/typedef, #pragma pack, `// @0x10` offset asserts).
     pub(crate) r#type: Option<String>,
     /// Variable of the function at `address` to name/type (`a1`, `local_58`).
     pub(crate) var: Option<String>,

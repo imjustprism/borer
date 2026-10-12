@@ -336,17 +336,180 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
 pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     /// Fields reported before the rest are counted.
     const FIELDS_MAX: usize = 64;
+    let Accesses {
+        spec: ValueSpec { entry, wanted, .. },
+        fields,
+        taken,
+    } = accesses(p, a, o, spec)?;
+    let mut out = format!(
+        "# structure through {wanted} of {}, from {} access site(s)\n",
+        short_name(a, o, entry),
+        fields.values().map(|f| f.sites.len()).sum::<usize>()
+    );
+    if fields.is_empty() && taken.is_empty() {
+        out.push_str("# nothing is accessed through it in this function\n");
+        return Ok(out);
+    }
+    let offsets: BTreeSet<i64> = fields.keys().chain(taken.keys()).copied().collect();
+    let width = |at: &i64| {
+        fields.get(at).map_or(0, |f| {
+            i64::from(f.widths.iter().copied().max().unwrap_or(0))
+        })
+    };
+    let low = offsets.first().copied().unwrap_or(0).min(0);
+    let high = offsets
+        .iter()
+        .map(|at| at.saturating_add(width(at)))
+        .max()
+        .unwrap_or(0);
+    let _ = writeln!(
+        out,
+        "# {} field(s) over {:#x} bytes\n# offset  size  access        seen",
+        offsets.len(),
+        high.saturating_sub(low)
+    );
+    for at in offsets.iter().take(FIELDS_MAX) {
+        let shown = if *at < 0 {
+            format!("-{:#x}", at.unsigned_abs())
+        } else {
+            format!("{at:#x}")
+        };
+        let note = taken.get(at).map_or(String::new(), |n| format!("  {n}"));
+        let Some(f) = fields.get(at) else {
+            let _ = writeln!(out, "{shown:<8} {:<5} {:<13} -{note}", "-", "addressed");
+            continue;
+        };
+        let access = match (f.read, f.written) {
+            (true, true) => "read, written",
+            (true, false) => "read",
+            (false, true) => "written",
+            (false, false) => "addressed",
+        };
+        let mut widths = f.widths.clone();
+        widths.sort_unstable();
+        let size = widths
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join("/");
+        let _ = writeln!(
+            out,
+            "{shown:<8} {size:<5} {access:<13} {}x{note}",
+            f.sites.len()
+        );
+    }
+    more_line(&mut out, offsets.len(), FIELDS_MAX, "fields not listed");
+    Ok(out)
+}
+
+/// The fields a pointer's accesses show, for a struct to be stated from
+/// them ([`crate::analysis::apply::from_pointer`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerFields {
+    /// Entry of the function the pointer is followed through.
+    pub entry: u64,
+    /// The register followed, lowercase as the spec spelled it.
+    pub register: String,
+    /// The parameter position the register holds, when the spec starts at
+    /// the function's entry and the register carries an argument there.
+    pub param: Option<usize>,
+    /// The widest access at each offset, in bytes.
+    pub widths: BTreeMap<i64, u32>,
+    /// The offsets only handed to calls, which state no width.
+    pub addressed: Vec<i64>,
+}
+
+/// Reads the fields a function's accesses through one pointer show, as
+/// [`layout_tsv`] proposes them, with the parameter the pointer arrives
+/// in.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names and types.
+/// * `spec` - `<address>` or `<address>,<register>`, as [`layout_tsv`]
+///   reads it.
+///
+/// # Returns
+///
+/// The fields and where the pointer comes from.
+///
+/// # Errors
+///
+/// When the spec is refused or the function's code does not read.
+pub fn layout_fields(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    spec: &str,
+) -> Result<PointerFields, String> {
+    let Accesses {
+        spec: parsed,
+        fields,
+        taken,
+    } = accesses(p, a, o, spec)?;
+    let param = (parsed.start == parsed.entry)
+        .then(|| {
+            crate::analysis::decompile::signature::passing(p, a, o, parsed.entry)
+                .regs
+                .iter()
+                .position(|r| r.full_register() == parsed.seed.full_register())
+        })
+        .flatten();
+    Ok(PointerFields {
+        entry: parsed.entry,
+        register: parsed.wanted,
+        param,
+        widths: fields
+            .iter()
+            .filter_map(|(at, f)| Some((*at, f.widths.iter().copied().max()?)))
+            .collect(),
+        addressed: taken
+            .keys()
+            .filter(|at| !fields.contains_key(at))
+            .copied()
+            .collect(),
+    })
+}
+
+/// What a function does through one pointer: the fields it reads and
+/// writes by offset, and the offsets it only hands to calls.
+struct Accesses {
+    /// The parsed spec.
+    spec: ValueSpec,
+    /// The fields accessed, by offset from the pointer.
+    fields: BTreeMap<i64, Field>,
+    /// The offsets handed to calls, with what each call is.
+    taken: BTreeMap<i64, String>,
+}
+
+/// Follows one pointer through a function, collecting what [`layout_tsv`]
+/// reports (its documentation says how the offsets are tracked).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `spec` - `<address>` or `<address>,<register>`.
+///
+/// # Errors
+///
+/// When the spec is refused or the function's code does not read.
+fn accesses(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Accesses, String> {
     /// Passes over the function, so a loop's back edge is followed once.
     const PASSES: usize = 2;
     /// Largest offset treated as a field rather than an unrelated pointer.
     const SPAN_MAX: i64 = 1 << 16;
+    let parsed = ValueSpec::parse(a, o, spec, p.arch.bitness().or(Some(64)), |n| n.first_arg)?;
     let ValueSpec {
         start,
         entry,
-        wanted,
         seed,
         bitness,
-    } = ValueSpec::parse(a, o, spec, p.arch.bitness().or(Some(64)), |n| n.first_arg)?;
+        ..
+    } = parsed;
     let instrs = function_instructions(p, a, entry);
     if instrs.is_empty() {
         return Err(format!("no code at {entry:#x}"));
@@ -444,65 +607,11 @@ pub fn layout_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<
             }
         }
     }
-    let mut out = format!(
-        "# structure through {wanted} of {}, from {} access site(s)\n",
-        short_name(a, o, entry),
-        fields.values().map(|f| f.sites.len()).sum::<usize>()
-    );
-    if fields.is_empty() && taken.is_empty() {
-        out.push_str("# nothing is accessed through it in this function\n");
-        return Ok(out);
-    }
-    let offsets: BTreeSet<i64> = fields.keys().chain(taken.keys()).copied().collect();
-    let width = |at: &i64| {
-        fields.get(at).map_or(0, |f| {
-            i64::from(f.widths.iter().copied().max().unwrap_or(0))
-        })
-    };
-    let low = offsets.first().copied().unwrap_or(0).min(0);
-    let high = offsets
-        .iter()
-        .map(|at| at.saturating_add(width(at)))
-        .max()
-        .unwrap_or(0);
-    let _ = writeln!(
-        out,
-        "# {} field(s) over {:#x} bytes\n# offset  size  access        seen",
-        offsets.len(),
-        high.saturating_sub(low)
-    );
-    for at in offsets.iter().take(FIELDS_MAX) {
-        let shown = if *at < 0 {
-            format!("-{:#x}", at.unsigned_abs())
-        } else {
-            format!("{at:#x}")
-        };
-        let note = taken.get(at).map_or(String::new(), |n| format!("  {n}"));
-        let Some(f) = fields.get(at) else {
-            let _ = writeln!(out, "{shown:<8} {:<5} {:<13} -{note}", "-", "addressed");
-            continue;
-        };
-        let access = match (f.read, f.written) {
-            (true, true) => "read, written",
-            (true, false) => "read",
-            (false, true) => "written",
-            (false, false) => "addressed",
-        };
-        let mut widths = f.widths.clone();
-        widths.sort_unstable();
-        let size = widths
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join("/");
-        let _ = writeln!(
-            out,
-            "{shown:<8} {size:<5} {access:<13} {}x{note}",
-            f.sites.len()
-        );
-    }
-    more_line(&mut out, offsets.len(), FIELDS_MAX, "fields not listed");
-    Ok(out)
+    Ok(Accesses {
+        spec: parsed,
+        fields,
+        taken,
+    })
 }
 
 /// One offset a function touches through a pointer.

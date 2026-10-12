@@ -8,6 +8,7 @@
 mod a64;
 pub mod about;
 pub mod anchors;
+pub mod apply;
 pub mod attributes;
 pub mod cdecl;
 pub mod classes;

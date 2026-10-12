@@ -565,19 +565,40 @@ impl BorerServer {
         })
     }
 
-    /// Proposes a structure from a pointer's accesses.
+    /// Proposes a structure from a pointer's accesses, or with `apply=Name`
+    /// defines it as a user struct and types the parameter the pointer
+    /// arrives in ([`borer_engine::analysis::apply::from_pointer`]): a dry
+    /// run unless the spec also says `dry_run=false`.
     ///
     /// # Arguments
     ///
-    /// * `spec` - `<address>[,<register>]`.
+    /// * `spec` - `<address>[,<register>][,apply=<Name>][,dry_run=false]`.
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, it has no code analysis, or the spec is
-    /// refused.
+    /// When no binary is loaded, it has no code analysis, or the spec or
+    /// the struct to apply is refused.
     pub(crate) fn layout_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Decompile, |p, a, o| {
-            render::layout_tsv(p, a, o, spec)
+        let mut apply: Option<&str> = None;
+        let mut dry = true;
+        let mut kept: Vec<&str> = Vec::new();
+        for part in spec.split(',') {
+            match part.trim() {
+                "dry_run=false" => dry = false,
+                "dry_run=true" => dry = true,
+                t => match t.strip_prefix("apply=") {
+                    Some(name) => apply = Some(name),
+                    None => kept.push(part),
+                },
+            }
+        }
+        let spec = kept.join(",");
+        self.refusing(Feature::Decompile, |p, a, o| match apply {
+            None => render::layout_tsv(p, a, o, &spec),
+            Some(name) => {
+                let plan = borer_engine::analysis::apply::from_pointer(p, a, o, &spec, name)?;
+                Ok(self.answer_plan(plan, a, o, dry))
+            }
         })
     }
 
