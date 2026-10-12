@@ -4,25 +4,25 @@
 //!
 //! Phase 1 walks the facts: the entry point, the symbols and the extents
 //! the file declares. A walk follows every branch, takes a `bl` target as a
-//! new function, takes a `b` as a tail call when it enters a known start
-//! or leaves the extent the file declares for the function ([`jump_kind`]),
+//! new function, takes a `b` as a tail call when it enters a known start or
+//! leaves the extent the file declares for the function ([`jump_kind`]),
 //! and stops after a call that never returns: one to a function named as
-//! never returning, or one followed by another function's start or by a
-//! word only a function opens with. An indirect
-//! `br` ends the path; jump tables are not resolved yet. A function whose
-//! walk followed a jump into what later proved a start, a call into what
-//! later proved never to return, or the fall-through of a call to where
-//! another function later proved to start, is walked again, round after
-//! round. Phase 2 guesses: every gap no block covers is swept a word at a
-//! time, and where it opens (its first word, or the word after padding or
-//! after an instruction control does not fall through) on a word a
-//! function opens with ([`prologue::opens`]), or on any word outside the
+//! never returning (or to an import named so, through its stub or its
+//! slot), or one followed by another function's start or by a word only a
+//! function opens with. An indirect `br` ends the path; jump tables are not
+//! resolved yet. A jump to a stub after an import is a tail call. A
+//! function whose walk followed a jump into what later proved a start, a
+//! call into what later proved never to return, or the fall-through of a
+//! call to where another function later proved to start, is walked again,
+//! round after round. Phase 2 guesses: every gap no block covers is swept a
+//! word at a time, and where it opens (its first word, or the word after
+//! padding or after an instruction control does not fall through) on a word
+//! a function opens with ([`prologue::opens`]), or on any word outside the
 //! extents of a file that declares them, the word is walked as a guess
 //! ([`Discovery::gap_seeds`]), kept only when the walk decodes nothing that
-//! is not code, finds a way out, does not run into another function or
-//! into code one covers, and does not lie inside a guess kept before it.
-//! Each accepted guess shrinks its gap, so rounds go on until one adds
-//! nothing.
+//! is not code, finds a way out, does not run into another function or into
+//! code one covers, and does not lie inside a guess kept before it. Each
+//! accepted guess shrinks its gap, so rounds go on until one adds nothing.
 //!
 //! Every walk of a wave reads the starts and the functions known never to
 //! return as they stood when the wave began, so the walks of a wave run
@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{prologue, refs};
+use super::{prologue, refs, stubs};
 use crate::analysis::functions::{
     GAP_ROUNDS_MAX, GUESS_WALK_MAX, SEEDS_MAX, SPLIT_ROUNDS_MAX, build_callers_and_names, fuel_for,
     is_noreturn_name, mix, push_site,
@@ -133,6 +133,10 @@ impl<'a> Text<'a> {
 struct Known<'a> {
     /// The code.
     text: &'a Text<'a>,
+    /// The slots the file names imports in.
+    import_slots: &'a FxHashSet<u64>,
+    /// The slots of the imports named as never returning.
+    noreturn_slots: &'a FxHashSet<u64>,
     /// Function starts known when the wave began.
     starts: &'a FxHashSet<u64>,
     /// Functions known never to return when the wave began.
@@ -216,10 +220,39 @@ impl Known<'_> {
         self.declared.get(k).is_some_and(|r| r.0 <= hi)
     }
 
+    /// Tells whether a stub after an import starts at `t` ([`stubs::slot`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `t` - The address.
+    fn stub(&self, t: u64) -> bool {
+        !self.import_slots.is_empty()
+            && stubs::slot(self.text, t).is_some_and(|s| self.import_slots.contains(&s))
+    }
+
+    /// Tells whether a call to `t`, or the call `insn` through a register,
+    /// reaches an import named as never returning through its slot: a stub
+    /// at `t` ([`stubs::slot`]), or the slot the call's register was loaded
+    /// from ([`stubs::slot_call`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `insn` - The call.
+    /// * `t` - Its direct target, when it has one.
+    fn noreturn_import(&self, insn: &Insn, t: Option<u64>) -> bool {
+        !self.noreturn_slots.is_empty()
+            && t.map_or_else(
+                || stubs::slot_call(self.text, insn),
+                |t| stubs::slot(self.text, t),
+            )
+            .is_some_and(|s| self.noreturn_slots.contains(&s))
+    }
+
     /// Tells whether a branch from the function at `entry` to `t` leaves
-    /// it: `t` is a known start, lies outside the extent the file declares
-    /// for the function, or, where it declares none, past another function
-    /// the file declares ([`Known::declared_between`]).
+    /// it: `t` is a known start or a stub after an import, lies outside the
+    /// extent the file declares for the function, or, where it declares
+    /// none, past another function the file declares
+    /// ([`Known::declared_between`]).
     ///
     /// # Arguments
     ///
@@ -227,6 +260,7 @@ impl Known<'_> {
     /// * `t` - A branch target.
     fn leaves(&self, entry: u64, t: u64) -> bool {
         self.starts.contains(&t)
+            || self.stub(t)
             || self
                 .within_extent(entry, t)
                 .map_or_else(|| self.declared_between(entry, t), |inside| !inside)
@@ -455,7 +489,9 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
                 if next != entry && known.start_at(next) {
                     found_noreturn.extend(callee);
                     terminated = true;
-                } else if callee.is_some_and(|t| known.noreturn.contains(&t)) {
+                } else if callee.is_some_and(|t| known.noreturn.contains(&t))
+                    || known.noreturn_import(&insn, insn.target())
+                {
                     terminated = true;
                 } else {
                     followed_calls.extend(callee);
@@ -791,6 +827,10 @@ struct Discovery<'a> {
     /// function's start follows that their own code does not show
     /// returning.
     noreturn: FxHashSet<u64>,
+    /// The slots the file names imports in.
+    import_slots: &'a FxHashSet<u64>,
+    /// The slots of the imports named as never returning.
+    noreturn_slots: &'a FxHashSet<u64>,
     /// Callees another function's start followed, held until the round
     /// ends ([`Discovery::promote_noreturn`]).
     claimed: BTreeSet<u64>,
@@ -885,6 +925,8 @@ impl Discovery<'_> {
             let program = self.program;
             let known = Known {
                 text,
+                import_slots: self.import_slots,
+                noreturn_slots: self.noreturn_slots,
                 starts: &starts,
                 noreturn: &noreturn,
                 declared: &program.function_ranges,
@@ -1106,12 +1148,25 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         .filter(|s| is_noreturn_name(bare_name(&crate::search::demangled_name(&s.name))))
         .map(|s| s.addr)
         .collect();
+    let imports = || {
+        program
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
+    };
+    let import_slots: FxHashSet<u64> = imports().map(|s| s.addr).collect();
+    let noreturn_slots: FxHashSet<u64> = imports()
+        .filter(|s| is_noreturn_name(bare_name(&crate::search::demangled_name(&s.name))))
+        .map(|s| s.addr)
+        .collect();
     let mut d = Discovery {
         program,
         fuel: fuel_for(program),
         incomplete: false,
         starts: seeds.iter().copied().collect(),
         noreturn,
+        import_slots: &import_slots,
+        noreturn_slots: &noreturn_slots,
         claimed: BTreeSet::new(),
         queue: seeds,
         done: FxHashSet::default(),
@@ -1153,7 +1208,18 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         .filter(|f| f.instr_count > 0)
         .collect();
     build_callers_and_names(program, &mut analysis.functions);
+    stubs::name(program, &text, &mut analysis.functions);
     refs::index(program, &text, &analysis.functions, &mut analysis.xrefs);
     analysis.finish_index(program);
     analysis
+}
+
+/// Tells whether an instruction lets the one after it run next: it falls
+/// through, branches only conditionally, or calls.
+///
+/// # Arguments
+///
+/// * `insn` - The instruction.
+pub(super) fn falls_through(insn: &Insn) -> bool {
+    matches!(insn.flow, Flow::Next | Flow::CondJump | Flow::Call)
 }

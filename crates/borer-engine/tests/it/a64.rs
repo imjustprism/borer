@@ -1906,6 +1906,39 @@ fn slot(name: &str) -> u64 {
     0x40_2040 + 8 * u64::try_from(k).expect("few")
 }
 
+/// Every stub shape is named after the import its slot holds and keeps
+/// the slot as its thunk.
+///
+/// An ELF PLT entry, a Mach-O `__stubs` entry (the PE thunk's shape too), a
+/// Mach-O `__auth_stubs` entry and a PLT entry landed with `bti c` that
+/// authenticates its jump. A function that only loads from a slot is no
+/// stub.
+#[test]
+fn stubs_of_every_shape_are_named_after_their_imports() {
+    let a = Analysis::compute(&refs_image(&REFS, &refs_data()));
+    for (off, name) in [
+        (0x58, "puts"),
+        (0x68, "malloc"),
+        (0x74, "strlen"),
+        (0x84, "abort"),
+    ] {
+        let f = a.function(TEXT + off).expect("the stub is a function");
+        assert_eq!(
+            (f.name.as_deref(), f.name_source, f.thunk),
+            (Some(name), NameSource::Symbol, Some(slot(name))),
+            "{off:#x}"
+        );
+    }
+    let exits = a.function(TEXT + 0xac).expect("exits");
+    assert_eq!((exits.name.as_deref(), exits.thunk), (None, None));
+    let main = a.function(TEXT).expect("main");
+    assert!(
+        [0x58, 0x68, 0x74]
+            .iter()
+            .all(|off| main.callees.contains(&(TEXT + off)))
+    );
+}
+
 /// An `adrp` and an `add` form a string's address, which is a data
 /// reference from the `add`, read by the string tools. A callee-saved
 /// register keeps its page across a call; an argument register does not.
@@ -1933,7 +1966,8 @@ fn an_adrp_add_pair_references_its_string() {
 }
 
 /// A `blr` through a register loaded from an import's slot calls through
-/// the slot, and the callgraph names the import behind the slot.
+/// the slot, and the callgraph names the imports behind the slot and the
+/// stubs.
 #[test]
 fn a_call_through_an_import_slot_is_a_call_to_the_slot() {
     let p = refs_image(&REFS, &refs_data());
@@ -1945,5 +1979,21 @@ fn a_call_through_an_import_slot_is_a_call_to_the_slot() {
         .collect();
     assert_eq!(sites, [(0x30, RefKind::Data), (0x34, RefKind::Call)]);
     let graph = render::callgraph_mermaid(&p, &a, &Overlay::default(), TEXT, 30, false);
-    assert!(graph.contains("\"free\""), "{graph}");
+    for name in ["free", "puts", "malloc", "strlen"] {
+        assert!(graph.contains(&format!("\"{name}\"")), "{name}: {graph}");
+    }
+}
+
+/// A call to an import that never returns ends its path, through a stub
+/// and through the slot alike: the dead code after it is not the
+/// caller's.
+#[test]
+fn calls_to_imports_that_never_return_end_their_path() {
+    let a = Analysis::compute(&refs_image(&REFS, &refs_data()));
+    let extent = |off: u64| {
+        let f = a.function(TEXT + off).expect("a function");
+        (f.end - TEXT, f.instr_count)
+    };
+    assert_eq!(extent(0x9c), (0xa4, 2));
+    assert_eq!(extent(0xac), (0xbc, 4));
 }
