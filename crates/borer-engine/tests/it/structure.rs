@@ -879,11 +879,12 @@ fn a_block_that_falls_out_of_its_function_jumps_out() {
 /// graph's, on the side that holds the path the other lacks.
 ///
 /// `C4,K,C1,R,R` is a loop whose blocks call `2`, `2` and `3` and that
-/// leaves on a test to a return; its own text agrees. With the call of `3`
-/// taken out or written twice, or with the loop's test leaving where it
-/// continues, the text claims a path the binary lacks (`2` right after
-/// `2`, `3` after `3`, a return after `3`); with the return turned into a
-/// `continue`, the binary has a path the text lacks: it leaves the loop.
+/// leaves on a test to a return, a `do`/`while`; its own text agrees. With
+/// the call of `3` taken out or written twice, or moved out of the loop
+/// past its test, the text claims a path the binary lacks (`2` right
+/// after `2`, `3` after `3`, a round of `2`s with no `3`); with the loop
+/// written as an `if` that runs its body once, the binary has a path the
+/// text lacks: a second round.
 #[test]
 fn the_structure_check_rejects_a_text_that_is_not_the_graph() {
     use borer_engine::analysis::decompile::traces::{Side, Structure, check_structure};
@@ -914,6 +915,12 @@ fn the_structure_check_rejects_a_text_that_is_not_the_graph() {
         .unwrap_or_default()
         .to_owned();
     assert!(!call.is_empty() && exit.contains("return"), "{text}");
+    let test = text
+        .lines()
+        .find_map(|l| l.strip_prefix("} while (")?.strip_suffix(");"))
+        .unwrap_or_default()
+        .to_owned();
+    assert!(!test.is_empty() && text.contains("do {"), "{text}");
     let mutants = [
         (
             text.replacen(
@@ -937,8 +944,19 @@ fn the_structure_check_rejects_a_text_that_is_not_the_graph() {
             ),
             Side::Text,
         ),
-        (text.replacen("continue;", "break;", 1), Side::Text),
-        (text.replacen(&exit, "  continue;", 1), Side::Binary),
+        (
+            text.replacen(
+                &format!("{call}\n}} while ({test});"),
+                &format!("}} while ({test});\n{}", call.trim_start()),
+                1,
+            ),
+            Side::Text,
+        ),
+        (
+            text.replacen("do {", &format!("if ({test}) {{"), 1)
+                .replacen(&format!("}} while ({test});"), "}", 1),
+            Side::Binary,
+        ),
     ];
     for (mutant, by) in mutants {
         assert_ne!(mutant, text);

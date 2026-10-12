@@ -3032,6 +3032,51 @@ fn a_dead_block_inside_a_loop_does_not_veto_it() {
     assert_eq!(text.matches("rcx += 1;").count(), 1, "{text}");
 }
 
+/// A loop whose body ends `if (c) break;` is a `do`/`while` on `!c`.
+///
+/// `xor eax,eax; xor ecx,ecx; test r8d,r8d; je X; L: cmp byte [rdx+rcx],0;
+/// je S; inc eax; S: inc ecx; cmp ecx,r8d; jae X; jmp L; X: add eax,ecx;
+/// ret`: the latch leaves on its taken side and goes round through a jump,
+/// so the body's last line breaks out, and the loop reads as the bottom
+/// test it is.
+#[test]
+fn a_loop_ending_in_a_conditional_break_is_a_do_while() {
+    let code = [
+        0x31, 0xc0, 0x31, 0xc9, 0x45, 0x85, 0xc0, 0x74, 0x11, 0x80, 0x3c, 0x0a, 0x00, 0x74, 0x02,
+        0xff, 0xc0, 0xff, 0xc1, 0x44, 0x39, 0xc1, 0x73, 0x02, 0xeb, 0xef, 0x01, 0xc8, 0xc3,
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains("while (1)"), "{text}");
+    assert!(!text.contains("break;"), "{text}");
+    assert!(
+        text.contains("} while ((uint32_t)rcx < (uint32_t)a3);"),
+        "{text}"
+    );
+}
+
+/// A loop that goes round on `if (c) continue;` and runs a tail once it
+/// stops is a `do`/`while` followed by that tail.
+///
+/// `test rcx,rcx; je J; mov rax,rcx; L: mov rcx,rax; mov rax,[rax]; test
+/// rax,rax; jne L; mov [rcx],edx; J: xor eax,eax; ret` walks a list to its
+/// last node and stores through it: the store moves after the loop.
+#[test]
+fn a_loop_going_round_on_continue_keeps_its_tail_after_it() {
+    let code = [
+        0x48, 0x85, 0xc9, 0x74, 0x10, 0x48, 0x89, 0xc8, 0x48, 0x89, 0xc1, 0x48, 0x8b, 0x00, 0x48,
+        0x85, 0xc0, 0x75, 0xf5, 0x89, 0x11, 0x31, 0xc0, 0xc3,
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains("while (1)"), "{text}");
+    assert!(!text.contains("continue;"), "{text}");
+    assert!(
+        text.contains("} while (rax != 0);\n  *(uint32_t*)rcx = a2;"),
+        "{text}"
+    );
+}
+
 /// A string-compare ladder and a constant-to-string table both yield an
 /// enum in the header.
 ///

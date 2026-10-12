@@ -20,9 +20,9 @@ use super::*;
 /// run before every test of the condition, so they are written again after
 /// the body, or the loop becomes `while (1) { header; if (!cond) break; ...}`
 /// when the body contains a `continue` that would skip that copy; a loop
-/// whose body ends `if (c) continue;` and then leaves (`break;` or a
-/// `return`) and continues nowhere else at its own level is
-/// `do { ... } while (c);` followed by the return, if any; an `if`
+/// whose body ends testing whether to go round again (`if (c) break;`, or
+/// `if (c) continue;` and then leaving) and continues nowhere else at its
+/// own level is `do { ... } while (c);` ([`latch_of`]); an `if`
 /// (target side), an inverted `if` (fall-through side), an `if/else` (in
 /// the last attempt, arms leaving through several exits still structure
 /// when exactly one exit is common to both: it is the continuation and the
@@ -568,7 +568,9 @@ pub(super) fn copy_chain<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, start: 
 /// the natural fall-through block breaks, but an exit region that leaves
 /// nowhere (it returns) is still written inline, copying a tail that calls
 /// before it returns when that is the only way the region leaves nowhere.
-/// The header's label is the loop's entry and goes in front of the loop.
+/// The header's label is the loop's entry and goes in front of the loop. A
+/// body that ends by testing whether to go round again is a `do`/`while`
+/// instead ([`latch_of`]).
 ///
 /// # Arguments
 ///
@@ -785,45 +787,20 @@ pub(super) fn try_loop<L: Lifter>(
         out.push_str(&header_label);
         out.push('\n');
     }
-    let exit_at = (0..lines.len())
-        .rev()
-        .find(|&i| lines.get(i).is_some_and(|l| !is_label(l)));
-    let cond_at = exit_at.and_then(|e| {
-        (0..e)
-            .rev()
-            .find(|&i| lines.get(i).is_some_and(|l| !is_label(l)))
-    });
-    let tail_exit = exit_at
-        .and_then(|i| lines.get(i))
-        .map(|l| l.trim())
-        .filter(|t| *t == "break;" || is_return(t));
-    let tail_cond = cond_at
-        .and_then(|i| lines.get(i))
-        .and_then(|l| l.trim().strip_prefix("if ("))
-        .and_then(|r| r.strip_suffix(") continue;"))
-        .filter(|_| tail_exit.is_some())
-        .filter(|_| !cond_at.is_some_and(|i| lines.get(..i).is_some_and(continues_at_top)))
-        .map(str::to_owned);
-    // A do-while puts the latch's exit right after `} while (cond);`, so a
-    // `break` in the body would land on that exit instead of on the join
-    // the break was written for: a loop whose body breaks keeps the
-    // `while (1)` form unless the latch's exit is the join itself.
-    let (opener, body, closer) = match (&tail_cond, tail_exit, cond_at, exit_at) {
-        (Some(cond), Some(exit), Some(c), Some(e)) if exit == "break;" || !has_break => {
+    let (opener, body, closer) = match latch_of(&lines, has_break) {
+        Some(Latch { cond, at, after }) => {
             let mut closer = format!("}} while ({cond});\n");
-            for l in lines.get(c + 1..e).unwrap_or(&[]) {
+            for l in after {
                 closer.push_str(l);
-                closer.push('\n');
-            }
-            if exit != "break;" {
-                closer.push_str(exit);
                 closer.push('\n');
             }
             // A jump to the latch is a `continue`: in a do-while that is
             // where `continue` goes. The latch's labels stand right before
             // the condition and stay (a copy of a body block elsewhere may
-            // jump to one); the cleanup drops a label nothing jumps to.
-            let mut body: Vec<String> = lines.get(..c).unwrap_or(&[]).to_vec();
+            // jump to one); the cleanup drops a label nothing jumps to. A
+            // `continue` the body ends with (the jump of a block that falls
+            // into the latch) goes where the body's end goes anyway.
+            let mut body: Vec<String> = lines.get(..at).unwrap_or(&[]).to_vec();
             let mut latch: Vec<String> = Vec::new();
             while body.last().is_some_and(|l| is_label(l)) {
                 if let Some(l) = body.pop() {
@@ -840,10 +817,13 @@ pub(super) fn try_loop<L: Lifter>(
                     }
                 }
             }
+            while body.last().is_some_and(|l| l == "continue;") {
+                body.pop();
+            }
             body.extend(latch.into_iter().rev());
             ("do {\n", body, closer)
         }
-        _ => ("while (1) {\n", lines.clone(), "}\n".to_owned()),
+        None => ("while (1) {\n", lines.clone(), "}\n".to_owned()),
     };
     out.push_str(opener);
     for l in &body {
@@ -858,6 +838,100 @@ pub(super) fn try_loop<L: Lifter>(
         let _ = writeln!(out, "{}", goto(va));
     }
     Some(join.unwrap_or(max + 1))
+}
+
+/// Where a `while (1)` body decides whether to go round again, when the
+/// loop reads as `do { ... } while (cond);`.
+pub(super) struct Latch<'l> {
+    /// The condition under which the loop goes round again.
+    pub(super) cond: String,
+    /// Index of the line holding the test: the body is the lines before it.
+    pub(super) at: usize,
+    /// The lines written after `} while (cond);`: what runs once the loop
+    /// is left, ending with its transfer when that is a `return`.
+    pub(super) after: Vec<&'l str>,
+}
+
+/// Finds the test a `while (1)` body ends with, so the loop can be written
+/// as a `do`/`while`.
+///
+/// Two shapes qualify. `BODY; if (c) break;` goes round while `c` fails.
+/// `BODY; if (c) continue; TAIL; break;` (or a `return` in place of the
+/// `break`) goes round while `c` holds and runs `TAIL` once it does not:
+/// `TAIL` moves after the loop, so it must neither break nor continue at
+/// the loop's level. Either way `BODY` may not `continue` (in a do-while
+/// that tests the condition, where the original skipped it), and when a
+/// `TAIL` moves out, `BODY` may not `break` either (it would land on the
+/// `TAIL` it skipped). A `TAIL` of labels alone is the latch's exit, so a
+/// `break` in `BODY` still lands on the join then, unless the exit is a
+/// `return`.
+///
+/// # Arguments
+///
+/// * `lines` - The loop body at its own level (nested blocks indented),
+///   the trailing `continue;` already dropped.
+/// * `has_break` - Whether the body breaks to the loop's join anywhere.
+///
+/// # Returns
+///
+/// The latch, or `None` when the loop keeps its `while (1)` form.
+pub(super) fn latch_of(lines: &[String], has_break: bool) -> Option<Latch<'_>> {
+    let exit_at = (0..lines.len()).rev().find(|&i| !is_label(&lines[i]))?;
+    let exit_line = lines.get(exit_at)?;
+    let exit = exit_line.trim();
+    let body = lines.get(..exit_at)?;
+    if exit_at + 1 == lines.len()
+        && !exit_line.starts_with(' ')
+        && let Some(c) = exit
+            .strip_prefix("if (")
+            .and_then(|r| r.strip_suffix(") break;"))
+        && !continues_at_top(body)
+    {
+        return Some(Latch {
+            cond: invert_condition(c),
+            at: exit_at,
+            after: Vec::new(),
+        });
+    }
+    if exit != "break;" && !is_return(exit) {
+        return None;
+    }
+    let (at, cond) = body.iter().enumerate().rev().find_map(|(k, l)| {
+        let c = l.strip_prefix("if (")?.strip_suffix(") continue;")?;
+        Some((k, c))
+    })?;
+    let head = lines.get(..at)?;
+    let tail = lines.get(at + 1..exit_at)?;
+    let labels_only = tail.iter().all(|l| is_label(l));
+    let fits = if labels_only {
+        exit == "break;" || !has_break
+    } else {
+        !breaks_at_top(tail) && !continues_at_top(tail) && !breaks_at_top(head)
+    };
+    if !fits || continues_at_top(head) {
+        return None;
+    }
+    let mut after: Vec<&str> = tail.iter().map(String::as_str).collect();
+    if exit != "break;" {
+        after.push(exit);
+    }
+    Some(Latch {
+        cond: cond.to_owned(),
+        at,
+        after,
+    })
+}
+
+/// Tells whether a loop body breaks out of its own loop: a `break` outside
+/// every nested loop and switch.
+///
+/// # Arguments
+///
+/// * `body` - The body lines, nested blocks indented deeper.
+pub(super) fn breaks_at_top(body: &[String]) -> bool {
+    let mut nested: Vec<Scope> = Vec::new();
+    body.iter()
+        .any(|l| at_loop_level(l, &mut nested) && breaks(l.trim()))
 }
 
 /// Tells whether a loop body continues its own loop before its end: a

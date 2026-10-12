@@ -213,7 +213,7 @@ fn arm64_switches_pair_stores_and_register_tests_decompile() {
     let pair = text(0x40);
     assert!(pair.contains("(x3 + 4) = a3"), "{pair}");
     let scan = text(0x50);
-    assert!(scan.contains("if (*(uint8_t*)x0 != 0) continue;"), "{scan}");
+    assert!(scan.contains("} while (*(uint8_t*)x0 != 0);"), "{scan}");
     for off in [0, 0x40, 0x50] {
         let r = replay_function(&p, &a, BASE2 + off, 1);
         assert!(r.checked > 0, "+{off:#x}: {}", replay_tsv(&r));
