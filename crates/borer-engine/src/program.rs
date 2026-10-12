@@ -1193,7 +1193,7 @@ impl Program {
             path: PathBuf::new(),
             bytes,
             format: BinaryFormat::Raw,
-            is_64: arch.bitness() == Some(64),
+            is_64: matches!(arch.isa(), Some(Isa::X86 { bits: 64 } | Isa::A64)),
             arch,
             entry,
             image_base,
@@ -2520,6 +2520,28 @@ mod tests {
             !code.contains("code:") && !code.contains("magic:"),
             "{code}"
         );
+    }
+
+    /// A raw arm64 program has eight-byte pointers, as a loaded arm64
+    /// image does; `is_64` followed the x86 decoder width, which arm64 has
+    /// none of, and the summary called the program 32-bit.
+    ///
+    /// # Panics
+    ///
+    /// When the program is not 64-bit or the summary says otherwise.
+    #[test]
+    fn a_raw_arm64_program_is_64_bit() {
+        let p = Program::raw(vec![0; 4], Arch::Arm64, 0, None, Vec::new());
+        assert!(p.is_64);
+        let s = p.summary();
+        assert!(
+            s.contains(
+                "arch: arm64 (64-bit)
+"
+            ),
+            "{s}"
+        );
+        assert!(!Program::raw(vec![0xc3], Arch::X86, 0, None, Vec::new()).is_64);
     }
 
     /// A section table of thousands of rows is listed up to the cap.
