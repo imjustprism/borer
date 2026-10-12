@@ -32,4 +32,5 @@ mod protection;
 mod regression;
 mod search;
 mod structure;
+mod typelib;
 mod x86;

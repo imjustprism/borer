@@ -26,6 +26,7 @@ mod float;
 mod pack;
 mod record;
 mod state;
+mod stated;
 mod step;
 
 pub(crate) use conv::*;
@@ -33,6 +34,7 @@ pub(in crate::analysis::decompile) use effects::*;
 pub(in crate::analysis::decompile) use pack::*;
 pub(in crate::analysis::decompile) use record::*;
 pub(in crate::analysis::decompile) use state::try_level_store;
+pub(in crate::analysis::decompile) use stated::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -684,6 +686,10 @@ pub(super) struct Exec<'c, 'a> {
     /// the machine passes, which the next recorded call carries
     /// ([`Call::short`]).
     args_short: bool,
+    /// A declaration stated for the callee of the call being lifted
+    /// contradicts the code around it, which the next recorded call
+    /// carries ([`Call::contradicted`]).
+    stated_contradicted: bool,
     /// A tail jump is being lifted: the callee's stack arguments are the
     /// caller's own, above the return address the jump leaves in place.
     forwarding: bool,
@@ -788,6 +794,7 @@ pub(super) fn exec_block(
         args_pushed: 0,
         cleaned: None,
         args_short: false,
+        stated_contradicted: false,
         forwarding: false,
         in_place: false,
         arity_floor: 0,

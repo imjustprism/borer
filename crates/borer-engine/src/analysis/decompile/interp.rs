@@ -2037,9 +2037,14 @@ impl Running<'_, '_> {
                     "`{n}` is read, and the text never declares or sets it"
                 ))
             }
-            _ => match crate::winconst::value(n) {
-                Some(code) => Ok(self.int(u64::from(code), CTy::int(32, true))),
-                None => unchecked(format!("`{n}` names nothing this can read")),
+            "NULL" => Ok(self.int(0, CTy::int(self.word(), false))),
+            _ => match (
+                crate::winconst::value(n),
+                crate::analysis::typelib::value_of(n, self.s.program.format),
+            ) {
+                (Some(code), _) => Ok(self.int(u64::from(code), CTy::int(32, true))),
+                (None, Some(v)) => Ok(self.int(v, CTy::int(self.word(), false))),
+                (None, None) => unchecked(format!("`{n}` names nothing this can read")),
             },
         }
     }

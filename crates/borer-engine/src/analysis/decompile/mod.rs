@@ -240,6 +240,10 @@ struct Ctx<'a> {
     /// Declaration type of each vector register that held a scalar float
     /// (`float`/`double`); registers absent here declare as `uint128_t`.
     reg_ty: BTreeMap<Key, Ty>,
+    /// The word-wide type each declared callee whose result the text binds
+    /// returns, by the callee's text (emission pass): what a variable that
+    /// holds only such results is declared as ([`typed_results`]).
+    result_types: BTreeMap<String, String>,
     /// Register-argument count of each callee looked at so far (see
     /// [`lift::Exec::callee_reg_params`]).
     callee_arity: BTreeMap<u64, (usize, u8, bool)>,
@@ -715,6 +719,7 @@ fn new_ctx<'a>(
         tmp_count: 0,
         effects: BTreeMap::new(),
         reg_ty: BTreeMap::new(),
+        result_types: BTreeMap::new(),
         callee_arity: BTreeMap::new(),
         stack_params: f.stack_args,
         funclet: f.funclet,
@@ -1766,8 +1771,9 @@ fn decompile_with(
             Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
         })
         .collect();
-    let mut by_type: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    let mut by_type: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
+    let result_typed = typed_results(&body, &ctx.result_types);
     for (k, ty) in &ctx.declared {
         if matches!(k, Key::Slot(o) if names.stack_param(*o).is_some()) {
             continue;
@@ -1790,7 +1796,14 @@ fn decompile_with(
                 notes.push(format!("// {name} overlaps {}", overlapping.join(", ")));
             }
         }
-        by_type.entry(ty.name()).or_default().push(name);
+        let stated = match k {
+            Key::Reg(_) => result_typed.get(&name).cloned(),
+            Key::Slot(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
+        };
+        by_type
+            .entry(stated.unwrap_or_else(|| ty.name().to_owned()))
+            .or_default()
+            .push(name);
     }
     // A stack slot whose address escapes to a call but that the function
     // never reads or writes directly has no entry in `declared`, yet
@@ -1826,10 +1839,16 @@ fn decompile_with(
     escaped.sort();
     escaped.dedup();
     if !escaped.is_empty() {
-        by_type.entry("uint64_t").or_default().extend(escaped);
+        by_type
+            .entry("uint64_t".to_owned())
+            .or_default()
+            .extend(escaped);
     }
     for (ty, names_of_ty) in &by_type {
-        let _ = writeln!(out, "{ty} {};", names_of_ty.join(", "));
+        let _ = match ty.strip_suffix('*') {
+            Some(base) => writeln!(out, "{} *{};", base.trim_end(), names_of_ty.join(", *")),
+            None => writeln!(out, "{ty} {};", names_of_ty.join(", ")),
+        };
     }
     for n in &notes {
         out.push_str(n);

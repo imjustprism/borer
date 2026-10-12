@@ -32,6 +32,7 @@ pub mod senders;
 pub mod sigs;
 pub mod snapshot;
 mod switch_index;
+pub mod typelib;
 pub mod utypes;
 pub mod vtables;
 mod x87;

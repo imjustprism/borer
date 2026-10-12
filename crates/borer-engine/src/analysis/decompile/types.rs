@@ -1460,3 +1460,82 @@ mod accessor_tests {
         assert_eq!(accessor_class("Game::OfferGroup::get"), None);
     }
 }
+
+/// The variables a function holds only declared results in, with the type
+/// the declarations give them.
+///
+/// A variable every write of which is `v = f(...);`, where each `f` is a
+/// callee whose declaration returns the same type (`HANDLE` from
+/// `CreateFileW`), holds a value of that type wherever the text names it,
+/// so it is declared of that type: the declaration says what the value
+/// is, where `uint64_t` says only how wide. A variable written any other
+/// way (a compound assignment, an increment, a `for` header, a second
+/// type), or whose address is taken, keeps the type the lifting gave it.
+///
+/// # Arguments
+///
+/// * `body` - The function's body text.
+/// * `returns` - Declared callee text to the type it returns, for the
+///   callees whose results the text binds.
+///
+/// # Returns
+///
+/// Variable name to type, for the variables that qualify.
+pub(super) fn typed_results(
+    body: &str,
+    returns: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    /// Operators that write the variable before them.
+    const WRITES: [&str; 12] = [
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "++", "--",
+    ];
+    if returns.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut typed: BTreeMap<String, Option<&str>> = BTreeMap::new();
+    let code = || body.lines().filter(|l| !l.trim_start().starts_with("//"));
+    for line in code() {
+        let t = line.trim();
+        let Some((lhs, rhs)) = t.split_once(" = ") else {
+            continue;
+        };
+        if !is_ident(lhs) {
+            continue;
+        }
+        let ty = rhs
+            .split_once('(')
+            .and_then(|(callee, _)| returns.get(callee))
+            .filter(|_| rhs.ends_with(");"))
+            .map(String::as_str);
+        let entry = typed.entry(lhs.to_owned()).or_insert(ty);
+        if *entry != ty {
+            *entry = None;
+        }
+    }
+    typed.retain(|_, ty| ty.is_some());
+    for line in code() {
+        let t = line.trim();
+        for (var, ty) in &mut typed {
+            for (i, _) in t.match_indices(var.as_str()) {
+                let before = t.get(..i).unwrap_or("");
+                let after = t.get(i + var.len()..).unwrap_or("");
+                if before.ends_with(is_ident_char) || after.starts_with(is_ident_char) {
+                    continue;
+                }
+                let plain_write = before.is_empty() && after.starts_with(" = ");
+                let other_write = (!before.is_empty() && after.trim_start().starts_with("= "))
+                    || WRITES.iter().any(|w| after.trim_start().starts_with(w))
+                    || before.ends_with("++")
+                    || before.ends_with("--")
+                    || before.ends_with('&');
+                if other_write && !plain_write {
+                    *ty = None;
+                }
+            }
+        }
+    }
+    typed
+        .into_iter()
+        .filter_map(|(var, ty)| Some((var, ty?.to_owned())))
+        .collect()
+}

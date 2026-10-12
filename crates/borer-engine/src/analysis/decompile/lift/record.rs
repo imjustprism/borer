@@ -69,6 +69,12 @@ pub(in crate::analysis::decompile) struct Call {
     /// read: the arguments it shows are checked, the ones it leaves out
     /// cannot be.
     pub(in crate::analysis::decompile) short: bool,
+    /// A declaration stated for the callee contradicts what the code does
+    /// around the call: it rules out a result the code reads after it, or
+    /// lists fewer arguments than the callee reads
+    /// ([`stated`](super::stated)). The text follows the declaration, so
+    /// what it leaves out is compared with nothing.
+    pub(in crate::analysis::decompile) contradicted: bool,
 }
 
 /// What a call calls.
@@ -142,7 +148,8 @@ impl Exec<'_, '_> {
     ///
     /// A call shown as a statement or a tail call carries whether the
     /// arguments rendered for it ([`Exec::args_for`]) fall short of what
-    /// its callee reads; any other call renders none.
+    /// its callee reads, and whether a declaration stated for the callee
+    /// contradicts the code around it; any other call renders none.
     ///
     /// # Arguments
     ///
@@ -165,6 +172,8 @@ impl Exec<'_, '_> {
         let short = std::mem::take(&mut self.args_short)
             && matches!(shown, Shown::Statement | Shown::Tail)
             && !matches!(callee, Callee::Builtin(..));
+        let contradicted = std::mem::take(&mut self.stated_contradicted)
+            && matches!(shown, Shown::Statement | Shown::Tail);
         self.record(EffectKind::Call(Box::new(Call {
             callee,
             args,
@@ -173,6 +182,7 @@ impl Exec<'_, '_> {
             noreturn,
             shown,
             short,
+            contradicted,
         })));
     }
 

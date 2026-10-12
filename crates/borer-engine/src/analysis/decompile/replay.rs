@@ -84,6 +84,9 @@ const OUTSIDE_FLOAT: &str = "an instruction outside the checked subset";
 /// Why a block is not checked: a call in it renders fewer stack words than
 /// its callee reads ([`Call::short`](super::lift::Call::short)).
 const SHORT_CALL: &str = "a call the text passes fewer words than its callee reads";
+/// Why a block is not checked: a call in it follows a declaration that the
+/// code around it contradicts ([`Call::contradicted`](super::lift::Call::contradicted)).
+const CONTRADICTED: &str = "a call whose declaration the code contradicts";
 /// Why a block is not checked: it returns nothing where the function's
 /// callers read a result ([`Witness::result_read`]).
 const BARE_RETURN: &str = "a return of nothing the callers read a result from";
@@ -564,6 +567,7 @@ fn unchecked_label(reason: &str) -> &'static str {
         OVER_BUDGET => "over budget",
         "a call the text leaves out or reads in place" => "call left out",
         SHORT_CALL => "call args dropped",
+        CONTRADICTED => "declaration contradicted",
         BARE_RETURN => "result dropped",
         "a statement no effect models"
         | "an instruction the emulator does not model"
@@ -2559,6 +2563,12 @@ impl Function<'_, '_> {
             .any(|e| matches!(&e.kind, EffectKind::Call(c) if c.short))
         {
             return Err(SHORT_CALL);
+        }
+        if effects
+            .iter()
+            .any(|e| matches!(&e.kind, EffectKind::Call(c) if c.contradicted))
+        {
+            return Err(CONTRADICTED);
         }
         if w.result_read && effects.iter().any(|e| e.kind == EffectKind::Return(None)) {
             return Err(BARE_RETURN);

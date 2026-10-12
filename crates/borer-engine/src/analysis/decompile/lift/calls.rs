@@ -1258,6 +1258,7 @@ impl<'a> Exec<'_, 'a> {
         self.env.df = Some(false);
         self.env.fresh.clear();
         self.args_short = false;
+        self.stated_contradicted = false;
         for k in self.clobbered(keep_rax) {
             self.env.vals.remove(&k);
             self.env.narrow.remove(&k);
@@ -2163,6 +2164,7 @@ impl<'a> Exec<'_, 'a> {
         }));
         if self.emit {
             values.extend(sse_args(sse).map(|r| (ArgAt::Reg(r), self.env.get(Key::Reg(r)))));
+            self.name_arguments(reached, &mut args);
         }
         let callee_value = self.emit.then(|| match direct {
             Some(t) => Callee::Direct(t),
@@ -2247,6 +2249,19 @@ impl<'a> Exec<'_, 'a> {
             && st0.is_none()
             && !self.preserved.contains(&xmm0)
             && (self.bitness() == 64 || sse.returns);
+        // INVARIANT: a declared callee hands back what its declaration
+        // says, so a register it says holds no result binds none; where the
+        // code reads one anyway, the text follows the declaration and the
+        // call says the code contradicts it.
+        let declared = stated_returns(self.ctx, reached).filter(|_| st0.is_none());
+        let (uses_result, float_result) = match declared {
+            Some(r) => {
+                let (rax, float, contradicted) = r.filter(uses_result, float_result);
+                self.stated_contradicted |= contradicted;
+                (rax, float)
+            }
+            None => (uses_result, float_result),
+        };
         let result = match st0 {
             Some(shown) => shown.then_some(Key::Reg(Register::ST0)),
             None if float_result => Some(xmm0),
@@ -2335,6 +2350,9 @@ impl<'a> Exec<'_, 'a> {
             emit_line!(self, format!("{} = {call};", n.key(xmm0)));
         } else if uses_result {
             self.declare(rax, self.word_ty());
+            if self.emit {
+                self.note_result_type(reached, &callee);
+            }
             let n = self.names();
             // INVARIANT: a narrow result merges into the caller's `rax`,
             // the merge naming what held it before the call, so the

@@ -69,7 +69,7 @@ pub(super) fn read_counts(
 /// demangling every import for each one cost ten milliseconds a call on a
 /// mutant whose symbol table was corrupt, seconds for a function of thirty
 /// blocks.
-struct ImportNames {
+pub(super) struct ImportNames {
     /// The raw symbol name of the first import at each address.
     by_addr: BTreeMap<u64, String>,
     /// The raw symbol name of the first import carrying each demangled name.
@@ -81,7 +81,7 @@ struct ImportNames {
 /// # Arguments
 ///
 /// * `ctx` - The program and its analysis, whose memo holds the tables.
-fn import_names(ctx: &Ctx<'_>) -> std::sync::Arc<ImportNames> {
+pub(super) fn import_names(ctx: &Ctx<'_>) -> std::sync::Arc<ImportNames> {
     ctx.analysis.derived.get_or_build("import_names", (), || {
         let mut by_addr = BTreeMap::new();
         let mut by_name = BTreeMap::new();
@@ -105,7 +105,8 @@ fn import_names(ctx: &Ctx<'_>) -> std::sync::Arc<ImportNames> {
 /// The import's raw symbol name is what carries it: an MSVC-mangled name
 /// states the parameters and the calling convention outright, and a C
 /// name is looked up in the SDK table ([`crate::analysis::prototypes::declared`]),
-/// which says how the target's convention passes it. A thunk names its
+/// which says how the target's convention passes it, then in the type
+/// library ([`library_prototype`]), which covers POSIX. A thunk names its
 /// import by the demangled form, so the raw symbol behind it is found by
 /// that.
 ///
@@ -125,7 +126,12 @@ pub(in crate::analysis::decompile) fn import_prototype(
     use crate::analysis::prototypes::{declared, msvc_prototype};
     let names = import_names(ctx);
     let name = bare(import_raw(ctx, &names, target?)?);
-    msvc_prototype(name).or_else(|| declared(name, ctx.bitness))
+    msvc_prototype(name)
+        .or_else(|| declared(name, ctx.bitness))
+        .or_else(|| {
+            crate::analysis::typelib::declared(name, ctx.program.format)
+                .map(|d| library_prototype(d, ctx.bitness, ctx.program.format))
+        })
 }
 
 /// Tells whether a call or jump reaches an import of a C runtime, whose
@@ -243,7 +249,7 @@ pub(in crate::analysis::decompile) fn function_pop(
 /// * `ctx` - The program and its analysis.
 /// * `names` - The import name tables ([`import_names`]).
 /// * `t` - The slot or the thunk's entry.
-fn import_raw<'n>(ctx: &Ctx<'_>, names: &'n ImportNames, t: u64) -> Option<&'n str> {
+pub(super) fn import_raw<'n>(ctx: &Ctx<'_>, names: &'n ImportNames, t: u64) -> Option<&'n str> {
     match names.by_addr.get(&t) {
         Some(name) => Some(name),
         None => {
