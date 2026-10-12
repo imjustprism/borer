@@ -13,6 +13,6 @@ call_args	2	1926	1
 next_hint	2	2649	1
 resume	3	3801	1
 raw_code	2	593	1
-emulate_syscall	2	771	1
+emulate_syscall	2	719	1
 emulate_elf_args	2	660	1
 decoded_strings	2	885	1

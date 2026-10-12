@@ -1980,10 +1980,11 @@ impl<'a> Emulator<'a> {
     /// non-null hint, which the kernel is allowed to), `write` returns the
     /// count it was asked to write, and `exit`/`exit_group` end the program;
     /// every other number returns zero so the run continues, as an unlisted
-    /// Windows API does. Each number seen is recorded with the neutralized
-    /// answers, and each serviced call in order with its number, name and
-    /// arguments ([`calls::decode_syscall_args`]), so a report names what the
-    /// program asked the kernel for.
+    /// Windows API does. Each serviced call is recorded in order with its
+    /// number, name and arguments ([`calls::decode_syscall_args`]), so a
+    /// report names what the program asked the kernel for; it is not also
+    /// one of the [`Emulator::neutralized`] answers, which a report lists
+    /// apart, so each call is told once.
     ///
     /// # Arguments
     ///
@@ -2004,8 +2005,6 @@ impl<'a> Emulator<'a> {
             self.reg(Register::RDX),
         );
         let name = linux_syscall_name(nr);
-        let named = name.map_or_else(String::new, |n| format!(" {n}"));
-        self.neutralized.insert(format!("syscall({nr}{named})"));
         let api = name.map_or_else(|| format!("sys_{nr}"), ToOwned::to_owned);
         let args = name.map_or_else(Vec::new, |n| {
             calls::decode_syscall_args(
@@ -4552,8 +4551,12 @@ mod tests {
             Some(0x101c),
             "syscall left its return address in rcx"
         );
-        assert!(
-            emu.neutralized().contains(&"syscall(9 mmap)"),
+        assert_eq!(
+            emu.api_calls()
+                .iter()
+                .map(|c| (c.syscall, c.api.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Some(9), "mmap")],
             "the number seen was noted"
         );
 
@@ -4581,7 +4584,12 @@ mod tests {
             Some(0),
             "an unknown number answered zero and the run continued"
         );
-        assert!(emu.neutralized().contains(&"syscall(999)"));
+        assert!(
+            emu.api_calls()
+                .iter()
+                .any(|c| c.syscall == Some(999) && c.api == "sys_999")
+        );
+        assert!(emu.neutralized().is_empty(), "{:?}", emu.neutralized());
 
         // ASM: mov eax,60; xor edi,edi; syscall; mov eax,1; ret
         let code: &[u8] = &[

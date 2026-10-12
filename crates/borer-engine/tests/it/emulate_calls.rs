@@ -12,7 +12,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::render::iocs_tsv;
+use borer_engine::analysis::render::{emulate_tsv, iocs_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::emulate::a64::Machine;
 use borer_engine::emulate::calls::ArgValue;
@@ -152,6 +152,21 @@ fn an_x86_syscall_is_named_with_its_path() {
         "{}",
         calls[0].call_text()
     );
+}
+
+/// `borer://emulate` lists a syscall once, in its calls, and not again on
+/// the line of answers given as an unwatched process.
+///
+/// The run noted every syscall number with those answers as well, so the
+/// report told each one twice.
+#[test]
+fn emulate_lists_a_syscall_once() {
+    let p = open_syscall_image();
+    let a = Analysis::compute(&p);
+    let out = emulate_tsv(&p, &a, &Overlay::default(), "0x1000").expect("the run reports");
+    assert_eq!(out.matches("open").count(), 1, "{out}");
+    assert!(out.contains("\nsyscall 2 open(\"/etc/passwd\""), "{out}");
+    assert!(!out.contains("unwatched"), "{out}");
 }
 
 /// A raw arm64 image whose `svc #0` opens a path, recorded by name.
