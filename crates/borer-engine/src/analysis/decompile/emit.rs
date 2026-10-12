@@ -113,7 +113,7 @@ pub(super) fn emit_block<L: Lifter>(
             && let Some(&s) = st.succs[i].first()
         {
             let _ = writeln!(out, "{}", goto(st.start(s)));
-        } else if let Some(t) = falls_outside(st, i) {
+        } else if let Some(t) = falls_outside(ctx, st, i) {
             let _ = writeln!(out, "{}", jump_to(st, t));
         }
         return i + 1;
@@ -464,10 +464,14 @@ pub(super) fn runs_on<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
 ///
 /// Text that ends such a block with nothing reads as falling into whatever
 /// the text writes next, a `return` at the end of the body; the jump out,
-/// `goto *<va>;`, is what the binary does.
+/// `goto *<va>;`, is what the binary does. A call that never returns
+/// ([`crate::analysis::functions::call_ends_path`]) ends its path where it
+/// stands, as the structure check reads it: the `goto` after
+/// `_CxxThrowException` or a Rust panic would send a reader into padding.
 ///
 /// # Arguments
 ///
+/// * `ctx` - Per-function state: the program and its functions.
 /// * `st` - Emission state.
 /// * `b` - The block.
 ///
@@ -475,13 +479,18 @@ pub(super) fn runs_on<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
 ///
 /// The address, or `None` for a block with a successor in the function, a
 /// call that never returns, or any other end.
-pub(super) fn falls_outside<L: Lifter>(st: &Emit<'_, L>, b: usize) -> Option<u64> {
+pub(super) fn falls_outside<L: Lifter>(ctx: &Ctx<'_>, st: &Emit<'_, L>, b: usize) -> Option<u64> {
     if !st.succs.get(b).is_some_and(Vec::is_empty) {
         return None;
     }
     let block = st.blocks.get(b)?;
     match block.term {
         BlockTerm::Fall => Some(block.end),
+        BlockTerm::Call
+            if crate::analysis::functions::call_ends_path(ctx.program, ctx.analysis, block) =>
+        {
+            None
+        }
         BlockTerm::Call => block.successors.first().copied(),
         BlockTerm::Ret
         | BlockTerm::Jmp
@@ -514,7 +523,7 @@ pub(super) fn copy_chain<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, start: 
                 .flatten()
         });
         let Some(va) = next else {
-            if let Some(t) = falls_outside(st, cur) {
+            if let Some(t) = falls_outside(ctx, st, cur) {
                 lines.push(jump_to(st, t));
             }
             break;
@@ -1386,7 +1395,7 @@ pub(super) fn emit_run<L: Lifter>(
                 && let Some(&s) = st.succs[b].first()
             {
                 kept.push(goto(st.start(s)));
-            } else if let Some(t) = falls_outside(st, b) {
+            } else if let Some(t) = falls_outside(ctx, st, b) {
                 kept.push(jump_to(st, t));
             }
             continue;

@@ -426,8 +426,11 @@ fn callee(
 ///
 /// Each block is a chain of its calls ending in what it does last: a
 /// return, a silent step to its live successors, a halt for a call that
-/// never returns or a trap, a tail call (the call, then a return), or a
-/// halt for a jump out of the function the text writes as `goto *`.
+/// never returns (one with no successor, or whose only way on leaves the
+/// function after a call that ends the path,
+/// [`crate::analysis::functions::call_ends_path`]) or a trap, a tail call
+/// (the call, then a return), or a halt for a jump out of the function the
+/// text writes as `goto *`.
 ///
 /// # Arguments
 ///
@@ -496,7 +499,12 @@ fn binary_graph(
                     None => halt,
                 }
             }
-            BlockTerm::Call if b.successors.is_empty() => {
+            BlockTerm::Call
+                if b.successors.is_empty()
+                    || (next.is_empty()
+                        && outside
+                        && crate::analysis::functions::call_ends_path(program, analysis, b)) =>
+            {
                 if let Some((Callee::Named(n), _)) = calls.last() {
                     names.noreturn.insert(*n);
                 }

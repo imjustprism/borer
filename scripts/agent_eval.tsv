@@ -1,7 +1,7 @@
 # task	calls	bytes	found
 front_door	3	31993	1
 orient	2	3918	1
-serial_constant	2	4153	1
+serial_constant	2	4107	1
 marker_user	2	1959	1
 caller	2	1836	1
 emulate_serial	2	1990	1
@@ -26,5 +26,5 @@ tlsh_digest	2	2217	1
 child_program	3	1270	1
 macho_chained_xref	2	778	1
 objc_messages	2	1528	1
-gs_cookie_folded	2	718	1
-rust_panic_location	2	762	1
+gs_cookie_folded	2	760	1
+rust_panic_location	2	768	1

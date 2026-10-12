@@ -4465,6 +4465,88 @@ pub(crate) fn decode_block(program: &Program, bitness: u32, blk: &BasicBlock) ->
     instrs
 }
 
+/// Tells whether the call that ends a block never returns, though the block
+/// still names the address after it, outside its function, as where it
+/// goes on.
+///
+/// The walk ends a function at a call it knows never returns, and keeps
+/// the address after the call as the block's successor; a text that then
+/// writes the jump there, `goto *0x140001527;`, sends the reader into the
+/// `int3` padding after `_CxxThrowException`. The call ends the path when
+/// what follows it is padding (`int3`, `ud2`, bytes that do not decode,
+/// Rust's `call; ud2` after a panic), another function's entry, or when the
+/// callee, or the import it jumps or calls through, is a function that never
+/// returns by name ([`is_noreturn_name`]).
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - The functions, for the next entry and the callee's name.
+/// * `b` - The block, whose successors the caller found outside its
+///   function.
+///
+/// # Returns
+///
+/// `true` for a call block whose call does not return; `false` for any
+/// other block.
+pub(crate) fn call_ends_path(program: &Program, analysis: &Analysis, b: &BasicBlock) -> bool {
+    if b.term != BlockTerm::Call {
+        return false;
+    }
+    let Some(bitness) = program.arch.bitness() else {
+        return false;
+    };
+    let after = b.end;
+    let padding = decode_at(program, bitness, after).is_none_or(|i| {
+        i.code() == Code::INVALID || matches!(i.mnemonic(), Mnemonic::Int3 | Mnemonic::Ud2)
+    });
+    let entry = analysis.function(after).is_some_and(|g| g.entry == after);
+    padding || entry || calls_noreturn(program, analysis, bitness, b)
+}
+
+/// Tells whether the last instruction of a block calls a function that
+/// never returns by name: a direct callee, the import a thunk it reaches
+/// jumps through, or the import slot it calls through.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - The functions, for the callee's name.
+/// * `bitness` - 32 or 64.
+/// * `b` - The block.
+fn calls_noreturn(program: &Program, analysis: &Analysis, bitness: u32, b: &BasicBlock) -> bool {
+    let Some(call) = decode_block(program, bitness, b).pop() else {
+        return false;
+    };
+    let named =
+        |name: &str| is_noreturn_name(super::bare_name(&crate::search::demangled_name(name)));
+    let import = |slot: u64| {
+        program.symbols.iter().any(|s| {
+            s.kind == crate::program::SymbolKind::Import && s.addr == slot && named(&s.name)
+        })
+    };
+    match call.op0_kind() {
+        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
+            let t = call.near_branch_target();
+            analysis
+                .function(t)
+                .filter(|g| g.entry == t)
+                .and_then(|g| g.name.as_deref())
+                .is_some_and(named)
+                || decode_at(program, bitness, t)
+                    .and_then(|i| slot_jump(&i))
+                    .is_some_and(import)
+        }
+        OpKind::Memory
+            if matches!(call.memory_base(), Register::None | Register::RIP)
+                && call.memory_index() == Register::None =>
+        {
+            import(call.memory_displacement64())
+        }
+        _ => false,
+    }
+}
+
 /// Tells whether an instruction tears the frame down: `pop ebp`, `leave`,
 /// or `add esp, N`, the last things a function does before it returns or
 /// tail-jumps.

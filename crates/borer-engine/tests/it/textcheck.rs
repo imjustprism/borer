@@ -517,3 +517,38 @@ fn an_elf_object_symbol_names_the_data_it_marks() {
     runs_alike(&p, 0x1010);
     runs_alike(&p, 0x1018);
 }
+
+/// A call that never returns ends its path where it stands.
+///
+/// The text no longer jumps to the padding after it (`goto *0x1009;`),
+/// whether the callee is a thunk to an import that never returns by name
+/// or a function with no way back followed by `ud2`.
+#[test]
+fn a_call_that_never_returns_ends_the_path() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x1020
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend([0xff, 0x25, 0xda, 0x0f, 0x00, 0x00]); // ASM: jmp [rip+0xfda]
+    code.resize(0x40, 0xcc);
+    code.extend([0xeb, 0xfe]); // ASM: jmp 0x1040
+    code.resize(0x60, 0xcc);
+    code.extend([
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0xd7, 0xff, 0xff, 0xff, // ASM: call 0x1040
+        0x0f, 0x0b, // ASM: ud2
+    ]);
+    let mut p = program(&code, &[]);
+    p.symbols = vec![Symbol {
+        name: "msvcrt.dll!_CxxThrowException".to_owned(),
+        addr: 0x2000,
+        kind: SymbolKind::Import,
+    }];
+    let (thrown, _) = text_of(&p, TEXT);
+    assert!(thrown.contains("_CxxThrowException("), "{thrown}");
+    assert!(!thrown.contains("goto *"), "{thrown}");
+    let (looped, _) = text_of(&p, TEXT + 0x60);
+    assert!(!looped.contains("goto *"), "{looped}");
+}
