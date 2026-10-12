@@ -12,7 +12,9 @@ hold. Every call goes over stdio JSON-RPC as an agent's would; a resource is
 read through the `query` tool, as an agent on a host without resources reads
 it. A task starts with load_binary, as a fresh session does, except
 `front_door`, which is what a session is handed before its first call (the
-instructions, tools/list and prompts/list).
+instructions, tools/list and prompts/list), and `raw_code`, which loads a
+few bytes of hand-assembled x86-64 (RAW_CODE, written to a temporary file
+counted as `<blob>`) at a stated base instead of the crackme.
 
 A row per task: the calls, the bytes returned (tool text, error messages,
 or the protocol JSON, with the fixture's path counted as `<bin>` and the
@@ -30,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -42,6 +45,17 @@ BASELINE = os.path.join(ROOT, "scripts", "agent_eval.tsv")
 # read instead: "@instructions" is the initialize answer's instructions,
 # any other the method after the "@".
 LOAD = ("load_binary", {"path": "{bin}"})
+
+# Headerless x86-64 code: a call to a local function that returns 42, plus
+# one, so it returns 43 (rax=0x2b) from 0x10000.
+RAW_CODE = bytes.fromhex(
+    "e806000000"  # call 0x1000b
+    "4883c001"  # add rax, 1
+    "c3"  # ret
+    "cc"  # int3
+    "b82a000000"  # mov eax, 42
+    "c3"  # ret
+)
 
 # (task, the question it answers, calls, the fact the answers must hold)
 TASKS = [
@@ -111,6 +125,15 @@ TASKS = [
         [LOAD, ("query", {"uri": "borer://calls/crackme::check_serial"})],
         "crackme::check_serial(",
     ),
+    (
+        "raw_code",
+        "what headerless code loaded at a stated base returns",
+        [
+            ("load_binary", {"path": "{blob}", "arch": "x64", "base": "0x10000"}),
+            ("query", {"uri": "borer://emulate/0x10000"}),
+        ],
+        "rax=0x2b ",
+    ),
 ]
 
 
@@ -154,14 +177,31 @@ def spellings(path: str) -> list[str]:
 
 def run(exe: str, binary: str) -> list[tuple[str, int, int, int]]:
     """Every task's (name, calls, bytes, found), in task order."""
-    paths = [(f, "<bin>") for f in spellings(binary)] + [(f, "<root>") for f in spellings(ROOT)]
+    with tempfile.NamedTemporaryFile(prefix="borer-eval-", suffix=".bin", delete=False) as f:
+        f.write(RAW_CODE)
+        blob = f.name
+    try:
+        return run_tasks(exe, binary, blob)
+    finally:
+        os.remove(blob)
+
+
+def run_tasks(exe: str, binary: str, blob: str) -> list[tuple[str, int, int, int]]:
+    """Every task's row, the crackme at `binary` and RAW_CODE at `blob`."""
+    paths = (
+        [(f, "<bin>") for f in spellings(binary)]
+        + [(f, "<blob>") for f in spellings(blob)]
+        + [(f, "<root>") for f in spellings(ROOT)]
+    )
     rows = []
     client = Client(exe)
     try:
         for name, _, calls, fact in TASKS:
             texts = []
             for tool, args in calls:
-                filled = {k: v.replace("{bin}", binary) for k, v in args.items()}
+                filled = {
+                    k: v.replace("{bin}", binary).replace("{blob}", blob) for k, v in args.items()
+                }
                 text = answer(client, tool, filled)
                 for form, mark in paths:
                     text = text.replace(form, mark)

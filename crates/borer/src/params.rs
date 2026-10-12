@@ -216,14 +216,48 @@ pub(crate) enum SearchKind {
 pub(crate) struct LoadBinaryParams {
     /// Path to the binary on disk (PE, ELF, Mach-O, or any file as raw bytes).
     pub(crate) path: String,
-    /// File offset of the entry point to use instead of the header's,
-    /// mapped to its address through the section table (a corrupt table is
-    /// mapped flat, so any offset in the file has one).
+    /// File offset to use as the entry instead of the header's.
     pub(crate) entry_file_offset: Option<u64>,
-    /// Whether a companion PDB the debug record names may apply its symbols
-    /// (default true); false analyzes the image alone, whatever sits beside
-    /// it or at the recorded path.
+    /// Apply the companion PDB the debug record names (default true).
     pub(crate) pdb: Option<bool>,
+    /// Raw code or a dump: map its bytes as this arch.
+    pub(crate) arch: Option<RawArch>,
+    /// With arch: the file's address (default 0).
+    pub(crate) base: Option<String>,
+    /// With arch: entry address (default first executable byte).
+    pub(crate) entry: Option<String>,
+    /// With arch, not base: VA@OFF:LEN[:rwx],... (max 256).
+    pub(crate) regions: Option<String>,
+}
+
+/// A raw load's architecture.
+///
+/// Its schema carries no description of its own: the `arch` parameter's
+/// says what it is, and tools/list is read in full by every agent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+#[schemars(transform = names_only, description = "")]
+pub(crate) enum RawArch {
+    /// 32-bit x86.
+    X86,
+    /// x86-64.
+    #[serde(alias = "x86-64", alias = "x86_64", alias = "amd64")]
+    X64,
+    /// AArch64.
+    #[serde(alias = "aarch64")]
+    Arm64,
+}
+
+impl From<RawArch> for program::Arch {
+    fn from(a: RawArch) -> Self {
+        match a {
+            RawArch::X86 => program::Arch::X86,
+            RawArch::X64 => program::Arch::X86_64,
+            RawArch::Arm64 => program::Arch::Arm64,
+        }
+    }
 }
 
 /// Parameters for `fetch_pdb`.

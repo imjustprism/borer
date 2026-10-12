@@ -11,6 +11,7 @@ use borer_engine::analysis::{
     map, messages, name_of, parse_addr, parse_off, ports, protocol, render, resolve_suggesting,
     schema, senders, sigs, snapshot, utypes, vtables,
 };
+use borer_engine::layout::{self, Layout};
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
 use borer_engine::text::{one_line, quoted, short_path};
@@ -100,6 +101,10 @@ options:
   --pack <file>                            run the analysis with a pack (repeatable; BORER_PACKS lists more, for the MCP server too)
   --no-auto-packs                          load only the packs --pack and BORER_PACKS name, not the pack directories' (BORER_AUTO_PACKS=0 does the same)
   --no-pdb                                 do not apply the companion PDB the debug record names, where one is on disk
+  --arch <x86|x64|arm64>                   read the binary as raw code or a memory dump of that architecture, its headers unread
+  --base <address>                         with --arch: where the file's first byte maps (default 0)
+  --entry <address>                        with --arch: the entry (default the first executable byte)
+  --regions <va@off:len[:rwx],...>         with --arch, instead of --base: map these parts of the file at these addresses (max 256)
 no arguments starts the MCP stdio server";
 
 /// The cap on rows that list classes: every class a program has fits.
@@ -927,6 +932,100 @@ fn split_pack_args(args: &[String]) -> anyhow::Result<(Vec<String>, Vec<String>,
     Ok((rest, files, auto, pdb))
 }
 
+/// The raw layout flags of a command line, as given.
+#[derive(Debug, Default)]
+struct RawFlags {
+    /// `--arch`: the architecture the bytes map as.
+    arch: Option<String>,
+    /// `--base`: where the whole file maps.
+    base: Option<String>,
+    /// `--entry`: the entry address.
+    entry: Option<String>,
+    /// `--regions`: the parts of the file mapped instead of the whole.
+    regions: Option<String>,
+}
+
+impl RawFlags {
+    /// Takes the layout flags (`--arch`, `--base`, `--entry`,
+    /// `--regions`, each `--flag value` or `--flag=value`) out of a command
+    /// line.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The command line after the program name.
+    ///
+    /// # Returns
+    ///
+    /// The other arguments in order, and the flags.
+    ///
+    /// # Errors
+    ///
+    /// When a flag ends the line with no value after it, or is given twice.
+    fn split(args: &[String]) -> anyhow::Result<(Vec<String>, RawFlags)> {
+        let mut rest = Vec::with_capacity(args.len());
+        let mut raw = RawFlags::default();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            let (flag, inline) = a
+                .split_once('=')
+                .map_or((a.as_str(), None), |(f, v)| (f, Some(v)));
+            let Some(slot) = raw.slot(flag) else {
+                rest.push(a.clone());
+                continue;
+            };
+            let value = match inline {
+                Some(v) => v.to_owned(),
+                None => it
+                    .next()
+                    .with_context(|| format!("{flag} needs a value"))?
+                    .clone(),
+            };
+            if slot.replace(value).is_some() {
+                bail!("{flag} is given twice");
+            }
+        }
+        Ok((rest, raw))
+    }
+
+    /// Returns where a layout flag's value goes.
+    ///
+    /// # Arguments
+    ///
+    /// * `flag` - The flag as typed, before any `=`.
+    ///
+    /// # Returns
+    ///
+    /// The flag's slot, or `None` when the word is no layout flag.
+    fn slot(&mut self, flag: &str) -> Option<&mut Option<String>> {
+        match flag {
+            "--arch" => Some(&mut self.arch),
+            "--base" => Some(&mut self.base),
+            "--entry" => Some(&mut self.entry),
+            "--regions" => Some(&mut self.regions),
+            _ => None,
+        }
+    }
+
+    /// Reads the layout the flags state.
+    ///
+    /// # Returns
+    ///
+    /// `None` when no layout flag was given.
+    ///
+    /// # Errors
+    ///
+    /// As [`layout::parse_arch`] and [`Layout::parse`].
+    fn layout(&self) -> anyhow::Result<Option<Layout>> {
+        let arch = self.arch.as_deref().map(layout::parse_arch).transpose()?;
+        Layout::parse(
+            arch,
+            self.base.as_deref(),
+            self.entry.as_deref(),
+            self.regions.as_deref(),
+        )
+    }
+}
+
 /// Describes a pack for its author: name, version, what it is about, its
 /// lines counted by section and key, and the warnings about keys borer does
 /// not read.
@@ -1006,6 +1105,7 @@ fn needs_a_binary(word: &str) -> String {
 /// * `args` - The command line, the command first and the binary second.
 /// * `pack_files` - The pack files to read.
 /// * `apply_pdb` - Whether a companion PDB's symbols may apply.
+/// * `layout` - Where a raw file's bytes map; `None` reads its headers.
 ///
 /// # Returns
 ///
@@ -1018,15 +1118,21 @@ fn open(
     args: &[String],
     pack_files: &[String],
     apply_pdb: bool,
+    layout: Option<&Layout>,
 ) -> anyhow::Result<(Arc<Packs>, Program)> {
     let named = read_packs(pack_files)?;
     let path = args
         .get(1)
         .with_context(|| needs_a_binary(args.first().map_or("", String::as_str)))?;
-    let symsrv = crate::symsrv::cache_dir().filter(|_| apply_pdb);
-    let program =
-        Program::load_with_symsrv(std::path::Path::new(path), apply_pdb, symsrv.as_deref())
-            .with_context(|| format!("loading {}", short_path(path)))?;
+    let file = std::path::Path::new(path);
+    let program = match layout {
+        Some(layout) => Program::load_layout(file, layout),
+        None => {
+            let symsrv = crate::symsrv::cache_dir().filter(|_| apply_pdb);
+            Program::load_with_symsrv(file, apply_pdb, symsrv.as_deref())
+        }
+    }
+    .with_context(|| format!("loading {}", short_path(path)))?;
     Ok((named, program))
 }
 
@@ -1252,7 +1358,8 @@ const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
 /// missing or unloadable binary, a bad address, or an engine failure; the
 /// message carries the command's usage lines where it helps.
 pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
-    let (owned, pack_files, auto, pdb) = split_pack_args(args)?;
+    let (args, raw) = RawFlags::split(args)?;
+    let (owned, pack_files, auto, pdb) = split_pack_args(&args)?;
     let args = owned.as_slice();
     let Some(word) = args.first() else {
         bail!("an option was given but no command; `borer help` lists the commands");
@@ -1298,6 +1405,21 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         | Command::Setup
         | Command::FetchPdb => (1, ""),
     };
+    let layout = raw.layout()?;
+    let maps_a_binary = match command {
+        Command::Query(_) | Command::Packs => true,
+        Command::PackKeys
+        | Command::Pack
+        | Command::Sigmake
+        | Command::Doctor
+        | Command::Setup
+        | Command::FetchPdb => false,
+    };
+    if layout.is_some() && !maps_a_binary {
+        bail!(
+            "--arch, --base, --entry and --regions say how a query reads its binary; {word} maps none"
+        );
+    }
     if let Some(most) = command.most_args()
         && let Some(extra) = args.get(first + most)
     {
@@ -1324,7 +1446,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         }
         Command::Sigmake => sigmake(args)?,
         Command::Packs => {
-            let (named, program) = open(args, &pack_files, pdb)?;
+            let (named, program) = open(args, &pack_files, pdb, layout.as_ref())?;
             print!("{}", packs_report(&program, &named, auto));
         }
         Command::Doctor => {
@@ -1371,7 +1493,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
             println!("{said}");
         }
         Command::Query(q) => {
-            let (named, program) = open(args, &pack_files, pdb)?;
+            let (named, program) = open(args, &pack_files, pdb, layout.as_ref())?;
             query(q, args, &Session::fit(program, &named, auto))?;
         }
     }

@@ -1,5 +1,5 @@
 # task	calls	bytes	found
-front_door	3	31469	1
+front_door	3	31774	1
 orient	2	3918	1
 serial_constant	2	3855	1
 marker_user	2	1959	1
@@ -10,3 +10,4 @@ uri_typo	2	1820	1
 name_typo	2	1851	1
 playbook	2	3041	1
 call_args	2	1926	1
+raw_code	2	593	1

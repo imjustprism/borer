@@ -42,6 +42,7 @@ mod symsrv;
 use borer_engine::analysis::{
     Analysis, EnumSource, Overlay, parse_addr, parse_off, render, resolve,
 };
+use borer_engine::layout::Layout;
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num, strings as strscan};
@@ -72,7 +73,7 @@ use params::{
     FindFunctionByStringParams, FunctionDetailParams, FunctionParams, FunctionsParams,
     HexdumpParams, LiveAttachParams, LiveInstancesParams, LiveModulesParams, LiveObjectParams,
     LiveReadParams, LiveWatchParams, LoadBinaryParams, LoadProjectParams, Page, QueryParams,
-    ReachesParams, ReadParams, SaveProjectParams, ScriptParams, SearchKind, SearchParams,
+    RawArch, ReachesParams, ReadParams, SaveProjectParams, ScriptParams, SearchKind, SearchParams,
     SetCommentParams, SetNameParams, SetTypeParams, StringEncoding, StringsParams, SymbolsParams,
     TypesParams, XrefsParams, count_param, must_be_in_a_section, must_fit_a_row, to_usize,
 };
@@ -101,6 +102,9 @@ struct BorerServer {
     /// The `entry_file_offset` the loaded program was loaded with, so a
     /// reload loads it the same way.
     entry_file_offset: Arc<RwLock<Option<u64>>>,
+    /// The raw layout the loaded program was mapped by, so a reload maps
+    /// it the same way.
+    raw_load: Arc<RwLock<RawLoad>>,
     /// Derived analysis of `program`, computed on first use and reset by `load_binary`.
     analysis: Arc<RwLock<Option<Arc<Analysis>>>>,
     /// The loaded program's string walks, computed on the first `strings`
@@ -120,6 +124,21 @@ struct BorerServer {
     /// by the transport once the reload reply and every earlier one are
     /// written.
     hand_over: Arc<HandOver>,
+}
+
+/// The raw layout `load_binary` was asked to map a file by (its `arch`,
+/// `base`, `entry` and `regions`, as given); all `None` when the file's
+/// own headers were read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RawLoad {
+    /// The architecture the bytes map as.
+    arch: Option<RawArch>,
+    /// Where the whole file maps.
+    base: Option<String>,
+    /// The entry address.
+    entry: Option<String>,
+    /// The parts of the file mapped instead of the whole.
+    regions: Option<String>,
 }
 
 /// A process attached for reading, with where the loaded binary sits in it
@@ -722,12 +741,18 @@ impl BorerServer {
     /// A refused load changes nothing: the program, its names and the
     /// load options of the session stay what they were.
     ///
+    /// With `arch`, the file is not parsed: its bytes map where `base` or
+    /// `regions` say ([`Layout`]), so raw code and memory dumps analyze
+    /// with every other tool; without it the load is what it always was.
+    ///
     /// # Errors
     ///
-    /// Invalid params when the file does not load, or the entry offset is
-    /// past its end or in no section's file bytes.
+    /// Invalid params when the file does not load, the entry offset is
+    /// past its end or in no section's file bytes, the stated layout does
+    /// not parse or the file cannot hold it, or `entry` and
+    /// `entry_file_offset` are both given.
     #[tool(
-        description = "Load a PE, ELF or Mach-O file (a fat Mach-O: its x86-64 slice), or any other file as raw bytes, as the current program; returns its summary. pdb=false skips the companion PDB; entry_file_offset overrides the entry.",
+        description = "Load a PE, ELF or Mach-O file (a fat Mach-O: its x86-64 slice), or any other file as raw bytes, as the current program; returns its summary. pdb=false skips the companion PDB; entry_file_offset overrides the entry; arch maps raw code or a dump.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -741,15 +766,39 @@ impl BorerServer {
             path,
             entry_file_offset,
             pdb,
+            arch,
+            base,
+            entry,
+            regions,
         }): Parameters<LoadBinaryParams>,
     ) -> Result<String, ErrorData> {
         let apply_pdb = pdb.unwrap_or(true);
+        if entry.is_some() && entry_file_offset.is_some() {
+            return Err(err_params(
+                "entry and entry_file_offset both name the entry; give one",
+            ));
+        }
+        let raw = RawLoad {
+            arch,
+            base,
+            entry,
+            regions,
+        };
+        let layout = Layout::parse(
+            raw.arch.map(Into::into),
+            raw.base.as_deref(),
+            raw.entry.as_deref(),
+            raw.regions.as_deref(),
+        )
+        .map_err(|e| err_params(format!("load failed: {e:#}")))?;
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Program::load_with_symsrv(
-                &PathBuf::from(&path),
-                apply_pdb,
-                symsrv::cache_dir().as_deref(),
-            )
+            let path = PathBuf::from(&path);
+            match &layout {
+                Some(layout) => Program::load_layout(&path, layout),
+                None => {
+                    Program::load_with_symsrv(&path, apply_pdb, symsrv::cache_dir().as_deref())
+                }
+            }
         }))
         .map_err(|e| {
             err_internal(format!(
@@ -792,6 +841,7 @@ impl BorerServer {
         }
         *write_lock(&self.pdb_applied) = apply_pdb;
         *write_lock(&self.entry_file_offset) = entry_file_offset;
+        *write_lock(&self.raw_load) = raw;
         if let Some(s) = lock(&self.live).as_mut() {
             let mapped = s.map(Some(&program));
             let _ = write!(
@@ -3843,6 +3893,7 @@ impl ServerHandler for BorerServer {
                 }),
                 pdb: Some(*read_lock(&self.pdb_applied)),
                 entry_file_offset: *read_lock(&self.entry_file_offset),
+                raw: read_lock(&self.raw_load).clone(),
             });
         }
         let response = response?;
@@ -4905,7 +4956,8 @@ impl BorerServer {
     }
 
     /// Loads the file the worker before this one had loaded, the way it was
-    /// loaded (its `pdb` and `entry_file_offset`), with its names and comments.
+    /// loaded (its `pdb`, `entry_file_offset` and raw layout), with its
+    /// names and comments.
     ///
     /// A file that no longer loads is said on stderr and the session goes on
     /// without it.
@@ -4925,6 +4977,7 @@ impl BorerServer {
             project,
             pdb,
             entry_file_offset,
+            raw,
         }: Resume,
     ) -> Option<InitializeRequestParams> {
         if let Some(project) = project {
@@ -4933,6 +4986,10 @@ impl BorerServer {
                 path: project.program,
                 entry_file_offset,
                 pdb,
+                arch: raw.arch,
+                base: raw.base,
+                entry: raw.entry,
+                regions: raw.regions,
             }));
             if let Err(e) = reloaded {
                 eprintln!(
@@ -4967,6 +5024,10 @@ struct Resume {
     /// The `entry_file_offset` the file was loaded with, for the next
     /// worker to load it the same way.
     entry_file_offset: Option<u64>,
+    /// The raw layout the file was mapped by, for the next worker to map
+    /// it the same way; absent from the state of a worker built before it.
+    #[serde(default)]
+    raw: RawLoad,
 }
 
 impl Resume {
@@ -5282,6 +5343,10 @@ mod tests {
                 path: path.to_owned(),
                 entry_file_offset,
                 pdb,
+                arch: None,
+                base: None,
+                entry: None,
+                regions: None,
             }
         };
         let server = super::BorerServer::default();
@@ -5324,6 +5389,10 @@ mod tests {
                 path: exe.display().to_string(),
                 entry_file_offset: None,
                 pdb: Some(false),
+                arch: None,
+                base: None,
+                entry: None,
+                regions: None,
             }))
             .expect("the test binary loads");
         let on_disk = server.loaded().and_then(|p| {
@@ -6652,10 +6721,130 @@ mod tests {
             path: path.display().to_string(),
             entry_file_offset: None,
             pdb: Some(false),
+            arch: None,
+            base: None,
+            entry: None,
+            regions: None,
         }));
         std::fs::remove_file(&path).expect("the file is removed");
         let said = said.expect("any file loads");
         assert!(said.ends_with(super::LOAD_NEXT), "{said}");
+    }
+
+    /// `load_binary` with `arch` maps a headerless file where `base` says.
+    ///
+    /// The code tools then read it; without `arch` the same file loads as
+    /// it always did, with no code; a layout that does not parse or fit,
+    /// or an entry given twice, is refused and changes nothing.
+    ///
+    /// # Panics
+    ///
+    /// When a load answers otherwise or a refused one moves the session.
+    #[test]
+    fn load_binary_maps_raw_code_at_a_stated_layout() {
+        use super::{FunctionsParams, LoadBinaryParams, Parameters, RawArch, RawLoad};
+        // ASM: call 0x1000b; add rax, 1; ret; int3; mov eax, 42; ret
+        const CODE: [u8; 17] = [
+            0xe8, 0x06, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc0, 0x01, 0xc3, 0xcc, 0xb8, 0x2a, 0x00,
+            0x00, 0x00, 0xc3,
+        ];
+        let path =
+            std::env::temp_dir().join(format!("borer-raw-layout-{}.bin", std::process::id()));
+        std::fs::write(&path, CODE).expect("the file is written");
+        let shown = path.display().to_string();
+        let load = |raw: RawLoad, entry_file_offset: Option<u64>| {
+            super::BorerServer::default().load_binary(Parameters(LoadBinaryParams {
+                path: shown.clone(),
+                entry_file_offset,
+                pdb: None,
+                arch: raw.arch,
+                base: raw.base,
+                entry: raw.entry,
+                regions: raw.regions,
+            }))
+        };
+        let plain = load(RawLoad::default(), None);
+        let server = super::BorerServer::default();
+        let stated = RawLoad {
+            arch: Some(RawArch::X64),
+            base: Some("0x10000".to_owned()),
+            entry: None,
+            regions: None,
+        };
+        let mapped = server.load_binary(Parameters(LoadBinaryParams {
+            path: shown.clone(),
+            entry_file_offset: None,
+            pdb: None,
+            arch: stated.arch,
+            base: stated.base.clone(),
+            entry: None,
+            regions: None,
+        }));
+        let functions = server.functions(Parameters(FunctionsParams {
+            filter: None,
+            sort: None,
+            offset: None,
+            limit: None,
+            count_only: None,
+        }));
+        let past = server.load_binary(Parameters(LoadBinaryParams {
+            path: shown.clone(),
+            entry_file_offset: None,
+            pdb: Some(false),
+            arch: Some(RawArch::X64),
+            base: None,
+            entry: None,
+            regions: Some("0x10000@0:0x40".to_owned()),
+        }));
+        let twice = load(
+            RawLoad {
+                entry: Some("0x10000".to_owned()),
+                ..stated.clone()
+            },
+            Some(0),
+        );
+        let no_arch = load(
+            RawLoad {
+                base: Some("0x10000".to_owned()),
+                ..RawLoad::default()
+            },
+            None,
+        );
+        std::fs::remove_file(&path).expect("the file is removed");
+
+        let plain = plain.expect("any file loads");
+        assert!(plain.contains("arch: unknown\n"), "{plain}");
+        let mapped = mapped.expect("the layout maps");
+        assert!(
+            mapped.contains("format:  raw   arch: x86-64 (64-bit)\n"),
+            "{mapped}"
+        );
+        assert!(mapped.contains("entry: 0x10000\n"), "{mapped}");
+        assert!(mapped.contains("kind stated layout"), "{mapped}");
+        let functions = functions.expect("it lists");
+        assert!(
+            functions.contains("0x10000 ") && functions.contains("0x1000b "),
+            "{functions}"
+        );
+        let past = past.expect_err("refused").message;
+        assert!(
+            past.contains("runs past the end of the file at 0x11"),
+            "{past}"
+        );
+        assert!(
+            twice.expect_err("refused").message.contains("give one"),
+            "both entries"
+        );
+        assert!(
+            no_arch.expect_err("refused").message.contains("need arch"),
+            "base alone"
+        );
+        assert_eq!(
+            *super::read_lock(&server.raw_load),
+            stated,
+            "the refusal moved it"
+        );
+        assert!(server.loaded().is_some_and(|p| p.entry == Some(0x10000)));
     }
 
     /// A count above a tool's cap is cut to the cap and the answer opens by
@@ -7089,6 +7278,10 @@ mod tests {
                 path: path.display().to_string(),
                 entry_file_offset: None,
                 pdb: Some(false),
+                arch: None,
+                base: None,
+                entry: None,
+                regions: None,
             }))
             .expect("the file loads")
     }

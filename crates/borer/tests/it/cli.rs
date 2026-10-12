@@ -1614,3 +1614,49 @@ fn cli_packs_read_list_and_load() {
     std::fs::remove_file(&bad).ok();
     assert!(!ok, "a file that is not a pack loads");
 }
+
+/// `--arch` with `--regions` maps a two-part dump where the command line
+/// says.
+///
+/// The queries then read it like any image; without `--arch` the same
+/// file has no code, and a region past the end of the file or a layout
+/// flag on a command that reads no binary is refused.
+#[test]
+fn cli_maps_a_dump_at_stated_regions() {
+    let mut bytes = vec![0xcc_u8; 0x30];
+    // ASM: mov eax, dword ptr [0x20000]; ret
+    bytes[..8].copy_from_slice(&[0x8b, 0x04, 0x25, 0x00, 0x00, 0x02, 0x00, 0xc3]);
+    bytes[0x20..0x24].copy_from_slice(&42u32.to_le_bytes());
+    let path = std::env::temp_dir().join(format!("borer_dump_fixture_{}.bin", std::process::id()));
+    std::fs::write(&path, &bytes).expect("the fixture is writable");
+    let path = path.to_string_lossy().to_string();
+    let regions = "0x10000@0:0x20:rx,0x20000@0x20:0x10:rw";
+
+    let (ok, info) = run_all(&["info", &path, "--arch", "x64", "--regions", regions]);
+    let (emulated, ran) = run_all(&[
+        "emulate",
+        &path,
+        "0x10000",
+        "--arch=x64",
+        "--regions",
+        regions,
+    ]);
+    let (plain, unmapped) = run_all(&["functions", &path]);
+    let (past, refusal) = run_all(&["info", &path, "--arch", "x64", "--regions", "0@0:0x31"]);
+    let (stray, stray_refusal) = run_all(&["pack-keys", "--arch", "x64"]);
+    drop(std::fs::remove_file(&path));
+
+    assert!(ok, "{info}");
+    assert!(info.contains("region1        0x20000"), "{info}");
+    assert!(info.contains("kind stated layout"), "{info}");
+    assert!(emulated && ran.contains("rax=0x2a "), "{ran}");
+    assert!(!plain && unmapped.contains("raw file"), "{unmapped}");
+    assert!(
+        !past && refusal.contains("runs past the end of the file at 0x30"),
+        "{refusal}"
+    );
+    assert!(
+        !stray && stray_refusal.contains("pack-keys maps none"),
+        "{stray_refusal}"
+    );
+}

@@ -392,3 +392,35 @@ fn a_reload_keeps_the_load_options() {
     assert_eq!(after, before, "the reload loaded the file another way");
     client.finish();
 }
+
+/// A reload maps a raw file by the layout the session stated.
+///
+/// The hand-over carried the `pdb` and the `entry_file_offset` alone, so a
+/// file loaded with `arch` and `regions` would come back as raw bytes with
+/// no architecture and no code.
+#[test]
+fn a_reload_keeps_a_stated_layout() {
+    // ASM: mov eax, 42; ret
+    const CODE: [u8; 6] = [0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3];
+    let path = std::env::temp_dir().join(format!("borer-reload-layout-{}.bin", std::process::id()));
+    std::fs::write(&path, CODE).expect("the file is written");
+    let shown = path.display().to_string();
+    let mut client = Client::start(&shown);
+    let loaded = client.text(
+        "load_binary",
+        &format!(r#"{{"path":{shown:?},"arch":"x64","regions":"0x10000@0:6:rx"}}"#),
+    );
+    assert!(loaded.contains("region0"), "{loaded}");
+    let before = client.text("binary_info", "{}");
+    client.passed.clear();
+    let reload = client.text("reload", "{}");
+    assert!(reload.contains("reloading borer"), "{reload}");
+    client.next_with(
+        "notifications/tools/list_changed",
+        "tool list announced after the reload",
+    );
+    let after = client.text("binary_info", "{}");
+    client.finish();
+    std::fs::remove_file(&path).expect("the file is removed");
+    assert_eq!(after, before, "the reload mapped the file another way");
+}
