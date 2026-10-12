@@ -47,6 +47,7 @@ import hashlib
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -934,6 +935,22 @@ def collect(client, binary: str, want: int = WANT) -> list[Function]:
     return out
 
 
+EXIT_WAIT = 120
+"""Seconds a server is given to exit once its input closes: dropping a
+large binary's analysis takes more than the ten mcp.py waits on a machine
+busy with builds, and the measurement is already in hand."""
+
+
+def shut(client) -> None:
+    """Closes a session's input and waits for the server to exit, else kills it."""
+    client.proc.stdin.close()
+    try:
+        client.proc.wait(timeout=EXIT_WAIT)
+    except subprocess.TimeoutExpired:
+        client.proc.kill()
+        client.proc.wait()
+
+
 def read_tsv(path: str) -> dict[str, dict[str, str]]:
     """A baseline: {tag: {column: value}}."""
     if not os.path.exists(path):
@@ -1057,7 +1074,7 @@ def main(argv: list[str]) -> int:
         try:
             funcs = collect(client, path)
         finally:
-            client.close()
+            shut(client)
         if opt("--out"):
             os.makedirs(opt("--out"), exist_ok=True)
             with open(os.path.join(opt("--out"), f"{tag}.txt"), "w", encoding="utf-8") as f:
