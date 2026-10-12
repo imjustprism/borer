@@ -316,6 +316,12 @@ pub struct Program {
     /// the provenance of the names it gave [`Program::symbols`], and the
     /// mark of which functions take Go's arguments ([`crate::go`]).
     pub go: Option<crate::go::Pclntab>,
+    /// The .NET metadata of a PE with a CLR runtime header
+    /// ([`crate::clr`]): `None` without one, `Some(Err)` with the reason
+    /// when its header or metadata does not hold, else what triage reads
+    /// of it, the provenance of the method names it gave
+    /// [`Program::symbols`].
+    pub clr: Option<Result<crate::clr::Clr, String>>,
     /// The file this program was carved from and where, when it was loaded
     /// as `<file>@<offset>` ([`Program::load`]); `None` for a file loaded
     /// whole.
@@ -1454,6 +1460,7 @@ impl Program {
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
             go: None,
+            clr: None,
             parent: None,
         }
     }
@@ -1677,6 +1684,7 @@ impl Program {
         let mut fit = Fit::default();
         let mut pdb_record: Option<crate::pdb::Record> = None;
         let mut relocs = crate::reloc::Relocs::default();
+        let mut clr_dir: Option<(u32, u32)> = None;
 
         match &obj {
             goblin::Object::PE(pe) => {
@@ -1689,6 +1697,11 @@ impl Program {
                 };
                 is_64 = pe.is_64;
                 image_base = pe.image_base;
+                clr_dir = pe
+                    .header
+                    .optional_header
+                    .and_then(|o| o.data_directories.get_clr_runtime_header().copied())
+                    .map(|d| (d.virtual_address, d.size));
                 if pe.entry != 0 {
                     entry = pe.image_base.checked_add(u64::from(pe.entry));
                 }
@@ -2229,10 +2242,13 @@ impl Program {
             flat_fallback,
             relocs,
             go: None,
+            clr: None,
             parent: None,
         };
         program.read_go();
         phases.mark("load go");
+        program.read_clr(clr_dir);
+        phases.mark("load clr");
         Ok(program)
     }
 
@@ -2256,6 +2272,36 @@ impl Program {
         let named = crate::go::symbols(&funcs, &self.symbols);
         self.symbols.extend(named);
         self.go = Some(table);
+    }
+
+    /// Reads the .NET metadata a CLR runtime header points at and names
+    /// each method's body with its method ([`crate::clr`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The CLR runtime header's data directory, `(rva, size)`;
+    ///   `None` for a file without one.
+    fn read_clr(&mut self, dir: Option<(u32, u32)>) {
+        let Some(dir) = dir else {
+            return;
+        };
+        let read = crate::clr::read(self, dir);
+        if let Ok(clr) = &read {
+            let named = clr.symbols(self.image_base, &self.symbols);
+            self.symbols.extend(named);
+        }
+        self.clr = Some(read);
+    }
+
+    /// The .NET metadata, when the program has a CLR runtime header whose
+    /// metadata reads ([`Program::clr`]).
+    ///
+    /// # Returns
+    ///
+    /// The metadata, or `None` for a file without one or with one refused.
+    #[must_use]
+    pub fn clr(&self) -> Option<&crate::clr::Clr> {
+        self.clr.as_ref().and_then(|c| c.as_ref().ok())
     }
 
     /// The addresses of the pointer-sized words a PE's base relocation
@@ -2825,6 +2871,14 @@ impl Program {
         out.push_str(&self.relocs.render());
         if let Some(go) = &self.go {
             out.push_str(&go.render());
+        }
+        match &self.clr {
+            Some(Ok(clr)) => out.push_str(&clr.render(self.image_base)),
+            Some(Err(why)) => out.push_str(&format!(
+                ".net:    a CLR runtime header, its metadata refused: {why}
+"
+            )),
+            None => {}
         }
         if let Some(outcome) = &self.pdb {
             out.push_str(&format!("pdb:     {}\n", outcome.render()));

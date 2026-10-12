@@ -205,3 +205,166 @@ fn an_embedded_program_opens_and_names_its_parent() {
     assert!(info.contains(&parent), "{info}");
     assert!(info.contains("format:  PE"), "{info}");
 }
+
+/// A two-byte cell.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+fn cell(v: u16) -> [u8; 2] {
+    v.to_le_bytes()
+}
+
+/// Appends a name to a `#Strings` heap and returns its index as a cell.
+///
+/// # Arguments
+///
+/// * `heap` - The heap, its empty string first.
+/// * `text` - The name.
+fn name(heap: &mut Vec<u8>, text: &str) -> [u8; 2] {
+    let at = u16::try_from(heap.len()).expect("a small heap");
+    heap.extend_from_slice(text.as_bytes());
+    heap.push(0);
+    cell(at)
+}
+
+/// Pads bytes to a four-byte boundary.
+///
+/// # Arguments
+///
+/// * `b` - The bytes.
+fn padded(mut b: Vec<u8>) -> Vec<u8> {
+    b.resize(b.len().next_multiple_of(4), 0);
+    b
+}
+
+/// A PE32+ .NET assembly with an IL method and a P/Invoke.
+///
+/// `Ns.Program::Main` is an IL body at RVA 0x1050 and
+/// `Ns.Program::MessageBox` a P/Invoke of `user32.dll!MessageBoxW`; one
+/// user string holds a URL. The CLR header is at 0x1010 and the metadata
+/// at 0x1080, in [`tiny_pe`]'s `.text` grown to 0x400 bytes.
+fn dotnet_pe() -> Vec<u8> {
+    let mut s = vec![0u8];
+    let mut t: Vec<u8> = Vec::new();
+    let lone = name(&mut s, "<Module>");
+    let (program, ns) = (name(&mut s, "Program"), name(&mut s, "Ns"));
+    let (main, pinvoke) = (name(&mut s, "Main"), name(&mut s, "MessageBox"));
+    let (user32, entry) = (name(&mut s, "user32.dll"), name(&mut s, "MessageBoxW"));
+    let none = 0u32.to_le_bytes();
+    let rows: [&[&[u8]]; 6] = [
+        &[&none, &lone, &cell(0), &cell(0), &cell(1), &cell(1)],
+        &[&none, &program, &ns, &cell(0), &cell(1), &cell(1)],
+        &[
+            &0x1050u32.to_le_bytes(),
+            &cell(0),
+            &cell(0x96),
+            &main,
+            &cell(0),
+            &cell(1),
+        ],
+        &[
+            &none,
+            &cell(0x80),
+            &cell(0x2096),
+            &pinvoke,
+            &cell(0),
+            &cell(1),
+        ],
+        &[&user32],
+        &[&cell(0x104), &cell((2 << 1) | 1), &entry, &cell(1)],
+    ];
+    for row in rows {
+        for c in row {
+            t.extend_from_slice(c);
+        }
+    }
+    let counts: [(u32, u32); 4] = [(0x02, 2), (0x06, 2), (0x1a, 1), (0x1c, 1)];
+    let mut stream = vec![0, 0, 0, 0, 2, 0, 0, 1];
+    let valid = counts.iter().fold(0u64, |v, (table, _)| v | (1 << table));
+    stream.extend_from_slice(&valid.to_le_bytes());
+    stream.extend_from_slice(&0u64.to_le_bytes());
+    for (_, n) in counts {
+        stream.extend_from_slice(&n.to_le_bytes());
+    }
+    stream.extend_from_slice(&t);
+    let url: Vec<u8> = "http://c2.example.test/gate.php"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let mut us = vec![0, u8::try_from(url.len() + 1).expect("a short string")];
+    us.extend_from_slice(&url);
+    us.push(0);
+    let streams = [
+        ("#~", padded(stream)),
+        ("#Strings", padded(s)),
+        ("#US", padded(us)),
+    ];
+    let mut meta = b"BSJB\x01\0\x01\0\0\0\0\0\x0c\0\0\0v4.0.30319\0\0\0\0".to_vec();
+    meta.extend_from_slice(&cell(3));
+    let mut off = meta.len()
+        + streams
+            .iter()
+            .map(|(n, _)| 8 + (n.len() + 4) / 4 * 4)
+            .sum::<usize>();
+    let mut body = Vec::new();
+    for (stream_name, bytes) in &streams {
+        meta.extend_from_slice(&u32::try_from(off).expect("fits").to_le_bytes());
+        meta.extend_from_slice(&u32::try_from(bytes.len()).expect("fits").to_le_bytes());
+        meta.extend_from_slice(&padded([stream_name.as_bytes(), b"\0"].concat()));
+        body.extend_from_slice(bytes);
+        off += bytes.len();
+    }
+    meta.extend_from_slice(&body);
+    let mut b = tiny_pe();
+    let (opt, row) = (0x80 + 24, 0x80 + 24 + 0xf0);
+    b[opt + 112 + 14 * 8..opt + 112 + 15 * 8].copy_from_slice(&[0x10, 0x10, 0, 0, 72, 0, 0, 0]);
+    b[row + 8..row + 12].copy_from_slice(&0x400u32.to_le_bytes());
+    b[row + 16..row + 20].copy_from_slice(&0x400u32.to_le_bytes());
+    b.resize(0x600, 0);
+    let mut cor20 = vec![72, 0, 0, 0, 2, 0, 5, 0, 0x80, 0x10, 0, 0];
+    cor20.extend_from_slice(&u32::try_from(meta.len()).expect("fits").to_le_bytes());
+    cor20.extend_from_slice(&1u32.to_le_bytes());
+    cor20.extend_from_slice(&0x0600_0001u32.to_le_bytes());
+    b[0x210..0x210 + cor20.len()].copy_from_slice(&cor20);
+    // ASM: a tiny IL header (2 bytes of code), nop, ret.
+    b[0x250..0x253].copy_from_slice(&[0x0a, 0x00, 0x2a]);
+    b[0x280..0x280 + meta.len()].copy_from_slice(&meta);
+    b
+}
+
+/// A .NET assembly's metadata and user strings read over the protocol.
+///
+/// `borer://clr` lists the P/Invoke, the user string joins `strings` whole
+/// as `dotnet-us`, `borer://iocs` reads the URL in it from that source,
+/// and `binary_info` has a `.net:` line.
+#[test]
+fn a_dotnet_assembly_lists_its_metadata_and_user_strings() {
+    let file = std::env::temp_dir().join(format!("borer_dotnet_{}.exe", std::process::id()));
+    std::fs::write(&file, dotnet_pe()).expect("the fixture is writable");
+    let mut client = Client::start(&file.to_string_lossy());
+    let pinvokes = read(&mut client, "borer://clr/pinvoke").expect("answers");
+    let strings = client.text("strings", r#"{"encoding": "utf16"}"#);
+    let iocs = read(&mut client, "borer://iocs/url").expect("answers");
+    let info = client.text("binary_info", "{}");
+    client.finish();
+    std::fs::remove_file(&file).ok();
+    assert!(
+        pinvokes
+            .contains("\npinvoke\t0x06000002\t-\tNs.Program::MessageBox\tuser32.dll!MessageBoxW\n"),
+        "{pinvokes}"
+    );
+    assert!(
+        strings.contains(" 31 dotnet-us \"http://c2.example.test/gate.php\"\n"),
+        "{strings}"
+    );
+    assert!(
+        iocs.lines()
+            .any(|l| l.contains("dotnet-us") && l.contains("http://c2.example.test/gate.php")),
+        "{iocs}"
+    );
+    assert!(
+        info.contains(".net:    module -, runtime 2.5, metadata v4.0.30319, ilonly; entry 0x06000001 Ns.Program::Main;"),
+        "{info}"
+    );
+}

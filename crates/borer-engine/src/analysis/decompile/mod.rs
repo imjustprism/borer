@@ -2679,6 +2679,7 @@ g(tmp_5);";
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
             go: None,
+            clr: None,
             parent: None,
         };
         let a = crate::analysis::Analysis::compute(&p);
@@ -2741,6 +2742,7 @@ g(tmp_5);";
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
             go: None,
+            clr: None,
             parent: None,
         };
         assert_eq!(

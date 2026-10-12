@@ -398,6 +398,7 @@ assert uris == [
     "borer://checks",
     "borer://children",
     "borer://classes",
+    "borer://clr",
     "borer://decoded",
     "borer://dynimports",
     "borer://enums",

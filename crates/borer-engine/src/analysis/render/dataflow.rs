@@ -796,6 +796,10 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
     }
 
     let go = p.go.as_ref().filter(|g| g.lists(va));
+    let method = p
+        .clr()
+        .and_then(|c| c.method_at(p.image_base, va))
+        .filter(|m| p.symbols.iter().any(|s| s.addr == va && s.name == m.name));
     let origin = if let Some(n) = o.names.get(&va) {
         format!("you set it: {n}")
     } else if let Some(d) = debug {
@@ -811,6 +815,17 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
             "the Go function table (pclntab, {}) records it: {}",
             g.version.releases(),
             s.name
+        )
+    } else if let Some(m) = method {
+        format!(
+            "the .NET metadata records it as method {:#010x} {}, {}",
+            m.token,
+            m.name,
+            match m.body {
+                crate::clr::Body::Native => "a native method, analyzed as code",
+                crate::clr::Body::Il | crate::clr::Body::Runtime | crate::clr::Body::None =>
+                    "an IL body, which borer does not decompile",
+            }
         )
     } else if let Some(s) = symbol.filter(|s| s.addr == va) {
         format!(
@@ -869,6 +884,9 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
         }
         if go.is_some() {
             how.push(String::from("the Go function table"));
+        }
+        if method.is_some() {
+            how.push(String::from("the .NET metadata"));
         }
         if !f.callers.is_empty() {
             how.push(format!("{} call site(s)", f.callers.len()));

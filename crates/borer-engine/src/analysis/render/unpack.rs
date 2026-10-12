@@ -683,6 +683,7 @@ fn materialized(p: &Program, bytes: Vec<u8>, oep: Option<u64>, sections: Vec<Sec
         flat_fallback: p.flat_fallback,
         relocs: crate::reloc::Relocs::default(),
         go: p.go.clone(),
+        clr: p.clr.clone(),
         parent: p.parent.clone(),
     }
 }

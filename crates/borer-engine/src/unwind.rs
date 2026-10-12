@@ -692,6 +692,7 @@ mod tests {
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
             go: None,
+            clr: None,
             parent: None,
         }
     }

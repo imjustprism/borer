@@ -1899,6 +1899,8 @@ pub fn parse_off(s: &str) -> Option<u64> {
 /// An import's slot holds a pointer to code in another module, so asking
 /// for the function there (`decompile GetLastError` where no thunk wraps
 /// it) is answered with what the slot is, not as a function not found.
+/// The start of a .NET method's IL body is refused the same way: it is not
+/// x86 code, and a function a sweep made of its bytes would be noise.
 ///
 /// # Arguments
 ///
@@ -1912,9 +1914,19 @@ pub fn parse_off(s: &str) -> Option<u64> {
 ///
 /// # Errors
 ///
-/// Says the address is an import's slot, or that no discovered function
-/// contains it.
+/// Says the address is an import's slot or an IL body, or that no
+/// discovered function contains it.
 pub fn function_entry(program: &Program, analysis: &Analysis, va: u64) -> Result<u64, String> {
+    if let Some(m) = program
+        .clr()
+        .and_then(|c| c.method_at(program.image_base, va))
+        .filter(|m| m.body == crate::clr::Body::Il)
+    {
+        return Err(format!(
+            "{va:#x} is the IL body of .NET method {:#010x} {}: borer does not decompile or disassemble IL; borer://clr lists the methods",
+            m.token, m.name
+        ));
+    }
     if let Some(f) = analysis.function_at(va) {
         return Ok(f.entry);
     }

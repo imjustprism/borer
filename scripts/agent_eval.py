@@ -449,6 +449,102 @@ def _objc_blob() -> bytes:
 MACHO_CODE = _macho_blob()
 OBJC_CODE = _objc_blob()
 
+
+def _dotnet_blob() -> bytes:
+    """A PE32+ .NET assembly `Hello`: `Ns.Program` with `Main` (an IL body
+    at RVA 0x1050) and `MessageBox` (a P/Invoke of user32.dll!MessageBoxW),
+    and one user string; the CLR header at 0x1000, the metadata at 0x1080."""
+    strings = bytearray(b"\0")
+
+    def s(name: str) -> bytes:
+        at = len(strings)
+        strings.extend(name.encode() + b"\0")
+        return at.to_bytes(2, "little")
+
+    def c(v: int) -> bytes:
+        return v.to_bytes(2, "little")
+
+    def d(v: int) -> bytes:
+        return v.to_bytes(4, "little")
+
+    def row(*cells: bytes) -> bytes:
+        return b"".join(cells)
+
+    tables = [
+        (0x00, [row(c(0), s("Hello.exe"), c(1), c(0), c(0))]),
+        # <Module>, then Ns.Program owning both methods.
+        (
+            0x02,
+            [
+                row(d(0), s("<Module>"), c(0), c(0), c(1), c(1)),
+                row(d(0x100001), s("Program"), s("Ns"), c(0), c(1), c(1)),
+            ],
+        ),
+        # Main, an IL body, then MessageBox, a P/Invoke: no body, PinvokeImpl set.
+        (
+            0x06,
+            [
+                row(d(0x1050), c(0), c(0x96), s("Main"), c(1), c(1)),
+                row(d(0), c(0x80), c(0x2096), s("MessageBox"), c(1), c(1)),
+            ],
+        ),
+        (0x1A, [s("user32.dll")]),
+        # MessageBox (MethodDef 2, MemberForwarded tag 1) bound to MessageBoxW.
+        (0x1C, [row(c(0x104), c((2 << 1) | 1), s("MessageBoxW"), c(1))]),
+        (0x20, [row(d(0x8004), c(1), c(0), c(0), c(0), d(0), c(0), s("Hello"), c(0))]),
+    ]
+    stream = bytearray(bytes.fromhex("0000000002000001"))
+    stream += sum(1 << t for t, _ in tables).to_bytes(8, "little") + bytes(8)
+    stream += b"".join(d(len(rs)) for _, rs in tables) + b"".join(b"".join(rs) for _, rs in tables)
+    text = "http://c2.example.test/gate.php".encode("utf-16-le")
+    us = bytes([0, len(text) + 1]) + text + b"\0"
+    pad = lambda b: bytes(b) + bytes(-len(b) % 4)  # noqa: E731
+    streams = [
+        (b"#~", pad(stream)),
+        (b"#Strings", pad(strings)),
+        (b"#US", pad(us)),
+        (b"#GUID", bytes(16)),
+        (b"#Blob", pad(b"\0\x03\x20\0")),
+    ]
+    head = b"BSJB" + c(1) + c(1) + d(0) + d(12) + b"v4.0.30319\0\0" + c(0) + c(len(streams))
+    off = len(head) + sum(8 + len(pad(n + b"\0")) for n, _ in streams)
+    body = b""
+    for name, data in streams:
+        head += d(off + len(body)) + d(len(data)) + pad(name + b"\0")
+        body += data
+    meta = head + body
+    text_sec = bytearray(0x80) + meta
+    text_sec[0:24] = d(72) + c(2) + c(5) + d(0x1080) + d(len(meta)) + d(1) + d(0x06000001)
+    text_sec[0x50:0x53] = bytes.fromhex("0a002a")  # tiny IL header; nop; ret
+    pe = bytearray(0x200)
+
+    def put(at: int, data: bytes) -> None:
+        pe[at : at + len(data)] = data
+
+    sig, opt = 0x80, 0x80 + 24
+    row = opt + 0xF0
+    put(0, b"MZ")
+    put(0x3C, d(0x80))
+    put(sig, b"PE\0\0")
+    put(sig + 4, c(0x8664) + c(1))
+    put(sig + 20, c(0xF0) + c(0x22))
+    put(opt, c(0x20B))
+    put(opt + 24, (0x140000000).to_bytes(8, "little"))
+    put(opt + 32, d(0x1000) + d(0x200))
+    put(opt + 48, c(6))
+    put(opt + 56, d(0x2000) + d(0x200))
+    put(opt + 68, c(3))
+    put(opt + 108, d(16))
+    put(opt + 112 + 14 * 8, d(0x1000) + d(72))
+    raw = len(text_sec) + (-len(text_sec) % 0x200)
+    put(row, b".text")
+    for at, v in ((8, len(text_sec)), (12, 0x1000), (16, raw), (20, 0x200), (36, 0x60000020)):
+        put(row + at, d(v))
+    return bytes(pe) + pad(text_sec) + bytes(raw - len(pad(text_sec)))
+
+
+DOTNET_CODE = _dotnet_blob()
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
@@ -462,6 +558,7 @@ BLOBS = {
     "static": (STATIC_CODE, "<static>"),
     "macho": (MACHO_CODE, "<macho>"),
     "objc": (OBJC_CODE, "<objc>"),
+    "dotnet": (DOTNET_CODE, "<dotnet>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -601,6 +698,15 @@ TASKS = [
             ("query", {"uri": "borer://capabilities"}),
         ],
         "connect (syscall), socket (syscall)",
+    ),
+    (
+        "dotnet_pinvoke",
+        "which native function a .NET assembly calls through P/Invoke, read from its metadata",
+        [
+            ("load_binary", {"path": "{dotnet}"}),
+            ("query", {"uri": "borer://clr/pinvoke"}),
+        ],
+        "Ns.Program::MessageBox	user32.dll!MessageBoxW",
     ),
     (
         "decoded_strings",

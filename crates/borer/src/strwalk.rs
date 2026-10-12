@@ -35,7 +35,8 @@ pub(crate) struct StringWalks {
     key: (usize, usize),
     /// ASCII runs of at least [`WALK_MIN`] bytes.
     ascii: Vec<StringHit>,
-    /// UTF-16LE runs of at least [`WALK_MIN`] code units.
+    /// UTF-16LE runs of at least [`WALK_MIN`] code units, a .NET
+    /// assembly's user strings in place of the runs walked in its `#US`.
     utf16: Vec<StringHit>,
 }
 
@@ -95,7 +96,11 @@ pub(crate) fn load_or_build(
     let walks = Arc::new(StringWalks {
         key,
         ascii: find_strings(&program.bytes, WALK_MIN),
-        utf16: find_wide_strings(&program.bytes, WALK_MIN),
+        utf16: borer_engine::clr::with_user_strings(
+            program,
+            find_wide_strings(&program.bytes, WALK_MIN),
+            WALK_MIN,
+        ),
     });
     *write_lock(cache) = Some(Arc::clone(&walks));
     walks

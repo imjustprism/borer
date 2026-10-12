@@ -3943,6 +3943,10 @@ fn percent_decode(text: &str) -> String {
 
 /// Walks a program's strings of one encoding, without the session's cache.
 ///
+/// A .NET assembly's user strings are read whole from its `#US` heap in
+/// place of the UTF-16LE runs the walk finds there
+/// ([`borer_engine::clr::with_user_strings`]).
+///
 /// # Arguments
 ///
 /// * `p` - The loaded program.
@@ -3953,12 +3957,14 @@ fn percent_decode(text: &str) -> String {
 ///
 /// The rows in offset order.
 fn walk_strings(p: &Program, encoding: StringEncoding, min: usize) -> Vec<strscan::StringHit> {
+    let wide =
+        || borer_engine::clr::with_user_strings(p, strscan::find_wide_strings(&p.bytes, min), min);
     match encoding {
         StringEncoding::Ascii => strscan::find_strings(&p.bytes, min),
-        StringEncoding::Utf16 => strscan::find_wide_strings(&p.bytes, min),
+        StringEncoding::Utf16 => wide(),
         StringEncoding::Both => {
             let mut all = strscan::find_strings(&p.bytes, min);
-            all.extend(strscan::find_wide_strings(&p.bytes, min));
+            all.extend(wide());
             all.sort_by_key(|h| h.off);
             all
         }
@@ -4625,7 +4631,7 @@ impl BorerServer {
     /// [`BorerServer::read_uri`] wraps it for `resources/read` and the
     /// `query` tool, and a script's `query(uri)` calls it directly
     /// ([`BorerServer::script`]). A listing that pages itself
-    /// (`attrs`, `messages`, `fieldrefs`, `grep`, `iocs`, `calls`) is
+    /// (`attrs`, `messages`, `fieldrefs`, `grep`, `iocs`, `calls`, `clr`) is
     /// handed the page; any other answer's rows are paged here
     /// ([`borer_engine::table::page`]), under a `# showing N of M from K`
     /// line and over the URI that reads the next page.
@@ -4669,6 +4675,8 @@ impl BorerServer {
             ("qt", None) => self.qt_text()?,
             ("objc", None) => return self.objc_text("", asked),
             ("objc", Some(filter)) => return self.objc_text(&filter, asked),
+            ("clr", None) => return self.clr_text(&asked.spec_words("")),
+            ("clr", Some(filter)) => return self.clr_text(&asked.spec_words(&filter)),
             ("stackstrings", None) => self.stack_strings_text("")?,
             ("stackstrings", Some(filter)) => self.stack_strings_text(&filter)?,
             ("emulate", Some(address)) => self.emulate_text(&address)?,
@@ -4856,6 +4864,10 @@ const RESOURCES: &[(&str, &str)] = &[
     (
         "borer://capabilities",
         "What the program can do, grouped from its imports: networking, injection, crypto, persistence, anti-analysis and more",
+    ),
+    (
+        "borer://clr",
+        "A .NET assembly's metadata: its types, its methods with each body's address (IL is not decompiled; a mixed-mode image's native methods analyze as usual), P/Invokes as dll!export, the external members it uses, referenced assemblies and its user strings, 200 rows a page; borer://clr/<filter> narrows by kind (type, method, pinvoke, memberref, asmref, moduleref, string) or text",
     ),
     (
         "borer://hidden",
@@ -5134,6 +5146,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://script/{path}",
         "Runs a Rhai script file against the loaded program in borer's sandbox: what it printed, and the names and comments it proposes (set_name applies one)",
         "borer://script/scan.rhai",
+    ),
+    (
+        "borer://clr/{filter}",
+        "A .NET assembly's metadata rows of one kind (type, method, pinvoke, memberref, asmref, moduleref, string) or whose name or detail contains the text, comma-separated; offset=<n> for the next page",
+        "borer://clr/pinvoke",
     ),
     (
         "borer://singletons/{filter}",

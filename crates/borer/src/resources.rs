@@ -437,6 +437,21 @@ impl BorerServer {
         self.with_program(|p| Ok(borer_engine::hashing::hashes_tsv(p)))
     }
 
+    /// Lists a .NET assembly's metadata: types, methods, P/Invokes,
+    /// external members, references and user strings.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Kinds and texts to keep, and the page, comma-separated.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, its metadata was refused, or the page
+    /// does not read.
+    pub(crate) fn clr_text(&self, spec: &str) -> Result<String, ErrorData> {
+        self.with_program(|p| borer_engine::clr::clr_tsv(p, spec))
+    }
+
     /// Lists the programs and containers embedded in the loaded file, and
     /// the high-entropy runs no header explains.
     ///

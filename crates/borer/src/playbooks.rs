@@ -244,6 +244,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "enums",
             "qt",
             "objc",
+            "clr",
         ],
     ),
     (

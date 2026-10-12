@@ -299,6 +299,11 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
   by magic when stripped), and on x86-64 a table from Go 1.18 on reads
   them with Go's register ABI and folds the stack-growth check. Its source
   lines and ABI0 assembly functions are not told apart yet.
+- A .NET assembly's metadata is read for triage (`borer://clr`): its
+  types, methods with their bodies' addresses, P/Invokes, referenced
+  members and assemblies, and user strings, which `strings` and
+  `borer://iocs` read too. IL is not decompiled; a mixed-mode image's
+  native methods are analyzed as any other code.
 - A static Linux binary's capabilities come from its syscall sites
   (`syscall`, `int 0x80`, arm64 `svc #0`), named only where the number is
   set in the same block as the call; one set elsewhere is counted as

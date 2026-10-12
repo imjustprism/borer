@@ -24,6 +24,7 @@
 
 pub mod analysis;
 pub mod carve;
+pub mod clr;
 pub mod crypto;
 pub mod disasm;
 pub mod dwarf;

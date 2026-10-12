@@ -108,6 +108,8 @@ const HIVE_HANDLES: [(u64, &str); 6] = [
 enum Source {
     /// A string stored in the file, ASCII or UTF-16.
     Static,
+    /// A .NET user string, a literal IL code loads, read from `#US`.
+    DotnetUs,
     /// A base64 string stored in the file, decoded.
     DecodedB64,
     /// A string a function builds on its stack.
@@ -130,6 +132,7 @@ impl Source {
     fn word(&self) -> String {
         match self {
             Source::Static => "static".to_owned(),
+            Source::DotnetUs => "dotnet-us".to_owned(),
             Source::DecodedB64 => "decoded-b64".to_owned(),
             Source::Stack => "stack".to_owned(),
             Source::Generated => "generated".to_owned(),
@@ -191,8 +194,9 @@ fn collected(p: &Program, a: &Analysis, o: &Overlay) -> Arc<Collected> {
 
 /// Collects every indicator of a program with its provenance.
 ///
-/// Six passes: the strings stored in the file outside code (and the base64
-/// among them, decoded), the strings functions build on their stacks, the
+/// Six passes: the strings stored in the file outside code and a .NET
+/// assembly's user strings (and the base64 among them, decoded), the
+/// strings functions build on their stacks, the
 /// strings generators build at run time ([`recovered_strings`]), the string
 /// arguments those generator runs pass to imported APIs and syscalls
 /// (decoded when the emulator services the call), the strings a decoder
@@ -215,21 +219,38 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
     let mut strings = crate::strings::find_strings(&p.bytes, STRING_MIN);
     strings.extend(crate::strings::find_wide_strings(&p.bytes, STRING_MIN));
     strings.sort_by_key(|h| h.off);
-    for hit in &strings {
-        let va = p.offset_to_va(hit.off);
-        if va
-            .and_then(|v| p.section_at(v))
-            .is_some_and(|s| s.executable)
+    let clr = p.clr();
+    let user_strings = clr.map_or(&[][..], |c| c.user_strings.as_slice());
+    let stored = user_strings
+        .iter()
+        .map(|u| {
+            (
+                u.off,
+                std::borrow::Cow::Borrowed(u.text.as_str()),
+                Source::DotnetUs,
+            )
+        })
+        .chain(
+            strings
+                .iter()
+                .filter(|hit| !clr.is_some_and(|c| c.in_user_strings(hit.off)))
+                .map(|hit| (hit.off, hit.full_text(&p.bytes), Source::Static)),
+        );
+    for (off, text, source) in stored {
+        let va = p.offset_to_va(off);
+        if source == Source::Static
+            && va
+                .and_then(|v| p.section_at(v))
+                .is_some_and(|s| s.executable)
         {
             continue;
         }
-        let site = va.map_or(Site::Off(hit.off), Site::Va);
+        let site = va.map_or(Site::Off(off), Site::Va);
         let function = va.and_then(user);
-        let text = hit.full_text(&p.bytes);
         let decoded = base64_text(&text);
         let found = classify(&text)
             .into_iter()
-            .map(|f| (f, Source::Static))
+            .map(|f| (f, source.clone()))
             .chain(
                 decoded
                     .iter()

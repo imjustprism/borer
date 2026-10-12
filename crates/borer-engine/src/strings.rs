@@ -10,14 +10,19 @@ pub enum Encoding {
     Ascii,
     /// UTF-16LE with ASCII code points, two bytes per character.
     Utf16,
+    /// A .NET user string (`#US`), UTF-16LE whole, read from the heap
+    /// rather than walked ([`crate::clr`]).
+    DotnetUs,
 }
 
 impl Encoding {
-    /// Returns the lowercase name used in tool output (`ascii` or `utf16`).
+    /// Returns the lowercase name used in tool output (`ascii`, `utf16`
+    /// or `dotnet-us`).
     pub fn name(self) -> &'static str {
         match self {
             Encoding::Ascii => "ascii",
             Encoding::Utf16 => "utf16",
+            Encoding::DotnetUs => "dotnet-us",
         }
     }
 }
@@ -59,17 +64,25 @@ impl StringHit {
         }
         let units = match self.encoding {
             Encoding::Ascii => 1,
-            Encoding::Utf16 => 2,
+            Encoding::Utf16 | Encoding::DotnetUs => 2,
         };
         let run = usize::try_from(self.off)
             .ok()
             .and_then(|start| bytes.get(start..start.checked_add(self.len.checked_mul(units)?)?));
-        match run {
-            Some(raw) => {
+        match (run, self.encoding) {
+            (Some(raw), Encoding::DotnetUs) => std::borrow::Cow::Owned(
+                char::decode_utf16(
+                    raw.chunks_exact(2)
+                        .filter_map(|c| c.first_chunk::<2>().map(|b| u16::from_le_bytes(*b))),
+                )
+                .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+                .collect(),
+            ),
+            (Some(raw), Encoding::Ascii | Encoding::Utf16) => {
                 let text: Vec<u8> = raw.iter().step_by(units).copied().collect();
                 std::borrow::Cow::Owned(String::from_utf8_lossy(&text).into_owned())
             }
-            None => std::borrow::Cow::Borrowed(&self.text),
+            (None, _) => std::borrow::Cow::Borrowed(&self.text),
         }
     }
 }
