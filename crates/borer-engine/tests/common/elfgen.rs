@@ -14,6 +14,8 @@
 
 /// `SHT_PROGBITS`.
 pub(crate) const PROGBITS: u32 = 1;
+/// `SHT_SYMTAB`.
+pub(crate) const SYMTAB: u32 = 2;
 /// `SHT_STRTAB`.
 pub(crate) const STRTAB: u32 = 3;
 /// `SHT_RELA`.
@@ -30,6 +32,8 @@ pub(crate) const WA: u64 = 3;
 pub(crate) const A: u64 = 2;
 /// `SHF_ALLOC | SHF_EXECINSTR`.
 pub(crate) const AX: u64 = 6;
+/// `ET_REL`.
+pub(crate) const ET_REL: u16 = 1;
 /// `ET_EXEC`.
 pub(crate) const ET_EXEC: u16 = 2;
 /// `ET_DYN`.
@@ -51,6 +55,9 @@ pub(crate) struct Sec {
     pub(crate) data: Vec<u8>,
     /// `sh_link`: a section index, counting the null section as 0.
     pub(crate) link: u32,
+    /// `sh_info`: the section a relocation section applies to, or one past
+    /// a symbol table's last local symbol.
+    pub(crate) info: u32,
     /// `sh_entsize`.
     pub(crate) entsize: u64,
 }
@@ -79,6 +86,7 @@ impl Sec {
             addr,
             data,
             link: 0,
+            info: 0,
             entsize: 0,
         }
     }
@@ -124,13 +132,26 @@ pub(crate) fn rela(offset: u64, sym: u32, ty: u32, addend: i64) -> Vec<u8> {
 /// * `shndx` - The section it is defined in, 0 for an import.
 /// * `value` - Its address.
 pub(crate) fn sym(name: u32, info: u8, shndx: u16, value: u64) -> Vec<u8> {
+    sym_sized(name, info, shndx, value, 0)
+}
+
+/// An `Elf64_Sym` entry with a size.
+///
+/// # Arguments
+///
+/// * `name` - Offset of its name in the string table.
+/// * `info` - `st_info`: binding and type.
+/// * `shndx` - The section it is defined in, 0 for an import.
+/// * `value` - Its address, or its offset in its section in an object.
+/// * `size` - `st_size`, in bytes.
+pub(crate) fn sym_sized(name: u32, info: u8, shndx: u16, value: u64, size: u64) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&name.to_le_bytes());
     out.push(info);
     out.push(0);
     out.extend_from_slice(&shndx.to_le_bytes());
     out.extend_from_slice(&value.to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
     out
 }
 
@@ -182,9 +203,20 @@ pub(crate) fn build(e_type: u16, machine: u16, entry: u64, secs: &[Sec]) -> Vec<
     let shoff = out.len().next_multiple_of(8);
     let count = secs.len() + 2;
     out.resize(shoff + count * 64, 0);
-    let header = |out: &mut Vec<u8>, i: usize, fields: [u64; 9]| {
+    let header = |out: &mut Vec<u8>, i: usize, fields: [u64; 10]| {
         let off = shoff + i * 64;
-        let [name, ty, flags, addr, offset, size, link, align, entsize] = fields;
+        let [
+            name,
+            ty,
+            flags,
+            addr,
+            offset,
+            size,
+            link,
+            info,
+            align,
+            entsize,
+        ] = fields;
         put(out, off, name, 4);
         put(out, off + 4, ty, 4);
         put(out, off + 8, flags, 8);
@@ -192,6 +224,7 @@ pub(crate) fn build(e_type: u16, machine: u16, entry: u64, secs: &[Sec]) -> Vec<
         put(out, off + 24, offset, 8);
         put(out, off + 32, size, 8);
         put(out, off + 40, link, 4);
+        put(out, off + 44, info, 4);
         put(out, off + 48, align, 8);
         put(out, off + 56, entsize, 8);
     };
@@ -208,6 +241,7 @@ pub(crate) fn build(e_type: u16, machine: u16, entry: u64, secs: &[Sec]) -> Vec<
                 s.addr,
                 size,
                 u64::from(s.link),
+                u64::from(s.info),
                 8,
                 s.entsize,
             ],
@@ -225,6 +259,7 @@ pub(crate) fn build(e_type: u16, machine: u16, entry: u64, secs: &[Sec]) -> Vec<
             0,
             shstr_at,
             shstr_len,
+            0,
             0,
             1,
             0,

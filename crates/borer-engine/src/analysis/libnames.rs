@@ -17,16 +17,21 @@
 //!    where the bytes there fit that name's signature: a helper too small
 //!    or too common to name by itself is named by its callers.
 //!
-//! The steps repeat until a round names nothing. An entry two names want
-//! in one round takes neither, since the linker folds identical functions
-//! into one and either name would mislead.
+//! The steps repeat until a round names nothing. A signature matches an
+//! entry only where the bytes after it fit the line's tail too
+//! ([`crate::libsig::Tail`]), which tells apart functions whose first bytes
+//! agree. An entry two names want in one round takes neither, since the
+//! linker folds identical functions into one and either name would
+//! mislead; it is listed as ambiguous with every name instead.
+
+use std::fmt::Write as _;
 
 use crate::isa::x86::{Decoder, DecoderOptions, OpKind, Register};
 
 use super::sigs::{EntryIndex, apply_names};
 use super::{Analysis, NameSource, single};
 use crate::fxmap::{FxHashMap, FxHashSet};
-use crate::libsig::{LibFunction, parse_line};
+use crate::libsig::{LibFunction, parse_line, tail_hash};
 use crate::program::{Program, SymbolKind};
 
 /// Fewest fixed bytes that name a function by themselves.
@@ -45,6 +50,9 @@ const CANDIDATES_MAX: usize = 4096;
 pub struct LibraryNames {
     /// The entries named, with their names.
     pub named: Vec<(u64, String)>,
+    /// Entries more than one name matched to the last byte the lines
+    /// carry, so none names them: the entry and every name, sorted.
+    pub ambiguous: Vec<(u64, Vec<String>)>,
     /// Entries a library name matched that the program names itself: the
     /// entry, the library's name and the program's.
     pub kept: Vec<(u64, String, String)>,
@@ -85,7 +93,7 @@ fn key(name: &str, is_64: bool) -> &str {
 /// * `name` - The library's name for it.
 /// * `is_64` - Whether the program is 64-bit.
 fn display(name: &str, is_64: bool) -> String {
-    if name.starts_with('?') {
+    if name.starts_with('?') || name.starts_with("_Z") || name.starts_with("_R") {
         crate::search::demangled_name(name)
     } else {
         key(name, is_64).to_owned()
@@ -129,6 +137,23 @@ fn reaches(program: &Program, entry: u64, at: u64) -> Option<u64> {
         });
     }
     None
+}
+
+/// Whether the bytes after a signature matched at `va` fit its tail: the
+/// fixed bytes the library has past its first [`crate::analysis::sigs::SIG_MAX`].
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `f` - The library function.
+/// * `va` - The entry its signature matched.
+fn tail_fits(program: &Program, f: &LibFunction, va: u64) -> bool {
+    f.tail.is_none_or(|t| {
+        let at = va.saturating_add(crate::num::from_usize(f.sig.len()));
+        program
+            .read_va(at, usize::from(t.len))
+            .is_some_and(|bytes| tail_hash(bytes) == t.hash)
+    })
 }
 
 /// Whether the bytes at `va` fit a signature.
@@ -201,9 +226,14 @@ pub fn find_library_names(program: &Program, analysis: &Analysis) -> LibraryName
                 Vec::new()
             } else {
                 found
+                    .into_iter()
+                    .filter(|&c| tail_fits(program, f, c))
+                    .collect()
             }
         })
         .collect();
+    let mut ambiguous: std::collections::BTreeMap<u64, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
     let mut named: FxHashMap<u64, usize> = FxHashMap::default();
     let mut named_keys: FxHashSet<&str> = known.values().map(String::as_str).collect();
     let mut placed = vec![false; fns.len()];
@@ -253,6 +283,12 @@ pub fn find_library_names(program: &Program, analysis: &Analysis) -> LibraryName
                 picks.push((k, c));
             }
         }
+        for (c, names) in want.iter().filter(|(_, names)| names.len() > 1) {
+            ambiguous
+                .entry(*c)
+                .or_default()
+                .extend(names.iter().map(|n| display(n, is_64)));
+        }
         let mut progress = false;
         let mut fresh: Vec<(u64, usize)> = Vec::new();
         for (k, c) in picks {
@@ -300,6 +336,11 @@ pub fn find_library_names(program: &Program, analysis: &Analysis) -> LibraryName
             break;
         }
     }
+    out.ambiguous = ambiguous
+        .into_iter()
+        .filter(|(entry, _)| !named.contains_key(entry))
+        .map(|(entry, names)| (entry, names.into_iter().collect()))
+        .collect();
     let mut named: Vec<(u64, String)> = named
         .into_iter()
         .map(|(entry, k)| (entry, display(&fns[k].name, is_64)))
@@ -335,17 +376,39 @@ pub fn apply_library_names(analysis: &mut Analysis, found: &mut LibraryNames) {
 ///   found.
 #[must_use]
 pub fn library_names_tsv(found: &LibraryNames) -> String {
+    /// Ambiguous entries spelled out before the rest are counted.
+    const AMBIGUOUS_SHOWN: usize = 8;
     if found.signatures == 0 {
         return String::new();
     }
     let same = found.kept.iter().filter(|(_, lib, own)| lib == own).count();
-    format!(
+    let mut out = format!(
         "# library names: {} of {} signatures named a function, {} matched one the program names itself ({same} by the same name), {} do not read\n",
         found.named.len(),
         found.signatures,
         found.kept.len(),
         found.unreadable
-    )
+    );
+    if !found.ambiguous.is_empty() {
+        let shown: Vec<String> = found
+            .ambiguous
+            .iter()
+            .take(AMBIGUOUS_SHOWN)
+            .map(|(entry, names)| format!("{entry:#x} {}", names.join("|")))
+            .collect();
+        let more = found.ambiguous.len().saturating_sub(AMBIGUOUS_SHOWN);
+        let _ = writeln!(
+            out,
+            "# library names ambiguous, so named neither: {}{}",
+            shown.join(", "),
+            if more > 0 {
+                format!(", +{more} more")
+            } else {
+                String::new()
+            }
+        );
+    }
+    out
 }
 
 #[cfg(test)]

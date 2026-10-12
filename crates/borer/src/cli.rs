@@ -91,7 +91,7 @@ commands:
   pack-keys                                every key a pack can set, with its default and meaning
   packs <binary>                           the packs borer knows and whether each loads for the binary: the named ones, and every pack-directory pack whose [match] lines all hold
   export-pack <binary> <name> [project] [all]the names a project file gave (and with all, the names borer recovered) as a pack that finds the same functions in another build by their first bytes
-  sigmake <out> <name> <library>...         the functions of static libraries or objects (.lib, .obj) as a pack of signatures, the relocated bytes masked, that names them in any program linked with them
+  sigmake <out> <name> <library>...         the functions of static libraries or objects (.lib, .obj, .a, .o, Rust .rlib) as a pack of signatures, the relocated bytes masked, that names them in any program linked with them
   script <binary> <file> [args...]           run a Rhai script in a sandbox: it reads functions, strings, bytes and xrefs, prints, and proposes names and comments; --save <project> writes them for export-pack
   scenario <binary> <function> <a2=5,...>    decompile under assumptions: branches and switches on the fixed parameters fold and only the code that can run is written
   scenarios <binary> <function> <a2=0..32>   a scenario per value of one parameter (a range, or values joined by |), the ones that behave alike grouped with their calls and returns

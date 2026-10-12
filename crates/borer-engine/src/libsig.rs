@@ -5,22 +5,26 @@
 //! and none of their names. The library's objects still have them: each
 //! function's bytes, the relocations the linker fills in (a call's target,
 //! an address the code loads), and the symbol each relocation names.
-//! [`read`] takes the functions out of a COFF object or an archive of them
-//! (`.obj`, `.lib`) with the relocated bytes masked, and [`pack_text`]
-//! writes them as `[names]` `lib` lines:
+//! [`read`] takes the functions out of an object or an archive of them
+//! with the relocated bytes masked: a COFF `.obj` or `.lib`, an ELF `.o`
+//! or `.a`, and a Rust `.rlib`, an archive of ELF or COFF objects beside
+//! its `lib.rmeta`. [`pack_text`] writes them as `[names]` `lib` lines:
 //!
 //! ```text
 //! lib 4883EC28E8????????4883C428C3 ?foo@@YAXXZ 5=?bar@@YAXXZ
 //! ```
 //!
 //! the signature, the symbol's name as the object spells it, and each
-//! relocation's offset in the function and the symbol it names. The
-//! analysis matches them against the program
-//! ([`crate::analysis::libnames`]): a signature long enough names the one
-//! function it matches, and a short one, a thunk or a wrapper, names a
-//! function when what it calls or reads is known by the name the library
-//! gives it. Where the masking comes from the relocations themselves, no
-//! byte is guessed: what the linker did not touch matches exactly.
+//! relocation's offset in the function and the symbol it names. A function
+//! longer than its signature also carries a `tail=<len>:<hash>` of the
+//! fixed bytes right after it, up to the next relocated byte ([`Tail`]):
+//! what tells apart two functions whose first bytes agree. The analysis
+//! matches them against the program ([`crate::analysis::libnames`]): a
+//! signature long enough names the one function it matches, and a short
+//! one, a thunk or a wrapper, names a function when what it calls or reads
+//! is known by the name the library gives it. Where the masking comes from
+//! the relocations themselves, no byte is guessed: what the linker did not
+//! touch matches exactly.
 
 use std::fmt::Write as _;
 
@@ -39,6 +43,36 @@ const CLASS_EXTERNAL: u8 = 2;
 const CLASS_STATIC: u8 = 3;
 /// `IMAGE_SYM_DTYPE_FUNCTION`, the derived type of a function symbol.
 const DTYPE_FUNCTION: u16 = 2;
+/// Most fixed bytes a [`Tail`] covers.
+const TAIL_MAX: usize = 255;
+
+/// The fixed bytes right after a signature: their count and a hash of
+/// them.
+///
+/// Two functions whose first [`SIG_MAX`] bytes agree (one template's
+/// instantiations, a family of wrappers) are told apart by what follows,
+/// FLIRT's tail check: the run of bytes no relocation touches, at most
+/// [`TAIL_MAX`], hashed so the line stays short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tail {
+    /// How many bytes follow the signature before a relocated one or the
+    /// function's end, 1 to [`TAIL_MAX`].
+    pub len: u8,
+    /// Their hash ([`tail_hash`]).
+    pub hash: u32,
+}
+
+/// Hashes the bytes a [`Tail`] covers: the first four bytes of their
+/// SHA-256, little-endian.
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes.
+#[must_use]
+pub fn tail_hash(bytes: &[u8]) -> u32 {
+    let h = crate::hashing::sha256(bytes);
+    u32::from_le_bytes([h[0], h[1], h[2], h[3]])
+}
 
 /// One function a library defines.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,6 +82,9 @@ pub struct LibFunction {
     /// Its first bytes, up to [`SIG_MAX`], the relocated ones masked and
     /// the padding after its end left out.
     pub sig: Vec<Option<u8>>,
+    /// The fixed bytes after the signature, `None` when the function ends
+    /// within it or a relocated byte comes first.
+    pub tail: Option<Tail>,
     /// Each relocation inside the signature that names a symbol another
     /// object can name too (an external or a function): its offset from
     /// the entry and the symbol's name.
@@ -62,14 +99,18 @@ impl LibFunction {
     }
 }
 
-/// Reads the functions a COFF object or an archive of objects defines.
+/// Reads the functions an object or an archive of objects defines.
 ///
-/// Only x86 and x64 objects are read; an archive's import members and
-/// objects of other machines are passed over. A damaged member is said so:
-/// a header that does not parse, or a member (the linker's own included)
-/// running past the end of the file, ends the walk there, and a member
-/// holding no COFF object is skipped. A damaged archive read as one with
-/// no functions, which wrote an empty pack and succeeded.
+/// COFF objects of x86 and x64 and ELF relocatable objects of x86, x86-64
+/// and arm64 are read; an archive's import members and objects of other
+/// machines are passed over, as are the members that are no object: the
+/// symbol tables (`/`, `/SYM64/`, `__.SYMDEF`), the GNU long-name table
+/// (`//`, which names the members called `/<offset>`) and a Rust
+/// `lib.rmeta`. A damaged member is said so: a header that does not
+/// parse, or a member (the linker's own included) running past the end of
+/// the file, ends the walk there, and a member holding no object it can
+/// read is skipped. A damaged archive read as one with no functions, which
+/// wrote an empty pack and succeeded.
 ///
 /// # Arguments
 ///
@@ -78,16 +119,19 @@ impl LibFunction {
 /// # Returns
 ///
 /// Every function with a name, in file order, and one line per damaged
-/// member saying what was wrong with it.
+/// member saying what was wrong with it, naming it by its long name where
+/// it has one.
 ///
 /// # Errors
 ///
-/// When the bytes are neither an archive nor a COFF object.
+/// When the bytes are neither an archive nor an object, or are an ELF
+/// file that is not a relocatable object.
 pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
     let mut out = Vec::new();
     let mut damaged = Vec::new();
     if bytes.starts_with(b"!<arch>\n") {
         let mut offset = 8usize;
+        let mut long_names: &[u8] = &[];
         while offset + goblin::archive::SIZEOF_HEADER <= bytes.len() {
             if offset % 2 == 1 {
                 offset += 1;
@@ -104,37 +148,92 @@ pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
             };
             let size = member.size();
             offset = start.saturating_add(size);
-            let name = member.header.name;
+            let raw = member.header.name.trim_end_matches(' ');
             let Some(data) = bytes.get(start..offset) else {
                 damaged.push(format!(
                     "member {} at {at:#x} runs past the end of the file; the rest of the archive is not read",
-                    one_line(name)
+                    one_line(raw)
                 ));
                 break;
             };
-            // SPEC: the linker members (`/`) and the long-name table (`//`)
-            // are not objects.
-            if name.starts_with('/')
-                && name
-                    .get(1..)
-                    .is_none_or(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()))
-            {
+            // SPEC: System V and GNU ar: `/` and `/SYM64/` are the symbol
+            // tables, `//` the long-name table, `/<offset>` a name at that
+            // offset in it, `name/` a short name; BSD ar's `#1/<len>` puts
+            // the name ahead of the data, which goblin reads.
+            let name = match raw.strip_prefix('/') {
+                Some("/") => {
+                    long_names = data;
+                    continue;
+                }
+                Some(rest) if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) => rest
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|k| long_name(long_names, k))
+                    .unwrap_or(raw),
+                Some(_) => continue,
+                None => member.extended_name(),
+            };
+            if name.starts_with("__.SYMDEF") || name.ends_with(".rmeta") {
                 continue;
             }
-            if let Err(why) = object_functions(data, &mut out) {
+            if let Err(why) = member_functions(data, &mut out) {
                 damaged.push(format!("member {} at {at:#x}: {why}", one_line(name)));
             }
         }
         return Ok((out, damaged));
     }
+    if bytes.starts_with(b"\x7fELF") {
+        elf_functions(bytes, &mut out).map_err(anyhow::Error::msg)?;
+        return Ok((out, damaged));
+    }
     if goblin::pe::Coff::parse(bytes).is_err() {
-        anyhow::bail!("neither an archive (.lib) nor a COFF object (.obj)");
+        anyhow::bail!(
+            "neither an archive (.lib, .a, .rlib) nor an object (a COFF .obj or an ELF .o)"
+        );
     }
     object_functions(bytes, &mut out).map_err(anyhow::Error::msg)?;
     Ok((out, damaged))
 }
 
-/// How many bytes a relocation of `kind` rewrites.
+/// Reads a GNU long member name: the text at `at` in the `//` table, up
+/// to its `/` and newline.
+///
+/// # Arguments
+///
+/// * `table` - The long-name table.
+/// * `at` - The name's offset in it.
+///
+/// # Returns
+///
+/// The name, or `None` when the offset is past the table or the text is
+/// not UTF-8.
+fn long_name(table: &[u8], at: usize) -> Option<&str> {
+    let rest = table.get(at..)?;
+    let end = rest.iter().position(|b| *b == b'\n').unwrap_or(rest.len());
+    let text = std::str::from_utf8(rest.get(..end)?).ok()?;
+    Some(text.strip_suffix('/').unwrap_or(text))
+}
+
+/// Adds the functions one archive member defines to `out`, reading it as
+/// an ELF object when it opens with the ELF magic and as COFF otherwise.
+///
+/// # Arguments
+///
+/// * `data` - The member's bytes.
+/// * `out` - Where the functions go.
+///
+/// # Errors
+///
+/// When the member is not an object, as the reader for its kind says.
+fn member_functions(data: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'static str> {
+    if data.starts_with(b"\x7fELF") {
+        elf_functions(data, out)
+    } else {
+        object_functions(data, out)
+    }
+}
+
+/// How many bytes a COFF relocation of `kind` rewrites.
 ///
 /// # Arguments
 ///
@@ -152,7 +251,31 @@ fn reloc_width(machine: u16, kind: u16) -> usize {
     }
 }
 
-/// Adds the functions one object defines to `out`.
+/// How many bytes an ELF relocation of `kind` rewrites.
+///
+/// An arm64 relocation that patches an instruction's immediate field
+/// rewrites bits of one four-byte word, which is masked whole.
+///
+/// # Arguments
+///
+/// * `machine` - The object's `e_machine`.
+/// * `kind` - The relocation type.
+fn elf_reloc_width(machine: u16, kind: u32) -> usize {
+    use goblin::elf::header::{EM_386, EM_AARCH64, EM_X86_64};
+    // SPEC: System V ABI AMD64 table 4.10 and i386 table 4.4; ELF for the
+    // Arm 64-bit Architecture 5.7: NONE rewrites nothing, the 64-bit data
+    // relocations eight bytes, the 16- and 8-bit ones two and one, and every
+    // other one a 32-bit field or one instruction word.
+    match (machine, kind) {
+        (_, 0) => 0,
+        (EM_X86_64, 1 | 24 | 25) | (EM_AARCH64, 257 | 260) => 8,
+        (EM_X86_64, 12 | 13) | (EM_386, 20 | 21) | (EM_AARCH64, 259 | 262) => 2,
+        (EM_X86_64, 14 | 15) | (EM_386, 22 | 23) => 1,
+        _ => 4,
+    }
+}
+
+/// Adds the functions one COFF object defines to `out`.
 ///
 /// A function runs from its symbol to the next function symbol in its
 /// section, or the section's end; `int3` padding after it is not its.
@@ -216,7 +339,7 @@ fn object_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'st
     Ok(())
 }
 
-/// Adds the functions of one section to `out`.
+/// Adds the functions of one COFF section to `out`.
 ///
 /// # Arguments
 ///
@@ -268,13 +391,156 @@ fn section_functions(
             }
         }
     }
-    for (i, (_, offset, name)) in functions.iter().enumerate() {
-        let from = *offset as usize;
-        let to = functions
-            .get(i + 1)
-            .map_or(size, |f| f.1 as usize)
-            .min(size);
-        let Some(body) = masked.get(from..to) else {
+    let spans: Vec<(usize, usize, &str)> = functions
+        .iter()
+        .enumerate()
+        .map(|(i, (_, offset, name))| {
+            let to = functions.get(i + 1).map_or(size, |f| f.1 as usize);
+            (*offset as usize, to, name.as_str())
+        })
+        .collect();
+    emit(&masked, &refs, &spans, out);
+}
+
+/// Adds the functions one ELF relocatable object defines to `out`.
+///
+/// A function is an `STT_FUNC` symbol in an executable section, running
+/// for its stated size, or to the next function or the section's end when
+/// it states none. The relocations of the section's `.rela`/`.rel` section
+/// mask what they rewrite, and each one naming a global, weak or function
+/// symbol is kept as a reference; one naming a section (a string's
+/// address, a local jump table) is masked and kept as nothing.
+///
+/// # Arguments
+///
+/// * `bytes` - The object.
+/// * `out` - Where the functions go.
+///
+/// # Errors
+///
+/// When the headers do not parse or the file is not a relocatable object;
+/// an object of another machine is passed over without one.
+fn elf_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'static str> {
+    use goblin::elf::header::{EM_386, EM_AARCH64, EM_X86_64, ET_REL};
+    use goblin::elf::section_header::{SHF_EXECINSTR, SHT_NOBITS};
+    use goblin::elf::sym::{STB_GLOBAL, STB_WEAK, STT_FUNC, STT_SECTION};
+    /// `SHN_LORESERVE`: section indexes from here up are special.
+    const SHN_LORESERVE: usize = 0xff00;
+    let elf = crate::program::caught(|| goblin::elf::Elf::parse(bytes))
+        .ok()
+        .and_then(Result::ok)
+        .ok_or("an ELF file whose headers do not parse")?;
+    if elf.header.e_type != ET_REL {
+        return Err("an ELF file that is not a relocatable object (.o)");
+    }
+    let machine = elf.header.e_machine;
+    if !matches!(machine, EM_X86_64 | EM_386 | EM_AARCH64) {
+        return Ok(());
+    }
+    let mut names: Vec<Option<String>> = Vec::with_capacity(elf.syms.len());
+    let mut functions: Vec<(usize, u64, u64, String)> = Vec::new();
+    for sym in &elf.syms {
+        let name = elf.strtab.get_at(sym.st_name).unwrap_or("");
+        let (bind, typ) = (sym.st_bind(), sym.st_type());
+        let kept = !name.is_empty()
+            && typ != STT_SECTION
+            && (bind == STB_GLOBAL || bind == STB_WEAK || typ == STT_FUNC);
+        names.push(kept.then(|| name.to_owned()));
+        if typ == STT_FUNC && !name.is_empty() && (1..SHN_LORESERVE).contains(&sym.st_shndx) {
+            functions.push((sym.st_shndx, sym.st_value, sym.st_size, name.to_owned()));
+        }
+    }
+    functions.sort_unstable();
+    functions.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    let mut at = 0;
+    while at < functions.len() {
+        let section = functions[at].0;
+        let end = functions[at..]
+            .iter()
+            .position(|f| f.0 != section)
+            .map_or(functions.len(), |n| at + n);
+        let group = &functions[at..end];
+        at = end;
+        let Some(sh) = elf.section_headers.get(section) else {
+            continue;
+        };
+        if sh.sh_flags & u64::from(SHF_EXECINSTR) == 0 || sh.sh_type == SHT_NOBITS {
+            continue;
+        }
+        let (Ok(start), Ok(size)) = (usize::try_from(sh.sh_offset), usize::try_from(sh.sh_size))
+        else {
+            continue;
+        };
+        let Some(data) = bytes.get(start..start.saturating_add(size)) else {
+            continue;
+        };
+        let mut masked: Vec<Option<u8>> = data.iter().copied().map(Some).collect();
+        let mut refs: Vec<(usize, &str)> = Vec::new();
+        for (index, relocations) in &elf.shdr_relocs {
+            if elf
+                .section_headers
+                .get(*index)
+                .is_none_or(|r| usize::try_from(r.sh_info).ok() != Some(section))
+            {
+                continue;
+            }
+            for r in relocations {
+                let Ok(at) = usize::try_from(r.r_offset) else {
+                    continue;
+                };
+                for b in masked
+                    .iter_mut()
+                    .skip(at)
+                    .take(elf_reloc_width(machine, r.r_type))
+                {
+                    *b = None;
+                }
+                if let Some(Some(name)) = names.get(r.r_sym) {
+                    refs.push((at, name));
+                }
+            }
+        }
+        let spans: Vec<(usize, usize, &str)> = group
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, value, length, name))| {
+                let from = usize::try_from(*value).ok()?;
+                let to = if *length > 0 {
+                    from.saturating_add(usize::try_from(*length).ok()?)
+                } else {
+                    group
+                        .get(i + 1)
+                        .and_then(|f| usize::try_from(f.1).ok())
+                        .unwrap_or(size)
+                };
+                Some((from, to, name.as_str()))
+            })
+            .collect();
+        emit(&masked, &refs, &spans, out);
+    }
+    Ok(())
+}
+
+/// Adds the functions of one section's masked bytes to `out`: each span's
+/// signature, its tail and the references inside the signature.
+///
+/// # Arguments
+///
+/// * `masked` - The section's bytes, the relocated ones masked.
+/// * `refs` - Each kept relocation's offset in the section and the symbol
+///   it names.
+/// * `spans` - Each function's start and end in the section, and its name;
+///   an end past the section stops at it, and `int3` padding before the
+///   end is not the function's.
+/// * `out` - Where the functions go.
+fn emit(
+    masked: &[Option<u8>],
+    refs: &[(usize, &str)],
+    spans: &[(usize, usize, &str)],
+    out: &mut Vec<LibFunction>,
+) {
+    for (from, to, name) in spans {
+        let Some(body) = masked.get(*from..(*to).min(masked.len())) else {
             continue;
         };
         let len = body.len() - body.iter().rev().take_while(|b| **b == Some(0xcc)).count();
@@ -282,12 +548,24 @@ fn section_functions(
             continue;
         }
         let cut = len.min(SIG_MAX);
+        let tail: Vec<u8> = body[cut..len]
+            .iter()
+            .take(TAIL_MAX)
+            .map_while(|b| *b)
+            .collect();
         out.push(LibFunction {
-            name: name.clone(),
+            name: (*name).to_owned(),
             sig: body[..cut].to_vec(),
+            tail: u8::try_from(tail.len())
+                .ok()
+                .filter(|n| *n > 0)
+                .map(|len| Tail {
+                    len,
+                    hash: tail_hash(&tail),
+                }),
             refs: refs
                 .iter()
-                .filter(|(at, _)| *at >= from && *at < from + cut)
+                .filter(|(at, _)| *at >= *from && *at < from + cut)
                 .filter_map(|(at, n)| Some((u32::try_from(at - from).ok()?, (*n).to_owned())))
                 .collect(),
         });
@@ -313,6 +591,9 @@ pub fn pack_text(name: &str, about: &str, functions: &[LibFunction]) -> String {
     );
     for f in distinct {
         let _ = write!(out, "lib {} {}", format_signature(&f.sig), f.name);
+        if let Some(t) = f.tail {
+            let _ = write!(out, " tail={:x}:{:08x}", t.len, t.hash);
+        }
         for (at, target) in &f.refs {
             let _ = write!(out, " {at:x}={target}");
         }
@@ -321,8 +602,8 @@ pub fn pack_text(name: &str, about: &str, functions: &[LibFunction]) -> String {
     out
 }
 
-/// Reads a `lib` line's value back: the signature, the name and the
-/// references.
+/// Reads a `lib` line's value back: the signature, the name, the tail and
+/// the references.
 ///
 /// # Arguments
 ///
@@ -333,16 +614,32 @@ pub fn pack_text(name: &str, about: &str, functions: &[LibFunction]) -> String {
 /// The function, or `None` when a field does not read.
 #[must_use]
 pub fn parse_line(value: &str) -> Option<LibFunction> {
-    let mut words = value.split_whitespace();
+    let mut words = value.split_whitespace().peekable();
     let sig = parse_signature(words.next()?)?;
     let name = words.next()?.to_owned();
+    let tail = match words.peek().and_then(|w| w.strip_prefix("tail=")) {
+        Some(t) => {
+            let (len, hash) = t.split_once(':')?;
+            words.next();
+            Some(Tail {
+                len: u8::from_str_radix(len, 16).ok().filter(|n| *n > 0)?,
+                hash: u32::from_str_radix(hash, 16).ok()?,
+            })
+        }
+        None => None,
+    };
     let refs = words
         .map(|w| {
             let (at, target) = w.split_once('=')?;
             Some((u32::from_str_radix(at, 16).ok()?, target.to_owned()))
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(LibFunction { name, sig, refs })
+    Some(LibFunction {
+        name,
+        sig,
+        tail,
+        refs,
+    })
 }
 
 #[cfg(test)]

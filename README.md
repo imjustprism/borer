@@ -229,10 +229,12 @@ Packs in a pack directory load on their own for binaries they match.
 
 `sigmake` turns static libraries into a signature pack, with relocated
 bytes masked, so functions linked from those libraries get their names
-back:
+back. It reads COFF `.lib`/`.obj` and ELF `.a`/`.o` archives and objects,
+and Rust `.rlib` files:
 
 ```bash
 borer sigmake msvc-x64.borer msvc-x64 libcmt.lib libvcruntime.lib libucrt.lib
+borer sigmake musl.borer musl libc.a
 borer functions sample.exe --pack msvc-x64.borer
 ```
 

@@ -34,6 +34,7 @@ mod groundtruth;
 mod hashing;
 mod iocs;
 mod layout;
+mod libsig;
 mod lsda;
 mod macho;
 mod next;

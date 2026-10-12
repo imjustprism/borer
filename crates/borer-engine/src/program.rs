@@ -1101,7 +1101,7 @@ fn disarm_exports(bytes: &mut [u8]) -> Option<Disarmed> {
 /// # Errors
 ///
 /// When the parse panicked, naming the file as unreadable rather than the panic's location.
-fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
+pub(crate) fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
     thread_local! {
         /// Whether this thread is inside a parse whose panic is reported as an error.
         static PARSING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
