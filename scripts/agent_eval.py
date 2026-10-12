@@ -47,9 +47,9 @@ LOAD = ("load_binary", {"path": "{bin}"})
 TASKS = [
     (
         "front_door",
-        "what a session is handed before its first call, and whether it names the triage",
+        "what a session is handed before its first call, and whether it starts at the triage",
         [("@instructions", {}), ("@tools/list", {}), ("@prompts/list", {})],
-        "borer://triage",
+        "load_binary, then query borer://triage",
     ),
     (
         "orient",
