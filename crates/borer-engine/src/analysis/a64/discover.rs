@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::prologue;
+use super::{prologue, refs};
 use crate::analysis::functions::{
     GAP_ROUNDS_MAX, GUESS_WALK_MAX, SEEDS_MAX, SPLIT_ROUNDS_MAX, build_callers_and_names, fuel_for,
     is_noreturn_name, mix, push_site,
@@ -76,7 +76,7 @@ const LITERAL: (u32, u32) = (0x3b00_0000, 0x1800_0000);
 
 /// The executable bytes of a program, section by section, read a word at a
 /// time.
-struct Text<'a> {
+pub(super) struct Text<'a> {
     /// `(address, bytes)` of every executable section the file backs,
     /// sorted by address.
     sections: Vec<(u64, &'a [u8])>,
@@ -113,7 +113,7 @@ impl<'a> Text<'a> {
     ///
     /// The word, or `None` when `va` is not aligned to an instruction or no
     /// executable section the file backs holds four bytes there.
-    fn word(&self, va: u64) -> Option<u32> {
+    pub(super) fn word(&self, va: u64) -> Option<u32> {
         if !va.is_multiple_of(STEP) {
             return None;
         }
@@ -1153,6 +1153,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         .filter(|f| f.instr_count > 0)
         .collect();
     build_callers_and_names(program, &mut analysis.functions);
+    refs::index(program, &text, &analysis.functions, &mut analysis.xrefs);
     analysis.finish_index(program);
     analysis
 }

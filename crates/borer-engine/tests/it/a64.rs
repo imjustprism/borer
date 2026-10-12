@@ -1,10 +1,12 @@
-//! AArch64 decoding and disassembly.
+//! AArch64 decoding, disassembly and analysis.
 //!
 //! A table of words assembled by LLVM (`clang --target=aarch64-linux-gnu`)
 //! and checked against `llvm-objdump`, each with the text, control flow and
 //! branch target the engine gives it; then thin arm64 Mach-O, ELF, PE and
 //! raw images, built here, disassembled at their entry, and a sweep of
-//! every word.
+//! every word; then function discovery, and the references, import stubs
+//! and jump tables read from a program linked by `ld.lld` at fixed
+//! addresses.
 #![expect(
     clippy::missing_panics_doc,
     clippy::expect_used,
@@ -14,7 +16,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use borer_engine::analysis::{Analysis, BlockTerm, NameSource, RefKind, render};
+use borer_engine::analysis::{Analysis, BlockTerm, NameSource, Overlay, RefKind, render};
 use borer_engine::disasm;
 use borer_engine::isa::Isa;
 use borer_engine::isa::a64::{self, Flow, Mem, Mnemonic, Mode, Op, Opnd, Reg, Rmw, Shift, Width};
@@ -1609,4 +1611,339 @@ fn discovery_survives_hostile_code() {
             );
         }
     }
+}
+
+// ---- references, stubs and jump tables ----
+
+/// A program calling imports, forming a string's address and dispatching
+/// through jump tables.
+///
+/// It is laid out from [`TEXT`] as `ld.lld --no-relax` placed it, with
+/// [`refs_data`] at 0x402000. `main` (0x00) forms `hello` (0x402010) with `adrp`/`add`, calls each
+/// stub, forms it again in `x19` (kept across a call) and in `x0` (not
+/// kept), calls `free` through its slot and calls the rest. The stubs are
+/// an ELF PLT entry (`plt_puts`, 0x58), a Mach-O `__stubs` entry or PE
+/// thunk (`stub_malloc`, 0x68), a Mach-O `__auth_stubs` entry
+/// (`auth_strlen`, 0x74) and a PLT entry landed with `bti c` and
+/// authenticating its jump (`bti_abort`, 0x84). `dies` (0x9c) calls
+/// `abort` through its stub and `exits` (0xac) calls `exit` through its
+/// slot, each followed by dead code. `clang_switch` (0xc4) dispatches
+/// through a byte table in `.rodata` whose address it formed before a
+/// branch, `msvc_switch` (0x118) through a word table kept in the code
+/// right after it, followed by `after_table` (0x164) which nothing calls,
+/// and `gcc_switch` (0x174) through a signed byte table with a case before
+/// its base. `indirect` (0x1b0) jumps through a register loaded from
+/// memory.
+const REFS: [u32; 110] = [
+    // ASM: stp x29, x30, [sp, #-0x10]! (main, 0x0)
+    0xa9bf_7bfd,
+    // ASM: mov x29, sp
+    0x9100_03fd,
+    // ASM: adrp x0, 0x402000
+    0xb000_0000,
+    // ASM: add x0, x0, #0x10
+    0x9100_4000,
+    // ASM: bl 0x401058
+    0x9400_0012,
+    // ASM: adrp x19, 0x402000
+    0xb000_0013,
+    // ASM: bl 0x401068
+    0x9400_0014,
+    // ASM: add x1, x19, #0x10
+    0x9100_4261,
+    // ASM: adrp x0, 0x402000
+    0xb000_0000,
+    // ASM: bl 0x401074
+    0x9400_0014,
+    // ASM: add x2, x0, #0x10
+    0x9100_4002,
+    // ASM: adrp x8, 0x402000
+    0xb000_0008,
+    // ASM: ldr x8, [x8, #0x60]
+    0xf940_3108,
+    // ASM: blr x8
+    0xd63f_0100,
+    // ASM: bl 0x4010c4
+    0x9400_0023,
+    // ASM: bl 0x401118
+    0x9400_0037,
+    // ASM: bl 0x401174
+    0x9400_004d,
+    // ASM: bl 0x4011b0
+    0x9400_005b,
+    // ASM: bl 0x40109c
+    0x9400_0015,
+    // ASM: bl 0x4010ac
+    0x9400_0018,
+    // ASM: ldp x29, x30, [sp], #0x10
+    0xa8c1_7bfd,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: adrp x16, 0x402000 (plt_puts, 0x58)
+    0xb000_0010,
+    // ASM: ldr x17, [x16, #0x40]
+    0xf940_2211,
+    // ASM: add x16, x16, #0x40
+    0x9101_0210,
+    // ASM: br x17
+    0xd61f_0220,
+    // ASM: adrp x16, 0x402000 (stub_malloc, 0x68)
+    0xb000_0010,
+    // ASM: ldr x16, [x16, #0x48]
+    0xf940_2610,
+    // ASM: br x16
+    0xd61f_0200,
+    // ASM: adrp x17, 0x402000 (auth_strlen, 0x74)
+    0xb000_0011,
+    // ASM: add x17, x17, #0x50
+    0x9101_4231,
+    // ASM: ldr x16, [x17]
+    0xf940_0230,
+    // ASM: braa x16, x17
+    0xd71f_0a11,
+    // ASM: bti c (bti_abort, 0x84)
+    0xd503_245f,
+    // ASM: adrp x16, 0x402000
+    0xb000_0010,
+    // ASM: ldr x17, [x16, #0x58]
+    0xf940_2e11,
+    // ASM: add x16, x16, #0x58
+    0x9101_6210,
+    // ASM: autia1716
+    0xd503_219f,
+    // ASM: br x17
+    0xd61f_0220,
+    // ASM: stp x29, x30, [sp, #-0x10]! (dies, 0x9c)
+    0xa9bf_7bfd,
+    // ASM: bl 0x401084
+    0x97ff_fff9,
+    // ASM: mov w0, #0x1
+    0x5280_0020,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: adrp x8, 0x402000 (exits, 0xac)
+    0xb000_0008,
+    // ASM: ldr x8, [x8, #0x68]
+    0xf940_3508,
+    // ASM: mov w0, #0x3
+    0x5280_0060,
+    // ASM: blr x8
+    0xd63f_0100,
+    // ASM: mov w0, #0x2
+    0x5280_0040,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: adrp x9, 0x402000 (clang_switch, 0xc4)
+    0xb000_0009,
+    // ASM: add x9, x9, #0x20
+    0x9100_8129,
+    // ASM: cbnz x1, 0x4010d4
+    0xb500_0041,
+    // ASM: b 0x4010d8
+    0x1400_0002,
+    // ASM: sub w0, w0, #0x1
+    0x5100_0400,
+    // ASM: cmp w0, #0x3
+    0x7100_0c1f,
+    // ASM: b.hi 0x401110
+    0x5400_01a8,
+    // ASM: adr x10, 0x4010f0
+    0x1000_008a,
+    // ASM: ldrb w11, [x9, w0, uxtw]
+    0x3860_492b,
+    // ASM: add x10, x10, x11, lsl #2
+    0x8b0b_094a,
+    // ASM: br x10
+    0xd61f_0140,
+    // ASM: mov w0, #0xa
+    0x5280_0140,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0xb
+    0x5280_0160,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0xc
+    0x5280_0180,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0xd
+    0x5280_01a0,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0x0
+    0x5280_0000,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: sub w10, w0, #0x1 (msvc_switch, 0x118)
+    0x5100_040a,
+    // ASM: cmp w10, #0x2
+    0x7100_095f,
+    // ASM: b.hi 0x401150
+    0x5400_0188,
+    // ASM: adr x9, 0x401158
+    0x1000_01a9,
+    // ASM: ldrsw x8, [x9, w10, uxtw #2]
+    0xb8aa_5928,
+    // ASM: adr x9, 0x401138
+    0x1000_0069,
+    // ASM: add x8, x9, x8, lsl #2
+    0x8b08_0928,
+    // ASM: br x8
+    0xd61f_0100,
+    // ASM: mov w0, #0x14
+    0x5280_0280,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0x15
+    0x5280_02a0,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0x16
+    0x5280_02c0,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0x0
+    0x5280_0000,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: .word 0x0 (the table, 0x158)
+    0x0000_0000,
+    // ASM: .word 0x2
+    0x0000_0002,
+    // ASM: .word 0x4
+    0x0000_0004,
+    // ASM: stp x29, x30, [sp, #-0x10]! (after_table, 0x164)
+    0xa9bf_7bfd,
+    // ASM: mov w0, #0x7
+    0x5280_00e0,
+    // ASM: ldp x29, x30, [sp], #0x10
+    0xa8c1_7bfd,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: b 0x401180 (gcc_switch, 0x174)
+    0x1400_0003,
+    // ASM: mov w0, #0x1e
+    0x5280_03c0,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: cmp w0, #0x1
+    0x7100_041f,
+    // ASM: b.hi 0x4011a8
+    0x5400_0128,
+    // ASM: adrp x1, 0x402000
+    0xb000_0001,
+    // ASM: add x1, x1, #0x24
+    0x9100_9021,
+    // ASM: ldrb w1, [x1, w0, uxtw]
+    0x3860_4821,
+    // ASM: adr x2, 0x4011a0
+    0x1000_0062,
+    // ASM: add x1, x2, w1, sxtb #2
+    0x8b21_8841,
+    // ASM: br x1
+    0xd61f_0020,
+    // ASM: mov w0, #0x1f
+    0x5280_03e0,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0x0
+    0x5280_0000,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: ldr x8, [x0] (indirect, 0x1b0)
+    0xf940_0008,
+    // ASM: br x8
+    0xd61f_0100,
+];
+
+/// Where `hello` lies in [`refs_data`].
+const HELLO: u64 = 0x40_2010;
+/// The import slots of [`REFS`], in `.rodata` from 0x402040, eight bytes
+/// apart.
+const SLOTS: [&str; 6] = ["puts", "malloc", "strlen", "abort", "free", "exit"];
+
+/// The `.rodata` of [`REFS`]: `hello` at 0x10, `clang_switch`'s table
+/// (cases 0, 2, 4 and 6 words past its base) at 0x20, `gcc_switch`'s
+/// (-10 and 0 words) at 0x24, and the import slots from 0x40.
+fn refs_data() -> Vec<u8> {
+    let mut d = vec![0u8; 0x70];
+    d[0x10..0x1d].copy_from_slice(b"hello, arm64\0");
+    d[0x20..0x26].copy_from_slice(&[0, 2, 4, 6, 0xf6, 0]);
+    d
+}
+
+/// Builds [`REFS`] as a raw arm64 image with its import slots named.
+///
+/// # Arguments
+///
+/// * `code` - The words of `.text`.
+/// * `data` - The bytes of `.rodata`.
+fn refs_image(code: &[u32], data: &[u8]) -> Program {
+    let mut p = crate::raw::image(Arch::Arm64, &le_words(code), data);
+    p.symbols = SLOTS
+        .iter()
+        .zip(0u64..)
+        .map(|(name, k)| Symbol {
+            name: (*name).to_owned(),
+            addr: 0x40_2040 + 8 * k,
+            kind: SymbolKind::Import,
+        })
+        .collect();
+    p
+}
+
+/// Returns the address of an import slot of [`REFS`].
+///
+/// # Arguments
+///
+/// * `name` - The import.
+fn slot(name: &str) -> u64 {
+    let k = SLOTS
+        .iter()
+        .position(|s| *s == name)
+        .expect("a slot of the program");
+    0x40_2040 + 8 * u64::try_from(k).expect("few")
+}
+
+/// An `adrp` and an `add` form a string's address, which is a data
+/// reference from the `add`, read by the string tools. A callee-saved
+/// register keeps its page across a call; an argument register does not.
+#[test]
+fn an_adrp_add_pair_references_its_string() {
+    let p = refs_image(&REFS, &refs_data());
+    let a = Analysis::compute(&p);
+    let sites: Vec<(u64, RefKind, Option<u64>)> = a
+        .xrefs_to(HELLO)
+        .iter()
+        .map(|s| (s.va - TEXT, s.kind, s.from_entry))
+        .collect();
+    assert_eq!(
+        sites,
+        [
+            (0x0c, RefKind::Data, Some(TEXT)),
+            (0x1c, RefKind::Data, Some(TEXT))
+        ]
+    );
+    let o = Overlay::default();
+    let users = render::functions_by_string_tsv(&p, &a, &o, "hello", 0, 10);
+    assert!(users.contains("sub_401000"), "{users}");
+    let strings = render::function_strings_tsv(&p, &a, &o, TEXT).expect("main");
+    assert!(strings.contains("hello, arm64"), "{strings}");
+}
+
+/// A `blr` through a register loaded from an import's slot calls through
+/// the slot, and the callgraph names the import behind the slot.
+#[test]
+fn a_call_through_an_import_slot_is_a_call_to_the_slot() {
+    let p = refs_image(&REFS, &refs_data());
+    let a = Analysis::compute(&p);
+    let sites: Vec<(u64, RefKind)> = a
+        .xrefs_to(slot("free"))
+        .iter()
+        .map(|s| (s.va - TEXT, s.kind))
+        .collect();
+    assert_eq!(sites, [(0x30, RefKind::Data), (0x34, RefKind::Call)]);
+    let graph = render::callgraph_mermaid(&p, &a, &Overlay::default(), TEXT, 30, false);
+    assert!(graph.contains("\"free\""), "{graph}");
 }

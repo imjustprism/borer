@@ -7,11 +7,14 @@
 //! table), following branches, taking `bl` targets as new functions and
 //! tail calls as callees, ending a path at a call that never returns, then
 //! guessing at the gaps no function covers that open the way an arm64
-//! function opens ([`prologue`]). It shares the seeds, the fuel, the
-//! never-returning names, the naming pass and the reference index with the
-//! x86 walk, and reads instructions only through [`crate::isa::a64`].
+//! function opens ([`prologue`]). Once the functions are final, the
+//! constants their registers hold give the data, table and slot references
+//! ([`refs`]). It shares the seeds, the fuel, the never-returning names, the
+//! naming pass and the reference index with the x86 walk, and reads
+//! instructions only through [`crate::isa::a64`].
 
 mod discover;
 mod prologue;
+mod refs;
 
 pub(crate) use discover::discover;
