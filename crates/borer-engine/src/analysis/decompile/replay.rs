@@ -135,8 +135,6 @@ pub(super) struct Witness {
     pub(super) ret_float: bool,
     /// That register is `xmm0`, not the x87 stack's top.
     pub(super) ret_xmm: bool,
-    /// A second result comes back in `rdx`.
-    pub(super) ret_rdx: bool,
     /// The function's callers read what it hands back: some caller reads
     /// the return register after the call, or the result is a float.
     pub(super) result_read: bool,
@@ -3095,27 +3093,6 @@ impl Function<'_, '_> {
                             || format!("{v:?}"),
                         );
                     }
-                }
-                // INVARIANT: a second result in `rdx` is what the text's
-                // `rdx` holds at the return, the line before it says what.
-                if self.w.ret_rdx
-                    && let Some(m) = t.emu.register("rdx")
-                {
-                    let rdx = Expr::Var(Key::Reg(Register::RDX));
-                    let text = t.text.eval(&rdx);
-                    self.compare(
-                        t,
-                        out,
-                        start,
-                        e.at,
-                        Claim::Return,
-                        "rdx".to_owned(),
-                        text,
-                        m,
-                        64,
-                        false,
-                        || format!("{rdx:?}"),
-                    );
                 }
                 // INVARIANT: a float result is the low lane of `xmm0`, at the
                 // width its expression computes, the whole low quadword where

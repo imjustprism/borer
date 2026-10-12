@@ -1284,9 +1284,8 @@ fn decompile_with(
     // back, written on the way to every exit.
     ctx.rax_written |= ctx.ret_float && (bitness == 64 || ctx.ret_sse);
     // INVARIANT: on a 32-bit target `edx` is scratch a caller reading it
-    // after the call often only finds left over, and a function said to
-    // hand it back would make it live at every return and behind every
-    // call; only a 64-bit function's own text shows its second result.
+    // after the call often only finds left over; only a 64-bit function's
+    // own text shows its second result.
     ctx.ret_rdx = bitness == 64 && f.hands_back_rdx;
     if let Some(sig) = &f.signature {
         if ctx.this_param
@@ -1871,7 +1870,6 @@ fn decompile_with(
             ret_bits: ctx.ret_bits,
             ret_float: ctx.ret_float,
             ret_xmm: ctx.ret_float && (bitness == 64 || ctx.ret_sse),
-            ret_rdx: ctx.ret_rdx,
             result_read: f.returns_value == Some(true) || ctx.ret_float,
             dispatches: std::mem::take(&mut ctx.pointer_dispatches)
                 .into_iter()

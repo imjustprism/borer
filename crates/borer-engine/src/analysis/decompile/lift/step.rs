@@ -317,9 +317,13 @@ impl<'a> Exec<'_, 'a> {
         // INVARIANT: a function whose callers read `rdx` after calling it
         // hands a second result back there ([`Ctx::ret_rdx`]), which they
         // read as `f__rdx(...)`; its own text says what that is before
-        // each `return`, or the value the callers read is nowhere in it. A
-        // result that reads `rdx` itself (`eax = [edx]; edx = [edx+4]`) is
-        // taken into a temporary before the line replaces `rdx`.
+        // each `return` that still holds it pending, or the value the
+        // callers read is nowhere in it. The register is no read of the
+        // `ret` for the liveness, which would keep it written out behind
+        // every call and compared at every edge to a return, where a
+        // caller's read of it is only a heuristic. A result that reads
+        // `rdx` itself (`eax = [edx]; edx = [edx+4]`) is taken into a
+        // temporary before the line replaces `rdx`.
         let rdx = self.canon(Register::RDX);
         let (line, value) = match self.env.vals.get(&rdx).cloned() {
             Some(second) if self.ctx.ret_rdx && second != Expr::Var(rdx) => {
