@@ -4809,10 +4809,13 @@ fn class_field(p: &Program, a: &Analysis, o: &Overlay, text: &str) -> Option<(St
 ///
 /// Gone are the draft URL, integer formats, non-negativity bounds (every
 /// count documents its own default and maximum), the `null` alternative
-/// schemars adds to an optional parameter's type (leaving the parameter out
-/// is how a client says null), and `additionalProperties: false`, which every
-/// parameter struct enforces at the boundary through `deny_unknown_fields`
-/// with an error that names the field.
+/// schemars adds to an optional parameter's type or enum (leaving the
+/// parameter out is how a client says null), and `additionalProperties:
+/// false`, which every parameter struct enforces at the boundary through
+/// `deny_unknown_fields` with an error that names the field. An enum
+/// parameter's `$defs` entry is written into the parameter itself, with the
+/// parameter's own description, so a client reads its choices in place
+/// rather than following a `$ref`.
 ///
 /// # Arguments
 ///
@@ -4821,11 +4824,40 @@ fn slim_tool(mut t: Tool) -> Tool {
     let mut schema = (*t.input_schema).clone();
     schema.remove("$schema");
     schema.remove("additionalProperties");
+    let defs = match schema.remove("$defs") {
+        Some(serde_json::Value::Object(defs)) => defs,
+        _ => serde_json::Map::new(),
+    };
     if let Some(serde_json::Value::Object(props)) = schema.get_mut("properties") {
         for p in props.values_mut() {
             if let serde_json::Value::Object(o) = p {
                 o.remove("format");
                 o.remove("minimum");
+                if let Some(serde_json::Value::Array(any)) = o.get("anyOf") {
+                    let mut rest = any.iter().filter(|s| s.get("type") != Some(&"null".into()));
+                    if let (Some(serde_json::Value::Object(only)), None) =
+                        (rest.next(), rest.next())
+                    {
+                        let only = only.clone();
+                        o.remove("anyOf");
+                        o.extend(only);
+                    }
+                }
+                let inlined = o
+                    .get("$ref")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|r| r.strip_prefix("#/$defs/"))
+                    .and_then(|name| defs.get(name))
+                    .and_then(serde_json::Value::as_object)
+                    .cloned();
+                if let Some(def) = inlined {
+                    o.remove("$ref");
+                    for (k, v) in def {
+                        if k != "description" || !o.contains_key("description") {
+                            o.insert(k, v);
+                        }
+                    }
+                }
                 let only = match o.get("type") {
                     Some(serde_json::Value::Array(kinds)) => {
                         let mut rest = kinds.iter().filter(|k| k.as_str() != Some("null"));
@@ -4841,6 +4873,13 @@ fn slim_tool(mut t: Tool) -> Tool {
                 }
             }
         }
+    }
+    if !defs.is_empty()
+        && serde_json::Value::Object(schema.clone())
+            .to_string()
+            .contains("\"$ref\"")
+    {
+        schema.insert("$defs".to_owned(), serde_json::Value::Object(defs));
     }
     t.input_schema = Arc::new(schema);
     t
