@@ -14,6 +14,7 @@ mod nebula;
 #[path = "../common/raw.rs"]
 mod raw;
 
+mod a64;
 mod analysis;
 mod decompile;
 mod discovery;

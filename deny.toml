@@ -36,6 +36,9 @@ allow = [
   "Unlicense",
   # tiny-keccak, through rhai's compile-time hash seed: a public-domain dedication.
   "CC0-1.0",
+  # yaxpeax-arm and yaxpeax-arch, the arm64 decoder: zero-clause BSD, more
+  # permissive than MIT (no attribution required).
+  "0BSD",
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"

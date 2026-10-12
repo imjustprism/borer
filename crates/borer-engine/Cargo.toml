@@ -22,3 +22,5 @@ pdb = "0.8"
 rustc-demangle = "0.1.27"
 rhai = { version = "1.26.1", default-features = false, features = ["std", "no_module", "no_custom_syntax", "no_time"] }
 serde = { version = "1.0.229", features = ["derive"] }
+yaxpeax-arch = { version = "0.3.2", default-features = false }
+yaxpeax-arm = { version = "0.5.0", default-features = false }

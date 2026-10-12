@@ -29,6 +29,10 @@ INVOKABLE = "INVOKABLE"
 excpt = "excpt"
 # OLE Automation's UDATE, in oleaut32's VarDateFromUdate
 Udate = "Udate"
+# Arm's Scalable Matrix Extension, an arm64 encoding space
+SME = "SME"
+Sme = "Sme"
+sme = "sme"
 
 [default.extend-identifiers]
 # iced-x86 operand kind
