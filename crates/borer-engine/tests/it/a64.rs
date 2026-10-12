@@ -1204,6 +1204,53 @@ fn pdata_makes_functions_and_bounds_them() {
     assert_eq!(first.callees, [at(0x20)]);
 }
 
+/// A shrink-wrapped tail stays in its function, and so does a stray guess.
+///
+/// A function that shrink-wraps its frame jumps back to its shared tail
+/// right after tearing the frame down, which is no tail call; and a guess
+/// that falls into code a kept function covers is that function's, not one
+/// of its own.
+#[test]
+fn shrink_wrapped_tails_stay_and_guesses_stop_at_covered_code() {
+    let code = [
+        // ASM: cbz x0, 0x18
+        0xb400_00c0,
+        // ASM: stp x29, x30, [sp, #-16]!
+        0xa9bf_7bfd,
+        // ASM: bl leaf
+        0x9400_0006,
+        // ASM: ldp x29, x30, [sp], #16
+        0xa8c1_7bfd,
+        // ASM: b 0x18
+        0x1400_0002,
+        // ASM: nop
+        0xd503_201f,
+        // ASM: mov w0, #0 (0x18, the shared tail)
+        0x5280_0000,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: add w0, w0, #1 (leaf, 0x20)
+        0x1100_0400,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: stp x29, x30, [sp, #-16]! (0x28, a stray push)
+        0xa9bf_7bfd,
+        // ASM: ret (0x2c)
+        0xd65f_03c0,
+        // ASM: b 0x2c (f, 0x30)
+        0x17ff_ffff,
+    ];
+    let mut p = crate::raw::image(Arch::Arm64, &le_words(&code), &[]);
+    p.symbols = vec![local("f", TEXT + 0x30)];
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - TEXT).collect();
+    assert_eq!(entries, [0, 0x20, 0x30]);
+    let main = a.function(TEXT).expect("main");
+    assert_eq!((main.end, main.instr_count), (TEXT + 0x20, 7));
+    assert_eq!(main.callees, [TEXT + 0x20]);
+    assert_eq!(a.function(TEXT + 0x30).map(|f| f.start), Some(TEXT + 0x2c));
+}
+
 /// Hostile code gives an answer, the same one twice.
 ///
 /// Pseudo-random words, a `nop` sled, words all zero or all ones, and jumps

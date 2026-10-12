@@ -4,12 +4,11 @@
 //!
 //! Phase 1 walks the facts: the entry point, the symbols and the extents
 //! the file declares. A walk follows every branch, takes a `bl` target as a
-//! new function, takes a `b` as a tail call when it enters a known start,
-//! leaves the extent the file declares for the function, comes right after
-//! the frame is torn down, lands after zero padding or lands on a word only
-//! a function opens with, and stops after a call that never returns: one
-//! to a function named as never returning, or one followed by another
-//! function's start or by a word only a function opens with. An indirect
+//! new function, takes a `b` as a tail call when it enters a known start
+//! or leaves the extent the file declares for the function ([`jump_kind`]),
+//! and stops after a call that never returns: one to a function named as
+//! never returning, or one followed by another function's start or by a
+//! word only a function opens with. An indirect
 //! `br` ends the path; jump tables are not resolved yet. A function whose
 //! walk followed a jump into what later proved a start, a call into what
 //! later proved never to return, or the fall-through of a call to where
@@ -140,9 +139,21 @@ struct Known<'a> {
     /// The fragments the file declares, sorted: chunks of a function, no
     /// function of their own ([`crate::headers::Headers::chained_chunks`]).
     fragments: &'a [(u64, u64)],
+    /// The code the functions kept so far cover, as sorted, disjoint
+    /// extents ([`Discovery::covered`]); empty for a wave of facts.
+    covered: &'a [(u64, u64)],
 }
 
 impl Known<'_> {
+    /// Tells whether a kept function's block covers `va`.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The address.
+    fn covers(&self, va: u64) -> bool {
+        inside(self.covered, va)
+    }
+
     /// Tells whether a function opens at `va`: a known start, or a word
     /// only a function opens with ([`prologue::opens_surely`]).
     ///
@@ -153,8 +164,8 @@ impl Known<'_> {
         self.starts.contains(&va) || self.text.word(va).is_some_and(prologue::opens_surely)
     }
 
-    /// Tells whether `t` lies outside the extent the file declares for the
-    /// function at `entry`, and in no fragment of one.
+    /// Tells whether `t` lies inside the extent the file declares for the
+    /// function at `entry`, or in a fragment of one.
     ///
     /// Of two extents declared at one entry (a sized symbol and an unwind
     /// entry), the longer is the function's.
@@ -166,25 +177,36 @@ impl Known<'_> {
     ///
     /// # Returns
     ///
-    /// `false` when the file declares no extent starting at `entry`.
-    fn leaves_extent(&self, entry: u64, t: u64) -> bool {
-        let Some(&(start, end)) = self
+    /// `None` when the file declares no extent starting at `entry`.
+    fn within_extent(&self, entry: u64, t: u64) -> Option<bool> {
+        let &(start, end) = self
             .declared
             .partition_point(|r| r.0 <= entry)
             .checked_sub(1)
             .and_then(|k| self.declared.get(k))
-            .filter(|r| r.0 == entry)
-        else {
-            return false;
-        };
+            .filter(|r| r.0 == entry)?;
         let in_fragment = {
             let f = self.fragments.partition_point(|r| r.0 <= t);
             f.checked_sub(1)
                 .and_then(|f| self.fragments.get(f))
                 .is_some_and(|&(lo, hi)| t >= lo && t < hi)
         };
-        !(start..end).contains(&t) && !in_fragment
+        Some((start..end).contains(&t) || in_fragment)
     }
+}
+
+/// What a direct `b` is, as far as the walk can tell at the jump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Jump {
+    /// A jump within the function: followed.
+    Within,
+    /// A tail call: the target is a callee, not followed.
+    Tail,
+    /// A tail call unless the walk reaches the target another way: the
+    /// frame was torn down right before it, which a tail call does, and
+    /// which a function that shrink-wraps its frame also does before
+    /// jumping back to the tail its other paths share.
+    Unless,
 }
 
 /// How a pending address was reached.
@@ -224,6 +246,10 @@ struct Walked {
     terminated: bool,
     /// A fall-through reached another function's start.
     fell_into_start: bool,
+    /// A guess's fall-through or jump reached code a kept function covers:
+    /// the unreached rest of that function (a jump table's case), not a
+    /// function of its own.
+    enters_covered: bool,
     /// The entry's own word is not code.
     bad_entry: bool,
     /// The walk reached its instruction cap.
@@ -244,15 +270,17 @@ struct Kept {
     after_calls: Vec<u64>,
 }
 
-/// Tells whether a direct `b` from `va` to `t` in the function at `entry`
-/// is a tail call rather than a jump within it.
+/// Tells what a direct `b` to `t` in the function at `entry` is.
 ///
-/// It is when `t` is a known start, lies outside the extent the file
-/// declares for the function, comes right after zero padding (which only
-/// separates functions) or opens with a word only a function opens with,
-/// or when the frame was torn down right before the jump. A conditional
-/// branch is held to the first two alone: a function that shrink-wraps its
-/// prologue branches to it past an early return.
+/// A jump into a known start is a tail call. Where the file declares the
+/// function's extent, the extent decides: a target outside it (and outside
+/// the function's fragments) is a tail call, one inside a jump. Where it
+/// declares none, a target right after zero padding (which only separates
+/// functions) or on a word only a function opens with is a tail call, and
+/// one right after the frame was torn down is one unless the walk reaches
+/// it another way ([`Jump::Unless`]). A conditional branch is held to the
+/// start and the extent alone: a function that shrink-wraps its prologue
+/// branches to it past an early return.
 ///
 /// # Arguments
 ///
@@ -260,13 +288,23 @@ struct Kept {
 /// * `entry` - The walked function's entry.
 /// * `t` - The target.
 /// * `torn_down` - Whether the instruction before the jump undid the frame.
-fn tail_call(known: &Known<'_>, entry: u64, t: u64, torn_down: bool) -> bool {
-    torn_down
-        || known.start_at(t)
-        || known.leaves_extent(entry, t)
-        || t.checked_sub(STEP)
-            .and_then(|before| known.text.word(before))
-            == Some(0)
+fn jump_kind(known: &Known<'_>, entry: u64, t: u64, torn_down: bool) -> Jump {
+    if known.starts.contains(&t) {
+        return Jump::Tail;
+    }
+    match known.within_extent(entry, t) {
+        Some(true) => Jump::Within,
+        Some(false) => Jump::Tail,
+        None if known.start_at(t)
+            || t.checked_sub(STEP)
+                .and_then(|before| known.text.word(before))
+                == Some(0) =>
+        {
+            Jump::Tail
+        }
+        None if torn_down => Jump::Unless,
+        None => Jump::Within,
+    }
 }
 
 /// Walks one function from its entry.
@@ -276,7 +314,9 @@ fn tail_call(known: &Known<'_>, entry: u64, t: u64, torn_down: bool) -> bool {
 /// * `known` - What the wave reads.
 /// * `entry` - Where to start.
 /// * `cap` - Most instructions to decode.
-fn walk(known: &Known<'_>, entry: u64, cap: u64) -> Walked {
+/// * `guess` - Whether the entry is a guess, whose walk stops at code a
+///   kept function covers ([`Walked::enters_covered`]).
+fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
     let mut seen: FxHashSet<u64> = FxHashSet::default();
     let mut words: Vec<(u64, u32)> = Vec::new();
     let mut pending: Vec<(u64, Via)> = vec![(entry, Via::Fall)];
@@ -286,8 +326,10 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64) -> Walked {
     let mut followed_calls: BTreeSet<u64> = BTreeSet::new();
     let mut after_calls: BTreeSet<u64> = BTreeSet::new();
     let mut found_noreturn: BTreeSet<u64> = BTreeSet::new();
+    let mut unless_reached: Vec<u64> = Vec::new();
     let (mut junk, mut terminated, mut fell_into_start, mut bad_entry, mut overlong) =
         (false, false, false, false, false);
+    let mut enters_covered = false;
     while let Some((va, via)) = pending.pop() {
         if seen.contains(&va) {
             continue;
@@ -314,10 +356,13 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64) -> Walked {
             torn_down.insert(next);
         }
         let falls_into_start = next != entry && known.starts.contains(&next);
+        let falls_into_covered = guess && known.covers(next);
         match insn.flow {
             Flow::Next => {
                 if falls_into_start {
                     fell_into_start = true;
+                } else if falls_into_covered {
+                    enters_covered = true;
                 } else {
                     pending.push((next, Via::Fall));
                 }
@@ -326,8 +371,12 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64) -> Walked {
                 if let Some(t) = insn.target() {
                     if t == entry {
                         pending.push((t, Via::Branch));
-                    } else if known.starts.contains(&t) || known.leaves_extent(entry, t) {
+                    } else if known.starts.contains(&t)
+                        || known.within_extent(entry, t) == Some(false)
+                    {
                         callees.insert(t);
+                    } else if guess && known.covers(t) {
+                        enters_covered = true;
                     } else {
                         followed.insert(t);
                         pending.push((t, Via::Branch));
@@ -335,6 +384,8 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64) -> Walked {
                 }
                 if falls_into_start {
                     fell_into_start = true;
+                } else if falls_into_covered {
+                    enters_covered = true;
                 } else {
                     pending.push((next, Via::Fall));
                 }
@@ -342,14 +393,21 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64) -> Walked {
             Flow::Jump => match insn.target() {
                 None => terminated = true,
                 Some(t) if t == entry => pending.push((t, Via::Branch)),
-                Some(t) if tail_call(known, entry, t, torn_down.contains(&va)) => {
-                    callees.insert(t);
-                    terminated = true;
-                }
-                Some(t) => {
-                    followed.insert(t);
-                    pending.push((t, Via::Branch));
-                }
+                Some(t) => match jump_kind(known, entry, t, torn_down.contains(&va)) {
+                    Jump::Within if guess && known.covers(t) => enters_covered = true,
+                    Jump::Within => {
+                        followed.insert(t);
+                        pending.push((t, Via::Branch));
+                    }
+                    Jump::Tail => {
+                        callees.insert(t);
+                        terminated = true;
+                    }
+                    Jump::Unless => {
+                        unless_reached.push(t);
+                        terminated = true;
+                    }
+                },
             },
             Flow::Call => {
                 let callee = insn.target().filter(|&t| known.text.word(t).is_some());
@@ -370,6 +428,7 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64) -> Walked {
             Flow::Return | Flow::Invalid => terminated = true,
         }
     }
+    callees.extend(unless_reached.into_iter().filter(|t| !seen.contains(t)));
     let spent = from_usize(words.len());
     let (func, sites) = assemble(entry, words, callees);
     Walked {
@@ -383,9 +442,41 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64) -> Walked {
         junk,
         terminated,
         fell_into_start,
+        enters_covered,
         bad_entry,
         overlong,
     }
+}
+
+/// Tells whether `va` lies in one of `extents`, sorted and disjoint.
+///
+/// # Arguments
+///
+/// * `extents` - `(start, end)` pairs, `end` exclusive.
+/// * `va` - The address.
+fn inside(extents: &[(u64, u64)], va: u64) -> bool {
+    extents
+        .partition_point(|e| e.0 <= va)
+        .checked_sub(1)
+        .and_then(|k| extents.get(k))
+        .is_some_and(|&(_, end)| va < end)
+}
+
+/// Merges extents into sorted, disjoint ones.
+///
+/// # Arguments
+///
+/// * `extents` - `(start, end)` pairs in any order, `end` exclusive.
+fn merged(mut extents: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    extents.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(extents.len());
+    for (lo, hi) in extents {
+        match out.last_mut() {
+            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+            Some(_) | None => out.push((lo, hi)),
+        }
+    }
+    out
 }
 
 /// Builds the function record and its references from the words a walk
@@ -621,21 +712,29 @@ fn operand_kind(o: &Opnd) -> u64 {
 ///
 /// A walk whose entry is not code is never one. Every other walk from a
 /// fact is; a guess must also decode nothing that is not code, reach a way
-/// out, not run into another function, hold more than one instruction and
-/// stay under its cap.
+/// out, run into no other function and no code a kept function covers,
+/// hold more than one instruction (or be one jump to another function, a
+/// thunk) and stay under its cap.
 ///
 /// # Arguments
 ///
 /// * `w` - The walk.
 /// * `guess` - Whether its entry was a guess.
 fn rejected(w: &Walked, guess: bool) -> bool {
+    let thunk = w.func.instr_count == 1
+        && !w.func.callees.is_empty()
+        && w.func
+            .blocks
+            .first()
+            .is_some_and(|b| b.term == BlockTerm::Jmp);
     w.bad_entry
         || (guess
             && (w.overlong
                 || w.junk
                 || !w.terminated
                 || w.fell_into_start
-                || w.func.instr_count < GUESS_INSTRS_MIN))
+                || w.enters_covered
+                || (w.func.instr_count < GUESS_INSTRS_MIN && !thunk)))
 }
 
 /// The state of one discovery pass.
@@ -667,6 +766,9 @@ struct Discovery<'a> {
     guessed: FxHashSet<u64>,
     /// The kept walks, by entry.
     walked: BTreeMap<u64, Kept>,
+    /// The extents the file declares, merged: no guess is made inside one,
+    /// where the code is the declared function's own.
+    declared: Vec<(u64, u64)>,
 }
 
 impl Discovery<'_> {
@@ -733,6 +835,11 @@ impl Discovery<'_> {
             }
             let starts = self.starts.clone();
             let noreturn = self.noreturn.clone();
+            let covered = if wave.iter().any(|e| self.guessed.contains(e)) {
+                self.covered()
+            } else {
+                Vec::new()
+            };
             let program = self.program;
             let known = Known {
                 text,
@@ -740,6 +847,7 @@ impl Discovery<'_> {
                 noreturn: &noreturn,
                 declared: &program.function_ranges,
                 fragments: &program.headers.chained_chunks,
+                covered: &covered,
             };
             for batch in wave.chunks(WAVE_BATCH) {
                 let guessed = &self.guessed;
@@ -750,11 +858,13 @@ impl Discovery<'_> {
                         WALK_MAX
                     }
                 };
-                let walks = striped(batch, |&e| walk(&known, e, cap(e)));
+                let walks = striped(batch, |&e| walk(&known, e, cap(e), guessed.contains(&e)));
                 let walks: Vec<Walked> = batch
                     .iter()
                     .zip(walks)
-                    .map(|(&e, w)| w.unwrap_or_else(|| walk(&known, e, cap(e))))
+                    .map(|(&e, w)| {
+                        w.unwrap_or_else(|| walk(&known, e, cap(e), guessed.contains(&e)))
+                    })
                     .collect();
                 for (&e, w) in batch.iter().zip(walks) {
                     self.fuel = self.fuel.saturating_sub(w.spent);
@@ -825,13 +935,27 @@ impl Discovery<'_> {
         }
     }
 
+    /// The code the kept functions' blocks cover, as sorted, disjoint
+    /// extents.
+    fn covered(&self) -> Vec<(u64, u64)> {
+        merged(
+            self.walked
+                .values()
+                .flat_map(|k| k.func.blocks.iter().map(|b| (b.start, b.end)))
+                .collect(),
+        )
+    }
+
     /// Collects the guesses of one gap round.
     ///
     /// Every gap no block covers in an executable section is swept a word
     /// at a time. A word opens the gap when it is the gap's first, or
-    /// follows padding or an instruction control does not fall through
-    /// (a jump, a return, a trap); one that opens it the way a function
-    /// opens ([`prologue::opens`]) and was not walked is a guess.
+    /// follows padding or an instruction control does not fall through (a
+    /// jump, a return, a trap); one that opens it the way a function opens
+    /// ([`prologue::opens`]) is a guess, unless it was walked or lies inside
+    /// an extent the file declares. A word opening like no function is not
+    /// guessed at: in a binary that declares nothing, the unreached blocks
+    /// of a function that was never found open that way too.
     ///
     /// # Arguments
     ///
@@ -841,19 +965,7 @@ impl Discovery<'_> {
     ///
     /// The guesses in address order, at most [`SEEDS_MAX`].
     fn gap_seeds(&self, text: &Text<'_>) -> Vec<u64> {
-        let mut extents: Vec<(u64, u64)> = self
-            .walked
-            .values()
-            .flat_map(|k| k.func.blocks.iter().map(|b| (b.start, b.end)))
-            .collect();
-        extents.sort_unstable();
-        let mut covered: Vec<(u64, u64)> = Vec::with_capacity(extents.len());
-        for (lo, hi) in extents {
-            match covered.last_mut() {
-                Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
-                Some(_) | None => covered.push((lo, hi)),
-            }
-        }
+        let covered = self.covered();
         let mut seeds = Vec::new();
         for &(start, bytes) in &text.sections {
             let end = start.saturating_add(from_usize(bytes.len()));
@@ -888,29 +1000,28 @@ impl Discovery<'_> {
     /// * `hi` - Its end (exclusive).
     /// * `seeds` - Collects the guesses.
     fn sweep_gap(&self, text: &Text<'_>, lo: u64, hi: u64, seeds: &mut Vec<u64>) {
-        let Some(mut va) = lo.checked_next_multiple_of(STEP) else {
+        let Some(first) = lo.checked_next_multiple_of(STEP) else {
             return;
         };
+        let mut va = first;
         let mut opening = true;
         while va.checked_add(STEP).is_some_and(|after| after <= hi) && seeds.len() < SEEDS_MAX {
             let Some(word) = text.word(va) else {
                 break;
             };
-            if prologue::is_padding(word) {
-                opening = true;
-            } else {
-                if opening
-                    && prologue::opens(word)
-                    && !self.done.contains(&va)
-                    && !self.rejected.contains(&va)
-                {
-                    seeds.push(va);
-                }
-                opening = matches!(
+            if opening
+                && prologue::opens(word)
+                && !self.done.contains(&va)
+                && !self.rejected.contains(&va)
+                && !inside(&self.declared, va)
+            {
+                seeds.push(va);
+            }
+            opening = prologue::is_padding(word)
+                || matches!(
                     a64::decode(word, va).flow,
                     Flow::Jump | Flow::Return | Flow::Invalid
                 );
-            }
             va += STEP;
         }
     }
@@ -947,6 +1058,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         rejected: FxHashSet::default(),
         guessed: FxHashSet::default(),
         walked: BTreeMap::new(),
+        declared: merged(program.function_ranges.clone()),
     };
     d.run(&text);
     for _ in 0..GAP_ROUNDS_MAX {
