@@ -83,6 +83,49 @@ pub fn skeleton(text: &str) -> String {
     s
 }
 
+/// The line the declarations at the top of a decompiled function end on.
+///
+/// The text opens with its `//` header lines, then declares every
+/// variable the body names, a type and names to a line, before the first
+/// statement. On optimized code that block runs to hundreds of lines, so
+/// the first page of a long function can be mostly declarations; the line
+/// it ends on is where a reader who wants statements starts.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, its header lines first.
+///
+/// # Returns
+///
+/// The 1-based number of the last declaration line, or `None` when the
+/// text declares nothing before its first statement.
+///
+/// # Examples
+///
+/// ```
+/// use borer_engine::analysis::decompile::declarations_end;
+///
+/// let text = "// f @ 0x1000\n// signature: void f(void)\nuint64_t rax;\nPlayer *p;\n\nrax = 1;\n";
+/// assert_eq!(declarations_end(text), Some(4));
+/// assert_eq!(declarations_end("// f\n\nreturn;\n"), None);
+/// ```
+#[must_use]
+pub fn declarations_end(text: &str) -> Option<usize> {
+    let declares = |line: &str| {
+        line.ends_with(';')
+            && !line.starts_with(' ')
+            && !line.contains(['=', '('])
+            && line.split_whitespace().count() >= 2
+            && !["return ", "goto "].iter().any(|w| line.starts_with(w))
+    };
+    text.lines()
+        .enumerate()
+        .skip_while(|(_, l)| l.starts_with("//"))
+        .take_while(|(_, l)| declares(l))
+        .last()
+        .map(|(i, _)| i + 1)
+}
+
 /// Reads the guarded single-call statement that starts at `i`, if one does.
 ///
 /// The shape is three lines: `if (...) {`, one call statement, and `}`.

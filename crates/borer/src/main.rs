@@ -396,7 +396,10 @@ const DECOMPILE_LINES_DEFAULT: usize = 300;
 /// [`DECOMPILE_LINES_DEFAULT`] lines is paged unasked, since a 2,500-line function was 98 KB
 /// in one answer. Once anything is asked for, or the page cuts, every line is numbered from
 /// one, because a filtered line is worth little without the address of the window to ask
-/// for next.
+/// for next. A cut page's header names that window, `offset=N continues`, and an unfiltered
+/// page that starts inside the declarations says the line they end on
+/// ([`borer_engine::analysis::decompile::declarations_end`]): on optimized code the first
+/// page can be mostly declarations, and the agent paged blind past them.
 ///
 /// A filtered or paged line is shown under the signature and the `if`/`else`/loop/`switch`/
 /// `case` headers enclosing it ([`render::scope_headers`]), each once, numbered `^N` so it
@@ -430,13 +433,29 @@ fn window(text: &str, filter: Option<&str>, offset: Option<u32>, limit: Option<u
     let from = to_usize(offset.unwrap_or(0));
     let shown: Vec<usize> = picked.iter().skip(from).take(take).copied().collect();
     let context = render::scope_headers(&lines, &shown);
+    let next = from + shown.len();
+    let more = if next < picked.len() {
+        format!("; offset={next} continues")
+    } else {
+        String::new()
+    };
     let mut out = match needle.needle() {
         Some(n) => format!(
-            "// {} of {total} lines carry {n:?}, showing {} from {from}",
+            "// {} of {total} lines carry {n:?}, showing {} from {from}{more}",
             picked.len(),
             shown.len()
         ),
-        None => format!("// showing {} of {total} lines from {from}", shown.len()),
+        None => {
+            let declared = borer_engine::analysis::decompile::declarations_end(text)
+                .filter(|&end| from < end)
+                .map_or(String::new(), |end| {
+                    format!("; declarations end at line {end}")
+                });
+            format!(
+                "// showing {} of {total} lines from {from}{declared}{more}",
+                shown.len()
+            )
+        }
     };
     if !context.is_empty() {
         out.push_str(render::SCOPE_NOTE);
@@ -454,6 +473,42 @@ fn window(text: &str, filter: Option<&str>, offset: Option<u32>, limit: Option<u
         let _ = writeln!(out, "{number:>5}  {}", lines[i]);
     }
     out
+}
+
+/// One function of a `decompile_batch` answer cut at its share: whole lines
+/// up to `cap` bytes, then a note naming where `decompile` picks it up.
+///
+/// The note counts lines as `decompile` numbers them, its header lines
+/// ([`decompile_header`]) included, so the offset it gives continues from
+/// the last line shown; it also names the line the declarations end on,
+/// since the share of a function with hundreds of locals can be all
+/// declarations.
+///
+/// # Arguments
+///
+/// * `text` - The function's pseudo-C, without the header lines.
+/// * `cap` - Most bytes kept.
+/// * `entry` - The function's entry.
+/// * `header` - How many lines `decompile` puts under the text's first line.
+///
+/// # Returns
+///
+/// The kept lines and the note, ending in a newline.
+fn truncated(text: &str, cap: usize, entry: u64, header: usize) -> String {
+    let end = text[..text.floor_char_boundary(cap)]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let kept = &text[..end];
+    let shift = |line: usize| if line > 1 { line + header } else { line };
+    let shown = shift(kept.lines().count());
+    let total = shift(text.lines().count());
+    let declared = borer_engine::analysis::decompile::declarations_end(text)
+        .map_or(String::new(), |end| {
+            format!("; declarations end at line {}", shift(end))
+        });
+    format!(
+        "{kept}// truncated at line {shown} of {total}{declared}; decompile(address={entry:#x}, offset={shown}) continues\n"
+    )
 }
 
 /// The lines a `decompile` answer puts under its first line: what of the
@@ -2772,15 +2827,32 @@ impl BorerServer {
                     )
                 })
                 .collect();
+            let mut spent = 0usize;
+            let printed = texts
+                .iter()
+                .take_while(|(_, text)| {
+                    let room = spent < TOTAL;
+                    spent += text.len().min(PER_FN);
+                    room
+                })
+                .count();
+            // PERF: only a cut function's header is read, a check each, in
+            // parallel: the note under its cut counts lines as decompile
+            // numbers them, header included.
+            let headers: std::collections::BTreeMap<u64, usize> = texts[..printed]
+                .par_iter()
+                .filter(|(_, text)| text.len() > PER_FN)
+                .map(|(entry, _)| {
+                    let lines = decompile_header(p, &a, &o, *entry).map_or(0, |h| h.lines().count());
+                    (*entry, lines)
+                })
+                .collect();
             // INVARIANT: the header counts the functions the body prints and
             // the clones of those alone, so a body the total cap cut short
             // never claims the functions it left out.
             let mut body = String::new();
-            let (mut used, mut shown, mut folded) = (0usize, 0usize, 0usize);
-            for (entry, text) in &texts {
-                if used >= TOTAL {
-                    break;
-                }
+            let (mut shown, mut folded) = (0usize, 0usize);
+            for (entry, text) in &texts[..printed] {
                 let name = borer_engine::analysis::name_of(&a, &o, *entry);
                 let same = skipped.get(entry).filter(|c| !c.is_empty());
                 let clones = same.map_or(String::new(), |c| {
@@ -2800,14 +2872,14 @@ impl BorerServer {
 ==== {name} @ {entry:#x} ===={clones}
 ");
                 if text.len() > PER_FN {
-                    body.push_str(&text[..text.floor_char_boundary(PER_FN)]);
-                    body.push_str("
-// truncated
-");
-                    used += PER_FN;
+                    body.push_str(&truncated(
+                        text,
+                        PER_FN,
+                        *entry,
+                        headers.get(entry).copied().unwrap_or(0),
+                    ));
                 } else {
                     body.push_str(text);
-                    used += text.len();
                 }
                 shown += 1;
                 folded += same.map_or(0, Vec::len);
@@ -2823,10 +2895,11 @@ impl BorerServer {
             );
             out.push_str(&body);
             let cut = texts.len().saturating_sub(shown);
-            if cut > 0 {
+            if let Some((first, _)) = texts.get(shown) {
                 let _ = writeln!(
                     out,
-                    "# total output cap of {TOTAL} chars reached: {cut} more decompiled, not shown; narrow the filter or lower max_functions"
+                    "# total output cap of {TOTAL} chars reached: {cut} more decompiled, not shown, the first {} @ {first:#x}; narrow the filter or lower max_functions",
+                    borer_engine::analysis::name_of(&a, &o, *first)
                 );
             }
             Ok(out)
@@ -5902,13 +5975,140 @@ mod tests {
             .collect();
         let paged = super::window(&long, None, None, None);
         let head = format!(
-            "// showing {} of {} lines from 0\n",
+            "// showing {} of {} lines from 0; offset={} continues\n",
             super::DECOMPILE_LINES_DEFAULT,
-            super::DECOMPILE_LINES_DEFAULT + 1
+            super::DECOMPILE_LINES_DEFAULT + 1,
+            super::DECOMPILE_LINES_DEFAULT
         );
         assert!(paged.starts_with(&head), "{paged}");
         assert_eq!(paged.lines().count(), super::DECOMPILE_LINES_DEFAULT + 1);
         assert_eq!(super::window(&long, None, None, Some(0)), long);
+    }
+
+    /// A cut page names the line the declarations end on while it starts
+    /// inside them, and the offset the next page starts at while one is
+    /// left; the last page names neither.
+    ///
+    /// # Panics
+    ///
+    /// When a header misnames the declarations or the next offset.
+    #[test]
+    fn a_cut_page_names_where_the_declarations_end_and_what_comes_next() {
+        let text: String = ["// f @ 0x1000\n// signature: void f(void)\n".to_owned()]
+            .into_iter()
+            .chain((0..400).map(|i| format!("uint64_t local_{i};\n")))
+            .chain(std::iter::once("\n".to_owned()))
+            .chain((0..600).map(|i| format!("x = {i};\n")))
+            .collect();
+        let head = |offset| {
+            super::window(&text, None, offset, None)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(
+            head(None),
+            "// showing 300 of 1003 lines from 0; declarations end at line 402; offset=300 continues"
+        );
+        assert_eq!(
+            head(Some(300)),
+            "// showing 300 of 1003 lines from 300; declarations end at line 402; offset=600 continues"
+        );
+        assert_eq!(
+            head(Some(500)),
+            "// showing 300 of 1003 lines from 500; offset=800 continues"
+        );
+        assert_eq!(head(Some(900)), "// showing 103 of 1003 lines from 900");
+        let filtered = super::window(&text, Some("x = 1"), None, Some(5));
+        assert!(
+            filtered.starts_with(
+                "// 111 of 1003 lines carry \"x = 1\", showing 5 from 0; offset=5 continues\n"
+            ),
+            "{filtered}"
+        );
+    }
+
+    /// A function a batch cuts at its share ends with a note whose offset,
+    /// passed to `decompile`, picks it up at the line after the last one
+    /// the batch shows, counted as `decompile` numbers its lines.
+    ///
+    /// # Panics
+    ///
+    /// When the note is missing or its offset skips or repeats a line.
+    #[test]
+    fn a_cut_batch_function_says_where_decompile_continues() {
+        use super::{DecompileBatchParams, DecompileParams, Parameters};
+        use borer_engine::program::{Arch, Program, Section};
+        let mut code = Vec::new();
+        for n in 0u32..400 {
+            // ASM: mov dword [rcx + n*8], n
+            code.extend_from_slice(&[0xc7, 0x81]);
+            code.extend_from_slice(&(n * 8).to_le_bytes());
+            code.extend_from_slice(&n.to_le_bytes());
+        }
+        code.push(0xc3); // ASM: ret
+        let len = u64::try_from(code.len()).expect("small");
+        let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let batch = server
+            .decompile_batch(Parameters(DecompileBatchParams {
+                filter: None,
+                max_functions: Some(1),
+            }))
+            .expect("batch");
+        let note = batch
+            .lines()
+            .find(|l| l.starts_with("// truncated at line "))
+            .unwrap_or_else(|| panic!("no cut note: {batch}"));
+        let offset: u32 = note
+            .split_once("offset=")
+            .and_then(|(_, rest)| rest.split(')').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no offset: {note}"));
+        assert!(
+            note.ends_with(&format!(
+                "; decompile(address=0x1000, offset={offset}) continues"
+            )),
+            "{note}"
+        );
+        let decompile = |offset, limit| {
+            server
+                .decompile(Parameters(DecompileParams {
+                    address: "0x1000".to_owned(),
+                    detail: None,
+                    filter: None,
+                    offset,
+                    limit: Some(limit),
+                }))
+                .expect("decompiles")
+        };
+        let whole = decompile(None, 0);
+        let lines: Vec<&str> = whole.lines().collect();
+        let at = usize::try_from(offset).expect("small");
+        let kept: Vec<&str> = batch.lines().take_while(|l| *l != note).collect();
+        assert_eq!(kept.last().copied(), lines.get(at - 1).copied(), "{batch}");
+        let page = decompile(Some(offset), 1);
+        let first = page
+            .lines()
+            .find(|l| !l.starts_with("//") && !l.trim_start().starts_with('^'))
+            .unwrap_or_default();
+        assert_eq!(
+            first,
+            format!(
+                "{:>5}  {}",
+                at + 1,
+                lines.get(at).copied().unwrap_or_default()
+            ),
+            "{page}"
+        );
     }
 
     /// A filter keeps the lines carrying the text, numbered where they were.
@@ -5994,7 +6194,7 @@ mod tests {
         assert_eq!(
             super::window(text, None, Some(8), Some(1)),
             format!(
-                "// showing 1 of 11 lines from 8{note}\n   ^3  if ((a3 & 0x200) != 0) {{\n   ^8  }} else {{\n    9    rax = 0;\n"
+                "// showing 1 of 11 lines from 8; offset=9 continues{note}\n   ^3  if ((a3 & 0x200) != 0) {{\n   ^8  }} else {{\n    9    rax = 0;\n"
             ),
             "a page opening inside an else"
         );
