@@ -11,6 +11,7 @@ use borer_engine::analysis::{
     map, messages, name_of, parse_addr, parse_off, ports, protocol, render, resolve_suggesting,
     schema, senders, sigs, snapshot, utypes, vtables,
 };
+use borer_engine::isa::Isa;
 use borer_engine::layout::{self, Layout};
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
@@ -95,8 +96,8 @@ commands:
   scenarios <binary> <function> <a2=0..32>   a scenario per value of one parameter (a range, or values joined by |), the ones that behave alike grouped with their calls and returns
   types <binary> [project] [filter] [offset] [limit]  user-defined types a project states and where each is applied (50 a page, max 500; \"\" for no filter)
   set-type <binary> <project> struct <name> [size] <off:name:type>...  define a struct in the project; or set-type <binary> <project> enum <name> [size] <name:value>...; or set-type <binary> <project> typedef <name> <type>; or set-type <binary> <project> apply <address|name> <type>, so decompile names that global's fields or constants
-  verify <binary> [function|all] [limit] [seed]check the lifter against the emulator block by block from seeded states; lists every register, stack slot, store and branch they disagree on and fails if any (default all, 2000 functions)
-  verify <binary> <function|all> <limit> <seed> text  check the text's statements instead: each block's, replayed under the lifter's witness, against the emulator from three seeded states; lists every claim the machine does not bear out and fails on any but lane roughness
+  verify <binary> [function|all] [limit] [seed]check the lifter against the emulator (arm64 code against the arm64 machine) block by block from seeded states; lists every register, stack slot, store and branch they disagree on and fails if any (default all, 2000 functions)
+  verify <binary> <function|all> <limit> <seed> text  check the text's statements instead (x86 and x64 only): each block's, replayed under the lifter's witness, against the emulator from three seeded states; lists every claim the machine does not bear out and fails on any but lane roughness
 options:
   --pack <file>                            run the analysis with a pack (repeatable; BORER_PACKS lists more, for the MCP server too)
   --no-auto-packs                          load only the packs --pack and BORER_PACKS name, not the pack directories' (BORER_AUTO_PACKS=0 does the same)
@@ -2475,7 +2476,17 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             println!("{say}; written to {}", short_path(project));
         }
         Query::Verify => {
-            let a = s.analysis(Feature::Decompile)?;
+            let text = args.get(5).is_some_and(|m| m == "text");
+            // INVARIANT: arm64 blocks lift and their lifting is checked
+            // against the arm64 machine, but arm64 functions do not
+            // decompile yet, so the text's check refuses them as decompile
+            // does.
+            let a64 = !text && s.program.arch.isa() == Some(Isa::A64);
+            let a = s.analysis(if a64 {
+                Feature::Discover
+            } else {
+                Feature::Decompile
+            })?;
             let which = args
                 .get(2)
                 .map(String::as_str)
@@ -2498,11 +2509,19 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     .collect(),
                 Some(which) => vec![entry_at(&s.program, &a, s.resolve(&a, which)?)?],
             };
-            if args.get(5).is_some_and(|m| m == "text") {
+            if text {
                 let r = decompile::replay::replay(&s.program, &a, &entries, seed);
                 print!("{}", decompile::replay::replay_tsv(&r));
                 if !r.wrong().is_empty() {
                     bail!("the text and the emulator disagree; see the table above");
+                }
+                return Ok(());
+            }
+            if a64 {
+                let v = decompile::verify_a64::verify(&s.program, &a, &entries, seed);
+                print!("{}", decompile::verify_a64::verify_tsv(&v));
+                if !v.mismatches.is_empty() {
+                    bail!("the lifter and the emulator disagree; see the table above");
                 }
                 return Ok(());
             }

@@ -545,7 +545,8 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
 /// `disasm` lists one word per row four bytes apart, up to where the
 /// discovered function's code ends, and so does a script's `disasm`;
 /// `functions` lists what discovery finds, `emulate` runs the entry in the
-/// arm64 machine, and `decompile` and `oracle` refuse, saying what applies.
+/// arm64 machine, `verify` checks the entry's lifting against it, and
+/// `decompile`, `verify ... text` and `oracle` refuse, saying what applies.
 ///
 /// The fixture is the test binary with its COFF machine set to arm64, so
 /// what decodes is x86 code read as arm64 words, its exception directory
@@ -614,6 +615,11 @@ fn cli_disassembles_and_discovers_an_arm64_image() {
     assert!(ok && out.starts_with("# ran "), "{out}");
     let (ok, out) = run_all(&["oracle", &path, &format!("{entry:#x}")]);
     assert!(!ok && out.contains("x86-64 code only for now"), "{out}");
+    let (_, out) = run_all(&["verify", &path, &format!("{entry:#x}")]);
+    assert!(out.starts_with("# verified 1 functions, "), "{out}");
+    assert!(out.contains("\n# vector: "), "{out}");
+    let (ok, out) = run_all(&["verify", &path, &format!("{entry:#x}"), "1", "1", "text"]);
+    assert!(!ok && out.contains("does not yet decompile it"), "{out}");
 
     drop(std::fs::remove_file(&path));
     drop(std::fs::remove_file(&script));
