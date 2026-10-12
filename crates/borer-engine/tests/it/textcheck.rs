@@ -423,3 +423,31 @@ fn a_result_is_as_wide_as_its_widest_read() {
     let p = program(&code, &[]);
     runs_alike(&p, TEXT);
 }
+
+/// A wide literal holding a newline reads whole, where it read as the
+/// one-character narrow `"%"`; a table of 16-bit values whose first entry
+/// is a space is no string at all.
+#[test]
+fn wide_literals_read_whole_and_tables_of_words_are_none() {
+    let mut code = vec![
+        0x48, 0x8d, 0x05, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea rax,[rip+0xff9]
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x10, 0xcc);
+    code.extend([
+        0x48, 0x8d, 0x05, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea rax,[rip+0xff9]
+        0xc3, // ASM: ret
+    ]);
+    let mut data = vec![0u8; 0x20];
+    for (k, c) in "%ws:\n".bytes().enumerate() {
+        data[2 * k] = c;
+    }
+    data[0x10..0x1c].copy_from_slice(&[
+        0x20, 0x00, 0x22, 0x00, 0x24, 0x00, 0x26, 0x00, 0x74, 0x61, 0x69, 0x6c,
+    ]);
+    let p = program(&code, &data);
+    let (wide, _) = text_of(&p, TEXT);
+    assert!(wide.contains(r#"return L"%ws:\n";"#), "{wide}");
+    let (table, _) = text_of(&p, TEXT + 0x10);
+    assert!(!table.contains('"'), "{table}");
+}

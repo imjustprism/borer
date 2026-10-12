@@ -94,7 +94,7 @@ use super::{
 };
 use crate::fxmap::FxHashMap;
 use crate::program::Program;
-use crate::strings::{cstr_at, cstr_text_at, wide_run_start, wstr_at};
+use crate::strings::{cstr_at, cstr_text_at, wide_run_start, wstr_text_at};
 
 /// Structuring recursion guard: deeper than this, fall back to gotos.
 ///
@@ -402,7 +402,11 @@ pub(super) fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option
 /// two candidates are weighed against each other. The wide reading wins when
 /// the narrow one is shorter than a literal's minimum and the wide one is
 /// longer still, which is the only shape where a narrow reading carries less
-/// than the bytes hold.
+/// than the bytes hold. Both readings run over the tab, newline and carriage
+/// return a literal escapes, so `L"%ws%ws %ws:\n"` keeps its newline and
+/// is not cut to the narrow `"%"`. A literal that does not read back to the
+/// image's bytes through the text's own tokenizer ([`round_trips`]) is not
+/// printed.
 fn string_at(program: &Program, addr: u64) -> Option<String> {
     /// Shortest run accepted as a literal in writable data, where a small
     /// object's first bytes may happen to read as text.
@@ -452,16 +456,68 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     };
     let sanitize = |t: String| crate::strings::escape_text(&t);
     let narrow = cstr_text_at(program, addr, min, CAP).filter(|&(len, _)| terminated(len));
-    let wide = wide_run_start(program, addr)
-        .then(|| wstr_at(program, addr, min.max(2), CAP))
-        .flatten()
-        .filter(|&(len, _)| terminated(len.saturating_mul(2)));
-    match (narrow, wide) {
-        (Some((n, _)), Some((w, t))) if n < MIN && w > n => Some(format!("L\"{}\"", sanitize(t))),
-        (Some((_, t)), _) => Some(format!("\"{}\"", sanitize(t))),
-        (None, Some((_, t))) => Some(format!("L\"{}\"", sanitize(t))),
-        (None, None) => None,
-    }
+    let run = wide_run_start(program, addr)
+        .then(|| wstr_text_at(program, addr, min.max(2), CAP))
+        .flatten();
+    let wide_len = run.as_ref().map_or(0, |(len, _)| *len);
+    let wide = run.filter(|&(len, _)| terminated(len.saturating_mul(2)));
+    let literal = match (narrow, wide) {
+        (Some((n, _)), Some((w, t))) if n < MIN && w > n => format!("L\"{}\"", sanitize(t)),
+        // INVARIANT: a one-character string whose terminator is the high
+        // byte of a longer run of wide characters with no terminator of
+        // its own is the first entry of a table of 16-bit values (Rust's
+        // `[0x20u16, 0x22, 0x24, 0x26]`), no string; the address says what
+        // it is where `" "` would send a reader to another copy of a space.
+        (Some((n, _)), None) if n < MIN && wide_len >= TABLE_UNITS => return None,
+        (Some((_, t)), _) => format!("\"{}\"", sanitize(t)),
+        (None, Some((_, t))) => format!("L\"{}\"", sanitize(t)),
+        (None, None) => return None,
+    };
+    round_trips(program, addr, &literal).then_some(literal)
+}
+
+/// Fewest wide characters, past a one-character narrow reading, that make
+/// the bytes a table of 16-bit values in [`string_at`].
+const TABLE_UNITS: usize = 3;
+
+/// Tells whether a literal reads back, as the C it is printed in, to the
+/// bytes the image holds where it was read.
+///
+/// The tokenizer the text's own readers use ([`ctext::tokens`]) decodes
+/// its escapes and its encoding
+/// (`L"..."` as UTF-16LE), and the bytes must be the image's, terminator
+/// included; a literal cut at its cap (ending `...`) must be a prefix of
+/// them.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - Where the literal was read.
+/// * `literal` - The literal as printed, quotes and prefix included.
+fn round_trips(program: &Program, addr: u64, literal: &str) -> bool {
+    /// What a literal cut at its cap ends with inside its quotes.
+    const CUT: &str = "...\"";
+    let (whole, cut) = match literal.strip_suffix(CUT) {
+        Some(head) => (format!("{head}\""), true),
+        None => (literal.to_owned(), false),
+    };
+    let Ok(toks) = ctext::tokens(&whole) else {
+        return false;
+    };
+    let [ctext::Tok::Str(bytes)] = toks.as_slice() else {
+        return false;
+    };
+    let unit = if literal.starts_with('L') { 2 } else { 1 };
+    let held = if cut {
+        bytes.get(..bytes.len().saturating_sub(unit))
+    } else {
+        Some(bytes.as_slice())
+    };
+    held.is_some_and(|held| {
+        program
+            .read_va(addr, held.len())
+            .is_some_and(|image| image == held)
+    })
 }
 
 /// Decompiles many functions at once, one stripe of them per core.

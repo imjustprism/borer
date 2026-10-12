@@ -12,7 +12,7 @@ use super::expr::{Expr, Key, Names, negative_magnitude};
 use super::lift::{self, ArgAt, Call, Callee, Conv, EffectKind, Shown};
 use super::{Analysis, Overlay, decompiled_cached, name_of};
 use crate::program::Program;
-use crate::strings::{cstr_text_at, wstr_at};
+use crate::strings::{cstr_text_at, wstr_text_at};
 
 /// Longest string argument read whole, in characters.
 const TEXT_MAX: usize = 512;
@@ -244,7 +244,7 @@ fn argument(e: &Expr, n: &Names<'_>) -> CallArg {
             let named = n.const_name(*v, true);
             let string = named.as_deref().and_then(|shown| {
                 if shown.starts_with("L\"") {
-                    wstr_at(n.program, *v, 1, TEXT_MAX).map(|(_, t)| t)
+                    wstr_text_at(n.program, *v, 1, TEXT_MAX).map(|(_, t)| t)
                 } else if shown.starts_with('"') {
                     cstr_text_at(n.program, *v, 1, TEXT_MAX).map(|(_, t)| t)
                 } else {

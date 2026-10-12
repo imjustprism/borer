@@ -448,6 +448,44 @@ pub(crate) fn wstr_in(raw: &[u8], min: usize, cap: usize) -> Option<(usize, Stri
     Some(capped(len, &chars, cap))
 }
 
+/// Reads the UTF-16LE string at `va` the way a wide literal is written, so
+/// a run holding a tab or a newline is still one string.
+///
+/// The wide counterpart of [`cstr_text_at`]: [`wstr_at`] stops at the
+/// first unit outside printable ASCII, which cut `L"%ws%ws %ws:\n"` before
+/// its newline, so the run had no terminator and the caller printed the
+/// one-character narrow reading `"%"` instead. This one runs to the
+/// terminator over the units a literal can escape.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image to read from.
+/// * `va` - Virtual address of the first code unit.
+/// * `min` - Shortest run accepted, in code units.
+/// * `cap` - Longest text returned in full; longer runs end with `...`.
+///
+/// # Returns
+///
+/// `(run length in code units, text with the control characters still in
+/// it)`, or `None` when `va` is unmapped or the run is shorter than `min`.
+pub fn wstr_text_at(program: &Program, va: u64, min: usize, cap: usize) -> Option<(usize, String)> {
+    let raw = program.read_va_upto(va, SCAN_MAX * 2)?;
+    let len = raw
+        .chunks_exact(2)
+        .position(|u| u.get(1) != Some(&0) || u.first().is_none_or(|b| !literal_byte(*b)))
+        .unwrap_or(raw.len() / 2);
+    if len < min {
+        return None;
+    }
+    let chars: Vec<u8> = raw
+        .get(..len.min(cap) * 2)?
+        .iter()
+        .step_by(2)
+        .copied()
+        .collect();
+    Some(capped(len, &chars, cap))
+}
+
 /// Pairs a run length with its display text, marking a cut with `...`.
 ///
 /// # Arguments
