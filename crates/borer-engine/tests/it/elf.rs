@@ -906,3 +906,74 @@ fn a_symbol_running_past_the_address_space_is_no_range() {
             .any(|&(start, _)| start == u64::MAX - 1)
     );
 }
+
+/// An ELF whose function at `0x1000` takes a pointer in `rdi`.
+///
+/// `rdi` is the System V first argument. The function reads the field at
+/// 8, writes the one at 0x10, and hands the address of the one at 0x18 to
+/// `sub_1020` in `rsi`, its second argument.
+#[expect(
+    clippy::expect_used,
+    reason = "a fixture that does not parse has no useful recovery"
+)]
+fn rdi_pointer_elf() -> Program {
+    use crate::elfgen::{self, AX, EM_X86_64, ET_EXEC, PROGBITS, Sec};
+    let mut text = vec![0xccu8; 0x21];
+    let code: &[u8] = &[
+        0x8b, 0x47, 0x08, // ASM: mov eax,[rdi+8]
+        0x89, 0x47, 0x10, // ASM: mov [rdi+0x10],eax
+        0x48, 0x8d, 0x77, 0x18, // ASM: lea rsi,[rdi+0x18]
+        0xe8, 0x11, 0x00, 0x00, 0x00, // ASM: call 0x1020
+        0xc3, // ASM: ret
+    ];
+    text[..code.len()].copy_from_slice(code);
+    text[0x20] = 0xc3; // ASM: ret
+    let bytes = elfgen::build(
+        ET_EXEC,
+        EM_X86_64,
+        0x1000,
+        &[Sec::new(".text", PROGBITS, AX, 0x1000, text)],
+    );
+    Program::from_bytes(std::path::PathBuf::from("rdi.elf"), bytes).expect("the image loads")
+}
+
+/// `layout` with no register follows `rdi` on an ELF.
+///
+/// That is the first argument by the function's own convention, and a
+/// field's address handed to a call is named by the argument System V
+/// passes it as. It followed the Microsoft x64 `rcx`, which the function
+/// never touches, and read `rsi` as no argument at all.
+#[test]
+fn layout_follows_rdi_on_an_elf() {
+    let p = rdi_pointer_elf();
+    let a = Analysis::compute(&p);
+    let out = borer_engine::analysis::render::layout_tsv(&p, &a, &Overlay::default(), "0x1000")
+        .expect("a layout");
+    assert!(
+        out.starts_with("# structure through rdi of sub_1000"),
+        "{out}"
+    );
+    assert!(out.contains("\n0x8      4     read "), "{out}");
+    assert!(out.contains("\n0x10     4     written "), "{out}");
+    assert!(out.contains("passed to sub_1020 as argument 2\n"), "{out}");
+}
+
+/// `taint` reads a call's arguments by System V on an ELF.
+///
+/// The arguments and the registers the callee destroys are the function's
+/// own convention's: `rdi` and `rsi` reach `sub_1020` as its first two
+/// arguments, and the call ends them. It took only the Microsoft x64
+/// `rcx`, `rdx`, `r8` and `r9` as arguments and kept `rdi` and `rsi` across
+/// the call, so the value reached nothing and was still held at the end.
+#[test]
+fn taint_reads_calls_by_system_v_on_an_elf() {
+    let p = rdi_pointer_elf();
+    let a = Analysis::compute(&p);
+    let out = borer_engine::analysis::render::taint_tsv(&p, &a, &Overlay::default(), "0x1000,rdi")
+        .expect("a taint");
+    assert!(
+        out.contains("sub_1020 takes it as argument 1 and argument 2\n"),
+        "{out}"
+    );
+    assert!(!out.contains("# still held"), "{out}");
+}

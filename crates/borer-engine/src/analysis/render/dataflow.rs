@@ -2,6 +2,7 @@
 //! register conventions they share.
 
 use super::*;
+use crate::analysis::decompile::lift;
 
 /// Where a value pass starts and what it follows: `<address>[,<register>]`.
 #[derive(Debug, Clone)]
@@ -22,13 +23,17 @@ pub(super) struct ValueSpec {
 impl ValueSpec {
     /// Parses the spec.
     ///
+    /// A register the spec names is checked before the function is looked
+    /// up, so a misspelled one is refused as such wherever it points.
+    ///
     /// # Arguments
     ///
+    /// * `p` - The loaded image, whose conventions pick the default.
     /// * `a` - The analysis, for resolving a name and finding the function.
     /// * `o` - User names.
     /// * `spec` - `<address>` or `<address>,<register>`.
     /// * `bitness` - Decoder bitness of the program; `None` refuses the pass.
-    /// * `default` - The register followed when the spec names none.
+    /// * `follow` - The register followed when the spec names none.
     ///
     /// # Returns
     ///
@@ -41,34 +46,50 @@ impl ValueSpec {
     /// unread), the register is not one the target has, or no function
     /// contains the address.
     pub(super) fn parse(
+        p: &Program,
         a: &Analysis,
         o: &Overlay,
         spec: &str,
         bitness: Option<u32>,
-        default: fn(&RegisterNames) -> &'static str,
+        follow: Follow,
     ) -> Result<Self, String> {
         let (where_, mut rest) = spec_head(spec);
         let start = locate(a, o, where_).ok_or_else(|| unresolved(where_))?;
         let bitness = bitness.ok_or_else(|| String::from("unknown architecture"))?;
         let names = RegisterNames::for_bitness(bitness);
-        let wanted = rest.next().unwrap_or(default(&names)).trim().to_lowercase();
+        let named = rest.next().map(|r| r.trim().to_lowercase());
         if let Some(extra) = rest.next() {
             return Err(format!(
                 "the spec is <address>[,<register>]; {} is one part too many",
                 crate::text::quoted(extra.trim())
             ));
         }
-        let seed = iced_register(&wanted, bitness).ok_or_else(|| {
-            format!(
-                "{} is not a general register; use {}",
-                crate::text::one_line(&wanted),
-                names.range
-            )
-        })?;
+        let register = |wanted: &str| {
+            iced_register(wanted, bitness).ok_or_else(|| {
+                format!(
+                    "{} is not a general register; use {}",
+                    crate::text::one_line(wanted),
+                    names.range
+                )
+            })
+        };
+        let given = named.as_deref().map(register).transpose()?;
         let entry = a
             .function_at(start)
             .ok_or_else(|| format!("no function contains {start:#x}"))?
             .entry;
+        let (wanted, seed) = match named.zip(given) {
+            Some(named) => named,
+            None => {
+                let seed = match follow {
+                    Follow::Result => register(names.result)?,
+                    Follow::FirstArgument => argument_registers(p, entry, bitness)
+                        .first()
+                        .map_or_else(|| register(names.result), |r| Ok(canonical(*r, bitness)))?,
+                };
+                (format!("{seed:?}").to_lowercase(), seed)
+            }
+        };
         Ok(Self {
             start,
             entry,
@@ -77,6 +98,16 @@ impl ValueSpec {
             bitness,
         })
     }
+}
+
+/// The register a value pass follows when its spec names none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Follow {
+    /// Where a call leaves its result: what `taint` follows.
+    Result,
+    /// Where the function's first argument arrives by its own convention:
+    /// the pointer `layout` follows.
+    FirstArgument,
 }
 
 /// Follows a value forward through a function and reports where it lands.
@@ -135,8 +166,12 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         wanted,
         seed,
         bitness,
-    } = ValueSpec::parse(a, o, spec, p.arch.bitness(), |n| n.result)?;
+    } = ValueSpec::parse(p, a, o, spec, p.arch.bitness(), Follow::Result)?;
     let instrs = function_instructions(p, a, entry);
+    let (arguments, volatile) = (
+        argument_registers(p, entry, bitness),
+        volatile_registers(p, entry, bitness),
+    );
 
     let mut tainted: BTreeSet<Register> = BTreeSet::new();
     tainted.insert(seed);
@@ -186,12 +221,10 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
                 FlowControl::Call | FlowControl::IndirectCall
             ) {
                 let preserves = preserves_registers(a, o, i);
-                let passed: Vec<String> = argument_registers(bitness)
+                let passed: Vec<String> = arguments
                     .iter()
                     .enumerate()
-                    .filter(|(_, name)| {
-                        iced_register(name, bitness).is_some_and(|r| tainted.contains(&r))
-                    })
+                    .filter(|(_, r)| tainted.contains(&canonical(**r, bitness)))
                     .map(|(k, _)| format!("argument {}", k + 1))
                     .collect();
                 if !passed.is_empty() && !preserves {
@@ -206,10 +239,8 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
                     }
                 }
                 if !preserves {
-                    for name in VOLATILE_REGISTERS {
-                        if let Some(r) = iced_register(name, bitness) {
-                            tainted.remove(&r);
-                        }
+                    for r in volatile {
+                        tainted.remove(&canonical(*r, bitness));
                     }
                 }
                 continue;
@@ -322,7 +353,9 @@ pub fn taint_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
 /// * `a` - The analysis.
 /// * `o` - User names.
 /// * `spec` - `<address>` or `<address>,<register>`; the register defaults to
-///   `rcx`, the first argument.
+///   the first argument by the function's own convention ([`Follow`]):
+///   `rcx` on a PE, `rdi` on an ELF or Mach-O, `rax` for a Go function,
+///   `ecx` in 32-bit code.
 ///
 /// # Returns
 ///
@@ -502,7 +535,14 @@ fn accesses(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Access
     const PASSES: usize = 2;
     /// Largest offset treated as a field rather than an unrelated pointer.
     const SPAN_MAX: i64 = 1 << 16;
-    let parsed = ValueSpec::parse(a, o, spec, p.arch.bitness().or(Some(64)), |n| n.first_arg)?;
+    let parsed = ValueSpec::parse(
+        p,
+        a,
+        o,
+        spec,
+        p.arch.bitness().or(Some(64)),
+        Follow::FirstArgument,
+    )?;
     let ValueSpec {
         start,
         entry,
@@ -514,6 +554,10 @@ fn accesses(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Access
     if instrs.is_empty() {
         return Err(format!("no code at {entry:#x}"));
     }
+    let (arguments, volatile) = (
+        argument_registers(p, entry, bitness),
+        volatile_registers(p, entry, bitness),
+    );
     let mut holds: BTreeMap<Register, i64> = BTreeMap::new();
     holds.insert(seed, 0);
     let mut fields: BTreeMap<i64, Field> = BTreeMap::new();
@@ -574,24 +618,19 @@ fn accesses(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Access
                 FlowControl::Call | FlowControl::IndirectCall
             ) {
                 let preserves = preserves_registers(a, o, i);
-                for (k, name) in argument_registers(bitness).iter().enumerate() {
+                for (k, r) in arguments.iter().enumerate() {
                     if preserves {
                         break;
                     }
-                    let Some(at) = iced_register(name, bitness)
-                        .and_then(|r| holds.get(&r))
-                        .copied()
-                    else {
+                    let Some(at) = holds.get(&canonical(*r, bitness)).copied() else {
                         continue;
                     };
                     let note = format!("passed to {} as argument {}", callee_name(a, o, i), k + 1);
                     taken.entry(at).or_insert(note);
                 }
                 if !preserves {
-                    for name in VOLATILE_REGISTERS {
-                        if let Some(r) = iced_register(name, bitness) {
-                            holds.remove(&r);
-                        }
+                    for r in volatile {
+                        holds.remove(&canonical(*r, bitness));
                     }
                 }
                 continue;
@@ -933,13 +972,13 @@ pub(super) fn parse_count(text: &str) -> Option<usize> {
     }
 }
 
-/// The argument registers, in convention order.
-pub(super) const ARGUMENT_REGISTERS: [&str; 4] = ["rcx", "rdx", "r8", "r9"];
-
-/// The registers a call's arguments travel in, in convention order, as the
-/// value passes read them.
+/// The registers a function's arguments, and the arguments of the calls it
+/// makes, travel in, in convention order, as the value passes read them.
 ///
-/// On a 64-bit target they are [`ARGUMENT_REGISTERS`]. A 32-bit `cdecl` or
+/// On a 64-bit target they are the function's own convention's, as the
+/// decompiler names its `a1`..`aN` ([`lift::conv_at`]): `rcx`, `rdx`, `r8`,
+/// `r9` on a PE, `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9` on an ELF or
+/// Mach-O, Go's for a function its table lists. A 32-bit `cdecl` or
 /// `stdcall` call passes every argument on the stack, so a value left in
 /// `edx` is not an argument, and only `ecx` is taken: where a `thiscall`
 /// method takes `this` and a `fastcall` callee its first argument, as the
@@ -947,13 +986,27 @@ pub(super) const ARGUMENT_REGISTERS: [&str; 4] = ["rcx", "rdx", "r8", "r9"];
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded image, whose format and Go table pick the convention.
+/// * `entry` - The function's entry.
 /// * `bitness` - Decoder bitness of the program.
-pub(super) fn argument_registers(bitness: u32) -> &'static [&'static str] {
+pub(super) fn argument_registers(p: &Program, entry: u64, bitness: u32) -> &'static [Register] {
     if bitness == 32 {
-        &["ecx"]
+        &[Register::ECX]
     } else {
-        &ARGUMENT_REGISTERS
+        lift::conv_at(p, entry, bitness).args
     }
+}
+
+/// The registers a call made by a function lets the callee destroy, by the
+/// function's own convention ([`lift::conv_at`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `entry` - The function's entry.
+/// * `bitness` - Decoder bitness of the program.
+pub(super) fn volatile_registers(p: &Program, entry: u64, bitness: u32) -> &'static [Register] {
+    lift::conv_at(p, entry, bitness).volatile
 }
 
 /// Names what a call goes to: the target of a direct call of any width,
@@ -971,9 +1024,6 @@ pub(super) fn callee_name(a: &Analysis, o: &Overlay, i: &Instruction) -> String 
         String::from("an indirect call")
     }
 }
-
-/// Registers a called function is free to destroy.
-pub(super) const VOLATILE_REGISTERS: [&str; 7] = ["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"];
 
 /// Whether a call goes to a helper that preserves every register.
 ///
@@ -1068,8 +1118,6 @@ pub(super) fn is_near_call(i: &Instruction) -> bool {
 pub(super) struct RegisterNames {
     /// Where a call leaves its result.
     pub(super) result: &'static str,
-    /// Where the first argument arrives.
-    pub(super) first_arg: &'static str,
     /// The names accepted, as an error message spells them.
     pub(super) range: &'static str,
 }
@@ -1084,13 +1132,11 @@ impl RegisterNames {
         if bitness == 32 {
             Self {
                 result: "eax",
-                first_arg: "ecx",
                 range: "eax..edi",
             }
         } else {
             Self {
                 result: "rax",
-                first_arg: "rcx",
                 range: "rax..r15",
             }
         }
