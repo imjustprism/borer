@@ -585,6 +585,20 @@ impl BorerServer {
         self.with_analysis(|p, a, _| Ok(render::protection_tsv(p, a)))
     }
 
+    /// Lists every call site of a function or import with its arguments.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - `<callee>[,aN<op><value>]...[,offset=<n>]`.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, it does not decompile, or the spec is
+    /// refused.
+    pub(crate) fn calls_text(&self, spec: &str) -> Result<String, ErrorData> {
+        self.refusing(|p, a, o| render::calls_tsv(p, a, o, spec))
+    }
+
     /// Lists the fields the binary's assertions name.
     ///
     /// # Arguments

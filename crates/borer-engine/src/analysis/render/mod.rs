@@ -5,6 +5,7 @@
 //! plural, the `(+N more)` and `# N more ...` tails of a cut list, the
 //! `borer://.../<filter>` hint, and the way a spec's address token is read.
 
+mod calls;
 mod catalog;
 mod dataflow;
 mod diff;
@@ -19,6 +20,7 @@ mod summary;
 mod triage;
 mod unpack;
 
+pub use calls::*;
 pub use catalog::*;
 pub use dataflow::*;
 pub use diff::*;

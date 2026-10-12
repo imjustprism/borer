@@ -105,6 +105,12 @@ TASKS = [
         [LOAD, ("query", {"uri": "borer://playbook/triage"})],
         "cheapest first",
     ),
+    (
+        "call_args",
+        "every call site of the serial check with the argument each passes",
+        [LOAD, ("query", {"uri": "borer://calls/crackme::check_serial"})],
+        "crackme::check_serial(",
+    ),
 ]
 
 

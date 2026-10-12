@@ -173,7 +173,7 @@ const INTENTS: &[(&str, &[&str])] = &[
     ),
     (
         "data flow",
-        &["taint", "layout", "fields", "fieldrefs", "why"],
+        &["taint", "layout", "fields", "fieldrefs", "calls", "why"],
     ),
     (
         "protection",

@@ -16,6 +16,7 @@ mod raw;
 
 mod a64;
 mod analysis;
+mod calls;
 mod decompile;
 mod discovery;
 mod elf;

@@ -4166,6 +4166,7 @@ impl BorerServer {
             ("checks", None) => self.checks_text()?,
             ("antianalysis", None) => self.anti_analysis_text()?,
             ("protection", None) => self.protection_text()?,
+            ("calls", Some(spec)) => self.calls_text(&spec)?,
             ("triage", None) => self.triage_text()?,
             ("fingerprint", None) => self.fingerprint_text()?,
             ("hashes", None) => self.hashes_text()?,
@@ -4450,6 +4451,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://unpack/{address}",
         "Run a packer's bootstrap and report the code it decrypts into memory, with the original entry point. Append ,budget=N to raise the step cap toward a fuller unpack",
         "borer://unpack/{entry}",
+    ),
+    (
+        "borer://calls/{callee}",
+        "Every call site of a function or import (direct, through its slot or a thunk) with the arguments the decompiler resolves at each: a constant in hex, a string quoted, a global by name, else the expression, ? where the lifter saw none (an import is padded to its declared parameters). <callee>[,aN=<value>]...: aN=0x40 keeps the calls whose argument aN is that number, aN=text the ones whose argument or string contains it, aN=? the unseen ones; aN!=, aN> and aN< too; offset=<n> for the next page (200 rows a page, 500 callers decompiled at most)",
+        "borer://calls/{entry}",
     ),
     (
         "borer://hidden/{filter}",
