@@ -111,8 +111,8 @@ impl Arch {
         match self.isa() {
             Some(Isa::X86 { .. }) => true,
             Some(Isa::A64) => match feature {
-                Feature::Disasm => true,
-                Feature::Discover | Feature::Emulate | Feature::Decompile => false,
+                Feature::Disasm | Feature::Discover => true,
+                Feature::Emulate | Feature::Decompile => false,
             },
             None => false,
         }
@@ -2354,9 +2354,9 @@ impl Program {
     /// An unrecognized file loads as raw bytes of no architecture, and a
     /// program for another instruction set loads with its sections and
     /// symbols; neither has code borer can read. An arm64 program is
-    /// disassembled and nothing more yet. The refusal names the format so
-    /// the reader knows which case it has, says what does apply, and
-    /// points at the tools that read any file.
+    /// disassembled and its functions discovered, and nothing more yet. The
+    /// refusal names the format so the reader knows which case it has, says
+    /// what does apply, and points at the tools that read any file.
     ///
     /// # Arguments
     ///
@@ -2378,7 +2378,7 @@ impl Program {
                     Feature::Decompile => "decompile it",
                 };
                 Err(format!(
-                    "{format} file, arch '{arch}': borer disassembles {arch} code (disassemble, the disasm command) but does not yet {stage}, so no code analysis beyond disassembly applies; triage, entropy and strings read any file"
+                    "{format} file, arch '{arch}': borer disassembles {arch} code and discovers its functions (functions, function, disassemble_function, cfg, callgraph, xrefs) but does not yet {stage}, so no code analysis beyond its functions, blocks and calls applies; triage, entropy and strings read any file"
                 ))
             }
             Some(_) | None => Err(format!(
@@ -2434,8 +2434,9 @@ impl Program {
     /// # Returns
     ///
     /// Path, size, format and architecture (its width only when the
-    /// architecture is known), why no code analysis applies and the
-    /// container magic when there are, base and entry, a flat-mapping
+    /// architecture is known), what code analysis does not apply (the
+    /// decompiler's refusal) and the container magic when there are, base
+    /// and entry, a flat-mapping
     /// warning when it applies, the section table with permissions and
     /// entropy (at most [`SECTIONS_SHOWN`] rows, under a `# showing N of M
     /// sections` line when there are more), and import/export counts with
@@ -2457,7 +2458,7 @@ impl Program {
         if let Some(machine) = &self.headers.machine {
             out.push_str(&format!("machine: {machine}\n"));
         }
-        if let Some(why) = self.refuses(Feature::Discover) {
+        if let Some(why) = self.refuses(Feature::Decompile) {
             out.push_str(&format!("code:    {why}\n"));
         }
         if let Some(magic) = crate::headers::sniff_file(&self.bytes) {

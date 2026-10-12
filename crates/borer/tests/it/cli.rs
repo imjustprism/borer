@@ -477,10 +477,11 @@ fn cli_symbols_page() {
 /// An architecture with no disassembler still answers what the headers say.
 ///
 /// The symbol table is parsed out of the file, not recovered from its code,
-/// so an arm64 image that borer cannot disassemble still has imports,
-/// exports and locals to list. It used to report "locals: N named functions"
-/// in its summary and then refuse to name them, because the listing asked
-/// for an analysis it only wanted a dead-import marker from.
+/// so a 32-bit ARM (Thumb-2) image, which borer cannot disassemble, still
+/// has imports, exports and locals to list. An arm64 image used to report
+/// "locals: N named functions" in its summary and then refuse to name them,
+/// because the listing asked for an analysis it only wanted a dead-import
+/// marker from.
 #[test]
 fn cli_symbols_survive_an_unanalyzable_arch() {
     let exe = std::env::current_exe().expect("the test binary has a path");
@@ -500,9 +501,9 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
     let field = bytes
         .get_mut(machine..machine + 2)
         .expect("the fixture has a COFF header");
-    field.copy_from_slice(&0xaa64u16.to_le_bytes());
+    field.copy_from_slice(&0x01c4u16.to_le_bytes());
 
-    let path = std::env::temp_dir().join(format!("borer_arm64_fixture_{}.bin", std::process::id()));
+    let path = std::env::temp_dir().join(format!("borer_armnt_fixture_{}.bin", std::process::id()));
     std::fs::write(&path, &bytes).expect("the fixture is writable");
     let path = path.to_string_lossy().to_string();
 
@@ -513,15 +514,15 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
 {out}"
     );
     assert!(
-        out.contains("arm64"),
-        "the fixture is not arm64:
+        out.contains("ARM_NT"),
+        "the fixture is not 32-bit ARM:
 {out}"
     );
 
     let (ok, out) = run(&["symbols", &path]);
     assert!(
         ok,
-        "symbols refused an arm64 image:
+        "symbols refused a 32-bit ARM image:
 {out}"
     );
     assert!(
@@ -539,15 +540,19 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
     drop(std::fs::remove_file(&path));
 }
 
-/// An arm64 image disassembles from the command line, one word per row
-/// four bytes apart, and so does a script's `disasm`; `functions` still
-/// refuses, saying disassembly is what applies.
+/// An arm64 image disassembles and discovers from the command line.
+///
+/// `disasm` lists one word per row four bytes apart, up to where the
+/// discovered function's code ends, and so does a script's `disasm`;
+/// `functions` lists what discovery finds, and `decompile` refuses,
+/// saying what applies.
 ///
 /// The fixture is the test binary with its COFF machine set to arm64, so
-/// what decodes is x86 code read as arm64 words: the rows' shape is what
-/// is checked, not their text.
+/// what decodes is x86 code read as arm64 words, its exception directory
+/// read as arm64 `.pdata`: the rows' shape is what is checked, not their
+/// text, and that discovery over it answers rather than faults.
 #[test]
-fn cli_disassembles_an_arm64_image() {
+fn cli_disassembles_and_discovers_an_arm64_image() {
     let exe = std::env::current_exe().expect("the test binary has a path");
     let mut bytes = std::fs::read(&exe).expect("the test binary is readable");
     if bytes.first_chunk::<2>() != Some(b"MZ") {
@@ -582,7 +587,9 @@ fn cli_disassembles_an_arm64_image() {
     let (ok, out) = run(&["disasm", &path, &format!("{entry:#x}"), "4"]);
     assert!(ok, "disasm failed:\n{out}");
     let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("0x")).collect();
-    assert_eq!(rows.len(), 4, "{out}");
+    // INVARIANT: the listing stops where the discovered entry function's code
+    // ends, which x86 bytes read as arm64 words reach within the four asked.
+    assert!(!rows.is_empty() && rows.len() <= 4, "{out}");
     for (row, at) in rows.iter().zip((0u64..).map(|i| entry + 4 * i)) {
         let (va, rest) = row.split_once("  ").expect("an address, then bytes");
         assert_eq!(va, format!("{at:#x}"), "{out}");
@@ -596,9 +603,11 @@ fn cli_disassembles_an_arm64_image() {
     assert!(ok && out.starts_with("3\n"), "{out}");
 
     let (ok, out) = run_all(&["functions", &path]);
-    assert!(!ok, "functions should refuse arm64 until discovery lands");
+    assert!(ok && out.starts_with("# showing "), "{out}");
+    let (ok, out) = run_all(&["decompile", &path, &format!("{entry:#x}")]);
+    assert!(!ok, "decompile should refuse arm64 until the lifter lands");
     assert!(
-        out.contains("borer disassembles arm64 code") && out.contains("discover its functions"),
+        out.contains("discovers its functions") && out.contains("does not yet decompile it"),
         "{out}"
     );
 

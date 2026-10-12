@@ -3409,8 +3409,7 @@ impl BorerServer {
     /// # Errors
     ///
     /// When no binary is loaded or borer does not disassemble its
-    /// architecture; a failing script is an answer, not an error. A program
-    /// whose functions borer does not discover yet (arm64) runs with none.
+    /// architecture; a failing script is an answer, not an error.
     #[tool(
         description = "Run a sandboxed Rhai script over the loaded program, for what no single tool answers: what it printed, then the names and comments it proposed (dry-run unless dry_run=false). print(help()) lists every call; query(uri) reads any borer:// resource.",
         annotations(
@@ -6414,18 +6413,22 @@ mod tests {
         assert_eq!(held(), (vec![0x1010], vec![0x2000], 0));
     }
 
-    /// An arm64 program disassembles, and a function tool refuses it.
+    /// An arm64 program disassembles and lists its functions, and a tool
+    /// that decompiles refuses it.
     ///
-    /// The `disassemble` tool lists from the word an address falls inside
-    /// and a script's `disasm` reads the same words, while a tool that
-    /// reads functions says disassembly is what applies.
+    /// The `disassemble` tool lists from the word an address falls inside,
+    /// a script's `disasm` reads the same words and its `functions` the one
+    /// function, the `functions` tool lists it, and `decompile` says what
+    /// applies.
     ///
     /// # Panics
     ///
     /// When a listing or the refusal differs.
     #[test]
-    fn an_arm64_program_disassembles_and_refuses_what_needs_functions() {
-        use super::{DisassembleParams, FunctionsParams, Parameters, ScriptParams};
+    fn an_arm64_program_lists_its_functions_and_refuses_the_decompiler() {
+        use super::{
+            DecompileParams, DisassembleParams, FunctionsParams, Parameters, ScriptParams,
+        };
         use borer_engine::program::{Arch, Program, Section};
         let code: Vec<u8> = [
             // ASM: bti c
@@ -6454,8 +6457,8 @@ mod tests {
             .expect("arm64 disassembles");
         assert!(
             out.starts_with(
-                "# 2 instructions at 0x1000; 0x1002 is inside an instruction, listing from 0x1000\n0x1000  bti c\n0x1004  ret\n"
-            ),
+                "# 2 instructions at 0x1000; 0x1002 is inside an instruction, listing from 0x1000;"
+            ) && out.contains("\n0x1000  bti c\n0x1004  ret\n"),
             "{out}"
         );
         let out = server
@@ -6464,8 +6467,8 @@ mod tests {
                 dry_run: None,
             }))
             .expect("a script answers");
-        assert!(out.starts_with("ret\n0\n"), "{out}");
-        let refused = server
+        assert!(out.starts_with("ret\n1\n"), "{out}");
+        let listed = server
             .functions(Parameters(FunctionsParams {
                 filter: None,
                 sort: None,
@@ -6473,11 +6476,22 @@ mod tests {
                 limit: None,
                 count_only: None,
             }))
-            .expect_err("arm64 functions are not discovered yet");
+            .expect("arm64 functions are discovered");
+        assert!(listed.lines().any(|l| l.starts_with("0x1000 ")), "{listed}");
+        let refused = server
+            .decompile(Parameters(DecompileParams {
+                address: "0x1000".to_owned(),
+                detail: None,
+                filter: None,
+                offset: None,
+                limit: None,
+            }))
+            .expect_err("arm64 does not decompile yet");
         assert!(
             refused
                 .message
-                .contains("borer disassembles arm64 code (disassemble, the disasm command) but does not yet discover its functions"),
+                .contains("borer disassembles arm64 code and discovers its functions")
+                && refused.message.contains("does not yet decompile it"),
             "{}",
             refused.message
         );

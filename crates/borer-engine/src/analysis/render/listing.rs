@@ -1168,8 +1168,8 @@ mod tests {
     /// An arm64 function lists word by word, its call named.
     ///
     /// The call reads the name of the function it reaches, as an x86
-    /// listing's does, and an address no function covers draws no caveat
-    /// where no functions are discovered.
+    /// listing's does, and an address no discovered function covers draws
+    /// the caveat that says so, as on x86.
     #[test]
     #[expect(
         clippy::missing_panics_doc,
@@ -1220,7 +1220,10 @@ mod tests {
             out.ends_with("\n0x1000  bl 0x1010  ; helper\n0x1004  ret\n"),
             "{out}"
         );
-        assert_eq!(listing_caveat(&p, &Analysis::default(), 0x1008), "");
+        assert_eq!(
+            listing_caveat(&p, &a, 0x1008),
+            "0x1008 is outside every discovered function"
+        );
     }
 
     /// The stack-buffer hex spells what `format!("{:x}")` prints.

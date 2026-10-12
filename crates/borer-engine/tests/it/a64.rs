@@ -358,7 +358,8 @@ fn block_bytes() -> Vec<u8> {
 ///
 /// It disassembles at its entry word by word with the call's target, an
 /// address inside a word lists from the word, discovery finds the entry and
-/// the function it calls, and the tools still refuse discovery.
+/// the function it calls, and what decompiles or runs code refuses it,
+/// saying what applies.
 fn check_disassembles(p: &Program, entry: u64) {
     assert_eq!((p.arch, p.is_64, p.entry), (Arch::Arm64, true, Some(entry)));
     let code = p.read_va(entry, 32).expect("the block is mapped");
@@ -386,14 +387,17 @@ fn check_disassembles(p: &Program, entry: u64) {
             .all(|(l, i)| l.va == entry + 4 * i && l.bytes.len() == 4)
     );
     assert_eq!(p.isa_for(Feature::Disasm), Ok(Isa::A64));
+    assert_eq!(p.isa_for(Feature::Discover), Ok(Isa::A64));
     let why = p
-        .refuses(Feature::Discover)
-        .expect("functions are not discovered yet");
+        .refuses(Feature::Decompile)
+        .expect("arm64 does not decompile yet");
     assert!(
-        why.contains("arch 'arm64': borer disassembles arm64 code")
-            && why.contains("does not yet discover its functions"),
+        why.contains("arch 'arm64': borer disassembles arm64 code and discovers its functions")
+            && why.contains("does not yet decompile it"),
         "{why}"
     );
+    let emulate = p.refuses(Feature::Emulate).expect("nor run");
+    assert!(emulate.contains("does not yet emulate it"), "{emulate}");
     assert!(p.summary().contains(&why), "{}", p.summary());
     let a = Analysis::compute(p);
     assert!(a.function(entry).is_some() && a.function(entry + 0x18).is_some());
