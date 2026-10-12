@@ -295,6 +295,34 @@ def _go_blob() -> bytes:
 
 GO_CODE = _go_blob()
 
+# A static x86-64 ELF with no imports whose entry opens a socket and
+# connects it through `syscall`: its reach shows only in its syscall sites.
+STATIC_CODE = _elf(
+    2,
+    0x1000,
+    [
+        (
+            ".text",
+            1,
+            6,
+            0x1000,
+            bytes.fromhex(
+                "b829000000"  # mov eax, 41 (socket)
+                "bf02000000"  # mov edi, 2
+                "be01000000"  # mov esi, 1
+                "31d2"  # xor edx, edx
+                "0f05"  # syscall
+                "89c7"  # mov edi, eax
+                "b82a000000"  # mov eax, 42 (connect)
+                "0f05"  # syscall
+                "c3"  # ret
+            ),
+            0,
+            0,
+        )
+    ],
+)
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
@@ -305,6 +333,7 @@ BLOBS = {
     "pie": (PIE_CODE, "<pie>"),
     "go": (GO_CODE, "<go>"),
     "children": (CHILDREN_BLOB, "<children>"),
+    "static": (STATIC_CODE, "<static>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -435,6 +464,15 @@ TASKS = [
             ("decompile", {"address": "main.add"}),
         ],
         "return a1 + a2;",
+    ),
+    (
+        "static_capabilities",
+        "what a static ELF with no imports can do, read from its syscall sites",
+        [
+            ("load_binary", {"path": "{static}"}),
+            ("query", {"uri": "borer://capabilities"}),
+        ],
+        "connect (syscall), socket (syscall)",
     ),
     (
         "decoded_strings",

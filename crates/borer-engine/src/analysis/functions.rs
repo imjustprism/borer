@@ -2760,7 +2760,18 @@ fn walk_function(
                 continue;
             }
             let next = instr.next_ip();
-            let flow = instr.flow_control();
+            // SPEC: Linux's `int 0x80` system call returns to the next
+            // instruction, as `syscall` does; every other `int` but `int3`
+            // ends its path.
+            let flow = match instr.flow_control() {
+                FlowControl::Interrupt
+                    if instr.mnemonic() == Mnemonic::Int
+                        && instr.try_immediate(0).ok() == Some(0x80) =>
+                {
+                    FlowControl::Next
+                }
+                other => other,
+            };
             let target = near_target(&instr);
             if odd_instruction(&instr, bitness, pe) && !in_handlers {
                 zero_bytes = true;

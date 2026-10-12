@@ -1173,7 +1173,7 @@ fn framework_imports_reach_the_capability_map() {
         kind: SymbolKind::Import,
     })
     .collect();
-    let text = capability_map_tsv(&p);
+    let text = capability_map_tsv(&p, None);
     assert!(text.contains("networking"), "{text}");
     assert!(text.contains("code integrity"), "{text}");
     assert!(text.contains("of 16 capabilities"), "{text}");

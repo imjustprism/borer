@@ -24,3 +24,4 @@ mod stubs;
 mod switch;
 
 pub(crate) use discover::discover;
+pub(crate) use refs::constant_in;

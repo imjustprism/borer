@@ -226,6 +226,12 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
         }
     }
     callees.extend(imported.into_values().map(str::to_owned));
+    callees.extend(
+        crate::analysis::syscalls::syscall_sites(p, a)
+            .iter()
+            .filter(|s| s.function == entry)
+            .map(crate::analysis::syscalls::SyscallSite::label),
+    );
     callees.sort_unstable();
     callees.dedup();
     let mut strings: Vec<String> = Vec::new();

@@ -44,6 +44,7 @@ mod regression;
 mod reloc;
 mod search;
 mod structure;
+mod syscalls;
 mod typelib;
 mod types;
 mod x86;

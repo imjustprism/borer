@@ -320,13 +320,20 @@ impl BorerServer {
         })
     }
 
-    /// Groups the imports into the capabilities they grant.
+    /// Groups the imports, and the syscall sites of a program with code
+    /// analysis, into the capabilities they grant.
     ///
     /// # Errors
     ///
-    /// When no binary is loaded.
+    /// When no binary is loaded, or its analysis fails.
     pub(crate) fn capabilities_text(&self) -> Result<String, ErrorData> {
-        self.with_program(|p| Ok(render::capability_map_tsv(p)))
+        self.with_program(|p| {
+            let a = match p.refuses(Feature::Discover) {
+                None => Some(self.ensure_analysis()?),
+                Some(_) => None,
+            };
+            Ok(render::capability_map_tsv(p, a.as_deref()))
+        })
     }
 
     /// Lists the `QObject` subclasses `moc` described and their methods.

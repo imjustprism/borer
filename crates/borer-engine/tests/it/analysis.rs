@@ -1189,7 +1189,7 @@ fn the_capability_map_groups_imports() {
         kind: SymbolKind::Import,
     })
     .collect();
-    let text = borer_engine::analysis::render::capability_map_tsv(&p);
+    let text = borer_engine::analysis::render::capability_map_tsv(&p, None);
     assert!(text.contains("process injection"), "{text}");
     assert!(text.contains("WriteProcessMemory"), "{text}");
     assert!(text.contains("networking"), "{text}");

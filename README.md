@@ -295,6 +295,10 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
   by magic when stripped), and on x86-64 a table from Go 1.18 on reads
   them with Go's register ABI and folds the stack-growth check. Its source
   lines and ABI0 assembly functions are not told apart yet.
+- A static Linux binary's capabilities come from its syscall sites
+  (`syscall`, `int 0x80`, arm64 `svc #0`), named only where the number is
+  set in the same block as the call; one set elsewhere is counted as
+  unresolved.
 - DWARF support covers function names, parameters, frame locals and types,
   not line tables or inlined frames.
 - Live process access is Windows only.

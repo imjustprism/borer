@@ -28,7 +28,9 @@ use crate::isa::Isa;
 /// The list leans on the fragments a Windows program cannot avoid for a
 /// behavior, and stays deliberately short of guessing. A framework's
 /// network classes count as well: a Qt or OpenSSL client never touches a
-/// socket API of its own.
+/// socket API of its own. The Linux calls (`execve`, `fork`, `openat`,
+/// `ptrace`, ...) are whole names, matched against a libc import and
+/// against a syscall site's name alike ([`crate::analysis::syscalls`]).
 pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
     (
         "networking",
@@ -42,6 +44,10 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "=bind",
             "=listen",
             "=accept",
+            "=accept4",
+            "=sendmsg",
+            "=recvmsg",
+            "=socketcall",
             "=closesocket",
             "wsastartup",
             "wsasocket",
@@ -102,6 +108,15 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "winexec",
             "terminateprocess",
             "openprocesstoken",
+            "=execve",
+            "=execveat",
+            "=fork",
+            "=vfork",
+            "=clone",
+            "=clone3",
+            "=kill",
+            "=tkill",
+            "=tgkill",
         ],
     ),
     (
@@ -112,6 +127,7 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "virtualfree",
             "ntprotectvirtualmemory",
             "heapcreate",
+            "=mprotect",
         ],
     ),
     (
@@ -165,6 +181,7 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "ntsetinformationthread",
             "getthreadcontext",
             "blockinput",
+            "=ptrace",
         ],
     ),
     (
@@ -201,6 +218,16 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "movefile",
             "copyfile",
             "findfirstfile",
+            "=open",
+            "=openat",
+            "=creat",
+            "=unlink",
+            "=unlinkat",
+            "=rename",
+            "=renameat",
+            "=mkdir",
+            "=mkdirat",
+            "=getdents64",
         ],
     ),
     (
@@ -211,6 +238,7 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "getsysteminfo",
             "getvolumeinformation",
             "gethostname",
+            "=uname",
         ],
     ),
     (
@@ -225,58 +253,89 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
     ),
 ];
 
-/// Groups the imports into the capabilities they grant.
+/// Groups the imports and the syscall sites into the capabilities they
+/// grant.
 ///
 /// The one question asked of an unknown binary before any other is what it
 /// can do, and the imports answer most of it: a program that resolves
 /// sockets talks on the network, one that writes another process's memory
-/// injects into it. This lists every capability at least one import gives,
-/// with the imports that give it, so a reader sees the program's reach in one
-/// screen. It does not judge intent: memory protection is an unpacker and a
-/// JIT alike.
+/// injects into it. A static Linux binary imports nothing and asks the
+/// kernel itself, so its named syscall sites count the way imports do,
+/// each shown as `name (syscall)` ([`crate::analysis::syscalls`]). This
+/// lists every capability at least one import or syscall gives, with what
+/// gives it, so a reader sees the program's reach in one screen. It does
+/// not judge intent: memory protection is an unpacker and a JIT alike.
 ///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
+/// * `a` - Its functions, for the syscall sites; `None` for a file with no
+///   code analysis, which shows its imports alone.
 ///
 /// # Returns
 ///
-/// The capabilities, each with its imports, the fullest first.
-pub fn capability_map_tsv(p: &Program) -> String {
+/// The capabilities, each with its imports and syscalls, the fullest
+/// first; the header counts the syscall sites, and those whose number
+/// their block does not set, when there are any.
+pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
     let imports: Vec<&str> = p
         .symbols
         .iter()
         .filter(|s| matches!(s.kind, SymbolKind::Import))
-        .map(|s| s.name.as_str())
+        .map(|s| bare_name(&s.name))
         .collect();
-    let mut hits: Vec<(&str, Vec<&str>)> = Vec::new();
+    let sites = a.map(|a| crate::analysis::syscalls::syscall_sites(p, a));
+    let sites = sites.as_deref().map_or(&[][..], Vec::as_slice);
+    let called: BTreeSet<&str> = sites.iter().filter_map(|s| s.name).collect();
+    let gives = |fragments: &[&str], api: &str| {
+        let api = api.to_lowercase();
+        fragments.iter().any(|frag| match frag.strip_prefix('=') {
+            Some(exact) => api == exact,
+            None => api.contains(frag),
+        })
+    };
+    let mut hits: Vec<(&str, Vec<String>)> = Vec::new();
     for (capability, fragments) in CAPABILITIES {
         let mut named: BTreeSet<&str> = BTreeSet::new();
         for import in &imports {
-            let api = bare_name(import).to_lowercase();
-            if fragments.iter().any(|frag| match frag.strip_prefix('=') {
-                Some(exact) => api == exact,
-                None => api.contains(frag),
-            }) {
+            if gives(fragments, import) {
                 named.insert(import);
             }
         }
-        if !named.is_empty() {
-            hits.push((capability, named.into_iter().collect()));
+        let mut found: Vec<String> = named.into_iter().map(str::to_owned).collect();
+        found.extend(
+            called
+                .iter()
+                .filter(|n| gives(fragments, n))
+                .map(|n| format!("{n} (syscall)")),
+        );
+        if !found.is_empty() {
+            hits.push((capability, found));
         }
     }
     hits.sort_by_key(|(cap, named)| (std::cmp::Reverse(named.len()), *cap));
     let mut out = format!(
-        "# {} of {} capabilities present across {} imports\n",
+        "# {} of {} capabilities present across {} imports",
         hits.len(),
         CAPABILITIES.len(),
         imports.len()
     );
-    if imports.len() < 12 {
-        out.push_str("# few imports: the rest are likely resolved at runtime, so this understates the reach\n");
+    if sites.is_empty() {
+        out.push('\n');
+        if imports.len() < 12 {
+            out.push_str("# few imports: the rest are likely resolved at runtime, so this understates the reach\n");
+        }
+    } else {
+        let unresolved = sites.iter().filter(|s| s.nr.is_none()).count();
+        let _ = writeln!(
+            out,
+            " and {} syscall site{} ({unresolved} whose number its block does not set)",
+            sites.len(),
+            plural(sites.len())
+        );
     }
     for (capability, named) in &hits {
-        let shown: Vec<&str> = named.iter().take(6).map(|n| bare_name(n)).collect();
+        let shown = named.iter().take(6).cloned().collect::<Vec<_>>();
         let more = if named.len() > shown.len() {
             format!(", +{}", named.len() - shown.len())
         } else {
@@ -944,7 +1003,7 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         recovered.found.len(),
         recovered.generators
     );
-    let capabilities = capability_map_tsv(p);
+    let capabilities = capability_map_tsv(p, Some(a));
     let _ = writeln!(
         out,
         "# capabilities: {}",
@@ -1110,8 +1169,17 @@ fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, verdict: &str) -> Vec<Str
         .iter()
         .filter(|s| s.kind == SymbolKind::Import)
         .count();
+    let sites = crate::analysis::syscalls::syscall_sites(p, a);
+    let unresolved = sites.iter().filter(|s| s.nr.is_none()).count();
     match p.format {
         BinaryFormat::Raw | BinaryFormat::Archive => {}
+        BinaryFormat::Elf | BinaryFormat::MachO if imports == 0 && !sites.is_empty() => {
+            spots.push(format!(
+                "no imports (statically linked): capabilities come from {} syscall site{} alone, and the {unresolved} whose number is set outside its block name nothing",
+                sites.len(),
+                plural(sites.len()),
+            ));
+        }
         BinaryFormat::Elf | BinaryFormat::MachO if imports == 0 => spots.push(
             "no imports (statically linked): capabilities, read from import names, say nothing about this file".to_owned(),
         ),

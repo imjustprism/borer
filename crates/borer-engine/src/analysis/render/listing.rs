@@ -824,7 +824,9 @@ pub fn disasm_function(
 /// Block starts get `L_<addr>:` labels, overlay names and comments appear
 /// inline, and branch targets that are functions or named addresses get a
 /// `; name` suffix: an x86 near call or jmp, whose target is read from its
-/// text, and any direct arm64 branch, whose decoder states it.
+/// text, and any direct arm64 branch, whose decoder states it. A Linux
+/// syscall site is tagged with its call the same way, `; syscall socket`
+/// ([`crate::analysis::syscalls`]).
 ///
 /// # Arguments
 ///
@@ -857,6 +859,7 @@ pub fn disasm_function_with(
         f.blocks.len()
     );
     let mut budget = max_instrs;
+    let sites = crate::analysis::syscalls::syscall_sites(p, a);
     for b in &f.blocks {
         let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
         let Some(code) = p.read_va_upto(b.start, len.max(1)) else {
@@ -886,6 +889,8 @@ pub fn disasm_function_with(
                 let _ = write!(text, "  ; {}", short_name(a, o, target));
             } else if let Some(name) = memory_import(p, &text) {
                 let _ = write!(text, "  ; {name}");
+            } else if let Ok(k) = sites.binary_search_by_key(&l.va, |s| s.at) {
+                let _ = write!(text, "  ; {}", sites[k].label());
             }
             if let Some(c) = o.comments.get(&l.va) {
                 let _ = write!(text, "  // {c}");

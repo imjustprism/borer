@@ -476,6 +476,32 @@ pub(super) fn writes(insn: &Insn) -> u32 {
     }
 }
 
+/// Returns the constant a register holds after a run of instructions, as
+/// a `movz` into it set it: where an `svc #0` reads its number from.
+///
+/// # Arguments
+///
+/// * `insns` - The instructions, in order.
+/// * `reg` - The register's number.
+///
+/// # Returns
+///
+/// The value, or `None` when no `movz` set it or an instruction after the
+/// last one may have changed it.
+pub(crate) fn constant_in(insns: &[Insn], reg: usize) -> Option<u64> {
+    let bit = 1u32.checked_shl(u32::try_from(reg).ok()?)?;
+    let mut value = None;
+    for insn in insns.iter().filter(|i| writes(i) & bit != 0) {
+        value = (insn.mnemonic == Mnemonic::Movz && any_reg(&insn.operands[0]) == Some(reg)).then(
+            || {
+                // SPEC: Arm ARM (DDI 0487) C6.2 MOVZ: imm16 is bits 5..20 and hw bits 21..22, shifting by hw * 16.
+                u64::from((insn.word >> 5) & 0xffff) << (((insn.word >> 21) & 3) * 16)
+            },
+        );
+    }
+    value
+}
+
 /// Applies one instruction to the registers, reporting each reference it
 /// makes through them.
 ///
