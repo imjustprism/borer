@@ -1824,7 +1824,8 @@ pub(super) fn lane_before(
 ///
 /// Every path from the return address is scanned, down both sides of each
 /// conditional branch and through each jump within the caller, until rax is
-/// read, fully written, clobbered by another call, or handed on by a `ret`;
+/// read whole, fully written, clobbered by another call, or handed on by a
+/// `ret` (a narrower read goes on, so the widest read is the width);
 /// a path ending in `int3` or `ud2` reads nothing. A path that leaves the
 /// caller's blocks, branches indirectly, or runs past [`SCAN_MAX`]
 /// instructions is not followed, and nor are more than [`PATHS_MAX`]
@@ -1916,9 +1917,14 @@ fn classify(
                 }
             }
             ended = true;
+            // INVARIANT: a read narrower than the register is no reason to
+            // stop: `mov cx, ax; shr eax, 0x10` reads the low half and then
+            // the third byte, and the widest read is the result's width.
             if let Some(bits) = read {
                 used = used.max(Some(bits));
-                break;
+                if bits >= 64 {
+                    break;
+                }
             }
             if full_write {
                 break;

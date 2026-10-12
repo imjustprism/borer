@@ -611,16 +611,22 @@ fn read_type(toks: &[Tok], at: &mut usize, word: u8) -> Option<CTy> {
 ///
 /// # Returns
 ///
-/// The scalar the declaration is of, and how many tokens it took before its
-/// first pointer, which belongs to the name after it; `None` when no type
-/// leads.
+/// The type the declaration is of short of its `*`s, which belong to the
+/// names after it (a named pointer type such as `HMODULE` stays a
+/// pointer), and how many tokens it took before its first `*`; `None`
+/// when no type leads.
 pub(super) fn leading_type(toks: &[Tok], word: u8) -> Option<(CTy, usize)> {
     let mut at = 0;
     let ty = read_type(toks, &mut at, word)?;
+    let mut stars = 0usize;
     while at > 0 && matches!(toks.get(at - 1), Some(Tok::Punct("*" | "&"))) {
         at -= 1;
+        stars += 1;
     }
-    Some((CTy::of(ty.base), at))
+    // INVARIANT: only the `*`s handed back to the declarators come off the
+    // type: a named pointer type (`HMODULE`) is a pointer whatever follows.
+    let base = (0..stars).try_fold(ty, |t, _| t.pointee());
+    Some((base.unwrap_or(CTy::of(ty.base)), at))
 }
 
 /// A unary operator.
@@ -1259,6 +1265,10 @@ mod tests {
         let (ty, used) = leading_type(&toks, 64).unwrap();
         assert_eq!(ty, CTy::int(8, false));
         assert_eq!(toks[used], Tok::Punct("*"));
+        let toks = tokens("HMODULE eax;").unwrap();
+        let (ty, used) = leading_type(&toks, 32).unwrap();
+        assert_eq!(ty, CTy::of(Base::Void).to(), "a named pointer type");
+        assert_eq!(toks[used], Tok::Name("eax".to_owned()));
         assert!(expression(&tokens("a +").unwrap(), &|_| true, 64).is_err());
     }
 }

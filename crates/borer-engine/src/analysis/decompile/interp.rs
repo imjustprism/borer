@@ -17,8 +17,9 @@
 //!
 //! A call runs the callee on the same memory in the emulator, from a frame
 //! below the text's, with the arguments the text passes and every other
-//! register zero: an import's stub answers it as it answers the binary,
-//! and a register the text does not pass is not passed. What this cannot
+//! register what the text's variable of its name holds, or zero: an
+//! import's stub answers it as it answers the binary, and an argument
+//! register the text does not pass is not passed. What this cannot
 //! run (a vector value, an intrinsic it does not model, a virtual call, a
 //! field the layout does not size) stops the run and says which line it
 //! was, rather than guessing: the answer is then unchecked, never wrong.
@@ -149,6 +150,56 @@ fn named_register(name: &str) -> Option<Register> {
         "r13" => Register::R13,
         "r14" => Register::R14,
         "r15" => Register::R15,
+        _ => return None,
+    })
+}
+
+/// Returns the width of the byte or word a function hands back, as the
+/// lifter reads a call to it.
+///
+/// Its declared signature's, else the width its callers and its exits
+/// agree on ([`Function::ret_width`](crate::analysis::Function::ret_width)).
+///
+/// # Arguments
+///
+/// * `analysis` - The functions.
+/// * `target` - The callee's entry.
+///
+/// # Returns
+///
+/// 8 or 16, or `None` when the result fills the register or nothing is
+/// known of it.
+fn returned_bits(analysis: &Analysis, target: u64) -> Option<u8> {
+    let f = analysis.function(target).filter(|f| f.entry == target)?;
+    let bits = match &f.signature {
+        Some(sig) => super::lift::declared_bits(&sig.ret),
+        None => f.ret_width?,
+    };
+    (bits <= 16).then_some(bits)
+}
+
+/// The emulator's name of the full general register a register lives in.
+///
+/// # Arguments
+///
+/// * `r` - The register, any width.
+fn full_register_name(r: Register) -> Option<&'static str> {
+    Some(match r.full_register() {
+        Register::RAX => "rax",
+        Register::RBX => "rbx",
+        Register::RCX => "rcx",
+        Register::RDX => "rdx",
+        Register::RSI => "rsi",
+        Register::RDI => "rdi",
+        Register::RBP => "rbp",
+        Register::R8 => "r8",
+        Register::R9 => "r9",
+        Register::R10 => "r10",
+        Register::R11 => "r11",
+        Register::R12 => "r12",
+        Register::R13 => "r13",
+        Register::R14 => "r14",
+        Register::R15 => "r15",
         _ => return None,
     })
 }
@@ -2930,7 +2981,14 @@ impl Running<'_, '_> {
             );
         }
         let rax = self.run_callee(target, &values, &name)?;
-        Ok(self.int(rax, CTy::int(self.word(), false)))
+        // INVARIANT: a callee the lifter reads as handing back a byte or a
+        // word is one whose result the text holds at that width, as C
+        // converts it: the bits above are the callee's leftovers, which the
+        // text never reads.
+        Ok(match returned_bits(self.s.analysis, target) {
+            Some(bits) => self.int(rax, CTy::int(bits, false)),
+            None => self.int(rax, CTy::int(self.word(), false)),
+        })
     }
 
     /// Evaluates a call's arguments to the machine's words.
@@ -2962,6 +3020,13 @@ impl Running<'_, '_> {
 
     /// Runs a callee on the machine and hands back what it left in `rax`.
     ///
+    /// The callee's argument registers hold the arguments the text passes
+    /// and nothing else; every other register holds what the text's
+    /// variable of its name holds, as the machine's does at the call, or
+    /// zero where the text has none: a `void` callee that leaves `rax` as
+    /// it found it hands back the caller's `rax`, and the bits above the
+    /// `al` a `bool` callee sets are the caller's too.
+    ///
     /// # Arguments
     ///
     /// * `target` - Its address.
@@ -2988,6 +3053,15 @@ impl Running<'_, '_> {
             "r13", "r14", "r15",
         ] {
             self.emu.set_register(r, 0);
+        }
+        for ((_, reg, _), v) in s.cells.iter().zip(&self.vals) {
+            if let Some(r) = reg
+                && *r != Register::RSP
+                && !callee.regs.iter().any(|a| a.full_register() == *r)
+                && let Some(name) = full_register_name(*r)
+            {
+                self.emu.set_register(name, *v);
+            }
         }
         self.emu.set_register("rsp", s.call_sp);
         poke_word(&mut self.emu, s.call_sp, sentinel, u64::from(s.word / 8));
@@ -3495,5 +3569,42 @@ return 0;
         ));
         let r = s.run(&[], &[], 100).unwrap();
         assert_eq!(r.end, End::Returned(Some(0x5566_7788)));
+    }
+
+    /// A callee finds the text's register variables in the registers no
+    /// argument travels in, and hands back the width it returns.
+    ///
+    /// As the machine's callee finds the caller's, one that leaves `rax`
+    /// as it found it hands back the caller's `rax`. A callee handing back
+    /// a byte hands back that byte, as C converts a `uint8_t` result, not
+    /// the caller's bits above it.
+    ///
+    /// # Panics
+    ///
+    /// When a run returns otherwise.
+    #[test]
+    fn a_callee_finds_the_texts_registers_and_hands_back_its_width() {
+        let mut code = vec![
+            0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x1010
+            0xe8, 0x16, 0x00, 0x00, 0x00, // ASM: call 0x1020
+            0x0f, 0xb6, 0xc0, // ASM: movzx eax,al
+            0xc3, // ASM: ret
+        ];
+        code.resize(0x10, 0xcc);
+        code.push(0xc3); // ASM: ret
+        code.resize(0x20, 0xcc);
+        code.extend([0xb0, 0x07, 0xc3]); // ASM: mov al,7; ret
+        let p = Program::raw_x64(&code);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        for (body, want) in [
+            ("rax = 5;\nrax = sub_1010();\nreturn rax;\n", 5),
+            ("rax = 0x100;\nrax = sub_1020();\nreturn rax;\n", 7),
+        ] {
+            let source = format!("// signature: uint64_t f(void)\nuint64_t rax;\n\n{body}");
+            let s = Script::read(&p, &a, &o, 0x1000, &source).unwrap();
+            let r = s.run(&[], &[], 1000).unwrap();
+            assert_eq!(r.end, End::Returned(Some(want)), "{body}");
+        }
     }
 }

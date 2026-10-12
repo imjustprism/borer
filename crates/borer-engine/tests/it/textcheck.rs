@@ -401,3 +401,25 @@ fn a_field_read_as_float_and_integer_keeps_its_casts() {
     assert!(text.contains("*(double*)(a2 + 8)"), "{text}");
     runs_alike(&p, TEXT);
 }
+
+/// A caller's widest read of a result is the result's width, not its first.
+///
+/// `movzx edx,ax; shr eax,0x10` reads the low half first and then the upper
+/// one: taken as a 16-bit result, the text cut what `g` (`mov eax,ecx; ret`)
+/// hands back to its low half before the shift read the rest.
+#[test]
+fn a_result_is_as_wide_as_its_widest_read() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x37, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x0f, 0xb7, 0xd0, // ASM: movzx edx,ax
+        0xc1, 0xe8, 0x10, // ASM: shr eax,0x10
+        0x01, 0xd0, // ASM: add eax,edx
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0x89, 0xc8, 0xc3]); // ASM: mov eax,ecx; ret
+    let p = program(&code, &[]);
+    runs_alike(&p, TEXT);
+}
