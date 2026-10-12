@@ -552,6 +552,105 @@ pub fn apply_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
     out
 }
 
+/// Names the constants a library call's result is compared with
+/// (`rax == INVALID_HANDLE_VALUE`, `rax != WAIT_OBJECT_0`), by the group its
+/// declaration gives the result ([`crate::analysis::typelib`]).
+///
+/// A variable assigned such a call's result carries the group until it is
+/// assigned again, as a parser's result carries its table in
+/// [`apply_enums`]; an `==` or `!=` between it and a number names the
+/// number by the group at the result's width, negative numbers included.
+///
+/// # Arguments
+///
+/// * `body` - The body text.
+/// * `groups` - Callee text to its result's group and width in bits.
+///
+/// # Returns
+///
+/// The body with the compared constants named.
+pub(super) fn apply_results(body: &str, groups: &BTreeMap<String, (&'static str, u8)>) -> String {
+    if groups.is_empty() {
+        return body.to_owned();
+    }
+    let mut carriers: BTreeMap<String, (&crate::analysis::typelib::Group, u8)> = BTreeMap::new();
+    let mut out = String::with_capacity(body.len());
+    for line in body.lines() {
+        let mut text = line.to_owned();
+        for (var, (group, bits)) in &carriers {
+            text = rename_against(&text, var, |v| {
+                crate::analysis::typelib::render(group, v, *bits)
+            });
+        }
+        let t = line.trim();
+        if let Some((lhs, rhs)) = t.split_once(" = ")
+            && is_ident(lhs)
+        {
+            let carried = rhs
+                .split_once('(')
+                .and_then(|(callee, _)| groups.get(callee))
+                .and_then(|(g, bits)| Some((crate::analysis::typelib::group(g)?, *bits)));
+            match carried {
+                Some(c) => {
+                    carriers.insert(lhs.to_owned(), c);
+                }
+                None => {
+                    carriers.remove(lhs);
+                }
+            }
+        }
+        out.push_str(&text);
+        out.push('\n');
+    }
+    out
+}
+
+/// Names the numbers compared against `var` on one line by `name`.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `var` - The variable compared.
+/// * `name` - Names a value, or says it has no name.
+fn rename_against(line: &str, var: &str, name: impl Fn(u64) -> Option<String>) -> String {
+    let mut text = line.to_owned();
+    for op in [" == ", " != "] {
+        let mut from = 0;
+        while let Some(at) = text.get(from..).and_then(|rest| rest.find(op)) {
+            let at = from + at;
+            let left_ok = text.get(..at).is_some_and(|l| {
+                l.ends_with(var)
+                    && !l
+                        .get(..l.len() - var.len())
+                        .and_then(|b| b.chars().next_back())
+                        .is_some_and(is_ident_char)
+            });
+            let start = at + op.len();
+            let rest = text.get(start..).unwrap_or("");
+            let sign = usize::from(rest.starts_with('-'));
+            let len = sign
+                + rest
+                    .get(sign..)
+                    .unwrap_or("")
+                    .find(|c: char| !c.is_ascii_alphanumeric())
+                    .unwrap_or(rest.len() - sign);
+            let token = rest.get(..len).unwrap_or("");
+            let value = token.strip_prefix('-').map_or_else(
+                || parse_const(token),
+                |m| parse_const(m).map(u64::wrapping_neg),
+            );
+            match value.filter(|_| left_ok).and_then(&name) {
+                Some(named) => {
+                    text.replace_range(start..start + len, &named);
+                    from = start + named.len();
+                }
+                None => from = start,
+            }
+        }
+    }
+    text
+}
+
 /// Names the constant compared against `var` on one line.
 ///
 /// # Arguments

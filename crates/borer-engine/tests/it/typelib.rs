@@ -213,6 +213,40 @@ fn mmap_names_its_protection_and_keeps_unknown_bits() {
     );
 }
 
+/// A comparison with a library call's result names the constant by the
+/// group its declaration gives the result: `CreateFileW`'s `-1` is
+/// `INVALID_HANDLE_VALUE`.
+#[test]
+fn a_compared_result_names_its_constant() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x48, // ASM: sub rsp, 0x48
+        0x31, 0xc9, // ASM: xor ecx, ecx
+        0xba, 0x00, 0x00, 0x00, 0x80, // ASM: mov edx, 0x80000000
+        0x45, 0x31, 0xc0, // ASM: xor r8d, r8d
+        0x45, 0x31, 0xc9, // ASM: xor r9d, r9d
+        0xc7, 0x44, 0x24, 0x20, 0x03, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+0x20], 3
+        0xc7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+0x28], 0
+        0x48, 0xc7, 0x44, 0x24, 0x30, 0x00, 0x00, 0x00, 0x00, // ASM: mov qword [rsp+0x30], 0
+    ];
+    let at = TEXT + u64::try_from(code.len()).expect("small");
+    code.extend_from_slice(&call_slot(at, RDATA));
+    code.extend_from_slice(&[
+        0x48, 0x83, 0xf8, 0xff, // ASM: cmp rax, -1
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0x0f, 0xb6, 0xc0, // ASM: movzx eax, al
+        0x48, 0x83, 0xc4, 0x48, // ASM: add rsp, 0x48
+        0xc3, // ASM: ret
+    ]);
+    let p = image(
+        BinaryFormat::Pe,
+        &code,
+        &[0u8; 8],
+        &["KERNEL32.dll!CreateFileW"],
+    );
+    let (text, _) = decompiled(&p);
+    assert!(text.contains("== INVALID_HANDLE_VALUE"), "{text}");
+}
+
 /// The same image decompiles to the same bytes twice.
 #[test]
 fn library_rendering_is_deterministic() {

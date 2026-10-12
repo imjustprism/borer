@@ -252,6 +252,11 @@ struct Ctx<'a> {
     /// returns, by the callee's text (emission pass): what a variable that
     /// holds only such results is declared as ([`typed_results`]).
     result_types: BTreeMap<String, String>,
+    /// The constant group each library callee whose result the text binds
+    /// compares its result with, and the result's width in bits, by the
+    /// callee's text (emission pass): what [`apply_results`] names the
+    /// constants a comparison with the result holds by.
+    result_groups: BTreeMap<String, (&'static str, u8)>,
     /// Register-argument count of each callee looked at so far (see
     /// [`lift::Exec::callee_reg_params`]).
     callee_arity: BTreeMap<u64, (usize, u8, bool)>,
@@ -718,6 +723,7 @@ fn new_ctx<'a>(
         effects: BTreeMap::new(),
         reg_ty: BTreeMap::new(),
         result_types: BTreeMap::new(),
+        result_groups: BTreeMap::new(),
         callee_arity: BTreeMap::new(),
         stack_params: f.stack_args,
         funclet: f.funclet,
@@ -1498,6 +1504,7 @@ fn decompile_with(
         EnumSource::Given => apply_enums(&body, &overlay.enums),
         EnumSource::Binary => apply_enums(&body, &called_tables(program, analysis, overlay, &body)),
     };
+    let body = apply_results(&body, &ctx.result_groups);
     let names = ctx.names();
     // The fields of globals a user type points at: named here, in the text
     // every reader of the memo gets, so the layout pass below counts them

@@ -240,6 +240,15 @@ impl Exec<'_, '_> {
                     .as_ref()
                     .map(|ty| (ty.spell(), ty.pass(&self.ctx.overlay.types, word, format)))
             });
+        if let Some((group, ret)) = library_decl(self.ctx, reached)
+            .filter(|_| stated.is_none())
+            .and_then(|d| Some((d.ret_group?, d.ret)))
+        {
+            let bits = typelib::pass_of(ret, word, format).map_or(word, |p| p.bits(word));
+            self.ctx
+                .result_groups
+                .insert(callee.to_owned(), (group, bits.max(8)));
+        }
         let declared = match stated {
             Some(ret) => ret,
             None => library_decl(self.ctx, reached)
