@@ -149,9 +149,10 @@ For other clients, the usual config block:
 }
 ```
 
-A normal session goes `load_binary`, `binary_info`, then
-`find_function_by_string`, `strings` or `symbols` to find something worth
-reading, `function_summary` to size it up, `decompile` to read it, and
+A normal session goes `load_binary`, then the `borer://triage` resource
+(what the file is, how it is protected, what it can do and where to read
+first), then `find_function_by_string`, `strings` or `symbols` to find
+something worth reading, `function_summary` to size it up, `decompile` to read it, and
 `xrefs`, `cfg` or `callgraph` to see how it connects. Any `address`
 argument takes hex, decimal or a name.
 
@@ -171,12 +172,16 @@ Annotation tools are dry-run unless told otherwise. `save_project` writes
 names, comments and types to a separate project file; the binary itself is
 never touched.
 
-Heavier analyses are MCP resources under `borer://`, about sixty of them:
+Heavier analyses are MCP resources under `borer://`, over seventy of them:
 taint tracking, struct layout from pointer use, emulation, input solving,
 unpacking, control-flow-flattening and VM detection, devirtualization,
 binary diffing and carrying names over to a new build, wire protocol
 recovery, and more. Clients that can't read resources can pass the same URI
-to the `query` tool. An unknown URI returns the full list.
+to the `query` tool. A template read without its argument (`borer://emulate`)
+returns its grammar and an example, an unknown URI the nearest names, and
+`borer://help` the full list. The prompts are resources too,
+`borer://playbook/<name>`, for agents whose client offers prompts only to
+the user.
 
 `reload` restarts the server on a freshly built binary without the client
 noticing. The process the client launched is a small relay that keeps

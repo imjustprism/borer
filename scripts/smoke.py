@@ -161,8 +161,30 @@ assert ann["decompile"].get("readOnlyHint") is True, ann["decompile"]
 assert ann["load_binary"].get("readOnlyHint") is False, ann["load_binary"]
 print("prompts:", ", ".join(pnames))
 
+# 2c. the front door: the instructions start at the triage and name every
+#     prompt, each prompt is also a resource an agent can read, and the
+#     instructions and prompts stay lean like the tool list (every session
+#     is handed them)
+instructions = init.get("instructions", "")
+assert "Start: load_binary, then query borer://triage" in instructions, instructions[:300]
+for p in pnames:
+    assert p in instructions, (p, instructions)
+assert len(instructions) < 3600, f"instructions are {len(instructions)} bytes; keep them lean"
+raw_prompts = json.dumps(prompts)
+assert len(raw_prompts) < 1500, f"prompts/list is {len(raw_prompts)} bytes"
+for p in prompts["prompts"]:
+    args = {a["name"]: "x" for a in p.get("arguments", [])}
+    said = wait_for(send("prompts/get", {"name": p["name"], "arguments": args}))
+    text = said["messages"][0]["content"]["text"]
+    assert len(text) < 3500, f"prompt {p['name']} is {len(text)} bytes"
+    spec = p["name"] + "".join(f"/{v}" for v in args.values())
+    book = wait_for(send("resources/read", {"uri": f"borer://playbook/{spec}"}))
+    assert book["contents"][0]["text"].startswith(text + "\n"), (p["name"], book)
+print(f"front door OK (instructions {len(instructions)} bytes, prompts/list {len(raw_prompts)})")
+
 # 3. load + info
 info = call_tool("load_binary", {"path": os.path.abspath(TARGET), "pdb": False})
+assert "# next: query borer://triage" in info, info[-300:]
 withpdb = call_tool("load_binary", {"path": os.path.abspath(TARGET)})
 assert "pdb:" in withpdb and "symbols applied" in withpdb, withpdb.splitlines()[:6]
 print("companion pdb OK: applied when not refused")

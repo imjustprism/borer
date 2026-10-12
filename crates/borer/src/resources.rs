@@ -1368,6 +1368,33 @@ impl BorerServer {
     }
 }
 
+/// Answers a prompt's text as a resource, for an agent whose host offers
+/// prompts only to its user ([`crate::playbooks`]).
+///
+/// # Arguments
+///
+/// * `spec` - `<prompt>[/<argument>]`: the argument fills what the text
+///   leaves open (`find_check/serial`).
+///
+/// # Errors
+///
+/// Resource-not-found for a name no prompt has, naming the playbooks.
+pub(crate) fn playbook_text(spec: &str) -> Result<String, ErrorData> {
+    let (name, argument) = spec
+        .split_once('/')
+        .map_or((spec, None), |(n, a)| (n, Some(a)));
+    crate::playbooks::playbook(name, argument)
+        .map(|text| text + "\n")
+        .ok_or_else(|| {
+            let names: Vec<&str> = crate::playbooks::PLAYBOOKS.iter().map(|p| p.0).collect();
+            err_not_found(format!(
+                "no playbook {}; the playbooks are {}",
+                borer_engine::text::quoted(name),
+                names.join(", ")
+            ))
+        })
+}
+
 /// Fills a template's example from the loaded binary.
 ///
 /// `{entry}` becomes its entry point (else its first section's address)

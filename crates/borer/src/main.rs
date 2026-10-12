@@ -31,6 +31,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod cli;
 mod doctor;
 mod params;
+mod playbooks;
 mod recall;
 mod relay;
 mod resources;
@@ -250,6 +251,11 @@ const DROPPED_NAMES: usize = 8;
 
 /// The refusal every tool answers before `load_binary`.
 const NO_BINARY: &str = "no binary loaded; call load_binary first";
+
+/// The line `load_binary` ends with: the one call that answers what the
+/// first ten of a triage would, where `binary_info` would only repeat the
+/// summary.
+const LOAD_NEXT: &str = "# next: query borer://triage (a whole triage in one call)\n";
 
 /// The refusal of a live tool that types memory by the loaded binary's
 /// classes when the binary is not loaded in the process.
@@ -794,6 +800,10 @@ impl BorerServer {
                 s.process.pid()
             );
         }
+        if !summary.ends_with('\n') {
+            summary.push('\n');
+        }
+        summary.push_str(LOAD_NEXT);
         *write_lock(&self.program_packs) = packs;
         *write_lock(&self.program) = Some(Arc::new(program));
         *write_lock(&self.analysis) = None;
@@ -3599,7 +3609,9 @@ fn parse_field_offset(text: &str) -> anyhow::Result<i64> {
     Ok(if negative { -value } else { value })
 }
 
-/// Agent workflows offered as MCP prompts: know-how shipped next to the tools.
+/// Agent workflows offered as MCP prompts: know-how shipped next to the
+/// tools, whose texts the `borer://playbook` resources serve too
+/// ([`playbooks`]).
 #[prompt_router]
 impl BorerServer {
     /// Returns the end-to-end triage workflow.
@@ -3609,28 +3621,7 @@ impl BorerServer {
         description = "Triage the loaded binary end to end (what it is, what it imports, what it hides, where to read first) in a token-frugal tool order."
     )]
     fn triage(&self) -> Vec<PromptMessage> {
-        vec![PromptMessage::new_text(
-            Role::User,
-            "Triage the currently loaded binary with the borer tools, cheapest first, and stop \
-             as soon as you can say what it is and where its interesting code lives.\n \
-             1. The resource borer://triage answers most of this in one call: format, whether \
-             it is packed, anti-analysis tricks, crypto, APIs resolved at runtime, the strings \
-             it generates rather than stores, what its imports let it do, and the functions to \
-             read first with the evidence for each. Start there.\n \
-             2. Only where that leaves a question: borer://protection and entropy(threshold=7.5) \
-             for a packer payload, borer://dynimports for APIs behind GetProcAddress, \
-             borer://stackstrings and strings(filter=...) for text it stores, \
-             find_function_by_string for the most telling of those, and borer://checks for \
-             serial and license validators.\n \
-             3. function_summary on each candidate from the reading list; decompile only the \
-             ones whose summary (callees, strings) makes them worth reading. \
-             borer://emulate/<addr> runs a generator or a decoder to read its plaintext, and \
-             takes a whole experiment: registers, arguments, patched bytes, a stop address, a \
-             step trace.\n \
-             4. Report: purpose, capabilities, notable functions with addresses, and the next \
-             three functions to read. Apply set_name(dry_run=false) for anything you \
-             identified and save_project so the names persist.",
-        )]
+        vec![PromptMessage::new_text(Role::User, playbooks::TRIAGE)]
     }
 
     /// Returns the workflow that maps a client's protocol and message system.
@@ -3640,47 +3631,7 @@ impl BorerServer {
         description = "Map how a networked client talks and dispatches: wire ids, every command's record, the message classes with their fields and handlers, and the registration tables, in a token-frugal order."
     )]
     fn protocol(&self) -> Vec<PromptMessage> {
-        vec![PromptMessage::new_text(
-            Role::User,
-            "Map the loaded client's protocol with the borer resources, tables first, and read \
-             code only where a table leaves a question.\n \
-             1. borer://vslot/<slot> lists every class whose virtual at that slot returns a \
-             constant; a command class answers its wire id that way, so try the low slots \
-             (3 is common) and keep the one whose values look like an id space.\n \
-             2. borer://protocol/<slot> puts every class on one row with who sends it, the \
-             handler that receives it, what it writes and what it reads; the rest of these \
-             steps are its columns in full. \
-             borer://schemas/<slot> joins those classes with the record each one decodes: \
-             kind@offset per field, nested records, repeats, field names where the class or \
-             the message it mirrors names them. That table is the wire protocol.\n \
-             3. borer://schema/<class> for one command in full, with the reader behind every \
-             field; borer://schema/<function> for any deserializer by address. The other \
-             direction is borer://encodes/<slot> and borer://encode/<class>: what each \
-             command writes onto the wire, in order, with widths and the field each value \
-             came from, packed buffers split into their parts; borer://senders/<slot> names \
-             the functions constructing each command, which is where the client sends it, \
-             and borer://hooks/<slot> gives the addresses to hook: encoder, decoder, handler \
-             and each send call site.\n \
-             4. borer://messages[/filter] lists every class that registered a four-character \
-             id with its named fields, the global its id lives in, and the functions reading \
-             that global: the handlers. A sender fills the message, a handler turns it into a \
-             command; follow a handler to the command class and back to step 2.\n \
-             5. borer://shape/<function> on any registration function lists its whole family \
-             with the string and data each one registers: attributes, settings, factories.\n \
-             6. borer://grep/<text> finds every pseudo-C line program-wide (a call, a field \
-             write, a constant) once the index is built; borer://fieldrefs/<offset> finds \
-             every instruction touching one field offset.\n \
-             7. Write the facts you rely on as anchors (field, vconst, function lines, and \
-             encode or decode lines holding a row of the protocol table) and keep the \
-             manifest: borer://anchors/<path> re-derives and judges every one after the \
-             next client update, a packet whose layout changed included.\n \
-             Any name met on the way: borer://about/<name> answers from every table at once. \
-             8. Inside the client a command becomes messages between components (borer://map \
-             lays out the subsystems first): \
-             borer://ports/<filter> lists which component accepts which message and the \
-             function each is dispatched to, and borer://attrs/<filter> lists the entity \
-             attributes with their codes, types and the functions using them.",
-        )]
+        vec![PromptMessage::new_text(Role::User, playbooks::PROTOCOL)]
     }
 
     /// Returns the workflow that locates a validation routine.
@@ -3699,22 +3650,7 @@ impl BorerServer {
     ) -> Vec<PromptMessage> {
         vec![PromptMessage::new_text(
             Role::User,
-            format!(
-                "Find the code that validates the {what} in the loaded binary.\n\
-                 1. find_function_by_string with filters related to it (e.g. \"invalid\", \
-                 \"wrong\", \"success\", \"registered\", \"{what}\") and search(kind=text) for \
-                 UI text; note every function that references such strings.\n\
-                 2. find_crypto_constants: a hash or cipher table near the check tells you how \
-                 the value is transformed before comparison.\n\
-                 3. function_summary, then decompile, the referencing functions; follow callers \
-                 (xrefs) upward until you reach the function that branches on the result.\n\
-                 4. In the decompilation, identify the comparison (== / != / memcmp-style loop), \
-                 the inputs feeding it, and every transformation on the way; quote the exact \
-                 pseudo-C lines with their addresses.\n\
-                 5. Explain the algorithm in plain language, state what input would pass, and \
-                 propose names for the functions and globals involved; apply them with \
-                 set_name(dry_run=false) and set_comment, then save_project."
-            ),
+            playbooks::FIND_CHECK.replace("<what>", &what),
         )]
     }
 
@@ -3734,17 +3670,7 @@ impl BorerServer {
     ) -> Vec<PromptMessage> {
         vec![PromptMessage::new_text(
             Role::User,
-            format!(
-                "Explain the function at {address}.\n\
-                 1. function_summary({address}) for its shape, callers, callees and strings.\n\
-                 2. decompile({address}); if a callee is unnamed and small, decompile it too so \
-                 the call reads meaningfully; use read(kind=cstr/ptr) on globals it touches.\n\
-                 3. xrefs to see how callers use it (arguments, return value).\n\
-                 4. Write: purpose in one sentence, parameters and return value, side effects, \
-                 notable constants or strings, and anything suspicious. Then propose a name for \
-                 the function and for each global it uses and apply them with \
-                 set_name(dry_run=false); attach a one-line set_comment at the entry."
-            ),
+            playbooks::EXPLAIN_FUNCTION.replace("<address>", &address),
         )]
     }
 }
@@ -3753,8 +3679,15 @@ impl BorerServer {
 #[prompt_handler]
 impl ServerHandler for BorerServer {
     /// Returns capabilities (tools, prompts, resources, completions), the
-    /// implementation name and version, and the agent-facing instructions.
+    /// implementation name and version, and the agent-facing instructions,
+    /// built from the routers and the resource tables
+    /// ([`playbooks::instructions`]).
     fn get_info(&self) -> rmcp::model::ServerInfo {
+        let tools: Vec<String> = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.into_owned())
+            .collect();
         rmcp::model::ServerInfo::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
@@ -3767,37 +3700,10 @@ impl ServerHandler for BorerServer {
             "borer",
             env!("CARGO_PKG_VERSION"),
         ))
-        .with_instructions(
-            "borer: agent-native binary analysis (x86/x64 PE/ELF/Mach-O; arm64 disassembly only). Workflow: load_binary, then \
-             binary_info; find_function_by_string / strings / symbols / find_crypto_constants to \
-             locate interesting code; function_summary to triage a function; decompile for \
-             pseudo-C; disassemble_function / cfg / callgraph / xrefs to go deeper; read and \
-             hexdump for data. Every `address` accepts 0x-hex (always the address), a name \
-             (function, import, overlay name), or bare decimal digits; a name wins over bare \
-             text that also reads as a number. set_name/set_comment annotate (dry-run by default), \
-             set_type defines user structs and applies them at globals so decompile names \
-             their fields, and save_project persists the overlay. For anything no single tool \
-             answers, script runs a sandboxed Rhai script over the program in one call; its \
-             query(uri) reads any resource. Outputs are capped and paged; count_only and \
-             filter keep them small. An answer of 512 bytes or more ends with `# since=<tag>` (a mermaid graph: \
-             `%% since=<tag>`); \
-             the same request with \"since\": \"<tag>\" added (on a URI: !since=<tag>) answers \
-             with a one-line note if nothing changed, else only the changed lines. \
-             Prompts: triage, find_check(what), explain_function(address). \
-             Beyond the tools, templated resources (resources/templates/list) read by URI, \
-             through resources/read or the query tool: \
-             borer://why/{address}, taint/{spec}, layout/{spec}, emulate/{address}, \
-             run/{spec}, solve/{spec}, devirt/{address}, unpack/{address}, flat/{address}, vm/{address}, \
-             fields/{address}, diff/{path}, difffn/{function}/{path}, carry/{path}, \
-             migrate/{function}/{path}, and filtered \
-             stackstrings, asserts, sources, classes, singletons, messages and attrs. Live: \
-             live_attach(process) \
-             opens the running program read-only and maps the binary onto it; then live_object \
-             reads an object by its class's fields, live_instances finds a class's objects by \
-             vtable, live_read reads typed values, and live_watch(name, address) then \
-             live_watch(name) shows what changed; every live address may be a static address \
-             or a name. After a rebuild of borer, reload restarts the server in place.",
-        )
+        .with_instructions(playbooks::instructions(
+            &tools,
+            &Self::prompt_router().list_all(),
+        ))
     }
 
     /// Runs a tool, then passes its text through the session's answer memory
@@ -4279,6 +4185,7 @@ impl BorerServer {
                     bytes: None,
                 }))?
             }
+            ("playbook", Some(spec)) => resources::playbook_text(&spec)?,
             ("help", None) => resources::help_index(),
             ("help", Some(name)) => self.help_text(&name)?,
             (name, None)
@@ -4432,6 +4339,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://help/{name}",
         "How to read one resource: its URI, what it answers and, for a template, an example built from the loaded binary",
         "borer://help/emulate",
+    ),
+    (
+        "borer://playbook/{name}",
+        "A prompt's text, for an agent whose host offers prompts only to its user: triage, protocol, find_check/<what is validated> or explain_function/<function>",
+        "borer://playbook/triage",
     ),
     (
         "borer://stackstrings/{filter}",
@@ -6644,6 +6556,28 @@ mod tests {
             "{}",
             refused.message
         );
+    }
+
+    /// `load_binary` ends by naming the call that answers a whole triage,
+    /// where `binary_info`, which the instructions sent an agent to next,
+    /// only repeats the summary.
+    ///
+    /// # Panics
+    ///
+    /// When the file does not load or the answer ends otherwise.
+    #[test]
+    fn load_binary_points_at_the_triage() {
+        use super::{LoadBinaryParams, Parameters};
+        let path = std::env::temp_dir().join(format!("borer-load-next-{}.bin", std::process::id()));
+        std::fs::write(&path, [0xc3u8; 64]).expect("the file is written");
+        let said = super::BorerServer::default().load_binary(Parameters(LoadBinaryParams {
+            path: path.display().to_string(),
+            entry_file_offset: None,
+            pdb: Some(false),
+        }));
+        std::fs::remove_file(&path).expect("the file is removed");
+        let said = said.expect("any file loads");
+        assert!(said.ends_with(super::LOAD_NEXT), "{said}");
     }
 
     /// A count above a tool's cap is cut to the cap and the answer opens by
