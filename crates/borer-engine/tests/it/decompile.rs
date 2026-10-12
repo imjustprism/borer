@@ -5735,6 +5735,61 @@ fn a_linux_stack_canary_folds_out_of_the_text() {
     assert!(text.contains("return a1 + 1;"), "{text}");
 }
 
+/// A Rust bounds check reads as the panic it raises, where in the source.
+///
+/// `f` indexes `a3[a1]` after `cmp rcx, rdx; jae fail`, the failing path
+/// handing `panic_bounds_check` the index, the length and a
+/// `core::panic::Location`; the entry is a function that loads the
+/// message's format template and calls on without returning, which names
+/// it. The location is written beside the call, and its crate file is the
+/// function's source.
+#[test]
+fn a_rust_bounds_check_reads_as_its_panic_and_location() {
+    let mut code = vec![
+        0x48, 0x39, 0xd1, // ASM: cmp rcx, rdx
+        0x73, 0x05, // ASM: jae fail
+        0x49, 0x8b, 0x04, 0xc8, // ASM: mov rax, [r8 + rcx*8]
+        0xc3, // ASM: ret
+        0x4c, 0x8d, 0x05, 0xef, 0x11, 0x00, 0x00, // ASM: lea r8, [rip + 0x11ef] (location)
+        0xe8, 0x2a, 0x00, 0x00, 0x00, // ASM: call panic_bounds_check
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x55, // ASM: push rbp
+        0x48, 0x83, 0xec, 0x50, // ASM: sub rsp, 0x50
+        0x48, 0x89, 0x4c, 0x24, 0x48, // ASM: mov [rsp + 0x48], rcx
+        0x48, 0x89, 0x54, 0x24, 0x40, // ASM: mov [rsp + 0x40], rdx
+        0x4c, 0x89, 0x44, 0x24, 0x38, // ASM: mov [rsp + 0x38], r8
+        0x48, 0x8d, 0x0d, 0xa5, 0x10, 0x00, 0x00, // ASM: lea rcx, [rip + 0x10a5] (message)
+        0xe8, 0x20, 0x00, 0x00, 0x00, // ASM: call panic_fmt
+    ]);
+    code.resize(0x80, 0xcc);
+    code.extend_from_slice(&[0x0f, 0x0b]); // ASM: ud2
+    let file = br"C:\Users\me\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rhai-1.26.1\src\parser.rs";
+    let mut data = vec![0u8; 0x220];
+    data[0x10..0x10 + file.len()].copy_from_slice(file);
+    let message = b"\x20index out of bounds: the len is \xc0\x12 but the index is ";
+    data[0x100..0x100 + message.len()].copy_from_slice(message);
+    let len = u64::try_from(file.len()).expect("a short path");
+    data[0x200..0x208].copy_from_slice(&0x1_4000_2010u64.to_le_bytes());
+    data[0x208..0x210].copy_from_slice(&len.to_le_bytes());
+    data[0x210..0x214].copy_from_slice(&1015u32.to_le_bytes());
+    data[0x214..0x218].copy_from_slice(&32u32.to_le_bytes());
+    let p = program64_with_data(&code, &data);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(
+        text.contains(
+            "panic_bounds_check(a1, a2, 0x140002200);  // at rhai-1.26.1/src/parser.rs:1015:32"
+        ),
+        "{text}"
+    );
+    let polished = polish(&text, 64, &borer_engine::pack::Packs::default());
+    assert!(
+        polished.contains("// source: rhai-1.26.1/src/parser.rs"),
+        "{polished}"
+    );
+}
+
 /// A 16-bit rotate by 8 swaps the half word's bytes and reads as `bswap`.
 #[test]
 fn a_half_word_rotate_by_eight_reads_as_a_byte_swap() {

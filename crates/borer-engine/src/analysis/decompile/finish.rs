@@ -246,7 +246,8 @@ pub(super) fn source_file(text: &str) -> String {
     joined
 }
 
-/// Lists the source paths a line quotes.
+/// Lists the source paths a line quotes, and the crate file a Rust
+/// panic's location beside it names (`// at rhai-1.26.1/src/parser.rs:12:5`).
 ///
 /// # Arguments
 ///
@@ -254,7 +255,7 @@ pub(super) fn source_file(text: &str) -> String {
 ///
 /// # Returns
 ///
-/// Each quoted token that names a source file.
+/// Each quoted token that names a source file, then the location's file.
 pub(super) fn cited_paths(line: &str) -> Vec<&str> {
     /// Extensions a cited source file ends in.
     const EXTENSIONS: [&str; 6] = [".h", ".hpp", ".inl", ".c", ".cc", ".cpp"];
@@ -268,6 +269,18 @@ pub(super) fn cited_paths(line: &str) -> Vec<&str> {
         if !text.contains(' ') && EXTENSIONS.iter().any(|e| text.ends_with(e)) {
             out.push(text);
         }
+    }
+    // INVARIANT: a Rust panic's location, written beside its call, cites
+    // the crate file it was raised in; the standard library's own files
+    // are where every crate's panics go, no file of this function's.
+    if let Some((_, at)) = line.rsplit_once("  // at ")
+        && let Some(path) = at.rsplitn(3, ':').nth(2)
+        && path.ends_with(".rs")
+        && !["core/", "alloc/", "std/"]
+            .iter()
+            .any(|s| path.starts_with(s))
+    {
+        out.push(path);
     }
     out
 }

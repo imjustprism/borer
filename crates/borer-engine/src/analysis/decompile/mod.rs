@@ -43,6 +43,7 @@ mod line;
 mod liveness;
 mod opaque;
 mod outline;
+mod panics;
 mod params;
 pub mod replay;
 mod replay_a64;
@@ -1574,6 +1575,11 @@ fn decompile_in<L: Lifter>(
         canary::fold(&body)
     } else {
         (body, None)
+    };
+    let body = if cleanup {
+        panics::annotate(&body, program)
+    } else {
+        body
     };
     let body = if returns_nothing {
         drop_dead_results(&body, result_reg)

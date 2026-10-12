@@ -48,6 +48,59 @@ const EPILOG_INSTRS_MAX: usize = 12;
 /// Most instructions in the `/GS` cookie check: the compare, the two
 /// tests of the x64 form, the rotates back and the jump to the report.
 const COOKIE_CHECK_INSTRS_MAX: usize = 10;
+/// Most instructions in a Rust panic entry: the frame, the arguments it
+/// lays out for the message and the call that never returns.
+const PANIC_INSTRS_MAX: usize = 24;
+/// The messages Rust's panic entries format, each with the entry's name;
+/// an entry loads its message's address, often a format template whose
+/// first byte is the literal's length.
+const PANIC_MESSAGES: [(&str, &str); 15] = [
+    ("index out of bounds: the len is ", "panic_bounds_check"),
+    ("attempt to add with overflow", "panic_const_add_overflow"),
+    (
+        "attempt to subtract with overflow",
+        "panic_const_sub_overflow",
+    ),
+    (
+        "attempt to multiply with overflow",
+        "panic_const_mul_overflow",
+    ),
+    (
+        "attempt to divide with overflow",
+        "panic_const_div_overflow",
+    ),
+    (
+        "attempt to calculate the remainder with overflow",
+        "panic_const_rem_overflow",
+    ),
+    (
+        "attempt to negate with overflow",
+        "panic_const_neg_overflow",
+    ),
+    (
+        "attempt to shift left with overflow",
+        "panic_const_shl_overflow",
+    ),
+    (
+        "attempt to shift right with overflow",
+        "panic_const_shr_overflow",
+    ),
+    ("attempt to divide by zero", "panic_const_div_by_zero"),
+    (
+        "attempt to calculate the remainder with a divisor of zero",
+        "panic_const_rem_by_zero",
+    ),
+    (
+        "misaligned pointer dereference: address must be a multiple of ",
+        "panic_misaligned_pointer_dereference",
+    ),
+    (
+        "called `Option::unwrap()` on a `None` value",
+        "option_unwrap_failed",
+    ),
+    ("range start index ", "slice_start_index_len_fail"),
+    ("range end index ", "slice_end_index_len_fail"),
+];
 /// The 32-bit stack probe's opening, `push ecx; lea ecx,[esp+4]; sub
 /// ecx,eax`: MSVC's `_chkstk` and `_alloca_probe` are that in every
 /// runtime version.
@@ -1705,6 +1758,12 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         }
         if f.name.is_none() && f.instr_count <= COOKIE_CHECK_INSTRS_MAX {
             f.name = cookie_check_name(program, bitness, f.entry).map(str::to_owned);
+        }
+        if f.name.is_none()
+            && f.instr_count <= PANIC_INSTRS_MAX
+            && matches!(program.arch.isa(), Some(crate::isa::Isa::X86 { .. }))
+        {
+            f.name = panic_helper_name(program, bitness, f.entry, f.instr_count).map(str::to_owned);
         }
         if f.name.is_some() && f.name_source == NameSource::None {
             f.name_source = NameSource::Helper;
@@ -3531,6 +3590,64 @@ pub(crate) fn cookie_check_name(program: &Program, bitness: u32, va: u64) -> Opt
         third.flow_control() == FlowControl::Return
     };
     (compares && differs && then).then_some("__security_check_cookie")
+}
+
+/// Names a Rust panic entry at `va` by the message it formats.
+///
+/// A panic entry (`core::panicking::panic_bounds_check`, the
+/// `panic_const_*` family, `core::option::unwrap_failed`, the slice
+/// index failures) is a few instructions that load the address of its
+/// message, or of a format template whose first byte is the literal's
+/// length, and call on into the panic machinery without returning. A
+/// small function of that shape whose one message is one of
+/// [`PANIC_MESSAGES`] is that entry; the names are the standard
+/// library's own.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `bitness` - Decoder bitness.
+/// * `va` - The function's entry.
+/// * `count` - Its instruction count.
+///
+/// # Returns
+///
+/// The entry's name, or `None` when the function returns, loads no
+/// message, or more than one.
+pub(crate) fn panic_helper_name(
+    program: &Program,
+    bitness: u32,
+    va: u64,
+    count: usize,
+) -> Option<&'static str> {
+    /// Bytes read at a loaded address, enough for the longest message.
+    const READ: usize = 72;
+    let mut at = va;
+    let mut found = None;
+    for _ in 0..count {
+        let i = decode_at(program, bitness, at)?;
+        if i.flow_control() == FlowControl::Return {
+            return None;
+        }
+        if i.mnemonic() == Mnemonic::Lea
+            && i.op1_kind() == OpKind::Memory
+            && i.memory_base() == Register::RIP
+            && let Some(bytes) = program.read_va_upto(i.memory_displacement64(), READ)
+        {
+            let says = |m: &str| {
+                bytes.starts_with(m.as_bytes())
+                    || bytes.get(1..).is_some_and(|b| b.starts_with(m.as_bytes()))
+            };
+            if let Some((_, name)) = PANIC_MESSAGES.iter().find(|(m, _)| says(m)) {
+                if found.is_some_and(|f| f != *name) {
+                    return None;
+                }
+                found = Some(*name);
+            }
+        }
+        at = i.next_ip();
+    }
+    found
 }
 
 /// Most distinct values kept for one parameter.
