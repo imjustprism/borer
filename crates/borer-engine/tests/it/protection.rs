@@ -54,6 +54,15 @@ pub(crate) fn sec(name: &'static str, rva: u32, data: Vec<u8>) -> Sec {
     }
 }
 
+/// A section of data, writable and not executable, whose table row tells
+/// the truth about its bytes.
+pub(crate) fn data(name: &'static str, rva: u32, data: Vec<u8>) -> Sec {
+    Sec {
+        chars: DATA,
+        ..sec(name, rva, data)
+    }
+}
+
 /// Writes a little-endian `u16`.
 fn put16(b: &mut [u8], at: usize, v: u16) {
     b[at..at + 2].copy_from_slice(&v.to_le_bytes());

@@ -38,9 +38,10 @@ pub struct Headers {
     /// where the handler's own data begins. What that data names -
     /// funclets - [`crate::unwind`] reads.
     pub exception_handlers: Vec<ExceptionHandler>,
-    /// Extents of the x64 exception table's chained entries, sorted: the
-    /// separated chunks of a function (PGO's cold code), which share the
-    /// unwind state of the function they belong to.
+    /// Extents of the x64 exception table's chained entries, or of the ARM64
+    /// `.pdata` entries flagged as fragments, sorted: the separated chunks
+    /// of a function (PGO's cold code), which share the unwind state of the
+    /// function they belong to.
     pub chained_chunks: Vec<(u64, u64)>,
     /// Image kind: `exe`, `dll`, `driver` (PE) or `ET_EXEC`, `ET_DYN (pie)`,
     /// `ET_DYN (shared object)`, `ET_REL`, `ET_CORE` (ELF).

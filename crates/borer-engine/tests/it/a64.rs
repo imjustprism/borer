@@ -508,3 +508,118 @@ fn every_word_decodes_to_one_line_of_four_bytes() {
         }
     });
 }
+
+// ---- unwind tables ----
+
+/// Returns words as the bytes an image stores.
+fn le_words(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// Where [`crate::protection::pe`] puts the exception directory's row: the
+/// fourth data directory of the PE32+ optional header.
+const EXCEPTION_DIR: usize = crate::protection::PE_AT + 24 + 112 + 3 * 8;
+
+/// Builds the bytes of an arm64 PE: `code` in `.text` at 0x1000, entered
+/// there; the `.pdata` entries at 0x2000, which the exception directory
+/// names; and `xdata` at 0x3000.
+///
+/// # Arguments
+///
+/// * `code` - The words of `.text`.
+/// * `pdata` - The entries: a start relative to the image base, and the
+///   unwind word.
+/// * `xdata` - The words of `.xdata`.
+fn arm64_pe_bytes(code: &[u32], pdata: &[(u32, u32)], xdata: &[u32]) -> Vec<u8> {
+    let entries: Vec<u32> = pdata
+        .iter()
+        .flat_map(|&(at, unwind)| [at, unwind])
+        .collect();
+    let mut bytes = crate::protection::pe(
+        &[
+            crate::protection::sec(".text", 0x1000, le_words(code)),
+            crate::protection::data(".pdata", 0x2000, le_words(&entries)),
+            crate::protection::data(".xdata", 0x3000, le_words(xdata)),
+        ],
+        0x1000,
+    );
+    let machine = crate::protection::PE_AT + 4;
+    bytes[machine..machine + 2].copy_from_slice(&0xaa64u16.to_le_bytes());
+    let size = u32::try_from(entries.len() * 4).expect("a few entries");
+    bytes[EXCEPTION_DIR..EXCEPTION_DIR + 4].copy_from_slice(&0x2000u32.to_le_bytes());
+    bytes[EXCEPTION_DIR + 4..EXCEPTION_DIR + 8].copy_from_slice(&size.to_le_bytes());
+    bytes
+}
+
+/// Code an arm64 PE's `.pdata` describes: a framed function at 0x1000, a
+/// leaf at 0x1010 and a fragment at 0x1018.
+const PDATA_CODE: [u32; 8] = [
+    // ASM: stp x29, x30, [sp, #-16]!
+    0xa9bf_7bfd,
+    // ASM: mov x29, sp
+    0x9100_03fd,
+    // ASM: ldp x29, x30, [sp], #16
+    0xa8c1_7bfd,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: add w0, w0, #1
+    0x1100_0400,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #0
+    0x5280_0000,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// The `.pdata` of [`PDATA_CODE`].
+///
+/// A packed function 16 bytes long (flag 1, length 4 words), a function
+/// whose `.xdata` record at 0x3000 states 8 bytes, and a packed fragment 8
+/// bytes long (flag 2, length 2 words).
+const PDATA: [(u32, u32); 3] = [(0x1000, 1 | 4 << 2), (0x1010, 0x3000), (0x1018, 2 | 2 << 2)];
+
+/// The `.xdata` record [`PDATA`] names: a function length of 2 words, the
+/// epilog in the header (bit 21) and one word of unwind codes (bits 27 to
+/// 31), then that word: `end` and three `nop`s.
+const XDATA: [u32; 2] = [2 | 1 << 21 | 1 << 27, 0xe3e3_e3e4];
+
+/// An arm64 PE's `.pdata` declares its functions, packed and through an
+/// `.xdata` record alike, each with the extent its entry states; a
+/// fragment is a chunk of a function, not one.
+#[test]
+fn pdata_declares_packed_and_xdata_functions_but_not_fragments() {
+    let bytes = arm64_pe_bytes(&PDATA_CODE, &PDATA, &XDATA);
+    let p = Program::from_bytes(PathBuf::from("pdata.exe"), bytes).expect("parses");
+    let base = crate::protection::IMAGE_BASE;
+    assert_eq!(p.arch, Arch::Arm64);
+    assert_eq!(
+        p.function_ranges,
+        [
+            (base + 0x1000, base + 0x1010),
+            (base + 0x1010, base + 0x1018)
+        ]
+    );
+    assert_eq!(p.headers.chained_chunks, [(base + 0x1018, base + 0x1020)]);
+}
+
+/// Damaged `.pdata` declares nothing, and the image still loads.
+///
+/// An entry with the reserved flag, one whose `.xdata` record lies outside
+/// every section and one stating no length each declare nothing, and a
+/// directory that runs past the end of the file declares nothing rather
+/// than faulting.
+#[test]
+fn hostile_pdata_declares_nothing() {
+    let mut bytes = arm64_pe_bytes(
+        &PDATA_CODE,
+        &[(0x1000, 3), (0x1008, 0x00ff_fff0), (0x1010, 1)],
+        &XDATA,
+    );
+    let p = Program::from_bytes(PathBuf::from("pdata.exe"), bytes.clone()).expect("loads");
+    assert!(p.function_ranges.is_empty(), "{:x?}", p.function_ranges);
+    assert!(p.headers.chained_chunks.is_empty());
+    bytes[EXCEPTION_DIR + 4..EXCEPTION_DIR + 8].copy_from_slice(&0x0fff_fff8u32.to_le_bytes());
+    let p = Program::from_bytes(PathBuf::from("pdata.exe"), bytes).expect("still loads");
+    assert!(p.function_ranges.is_empty(), "{:x?}", p.function_ranges);
+}

@@ -270,8 +270,10 @@ pub struct Program {
     /// Imports, exports, local and data symbols in file order.
     pub symbols: Vec<Symbol>,
     /// Function extents the file declares, `(start, end)` virtual addresses,
-    /// sorted: x64 exception-table entries (chained chunks excluded), sized
-    /// `STT_FUNC` symbols, and the extents an applied PDB's procedures
+    /// sorted: x64 exception-table entries (chained chunks excluded), ARM64
+    /// `.pdata` entries (fragments excluded), sized `STT_FUNC` symbols,
+    /// `.eh_frame` FDEs, a Mach-O image's function starts, and the extents
+    /// an applied PDB's procedures
     /// state where an executable section holds them whole. Discovery seeds
     /// from them and treats a jump into one as a tail call.
     pub function_ranges: Vec<(u64, u64)>,
@@ -1099,6 +1101,72 @@ fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
     })
 }
 
+/// `(start, end)` virtual addresses of the code extents an unwind table
+/// states, `end` exclusive.
+type Extents = Vec<(u64, u64)>;
+
+/// Reads an ARM64 image's exception directory (`.pdata`): the extent of
+/// every function it declares, and of every fragment.
+///
+/// An entry states the function's start and either packs its unwind data,
+/// length included, into its second word, or points at an `.xdata` record
+/// whose header states the length. A packed entry flagged as a fragment
+/// describes code with no prologue, a function's separated chunk, which
+/// is no function start; an entry with the reserved flag, or whose
+/// `.xdata` record does not parse, states no length and is skipped, since a
+/// guessed extent would misplace the function's end.
+///
+/// # Arguments
+///
+/// * `ex` - The exception directory goblin parsed.
+/// * `sections` - The section table, to map an `.xdata` record's address.
+/// * `base` - The image base the addresses are relative to.
+///
+/// # Returns
+///
+/// `(functions, fragments)`: `(start, end)` virtual addresses, the
+/// fragments sorted. Reading the directory can panic in goblin on a
+/// damaged file, so the caller runs this under [`caught`].
+fn arm64_pdata(
+    ex: &goblin::pe::exception::ExceptionData<'_>,
+    sections: &[goblin::pe::section_table::SectionTable],
+    base: u64,
+) -> (Extents, Extents) {
+    use goblin::pe::exception::{
+        ARM64_PDATA_PACKED_UNWIND_FRAGMENT, ARM64_PDATA_PACKED_UNWIND_FUNCTION,
+        ARM64_PDATA_REF_TO_FULL_XDATA,
+    };
+    let mut functions = Vec::new();
+    let mut fragments = Vec::new();
+    for rf in ex.functions_arm64().flatten() {
+        let (len, fragment) = match rf.flag() {
+            ARM64_PDATA_PACKED_UNWIND_FUNCTION => (rf.function_length(), false),
+            ARM64_PDATA_PACKED_UNWIND_FRAGMENT => (rf.function_length(), true),
+            ARM64_PDATA_REF_TO_FULL_XDATA => match ex.get_unwind_info_arm64(rf, sections) {
+                Some(Ok(info)) => (info.header.function_length(), false),
+                Some(Err(_)) | None => continue,
+            },
+            // SPEC: Microsoft, "ARM64 exception handling", .pdata records:
+            // flag 3 is reserved.
+            _ => continue,
+        };
+        let Some(start) = base.checked_add(u64::from(rf.begin_address)) else {
+            continue;
+        };
+        let Some(end) = start.checked_add(u64::from(len)).filter(|&end| end > start) else {
+            continue;
+        };
+        let extent = (start, end);
+        if fragment {
+            fragments.push(extent);
+        } else {
+            functions.push(extent);
+        }
+    }
+    fragments.sort_unstable();
+    (functions, fragments)
+}
+
 /// Why a path cannot be a file, when it cannot.
 ///
 /// Public because a path from a caller is opened in more than one place: the
@@ -1354,7 +1422,8 @@ impl Program {
     /// ([`Headers::implausible_imports`], [`Headers::implausible_exports`]).
     /// Imports record their IAT
     /// slot address, exports their entry; x64 exception-table entries whose
-    /// unwind info is not chained become [`Program::function_ranges`]. The
+    /// unwind info is not chained, and ARM64 `.pdata` entries that are not
+    /// fragments, become [`Program::function_ranges`] ([`arm64_pdata`]). The
     /// debug directory's `CodeView` record names a PDB, applied when it is on
     /// disk at the recorded path, beside the loaded file or in the symbol
     /// cache and states the record's GUID and age (the DBI age): its function
@@ -1666,6 +1735,14 @@ impl Program {
                     exception_handlers = registered;
                     chained_chunks = chunks;
                     chained_chunks.sort_unstable();
+                }
+                if arch == Arch::Arm64
+                    && let Some(ex) = &pe.exception_data
+                {
+                    let (found, fragments) =
+                        caught(|| arm64_pdata(ex, &pe.sections, image_base)).unwrap_or_default();
+                    function_ranges.extend(found);
+                    chained_chunks = fragments;
                 }
                 // The header facts are read through the same directories, so
                 // the same damaged file can fault here too.
