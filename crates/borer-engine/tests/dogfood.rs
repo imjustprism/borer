@@ -521,6 +521,35 @@ fn the_lifter_agrees_with_the_emulator_on_every_block() {
     assert!(v.mismatches.is_empty(), "{text}");
 }
 
+/// Checks the arm64 lifter against the arm64 machine on every block of the
+/// `BORER_DOGFOOD_A64` binary and requires them to agree on every register,
+/// `v` register, stack slot, store and branch.
+///
+/// The arm64 counterpart of the sweep above, for an arm64 build of any
+/// program (a C library linked for `aarch64-linux-gnu`, a Mach-O, a PE);
+/// it prints the tally and the share of blocks the check compared.
+#[test]
+#[ignore = "set BORER_DOGFOOD_A64 to an arm64 binary path to run this sweep"]
+fn the_arm64_lifter_agrees_with_the_emulator_on_every_block() {
+    use borer_engine::analysis::decompile::verify_a64::{verify, verify_tsv};
+    let path = std::env::var("BORER_DOGFOOD_A64").expect("BORER_DOGFOOD_A64 env var");
+    let p = Program::load(std::path::Path::new(&path)).expect("load");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    let started = std::time::Instant::now();
+    let v = verify(&p, &a, &entries, 1);
+    let took = started.elapsed();
+    let text = verify_tsv(&v);
+    for line in text.lines().take_while(|l| l.starts_with('#')) {
+        eprintln!("{line}");
+    }
+    let share = borer_engine::num::usize_f64(v.checked) * 100.0
+        / borer_engine::num::usize_f64(v.blocks.max(1));
+    eprintln!("# {share:.1}% of blocks checked; verify took {took:.1?}");
+    assert!(v.checked > 0, "{text}");
+    assert!(v.mismatches.is_empty(), "{text}");
+}
+
 /// Replays the text of every function of the `BORER_DOGFOOD` binary
 /// against the emulator and requires every claim it makes to hold.
 ///
