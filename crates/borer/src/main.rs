@@ -538,16 +538,10 @@ impl BorerServer {
         };
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(p))) {
             Ok(answer) => answer.map_err(err_params),
-            Err(e) => {
-                let what = e
-                    .downcast_ref::<&str>()
-                    .map(|s| (*s).to_owned())
-                    .or_else(|| e.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "no message".to_owned());
-                Err(err_internal(format!(
-                    "the analysis faulted on this binary: {what}. The session is still up; another tool or another address may still answer."
-                )))
-            }
+            Err(e) => Err(err_internal(format!(
+                "the analysis faulted on this binary: {}. The session is still up; another tool or another address may still answer.",
+                fault_text(e.as_ref())
+            ))),
         }
     }
 
@@ -737,12 +731,20 @@ impl BorerServer {
         }): Parameters<LoadBinaryParams>,
     ) -> Result<String, ErrorData> {
         let apply_pdb = pdb.unwrap_or(true);
-        let mut program = Program::load_with_symsrv(
-            &PathBuf::from(&path),
-            apply_pdb,
-            symsrv::cache_dir().as_deref(),
-        )
-        .map_err(|e| err_params(format!("load failed: {e:#}")))?;
+        let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Program::load_with_symsrv(
+                &PathBuf::from(&path),
+                apply_pdb,
+                symsrv::cache_dir().as_deref(),
+            )
+        }))
+        .map_err(|e| {
+            err_internal(format!(
+                "loading faulted on this file: {}. The session is still up and keeps the program it had.",
+                fault_text(e.as_ref())
+            ))
+        })?;
+        let mut program = loaded.map_err(|e| err_params(format!("load failed: {e:#}")))?;
         if let Some(off) = entry_file_offset {
             if off >= num::from_usize(program.bytes.len()) {
                 return Err(err_params(format!(
@@ -3337,6 +3339,24 @@ impl BorerServer {
         );
         Ok(text)
     }
+}
+
+/// The message a caught panic carries, for an answer that says a tool
+/// faulted.
+///
+/// # Arguments
+///
+/// * `e` - The panic's payload, as `catch_unwind` hands it back.
+///
+/// # Returns
+///
+/// The payload's text, or `no message` when it is neither `&str` nor
+/// `String`.
+fn fault_text(e: &(dyn std::any::Any + Send)) -> String {
+    e.downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| e.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".to_owned())
 }
 
 /// Percent-decodes a resource URI argument.
