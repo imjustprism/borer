@@ -340,5 +340,7 @@ Mode is on and `core.symlinks` is `true`. A flat link holds just the path
 
 The imphash's ordinal name tables come from
 [pefile](https://github.com/erocarrera/pefile) (MIT, Copyright (c) 2004-2024
-Ero Carrera); its notice is at the top of
-[`ordinals.tsv`](crates/borer-engine/src/ordinals.tsv).
+Ero Carrera), and the TLSH digest follows Trend Micro's
+[reference implementation](https://github.com/trendmicro/tlsh) (BSD,
+Copyright (c) 2013 Trend Micro Incorporated). Their notices are in
+[NOTICE](NOTICE), which ships with every release archive.
