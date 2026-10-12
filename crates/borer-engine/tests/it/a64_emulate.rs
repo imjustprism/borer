@@ -15,8 +15,8 @@
 )]
 
 use borer_engine::analysis::{Analysis, Overlay, render};
-use borer_engine::emulate::Stop;
 use borer_engine::emulate::a64::Machine;
+use borer_engine::emulate::{Stop, fill_byte};
 use borer_engine::program::{Arch, Program, Section};
 
 /// Where every routine is placed and run from.
@@ -1353,6 +1353,41 @@ fn an_xor_loop_decrypts_its_blob() {
     assert!(trace[0].starts_with("0x10028  b.ne 0x10014"), "{trace:?}");
     assert!(trace[1].contains("x29=0x0 sp=0x7fff00000000"), "{trace:?}");
     assert!(trace[2].ends_with("stopped: returned"), "{trace:?}");
+}
+
+/// A load through a pointer nothing backs faults, unless a fill is set:
+/// then it reads the fill's hash of each address, while a jump there
+/// still faults, since a fill answers loads and never fetches.
+#[test]
+fn a_fill_answers_a_load_nothing_backs() {
+    /// An address no image, stack or planted byte takes.
+    const NOWHERE: u64 = 0x5000_0000;
+    /// The fill's seed.
+    const SEED: u64 = 7;
+    let load = image(&[
+        // ASM: ldr x0, [x1]
+        0xf940_0020,
+        RET,
+    ]);
+    let mut m = machine(&load);
+    assert!(m.set_register("x1", NOWHERE));
+    assert_eq!(m.run(BASE).stop, Stop::Fault(NOWHERE));
+    let mut m = machine(&load);
+    m.set_fill(Some(SEED));
+    assert!(m.set_register("x1", NOWHERE));
+    assert_eq!(m.run(BASE).stop, Stop::Returned);
+    let want = (0..8)
+        .rev()
+        .fold(0, |v, k| (v << 8) | u64::from(fill_byte(SEED, NOWHERE + k)));
+    assert_eq!(m.register("x0"), Some(want));
+    let jump = image(&[
+        // ASM: br x1
+        0xd61f_0020,
+    ]);
+    let mut m = machine(&jump);
+    m.set_fill(Some(SEED));
+    assert!(m.set_register("x1", NOWHERE));
+    assert_eq!(m.run(BASE).stop, Stop::Fault(NOWHERE));
 }
 
 /// The experiment and typed-run surfaces run arm64 code.

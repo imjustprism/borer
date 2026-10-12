@@ -83,7 +83,7 @@ impl Machine<'_> {
         let mut v = 0u128;
         for (k, shift) in (0..from_usize(bytes)).zip((0u32..).step_by(8)) {
             let a = addr.wrapping_add(k);
-            v |= u128::from(self.byte_at(a).ok_or(Stop::Fault(a))?) << shift;
+            v |= u128::from(self.load_byte(a).ok_or(Stop::Fault(a))?) << shift;
         }
         if self.trace_cap > 0 {
             self.step_memory.push((false, addr, bytes, v));

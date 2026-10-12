@@ -23,7 +23,8 @@ use std::collections::VecDeque;
 
 use super::store::Store;
 use super::{
-    Run, STACK_BASE, STACK_SPAN, Stop, TRACE_MAX, image_byte, lo64, mask, rotate_right, sign_extend,
+    Run, STACK_BASE, STACK_SPAN, Stop, TRACE_MAX, fill_byte, image_byte, lo64, mask, rotate_right,
+    sign_extend,
 };
 use crate::isa::Isa;
 use crate::isa::a64::{self, Cond, Insn, Mnemonic, Op, Opnd, Reg};
@@ -173,6 +174,9 @@ pub struct Machine<'a> {
     /// Memory the routine wrote, over the image's own bytes, and which of
     /// those bytes it wrote outside the stack.
     mem: Store,
+    /// What a load of memory nothing backs reads: [`fill_byte`] of this
+    /// seed, or a fault when `None`.
+    fill: Option<u64>,
     /// Steps a run may take.
     budget: usize,
     /// Steps the current run has taken, one per instruction.
@@ -226,6 +230,7 @@ impl<'a> Machine<'a> {
             vregs: [0; 32],
             tpidr: 0,
             mem: Store::default(),
+            fill: None,
             budget,
             steps: 0,
             stop_at: None,
@@ -391,7 +396,8 @@ impl<'a> Machine<'a> {
         self.mem.get(addr)
     }
 
-    /// Reads a byte as a load reads it: written, else the image's.
+    /// Reads a byte as an instruction fetch reads it: written, else the
+    /// image's.
     ///
     /// # Arguments
     ///
@@ -399,12 +405,39 @@ impl<'a> Machine<'a> {
     ///
     /// # Returns
     ///
-    /// The byte, or `None` where a load faults.
+    /// The byte, or `None` where nothing backs it.
     #[must_use]
     pub fn byte_at(&self, addr: u64) -> Option<u8> {
         self.mem
             .get(addr)
             .or_else(|| image_byte(self.program, addr))
+    }
+
+    /// Makes a load of memory nothing backs read [`fill_byte`] of a seed
+    /// instead of faulting, as the x86 machine's permissive fill does: a
+    /// hash of the address, so a load at a wrong offset reads a different
+    /// value. Instruction fetches still fault there.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - The fill seed, or `None` to fault.
+    pub fn set_fill(&mut self, seed: Option<u64>) {
+        self.fill = seed;
+    }
+
+    /// Reads a byte as a load reads it: written, else the image's, else
+    /// the fill.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address.
+    ///
+    /// # Returns
+    ///
+    /// The byte, or `None` where the load faults.
+    fn load_byte(&self, addr: u64) -> Option<u8> {
+        self.byte_at(addr)
+            .or_else(|| self.fill.map(|seed| fill_byte(seed, addr)))
     }
 
     /// Reads up to `n` bytes at `va` as the run sees them, stopping at the
