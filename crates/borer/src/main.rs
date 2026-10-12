@@ -1107,6 +1107,9 @@ impl BorerServer {
     /// Reading stops at the first address that is not there, and the header
     /// says so: returning fewer values than were asked for without a word
     /// would leave the caller to notice the shortfall by counting rows.
+    /// With `type`, a user type is laid over the bytes instead
+    /// ([`render::typed_tsv`]): `count` records of it, or as many as the
+    /// type's own array states.
     ///
     /// # Arguments
     ///
@@ -1114,10 +1117,11 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// Invalid params for an unknown kind; internal error when the address does not
+    /// Invalid params for an unknown kind, a type that does not parse, or
+    /// both a kind and a type; internal error when the address does not
     /// resolve or the bytes are not mapped.
     #[tool(
-        description = "Read `count` typed values (kind u8..u64, i8..i64, f32, f64, ptr, cstr, wstr; default u64, count 1, max 256) as `va value` rows; pointers are named.",
+        description = "Read `count` typed values (kind u8..u64, i8..i64, f32, f64, ptr, cstr, wstr; default u64, count 1, max 256) as `va value` rows; pointers are named. `type` reads a user type instead: one row per field.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1130,13 +1134,43 @@ impl BorerServer {
         Parameters(ReadParams {
             address,
             kind,
+            r#type: ty,
             count,
         }): Parameters<ReadParams>,
     ) -> Result<String, ErrorData> {
-        let kind_text = kind.unwrap_or_default();
-        let kind: memory::Kind = kind_text.into();
         let count = count_param(count, 1, 256, "count")?;
         let n = count.n;
+        if let Some(spelled) = ty {
+            if kind.is_some() {
+                return Err(err_params(
+                    "`kind` and `type` both say what the bytes are; give one",
+                ));
+            }
+            let parsed = borer_engine::analysis::utypes::parse_type(&spelled)
+                .map_err(|e| err_params(e.to_string()))?;
+            let parsed = if n > 1 {
+                borer_engine::analysis::utypes::TypeExpr::Array(
+                    Box::new(parsed),
+                    num::from_usize(n),
+                )
+            } else {
+                parsed
+            };
+            return self
+                .with_program(|p| {
+                    if parse_off(&address).is_some() {
+                        return Err(
+                            "a typed read takes an address; off: reads by `kind`".to_owned()
+                        );
+                    }
+                    let va = self.addr(p, &address)?;
+                    let analysis = read_lock(&self.analysis).clone();
+                    render::typed_tsv(p, analysis.as_deref(), &self.overlay(), va, &parsed)
+                })
+                .map(|text| count.noted(text));
+        }
+        let kind_text = kind.unwrap_or_default();
+        let kind: memory::Kind = kind_text.into();
         self.with_program(|p| {
             let (start, values, place) = match parse_off(&address) {
                 Some(off) => (off, memory::read_values_at_offset(p, off, kind, n)?, "off:"),
@@ -1165,26 +1199,11 @@ impl BorerServer {
             out.push('\n');
             for v in &values {
                 let mut text = v.text.clone();
-                if let Some(t) = v.target {
-                    if let Some(a) = &analysis
-                        && let Some(f) = a.function_at(t)
-                    {
-                        text.push_str(&format!(
-                            " -> {}",
-                            borer_engine::analysis::name_of(a, &o, f.entry)
-                        ));
-                    } else if let Some(n) = o.names.get(&t) {
-                        text.push_str(&format!(" -> {n}"));
-                    } else if let Some(a) = &analysis
-                        && let Some(s) = a.symbol_at(p, t)
-                    {
-                        text.push_str(&format!(
-                            " -> {}",
-                            borer_engine::search::demangled_name(&s.name)
-                        ));
-                    } else if let Some(s) = p.section_at(t) {
-                        text.push_str(&format!(" -> {}", s.name));
-                    }
+                if let Some(name) = v
+                    .target
+                    .and_then(|t| render::pointee_name(p, analysis.as_deref(), &o, t))
+                {
+                    text.push_str(&format!(" -> {name}"));
                 }
                 out.push_str(&format!("{:<12} {text}\n", format!("{:#x}", v.at)));
             }
@@ -6305,6 +6324,75 @@ mod tests {
         );
     }
 
+    /// `read` with `type` lays a defined struct over the bytes: `count`
+    /// records, each field a row with a `char` array quoted; a kind beside
+    /// a type, and a file offset, are refused.
+    ///
+    /// # Panics
+    ///
+    /// When a row is missing or a refusal accepts.
+    #[test]
+    fn read_lays_a_user_type_over_the_bytes() {
+        use super::params::ReadKind;
+        use super::{Parameters, ReadParams, SetTypeParams};
+        use borer_engine::program::{Arch, Program, Section};
+        let mut bytes = vec![0u8; 0x200];
+        bytes[0x100..0x104].copy_from_slice(&7u32.to_le_bytes());
+        bytes[0x104..0x108].copy_from_slice(b"hi\0\0");
+        bytes[0x108..0x10c].copy_from_slice(&9u32.to_le_bytes());
+        bytes[0x10c..0x110].copy_from_slice(b"yo\0\0");
+        let data = Section::mapped(".data", 0x2000, 0x100, 0x100, true, false);
+        let program = Program::raw(bytes, Arch::X86_64, 0, None, vec![data]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        server
+            .set_type(Parameters(SetTypeParams {
+                name: Some("Item".to_owned()),
+                fields: Some(vec!["0:id:u32".to_owned(), "4:tag:char[4]".to_owned()]),
+                values: None,
+                size: None,
+                address: None,
+                r#type: None,
+                var: None,
+                dry_run: Some(false),
+            }))
+            .expect("defines");
+        let read = |kind: Option<ReadKind>, ty: &str, address: &str, count: Option<u32>| {
+            server.read(Parameters(ReadParams {
+                address: address.to_owned(),
+                kind,
+                r#type: Some(ty.to_owned()),
+                count,
+            }))
+        };
+        let text = read(None, "Item", "0x2000", Some(2)).expect("reads");
+        assert!(
+            text.starts_with("# showing 4 of 4 rows: Item[2] at 0x2000 in .data, 0x10 bytes\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("0x2004       [0].tag char[4] \"hi\"\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("0x2008       [1].id  u32     0x9\n"),
+            "{text}"
+        );
+        let one = read(None, "Item", "0x2008", None).expect("reads one");
+        assert!(one.contains("0x200c       tag char[4] \"yo\"\n"), "{one}");
+        let both = read(Some(ReadKind::U8), "Item", "0x2000", None).expect_err("kind and type");
+        assert!(both.message.contains("give one"), "{}", both.message);
+        let off = read(None, "Item", "off:0x100", None).expect_err("an offset");
+        assert!(off.message.contains("takes an address"), "{}", off.message);
+        let bad = read(None, "Item[", "0x2000", None).expect_err("an open bracket");
+        assert!(bad.message.contains("does not close"), "{}", bad.message);
+    }
+
     /// `set_type` with `values` defines an enum, applies it at a data
     /// global, and `types` lists its values in value order.
     ///
@@ -7275,6 +7363,7 @@ mod tests {
             .read(Parameters(ReadParams {
                 address: "0x1000".to_owned(),
                 kind: Some(super::params::ReadKind::U8),
+                r#type: None,
                 count: Some(300),
             }))
             .expect("reads");

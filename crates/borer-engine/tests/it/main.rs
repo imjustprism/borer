@@ -36,4 +36,5 @@ mod regression;
 mod search;
 mod structure;
 mod typelib;
+mod types;
 mod x86;

@@ -302,6 +302,8 @@ pub(crate) struct ReadParams {
     pub(crate) address: String,
     /// What to decode the bytes as (default u64).
     pub(crate) kind: Option<ReadKind>,
+    /// A user type instead of kind: `Rec`, `Rec[4]`, `char[16]`.
+    pub(crate) r#type: Option<String>,
     /// Values to read (default 1, max 256).
     pub(crate) count: Option<u32>,
 }

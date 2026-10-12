@@ -4,10 +4,10 @@
 //! The analysis derives layouts it can prove; the agent often knows one the
 //! binary does not say (from documentation, a header, or reading the code).
 //! A user type is that knowledge in a small language: the scalar widths, a
-//! pointer to anything in the language, and by-name references to other user
-//! types. Types are stated as structured parameters and parsed here at
-//! the boundary, never as C declarations; anything the language does not
-//! spell is refused with a message naming it.
+//! pointer to anything in the language, an array of anything in it, and
+//! by-name references to other user types. Types are stated as structured
+//! parameters and parsed here at the boundary; anything the language does
+//! not spell is refused with a message naming it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,9 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// The scalars the decompiler already renders (`u8`..`u64`, `i8`..`i64`,
 /// `f32`, `f64`, `char`), a pointer to any of those or to a named user
-/// type, and a name standing for another user type. A name is resolved
-/// against the overlay's types wherever a width or a field is asked for, so
-/// redefining a type changes every reference at once.
+/// type, an array of any type, and a name standing for another user type.
+/// A name is resolved against the overlay's types wherever a width or a
+/// field is asked for, so redefining a type changes every reference at
+/// once.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TypeExpr {
     /// One unsigned byte.
@@ -44,6 +45,9 @@ pub enum TypeExpr {
     Char,
     /// A pointer to a value of the inner type.
     Ptr(Box<TypeExpr>),
+    /// That many values of the inner type back to back: at least one and
+    /// at most [`ARRAY_LEN_MAX`].
+    Array(Box<TypeExpr>, u64),
     /// A user type by its name, resolved where it is asked for.
     Named(String),
 }
@@ -63,14 +67,20 @@ const SCALARS: [(&str, u64); 11] = [
     ("char", 1),
 ];
 
-/// Most pointers one type stacks over its base word.
+/// Most pointers and arrays one type stacks over its base word.
 ///
-/// A [`TypeExpr`] is a chain of boxes, one per pointer, and spelling,
-/// hashing, comparing and dropping one walk the chain by recursion; a cap
-/// where a type enters (from a tool's text or a project file) keeps every
-/// one of those walks shallow. Sixteen is the depth the debug-information
-/// reader follows a chain to, and far past any pointer a program declares.
+/// A [`TypeExpr`] is a chain of boxes, one per pointer or array, and
+/// spelling, hashing, comparing and dropping one walk the chain by
+/// recursion; a cap where a type enters (from a tool's text or a project
+/// file) keeps every one of those walks shallow. Sixteen is the depth the
+/// debug-information reader follows a chain to, and far past any pointer a
+/// program declares.
 pub const PTR_DEPTH_MAX: usize = 16;
+
+/// Most values one array type holds: sixteen million, far past any table a
+/// program lays out statically, and small enough that no width computed
+/// from one overflows.
+pub const ARRAY_LEN_MAX: u64 = 1 << 24;
 
 /// Tells whether `text` is an identifier a name may take: a letter or `_`
 /// first, then letters, digits or `_`, at most [`crate::text::OUTSIDE_MAX`]
@@ -92,11 +102,15 @@ pub(crate) fn is_ident(text: &str) -> bool {
 
 /// Parses a type as the tools and the project file spell it.
 ///
-/// One scalar (`u32`, `f64`, `char`), one user type name (`Player`), or any
-/// of those under pointers: `Player *`, `Player*`, `Player **`, `ptr Player`
-/// and `ptr ptr u8` all parse. Two bases (`u32 u64`), a stray `*`, an empty
-/// text, a word that is not an identifier and more than [`PTR_DEPTH_MAX`]
-/// pointers are refused.
+/// One scalar (`u32`, `f64`, `char`) or one user type name (`Player`),
+/// then pointers and arrays read left to right, each applying to all
+/// before it: `Player *`, `Player*`, `Player **`, `char[16]` (sixteen
+/// chars), `Rec[4]`, `Rec *[4]` (four pointers) and `char[16] *` (a
+/// pointer to sixteen chars) all parse, as do `ptr Player` and `ptr ptr u8`
+/// with the pointers before the word. Two bases (`u32 u64`), a stray `*`,
+/// an empty text, a word that is not an identifier, an array of no values
+/// or of more than [`ARRAY_LEN_MAX`], and more than [`PTR_DEPTH_MAX`]
+/// pointers and arrays are refused.
 ///
 /// # Arguments
 ///
@@ -109,40 +123,64 @@ pub(crate) fn is_ident(text: &str) -> bool {
 /// # Errors
 ///
 /// When the text is empty, is not a type the language spells, or stacks
-/// more pointers than [`PTR_DEPTH_MAX`]; the message names the offending
-/// word so the caller can retry.
+/// more pointers and arrays than [`PTR_DEPTH_MAX`]; the message names the
+/// offending word so the caller can retry.
 pub fn parse_type(text: &str) -> anyhow::Result<TypeExpr> {
-    let mut bases: Vec<&str> = Vec::new();
-    let mut stars: usize = 0;
-    let mut ptrs: usize = 0;
-    for word in text.split_whitespace() {
-        let base = word.trim_end_matches('*');
-        stars += word.len() - base.len();
-        if base.is_empty() {
-            // A run of stars on its own: a pointer marker, which belongs
-            // after the word it points; before any word it is a typo.
-            if bases.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "a type is one word under pointers; {} is not one",
-                    crate::text::quoted(text)
-                ));
-            }
-        } else if base == "ptr" {
-            ptrs += 1;
-        } else {
-            bases.push(base);
-        }
-    }
-    let [base] = bases[..] else {
-        return Err(anyhow::anyhow!(
+    let one_word = || {
+        anyhow::anyhow!(
             "a type is one word under pointers; {} is not one",
             crate::text::quoted(text)
-        ));
+        )
     };
-    let depth = stars.saturating_add(ptrs);
+    let mut base: Option<&str> = None;
+    let mut ptrs: usize = 0;
+    let mut suffixes: Vec<Option<u64>> = Vec::new();
+    let mut rest = text.trim_start();
+    while let Some(c) = rest.chars().next() {
+        if c == '*' || c == '[' {
+            // A pointer or an array follows the word it applies to; before
+            // any word it is a typo.
+            if base.is_none() {
+                return Err(one_word());
+            }
+            if c == '*' {
+                suffixes.push(None);
+                rest = rest.get(1..).unwrap_or("");
+            } else {
+                let (len, after) =
+                    rest.get(1..).unwrap_or("").split_once(']').ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{} opens an array it does not close",
+                            crate::text::quoted(text)
+                        )
+                    })?;
+                suffixes.push(Some(array_len(len, text)?));
+                rest = after;
+            }
+        } else {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '*' || c == '[')
+                .unwrap_or(rest.len());
+            let (word, after) = rest.split_at(end);
+            rest = after;
+            match word {
+                "ptr" if base.is_none() => ptrs += 1,
+                _ if base.is_some() => return Err(one_word()),
+                _ => base = Some(word),
+            }
+        }
+        rest = rest.trim_start();
+    }
+    let base = base.ok_or_else(one_word)?;
+    let depth = suffixes.len().saturating_add(ptrs);
     if depth > PTR_DEPTH_MAX {
+        let what = if suffixes.iter().any(Option::is_some) {
+            "pointers and arrays"
+        } else {
+            "pointers"
+        };
         return Err(anyhow::anyhow!(
-            "the type stacks {depth} pointers over {}; {PTR_DEPTH_MAX} is the most",
+            "the type stacks {depth} {what} over {}; {PTR_DEPTH_MAX} is the most",
             crate::text::quoted(base)
         ));
     }
@@ -151,14 +189,47 @@ pub fn parse_type(text: &str) -> anyhow::Result<TypeExpr> {
         None => {
             if !is_ident(base) {
                 return Err(anyhow::anyhow!(
-                    "{} is not a type: use u8..u64, i8..i64, f32, f64, char, a pointer (`T *`, `ptr T`) or a name",
+                    "{} is not a type: use u8..u64, i8..i64, f32, f64, char, a pointer (`T *`, `ptr T`), an array (`T[4]`) or a name",
                     crate::text::quoted(base)
                 ));
             }
             TypeExpr::Named(base.to_owned())
         }
     };
-    Ok((0..depth).fold(ty, |t, _| TypeExpr::Ptr(Box::new(t))))
+    let ty = suffixes.into_iter().fold(ty, |t, s| match s {
+        None => TypeExpr::Ptr(Box::new(t)),
+        Some(n) => TypeExpr::Array(Box::new(t), n),
+    });
+    Ok((0..ptrs).fold(ty, |t, _| TypeExpr::Ptr(Box::new(t))))
+}
+
+/// Reads an array's length as a type spells it: decimal, or hex after
+/// `0x`.
+///
+/// # Arguments
+///
+/// * `len` - The text between the brackets.
+/// * `text` - The whole type, for the message.
+///
+/// # Errors
+///
+/// When the text is no number, or the number is zero or past
+/// [`ARRAY_LEN_MAX`].
+pub(crate) fn array_len(len: &str, text: &str) -> anyhow::Result<u64> {
+    let len = len.trim();
+    len.strip_prefix("0x")
+        .map_or_else(
+            || len.parse::<u64>().ok(),
+            |h| u64::from_str_radix(h, 16).ok(),
+        )
+        .filter(|n| (1..=ARRAY_LEN_MAX).contains(n))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "array length {} in {} is not a count from 1 to {ARRAY_LEN_MAX:#x}",
+                crate::text::quoted(len),
+                crate::text::quoted(text)
+            )
+        })
 }
 
 /// The scalar a word of the language spells.
@@ -190,38 +261,46 @@ impl TypeExpr {
     ///
     /// # Returns
     ///
-    /// `u32`, `char`, `Player`, `Player *`: stars, never the `ptr` word, so
-    /// one form round-trips.
+    /// `u32`, `char`, `Player`, `Player *`, `char[16]`, `Rec *[4]`: stars,
+    /// never the `ptr` word, so one form round-trips.
     #[must_use]
     pub fn spell(&self) -> String {
-        let (base, stars) = self.spelled_parts();
-        if stars == 0 {
-            base
-        } else {
-            format!("{base} {}", "*".repeat(stars))
-        }
-    }
-
-    /// The type's own word and how many pointers are over it.
-    fn spelled_parts(&self) -> (String, usize) {
-        match self {
-            Self::U8 => ("u8".to_owned(), 0),
-            Self::U16 => ("u16".to_owned(), 0),
-            Self::U32 => ("u32".to_owned(), 0),
-            Self::U64 => ("u64".to_owned(), 0),
-            Self::I8 => ("i8".to_owned(), 0),
-            Self::I16 => ("i16".to_owned(), 0),
-            Self::I32 => ("i32".to_owned(), 0),
-            Self::I64 => ("i64".to_owned(), 0),
-            Self::F32 => ("f32".to_owned(), 0),
-            Self::F64 => ("f64".to_owned(), 0),
-            Self::Char => ("char".to_owned(), 0),
-            Self::Named(n) => (n.clone(), 0),
-            Self::Ptr(inner) => {
-                let (base, stars) = inner.spelled_parts();
-                (base, stars + 1)
+        let mut suffixes: Vec<Option<u64>> = Vec::new();
+        let mut current = self;
+        let base = loop {
+            current = match current {
+                Self::Ptr(inner) => {
+                    suffixes.push(None);
+                    inner
+                }
+                Self::Array(inner, n) => {
+                    suffixes.push(Some(*n));
+                    inner
+                }
+                Self::U8 => break "u8",
+                Self::U16 => break "u16",
+                Self::U32 => break "u32",
+                Self::U64 => break "u64",
+                Self::I8 => break "i8",
+                Self::I16 => break "i16",
+                Self::I32 => break "i32",
+                Self::I64 => break "i64",
+                Self::F32 => break "f32",
+                Self::F64 => break "f64",
+                Self::Char => break "char",
+                Self::Named(n) => break n.as_str(),
+            };
+        };
+        let mut out = base.to_owned();
+        let mut star_run = false;
+        for s in suffixes.iter().rev() {
+            match s {
+                None => out.push_str(if star_run { "*" } else { " *" }),
+                Some(n) => out.push_str(&format!("[{n}]")),
             }
+            star_run = s.is_none();
         }
+        out
     }
 
     /// The C type the decompiler renders a load of this width as, when the
@@ -234,7 +313,7 @@ impl TypeExpr {
     /// # Returns
     ///
     /// The cast text inside `*(T*)`, or `None` for a named type, whose width
-    /// the types it names say.
+    /// the types it names say, and for an array, which no one load reads.
     #[must_use]
     pub fn c_name(&self, word: u64) -> Option<String> {
         Some(match self {
@@ -249,7 +328,7 @@ impl TypeExpr {
             Self::F32 => "float".to_owned(),
             Self::F64 => "double".to_owned(),
             Self::Ptr(_) => (if word == 4 { "uint32_t" } else { "uint64_t" }).to_owned(),
-            Self::Named(_) => return None,
+            Self::Named(_) | Self::Array(..) => return None,
         })
     }
 }
@@ -565,7 +644,9 @@ pub(crate) fn check_type_name(name: &str) -> anyhow::Result<()> {
 /// A name is followed through aliases and into a struct's size; a chain
 /// that loops, or a name neither table has, has no width. A self-reference
 /// resolves only in a cycle a pointer broke, which [`TypeExpr::Ptr`] sizing
-/// to the word without walking its inner type is what ends.
+/// to the word without walking its inner type is what ends. An array is its
+/// values' width times their count, which [`ARRAY_LEN_MAX`] keeps from
+/// overflowing at any depth the language allows.
 ///
 /// # Arguments
 ///
@@ -584,28 +665,32 @@ pub fn named_width(
     self_name: &str,
     word: u64,
 ) -> Option<u64> {
-    match ty {
-        TypeExpr::Ptr(inner) => resolves(known, inner, self_name).then_some(word),
-        TypeExpr::Named(n) => {
-            let mut seen: BTreeSet<&str> = BTreeSet::new();
-            let mut current = n.as_str();
-            loop {
-                if current == self_name || !seen.insert(current) {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut count: u64 = 1;
+    let mut current = ty;
+    loop {
+        current = match current {
+            TypeExpr::Ptr(inner) => {
+                return resolves(known, inner, self_name)
+                    .then_some(word)?
+                    .checked_mul(count);
+            }
+            TypeExpr::Array(inner, n) => {
+                count = count.checked_mul(*n)?;
+                inner
+            }
+            TypeExpr::Named(n) => {
+                if n == self_name || !seen.insert(n.as_str()) {
                     return None;
                 }
-                match known.get(current) {
-                    Some(UserType::Struct(s)) => return Some(s.size),
-                    Some(UserType::Enum(e)) => return Some(e.size),
-                    Some(UserType::Alias(inner)) => match inner {
-                        TypeExpr::Ptr(_) => return Some(word),
-                        TypeExpr::Named(next) => current = next.as_str(),
-                        leaf => return scalar_width(leaf),
-                    },
-                    None => return None,
+                match known.get(n)? {
+                    UserType::Struct(s) => return s.size.checked_mul(count),
+                    UserType::Enum(e) => return e.size.checked_mul(count),
+                    UserType::Alias(inner) => inner,
                 }
             }
-        }
-        leaf => scalar_width(leaf),
+            leaf => return scalar_width(leaf)?.checked_mul(count),
+        };
     }
 }
 
@@ -631,7 +716,7 @@ fn resolves(known: &BTreeMap<String, UserType>, ty: &TypeExpr, self_name: &str) 
     let mut current = ty;
     loop {
         match current {
-            TypeExpr::Ptr(inner) => current = inner.as_ref(),
+            TypeExpr::Ptr(inner) | TypeExpr::Array(inner, _) => current = inner.as_ref(),
             TypeExpr::Named(n) => {
                 if n == self_name {
                     return true;
@@ -661,7 +746,7 @@ fn scalar_width(ty: &TypeExpr) -> Option<u64> {
         TypeExpr::U16 | TypeExpr::I16 => 2,
         TypeExpr::U32 | TypeExpr::I32 | TypeExpr::F32 => 4,
         TypeExpr::U64 | TypeExpr::I64 | TypeExpr::F64 => 8,
-        TypeExpr::Ptr(_) | TypeExpr::Named(_) => return None,
+        TypeExpr::Ptr(_) | TypeExpr::Array(..) | TypeExpr::Named(_) => return None,
     })
 }
 
@@ -891,9 +976,9 @@ pub fn validate(
     Ok(())
 }
 
-/// Refuses a type that stacks more pointers than [`PTR_DEPTH_MAX`], the
-/// cap [`parse_type`] holds a tool's text to, so a hand-edited project
-/// cannot state a deeper type than a tool call can.
+/// Refuses a type that stacks more pointers and arrays than
+/// [`PTR_DEPTH_MAX`], or holds an array of a count [`parse_type`] refuses,
+/// so a hand-edited project cannot state a type a tool call cannot.
 ///
 /// # Arguments
 ///
@@ -902,13 +987,36 @@ pub fn validate(
 ///
 /// # Errors
 ///
-/// When the type is deeper than the cap; the message names `what`.
+/// When the type is deeper than the cap or an array's count is zero or
+/// past [`ARRAY_LEN_MAX`]; the message names `what`.
 fn check_depth(ty: &TypeExpr, what: &str) -> anyhow::Result<()> {
     let mut depth = 0usize;
     let mut current = ty;
-    while let TypeExpr::Ptr(inner) = current {
+    loop {
+        current = match current {
+            TypeExpr::Ptr(inner) => inner,
+            TypeExpr::Array(inner, n) => {
+                if !(1..=ARRAY_LEN_MAX).contains(n) {
+                    return Err(anyhow::anyhow!(
+                        "{what} holds an array of {n}; an array holds 1 to {ARRAY_LEN_MAX:#x}"
+                    ));
+                }
+                inner
+            }
+            TypeExpr::U8
+            | TypeExpr::U16
+            | TypeExpr::U32
+            | TypeExpr::U64
+            | TypeExpr::I8
+            | TypeExpr::I16
+            | TypeExpr::I32
+            | TypeExpr::I64
+            | TypeExpr::F32
+            | TypeExpr::F64
+            | TypeExpr::Char
+            | TypeExpr::Named(_) => break,
+        };
         depth += 1;
-        current = inner;
     }
     if depth > PTR_DEPTH_MAX {
         return Err(anyhow::anyhow!(
@@ -1046,6 +1154,80 @@ mod tests {
         for bad in ["", "u32 u64", "* Player", "not-a-type!", "u32 * extra"] {
             assert!(parse_type(bad).is_err(), "{bad} parsed");
         }
+    }
+
+    /// Arrays parse, spell back and size as their values times their count.
+    ///
+    /// They read left to right with the pointers; an empty or oversized
+    /// count, a bracket left open, and a loop of typedefs through arrays
+    /// are refused rather than overflowing or recursing for ever.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn arrays_parse_spell_and_size() {
+        let rec = || Box::new(TypeExpr::Named("Rec".to_owned()));
+        for (text, ty, spelled) in [
+            (
+                "char[16]",
+                TypeExpr::Array(Box::new(TypeExpr::Char), 16),
+                "char[16]",
+            ),
+            (
+                "Rec *[4]",
+                TypeExpr::Array(Box::new(TypeExpr::Ptr(rec())), 4),
+                "Rec *[4]",
+            ),
+            (
+                "char[0x10]*",
+                TypeExpr::Ptr(Box::new(TypeExpr::Array(Box::new(TypeExpr::Char), 16))),
+                "char[16] *",
+            ),
+            (
+                "u8 [2] [3]",
+                TypeExpr::Array(Box::new(TypeExpr::Array(Box::new(TypeExpr::U8), 2)), 3),
+                "u8[2][3]",
+            ),
+        ] {
+            let parsed = parse_type(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(parsed, ty, "{text}");
+            assert_eq!(parsed.spell(), spelled, "{text}");
+            assert_eq!(parse_type(spelled).ok(), Some(ty), "{spelled}");
+        }
+        let known = BTreeMap::new();
+        assert_eq!(
+            width_of(&known, &parse_type("u32[3][2]").unwrap(), 8),
+            Some(24)
+        );
+        assert_eq!(
+            width_of(&known, &parse_type("u8 *[4]").unwrap(), 4),
+            Some(16)
+        );
+        for bad in ["u8[0]", "u8[0xffffffffffff]", "u8[", "u8[x]", "[4]u8"] {
+            assert!(parse_type(bad).is_err(), "{bad} parsed");
+        }
+        let huge = (0..super::PTR_DEPTH_MAX).fold(TypeExpr::U64, |t, _| {
+            TypeExpr::Array(Box::new(t), super::ARRAY_LEN_MAX)
+        });
+        assert_eq!(width_of(&known, &huge, 8), None, "overflow sizes to none");
+        let mut looped = BTreeMap::new();
+        looped.insert(
+            "A".to_owned(),
+            super::UserType::Alias(parse_type("B[2]").unwrap()),
+        );
+        looped.insert(
+            "B".to_owned(),
+            super::UserType::Alias(parse_type("A[2]").unwrap()),
+        );
+        assert!(validate(&looped, &BTreeMap::new()).is_err());
+        let mut empty = BTreeMap::new();
+        empty.insert(
+            "E".to_owned(),
+            super::UserType::Alias(TypeExpr::Array(Box::new(TypeExpr::U8), 0)),
+        );
+        let err = validate(&empty, &BTreeMap::new()).expect_err("an empty array validated");
+        assert!(err.to_string().contains("holds an array of 0"), "{err}");
     }
 
     /// A type deeper than [`super::PTR_DEPTH_MAX`] pointers is refused where

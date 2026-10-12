@@ -19,6 +19,7 @@ mod protection;
 mod runs;
 mod summary;
 mod triage;
+mod typed;
 mod unpack;
 
 pub use calls::*;
@@ -35,6 +36,7 @@ pub use protection::*;
 pub use runs::*;
 pub use summary::*;
 pub use triage::*;
+pub use typed::*;
 pub use unpack::*;
 
 use super::{

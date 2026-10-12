@@ -152,7 +152,8 @@ impl CType {
     }
 }
 
-/// What the machine passes a type of the user-type language as.
+/// What the machine passes a type of the user-type language as; an array
+/// passes as a pointer to its first value, as C passes one.
 ///
 /// # Arguments
 ///
@@ -163,7 +164,7 @@ fn user_pass(types: &BTreeMap<String, UserType>, ty: &TypeExpr) -> Option<Pass> 
     let mut current = ty;
     for _ in 0..=utypes::PTR_DEPTH_MAX {
         current = match current {
-            TypeExpr::Ptr(_) => return Some(Pass::Pointer),
+            TypeExpr::Ptr(_) | TypeExpr::Array(..) => return Some(Pass::Pointer),
             TypeExpr::U8 | TypeExpr::Char => return int(8, false),
             TypeExpr::U16 => return int(16, false),
             TypeExpr::U32 => return int(32, false),
