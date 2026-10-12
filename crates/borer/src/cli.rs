@@ -12,7 +12,7 @@ use borer_engine::analysis::{
     senders, sigs, snapshot, utypes, vtables,
 };
 use borer_engine::pack::{Pack, Packs};
-use borer_engine::program::Program;
+use borer_engine::program::{Feature, Program};
 use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, script, search};
 
@@ -977,7 +977,7 @@ fn packs_report(program: &Program, named: &Packs, auto: bool) -> String {
     let (loaded, _) = borer::packs::for_program(program, named, auto);
     let scripts = loaded.packs.iter().any(|p| !p.scripts.is_empty());
     let names = !loaded.list("names", "fn").is_empty() || !loaded.list("names", "lib").is_empty();
-    if (scripts || names) && program.arch.bitness().is_some() {
+    if (scripts || names) && program.arch.supports(Feature::Discover) {
         let a = Analysis::compute_with(program, loaded);
         out.push_str(&sigs::pack_names_tsv(&a.pack_names));
         out.push_str(&libnames::library_names_tsv(&a.library_names));
@@ -1071,7 +1071,7 @@ impl Session {
     ///
     /// When borer cannot disassemble the architecture.
     fn analysis(&self) -> anyhow::Result<Analysis> {
-        if let Some(why) = self.program.no_code() {
+        if let Some(why) = self.program.refuses(Feature::Discover) {
             bail!("{why}");
         }
         Ok(Analysis::compute_with(
@@ -1523,7 +1523,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .program
                 .arch
                 .bitness()
-                .with_context(|| s.program.no_code().unwrap_or_default())?;
+                .with_context(|| s.program.refuses(Feature::Disasm).unwrap_or_default())?;
             let code = s
                 .program
                 .read_va_upto(va, 16 * 1024)
@@ -1851,7 +1851,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", render::qt_tsv(&a));
         }
         Query::Triage => {
-            if s.program.no_code().is_some() {
+            if s.program.refuses(Feature::Discover).is_some() {
                 print!("{}", render::file_triage_tsv(&s.program));
             } else {
                 let a = s.analysis()?;

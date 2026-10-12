@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use borer_engine::analysis::{Analysis, Overlay, render};
-use borer_engine::program::Program;
+use borer_engine::program::{Feature, Program};
 use rmcp::ErrorData;
 
 use super::{BorerServer, err_params, parse_field_offset};
@@ -565,7 +565,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     pub(crate) fn triage_text(&self) -> Result<String, ErrorData> {
-        if self.require_loaded()?.no_code().is_some() {
+        if self.require_loaded()?.refuses(Feature::Discover).is_some() {
             return self.with_program(|p| Ok(render::file_triage_tsv(p)));
         }
         self.with_analysis(|p, a, o| Ok(render::triage_tsv(p, a, o)))

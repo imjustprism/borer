@@ -42,7 +42,7 @@ use borer_engine::analysis::{
     Analysis, EnumSource, Overlay, parse_addr, parse_off, render, resolve,
 };
 use borer_engine::pack::{Pack, Packs};
-use borer_engine::program::Program;
+use borer_engine::program::{Feature, Program};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num, strings as strscan};
 use rayon::prelude::*;
 use rmcp::handler::server::wrapper::Parameters;
@@ -463,7 +463,7 @@ impl BorerServer {
             symsrv::cache_dir().as_deref(),
         )
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;
-        if prog.arch.bitness().is_none() {
+        if !prog.arch.supports(Feature::Discover) {
             return Err(err_params(format!(
                 "arch '{}' has no code analysis",
                 prog.arch.name()
@@ -581,7 +581,7 @@ impl BorerServer {
             return Ok(a);
         }
         let program = self.loaded().ok_or(NO_BINARY)?;
-        if let Some(why) = program.no_code() {
+        if let Some(why) = program.refuses(Feature::Discover) {
             return Err(why);
         }
         let packs = Arc::clone(&read_lock(&self.program_packs));
@@ -877,7 +877,7 @@ impl BorerServer {
     )]
     fn binary_info(&self) -> Result<String, ErrorData> {
         self.with_program(|p| {
-            let more = if p.no_code().is_some() {
+            let more = if p.refuses(Feature::Discover).is_some() {
                 "borer://triage reads the whole file in one call".to_owned()
             } else {
                 template_names()
@@ -921,7 +921,7 @@ impl BorerServer {
             let bitness = p
                 .arch
                 .bitness()
-                .ok_or_else(|| p.no_code().unwrap_or_default())?;
+                .ok_or_else(|| p.refuses(Feature::Disasm).unwrap_or_default())?;
             let va = self
                 .ensure_analysis()
                 .ok()

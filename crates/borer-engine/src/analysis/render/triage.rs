@@ -923,7 +923,7 @@ pub fn file_triage_tsv(p: &Program) -> String {
         p.sections.len(),
         p.symbols.len()
     );
-    if let Some(why) = p.no_code() {
+    if let Some(why) = p.refuses(Feature::Discover) {
         let _ = writeln!(out, "# code: {why}");
     }
     let _ = writeln!(

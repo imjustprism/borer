@@ -13,6 +13,7 @@ use anyhow::{Context, anyhow};
 
 use crate::entropy::shannon;
 use crate::headers::Headers;
+use crate::isa::Isa;
 
 /// Container format of the loaded file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +45,9 @@ impl BinaryFormat {
 
 /// Instruction-set architectures the engine recognizes.
 ///
-/// The disassembler and decompiler cover [`Arch::X86`] and [`Arch::X86_64`];
-/// the other variants are identified from the headers so the summary can say
-/// what a file is, and wait for a multi-architecture lifter.
+/// What the engine does with each one's code is [`Arch::supports`]; an
+/// architecture it does not analyze is still identified from the headers
+/// so the summary can say what a file is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arch {
     /// 32-bit x86.
@@ -82,6 +83,59 @@ impl Arch {
             _ => None,
         }
     }
+
+    /// Returns the instruction set this architecture's code is written in.
+    ///
+    /// # Returns
+    ///
+    /// The instruction set, or `None` for [`Arch::Unknown`].
+    pub fn isa(self) -> Option<Isa> {
+        match self {
+            Arch::X86 => Some(Isa::X86 { bits: 32 }),
+            Arch::X86_64 => Some(Isa::X86 { bits: 64 }),
+            Arch::Arm64 => Some(Isa::A64),
+            Arch::Unknown => None,
+        }
+    }
+
+    /// Tells whether the engine does `feature` with this architecture's code.
+    ///
+    /// The one table of what each instruction set supports: a stage lands
+    /// for an instruction set by flipping its arm here, and every gate
+    /// ([`Program::refuses`]) follows.
+    ///
+    /// # Arguments
+    ///
+    /// * `feature` - What a tool asks of the code.
+    pub fn supports(self, feature: Feature) -> bool {
+        match self.isa() {
+            Some(Isa::X86 { .. }) => true,
+            Some(Isa::A64) => match feature {
+                Feature::Disasm | Feature::Discover | Feature::Emulate | Feature::Decompile => {
+                    false
+                }
+            },
+            None => false,
+        }
+    }
+}
+
+/// What a code tool asks the engine to do with a program's instructions.
+///
+/// Support arrives one instruction set and one stage at a time, so a tool
+/// names the stage it needs ([`Program::refuses`]) instead of reading
+/// support off [`Arch::bitness`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Feature {
+    /// Decoding instructions to text: a linear listing at an address.
+    Disasm,
+    /// Function discovery, and every answer read from the analysis it
+    /// builds (functions, references, the call graph).
+    Discover,
+    /// Running code in the emulator.
+    Emulate,
+    /// Lifting functions to pseudo-C.
+    Decompile,
 }
 
 /// One mapped section of the image.
@@ -2173,7 +2227,8 @@ impl Program {
         self.header_slice(va, 1).is_some()
     }
 
-    /// Says why the code tools have nothing to read here, when they have not.
+    /// Says why the engine cannot do `feature` with this program's code,
+    /// when it cannot.
     ///
     /// An unrecognized file loads as raw bytes of no architecture, and a
     /// program for another instruction set loads with its sections and
@@ -2181,12 +2236,16 @@ impl Program {
     /// the format so the reader knows which of the two it has, and points
     /// at the tools that read any file.
     ///
+    /// # Arguments
+    ///
+    /// * `feature` - What the tool asks of the code.
+    ///
     /// # Returns
     ///
-    /// `None` for x86 and x86-64; otherwise the sentence a code tool
-    /// answers with.
-    pub fn no_code(&self) -> Option<String> {
-        self.arch.bitness().is_none().then(|| {
+    /// `None` when [`Arch::supports`] the feature; otherwise the sentence
+    /// a code tool answers with.
+    pub fn refuses(&self, feature: Feature) -> Option<String> {
+        (!self.arch.supports(feature)).then(|| {
             format!(
                 "{} file, arch '{}': borer analyzes only x86 and x86-64 code, so no code analysis applies; triage, entropy and strings read any file",
                 self.format.name(),
@@ -2250,7 +2309,7 @@ impl Program {
         if let Some(machine) = &self.headers.machine {
             out.push_str(&format!("machine: {machine}\n"));
         }
-        if let Some(why) = self.no_code() {
+        if let Some(why) = self.refuses(Feature::Discover) {
             out.push_str(&format!("code:    {why}\n"));
         }
         if let Some(magic) = crate::headers::sniff_file(&self.bytes) {

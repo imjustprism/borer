@@ -11,7 +11,7 @@
 
 use borer_engine::analysis::{Analysis, Overlay, decompile::decompile};
 use borer_engine::num::lo32;
-use borer_engine::program::{Program, SymbolKind};
+use borer_engine::program::{Feature, Program, SymbolKind};
 
 /// Image base of the fixture.
 const BASE: u64 = 0x40_0000;
@@ -502,7 +502,7 @@ fn eh_frame_seeds_the_functions_of_a_stripped_binary() {
 /// machine and says no code analysis applies, while still loading sections.
 ///
 /// The fixture's `e_machine` is rewritten to `EM_ARM` (40). The summary
-/// then carries a `machine:` line, `no_code` fires, and the sections the
+/// then carries a `machine:` line, `refuses` fires, and the sections the
 /// loader read are still there for triage.
 #[test]
 fn a_non_x86_machine_is_named_and_code_analysis_declines() {
@@ -517,7 +517,10 @@ fn a_non_x86_machine_is_named_and_code_analysis_declines() {
     );
     let summary = p.summary();
     assert!(summary.contains("machine: ARM (e_machine 40)"), "{summary}");
-    assert!(p.no_code().is_some(), "no code analysis on a foreign arch");
+    assert!(
+        p.refuses(Feature::Discover).is_some(),
+        "no code analysis on a foreign arch"
+    );
     assert!(
         p.sections.iter().any(|s| s.name == ".text"),
         "the sections still loaded"
