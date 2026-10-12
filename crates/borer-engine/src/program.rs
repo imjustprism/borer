@@ -111,9 +111,8 @@ impl Arch {
         match self.isa() {
             Some(Isa::X86 { .. }) => true,
             Some(Isa::A64) => match feature {
-                Feature::Disasm | Feature::Discover | Feature::Emulate | Feature::Decompile => {
-                    false
-                }
+                Feature::Disasm => true,
+                Feature::Discover | Feature::Emulate | Feature::Decompile => false,
             },
             None => false,
         }
@@ -2227,14 +2226,47 @@ impl Program {
         self.header_slice(va, 1).is_some()
     }
 
-    /// Says why the engine cannot do `feature` with this program's code,
-    /// when it cannot.
+    /// Returns the instruction set to read this program's code in for
+    /// `feature`.
     ///
     /// An unrecognized file loads as raw bytes of no architecture, and a
     /// program for another instruction set loads with its sections and
-    /// symbols; neither has code borer can disassemble. The answer names
-    /// the format so the reader knows which of the two it has, and points
-    /// at the tools that read any file.
+    /// symbols; neither has code borer can read. An arm64 program is
+    /// disassembled and nothing more yet. The refusal names the format so
+    /// the reader knows which case it has, says what does apply, and
+    /// points at the tools that read any file.
+    ///
+    /// # Arguments
+    ///
+    /// * `feature` - What the tool asks of the code.
+    ///
+    /// # Errors
+    ///
+    /// The sentence a code tool answers with when the engine does not do
+    /// `feature` with this architecture ([`Arch::supports`]).
+    pub fn isa_for(&self, feature: Feature) -> Result<Isa, String> {
+        let (format, arch) = (self.format.name(), self.arch.name());
+        match self.arch.isa() {
+            Some(isa) if self.arch.supports(feature) => Ok(isa),
+            Some(_) if self.arch.supports(Feature::Disasm) => {
+                let stage = match feature {
+                    Feature::Disasm => "disassemble it",
+                    Feature::Discover => "discover its functions",
+                    Feature::Emulate => "emulate it",
+                    Feature::Decompile => "decompile it",
+                };
+                Err(format!(
+                    "{format} file, arch '{arch}': borer disassembles {arch} code (disassemble, the disasm command) but does not yet {stage}, so no code analysis beyond disassembly applies; triage, entropy and strings read any file"
+                ))
+            }
+            Some(_) | None => Err(format!(
+                "{format} file, arch '{arch}': borer decodes only x86, x86-64 and arm64 code, so no code analysis applies; triage, entropy and strings read any file"
+            )),
+        }
+    }
+
+    /// Says why the engine cannot do `feature` with this program's code,
+    /// when it cannot.
     ///
     /// # Arguments
     ///
@@ -2243,15 +2275,9 @@ impl Program {
     /// # Returns
     ///
     /// `None` when [`Arch::supports`] the feature; otherwise the sentence
-    /// a code tool answers with.
+    /// a code tool answers with ([`Program::isa_for`]).
     pub fn refuses(&self, feature: Feature) -> Option<String> {
-        (!self.arch.supports(feature)).then(|| {
-            format!(
-                "{} file, arch '{}': borer analyzes only x86 and x86-64 code, so no code analysis applies; triage, entropy and strings read any file",
-                self.format.name(),
-                self.arch.name()
-            )
-        })
+        self.isa_for(feature).err()
     }
 
     /// Returns a compact `name(start..end)` listing of the sections.

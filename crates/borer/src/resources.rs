@@ -703,11 +703,15 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, or the path is a device or does not read.
+    /// When no binary is loaded, borer does not disassemble its
+    /// architecture, or the path is a device or does not read.
     pub(crate) fn script_text(&self, path: &str) -> Result<String, ErrorData> {
         let code = read_spec_file(path, "a Rhai script")?;
         let program = self.require_loaded()?;
-        let a = self.ensure_analysis().map_err(err_params)?;
+        if let Some(why) = program.refuses(Feature::Disasm) {
+            return Err(err_params(why));
+        }
+        let a = self.analysis_or_empty();
         let run =
             borer_engine::script::run_with(program, a, Arc::new(self.overlay()), &code, &[], None);
         Ok(borer_engine::script::run_tsv(&run))

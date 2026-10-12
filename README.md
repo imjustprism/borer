@@ -7,7 +7,8 @@ the full listings a GUI tool would show.
 
 No Ghidra, IDA or Binary Ninja runs behind it. The loader, function
 discovery, lifter, emulator and decompiler all live in this repo; instruction
-decoding comes from [iced-x86](https://github.com/icedland/iced).
+decoding comes from [iced-x86](https://github.com/icedland/iced) for x86 and
+[yaxpeax-arm](https://crates.io/crates/yaxpeax-arm) for arm64.
 
 ## Why another one
 
@@ -259,9 +260,11 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
 
 ## Limits
 
-- Only x86 and x86-64 are disassembled and decompiled. An arm64 Mach-O
-  loads its sections and symbols and stops there. Other ELF machines are
-  not decoded.
+- Only x86 and x86-64 are analyzed and decompiled. An arm64 Mach-O, ELF
+  or PE loads its sections and symbols and disassembles (`disassemble`,
+  the `disasm` command, a script's `disasm`), but its functions are not
+  discovered yet, so the tools that read functions refuse it. Other
+  machines are not decoded.
 - Decompiler output is structured but rough, as the example above shows.
   Shapes it can't prove come out as labels and gotos rather than a guess.
 - Relocations are read for analysis, not applied. Mach-O chained fixups

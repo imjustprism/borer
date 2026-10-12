@@ -1519,21 +1519,20 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 bail!("disasm count must be at least 1");
             }
             let count = count.min(256);
-            let bitness = s
+            let isa = s
                 .program
-                .arch
-                .bitness()
-                .with_context(|| s.program.refuses(Feature::Disasm).unwrap_or_default())?;
+                .isa_for(Feature::Disasm)
+                .map_err(anyhow::Error::msg)?;
             let code = s
                 .program
                 .read_va_upto(va, 16 * 1024)
                 .with_context(|| format!("address {va:#x} not mapped"))?;
-            let a = s.analysis()?;
+            let a = s.analysis_or_empty();
             let window = render::sweep_limit(&a, va)
                 .and_then(|end| usize::try_from(end - va).ok())
                 .and_then(|n| code.get(..n.min(code.len())))
                 .unwrap_or(code);
-            let lines = disasm::disassemble(window, va, bitness, count);
+            let lines = disasm::disassemble_isa(window, va, isa, count);
             let caveat = render::listing_caveat(&s.program, &a, va);
             if !caveat.is_empty() {
                 println!("# {caveat}");
@@ -2071,7 +2070,10 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     words.push(w.clone());
                 }
             }
-            let a = s.analysis()?;
+            if let Some(why) = s.program.refuses(Feature::Disasm) {
+                bail!("{why}");
+            }
+            let a = s.analysis_or_empty();
             let run = script::run(
                 Arc::clone(&s.program),
                 Arc::new(a),

@@ -1,12 +1,24 @@
-//! AArch64 decoding: a table of words assembled by LLVM (`clang
-//! --target=aarch64-linux-gnu`) and checked against `llvm-objdump`, each
-//! with the text, control flow and branch target the engine gives it.
+//! AArch64 decoding and disassembly.
+//!
+//! A table of words assembled by LLVM (`clang --target=aarch64-linux-gnu`)
+//! and checked against `llvm-objdump`, each with the text, control flow and
+//! branch target the engine gives it; then thin arm64 Mach-O, ELF, PE and
+//! raw images, built here, disassembled at their entry, and a sweep of
+//! every word.
 #![expect(
     clippy::missing_panics_doc,
+    clippy::expect_used,
     reason = "assertions are the point of a test"
 )]
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use borer_engine::analysis::{Analysis, render};
+use borer_engine::disasm;
+use borer_engine::isa::Isa;
 use borer_engine::isa::a64::{self, Flow, Mem, Mode, Op, Opnd, Reg, Shift};
+use borer_engine::program::{Arch, BinaryFormat, Feature, Program};
 
 /// Where the first word of [`WORDS`] sits; each next word is four bytes on.
 const BASE: u64 = 0x10000;
@@ -314,4 +326,185 @@ fn authenticated_branches_keep_the_plain_branch_class() {
     assert_eq!(a64::decode(0xd71f_0a11, 0).op, Op::Br);
     // ASM: blraa x8, sp
     assert_eq!(a64::decode(0xd73f_091f, 0).op, Op::Blr);
+}
+
+/// The code every image fixture holds at its entry: a guarded frame that
+/// calls a helper six words on.
+const BLOCK: [u32; 8] = [
+    // ASM: bti c
+    0xd503_245f,
+    // ASM: stp x29, x30, [sp, #-16]!
+    0xa9bf_7bfd,
+    // ASM: bl entry+0x18
+    0x9400_0004,
+    // ASM: ldp x29, x30, [sp], #16
+    0xa8c1_7bfd,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: nop
+    0xd503_201f,
+    // ASM: add w0, w0, #1
+    0x1100_0400,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// Returns [`BLOCK`] as the bytes an image stores.
+fn block_bytes() -> Vec<u8> {
+    BLOCK.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// Checks that an arm64 program disassembles [`BLOCK`] at its entry, word
+/// by word with the call's target, that an address inside a word lists
+/// from the word, and that disassembly is all that applies yet.
+fn check_disassembles(p: &Program, entry: u64) {
+    assert_eq!((p.arch, p.is_64, p.entry), (Arch::Arm64, true, Some(entry)));
+    let code = p.read_va(entry, 32).expect("the block is mapped");
+    let lines = disasm::disassemble_isa(code, entry, Isa::A64, 64);
+    let call = format!("bl {:#x}", entry + 0x18);
+    let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(
+        text,
+        [
+            "bti c",
+            "stp x29, x30, [sp, #-0x10]!",
+            call.as_str(),
+            "ldp x29, x30, [sp], #0x10",
+            "ret",
+            "nop",
+            "add w0, w0, #0x1",
+            "ret"
+        ]
+    );
+    assert_eq!(lines[2].target, Some(entry + 0x18));
+    assert!(
+        lines
+            .iter()
+            .zip(0u64..)
+            .all(|(l, i)| l.va == entry + 4 * i && l.bytes.len() == 4)
+    );
+    assert_eq!(p.isa_for(Feature::Disasm), Ok(Isa::A64));
+    let why = p
+        .refuses(Feature::Discover)
+        .expect("functions are not discovered yet");
+    assert!(
+        why.contains("arch 'arm64': borer disassembles arm64 code")
+            && why.contains("does not yet discover its functions"),
+        "{why}"
+    );
+    assert!(p.summary().contains(&why), "{}", p.summary());
+    let a = Analysis::compute(p);
+    assert!(a.functions.is_empty());
+    assert_eq!(
+        render::instruction_at_or_before(p, &a, entry + 6),
+        Some(entry + 4)
+    );
+}
+
+/// A thin arm64 Mach-O: the x86-64 fixture with its CPU type set to
+/// `CPU_TYPE_ARM64` and arm64 code at its entry.
+#[test]
+fn a_thin_arm64_macho_disassembles_at_its_entry() {
+    let mut bytes = crate::macho::thin();
+    bytes[4..8].copy_from_slice(&0x0100_000cu32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&0u32.to_le_bytes());
+    bytes[0x300..0x320].copy_from_slice(&block_bytes());
+    let p = Program::from_bytes(PathBuf::from("arm64.macho"), bytes).expect("parses");
+    assert_eq!(p.format, BinaryFormat::MachO);
+    check_disassembles(&p, crate::macho::MAIN);
+}
+
+/// An arm64 ELF: the x86-64 fixture with `e_machine` set to `EM_AARCH64`
+/// (183) and arm64 code at its entry.
+#[test]
+fn an_arm64_elf_disassembles_at_its_entry() {
+    let mut bytes = crate::elf::elf_bytes(false);
+    bytes[0x12..0x14].copy_from_slice(&183u16.to_le_bytes());
+    bytes[0x180..0x1a0].copy_from_slice(&block_bytes());
+    let p = Program::from_bytes(PathBuf::from("arm64.elf"), bytes).expect("parses");
+    assert_eq!(p.format, BinaryFormat::Elf);
+    check_disassembles(&p, crate::elf::MAIN);
+}
+
+/// An arm64 PE: one code section entered at its start, with the COFF
+/// machine set to `IMAGE_FILE_MACHINE_ARM64` (`0xaa64`).
+#[test]
+fn an_arm64_pe_disassembles_at_its_entry() {
+    let mut bytes = crate::protection::pe(
+        &[crate::protection::sec(".text", 0x1000, block_bytes())],
+        0x1000,
+    );
+    let machine = crate::protection::PE_AT + 4;
+    bytes[machine..machine + 2].copy_from_slice(&0xaa64u16.to_le_bytes());
+    let p = Program::from_bytes(PathBuf::from("arm64.exe"), bytes).expect("parses");
+    assert_eq!(p.format, BinaryFormat::Pe);
+    check_disassembles(&p, crate::protection::IMAGE_BASE + 0x1000);
+}
+
+/// A raw arm64 image, built in memory with no container, is 64-bit and
+/// disassembles like a loaded one.
+#[test]
+fn a_raw_arm64_image_disassembles_at_its_entry() {
+    let p = crate::raw::image(Arch::Arm64, &block_bytes(), &[]);
+    check_disassembles(&p, 0x40_1000);
+}
+
+/// Trailing bytes too few for a word are one `(bad)` line that keeps them,
+/// rather than being dropped, and the instruction cap holds.
+#[test]
+fn a_truncated_last_word_keeps_its_bytes() {
+    let mut code = block_bytes();
+    code.truncate(10);
+    let lines = disasm::disassemble_isa(&code, 0x1000, Isa::A64, 16);
+    assert_eq!(lines.len(), 3);
+    assert_eq!(
+        (
+            lines[2].va,
+            lines[2].bytes.as_slice(),
+            lines[2].text.as_str(),
+            lines[2].target
+        ),
+        (0x1008, &[0x04, 0x00][..], "(bad)", None)
+    );
+    assert_eq!(disasm::disassemble_isa(&code, 0x1000, Isa::A64, 1).len(), 1);
+}
+
+/// Every one of the 2^32 words decodes to one line of four bytes.
+///
+/// A word is all the input one instruction has, so the sweep proves that no
+/// input reaches a panic in the decoder or its text.
+#[test]
+#[ignore = "decodes all 2^32 words: minutes on every core"]
+fn every_word_decodes_to_one_line_of_four_bytes() {
+    /// Chunks of [`CHUNK`] words each, and words per chunk: 2^16 each.
+    const CHUNK: u32 = 1 << 16;
+    /// The same count as a line count.
+    const LINES: usize = 1 << 16;
+    let next = AtomicU32::new(0);
+    let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let chunk = next.fetch_add(1, Ordering::Relaxed);
+                    if chunk >= CHUNK {
+                        break;
+                    }
+                    let first = chunk << 16;
+                    let code: Vec<u8> = (first..=first | (CHUNK - 1))
+                        .flat_map(u32::to_le_bytes)
+                        .collect();
+                    let lines =
+                        disasm::disassemble_isa(&code, u64::from(first) << 2, Isa::A64, LINES);
+                    assert_eq!(lines.len(), LINES, "chunk {chunk:#x}");
+                    assert!(
+                        lines
+                            .iter()
+                            .all(|l| l.bytes.len() == 4 && !l.text.is_empty()),
+                        "chunk {chunk:#x}"
+                    );
+                }
+            });
+        }
+    });
 }

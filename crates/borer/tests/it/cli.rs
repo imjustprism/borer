@@ -539,6 +539,73 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
     drop(std::fs::remove_file(&path));
 }
 
+/// An arm64 image disassembles from the command line, one word per row
+/// four bytes apart, and so does a script's `disasm`; `functions` still
+/// refuses, saying disassembly is what applies.
+///
+/// The fixture is the test binary with its COFF machine set to arm64, so
+/// what decodes is x86 code read as arm64 words: the rows' shape is what
+/// is checked, not their text.
+#[test]
+fn cli_disassembles_an_arm64_image() {
+    let exe = std::env::current_exe().expect("the test binary has a path");
+    let mut bytes = std::fs::read(&exe).expect("the test binary is readable");
+    if bytes.first_chunk::<2>() != Some(b"MZ") {
+        return;
+    }
+    let pe = bytes
+        .get(0x3c..0x40)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map(u32::from_le_bytes)
+        .and_then(|at| usize::try_from(at).ok())
+        .expect("the fixture names its PE header");
+    // SPEC: the COFF machine field is the first u16 after the PE signature.
+    bytes
+        .get_mut(pe + 4..pe + 6)
+        .expect("the fixture has a COFF header")
+        .copy_from_slice(&0xaa64u16.to_le_bytes());
+    let dir = std::env::temp_dir();
+    let id = std::process::id();
+    let path = dir.join(format!("borer_arm64_disasm_{id}.bin"));
+    std::fs::write(&path, &bytes).expect("the fixture is writable");
+    let script = dir.join(format!("borer_arm64_disasm_{id}.rhai"));
+    let path = path.to_string_lossy().to_string();
+
+    let (ok, info) = run(&["info", &path]);
+    assert!(ok && info.contains("arch: arm64 (64-bit)"), "{info}");
+    let entry = info
+        .lines()
+        .find_map(|l| l.split("entry: ").nth(1))
+        .and_then(|e| e.split_whitespace().next())
+        .and_then(|e| u64::from_str_radix(e.trim_start_matches("0x"), 16).ok())
+        .expect("entry in info");
+    let (ok, out) = run(&["disasm", &path, &format!("{entry:#x}"), "4"]);
+    assert!(ok, "disasm failed:\n{out}");
+    let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("0x")).collect();
+    assert_eq!(rows.len(), 4, "{out}");
+    for (row, at) in rows.iter().zip((0u64..).map(|i| entry + 4 * i)) {
+        let (va, rest) = row.split_once("  ").expect("an address, then bytes");
+        assert_eq!(va, format!("{at:#x}"), "{out}");
+        let column = rest.get(..24).unwrap_or(rest);
+        assert_eq!(column.split_whitespace().count(), 4, "{out}");
+    }
+
+    std::fs::write(&script, format!("print(disasm({entry:#x}, 3).len());\n"))
+        .expect("the script is writable");
+    let (ok, out) = run(&["script", &path, &script.to_string_lossy()]);
+    assert!(ok && out.starts_with("3\n"), "{out}");
+
+    let (ok, out) = run_all(&["functions", &path]);
+    assert!(!ok, "functions should refuse arm64 until discovery lands");
+    assert!(
+        out.contains("borer disassembles arm64 code") && out.contains("discover its functions"),
+        "{out}"
+    );
+
+    drop(std::fs::remove_file(&path));
+    drop(std::fs::remove_file(&script));
+}
+
 /// A file that is no program, base64 of random bytes as an encrypted wallet
 /// stores it, is triaged from its bytes instead of refused, and the code
 /// tools name the format and the tools that do read it.

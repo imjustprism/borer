@@ -1,8 +1,11 @@
-//! Linear disassembly of x86/x86-64 code (iced-x86).
+//! Linear disassembly: x86/x86-64 through iced-x86, AArch64 through
+//! [`crate::isa::a64`].
 //!
-//! iced stays the fast x86 path (and the future encoder for patching); a
-//! multi-architecture lifter would sit beside it rather than replace it.
+//! [`disassemble_isa`] picks the decoder an instruction set needs;
+//! [`disassemble`] is the x86 sweep the x86-only passes call directly.
 
+use crate::isa::Isa;
+use crate::isa::a64;
 use crate::isa::x86::{Code, Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
 
 /// One decoded instruction as text.
@@ -12,8 +15,13 @@ pub struct DisasmLine {
     pub va: u64,
     /// The encoded bytes (empty when the decoder ran past the buffer).
     pub bytes: Vec<u8>,
-    /// NASM-syntax text, or `(bad)` for undecodable bytes.
+    /// NASM-syntax text for x86, the decoder's syntax for AArch64, or
+    /// `(bad)` for undecodable bytes.
     pub text: String,
+    /// Where a direct branch or call goes, for AArch64; `None` for every
+    /// other instruction and for all x86, whose listings read the target
+    /// out of the text.
+    pub target: Option<u64>,
 }
 
 /// Returns a memory operand's displacement as a signed offset.
@@ -95,9 +103,60 @@ pub fn disassemble(code: &[u8], va: u64, bitness: u32, max_instrs: usize) -> Vec
             va: instr.ip(),
             bytes: code.get(start..end).map(<[u8]>::to_vec).unwrap_or_default(),
             text: line_text,
+            target: None,
         });
     }
     out
+}
+
+/// Disassembles up to `max_instrs` instructions from `code` in the
+/// instruction set given.
+///
+/// AArch64 decodes one four-byte word per line; trailing bytes too few for
+/// a word are one `(bad)` line holding them, so a listing never drops
+/// bytes it was handed, as an x86 instruction cut off by the end of the
+/// buffer is.
+///
+/// # Arguments
+///
+/// * `code` - The bytes to decode; decoding stops at the end of the slice.
+/// * `va` - Virtual address of `code[0]`.
+/// * `isa` - The instruction set the bytes are written in.
+/// * `max_instrs` - Hard cap on the number of instructions returned.
+///
+/// # Returns
+///
+/// The decoded lines in address order.
+pub fn disassemble_isa(code: &[u8], va: u64, isa: Isa, max_instrs: usize) -> Vec<DisasmLine> {
+    match isa {
+        Isa::X86 { bits } => disassemble(code, va, bits, max_instrs),
+        Isa::A64 => {
+            let step = crate::num::from_usize(a64::INSN_LEN);
+            let mut at = va;
+            let mut out = Vec::with_capacity(max_instrs.min(code.len() / a64::INSN_LEN + 1));
+            for chunk in code.chunks(a64::INSN_LEN).take(max_instrs) {
+                out.push(match <[u8; a64::INSN_LEN]>::try_from(chunk) {
+                    Ok(word) => {
+                        let insn = a64::decode(u32::from_le_bytes(word), at);
+                        DisasmLine {
+                            va: at,
+                            bytes: chunk.to_vec(),
+                            text: a64::text(&insn),
+                            target: insn.target(),
+                        }
+                    }
+                    Err(_) => DisasmLine {
+                        va: at,
+                        bytes: chunk.to_vec(),
+                        text: "(bad)".to_owned(),
+                        target: None,
+                    },
+                });
+                at = at.wrapping_add(step);
+            }
+            out
+        }
+    }
 }
 
 /// Renders disassembly lines as `va  text` rows.

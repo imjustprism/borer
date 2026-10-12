@@ -16,9 +16,9 @@ const HEADERS: usize = 0x400;
 /// The file alignment every section's bytes keep.
 const FILE_ALIGN: usize = 0x200;
 /// The preferred load address.
-const IMAGE_BASE: u64 = 0x1_4000_0000;
+pub(crate) const IMAGE_BASE: u64 = 0x1_4000_0000;
 /// Where the PE signature sits.
-const PE_AT: usize = 0x80;
+pub(crate) const PE_AT: usize = 0x80;
 /// Bytes of the PE32+ optional header.
 const OPTIONAL: usize = 240;
 /// `IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ`.
@@ -29,7 +29,7 @@ const DATA: u32 = 0xC000_0040;
 const WX: u32 = 0xE000_0040;
 
 /// One section of a built image.
-struct Sec {
+pub(crate) struct Sec {
     /// Its name, at most eight bytes.
     name: &'static str,
     /// Where it maps, relative to [`IMAGE_BASE`].
@@ -43,7 +43,7 @@ struct Sec {
 }
 
 /// A section whose table row tells the truth about its bytes, read-only code.
-fn sec(name: &'static str, rva: u32, data: Vec<u8>) -> Sec {
+pub(crate) fn sec(name: &'static str, rva: u32, data: Vec<u8>) -> Sec {
     let vsize = u32::try_from(data.len()).expect("a test section fits a u32");
     Sec {
         name,
@@ -76,7 +76,7 @@ fn put64(b: &mut [u8], at: usize, v: u64) {
 ///
 /// * `secs` - The sections, in table order.
 /// * `entry_rva` - The entry point, relative to [`IMAGE_BASE`].
-fn pe(secs: &[Sec], entry_rva: u32) -> Vec<u8> {
+pub(crate) fn pe(secs: &[Sec], entry_rva: u32) -> Vec<u8> {
     let mut b = vec![0u8; HEADERS];
     b[..2].copy_from_slice(b"MZ");
     put32(&mut b, 0x3c, u32::try_from(PE_AT).expect("fits"));

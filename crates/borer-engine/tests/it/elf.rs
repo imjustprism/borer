@@ -22,7 +22,7 @@ const FILE_SIZE: usize = 0xb00;
 /// PLT stub for `puts`: `jmp [rip+X]` through the GOT slot.
 const PLT_PUTS: u64 = BASE + 0x160;
 /// `main`: `lea rdi, [msg]; call puts@plt; xor eax, eax; ret`.
-const MAIN: u64 = BASE + 0x180;
+pub(crate) const MAIN: u64 = BASE + 0x180;
 /// `helper`: `lea eax, [rdi+1]; ret`.
 const HELPER: u64 = BASE + 0x190;
 /// `wrapper`: `mov edi, 7; jmp helper`.
@@ -177,7 +177,7 @@ fn build_elf(stripped: bool) -> Program {
     clippy::expect_used,
     reason = "a fixture whose fields do not fit has no useful recovery"
 )]
-fn elf_bytes(stripped: bool) -> Vec<u8> {
+pub(crate) fn elf_bytes(stripped: bool) -> Vec<u8> {
     let mut im = Image(vec![0u8; FILE_SIZE]);
     im.put(0, &[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
     im.u16(0x10, 2);

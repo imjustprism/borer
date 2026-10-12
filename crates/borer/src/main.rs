@@ -918,15 +918,9 @@ impl BorerServer {
         let with_bytes = bytes.unwrap_or(false);
         self.with_program(|p| {
             let asked = self.addr(p, &address)?;
-            let bitness = p
-                .arch
-                .bitness()
-                .ok_or_else(|| p.refuses(Feature::Disasm).unwrap_or_default())?;
-            let va = self
-                .ensure_analysis()
-                .ok()
-                .and_then(|a| render::instruction_at_or_before(p, &a, asked))
-                .unwrap_or(asked);
+            let isa = p.isa_for(Feature::Disasm)?;
+            let a = self.analysis_or_empty();
+            let va = render::instruction_at_or_before(p, &a, asked).unwrap_or(asked);
             let snapped = if va == asked {
                 String::new()
             } else {
@@ -939,23 +933,17 @@ impl BorerServer {
                     p.section_list()
                 )
             })?;
-            let limit = self
-                .ensure_analysis()
-                .ok()
-                .and_then(|a| render::sweep_limit(&a, va));
+            let limit = render::sweep_limit(&a, va);
             let window = limit
                 .and_then(|end| usize::try_from(end - va).ok())
                 .and_then(|n| code.get(..n.min(code.len())))
                 .unwrap_or(code);
-            let lines = disasm::disassemble(window, va, bitness, n);
+            let lines = disasm::disassemble_isa(window, va, isa, n);
             let o = self.overlay();
             let ends = limit.map_or(String::new(), |end| {
                 format!("; code ends at {end:#x}, what follows is data")
             });
-            let caveat = self
-                .ensure_analysis()
-                .ok()
-                .map(|a| render::listing_caveat(p, &a, va))
+            let caveat = Some(render::listing_caveat(p, &a, va))
                 .filter(|c| !c.is_empty())
                 .map_or(String::new(), |c| format!("; {c}"));
             let mut out = format!(
@@ -3258,8 +3246,9 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded or the analysis fails; a failing script is
-    /// an answer, not an error.
+    /// When no binary is loaded or borer does not disassemble its
+    /// architecture; a failing script is an answer, not an error. A program
+    /// whose functions borer does not discover yet (arm64) runs with none.
     #[tool(
         description = "Run a sandboxed Rhai script over the loaded program, for what no single tool answers: what it printed, then the names and comments it proposed (dry-run unless dry_run=false). print(help()) lists every call; query(uri) reads any borer:// resource.",
         annotations(
@@ -3274,7 +3263,10 @@ impl BorerServer {
         Parameters(ScriptParams { code, dry_run }): Parameters<ScriptParams>,
     ) -> Result<String, ErrorData> {
         let program = self.require_loaded()?;
-        let analysis = self.ensure_analysis().map_err(err_params)?;
+        if let Some(why) = program.refuses(Feature::Disasm) {
+            return Err(err_params(why));
+        }
+        let analysis = self.analysis_or_empty();
         let server = self.clone();
         let query: borer_engine::script::Query = std::rc::Rc::new(move |uri: &str| {
             if uri.starts_with("borer://script/") {
@@ -3750,7 +3742,7 @@ impl ServerHandler for BorerServer {
             env!("CARGO_PKG_VERSION"),
         ))
         .with_instructions(
-            "borer: agent-native binary analysis (x86/x64 PE/ELF/Mach-O). Workflow: load_binary, then \
+            "borer: agent-native binary analysis (x86/x64 PE/ELF/Mach-O; arm64 disassembly only). Workflow: load_binary, then \
              binary_info; find_function_by_string / strings / symbols / find_crypto_constants to \
              locate interesting code; function_summary to triage a function; decompile for \
              pseudo-C; disassemble_function / cfg / callgraph / xrefs to go deeper; read and \
@@ -6196,6 +6188,75 @@ mod tests {
             "{forced}"
         );
         assert_eq!(held(), (vec![0x1010], vec![0x2000], 0));
+    }
+
+    /// An arm64 program disassembles, and a function tool refuses it.
+    ///
+    /// The `disassemble` tool lists from the word an address falls inside
+    /// and a script's `disasm` reads the same words, while a tool that
+    /// reads functions says disassembly is what applies.
+    ///
+    /// # Panics
+    ///
+    /// When a listing or the refusal differs.
+    #[test]
+    fn an_arm64_program_disassembles_and_refuses_what_needs_functions() {
+        use super::{DisassembleParams, FunctionsParams, Parameters, ScriptParams};
+        use borer_engine::program::{Arch, Program, Section};
+        let code: Vec<u8> = [
+            // ASM: bti c
+            0xd503_245fu32,
+            // ASM: ret
+            0xd65f_03c0,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let text = Section::mapped(".text", 0x1000, 0, 8, false, true);
+        let program = Program::raw(code, Arch::Arm64, 0, Some(0x1000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let out = server
+            .disassemble(Parameters(DisassembleParams {
+                address: "0x1002".to_owned(),
+                count: None,
+                bytes: None,
+            }))
+            .expect("arm64 disassembles");
+        assert!(
+            out.starts_with(
+                "# 2 instructions at 0x1000; 0x1002 is inside an instruction, listing from 0x1000\n0x1000  bti c\n0x1004  ret\n"
+            ),
+            "{out}"
+        );
+        let out = server
+            .script(Parameters(ScriptParams {
+                code: "print(disasm(0x1000, 2)[1].text); print(functions().len);".to_owned(),
+                dry_run: None,
+            }))
+            .expect("a script answers");
+        assert!(out.starts_with("ret\n0\n"), "{out}");
+        let refused = server
+            .functions(Parameters(FunctionsParams {
+                filter: None,
+                sort: None,
+                offset: None,
+                limit: None,
+                count_only: None,
+            }))
+            .expect_err("arm64 functions are not discovered yet");
+        assert!(
+            refused
+                .message
+                .contains("borer disassembles arm64 code (disassemble, the disasm command) but does not yet discover its functions"),
+            "{}",
+            refused.message
+        );
     }
 
     /// The `script` tool runs inline code and applies only on request.

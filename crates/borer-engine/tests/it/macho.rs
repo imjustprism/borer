@@ -16,7 +16,7 @@ use borer_engine::program::{Arch, BinaryFormat, Program, SymbolKind};
 /// Where `__TEXT` is mapped.
 const TEXT: u64 = 0x1_0000_0000;
 /// `main`: `call [rip+got]; xor eax, eax; ret`.
-const MAIN: u64 = TEXT + 0x300;
+pub(crate) const MAIN: u64 = TEXT + 0x300;
 /// `helper`: `lea eax, [rdi+1]; ret`.
 const HELPER: u64 = TEXT + 0x310;
 /// The `__got` slot the loader binds `puts` to.
@@ -118,7 +118,7 @@ impl Image {
     clippy::expect_used,
     reason = "a fixture that does not fit has no useful recovery"
 )]
-fn thin() -> Vec<u8> {
+pub(crate) fn thin() -> Vec<u8> {
     let mut img = Image(vec![0u8; FILE_SIZE]);
     // Header: MH_MAGIC_64, x86-64, MH_EXECUTE, PIE, no-heap-execution.
     img.u32(0, 0xfeed_facf);

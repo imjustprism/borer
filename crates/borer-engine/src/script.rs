@@ -55,7 +55,8 @@ use std::sync::Arc;
 use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, INT, Map, Scope};
 
 use crate::analysis::{Analysis, Function, NameSource, Overlay, decompile, name_of, resolve};
-use crate::program::{Program, SymbolKind};
+use crate::isa::Isa;
+use crate::program::{Feature, Program, SymbolKind};
 
 /// Operations a script may run before it is stopped.
 pub const OPS_MAX: u64 = 200_000_000;
@@ -470,7 +471,11 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
             ("arch", p.arch.name().into()),
             (
                 "bits",
-                Dynamic::from_int(INT::from(p.arch.bitness().unwrap_or(0))),
+                Dynamic::from_int(INT::from(match p.arch.isa() {
+                    Some(Isa::X86 { bits }) => bits,
+                    Some(Isa::A64) => 64,
+                    None => 0,
+                })),
             ),
             ("base", Dynamic::from_int(int(p.image_base))),
             (
@@ -639,14 +644,14 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
     );
     let h = Rc::clone(host);
     engine.register_fn("disasm", move |at: INT, n: INT| -> Array {
-        let Some(bits) = h.program.arch.bitness() else {
+        let Ok(isa) = h.program.isa_for(Feature::Disasm) else {
             return Array::new();
         };
         let n = usize::try_from(n).unwrap_or(0).min(DISASM_MAX);
         let Some(code) = h.program.read_va_upto(addr(at), n.saturating_mul(15)) else {
             return Array::new();
         };
-        crate::disasm::disassemble(code, addr(at), bits, n)
+        crate::disasm::disassemble_isa(code, addr(at), isa, n)
             .into_iter()
             .map(|l| {
                 let hex: String = l.bytes.iter().map(|b| format!("{b:02x}")).collect();

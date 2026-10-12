@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::analysis::qt::QtMethodKind;
+use crate::isa::{Isa, a64};
 use crate::num::lo8;
 use crate::program::Symbol;
 use crate::search::demangled_or_raw;
@@ -821,8 +822,9 @@ pub fn disasm_function(
 /// Renders a whole function's disassembly block by block.
 ///
 /// Block starts get `L_<addr>:` labels, overlay names and comments appear
-/// inline, and near call/jmp targets that are functions or named addresses
-/// get a `; name` suffix.
+/// inline, and branch targets that are functions or named addresses get a
+/// `; name` suffix: an x86 near call or jmp, whose target is read from its
+/// text, and any direct arm64 branch, whose decoder states it.
 ///
 /// # Arguments
 ///
@@ -846,7 +848,7 @@ pub fn disasm_function_with(
     bytes: Bytes,
 ) -> Option<String> {
     let f = a.function(entry)?;
-    let bitness = p.arch.bitness()?;
+    let isa = p.isa_for(Feature::Disasm).ok()?;
     let mut out = format!(
         "// {} @ {:#x}: {} instructions, {} blocks\n",
         name_of(a, o, f.entry),
@@ -863,17 +865,22 @@ pub fn disasm_function_with(
         if b.start != f.entry {
             let _ = writeln!(out, "L_{:x}:", b.start);
         }
-        let lines = disasm::disassemble(code, b.start, bitness, budget);
+        let lines = disasm::disassemble_isa(code, b.start, isa, budget);
         for l in &lines {
             if let Some(n) = o.names.get(&l.va) {
                 let _ = writeln!(out, "            ; = {n} =");
             }
             let mut text = l.text.clone();
-            if (text.starts_with("call ") || text.starts_with("jmp "))
-                && let Some(target) = text
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|t| u64::from_str_radix(t.trim_end_matches('h'), 16).ok())
+            let target = l.target.or_else(|| {
+                if text.starts_with("call ") || text.starts_with("jmp ") {
+                    text.split_whitespace()
+                        .nth(1)
+                        .and_then(|t| u64::from_str_radix(t.trim_end_matches('h'), 16).ok())
+                } else {
+                    None
+                }
+            });
+            if let Some(target) = target
                 && (a.function(target).is_some() || o.names.contains_key(&target))
             {
                 let _ = write!(text, "  ; {}", short_name(a, o, target));
@@ -931,7 +938,8 @@ const PACKED_WINDOW: u64 = 4096;
 /// A sentence for a non-executable section (`0x42c0ba is in .rdata (r--),
 /// which never executes: the bytes decode, nothing runs them`) or for an
 /// executable address no discovered function covers (`0x401800 is outside
-/// every discovered function`), and an empty string for code inside one.
+/// every discovered function`, said only where functions are discovered),
+/// and an empty string for code inside one.
 pub fn listing_caveat(p: &Program, a: &Analysis, va: u64) -> String {
     let covering = p
         .sections
@@ -973,7 +981,7 @@ pub fn listing_caveat(p: &Program, a: &Analysis, va: u64) -> String {
             );
         }
     }
-    if a.function_at(va).is_none() {
+    if p.arch.supports(Feature::Discover) && a.function_at(va).is_none() {
         return format!("{va:#x} is outside every discovered function");
     }
     String::new()
@@ -984,7 +992,9 @@ pub fn listing_caveat(p: &Program, a: &Analysis, va: u64) -> String {
 /// A byte search lands on an operand, not on an instruction, and decoding
 /// from the operand yields confident garbage; the function's block already
 /// says where the instructions start, so the last one starting at or before
-/// `va` is where a listing should begin.
+/// `va` is where a listing should begin. Every arm64 instruction is an
+/// aligned word, so there the boundary is `va` aligned down, with no block
+/// to ask.
 ///
 /// # Arguments
 ///
@@ -994,9 +1004,13 @@ pub fn listing_caveat(p: &Program, a: &Analysis, va: u64) -> String {
 ///
 /// # Returns
 ///
-/// The boundary, or `None` when no discovered block covers `va`.
+/// The boundary; `None` for x86 when no discovered block covers `va`, and
+/// for an architecture borer does not disassemble.
 pub fn instruction_at_or_before(p: &Program, a: &Analysis, va: u64) -> Option<u64> {
-    let bitness = p.arch.bitness()?;
+    let bitness = match p.isa_for(Feature::Disasm).ok()? {
+        Isa::X86 { bits } => bits,
+        Isa::A64 => return Some(va - va % from_usize(a64::INSN_LEN)),
+    };
     let f = a.function_at(va)?;
     let b = f.blocks.iter().find(|b| b.start <= va && va < b.end)?;
     let len = usize::try_from(b.end - b.start).ok()?;
@@ -1149,6 +1163,64 @@ mod tests {
                 "hay {hay:?}, needle {needle:?}"
             );
         }
+    }
+
+    /// An arm64 function lists word by word, its call named.
+    ///
+    /// The call reads the name of the function it reaches, as an x86
+    /// listing's does, and an address no function covers draws no caveat
+    /// where no functions are discovered.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn an_arm64_listing_names_its_call() {
+        let bytes: Vec<u8> = [
+            // ASM: bl 0x1010
+            0x9400_0004u32,
+            // ASM: ret
+            0xd65f_03c0,
+            // ASM: nop
+            0xd503_201f,
+            // ASM: nop
+            0xd503_201f,
+            // ASM: ret
+            0xd65f_03c0,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let text = Section::mapped(".text", 0x1000, 0, 0x14, false, true);
+        let p = Program::raw(
+            bytes,
+            crate::program::Arch::Arm64,
+            0,
+            Some(0x1000),
+            vec![text],
+        );
+        let block = |start: u64, end: u64| BasicBlock {
+            start,
+            end,
+            term: BlockTerm::Ret,
+            successors: Vec::new(),
+        };
+        let mut main = bare(0x1000, None);
+        main.blocks = vec![block(0x1000, 0x1008)];
+        let mut helper = bare(0x1010, Some("helper"));
+        helper.blocks = vec![block(0x1010, 0x1014)];
+        let mut a = Analysis {
+            functions: vec![main, helper],
+            ..Analysis::default()
+        };
+        a.finish_index(&p);
+        let out = disasm_function_with(&p, &a, &Overlay::default(), 0x1000, 10, Bytes::Hidden)
+            .expect("a function starts there");
+        assert!(
+            out.ends_with("\n0x1000  bl 0x1010  ; helper\n0x1004  ret\n"),
+            "{out}"
+        );
+        assert_eq!(listing_caveat(&p, &Analysis::default(), 0x1008), "");
     }
 
     /// The stack-buffer hex spells what `format!("{:x}")` prints.
