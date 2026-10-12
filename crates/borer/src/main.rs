@@ -4924,7 +4924,7 @@ const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://hashes",
-        "The content hashes a file is correlated by: imphash (Mandiant's dll.function MD5 as pefile and VirusTotal compute it: table order, dll lowercased with .dll/.ocx/.sys stripped, ordinals named as pefile names them), authentihash (SHA-256 with the checksum, security directory and certificate table excluded, so signing does not move it) and tlsh (borer's locality-sensitive hash: same bytes the same hash, near bytes a small distance - correlates within borer, not with Trend Micro tlsh strings)",
+        "The content hashes a file is correlated by: imphash (Mandiant's dll.function MD5 as pefile and VirusTotal compute it: table order, dll lowercased with .dll/.ocx/.sys stripped, ordinals named as pefile names them), authentihash (SHA-256 with the checksum, security directory and certificate table excluded, so signing does not move it), tlsh (Trend Micro's TLSH, the T1 string public feeds carry; none under 50 bytes or for too little variety) and borer-lsh (borer's own locality-sensitive hash, matching only another borer-lsh)",
     ),
     (
         "borer://children",

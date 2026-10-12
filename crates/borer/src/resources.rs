@@ -379,7 +379,7 @@ impl BorerServer {
     }
 
     /// The content hashes the loaded file is correlated by: imphash,
-    /// authentihash and tlsh, from the image alone.
+    /// authentihash, TLSH and borer-lsh, from the image alone.
     ///
     /// # Errors
     ///

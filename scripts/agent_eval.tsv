@@ -18,4 +18,5 @@ emulate_elf_args	2	660	1
 pie_table_xref	2	816	1
 go_names	2	828	1
 decoded_strings	2	885	1
+tlsh_digest	2	2217	1
 child_program	3	1270	1

@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use borer_engine::hashing::{authentihash, hashes_tsv, imphash};
+use borer_engine::hashing::{authentihash, hashes_tsv, imphash, tlsh};
 use borer_engine::program::{Program, SymbolKind};
 
 /// Where the headers end and the first section's bytes begin.
@@ -350,7 +350,8 @@ fn an_unsigned_pe_hashes_without_the_entry() {
     );
 }
 
-/// The resource answer carries all three hashes.
+/// The resource answer carries all four hashes, TLSH as the `T1` string
+/// its own function prints and borer's hash on a row of its own.
 #[test]
 fn hashes_tsv_names_all_three() {
     let p = load(image());
@@ -359,4 +360,19 @@ fn hashes_tsv_names_all_three() {
     assert!(out.contains("authentihash  73c57db4"), "{out}");
     assert!(out.starts_with("# content hashes of hashed.exe"), "{out}");
     assert!(out.contains("tlsh"), "{out}");
+    let t1 = tlsh(&p.bytes).expect("the image is varied enough").hex();
+    assert!(out.contains(&format!("\ntlsh          {t1}\n")), "{out}");
+    assert!(out.contains("\nborer-lsh     "), "{out}");
+}
+
+/// A file too short for TLSH says why on its row instead of a digest.
+#[test]
+fn a_short_file_has_no_tlsh() {
+    let p =
+        Program::from_bytes(PathBuf::from("short.bin"), b"short".to_vec()).expect("any bytes load");
+    let out = hashes_tsv(&p);
+    assert!(
+        out.contains("\ntlsh          - (TLSH needs 50 bytes or more, of enough variety)\n"),
+        "{out}"
+    );
 }

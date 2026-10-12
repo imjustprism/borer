@@ -449,6 +449,12 @@ TASKS = [
         "http://x3.test/c2",
     ),
     (
+        "tlsh_digest",
+        "the TLSH string a threat feed would carry for the file",
+        [LOAD, ("query", {"uri": "borer://hashes"})],
+        "tlsh          T1",
+    ),
+    (
         "child_program",
         "the program a blob holds, listed and then opened as one of its own",
         [

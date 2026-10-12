@@ -1,7 +1,7 @@
-//! The content hashes analysts correlate on: imphash, authentihash and a
-//! TLSH-style locality-sensitive hash.
+//! The content hashes analysts correlate on: imphash, authentihash, TLSH
+//! and borer's own locality-sensitive hash.
 //!
-//! All three are hand-rolled: MD5 and SHA-256 are forty lines each, verified
+//! All four are hand-rolled: MD5 and SHA-256 are forty lines each, verified
 //! against their RFC 1321 and FIPS 180-4 test vectors below, and the crate
 //! carries no hash dependency by policy. Every function here is a pure
 //! function of the bytes or the [`Program`] it is handed.
@@ -25,16 +25,23 @@
 //!   offset, not an RVA. A range the file cannot hold is clamped to it
 //!   rather than refused: hostile headers are the norm here, and the answer
 //!   is `None` only when there is no PE header at all.
-//! * **tlsh** follows the published TLSH construction (Oliver et al., "TLSH
-//!   — A Locality Sensitive Hash", 2013): a 128-bucket histogram fed by
-//!   Pearson-style hashes over byte pairs at distances one to three, quartile
-//!   points, a chained checksum byte and a length bucket. The 256-byte
-//!   permutation table is borer's own (see [`BUCKETS`]); Trend Micro's
-//!   reference constants are not reproduced, so a borer tlsh does **not**
-//!   match a `tlsh` tool's string and must not be sent to one. The hash is
-//!   for correlating builds within borer — same bytes, same hash; near
-//!   bytes, small [`Tlsh::distance`] — which is what diff and carry
-//!   workflows need.
+//! * **tlsh** is TLSH as Trend Micro's reference implementation
+//!   (github.com/trendmicro/tlsh, version 4) computes it by default: 128
+//!   buckets, a one-byte checksum, the `T1` prefix. Its Pearson table, its
+//!   window salts, its length buckets and its distance are reproduced
+//!   exactly ([`tlsh`], [`Tlsh::distance`]), checked against digests and a
+//!   distance from the reference's own test data, so a digest here is the
+//!   string threat-intelligence feeds carry and compares with theirs. Like
+//!   the reference, it gives no digest for fewer than [`TLSH_MIN`] bytes or
+//!   a stream with too little variety.
+//! * **borer-lsh** is borer's own variant of the construction (Oliver et
+//!   al., "TLSH - A Locality Sensitive Hash", 2013): a 128-bucket histogram
+//!   fed by hashes over byte pairs at distances one to three, quartile
+//!   points, a chained checksum byte and a length bucket, with a
+//!   permutation table of its own ([`BUCKETS`]). It matches nothing outside
+//!   borer and is for correlating builds within it: same bytes, same hash;
+//!   near bytes, a small [`BorerLsh::distance`]. It hashes any non-empty
+//!   stream, however short.
 
 use std::fmt::Write as _;
 
@@ -493,12 +500,393 @@ pub fn authentihash(program: &Program) -> Option<[u8; 32]> {
 
 // ---- tlsh ----
 
-/// Borer's 256-byte permutation for the TLSH bucket hashes and checksum.
+/// Pearson's permutation as the TLSH reference carries it (`v_table` in
+/// Trend Micro's `tlsh_impl.cpp`): every bucket index and the checksum
+/// are three chained lookups in it ([`pearson`]).
+const PEARSON: [u8; 256] = [
+    1, 87, 49, 12, 176, 178, 102, 166, 121, 193, 6, 84, 249, 230, 44, 163, 14, 197, 213, 181, 161,
+    85, 218, 80, 64, 239, 24, 226, 236, 142, 38, 200, 110, 177, 104, 103, 141, 253, 255, 50, 77,
+    101, 81, 18, 45, 96, 31, 222, 25, 107, 190, 70, 86, 237, 240, 34, 72, 242, 20, 214, 244, 227,
+    149, 235, 97, 234, 57, 22, 60, 250, 82, 175, 208, 5, 127, 199, 111, 62, 135, 248, 174, 169,
+    211, 58, 66, 154, 106, 195, 245, 171, 17, 187, 182, 179, 0, 243, 132, 56, 148, 75, 128, 133,
+    158, 100, 130, 126, 91, 13, 153, 246, 216, 219, 119, 68, 223, 78, 83, 88, 201, 99, 122, 11, 92,
+    32, 136, 114, 52, 10, 138, 30, 48, 183, 156, 35, 61, 26, 143, 74, 251, 94, 129, 162, 63, 152,
+    170, 7, 115, 167, 241, 206, 3, 150, 55, 59, 151, 220, 90, 53, 23, 131, 125, 173, 15, 238, 79,
+    95, 89, 16, 105, 137, 225, 224, 217, 160, 37, 123, 118, 73, 2, 157, 46, 116, 9, 145, 134, 228,
+    207, 212, 202, 215, 69, 229, 27, 188, 67, 124, 168, 252, 42, 4, 29, 108, 21, 247, 19, 205, 39,
+    203, 233, 40, 186, 147, 198, 192, 155, 33, 164, 191, 98, 204, 165, 180, 117, 76, 140, 36, 210,
+    172, 41, 54, 159, 8, 185, 232, 113, 196, 231, 47, 146, 120, 51, 65, 28, 144, 254, 221, 93, 189,
+    194, 139, 112, 43, 71, 109, 184, 209,
+];
+
+/// The largest stream length each TLSH length bucket holds (`topval` in
+/// the reference's `tlsh_util.cpp`): bucket `i` holds the lengths above
+/// entry `i - 1` and up to entry `i`.
+const TOPVAL: [u32; 170] = [
+    1,
+    2,
+    3,
+    5,
+    7,
+    11,
+    17,
+    25,
+    38,
+    57,
+    86,
+    129,
+    194,
+    291,
+    437,
+    656,
+    854,
+    1_110,
+    1_443,
+    1_876,
+    2_439,
+    3_171,
+    3_475,
+    3_823,
+    4_205,
+    4_626,
+    5_088,
+    5_597,
+    6_157,
+    6_772,
+    7_450,
+    8_195,
+    9_014,
+    9_916,
+    10_907,
+    11_998,
+    13_198,
+    14_518,
+    15_970,
+    17_567,
+    19_323,
+    21_256,
+    23_382,
+    25_720,
+    28_292,
+    31_121,
+    34_233,
+    37_656,
+    41_422,
+    45_564,
+    50_121,
+    55_133,
+    60_646,
+    66_711,
+    73_382,
+    80_721,
+    88_793,
+    97_672,
+    107_439,
+    118_183,
+    130_002,
+    143_002,
+    157_302,
+    173_032,
+    190_335,
+    209_369,
+    230_306,
+    253_337,
+    278_670,
+    306_538,
+    337_191,
+    370_911,
+    408_002,
+    448_802,
+    493_682,
+    543_050,
+    597_356,
+    657_091,
+    722_800,
+    795_081,
+    874_589,
+    962_048,
+    1_058_252,
+    1_164_078,
+    1_280_486,
+    1_408_534,
+    1_549_388,
+    1_704_327,
+    1_874_759,
+    2_062_236,
+    2_268_459,
+    2_495_305,
+    2_744_836,
+    3_019_320,
+    3_321_252,
+    3_653_374,
+    4_018_711,
+    4_420_582,
+    4_862_641,
+    5_348_905,
+    5_883_796,
+    6_472_176,
+    7_119_394,
+    7_831_333,
+    8_614_467,
+    9_475_909,
+    10_423_501,
+    11_465_851,
+    12_612_437,
+    13_873_681,
+    15_261_050,
+    16_787_154,
+    18_465_870,
+    20_312_458,
+    22_343_706,
+    24_578_077,
+    27_035_886,
+    29_739_474,
+    32_713_425,
+    35_984_770,
+    39_583_245,
+    43_541_573,
+    47_895_730,
+    52_685_306,
+    57_953_837,
+    63_749_221,
+    70_124_148,
+    77_136_564,
+    84_850_228,
+    93_335_252,
+    102_668_779,
+    112_935_659,
+    124_229_227,
+    136_652_151,
+    150_317_384,
+    165_349_128,
+    181_884_040,
+    200_072_456,
+    220_079_703,
+    242_087_671,
+    266_296_456,
+    292_926_096,
+    322_218_735,
+    354_440_623,
+    389_884_688,
+    428_873_168,
+    471_760_495,
+    518_936_559,
+    570_830_240,
+    627_913_311,
+    690_704_607,
+    759_775_136,
+    835_752_671,
+    919_327_967,
+    1_011_260_767,
+    1_112_386_880,
+    1_223_623_232,
+    1_345_985_727,
+    1_480_584_256,
+    1_628_642_751,
+    1_791_507_135,
+    1_970_657_856,
+    2_167_723_648,
+    2_384_496_256,
+    2_622_945_920,
+    2_885_240_448,
+    3_173_764_736,
+    3_491_141_248,
+    3_840_255_616,
+    4_224_281_216,
+];
+
+/// Bytes a stream needs before TLSH gives it a digest (the reference's
+/// `MIN_DATA_LENGTH`).
+pub const TLSH_MIN: usize = 50;
+
+/// A TLSH digest as Trend Micro's reference computes it by default: 128
+/// buckets, a one-byte checksum, printed `T1` and 70 hex digits.
+///
+/// Built by [`tlsh`]; compared with [`Tlsh::distance`] and printed by
+/// [`Tlsh::hex`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Tlsh {
+    /// The chained Pearson checksum over consecutive byte pairs.
+    checksum: u8,
+    /// The length bucket, an index into [`TOPVAL`].
+    l_value: u8,
+    /// The first quartile over the third, as a percent, modulo 16.
+    q1_ratio: u8,
+    /// The second quartile over the third, as a percent, modulo 16.
+    q2_ratio: u8,
+    /// The 128 two-bit bucket levels, bucket `4 * i + j` at bits `2 * j` of
+    /// byte `i`.
+    code: [u8; 32],
+}
+
+/// Pearson's hash of three bytes after a salt, the reference's
+/// `fast_b_mapping`.
+///
+/// # Arguments
+///
+/// * `salt` - The salt, which picks the triplet's bucket mixture.
+/// * `a` / `b` / `c` - The three bytes, in the order they are chained.
+#[must_use]
+fn pearson(salt: u8, a: u8, b: u8, c: u8) -> u8 {
+    PEARSON[usize::from(PEARSON[usize::from(PEARSON[usize::from(salt ^ a)] ^ b)] ^ c)]
+}
+
+/// The TLSH digest of a byte stream, as the reference computes it.
+///
+/// Every five-byte window adds one to six of 256 buckets, picked by
+/// [`pearson`] over byte triplets of the window with the reference's salts,
+/// and chains the checksum over its last two bytes. The first 128 buckets
+/// are cut at their quartiles into two-bit levels, and the header carries
+/// the checksum, the length bucket ([`TOPVAL`]) and the quartile ratios.
+///
+/// # Arguments
+///
+/// * `data` - The bytes to hash; the whole file is the usual input.
+///
+/// # Returns
+///
+/// The digest, or `None` as the reference gives none: for fewer than
+/// [`TLSH_MIN`] bytes or 4 GiB and more, and for a stream with too little
+/// variety, whose third quartile is zero or whose buckets are half or more
+/// empty.
+#[must_use]
+pub fn tlsh(data: &[u8]) -> Option<Tlsh> {
+    if data.len() < TLSH_MIN {
+        return None;
+    }
+    let len = u32::try_from(data.len()).ok()?;
+    let mut buckets = [0u64; 256];
+    let mut checksum = 0u8;
+    for window in data.windows(5) {
+        let &[a0, a1, a2, a3, a4] = window else {
+            continue;
+        };
+        checksum = pearson(1, a4, a3, checksum);
+        // SPEC: the six salted triplets of `tlsh_impl.cpp`'s
+        // `raw_fast_update5`, each with the window's newest byte first.
+        for (salt, b, c) in [
+            (49, a3, a2),
+            (12, a3, a1),
+            (178, a2, a1),
+            (166, a2, a0),
+            (84, a3, a0),
+            (230, a1, a0),
+        ] {
+            buckets[usize::from(pearson(salt, a4, b, c))] += 1;
+        }
+    }
+    let counts = buckets.first_chunk::<128>()?;
+    let mut sorted = *counts;
+    sorted.sort_unstable();
+    let (q1, q2, q3) = (sorted[31], sorted[63], sorted[95]);
+    if q3 == 0 || counts.iter().filter(|&&c| c > 0).count() <= 64 {
+        return None;
+    }
+    let mut code = [0u8; 32];
+    for (i, &count) in counts.iter().enumerate() {
+        let level: u8 = if count > q3 {
+            3
+        } else if count > q2 {
+            2
+        } else {
+            u8::from(count > q1)
+        };
+        code[i / 4] |= level << (2 * (i % 4));
+    }
+    let ratio = |q: u64| crate::num::lo8(q * 100 / q3 % 16);
+    Some(Tlsh {
+        checksum,
+        l_value: u8::try_from(TOPVAL.partition_point(|&top| top < len)).unwrap_or(u8::MAX),
+        q1_ratio: ratio(q1),
+        q2_ratio: ratio(q2),
+        code,
+    })
+}
+
+impl Tlsh {
+    /// The digest as the reference prints it: `T1`, then 70 uppercase hex
+    /// digits.
+    ///
+    /// The checksum and the length bucket are written nibble-swapped, the
+    /// quartile ratios as one byte (`q1` high), and the levels from the last
+    /// byte to the first, as `lsh_bin_hash` writes them.
+    ///
+    /// # Returns
+    ///
+    /// The `T1` string the public feeds carry.
+    #[must_use]
+    pub fn hex(&self) -> String {
+        let head = [
+            self.checksum.rotate_left(4),
+            self.l_value.rotate_left(4),
+            (self.q1_ratio << 4) | self.q2_ratio,
+        ];
+        let mut out = String::with_capacity(72);
+        out.push_str("T1");
+        for b in head.iter().chain(self.code.iter().rev()) {
+            let _ = write!(out, "{b:02X}");
+        }
+        out
+    }
+
+    /// The reference's distance between two digests (`totalDiff` with the
+    /// length counted).
+    ///
+    /// The length buckets' circular difference (one point for one bucket
+    /// apart, twelve per bucket beyond), each quartile ratio's (twelve per
+    /// step past the first), one for a different checksum, and per bucket
+    /// the level difference, a difference of three counting six. Zero is
+    /// the same digest, and the further apart two streams are, the larger
+    /// it grows.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The digest to compare with.
+    ///
+    /// # Returns
+    ///
+    /// The distance.
+    #[must_use]
+    pub fn distance(&self, other: &Tlsh) -> u32 {
+        /// The shorter way round a circle of `range` between two values.
+        fn circular(x: u8, y: u8, range: u32) -> u32 {
+            let d = u32::from(x.abs_diff(y));
+            d.min(range - d)
+        }
+        let mut diff = match circular(self.l_value, other.l_value, 256) {
+            d @ (0 | 1) => d,
+            d => d * 12,
+        };
+        for (x, y) in [
+            (self.q1_ratio, other.q1_ratio),
+            (self.q2_ratio, other.q2_ratio),
+        ] {
+            diff += match circular(x, y, 16) {
+                d @ (0 | 1) => d,
+                d => (d - 1) * 12,
+            };
+        }
+        diff += u32::from(self.checksum != other.checksum);
+        for (&x, &y) in self.code.iter().zip(&other.code) {
+            for shift in [0, 2, 4, 6] {
+                diff += match ((x >> shift) & 3).abs_diff((y >> shift) & 3) {
+                    3 => 6,
+                    d => u32::from(d),
+                };
+            }
+        }
+        diff
+    }
+}
+
+// ---- borer-lsh ----
+
+/// Borer's 256-byte permutation for the borer-lsh bucket hashes and checksum.
 ///
 /// A Fisher-Yates shuffle of `0..=255` driven by an `xorshift64*` generator
-/// seeded with `0x9e37_79b9_7f4a_7c15` (the golden ratio constant). Trend
-/// Micro's own table is not reproduced, so a borer tlsh only ever matches
-/// another borer tlsh.
+/// seeded with `0x9e37_79b9_7f4a_7c15` (the golden ratio constant), so a
+/// borer-lsh only ever matches another borer-lsh; [`PEARSON`] is the
+/// reference TLSH's table.
 const BUCKETS: [u8; 256] = [
     0x37, 0x36, 0x1f, 0x14, 0x48, 0x28, 0x3a, 0x09, 0xbd, 0x93, 0xe0, 0x79, 0x22, 0x63, 0x71, 0x1c,
     0xe7, 0x10, 0x55, 0xd6, 0x1a, 0x06, 0x7d, 0x3c, 0xb7, 0x2a, 0x94, 0x3d, 0xae, 0x41, 0xb3, 0x5c,
@@ -518,16 +906,16 @@ const BUCKETS: [u8; 256] = [
     0x17, 0x23, 0xca, 0x85, 0x98, 0x43, 0xc8, 0x67, 0x1b, 0x25, 0xbb, 0x64, 0x62, 0x82, 0xdf, 0x99,
 ];
 
-/// One TLSH digest: a checksum byte, a length bucket, the two quartile
-/// points it was cut at, and 128 two-bit bucket levels packed four to a byte
-/// (bucket 0 in the low bits of byte 0).
+/// One borer-lsh digest: a checksum byte, a length bucket, the two
+/// quartile points it was cut at, and 128 two-bit bucket levels packed four
+/// to a byte (bucket 0 in the low bits of byte 0).
 ///
-/// Built by [`tlsh`]; compared with [`Tlsh::distance`] and carried as hex by
-/// [`Tlsh::hex`]. The checksum byte takes no part in the distance: it is
+/// Built by [`borer_lsh`]; compared with [`BorerLsh::distance`] and carried
+/// as hex by [`BorerLsh::hex`]. Not TLSH: [`Tlsh`] is. The checksum byte takes no part in the distance: it is
 /// compared by equality alone, since any difference there means the streams
 /// differ even when every bucket agrees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Tlsh {
+pub struct BorerLsh {
     /// The chained permutation checksum of the byte stream.
     checksum: u8,
     /// `floor(log2(length))`, capped at 255.
@@ -558,10 +946,10 @@ fn bucket(salt: u8, left: u8, right: u8) -> usize {
     ) & 0x7f
 }
 
-/// Hashes a byte stream into a TLSH digest.
+/// Hashes a byte stream into a borer-lsh digest.
 ///
 /// The construction is the published TLSH scheme with borer's permutation
-/// table (see the module docs): each anchor position hashes its three
+/// table (see the module docs), so the digest is not a TLSH one: each anchor position hashes its three
 /// right-neighbour pairs into 128 buckets, the counts are cut at their
 /// quartiles into two-bit levels, and a chained checksum byte and a length
 /// bucket ride along in the header.
@@ -575,7 +963,7 @@ fn bucket(salt: u8, left: u8, right: u8) -> usize {
 /// The digest, or `None` for an empty stream, whose every count is zero and
 /// whose digest would say "equal" to any other empty one.
 #[must_use]
-pub fn tlsh(data: &[u8]) -> Option<Tlsh> {
+pub fn borer_lsh(data: &[u8]) -> Option<BorerLsh> {
     if data.is_empty() {
         return None;
     }
@@ -606,7 +994,7 @@ pub fn tlsh(data: &[u8]) -> Option<Tlsh> {
         };
         levels[i / 4] |= level << (2 * (i % 4));
     }
-    Some(Tlsh {
+    Some(BorerLsh {
         checksum,
         len_bucket: u8::try_from(usize::BITS - 1 - data.len().leading_zeros()).unwrap_or(u8::MAX),
         q1: u8::try_from(q1.min(usize::from(u8::MAX))).unwrap_or(u8::MAX),
@@ -615,7 +1003,7 @@ pub fn tlsh(data: &[u8]) -> Option<Tlsh> {
     })
 }
 
-impl Tlsh {
+impl BorerLsh {
     /// The digest as 70 lowercase hex characters: checksum, length bucket,
     /// `q1`, `q3`, then the 32 packed level bytes.
     ///
@@ -650,7 +1038,7 @@ impl Tlsh {
     ///
     /// The distance, at most `429` (384 of levels, 45 of header terms).
     #[must_use]
-    pub fn distance(&self, other: &Tlsh) -> u32 {
+    pub fn distance(&self, other: &BorerLsh) -> u32 {
         let mut hist = 0u32;
         for i in 0..128 {
             let shift = 2 * (i % 4);
@@ -676,8 +1064,9 @@ impl Tlsh {
 ///
 /// # Returns
 ///
-/// A header naming the file, one row per hash (`-` when it does not apply),
-/// and one note line saying what the tlsh variant does and does not match.
+/// A header naming the file, one row per hash (`-` when it does not apply,
+/// with why for a file TLSH gives no digest), and one note line saying which
+/// hash matches public feeds and which only borer.
 #[must_use]
 pub fn hashes_tsv(program: &Program) -> String {
     let hex = |digest: Option<&[u8]>| {
@@ -687,14 +1076,18 @@ pub fn hashes_tsv(program: &Program) -> String {
         )
     };
     let mut out = format!(
-        "# content hashes of {}\nimphash       {}\nauthentihash  {}\ntlsh          {}\n",
+        "# content hashes of {}\nimphash       {}\nauthentihash  {}\ntlsh          {}\nborer-lsh     {}\n",
         program.path.display(),
         hex(imphash(program).as_ref().map(|d| d.as_slice())),
         hex(authentihash(program).as_ref().map(|d| d.as_slice())),
-        tlsh(&program.bytes).map_or_else(|| "-".to_owned(), |t| t.hex()),
+        tlsh(&program.bytes).map_or_else(
+            || format!("- (TLSH needs {TLSH_MIN} bytes or more, of enough variety)"),
+            |t| t.hex()
+        ),
+        borer_lsh(&program.bytes).map_or_else(|| "-".to_owned(), |t| t.hex()),
     );
     out.push_str(
-        "# tlsh is borer's variant: correlate hashes and distances within borer, not against Trend Micro tlsh strings\n",
+        "# tlsh is Trend Micro's TLSH (128 buckets, 1-byte checksum, T1), the string public feeds carry; borer-lsh is borer's own and matches only another borer-lsh\n",
     );
     out
 }
@@ -830,7 +1223,7 @@ mod tests {
     /// hashes the same, one flipped byte in a kilobyte stays near, and an
     /// unrelated kilobyte lands far away.
     #[test]
-    fn tlsh_is_self_consistent() {
+    fn borer_lsh_is_self_consistent() {
         let base: Vec<u8> = (0..1024usize)
             .map(|i| u8::try_from(i % 256).unwrap_or(0))
             .collect();
@@ -839,9 +1232,9 @@ mod tests {
         let far: Vec<u8> = (0..1024usize)
             .map(|i| u8::try_from((i * 7 + 13) % 256).unwrap_or(0))
             .collect();
-        let h = tlsh(&base).expect("a non-empty stream hashes");
-        let near_h = tlsh(&near).expect("near hashes");
-        let far_h = tlsh(&far).expect("far hashes");
+        let h = borer_lsh(&base).expect("a non-empty stream hashes");
+        let near_h = borer_lsh(&near).expect("near hashes");
+        let far_h = borer_lsh(&far).expect("far hashes");
         assert_eq!(
             h.hex(),
             "d50a101cd566bbdfae6df5ddb9feab6fbd9ae5e7b9bb7b6da9dcdf6baa75aeba7a9deddb"
@@ -857,6 +1250,48 @@ mod tests {
         assert_eq!(h.distance(&h), 0);
         assert_eq!(h.distance(&near_h), 2);
         assert_eq!(h.distance(&far_h), 122);
-        assert!(tlsh(&[]).is_none());
+        assert!(borer_lsh(&[]).is_none());
+    }
+
+    /// `Testing/example_data/small.txt` of the TLSH reference
+    /// (github.com/trendmicro/tlsh), 60 bytes.
+    const SMALL: &[u8] = b"bfghjdbkfdj376t4en, i7e2w 8o\tq22we ,9wq12q ,32qTE$#!#$%^I&*\n";
+
+    /// `Testing/example_data/small2.txt` of the TLSH reference, 67 bytes.
+    const SMALL2: &[u8] =
+        b"'Type \"copyright\", \"credits\" or \"license\" for more information.\xe2\x80\x99\n";
+
+    /// The reference's digests of its two small inputs and their distance.
+    ///
+    /// As its test data states them: the `T1` lines from
+    /// `Testing/exp/example_data.128.1.len.out_EXP` and the score from
+    /// `Testing/exp/example_data.128.1.len.xref.scores_EXP`.
+    #[test]
+    fn tlsh_matches_the_reference_test_data() {
+        assert_eq!(SMALL.len(), 60);
+        assert_eq!(SMALL2.len(), 67);
+        let small = tlsh(SMALL).expect("60 varied bytes hash");
+        let small2 = tlsh(SMALL2).expect("67 varied bytes hash");
+        assert_eq!(
+            small.hex(),
+            "T1F8A0220C0F8C0023CB880800CA33E88B8F0C022AB302C2008A030300300E8A00C83AAC"
+        );
+        assert_eq!(
+            small2.hex(),
+            "T1C6A022A2E0008CC320C083A3E20AA888022A00000A0AB0088828022A0008A00022F22A"
+        );
+        assert_eq!(small.distance(&small2), 221);
+        assert_eq!(small2.distance(&small), 221);
+        assert_eq!(small.distance(&small), 0);
+    }
+
+    /// As the reference does, TLSH gives no digest for fewer than 50 bytes
+    /// or a stream whose buckets are half or more empty.
+    #[test]
+    fn tlsh_refuses_short_and_uniform_streams() {
+        assert!(tlsh(&SMALL[..49]).is_none());
+        assert!(tlsh(&SMALL[..50]).is_some());
+        assert!(tlsh(&[0u8; 4096]).is_none());
+        assert!(tlsh(&b"ab".repeat(2048)).is_none());
     }
 }
