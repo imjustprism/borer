@@ -44,7 +44,7 @@ use super::expr::{Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, fold, tls_slot
 use super::lift::{BlockFacts, Env, Pass, exec_block};
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
-use crate::emulate::{Emulator, Stop, fill_byte};
+use crate::emulate::{Emulator, Run, Stop, fill_byte};
 use crate::fxmap::FxHashSet;
 use crate::num::{from_usize, lo8, lo32};
 use crate::program::Program;
@@ -269,7 +269,7 @@ impl Verified {
     /// # Returns
     ///
     /// The value to compare, or `None` when there is none.
-    fn count(&mut self, fact: Fact, read: Read) -> Option<u64> {
+    pub(super) fn count(&mut self, fact: Fact, read: Read) -> Option<u64> {
         let tally = self.facts.entry(fact).or_default();
         match read {
             Read::Value(v) => {
@@ -328,7 +328,7 @@ impl Verified {
 
 /// How a lifted value read under a block's starting state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Read {
+pub(super) enum Read {
     /// It evaluated to this.
     Value(u64),
     /// The evaluator cannot read it.
@@ -407,7 +407,7 @@ impl Probe {
 
 /// One memory write of the lifter's.
 #[derive(Debug)]
-enum Effect {
+pub(super) enum Effect {
     /// A store through a pointer.
     Store {
         /// The address stored to.
@@ -444,37 +444,109 @@ impl Rng {
     }
 }
 
-/// The state a block starts from, shared by the emulator and the
+/// A machine a block runs on for the check: the x86 [`Emulator`], or the
+/// arm64 [`crate::emulate::a64::Machine`], which share these methods.
+pub(super) trait Bench: Clone {
+    /// The name the machine reads its stack pointer by, as a report names
+    /// a slot from it.
+    const SP: &'static str;
+
+    /// Reads a byte as a load reads it, or `None` where a load faults.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address.
+    fn byte_at(&self, at: u64) -> Option<u8>;
+
+    /// Reads a register named as text, or `None` for a name that is no
+    /// register.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The register's name.
+    fn register(&self, name: &str) -> Option<u64>;
+
+    /// Sets the step budget of the next run.
+    ///
+    /// # Arguments
+    ///
+    /// * `budget` - The most instructions to run.
+    fn set_budget(&mut self, budget: usize);
+
+    /// Sets the address the next run halts at before executing it.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address, or `None` to run to the end.
+    fn stop_at(&mut self, at: Option<u64>);
+
+    /// Runs from `entry` until it stops.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The first instruction.
+    ///
+    /// # Returns
+    ///
+    /// Why it stopped, and the bytes it wrote in order.
+    fn run(&mut self, entry: u64) -> Run;
+}
+
+impl Bench for Emulator<'_> {
+    const SP: &'static str = "rsp";
+
+    fn byte_at(&self, at: u64) -> Option<u8> {
+        Emulator::byte_at(self, at)
+    }
+
+    fn register(&self, name: &str) -> Option<u64> {
+        Emulator::register(self, name)
+    }
+
+    fn set_budget(&mut self, budget: usize) {
+        Emulator::set_budget(self, budget);
+    }
+
+    fn stop_at(&mut self, at: Option<u64>) {
+        Emulator::stop_at(self, at);
+    }
+
+    fn run(&mut self, entry: u64) -> Run {
+        Emulator::run(self, entry)
+    }
+}
+
+/// The state a block starts from, shared by the machine and the
 /// evaluator.
-struct State<'p> {
-    /// The memory before any run: the image and what the emulator plants.
-    pristine: &'p Emulator<'p>,
+pub(super) struct State<'p, M> {
+    /// The memory before any run: the image and what the machine plants.
+    pub(super) pristine: &'p M,
     /// The seed of the bytes nothing backs ([`fill_byte`]).
-    fill: u64,
-    /// Each general register's starting value.
-    regs: BTreeMap<Register, u64>,
+    pub(super) fill: u64,
+    /// Each register's starting value, keyed as the lifter keys it.
+    pub(super) regs: BTreeMap<Key, u64>,
     /// The starting stack pointer.
-    rsp: u64,
+    pub(super) rsp: u64,
     /// The seeded stack bytes.
-    stack: BTreeMap<u64, u8>,
+    pub(super) stack: BTreeMap<u64, u8>,
     /// The register width: an address and every operator is computed at
     /// this width, as the emulator computes it, so `eax * 4` past four
     /// gigabytes wraps.
-    width: u8,
+    pub(super) width: u8,
     /// The temporaries the lifter made, by id, with the value each copied.
-    temps: BTreeMap<u32, Expr>,
+    pub(super) temps: BTreeMap<u32, Expr>,
     /// The address the entry state walks the TLS block to, resolved once
-    /// per run ([`State::resolve_tls`]).
-    tls_block: u64,
+    /// per run ([`State::resolve_tls`]); zero where no walk applies.
+    pub(super) tls_block: u64,
 }
 
-impl State<'_> {
+impl<M: Bench> State<'_, M> {
     /// A byte of memory before the block ran.
     ///
     /// # Arguments
     ///
     /// * `at` - The address.
-    fn byte(&self, at: u64) -> u8 {
+    pub(super) fn byte(&self, at: u64) -> u8 {
         self.stack
             .get(&at)
             .copied()
@@ -493,7 +565,9 @@ impl State<'_> {
             .contains(&n)
             .then(|| word(n, |i| self.byte(at.wrapping_add(i))))
     }
+}
 
+impl State<'_, Emulator<'_>> {
     /// Resolves the address a TLS slot read stands for, from the entry
     /// state, once per run.
     ///
@@ -578,11 +652,16 @@ pub(super) fn low(bits: u8) -> u64 {
 /// * `st` - The starting state.
 /// * `reads` - The memory ranges it read, gathered for the store check.
 /// * `depth` - How much deeper to look.
-fn eval(e: &Expr, st: &State<'_>, reads: &mut Vec<(u64, u64)>, depth: u8) -> Option<u64> {
+pub(super) fn eval<M: Bench>(
+    e: &Expr,
+    st: &State<'_, M>,
+    reads: &mut Vec<(u64, u64)>,
+    depth: u8,
+) -> Option<u64> {
     let d = depth.checked_sub(1)?;
     match e {
         Expr::Const(v) | Expr::FConst(v, _) => Some(*v),
-        Expr::Var(Key::Reg(r)) => st.regs.get(r).copied(),
+        Expr::Var(k @ Key::Reg(_)) => st.regs.get(k).copied(),
         Expr::Var(Key::Tmp(id)) => eval(st.temps.get(id)?, st, reads, d),
         Expr::Var(Key::Slot(off)) => {
             let at = st.rsp.wrapping_add_signed(*off) & low(st.width);
@@ -675,7 +754,7 @@ fn eval(e: &Expr, st: &State<'_>, reads: &mut Vec<(u64, u64)>, depth: u8) -> Opt
 ///
 /// * `e` - The expression.
 /// * `st` - The starting state, whose temporaries are looked through.
-fn float_bits(e: &Expr, st: &State<'_>) -> Option<u8> {
+pub(super) fn float_bits<M: Bench>(e: &Expr, st: &State<'_, M>) -> Option<u8> {
     match e {
         Expr::Deref(_, Ty::F32) | Expr::Cast(_, Ty::F32) | Expr::FConst(_, Ty::F32) => Some(32),
         Expr::Deref(_, Ty::F64) | Expr::Cast(_, Ty::F64) | Expr::FConst(_, Ty::F64) => Some(64),
@@ -948,7 +1027,12 @@ pub(super) fn float_cc(cc: ConditionCode, a: f64, b: f64) -> Option<bool> {
 /// * `st` - The starting state.
 /// * `reads` - The memory ranges read.
 /// * `d` - How much deeper to look.
-fn eval_cond(c: &Cond, st: &State<'_>, reads: &mut Vec<(u64, u64)>, d: u8) -> Option<bool> {
+pub(super) fn eval_cond<M: Bench>(
+    c: &Cond,
+    st: &State<'_, M>,
+    reads: &mut Vec<(u64, u64)>,
+    d: u8,
+) -> Option<bool> {
     if let Flags::Cmp(a, b, _) = &c.flags
         && let Some(fb) = float_bits(a, st).or_else(|| float_bits(b, st))
     {
@@ -1018,17 +1102,29 @@ fn statement_only(i: &Instruction) -> bool {
 /// What was compared and every disagreement.
 #[must_use]
 pub fn verify(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
+    in_parts(entries, |part| verify_some(program, analysis, part, seed))
+}
+
+/// Checks some functions in parts, one thread per part, and adds up what
+/// the parts found in the order of `entries`.
+///
+/// # Arguments
+///
+/// * `entries` - The functions to check.
+/// * `some` - Checks one part on the calling thread.
+pub(super) fn in_parts(entries: &[u64], some: impl Fn(&[u64]) -> Verified + Sync) -> Verified {
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(entries.len().div_ceil(PAR_MIN).max(1));
     if threads <= 1 {
-        return verify_some(program, analysis, entries, seed);
+        return some(entries);
     }
     let chunk = entries.len().div_ceil(threads);
+    let some = &some;
     let parts: Vec<Verified> = std::thread::scope(|scope| {
         let handles: Vec<_> = entries
             .chunks(chunk)
-            .map(|part| scope.spawn(move || verify_some(program, analysis, part, seed)))
+            .map(|part| scope.spawn(move || some(part)))
             .collect();
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
@@ -1121,11 +1217,11 @@ fn written_registers(instrs: &[Instruction], width: u8) -> Vec<Register> {
 
 /// What a block's comparisons suggest a register start next to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Near {
+pub(super) enum Near {
     /// The constant it is compared with.
     Constant(u64),
     /// The register it is compared with, which is seeded before it.
-    Register(Register),
+    Register(Key),
 }
 
 impl Near {
@@ -1136,7 +1232,7 @@ impl Near {
     /// * `regs` - The registers seeded so far.
     /// * `r` - A random value, which picks the offset and stands in for a
     ///   register not seeded yet.
-    fn seed(self, regs: &BTreeMap<Register, u64>, r: u64) -> u64 {
+    pub(super) fn seed(self, regs: &BTreeMap<Key, u64>, r: u64) -> u64 {
         let base = match self {
             Self::Constant(k) => k,
             Self::Register(other) => regs.get(&other).copied().unwrap_or(r),
@@ -1184,7 +1280,7 @@ fn comparands(
                     near.insert(r0, Near::Constant(0));
                 } else if let (Some(a), Some(b)) = (rank(r0), rank(r1)) {
                     let (first, second) = if a < b { (r0, r1) } else { (r1, r0) };
-                    near.insert(second, Near::Register(first));
+                    near.insert(second, Near::Register(Key::Reg(first)));
                 }
             }
             OpKind::Memory => {}
@@ -1311,7 +1407,7 @@ impl<'p> Sweep<'p> {
         entry: u64,
         block: &BasicBlock,
         out: &mut Verified,
-    ) -> Result<Ran<'_>, &'static str> {
+    ) -> Result<Ran<'_, Emulator<'p>, X86Regs>, &'static str> {
         let (instrs, jcc, end) = straight_line(ctx, block);
         if instrs.is_empty() {
             return Err("no straight-line code");
@@ -1380,7 +1476,7 @@ impl<'p> Sweep<'p> {
                 _ => r,
             } & low(self.width);
             emu.set_register(name, v);
-            st.regs.insert(reg, v);
+            st.regs.insert(Key::Reg(reg), v);
         }
         // INVARIANT: both sides start the segment registers clear, as the
         // xmm registers start clear, so a segment the lifter wrote nothing
@@ -1395,7 +1491,7 @@ impl<'p> Sweep<'p> {
             .iter()
             .filter(|&&(_, s)| !matches!(s, Register::FS | Register::GS))
         {
-            st.regs.insert(seg, 0);
+            st.regs.insert(Key::Reg(seg), 0);
         }
         for word in -STACK_WORDS..STACK_WORDS {
             let at = st.rsp.wrapping_add_signed(word * 8);
@@ -1454,11 +1550,18 @@ impl<'p> Sweep<'p> {
             st,
             emu,
             stored,
-            regs: self.regs,
-            written,
+            regs: X86Regs {
+                names: self.regs,
+                written,
+            },
             env,
             effects: probe.effects,
-            branch: jcc.zip(lifted.branch.map(|b| b.cond)),
+            branch: jcc
+                .map(|j| Jcc {
+                    ip: j.ip(),
+                    target: j.near_branch_target(),
+                })
+                .zip(lifted.branch.map(|b| b.cond)),
         })
     }
 
@@ -1522,32 +1625,48 @@ impl<'p> Sweep<'p> {
     }
 }
 
-/// One block run both ways, ready to compare.
-struct Ran<'p> {
-    /// The function's entry.
-    function: u64,
-    /// The block's start.
-    block: u64,
-    /// The state both runs started from.
-    st: State<'p>,
-    /// The emulator, stopped where the straight line ends.
-    emu: Emulator<'p>,
-    /// Addresses the emulator wrote.
-    stored: FxHashSet<u64>,
-    /// The general registers compared, named as the emulator names them.
-    regs: &'static [(&'static str, Register)],
-    /// The registers some instruction of the block writes.
-    written: Vec<Register>,
-    /// The lifter's environment where the straight line ends.
-    env: Env,
-    /// The lifter's memory writes, in program order.
-    effects: Vec<Effect>,
-    /// The conditional branch ending the block, with the condition the
-    /// lifter says it is taken under.
-    branch: Option<(Instruction, Cond)>,
+/// A block's conditional branch, as the check steps it on the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Jcc {
+    /// The branch's address.
+    pub(super) ip: u64,
+    /// Where it goes when taken.
+    pub(super) target: u64,
 }
 
-impl Ran<'_> {
+/// The register facts an x86 block's check compares beyond what every
+/// instruction set's does.
+pub(super) struct X86Regs {
+    /// The general registers compared, named as the emulator names them.
+    names: &'static [(&'static str, Register)],
+    /// The registers some instruction of the block writes.
+    written: Vec<Register>,
+}
+
+/// One block run both ways, ready to compare.
+pub(super) struct Ran<'p, M, R> {
+    /// The function's entry.
+    pub(super) function: u64,
+    /// The block's start.
+    pub(super) block: u64,
+    /// The state both runs started from.
+    pub(super) st: State<'p, M>,
+    /// The machine, stopped where the straight line ends.
+    pub(super) emu: M,
+    /// Addresses the machine wrote.
+    pub(super) stored: FxHashSet<u64>,
+    /// The register facts of the block's instruction set.
+    pub(super) regs: R,
+    /// The lifter's environment where the straight line ends.
+    pub(super) env: Env,
+    /// The lifter's memory writes, in program order.
+    pub(super) effects: Vec<Effect>,
+    /// The conditional branch ending the block, with the condition the
+    /// lifter says it is taken under.
+    pub(super) branch: Option<(Jcc, Cond)>,
+}
+
+impl Ran<'_, Emulator<'_>, X86Regs> {
     /// Compares every fact: registers, the x87 stack, the xmm lanes, slots,
     /// stores, then the branch.
     ///
@@ -1562,16 +1681,18 @@ impl Ran<'_> {
         let held = self.slots(out);
         self.stores(&held, out);
         if let Some((jcc, cond)) = self.branch.take() {
-            self.step_branch(&jcc, &cond, out);
+            self.step_branch(jcc, &cond, out);
         }
     }
+}
 
+impl<M: Bench, R> Ran<'_, M, R> {
     /// Evaluates a lifted value under the starting state.
     ///
     /// # Arguments
     ///
     /// * `e` - The value.
-    fn read(&self, e: &Expr) -> Read {
+    pub(super) fn read(&self, e: &Expr) -> Read {
         let mut reads = Vec::new();
         let v = eval(e, &self.st, &mut reads, EVAL_DEPTH);
         if self.touches(&reads) {
@@ -1591,7 +1712,7 @@ impl Ran<'_> {
             .any(|&(at, n)| (0..n).any(|i| self.stored.contains(&at.wrapping_add(i))))
     }
 
-    /// A byte of memory as the emulator left it.
+    /// A byte of memory as the machine left it.
     ///
     /// # Arguments
     ///
@@ -1612,7 +1733,7 @@ impl Ran<'_> {
     /// * `values` - What the emulator left, what the lifted expression
     ///   evaluates to, and the width compared.
     /// * `expr` - The lifted expression.
-    fn disagree(
+    pub(super) fn disagree(
         &self,
         out: &mut Verified,
         fact: Fact,
@@ -1632,7 +1753,9 @@ impl Ran<'_> {
             expr,
         });
     }
+}
 
+impl Ran<'_, Emulator<'_>, X86Regs> {
     /// Compares every general register and the stack pointer.
     ///
     /// # Arguments
@@ -1640,7 +1763,7 @@ impl Ran<'_> {
     /// * `out` - Where the counts and disagreements go.
     fn registers(&self, out: &mut Verified) {
         let (env, width) = (&self.env, self.st.width);
-        for &(name, reg) in self.regs {
+        for &(name, reg) in self.regs.names {
             let key = Key::Reg(reg);
             let Some(emulated) = self.emu.register(name) else {
                 continue;
@@ -1648,9 +1771,9 @@ impl Ran<'_> {
             let lane = env.narrow.get(&key).copied().unwrap_or(64);
             let value = env.vals.get(&key);
             let (read, bits) = match value {
-                None if self.written.contains(&reg) && lane != 32 => (Read::Unreadable, lane),
+                None if self.regs.written.contains(&reg) && lane != 32 => (Read::Unreadable, lane),
                 None => (
-                    Read::Value(self.st.regs.get(&reg).copied().unwrap_or(0)),
+                    Read::Value(self.st.regs.get(&key).copied().unwrap_or(0)),
                     lane,
                 ),
                 Some(e) => (self.read(e), lane.clamp(8, 64)),
@@ -1847,9 +1970,11 @@ impl Ran<'_> {
             }
         }
     }
+}
 
+impl<M: Bench, R> Ran<'_, M, R> {
     /// Compares every stack slot the lifter holds a value for with the
-    /// emulator's stack.
+    /// machine's stack.
     ///
     /// # Arguments
     ///
@@ -1859,7 +1984,7 @@ impl Ran<'_> {
     ///
     /// The bytes the lifter's slots hold, whose value this compared; the
     /// store check leaves them to it.
-    fn slots(&self, out: &mut Verified) -> FxHashSet<u64> {
+    pub(super) fn slots(&self, out: &mut Verified) -> FxHashSet<u64> {
         let (env, mask) = (&self.env, low(self.st.width));
         let mut held = FxHashSet::default();
         for (&k, &bits) in &env.slot_bits {
@@ -1887,9 +2012,9 @@ impl Ran<'_> {
             let emulated = word(n, |i| self.after(at.wrapping_add(i) & mask));
             if !agree(emulated, lifted, bits, float.is_some()) {
                 let place = if k < 0 {
-                    format!("rsp-{:#x}", k.unsigned_abs())
+                    format!("{}-{:#x}", M::SP, k.unsigned_abs())
                 } else {
-                    format!("rsp+{k:#x}")
+                    format!("{}+{k:#x}", M::SP)
                 };
                 self.disagree(
                     out,
@@ -1963,7 +2088,7 @@ impl Ran<'_> {
     ///
     /// * `held` - The bytes the lifter's slots hold, compared already.
     /// * `out` - Where the counts and disagreements go.
-    fn stores(&self, held: &FxHashSet<u64>, out: &mut Verified) {
+    pub(super) fn stores(&self, held: &FxHashSet<u64>, out: &mut Verified) {
         let mask = low(self.st.width);
         let spans: Vec<Option<(u64, u64)>> = self.effects.iter().map(|e| self.span(e)).collect();
         let covers = |(a, n): (u64, u64), x: u64| (x.wrapping_sub(a) & mask) < n;
@@ -2050,7 +2175,7 @@ impl Ran<'_> {
         if spans.iter().any(Option::is_none) {
             return;
         }
-        let end_sp = self.emu.register("rsp").unwrap_or(self.st.rsp);
+        let end_sp = self.emu.register(M::SP).unwrap_or(self.st.rsp);
         let frame = |x: u64| {
             [self.st.rsp, end_sp]
                 .iter()
@@ -2132,11 +2257,11 @@ impl Ran<'_> {
     /// * `jcc` - The branch.
     /// * `cond` - The lifted condition it is taken under.
     /// * `out` - Where the counts and disagreements go.
-    fn step_branch(&mut self, jcc: &Instruction, cond: &Cond, out: &mut Verified) {
-        let target = jcc.near_branch_target();
+    pub(super) fn step_branch(&mut self, jcc: Jcc, cond: &Cond, out: &mut Verified) {
+        let target = jcc.target;
         self.emu.set_budget(1);
         self.emu.stop_at(Some(target));
-        let taken = match self.emu.run(jcc.ip()).stop {
+        let taken = match self.emu.run(jcc.ip).stop {
             Stop::Stopped(at) if at == target => true,
             Stop::Budget => false,
             _ => {
@@ -2159,7 +2284,7 @@ impl Ran<'_> {
             self.disagree(
                 out,
                 Fact::Branch,
-                format!("{:#x}", jcc.ip()),
+                format!("{:#x}", jcc.ip),
                 values,
                 format!("{cond:?}"),
             );
@@ -2209,6 +2334,17 @@ fn verify_some(program: &Program, analysis: &Analysis, entries: &[u64], seed: u6
 /// * `v` - What [`verify`] found.
 #[must_use]
 pub fn verify_tsv(v: &Verified) -> String {
+    report(v, &Fact::ALL)
+}
+
+/// Renders a verification as a report with a line for each of `kinds`.
+///
+/// # Arguments
+///
+/// * `v` - What a verification found.
+/// * `kinds` - The kinds of fact the instruction set's check compares, in
+///   report order.
+pub(super) fn report(v: &Verified, kinds: &[Fact]) -> String {
     let skipped: usize = v.skipped.values().sum();
     let mut out = format!(
         "# verified {} functions, {} blocks: {} checked against the emulator, {skipped} not checked, {} disagreements\n",
@@ -2217,7 +2353,7 @@ pub fn verify_tsv(v: &Verified) -> String {
         v.checked,
         v.mismatches.len()
     );
-    for fact in Fact::ALL {
+    for &fact in kinds {
         let t = v.facts.get(&fact).copied().unwrap_or_default();
         let _ = write!(
             out,
