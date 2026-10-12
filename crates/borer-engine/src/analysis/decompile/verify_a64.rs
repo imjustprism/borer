@@ -500,9 +500,11 @@ impl Ran<'_, Machine<'_>, ()> {
     /// A register the lifter holds no value for still holds the value it
     /// started with: the lifter writes every register an instruction it
     /// models changes, and a block holding one it does not model is not
-    /// checked. The stack pointer compares as the tracked offset from the
-    /// starting one, or as the value the lifter holds when it lost the
-    /// offset.
+    /// checked. A register a `w` write left narrow holds its value uncut,
+    /// the machine's upper half being zero ([`super::lift::Env::narrow`]),
+    /// so it compares with that half cleared. The stack pointer compares
+    /// as the tracked offset from the starting one, or as the value the
+    /// lifter holds when it lost the offset.
     ///
     /// # Arguments
     ///
@@ -518,6 +520,12 @@ impl Ran<'_, Machine<'_>, ()> {
                 || Read::Value(self.st.regs.get(&key).copied().unwrap_or(0)),
                 |e| self.read(e),
             );
+            let read = match read {
+                Read::Value(v) if self.env.narrow.get(&key) == Some(&32) => {
+                    Read::Value(v & 0xffff_ffff)
+                }
+                other => other,
+            };
             self.compare_register(out, name, emulated, read, value.map(|e| format!("{e:?}")));
         }
         let Some(emulated) = self.emu.register("sp") else {

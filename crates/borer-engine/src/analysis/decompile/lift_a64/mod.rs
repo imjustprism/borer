@@ -7,8 +7,9 @@
 //! stack slots, stores and writing values out follow the x86 lifter's
 //! rules. A register is a [`Key::A64`] variable. The stack pointer is the
 //! tracked offset [`Expr::Sp`] while it is one, so a frame's slots are
-//! [`Key::Slot`]s; a `w` write zero-extends into its `x` register, a scalar
-//! `v` write clears the bits above it, the zero register reads 0 and a
+//! [`Key::Slot`]s; a `w` write zero-extends into its `x` register, cut
+//! where a whole read needs it as the x86 lifter cuts a 32-bit write, a
+//! scalar `v` write clears the bits above it, the zero register reads 0 and a
 //! write to it vanishes. Pointer authentication and branch target
 //! identification change no value. The flags are the x86 lifter's, read
 //! through what set them ([`flags`]), and a conditional select is an
@@ -39,7 +40,7 @@ pub(in crate::analysis::decompile) use shape::{
 use std::collections::btree_map::Entry;
 
 use super::Ctx;
-use super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, fold, mask, sign_extend};
+use super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, fold, known_bits, mask, sign_extend};
 use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn, pack};
 use crate::fxmap::FxHashMap;
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg, Shift};
@@ -350,11 +351,25 @@ impl Lift<'_, '_> {
     ///
     /// # Arguments
     ///
-    /// * `r` - The register: an `x` or `v` register reads as the
-    ///   environment holds it (a `w` read is its `x` register's value,
-    ///   which a caller cuts where the upper bits matter), the stack
-    ///   pointer as its tracked offset, the zero register as 0.
+    /// * `r` - The register, read at 64 bits ([`Lift::reg_at`]).
     fn read(&self, r: Reg) -> Expr {
+        self.reg_at(r, 64)
+    }
+
+    /// Reads a register at the width an instruction reads it.
+    ///
+    /// An `x` or `v` register reads as the environment holds it, the stack
+    /// pointer as its tracked offset, the zero register as 0. A `w` write
+    /// leaves the value it computed uncut ([`Lift::write`]), so a read of
+    /// 32 bits or fewer is that value, whose bits above the read a caller
+    /// cuts where they matter, and a whole read of a register a `w` write
+    /// left cuts it to the low 32 bits the machine kept.
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - The register.
+    /// * `bits` - The width read, 8 to 128.
+    fn reg_at(&self, r: Reg, bits: u16) -> Expr {
         match r {
             Reg::Zr => Expr::Const(0),
             Reg::Sp => self
@@ -362,14 +377,20 @@ impl Lift<'_, '_> {
                 .env
                 .sp
                 .map_or_else(|| self.ex.env.get(Key::A64(Reg::Sp)), Expr::Sp),
+            Reg::X(_) if bits > 32 && self.ex.env.narrow.get(&Key::A64(r)).copied() == Some(32) => {
+                mask(self.ex.assumed(self.ex.env.get(Key::A64(r))), 0xffff_ffff)
+            }
             Reg::X(_) | Reg::V(_) => self.ex.assumed(self.ex.env.get(Key::A64(r))),
         }
     }
 
     /// Writes a register at a width, lazily.
     ///
-    /// A `w` write zero-extends into its `x` register and a scalar `v`
-    /// write clears the bits above it, so the value is cut to the width; a
+    /// A `w` write zero-extends into its `x` register, as the x86 lifter's
+    /// 32-bit writes do: the value is kept uncut and the register held
+    /// narrow ([`super::lift::Env::narrow`]) when it may have bits above
+    /// 32, so only a whole read cuts it ([`Lift::reg_at`]). A scalar `v`
+    /// write clears the bits above it, so its value is cut to the width; a
     /// write to the zero register vanishes; the stack pointer is tracked as
     /// an offset while the value is one, and held as a value when not.
     ///
@@ -379,7 +400,8 @@ impl Lift<'_, '_> {
     /// * `bits` - The width written.
     /// * `v` - The value.
     fn write(&mut self, r: Reg, bits: u16, v: Expr) {
-        let v = low(v, bits);
+        let w = matches!(r, Reg::X(_)) && bits == 32;
+        let v = if w { v } else { low(v, bits) };
         match (r, v) {
             (Reg::Zr, _) => {}
             (Reg::Sp, Expr::Sp(k)) => {
@@ -389,6 +411,14 @@ impl Lift<'_, '_> {
             (Reg::Sp, v) => {
                 self.ex.env.sp = None;
                 self.ex.assign(Key::A64(Reg::Sp), v);
+            }
+            (Reg::X(_), v) if w => {
+                let key = Key::A64(r);
+                let wide = known_bits(&v) > 0xffff_ffff;
+                self.ex.assign(key, v);
+                if wide && self.ex.env.narrow.get(&key).is_none_or(|b| *b > 32) {
+                    self.ex.env.narrow.insert(key, 32);
+                }
             }
             (Reg::X(_) | Reg::V(_), v) => self.ex.assign(Key::A64(r), v),
         }
@@ -430,14 +460,14 @@ impl Lift<'_, '_> {
         match i.operands.get(k).copied()? {
             Opnd::Reg {
                 reg: reg @ (Reg::X(_) | Reg::Sp | Reg::Zr),
-                ..
-            } => Some(self.read(reg)),
+                bits,
+            } => Some(self.reg_at(reg, bits)),
             Opnd::Shifted {
                 reg: reg @ (Reg::X(_) | Reg::Sp | Reg::Zr),
                 bits,
                 shift,
                 amount,
-            } => Some(shifted(self.read(reg), bits, shift, amount, width)),
+            } => Some(shifted(self.reg_at(reg, bits), bits, shift, amount, width)),
             Opnd::Imm(v) => Some(Expr::Const(v)),
             Opnd::Reg { .. }
             | Opnd::Shifted { .. }
@@ -547,7 +577,7 @@ impl Lift<'_, '_> {
             Test::Zero { reg, bits, zero } => Cond {
                 cc: Cc(if zero { C::e } else { C::ne }),
                 flags: Flags::Cmp(
-                    tested.unwrap_or_else(|| self.read(reg)),
+                    tested.unwrap_or_else(|| self.reg_at(reg, bits)),
                     Expr::Const(0),
                     width8(bits),
                 ),
@@ -560,7 +590,7 @@ impl Lift<'_, '_> {
             } => Cond {
                 cc: Cc(if set { C::ne } else { C::e }),
                 flags: Flags::Test(
-                    tested.unwrap_or_else(|| self.read(reg)),
+                    tested.unwrap_or_else(|| self.reg_at(reg, bits)),
                     Expr::Const(1 << bit),
                     width8(bits),
                 ),
@@ -599,7 +629,9 @@ impl Lift<'_, '_> {
         // value is held where they protect it, as a jump table's index is,
         // a block ending in a branch having none.
         let tested = match jcc {
-            Some((Test::Zero { reg, .. } | Test::Bit { reg, .. }, ..)) => Some(self.read(reg)),
+            Some((Test::Zero { reg, bits, .. } | Test::Bit { reg, bits, .. }, ..)) => {
+                Some(self.reg_at(reg, bits))
+            }
             Some((Test::Flags(_), ..)) | None => None,
         };
         let holds = tested.is_some();

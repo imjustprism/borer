@@ -5,11 +5,12 @@
 //! Each handler computes every value before it writes anything, and
 //! answers `None` for an operand it does not model, which leaves the
 //! instruction unmodeled. A value is built at 64 bits from the registers'
-//! whole values and cut to the destination's width by the write: an add,
-//! a subtract, a multiply or a logical operation needs no bit of a `w`
-//! operand above its 32, so only an operation that does (a right shift, a
-//! divide, a rotate, an extension) cuts or sign-extends its operand first,
-//! and a compare's flags carry their width.
+//! values as the instruction reads them and left uncut by a `w` write,
+//! which holds the register narrow instead: an add, a subtract, a multiply
+//! or a logical operation needs no bit of a `w` operand above its 32, so
+//! only an operation that does (a right shift, a divide, a rotate, an
+//! extension) cuts or sign-extends its operand first, and a compare's
+//! flags carry their width.
 
 use super::super::expr::{Expr, Flags, Op, Ty, UnOp, fold, mask, sign_extend, ternary, unary};
 use super::flags::{self, holds, next_reader};
@@ -350,7 +351,12 @@ impl Lift<'_, '_> {
             Wide::Not => Expr::Const(!field),
             Wide::Keep => fold(
                 Op::Or,
-                fold(Op::And, self.read(rd), Expr::Const(!(0xffff << pos)), 64),
+                fold(
+                    Op::And,
+                    self.reg_at(rd, bits),
+                    Expr::Const(!(0xffff << pos)),
+                    64,
+                ),
                 Expr::Const(field),
                 64,
             ),
@@ -457,7 +463,7 @@ impl Lift<'_, '_> {
         let v = match kind {
             Field::Unsigned => ubfm(src, r, s, width),
             Field::Signed => sbfm(src, r, s, width),
-            Field::Insert => bfm(self.read(rd), src, r, s, width),
+            Field::Insert => bfm(self.reg_at(rd, bits), src, r, s, width),
         };
         self.write(rd, bits, v);
         Some(())
@@ -641,7 +647,7 @@ impl Lift<'_, '_> {
         };
         let v = match i.operands[1] {
             Opnd::Reg { reg, bits: from } => {
-                let v = self.read(reg);
+                let v = self.reg_at(reg, from);
                 if from == 64 { low64(v) } else { low(v, from) }
             }
             Opnd::Other if matches!(dst, Reg::V(_)) && i.word & FMOV_IMM.0 == FMOV_IMM.1 => {

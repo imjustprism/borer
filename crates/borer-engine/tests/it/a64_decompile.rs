@@ -220,3 +220,55 @@ fn arm64_switches_pair_stores_and_register_tests_decompile() {
         assert!(r.wrong().is_empty(), "+{off:#x}: {}", replay_tsv(&r));
     }
 }
+
+/// Where the third set of routines is placed.
+const BASE3: u64 = 0x3_0000;
+
+/// 32-bit arithmetic read back at 32 bits, and a 32-bit value read whole
+/// as an index, at [`BASE3`]:
+///
+/// ```text
+/// wsum(a, b): t = a + 1; t == b ? t : t - b    (all uint32_t)   at +0x00
+/// widx(a, p): return p[(uint32_t)(a + 1)]                        at +0x1c
+/// ```
+const ROUTINES3: [u32; 10] = [
+    0x1100_0408, // ASM: add w8, w0, #0x1 (wsum)
+    0x6b01_011f, // ASM: cmp w8, w1
+    0x5400_0061, // ASM: b.ne wsum+0x14
+    0x2a08_03e0, // ASM: mov w0, w8
+    0xd65f_03c0, // ASM: ret
+    0x4b01_0100, // ASM: sub w0, w8, w1
+    0xd65f_03c0, // ASM: ret
+    0x1100_0408, // ASM: add w8, w0, #0x1 (widx)
+    0xf868_7820, // ASM: ldr x0, [x1, x8, lsl #3]
+    0xd65f_03c0, // ASM: ret
+];
+
+/// A `w` write leaves no mask where every reader takes 32 bits, and a whole
+/// read of the register is cut to the 32 bits the machine kept.
+///
+/// The `x` register a `w` write sets holds the value uncut until a 64-bit
+/// read needs its upper half zero, as the x86 lifter's 32-bit writes do;
+/// a compare, a return and another `w` operation read the low half only.
+#[test]
+fn arm64_w_writes_mask_only_where_a_whole_read_needs_it() {
+    let code: Vec<u8> = ROUTINES3.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let len = u64::try_from(code.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE3, 0, len, false, true);
+    let mut p = Program::raw(code, Arch::Arm64, 0, Some(BASE3), vec![text]);
+    p.symbols = vec![local("wsum", BASE3), local("widx", BASE3 + 0x1c)];
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let wsum = decompile(&p, &a, &o, BASE3).expect("decompiles");
+    assert!(!wsum.contains("0xffffffff"), "{wsum}");
+    let widx = decompile(&p, &a, &o, BASE3 + 0x1c).expect("decompiles");
+    assert!(
+        widx.contains("0xffffffff") || widx.contains("(uint32_t)"),
+        "{widx}"
+    );
+    for off in [0, 0x1c] {
+        let r = replay_function(&p, &a, BASE3 + off, 1);
+        assert!(r.checked > 0, "+{off:#x}: {}", replay_tsv(&r));
+        assert!(r.disagreements.is_empty(), "+{off:#x}: {}", replay_tsv(&r));
+    }
+}

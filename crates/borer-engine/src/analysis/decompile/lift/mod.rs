@@ -256,7 +256,17 @@ impl Env {
             .retain(|k, v| other.slot_types.get(k) == Some(v));
         self.tls_arrays.retain(|k| other.tls_arrays.contains(k));
         self.tls_blocks.retain(|k| other.tls_blocks.contains(k));
-        self.narrow.retain(|k, v| other.narrow.get(k) == Some(v));
+        // INVARIANT: an arm64 register narrow on both sides fits the wider
+        // of the two on either path (a `w` write's 32 bits, a byte), so a
+        // whole read cuts it there; an x86 call's result is narrow only by
+        // what its callers read, and keeps its width only where both agree.
+        self.narrow.retain(|k, v| match (k, other.narrow.get(k)) {
+            (Key::A64(_), Some(w)) => {
+                *v = (*v).max(*w);
+                true
+            }
+            (_, w) => w == Some(v),
+        });
         self.unset.retain(|k| other.unset.contains(k));
         self.fresh.retain(|k| other.fresh.contains(k));
         self.touched.extend(other.touched.iter().copied());
