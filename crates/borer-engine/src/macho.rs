@@ -3,8 +3,8 @@
 //!
 //! The image's segments give its sections, its symbol table the exports
 //! and locals, the indirect symbols the import slots, the linker's
-//! function starts the function ranges, and the load commands the header
-//! facts.
+//! function starts and compact unwind table the function ranges, and the
+//! load commands the header facts.
 //!
 //! A Mach-O says more about its code than an ELF does: ld64 writes
 //! `LC_FUNCTION_STARTS`, every function's entry as a ULEB128 delta from
@@ -58,6 +58,19 @@ const N_SECT: u8 = 0x0e;
 const N_EXT: u8 = 0x01;
 /// Most function starts read.
 const STARTS_MAX: usize = 1 << 22;
+/// `UNWIND_SECTION_VERSION`: the one `__unwind_info` layout there is.
+const UNWIND_VERSION: u32 = 1;
+/// `UNWIND_SECOND_LEVEL_REGULAR`: a page of `(function offset, encoding)`
+/// pairs, eight bytes each.
+const UNWIND_REGULAR: u32 = 2;
+/// `UNWIND_SECOND_LEVEL_COMPRESSED`: a page of four-byte entries, each a
+/// function's offset from the page's first function in its low 24 bits.
+const UNWIND_COMPRESSED: u32 = 3;
+/// The offset bits of a compressed second-level entry.
+const UNWIND_OFFSET_MASK: u32 = 0x00ff_ffff;
+/// Bytes of one first-level index entry: the first function's offset, the
+/// page's offset and the LSDA array's offset.
+const UNWIND_INDEX_ENTRY: usize = 12;
 
 /// What one Mach-O image says about itself.
 pub(crate) struct Loaded {
@@ -176,6 +189,17 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
             Ok(loaded)
         }
     }
+}
+
+/// Reads a little-endian `u16` at `at` in `file`.
+///
+/// # Arguments
+///
+/// * `file` - The file.
+/// * `at` - The offset.
+fn u16_at(file: &[u8], at: usize) -> Option<u16> {
+    let b = file.get(at..at.checked_add(2)?)?;
+    Some(u16::from_le_bytes([b[0], b[1]]))
 }
 
 /// Reads a little-endian `u32` at `at` in `file`.
@@ -370,6 +394,93 @@ fn function_starts(file: &[u8], m: &MachO<'_>, base: usize, text: u64) -> Vec<u6
     out
 }
 
+/// The function starts an image's `__unwind_info` section lists.
+///
+/// ld64's compact unwind table is a first-level index of pages, each entry
+/// naming the first function its page covers, and second-level pages,
+/// regular or compressed, naming every function's offset from `__TEXT`.
+/// The linker folds a run of functions that share one encoding into the
+/// first of them, so the table names a subset of the starts
+/// `LC_FUNCTION_STARTS` lists, but each one it names is a function start,
+/// and it is there when that command is not. The index's last entry is a
+/// sentinel saying where the last function ends; it names no page.
+///
+/// # Arguments
+///
+/// * `file` - The whole file.
+/// * `raw` - The image's section headers.
+/// * `text` - Where `__TEXT` is mapped, which every offset counts from.
+///
+/// # Returns
+///
+/// The starts in table order, at most [`STARTS_MAX`]; none without a
+/// table of the one version there is.
+fn unwind_starts(file: &[u8], raw: &[RawSection], text: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    let Some(data) = raw
+        .iter()
+        .find(|s| s.name == "__TEXT,__unwind_info")
+        .and_then(|s| {
+            let at = usize::try_from(s.offset).ok()?;
+            file.get(at..at.checked_add(usize::try_from(s.size).ok()?)?)
+        })
+    else {
+        return out;
+    };
+    let wide = |v: u32| usize::try_from(v).unwrap_or(usize::MAX);
+    let (Some(UNWIND_VERSION), Some(index), Some(count)) =
+        (u32_at(data, 0), u32_at(data, 20), u32_at(data, 24))
+    else {
+        return out;
+    };
+    for i in 0..wide(count) {
+        if out.len() >= STARTS_MAX {
+            break;
+        }
+        let Some(entry) = i
+            .checked_mul(UNWIND_INDEX_ENTRY)
+            .and_then(|o| o.checked_add(wide(index)))
+        else {
+            break;
+        };
+        let (Some(first), Some(page)) = (
+            u32_at(data, entry),
+            entry.checked_add(4).and_then(|at| u32_at(data, at)),
+        ) else {
+            break;
+        };
+        if page == 0 {
+            continue;
+        }
+        out.push(text.wrapping_add(u64::from(first)));
+        let page = wide(page);
+        let (Some(kind), Some(entries), Some(n)) = (
+            u32_at(data, page),
+            page.checked_add(4).and_then(|at| u16_at(data, at)),
+            page.checked_add(6).and_then(|at| u16_at(data, at)),
+        ) else {
+            continue;
+        };
+        let entries = page.saturating_add(usize::from(entries));
+        for k in 0..usize::from(n) {
+            let offset = match kind {
+                UNWIND_REGULAR => u32_at(data, entries.saturating_add(k * 8)),
+                UNWIND_COMPRESSED => u32_at(data, entries.saturating_add(k * 4))
+                    .map(|w| first.wrapping_add(w & UNWIND_OFFSET_MASK)),
+                _ => None,
+            };
+            let Some(offset) = offset else {
+                break;
+            };
+            out.push(text.wrapping_add(u64::from(offset)));
+            if out.len() >= STARTS_MAX {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// A symbol's name as borer shows it: the C underscore dropped, which
 /// leaves a C++ name demanglable.
 ///
@@ -486,6 +597,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
     };
     let mut starts: Vec<u64> = function_starts(file, m, base, text)
         .into_iter()
+        .chain(unwind_starts(file, &raw, text))
         .filter(|&va| code(va).is_some())
         .collect();
     starts.sort_unstable();

@@ -1443,8 +1443,9 @@ impl Program {
     /// the PLT adds its extent to the ranges (stripped binaries keep unwind
     /// data, so their functions are still seeded).
     /// Mach-O: the segments' sections, the symbol table with the import
-    /// slots the indirect symbols name, and the linker's function starts as
-    /// the ranges ([`crate::macho`]); of a fat file, the x86-64 slice.
+    /// slots the indirect symbols name, and the starts the linker's function
+    /// starts and compact unwind table list as the ranges ([`crate::macho`]);
+    /// of a fat file, the x86-64 slice.
     /// An ELF file with no section table to read (stripped, or past the
     /// end) maps its `PT_LOAD` segments in its place, as the system loader
     /// does, and says so.

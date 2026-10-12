@@ -623,3 +623,222 @@ fn hostile_pdata_declares_nothing() {
     let p = Program::from_bytes(PathBuf::from("pdata.exe"), bytes).expect("still loads");
     assert!(p.function_ranges.is_empty(), "{:x?}", p.function_ranges);
 }
+
+/// Where an arm64 Mach-O's `__TEXT` is mapped, its header first.
+const MACHO_TEXT: u64 = 0x1_0000_0000;
+/// Where `__TEXT,__text` starts, in `__TEXT` and in the file.
+const MACHO_CODE: usize = 0x400;
+/// Where `__TEXT,__unwind_info` starts, in `__TEXT` and in the file.
+const MACHO_UNWIND: usize = 0x800;
+/// Where `__LINKEDIT` starts in the file: the function starts' data.
+const MACHO_LINKEDIT: usize = 0x1000;
+
+/// Writes a little-endian `u32` at `at`.
+fn put32(b: &mut [u8], at: usize, v: u32) {
+    b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+/// Writes a little-endian `u64` at `at`.
+fn put64(b: &mut [u8], at: usize, v: u64) {
+    b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+/// Writes a 16-byte, NUL-padded name at `at`.
+fn put_name(b: &mut [u8], at: usize, name: &str) {
+    b[at..at + name.len()].copy_from_slice(name.as_bytes());
+}
+
+/// Builds a stripped arm64 Mach-O executable.
+///
+/// `code` is `__TEXT,__text` at [`MACHO_CODE`], entered at its start;
+/// `unwind` is `__TEXT,__unwind_info` at [`MACHO_UNWIND`]; and `starts` is
+/// the `LC_FUNCTION_STARTS` data, in `__LINKEDIT`.
+///
+/// # Arguments
+///
+/// * `code` - The words of `__text`.
+/// * `unwind` - The words of `__unwind_info`.
+/// * `starts` - The ULEB128 deltas of the function starts, zero-terminated.
+fn arm64_macho(code: &[u32], unwind: &[u32], starts: &[u8]) -> Program {
+    let mut b = vec![0u8; MACHO_LINKEDIT + 0x100];
+    put32(&mut b, 0, 0xfeed_facf);
+    put32(&mut b, 4, 0x0100_000c);
+    put32(&mut b, 12, 2);
+    let text = 32;
+    put32(&mut b, text, 0x19);
+    put32(&mut b, text + 4, 72 + 2 * 80);
+    put_name(&mut b, text + 8, "__TEXT");
+    put64(&mut b, text + 24, MACHO_TEXT);
+    put64(&mut b, text + 32, 0x1000);
+    put64(&mut b, text + 48, 0x1000);
+    put32(&mut b, text + 56, 5);
+    put32(&mut b, text + 60, 5);
+    put32(&mut b, text + 64, 2);
+    for (k, (name, at, words, flags)) in [
+        ("__text", MACHO_CODE, code.len(), 0x8000_0400),
+        ("__unwind_info", MACHO_UNWIND, unwind.len(), 0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = text + 72 + k * 80;
+        put_name(&mut b, row, name);
+        put_name(&mut b, row + 16, "__TEXT");
+        put64(
+            &mut b,
+            row + 32,
+            MACHO_TEXT + u64::try_from(at).expect("fits"),
+        );
+        put64(&mut b, row + 40, u64::try_from(words * 4).expect("fits"));
+        put32(&mut b, row + 48, u32::try_from(at).expect("fits"));
+        put32(&mut b, row + 52, 2);
+        put32(&mut b, row + 64, flags);
+    }
+    let linkedit = text + 72 + 2 * 80;
+    put32(&mut b, linkedit, 0x19);
+    put32(&mut b, linkedit + 4, 72);
+    put_name(&mut b, linkedit + 8, "__LINKEDIT");
+    put64(&mut b, linkedit + 24, MACHO_TEXT + 0x1000);
+    put64(&mut b, linkedit + 32, 0x1000);
+    put64(&mut b, linkedit + 40, 0x1000);
+    put64(&mut b, linkedit + 48, 0x100);
+    put32(&mut b, linkedit + 56, 1);
+    put32(&mut b, linkedit + 60, 1);
+    let main = linkedit + 72;
+    put32(&mut b, main, 0x8000_0028);
+    put32(&mut b, main + 4, 24);
+    put64(&mut b, main + 8, u64::try_from(MACHO_CODE).expect("fits"));
+    let function_starts = main + 24;
+    put32(&mut b, function_starts, 0x26);
+    put32(&mut b, function_starts + 4, 16);
+    put32(
+        &mut b,
+        function_starts + 8,
+        u32::try_from(MACHO_LINKEDIT).expect("fits"),
+    );
+    put32(
+        &mut b,
+        function_starts + 12,
+        u32::try_from(starts.len()).expect("fits"),
+    );
+    put32(&mut b, 16, 4);
+    put32(
+        &mut b,
+        20,
+        u32::try_from(function_starts + 16 - 32).expect("fits"),
+    );
+    b[MACHO_CODE..MACHO_CODE + code.len() * 4].copy_from_slice(&le_words(code));
+    b[MACHO_UNWIND..MACHO_UNWIND + unwind.len() * 4].copy_from_slice(&le_words(unwind));
+    b[MACHO_LINKEDIT..MACHO_LINKEDIT + starts.len()].copy_from_slice(starts);
+    Program::from_bytes(PathBuf::from("arm64.macho"), b).expect("parses")
+}
+
+/// Four leaf functions no instruction calls, none opening with a
+/// prologue: only the image's tables say where they start.
+const LEAVES: [u32; 8] = [
+    // ASM: mov w0, #0
+    0x5280_0000,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #1
+    0x5280_0020,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #2
+    0x5280_0040,
+    // ASM: ret
+    0xd65f_03c0,
+    // ASM: mov w0, #3
+    0x5280_0060,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// `LC_FUNCTION_STARTS` naming the first two of [`LEAVES`]: `0x400` and
+/// then `8` on, as ULEB128 deltas from `__TEXT`, and the terminator.
+const LEAF_STARTS: [u8; 4] = [0x80, 0x08, 0x08, 0x00];
+
+/// An `__unwind_info` naming the last two of [`LEAVES`].
+///
+/// The header (version 1, empty encoding and personality arrays, a
+/// three-entry index at 28), an index whose first page is compressed
+/// (`0x410`, at 64) and second regular (`0x418`, at 80) before the sentinel
+/// (`0x420`), the compressed page with one entry at offset 0 from its
+/// first function, and the regular page with one entry naming `0x418`.
+const LEAF_UNWIND: [u32; 24] = [
+    1,
+    28,
+    0,
+    28,
+    0,
+    28,
+    3,
+    0x410,
+    64,
+    0,
+    0x418,
+    80,
+    0,
+    0x420,
+    0,
+    0,
+    3,
+    12 | 1 << 16,
+    16,
+    0,
+    2,
+    8 | 1 << 16,
+    0x418,
+    0,
+];
+
+/// A Mach-O's function starts come from `LC_FUNCTION_STARTS` and from the
+/// pages of its `__unwind_info`, compressed and regular, each range ending
+/// where the next function starts.
+#[test]
+fn macho_function_starts_and_unwind_info_declare_functions() {
+    let at = |off: u64| MACHO_TEXT + 0x400 + off;
+    let p = arm64_macho(&LEAVES, &[], &LEAF_STARTS);
+    assert_eq!(p.function_ranges, [(at(0), at(8)), (at(8), at(0x20))]);
+    let p = arm64_macho(&LEAVES, &LEAF_UNWIND, &LEAF_STARTS);
+    assert_eq!(
+        p.function_ranges,
+        [
+            (at(0), at(8)),
+            (at(8), at(0x10)),
+            (at(0x10), at(0x18)),
+            (at(0x18), at(0x20))
+        ]
+    );
+}
+
+/// A damaged `__unwind_info` names nothing past what it can hold, and the
+/// image still loads.
+///
+/// A table of another version names nothing; an index past the end of the
+/// section names nothing; a page past it names only its index entry's
+/// first function; and a page claiming more entries than the section
+/// holds names those it holds.
+#[test]
+fn hostile_unwind_info_names_nothing_past_its_end() {
+    let at = |off: u64| MACHO_TEXT + 0x400 + off;
+    let starts = |p: &Program| -> Vec<u64> { p.function_ranges.iter().map(|r| r.0).collect() };
+    let mut unwind = LEAF_UNWIND;
+    unwind[0] = 2;
+    let p = arm64_macho(&LEAVES, &unwind, &LEAF_STARTS);
+    assert_eq!(starts(&p), [at(0), at(8)]);
+    let mut unwind = LEAF_UNWIND;
+    unwind[5] = 0xffff_fff0;
+    unwind[6] = u32::MAX;
+    let p = arm64_macho(&LEAVES, &unwind, &LEAF_STARTS);
+    assert_eq!(starts(&p), [at(0), at(8)]);
+    let mut unwind = LEAF_UNWIND;
+    unwind[8] = 0x7fff_fff0;
+    unwind[11] = 0x7fff_fff0;
+    let p = arm64_macho(&LEAVES, &unwind, &LEAF_STARTS);
+    assert_eq!(starts(&p), [at(0), at(8), at(0x10), at(0x18)]);
+    let mut unwind = LEAF_UNWIND;
+    unwind[21] = 8 | 0xffff << 16;
+    let p = arm64_macho(&LEAVES, &unwind, &LEAF_STARTS);
+    assert_eq!(starts(&p), [at(0), at(8), at(0x10), at(0x18)]);
+}
