@@ -521,14 +521,23 @@ impl BorerServer {
         self.loaded().ok_or_else(|| err_params(NO_BINARY))
     }
 
-    /// The analysis, for a resource read outside a tool body.
+    /// The analysis, for a resource read outside a tool body that needs
+    /// `feature` of the program's code.
+    ///
+    /// # Arguments
+    ///
+    /// * `feature` - The stage the resource reads ([`Program::refuses`]).
     ///
     /// # Errors
     ///
-    /// Invalid params when no binary is loaded or its architecture has no
-    /// code analysis, as [`Self::with_analysis`] refuses both: the request
-    /// came too early or asked the wrong file, and the server did not fail.
-    fn analysis(&self) -> Result<Arc<Analysis>, ErrorData> {
+    /// Invalid params when no binary is loaded or the engine does not do
+    /// `feature` with its architecture, as [`Self::with_analysis`] refuses
+    /// both: the request came too early or asked the wrong file, and the
+    /// server did not fail.
+    fn analysis(&self, feature: Feature) -> Result<Arc<Analysis>, ErrorData> {
+        if let Some(why) = self.require_loaded()?.refuses(feature) {
+            return Err(err_params(why));
+        }
         self.ensure_analysis().map_err(err_params)
     }
 
@@ -613,19 +622,33 @@ impl BorerServer {
     /// Runs `f` against the loaded program, its analysis and a snapshot of
     /// the overlay: the prologue of every tool that reads code.
     ///
+    /// A tool names the stage it reads, so a program whose instruction set
+    /// has functions but no lifter yet answers the discovery tools and
+    /// refuses the rest with the sentence [`Program::refuses`] gives,
+    /// rather than an answer read as "nothing found".
+    ///
     /// # Arguments
     ///
+    /// * `feature` - The stage the tool reads: [`Feature::Discover`] for
+    ///   functions, blocks, references and calls, [`Feature::Decompile`]
+    ///   for anything read from lifted code, [`Feature::Emulate`] for
+    ///   anything that runs it.
     /// * `f` - The tool body; its `Err` text becomes an internal error.
     ///
     /// # Errors
     ///
     /// Invalid params when no binary is loaded; internal error when the
-    /// architecture has no code analysis or `f` fails or faults.
+    /// engine does not do `feature` with the architecture or `f` fails or
+    /// faults.
     fn with_analysis(
         &self,
+        feature: Feature,
         f: impl FnOnce(&Program, &Analysis, &Overlay) -> Result<String, String>,
     ) -> Result<String, ErrorData> {
         self.with_program(|p| {
+            if let Some(why) = p.refuses(feature) {
+                return Err(why);
+            }
             let a = self.ensure_analysis()?;
             f(p, &a, &self.overlay())
         })
@@ -946,7 +969,7 @@ impl BorerServer {
     )]
     fn binary_info(&self) -> Result<String, ErrorData> {
         self.with_program(|p| {
-            let more = if p.refuses(Feature::Discover).is_some() {
+            let more = if p.refuses(Feature::Decompile).is_some() {
                 "borer://triage reads the whole file in one call".to_owned()
             } else {
                 template_names()
@@ -1070,7 +1093,7 @@ impl BorerServer {
         }): Parameters<DisassembleFunctionParams>,
     ) -> Result<String, ErrorData> {
         let max = count_param(max_instrs, 400, 2000, "max_instrs")?;
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let entry = self.function_entry(p, a, &address)?;
             render::disasm_function(p, a, o, entry, max.n, bytes.unwrap_or(false))
                 .ok_or_else(|| format!("no function at {entry:#x}"))
@@ -1309,7 +1332,7 @@ impl BorerServer {
         &self,
         Parameters(FunctionParams { address }): Parameters<FunctionParams>,
     ) -> Result<String, ErrorData> {
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let entry = self.function_entry(p, a, &address)?;
             render::function_strings_tsv(p, a, o, entry)
                 .ok_or_else(|| format!("no function at {entry:#x}"))
@@ -1344,7 +1367,7 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let offset = to_usize(offset.unwrap_or(0));
         let limit = count_param(limit, 50, 300, "limit")?;
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             Ok(render::functions_by_string_tsv(
                 p, a, o, &filter, offset, limit.n,
             ))
@@ -1730,7 +1753,7 @@ impl BorerServer {
         &self,
         Parameters(LiveObjectParams { address, class }): Parameters<LiveObjectParams>,
     ) -> Result<String, ErrorData> {
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Decompile, |p, a, o| {
             self.with_live(|s| {
                 let r = s.mapped()?;
                 let va = self.live_addr(s, &address)?;
@@ -1776,7 +1799,7 @@ impl BorerServer {
         } else {
             page.offset.saturating_add(page.limit.n)
         };
-        self.with_analysis(|_, a, _| {
+        self.with_analysis(Feature::Decompile, |_, a, _| {
             self.with_live(|s| {
                 let r = s.mapped()?;
                 let scan = live::instances(&s.process, &r, a, &class, s.word, collect)?;
@@ -2155,7 +2178,7 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let page = Page::new(offset, limit, count_only, 50, 300)?;
         let order = sort.unwrap_or_default().into();
-        self.with_analysis(|_, a, o| {
+        self.with_analysis(Feature::Discover, |_, a, o| {
             let (shown, _, text) =
                 render::functions_tsv(a, o, filter.as_deref(), order, page.offset, page.limit.n);
             if page.count_only {
@@ -2193,7 +2216,7 @@ impl BorerServer {
         Parameters(FunctionDetailParams { address, offset }): Parameters<FunctionDetailParams>,
     ) -> Result<String, ErrorData> {
         let offset = to_usize(offset.unwrap_or(0));
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let entry = self.function_entry(p, a, &address)?;
             render::function_detail(a, o, entry, offset)
                 .ok_or_else(|| format!("no function at {entry:#x}"))
@@ -2243,7 +2266,7 @@ impl BorerServer {
             render::XREF_ROWS_DEFAULT,
             render::XREF_ROWS_MAX,
         )?;
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let va = match self.addr(p, &address) {
                 Ok(va) => va,
                 Err(unknown) => {
@@ -2252,6 +2275,11 @@ impl BorerServer {
                             "{unknown}; nor is it Class+offset, a field of a class with methods or a vtable"
                         )
                     })?;
+                    if let Some(why) = p.refuses(Feature::Decompile) {
+                        return Err(format!(
+                            "{class}+{offset:#x} is a field, read from decompiled methods: {why}"
+                        ));
+                    }
                     let uses = borer_engine::analysis::classes::typed_field_uses(p, a, o, &class, offset)
                         .ok_or_else(|| format!("no class {class}"))?;
                     return Ok(borer_engine::analysis::classes::typed_field_uses_tsv(
@@ -2300,7 +2328,7 @@ impl BorerServer {
         &self,
         Parameters(ClassLayoutParams { class }): Parameters<ClassLayoutParams>,
     ) -> Result<String, ErrorData> {
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Decompile, |p, a, o| {
             let name = match self.function_entry(p, a, &class) {
                 Ok(entry) => {
                     let n = borer_engine::analysis::name_of(a, o, entry);
@@ -2354,7 +2382,7 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let max = count_param(max_nodes, 30, 100, "max_nodes")?;
         let callers = callers.unwrap_or(false);
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let root = match self.function_entry(p, a, &address) {
                 Ok(root) => root,
                 Err(e) => {
@@ -2398,7 +2426,7 @@ impl BorerServer {
         Parameters(ReachesParams { from, to, depth }): Parameters<ReachesParams>,
     ) -> Result<String, ErrorData> {
         let deep = count_param(depth, 24, 64, "depth")?;
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let start = self.function_entry(p, a, &from)?;
             let goal = match self.function_entry(p, a, &to) {
                 Ok(goal) => goal,
@@ -2441,7 +2469,7 @@ impl BorerServer {
         Parameters(CfgParams { address, offset }): Parameters<CfgParams>,
     ) -> Result<String, ErrorData> {
         let offset = to_usize(offset.unwrap_or(0));
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let entry = self.function_entry(p, a, &address)?;
             render::cfg_mermaid(a, o, entry, offset)
                 .ok_or_else(|| format!("no function at {entry:#x}"))
@@ -2488,6 +2516,9 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         use borer_engine::analysis::decompile;
         self.with_program(|p| {
+            if let Some(why) = p.refuses(Feature::Decompile) {
+                return Err(why);
+            }
             let a = self.ensure_analysis()?;
             let entry = self.function_entry(p, &a, &address)?;
             let o = self.overlay();
@@ -2539,6 +2570,9 @@ impl BorerServer {
         let max = cap.n;
         let filter = Filter::new(filter.as_deref());
         self.with_program(|p| {
+            if let Some(why) = p.refuses(Feature::Decompile) {
+                return Err(why);
+            }
             let a = self.ensure_analysis()?;
             let o = self.overlay();
             let matches = |f: &&borer_engine::analysis::Function| match filter.needle() {
@@ -2729,7 +2763,7 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let dry = dry_run.unwrap_or(true);
         must_fit_a_row(&name, Annotation::Name)?;
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let va = self.addr(p, &address)?;
             must_be_in_a_section(p, va, Annotation::Name)?;
             let target = a.function_at(va).map_or(va, |f| f.entry);
@@ -2861,7 +2895,7 @@ impl BorerServer {
         {
             must_fit_a_row(text, Annotation::Type)?;
         }
-        self.with_analysis(|p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let word: u64 = if p.is_64 { 8 } else { 4 };
             // The definition half: built and validated against the types
             // already in the overlay before anything is written.
@@ -5807,7 +5841,9 @@ mod tests {
             }))
             .expect("batch");
         assert!(!batch.contains("checked vs binary"), "{batch}");
-        let a = server.analysis().expect("analyzed");
+        let a = server
+            .analysis(super::Feature::Decompile)
+            .expect("analyzed");
         let plain = server
             .with_program(|p| {
                 borer_engine::analysis::decompile::decompile_named(p, &a, &server.overlay(), 0x1000)
@@ -5911,7 +5947,7 @@ mod tests {
         };
         let held = || {
             server
-                .analysis()
+                .analysis(super::Feature::Decompile)
                 .expect("analyzed")
                 .derived
                 .held("plain_text")

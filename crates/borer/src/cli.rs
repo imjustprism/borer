@@ -1171,13 +1171,22 @@ impl Session {
         }
     }
 
-    /// Computes the analysis.
+    /// Computes the analysis for a command that reads `feature` of the
+    /// program's code.
+    ///
+    /// # Arguments
+    ///
+    /// * `feature` - The stage the command reads: [`Feature::Discover`] for
+    ///   functions, blocks, references and calls, [`Feature::Decompile`]
+    ///   for anything read from lifted code, [`Feature::Emulate`] for
+    ///   anything that runs it.
     ///
     /// # Errors
     ///
-    /// When borer cannot disassemble the architecture.
-    fn analysis(&self) -> anyhow::Result<Analysis> {
-        if let Some(why) = self.program.refuses(Feature::Discover) {
+    /// When the engine does not do `feature` with the architecture
+    /// ([`Program::refuses`]).
+    fn analysis(&self, feature: Feature) -> anyhow::Result<Analysis> {
+        if let Some(why) = self.program.refuses(feature) {
             bail!("{why}");
         }
         Ok(Analysis::compute_with(
@@ -1187,7 +1196,7 @@ impl Session {
     }
 
     /// Computes the analysis, or returns an empty one when borer cannot
-    /// disassemble the architecture.
+    /// discover the architecture's functions.
     ///
     /// For facts of the file rather than of its code: the symbol table and
     /// a crypto constant are parsed or scanned without disassembling
@@ -1195,7 +1204,7 @@ impl Session {
     /// belong to. Refusing them on an architecture borer cannot disassemble
     /// threw away what it had already read out of the headers.
     fn analysis_or_empty(&self) -> Analysis {
-        self.analysis().unwrap_or_default()
+        self.analysis(Feature::Discover).unwrap_or_default()
     }
 
     /// Resolves an address or a name.
@@ -1243,6 +1252,7 @@ impl Session {
     /// * `args` - The command line.
     /// * `i` - The argument's index.
     /// * `missing` - The error when the line is shorter.
+    /// * `feature` - The stage the command reads ([`Session::analysis`]).
     ///
     /// # Returns
     ///
@@ -1257,8 +1267,9 @@ impl Session {
         args: &[String],
         i: usize,
         missing: &'static str,
+        feature: Feature,
     ) -> anyhow::Result<(Analysis, u64)> {
-        let a = self.analysis()?;
+        let a = self.analysis(feature)?;
         let va = self.resolve(&a, arg(args, i, missing)?)?;
         let entry = entry_at(&self.program, &a, va)?;
         Ok((a, entry))
@@ -1288,7 +1299,12 @@ impl Session {
 /// or names no function, or a function that does not decompile.
 fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
     let (detail, offset, limit) = decompile_args(args.get(3..).unwrap_or_default())?;
-    let (a, entry) = s.function_arg(args, 2, "decompile needs an address or name")?;
+    let (a, entry) = s.function_arg(
+        args,
+        2,
+        "decompile needs an address or name",
+        Feature::Decompile,
+    )?;
     // SPEC: BORER_RAW=1 shows the structurer's output before text cleanup.
     let raw = std::env::var_os("BORER_RAW").is_some();
     // PERF: the check first, so the decompilation it memoizes keeps
@@ -1522,7 +1538,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
     match cmd {
         Query::Info => print!("{}", s.program.summary()),
         Query::Functions => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Discover)?;
             let (offset, limit) = cli_page(args, 3, 100, 300)?;
             let (_, _, text) = render::functions_tsv(
                 &a,
@@ -1535,7 +1551,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{text}");
         }
         Query::Function => {
-            let (a, entry) = s.function_arg(args, 2, "function needs an address or name")?;
+            let (a, entry) = s.function_arg(
+                args,
+                2,
+                "function needs an address or name",
+                Feature::Discover,
+            )?;
             print!(
                 "{}",
                 render::function_detail(&a, &s.overlay, entry, 0)
@@ -1543,7 +1564,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Summary => {
-            let (a, entry) = s.function_arg(args, 2, "summary needs an address or name")?;
+            let (a, entry) = s.function_arg(
+                args,
+                2,
+                "summary needs an address or name",
+                Feature::Discover,
+            )?;
             print!(
                 "{}",
                 render::function_summary(&s.program, &a, &s.overlay, entry)
@@ -1619,7 +1645,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", render_hits(&hits, offset, false, (&a, &s.overlay)));
         }
         Query::Fstrings => {
-            let (a, entry) = s.function_arg(args, 2, "fstrings needs an address or name")?;
+            let (a, entry) = s.function_arg(
+                args,
+                2,
+                "fstrings needs an address or name",
+                Feature::Discover,
+            )?;
             print!(
                 "{}",
                 render::function_strings_tsv(&s.program, &a, &s.overlay, entry)
@@ -1627,7 +1658,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Findstr => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Discover)?;
             let filter = arg(args, 2, "findstr needs a filter")?;
             print!(
                 "{}",
@@ -1662,7 +1693,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", disasm::render(&lines, true));
         }
         Query::Disasmfn => {
-            let (a, entry) = s.function_arg(args, 2, "disasmfn needs an address or name")?;
+            let (a, entry) = s.function_arg(
+                args,
+                2,
+                "disasmfn needs an address or name",
+                Feature::Discover,
+            )?;
             print!(
                 "{}",
                 render::disasm_function(&s.program, &a, &s.overlay, entry, 400, false)
@@ -1671,7 +1707,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Decompile => print!("{}", decompiled(args, s)?),
         Query::Class => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let what = arg(args, 2, "class needs a class name or a method address")?;
             let class = match s.resolve(&a, what) {
                 Ok(va) => {
@@ -1687,7 +1723,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", classes::render_layout(&layout, &a, &s.overlay));
         }
         Query::Fieldrefs => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let offset = parse_field_offset(arg(args, 2, "fieldrefs needs a field offset")?)?;
             let filter = args.get(3).map_or("", String::as_str);
             let (skip, limit) = cli_page(args, 4, 100, 500)?;
@@ -1697,7 +1733,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Vslot => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let q = SlotQuery::parse(args, "vslot needs a vtable slot index")?;
             print!(
                 "{}",
@@ -1705,7 +1741,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Index => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             #[expect(
                 clippy::disallowed_methods,
                 reason = "the CLI tells the user how long indexing took"
@@ -1732,7 +1768,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             borer::index::Matcher::parse(pattern).map_err(anyhow::Error::msg)?;
             let filter = args.get(3).map_or("", String::as_str);
             let (skip, limit) = cli_page(args, 4, 100, 500)?;
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let (index, _, built) =
                 borer::index::load_or_build(&s.program, &a).map_err(anyhow::Error::msg)?;
             if built {
@@ -1747,7 +1783,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Schema => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let what = arg(
                 args,
                 2,
@@ -1772,7 +1808,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{text}");
         }
         Query::Schemas => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let q = SlotQuery::parse(args, "schemas needs the vtable slot the id sits in")?;
             print!(
                 "{}",
@@ -1780,7 +1816,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Encode => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let what = arg(
                 args,
                 2,
@@ -1802,7 +1838,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{text}");
         }
         Query::Encodes => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let q = SlotQuery::parse(args, "encodes needs the vtable slot the id sits in")?;
             print!(
                 "{}",
@@ -1810,7 +1846,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Senders => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let q = SlotQuery::parse(args, "senders needs the vtable slot the id sits in")?;
             print!(
                 "{}",
@@ -1818,7 +1854,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Protocol => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let q = SlotQuery::parse(args, "protocol needs the vtable slot the id sits in")?;
             print!(
                 "{}",
@@ -1826,7 +1862,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Hooks => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let q = SlotQuery::parse(args, "hooks needs the vtable slot the id sits in")?;
             print!(
                 "{}",
@@ -1834,7 +1870,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Shape => {
-            let (a, entry) = s.function_arg(args, 2, "shape needs a function")?;
+            let (a, entry) =
+                s.function_arg(args, 2, "shape needs a function", Feature::Discover)?;
             let limit = cli_limit(args, 3, CLASS_ROWS, CLASS_ROWS)?;
             print!(
                 "{}",
@@ -1843,7 +1880,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Messages => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let (filter, limit) = filter_limit(args, PAGE_ROWS)?;
             print!(
                 "{}",
@@ -1851,7 +1888,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::About => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let name = arg(args, 2, ABOUT_NEEDS_A_NAME)?;
             if name.trim().is_empty() {
                 bail!(ABOUT_NEEDS_A_NAME);
@@ -1861,7 +1898,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         Query::Snapshot => {
             let out = path_arg(args, 2, "snapshot needs a file to write")?;
             writable(out)?;
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let facts = snapshot::facts(&s.program, &a, &s.overlay);
             write_file(out, snapshot::write(&facts).as_bytes())?;
             println!(
@@ -1872,7 +1909,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Changes => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let path = path_arg(args, 2, "changes needs a snapshot file")?;
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {}", short_path(path)))?;
@@ -1881,12 +1918,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", snapshot::changes_tsv(&before, &after));
         }
         Query::Map => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let (namespace, limit) = filter_limit(args, CATALOG_ROWS)?;
             print!("{}", map::map_tsv(&a, &s.overlay, namespace, limit));
         }
         Query::Attrs => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let (filter, limit) = filter_limit(args, PAGE_ROWS)?;
             print!(
                 "{}",
@@ -1894,7 +1931,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Ports => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let (filter, limit) = filter_limit(args, CATALOG_ROWS)?;
             print!(
                 "{}",
@@ -1902,7 +1939,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Anchors => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let manifest = path_arg(args, 2, "anchors needs a manifest file")?;
             let text = std::fs::read_to_string(manifest)
                 .with_context(|| format!("reading {}", short_path(manifest)))?;
@@ -1915,7 +1952,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
         }
         Query::Xrefs => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Discover)?;
             let va = s.resolve(&a, arg(args, 2, "xrefs needs an address")?)?;
             print!(
                 "{}",
@@ -1923,14 +1960,15 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Cfg => {
-            let (a, entry) = s.function_arg(args, 2, "cfg/callgraph needs an address")?;
+            let (a, entry) =
+                s.function_arg(args, 2, "cfg/callgraph needs an address", Feature::Discover)?;
             print!(
                 "{}",
                 render::cfg_mermaid(&a, &s.overlay, entry, 0).context("no function at address")?
             );
         }
         Query::Callgraph => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Discover)?;
             let va = s.resolve(&a, arg(args, 2, "cfg/callgraph needs an address")?)?;
             let direction = Direction::parse(args.get(3).map(String::as_str));
             let referenced = matches!(direction, Ok(Direction::Callers))
@@ -1968,19 +2006,19 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", render::crypto_tsv(&s.program, &a, &s.overlay, 0, 200));
         }
         Query::Qt => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             print!("{}", render::qt_tsv(&a));
         }
         Query::Triage => {
-            if s.program.refuses(Feature::Discover).is_some() {
+            if s.program.refuses(Feature::Decompile).is_some() {
                 print!("{}", render::file_triage_tsv(&s.program));
             } else {
-                let a = s.analysis()?;
+                let a = s.analysis(Feature::Decompile)?;
                 print!("{}", render::triage_tsv(&s.program, &a, &s.overlay));
             }
         }
         Query::Taint => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let spec = arg(args, 2, "taint needs <address>[,<register>]")?;
             print!(
                 "{}",
@@ -1988,7 +2026,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Layout => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let spec = arg(args, 2, "layout needs <address>[,<register>]")?;
             print!(
                 "{}",
@@ -1996,7 +2034,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Why => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let target = arg(args, 2, "why needs an address or name")?;
             print!(
                 "{}",
@@ -2004,7 +2042,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Solve => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Emulate)?;
             let spec = arg(args, 2, "solve needs <address>[,<argument>]")?;
             print!(
                 "{}",
@@ -2012,7 +2050,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Flat => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let filter = args.get(2).map_or("", String::as_str);
             print!(
                 "{}",
@@ -2021,7 +2059,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Vm => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let filter = args.get(2).map_or("", String::as_str);
             print!(
                 "{}",
@@ -2030,7 +2068,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Devirt => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Emulate)?;
             let target = arg(args, 2, "devirt needs <address>[,reg=value...]")?;
             print!(
                 "{}",
@@ -2039,7 +2077,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Unpack => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Emulate)?;
             let spec = arg(args, 2, "unpack needs an address")?;
             match args.get(3) {
                 Some(out) => {
@@ -2070,7 +2108,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
         }
         Query::Oracle => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Emulate)?;
             let what = arg(args, 2, "oracle needs an address or name")?;
             print!(
                 "{}",
@@ -2078,7 +2116,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Emulate => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Emulate)?;
             let what = arg(args, 2, "emulate needs an address or name")?;
             print!(
                 "{}",
@@ -2087,7 +2125,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Run => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Emulate)?;
             let what = arg(args, 2, "run needs <function>/<input>[;<input>...]")?;
             print!(
                 "{}",
@@ -2095,7 +2133,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Hidden => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Emulate)?;
             let filter = args.get(2).map_or("", String::as_str);
             print!(
                 "{}",
@@ -2143,7 +2181,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
         }
         Query::Fingerprint => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Discover)?;
             let text = render::fingerprint_tsv(&a);
             match args.get(2) {
                 Some(out) => {
@@ -2175,7 +2213,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                         .map_err(anyhow::Error::msg)?;
                 }
             }
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             print!("{}", sigs::export_pack(&s.program, &a, &overlay, name, all));
         }
         Query::Script => {
@@ -2225,7 +2263,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
         }
         Query::Scenario => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let va = s.resolve(&a, arg(args, 2, "scenario needs a function")?)?;
             let assume = decompile::parse_scenario(arg(
                 args,
@@ -2239,7 +2277,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{text}");
         }
         Query::Scenarios => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let va = s.resolve(&a, arg(args, 2, "scenarios needs a function")?)?;
             let (slot, values) = decompile::parse_explosion(arg(
                 args,
@@ -2390,7 +2428,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     let text = arg(args, 4, "set-type apply needs an address or name")?;
                     let spelled = arg(args, 5, "set-type apply needs the type to apply")?;
                     let ty = utypes::parse_type(spelled).map_err(anyhow::Error::msg)?;
-                    let a = s.analysis()?;
+                    let a = s.analysis(Feature::Discover)?;
                     let va = s.resolve(&a, text)?;
                     crate::params::must_be_in_a_section(
                         &s.program,
@@ -2435,7 +2473,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             println!("{say}; written to {}", short_path(project));
         }
         Query::Verify => {
-            let a = s.analysis()?;
+            let a = s.analysis(Feature::Decompile)?;
             let which = args
                 .get(2)
                 .map(String::as_str)

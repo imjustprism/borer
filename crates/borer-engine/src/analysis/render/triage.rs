@@ -1046,7 +1046,7 @@ fn unread_lookups(p: &Program, a: &Analysis, o: &Overlay) -> Option<(usize, usiz
 ///
 /// An unrecognized file (an encrypted wallet, an archive, a payload pulled
 /// out of a dropper) or a program for an instruction set borer does not
-/// disassemble still answers the first questions: what it is, how large,
+/// decompile still answers the first questions: what it is, how large,
 /// how random, where the random or encoded bytes sit, and what text it
 /// holds. The code questions are said not to apply rather than answered
 /// with an empty list.
@@ -1089,7 +1089,7 @@ pub fn file_triage_tsv(p: &Program) -> String {
         p.sections.len(),
         p.symbols.len()
     );
-    if let Some(why) = p.refuses(Feature::Discover) {
+    if let Some(why) = p.refuses(Feature::Decompile) {
         let _ = writeln!(out, "# code: {why}");
     }
     let _ = writeln!(
