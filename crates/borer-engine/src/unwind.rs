@@ -690,6 +690,7 @@ mod tests {
             pdb_record: None,
             pdb_source: None,
             flat_fallback: false,
+            relocs: crate::reloc::Relocs::default(),
         }
     }
 

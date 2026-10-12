@@ -7,6 +7,8 @@
 mod common;
 #[path = "../common/decompiled.rs"]
 mod decompiled;
+#[path = "../common/elfgen.rs"]
+mod elfgen;
 #[path = "../common/gotos.rs"]
 mod gotos;
 #[path = "../common/nebula.rs"]
@@ -36,6 +38,7 @@ mod next;
 mod protection;
 mod protos;
 mod regression;
+mod reloc;
 mod search;
 mod structure;
 mod typelib;

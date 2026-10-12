@@ -308,6 +308,10 @@ pub struct Program {
     pub pdb_source: Option<(PathBuf, crate::pdb::Record)>,
     /// The section table was unusable and a flat file mapping was synthesized.
     pub flat_fallback: bool,
+    /// What an ELF's dynamic relocations write into the image: every read
+    /// of the mapped image ([`Program::read_va`], [`Program::section_bytes`])
+    /// sees the relocated words, while [`Program::bytes`] stays the file.
+    pub relocs: crate::reloc::Relocs,
 }
 
 /// The container a file's first bytes name, for a parse that fails.
@@ -1317,6 +1321,7 @@ impl Program {
             pdb_record: None,
             pdb_source: None,
             flat_fallback: false,
+            relocs: crate::reloc::Relocs::default(),
         }
     }
 
@@ -1527,6 +1532,7 @@ impl Program {
         let file_len = crate::num::from_usize(bytes.len());
         let mut fit = Fit::default();
         let mut pdb_record: Option<crate::pdb::Record> = None;
+        let mut relocs = crate::reloc::Relocs::default();
 
         match &obj {
             goblin::Object::PE(pe) => {
@@ -1838,7 +1844,11 @@ impl Program {
                 fit.add(fit_sections(&mut sections, file_len));
                 fit.add(fit_sections(&mut unmapped, file_len));
 
-                let mut slot_of: BTreeMap<usize, u64> = BTreeMap::new();
+                /// Most slots one import is named at: a GOT slot and a PLT
+                /// slot are two, a table of thousands is hostile.
+                const SLOTS_PER_IMPORT: usize = 16;
+                let applied = crate::reloc::read_elf(elf, &bytes, &sections);
+                let mut slots_of: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
                 for r in elf
                     .pltrelocs
                     .iter()
@@ -1846,9 +1856,20 @@ impl Program {
                     .chain(elf.dynrels.iter())
                 {
                     if r.r_sym != 0 {
-                        slot_of.entry(r.r_sym).or_insert(r.r_offset);
+                        slots_of.entry(r.r_sym).or_insert_with(|| vec![r.r_offset]);
                     }
                 }
+                // INVARIANT: every slot a GOT bind or an absolute word ties
+                // to an import names it, so a call through any of them reads
+                // as the import; the first slot any relocation names stays
+                // first, as the one a name resolves to.
+                for (sym, slot) in applied.bound {
+                    let slots = slots_of.entry(sym).or_default();
+                    if !slots.contains(&slot) && slots.len() < SLOTS_PER_IMPORT {
+                        slots.push(slot);
+                    }
+                }
+                relocs = applied.relocs;
                 let strs = &elf.dynstrtab;
                 for (i, sym) in elf.dynsyms.iter().enumerate() {
                     let Some(name) = strs.get_at(sym.st_name) else {
@@ -1858,11 +1879,14 @@ impl Program {
                         continue;
                     }
                     if sym.st_shndx == 0 {
-                        symbols.push(Symbol {
-                            name: name.to_owned(),
-                            addr: slot_of.get(&i).copied().unwrap_or(0),
-                            kind: SymbolKind::Import,
-                        });
+                        let slots = slots_of.get(&i).map_or(&[0][..], Vec::as_slice);
+                        for &addr in slots {
+                            symbols.push(Symbol {
+                                name: name.to_owned(),
+                                addr,
+                                kind: SymbolKind::Import,
+                            });
+                        }
                     } else if sym.st_value != 0 {
                         symbols.push(Symbol {
                             name: name.to_owned(),
@@ -2058,23 +2082,28 @@ impl Program {
             pdb_record,
             pdb_source,
             flat_fallback,
+            relocs,
         })
     }
 
     /// The addresses of the pointer-sized words a PE's base relocation
-    /// table fixes up: every absolute address the image holds, as an
-    /// instruction's operand or as data.
+    /// table or a position-independent ELF's dynamic relocations fix up:
+    /// every absolute address the image holds, as an instruction's operand
+    /// or as data.
     ///
     /// A 32-bit image names its function pointers nowhere else: a table of
     /// callbacks kept in `.text` (a linker without `.rdata` puts it there)
     /// is a run of relocated words, where a scan of the data sections never
     /// looks. Only `HIGHLOW` entries count in a 32-bit image and `DIR64` in
-    /// a 64-bit one.
+    /// a 64-bit one. An ELF's are its `RELATIVE`, absolute and `DT_RELR`
+    /// words ([`crate::reloc`]), and only an `ET_DYN` image's, the one kind
+    /// that relocates every pointer it holds.
     ///
     /// # Returns
     ///
-    /// The fixed-up words' addresses in table order, at most a million;
-    /// empty for a file that is not PE or has no relocations.
+    /// The fixed-up words' addresses, in table order for a PE and address
+    /// order for an ELF, at most a million; empty for any other file or one
+    /// with no relocations.
     #[must_use]
     pub fn relocated_words(&self) -> Vec<u64> {
         /// Most relocated words read, whatever the table claims.
@@ -2084,6 +2113,9 @@ impl Program {
         /// `IMAGE_REL_BASED_DIR64`, a 64-bit address.
         const DIR64: u16 = 10;
         let mut out = Vec::new();
+        if self.format == BinaryFormat::Elf {
+            return self.relocs.sites.clone();
+        }
         if self.format != BinaryFormat::Pe {
             return out;
         }
@@ -2228,7 +2260,10 @@ impl Program {
         self.bytes.get(start..end).filter(|b| !b.is_empty())
     }
 
-    /// Returns the raw bytes of a section's file extent.
+    /// Returns the bytes of a section's file extent as the image holds them.
+    ///
+    /// They are the file's, with the words an ELF's dynamic relocations
+    /// write in place ([`Program::relocs`]).
     ///
     /// # Arguments
     ///
@@ -2238,9 +2273,27 @@ impl Program {
     ///
     /// The bytes, or `None` when the extent runs past the end of the file.
     pub fn section_bytes(&self, s: &Section) -> Option<&[u8]> {
-        let start = usize::try_from(s.file_off).ok()?;
-        let end = usize::try_from(s.file_off.checked_add(s.file_size)?).ok()?;
-        self.bytes.get(start..end)
+        self.image_bytes(s.file_off, s.file_off.checked_add(s.file_size)?)
+    }
+
+    /// Reads file offsets `start..end` as the loaded image holds them: the
+    /// relocated copy where the dynamic relocations wrote into the range,
+    /// else the file.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - File offset of the first byte.
+    /// * `end` - File offset one past the last byte.
+    ///
+    /// # Returns
+    ///
+    /// The bytes, or `None` when the range runs past the end of the file.
+    fn image_bytes(&self, start: u64, end: u64) -> Option<&[u8]> {
+        if let Some(relocated) = self.relocs.slice(start, end) {
+            return Some(relocated);
+        }
+        self.bytes
+            .get(usize::try_from(start).ok()?..usize::try_from(end).ok()?)
     }
 
     /// Reads up to `max` bytes at `va`, clamped at the end of the section.
@@ -2270,9 +2323,7 @@ impl Program {
         let off = s.file_off + (va - s.va);
         let limit = (s.file_off + s.file_size).min(self.bytes.len() as u64);
         let end = (off + max as u64).min(limit);
-        self.bytes
-            .get(usize::try_from(off).ok()?..usize::try_from(end).ok()?)
-            .filter(|b| !b.is_empty())
+        self.image_bytes(off, end).filter(|b| !b.is_empty())
     }
 
     /// Reads exactly `len` bytes at `va` from one section's file bytes.
@@ -2297,8 +2348,7 @@ impl Program {
         if end > s.file_off + s.file_size {
             return None;
         }
-        self.bytes
-            .get(usize::try_from(off).ok()?..usize::try_from(end).ok()?)
+        self.image_bytes(off, end)
     }
 
     /// The mapped headers at `va`, when `va` is inside them.
@@ -2591,6 +2641,7 @@ impl Program {
         if locals > 0 {
             out.push_str(&format!("locals:  {locals} named functions\n"));
         }
+        out.push_str(&self.relocs.render());
         if let Some(outcome) = &self.pdb {
             out.push_str(&format!("pdb:     {}\n", outcome.render()));
         }

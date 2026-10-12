@@ -652,10 +652,13 @@ pub fn unpack_start(
 
 /// The original program over the bytes a run materialized.
 ///
+/// The rebuilt bytes already hold the relocated words, so the program has
+/// no relocated copy of its own.
+///
 /// # Arguments
 ///
 /// * `p` - The original image, whose headers, symbols and the rest are kept.
-/// * `bytes` - The rebuilt bytes.
+/// * `bytes` - The rebuilt bytes, relocations applied.
 /// * `oep` - The original entry point the run reached; the original's entry
 ///   stays when there is none.
 /// * `sections` - The section table the rebuilt bytes follow.
@@ -678,6 +681,7 @@ fn materialized(p: &Program, bytes: Vec<u8>, oep: Option<u64>, sections: Vec<Sec
         pdb_record: p.pdb_record.clone(),
         pdb_source: p.pdb_source.clone(),
         flat_fallback: p.flat_fallback,
+        relocs: crate::reloc::Relocs::default(),
     }
 }
 
@@ -719,6 +723,7 @@ pub(super) fn rebuild(p: &Program, emu: &Emulator<'_>, regions: &[(u64, u64)]) -
         return rebuild_pe(p, emu, regions, COPY_MAX);
     }
     let mut bytes = p.bytes.clone();
+    p.relocs.bake(&mut bytes);
     let mut written = 0u64;
     'regions: for (start, len) in regions {
         for k in 0..*len {

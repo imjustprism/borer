@@ -45,6 +45,7 @@ pub mod num;
 pub mod pack;
 pub mod pdb;
 pub mod program;
+pub mod reloc;
 pub mod script;
 pub mod search;
 pub mod strings;

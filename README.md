@@ -284,8 +284,11 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
   machines are not decoded.
 - Decompiler output is structured but rough, as the example above shows.
   Shapes it can't prove come out as labels and gotos rather than a guess.
-- Relocations are read for analysis, not applied. Mach-O chained fixups
-  aren't read at all.
+- An ELF's dynamic relocations (`.rela.dyn`, `.rel.dyn`, `DT_RELR`, the
+  GOT binds) are applied to the image for x86, x86-64 and arm64, so an lld
+  PIE's pointer tables read as pointers; Android's packed `APS2` tables are
+  not read. A PE's base relocations are read for analysis. Mach-O chained
+  fixups aren't read at all.
 - DWARF support covers function names, parameters, frame locals and types,
   not line tables or inlined frames.
 - Live process access is Windows only.

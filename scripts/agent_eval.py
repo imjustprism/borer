@@ -188,6 +188,35 @@ def _elf(e_type: int, entry: int, sections: list[tuple]) -> bytes:
 # is rdi, which `emulate`'s a1= sets on an ELF.
 ELF_ARG_CODE = _elf(2, 0x1000, [(".text", 1, 6, 0x1000, bytes.fromhex("8d4701c3"), 0, 0)])
 
+
+def _pie_blob() -> bytes:
+    """An x86-64 PIE as lld links one: the function at 0x1010 (`mov eax,42;
+    ret`) is reached only through the .data.rel.ro slot at 0x2000, zero on
+    disk, which one R_X86_64_RELATIVE entry fills."""
+    text = bytearray(b"\xcc" * 0x20)
+    text[0:3] = bytes.fromhex("31c0c3")  # xor eax, eax; ret
+    text[0x10:0x16] = bytes.fromhex("b82a000000c3")  # mov eax, 42; ret
+    rela = (
+        (0x2000).to_bytes(8, "little") + (8).to_bytes(8, "little") + (0x1010).to_bytes(8, "little")
+    )
+    dyn = b"".join(
+        t.to_bytes(8, "little") + v.to_bytes(8, "little")
+        for t, v in [(7, 0x3000), (8, len(rela)), (9, 24), (0, 0)]
+    )
+    return _elf(
+        3,
+        0x1000,
+        [
+            (".text", 1, 6, 0x1000, bytes(text), 0, 0),
+            (".data.rel.ro", 1, 3, 0x2000, bytes(16), 0, 0),
+            (".rela.dyn", 4, 2, 0x3000, rela, 0, 24),
+            (".dynamic", 6, 3, 0x3400, dyn, 0, 16),
+        ],
+    )
+
+
+PIE_CODE = _pie_blob()
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
@@ -195,6 +224,7 @@ BLOBS = {
     "syscall": (SYSCALL_CODE, "<syscall>"),
     "decoder": (DECODER_CODE, "<decoder>"),
     "elfargs": (ELF_ARG_CODE, "<elfargs>"),
+    "pie": (PIE_CODE, "<pie>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -307,6 +337,15 @@ TASKS = [
             ("query", {"uri": "borer://emulate/0x1000,a1=5"}),
         ],
         "rax=0x6 ",
+    ),
+    (
+        "pie_table_xref",
+        "where a PIE's function reached only through a relocated table is referenced",
+        [
+            ("load_binary", {"path": "{pie}"}),
+            ("xrefs", {"address": "0x1010"}),
+        ],
+        "-: 0x2000 table",
     ),
     (
         "decoded_strings",

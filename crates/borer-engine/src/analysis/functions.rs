@@ -5106,11 +5106,13 @@ fn holds_resources(name: &str) -> bool {
     name == ".rsrc" || name.starts_with(".rsrc$")
 }
 
-/// The file bytes of a section pointers are read from.
+/// The bytes of a section pointers are read from, as the image holds them.
 ///
 /// That is a non-executable section that neither describes addresses
 /// ([`describes_addresses`]) nor holds resources ([`holds_resources`]), at
-/// least one word long.
+/// least one word long. Its words are the relocated ones
+/// ([`Program::section_bytes`]): a PIE lld linked keeps its vtables and
+/// callback tables as zeros in the file.
 ///
 /// # Arguments
 ///
@@ -5120,7 +5122,7 @@ fn holds_resources(name: &str) -> bool {
 ///
 /// # Returns
 ///
-/// The section's file bytes, or `None` when no pointer is read from it.
+/// The section's bytes, or `None` when no pointer is read from it.
 fn pointer_section_bytes<'a>(program: &'a Program, s: &Section, word: usize) -> Option<&'a [u8]> {
     if s.executable
         || describes_addresses(&s.name)
@@ -5129,9 +5131,7 @@ fn pointer_section_bytes<'a>(program: &'a Program, s: &Section, word: usize) -> 
     {
         return None;
     }
-    let start = saturating_usize(s.file_off);
-    let end = saturating_usize(s.file_off + s.file_size);
-    program.bytes.get(start..end)
+    program.section_bytes(s)
 }
 
 /// Records a reference from every data pointer that names a function or

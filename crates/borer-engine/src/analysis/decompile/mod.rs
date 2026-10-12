@@ -2585,6 +2585,7 @@ g(tmp_5);";
             pdb_record: None,
             pdb_source: None,
             flat_fallback: false,
+            relocs: crate::reloc::Relocs::default(),
         };
         let a = crate::analysis::Analysis::compute(&p);
         let o = crate::analysis::Overlay::default();
@@ -2644,6 +2645,7 @@ g(tmp_5);";
             pdb_record: None,
             pdb_source: None,
             flat_fallback: false,
+            relocs: crate::reloc::Relocs::default(),
         };
         assert_eq!(
             super::string_at(&p, 0x2000),
