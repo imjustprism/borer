@@ -518,9 +518,10 @@ fn an_export_by_ordinal_alone_is_listed() {
 /// A DLL linked `/DELAYLOAD` is read out of the delay-load directory.
 ///
 /// Each slot of its address table is an import `module!name` at the slot, by
-/// name or by ordinal, so the call through it is named as a call through an
-/// import is. The directory was never read, so a delay-loaded API was missing
-/// from the imports and its call sites named a thunk.
+/// name or by ordinal (`<module>_ord<n>` where no table names the export),
+/// so the call through it is named as a call through an import is. The
+/// directory was never read, so a delay-loaded API was missing from the
+/// imports and its call sites named a thunk.
 #[test]
 fn delay_loaded_imports_are_imports() {
     let _serial = serial();
@@ -563,7 +564,7 @@ fn delay_loaded_imports_are_imports() {
         imports,
         vec![
             ("DLY.dll!Late".to_owned(), IMAGE_BASE + 0x2200),
-            ("DLY.dll!ORDINAL 7".to_owned(), IMAGE_BASE + 0x2208)
+            ("DLY.dll!dly_ord7".to_owned(), IMAGE_BASE + 0x2208)
         ]
     );
     assert!(

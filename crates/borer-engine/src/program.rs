@@ -997,6 +997,42 @@ fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
     out
 }
 
+/// Names a PE's imports by ordinal, which the import table spells
+/// `module!ORDINAL n`.
+///
+/// Each takes the name of the export it is where a table of the system
+/// DLLs' exports lists it, else `<module>_ord<n>`
+/// ([`crate::hashing::import_ordinal_name`]), so a call to one reads as a
+/// C call to a function (`ldap_initW(..)`, `certcli_ord359(..)`).
+///
+/// # Arguments
+///
+/// * `symbols` - The program's symbols; its ordinal imports are renamed.
+///
+/// # Returns
+///
+/// Each renamed import's slot and ordinal, sorted by slot, for the import
+/// hash, which names an import by its ordinal.
+fn name_ordinal_imports(symbols: &mut [Symbol]) -> Vec<(u64, u16)> {
+    let mut out = Vec::new();
+    for s in symbols.iter_mut().filter(|s| s.kind == SymbolKind::Import) {
+        let Some((dll, func)) = s.name.rsplit_once('!') else {
+            continue;
+        };
+        let Some(n) = func
+            .strip_prefix("ORDINAL ")
+            .and_then(|n| n.parse::<u16>().ok())
+        else {
+            continue;
+        };
+        s.name = format!("{dll}!{}", crate::hashing::import_ordinal_name(dll, n));
+        out.push((s.addr, n));
+    }
+    out.sort_unstable();
+    out.dedup_by_key(|(slot, _)| *slot);
+    out
+}
+
 /// The exports a PE names by ordinal alone, which the parser leaves out.
 ///
 /// The parser reads the exports through the name table, so an
@@ -1917,6 +1953,7 @@ impl Program {
                 headers.exception_handlers = exception_handlers;
                 headers.chained_chunks = chained_chunks;
                 headers.delay_imports = delay_slots;
+                headers.ordinal_imports = name_ordinal_imports(&mut symbols);
                 pdb_record = pe
                     .debug_data
                     .as_ref()

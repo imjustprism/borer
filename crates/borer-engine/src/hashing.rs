@@ -355,6 +355,62 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 /// extension as the import table spells it.
 const ORDINALS: &str = include_str!("ordinals.tsv");
 
+/// The names of system DLLs' exports that programs import by ordinal, from
+/// their export tables (`scripts/ordinals.py` writes it).
+///
+/// One `dll<TAB>ordinal<TAB>name` line each, the dll lowercased with its
+/// extension.
+const IMPORT_ORDINALS: &str = include_str!("import_ordinals.tsv");
+
+/// Finds the name a table of `dll<TAB>ordinal<TAB>name` lines gives an
+/// ordinal of a dll.
+///
+/// # Arguments
+///
+/// * `table` - The lines.
+/// * `dll` - The module name, lowercased.
+/// * `ordinal` - The ordinal, in decimal.
+fn listed<'t>(table: &'t str, dll: &str, ordinal: &str) -> Option<&'t str> {
+    table
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(d, _)| *d == dll)
+        .find_map(|(_, rest)| {
+            rest.split_once('\t')
+                .filter(|(n, _)| *n == ordinal)
+                .map(|(_, name)| name)
+        })
+}
+
+/// Returns the name the loader gives an import by ordinal.
+///
+/// The export's name where a table lists the dll and the ordinal
+/// ([`IMPORT_ORDINALS`], then `pefile`'s [`ORDINALS`]), else
+/// `<dll>_ord<n>` with the dll's stem made a C identifier, so a call to it
+/// is valid C (`certcli_ord359(..)`, where it read `ORDINAL 359(..)`).
+///
+/// # Arguments
+///
+/// * `dll` - The module name as the import table states it.
+/// * `ordinal` - The ordinal imported.
+#[must_use]
+pub(crate) fn import_ordinal_name(dll: &str, ordinal: u16) -> String {
+    let lower = dll.to_lowercase();
+    let n = ordinal.to_string();
+    listed(IMPORT_ORDINALS, &lower, &n)
+        .or_else(|| listed(ORDINALS, &lower, &n))
+        .map_or_else(
+            || {
+                let stem: String = dll_stem(dll)
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                format!("{stem}_ord{n}")
+            },
+            ToOwned::to_owned,
+        )
+}
+
 /// The dll name lowercased with a final `.dll`, `.ocx` or `.sys` removed,
 /// as `pefile` strips it.
 ///
@@ -382,18 +438,8 @@ fn dll_stem(dll: &str) -> String {
 /// * `dll` - The module name as the import table states it.
 /// * `ordinal` - The ordinal imported.
 fn ordinal_name(dll: &str, ordinal: u16) -> String {
-    let dll = dll.to_lowercase();
-    let ordinal = ordinal.to_string();
-    ORDINALS
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .filter(|(d, _)| *d == dll)
-        .find_map(|(_, rest)| {
-            rest.split_once('\t')
-                .filter(|(n, _)| *n == ordinal)
-                .map(|(_, name)| name.to_owned())
-        })
-        .unwrap_or_else(|| format!("ord{ordinal}"))
+    let n = ordinal.to_string();
+    listed(ORDINALS, &dll.to_lowercase(), &n).map_or_else(|| format!("ord{n}"), ToOwned::to_owned)
 }
 
 /// Mandiant's import hash of the program's import table, as `pefile` and
@@ -403,8 +449,12 @@ fn ordinal_name(dll: &str, ordinal: u16) -> String {
 /// `dll.function` (dll lowercased, `.dll`, `.ocx` or `.sys` stripped;
 /// function lowercased, an ordinal named by [`ordinal_name`]), in import
 /// table order, comma-joined, and the digest is MD5 of that string. The
-/// loader names an import by ordinal `ORDINAL <n>` and keeps the table's
-/// order. An import whose name entry is empty is skipped; non-PE imports
+/// loader names an import by ordinal for the reader
+/// ([`import_ordinal_name`]) and keeps its ordinal beside it
+/// ([`crate::headers::Headers::ordinal_imports`]), which the hash names
+/// it by; a symbol still spelled `ORDINAL <n>` is read the same way. The
+/// loader keeps the table's order. An import whose name entry is empty is
+/// skipped; non-PE imports
 /// carry no module and are skipped too, and so are the delay-load imports
 /// ([`crate::headers::Headers::delay_imports`]), which `pefile` leaves out.
 ///
@@ -429,13 +479,22 @@ pub fn imphash(program: &Program) -> Option<[u8; 16]> {
                     .binary_search(&s.addr)
                     .is_err()
         })
-        .filter_map(|s| s.name.rsplit_once('!'))
-        .filter(|&(_, func)| func != "(unnamed)")
-        .map(|(dll, func)| {
-            let func = func
-                .strip_prefix("ORDINAL ")
-                .and_then(|n| n.parse().ok())
-                .map_or_else(|| func.to_owned(), |n| ordinal_name(dll, n));
+        .filter_map(|s| {
+            s.name
+                .rsplit_once('!')
+                .map(|(dll, func)| (s.addr, dll, func))
+        })
+        .filter(|&(_, _, func)| func != "(unnamed)")
+        .map(|(addr, dll, func)| {
+            let ordinal = program
+                .headers
+                .ordinal_imports
+                .binary_search_by_key(&addr, |(slot, _)| *slot)
+                .ok()
+                .and_then(|k| program.headers.ordinal_imports.get(k))
+                .map(|(_, n)| *n)
+                .or_else(|| func.strip_prefix("ORDINAL ").and_then(|n| n.parse().ok()));
+            let func = ordinal.map_or_else(|| func.to_owned(), |n| ordinal_name(dll, n));
             format!("{}.{}", dll_stem(dll), func.to_lowercase())
         })
         .collect();
@@ -1135,6 +1194,28 @@ mod tests {
     )]
 
     use super::*;
+
+    /// An import by ordinal is named by the export its DLL lists there, by
+    /// `pefile`'s table, or `<dll>_ord<n>`, a C identifier whatever the
+    /// module's name.
+    #[test]
+    fn ordinal_imports_are_named_as_c_functions() {
+        assert_eq!(import_ordinal_name("WLDAP32.dll", 145), "ldap_initW");
+        assert_eq!(
+            import_ordinal_name("certcli.dll", 359),
+            "CSPrintErrorLineFileData"
+        );
+        assert_eq!(import_ordinal_name("WS2_32.dll", 115), "WSAStartup");
+        assert_eq!(
+            import_ordinal_name("certcli.dll", 60000),
+            "certcli_ord60000"
+        );
+        assert_eq!(
+            import_ordinal_name("api-ms-win-x.dll", 3),
+            "api_ms_win_x_ord3"
+        );
+        assert_eq!(ordinal_name("WLDAP32.dll", 145), "ord145");
+    }
 
     /// RFC 1321 appendix A.5's seven test vectors.
     #[test]

@@ -145,6 +145,11 @@ pub struct Headers {
     /// imports a DLL linked `/DELAYLOAD` binds on first call, which the
     /// import hash leaves out as `pefile` does.
     pub delay_imports: Vec<u64>,
+    /// The address-table slots of a PE's imports by ordinal and each one's
+    /// ordinal, sorted by slot: the loader names such an import by the
+    /// export it is (`wldap32.dll!ldap_initW`) or `<dll>_ord<n>`, and the
+    /// import hash names it by its ordinal, as `pefile` does.
+    pub ordinal_imports: Vec<(u64, u16)>,
     /// What the loader read past to load the file at all: a header the
     /// strict parse refused, a field the operating system's loader ignores,
     /// a container's headers a stated layout left unread, each said in a

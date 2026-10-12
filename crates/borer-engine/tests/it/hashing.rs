@@ -235,7 +235,9 @@ fn imphash_matches_the_hand_computed_table() {
 /// Pinned to the digest `pefile` 2024.8.26's `get_imphash` computed over
 /// the same file:
 /// `user32.messageboxa,ws2_32.wsastartup,ws2_32.ord999,ws2_32.send`. It
-/// sorted the list and hashed `ORDINAL 115` as a name.
+/// sorted the list and hashed `ORDINAL 115` as a name. The loader names
+/// the ordinals for a reader (`WSAStartup`, `ws2_32_ord999`) and the hash
+/// still names them as `pefile` does.
 #[test]
 fn imphash_keeps_table_order_and_names_ordinals_as_pefile_does() {
     let p = load(image_with(&rdata_by_ordinal()));
@@ -249,8 +251,8 @@ fn imphash_keeps_table_order_and_names_ordinals_as_pefile_does() {
         imports,
         vec![
             "USER32.DLL!MessageBoxA",
-            "WS2_32.dll!ORDINAL 115",
-            "WS2_32.dll!ORDINAL 999",
+            "WS2_32.dll!WSAStartup",
+            "WS2_32.dll!ws2_32_ord999",
             "WS2_32.dll!send",
         ],
         "the loader read the crafted table"
