@@ -191,10 +191,15 @@ def main(argv: list[str]) -> int:
                     # functions and 7 of msvcrt; it joins when both reach 0.
                     "--skip",
                     "the_final_text_agrees_with_the_emulator_on_small_functions",
-                    # The arm64 sweep reads its own binary (BORER_DOGFOOD_A64),
-                    # which a fresh clone does not have.
+                    # The arm64 sweeps read their own binary
+                    # (BORER_DOGFOOD_A64), which a fresh clone does not have:
+                    # set it to an arm64 build and run them by name.
                     "--skip",
                     "the_arm64_lifter_agrees_with_the_emulator_on_every_block",
+                    "--skip",
+                    "decompile_every_arm64_function",
+                    "--skip",
+                    "the_arm64_text_agrees_with_the_machine_on_every_block",
                 ],
                 {"BORER_DOGFOOD": dogfood},
                 None,
@@ -244,6 +249,10 @@ def main(argv: list[str]) -> int:
                         "the_final_text_agrees_with_the_emulator_on_small_functions",
                         "--skip",
                         "the_arm64_lifter_agrees_with_the_emulator_on_every_block",
+                        "--skip",
+                        "decompile_every_arm64_function",
+                        "--skip",
+                        "the_arm64_text_agrees_with_the_machine_on_every_block",
                     ],
                     {"BORER_DOGFOOD": x86},
                     None,

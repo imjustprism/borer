@@ -372,6 +372,95 @@ fn decompile_every_function() {
     assert!(malformed.is_empty(), "malformed output: {malformed:?}");
 }
 
+/// Decompiles every function of the `BORER_DOGFOOD_A64` binary and
+/// requires well-formed text.
+///
+/// As [`decompile_every_function`] does for an x86 build: no function
+/// fails, no `goto` dangles, braces balance and every callee is named.
+///
+/// For an arm64 build of any program (a C library linked for
+/// `aarch64-linux-gnu`, a Mach-O, a PE); it prints the tally of each
+/// defect over the whole binary.
+#[test]
+#[ignore = "set BORER_DOGFOOD_A64 to an arm64 binary path to run this sweep"]
+fn decompile_every_arm64_function() {
+    let path = std::env::var("BORER_DOGFOOD_A64").expect("BORER_DOGFOOD_A64 env var");
+    let p = Program::load(std::path::Path::new(&path)).expect("load");
+    let a = Analysis::compute(&p);
+    let started = std::time::Instant::now();
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    let texts = decompile_all(&p, &a, &Overlay::default(), &entries);
+    let took = started.elapsed();
+    let (mut ok, mut failed, mut gotos, mut braces, mut unnamed) = (0usize, 0, 0, 0, 0);
+    let mut first: Vec<String> = Vec::new();
+    for (f, r) in a.functions.iter().zip(texts) {
+        let Some(t) = r else {
+            failed += 1;
+            continue;
+        };
+        ok += 1;
+        let missing = dangling_gotos(&t);
+        let depth = brace_imbalance(&t);
+        let calls = missing_calls(&a, &Overlay::default(), f, &t);
+        gotos += usize::from(!missing.is_empty());
+        braces += usize::from(depth != 0);
+        unnamed += usize::from(!calls.is_empty());
+        if (!missing.is_empty() || depth != 0 || !calls.is_empty()) && first.len() < 10 {
+            first.push(format!(
+                "{:#x}: dangling gotos {missing:?}, brace depth {depth}, calls not in the text {calls:?}",
+                f.entry
+            ));
+        }
+    }
+    eprintln!(
+        "binary: {path}\nfunctions: {} decompiled {ok} failed {failed} in {took:.1?}\nwith dangling gotos {gotos}, unbalanced braces {braces}, a callee unnamed {unnamed}\nfirst: {first:#?}",
+        a.functions.len()
+    );
+    assert_eq!(failed, 0, "functions that failed to decompile");
+    assert!(first.is_empty(), "malformed output: {first:#?}");
+}
+
+/// Replays the text of every function of the `BORER_DOGFOOD_A64` binary
+/// against the arm64 machine and requires every claim it makes to hold.
+///
+/// As [`the_text_agrees_with_the_emulator_on_every_block`] does for an
+/// x86 build; it prints the tally and the share of blocks checked.
+#[test]
+#[ignore = "set BORER_DOGFOOD_A64 to an arm64 binary path to run this sweep"]
+fn the_arm64_text_agrees_with_the_machine_on_every_block() {
+    use borer_engine::analysis::decompile::replay::{replay, replay_tsv};
+    let path = std::env::var("BORER_DOGFOOD_A64").expect("BORER_DOGFOOD_A64 env var");
+    let p = Program::load(std::path::Path::new(&path)).expect("load");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a
+        .functions
+        .iter()
+        .filter(|f| f.thunk.is_none())
+        .map(|f| f.entry)
+        .collect();
+    let started = std::time::Instant::now();
+    let r = replay(&p, &a, &entries, 1);
+    let took = started.elapsed();
+    let text = replay_tsv(&r);
+    for line in text.lines().take_while(|l| l.starts_with('#')) {
+        eprintln!("{line}");
+    }
+    for d in r.wrong().iter().take(40) {
+        eprintln!(
+            "ROW\t{:#x}\t{:#x}\t{:#x}\t{}\t{}\t{:#x}\t{:#x}\t{}\t{}",
+            d.function, d.block, d.at, d.claim, d.place, d.text, d.machine, d.bits, d.expr
+        );
+    }
+    let share = borer_engine::num::usize_f64(r.checked) * 100.0
+        / borer_engine::num::usize_f64(r.blocks.max(1));
+    eprintln!(
+        "# {share:.1}% of blocks checked, {} disagreements; replay took {took:.1?}",
+        r.wrong().len()
+    );
+    assert!(r.checked > 0, "{text}");
+    assert!(r.wrong().is_empty(), "{} disagreements", r.wrong().len());
+}
+
 /// Decompiles every function of the `BORER_DOGFOOD` binary the way the
 /// tools do, with the fields, results and asserted names, and requires
 /// the same well-formed text as [`decompile_every_function`].
