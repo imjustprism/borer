@@ -1,6 +1,7 @@
 //! Typed runs: a function called on the inputs a reader names, in the
 //! emulator, and its answer checked against the function's printed text.
 
+use super::oracle::compared_constants;
 use super::*;
 use crate::analysis::decompile::interp::{End, Script, TextRun};
 use crate::analysis::decompile::signature::{Kind, Passing, Signature, passing, printed};
@@ -1074,30 +1075,9 @@ fn render_runs(
     }
     out.push_str("# args\treturns\tstop\tsteps\twrites\ttext\n");
     for (input, x) in req.inputs.iter().zip(outcomes) {
-        let args: Vec<String> = input.iter().map(Arg::shown).collect();
-        let args = if args.is_empty() {
-            "-".to_owned()
-        } else {
-            args.join(" ")
-        };
+        let args = args_shown(input);
         let returns = x.value.map_or_else(|| "-".to_owned(), small_hex);
-        let writes: Vec<String> = x
-            .writes
-            .iter()
-            .map(|(k, b, past)| {
-                let tail = if *past > 0 {
-                    format!(" +{past} past the end")
-                } else {
-                    String::new()
-                };
-                format!("a{}={}{tail}", k + 1, bytes_shown(b))
-            })
-            .collect();
-        let writes = if writes.is_empty() {
-            "-".to_owned()
-        } else {
-            writes.join(" ")
-        };
+        let writes = writes_shown(x);
         let verdict = match &x.verdict {
             Verdict::Agrees => "agrees".to_owned(),
             Verdict::Differs(l, _) => format!("differs@L{l}"),
@@ -1181,6 +1161,42 @@ fn render_runs(
     out
 }
 
+/// An input's arguments as a row spells them, `-` for none.
+///
+/// # Arguments
+///
+/// * `input` - The arguments.
+fn args_shown(input: &[Arg]) -> String {
+    if input.is_empty() {
+        return "-".to_owned();
+    }
+    input.iter().map(Arg::shown).collect::<Vec<_>>().join(" ")
+}
+
+/// What a run left in the buffers it changed, as a row spells it: `aN=`
+/// and the bytes, with what it wrote past the end; `-` for nothing.
+///
+/// # Arguments
+///
+/// * `x` - The run's outcome.
+fn writes_shown(x: &Outcome) -> String {
+    if x.writes.is_empty() {
+        return "-".to_owned();
+    }
+    x.writes
+        .iter()
+        .map(|(k, b, past)| {
+            let tail = if *past > 0 {
+                format!(" +{past} past the end")
+            } else {
+                String::new()
+            };
+            format!("a{}={}{tail}", k + 1, bytes_shown(b))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Call rows one run request lists before the rest are counted.
 const RUN_CALLS_SHOWN: usize = 48;
 
@@ -1255,6 +1271,22 @@ const GENERATED_TEXT: u64 = 40;
 /// The characters a generated text is spelled with.
 const GENERATED_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789 ,.-_/";
 
+/// A value cut to a parameter's width and extended as its sign says.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+/// * `bits` - The parameter's width, 1 to 64.
+/// * `signed` - Whether the parameter is signed.
+fn cut(v: u64, bits: u8, signed: bool) -> u64 {
+    let shift = 64 - u32::from(bits.clamp(1, 64));
+    if signed {
+        ((v << shift).cast_signed() >> shift).cast_unsigned()
+    } else {
+        (v << shift) >> shift
+    }
+}
+
 /// Inputs generated for a function from the kinds of its parameters.
 ///
 /// Each input is a pure function of the seed, the function's entry and the
@@ -1299,12 +1331,7 @@ fn generated(kinds: &[Kind], count: usize, seed: u64, entry: u64) -> Result<Vec<
                         2 => (next() % 16).wrapping_neg(),
                         _ => next(),
                     };
-                    let shift = 64 - u32::from(bits.clamp(1, 64));
-                    Arg::Int(if signed {
-                        ((v << shift).cast_signed() >> shift).cast_unsigned()
-                    } else {
-                        (v << shift) >> shift
-                    })
+                    Arg::Int(cut(v, bits, signed))
                 }
                 Kind::Pointer => match next() % 3 {
                     0 => {
@@ -1394,11 +1421,484 @@ pub fn check_generated(
         .collect())
 }
 
+/// Inputs a vector request runs unless its spec says how many.
+const VECTORS: usize = 16;
+
+/// The seed a vector request's generated inputs are drawn from, fixed so
+/// the same request answers the same.
+const VECTORS_SEED: u64 = 0x7e57_7ec7;
+
+/// Vectors the harness asserts before the rest are left to the table.
+const HARNESS_MAX: usize = 16;
+
+/// The inputs of a vector request, each input once.
+///
+/// One per constant the function compares against, then inputs generated
+/// from its signature ([`generated`]); twice as many are generated as are
+/// needed, so a repeat dropped does not cut the count. A constant fills every integer parameter, cut to its width, and every
+/// pointer parameter as a [`GENERATED_BUFFER`]-byte buffer opening with the
+/// constant's little-endian bytes, so a check of a buffer's first word sees
+/// the value it compares with. The constants take at most half the inputs.
+///
+/// # Arguments
+///
+/// * `kinds` - The parameters' kinds, in order.
+/// * `constants` - The values the function compares against, in order.
+/// * `count` - How many inputs.
+/// * `entry` - The function's entry, which stirs the generated inputs.
+///
+/// # Errors
+///
+/// When a parameter is floating, or of a type a run does not pass.
+fn vector_inputs(
+    kinds: &[Kind],
+    constants: &[u64],
+    count: usize,
+    entry: u64,
+) -> Result<Vec<Vec<Arg>>, String> {
+    let mut out: Vec<Vec<Arg>> = Vec::with_capacity(count);
+    for &c in constants.iter().take(count.div_ceil(2)) {
+        let mut input = Vec::with_capacity(kinds.len());
+        for (k, kind) in kinds.iter().enumerate() {
+            input.push(match *kind {
+                Kind::Int(bits, signed) => Arg::Int(cut(c, bits, signed)),
+                Kind::Pointer => {
+                    let mut b = c.to_le_bytes().to_vec();
+                    b.resize(GENERATED_BUFFER, 0);
+                    Arg::Bytes(b)
+                }
+                Kind::Float => {
+                    return Err(format!("a{} is floating, which a run does not pass", k + 1));
+                }
+                Kind::Other => {
+                    return Err(format!("a{} is of a type a run does not pass", k + 1));
+                }
+            });
+        }
+        if !out.contains(&input) {
+            out.push(input);
+        }
+    }
+    for input in generated(kinds, count.saturating_mul(2), VECTORS_SEED, entry)? {
+        if out.len() >= count {
+            break;
+        }
+        if !out.contains(&input) {
+            out.push(input);
+        }
+    }
+    Ok(out)
+}
+
+/// The C type a harness declares a parameter or result of a kind as.
+///
+/// # Arguments
+///
+/// * `kind` - The kind.
+fn c_type(kind: Kind) -> String {
+    match kind {
+        Kind::Int(bits, signed) => format!(
+            "{}int{}_t",
+            if signed { "" } else { "u" },
+            bits.clamp(8, 64).next_power_of_two()
+        ),
+        Kind::Pointer => "uint8_t *".to_owned(),
+        Kind::Float => "double".to_owned(),
+        Kind::Other => "uint64_t".to_owned(),
+    }
+}
+
+/// A function's name as a C identifier: its last `::` segment, every
+/// character that cannot be in one made `_`.
+///
+/// # Arguments
+///
+/// * `name` - The name.
+fn c_name(name: &str) -> String {
+    let mut out: String = name
+        .rsplit("::")
+        .next()
+        .unwrap_or(name)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// Bytes as a C array initializer, its trailing zeros left to the array's
+/// size.
+///
+/// # Arguments
+///
+/// * `b` - The bytes.
+fn c_bytes(b: &[u8]) -> String {
+    let end = b.iter().rposition(|c| *c != 0).map_or(0, |i| i + 1);
+    let body: Vec<String> = b
+        .get(..end)
+        .unwrap_or(b)
+        .iter()
+        .map(|c| format!("{c:#04x}"))
+        .collect();
+    if body.is_empty() {
+        "{0}".to_owned()
+    } else {
+        format!("{{{}}}", body.join(", "))
+    }
+}
+
+/// The C a harness opens with after its header comment: the includes, the
+/// failure count and the two helpers each vector's line reports through.
+const HARNESS_HEAD: &str = "#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static int failed;
+
+/* Reports a vector whose result differs. */
+static void differs(int vector, unsigned long long got, unsigned long long want) {
+    printf(\"vector %d: returned %#llx, want %#llx\\n\", vector, got, want);
+    failed++;
+}
+
+/* Reports a vector that left other bytes in a buffer. */
+static void changed(int vector, int arg) {
+    printf(\"vector %d: a%d holds other bytes\\n\", vector, arg);
+    failed++;
+}
+";
+
+/// Writes a C program asserting the vectors that returned, a line each:
+/// the call's result at its declared width and the bytes it left in each
+/// buffer it changed.
+///
+/// # Arguments
+///
+/// * `name` - The function's name, as a C identifier.
+/// * `sig` - Its signature.
+/// * `inputs` - Every input, in table order.
+/// * `outcomes` - Each input's run.
+fn harness(name: &str, sig: &Signature, inputs: &[Vec<Arg>], outcomes: &[Arc<Outcome>]) -> String {
+    let kinds = sig.parameter_kinds();
+    let ret = sig.return_kind();
+    let params: Vec<String> = kinds
+        .iter()
+        .enumerate()
+        .map(|(k, kind)| match kind {
+            Kind::Pointer => format!("uint8_t *a{}", k + 1),
+            Kind::Int(..) | Kind::Float | Kind::Other => format!("{} a{}", c_type(*kind), k + 1),
+        })
+        .collect();
+    let params = if params.is_empty() {
+        "void".to_owned()
+    } else {
+        params.join(", ")
+    };
+    let (ret_type, got) = match ret {
+        None => ("void".to_owned(), None),
+        Some((Kind::Int(bits, signed), _)) => (
+            c_type(Kind::Int(bits, signed)),
+            Some(if signed {
+                format!("({})got", c_type(Kind::Int(bits, false)))
+            } else {
+                "got".to_owned()
+            }),
+        ),
+        Some((kind @ (Kind::Pointer | Kind::Float | Kind::Other), _)) => (c_type(kind), None),
+    };
+    let returned: Vec<usize> = (0..outcomes.len())
+        .filter(|&n| outcomes.get(n).is_some_and(|x| x.value.is_some()))
+        .collect();
+    let mut out = format!(
+        "/* {} of the {} vectors that returned, for {}, as borer's emulator ran the binary.\n   Link with a reimplementation of {name}: the run prints each vector that differs and exits 1 if any did. */\n{HARNESS_HEAD}\n{ret_type} {name}({params});\n\nint main(void) {{\n",
+        returned.len().min(HARNESS_MAX),
+        returned.len(),
+        sig.text
+    );
+    if got.is_none() && ret.is_some() {
+        out.push_str("    /* the result is not an integer, so only the buffers are compared */\n");
+    }
+    for &n in returned.iter().take(HARNESS_MAX) {
+        let (Some(input), Some(x)) = (inputs.get(n), outcomes.get(n)) else {
+            continue;
+        };
+        let vector = n + 1;
+        let mut line = String::from("    {");
+        let mut args = Vec::with_capacity(input.len());
+        for (k, arg) in input.iter().enumerate() {
+            match arg {
+                Arg::Int(v) => args.push(format!("{v:#x}")),
+                Arg::Bytes(_) | Arg::Out(_) => {
+                    let initial = arg.initial();
+                    let _ = write!(
+                        line,
+                        " uint8_t b{}[{}] = {};",
+                        k + 1,
+                        initial.len().max(1),
+                        c_bytes(&initial)
+                    );
+                    args.push(format!("b{}", k + 1));
+                }
+            }
+        }
+        let call = format!("{name}({})", args.join(", "));
+        match (&got, x.value) {
+            (Some(got), Some(v)) => {
+                let _ = write!(
+                    line,
+                    " {ret_type} got = {call}; if ({got} != {v:#x}) differs({vector}, {got}, {v:#x});"
+                );
+            }
+            (Some(_) | None, _) => {
+                let _ = write!(line, " {call};");
+            }
+        }
+        for (k, after, _) in &x.writes {
+            let _ = write!(
+                line,
+                " static const uint8_t w{0}[{1}] = {2}; if (memcmp(b{0}, w{0}, sizeof w{0})) changed({vector}, {0});",
+                k + 1,
+                after.len().max(1),
+                c_bytes(after)
+            );
+        }
+        line.push_str(" }\n");
+        out.push_str(&line);
+    }
+    out.push_str("    printf(\"%d vectors differ\\n\", failed);\n    return failed != 0;\n}\n");
+    out
+}
+
+/// Records test vectors for reimplementing a function: inputs typed by
+/// its recovered signature, each run in the emulator, and a C harness that
+/// asserts what the binary answered.
+///
+/// The inputs open with the constants the function compares against (the
+/// values `solve` tries, [`compared_constants`]), then ones generated from
+/// the signature ([`generated`]), each a pure function of the function and
+/// a fixed seed, so the same request answers the same, byte for byte. Each
+/// runs as [`run_tsv`] runs it, through the same memo. The table gives a
+/// row per input; the harness asserts the first [`HARNESS_MAX`] that
+/// returned: the result at its declared width, and the bytes each changed
+/// buffer holds after.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `spec` - `<function>[,count=N][,steps=N]`: at most [`INPUTS_MAX`]
+///   inputs, [`VECTORS`] by default.
+///
+/// # Returns
+///
+/// A header with the signature and the counts, the table, then the
+/// harness under a `# harness` line.
+///
+/// # Errors
+///
+/// When the spec does not read, the function does not decompile or has no
+/// signature, a parameter is of a type a run does not pass, or the code is
+/// arm64.
+pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
+    x86_only(p, "vectors")?;
+    let (target, rest) = spec_head(spec);
+    let start = locate(a, o, target).ok_or_else(|| unresolved(target))?;
+    let entry = a
+        .function_at(start)
+        .ok_or_else(|| format!("no function contains {start:#x}"))?
+        .entry;
+    let (mut count, mut budget) = (VECTORS, BUDGET);
+    for option in rest.map(str::trim) {
+        match option.split_once('=') {
+            Some(("count", n)) => {
+                count = parse_count(n)
+                    .filter(|n| (1..=INPUTS_MAX).contains(n))
+                    .ok_or_else(|| format!("count is 1 to {INPUTS_MAX}"))?;
+            }
+            Some(("steps", n)) => {
+                budget = parse_count(n)
+                    .filter(|n| (1..=BUDGET_MAX).contains(n))
+                    .ok_or_else(|| format!("steps is 1 to {BUDGET_MAX}"))?;
+            }
+            _ => {
+                return Err(format!(
+                    "vectors takes <function>[,count=N][,steps=N]; cannot read {}",
+                    one_line(option)
+                ));
+            }
+        }
+    }
+    let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
+    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let sig = printed(&text, word)?;
+    let constants: Vec<u64> =
+        compared_constants(&function_instructions(p, a, entry), Vec::new(), INPUTS_MAX)
+            .iter()
+            .map(|c| c.value)
+            .collect();
+    let inputs = vector_inputs(&sig.parameter_kinds(), &constants, count, entry)?;
+    let seeded = constants.len().min(count.div_ceil(2));
+    let shared = Shared {
+        script: Script::read(p, a, o, entry, &text),
+        pass: Some(passing(p, a, o, entry)),
+        sig: Ok(sig.clone()),
+    };
+    let names = o.fingerprint();
+    let outcomes: Vec<Arc<Outcome>> = inputs
+        .iter()
+        .map(|input| {
+            a.derived.get_or_build_item(
+                "fn_run",
+                names,
+                (entry, budget, input.clone()),
+                || run_one(p, &shared, entry, input, budget),
+                Outcome::bytes,
+            )
+        })
+        .collect();
+    let returned = outcomes.iter().filter(|x| x.value.is_some()).count();
+    let mut out = format!(
+        "# vectors for {}: {} input{} ({seeded} from the constants it compares, the rest generated from its signature), at most {budget} steps each; {returned} returned\n",
+        sig.text,
+        inputs.len(),
+        plural(inputs.len())
+    );
+    out.push_str("# args\treturns\tstop\twrites\n");
+    for (input, x) in inputs.iter().zip(&outcomes) {
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}\t{}",
+            args_shown(input),
+            x.value.map_or_else(|| "-".to_owned(), small_hex),
+            x.stop,
+            writes_shown(x)
+        );
+    }
+    out.push_str("# harness: C, asserting the vectors that returned\n");
+    out.push_str(&harness(
+        &c_name(&short_name(a, o, entry)),
+        &sig,
+        &inputs,
+        &outcomes,
+    ));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Arg, Kind, generated, parse_run, run_tsv};
+    use super::{
+        Arg, Kind, args_shown, generated, parse_run, run_tsv, small_hex, vector_inputs, vectors_tsv,
+    };
+    use crate::analysis::decompile::decompile_named;
+    use crate::analysis::decompile::signature::printed;
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{Arch, Program, Section};
+
+    /// A buffer checksum: `acc = acc * 33 + byte` from 0x1505 over the
+    /// first `len` bytes of `buf`, `len` cut at 64 by the compare `solve`
+    /// finds.
+    const SUM33: [u8; 37] = [
+        0xb8, 0x05, 0x15, 0x00, 0x00, // ASM: mov eax, 0x1505
+        0x83, 0xfa, 0x40, // ASM: cmp edx, 0x40
+        0x76, 0x05, // ASM: jbe +5
+        0xba, 0x40, 0x00, 0x00, 0x00, // ASM: mov edx, 0x40
+        0x85, 0xd2, // ASM: test edx, edx
+        0x74, 0x11, // ASM: je +0x11
+        0x6b, 0xc0, 0x21, // ASM: imul eax, eax, 33
+        0x44, 0x0f, 0xb6, 0x01, // ASM: movzx r8d, byte [rcx]
+        0x44, 0x01, 0xc0, // ASM: add eax, r8d
+        0x48, 0xff, 0xc1, // ASM: inc rcx
+        0xff, 0xca, // ASM: dec edx
+        0x75, 0xef, // ASM: jne -0x11
+        0xc3, // ASM: ret
+    ];
+
+    /// What [`SUM33`] returns, computed apart from the binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - The buffer.
+    /// * `len` - The length argument, as passed.
+    fn sum33(buf: &[u8], len: u64) -> u64 {
+        let n = usize::try_from(crate::num::lo32(len).min(64)).unwrap_or(64);
+        u64::from(buf.iter().take(n).fold(0x1505u32, |acc, &b| {
+            acc.wrapping_mul(33).wrapping_add(u32::from(b))
+        }))
+    }
+
+    /// Vectors for a buffer checksum: a row per input with the checksum a
+    /// model computes apart, the harness asserting each of them, the same
+    /// request answering the same, and the counts capped.
+    ///
+    /// # Panics
+    ///
+    /// When a row or an assertion is missing, a repeat differs, or a cap
+    /// does not hold.
+    #[test]
+    fn vectors_record_a_checksum_and_its_harness() {
+        let p = Program::raw_x64(&SUM33);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let out = vectors_tsv(&p, &a, &o, "0x1000").unwrap();
+        let text = decompile_named(&p, &a, &o, 0x1000).unwrap();
+        let sig = printed(&text, 64).unwrap();
+        let kinds = sig.parameter_kinds();
+        assert!(
+            matches!(kinds.as_slice(), [Kind::Pointer, Kind::Int(..)]),
+            "{sig:?}"
+        );
+        assert!(out.contains("(1 from the constants it compares"), "{out}");
+        let inputs = vector_inputs(&kinds, &[0x40], 16, 0x1000).unwrap();
+        assert_eq!(inputs.len(), 16);
+        for input in &inputs {
+            let [buf, Arg::Int(len)] = input.as_slice() else {
+                panic!("{input:?}")
+            };
+            let want = sum33(&buf.initial(), *len);
+            let row = format!(
+                "\n{}\t{}\treturned\t-\n",
+                args_shown(input),
+                small_hex(want)
+            );
+            assert!(out.contains(&row), "{row:?} in\n{out}");
+            assert!(
+                out.contains(&format!("if (got != {want:#x}) differs(")),
+                "{want:#x} in\n{out}"
+            );
+        }
+        assert!(
+            out.contains("\nuint32_t sub_1000(uint8_t *a1, uint64_t a2);\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("/* 16 of the 16 vectors that returned"),
+            "{out}"
+        );
+        assert_eq!(out, vectors_tsv(&p, &a, &o, "0x1000").unwrap());
+        let many = vectors_tsv(&p, &a, &o, "0x1000,count=64").unwrap();
+        let rows = many
+            .lines()
+            .skip(2)
+            .take_while(|l| !l.starts_with("# harness"))
+            .count();
+        assert_eq!(rows, 64, "{many}");
+        assert!(
+            many.contains("/* 16 of the 64 vectors that returned"),
+            "{many}"
+        );
+        for (bad, says) in [
+            ("0x1000,count=65", "count is 1 to 64"),
+            ("0x1000,count=0", "count is 1 to 64"),
+            ("0x1000,lang=c", "vectors takes"),
+            ("nowhere", "cannot resolve nowhere"),
+        ] {
+            let err = vectors_tsv(&p, &a, &o, bad).unwrap_err();
+            assert!(err.contains(says), "{bad}: {err}");
+        }
+    }
 
     /// The forms of an argument read, and a malformed one is refused naming
     /// it.

@@ -133,40 +133,14 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         beyond_parameters(p, a, o, entry, slot)?;
     }
     let instrs = function_instructions(p, a, entry);
-    let mut candidates: Vec<Candidate> = [0, 1, u64::MAX]
-        .iter()
-        .map(|&value| Candidate { value, from: None })
-        .collect();
-    for i in &instrs {
-        if !matches!(
-            i.mnemonic(),
-            Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Sub | Mnemonic::Xor | Mnemonic::And
-        ) {
-            continue;
-        }
-        for n in 0..i.op_count() {
-            let value = match i.op_kind(n) {
-                OpKind::Immediate8 => u64::from(i.immediate8()),
-                OpKind::Immediate8to16
-                | OpKind::Immediate8to32
-                | OpKind::Immediate8to64
-                | OpKind::Immediate16
-                | OpKind::Immediate32
-                | OpKind::Immediate32to64
-                | OpKind::Immediate64 => i.immediate(n),
-                _ => continue,
-            };
-            if !candidates.iter().any(|c| c.value == value) {
-                candidates.push(Candidate {
-                    value,
-                    from: Some(i.ip()),
-                });
-            }
-        }
-        if candidates.len() >= CANDIDATES_MAX {
-            break;
-        }
-    }
+    let candidates = compared_constants(
+        &instrs,
+        [0, 1, u64::MAX]
+            .iter()
+            .map(|&value| Candidate { value, from: None })
+            .collect(),
+        CANDIDATES_MAX,
+    );
     let pass = passing(p, a, o, entry);
     let mut answers: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
     for c in &candidates {
@@ -235,6 +209,60 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     }
     more_line(&mut out, grouped.len(), GROUPS_MAX, "answers not listed");
     Ok(out)
+}
+
+/// Gathers the constants a function compares against, in the order it
+/// reads them, each with the instruction that compares: what [`solve_tsv`]
+/// tries as an argument and [`vectors_tsv`] seeds inputs with.
+///
+/// The immediates of `cmp`, `test`, `sub`, `xor` and `and`, each value once.
+///
+/// # Arguments
+///
+/// * `instrs` - The function's instructions.
+/// * `candidates` - Values already gathered; a constant among them is not
+///   added again.
+/// * `max` - The count past which no further instruction is read.
+///
+/// # Returns
+///
+/// `candidates` with the constants after them.
+pub(super) fn compared_constants(
+    instrs: &[Instruction],
+    mut candidates: Vec<Candidate>,
+    max: usize,
+) -> Vec<Candidate> {
+    for i in instrs {
+        if !matches!(
+            i.mnemonic(),
+            Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Sub | Mnemonic::Xor | Mnemonic::And
+        ) {
+            continue;
+        }
+        for n in 0..i.op_count() {
+            let value = match i.op_kind(n) {
+                OpKind::Immediate8 => u64::from(i.immediate8()),
+                OpKind::Immediate8to16
+                | OpKind::Immediate8to32
+                | OpKind::Immediate8to64
+                | OpKind::Immediate16
+                | OpKind::Immediate32
+                | OpKind::Immediate32to64
+                | OpKind::Immediate64 => i.immediate(n),
+                _ => continue,
+            };
+            if !candidates.iter().any(|c| c.value == value) {
+                candidates.push(Candidate {
+                    value,
+                    from: Some(i.ip()),
+                });
+            }
+        }
+        if candidates.len() >= max {
+            break;
+        }
+    }
+    candidates
 }
 
 /// Refuses an argument the function's recovered signature does not list.

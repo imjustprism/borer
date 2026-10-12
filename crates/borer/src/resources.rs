@@ -269,6 +269,23 @@ impl BorerServer {
         self.refusing(Feature::Emulate, |p, a, o| render::run_tsv(p, a, o, spec))
     }
 
+    /// Records test vectors for reimplementing a function: typed inputs
+    /// run in the emulator and a C harness asserting what came back.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - `<function>[,count=N][,steps=N]`.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, it is not emulated, or the spec or the
+    /// function's signature is refused.
+    pub(crate) fn vectors_text(&self, spec: &str) -> Result<String, ErrorData> {
+        self.refusing(Feature::Emulate, |p, a, o| {
+            render::vectors_tsv(p, a, o, spec)
+        })
+    }
+
     /// Recovers the strings the program generates at run time, the CLI's
     /// `hidden`.
     ///

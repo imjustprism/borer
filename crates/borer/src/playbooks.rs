@@ -173,7 +173,15 @@ const INTENTS: &[(&str, &[&str])] = &[
     ("start", &["triage", "info", "help", "playbook", "about"]),
     (
         "run code",
-        &["emulate", "run", "solve", "scenario", "scenarios", "oracle"],
+        &[
+            "emulate",
+            "run",
+            "vectors",
+            "solve",
+            "scenario",
+            "scenarios",
+            "oracle",
+        ],
     ),
     (
         "data flow",

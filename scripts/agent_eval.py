@@ -449,6 +449,12 @@ TASKS = [
         "http://x3.test/c2",
     ),
     (
+        "test_vectors",
+        "test vectors and a harness for reimplementing the serial check",
+        [LOAD, ("query", {"uri": "borer://vectors/crackme::check_serial"})],
+        "got = check_serial(",
+    ),
+    (
         "tlsh_digest",
         "the TLSH string a threat feed would carry for the file",
         [LOAD, ("query", {"uri": "borer://hashes"})],

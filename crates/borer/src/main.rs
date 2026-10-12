@@ -4684,6 +4684,7 @@ impl BorerServer {
             ("decoded", Some(filter)) => return self.decoded_text(&asked.spec_words(&filter)),
             ("oracle", Some(address)) => self.oracle_text(&address)?,
             ("run", Some(spec)) => self.run_text(&spec)?,
+            ("vectors", Some(spec)) => self.vectors_text(&spec)?,
             ("diff", Some(other)) => self.diff_text(&other)?,
             ("difffn", Some(spec)) => self.diff_function_text(&spec)?,
             ("migrate", Some(spec)) => self.migrate_text(&spec)?,
@@ -5042,6 +5043,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://run/{spec}",
         "Call a function on inputs typed by its recovered signature and check its decompiled text on them: <function>[,steps=N]/<input>[;<input>...], each input its arguments in order: 5, -1, \"text\", hex:0102 or out:16 (a zeroed buffer). A row per input: the return value, the stop, the steps, the bytes each buffer holds after, and whether the text run as C agrees, differs (at a line) or is unchecked (at most 64 inputs, 1000000 steps each by default); then the imported APIs and syscalls the runs serviced as api(args) -> ret with each argument decoded",
         "borer://run/{entry}/5;-1",
+    ),
+    (
+        "borer://vectors/{spec}",
+        "Test vectors for reimplementing a function: <function>[,count=N][,steps=N]. Inputs from the constants it compares and generated from its recovered signature (16 by default, at most 64), each run in the emulator: a row per input with what it returned and left in its buffers, then a C harness asserting the vectors that returned",
+        "borer://vectors/{entry}",
     ),
     (
         "borer://diff/{path}",
