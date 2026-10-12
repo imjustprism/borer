@@ -4,11 +4,11 @@
 use super::*;
 
 /// Emission state of the structurer for one function.
-pub(super) struct Emit<'e> {
+pub(super) struct Emit<'e, L: Lifter> {
     /// The function's basic blocks in address order.
     pub(super) blocks: &'e [BasicBlock],
     /// Decoded instructions per block.
-    pub(super) code: &'e [Vec<Instruction>],
+    pub(super) code: &'e [Vec<L::Insn>],
     /// Owned: never-taken edges are removed before structuring.
     pub(super) succs: Vec<Vec<usize>>,
     /// Owned: structuring through a trampoline re-parents its target.
@@ -59,7 +59,7 @@ pub(super) struct Emit<'e> {
     pub(super) orders: Vec<(Vec<usize>, usize)>,
 }
 
-impl Emit<'_> {
+impl<L: Lifter> Emit<'_, L> {
     /// Returns the start address of block `i` (`0` for an invalid index).
     ///
     /// # Arguments
@@ -182,7 +182,7 @@ pub(super) fn note_jumps(text: &str, named: &mut BTreeSet<u64>) {
 ///
 /// Body lines plus phi assignments, with the captured branch condition and
 /// switch index kept consistent with them.
-pub(super) fn run_block(ctx: &mut Ctx<'_>, st: &Emit<'_>, i: usize) -> BlockOut {
+pub(super) fn run_block<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, i: usize) -> BlockOut {
     run_block_env(ctx, st, i).0
 }
 
@@ -193,7 +193,11 @@ pub(super) fn run_block(ctx: &mut Ctx<'_>, st: &Emit<'_>, i: usize) -> BlockOut 
 /// * `ctx` - Per-function state.
 /// * `st` - Emission state.
 /// * `i` - Block index.
-pub(super) fn run_block_env(ctx: &mut Ctx<'_>, st: &Emit<'_>, i: usize) -> (BlockOut, Env) {
+pub(super) fn run_block_env<L: Lifter>(
+    ctx: &mut Ctx<'_>,
+    st: &Emit<'_, L>,
+    i: usize,
+) -> (BlockOut, Env) {
     let mut env = st.in_envs[i].clone();
     let succs = &st.succs[i];
     let ins = st.in_envs;
@@ -201,8 +205,8 @@ pub(super) fn run_block_env(ctx: &mut Ctx<'_>, st: &Emit<'_>, i: usize) -> (Bloc
     let processed = st.processed;
     let phi = |out: &Env| phi_keys(out, succs, ins, live, processed, None);
     let live_out = |k: Key| succs.iter().any(|&s| live.is_live(s, k));
-    let facts = block_facts(ctx, st.code, &st.succs, &st.live.need, st.assumes, i);
-    let out = exec_block(
+    let facts = block_facts::<L>(ctx, st.code, &st.succs, &st.live.need, st.assumes, i);
+    let out = L::exec_block(
         ctx,
         &st.code[i],
         i.checked_sub(1).map(|p| st.code[p].as_slice()),
@@ -344,9 +348,9 @@ impl Guard {
 /// block is not a conditional entered only from `from`, has statements, a
 /// switch dispatch, changes the stack pointer, or has a constant condition
 /// (its dead edge was pruned, so it is a plain jump, not a guard term).
-pub(super) fn pure_condition(
+pub(super) fn pure_condition<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     from: usize,
     b: usize,
 ) -> Option<(expr::Cond, usize, usize)> {
@@ -388,9 +392,9 @@ pub(super) fn pure_condition(
 /// # Returns
 ///
 /// `(guard, target, fall)` after merging.
-pub(super) fn merge_guard(
+pub(super) fn merge_guard<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     i: usize,
     cond: expr::Cond,
     t: usize,
@@ -438,7 +442,7 @@ impl Journal {
     ///
     /// * `st` - Emission state.
     /// * `b` - Block index.
-    pub(super) fn emitted(&mut self, st: &Emit<'_>, b: usize) {
+    pub(super) fn emitted<L: Lifter>(&mut self, st: &Emit<'_, L>, b: usize) {
         self.0.push(Undo::Emitted(b, st.emitted[b]));
     }
 
@@ -448,7 +452,7 @@ impl Journal {
     ///
     /// * `st` - Emission state.
     /// * `b` - Block index.
-    pub(super) fn succs(&mut self, st: &Emit<'_>, b: usize) {
+    pub(super) fn succs<L: Lifter>(&mut self, st: &Emit<'_, L>, b: usize) {
         self.0.push(Undo::Succs(b, st.succs[b].clone()));
     }
 
@@ -458,7 +462,7 @@ impl Journal {
     ///
     /// * `st` - Emission state.
     /// * `b` - Block index.
-    pub(super) fn preds(&mut self, st: &Emit<'_>, b: usize) {
+    pub(super) fn preds<L: Lifter>(&mut self, st: &Emit<'_, L>, b: usize) {
         self.0.push(Undo::Preds(b, st.preds[b].clone()));
     }
 
@@ -468,7 +472,7 @@ impl Journal {
     ///
     /// * `st` - Emission state.
     /// * `mark` - Where the journal stood ([`Journal::mark`]).
-    pub(super) fn restore(&mut self, st: &mut Emit<'_>, mark: usize) {
+    pub(super) fn restore<L: Lifter>(&mut self, st: &mut Emit<'_, L>, mark: usize) {
         while self.0.len() > mark {
             match self.0.pop() {
                 Some(Undo::Emitted(b, was)) => st.emitted[b] = was,
@@ -498,9 +502,9 @@ impl Journal {
 /// * `depth` - Current nesting; [`MAX_GUARD_DEPTH`] stops the recursion.
 /// * `journal` - Where the merge records what it changes.
 #[expect(clippy::too_many_arguments, reason = "the structurer's shape")]
-pub(super) fn sub_chain(
+pub(super) fn sub_chain<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     block: usize,
     cond: expr::Cond,
     t: usize,
@@ -539,9 +543,9 @@ pub(super) fn sub_chain(
 ///
 /// `(guard, target, fall)` after merging.
 #[expect(clippy::too_many_arguments, reason = "the structurer's shape")]
-pub(super) fn merge_chain(
+pub(super) fn merge_chain<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     header: usize,
     mut guard: Guard,
     mut t: usize,
@@ -606,7 +610,12 @@ pub(super) fn merge_chain(
 /// * `header` - The absorbing block.
 /// * `b` - The block folded away.
 /// * `journal` - Where the change is recorded.
-pub(super) fn consume(st: &mut Emit<'_>, header: usize, b: usize, journal: &mut Journal) {
+pub(super) fn consume<L: Lifter>(
+    st: &mut Emit<'_, L>,
+    header: usize,
+    b: usize,
+    journal: &mut Journal,
+) {
     journal.emitted(st, b);
     st.emitted[b] = true;
     let succs: Vec<usize> = st.succs[b].clone();
@@ -704,9 +713,9 @@ pub(super) const ABSORB_MAX_BLOCKS: usize = 8;
 /// * `i` - The dispatch block.
 /// * `idx_expr` - The switch index expression.
 /// * `out` - Receives the text.
-pub(super) fn goto_switch(
+pub(super) fn goto_switch<L: Lifter>(
     ctx: &Ctx<'_>,
-    st: &Emit<'_>,
+    st: &Emit<'_, L>,
     i: usize,
     idx_expr: &Expr,
     out: &mut String,
@@ -768,8 +777,8 @@ pub(super) fn goto_switch(
 /// * `start` - The region's first block.
 /// * `headers` - Blocks allowed to enter the region from outside.
 /// * `stop_at` - A block that ends the region.
-pub(super) fn closed_run_from(
-    st: &Emit<'_>,
+pub(super) fn closed_run_from<L: Lifter>(
+    st: &Emit<'_, L>,
     start: usize,
     headers: &BTreeSet<usize>,
     stop_at: Option<usize>,
@@ -803,8 +812,8 @@ pub(super) struct Base {
 /// * `start` - The region's first block.
 /// * `headers` - Blocks allowed to enter the region from outside.
 /// * `stop_at` - A block that ends the region.
-pub(super) fn base_of(
-    st: &Emit<'_>,
+pub(super) fn base_of<L: Lifter>(
+    st: &Emit<'_, L>,
     start: usize,
     headers: &BTreeSet<usize>,
     stop_at: Option<usize>,
@@ -860,14 +869,14 @@ pub(super) fn base_of(
 /// * `stop_at` - A block that ends the region.
 /// * `base` - The base of this very region ([`base_of`] with the same
 ///   arguments under the same graph), when the caller has it.
-pub(super) fn closed_run_with(
-    st: &Emit<'_>,
+pub(super) fn closed_run_with<L: Lifter>(
+    st: &Emit<'_, L>,
     start: usize,
     headers: &BTreeSet<usize>,
     stop_at: Option<usize>,
     base: Option<&Base>,
 ) -> Region {
-    let small = |b: usize| body_len(&st.code[b]) <= DUP_MAX_INSTRS;
+    let small = |b: usize| L::body_len(&st.code[b]) <= DUP_MAX_INSTRS;
     let one_way = |b: usize| {
         st.succs[b].len() == 1
             && st.succs[b].first() != Some(&b)
@@ -876,7 +885,7 @@ pub(super) fn closed_run_with(
     };
     let chain = |b: usize| -> Option<Vec<usize>> {
         let mut order = vec![b];
-        let mut instrs = body_len(&st.code[b]);
+        let mut instrs = L::body_len(&st.code[b]);
         let mut cur = b;
         while let Some(&next) = st.succs[cur].first() {
             if !one_way(cur)
@@ -888,7 +897,7 @@ pub(super) fn closed_run_with(
             {
                 return None;
             }
-            instrs += body_len(&st.code[next]);
+            instrs += L::body_len(&st.code[next]);
             if instrs > DUP_MAX_INSTRS {
                 return None;
             }
@@ -1000,7 +1009,7 @@ pub(super) fn closed_run_with(
 /// # Returns
 ///
 /// `goto L_<va>;` when a block starts there, else `goto *<va>;`.
-pub(super) fn jump_to(st: &Emit<'_>, va: u64) -> String {
+pub(super) fn jump_to<L: Lifter>(st: &Emit<'_, L>, va: u64) -> String {
     if st.index_of(va).is_some() {
         goto(va)
     } else {

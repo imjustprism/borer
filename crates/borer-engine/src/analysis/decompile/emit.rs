@@ -47,9 +47,9 @@ use super::*;
 /// # Returns
 ///
 /// The next block index to consider (the join of a structure, else `i + 1`).
-pub(super) fn emit_block(
+pub(super) fn emit_block<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     i: usize,
     out: &mut String,
     depth: usize,
@@ -397,7 +397,7 @@ pub(super) fn emit_block(
     // the copy: it is the `if`'s body instead, and the other side follows,
     // which spares the goto to the other side that the copy would sit in
     // front of.
-    let copied_next = |st: &Emit<'_>, b: usize| {
+    let copied_next = |st: &Emit<'_, L>, b: usize| {
         st.dup_stack.last().is_some_and(|d| d.contains(&b))
             && st
                 .orders
@@ -450,7 +450,7 @@ pub(super) fn emit_block(
 ///
 /// * `st` - Emission state.
 /// * `b` - The copied block.
-pub(super) fn runs_on(st: &Emit<'_>, b: usize) -> bool {
+pub(super) fn runs_on<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
     match st.blocks[b].term {
         BlockTerm::Fall | BlockTerm::Call => true,
         BlockTerm::Cond | BlockTerm::Indirect => st.succs[b].len() == 1,
@@ -475,7 +475,7 @@ pub(super) fn runs_on(st: &Emit<'_>, b: usize) -> bool {
 ///
 /// The address, or `None` for a block with a successor in the function, a
 /// call that never returns, or any other end.
-pub(super) fn falls_outside(st: &Emit<'_>, b: usize) -> Option<u64> {
+pub(super) fn falls_outside<L: Lifter>(st: &Emit<'_, L>, b: usize) -> Option<u64> {
     if !st.succs.get(b).is_some_and(Vec::is_empty) {
         return None;
     }
@@ -501,7 +501,7 @@ pub(super) fn falls_outside(st: &Emit<'_>, b: usize) -> Option<u64> {
 /// * `ctx` - Per-function state.
 /// * `st` - Emission state.
 /// * `start` - The copied block the branch enters.
-pub(super) fn copy_chain(ctx: &mut Ctx<'_>, st: &Emit<'_>, start: usize) -> String {
+pub(super) fn copy_chain<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, start: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut cur = start;
     let mut seen: BTreeSet<usize> = BTreeSet::new();
@@ -569,9 +569,9 @@ pub(super) fn copy_chain(ctx: &mut Ctx<'_>, st: &Emit<'_>, start: usize) -> Stri
 ///
 /// The loop's continuation block (else the block after its range), or
 /// `None` when `i` heads no loop the emitter can express.
-pub(super) fn try_loop(
+pub(super) fn try_loop<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     i: usize,
     out: &mut String,
     depth: usize,
@@ -659,7 +659,7 @@ pub(super) fn try_loop(
         .flat_map(|b| st.succs[*b].iter().copied())
         .filter(|s| !range.contains(s))
         .collect();
-    let absorbable = |st: &Emit<'_>, x: usize, stop: Option<usize>| -> Option<Region> {
+    let absorbable = |st: &Emit<'_, L>, x: usize, stop: Option<usize>| -> Option<Region> {
         (!st.emitted[x])
             .then(|| closed_run_from(st, x, &range, stop))
             .filter(|r| r.closed && r.order.len() <= ABSORB_MAX_BLOCKS)
@@ -875,7 +875,7 @@ pub(super) fn continues_at_top(body: &[String]) -> bool {
 ///
 /// The loop's blocks and its entry, or `None` when `i` is on no cycle or the
 /// cycle has several entries.
-pub(super) fn cycle_of(st: &Emit<'_>, i: usize) -> Option<(BTreeSet<usize>, usize)> {
+pub(super) fn cycle_of<L: Lifter>(st: &Emit<'_, L>, i: usize) -> Option<(BTreeSet<usize>, usize)> {
     let n = st.blocks.len();
     let open = |b: usize| !st.outside(b) && !st.emitted[b] && !st.loops.contains(&b);
     let mut forward = vec![false; n];
@@ -931,9 +931,9 @@ pub(super) fn cycle_of(st: &Emit<'_>, i: usize) -> Option<(BTreeSet<usize>, usiz
 /// # Returns
 ///
 /// The trampoline's target, or `b` itself when it is not a trampoline.
-pub(super) fn follow_trampoline(
+pub(super) fn follow_trampoline<L: Lifter>(
     ctx: &Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     header: usize,
     b: usize,
     journal: &mut Journal,
@@ -1028,8 +1028,8 @@ pub(super) fn push_if(out: &mut String, cond: &str, body: &str) {
 /// # Returns
 ///
 /// `(body region, exit block, the side the body is on)`, or `None`.
-pub(super) fn try_while(
-    st: &Emit<'_>,
+pub(super) fn try_while<L: Lifter>(
+    st: &Emit<'_, L>,
     header: usize,
     t: usize,
     f: usize,
@@ -1048,8 +1048,8 @@ pub(super) fn try_while(
 /// * `t` - Its branch target block.
 /// * `f` - Its fall-through block.
 /// * `bases` - The target side's base and the fall-through side's.
-pub(super) fn try_while_with(
-    st: &Emit<'_>,
+pub(super) fn try_while_with<L: Lifter>(
+    st: &Emit<'_, L>,
     header: usize,
     t: usize,
     f: usize,
@@ -1121,9 +1121,9 @@ pub(super) const SWITCH_VALUES_MAX: usize = 512;
 /// The block after the switch, or `None` when the table is missing, empty,
 /// reaches more than [`SWITCH_ARMS_MAX`] distinct bodies, or holds more
 /// than [`SWITCH_VALUES_MAX`] values.
-pub(super) fn try_switch(
+pub(super) fn try_switch<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     i: usize,
     idx_expr: &Expr,
     out: &mut String,
@@ -1202,9 +1202,9 @@ pub(super) fn try_switch(
 ///
 /// The block after the switch.
 #[expect(clippy::too_many_arguments, reason = "the structurer's shape")]
-pub(super) fn emit_switch(
+pub(super) fn emit_switch<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     headers: &BTreeSet<usize>,
     switch_expr: &str,
     arms: &[Arm],
@@ -1222,8 +1222,8 @@ pub(super) fn emit_switch(
     }
     /// The region an arm's body is, and the exits it had before an open
     /// one was cut down to its first block.
-    fn arm_region(
-        st: &Emit<'_>,
+    fn arm_region<L: Lifter>(
+        st: &Emit<'_, L>,
         headers: &BTreeSet<usize>,
         bi: usize,
     ) -> (Region, BTreeSet<usize>) {
@@ -1252,7 +1252,7 @@ pub(super) fn emit_switch(
         .iter()
         .flat_map(|(r, _)| r.order.iter().copied())
         .collect();
-    let continuation = |st: &Emit<'_>, b: usize| {
+    let continuation = |st: &Emit<'_, L>, b: usize| {
         st.emitted[b]
             || st.preds[b]
                 .iter()
@@ -1346,9 +1346,9 @@ pub(super) fn emit_switch(
 /// A jump to the loop's exit becomes `break` and one to its header
 /// `continue`, but only where the line stands in this loop and not in one
 /// the body opens itself ([`at_loop_level`]).
-pub(super) fn emit_run(
+pub(super) fn emit_run<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     region: &Region,
     join_start: Option<u64>,
     loop_exit: Option<u64>,

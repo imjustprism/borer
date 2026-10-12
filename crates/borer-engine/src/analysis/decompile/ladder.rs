@@ -118,9 +118,9 @@ fn case_label(k: u64) -> String {
 ///
 /// The block after the switch, or `None` when the root heads no such tree.
 #[expect(clippy::too_many_arguments, reason = "the structurer's shape")]
-pub(super) fn try_ladder(
+pub(super) fn try_ladder<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    st: &mut Emit<'_>,
+    st: &mut Emit<'_, L>,
     i: usize,
     cond: &expr::Cond,
     t: usize,

@@ -124,8 +124,8 @@ pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<(Key, u64)> {
 /// * `code` - Decoded instructions per block (the first gives the start address).
 /// * `preds` - Predecessor block indices per block.
 /// * `recorded` - The previous dataflow round's block records (their branches).
-pub(super) fn block_assumptions(
-    code: &[Vec<Instruction>],
+pub(super) fn block_assumptions<L: Lifter>(
+    code: &[Vec<L::Insn>],
     preds: &[Vec<usize>],
     recorded: &[SlotRec],
 ) -> Vec<Option<(Key, u64)>> {
@@ -134,7 +134,7 @@ pub(super) fn block_assumptions(
             let [p] = preds[b].as_slice() else {
                 return None;
             };
-            let start = code[b].first()?.ip();
+            let start = L::start(code[b].first()?);
             assumption(recorded[*p].branch.as_ref()?, start)
         })
         .collect()
@@ -317,9 +317,9 @@ pub(super) fn slot_liveness(recorded: &[SlotRec], succs: &[Vec<usize>]) -> Vec<B
 /// * `need` - Per block and instruction, the registers read later.
 /// * `assumes` - Per block, the equality fact it may read under.
 /// * `b` - The block.
-pub(super) fn block_facts<'n>(
+pub(super) fn block_facts<'n, L: Lifter>(
     ctx: &Ctx<'_>,
-    code: &[Vec<Instruction>],
+    code: &[Vec<L::Insn>],
     succs: &[Vec<usize>],
     need: &'n [Vec<FxHashMap<Key, u8>>],
     assumes: &[Option<(Key, u64)>],
@@ -329,8 +329,8 @@ pub(super) fn block_facts<'n>(
         need: Some(&need[b]),
         flags_out: succs[b].iter().any(|&s| ctx.flag_readers[s]),
         assume: assumes.get(b).copied().flatten(),
-        after: succs[b].first().and_then(|&s| code[s].first().copied()),
-        entry: prologue_block(ctx, code, b),
+        after: succs[b].first().and_then(|&s| L::after(code, s)),
+        entry: L::prologue_block(ctx, code, b),
         unregistered: ctx.seh_frame && b == ctx.entry_block,
         rebase_flags: ctx.rebase_flags.get(b).copied().flatten(),
     }
@@ -634,9 +634,9 @@ thread_local! {
 /// # Returns
 ///
 /// `(IN environments, processed flags, slot records)` per block.
-pub(super) fn dataflow(
+pub(super) fn dataflow<L: Lifter>(
     ctx: &mut Ctx<'_>,
-    code: &[Vec<Instruction>],
+    code: &[Vec<L::Insn>],
     succs: &[Vec<usize>],
     preds: &[Vec<usize>],
     live: &Live,
@@ -675,7 +675,7 @@ pub(super) fn dataflow(
             let in_changed = if unchanged {
                 false
             } else {
-                let mut m: Option<Env> = (b == entry).then(|| entry_env(&*ctx));
+                let mut m: Option<Env> = (b == entry).then(|| L::entry_env(&*ctx));
                 for &p in &preds[b] {
                     if !processed[p] {
                         continue;
@@ -763,7 +763,7 @@ pub(super) fn dataflow(
                             None
                         }
                         .or_else(|| {
-                            let cc = join_reader_cc(&code[b])?;
+                            let cc = L::join_reader_cc(&code[b])?;
                             ctx.tmp_count += 1;
                             Some(Rebase::Truth(cc, ctx.tmp_count))
                         });
@@ -798,8 +798,8 @@ pub(super) fn dataflow(
             }
             ran_under[b] = Some(floor);
             let mut env = ins[b].clone();
-            let facts = block_facts(ctx, code, succs, &live.need, assumes, b);
-            let out = exec_block(
+            let facts = block_facts::<L>(ctx, code, succs, &live.need, assumes, b);
+            let out = L::exec_block(
                 ctx,
                 &code[b],
                 b.checked_sub(1).map(|p| code[p].as_slice()),
@@ -813,7 +813,7 @@ pub(super) fn dataflow(
                 && let Some(cc) = succs[b]
                     .iter()
                     .find(|&&s| ctx.flag_readers[s])
-                    .and_then(|&s| join_reader_cc(&code[s]))
+                    .and_then(|&s| L::join_reader_cc(&code[s]))
             {
                 ctx.tmp_count += 1;
                 ctx.rebase_flags[b] = Some(Rebase::Truth(cc, ctx.tmp_count));

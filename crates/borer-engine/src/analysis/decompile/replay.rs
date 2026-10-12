@@ -122,7 +122,7 @@ const DISAGREE_SHOWN: usize = 4;
 /// with.
 pub(super) struct Witness {
     /// Each block's instructions.
-    pub(super) code: Vec<Vec<Instruction>>,
+    pub(super) code: Code,
     /// Each block's IN environment.
     pub(super) ins: Vec<Env>,
     /// The blocks the dataflow ran.
@@ -171,10 +171,20 @@ pub(super) struct Witness {
 impl std::fmt::Debug for Witness {
     /// Writes how many blocks the witness covers.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let blocks = match &self.code {
+            Code::X86(code) => code.len(),
+        };
         f.debug_struct("Witness")
-            .field("blocks", &self.code.len())
+            .field("blocks", &blocks)
             .finish_non_exhaustive()
     }
+}
+
+/// A function's blocks in the instruction set it is written in, as the
+/// lifter decoded them ([`super::arch::Lifter::witness`]).
+pub(super) enum Code {
+    /// x86 or x86-64 instructions, per block.
+    X86(Vec<Vec<Instruction>>),
 }
 
 /// What a statement or a block's end claims, as compared with the machine.
@@ -620,6 +630,7 @@ fn replay_effects(
     let (Some(f), Some(bitness)) = (analysis.function(entry), program.arch.bitness()) else {
         return out;
     };
+    let Code::X86(code) = &w.code;
     out.functions = 1;
     let named = named_slots(effects, if bitness == 32 { 4 } else { 8 });
     let function = Function {
@@ -628,6 +639,7 @@ fn replay_effects(
         entry,
         seed,
         w,
+        code,
         succs,
         effects,
         named: &named,
@@ -2476,6 +2488,8 @@ struct Function<'f, 'p> {
     seed: u64,
     /// The lifter's witness.
     w: &'f Witness,
+    /// Each block's instructions, from the witness.
+    code: &'f [Vec<Instruction>],
     /// The successors of each block in the graph the text was written for.
     succs: &'f [Vec<usize>],
     /// Each block's effects.
@@ -2536,7 +2550,7 @@ impl Function<'_, '_> {
         out: &mut Replayed,
     ) -> Result<(), &'static str> {
         let w = self.w;
-        let code = w
+        let code = self
             .code
             .get(b)
             .filter(|c| !c.is_empty())
@@ -2636,7 +2650,7 @@ impl Function<'_, '_> {
     fn flags_lost(&self, b: usize) -> bool {
         let w = self.w;
         let sets = |c: usize| {
-            w.code
+            self.code
                 .get(c)
                 .is_some_and(|code| code.iter().any(|i| i.rflags_modified() != 0))
         };
@@ -2678,7 +2692,7 @@ impl Function<'_, '_> {
             if preds.next().is_some() {
                 return None;
             }
-            let jcc = self.w.code.get(p)?.last()?;
+            let jcc = self.code.get(p)?.last()?;
             if jcc.flow_control() == FlowControl::UnconditionalBranch
                 && self.effects.get(p).is_some_and(Vec::is_empty)
             {
@@ -2688,7 +2702,7 @@ impl Function<'_, '_> {
             if jcc.flow_control() != FlowControl::ConditionalBranch {
                 return None;
             }
-            let start = self.w.code.get(b)?.first()?.ip();
+            let start = self.code.get(b)?.first()?.ip();
             let (target, fall) = (jcc.near_branch_target(), jcc.next_ip());
             let taken = match start {
                 _ if target == fall => return None,
@@ -3253,7 +3267,6 @@ impl Function<'_, '_> {
         let bitness = u32::from(self.width);
         if self.w.seh_frame
             && self
-                .w
                 .code
                 .get(t.b)
                 .is_some_and(|c| c.iter().any(|i| try_level_store(i, bitness)))
@@ -3346,7 +3359,7 @@ impl Function<'_, '_> {
     fn successor(&self, t: &mut Trial<'_, '_>, start: u64, at: u64, s: usize, out: &mut Replayed) {
         let w = self.w;
         let Some(sin) = w.ins.get(s) else { return };
-        let succ = w
+        let succ = self
             .code
             .get(s)
             .and_then(|c| c.first())

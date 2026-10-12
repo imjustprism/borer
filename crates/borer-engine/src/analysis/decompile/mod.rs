@@ -20,9 +20,11 @@
 //! same function; [`opaque`] spots conditions that always go one way;
 //! [`traces`] checks the text's control flow against the binary's.
 //! [`lift_a64`] lifts arm64 blocks into the same expressions and
-//! [`verify_a64`] checks it against the arm64 machine; the rest of the
-//! pipeline reads x86 code only, so arm64 functions do not decompile yet.
+//! [`verify_a64`] checks it against the arm64 machine. The pipeline itself
+//! is written against [`arch::Lifter`], what it asks of an instruction set;
+//! only x86 implements it yet, so arm64 functions do not decompile yet.
 
+mod arch;
 mod asserts;
 mod ctext;
 mod declared;
@@ -53,6 +55,7 @@ pub mod verify;
 pub mod verify_a64;
 mod wire;
 
+use arch::Lifter;
 pub use asserts::*;
 use emit::*;
 pub use enums::*;
@@ -1222,6 +1225,39 @@ fn decompile_with(
     assume: &[(u8, u64)],
     witness: bool,
 ) -> Option<Decompiled> {
+    match program.arch.isa()? {
+        crate::isa::Isa::X86 { .. } => {
+            decompile_in::<arch::X86>(program, analysis, overlay, entry, cleanup, assume, witness)
+        }
+        crate::isa::Isa::A64 => None,
+    }
+}
+
+/// [`decompile_with`] for one instruction set's lifter.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results.
+/// * `overlay` - User names and comments.
+/// * `entry` - The function's entry address.
+/// * `cleanup` - Run [`cleanup_text`] on the body.
+/// * `assume` - Parameter slots a scenario fixes, and their values.
+/// * `witness` - Keep what the lifter knew about each block beside the
+///   text, for [`replay`].
+///
+/// # Returns
+///
+/// The pseudo-C, or `None` when there is no such function.
+fn decompile_in<L: Lifter>(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    cleanup: bool,
+    assume: &[(u8, u64)],
+    witness: bool,
+) -> Option<Decompiled> {
     let f = analysis.function(entry)?;
     let bitness = program.arch.bitness()?;
     let blocks = &f.blocks;
@@ -1256,22 +1292,21 @@ fn decompile_with(
         idx.keys().copied().collect(),
         assume,
     );
-    let code = decode_blocks(&ctx, f);
-    ctx.seh_frame = seh_frame(&ctx, &code);
-    ctx.go_check = go_stack_check(&ctx, f.entry, &code, &idx);
+    let code = L::decode_blocks(&ctx, f);
+    ctx.seh_frame = L::seh_frame(&ctx, &code);
+    ctx.go_check = L::go_check(&ctx, f.entry, &code, &idx);
     // INVARIANT: the parameters are read once per function and overlay
     // ([`callee_shape`]), so the signature below lists exactly what every
     // call to the function passes.
     let entry_block = ctx.entry_block;
-    let shape = callee_shape(&ctx, f.entry)
-        .unwrap_or_else(|| std::sync::Arc::new(shape_of(&mut ctx, f, &code, &succs, entry_block)));
+    let shape = L::shape(&mut ctx, f, &code, &succs, entry_block);
     ctx.conv = shape.conv;
     ctx.params.clone_from(&shape.params);
     ctx.variadic = shape.variadic;
     ctx.this_param = shape.this_param;
     ctx.result_param = shape.result_param;
     ctx.stack_params = shape.stack;
-    ctx.rax_written = writes_rax(&ctx, &code);
+    ctx.rax_written = L::writes_result(&ctx, &code);
     let word = u8::try_from(bitness).unwrap_or(64);
     // INVARIANT: a stated prototype says what the function hands back,
     // ahead of a signature string and of what its callers and exits show.
@@ -1289,7 +1324,7 @@ fn decompile_with(
     ctx.ret_lane = match stated_returns {
         Some(lift::Returns::Int(bits @ (8 | 16))) => bits,
         Some(_) => 64,
-        None => lift::ret_lane(
+        None => L::ret_lane(
             &code,
             &succs,
             f.signature.as_ref().map(|s| s.ret.as_str()),
@@ -1340,9 +1375,9 @@ fn decompile_with(
     for (i, c) in &f.param_hints {
         ctx.param_class.entry(*i).or_insert_with(|| c.clone());
     }
-    ctx.flag_readers = code.iter().map(|b| reads_inherited_flags(b)).collect();
+    ctx.flag_readers = code.iter().map(|b| L::reads_inherited_flags(b)).collect();
     ctx.rebase_flags = vec![None; code.len()];
-    let regs = lift::live_in(&ctx, &code, &succs);
+    let regs = L::live_in(&ctx, &code, &succs);
     let need = code
         .iter()
         .enumerate()
@@ -1351,7 +1386,7 @@ fn decompile_with(
             for &s in &succs[b] {
                 lift::join_need(&mut out, &regs[s]);
             }
-            lift::need_after(&ctx, instrs, &out)
+            L::need_after(&ctx, instrs, &out)
         })
         .collect();
     let mut live = Live {
@@ -1359,11 +1394,12 @@ fn decompile_with(
         need,
         slots: None,
     };
-    let (_, _, mut recorded) = dataflow(&mut ctx, &code, &succs, &preds, &live, &[]);
+    let (_, _, mut recorded) = dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &[]);
     widen_slots(&mut recorded);
     live.slots = Some(slot_liveness(&recorded, &succs));
-    let assumes = block_assumptions(&code, &preds, &recorded);
-    let (in_envs, processed, recorded) = dataflow(&mut ctx, &code, &succs, &preds, &live, &assumes);
+    let assumes = block_assumptions::<L>(&code, &preds, &recorded);
+    let (in_envs, processed, recorded) =
+        dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &assumes);
 
     let mut succs_live = succs.clone();
     let mut preds_live = preds.clone();
@@ -1395,7 +1431,7 @@ fn decompile_with(
         }
     }
 
-    let mut st = Emit {
+    let mut st = Emit::<L> {
         blocks,
         code: &code,
         succs: succs_live,
@@ -1437,7 +1473,7 @@ fn decompile_with(
         succs: st.succs.clone(),
     };
     let mut body = String::new();
-    let entry_env = entry_env(&ctx);
+    let entry_env = L::entry_env(&ctx);
     if let Some(joined) = in_envs.get(entry_block) {
         let names = ctx.names();
         for (k, v) in &entry_env.vals {
@@ -1570,7 +1606,7 @@ fn decompile_with(
     };
     let recorded_ret = ctx.debug_ret.as_deref();
     let ret_ty = recorded_ret.unwrap_or(inferred);
-    let typed = param_types(&ctx, &code, &succs, entry_block);
+    let typed = L::param_types(&ctx, &code, &succs, entry_block);
     let name = name_of(analysis, overlay, f.entry);
     let declared: Vec<String> = match ctx.stated {
         Some(_) => ctx
@@ -1970,7 +2006,7 @@ fn decompile_with(
     );
     let witness = witness.then(|| {
         Box::new(replay::Witness {
-            code,
+            code: L::witness(code),
             ins: in_envs,
             processed,
             assumes,
