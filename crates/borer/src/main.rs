@@ -746,6 +746,67 @@ impl BorerServer {
             format!("{e}{hint}")
         })
     }
+
+    /// Defines the types C declarations state, laid out by the loaded
+    /// binary's ABI ([`borer_engine::analysis::cdecl`]): `set_type` with
+    /// `type` alone.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The declarations.
+    /// * `dry` - Say what would be defined and write nothing.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, the text is refused (a construct the
+    /// subset does not read, an offset assertion that fails), or the types
+    /// with the overlay's would not validate.
+    fn declare_c(&self, text: &str, dry: bool) -> Result<String, ErrorData> {
+        /// Types a reply describes before it counts the rest.
+        const SHOWN: usize = 64;
+        self.with_program(|p| {
+            let abi = borer_engine::analysis::cdecl::Abi::of(p);
+            let o = self.overlay_plain();
+            let declared = borer_engine::analysis::cdecl::parse(text, &o.types, abi)
+                .map_err(|e| e.to_string())?;
+            let mut types = o.types.clone();
+            for (name, ty, _) in &declared.types {
+                types.insert(name.clone(), ty.clone());
+            }
+            borer_engine::analysis::utypes::validate(&types, &o.applied)
+                .map_err(|e| e.to_string())?;
+            let lines = borer_engine::analysis::cdecl::describe(&declared);
+            let mut out = format!(
+                "{} {} type(s) from C, laid out for {}:\n",
+                if dry {
+                    "dry-run: would define"
+                } else {
+                    "defined"
+                },
+                declared.types.len(),
+                abi.name()
+            );
+            for line in lines.iter().take(SHOWN) {
+                out.push_str(line);
+                out.push('\n');
+            }
+            if lines.len() > SHOWN {
+                out.push_str(&format!(
+                    "# showing {SHOWN} of {} lines; `types` lists every type\n",
+                    lines.len()
+                ));
+            }
+            if dry {
+                out.push_str("pass dry_run=false to apply.\n");
+                return Ok(out);
+            }
+            write_lock(&self.overlay)
+                .types
+                .extend(declared.types.into_iter().map(|(name, ty, _)| (name, ty)));
+            self.names_changed();
+            Ok(out)
+        })
+    }
 }
 
 #[tool_router]
@@ -2870,10 +2931,12 @@ impl BorerServer {
     /// ([`borer_engine::analysis::protos::Proto`]), which its signature,
     /// its body and every call to it follow; with `var` (`a1`, `local_58`,
     /// or a name stated before), `name` and an optional `type` name and
-    /// type that variable. Everything is validated before anything is
-    /// written: types the language does not spell, references to names
-    /// nothing defines, fields that overlap and a size that does not cover
-    /// the last field are refused with a message naming the offender.
+    /// type that variable. `type` alone is C declarations, laid out by the
+    /// binary's ABI ([`BorerServer::declare_c`]). Everything is validated
+    /// before anything is written: types the language does not spell,
+    /// references to names nothing defines, fields that overlap, a size
+    /// that does not cover the last field and an offset assertion that
+    /// fails are refused with a message naming the offender.
     ///
     /// # Arguments
     ///
@@ -2885,7 +2948,7 @@ impl BorerServer {
     /// or a variable is refused, or the address does not resolve or no
     /// section holds it.
     #[tool(
-        description = "Define a user type and/or apply one: at a data global, `type` types it (a `Player *` names the fields read through it, an enum the constants compared with it); at a function, `type` is its C prototype, or with `var` (a1, local_58) names/types that variable. Dry-run unless dry_run=false.",
+        description = "Define a user type and/or apply one: at a data global, `type` types it (a `Player *` names the fields read through it, an enum the constants compared with it); at a function, `type` is its C prototype, or with `var` (a1, local_58) names/types that variable; `type` alone defines C structs. Dry-run unless dry_run=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2908,9 +2971,14 @@ impl BorerServer {
         }): Parameters<SetTypeParams>,
     ) -> Result<String, ErrorData> {
         let dry = dry_run.unwrap_or(true);
+        if let (None, None, None, None, None, None, Some(decl)) =
+            (&name, &address, &var, &fields, &values, size, &ty)
+        {
+            return self.declare_c(decl, dry);
+        }
         if name.is_none() && address.is_none() {
             return Err(err_params(
-                "set_type needs `name` (+ `fields`, `values` or `type`) to define a type, or `address` + `type` to apply one",
+                "set_type needs `name` (+ `fields`, `values` or `type`) to define a type, `address` + `type` to apply one, or `type` alone holding C declarations",
             ));
         }
         for text in name
@@ -6321,6 +6389,94 @@ mod tests {
             bad.message.contains("types apply to data globals"),
             "{}",
             bad.message
+        );
+    }
+
+    /// `set_type` with `type` alone reads C declarations by the binary's ABI.
+    ///
+    /// The dry run shows the offsets and writes nothing, the applied struct
+    /// reads with `read type=`, and a failing offset assertion is refused
+    /// with the field named.
+    ///
+    /// # Panics
+    ///
+    /// When a layout differs, the dry run writes, or a refusal accepts.
+    #[test]
+    fn set_type_reads_c_declarations() {
+        use super::{Parameters, ReadParams, SetTypeParams, TypesParams};
+        use borer_engine::program::{Arch, Program, Section};
+        let decl = |server: &super::BorerServer, text: &str, dry_run: Option<bool>| {
+            server.set_type(Parameters(SetTypeParams {
+                name: None,
+                fields: None,
+                values: None,
+                size: None,
+                address: None,
+                r#type: Some(text.to_owned()),
+                var: None,
+                dry_run,
+            }))
+        };
+        let server_for = |arch: Arch| {
+            let mut bytes = vec![0u8; 0x200];
+            bytes[0x100] = b'A';
+            bytes[0x104..0x108].copy_from_slice(&7u32.to_le_bytes());
+            let data = Section::mapped(".data", 0x2000, 0x100, 0x100, true, false);
+            let program = Program::raw(bytes, arch, 0, None, vec![data]);
+            super::BorerServer {
+                program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                    program,
+                )))),
+                pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+                ..super::BorerServer::default()
+            }
+        };
+        let text = "#pragma pack(push, 8)\nstruct S {\n  char c;\n  int n;   // @0x4\n  char *p;\n};\n#pragma pack(pop)\nstatic_assert(sizeof(S) == 16);";
+        let x64 = server_for(Arch::X86_64);
+        let dry = decl(&x64, text, None).expect("dry-runs");
+        assert_eq!(
+            dry,
+            "dry-run: would define 1 type(s) from C, laid out for x64 Windows:\nstruct S (0x10 bytes, align 8): 0x0 c char, 0x4 n i32, 0x8 p char *\npass dry_run=false to apply.\n"
+        );
+        let listed = x64
+            .types(Parameters(TypesParams {
+                filter: None,
+                offset: None,
+                limit: None,
+                count_only: Some(true),
+            }))
+            .expect("lists");
+        assert!(listed.contains("0 rows (0 type(s)"), "{listed}");
+        let done = decl(&x64, text, Some(false)).expect("defines");
+        assert!(done.starts_with("defined 1 type(s) from C"), "{done}");
+        let read = x64
+            .read(Parameters(ReadParams {
+                address: "0x2000".to_owned(),
+                kind: None,
+                r#type: Some("S".to_owned()),
+                count: None,
+            }))
+            .expect("reads");
+        assert!(read.contains("0x2000       c char   'A'\n"), "{read}");
+        assert!(read.contains("0x2004       n i32    7\n"), "{read}");
+        let x86 = server_for(Arch::X86);
+        let narrow = decl(&x86, "struct S { char c; int n; char *p; };", None).expect("x86");
+        assert!(
+            narrow.contains("laid out for x86 Windows:\nstruct S (0xc bytes, align 4)"),
+            "{narrow}"
+        );
+        let wrong = decl(
+            &x64,
+            "struct T {\n  char c;\n  int n;   // @0x2\n};",
+            Some(false),
+        )
+        .expect_err("a failing assertion");
+        assert!(
+            wrong.message.contains(
+                "line 3: field n of struct T is at 0x4 under x64 Windows layout, not 0x2"
+            ),
+            "{}",
+            wrong.message
         );
     }
 

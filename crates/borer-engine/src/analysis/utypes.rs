@@ -6,8 +6,9 @@
 //! A user type is that knowledge in a small language: the scalar widths, a
 //! pointer to anything in the language, an array of anything in it, and
 //! by-name references to other user types. Types are stated as structured
-//! parameters and parsed here at the boundary; anything the language does
-//! not spell is refused with a message naming it.
+//! parameters and parsed here at the boundary, or as C declarations read
+//! into the same types by [`super::cdecl`]; anything the language does not
+//! spell is refused with a message naming it.
 
 use std::collections::{BTreeMap, BTreeSet};
 

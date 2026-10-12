@@ -9,6 +9,7 @@ mod a64;
 pub mod about;
 pub mod anchors;
 pub mod attributes;
+pub mod cdecl;
 pub mod classes;
 pub mod decompile;
 mod descriptors;
