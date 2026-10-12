@@ -2096,13 +2096,27 @@ impl Program {
                     let kind = goblin::elf::sym::st_type(sym.st_info);
                     let is_code = kind == goblin::elf::sym::STT_FUNC
                         || kind == goblin::elf::sym::STT_GNU_IFUNC;
-                    if !is_code || sym.st_value == 0 {
+                    // INVARIANT: a sized object symbol names the table or
+                    // variable at its address (`sqlite3UpperToLower`), which
+                    // the text then prints by name instead of `0x201843`.
+                    let is_data = kind == goblin::elf::sym::STT_OBJECT && sym.st_size != 0;
+                    if !(is_code || is_data) || sym.st_value == 0 {
                         continue;
                     }
                     let Some(name) = elf.strtab.get_at(sym.st_name) else {
                         continue;
                     };
                     if name.is_empty() {
+                        continue;
+                    }
+                    if is_data {
+                        if !exported.contains(&(sym.st_value, name)) {
+                            locals.push(Symbol {
+                                name: name.to_owned(),
+                                addr: sym.st_value,
+                                kind: SymbolKind::Data,
+                            });
+                        }
                         continue;
                     }
                     if sym.st_size != 0

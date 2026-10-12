@@ -451,3 +451,69 @@ fn wide_literals_read_whole_and_tables_of_words_are_none() {
     let (table, _) = text_of(&p, TEXT + 0x10);
     assert!(!table.contains('"'), "{table}");
 }
+
+/// An integer read at a constant address in the image's data is the global
+/// there.
+///
+/// It is named as the lifter names one (`g64_2008`), where the text read
+/// `*(uint64_t*)0x2008`; the text's run resolves the name to the address.
+#[test]
+fn a_read_at_a_constant_data_address_is_a_global() {
+    let code = [
+        0xb8, 0x08, 0x20, 0x00, 0x00, // ASM: mov eax,0x2008
+        0x48, 0x8b, 0x00, // ASM: mov rax,[rax]
+        0xc3, // ASM: ret
+    ];
+    let p = program(&code, &[0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 5, 4, 3, 2, 1, 0]);
+    let (text, _) = text_of(&p, TEXT);
+    assert!(text.contains("return g64_2008;"), "{text}");
+    runs_alike(&p, TEXT);
+}
+
+/// A sized `STT_OBJECT` symbol of an ELF's `.symtab` names the data it
+/// marks, so the global reads by name and a byte table indexes by it,
+/// converting the entry a signed read takes.
+#[test]
+fn an_elf_object_symbol_names_the_data_it_marks() {
+    use crate::elfgen::{self, AX, EM_X86_64, ET_EXEC, PROGBITS, STRTAB, SYMTAB, Sec, WA};
+    use borer_engine::program::SymbolKind;
+    let mut code = vec![
+        0xb8, 0x00, 0x20, 0x00, 0x00, // ASM: mov eax,0x2000
+        0x48, 0x8b, 0x00, // ASM: mov rax,[rax]
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x10, 0xcc);
+    code.extend([0x0f, 0xb6, 0x87, 0x00, 0x20, 0x00, 0x00, 0xc3]); // ASM: movzx eax,byte [rdi+0x2000]; ret
+    code.extend([0x48, 0x0f, 0xbe, 0x87, 0x00, 0x20, 0x00, 0x00, 0xc3]); // ASM: movsx rax,byte [rdi+0x2000]; ret
+    let mut symtab = vec![0u8; 24];
+    symtab.extend(elfgen::sym_sized(1, 0x12, 1, 0x1000, 9));
+    symtab.extend(elfgen::sym_sized(3, 0x11, 2, 0x2000, 8));
+    symtab.extend(elfgen::sym_sized(9, 0x12, 1, 0x1010, 8));
+    symtab.extend(elfgen::sym_sized(11, 0x12, 1, 0x1018, 9));
+    let mut secs = vec![
+        Sec::new(".text", PROGBITS, AX, 0x1000, code),
+        Sec::new(".data", PROGBITS, WA, 0x2000, vec![7, 0, 0, 0, 0, 0, 0, 0]),
+        Sec::new(".symtab", SYMTAB, 0, 0x3000, symtab),
+        Sec::new(".strtab", STRTAB, 0, 0x3100, b"\0f\0table\0g\0h\0".to_vec()),
+    ];
+    secs[2].link = 4;
+    secs[2].info = 1;
+    secs[2].entsize = 24;
+    let bytes = elfgen::build(ET_EXEC, EM_X86_64, 0x1000, &secs);
+    let p = Program::from_bytes(std::path::PathBuf::from("data.elf"), bytes).expect("parses");
+    assert!(
+        p.symbols
+            .iter()
+            .any(|s| s.name == "table" && s.kind == SymbolKind::Data && s.addr == 0x2000),
+        "{:?}",
+        p.symbols
+    );
+    let (text, _) = text_of(&p, 0x1000);
+    assert!(text.contains("return table;"), "{text}");
+    let (indexed, _) = text_of(&p, 0x1010);
+    assert!(indexed.contains("return table[a1];"), "{indexed}");
+    let (signed, _) = text_of(&p, 0x1018);
+    assert!(signed.contains("return (int8_t)table[a1];"), "{signed}");
+    runs_alike(&p, 0x1010);
+    runs_alike(&p, 0x1018);
+}

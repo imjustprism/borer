@@ -4243,6 +4243,12 @@ fn computes_narrow(op: Op, l: &Expr, r: &Expr) -> bool {
 /// Renders a load of `ty` at `a` as `*(name*)a`, or as the array element
 /// `((name*)base)[index]` when the address is one ([`indexed`]).
 ///
+/// An unsigned integer read at a constant address in the image's data is
+/// the global there (`g64_2f64f0`, the name [`Names::key`] gives it), and a
+/// byte read at a data symbol plus a variable is the symbol's table indexed
+/// (`sqlite3UpperToLower[c]`, `(int8_t)yyRuleInfoNRhs[r]` for a signed
+/// one).
+///
 /// # Arguments
 ///
 /// * `a` - The address.
@@ -4250,6 +4256,44 @@ fn computes_narrow(op: Op, l: &Expr, r: &Expr) -> bool {
 /// * `name` - The type name to print, signed or unsigned.
 /// * `n` - Name resolution.
 fn render_load(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> (String, u8) {
+    // INVARIANT: an integer read at a constant address in the image's data
+    // is a global, named as one the lifter keys (`g64_2f64f0`, or the data
+    // symbol there), which the text's readers resolve to that address and
+    // width; `*(uint64_t*)0x2f64f0` said the same in more words.
+    if let Expr::Const(at) = a
+        && matches!(ty, Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64)
+        && n.program
+            .section_at(*at)
+            .is_some_and(|s| !s.executable && s.file_size > 0)
+        && name.starts_with('u')
+    {
+        return (n.key(Key::Global(*at, ty.bits())), ATOM);
+    }
+    // INVARIANT: a byte read at a data symbol plus a variable is an entry of
+    // the table the symbol names, where base and index are otherwise
+    // ambiguous for one-byte elements: `sqlite3UpperToLower[c]`. The table
+    // holds bytes, so a signed read converts the entry it reads.
+    if ty == Ty::U8
+        && matches!(name, "uint8_t" | "int8_t")
+        && let Expr::Bin(Op::Add, p, q) = a
+    {
+        for (base, index) in [(p, q), (q, p)] {
+            if let Expr::Const(at) = **base
+                && !matches!(**index, Expr::Const(_))
+                && let Some(s) = n
+                    .analysis
+                    .symbol_at(n.program, at)
+                    .filter(|s| s.kind == SymbolKind::Data)
+            {
+                let table = crate::search::demangled_name(&s.name);
+                let entry = format!("{table}[{}]", index.render(n));
+                return match name {
+                    "int8_t" => (format!("(int8_t){entry}"), UNARY),
+                    _ => (entry, ATOM),
+                };
+            }
+        }
+    }
     if let Some((base, index)) = indexed(a, ty) {
         let (bs, bp) = base.render_prec(n, true, true);
         let bs = if bp < UNARY { format!("({bs})") } else { bs };

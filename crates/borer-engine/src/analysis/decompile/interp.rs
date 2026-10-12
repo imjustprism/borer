@@ -2537,6 +2537,14 @@ impl Running<'_, '_> {
                 let Some(ty) = base.ty.pointee() else {
                     return unchecked("an index into a value that is no pointer");
                 };
+                // INVARIANT: a table the text names by its data symbol
+                // (`sqlite3UpperToLower[c]`) is an address, a `void *`,
+                // indexed by bytes as GNU C steps one.
+                let ty = if ty == CTy::of(Base::Void) {
+                    CTy::int(8, false)
+                } else {
+                    ty
+                };
                 let Some(size) = ty.size(self.word()) else {
                     return unchecked("an index into a type of no known size");
                 };
