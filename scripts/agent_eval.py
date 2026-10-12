@@ -108,6 +108,43 @@ def _decoder_blob() -> bytes:
 
 DECODER_CODE = _decoder_blob()
 
+
+def _children_blob() -> bytes:
+    """A headerless blob holding a PE32+ x86-64 exe at file offset 0x200:
+    0x400 bytes of headers and one .text section whose code returns 7."""
+    pe = bytearray(0x400)
+
+    def put(at: int, data: bytes) -> None:
+        pe[at : at + len(data)] = data
+
+    sig, opt = 0x80, 0x80 + 24
+    row = opt + 0xF0
+    put(0, b"MZ")
+    put(0x3C, (0x80).to_bytes(4, "little"))
+    put(sig, b"PE\0\0")
+    put(sig + 4, (0x8664).to_bytes(2, "little"))
+    put(sig + 6, (1).to_bytes(2, "little"))
+    put(sig + 20, (0xF0).to_bytes(2, "little"))
+    put(sig + 22, (0x22).to_bytes(2, "little"))
+    put(opt, (0x20B).to_bytes(2, "little"))
+    put(opt + 16, (0x1000).to_bytes(4, "little"))
+    put(opt + 24, (0x140000000).to_bytes(8, "little"))
+    put(opt + 32, (0x1000).to_bytes(4, "little"))
+    put(opt + 36, (0x200).to_bytes(4, "little"))
+    put(opt + 48, (6).to_bytes(2, "little"))
+    put(opt + 56, (0x2000).to_bytes(4, "little"))
+    put(opt + 60, (0x200).to_bytes(4, "little"))
+    put(opt + 68, (3).to_bytes(2, "little"))
+    put(opt + 108, (16).to_bytes(4, "little"))
+    put(row, b".text")
+    for at, v in ((8, 0x200), (12, 0x1000), (16, 0x200), (20, 0x200), (36, 0x60000020)):
+        put(row + at, v.to_bytes(4, "little"))
+    put(0x200, bytes.fromhex("b807000000c3"))  # mov eax, 7; ret
+    return bytes(0x200) + bytes(pe)
+
+
+CHILDREN_BLOB = _children_blob()
+
 # How the decoder blob's code and data map: rx code at 0x10000, rw data at
 # 0x20000, so the ciphertext pointer is a data pointer.
 DECODER_REGIONS = "0x10000@0:0x200:rx,0x20000@0x200:0x20:rw"
@@ -267,6 +304,7 @@ BLOBS = {
     "elfargs": (ELF_ARG_CODE, "<elfargs>"),
     "pie": (PIE_CODE, "<pie>"),
     "go": (GO_CODE, "<go>"),
+    "children": (CHILDREN_BLOB, "<children>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -409,6 +447,16 @@ TASKS = [
             ("query", {"uri": "borer://decoded"}),
         ],
         "http://x3.test/c2",
+    ),
+    (
+        "child_program",
+        "the program a blob holds, listed and then opened as one of its own",
+        [
+            ("load_binary", {"path": "{children}"}),
+            ("query", {"uri": "borer://children"}),
+            ("load_binary", {"path": "{children}@0x200"}),
+        ],
+        "parent:  <children> at file offset 0x200, 0x400 bytes",
     ),
 ]
 

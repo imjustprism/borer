@@ -2594,6 +2594,7 @@ g(tmp_5);";
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
             go: None,
+            parent: None,
         };
         let a = crate::analysis::Analysis::compute(&p);
         let o = crate::analysis::Overlay::default();
@@ -2655,6 +2656,7 @@ g(tmp_5);";
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
             go: None,
+            parent: None,
         };
         assert_eq!(
             super::string_at(&p, 0x2000),

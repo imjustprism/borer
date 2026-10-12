@@ -23,6 +23,7 @@
 //! ```
 
 pub mod analysis;
+pub mod carve;
 pub mod crypto;
 pub mod disasm;
 pub mod dwarf;

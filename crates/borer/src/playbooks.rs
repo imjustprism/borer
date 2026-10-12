@@ -198,6 +198,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "vm",
             "devirt",
             "unpack",
+            "children",
             "hidden",
             "decoded",
             "stackstrings",

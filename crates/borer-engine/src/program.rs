@@ -316,6 +316,22 @@ pub struct Program {
     /// the provenance of the names it gave [`Program::symbols`], and the
     /// mark of which functions take Go's arguments ([`crate::go`]).
     pub go: Option<crate::go::Pclntab>,
+    /// The file this program was carved from and where, when it was loaded
+    /// as `<file>@<offset>` ([`Program::load`]); `None` for a file loaded
+    /// whole.
+    pub parent: Option<Parent>,
+}
+
+/// Where an embedded program's bytes came from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Parent {
+    /// The file holding it, as named; itself `<file>@<offset>` for a
+    /// program carved from a carved one.
+    pub path: PathBuf,
+    /// File offset of the program's first byte in that file.
+    pub off: u64,
+    /// Bytes of that file the program spans.
+    pub len: u64,
 }
 
 /// The container a file's first bytes name, for a parse that fails.
@@ -1288,6 +1304,117 @@ fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// How much of a file a `<file>@<offset>` load takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Take {
+    /// The program that starts at the offset, as far as its headers state
+    /// ([`crate::carve::at`]).
+    Program,
+    /// Every byte from the offset to the end, for a stated layout to map.
+    Rest,
+}
+
+/// Most `@<offset>` suffixes one path may chain.
+const NESTING_MAX: usize = 4;
+
+/// Splits a path that names no file into the file and the offset its
+/// `@<offset>` suffix names.
+///
+/// # Arguments
+///
+/// * `path` - The path as given.
+///
+/// # Returns
+///
+/// The file part and the offset (`0x` hex or decimal), or `None` when the
+/// path names a file of its own or has no such suffix.
+fn child_path(path: &Path) -> Option<(PathBuf, u64)> {
+    if path.exists() {
+        return None;
+    }
+    let (file, off) = path.to_str()?.rsplit_once('@')?;
+    let off = match off.strip_prefix("0x").or_else(|| off.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok()?,
+        None => off.parse().ok()?,
+    };
+    Some((PathBuf::from(file), off))
+}
+
+/// Reads a program file, or the bytes of a program embedded in one.
+///
+/// A path naming no file but ending in `@<offset>` after one that does
+/// names the bytes at that file offset ([`child_path`]): the program its
+/// headers say starts there, as far as they state ([`crate::carve::at`]),
+/// or for a stated layout every byte from there on. The file part may
+/// itself be `<file>@<offset>`, up to [`NESTING_MAX`] deep.
+///
+/// # Arguments
+///
+/// * `path` - The path as given.
+/// * `take` - How much a `@<offset>` path takes.
+/// * `depth` - How many `@<offset>` suffixes were read off already.
+///
+/// # Returns
+///
+/// The bytes, and where they came from when they are a carved program's.
+///
+/// # Errors
+///
+/// As [`read_program_file`]; for a `@<offset>` path, when the offset is
+/// past the end, or no PE, ELF or Mach-O image starts there (naming the
+/// container that does, if one does).
+fn read_program_bytes(
+    path: &Path,
+    take: Take,
+    depth: usize,
+) -> anyhow::Result<(Vec<u8>, Option<Parent>)> {
+    let Some((file, off)) = child_path(path).filter(|_| depth < NESTING_MAX) else {
+        return Ok((read_program_file(path)?, None));
+    };
+    let (outer, _) = read_program_bytes(&file, Take::Program, depth + 1)?;
+    let shown = crate::text::short_path(&file.display().to_string());
+    let rest = usize::try_from(off)
+        .ok()
+        .and_then(|start| outer.get(start..))
+        .filter(|rest| !rest.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "offset {off:#x} is past the end of {shown} ({:#x} bytes)",
+                outer.len()
+            )
+        })?;
+    let len = match take {
+        Take::Rest => rest.len(),
+        Take::Program => match crate::carve::at(&outer, off) {
+            Some(child) if child.kind.is_program() => match child.size {
+                crate::carve::Size::Stated(n) => crate::num::saturating_usize(n),
+                crate::carve::Size::Run(_) | crate::carve::Size::Unknown => rest.len(),
+            },
+            Some(child) => {
+                return Err(anyhow!(
+                    "{shown} holds a {} at {off:#x} ({}): containers are listed, not extracted, and a load opens a PE, ELF or Mach-O image; with arch the bytes from there map raw",
+                    child.kind.name(),
+                    child.identity
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "no PE, ELF or Mach-O image starts at {off:#x} in {shown}: borer://children lists the programs it holds; with arch the bytes from there map raw"
+                ));
+            }
+        },
+    };
+    let bytes = rest.get(..len).unwrap_or(rest).to_vec();
+    Ok((
+        bytes,
+        Some(Parent {
+            path: file,
+            off,
+            len: crate::num::from_usize(len),
+        }),
+    ))
+}
+
 impl Program {
     /// A program built from bytes in memory, with no symbols, ranges,
     /// headers or debug information: a fixture, or a dump that has no file.
@@ -1327,21 +1454,28 @@ impl Program {
             flat_fallback: false,
             relocs: crate::reloc::Relocs::default(),
             go: None,
+            parent: None,
         }
     }
 
     /// Loads and parses the file at `path`.
     ///
+    /// A path that names no file but ends in `@<offset>` after one that does
+    /// (`dropper.exe@0x4400`) loads the PE, ELF or Mach-O image embedded at
+    /// that file offset, as far as its headers state ([`crate::carve`]),
+    /// with [`Program::parent`] saying where it came from.
+    ///
     /// # Arguments
     ///
-    /// * `path` - A PE, ELF, Mach-O or other file; unknown formats load as
-    ///   [`BinaryFormat::Raw`].
+    /// * `path` - A PE, ELF, Mach-O or other file, or `<file>@<offset>`;
+    ///   unknown formats load as [`BinaryFormat::Raw`].
     ///
     /// # Errors
     ///
     /// Returns the I/O error of reading the file, the refusal of a name that
     /// is a device, a directory or anything else that is not a regular
-    /// file, or the parse error from [`Program::from_bytes`].
+    /// file, the refusal of an `@<offset>` where no program starts, or the
+    /// parse error from [`Program::from_bytes`].
     pub fn load(path: &Path) -> anyhow::Result<Program> {
         Self::load_with(path, true)
     }
@@ -1390,15 +1524,18 @@ impl Program {
         apply_pdb: bool,
         symsrv: Option<&Path>,
     ) -> anyhow::Result<Program> {
-        let bytes = read_program_file(path)?;
-        Self::from_bytes_with(path.to_path_buf(), bytes, apply_pdb, symsrv)
+        let (bytes, parent) = read_program_bytes(path, Take::Program, 0)?;
+        let mut program = Self::from_bytes_with(path.to_path_buf(), bytes, apply_pdb, symsrv)?;
+        program.parent = parent;
+        Ok(program)
     }
 
     /// Loads the file at `path` as raw bytes mapped where a caller-stated
     /// layout says, its headers unread.
     ///
     /// The same file checks as [`Program::load`], then
-    /// [`crate::layout::Layout::program`].
+    /// [`crate::layout::Layout::program`]; a `<file>@<offset>` path maps
+    /// every byte from that offset on.
     ///
     /// # Arguments
     ///
@@ -1411,8 +1548,10 @@ impl Program {
     /// [`crate::layout::Layout::program`] for a layout the file cannot
     /// hold.
     pub fn load_layout(path: &Path, layout: &crate::layout::Layout) -> anyhow::Result<Program> {
-        let bytes = read_program_file(path)?;
-        layout.program(path.to_path_buf(), bytes)
+        let (bytes, parent) = read_program_bytes(path, Take::Rest, 0)?;
+        let mut program = layout.program(path.to_path_buf(), bytes)?;
+        program.parent = parent;
+        Ok(program)
     }
 
     /// Parses an in-memory file image.
@@ -2089,6 +2228,7 @@ impl Program {
             flat_fallback,
             relocs,
             go: None,
+            parent: None,
         };
         program.read_go();
         phases.mark("load go");
@@ -2534,6 +2674,14 @@ impl Program {
     pub fn summary(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("path:    {}\n", self.path.display()));
+        if let Some(parent) = &self.parent {
+            out.push_str(&format!(
+                "parent:  {} at file offset {:#x}, {:#x} bytes\n",
+                parent.path.display(),
+                parent.off,
+                parent.len
+            ));
+        }
         out.push_str(&format!("size:    {} bytes\n", self.bytes.len()));
         out.push_str(&format!(
             "format:  {}   arch: {}{}\n",

@@ -171,3 +171,37 @@ fn the_session_ledger_lists_what_the_session_did() {
     );
     assert!(!session.contains("borer://session"), "{session}");
 }
+
+/// A program embedded in a file is listed by `borer://children`, opens
+/// with `load_binary` on `<file>@<offset>` as a program of its own, and
+/// `binary_info` then names the file and offset it came from.
+#[test]
+fn an_embedded_program_opens_and_names_its_parent() {
+    let file = std::env::temp_dir().join(format!("borer_children_{}.bin", std::process::id()));
+    let mut blob = vec![0u8; 0x200];
+    blob.extend_from_slice(&tiny_pe());
+    std::fs::write(&file, &blob).expect("the fixture is writable");
+    let shown = file.to_string_lossy().to_string();
+    let mut client = Client::start(&shown);
+    let children = read(&mut client, "borer://children").expect("answers");
+    let child = format!("{shown}@0x200");
+    let loaded = client.text(
+        "load_binary",
+        &serde_json::json!({ "path": child }).to_string(),
+    );
+    let info = client.text("binary_info", "{}");
+    client.finish();
+    std::fs::remove_file(&file).ok();
+    assert!(
+        children.contains("\n0x200\t0x400\tpe\tPE32+ x86-64 exe, console, 1 section\n"),
+        "{children}"
+    );
+    assert!(
+        children.contains(&format!("load_binary path={shown}@<off>")),
+        "{children}"
+    );
+    let parent = format!("parent:  {shown} at file offset 0x200, 0x400 bytes\n");
+    assert!(loaded.contains(&parent), "{loaded}");
+    assert!(info.contains(&parent), "{info}");
+    assert!(info.contains("format:  PE"), "{info}");
+}

@@ -21,6 +21,7 @@ mod a64_emulate;
 mod a64_lift;
 mod analysis;
 mod calls;
+mod carve;
 mod decoded;
 mod decompile;
 mod discovery;

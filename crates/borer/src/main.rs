@@ -4664,6 +4664,7 @@ impl BorerServer {
             ("triage", None) => self.triage_text()?,
             ("fingerprint", None) => self.fingerprint_text()?,
             ("hashes", None) => self.hashes_text()?,
+            ("children", None) => self.children_text()?,
             ("capabilities", None) => self.capabilities_text()?,
             ("qt", None) => self.qt_text()?,
             ("stackstrings", None) => self.stack_strings_text("")?,
@@ -4924,6 +4925,10 @@ const RESOURCES: &[(&str, &str)] = &[
     (
         "borer://hashes",
         "The content hashes a file is correlated by: imphash (Mandiant's dll.function MD5 as pefile and VirusTotal compute it: table order, dll lowercased with .dll/.ocx/.sys stripped, ordinals named as pefile names them), authentihash (SHA-256 with the checksum, security directory and certificate table excluded, so signing does not move it) and tlsh (borer's locality-sensitive hash: same bytes the same hash, near bytes a small distance - correlates within borer, not with Trend Micro tlsh strings)",
+    ),
+    (
+        "borer://children",
+        "Programs and containers embedded in the file, each found by its signature and kept only when its headers validate (PE, ELF, Mach-O, zip, gzip, xz, 7z, cab, squashfs, cpio, uImage, cramfs, Android boot image), with offset, size and a one-line identity, plus the high-entropy runs no header explains: packed, compressed or encrypted bytes. load_binary path=<file>@<off> opens a program row as a program of its own; containers are listed, not extracted",
     ),
     (
         "borer://asserts",

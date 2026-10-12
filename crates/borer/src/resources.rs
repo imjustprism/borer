@@ -388,6 +388,16 @@ impl BorerServer {
         self.with_program(|p| Ok(borer_engine::hashing::hashes_tsv(p)))
     }
 
+    /// Lists the programs and containers embedded in the loaded file, and
+    /// the high-entropy runs no header explains.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded.
+    pub(crate) fn children_text(&self) -> Result<String, ErrorData> {
+        self.with_program(|p| Ok(borer_engine::carve::children_tsv(p)))
+    }
+
     /// Compares the loaded binary against another version and reports the diff.
     ///
     /// When `other` is a fingerprint manifest (from `borer://fingerprint`), it
