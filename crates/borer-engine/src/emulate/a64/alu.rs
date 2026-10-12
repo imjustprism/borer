@@ -17,7 +17,7 @@ use crate::num::lo8;
 /// one `fmov` whose source is an immediate and whose destination is a
 /// scalar register.
 // SPEC: Arm ARM (DDI 0487) C7.2 FMOV (scalar, immediate): 0001 1110 ty 1 imm8 100 00000 Rd.
-const FMOV_IMM: (u32, u32) = (0xff20_1fe0, 0x1e20_1000);
+pub(crate) const FMOV_IMM: (u32, u32) = (0xff20_1fe0, 0x1e20_1000);
 
 /// Each byte's low bit, for replicating a byte across a doubleword.
 const BYTES: u64 = 0x0101_0101_0101_0101;
@@ -634,7 +634,7 @@ pub(super) fn bfm(old: u64, src: u64, r: u32, s: u32, width: u32) -> u64 {
 ///
 /// The bits, or `None` for any other width.
 // SPEC: Arm ARM (DDI 0487) J1, VFPExpandImm.
-fn vfp_expand(imm8: u32, bits: u16) -> Option<u64> {
+pub(crate) fn vfp_expand(imm8: u32, bits: u16) -> Option<u64> {
     let exp_bits: u32 = match bits {
         16 => 5,
         32 => 8,
@@ -669,7 +669,7 @@ fn vfp_expand(imm8: u32, bits: u16) -> Option<u64> {
 /// The pattern, or `None` for the `cmode` that encodes a floating-point
 /// immediate.
 // SPEC: Arm ARM (DDI 0487) J1, AdvSIMDExpandImm.
-fn expand_imm(op: u32, cmode: u32, imm8: u64) -> Option<u64> {
+pub(crate) fn expand_imm(op: u32, cmode: u32, imm8: u64) -> Option<u64> {
     let words = |v: u64| v | (v << 32);
     Some(match cmode >> 1 {
         0b000 => words(imm8),

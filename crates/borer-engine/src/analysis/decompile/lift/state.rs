@@ -5,7 +5,7 @@ use super::*;
 
 impl<'a> Exec<'_, 'a> {
     /// Returns the name resolver for rendering.
-    pub(super) fn names(&self) -> Names<'a> {
+    pub(in crate::analysis::decompile) fn names(&self) -> Names<'a> {
         self.ctx.names()
     }
 
@@ -134,7 +134,7 @@ impl<'a> Exec<'_, 'a> {
     /// # Returns
     ///
     /// `e` with the assumed variable replaced by its constant, or `e` itself.
-    pub(super) fn assumed(&self, e: Expr) -> Expr {
+    pub(in crate::analysis::decompile) fn assumed(&self, e: Expr) -> Expr {
         match self.assume {
             Some((k, c)) if e.mentions(k) => e.subst(&Expr::Var(k), &Expr::Const(c)),
             _ => e,
@@ -273,7 +273,7 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `addr` - The address.
     /// * `ty` - The access type.
-    pub(super) fn read_at(&mut self, addr: Expr, ty: Ty) -> Expr {
+    pub(in crate::analysis::decompile) fn read_at(&mut self, addr: Expr, ty: Ty) -> Expr {
         match addr {
             Expr::Sp(k) => self.slot_read(k, ty),
             Expr::Const(a) if self.is_data(a) && self.const_float(a, ty).is_some() => self
@@ -534,7 +534,7 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `key` - The variable.
     /// * `v` - Its new value.
-    pub(super) fn assign(&mut self, key: Key, v: Expr) {
+    pub(in crate::analysis::decompile) fn assign(&mut self, key: Key, v: Expr) {
         let v = self.bounded(v);
         self.written_here.insert(key);
         self.env.set(key, v.clone());
@@ -809,7 +809,7 @@ impl<'a> Exec<'_, 'a> {
     /// * `addr` - The address.
     /// * `ty` - The store type.
     /// * `v` - The stored value.
-    pub(super) fn store_at(&mut self, addr: Expr, ty: Ty, v: Expr) {
+    pub(in crate::analysis::decompile) fn store_at(&mut self, addr: Expr, ty: Ty, v: Expr) {
         let v = match v {
             Expr::FConst(bits, fty)
                 if matches!(ty, Ty::U32 | Ty::U64) && fty.bits() == ty.bits() =>
@@ -884,15 +884,23 @@ impl<'a> Exec<'_, 'a> {
     /// * `ty` - Store type.
     /// * `v` - The stored value.
     pub(super) fn is_register_save(&self, k: i64, ty: Ty, v: &Expr) -> bool {
-        let Expr::Var(Key::Reg(r)) = v else {
-            return false;
-        };
         let _ = k;
+        let (key, saved) = match v {
+            Expr::Var(key @ Key::Reg(r)) => (
+                *key,
+                u64::try_from(r.size()).is_ok_and(|size| size * 8 == u64::from(ty.bits()))
+                    && self.ctx.conv.callee_saved.contains(r),
+            ),
+            Expr::Var(key @ Key::A64(r)) => (
+                *key,
+                ty.bits() == 64 && crate::analysis::decompile::lift_a64::callee_saved(*r),
+            ),
+            _ => return false,
+        };
         self.entry
-            && u64::try_from(r.size()).is_ok_and(|size| size * 8 == u64::from(ty.bits()))
-            && self.ctx.conv.callee_saved.contains(r)
-            && !self.written_here.contains(&Key::Reg(*r))
-            && !self.env.vals.contains_key(&Key::Reg(*r))
+            && saved
+            && !self.written_here.contains(&key)
+            && !self.env.vals.contains_key(&key)
     }
 
     /// Emits a store to non-slot memory after protecting memory readers.
@@ -971,7 +979,7 @@ impl<'a> Exec<'_, 'a> {
     ///   in a temporary instead.
     /// * `live` - At a block end, the liveness oracle that lets dead
     ///   registers be forgotten instead of written.
-    pub(super) fn materialize(
+    pub(in crate::analysis::decompile) fn materialize(
         &mut self,
         key: Key,
         stack: &mut Vec<Key>,
@@ -1053,7 +1061,7 @@ impl<'a> Exec<'_, 'a> {
                 .get(&o)
                 .copied()
                 .unwrap_or_else(|| self.ty_of(key).bits()),
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) => self.ty_of(key).bits(),
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => self.ty_of(key).bits(),
         };
         self.record(EffectKind::Assign(key, val.clone(), bits));
         let n = self.names();
@@ -1061,7 +1069,7 @@ impl<'a> Exec<'_, 'a> {
         // writes its own bytes, through the slot's address.
         let name = match key {
             Key::Slot(o) => n.slot_at(o, Ty::from_bits(bits)).0,
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) => n.key(key),
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) | Key::A64(_) => n.key(key),
         };
         let compound = match val {
             Expr::Bin(op, l, r) => match op.compound() {
@@ -1357,7 +1365,11 @@ impl<'a> Exec<'_, 'a> {
             // INVARIANT: an x87 register holds a floating-point value, which
             // an integer declaration would truncate on every assignment.
             Key::Reg(r) if r >= Register::ST0 && r <= Register::ST7 => Ty::F64,
-            Key::Reg(_) | Key::Tmp(_) | Key::Global(..) | Key::Param(_) => self.word_ty(),
+            // INVARIANT: a `v` register's variable holds all 128 bits.
+            Key::A64(crate::isa::a64::Reg::V(_)) => Ty::U128,
+            Key::Reg(_) | Key::Tmp(_) | Key::Global(..) | Key::Param(_) | Key::A64(_) => {
+                self.word_ty()
+            }
             Key::Slot(k) => self
                 .ctx
                 .declared
@@ -1505,7 +1517,7 @@ impl<'a> Exec<'_, 'a> {
     /// Writes out every value that was read from memory, because a store or
     /// call is about to change memory; a register nothing reads later is
     /// forgotten instead.
-    pub(super) fn protect_memory(&mut self) {
+    pub(in crate::analysis::decompile) fn protect_memory(&mut self) {
         let readers: Vec<Key> = self
             .env
             .vals
@@ -1624,7 +1636,7 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `key` - The variable a successor needs in the text.
     /// * `live` - Liveness oracle for the readers protected on the way.
-    pub(super) fn materialize_phi(&mut self, key: Key, live: &LiveFn<'_>) {
+    pub(in crate::analysis::decompile) fn materialize_phi(&mut self, key: Key, live: &LiveFn<'_>) {
         if !self.env.vals.contains_key(&key) {
             return;
         }
@@ -1782,7 +1794,7 @@ impl<'a> Exec<'_, 'a> {
     /// # Arguments
     ///
     /// * `key` - The variable being clobbered.
-    pub(super) fn clobber(&mut self, key: Key) {
+    pub(in crate::analysis::decompile) fn clobber(&mut self, key: Key) {
         self.protect_readers(key, &mut Vec::new(), None);
         self.protect_flags(&|e: &Expr| e.mentions(key));
         self.env.vals.remove(&key);

@@ -246,7 +246,9 @@ impl Env {
             other.vals.get(k) == Some(v)
                 && match k {
                     Key::Slot(o) => self.slot_bits.contains_key(o),
-                    Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) => true,
+                    Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
+                        true
+                    }
                 }
         });
         self.classes.retain(|k, v| other.classes.get(k) == Some(v));
@@ -620,21 +622,21 @@ fn is_imm(k: OpKind) -> bool {
 /// Block executor: owns the lines being produced for one block.
 pub(super) struct Exec<'c, 'a> {
     /// Per-function decompilation state (declarations, globals, escape floor).
-    ctx: &'c mut Ctx<'a>,
+    pub(super) ctx: &'c mut Ctx<'a>,
     /// The symbolic state, advanced instruction by instruction.
-    env: &'c mut Env,
+    pub(super) env: &'c mut Env,
     /// Statements emitted so far.
-    lines: Vec<String>,
+    pub(super) lines: Vec<String>,
     /// What those statements do, recorded beside them.
-    effects: Vec<Effect>,
+    pub(super) effects: Vec<Effect>,
     /// The instruction being lifted, which the effects it records name.
-    at: u64,
+    pub(super) at: u64,
     /// What the flags register holds right now.
-    flags: Flags,
+    pub(super) flags: Flags,
     /// Switch index captured at a jump-table dispatch (protected like flags).
     switch_idx: Option<Expr>,
     /// Recording declarations and temporaries only in the emission pass.
-    emit: bool,
+    pub(super) emit: bool,
     /// Temporary counter of the dataflow pass (the emission pass counts in
     /// `ctx`); it starts at [`BLOCK_TMP`] so these never collide with the
     /// shared temporaries a join allocates from `ctx`.
@@ -643,12 +645,12 @@ pub(super) struct Exec<'c, 'a> {
     info: InstructionInfoFactory,
     /// Slot offsets read before being written in this block, each with
     /// the widest such read in bits.
-    slot_use: BTreeMap<i64, u8>,
+    pub(super) slot_use: BTreeMap<i64, u8>,
     /// Slot offsets written in this block, each with the widest store in
     /// bits.
-    slot_def: BTreeMap<i64, u8>,
+    pub(super) slot_def: BTreeMap<i64, u8>,
     /// Slots each call may read, with the frame bytes written before it.
-    call_uses: Vec<(SlotUse, BTreeSet<i64>)>,
+    pub(super) call_uses: Vec<(SlotUse, BTreeSet<i64>)>,
     /// Is the return register read by a successor? (`None`: not known yet.)
     rax_live_out: Option<bool>,
     /// Values written out early for size, by key: a jump-table target
@@ -657,11 +659,11 @@ pub(super) struct Exec<'c, 'a> {
     /// While an instruction with several results records them, the
     /// variables whose early write-out waits until all are recorded
     /// ([`Exec::reg_write_all`]).
-    deferred: Option<Vec<Key>>,
+    pub(super) deferred: Option<Vec<Key>>,
     /// Flag bits a later reader needs, in the block or after it: none when
     /// the flags are dead at the current instruction, every bit when the
     /// reader is out of sight.
-    flags_needed: u32,
+    pub(super) flags_needed: u32,
     /// A variable known to hold a constant throughout this block (the edge
     /// into it was an equality branch); substituted into every value read.
     assume: Option<(Key, u64)>,
@@ -729,7 +731,70 @@ pub(super) struct Exec<'c, 'a> {
     reads_ahead: FxHashMap<Key, u32>,
     /// Instructions of this block without a model that wrote a register
     /// ([`Exec::unmodeled`]).
-    unmodeled: usize,
+    pub(super) unmodeled: usize,
+}
+
+impl<'c, 'a> Exec<'c, 'a> {
+    /// Builds the executor of one block: nothing written yet, the flags
+    /// the predecessors left taken out of the environment, and the block's
+    /// facts in force.
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - Per-function state.
+    /// * `env` - State at the block's entry.
+    /// * `pass` - Record text (the emission pass) or only compute state.
+    /// * `facts` - The equality the block runs under, whether it is the
+    ///   entry block, and whether its handler is registered yet.
+    /// * `at` - The block's first address.
+    pub(super) fn new(
+        ctx: &'c mut Ctx<'a>,
+        env: &'c mut Env,
+        pass: Pass,
+        facts: &BlockFacts<'_>,
+        at: u64,
+    ) -> Self {
+        let inherited = std::mem::replace(&mut env.flags, Flags::Unknown);
+        Exec {
+            ctx,
+            env,
+            lines: Vec::new(),
+            effects: Vec::new(),
+            at,
+            flags: inherited,
+            switch_idx: None,
+            emit: pass == Pass::Emission,
+            tmp_local: BLOCK_TMP,
+            info: InstructionInfoFactory::new(),
+            slot_use: BTreeMap::new(),
+            slot_def: BTreeMap::new(),
+            call_uses: Vec::new(),
+            rax_live_out: None,
+            flags_needed: u32::MAX,
+            big_written: BTreeMap::new(),
+            deferred: None,
+            assume: facts.assume,
+            entry: facts.entry,
+            seh_registered: !facts.unregistered,
+            args_pushed: 0,
+            cleaned: None,
+            args_short: false,
+            stated_contradicted: false,
+            forwarding: false,
+            in_place: false,
+            arity_floor: 0,
+            call_through: None,
+            receiver: None,
+            preserved: Vec::new(),
+            written_here: BTreeSet::new(),
+            flag_src: None,
+            float_flags: false,
+            status_ah: None,
+            regs_needed: None,
+            reads_ahead: FxHashMap::default(),
+            unmodeled: 0,
+        }
+    }
 }
 
 /// Executes one block from `env`, returning its lines and control-flow facts.
@@ -768,47 +833,13 @@ pub(super) fn exec_block(
     facts: BlockFacts<'_>,
 ) -> BlockOut {
     let flags_out = facts.flags_out;
-    let inherited = std::mem::replace(&mut env.flags, Flags::Unknown);
-    let seh_registered = !facts.unregistered;
-    let mut ex = Exec {
+    let mut ex = Exec::new(
         ctx,
         env,
-        lines: Vec::new(),
-        effects: Vec::new(),
-        at: instrs.first().map_or(0, Instruction::ip),
-        flags: inherited,
-        switch_idx: None,
-        emit: pass == Pass::Emission,
-        tmp_local: BLOCK_TMP,
-        info: InstructionInfoFactory::new(),
-        slot_use: BTreeMap::new(),
-        slot_def: BTreeMap::new(),
-        call_uses: Vec::new(),
-        rax_live_out: None,
-        flags_needed: u32::MAX,
-        big_written: BTreeMap::new(),
-        deferred: None,
-        assume: facts.assume,
-        entry: facts.entry,
-        seh_registered,
-        args_pushed: 0,
-        cleaned: None,
-        args_short: false,
-        stated_contradicted: false,
-        forwarding: false,
-        in_place: false,
-        arity_floor: 0,
-        call_through: None,
-        receiver: None,
-        preserved: Vec::new(),
-        written_here: BTreeSet::new(),
-        flag_src: None,
-        float_flags: false,
-        status_ah: None,
-        regs_needed: None,
-        reads_ahead: FxHashMap::default(),
-        unmodeled: 0,
-    };
+        pass,
+        &facts,
+        instrs.first().map_or(0, Instruction::ip),
+    );
     if let Some((_, live)) = phi {
         let rax = Key::Reg(canon(Register::RAX, ex.bitness()));
         ex.rax_live_out = Some(live(rax));

@@ -16,6 +16,7 @@ mod raw;
 
 mod a64;
 mod a64_emulate;
+mod a64_lift;
 mod analysis;
 mod calls;
 mod decompile;

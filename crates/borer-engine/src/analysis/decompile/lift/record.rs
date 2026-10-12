@@ -138,7 +138,7 @@ impl Exec<'_, '_> {
     /// # Arguments
     ///
     /// * `kind` - What it does.
-    pub(super) fn record(&mut self, kind: EffectKind) {
+    pub(in crate::analysis::decompile) fn record(&mut self, kind: EffectKind) {
         if self.emit {
             self.effects.push(Effect { at: self.at, kind });
         }
@@ -160,7 +160,7 @@ impl Exec<'_, '_> {
     ///   to.
     /// * `noreturn` - Nothing follows it.
     /// * `shown` - How the text shows it.
-    pub(super) fn record_call(
+    pub(in crate::analysis::decompile) fn record_call(
         &mut self,
         callee: Callee,
         args: Vec<(ArgAt, Expr)>,

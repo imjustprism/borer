@@ -54,7 +54,7 @@ use crate::isa::x86::{
     FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
 };
 
-use super::expr::{Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, fold, known_bits, unary};
+use super::expr::{Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, a64_code, fold, known_bits, unary};
 use super::lift::{
     ArgAt, Callee, Conv, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
 };
@@ -1558,6 +1558,7 @@ fn key_spot(k: Key) -> u64 {
         Key::Param(i) => (2 << 32) | u64::from(i),
         Key::Slot(o) => (3 << 32) ^ o.cast_unsigned(),
         Key::Global(a, _) => (4 << 32) ^ a,
+        Key::A64(r) => (5 << 32) | u64::from(a64_code(r)),
     };
     TLS_BASE.wrapping_sub(1 << 40) | code
 }
@@ -1817,7 +1818,7 @@ impl Text<'_, '_> {
             // an expression reading one stays unevaluated; an xmm
             // register's variable reads the state the trial seeded.
             Key::Reg(r) if !r.is_gpr() && !r.is_xmm() => None,
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) => {
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
                 Some(self.vars.get(&k).copied().unwrap_or_else(|| self.drawn(k)))
             }
         }
@@ -2017,7 +2018,7 @@ impl Text<'_, '_> {
             Key::Slot(o) if !self.foreign(o, 16) => self.read_vec(self.sp0.wrapping_add_signed(o)),
             Key::Global(a, 128) if a < TLS_BASE => self.read_vec(a),
             Key::Reg(r) if !r.is_gpr() && !r.is_xmm() => None,
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) => self.vecs.get(&k).copied(),
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => self.vecs.get(&k).copied(),
             Key::Slot(_) | Key::Global(..) => None,
         }
     }
@@ -2341,7 +2342,7 @@ impl Text<'_, '_> {
                     self.write(a, u64::from(gb / 8).max(1), value);
                 }
             }
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) => {
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
                 // INVARIANT: a whole-lane write fills the vector's state and
                 // its low half alike; a narrower one rewrites part of a lane
                 // whose rest the machine keeps or clears by its own form, so
@@ -2770,7 +2771,7 @@ impl Function<'_, '_> {
                     u64::from(inn.slot_bits.get(&o).copied().unwrap_or(self.width) / 8),
                 ),
                 Key::Global(a, bits) => (a, u64::from(bits / 8).max(1)),
-                Key::Reg(_) | Key::Tmp(_) | Key::Param(_) => (0, 0),
+                Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => (0, 0),
             };
             for i in 0..n.min(8) {
                 base.insert(at.wrapping_add(i) & mask, lo8(c >> (8 * i)));
@@ -2895,7 +2896,9 @@ impl Function<'_, '_> {
                     None => continue,
                 },
                 Key::Global(a, bits) if *a < TLS_BASE => (*a, u64::from(*bits / 8).max(1)),
-                Key::Global(..) | Key::Reg(_) | Key::Tmp(_) | Key::Param(_) => continue,
+                Key::Global(..) | Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
+                    continue;
+                }
             };
             let value = wide_value(&text, e, n);
             for i in 0..n {

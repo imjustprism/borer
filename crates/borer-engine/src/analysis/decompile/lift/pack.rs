@@ -9,7 +9,7 @@
 
 use crate::isa::x86::{ConditionCode, Register};
 
-use super::super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp};
+use super::super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, a64_code, a64_reg};
 use super::{ArgAt, Call, Callee, Effect, EffectKind, Routine, Shown};
 
 /// The routines a [`Callee::Builtin`] names, by packed code.
@@ -337,6 +337,10 @@ impl Writer<'_> {
             Key::Param(i) => {
                 self.byte(4);
                 self.byte(i);
+            }
+            Key::A64(r) => {
+                self.byte(5);
+                self.byte(a64_code(r));
             }
         }
     }
@@ -669,6 +673,7 @@ impl Reader<'_> {
             }
             3 => Key::Tmp(u32::try_from(self.num()?).ok()?),
             4 => Key::Param(self.byte()?),
+            5 => Key::A64(a64_reg(self.byte()?)?),
             _ => return None,
         })
     }

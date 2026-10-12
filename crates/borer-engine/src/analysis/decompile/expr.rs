@@ -5,6 +5,7 @@
 //! pseudo-C, never to a machine register at some earlier time. That invariant
 //! is what lets the lifter keep expressions symbolic until they are needed.
 
+use crate::isa::a64;
 use crate::isa::x86::{ConditionCode, Register};
 
 use super::opaque::Evidence;
@@ -28,6 +29,10 @@ pub(super) enum Key {
     /// convention (`a1` is the first argument register). Never written, so
     /// copies of it stay symbolic across calls.
     Param(u8),
+    /// An arm64 register: `x0`..`x30`, the stack pointer while it is no
+    /// tracked offset, or `v0`..`v31`. Last, so the order and hash of every
+    /// other variable stay as they were.
+    A64(a64::Reg),
 }
 
 impl Key {
@@ -2676,6 +2681,7 @@ impl Names<'_> {
                 format!("g{bits}_{addr:x}")
             }
             Key::Tmp(n) => format!("tmp_{n}"),
+            Key::A64(r) => a64_name(r),
             Key::Param(0) if self.this_param => "this".to_owned(),
             Key::Param(i) if Some(i) == self.result_param => "result".to_owned(),
             // The compiler's own name for the parameter, when it left one.
@@ -2686,6 +2692,69 @@ impl Names<'_> {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| format!("a{}", u32::from(i) + 1)),
         }
+    }
+}
+
+/// The code of the stack pointer in [`a64_code`], after `x30`.
+const A64_SP: u8 = 31;
+
+/// The code of the zero register in [`a64_code`].
+const A64_ZR: u8 = 32;
+
+/// The code of `v0` in [`a64_code`], with `v1`..`v31` after it.
+const A64_V: u8 = 64;
+
+/// The highest `v` register number.
+const A64_V_LAST: u8 = 31;
+
+/// Returns the one-byte code of an arm64 register.
+///
+/// Packed effects and the replay's variable addresses spell a register by
+/// it: `x0`..`x30` as their numbers, then [`A64_SP`], [`A64_ZR`], and
+/// `v0`..`v31` from [`A64_V`].
+///
+/// # Arguments
+///
+/// * `r` - The register.
+pub(super) fn a64_code(r: a64::Reg) -> u8 {
+    match r {
+        a64::Reg::X(n) => n,
+        a64::Reg::Sp => A64_SP,
+        a64::Reg::Zr => A64_ZR,
+        a64::Reg::V(n) => A64_V.saturating_add(n),
+    }
+}
+
+/// The arm64 register an [`a64_code`] names.
+///
+/// # Arguments
+///
+/// * `code` - The code.
+///
+/// # Returns
+///
+/// The register, or `None` for a code that names none.
+pub(super) fn a64_reg(code: u8) -> Option<a64::Reg> {
+    Some(match code {
+        A64_SP => a64::Reg::Sp,
+        A64_ZR => a64::Reg::Zr,
+        n if n < A64_SP => a64::Reg::X(n),
+        n => a64::Reg::V(n.checked_sub(A64_V).filter(|v| *v <= A64_V_LAST)?),
+    })
+}
+
+/// Names an arm64 register as the text names its variable: `x0`, `sp`,
+/// `xzr`, `v0`.
+///
+/// # Arguments
+///
+/// * `r` - The register.
+fn a64_name(r: a64::Reg) -> String {
+    match r {
+        a64::Reg::X(n) => format!("x{n}"),
+        a64::Reg::Sp => "sp".to_owned(),
+        a64::Reg::Zr => "xzr".to_owned(),
+        a64::Reg::V(n) => format!("v{n}"),
     }
 }
 

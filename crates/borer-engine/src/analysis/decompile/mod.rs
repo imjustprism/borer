@@ -19,6 +19,9 @@
 //! rework the text. [`outline`] and [`scenario`] are other views of the
 //! same function; [`opaque`] spots conditions that always go one way;
 //! [`traces`] checks the text's control flow against the binary's.
+//! [`lift_a64`] lifts arm64 blocks into the same expressions and
+//! [`verify_a64`] checks it against the arm64 machine; the rest of the
+//! pipeline reads x86 code only, so arm64 functions do not decompile yet.
 
 mod asserts;
 mod ctext;
@@ -31,6 +34,7 @@ mod finish;
 pub(crate) mod interp;
 mod ladder;
 pub(crate) mod lift;
+mod lift_a64;
 mod line;
 mod liveness;
 mod opaque;
@@ -46,6 +50,7 @@ mod tidy;
 pub mod traces;
 mod types;
 pub mod verify;
+pub mod verify_a64;
 mod wire;
 
 pub use asserts::*;
@@ -1844,7 +1849,7 @@ fn decompile_with(
         .iter()
         .filter_map(|(k, t)| match k {
             Key::Slot(o) => Some((*o, *t)),
-            Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
+            Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => None,
         })
         .collect();
     let mut by_type: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1874,7 +1879,7 @@ fn decompile_with(
             }
         }
         let stated = match k {
-            Key::Reg(_) => result_typed.get(&name).cloned(),
+            Key::Reg(_) | Key::A64(_) => result_typed.get(&name).cloned(),
             Key::Slot(o) => slot_stated.get(o).cloned(),
             Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
         };
@@ -1982,7 +1987,9 @@ fn decompile_with(
                 .iter()
                 .filter_map(|(k, ty)| match k {
                     Key::Slot(o) => Some((*o, ty.bits())),
-                    Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) => None,
+                    Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) | Key::A64(_) => {
+                        None
+                    }
                 })
                 .collect(),
             reg_ty: ctx

@@ -149,6 +149,8 @@ pub enum Fact {
     Store,
     /// Whether the block's conditional branch is taken.
     Branch,
+    /// The low 64 bits of an arm64 `v` register, at the block's end.
+    Vector,
 }
 
 impl Fact {
@@ -175,6 +177,7 @@ impl std::fmt::Display for Fact {
             Self::Slot => "slot",
             Self::Store => "store",
             Self::Branch => "branch",
+            Self::Vector => "vector",
         })
     }
 }
@@ -350,9 +353,9 @@ pub(super) enum Read {
 #[derive(Debug, Default)]
 pub(super) struct Probe {
     /// The memory writes, in program order.
-    effects: Vec<Effect>,
+    pub(super) effects: Vec<Effect>,
     /// Each temporary the lifter made, by id, with the value it copied.
-    temps: BTreeMap<u32, Expr>,
+    pub(super) temps: BTreeMap<u32, Expr>,
 }
 
 impl Probe {
@@ -661,7 +664,7 @@ pub(super) fn eval<M: Bench>(
     let d = depth.checked_sub(1)?;
     match e {
         Expr::Const(v) | Expr::FConst(v, _) => Some(*v),
-        Expr::Var(k @ Key::Reg(_)) => st.regs.get(k).copied(),
+        Expr::Var(k @ (Key::Reg(_) | Key::A64(_))) => st.regs.get(k).copied(),
         Expr::Var(Key::Tmp(id)) => eval(st.temps.get(id)?, st, reads, d),
         Expr::Var(Key::Slot(off)) => {
             let at = st.rsp.wrapping_add_signed(*off) & low(st.width);

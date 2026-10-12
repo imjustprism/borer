@@ -30,6 +30,7 @@ use crate::isa::Isa;
 use crate::isa::a64::{self, Cond, Insn, Mnemonic, Op, Opnd, Reg};
 use crate::num::{from_usize, lo8, lo32, sext32};
 use crate::program::Program;
+pub(crate) use alu::{FMOV_IMM, expand_imm, vfp_expand};
 use alu::{Form, Wide};
 
 mod alu;
