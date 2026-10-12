@@ -2,10 +2,10 @@
 //! decoder.
 //!
 //! [`decode()`] turns one four-byte word into an [`Insn`] whose class, base
-//! instruction, operands, condition and control flow are engine types, and [`text`]
-//! renders one as assembly. This module's three files are the only ones
-//! that name the decoder crate; everything downstream reads the types
-//! below.
+//! instruction, operands, condition and control flow are engine types,
+//! [`text`] renders one as assembly, and [`Insn::registers`] says which
+//! registers its operands read and write. Only `decode.rs` and `fmt.rs`
+//! name the decoder crate; everything downstream reads the types below.
 //!
 //! Every word decodes to something. A word in the SVE or SME encoding
 //! space, which the decoder does not model, is an opaque instruction that
@@ -19,9 +19,11 @@
 
 mod decode;
 mod fmt;
+mod roles;
 
 pub use decode::decode;
 pub use fmt::text;
+pub use roles::Registers;
 
 /// Bytes in every A64 instruction; instructions are also aligned to it.
 pub const INSN_LEN: usize = 4;

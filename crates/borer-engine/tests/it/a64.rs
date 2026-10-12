@@ -563,6 +563,57 @@ fn words_name_their_base_instruction() {
     assert_eq!(a64::decode(0xd600_0000, 0).mnemonic, Mnemonic::Other);
 }
 
+/// Operands read and write the registers their roles say.
+///
+/// A destination is written whole, a store and a compare write nothing, a
+/// write-back writes its base, a move-keep reads what it writes, and the
+/// zero register is never listed.
+#[test]
+fn operands_name_the_registers_they_read_and_write() {
+    /// A word, the registers it reads with their widths, and those it
+    /// writes.
+    type Case = (u32, &'static [(Reg, u16)], &'static [Reg]);
+    let cases: &[Case] = &[
+        // ASM: add x0, x1, x2
+        (
+            0x8b02_0020,
+            &[(Reg::X(1), 64), (Reg::X(2), 64)],
+            &[Reg::X(0)],
+        ),
+        // ASM: str w1, [sp, #8]
+        (0xb900_0be1, &[(Reg::X(1), 32), (Reg::Sp, 64)], &[]),
+        // ASM: ldp x29, x30, [sp], #16
+        (
+            0xa8c1_7bfd,
+            &[(Reg::Sp, 64)],
+            &[Reg::X(29), Reg::X(30), Reg::Sp],
+        ),
+        // ASM: movk x0, #1, lsl #16
+        (0xf2a0_0020, &[(Reg::X(0), 64)], &[Reg::X(0)]),
+        // ASM: cbz w3, +0x10
+        (0x3400_0083, &[(Reg::X(3), 32)], &[]),
+        // ASM: cmp x0, #3
+        (0xf100_0c1f, &[(Reg::X(0), 64)], &[]),
+        // ASM: ldr x8, [x9, x10, lsl #3]
+        (
+            0xf86a_7928,
+            &[(Reg::X(9), 64), (Reg::X(10), 64)],
+            &[Reg::X(8)],
+        ),
+        // ASM: stp x19, x20, [sp, #-32]!
+        (
+            0xa9be_53f3,
+            &[(Reg::X(19), 64), (Reg::X(20), 64), (Reg::Sp, 64)],
+            &[Reg::Sp],
+        ),
+    ];
+    for &(word, reads, writes) in cases {
+        let r = a64::decode(word, 0).registers();
+        assert_eq!(r.reads, reads, "{word:#010x}");
+        assert_eq!(r.writes, writes, "{word:#010x}");
+    }
+}
+
 /// The code every image fixture holds at its entry: a guarded frame that
 /// calls a helper six words on.
 const BLOCK: [u32; 8] = [
