@@ -590,7 +590,8 @@ pub fn cleanup(body: &str) -> String {
 /// which was absorbed into a structure; a label anywhere inside means the
 /// span is entered by a goto). That last pass walks from the end, so a
 /// removal only moves lines already handled and the precomputed closer
-/// indices stay valid.
+/// indices stay valid. Once the passes settle, inverted and counted loops
+/// read as the `while` and `for` they were ([`super::loops::recover_loops`]).
 ///
 /// # Arguments
 ///
@@ -605,6 +606,7 @@ pub(super) fn cleanup_text(body: &str, live_out: Option<&str>) -> String {
     let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
     let fuel = CLEANUP_PASSES.saturating_add(lines.len());
     cleanup_passes(&mut lines, fuel, live_out);
+    loops::recover_loops(&mut lines);
     let mut text = lines.join("\n");
     text.push('\n');
     text

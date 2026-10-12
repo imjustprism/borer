@@ -1,0 +1,495 @@
+//! Loop recovery on the finished text: `while` and `for` from the guarded
+//! `do`/`while` a compiler's loop inversion leaves, and `for` from a
+//! counted `while`.
+
+use super::ctext::{Ast, Bin, expression, named_type, tokens as c_tokens};
+use super::*;
+
+/// Lines the scan for a later write of a moved variable reads before it
+/// gives up.
+const DEAD_SCAN_MAX: usize = 200;
+
+/// Rewrites the inverted and counted loops of a body as `while` and `for`.
+///
+/// A compiler tests a loop's condition once before entering it and then
+/// at its bottom: `if (C) { do { B } while (C); }` is `while (C) { B }`.
+/// When the guard is the condition with the loop variable's first value
+/// put in (`if (p->list != 0) { v = p->list; do { B; v = *v; } while (v !=
+/// 0); }`), the loop is `for (v = p->list; v != 0; v = *v) { B }`, and with
+/// no step at the body's end it is `v = p->list; while (v != 0) { B }`;
+/// either way `v` is assigned on the path that skipped the loop too, so
+/// it must be dead there ([`dead_after`]); other first values set beside
+/// `v` stay in front of the loop under the same rule, when neither the
+/// condition nor `v`'s value reads them and they do not read `v`.
+/// `v = k; while (C) { B; v += 1; }` is a `for` as it stands. A loop body
+/// that continues at its own level
+/// keeps its form when a `for` would run the step on the way to the test
+/// where the `do` did not, and no rewrite takes a loop that holds a label.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+///
+/// # Returns
+///
+/// Whether anything was rewritten.
+pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
+    let mut changed = false;
+    let mut k = 0;
+    while k < lines.len() {
+        if guarded_loop(lines, k) || counted_while(lines, k) {
+            changed = true;
+            continue;
+        }
+        k += 1;
+    }
+    changed
+}
+
+/// Rewrites the `if (G) { inits; do { B } while (C); }` at line `k`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the `if`.
+///
+/// # Returns
+///
+/// Whether the `if` was a guarded loop and became a `while` or a `for`.
+fn guarded_loop(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(open) = lines.get(k) else {
+        return false;
+    };
+    let pad = indent_of(open);
+    let Some(guard) = if_opener(open.trim()).map(str::to_owned) else {
+        return false;
+    };
+    let inner = pad + 2;
+    let Some(close) =
+        closing(lines, k, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    let Some(latch) = close.checked_sub(1).filter(|&l| l > k) else {
+        return false;
+    };
+    let Some(cond) = lines
+        .get(latch)
+        .filter(|l| indent_of(l) == inner)
+        .and_then(|l| l.trim().strip_prefix("} while (")?.strip_suffix(");"))
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let Some(d) = (k + 1..latch)
+        .rev()
+        .find(|&j| {
+            lines
+                .get(j)
+                .is_some_and(|l| indent_of(l) <= inner && !l.trim().is_empty())
+        })
+        .filter(|&j| {
+            lines
+                .get(j)
+                .is_some_and(|l| l.trim() == "do {" && indent_of(l) == inner)
+        })
+    else {
+        return false;
+    };
+    let region = lines.get(k + 1..close).unwrap_or(&[]);
+    if region.iter().any(|l| is_label(l)) {
+        return false;
+    }
+    let inits = lines.get(k + 1..d).unwrap_or(&[]);
+    let body = lines.get(d + 1..latch).unwrap_or(&[]);
+    let pad_s = " ".repeat(pad);
+    let dedent = |l: &String| l.strip_prefix("  ").unwrap_or(l).to_owned();
+    let rewritten: Vec<String> = match inits {
+        [] if same_condition(&guard, &cond) => std::iter::once(format!("{pad_s}while ({cond}) {{"))
+            .chain(body.iter().map(dedent))
+            .chain(std::iter::once(format!("{pad_s}}}")))
+            .collect(),
+        [] => return false,
+        inits => {
+            let Some(parsed) = inits
+                .iter()
+                .map(|l| plain_assignment(l).filter(|(_, r)| indent_of(l) == inner && !impure(r)))
+                .collect::<Option<Vec<(&str, &str)>>>()
+            else {
+                return false;
+            };
+            let Some(at) = parsed.iter().rposition(|(v, _)| mentions_ident(&cond, v)) else {
+                return false;
+            };
+            let Some(&(v, value)) = parsed.get(at) else {
+                return false;
+            };
+            let others: Vec<(&str, &str)> = parsed
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != at)
+                .map(|(_, p)| *p)
+                .collect();
+            let apart = others.iter().all(|(o, r)| {
+                *o != v
+                    && !mentions_ident(&cond, o)
+                    && !mentions_ident(value, o)
+                    && !mentions_ident(r, v)
+                    && dead_after(lines, close + 1, pad, o)
+            });
+            if !apart
+                || !same_condition(&guard, &rename_word(&cond, v, &format!("({value})")))
+                || !dead_after(lines, close + 1, pad, v)
+            {
+                return false;
+            }
+            let front: Vec<String> = others
+                .iter()
+                .map(|(o, r)| format!("{pad_s}{o} = {r};"))
+                .collect();
+            let looped: Vec<String> = match step_of(body, inner + 2, v) {
+                Some(step) => {
+                    let head = format!("{pad_s}for ({v} = {value}; {cond}; {step}) {{");
+                    std::iter::once(head)
+                        .chain(body.get(..body.len() - 1).unwrap_or(&[]).iter().map(dedent))
+                        .chain(std::iter::once(format!("{pad_s}}}")))
+                        .collect()
+                }
+                None => [
+                    format!("{pad_s}{v} = {value};"),
+                    format!("{pad_s}while ({cond}) {{"),
+                ]
+                .into_iter()
+                .chain(body.iter().map(dedent))
+                .chain(std::iter::once(format!("{pad_s}}}")))
+                .collect(),
+            };
+            front.into_iter().chain(looped).collect()
+        }
+    };
+    lines.splice(k..=close, rewritten);
+    true
+}
+
+/// Rewrites the `v = init; while (C) { B; step }` at line `k` as a `for`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the assignment.
+///
+/// # Returns
+///
+/// Whether the loop became a `for`.
+fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
+    let (Some(init), Some(head)) = (lines.get(k), lines.get(k + 1)) else {
+        return false;
+    };
+    let pad = indent_of(init);
+    let Some((v, value)) = plain_assignment(init).filter(|(_, r)| !impure(r)) else {
+        return false;
+    };
+    let Some(cond) = head
+        .trim()
+        .strip_prefix("while (")
+        .and_then(|r| r.strip_suffix(") {"))
+        .filter(|c| indent_of(head) == pad && mentions_ident(c, v))
+    else {
+        return false;
+    };
+    let Some(close) = closing(lines, k + 1, pad) else {
+        return false;
+    };
+    if lines.get(close).is_none_or(|l| l.trim() != "}") {
+        return false;
+    }
+    let body = lines.get(k + 2..close).unwrap_or(&[]);
+    if body.iter().any(|l| is_label(l)) {
+        return false;
+    }
+    let Some(step) = step_of(body, pad + 2, v) else {
+        return false;
+    };
+    let pad_s = " ".repeat(pad);
+    let rewritten: Vec<String> =
+        std::iter::once(format!("{pad_s}for ({v} = {value}; {cond}; {step}) {{"))
+            .chain(body.get(..body.len() - 1).unwrap_or(&[]).iter().cloned())
+            .chain(std::iter::once(format!("{pad_s}}}")))
+            .collect();
+    lines.splice(k..=close, rewritten);
+    true
+}
+
+/// Finds the line that closes the block opened on line `k`: the first
+/// later line at or left of the opener's indentation.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The opening line.
+/// * `pad` - Its indentation.
+fn closing(lines: &[String], k: usize, pad: usize) -> Option<usize> {
+    (k + 1..lines.len())
+        .find(|&j| {
+            lines
+                .get(j)
+                .is_some_and(|l| !l.trim().is_empty() && indent_of(l) <= pad)
+        })
+        .filter(|&j| {
+            lines
+                .get(j)
+                .is_some_and(|l| indent_of(l) == pad && l.trim().starts_with('}'))
+        })
+}
+
+/// The step a loop body ends with, for a `for` header.
+///
+/// It is the body's last line at its own level, when that line assigns
+/// `v` and calls nothing, and the body never continues at its own level (a
+/// `for` runs the step on the way to the test, which a `continue` in the
+/// original skipped).
+///
+/// # Arguments
+///
+/// * `body` - The loop body's lines.
+/// * `level` - The indentation of the body's own statements.
+/// * `v` - The loop variable.
+///
+/// # Returns
+///
+/// The step without its semicolon, or `None`.
+fn step_of<'b>(body: &'b [String], level: usize, v: &str) -> Option<&'b str> {
+    let last = body.last()?;
+    let t = last.trim();
+    let step = t.strip_suffix(';')?;
+    let (lhs, rhs) = step.split_once(' ')?;
+    let assigns = matches!(
+        rhs.split_once(' ').map(|(op, _)| op),
+        Some("=" | "+=" | "-=" | "*=" | "<<=" | ">>=" | "&=" | "|=" | "^=")
+    );
+    (indent_of(last) == level && lhs == v && assigns && !impure(rhs) && !continues_at_top(body))
+        .then_some(step)
+}
+
+/// Tells whether `v` is dead from line `from` on, where the text leaves
+/// the block at indentation `pad`: written before any read on every path.
+///
+/// The scan is straight-line and conservative: it follows the text down,
+/// out of an `if` arm it ends inside (skipping an `else`), and answers yes
+/// at a plain assignment to `v` that does not read it, a `return` at the
+/// level it scans that does not name `v`, or the end of the text. Such an
+/// assignment inside a nested block skips the rest of that block, which
+/// reads the new value. A label, a jump, a `case`, the end of a loop or a
+/// switch, a read of `v` anywhere, or [`DEAD_SCAN_MAX`] lines say no.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `from` - The first line after the rewritten region.
+/// * `pad` - The indentation the region stood at.
+/// * `v` - The variable.
+fn dead_after(lines: &[String], from: usize, pad: usize, v: &str) -> bool {
+    let mut level = pad;
+    let mut j = from;
+    let end = from.saturating_add(DEAD_SCAN_MAX);
+    while j < lines.len() {
+        if j >= end {
+            return false;
+        }
+        let Some(l) = lines.get(j) else {
+            return false;
+        };
+        let t = l.trim();
+        let ind = indent_of(l);
+        j += 1;
+        if t.is_empty() {
+            continue;
+        }
+        if is_label(l) || t.contains("goto ") || breaks(t) || continues(t) || is_case(t) {
+            return false;
+        }
+        if ind < level {
+            let Some(opener) = (0..j - 1)
+                .rev()
+                .find(|&o| {
+                    lines
+                        .get(o)
+                        .is_some_and(|m| indent_of(m) == ind && !m.trim().is_empty())
+                })
+                .and_then(|o| lines.get(o))
+            else {
+                return false;
+            };
+            let o = opener.trim();
+            let arm = o.starts_with("if (") || o.starts_with("} else if (") || o == "} else {";
+            match t {
+                "}" if arm => level = ind,
+                "} else {" if arm => match closing(lines, j - 1, ind) {
+                    Some(c) if lines.get(c).is_some_and(|m| m.trim() == "}") => {
+                        level = ind;
+                        j = c + 1;
+                    }
+                    _ => return false,
+                },
+                _ => return false,
+            }
+            continue;
+        }
+        if mentions_ident(t, v) {
+            let write =
+                plain_assignment(t).is_some_and(|(lhs, rhs)| lhs == v && !mentions_ident(rhs, v));
+            if !write || ind == level {
+                return write;
+            }
+            while let Some(m) = lines
+                .get(j)
+                .filter(|m| m.trim().is_empty() || indent_of(m) >= ind)
+            {
+                if is_label(m) {
+                    return false;
+                }
+                j += 1;
+            }
+        }
+        if ind == level && is_return(t) {
+            return true;
+        }
+    }
+    true
+}
+
+/// Tells whether two rendered conditions are the same test: equal as
+/// expressions once `a > b` is read as `b < a` and an integer bound as the
+/// strict one beside it (`x >= 65` is `x > 64`).
+///
+/// # Arguments
+///
+/// * `a` - One condition.
+/// * `b` - The other.
+fn same_condition(a: &str, b: &str) -> bool {
+    let read = |s: &str| {
+        let toks = c_tokens(s).ok()?;
+        expression(&toks, &|n| named_type(n, 64).is_none(), 64)
+            .ok()
+            .map(strict)
+    };
+    matches!((read(a), read(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// Writes a comparison as `<` with a strict integer bound where it can:
+/// `a > b` as `b < a`, `a >= b` as `b <= a`, and `k <= x` as `k - 1 < x`,
+/// `x <= k` as `x < k + 1` for an integer literal `k`.
+///
+/// # Arguments
+///
+/// * `e` - The expression.
+fn strict(e: Ast) -> Ast {
+    let e = match e {
+        Ast::Bin(Bin::Gt, l, r) => Ast::Bin(Bin::Lt, r, l),
+        Ast::Bin(Bin::Ge, l, r) => Ast::Bin(Bin::Le, r, l),
+        other => other,
+    };
+    match e {
+        Ast::Bin(Bin::Le, l, r) => match (*l, *r) {
+            (Ast::Int(k, ty), x) if k > 0 => {
+                Ast::Bin(Bin::Lt, Box::new(Ast::Int(k - 1, ty)), Box::new(x))
+            }
+            (x, Ast::Int(k, ty)) if k < u64::MAX => {
+                Ast::Bin(Bin::Lt, Box::new(x), Box::new(Ast::Int(k + 1, ty)))
+            }
+            (l, r) => Ast::Bin(Bin::Le, Box::new(l), Box::new(r)),
+        },
+        other => other,
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    //! The loop rewrites on hand-written text, each beside the case that
+    //! must keep its form.
+
+    use super::recover_loops;
+
+    /// Runs the rewrites over a body.
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - The text, one statement per line.
+    ///
+    /// # Returns
+    ///
+    /// The text after the rewrites.
+    fn run(body: &str) -> String {
+        let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
+        recover_loops(&mut lines);
+        lines.join("\n") + "\n"
+    }
+
+    /// A guard that is the loop's own test makes the `do` a `while`.
+    #[test]
+    fn a_do_guarded_by_its_own_test_is_a_while() {
+        let text = "if (rcx != 0) {\n  do {\n    rax += 1;\n    rcx -= 1;\n  } while (rcx != 0);\n}\nreturn rax;\n";
+        assert_eq!(
+            run(text),
+            "while (rcx != 0) {\n  rax += 1;\n  rcx -= 1;\n}\nreturn rax;\n"
+        );
+        let bound = "if ((int32_t)rdi >= 65) {\n  do {\n    rdi -= 1;\n  } while ((int32_t)rdi > 64);\n}\nreturn 0;\n";
+        assert_eq!(
+            run(bound),
+            "while ((int32_t)rdi > 64) {\n  rdi -= 1;\n}\nreturn 0;\n"
+        );
+        let other =
+            "if (rdx != 0) {\n  do {\n    rcx -= 1;\n  } while (rcx != 0);\n}\nreturn rcx;\n";
+        assert_eq!(run(other), other);
+    }
+
+    /// A guard that is the test with the first value put in makes a `for`,
+    /// when the variable is dead on the path that skipped the loop.
+    #[test]
+    fn a_do_guarded_by_its_first_test_is_a_for() {
+        let text = "if (*(uint64_t*)(r12 + 0x40) != 0) {\n  rbx = *(uint64_t*)(r12 + 0x40);\n  do {\n    sub_1(rbx);\n    rbx = *(uint64_t*)rbx;\n  } while (rbx != 0);\n}\nrbx = 0;\nreturn 0;\n";
+        assert_eq!(
+            run(text),
+            "for (rbx = *(uint64_t*)(r12 + 0x40); rbx != 0; rbx = *(uint64_t*)rbx) {\n  sub_1(rbx);\n}\nrbx = 0;\nreturn 0;\n"
+        );
+        let read = "if (*(uint64_t*)(r12 + 0x40) != 0) {\n  rbx = *(uint64_t*)(r12 + 0x40);\n  do {\n    sub_1(rbx);\n    rbx = *(uint64_t*)rbx;\n  } while (rbx != 0);\n}\nreturn rbx;\n";
+        assert_eq!(run(read), read);
+        let continued = "if (a1 != 0) {\n  rcx = a1;\n  do {\n    if (rax != 0) continue;\n    rcx -= 1;\n  } while (rcx != 0);\n}\nreturn 0;\n";
+        assert_eq!(
+            run(continued),
+            "rcx = a1;\nwhile (rcx != 0) {\n  if (rax != 0) continue;\n  rcx -= 1;\n}\nreturn 0;\n"
+        );
+    }
+
+    /// The other first values set beside the loop variable stay in front of
+    /// the `for`, each dead where the loop was skipped: a write inside a
+    /// later block is a write on the paths through it.
+    #[test]
+    fn the_other_first_values_stay_in_front() {
+        let text = "if (a1 != 0) {\n  rsi = a2;\n  rax = a1;\n  do {\n    sub_1(rax, rsi);\n    rax = *(uint64_t*)rax;\n  } while (rax != 0);\n}\nif (a3 != 0) {\n  rax = a3;\n  rsi = 0;\n  sub_2(rax);\n}\nreturn 0;\n";
+        assert_eq!(
+            run(text),
+            "rsi = a2;\nfor (rax = a1; rax != 0; rax = *(uint64_t*)rax) {\n  sub_1(rax, rsi);\n}\nif (a3 != 0) {\n  rax = a3;\n  rsi = 0;\n  sub_2(rax);\n}\nreturn 0;\n"
+        );
+        let read = text.replace("  rsi = 0;\n", "  sub_3(rsi);\n");
+        assert_eq!(run(&read), read);
+    }
+
+    /// A `while` whose variable is set right before it and stepped at the
+    /// end of its body is a `for`; one with a label in its body is not.
+    #[test]
+    fn a_counted_while_is_a_for() {
+        let text = "rcx = 0;\nwhile (rcx < a1) {\n  rax += rcx;\n  rcx += 1;\n}\nreturn rax;\n";
+        assert_eq!(
+            run(text),
+            "for (rcx = 0; rcx < a1; rcx += 1) {\n  rax += rcx;\n}\nreturn rax;\n"
+        );
+        let labelled =
+            "rcx = 0;\nwhile (rcx < a1) {\n  rax += rcx;\n  L_1:\n  rcx += 1;\n}\nreturn rax;\n";
+        assert_eq!(run(labelled), labelled);
+    }
+}

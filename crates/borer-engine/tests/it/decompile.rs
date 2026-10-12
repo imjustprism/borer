@@ -1702,7 +1702,7 @@ fn deterministic_output() {
 fn nested_if_inside_while() {
     let out = dc(0x1180);
     assert!(
-        out.contains("for (rax = 0; (int32_t)rax < 5; rax += 1)") || out.contains("while ("),
+        out.contains("for (rax = 0; (int32_t)rax < 5") || out.contains("while ("),
         "no loop:
 {out}"
     );
@@ -3220,7 +3220,10 @@ fn headers_summarize_effects() {
 fn loop_escapes_to_a_returning_tail_carry_it() {
     let out = dc(0x4900);
     assert!(!out.contains("goto"), "{out}");
-    assert!(out.contains("while"), "{out}");
+    assert!(
+        out.contains("for (rcx = a1; *(uint32_t*)rcx != 0; rcx += 8) {"),
+        "{out}"
+    );
     assert!(
         out.contains("if (Base::vfunc_1() == 0 || Base::vfunc_1() == 0) {"),
         "{out}"

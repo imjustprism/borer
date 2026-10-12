@@ -41,6 +41,7 @@ pub(crate) mod lift;
 mod lift_a64;
 mod line;
 mod liveness;
+mod loops;
 mod opaque;
 mod outline;
 mod panics;
