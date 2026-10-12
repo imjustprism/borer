@@ -849,19 +849,143 @@ pub(in crate::analysis::decompile) fn forwarded_reads(
     out.into_iter().collect()
 }
 
+/// Most functions [`preserved_volatiles`] reads under one callee, the
+/// callee included: past them it gives up and takes every volatile as
+/// clobbered.
+const PRESERVED_REACH: usize = 32;
+
+/// What one function's own instructions do to the registers, read once per
+/// function and overlay ([`own_writes`]).
+#[derive(Debug, Default)]
+pub(in crate::analysis::decompile) struct OwnWrites {
+    /// It leaves by a way no caller can follow: a call or jump to no
+    /// function of the image (an import, a register), an indirect jump that
+    /// is no jump table, a trap, or an instruction that does not decode.
+    leaves: bool,
+    /// The registers its instructions write, as canonical keys.
+    written: BTreeSet<Key>,
+    /// The function entries it calls or tail-jumps to.
+    callees: BTreeSet<u64>,
+}
+
+/// Reads what one function's own instructions write ([`OwnWrites`]),
+/// without following its calls.
+///
+/// # Arguments
+///
+/// * `ctx` - The program, its analysis and the decoder.
+/// * `target` - The function's entry.
+///
+/// # Returns
+///
+/// Its writes; a function that leaves when no function starts at `target`.
+fn own_writes(ctx: &Ctx<'_>, target: u64) -> std::sync::Arc<OwnWrites> {
+    ctx.analysis.derived.get_or_build_item(
+        "own_writes",
+        ctx.overlay_key,
+        target,
+        || {
+            let leaves = OwnWrites {
+                leaves: true,
+                ..OwnWrites::default()
+            };
+            let Some(f) = ctx.analysis.function(target).filter(|f| f.entry == target) else {
+                return leaves;
+            };
+            let entry_of = |t: u64| {
+                ctx.analysis
+                    .function(t)
+                    .is_some_and(|g| g.entry == t)
+                    .then_some(t)
+            };
+            let starts: BTreeSet<u64> = f.blocks.iter().map(|b| b.start).collect();
+            let mut factory = InstructionInfoFactory::new();
+            let mut out = OwnWrites::default();
+            for b in &f.blocks {
+                let mut va = b.start;
+                while va < b.end {
+                    let Some(i) = ctx.decode(va) else {
+                        return leaves;
+                    };
+                    va = i.next_ip();
+                    let onward = match i.flow_control() {
+                        FlowControl::Call | FlowControl::IndirectCall
+                            if crate::analysis::render::preserves_registers(
+                                ctx.analysis,
+                                ctx.overlay,
+                                &i,
+                            ) =>
+                        {
+                            Some(None)
+                        }
+                        FlowControl::Call | FlowControl::IndirectCall => {
+                            near_target(&i).and_then(entry_of).map(Some)
+                        }
+                        FlowControl::UnconditionalBranch => match near_target(&i) {
+                            Some(t) if starts.contains(&t) => Some(None),
+                            t => t.and_then(entry_of).map(Some),
+                        },
+                        FlowControl::IndirectBranch => ctx
+                            .analysis
+                            .jump_tables
+                            .contains_key(&i.ip())
+                            .then_some(None),
+                        FlowControl::Interrupt
+                        | FlowControl::Exception
+                        | FlowControl::XbeginXabortXend => None,
+                        FlowControl::Next
+                        | FlowControl::ConditionalBranch
+                        | FlowControl::Return => Some(None),
+                    };
+                    match onward {
+                        None => return leaves,
+                        Some(Some(t)) => {
+                            out.callees.insert(t);
+                        }
+                        Some(None) => {}
+                    }
+                    for ur in factory.info(&i).used_registers() {
+                        if matches!(
+                            ur.access(),
+                            OpAccess::Write
+                                | OpAccess::ReadWrite
+                                | OpAccess::CondWrite
+                                | OpAccess::ReadCondWrite
+                        ) {
+                            out.written
+                                .insert(Key::Reg(canon(ur.register(), ctx.bitness)));
+                        }
+                    }
+                }
+            }
+            out
+        },
+        |w| {
+            size_of::<OwnWrites>()
+                + w.written.len() * size_of::<Key>()
+                + w.callees.len() * size_of::<u64>()
+        },
+    )
+}
+
 /// Returns the volatile registers a direct callee leaves as it found them.
 ///
 /// A leaf function that never writes `r8` hands the caller's `r8` back, and
 /// a compiler that sees the leaf (link-time code generation) keeps using
-/// it: `mov r8, rcx; xor edx, edx; call leaf; mov [r8+0C0h], dl`. A callee
-/// is read whole, once per function and overlay: any call in it (but a
-/// stack probe or a cookie check), any jump out of it or through a
-/// register that is no jump table, any trap clobbers every volatile;
-/// otherwise the volatile registers no instruction of it writes survive.
-/// `rax` is left to [`crate::analysis::Function::preserves_rax`]. `xmm0`
-/// also survives a callee that hands it back untouched on every path to a
-/// `ret` ([`keeps_float`]): a stack-cookie check jumps out to a function
-/// that never returns when the cookie is wrong, and the double the caller
+/// it: `mov r8, rcx; xor edx, edx; call leaf; mov [r8+0C0h], dl`. The same
+/// compiler sees through a callee whose callees leave a register alone
+/// too, so the callee is read with every function it calls or tail-jumps
+/// to, each once ([`own_writes`]), up to [`PRESERVED_REACH`] of them:
+/// whoami's `mov r10d,eax; ...; call sub_14000d5bc; ...; sub edx,r10d`
+/// keeps `r10` across a callee that calls another, and neither writes it.
+/// A call (but a stack probe or a cookie check) or jump to no function of
+/// the image, a jump through a register that is no jump table, or a trap
+/// anywhere among them clobbers every volatile; otherwise the volatile
+/// registers no instruction among them writes survive. `rax` is left to
+/// [`crate::analysis::Function::preserves_rax`]. `xmm0` also survives a
+/// callee that hands it back untouched on every path to a `ret`
+/// ([`keeps_float`]): a stack-cookie check jumps out to a function that
+/// never returns when the cookie is wrong, and the double the caller
 /// computed is still in `xmm0` when it does return.
 ///
 /// # Arguments
@@ -882,58 +1006,33 @@ pub(in crate::analysis::decompile) fn preserved_volatiles(
         ctx.overlay_key,
         target,
         || {
-            let Some(f) = ctx.analysis.function(target).filter(|f| f.entry == target) else {
+            if ctx
+                .analysis
+                .function(target)
+                .is_none_or(|f| f.entry != target)
+            {
                 return Vec::new();
-            };
+            }
             let xmm0 = Key::Reg(Register::XMM0);
             let float = (ctx.bitness == 64
                 && ctx.conv.volatile.contains(&Register::XMM0)
                 && keeps_float(ctx, target))
             .then_some(xmm0);
-            let starts: BTreeSet<u64> = f.blocks.iter().map(|b| b.start).collect();
-            let mut factory = InstructionInfoFactory::new();
             let mut written: BTreeSet<Key> = BTreeSet::new();
-            for b in &f.blocks {
-                let mut va = b.start;
-                while va < b.end {
-                    let Some(i) = ctx.decode(va) else {
-                        return Vec::new();
-                    };
-                    va = i.next_ip();
-                    let leaves = match i.flow_control() {
-                        FlowControl::Call | FlowControl::IndirectCall => {
-                            !crate::analysis::render::preserves_registers(
-                                ctx.analysis,
-                                ctx.overlay,
-                                &i,
-                            )
+            let mut seen: BTreeSet<u64> = BTreeSet::from([target]);
+            let mut todo = vec![target];
+            while let Some(t) = todo.pop() {
+                let own = own_writes(ctx, t);
+                if own.leaves {
+                    return float.into_iter().collect();
+                }
+                written.extend(own.written.iter().copied());
+                for &c in &own.callees {
+                    if seen.insert(c) {
+                        if seen.len() > PRESERVED_REACH {
+                            return float.into_iter().collect();
                         }
-                        FlowControl::UnconditionalBranch => {
-                            near_target(&i).is_none_or(|t| !starts.contains(&t))
-                        }
-                        FlowControl::IndirectBranch => {
-                            !ctx.analysis.jump_tables.contains_key(&i.ip())
-                        }
-                        FlowControl::Interrupt
-                        | FlowControl::Exception
-                        | FlowControl::XbeginXabortXend => true,
-                        FlowControl::Next
-                        | FlowControl::ConditionalBranch
-                        | FlowControl::Return => false,
-                    };
-                    if leaves {
-                        return float.into_iter().collect();
-                    }
-                    for ur in factory.info(&i).used_registers() {
-                        if matches!(
-                            ur.access(),
-                            OpAccess::Write
-                                | OpAccess::ReadWrite
-                                | OpAccess::CondWrite
-                                | OpAccess::ReadCondWrite
-                        ) {
-                            written.insert(Key::Reg(canon(ur.register(), ctx.bitness)));
-                        }
+                        todo.push(c);
                     }
                 }
             }

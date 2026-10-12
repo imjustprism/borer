@@ -131,3 +131,36 @@ fn a_decompiled_read_of_a_register_no_line_sets_is_flagged() {
     assert!(unset.is_empty(), "{closed}\n{unset:?}");
     runs_alike(&p, TEXT + 0x10);
 }
+
+/// A register a callee and every function it calls leave alone keeps its
+/// value across the call.
+///
+/// The compiler that saw them all (link-time code generation) relies on
+/// it: the text reads the copy it made before the call, never a register
+/// no line sets.
+///
+/// `mov r10d,ecx; call f; mov eax,r10d; ret`, `f` is `sub rsp,0x28; call
+/// g; add rsp,0x28; ret` and `g` is `mov eax,1; ret`: neither writes `r10`.
+#[test]
+fn a_register_a_callees_callees_leave_alone_survives_the_call() {
+    let mut code = vec![
+        0x41, 0x89, 0xca, // ASM: mov r10d,ecx
+        0xe8, 0x18, 0x00, 0x00, 0x00, // ASM: call 0x1020
+        0x44, 0x89, 0xd0, // ASM: mov eax,r10d
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend([
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x40, 0xcc);
+    code.extend([0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax,1; ret
+    let p = program(&code, &[]);
+    let (text, unset) = text_of(&p, TEXT);
+    assert!(unset.is_empty(), "{text}\n{unset:?}");
+    assert!(text.contains("a1"), "{text}");
+    runs_alike(&p, TEXT);
+}

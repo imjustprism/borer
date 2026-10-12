@@ -4049,8 +4049,10 @@ fn a_32_bit_callee_returning_in_xmm0_binds_it() {
 /// after it is of a register the convention leaves undefined, never the
 /// call's result.
 ///
-/// `sub_401020` is `push esi; call sub_401040; pop esi; ret`; the caller
-/// is that of [`a_32_bit_callee_returning_in_xmm0_binds_it`].
+/// `sub_401020` is `push esi; call sub_401040; pop esi; ret`, and
+/// `sub_401040` clears `xmm0` (a callee whose callees leave a vector
+/// register alone hands it back as it found it); the caller is that of
+/// [`a_32_bit_callee_returning_in_xmm0_binds_it`].
 #[test]
 fn a_32_bit_call_binds_no_xmm0_it_does_not_return() {
     let mut code = vec![
@@ -4068,6 +4070,7 @@ fn a_32_bit_call_binds_no_xmm0_it_does_not_return() {
         0xc3, // ASM: ret
     ]);
     code.resize(0x40, 0xcc);
+    code.extend([0x0f, 0x57, 0xc0]); // ASM: xorps xmm0,xmm0
     code.push(0xc3); // ASM: ret
     let text = dc(&code);
     assert!(!text.contains("xmm0 = sub_401020"), "{text}");
