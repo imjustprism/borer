@@ -8,7 +8,8 @@
 
 Steps, in order: the unpushed commits' messages (scripts/commits.py), cargo fmt, cargo clippy -D warnings, cargo test, cargo doc
 with warnings as errors (private items included), cargo deny (offline subset),
-the dogfood sweep over a real binary, typos, ruff check + format, the type
+the dogfood sweep over a real binary, the readability benchmark against its
+baseline (scripts/readability.py), typos, ruff check + format, the type
 library regenerated (scripts/typelib.py --check),
 scripts/smoke.py, scripts/agent_eval.py. The first failure stops the run and the exit status is
 non-zero. Tools that are not installed are reported and skipped, never
@@ -260,6 +261,27 @@ def main(argv: list[str]) -> int:
             )
         else:
             print(f"[skip] dogfood x86: no {x86} on this machine")
+        # The pseudo-C's noise and distance to source against the baseline
+        # (scripts/readability.py): a rate that rose beyond its tolerance
+        # fails. Inputs this machine lacks (the sqlite builds without
+        # BORER_READABILITY_CORPUS, the Windows binaries elsewhere) are
+        # skipped by the script itself.
+        steps.append(
+            (
+                "readability",
+                [
+                    sys.executable,
+                    os.path.join("scripts", "readability.py"),
+                    "run",
+                    server,
+                    "--baseline",
+                    os.path.join("scripts", "readability.tsv"),
+                    "--quiet",
+                ],
+                None,
+                None,
+            )
+        )
         steps += [
             (
                 "doc",
