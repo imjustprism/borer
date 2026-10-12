@@ -266,10 +266,10 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
 ## Limits
 
 - Only x86 and x86-64 are decompiled. An arm64 Mach-O, ELF or PE loads
-  its sections and symbols, disassembles, and has its functions, blocks
-  and calls discovered (`functions`, `function`, `disassemble_function`,
-  `cfg`, `callgraph`, `xrefs` on calls), but jump tables, data references
-  and import stubs are not resolved yet. Its code runs under
+  its sections and symbols, disassembles, and has its functions, blocks,
+  calls, jump tables, import stubs and data references discovered
+  (`functions`, `function`, `disassemble_function`, `cfg`, `callgraph`,
+  `xrefs`, `find_function_by_string`). Its code runs under
   `borer://emulate` and `borer://run` in an arm64 machine that models the
   integer, memory and branch instructions and stops on anything else (no
   floating-point arithmetic, no vector lanes, no system calls but exit);
