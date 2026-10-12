@@ -164,3 +164,32 @@ fn a_register_a_callees_callees_leave_alone_survives_the_call() {
     assert!(text.contains("a1"), "{text}");
     runs_alike(&p, TEXT);
 }
+
+/// A position a function's signature lists below a parameter it reads is a
+/// parameter too, when the function only hands it on: the call passes it
+/// by its name, not as a register no line sets.
+///
+/// `sub rsp,0x28; mov r9,[r9]; call f; add rsp,0x28; ret` with `f` reading
+/// all four argument registers (`lea rax,[rcx+rdx]; add rax,r8; add
+/// rax,r9; ret`).
+#[test]
+fn a_parameter_a_function_only_hands_on_is_named() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x4d, 0x8b, 0x09, // ASM: mov r9,[r9]
+        0xe8, 0x34, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([
+        0x48, 0x8d, 0x04, 0x11, // ASM: lea rax,[rcx+rdx]
+        0x4c, 0x01, 0xc0, // ASM: add rax,r8
+        0x4c, 0x01, 0xc8, // ASM: add rax,r9
+        0xc3, // ASM: ret
+    ]);
+    let p = program(&code, &[]);
+    let (text, unset) = text_of(&p, TEXT);
+    assert!(unset.is_empty(), "{text}\n{unset:?}");
+    assert!(text.contains("(a1, a2, a3, "), "{text}");
+}

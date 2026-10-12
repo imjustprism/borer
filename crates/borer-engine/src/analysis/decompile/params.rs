@@ -242,13 +242,34 @@ pub(super) fn pointee_type(widths: &BTreeSet<usize>, offsets: &BTreeSet<i64>) ->
 ///
 /// The parameters sit in their registers; a funclet also has `ebp` at its
 /// parent's frame, the word below the parent's return address, so the
-/// parent's locals read under the parent's names.
+/// parent's locals read under the parent's names. A position the
+/// signature lists below a parameter the body reads holds a parameter
+/// too, even when the body only passes it on: a thunk that hands `rdx`,
+/// `r8` and the `r9` it reads to its callee takes `a2` and `a3`, and its
+/// call passes them by those names, not as registers no line set.
 ///
 /// # Arguments
 ///
 /// * `ctx` - The convention, the parameters and the funclet, if any.
 pub(super) fn entry_env(ctx: &Ctx<'_>) -> Env {
     let mut env = Env::entry_with_params(ctx.conv, &ctx.params);
+    let ints = if ctx.conv.float_seq {
+        ctx.conv.float_base(&ctx.params)
+    } else {
+        ctx.arg_count
+    };
+    for (i, r) in ctx.conv.args.iter().enumerate().take(ints) {
+        let float = (!ctx.conv.float_seq)
+            .then(|| ctx.conv.float_args.get(i))
+            .flatten();
+        if ctx.params.contains(r) || float.is_some_and(|f| ctx.params.contains(f)) {
+            continue;
+        }
+        if let Ok(pos) = u8::try_from(i) {
+            env.vals.insert(Key::Reg(*r), Expr::Var(Key::Param(pos)));
+            env.unset.remove(&Key::Reg(*r));
+        }
+    }
     for &(reg, value) in &ctx.assume {
         env.vals.insert(Key::Reg(reg), Expr::Const(value));
     }
