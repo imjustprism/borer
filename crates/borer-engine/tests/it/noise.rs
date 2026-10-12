@@ -164,3 +164,28 @@ fn a_float_callee_still_binds_its_result() {
     let text = decompiled(&p, 0x401000);
     assert!(text.contains("xmm0 = sub_401020();"), "{text}");
 }
+
+/// An import slot the code reads as a value is named for its import and
+/// declared as no variable.
+///
+/// `mov rax,[frob]; mov [rcx],rax; ret`, where 0x402000 is the import
+/// slot of `Foo.dll!frob`: the text stores `frob` and listed `uint64_t
+/// frob; // @ 0x402000` among its locals, as if the import were one.
+#[test]
+fn an_import_slot_is_declared_as_no_variable() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let code = [
+        0x48, 0x8b, 0x05, 0xf9, 0x0f, 0x00, 0x00, // ASM: mov rax, [rip+0xff9]
+        0x48, 0x89, 0x01, // ASM: mov [rcx], rax
+        0xc3, // ASM: ret
+    ];
+    let mut p = image(Arch::X86_64, &code, &[0u8; 8]);
+    p.symbols = vec![Symbol {
+        name: "Foo.dll!frob".to_owned(),
+        addr: 0x402000,
+        kind: SymbolKind::Import,
+    }];
+    let text = decompiled(&p, 0x401000);
+    assert!(text.contains("= frob;"), "{text}");
+    assert!(!text.contains("// @ 0x402000"), "{text}");
+}

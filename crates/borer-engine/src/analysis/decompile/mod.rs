@@ -2031,7 +2031,11 @@ fn decompile_in<L: Lifter>(
     }
     for (addr, ty) in &ctx.globals {
         let g = names.key(Key::Global(*addr, ty.bits()));
-        if used.contains(g.as_str()) {
+        // INVARIANT: an import's slot is named for the function it holds,
+        // which the text calls by that name like any other function, so it
+        // is no variable to declare; one the overlay renamed still is.
+        let import = names.import_at(*addr).is_some_and(|n| n == g);
+        if used.contains(g.as_str()) && !import {
             match expr::tls_slot(*addr) {
                 Some(off) => {
                     let _ = writeln!(out, "{} {g}; // TLS slot {off:#x}", ty.name());
