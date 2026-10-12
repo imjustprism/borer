@@ -1423,7 +1423,7 @@ fn decompile_in<L: Lifter>(
         .enumerate()
         .map(|(i, b)| (b.start, i))
         .collect();
-    let succs: Vec<Vec<usize>> = blocks
+    let mut succs: Vec<Vec<usize>> = blocks
         .iter()
         .map(|b| {
             b.successors
@@ -1448,6 +1448,18 @@ fn decompile_in<L: Lifter>(
         assume,
     );
     let code = L::decode_blocks(&ctx, f);
+    let twins = twin_tests::<L>(&code, &preds);
+    for (&d, &o) in &twins {
+        for p in std::mem::take(&mut preds[d]) {
+            for s in &mut succs[p] {
+                if *s == d {
+                    *s = o;
+                }
+            }
+            preds[o].push(p);
+        }
+    }
+    let at = |va: &u64| idx.get(va).map(|&i| twins.get(&i).copied().unwrap_or(i));
     ctx.seh_frame = L::seh_frame(&ctx, &code);
     ctx.go_check = L::go_check(&ctx, f.entry, &code, &idx);
     // INVARIANT: the parameters are read once per function and overlay
@@ -1565,7 +1577,7 @@ fn decompile_in<L: Lifter>(
             continue;
         };
         let dead = if taken { fall } else { target };
-        let Some(&d) = idx.get(&dead) else { continue };
+        let Some(d) = at(&dead) else { continue };
         succs_live[b].retain(|s| *s != d);
         preds_live[d].retain(|p| *p != b);
     }
@@ -1577,7 +1589,7 @@ fn decompile_in<L: Lifter>(
                 rec.switch_const
                     .and_then(|k| blocks.get(b).and_then(|blk| table_target(analysis, blk, k)))
             })
-            .and_then(|t| idx.get(&t).copied())
+            .and_then(|t| at(&t))
         else {
             continue;
         };
@@ -1599,6 +1611,7 @@ fn decompile_in<L: Lifter>(
         assumes: &assumes,
         emitted: vec![false; n],
         dead: vec![false; n],
+        twins,
         bound: n,
         skipped: BTreeSet::new(),
         loops: Vec::new(),
@@ -1617,7 +1630,11 @@ fn decompile_in<L: Lifter>(
         }
         work.extend(st.succs[b].iter().copied());
     }
-    let unreachable = reached.iter().filter(|r| !**r).count();
+    let unreachable = reached
+        .iter()
+        .enumerate()
+        .filter(|(b, r)| !**r && !st.twins.contains_key(b))
+        .count();
     for (b, r) in reached.iter().enumerate() {
         if !r {
             st.emitted[b] = true;

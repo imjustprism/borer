@@ -3121,6 +3121,30 @@ fn a_call_tested_once_is_written_in_its_condition() {
     );
 }
 
+/// Two copies of one test on two paths are one test, where the paths meet.
+///
+/// `test cl,1; je A; call F1; test bl,2; je E; T: call F2; jmp E; A: test
+/// bl,2; jne T; E: ret` (`F1` and `F2` each `mov eax,1; ret`) tests `bl &
+/// 2` after each arm of the first `if`, the copies sending each outcome to
+/// the same blocks; read as one block, the two `if`s follow one another and
+/// the test is written once.
+#[test]
+fn copies_of_one_test_are_one_test() {
+    let mut code = vec![
+        0xf6, 0xc1, 0x01, 0x74, 0x11, 0xe8, 0x36, 0x00, 0x00, 0x00, 0xf6, 0xc3, 0x02, 0x74, 0x0c,
+        0xe8, 0x3c, 0x00, 0x00, 0x00, 0xeb, 0x05, 0xf6, 0xc3, 0x02, 0x75, 0xf4, 0xc3,
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    code.resize(0x50, 0xcc);
+    code.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains("goto"), "{text}");
+    assert_eq!(text.matches("sub_140001050(").count(), 1, "{text}");
+    assert_eq!(text.matches("& 2").count(), 1, "{text}");
+}
+
 /// A loop whose body ends `if (c) break;` is a `do`/`while` on `!c`.
 ///
 /// `xor eax,eax; xor ecx,ecx; test r8d,r8d; je X; L: cmp byte [rdx+rcx],0;

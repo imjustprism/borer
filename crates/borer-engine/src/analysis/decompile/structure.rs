@@ -23,6 +23,9 @@ pub(super) struct Emit<'e, L: Lifter> {
     pub(super) assumes: &'e [Option<(Key, u64)>],
     /// Blocks whose text has been written (or that must never be written).
     pub(super) emitted: Vec<bool>,
+    /// Blocks that make the same test as an earlier block, each with that
+    /// block ([`twin_tests`]): every jump to one lands on the other.
+    pub(super) twins: BTreeMap<usize, usize>,
     /// Blocks nothing reaches once the folded branches lost their dead
     /// edges: marked emitted from the start, with no edges in or out.
     pub(super) dead: Vec<bool>,
@@ -131,7 +134,8 @@ impl<L: Lifter> Emit<'_, L> {
     ///
     /// * `va` - A block start address.
     pub(super) fn index_of(&self, va: u64) -> Option<usize> {
-        self.blocks.iter().position(|b| b.start == va)
+        let i = self.blocks.iter().position(|b| b.start == va)?;
+        Some(self.twins.get(&i).copied().unwrap_or(i))
     }
 
     /// Tells whether no path of the text can reach block `b` any more.
@@ -1232,6 +1236,81 @@ pub(super) fn body_len(instrs: &[Instruction]) -> usize {
         .count()
 }
 
+/// Most instructions a block holds for [`twin_tests`] to pair it.
+pub(super) const TWIN_MAX_INSTRS: usize = 4;
+
+/// Pairs each small test block with an earlier block making the same test.
+///
+/// The test is [`Lifter::same_test`]'s, and the later block's predecessors
+/// then jump to the earlier block instead. A compiler that tests one value twice on two paths (`if (x & 2)` after
+/// both arms of an `if`) leaves two copies of the test, each a block of its
+/// own, and the two paths can only meet again by a jump; read as one block
+/// they join where the source did. The same instructions sending each
+/// outcome to the same blocks compute the same thing from the same state,
+/// so the merge is exact. Pairs where one block's predecessor also reaches
+/// the other are left alone, so no branch gains two edges to one block.
+///
+/// # Arguments
+///
+/// * `code` - Each block's instructions.
+/// * `preds` - Each block's predecessors.
+///
+/// # Returns
+///
+/// The later block of each pair, mapped to the earlier.
+pub(super) fn twin_tests<L: Lifter>(
+    code: &[Vec<L::Insn>],
+    preds: &[Vec<usize>],
+) -> BTreeMap<usize, usize> {
+    let mut twins = BTreeMap::new();
+    for (b, instrs) in code.iter().enumerate() {
+        if instrs.len() > TWIN_MAX_INSTRS || preds.get(b).is_none_or(Vec::is_empty) {
+            continue;
+        }
+        let first = (0..b).find(|&a| {
+            !twins.contains_key(&a)
+                && code.get(a).is_some_and(|other| L::same_test(other, instrs))
+                && preds.get(a).is_some_and(|pa| {
+                    preds
+                        .get(b)
+                        .is_some_and(|pb| pb.iter().all(|p| *p != a && !pa.contains(p)))
+                })
+        });
+        if let Some(a) = first {
+            twins.insert(b, a);
+        }
+    }
+    twins
+}
+
+/// Tells whether two x86 blocks make the same test.
+///
+/// They hold the same instructions up to a conditional branch at the end
+/// of each, the branches sending each outcome to the same address (the
+/// same condition and targets, or the opposite condition with the taken
+/// and fall-through sides swapped).
+///
+/// # Arguments
+///
+/// * `a` - One block's instructions.
+/// * `b` - The other's.
+pub(super) fn same_test(a: &[Instruction], b: &[Instruction]) -> bool {
+    let (Some((ja, ha)), Some((jb, hb))) = (a.split_last(), b.split_last()) else {
+        return false;
+    };
+    if ha != hb
+        || ja.flow_control() != FlowControl::ConditionalBranch
+        || jb.flow_control() != FlowControl::ConditionalBranch
+        || ja.condition_code() == ConditionCode::None
+    {
+        return false;
+    }
+    let (ta, fa) = (ja.near_branch_target(), ja.next_ip());
+    let (tb, fb) = (jb.near_branch_target(), jb.next_ip());
+    (ja.mnemonic() == jb.mnemonic() && ta == tb && fa == fb)
+        || (ja.code().negate_condition_code().mnemonic() == jb.mnemonic() && ta == fb && fa == tb)
+}
+
 /// Longest chain of one-way blocks ending in a terminal block copied whole.
 pub(super) const DUP_CHAIN_MAX: usize = 3;
 
@@ -1547,10 +1626,9 @@ pub(super) fn closed_run_with<L: Lifter>(
 ///
 /// `goto L_<va>;` when a block starts there, else `goto *<va>;`.
 pub(super) fn jump_to<L: Lifter>(st: &Emit<'_, L>, va: u64) -> String {
-    if st.index_of(va).is_some() {
-        goto(va)
-    } else {
-        format!("goto *{va:#x};")
+    match st.index_of(va) {
+        Some(i) => goto(st.start(i)),
+        None => format!("goto *{va:#x};"),
     }
 }
 

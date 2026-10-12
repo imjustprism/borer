@@ -573,11 +573,14 @@ pub(super) fn copy_chain<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, start: 
     while seen.insert(cur) {
         let copy = run_block(ctx, st, cur);
         lines.extend(copy.lines.iter().cloned());
-        let next = copy.goto.or_else(|| {
-            runs_on(st, cur)
-                .then(|| st.succs[cur].first().map(|&s| st.start(s)))
-                .flatten()
-        });
+        let next = copy
+            .goto
+            .map(|t| st.index_of(t).map_or(t, |n| st.start(n)))
+            .or_else(|| {
+                runs_on(st, cur)
+                    .then(|| st.succs[cur].first().map(|&s| st.start(s)))
+                    .flatten()
+            });
         let Some(va) = next else {
             if let Some(t) = falls_outside(ctx, st, cur) {
                 lines.push(jump_to(st, t));
@@ -1528,7 +1531,7 @@ pub(super) fn emit_run<L: Lifter>(
             let copy = run_block(ctx, st, b);
             kept.extend(copy.lines.iter().cloned());
             if let Some(t) = copy.goto {
-                kept.push(goto(t));
+                kept.push(jump_to(st, t));
             } else if runs_on(st, b)
                 && let Some(&s) = st.succs[b].first()
             {

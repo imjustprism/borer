@@ -161,6 +161,15 @@ pub(super) trait Lifter {
     /// * `instrs` - The block's instructions.
     fn body_len(instrs: &[Self::Insn]) -> usize;
 
+    /// Tells whether two blocks make the same test: the same instructions,
+    /// ending in branches that send each outcome to the same block.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - One block's instructions.
+    /// * `b` - The other's.
+    fn same_test(a: &[Self::Insn], b: &[Self::Insn]) -> bool;
+
     /// Tells whether the function runs under a structured exception handler
     /// whose bookkeeping renders as nothing.
     ///
@@ -343,6 +352,10 @@ impl Lifter for X86 {
         body_len(instrs)
     }
 
+    fn same_test(a: &[Instruction], b: &[Instruction]) -> bool {
+        same_test(a, b)
+    }
+
     fn seh_frame(ctx: &Ctx<'_>, code: &[Vec<Instruction>]) -> bool {
         seh_frame(ctx, code)
     }
@@ -473,6 +486,10 @@ impl Lifter for A64 {
 
     fn body_len(instrs: &[a64::Insn]) -> usize {
         lift_a64::body_len(instrs)
+    }
+
+    fn same_test(_a: &[a64::Insn], _b: &[a64::Insn]) -> bool {
+        false
     }
 
     fn seh_frame(_ctx: &Ctx<'_>, _code: &[Vec<a64::Insn>]) -> bool {
