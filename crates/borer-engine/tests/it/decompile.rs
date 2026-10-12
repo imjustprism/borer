@@ -5652,6 +5652,89 @@ fn a_narrow_store_shows_no_mask_of_what_it_drops() {
     assert!(!text.contains("& 0xff"), "{text}");
 }
 
+/// The `/GS` cookie leaves the text, and the header says it was folded.
+///
+/// The prologue stores the cookie mixed with the stack pointer into a
+/// slot and the epilogue hands the slot, mixed again, to the cookie check,
+/// an unnamed function of the CRT's shape (`cmp rcx, [cookie]; jne fail;
+/// rol rcx, 16`), which is named for it; the text keeps the function's
+/// work and runs as the binary does.
+#[test]
+fn a_gs_cookie_folds_out_of_the_text() {
+    let code = [
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp, 0x28
+        0x48, 0x8b, 0x05, 0xf5, 0x0f, 0x00, 0x00, // ASM: mov rax, [rip + 0xff5] (cookie)
+        0x48, 0x31, 0xe0, // ASM: xor rax, rsp
+        0x48, 0x89, 0x44, 0x24, 0x20, // ASM: mov [rsp + 0x20], rax
+        0x48, 0x8d, 0x41, 0x01, // ASM: lea rax, [rcx + 1]
+        0x48, 0x8b, 0x4c, 0x24, 0x20, // ASM: mov rcx, [rsp + 0x20]
+        0x48, 0x31, 0xe1, // ASM: xor rcx, rsp
+        0xe8, 0x1c, 0x00, 0x00, 0x00, // ASM: call checker
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp, 0x28
+        0xc3, // ASM: ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 (padding)
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 (padding)
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 (padding)
+        0x48, 0x3b, 0x0d, 0xb9, 0x0f, 0x00, 0x00, // ASM: cmp rcx, [rip + 0xfb9] (checker)
+        0x75, 0x10, // ASM: jne fail
+        0x48, 0xc1, 0xc1, 0x10, // ASM: rol rcx, 0x10
+        0x66, 0xf7, 0xc1, 0xff, 0xff, // ASM: test cx, 0xffff
+        0x75, 0x01, // ASM: jne fail2
+        0xc3, // ASM: ret
+        0x48, 0xc1, 0xc9, 0x10, // ASM: ror rcx, 0x10 (fail2)
+        0xcc, // ASM: int3 (fail)
+    ];
+    let cookie = 0x2b99_2ddf_a232u64.to_le_bytes();
+    let p = program64_with_data(&code, &cookie);
+    let text = runs_agree(&p, 0x1_4000_1000);
+    assert!(text.contains("// folded: /GS cookie"), "{text}");
+    assert!(!text.contains("security_check_cookie("), "{text}");
+    assert!(!text.contains(" ^ "), "{text}");
+    assert!(text.contains("return a1 + 1;"), "{text}");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.function(0x1_4000_1040).and_then(|f| f.name.clone()),
+        Some("__security_check_cookie".to_owned())
+    );
+}
+
+/// A Linux stack canary leaves the text, and the header says it was folded.
+///
+/// The prologue copies `fs:0x28` into a slot and the epilogue compares the
+/// slot with it, calling `__stack_chk_fail` on a mismatch; the text keeps
+/// the function's work alone.
+#[test]
+fn a_linux_stack_canary_folds_out_of_the_text() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let code = [
+        0x48, 0x83, 0xec, 0x18, // ASM: sub rsp, 0x18
+        0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: mov rax, fs:[0x28]
+        0x48, 0x89, 0x44, 0x24, 0x10, // ASM: mov [rsp + 0x10], rax
+        0x8d, 0x41, 0x01, // ASM: lea eax, [rcx + 1]
+        0x64, 0x48, 0x8b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: mov rdx, fs:[0x28]
+        0x48, 0x3b, 0x54, 0x24, 0x10, // ASM: cmp rdx, [rsp + 0x10]
+        0x75, 0x05, // ASM: jne fail
+        0x48, 0x83, 0xc4, 0x18, // ASM: add rsp, 0x18
+        0xc3, // ASM: ret
+        0xe8, 0x11, 0x00, 0x00, 0x00, // ASM: call __stack_chk_fail (fail)
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 (padding)
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 (padding)
+        0xcc, // ASM: int3 (padding)
+        0x0f, 0x0b, // ASM: ud2 (__stack_chk_fail)
+    ];
+    let mut p = program64(&code);
+    p.symbols.push(Symbol {
+        name: "__stack_chk_fail".to_owned(),
+        addr: 0x1_4000_1040,
+        kind: SymbolKind::Local,
+    });
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("// folded: stack canary"), "{text}");
+    assert!(!text.contains("fs + 0x28"), "{text}");
+    assert!(!text.contains("__stack_chk_fail("), "{text}");
+    assert!(text.contains("return a1 + 1;"), "{text}");
+}
+
 /// A 16-bit rotate by 8 swaps the half word's bytes and reads as `bswap`.
 #[test]
 fn a_half_word_rotate_by_eight_reads_as_a_byte_swap() {

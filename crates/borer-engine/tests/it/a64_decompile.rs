@@ -312,6 +312,54 @@ fn arm64_division_idioms_read_as_their_operators() {
     }
 }
 
+/// Where the fifth set of routines is placed, its guard a page above.
+const BASE5: u64 = 0x5_0000;
+
+/// A function under a stack protector whose guard is a global, at
+/// [`BASE5`]: `f(a) = a + 1`, the guard copied into `[sp, #8]` and
+/// compared before the return, `__stack_chk_fail` at `+0x40`.
+const ROUTINES5: [u32; 17] = [
+    0xd100_83ff, // ASM: sub sp, sp, #0x20
+    0xa901_7bfd, // ASM: stp x29, x30, [sp, #0x10]
+    0x9100_43fd, // ASM: add x29, sp, #0x10
+    0xb000_0008, // ASM: adrp x8, BASE5 + 0x1000
+    0xf940_0108, // ASM: ldr x8, [x8]
+    0xf900_07e8, // ASM: str x8, [sp, #0x8]
+    0x1100_0400, // ASM: add w0, w0, #0x1
+    0xb000_0008, // ASM: adrp x8, BASE5 + 0x1000
+    0xf940_0108, // ASM: ldr x8, [x8]
+    0xf940_07e9, // ASM: ldr x9, [sp, #0x8]
+    0xeb09_011f, // ASM: cmp x8, x9
+    0x5400_0081, // ASM: b.ne f+0x3c
+    0xa941_7bfd, // ASM: ldp x29, x30, [sp, #0x10]
+    0x9100_83ff, // ASM: add sp, sp, #0x20
+    0xd65f_03c0, // ASM: ret
+    0x9400_0001, // ASM: bl __stack_chk_fail
+    0x1400_0000, // ASM: b . (__stack_chk_fail)
+];
+
+/// A stack canary whose guard is a global leaves the arm64 text, and the
+/// statements it left still agree with the machine.
+#[test]
+fn an_arm64_stack_canary_folds_out_of_the_text() {
+    let mut bytes: Vec<u8> = ROUTINES5.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let len = u64::try_from(bytes.len()).expect("a small image");
+    bytes.extend_from_slice(&0x5a5a_5a5a_1234_5678u64.to_le_bytes());
+    let text = Section::mapped(".text", BASE5, 0, len, false, true);
+    let data = Section::mapped(".data", BASE5 + 0x1000, len, 8, true, false);
+    let mut p = Program::raw(bytes, Arch::Arm64, 0, Some(BASE5), vec![text, data]);
+    p.symbols = vec![local("f", BASE5), local("__stack_chk_fail", BASE5 + 0x40)];
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let f = decompile(&p, &a, &o, BASE5).expect("decompiles");
+    assert!(f.contains("// folded: stack canary"), "{f}");
+    assert!(!f.contains("__stack_chk_fail("), "{f}");
+    assert!(f.contains("return a1 + 1;"), "{f}");
+    let r = replay_function(&p, &a, BASE5, 1);
+    assert!(r.checked > 0, "{}", replay_tsv(&r));
+    assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
+}
+
 /// A `w` write leaves no mask where every reader takes 32 bits, and a whole
 /// read of the register is cut to the 32 bits the machine kept.
 ///

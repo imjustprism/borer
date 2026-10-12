@@ -606,7 +606,9 @@ fn a_cdecl_call_passes_what_its_caller_cleans_up() {
 /// `__report_gsfailure` (`push ebp; mov ebp,esp; mov [0x402004],ecx; lea
 /// eax,[ebp+8]; mov [0x402008],eax; ud2`). Its address of the word above
 /// the return address made the check take a stack argument, and the call
-/// passed the caller's local at the top of the stack as one.
+/// passed the caller's local at the top of the stack as one. The check is
+/// the cookie check by its shape, which preserves every register and
+/// takes `ecx` alone, and the text folds it.
 #[test]
 fn a_callee_popping_nothing_takes_no_stack_argument() {
     let mut code = vec![
@@ -634,7 +636,8 @@ fn a_callee_popping_nothing_takes_no_stack_argument() {
         0x0f, 0x0b, // ASM: ud2
     ]);
     let text = dc(&code);
-    assert!(text.contains("sub_401040(5);"), "{text}");
+    assert!(text.contains("// folded: /GS cookie, 1 check"), "{text}");
+    assert!(!text.contains('9'), "{text}");
 }
 
 /// A 32-bit function whose exits all leave a double in `xmm0`, which its

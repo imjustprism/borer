@@ -27,7 +27,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{Scope, ScopedJoinHandle};
 
 use crate::isa::x86::{
-    Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
+    Code, ConditionCode, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind,
+    Register,
 };
 
 use super::switch_index::{TableBound, check_bound, index_bound, table_index};
@@ -44,6 +45,9 @@ const FUEL_MIN: u64 = 2_000_000;
 /// Most instructions in an MSVC epilogue helper: the unlink, the pops, the
 /// frame's release and the return.
 const EPILOG_INSTRS_MAX: usize = 12;
+/// Most instructions in the `/GS` cookie check: the compare, the two
+/// tests of the x64 form, the rotates back and the jump to the report.
+const COOKIE_CHECK_INSTRS_MAX: usize = 10;
 /// The 32-bit stack probe's opening, `push ecx; lea ecx,[esp+4]; sub
 /// ecx,eax`: MSVC's `_chkstk` and `_alloca_probe` are that in every
 /// runtime version.
@@ -1698,6 +1702,9 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         // caller's registration; a function of that shape is the helper.
         if f.name.is_none() && f.instr_count <= EPILOG_INSTRS_MAX {
             f.name = epilog_helper_name(program, bitness, f.entry).map(str::to_owned);
+        }
+        if f.name.is_none() && f.instr_count <= COOKIE_CHECK_INSTRS_MAX {
+            f.name = cookie_check_name(program, bitness, f.entry).map(str::to_owned);
         }
         if f.name.is_some() && f.name_source == NameSource::None {
             f.name_source = NameSource::Helper;
@@ -3473,6 +3480,57 @@ pub(crate) fn epilog_helper_name(program: &Program, bitness: u32, va: u64) -> Op
         -0xc => Some("__EH_epilog3"),
         _ => None,
     }
+}
+
+/// Names the `/GS` cookie check at `va` by its first three instructions.
+///
+/// `__security_check_cookie` compares its argument with the cookie
+/// global and jumps to the failure report when they differ: on x64 `cmp
+/// rcx, [cookie]; jne fail; rol rcx, 16` (its second test checks the top
+/// word is clear), on x86 `cmp ecx, [cookie]; jne fail; ret`. A function of
+/// that shape returns its argument register and every other one as it
+/// found them, which the decompiler reads it by. The name is the CRT's
+/// own.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `bitness` - Decoder bitness.
+/// * `va` - The function's entry.
+///
+/// # Returns
+///
+/// The checker's name, or `None` when the code at `va` does not open like
+/// one.
+pub(crate) fn cookie_check_name(program: &Program, bitness: u32, va: u64) -> Option<&'static str> {
+    let first = decode_at(program, bitness, va)?;
+    let second = decode_at(program, bitness, first.next_ip())?;
+    let third = decode_at(program, bitness, second.next_ip())?;
+    let arg = if bitness == 64 {
+        Register::RCX
+    } else {
+        Register::ECX
+    };
+    let compares = first.mnemonic() == Mnemonic::Cmp
+        && first.op0_kind() == OpKind::Register
+        && first.op0_register() == arg
+        && first.op1_kind() == OpKind::Memory
+        && matches!(
+            first.memory_base(),
+            Register::None | Register::RIP | Register::EIP
+        )
+        && first.memory_index() == Register::None
+        && first.segment_prefix() == Register::None;
+    let differs = second.flow_control() == FlowControl::ConditionalBranch
+        && second.condition_code() == ConditionCode::ne;
+    let then = if bitness == 64 {
+        third.mnemonic() == Mnemonic::Rol
+            && third.op0_kind() == OpKind::Register
+            && third.op0_register() == Register::RCX
+    } else {
+        third.flow_control() == FlowControl::Return
+    };
+    (compares && differs && then).then_some("__security_check_cookie")
 }
 
 /// Most distinct values kept for one parameter.

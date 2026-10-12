@@ -27,6 +27,7 @@
 
 mod arch;
 mod asserts;
+mod canary;
 mod ctext;
 mod declared;
 mod emit;
@@ -1569,6 +1570,11 @@ fn decompile_in<L: Lifter>(
     } else {
         body
     };
+    let (body, canary) = if cleanup {
+        canary::fold(&body)
+    } else {
+        (body, None)
+    };
     let body = if returns_nothing {
         drop_dead_results(&body, result_reg)
     } else {
@@ -1789,6 +1795,9 @@ fn decompile_in<L: Lifter>(
     }
     if let Some((_, folded)) = &ctx.go_check {
         let _ = writeln!(out, "// go stack check folded: {folded}");
+    }
+    if let Some(folded) = &canary {
+        let _ = writeln!(out, "// folded: {}", folded.note());
     }
     if let Some(table) = enum_table(&body, &params) {
         /// Most members written into the header line.

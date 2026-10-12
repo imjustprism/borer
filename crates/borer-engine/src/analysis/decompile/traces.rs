@@ -272,7 +272,8 @@ impl Names {
 enum Quiet {
     /// Written as the call it is.
     Shown,
-    /// Left out: it does nothing but return.
+    /// Left out: it does nothing but return, or it checks a stack
+    /// protector the text folded.
     Dropped,
     /// Read in place or called through the register it jumps through:
     /// the text writes another call, or none.
@@ -283,7 +284,7 @@ enum Quiet {
 ///
 /// # Arguments
 ///
-/// * `notes` - The text's `// note:` header lines.
+/// * `notes` - The text's `// note:` and `// folded:` header lines.
 /// * `name` - The callee's full name.
 fn quiet(notes: &[&str], name: &str) -> Quiet {
     let listed = |list: &str| {
@@ -293,6 +294,14 @@ fn quiet(notes: &[&str], name: &str) -> Quiet {
             || list.contains(&format!(", {name}, "))
     };
     for line in notes {
+        if let Some(folded) = line.strip_prefix("// folded: ")
+            && let Some((list, _)) = folded
+                .split_once("; calls to ")
+                .and_then(|(_, r)| r.split_once(" are left out"))
+            && listed(list)
+        {
+            return Quiet::Dropped;
+        }
         let Some(note) = line.strip_prefix("// note: ") else {
             continue;
         };
@@ -1451,7 +1460,7 @@ pub fn check(
     let notes: Vec<&str> = text
         .lines()
         .take_while(|l| l.starts_with("//"))
-        .filter(|l| l.starts_with("// note: "))
+        .filter(|l| l.starts_with("// note: ") || l.starts_with("// folded: "))
         .collect();
     let mut names = Names::default();
     let (mut bin, heads) = binary_graph(program, analysis, overlay, f, live, &notes, &mut names);
