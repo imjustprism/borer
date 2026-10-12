@@ -197,7 +197,7 @@ fn collected(p: &Program, a: &Analysis, o: &Overlay) -> Arc<Collected> {
 /// arguments those generator runs pass to imported APIs and syscalls
 /// (decoded when the emulator services the call), the strings a decoder
 /// produces when run at each of its call sites
-/// ([`decoded_strings`](super::decoded::decoded_strings)), and the string
+/// ([`decoded_strings`]), and the string
 /// arguments of the APIs that name a mutex, a pipe, a key, a file or
 /// a host ([`NAMING_APIS`]), read from the decompiled callers' recorded
 /// calls. An API's word for its argument decides its kind where the text
