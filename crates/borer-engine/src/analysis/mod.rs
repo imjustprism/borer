@@ -41,6 +41,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::isa::Isa;
 use crate::isa::x86::OpKind;
 
 use crate::fxmap::FxHashMap;
@@ -1180,7 +1181,14 @@ impl Analysis {
     #[must_use]
     pub fn compute_with(program: &Program, packs: Arc<crate::pack::Packs>) -> Analysis {
         let mut phases = crate::timing::Phases::new();
-        let mut analysis = functions::discover(program);
+        let mut analysis = match program.arch.isa() {
+            Some(Isa::X86 { bits }) => functions::discover(program, bits),
+            Some(Isa::A64) | None => {
+                let mut empty = Analysis::default();
+                empty.finish_index(program);
+                empty
+            }
+        };
         phases.mark("analysis discover");
         analysis.packs = packs;
         naming::infer(program, &mut analysis);
@@ -1250,6 +1258,36 @@ impl Analysis {
         let analysis = crate::script::run_pack_scripts(program, analysis);
         phases.mark("analysis scripts");
         analysis
+    }
+
+    /// Builds the lookups over what discovery found: the entry index, the
+    /// clone and shape classes, the symbol index, and every reference
+    /// list sorted by site.
+    ///
+    /// The last step of discovery for every instruction set, run once the
+    /// functions are final and sorted by entry; an instruction set with no
+    /// discovery runs it over no functions, which still indexes the
+    /// program's symbols.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The program whose symbols are indexed.
+    pub(crate) fn finish_index(&mut self, program: &Program) {
+        for (i, f) in self.functions.iter().enumerate() {
+            self.entry_index.insert(f.entry, i);
+        }
+        self.clones = functions::shared_classes(&self.functions, |f| f.body_hash);
+        self.shapes = functions::shared_classes(&self.functions, |f| f.shape_hash);
+        for imports in [false, true] {
+            for (i, s) in program.symbols.iter().enumerate() {
+                if (s.kind == SymbolKind::Import) == imports && s.addr != 0 {
+                    self.symbol_index.entry(s.addr).or_insert(i);
+                }
+            }
+        }
+        for sites in self.xrefs.values_mut() {
+            sites.sort_by_key(|s| s.va);
+        }
     }
 
     /// Looks up the function whose entry is exactly `entry`.

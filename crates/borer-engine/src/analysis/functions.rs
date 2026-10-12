@@ -1374,17 +1374,15 @@ fn fuel_for(program: &Program) -> u64 {
 ///
 /// # Arguments
 ///
-/// * `program` - The loaded image.
+/// * `program` - The loaded image, x86 or x86-64.
+/// * `bitness` - The decoder bitness, `32` or `64`.
 ///
 /// # Returns
 ///
-/// The analysis; empty (no functions) for architectures without a decoder.
-pub(crate) fn discover(program: &Program) -> Analysis {
+/// The analysis, indexed ([`Analysis::finish_index`]).
+pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     let mut phases = crate::timing::Phases::new();
     let mut analysis = Analysis::default();
-    let Some(bitness) = program.arch.bitness() else {
-        return analysis;
-    };
 
     let seeds = super::seeds(program);
     let named_noreturn = |s: &&crate::program::Symbol| {
@@ -1705,21 +1703,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
             f.name_source = NameSource::Helper;
         }
     }
-    for (i, f) in analysis.functions.iter().enumerate() {
-        analysis.entry_index.insert(f.entry, i);
-    }
-    analysis.clones = shared_classes(&analysis.functions, |f| f.body_hash);
-    analysis.shapes = shared_classes(&analysis.functions, |f| f.shape_hash);
-    for imports in [false, true] {
-        for (i, s) in program.symbols.iter().enumerate() {
-            if (s.kind == crate::program::SymbolKind::Import) == imports && s.addr != 0 {
-                analysis.symbol_index.entry(s.addr).or_insert(i);
-            }
-        }
-    }
-    for sites in analysis.xrefs.values_mut() {
-        sites.sort_by_key(|s| s.va);
-    }
+    analysis.finish_index(program);
     phases.mark("discover index+clones");
     analysis
 }
@@ -1735,7 +1719,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
 /// # Returns
 ///
 /// Fingerprint to the entries sharing it, in the functions' order.
-fn shared_classes(
+pub(super) fn shared_classes(
     functions: &[Function],
     key: impl Fn(&Function) -> u64,
 ) -> BTreeMap<u64, Vec<u64>> {
