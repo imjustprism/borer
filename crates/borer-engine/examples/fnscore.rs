@@ -378,16 +378,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         let Some(bytes) = program.read_va(lo, saturating_usize(hi - lo)) else {
             return false;
         };
-        let mut d = borer_engine::isa::Decoder::with_ip(
+        let mut d = borer_engine::isa::x86::Decoder::with_ip(
             bitness,
             bytes,
             lo,
-            borer_engine::isa::DecoderOptions::NONE,
+            borer_engine::isa::x86::DecoderOptions::NONE,
         );
         d.iter().all(|i| {
             matches!(
                 i.mnemonic(),
-                borer_engine::isa::Mnemonic::Nop | borer_engine::isa::Mnemonic::Int3
+                borer_engine::isa::x86::Mnemonic::Nop | borer_engine::isa::x86::Mnemonic::Int3
             )
         })
     };

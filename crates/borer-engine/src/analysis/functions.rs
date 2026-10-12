@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{Scope, ScopedJoinHandle};
 
-use crate::isa::{
+use crate::isa::x86::{
     Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
 };
 
@@ -1830,7 +1830,7 @@ impl<'a> Cursors<'a> {
     /// # Returns
     ///
     /// The offsets, or `None` when no decoder stands right after it.
-    fn constant_offsets(&self, instr: &Instruction) -> Option<crate::isa::ConstantOffsets> {
+    fn constant_offsets(&self, instr: &Instruction) -> Option<crate::isa::x86::ConstantOffsets> {
         let c = self.open.iter().find(|c| {
             c.decoder.ip() == instr.next_ip() && instr.ip() >= c.va && instr.ip() < c.end
         })?;
@@ -4087,7 +4087,7 @@ fn byte_add(instr: &Instruction) -> bool {
 /// * `pe` - The program is a PE, whose interrupts are Windows' and not
 ///   Linux's.
 fn odd_instruction(instr: &Instruction, bitness: u32, pe: bool) -> bool {
-    use crate::isa::Mnemonic as M;
+    use crate::isa::x86::Mnemonic as M;
     if instr.code() == Code::Add_rm8_r8 {
         return true;
     }
@@ -5391,7 +5391,7 @@ fn record_data_refs(
     instr: &Instruction,
     va: u64,
     out: &mut Vec<DataRef>,
-    patched: Option<(&AddrSet, crate::isa::ConstantOffsets)>,
+    patched: Option<(&AddrSet, crate::isa::x86::ConstantOffsets)>,
 ) {
     let in_image =
         |v: u64| (mapped.contains(&v) && program.section_at(v).is_some()) || program.in_headers(v);

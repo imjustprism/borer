@@ -25,7 +25,7 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use crate::isa::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind};
+use crate::isa::x86::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind};
 
 use super::{decompile_plain_full, lift, matching_paren, name_fields};
 use crate::analysis::render::{epilog_helper, frame_helper};

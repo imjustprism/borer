@@ -50,7 +50,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use crate::isa::{FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register};
+use crate::isa::x86::{
+    FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
+};
 
 use super::expr::{Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, fold, known_bits, unary};
 use super::lift::{
@@ -3747,7 +3749,7 @@ impl Function<'_, '_> {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use crate::isa::Register;
+    use crate::isa::x86::Register;
 
     use super::{Claim, Replayed, TextCheck, replay_effects, replay_function, replay_tsv};
     use crate::analysis::decompile::expr::{Expr, UnOp};

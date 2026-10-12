@@ -21,7 +21,7 @@
 //! in one round takes neither, since the linker folds identical functions
 //! into one and either name would mislead.
 
-use crate::isa::{Decoder, DecoderOptions, OpKind, Register};
+use crate::isa::x86::{Decoder, DecoderOptions, OpKind, Register};
 
 use super::sigs::{EntryIndex, apply_names};
 use super::{Analysis, NameSource, single};

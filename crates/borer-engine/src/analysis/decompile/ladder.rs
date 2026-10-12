@@ -45,7 +45,7 @@ impl Test {
 ///
 /// * `cond` - The block's branch condition.
 fn test_of(cond: &expr::Cond) -> Option<Test> {
-    use crate::isa::ConditionCode as C;
+    use crate::isa::x86::ConditionCode as C;
     let cond = cond.simplify().unwrap_or_else(|| cond.clone());
     match (cond.cc.0, &cond.flags) {
         (C::e | C::ne, Flags::Cmp(v, Expr::Const(k), bits)) => {

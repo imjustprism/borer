@@ -6,7 +6,7 @@
 //! address and any shadow space), and types each one by the signature the
 //! reader sees, so a run and the text agree on what `a2` is.
 
-use crate::isa::Register;
+use crate::isa::x86::Register;
 
 use super::ctext::{Base, CTy, Tok, closing, leading_type, split_top, tokens};
 use super::lift;

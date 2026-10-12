@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::expr::{Cc, Cond, Expr, Flags, Key, Op, fold};
-use crate::isa::ConditionCode;
+use crate::isa::x86::ConditionCode;
 
 /// Values a free variable is given, in this order, across the samples.
 ///
@@ -570,7 +570,7 @@ fn reads_memory(e: &Expr) -> bool {
 mod tests {
     use super::{Evidence, constant_outcome};
     use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, Op, opaque_note};
-    use crate::isa::{ConditionCode, Register};
+    use crate::isa::x86::{ConditionCode, Register};
 
     /// Builds `x` as a register variable.
     fn x() -> Expr {

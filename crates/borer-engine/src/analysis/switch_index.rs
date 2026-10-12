@@ -19,7 +19,7 @@
 //! other value still stand, as a guess, and the table it sizes is cut
 //! short where its entries stop looking like cases.
 
-use crate::isa::{
+use crate::isa::x86::{
     FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
 };
 
@@ -519,7 +519,7 @@ pub(super) fn index_bound(
 )]
 mod tests {
     use super::{TableBound, index_bound, table_index};
-    use crate::isa::{Decoder, DecoderOptions, Instruction};
+    use crate::isa::x86::{Decoder, DecoderOptions, Instruction};
 
     /// Decodes `code` at 0x1000 in 64-bit mode.
     fn decode(code: &[u8]) -> Vec<Instruction> {

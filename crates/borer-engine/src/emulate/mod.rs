@@ -8,7 +8,7 @@
 //! full CPU: a routine that calls out, uses vector math, or faults is left to
 //! a real debugger.
 
-use crate::isa::{
+use crate::isa::x86::{
     Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register, gpr_bank_index,
     st_depth_mod8, xmm_slot,
 };

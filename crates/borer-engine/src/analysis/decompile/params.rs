@@ -157,8 +157,8 @@ pub(super) fn param_types(
             };
             let info = factory.info(instr);
             let float_bytes = match instr.memory_size() {
-                crate::isa::MemorySize::Float32 => Some(4),
-                crate::isa::MemorySize::Float64 => Some(8),
+                crate::isa::x86::MemorySize::Float32 => Some(4),
+                crate::isa::x86::MemorySize::Float64 => Some(8),
                 _ => None,
             };
             if let Some(bytes) = float_bytes

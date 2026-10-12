@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::isa::Register;
+use crate::isa::x86::Register;
 
 use super::ctext::{
     Ast, Base, Bin, CTy, Tok, Un, closing, expression, float_bits, float_of, split_top, tokens,

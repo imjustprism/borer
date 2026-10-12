@@ -8,7 +8,7 @@
 //! routine finds its terminator with `bsf` or `tzcnt`.
 
 use super::{Emulator, Stop, lo64, mask, op_bits, operand_bytes, remainder, sign_extend, sized_ax};
-use crate::isa::{Instruction, Mnemonic, OpKind, Register};
+use crate::isa::x86::{Instruction, Mnemonic, OpKind, Register};
 use crate::num::lo32;
 
 impl Emulator<'_> {

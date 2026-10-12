@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::isa::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
+use crate::isa::x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
 use super::classes::{class_of, field_labels, fourcc};
 use super::render::Legend;

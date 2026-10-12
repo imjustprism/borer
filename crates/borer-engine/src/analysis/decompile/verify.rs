@@ -35,7 +35,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::isa::{
+use crate::isa::x86::{
     ConditionCode, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind,
     Register, st_register,
 };
@@ -2277,7 +2277,7 @@ mod tests {
     use super::{Effect, Fact, Sweep, Verified, st_register, verify, verify_tsv};
     use crate::analysis::decompile::expr::{Expr, Key, Op, UnOp};
     use crate::analysis::{Analysis, Overlay};
-    use crate::isa::Register;
+    use crate::isa::x86::Register;
     use crate::program::{Arch, Program, Section, Symbol, SymbolKind};
 
     /// Lists the kinds of the disagreements, in order.

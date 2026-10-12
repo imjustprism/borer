@@ -5,7 +5,7 @@
 //! pseudo-C, never to a machine register at some earlier time. That invariant
 //! is what lets the lifter keep expressions symbolic until they are needed.
 
-use crate::isa::{ConditionCode, Register};
+use crate::isa::x86::{ConditionCode, Register};
 
 use super::opaque::Evidence;
 use crate::analysis::Overlay;
@@ -4266,7 +4266,7 @@ mod tests {
     /// count, and the width has to match the operands.
     #[test]
     fn a_bit_scan_against_the_width_is_a_count() {
-        let x = Expr::Var(Key::Reg(crate::isa::Register::RAX));
+        let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
         let scan = Expr::Un(super::UnOp::Bsr, Box::new(x.clone()));
         let want = Expr::Un(super::UnOp::Lzcnt, Box::new(x));
         // bsr(x) ^ 63 and 63 ^ bsr(x), at 64 bits
@@ -4356,8 +4356,8 @@ mod tests {
     /// The folder applies those identities to the expressions it builds.
     #[test]
     fn an_obfuscated_addition_folds_back() {
-        let x = Expr::Var(Key::Reg(crate::isa::Register::RAX));
-        let y = Expr::Var(Key::Reg(crate::isa::Register::RCX));
+        let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
+        let y = Expr::Var(Key::Reg(crate::isa::x86::Register::RCX));
         let bin =
             |o: Op, a: &Expr, b: &Expr| Expr::Bin(o, Box::new(a.clone()), Box::new(b.clone()));
         let plain = bin(Op::Add, &x, &y);
@@ -4416,7 +4416,7 @@ mod tests {
     /// holds everywhere and still reads as the division.
     #[test]
     fn a_magic_that_misses_a_dividend_is_no_division() {
-        let x = Expr::Var(Key::Reg(crate::isa::Register::RAX));
+        let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
         let shifted = |m: u64, s: u64| {
             let hi = Expr::Bin(Op::MulHi(32), Box::new(Expr::Const(m)), Box::new(x.clone()));
             super::fold(Op::Shr, hi, Expr::Const(s), 32)
@@ -4446,7 +4446,7 @@ mod tests {
     /// its fix is a fifth on every dividend and still reads as the division.
     #[test]
     fn a_signed_magic_that_misses_a_dividend_is_no_division() {
-        let x = Expr::Var(Key::Reg(crate::isa::Register::RAX));
+        let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
         let fixed = |m: u64, s: u64| {
             let hi = Expr::Bin(
                 Op::SMulHi(32),
@@ -4483,7 +4483,7 @@ mod tests {
     /// is the division.
     #[test]
     fn a_halving_through_another_widths_sign_is_no_division() {
-        let x = Expr::Var(Key::Reg(crate::isa::Register::RAX));
+        let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
         let halved = |bits: u8| {
             let sign = Expr::Bin(Op::Shr, Box::new(x.clone()), Box::new(Expr::Const(63)));
             let sum = Expr::Bin(Op::Add, Box::new(x.clone()), Box::new(sign));
@@ -4507,7 +4507,7 @@ mod tests {
     /// `INT_MIN`, which gives `1`. A shift by 30 is still a quotient.
     #[test]
     fn a_shift_by_the_sign_bit_is_no_power_quotient() {
-        let x = Expr::Var(Key::Reg(crate::isa::Register::RAX));
+        let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
         let quotient = |k: u64| {
             let lane = Expr::Sext(Box::new(x.clone()), 32);
             let sign = Expr::Bin(Op::Sar, Box::new(lane), Box::new(Expr::Const(31)));
@@ -4535,7 +4535,7 @@ mod tests {
     /// sign it is `(int32_t)x / 2`.
     #[test]
     fn a_lane_halves_through_its_own_sign() {
-        let x = Expr::Var(Key::Reg(crate::isa::Register::RAX));
+        let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
         let halved = |sign: Expr| {
             let fix = Expr::Bin(Op::And, Box::new(sign), Box::new(Expr::Const(1)));
             let sum = Expr::Bin(Op::Add, Box::new(x.clone()), Box::new(fix));
@@ -4656,7 +4656,7 @@ mod cond_tests {
 
     use std::sync::Arc;
 
-    use crate::isa::{ConditionCode, Register};
+    use crate::isa::x86::{ConditionCode, Register};
 
     use super::{Cc, Cond, Expr, Flags, Key, Names, Op, Ty};
     use crate::analysis::{Analysis, Overlay};
@@ -5456,7 +5456,7 @@ mod fold_tests {
 
     use std::collections::BTreeMap;
 
-    use crate::isa::{ConditionCode as C, Register};
+    use crate::isa::x86::{ConditionCode as C, Register};
 
     use super::{
         Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, fold, lo64, merge_bits, sign_extend, ternary,

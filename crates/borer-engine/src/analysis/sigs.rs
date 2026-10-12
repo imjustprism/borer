@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::isa::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind, Register};
+use crate::isa::x86::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind, Register};
 
 use super::{Analysis, NameSource, Overlay, is_imm, name_of};
 use crate::program::Program;

@@ -39,13 +39,13 @@ use super::{
 };
 use crate::disasm;
 use crate::emulate::{Emulator, Stop, Written};
-use crate::num::from_usize;
-use crate::program::{BinaryFormat, Program, Section, Symbol, SymbolKind};
-use crate::strings::{cstr_at, literal_byte, wstr_at};
-use iced_x86::{
+use crate::isa::x86::{
     Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess,
     OpKind, Register,
 };
+use crate::num::from_usize;
+use crate::program::{BinaryFormat, Program, Section, Symbol, SymbolKind};
+use crate::strings::{cstr_at, literal_byte, wstr_at};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;

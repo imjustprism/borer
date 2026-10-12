@@ -65,7 +65,7 @@ use wire::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use crate::isa::{
+use crate::isa::x86::{
     ConditionCode, Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory,
     Mnemonic, OpAccess, OpKind, Register,
 };
@@ -272,7 +272,7 @@ impl<'a> Ctx<'a> {
         let mut d = Decoder::with_ip(self.bitness, bytes, va, DecoderOptions::NONE);
         let mut i = Instruction::default();
         d.decode_out(&mut i);
-        if i.code() == crate::isa::Code::INVALID {
+        if i.code() == crate::isa::x86::Code::INVALID {
             return None;
         }
         Some(i)

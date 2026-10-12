@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::isa::{
+use crate::isa::x86::{
     FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
     st_depth,
 };

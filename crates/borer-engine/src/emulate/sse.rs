@@ -16,7 +16,7 @@
 //! not modeled.
 
 use super::{Emulator, Stop, lane_bits, lo64, mask, packed, reg_bits, sign_extend, ymm_index};
-use crate::isa::{Instruction, Mnemonic, OpKind, xmm_slot};
+use crate::isa::x86::{Instruction, Mnemonic, OpKind, xmm_slot};
 use crate::num::lo32;
 
 /// `MXCSR` as the process starts: every exception masked, round to nearest.

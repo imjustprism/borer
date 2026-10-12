@@ -36,7 +36,7 @@ pub(in crate::analysis::decompile) use state::try_level_store;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::isa::{
+use crate::isa::x86::{
     Code, ConditionCode, FlowControl, Formatter, Instruction, InstructionInfoFactory, MemorySize,
     Mnemonic, NasmFormatter, OpAccess, OpKind, Register, RflagsBits, as_xmm, sized_register,
     st_depth, st_register,

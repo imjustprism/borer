@@ -10,7 +10,7 @@
 
 use std::fmt::Write as _;
 
-use crate::isa::{Instruction, InstructionInfoFactory, Mnemonic, OpAccess, Register};
+use crate::isa::x86::{Instruction, InstructionInfoFactory, Mnemonic, OpAccess, Register};
 
 use super::functions::decode_block;
 use super::{Analysis, Function, Overlay, is_imm, name_of, striped};

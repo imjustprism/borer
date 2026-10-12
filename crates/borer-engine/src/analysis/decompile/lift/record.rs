@@ -8,7 +8,7 @@
 //! its arguments, and a call the text leaves out or reads in place is
 //! recorded as such, so no instruction's part in the text is silent.
 
-use crate::isa::{Instruction, OpKind, Register};
+use crate::isa::x86::{Instruction, OpKind, Register};
 
 use super::super::expr::{Cond, Expr, Key, Ty};
 use super::Exec;
@@ -210,7 +210,7 @@ impl Exec<'_, '_> {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use crate::isa::Register;
+    use crate::isa::x86::Register;
 
     use super::{ArgAt, Callee, EffectKind, Shown};
     use crate::analysis::decompile::decompile_plain_full;

@@ -65,7 +65,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use crate::isa::{
+use crate::isa::x86::{
     Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess,
     OpKind, Register,
 };
@@ -4309,7 +4309,7 @@ mod tests {
         );
         assert!(fs[1].signature.is_none());
     }
-    use crate::isa::Register;
+    use crate::isa::x86::Register;
     use crate::program::Program;
 
     /// A deleting destructor's test of its flag is found, also after the

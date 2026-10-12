@@ -1014,7 +1014,7 @@ pub fn stack_strings_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -
 /// `(base register, displacement, the immediate's little-endian bytes)`, or
 /// `None` when the instruction is not an immediate store to a based address.
 pub(super) fn immediate_store(i: &Instruction, bitness: u32) -> Option<(Register, i64, Vec<u8>)> {
-    use crate::isa::MemorySize;
+    use crate::isa::x86::MemorySize;
     if i.mnemonic() != Mnemonic::Mov || i.op_count() != 2 {
         return None;
     }

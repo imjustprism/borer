@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::isa::{FlowControl, Mnemonic, OpKind, Register};
+use crate::isa::x86::{FlowControl, Mnemonic, OpKind, Register};
 
 use super::{Analysis, NameSource, RefKind, pointer_size, read_u32, read_word, unique_name};
 use crate::num::from_usize;
@@ -501,7 +501,7 @@ fn ladder_targets(
     count: usize,
 ) -> Vec<Option<u64>> {
     let mut cases: Vec<Option<u64>> = vec![None; count];
-    let loads_index = |i: &crate::isa::Instruction| {
+    let loads_index = |i: &crate::isa::x86::Instruction| {
         i.mnemonic() == Mnemonic::Mov
             && i.op0_kind() == OpKind::Register
             && i.op1_kind() == OpKind::Memory

@@ -3,7 +3,7 @@
 //! iced stays the fast x86 path (and the future encoder for patching); a
 //! multi-architecture lifter would sit beside it rather than replace it.
 
-use crate::isa::{Code, Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+use crate::isa::x86::{Code, Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
 
 /// One decoded instruction as text.
 #[derive(Debug, Clone)]

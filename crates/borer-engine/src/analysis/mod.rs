@@ -41,7 +41,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::isa::OpKind;
+use crate::isa::x86::OpKind;
 
 use crate::fxmap::FxHashMap;
 

@@ -7,7 +7,7 @@
 //! statement about a tenth of its line. A block's effects unpack on
 //! demand, as the values they were.
 
-use crate::isa::{ConditionCode, Register};
+use crate::isa::x86::{ConditionCode, Register};
 
 use super::super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp};
 use super::{ArgAt, Call, Callee, Effect, EffectKind, Routine, Shown};
@@ -845,7 +845,7 @@ impl Reader<'_> {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use crate::isa::{ConditionCode, Register};
+    use crate::isa::x86::{ConditionCode, Register};
 
     use super::{
         Packed, ROUTINES, SHOWNS, TYS, UNOPS, op_code, op_of, pack, shown_code, ty_code, unop_code,

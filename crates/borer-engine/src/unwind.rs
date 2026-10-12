@@ -23,7 +23,7 @@
 //! export - and told by the shape of its data when it does not: a runtime
 //! linked in statically has no name, and the same records.
 
-use crate::isa::{FlowControl, OpKind, Register};
+use crate::isa::x86::{FlowControl, OpKind, Register};
 
 use crate::analysis::FuncletRole;
 use crate::fxmap::FxHashMap;

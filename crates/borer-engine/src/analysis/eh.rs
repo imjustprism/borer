@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::isa::{FlowControl, Mnemonic, OpKind, Register};
+use crate::isa::x86::{FlowControl, Mnemonic, OpKind, Register};
 
 use super::{Analysis, Funclet, FuncletRole, NameSource, RefKind, bare_name, read_u32};
 use crate::program::{Program, SymbolKind};

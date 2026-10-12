@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::isa::{InstructionInfoFactory, OpAccess, Register};
+use crate::isa::x86::{InstructionInfoFactory, OpAccess, Register};
 
 use super::classes::class_of;
 use super::functions::decode_block;
