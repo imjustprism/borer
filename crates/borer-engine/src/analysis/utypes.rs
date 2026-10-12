@@ -925,10 +925,12 @@ pub const TYPES_ROWS_MAX: usize = 500;
 /// Lists the user types and where they are applied, as the `types` tools
 /// print them.
 ///
-/// One row per type, then one per application: a struct with its size and
-/// `off name type` per field, an enum with its width and `name = value` per
-/// value, a typedef with its target, an application with the address and the
-/// type. The filter matches the whole row in any
+/// One row per type, then one per application, then the stated prototypes
+/// and variables the caller renders ([`crate::analysis::protos::rows`]): a
+/// struct with its size and `off name type` per field, an enum with its
+/// width and `name = value` per value, a typedef with its target, an
+/// application with the address and the type. The filter matches the whole
+/// row in any
 /// case, so a type's name, a field's name and an application's address hex
 /// all find it.
 ///
@@ -936,6 +938,7 @@ pub const TYPES_ROWS_MAX: usize = 500;
 ///
 /// * `types` - The defined types.
 /// * `applied` - The applications, by address.
+/// * `stated` - The rows of the stated prototypes and variables.
 /// * `filter` - Case-insensitive substring a row must contain.
 /// * `offset` - Rows to skip first.
 /// * `limit` - Most rows to show.
@@ -948,6 +951,7 @@ pub const TYPES_ROWS_MAX: usize = 500;
 pub fn list_tsv(
     types: &BTreeMap<String, UserType>,
     applied: &BTreeMap<u64, TypeExpr>,
+    stated: &[String],
     filter: Option<&str>,
     offset: usize,
     limit: usize,
@@ -981,6 +985,7 @@ pub fn list_tsv(
     for (addr, ty) in applied {
         rows.push(format!("applied\t{addr:#x}\t-\t{}", ty.spell()));
     }
+    rows.extend(stated.iter().cloned());
     if let Some(q) = filter {
         let q = q.to_lowercase();
         rows.retain(|r| r.to_lowercase().contains(q.as_str()));
@@ -1238,7 +1243,7 @@ mod tests {
         assert_eq!(width_of(&known, &parse_type("Mode").unwrap(), 8), Some(4));
         assert_eq!(width_of(&known, &parse_type("S").unwrap(), 8), Some(4));
         assert_eq!(
-            list_tsv(&known, &BTreeMap::new(), None, 0, 10).2,
+            list_tsv(&known, &BTreeMap::new(), &[], None, 0, 10).2,
             "# showing 3 of 3 rows (3 type(s), 0 applied)\n\
              # kind\tname\tsize\tfields\n\
              typedef\tMode\t-\tState\n\

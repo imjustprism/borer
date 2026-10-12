@@ -602,7 +602,7 @@ pub(crate) struct SetCommentParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetTypeParams {
-    /// Name to define (struct/enum/typedef with `fields`/`values`/`type`).
+    /// Name to define (struct/enum/typedef with `fields`/`values`/`type`), or `var`'s new name.
     pub(crate) name: Option<String>,
     /// The struct's fields, each `offset:name:type` (`0x1c:mp:u32`).
     pub(crate) fields: Option<Vec<String>>,
@@ -610,10 +610,12 @@ pub(crate) struct SetTypeParams {
     pub(crate) values: Option<Vec<String>>,
     /// Size past the last field, or an enum's width (4 or 8).
     pub(crate) size: Option<u64>,
-    /// Address of a data global to type (decompile names its fields).
+    /// Data global to type, or a function for a prototype or `var`.
     pub(crate) address: Option<String>,
-    /// The type to apply, or a typedef's target (`Player *`).
+    /// The type to apply, a typedef's target (`Player *`), or a prototype (`int f(Player *p)`).
     pub(crate) r#type: Option<String>,
+    /// Variable of the function at `address` to name/type (`a1`, `local_58`).
+    pub(crate) var: Option<String>,
     /// Preview only; false applies.
     pub(crate) dry_run: Option<bool>,
 }
@@ -1008,6 +1010,98 @@ pub(crate) fn must_be_in_a_section(
         "{va:#x} is in no section, so nothing there can take a {what}; sections: {}",
         program.section_list()
     ))
+}
+
+/// Returns the stack word and the callee-owned home space above the
+/// return address, in bytes.
+///
+/// The decompiled text numbers a function's slots by them: 32 bytes of
+/// home space under the Microsoft x64 convention, none elsewhere.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+pub(crate) fn frame_words(p: &program::Program) -> (i64, i64) {
+    let windows = !matches!(
+        p.format,
+        program::BinaryFormat::Elf | program::BinaryFormat::MachO
+    );
+    match (p.is_64, windows) {
+        (true, true) => (8, 32),
+        (true, false) => (8, 0),
+        (false, _) => (4, 0),
+    }
+}
+
+/// Reads what `set_type` states of a function's variable: which variable
+/// `var` names, and the name and type it takes.
+///
+/// `var` is the name the text shows (`a1`, `local_58`) or one stated
+/// before, the variable's or the prototype's parameter's; `name` is the
+/// new name and `type` an optional C type.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program, for its word.
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `var` - The variable.
+/// * `name` - Its new name.
+/// * `ty` - Its type, if one is stated.
+///
+/// # Errors
+///
+/// When `var` names no parameter or slot, `name` is missing or refused,
+/// the type does not parse, another variable of the function already has
+/// the name, or the overlay holds as many variables as it can.
+pub(crate) fn plan_var(
+    p: &program::Program,
+    o: &borer_engine::analysis::Overlay,
+    entry: u64,
+    var: &str,
+    name: Option<&str>,
+    ty: Option<&str>,
+) -> Result<
+    (
+        borer_engine::analysis::protos::VarKey,
+        borer_engine::analysis::protos::Var,
+    ),
+    String,
+> {
+    use borer_engine::analysis::protos::{VARS_MAX, Var, VarKey};
+    let (stack, shadow) = frame_words(p);
+    let stated = o.vars.get(&entry);
+    let key = stated
+        .and_then(|vs| vs.iter().find(|(_, v)| v.name == var).map(|(k, _)| *k))
+        .or_else(|| {
+            let i = o
+                .prototypes
+                .get(&entry)?
+                .params
+                .iter()
+                .position(|q| q.name == var)?;
+            u8::try_from(i).ok().map(VarKey::Param)
+        })
+        .map_or_else(|| VarKey::parse(var, stack).map_err(|e| e.to_string()), Ok)?;
+    let name = name.ok_or("naming a variable needs `name`, its new name (`type` is optional)")?;
+    let decl = ty.map_or_else(|| name.to_owned(), |t| format!("{t} {name}"));
+    let var = Var::parse(&decl).map_err(|e| e.to_string())?;
+    if let Some((other, _)) =
+        stated.and_then(|vs| vs.iter().find(|(k, v)| v.name == var.name && **k != key))
+    {
+        return Err(format!(
+            "{} already names {} of this function",
+            var.name,
+            other.spell(stack, shadow)
+        ));
+    }
+    let held: usize = o.vars.values().map(std::collections::BTreeMap::len).sum();
+    if held >= VARS_MAX && !stated.is_some_and(|vs| vs.contains_key(&key)) {
+        return Err(format!(
+            "the overlay states {held} variables, the most it holds"
+        ));
+    }
+    Ok((key, var))
 }
 
 /// What the parameter parser starts a refused argument's message with.

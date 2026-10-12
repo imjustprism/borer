@@ -75,7 +75,8 @@ use params::{
     LiveReadParams, LiveWatchParams, LoadBinaryParams, LoadProjectParams, Page, QueryParams,
     RawArch, ReachesParams, ReadParams, SaveProjectParams, ScriptParams, SearchKind, SearchParams,
     SetCommentParams, SetNameParams, SetTypeParams, StringEncoding, StringsParams, SymbolsParams,
-    TypesParams, XrefsParams, count_param, must_be_in_a_section, must_fit_a_row, to_usize,
+    TypesParams, XrefsParams, count_param, frame_words, must_be_in_a_section, must_fit_a_row,
+    plan_var, to_usize,
 };
 use recall::{FRESH_SUFFIX, Narrow, Recall, SINCE_ARG, SINCE_SUFFIX, Tag, budgeted};
 
@@ -2837,18 +2838,23 @@ impl BorerServer {
         })
     }
 
-    /// Defines a user type, applies one at an address, or both.
+    /// Defines a user type, applies one at an address, states a function's
+    /// prototype or one of its variables.
     ///
     /// `name` with `fields` defines a struct; `name` with `values` defines
     /// an enum; `name` with `type` alone defines a typedef. `address` with
     /// `type` applies the type at that data global: the decompiler types the
     /// variable it renders there, so a `Player *` names every field read
     /// through it (`g->hp` at the width the field states) and a `State`
-    /// applied at a global names every constant compared with it. Everything
-    /// is validated before anything is written: types the language does not
-    /// spell, references to names nothing defines, fields that overlap and a
-    /// size that does not cover the last field are refused with a message
-    /// naming the offender.
+    /// applied at a global names every constant compared with it. At a
+    /// function, `type` is its prototype as C
+    /// ([`borer_engine::analysis::protos::Proto`]), which its signature,
+    /// its body and every call to it follow; with `var` (`a1`, `local_58`,
+    /// or a name stated before), `name` and an optional `type` name and
+    /// type that variable. Everything is validated before anything is
+    /// written: types the language does not spell, references to names
+    /// nothing defines, fields that overlap and a size that does not cover
+    /// the last field are refused with a message naming the offender.
     ///
     /// # Arguments
     ///
@@ -2856,11 +2862,11 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, a definition or application is refused, the
-    /// address does not resolve, no section holds it, or it is inside a
-    /// function.
+    /// When no binary is loaded, a definition, an application, a prototype
+    /// or a variable is refused, or the address does not resolve or no
+    /// section holds it.
     #[tool(
-        description = "Define a user type and/or apply one at a data global; dry-run unless dry_run=false. A `Player *` applied at a global makes decompile name the fields read through it; an enum applied there names the constants compared with it.",
+        description = "Define a user type and/or apply one: at a data global, `type` types it (a `Player *` names the fields read through it, an enum the constants compared with it); at a function, `type` is its C prototype, or with `var` (a1, local_58) names/types that variable. Dry-run unless dry_run=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2878,6 +2884,7 @@ impl BorerServer {
             size,
             address,
             r#type: ty,
+            var,
             dry_run,
         }): Parameters<SetTypeParams>,
     ) -> Result<String, ErrorData> {
@@ -2890,6 +2897,7 @@ impl BorerServer {
         for text in name
             .iter()
             .chain(&ty)
+            .chain(&var)
             .chain(fields.iter().flatten())
             .chain(values.iter().flatten())
         {
@@ -2897,6 +2905,41 @@ impl BorerServer {
         }
         self.with_analysis(Feature::Discover, |p, a, o| {
             let word: u64 = if p.is_64 { 8 } else { 4 };
+            // A function's address states its prototype, or with `var` one
+            // of its variables, where a data global's applies a type.
+            let function = match &address {
+                Some(text) => {
+                    let va = self.addr(p, text)?;
+                    must_be_in_a_section(p, va, Annotation::Type)?;
+                    a.function_at(va).map(|f| f.entry)
+                }
+                None => None,
+            };
+            if let Some(var) = &var {
+                let entry = function.ok_or_else(|| {
+                    "`var` names a variable of a function: give the function's `address`".to_owned()
+                })?;
+                let (key, stated) = plan_var(p, o, entry, var, name.as_deref(), ty.as_deref())?;
+                let (stack, shadow) = frame_words(p);
+                let what = format!(
+                    "{} of {} ({entry:#x}) {}",
+                    key.spell(stack, shadow),
+                    borer_engine::analysis::name_of(a, o, entry),
+                    stated.spell()
+                );
+                if dry {
+                    return Ok(format!(
+                        "dry-run: would name {what}; decompile then renders it so. pass dry_run=false to apply."
+                    ));
+                }
+                write_lock(&self.overlay)
+                    .vars
+                    .entry(entry)
+                    .or_default()
+                    .insert(key, stated);
+                self.names_changed();
+                return Ok(format!("named {what}"));
+            }
             // The definition half: built and validated against the types
             // already in the overlay before anything is written.
             let defined = match (&name, &fields, &values) {
@@ -2966,6 +3009,11 @@ impl BorerServer {
                         "enum {n} states no values; give them as name:value"
                     ));
                 }
+                (Some(n), None, None) if function.is_some() => {
+                    return Err(format!(
+                        "at a function `type` is its prototype; define typedef {n} in a call of its own"
+                    ));
+                }
                 (Some(n), None, None) => {
                     let target = ty.as_deref().ok_or_else(|| {
                         format!("typedef {n} needs the `type` it stands for")
@@ -2980,23 +3028,48 @@ impl BorerServer {
                 }
                 (None, _, _) => None,
             };
-            // The application half: resolved, in a section and not code.
+            // The application half: a data global's type, resolved and in
+            // a section, or a function's prototype.
             let applied = match &address {
-                Some(text) => {
+                Some(text) if function.is_none() => {
                     let spelled = ty.as_deref().ok_or_else(|| {
                         "applying a type needs the `type` to apply".to_owned()
                     })?;
                     let parsed = borer_engine::analysis::utypes::parse_type(spelled)
                         .map_err(|e| e.to_string())?;
                     let va = self.addr(p, text)?;
-                    must_be_in_a_section(p, va, Annotation::Type)?;
-                    if let Some(f) = a.function_at(va) {
+                    Some((va, parsed))
+                }
+                Some(_) | None => None,
+            };
+            let stated = match function {
+                Some(entry) => {
+                    let decl = ty.as_deref().ok_or_else(|| {
+                        "at a function `type` is its prototype: `int f(Player *p, uint32_t n)`"
+                            .to_owned()
+                    })?;
+                    // INVARIANT: a plain type at a function is a type for a
+                    // data global given the wrong address, and says so.
+                    let proto =
+                        borer_engine::analysis::protos::Proto::parse(decl).map_err(|e| {
+                            if decl.contains('(') {
+                                e.to_string()
+                            } else {
+                                format!(
+                                    "{entry:#x} is inside {}; types apply to data globals, and at a function `type` is its prototype (`int f(Player *p)`)",
+                                    borer_engine::analysis::name_of(a, o, entry)
+                                )
+                            }
+                        })?;
+                    if o.prototypes.len() >= borer_engine::analysis::protos::PROTOTYPES_MAX
+                        && !o.prototypes.contains_key(&entry)
+                    {
                         return Err(format!(
-                            "{va:#x} is inside {}; types apply to data globals",
-                            borer_engine::analysis::name_of(a, o, f.entry)
+                            "the overlay states {} prototypes, the most it holds",
+                            o.prototypes.len()
                         ));
                     }
-                    Some((va, parsed))
+                    Some((entry, proto))
                 }
                 None => None,
             };
@@ -3068,9 +3141,32 @@ impl BorerServer {
                     ty.spell()
                 ));
             }
+            let mut note = String::new();
+            if let Some((entry, proto)) = &stated {
+                let fname = borer_engine::analysis::name_of(a, o, *entry);
+                done.push(format!("stated {fname} ({entry:#x}) as {}", proto.spell()));
+                would.push(format!(
+                    "state {fname} ({entry:#x}) as {}; decompile then renders its signature, its body and every call to it by it",
+                    proto.spell()
+                ));
+                let bits = u8::try_from(word * 8).unwrap_or(64);
+                let unknown: Vec<String> = proto
+                    .ret
+                    .iter()
+                    .chain(proto.params.iter().map(|q| &q.ty))
+                    .filter(|t| t.pass(&types, bits, p.format).is_none())
+                    .map(borer_engine::analysis::protos::CType::spell)
+                    .collect();
+                if !unknown.is_empty() {
+                    note = format!(
+                        "\n# note: {} names no user type or C type word borer knows, so it passes as a word",
+                        unknown.join(", ")
+                    );
+                }
+            }
             if dry {
                 return Ok(format!(
-                    "dry-run: would {}. pass dry_run=false to apply.",
+                    "dry-run: would {}. pass dry_run=false to apply.{note}",
                     would.join("; ")
                 ));
             }
@@ -3081,9 +3177,12 @@ impl BorerServer {
             if let Some((va, ty, _)) = applied {
                 overlay.applied.insert(va, ty);
             }
+            if let Some((entry, proto)) = stated {
+                overlay.prototypes.insert(entry, proto);
+            }
             drop(overlay);
             self.names_changed();
-            Ok(done.join("; "))
+            Ok(format!("{}{note}", done.join("; ")))
         })
     }
 
@@ -3122,9 +3221,11 @@ impl BorerServer {
             borer_engine::analysis::utypes::TYPES_ROWS_MAX,
         )?;
         let o = read_lock(&self.overlay);
+        let stated = borer_engine::analysis::protos::rows(&o.prototypes, &o.vars);
         let (_, total, table) = borer_engine::analysis::utypes::list_tsv(
             &o.types,
             &o.applied,
+            &stated,
             filter.as_deref(),
             page.offset,
             page.limit.n,
@@ -3169,8 +3270,14 @@ impl BorerServer {
             &read_lock(&self.overlay),
         );
         pf.save(&path).map_err(err_internal)?;
+        let vars: usize = pf.vars.values().map(std::collections::BTreeMap::len).sum();
+        let stated = if pf.prototypes.is_empty() && vars == 0 {
+            String::new()
+        } else {
+            format!(" + {} prototypes + {vars} variables", pf.prototypes.len())
+        };
         Ok(format!(
-            "saved {} names + {} comments + {} types to {path}",
+            "saved {} names + {} comments + {} types{stated} to {path}",
             pf.names.len(),
             pf.comments.len(),
             pf.types.len()
@@ -3242,8 +3349,21 @@ impl BorerServer {
         }
         let mut loaded = pf.to_overlay().map_err(err_params)?;
         let left_out = borer::project::keep_placeable(&mut loaded, &program);
+        let vars: usize = loaded
+            .vars
+            .values()
+            .map(std::collections::BTreeMap::len)
+            .sum();
+        let stated = if loaded.prototypes.is_empty() && vars == 0 {
+            String::new()
+        } else {
+            format!(
+                " + {} prototypes + {vars} variables",
+                loaded.prototypes.len()
+            )
+        };
         let mut said = format!(
-            "loaded {} names + {} comments + {} types + {} applied\n",
+            "loaded {} names + {} comments + {} types + {} applied{stated}\n",
             loaded.names.len(),
             loaded.comments.len(),
             loaded.types.len(),
@@ -6083,6 +6203,7 @@ mod tests {
                 size: None,
                 address: Some("0x2000".to_owned()),
                 r#type: Some("Player *".to_owned()),
+                var: None,
                 dry_run: None,
             }))
             .expect("dry-runs");
@@ -6108,6 +6229,7 @@ mod tests {
                 size: None,
                 address: Some("0x2000".to_owned()),
                 r#type: Some("Player *".to_owned()),
+                var: None,
                 dry_run: Some(false),
             }))
             .expect("defines and applies");
@@ -6138,6 +6260,7 @@ mod tests {
                 size: None,
                 address: Some("0x2000".to_owned()),
                 r#type: Some("three of them".to_owned()),
+                var: None,
                 dry_run: Some(false),
             }))
             .expect_err("garbage refused");
@@ -6153,6 +6276,7 @@ mod tests {
                 size: None,
                 address: None,
                 r#type: None,
+                var: None,
                 dry_run: Some(false),
             }))
             .expect_err("unknown name refused");
@@ -6170,6 +6294,7 @@ mod tests {
                 size: None,
                 address: Some("0x1000".to_owned()),
                 r#type: Some("u32".to_owned()),
+                var: None,
                 dry_run: Some(false),
             }))
             .expect_err("code refused");
@@ -6217,6 +6342,7 @@ mod tests {
                 size: None,
                 address: Some("0x2000".to_owned()),
                 r#type: Some("State".to_owned()),
+                var: None,
                 dry_run: Some(false),
             }))
             .expect("defines and applies");
@@ -6249,6 +6375,7 @@ mod tests {
                 size: None,
                 address: None,
                 r#type: None,
+                var: None,
                 dry_run: Some(false),
             }))
             .expect_err("a duplicate value refused");
@@ -6265,6 +6392,7 @@ mod tests {
                 size: None,
                 address: None,
                 r#type: None,
+                var: None,
                 dry_run: Some(false),
             }))
             .expect_err("fields beside values refused");
@@ -6304,6 +6432,7 @@ mod tests {
                     size: None,
                     address: address.map(str::to_owned),
                     r#type: Some(ty.to_owned()),
+                    var: None,
                     dry_run: None,
                 }))
                 .expect_err("a type too deep to walk was accepted")
@@ -6320,6 +6449,99 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    /// `set_type` at a function states its prototype, and with `var` one of
+    /// its variables.
+    ///
+    /// Dry runs leave the overlay's fingerprint as it was; applying states
+    /// the prototype, and a variable is then found by the name the
+    /// prototype gave it; a register and a data address are refused.
+    ///
+    /// # Panics
+    ///
+    /// When a dry run writes, an application does not, or a refusal is
+    /// accepted.
+    #[test]
+    fn set_type_states_prototypes_and_variables() {
+        use super::{Parameters, SetTypeParams};
+        use borer_engine::analysis::protos::VarKey;
+        use borer_engine::program::{Arch, Program, Section};
+        let mut bytes = vec![0xcc; 0x200];
+        // ASM: lea eax, [rcx+1]; ret
+        bytes[..4].copy_from_slice(&[0x8d, 0x41, 0x01, 0xc3]);
+        let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
+        let data = Section::mapped(".data", 0x2000, 0x100, 0x100, true, false);
+        let program = Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![text, data]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let call = |address: &str,
+                    ty: Option<&str>,
+                    var: Option<&str>,
+                    name: Option<&str>,
+                    dry: Option<bool>| {
+            server.set_type(Parameters(SetTypeParams {
+                name: name.map(str::to_owned),
+                fields: None,
+                values: None,
+                size: None,
+                address: Some(address.to_owned()),
+                r#type: ty.map(str::to_owned),
+                var: var.map(str::to_owned),
+                dry_run: dry,
+            }))
+        };
+        let before = server.overlay_plain().fingerprint();
+        let out = call("0x1000", Some("int f(int n)"), None, None, None).expect("dry-runs");
+        assert!(
+            out.starts_with("dry-run: would state sub_1000 (0x1000) as int (int n)"),
+            "{out}"
+        );
+        assert_eq!(server.overlay_plain().fingerprint(), before);
+        let out = call("0x1002", Some("int f(int n)"), None, None, Some(false)).expect("states");
+        assert!(
+            out.contains("stated sub_1000 (0x1000) as int (int n)"),
+            "{out}"
+        );
+        let stated = server.overlay_plain().fingerprint();
+        assert_ne!(stated, before);
+        let out = call("0x1000", Some("Mystery *"), Some("n"), Some("thing"), None)
+            .expect("dry-runs the variable");
+        assert!(
+            out.starts_with("dry-run: would name a1 of sub_1000 (0x1000) Mystery *thing"),
+            "{out}"
+        );
+        assert_eq!(server.overlay_plain().fingerprint(), stated);
+        call("0x1000", None, Some("n"), Some("count"), Some(false)).expect("names");
+        let o = server.overlay_plain();
+        assert_eq!(
+            o.vars
+                .get(&0x1000)
+                .and_then(|v| v.get(&VarKey::Param(0)))
+                .map(|v| v.name.as_str()),
+            Some("count")
+        );
+        let refused = call("0x1000", None, Some("rax"), Some("x"), None)
+            .expect_err("a register was named")
+            .message;
+        assert!(refused.contains("register"), "{refused}");
+        let refused = call("0x2000", None, Some("a1"), Some("x"), None)
+            .expect_err("a variable outside any function was named")
+            .message;
+        assert!(refused.contains("function"), "{refused}");
+        let refused = call("0x1000", Some("int f(int n"), None, None, None)
+            .expect_err("a prototype with an open parameter list was stated")
+            .message;
+        assert!(refused.contains("parameter list"), "{refused}");
+        let refused = call("0x1000", Some("u32"), None, None, None)
+            .expect_err("a plain type was stated at a function")
+            .message;
+        assert!(refused.contains("types apply to data globals"), "{refused}");
     }
 
     /// `load_project` holds a project to what the annotating tools accept

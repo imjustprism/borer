@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use borer_engine::analysis::Overlay;
+use borer_engine::analysis::protos::{PROTOTYPES_MAX, Proto, VARS_MAX, Var, VarKey};
 use borer_engine::analysis::utypes::UserType;
 use borer_engine::program::Program;
 
@@ -37,6 +38,16 @@ pub struct ProjectFile {
     /// refuses the file.
     #[serde(default)]
     pub applied: BTreeMap<String, String>,
+    /// "0x..." function entry -> the prototype stated for it, as C without
+    /// the function's name (`int (Player *p)`); parsed on load, where one
+    /// that does not parse refuses the file. Absent when none is stated.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prototypes: BTreeMap<String, String>,
+    /// "0x..." function entry -> variable (`a1`, `local_58`, `sp+0x30`) ->
+    /// its stated declaration (`wchar_t *path`, or a name alone); parsed on
+    /// load like the prototypes. Absent when none is stated.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vars: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// How a project file's binary compares with the loaded one
@@ -182,8 +193,8 @@ fn by_address(
 /// # Returns
 ///
 /// What was left out, one `name at 0x0 (in no section)` entry per
-/// annotation: names, then comments, then applied types, each in address
-/// order.
+/// annotation: names, then comments, applied types, prototypes and
+/// variables, each in address order.
 pub fn keep_placeable(o: &mut Overlay, program: &Program) -> Vec<String> {
     let mut left_out: Vec<String> = Vec::new();
     let mut keep = |what: &str, va: u64, text: Option<&str>| {
@@ -201,6 +212,8 @@ pub fn keep_placeable(o: &mut Overlay, program: &Program) -> Vec<String> {
     o.comments
         .retain(|&va, c| keep("comment", va, Some(c.as_str())));
     o.applied.retain(|&va, _| keep("type", va, None));
+    o.prototypes.retain(|&va, _| keep("prototype", va, None));
+    o.vars.retain(|&va, _| keep("variables", va, None));
     left_out
 }
 
@@ -226,6 +239,22 @@ impl ProjectFile {
                 .iter()
                 .map(|(k, v)| (format!("{k:#x}"), v.spell()))
                 .collect(),
+            prototypes: o
+                .prototypes
+                .iter()
+                .map(|(k, p)| (format!("{k:#x}"), p.spell()))
+                .collect(),
+            vars: o
+                .vars
+                .iter()
+                .map(|(k, vars)| {
+                    let vars = vars
+                        .iter()
+                        .map(|(key, var)| (key.spell_saved(), var.spell()))
+                        .collect();
+                    (format!("{k:#x}"), vars)
+                })
+                .collect(),
         }
     }
 
@@ -245,8 +274,9 @@ impl ProjectFile {
     ///
     /// # Errors
     ///
-    /// When a key is not an address or two keys name one, an applied type
-    /// does not parse, or a defined type's references do not resolve.
+    /// When a key is not an address or two keys name one, an applied type,
+    /// a prototype or a variable does not parse, or a defined type's
+    /// references do not resolve.
     pub fn to_overlay(&self) -> Result<Overlay, String> {
         let mut applied: BTreeMap<u64, borer_engine::analysis::utypes::TypeExpr> = BTreeMap::new();
         for (va, (_, v)) in keyed("applied", &self.applied)? {
@@ -258,11 +288,49 @@ impl ProjectFile {
             })?;
             applied.insert(va, ty);
         }
+        let mut prototypes = BTreeMap::new();
+        for (va, (_, text)) in keyed("prototypes", &self.prototypes)? {
+            let proto =
+                Proto::parse(text).map_err(|e| format!("the prototype stated at {va:#x}: {e}"))?;
+            prototypes.insert(va, proto);
+        }
+        let mut vars: BTreeMap<u64, BTreeMap<VarKey, Var>> = BTreeMap::new();
+        let mut held = 0usize;
+        for (k, table) in &self.vars {
+            let va = borer_engine::analysis::parse_addr(k).ok_or_else(|| {
+                format!(
+                    "vars key {} is not an address; a key is 0x-hex as save_project writes it",
+                    borer_engine::text::quoted(k)
+                )
+            })?;
+            let into = vars.entry(va).or_default();
+            for (key, decl) in table {
+                let key = VarKey::parse_saved(key)
+                    .map_err(|e| format!("a variable of the function at {va:#x}: {e}"))?;
+                let var = Var::parse(decl)
+                    .map_err(|e| format!("a variable of the function at {va:#x}: {e}"))?;
+                if into.insert(key, var).is_some() {
+                    return Err(format!(
+                        "the function at {va:#x} states {} twice",
+                        key.spell_saved()
+                    ));
+                }
+                held += 1;
+            }
+        }
+        if prototypes.len() > PROTOTYPES_MAX || held > VARS_MAX {
+            return Err(format!(
+                "the project states {} prototypes and {held} variables; {PROTOTYPES_MAX} and {VARS_MAX} are the most",
+                prototypes.len()
+            ));
+        }
         let o = Overlay {
             names: by_address("names", &self.names)?,
             comments: by_address("comments", &self.comments)?,
             types: self.types.clone(),
             applied,
+            prototypes,
+            vars,
             ..Overlay::default()
         };
         borer_engine::analysis::utypes::validate(&o.types, &o.applied)

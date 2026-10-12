@@ -405,3 +405,71 @@ fn the_server_keys_projects_by_hash_and_pages_the_ledger() {
     client.finish();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Stated prototypes and variables survive a save/load round trip.
+///
+/// They are keyed by function and by the variable's word-free name; a
+/// project that states none writes neither table, and one whose prototype
+/// does not parse is refused with the address named.
+#[test]
+fn prototypes_and_variables_round_trip_through_json() {
+    use borer_engine::analysis::protos::{Proto, Var, VarKey};
+    let mut o = Overlay::default();
+    o.prototypes.insert(
+        0x140001000,
+        Proto::parse("int __fastcall f(Player *p, uint32_t n)").unwrap(),
+    );
+    let mut vars = std::collections::BTreeMap::new();
+    vars.insert(VarKey::Slot(-0x58), Var::parse("wchar_t *path").unwrap());
+    vars.insert(VarKey::Slot(0x30), Var::parse("spill").unwrap());
+    vars.insert(VarKey::Param(1), Var::parse("count").unwrap());
+    o.vars.insert(0x140001000, vars);
+    let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("protos.json");
+    let pf = ProjectFile::from_overlay("bin", None, &o);
+    assert_eq!(
+        pf.prototypes.get("0x140001000").map(String::as_str),
+        Some("int __fastcall (Player *p, uint32_t n)")
+    );
+    assert_eq!(
+        pf.vars
+            .get("0x140001000")
+            .and_then(|v| v.get("local_58"))
+            .map(String::as_str),
+        Some("wchar_t *path")
+    );
+    pf.save(path.to_str().unwrap()).unwrap();
+    let restored = ProjectFile::load(path.to_str().unwrap())
+        .unwrap()
+        .to_overlay()
+        .unwrap();
+    assert_eq!(restored.prototypes, o.prototypes);
+    assert_eq!(restored.vars, o.vars);
+    assert_eq!(restored.fingerprint(), o.fingerprint());
+
+    let plain = dir.join("plain.json");
+    ProjectFile::from_overlay("bin", None, &Overlay::default())
+        .save(plain.to_str().unwrap())
+        .unwrap();
+    let text = std::fs::read_to_string(&plain).unwrap();
+    assert!(
+        !text.contains("prototypes") && !text.contains("vars"),
+        "{text}"
+    );
+
+    let bad = dir.join("bad-proto.json");
+    std::fs::write(
+        &bad,
+        r#"{"program":"bin","names":{},"comments":{},"prototypes":{"0x401000":"int f"}}"#,
+    )
+    .unwrap();
+    let err = ProjectFile::load(bad.to_str().unwrap())
+        .unwrap()
+        .to_overlay()
+        .unwrap_err();
+    assert!(
+        err.contains("0x401000") && err.contains("parameter list"),
+        "{err}"
+    );
+}
