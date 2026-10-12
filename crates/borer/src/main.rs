@@ -4679,6 +4679,8 @@ impl BorerServer {
             ("unpack", Some(address)) => self.unpack_text(&address)?,
             ("hidden", None) => self.hidden_text("")?,
             ("hidden", Some(filter)) => self.hidden_text(&filter)?,
+            ("decoded", None) => return self.decoded_text(&asked.spec_words("")),
+            ("decoded", Some(filter)) => return self.decoded_text(&asked.spec_words(&filter)),
             ("oracle", Some(address)) => self.oracle_text(&address)?,
             ("run", Some(spec)) => self.run_text(&spec)?,
             ("diff", Some(other)) => self.diff_text(&other)?,
@@ -4852,6 +4854,10 @@ const RESOURCES: &[(&str, &str)] = &[
         "Strings the program generates at run time by mixing a keystream, recovered by running the generators",
     ),
     (
+        "borer://decoded",
+        "Strings a decoder function produces, recovered by running it at each of its call sites with that site's arguments (ciphertext pointer, length): a row per recovered string with its decoder and call site; a function that only copies yields nothing; borer://decoded/<filter> narrows by text",
+    ),
+    (
         "borer://stackstrings",
         "Strings a function builds on its stack a piece at a time, which malware does to keep text out of the data sections",
     ),
@@ -5016,6 +5022,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://hidden/{filter}",
         "Run-time generated strings whose text or generator matches {filter}",
         "borer://hidden/http",
+    ),
+    (
+        "borer://decoded/{filter}",
+        "Decoder-recovered strings whose text contains {filter}; offset=<n> for the next page",
+        "borer://decoded/http",
     ),
     (
         "borer://oracle/{address}",

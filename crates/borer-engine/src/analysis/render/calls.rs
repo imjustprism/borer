@@ -92,7 +92,7 @@ fn thunks(a: &Analysis, slot: u64) -> BTreeSet<u64> {
 /// # Errors
 ///
 /// When the address lies inside a function but is not its entry.
-fn reach_of(p: &Program, a: &Analysis, o: &Overlay, va: u64) -> Result<Reach, String> {
+pub(super) fn reach_of(p: &Program, a: &Analysis, o: &Overlay, va: u64) -> Result<Reach, String> {
     if let Some(s) = p
         .symbols
         .iter()

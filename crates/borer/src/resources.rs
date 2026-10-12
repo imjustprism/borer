@@ -286,6 +286,23 @@ impl BorerServer {
         })
     }
 
+    /// Recovers the strings a decoder produces when run at each of its call
+    /// sites, the resource `borer://decoded`.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Case-insensitive text the string must contain, with
+    ///   `offset=<n>` and `limit=<n>` for paging; empty for all.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or the offset or the limit does not read.
+    pub(crate) fn decoded_text(&self, filter: &str) -> Result<String, ErrorData> {
+        self.refusing(Feature::Emulate, |p, a, o| {
+            render::decoded_tsv(p, a, o, filter)
+        })
+    }
+
     /// Groups the imports into the capabilities they grant.
     ///
     /// # Errors

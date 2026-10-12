@@ -69,11 +69,55 @@ SYSCALL_CODE = bytes.fromhex(
     "2f746d702f7800"  # "/tmp/x\0"
 )
 
+# The single-byte XOR decoder (key 0x5a) the decoder blob calls.
+XOR_DECODE = bytes.fromhex(
+    "4885d2"  # test rdx, rdx
+    "7415"  # je ret
+    "4531c0"  # xor r8d, r8d
+    "428a0401"  # mov al, [rcx+r8]
+    "345a"  # xor al, 0x5a
+    "42880401"  # mov [rcx+r8], al
+    "49ffc0"  # inc r8
+    "4939d0"  # cmp r8, rdx
+    "72ee"  # jb loop
+    "c3"  # ret
+)
+
+
+def _decoder_blob() -> bytes:
+    """A headerless x64 blob: a caller that decodes one planted ciphertext
+    from three sites, and the XOR decoder it calls. Mapped with a code
+    region at 0x10000 (rx) and a data region at 0x20000 (rw), so the
+    ciphertext pointer reads as data."""
+    plaintext = b"http://x3.test/c2"
+    ciphertext = bytes(b ^ 0x5A for b in plaintext)
+    caller = bytearray()
+    for k in range(3):
+        off = 15 * k  # each site is mov ecx,imm + mov edx,imm + call (5+5+5).
+        caller += b"\xb9" + (0x20000).to_bytes(4, "little")
+        caller += b"\xba" + len(plaintext).to_bytes(4, "little")
+        disp = 0x100 - off - 15  # the decoder sits at file offset 0x100.
+        caller += b"\xe8" + disp.to_bytes(4, "little", signed=True)
+    caller += b"\xc3"
+    blob = bytearray(0x220)
+    blob[0 : len(caller)] = caller
+    blob[0x100 : 0x100 + len(XOR_DECODE)] = XOR_DECODE
+    blob[0x200 : 0x200 + len(ciphertext)] = ciphertext
+    return bytes(blob)
+
+
+DECODER_CODE = _decoder_blob()
+
+# How the decoder blob's code and data map: rx code at 0x10000, rw data at
+# 0x20000, so the ciphertext pointer is a data pointer.
+DECODER_REGIONS = "0x10000@0:0x200:rx,0x20000@0x200:0x20:rw"
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
     "blob": (RAW_CODE, "<blob>"),
     "syscall": (SYSCALL_CODE, "<syscall>"),
+    "decoder": (DECODER_CODE, "<decoder>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -177,6 +221,18 @@ TASKS = [
             ("query", {"uri": "borer://emulate/0x10000"}),
         ],
         'syscall 2 open("/tmp/x"',
+    ),
+    (
+        "decoded_strings",
+        "the strings a decoder produces, recovered by running it at its call sites",
+        [
+            (
+                "load_binary",
+                {"path": "{decoder}", "arch": "x64", "regions": DECODER_REGIONS},
+            ),
+            ("query", {"uri": "borer://decoded"}),
+        ],
+        "http://x3.test/c2",
     ),
 ]
 

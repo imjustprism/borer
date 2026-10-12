@@ -114,6 +114,8 @@ enum Source {
     Stack,
     /// A string a generator builds at run time, recovered by running it.
     Generated,
+    /// A string a decoder produced, recovered by running it at a call site.
+    Decoded,
     /// A string argument a generator run passed to an imported API or
     /// syscall, decoded when the emulator serviced the call: the function's
     /// name.
@@ -131,6 +133,7 @@ impl Source {
             Source::DecodedB64 => "decoded-b64".to_owned(),
             Source::Stack => "stack".to_owned(),
             Source::Generated => "generated".to_owned(),
+            Source::Decoded => "decoded".to_owned(),
             Source::Emulated(api) => format!("emulated:{api}"),
             Source::Call(api, pos) => format!("call:{api},a{pos}"),
         }
@@ -188,11 +191,13 @@ fn collected(p: &Program, a: &Analysis, o: &Overlay) -> Arc<Collected> {
 
 /// Collects every indicator of a program with its provenance.
 ///
-/// Five passes: the strings stored in the file outside code (and the base64
+/// Six passes: the strings stored in the file outside code (and the base64
 /// among them, decoded), the strings functions build on their stacks, the
 /// strings generators build at run time ([`recovered_strings`]), the string
 /// arguments those generator runs pass to imported APIs and syscalls
-/// (decoded when the emulator services the call), and the string
+/// (decoded when the emulator services the call), the strings a decoder
+/// produces when run at each of its call sites
+/// ([`decoded_strings`](super::decoded::decoded_strings)), and the string
 /// arguments of the APIs that name a mutex, a pipe, a key, a file or
 /// a host ([`NAMING_APIS`]), read from the decompiled callers' recorded
 /// calls. An API's word for its argument decides its kind where the text
@@ -271,6 +276,16 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
                 source: Source::Emulated(arg.api.clone()),
                 site: Site::Va(arg.at),
                 function: Some(arg.built_by),
+            });
+        }
+    }
+    for r in &decoded_strings(p, a, o).rows {
+        for found in classify(&r.text) {
+            rows.push(Row {
+                found,
+                source: Source::Decoded,
+                site: Site::Va(r.at),
+                function: Some(r.caller),
             });
         }
     }
@@ -518,12 +533,13 @@ pub(super) fn iocs_line(p: &Program, a: &Analysis, o: &Overlay) -> String {
 /// ([`crate::ioc::classify`]), from the strings stored outside code (and
 /// base64 among them, decoded), the strings functions build on their
 /// stacks, the strings generators build at run time, the string arguments
-/// those runs pass to imported APIs and syscalls, and the string
+/// those runs pass to imported APIs and syscalls, the strings a decoder
+/// produces at each of its call sites, and the string
 /// arguments of the APIs that name what they take, read from the callers'
 /// decompiled calls. A row says the kind, the confidence (or
 /// `benign-common` for what every program carries: schema hosts, the
 /// loopback address, a toolchain's build paths), the pass (`static`,
-/// `decoded-b64`, `stack`, `generated`, `emulated:<api>`,
+/// `decoded-b64`, `stack`, `generated`, `decoded`, `emulated:<api>`,
 /// `call:<api>,a<N>`), the site (the
 /// string's address or file offset, the store starting a stack string, the
 /// generator, the call), the function using it, and the value. Rows are

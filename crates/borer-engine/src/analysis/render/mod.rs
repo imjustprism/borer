@@ -8,6 +8,7 @@
 mod calls;
 mod catalog;
 mod dataflow;
+mod decoded;
 mod diff;
 mod graph;
 mod iocs;
@@ -26,6 +27,7 @@ mod unpack;
 pub use calls::*;
 pub use catalog::*;
 pub use dataflow::*;
+pub use decoded::*;
 pub use diff::*;
 pub use graph::*;
 pub use iocs::*;

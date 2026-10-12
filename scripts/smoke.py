@@ -397,6 +397,7 @@ assert uris == [
     "borer://capabilities",
     "borer://checks",
     "borer://classes",
+    "borer://decoded",
     "borer://dynimports",
     "borer://enums",
     "borer://fingerprint",

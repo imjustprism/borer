@@ -193,7 +193,15 @@ const INTENTS: &[(&str, &[&str])] = &[
     ),
     (
         "obfuscation",
-        &["flat", "vm", "devirt", "unpack", "hidden", "stackstrings"],
+        &[
+            "flat",
+            "vm",
+            "devirt",
+            "unpack",
+            "hidden",
+            "decoded",
+            "stackstrings",
+        ],
     ),
     (
         "builds",
