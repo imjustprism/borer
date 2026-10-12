@@ -3010,6 +3010,28 @@ fn loops_headed_by_the_entry_block_carry_their_parameter() {
     assert!(out.contains("*(uint8_t*)(rcx + 0x34) ^= 1;"), "{out}");
 }
 
+/// A block nothing reaches inside a loop's address range does not keep the
+/// loop from structuring.
+///
+/// `xor ecx,ecx; L: mov eax,0x41; cmp al,0x43; jl S; mov eax,0x43; S: mov
+/// [rdx+rcx],al; inc ecx; cmp ecx,r8d; jb L; ret`: the compare folds, so
+/// the `mov eax,0x43` between the loop's blocks is dead, and the loop is
+/// one `do`/`while` rather than a rotated `while` that writes its first
+/// block twice, once in front of the loop and once inside it.
+#[test]
+fn a_dead_block_inside_a_loop_does_not_veto_it() {
+    let code = [
+        0x31, 0xc9, 0xb8, 0x41, 0x00, 0x00, 0x00, 0x3c, 0x43, 0x7c, 0x05, 0xb8, 0x43, 0x00, 0x00,
+        0x00, 0x88, 0x04, 0x0a, 0xff, 0xc1, 0x44, 0x39, 0xc1, 0x72, 0xe8, 0xc3,
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("unreachable"), "{text}");
+    assert!(!text.contains("goto"), "{text}");
+    assert!(text.contains("do {"), "{text}");
+    assert_eq!(text.matches("rcx += 1;").count(), 1, "{text}");
+}
+
 /// A string-compare ladder and a constant-to-string table both yield an
 /// enum in the header.
 ///

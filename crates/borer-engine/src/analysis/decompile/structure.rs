@@ -23,6 +23,9 @@ pub(super) struct Emit<'e, L: Lifter> {
     pub(super) assumes: &'e [Option<(Key, u64)>],
     /// Blocks whose text has been written (or that must never be written).
     pub(super) emitted: Vec<bool>,
+    /// Blocks nothing reaches once the folded branches lost their dead
+    /// edges: marked emitted from the start, with no edges in or out.
+    pub(super) dead: Vec<bool>,
     /// Blocks at or beyond this index lie after the loop being emitted and
     /// are never absorbed into a structure inside it.
     pub(super) bound: usize,

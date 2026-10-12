@@ -554,7 +554,11 @@ pub(super) fn copy_chain<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, start: 
 /// outside the range (a return the function's head jumps to, a switch arm
 /// interleaved with the loop) is not the loop's to emit: it is skipped,
 /// left to whoever owns it, and the loop's blocks treat it as one beyond
-/// the range. Exit blocks entered only from
+/// the range. A block nothing reaches (the other side of a branch that
+/// folded to a constant) is no text at all and vetoes nothing, and a header
+/// whose branch leads into one is a jump, not the `while` test it would
+/// otherwise be left to. Exit blocks
+/// entered only from
 /// the loop whose own region leaves through the one block every exit
 /// reaches (the loop's continuation) are written inline in front of their
 /// `break`: pass 1 finds that continuation (a shared exit block an exit
@@ -601,6 +605,8 @@ pub(super) fn try_loop<L: Lifter>(
             st.blocks[i].successors.get(1).and_then(|s| st.index_of(*s)),
         );
         if let (Some(t), Some(f)) = (t, f)
+            && !st.dead[t]
+            && !st.dead[f]
             && try_while(st, i, t, f).is_some()
         {
             return None;
@@ -631,7 +637,7 @@ pub(super) fn try_loop<L: Lifter>(
         skipped.extend(more);
     }
     for b in min..=max {
-        if body.contains(&b) || skipped.contains(&b) {
+        if body.contains(&b) || skipped.contains(&b) || st.dead[b] {
             continue;
         }
         let falls_out = matches!(st.blocks[b].term, BlockTerm::Fall | BlockTerm::Call)

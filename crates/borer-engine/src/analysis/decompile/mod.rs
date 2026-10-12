@@ -1597,6 +1597,7 @@ fn decompile_in<L: Lifter>(
         processed: &processed,
         assumes: &assumes,
         emitted: vec![false; n],
+        dead: vec![false; n],
         bound: n,
         skipped: BTreeSet::new(),
         loops: Vec::new(),
@@ -1619,6 +1620,7 @@ fn decompile_in<L: Lifter>(
     for (b, r) in reached.iter().enumerate() {
         if !r {
             st.emitted[b] = true;
+            st.dead[b] = true;
             st.succs[b].clear();
         }
     }
