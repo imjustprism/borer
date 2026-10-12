@@ -323,6 +323,74 @@ STATIC_CODE = _elf(
     ],
 )
 
+
+def _le(*fields: tuple[int, int]) -> bytes:
+    """Little-endian fields, each (value, width in bytes), back to back."""
+    return b"".join(v.to_bytes(n, "little") for v, n in fields)
+
+
+def _macho(cpu: int, segs: list[tuple], extra: list[bytes]) -> bytes:
+    """A little-endian 64-bit Mach-O PIE executable: each segment (name,
+    vmaddr, fileoff, data, prot, sections) at its file offset with its
+    sections (name, addr, size, flags), then the extra load commands; the
+    header and commands lie over the first segment's first bytes."""
+    out = bytearray()
+    cmds = bytearray()
+    for name, vmaddr, fileoff, data, prot, sections in segs:
+        if len(out) < fileoff + len(data):
+            out += bytes(fileoff + len(data) - len(out))
+        out[fileoff : fileoff + len(data)] = data
+        seg = name.encode().ljust(16, b"\0")
+        vmsize = (len(data) + 0xFFF) & ~0xFFF
+        cmds += _le((0x19, 4), (72 + 80 * len(sections), 4)) + seg
+        cmds += _le((vmaddr, 8), (vmsize, 8), (fileoff, 8), (len(data), 8))
+        cmds += _le((prot, 4), (prot, 4), (len(sections), 4), (0, 4))
+        for sect, addr, size, flags in sections:
+            cmds += sect.encode().ljust(16, b"\0") + seg
+            cmds += _le((addr, 8), (size, 8), (fileoff + addr - vmaddr, 4), (0, 12))
+            cmds += _le((flags, 4), (0, 12))
+    for c in extra:
+        cmds += c
+    head = _le((0xFEEDFACF, 4), (cpu, 4), (3, 4), (2, 4), (len(segs) + len(extra), 4))
+    out[0 : 32 + len(cmds)] = head + _le((len(cmds), 4), (0x200000, 4), (0, 4)) + cmds
+    return bytes(out)
+
+
+def _macho_blob() -> bytes:
+    """An x86-64 Mach-O PIE with chained fixups as ld64 writes them for
+    macOS 12: the function at 0x100000410 (`mov eax,42; ret`) is reached
+    only through the __DATA_CONST slot at 0x100001000, which on disk holds
+    its DYLD_CHAINED_PTR_64_OFFSET rebase (offset 0x410, next 2 strides),
+    and the slot after it binds _malloc."""
+    base = 0x100000000
+    text = bytearray(0x1000)
+    text[0x400:0x403] = bytes.fromhex("31c0c3")  # xor eax, eax; ret
+    text[0x410:0x416] = bytes.fromhex("b82a000000c3")  # mov eax, 42; ret
+    data = _le((0x410 | 2 << 51, 8), (1 << 63, 8))
+    starts = _le((24, 4), (0x1000, 2), (6, 2), (0x1000, 8), (0, 4), (1, 2), (0, 2))
+    image = _le((3, 4), (0, 4), (16, 4), (0, 4)) + starts
+    names = b"\0_malloc\0"
+    fixups = _le((0, 4), (32, 4), (72, 4), (76, 4), (1, 4), (1, 4), (0, 4), (0, 4))
+    fixups += image + _le((1 | 1 << 9, 4)) + names
+    lib = b"/usr/lib/libSystem.B.dylib".ljust(32, b"\0")
+    dylib = _le((0xC, 4), (56, 4), (24, 4), (0, 12)) + lib
+    return _macho(
+        0x01000007,
+        [
+            ("__TEXT", base, 0, bytes(text), 5, [("__text", base + 0x400, 0x20, 0x80000400)]),
+            ("__DATA_CONST", base + 0x1000, 0x1000, data, 3, [("__const", base + 0x1000, 16, 0)]),
+            ("__LINKEDIT", base + 0x10000, 0x1010, fixups, 1, []),
+        ],
+        [
+            _le((0x80000028, 4), (24, 4), (0x400, 8), (0, 8)),
+            _le((0x80000034, 4), (16, 4), (0x1010, 4), (len(fixups), 4)),
+            dylib,
+        ],
+    )
+
+
+MACHO_CODE = _macho_blob()
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
@@ -334,6 +402,7 @@ BLOBS = {
     "go": (GO_CODE, "<go>"),
     "children": (CHILDREN_BLOB, "<children>"),
     "static": (STATIC_CODE, "<static>"),
+    "macho": (MACHO_CODE, "<macho>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -507,6 +576,15 @@ TASKS = [
             ("load_binary", {"path": "{children}@0x200"}),
         ],
         "parent:  <children> at file offset 0x200, 0x400 bytes",
+    ),
+    (
+        "macho_chained_xref",
+        "where a chained-fixups Mach-O's function reached only through a rebased slot is referenced",
+        [
+            ("load_binary", {"path": "{macho}"}),
+            ("xrefs", {"address": "0x100000410"}),
+        ],
+        "-: 0x100001000 table",
     ),
 ]
 

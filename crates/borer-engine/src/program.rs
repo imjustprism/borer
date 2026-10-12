@@ -307,9 +307,10 @@ pub struct Program {
     pub pdb_source: Option<(PathBuf, crate::pdb::Record)>,
     /// The section table was unusable and a flat file mapping was synthesized.
     pub flat_fallback: bool,
-    /// What an ELF's dynamic relocations write into the image: every read
-    /// of the mapped image ([`Program::read_va`], [`Program::section_bytes`])
-    /// sees the relocated words, while [`Program::bytes`] stays the file.
+    /// What an ELF's dynamic relocations or a Mach-O's fixups write into
+    /// the image: every read of the mapped image ([`Program::read_va`],
+    /// [`Program::section_bytes`]) sees the relocated words, while
+    /// [`Program::bytes`] stays the file.
     pub relocs: crate::reloc::Relocs,
     /// The Go function table, when the program carries one that validates:
     /// the provenance of the names it gave [`Program::symbols`], and the
@@ -2105,6 +2106,7 @@ impl Program {
                 symbols = loaded.symbols;
                 function_ranges = loaded.function_ranges;
                 headers = loaded.headers;
+                relocs = loaded.relocs;
                 fit.add(loaded.fit);
                 if let Some(why) = loaded.lenient {
                     lenient.push(why);
@@ -2257,9 +2259,9 @@ impl Program {
     }
 
     /// The addresses of the pointer-sized words a PE's base relocation
-    /// table or a position-independent ELF's dynamic relocations fix up:
-    /// every absolute address the image holds, as an instruction's operand
-    /// or as data.
+    /// table, a position-independent ELF's dynamic relocations or a
+    /// Mach-O's rebases fix up: every absolute address the image holds, as
+    /// an instruction's operand or as data.
     ///
     /// A 32-bit image names its function pointers nowhere else: a table of
     /// callbacks kept in `.text` (a linker without `.rdata` puts it there)
@@ -2267,13 +2269,14 @@ impl Program {
     /// looks. Only `HIGHLOW` entries count in a 32-bit image and `DIR64` in
     /// a 64-bit one. An ELF's are its `RELATIVE`, absolute and `DT_RELR`
     /// words ([`crate::reloc`]), and only an `ET_DYN` image's, the one kind
-    /// that relocates every pointer it holds.
+    /// that relocates every pointer it holds; a Mach-O's are its rebases
+    /// ([`crate::dyld`]), and only a PIE's, a dylib's or a bundle's.
     ///
     /// # Returns
     ///
     /// The fixed-up words' addresses, in table order for a PE and address
-    /// order for an ELF, at most a million; empty for any other file or one
-    /// with no relocations.
+    /// order for an ELF or a Mach-O, at most a million; empty for any other
+    /// file or one with no relocations.
     #[must_use]
     pub fn relocated_words(&self) -> Vec<u64> {
         /// Most relocated words read, whatever the table claims.
@@ -2283,7 +2286,7 @@ impl Program {
         /// `IMAGE_REL_BASED_DIR64`, a 64-bit address.
         const DIR64: u16 = 10;
         let mut out = Vec::new();
-        if self.format == BinaryFormat::Elf {
+        if matches!(self.format, BinaryFormat::Elf | BinaryFormat::MachO) {
             return self.relocs.sites.clone();
         }
         if self.format != BinaryFormat::Pe {

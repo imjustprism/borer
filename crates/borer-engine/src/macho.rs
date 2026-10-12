@@ -14,9 +14,11 @@
 //! names, pointer by pointer, the symbol the loader binds there, and a
 //! stub that jumps through the pointer takes that name as a PE's import
 //! thunk does. A fat file holds one image per architecture; the x86-64
-//! slice is the one analyzed, the arm64 one when there is no other.
+//! slice is the one analyzed, the arm64 one when there is no other. The
+//! image's fixups ([`crate::dyld`]) relocate its pointers and name every
+//! slot a bind fills after its import, data words as well as `__got`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use goblin::mach::load_command::CommandVariant;
 use goblin::mach::{Mach, MachO};
@@ -71,6 +73,9 @@ const UNWIND_OFFSET_MASK: u32 = 0x00ff_ffff;
 /// Bytes of one first-level index entry: the first function's offset, the
 /// page's offset and the LSDA array's offset.
 const UNWIND_INDEX_ENTRY: usize = 12;
+/// Most slots one import is named at through its binds: a `__got` slot
+/// and a few data words are real, a table of thousands names nothing new.
+const SLOTS_PER_IMPORT: usize = 16;
 
 /// What one Mach-O image says about itself.
 pub(crate) struct Loaded {
@@ -95,6 +100,8 @@ pub(crate) struct Loaded {
     /// What the strict parse of a fat file's slice said when only the
     /// lossy parse read it.
     pub lenient: Option<String>,
+    /// The image as its fixups leave it ([`crate::dyld`]).
+    pub relocs: crate::reloc::Relocs,
 }
 
 /// A section's raw header, read from its segment command.
@@ -345,7 +352,7 @@ fn text_base(m: &MachO<'_>) -> u64 {
 ///
 /// * `data` - The bytes.
 /// * `at` - The offset, moved past the value.
-fn uleb(data: &[u8], at: &mut usize) -> Option<u64> {
+pub(crate) fn uleb(data: &[u8], at: &mut usize) -> Option<u64> {
     let mut value: u64 = 0;
     let mut shift = 0u32;
     loop {
@@ -590,6 +597,46 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         }
     }
 
+    let chain_starts = raw
+        .iter()
+        .find(|s| s.name == "__TEXT,__chain_starts")
+        .and_then(|s| {
+            let at = usize::try_from(s.offset).ok()?;
+            file.get(at..at.checked_add(usize::try_from(s.size).ok()?)?)
+        });
+    let relocs = crate::dyld::read(
+        file,
+        m,
+        base,
+        text,
+        &sections,
+        chain_starts,
+        m.libs.len().saturating_sub(1),
+    );
+    // INVARIANT: every slot a bind names takes its import's name, so a
+    // load or call through it reads as the import, up to
+    // `SLOTS_PER_IMPORT` slots an import in address order: a class's
+    // superclass pointer binds `OBJC_CLASS_$_NSObject` once per subclass,
+    // and the import list is not the place to count them.
+    let mut named_slots: BTreeMap<usize, usize> = BTreeMap::new();
+    for b in &relocs.binds {
+        let (Some(import), slots) = (
+            relocs.imports.get(b.import),
+            named_slots.entry(b.import).or_default(),
+        ) else {
+            continue;
+        };
+        let name = plain(&import.name);
+        if *slots < SLOTS_PER_IMPORT && seen.insert((b.slot, name.to_owned())) {
+            *slots += 1;
+            symbols.push(Symbol {
+                name: name.to_owned(),
+                addr: b.slot,
+                kind: SymbolKind::Import,
+            });
+        }
+    }
+
     let code = |va: u64| {
         sections
             .iter()
@@ -725,5 +772,6 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         headers,
         fit,
         lenient: None,
+        relocs,
     }
 }

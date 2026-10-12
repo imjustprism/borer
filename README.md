@@ -290,8 +290,11 @@ borer script sample.exe packs/scripts/suspicious_apis.rhai
 - An ELF's dynamic relocations (`.rela.dyn`, `.rel.dyn`, `DT_RELR`, the
   GOT binds) are applied to the image for x86, x86-64 and arm64, so an lld
   PIE's pointer tables read as pointers; Android's packed `APS2` tables are
-  not read. A PE's base relocations are read for analysis. Mach-O chained
-  fixups aren't read at all.
+  not read. A PE's base relocations are read for analysis. A Mach-O's
+  chained fixups (the 64-bit, arm64e and kernel cache pointer formats) and
+  dyld info opcodes are applied the same way, arm64e pointers with their
+  authentication stripped, and each bind names its slot after the import;
+  the 32-bit and shared cache chain formats are refused.
 - A Go binary's functions are named from its `pclntab` (Go 1.2 on, found
   by magic when stripped), and on x86-64 a table from Go 1.18 on reads
   them with Go's register ABI and folds the stack-growth check. Its source

@@ -27,6 +27,7 @@ pub mod carve;
 pub mod crypto;
 pub mod disasm;
 pub mod dwarf;
+mod dyld;
 mod eh_frame;
 pub mod emulate;
 pub mod entropy;

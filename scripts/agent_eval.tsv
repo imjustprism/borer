@@ -22,3 +22,4 @@ decoded_strings	2	885	1
 test_vectors	2	4574	1
 tlsh_digest	2	2217	1
 child_program	3	1270	1
+macho_chained_xref	2	778	1

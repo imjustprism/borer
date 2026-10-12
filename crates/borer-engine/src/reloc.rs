@@ -1,4 +1,6 @@
-//! ELF dynamic relocations, applied to the image the way the loader does.
+//! ELF dynamic relocations, applied to the image the way the loader does,
+//! and the words any loader's fixups claim, settled into one relocated
+//! image.
 //!
 //! A position-independent ELF states every absolute pointer it holds as a
 //! dynamic relocation: the `.rela.dyn`/`.rel.dyn` entries, the packed
@@ -24,12 +26,17 @@
 //! no file-backed section holds, that land on a word another entry already
 //! wrote, or that come past the cap are refused and counted, never
 //! applied.
+//!
+//! A Mach-O's fixups ([`crate::dyld`]) claim words the same way and settle
+//! through [`settle`] into the same [`Relocs`], so every read of either
+//! format's image goes through one relocated copy.
 
 use crate::num::saturating_usize;
 use crate::program::Section;
 
-/// Most entries read from one relocation table, whatever its size claims.
-const ENTRIES_MAX: usize = 1 << 20;
+/// Most entries read from one relocation table, whatever its size claims,
+/// and most words one Mach-O's fixups claim.
+pub(crate) const ENTRIES_MAX: usize = 1 << 20;
 
 /// Most relocated words claimed across every table: a `DT_RELR` word past
 /// it is refused, since one bitmap word can claim 63.
@@ -84,11 +91,49 @@ fn kind(machine: u16, r_type: u32) -> Option<Kind> {
     }
 }
 
-/// The image as the dynamic relocations leave it.
+/// The table a loader's fixups came from, which names them in the summary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Table {
+    /// An ELF's dynamic relocations.
+    #[default]
+    Elf,
+    /// A Mach-O's chained fixups, in the pointer format named.
+    Chained(&'static str),
+    /// A Mach-O's `LC_DYLD_INFO` rebase and bind opcodes.
+    Opcodes,
+}
+
+/// A symbol a Mach-O's binds name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Import {
+    /// Its name as the table spells it, the C underscore kept.
+    pub(crate) name: String,
+    /// The library ordinal it binds from: `1` on for the linked libraries
+    /// in load-command order, `0` the image itself, `-1` the main
+    /// executable, `-2` a flat lookup and `-3` a weak lookup.
+    pub(crate) ordinal: i64,
+    /// A weak import: the slot reads zero when no library defines it.
+    pub(crate) weak: bool,
+}
+
+/// One slot a Mach-O's bind fixes up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Bind {
+    /// The slot's address.
+    pub(crate) slot: u64,
+    /// The import, as an index into [`Relocs::imports`].
+    pub(crate) import: usize,
+    /// What the loader adds to the import's address.
+    pub(crate) addend: i64,
+    /// Bound on the first call through a lazy pointer, not at load.
+    pub(crate) lazy: bool,
+}
+
+/// The image as the dynamic relocations or fixups leave it.
 ///
-/// Empty for every format but ELF, and for an ELF whose relocations write
-/// nothing the file does not already hold (GNU ld writes the values into
-/// the slots of a RELA image itself).
+/// Empty for a PE, and for an ELF whose relocations write nothing the file
+/// does not already hold (GNU ld writes the values into the slots of a
+/// RELA image itself).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Relocs {
     /// Copies of the file ranges the relocations write into, as `(file
@@ -106,6 +151,16 @@ pub struct Relocs {
     /// Entries refused: a slot no file-backed section holds, a word another
     /// entry already wrote, a malformed `DT_RELR` table, or past the cap.
     pub(crate) refused: usize,
+    /// The table the entries came from.
+    pub(crate) table: Table,
+    /// Every slot a Mach-O bind names, sorted by slot and unique; empty for
+    /// an ELF, whose bound slots are named through its dynamic symbols.
+    pub(crate) binds: Vec<Bind>,
+    /// The symbols [`Relocs::binds`] name, in the table's order.
+    pub(crate) imports: Vec<Import>,
+    /// Of the entries applied, the arm64e pointers the loader signs, read
+    /// with their authentication bits stripped.
+    pub(crate) authenticated: usize,
 }
 
 impl Relocs {
@@ -148,20 +203,56 @@ impl Relocs {
     }
 
     /// Renders what was applied as a summary line, empty when the image has
-    /// no dynamic relocations this applies.
+    /// no dynamic relocations or fixups this applies.
     pub(crate) fn render(&self) -> String {
         if self.applied == 0 && self.refused == 0 {
             return String::new();
         }
-        let mut out = format!(
-            "relocs:  {} dynamic relocation(s) applied to the image",
-            self.applied
-        );
+        let how = match self.table {
+            Table::Elf => None,
+            Table::Chained(format) => Some(format!("chained fixups, {format}")),
+            Table::Opcodes => Some("dyld info opcodes".to_owned()),
+        };
+        let mut out = match &how {
+            None => format!(
+                "relocs:  {} dynamic relocation(s) applied to the image",
+                self.applied
+            ),
+            Some(how) => {
+                let weak = self
+                    .binds
+                    .iter()
+                    .filter(|b| self.imports.get(b.import).is_some_and(|i| i.weak))
+                    .count();
+                let lazy = self.binds.iter().filter(|b| b.lazy).count();
+                let mut line = format!(
+                    "fixups:  {} rebase(s) and {} bind(s) applied to the image ({how})",
+                    self.applied.saturating_sub(self.binds.len()),
+                    self.binds.len()
+                );
+                for (n, what) in [
+                    (self.authenticated, "authenticated"),
+                    (weak, "weak"),
+                    (lazy, "lazy"),
+                ] {
+                    if n > 0 {
+                        line.push_str(&format!("; {n} {what}"));
+                    }
+                }
+                line
+            }
+        };
         if self.refused > 0 {
-            out.push_str(&format!(
-                "; {} refused (a slot outside the file-backed image, a word another entry wrote, a malformed DT_RELR table, or past the cap of {ENTRIES_MAX} per table)",
-                self.refused
-            ));
+            let why = if how.is_none() {
+                format!(
+                    "a slot outside the file-backed image, a word another entry wrote, a malformed DT_RELR table, or past the cap of {ENTRIES_MAX} per table"
+                )
+            } else {
+                format!(
+                    "a slot outside its segment or the file-backed image, a word another fixup wrote, a chain running into one already walked, a pointer format or opcode this does not read, an import the table does not hold, or past the cap of {ENTRIES_MAX}"
+                )
+            };
+            out.push_str(&format!("; {} refused ({why})", self.refused));
         }
         out.push('\n');
         out
@@ -180,7 +271,7 @@ impl Relocs {
 ///
 /// The first byte's file offset and the file extent of the section holding
 /// them all, or `None` when no file-backed section does.
-fn file_range(sections: &[Section], va: u64, len: u64) -> Option<(u64, (u64, u64))> {
+pub(crate) fn file_range(sections: &[Section], va: u64, len: u64) -> Option<(u64, (u64, u64))> {
     let s = sections
         .iter()
         .find(|s| s.file_size > 0 && va >= s.va && va - s.va < s.vsize.max(s.file_size))?;
@@ -266,48 +357,79 @@ pub(crate) fn read_elf(elf: &goblin::elf::Elf<'_>, bytes: &[u8], sections: &[Sec
                 at,
                 value,
                 site: matches!(kind, Kind::Relative | Kind::Absolute),
+                bind: None,
+                auth: false,
             });
         }
     }
     relr(elf, bytes, sections, word, &mut claims, &mut out.relocs);
+    let pic = elf.header.e_type == goblin::elf::header::ET_DYN;
+    settle(bytes, claims, word, pic, &mut out.relocs);
+    out
+}
+
+/// One word a relocation or fixup claims, before overlaps are settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Claim {
+    /// The slot's address.
+    pub(crate) va: u64,
+    /// The slot's file offset and its section's file extent.
+    pub(crate) at: (u64, (u64, u64)),
+    /// The value the loader writes, `None` where the slot already holds it
+    /// (an implicit addend, loaded at the link address).
+    pub(crate) value: Option<u64>,
+    /// Whether the word is a pointer into the image, which every relative
+    /// and absolute word is and a GOT bind to a defined symbol is not.
+    pub(crate) site: bool,
+    /// The Mach-O bind naming the slot, `None` for any other word.
+    pub(crate) bind: Option<Bind>,
+    /// Whether the loader signs the pointer (arm64e).
+    pub(crate) auth: bool,
+}
+
+/// Settles the words the relocations or fixups claim into the relocated
+/// image.
+///
+/// # Arguments
+///
+/// * `bytes` - The file.
+/// * `claims` - The claims, in table order.
+/// * `word` - The width of each word in bytes.
+/// * `pic` - Whether the image relocates every pointer it holds, so the
+///   pointer words are recorded as [`Relocs::sites`].
+/// * `relocs` - Receives the copies, the sites, the binds and the counts.
+pub(crate) fn settle(
+    bytes: &[u8],
+    mut claims: Vec<Claim>,
+    word: u64,
+    pic: bool,
+    relocs: &mut Relocs,
+) {
     // INVARIANT: a word is written once: of the entries claiming one, the
     // lowest address wins, then the first in table order, so a hostile
     // table cannot make a write depend on anything but the file.
     claims.sort_by_key(|c| c.va);
-    let pic = elf.header.e_type == goblin::elf::header::ET_DYN;
     let mut last_end = 0u64;
     let mut writes: Vec<(u64, (u64, u64), u64)> = Vec::new();
     for c in claims {
         if c.va < last_end {
-            out.relocs.refused += 1;
+            relocs.refused += 1;
             continue;
         }
         last_end = c.va.saturating_add(word);
-        out.relocs.applied += 1;
+        relocs.applied += 1;
+        relocs.authenticated += usize::from(c.auth);
         if c.site && pic {
-            out.relocs.sites.push(c.va);
+            relocs.sites.push(c.va);
+        }
+        if let Some(b) = c.bind {
+            relocs.binds.push(b);
         }
         if let Some(v) = c.value {
             writes.push((c.at.0, c.at.1, v));
         }
     }
-    out.relocs.patched = patch(bytes, &writes, word);
-    out
-}
-
-/// One word a relocation claims, before overlaps are settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Claim {
-    /// The slot's address.
-    va: u64,
-    /// The slot's file offset and its section's file extent.
-    at: (u64, (u64, u64)),
-    /// The value the loader writes, `None` where the slot already holds it
-    /// (an implicit addend, loaded at the link address).
-    value: Option<u64>,
-    /// Whether the word is a pointer into the image, which every relative
-    /// and absolute word is and a GOT bind to a defined symbol is not.
-    site: bool,
+    relocs.patched = patch(bytes, &writes, word);
 }
 
 /// Decodes the packed `DT_RELR` table into the pointer words it relocates.
@@ -364,6 +486,8 @@ fn relr(
             at,
             value: None,
             site: true,
+            bind: None,
+            auth: false,
         }),
         None => relocs.refused += 1,
     };

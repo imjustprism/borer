@@ -11,6 +11,8 @@ mod decompiled;
 mod elfgen;
 #[path = "../common/gotos.rs"]
 mod gotos;
+#[path = "../common/machogen.rs"]
+mod machogen;
 #[path = "../common/nebula.rs"]
 mod nebula;
 #[path = "../common/raw.rs"]
@@ -30,6 +32,7 @@ mod elf;
 mod emulate_calls;
 mod engine;
 mod families;
+mod fixups;
 mod go;
 mod groundtruth;
 mod hashing;
