@@ -1028,7 +1028,7 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     for hit in crate::crypto::find_crypto_constants(p) {
         if let Some(f) = hit.va.and_then(|va| a.function_at(va)) {
             let entry = reasons.entry(f.entry).or_default();
-            let note = format!("holds {}", hit.name);
+            let note = format!("holds {}{}", hit.name, hit.storage);
             if !entry.contains(&note) {
                 *score.entry(f.entry).or_default() += WEIGHT_HOLDS;
                 if entry.len() < 4 {

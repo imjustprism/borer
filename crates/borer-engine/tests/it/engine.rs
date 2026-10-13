@@ -504,6 +504,39 @@ fn crypto_constant_scan() {
     assert!(find_crypto_constants(&two_section_program(vec![0x90; 16], vec![0; 64])).is_empty());
 }
 
+/// The same table stored the other way round, xored with a constant and
+/// added one, is named with what was done to it; the plain form reports
+/// once and no delta form doubles it.
+#[test]
+fn crypto_constant_storage_variants() {
+    use borer_engine::crypto::{Storage, find_crypto_constants};
+    let k: Vec<u8> = vec![
+        0x98, 0x2f, 0x8a, 0x42, 0x91, 0x44, 0x37, 0x71, 0xcf, 0xfb, 0xc0, 0xb5, 0xa5, 0xdb, 0xb5,
+        0xe9,
+    ];
+    let forms: [(Vec<u8>, Storage); 4] = [
+        (k.clone(), Storage::Native),
+        (
+            k.chunks(4).flat_map(|c| c.iter().rev().copied()).collect(),
+            Storage::Swapped,
+        ),
+        (k.iter().map(|b| b ^ 0x5a).collect(), Storage::Xored(0x5a)),
+        (
+            k.iter().map(|b| b.wrapping_add(0x11)).collect(),
+            Storage::Added(0x11),
+        ),
+    ];
+    for (stored, storage) in &forms {
+        let mut data = vec![0u8; 8];
+        data.extend(stored);
+        let p = two_section_program(vec![0x90; 16], data);
+        let hits = find_crypto_constants(&p);
+        assert_eq!(hits.len(), 1, "{storage}: {hits:?}");
+        assert_eq!(hits[0].name, "SHA-256 K constants", "{storage}: {hits:?}");
+        assert_eq!(&hits[0].storage, storage, "{hits:?}");
+    }
+}
+
 /// A constant in bytes no section maps is found by its file offset, as
 /// `search` finds it: a table appended after the last section was missed.
 #[test]

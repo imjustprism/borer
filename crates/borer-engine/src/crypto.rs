@@ -124,6 +124,66 @@ const SIGNATURES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The width of one word of a signature's table, so the same table stored
+/// the other way round is scanned too; byte tables and text constants
+/// have no word order and return 0.
+#[must_use]
+pub fn word_of(name: &str) -> usize {
+    /// Byte tables and text constants, whose bytes carry no word order.
+    const BYTES: [&str; 7] = [
+        "S-box",
+        "rcon",
+        "sigma",
+        "tau",
+        "somepseu",
+        "dorandom",
+        "Base64 alphabet",
+    ];
+    /// Tables of 64-bit words.
+    const W64: [&str; 8] = [
+        "SHA-512",
+        "BLAKE2b",
+        "xxHash64",
+        "splitmix64",
+        "xoshiro256",
+        "PCG64",
+        "MurmurHash3 x64",
+        "FNV-1 64",
+    ];
+    if BYTES.iter().any(|k| name.contains(k)) {
+        0
+    } else if W64.iter().any(|k| name.contains(k)) {
+        8
+    } else {
+        4
+    }
+}
+
+/// How a table was stored when [`scan`] met it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Storage {
+    /// The signature's own bytes, as the table writes them.
+    #[default]
+    Native,
+    /// Each word of the table stored the other way round.
+    Swapped,
+    /// Every byte xored with one constant, which names it.
+    Xored(u8),
+    /// One constant added to every byte, which names it.
+    Added(u8),
+}
+
+impl std::fmt::Display for Storage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Storage::Native => Ok(()),
+            Storage::Swapped => write!(f, " (big-endian)"),
+            Storage::Xored(k) => write!(f, " (xor {k:#04x})"),
+            Storage::Added(k) => write!(f, " (add {k:#04x})"),
+        }
+    }
+}
+
 /// One recognized constant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CryptoHit {
@@ -134,6 +194,8 @@ pub struct CryptoHit {
     pub file_off: u64,
     /// Algorithm name from [`SIGNATURES`].
     pub name: &'static str,
+    /// How the table was stored, [`Storage::Native`] for the plain form.
+    pub storage: Storage,
     /// Name of the section holding the constant, [`UNMAPPED`] for bytes no
     /// section maps.
     pub section: String,
@@ -247,6 +309,8 @@ pub struct Seen<'p> {
     pub file_off: u64,
     /// Algorithm name from [`SIGNATURES`].
     pub name: &'static str,
+    /// How the table was stored, [`Storage::Native`] for the plain form.
+    pub storage: Storage,
     /// Name of the section holding the constant, [`UNMAPPED`] for bytes no
     /// section maps.
     pub section: &'p str,
@@ -260,6 +324,7 @@ impl Seen<'_> {
             va: self.va,
             file_off: self.file_off,
             name: self.name,
+            storage: self.storage,
             section: self.section.to_owned(),
         }
     }
@@ -269,10 +334,16 @@ impl Seen<'_> {
 /// known constants, handing each hit to `visit` until it says stop.
 ///
 /// Signatures are bucketed by their first byte, so each position compares
-/// against the few candidates that can start there. An overlay, the
-/// headers and a file with no sections hold bytes worth scanning, as
-/// `search` scans them: a table appended after the last section was found
-/// by `search` and missed here.
+/// against the few candidates that can start there: byte-keyed forms
+/// under the byte a match starts with, delta forms under the delta. Each
+/// table is also
+/// matched word-swapped, and through the adjacent-byte deltas a constant
+/// xor or add key leaves unchanged, so the other word order and lightly
+/// obfuscated forms are named with what was done to them; the plain form
+/// reports those once, so a delta hit with key zero is skipped. An
+/// overlay, the headers and a file with no sections hold bytes worth
+/// scanning, as `search` scans them: a table appended after the last
+/// section was found by `search` and missed here.
 ///
 /// # Arguments
 ///
@@ -280,15 +351,81 @@ impl Seen<'_> {
 /// * `visit` - Receives every hit in a deterministic order: section, then
 ///   offset, then table order, then the unmapped runs in file order; it
 ///   returns [`ControlFlow::Break`] to end the scan.
+/// Which form of a signature [`scan`] matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Var {
+    /// The signature's own bytes.
+    Native,
+    /// Each word stored the other way round.
+    Swapped,
+    /// Adjacent xor deltas, which a constant xor key leaves unchanged.
+    Xor,
+    /// Adjacent subtract deltas, which a constant add key leaves unchanged.
+    Add,
+}
+
 pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<()>) {
+    /// One form of a signature [`scan`] matches at a position.
+    struct Form {
+        /// The signature's index in [`SIGNATURES`].
+        sig: usize,
+        /// The bytes this form matches: the constant's own bytes for
+        /// [`Var::Native`] and [`Var::Swapped`], the run of adjacent-byte
+        /// deltas for [`Var::Xor`] and [`Var::Add`].
+        bytes: Vec<u8>,
+        /// Which form this is.
+        var: Var,
+    }
     let sigs: Vec<(&'static str, Vec<u8>)> = SIGNATURES
         .iter()
         .map(|(name, sig)| (*name, parse(sig)))
         .collect();
-    let mut by_first: Vec<Vec<usize>> = vec![Vec::new(); 256];
-    for (i, (_, bytes)) in sigs.iter().enumerate() {
-        if let Some(&b) = bytes.first() {
-            by_first[usize::from(b)].push(i);
+    let mut forms: Vec<Form> = Vec::new();
+    for (sig, (name, bytes)) in sigs.iter().enumerate() {
+        forms.push(Form {
+            sig,
+            bytes: bytes.clone(),
+            var: Var::Native,
+        });
+        let word = word_of(name);
+        if word > 0 {
+            forms.push(Form {
+                sig,
+                bytes: bytes
+                    .chunks(word)
+                    .flat_map(|c| c.iter().rev().copied())
+                    .collect(),
+                var: Var::Swapped,
+            });
+        }
+        for var in [Var::Xor, Var::Add] {
+            forms.push(Form {
+                sig,
+                bytes: bytes[1..]
+                    .iter()
+                    .scan(bytes[0], |a, b| {
+                        let d = if var == Var::Xor {
+                            *a ^ b
+                        } else {
+                            b.wrapping_sub(*a)
+                        };
+                        *a = *b;
+                        Some(d)
+                    })
+                    .collect(),
+                var,
+            });
+        }
+    }
+    let mut by_byte: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    let mut by_xor: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    let mut by_sub: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    for (i, f) in forms.iter().enumerate() {
+        let Some(&b) = f.bytes.first() else { continue };
+        match f.var {
+            Var::Native | Var::Swapped => by_byte[usize::from(b)].push(i),
+            Var::Xor => by_xor[usize::from(b)].push(i),
+            Var::Add => by_sub[usize::from(b)].push(i),
         }
     }
     let runs = program
@@ -310,20 +447,70 @@ pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<(
         );
     for (data, off, va, section) in runs {
         for (i, &b) in (0u64..).zip(data.iter()) {
-            for &si in &by_first[usize::from(b)] {
-                let (name, sig) = (sigs[si].0, &sigs[si].1);
-                let at = crate::num::saturating_usize(i);
-                if data.get(at..at.saturating_add(sig.len())) != Some(sig.as_slice()) {
+            let at = crate::num::saturating_usize(i);
+            for &fi in &by_byte[usize::from(b)] {
+                let f = &forms[fi];
+                if data.get(at..at.saturating_add(f.bytes.len())) != Some(f.bytes.as_slice()) {
                     continue;
                 }
+                let storage = match f.var {
+                    Var::Native => Storage::Native,
+                    Var::Swapped => Storage::Swapped,
+                    Var::Xor | Var::Add => continue,
+                };
                 let seen = Seen {
                     va: va.map(|v| v + i),
                     file_off: off + i,
-                    name,
+                    name: sigs[f.sig].0,
+                    storage,
                     section,
                 };
                 if visit(&seen).is_break() {
                     return;
+                }
+            }
+            let Some(&next) = data.get(at + 1) else {
+                continue;
+            };
+            for (table, xor) in [(&by_xor, true), (&by_sub, false)] {
+                let head = if xor { b ^ next } else { next.wrapping_sub(b) };
+                for &fi in &table[usize::from(head)] {
+                    let f = &forms[fi];
+                    let keyed = (0..f.bytes.len()).all(|j| {
+                        data.get(at + j)
+                            .copied()
+                            .zip(data.get(at + j + 1).copied())
+                            .is_some_and(|(l, r)| {
+                                let d = if xor { l ^ r } else { r.wrapping_sub(l) };
+                                d == f.bytes[j]
+                            })
+                    });
+                    if !keyed {
+                        continue;
+                    }
+                    let key = if xor {
+                        b ^ sigs[f.sig].1[0]
+                    } else {
+                        b.wrapping_sub(sigs[f.sig].1[0])
+                    };
+                    if key == 0 {
+                        continue;
+                    }
+                    let storage = if xor {
+                        Storage::Xored(key)
+                    } else {
+                        Storage::Added(key)
+                    };
+                    let seen = Seen {
+                        va: va.map(|v| v + i),
+                        file_off: off + i,
+                        name: sigs[f.sig].0,
+                        storage,
+                        section,
+                    };
+                    if visit(&seen).is_break() {
+                        return;
+                    }
                 }
             }
         }
@@ -389,7 +576,10 @@ pub fn rows(hits: &[CryptoHit]) -> String {
     for h in hits {
         let at =
             h.va.map_or_else(|| format!("off={:#x}", h.file_off), |va| format!("{va:#x}"));
-        out.push_str(&format!("{at:<12} {:<9} {}\n", h.section, h.name));
+        out.push_str(&format!(
+            "{at:<12} {:<9} {}{}\n",
+            h.section, h.name, h.storage
+        ));
     }
     out
 }
