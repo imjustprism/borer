@@ -841,7 +841,10 @@ pub(super) fn split_pair(inner: &str) -> Option<(&str, &str)> {
 /// on its own line, which covers loops (a back edge's read is a mention)
 /// and address-taken stack slots (`&local_18` mentions it), and a right
 /// side that reads the target itself (`rdx = f__rdx(rsi, rdx)`) only feeds
-/// a value nothing reads; or when the lines that follow it in order
+/// a value nothing reads; or, for a call's result, when no other line
+/// reads it at all, every other mention assigning it (a register several
+/// calls write and a condition no longer reads); or when the lines that
+/// follow it in order
 /// replace or abandon the value before anything can read it
 /// ([`dead_after`]). A dead target goes when its right side is pure, or a
 /// second result (`f__rdx(..)`), which only names what the call on the
@@ -871,9 +874,19 @@ pub(super) fn drop_dead_assignments(
     live_out: Option<&str>,
 ) -> Option<Vec<String>> {
     let mut mentions: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut reads: BTreeMap<&str, usize> = BTreeMap::new();
     for line in lines {
         for word in tokens(line).filter(|w| is_register_name(w)) {
             *mentions.entry(word).or_default() += 1;
+        }
+        let t = line.trim();
+        let read = t
+            .strip_suffix(';')
+            .and_then(|s| s.rsplit_once(" = "))
+            .filter(|(targets, _)| targets.split(" = ").all(is_ident))
+            .map_or(t, |(_, rhs)| rhs);
+        for word in tokens(read).filter(|w| is_register_name(w)) {
+            *reads.entry(word).or_default() += 1;
         }
     }
     let own = |name: &str, prefix: &str| {
@@ -905,6 +918,9 @@ pub(super) fn drop_dead_assignments(
                     && is_register_name(name)
                     && live_out != Some(*name)
                     && (mentions.get(name) == Some(&tokens(line).filter(|w| w == name).count())
+                        || (call
+                            && reads.get(name).copied().unwrap_or(0)
+                                == tokens(rhs).filter(|w| w == name).count())
                         || dead_after(lines, at, name, live_out));
                 let itself = local(name) && name == rhs;
                 !(unread || itself)

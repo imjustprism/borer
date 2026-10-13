@@ -1308,6 +1308,30 @@ fn a_dead_result_before_a_bare_return_is_dropped() {
     assert!(!text.contains("rax"), "{text}");
 }
 
+/// A register several calls write and no line reads holds results nobody
+/// reads: each call stands as a statement of its own.
+///
+/// Once a condition takes in the call it tests, the calls before and after
+/// it may assign `x0` with nothing left to read it; the assignments in two
+/// arms are not in line with one another, so only the absence of any read
+/// tells them dead.
+#[test]
+fn results_no_line_reads_are_dropped() {
+    let body = "if (a1 != 0) {\n  x0 = sub_1(a1);\n} else {\n  x0 = sub_2(a1);\n}\nif ((uint32_t)sub_3(a1) != 0) {\n  return 1;\n}\nreturn 0;\n";
+    let out = cleanup(body);
+    assert!(!out.contains("x0"), "{out}");
+    assert!(
+        out.contains("sub_1(a1);") && out.contains("sub_2(a1);"),
+        "{out}"
+    );
+    let read = body.replace("return 0;", "return x0;");
+    assert!(
+        cleanup(&read).contains("x0 = sub_1(a1);"),
+        "{}",
+        cleanup(&read)
+    );
+}
+
 /// An early exit's epilogue does not move the stack pointer of the code
 /// after it: a home-slot read there is no stack argument.
 ///
