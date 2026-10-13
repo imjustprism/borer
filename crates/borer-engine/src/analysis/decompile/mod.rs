@@ -1361,6 +1361,13 @@ pub fn decompile_raw(
 /// a block not yet written (the goto/label pair then cancels), else takes
 /// the lowest unwritten block. Only variables the body names are declared.
 ///
+/// The work runs on a thread with [`DECOMPILE_STACK`] bytes: structuring
+/// nests [`MAX_DEPTH`] emitter frames deep, and one inlined monolith (a
+/// Zig `main` holding the whole program, 3,890 blocks) fills each frame
+/// with kilobytes of its own, where the cap was sized for a megabyte in
+/// total. The answer is only deep, so it gets room for it; wasm builds
+/// have no threads and keep the caller's stack.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -1374,7 +1381,7 @@ pub fn decompile_raw(
 ///
 /// # Returns
 ///
-/// The pseudo-C, or `None` when there is no such function or no lifter.
+/// The decompilation, or `None` when there is no such function or no lifter.
 fn decompile_with(
     program: &Program,
     analysis: &Analysis,
@@ -1385,7 +1392,48 @@ fn decompile_with(
     witness: bool,
 ) -> Option<Decompiled> {
     let run = (program, analysis, overlay, entry);
-    match program.arch.isa()? {
+    #[cfg(target_arch = "wasm32")]
+    {
+        decompile_in_run(run, cleanup, assume, witness)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(DECOMPILE_STACK)
+                .spawn_scoped(scope, || decompile_in_run(run, cleanup, assume, witness))
+                .ok()?
+                .join()
+                .ok()
+                .flatten()
+        })
+    }
+}
+
+/// Stack bytes the decompile thread runs on: deep structure is not a
+/// fault, so the thread is sized for [`MAX_DEPTH`] frames of a fat
+/// function.
+#[cfg(not(target_arch = "wasm32"))]
+const DECOMPILE_STACK: usize = 64 << 20;
+
+/// [`decompile_with`] past the stack choice: pick the instruction set's
+/// lifter.
+///
+/// # Arguments
+///
+/// * `run` - The loaded image, its discovery results, the user names and
+///   comments, and the function's entry address.
+/// * `cleanup` - Run [`cleanup_text`] on the body.
+/// * `assume` - Parameter slots a scenario fixes, and their values.
+/// * `witness` - Keep what the lifter knew about each block beside the
+///   text, for [`replay`].
+fn decompile_in_run(
+    run: (&Program, &Analysis, &Overlay, u64),
+    cleanup: bool,
+    assume: &[(u8, u64)],
+    witness: bool,
+) -> Option<Decompiled> {
+    match run.0.arch.isa()? {
         crate::isa::Isa::X86 { bits } => {
             decompile_in::<arch::X86>(run, bits, cleanup, assume, witness)
         }
