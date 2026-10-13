@@ -1902,18 +1902,23 @@ impl<'t> Text<'t> {
 
     /// The statements control runs between `d` and `u` when the code
     /// runs straight from one to the other: each step the only way out of
-    /// the last and the only way into the next, joins passed.
+    /// the last and the only way into the next, joins passed, unless the
+    /// right side calls: a call a block's jumps lead around is a statement
+    /// of the block the binary has it in, so a calling right side crosses
+    /// no join.
     ///
     /// # Arguments
     ///
     /// * `d` - The node control leaves.
     /// * `u` - The node control reaches.
+    /// * `calls` - Whether the right side being carried calls.
     ///
     /// # Returns
     ///
     /// The nodes in between, none of them joins, or `None` when control
-    /// does not run straight from `d` to `u` within [`REACH`] statements.
-    fn between(&self, d: usize, u: usize) -> Option<Vec<usize>> {
+    /// does not run straight from `d` to `u` within [`REACH`] statements,
+    /// or a calling right side would cross a join.
+    fn between(&self, d: usize, u: usize, calls: bool) -> Option<Vec<usize>> {
         let mut out = Vec::new();
         let mut cur = d;
         for _ in 0..self.graph.nodes.len() {
@@ -1926,11 +1931,11 @@ impl<'t> Text<'t> {
             if *s == u {
                 return Some(out);
             }
-            if self.graph.nodes.get(*s)?.form != Form::Join {
-                if out.len() == REACH {
-                    return None;
-                }
-                out.push(*s);
+            match self.graph.nodes.get(*s)?.form {
+                Form::Join if !calls => {}
+                Form::Join => return None,
+                _ if out.len() == REACH => return None,
+                _ => out.push(*s),
             }
             cur = *s;
         }
@@ -2068,7 +2073,7 @@ impl<'t> Text<'t> {
             .map(|(v, _)| *v)
             .collect();
         if !self
-            .between(d, u)?
+            .between(d, u, rhs_does.calls)?
             .iter()
             .all(|m| self.passes(*m, &reads, rhs_does))
         {
@@ -2766,6 +2771,30 @@ mod tests {
                 "var1 = *(uint64_t*)a1;",
                 "sub_1(sub_2(a2), var1);",
                 "return 0;",
+            ],
+        );
+        assert_eq!(fold(&t), None);
+    }
+
+    /// A call does not fold across a join: the label starts another
+    /// block, and the call belongs where the binary has it, before the
+    /// jump that reaches the label, not after the label itself.
+    #[test]
+    fn a_call_does_not_fold_across_a_join() {
+        let t = function(
+            &["uint64_t var1;"],
+            &[
+                "if (a1 == 13) {",
+                "  var1 = sub_1(a2);",
+                "  goto L_1004;",
+                "}",
+                "sub_2(a2);",
+                "goto L_1005;",
+                "L_1004:",
+                "sub_3(var1);",
+                "return 0;",
+                "L_1005:",
+                "return 1;",
             ],
         );
         assert_eq!(fold(&t), None);
