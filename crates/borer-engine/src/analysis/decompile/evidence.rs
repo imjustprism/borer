@@ -1,5 +1,9 @@
-//! Names from evidence: the variables the webs pass made (`var1` to
-//! `varN`, [`super::vars`]) named by what the text shows they hold.
+//! Names and types from evidence.
+//!
+//! The variables the webs pass made (`var1` to `varN`, [`super::vars`])
+//! are named and typed by what the text shows they hold, the constants an
+//! API takes are named by the group its declaration gives, and the test of
+//! a call that answers yes or no is spelled as the call.
 //!
 //! First match wins, as a reader names them: the parameter of a declared
 //! API a variable is passed to whole (`hKey`), the thing a handle or
@@ -13,7 +17,7 @@
 
 use super::vars::{Lex, Line, declaration, is_var_name, lex, parts};
 use super::*;
-use crate::analysis::typelib::{self, Decl, Os};
+use crate::analysis::typelib::{self, Decl, Os, Pass};
 use crate::program::BinaryFormat;
 
 /// The kinds of evidence, strongest first.
@@ -59,6 +63,19 @@ const HANDLES: [&str; 12] = [
     "HWND",
 ];
 
+/// The handle types a run reads as a pointer to nothing: what one holds
+/// and how it compares are a machine word's.
+const VOID_POINTERS: [&str; 8] = [
+    "HANDLE",
+    "HMODULE",
+    "HINSTANCE",
+    "HKEY",
+    "PVOID",
+    "LPVOID",
+    "LPCVOID",
+    "void *",
+];
+
 /// Words a name may not be: C's keywords and the type words a cast spells.
 const RESERVED: [&str; 34] = [
     "if", "else", "while", "for", "do", "switch", "case", "default", "return", "goto", "break",
@@ -78,6 +95,18 @@ fn decl(name: &str) -> Option<&'static Decl> {
     typelib::declared(name, BinaryFormat::Pe)
         .or_else(|| typelib::declared(name, BinaryFormat::Elf))
         .filter(|d| d.os != Os::C)
+}
+
+/// Any declaration of a function the text calls, the C library's rows
+/// included, with the format whose rows it is.
+///
+/// # Arguments
+///
+/// * `name` - The callee's name.
+fn any_decl(name: &str) -> Option<(&'static Decl, BinaryFormat)> {
+    typelib::declared(name, BinaryFormat::Pe)
+        .map(|d| (d, BinaryFormat::Pe))
+        .or_else(|| typelib::declared(name, BinaryFormat::Elf).map(|d| (d, BinaryFormat::Elf)))
 }
 
 /// Tells whether a word can name a variable: an identifier no pass reads
@@ -242,18 +271,332 @@ fn compared<'t>(lines: &[Line<'t>]) -> BTreeSet<&'t str> {
     out
 }
 
-/// Names the variables the webs pass made from the evidence the text
-/// holds.
+/// Names and types the variables the webs pass made from the evidence the
+/// text holds, names the constants declared APIs take, and spells the
+/// tests of yes-or-no APIs as the call.
 ///
 /// # Arguments
 ///
 /// * `text` - A decompiled function after the webs pass and the typing.
+/// * `word` - The machine word in bits (32 or 64).
 ///
 /// # Returns
 ///
-/// The text renamed, or unchanged when no evidence names anything.
-pub(super) fn name_vars(text: &str) -> String {
-    rename(text).unwrap_or_else(|| text.to_owned())
+/// The text renamed, or unchanged when no evidence says anything.
+pub(super) fn name_vars(text: &str, word: u8) -> String {
+    let typed = retype(text, word).unwrap_or_else(|| text.to_owned());
+    let named = rename(&typed).unwrap_or(typed);
+    let constants = name_constants(&named, word).unwrap_or(named);
+    bool_tests(&constants).unwrap_or(constants)
+}
+
+/// Types the variables whose every value is a handle or pointer API's
+/// result, of one type, by that type (`HANDLE` where `uint64_t` said only
+/// how wide).
+///
+/// A variable takes the type only when every write is `v = Api(...)` with
+/// that declared result, it is declared at the machine word (a narrower
+/// declaration says its uses read part of it), and every read hands the
+/// value on whole (an argument, a return, an assignment, a test against
+/// zero), where a pointer to nothing and a word read the same.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function.
+/// * `word` - The machine word in bits.
+///
+/// # Returns
+///
+/// The text retyped, or `None` when nothing changes.
+fn retype(text: &str, word: u8) -> Option<String> {
+    let word_ty = if word == 32 { "uint32_t" } else { "uint64_t" };
+    let p = parts(text)?;
+    let mut found: BTreeMap<&str, Option<&'static str>> = BTreeMap::new();
+    for d in p.head.get(p.decls..)? {
+        if let Some((_, items)) = declaration(d).filter(|(ty, _)| *ty == word_ty) {
+            for (stars, n) in items {
+                if stars.is_empty() && is_var_name(n) {
+                    found.insert(n, None);
+                }
+            }
+        }
+    }
+    let mut refused: BTreeSet<&str> = BTreeSet::new();
+    for t in &p.body {
+        let l = Line {
+            text: t,
+            toks: lex(t),
+        };
+        let def = assignment(&l).filter(|(_, rhs)| lone_call(rhs));
+        for (k, tok) in l.toks.iter().enumerate() {
+            let Some(w) = l
+                .text
+                .get(tok.at..tok.end)
+                .filter(|w| found.contains_key(w))
+            else {
+                continue;
+            };
+            if k == 0 && def.is_some_and(|(v, _)| v == w) {
+                let ret = def
+                    .and_then(|(_, rhs)| rhs.split_once('('))
+                    .and_then(|(callee, _)| any_decl(callee))
+                    .map(|(d, _)| d.ret)
+                    .filter(|r| VOID_POINTERS.contains(r));
+                match (ret, found.get(w).copied().flatten()) {
+                    (Some(r), None) => {
+                        found.insert(w, Some(r));
+                    }
+                    (Some(r), Some(seen)) if r == seen => {}
+                    (Some(_) | None, _) => {
+                        refused.insert(w);
+                    }
+                }
+                continue;
+            }
+            if !whole_read(&l, k) {
+                refused.insert(w);
+            }
+        }
+    }
+    let typed: BTreeMap<&str, &str> = found
+        .into_iter()
+        .filter(|(n, _)| !refused.contains(n))
+        .filter_map(|(n, r)| Some((n, r?)))
+        .collect();
+    if typed.is_empty() {
+        return None;
+    }
+    let mut out: Vec<String> = p
+        .head
+        .iter()
+        .take(p.decls)
+        .map(|l| (*l).to_owned())
+        .collect();
+    for d in p.head.iter().skip(p.decls) {
+        match declaration(d) {
+            Some((ty, items)) if ty == word_ty => {
+                let kept: Vec<String> = items
+                    .iter()
+                    .filter(|(_, n)| !typed.contains_key(n))
+                    .map(|(stars, n)| format!("{stars}{n}"))
+                    .collect();
+                if !kept.is_empty() {
+                    out.push(format!("{ty} {};", kept.join(", ")));
+                }
+            }
+            Some(_) | None => out.push((*d).to_owned()),
+        }
+    }
+    let mut by_type: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (n, ty) in &typed {
+        by_type.entry(ty).or_default().push(n);
+    }
+    for (ty, names) in by_type {
+        out.push(match ty.strip_suffix('*') {
+            Some(base) => format!("{} *{};", base.trim_end(), names.join(", *")),
+            None => format!("{ty} {};", names.join(", ")),
+        });
+    }
+    out.push(String::new());
+    out.extend(p.body.iter().map(|l| (*l).to_owned()));
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
+}
+
+/// Tells whether the read at token `k` hands the value on whole: an
+/// argument, a returned value, an assignment's right side, a test, or a
+/// comparison with a non-negative literal or another value.
+///
+/// # Arguments
+///
+/// * `l` - The line.
+/// * `k` - The token.
+fn whole_read(l: &Line<'_>, k: usize) -> bool {
+    const BEFORE: [&str; 11] = [
+        "(", ",", "=", "==", "!=", "!", "&&", "||", "?", ":", "return",
+    ];
+    const AFTER: [&str; 9] = [")", ",", ";", "==", "!=", "&&", "||", "?", ":"];
+    let before = k.checked_sub(1).is_none_or(|p| BEFORE.contains(&l.word(p)));
+    let after = AFTER.contains(&l.word(k + 1)) || k + 1 == l.toks.len();
+    let negative = (l.is(k + 1, "==") || l.is(k + 1, "!=")) && l.is(k + 2, "-");
+    let prev_cmp = k
+        .checked_sub(1)
+        .is_some_and(|p| l.is(p, "==") || l.is(p, "!="))
+        && k.checked_sub(2).is_some_and(|p| l.is(p, "-"));
+    before && after && !negative && !prev_cmp
+}
+
+/// Names the constants a declared API takes by the group its parameter
+/// gives them, where the text spells a number or a guess.
+///
+/// The lifter names the bare numbers it passes; a constant the webs pass
+/// folded into the call later, and a status name the renderer guessed for
+/// a value it saw alone (`STATUS_DATATYPE_MISALIGNMENT` for an `HKEY` of
+/// `0x80000002`), are named here: by the parameter's group, else `NULL`
+/// for a zero pointer, else a guessed status name passed as a pointer
+/// reads as its number.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function.
+/// * `word` - The machine word in bits.
+///
+/// # Returns
+///
+/// The text with the constants named, or `None` when none changes.
+fn name_constants(text: &str, word: u8) -> Option<String> {
+    let mut changed = false;
+    let mut out: Vec<String> = Vec::new();
+    let mut in_body = false;
+    for line in text.lines() {
+        if !in_body {
+            in_body = line.trim().is_empty();
+            out.push(line.to_owned());
+            continue;
+        }
+        let l = Line {
+            text: line,
+            toks: lex(line),
+        };
+        let mut edits: Vec<(usize, usize, String)> = Vec::new();
+        for (k, tok) in l.toks.iter().enumerate() {
+            let w = l.text.get(tok.at..tok.end).unwrap_or("");
+            let (value, guessed) = match tok.lex {
+                Lex::Number => (parse_const(w), false),
+                Lex::Name => (crate::winconst::value(w).map(u64::from), true),
+                Lex::Literal | Lex::Punct => (None, false),
+            };
+            let Some(v) = value else {
+                continue;
+            };
+            if k.checked_sub(1).is_some_and(|p| l.is(p, "-")) {
+                continue;
+            }
+            let Some((callee, i)) = argument_of(&l, k) else {
+                continue;
+            };
+            let Some((d, format)) = any_decl(callee) else {
+                continue;
+            };
+            let Some(param) = d.params.get(i) else {
+                continue;
+            };
+            let pass = typelib::pass_of(param.ty, word, format);
+            let bits = pass.map_or(word, |p| p.bits(word)).max(8);
+            let named = match (param.group.and_then(typelib::group), pass) {
+                (Some(g), _) if guessed => typelib::render(g, v, bits)
+                    .or_else(|| typelib::render(g, crate::num::sext32(v), bits)),
+                (Some(g), _) => typelib::render(g, v, bits),
+                (None, Some(Pass::Pointer)) if v == 0 && !guessed => Some("NULL".to_owned()),
+                (None, Some(Pass::Pointer)) if guessed => Some(format!("{v:#x}")),
+                (None, _) => None,
+            };
+            if let Some(n) = named.filter(|n| n != w) {
+                edits.push((tok.at, tok.end, n));
+            }
+        }
+        let mut s = line.to_owned();
+        for (at, end, with) in edits.into_iter().rev() {
+            if s.get(at..end).is_some() {
+                s.replace_range(at..end, &with);
+                changed = true;
+            }
+        }
+        out.push(s);
+    }
+    if !changed {
+        return None;
+    }
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
+}
+
+/// Spells the test of a call that answers yes or no (a declared `BOOL`,
+/// `BOOLEAN` or `bool` result) as the call: `if (Api(..) != 0)` as
+/// `if (Api(..))` and `if (Api(..) == 0)` as `if (!Api(..))`.
+///
+/// The same value is tested either way: a condition reads any scalar as
+/// its comparison with zero.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function.
+///
+/// # Returns
+///
+/// The text respelled, or `None` when it holds no such test.
+fn bool_tests(text: &str) -> Option<String> {
+    let mut changed = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        let cond = ["if (", "} else if (", "while (", "} while ("]
+            .iter()
+            .any(|p| t.starts_with(p));
+        if !cond {
+            out.push(line.to_owned());
+            continue;
+        }
+        let l = Line {
+            text: line,
+            toks: lex(line),
+        };
+        let mut edits: Vec<(usize, usize, &str)> = Vec::new();
+        for c in 0..l.toks.len() {
+            if !l.is(c + 1, "(") {
+                continue;
+            }
+            let yes_no = any_decl(l.word(c))
+                .is_some_and(|(d, _)| matches!(d.ret, "BOOL" | "BOOLEAN" | "bool"));
+            let Some(close) = l.closing(c + 1).filter(|_| yes_no) else {
+                continue;
+            };
+            let eq = l.is(close + 1, "==");
+            let tested = (eq || l.is(close + 1, "!=")) && l.word(close + 2) == "0";
+            let ends = ["", ")", "&&", "||"].contains(&l.word(close + 3));
+            let opens = c
+                .checked_sub(1)
+                .is_none_or(|b| l.is(b, "(") || l.is(b, "&&") || l.is(b, "||"));
+            let (Some(end), Some(zero), Some(callee)) =
+                (l.toks.get(close), l.toks.get(close + 2), l.toks.get(c))
+            else {
+                continue;
+            };
+            if tested && ends && opens {
+                edits.push((end.end, zero.end, ""));
+                if eq {
+                    edits.push((callee.at, callee.at, "!"));
+                }
+            }
+        }
+        if edits.is_empty() {
+            out.push(line.to_owned());
+            continue;
+        }
+        changed = true;
+        edits.sort_unstable_by_key(|e| std::cmp::Reverse(e.0));
+        let mut s = line.to_owned();
+        for (at, end, with) in edits {
+            if s.get(at..end).is_some() {
+                s.replace_range(at..end, with);
+            }
+        }
+        out.push(s);
+    }
+    if !changed {
+        return None;
+    }
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
 }
 
 /// [`name_vars`], `None` when nothing changes.
@@ -410,6 +753,9 @@ fn rename(text: &str) -> Option<String> {
 mod tests {
     use super::name_vars;
 
+    /// The machine word the tests read as.
+    const WORD: u8 = 64;
+
     /// A function text: a header, the declarations, a blank line, the body.
     ///
     /// # Arguments
@@ -451,7 +797,7 @@ mod tests {
                 "return 0;",
             ],
         );
-        let out = name_vars(&t);
+        let out = name_vars(&t, WORD);
         assert_eq!(
             body(&out),
             [
@@ -464,7 +810,13 @@ mod tests {
             ],
             "{out}"
         );
-        assert!(out.contains("uint64_t ProcessHeap, len, hObject;"), "{out}");
+        assert!(
+            out.contains(
+                "uint64_t len, hObject;
+HANDLE ProcessHeap;"
+            ),
+            "{out}"
+        );
     }
 
     /// Counters of nested loops are `i` and `j`; a variable no evidence
@@ -487,7 +839,7 @@ mod tests {
                 "return 0;",
             ],
         );
-        let out = name_vars(&t);
+        let out = name_vars(&t, WORD);
         assert_eq!(
             body(&out),
             [
@@ -519,7 +871,7 @@ mod tests {
                 "return 0;",
             ],
         );
-        let out = name_vars(&t);
+        let out = name_vars(&t, WORD);
         assert_eq!(
             body(&out),
             [
@@ -545,7 +897,7 @@ mod tests {
                 "return len;",
             ],
         );
-        let out = name_vars(&t);
+        let out = name_vars(&t, WORD);
         assert_eq!(
             body(&out),
             [
@@ -553,6 +905,81 @@ mod tests {
                 "len2 = strlen(a2);",
                 "len = count + len2;",
                 "return len;",
+            ],
+            "{out}"
+        );
+    }
+
+    /// A variable holding only one handle API's results is declared by
+    /// that type; one read in arithmetic keeps its width.
+    #[test]
+    fn handles_are_typed_by_their_api() {
+        let t = function(
+            &["uint64_t var1, var2;"],
+            &[
+                "var1 = OpenProcess(a1, 0, a2);",
+                "var2 = GetProcessHeap();",
+                "sub_1(var1, var2 + 8);",
+                "return 0;",
+            ],
+        );
+        let out = name_vars(&t, WORD);
+        assert!(
+            out.contains("uint64_t ProcessHeap;\nHANDLE Process;"),
+            "{out}"
+        );
+    }
+
+    /// A constant folded into a declared API's call, or guessed as a
+    /// status, reads by the parameter's group.
+    #[test]
+    fn constants_read_by_the_parameters_group() {
+        let t = function(
+            &["uint64_t local_8;"],
+            &[
+                "RegOpenKeyExW(STATUS_DATATYPE_MISALIGNMENT, L\"Software\", 0, 0x20019, &local_8);",
+                "CloseHandle(0);",
+                "return 0;",
+            ],
+        );
+        let out = name_vars(&t, WORD);
+        assert_eq!(
+            body(&out),
+            [
+                "RegOpenKeyExW(HKEY_LOCAL_MACHINE, L\"Software\", REG_OPTION_NON_VOLATILE, KEY_READ, &local_8);",
+                "CloseHandle(NULL);",
+                "return 0;",
+            ],
+            "{out}"
+        );
+    }
+
+    /// A yes-or-no API's test reads as the call; a count's test does not.
+    #[test]
+    fn yes_or_no_tests_read_as_the_call() {
+        let t = function(
+            &[],
+            &[
+                "if (CloseHandle(a1) == 0) {",
+                "  return 1;",
+                "}",
+                "if (CloseHandle(a2) != 0 && GetFileSize(a1, 0) == 0) {",
+                "  return 2;",
+                "}",
+                "return 0;",
+            ],
+        );
+        let out = name_vars(&t, WORD);
+        assert_eq!(
+            body(&out),
+            [
+                "if (!CloseHandle(a1)) {",
+                "  return 1;",
+                "}",
+                "if (CloseHandle(a2) && GetFileSize(a1, NULL) == 0) {",
+                "  return 2;",
+                "}",
+                "return 0;",
             ],
             "{out}"
         );

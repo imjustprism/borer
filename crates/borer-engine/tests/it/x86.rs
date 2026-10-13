@@ -461,12 +461,15 @@ fn win32_imports_pop_and_runtime_imports_do_not() {
     let mut five = vec![0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00];
     five.extend_from_slice(&tail);
     let win32 = dc_with(&five, &[(0x402000, "KERNEL32.dll!WriteFile")]);
-    assert!(win32.contains("WriteFile(0, 0, 0, 0, 0);"), "{win32}");
+    assert!(
+        win32.contains("WriteFile(NULL, NULL, 0, NULL, NULL);"),
+        "{win32}"
+    );
     assert!(win32.contains("local_4"), "{win32}");
     let mut three = vec![0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00];
     three.extend_from_slice(&tail);
     let crt = dc_with(&three, &[(0x402000, "MSVCR100.dll!memset")]);
-    assert!(crt.contains("memset(0, 0, 0);"), "{crt}");
+    assert!(crt.contains("memset(NULL, 0, 0);"), "{crt}");
     assert!(crt.contains("local_10"), "{crt}");
 }
 

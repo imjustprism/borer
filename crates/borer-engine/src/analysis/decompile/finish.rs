@@ -8,7 +8,8 @@ use super::*;
 /// The header lines the text's own calls give, one variable per register
 /// web ([`vars::split_webs`]), layouts, then parameter types, then the
 /// byte arithmetic those types would otherwise scale, and last the names
-/// the evidence gives the variables ([`evidence::name_vars`]).
+/// and types the evidence gives the variables and the constants they
+/// take ([`evidence::name_vars`]).
 ///
 /// For callers that assemble the text themselves; [`decompile`] and
 /// [`decompile_named`] already apply it.
@@ -29,16 +30,19 @@ use super::*;
 pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
-    let text = normalize_temps(&evidence::name_vars(&byte_arithmetic(
-        &type_locals(&type_parameters(
-            &apply_layouts(&vars::split_webs(&wire_format(
-                &source_file(&name_own_fields(text)),
-                &streams,
-            ))),
+    let text = normalize_temps(&evidence::name_vars(
+        &byte_arithmetic(
+            &type_locals(&type_parameters(
+                &apply_layouts(&vars::split_webs(&wire_format(
+                    &source_file(&name_own_fields(text)),
+                    &streams,
+                ))),
+                word,
+            )),
             word,
-        )),
-        word,
-    )));
+        ),
+        u8::try_from(bitness).unwrap_or(64),
+    ));
     let mut out: String = text.lines().map(elvis).collect::<Vec<_>>().join("\n");
     out.push('\n');
     out
