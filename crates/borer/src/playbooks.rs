@@ -176,6 +176,7 @@ const INTENTS: &[(&str, &[&str])] = &[
         &[
             "emulate",
             "run",
+            "diverge",
             "vectors",
             "solve",
             "scenario",

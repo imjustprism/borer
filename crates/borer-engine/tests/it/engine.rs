@@ -504,6 +504,49 @@ fn crypto_constant_scan() {
     assert!(find_crypto_constants(&two_section_program(vec![0x90; 16], vec![0; 64])).is_empty());
 }
 
+/// Where two runs of one function part ways: the comparison that split
+/// them, the callees each side then visits, and what each returned.
+///
+/// `f` at 0x1000 is `cmp ecx,5; jge H; call G; ret; H: call H2; ret`, G
+/// at 0x1011 `lea eax,[rcx+1]; ret` and H2 at 0x1015 `lea eax,[rcx+2];
+/// ret`, so input 1 takes G and input 9 H2.
+#[test]
+fn a_diff_names_the_branch_and_each_sides_calls() {
+    use borer_engine::analysis::{Analysis, Overlay, render::run_diff_tsv};
+    let code: Vec<u8> = [
+        &[0x83, 0xf9, 0x05][..],
+        &[0x7d, 0x06],
+        &[0xe8, 0x07, 0x00, 0x00, 0x00],
+        &[0xc3],
+        &[0xe8, 0x05, 0x00, 0x00, 0x00],
+        &[0xc3],
+        &[0x8d, 0x41, 0x01, 0xc3],
+        &[0x8d, 0x41, 0x02, 0xc3],
+    ]
+    .concat();
+    let p = two_section_program(code, vec![0; 8]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let out = run_diff_tsv(&p, &a, &o, "0x1000/1;9").expect("a diff");
+    assert!(
+        out.contains("# first divergence: step 3 at 0x1005 in sub_1000 vs 0x100b in sub_1000"),
+        "{out}"
+    );
+    assert!(out.contains("# input 1 then called: sub_1011"), "{out}");
+    assert!(out.contains("# input 2 then called: sub_1015"), "{out}");
+    assert!(
+        out.contains("returned 0x2") && out.contains("returned 0xb"),
+        "{out}"
+    );
+    let agree = run_diff_tsv(&p, &a, &o, "0x1000/1;1").expect("a diff");
+    assert!(
+        agree.contains("# the runs agree on every traced step"),
+        "{agree}"
+    );
+    let refused = run_diff_tsv(&p, &a, &o, "0x1000/1;2;3").expect_err("three inputs");
+    assert!(refused.contains("two inputs"), "{refused}");
+}
+
 /// The same table stored the other way round, xored with a constant and
 /// added one, is named with what was done to it; the plain form reports
 /// once and no delta form doubles it.

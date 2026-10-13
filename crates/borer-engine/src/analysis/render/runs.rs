@@ -428,6 +428,8 @@ struct Machine {
     /// Each serviced call rendered as `api(args) -> ret`, in order: the
     /// behavior trace the arguments decode to.
     call_lines: Vec<String>,
+    /// The traced instructions, empty when the run was not traced.
+    trace: Vec<String>,
 }
 
 /// The register value a return of `bits` hands back: `rax`'s low bits,
@@ -477,6 +479,10 @@ fn read_back(byte_at: impl Fn(u64) -> Option<u8>, at: u64, len: usize) -> Vec<u8
 /// * `input` - The arguments.
 /// * `layout` - The values, buffer addresses and setup of the input.
 /// * `budget` - Steps.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a run takes the whole setup of one input"
+)]
 fn run_machine(
     p: &Program,
     entry: u64,
@@ -485,12 +491,16 @@ fn run_machine(
     input: &[Arg],
     layout: &Layout,
     budget: usize,
+    traced: bool,
 ) -> Option<Machine> {
     let Some(pass) = pass else {
-        return run_a64(p, entry, ret_bits, input, layout, budget);
+        return run_a64(p, entry, ret_bits, input, layout, budget, traced);
     };
     let Layout { values, at, pokes } = layout;
     let mut emu = Emulator::new(p, budget)?;
+    if traced {
+        emu.set_trace(budget);
+    }
     emu.install_imports();
     for (addr, bytes) in pokes {
         poke_all(&mut emu, *addr, bytes);
@@ -515,6 +525,7 @@ fn run_machine(
         buffers,
         calls: emu.api_names().iter().map(|s| (*s).to_owned()).collect(),
         call_lines: emu.api_calls().iter().map(ApiCall::call_text).collect(),
+        trace: emu.trace(),
     })
 }
 
@@ -540,6 +551,7 @@ fn run_a64(
     input: &[Arg],
     layout: &Layout,
     budget: usize,
+    traced: bool,
 ) -> Option<Machine> {
     let Layout { values, at, pokes } = layout;
     let mut emu = A64Machine::new(p, budget)?;
@@ -566,6 +578,9 @@ fn run_a64(
             addr.map(|a| read_back(|b| emu.byte_at(b), a, arg.initial().len() + GUARD))
         })
         .collect();
+    if traced {
+        emu.set_trace(budget);
+    }
     Some(Machine {
         stop: run.stop,
         steps: run.steps,
@@ -573,6 +588,7 @@ fn run_a64(
         buffers,
         calls: Vec::new(),
         call_lines: emu.api_calls().iter().map(ApiCall::call_text).collect(),
+        trace: emu.trace(),
     })
 }
 
@@ -846,6 +862,7 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
         input,
         &layout,
         budget,
+        false,
     ) else {
         return Outcome {
             stop: "this architecture is not emulated".to_owned(),
@@ -857,18 +874,7 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
             call_lines: Vec::new(),
         };
     };
-    let writes = input
-        .iter()
-        .zip(&m.buffers)
-        .enumerate()
-        .filter_map(|(k, (arg, after))| {
-            let after = after.as_ref()?;
-            let initial = arg.initial();
-            let (body, guard) = after.split_at(initial.len().min(after.len()));
-            let past = guard.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
-            (body != initial.as_slice() || past > 0).then(|| (k, body.to_vec(), past))
-        })
-        .collect();
+    let writes = buffer_writes(input, &m.buffers);
     let (verdict, text_steps) = match &shared.script {
         Err(why) => (Verdict::Unchecked(None, why.clone()), 0),
         Ok(script) => match script.run(&layout.values, &layout.pokes, budget) {
@@ -933,30 +939,7 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
 pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     let req = parse_run(a, o, spec)?;
     let entry = req.entry;
-    let a64 = matches!(p.arch.isa(), Some(Isa::A64));
-    let (text, why) = if a64 {
-        (
-            None,
-            "a run's text is checked for x86 code only; an arm64 text is checked block by block against the arm64 machine (decompile's checked line)",
-        )
-    } else {
-        (
-            decompile_named(p, a, o, entry),
-            "the function does not decompile",
-        )
-    };
-    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
-    let shared = Shared {
-        sig: text
-            .as_deref()
-            .ok_or_else(|| why.to_owned())
-            .and_then(|t| printed(t, word)),
-        script: text
-            .as_deref()
-            .ok_or_else(|| why.to_owned())
-            .and_then(|t| Script::read(p, a, o, entry, t)),
-        pass: (!a64).then(|| passing(p, a, o, entry)),
-    };
+    let (text, shared) = shared_for(p, a, o, entry);
     let mut notes: Vec<String> = Vec::new();
     if let Ok(sig) = &shared.sig {
         let kinds = sig.parameter_kinds();
@@ -1023,6 +1006,365 @@ pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Str
         &outcomes,
         &notes,
     ))
+}
+
+/// What each buffer argument holds after a run, only the ones the run
+/// changed: its index, its bytes, and how far past the input it wrote.
+///
+/// # Arguments
+///
+/// * `input` - The arguments, their initial bytes read back against.
+/// * `buffers` - Where each buffer argument landed, as the machine left it.
+fn buffer_writes(input: &[Arg], buffers: &[Option<Vec<u8>>]) -> Vec<(usize, Vec<u8>, usize)> {
+    input
+        .iter()
+        .zip(buffers)
+        .enumerate()
+        .filter_map(|(k, (arg, after))| {
+            let after = after.as_ref()?;
+            let initial = arg.initial();
+            let (body, guard) = after.split_at(initial.len().min(after.len()));
+            let past = guard.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+            (body != initial.as_slice() || past > 0).then(|| (k, body.to_vec(), past))
+        })
+        .collect()
+}
+
+/// The text and convention a run of `entry` needs, with the text itself.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `entry` - The function to run.
+///
+/// # Returns
+///
+/// The decompiled text, `None` where the architecture reads none, and the
+/// signature, script and calling convention shared by every run of it.
+fn shared_for<'s>(
+    p: &'s Program,
+    a: &'s Analysis,
+    o: &'s Overlay,
+    entry: u64,
+) -> (Option<String>, Shared<'s>) {
+    let a64 = matches!(p.arch.isa(), Some(Isa::A64));
+    let (text, why) = if a64 {
+        (
+            None,
+            "a run's text is checked for x86 code only; an arm64 text is checked block by block against the arm64 machine (decompile's checked line)",
+        )
+    } else {
+        (
+            decompile_named(p, a, o, entry),
+            "the function does not decompile",
+        )
+    };
+    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let shared = Shared {
+        sig: text
+            .as_deref()
+            .ok_or_else(|| why.to_owned())
+            .and_then(|t| printed(t, word)),
+        script: text
+            .as_deref()
+            .ok_or_else(|| why.to_owned())
+            .and_then(|t| Script::read(p, a, o, entry, t)),
+        pass: (!a64).then(|| passing(p, a, o, entry)),
+    };
+    (text, shared)
+}
+
+/// One input's traced run, what a diff reports from.
+struct DiffRun {
+    /// How it ended, in words.
+    stop: String,
+    /// Steps taken.
+    steps: usize,
+    /// What it returned, `None` when it did not.
+    value: Option<u64>,
+    /// The traced instructions, in the order they ran.
+    trace: Vec<String>,
+    /// Each serviced call as `api(args) -> ret`, in order.
+    call_lines: Vec<String>,
+    /// What each changed buffer argument holds after, as
+    /// [`buffer_writes`] leaves it.
+    writes: Vec<(usize, Vec<u8>, usize)>,
+}
+
+/// Runs one input for [`diff_tsv`], its whole path traced.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `shared` - The text and convention [`shared_for`] built.
+/// * `entry` - The function.
+/// * `input` - The arguments.
+/// * `budget` - Steps, never past what one trace holds.
+///
+/// # Returns
+///
+/// The traced run, or `None` when the architecture is not emulated.
+fn diff_one(
+    p: &Program,
+    shared: &Shared<'_>,
+    entry: u64,
+    input: &[Arg],
+    budget: usize,
+) -> Option<DiffRun> {
+    let buffers = input.iter().filter(|a| a.is_buffer()).count();
+    let layout = lay_out(buffer_base(p, buffers.max(input.len())), input);
+    let ret = shared.sig.as_ref().ok().and_then(Signature::return_kind);
+    let m = run_machine(
+        p,
+        entry,
+        shared.pass.as_ref(),
+        ret.map(|(_, bits)| bits),
+        input,
+        &layout,
+        budget,
+        true,
+    )?;
+    let writes = buffer_writes(input, &m.buffers);
+    Some(DiffRun {
+        stop: m.stop.to_string(),
+        steps: m.steps,
+        value: m.value,
+        writes,
+        call_lines: m.call_lines,
+        trace: m.trace,
+    })
+}
+
+/// The address a trace line ran at, when the line carries one.
+///
+/// # Arguments
+///
+/// * `line` - One line of [`crate::emulate::Emulator::trace`], which
+///   begins with where the instruction was.
+fn trace_at(line: &str) -> Option<u64> {
+    let head = line.split_whitespace().next()?;
+    code_addr(head)
+}
+
+/// Reads one instruction operand as the address it names, in either
+/// decoder's spelling: `0x1014` or `1014h`.
+///
+/// # Arguments
+///
+/// * `word` - The operand as the trace printed it.
+fn code_addr(word: &str) -> Option<u64> {
+    word.strip_prefix("0x")
+        .or_else(|| word.strip_suffix('h'))
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+}
+
+/// The functions a trace called, from step `from` on, named once each, in
+/// order: the transforms a run made of its input.
+///
+/// # Arguments
+///
+/// * `a` - The analysis, for the function each call lands in.
+/// * `o` - User names.
+/// * `lines` - The traced instructions.
+/// * `from` - The first step to read.
+///
+/// # Returns
+///
+/// At most 12 callee names; an indirect call whose trace shows no target
+/// is skipped.
+fn trace_calls(a: &Analysis, o: &Overlay, lines: &[String], from: usize) -> Vec<String> {
+    /// Most callees a diff names per side.
+    const CALLS_MAX: usize = 12;
+    let mut out: Vec<String> = Vec::new();
+    for line in lines.iter().skip(from) {
+        let mut parts = line.split_whitespace();
+        let (Some(_), Some(mn), target) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if !matches!(mn, "call" | "bl") {
+            continue;
+        }
+        let Some(at) = target.and_then(code_addr) else {
+            continue;
+        };
+        let Some(f) = a.function_at(at) else { continue };
+        let name = short_name(a, o, f.entry);
+        if !out.contains(&name) {
+            out.push(name);
+            if out.len() >= CALLS_MAX {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Bytes as two hex digits each, capped with an ellipsis.
+///
+/// # Arguments
+///
+/// * `bytes` - What a run left in a buffer.
+fn short_hex(bytes: &[u8]) -> String {
+    /// Most bytes one line shows.
+    const SHOWN: usize = 32;
+    let mut out: String = bytes
+        .iter()
+        .take(SHOWN)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if bytes.len() > SHOWN {
+        out.push_str("...");
+    }
+    out
+}
+
+/// Answers where two runs of one function part ways.
+///
+/// The first step whose instructions differ names the comparison that
+/// split them; the calls each side then makes, every write and serviced
+/// call that differs follow. The spec is [`run_tsv`]'s with exactly two
+/// inputs. Both paths are
+/// traced whole, so the budget is held to what one trace holds
+/// ([`crate::emulate::TRACE_MAX`]); where the traces agree to the end the
+/// report says so, and the writes and calls still tell the two apart.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `spec` - `<function>[,steps=N]/<input>;<input>`.
+///
+/// # Errors
+///
+/// When the spec is refused or does not name exactly two inputs.
+pub fn run_diff_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
+    let req = parse_run(a, o, spec)?;
+    if req.inputs.len() != 2 {
+        return Err("diff takes two inputs: <function>[,steps=N]/<input>;<input>".to_owned());
+    }
+    let budget = req.budget.min(crate::emulate::TRACE_MAX);
+    let (_, shared) = shared_for(p, a, o, req.entry);
+    let runs: Vec<DiffRun> = req
+        .inputs
+        .iter()
+        .map(|input| diff_one(p, &shared, req.entry, input, budget))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("this architecture is not emulated")?;
+    let [one, two] = &runs[..] else {
+        return Ok(String::new());
+    };
+    let title = shared
+        .sig
+        .as_ref()
+        .map_or_else(|_| short_name(a, o, req.entry), |s| s.text.clone());
+    let mut out = format!(
+        "# diff {title}: input 1 vs input 2, at most {budget} steps each
+"
+    );
+    for (n, r) in runs.iter().enumerate() {
+        let value = r
+            .value
+            .map_or_else(|| "-".to_owned(), |v| format!("{v:#x}"));
+        let _ = writeln!(
+            out,
+            "# input {}: {}, returned {}, {} steps",
+            n + 1,
+            one_line(&r.stop),
+            value,
+            r.steps
+        );
+    }
+    let common = one
+        .trace
+        .iter()
+        .zip(&two.trace)
+        .take_while(|(l, r)| l == r)
+        .count();
+    if common == one.trace.len() && common == two.trace.len() {
+        out.push_str(
+            "# the runs agree on every traced step
+",
+        );
+    } else {
+        let side = |line: Option<&String>| line.and_then(|l| trace_at(l));
+        let (at_one, at_two) = (side(one.trace.get(common)), side(two.trace.get(common)));
+        let in_one = at_one
+            .and_then(|at| a.function_at(at))
+            .map_or_else(|| "no function".to_owned(), |f| short_name(a, o, f.entry));
+        let in_two = at_two
+            .and_then(|at| a.function_at(at))
+            .map_or_else(|| "no function".to_owned(), |f| short_name(a, o, f.entry));
+        match (at_one, at_two) {
+            (Some(l), Some(r)) => {
+                let _ = writeln!(
+                    out,
+                    "# first divergence: step {} at {l:#x} in {in_one} vs {r:#x} in {in_two}",
+                    common + 1
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    out,
+                    "# first divergence: step {}, one run ended first ({}, {})",
+                    common + 1,
+                    one_line(&one.stop),
+                    one_line(&two.stop)
+                );
+            }
+        }
+    }
+    for (n, r) in runs.iter().enumerate() {
+        let calls = trace_calls(a, o, &r.trace, common);
+        if !calls.is_empty() {
+            let _ = writeln!(out, "# input {} then called: {}", n + 1, calls.join(", "));
+        }
+    }
+    let split = one
+        .call_lines
+        .iter()
+        .zip(&two.call_lines)
+        .position(|(l, r)| l != r);
+    match split {
+        Some(at) => {
+            let _ = writeln!(out, "# serviced call {} differs", at + 1);
+            let _ = writeln!(out, "#   1 {}", one.call_lines[at]);
+            let _ = writeln!(out, "#   2 {}", two.call_lines[at]);
+        }
+        None => {
+            let (longer, n) = if one.call_lines.len() > two.call_lines.len() {
+                (&one.call_lines, 1)
+            } else {
+                (&two.call_lines, 2)
+            };
+            for line in longer
+                .iter()
+                .skip(two.call_lines.len().min(one.call_lines.len()))
+            {
+                let _ = writeln!(out, "# only input {n} serviced: {line}");
+            }
+        }
+    }
+    let mut buffers: Vec<usize> = one
+        .writes
+        .iter()
+        .chain(&two.writes)
+        .map(|(k, _, _)| *k)
+        .collect();
+    buffers.sort_unstable();
+    buffers.dedup();
+    for k in buffers {
+        let hex = |r: &DiffRun| {
+            r.writes
+                .iter()
+                .find(|(n, _, _)| *n == k)
+                .map_or_else(|| "(as given)".to_owned(), |(_, b, _)| short_hex(b))
+        };
+        let _ = writeln!(out, "# a{} after: {} vs {}", k + 1, hex(one), hex(two));
+    }
+    Ok(out)
 }
 
 /// Writes the report of a run request.

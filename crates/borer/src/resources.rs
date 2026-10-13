@@ -269,6 +269,21 @@ impl BorerServer {
         self.refusing(Feature::Emulate, |p, a, o| render::run_tsv(p, a, o, spec))
     }
 
+    /// Answers where two runs of one function part ways.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - `<function>[,steps=N]/<input>;<input>`.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or the spec is refused.
+    pub(crate) fn diverge_text(&self, spec: &str) -> Result<String, ErrorData> {
+        self.refusing(Feature::Emulate, |p, a, o| {
+            render::run_diff_tsv(p, a, o, spec)
+        })
+    }
+
     /// Records test vectors for reimplementing a function: typed inputs
     /// run in the emulator and a C harness asserting what came back.
     ///

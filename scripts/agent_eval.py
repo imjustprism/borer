@@ -632,6 +632,20 @@ LOOP_CODE = bytes.fromhex(
     "c3"  # ret
 )
 
+# Headerless x86-64 code, loaded at 0x10000: a branch that picks between
+# two callees by its input, then both callees.
+DIVERGE_CODE = bytes.fromhex(
+    "83f90"  # cmp ecx, 5
+    "5"
+    "7d06"  # jge +6
+    "e807000000"  # call 0x10011
+    "c3"  # ret
+    "e805000000"  # call 0x10015
+    "c3"  # ret
+    "8d4101c3"  # lea eax,[rcx+1]; ret
+    "8d4102c3"  # lea eax,[rcx+2]; ret
+)
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
@@ -650,6 +664,7 @@ BLOBS = {
     "gs": (GS_CODE, "<gs>"),
     "panic": (PANIC_CODE, "<panic>"),
     "loop": (LOOP_CODE, "<loop>"),
+    "diverge": (DIVERGE_CODE, "<diverge>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -886,6 +901,15 @@ TASKS = [
             ("decompile", {"address": "0x10000"}),
         ],
         "i < 10",
+    ),
+    (
+        "diverge_runs",
+        "where two runs of one function part ways: the branch and the callee each side takes",
+        [
+            ("load_binary", {"path": "{diverge}", "arch": "x64", "base": "0x10000"}),
+            ("query", {"uri": "borer://diverge/0x10000/1;9"}),
+        ],
+        "first divergence: step 3 at 0x10005",
     ),
 ]
 
