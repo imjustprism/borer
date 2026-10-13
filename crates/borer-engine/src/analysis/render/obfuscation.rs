@@ -510,6 +510,7 @@ pub fn vm_dispatch_tsv(
     );
     let (_, _, hint) = constraint_shape(p, a, d);
     out.push_str(&hint);
+    out.push_str(&decode_shape(p, a, d));
     Ok(out)
 }
 
@@ -582,6 +583,325 @@ fn constraint_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> (usize, usiz
         String::new()
     };
     (conditional, arithmetic, hint)
+}
+
+/// Most blocks read back from a dispatch site before the decode shape is
+/// given up on.
+pub(super) const DECODE_BLOCKS_MAX: usize = 16;
+
+/// Most instructions in those blocks before the decode shape is given up on.
+pub(super) const DECODE_INSTRS_MAX: usize = 128;
+
+/// Fewest operand loads through one base register that count as the fetch.
+pub(super) const DECODE_FETCH_MIN: usize = 2;
+
+/// Instructions searched after a call for the key rebuild it starts.
+pub(super) const DECODE_ADVANCE_WINDOW: usize = 6;
+
+/// The 64-bit register a name spells, or `None` when it is not one.
+///
+/// A fetch reads its fields into partial registers (`edx`, `r9d`, `al`) and
+/// the instructions around it mix whole and partial names of the same
+/// storage (`xor rcx,rbx` one line, `xor al,bh` the next), so every operand
+/// is compared by the full register it names.
+///
+/// # Arguments
+///
+/// * `reg` - An operand as the disassembly spells it.
+///
+/// # Returns
+///
+/// The 64-bit register it names, or `None` for memory, immediates and names
+/// outside the general-purpose set.
+fn wide(reg: &str) -> Option<&'static str> {
+    const PAIRS: [(&str, &str); 36] = [
+        ("rax", "rax"),
+        ("eax", "rax"),
+        ("ax", "rax"),
+        ("al", "rax"),
+        ("ah", "rax"),
+        ("rbx", "rbx"),
+        ("ebx", "rbx"),
+        ("bx", "rbx"),
+        ("bl", "rbx"),
+        ("bh", "rbx"),
+        ("rcx", "rcx"),
+        ("ecx", "rcx"),
+        ("cx", "rcx"),
+        ("cl", "rcx"),
+        ("ch", "rcx"),
+        ("rdx", "rdx"),
+        ("edx", "rdx"),
+        ("dx", "rdx"),
+        ("dl", "rdx"),
+        ("dh", "rdx"),
+        ("rsi", "rsi"),
+        ("esi", "rsi"),
+        ("si", "rsi"),
+        ("sil", "rsi"),
+        ("rdi", "rdi"),
+        ("edi", "rdi"),
+        ("di", "rdi"),
+        ("dil", "rdi"),
+        ("rbp", "rbp"),
+        ("ebp", "rbp"),
+        ("bp", "rbp"),
+        ("bpl", "rbp"),
+        ("rsp", "rsp"),
+        ("esp", "rsp"),
+        ("sp", "rsp"),
+        ("spl", "rsp"),
+    ];
+    if let Some(found) = PAIRS.iter().find(|(n, _)| *n == reg) {
+        return Some(found.1);
+    }
+    let stripped = reg.strip_prefix('r')?;
+    let num = if let Ok(num) = stripped.parse::<usize>() {
+        num
+    } else {
+        stripped[..stripped.len().saturating_sub(1)].parse().ok()?
+    };
+    if !(8..=15).contains(&num) {
+        return None;
+    }
+    let names = ["r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
+    names.get(num - 8).copied()
+}
+
+/// Reports how a dispatch loop decodes the operations it fetches.
+///
+/// A plain interpreter reads `op|dst|src|imm` out of its program and jumps.
+/// A harder machine xors what it fetched with a key register before the
+/// jump, and the hardest rebuilds that key every step out of the machine's
+/// own state — a mixer call whose result is xored with a register-file slot
+/// and written back. Then the bytecode on disk is noise for every run but
+/// the one that produced it: the program only decodes correctly while the
+/// machine is doing what the author intended, which makes the decode itself
+/// the check (the "quine lock" of `VoidVault v7.1`, whose passphrase bytes
+/// are the decryption key of its own program). That shape is never solved
+/// statically — it is solved per input step, with derailment as the oracle.
+///
+/// The two facts are read apart, and only their combination says the hard
+/// thing: an xor before the dispatch with no rebuild is a fixed key, found
+/// once and then decoded like any other encrypted bytecode.
+///
+/// The search walks the blocks that reach the dispatch site backwards, so
+/// a fetch and a mix split across blocks are still seen together, and stops
+/// at handler entries: a handler's body is the operation, not the fetch.
+/// One shared tail that every handler jumps back to is also a handler entry
+/// and still lands in the window when the loop's back edge comes from it —
+/// which is where this machine keeps its key rebuild.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `d` - The dispatch loop.
+///
+/// # Returns
+///
+/// The hint lines, empty when the fetch is plain.
+fn decode_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> String {
+    let Some(f) = a.function(d.entry) else {
+        return String::new();
+    };
+    let Some(bitness) = p.arch.bitness() else {
+        return String::new();
+    };
+    // The blocks that reach the dispatch site, backwards, capped and handler-
+    // free at the edges: the fetch and its mix live above the jump, the key
+    // rebuild in the tail the handlers return through. A call's fallthrough
+    // is an edge the successor lists do not always carry, and the mixer call
+    // sits exactly past one, so it is added here.
+    let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for b in &f.blocks {
+        for &s in &b.successors {
+            preds.entry(s).or_default().push(b.start);
+        }
+        if b.term == BlockTerm::Call && f.blocks.iter().any(|x| x.start == b.end) {
+            preds.entry(b.end).or_default().push(b.start);
+        }
+    }
+    let handlers: BTreeSet<u64> = d.handlers.iter().copied().collect();
+    let Some(site) = f
+        .blocks
+        .iter()
+        .find(|b| d.site >= b.start && d.site < b.end)
+    else {
+        return String::new();
+    };
+    let mut window: BTreeSet<u64> = BTreeSet::new();
+    let mut queue: std::collections::VecDeque<u64> = std::collections::VecDeque::from([site.start]);
+    let mut instrs = 0usize;
+    let mut walked = 0usize;
+    while let Some(start) = queue.pop_front() {
+        if !window.insert(start) {
+            continue;
+        }
+        let Some(b) = f.blocks.iter().find(|b| b.start == start) else {
+            continue;
+        };
+        let len = usize::try_from(b.end - b.start).unwrap_or(0);
+        instrs += len / 4 + 1;
+        if handlers.contains(&start) {
+            continue;
+        }
+        walked += 1;
+        if walked >= DECODE_BLOCKS_MAX || instrs > DECODE_INSTRS_MAX {
+            break;
+        }
+        if let Some(up) = preds.get(&start) {
+            queue.extend(up.iter().copied());
+        }
+    }
+    let mut lines: Vec<disasm::DisasmLine> = Vec::new();
+    for &start in &window {
+        let Some(b) = f.blocks.iter().find(|b| b.start == start) else {
+            continue;
+        };
+        let len = usize::try_from(b.end - b.start).unwrap_or(0);
+        if let Some(code) = p.read_va(start, len) {
+            lines.extend(disasm::disassemble(code, start, bitness, HANDLER_INSTRS));
+        }
+    }
+    // The fetch: one base register several operands are loaded through.
+    let mut fields: Vec<&'static str> = Vec::new();
+    let mut bases: Vec<&'static str> = Vec::new();
+    let mut loads: Vec<(String, String)> = Vec::new();
+    for l in &lines {
+        let text = l.text.as_str();
+        let Some((mnemonic, operands)) = text.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Some((dst, src)) = operands.split_once(',') else {
+            continue;
+        };
+        let fetched = matches!(mnemonic, "movzx" | "movsx") && src.contains("byte [")
+            || mnemonic == "mov" && src.starts_with('[');
+        if !fetched {
+            continue;
+        }
+        let Some(open) = src.find('[') else {
+            continue;
+        };
+        let Some(close) = src[open..].find(']') else {
+            continue;
+        };
+        // An address of a stream fetch is one base and a small displacement
+        // — `[r9+1]` reads the second byte of an instruction. `[r8+1088h]`
+        // reads a field of a state struct and `[r8+rax*8]` a register-file
+        // slot; both are machine state, not program bytes, and neither is
+        // the fetch.
+        let inside = &src[open + 1..open + close];
+        let parts: Vec<&str> = inside.split(['+', '-']).filter(|p| !p.is_empty()).collect();
+        if parts.len() > 2 {
+            continue;
+        }
+        let small = match parts.as_slice() {
+            [_] => true,
+            [_, disp] => disp
+                .strip_suffix('h')
+                .unwrap_or(disp)
+                .parse::<u16>()
+                .is_ok_and(|d| d <= 0xF),
+            _ => false,
+        };
+        let Some(base) = parts.iter().find(|p| wide(p).is_some()).copied() else {
+            continue;
+        };
+        if !small {
+            continue;
+        }
+        loads.push((dst.trim().to_owned(), base.trim().to_owned()));
+    }
+    for base in loads.iter().map(|(_, b)| b).collect::<BTreeSet<_>>() {
+        let group: Vec<&(String, String)> = loads.iter().filter(|(_, b)| b == base).collect();
+        if group.len() < DECODE_FETCH_MIN {
+            continue;
+        }
+        let Some(wide_base) = wide(base) else {
+            continue;
+        };
+        bases.push(wide_base);
+        for (dst, _) in group {
+            if let Some(w) = wide(dst) {
+                fields.push(w);
+            }
+        }
+    }
+    if fields.is_empty() {
+        return String::new();
+    }
+    // The mix: an xor pairing a fetched field with a register that is
+    // neither fetched nor the base it was loaded through.
+    let mut partners: BTreeSet<&'static str> = BTreeSet::new();
+    for l in &lines {
+        let text = l.text.as_str();
+        let Some(("xor", operands)) = text.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Some((a, b)) = operands.split_once(',') else {
+            continue;
+        };
+        let (Some(a), Some(b)) = (wide(a.trim()), wide(b.trim())) else {
+            continue;
+        };
+        let field_a = fields.contains(&a);
+        let field_b = fields.contains(&b);
+        if field_a == field_b {
+            continue;
+        }
+        let other = if field_a { b } else { a };
+        if bases.contains(&other) {
+            continue;
+        }
+        partners.insert(other);
+    }
+    if partners.is_empty() {
+        return String::new();
+    }
+    // The rebuild: a call whose result is xored with a register-file slot
+    // and written back into one of the mixing registers. The call's own
+    // target is the mixer; an indirect call falls back to naming the site.
+    for (i, l) in lines.iter().enumerate() {
+        if !l.text.starts_with("call ") {
+            continue;
+        }
+        let mixer = l
+            .text
+            .strip_prefix("call ")
+            .and_then(|t| t.trim().strip_suffix('h'))
+            .and_then(|t| u64::from_str_radix(t, 16).ok())
+            .unwrap_or(l.va);
+        for j in i + 1..(i + DECODE_ADVANCE_WINDOW).min(lines.len()) {
+            if !lines[j].text.starts_with("xor rax,[") {
+                continue;
+            }
+            for after in lines.iter().take((j + 3).min(lines.len())).skip(j + 1) {
+                let text = after.text.as_str();
+                let Some(("mov", operands)) = text.split_once(char::is_whitespace) else {
+                    continue;
+                };
+                let Some((dst, src)) = operands.split_once(',') else {
+                    continue;
+                };
+                if src.trim() != "rax" {
+                    continue;
+                }
+                if let Some(w) = wide(dst.trim())
+                    && partners.contains(w)
+                {
+                    return format!(
+                        "# decode shape: running-key fetch — the operands are xored with {w} before the dispatch, and every step rebuilds {w} from the mixer at {mixer:#x} xored with the register file, so the program reads correctly only on the run that produced it: the decode is the check, solve per input step with derailment as the oracle\n"
+                    );
+                }
+            }
+        }
+    }
+    let keys = partners.iter().copied().collect::<Vec<_>>().join("/");
+    format!(
+        "# decode shape: the fetched operands are xored with {keys} before the dispatch — the bytecode is stored encrypted; recover the key to read it statically\n"
+    )
 }
 
 /// The address a `lea` or `mov` reads from, when it is a fixed one.

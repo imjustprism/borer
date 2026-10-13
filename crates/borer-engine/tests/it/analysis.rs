@@ -1117,6 +1117,107 @@ fn a_small_dispatch_that_fetches_from_memory_is_found() {
     assert!(refused.starts_with("# 0 dispatch loops found"), "{refused}");
 }
 
+/// A dispatch whose fetch is xored with a running key is named as one.
+///
+/// The machine here is `VoidVault v7.1`'s shape in miniature: the fetch reads
+/// three operands through one base, the immediate is xored with `rbx` before
+/// the jump, and every handler returns through a tail that calls a mixer,
+/// xors its result with a register-file slot and writes it back into `rbx`.
+/// The bytecode on disk is then noise for every run but the one that
+/// produced it, and the view must say so rather than leave the reader to
+/// discover it opcode by opcode.
+///
+/// # Panics
+///
+/// Never in practice: every displacement constant fits by construction.
+#[test]
+fn a_running_key_fetch_is_named_in_the_dispatch_view() {
+    const TABLE: u64 = 0x8000;
+    const PROG: u64 = 0x9000;
+    const HANDLER: u64 = 0x1040;
+    const TAIL: u64 = 0x10a0;
+    const MIXER: u64 = 0x10b8;
+    let mut bytes = vec![0xccu8; 0x1000];
+    let mut code: Vec<u8> = Vec::new();
+    code.extend_from_slice(&[0x4c, 0x8d, 0x0d]); // lea r9,[PROG]
+    code.extend_from_slice(&i32::try_from(PROG - 0x1007).unwrap().to_le_bytes());
+    code.extend_from_slice(&[0x4c, 0x8d, 0x1d]); // lea r11,[TABLE]
+    code.extend_from_slice(&i32::try_from(TABLE - 0x100e).unwrap().to_le_bytes());
+    code.extend_from_slice(&[0x41, 0x0f, 0xb6, 0x11]); // movzx edx,byte [r9]
+    code.extend_from_slice(&[0x45, 0x0f, 0xb6, 0x51, 0x01]); // movzx r10d,byte [r9+1]
+    code.extend_from_slice(&[0x49, 0x8b, 0x49, 0x04]); // mov rcx,[r9+4]
+    code.extend_from_slice(&[0x48, 0x31, 0xd9]); // xor rcx,rbx
+    code.extend_from_slice(&[0x49, 0x83, 0xc1, 0x02]); // add r9,2
+    code.extend_from_slice(&[0x80, 0xfa, 0x0b]); // cmp dl,0xb
+    code.extend_from_slice(&[0x0f, 0x87]); // ja MIXER
+    code.extend_from_slice(&(i32::try_from(MIXER - 0x102b).unwrap()).to_le_bytes());
+    code.extend_from_slice(&[0x49, 0x63, 0x14, 0x93]); // movsxd rdx,[r11+rdx*4]
+    code.extend_from_slice(&[0x4c, 0x01, 0xda]); // add rdx,r11
+    code.extend_from_slice(&[0xff, 0xe2]); // jmp rdx
+    bytes.extend_from_slice(&code);
+    for i in 0..12u8 {
+        let at = HANDLER + u64::from(i) * 8;
+        bytes.resize(usize::try_from(at).unwrap(), 0xcc);
+        bytes.extend_from_slice(&[0x83, 0xc3, i]); // add ebx,i
+        let back = i32::try_from(TAIL - (at + 8)).unwrap();
+        bytes.extend_from_slice(&[0xe9]);
+        bytes.extend_from_slice(&back.to_le_bytes());
+    }
+    bytes.resize(usize::try_from(TAIL).unwrap(), 0xcc);
+    bytes.extend_from_slice(&[0xe8]); // call MIXER
+    bytes.extend_from_slice(&i32::try_from(MIXER - (TAIL + 5)).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&[0x4b, 0x33, 0x04, 0xa8]); // xor rax,[r8+r10*8]
+    bytes.extend_from_slice(&[0x48, 0x89, 0xc3]); // mov rbx,rax
+    bytes.extend_from_slice(&[0xe9]); // jmp LOOP
+    bytes.extend_from_slice(
+        &i32::try_from(0x100ei64 - i64::try_from(TAIL).unwrap() - 0x11)
+            .unwrap()
+            .to_le_bytes(),
+    );
+    bytes.resize(usize::try_from(MIXER).unwrap(), 0xcc);
+    bytes.extend_from_slice(&[0xc3]); // ret
+    bytes.resize(usize::try_from(TABLE).unwrap(), 0xcc);
+    for i in 0..12u64 {
+        let entry = i32::try_from(HANDLER + i * 8).unwrap() - i32::try_from(TABLE).unwrap();
+        bytes.extend_from_slice(&entry.to_le_bytes());
+    }
+    bytes.resize(usize::try_from(PROG).unwrap(), 0xcc);
+    bytes.extend_from_slice(&[3, 0, 0, 0x5a, 2, 3, 3, 0, 1, 0x33, 2, 7]);
+    bytes.resize(0xA000, 0);
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0x1000, 0x7000, false, true),
+            Section::mapped(".rdata", TABLE, TABLE, 0x2000, false, false),
+        ],
+    );
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let list = borer_engine::analysis::render::vm_dispatch_tsv(&p, &a, &o, "").unwrap();
+    assert!(list.starts_with("# 1 dispatch loop found"), "{list}");
+    let one = borer_engine::analysis::render::vm_dispatch_tsv(&p, &a, &o, "0x1000").unwrap();
+    assert!(one.contains("12 handlers"), "{one}");
+    assert!(
+        one.contains("running-key fetch"),
+        "the running key is not named: {one}"
+    );
+    assert!(
+        one.contains("xored with rbx"),
+        "the key register is not named: {one}"
+    );
+    assert!(
+        one.contains(&format!("mixer at {MIXER:#x}")),
+        "the mixer is not named: {one}"
+    );
+    assert!(
+        one.contains("solve per input step with derailment as the oracle"),
+        "the reading is not told how to proceed: {one}"
+    );
+}
+
 /// A string built on the stack a byte at a time is recovered.
 ///
 /// Malware keeps a string out of the data sections by writing it onto the
