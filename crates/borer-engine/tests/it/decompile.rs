@@ -1694,10 +1694,10 @@ fn const_survives_join() {
 fn while_loop_structured() {
     let out = dc(0x1100);
     assert!(
-        out.contains("for (var2 = 0; (int32_t)var2 < 5; var2 += 1)"),
+        out.contains("for (i = 0; (int32_t)i < 5; i += 1)"),
         "no for sugar:\n{out}"
     );
-    assert!(out.contains("var1 += var2;"), "loop body missing:\n{out}");
+    assert!(out.contains("var1 += i;"), "loop body missing:\n{out}");
     assert!(!out.contains("tmp_"), "spurious temporaries:\n{out}");
     assert!(
         !out.contains("goto L_1107;"),
@@ -1726,7 +1726,7 @@ fn deterministic_output() {
 fn nested_if_inside_while() {
     let out = dc(0x1180);
     assert!(
-        out.contains("for (var1 = 0; (int32_t)var1 < 5") || out.contains("while ("),
+        out.contains("for (i = 0; (int32_t)i < 5") || out.contains("while ("),
         "no loop:
 {out}"
     );
@@ -1741,7 +1741,7 @@ fn nested_if_inside_while() {
 {out}"
     );
     assert!(
-        out.contains("return var1;"),
+        out.contains("return i;"),
         "no return:
 {out}"
     );

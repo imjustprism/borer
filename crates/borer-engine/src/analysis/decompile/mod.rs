@@ -32,6 +32,7 @@ mod ctext;
 mod declared;
 mod emit;
 mod enums;
+mod evidence;
 mod expr;
 mod fields;
 mod finish;

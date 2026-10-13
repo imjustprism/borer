@@ -132,7 +132,7 @@ fn create_file_renders_its_constants_and_its_handle() {
         ),
         "{text}"
     );
-    assert!(text.contains("HANDLE var1;"), "{text}");
+    assert!(text.contains("HANDLE hObject;"), "{text}");
     assert!(header.contains("3/3 blocks"), "{header}");
     assert!(!header.contains("contradicted"), "{header}");
 }

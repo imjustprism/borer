@@ -52,7 +52,7 @@ const COMPOUND: [&str; 10] = ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<
 
 /// What a token is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Lex {
+pub(super) enum Lex {
     /// An identifier.
     Name,
     /// A numeric literal.
@@ -65,13 +65,13 @@ enum Lex {
 
 /// One token of a line and the bytes it spans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Tok {
+pub(super) struct Tok {
     /// What it is.
-    lex: Lex,
+    pub(super) lex: Lex,
     /// Its first byte in the line.
-    at: usize,
+    pub(super) at: usize,
     /// One past its last byte.
-    end: usize,
+    pub(super) end: usize,
 }
 
 /// Splits a line into tokens, leaving out whitespace and comments.
@@ -83,7 +83,7 @@ struct Tok {
 /// # Returns
 ///
 /// The tokens in order; a comment that does not end ends the line.
-fn lex(line: &str) -> Vec<Tok> {
+pub(super) fn lex(line: &str) -> Vec<Tok> {
     let b = line.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -185,11 +185,11 @@ fn lex(line: &str) -> Vec<Tok> {
 
 /// One line and its tokens.
 #[derive(Debug)]
-struct Line<'t> {
+pub(super) struct Line<'t> {
     /// The line as written.
-    text: &'t str,
+    pub(super) text: &'t str,
     /// Its tokens.
-    toks: Vec<Tok>,
+    pub(super) toks: Vec<Tok>,
 }
 
 impl Line<'_> {
@@ -198,7 +198,7 @@ impl Line<'_> {
     /// # Arguments
     ///
     /// * `k` - The token's index.
-    fn word(&self, k: usize) -> &str {
+    pub(super) fn word(&self, k: usize) -> &str {
         self.toks
             .get(k)
             .and_then(|t| self.text.get(t.at..t.end))
@@ -211,7 +211,7 @@ impl Line<'_> {
     ///
     /// * `k` - The token's index.
     /// * `p` - The punctuation.
-    fn is(&self, k: usize, p: &str) -> bool {
+    pub(super) fn is(&self, k: usize, p: &str) -> bool {
         self.toks.get(k).is_some_and(|t| t.lex == Lex::Punct) && self.word(k) == p
     }
 
@@ -220,7 +220,7 @@ impl Line<'_> {
     /// # Arguments
     ///
     /// * `open` - The index of a `(` or `[` token.
-    fn closing(&self, open: usize) -> Option<usize> {
+    pub(super) fn closing(&self, open: usize) -> Option<usize> {
         let mut depth = 0usize;
         for k in open..self.toks.len() {
             if self.is(k, "(") || self.is(k, "[") {
@@ -975,13 +975,13 @@ fn webs_of(
 
 /// The parts of a function's text.
 #[derive(Debug)]
-struct Parts<'t> {
+pub(super) struct Parts<'t> {
     /// The lines before the body: header comments and declarations.
-    head: Vec<&'t str>,
+    pub(super) head: Vec<&'t str>,
     /// Where the declarations start in `head`.
-    decls: usize,
+    pub(super) decls: usize,
     /// The body's lines.
-    body: Vec<&'t str>,
+    pub(super) body: Vec<&'t str>,
 }
 
 /// Splits a text into header, declarations and body.
@@ -993,7 +993,7 @@ struct Parts<'t> {
 /// # Returns
 ///
 /// The parts, or `None` when the text has no blank line before a body.
-fn parts(text: &str) -> Option<Parts<'_>> {
+pub(super) fn parts(text: &str) -> Option<Parts<'_>> {
     let lines: Vec<&str> = text.lines().collect();
     let decls = header_len(&lines);
     let blank_at = decls
@@ -1051,7 +1051,7 @@ fn declared(decls: &[&str]) -> BTreeMap<String, String> {
 ///
 /// The type and the items, or `None` for a line that is not a plain
 /// declaration (a comment, a global with its address).
-fn declaration(line: &str) -> Option<(&str, Vec<(&str, &str)>)> {
+pub(super) fn declaration(line: &str) -> Option<(&str, Vec<(&str, &str)>)> {
     let t = line.strip_suffix(';')?;
     if t.contains(['/', '=', '(', '[']) || t.starts_with(' ') {
         return None;
