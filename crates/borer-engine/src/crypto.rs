@@ -351,20 +351,20 @@ impl Seen<'_> {
 /// * `visit` - Receives every hit in a deterministic order: section, then
 ///   offset, then table order, then the unmapped runs in file order; it
 ///   returns [`ControlFlow::Break`] to end the scan.
-/// Which form of a signature [`scan`] matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Var {
-    /// The signature's own bytes.
-    Native,
-    /// Each word stored the other way round.
-    Swapped,
-    /// Adjacent xor deltas, which a constant xor key leaves unchanged.
-    Xor,
-    /// Adjacent subtract deltas, which a constant add key leaves unchanged.
-    Add,
-}
-
 pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<()>) {
+    /// Which form of a signature [`scan`] matches.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Var {
+        /// The signature's own bytes.
+        Native,
+        /// Each word stored the other way round.
+        Swapped,
+        /// Adjacent xor deltas, which a constant xor key leaves unchanged.
+        Xor,
+        /// Adjacent subtract deltas, which a constant add key leaves unchanged.
+        Add,
+    }
+
     /// One form of a signature [`scan`] matches at a position.
     struct Form {
         /// The signature's index in [`SIGNATURES`].
