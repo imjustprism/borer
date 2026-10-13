@@ -556,13 +556,16 @@ for tool in tools["tools"]:
         assert prop in text or str(wrong) in text, (tool["name"], prop, text[:200])
         survived += 1
     if required:
+        # Every required parameter, plus a junk field the server must
+        # refuse before any handler runs: the refusal names the junk, and
+        # would instead name a parameter the bridge had dropped.
         args = {k: filler(props[k]) for k in required}
+        args["nosuchfield_xyz"] = 1
         res = wait_for(
             send("tools/call", {"name": tool["name"], "arguments": args}), allow_error=True
         )
-        text = json.dumps(res).lower()
-        for k in required:
-            assert not ("missing" in text and k in text), (tool["name"], k, text[:200])
+        text = json.dumps(res)
+        assert "nosuchfield_xyz" in text, (tool["name"], text[:200])
 print(f"parameter round-trip OK ({survived} parameters across {len(tools['tools'])} tools)")
 hid = wait_for(send("resources/read", {"uri": "borer://hidden"}))["contents"][0]["text"]
 # "1 generated string" or "N generated strings": the count depends on the binary
