@@ -225,7 +225,7 @@ fn a_result_read_through_the_second_one_is_taken_first() {
         .iter()
         .rposition(|l| l.starts_with("return "))
         .unwrap_or(0);
-    assert!(lines[at].starts_with("return var"), "{text}");
+    assert!(lines[at].starts_with("return *(uint64_t*)var1"), "{text}");
     assert!(
         at.checked_sub(1)
             .and_then(|i| lines.get(i))

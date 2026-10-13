@@ -1168,6 +1168,7 @@ pub(super) fn split_webs(text: &str) -> String {
             None => break,
         }
     }
+
     if out == text {
         return out;
     }
@@ -2413,7 +2414,12 @@ impl<'t> Text<'t> {
                     let deref =
                         w == "*" && unary(l, k, span.0) && !(l.is(k + 1, ")") || l.is(k + 1, "*"));
                     out.loads |= deref || matches!(w, "->" | "." | "[");
-                    out.calls |= w == ")" && l.is(k + 1, "(");
+                    let cast = k > 0
+                        && (l.is(k - 1, "*")
+                            || l.toks.get(k - 1).is_some_and(
+                                |p| matches!(p.lex, Lex::Name if type_word(l.word(k - 1))),
+                            ));
+                    out.calls |= w == ")" && l.is(k + 1, "(") && !cast;
                 }
                 Lex::Name if l.is(k + 1, "::") => {}
                 Lex::Name => {
