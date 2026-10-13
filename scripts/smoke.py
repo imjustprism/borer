@@ -485,6 +485,85 @@ assert "nosuchfield" in bad_text and ("unknown field" in bad_text or "isError" i
     bad_text[:300]
 )
 print("unknown parameter rejected OK")
+
+# 2b. every parameter of every tool survives the bridge. Two failures of
+# the past are guarded here: a parameter the bridge drops, and a parameter
+# the server reads but never names in its refusal. Every documented
+# parameter is sent with a type the schema forbids, and the refusal must
+# carry the parameter's name or the distinctive wrong value itself; then a
+# call holding every required parameter must not be answered with
+# `missing` for a parameter the call carried. An unknown junk parameter
+# is refused on every tool the same way.
+INT_MARKER = 987654321
+STR_MARKER = "zz-no-such-value"
+FORBIDDEN = {
+    "string": INT_MARKER,
+    "integer": STR_MARKER,
+    "number": STR_MARKER,
+    "boolean": STR_MARKER,
+    "array": STR_MARKER,
+}
+
+
+def filler(schema):
+    """A value the schema accepts, for parameters that must be present."""
+    if "enum" in schema:
+        return schema["enum"][0]
+    kind = schema.get("type")
+    if kind == "string":
+        return "0"
+    if kind in ("integer", "number"):
+        return 0
+    if kind == "boolean":
+        return False
+    if kind == "array":
+        return [""]
+    return {}
+
+
+def wrong_for(schema):
+    """A value the schema forbids, or None when the schema accepts anything."""
+    if "enum" in schema:
+        return INT_MARKER if all(str(v) == v for v in schema["enum"]) else STR_MARKER
+    kind = schema.get("type")
+    return FORBIDDEN.get(kind)
+
+
+survived = 0
+for tool in tools["tools"]:
+    schema = tool.get("inputSchema") or {}
+    props = schema.get("properties") or {}
+    if not props:
+        continue
+    res = wait_for(
+        send("tools/call", {"name": tool["name"], "arguments": {"nosuchfield_xyz": 1}}),
+        allow_error=True,
+    )
+    text = json.dumps(res)
+    assert "unknown field" in text and "nosuchfield_xyz" in text, (tool["name"], text[:200])
+    required = set(schema.get("required") or [])
+    for prop, spec in props.items():
+        wrong = wrong_for(spec)
+        if wrong is None:
+            continue
+        args = {k: filler(v) for k, v in props.items() if k in required and k != prop}
+        args[prop] = wrong
+        res = wait_for(
+            send("tools/call", {"name": tool["name"], "arguments": args}), allow_error=True
+        )
+        text = json.dumps(res)
+        assert "isError" in text or "error" in text, (tool["name"], prop, text[:200])
+        assert prop in text or str(wrong) in text, (tool["name"], prop, text[:200])
+        survived += 1
+    if required:
+        args = {k: filler(props[k]) for k in required}
+        res = wait_for(
+            send("tools/call", {"name": tool["name"], "arguments": args}), allow_error=True
+        )
+        text = json.dumps(res).lower()
+        for k in required:
+            assert not ("missing" in text and k in text), (tool["name"], k, text[:200])
+print(f"parameter round-trip OK ({survived} parameters across {len(tools['tools'])} tools)")
 hid = wait_for(send("resources/read", {"uri": "borer://hidden"}))["contents"][0]["text"]
 # "1 generated string" or "N generated strings": the count depends on the binary
 assert hid.startswith("# ") and "generated string" in hid, hid[:200]
