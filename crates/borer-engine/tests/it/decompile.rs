@@ -3060,7 +3060,7 @@ fn a_dead_block_inside_a_loop_does_not_veto_it() {
     assert!(text.contains("unreachable"), "{text}");
     assert!(!text.contains("goto"), "{text}");
     assert!(text.contains("do {"), "{text}");
-    assert_eq!(text.matches("rcx += 1;").count(), 1, "{text}");
+    assert_eq!(text.matches("i += 1;").count(), 1, "{text}");
 }
 
 /// A range test joined to a bit test of a constant reads as the values it
@@ -3189,7 +3189,7 @@ fn a_loop_ending_in_a_conditional_break_is_a_do_while() {
     assert!(!text.contains("while (1)"), "{text}");
     assert!(!text.contains("break;"), "{text}");
     assert!(
-        text.contains("} while ((uint32_t)rcx < (uint32_t)a3);"),
+        text.contains("} while ((uint32_t)i < (uint32_t)a3);"),
         "{text}"
     );
 }
@@ -3211,7 +3211,7 @@ fn a_loop_going_round_on_continue_keeps_its_tail_after_it() {
     assert!(!text.contains("while (1)"), "{text}");
     assert!(!text.contains("continue;"), "{text}");
     assert!(
-        text.contains("} while (rax != 0);\n  *(uint32_t*)rcx = a2;"),
+        text.contains("} while (var1 != 0);\n  *(uint32_t*)var2 = a2;"),
         "{text}"
     );
 }
@@ -3271,7 +3271,7 @@ fn loop_escapes_to_a_returning_tail_carry_it() {
     let out = dc(0x4900);
     assert!(!out.contains("goto"), "{out}");
     assert!(
-        out.contains("for (rcx = a1; *(uint32_t*)rcx != 0; rcx += 8) {"),
+        out.contains("for (var1 = a1; *(uint32_t*)var1 != 0; var1 += 8) {"),
         "{out}"
     );
     assert!(
@@ -5273,7 +5273,7 @@ fn a_forwarder_passes_its_parameters_through() {
         text.contains("return __imp_MultiByteToWideChar(a1, a2, a3, a4, a5, a6);"),
         "{text}"
     );
-    assert!(text.contains("uint64_t a6)"), "{text}");
+    assert!(text.contains("int a6)"), "{text}");
 }
 
 /// A function's signature and every call to it print one arity.
