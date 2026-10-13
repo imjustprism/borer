@@ -508,7 +508,80 @@ pub fn vm_dispatch_tsv(
         VM_HANDLERS_MAX,
         "handlers not listed",
     );
+    let (_, _, hint) = constraint_shape(p, a, d);
+    out.push_str(&hint);
     Ok(out)
+}
+
+/// Reports the algebraic shape a dispatch loop's handler set forms.
+///
+/// A crackme's virtual machine often implements its check as conditional
+/// arithmetic: an add or xor that only fires when a data bit tests true
+/// creates one unknown bit per handler. Enough of these on a bounded state
+/// form a linear relation system a lattice-reduction solver (LLL, BKZ)
+/// cracks in seconds, where inverting the virtual cipher round by round
+/// is exponential. A modular-exponentiation shape points at index
+/// calculus instead. The hint names the shape so the analyst reaches for
+/// the right tool, and counts the constraints so the difficulty is
+/// visible before any are solved.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `d` - The dispatch loop.
+///
+/// # Returns
+///
+/// `(conditional operations, arithmetic operations, the hint line)`.
+fn constraint_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> (usize, usize, String) {
+    /// Fewest conditional operations before the hint fires.
+    const LATTICE_MIN: usize = 8;
+    let mut conditional = 0usize;
+    let mut arithmetic = 0usize;
+    let mut modular = 0usize;
+    for &h in &d.handlers {
+        let (_, effect) = handler_effect(p, a, h);
+        let low = effect.to_lowercase();
+        if low.contains("div") || low.contains("mod") {
+            modular += 1;
+        }
+        if low.contains("add") || low.contains("sub") || low.contains("mul") {
+            arithmetic += 1;
+        }
+        // A conditional operation: the effect names both a test and an
+        // arithmetic or logic change, or a multiply whose result depends
+        // on an operand the text gates.
+        if (low.contains("test") || low.contains("cmp") || low.contains("je"))
+            && (low.contains("add")
+                || low.contains("sub")
+                || low.contains("xor")
+                || low.contains("or")
+                || low.contains("mul"))
+        {
+            conditional += 1;
+        }
+    }
+    let hint = if conditional >= LATTICE_MIN && arithmetic >= LATTICE_MIN {
+        format!(
+            "# constraint shape: {conditional} conditional and {arithmetic} arithmetic operations on a bounded state; lattice reduction (LLL or BKZ) applies, each conditional contributing one unknown bit
+"
+        )
+    } else if modular >= 3 && arithmetic >= LATTICE_MIN {
+        format!(
+            "# constraint shape: {modular} modular and {arithmetic} arithmetic operations; a discrete-log or modular-equation shape, index calculus applies
+"
+        )
+    } else if conditional > 0 {
+        format!(
+            "# constraint shape: {conditional} conditional operation{} — too few for a lattice hint
+",
+            plural(conditional)
+        )
+    } else {
+        String::new()
+    };
+    (conditional, arithmetic, hint)
 }
 
 /// The address a `lea` or `mov` reads from, when it is a fixed one.
