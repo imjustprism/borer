@@ -1800,17 +1800,37 @@ fn decompile_in<L: Lifter>(
     let ret_ty = recorded_ret.unwrap_or(inferred);
     let typed = L::param_types(&ctx, &code, &succs, entry_block);
     let name = name_of(analysis, overlay, f.entry);
+    // A function the binary defines under a library name takes the
+    // library's prototype, when nothing better states one and the code
+    // agrees with it.
+    let library = (ctx.stated.is_none()
+        && f.signature.is_none()
+        && ctx.debug_ret.is_none()
+        && ctx.debug_params.is_empty())
+    .then(|| {
+        signature::library_prototype(
+            expr::bare(&name),
+            program.format,
+            shape.count,
+            ctx.variadic,
+            value_return,
+        )
+    })
+    .flatten();
     let declared: Vec<String> = match ctx.stated {
         Some(_) => ctx
             .debug_params
             .iter()
             .map(|p| p.type_name.clone().unwrap_or_default())
             .collect(),
-        None => f
-            .signature
-            .as_ref()
-            .map(|s| s.params.clone())
-            .unwrap_or_default(),
+        None => f.signature.as_ref().map_or_else(
+            || {
+                library.as_ref().map_or_else(Vec::new, |(_, params)| {
+                    params.iter().map(|p| (*p).to_owned()).collect()
+                })
+            },
+            |s| s.params.clone(),
+        ),
     };
     let var_typed: BTreeSet<usize> = overlay
         .vars
@@ -1825,11 +1845,13 @@ fn decompile_in<L: Lifter>(
         .collect();
     let class = classes::class_of(expr::bare(&name)).unwrap_or("");
     let ret_ty = f.signature.as_ref().map_or_else(
-        || {
-            f.ret_hint
+        || match &library {
+            Some((ret, _)) => (*ret).to_owned(),
+            None => f
+                .ret_hint
                 .as_ref()
                 .filter(|_| f.ret_float.is_none())
-                .map_or(ret_ty.to_owned(), |c| format!("{c} *"))
+                .map_or(ret_ty.to_owned(), |c| format!("{c} *")),
         },
         |s| s.ret.clone(),
     );

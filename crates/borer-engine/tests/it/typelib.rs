@@ -271,3 +271,57 @@ fn library_rendering_is_deterministic() {
         "{first}"
     );
 }
+
+/// A token query names the class of information it asks for, its null
+/// buffers as `NULL`: a row the library gained for an import the system
+/// tools call.
+#[test]
+fn a_token_query_names_its_information_class() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x38, // ASM: sub rsp, 0x38
+        0xba, 0x01, 0x00, 0x00, 0x00, // ASM: mov edx, 1
+        0x45, 0x31, 0xc0, // ASM: xor r8d, r8d
+        0x45, 0x31, 0xc9, // ASM: xor r9d, r9d
+        0x48, 0xc7, 0x44, 0x24, 0x20, 0x00, 0x00, 0x00, 0x00, // ASM: mov qword [rsp+0x20], 0
+    ];
+    let at = TEXT + u64::try_from(code.len()).expect("small");
+    code.extend_from_slice(&call_slot(at, RDATA));
+    code.extend_from_slice(&[
+        0x48, 0x83, 0xc4, 0x38, // ASM: add rsp, 0x38
+        0xc3, // ASM: ret
+    ]);
+    let p = image(
+        BinaryFormat::Pe,
+        &code,
+        &[0u8; 8],
+        &["ADVAPI32.dll!GetTokenInformation"],
+    );
+    let (text, header) = decompiled(&p);
+    assert!(
+        text.contains("GetTokenInformation(a1, TokenUser, NULL, 0, NULL)"),
+        "{text}"
+    );
+    assert!(!header.contains("contradicted"), "{header}");
+}
+
+/// A function the binary defines under a library name takes the library's
+/// prototype, its parameter and result typed where the code shows only
+/// their widths.
+#[test]
+fn a_function_named_for_the_library_takes_its_prototype() {
+    let code = [
+        0x8b, 0x01, // ASM: mov eax, [rcx]
+        0xc3, // ASM: ret
+    ];
+    let mut p = image(BinaryFormat::Pe, &code, &[0u8; 8], &[]);
+    p.symbols.push(Symbol {
+        name: "lstrlenW".to_owned(),
+        addr: TEXT,
+        kind: SymbolKind::Export,
+    });
+    let (text, _) = decompiled(&p);
+    assert!(
+        text.contains("// signature: int lstrlenW(LPCWSTR a1)"),
+        "{text}"
+    );
+}

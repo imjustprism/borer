@@ -620,6 +620,18 @@ def _panic_blob() -> bytes:
 
 PANIC_CODE = _panic_blob()
 
+# Headerless x86-64 code, loaded at 0x10000: a loop that sums its counter,
+# both kept in registers the whole time.
+LOOP_CODE = bytes.fromhex(
+    "31c0"  # xor eax, eax
+    "31c9"  # xor ecx, ecx
+    "01c8"  # add eax, ecx
+    "ffc1"  # inc ecx
+    "83f90a"  # cmp ecx, 10
+    "7cf7"  # jl (the add)
+    "c3"  # ret
+)
+
 # Each extra blob the tasks load: its bytes and the marker a path counts as,
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
@@ -637,6 +649,7 @@ BLOBS = {
     "dotnet": (DOTNET_CODE, "<dotnet>"),
     "gs": (GS_CODE, "<gs>"),
     "panic": (PANIC_CODE, "<panic>"),
+    "loop": (LOOP_CODE, "<loop>"),
 }
 
 # (task, the question it answers, calls, the fact the answers must hold)
@@ -864,6 +877,15 @@ TASKS = [
             ("decompile", {"address": "0x10000"}),
         ],
         "// at rhai-1.26.1/src/parser.rs:1015:32",
+    ),
+    (
+        "loop_counter",
+        "the counter a loop steps, read as a variable of its own rather than a register",
+        [
+            ("load_binary", {"path": "{loop}", "arch": "x64", "base": "0x10000"}),
+            ("decompile", {"address": "0x10000"}),
+        ],
+        "i < 10",
     ),
 ]
 

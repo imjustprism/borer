@@ -242,6 +242,40 @@ impl Signature {
     }
 }
 
+/// The prototype the type library states for a function the binary itself
+/// defines under a library name (a statically linked `strtok`, a DLL's own
+/// export), when the code agrees with it.
+///
+/// The code agrees when it takes as many parameters as the declaration
+/// lists, reads a variable list exactly when the declaration has one, and
+/// returns a value exactly when the declaration does; the types then say
+/// what the parameters and the result are where the code shows only their
+/// widths.
+///
+/// # Arguments
+///
+/// * `name` - The function's name.
+/// * `format` - The binary's format, which picks the platform's rows.
+/// * `count` - How many parameters the code shows.
+/// * `variadic` - Whether the code reads a variable list.
+/// * `returns` - Whether the code returns a value.
+///
+/// # Returns
+///
+/// The return type and the parameter types, or `None` when the library
+/// has no row for the name or the code disagrees with it.
+pub(super) fn library_prototype(
+    name: &str,
+    format: crate::program::BinaryFormat,
+    count: usize,
+    variadic: bool,
+    returns: bool,
+) -> Option<(&'static str, Vec<&'static str>)> {
+    let d = crate::analysis::typelib::declared(name, format)?;
+    (d.params.len() == count && d.variadic == variadic && (d.ret != "void") == returns)
+        .then(|| (d.ret, d.params.iter().map(|p| p.ty).collect()))
+}
+
 /// Reads the signature a decompiled function's text prints on its
 /// `// signature:` line.
 ///

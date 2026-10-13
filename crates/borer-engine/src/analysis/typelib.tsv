@@ -1,7 +1,14 @@
+AcquireSRWLockExclusive	win	void	-	PSRWLOCK SRWLock	-
+AcquireSRWLockShared	win	void	-	PSRWLOCK SRWLock	-
+AdjustTokenPrivileges	win	BOOL	-	HANDLE TokenHandle|BOOL DisableAllPrivileges|PTOKEN_PRIVILEGES NewState|DWORD BufferLength|PTOKEN_PRIVILEGES PreviousState|PDWORD ReturnLength	-|bool|-|-|-|-
+CertFreeCertificateContext	win	BOOL	-	PCCERT_CONTEXT pCertContext	-
+CharLowerW	win	LPWSTR	-	LPWSTR lpsz	-
+CharUpperW	win	LPWSTR	-	LPWSTR lpsz	-
 CheckRemoteDebuggerPresent	win	BOOL	-	HANDLE hProcess|PBOOL pbDebuggerPresent	-
 CloseHandle	win	BOOL	-	HANDLE hObject	-
 CoCreateInstance	win	HRESULT	-	REFCLSID rclsid|LPUNKNOWN pUnkOuter|DWORD dwClsContext|REFIID riid|LPVOID *ppv	-|-|clsctx|-|-
 CopyFileW	win	BOOL	-	LPCWSTR lpExistingFileName|LPCWSTR lpNewFileName|BOOL bFailIfExists	-|-|bool
+CopySid	win	BOOL	-	DWORD nDestinationSidLength|PSID pDestinationSid|PSID pSourceSid	-
 CreateDirectoryW	win	BOOL	-	LPCWSTR lpPathName|LPSECURITY_ATTRIBUTES lpSecurityAttributes	-
 CreateEventW	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpEventAttributes|BOOL bManualReset|BOOL bInitialState|LPCWSTR lpName	-|bool|bool|-
 CreateFileA	win	HANDLE	handle	LPCSTR lpFileName|DWORD dwDesiredAccess|DWORD dwShareMode|LPSECURITY_ATTRIBUTES lpSecurityAttributes|DWORD dwCreationDisposition|DWORD dwFlagsAndAttributes|HANDLE hTemplateFile	-|file_access|file_share|-|file_disposition|file_flags|-
@@ -13,53 +20,82 @@ CreateProcessW	win	BOOL	-	LPCWSTR lpApplicationName|LPWSTR lpCommandLine|LPSECUR
 CreateRemoteThread	win	HANDLE	-	HANDLE hProcess|LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPDWORD lpThreadId	-|-|-|-|-|thread_creation|-
 CreateThread	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPDWORD lpThreadId	-|-|-|-|thread_creation|-
 CreateToolhelp32Snapshot	win	HANDLE	handle	DWORD dwFlags|DWORD th32ProcessID	snapshot|-
+CryptReleaseContext	win	BOOL	-	HCRYPTPROV hProv|DWORD dwFlags	-
 DeleteCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
 DeleteFileA	win	BOOL	-	LPCSTR lpFileName	-
 DeleteFileW	win	BOOL	-	LPCWSTR lpFileName	-
 DuplicateHandle	win	BOOL	-	HANDLE hSourceProcessHandle|HANDLE hSourceHandle|HANDLE hTargetProcessHandle|LPHANDLE lpTargetHandle|DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwOptions	-|-|-|-|-|bool|duplicate
 EnterCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
+EqualSid	win	BOOL	-	PSID pSid1|PSID pSid2	-
 ExitProcess	win	void	-	UINT uExitCode	-
 ExitThread	win	void	-	DWORD dwExitCode	-
+FileTimeToSystemTime	win	BOOL	-	LPFILETIME lpFileTime|LPSYSTEMTIME lpSystemTime	-
 FindClose	win	BOOL	-	HANDLE hFindFile	-
+FindFirstFileA	win	HANDLE	handle	LPCSTR lpFileName|LPWIN32_FIND_DATAA lpFindFileData	-
 FindFirstFileW	win	HANDLE	handle	LPCWSTR lpFileName|LPWIN32_FIND_DATAW lpFindFileData	-
+FindNextFileA	win	BOOL	-	HANDLE hFindFile|LPWIN32_FIND_DATAA lpFindFileData	-
 FindNextFileW	win	BOOL	-	HANDLE hFindFile|LPWIN32_FIND_DATAW lpFindFileData	-
+FormatMessageW	win	DWORD	-	DWORD dwFlags|LPCVOID lpSource|DWORD dwMessageId|DWORD dwLanguageId|LPWSTR lpBuffer|DWORD nSize|void *Arguments	format_message|-|-|-|-|-|-
 FreeLibrary	win	BOOL	-	HMODULE hLibModule	-
 GetAsyncKeyState	win	SHORT	-	int vKey	-
+GetConsoleMode	win	BOOL	-	HANDLE hConsoleHandle|LPDWORD lpMode	-
+GetConsoleOutputCP	win	UINT	-	-	-
+GetCurrentDirectoryA	win	DWORD	-	DWORD nBufferLength|LPSTR lpBuffer	-
 GetCurrentProcess	win	HANDLE	-	-	-
 GetCurrentProcessId	win	DWORD	-	-	-
 GetCurrentThreadId	win	DWORD	-	-	-
+GetFileAttributesA	win	DWORD	-	LPCSTR lpFileName	-
 GetFileAttributesW	win	DWORD	-	LPCWSTR lpFileName	-
 GetFileSize	win	DWORD	-	HANDLE hFile|LPDWORD lpFileSizeHigh	-
+GetFileType	win	DWORD	file_type	HANDLE hFile	-
 GetLastError	win	DWORD	-	-	-
+GetLengthSid	win	DWORD	-	PSID pSid	-
 GetModuleFileNameW	win	DWORD	-	HMODULE hModule|LPWSTR lpFilename|DWORD nSize	-
 GetModuleHandleA	win	HMODULE	-	LPCSTR lpModuleName	-
 GetModuleHandleW	win	HMODULE	-	LPCWSTR lpModuleName	-
 GetProcAddress	win	FARPROC	-	HMODULE hModule|LPCSTR lpProcName	-
 GetProcessHeap	win	HANDLE	-	-	-
+GetSidSubAuthority	win	PDWORD	-	PSID pSid|DWORD nSubAuthority	-
+GetSidSubAuthorityCount	win	PUCHAR	-	PSID pSid	-
 GetStdHandle	win	HANDLE	handle	DWORD nStdHandle	std_handle
+GetSystemTimeAsFileTime	win	void	-	LPFILETIME lpSystemTimeAsFileTime	-
+GetThreadLocale	win	LCID	-	-	-
 GetTickCount	win	DWORD	-	-	-
 GetTickCount64	win	ULONGLONG	-	-	-
+GetTokenInformation	win	BOOL	-	HANDLE TokenHandle|TOKEN_INFORMATION_CLASS TokenInformationClass|LPVOID TokenInformation|DWORD TokenInformationLength|PDWORD ReturnLength	-|token_information_class|-|-|-
+GetUserNameExW	win	BOOLEAN	-	EXTENDED_NAME_FORMAT NameFormat|LPWSTR lpNameBuffer|PULONG nSize	extended_name_format|-|-
 HeapAlloc	win	LPVOID	-	HANDLE hHeap|DWORD dwFlags|SIZE_T dwBytes	-|heap_flags|-
 HeapFree	win	BOOL	-	HANDLE hHeap|DWORD dwFlags|LPVOID lpMem	-|heap_flags|-
+HeapReAlloc	win	LPVOID	-	HANDLE hHeap|DWORD dwFlags|LPVOID lpMem|SIZE_T dwBytes	-
+HeapSize	win	SIZE_T	-	HANDLE hHeap|DWORD dwFlags|LPCVOID lpMem	-
 InitializeCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
 InternetCloseHandle	win	BOOL	-	HINTERNET hInternet	-
 InternetOpenUrlW	win	HINTERNET	-	HINTERNET hInternet|LPCWSTR lpszUrl|LPCWSTR lpszHeaders|DWORD dwHeadersLength|DWORD dwFlags|DWORD_PTR dwContext	-|-|-|-|internet_flags|-
 InternetOpenW	win	HINTERNET	-	LPCWSTR lpszAgent|DWORD dwAccessType|LPCWSTR lpszProxy|LPCWSTR lpszProxyBypass|DWORD dwFlags	-|internet_open|-|-|internet_flags
 InternetReadFile	win	BOOL	-	HINTERNET hFile|LPVOID lpBuffer|DWORD dwNumberOfBytesToRead|LPDWORD lpdwNumberOfBytesRead	-
+IsDBCSLeadByte	win	BOOL	-	BYTE TestChar	-
 IsDebuggerPresent	win	BOOL	-	-	-
+IsValidSid	win	BOOL	-	PSID pSid	-
 LeaveCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
 LoadLibraryA	win	HMODULE	-	LPCSTR lpLibFileName	-
 LoadLibraryExW	win	HMODULE	-	LPCWSTR lpLibFileName|HANDLE hFile|DWORD dwFlags	-|-|load_library
 LoadLibraryW	win	HMODULE	-	LPCWSTR lpLibFileName	-
+LocalAlloc	win	HLOCAL	-	UINT uFlags|SIZE_T uBytes	local_alloc|-
+LocalFree	win	HLOCAL	-	HLOCAL hMem	-
+LookupAccountSidW	win	BOOL	-	LPCWSTR lpSystemName|PSID Sid|LPWSTR Name|LPDWORD cchName|LPWSTR ReferencedDomainName|LPDWORD cchReferencedDomainName|PSID_NAME_USE peUse	-
+LookupPrivilegeValueW	win	BOOL	-	LPCWSTR lpSystemName|LPCWSTR lpName|PLUID lpLuid	-
 MapViewOfFile	win	LPVOID	-	HANDLE hFileMappingObject|DWORD dwDesiredAccess|DWORD dwFileOffsetHigh|DWORD dwFileOffsetLow|SIZE_T dwNumberOfBytesToMap	-|file_map|-|-|-
 MessageBoxA	win	int	dialog_result	HWND hWnd|LPCSTR lpText|LPCSTR lpCaption|UINT uType	-|-|-|message_box
 MessageBoxW	win	int	dialog_result	HWND hWnd|LPCWSTR lpText|LPCWSTR lpCaption|UINT uType	-|-|-|message_box
 MoveFileExW	win	BOOL	-	LPCWSTR lpExistingFileName|LPCWSTR lpNewFileName|DWORD dwFlags	-|-|move_file
+MultiByteToWideChar	win	int	-	UINT CodePage|DWORD dwFlags|LPCSTR lpMultiByteStr|int cbMultiByte|LPWSTR lpWideCharStr|int cchWideChar	code_page|-|-|-|-|-
+NetApiBufferFree	win	NET_API_STATUS	-	LPVOID Buffer	-
 OpenProcess	win	HANDLE	-	DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwProcessId	process_access|bool|-
 OpenProcessToken	win	BOOL	-	HANDLE ProcessHandle|DWORD DesiredAccess|PHANDLE TokenHandle	-|token_access|-
 OpenThread	win	HANDLE	-	DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwThreadId	thread_access|bool|-
 OutputDebugStringA	win	void	-	LPCSTR lpOutputString	-
 OutputDebugStringW	win	void	-	LPCWSTR lpOutputString	-
+QueryPerformanceCounter	win	BOOL	-	PLARGE_INTEGER lpPerformanceCount	-
 ReadFile	win	BOOL	-	HANDLE hFile|LPVOID lpBuffer|DWORD nNumberOfBytesToRead|LPDWORD lpNumberOfBytesRead|LPOVERLAPPED lpOverlapped	-
 ReadProcessMemory	win	BOOL	-	HANDLE hProcess|LPCVOID lpBaseAddress|LPVOID lpBuffer|SIZE_T nSize|SIZE_T *lpNumberOfBytesRead	-
 RegCloseKey	win	LSTATUS	-	HKEY hKey	hkey
@@ -67,18 +103,27 @@ RegCreateKeyExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpSubKey|DWORD Reserved|LPWSTR l
 RegDeleteValueW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName	hkey|-
 RegOpenKeyExA	win	LSTATUS	-	HKEY hKey|LPCSTR lpSubKey|DWORD ulOptions|REGSAM samDesired|PHKEY phkResult	hkey|-|reg_options|reg_sam|-
 RegOpenKeyExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpSubKey|DWORD ulOptions|REGSAM samDesired|PHKEY phkResult	hkey|-|reg_options|reg_sam|-
+RegOpenKeyW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpSubKey|PHKEY phkResult	hkey|-|-
 RegQueryValueExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName|LPDWORD lpReserved|LPDWORD lpType|LPBYTE lpData|LPDWORD lpcbData	hkey|-|-|-|-|-
 RegSetValueExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName|DWORD Reserved|DWORD dwType|const BYTE *lpData|DWORD cbData	hkey|-|-|reg_type|-|-
+ReleaseSRWLockExclusive	win	void	-	PSRWLOCK SRWLock	-
+ReleaseSRWLockShared	win	void	-	PSRWLOCK SRWLock	-
 ResumeThread	win	DWORD	-	HANDLE hThread	-
+RtlCaptureContext	win	void	-	PCONTEXT ContextRecord	-
 SHGetFolderPathW	win	HRESULT	-	HWND hwnd|int csidl|HANDLE hToken|DWORD dwFlags|LPWSTR pszPath	-|csidl|-|-|-
+SetConsoleTextAttribute	win	BOOL	-	HANDLE hConsoleOutput|WORD wAttributes	-
+SetCurrentDirectoryA	win	BOOL	-	LPCSTR lpPathName	-
 SetFileAttributesW	win	BOOL	-	LPCWSTR lpFileName|DWORD dwFileAttributes	-|file_flags
 SetFilePointer	win	DWORD	-	HANDLE hFile|LONG lDistanceToMove|PLONG lpDistanceToMoveHigh|DWORD dwMoveMethod	-|-|-|move_method
 SetLastError	win	void	-	DWORD dwErrCode	-
+SetThreadUILanguage	win	LANGID	-	LANGID LangId	-
+SetUnhandledExceptionFilter	win	LPTOP_LEVEL_EXCEPTION_FILTER	-	LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter	-
 SetWindowsHookExW	win	HHOOK	-	int idHook|HOOKPROC lpfn|HINSTANCE hmod|DWORD dwThreadId	hook|-|-|-
 ShowWindow	win	BOOL	-	HWND hWnd|int nCmdShow	-|show_window
 Sleep	win	void	-	DWORD dwMilliseconds	timeout
 SuspendThread	win	DWORD	-	HANDLE hThread	-
 TerminateProcess	win	BOOL	-	HANDLE hProcess|UINT uExitCode	-
+UnhandledExceptionFilter	win	LONG	-	PEXCEPTION_POINTERS ExceptionInfo	-
 UnmapViewOfFile	win	BOOL	-	LPCVOID lpBaseAddress	-
 VirtualAlloc	win	LPVOID	-	LPVOID lpAddress|SIZE_T dwSize|DWORD flAllocationType|DWORD flProtect	-|-|mem_type|page_protect
 VirtualAllocEx	win	LPVOID	-	HANDLE hProcess|LPVOID lpAddress|SIZE_T dwSize|DWORD flAllocationType|DWORD flProtect	-|-|-|mem_type|page_protect
@@ -88,6 +133,9 @@ VirtualProtectEx	win	BOOL	-	HANDLE hProcess|LPVOID lpAddress|SIZE_T dwSize|DWORD
 VirtualQuery	win	SIZE_T	-	LPCVOID lpAddress|PMEMORY_BASIC_INFORMATION lpBuffer|SIZE_T dwLength	-
 WSAStartup	win	int	-	WORD wVersionRequested|LPWSADATA lpWSAData	-
 WaitForSingleObject	win	DWORD	wait_result	HANDLE hHandle|DWORD dwMilliseconds	-|timeout
+WakeAllConditionVariable	win	void	-	PCONDITION_VARIABLE ConditionVariable	-
+WideCharToMultiByte	win	int	-	UINT CodePage|DWORD dwFlags|LPCWSTR lpWideCharStr|int cchWideChar|LPSTR lpMultiByteStr|int cbMultiByte|LPCSTR lpDefaultChar|LPBOOL lpUsedDefaultChar	code_page|-|-|-|-|-|-|-
+WriteConsoleW	win	BOOL	-	HANDLE hConsoleOutput|LPCVOID lpBuffer|DWORD nNumberOfCharsToWrite|LPDWORD lpNumberOfCharsWritten|LPVOID lpReserved	-
 WriteFile	win	BOOL	-	HANDLE hFile|LPCVOID lpBuffer|DWORD nNumberOfBytesToWrite|LPDWORD lpNumberOfBytesWritten|LPOVERLAPPED lpOverlapped	-
 WriteProcessMemory	win	BOOL	-	HANDLE hProcess|LPVOID lpBaseAddress|LPCVOID lpBuffer|SIZE_T nSize|SIZE_T *lpNumberOfBytesWritten	-
 _exit	posix	void	-	int status	-
@@ -125,6 +173,8 @@ getuid	posix	uid_t	-	-	-
 kill	posix	int	-	pid_t pid|int sig	-|signal
 listen	posix	int	-	int sockfd|int backlog	-
 lseek	posix	off_t	-	int fd|off_t offset|int whence	-|-|seek
+lstrlenA	win	int	-	LPCSTR lpString	-
+lstrlenW	win	int	-	LPCWSTR lpString	-
 malloc	c	void *	-	size_t size	-
 memcmp	c	int	-	const void *s1|const void *s2|size_t n	-
 memcpy	c	void *	-	void *dest|const void *src|size_t n	-
