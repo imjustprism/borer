@@ -355,6 +355,10 @@ pub struct Emulator<'a> {
     calls: Vec<ApiCall>,
     /// Next address a modeled allocator hands out ([`Emulator::allocate`]).
     alloc_next: u64,
+    /// The regions allocation handed out, as `(base, one past the end)`:
+    /// zero-backed before the run writes them, so a pointer the emulator
+    /// itself returned never faults where the OS would not.
+    allocs: Vec<(u64, u64)>,
     /// Best-effort mode: a call or jump to memory nothing maps is skipped
     /// (treated as a stub returning zero) and an unmapped read returns zero,
     /// rather than faulting, so a packer's bootstrap runs past the imports the
@@ -431,6 +435,10 @@ const ALLOC_BASE: u64 = 0x6000_0000_0000;
 /// the bases an executable and a DLL are linked at, below the API stubs, so
 /// a four-byte pointer holds all of it.
 const ALLOC_BASE_32: u64 = 0x6000_0000;
+
+/// Most bytes one modeled `memcpy`, `memmove` or `memset` moves, so a
+/// wild length cannot fill the memory map.
+const API_COPY_MAX: usize = 0x1_0000;
 
 /// Address space one modeled allocation takes, whatever size it asked for.
 const ALLOC_STRIDE: u64 = 0x0010_0000;
@@ -1133,6 +1141,7 @@ impl<'a> Emulator<'a> {
             apis: BTreeMap::new(),
             calls: Vec::new(),
             alloc_next,
+            allocs: Vec::new(),
             permissive: false,
             fill: None,
             skipped: 0,
@@ -1757,6 +1766,24 @@ impl<'a> Emulator<'a> {
         &self.calls
     }
 
+    /// The byte at `a` only when a write or the image states it: zero
+    /// backing left out, so a checker can tell a known byte from an
+    /// untouched one.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The address.
+    #[must_use]
+    pub fn byte_stated(&self, a: u64) -> Option<u8> {
+        self.mem.get(a).or_else(|| image_byte(self.program, a))
+    }
+
+    /// The most recent region the modeled allocator handed out, if any.
+    #[must_use]
+    pub fn last_alloc(&self) -> Option<u64> {
+        self.allocs.last().map(|(base, _)| *base)
+    }
+
     /// The names of the serviced calls, in order: the order and names a
     /// check compares and a count sums, without the decoded arguments.
     #[must_use]
@@ -1836,6 +1863,26 @@ impl<'a> Emulator<'a> {
             } else {
                 requested
             }
+        } else if api == "memcpy" || api == "memmove" {
+            // Copy through the machine's own memory, gathered before it is
+            // written so an overlapping move behaves as the OS's does.
+            let (src, len) = (self.api_arg(1), self.api_arg(2));
+            let len = usize::try_from(len).unwrap_or(0).min(API_COPY_MAX);
+            let bytes: Vec<u8> = (0..len)
+                .map(|k| self.byte(src.wrapping_add(from_usize(k))).unwrap_or(0))
+                .collect();
+            for (k, b) in bytes.into_iter().enumerate() {
+                self.write(rcx.wrapping_add(from_usize(k)), u64::from(b), 1)?;
+            }
+            rcx
+        } else if api == "memset" {
+            let (dst, len) = (self.api_arg(1), self.api_arg(2));
+            let len = usize::try_from(len).unwrap_or(0).min(API_COPY_MAX);
+            let fill = lo8(rcx);
+            for k in 0..len {
+                self.write(dst.wrapping_add(from_usize(k)), u64::from(fill), 1)?;
+            }
+            rcx
         } else if api.starts_with("VirtualProtect") || api.starts_with("VirtualFree") {
             1
         } else {
@@ -1896,6 +1943,7 @@ impl<'a> Emulator<'a> {
         match at.checked_add(ALLOC_STRIDE) {
             Some(next) if next <= self.api_stub(0) => {
                 self.alloc_next = next;
+                self.allocs.push((at, next));
                 at
             }
             _ => 0,
@@ -2128,7 +2176,22 @@ impl<'a> Emulator<'a> {
     ///
     /// The byte, or `None` when neither memory nor the image backs it.
     fn byte(&self, a: u64) -> Option<u8> {
-        self.mem.get(a).or_else(|| image_byte(self.program, a))
+        self.mem
+            .get(a)
+            .or_else(|| image_byte(self.program, a))
+            .or_else(|| (self.in_alloc(a) || self.in_stack(a)).then_some(0))
+    }
+
+    /// Whether `a` lies in a region the modeled allocator handed out.
+    fn in_alloc(&self, a: u64) -> bool {
+        self.allocs.iter().any(|(base, end)| a >= *base && a < *end)
+    }
+
+    /// Whether `a` lies on the scratch stack's span, whose untouched pages
+    /// read as zero the way an OS stack's do for a stack probe.
+    fn in_stack(&self, a: u64) -> bool {
+        let deep = self.stack_base.saturating_sub(self.stack_span);
+        (deep..=self.stack_base).contains(&a)
     }
 
     /// Runs from `entry` until it returns, exhausts the budget, or stops.

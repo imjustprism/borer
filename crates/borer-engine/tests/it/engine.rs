@@ -689,6 +689,45 @@ fn anti_debug_queries_are_answered_benignly() {
     assert_eq!(emu.neutralized(), vec!["IsDebuggerPresent"]);
 }
 
+/// A pointer the modeled allocator hands out reads as zero and keeps what
+/// the run wrote, instead of faulting where the OS would not.
+#[test]
+fn an_allocated_pointer_is_backed_memory() {
+    use borer_engine::emulate::{Emulator, Stop};
+    use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
+    // malloc; mov rax,[rax]; ret: read the first byte of the allocation.
+    let code: Vec<u8> = [
+        0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00, // call [rip+0xffa] -> 0x2000
+        0x8a, 0x00, // mov al,[rax]
+        0xc3, // ret
+    ]
+    .to_vec();
+    let mut bytes = code;
+    bytes.extend(std::iter::repeat_n(0u8, 0x1000));
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+            Section::mapped(".idata", 0x2000, 0x1000, 0x1000, false, false),
+        ],
+    );
+    p.symbols = vec![Symbol {
+        name: "ucrtbase.dll!malloc".to_owned(),
+        addr: 0x2000,
+        kind: SymbolKind::Import,
+    }];
+    let mut emu = Emulator::new(&p, 200).expect("emulator");
+    emu.install_imports();
+    let run = emu.run(0x1000);
+    assert_ne!(run.stop, Stop::Fault(0));
+    let at = emu.last_alloc().expect("an allocation");
+    assert_eq!(emu.byte_at(at), Some(0), "reads as zero");
+    assert!(emu.api_names().contains(&"malloc"), "malloc serviced");
+}
+
 /// A 32-bit call through an import slot reaches the API stub, as a 64-bit
 /// one does.
 ///

@@ -2438,7 +2438,7 @@ impl Running<'_, '_> {
                 let mut v = 0u64;
                 for k in (0..n).rev() {
                     let a = at.wrapping_add(k) & mask(self.word());
-                    let Some(b) = self.emu.byte_at(a) else {
+                    let Some(b) = self.emu.byte_stated(a) else {
                         if self.handed.is_some_and(|h| a >= h && a < self.s.entry_sp) {
                             return unchecked(
                                 "a read of memory the text handed to an import, which the emulator does not fill",
