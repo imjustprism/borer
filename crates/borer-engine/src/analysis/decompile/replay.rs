@@ -2306,6 +2306,26 @@ impl<M: Bench> Text<'_, M> {
         }
     }
 
+    /// What a successor's relation holds for `k`, and where to name a
+    /// disagreement about it: the pending expression's value at the block's
+    /// last instruction, the variable's own at the instruction that last
+    /// wrote it.
+    ///
+    /// # Arguments
+    ///
+    /// * `sin` - The successor's IN environment.
+    /// * `k` - The register or vector read.
+    /// * `at` - The block's last instruction.
+    fn held_value(&self, sin: &Env, k: Key, at: u64) -> (Option<u64>, u64) {
+        match sin.vals.get(&k) {
+            Some(e) => (self.eval(e), at),
+            None => (
+                self.var(k),
+                self.writers.get(&key_spot(k)).copied().unwrap_or(at),
+            ),
+        }
+    }
+
     /// Tells whether the text last wrote any of `n` bytes at slot `o`
     /// through another slot's name.
     ///
@@ -3835,13 +3855,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             let Some(m) = t.emu.register(name) else {
                 continue;
             };
-            let (text, at) = match sin.vals.get(&k) {
-                Some(e) => (t.text.eval(e), at),
-                None => (
-                    t.text.var(k),
-                    t.text.writers.get(&key_spot(k)).copied().unwrap_or(at),
-                ),
-            };
+            let (text, at) = t.text.held_value(sin, k, at);
             let narrow = sin.narrow.get(&k).copied();
             let mut bits = need.min(self.width);
             if let Some(nb) = narrow {
@@ -3894,13 +3908,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             let float = held.and_then(|e| t.text.float_bits(e));
             let narrow = sin.narrow.get(&k).copied();
             let shown = held.map_or_else(|| "(its own variable)".to_owned(), |e| format!("{e:?}"));
-            let (text, at) = match held {
-                Some(e) => (t.text.eval(e), at),
-                None => (
-                    t.text.var(k),
-                    t.text.writers.get(&key_spot(k)).copied().unwrap_or(at),
-                ),
-            };
+            let (text, at) = t.text.held_value(sin, k, at);
             // INVARIANT: an integer the text holds by its whole lane (a
             // packed statement's value, or the register's own state after
             // one) is compared whole, both halves: the machine's register
