@@ -1413,8 +1413,8 @@ pub(super) fn closed_run_from<L: Lifter>(
 /// every `if` attempt, between which only the copy rules change, so
 /// [`emit_block`] computes each arm's base once and hands it to every ask.
 pub(super) struct Base {
-    /// Per block, whether it is in the region.
-    reached: Vec<bool>,
+    /// The region's blocks, ascending.
+    members: Vec<usize>,
     /// Every member is entered only from the headers or from inside.
     closed: bool,
 }
@@ -1446,36 +1446,57 @@ pub(super) fn base_of<L: Lifter>(
     };
     let allowed =
         |s: usize| !headers.contains(&s) && Some(s) != stop_at && !st.outside(s) && !st.emitted[s];
-    let reach = |within: &dyn Fn(usize) -> bool| -> Vec<bool> {
-        let mut seen = vec![false; n];
-        seen[start] = true;
-        let mut work = vec![start];
+    // PERF: one scratch and one kept bitmap for the whole shed loop, each
+    // cleared through the member list of what it last held instead of a
+    // fresh vec![false; n] per round.
+    let mut reached = vec![false; n];
+    let mut kept = vec![false; n];
+    let mut members: Vec<usize> = Vec::new();
+    let mut kept_members: Vec<usize> = Vec::new();
+    let mut work: Vec<usize> = Vec::new();
+    let reach = |within: &dyn Fn(usize) -> bool,
+                 reached: &mut [bool],
+                 members: &mut Vec<usize>,
+                 work: &mut Vec<usize>| {
+        reached[start] = true;
+        members.push(start);
+        work.push(start);
         while let Some(b) = work.pop() {
             for &s in &st.succs[b] {
-                if s != start && within(s) && !seen[s] {
-                    seen[s] = true;
+                if s != start && within(s) && !reached[s] {
+                    reached[s] = true;
+                    members.push(s);
                     work.push(s);
                 }
             }
         }
-        seen
     };
-    let mut reached = reach(&allowed);
+    reach(&allowed, &mut reached, &mut members, &mut work);
     loop {
-        let shed: Vec<usize> = (0..n)
-            .filter(|&b| reached[b] && b != start && !inside(&reached, b))
+        let shed: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&b| b != start && !inside(&reached, b))
             .collect();
         if shed.is_empty() {
             break;
         }
-        let mut kept = reached;
-        for b in shed {
-            kept[b] = false;
+        for m in kept_members.drain(..) {
+            kept[m] = false;
         }
-        reached = reach(&|s| kept[s]);
+        for &b in &shed {
+            reached[b] = false;
+        }
+        std::mem::swap(&mut reached, &mut kept);
+        kept_members.extend(members.iter().copied().filter(|&m| kept[m]));
+        members.clear();
+        reach(&|s| kept[s], &mut reached, &mut members, &mut work);
     }
-    let closed = (0..n).all(|b| !reached[b] || inside(&reached, b));
-    Base { reached, closed }
+    members.sort_unstable();
+    // INVARIANT: reached is false for every non-member, so !reached || inside
+    // is vacuously true there; the members alone decide the boolean.
+    let closed = members.iter().all(|&b| inside(&reached, b));
+    Base { members, closed }
 }
 
 /// [`closed_run_from`] with the region's base computed already, or
@@ -1552,7 +1573,7 @@ pub(super) fn closed_run_with<L: Lifter>(
         }
     };
     let closed = base.closed;
-    let mut region: BTreeSet<usize> = (0..st.blocks.len()).filter(|&b| base.reached[b]).collect();
+    let mut region: BTreeSet<usize> = base.members.iter().copied().collect();
     let mut exits: BTreeSet<usize> = region
         .iter()
         .flat_map(|b| st.succs[*b].iter().copied())
