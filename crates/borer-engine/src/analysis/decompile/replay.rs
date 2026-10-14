@@ -844,12 +844,7 @@ fn replay_one<L: Replay>(
     let Some(w) = d.take_witness() else {
         return Replayed::default();
     };
-    let effects: Vec<Vec<Effect>> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| d.effects.block(i, b.start).unwrap_or_default())
-        .collect();
+    let effects = effects_of(&d, f);
     replay_effects::<L>(
         program,
         analysis,
@@ -919,12 +914,7 @@ fn check_answer_in<L: Replay>(
             (&fresh, w)
         }
     };
-    let effects: Vec<Vec<Effect>> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| d.effects.block(i, b.start).unwrap_or_default())
-        .collect();
+    let effects = effects_of(d, f);
     let r = replay_effects::<L>(
         program,
         analysis,
@@ -1054,6 +1044,21 @@ fn unchecked_label(reason: &str) -> &'static str {
         "the stack pointer unknown at its start" | "a frame alignment" => "stack unknown",
         _ => "other",
     }
+}
+
+/// Each block's effects of a decompilation, by block index, empty for a
+/// block the text leaves out.
+///
+/// # Arguments
+///
+/// * `d` - The decompilation.
+/// * `f` - Its function.
+fn effects_of(d: &super::Decompiled, f: &crate::analysis::Function) -> Vec<Vec<Effect>> {
+    f.blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| d.effects.block(i, b.start).unwrap_or_default())
+        .collect()
 }
 
 /// Replays a decompiled function's effects against the emulator.
