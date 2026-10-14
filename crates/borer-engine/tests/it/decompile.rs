@@ -1475,18 +1475,21 @@ fn a_frame_pointer_set_from_the_rax_alias_places_stack_arguments() {
 /// * `code` - The bytes of `.text`, at most a page.
 /// * `data` - The bytes of `.rdata`, at most a page.
 fn program64_with_data(code: &[u8], data: &[u8]) -> borer_engine::program::Program {
-    use borer_engine::program::Section;
-    let mut p = program64(code);
-    p.bytes.resize(0x2000, 0);
-    p.bytes[0x1000..0x1000 + data.len()].copy_from_slice(data);
-    p.sections.push(Section::mapped(
-        ".rdata",
-        0x1_4000_2000,
-        0x1000,
-        0x1000,
-        false,
-        false,
-    ));
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut bytes = vec![0u8; 0x2000];
+    bytes[..code.len()].copy_from_slice(code);
+    bytes[0x1000..0x1000 + data.len()].copy_from_slice(data);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x1_4000_0000,
+        Some(0x1_4000_1000),
+        vec![
+            Section::mapped(".text", 0x1_4000_1000, 0, 0x1000, false, true),
+            Section::mapped(".rdata", 0x1_4000_2000, 0x1000, 0x1000, false, false),
+        ],
+    );
+    p.format = BinaryFormat::Pe;
     p
 }
 

@@ -2354,12 +2354,21 @@ fn a_resource_word_seeds_no_function() {
     let code = [
         0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3,
     ];
-    let mut p = image_with_data(&code, &0x401007u32.to_le_bytes());
-    p.bytes.resize(0x3000, 0);
-    p.bytes[0x2000..0x2004].copy_from_slice(&0x401001u32.to_le_bytes());
-    p.sections.push(Section::mapped(
-        ".rsrc", 0x403000, 0x2000, 0x1000, false, false,
-    ));
+    let mut bytes = vec![0u8; 0x3000];
+    bytes[..code.len()].copy_from_slice(&code);
+    bytes[0x1000..0x1004].copy_from_slice(&0x401007u32.to_le_bytes());
+    bytes[0x2000..0x2004].copy_from_slice(&0x401001u32.to_le_bytes());
+    let p = Program::raw(
+        bytes,
+        Arch::X86,
+        0x400000,
+        Some(0x401000),
+        vec![
+            Section::mapped(".text", 0x401000, 0, 0x1000, false, true),
+            Section::mapped(".rdata", 0x402000, 0x1000, 0x1000, false, false),
+            Section::mapped(".rsrc", 0x403000, 0x2000, 0x1000, false, false),
+        ],
+    );
     let a = Analysis::compute(&p);
     let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
     assert!(entries.contains(&0x401007), "{entries:x?}");

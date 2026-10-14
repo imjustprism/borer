@@ -23,6 +23,10 @@ const PAD: u64 = FUNC + 0x40;
 /// `sdata4` absolute, and keeps the call-site table in `uleb`, the encoding
 /// GCC and Clang ship most.
 ///
+/// # Arguments
+///
+/// * `eh_frame` - Whether the image carries the `.eh_frame` section at all.
+///
 /// # Panics
 ///
 /// When the fixture layout arithmetic overflows a conversion.
@@ -30,7 +34,7 @@ const PAD: u64 = FUNC + 0x40;
     clippy::expect_used,
     reason = "a fixture that does not parse has no useful recovery"
 )]
-fn throwing() -> Program {
+fn throwing(eh_frame: bool) -> Program {
     let mut text: Vec<u8> = vec![0xcc; 0x100];
     // The function: set edi, call the thrower, fall through; the pad (at
     // +0x40) is code no instruction reaches.
@@ -98,17 +102,20 @@ fn throwing() -> Program {
     eh.extend_from_slice(b"N3foo3BarE\0");
 
     let text_sec = Section::mapped(".text", FUNC, 0, 0x100, false, true);
-    let eh_sec = Section::mapped(
-        ".eh_frame",
-        EH,
-        u64::try_from(text.len()).expect("fits"),
-        u64::try_from(eh.len()).expect("fits"),
-        false,
-        false,
-    );
     let mut bytes = text.clone();
     bytes.extend_from_slice(&eh);
-    Program::raw(bytes, Arch::X86_64, 0, Some(FUNC), vec![text_sec, eh_sec])
+    let mut sections = vec![text_sec];
+    if eh_frame {
+        sections.push(Section::mapped(
+            ".eh_frame",
+            EH,
+            u64::try_from(text.len()).expect("fits"),
+            u64::try_from(eh.len()).expect("fits"),
+            false,
+            false,
+        ));
+    }
+    Program::raw(bytes, Arch::X86_64, 0, Some(FUNC), sections)
 }
 
 /// The FDE's LSDA pointer names the table, and its call sites come back as
@@ -120,7 +127,7 @@ fn throwing() -> Program {
 /// When the sites do not come back exactly as the table states them.
 #[test]
 fn the_lsda_call_sites_come_back_as_facts() {
-    let p = throwing();
+    let p = throwing(true);
     let a = Analysis::compute(&p);
     let sites = a
         .throw_sites
@@ -148,7 +155,7 @@ fn the_lsda_call_sites_come_back_as_facts() {
 /// When the pad is not discovered as code.
 #[test]
 fn a_landing_pad_is_walked_as_the_function_s_code() {
-    let p = throwing();
+    let p = throwing(true);
     let a = Analysis::compute(&p);
     let f = a
         .function(FUNC)
@@ -168,7 +175,7 @@ fn a_landing_pad_is_walked_as_the_function_s_code() {
 /// When sites appear where the file carries none.
 #[test]
 fn no_lsda_augmentation_names_no_sites() {
-    let mut p = throwing();
+    let mut p = throwing(true);
     // Turn the CIE's augmentation into "zR\0" only, dropping the L: the
     // record still parses, the FDE carries no LSDA pointer.
     // The augmentation string sits after the `.eh_frame` file offset
@@ -179,8 +186,7 @@ fn no_lsda_augmentation_names_no_sites() {
     p.bytes[aug + 2] = 0x00; // 'L' -> NUL: the augmentation ends early
     let a = Analysis::compute(&p);
     assert!(a.throw_sites.is_empty(), "{:?}", a.throw_sites);
-    let mut stripped = throwing();
-    stripped.sections.retain(|s| s.name != ".eh_frame");
+    let stripped = throwing(false);
     let a = Analysis::compute(&stripped);
     assert!(a.throw_sites.is_empty(), "{:?}", a.throw_sites);
 }
@@ -193,7 +199,7 @@ fn no_lsda_augmentation_names_no_sites() {
 /// When a broken table still yields sites.
 #[test]
 fn a_landing_pad_outside_code_refuses_the_table() {
-    let mut p = throwing();
+    let mut p = throwing(true);
     // The LSDA's first record's landing-pad field, one uleb, at the table
     // body: point it far outside every section.
     let lsda_off = 0x100 + usize::try_from(LSDA - EH).expect("fits");
@@ -250,7 +256,7 @@ fn a_landing_pad_outside_code_refuses_the_table() {
 /// When the throws line is missing or wrong.
 #[test]
 fn the_summary_says_what_the_throw_sites_catch() {
-    let p = throwing();
+    let p = throwing(true);
     let a = Analysis::compute(&p);
     let s = borer_engine::analysis::render::function_summary(
         &p,

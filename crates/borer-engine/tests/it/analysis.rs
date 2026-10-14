@@ -5296,3 +5296,63 @@ fn an_applied_class_layout_types_each_methods_object() {
     assert!(set.contains("this->f_8 = a2;"), "{set}");
     assert!(set.contains("this->f_10 = "), "{set}");
 }
+
+/// File-backed sections that overlap or share a start answer a read by
+/// declaration order.
+///
+/// The first-declared section that holds the address answers, both for
+/// `section_at` and for the bytes `read_va` returns, and the address only
+/// the second section spans still reads the second's. `section_at` walks
+/// an address-ordered index, and the walk must keep the linear scan's
+/// answer - the first section in file order - wherever sections nest or
+/// share a virtual address, so a read that lands on the overlap still
+/// returns the bytes of the section declared first.
+///
+/// # Panics
+///
+/// When the wrong section answers or its bytes come back.
+#[test]
+fn overlapping_sections_answer_in_declaration_order() {
+    let mut bytes = vec![0xaau8; 0x200];
+    bytes.extend(vec![0xbbu8; 0x300]);
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        None,
+        vec![
+            Section::mapped(".first", 0x1000, 0, 0x200, false, false),
+            Section::mapped(".second", 0x1100, 0x200, 0x300, false, false),
+        ],
+    );
+    assert_eq!(
+        p.section_at(0x1000).map(|s| s.name.as_str()),
+        Some(".first")
+    );
+    // 0x1100 sits in both spans; the section declared first answers.
+    assert_eq!(
+        p.section_at(0x1100).map(|s| s.name.as_str()),
+        Some(".first")
+    );
+    assert_eq!(p.read_va(0x1100, 4), Some(&[0xaa, 0xaa, 0xaa, 0xaa][..]));
+    // Past the first section's end, only the second holds the address.
+    assert_eq!(
+        p.section_at(0x1200).map(|s| s.name.as_str()),
+        Some(".second")
+    );
+    assert_eq!(p.read_va(0x1200, 4), Some(&[0xbb, 0xbb, 0xbb, 0xbb][..]));
+    assert!(p.section_at(0x1400).is_none());
+    // Two sections at one address: again the first declared answers.
+    let tied = Program::raw(
+        vec![0x11, 0x22, 0x33, 0x44],
+        Arch::X86_64,
+        0,
+        None,
+        vec![
+            Section::mapped(".a", 0x1000, 0, 0x2, false, false),
+            Section::mapped(".b", 0x1000, 0x2, 0x2, false, false),
+        ],
+    );
+    assert_eq!(tied.section_at(0x1000).map(|s| s.name.as_str()), Some(".a"));
+    assert_eq!(tied.read_va(0x1000, 2), Some(&[0x11, 0x22][..]));
+}

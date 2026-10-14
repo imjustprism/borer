@@ -669,6 +669,11 @@ mod tests {
             }],
             ..Headers::default()
         };
+        let sections = vec![
+            section(".text", 0x1000, true),
+            section(".rdata", 0x2000, false),
+        ];
+        let section_index = Program::index_sections(&sections);
         Program {
             path: PathBuf::new(),
             bytes,
@@ -677,10 +682,8 @@ mod tests {
             is_64: true,
             entry: Some(BASE + 0x1000),
             image_base: BASE,
-            sections: vec![
-                section(".text", 0x1000, true),
-                section(".rdata", 0x2000, false),
-            ],
+            sections,
+            section_index,
             symbols,
             function_ranges: Vec::new(),
             headers,

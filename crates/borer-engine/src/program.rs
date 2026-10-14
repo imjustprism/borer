@@ -264,8 +264,13 @@ pub struct Program {
     /// Preferred load base (PE); `0` for formats whose addresses are absolute (ELF).
     pub image_base: u64,
     /// Mapped sections in file order; a stated layout's in the order it
-    /// names them ([`crate::layout::Layout::program`]).
+    /// names them ([`crate::layout::Layout::program`]). Final at
+    /// construction: [`Program::section_at`]'s index is built from them,
+    /// so a section pushed after construction is never found.
     pub sections: Vec<Section>,
+    /// Address-ordered rows behind [`Program::section_at`]'s binary
+    /// search, built from [`Program::sections`] when the program is.
+    pub(crate) section_index: Vec<SectionRow>,
     /// Imports, exports, local and data symbols in file order.
     pub symbols: Vec<Symbol>,
     /// Function extents the file declares, `(start, end)` virtual addresses,
@@ -326,6 +331,24 @@ pub struct Program {
     /// as `<file>@<offset>` ([`Program::load`]); `None` for a file loaded
     /// whole.
     pub parent: Option<Parent>,
+}
+
+/// Rows of [`Program::section_index`]: one file-backed section's span,
+/// where the section was declared, and the largest span of the rows before
+/// it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SectionRow {
+    /// The section's first virtual address.
+    va: u64,
+    /// One past the section's last virtual address (the larger of its
+    /// memory and file sizes, saturating).
+    end: u64,
+    /// The largest `end` of the rows sorted before this one: a walk back
+    /// past this row can stop when no earlier row reaches that far.
+    max_end_before: u64,
+    /// The section's index in [`Program::sections`], the declaration order
+    /// a linear scan of the table answers by.
+    index: usize,
 }
 
 /// Where an embedded program's bytes came from.
@@ -1476,6 +1499,7 @@ impl Program {
         entry: Option<u64>,
         sections: Vec<Section>,
     ) -> Program {
+        let section_index = Program::index_sections(&sections);
         Program {
             path: PathBuf::new(),
             bytes,
@@ -1485,6 +1509,7 @@ impl Program {
             entry,
             image_base,
             sections,
+            section_index,
             symbols: Vec::new(),
             function_ranges: Vec::new(),
             headers: Headers::default(),
@@ -2273,6 +2298,7 @@ impl Program {
         function_ranges.dedup();
         phases.mark("load finish");
 
+        let section_index = Program::index_sections(&sections);
         let mut program = Program {
             path,
             bytes,
@@ -2282,6 +2308,7 @@ impl Program {
             entry,
             image_base,
             sections,
+            section_index,
             symbols,
             function_ranges,
             headers,
@@ -2422,6 +2449,44 @@ impl Program {
         out
     }
 
+    /// Builds the address-ordered lookup rows of a section table.
+    ///
+    /// Rows keep only the file-backed sections ([`Program::section_at`]'s
+    /// answers), sorted by `(va, end, declaration index)` so a binary search
+    /// narrows a look-up to the rows whose `va` can hold the address, and a
+    /// walk back over them - stopped by each row's `max_end_before` - finds
+    /// the first-declared section that contains it, the same section a linear
+    /// scan of the table in file order returns, however the sections nest or
+    /// overlap.
+    ///
+    /// # Arguments
+    ///
+    /// * `sections` - The final section table.
+    ///
+    /// # Returns
+    ///
+    /// The rows, sorted by virtual address.
+    pub(crate) fn index_sections(sections: &[Section]) -> Vec<SectionRow> {
+        let mut rows: Vec<SectionRow> = sections
+            .iter()
+            .enumerate()
+            .filter(|&(_, s)| s.file_size > 0)
+            .map(|(index, s)| SectionRow {
+                va: s.va,
+                end: s.va.saturating_add(s.vsize.max(s.file_size)),
+                max_end_before: 0,
+                index,
+            })
+            .collect();
+        rows.sort_unstable_by_key(|r| (r.va, r.end, r.index));
+        let mut max_end = 0;
+        for r in &mut rows {
+            r.max_end_before = max_end;
+            max_end = max_end.max(r.end);
+        }
+        rows
+    }
+
     /// Finds the file-backed section containing `va`.
     ///
     /// # Arguments
@@ -2430,14 +2495,21 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The section whose span (the larger of its memory and file sizes) holds
-    /// `va`, or `None` when the address is unmapped or only in `.bss`-style
-    /// memory.
+    /// The first-declared section whose span (the larger of its memory and
+    /// file sizes) holds `va`, or `None` when the address is unmapped or only
+    /// in `.bss`-style memory.
     pub fn section_at(&self, va: u64) -> Option<&Section> {
-        self.sections.iter().find(|s| {
-            let span = s.vsize.max(s.file_size);
-            s.file_size > 0 && va >= s.va && va < s.va.saturating_add(span)
-        })
+        let rows = &self.section_index[..self.section_index.partition_point(|r| r.va <= va)];
+        let mut best: Option<usize> = None;
+        for r in rows.iter().rev() {
+            if r.end > va {
+                best = Some(best.map_or(r.index, |b| b.min(r.index)));
+            }
+            if r.max_end_before <= va {
+                break;
+            }
+        }
+        best.and_then(|i| self.sections.get(i))
     }
 
     /// Converts a virtual address to its file offset.

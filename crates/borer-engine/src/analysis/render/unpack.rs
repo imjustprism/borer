@@ -691,6 +691,7 @@ pub fn unpack_start(
 ///   stays when there is none.
 /// * `sections` - The section table the rebuilt bytes follow.
 fn materialized(p: &Program, bytes: Vec<u8>, oep: Option<u64>, sections: Vec<Section>) -> Program {
+    let section_index = Program::index_sections(&sections);
     Program {
         path: p.path.clone(),
         bytes,
@@ -700,6 +701,7 @@ fn materialized(p: &Program, bytes: Vec<u8>, oep: Option<u64>, sections: Vec<Sec
         entry: oep.or(p.entry),
         image_base: p.image_base,
         sections,
+        section_index,
         symbols: p.symbols.clone(),
         function_ranges: p.function_ranges.clone(),
         headers: p.headers.clone(),

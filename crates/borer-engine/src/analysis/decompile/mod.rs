@@ -2901,6 +2901,17 @@ g(tmp_5);";
         ];
         let mut bytes = vec![0u8; 0x2000];
         bytes[0x1000..0x1000 + code.len()].copy_from_slice(code);
+        let sections = vec![crate::program::Section {
+            name: ".text".to_owned(),
+            va: 0x1000,
+            vsize: 0x1000,
+            file_off: 0x1000,
+            file_size: 0x1000,
+            readable: true,
+            writable: false,
+            executable: true,
+        }];
+        let section_index = crate::program::Program::index_sections(&sections);
         let p = crate::program::Program {
             path: std::path::PathBuf::new(),
             bytes,
@@ -2909,16 +2920,8 @@ g(tmp_5);";
             is_64: true,
             entry: Some(0x1000),
             image_base: 0,
-            sections: vec![crate::program::Section {
-                name: ".text".to_owned(),
-                va: 0x1000,
-                vsize: 0x1000,
-                file_off: 0x1000,
-                file_size: 0x1000,
-                readable: true,
-                writable: false,
-                executable: true,
-            }],
+            sections,
+            section_index,
             symbols: Vec::new(),
             function_ranges: Vec::new(),
             headers: crate::headers::Headers::default(),
@@ -2964,6 +2967,17 @@ g(tmp_5);";
         bytes[0x1000..0x1008].copy_from_slice(&0x0000_0001_402d_6424u64.to_le_bytes());
         // At 0x2010: a genuine null-terminated string.
         bytes[0x1010..0x1016].copy_from_slice(b"hello\0");
+        let sections = vec![crate::program::Section {
+            name: ".rdata".to_owned(),
+            va: 0x2000,
+            vsize: 0x1000,
+            file_off: 0x1000,
+            file_size: 0x1000,
+            readable: true,
+            writable: false,
+            executable: false,
+        }];
+        let section_index = crate::program::Program::index_sections(&sections);
         let p = crate::program::Program {
             path: std::path::PathBuf::new(),
             bytes,
@@ -2972,16 +2986,8 @@ g(tmp_5);";
             is_64: true,
             entry: None,
             image_base: 0,
-            sections: vec![crate::program::Section {
-                name: ".rdata".to_owned(),
-                va: 0x2000,
-                vsize: 0x1000,
-                file_off: 0x1000,
-                file_size: 0x1000,
-                readable: true,
-                writable: false,
-                executable: false,
-            }],
+            sections,
+            section_index,
             symbols: Vec::new(),
             function_ranges: Vec::new(),
             headers: crate::headers::Headers::default(),

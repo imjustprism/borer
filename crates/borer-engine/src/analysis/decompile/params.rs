@@ -1016,19 +1016,35 @@ pub(super) fn shape_built(
 
 /// Decodes every block of a function, in block order.
 ///
+/// Each block is decoded by one decoder over bytes read once, not a decoder
+/// per instruction. Results equal [`Ctx::decode`]'s: a walk's blocks lie
+/// inside one executable section and end where an instruction does, so the
+/// decoder sees the same file-backed bytes, cut at the same section end,
+/// and stops where the per-instruction decode did (an instruction that does
+/// not decode, or the block or the section's file bytes running out).
+///
 /// # Arguments
 ///
-/// * `ctx` - The function's context, for the decoder.
+/// * `ctx` - The function's context, for the image and decoder bitness.
 /// * `f` - The function.
 pub(super) fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<Instruction>> {
     f.blocks
         .iter()
         .map(|b| {
             let mut v = Vec::new();
-            let mut va = b.start;
-            while va < b.end {
-                let Some(i) = ctx.decode(va) else { break };
-                va = i.next_ip();
+            if !crate::analysis::is_executable_va(ctx.program, b.start) {
+                return v;
+            }
+            let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
+            let Some(bytes) = ctx.program.read_va_upto(b.start, len) else {
+                return v;
+            };
+            let mut d = Decoder::with_ip(ctx.bitness, bytes, b.start, DecoderOptions::NONE);
+            while d.can_decode() {
+                let i = d.decode();
+                if i.is_invalid() {
+                    break;
+                }
                 v.push(i);
             }
             v
