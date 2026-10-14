@@ -268,9 +268,53 @@ fn needs_escape(c: char) -> bool {
         || matches!(c, '\u{200e}' | '\u{200f}' | '\u{061c}')
 }
 
+/// A count read for its plural: the widths borer holds counts in, `u64`
+/// and `usize`.
+pub(crate) trait Count {
+    /// The count as a `u64`, lossless from both widths there are.
+    fn count(self) -> u64;
+}
+
+impl Count for u64 {
+    fn count(self) -> u64 {
+        self
+    }
+}
+
+impl Count for usize {
+    fn count(self) -> u64 {
+        crate::num::from_usize(self)
+    }
+}
+
+/// `s` when `n` is not one, so a count reads `1 file` and `2 files`.
+///
+/// # Arguments
+///
+/// * `n` - The count, held as a `u64` or a `usize`.
+#[must_use]
+pub(crate) fn plural(n: impl Count) -> &'static str {
+    if n.count() == 1 { "" } else { "s" }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{OUTSIDE_MAX, PATH_MAX, edits_within, nearest, one_line, quoted, short_path};
+    use super::{
+        OUTSIDE_MAX, PATH_MAX, edits_within, nearest, one_line, plural, quoted, short_path,
+    };
+
+    /// A count's noun takes its plural from either width a count is held in.
+    ///
+    /// # Panics
+    ///
+    /// When one reads `1 files` or `2 file`.
+    #[test]
+    fn a_count_pluralizes_from_either_width() {
+        assert_eq!(plural(1u64), "");
+        assert_eq!(plural(2u64), "s");
+        assert_eq!(plural(1usize), "");
+        assert_eq!(plural(2usize), "s");
+    }
 
     /// A name with nothing wrong with it comes back untouched.
     ///

@@ -24,7 +24,7 @@ use std::fmt::Write as _;
 
 use crate::num::{from_usize, saturating_usize};
 use crate::program::{BinaryFormat, Program};
-use crate::text::quoted;
+use crate::text::{plural, quoted};
 
 /// Bytes of a file the signature scan reads; past them nothing is listed.
 pub const SCAN_MAX: usize = 256 << 20;
@@ -295,15 +295,6 @@ fn header_name(raw: &[u8]) -> Option<String> {
     let name = raw.get(..end.min(NAME_MAX))?;
     (!name.is_empty() && name.iter().all(|c| (0x20..0x7f).contains(c)))
         .then(|| quoted(&String::from_utf8_lossy(name)))
-}
-
-/// `s` when `n` is not one, for a count's noun.
-///
-/// # Arguments
-///
-/// * `n` - The count.
-fn plural(n: u64) -> &'static str {
-    if n == 1 { "" } else { "s" }
 }
 
 /// Bytes a count of `page`-byte pages covers when `len` bytes are rounded

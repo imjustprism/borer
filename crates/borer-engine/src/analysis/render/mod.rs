@@ -56,6 +56,7 @@ use crate::isa::x86::{
 use crate::num::from_usize;
 use crate::program::{BinaryFormat, Feature, Program, Section, Symbol, SymbolKind};
 use crate::strings::{cstr_at, literal_byte, wstr_at};
+use crate::text::plural;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -82,15 +83,6 @@ pub(super) fn x86_only(p: &Program, surface: &str) -> Result<(), String> {
         )),
         Some(crate::isa::Isa::X86 { .. }) | None => Ok(()),
     }
-}
-
-/// `s` when `n` is not one, so a count reads `1 string` and `2 strings`.
-///
-/// # Arguments
-///
-/// * `n` - The count.
-pub(super) fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
 }
 
 /// The `showing N of M` count of a page cut from a longer list.
