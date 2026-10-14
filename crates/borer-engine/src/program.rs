@@ -1869,12 +1869,12 @@ impl Program {
                         imp.name.to_string()
                     };
                     let dll = imp.dll.trim_end_matches('\0');
-                    // SPEC: goblin's `Import::offset` is the IAT slot RVA; `rva` is the hint/name entry.
-                    let addr = if imp.offset != 0 {
-                        pe.image_base.wrapping_add(imp.offset as u64)
-                    } else {
-                        va_of_off(imp.rva as u64)
-                    };
+                    // SPEC: goblin's `Import::offset` is the IAT slot RVA and
+                    // `rva` the hint/name entry's, so both map through the
+                    // image base like every RVA here, never through the file
+                    // extents `va_of_off` answers.
+                    let rva = if imp.offset != 0 { imp.offset } else { imp.rva };
+                    let addr = pe.image_base.wrapping_add(rva as u64);
                     symbols.push(Symbol {
                         name: format!("{dll}!{name}"),
                         addr,
