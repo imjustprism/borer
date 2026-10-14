@@ -500,12 +500,12 @@ fn image_byte(program: &Program, va: u64) -> Option<u8> {
     }
     if program.sections.iter().any(|s| {
         let mapped = s.vsize.max(s.file_size).wrapping_add(PAGE - 1) & !(PAGE - 1);
-        va >= s.va && va - s.va < mapped
+        va >= s.va.0 && va - s.va.0 < mapped
     }) {
         return Some(0);
     }
     let base = program.image_base;
-    let first = program.sections.iter().map(|s| s.va).min();
+    let first = program.sections.iter().map(|s| s.va.0).min();
     if va < base || first.is_none_or(|f| va >= f) {
         return None;
     }
@@ -513,7 +513,7 @@ fn image_byte(program: &Program, va: u64) -> Option<u8> {
         .sections
         .iter()
         .filter(|s| s.file_size > 0)
-        .map(|s| s.file_off)
+        .map(|s| s.file_off.0)
         .min()
         .unwrap_or(0);
     let off = va - base;
@@ -1928,10 +1928,10 @@ impl<'a> Emulator<'a> {
     /// when no region is left below the stubs.
     fn allocate(&mut self) -> u64 {
         let (base, sections) = (self.program.image_base, &self.program.sections);
-        let start = sections.iter().map(|s| s.va).fold(base, u64::min);
+        let start = sections.iter().map(|s| s.va.0).fold(base, u64::min);
         let end = sections
             .iter()
-            .map(|s| s.va.saturating_add(s.vsize.max(s.file_size)))
+            .map(|s| s.va.0.saturating_add(s.vsize.max(s.file_size)))
             .fold(base, u64::max);
         let mut at = self.alloc_next;
         if at < end && at.saturating_add(ALLOC_STRIDE) > start {
@@ -5285,7 +5285,7 @@ mod tests {
         let mut p = image32(&[0xc3], &[]);
         p.image_base = super::ALLOC_BASE_32;
         for s in &mut p.sections {
-            s.va += super::ALLOC_BASE_32;
+            s.va.0 += super::ALLOC_BASE_32;
         }
         let mut emu = Emulator::new(&p, 1).expect("emulator");
         let regions: Vec<u64> = std::iter::repeat_with(|| emu.allocate())

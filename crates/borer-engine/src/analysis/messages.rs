@@ -183,7 +183,7 @@ fn code_referrers(
     let wanted: FxHashSet<u32> = codes.iter().copied().collect();
     let mut out: FxHashMap<u32, Vec<u64>> = FxHashMap::default();
     for section in program.sections.iter().filter(|s| s.executable) {
-        let start = usize::try_from(section.file_off).unwrap_or(usize::MAX);
+        let start = usize::try_from(section.file_off.0).unwrap_or(usize::MAX);
         let len = usize::try_from(section.file_size).unwrap_or(0);
         let Some(bytes) = program.bytes.get(start..start.saturating_add(len)) else {
             continue;
@@ -196,7 +196,7 @@ fn code_referrers(
             if !wanted.contains(&code) {
                 continue;
             }
-            let va = section.va.saturating_add(i as u64);
+            let va = section.va.0.saturating_add(i as u64);
             if let Some(f) = analysis.function_at(va) {
                 out.entry(code).or_default().push(f.entry);
             }

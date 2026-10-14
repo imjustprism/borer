@@ -284,7 +284,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         program
             .sections
             .iter()
-            .any(|s| s.executable && va >= s.va && va < s.va + s.vsize.max(s.file_size))
+            .any(|s| s.executable && va >= s.va.0 && va < s.va.0 + s.vsize.max(s.file_size))
     };
     let truth: BTreeMap<u64, Truth> = truth(&pdb_path)?
         .into_iter()

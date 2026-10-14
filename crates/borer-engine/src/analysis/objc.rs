@@ -341,7 +341,7 @@ fn words(p: &Program, name: &str) -> Vec<(u64, u64)> {
             let mut le = [0u8; 8];
             le.copy_from_slice(w);
             let at = crate::num::from_usize(k * 8);
-            out.push((s.va.wrapping_add(at), u64::from_le_bytes(le)));
+            out.push((s.va.0.wrapping_add(at), u64::from_le_bytes(le)));
         }
     }
     out
@@ -747,8 +747,8 @@ fn stubs(p: &Program, a: &Analysis, selrefs: &BTreeMap<u64, String>) -> BTreeMap
         .iter()
         .filter(|s| s.name.rsplit(',').next() == Some("__objc_stubs"))
     {
-        let end = s.va.saturating_add(s.vsize);
-        let start = a.functions.partition_point(|f| f.entry < s.va);
+        let end = s.va.0.saturating_add(s.vsize);
+        let start = a.functions.partition_point(|f| f.entry < s.va.0);
         for f in a.functions.iter().skip(start).take_while(|f| f.entry < end) {
             if let Some(sel) = stub_selector(p, f.entry, selrefs) {
                 out.insert(f.entry, sel.clone());

@@ -1067,7 +1067,7 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
         }
     }
     if let Some(first) = p.sections.first() {
-        let header_end = usize::try_from(first.file_off)
+        let header_end = usize::try_from(first.file_off.0)
             .unwrap_or(0)
             .min(p.bytes.len());
         if let Some(header) = p.bytes.get(..header_end) {
@@ -1089,7 +1089,7 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
     let mut wx: Vec<&str> = Vec::new();
     for s in &p.sections {
         let len = usize::try_from(s.file_size).unwrap_or(0);
-        let e = p.read_va(s.va, len).map_or(0.0, crate::entropy::shannon);
+        let e = p.read_va(s.va.0, len).map_or(0.0, crate::entropy::shannon);
         total_bytes += s.file_size;
         if e >= PACKED_ENTROPY {
             packed_bytes += s.file_size;
@@ -1102,7 +1102,7 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
             rows,
             "{:<12} {:#012x}  {:>10}  {:>10}  {}  {e:>5.2}{}",
             s.name,
-            s.va,
+            s.va.0,
             s.file_size,
             s.vsize,
             s.perms(),

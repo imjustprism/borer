@@ -102,9 +102,9 @@ impl<'a> Text<'a> {
             .iter()
             .filter(|s| s.executable && s.file_size > 0)
             .filter_map(|s| {
-                let off = usize::try_from(s.file_off).ok()?;
+                let off = usize::try_from(s.file_off.0).ok()?;
                 let len = usize::try_from(s.file_size).ok()?;
-                Some((s.va, program.bytes.get(off..off.checked_add(len)?)?))
+                Some((s.va.0, program.bytes.get(off..off.checked_add(len)?)?))
             })
             .collect();
         sections.sort_by_key(|s| s.0);

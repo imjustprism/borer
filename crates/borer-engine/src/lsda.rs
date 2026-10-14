@@ -61,7 +61,7 @@ pub(crate) fn throw_sites(program: &Program) -> BTreeMap<u64, Vec<ThrowSite>> {
     let Some(bytes) = program.section_bytes(sec) else {
         return out;
     };
-    for fde in crate::eh_frame::fdes(bytes, sec.va, program.is_64) {
+    for fde in crate::eh_frame::fdes(bytes, sec.va.0, program.is_64) {
         let Some(at) = fde.lsda else {
             continue;
         };
@@ -101,11 +101,11 @@ pub(crate) fn throw_sites(program: &Program) -> BTreeMap<u64, Vec<ThrowSite>> {
 fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
     let sec = program.section_at(at)?;
     let bytes = program.section_bytes(sec)?;
-    let off = usize::try_from(at.checked_sub(sec.va)?).ok()?;
+    let off = usize::try_from(at.checked_sub(sec.va.0)?).ok()?;
     let mut c = Cursor {
         bytes,
         pos: off,
-        base: sec.va,
+        base: sec.va.0,
         ptr64: program.is_64,
     };
     let lpstart_enc = c.u8()?;
@@ -121,7 +121,7 @@ fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
         // SPEC: Itanium C++ ABI, LSDA header: the type table's base is the
         // uleb offset's own field position plus the offset, and the entry a
         // filter names sits that many entry widths below the base.
-        let field = sec.va.checked_add(u64::try_from(c.pos).ok()?)?;
+        let field = sec.va.0.checked_add(u64::try_from(c.pos).ok()?)?;
         let base = field.wrapping_add(c.uleb()?);
         Some((ttype_enc, base))
     };
@@ -130,6 +130,7 @@ fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
     let table = c.take(table_len)?;
     let base = sec
         .va
+        .0
         .checked_add(u64::try_from(c.pos - table.len()).ok()?)?;
     let actions = base.checked_add(u64::try_from(table.len()).ok()?)?;
     let mut t = Cursor {
@@ -220,7 +221,7 @@ fn chain(
         .checked_sub(1)
         .map(u64::from)
         .and_then(|a| actions.checked_add(a))
-        .and_then(|a| a.checked_sub(sec.va))
+        .and_then(|a| a.checked_sub(sec.va.0))
         .and_then(|a| usize::try_from(a).ok())
         .filter(|p| *p < bytes.len())
     else {
@@ -229,7 +230,7 @@ fn chain(
     let mut c = Cursor {
         bytes,
         pos: first,
-        base: sec.va,
+        base: sec.va.0,
         ptr64: program.is_64,
     };
     let mut catches = Vec::new();
@@ -294,11 +295,11 @@ fn entry(
 ) -> Option<String> {
     let size = entry_size(enc, program)?;
     let at = base.checked_sub(u64::try_from(filter).ok()?.checked_mul(size)?)?;
-    let pos = usize::try_from(at.checked_sub(sec.va)?).ok()?;
+    let pos = usize::try_from(at.checked_sub(sec.va.0)?).ok()?;
     let mut c = Cursor {
         bytes,
         pos,
-        base: sec.va,
+        base: sec.va.0,
         ptr64: program.is_64,
     };
     let descriptor = c.pointer(enc)?;

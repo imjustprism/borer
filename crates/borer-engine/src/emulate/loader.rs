@@ -210,7 +210,7 @@ fn image_name(p: &Program) -> String {
 fn image_span(p: &Program) -> u64 {
     p.sections
         .iter()
-        .map(|s| s.va.saturating_add(s.vsize.max(s.file_size)))
+        .map(|s| s.va.0.saturating_add(s.vsize.max(s.file_size)))
         .fold(p.image_base, u64::max)
         .saturating_sub(p.image_base)
 }

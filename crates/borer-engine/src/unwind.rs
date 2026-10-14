@@ -617,7 +617,7 @@ mod tests {
     use super::{Funclet, continuations, funclets};
     use crate::analysis::FuncletRole;
     use crate::headers::{ExceptionHandler, Headers};
-    use crate::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
+    use crate::program::{Arch, BinaryFormat, FileOff, Program, Section, Symbol, SymbolKind, Va};
 
     /// Image base of the fixtures.
     const BASE: u64 = 0x1_4000_0000;
@@ -645,9 +645,9 @@ mod tests {
         bytes[0x2000..0x2000 + data.len()].copy_from_slice(data);
         let section = |name: &str, off: u64, executable: bool| Section {
             name: name.to_owned(),
-            va: BASE + off,
+            va: Va(BASE + off),
             vsize: 0x1000,
-            file_off: off,
+            file_off: FileOff(off),
             file_size: 0x1000,
             readable: true,
             writable: false,

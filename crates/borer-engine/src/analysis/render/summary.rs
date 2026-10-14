@@ -72,7 +72,7 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
     const WINDOW: u64 = 256;
     let sec = p.section_at(va).filter(|s| in_code || !s.executable)?;
     if cstr_at(p, va, 4, cap).is_some() {
-        let floor = va.saturating_sub(WINDOW).max(sec.va);
+        let floor = va.saturating_sub(WINDOW).max(sec.va.0);
         let mut start = va;
         while start > floor
             && p.read_va_upto(start - 1, 1)
@@ -86,7 +86,7 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
         }
     }
     wstr_at(p, va, 4, cap)?;
-    let floor = va.saturating_sub(WINDOW).max(sec.va);
+    let floor = va.saturating_sub(WINDOW).max(sec.va.0);
     let mut start = va;
     while start >= floor.saturating_add(2)
         && p.read_va_upto(start - 2, 2)

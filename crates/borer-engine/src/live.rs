@@ -244,7 +244,7 @@ impl Rebase {
                     let end = program
                         .sections
                         .iter()
-                        .map(|s| s.va.saturating_add(s.vsize))
+                        .map(|s| s.va.0.saturating_add(s.vsize))
                         .max()
                         .unwrap_or(program.image_base.saturating_add(module.size))
                         .max(program.image_base.saturating_add(module.size));
@@ -355,7 +355,7 @@ impl Rebase {
             return Some(format!("\"{}\"", text.replace('"', "\\\"")));
         }
         Some(match program.section_at(va) {
-            Some(s) => format!("{}+{:#x}", s.name, va - s.va),
+            Some(s) => format!("{}+{:#x}", s.name, va - s.va.0),
             None => format!("image+{:#x}", va - self.static_base),
         })
     }

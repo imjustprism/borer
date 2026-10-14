@@ -789,7 +789,7 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
             out,
             "# section {} at {:#x}, {} and {}",
             s.name,
-            s.va,
+            s.va.0,
             s.perms(),
             if s.executable { "code" } else { "data" }
         );

@@ -1135,7 +1135,7 @@ fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, verdict: &str) -> Vec<Str
     let dense: Vec<&str> = sized()
         .filter(|s| {
             let len = usize::try_from(s.file_size).unwrap_or(0);
-            p.read_va(s.va, len)
+            p.read_va(s.va.0, len)
                 .is_some_and(|b| crate::entropy::shannon(b) >= PACKED_ENTROPY)
         })
         .map(|s| s.name.as_str())
@@ -1151,8 +1151,10 @@ fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, verdict: &str) -> Vec<Str
     let bare: Vec<&str> = sized()
         .filter(|s| s.executable)
         .filter(|s| {
-            let end = s.va.saturating_add(s.vsize.max(s.file_size));
-            !a.functions.iter().any(|f| f.entry >= s.va && f.entry < end)
+            let end = s.va.0.saturating_add(s.vsize.max(s.file_size));
+            !a.functions
+                .iter()
+                .any(|f| f.entry >= s.va.0 && f.entry < end)
         })
         .map(|s| s.name.as_str())
         .collect();

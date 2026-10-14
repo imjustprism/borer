@@ -2752,7 +2752,7 @@ impl Names<'_> {
             .program
             .sections
             .iter()
-            .any(|s| v >= s.va && v < s.va.saturating_add(s.vsize.max(s.file_size)));
+            .any(|s| v >= s.va.0 && v < s.va.0.saturating_add(s.vsize.max(s.file_size)));
         if mapped && let Some(n) = self.overlay.names.get(&v) {
             return Some(format!("&{n}"));
         }
@@ -2803,7 +2803,7 @@ impl Names<'_> {
     ///
     /// * `v` - The constant.
     fn starts_string(&self, v: u64) -> bool {
-        let first = self.program.section_at(v).is_some_and(|s| s.va == v)
+        let first = self.program.section_at(v).is_some_and(|s| s.va.0 == v)
             || v.checked_sub(1)
                 .and_then(|b| self.program.read_va(b, 1))
                 .is_some_and(|b| b == [0]);

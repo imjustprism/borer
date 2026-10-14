@@ -434,8 +434,8 @@ pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<(
         .filter_map(|s| {
             Some((
                 program.section_bytes(s)?,
-                s.file_off,
-                Some(s.va),
+                s.file_off.0,
+                Some(s.va.0),
                 s.name.as_str(),
             ))
         })
