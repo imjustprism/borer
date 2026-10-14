@@ -132,7 +132,7 @@ pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
     if bytes.starts_with(b"!<arch>\n") {
         let mut offset = 8usize;
         let mut long_names: &[u8] = &[];
-        while offset + goblin::archive::SIZEOF_HEADER <= bytes.len() {
+        while offset.saturating_add(goblin::archive::SIZEOF_HEADER) <= bytes.len() {
             if offset % 2 == 1 {
                 offset += 1;
             }
@@ -369,8 +369,8 @@ fn section_functions(
     if section.characteristics & SCN_CODE == 0 || section.pointer_to_raw_data == 0 {
         return;
     }
-    let start = section.pointer_to_raw_data as usize;
-    let size = section.size_of_raw_data as usize;
+    let start = usize::try_from(section.pointer_to_raw_data).unwrap_or(usize::MAX);
+    let size = usize::try_from(section.size_of_raw_data).unwrap_or(usize::MAX);
     let Some(data) = bytes.get(start..start.saturating_add(size)) else {
         return;
     };
@@ -378,12 +378,12 @@ fn section_functions(
     let mut refs: Vec<(usize, &str)> = Vec::new();
     if let Ok(relocations) = section.relocations(bytes) {
         for r in relocations.take(usize::from(section.number_of_relocations)) {
-            let at = r.virtual_address as usize;
+            let at = usize::try_from(r.virtual_address).unwrap_or(usize::MAX);
             let width = reloc_width(machine, r.typ);
             for b in masked.iter_mut().skip(at).take(width) {
                 *b = None;
             }
-            let index = r.symbol_table_index as usize;
+            let index = usize::try_from(r.symbol_table_index).unwrap_or(usize::MAX);
             if let Ok(i) = names.binary_search_by_key(&index, |n| n.0)
                 && let Some((_, name, true)) = names.get(i)
             {
@@ -395,8 +395,14 @@ fn section_functions(
         .iter()
         .enumerate()
         .map(|(i, (_, offset, name))| {
-            let to = functions.get(i + 1).map_or(size, |f| f.1 as usize);
-            (*offset as usize, to, name.as_str())
+            let to = functions
+                .get(i + 1)
+                .map_or(size, |f| usize::try_from(f.1).unwrap_or(usize::MAX));
+            (
+                usize::try_from(*offset).unwrap_or(usize::MAX),
+                to,
+                name.as_str(),
+            )
         })
         .collect();
     emit(&masked, &refs, &spans, out);
@@ -565,7 +571,7 @@ fn emit(
                 }),
             refs: refs
                 .iter()
-                .filter(|(at, _)| *at >= *from && *at < from + cut)
+                .filter(|(at, _)| *at >= *from && *at < from.saturating_add(cut))
                 .filter_map(|(at, n)| Some((u32::try_from(at - from).ok()?, (*n).to_owned())))
                 .collect(),
         });
