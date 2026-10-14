@@ -611,7 +611,10 @@ thread_local! {
 /// the `eax` it reads is written out for reading a slot written out; `edx = a2`
 /// pending while `a2 = ebx` is written out for `ebx`). A block reruns only when its IN or
 /// the escape floor it last ran under changed; a floor change restarts the
-/// pass budget.
+/// pass budget. `ran_under` holds that per block: `None` before it has run
+/// and once a flag rebase it must lift under lands, `Some(None)` when it
+/// last ran with the escape floor unknown, and `Some(Some(k))` when it last
+/// ran under floor `k`.
 ///
 /// The transfer is not monotone: phi placement compares a predecessor's
 /// OUT with the IN it feeds, so a value a back edge disagrees with can
