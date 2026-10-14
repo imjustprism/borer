@@ -1908,7 +1908,7 @@ impl<'a> Emulator<'a> {
                 .unwrap_or(0);
             let sp = self
                 .reg(Register::RSP)
-                .wrapping_add(u64::from(popped) * self.word as u64);
+                .wrapping_add(u64::from(popped) * from_usize(self.word));
             self.set_reg(Register::RSP, sp);
         }
         Ok(ret)
@@ -3791,7 +3791,7 @@ impl<'a> Emulator<'a> {
     ///
     /// [`Stop::MemoryFull`] when the word would take memory past its cap.
     fn push(&mut self, v: u64) -> Result<(), Stop> {
-        let sp = self.narrow(self.reg(Register::RSP).wrapping_sub(self.word as u64));
+        let sp = self.narrow(self.reg(Register::RSP).wrapping_sub(from_usize(self.word)));
         self.set_reg(Register::RSP, sp);
         self.write(sp, v, self.word)
     }
@@ -3806,7 +3806,7 @@ impl<'a> Emulator<'a> {
         let v = self.load(sp, self.word)?;
         self.set_reg(
             Register::RSP,
-            self.narrow(sp.wrapping_add(self.word as u64)),
+            self.narrow(sp.wrapping_add(from_usize(self.word))),
         );
         Ok(v)
     }
