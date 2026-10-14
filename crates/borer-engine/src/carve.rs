@@ -587,7 +587,7 @@ fn macho(b: &[u8]) -> Option<Found> {
             return None;
         };
         let size = usize::try_from(size).ok()?;
-        if size < 8 || at + size > header + room {
+        if size < 8 || at.saturating_add(size) > header + room {
             return None;
         }
         // SPEC: LC_SEGMENT (1) carries fileoff and filesize as u32 at 32 and
