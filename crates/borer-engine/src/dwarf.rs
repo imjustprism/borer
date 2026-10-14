@@ -924,7 +924,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
     let mut out: Vec<Subprogram> = Vec::new();
     let mut types: BTreeMap<String, UserType> = BTreeMap::new();
     let mut at = 0usize;
-    while at + 11 < info.len() {
+    while at.saturating_add(11) < info.len() {
         let at_start = at;
         let mut c = Cursor::new(info, at);
         let Some((body_end, address_size, abbrev_offset, offset_size)) = unit_header(&mut c) else {
@@ -1763,5 +1763,26 @@ mod tests {
         for cut in 0..truncated.len() {
             let _ = read_in(&truncated[..cut], &abbrev(), &strings);
         }
+    }
+
+    /// A unit whose stated length runs to the top of the offset space
+    /// names nothing and ends the walk, rather than adding its offset to
+    /// the minimum-unit bound and overflowing.
+    #[test]
+    fn a_huge_stated_length_ends_the_walk() {
+        // The 64-bit escape, then a length whose end offset lands on
+        // `usize::MAX`, then the whole version-5 header the reader wants.
+        let mut info = Vec::new();
+        info.extend_from_slice(&u32::MAX.to_le_bytes());
+        info.extend_from_slice(&(u64::MAX - 12).to_le_bytes());
+        info.extend_from_slice(&5u16.to_le_bytes());
+        info.push(0x01);
+        info.push(8);
+        info.extend_from_slice(&[0; 8]);
+        let strings = Strings {
+            text: &[],
+            lines: &[],
+        };
+        assert!(read_in(&info, &abbrev(), &strings).subprograms.is_empty());
     }
 }
