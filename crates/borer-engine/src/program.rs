@@ -1480,6 +1480,28 @@ fn read_program_bytes(
     ))
 }
 
+/// Maps a file offset to the virtual address its section places it at.
+///
+/// The one scan behind [`Program::offset_to_va`] and the PE reader's
+/// file-offset lookups: the first section declared whose file extent
+/// covers the offset wins, and the extent saturates rather than
+/// overflows on a hostile row.
+///
+/// # Arguments
+///
+/// * `sections` - The image's sections, in declaration order.
+/// * `off` - An offset into the file.
+///
+/// # Returns
+///
+/// The address, or `None` when no section's file extent covers `off`.
+fn offset_to_va_in(sections: &[Section], off: u64) -> Option<u64> {
+    sections.iter().find_map(|s| {
+        (s.file_size > 0 && off >= s.file_off && off < s.file_off.saturating_add(s.file_size))
+            .then(|| s.va + (off - s.file_off))
+    })
+}
+
 impl Program {
     /// A program built from bytes in memory, with no symbols, ranges,
     /// headers or debug information: a fixture, or a dump that has no file.
@@ -1839,21 +1861,7 @@ impl Program {
                     flat_fallback = true;
                 }
 
-                let va_of_off = |off: u64| -> u64 {
-                    sections
-                        .iter()
-                        .find_map(|s| {
-                            if s.file_size > 0
-                                && off >= s.file_off
-                                && off < s.file_off + s.file_size
-                            {
-                                Some(s.va + (off - s.file_off))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(0)
-                };
+                let va_of_off = |off: u64| -> u64 { offset_to_va_in(&sections, off).unwrap_or(0) };
                 for imp in &pe.imports {
                     let name = if imp.name.is_empty() {
                         "(unnamed)".to_owned()
@@ -2546,14 +2554,7 @@ impl Program {
     ///
     /// The address, or `None` when no section's file extent covers `off`.
     pub fn offset_to_va(&self, off: u64) -> Option<u64> {
-        self.sections.iter().find_map(|s| {
-            if s.file_size > 0 && off >= s.file_off && off < s.file_off.saturating_add(s.file_size)
-            {
-                Some(s.va + (off - s.file_off))
-            } else {
-                None
-            }
-        })
+        offset_to_va_in(&self.sections, off)
     }
 
     /// Returns the runs of file bytes that no section's file extent covers.
@@ -2572,7 +2573,7 @@ impl Program {
             .sections
             .iter()
             .filter(|s| self.section_bytes(s).is_some())
-            .map(|s| (s.file_off, s.file_off + s.file_size))
+            .map(|s| (s.file_off, s.file_off.saturating_add(s.file_size)))
             .collect();
         covered.sort_unstable();
         let len = crate::num::from_usize(self.bytes.len());
