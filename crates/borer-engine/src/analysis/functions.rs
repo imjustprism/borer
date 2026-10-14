@@ -1904,12 +1904,12 @@ impl<'a> Cursors<'a> {
         if !s.executable || self.open.iter().any(|c| c.va == s.va.0) {
             return None;
         }
-        let limit = (s.file_off.0 + s.file_size).min(program.bytes.len() as u64);
+        let limit = (s.file_off.0 + s.file_size).min(from_usize(program.bytes.len()));
         let bytes = program
             .bytes
             .get(usize::try_from(s.file_off.0).ok()?..usize::try_from(limit).ok()?)
             .filter(|b| !b.is_empty())?;
-        let end = s.va.0 + bytes.len() as u64;
+        let end = s.va.0 + from_usize(bytes.len());
         self.open.push(Cursor {
             va: s.va.0,
             end,
@@ -2034,7 +2034,7 @@ impl AddrSet {
                 .iter()
                 .enumerate()
                 .find(|(_, w)| **w != 0)
-                .map(|(i, w)| self.base + (i as u64) * 64 + u64::from(w.trailing_zeros()))
+                .map(|(i, w)| self.base + from_usize(i) * 64 + u64::from(w.trailing_zeros()))
                 .into_iter()
                 .chain(spilled)
                 .min();
@@ -2045,7 +2045,7 @@ impl AddrSet {
         while let Some(w) = self.bits.get(word) {
             let hit = w & mask;
             if hit != 0 {
-                found = Some(self.base + (word as u64) * 64 + u64::from(hit.trailing_zeros()));
+                found = Some(self.base + from_usize(word) * 64 + u64::from(hit.trailing_zeros()));
                 break;
             }
             word += 1;
@@ -4913,7 +4913,7 @@ fn read_jump_table(
 fn offset_targets(program: &Program, table: u64, entries: usize, base: u64) -> Option<Vec<u64>> {
     let targets: Option<Vec<u64>> = (0..entries)
         .map(|i| {
-            let slot = table.checked_add((i as u64).checked_mul(4)?)?;
+            let slot = table.checked_add(from_usize(i).checked_mul(4)?)?;
             let bytes: [u8; 4] = program.read_va(slot, 4)?.try_into().ok()?;
             Some(base.wrapping_add_signed(i64::from(u32::from_le_bytes(bytes).cast_signed())))
         })
@@ -5656,7 +5656,7 @@ fn record_data_refs(
     let in_image =
         |v: u64| (mapped.contains(&v) && program.section_at(v).is_some()) || program.in_headers(v);
     let relocated = |offset: usize, size: usize| {
-        patched.is_none_or(|(sites, _)| size >= 4 && sites.contains(va + offset as u64))
+        patched.is_none_or(|(sites, _)| size >= 4 && sites.contains(va + from_usize(offset)))
     };
     for op in 0..instr.op_count() {
         match instr.op_kind(op) {
