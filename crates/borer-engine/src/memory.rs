@@ -168,24 +168,23 @@ pub fn read_values(
     kind: Kind,
     count: usize,
 ) -> Result<Vec<Value>, String> {
-    let read = |at: u64, max: usize| program.read_va_upto(at, max).map(Cow::Borrowed);
-    let out = decode(read, program.is_64, va, kind, count);
-    if !out.is_empty() {
-        return Ok(out);
-    }
-    // INVARIANT: an address that maps to no file bytes and one that maps to
-    // bytes that are not the kind asked for are two different answers, and
-    // the reader acts differently on each.
-    let Some(first) = read(va, 1).and_then(|b| b.first().copied()) else {
-        return Err(format!(
-            "address {va:#x} is not mapped to file bytes; sections: {}{}",
-            program.section_list(),
-            by_offset_hint(program)
-        ));
-    };
-    Err(refusal(kind, first, &format!("{va:#x}"), program, || {
-        format!("; sections: {}", program.section_list())
-    }))
+    read_values_with(
+        program,
+        |at, max| program.read_va_upto(at, max).map(Cow::Borrowed),
+        va,
+        kind,
+        count,
+        |first| match first {
+            None => format!(
+                "address {va:#x} is not mapped to file bytes; sections: {}{}",
+                program.section_list(),
+                by_offset_hint(program)
+            ),
+            Some(first) => refusal(kind, first, &format!("{va:#x}"), program, || {
+                format!("; sections: {}", program.section_list())
+            }),
+        },
+    )
 }
 
 /// Decodes `count` consecutive values of `kind` starting at a file offset.
@@ -214,25 +213,61 @@ pub fn read_values_at_offset(
     kind: Kind,
     count: usize,
 ) -> Result<Vec<Value>, String> {
-    let read = |at: u64, max: usize| program.read_off_upto(at, max).map(Cow::Borrowed);
-    let out = decode(read, program.is_64, off, kind, count);
+    read_values_with(
+        program,
+        |at, max| program.read_off_upto(at, max).map(Cow::Borrowed),
+        off,
+        kind,
+        count,
+        |first| match first {
+            None => format!(
+                "file offset {off:#x} is past the end of the file; the file is {:#x} bytes",
+                program.bytes.len()
+            ),
+            Some(first) => refusal(kind, first, &format!("off:{off:#x}"), program, || {
+                format!("; the file is {:#x} bytes", program.bytes.len())
+            }),
+        },
+    )
+}
+
+/// Decodes values through a reader, the caller saying why none decoded.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, for the word size.
+/// * `read` - Reads up to a number of bytes at a position; `None` where
+///   nothing is readable.
+/// * `start` - Position of the first value, in `read`'s terms.
+/// * `kind` - How to interpret the bytes.
+/// * `count` - Maximum number of values.
+/// * `why` - Builds the error from the byte at the start, or `None` when
+///   not even it reads.
+///
+/// # Returns
+///
+/// The values in order, at least one.
+///
+/// # Errors
+///
+/// Whatever `why` builds, when not even the first value decodes.
+fn read_values_with<'a>(
+    program: &Program,
+    read: impl Fn(u64, usize) -> Option<Cow<'a, [u8]>>,
+    start: u64,
+    kind: Kind,
+    count: usize,
+    why: impl FnOnce(Option<u8>) -> String,
+) -> Result<Vec<Value>, String> {
+    let out = decode(&read, program.is_64, start, kind, count);
     if !out.is_empty() {
         return Ok(out);
     }
-    let size = || format!("; the file is {:#x} bytes", program.bytes.len());
-    let Some(first) = read(off, 1).and_then(|b| b.first().copied()) else {
-        return Err(format!(
-            "file offset {off:#x} is past the end of the file{}",
-            size()
-        ));
-    };
-    Err(refusal(
-        kind,
-        first,
-        &format!("off:{off:#x}"),
-        program,
-        size,
-    ))
+    // INVARIANT: an address that maps to no file bytes and one that maps to
+    // bytes that are not the kind asked for are two different answers, and
+    // the reader acts differently on each.
+    let first = read(start, 1).and_then(|b| b.first().copied());
+    Err(why(first))
 }
 
 /// Says how to read the bytes no section maps, for an error about an
