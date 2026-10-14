@@ -278,7 +278,7 @@ fn raw_sections(file: &[u8], m: &MachO<'_>, base: usize) -> Vec<RawSection> {
             let Some(at) = first.checked_add(k * entry) else {
                 break;
             };
-            let Some(raw) = file.get(at..at + entry) else {
+            let Some(raw) = at.checked_add(entry).and_then(|end| file.get(at..end)) else {
                 break;
             };
             let sect = name16(&raw[..16]);
@@ -382,10 +382,12 @@ fn function_starts(file: &[u8], m: &MachO<'_>, base: usize, text: u64) -> Vec<u6
         let CommandVariant::FunctionStarts(l) = &lc.command else {
             continue;
         };
-        let Some(start) = base.checked_add(l.dataoff as usize) else {
+        let Some(start) = base.checked_add(usize::try_from(l.dataoff).unwrap_or(usize::MAX)) else {
             continue;
         };
-        let Some(data) = file.get(start..start.saturating_add(l.datasize as usize)) else {
+        let Some(data) = file
+            .get(start..start.saturating_add(usize::try_from(l.datasize).unwrap_or(usize::MAX)))
+        else {
             continue;
         };
         let mut at = 0;
@@ -560,14 +562,16 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         }
         // The pointer sections: each slot's symbol is in the indirect table.
         let indirect = m.load_commands.iter().find_map(|lc| match &lc.command {
-            CommandVariant::Dysymtab(d) => {
-                Some((d.indirectsymoff as usize, d.nindirectsyms as usize))
-            }
+            CommandVariant::Dysymtab(d) => Some((
+                usize::try_from(d.indirectsymoff).unwrap_or(usize::MAX),
+                usize::try_from(d.nindirectsyms).unwrap_or(usize::MAX),
+            )),
             _ => None,
         });
         if let Some((off, count)) = indirect {
             let at = |i: usize| -> Option<u32> {
-                (i < count).then(|| u32_at(file, base.checked_add(off)?.checked_add(i * 4)?))?
+                (i < count)
+                    .then(|| u32_at(file, base.checked_add(off)?.checked_add(i.checked_mul(4)?)?))?
             };
             for s in raw
                 .iter()
@@ -575,16 +579,21 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
             {
                 let slots = usize::try_from(s.size / word).unwrap_or(0).min(1 << 20);
                 for i in 0..slots {
-                    let Some(index) = at(s.reserved1 as usize + i) else {
+                    let Some(index) = usize::try_from(s.reserved1)
+                        .unwrap_or(usize::MAX)
+                        .checked_add(i)
+                        .and_then(at)
+                    else {
                         break;
                     };
                     if index & INDIRECT_NONE != 0 {
                         continue;
                     }
-                    let Ok((name, _)) = table.get(index as usize) else {
+                    let Ok((name, _)) = table.get(usize::try_from(index).unwrap_or(usize::MAX))
+                    else {
                         continue;
                     };
-                    let slot = s.addr + i as u64 * word;
+                    let slot = s.addr.wrapping_add(crate::num::from_usize(i) * word);
                     if !name.is_empty() && seen.insert((slot, plain(name).to_owned())) {
                         symbols.push(Symbol {
                             name: plain(name).to_owned(),
@@ -722,7 +731,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
             CommandVariant::LoadDylinker(d) => {
                 let at = base
                     .saturating_add(lc.offset)
-                    .saturating_add(d.name as usize);
+                    .saturating_add(usize::try_from(d.name).unwrap_or(usize::MAX));
                 if let Some(rest) = file.get(at..) {
                     let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
                     headers.interpreter =
@@ -751,7 +760,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
                 for k in 0..usize::try_from(b.ntools).unwrap_or(0).min(16) {
                     let at = first.saturating_add(k * 8);
                     if u32_at(file, at) == Some(3)
-                        && let Some(v) = u32_at(file, at + 4)
+                        && let Some(v) = at.checked_add(4).and_then(|a| u32_at(file, a))
                     {
                         headers.linker =
                             Some(format!("ld {}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff));
@@ -773,5 +782,124 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         fit,
         lenient: None,
         relocs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use goblin::mach::MachO;
+
+    use super::{SymbolKind, image};
+
+    /// Builds a 64-bit Mach-O image whose one `__DATA,__got` section sits
+    /// at the top of the address space and names its slots through the
+    /// indirect symbol table, or fills it past the image's parts.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The `__got` section's address.
+    ///
+    /// # Panics
+    ///
+    /// When `addr` does not fit the header's field.
+    fn got_image(addr: u64) -> Vec<u8> {
+        let str_at = 0x130usize;
+        let ind_at = 0x138usize;
+        let got_at = 0x140usize;
+        let mut f = Vec::new();
+        f.extend_from_slice(&0xfeed_facf_u32.to_le_bytes()); // magic
+        f.extend_from_slice(&0x0100_0007_u32.to_le_bytes()); // cputype x86-64
+        f.extend_from_slice(&3u32.to_le_bytes()); // cpusubtype
+        f.extend_from_slice(&6u32.to_le_bytes()); // filetype dylib
+        f.extend_from_slice(&3u32.to_le_bytes()); // ncmds
+        f.extend_from_slice(&256u32.to_le_bytes()); // sizeofcmds
+        f.extend_from_slice(&[0u8; 8]); // flags, reserved
+        f.extend_from_slice(&0x19u32.to_le_bytes()); // LC_SEGMENT_64
+        f.extend_from_slice(&152u32.to_le_bytes());
+        let mut segname = [0u8; 16];
+        segname[..6].copy_from_slice(b"__DATA");
+        f.extend_from_slice(&segname);
+        f.extend_from_slice(&0u64.to_le_bytes()); // vmaddr
+        f.extend_from_slice(&0x1000u64.to_le_bytes()); // vmsize
+        f.extend_from_slice(&u64::try_from(got_at).unwrap().to_le_bytes()); // fileoff
+        f.extend_from_slice(&16u64.to_le_bytes()); // filesize
+        f.extend_from_slice(&1u32.to_le_bytes()); // maxprot
+        f.extend_from_slice(&3u32.to_le_bytes()); // initprot
+        f.extend_from_slice(&1u32.to_le_bytes()); // nsects
+        f.extend_from_slice(&0u32.to_le_bytes()); // flags
+        let mut sectname = [0u8; 16];
+        sectname[..5].copy_from_slice(b"__got");
+        f.extend_from_slice(&sectname);
+        f.extend_from_slice(&segname);
+        f.extend_from_slice(&addr.to_le_bytes()); // addr
+        f.extend_from_slice(&16u64.to_le_bytes()); // size
+        f.extend_from_slice(&u32::try_from(got_at).unwrap().to_le_bytes()); // offset
+        f.extend_from_slice(&3u32.to_le_bytes()); // align
+        f.extend_from_slice(&[0u8; 8]); // reloff, nreloc
+        f.extend_from_slice(&6u32.to_le_bytes()); // S_NON_LAZY_SYMBOL_POINTERS
+        f.extend_from_slice(&[0u8; 12]); // reserved1..3
+        f.extend_from_slice(&2u32.to_le_bytes()); // LC_SYMTAB
+        f.extend_from_slice(&24u32.to_le_bytes());
+        f.extend_from_slice(&0x120u32.to_le_bytes()); // symoff
+        f.extend_from_slice(&1u32.to_le_bytes()); // nsyms
+        f.extend_from_slice(&u32::try_from(str_at).unwrap().to_le_bytes()); // stroff
+        f.extend_from_slice(&6u32.to_le_bytes()); // strsize
+        f.extend_from_slice(&0xbu32.to_le_bytes()); // LC_DYSYMTAB
+        f.extend_from_slice(&80u32.to_le_bytes());
+        f.extend_from_slice(&[0u8; 48]); // the symbol-table indexes before the indirects
+        f.extend_from_slice(&u32::try_from(ind_at).unwrap().to_le_bytes()); // indirectsymoff
+        f.extend_from_slice(&2u32.to_le_bytes()); // nindirectsyms
+        f.extend_from_slice(&[0u8; 16]); // the rest of the command
+        f.extend_from_slice(&1u32.to_le_bytes()); // n_strx
+        f.push(0x01); // n_type: external, no section
+        f.push(0); // n_sect
+        f.extend_from_slice(&0u16.to_le_bytes()); // n_desc
+        f.extend_from_slice(&0u64.to_le_bytes()); // n_value
+        f.extend_from_slice(b"\0_imp\0");
+        f.extend_from_slice(&[0u8; 2]); // pad to the indirect table
+        f.extend_from_slice(&0u32.to_le_bytes()); // slot 0 names symbol 0
+        f.extend_from_slice(&0u32.to_le_bytes()); // slot 1 names symbol 0
+        f.extend_from_slice(&[0u8; 16]); // the __got data
+        f
+    }
+
+    /// A `__got` at the top of the address space names both its slots: the
+    /// second slot's address is the section's address plus the word width,
+    /// which leaves the 64-bit space rather than overflowing the sum.
+    ///
+    /// # Panics
+    ///
+    /// When the image does not parse or a slot goes unnamed.
+    #[test]
+    fn a_got_at_the_top_of_the_space_names_its_slots() {
+        let file = got_image(u64::MAX);
+        let m = MachO::parse(&file, 0).expect("the image parses");
+        let loaded = image(&file, &m, 0);
+        let slots: Vec<u64> = loaded
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Import)
+            .map(|s| s.addr)
+            .collect();
+        assert_eq!(slots, vec![u64::MAX, 7], "both slots are named");
+    }
+
+    /// A `__got` anywhere else still names its slots, unwrapped.
+    ///
+    /// # Panics
+    ///
+    /// When the image does not parse or a slot goes unnamed.
+    #[test]
+    fn a_got_away_from_the_top_names_its_slots() {
+        let file = got_image(0x1000);
+        let m = MachO::parse(&file, 0).expect("the image parses");
+        let loaded = image(&file, &m, 0);
+        let slots: Vec<u64> = loaded
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Import)
+            .map(|s| s.addr)
+            .collect();
+        assert_eq!(slots, vec![0x1000, 0x1008], "both slots are named");
     }
 }
