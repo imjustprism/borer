@@ -1570,7 +1570,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
             if !s.executable || s.file_size == 0 {
                 continue;
             }
-            for gap in blocks.uncovered(s.va, s.va + s.file_size) {
+            for gap in blocks.uncovered(s.va.0, s.va.0 + s.file_size) {
                 let between_functions = !ranges.contains(gap.start);
                 let mut va = gap.start;
                 let hi = gap.end;
@@ -1901,19 +1901,19 @@ impl<'a> Cursors<'a> {
     fn open_section(&mut self, va: u64) -> Option<usize> {
         let program = self.program;
         let s = program.section_at(va)?;
-        if !s.executable || self.open.iter().any(|c| c.va == s.va) {
+        if !s.executable || self.open.iter().any(|c| c.va == s.va.0) {
             return None;
         }
-        let limit = (s.file_off + s.file_size).min(program.bytes.len() as u64);
+        let limit = (s.file_off.0 + s.file_size).min(program.bytes.len() as u64);
         let bytes = program
             .bytes
-            .get(usize::try_from(s.file_off).ok()?..usize::try_from(limit).ok()?)
+            .get(usize::try_from(s.file_off.0).ok()?..usize::try_from(limit).ok()?)
             .filter(|b| !b.is_empty())?;
-        let end = s.va + bytes.len() as u64;
+        let end = s.va.0 + bytes.len() as u64;
         self.open.push(Cursor {
-            va: s.va,
+            va: s.va.0,
             end,
-            decoder: Decoder::with_ip(self.bitness, bytes, s.va, DecoderOptions::NONE),
+            decoder: Decoder::with_ip(self.bitness, bytes, s.va.0, DecoderOptions::NONE),
         });
         (va < end).then_some(self.open.len() - 1)
     }
@@ -1953,8 +1953,8 @@ impl AddrSet {
             .filter(|s| s.executable && s.file_size > 0)
             .fold((u64::MAX, 0), |(lo, hi), s| {
                 (
-                    lo.min(s.va),
-                    hi.max(s.va.saturating_add(s.vsize.max(s.file_size))),
+                    lo.min(s.va.0),
+                    hi.max(s.va.0.saturating_add(s.vsize.max(s.file_size))),
                 )
             });
         let span = hi.saturating_sub(lo);
@@ -2316,11 +2316,19 @@ impl FrameFacts {
     /// exit, the pops, cleanups and frame restores that lead into it
     /// without a gap, walking back while each one's next address is the
     /// one reached so far.
+    ///
+    /// A map from each link's next address to its own, built once with the
+    /// first link encountered winning as a scan's first match would, answers
+    /// each step of that walk in constant time.
     fn epilogues(&self) -> BTreeSet<u64> {
+        let mut leads = FxHashMap::with_capacity_and_hasher(self.links.len(), Default::default());
+        for &(addr, next) in &self.links {
+            leads.entry(next).or_insert(addr);
+        }
         let mut out = BTreeSet::new();
         for &exit in &self.exits {
             let mut at = exit;
-            while let Some(&(addr, _)) = self.links.iter().find(|(_, next)| *next == at) {
+            while let Some(&addr) = leads.get(&at) {
                 if !out.insert(addr) {
                     break;
                 }
@@ -3403,7 +3411,7 @@ fn seh_scope_roots(program: &Program, table: u64, entry: u64) -> Vec<u64> {
     const FRAME_MAX: i32 = 0x1_0000;
     /// The outermost enclosing level, and the no-cookie offset.
     const TOPMOST: u32 = 0xffff_fffe;
-    let Some(home) = program.section_at(entry).map(|s| s.va) else {
+    let Some(home) = program.section_at(entry).map(|s| s.va.0) else {
         return Vec::new();
     };
     let word = |va: u64| read_u32(program, va);
@@ -3421,7 +3429,7 @@ fn seh_scope_roots(program: &Program, table: u64, entry: u64) -> Vec<u64> {
     let code = |va: u32| {
         let va = u64::from(va);
         super::is_executable_va(program, va)
-            && program.section_at(va).is_some_and(|s| s.va == home)
+            && program.section_at(va).is_some_and(|s| s.va.0 == home)
             && plausible_entry(program, 32, va)
     };
     let mut roots = Vec::new();
@@ -4873,7 +4881,7 @@ fn read_jump_table(
     let targets = table_targets(program, table, entries)?;
     let jmp_section = program.section_at(jmp_va)?.va;
     let plausible = targets.iter().all(|&t| {
-        program.section_at(t).is_some_and(|s| s.va == jmp_section)
+        program.section_at(t).is_some_and(|s| s.va.0 == jmp_section)
             && decode_at(program, bitness, t).is_some_and(|i| i.code() != Code::INVALID)
     });
     plausible.then_some(TableRead {
@@ -5338,8 +5346,8 @@ fn mapped_range(program: &Program) -> std::ops::Range<u64> {
             .filter(|s| s.file_size > 0)
             .fold((u64::MAX, 0), |(lo, hi), s| {
                 (
-                    lo.min(s.va),
-                    hi.max(s.va.saturating_add(s.vsize.max(s.file_size))),
+                    lo.min(s.va.0),
+                    hi.max(s.va.0.saturating_add(s.vsize.max(s.file_size))),
                 )
             });
     lo..hi.max(lo)
@@ -5443,7 +5451,7 @@ fn record_table_refs(
             if !mapped.contains(&v) {
                 continue;
             }
-            let slot = s.va + from_usize(i * word);
+            let slot = s.va.0 + from_usize(i * word);
             if sorted.binary_search(&v).is_ok() {
                 push_site(xrefs, v, slot, RefKind::Table, None);
             } else if program
@@ -5597,7 +5605,7 @@ fn pointer_seeds(program: &Program, sites: Option<&FxHashSet<u64>>) -> Vec<u64> 
         for (k, chunk) in data.chunks_exact(word).enumerate() {
             // INVARIANT: a relocatable image relocates every pointer it
             // holds; a word the loader leaves alone is a number, or text.
-            if sites.is_some_and(|set| !set.contains(&(s.va + from_usize(k * word)))) {
+            if sites.is_some_and(|set| !set.contains(&(s.va.0 + from_usize(k * word)))) {
                 continue;
             }
             let v = le_word(program, chunk);
