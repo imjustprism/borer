@@ -1650,8 +1650,16 @@ fn decompile_in<L: Lifter>(
         }
     }
 
+    let starts = blocks
+        .iter()
+        .enumerate()
+        .fold(FxHashMap::default(), |mut m, (i, b)| {
+            m.entry(b.start).or_insert(i);
+            m
+        });
     let mut st = Emit::<L> {
         blocks,
+        starts,
         code: &code,
         succs: succs_live,
         preds: preds_live,

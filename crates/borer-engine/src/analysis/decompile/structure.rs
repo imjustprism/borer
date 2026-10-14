@@ -2,11 +2,15 @@
 //! graph.
 
 use super::*;
+use crate::fxmap::FxHashMap;
 
 /// Emission state of the structurer for one function.
 pub(super) struct Emit<'e, L: Lifter> {
     /// The function's basic blocks in address order.
     pub(super) blocks: &'e [BasicBlock],
+    /// Each block's start address mapped to its index, the first block at
+    /// that address winning as [`Emit::index_of`] always found it.
+    pub(super) starts: FxHashMap<u64, usize>,
     /// Decoded instructions per block.
     pub(super) code: &'e [Vec<L::Insn>],
     /// Owned: never-taken edges are removed before structuring.
@@ -134,7 +138,7 @@ impl<L: Lifter> Emit<'_, L> {
     ///
     /// * `va` - A block start address.
     pub(super) fn index_of(&self, va: u64) -> Option<usize> {
-        let i = self.blocks.iter().position(|b| b.start == va)?;
+        let i = self.starts.get(&va).copied()?;
         Some(self.twins.get(&i).copied().unwrap_or(i))
     }
 

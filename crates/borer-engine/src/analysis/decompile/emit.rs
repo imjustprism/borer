@@ -63,19 +63,29 @@ pub(super) fn emit_block<L: Lifter>(
     if i >= n || st.emitted[i] {
         return i + 1;
     }
-    if depth < MAX_DEPTH
-        && !st.loops.contains(&i)
-        && let Some((body, entry)) = cycle_of(st, i)
-        && entry != i
-        && body.first() == Some(&i)
-        && !st.emitted[entry]
-    {
-        let next = emit_block(ctx, st, entry, out, depth);
-        if st.emitted[i] {
-            return next;
+    let mut cyc: Option<(BTreeSet<usize>, usize)> = None;
+    if depth < MAX_DEPTH && !st.loops.contains(&i) {
+        let found = cycle_of(st, i);
+        let recursed = if let Some((body, entry)) = &found
+            && *entry != i
+            && body.first() == Some(&i)
+            && !st.emitted[*entry]
+        {
+            let next = emit_block(ctx, st, *entry, out, depth);
+            if st.emitted[i] {
+                return next;
+            }
+            true
+        } else {
+            false
+        };
+        // The cycle the emitter asks for next is the one just computed
+        // unless the trampoline pass above emitted blocks.
+        if !recursed {
+            cyc = found;
         }
     }
-    if let Some(next) = try_loop(ctx, st, i, out, depth) {
+    if let Some(next) = try_loop(ctx, st, i, out, depth, cyc) {
         return next;
     }
     let mut block_out = run_block(ctx, st, i);
@@ -239,26 +249,46 @@ pub(super) fn emit_block<L: Lifter>(
             && header_lines.is_empty()
         {
             let inc = format!("{v} += 1;");
-            let body_lines: Vec<&str> = buf.lines().collect();
-            let body_has_inc = body_lines.last() == Some(&inc.as_str());
-            let out_lines: Vec<&str> = out.lines().collect();
-            let init_idx = out_lines
-                .iter()
-                .enumerate()
-                .rev()
-                .take(4)
-                .find_map(|(idx, l)| {
-                    l.strip_prefix(&format!("{v} = "))
-                        .and_then(|r| r.strip_suffix(';'))
-                        .map(|val| (idx, val.to_owned()))
-                });
-            if body_has_inc && let Some((idx, init)) = init_idx {
-                let mut kept_out: Vec<&str> = out_lines.clone();
-                kept_out.remove(idx);
-                *out = kept_out.join("\n") + "\n";
-                let body_wo_inc = &body_lines[..body_lines.len() - 1];
+            let init_of = format!("{v} = ");
+            // The last body line is the increment and the initializer sits
+            // within the four lines already written: both are said by
+            // looking at those lines only, and the initializer leaves by a
+            // byte splice, so a body of any size costs what a small one
+            // does instead of rebuilding everything written so far.
+            let body_wo_nl = buf.trim_end_matches('\n');
+            let body_last = body_wo_nl.rfind('\n').map_or(0, |at| at + 1);
+            let body_has_inc = body_wo_nl[body_last..] == inc;
+            let bytes = out.as_bytes();
+            let mut line_end = bytes.len();
+            if line_end > 0 && bytes[line_end - 1] == b'\n' {
+                line_end -= 1;
+            }
+            let mut splice: Option<(usize, usize, String)> = None;
+            for _ in 0..4 {
+                if line_end == 0 {
+                    break;
+                }
+                let start = bytes[..line_end]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(0, |at| at + 1);
+                if let Some(val) = out[start..line_end]
+                    .strip_prefix(&init_of)
+                    .and_then(|r| r.strip_suffix(';'))
+                {
+                    splice = Some((start, line_end, val.to_owned()));
+                    break;
+                }
+                if start == 0 {
+                    break;
+                }
+                line_end = start - 1;
+            }
+            if body_has_inc && let Some((start, end, init)) = splice {
+                out.replace_range(start..end + 1, "");
+                let body_wo_inc = &buf[..body_wo_nl.len()];
                 let _ = writeln!(out, "for ({v} = {init}; {cond}; {v} += 1) {{");
-                for l in body_wo_inc {
+                for l in body_wo_inc.lines() {
                     if !l.is_empty() {
                         out.push_str("  ");
                     }
@@ -649,11 +679,12 @@ pub(super) fn try_loop<L: Lifter>(
     i: usize,
     out: &mut String,
     depth: usize,
+    cyc: Option<(BTreeSet<usize>, usize)>,
 ) -> Option<usize> {
     if depth >= MAX_DEPTH || st.loops.contains(&i) {
         return None;
     }
-    let (body, entry) = cycle_of(st, i)?;
+    let (body, entry) = cyc.or_else(|| cycle_of(st, i))?;
     if entry != i {
         return None;
     }

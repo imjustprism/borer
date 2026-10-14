@@ -411,7 +411,17 @@ pub(super) fn merge_return_assignments(lines: &mut Vec<String>) -> bool {
             .strip_suffix(';')
             .and_then(|r| r.split_once(" = "))
             .filter(|(v, _)| is_plain_var(v))
-            .filter(|(v, _)| lines[i + 1] == format!("{pad}return {v};"))
+            .filter(|(v, _)| {
+                // The next line is exactly this assignment returned: said
+                // without building the string, the comparison runs per
+                // assignment line of every cleanup pass.
+                let next = lines[i + 1].as_bytes();
+                next.len() == pad.len() + v.len() + 8
+                    && next.starts_with(pad.as_bytes())
+                    && next[pad.len()..].starts_with(b"return ")
+                    && next[pad.len() + 7..pad.len() + 7 + v.len()] == *v.as_bytes()
+                    && next[next.len() - 1] == b';'
+            })
             .map(|(_, x)| format!("{pad}return {x};"));
         if let Some(m) = merged {
             lines[i] = m;
@@ -726,15 +736,20 @@ pub(super) fn dataflow<L: Lifter>(
                         }
                     }
                     let mut written = phis;
+                    // The membership mirror keeps the `written` order (the
+                    // loop below walks it) while the contains test stops
+                    // being a scan of every key so far.
+                    let mut marked: BTreeSet<Key> = written.iter().copied().collect();
                     let mut at = 0;
                     while let Some(&k) = written.get(at) {
                         at += 1;
                         let readers: Vec<Key> = outs[p]
                             .vals
                             .iter()
-                            .filter(|(x, e)| **x != k && !written.contains(x) && e.may_read(k))
+                            .filter(|(x, e)| **x != k && !marked.contains(*x) && e.may_read(k))
                             .map(|(x, _)| *x)
                             .collect();
+                        marked.extend(readers.iter().copied());
                         written.extend(readers);
                     }
                     while let Some(k) = written.pop() {
