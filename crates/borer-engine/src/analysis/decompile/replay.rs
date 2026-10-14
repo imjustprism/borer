@@ -3482,7 +3482,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             .last()
             .is_some_and(|i| L::transfer(&i) == Transfer::Call);
         if !t.called && !t.settled {
-            self.memory(&mut t, start, last, b, out);
+            self.memory(&mut t, start, last, Some(b), out);
         }
         for &s in self.succs.get(b).map_or(&[][..], Vec::as_slice) {
             if w.processed.get(s).copied().unwrap_or(false) {
@@ -3575,7 +3575,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         || format!("{arg:?}"),
                     );
                 }
-                self.memory(t, start, e.at, usize::MAX, out);
+                self.memory(t, start, e.at, None, out);
                 t.settled = true;
                 t.called = true;
                 t.text.lost_all = true;
@@ -3639,7 +3639,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         || format!("{v:?}"),
                     );
                 }
-                self.memory(t, start, e.at, usize::MAX, out);
+                self.memory(t, start, e.at, None, out);
                 t.settled = true;
             }
             EffectKind::Branch(c) => {
@@ -3724,14 +3724,14 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `start` - The block's start.
     /// * `at` - The statement or instruction compared at.
     /// * `b` - The block's index, whose successors' pending globals are
-    ///   left out; `usize::MAX` at a call or a return, where none may be.
+    ///   left out; `None` at a call or a return, where none may be.
     /// * `out` - Where the counts and disagreements go.
     fn memory(
         &self,
         t: &mut Trial<'_, L::Rig<'p>>,
         start: u64,
         at: u64,
-        b: usize,
+        b: Option<usize>,
         out: &mut Replayed,
     ) {
         let mask = low(self.width);
@@ -3751,7 +3751,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut kept: FxHashSet<u64> = L::kept(&t.emu, self.code.get(t.b), self.w, self.width)
             .into_iter()
             .collect();
-        for &s in self.succs.get(b).map_or(&[][..], Vec::as_slice) {
+        for &s in b
+            .and_then(|b| self.succs.get(b))
+            .map_or(&[][..], Vec::as_slice)
+        {
             for k in self
                 .w
                 .ins
