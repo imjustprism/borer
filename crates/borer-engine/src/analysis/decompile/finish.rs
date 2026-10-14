@@ -44,7 +44,15 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
         ),
         u8::try_from(bitness).unwrap_or(64),
     ));
-    let mut out: String = text.lines().map(elvis).collect::<Vec<_>>().join("\n");
+    // PERF: the elvis pass only shortens lines, so the text's own length
+    // caps the result; lines are written straight into it, one pass.
+    let mut out = String::with_capacity(text.len() + 1);
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&elvis(line));
+    }
     out.push('\n');
     out
 }
