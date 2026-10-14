@@ -464,7 +464,7 @@ impl BorerServer {
     /// When no binary is loaded, its metadata was refused, or the page
     /// does not read.
     pub(crate) fn clr_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.with_program(|p| borer_engine::clr::clr_tsv(p, spec))
+        self.with_program(|p| borer_engine::clr::clr_tsv(p, spec).map_err(|e| e.to_string()))
     }
 
     /// Lists the programs and containers embedded in the loaded file, and
