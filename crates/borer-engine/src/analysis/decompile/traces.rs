@@ -161,6 +161,22 @@ enum Node {
     Label(u32, u32),
 }
 
+/// A node of a path graph, by its index among that graph's nodes.
+///
+/// The index `u32::MAX` stands for no node: what a graph with more nodes
+/// than a `u32` names hands out, which every read treats as past every
+/// node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NodeIx(u32);
+
+impl NodeIx {
+    /// The index as a position of one of its graph's per-node `Vec`s, past
+    /// every element when it stands for no node.
+    fn pos(self) -> usize {
+        usize::try_from(self.0).unwrap_or(usize::MAX)
+    }
+}
+
 /// One side's paths.
 #[derive(Debug, Default)]
 struct Graph {
@@ -187,9 +203,40 @@ impl Graph {
     ///
     /// # Arguments
     ///
-    /// * `n` - The index.
-    fn node(&self, n: u32) -> &Node {
-        self.nodes.get(n as usize).unwrap_or(&Node::Halt)
+    /// * `ix` - The index.
+    ///
+    /// # Returns
+    ///
+    /// The node, or `None` when the index stands for no node, which every
+    /// walk reads as [`Node::Halt`].
+    fn node(&self, ix: NodeIx) -> Option<&Node> {
+        self.nodes.get(ix.pos())
+    }
+
+    /// Where the node at an index is: a text line number, or a binary
+    /// address.
+    ///
+    /// # Arguments
+    ///
+    /// * `ix` - The index.
+    ///
+    /// # Returns
+    ///
+    /// The site, or `None` when the index stands for no node.
+    fn site(&self, ix: NodeIx) -> Option<u64> {
+        self.site.get(ix.pos()).copied()
+    }
+
+    /// Points the node at an index at successors, when it stands for one.
+    ///
+    /// # Arguments
+    ///
+    /// * `ix` - The index.
+    /// * `to` - The successors.
+    fn set_go(&mut self, ix: NodeIx, to: Vec<u32>) {
+        if let Some(slot) = self.nodes.get_mut(ix.pos()) {
+            *slot = Node::Go(to);
+        }
     }
 
     /// Points every step past the silent steps with one way on, so a walk
@@ -203,7 +250,7 @@ impl Graph {
         let n = self.nodes.len();
         let past = |g: &Graph, mut x: u32| {
             for _ in 0..n {
-                match g.node(x) {
+                match g.node(NodeIx(x)).unwrap_or(&Node::Halt) {
                     Node::Go(to) if to.len() == 1 => x = to[0],
                     _ => break,
                 }
@@ -213,7 +260,7 @@ impl Graph {
         let to: Vec<u32> = (0..n)
             .map(|i| past(self, u32::try_from(i).unwrap_or(u32::MAX)))
             .collect();
-        let at = |x: &mut u32| *x = to.get(*x as usize).copied().unwrap_or(*x);
+        let at = |x: &mut u32| *x = to.get(NodeIx(*x).pos()).copied().unwrap_or(*x);
         for node in &mut self.nodes {
             match node {
                 Node::Call(_, next) | Node::Label(_, next) => at(next),
@@ -263,6 +310,21 @@ impl Names {
             self.by_last.entry(last).or_default().push(i);
         }
         i
+    }
+
+    /// A name by its index.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The index [`Names::intern`] returned.
+    ///
+    /// # Returns
+    ///
+    /// The name, or `None` when the index stands for none.
+    fn name(&self, k: u32) -> Option<&str> {
+        self.names
+            .get(usize::try_from(k).unwrap_or(usize::MAX))
+            .map(String::as_str)
     }
 }
 
@@ -525,8 +587,8 @@ fn binary_graph(
         for &(c, at) in calls.iter().rev() {
             chain = g.add(Node::Call(c, chain), at);
         }
-        if let Some(head) = heads.get(k).and_then(|h| g.nodes.get_mut(*h as usize)) {
-            *head = Node::Go(vec![chain]);
+        if let Some(&head) = heads.get(k) {
+            g.set_go(NodeIx(head), vec![chain]);
         }
     }
     (g, heads)
@@ -900,9 +962,9 @@ fn calls_in(t: &str, names: &Names) -> Vec<u32> {
             .get(last)
             .into_iter()
             .flatten()
-            .filter_map(|&k| Some((k, names.names.get(k as usize)?)))
+            .filter_map(|&k| Some((k, names.name(k)?)))
             .filter(|(_, n)| {
-                before.strip_suffix(n.as_str()).is_some_and(|head| {
+                before.strip_suffix(*n).is_some_and(|head| {
                     let head = head.strip_suffix("__imp_").unwrap_or(head);
                     head.chars()
                         .next_back()
@@ -968,7 +1030,7 @@ impl Builder<'_> {
                 node = self.halt;
                 ends = true;
             }
-            let name = self.names.names.get(n as usize).map_or("", String::as_str);
+            let name = self.names.name(n).unwrap_or("");
             let callee = if INTRINSICS.contains(&name) {
                 Callee::Maybe(Some(n))
             } else {
@@ -1043,9 +1105,7 @@ impl Builder<'_> {
     /// * `n` - The node.
     /// * `to` - Its successors.
     fn fill(&mut self, n: u32, to: Vec<u32>) {
-        if let Some(slot) = self.g.nodes.get_mut(n as usize) {
-            *slot = Node::Go(to);
-        }
+        self.g.set_go(NodeIx(n), to);
     }
 
     /// Builds a run of statements in front of `next`.
@@ -1294,7 +1354,7 @@ impl Places<'_> {
                 continue;
             }
             *fuel = fuel.checked_sub(1)?;
-            match self.g.node(n) {
+            match self.g.node(NodeIx(n)).unwrap_or(&Node::Halt) {
                 Node::Call(c, next) => {
                     r.calls.push((*c, *next));
                     if matches!(c, Callee::Maybe(_)) {
@@ -1337,7 +1397,7 @@ impl Places<'_> {
                 continue;
             }
             *fuel = fuel.checked_sub(1)?;
-            match self.g.node(n) {
+            match self.g.node(NodeIx(n)).unwrap_or(&Node::Halt) {
                 Node::Call(Callee::Maybe(_), next) | Node::Label(_, next) => stack.push(*next),
                 Node::Go(to) => stack.extend(to.iter().copied()),
                 Node::Switch(to, out) => {
@@ -1419,7 +1479,7 @@ fn included(
             .iter()
             .filter_map(|(c, _)| match c {
                 Callee::Named(n) | Callee::Maybe(Some(n)) => {
-                    names.names.get(*n as usize).map(|s| format!("call {s}"))
+                    names.name(*n).map(|s| format!("call {s}"))
                 }
                 Callee::Maybe(None) => None,
             })
@@ -1431,12 +1491,12 @@ fn included(
         let near: Vec<String> = from
             .iter()
             .take(4)
-            .map(|n| format!("{:#x}", b.site.get(*n as usize).copied().unwrap_or(0)))
+            .map(|n| format!("{:#x}", b.site(NodeIx(*n)).unwrap_or(0)))
             .collect();
         other.push(format!("from {}", near.join(" ")));
         let trail: Vec<String> = last
             .iter()
-            .filter_map(|n| a.site.get(*n as usize))
+            .filter_map(|n| a.site(NodeIx(*n)))
             .map(|s| format!("{s:#x}"))
             .collect();
         if !trail.is_empty() {
@@ -1444,7 +1504,7 @@ fn included(
         }
         Disagreement {
             side,
-            at: a.site.get(at as usize).copied().unwrap_or(0),
+            at: a.site(NodeIx(at)).unwrap_or(0),
             step,
             other,
         }
@@ -1454,7 +1514,7 @@ fn included(
         if !seen.insert((n, Rc::clone(&from))) {
             continue;
         }
-        match a.node(n) {
+        match a.node(NodeIx(n)).unwrap_or(&Node::Halt) {
             Node::Go(to) | Node::Switch(to, _) => {
                 work.extend(to.iter().map(|t| (*t, Rc::clone(&from), last)));
             }
@@ -1464,7 +1524,10 @@ fn included(
                     work.push((*next, from, last));
                     continue;
                 };
-                let (head, addr) = heads.get(*block as usize).copied().unwrap_or((u32::MAX, 0));
+                let (head, addr) = heads
+                    .get(usize::try_from(*block).unwrap_or(usize::MAX))
+                    .copied()
+                    .unwrap_or((u32::MAX, 0));
                 if places
                     .reaches(&from, head, &mut fuel)
                     .ok_or("out of fuel")?
@@ -1490,7 +1553,7 @@ fn included(
                     to.extend(from.iter().copied());
                 } else if to.is_empty() && !r.halt {
                     let Callee::Named(k) = c else { continue };
-                    let name = names.names.get(*k as usize).map_or("?", String::as_str);
+                    let name = names.name(*k).unwrap_or("?");
                     return Ok(Some(report(n, last, format!("call {name}"), &r, &from)));
                 }
                 if !to.is_empty() {
@@ -1553,14 +1616,17 @@ pub fn check(
         .enumerate()
         .filter_map(|(i, b)| Some((b.start, u32::try_from(i).ok()?)))
         .collect();
-    let Some(&bin_entry) = blocks.get(&f.entry).and_then(|b| heads.get(*b as usize)) else {
+    let Some(&bin_entry) = blocks
+        .get(&f.entry)
+        .and_then(|b| heads.get(usize::try_from(*b).unwrap_or(usize::MAX)))
+    else {
         return Structure::Unchecked("the entry starts no block");
     };
     let (mut txt, txt_entry) = match text_graph(text, &names, &blocks) {
         Ok(g) => g,
         Err(why) => return Structure::Unchecked(why),
     };
-    let past = |to: &[u32], n: u32| to.get(n as usize).copied().unwrap_or(n);
+    let past = |to: &[u32], n: u32| to.get(NodeIx(n).pos()).copied().unwrap_or(n);
     let (bin_to, txt_to) = (bin.compress(), txt.compress());
     let heads: Vec<(u32, u64)> = heads
         .iter()
