@@ -2499,6 +2499,16 @@ impl Program {
     /// file sizes) holds `va`, or `None` when the address is unmapped or only
     /// in `.bss`-style memory.
     pub fn section_at(&self, va: u64) -> Option<&Section> {
+        // The first-declared section answers the common read before the
+        // search: it wins every overlap by declaration order anyway, and
+        // most images keep their hottest code in it.
+        if let Some(first) = self.sections.first()
+            && first.file_size > 0
+            && first.va <= va
+            && va < first.va + first.vsize.max(first.file_size)
+        {
+            return Some(first);
+        }
         let rows = &self.section_index[..self.section_index.partition_point(|r| r.va <= va)];
         let mut best: Option<usize> = None;
         for r in rows.iter().rev() {
