@@ -32,6 +32,7 @@ use super::ctext::{
     Ast, Base, Bin, CTy, Tok, Un, closing, expression, float_bits, float_of, split_top, tokens,
 };
 use super::expr::{Expr, Op, TEB_FIELDS, UnOp, fold, unary};
+use super::line::is_param_name;
 use super::signature::{Passing, Signature, passing, poke_word, printed};
 use super::traces::{INTRINSICS, Stmt, blank, statements};
 use crate::analysis::{Analysis, BlockTerm, Overlay, bare_name, name_of};
@@ -1238,11 +1239,7 @@ impl<'p> Script<'p> {
             };
             vars.insert(name.clone(), Variable { ty: *ty, slot });
         }
-        let values = |n: &str| {
-            vars.contains_key(n)
-                || n.strip_prefix('a')
-                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
-        };
+        let values = |n: &str| vars.contains_key(n) || is_param_name(n);
         let body: Vec<String> = all
             .get(base..)
             .unwrap_or(&[])
@@ -2508,20 +2505,19 @@ impl Running<'_, '_> {
         match e {
             Ast::Name(n) => match self.s.vars.get(n).copied() {
                 Some(v) => Ok(Self::slot_place(v)),
-                None if global_name(n).is_some() => {
-                    let (at, ty) = global_name(n).unwrap_or((0, CTy::of(Base::Void)));
-                    Ok(Place::Mem(at, ty))
-                }
-                None => match n
-                    .strip_prefix('a')
-                    .and_then(|d| d.parse::<usize>().ok())
-                    .and_then(|k| k.checked_sub(1))
-                {
-                    Some(i) if i >= self.s.passing.regs.len() => Ok(Place::Mem(
-                        self.s.entry_sp.wrapping_add(self.s.passing.stack_offset(i)),
-                        CTy::int(self.word(), false),
-                    )),
-                    _ => unchecked(format!("`{n}` is no place this can write")),
+                None => match global_name(n) {
+                    Some((at, ty)) => Ok(Place::Mem(at, ty)),
+                    None => match n
+                        .strip_prefix('a')
+                        .and_then(|d| d.parse::<usize>().ok())
+                        .and_then(|k| k.checked_sub(1))
+                    {
+                        Some(i) if i >= self.s.passing.regs.len() => Ok(Place::Mem(
+                            self.s.entry_sp.wrapping_add(self.s.passing.stack_offset(i)),
+                            CTy::int(self.word(), false),
+                        )),
+                        _ => unchecked(format!("`{n}` is no place this can write")),
+                    },
                 },
             },
             Ast::Un(Un::Deref, a) => {
@@ -2821,29 +2817,29 @@ impl Running<'_, '_> {
         }
         let bits = ty.bits(word).unwrap_or(64);
         if op.compares() {
-            let (l, r) = if ty.signed() {
-                (
+            let unsigned = !ty.signed();
+            let t = if unsigned {
+                match op {
+                    Bin::Lt => a.bits < b.bits,
+                    Bin::Le => a.bits <= b.bits,
+                    Bin::Gt => a.bits > b.bits,
+                    Bin::Ge => a.bits >= b.bits,
+                    Bin::Eq => a.bits == b.bits,
+                    _ => a.bits != b.bits,
+                }
+            } else {
+                let (l, r) = (
                     sext(a.bits, bits).cast_signed(),
                     sext(b.bits, bits).cast_signed(),
-                )
-            } else {
-                (
-                    i64::try_from(a.bits).unwrap_or(i64::MAX),
-                    i64::try_from(b.bits).unwrap_or(i64::MAX),
-                )
-            };
-            let unsigned = !ty.signed();
-            let t = match op {
-                Bin::Lt if unsigned => a.bits < b.bits,
-                Bin::Le if unsigned => a.bits <= b.bits,
-                Bin::Gt if unsigned => a.bits > b.bits,
-                Bin::Ge if unsigned => a.bits >= b.bits,
-                Bin::Lt => l < r,
-                Bin::Le => l <= r,
-                Bin::Gt => l > r,
-                Bin::Ge => l >= r,
-                Bin::Eq => a.bits == b.bits,
-                _ => a.bits != b.bits,
+                );
+                match op {
+                    Bin::Lt => l < r,
+                    Bin::Le => l <= r,
+                    Bin::Gt => l > r,
+                    Bin::Ge => l >= r,
+                    Bin::Eq => a.bits == b.bits,
+                    _ => a.bits != b.bits,
+                }
             };
             return Ok(Self::boolean(t));
         }
