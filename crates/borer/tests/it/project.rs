@@ -349,7 +349,7 @@ fn the_server_keys_projects_by_hash_and_pages_the_ledger() {
     )
     .unwrap();
     assert_eq!(
-        only,
+        crate::without_evidence(&only),
         "# 1 annotations (2 names, 0 findings, 1 open question(s))\n"
     );
     let saved = call("save_project", serde_json::json!({"path": project})).unwrap();
@@ -363,7 +363,9 @@ fn the_server_keys_projects_by_hash_and_pages_the_ledger() {
     call("load_binary", serde_json::json!({"path": path(&copy)})).unwrap();
     let moved = call("load_project", serde_json::json!({"path": project})).unwrap();
     assert!(moved.starts_with("loaded 2 names + 1 comments"), "{moved}");
-    assert!(!moved.contains('#'), "a copy loads without a note: {moved}");
+    let lines: Vec<&str> = moved.lines().collect();
+    assert_eq!(lines.len(), 2, "a copy loads without a note: {moved}");
+    assert!(lines[1].starts_with("# evidence: "), "{moved}");
 
     std::fs::write(&original, &rebuild).unwrap();
     call("load_binary", serde_json::json!({"path": path(&original)})).unwrap();

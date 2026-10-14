@@ -17,6 +17,7 @@ use super::{
     parse_field_offset, read_lock, resource_name,
 };
 use crate::paging::Asked;
+use crate::session;
 
 /// Most rows one listing keyed by a vtable slot returns.
 const SLOT_PAGE: usize = 2000;
@@ -1537,6 +1538,41 @@ impl BorerServer {
         lock(&self.ledger).render(loaded.as_deref(), (&counts, fingerprint), |key| {
             recall.holds(key)
         })
+    }
+
+    /// Answers `borer://session/evidence/<id>`, or how to read it when the
+    /// URI stops at `evidence`.
+    ///
+    /// The kept answer comes back as it was sent, its own evidence line
+    /// included; an id past the cap is answered with the notice that says
+    /// so, since the text is gone but the session still lists the request
+    /// that minted it.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The URI's argument after `borer://session/`:
+    ///   `evidence/<id>`, or `evidence` alone for the grammar.
+    ///
+    /// # Errors
+    ///
+    /// When the id is not one a `# evidence:` line carried, or the spec
+    /// names nothing under `borer://session`.
+    pub(crate) fn session_evidence(&self, spec: &str) -> Result<String, ErrorData> {
+        let Some(id) = spec.strip_prefix("evidence/").filter(|id| !id.is_empty()) else {
+            return if spec == "evidence" {
+                self.help_text("session")
+            } else {
+                Err(unknown_resource(&format!("borer://session/{spec}")))
+            };
+        };
+        match lock(&self.ledger).evidence(id) {
+            Ok(session::Answer::Kept(text)) => Ok(text),
+            Ok(session::Answer::LetGo) => Ok(format!(
+                "# evidence {id} was let go past the {} the session keeps; borer://session lists the requests it answered\n",
+                session::EVIDENCE_KEPT
+            )),
+            Err(why) => Err(err_params(why)),
+        }
     }
 
     /// Lists every name table the binary encodes, one line per function.

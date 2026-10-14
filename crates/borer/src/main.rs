@@ -4258,8 +4258,8 @@ impl ServerHandler for BorerServer {
         ))
     }
 
-    /// Runs a tool, then passes its text through the session's answer memory
-    /// and the byte budget.
+    /// Runs a tool, then passes its text through the session's answer
+    /// memory, the byte budget and the evidence line.
     ///
     /// Any tool takes a `since` argument the schemas leave out (every tool
     /// would pay for it in the tool list): the tag of the answer the reader
@@ -4359,7 +4359,7 @@ impl ServerHandler for BorerServer {
                         Ok(mut recall) => recall.answer(&key, since, &again, full),
                         Err(_) => full,
                     };
-                    t.text = budgeted(sent, Narrow::Tool);
+                    t.text = self.evidence(budgeted(sent, Narrow::Tool));
                 }
                 CallToolResponse::Complete(result)
             }
@@ -4590,7 +4590,7 @@ const PARAMS_SHAPES: &[(&str, &str)] = &[
 
 impl BorerServer {
     /// Reads a `borer://` resource: the text its handler answers, through
-    /// the session's answer memory and the byte budget.
+    /// the session's answer memory, the byte budget and the evidence line.
     ///
     /// `resources/read` and the `query` tool both come here, so a URI is
     /// answered alike either way: the same text, the same errors, and one
@@ -4599,7 +4599,10 @@ impl BorerServer {
     /// characters an argument uses, and an experiment spec is full of them.
     /// An unknown URI is refused with the few resources nearest it, and
     /// `borer://help` lists every one, which is how an agent whose host
-    /// lists no resources finds them.
+    /// lists no resources finds them. An evidence URI
+    /// (`borer://session/evidence/<id>`) skips the memory, the budget's
+    /// cut apart, and mints no evidence of its own: the text an id names
+    /// comes back exactly as it was sent.
     ///
     /// # Arguments
     ///
@@ -4621,6 +4624,9 @@ impl BorerServer {
         let asked = paging::Asked::read(uri).map_err(err_params)?;
         let text = self.listing(&asked)?;
         let key = asked.key();
+        if asked.core.starts_with(EVIDENCE_URI) {
+            return Ok((key, budgeted(text, Narrow::Uri)));
+        }
         if asked.core != SESSION_URI {
             lock(&self.ledger).answered(
                 &key,
@@ -4633,7 +4639,7 @@ impl BorerServer {
             Ok(mut recall) => recall.answer(&key, asked.since, &again, text),
             Err(_) => text,
         };
-        Ok((key, budgeted(text, Narrow::Uri)))
+        Ok((key, self.evidence(budgeted(text, Narrow::Uri))))
     }
 
     /// The text of one resource, as its handler answers it: no answer
@@ -4785,6 +4791,7 @@ impl BorerServer {
             ("playbook", Some(spec)) => resources::playbook_text(&spec)?,
             ("help", None) => resources::help_index(self.loaded().as_deref()),
             ("session", None) => self.session_text(),
+            ("session", Some(spec)) => return self.session_evidence(&spec),
             ("help", Some(name)) => self.help_text(&name)?,
             (name, None)
                 if RESOURCE_TEMPLATES
@@ -4810,7 +4817,30 @@ impl BorerServer {
 /// The session ledger's URI, whose reads the ledger does not list.
 const SESSION_URI: &str = "borer://session";
 
+/// The evidence retrieval prefix, whose reads return the retained text
+/// verbatim instead of minting new evidence.
+const EVIDENCE_URI: &str = "borer://session/evidence/";
+
 impl BorerServer {
+    /// Sends an answer with the evidence line naming it, and keeps the
+    /// answer behind that line's id for `borer://session/evidence/<id>`
+    /// ([`session::Evidence`]).
+    ///
+    /// One line is all the answer pays, whatever its size; the text stays
+    /// server-side. The line goes after every other, a `# since=` line
+    /// included, since it names the emission a reader cites.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The answer as sent, the byte budget already applied.
+    fn evidence(&self, mut text: String) -> String {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&lock(&self.ledger).evidence_line(&text));
+        text
+    }
+
     /// Records in the ledger a tool call that changed what the session
     /// holds: a load or a save, or a name, comment, type or script applied
     /// with `dry_run=false` ([`session::changes`]), and what a save or a
@@ -5008,6 +5038,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://help/{name}",
         "How to read one resource: its URI, what it answers and, for a template, an example built from the loaded binary",
         "borer://help/emulate",
+    ),
+    (
+        "borer://session/evidence/{id}",
+        "The answer its `# evidence:` line names, kept as it was sent; every answer carries one as its last line (a mermaid graph: `%% evidence:`), the id <n>-<8 hex digits>, and this returns the text behind it or says it was let go past the 256 the session keeps",
+        "borer://session/evidence/1-00000000",
     ),
     (
         "borer://playbook/{name}",
@@ -5881,6 +5916,66 @@ fn read_packs(files: &[String]) -> anyhow::Result<Arc<Packs>> {
 #[cfg(test)]
 mod tests {
     use super::percent_decode;
+
+    /// An answer with its evidence line taken off, so two emissions of one
+    /// answer compare: the id names the emission, so that is the one line
+    /// that differs between them.
+    ///
+    /// # Arguments
+    ///
+    /// * `sent` - An answer as sent.
+    fn without_evidence(sent: &str) -> &str {
+        let at = sent.trim_end_matches('\n').rfind('\n').map_or(0, |i| i + 1);
+        let last = &sent[at..];
+        if last.starts_with("# evidence:") || last.starts_with("%% evidence:") {
+            &sent[..at]
+        } else {
+            sent
+        }
+    }
+
+    /// Every answer ends with an evidence line naming it, and the id it
+    /// names returns the answer exactly as it was sent.
+    ///
+    /// The line is the answer's last, a `# since=` line before it, and the
+    /// id is `<n>-<8 hex digits>`; an id no `# evidence:` line carried is
+    /// refused as invalid params.
+    ///
+    /// # Panics
+    ///
+    /// When the line is missing or malformed, or the read is not the text.
+    #[test]
+    fn an_answer_ends_with_evidence_that_returns_it() {
+        use borer_engine::program::{Arch, Program, Section};
+        let mut code = vec![0x90; 0x200];
+        code.push(0xc3);
+        let text = Section::mapped(".text", 0x1000, 0, 0x201, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = super::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..super::BorerServer::default()
+        };
+        let whole = server.read_uri("borer://disasm/0x1000").expect("reads").1;
+        let last = whole.lines().last().expect("a last line");
+        let id = last
+            .strip_prefix("# evidence: ")
+            .expect("the answer ends with its evidence line")
+            .to_owned();
+        let (counter, digest) = id.split_once('-').expect("the id is <n>-<digest>");
+        assert!(!counter.is_empty() && counter.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_eq!(digest.len(), 8, "{id}");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+        let evidence_uri = format!("borer://session/evidence/{id}");
+        let (read_as, back) = server.read_uri(&evidence_uri).expect("reads");
+        assert_eq!((read_as.as_str(), back), (evidence_uri.as_str(), whole));
+        let refused = server
+            .read_uri("borer://session/evidence/9999-00000000")
+            .expect_err("never minted");
+        assert_eq!(refused.code, super::ErrorCode::INVALID_PARAMS);
+    }
 
     /// A fault inside a tool becomes an answer, not a dead session.
     ///
@@ -7742,7 +7837,9 @@ mod tests {
     /// naming the read that returns the text, whichever way it is read;
     /// `!fresh` after the tag is whole again, and a tag that is not one is
     /// refused. An unknown URI is the same refusal both ways, listing every
-    /// resource there is.
+    /// resource there is. The evidence line, the answer's last, names the
+    /// emission and so differs between two reads of one answer; these
+    /// assertions compare with it taken off.
     ///
     /// # Panics
     ///
@@ -7772,12 +7869,15 @@ mod tests {
         let (read_as, whole) = server.read_uri(uri).expect("reads");
         assert_eq!(read_as, uri);
         assert!(whole.len() > 512, "long enough to be remembered: {whole}");
-        assert_eq!(query(uri).expect("reads"), whole, "a repeat is whole");
+        assert_eq!(
+            without_evidence(&query(uri).expect("reads")),
+            without_evidence(&whole),
+            "a repeat is whole but for its evidence line"
+        );
         let tag = whole
             .lines()
-            .last()
-            .and_then(|l| l.strip_prefix("# since="))
-            .expect("a long answer ends with its tag");
+            .find_map(|l| l.strip_prefix("# since="))
+            .expect("a long answer carries its tag");
         let tagged = format!("{uri}!since={tag}");
         let note = query(&tagged).expect("reads");
         assert!(
@@ -7785,17 +7885,24 @@ mod tests {
             "{note}"
         );
         assert!(
-            note.ends_with("; this note stands in for that text, and reading borer://disasm/0x1000 (resources/read or the query tool) returns it in full\n"),
+            without_evidence(&note)
+                .ends_with("; this note stands in for that text, and reading borer://disasm/0x1000 (resources/read or the query tool) returns it in full\n"),
             "{note}"
         );
         let (read_as, noted) = server.read_uri(&tagged).expect("reads");
         assert_eq!(
-            (read_as.as_str(), noted),
-            (uri, note),
+            (read_as.as_str(), without_evidence(&noted)),
+            (uri, without_evidence(&note)),
             "one memory for both ways"
         );
-        assert_eq!(query(&format!("{tagged}!fresh")).expect("reads"), whole);
-        assert_eq!(query(&format!("{uri}!fresh")).expect("reads"), whole);
+        assert_eq!(
+            without_evidence(&query(&format!("{tagged}!fresh")).expect("reads")),
+            without_evidence(&whole)
+        );
+        assert_eq!(
+            without_evidence(&query(&format!("{uri}!fresh")).expect("reads")),
+            without_evidence(&whole)
+        );
         let bad = query(&format!("{uri}!since=zz")).expect_err("not a tag");
         assert_eq!(bad.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         let refused = server.read_uri("borer://nope").expect_err("unknown");

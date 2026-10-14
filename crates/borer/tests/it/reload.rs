@@ -278,8 +278,7 @@ fn a_request_pipelined_behind_the_reload_is_answered() {
     let held = held.unwrap_or_default();
     let tag = held
         .lines()
-        .last()
-        .and_then(|l| l.strip_prefix("# since="))
+        .find_map(|l| l.strip_prefix("# since="))
         .unwrap_or_else(|| panic!("the held answer carries no tag: {held}"))
         .to_owned();
     comment(&mut client, entry + 3, "held");
@@ -330,7 +329,11 @@ fn the_launched_process_serves_the_session_through_reloads() {
             &format!("tool list announced after {round}"),
         );
         let after = client.text("binary_info", "{}");
-        assert_eq!(after, info, "the file loaded before {round}");
+        assert_eq!(
+            crate::without_evidence(&after),
+            crate::without_evidence(&info),
+            "the file loaded before {round}"
+        );
         let names = client.text("annotations", "{}");
         assert!(
             names.contains(&format!("{entry:<12} name: kept_across_reload")),
@@ -389,7 +392,11 @@ fn a_reload_keeps_the_load_options() {
         "tool list announced after the reload",
     );
     let after = client.text("binary_info", "{}");
-    assert_eq!(after, before, "the reload loaded the file another way");
+    assert_eq!(
+        crate::without_evidence(&after),
+        crate::without_evidence(&before),
+        "the reload loaded the file another way"
+    );
     client.finish();
 }
 
@@ -422,5 +429,9 @@ fn a_reload_keeps_a_stated_layout() {
     let after = client.text("binary_info", "{}");
     client.finish();
     std::fs::remove_file(&path).expect("the file is removed");
-    assert_eq!(after, before, "the reload mapped the file another way");
+    assert_eq!(
+        crate::without_evidence(&after),
+        crate::without_evidence(&before),
+        "the reload mapped the file another way"
+    );
 }

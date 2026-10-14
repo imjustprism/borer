@@ -147,9 +147,11 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 and arm64 P
      Rhai script over the program in one call; its query(uri) reads any resource, \
      rows(uri) its table as maps, and help(\"query\") lists every resource. \
      Outputs are capped and paged; count_only and filter keep them small. An answer of \
-     512 bytes or more ends with `# since=<tag>` (a mermaid graph: `%% since=<tag>`); \
+     512 bytes or more carries `# since=<tag>` (a mermaid graph: `%% since=<tag>`); \
      the same request with \"since\": \"<tag>\" added (on a URI: !since=<tag>) answers \
-     with a one-line note if nothing changed, else only the changed lines.";
+     with a one-line note if nothing changed, else only the changed lines. Every \
+     answer's last line is `# evidence: <id>` naming it; \
+     borer://session/evidence/<id> returns the text behind the id, the last 256 kept.";
 
 /// The instructions' resource sentence before the groups, tools written as
 /// in [`WORKFLOW`].

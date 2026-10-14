@@ -111,6 +111,22 @@ def call_tool(name, args):
     return "\n".join(c.get("text", "") for c in res.get("content", []))
 
 
+def without_evidence(text):
+    """An answer without its evidence line: the id names the emission, so
+    that is the one line that differs between two emissions of one answer."""
+    for mark in ("\n# evidence: ", "\n%% evidence: "):
+        if mark in text:
+            return text.split(mark)[0] + "\n"
+    return text
+
+
+def evidence_id(text):
+    """The evidence id an answer's last line names (`<n>-<8 hex digits>`)."""
+    last = text.splitlines()[-1]
+    assert last.startswith("# evidence: "), text[-200:]
+    return last.removeprefix("# evidence: ")
+
+
 # 1. initialize
 init = wait_for(
     send(
@@ -278,10 +294,12 @@ wide = call_tool("strings", {"encoding": "utf16", "min_length": 6, "limit": 5})
 assert wide.startswith("# showing"), wide[:200]
 paged = call_tool("symbols", {"limit": 3, "offset": 1})
 assert paged.startswith("# showing"), paged[:200]
+# count_only stays one line, and the evidence line naming the answer is the
+# only other
 only = call_tool("functions", {"count_only": True})
-assert only.count("\n") == 1 and only.startswith("# ") and "functions" in only, only
+assert only.count("\n") == 2 and only.startswith("# ") and "functions" in only, only
 only_s = call_tool("strings", {"count_only": True, "filter": "borer"})
-assert only_s.count("\n") == 1, only_s
+assert only_s.count("\n") == 2, only_s
 with_bytes = call_tool("disassemble", {"address": m.group(1), "count": 2, "bytes": True})
 assert len(with_bytes.splitlines()[1]) > len(dis.splitlines()[1]), (with_bytes, dis)
 
@@ -653,17 +671,24 @@ assert "error" in missing, missing
 # query reads every resource through a tool, as resources/read answers it: one
 # answer memory keyed by the URI. A read without a tag is whole every time
 # (borer://info was read above: a second reader sharing the session may not
-# hold it); with the tag its last line carries, on the URI or as `since`, it is
+# hold it); with the tag its answer carries, on the URI or as `since`, it is
 # a note naming the read that returns the text; `!fresh` is whole; and the
-# same refusal
+# same refusal. Two emissions of one answer differ only in their evidence
+# line, which names the emission.
 info = rd["contents"][0]["text"]
-assert call_tool("query", {"uri": "borer://info"}) == info
-tag = info.splitlines()[-1].removeprefix("# since=")
+assert without_evidence(call_tool("query", {"uri": "borer://info"})) == without_evidence(info)
+tag = next(
+    line.removeprefix("# since=") for line in info.splitlines() if line.startswith("# since=")
+)
 noted = call_tool("query", {"uri": f"borer://info!since={tag}"})
 assert noted.startswith(f"# unchanged since the answer tagged {tag}: "), noted[:300]
 assert "reading borer://info (resources/read or the query tool) returns it" in noted, noted
-assert call_tool("query", {"uri": "borer://info", "since": tag}) == noted
-assert call_tool("query", {"uri": f"borer://info!since={tag}!fresh"}) == info
+assert without_evidence(
+    call_tool("query", {"uri": "borer://info", "since": tag})
+) == without_evidence(noted)
+assert without_evidence(
+    call_tool("query", {"uri": f"borer://info!since={tag}!fresh"})
+) == without_evidence(info)
 qmissing = wait_for(
     send("tools/call", {"name": "query", "arguments": {"uri": "borer://nope"}}), allow_error=True
 )
@@ -690,17 +715,25 @@ assert ran.startswith("true\ntrue\n"), ran
 # is refused
 page = {"limit": 40, "offset": 1}
 first = call_tool("functions", page)
-assert call_tool("functions", page) == first
-tag = first.splitlines()[-1].removeprefix("# since=")
+assert without_evidence(call_tool("functions", page)) == without_evidence(first)
+tag = next(
+    line.removeprefix("# since=") for line in first.splitlines() if line.startswith("# since=")
+)
 note = call_tool("functions", {**page, "since": tag})
 assert note.startswith(f"# unchanged since the answer tagged {tag}: "), note[:300]
 assert 'calling functions {"limit":40,"offset":1} returns it in full' in note, note
+# the evidence id the answer's last line names returns the answer as it was
+# sent, read either way
+ev = evidence_id(first)
+assert call_tool("query", {"uri": f"borer://session/evidence/{ev}"}) == first
+back = wait_for(send("resources/read", {"uri": f"borer://session/evidence/{ev}"}))
+assert back["contents"][0]["text"] == first, back
 bad = wait_for(
     send("tools/call", {"name": "functions", "arguments": {**page, "since": "zz"}}),
     allow_error=True,
 )
 assert "is not a tag" in json.dumps(bad), bad
-print("query and answer memory OK (resources/read's text, errors; whole unless a tag is passed)")
+print("query and answer memory OK (whole unless a tag is passed; evidence id returns an answer)")
 comp = wait_for(
     send(
         "completion/complete",
