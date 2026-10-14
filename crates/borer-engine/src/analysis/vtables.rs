@@ -1172,20 +1172,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         }
     }
     let address_votes = {
-        // PERF: the class substring is cloned straight out of the name;
-        // cloning the whole qualified name per scan was pure churn.
-        let member_class = |entry: u64| -> Option<String> {
-            let f = analysis.function(entry)?;
-            if statics.contains(&entry) {
-                return None;
-            }
-            renames
-                .get(&entry)
-                .map_or(f.name.as_deref(), |n| Some(n.as_str()))
-                .and_then(class_of)
-                .map(str::to_owned)
-                .or_else(|| hints.get(&entry)?.get(&0).cloned())
-        };
+        let member_class = |entry: u64| named_class(analysis, &renames, &statics, &hints, entry);
         let mut votes: BTreeMap<(u64, u8), BTreeSet<String>> = BTreeMap::new();
         for (&entry, scan) in &scans {
             let Some(class) = member_class(entry) else {
@@ -1236,18 +1223,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
             .filter_map(|e| analysis.function(*e))
             .collect();
         scans.extend(scan_all(program, &todo, bitness, &conv));
-        let this_class = |entry: u64| -> Option<String> {
-            let f = analysis.function(entry)?;
-            if statics.contains(&entry) {
-                return None;
-            }
-            renames
-                .get(&entry)
-                .cloned()
-                .or_else(|| f.name.clone())
-                .and_then(|n| class_of(&n).map(str::to_owned))
-                .or_else(|| hints.get(&entry)?.get(&0).cloned())
-        };
+        let this_class = |entry: u64| named_class(analysis, &renames, &statics, &hints, entry);
         let found = return_summaries(
             analysis,
             &scans,
@@ -2423,6 +2399,38 @@ fn receiver_class<'a>(
     }
 }
 
+/// Returns the class a function's own name gives it, else the class its
+/// first parameter was hinted, without asking whether it is a member of
+/// the class ([`receiver_class`] does).
+///
+/// # Arguments
+///
+/// * `analysis` - The functions.
+/// * `renames` - Names chosen by this pass.
+/// * `statics` - Class-named functions whose first argument is not `this`.
+/// * `hints` - Parameter classes chosen by this pass.
+/// * `entry` - The function's entry.
+fn named_class(
+    analysis: &Analysis,
+    renames: &BTreeMap<u64, String>,
+    statics: &BTreeSet<u64>,
+    hints: &BTreeMap<u64, BTreeMap<u8, String>>,
+    entry: u64,
+) -> Option<String> {
+    let f = analysis.function(entry)?;
+    if statics.contains(&entry) {
+        return None;
+    }
+    // PERF: the class substring is cloned straight out of the name;
+    // cloning the whole qualified name per scan was pure churn.
+    renames
+        .get(&entry)
+        .map_or(f.name.as_deref(), |n| Some(n.as_str()))
+        .and_then(class_of)
+        .map(str::to_owned)
+        .or_else(|| hints.get(&entry)?.get(&0).cloned())
+}
+
 /// The class a function's parameter `n` is known to point at.
 ///
 /// A declared signature names it; otherwise a hint an earlier round
@@ -3041,6 +3049,21 @@ fn scan_all(
     .collect()
 }
 
+/// The register `r` stands for at `bitness`: its 64-bit self on 64-bit
+/// code, the 32-bit one it aliases on 32-bit code.
+///
+/// # Arguments
+///
+/// * `r` - Any register.
+/// * `bitness` - 32 or 64.
+fn full_reg(r: Register, bitness: u32) -> Register {
+    if bitness == 64 {
+        r.full_register()
+    } else {
+        r.full_register32()
+    }
+}
+
 /// Follows `this`, the incoming arguments and the table addresses loaded
 /// into registers through a function's instructions in address order.
 ///
@@ -3087,13 +3110,6 @@ fn scan_function(program: &Program, f: &Function, bitness: u32, conv: &Conv) -> 
     };
     let mut info = InstructionInfoFactory::new();
     scan.args_read = entry_reads(f, &blocks, bitness, conv, &mut info);
-    let full = |r: Register| {
-        if bitness == 64 {
-            r.full_register()
-        } else {
-            r.full_register32()
-        }
-    };
     for (start, block) in f.blocks.iter().map(|b| b.start).zip(blocks) {
         // INVARIANT: a block laid out before the entry (code the function
         // shares with another, which it jumps back to) is reached with
@@ -3126,11 +3142,11 @@ fn scan_function(program: &Program, f: &Function, bitness: u32, conv: &Conv) -> 
                         .is_some_and(|r| loaded.contains(r))
                 }));
             if instr.op0_kind() == OpKind::Register {
-                let dst = full(instr.op0_register());
+                let dst = full_reg(instr.op0_register(), bitness);
                 let loads = match (instr.mnemonic(), instr.op1_kind()) {
                     (Mnemonic::Lea, OpKind::Memory) => instr.memory_base() == Register::RIP,
                     (Mnemonic::Mov, OpKind::Register) => {
-                        loaded.contains(&full(instr.op1_register()))
+                        loaded.contains(&full_reg(instr.op1_register(), bitness))
                     }
                     (
                         Mnemonic::Mov,
@@ -3198,13 +3214,6 @@ fn entry_reads(
     let Some(&first) = index.get(&f.entry) else {
         return 0;
     };
-    let full = |r: Register| {
-        if bitness == 64 {
-            r.full_register()
-        } else {
-            r.full_register32()
-        }
-    };
     let bit = |r: Register| {
         conv.args
             .iter()
@@ -3227,7 +3236,7 @@ fn entry_reads(
                 && instr.op0_kind() == OpKind::Register;
             let mut writes = 0u32;
             for ur in info.info(instr).used_registers() {
-                let Some((pos, b)) = bit(full(ur.register())) else {
+                let Some((pos, b)) = bit(full_reg(ur.register(), bitness)) else {
                     continue;
                 };
                 if matches!(
@@ -3473,11 +3482,7 @@ fn step(
     } = *conv;
     let word = if bitness == 64 { 8 } else { 4 };
     if matches!(instr.flow_control(), FlowControl::Return) {
-        let rax = if bitness == 64 {
-            Register::RAX
-        } else {
-            Register::EAX
-        };
+        let rax = full_reg(Register::RAX, bitness);
         match vals.get(&rax) {
             Some(Tracked::TlsSlot(off)) => scan.returns_tls = Some(*off),
             Some(Tracked::Result(callee)) => scan.returns_result = Some(*callee),
@@ -3510,11 +3515,7 @@ fn step(
             vals.remove(r);
         }
         if direct {
-            let rax = if bitness == 64 {
-                Register::RAX
-            } else {
-                Register::EAX
-            };
+            let rax = full_reg(Register::RAX, bitness);
             vals.insert(rax, Tracked::Result(instr.near_branch_target()));
         }
         return;
@@ -3666,11 +3667,7 @@ fn step(
             OpKind::Immediate64 | OpKind::Immediate32to64 | OpKind::Immediate32
         )
     {
-        let dst = if bitness == 64 {
-            instr.op0_register().full_register()
-        } else {
-            instr.op0_register().full_register32()
-        };
+        let dst = full_reg(instr.op0_register(), bitness);
         this.remove(&dst);
         let imm = instr.immediate64();
         if in_data(program, imm) {
@@ -3779,20 +3776,13 @@ fn step(
         instr.mnemonic(),
         Mnemonic::Mov | Mnemonic::Movaps | Mnemonic::Movups | Mnemonic::Movdqa | Mnemonic::Movdqu
     );
-    let full = |r: Register| {
-        if bitness == 64 {
-            r.full_register()
-        } else {
-            r.full_register32()
-        }
-    };
     if moves
         && instr.op0_kind() == OpKind::Register
         && instr.op1_kind() == OpKind::Memory
         && instr.memory_index() == Register::None
         && let Some(Tracked::Param(n)) = vals.get(&instr.memory_base()).copied()
     {
-        let dst = full(instr.op0_register());
+        let dst = full_reg(instr.op0_register(), bitness);
         this.remove(&dst);
         vals.insert(dst, Tracked::Copied(n, instr.memory_displacement64()));
         return;
@@ -3801,7 +3791,8 @@ fn step(
         && instr.op0_kind() == OpKind::Memory
         && instr.op1_kind() == OpKind::Register
         && instr.memory_index() == Register::None
-        && let Some(Tracked::Copied(n, from)) = vals.get(&full(instr.op1_register())).copied()
+        && let Some(Tracked::Copied(n, from)) =
+            vals.get(&full_reg(instr.op1_register(), bitness)).copied()
         && let Some(at) = match instr.memory_base() {
             Register::RSP | Register::ESP => Some(0),
             base => match vals.get(&base) {
@@ -3860,11 +3851,7 @@ fn step(
             ur.access(),
             OpAccess::Write | OpAccess::ReadWrite | OpAccess::CondWrite | OpAccess::ReadCondWrite
         ) {
-            let r = if bitness == 64 {
-                ur.register().full_register()
-            } else {
-                ur.register().full_register32()
-            };
+            let r = full_reg(ur.register(), bitness);
             this.remove(&r);
             vals.remove(&r);
         }

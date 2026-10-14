@@ -844,12 +844,7 @@ fn replay_one<L: Replay>(
     let Some(w) = d.take_witness() else {
         return Replayed::default();
     };
-    let effects: Vec<Vec<Effect>> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| d.effects.block(i, b.start).unwrap_or_default())
-        .collect();
+    let effects = effects_of(&d, f);
     replay_effects::<L>(
         program,
         analysis,
@@ -919,12 +914,7 @@ fn check_answer_in<L: Replay>(
             (&fresh, w)
         }
     };
-    let effects: Vec<Vec<Effect>> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| d.effects.block(i, b.start).unwrap_or_default())
-        .collect();
+    let effects = effects_of(d, f);
     let r = replay_effects::<L>(
         program,
         analysis,
@@ -1054,6 +1044,21 @@ fn unchecked_label(reason: &str) -> &'static str {
         "the stack pointer unknown at its start" | "a frame alignment" => "stack unknown",
         _ => "other",
     }
+}
+
+/// Each block's effects of a decompilation, by block index, empty for a
+/// block the text leaves out.
+///
+/// # Arguments
+///
+/// * `d` - The decompilation.
+/// * `f` - Its function.
+fn effects_of(d: &super::Decompiled, f: &crate::analysis::Function) -> Vec<Vec<Effect>> {
+    f.blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| d.effects.block(i, b.start).unwrap_or_default())
+        .collect()
 }
 
 /// Replays a decompiled function's effects against the emulator.
@@ -2301,6 +2306,26 @@ impl<M: Bench> Text<'_, M> {
         }
     }
 
+    /// What a successor's relation holds for `k`, and where to name a
+    /// disagreement about it: the pending expression's value at the block's
+    /// last instruction, the variable's own at the instruction that last
+    /// wrote it.
+    ///
+    /// # Arguments
+    ///
+    /// * `sin` - The successor's IN environment.
+    /// * `k` - The register or vector read.
+    /// * `at` - The block's last instruction.
+    fn held_value(&self, sin: &Env, k: Key, at: u64) -> (Option<u64>, u64) {
+        match sin.vals.get(&k) {
+            Some(e) => (self.eval(e), at),
+            None => (
+                self.var(k),
+                self.writers.get(&key_spot(k)).copied().unwrap_or(at),
+            ),
+        }
+    }
+
     /// Tells whether the text last wrote any of `n` bytes at slot `o`
     /// through another slot's name.
     ///
@@ -3457,7 +3482,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             .last()
             .is_some_and(|i| L::transfer(&i) == Transfer::Call);
         if !t.called && !t.settled {
-            self.memory(&mut t, start, last, b, out);
+            self.memory(&mut t, start, last, Some(b), out);
         }
         for &s in self.succs.get(b).map_or(&[][..], Vec::as_slice) {
             if w.processed.get(s).copied().unwrap_or(false) {
@@ -3550,7 +3575,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         || format!("{arg:?}"),
                     );
                 }
-                self.memory(t, start, e.at, usize::MAX, out);
+                self.memory(t, start, e.at, None, out);
                 t.settled = true;
                 t.called = true;
                 t.text.lost_all = true;
@@ -3614,7 +3639,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         || format!("{v:?}"),
                     );
                 }
-                self.memory(t, start, e.at, usize::MAX, out);
+                self.memory(t, start, e.at, None, out);
                 t.settled = true;
             }
             EffectKind::Branch(c) => {
@@ -3699,14 +3724,14 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `start` - The block's start.
     /// * `at` - The statement or instruction compared at.
     /// * `b` - The block's index, whose successors' pending globals are
-    ///   left out; `usize::MAX` at a call or a return, where none may be.
+    ///   left out; `None` at a call or a return, where none may be.
     /// * `out` - Where the counts and disagreements go.
     fn memory(
         &self,
         t: &mut Trial<'_, L::Rig<'p>>,
         start: u64,
         at: u64,
-        b: usize,
+        b: Option<usize>,
         out: &mut Replayed,
     ) {
         let mask = low(self.width);
@@ -3726,7 +3751,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut kept: FxHashSet<u64> = L::kept(&t.emu, self.code.get(t.b), self.w, self.width)
             .into_iter()
             .collect();
-        for &s in self.succs.get(b).map_or(&[][..], Vec::as_slice) {
+        for &s in b
+            .and_then(|b| self.succs.get(b))
+            .map_or(&[][..], Vec::as_slice)
+        {
             for k in self
                 .w
                 .ins
@@ -3830,13 +3858,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             let Some(m) = t.emu.register(name) else {
                 continue;
             };
-            let (text, at) = match sin.vals.get(&k) {
-                Some(e) => (t.text.eval(e), at),
-                None => (
-                    t.text.var(k),
-                    t.text.writers.get(&key_spot(k)).copied().unwrap_or(at),
-                ),
-            };
+            let (text, at) = t.text.held_value(sin, k, at);
             let narrow = sin.narrow.get(&k).copied();
             let mut bits = need.min(self.width);
             if let Some(nb) = narrow {
@@ -3889,13 +3911,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             let float = held.and_then(|e| t.text.float_bits(e));
             let narrow = sin.narrow.get(&k).copied();
             let shown = held.map_or_else(|| "(its own variable)".to_owned(), |e| format!("{e:?}"));
-            let (text, at) = match held {
-                Some(e) => (t.text.eval(e), at),
-                None => (
-                    t.text.var(k),
-                    t.text.writers.get(&key_spot(k)).copied().unwrap_or(at),
-                ),
-            };
+            let (text, at) = t.text.held_value(sin, k, at);
             // INVARIANT: an integer the text holds by its whole lane (a
             // packed statement's value, or the register's own state after
             // one) is compared whole, both halves: the machine's register
