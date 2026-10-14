@@ -480,7 +480,11 @@ fn user_strings_feed_strings_and_indicators() {
 fn the_listing_is_deterministic() {
     let bytes = root(&meta());
     let (one, two) = (load(&bytes), load(&bytes));
-    assert_eq!(clr_tsv(&one, ""), clr_tsv(&two, ""));
+    assert_eq!(
+        clr_tsv(&one, "").ok(),
+        clr_tsv(&two, "").ok(),
+        "the listings agree"
+    );
     assert_eq!(one.summary(), two.summary());
 }
 
@@ -522,7 +526,9 @@ fn corrupt_metadata_is_refused_cleanly() {
         (past, "stream #~ at metadata offset 0xff0000"),
     ] {
         let p = load(&bytes);
-        let refused = clr_tsv(&p, "").expect_err("the metadata is refused");
+        let refused = clr_tsv(&p, "")
+            .expect_err("the metadata is refused")
+            .to_string();
         assert!(refused.contains(why), "{why}\n{refused}");
         assert!(
             p.summary()

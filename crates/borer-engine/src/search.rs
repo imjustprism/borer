@@ -119,8 +119,8 @@ impl Hits {
     fn push(&mut self, span: &Span<'_>, i: u64, offset: usize) {
         if self.total >= offset && self.hits.len() < HITS_MAX {
             self.hits.push(Hit {
-                va: span.va.map(|v| v + i),
-                file_off: span.off + i,
+                va: span.va.map(|v| v.saturating_add(i)),
+                file_off: span.off.saturating_add(i),
             });
         }
         self.total += 1;
@@ -201,17 +201,17 @@ fn candidate_hits(
         let word = u64::from_le_bytes(*w);
         let mut m = eq_mask(word, lo) | eq_mask(word, hi);
         while m != 0 {
-            let i = k * 8 + m.trailing_zeros() as usize / 8;
+            let i = k * 8 + crate::num::saturating_usize(u64::from(m.trailing_zeros() / 8));
             m &= m - 1;
             if i <= last && matches(&data[i..i + n]) {
-                out.push(i as u64);
+                out.push(crate::num::from_usize(i));
             }
         }
     }
     for i in words.len() * 8..=last {
         let b = data[i];
         if (b == lo || b == hi) && matches(&data[i..i + n]) {
-            out.push(i as u64);
+            out.push(crate::num::from_usize(i));
         }
     }
 }

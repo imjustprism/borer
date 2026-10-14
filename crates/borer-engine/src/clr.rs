@@ -1575,8 +1575,8 @@ struct Row {
 ///
 /// When the metadata was refused, with the reason, or the spec's page
 /// does not read.
-pub fn clr_tsv(p: &Program, spec: &str) -> Result<String, String> {
-    let filter = Filter::parse(spec)?;
+pub fn clr_tsv(p: &Program, spec: &str) -> anyhow::Result<String> {
+    let filter = Filter::parse(spec).map_err(anyhow::Error::msg)?;
     let clr = match &p.clr {
         None => {
             return Ok(
@@ -1584,7 +1584,9 @@ pub fn clr_tsv(p: &Program, spec: &str) -> Result<String, String> {
                     .to_owned(),
             );
         }
-        Some(Err(why)) => return Err(format!("the .NET metadata is refused: {why}")),
+        Some(Err(why)) => {
+            return Err(anyhow::anyhow!("the .NET metadata is refused: {why}"));
+        }
         Some(Ok(clr)) => clr,
     };
     let base = p.image_base;
