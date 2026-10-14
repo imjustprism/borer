@@ -187,6 +187,10 @@ mod tests {
     /// Each reader returns the little-endian word at the offset, and
     /// `None` where the bytes (or the offset itself) run out.
     #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
     fn little_endian_reads_stop_at_the_end() {
         let b = [0x78, 0x56, 0x34, 0x12, 0xf0, 0xde, 0xbc, 0x9a];
         assert_eq!(u16_le(&b, 0), Some(0x5678));
