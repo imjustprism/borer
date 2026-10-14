@@ -623,8 +623,8 @@ pub fn iocs_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
     let page = &rows[start..total.min(start.saturating_add(size))];
     let _ = writeln!(
         out,
-        "# showing {} of {total} from {}",
-        page.len(),
+        "# {} from {}",
+        showing(page.len(), total),
         filter.offset
     );
     if page.is_empty() {

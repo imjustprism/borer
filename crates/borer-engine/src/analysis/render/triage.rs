@@ -522,9 +522,8 @@ fn api_calls_section(out: &mut String, a: &Analysis, o: &Overlay, calls: &[ApiCa
     }
     let _ = writeln!(
         out,
-        "# api calls: showing {} of {}, api(args) -> ret, by caller",
-        calls.len().min(CALLS_SHOWN),
-        calls.len()
+        "# api calls: {}, api(args) -> ret, by caller",
+        showing(calls.len().min(CALLS_SHOWN), calls.len())
     );
     for call in calls.iter().take(CALLS_SHOWN) {
         let _ = writeln!(out, "{}{}", call.call_text(), where_in(a, o, call.caller));
@@ -849,11 +848,7 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: 
             g.owners.len()
         );
     }
-    let _ = writeln!(
-        out,
-        "\n# showing {} of {total} hits from {offset}",
-        page.len()
-    );
+    let _ = writeln!(out, "\n# {} hits from {offset}", showing(page.len(), total));
     out.push_str(&crate::crypto::rows(&page));
     let next = offset.saturating_add(page.len());
     if next < total {

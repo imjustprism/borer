@@ -8,7 +8,7 @@
 //! as quoted text, and a pointer with what it points at (the text a `char`
 //! pointer holds, else the function, global or section).
 
-use super::{Analysis, Overlay, name_of};
+use super::{Analysis, Overlay, name_of, showing};
 use crate::analysis::utypes::{TypeExpr, UserType, width_of};
 use crate::memory::{Kind, le_word, scalar_text};
 use crate::num::from_usize;
@@ -465,9 +465,8 @@ pub fn typed_tsv(
         .section_at(va)
         .map_or_else(String::new, |s| format!(" in {}", s.name));
     let mut out = format!(
-        "# showing {} of {} rows: {} at {va:#x}{section}, {size:#x} bytes",
-        walk.rows.len(),
-        walk.total,
+        "# {} rows: {} at {va:#x}{section}, {size:#x} bytes",
+        showing(walk.rows.len(), walk.total),
         ty.spell()
     );
     if read < size {

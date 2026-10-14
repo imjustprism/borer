@@ -562,7 +562,7 @@ pub fn calls_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     let start = offset.min(total);
     let size = limit.map_or(CALLS_PAGE, |n| n.min(CALLS_PAGE));
     let page = &rows[start..total.min(start.saturating_add(size))];
-    let _ = writeln!(out, "# showing {} of {total} from {offset}", page.len());
+    let _ = writeln!(out, "# {} from {offset}", showing(page.len(), total));
     if page.is_empty() {
         return Ok(out);
     }

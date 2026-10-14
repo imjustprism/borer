@@ -93,6 +93,24 @@ pub(super) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+/// The `showing N of M` count of a page cut from a longer list.
+///
+/// Every capped report says how much of a list the page it answers holds;
+/// the words around the count, what is counted and where the page starts,
+/// stay with the report that knows them.
+///
+/// # Arguments
+///
+/// * `shown` - How many rows the page holds.
+/// * `total` - How many rows there are to page over.
+///
+/// # Returns
+///
+/// The count, to embed in a header line.
+pub(super) fn showing(shown: usize, total: usize) -> String {
+    format!("showing {shown} of {total}")
+}
+
 /// The ` (+N more)` tail of a list cut at `cap`.
 ///
 /// # Arguments

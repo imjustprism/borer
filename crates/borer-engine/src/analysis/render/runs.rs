@@ -1567,8 +1567,8 @@ fn api_calls_section(out: &mut String, req: &RunSpec, outcomes: &[Arc<Outcome>])
     }
     let _ = writeln!(
         out,
-        "# api calls: showing {} of {total}, api(args) -> ret, by input",
-        total.min(RUN_CALLS_SHOWN)
+        "# api calls: {}, api(args) -> ret, by input",
+        showing(total.min(RUN_CALLS_SHOWN), total)
     );
     let mut shown = 0usize;
     for (input, outcome) in req.inputs.iter().zip(outcomes) {

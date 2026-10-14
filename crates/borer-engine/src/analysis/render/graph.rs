@@ -500,9 +500,8 @@ pub fn cfg_mermaid(a: &Analysis, o: &Overlay, entry: u64, offset: usize) -> Opti
     if drawn.len() < f.blocks.len() {
         let _ = write!(
             out,
-            "%% showing {} of {} blocks from {offset}",
-            drawn.len(),
-            f.blocks.len()
+            "%% {} blocks from {offset}",
+            showing(drawn.len(), f.blocks.len())
         );
         let next = offset.saturating_add(drawn.len());
         if next < f.blocks.len() {
