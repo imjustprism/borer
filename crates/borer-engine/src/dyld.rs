@@ -34,6 +34,7 @@ use goblin::mach::load_command::CommandVariant;
 
 use crate::fxmap::FxHashSet;
 use crate::macho::uleb;
+use crate::num::{u16_le, u32_le, u64_le};
 use crate::program::Section;
 use crate::reloc::{Bind, Claim, ENTRIES_MAX, Import, Relocs, Table, file_range, settle};
 
@@ -282,41 +283,6 @@ impl Format {
     }
 }
 
-/// Reads a little-endian `u16` at `at`.
-///
-/// # Arguments
-///
-/// * `data` - The bytes.
-/// * `at` - The offset.
-fn u16_at(data: &[u8], at: usize) -> Option<u16> {
-    let b = data.get(at..at.checked_add(2)?)?;
-    Some(u16::from_le_bytes([*b.first()?, *b.get(1)?]))
-}
-
-/// Reads a little-endian `u32` at `at`.
-///
-/// # Arguments
-///
-/// * `data` - The bytes.
-/// * `at` - The offset.
-fn u32_at(data: &[u8], at: usize) -> Option<u32> {
-    let mut le = [0u8; 4];
-    le.copy_from_slice(data.get(at..at.checked_add(4)?)?);
-    Some(u32::from_le_bytes(le))
-}
-
-/// Reads a little-endian `u64` at `at`.
-///
-/// # Arguments
-///
-/// * `data` - The bytes.
-/// * `at` - The offset.
-fn u64_at(data: &[u8], at: usize) -> Option<u64> {
-    let mut le = [0u8; 8];
-    le.copy_from_slice(data.get(at..at.checked_add(8)?)?);
-    Some(u64::from_le_bytes(le))
-}
-
 /// Reads the SLEB128 at `at`.
 ///
 /// # Arguments
@@ -491,7 +457,7 @@ impl Walk<'_> {
             }
             let Some(w) = segment
                 .file_off(va, 8)
-                .and_then(|off| u64_at(self.file, usize::try_from(off).ok()?))
+                .and_then(|off| u64_le(self.file, usize::try_from(off).ok()?))
             else {
                 self.refused += 1;
                 return;
@@ -553,7 +519,7 @@ impl Walk<'_> {
     /// The name of the first pointer format read, `None` when no segment
     /// holds a chain.
     fn chained(&mut self, data: &[u8]) -> Option<&'static str> {
-        let field = |k: usize| u32_at(data, k * 4).and_then(|v| usize::try_from(v).ok());
+        let field = |k: usize| u32_le(data, k * 4).and_then(|v| usize::try_from(v).ok());
         let (
             Some(0),
             Some(starts),
@@ -648,9 +614,9 @@ impl Walk<'_> {
         for k in 0..held {
             let entry = at.saturating_add(k * size);
             let raw = if size == 16 {
-                u64_at(data, entry)
+                u64_le(data, entry)
             } else {
-                u32_at(data, entry).map(u64::from)
+                u32_le(data, entry).map(u64::from)
             };
             let Some(raw) = raw else {
                 out.push(None);
@@ -663,7 +629,7 @@ impl Walk<'_> {
                         special(lib, 0xfff0, 0x1_0000),
                         bits(raw, 16, 1) == 1,
                         bits(raw, 32, 32),
-                        u64_at(data, entry + 8).map_or(0, u64::cast_signed),
+                        u64_le(data, entry + 8).map_or(0, u64::cast_signed),
                     )
                 }
                 _ => (
@@ -671,7 +637,7 @@ impl Walk<'_> {
                     bits(raw, 8, 1) == 1,
                     bits(raw, 9, 23),
                     if size == 8 {
-                        u32_at(data, entry + 4).map_or(0, |a| i64::from(a.cast_signed()))
+                        u32_le(data, entry + 4).map_or(0, |a| i64::from(a.cast_signed()))
                     } else {
                         0
                     },
@@ -712,10 +678,10 @@ impl Walk<'_> {
         // size, page_size, pointer_format, segment_offset,
         // max_valid_pointer, page_count, page_start[].
         let header = (
-            u16_at(data, at.saturating_add(4)),
-            u16_at(data, at.saturating_add(6)),
-            u64_at(data, at.saturating_add(8)),
-            u16_at(data, at.saturating_add(20)),
+            u16_le(data, at.saturating_add(4)),
+            u16_le(data, at.saturating_add(6)),
+            u64_le(data, at.saturating_add(8)),
+            u16_le(data, at.saturating_add(20)),
         );
         let (Some(page_size), Some(code), Some(offset), Some(pages)) = header else {
             self.refused += 1;
@@ -734,7 +700,7 @@ impl Walk<'_> {
         }
         let first = self.base.wrapping_add(offset);
         for page in 0..pages {
-            let Some(start) = u16_at(
+            let Some(start) = u16_le(
                 data,
                 at.saturating_add(22).saturating_add(usize::from(page) * 2),
             ) else {
@@ -767,7 +733,7 @@ impl Walk<'_> {
     /// The pointer format's name, or `None` when the section does not read
     /// or names a format this does not read.
     fn section_chains(&mut self, data: &[u8]) -> Option<&'static str> {
-        let (Some(code), Some(count)) = (u32_at(data, 0), u32_at(data, 4)) else {
+        let (Some(code), Some(count)) = (u32_le(data, 0), u32_le(data, 4)) else {
             self.refused += 1;
             return None;
         };
@@ -779,7 +745,7 @@ impl Walk<'_> {
         let listed = count.min(data.len().saturating_sub(8) / 4);
         self.refused += usize::from(listed < count);
         for k in 0..listed {
-            let Some(start) = u32_at(data, 8 + k * 4) else {
+            let Some(start) = u32_le(data, 8 + k * 4) else {
                 break;
             };
             let va = self.base.wrapping_add(u64::from(start));
@@ -1026,7 +992,7 @@ fn special(v: u64, floor: u64, span: i64) -> i64 {
 /// * `data` - The bytes.
 /// * `at` - The offset of the field.
 fn field_at(data: &[u8], at: usize) -> Option<usize> {
-    u32_at(data, at).and_then(|v| usize::try_from(v).ok())
+    u32_le(data, at).and_then(|v| usize::try_from(v).ok())
 }
 
 /// Reads the file bytes a `linkedit_data_command`-style range names.

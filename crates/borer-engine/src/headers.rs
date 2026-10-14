@@ -16,6 +16,7 @@ use goblin::elf::Elf;
 use goblin::pe::PE;
 use goblin::pe::data_directories::DataDirectoryType;
 
+use crate::num::{u16_le, u32_le};
 use crate::program::Section;
 
 /// A handler the x64 unwind tables register for one function.
@@ -179,22 +180,14 @@ pub struct Headers {
 /// The name the content indicates, or `None` when nothing matches.
 #[must_use]
 pub fn sniff_section(bytes: &[u8]) -> Option<&'static str> {
-    /// Reads a little-endian `u32` at `at`.
-    fn u32_at(b: &[u8], at: usize) -> Option<u32> {
-        b.get(at..at + 4)?.try_into().ok().map(u32::from_le_bytes)
-    }
-    /// Reads a little-endian `u16` at `at`.
-    fn u16_at(b: &[u8], at: usize) -> Option<u16> {
-        b.get(at..at + 2)?.try_into().ok().map(u16::from_le_bytes)
-    }
     if bytes.len() < 8 {
         return None;
     }
-    let version = u16_at(bytes, 4);
+    let version = u16_le(bytes, 4);
     let address_size_at = |at: usize| matches!(bytes.get(at), Some(4 | 8));
     // A call-frame section opens with a CIE whose id says which one it is:
     // zero for the runtime unwinder's copy, all ones for the debug copy.
-    if let Some(id) = u32_at(bytes, 4)
+    if let Some(id) = u32_le(bytes, 4)
         && bytes.get(8) == Some(&1)
     {
         if id == 0 {
@@ -986,7 +979,7 @@ fn rich_header(bytes: &[u8], pe_pointer: usize) -> Vec<(u16, u16, u32)> {
     let Some(rich) = head.windows(4).rposition(|w| w == b"Rich") else {
         return Vec::new();
     };
-    let Some(key) = le_u32(head, rich + 4) else {
+    let Some(key) = u32_le(head, rich + 4) else {
         return Vec::new();
     };
     let mut at = rich;
@@ -995,7 +988,7 @@ fn rich_header(bytes: &[u8], pe_pointer: usize) -> Vec<(u16, u16, u32)> {
             return Vec::new();
         }
         at -= 4;
-        match le_u32(head, at) {
+        match u32_le(head, at) {
             Some(v) if v ^ key == DANS => break,
             Some(_) => {}
             None => return Vec::new(),
@@ -1004,7 +997,7 @@ fn rich_header(bytes: &[u8], pe_pointer: usize) -> Vec<(u16, u16, u32)> {
     let mut entries = Vec::new();
     let mut p = at + 16;
     while p + 8 <= rich {
-        let (Some(id), Some(count)) = (le_u32(head, p), le_u32(head, p + 4)) else {
+        let (Some(id), Some(count)) = (u32_le(head, p), u32_le(head, p + 4)) else {
             break;
         };
         let id = id ^ key;
@@ -1017,17 +1010,6 @@ fn rich_header(bytes: &[u8], pe_pointer: usize) -> Vec<(u16, u16, u32)> {
     }
     entries.sort_by(|l, r| r.2.cmp(&l.2).then(l.cmp(r)));
     entries
-}
-
-/// Reads a little-endian `u32` at a file offset.
-///
-/// # Arguments
-///
-/// * `bytes` - The file.
-/// * `at` - The offset.
-fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    let b = bytes.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes(b.try_into().ok()?))
 }
 
 /// Reads the ELF header facts.

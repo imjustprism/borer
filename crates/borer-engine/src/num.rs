@@ -7,6 +7,8 @@
 //! whose intent has to be guessed. A conversion that can fail (a 64-bit
 //! count into a `usize`, a value into a narrower type it must fit) goes
 //! through `try_from` at the call site, where the failure has a meaning.
+//! The little-endian word readers the header and table walks share live
+//! here too, so one bounds discipline answers a hostile offset everywhere.
 
 /// The low 32 bits of a value.
 ///
@@ -115,9 +117,57 @@ pub const fn usize_f64(v: usize) -> f64 {
     v as f64
 }
 
+/// Reads a little-endian `u16` at `at`.
+///
+/// # Arguments
+///
+/// * `data` - The bytes.
+/// * `at` - The offset of the value's first byte.
+///
+/// # Returns
+///
+/// The value, or `None` when `data` holds fewer than two bytes from `at`.
+#[must_use]
+pub fn u16_le(data: &[u8], at: usize) -> Option<u16> {
+    let b: [u8; 2] = data.get(at..at.checked_add(2)?)?.try_into().ok()?;
+    Some(u16::from_le_bytes(b))
+}
+
+/// Reads a little-endian `u32` at `at`.
+///
+/// # Arguments
+///
+/// * `data` - The bytes.
+/// * `at` - The offset of the value's first byte.
+///
+/// # Returns
+///
+/// The value, or `None` when `data` holds fewer than four bytes from `at`.
+#[must_use]
+pub fn u32_le(data: &[u8], at: usize) -> Option<u32> {
+    let b: [u8; 4] = data.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_le_bytes(b))
+}
+
+/// Reads a little-endian `u64` at `at`.
+///
+/// # Arguments
+///
+/// * `data` - The bytes.
+/// * `at` - The offset of the value's first byte.
+///
+/// # Returns
+///
+/// The value, or `None` when `data` holds fewer than eight bytes from `at`.
+#[must_use]
+pub fn u64_le(data: &[u8], at: usize) -> Option<u64> {
+    let b: [u8; 8] = data.get(at..at.checked_add(8)?)?.try_into().ok()?;
+    Some(u64::from_le_bytes(b))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{lo8, lo16, lo32, saturating_usize, sext32};
+    use super::{lo8, lo16, lo32, saturating_usize, sext32, u16_le, u32_le, u64_le};
 
     /// Each conversion keeps the bits it names and nothing else.
     #[test]
@@ -132,5 +182,21 @@ mod tests {
         assert_eq!(sext32(0xffff_fd30), 0xffff_ffff_ffff_fd30);
         assert_eq!(sext32(0x7fff_ffff), 0x7fff_ffff);
         assert_eq!(saturating_usize(5), 5);
+    }
+
+    /// Each reader returns the little-endian word at the offset, and
+    /// `None` where the bytes (or the offset itself) run out.
+    #[test]
+    fn little_endian_reads_stop_at_the_end() {
+        let b = [0x78, 0x56, 0x34, 0x12, 0xf0, 0xde, 0xbc, 0x9a];
+        assert_eq!(u16_le(&b, 0), Some(0x5678));
+        assert_eq!(u16_le(&b, 6), Some(0x9abc));
+        assert_eq!(u32_le(&b, 4), Some(0x9abc_def0));
+        assert_eq!(u64_le(&b, 0), Some(0x9abc_def0_1234_5678));
+        assert_eq!(u16_le(&b, 7), None);
+        assert_eq!(u32_le(&b, 5), None);
+        assert_eq!(u64_le(&b, 1), None);
+        assert_eq!(u32_le(&[], usize::MAX), None);
+        assert_eq!(u64_le(&b, usize::MAX), None);
     }
 }
