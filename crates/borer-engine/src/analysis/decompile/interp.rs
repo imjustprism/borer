@@ -1093,7 +1093,7 @@ const LITERAL_MAX: usize = 512;
 fn literals(program: &Program) -> FxHashMap<Vec<u8>, u64> {
     let mut out: FxHashMap<Vec<u8>, u64> = FxHashMap::default();
     for s in program.sections.iter().filter(|s| !s.executable) {
-        let Some(bytes) = program.read_va_upto(s.va, usize::try_from(s.file_size).unwrap_or(0))
+        let Some(bytes) = program.read_va_upto(s.va.0, usize::try_from(s.file_size).unwrap_or(0))
         else {
             continue;
         };
@@ -1110,7 +1110,7 @@ fn literals(program: &Program) -> FxHashMap<Vec<u8>, u64> {
                         .all(crate::strings::literal_byte)
                 {
                     out.entry(key.to_vec())
-                        .or_insert(s.va.wrapping_add(from_usize(at)));
+                        .or_insert(s.va.0.wrapping_add(from_usize(at)));
                 }
             }
             let wide_starts = at % 2 == 0 && (at == 0 || bytes.get(at - 2..at) == Some(&[0, 0]));
@@ -1125,7 +1125,7 @@ fn literals(program: &Program) -> FxHashMap<Vec<u8>, u64> {
                     })
                 {
                     out.entry(key.to_vec())
-                        .or_insert(s.va.wrapping_add(from_usize(at)));
+                        .or_insert(s.va.0.wrapping_add(from_usize(at)));
                 }
             }
         }

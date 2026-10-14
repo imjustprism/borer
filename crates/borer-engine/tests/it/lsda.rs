@@ -238,7 +238,7 @@ fn a_landing_pad_outside_code_refuses_the_table() {
     eh.vsize += extra;
     eh.file_size += extra;
     p.bytes.resize(
-        usize::try_from(eh.file_off + eh.file_size).expect("fits"),
+        usize::try_from(eh.file_off.0 + eh.file_size).expect("fits"),
         0,
     );
     for (k, b) in uleb.iter().enumerate() {

@@ -4879,7 +4879,7 @@ fn read_jump_table(
     let table = table?;
 
     let targets = table_targets(program, table, entries)?;
-    let jmp_section = program.section_at(jmp_va)?.va;
+    let jmp_section = program.section_at(jmp_va)?.va.0;
     let plausible = targets.iter().all(|&t| {
         program.section_at(t).is_some_and(|s| s.va.0 == jmp_section)
             && decode_at(program, bitness, t).is_some_and(|i| i.code() != Code::INVALID)

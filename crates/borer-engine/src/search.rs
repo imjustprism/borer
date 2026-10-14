@@ -314,7 +314,7 @@ fn spans(program: &Program, reach: usize) -> Vec<Span<'_>> {
         .sections
         .iter()
         .filter(|s| s.file_size > 0)
-        .filter_map(|s| span(program.section_bytes(s)?, s.file_off, Some(s.va)))
+        .filter_map(|s| span(program.section_bytes(s)?, s.file_off.0, Some(s.va.0)))
         .collect();
     spans.extend(
         program

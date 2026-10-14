@@ -1224,8 +1224,8 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
 /// The section's bytes, or an empty slice when it is not there.
 fn debug_section<'a>(sections: &[&Section], bytes: &'a [u8], want: &str) -> &'a [u8] {
     let body = |s: &Section| -> &'a [u8] {
-        let start = usize::try_from(s.file_off).unwrap_or(usize::MAX);
-        let end = usize::try_from(s.file_off.saturating_add(s.file_size)).unwrap_or(usize::MAX);
+        let start = usize::try_from(s.file_off.0).unwrap_or(usize::MAX);
+        let end = usize::try_from(s.file_off.0.saturating_add(s.file_size)).unwrap_or(usize::MAX);
         bytes.get(start..end.min(bytes.len())).unwrap_or(&[])
     };
     if let Some(s) = sections.iter().find(|s| s.name == want) {

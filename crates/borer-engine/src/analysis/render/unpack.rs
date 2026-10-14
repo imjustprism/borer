@@ -594,7 +594,9 @@ fn writes_code(p: &Program, regions: &[(u64, u64)], oep: Option<u64>) -> bool {
         || regions.iter().any(|&(start, len)| {
             let end = start.saturating_add(len);
             p.sections.iter().any(|s| {
-                s.executable && s.va < end && start < s.va.saturating_add(s.vsize.max(s.file_size))
+                s.executable
+                    && s.va.0 < end
+                    && start < s.va.0.saturating_add(s.vsize.max(s.file_size))
             })
         })
 }
@@ -768,7 +770,7 @@ pub(super) fn rebuild(p: &Program, emu: &Emulator<'_>, regions: &[(u64, u64)]) -
                 continue;
             };
             let Some(off) = p.section_at(va).and_then(|s| {
-                usize::try_from(s.file_off + (va - s.va))
+                usize::try_from(s.file_off.0 + (va - s.va.0))
                     .ok()
                     .filter(|o| *o < bytes.len())
             }) else {
@@ -821,7 +823,7 @@ pub(super) fn rebuild_pe(
     let image_end = p
         .sections
         .iter()
-        .map(|s| s.va + s.vsize.max(s.file_size))
+        .map(|s| s.va.0 + s.vsize.max(s.file_size))
         .max()?;
     let image_size = usize::try_from(image_end.checked_sub(base)?).ok()?;
     if image_size == 0 || image_size > 0x8000_0000 {
@@ -829,7 +831,7 @@ pub(super) fn rebuild_pe(
     }
     let mut buf = vec![0u8; image_size];
 
-    let first_va = p.sections.iter().map(|s| s.va).min()?;
+    let first_va = p.sections.iter().map(|s| s.va.0).min()?;
     let headers_len = usize::try_from(first_va.checked_sub(base)?)
         .ok()?
         .min(p.bytes.len())
@@ -837,7 +839,7 @@ pub(super) fn rebuild_pe(
     buf[..headers_len].copy_from_slice(&p.bytes[..headers_len]);
 
     for s in &p.sections {
-        let Ok(rva) = usize::try_from(s.va.wrapping_sub(base)) else {
+        let Ok(rva) = usize::try_from(s.va.0.wrapping_sub(base)) else {
             continue;
         };
         if rva >= image_size {
@@ -878,7 +880,7 @@ pub(super) fn rebuild_pe(
         .sections
         .iter()
         .map(|s| Section {
-            file_off: s.va.wrapping_sub(base),
+            file_off: FileOff(s.va.0.wrapping_sub(base)),
             file_size: s.vsize.max(s.file_size),
             ..s.clone()
         })
@@ -1044,9 +1046,9 @@ mod tests {
         let text = Section::mapped(".text", 0x1000, 0, CODE.len() as u64, false, true);
         let empty = Section {
             name: ".handler".to_owned(),
-            va: 0x2000,
+            va: crate::program::Va(0x2000),
             vsize: 0x1000,
-            file_off: 0x2000,
+            file_off: crate::program::FileOff(0x2000),
             file_size: 0,
             readable: true,
             writable: true,

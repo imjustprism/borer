@@ -265,7 +265,7 @@ pub(crate) fn find<'a>(
     let code = |va: u64| {
         sections
             .iter()
-            .any(|s| s.executable && va >= s.va && va - s.va < s.vsize.max(s.file_size))
+            .any(|s| s.executable && va >= s.va.0 && va - s.va.0 < s.vsize.max(s.file_size))
     };
     let named = |s: &Section| s.name == ".gopclntab" || s.name.ends_with("__gopclntab");
     let read = |s: &'a Section, head: usize| {
@@ -279,7 +279,7 @@ pub(crate) fn find<'a>(
         )?;
         let table = Pclntab {
             version,
-            at: s.va.checked_add(from_usize(head))?,
+            at: s.va.0.checked_add(from_usize(head))?,
             entries: funcs.iter().map(|f| f.0).collect(),
         };
         Some((table, funcs))

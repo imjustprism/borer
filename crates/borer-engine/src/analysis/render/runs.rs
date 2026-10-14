@@ -359,8 +359,8 @@ fn buffer_base(p: &Program, count: usize) -> u64 {
     let span = from_usize(count.max(1)).saturating_mul(BUFFER_STRIDE);
     for _ in 0..8 {
         let clash = p.sections.iter().any(|s| {
-            let end = s.va.saturating_add(s.vsize.max(s.file_size));
-            s.va < base.saturating_add(span) && base < end
+            let end = s.va.0.saturating_add(s.vsize.max(s.file_size));
+            s.va.0 < base.saturating_add(span) && base < end
         });
         if !clash {
             break;

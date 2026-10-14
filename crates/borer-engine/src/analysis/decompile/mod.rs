@@ -2904,9 +2904,9 @@ g(tmp_5);";
         bytes[0x1000..0x1000 + code.len()].copy_from_slice(code);
         let sections = vec![crate::program::Section {
             name: ".text".to_owned(),
-            va: 0x1000,
+            va: crate::program::Va(0x1000),
             vsize: 0x1000,
-            file_off: 0x1000,
+            file_off: crate::program::FileOff(0x1000),
             file_size: 0x1000,
             readable: true,
             writable: false,
@@ -2970,9 +2970,9 @@ g(tmp_5);";
         bytes[0x1010..0x1016].copy_from_slice(b"hello\0");
         let sections = vec![crate::program::Section {
             name: ".rdata".to_owned(),
-            va: 0x2000,
+            va: crate::program::Va(0x2000),
             vsize: 0x1000,
-            file_off: 0x1000,
+            file_off: crate::program::FileOff(0x1000),
             file_size: 0x1000,
             readable: true,
             writable: false,

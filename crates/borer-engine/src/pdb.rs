@@ -551,8 +551,8 @@ pub(crate) fn sources(
 fn data_va(image_base: u64, rva: u32, sections: &[Section]) -> Option<u64> {
     let va = image_base.checked_add(u64::from(rva))?;
     sections.iter().find_map(|s| {
-        let limit = s.va.checked_add(s.vsize.max(s.file_size))?;
-        (!s.executable && va >= s.va && va < limit).then_some(va)
+        let limit = s.va.0.checked_add(s.vsize.max(s.file_size))?;
+        (!s.executable && va >= s.va.0 && va < limit).then_some(va)
     })
 }
 
@@ -583,8 +583,8 @@ fn extent_va(image_base: u64, rva: u32, end: u32, sections: &[Section]) -> Optio
     let start = image_base.checked_add(u64::from(rva))?;
     let end = image_base.checked_add(u64::from(end))?;
     sections.iter().find_map(|s| {
-        let limit = s.va.checked_add(s.vsize.max(s.file_size))?;
-        (s.executable && start >= s.va && start < limit && end <= limit).then_some((start, end))
+        let limit = s.va.0.checked_add(s.vsize.max(s.file_size))?;
+        (s.executable && start >= s.va.0 && start < limit && end <= limit).then_some((start, end))
     })
 }
 

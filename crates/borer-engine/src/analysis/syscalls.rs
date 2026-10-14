@@ -203,7 +203,7 @@ fn scan(p: &Program, a: &Analysis) -> Vec<SyscallSite> {
             Isa::A64 => {
                 for (k, word) in bytes.chunks_exact(4).enumerate() {
                     if word == SVC0 {
-                        let va = s.va.saturating_add(crate::num::from_usize(k * 4));
+                        let va = s.va.0.saturating_add(crate::num::from_usize(k * 4));
                         if !found(svc_site(p, a, va)) {
                             break 'sections;
                         }
@@ -217,7 +217,7 @@ fn scan(p: &Program, a: &Analysis) -> Vec<SyscallSite> {
                         [0xcd, 0x80] => Gate::Int80,
                         _ => continue,
                     };
-                    let va = s.va.saturating_add(crate::num::from_usize(k));
+                    let va = s.va.0.saturating_add(crate::num::from_usize(k));
                     if !found(x86_site(p, a, va, gate, bits)) {
                         break 'sections;
                     }

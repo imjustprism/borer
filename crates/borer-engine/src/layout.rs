@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, anyhow, bail};
 
 use crate::analysis::parse_addr;
-use crate::program::{Arch, Program, Section};
+use crate::program::{Arch, FileOff, Program, Section, Va};
 use crate::text::quoted;
 
 /// Most regions one layout maps.
@@ -265,9 +265,9 @@ impl Layout {
                 } else {
                     format!("region{i}")
                 },
-                va: r.va,
+                va: Va(r.va),
                 vsize: r.len,
-                file_off: r.off,
+                file_off: FileOff(r.off),
                 file_size: r.len,
                 readable: r.readable,
                 writable: r.writable,

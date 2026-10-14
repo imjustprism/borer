@@ -24,7 +24,7 @@ use goblin::mach::load_command::CommandVariant;
 use goblin::mach::{Mach, MachO};
 
 use crate::headers::Headers;
-use crate::program::{Arch, Fit, Section, Symbol, SymbolKind, fit_sections};
+use crate::program::{Arch, FileOff, Fit, Section, Symbol, SymbolKind, Va, fit_sections};
 
 /// `CPU_TYPE_X86`.
 const CPU_X86: u32 = 7;
@@ -524,9 +524,9 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         let holds_bytes = !ZEROFILL.contains(&kind);
         sections.push(Section {
             name: s.name.clone(),
-            va: s.addr,
+            va: Va(s.addr),
             vsize: s.size,
-            file_off: if holds_bytes { s.offset } else { 0 },
+            file_off: FileOff(if holds_bytes { s.offset } else { 0 }),
             file_size: if holds_bytes { s.size } else { 0 },
             readable: s.prot & PROT.0 != 0,
             writable: s.prot & PROT.1 != 0,
@@ -649,7 +649,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
     let code = |va: u64| {
         sections
             .iter()
-            .find(|s| s.executable && va >= s.va && va < s.va.saturating_add(s.vsize))
+            .find(|s| s.executable && va >= s.va.0 && va < s.va.0.saturating_add(s.vsize))
     };
     let mut starts: Vec<u64> = function_starts(file, m, base, text)
         .into_iter()
@@ -666,8 +666,8 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
             let end = starts
                 .get(i + 1)
                 .copied()
-                .filter(|&n| n < section.va.saturating_add(section.vsize))
-                .unwrap_or(section.va.saturating_add(section.vsize));
+                .filter(|&n| n < section.va.0.saturating_add(section.vsize))
+                .unwrap_or(section.va.0.saturating_add(section.vsize));
             Some((va, end))
         })
         .collect();

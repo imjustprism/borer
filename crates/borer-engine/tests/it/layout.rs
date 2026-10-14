@@ -210,7 +210,7 @@ fn a_two_region_dump_maps_each_part_at_its_address() {
     let rows: Vec<(String, u64, u64, String)> = p
         .sections
         .iter()
-        .map(|s| (s.name.clone(), s.va, s.file_off, s.perms()))
+        .map(|s| (s.name.clone(), s.va.0, s.file_off.0, s.perms()))
         .collect();
     assert_eq!(
         rows,
@@ -242,7 +242,7 @@ fn a_two_region_dump_maps_each_part_at_its_address() {
     assert_eq!(reversed.entry, Some(0x10000), "the first executable region");
     assert_eq!(reversed.image_base, 0x10000, "the lowest region");
     assert_eq!(reversed.sections[0].name, "region0");
-    assert_eq!(reversed.sections[0].va, 0x20000, "named in stated order");
+    assert_eq!(reversed.sections[0].va.0, 0x20000, "named in stated order");
 }
 
 /// A file whose first bytes name a container still maps raw when a

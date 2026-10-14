@@ -1833,7 +1833,7 @@ pub(crate) fn seeds(program: &Program) -> Vec<u64> {
 /// * `va` - A virtual address.
 pub(crate) fn is_executable_va(program: &Program, va: u64) -> bool {
     program.section_at(va).is_some_and(|s| {
-        s.executable && va >= s.va && va < s.va.saturating_add(s.vsize.max(s.file_size))
+        s.executable && va >= s.va.0 && va < s.va.0.saturating_add(s.vsize.max(s.file_size))
     })
 }
 

@@ -144,8 +144,8 @@ pub fn high_entropy_regions(program: &Program, window: usize, threshold: f64) ->
         let Some(data) = program.section_bytes(s) else {
             continue;
         };
-        let at = |off: u64| Some(s.va + (off - s.file_off));
-        if scan(data, s.file_off, at, window, threshold, &mut regions) {
+        let at = |off: u64| Some(s.va.0 + (off - s.file_off.0));
+        if scan(data, s.file_off.0, at, window, threshold, &mut regions) {
             return regions;
         }
     }

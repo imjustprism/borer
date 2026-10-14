@@ -820,7 +820,7 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
             .map(|s| {
                 map(vec![
                     ("name", s.name.clone().into()),
-                    ("at", Dynamic::from_int(int(s.va))),
+                    ("at", Dynamic::from_int(int(s.va.0))),
                     ("size", Dynamic::from_int(int(s.vsize))),
                     ("r", s.readable.into()),
                     ("w", s.writable.into()),

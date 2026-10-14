@@ -1489,7 +1489,11 @@ fn a_call_outside_executable_memory_seeds_no_function() {
         .functions
         .iter()
         .map(|f| f.entry)
-        .filter(|e| !p.sections.iter().any(|s| *e >= s.va && *e < s.va + s.vsize))
+        .filter(|e| {
+            !p.sections
+                .iter()
+                .any(|s| *e >= s.va.0 && *e < s.va.0 + s.vsize)
+        })
         .collect();
     assert!(
         outside.is_empty(),

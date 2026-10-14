@@ -274,7 +274,7 @@ fn check(p: &Program, shift: u64) {
         .expect("the text section");
     assert!(text.executable && text.readable && !text.writable);
     assert_eq!(
-        (text.va, text.vsize, text.file_off),
+        (text.va.0, text.vsize, text.file_off.0),
         (MAIN, 0x40, 0x300 + shift)
     );
     let got = p

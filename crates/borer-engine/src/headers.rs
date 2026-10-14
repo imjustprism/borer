@@ -691,7 +691,7 @@ pub(crate) fn from_pe(
     let load_config = pe.load_config_data.as_ref().map(|l| &l.directory);
     let mapped_end = sections
         .iter()
-        .map(|s| s.file_off + s.file_size)
+        .map(|s| s.file_off.0 + s.file_size)
         .max()
         .unwrap_or(0);
     let mut overlay_end = file_len;

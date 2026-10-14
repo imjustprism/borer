@@ -54,7 +54,7 @@ use crate::isa::x86::{
     OpKind, Register,
 };
 use crate::num::from_usize;
-use crate::program::{BinaryFormat, Feature, Program, Section, Symbol, SymbolKind};
+use crate::program::{BinaryFormat, Feature, FileOff, Program, Section, Symbol, SymbolKind};
 use crate::strings::{cstr_at, literal_byte, wstr_at};
 use crate::text::plural;
 use std::collections::{BTreeMap, BTreeSet};

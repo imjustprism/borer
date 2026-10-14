@@ -1709,7 +1709,7 @@ pub(super) fn fold_static(program: &Program, e: &Expr, depth: u8) -> Option<u64>
             let section = program
                 .sections
                 .iter()
-                .find(|s| at >= s.va && at < s.va.saturating_add(s.vsize))?;
+                .find(|s| at >= s.va.0 && at < s.va.0.saturating_add(s.vsize))?;
             if section.writable {
                 return None;
             }

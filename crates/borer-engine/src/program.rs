@@ -136,17 +136,43 @@ pub enum Feature {
     Decompile,
 }
 
+/// A virtual address: where a byte sits once the image is mapped.
+///
+/// Newtype over the `u64` virtual addresses the whole engine speaks, so a
+/// file offset ([`FileOff`]) or a size cannot silently stand in for one:
+/// the two meet only where one says so, through `.0` at a boundary that
+/// names the choice. Sizes stay bare `u64`, and an address becomes a file
+/// offset only through [`Program::va_to_offset`], and the other way only
+/// through [`Program::offset_to_va`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Va(
+    /// The address, in bytes.
+    pub u64,
+);
+
+/// A file offset: where a byte sits in the file the image was loaded from.
+///
+/// Newtype over the `u64` file offsets, the mirror of [`Va`]: the loader
+/// reads the file by these and the analysis reads the image by addresses,
+/// and a value of one kind reaching code of the other is a mixup the
+/// compiler rejects instead of one a query answers wrongly with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileOff(
+    /// The offset, in bytes from the start of the file.
+    pub u64,
+);
+
 /// One mapped section of the image.
 #[derive(Debug, Clone)]
 pub struct Section {
     /// Section name as stored in the file (`.text`, `.rdata`, ...).
     pub name: String,
     /// Virtual address of the first byte when the image is loaded.
-    pub va: u64,
+    pub va: Va,
     /// Size in memory, in bytes (may exceed `file_size`: zero-filled tail).
     pub vsize: u64,
     /// Offset of the section's bytes in the file.
-    pub file_off: u64,
+    pub file_off: FileOff,
     /// Number of bytes backed by the file (`0` for `.bss`-style sections).
     pub file_size: u64,
     /// Section is readable when mapped.
@@ -160,6 +186,11 @@ pub struct Section {
 impl Section {
     /// A section backed by `size` bytes of the file at `file_off`, mapped
     /// at `va` with the same size.
+    ///
+    /// The fixture boundary for building a [`Section`] by hand: `va` and
+    /// `file_off` stay bare `u64` here and convert to [`Va`] and
+    /// [`FileOff`], so the test images that state an address and an offset
+    /// as numbers keep compiling while the fields carry the types.
     ///
     /// # Arguments
     ///
@@ -180,9 +211,9 @@ impl Section {
     ) -> Section {
         Section {
             name: name.to_owned(),
-            va,
+            va: Va(va),
             vsize: size,
-            file_off,
+            file_off: FileOff(file_off),
             file_size: size,
             readable: true,
             writable,
@@ -636,16 +667,16 @@ pub(crate) fn fit_sections(sections: &mut Vec<Section>, file_len: u64) -> Fit {
     sections.retain_mut(|s| {
         let sane = s.vsize <= SANE_MAX
             && s.file_size <= SANE_MAX
-            && (s.file_size == 0 || s.file_off < file_len)
-            && s.va.checked_add(s.vsize.max(s.file_size)).is_some();
+            && (s.file_size == 0 || s.file_off.0 < file_len)
+            && s.va.0.checked_add(s.vsize.max(s.file_size)).is_some();
         if !sane {
             fit.dropped += 1;
             return false;
         }
-        let end = s.file_off.saturating_add(s.file_size);
+        let end = s.file_off.0.saturating_add(s.file_size);
         if end > file_len {
             fit.note_cut(end);
-            s.file_size = file_len - s.file_off;
+            s.file_size = file_len - s.file_off.0;
         }
         true
     });
@@ -1497,8 +1528,8 @@ fn read_program_bytes(
 /// The address, or `None` when no section's file extent covers `off`.
 fn offset_to_va_in(sections: &[Section], off: u64) -> Option<u64> {
     sections.iter().find_map(|s| {
-        (s.file_size > 0 && off >= s.file_off && off < s.file_off.saturating_add(s.file_size))
-            .then(|| s.va + (off - s.file_off))
+        (s.file_size > 0 && off >= s.file_off.0 && off < s.file_off.0.saturating_add(s.file_size))
+            .then(|| s.va.0 + (off - s.file_off.0))
     })
 }
 
@@ -1837,9 +1868,9 @@ impl Program {
                                 },
                                 str::to_owned,
                             ),
-                            va,
+                            va: Va(va),
                             vsize: u64::from(s.virtual_size),
-                            file_off: rawoff,
+                            file_off: FileOff(rawoff),
                             file_size: if cut { file_len - rawoff } else { rawsz },
                             readable: s.characteristics & READ != 0,
                             writable: s.characteristics & WRITE != 0,
@@ -1850,9 +1881,9 @@ impl Program {
                 if fit.dropped > 0 && sections.is_empty() && pe.entry != 0 {
                     sections.push(Section {
                         name: "<flat>".to_owned(),
-                        va: pe.image_base,
+                        va: Va(pe.image_base),
                         vsize: file_len,
-                        file_off: 0,
+                        file_off: FileOff(0),
                         file_size: file_len,
                         readable: true,
                         writable: true,
@@ -2017,9 +2048,9 @@ impl Program {
                         if name.starts_with(".debug_") && !nobits {
                             unmapped.push(Section {
                                 name: name.to_owned(),
-                                va: 0,
+                                va: Va(0),
                                 vsize: 0,
-                                file_off: sh.sh_offset,
+                                file_off: FileOff(sh.sh_offset),
                                 file_size: sh.sh_size,
                                 readable: false,
                                 writable: false,
@@ -2030,9 +2061,9 @@ impl Program {
                     }
                     sections.push(Section {
                         name: name.to_owned(),
-                        va: sh.sh_addr,
+                        va: Va(sh.sh_addr),
                         vsize: sh.sh_size,
-                        file_off: sh.sh_offset,
+                        file_off: FileOff(sh.sh_offset),
                         file_size: if nobits { 0 } else { sh.sh_size },
                         readable: sh.sh_flags & ALLOC != 0,
                         writable: sh.sh_flags & WRITE != 0,
@@ -2052,9 +2083,9 @@ impl Program {
                     {
                         sections.push(Section {
                             name: format!("LOAD{i}"),
-                            va: ph.p_vaddr,
+                            va: Va(ph.p_vaddr),
                             vsize: ph.p_memsz,
-                            file_off: ph.p_offset,
+                            file_off: FileOff(ph.p_offset),
                             file_size: ph.p_filesz,
                             readable: ph.p_flags & PF.2 != 0,
                             writable: ph.p_flags & PF.1 != 0,
@@ -2169,7 +2200,7 @@ impl Program {
                 let mut unwind = 0usize;
                 if let Some(sec) = sections.iter().find(|s| s.name == ".eh_frame")
                     && let (Ok(off), Ok(size)) = (
-                        usize::try_from(sec.file_off),
+                        usize::try_from(sec.file_off.0),
                         usize::try_from(sec.file_size),
                     )
                     && let Some(slice) = off.checked_add(size).and_then(|end| bytes.get(off..end))
@@ -2178,11 +2209,11 @@ impl Program {
                         sections.iter().any(|s| {
                             s.executable
                                 && !s.name.starts_with(".plt")
-                                && va >= s.va
-                                && va < s.va.saturating_add(s.vsize)
+                                && va >= s.va.0
+                                && va < s.va.0.saturating_add(s.vsize)
                         })
                     };
-                    for (start, end) in crate::eh_frame::function_ranges(slice, sec.va, is_64) {
+                    for (start, end) in crate::eh_frame::function_ranges(slice, sec.va.0, is_64) {
                         if in_code(start) {
                             unwind += 1;
                             function_ranges.push((start, end));
@@ -2480,8 +2511,8 @@ impl Program {
             .enumerate()
             .filter(|&(_, s)| s.file_size > 0)
             .map(|(index, s)| SectionRow {
-                va: s.va,
-                end: s.va.saturating_add(s.vsize.max(s.file_size)),
+                va: s.va.0,
+                end: s.va.0.saturating_add(s.vsize.max(s.file_size)),
                 max_end_before: 0,
                 index,
             })
@@ -2512,8 +2543,8 @@ impl Program {
         // most images keep their hottest code in it.
         if let Some(first) = self.sections.first()
             && first.file_size > 0
-            && first.va <= va
-            && va < first.va + first.vsize.max(first.file_size)
+            && first.va.0 <= va
+            && va < first.va.0 + first.vsize.max(first.file_size)
         {
             return Some(first);
         }
@@ -2541,7 +2572,7 @@ impl Program {
     /// The offset, or `None` when [`Program::section_at`] finds no section.
     pub fn va_to_offset(&self, va: u64) -> Option<u64> {
         let s = self.section_at(va)?;
-        Some(s.file_off + (va - s.va))
+        Some(s.file_off.0 + (va - s.va.0))
     }
 
     /// Converts a file offset to the virtual address it is mapped at.
@@ -2573,7 +2604,7 @@ impl Program {
             .sections
             .iter()
             .filter(|s| self.section_bytes(s).is_some())
-            .map(|s| (s.file_off, s.file_off.saturating_add(s.file_size)))
+            .map(|s| (s.file_off.0, s.file_off.0.saturating_add(s.file_size)))
             .collect();
         covered.sort_unstable();
         let len = crate::num::from_usize(self.bytes.len());
@@ -2626,7 +2657,7 @@ impl Program {
     ///
     /// The bytes, or `None` when the extent runs past the end of the file.
     pub fn section_bytes(&self, s: &Section) -> Option<&[u8]> {
-        self.image_bytes(s.file_off, s.file_off.checked_add(s.file_size)?)
+        self.image_bytes(s.file_off.0, s.file_off.0.checked_add(s.file_size)?)
     }
 
     /// Reads file offsets `start..end` as the loaded image holds them: the
@@ -2668,13 +2699,17 @@ impl Program {
             // The headers are mapped but are not a section; a short read of
             // them is the same read as a short read of anything else.
             let first = self.sections.first()?;
-            let cap = first.va.checked_sub(self.image_base)?.min(first.file_off);
+            let cap = first
+                .va
+                .0
+                .checked_sub(self.image_base)?
+                .min(first.file_off.0);
             let off = va.checked_sub(self.image_base)?;
             let room = usize::try_from(cap.checked_sub(off)?).ok()?;
             return self.header_slice(va, max.min(room));
         };
-        let off = s.file_off + (va - s.va);
-        let limit = (s.file_off + s.file_size).min(self.bytes.len() as u64);
+        let off = s.file_off.0 + (va - s.va.0);
+        let limit = (s.file_off.0 + s.file_size).min(self.bytes.len() as u64);
         let end = (off + max as u64).min(limit);
         self.image_bytes(off, end).filter(|b| !b.is_empty())
     }
@@ -2696,9 +2731,9 @@ impl Program {
         let Some(s) = self.section_at(va) else {
             return self.header_slice(va, len);
         };
-        let off = s.file_off + (va - s.va);
+        let off = s.file_off.0 + (va - s.va.0);
         let end = off.checked_add(len as u64)?;
-        if end > s.file_off + s.file_size {
+        if end > s.file_off.0 + s.file_size {
             return None;
         }
         self.image_bytes(off, end)
@@ -2730,7 +2765,11 @@ impl Program {
             return None;
         }
         let first = self.sections.first()?;
-        let cap = first.va.checked_sub(self.image_base)?.min(first.file_off);
+        let cap = first
+            .va
+            .0
+            .checked_sub(self.image_base)?
+            .min(first.file_off.0);
         let off = va - self.image_base;
         let end = off.checked_add(len as u64)?;
         if end > cap {
@@ -2832,8 +2871,8 @@ impl Program {
                 format!(
                     "{}({:#x}..{:#x})",
                     s.name,
-                    s.va,
-                    s.va.saturating_add(s.vsize.max(s.file_size))
+                    s.va.0,
+                    s.va.0.saturating_add(s.vsize.max(s.file_size))
                 )
             })
             .chain((more > 0).then(|| format!("... {more} more")))
@@ -2936,9 +2975,9 @@ impl Program {
             out.push_str(&format!(
                 "  {:<14} {:<12} {:<9} {:<9} {:<9} {}  {:>5.2}{}\n",
                 s.name,
-                format!("{:#x}", s.va),
+                format!("{:#x}", s.va.0),
                 format!("{:#x}", s.vsize),
-                format!("{:#x}", s.file_off),
+                format!("{:#x}", s.file_off.0),
                 format!("{:#x}", s.file_size),
                 s.perms(),
                 self.section_entropy(s),

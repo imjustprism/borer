@@ -288,11 +288,11 @@ impl Relocs {
 pub(crate) fn file_range(sections: &[Section], va: u64, len: u64) -> Option<(u64, (u64, u64))> {
     let s = sections
         .iter()
-        .find(|s| s.file_size > 0 && va >= s.va && va - s.va < s.vsize.max(s.file_size))?;
-    let rel = va - s.va;
+        .find(|s| s.file_size > 0 && va >= s.va.0 && va - s.va.0 < s.vsize.max(s.file_size))?;
+    let rel = va - s.va.0;
     let end = rel.checked_add(len)?;
-    let extent_end = s.file_off.checked_add(s.file_size)?;
-    (end <= s.file_size).then_some((s.file_off + rel, (s.file_off, extent_end)))
+    let extent_end = s.file_off.0.checked_add(s.file_size)?;
+    (end <= s.file_size).then_some((s.file_off.0 + rel, (s.file_off.0, extent_end)))
 }
 
 /// Reads a little-endian word of the file.

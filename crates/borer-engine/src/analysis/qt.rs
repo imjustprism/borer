@@ -130,8 +130,8 @@ pub(super) fn infer(program: &Program, analysis: &mut Analysis) {
         let Some(held) = program.section_bytes(s).filter(|b| b.len() >= 16) else {
             continue;
         };
-        let end = s.va.saturating_add(from_usize(held.len()));
-        let mut va = s.va;
+        let end = s.va.0.saturating_add(from_usize(held.len()));
+        let mut va = s.va.0;
         while va.saturating_add(16) <= end {
             match string_table(program, va, word) {
                 Some(names) => {

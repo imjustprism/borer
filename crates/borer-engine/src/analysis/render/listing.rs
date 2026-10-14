@@ -952,7 +952,7 @@ pub fn listing_caveat(p: &Program, a: &Analysis, va: u64) -> String {
     let covering = p
         .sections
         .iter()
-        .find(|s| va >= s.va && va < s.va.saturating_add(s.vsize.max(s.file_size)));
+        .find(|s| va >= s.va.0 && va < s.va.0.saturating_add(s.vsize.max(s.file_size)));
     if let Some(s) = covering {
         if !s.executable {
             return format!(
@@ -969,13 +969,13 @@ pub fn listing_caveat(p: &Program, a: &Analysis, va: u64) -> String {
                 s.perms()
             );
         }
-        let backed_end = s.va.saturating_add(s.file_size);
+        let backed_end = s.va.0.saturating_add(s.file_size);
         let to = va
             .saturating_sub(PACKED_WINDOW / 2)
-            .max(s.va)
+            .max(s.va.0)
             .saturating_add(PACKED_WINDOW)
             .min(backed_end);
-        let from = to.saturating_sub(PACKED_WINDOW).max(s.va);
+        let from = to.saturating_sub(PACKED_WINDOW).max(s.va.0);
         let e = p
             .read_va(from, usize::try_from(to.saturating_sub(from)).unwrap_or(0))
             .map_or(0.0, crate::entropy::shannon);

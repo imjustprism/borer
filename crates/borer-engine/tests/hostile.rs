@@ -670,7 +670,7 @@ fn a_section_the_file_ends_inside_keeps_the_bytes_it_holds() {
     let mapped: Vec<(&str, u64, u64, u64)> = p
         .sections
         .iter()
-        .map(|s| (s.name.as_str(), s.va, s.vsize, s.file_size))
+        .map(|s| (s.name.as_str(), s.va.0, s.vsize, s.file_size))
         .collect();
     assert_eq!(mapped, vec![(".text", IMAGE_BASE + 0x1000, 0x400, 0x200)]);
     let a = Analysis::compute(&p);

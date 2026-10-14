@@ -141,11 +141,11 @@ pub fn masked_bytes(program: &Program, analysis: &Analysis, entry: u64) -> Optio
         .unwrap_or(SIG_MAX)
         .clamp(1, SIG_MAX);
     let bytes = program.read_va_upto(entry, limit)?;
-    let start = program.sections.iter().map(|s| s.va).min().unwrap_or(0);
+    let start = program.sections.iter().map(|s| s.va.0).min().unwrap_or(0);
     let end = program
         .sections
         .iter()
-        .map(|s| s.va.saturating_add(s.vsize))
+        .map(|s| s.va.0.saturating_add(s.vsize))
         .max()
         .unwrap_or(0);
     let image = start..end;

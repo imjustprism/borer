@@ -1683,7 +1683,7 @@ pub(crate) fn playbook_text(spec: &str) -> Result<String, ErrorData> {
 ///   for the reader to fill.
 fn example(shown: &str, program: Option<&Program>) -> String {
     let entry = program
-        .and_then(|p| p.entry.or_else(|| p.sections.first().map(|s| s.va)))
+        .and_then(|p| p.entry.or_else(|| p.sections.first().map(|s| s.va.0)))
         .map_or_else(|| "<entry>".to_owned(), |va| format!("{va:#x}"));
     let path = program
         .map(|p| p.path.display().to_string().replace('\\', "/"))
