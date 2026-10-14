@@ -2817,29 +2817,29 @@ impl Running<'_, '_> {
         }
         let bits = ty.bits(word).unwrap_or(64);
         if op.compares() {
-            let (l, r) = if ty.signed() {
-                (
+            let unsigned = !ty.signed();
+            let t = if unsigned {
+                match op {
+                    Bin::Lt => a.bits < b.bits,
+                    Bin::Le => a.bits <= b.bits,
+                    Bin::Gt => a.bits > b.bits,
+                    Bin::Ge => a.bits >= b.bits,
+                    Bin::Eq => a.bits == b.bits,
+                    _ => a.bits != b.bits,
+                }
+            } else {
+                let (l, r) = (
                     sext(a.bits, bits).cast_signed(),
                     sext(b.bits, bits).cast_signed(),
-                )
-            } else {
-                (
-                    i64::try_from(a.bits).unwrap_or(i64::MAX),
-                    i64::try_from(b.bits).unwrap_or(i64::MAX),
-                )
-            };
-            let unsigned = !ty.signed();
-            let t = match op {
-                Bin::Lt if unsigned => a.bits < b.bits,
-                Bin::Le if unsigned => a.bits <= b.bits,
-                Bin::Gt if unsigned => a.bits > b.bits,
-                Bin::Ge if unsigned => a.bits >= b.bits,
-                Bin::Lt => l < r,
-                Bin::Le => l <= r,
-                Bin::Gt => l > r,
-                Bin::Ge => l >= r,
-                Bin::Eq => a.bits == b.bits,
-                _ => a.bits != b.bits,
+                );
+                match op {
+                    Bin::Lt => l < r,
+                    Bin::Le => l <= r,
+                    Bin::Gt => l > r,
+                    Bin::Ge => l >= r,
+                    Bin::Eq => a.bits == b.bits,
+                    _ => a.bits != b.bits,
+                }
             };
             return Ok(Self::boolean(t));
         }
