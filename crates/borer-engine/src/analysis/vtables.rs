@@ -1172,20 +1172,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         }
     }
     let address_votes = {
-        // PERF: the class substring is cloned straight out of the name;
-        // cloning the whole qualified name per scan was pure churn.
-        let member_class = |entry: u64| -> Option<String> {
-            let f = analysis.function(entry)?;
-            if statics.contains(&entry) {
-                return None;
-            }
-            renames
-                .get(&entry)
-                .map_or(f.name.as_deref(), |n| Some(n.as_str()))
-                .and_then(class_of)
-                .map(str::to_owned)
-                .or_else(|| hints.get(&entry)?.get(&0).cloned())
-        };
+        let member_class = |entry: u64| named_class(analysis, &renames, &statics, &hints, entry);
         let mut votes: BTreeMap<(u64, u8), BTreeSet<String>> = BTreeMap::new();
         for (&entry, scan) in &scans {
             let Some(class) = member_class(entry) else {
@@ -1236,18 +1223,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
             .filter_map(|e| analysis.function(*e))
             .collect();
         scans.extend(scan_all(program, &todo, bitness, &conv));
-        let this_class = |entry: u64| -> Option<String> {
-            let f = analysis.function(entry)?;
-            if statics.contains(&entry) {
-                return None;
-            }
-            renames
-                .get(&entry)
-                .cloned()
-                .or_else(|| f.name.clone())
-                .and_then(|n| class_of(&n).map(str::to_owned))
-                .or_else(|| hints.get(&entry)?.get(&0).cloned())
-        };
+        let this_class = |entry: u64| named_class(analysis, &renames, &statics, &hints, entry);
         let found = return_summaries(
             analysis,
             &scans,
@@ -2421,6 +2397,38 @@ fn receiver_class<'a>(
             reads_this.then_some(class)
         }
     }
+}
+
+/// Returns the class a function's own name gives it, else the class its
+/// first parameter was hinted, without asking whether it is a member of
+/// the class ([`receiver_class`] does).
+///
+/// # Arguments
+///
+/// * `analysis` - The functions.
+/// * `renames` - Names chosen by this pass.
+/// * `statics` - Class-named functions whose first argument is not `this`.
+/// * `hints` - Parameter classes chosen by this pass.
+/// * `entry` - The function's entry.
+fn named_class(
+    analysis: &Analysis,
+    renames: &BTreeMap<u64, String>,
+    statics: &BTreeSet<u64>,
+    hints: &BTreeMap<u64, BTreeMap<u8, String>>,
+    entry: u64,
+) -> Option<String> {
+    let f = analysis.function(entry)?;
+    if statics.contains(&entry) {
+        return None;
+    }
+    // PERF: the class substring is cloned straight out of the name;
+    // cloning the whole qualified name per scan was pure churn.
+    renames
+        .get(&entry)
+        .map_or(f.name.as_deref(), |n| Some(n.as_str()))
+        .and_then(class_of)
+        .map(str::to_owned)
+        .or_else(|| hints.get(&entry)?.get(&0).cloned())
 }
 
 /// The class a function's parameter `n` is known to point at.
