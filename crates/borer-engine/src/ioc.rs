@@ -147,34 +147,9 @@ const TLDS: &[&str] = &[
 /// Host names every program may carry: schema namespaces, certificate
 /// authorities and their revocation servers, toolchain sites. A host equal
 /// to one or under it is benign.
-const BENIGN_HOSTS: &[&str] = &[
-    "adobe.com",
-    "apache.org",
-    "comodoca.com",
-    "digicert.com",
-    "entrust.net",
-    "globalsign.com",
-    "globalsign.net",
-    "gnu.org",
-    "godaddy.com",
-    "identrust.com",
-    "letsencrypt.org",
-    "localhost",
-    "microsoft.com",
-    "mozilla.org",
-    "openssl.org",
-    "purl.org",
-    "python.org",
-    "rust-lang.org",
-    "sectigo.com",
-    "symantec.com",
-    "symcb.com",
-    "symcd.com",
-    "thawte.com",
-    "usertrust.com",
-    "verisign.com",
-    "w3.org",
-];
+///
+/// One lowercase host per line, sorted.
+const BENIGN_HOSTS: &str = include_str!("benign_hosts.tsv");
 
 /// Paths every program of a toolchain carries: build trees, the null and
 /// random devices.
@@ -770,8 +745,8 @@ fn benign_host(host: &str) -> bool {
     host.starts_with("ocsp.")
         || host.starts_with("crl.")
         || BENIGN_HOSTS
-            .iter()
-            .any(|b| host == *b || host.strip_suffix(b).is_some_and(|head| head.ends_with('.')))
+            .lines()
+            .any(|b| host == b || host.strip_suffix(b).is_some_and(|head| head.ends_with('.')))
 }
 
 /// Tells whether a path is one every program of a toolchain carries.
@@ -899,6 +874,27 @@ mod tests {
         assert_eq!(benign("http://evil.example.com/"), [false]);
         let low = classify("6.0.0.0 here");
         assert_eq!(low.first().map(|i| i.confidence), Some(Confidence::Low));
+    }
+
+    /// The benign-host table is one lowercase host per line, sorted.
+    ///
+    /// A host is matched against lowercased text, so an entry carrying a
+    /// uppercase letter would never match; a sorted table reads as a
+    /// checklist and a duplicate stands out in a diff.
+    ///
+    /// # Panics
+    ///
+    /// When the table is not sorted, holds a blank line or a host that is
+    /// not lowercase.
+    #[test]
+    fn the_benign_host_table_is_sorted_and_lowercase() {
+        let hosts: Vec<&str> = super::BENIGN_HOSTS.lines().collect();
+        assert!(!hosts.is_empty());
+        assert!(hosts.windows(2).all(|w| w[0] < w[1]), "not sorted");
+        assert!(
+            hosts.iter().all(|h| *h == h.to_ascii_lowercase()),
+            "not lowercase"
+        );
     }
 
     /// An API's word for its argument names what it is, whatever the text.
