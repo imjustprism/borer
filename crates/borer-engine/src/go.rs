@@ -188,9 +188,9 @@ fn parse<'a>(
 ) -> Option<(GoVersion, Vec<(u64, &'a str)>)> {
     let version = GoVersion::of(v.u32(head)?)?;
     let (pad, min_lc, ptr) = (
-        v.bytes.get(head + 4..head + 6)?,
-        *v.bytes.get(head + 6)?,
-        *v.bytes.get(head + 7)?,
+        v.bytes.get(head.checked_add(4)?..head.checked_add(6)?)?,
+        *v.bytes.get(head.checked_add(6)?)?,
+        *v.bytes.get(head.checked_add(7)?)?,
     );
     if pad != [0, 0] || !matches!(min_lc, 1 | 2 | 4) || usize::from(ptr) != v.word {
         return None;
