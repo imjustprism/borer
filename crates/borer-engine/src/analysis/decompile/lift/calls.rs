@@ -1001,10 +1001,16 @@ impl<'a> Exec<'_, 'a> {
         // before the callee runs, so neither its source nor memory changing
         // under it calls for it to be written out.
         let only_read_here: Vec<Key> = held.iter().copied().filter(|k| self.dead_reg(*k)).collect();
-        let needed = self.regs_needed.clone();
+        // PERF: the window's extra needs are the keys inserted here and
+        // taken back out after it, so the map itself is never cloned
+        // around the call.
+        let mut added: Vec<Key> = Vec::new();
         if let Some(m) = self.regs_needed.as_mut() {
             for k in &held {
-                m.entry(*k).or_insert(64);
+                if !m.contains_key(k) {
+                    m.insert(*k, 64);
+                    added.push(*k);
+                }
             }
         }
         let outlives = |k: &Key| !volatile.contains(k) && !only_read_here.contains(k);
@@ -1055,7 +1061,11 @@ impl<'a> Exec<'_, 'a> {
         for o in slots {
             self.write_out_for_call(Key::Slot(o), &held);
         }
-        self.regs_needed = needed;
+        if let Some(m) = self.regs_needed.as_mut() {
+            for k in &added {
+                m.remove(k);
+            }
+        }
         self.effects[start..]
             .iter()
             .filter_map(|e| match e.kind {
@@ -1670,10 +1680,16 @@ impl<'a> Exec<'_, 'a> {
         if pending.is_empty() {
             return;
         }
-        let needed = self.regs_needed.clone();
+        // PERF: the window's extra needs are the keys inserted here and
+        // taken back out after it, so the map itself is never cloned
+        // around the call.
+        let mut added: Vec<Key> = Vec::new();
         if let Some(m) = self.regs_needed.as_mut() {
             for k in args.iter().chain(&through) {
-                m.entry(*k).or_insert(64);
+                if !m.contains_key(k) {
+                    m.insert(*k, 64);
+                    added.push(*k);
+                }
             }
         }
         for k in pending {
@@ -1694,7 +1710,11 @@ impl<'a> Exec<'_, 'a> {
                 self.env.vals.extend(rebased);
             }
         }
-        self.regs_needed = needed;
+        if let Some(m) = self.regs_needed.as_mut() {
+            for k in &added {
+                m.remove(k);
+            }
+        }
     }
 
     /// Takes out of the environment, rewritten, the arguments that read a

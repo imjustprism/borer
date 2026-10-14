@@ -870,8 +870,19 @@ pub(super) fn exec_block(
             ex.lines.push(format!("// {c}"));
         }
         ex.flags_needed = flags_live_after[idx];
-        ex.regs_needed = facts.need.and_then(|n| n.get(idx).cloned());
-        ex.reads_ahead = reads_ahead.get(idx).cloned().unwrap_or_default();
+        // PERF: each instruction's needs overwrite the last one's in place,
+        // so the two maps are allocated once per block execution instead
+        // of cloned once per instruction.
+        if let Some(src) = facts.need.and_then(|n| n.get(idx)) {
+            ex.regs_needed.get_or_insert_default().clone_from(src);
+        } else {
+            ex.regs_needed = None;
+        }
+        if let Some(src) = reads_ahead.get(idx) {
+            ex.reads_ahead.clone_from(src);
+        } else {
+            ex.reads_ahead.clear();
+        }
         let next = instrs.get(idx + 1);
         match instr.flow_control() {
             FlowControl::ConditionalBranch => {
