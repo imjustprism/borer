@@ -32,6 +32,7 @@ use super::ctext::{
     Ast, Base, Bin, CTy, Tok, Un, closing, expression, float_bits, float_of, split_top, tokens,
 };
 use super::expr::{Expr, Op, TEB_FIELDS, UnOp, fold, unary};
+use super::line::is_param_name;
 use super::signature::{Passing, Signature, passing, poke_word, printed};
 use super::traces::{INTRINSICS, Stmt, blank, statements};
 use crate::analysis::{Analysis, BlockTerm, Overlay, bare_name, name_of};
@@ -1238,11 +1239,7 @@ impl<'p> Script<'p> {
             };
             vars.insert(name.clone(), Variable { ty: *ty, slot });
         }
-        let values = |n: &str| {
-            vars.contains_key(n)
-                || n.strip_prefix('a')
-                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
-        };
+        let values = |n: &str| vars.contains_key(n) || is_param_name(n);
         let body: Vec<String> = all
             .get(base..)
             .unwrap_or(&[])
