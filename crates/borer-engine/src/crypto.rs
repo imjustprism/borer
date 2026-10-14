@@ -459,8 +459,8 @@ pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<(
                     Var::Xor | Var::Add => continue,
                 };
                 let seen = Seen {
-                    va: va.map(|v| v + i),
-                    file_off: off + i,
+                    va: va.map(|v| v.saturating_add(i)),
+                    file_off: off.saturating_add(i),
                     name: sigs[f.sig].0,
                     storage,
                     section,
@@ -502,8 +502,8 @@ pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<(
                         Storage::Added(key)
                     };
                     let seen = Seen {
-                        va: va.map(|v| v + i),
-                        file_off: off + i,
+                        va: va.map(|v| v.saturating_add(i)),
+                        file_off: off.saturating_add(i),
                         name: sigs[f.sig].0,
                         storage,
                         section,
