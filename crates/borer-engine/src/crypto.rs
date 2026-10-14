@@ -448,6 +448,16 @@ pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<(
     for (data, off, va, section) in runs {
         for (i, &b) in (0u64..).zip(data.iter()) {
             let at = crate::num::saturating_usize(i);
+            let mut report = |name: &'static str, storage: Storage| {
+                visit(&Seen {
+                    va: va.map(|v| v.saturating_add(i)),
+                    file_off: off.saturating_add(i),
+                    name,
+                    storage,
+                    section,
+                })
+                .is_break()
+            };
             for &fi in &by_byte[usize::from(b)] {
                 let f = &forms[fi];
                 if data.get(at..at.saturating_add(f.bytes.len())) != Some(f.bytes.as_slice()) {
@@ -458,14 +468,7 @@ pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<(
                     Var::Swapped => Storage::Swapped,
                     Var::Xor | Var::Add => continue,
                 };
-                let seen = Seen {
-                    va: va.map(|v| v.saturating_add(i)),
-                    file_off: off.saturating_add(i),
-                    name: sigs[f.sig].0,
-                    storage,
-                    section,
-                };
-                if visit(&seen).is_break() {
+                if report(sigs[f.sig].0, storage) {
                     return;
                 }
             }
@@ -501,14 +504,7 @@ pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<(
                     } else {
                         Storage::Added(key)
                     };
-                    let seen = Seen {
-                        va: va.map(|v| v.saturating_add(i)),
-                        file_off: off.saturating_add(i),
-                        name: sigs[f.sig].0,
-                        storage,
-                        section,
-                    };
-                    if visit(&seen).is_break() {
+                    if report(sigs[f.sig].0, storage) {
                         return;
                     }
                 }
