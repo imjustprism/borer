@@ -2505,20 +2505,19 @@ impl Running<'_, '_> {
         match e {
             Ast::Name(n) => match self.s.vars.get(n).copied() {
                 Some(v) => Ok(Self::slot_place(v)),
-                None if global_name(n).is_some() => {
-                    let (at, ty) = global_name(n).unwrap_or((0, CTy::of(Base::Void)));
-                    Ok(Place::Mem(at, ty))
-                }
-                None => match n
-                    .strip_prefix('a')
-                    .and_then(|d| d.parse::<usize>().ok())
-                    .and_then(|k| k.checked_sub(1))
-                {
-                    Some(i) if i >= self.s.passing.regs.len() => Ok(Place::Mem(
-                        self.s.entry_sp.wrapping_add(self.s.passing.stack_offset(i)),
-                        CTy::int(self.word(), false),
-                    )),
-                    _ => unchecked(format!("`{n}` is no place this can write")),
+                None => match global_name(n) {
+                    Some((at, ty)) => Ok(Place::Mem(at, ty)),
+                    None => match n
+                        .strip_prefix('a')
+                        .and_then(|d| d.parse::<usize>().ok())
+                        .and_then(|k| k.checked_sub(1))
+                    {
+                        Some(i) if i >= self.s.passing.regs.len() => Ok(Place::Mem(
+                            self.s.entry_sp.wrapping_add(self.s.passing.stack_offset(i)),
+                            CTy::int(self.word(), false),
+                        )),
+                        _ => unchecked(format!("`{n}` is no place this can write")),
+                    },
                 },
             },
             Ast::Un(Un::Deref, a) => {
