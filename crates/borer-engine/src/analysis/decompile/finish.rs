@@ -2,6 +2,7 @@
 //! file a function cites.
 
 use super::*;
+use crate::num::from_usize;
 
 /// The text passes every decompile ends with.
 ///
@@ -174,7 +175,7 @@ pub(super) fn normalize_temps(text: &str) -> String {
     let remap: BTreeMap<u64, u64> = leaked
         .iter()
         .enumerate()
-        .map(|(k, id)| (*id, small_max + 1 + k as u64))
+        .map(|(k, id)| (*id, small_max + 1 + from_usize(k)))
         .collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
