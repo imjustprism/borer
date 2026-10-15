@@ -4,7 +4,9 @@
 //! table is read from its `.gopclntab` section, or found by its magic where
 //! no section names it, and a corrupt one is refused. The functions it
 //! lists take their arguments in Go's registers (`rax`, `rbx`, `rcx`, ...),
-//! and their stack-growth prologue folds into one comment.
+//! and their stack-growth prologue folds into one comment. The same table
+//! also states the file and line each function starts at, which a
+//! decompile's header cites.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -88,6 +90,188 @@ fn pclntab(funcs: &[(u32, &str)], end: u32) -> Vec<u8> {
     out
 }
 
+/// One function of a table that carries sources, with the line runs its
+/// code states.
+#[derive(Debug, Clone, Copy)]
+struct Src {
+    /// The entry's offset from the text at `0x1000`.
+    entry: u32,
+    /// The function's name.
+    name: &'static str,
+    /// The line runs the code states, as `(offset from the entry, line)`
+    /// pairs the line holds from; empty when the code states none.
+    lines: &'static [(u32, u32)],
+}
+
+/// The functions of a table that carries sources: `main.main` changes
+/// line inside its body, `main.add` sits on one, and the assembly
+/// `runtime.morestack_noctxt` states none.
+const SRCS: [Src; 3] = [
+    Src {
+        entry: 0x00,
+        name: "main.main",
+        lines: &[(0x00, 20), (0x06, 21)],
+    },
+    Src {
+        entry: 0x10,
+        name: "main.add",
+        lines: &[(0x00, 40)],
+    },
+    Src {
+        entry: 0x30,
+        name: "runtime.morestack_noctxt",
+        lines: &[],
+    },
+];
+
+/// A `u64` as the little-endian base-128 varint the runs are written in.
+fn uvarint(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    while v >= 0x80 {
+        out.push(u8::try_from(v & 0x7f | 0x80).expect("fits"));
+        v >>= 7;
+    }
+    out.push(u8::try_from(v).expect("fits"));
+    out
+}
+
+/// A signed delta as the zigzag varint Go's `funcpctab` writes it, the
+/// sign in the low bit.
+fn zigzag(v: i64) -> u64 {
+    u64::try_from(v << 1 ^ v >> 63).expect("fits")
+}
+
+/// A pc-value run for `runs` of `(pc offset, value)`, the value holding
+/// from that pc to the next, ended at `end`.
+///
+/// The bytes are as Go's `funcpctab` writes them: the first value's
+/// delta, then each later pc's delta before its value's, then the last
+/// pc's and a zero.
+fn pctable(runs: &[(u64, i64)], end: u64) -> Vec<u8> {
+    if runs.is_empty() {
+        return Vec::new();
+    }
+    let mut out = uvarint(zigzag(runs[0].1 + 1));
+    let (mut pc, mut val) = (0u64, runs[0].1);
+    for &(at, v) in &runs[1..] {
+        out.extend(uvarint(at - pc));
+        out.extend(uvarint(zigzag(v - val)));
+        pc = at;
+        val = v;
+    }
+    out.extend(uvarint(end - pc));
+    out.push(0);
+    out
+}
+
+/// Builds a `pclntab` that also states its functions' sources: one
+/// file, and per function a `pcfile` naming it and a `pcline` of its
+/// line runs.
+///
+/// The regions are laid out as the linker emits them: the names, the
+/// file index table, the name blob, the pc-value runs, the function
+/// table, the records.
+///
+/// # Arguments
+///
+/// * `magic` - The header's magic, of the layouts that name the
+///   sub-tables: `0xfffffff1` (Go 1.20+), `0xfffffff0` (1.18) or
+///   `0xfffffffa` (1.16).
+/// * `absolute` - Whether the layout is 1.16's, whose entries and record
+///   offsets are absolute words.
+/// * `funcs` - The functions, with their line runs.
+/// * `end` - The text's end, as an offset.
+fn sourced(magic: [u8; 4], absolute: bool, funcs: &[Src], end: u32) -> Vec<u8> {
+    /// The one file the tables name.
+    const FILE: &[u8] = b"main.go\0";
+    let mut names = Vec::new();
+    let mut name_offs = Vec::new();
+    for f in funcs {
+        name_offs.push(u32::try_from(names.len()).expect("fits"));
+        names.extend_from_slice(f.name.as_bytes());
+        names.push(0);
+    }
+    let mut pctab = vec![0u8];
+    let mut run_offs = Vec::new();
+    for (k, f) in funcs.iter().enumerate() {
+        let size = u64::from(funcs.get(k + 1).map_or(end, |n| n.entry) - f.entry);
+        let pcfile = u32::try_from(pctab.len()).expect("fits");
+        pctab.extend(pctable(&[(0, 0)], size));
+        let pcline = u32::try_from(if f.lines.is_empty() { 0 } else { pctab.len() }).expect("fits");
+        let runs: Vec<(u64, i64)> = f
+            .lines
+            .iter()
+            .map(|&(at, line)| (u64::from(at), i64::from(line)))
+            .collect();
+        pctab.extend(pctable(&runs, size));
+        run_offs.push((pcfile, pcline));
+    }
+    let round = |n: usize| n.next_multiple_of(8);
+    let names_at = if absolute { 8 + 7 * 8 } else { 8 + 8 * 8 };
+    let cutab_at = names_at + round(names.len());
+    let file_at = cutab_at + round(4);
+    let pctab_at = file_at + round(FILE.len());
+    let functab_at = pctab_at + round(pctab.len());
+    let stride = if absolute { 16 } else { 8 };
+    let records_at = functab_at + (funcs.len() + 1) * stride;
+    let mut out = vec![0u8; records_at + funcs.len() * RECORD];
+    out[0..4].copy_from_slice(&magic);
+    out[4..8].copy_from_slice(&[0, 0, 1, 8]);
+    let mut words = vec![
+        u64::try_from(funcs.len()).expect("fits"), // nfunc
+        1,                                         // nfiles
+    ];
+    if !absolute {
+        words.push(MAIN); // textStart
+    }
+    words.extend(
+        [names_at, cutab_at, file_at, pctab_at, functab_at]
+            .map(|n| u64::try_from(n).expect("fits")),
+    );
+    for (k, w) in words.iter().enumerate() {
+        out[8 + k * 8..16 + k * 8].copy_from_slice(&w.to_le_bytes());
+    }
+    out[names_at..names_at + names.len()].copy_from_slice(&names);
+    out[cutab_at..cutab_at + 4].copy_from_slice(&0u32.to_le_bytes());
+    out[file_at..file_at + FILE.len()].copy_from_slice(FILE);
+    out[pctab_at..pctab_at + pctab.len()].copy_from_slice(&pctab);
+    for (k, f) in funcs.iter().enumerate() {
+        let (row, record) = (functab_at + k * stride, records_at + k * RECORD);
+        let (pcfile, pcline) = run_offs[k];
+        if absolute {
+            let entry = MAIN + u64::from(f.entry);
+            out[row..row + 8].copy_from_slice(&entry.to_le_bytes());
+            out[row + 8..row + 16].copy_from_slice(
+                &u64::try_from(record - functab_at)
+                    .expect("fits")
+                    .to_le_bytes(),
+            );
+            out[record..record + 8].copy_from_slice(&entry.to_le_bytes());
+            out[record + 8..record + 12].copy_from_slice(&name_offs[k].to_le_bytes());
+            out[record + 24..record + 28].copy_from_slice(&pcfile.to_le_bytes());
+            out[record + 28..record + 32].copy_from_slice(&pcline.to_le_bytes());
+        } else {
+            out[row..row + 4].copy_from_slice(&f.entry.to_le_bytes());
+            out[row + 4..row + 8].copy_from_slice(
+                &u32::try_from(record - functab_at)
+                    .expect("fits")
+                    .to_le_bytes(),
+            );
+            out[record..record + 4].copy_from_slice(&f.entry.to_le_bytes());
+            out[record + 4..record + 8].copy_from_slice(&name_offs[k].to_le_bytes());
+            out[record + 20..record + 24].copy_from_slice(&pcfile.to_le_bytes());
+            out[record + 24..record + 28].copy_from_slice(&pcline.to_le_bytes());
+        }
+    }
+    let last = functab_at + funcs.len() * stride;
+    if absolute {
+        out[last..last + 8].copy_from_slice(&(MAIN + u64::from(end)).to_le_bytes());
+    } else {
+        out[last..last + 4].copy_from_slice(&end.to_le_bytes());
+    }
+    out
+}
+
 /// A stripped Go executable: the three functions in `.text`, and the table
 /// in a section of the given name at `0x2000`, `lead` bytes in.
 ///
@@ -167,6 +351,53 @@ fn a_gopclntab_section_names_its_functions() {
     );
 }
 
+/// The table states where each listed function starts.
+///
+/// `main.main` starts at line 20 of `main.go` and `main.add` at 40,
+/// while an address no entry starts at, and the assembly
+/// `runtime.morestack_noctxt` whose code states no run, answer nothing.
+/// A decompile's header cites the line, as the PDB's rows do.
+#[test]
+fn a_table_states_the_source_its_functions_start_at() {
+    let p = go_elf(
+        ".gopclntab",
+        0,
+        &sourced([0xf1, 0xff, 0xff, 0xff], false, &SRCS, 0x31),
+    );
+    let go = p.go.as_ref().expect("the table is kept");
+    assert_eq!(go.version, GoVersion::V1_20);
+    let bytes = p
+        .section_bytes(p.section_at(go.at).expect("the table's section"))
+        .expect("the section reads");
+    assert_eq!(go.source_of(bytes, MAIN), Some(("main.go".to_owned(), 20)));
+    assert_eq!(go.source_of(bytes, ADD), Some(("main.go".to_owned(), 40)));
+    assert_eq!(go.source_of(bytes, MORESTACK), None);
+    assert_eq!(go.source_of(bytes, 0x1020), None);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), MAIN).expect("main.main decompiles");
+    assert!(text.contains("// source: main.go:20\n"), "{text}");
+}
+
+/// The 1.16 layout states sources too, from its pointer-width rows and
+/// records, and still names every function it lists.
+#[test]
+fn a_1_16_table_states_sources_too() {
+    let p = go_elf(
+        ".gopclntab",
+        0,
+        &sourced([0xfa, 0xff, 0xff, 0xff], true, &SRCS, 0x31),
+    );
+    let go = p.go.as_ref().expect("the table is kept");
+    assert_eq!(go.version, GoVersion::V1_16);
+    assert_eq!(locals(&p).len(), 3, "{:?}", locals(&p));
+    let bytes = p
+        .section_bytes(p.section_at(go.at).expect("the table's section"))
+        .expect("the section reads");
+    assert_eq!(go.source_of(bytes, MAIN), Some(("main.go".to_owned(), 20)));
+    assert_eq!(go.source_of(bytes, ADD), Some(("main.go".to_owned(), 40)));
+    assert_eq!(go.source_of(bytes, MORESTACK), None);
+}
+
 /// The same table in a section no toolchain names, past some other data,
 /// is found by its magic.
 #[test]
@@ -193,12 +424,22 @@ fn a_corrupt_table_is_refused() {
     count[8..16].copy_from_slice(&(1u64 << 40).to_le_bytes());
     let mut truncated = good;
     truncated.truncate(pcln + 8);
+    let mut misordered = sourced([0xf1, 0xff, 0xff, 0xff], false, &SRCS, 0x31);
+    // The file index table placed past the name blob it indexes into:
+    // no linker writes that order, so the table is refused.
+    let (cu, files) = (
+        u64::from_le_bytes(misordered[40..48].try_into().expect("word")),
+        u64::from_le_bytes(misordered[48..56].try_into().expect("word")),
+    );
+    misordered[40..48].copy_from_slice(&files.to_le_bytes());
+    misordered[48..56].copy_from_slice(&cu.to_le_bytes());
     for (what, table) in [
         ("a record that disagrees", mismatch),
         ("entries out of order", unordered),
         ("a name past the table", far_name),
         ("a count past the end", count),
         ("a truncated table", truncated),
+        ("the file regions out of order", misordered),
     ] {
         for section in [".gopclntab", ".rodata"] {
             let p = go_elf(section, 0, &table);

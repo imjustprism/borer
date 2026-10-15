@@ -15,7 +15,10 @@
 //! DWARF names do, and [`Pclntab`] stays on the program as their
 //! provenance and as the mark of which functions are Go: from Go 1.17 on
 //! (`pclntab` 1.18 and later here) those take their arguments in
-//! registers, which the decompiler reads them by.
+//! registers, which the decompiler reads them by. From Go 1.16 on the
+//! same header also names the file and line runs each function's record
+//! points at, so a listed function says the source it starts at
+//! ([`Pclntab::source_of`]).
 
 use crate::num::{from_usize, saturating_usize};
 use crate::program::{Section, Symbol, SymbolKind};
@@ -91,6 +94,9 @@ pub struct Pclntab {
     pub at: u64,
     /// Every function's entry, sorted and unique.
     pub entries: Vec<u64>,
+    /// The file and line sub-tables a 1.16-or-later header named;
+    /// `None` for the 1.2 layout, which carries none.
+    pub(crate) lines: Option<Lines>,
 }
 
 impl Pclntab {
@@ -104,6 +110,90 @@ impl Pclntab {
         self.entries.binary_search(&entry).is_ok()
     }
 
+    /// Reads the file and line the table states a listed function starts
+    /// at.
+    ///
+    /// A 1.16-or-later header names the sub-tables the runtime's
+    /// traceback walks: each `_func` record points at two delta-encoded
+    /// runs, one naming the file its code came from and one the line, and
+    /// the first run of each is the function's start. Earlier layouts
+    /// carry no file table, and code the compiler wrote no runs for has
+    /// none, so both answer `None`.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes of the section the table was read from.
+    /// * `entry` - A function's entry.
+    ///
+    /// # Returns
+    ///
+    /// The `(file, line)` the runs at the entry state, or `None` when
+    /// the table does not list `entry`, predates the file table, or its
+    /// runs do not decode.
+    #[must_use]
+    pub fn source_of(&self, bytes: &[u8], entry: u64) -> Option<(String, u32)> {
+        let l = self.lines?;
+        let v = View {
+            bytes,
+            word: l.word,
+        };
+        let i = self.entries.binary_search(&entry).ok()?;
+        // SPEC: runtime/symtab.go `functab`: each row holds its entry
+        // beside the offset of its `_func` record from the records'
+        // start, a 32-bit offset in the 1.18 layouts and a word in the
+        // 1.16 one.
+        let record_off = match self.version {
+            GoVersion::V1_2 => return None,
+            GoVersion::V1_16 => {
+                let row = l.functab.checked_add(i.checked_mul(2 * l.word)?)?;
+                v.word(row.checked_add(l.word)?)?
+            }
+            GoVersion::V1_18 | GoVersion::V1_20 => {
+                let row = l.functab.checked_add(i.checked_mul(8)?)?;
+                u64::from(v.u32(row.checked_add(4)?)?)
+            }
+        };
+        let record = l.functab.checked_add(saturating_usize(record_off))?;
+        let (fileno, line) = (
+            pcvalue(
+                v,
+                l,
+                saturating_usize(u64::from(v.u32(record.checked_add(l.pcfile_at)?)?)),
+            )?,
+            pcvalue(
+                v,
+                l,
+                saturating_usize(u64::from(v.u32(record.checked_add(l.pcline_at)?)?)),
+            )?,
+        );
+        if fileno < 0 || line < 0 {
+            return None;
+        }
+        // SPEC: runtime/symtab.go `funcfile`: the record's compilation
+        // unit slots its file numbers into the name blob, `u32::MAX`
+        // marking a file the linker dropped.
+        let cu = v.u32(record.checked_add(l.cu_at)?)?;
+        if cu == u32::MAX {
+            return None;
+        }
+        let slot = usize::try_from(cu)
+            .ok()?
+            .checked_add(usize::try_from(fileno).ok()?)?;
+        let at = l.cutab.checked_add(slot.checked_mul(4)?)?;
+        if l.filetab < at.checked_add(4)? {
+            return None;
+        }
+        let file_off = v.u32(at)?;
+        if file_off == u32::MAX {
+            return None;
+        }
+        let path = v.name(
+            l.filetab
+                .checked_add(saturating_usize(u64::from(file_off)))?,
+        )?;
+        Some((path.to_owned(), u32::try_from(line).ok()?))
+    }
+
     /// Renders the table as a summary line.
     pub(crate) fn render(&self) -> String {
         format!(
@@ -113,6 +203,150 @@ impl Pclntab {
             self.entries.len()
         )
     }
+}
+
+/// The file and line sub-tables a 1.16-or-later header names, as offsets
+/// into the section carrying the table.
+///
+/// The linker emits them in the order the header lists them - the
+/// per-compilation-unit file index table, the name blob, the pc-value
+/// runs - so each region ends where the next begins, and a table whose
+/// offsets disagree with that order is refused whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lines {
+    /// The pc quantum the pc-value runs' deltas count in, in bytes.
+    min_lc: u32,
+    /// The pointer width in bytes, 4 or 8, which the 1.16 layout's
+    /// function table rows and records are laid out by.
+    word: usize,
+    /// The function table's and the records' offset: rows of (entry,
+    /// record offset), then the records themselves.
+    functab: usize,
+    /// The file index table's offset, in `u32` slots of a compilation
+    /// unit's file numbers into the name blob.
+    cutab: usize,
+    /// The file name blob's offset, of NUL-separated paths.
+    filetab: usize,
+    /// The pc-value runs' offset, which the records' `pcfile` and
+    /// `pcline` offsets count from.
+    pctab: usize,
+    /// The offset of the record's `pcfile` run within it.
+    pcfile_at: usize,
+    /// The offset of the record's `pcline` run within it.
+    pcline_at: usize,
+    /// The offset of the record's compilation-unit slot within it.
+    cu_at: usize,
+}
+
+impl Lines {
+    /// Records the sub-tables a header names, checked against the order
+    /// the linker emits them in.
+    ///
+    /// # Arguments
+    ///
+    /// * `word` - The pointer width in bytes, 4 or 8.
+    /// * `min_lc` - The pc quantum from the header, in bytes.
+    /// * `cutab` - The file index table's offset in the section.
+    /// * `filetab` - The file name blob's offset in it.
+    /// * `pctab` - The pc-value runs' offset in it.
+    /// * `functab` - The function table's offset in it.
+    /// * `record` - The `(pcfile, pcln, cuOffset)` offsets within a
+    ///   record.
+    ///
+    /// # Returns
+    ///
+    /// The sub-tables, or `None` when the regions lie out of emission
+    /// order, which no Go linker writes.
+    fn new(
+        word: usize,
+        min_lc: u8,
+        cutab: usize,
+        filetab: usize,
+        pctab: usize,
+        functab: usize,
+        record: (usize, usize, usize),
+    ) -> Option<Self> {
+        (cutab <= filetab && filetab <= pctab && pctab <= functab).then_some(Self {
+            min_lc: u32::from(min_lc),
+            word,
+            functab,
+            cutab,
+            filetab,
+            pctab,
+            pcfile_at: record.0,
+            pcline_at: record.1,
+            cu_at: record.2,
+        })
+    }
+}
+
+/// Decodes the value a pc-value run states at a function's entry.
+///
+/// A run ([`Lines::pctab`]) is a sequence of pairs, a zigzag varint of
+/// how the value changes and a varint of how far the pc then moves in
+/// [`Lines::min_lc`]-byte steps, the new value holding from that pc on,
+/// ended by a zero value delta. The entry's value is the first pair's.
+///
+/// # Arguments
+///
+/// * `v` - The section's bytes.
+/// * `l` - The sub-tables the header named.
+/// * `off` - The run's offset from [`Lines::pctab`], 0 meaning none.
+///
+/// # Returns
+///
+/// The value in effect at the entry, or `None` when the run is absent,
+/// runs past the pc-value region, or never covers the entry.
+fn pcvalue(v: View<'_>, l: Lines, off: usize) -> Option<i64> {
+    if off == 0 {
+        return None;
+    }
+    let mut p = l.pctab.checked_add(off)?;
+    let (mut pc, mut val) = (0u64, -1i64);
+    loop {
+        let (uv, after_uv) = varint(v.bytes, l.functab, p)?;
+        // SPEC: runtime/symtab.go `step`: a zero value delta ends the
+        // run, save on an entry the pc has not moved past, and the pc
+        // delta counts `minLC`-byte steps.
+        if uv == 0 && pc != 0 {
+            return None;
+        }
+        let (delta, after) = varint(v.bytes, l.functab, after_uv)?;
+        val += i64::from(uv >> 1) ^ -i64::from(uv & 1);
+        pc = pc.checked_add(u64::from(delta).checked_mul(u64::from(l.min_lc))?)?;
+        p = after;
+        if pc > 0 {
+            return Some(val);
+        }
+    }
+}
+
+/// Reads a little-endian base-128 varint from a bounded region.
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes the runs live in.
+/// * `end` - The region's end, an offset into `bytes`.
+/// * `at` - The varint's first byte's offset.
+///
+/// # Returns
+///
+/// The value and the offset of the byte after it, or `None` when the
+/// region ends first or five bytes (all a `u32` holds) continue.
+fn varint(bytes: &[u8], end: usize, at: usize) -> Option<(u32, usize)> {
+    let mut v = 0u32;
+    for k in 0..5 {
+        let i = at.checked_add(k)?;
+        if i >= end {
+            return None;
+        }
+        let b = bytes[i];
+        v |= u32::from(b & 0x7f) << (k * 7);
+        if b < 0x80 {
+            return Some((v, i + 1));
+        }
+    }
+    None
 }
 
 /// A view of one section's bytes, read by offset from its start.
@@ -169,6 +403,18 @@ impl<'a> View<'a> {
     }
 }
 
+/// What [`parse`] reads from one table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Parsed<'a> {
+    /// The layout, which says which Go releases wrote it.
+    version: GoVersion,
+    /// The file and line sub-tables the header named, `None` for the
+    /// 1.2 layout, which carries none.
+    lines: Option<Lines>,
+    /// Every function's `(entry, name)`, in table order.
+    funcs: Vec<(u64, &'a str)>,
+}
+
 /// Reads a table whose header starts at `head` in a view.
 ///
 /// # Arguments
@@ -179,13 +425,10 @@ impl<'a> View<'a> {
 ///
 /// # Returns
 ///
-/// The layout and every function's `(entry, name)` in table order, or
-/// `None` when any field, entry or name does not hold.
-fn parse<'a>(
-    v: View<'a>,
-    head: usize,
-    code: &dyn Fn(u64) -> bool,
-) -> Option<(GoVersion, Vec<(u64, &'a str)>)> {
+/// The layout, the file and line sub-tables it names and every
+/// function's `(entry, name)` in table order, or `None` when any field,
+/// entry or name does not hold.
+fn parse<'a>(v: View<'a>, head: usize, code: &dyn Fn(u64) -> bool) -> Option<Parsed<'a>> {
     let version = GoVersion::of(v.u32(head)?)?;
     let (pad, min_lc, ptr) = (
         v.bytes.get(head.checked_add(4)?..head.checked_add(6)?)?,
@@ -205,11 +448,50 @@ fn parse<'a>(
     // release: 1.18 on store each entry and record offset as 32 bits from
     // the header's text start, earlier layouts as absolute words, and 1.2
     // counts its record and name offsets from the header itself.
+    //
+    // SPEC: cmd/link/internal/ld/pcln.go `writeFuncs`: each record holds
+    // its `pcfile` and `pcline` runs and its compilation-unit slot at
+    // `w+16`/`w+20`/`w+28` in the 1.16 layout's pointer-width records,
+    // and at 20/24/32 once entries shrank to 32-bit offsets.
     let at = |k: usize| head.checked_add(v.offset(field(k)?)?);
-    let (text, names, table, records) = match version {
-        GoVersion::V1_18 | GoVersion::V1_20 => (Some(v.word(field(2)?)?), at(3)?, at(7)?, at(7)?),
-        GoVersion::V1_16 => (None, at(2)?, at(6)?, at(6)?),
-        GoVersion::V1_2 => (None, head, field(1)?, head),
+    let (text, names, table, records, lines) = match version {
+        GoVersion::V1_18 | GoVersion::V1_20 => {
+            let functab = at(7)?;
+            (
+                Some(v.word(field(2)?)?),
+                at(3)?,
+                functab,
+                functab,
+                Some(Lines::new(
+                    v.word,
+                    min_lc,
+                    at(4)?,
+                    at(5)?,
+                    at(6)?,
+                    functab,
+                    (20, 24, 32),
+                )?),
+            )
+        }
+        GoVersion::V1_16 => {
+            let functab = at(6)?;
+            (
+                None,
+                at(2)?,
+                functab,
+                functab,
+                Some(Lines::new(
+                    v.word,
+                    min_lc,
+                    at(3)?,
+                    at(4)?,
+                    at(5)?,
+                    functab,
+                    (w + 16, w + 20, w + 28),
+                )?),
+            )
+        }
+        GoVersion::V1_2 => (None, head, field(1)?, head, None),
     };
     let (stride, half) = if text.is_some() { (8, 4) } else { (2 * w, w) };
     let entry_at = |at: usize| match text {
@@ -238,7 +520,11 @@ fn parse<'a>(
     let end = funcs.pop()?.0;
     let ordered =
         funcs.windows(2).all(|p| p[0].0 < p[1].0) && funcs.last().is_some_and(|last| last.0 <= end);
-    (ordered && funcs.iter().all(|(entry, _)| code(*entry))).then_some((version, funcs))
+    (ordered && funcs.iter().all(|(entry, _)| code(*entry))).then_some(Parsed {
+        version,
+        lines,
+        funcs,
+    })
 }
 
 /// Finds and reads the Go function table of an image.
@@ -269,7 +555,7 @@ pub(crate) fn find<'a>(
     };
     let named = |s: &Section| s.name == ".gopclntab" || s.name.ends_with("__gopclntab");
     let read = |s: &'a Section, head: usize| {
-        let (version, funcs) = parse(
+        let parsed = parse(
             View {
                 bytes: bytes(s)?,
                 word,
@@ -278,11 +564,12 @@ pub(crate) fn find<'a>(
             &code,
         )?;
         let table = Pclntab {
-            version,
+            version: parsed.version,
             at: s.va.0.checked_add(from_usize(head))?,
-            entries: funcs.iter().map(|f| f.0).collect(),
+            entries: parsed.funcs.iter().map(|f| f.0).collect(),
+            lines: parsed.lines,
         };
-        Some((table, funcs))
+        Some((table, parsed.funcs))
     };
     if let Some(found) = sections
         .iter()
