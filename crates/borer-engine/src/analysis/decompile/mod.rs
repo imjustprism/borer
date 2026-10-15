@@ -227,10 +227,12 @@ struct Ctx<'a> {
     /// value came from.
     debug_params: std::sync::Arc<[crate::dwarf::Parameter]>,
     /// The source file and line the debug information states the function
-    /// was written in, for the header's `// source:` line; `None` when
-    /// nothing was recorded, which leaves the line to what the body's own
-    /// assertions cite. The PDB's rows are read lazily ([`pdb_sources`]),
-    /// so the first header that states one pays their walk once.
+    /// was written in - the PDB's rows, or a Go function's `pclntab`
+    /// record ([`pdb_sources`], [`go_source`]) - for the header's
+    /// `// source:` line; `None` when nothing was recorded, which leaves
+    /// the line to what the body's own assertions cite. The PDB's rows
+    /// are read lazily, so the first header that states one pays their
+    /// walk once.
     debug_source: Option<(String, u32)>,
     /// The frame-relative locals the debug information states, as slot
     /// offset to name, each stated variable's name over its slot
@@ -741,6 +743,29 @@ fn pdb_sources(
     })
 }
 
+/// The source file and line a Go function's own table states it starts
+/// at, where the debug information said nothing.
+///
+/// Go's `pclntab` names the file and line runs beside the function names
+/// it already gave, read straight from the section the load found the
+/// table in. One function's lookup is two short varint runs, so unlike
+/// [`pdb_sources`] no walk is worth memoizing.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, holding the table.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The `(file, line)` the table states, or `None` when no table was
+/// kept, it does not list `entry`, or it predates the file tables.
+fn go_source(program: &Program, entry: u64) -> Option<(String, u32)> {
+    let go = program.go.as_ref()?;
+    let bytes = program.section_bytes(program.section_at(go.at)?)?;
+    go.source_of(bytes, entry)
+}
+
 /// The per-function state the lifter runs with, before the parameters and
 /// the calling convention are read from the code.
 ///
@@ -805,7 +830,10 @@ fn new_ctx<'a>(
             None => debug.and_then(|d| d.return_type.clone()),
         },
         debug_params: std::sync::Arc::from(declared::params(stated, debug, vars)),
-        debug_source: pdb_sources(program, analysis).get(&f.entry).cloned(),
+        debug_source: pdb_sources(program, analysis)
+            .get(&f.entry)
+            .cloned()
+            .or_else(|| go_source(program, f.entry)),
         debug_locals: std::sync::Arc::new(declared::locals(debug, vars)),
         vcalls: BTreeSet::new(),
         empty_calls: BTreeSet::new(),
