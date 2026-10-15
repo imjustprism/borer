@@ -15,17 +15,20 @@
 //! through what set them ([`flags`]), and a conditional select is an
 //! [`Expr::Ternary`]. In the entry block a store of a register the callee
 //! must preserve ([`callee_saved`]) is a save, as the x86 lifter reads a
-//! push. An instruction without a model (floating-point and vector
-//! arithmetic, system registers, atomics) stays an `/* asm */` comment and
-//! forgets what it writes. A call passes its callee the arguments the
-//! arm64 procedure call standard puts in registers and assigns its result
-//! ([`call`]); what a function itself takes and hands back is read from
-//! its code and its declarations ([`mod@shape`]); which registers each
-//! instruction reads and writes is [`live`]'s.
+//! push. The scalar floating-point arithmetic, compares and conversions
+//! and the vector moves and bitwise logic are modeled as the x86 lifter
+//! models its own ([`float`], [`step`]); an instruction without a model
+//! (the packed arithmetic, system registers, atomics) stays an `/* asm */`
+//! comment and forgets what it writes. A call passes its callee the
+//! arguments the arm64 procedure call standard puts in registers and
+//! assigns its result ([`call`]); what a function itself takes and hands
+//! back is read from its code and its declarations ([`mod@shape`]); which
+//! registers each instruction reads and writes is [`live`]'s.
 
 mod call;
 mod conv;
 mod flags;
+mod float;
 mod live;
 mod mem;
 mod shape;
@@ -390,9 +393,12 @@ impl Lift<'_, '_> {
     /// 32-bit writes do: the value is kept uncut and the register held
     /// narrow ([`super::lift::Env::narrow`]) when it may have bits above
     /// 32, so only a whole read cuts it ([`Lift::reg_at`]). A scalar `v`
-    /// write clears the bits above it, so its value is cut to the width; a
-    /// write to the zero register vanishes; the stack pointer is tracked as
-    /// an offset while the value is one, and held as a value when not.
+    /// write clears the bits above it, so its value is cut to the width —
+    /// unless the value is a float, whose bits already fit the width its
+    /// type gives and which a mask would read as an operation on the
+    /// number; a write to the zero register vanishes; the stack pointer is
+    /// tracked as an offset while the value is one, and held as a value
+    /// when not.
     ///
     /// # Arguments
     ///
@@ -401,7 +407,7 @@ impl Lift<'_, '_> {
     /// * `v` - The value.
     fn write(&mut self, r: Reg, bits: u16, v: Expr) {
         let w = matches!(r, Reg::X(_)) && bits == 32;
-        let v = if w { v } else { low(v, bits) };
+        let v = if w || v.is_float() { v } else { low(v, bits) };
         match (r, v) {
             (Reg::Zr, _) => {}
             (Reg::Sp, Expr::Sp(k)) => {

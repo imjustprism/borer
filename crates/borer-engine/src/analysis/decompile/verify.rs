@@ -36,8 +36,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::isa::x86::{
-    ConditionCode, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind,
-    Register, st_register,
+    FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
+    st_register,
 };
 
 use super::expr::{Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, fold, tls_slot, unary};
@@ -986,41 +986,6 @@ pub(super) fn float_to_int(v: u64, fb: u8, bits: u8) -> u64 {
     }
 }
 
-/// Evaluates a float comparison's condition code from the flags `comiss`
-/// leaves: unordered sets all three, above clears all three, below sets
-/// the carry, equal sets the zero flag.
-///
-/// # Arguments
-///
-/// * `cc` - The condition code.
-/// * `a` - The left float.
-/// * `b` - The right float.
-///
-/// # Returns
-///
-/// The truth value, or `None` for a condition code a float compare does
-/// not decide.
-pub(super) fn float_cc(cc: ConditionCode, a: f64, b: f64) -> Option<bool> {
-    use ConditionCode as C;
-    let unordered = a.is_nan() || b.is_nan();
-    let (zf, pf, cf) = if unordered {
-        (true, true, true)
-    } else {
-        (a == b, false, a < b)
-    };
-    match cc {
-        C::a => Some(!cf && !zf),
-        C::ae => Some(!cf),
-        C::b => Some(cf),
-        C::be => Some(cf || zf),
-        C::e => Some(zf),
-        C::ne => Some(!zf),
-        C::p => Some(pf),
-        C::np => Some(!pf),
-        _ => None,
-    }
-}
-
 /// Evaluates a condition by folding its flags' operands to constants and
 /// asking the lifter's own condition logic.
 ///
@@ -1036,16 +1001,22 @@ pub(super) fn eval_cond<M: Bench>(
     reads: &mut Vec<(u64, u64)>,
     d: u8,
 ) -> Option<bool> {
+    if let Flags::Float(a, b, fb) = &c.flags {
+        let l = float_of(eval(a, st, reads, d)?, *fb);
+        let r = float_of(eval(b, st, reads, d)?, *fb);
+        return super::expr::float_cc(c.cc.0, l, r);
+    }
     if let Flags::Cmp(a, b, _) = &c.flags
         && let Some(fb) = float_bits(a, st).or_else(|| float_bits(b, st))
     {
         let l = float_of(eval(a, st, reads, d)?, fb);
         let r = float_of(eval(b, st, reads, d)?, fb);
-        return float_cc(c.cc.0, l, r);
+        return super::expr::float_cc(c.cc.0, l, r);
     }
     let mut k = |e: &Expr| eval(e, st, reads, d).map(Expr::Const);
     let flags = match &c.flags {
         Flags::Cmp(a, b, w) => Flags::Cmp(k(a)?, k(b)?, *w),
+        Flags::Float(..) => return None,
         Flags::Test(a, b, w) => Flags::Test(k(a)?, k(b)?, *w),
         Flags::Result(a, w) => Flags::Result(k(a)?, *w),
         Flags::Add(a, b, w) => Flags::Add(k(a)?, k(b)?, *w),

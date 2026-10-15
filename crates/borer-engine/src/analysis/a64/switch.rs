@@ -326,6 +326,23 @@ fn copied_from(insn: &Insn) -> Option<usize> {
         | Mnemonic::Cas(_)
         | Mnemonic::Prfm
         | Mnemonic::Fmov
+        | Mnemonic::Fadd
+        | Mnemonic::Fsub
+        | Mnemonic::Fmul
+        | Mnemonic::Fdiv
+        | Mnemonic::Fsqrt
+        | Mnemonic::Fabs
+        | Mnemonic::Fneg
+        | Mnemonic::Fcmp
+        | Mnemonic::Fcmpe
+        | Mnemonic::Fccmp
+        | Mnemonic::Fcsel
+        | Mnemonic::Scvtf
+        | Mnemonic::Ucvtf
+        | Mnemonic::Fcvtzs
+        | Mnemonic::Fcvtzu
+        | Mnemonic::Fcvt
+        | Mnemonic::Dup
         | Mnemonic::Movi
         | Mnemonic::Mvni
         | Mnemonic::Svc

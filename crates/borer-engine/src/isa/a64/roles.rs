@@ -162,6 +162,11 @@ impl Insn {
             | Mnemonic::Prfm
             | Mnemonic::Ccmp
             | Mnemonic::Ccmn
+            // INVARIANT: the floating-point compares write the flags only;
+            // their register operands are all sources.
+            | Mnemonic::Fcmp
+            | Mnemonic::Fcmpe
+            | Mnemonic::Fccmp
             | Mnemonic::Svc => r.rest(ops, 0),
             Mnemonic::Ldr(_) | Mnemonic::Mrs | Mnemonic::Stxr(_) | Mnemonic::Stxp => {
                 r.write(ops[0]);
@@ -229,6 +234,20 @@ impl Insn {
             | Mnemonic::Csinv
             | Mnemonic::Csneg
             | Mnemonic::Fmov
+            | Mnemonic::Fadd
+            | Mnemonic::Fsub
+            | Mnemonic::Fmul
+            | Mnemonic::Fdiv
+            | Mnemonic::Fsqrt
+            | Mnemonic::Fabs
+            | Mnemonic::Fneg
+            | Mnemonic::Fcsel
+            | Mnemonic::Scvtf
+            | Mnemonic::Ucvtf
+            | Mnemonic::Fcvtzs
+            | Mnemonic::Fcvtzu
+            | Mnemonic::Fcvt
+            | Mnemonic::Dup
             | Mnemonic::Movi
             | Mnemonic::Mvni
             | Mnemonic::Other => {

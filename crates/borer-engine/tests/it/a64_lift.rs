@@ -3,12 +3,14 @@
 //! Each routine is a few blocks of one form the lifter maps (the carry a
 //! compare or an addition leaves, conditional compare chains, the
 //! conditional selects, the bitfield moves, pair loads that write their
-//! base back, `w` writes that clear the upper half, a frame built and torn
-//! down under pointer authentication), assembled by LLVM (`clang
-//! --target=aarch64-linux-gnu -march=armv8.5-a`) and checked against
-//! `llvm-objdump`. Every block is lifted and run from the same seeded
-//! states, and every register, `v` register, slot, store and branch must
-//! agree on every seed.
+//! base back, `w` writes that clear the upper half, the scalar float
+//! arithmetic, compares and conversions, the vector bitwise logic, a frame
+//! built and torn down under pointer authentication), assembled by LLVM
+//! (`clang --target=aarch64-linux-gnu -march=armv8.5-a`) and checked
+//! against `llvm-objdump` — the float and vector ones hand-encoded from
+//! the Arm ARM and checked against the decoder. Every block is lifted and
+//! run from the same seeded states, and every register, `v` register,
+//! slot, store and branch must agree on every seed.
 #![expect(
     clippy::missing_panics_doc,
     clippy::expect_used,
@@ -360,6 +362,199 @@ fn cbz_and_tbnz_alone_agree_with_the_emulator() {
     ];
     for v in agrees(&words, 4) {
         assert_eq!(compared(&v, Fact::Branch), 2, "{}", verify_tsv(&v));
+    }
+}
+
+/// Scalar float arithmetic over values a memory load typed: the sum,
+/// difference, product, quotient, root, absolute value and negation, with
+/// the two results stored back.
+#[test]
+fn float_arithmetic_agrees_with_the_emulator() {
+    let words = [
+        // ASM: ldr d0, [x0]
+        0xfd40_0000,
+        // ASM: ldr d1, [x0, #0x8]
+        0xfd40_0401,
+        // ASM: fadd d2, d0, d1
+        0x1e61_2802,
+        // ASM: fsub d3, d0, d1
+        0x1e61_3803,
+        // ASM: fmul d4, d0, d1
+        0x1e61_0804,
+        // ASM: fdiv d5, d0, d1
+        0x1e61_1805,
+        // ASM: fsqrt d6, d2
+        0x1e61_c046,
+        // ASM: fabs d7, d6
+        0x1e60_c0c7,
+        // ASM: fneg d8, d7
+        0x1e61_40e8,
+        // ASM: str d5, [x1]
+        0xfd00_0025,
+        // ASM: str d8, [x1, #0x8]
+        0xfd00_0428,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for v in agrees(&words, 1) {
+        assert_eq!(compared(&v, Fact::Vector), 32, "{}", verify_tsv(&v));
+        assert_eq!(compared(&v, Fact::Store), 2, "{}", verify_tsv(&v));
+    }
+}
+
+/// A float compare sets the flags its conditions read.
+///
+/// The block's `mi` branch goes where the machine's goes from every state,
+/// and the two conditional selects on the same flags — `mi` both ways —
+/// pick the sources the machine picks.
+#[test]
+fn fcmp_and_fcsel_agree_with_the_emulator() {
+    let words = [
+        // ASM: ldr s0, [x0]
+        0xbd40_0000,
+        // ASM: ldr s1, [x0, #0x4]
+        0xbd40_0401,
+        // ASM: fcmp s0, s1
+        0x1e21_2000,
+        // ASM: fcsel s2, s0, s1, mi
+        0x1e21_4c02,
+        // ASM: fcsel s3, s0, s1, ge
+        0x1e21_ac03,
+        // ASM: str s2, [x1]
+        0xbd00_0022,
+        // ASM: str s3, [x1, #0x4]
+        0xbd00_0423,
+        // ASM: b.mi 0x28
+        0x5400_0064,
+        // ASM: str s0, [x1]
+        0xbd00_0020,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: str s1, [x1]
+        0xbd00_0021,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for v in agrees(&words, 3) {
+        assert_eq!(compared(&v, Fact::Branch), 1, "{}", verify_tsv(&v));
+    }
+}
+
+/// A conditional float compare chains through the compare before it: the
+/// branch reads the condition the immediate flags or the second compare
+/// left, whichever the machine's flags say.
+#[test]
+fn fccmp_chains_agree_with_the_emulator() {
+    let words = [
+        // ASM: ldr s0, [x0]
+        0xbd40_0000,
+        // ASM: ldr s1, [x0, #0x4]
+        0xbd40_0401,
+        // ASM: ldr s2, [x0, #0x8]
+        0xbd40_0802,
+        // ASM: ldr s3, [x0, #0xc]
+        0xbd40_0c03,
+        // ASM: fcmp s0, s1
+        0x1e21_2000,
+        // ASM: fccmp s2, s3, #0xf, gt
+        0x1e23_c44f,
+        // ASM: b.mi 0x24
+        0x5400_0064,
+        // ASM: str s0, [x1]
+        0xbd00_0020,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: str s1, [x1]
+        0xbd00_0021,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for v in agrees(&words, 3) {
+        assert_eq!(compared(&v, Fact::Branch), 1, "{}", verify_tsv(&v));
+    }
+}
+
+/// The conversions between widths agree wherever the tree can hold the
+/// value.
+///
+/// The integer conversions that saturate or convert an integer a register
+/// holds stay the intrinsics and casts the evaluator cannot read, counted
+/// below rather than compared.
+#[test]
+fn float_conversions_agree_with_the_emulator() {
+    let words = [
+        // ASM: ldr d0, [x0]
+        0xfd40_0000,
+        // ASM: fcvt s1, d0
+        0x1e62_4001,
+        // ASM: fcvt d2, s1
+        0x1e22_c022,
+        // ASM: scvtf d3, x2
+        0x9e62_0043,
+        // ASM: ucvtf d4, w2
+        0x1e63_0044,
+        // ASM: fcvtzs x5, d0
+        0x9e78_0005,
+        // ASM: fcvtzu w6, s1
+        0x1e39_0026,
+        // ASM: scvtf s7, w2, #0x4
+        0x1e02_f047,
+        // ASM: str d3, [x1]
+        0xfd00_0023,
+        // ASM: str s7, [x1, #0x8]
+        0xbd00_0827,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    let p = image(&words);
+    let a = Analysis::compute(&p);
+    for seed in 1..=SEEDS {
+        let v = verify(&p, &a, &[BASE], seed);
+        let tsv = verify_tsv(&v);
+        assert_eq!(v.checked, 1, "seed {seed}: {tsv}");
+        assert!(v.mismatches.is_empty(), "seed {seed}: {tsv}");
+        assert_eq!(compared(&v, Fact::Store), 0, "seed {seed}: {tsv}");
+        // INVARIANT: the conversions between widths hold values the tree
+        // reads, while the two integer-to-float results, the two
+        // saturating integer results and the two stores of those stay
+        // unreadable, a cast of an integer and a call not being evaluable.
+        assert_eq!(v.facts[&Fact::Vector].unreadable, 3, "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Register].unreadable, 2, "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Store].unreadable, 2, "seed {seed}: {tsv}");
+    }
+}
+
+/// The vector bitwise operations and `dup` agree over whole registers,
+/// both through memory and through the registers a general one replicated.
+#[test]
+fn neon_bitwise_agrees_with_the_emulator() {
+    let words = [
+        // ASM: ldr d0, [x0]
+        0xfd40_0000,
+        // ASM: ldr d1, [x0, #0x8]
+        0xfd40_0401,
+        // ASM: and v2.16b, v0.16b, v1.16b
+        0x4e21_1c02,
+        // ASM: orr v3.16b, v0.16b, v1.16b
+        0x4ea1_1c03,
+        // ASM: eor v4.16b, v0.16b, v1.16b
+        0x6e21_1c04,
+        // ASM: bic v5.16b, v0.16b, v1.16b
+        0x4e61_1c05,
+        // ASM: dup v6.2d, x2
+        0x4e08_0c46,
+        // ASM: mov v8.4s, v0.s[1]
+        0x4e0c_0408,
+        // ASM: str d2, [x1]
+        0xfd00_0022,
+        // ASM: str d3, [x1, #0x8]
+        0xfd00_0423,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for v in agrees(&words, 1) {
+        assert_eq!(compared(&v, Fact::Vector), 32, "{}", verify_tsv(&v));
+        assert_eq!(compared(&v, Fact::Store), 2, "{}", verify_tsv(&v));
     }
 }
 

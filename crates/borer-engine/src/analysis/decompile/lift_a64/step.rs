@@ -107,7 +107,7 @@ fn dest(i: &Insn) -> Option<(Reg, u16)> {
 ///
 /// * `i` - The instruction.
 /// * `k` - The operand's position.
-fn imm(i: &Insn, k: usize) -> Option<u64> {
+pub(super) fn imm(i: &Insn, k: usize) -> Option<u64> {
     match i.operands.get(k).copied()? {
         Opnd::Imm(v) => Some(v),
         Opnd::None
@@ -118,6 +118,16 @@ fn imm(i: &Insn, k: usize) -> Option<u64> {
         | Opnd::Cond(_)
         | Opnd::Other => None,
     }
+}
+
+/// Whether an instruction is in its vector form: the arrangement operands
+/// the decoder leaves unmodeled in place of its registers.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn vector(i: &Insn) -> bool {
+    matches!(i.operands[0], Opnd::Other)
 }
 
 /// `ubfm`: the field `src<s:r>` at bit 0 when `s >= r`, else `src<s:0>` at
@@ -262,6 +272,12 @@ impl Lift<'_, '_> {
             Mnemonic::Adcs => self.arith(i, Form::Adc, true),
             Mnemonic::Sbc => self.arith(i, Form::Sbc, false),
             Mnemonic::Sbcs => self.arith(i, Form::Sbc, true),
+            Mnemonic::And if vector(i) => self.vector_logical(i, |a, b| fold(Op::And, a, b, 64)),
+            Mnemonic::Bic if vector(i) => {
+                self.vector_logical(i, |a, b| fold(Op::And, a, unary(UnOp::Not, b, 64), 64))
+            }
+            Mnemonic::Orr if vector(i) => self.vector_logical(i, |a, b| fold(Op::Or, a, b, 64)),
+            Mnemonic::Eor if vector(i) => self.vector_logical(i, |a, b| fold(Op::Xor, a, b, 64)),
             Mnemonic::And => self.logical(i, Op::And, false, false),
             Mnemonic::Ands => self.logical(i, Op::And, false, true),
             Mnemonic::Orr => self.logical(i, Op::Or, false, false),
@@ -310,6 +326,22 @@ impl Lift<'_, '_> {
             Mnemonic::Ccmp => self.compare_if(i, later, false),
             Mnemonic::Ccmn => self.compare_if(i, later, true),
             Mnemonic::Fmov => self.fmov(i),
+            Mnemonic::Fadd => self.float_binary(i, Op::FAdd),
+            Mnemonic::Fsub => self.float_binary(i, Op::FSub),
+            Mnemonic::Fmul => self.float_binary(i, Op::FMul),
+            Mnemonic::Fdiv => self.float_binary(i, Op::FDiv),
+            Mnemonic::Fsqrt => self.float_unary(i, UnOp::Sqrt),
+            Mnemonic::Fabs => self.float_unary(i, UnOp::Fabs),
+            Mnemonic::Fneg => self.float_unary(i, UnOp::Neg),
+            Mnemonic::Fcmp | Mnemonic::Fcmpe => self.float_compare(i),
+            Mnemonic::Fccmp => self.float_compare_if(i, later),
+            Mnemonic::Fcsel => self.float_select(i),
+            Mnemonic::Scvtf => self.int_to_float(i, true),
+            Mnemonic::Ucvtf => self.int_to_float(i, false),
+            Mnemonic::Fcvtzs => self.float_to_int(i, "__fcvtzs"),
+            Mnemonic::Fcvtzu => self.float_to_int(i, "__fcvtzu"),
+            Mnemonic::Fcvt => self.float_convert(i),
+            Mnemonic::Dup => self.dup(i),
             Mnemonic::Movi => self.movi(i, false),
             Mnemonic::Mvni => self.movi(i, true),
             Mnemonic::Ldr(width) => self.load(i, width),
@@ -633,7 +665,8 @@ impl Lift<'_, '_> {
 
     /// `fmov` between registers, general and floating-point alike, and of
     /// a scalar immediate: the source's bits at its width, zero-extended
-    /// into the destination.
+    /// into the destination. A float value moves as the float it is, its
+    /// bits already fitting the width.
     ///
     /// # Arguments
     ///
@@ -645,7 +678,13 @@ impl Lift<'_, '_> {
         let v = match i.operands[1] {
             Opnd::Reg { reg, bits: from } => {
                 let v = self.reg_at(reg, from);
-                if from == 64 { low64(v) } else { low(v, from) }
+                if v.is_float() {
+                    v
+                } else if from == 64 {
+                    low64(v)
+                } else {
+                    low(v, from)
+                }
             }
             Opnd::Other if matches!(dst, Reg::V(_)) && i.word & FMOV_IMM.0 == FMOV_IMM.1 => {
                 Expr::Const(vfp_expand((i.word >> 13) & 0xff, bits)?)

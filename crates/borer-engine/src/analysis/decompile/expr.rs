@@ -430,6 +430,15 @@ impl Cc {
 pub(super) enum Flags {
     /// `cmp l, r` at this operand width.
     Cmp(Expr, Expr, u8),
+    /// A floating-point compare of the two values at this width: the same
+    /// records an integer compare keeps, with the order the flags answer
+    /// the floating-point one, an unordered pair apart from every ordered
+    /// one.
+    ///
+    /// The compare's being floating-point is a fact of the instruction
+    /// that set the flags, which the values alone no longer say once a
+    /// store protects its operands into temporaries.
+    Float(Expr, Expr, u8),
     /// `test l, r` at this operand width.
     Test(Expr, Expr, u8),
     /// Flags set by an arithmetic result of this width (`dec`, `shl`, ...).
@@ -458,9 +467,10 @@ impl Flags {
     /// * `pred` - Predicate over the variables read.
     pub(super) fn any_var(&self, pred: &dyn Fn(Key) -> bool) -> bool {
         match self {
-            Flags::Cmp(l, r, _) | Flags::Test(l, r, _) | Flags::Add(l, r, _) => {
-                l.any_var(pred) || r.any_var(pred)
-            }
+            Flags::Cmp(l, r, _)
+            | Flags::Float(l, r, _)
+            | Flags::Test(l, r, _)
+            | Flags::Add(l, r, _) => l.any_var(pred) || r.any_var(pred),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.any_var(pred),
             Flags::Shift(e, _, c) => e.any_var(pred) || c.any_var(pred),
             Flags::Unknown => false,
@@ -484,6 +494,42 @@ pub(super) struct Cond {
     pub cc: Cc,
     /// What set the flags.
     pub flags: Flags,
+}
+
+/// The truth of a condition code on two floating-point values.
+///
+/// The code a float compare leaves (`e`, `ne`, `b`, `ae`, `a`, `be`, `p`,
+/// `np`) answers the pair's order and unordered test, and no other code
+/// does.
+///
+/// # Arguments
+///
+/// * `cc` - The condition code.
+/// * `a` - The left value.
+/// * `b` - The right value.
+///
+/// # Returns
+///
+/// The truth, or `None` for a code a float compare does not decide.
+pub(super) fn float_cc(cc: ConditionCode, a: f64, b: f64) -> Option<bool> {
+    use ConditionCode as C;
+    let unordered = a.is_nan() || b.is_nan();
+    let (zf, pf, cf) = if unordered {
+        (true, true, true)
+    } else {
+        (a == b, false, a < b)
+    };
+    Some(match cc {
+        C::a => !cf && !zf,
+        C::ae => !cf,
+        C::b => cf,
+        C::be => cf || zf,
+        C::e => zf,
+        C::ne => !zf,
+        C::p => pf,
+        C::np => !pf,
+        C::None | C::s | C::ns | C::o | C::no | C::l | C::ge | C::le | C::g => return None,
+    })
 }
 
 /// A symbolic value.
@@ -836,9 +882,10 @@ impl Cond {
     /// address from ([`Expr::frame_read_base`]).
     fn frame_read_base(&self) -> Option<i64> {
         match &self.flags {
-            Flags::Cmp(l, r, _) | Flags::Test(l, r, _) | Flags::Add(l, r, _) => {
-                min_opt(l.frame_read_base(), r.frame_read_base())
-            }
+            Flags::Cmp(l, r, _)
+            | Flags::Float(l, r, _)
+            | Flags::Test(l, r, _)
+            | Flags::Add(l, r, _) => min_opt(l.frame_read_base(), r.frame_read_base()),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.frame_read_base(),
             Flags::Shift(e, _, c) => min_opt(e.frame_read_base(), c.frame_read_base()),
             Flags::Unknown => None,
@@ -848,9 +895,10 @@ impl Cond {
     /// Returns the lowest stack offset whose address appears in the flags operands.
     fn min_sp(&self) -> Option<i64> {
         match &self.flags {
-            Flags::Cmp(l, r, _) | Flags::Test(l, r, _) | Flags::Add(l, r, _) => {
-                min_opt(l.min_sp(), r.min_sp())
-            }
+            Flags::Cmp(l, r, _)
+            | Flags::Float(l, r, _)
+            | Flags::Test(l, r, _)
+            | Flags::Add(l, r, _) => min_opt(l.min_sp(), r.min_sp()),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.min_sp(),
             Flags::Shift(e, _, c) => min_opt(e.min_sp(), c.min_sp()),
             Flags::Unknown => None,
@@ -940,6 +988,7 @@ impl Cond {
             Flags::Result(e, _) | Flags::Shift(e, _, _) => Some(e),
             Flags::Cmp(l, Expr::Const(0), _) => Some(l),
             Flags::Cmp(..)
+            | Flags::Float(..)
             | Flags::Test(..)
             | Flags::Add(..)
             | Flags::Carry(_)
@@ -951,7 +1000,10 @@ impl Cond {
     /// Returns the node count of the flags operands.
     pub(super) fn size(&self) -> usize {
         match &self.flags {
-            Flags::Cmp(l, r, _) | Flags::Test(l, r, _) | Flags::Add(l, r, _) => l.size() + r.size(),
+            Flags::Cmp(l, r, _)
+            | Flags::Float(l, r, _)
+            | Flags::Test(l, r, _)
+            | Flags::Add(l, r, _) => l.size() + r.size(),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.size(),
             Flags::Shift(e, _, c) => e.size() + c.size(),
             Flags::Unknown => 1,
@@ -970,9 +1022,10 @@ impl Cond {
     /// Tells whether any flags operand reads aliasable memory.
     fn mem_dependent(&self) -> bool {
         match &self.flags {
-            Flags::Cmp(l, r, _) | Flags::Test(l, r, _) | Flags::Add(l, r, _) => {
-                l.mem_dependent() || r.mem_dependent()
-            }
+            Flags::Cmp(l, r, _)
+            | Flags::Float(l, r, _)
+            | Flags::Test(l, r, _)
+            | Flags::Add(l, r, _) => l.mem_dependent() || r.mem_dependent(),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.mem_dependent(),
             Flags::Shift(e, _, c) => e.mem_dependent() || c.mem_dependent(),
             Flags::Unknown => false,
@@ -988,6 +1041,7 @@ impl Cond {
     pub(super) fn subst(&self, from: &Expr, to: &Expr) -> Cond {
         let flags = match &self.flags {
             Flags::Cmp(l, r, b) => Flags::Cmp(l.subst(from, to), r.subst(from, to), *b),
+            Flags::Float(l, r, b) => Flags::Float(l.subst(from, to), r.subst(from, to), *b),
             Flags::Test(l, r, b) => Flags::Test(l.subst(from, to), r.subst(from, to), *b),
             Flags::Result(e, b) => Flags::Result(e.subst(from, to), *b),
             Flags::Add(l, r, b) => Flags::Add(l.subst(from, to), r.subst(from, to), *b),
@@ -1011,6 +1065,18 @@ impl Cond {
         }
         let (l, r, bits) = match &self.flags {
             Flags::Cmp(Expr::Const(l), Expr::Const(r), bits) => (*l, *r, *bits),
+            Flags::Float(Expr::Const(l), Expr::Const(r), bits) => {
+                // INVARIANT: the constants hold the values' bits, widened
+                // here to the doubles the comparison computes on.
+                let of = |v: u64| {
+                    if *bits == 32 {
+                        f64::from(f32::from_bits(lo32(v)))
+                    } else {
+                        f64::from_bits(v)
+                    }
+                };
+                return float_cc(self.cc.0, of(*l), of(*r));
+            }
             Flags::Test(Expr::Const(l), Expr::Const(r), bits) => (l & r, 0, *bits),
             Flags::Result(Expr::Const(e), bits) => (*e, 0, *bits),
             Flags::Shift(e, bits, c) => {
@@ -1078,6 +1144,7 @@ impl Cond {
                 };
             }
             Flags::Cmp(..)
+            | Flags::Float(..)
             | Flags::Test(..)
             | Flags::Result(..)
             | Flags::Add(..)
@@ -4373,6 +4440,23 @@ mod fold_tests {
                 let d = a.wrapping_sub(b);
                 let of = signed(a, *w) - signed(b, *w) != signed(d, *w);
                 (Some(a & lane(*w) < b & lane(*w)), res(d, *w), Some(of))
+            }
+            Flags::Float(l, r, w) => {
+                let f = |e: &Expr| -> Option<f64> {
+                    let bits = v(e, *w)?;
+                    Some(if *w == 32 {
+                        f64::from(f32::from_bits(u32::try_from(bits).ok()?))
+                    } else {
+                        f64::from_bits(bits)
+                    })
+                };
+                let (a, b) = (f(l)?, f(r)?);
+                match a.partial_cmp(&b) {
+                    None => (Some(true), (true, false, true), None),
+                    Some(std::cmp::Ordering::Less) => (Some(true), (false, false, false), None),
+                    Some(std::cmp::Ordering::Equal) => (Some(false), (true, false, false), None),
+                    Some(std::cmp::Ordering::Greater) => (Some(false), (false, false, false), None),
+                }
             }
             Flags::Test(l, r, w) => (Some(false), res(v(l, *w)? & v(r, *w)?, *w), Some(false)),
             Flags::Add(l, r, w) => {

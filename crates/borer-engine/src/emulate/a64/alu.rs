@@ -476,6 +476,106 @@ impl Machine<'_> {
         self.set_reg(Reg::V(lo8(u64::from(w & 0x1f))), 128, v);
         Ok(())
     }
+
+    /// `and`, `orr`, `eor` and `bic` (vector, register and immediate forms):
+    /// the operation over the whole registers, the upper half zero for a
+    /// 64-bit arrangement.
+    ///
+    /// Every field is read from the word: the arrangement operands stay
+    /// unmodeled, and the immediate form (`orr`/`bic` only) combines with
+    /// the destination it reads as the register at bits 0 to 4.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `f` - The operation on the two values.
+    ///
+    /// # Errors
+    ///
+    /// For the immediate forms' `cmode`, which [`expand_imm`] refuses.
+    // SPEC: Arm ARM (DDI 0487) C7.2 AND/ORR/EOR/BIC (vector): Rd bits 0..4,
+    // Rn bits 5..9, Rm bits 16..20, Q bit 30; the immediate forms share
+    // movi's imm8 and cmode fields, op bit 29 and cmode's low bit naming
+    // the operation in place of the move.
+    pub(super) fn vector_logical(
+        &mut self,
+        i: &Insn,
+        f: impl Fn(u128, u128) -> u128,
+    ) -> Result<(), Stop> {
+        let w = i.word;
+        let vreg = |at: u32| Reg::V(lo8(u64::from((w >> at) & 0x1f)));
+        let (x, y) = match i.operands[1] {
+            Opnd::Other => (self.reg(vreg(5)), self.reg(vreg(16))),
+            Opnd::Imm(_) => {
+                let imm8 = u64::from((((w >> 16) & 7) << 5) | ((w >> 5) & 0x1f));
+                let imm =
+                    expand_imm((w >> 29) & 1, (w >> 12) & 0xf, imm8).ok_or_else(|| unmodeled(i))?;
+                let imm = u128::from(imm);
+                let span = if (w >> 30) & 1 == 1 {
+                    (imm << 64) | imm
+                } else {
+                    imm
+                };
+                (self.reg(vreg(0)), span)
+            }
+            Opnd::Reg { .. }
+            | Opnd::None
+            | Opnd::Shifted { .. }
+            | Opnd::PcRel(_)
+            | Opnd::Mem(_)
+            | Opnd::Cond(_) => return Err(unmodeled(i)),
+        };
+        let v = f(x, y);
+        let v = if (w >> 30) & 1 == 1 {
+            v
+        } else {
+            v & u128::from(u64::MAX)
+        };
+        self.set_reg(vreg(0), 128, v);
+        Ok(())
+    }
+
+    /// `dup`: one lane's value replicated through a whole `v` register, the
+    /// upper half zero for a 64-bit arrangement.
+    ///
+    /// Every field is read from the word: the general form takes the low
+    /// lane bits of a general register, the element form the lane `imm5`
+    /// names of a `v` register.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    ///
+    /// # Errors
+    ///
+    /// When `imm5` names no lane width.
+    // SPEC: Arm ARM (DDI 0487) C7.2 DUP: imm5 bits 16..20, its lowest set
+    /// bit naming the element size and the bits above it the index; Q bit 30.
+    pub(super) fn dup(&mut self, i: &Insn) -> Result<(), Stop> {
+        let w = i.word;
+        let imm5 = (w >> 16) & 0x1f;
+        let Some(shift) = (0..4).find(|&s| imm5 >> s & 1 == 1) else {
+            return Err(unmodeled(i));
+        };
+        let lane = 8u16 << shift;
+        let index = imm5 >> (shift + 1);
+        let lane_value = match i.operands[1] {
+            Opnd::Reg { reg, .. } => mask(lo64(self.reg(reg)), u32::from(lane)),
+            _ => {
+                let at = index * u32::from(lane);
+                mask(
+                    lo64(self.reg(Reg::V(lo8(u64::from((w >> 5) & 0x1f)))) >> at),
+                    u32::from(lane),
+                )
+            }
+        };
+        let span = if (w >> 30) & 1 == 1 { 128 } else { 64 };
+        let v = (0..u32::from(span / lane)).fold(0u128, |acc, k| {
+            acc | u128::from(lane_value) << (k * u32::from(lane))
+        });
+        self.set_reg(Reg::V(lo8(u64::from(w & 0x1f))), 128, v);
+        Ok(())
+    }
 }
 
 /// The destination of a data-processing instruction: operand 0 as a

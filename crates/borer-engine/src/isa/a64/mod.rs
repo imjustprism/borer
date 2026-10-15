@@ -479,6 +479,43 @@ pub enum Mnemonic {
     /// `fmov`: a move to, from or between floating-point registers, or of a
     /// floating-point immediate.
     Fmov,
+    /// `fadd` (scalar): floating-point addition.
+    Fadd,
+    /// `fsub` (scalar): floating-point subtraction.
+    Fsub,
+    /// `fmul` (scalar): floating-point multiplication.
+    Fmul,
+    /// `fdiv` (scalar): floating-point division.
+    Fdiv,
+    /// `fsqrt` (scalar): the floating-point square root.
+    Fsqrt,
+    /// `fabs` (scalar, register): the floating-point absolute value.
+    Fabs,
+    /// `fneg` (scalar, register): the floating-point negation.
+    Fneg,
+    /// `fcmp`: a floating-point compare that sets the flags.
+    Fcmp,
+    /// `fcmpe`: likewise, raising an invalid-operation exception on a
+    /// signaling NaN, which changes no flag the engine reads.
+    Fcmpe,
+    /// `fccmp` and `fccmpe`: a floating-point compare when the condition
+    /// holds, else flags from an immediate.
+    Fccmp,
+    /// `fcsel`: a floating-point conditional select.
+    Fcsel,
+    /// `scvtf`: a signed integer to floating-point.
+    Scvtf,
+    /// `ucvtf`: an unsigned integer to floating-point.
+    Ucvtf,
+    /// `fcvtzs`: floating-point to signed integer, toward zero.
+    Fcvtzs,
+    /// `fcvtzu`: floating-point to unsigned integer, toward zero.
+    Fcvtzu,
+    /// `fcvt`: a conversion between floating-point widths.
+    Fcvt,
+    /// `dup`: a scalar or a general register's value replicated through a
+    /// `v` register's lanes.
+    Dup,
     /// `movi`: a vector or 64-bit scalar immediate.
     Movi,
     /// `mvni`: the inverse of a vector immediate.

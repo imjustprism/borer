@@ -1198,6 +1198,17 @@ impl Cond {
                 None => format!("!{}", paren_if_lower(e, n, UNARY)),
             },
             Flags::Truth(e, _) => undecided(n, self.cc, inverted, &[e]),
+            Flags::Float(l, r, bits) if matches!(cc.0, C::p | C::np) => {
+                let not = if cc.0 == C::np { "!" } else { "" };
+                format!("{not}isunordered({}, {})", l.render(n), r.render(n))
+            }
+            Flags::Float(l, r, _) if matches!(cc.0, C::a | C::ae | C::b | C::be) => {
+                float_relation(n, cc, l, r)
+            }
+            Flags::Float(l, r, bits) => match cc.rel() {
+                Some(rel) => compare(n, l, r, rel, false, *bits),
+                None => undecided(n, self.cc, inverted, &[l, r]),
+            },
             Flags::Cmp(l, r, bits) if matches!(cc.0, C::p | C::np) => {
                 let unordered = l.is_float()
                     || r.is_float()

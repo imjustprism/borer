@@ -6,9 +6,10 @@
 //! reasons ([`Stop`]), run report ([`Run`]), caps ([`super::MEMORY_MAX`],
 //! [`TRACE_MAX`]) and method names, and models the integer, bitfield,
 //! multiply and divide, conditional, memory and branch instructions such
-//! routines use ([`alu`], [`mem`]), with the scalar vector moves a compiler
-//! puts around them. Every other instruction stops the run with
-//! [`Stop::Unmodeled`] and its text: the machine never guesses what an
+//! routines use ([`alu`], [`mem`]), the scalar floating-point arithmetic
+//! and conversions around them ([`fpu`]), and the vector moves and bitwise
+//! logic a compiler puts around them. Every other instruction stops the run
+//! with [`Stop::Unmodeled`] and its text: the machine never guesses what an
 //! instruction does.
 //!
 //! A run starts with zeroed registers, the stack pointer at a scratch stack
@@ -35,7 +36,18 @@ pub(crate) use alu::{FMOV_IMM, expand_imm, vfp_expand};
 use alu::{Form, Wide};
 
 mod alu;
+mod fpu;
 mod mem;
+
+/// Whether an instruction is in its vector form: the arrangement operands
+/// the decoder leaves unmodeled in place of its registers.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn vector(i: &Insn) -> bool {
+    matches!(i.operands[0], Opnd::Other)
+}
 
 /// What the link register holds when a run starts: an address no image,
 /// stack or allocation takes, so a transfer to it is the routine returning
@@ -752,6 +764,10 @@ impl<'a> Machine<'a> {
             Mnemonic::Adcs => self.arith(i, Form::Adc, true),
             Mnemonic::Sbc => self.arith(i, Form::Sbc, false),
             Mnemonic::Sbcs => self.arith(i, Form::Sbc, true),
+            Mnemonic::And if vector(i) => self.vector_logical(i, |x, y| x & y),
+            Mnemonic::Bic if vector(i) => self.vector_logical(i, |x, y| x & !y),
+            Mnemonic::Orr if vector(i) => self.vector_logical(i, |x, y| x | y),
+            Mnemonic::Eor if vector(i) => self.vector_logical(i, |x, y| x ^ y),
             Mnemonic::And => self.logical(i, |x, y| x & y, false),
             Mnemonic::Ands => self.logical(i, |x, y| x & y, true),
             Mnemonic::Orr => self.logical(i, |x, y| x | y, false),
@@ -826,6 +842,22 @@ impl<'a> Machine<'a> {
             Mnemonic::Ccmp => self.compare_if(i, Form::Sub),
             Mnemonic::Ccmn => self.compare_if(i, Form::Add),
             Mnemonic::Fmov => self.fmov(i),
+            Mnemonic::Fadd => self.float_binary(i, |x, y| x + y),
+            Mnemonic::Fsub => self.float_binary(i, |x, y| x - y),
+            Mnemonic::Fmul => self.float_binary(i, |x, y| x * y),
+            Mnemonic::Fdiv => self.float_binary(i, |x, y| x / y),
+            Mnemonic::Fsqrt => self.float_sqrt(i),
+            Mnemonic::Fabs => self.float_sign(i, false),
+            Mnemonic::Fneg => self.float_sign(i, true),
+            Mnemonic::Fcmp | Mnemonic::Fcmpe => self.float_compare(i),
+            Mnemonic::Fccmp => self.float_compare_if(i),
+            Mnemonic::Fcsel => self.float_select(i),
+            Mnemonic::Scvtf => self.int_to_float(i, true),
+            Mnemonic::Ucvtf => self.int_to_float(i, false),
+            Mnemonic::Fcvtzs => self.float_to_int(i, true),
+            Mnemonic::Fcvtzu => self.float_to_int(i, false),
+            Mnemonic::Fcvt => self.float_convert(i),
+            Mnemonic::Dup => self.dup(i),
             Mnemonic::Movi => self.movi(i, false),
             Mnemonic::Mvni => self.movi(i, true),
             Mnemonic::Ldr(width) => self.load_one(i, width),

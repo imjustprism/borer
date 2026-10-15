@@ -67,8 +67,8 @@ use super::lift::{
 use super::liveness::Live;
 use super::verify::{
     Bench, EVAL_DEPTH, FRAME_SPAN, GOLDEN, REGION_MAX, REGS, REGS_32, Rng, STACK_WORDS, XMMS,
-    agree, aligns_stack, convert_float, float_arith, float_cc, float_of, float_to_int, float_un,
-    low, sext, word,
+    agree, aligns_stack, convert_float, float_arith, float_of, float_to_int, float_un, low, sext,
+    word,
 };
 use super::{decompile_with, table_target};
 use crate::analysis::decompiled_witnessed;
@@ -1305,6 +1305,7 @@ fn frame_base(e: &Expr) -> Option<i64> {
 fn cond_exprs<'e>(c: &'e Cond, out: &mut Vec<&'e Expr>) {
     match &c.flags {
         Flags::Cmp(a, b, _)
+        | Flags::Float(a, b, _)
         | Flags::Test(a, b, _)
         | Flags::Add(a, b, _)
         | Flags::Shift(a, _, b) => {
@@ -2795,8 +2796,13 @@ impl<M: Bench> Text<'_, M> {
             if let Some(fb) = fb {
                 let l = float_of(self.eval_at(a, d)?, fb);
                 let r = float_of(self.eval_at(b, d)?, fb);
-                return float_cc(c.cc.0, l, r);
+                return super::expr::float_cc(c.cc.0, l, r);
             }
+        }
+        if let Flags::Float(a, b, fb) = &c.flags {
+            let l = float_of(self.eval_at(a, d)?, *fb);
+            let r = float_of(self.eval_at(b, d)?, *fb);
+            return super::expr::float_cc(c.cc.0, l, r);
         }
         let k = |e: &Expr| {
             if floating(e) {
@@ -2807,6 +2813,7 @@ impl<M: Bench> Text<'_, M> {
         };
         let flags = match &c.flags {
             Flags::Cmp(a, b, w) => Flags::Cmp(k(a)?, k(b)?, *w),
+            Flags::Float(a, b, w) => Flags::Float(k(a)?, k(b)?, *w),
             Flags::Test(a, b, w) => Flags::Test(k(a)?, k(b)?, *w),
             Flags::Result(a, w) => Flags::Result(k(a)?, *w),
             Flags::Add(a, b, w) => Flags::Add(k(a)?, k(b)?, *w),

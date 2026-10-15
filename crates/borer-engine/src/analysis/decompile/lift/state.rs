@@ -1658,6 +1658,10 @@ impl<'a> Exec<'_, 'a> {
                 let (l, r) = self.tmp_pair(l, r, pred);
                 Flags::Cmp(l, r, b)
             }
+            Flags::Float(l, r, b) => {
+                let (l, r) = self.tmp_pair(l, r, pred);
+                Flags::Float(l, r, b)
+            }
             Flags::Test(l, r, b) => {
                 let (l, r) = self.tmp_pair(l, r, pred);
                 Flags::Test(l, r, b)
@@ -1729,6 +1733,10 @@ impl<'a> Exec<'_, 'a> {
             Flags::Cmp(l, r, b) => {
                 let (l, r) = pair(self, l, r);
                 Flags::Cmp(l, r, b)
+            }
+            Flags::Float(l, r, b) => {
+                let (l, r) = pair(self, l, r);
+                Flags::Float(l, r, b)
             }
             Flags::Test(l, r, b) => {
                 let (l, r) = pair(self, l, r);

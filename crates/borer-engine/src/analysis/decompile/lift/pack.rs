@@ -433,6 +433,7 @@ impl Writer<'_> {
         self.num(crate::num::from_usize(c.cc.0 as usize));
         match &c.flags {
             Flags::Cmp(a, b, w) => self.pair(0, *w, a, b),
+            Flags::Float(a, b, w) => self.pair(8, *w, a, b),
             Flags::Test(a, b, w) => self.pair(1, *w, a, b),
             Flags::Add(a, b, w) => self.pair(3, *w, a, b),
             Flags::Result(a, w) => {
@@ -740,13 +741,14 @@ impl Reader<'_> {
     fn cond(&mut self) -> Option<Cond> {
         let cc = self.cc()?;
         let flags = match self.byte()? {
-            code @ (0 | 1 | 3) => {
+            code @ (0 | 1 | 3 | 8) => {
                 let w = self.byte()?;
                 let a = self.expr()?;
                 let b = self.expr()?;
                 match code {
                     0 => Flags::Cmp(a, b, w),
                     1 => Flags::Test(a, b, w),
+                    8 => Flags::Float(a, b, w),
                     _ => Flags::Add(a, b, w),
                 }
             }
