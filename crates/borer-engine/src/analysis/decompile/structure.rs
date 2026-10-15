@@ -51,6 +51,9 @@ pub(super) struct Emit<'e, L: Lifter> {
     /// default (a copied call is a copied side effect); a branch that
     /// structures no other way turns it on for a later attempt.
     pub(super) copy_calls: bool,
+    /// Goto sites a shared return tail has been cloned into so far, capped
+    /// by [`TAIL_CLONE_MAX`].
+    pub(super) tail_clones: usize,
     /// Whether the block that ends a region (the other arm's start) may be
     /// copied into it when it leads one way into the region's exits. Off by
     /// default (the arm would rather fall into it); a branch that structures
@@ -1317,6 +1320,109 @@ pub(super) fn same_test(a: &[Instruction], b: &[Instruction]) -> bool {
 
 /// Longest chain of one-way blocks ending in a terminal block copied whole.
 pub(super) const DUP_CHAIN_MAX: usize = 3;
+
+/// Most goto sites one function clones a shared return tail into.
+///
+/// A tail every site copied is dead text ([`Emit::unread`] drops it), so
+/// the cap bounds how much text the rule can add to one function.
+pub(super) const TAIL_CLONE_MAX: usize = 4;
+
+/// Largest shared return tail, in instructions that render.
+///
+/// Counts as [`body_len`] does, worth cloning to a goto site: the two
+/// assignments a compiler writes in front of the shared `return`, whose
+/// own epilogue renders as nothing.
+pub(super) const TAIL_BODY_MAX: usize = 2;
+
+/// Returns the statements of a shared return tail for the site of a `goto`
+/// to clone in place of the jump.
+///
+/// The tail is a block, or a short one-way chain of blocks ending in one
+/// ([`DUP_CHAIN_MAX`] long, as the region copier allows), that only
+/// returns: every statement it renders is an assignment to a local or a
+/// register ([`lift::EffectKind::Assign`]) except the last, the `return`.
+/// No calls, stores, unmodeled instructions or stack-pointer changes, so
+/// the common `rc = ERR; goto cleanup;` shape, whose cleanup tail calls,
+/// stays a goto for a single-cleanup-tail pattern to claim; cloning a call
+/// would clone a side effect the function runs once. The tail must be
+/// shared ([`Emit::preds`] holds two sites at least): a site of its own is
+/// the label-following rule's, and the goto the site writes is dropped by
+/// the cleanup. The goto itself is the site block's last statement (an
+/// unconditional jump), so the clone replaces the block's whole
+/// continuation.
+///
+/// Each statement renders from the tail's own entry state, as a region's
+/// copied tail does ([`copy_chain`]), so every site prints the same text.
+/// With every predecessor cloned no text names the tail's label, and the
+/// emission driver's [`Emit::unread`] rule drops the original.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state (names).
+/// * `st` - Emission state; the clone count grows by one on success.
+/// * `va` - The jump target address.
+///
+/// # Returns
+///
+/// The tail's statements, one per line, ending in its `return`; `None`
+/// when the target is no shared pure return tail, or the function has
+/// cloned [`TAIL_CLONE_MAX`] sites already.
+pub(super) fn return_tail<L: Lifter>(
+    ctx: &mut Ctx<'_>,
+    st: &mut Emit<'_, L>,
+    va: u64,
+) -> Option<String> {
+    let t = st.index_of(va)?;
+    if st.tail_clones >= TAIL_CLONE_MAX || t == st.entry || st.emitted[t] || st.preds[t].len() < 2 {
+        return None;
+    }
+    let mut body = 0usize;
+    let mut chain: Vec<usize> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = t;
+    loop {
+        body += L::body_len(&st.code[cur]);
+        let (out, env) = run_block_env(ctx, st, cur);
+        if body > TAIL_BODY_MAX
+            || out.branch.is_some()
+            || out.switch_idx.is_some()
+            || out.unmodeled > 0
+            || env.sp != st.in_envs[cur].sp
+        {
+            return None;
+        }
+        let assign_only = |effects: &[lift::Effect]| {
+            effects
+                .iter()
+                .all(|e| matches!(e.kind, lift::EffectKind::Assign(..)))
+        };
+        match out.effects.last().map(|e| &e.kind) {
+            Some(lift::EffectKind::Return(_)) => {
+                if !assign_only(&out.effects[..out.effects.len() - 1])
+                    || !out.lines.last().is_some_and(|l| is_return(l))
+                    || chain.len() >= DUP_CHAIN_MAX
+                {
+                    return None;
+                }
+                lines.extend(out.lines.iter().cloned());
+                st.tail_clones += 1;
+                return Some(lines.join("\n"));
+            }
+            _ if assign_only(&out.effects) => {
+                let &[next] = st.succs[cur].as_slice() else {
+                    return None;
+                };
+                if chain.len() + 1 >= DUP_CHAIN_MAX || next == t || chain.contains(&next) {
+                    return None;
+                }
+                lines.extend(out.lines.iter().cloned());
+                chain.push(cur);
+                cur = next;
+            }
+            _ => return None,
+        }
+    }
+}
 
 /// Largest loop-exit region written inline in front of its `break`.
 pub(super) const ABSORB_MAX_BLOCKS: usize = 8;

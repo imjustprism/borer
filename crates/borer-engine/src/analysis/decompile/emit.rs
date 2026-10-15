@@ -17,7 +17,10 @@ use super::*;
 ///
 /// In order: a natural loop headed here ([`try_loop`]); the block's label and
 /// lines; a jump-table dispatch as a `switch` ([`try_switch`]) or, when that
-/// fails, a switch of gotos; an unconditional jump; a block that simply
+/// fails, a switch of gotos; an unconditional jump, which a shared pure
+/// return tail reaches from other sites too, whose statements are cloned in
+/// place of the `goto` ([`return_tail`]) so the site reads as the `return`
+/// it jumps to; a block that simply
 /// continues (`goto` to its successor, which the cleanup drops when the text
 /// continues there anyway); a condition folded to a constant (a plain
 /// `goto`); a branch whose two sides meet at once (the condition decides
@@ -120,7 +123,11 @@ pub(super) fn emit_block<L: Lifter>(
         return i + 1;
     }
     if let Some(t) = block_out.goto {
-        let _ = writeln!(out, "{}", jump_to(st, t));
+        if let Some(tail) = return_tail(ctx, st, t) {
+            let _ = writeln!(out, "{tail}");
+        } else {
+            let _ = writeln!(out, "{}", jump_to(st, t));
+        }
         return i + 1;
     }
     let mut call = block_out

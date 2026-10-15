@@ -1705,6 +1705,7 @@ fn decompile_in<L: Lifter>(
         orders: Vec::new(),
         no_dup: BTreeSet::new(),
         copy_calls: false,
+        tail_clones: 0,
         copy_stop: false,
         dup_stack: Vec::new(),
         entry: entry_block,
