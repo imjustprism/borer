@@ -309,6 +309,16 @@ fn width8(bits: u16) -> u8 {
     u8::try_from(bits).unwrap_or(u8::MAX)
 }
 
+/// Whether an instruction is in its vector form: the arrangement operands
+/// the decoder leaves unmodeled in place of its registers.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn vector(i: &Insn) -> bool {
+    matches!(i.operands[0], Opnd::Other)
+}
+
 /// A register operand shifted or extended as the encoding says, with
 /// every bit the machine reads and none it does not.
 ///

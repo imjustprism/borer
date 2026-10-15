@@ -14,7 +14,8 @@
 
 use super::super::expr::{Expr, Flags, Op, Ty, UnOp, fold, mask, sign_extend, ternary, unary};
 use super::flags::{self, holds, next_reader};
-use super::{Lift, low, low64, width8};
+use super::float::{packed_name, vreg};
+use super::{Lift, low, low64, vector, width8};
 use crate::emulate::a64::{FMOV_IMM, expand_imm, vfp_expand};
 use crate::isa::a64::{self, Insn, Mnemonic, Opnd, Reg};
 use crate::num::lo8;
@@ -118,16 +119,6 @@ pub(super) fn imm(i: &Insn, k: usize) -> Option<u64> {
         | Opnd::Cond(_)
         | Opnd::Other => None,
     }
-}
-
-/// Whether an instruction is in its vector form: the arrangement operands
-/// the decoder leaves unmodeled in place of its registers.
-///
-/// # Arguments
-///
-/// * `i` - The instruction.
-fn vector(i: &Insn) -> bool {
-    matches!(i.operands[0], Opnd::Other)
 }
 
 /// `ubfm`: the field `src<s:r>` at bit 0 when `s >= r`, else `src<s:0>` at
@@ -264,6 +255,8 @@ impl Lift<'_, '_> {
             Mnemonic::Movz => self.move_wide(i, Wide::Zero),
             Mnemonic::Movn => self.move_wide(i, Wide::Not),
             Mnemonic::Movk => self.move_wide(i, Wide::Keep),
+            Mnemonic::Add if vector(i) => self.vector_arith(i, "add"),
+            Mnemonic::Sub if vector(i) => self.vector_arith(i, "sub"),
             Mnemonic::Add => self.arith(i, Form::Add, false),
             Mnemonic::Adds => self.arith(i, Form::Add, true),
             Mnemonic::Sub => self.arith(i, Form::Sub, false),
@@ -278,6 +271,9 @@ impl Lift<'_, '_> {
             }
             Mnemonic::Orr if vector(i) => self.vector_logical(i, |a, b| fold(Op::Or, a, b, 64)),
             Mnemonic::Eor if vector(i) => self.vector_logical(i, |a, b| fold(Op::Xor, a, b, 64)),
+            Mnemonic::Mul => self.vector_arith(i, "mul"),
+            Mnemonic::Neg => self.vector_unary(i, "neg"),
+            Mnemonic::Abs => self.vector_unary(i, "abs"),
             Mnemonic::And => self.logical(i, Op::And, false, false),
             Mnemonic::Ands => self.logical(i, Op::And, false, true),
             Mnemonic::Orr => self.logical(i, Op::Or, false, false),
@@ -326,10 +322,18 @@ impl Lift<'_, '_> {
             Mnemonic::Ccmp => self.compare_if(i, later, false),
             Mnemonic::Ccmn => self.compare_if(i, later, true),
             Mnemonic::Fmov => self.fmov(i),
+            Mnemonic::Fadd if vector(i) => self.float_array(i, "fadd"),
+            Mnemonic::Fsub if vector(i) => self.float_array(i, "fsub"),
+            Mnemonic::Fmul if vector(i) => self.float_array(i, "fmul"),
+            Mnemonic::Fdiv if vector(i) => self.float_array(i, "fdiv"),
+            Mnemonic::Fmax if vector(i) => self.float_array(i, "fmax"),
+            Mnemonic::Fmin if vector(i) => self.float_array(i, "fmin"),
             Mnemonic::Fadd => self.float_binary(i, Op::FAdd),
             Mnemonic::Fsub => self.float_binary(i, Op::FSub),
             Mnemonic::Fmul => self.float_binary(i, Op::FMul),
             Mnemonic::Fdiv => self.float_binary(i, Op::FDiv),
+            Mnemonic::Fmax => self.float_binary(i, Op::FMax),
+            Mnemonic::Fmin => self.float_binary(i, Op::FMin),
             Mnemonic::Fsqrt => self.float_unary(i, UnOp::Sqrt),
             Mnemonic::Fabs => self.float_unary(i, UnOp::Fabs),
             Mnemonic::Fneg => self.float_unary(i, UnOp::Neg),
@@ -348,6 +352,8 @@ impl Lift<'_, '_> {
             Mnemonic::Str(width) => self.store(i, width),
             Mnemonic::Ldp(width) => self.load_pair(i, width),
             Mnemonic::Stp => self.store_pair(i),
+            Mnemonic::Ld1 => self.load_group(i),
+            Mnemonic::St1 => self.store_group(i),
             Mnemonic::Prfm | Mnemonic::Barrier => Some(()),
             Mnemonic::Stxr(_)
             | Mnemonic::Stxp
@@ -663,15 +669,19 @@ impl Lift<'_, '_> {
         Some(())
     }
 
-    /// `fmov` between registers, general and floating-point alike, and of
-    /// a scalar immediate: the source's bits at its width, zero-extended
-    /// into the destination. A float value moves as the float it is, its
-    /// bits already fitting the width.
+    /// `fmov` between registers, general and floating-point alike, of a
+    /// scalar immediate, and of a vector immediate replicated through the
+    /// lanes: the source's bits at its width, zero-extended into the
+    /// destination. A float value moves as the float it is, its bits
+    /// already fitting the width.
     ///
     /// # Arguments
     ///
     /// * `i` - The instruction.
     fn fmov(&mut self, i: &Insn) -> Option<()> {
+        if vector(i) {
+            return self.fmov_imm_array(i);
+        }
         let Opnd::Reg { reg: dst, bits } = i.operands[0] else {
             return None;
         };
@@ -721,6 +731,75 @@ impl Lift<'_, '_> {
             return None;
         }
         self.write(Reg::V(lo8(u64::from(w & 0x1f))), 128, Expr::Const(v));
+        Some(())
+    }
+
+    /// `fmov` (vector, immediate): the expanded imm8 in every lane, one
+    /// constant over the tree's low 64 bits.
+    ///
+    /// Every field is read from the word, as the machine reads it.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    // SPEC: Arm ARM (DDI 0487) C7.2 FMOV (vector, immediate): the
+    // modified-immediate group with cmode 1111, its op and o2 bits naming
+    // the lane width, as the machine's handler reads it.
+    fn fmov_imm_array(&mut self, i: &Insn) -> Option<()> {
+        let w = i.word;
+        if (w >> 24) & 0x1f != 0b01111 || (w >> 12) & 0xf != 0b1111 {
+            return None;
+        }
+        let lane = match ((w >> 29) & 1 == 1, (w >> 11) & 1 == 1) {
+            (false, false) => 32,
+            (false, true) => 16,
+            (true, false) => 64,
+            (true, true) => return None,
+        };
+        let imm8 = (((w >> 16) & 7) << 5) | ((w >> 5) & 0x1f);
+        let one = vfp_expand(imm8, lane)?;
+        let v = (1..u64::from(64 / lane)).fold(one, |acc, k| acc | one << (k * u64::from(lane)));
+        self.write(Reg::V(lo8(u64::from(w & 0x1f))), 128, Expr::Const(v));
+        Some(())
+    }
+
+    /// `add`, `sub` and `mul` (vector): the instruction named as an
+    /// intrinsic over the two registers, as [`Lift::float_array`] names
+    /// the packed float operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `name` - The mnemonic.
+    // SPEC: Arm ARM (DDI 0487) C7.2 ADD/SUB/MUL (vector): size bits 22..23
+    // name the lane width, as every three-register vector word encodes it.
+    fn vector_arith(&mut self, i: &Insn, name: &str) -> Option<()> {
+        let w = i.word;
+        let (a, b) = (self.reg_at(vreg(w, 5), 128), self.reg_at(vreg(w, 16), 128));
+        let lane = 8u16 << ((w >> 22) & 3);
+        let v = Expr::Call(
+            packed_name(name, lane, (w >> 30) & 1 == 1),
+            vec![low(a, 64), low(b, 64)],
+        );
+        self.write(vreg(w, 0), 128, v);
+        Some(())
+    }
+
+    /// `neg` and `abs` (vector): the instruction named as an intrinsic
+    /// over the register.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `name` - The mnemonic.
+    // SPEC: Arm ARM (DDI 0487) C7.2 NEG/ABS (vector): the two-register
+    // shape, its size and Q fields as every vector word encodes them.
+    fn vector_unary(&mut self, i: &Insn, name: &str) -> Option<()> {
+        let w = i.word;
+        let x = low(self.reg_at(vreg(w, 5), 128), 64);
+        let lane = 8u16 << ((w >> 22) & 3);
+        let v = Expr::Call(packed_name(name, lane, (w >> 30) & 1 == 1), vec![x]);
+        self.write(vreg(w, 0), 128, v);
         Some(())
     }
 }

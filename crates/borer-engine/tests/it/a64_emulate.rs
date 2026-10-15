@@ -38,6 +38,30 @@ const DATA: [u8; 24] = [
 /// back from.
 const PLANTED: usize = 64;
 
+/// [`DATA`]'s first sixteen bytes as one `v` register.
+const QWORDS: u128 = 0xffff_fffe_8001_ff80_1122_3344_5566_7788;
+
+/// [`DATA`]'s eight rising bytes, then zeros, as one `v` register.
+const RISING: u128 = 0x8070_6050_4030_2010;
+
+/// A lane's value replicated `times` times through a `v` register, as
+/// `dup` leaves it.
+///
+/// # Arguments
+///
+/// * `v` - One lane's value.
+/// * `times` - How many lanes the arrangement holds.
+const fn rep(v: u64, times: u8) -> u128 {
+    let each = 128 / (times as u64);
+    let mut acc = v as u128;
+    let mut k = 1;
+    while k < times as u64 {
+        acc |= (v as u128) << (k * each);
+        k += 1;
+    }
+    acc
+}
+
 /// The stack pointer a run starts with.
 const SP: u64 = 0x7fff_0000_0000;
 
@@ -1146,6 +1170,206 @@ const CASES: &[Case] = &[
         ],
     },
     Case {
+        name: "packed_float",
+        words: &[
+            // ASM: dup v0.4s, w0
+            0x4e04_0c00,
+            // ASM: dup v1.4s, w1
+            0x4e04_0c21,
+            // ASM: fadd v2.4s, v0.4s, v1.4s
+            0x4e21_d402,
+            // ASM: fsub v3.4s, v0.4s, v1.4s
+            0x4ea1_d403,
+            // ASM: fmul v4.4s, v0.4s, v1.4s
+            0x6e21_dc04,
+            // ASM: fdiv v5.4s, v0.4s, v1.4s
+            0x6e21_fc05,
+            // ASM: fmax v6.4s, v0.4s, v1.4s
+            0x4e21_f406,
+            // ASM: fmin v7.4s, v0.4s, v1.4s
+            0x4ea1_f407,
+            // ASM: fabs v8.4s, v3.4s
+            0x4ea0_f868,
+            // ASM: fneg v9.4s, v2.4s
+            0x6ea0_f849,
+            // ASM: fsqrt v10.4s, v1.4s
+            0x6ea1_f82a,
+            // ASM: dup v11.2d, x2
+            0x4e08_0c4b,
+            // ASM: dup v12.2d, x3
+            0x4e08_0c6c,
+            // ASM: fadd v13.2d, v11.2d, v12.2d
+            0x4e6c_d56d,
+            // ASM: fmul v14.2d, v11.2d, v12.2d
+            0x6e6c_dd6e,
+            // ASM: fdiv v15.2d, v11.2d, v12.2d
+            0x6e6c_fd6f,
+            // ASM: fmin v16.2d, v11.2d, v12.2d
+            0x4eec_f570,
+            // ASM: fmax v17.2d, v11.2d, v12.2d
+            0x4e6c_f571,
+            // ASM: fsub v18.2d, v11.2d, v12.2d
+            0x4eec_d572,
+            // ASM: fabs v19.2d, v18.2d
+            0x4ee0_fa53,
+            // ASM: fneg v20.2d, v13.2d
+            0x6ee0_f9b4,
+            // ASM: fsqrt v21.2d, v14.2d
+            0x6ee1_f9d5,
+            // ASM: fmov v22.2s, #1.00000000
+            0x0f03_f616,
+            // ASM: fmov v23.2d, #0.12500000
+            0x6f02_f417,
+            // ASM: fmov v24.4s, #1.00000000
+            0x4f03_f618,
+            // ASM: fmov v25.4s, #-2.50000000
+            0x4f04_f499,
+            // ASM: ret
+            0xd65f_03c0,
+        ],
+        set: &[
+            ("x0", 0x4040_0000),
+            ("x1", 0x4080_0000),
+            ("x2", 0x4004_0000_0000_0000),
+            ("x3", 0x4008_0000_0000_0000),
+        ],
+        want: &[],
+        mem: &[],
+        vregs: &[
+            (0, rep(0x4040_0000, 4)),
+            (1, rep(0x4080_0000, 4)),
+            (2, rep(0x40e0_0000, 4)),
+            (3, rep(0xbf80_0000, 4)),
+            (4, rep(0x4140_0000, 4)),
+            (5, rep(0x3f40_0000, 4)),
+            (6, rep(0x4080_0000, 4)),
+            (7, rep(0x4040_0000, 4)),
+            (8, rep(0x3f80_0000, 4)),
+            (9, rep(0xc0e0_0000, 4)),
+            (10, rep(0x4000_0000, 4)),
+            (11, rep(0x4004_0000_0000_0000, 2)),
+            (12, rep(0x4008_0000_0000_0000, 2)),
+            (13, rep(0x4016_0000_0000_0000, 2)),
+            (14, rep(0x401e_0000_0000_0000, 2)),
+            (15, rep(0x3fea_aaaa_aaaa_aaab, 2)),
+            (16, rep(0x4004_0000_0000_0000, 2)),
+            (17, rep(0x4008_0000_0000_0000, 2)),
+            (18, rep(0xbfe0_0000_0000_0000, 2)),
+            (19, rep(0x3fe0_0000_0000_0000, 2)),
+            (20, rep(0xc016_0000_0000_0000, 2)),
+            (21, rep(0x4005_e8ad_d236_a58f, 2)),
+            (22, 0x3f80_0000_3f80_0000),
+            (23, rep(0x3fc0_0000_0000_0000, 2)),
+            (24, rep(0x3f80_0000, 4)),
+            (25, rep(0xc020_0000, 4)),
+        ],
+    },
+    Case {
+        name: "neon_int",
+        words: &[
+            // ASM: dup v0.4s, w0
+            0x4e04_0c00,
+            // ASM: dup v1.4s, w1
+            0x4e04_0c21,
+            // ASM: add v2.4s, v0.4s, v1.4s
+            0x4ea1_8402,
+            // ASM: sub v3.4s, v0.4s, v1.4s
+            0x6ea1_8403,
+            // ASM: mul v4.4s, v0.4s, v1.4s
+            0x4ea1_9c04,
+            // ASM: neg v5.4s, v0.4s
+            0x6ea0_b805,
+            // ASM: abs v6.4s, v3.4s
+            0x4ea0_b866,
+            // ASM: dup v8.8h, w6
+            0x4e02_0cc8,
+            // ASM: dup v9.8h, w7
+            0x4e02_0ce9,
+            // ASM: sub v10.8h, v8.8h, v9.8h
+            0x6e69_850a,
+            // ASM: dup v11.16b, w8
+            0x4e01_0d0b,
+            // ASM: neg v12.16b, v11.16b
+            0x6e20_b96c,
+            // ASM: abs v13.16b, v12.16b
+            0x4e20_b98d,
+            // ASM: dup v14.2d, x9
+            0x4e08_0d2e,
+            // ASM: add v15.2d, v14.2d, v14.2d
+            0x4eee_85cf,
+            // ASM: ret
+            0xd65f_03c0,
+        ],
+        set: &[
+            ("x0", 0xffff_fff0),
+            ("x1", 0x101),
+            ("x6", 0x5),
+            ("x7", 0x7),
+            ("x8", 0x80),
+            ("x9", 0xffff_ffff_ffff_ffff),
+        ],
+        want: &[],
+        mem: &[],
+        vregs: &[
+            (0, rep(0xffff_fff0, 4)),
+            (1, rep(0x101, 4)),
+            (2, rep(0xf1, 4)),
+            (3, rep(0xffff_feef, 4)),
+            (4, rep(0xffff_eff0, 4)),
+            (5, rep(0x10, 4)),
+            (6, rep(0x111, 4)),
+            (8, rep(0x0005, 8)),
+            (9, rep(0x0007, 8)),
+            (10, rep(0xfffe, 8)),
+            (11, rep(0x80, 16)),
+            (12, rep(0x80, 16)),
+            (13, rep(0x80, 16)),
+            (14, rep(0xffff_ffff_ffff_ffff, 2)),
+            (15, rep(0xffff_ffff_ffff_fffe, 2)),
+        ],
+    },
+    Case {
+        name: "neon_mem",
+        words: &[
+            // ASM: ldp q1, q2, [x5]
+            0xad40_08a1,
+            // ASM: stp q1, q2, [x6]
+            0xad00_08c1,
+            // ASM: ld1 {v3.16b}, [x5]
+            0x4c40_70a3,
+            // ASM: ld1 {v6.16b, v7.16b, v8.16b, v9.16b}, [x5]
+            0x4c40_20a6,
+            // ASM: ld1 {v4.16b, v5.16b}, [x5], #32
+            0x4cdf_a0a4,
+            // ASM: st1 {v3.16b}, [x6]
+            0x4c00_70c3,
+            // ASM: st1 {v4.16b}, [x6], #16
+            0x4c9f_70c4,
+            // ASM: ret
+            0xd65f_03c0,
+        ],
+        set: &[("x5", 0x3_0000), ("x6", 0x3_0020)],
+        want: &[("x5", 0x3_0020), ("x6", 0x3_0030)],
+        mem: &[(
+            0x3_0020,
+            &[
+                0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x80, 0xff, 0x01, 0x80, 0xfe, 0xff,
+                0xff, 0xff, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )],
+        vregs: &[
+            (1, QWORDS),
+            (2, RISING),
+            (3, QWORDS),
+            (4, QWORDS),
+            (5, RISING),
+            (6, QWORDS),
+            (7, RISING),
+            (8, QWORDS),
+            (9, RISING),
+        ],
+    },
+    Case {
         name: "system",
         words: &[
             // ASM: mrs x0, TPIDR_EL0
@@ -1457,10 +1681,10 @@ fn every_stop_is_named() {
         Stop::Derailed(SP - 0x100)
     );
     let cases: [(&[u32], &str); 5] = [
-        // ASM: fadd v0.4s, v1.4s, v2.4s (the vector form; the scalar one runs)
-        (&[0x4e22_d420], "fadd v0.4s"),
-        // ASM: ld1 { v0.16b }, [x0]
-        (&[0x4c40_7000], "ld1"),
+        // ASM: faddp v0.4s, v0.4s, v1.4s (the pairwise form; the plain one runs)
+        (&[0x6e21_d400], "faddp"),
+        // ASM: ld2 { v0.16b, v1.16b }, [x0] (the interleaved form; ld1 runs)
+        (&[0x4c40_8000], "ld2"),
         // ASM: brk #0x3e8
         (&[0xd420_7d00], "brk"),
         // ASM: svc #0x80

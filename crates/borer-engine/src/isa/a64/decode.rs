@@ -321,6 +321,8 @@ fn mnemonic(opcode: Opcode) -> Mnemonic {
         Opcode::FSQRT => Mnemonic::Fsqrt,
         Opcode::FABS => Mnemonic::Fabs,
         Opcode::FNEG => Mnemonic::Fneg,
+        Opcode::FMAX => Mnemonic::Fmax,
+        Opcode::FMIN => Mnemonic::Fmin,
         Opcode::FCMP => Mnemonic::Fcmp,
         Opcode::FCMPE => Mnemonic::Fcmpe,
         Opcode::FCCMP | Opcode::FCCMPE => Mnemonic::Fccmp,
@@ -333,6 +335,14 @@ fn mnemonic(opcode: Opcode) -> Mnemonic {
         Opcode::DUP => Mnemonic::Dup,
         Opcode::MOVI => Mnemonic::Movi,
         Opcode::MVNI => Mnemonic::Mvni,
+        // SPEC: Arm ARM (DDI 0487) C7.2 MUL/NEG/ABS (vector): scalar
+        // `mul` is `madd` with a zero addend and scalar `neg` an alias of
+        // `sub`, so these opcodes only arise as vector forms.
+        Opcode::MUL => Mnemonic::Mul,
+        Opcode::NEG => Mnemonic::Neg,
+        Opcode::ABS => Mnemonic::Abs,
+        Opcode::LD1 => Mnemonic::Ld1,
+        Opcode::ST1 => Mnemonic::St1,
         Opcode::SVC => Mnemonic::Svc,
         Opcode::MRS => Mnemonic::Mrs,
         Opcode::MSR => Mnemonic::Msr,

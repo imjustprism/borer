@@ -12,11 +12,25 @@
 
 use super::super::expr::{Expr, Op, Ty, fold, sign_extend};
 use super::{Lift, low, shifted};
-use crate::isa::a64::{Insn, Mode, Opnd, Reg, Width};
-use crate::num::from_usize;
+use crate::isa::a64::{self, Insn, Mode, Opnd, Reg, Width};
+use crate::num::{from_usize, lo8};
 
 /// A base register and the value an access writes back to it.
 type WriteBack = Option<(Reg, Expr)>;
+
+/// Bytes one `ld1`/`st1` register moves.
+const GROUP_BYTES: u64 = 16;
+
+/// The `v` register `k` places after `first` in an `ld1`/`st1` group,
+/// wrapping from `v31` to `v0` as the architecture numbers them.
+///
+/// # Arguments
+///
+/// * `first` - The first register's number.
+/// * `k` - The offset from it.
+fn group_reg(first: u8, k: u32) -> Reg {
+    Reg::V(first.wrapping_add(lo8(u64::from(k))) % 32)
+}
 
 /// The type one element of `width` moves for a register of `bits`, and
 /// whether the load sign-extends it.
@@ -233,6 +247,59 @@ impl Lift<'_, '_> {
         let (addr, back) = self.address(i.operands[2])?;
         let b = stored(self.reg_at(second, bits), ty);
         self.ex.store_at(fold(Op::Add, addr, step, 64), ty, b);
+        if let Some((r, a)) = back {
+            self.write(r, 64, a);
+        }
+        Some(())
+    }
+
+    /// `ld1`: one to four consecutive `v` registers loaded from
+    /// consecutive sixteen-byte blocks, the base written back as its
+    /// operand says — a pair load generalized to its register count.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction: register list, then address.
+    // SPEC: Arm ARM (DDI 0487) C6.2 LD1 (multiple structures).
+    pub(super) fn load_group(&mut self, i: &Insn) -> Option<()> {
+        let (first, count) = a64::ld1_group(i.word)?;
+        let (addr, back) = self.address(i.operands[1])?;
+        let mut writes = Vec::with_capacity(usize::from(count) + 1);
+        for k in 0..u32::from(count) {
+            let at = if k == 0 {
+                addr.clone()
+            } else {
+                fold(
+                    Op::Add,
+                    addr.clone(),
+                    Expr::Const(u64::from(k) * GROUP_BYTES),
+                    64,
+                )
+            };
+            writes.push((group_reg(first, k), 128, self.ex.read_at(at, Ty::U128)));
+        }
+        writes.extend(back.map(|(r, a)| (r, 64, a)));
+        self.write_all(writes);
+        Some(())
+    }
+
+    /// `st1`: the store counterpart of [`Lift::load_group`].
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction: register list, then address.
+    pub(super) fn store_group(&mut self, i: &Insn) -> Option<()> {
+        let (first, count) = a64::ld1_group(i.word)?;
+        for k in 0..u32::from(count) {
+            let (addr, _) = self.address(i.operands[1])?;
+            let v = stored(self.reg_at(group_reg(first, k), 128), Ty::U128);
+            self.ex.store_at(
+                fold(Op::Add, addr, Expr::Const(u64::from(k) * GROUP_BYTES), 64),
+                Ty::U128,
+                v,
+            );
+        }
+        let (_, back) = self.address(i.operands[1])?;
         if let Some((r, a)) = back {
             self.write(r, 64, a);
         }

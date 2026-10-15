@@ -7,6 +7,8 @@
 //! (`emulate::sse`); these handlers keep its conventions, so both machines
 //! answer byte for byte: the host's IEEE-754 arithmetic rounds to
 //! nearest-even and quiets a signaling NaN as the operation itself does.
+//! A vector form computes each lane at the lane's own width the same way,
+//! independently, the bits above the arrangement's span cleared.
 //!
 //! The flags a compare sets follow the architecture's table exactly, and a
 //! float converted to an integer saturates with a NaN going to zero, as the
@@ -15,7 +17,7 @@
 use crate::emulate::{Stop, lo64, mask, sign_extend};
 use crate::isa::a64::{Cond, Insn, Opnd, Reg};
 
-use super::{Machine, unmodeled};
+use super::{Machine, mask_wide, unmodeled, vector};
 
 /// The sign bit of a value `bits` wide, for `fabs` and `fneg`.
 fn sign_bit(bits: u16) -> u64 {
@@ -62,6 +64,46 @@ fn value(m: &Machine<'_>, reg: Reg, bits: u16) -> f64 {
     }
 }
 
+/// A float's value from its bits at a width, as the double the model
+/// computes on.
+///
+/// # Arguments
+///
+/// * `raw` - The value's low bits.
+/// * `bits` - The width, 32 or 64.
+fn of_bits(raw: u64, bits: u16) -> f64 {
+    if bits == 32 {
+        f64::from(f32::from_bits(crate::num::lo32(raw)))
+    } else {
+        f64::from_bits(raw)
+    }
+}
+
+/// The `v` register a vector word's field names.
+///
+/// # Arguments
+///
+/// * `w` - The encoded word.
+/// * `at` - Where the register's number starts.
+fn vreg(w: u32, at: u32) -> Reg {
+    Reg::V(crate::num::lo8(u64::from((w >> at) & 0x1f)))
+}
+
+/// The lane width and span a vector floating-point word names: a single
+/// or a double lane, over the low half or the whole register.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+// SPEC: Arm ARM (DDI 0487) C7.2 FADD..FMIN (vector) and
+// FABS/FNEG/FSQRT (vector): size bit 22 picks the single or the double,
+// Q bit 30 the 128- or 64-bit span.
+fn fp_shape(i: &Insn) -> (u16, u16) {
+    let lane = if (i.word >> 22) & 1 == 1 { 64 } else { 32 };
+    let span = if (i.word >> 30) & 1 == 1 { 128 } else { 64 };
+    (lane, span)
+}
+
 /// A result written back at a single's or a double's width.
 ///
 /// # Arguments
@@ -104,8 +146,9 @@ fn cond(i: &Insn) -> Result<Cond, Stop> {
 }
 
 impl Machine<'_> {
-    /// `fadd`, `fsub`, `fmul` and `fdiv` (scalar): the operation at the
-    /// destination's width, which clears every bit above it.
+    /// `fadd`, `fsub`, `fmul`, `fdiv`, `fmax` and `fmin`: the operation at
+    /// the destination's width, which clears every bit above it — scalar,
+    /// or lane-wise over the two registers for a vector form.
     ///
     /// # Arguments
     ///
@@ -120,6 +163,9 @@ impl Machine<'_> {
         i: &Insn,
         f: impl Fn(f64, f64) -> f64,
     ) -> Result<(), Stop> {
+        if vector(i) {
+            return self.float_array(i, f);
+        }
         let (rd, bits) = reg_opnd(i, 0)?;
         let (rn, from_n) = reg_opnd(i, 1)?;
         let (rm, from_m) = reg_opnd(i, 2)?;
@@ -131,12 +177,56 @@ impl Machine<'_> {
         Ok(())
     }
 
-    /// `fsqrt` (scalar): the square root in the width's own arithmetic.
+    /// The vector form of a two-source float operation: the operation
+    /// lane-wise at the lane's width, each lane a single computing in a
+    /// single, the bits above the arrangement's span cleared.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `f` - The operation on doubles.
+    ///
+    /// # Errors
+    ///
+    /// Never; the decoder has already accepted the arrangement.
+    pub(super) fn float_array(
+        &mut self,
+        i: &Insn,
+        f: impl Fn(f64, f64) -> f64,
+    ) -> Result<(), Stop> {
+        let (rn, rm) = (vreg(i.word, 5), vreg(i.word, 16));
+        let (lane, span) = fp_shape(i);
+        let (x, y) = (self.reg(rn), self.reg(rm));
+        let mut v = 0u128;
+        for k in 0..u32::from(span / lane) {
+            let at = k * u32::from(lane);
+            let (a, b) = (of_bits(lo64(x >> at), lane), of_bits(lo64(y >> at), lane));
+            v |= u128::from(single(f(a, b), lane)) << at;
+        }
+        self.set_reg(vreg(i.word, 0), 128, v);
+        Ok(())
+    }
+
+    /// `fsqrt`: the square root in the width's own arithmetic, scalar or
+    /// lane-wise.
     ///
     /// # Errors
     ///
     /// When the source is no `v` register at 32 or 64 bits.
     pub(super) fn float_sqrt(&mut self, i: &Insn) -> Result<(), Stop> {
+        if vector(i) {
+            let rn = vreg(i.word, 5);
+            let (lane, span) = fp_shape(i);
+            let x = self.reg(rn);
+            let mut v = 0u128;
+            for k in 0..u32::from(span / lane) {
+                let at = k * u32::from(lane);
+                let a = of_bits(lo64(x >> at), lane);
+                v |= u128::from(single(a.sqrt(), lane)) << at;
+            }
+            self.set_reg(vreg(i.word, 0), 128, v);
+            return Ok(());
+        }
         let (rd, bits) = reg_opnd(i, 0)?;
         let (rn, from) = reg_opnd(i, 1)?;
         if from != bits {
@@ -147,8 +237,9 @@ impl Machine<'_> {
         Ok(())
     }
 
-    /// `fabs` and `fneg` (scalar, register): the value's sign bit cleared
-    /// or flipped, every other bit as it was.
+    /// `fabs` and `fneg` (register): the value's sign bit cleared or
+    /// flipped, every other bit as it was — scalar, or every lane's sign
+    /// bit for a vector form.
     ///
     /// # Arguments
     ///
@@ -159,6 +250,16 @@ impl Machine<'_> {
     ///
     /// When the source is no `v` register at 32 or 64 bits.
     pub(super) fn float_sign(&mut self, i: &Insn, flip: bool) -> Result<(), Stop> {
+        if vector(i) {
+            let (lane, span) = fp_shape(i);
+            let signs = (0..u32::from(span / lane)).fold(0u128, |acc, k| {
+                acc | u128::from(sign_bit(lane)) << (k * u32::from(lane))
+            });
+            let raw = self.reg(vreg(i.word, 5)) & mask_wide(u128::MAX, span);
+            let v = if flip { raw ^ signs } else { raw & !signs };
+            self.set_reg(vreg(i.word, 0), 128, v);
+            return Ok(());
+        }
         let (rd, bits) = reg_opnd(i, 0)?;
         let (rn, from) = reg_opnd(i, 1)?;
         let raw = lo64(self.reg(rn)) & mask(u64::MAX, u32::from(from));

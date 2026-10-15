@@ -1,5 +1,4 @@
-//! Scalar floating-point and vector bitwise instructions for the arm64
-//! lifter.
+//! Scalar floating-point and vector instructions for the arm64 lifter.
 //!
 //! The x86 lifter types a float by where it came from: a memory load, a
 //! conversion or a constant is a float expression, a register alone holds
@@ -12,12 +11,17 @@
 //!
 //! An instruction whose value the tree does not hold as a float, where
 //! modeling it would read as an integer operation (`fneg` of a bare
-//! register), stays an `/* asm */` comment rather than guess.
+//! register), stays an `/* asm */` comment rather than guess. A packed
+//! float operation over lanes has no one value the tree could hold, as
+//! the x86 lifter's own packed operations do not either, so it names the
+//! instruction as an intrinsic over the registers ([`Lift::float_array`]);
+//! the sign operations, which are bit operations at heart, mask the sign
+//! bits instead.
 
 use super::super::expr::{Expr, Flags, Key, Op, Ty, UnOp, fold, sign_extend, ternary, unary};
 use super::flags::{self, next_reader};
 use super::step::imm;
-use super::{Lift, low, width8};
+use super::{Lift, low, vector, width8};
 use crate::emulate::a64::expand_imm;
 use crate::isa::a64::{Insn, Opnd, Reg};
 use crate::num::lo8;
@@ -42,8 +46,50 @@ fn ty(bits: u16) -> Option<Ty> {
 ///
 /// * `w` - The encoded word.
 /// * `at` - Where the register's number starts.
-fn vreg(w: u32, at: u32) -> Reg {
+pub(super) fn vreg(w: u32, at: u32) -> Reg {
     Reg::V(lo8(u64::from((w >> at) & 0x1f)))
+}
+
+/// The arrangement suffix of a lane width over a span, as the assembly
+/// writes it: `4s` for 32-bit lanes over the whole register.
+///
+/// # Arguments
+///
+/// * `lane` - The lane width in bits, 8 to 64.
+/// * `whole` - Whether the arrangement covers all 128 bits.
+fn arrangement(lane: u16, whole: bool) -> String {
+    let letter = match lane {
+        8 => "b",
+        16 => "h",
+        32 => "s",
+        _ => "d",
+    };
+    let count = u64::from(if whole { 128 } else { 64 } / lane);
+    format!("{count}{letter}")
+}
+
+/// The intrinsic name of a packed operation: its mnemonic with its
+/// arrangement.
+///
+/// # Arguments
+///
+/// * `name` - The mnemonic.
+/// * `lane` - The lane width in bits, 8 to 64.
+/// * `whole` - Whether the arrangement covers all 128 bits.
+pub(super) fn packed_name(name: &str, lane: u16, whole: bool) -> String {
+    format!("__{}_{}", name, arrangement(lane, whole))
+}
+
+/// The lane width a vector floating-point word names: a single or a
+/// double.
+///
+/// # Arguments
+///
+/// * `w` - The encoded word.
+// SPEC: Arm ARM (DDI 0487) C7.2 FADD..FMIN, FABS/FNEG/FSQRT (vector):
+// size bit 22 picks the single or the double.
+fn fp_lane(w: u32) -> u16 {
+    if (w >> 22) & 1 == 1 { 64 } else { 32 }
 }
 
 /// Two to a power as a float constant of a width.
@@ -129,6 +175,46 @@ impl Lift<'_, '_> {
         Some(())
     }
 
+    /// `fadd`, `fsub`, `fmul`, `fdiv`, `fmax` and `fmin` (vector): the
+    /// instruction named as an intrinsic over the two registers, its
+    /// arrangement in the name.
+    ///
+    /// A lane's arithmetic over a value the tree holds as one integer has
+    /// no expression the C vocabulary names, so the packed operation stays
+    /// whole, as the x86 lifter's own vector operations do.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `name` - The mnemonic.
+    pub(super) fn float_array(&mut self, i: &Insn, name: &str) -> Option<()> {
+        let w = i.word;
+        let (a, b) = (self.reg_at(vreg(w, 5), 128), self.reg_at(vreg(w, 16), 128));
+        let v = Expr::Call(
+            packed_name(name, fp_lane(w), (w >> 30) & 1 == 1),
+            vec![low(a, 64), low(b, 64)],
+        );
+        self.write(vreg(w, 0), 128, v);
+        Some(())
+    }
+
+    /// `fsqrt` (vector): the instruction named as an intrinsic over the
+    /// register, as [`Lift::float_array`] names its three-register kin.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    pub(super) fn float_sqrt_array(&mut self, i: &Insn) -> Option<()> {
+        let w = i.word;
+        let x = low(self.reg_at(vreg(w, 5), 128), 64);
+        let v = Expr::Call(
+            packed_name("fsqrt", fp_lane(w), (w >> 30) & 1 == 1),
+            vec![x],
+        );
+        self.write(vreg(w, 0), 128, v);
+        Some(())
+    }
+
     /// `fsqrt`, `fabs` and `fneg` (scalar): the one operation over the
     /// source at the destination's width.
     ///
@@ -138,6 +224,30 @@ impl Lift<'_, '_> {
     /// * `op` - The unary operator, [`UnOp::Sqrt`], [`UnOp::Fabs`] or
     ///   [`UnOp::Neg`].
     pub(super) fn float_unary(&mut self, i: &Insn, op: UnOp) -> Option<()> {
+        if vector(i) {
+            return match op {
+                UnOp::Sqrt => self.float_sqrt_array(i),
+                // INVARIANT: the sign operations are bit operations at
+                // heart, so every lane's sign bit is cleared or flipped as
+                // one mask over the tree's low 64 bits.
+                UnOp::Fabs | UnOp::Neg => {
+                    let w = i.word;
+                    let lane = fp_lane(w);
+                    let sign = 1u64 << (lane - 1);
+                    let signs = (1..u64::from(64 / lane))
+                        .fold(sign, |acc, k| acc | sign << (k * u64::from(lane)));
+                    let x = low(self.reg_at(vreg(w, 5), 128), 64);
+                    let v = if matches!(op, UnOp::Neg) {
+                        fold(Op::Xor, x, Expr::Const(signs), 64)
+                    } else {
+                        fold(Op::And, x, Expr::Const(!signs), 64)
+                    };
+                    self.write(vreg(w, 0), 128, v);
+                    Some(())
+                }
+                _ => None,
+            };
+        }
         let Opnd::Reg { reg: dst, bits } = i.operands[0] else {
             return None;
         };

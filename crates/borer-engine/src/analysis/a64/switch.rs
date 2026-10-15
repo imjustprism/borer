@@ -333,6 +333,8 @@ fn copied_from(insn: &Insn) -> Option<usize> {
         | Mnemonic::Fsqrt
         | Mnemonic::Fabs
         | Mnemonic::Fneg
+        | Mnemonic::Fmax
+        | Mnemonic::Fmin
         | Mnemonic::Fcmp
         | Mnemonic::Fcmpe
         | Mnemonic::Fccmp
@@ -343,12 +345,17 @@ fn copied_from(insn: &Insn) -> Option<usize> {
         | Mnemonic::Fcvtzu
         | Mnemonic::Fcvt
         | Mnemonic::Dup
+        | Mnemonic::Mul
+        | Mnemonic::Neg
+        | Mnemonic::Abs
         | Mnemonic::Movi
         | Mnemonic::Mvni
         | Mnemonic::Svc
         | Mnemonic::Mrs
         | Mnemonic::Msr
         | Mnemonic::Barrier
+        | Mnemonic::Ld1
+        | Mnemonic::St1
         | Mnemonic::Other => None,
     }
 }

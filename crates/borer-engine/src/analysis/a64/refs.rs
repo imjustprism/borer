@@ -417,7 +417,9 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             // INVARIANT: the floating-point compares write the flags only.
             | Mnemonic::Fcmp
             | Mnemonic::Fcmpe
-            | Mnemonic::Fccmp => writeback,
+            | Mnemonic::Fccmp
+            | Mnemonic::Ld1
+            | Mnemonic::St1 => writeback,
             Mnemonic::Stxr(_) | Mnemonic::Stxp | Mnemonic::Cas(_) => bit(0) | writeback,
             Mnemonic::Ldp(_) => bit(0) | bit(1) | writeback,
             Mnemonic::Atomic(..) => bit(1),
@@ -481,6 +483,8 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Fsqrt
             | Mnemonic::Fabs
             | Mnemonic::Fneg
+            | Mnemonic::Fmax
+            | Mnemonic::Fmin
             | Mnemonic::Fcsel
             | Mnemonic::Scvtf
             | Mnemonic::Ucvtf
@@ -488,6 +492,9 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Fcvtzu
             | Mnemonic::Fcvt
             | Mnemonic::Dup
+            | Mnemonic::Mul
+            | Mnemonic::Neg
+            | Mnemonic::Abs
             | Mnemonic::Movi
             | Mnemonic::Mvni
             | Mnemonic::Mrs
@@ -642,6 +649,8 @@ fn data(regs: &Regs, insn: &Insn, found: &mut dyn FnMut(u64, RefKind)) -> Option
         | Mnemonic::Stxp
         | Mnemonic::Atomic(..)
         | Mnemonic::Cas(_)
+        | Mnemonic::Ld1
+        | Mnemonic::St1
         | Mnemonic::Other => {
             match pc_rel(insn) {
                 Some(at) => found(at, RefKind::Data),
@@ -707,6 +716,8 @@ fn data(regs: &Regs, insn: &Insn, found: &mut dyn FnMut(u64, RefKind)) -> Option
         | Mnemonic::Fsqrt
         | Mnemonic::Fabs
         | Mnemonic::Fneg
+        | Mnemonic::Fmax
+        | Mnemonic::Fmin
         | Mnemonic::Fcmp
         | Mnemonic::Fcmpe
         | Mnemonic::Fccmp
@@ -717,6 +728,9 @@ fn data(regs: &Regs, insn: &Insn, found: &mut dyn FnMut(u64, RefKind)) -> Option
         | Mnemonic::Fcvtzu
         | Mnemonic::Fcvt
         | Mnemonic::Dup
+        | Mnemonic::Mul
+        | Mnemonic::Neg
+        | Mnemonic::Abs
         | Mnemonic::Movi
         | Mnemonic::Mvni
         | Mnemonic::Svc
