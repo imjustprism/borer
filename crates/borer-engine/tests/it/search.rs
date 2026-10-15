@@ -81,6 +81,80 @@ fn find_bytes_exact() {
     assert_eq!(hits[0].file_off, 0);
 }
 
+/// A pattern of pure wildcards has no anchor and matches at every offset.
+#[test]
+fn find_bytes_all_wildcards() {
+    let p = fixture();
+    let hits = find_bytes(&p, &parse_pattern("? ? ? ?").unwrap(), 0);
+    assert_eq!(hits.total, 0x40 - 3);
+    assert_eq!(hits.hits.len(), 0x40 - 3);
+}
+
+/// Leading wildcards leave the anchor inside the pattern; a candidate hit
+/// whose window would start before the run is skipped, the rest matched.
+#[test]
+fn find_bytes_leading_wildcards() {
+    let p = fixture();
+    let hits = find_bytes(&p, &parse_pattern("? 8b 99 05").unwrap(), 0);
+    let vas: Vec<u64> = hits.hits.iter().filter_map(|h| h.va).collect();
+    assert_eq!(vas, vec![0x1010]);
+    assert_eq!(hits.total, 1);
+}
+
+/// A pattern longer than one compare chunk verifies chunk by chunk and
+/// lane by lane in its short tail chunk.
+#[test]
+fn find_bytes_long_pattern_with_tail_chunk() {
+    let p = fixture();
+    let hits = find_bytes(
+        &p,
+        &parse_pattern("48 8b 41 05 00 00 00 00 00 00 10").unwrap(),
+        0,
+    );
+    assert_eq!(hits.total, 0);
+    let near = find_bytes(
+        &p,
+        &parse_pattern("48 8b 41 05 00 00 00 00 00 00 00").unwrap(),
+        0,
+    );
+    let vas: Vec<u64> = near.hits.iter().filter_map(|h| h.va).collect();
+    assert_eq!(vas, vec![0x1000]);
+    let wild = find_bytes(
+        &p,
+        &parse_pattern("48 8b ?? 05 ?? 00 ?? 00 ?? 00 00").unwrap(),
+        0,
+    );
+    assert_eq!(wild.total, 2);
+}
+
+/// A one-byte pattern is its own anchor and matches that byte alone.
+#[test]
+fn find_bytes_single_byte() {
+    let p = fixture();
+    let hits = find_bytes(&p, &parse_pattern("8b").unwrap(), 0);
+    assert_eq!(hits.total, 2);
+    let vas: Vec<u64> = hits.hits.iter().filter_map(|h| h.va).collect();
+    assert_eq!(vas, vec![0x1001, 0x1011]);
+}
+
+/// An anchor sitting in the scan's tail bytes, past the last whole word,
+/// still finds its match.
+#[test]
+fn find_bytes_anchor_in_tail() {
+    let mut bytes = vec![0u8; 9];
+    bytes[8] = 0x41;
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(".text", 0x1000, 0, 9, false, true)],
+    );
+    let hits = find_bytes(&p, &parse_pattern("41").unwrap(), 0);
+    assert_eq!(hits.total, 1);
+    assert_eq!(hits.hits[0].va, Some(0x1008));
+}
+
 /// Text search finds the literal and nothing for an absent one.
 #[test]
 fn find_text_hits() {

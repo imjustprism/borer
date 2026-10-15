@@ -252,7 +252,7 @@ const INTENTS: &[(&str, &[&str])] = &[
     ),
     (
         "code",
-        &["function", "decompile", "disasm", "grep", "index"],
+        &["function", "decompile", "disasm", "grep", "index", "bench"],
     ),
     ("session", &["session", "annotations", "packs", "script"]),
 ];

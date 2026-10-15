@@ -40,6 +40,122 @@ pub struct StringHit {
     pub encoding: Encoding,
 }
 
+/// One extracted string as a span of the bytes it was found in, without
+/// the text materialized.
+///
+/// A walk of a large image finds tens of thousands of strings, and a
+/// [`StringHit`] holds a heap `String` for every one of them; a span is
+/// sixteen bytes with no allocation at all, and the page a query shows
+/// materializes the few rows it prints through [`RawStringSpan::hit`].
+/// The span index a session holds between `strings` calls is these.
+///
+/// `len` counts characters — bytes for [`Encoding::Ascii`], code units
+/// for the UTF-16 encodings — the same count [`StringHit::len`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawStringSpan {
+    /// File offset of the first byte.
+    pub off: u64,
+    /// Length in characters, saturated at `u32::MAX`; no run a walk
+    /// reports reaches a fraction of that.
+    pub len: u32,
+    /// How the bytes decode.
+    pub encoding: Encoding,
+}
+
+impl RawStringSpan {
+    /// Materializes the span as the listing row over the bytes it was
+    /// walked from.
+    ///
+    /// The text is decoded again from `bytes` and cut to
+    /// [`DISPLAY_MAX`], exactly what a direct walk reports for the same
+    /// run: a span is only the run's extent, never a copy of its text.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes the span was walked from, which
+    ///   [`RawStringSpan::off`] indexes; out-of-range extents yield an
+    ///   empty text.
+    ///
+    /// # Returns
+    ///
+    /// The hit for the run.
+    #[must_use]
+    pub fn hit(self, bytes: &[u8]) -> StringHit {
+        StringHit {
+            off: self.off,
+            len: usize::try_from(self.len).unwrap_or(usize::MAX),
+            text: self.text(bytes),
+            encoding: self.encoding,
+        }
+    }
+
+    /// Decodes the span's display text from `bytes`.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes the span was walked from, which
+    ///   [`RawStringSpan::off`] indexes; out-of-range extents yield an
+    ///   empty text.
+    ///
+    /// # Returns
+    ///
+    /// The text cut to [`DISPLAY_MAX`] characters, `...` appended when it
+    /// was cut.
+    #[must_use]
+    pub fn text(self, bytes: &[u8]) -> String {
+        match self.encoding {
+            Encoding::Ascii => display_text(self.raw(bytes, 1)),
+            Encoding::Utf16 => {
+                let raw: Vec<u8> = self.raw(bytes, 2).iter().step_by(2).copied().collect();
+                display_text(&raw)
+            }
+            Encoding::DotnetUs => {
+                let raw = self.raw(bytes, 2);
+                let text: String = char::decode_utf16(
+                    raw.chunks_exact(2)
+                        .filter_map(|c| c.first_chunk::<2>().map(|b| u16::from_le_bytes(*b))),
+                )
+                .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+                .collect();
+                cut_decoded(text)
+            }
+        }
+    }
+
+    /// The span's bytes in `bytes`, empty when they no longer stand there.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes the span was walked from.
+    /// * `unit` - Bytes per character: one for ASCII, two for UTF-16.
+    fn raw(self, bytes: &[u8], unit: usize) -> &[u8] {
+        let chars = usize::try_from(self.len).unwrap_or(usize::MAX);
+        usize::try_from(self.off)
+            .ok()
+            .and_then(|start| bytes.get(start..start.checked_add(chars.checked_mul(unit)?)?))
+            .unwrap_or(&[])
+    }
+
+    /// The span's whole bytes in `bytes`, whatever its encoding: one byte
+    /// per ASCII character, two per UTF-16 code unit.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes the span was walked from.
+    ///
+    /// # Returns
+    ///
+    /// The run, empty when it no longer stands in `bytes`.
+    #[must_use]
+    pub fn raw_bytes(self, bytes: &[u8]) -> &[u8] {
+        let unit = match self.encoding {
+            Encoding::Ascii => 1,
+            Encoding::Utf16 | Encoding::DotnetUs => 2,
+        };
+        self.raw(bytes, unit)
+    }
+}
+
 impl StringHit {
     /// Returns the whole text of the string, past the cut its display text
     /// makes.
@@ -99,9 +215,110 @@ pub fn printable(b: u8) -> bool {
 
 /// Finds runs of printable ASCII of at least `min_len` bytes.
 ///
-/// The scan hops from run to run: a run starts at the next printable byte
-/// and ends at the next one outside printable ASCII, each found by a tight
-/// `position` loop, so a whole image costs one pass without per-byte state.
+/// The scan is word-wise: eight bytes are tested at a time with
+/// [`unprintable_mask`], and a word inside a run — no separator byte in
+/// it — costs the one test, while the run's extents fall out of the
+/// separator positions. The spans hold no text; the rows a query shows
+/// materialize through [`RawStringSpan::hit`].
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes to scan; offsets in the result are relative to it.
+/// * `min_len` - Shortest run reported, in bytes.
+///
+/// # Returns
+/// The runs in offset order.
+pub fn find_ascii_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
+    /// Reports the run `from..to` when it is long enough.
+    ///
+    /// # Arguments
+    ///
+    /// * `spans` - Where the run goes.
+    /// * `from` - Offset of the run's first byte.
+    /// * `to` - Offset one past the run's last byte.
+    fn emit(spans: &mut Vec<RawStringSpan>, from: usize, to: usize, min_len: usize) {
+        if to <= from || to - from < min_len {
+            return;
+        }
+        spans.push(RawStringSpan {
+            off: crate::num::from_usize(from),
+            len: u32::try_from(to - from).unwrap_or(u32::MAX),
+            encoding: Encoding::Ascii,
+        });
+    }
+    let mut spans = Vec::new();
+    let mut ended = None;
+    let (words, tail) = bytes.as_chunks::<8>();
+    for (k, w) in words.iter().enumerate() {
+        let mut m = unprintable_mask(u64::from_le_bytes(*w));
+        if m == HIGH {
+            // PERF: a word of separators alone - padding, code, binary
+            // data - ends whatever run approached it and starts none, so
+            // emitting that run at the word's head and remembering the
+            // word's last byte is all the word has to say.
+            emit(&mut spans, ended.map_or(0, |e| e + 1), 8 * k, min_len);
+            ended = Some(8 * k + 7);
+            continue;
+        }
+        while m != 0 {
+            let z = k * 8 + crate::num::saturating_usize(u64::from(m.trailing_zeros() / 8));
+            m &= m - 1;
+            emit(&mut spans, ended.map_or(0, |e| e + 1), z, min_len);
+            ended = Some(z);
+        }
+    }
+    for (j, &b) in tail.iter().enumerate() {
+        if printable(b) {
+            continue;
+        }
+        let z = words.len() * 8 + j;
+        emit(&mut spans, ended.map_or(0, |e| e + 1), z, min_len);
+        ended = Some(z);
+    }
+    emit(&mut spans, ended.map_or(0, |e| e + 1), bytes.len(), min_len);
+    spans
+}
+
+/// The bytes of `word` outside printable ASCII, as one high bit per byte
+/// at the byte's own place.
+///
+/// Three lane-exact tests decide every byte at once: the lanes whose high
+/// bit is clear name the ASCII bytes (`high_clear`), adding `0x60` to
+/// those lanes carries into the high bit exactly for the bytes of `0x20`
+/// and above (`ge20`), and adding one carries only for `0x7f`, the last
+/// byte past printable (`above`). Neither add leaves its lane - the first
+/// adds to bytes already masked below `0x80`, the second to the same -
+/// so no borrow or carry crosses a lane and the mask is exact for every
+/// word, bytes with their high bit set included: those lanes hold no
+/// `high_clear` bit, so they are separators outright.
+///
+/// # Arguments
+///
+/// * `word` - The eight bytes tested.
+///
+/// # Returns
+///
+/// The separator mask, bit `8k + 7` for byte `k`.
+fn unprintable_mask(word: u64) -> u64 {
+    let ascii = word & !HIGH;
+    let high_clear = !word & HIGH;
+    let ge20 = ascii.wrapping_add(0x60 * ONES) & HIGH;
+    let above = ascii.wrapping_add(ONES) & HIGH;
+    let printable = ge20 & !above & high_clear;
+    HIGH & !printable
+}
+
+/// A `u64` of `0x01` bytes, the subtrahend of the byte tests.
+const ONES: u64 = 0x0101_0101_0101_0101;
+/// A `u64` of `0x80` bytes, one high bit per byte of a mask.
+const HIGH: u64 = 0x8080_8080_8080_8080;
+
+/// Finds runs of printable ASCII of at least `min_len` bytes, with each
+/// run's text materialized.
+///
+/// The spans come from [`find_ascii_spans`]; this walk answers with the
+/// full rows, text and all, which a caller that wants every string's
+/// text — an IOC sweep, a triage — takes as-is.
 ///
 /// # Arguments
 ///
@@ -112,40 +329,10 @@ pub fn printable(b: u8) -> bool {
 ///
 /// The runs in offset order.
 pub fn find_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
-    let mut hits = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let Some(rel) = bytes[i..].iter().position(|&b| printable(b)) else {
-            break;
-        };
-        let start = i + rel;
-        let run = &bytes[start..];
-        let end = start + run.iter().position(|&b| !printable(b)).unwrap_or(run.len());
-        if end - start >= min_len {
-            hits.push(ascii_hit(start, &bytes[start..end]));
-        }
-        i = end;
-    }
-    hits
-}
-
-/// Builds the [`StringHit`] for an ASCII run.
-///
-/// # Arguments
-///
-/// * `off` - Offset of the run's first byte.
-/// * `raw` - The run's bytes.
-///
-/// # Returns
-///
-/// The hit with its display text cut to [`DISPLAY_MAX`].
-fn ascii_hit(off: usize, raw: &[u8]) -> StringHit {
-    StringHit {
-        off: off as u64,
-        len: raw.len(),
-        text: display_text(raw),
-        encoding: Encoding::Ascii,
-    }
+    find_ascii_spans(bytes, min_len)
+        .into_iter()
+        .map(|s| s.hit(bytes))
+        .collect()
 }
 
 /// Finds runs of UTF-16LE code units at least `min_len` characters long.
@@ -160,7 +347,8 @@ fn ascii_hit(off: usize, raw: &[u8]) -> StringHit {
 /// Every unit's high byte is zero, so the scan flags zero bytes eight at a
 /// time ([`crate::search::eq_mask`]) and tests the byte before each as a
 /// unit's low half; units two bytes apart chain into one run, which the
-/// start rule trims by a unit when its first sits on an ASCII tail.
+/// start rule trims by a unit when its first sits on an ASCII tail. The
+/// runs are spans; a query's page materializes the rows it prints.
 ///
 /// # Arguments
 ///
@@ -170,17 +358,23 @@ fn ascii_hit(off: usize, raw: &[u8]) -> StringHit {
 /// # Returns
 ///
 /// The runs in offset order.
-pub fn find_wide_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
+pub fn find_wide_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
     /// Reports one run of units spanning `first..end`.
     ///
     /// # Arguments
     ///
-    /// * `hits` - Where the run goes.
+    /// * `spans` - Where the run goes.
     /// * `bytes` - The buffer scanned.
     /// * `first` - Offset of the run's first unit's low byte.
     /// * `end` - Offset one past the run's last unit's high byte.
     /// * `min_len` - Shortest run reported, in code units.
-    fn emit(hits: &mut Vec<StringHit>, bytes: &[u8], first: usize, end: usize, min_len: usize) {
+    fn emit(
+        spans: &mut Vec<RawStringSpan>,
+        bytes: &[u8],
+        first: usize,
+        end: usize,
+        min_len: usize,
+    ) {
         // INVARIANT: inside a run every unit's high byte is zero, so only the
         // first can sit on an ASCII tail; the run is then reported from its
         // second unit, which is what the per-byte walk answered.
@@ -193,11 +387,9 @@ pub fn find_wide_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
         if len < min_len {
             return;
         }
-        let raw: Vec<u8> = bytes[start..end].iter().step_by(2).copied().collect();
-        hits.push(StringHit {
-            off: start as u64,
-            len,
-            text: display_text(&raw),
+        spans.push(RawStringSpan {
+            off: crate::num::from_usize(start),
+            len: u32::try_from(len).unwrap_or(u32::MAX),
             encoding: Encoding::Utf16,
         });
     }
@@ -207,13 +399,13 @@ pub fn find_wide_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
     ///
     /// # Arguments
     ///
-    /// * `hits` - Where a finished run goes.
+    /// * `spans` - Where a finished run goes.
     /// * `bytes` - The buffer scanned.
     /// * `run` - The run being built: its first unit's low byte and its end.
     /// * `lo` - The unit's low byte's offset.
     /// * `min_len` - Shortest run reported, in code units.
     fn see(
-        hits: &mut Vec<StringHit>,
+        spans: &mut Vec<RawStringSpan>,
         bytes: &[u8],
         run: &mut Option<(usize, usize)>,
         lo: usize,
@@ -222,14 +414,14 @@ pub fn find_wide_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
         match *run {
             Some((first, end)) if lo == end => *run = Some((first, end + 2)),
             Some((first, end)) => {
-                emit(hits, bytes, first, end, min_len);
+                emit(spans, bytes, first, end, min_len);
                 *run = Some((lo, lo + 2));
             }
             None => *run = Some((lo, lo + 2)),
         }
     }
 
-    let mut hits = Vec::new();
+    let mut spans = Vec::new();
     let mut run: Option<(usize, usize)> = None;
     let (words, tail) = bytes.as_chunks::<8>();
     for (k, w) in words.iter().enumerate() {
@@ -238,7 +430,7 @@ pub fn find_wide_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
             let z = k * 8 + m.trailing_zeros() as usize / 8;
             m &= m - 1;
             if let Some(lo) = z.checked_sub(1).filter(|lo| printable(bytes[*lo])) {
-                see(&mut hits, bytes, &mut run, lo, min_len);
+                see(&mut spans, bytes, &mut run, lo, min_len);
             }
         }
     }
@@ -248,13 +440,34 @@ pub fn find_wide_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
                 .checked_sub(1)
                 .filter(|lo| printable(bytes[*lo]))
         {
-            see(&mut hits, bytes, &mut run, lo, min_len);
+            see(&mut spans, bytes, &mut run, lo, min_len);
         }
     }
     if let Some((first, end)) = run {
-        emit(&mut hits, bytes, first, end, min_len);
+        emit(&mut spans, bytes, first, end, min_len);
     }
-    hits
+    spans
+}
+
+/// Finds runs of UTF-16LE code units at least `min_len` characters long,
+/// with each run's text materialized.
+///
+/// The spans come from [`find_wide_spans`]; this walk answers with the
+/// full rows, text and all.
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes to scan; offsets in the result are relative to it.
+/// * `min_len` - Shortest run reported, in characters.
+///
+/// # Returns
+///
+/// The runs in offset order.
+pub fn find_wide_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
+    find_wide_spans(bytes, min_len)
+        .into_iter()
+        .map(|s| s.hit(bytes))
+        .collect()
 }
 
 /// Tells whether the two bytes at `i` form a printable UTF-16LE ASCII unit.
@@ -301,11 +514,25 @@ pub fn wide_run_start(program: &Program, va: u64) -> bool {
 /// The text, with `...` appended when it was cut, so one monster string
 /// cannot fill a context window.
 fn display_text(raw: &[u8]) -> String {
-    let mut t = String::from_utf8_lossy(raw).to_string();
-    if t.len() > DISPLAY_MAX {
-        t.truncate(DISPLAY_MAX);
-        t.push_str("...");
+    cut_decoded(String::from_utf8_lossy(raw).into_owned())
+}
+
+/// Cuts decoded text to [`DISPLAY_MAX`] characters.
+///
+/// # Arguments
+///
+/// * `text` - The decoded text.
+///
+/// # Returns
+///
+/// The text, with `...` appended when it was cut; multi-byte characters
+/// are counted, not split.
+fn cut_decoded(text: String) -> String {
+    if text.chars().count() <= DISPLAY_MAX {
+        return text;
     }
+    let mut t: String = text.chars().take(DISPLAY_MAX).collect();
+    t.push_str("...");
     t
 }
 

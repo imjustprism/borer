@@ -49,6 +49,16 @@ pub struct Hits {
 
 /// Scans every section, then the bytes no section maps, for `pattern`.
 ///
+/// The scan is anchored: the pattern's first fixed byte names an anchor,
+/// and eight bytes are tested at a time with [`eq_mask`], so a word with
+/// no anchor byte in it is rejected in a handful of instructions instead
+/// of one window compare per offset. Each candidate is then verified by
+/// whole-word compares against the pattern compiled into `(expected,
+/// mask)` chunks ([`compile_pattern`]): one xor, and and a test cover
+/// eight pattern bytes, wildcards included. A pattern of wildcards alone
+/// has no anchor and keeps the per-window walk, which for it answers a
+/// match at every offset.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image whose bytes are scanned.
@@ -59,11 +69,182 @@ pub struct Hits {
 ///
 /// The page after `offset` and the total, both empty for an empty pattern.
 pub fn find_bytes(program: &Program, pattern: &[Option<u8>], offset: usize) -> Hits {
-    scan(program, pattern.len(), offset, |w| {
-        w.iter()
-            .zip(pattern.iter())
-            .all(|(b, p)| p.is_none_or(|p| *b == p))
-    })
+    let mut out = Hits::default();
+    let Some(reach) = pattern.len().checked_sub(1) else {
+        return out;
+    };
+    let Some((anchor_at, anchor)) = anchor_of(pattern, program.bytes.as_slice()) else {
+        return scan(program, pattern.len(), offset, |_| true);
+    };
+    let chunks = compile_pattern(pattern);
+    for span in spans(program, reach) {
+        let Some(last) = span.data.len().checked_sub(pattern.len()) else {
+            continue;
+        };
+        let (words, _tail) = span.data.as_chunks::<8>();
+        for (k, w) in words.iter().enumerate() {
+            let word = u64::from_le_bytes(*w);
+            let mut m = eq_mask(word, anchor);
+            while m != 0 {
+                let z = k * 8 + crate::num::saturating_usize(u64::from(m.trailing_zeros() / 8));
+                m &= m - 1;
+                let Some(i) = z.checked_sub(anchor_at) else {
+                    continue;
+                };
+                if i <= last && compiled_match(&span.data[i..], pattern, &chunks) {
+                    out.push(&span, crate::num::from_usize(i), offset);
+                }
+            }
+        }
+        for z in words.len() * 8..span.data.len() {
+            if span.data[z] != anchor {
+                continue;
+            }
+            let Some(i) = z.checked_sub(anchor_at) else {
+                continue;
+            };
+            if i <= last && compiled_match(&span.data[i..], pattern, &chunks) {
+                out.push(&span, crate::num::from_usize(i), offset);
+            }
+        }
+    }
+    out
+}
+
+/// Bytes of the file the anchor's frequency is counted over, a bound on
+/// the cost of choosing it.
+const ANCHOR_SAMPLE: usize = 32 << 10;
+/// Most distinct fixed bytes one pattern's anchor choice considers; a
+/// longer pattern's bytes repeat these or lose nothing by it.
+const ANCHOR_CANDIDATES: usize = 8;
+
+/// Chooses the pattern's anchor: the position and value of the fixed
+/// byte least frequent in a sample of the file.
+///
+/// Every candidate the scan tests is an anchor hit, and the anchor is
+/// the one byte a pattern can pick to be tested least: a frequency count
+/// over the file's head answers which fixed byte that is, and the rarest
+/// one wins, ties to the earliest. A byte the sample never sees is the
+/// rarest of all; should the file hold a section that begins with it,
+/// the verify each candidate pays stays correct, only less selective.
+/// At most [`ANCHOR_CANDIDATES`] distinct bytes are counted, each a
+/// word-wise pass over [`ANCHOR_SAMPLE`] bytes, so the choice costs
+/// microseconds against the whole-file scan it narrows.
+///
+/// # Arguments
+///
+/// * `pattern` - Bytes with `None` wildcards, as produced by [`parse_pattern`].
+/// * `file` - The file the scan will walk, for the frequency sample.
+///
+/// # Returns
+///
+/// The anchor's offset in the pattern and its byte, or `None` when every
+/// byte is a wildcard.
+fn anchor_of(pattern: &[Option<u8>], file: &[u8]) -> Option<(usize, u8)> {
+    let mut candidates: Vec<u8> = Vec::new();
+    for b in pattern.iter().flatten() {
+        if !candidates.contains(b) && candidates.len() < ANCHOR_CANDIDATES {
+            candidates.push(*b);
+        }
+    }
+    let sample = &file[..file.len().min(ANCHOR_SAMPLE)];
+    let (words, _tail) = sample.as_chunks::<8>();
+    let best = candidates
+        .iter()
+        .map(|&b| {
+            let hits = words
+                .iter()
+                .map(|w| eq_mask(u64::from_le_bytes(*w), b).count_ones())
+                .sum::<u32>()
+                + u32::try_from(
+                    sample[words.len() * 8..]
+                        .iter()
+                        .filter(|&&x| x == b)
+                        .count(),
+                )
+                .unwrap_or(u32::MAX);
+            (hits, b)
+        })
+        .min_by_key(|&(hits, b)| (hits, b))
+        .map(|(_, b)| b)?;
+    let at = pattern.iter().position(|p| p.is_some_and(|p| p == best))?;
+    Some((at, best))
+}
+
+/// Compiles a byte pattern into eight-byte `(expected, mask)` compare
+/// chunks.
+///
+/// Chunk `k` covers the pattern's bytes `8k..8k+8`: `expected` holds each
+/// fixed byte in its lane, and `mask` carries a `0xff` lane where the
+/// pattern fixes the byte and a zero lane for a wildcard. A window chunk
+/// matches when `(window_word ^ expected) & mask` is zero, eight bytes
+/// compared with three instructions whatever the wildcards.
+///
+/// # Arguments
+///
+/// * `pattern` - Bytes with `None` wildcards, as produced by [`parse_pattern`].
+///
+/// # Returns
+///
+/// One chunk per eight pattern bytes, the last short.
+fn compile_pattern(pattern: &[Option<u8>]) -> Vec<(u64, u64)> {
+    pattern
+        .chunks(8)
+        .map(|chunk| {
+            let (mut expected, mut mask) = (0u64, 0u64);
+            for (lane, p) in chunk.iter().enumerate() {
+                if let Some(b) = p {
+                    expected |= u64::from(*b) << (8 * lane);
+                    mask |= 0xff << (8 * lane);
+                }
+            }
+            (expected, mask)
+        })
+        .collect()
+}
+
+/// Whether the pattern holds at the head of `rest`, one whole word at a
+/// time.
+///
+/// Each chunk's eight bytes compare in a single xor and and against the
+/// rest as it lies, wildcards masked away; the last chunk may be short,
+/// where its remaining lanes compare byte by byte. The caller guarantees
+/// `rest` holds at least the pattern's length, so a whole-chunk compare
+/// never reads past what stands there.
+///
+/// # Arguments
+///
+/// * `rest` - The bytes from the candidate position on.
+/// * `pattern` - The bytes with wildcards sought.
+/// * `chunks` - The pattern as [`compile_pattern`] holds it.
+///
+/// # Returns
+///
+/// Whether every fixed byte of the pattern equals the rest's byte at its
+/// lane.
+fn compiled_match(rest: &[u8], pattern: &[Option<u8>], chunks: &[(u64, u64)]) -> bool {
+    for (k, (expected, mask)) in chunks.iter().enumerate() {
+        let base = 8 * k;
+        if mask == &0 {
+            continue;
+        }
+        // INVARIANT: the mask holds no lane past the pattern's length, so
+        // a whole-word compare of a short final chunk is exact: the
+        // lanes it reads past the pattern are masked away. Only a rest
+        // too short to load a whole word - which the caller's bounds
+        // allow only inside the final chunk - compares lane by lane.
+        if let Some(word) = rest.get(base..).and_then(|r| r.first_chunk::<8>()) {
+            if (u64::from_le_bytes(*word) ^ expected) & mask != 0 {
+                return false;
+            }
+        } else {
+            return pattern[base..]
+                .iter()
+                .zip(rest.get(base..).unwrap_or(&[]))
+                .all(|(p, b)| p.is_none_or(|p| p == *b));
+        }
+    }
+    true
 }
 
 /// Scans every section, then the bytes no section maps, for a text needle,
@@ -356,7 +537,9 @@ fn utf16le_eq_ignore_ascii_case(window: &[u8], wide: &[u8]) -> bool {
 ///
 /// The walk never stops early: the total is what tells a caller how far
 /// the pages go, and a section is a memory compare per window. A window may
-/// run past its run's end into the file's next bytes ([`spans`]).
+/// run past its run's end into the file's next bytes ([`spans`]). Only a
+/// pattern of pure wildcards takes this walk: every other pattern is
+/// anchored and scanned eight bytes at a time by [`find_bytes`].
 ///
 /// # Arguments
 ///

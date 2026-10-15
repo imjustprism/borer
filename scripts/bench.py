@@ -13,11 +13,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 
 _ID = 0
+
+
+def _timed(proc: subprocess.Popen, name: str, args: dict) -> float:
+    """Calls a tool and returns its wall time in seconds, answer dropped."""
+    t = time.perf_counter()
+    _call(proc, name, args)
+    return time.perf_counter() - t
 
 
 def _recv(proc: subprocess.Popen) -> dict:
@@ -130,6 +138,18 @@ def bench(borer: str, binary: str) -> dict:
                     stats.setdefault("long_sigs", 0)
                     stats["long_sigs"] += 1
         timed("strings", {"limit": 20})
+        # The speed ops the showcase tracks: each repeated, the fastest run
+        # kept, because a first call pays the walk and a filter's page its
+        # rendering. Throughput comes from the binary's size on disk.
+        size = os.path.getsize(binary)
+        aob = min(
+            _timed(proc, "search", {"query": "65 6c ?? ??", "kind": "bytes", "limit": 20})
+            for _ in range(3)
+        )
+        stats["aob_ms"] = round(aob * 1000, 2)
+        stats["aob_gbps"] = round(size / aob / 1e9, 1)
+        filtered = min(_timed(proc, "strings", {"filter": "er", "limit": 20}) for _ in range(3))
+        stats["str_ms"] = round(filtered * 1000, 2)
         timed("search", {"query": "65 6c", "kind": "bytes", "limit": 20})
         assert info
 

@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use crate::protection::{IMAGE_BASE, PE_AT, pe, sec};
 use borer_engine::analysis::render::{iocs_tsv, why_tsv};
 use borer_engine::analysis::{Analysis, Overlay, function_entry};
-use borer_engine::clr::{Body, clr_tsv, with_user_strings};
+use borer_engine::clr::{Body, clr_tsv, split_user_strings};
 use borer_engine::program::{Program, SymbolKind};
-use borer_engine::strings::{Encoding, find_wide_strings};
+use borer_engine::strings::{Encoding, find_wide_spans};
 
 /// Where the CLR header sits.
 const COR20_RVA: u32 = 0x1000;
@@ -448,13 +448,15 @@ fn method_names_are_symbols_why_explains() {
 #[test]
 fn user_strings_feed_strings_and_indicators() {
     let p = load(&root(&meta()));
-    let walked = find_wide_strings(&p.bytes, 5);
-    let merged = with_user_strings(&p, walked, 5);
-    let ours: Vec<(&str, Encoding)> = merged
+    let walked = find_wide_spans(&p.bytes, 5);
+    let (spans, user) = split_user_strings(&p, walked, 5);
+    let merged: Vec<(String, Encoding)> = spans
         .iter()
-        .filter(|h| h.encoding == Encoding::DotnetUs)
-        .map(|h| (h.text.as_str(), h.encoding))
+        .filter(|s| s.encoding == Encoding::DotnetUs)
+        .map(|s| (s.text(&p.bytes), s.encoding))
+        .chain(user.iter().map(|h| (h.text.clone(), h.encoding)))
         .collect();
+    let ours: Vec<(&str, Encoding)> = merged.iter().map(|(t, e)| (t.as_str(), *e)).collect();
     assert_eq!(
         ours,
         [(URL, Encoding::DotnetUs), (WIDE, Encoding::DotnetUs)]
@@ -462,7 +464,7 @@ fn user_strings_feed_strings_and_indicators() {
     assert!(
         merged
             .iter()
-            .all(|h| h.encoding == Encoding::DotnetUs || !h.text.contains("llo w")),
+            .all(|(t, e)| *e == Encoding::DotnetUs || !t.contains("llo w")),
         "the walk's split pieces of the wide string are gone"
     );
     let a = Analysis::compute(&p);

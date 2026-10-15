@@ -415,6 +415,7 @@ assert uris == [
     "borer://antianalysis",
     "borer://asserts",
     "borer://attrs",
+    "borer://bench",
     "borer://capabilities",
     "borer://checks",
     "borer://children",

@@ -1434,40 +1434,46 @@ const TABLES_READ: [u8; 9] = [
     NESTED_CLASS,
 ];
 
-/// Replaces the UTF-16 runs a walk of the file found inside the `#US` heap
-/// with the heap's own strings, tagged [`Encoding::DotnetUs`].
+/// Splits the UTF-16LE runs a walk of the file found into the runs
+/// outside the `#US` heap, kept as spans, and the heap's own strings,
+/// kept as rows.
 ///
-/// The walk reads only ASCII characters, so it splits a user string at its
-/// first other character and joins none of it to its token; the heap's
+/// The walk reads only ASCII characters, so it splits a user string at
+/// its first other character and joins none of it to its token; the heap's
 /// entries are the strings whole, so they replace what the walk found
-/// there.
+/// there. A user string's display text is escaped and one-lined
+/// ([`UserString::hit`]), which no span over the raw bytes reproduces,
+/// so the heap's rows keep their text and the plain runs stay spans.
 ///
 /// # Arguments
 ///
 /// * `p` - The program.
-/// * `wide` - The walk's UTF-16LE runs, in offset order.
+/// * `wide` - The walk's UTF-16LE run spans, in offset order.
 /// * `min` - Shortest string kept, in code units.
 ///
 /// # Returns
 ///
-/// The runs in offset order; `wide` itself for a program with no `#US`.
-#[must_use]
-pub fn with_user_strings(p: &Program, mut wide: Vec<StringHit>, min: usize) -> Vec<StringHit> {
+/// The runs outside `#US` in offset order and the heap's rows in offset
+/// order; `wide` unchanged and no rows for a program with no `#US`.
+pub fn split_user_strings(
+    p: &Program,
+    mut wide: Vec<crate::strings::RawStringSpan>,
+    min: usize,
+) -> (Vec<crate::strings::RawStringSpan>, Vec<StringHit>) {
     let Some(clr) = p.clr() else {
-        return wide;
+        return (wide, Vec::new());
     };
     if clr.us_heap.is_none() {
-        return wide;
+        return (wide, Vec::new());
     }
-    wide.retain(|h| !clr.in_user_strings(h.off));
-    wide.extend(
-        clr.user_strings
-            .iter()
-            .filter(|s| s.units >= min)
-            .map(UserString::hit),
-    );
-    wide.sort_by_key(|h| h.off);
-    wide
+    wide.retain(|s| !clr.in_user_strings(s.off));
+    let user: Vec<StringHit> = clr
+        .user_strings
+        .iter()
+        .filter(|s| s.units >= min)
+        .map(UserString::hit)
+        .collect();
+    (wide, user)
 }
 
 /// What a `borer://clr` read keeps: kinds, texts and a page.

@@ -24,11 +24,12 @@ use borer_engine::analysis::{Analysis, Overlay, name_of, render};
 use borer_engine::pack::Packs;
 use borer_engine::program::Program;
 use borer_engine::table::Window;
+use rayon::prelude::*;
 
 /// Magic bytes opening an index file.
 const MAGIC: &[u8; 8] = b"BORERIDX";
 /// Layout version of the file; bump when the record shape changes.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 /// Longest name or text one record may carry, a bound on a corrupt length.
 const RECORD_MAX: usize = 64 << 20;
 /// Environment variable naming the directory indexes live in.
@@ -91,6 +92,9 @@ pub struct CodeIndex {
     pub key: IndexKey,
     /// The functions in entry order.
     pub functions: Vec<IndexedFunction>,
+    /// The trigram index over the functions' texts, the prefilter a
+    /// literal grep intersects instead of scanning every line.
+    pub postings: Postings,
 }
 
 impl CodeIndex {
@@ -99,6 +103,155 @@ impl CodeIndex {
     pub fn text_bytes(&self) -> usize {
         self.functions.iter().map(|f| f.text.len()).sum()
     }
+}
+
+/// The trigram index over every function's text: for each trigram the
+/// ascending indices of the functions whose folded text holds it.
+///
+/// The fold is ASCII case-folding over the identifier alphabet
+/// `[a-z0-9_]`; every other byte breaks a run. A line holds a literal
+/// only when its function's folded text holds every trigram of the
+/// literal's folded runs, so a literal grep intersects a handful of
+/// posting lists and line-scans only the survivors - the whole program's
+/// pseudo-C is never touched for a word it cannot hold. An expression
+/// asks nothing of the index: its matches need not hold any one literal,
+/// so it scans as before, in stripes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Postings {
+    /// [`TRIGRAMS`] lists, one per trigram in id order, each holding the
+    /// ascending indices of the functions whose text spells it.
+    lists: Vec<Vec<u32>>,
+}
+
+/// The symbols a trigram is spelled over: the ASCII letters case-folded,
+/// the digits and the underscore, the alphabet a C identifier uses.
+const SYMBOLS: usize = 37;
+/// The count of trigrams the fold can spell, [`SYMBOLS`] cubed.
+const TRIGRAMS: usize = SYMBOLS * SYMBOLS * SYMBOLS;
+
+/// One byte's symbol number in the trigram alphabet.
+///
+/// # Arguments
+///
+/// * `b` - The byte as it stands in a text or a query.
+///
+/// # Returns
+///
+/// The folded symbol below [`SYMBOLS`], or `None` when the byte breaks a
+/// run.
+fn symbol(b: u8) -> Option<u8> {
+    match b {
+        b'a'..=b'z' => Some(b - b'a'),
+        b'0'..=b'9' => Some(b - b'0' + 26),
+        b'_' => Some(36),
+        b'A'..=b'Z' => Some(b - b'A'),
+        _ => None,
+    }
+}
+
+/// The trigram three folded symbols spell.
+///
+/// # Arguments
+///
+/// * `a`, `b`, `c` - The symbols, as [`symbol`] numbers.
+///
+/// # Returns
+///
+/// The trigram's id, below [`TRIGRAMS`].
+fn trigram(a: u8, b: u8, c: u8) -> usize {
+    (usize::from(a) * SYMBOLS + usize::from(b)) * SYMBOLS + usize::from(c)
+}
+
+/// The ids of every trigram the folded runs of `text` spell.
+///
+/// A run is a stretch of the identifier alphabet; trigrams never span
+/// past a byte outside it, and neither does a literal's run, so the ids
+/// of a query's runs are exactly the ids its matches' lines must hold.
+///
+/// # Arguments
+///
+/// * `text` - A query literal, folded as it is.
+///
+/// # Returns
+///
+/// The trigram ids, unsorted and undeduped; empty for text without a
+/// three-symbol run.
+fn trigram_ids(text: &str) -> Vec<usize> {
+    let mut ids = Vec::new();
+    let mut run = ([0u8; 2], 0usize);
+    for &b in text.as_bytes() {
+        let Some(s) = symbol(b) else {
+            run.1 = 0;
+            continue;
+        };
+        match run.1 {
+            0 => {
+                run.0[0] = s;
+                run.1 = 1;
+            }
+            1 => {
+                run.0[1] = s;
+                run.1 = 2;
+            }
+            _ => {
+                ids.push(trigram(run.0[0], run.0[1], s));
+                run.0 = [run.0[1], s];
+            }
+        }
+    }
+    ids
+}
+
+/// Indexes every function's text into postings, one pass per function.
+///
+/// # Arguments
+///
+/// * `functions` - The records the index holds, in order.
+///
+/// # Returns
+///
+/// The postings over their texts; an id's list holds each function
+/// index once, ascending.
+fn trigram_postings(functions: &[IndexedFunction]) -> Postings {
+    let mut sieve = vec![false; TRIGRAMS];
+    let mut touched: Vec<usize> = Vec::new();
+    let mut lists = vec![Vec::<u32>::new(); TRIGRAMS];
+    for (i, f) in functions.iter().enumerate() {
+        let Some(i) = u32::try_from(i).ok() else {
+            continue;
+        };
+        touched.clear();
+        let mut run = ([0u8; 2], 0usize);
+        for &b in f.text.as_bytes() {
+            let Some(s) = symbol(b) else {
+                run.1 = 0;
+                continue;
+            };
+            let id = match run.1 {
+                0 => {
+                    run.0[0] = s;
+                    run.1 = 1;
+                    continue;
+                }
+                1 => {
+                    run.0[1] = s;
+                    run.1 = 2;
+                    continue;
+                }
+                _ => trigram(run.0[0], run.0[1], s),
+            };
+            if !sieve[id] {
+                sieve[id] = true;
+                touched.push(id);
+            }
+            run.0 = [run.0[1], s];
+        }
+        for id in touched.drain(..) {
+            lists[id].push(i);
+            sieve[id] = false;
+        }
+    }
+    Postings { lists }
 }
 
 /// One pseudo-C line that matched a query.
@@ -174,6 +327,20 @@ impl Matcher {
         match self {
             Matcher::Literal(_) => "contain",
             Matcher::Regex(_) => "match",
+        }
+    }
+
+    /// The literal the matcher holds, when it is one.
+    ///
+    /// # Returns
+    ///
+    /// The text every matching line contains, or `None` for an
+    /// expression, whose matches need not hold any one literal.
+    #[must_use]
+    pub fn literal(&self) -> Option<&str> {
+        match self {
+            Matcher::Literal(text) => Some(text),
+            Matcher::Regex(_) => None,
         }
     }
 }
@@ -295,7 +462,7 @@ fn require_cache_dir() -> Result<PathBuf, String> {
 pub fn build(program: &Program, analysis: &Analysis, overlay: &Overlay) -> CodeIndex {
     let entries: Vec<u64> = analysis.functions.iter().map(|f| f.entry).collect();
     let texts = decompile_named_all(program, analysis, overlay, &entries);
-    let functions = entries
+    let functions: Vec<IndexedFunction> = entries
         .iter()
         .zip(texts)
         .map(|(&entry, text)| IndexedFunction {
@@ -304,32 +471,52 @@ pub fn build(program: &Program, analysis: &Analysis, overlay: &Overlay) -> CodeI
             text: text.unwrap_or_default(),
         })
         .collect();
+    let postings = trigram_postings(&functions);
     CodeIndex {
         key: index_key(program, &analysis.packs),
         functions,
+        postings,
     }
 }
 
 /// The FNV-1a digest of an index's records, exactly as [`encode`] writes
-/// them: per function its entry, then its name and text each behind its
-/// length.
+/// them.
+///
+/// Per function its entry, then its name and text each behind its
+/// length, then the postings, each present trigram by its id, its count
+/// and its function indices.
 ///
 /// The header carries it and [`read`] checks it, since a record that still
 /// parses after an edit (a changed byte of a text) changed every grep over
 /// it, and a cache that answers differently from a fresh build breaks the
-/// promise that the same query answers the same.
+/// promise that the same query answers the same. The postings join the
+/// digest for the same reason: a listing that skipped a function a
+/// tampered posting list dropped would answer less than the build does.
 ///
 /// # Arguments
 ///
 /// * `functions` - The records, in file order.
-fn digest(functions: &[IndexedFunction]) -> u64 {
-    functions.iter().fold(FNV_SEED, |h, f| {
+/// * `postings` - The trigram postings over them.
+fn digest(functions: &[IndexedFunction], postings: &Postings) -> u64 {
+    let h = functions.iter().fold(FNV_SEED, |h, f| {
         let h = fnv1a(h, &f.entry.to_le_bytes());
         [&f.name, &f.text].iter().fold(h, |h, field| {
             let (len, bytes) = clipped(field);
             fnv1a(fnv1a(h, &len.to_le_bytes()), bytes)
         })
-    })
+    });
+    postings
+        .lists
+        .iter()
+        .enumerate()
+        .filter(|(_, list)| !list.is_empty())
+        .fold(h, |h, (id, list)| {
+            let id = u32::try_from(id).unwrap_or(u32::MAX);
+            let len = u32::try_from(list.len()).unwrap_or(u32::MAX);
+            let h = fnv1a(h, &id.to_le_bytes());
+            let h = fnv1a(h, &len.to_le_bytes());
+            list.iter().fold(h, |h, i| fnv1a(h, &i.to_le_bytes()))
+        })
 }
 
 /// A record field as the file holds it: its length as a `u32` and as many
@@ -350,8 +537,11 @@ fn clipped(field: &str) -> (u32, &[u8]) {
 }
 
 /// Serializes an index: the magic, the format, the key's two halves, a
-/// count, the records' [`digest`], then per function its entry and
-/// length-prefixed name and text.
+/// count, the records' [`digest`], then the records and the postings.
+///
+/// Per function its entry and length-prefixed name and text; then the
+/// postings: a count of present trigrams, and per trigram its id, a
+/// count and the function indices.
 ///
 /// The bytes go straight to `out`: an index is as large as all of a
 /// program's pseudo-C, and a copy of it in memory beside the index itself
@@ -375,13 +565,34 @@ pub fn encode(index: &CodeIndex, out: &mut impl std::io::Write) -> std::io::Resu
             .unwrap_or(u32::MAX)
             .to_le_bytes(),
     )?;
-    out.write_all(&digest(&index.functions).to_le_bytes())?;
+    out.write_all(&digest(&index.functions, &index.postings).to_le_bytes())?;
     for f in &index.functions {
         out.write_all(&f.entry.to_le_bytes())?;
         for field in [&f.name, &f.text] {
             let (len, bytes) = clipped(field);
             out.write_all(&len.to_le_bytes())?;
             out.write_all(bytes)?;
+        }
+    }
+    let present: Vec<usize> = index
+        .postings
+        .lists
+        .iter()
+        .enumerate()
+        .filter(|(_, list)| !list.is_empty())
+        .map(|(id, _)| id)
+        .collect();
+    out.write_all(
+        &u32::try_from(present.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    )?;
+    for id in present {
+        let list = &index.postings.lists[id];
+        out.write_all(&u32::try_from(id).unwrap_or(u32::MAX).to_le_bytes())?;
+        out.write_all(&u32::try_from(list.len()).unwrap_or(u32::MAX).to_le_bytes())?;
+        for i in list {
+            out.write_all(&i.to_le_bytes())?;
         }
     }
     Ok(())
@@ -417,6 +628,19 @@ impl<R: Read> Reader<R> {
     /// Reads a little-endian `u32`.
     fn u32(&mut self) -> Option<u32> {
         self.take().map(u32::from_le_bytes)
+    }
+
+    /// Reads a length-checked sequence of little-endian `u32`s.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` - How many values to read.
+    fn u32s(&mut self, len: usize) -> Option<Vec<u32>> {
+        let mut out = Vec::with_capacity(len.min(1 << 16));
+        for _ in 0..len {
+            out.push(self.u32()?);
+        }
+        Some(out)
     }
 
     /// Reads a little-endian `u64`.
@@ -478,7 +702,25 @@ fn read(input: impl Read, len: u64) -> Option<CodeIndex> {
         let text = r.string()?;
         functions.push(IndexedFunction { entry, name, text });
     }
-    (digest(&functions) == stored).then_some(CodeIndex { key, functions })
+    let present = usize::try_from(r.u32()?).ok()?;
+    if present > TRIGRAMS {
+        return None;
+    }
+    let mut lists = vec![Vec::<u32>::new(); TRIGRAMS];
+    for _ in 0..present {
+        let id = usize::try_from(r.u32()?).ok()?;
+        let len = usize::try_from(r.u32()?).ok()?;
+        if id >= TRIGRAMS || u64::try_from(len).ok()? > r.left {
+            return None;
+        }
+        lists[id] = r.u32s(len)?;
+    }
+    let postings = Postings { lists };
+    (digest(&functions, &postings) == stored).then_some(CodeIndex {
+        key,
+        functions,
+        postings,
+    })
 }
 
 /// Parses an index from its encoding.
@@ -546,6 +788,24 @@ pub fn load_from(path: &Path) -> Option<CodeIndex> {
 /// * `key` - The key wanted.
 fn load_in(dir: &Path, key: IndexKey) -> Option<CodeIndex> {
     load_from(&dir.join(key.file_name())).filter(|index| index.key == key)
+}
+
+/// Reads the index cached for `program`, without building one.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `packs` - The packs its analysis runs with, part of the key.
+///
+/// # Returns
+///
+/// The index and its path, or `None` when no cache holds one for this
+/// program, engine and packs.
+#[must_use]
+pub fn load_cached(program: &Program, packs: &Packs) -> Option<(CodeIndex, PathBuf)> {
+    let dir = cache_dir()?;
+    let key = index_key(program, packs);
+    load_in(&dir, key).map(|index| (index, dir.join(key.file_name())))
 }
 
 /// Writes an index into `dir` under its key's name, then removes the
@@ -693,6 +953,12 @@ pub fn load_or_build(
 
 /// Finds every pseudo-C line `matcher` accepts, in entry then line order.
 ///
+/// A literal query is prefetched through the postings: the functions whose
+/// folded texts hold every trigram of the literal's runs are the only ones
+/// whose lines are scanned, and they are scanned in stripes. An
+/// expression, or a literal too short to spell a trigram, scans every
+/// function the name filter leaves.
+///
 /// # Arguments
 ///
 /// * `index` - The index to scan.
@@ -709,11 +975,16 @@ pub fn grep(index: &CodeIndex, matcher: &Matcher, function_filter: &str) -> Vec<
         return Vec::new();
     }
     let q = function_filter.to_lowercase();
+    let scope = matcher.literal().and_then(|lit| literal_scope(index, lit));
     index
         .functions
-        .iter()
-        .filter(|f| q.is_empty() || f.name.to_lowercase().contains(&q))
-        .flat_map(|f| {
+        .par_iter()
+        .enumerate()
+        .filter(|(i, f)| {
+            (q.is_empty() || f.name.to_lowercase().contains(&q))
+                && scope.as_ref().is_none_or(|m| m[*i])
+        })
+        .map(|(_, f)| {
             f.text
                 .lines()
                 .enumerate()
@@ -724,8 +995,56 @@ pub fn grep(index: &CodeIndex, matcher: &Matcher, function_filter: &str) -> Vec<
                     line_no: i + 1,
                     line: line.trim().to_owned(),
                 })
+                .collect::<Vec<GrepHit>>()
         })
+        .collect::<Vec<Vec<GrepHit>>>()
+        .into_iter()
+        .flatten()
         .collect()
+}
+
+/// Which functions a literal can hit, as one membership bit per function.
+///
+/// The scope is the intersection of the literal's trigrams' posting
+/// lists, tested list by list against the marks the shortest list set: a
+/// function stays marked only while every list so far holds it. The
+/// shortest list first is what keeps the marking pass narrow.
+///
+/// # Arguments
+///
+/// * `index` - The index whose postings are intersected.
+/// * `literal` - The text every matching line contains.
+///
+/// # Returns
+///
+/// The membership bits, or `None` when the literal spells no trigram and
+/// nothing can be ruled out.
+fn literal_scope(index: &CodeIndex, literal: &str) -> Option<Vec<bool>> {
+    let mut needed = trigram_ids(literal);
+    needed.sort_unstable();
+    needed.dedup();
+    if needed.is_empty() {
+        return None;
+    }
+    needed.sort_by_key(|id| index.postings.lists.get(*id).map_or(usize::MAX, Vec::len));
+    let mut scope = vec![false; index.functions.len()];
+    for &i in index.postings.lists.get(needed[0]).into_iter().flatten() {
+        if let Ok(at) = usize::try_from(i)
+            && let Some(mark) = scope.get_mut(at)
+        {
+            *mark = true;
+        }
+    }
+    for id in &needed[1..] {
+        let list = index.postings.lists.get(*id)?;
+        for (i, mark) in scope.iter_mut().enumerate() {
+            let idx = u32::try_from(i).unwrap_or(u32::MAX);
+            if *mark && list.binary_search(&idx).is_err() {
+                *mark = false;
+            }
+        }
+    }
+    Some(scope)
 }
 
 /// Renders a grep as a `#`-headed table, paged, with names from the overlay.
@@ -821,25 +1140,93 @@ mod tests {
 
     /// A two-function index with a shared line and a distinct one.
     fn sample() -> CodeIndex {
+        let functions = vec![
+            IndexedFunction {
+                entry: 0x1000,
+                name: "Game::Send".to_owned(),
+                text: "// signature: void Game::Send(void)\nAppendCommand(cmd, 1);\nreturn;\n"
+                    .to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x2000,
+                name: "sub_2000".to_owned(),
+                text: "x = AppendCommand(cmd, 0);\n  return x;\n".to_owned(),
+            },
+        ];
         CodeIndex {
             key: IndexKey {
                 program: 7,
                 engine: 9,
             },
-            functions: vec![
-                IndexedFunction {
-                    entry: 0x1000,
-                    name: "Game::Send".to_owned(),
-                    text: "// signature: void Game::Send(void)\nAppendCommand(cmd, 1);\nreturn;\n"
-                        .to_owned(),
-                },
-                IndexedFunction {
-                    entry: 0x2000,
-                    name: "sub_2000".to_owned(),
-                    text: "x = AppendCommand(cmd, 0);\n  return x;\n".to_owned(),
-                },
-            ],
+            postings: trigram_postings(&functions),
+            functions,
         }
+    }
+
+    /// The trigram prefilter keeps every hit a full scan finds.
+    ///
+    /// Across case folds, separator-split runs and texts too short to
+    /// spell a trigram, and it rules out functions whose folded text
+    /// cannot hold the literal.
+    ///
+    /// # Panics
+    ///
+    /// When the prefilled grep disagrees with a scan of every line.
+    #[test]
+    fn the_trigram_prefilter_answers_what_a_full_scan_answers() {
+        let functions = vec![
+            IndexedFunction {
+                entry: 0x1000,
+                name: "a".to_owned(),
+                text: "memcpy(dst, src, n);\nreturn 0x20;\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x2000,
+                name: "b".to_owned(),
+                text: "MEMCPY(dst, src, n);\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x3000,
+                name: "c".to_owned(),
+                text: "x = 1;\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x4000,
+                name: "d".to_owned(),
+                text: String::new(),
+            },
+        ];
+        let index = CodeIndex {
+            key: IndexKey {
+                program: 1,
+                engine: 2,
+            },
+            postings: trigram_postings(&functions),
+            functions,
+        };
+        for lit in ["memcpy", "MEMCPY", "MeMcPy", "dst,", "0x20", "x = 1", "= 1"] {
+            let matcher = Matcher::parse(lit).expect("a literal parses");
+            let brute: Vec<(u64, usize)> = index
+                .functions
+                .iter()
+                .flat_map(|f| {
+                    f.text.lines().enumerate().filter_map(|(i, line)| {
+                        matcher.is_match(line.trim()).then_some((f.entry, i + 1))
+                    })
+                })
+                .collect();
+            let hits: Vec<(u64, usize)> = grep(&index, &matcher, "")
+                .iter()
+                .map(|h| (h.entry, h.line_no))
+                .collect();
+            assert_eq!(hits, brute, "{lit:?}");
+        }
+        let scope = literal_scope(&index, "memcpy").expect("the literal spells trigrams");
+        assert_eq!(scope, vec![true, true, false, false]);
+        assert!(
+            literal_scope(&index, "= 1").is_none(),
+            "a literal without a three-symbol run rules nothing out"
+        );
     }
 
     /// The encoding reads back equal, and a truncated or foreign file is
@@ -1070,16 +1457,18 @@ mod tests {
     /// header line does not say what `^N` means.
     #[test]
     fn a_grep_hit_comes_with_the_headers_enclosing_it() {
+        let functions = vec![IndexedFunction {
+            entry: 0x1000,
+            name: "f".to_owned(),
+            text: "// f @ 0x1000\n\nif (a1 != 0) {\n  while (rax) {\n    Send(a1);\n    Send(a2);\n  }\n} else {\n  Send(0);\n}\nSend(9);\n".to_owned(),
+        }];
         let index = CodeIndex {
             key: IndexKey {
                 program: 7,
                 engine: 9,
             },
-            functions: vec![IndexedFunction {
-                entry: 0x1000,
-                name: "f".to_owned(),
-                text: "// f @ 0x1000\n\nif (a1 != 0) {\n  while (rax) {\n    Send(a1);\n    Send(a2);\n  }\n} else {\n  Send(0);\n}\nSend(9);\n".to_owned(),
-            }],
+            postings: trigram_postings(&functions),
+            functions,
         };
         let (a, o) = (Analysis::default(), Overlay::default());
         let note = render::SCOPE_NOTE;

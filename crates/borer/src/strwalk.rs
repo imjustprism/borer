@@ -8,11 +8,17 @@
 //! program's bytes (pointer and length), so a walk can only be served to
 //! the allocation it was walked from, the way the decompile index is keyed
 //! per program (`index::index_key`) with the session in place of the file.
+//!
+//! The cached rows are spans, not texts: sixteen bytes per string and no
+//! allocation, where a materialized row is a heap `String` each - fifty
+//! thousand of those on a large image. The filter tests the span's bytes
+//! where they lie in the program, and a page materializes only the rows it
+//! prints.
 
 use std::sync::{Arc, RwLock};
 
 use borer_engine::program::Program;
-use borer_engine::strings::{StringHit, find_strings, find_wide_strings};
+use borer_engine::strings::{RawStringSpan, StringHit, find_ascii_spans, find_wide_spans};
 
 use crate::params::StringEncoding;
 use crate::{read_lock, write_lock};
@@ -26,6 +32,102 @@ use crate::{read_lock, write_lock};
 /// call itself instead of asking the cache.
 pub(crate) const WALK_MIN: usize = 5;
 
+/// One row the strings listing shows: a span of the program's bytes, or a
+/// .NET user string kept whole.
+///
+/// A walked run's display text is what its bytes decode to, so a span
+/// materializes it only when shown. A `#US` literal's display text is
+/// escaped and one-lined, which the raw bytes do not spell, so its row
+/// keeps the text the heap read.
+#[derive(Debug, Clone)]
+pub(crate) enum StringRow {
+    /// A walked ASCII or UTF-16LE run, its text still in the program's
+    /// bytes.
+    Span(RawStringSpan),
+    /// A .NET user string, materialized by the heap reader.
+    Hit(StringHit),
+}
+
+impl StringRow {
+    /// The row's file offset.
+    pub(crate) fn off(&self) -> u64 {
+        match self {
+            StringRow::Span(s) => s.off,
+            StringRow::Hit(h) => h.off,
+        }
+    }
+
+    /// The row's length in characters, bytes for ASCII and code units for
+    /// UTF-16.
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            StringRow::Span(s) => usize::try_from(s.len).unwrap_or(usize::MAX),
+            StringRow::Hit(h) => h.len,
+        }
+    }
+
+    /// The row's encoding name.
+    pub(crate) fn encoding(&self) -> borer_engine::strings::Encoding {
+        match self {
+            StringRow::Span(s) => s.encoding,
+            StringRow::Hit(h) => h.encoding,
+        }
+    }
+
+    /// The row's whole text, borrowed from the bytes for a span and taken
+    /// as held for a hit.
+    ///
+    /// A walked run holds only printable ASCII, which is UTF-8 as it
+    /// stands, so a span's whole text borrows its bytes with no copy at
+    /// all - the zero-copy path a filter takes.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The program's bytes, which a span indexes.
+    pub(crate) fn full_text<'a>(&'a self, bytes: &'a [u8]) -> std::borrow::Cow<'a, str> {
+        match self {
+            StringRow::Span(s) => match s.encoding {
+                // INVARIANT: an ASCII run's bytes are printable ASCII,
+                // which is UTF-8 as it stands, so the whole text borrows
+                // its bytes with no copy at all.
+                borer_engine::strings::Encoding::Ascii => {
+                    let raw = s.raw_bytes(bytes);
+                    std::str::from_utf8(raw).map_or_else(
+                        |_| std::borrow::Cow::Owned(String::from_utf8_lossy(raw).into_owned()),
+                        std::borrow::Cow::Borrowed,
+                    )
+                }
+                // A UTF-16LE run's text is its low bytes: the high halves
+                // are zero and carry nothing of the text.
+                _ => std::borrow::Cow::Owned(
+                    String::from_utf8_lossy(
+                        &s.raw_bytes(bytes)
+                            .iter()
+                            .step_by(2)
+                            .copied()
+                            .collect::<Vec<u8>>(),
+                    )
+                    .into_owned(),
+                ),
+            },
+            StringRow::Hit(h) => h.full_text(bytes),
+        }
+    }
+
+    /// The row's display text, materialized from the bytes for a span and
+    /// taken as held for a hit.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The program's bytes, which a span indexes.
+    pub(crate) fn display_text(&self, bytes: &[u8]) -> String {
+        match self {
+            StringRow::Span(s) => s.text(bytes),
+            StringRow::Hit(h) => h.text.clone(),
+        }
+    }
+}
+
 /// One program's string rows, in offset order per encoding.
 #[derive(Debug)]
 pub(crate) struct StringWalks {
@@ -34,10 +136,13 @@ pub(crate) struct StringWalks {
     /// program's allocation.
     key: (usize, usize),
     /// ASCII runs of at least [`WALK_MIN`] bytes.
-    ascii: Vec<StringHit>,
-    /// UTF-16LE runs of at least [`WALK_MIN`] code units, a .NET
-    /// assembly's user strings in place of the runs walked in its `#US`.
-    utf16: Vec<StringHit>,
+    ascii: Vec<RawStringSpan>,
+    /// UTF-16LE runs of at least [`WALK_MIN`] code units outside a `#US`
+    /// heap.
+    utf16: Vec<RawStringSpan>,
+    /// A .NET assembly's user strings in place of the runs walked in its
+    /// `#US`; empty for every other program.
+    user: Vec<StringHit>,
 }
 
 impl StringWalks {
@@ -51,20 +156,29 @@ impl StringWalks {
     ///
     /// # Returns
     ///
-    /// The rows in offset order, an ASCII row before a UTF-16LE one at the
-    /// same offset.
-    pub(crate) fn rows(&self, encoding: StringEncoding, min: usize) -> Vec<&StringHit> {
-        /// The rows of one walk, cut to runs of `min` or more.
-        fn picked(rows: &[StringHit], min: usize) -> Vec<&StringHit> {
-            rows.iter().filter(|h| h.len >= min).collect()
+    /// The rows in offset order, an ASCII row before a UTF-16LE one at
+    /// the same offset.
+    pub(crate) fn rows(&self, encoding: StringEncoding, min: usize) -> Vec<StringRow> {
+        /// The spans of one walk, cut to runs of `min` or more.
+        fn picked(spans: &[RawStringSpan], min: usize) -> Vec<StringRow> {
+            spans
+                .iter()
+                .filter(|s| usize::try_from(s.len).unwrap_or(usize::MAX) >= min)
+                .map(|&s| StringRow::Span(s))
+                .collect()
         }
         match encoding {
             StringEncoding::Ascii => picked(&self.ascii, min),
-            StringEncoding::Utf16 => picked(&self.utf16, min),
+            StringEncoding::Utf16 => {
+                let mut all = picked(&self.utf16, min);
+                all.extend(self.user.iter().cloned().map(StringRow::Hit));
+                all
+            }
             StringEncoding::Both => {
                 let mut all = picked(&self.ascii, min);
                 all.extend(picked(&self.utf16, min));
-                all.sort_by_key(|h| h.off);
+                all.extend(self.user.iter().cloned().map(StringRow::Hit));
+                all.sort_by_key(StringRow::off);
                 all
             }
         }
@@ -93,14 +207,16 @@ pub(crate) fn load_or_build(
     if let Some(walks) = read_lock(cache).as_ref().filter(|w| w.key == key) {
         return Arc::clone(walks);
     }
+    let (utf16, user) = borer_engine::clr::split_user_strings(
+        program,
+        find_wide_spans(&program.bytes, WALK_MIN),
+        WALK_MIN,
+    );
     let walks = Arc::new(StringWalks {
         key,
-        ascii: find_strings(&program.bytes, WALK_MIN),
-        utf16: borer_engine::clr::with_user_strings(
-            program,
-            find_wide_strings(&program.bytes, WALK_MIN),
-            WALK_MIN,
-        ),
+        ascii: find_ascii_spans(&program.bytes, WALK_MIN),
+        utf16,
+        user,
     });
     *write_lock(cache) = Some(Arc::clone(&walks));
     walks
@@ -141,10 +257,12 @@ mod tests {
     /// When a cached page disagrees with a fresh walk.
     #[test]
     fn rows_answer_what_a_walk_at_the_minimum_answers() {
+        let p = program();
         let walks = StringWalks {
             key: (0, 0),
-            ascii: find_strings(&program().bytes, WALK_MIN),
-            utf16: find_wide_strings(&program().bytes, WALK_MIN),
+            ascii: find_ascii_spans(&p.bytes, WALK_MIN),
+            utf16: find_wide_spans(&p.bytes, WALK_MIN),
+            user: Vec::new(),
         };
         for encoding in [
             StringEncoding::Ascii,
@@ -155,20 +273,20 @@ mod tests {
                 let cached: Vec<(u64, usize)> = walks
                     .rows(encoding, min)
                     .iter()
-                    .map(|h| (h.off, h.len))
+                    .map(|r| (r.off(), r.len()))
                     .collect();
                 let walked: Vec<(u64, usize)> = match encoding {
-                    StringEncoding::Ascii => find_strings(&program().bytes, min),
-                    StringEncoding::Utf16 => find_wide_strings(&program().bytes, min),
+                    StringEncoding::Ascii => find_ascii_spans(&p.bytes, min),
+                    StringEncoding::Utf16 => find_wide_spans(&p.bytes, min),
                     StringEncoding::Both => {
-                        let mut all = find_strings(&program().bytes, min);
-                        all.extend(find_wide_strings(&program().bytes, min));
-                        all.sort_by_key(|h| h.off);
+                        let mut all = find_ascii_spans(&p.bytes, min);
+                        all.extend(find_wide_spans(&p.bytes, min));
+                        all.sort_by_key(|s| s.off);
                         all
                     }
                 }
                 .iter()
-                .map(|h| (h.off, h.len))
+                .map(|s| (s.off, usize::try_from(s.len).unwrap_or(usize::MAX)))
                 .collect();
                 assert_eq!(cached, walked, "{encoding:?} min {min}");
             }

@@ -47,7 +47,7 @@ use borer_engine::analysis::{
 use borer_engine::layout::Layout;
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
-use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num, strings as strscan};
+use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num};
 use rayon::prelude::*;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -68,6 +68,7 @@ use rmcp::{
 
 use borer::project::Identity;
 use borer_engine::live::{self as live, Memory as _, Rebase, Snapshot};
+use borer_engine::strings::{find_ascii_spans, find_wide_spans};
 use params::{
     Annotation, AnnotationsParams, CallgraphParams, CfgParams, ClassLayoutParams, CryptoParams,
     DecompileBatchParams, DecompileParams, Detail, DisassembleFunctionParams, DisassembleParams,
@@ -81,6 +82,7 @@ use params::{
     plan_var, to_usize,
 };
 use recall::{Narrow, Recall, SINCE_ARG, Tag, budgeted};
+use strwalk::StringRow;
 
 // ---------------------------------------------------------------- server ----
 
@@ -2317,14 +2319,10 @@ impl BorerServer {
             // A floor call (min_length below the cached default) walks
             // itself: its rows are nearly all noise, and holding them would
             // cost the cache an order of magnitude more memory.
-            let walks;
-            let fresh: Vec<strscan::StringHit>;
-            let rows: Vec<&strscan::StringHit> = if min >= strwalk::WALK_MIN {
-                walks = strwalk::load_or_build(&self.strings, p);
-                walks.rows(encoding, min)
+            let rows: Vec<StringRow> = if min >= strwalk::WALK_MIN {
+                strwalk::load_or_build(&self.strings, p).rows(encoding, min)
             } else {
-                fresh = walk_strings(p, encoding, min);
-                fresh.iter().collect()
+                walk_rows(p, encoding, min)
             };
             Ok(strings_page(
                 p,
@@ -3971,7 +3969,7 @@ fn percent_decode(text: &str) -> String {
 ///
 /// A .NET assembly's user strings are read whole from its `#US` heap in
 /// place of the UTF-16LE runs the walk finds there
-/// ([`borer_engine::clr::with_user_strings`]).
+/// ([`borer_engine::clr::split_user_strings`]).
 ///
 /// # Arguments
 ///
@@ -3982,26 +3980,116 @@ fn percent_decode(text: &str) -> String {
 /// # Returns
 ///
 /// The rows in offset order.
-fn walk_strings(p: &Program, encoding: StringEncoding, min: usize) -> Vec<strscan::StringHit> {
-    let wide =
-        || borer_engine::clr::with_user_strings(p, strscan::find_wide_strings(&p.bytes, min), min);
+fn walk_rows(p: &Program, encoding: StringEncoding, min: usize) -> Vec<StringRow> {
+    let ascii = || {
+        find_ascii_spans(&p.bytes, min)
+            .into_iter()
+            .map(StringRow::Span)
+    };
+    let wide = || {
+        let (spans, user) =
+            borer_engine::clr::split_user_strings(p, find_wide_spans(&p.bytes, min), min);
+        spans
+            .into_iter()
+            .map(StringRow::Span)
+            .chain(user.into_iter().map(StringRow::Hit))
+    };
     match encoding {
-        StringEncoding::Ascii => strscan::find_strings(&p.bytes, min),
-        StringEncoding::Utf16 => wide(),
+        StringEncoding::Ascii => ascii().collect(),
+        StringEncoding::Utf16 => wide().collect(),
         StringEncoding::Both => {
-            let mut all = strscan::find_strings(&p.bytes, min);
-            all.extend(wide());
-            all.sort_by_key(|h| h.off);
+            let mut all: Vec<StringRow> = ascii().chain(wide()).collect();
+            all.sort_by_key(StringRow::off);
             all
         }
+    }
+}
+
+/// Whether `raw` holds `needle` under ASCII case folding, byte for byte
+/// with no copy of the text.
+///
+/// # Arguments
+///
+/// * `raw` - The bytes a string's whole text spells.
+/// * `needle` - The lowered filter text, all ASCII.
+fn contains_fold_ascii(raw: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty()
+        || raw.len() >= needle.len()
+            && raw
+                .windows(needle.len())
+                .any(|w| w.iter().zip(needle).all(|(b, n)| b.eq_ignore_ascii_case(n)))
+}
+
+/// Whether the UTF-16LE code units `raw` spells hold `needle` under ASCII
+/// case folding, tested against the units in place.
+///
+/// # Arguments
+///
+/// * `raw` - The run's bytes: one ASCII low byte and one zero high byte
+///   per unit.
+/// * `needle` - The lowered filter text, all ASCII.
+fn contains_fold_wide(raw: &[u8], needle: &[u8]) -> bool {
+    let units = raw.len() / 2;
+    if needle.is_empty() {
+        return true;
+    }
+    if units < needle.len() {
+        return false;
+    }
+    (0..=units - needle.len()).any(|u| {
+        needle
+            .iter()
+            .enumerate()
+            .all(|(k, n)| raw[2 * (u + k) + 1] == 0 && raw[2 * (u + k)].eq_ignore_ascii_case(n))
+    })
+}
+
+/// Whether one row passes `filter`, the span's bytes tested where they
+/// lie in the program and no text decoded.
+///
+/// A span's whole text is pure printable ASCII, so an ASCII needle is a
+/// folded byte search over the run and any other needle answers `false`
+/// without a copy; a .NET user string's text may hold what its bytes'
+/// walk could not, so its row decodes.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program, for the bytes a span indexes.
+/// * `row` - The row tested.
+/// * `filter` - Keeps the rows whose text contains it.
+fn row_matches(p: &Program, row: &StringRow, filter: &Filter) -> bool {
+    let Some(needle) = filter.needle() else {
+        return true;
+    };
+    let bytes = needle.as_bytes();
+    if !bytes.is_ascii() {
+        // INVARIANT: a span's whole text is printable ASCII, which no
+        // non-ASCII needle is contained in; a user string's text may hold
+        // one, so its row decodes.
+        return match row {
+            StringRow::Span(_) => false,
+            StringRow::Hit(_) => filter.accepts(&row.full_text(&p.bytes)),
+        };
+    }
+    match row {
+        StringRow::Span(s) => {
+            let raw = s.raw_bytes(&p.bytes);
+            if s.encoding == borer_engine::strings::Encoding::Ascii {
+                contains_fold_ascii(raw, bytes)
+            } else {
+                contains_fold_wide(raw, bytes)
+            }
+        }
+        StringRow::Hit(_) => filter.accepts(&row.full_text(&p.bytes)),
     }
 }
 
 /// Renders one page of string rows, the answer `strings` gives and the
 /// command line prints alike.
 ///
-/// The filter tests a row's whole text ([`strscan::StringHit::full_text`]),
-/// not the display text a long string is cut to.
+/// The filter tests a row's whole text ([`StringRow::full_text`]), not
+/// the display text a long string is cut to, and a span's text is tested
+/// in place: only the rows the page prints are materialized.
 ///
 /// # Arguments
 ///
@@ -4018,7 +4106,7 @@ fn walk_strings(p: &Program, encoding: StringEncoding, min: usize) -> Vec<strsca
 /// `va len enc "text"` row per string, `off=<n>` for bytes no section maps.
 fn strings_page(
     p: &Program,
-    rows: Vec<&strscan::StringHit>,
+    rows: Vec<StringRow>,
     filter: &Filter,
     walk: (usize, StringEncoding),
     window: (usize, usize),
@@ -4026,11 +4114,10 @@ fn strings_page(
 ) -> String {
     let (min, encoding) = walk;
     let (offset, limit) = window;
-    let matched: Vec<_> = rows
-        .into_iter()
-        .filter(|h| filter.accepts(&h.full_text(&p.bytes)))
-        .collect();
-    let total = matched.len();
+    let total = rows
+        .iter()
+        .filter(|row| row_matches(p, row, filter))
+        .count();
     if count_only {
         return format!("# {total} matches (min_len={min}, encoding={encoding})\n");
     }
@@ -4038,11 +4125,22 @@ fn strings_page(
     let mut out = format!(
         "# showing {shown} of {total} matches (min_len={min}, encoding={encoding}; filter=/offset= to narrow)\n# va len enc text\n"
     );
-    for h in matched.into_iter().skip(offset).take(limit) {
+    for row in rows
+        .into_iter()
+        .filter(|row| row_matches(p, row, filter))
+        .skip(offset)
+        .take(limit)
+    {
         let va = p
-            .offset_to_va(h.off)
-            .map_or_else(|| format!("off={:#x}", h.off), |v| format!("{v:#x}"));
-        let _ = writeln!(out, "{va} {} {} \"{}\"", h.len, h.encoding.name(), h.text);
+            .offset_to_va(row.off())
+            .map_or_else(|| format!("off={:#x}", row.off()), |v| format!("{v:#x}"));
+        let _ = writeln!(
+            out,
+            "{va} {} {} \"{}\"",
+            row.len(),
+            row.encoding().name(),
+            row.display_text(&p.bytes)
+        );
     }
     out
 }
@@ -4752,6 +4850,7 @@ impl BorerServer {
             ("scenario", Some(spec)) => self.scenario_text(&spec)?,
             ("scenarios", Some(spec)) => self.scenarios_text(&spec)?,
             ("index", None) => self.index_text()?,
+            ("bench", None) => self.bench_text()?,
             ("schema", Some(what)) => self.schema_text(&what)?,
             ("schemas", Some(spec)) => self.schemas_text(&spec)?,
             ("encode", Some(what)) => self.encode_text(&what)?,
@@ -5025,6 +5124,10 @@ const RESOURCES: &[(&str, &str)] = &[
     (
         "borer://enums",
         "Every name table the binary encodes (string-to-constant parsers and constant-to-string tables), one line per function",
+    ),
+    (
+        "borer://bench",
+        "Wall-clock speed of borer's hot queries on the loaded binary (AOB scan, string walks, indexed grep when the index is cached): one row per op with its answer size, fastest elapsed and throughput; timings differ run to run, the counts never do",
     ),
 ];
 
@@ -5916,6 +6019,60 @@ fn read_packs(files: &[String]) -> anyhow::Result<Arc<Packs>> {
 #[cfg(test)]
 mod tests {
     use super::percent_decode;
+
+    /// The zero-copy span filter answers what the text filter answers for
+    /// every row shape: ASCII and UTF-16 spans, case folds, a needle past
+    /// the display cut, and a non-ASCII needle no walked text holds.
+    ///
+    /// # Panics
+    ///
+    /// When the byte test disagrees with the lowered-text test.
+    #[test]
+    fn span_filter_answers_what_the_text_filter_answers() {
+        use borer_engine::program::{Arch, Program};
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"Kernel32.DLL\x00");
+        bytes.extend_from_slice(b"short\x00");
+        bytes.extend_from_slice(&[
+            b'L', 0, b'o', 0, b'N', 0, b'g', 0, b'W', 0, b'i', 0, b'd', 0, b'e', 0,
+        ]);
+        bytes.push(0);
+        let long: Vec<u8> = b"xyzABCDEFGH".iter().cycle().take(600).copied().collect();
+        bytes.extend_from_slice(&long);
+        bytes.push(0);
+        let p = Program::raw(bytes, Arch::X86_64, 0, None, Vec::new());
+        let rows: Vec<super::StringRow> = borer_engine::strings::find_ascii_spans(&p.bytes, 4)
+            .into_iter()
+            .map(super::StringRow::Span)
+            .chain(
+                borer_engine::strings::find_wide_spans(&p.bytes, 4)
+                    .into_iter()
+                    .map(super::StringRow::Span),
+            )
+            .collect();
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        for needle in [
+            "kernel32",
+            "KERNEL32.DLL",
+            "short",
+            "wide",
+            "lOnGwIdE",
+            "xyzabcdefgh",
+            "ü",
+            "",
+        ] {
+            let filter = super::Filter::new(Some(needle));
+            for row in &rows {
+                let want = filter.accepts(&row.full_text(&p.bytes));
+                assert_eq!(
+                    super::row_matches(&p, row, &filter),
+                    want,
+                    "{needle:?} at {:?}",
+                    row.full_text(&p.bytes)
+                );
+            }
+        }
+    }
 
     /// An answer with its evidence line taken off, so two emissions of one
     /// answer compare: the id names the emission, so that is the one line

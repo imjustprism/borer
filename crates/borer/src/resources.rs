@@ -1109,6 +1109,111 @@ impl BorerServer {
         })
     }
 
+    /// Measures the speed of the hot queries on the loaded binary: an
+    /// anchored AOB scan, the string walks, and an indexed grep when the
+    /// cache holds the index.
+    ///
+    /// Each row names the op, what it answered, how long the fastest of
+    /// its runs took, and the throughput where bytes name one: the numbers
+    /// an agent compares against the machine it sits on. Timings are
+    /// wall-clock and differ run to run; the rows and counts never do.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded.
+    pub(crate) fn bench_text(&self) -> Result<String, ErrorData> {
+        self.with_program(|p| {
+            /// Runs `op` `runs` times, returning the fastest elapsed.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the bench resource is a benchmark: wall time is its answer, never another's"
+            )]
+            fn fastest(runs: usize, op: impl Fn()) -> std::time::Duration {
+                (0..runs)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        op();
+                        t.elapsed()
+                    })
+                    .min()
+                    .unwrap_or_default()
+            }
+            let mut out = String::from("# bench: op rows elapsed throughput\n");
+            // The AOB pattern comes from the program's own entry bytes:
+            // two fixed, two wild, so the scan always has its anchor and
+            // its hits are the shape a real query's are.
+            let va = p.entry.unwrap_or(p.image_base);
+            let head: Option<[u8; 4]> = p
+                .read_va_upto(va, 4)
+                .and_then(|b| b.first_chunk::<4>().copied())
+                .or_else(|| p.bytes.as_slice().first_chunk::<4>().copied());
+            if let Some([a, b, _, _]) = head {
+                let pattern = [Some(a), Some(b), None, None];
+                let scan = fastest(3, || {
+                    let _ = borer_engine::search::find_bytes(p, &pattern, 0);
+                });
+                let total = borer_engine::search::find_bytes(p, &pattern, 0).total;
+                let gb =
+                    borer_engine::num::as_f64(u64::try_from(p.bytes.len()).unwrap_or(u64::MAX))
+                        / scan.as_secs_f64()
+                        / 1e9;
+                let _ = writeln!(
+                    out,
+                    "aob {a:02x} {b:02x} ?? ??\t{total}\t{scan:.2?}\t{gb:.1} GB/s"
+                );
+            }
+            let walk = fastest(3, || {
+                let _ = borer_engine::strings::find_ascii_spans(&p.bytes, 5);
+            });
+            let spans = borer_engine::strings::find_ascii_spans(&p.bytes, 5);
+            let gb = borer_engine::num::as_f64(u64::try_from(p.bytes.len()).unwrap_or(u64::MAX))
+                / walk.as_secs_f64()
+                / 1e9;
+            let _ = writeln!(out, "strings\t{}\t{walk:.2?}\t{gb:.1} GB/s", spans.len());
+            let filter = crate::Filter::new(Some("e"));
+            let filtered = spans
+                .iter()
+                .filter(|&s| crate::row_matches(p, &crate::strwalk::StringRow::Span(*s), &filter));
+            let scan = fastest(3, || {
+                let n = spans
+                    .iter()
+                    .filter(|&s| {
+                        crate::row_matches(p, &crate::strwalk::StringRow::Span(*s), &filter)
+                    })
+                    .count();
+                let _ = n;
+            });
+            let rows = filtered.count();
+            let _ = writeln!(out, "strings filter=e\t{rows}\t{scan:.2?}\t0 allocs");
+            let analysis = read_lock(&self.analysis).as_ref().map(Arc::clone);
+            let cached = analysis
+                .as_ref()
+                .and_then(|a| borer::index::load_cached(p, &a.packs));
+            if let Some((index, _)) = cached {
+                let matcher = borer::index::Matcher::parse("return")?;
+                let scan = fastest(3, || {
+                    let _ = borer::index::grep(&index, &matcher, "");
+                });
+                let lines = borer::index::grep(&index, &matcher, "").len();
+                let mb = borer_engine::num::as_f64(
+                    u64::try_from(index.text_bytes()).unwrap_or(u64::MAX),
+                ) / scan.as_secs_f64()
+                    / 1e6;
+                let _ = writeln!(
+                    out,
+                    "grep return\t{lines}\t{scan:.2?}\t{mb:.0} MB/s over {} functions",
+                    index.functions.len()
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "grep -\t-\t-\tquery borer://index once to build the index first"
+                );
+            }
+            Ok(out)
+        })
+    }
+
     /// Renders the record a deserializer reads off its stream.
     ///
     /// A function that reads no stream is an answer, not a fault: the line
