@@ -403,7 +403,6 @@ pub(super) fn apply_layouts(text: &str) -> String {
     let mut seen: BTreeMap<&str, BTreeMap<u64, BTreeSet<&str>>> = BTreeMap::new();
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut assigned: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut strides: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
     for line in &lines {
         if !line.starts_with("//") {
             for base in named_members(line) {
@@ -425,30 +424,18 @@ pub(super) fn apply_layouts(text: &str) -> String {
             *assigned.entry(lhs).or_default() += 1;
         }
         for op in ["+=", "-=", "|=", "&=", "^=", "<<=", ">>=", "*="] {
-            if let Some((lhs, rhs)) = t.split_once(&format!(" {op} "))
+            if let Some((lhs, _)) = t.split_once(&format!(" {op} "))
                 && is_ident(lhs)
             {
-                if op == "+="
-                    && let Some(step) = rhs.trim_end().strip_suffix(';').and_then(parse_const)
-                    && step >= 8
-                {
-                    strides.entry(lhs).or_default().push(step);
-                } else {
-                    *assigned.entry(lhs).or_default() += 1;
-                }
+                *assigned.entry(lhs).or_default() += 1;
             }
         }
     }
     let mut headers: Vec<String> = Vec::new();
     let mut renames: Vec<(String, BTreeMap<u64, String>)> = Vec::new();
     for (base, offsets) in &seen {
-        let strided_ok = match strides.get(base) {
-            None => true,
-            Some(steps) => steps.len() == 1 && offsets.keys().all(|&off| off < steps[0]),
-        };
         if counts.get(base).copied().unwrap_or(0) < LAYOUT_MIN
             || assigned.get(base).copied().unwrap_or(0) > 1
-            || !strided_ok
             || matches!(*base, "gs" | "fs")
         {
             continue;
@@ -482,9 +469,6 @@ pub(super) fn apply_layouts(text: &str) -> String {
             }
         }
         headers.push(header);
-        if let Some([step]) = strides.get(base).map(Vec::as_slice) {
-            headers.push(format!("// stride {base}: {step:#x}"));
-        }
         let names = fields
             .keys()
             .map(|o| (*o, format!("field_{o:#x}")))

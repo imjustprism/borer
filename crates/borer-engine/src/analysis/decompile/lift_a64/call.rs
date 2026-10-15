@@ -330,21 +330,19 @@ impl Lift<'_, '_> {
         }
         self.ex.env.fresh.clear();
         self.ex.flags = super::super::expr::Flags::Unknown;
-        let written = self.ex.written_slots();
-        match self.ex.env.sp {
-            Some(_) => {
-                if let Some(f) = self.ex.ctx.escape_floor {
-                    self.ex
-                        .call_uses
-                        .push((SlotUse::Window(f, 0), written.clone()));
-                }
-                if let Some(f) = self.ex.ctx.home_escape_floor {
-                    self.ex
-                        .call_uses
-                        .push((SlotUse::Window(f, i64::MAX), written));
-                }
-            }
-            None => self.ex.call_uses.push((SlotUse::All, written)),
+        let written = self
+            .ex
+            .slot_def
+            .iter()
+            .flat_map(|(&o, &b)| o..o.saturating_add(i64::from(b / 8).max(1)))
+            .collect();
+        match (self.ex.env.sp, self.ex.ctx.escape_floor) {
+            (Some(_), Some(f)) => self
+                .ex
+                .call_uses
+                .push((SlotUse::Window(f, i64::MAX), written)),
+            (Some(_), None) => {}
+            (None, _) => self.ex.call_uses.push((SlotUse::All, written)),
         }
     }
 

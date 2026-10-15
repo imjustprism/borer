@@ -51,15 +51,15 @@ const SENTINEL_32: u64 = 0x5fff_0000;
 /// Bytes left between the text's lowest frame slot and a callee's frame.
 const CALL_GAP: u64 = 0x100;
 
-/// Most steps a modeled `memset`, `memcpy` or `strlen` touches.
+/// Most bytes a modeled `memset`, `memcpy` or `strlen` touches.
 const BUILTIN_MAX: u64 = 1 << 20;
-
-/// Steps the two verification runs of a solved constraint are given.
-const SOLVE_BUDGET: usize = 50_000;
 
 /// Most steps the closure check ([`Script::unset_reads`]) takes before it
 /// gives up and flags nothing.
 const UNSET_ROUNDS: usize = 1 << 20;
+
+/// Steps the two verification runs of a solved constraint are given.
+const SOLVE_BUDGET: usize = 50_000;
 
 /// Bytes below a callee's frame its own stack reaches: a read there that
 /// nothing set is the leftovers of earlier calls, not an argument.
@@ -1878,21 +1878,7 @@ impl<'p> Script<'p> {
             }
             Ast::Call(f, args) => {
                 self.reads(f, undeclared, set, note);
-                let passing = match f.as_ref() {
-                    Ast::Name(n) => match self.known.get(n) {
-                        Some(Known::Code(at)) => self.callees.get(at),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                for (i, a) in args.iter().enumerate() {
-                    if let (Ast::Name(n), Some(p)) = (a, passing)
-                        && i < 8
-                        && (p.skipped >> i) & 1 != 0
-                        && named_register(n).is_some_and(|r| p.regs.get(i) == Some(&r))
-                    {
-                        continue;
-                    }
+                for a in args {
                     self.reads(a, undeclared, set, note);
                 }
             }

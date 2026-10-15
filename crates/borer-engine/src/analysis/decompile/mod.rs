@@ -172,14 +172,9 @@ struct Ctx<'a> {
     slot_types: std::sync::Arc<BTreeMap<i64, Ty>>,
     /// Absolute data accesses hoisted to named globals.
     globals: BTreeSet<(u64, Ty)>,
-    /// Lowest local stack offset (`< 0`) whose address reached a callee or
-    /// memory: local slots from there up to the return address may be read or
-    /// written by any call.
+    /// Lowest stack offset whose address reached a callee or memory: slots
+    /// from there up may be read or written by any call.
     escape_floor: Option<i64>,
-    /// Lowest caller-frame stack offset (`>= 0`) whose address reached a
-    /// callee or memory: home and argument slots from there up may be read or
-    /// written by any call.
-    home_escape_floor: Option<i64>,
     /// Some instruction (not a call) writes rax: `ret` returns it.
     rax_written: bool,
     /// The function returns nothing: its signature says `void`, or it has
@@ -687,7 +682,7 @@ pub fn decompile(
     decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
         .as_ref()
         .as_ref()
-        .map(|d| annotate_rodata_globals(program, polish(&d.text, bitness, &analysis.packs)))
+        .map(|d| polish(&d.text, bitness, &analysis.packs))
 }
 
 /// [`decompile`] built afresh, for a batch ([`decompile_all`]).
@@ -710,458 +705,7 @@ fn decompile_afresh(
 ) -> Option<String> {
     let bitness = program.arch.bitness().unwrap_or(64);
     decompile_plain_full(program, analysis, overlay, entry)
-        .map(|d| annotate_rodata_globals(program, polish(&d.text, bitness, &analysis.packs)))
-}
-
-/// Annotates read-only global strings, multi-piece stack strings, and stack arrays.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `text` - Polished decompiler output.
-fn annotate_rodata_globals(program: &Program, text: String) -> String {
-    let text = annotate_rodata_strings(program, text);
-    if !text.contains("local_") && !text.contains("home_") {
-        return text;
-    }
-    annotate_stack_structures(&text).unwrap_or(text)
-}
-
-/// Annotates assignments from read-only `g32_`, `g64_` and `g128_` globals
-/// with the ASCII or UTF-16LE string literal stored at that address when the
-/// bytes spell a terminated string.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `text` - Polished decompiler output.
-fn annotate_rodata_strings(program: &Program, text: String) -> String {
-    if !text.contains(" = g32_") && !text.contains(" = g64_") && !text.contains(" = g128_") {
-        return text;
-    }
-    let note_for = |line: &str| -> Option<String> {
-        let t = line.trim();
-        if t.starts_with("//") || t.contains("/*") || t.contains("//") {
-            return None;
-        }
-        let (_, rhs) = t.strip_suffix(';')?.split_once(" = ")?;
-        let hex = rhs
-            .strip_prefix("g32_")
-            .or_else(|| rhs.strip_prefix("g64_"))
-            .or_else(|| rhs.strip_prefix("g128_"))?;
-        let addr = u64::from_str_radix(hex, 16).ok()?;
-        let sec = program.section_at(addr)?;
-        if sec.writable || sec.executable {
-            return None;
-        }
-        if let Some(lit) = string_at(program, addr)
-            && lit.trim_start_matches('L').len() >= 4
-        {
-            return Some(lit);
-        }
-        let (len, raw) = wstr_text_at(program, addr, 2, 64)?;
-        let term = addr.checked_add(u64::try_from(len.saturating_mul(2)).ok()?)?;
-        (program.read_va(term, 2) == Some(&[0, 0]))
-            .then(|| format!("L\"{}\"", crate::strings::escape_text(&raw)))
-    };
-    let mut out = String::with_capacity(text.len() + 64);
-    let mut in_body = false;
-    for (i, line) in text.lines().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        if line.is_empty() {
-            in_body = true;
-        }
-        out.push_str(line);
-        if in_body && let Some(note) = note_for(line) {
-            out.push_str(" /* ");
-            out.push_str(&note);
-            out.push_str(" */");
-        }
-    }
-    out.push('\n');
-    out
-}
-
-/// Coalesces multi-piece stack strings, propagates `&local_X` string pointer
-/// comments, and annotates repeating stack struct arrays (`local_B[i].field_0xN`).
-///
-/// # Arguments
-///
-/// * `text` - Decompiler output after `.rdata` global string annotation.
-fn annotate_stack_structures(text: &str) -> Option<String> {
-    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    let decls_at = header_len(&lines);
-    let blank_at = decls_at
-        + lines
-            .get(decls_at..)?
-            .iter()
-            .position(|l| l.trim().is_empty())?;
-    let mut slot_info: BTreeMap<u64, (usize, &'static str)> = BTreeMap::new();
-    for d in lines.get(decls_at..blank_at)? {
-        let Some((ty, items)) = vars::declaration(d) else {
-            continue;
-        };
-        for (stars, name) in items {
-            let Some((false, off)) = vars::slot_parts(name) else {
-                continue;
-            };
-            let info = if stars.is_empty() {
-                match ty {
-                    "uint8_t" => (1, "u8"),
-                    "int8_t" | "char" | "bool" => (1, "i8"),
-                    "uint16_t" | "wchar_t" => (2, "u16"),
-                    "int16_t" | "short" => (2, "i16"),
-                    "uint32_t" => (4, "u32"),
-                    "int32_t" | "int" => (4, "i32"),
-                    "uint64_t" => (8, "u64"),
-                    "int64_t" => (8, "i64"),
-                    "uint128_t" => (16, "u128"),
-                    "float" => (4, "f32"),
-                    "double" => (8, "f64"),
-                    _ => (8, "u64"),
-                }
-            } else {
-                (8, "u64")
-            };
-            slot_info.insert(off, info);
-        }
-    }
-    let mut slot_strings: BTreeMap<String, String> = BTreeMap::new();
-    let mut slot_bytes: BTreeMap<u64, (usize, Vec<u8>)> = BTreeMap::new();
-    let mut written_locals: BTreeSet<u64> = BTreeSet::new();
-    for (idx, line) in lines.iter().enumerate().skip(blank_at + 1) {
-        let (code, note) = match line.split_once(" /* ") {
-            Some((c, n)) => (c.trim(), n.strip_suffix("*/").map(str::trim)),
-            None => (line.trim(), None),
-        };
-        let Some(stmt) = code.strip_suffix(';') else {
-            continue;
-        };
-        let parts: Vec<&str> = stmt.split(" = ").map(str::trim).collect();
-        let Some(&rhs) = parts.last() else {
-            continue;
-        };
-        if parts.len() < 2 {
-            continue;
-        }
-        for &lhs in &parts[..parts.len() - 1] {
-            let Some((home, off)) = vars::slot_parts(lhs) else {
-                continue;
-            };
-            if !home {
-                written_locals.insert(off);
-            }
-            if (rhs.starts_with('"') || rhs.starts_with("L\"")) && rhs.ends_with('"') {
-                slot_strings.insert(lhs.to_owned(), rhs.to_owned());
-            } else if let Some(n) = note
-                && (n.starts_with('"') || n.starts_with("L\""))
-                && n.ends_with('"')
-            {
-                slot_strings.insert(lhs.to_owned(), n.to_owned());
-            }
-            if !home
-                && !slot_bytes.contains_key(&off)
-                && let Some(&(width, _)) = slot_info.get(&off)
-                && width <= 8
-                && let Some(val) = parse_const(rhs)
-            {
-                slot_bytes.insert(off, (idx, val.to_le_bytes()[..width].to_vec()));
-            }
-        }
-    }
-    let mut changed = false;
-    for (&off, &(line_idx, _)) in &slot_bytes {
-        let name = format!("local_{off:x}");
-        if slot_strings.contains_key(&name) {
-            continue;
-        }
-        let mut combined: Vec<u8> = Vec::new();
-        let mut cur = off;
-        let mut pieces = 0usize;
-        while let Some((_, bytes)) = slot_bytes.get(&cur) {
-            combined.extend_from_slice(bytes);
-            pieces += 1;
-            let Ok(step) = u64::try_from(bytes.len()) else {
-                break;
-            };
-            let Some(next) = cur.checked_sub(step) else {
-                break;
-            };
-            cur = next;
-            if pieces >= 6 {
-                break;
-            }
-        }
-        if pieces >= 2
-            && let Some(lit) = decode_coalesced_stack_string(&combined)
-        {
-            slot_strings.insert(name, lit.clone());
-            if let Some(line) = lines.get_mut(line_idx)
-                && !line.contains("/*")
-                && !line.contains("//")
-            {
-                let _ = write!(line, " /* {lit} */");
-                changed = true;
-            }
-        }
-    }
-    let array = detect_stack_array(&lines, blank_at, &slot_info, &written_locals);
-    for line in lines.iter_mut().skip(blank_at + 1) {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") {
-            continue;
-        }
-        let (code, existing_note) = match line.split_once(" /* ") {
-            Some((c, n)) => (c, n.strip_suffix("*/").map(str::trim)),
-            None => (line.as_str(), None),
-        };
-        if code.contains("//") {
-            continue;
-        }
-        let lhs_slot = code
-            .trim()
-            .strip_suffix(';')
-            .and_then(|s| s.split_once(" = "))
-            .and_then(|(lhs, _)| vars::slot_parts(lhs));
-        let array_tag = match (lhs_slot, &array) {
-            (Some((false, off)), Some(arr))
-                if off <= arr.base_off && arr.base_off - off < arr.count * arr.stride =>
-            {
-                let delta = arr.base_off - off;
-                let idx = delta / arr.stride;
-                let field_off = delta % arr.stride;
-                Some(format!(
-                    "local_{:x}[{idx}].field_{field_off:#x}",
-                    arr.base_off
-                ))
-            }
-            _ => None,
-        };
-        let amp_string = find_amp_slot_string(code, &slot_strings);
-        let new_note = match (array_tag, existing_note.or(amp_string.as_deref())) {
-            (Some(tag), Some(lit)) => Some(format!("{tag} = {lit}")),
-            (Some(tag), None) => Some(tag),
-            (None, Some(lit)) if existing_note.is_none() => Some(lit.to_owned()),
-            (None, _) => None,
-        };
-        if let Some(note) = new_note {
-            let base = code.to_owned();
-            *line = format!("{base} /* {note} */");
-            changed = true;
-        }
-    }
-    if let Some(arr) = array {
-        let mut headers: Vec<String> = Vec::new();
-        let mut header = format!(
-            "// stack array local_{:x}[{}] (stride {:#x}):",
-            arr.base_off, arr.count, arr.stride
-        );
-        for (k, (o, l)) in arr.fields.iter().enumerate() {
-            let item = format!("{}{o:#x} {l}", if k == 0 { " " } else { ", " });
-            if header.len() + item.len() > LAYOUT_WIDTH {
-                headers.push(std::mem::replace(&mut header, "//  ".to_owned()));
-                header.push_str(item.trim_start_matches(','));
-            } else {
-                header.push_str(&item);
-            }
-        }
-        headers.push(header);
-        for (k, h) in headers.into_iter().enumerate() {
-            lines.insert(decls_at + k, h);
-        }
-        changed = true;
-    }
-    if !changed {
-        return None;
-    }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    Some(out)
-}
-
-/// A detected array of structs laid out across contiguous stack slots.
-struct StackArray {
-    /// Base stack offset (`local_<base_off>`).
-    base_off: u64,
-    /// Element stride in bytes.
-    stride: u64,
-    /// Element count.
-    count: u64,
-    /// Element field offsets and width letters.
-    fields: BTreeMap<u64, &'static str>,
-}
-
-/// Decodes a multi-slot stack byte buffer into a C or wide string literal
-/// when its bytes spell a null-terminated string spanning past the first slot.
-///
-/// # Arguments
-///
-/// * `bytes` - Contiguous little-endian stack bytes.
-fn decode_coalesced_stack_string(bytes: &[u8]) -> Option<String> {
-    let ascii_len = bytes.iter().position(|&b| b == 0)?;
-    if ascii_len >= 5
-        && bytes[..ascii_len].iter().all(|b| (0x20..0x7f).contains(b))
-        && bytes[..ascii_len]
-            .iter()
-            .filter(|b| b.is_ascii_alphanumeric())
-            .count()
-            >= ascii_len.saturating_sub(2).max(4)
-    {
-        let s: String = bytes[..ascii_len]
-            .iter()
-            .flat_map(|&b| match b {
-                b'\\' => vec!['\\', '\\'],
-                b'"' => vec!['\\', '"'],
-                _ => vec![char::from(b)],
-            })
-            .collect();
-        return Some(format!("\"{s}\""));
-    }
-    let wide: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    let wide_len = wide.iter().position(|&u| u == 0)?;
-    if wide_len >= 4
-        && wide[..wide_len].iter().all(|&u| (0x20..0x7f).contains(&u))
-        && wide[..wide_len]
-            .iter()
-            .filter(|&&u| u8::try_from(u).is_ok_and(|b| b.is_ascii_alphanumeric()))
-            .count()
-            >= wide_len.saturating_sub(1).max(3)
-    {
-        let s: String = wide[..wide_len]
-            .iter()
-            .filter_map(|&u| u8::try_from(u).ok())
-            .flat_map(|b| match b {
-                b'\\' => vec!['\\', '\\'],
-                b'"' => vec!['\\', '"'],
-                _ => vec![char::from(b)],
-            })
-            .collect();
-        return Some(format!("L\"{s}\""));
-    }
-    None
-}
-
-/// Finds the string literal associated with an `&local_<hex>` or `&home_<hex>`
-/// operand on `code`, if any.
-///
-/// # Arguments
-///
-/// * `code` - The statement part of a line (without comments).
-/// * `slot_strings` - Known string literals per stack slot name.
-fn find_amp_slot_string(code: &str, slot_strings: &BTreeMap<String, String>) -> Option<String> {
-    let mut from = 0usize;
-    while let Some(pos) = code.get(from..).and_then(|s| s.find('&')) {
-        let at = from + pos + 1;
-        from = at;
-        let rest = code.get(at..).unwrap_or("");
-        let end = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
-        let name = rest.get(..end).unwrap_or("");
-        if let Some(lit) = slot_strings.get(name) {
-            return Some(lit.clone());
-        }
-    }
-    None
-}
-
-/// Detects a repeating array of stack structs starting at an address-taken
-/// `local_<base_off>` slot.
-///
-/// # Arguments
-///
-/// * `lines` - All lines of the function.
-/// * `blank_at` - Index of the blank line before the body.
-/// * `slot_info` - Declared local slot offsets to `(byte_width, layout_letter)`.
-/// * `written_locals` - Local slot offsets written in the body.
-fn detect_stack_array(
-    lines: &[String],
-    blank_at: usize,
-    slot_info: &BTreeMap<u64, (usize, &'static str)>,
-    written_locals: &BTreeSet<u64>,
-) -> Option<StackArray> {
-    if written_locals.len() < 9 {
-        return None;
-    }
-    let mut candidates: BTreeSet<u64> = BTreeSet::new();
-    for h in lines.get(..blank_at)? {
-        if let Some(rest) = h.strip_prefix("// note: &")
-            && let Some((slot, _)) = rest.split_once(' ')
-            && let Some((false, off)) = vars::slot_parts(slot)
-        {
-            candidates.insert(off);
-        }
-    }
-    for b in lines.get(blank_at + 1..)? {
-        let mut from = 0usize;
-        while let Some(pos) = b.get(from..).and_then(|s| s.find("&local_")) {
-            let at = from + pos + 1;
-            from = at;
-            let rest = b.get(at..).unwrap_or("");
-            let end = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
-            if let Some((false, off)) = rest.get(..end).and_then(vars::slot_parts) {
-                candidates.insert(off);
-            }
-        }
-    }
-    let mut best: Option<(usize, StackArray)> = None;
-    for &base_off in &candidates {
-        for stride in (24u64..=256).step_by(8) {
-            let elem_fields = |idx: u64| -> BTreeMap<u64, &'static str> {
-                let mut m = BTreeMap::new();
-                let Some(hi) = base_off.checked_sub(idx.saturating_mul(stride)) else {
-                    return m;
-                };
-                let lo = hi.saturating_sub(stride - 1);
-                for &off in written_locals.range(lo..=hi) {
-                    let field_off = hi - off;
-                    let letter = slot_info.get(&off).map_or("u64", |(_, l)| *l);
-                    if letter == "u128" && field_off + 8 < stride {
-                        m.insert(field_off, "u64");
-                        m.insert(field_off + 8, "u64");
-                    } else {
-                        m.insert(field_off, letter);
-                    }
-                }
-                m
-            };
-            let elem0 = elem_fields(0);
-            if elem0.len() < 3 {
-                continue;
-            }
-            let mut union_fields = elem0.clone();
-            let mut count = 1u64;
-            while count < 64 {
-                let next = elem_fields(count);
-                let shared = next.iter().filter(|(k, v)| elem0.get(k) == Some(v)).count();
-                if shared < 3 {
-                    break;
-                }
-                for (k, v) in next {
-                    union_fields.entry(k).or_insert(v);
-                }
-                count += 1;
-            }
-            if count >= 3 {
-                let score = usize::try_from(count).unwrap_or(0) * union_fields.len();
-                if best.as_ref().is_none_or(|b| score > b.0) {
-                    best = Some((
-                        score,
-                        StackArray {
-                            base_off,
-                            stride,
-                            count,
-                            fields: union_fields,
-                        },
-                    ));
-                }
-            }
-        }
-    }
-    best.map(|(_, arr)| arr)
+        .map(|d| polish(&d.text, bitness, &analysis.packs))
 }
 
 /// The source file and line each PDB-named function starts at, read once
@@ -1243,7 +787,6 @@ fn new_ctx<'a>(
         slot_types: std::sync::Arc::default(),
         globals: BTreeSet::new(),
         escape_floor: None,
-        home_escape_floor: None,
         rax_written: false,
         unused_result: false,
         variadic: false,
@@ -1701,9 +1244,10 @@ fn name_fields(
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    Some(annotate_rodata_globals(
-        program,
-        polish(&out, program.arch.bitness().unwrap_or(64), &analysis.packs),
+    Some(polish(
+        &out,
+        program.arch.bitness().unwrap_or(64),
+        &analysis.packs,
     ))
 }
 
@@ -2591,7 +2135,7 @@ fn decompile_in<L: Lifter>(
             name_of(analysis, overlay, funclet.parent)
         );
     }
-    if let Some(f) = ctx.escape_floor.or(ctx.home_escape_floor) {
+    if let Some(f) = ctx.escape_floor {
         let _ = writeln!(
             out,
             "// note: &{} escapes; locals from there up are reloaded after calls",
@@ -2676,14 +2220,7 @@ fn decompile_in<L: Lifter>(
         }
         let stated = match k {
             Key::Reg(_) | Key::A64(_) => result_typed.get(&name).cloned(),
-            Key::Slot(o) => slot_stated.get(o).cloned().or_else(|| {
-                notes
-                    .last()
-                    .is_none_or(|n| !n.starts_with(&format!("// {name} overlaps ")))
-                    .then(|| result_typed.get(&name))
-                    .flatten()
-                    .cloned()
-            }),
+            Key::Slot(o) => slot_stated.get(o).cloned(),
             Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
         };
         by_type

@@ -500,11 +500,10 @@ pub(super) struct Homes {
     pub(super) rbp: Option<i64>,
     /// Argument registers by slot.
     pub(super) args: Vec<Register>,
-    /// The register last stored into each home slot: `Some(r)` for the
-    /// slot's own argument register for `va_start`, or any other, `xmm0`
-    /// for a float argument parked to be read back as bits; `None` when a
-    /// non-register store overwrote the slot.
-    pub(super) stored: BTreeMap<usize, Option<Register>>,
+    /// The register last stored into each home slot: the slot's own
+    /// argument register for `va_start`, or any other, `xmm0` for a float
+    /// argument parked to be read back as bits.
+    pub(super) stored: BTreeMap<usize, Register>,
     /// The lowest slot whose address was taken.
     pub(super) va_start: Option<usize>,
 }
@@ -584,28 +583,21 @@ impl Homes {
         if is_store && i.op0_kind() == OpKind::Memory && i.op1_kind() == OpKind::Register {
             if let Some(k) = slot_of(self, i) {
                 let r = i.op1_register().full_register();
-                self.stored.insert(k, Some(r));
+                self.stored.insert(k, r);
                 if r == self.args[k] {
                     out = Some(Home::Spill);
                 }
             }
-        } else if self.active && i.op0_kind() == OpKind::Memory {
-            if let Some(k) = slot_of(self, i) {
-                self.stored.insert(k, None);
-            }
         } else if is_mov && i.op0_kind() == OpKind::Register && i.op1_kind() == OpKind::Memory {
             if let Some(k) = slot_of(self, i) {
-                out = match self.stored.get(&k).copied() {
-                    Some(Some(r)) => Some(Home::Load(r)),
-                    Some(None) => None,
-                    None => Some(Home::Load(self.args[k])),
-                };
+                out = Some(Home::Load(
+                    self.stored.get(&k).copied().unwrap_or(self.args[k]),
+                ));
             }
         } else if self.active
             && i.mnemonic() == Mnemonic::Lea
             && i.op0_kind() == OpKind::Register
             && let Some(k) = arg_slot(self, i)
-            && self.stored.get(&k) != Some(&None)
         {
             self.va_start = Some(self.va_start.map_or(k, |v| v.min(k)));
             out = Some(Home::VaStart);
@@ -672,7 +664,7 @@ impl Homes {
             return self.save_area_fixed();
         }
         let first = self.va_start?;
-        let own = |k: usize| self.stored.get(&k).copied().flatten() == self.args.get(k).copied();
+        let own = |k: usize| self.stored.get(&k) == self.args.get(k);
         let last = self.args.len().checked_sub(1)?;
         ((first..self.args.len()).all(own) && (first <= last || own(last))).then_some(first)
     }

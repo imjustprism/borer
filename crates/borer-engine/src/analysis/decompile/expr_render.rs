@@ -1980,25 +1980,14 @@ fn packed_literal(n: &Names<'_>, e: &Expr) -> Option<Expr> {
     }
     let len = usize::from(*bits) / 8;
     let raw = n.program.read_va(*addr, len)?;
-    if raw.iter().all(|&b| crate::strings::printable(b)) {
-        let text = String::from_utf8(raw.to_vec()).ok()?;
-        return Some(Expr::Str(format!(
-            "\"{}\"",
-            text.replace('\\', "\\\\").replace('"', "\\\"")
-        )));
+    if !raw.iter().all(|&b| crate::strings::printable(b)) {
+        return None;
     }
-    if raw
-        .chunks_exact(2)
-        .all(|c| c[1] == 0 && crate::strings::printable(c[0]))
-    {
-        let units: Vec<u8> = raw.chunks_exact(2).map(|c| c[0]).collect();
-        let text = String::from_utf8(units).ok()?;
-        return Some(Expr::Str(format!(
-            "L\"{}\"",
-            text.replace('\\', "\\\\").replace('"', "\\\"")
-        )));
-    }
-    None
+    let text = String::from_utf8(raw.to_vec()).ok()?;
+    Some(Expr::Str(format!(
+        "\"{}\"",
+        text.replace('\\', "\\\\").replace('"', "\\\"")
+    )))
 }
 
 /// Reads the two vectors an all-lanes-equal test compares, if that is the test.

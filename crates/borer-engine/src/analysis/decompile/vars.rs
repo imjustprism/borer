@@ -626,9 +626,15 @@ impl Vars {
     ///
     /// * `l` - The line.
     /// * `span` - The token span.
-    /// * `o` - The occurrences found, appended to.
+    /// * `uses` - The reads found, appended to.
     /// * `bad` - The variables found unsafe, appended to.
-    fn reads(&self, l: &Line<'_>, span: (usize, usize), o: &mut Occs, bad: &mut BTreeSet<usize>) {
+    fn reads(
+        &self,
+        l: &Line<'_>,
+        span: (usize, usize),
+        uses: &mut Vec<(usize, usize)>,
+        bad: &mut BTreeSet<usize>,
+    ) {
         for k in span.0..span.1 {
             let Some(v) = self.at(l, k) else {
                 continue;
@@ -647,65 +653,12 @@ impl Vars {
                 || COMPOUND.contains(&next)
                 || matches!(next, "++" | "--")
                 || matches!(prev, "++" | "--");
-            if unary_amp
-                && !written
-                && self.names.get(v).is_some_and(|n| slot_parts(n).is_some())
-                && is_call_arg_amp(l, span, k)
-            {
-                o.rmw.push((v, k));
-                if !o.machine.contains(&v) {
-                    o.machine.push(v);
-                }
-                continue;
-            }
             if unary_amp || written {
                 bad.insert(v);
             }
-            o.uses.push((v, k));
+            uses.push((v, k));
         }
     }
-}
-
-/// Tells whether `&<name>` at token `k` is a whole direct argument of a call.
-///
-/// # Arguments
-///
-/// * `l` - The line.
-/// * `span` - The enclosing token span.
-/// * `k` - The variable token index after `&`.
-fn is_call_arg_amp(l: &Line<'_>, span: (usize, usize), k: usize) -> bool {
-    if k < span.0 + 2 || k + 1 >= span.1 {
-        return false;
-    }
-    if !(l.is(k - 2, "(") || l.is(k - 2, ",")) || !(l.is(k + 1, ",") || l.is(k + 1, ")")) {
-        return false;
-    }
-    let mut depth = 0usize;
-    let mut open = None;
-    for p in (span.0..=k - 2).rev() {
-        if l.is(p, ")") || l.is(p, "]") {
-            depth += 1;
-        } else if l.is(p, "(") || l.is(p, "[") {
-            if depth == 0 {
-                open = Some(p);
-                break;
-            }
-            depth -= 1;
-        }
-    }
-    let Some(c) = open
-        .filter(|o| l.is(*o, "("))
-        .and_then(|o| o.checked_sub(1))
-    else {
-        return false;
-    };
-    c >= span.0
-        && l.toks.get(c).is_some_and(|t| t.lex == Lex::Name)
-        && !type_word(l.word(c))
-        && !matches!(
-            l.word(c),
-            "sizeof" | "if" | "while" | "for" | "return" | "switch"
-        )
 }
 
 /// Reads what one node does to the tracked variables.
@@ -753,11 +706,11 @@ fn occs(
     match node.form {
         Form::Leave => {
             o.reads_all = true;
-            vars.reads(l, (start, end), &mut o, bad);
+            vars.reads(l, (start, end), &mut o.uses, bad);
             return (o, None);
         }
         Form::Expr => {
-            vars.reads(l, (start, end), &mut o, bad);
+            vars.reads(l, (start, end), &mut o.uses, bad);
             return (o, None);
         }
         Form::Join | Form::Exit | Form::Entry | Form::Machine | Form::Statement => {}
@@ -786,17 +739,13 @@ fn occs(
             assign.targets.push((from, eq));
             match (eq - from == 1).then(|| vars.at(l, from)).flatten() {
                 Some(v) => o.defs.push((v, from)),
-                None => vars.reads(l, (from, eq), &mut o, bad),
+                None => vars.reads(l, (from, eq), &mut o.uses, bad),
             }
             from = eq + 1;
         }
-        vars.reads(l, assign.rhs, &mut o, bad);
+        vars.reads(l, assign.rhs, &mut o.uses, bad);
         for &(v, _) in &o.defs {
-            if o.uses
-                .iter()
-                .chain(&o.rmw)
-                .any(|(u, k)| *u == v && *k < last)
-            {
+            if o.uses.iter().any(|(u, k)| *u == v && *k < last) {
                 bad.insert(v);
             }
         }
@@ -805,9 +754,9 @@ fn occs(
     if let (Some(op), true) = (compound, eqs.is_empty()) {
         match (op - start == 1).then(|| vars.at(l, start)).flatten() {
             Some(v) => o.rmw.push((v, start)),
-            None => vars.reads(l, (start, op), &mut o, bad),
+            None => vars.reads(l, (start, op), &mut o.uses, bad),
         }
-        vars.reads(l, (op + 1, end), &mut o, bad);
+        vars.reads(l, (op + 1, end), &mut o.uses, bad);
         return (o, None);
     }
     if end - start == 2 && eqs.is_empty() && compound.is_none() {
@@ -828,7 +777,7 @@ fn occs(
             bad.insert(v);
         }
     }
-    vars.reads(l, (start, end), &mut o, bad);
+    vars.reads(l, (start, end), &mut o.uses, bad);
     (o, None)
 }
 
@@ -1233,176 +1182,13 @@ const FOLDS: usize = 6;
 /// Most statements a fold carries a right side past to its one read.
 const REACH: usize = 8;
 
-/// Parses a stack slot's name (`local_<hex>` or `home_<hex>`) into whether
-/// it is a home slot and its unsigned offset.
-///
-/// # Arguments
-///
-/// * `name` - The identifier.
-pub(super) fn slot_parts(name: &str) -> Option<(bool, u64)> {
-    let (home, hex) = match name.strip_prefix("local_") {
-        Some(h) => (false, h),
-        None => (true, name.strip_prefix("home_")?),
-    };
-    (!hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| u64::from_str_radix(hex, 16).ok())
-        .flatten()
-        .map(|off| (home, off))
-}
-
-/// Finds the declared stack slots (`local_*` and `home_*`) in `parts` that
-/// neither escape nor overlap another slot in the frame.
-///
-/// # Arguments
-///
-/// * `parts` - The function's header, declarations, and body.
-pub(super) fn safe_slot_names(parts: &Parts<'_>) -> BTreeSet<String> {
-    let mut types: BTreeMap<String, String> = BTreeMap::new();
-    for d in parts.head.get(parts.decls..).unwrap_or(&[]) {
-        if let Some((ty, items)) = declaration(d) {
-            for (stars, n) in items {
-                let full = if stars.is_empty() {
-                    ty.to_owned()
-                } else {
-                    format!("{ty} {stars}")
-                };
-                types.insert(n.to_owned(), full);
-            }
-        }
-    }
-    safe_slots(parts, &types)
-}
-
-/// Finds the declared stack slots (`local_*` and `home_*`) that neither
-/// escape nor overlap another slot in the frame.
-///
-/// # Arguments
-///
-/// * `parts` - The function's header, declarations, and body.
-/// * `types` - Every declared variable's type.
-///
-/// # Returns
-///
-/// The slot names safe to split into value webs and drop dead stores from.
-fn safe_slots(parts: &Parts<'_>, types: &BTreeMap<String, String>) -> BTreeSet<String> {
-    if parts
-        .head
-        .iter()
-        .any(|h| h.contains("on that function's frame"))
-        || names_in(parts.body.iter().copied())
-            .iter()
-            .any(|w| matches!(*w, "rsp" | "esp"))
-    {
-        return BTreeSet::new();
-    }
-    let mut non_arg_local: Option<u64> = None;
-    let mut call_arg_local: Option<u64> = None;
-    let mut non_arg_home: Option<u64> = None;
-    let mut call_arg_homes: BTreeSet<u64> = BTreeSet::new();
-    for b in &parts.body {
-        let l = Line {
-            text: b,
-            toks: lex(b),
-        };
-        let n = l.toks.len();
-        for (k, t) in l.toks.iter().enumerate() {
-            if t.lex == Lex::Name
-                && k > 0
-                && l.is(k - 1, "&")
-                && let Some(w) = b.get(t.at..t.end)
-                && let Some((home, off)) = slot_parts(w)
-            {
-                let call_arg = is_call_arg_amp(&l, (0, n), k);
-                if home {
-                    if call_arg {
-                        call_arg_homes.insert(off);
-                    } else {
-                        non_arg_home = Some(non_arg_home.map_or(off, |m| m.min(off)));
-                    }
-                } else if call_arg {
-                    call_arg_local = Some(call_arg_local.map_or(off, |m| m.max(off)));
-                } else {
-                    non_arg_local = Some(non_arg_local.map_or(off, |m| m.max(off)));
-                }
-            }
-        }
-    }
-    for h in &parts.head {
-        if let Some(rest) = h.strip_prefix("// note: &")
-            && let Some((slot, _)) = rest.split_once(' ')
-            && let Some((home, off)) = slot_parts(slot)
-        {
-            if home {
-                if !call_arg_homes.contains(&off) {
-                    non_arg_home = Some(non_arg_home.map_or(off, |m| m.min(off)));
-                }
-            } else if call_arg_local != Some(off) {
-                non_arg_local = Some(non_arg_local.map_or(off, |m| m.max(off)));
-            }
-        }
-    }
-    let mut overlapped: BTreeSet<&str> = BTreeSet::new();
-    for d in parts.head.get(parts.decls..).unwrap_or(&[]) {
-        if d.starts_with("// ") && d.contains(" overlaps ") {
-            overlapped.extend(tokens(d));
-        }
-    }
-    let slot_size = |ty: &str| -> Option<i64> {
-        Some(match ty {
-            "uint8_t" | "int8_t" | "char" | "bool" => 1,
-            "uint16_t" | "int16_t" | "short" | "wchar_t" => 2,
-            "uint32_t" | "int32_t" | "int" | "float" => 4,
-            "uint64_t" | "int64_t" | "double" => 8,
-            t if t.ends_with('*') => 8,
-            _ => return None,
-        })
-    };
-    let mut ranges: Vec<(&str, bool, u64, i64, i64)> = Vec::new();
-    for (name, ty) in types {
-        let Some((home, off)) = slot_parts(name) else {
-            continue;
-        };
-        let Ok(raw) = i64::try_from(off) else {
-            continue;
-        };
-        let start = if home { raw } else { -raw };
-        let size = slot_size(ty).unwrap_or(16);
-        let Some(end) = start.checked_add(size) else {
-            continue;
-        };
-        ranges.push((name.as_str(), home, off, start, end));
-    }
-    let mut out = BTreeSet::new();
-    for &(name, home, off, lo, hi) in &ranges {
-        let Some(ty) = types.get(name) else {
-            continue;
-        };
-        if slot_size(ty).is_none() || overlapped.contains(name) {
-            continue;
-        }
-        let escaped = if home {
-            non_arg_home.is_some_and(|min| off >= min)
-        } else {
-            non_arg_local.is_some_and(|max| off <= max)
-                || call_arg_local.is_some_and(|max| off < max)
-        };
-        let clashes = ranges
-            .iter()
-            .any(|&(other, _, _, o_lo, o_hi)| other != name && lo < o_hi && o_lo < hi);
-        if !escaped && !clashes {
-            out.insert(name.to_owned());
-        }
-    }
-    out
-}
-
 /// [`split_webs`] before the folding, `None` where the text stays as it is.
 ///
 /// # Arguments
 ///
 /// * `text` - A decompiled function.
 fn split(text: &str) -> Option<String> {
-    let mut t = Text::read(text)?;
+    let mut t = Text::read(text, splits)?;
     for _ in 0..ROUNDS {
         if !t.drop_dead() {
             break;
@@ -1422,7 +1208,7 @@ fn split(text: &str) -> Option<String> {
 ///
 /// The folded text, or `None` when nothing folds.
 fn fold(text: &str) -> Option<String> {
-    let t = Text::read(text)?;
+    let t = Text::read(text, |n| is_var_name(n) || splits(n))?;
     let ret = return_type(&t.parts.head);
     let mut plans: Vec<Plan> = Vec::new();
     for &v in &t.tracked {
@@ -1642,25 +1428,21 @@ struct Seen {
 
 impl<'t> Text<'t> {
     /// Reads a text: its parts, its graph and what each node does to the
-    /// declared names this pass analyses.
+    /// declared names `track` accepts.
     ///
     /// # Arguments
     ///
     /// * `text` - A decompiled function.
+    /// * `track` - Which declared names are variables to analyse.
     ///
     /// # Returns
     ///
     /// The reading, or `None` when the text has nothing to track, holds a
     /// shape this does not read, or is past [`WORK_MAX`].
-    fn read(text: &'t str) -> Option<Self> {
+    fn read(text: &'t str, track: fn(&str) -> bool) -> Option<Self> {
         let parts = parts(text)?;
         let types = declared(parts.head.get(parts.decls..)?);
-        let safe = safe_slots(&parts, &types);
-        let names: Vec<String> = types
-            .keys()
-            .filter(|n| splits(n) || is_var_name(n) || safe.contains(*n))
-            .cloned()
-            .collect();
+        let names: Vec<String> = types.keys().filter(|n| track(n)).cloned().collect();
         if names.is_empty() {
             return None;
         }
@@ -1717,7 +1499,6 @@ impl<'t> Text<'t> {
             o.defs.retain(|(v, _)| !vars.unsafe_vars.contains(v));
             o.rmw.retain(|(v, _)| !vars.unsafe_vars.contains(v));
             o.uses.retain(|(v, _)| !vars.unsafe_vars.contains(v));
-            o.machine.retain(|v| !vars.unsafe_vars.contains(v));
         }
         let live_out: BTreeSet<usize> = parts
             .head
@@ -1804,15 +1585,6 @@ impl<'t> Text<'t> {
             let Some(&v) = self.tracked.get(at) else {
                 continue;
             };
-            if self
-                .vars
-                .names
-                .get(v)
-                .is_some_and(|n| slot_parts(n).is_some())
-                && self.occs.iter().any(|o| o.machine.contains(&v))
-            {
-                continue;
-            }
             let mut w = self.webs(v);
             for (i, node) in self.graph.nodes.iter().enumerate() {
                 let Some(l) = node.line.and_then(|x| self.lines.get(x)) else {
@@ -1875,15 +1647,6 @@ impl<'t> Text<'t> {
     fn seen(&self) -> Vec<Seen> {
         let mut seen: Vec<Seen> = Vec::new();
         for &v in &self.tracked {
-            if self.vars.names.get(v).is_some_and(|n| is_var_name(n)) {
-                continue;
-            }
-            let has_amp = self
-                .vars
-                .names
-                .get(v)
-                .is_some_and(|n| slot_parts(n).is_some())
-                && self.occs.iter().any(|o| o.machine.contains(&v));
             let mut w = self.webs(v);
             for (i, o) in self.occs.iter().enumerate() {
                 let Some(line) = self.graph.nodes.get(i).and_then(|n| n.line) else {
@@ -1902,7 +1665,7 @@ impl<'t> Text<'t> {
                     .map(|(_, k)| (*k, false));
                 for (tok, def) in defs.chain(reads).collect::<Vec<_>>() {
                     let root = if def { w.def_at(i) } else { w.read_at(i) };
-                    let pinned = w.pinned(root) || (has_amp && !w.read.contains(&root));
+                    let pinned = w.pinned(root);
                     seen.push(Seen {
                         line,
                         tok,
@@ -1930,10 +1693,6 @@ impl<'t> Text<'t> {
     /// The new text, or `None` when nothing changes.
     fn rename(&self, newline: bool) -> Option<String> {
         let seen = self.seen();
-        let mut webs_of_var: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-        for s in &seen {
-            webs_of_var.entry(s.var).or_default().insert(s.root);
-        }
         let mut taken: BTreeSet<&str> = BTreeSet::new();
         for l in &self.lines {
             for (k, t) in l.toks.iter().enumerate() {
@@ -1948,9 +1707,7 @@ impl<'t> Text<'t> {
         let mut named: BTreeMap<(usize, usize), (usize, String)> = BTreeMap::new();
         let mut next = 1usize;
         for s in &seen {
-            let single_web_non_reg = self.vars.names.get(s.var).is_some_and(|n| !splits(n))
-                && webs_of_var.get(&s.var).is_none_or(|w| w.len() <= 1);
-            if s.pinned || single_web_non_reg || named.contains_key(&(s.var, s.root)) {
+            if s.pinned || named.contains_key(&(s.var, s.root)) {
                 continue;
             }
             let (number, name) = loop {
@@ -2392,12 +2149,7 @@ impl<'t> Text<'t> {
             else {
                 continue;
             };
-            let Some(b_name) = self
-                .vars
-                .names
-                .get(b)
-                .filter(|n| is_var_name(n) || slot_parts(n).is_some())
-            else {
+            let Some(b_name) = self.vars.names.get(b).filter(|n| is_var_name(n)) else {
                 continue;
             };
             let Some(o) = self.occs.get(c) else {
@@ -2433,12 +2185,8 @@ impl<'t> Text<'t> {
         let (av, tok) = target;
         let a_name = self.vars.names.get(av)?;
         if av == b
-            || !(is_var_name(a_name) || slot_parts(a_name).is_some())
+            || !is_var_name(a_name)
             || self.types.get(a_name.as_str()) != self.types.get(b_name)
-            || self
-                .occs
-                .iter()
-                .any(|o| o.machine.contains(&av) || o.machine.contains(&b))
         {
             return None;
         }
@@ -2482,9 +2230,6 @@ impl<'t> Text<'t> {
                 let (ul, t) = self.token(i, k)?;
                 uses.push((ul, t.at, t.end, b_name.to_owned()));
             }
-        }
-        if slot_parts(a_name).is_some() && uses.is_empty() {
-            return None;
         }
         Some(Plan { line, cut, uses })
     }

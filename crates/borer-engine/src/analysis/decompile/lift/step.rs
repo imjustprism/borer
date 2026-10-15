@@ -474,20 +474,12 @@ impl<'a> Exec<'_, 'a> {
                 let v = self.val(instr, 1);
                 let v = match mn {
                     Mnemonic::Movss | Mnemonic::Vmovss => {
-                        if matches!(v, Expr::Const(b) if b != 0) {
-                            v
-                        } else {
-                            self.note_reg_ty(instr, Ty::F32);
-                            float_bits(v, Ty::F32)
-                        }
+                        self.note_reg_ty(instr, Ty::F32);
+                        float_bits(v, Ty::F32)
                     }
                     Mnemonic::Movsd | Mnemonic::Vmovsd => {
-                        if matches!(v, Expr::Const(b) if b != 0) {
-                            v
-                        } else {
-                            self.note_reg_ty(instr, Ty::F64);
-                            float_bits(v, Ty::F64)
-                        }
+                        self.note_reg_ty(instr, Ty::F64);
+                        float_bits(v, Ty::F64)
                     }
                     // INVARIANT: `movd`/`vmovd` into a vector register writes
                     // the low 32 bits of the lane and zeroes the rest, so the

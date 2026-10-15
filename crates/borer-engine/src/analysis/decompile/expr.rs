@@ -2155,13 +2155,12 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         }
     }
     /// Whether the tree is selector-linear in its leaves: no shift by a
-    /// leaf, no product or quotient of two leaves, which the Boolean
-    /// lattice the coefficients are read from does not carry.
+    /// leaf, no shift right at all (a constant one loses bits the lattice
+    /// does not carry), no product or quotient of two leaves.
     fn linear(e: &Expr, x: &Expr, y: Option<&Expr>) -> bool {
         match e {
-            Expr::Bin(Op::Shl | Op::Shr | Op::Sar, a, count) => {
-                !mentions(count, x, y) && linear(a, x, y)
-            }
+            Expr::Bin(Op::Shl, a, count) => !mentions(count, x, y) && linear(a, x, y),
+            Expr::Bin(Op::Shr | Op::Sar, ..) => false,
             Expr::Bin(Op::Mul | Op::Div | Op::Rem | Op::SDiv | Op::SRem, a, b) => {
                 !(mentions(a, x, y) && mentions(b, x, y)) && linear(a, x, y) && linear(b, x, y)
             }

@@ -15,7 +15,7 @@
 //! keeps its number. Names are spelling: no line reads anything else for
 //! them.
 
-use super::vars::{Lex, Line, declaration, is_var_name, lex, parts, safe_slot_names, slot_parts};
+use super::vars::{Lex, Line, declaration, is_var_name, lex, parts};
 use super::*;
 use crate::analysis::typelib::{self, Decl, Os, Pass};
 use crate::program::BinaryFormat;
@@ -198,16 +198,6 @@ fn argument_of<'t>(l: &Line<'t>, k: usize) -> Option<(&'t str, usize)> {
         .then(|| (l.text.get(t.at..t.end).unwrap_or(""), commas))
 }
 
-/// Tells whether `w` is a `varN` temporary or a stack slot (`local_*` or
-/// `home_*`).
-///
-/// # Arguments
-///
-/// * `w` - The identifier.
-fn is_candidate(w: &str) -> bool {
-    is_var_name(w) || slot_parts(w).is_some()
-}
-
 /// A whole-line assignment to one variable: `v = rhs;`.
 ///
 /// # Arguments
@@ -219,7 +209,7 @@ fn is_candidate(w: &str) -> bool {
 /// The variable and the right side, or `None`.
 fn assignment<'t>(l: &Line<'t>) -> Option<(&'t str, &'t str)> {
     let (lhs, rhs) = l.text.trim().strip_suffix(';')?.split_once(" = ")?;
-    (is_candidate(lhs) && !rhs.contains(" = ")).then_some((lhs, rhs))
+    (is_var_name(lhs) && !rhs.contains(" = ")).then_some((lhs, rhs))
 }
 
 /// The variable a line counts up by one, if it does: `v += 1;`, `v++;`,
@@ -231,7 +221,7 @@ fn assignment<'t>(l: &Line<'t>) -> Option<(&'t str, &'t str)> {
 fn counter<'t>(l: &Line<'t>) -> Option<&'t str> {
     let t = l.text.trim().strip_suffix(';')?;
     if let Some(v) = t.strip_suffix(" += 1").or_else(|| t.strip_suffix("++")) {
-        return is_candidate(v).then_some(v);
+        return is_var_name(v).then_some(v);
     }
     let (v, rhs) = t.split_once(" = ")?;
     let plus = format!("{v} + 1");
@@ -239,7 +229,7 @@ fn counter<'t>(l: &Line<'t>) -> Option<&'t str> {
         || rhs
             .strip_prefix(&format!("({plus}) & 0x"))
             .is_some_and(|m| m.bytes().all(|b| b == b'f'));
-    (is_candidate(v) && stepped).then_some(v)
+    (is_var_name(v) && stepped).then_some(v)
 }
 
 /// The variable a `for` header counts up by one: `for (v = ..; ..; v += 1) {`.
@@ -253,7 +243,7 @@ fn for_counter(t: &str) -> Option<&str> {
     let (_, step) = rest.rsplit_once("; ")?;
     let v = init.split_once(" = ")?.0;
     let stepped = step == format!("{v} += 1") || step == format!("{v}++");
-    (is_candidate(v) && stepped).then_some(v)
+    (is_var_name(v) && stepped).then_some(v)
 }
 
 /// The variables an ordering comparison reads, as a loop's counter is.
@@ -271,7 +261,7 @@ fn compared<'t>(lines: &[Line<'t>]) -> BTreeSet<&'t str> {
             for side in [k.checked_sub(1), Some(k + 1)].into_iter().flatten() {
                 if let Some(t) = l.toks.get(side)
                     && let Some(w) = l.text.get(t.at..t.end)
-                    && is_candidate(w)
+                    && is_var_name(w)
                 {
                     out.insert(w);
                 }
@@ -321,12 +311,11 @@ pub(super) fn name_vars(text: &str, word: u8) -> String {
 fn retype(text: &str, word: u8) -> Option<String> {
     let word_ty = if word == 32 { "uint32_t" } else { "uint64_t" };
     let p = parts(text)?;
-    let safe = safe_slot_names(&p);
     let mut found: BTreeMap<&str, Option<&'static str>> = BTreeMap::new();
     for d in p.head.get(p.decls..)? {
         if let Some((_, items)) = declaration(d).filter(|(ty, _)| *ty == word_ty) {
             for (stars, n) in items {
-                if stars.is_empty() && (is_var_name(n) || safe.contains(n)) {
+                if stars.is_empty() && is_var_name(n) {
                     found.insert(n, None);
                 }
             }
@@ -351,10 +340,7 @@ fn retype(text: &str, word: u8) -> Option<String> {
                 let ret = def
                     .and_then(|(_, rhs)| rhs.split_once('('))
                     .and_then(|(callee, _)| any_decl(callee))
-                    .map(|(d, _)| match d.ret {
-                        "HLOCAL" | "HGLOBAL" => "void *",
-                        r => r,
-                    })
+                    .map(|(d, _)| d.ret)
                     .filter(|r| VOID_POINTERS.contains(r));
                 match (ret, found.get(w).copied().flatten()) {
                     (Some(r), None) => {
@@ -420,11 +406,9 @@ fn retype(text: &str, word: u8) -> Option<String> {
     Some(joined)
 }
 
-/// Tells whether the read at token `k` hands the value on whole.
-///
-/// Accepts an argument, a returned value, an assignment's right side, a test,
-/// a field access, or a comparison with a non-negative literal or another
-/// value.
+/// Tells whether the read at token `k` hands the value on whole: an
+/// argument, a returned value, an assignment's right side, a test, or a
+/// comparison with a non-negative literal or another value.
 ///
 /// # Arguments
 ///
@@ -435,14 +419,8 @@ fn whole_read(l: &Line<'_>, k: usize) -> bool {
         "(", ",", "=", "==", "!=", "!", "&&", "||", "?", ":", "return",
     ];
     const AFTER: [&str; 9] = [")", ",", ";", "==", "!=", "&&", "||", "?", ":"];
-    let before = k
-        .checked_sub(1)
-        .is_none_or(|p| BEFORE.contains(&l.word(p)) || (l.is(p, "&") && l.is(k + 1, "->")));
-    let arrow = l.is(k + 1, "->")
-        && l.toks
-            .get(k + 3)
-            .is_none_or(|t| t.lex != Lex::Punct || l.word(k + 3) != "(");
-    let after = AFTER.contains(&l.word(k + 1)) || arrow || k + 1 == l.toks.len();
+    let before = k.checked_sub(1).is_none_or(|p| BEFORE.contains(&l.word(p)));
+    let after = AFTER.contains(&l.word(k + 1)) || k + 1 == l.toks.len();
     let negative = (l.is(k + 1, "==") || l.is(k + 1, "!=")) && l.is(k + 2, "-");
     let prev_cmp = k
         .checked_sub(1)
@@ -628,11 +606,10 @@ fn bool_tests(text: &str) -> Option<String> {
 /// * `text` - A decompiled function.
 fn rename(text: &str) -> Option<String> {
     let p = parts(text)?;
-    let safe = safe_slot_names(&p);
     let mut vars: BTreeMap<&str, Option<(Rank, String)>> = BTreeMap::new();
     for d in p.head.get(p.decls..)? {
         for (_, n) in declaration(d).map(|(_, items)| items).unwrap_or_default() {
-            if is_var_name(n) || safe.contains(n) {
+            if is_var_name(n) {
                 vars.insert(n, None);
             }
         }
@@ -664,7 +641,7 @@ fn rename(text: &str) -> Option<String> {
             open.pop();
         }
         for (k, tok) in l.toks.iter().enumerate() {
-            let Some(w) = l.text.get(tok.at..tok.end).filter(|w| is_candidate(w)) else {
+            let Some(w) = l.text.get(tok.at..tok.end).filter(|w| is_var_name(w)) else {
                 continue;
             };
             if let Some((callee, i)) = argument_of(l, k)
@@ -722,19 +699,10 @@ fn rename(text: &str) -> Option<String> {
             }
         }
     }
-    let mut order: Vec<((u8, usize), &str)> = vars
+    let mut order: Vec<(usize, &str)> = vars
         .iter()
         .filter(|(_, e)| e.is_some())
-        .filter_map(|(v, _)| {
-            let key = if let Some(n) = v.strip_prefix("var").and_then(|s| s.parse::<usize>().ok()) {
-                (0, n)
-            } else if let Some((home, off)) = slot_parts(v) {
-                (1 + u8::from(home), usize::try_from(off).ok()?)
-            } else {
-                return None;
-            };
-            Some((key, *v))
-        })
+        .filter_map(|(v, _)| Some((v.strip_prefix("var")?.parse::<usize>().ok()?, *v)))
         .collect();
     order.sort_unstable();
     let mut renames: BTreeMap<&str, String> = BTreeMap::new();
