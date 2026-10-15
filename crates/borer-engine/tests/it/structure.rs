@@ -1130,3 +1130,194 @@ fn a_copied_one_way_branch_goes_on_to_its_side() {
         "{out}"
     );
 }
+
+/// One block of the tail-clone fixture: its bytes with zero
+/// displacements, and where each rel32 displacement lands and which block
+/// it reaches.
+struct TailBlock {
+    /// The block's bytes, displacements zeroed.
+    bytes: Vec<u8>,
+    /// (index of a rel32 displacement, the block it reaches).
+    rel32: Vec<(usize, usize)>,
+}
+
+/// Assembles the fixture's blocks, patching every displacement to its
+/// target block.
+///
+/// # Arguments
+///
+/// * `blocks` - The blocks in address order.
+///
+/// # Returns
+///
+/// The function's bytes.
+fn tail_assemble(blocks: &[TailBlock]) -> Vec<u8> {
+    let mut at = Vec::with_capacity(blocks.len());
+    let mut off = 0usize;
+    for b in blocks {
+        at.push(off);
+        off += b.bytes.len();
+    }
+    let mut out = Vec::with_capacity(off);
+    for b in blocks {
+        out.extend_from_slice(&b.bytes);
+    }
+    for (i, b) in blocks.iter().enumerate() {
+        for (d, to) in &b.rel32 {
+            let v = lo32(from_usize(at[*to]).wrapping_sub(from_usize(at[i] + d + 4)));
+            out[at[i] + d..at[i] + d + 4].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Builds the tail-clone fixture.
+///
+/// A loop's exit and an `if` arm both run `rc = ERR; goto tail;` over a
+/// shared `xor eax,eax` that jumps to the function's shared `ret`, so no
+/// single region owns the tail to copy it. A caller at 0x1200 reads the
+/// function's result, so its `eax` stays live. `calls` puts a call in the
+/// tail: the cleanup shape (`rc = ERR; goto cleanup;` whose cleanup
+/// frees), which cloning would run twice.
+///
+/// # Arguments
+///
+/// * `calls` - Whether the shared tail calls before returning.
+///
+/// # Returns
+///
+/// A raw x86-64 program whose entry at 0x1000 holds the fixture.
+fn tail_clone_fixture(calls: bool) -> Program {
+    let base = 0x1000u64;
+    let callee = 0x1100u64;
+    let caller = 0x1200u64;
+    const BODY: usize = 2;
+    const HEAD: usize = 3;
+    const SITE1: usize = 4;
+    const ELSE: usize = 5;
+    const SITE2: usize = 6;
+    const R: usize = 7;
+    let mut tail = vec![0x31, 0xc0]; // ASM: xor eax,eax
+    if calls {
+        tail.extend_from_slice(&[0xe8, 0, 0, 0, 0]); // ASM: call 0x1100
+    }
+    tail.extend_from_slice(&[0xe9, 0, 0, 0, 0]); // ASM: jmp R
+    let tail_jmp = (tail.len() - 4, R);
+    let blocks = vec![
+        TailBlock {
+            // ASM: test ecx,ecx; jz ELSE; jmp BODY
+            bytes: vec![0x85, 0xc9, 0x0f, 0x84, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(4, ELSE), (9, BODY)],
+        },
+        TailBlock {
+            bytes: tail,
+            rel32: vec![tail_jmp],
+        },
+        TailBlock {
+            bytes: vec![0x45, 0x31, 0xc9], // ASM: xor r9d,r9d
+            rel32: vec![],
+        },
+        TailBlock {
+            // ASM: cmp r9d,edx; jae SITE1; inc r9d; jmp HEAD
+            bytes: vec![
+                0x44, 0x39, 0xca, 0x0f, 0x83, 0, 0, 0, 0, 0x41, 0xff, 0xc1, 0xe9, 0, 0, 0, 0,
+            ],
+            rel32: vec![(5, SITE1), (13, HEAD)],
+        },
+        TailBlock {
+            // ASM: mov esi,5; jmp TAIL
+            bytes: vec![0xbe, 0x05, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(6, 1)],
+        },
+        TailBlock {
+            // ASM: test r8d,r8d; jz SITE2; mov eax,2; jmp R
+            bytes: vec![
+                0x45, 0x85, 0xc0, 0x0f, 0x84, 0, 0, 0, 0, 0xb8, 0x02, 0, 0, 0, 0xe9, 0, 0, 0, 0,
+            ],
+            rel32: vec![(5, SITE2), (15, R)],
+        },
+        TailBlock {
+            // ASM: mov edi,7; jmp TAIL
+            bytes: vec![0xbf, 0x07, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(6, 1)],
+        },
+        TailBlock {
+            bytes: vec![0xc3], // ASM: ret
+            rel32: vec![],
+        },
+    ];
+    let mut code = tail_assemble(&blocks);
+    if calls {
+        // INVARIANT: the entry block is 13 bytes, so the tail's `call F`
+        // ends at offset 20 and its displacement is the four before it.
+        code[16..20].copy_from_slice(&lo32(callee.wrapping_sub(base + 20)).to_le_bytes());
+    }
+    let mut image = vec![0xccu8; 0x2000];
+    let at = saturating_usize(base);
+    image[at..at + code.len()].copy_from_slice(&code);
+    if calls {
+        let f = saturating_usize(callee);
+        image[f..f + 6].copy_from_slice(&[0xb8, 0x03, 0, 0, 0, 0xc3]); // ASM: mov eax,3; ret
+    }
+    let at = saturating_usize(caller);
+    image[at..at + 5].copy_from_slice(&[0xe8, 0, 0, 0, 0]); // ASM: call 0x1000
+    image[at + 1..at + 5].copy_from_slice(&lo32(base.wrapping_sub(caller + 5)).to_le_bytes());
+    image[at + 5..at + 8].copy_from_slice(&[0x89, 0xc3, 0xc3]); // ASM: mov ebx,eax; ret
+    Program::raw(
+        image,
+        Arch::X86_64,
+        0,
+        Some(base),
+        vec![Section::mapped(".text", base, base, 0x1000, false, true)],
+    )
+}
+
+/// A shared pure return tail is cloned into the goto sites that reach it.
+///
+/// The loop's exit and the `if` arm both end in a jump to the same
+/// `xor eax,eax` that jumps to the shared `ret`. The emitter writes each
+/// site's copy of the tail's statements instead of its `goto`, so the
+/// emission names no label for the tail and the driver drops the
+/// original: two `return 0;` and no `goto` in the text.
+#[test]
+fn a_shared_return_tail_is_cloned_into_its_goto_sites() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+    let p = tail_clone_fixture(false);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let Some(raw) = decompile_raw(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    assert!(!raw_body(&raw).contains("goto L_100d;"), "{raw}");
+    let Some(out) = decompile(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    assert_eq!(out.matches("return 0;").count(), 2, "{out}");
+    assert!(!out.contains("goto "), "{out}");
+    assert_eq!(
+        check_structure(&p, &a, &o, 0x1000, &out),
+        Structure::Agrees,
+        "{out}"
+    );
+}
+
+/// A shared tail that calls keeps its goto: cloning it would run the call
+/// twice.
+///
+/// The same fixture with a call in the tail, the `rc = ERR; goto
+/// cleanup;` shape whose cleanup frees. The tail is not pure, so the site
+/// keeps its jump and the call appears once, in the tail's own text.
+#[test]
+fn a_cleanup_tail_that_calls_keeps_its_goto() {
+    let p = tail_clone_fixture(true);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let Some(raw) = decompile_raw(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    assert!(raw_body(&raw).contains("goto L_100d;"), "{raw}");
+    let Some(out) = decompile(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    assert_eq!(out.matches("sub_1100();").count(), 1, "{out}");
+}
