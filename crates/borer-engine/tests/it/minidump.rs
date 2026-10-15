@@ -517,7 +517,7 @@ fn a_lone_surrogate_name_decodes_lossily() {
     let mut d = dump();
     u32_at(&mut d, 0x118, 2);
     u16_at(&mut d, 0x11c, 0xd800);
-    let p = Program::from_bytes("sur.dmp".into(), d).expect("loads");
+    let p = Program::from_bytes("cut.dmp".into(), d).expect("loads");
     assert_eq!(p.symbols.len(), 1);
     assert_eq!(p.symbols[0].name, "\u{fffd}");
 }
