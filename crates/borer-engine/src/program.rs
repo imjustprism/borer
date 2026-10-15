@@ -2555,7 +2555,7 @@ impl Program {
         if let Some(first) = self.sections.first()
             && first.file_size > 0
             && first.va.0 <= va
-            && va < first.va.0 + first.vsize.max(first.file_size)
+            && va < first.va.0.saturating_add(first.vsize.max(first.file_size))
         {
             return Some(first);
         }
@@ -2580,10 +2580,11 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The offset, or `None` when [`Program::section_at`] finds no section.
+    /// The offset, or `None` when [`Program::section_at`] finds no section
+    /// or the offset the address maps to does not fit one.
     pub fn va_to_offset(&self, va: u64) -> Option<u64> {
         let s = self.section_at(va)?;
-        Some(s.file_off.0 + (va - s.va.0))
+        s.file_off.0.checked_add(va - s.va.0)
     }
 
     /// Converts a file offset to the virtual address it is mapped at.
@@ -2703,8 +2704,8 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// A non-empty slice, or `None` when `va` is unmapped or at the very end
-    /// of its section's file bytes.
+    /// A non-empty slice, or `None` when `va` is unmapped, at the very end
+    /// of its section's file bytes, or maps past any file offset.
     pub fn read_va_upto(&self, va: u64, max: usize) -> Option<&[u8]> {
         let Some(s) = self.section_at(va) else {
             // The headers are mapped but are not a section; a short read of
@@ -2719,7 +2720,7 @@ impl Program {
             let room = usize::try_from(cap.checked_sub(off)?).ok()?;
             return self.header_slice(va, max.min(room));
         };
-        let off = s.file_off.0 + (va - s.va.0);
+        let off = s.file_off.0.checked_add(va - s.va.0)?;
         let limit = (s.file_off.0 + s.file_size).min(self.bytes.len() as u64);
         let end = (off + max as u64).min(limit);
         self.image_bytes(off, end).filter(|b| !b.is_empty())
@@ -2737,12 +2738,13 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The bytes, or `None` when the range is not entirely file-backed.
+    /// The bytes, or `None` when the range is not entirely file-backed or
+    /// the offset it maps to does not fit one.
     pub fn read_va(&self, va: u64, len: usize) -> Option<&[u8]> {
         let Some(s) = self.section_at(va) else {
             return self.header_slice(va, len);
         };
-        let off = s.file_off.0 + (va - s.va.0);
+        let off = s.file_off.0.checked_add(va - s.va.0)?;
         let end = off.checked_add(len as u64)?;
         if end > s.file_off.0 + s.file_size {
             return None;
