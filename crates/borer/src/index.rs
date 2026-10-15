@@ -32,6 +32,10 @@ const MAGIC: &[u8; 8] = b"BORERIDX";
 const FORMAT: u32 = 4;
 /// Longest name or text one record may carry, a bound on a corrupt length.
 const RECORD_MAX: usize = 64 << 20;
+/// Fewest bytes one record can hold: its entry and two length words. A
+/// count the file cannot hold that many bytes per record of is refused,
+/// since no record it could stand for was ever written.
+const RECORD_FLOOR: u64 = 16;
 /// Environment variable naming the directory indexes live in.
 const CACHE_ENV: &str = "BORER_CACHE_DIR";
 /// Extension of an index file.
@@ -671,6 +675,14 @@ impl<R: Read> Reader<R> {
 /// Parses an index from its encoding as it is read, so the file's bytes are
 /// never held whole beside the index they make.
 ///
+/// A record count the file cannot hold [`RECORD_FLOOR`] bytes per record
+/// of is refused before anything is allocated for it, and the record
+/// vector starts small however large a count claims, so a header alone
+/// cannot ask for memory the file never paid for. A posting list that
+/// does not name functions in strict ascending order is refused as well:
+/// this format never writes one, and the binary search a grep intersects
+/// with trusts its order.
+///
 /// # Arguments
 ///
 /// * `input` - The encoding.
@@ -691,11 +703,11 @@ fn read(input: impl Read, len: u64) -> Option<CodeIndex> {
         engine: r.u64()?,
     };
     let count = usize::try_from(r.u32()?).ok()?;
-    if u64::try_from(count).ok()? > len {
+    if u64::try_from(count).ok()? > len / RECORD_FLOOR {
         return None;
     }
     let stored = r.u64()?;
-    let mut functions = Vec::with_capacity(count);
+    let mut functions = Vec::with_capacity(count.min(1 << 12));
     for _ in 0..count {
         let entry = r.u64()?;
         let name = r.string()?;
@@ -713,7 +725,15 @@ fn read(input: impl Read, len: u64) -> Option<CodeIndex> {
         if id >= TRIGRAMS || u64::try_from(len).ok()? > r.left {
             return None;
         }
-        lists[id] = r.u32s(len)?;
+        let list = r.u32s(len)?;
+        let lawful = list.windows(2).all(|w| w[0] < w[1])
+            && list
+                .iter()
+                .all(|&i| usize::try_from(i).is_ok_and(|at| at < functions.len()));
+        if !lawful {
+            return None;
+        }
+        lists[id] = list;
     }
     let postings = Postings { lists };
     (digest(&functions, &postings) == stored).then_some(CodeIndex {
@@ -1556,6 +1576,750 @@ mod tests {
         assert!(
             text.starts_with("# 2 lines in 2 functions match 're:^return', showing 2 from 0\n"),
             "{text}"
+        );
+    }
+
+    /// Every line `matcher` accepts, in entry then line order with the
+    /// name filter applied - the answer a scan of every line owes.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The index whose texts are scanned.
+    /// * `matcher` - What a line must hold.
+    /// * `filter` - The function-name filter, as [`grep`] takes it.
+    fn brute_hits(index: &CodeIndex, matcher: &Matcher, filter: &str) -> Vec<(u64, usize, String)> {
+        let q = filter.to_lowercase();
+        index
+            .functions
+            .iter()
+            .filter(|f| q.is_empty() || f.name.to_lowercase().contains(&q))
+            .flat_map(|f| {
+                f.text
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| matcher.is_match(line.trim()))
+                    .map(|(i, line)| (f.entry, i + 1, line.trim().to_owned()))
+            })
+            .collect()
+    }
+
+    /// What [`grep`] answered, as triples a brute scan can be compared with.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The index scanned.
+    /// * `matcher` - What a line must hold.
+    /// * `filter` - The function-name filter.
+    fn grep_shape(index: &CodeIndex, matcher: &Matcher, filter: &str) -> Vec<(u64, usize, String)> {
+        grep(index, matcher, filter)
+            .into_iter()
+            .map(|h| (h.entry, h.line_no, h.line))
+            .collect()
+    }
+
+    /// A deterministic xorshift word generator: the corpus and its queries
+    /// come out the same on every run, which is what makes a failure
+    /// reproducible.
+    #[derive(Debug)]
+    struct Rng(u64);
+
+    impl Rng {
+        /// Steps the generator and returns the next word.
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// A word below `n`.
+        ///
+        /// # Panics
+        ///
+        /// When `n` is zero.
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(n).expect("n is not zero"))
+                .expect("the word is below n")
+        }
+
+        /// One of `items`, evenly enough for a corpus.
+        ///
+        /// # Panics
+        ///
+        /// When `items` is empty.
+        fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+            &items[self.below(items.len())]
+        }
+    }
+
+    /// Words the corpus splices into its lines: mixed case, digits and
+    /// underscores, so folded trigrams and case-sensitive scans disagree.
+    const WORDS: &[&str] = &[
+        "Game",
+        "GAME",
+        "game",
+        "Send",
+        "sendCmd",
+        "MEMCPY",
+        "memcpy",
+        "dst_buf",
+        "SrcPtr",
+        "x2",
+        "n0",
+        "var_1c",
+        "qword_140001000",
+        "rax",
+        "AppendCommand",
+        "cmd_queue_2",
+        "a1",
+        "bB",
+        "C_c",
+        "d_4e",
+        "loop_3x",
+        "Ctx",
+        "hEvent",
+        "dwFlags",
+        "lpBuffers",
+        "Zz_9",
+        "if",
+        "return",
+        "else",
+        "while",
+        "NULL",
+    ];
+
+    /// What the corpus joins words with, most of it outside the identifier
+    /// alphabet so runs break, and some of it spelling trigramless queries.
+    const GLUE: &[&str] = &[
+        " = ", ", ", "(", ")", " == ", "!=", " + ", " ^ ", "->", ".", "== 0x", "--", " << ", " ? ",
+        ":=", "; ",
+    ];
+
+    /// Decorations from outside the identifier alphabet, including
+    /// multi-byte characters a query may still hold.
+    const NOISE: &[&str] = &[
+        ";;",
+        "}}",
+        "===",
+        "/* café */",
+        "// 参照",
+        "\u{1f600}",
+        "~~~",
+    ];
+
+    /// The seeded corpus the soundness queries run over: forty functions of
+    /// two hundred pseudo-C-ish lines each, mixed case, digits, underscores
+    /// and punctuation.
+    fn corpus() -> CodeIndex {
+        let mut rng = Rng(0x5eed_c0de_1234_5678);
+        let functions = (0u64..40)
+            .map(|i| {
+                let mut text = String::new();
+                for _ in 0..200 {
+                    if rng.below(9) == 0 {
+                        text.push('\n');
+                        continue;
+                    }
+                    for w in 0..1 + rng.below(6) {
+                        if w > 0 {
+                            text.push_str(rng.pick(GLUE));
+                        }
+                        text.push_str(rng.pick(WORDS));
+                    }
+                    match rng.below(6) {
+                        0 => text.push_str(rng.pick(NOISE)),
+                        1 => {
+                            text.push_str(rng.pick(GLUE));
+                            text.push_str(rng.pick(WORDS));
+                        }
+                        _ => text.push(';'),
+                    }
+                    text.push('\n');
+                }
+                IndexedFunction {
+                    entry: 0x1000 + 0x100 * i,
+                    name: format!("{}_{i:02x}", rng.pick(WORDS)),
+                    text,
+                }
+            })
+            .collect::<Vec<_>>();
+        CodeIndex {
+            key: IndexKey {
+                program: 0x5eed,
+                engine: 0xc0de,
+            },
+            postings: trigram_postings(&functions),
+            functions,
+        }
+    }
+
+    /// `n` random substrings of the corpus's own lines, char-aligned so
+    /// they are texts a line can hold.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - The generator, so the queries are deterministic.
+    /// * `index` - The corpus to draw from.
+    /// * `n` - How many queries.
+    ///
+    /// # Panics
+    ///
+    /// When a picked line holds no characters.
+    fn random_queries(rng: &mut Rng, index: &CodeIndex, n: usize) -> Vec<String> {
+        (0..n)
+            .map(|_| {
+                let f = rng.pick(&index.functions);
+                let lines: Vec<&str> = f.text.lines().filter(|l| !l.is_empty()).collect();
+                let line = rng.pick(&lines);
+                let chars: Vec<char> = line.chars().collect();
+                let start = rng.below(chars.len());
+                let len = 1 + rng.below(12.min(chars.len() - start));
+                chars[start..start + len].iter().collect()
+            })
+            .collect()
+    }
+
+    /// The trigram prefilter answers exactly what a full scan answers, on a
+    /// seeded corpus, for random substrings of its own texts, their
+    /// case-folded variants, and fixed trigramless queries.
+    ///
+    /// # Panics
+    ///
+    /// When the prefetched grep disagrees with a scan of every line, or
+    /// the corpus does not round-trip through its encoding.
+    #[test]
+    fn the_prefilter_agrees_with_a_full_scan_on_a_seeded_corpus() {
+        let index = corpus();
+        let mut bytes = Vec::new();
+        encode(&index, &mut bytes).expect("encodes");
+        assert_eq!(
+            decode(&bytes),
+            Some(index.clone()),
+            "the corpus round trips"
+        );
+        let mut rng = Rng(0xfeed_face_2468_ace0);
+        let mut queries: Vec<String> = Vec::new();
+        for q in random_queries(&mut rng, &index, 60) {
+            queries.push(q.to_lowercase());
+            queries.push(q.to_uppercase());
+            queries.push(q);
+        }
+        queries.extend(
+            [
+                "a",
+                "ab",
+                "z9",
+                "--",
+                "== 0x",
+                "_",
+                ";;",
+                "}",
+                "A",
+                "0x",
+                "MEMCPY",
+                "memcpy",
+                "if",
+                "IF",
+                "café",
+                "参照",
+                "\u{1f600}",
+                "===",
+                "dst_buf",
+                "DstBuf",
+            ]
+            .map(str::to_owned),
+        );
+        for q in &queries {
+            let matcher = Matcher::parse(q).expect("a literal parses");
+            assert_eq!(
+                grep_shape(&index, &matcher, ""),
+                brute_hits(&index, &matcher, ""),
+                "{q:?}"
+            );
+        }
+    }
+
+    /// `re:` queries ask nothing of the postings and scan every function,
+    /// answering exactly what a full scan answers on the same corpus.
+    ///
+    /// # Panics
+    ///
+    /// When an expression scan disagrees with a scan of every line.
+    #[test]
+    fn regular_expression_queries_agree_with_a_full_scan() {
+        let index = corpus();
+        for pattern in [
+            "re:^if",
+            "re:return;$",
+            "re:(?i)game",
+            "re:[0-9a-f]{6}",
+            r"re:\w+_\d",
+            "re:== 0x[0-9a-f]+",
+            "re:(?i)(send|memcpy)",
+            r"re:\)",
+            "re:x2",
+            "re:;",
+        ] {
+            let matcher = Matcher::parse(pattern).expect("parses");
+            assert_eq!(
+                grep_shape(&index, &matcher, ""),
+                brute_hits(&index, &matcher, ""),
+                "{pattern}"
+            );
+        }
+    }
+
+    /// The function filter narrows the prefetched scan to exactly the
+    /// functions a brute-force scan of the same names would keep.
+    ///
+    /// # Panics
+    ///
+    /// When a filtered grep disagrees with a scan of every line.
+    #[test]
+    fn the_function_filter_agrees_with_a_full_scan_under_the_prefilter() {
+        let index = corpus();
+        let mut rng = Rng(0x0d00_dbee_f135_79bd);
+        for q in random_queries(&mut rng, &index, 12) {
+            let matcher = Matcher::parse(&q).expect("a literal parses");
+            for filter in ["", "game", "SEND", "_", "zz", "memcpy", "0f", "a1"] {
+                assert_eq!(
+                    grep_shape(&index, &matcher, filter),
+                    brute_hits(&index, &matcher, filter),
+                    "{q:?} over names holding {filter:?}"
+                );
+            }
+        }
+    }
+
+    /// Trigramless texts round trip and still answer a grep.
+    ///
+    /// Empty texts, punctuation-only ones, one or two identifier
+    /// characters, multi-byte and duplicated: the queries that cannot
+    /// rule anything out still find what a full scan finds.
+    ///
+    /// # Panics
+    ///
+    /// When the round trip loses a record or a grep disagrees with a scan
+    /// of every line.
+    #[test]
+    fn trigramless_texts_round_trip_and_still_answer() {
+        let functions = vec![
+            IndexedFunction {
+                entry: 0x1000,
+                name: "empty".to_owned(),
+                text: String::new(),
+            },
+            IndexedFunction {
+                entry: 0x2000,
+                name: "punct".to_owned(),
+                text: ";;;}}}===\n--\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x3000,
+                name: "one".to_owned(),
+                text: "a\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x4000,
+                name: "two".to_owned(),
+                text: "ab\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x5000,
+                name: "under".to_owned(),
+                text: "_\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x6000,
+                name: "uni".to_owned(),
+                text: "café = 参照;\nif (héllo) {\n  return \u{1f600};\n}\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x7000,
+                name: "dup1".to_owned(),
+                text: "dup(x);\ndup(x);\n".to_owned(),
+            },
+            IndexedFunction {
+                entry: 0x8000,
+                name: "dup2".to_owned(),
+                text: "dup(x);\ndup(x);\n".to_owned(),
+            },
+        ];
+        let index = CodeIndex {
+            key: IndexKey {
+                program: 5,
+                engine: 6,
+            },
+            postings: trigram_postings(&functions),
+            functions,
+        };
+        let mut bytes = Vec::new();
+        encode(&index, &mut bytes).expect("encodes");
+        assert_eq!(
+            decode(&bytes),
+            Some(index.clone()),
+            "every shape round trips"
+        );
+        for q in [
+            "a",
+            "ab",
+            "_",
+            ";;;",
+            "===",
+            "--",
+            "dup(x)",
+            "café",
+            "参照",
+            "\u{1f600}",
+            "héllo",
+            "}",
+            "x",
+        ] {
+            let matcher = Matcher::parse(q).expect("a literal parses");
+            assert_eq!(
+                grep_shape(&index, &matcher, ""),
+                brute_hits(&index, &matcher, ""),
+                "{q:?}"
+            );
+        }
+    }
+
+    /// A megabyte of one word is one line, one trigram and a million
+    /// repetitions of it: it round trips, and the prefilter still answers
+    /// what a full scan answers for it.
+    ///
+    /// # Panics
+    ///
+    /// When the round trip loses the text or a grep disagrees with a scan
+    /// of every line.
+    #[test]
+    fn a_megabyte_run_round_trips() {
+        let functions = vec![IndexedFunction {
+            entry: 0x1000,
+            name: "long".to_owned(),
+            text: "a".repeat(1 << 20),
+        }];
+        let index = CodeIndex {
+            key: IndexKey {
+                program: 8,
+                engine: 9,
+            },
+            postings: trigram_postings(&functions),
+            functions,
+        };
+        let mut bytes = Vec::new();
+        encode(&index, &mut bytes).expect("encodes");
+        assert_eq!(decode(&bytes), Some(index.clone()));
+        for q in ["a", "aa", "aaaa", "aaaaaaaa", "ab", "b", "aaaab"] {
+            let matcher = Matcher::parse(q).expect("a literal parses");
+            assert_eq!(
+                grep_shape(&index, &matcher, ""),
+                brute_hits(&index, &matcher, ""),
+                "{q:?}"
+            );
+        }
+    }
+
+    /// An index of no functions encodes, decodes back equal and greps
+    /// nothing, with or without a filter.
+    ///
+    /// # Panics
+    ///
+    /// When the empty index does not round trip or a grep answers.
+    #[test]
+    fn an_empty_index_round_trips_and_finds_nothing() {
+        let index = CodeIndex {
+            key: IndexKey {
+                program: 11,
+                engine: 12,
+            },
+            functions: Vec::new(),
+            postings: trigram_postings(&[]),
+        };
+        let mut bytes = Vec::new();
+        encode(&index, &mut bytes).expect("encodes");
+        assert_eq!(decode(&bytes), Some(index.clone()));
+        let lit = Matcher::parse("x").expect("parses");
+        assert!(grep(&index, &lit, "").is_empty());
+        assert!(grep(&index, &lit, "no_such_name").is_empty());
+        let re = Matcher::parse("re:.").expect("parses");
+        assert!(grep(&index, &re, "").is_empty());
+    }
+
+    /// Every strict prefix of an index file is refused - cut in the
+    /// header, mid-record or mid-postings - rather than read as a shorter
+    /// index.
+    ///
+    /// # Panics
+    ///
+    /// When some prefix of the file decodes.
+    #[test]
+    fn every_truncation_is_refused() {
+        let index = sample();
+        let mut bytes = Vec::new();
+        encode(&index, &mut bytes).expect("encodes");
+        for cut in 0..bytes.len() {
+            assert_eq!(decode(&bytes[..cut]), None, "cut at {cut}");
+        }
+    }
+
+    /// Flipping any byte never panics and never yields a changed index.
+    ///
+    /// Header, length, text, digest or postings: only the key half of the
+    /// header sits outside the digest, and a flipped key still reads back
+    /// the same index under another name.
+    ///
+    /// # Panics
+    ///
+    /// When a flip crashes the reader or lands a changed index.
+    #[test]
+    fn every_single_byte_flip_is_refused_or_consistent() {
+        let index = sample();
+        let mut bytes = Vec::new();
+        encode(&index, &mut bytes).expect("encodes");
+        for at in 0..bytes.len() {
+            for xor in [0x01u8, 0x80, 0xff] {
+                let mut flipped = bytes.clone();
+                flipped[at] ^= xor;
+                let decoded = decode(&flipped);
+                assert!(
+                    decoded.as_ref().is_none_or(|ix| {
+                        ix.functions == index.functions && ix.postings == index.postings
+                    }),
+                    "byte {at} xor {xor:#x} changed the index"
+                );
+            }
+        }
+    }
+
+    /// A flipped byte in each named field - the magic, the format word,
+    /// the record count, the digest, a name, a text, and every field of
+    /// the postings tail the one-edit test never reaches - is refused.
+    ///
+    /// # Panics
+    ///
+    /// When an edited field is read, or a field cannot be located in the
+    /// file.
+    #[test]
+    fn edits_in_every_named_field_are_refused() {
+        let index = sample();
+        let mut bytes = Vec::new();
+        encode(&index, &mut bytes).expect("encodes");
+        let find = |needle: &[u8], bytes: &[u8]| {
+            bytes
+                .windows(needle.len())
+                .position(|w| w == needle)
+                .expect("the needle is in the file")
+        };
+        let mut fields = vec![
+            (0, "the magic"),
+            (8, "the format word"),
+            (28, "the record count"),
+            (32, "the digest"),
+            (find(b"sub_2000", &bytes), "a name"),
+            (find(b"AppendCommand", &bytes), "a text"),
+        ];
+        let mut records_end = 40;
+        for f in &index.functions {
+            records_end += 16 + f.name.len() + f.text.len();
+        }
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("aligned"));
+        let present = u32_at(records_end);
+        fields.push((records_end, "the postings count"));
+        let mut walk = records_end + 4;
+        for _ in 0..present {
+            fields.push((walk, "a trigram id"));
+            walk += 4;
+            fields.push((walk, "a list length"));
+            let len = u32_at(walk);
+            walk += 4;
+            for _ in 0..len {
+                fields.push((walk, "a function index"));
+                walk += 4;
+            }
+        }
+        assert_eq!(walk, bytes.len(), "the walk reaches the file's end");
+        for (at, what) in fields {
+            let mut edited = bytes.clone();
+            edited[at] ^= 0xff;
+            assert_eq!(decode(&edited), None, "{what} is refused");
+        }
+    }
+
+    /// Postings that claim more than the file holds are refused.
+    ///
+    /// A present count past the alphabet, a trigram id out of range, a
+    /// list longer than the bytes left, a list the file cuts short
+    /// mid-entry, a list the digest never covered.
+    ///
+    /// # Panics
+    ///
+    /// When a hostile count is read.
+    #[test]
+    fn hostile_posting_counts_are_refused() {
+        let mut plain = sample();
+        plain.postings = Postings::default();
+        let mut bytes = Vec::new();
+        encode(&plain, &mut bytes).expect("encodes an index without postings");
+        let words =
+            |parts: &[u32]| -> Vec<u8> { parts.iter().flat_map(|p| p.to_le_bytes()).collect() };
+        let trigrams = u32::try_from(TRIGRAMS).expect("the alphabet fits a u32");
+        let mut cut_short = words(&[1, 0, 1]);
+        cut_short.extend_from_slice(&[0xAB, 0xCD]);
+        for (tail, why) in [
+            (words(&[u32::MAX]), "a present count past the alphabet"),
+            (words(&[trigrams]), "more lists than the file holds"),
+            (words(&[1, trigrams]), "a trigram id past the alphabet"),
+            (
+                words(&[1, 0, u32::MAX]),
+                "a list longer than the bytes left",
+            ),
+            (cut_short, "a list the file cuts short mid-entry"),
+            (words(&[1, 0, 1, 0]), "a list the digest never covered"),
+        ] {
+            let mut hostile = bytes[..bytes.len() - 4].to_vec();
+            hostile.extend_from_slice(&tail);
+            assert_eq!(decode(&hostile), None, "{why} is refused");
+        }
+    }
+
+    /// A record count the file cannot hold is refused before anything is
+    /// allocated for it.
+    ///
+    /// A 32-byte header claiming four billion records, under a file that
+    /// would need sixteen bytes for each: a hostile cache file cannot ask
+    /// for memory by its count alone.
+    ///
+    /// # Panics
+    ///
+    /// When the count is read or the scratch file cannot be stretched.
+    #[test]
+    fn a_record_count_past_the_files_bytes_is_refused() {
+        let mut header = Vec::new();
+        header.extend_from_slice(MAGIC);
+        header.extend_from_slice(&FORMAT.to_le_bytes());
+        header.extend_from_slice(&1u64.to_le_bytes());
+        header.extend_from_slice(&2u64.to_le_bytes());
+        header.extend_from_slice(&u32::MAX.to_le_bytes());
+        let dir = scratch("huge_count");
+        let path = dir.join(
+            IndexKey {
+                program: 1,
+                engine: 2,
+            }
+            .file_name(),
+        );
+        std::fs::write(&path, &header).expect("writes the header");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("opens");
+        file.set_len(u64::from(u32::MAX) + 128)
+            .expect("stretches without writing");
+        drop(file);
+        assert_eq!(
+            load_from(&path),
+            None,
+            "the count is past what the file can hold"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+    }
+
+    /// Lawless postings are refused even with a matching digest.
+    ///
+    /// A list out of order, an entry naming a function that is not there:
+    /// this format never writes either, and the binary search a grep
+    /// intersects with trusts the order, so over an unsorted list it can
+    /// miss every function the shortest list marked, hiding lines the
+    /// texts hold.
+    ///
+    /// # Panics
+    ///
+    /// When a lawful hand-made index is refused, or a lawless one is read,
+    /// or the unsorted list fails to hide the lines it must.
+    #[test]
+    fn lawless_postings_are_refused_even_with_a_matching_digest() {
+        let functions: Vec<IndexedFunction> = (0..3u64)
+            .map(|i| IndexedFunction {
+                entry: 0x1000 + 0x10 * i,
+                name: format!("f{i}"),
+                text: if i == 2 {
+                    "y = 1;\n".to_owned()
+                } else {
+                    "x = abcdef;\n".to_owned()
+                },
+            })
+            .collect();
+        let (abc, bcd, cde, def) = (
+            trigram(0, 1, 2),
+            trigram(1, 2, 3),
+            trigram(2, 3, 4),
+            trigram(3, 4, 5),
+        );
+        let made = |lists: Vec<(usize, Vec<u32>)>| {
+            let mut postings = Postings {
+                lists: vec![Vec::new(); TRIGRAMS],
+            };
+            for (id, list) in lists {
+                postings.lists[id] = list;
+            }
+            CodeIndex {
+                key: IndexKey {
+                    program: 13,
+                    engine: 14,
+                },
+                functions: functions.clone(),
+                postings,
+            }
+        };
+        let round_trip = |index: &CodeIndex| {
+            let mut bytes = Vec::new();
+            encode(index, &mut bytes).expect("encodes");
+            decode(&bytes)
+        };
+        let lawful = made(vec![
+            (abc, vec![0, 1]),
+            (bcd, vec![0, 1]),
+            (cde, vec![0, 1]),
+            (def, vec![0, 1]),
+        ]);
+        assert_eq!(
+            round_trip(&lawful),
+            Some(lawful),
+            "a hand-made but lawful shape reads back"
+        );
+        let unsorted = made(vec![
+            (abc, vec![0, 1]),
+            (bcd, vec![2, 1, 0]),
+            (cde, vec![0, 1]),
+            (def, vec![0, 1]),
+        ]);
+        let matcher = Matcher::parse("abcdef").expect("parses");
+        assert_eq!(
+            grep_shape(&unsorted, &matcher, ""),
+            Vec::new(),
+            "the binary search over the unsorted list misses every function it marked"
+        );
+        assert_eq!(
+            brute_hits(&unsorted, &matcher, "").len(),
+            2,
+            "both texts hold the literal"
+        );
+        assert_eq!(
+            round_trip(&unsorted),
+            None,
+            "an out-of-order list is corrupt, digest or no digest"
+        );
+        let foreign = made(vec![
+            (abc, vec![0, 1]),
+            (bcd, vec![0, 1]),
+            (cde, vec![0, 1]),
+            (def, vec![0, 99]),
+        ]);
+        assert_eq!(
+            round_trip(&foreign),
+            None,
+            "an entry past the functions is corrupt"
         );
     }
 }
