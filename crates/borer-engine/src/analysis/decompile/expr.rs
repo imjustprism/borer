@@ -2095,8 +2095,9 @@ const MBA_NODES_MAX: usize = 32;
 /// c2*(~x & y) + c3*(x & y)`, so evaluating it on the four classes of
 /// `(x, y)` - both zero, one all-ones and the other zero, both all-ones -
 /// gives the coefficients (the all-ones mask is odd, so it divides). The
-/// coefficients then name the plain form: `x + y` is `(0, 1, 1, 2)`, the
-/// or is `(0, 1, 1, -1)`, a difference keeps its zero. The collapsed form
+/// coefficients then name the plain form, read in the basis `1, x, y,
+/// x & y`: `x + y` is `(0, 1, 1, 0)`, the or is `(0, 1, 1, -1)`, a
+/// difference keeps its zero. The collapsed form
 /// is checked against the original on the four class vectors and two
 /// mixed ones before it answers, so a shape this misread - a product, a
 /// variable shift - never survives to say so; only a strictly smaller
@@ -2221,16 +2222,34 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
             _ => false,
         }
     }
-    /// Whether the tree is selector-linear in its leaves: no shift by a
-    /// leaf, no shift right at all (a constant one loses bits the lattice
-    /// does not carry), no product or quotient of two leaves.
+    /// Whether the tree is selector-linear in its leaves.
+    ///
+    /// No shift by a leaf, no shift right at all (a constant one loses
+    /// bits the lattice does not carry), no product or quotient of two
+    /// leaves, and no and, or or xor over an operand that is not a
+    /// bitwise function of the leaves' own bits - a negation or a sum
+    /// inside one carries between bit positions, which the lattice the
+    /// coefficients are read on does not model.
     fn linear(e: &Expr, x: &Expr, y: Option<&Expr>) -> bool {
+        /// Whether the tree is a bitwise function of the leaves' bits:
+        /// each of its bits depends only on the leaves' bits at that
+        /// position.
+        fn bitwise(e: &Expr, x: &Expr, y: Option<&Expr>) -> bool {
+            match e {
+                Expr::Const(_) => true,
+                leaf if leaf == x || y.is_some_and(|y| leaf == y) => true,
+                Expr::Un(UnOp::Not, a) => bitwise(a, x, y),
+                Expr::Bin(Op::And | Op::Or | Op::Xor, a, b) => bitwise(a, x, y) && bitwise(b, x, y),
+                _ => false,
+            }
+        }
         match e {
             Expr::Bin(Op::Shl, a, count) => !mentions(count, x, y) && linear(a, x, y),
             Expr::Bin(Op::Shr | Op::Sar, ..) => false,
             Expr::Bin(Op::Mul | Op::Div | Op::Rem | Op::SDiv | Op::SRem, a, b) => {
                 !(mentions(a, x, y) && mentions(b, x, y)) && linear(a, x, y) && linear(b, x, y)
             }
+            Expr::Bin(Op::And | Op::Or | Op::Xor, a, b) => bitwise(a, x, y) && bitwise(b, x, y),
             Expr::Bin(_, a, b) | Expr::Ternary(_, a, b) => linear(a, x, y) && linear(b, x, y),
             Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => linear(a, x, y),
             _ => true,
@@ -2288,13 +2307,13 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         .wrapping_mul(inv)
         & m;
     let one = 1 & m;
-    let two = 2 & m;
     let neg = m;
     let neg_two = m.wrapping_sub(1);
     let y = || y.clone();
     // INVARIANT: the coefficients read in the basis `1, x, y, x & y`, so
-    // `x` is `(1, 0, 0)` and the or, an x plus a y less the shared bits,
-    // is `(1, 1, -1)`.
+    // `x` is `(1, 0, 0)`, a sum keeps the shared bits out of the third
+    // coefficient at `(1, 1, 0)`, and the or, an x plus a y less the
+    // shared bits, is `(1, 1, -1)`.
     let plain = match (c1, c2, c3) {
         (0, 0, 0) => Some(Expr::Const(k)),
         (a, 0, 0) if a == one => Some(plus(x.clone(), k, bits)),
@@ -2313,7 +2332,7 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         )),
         (a, b, c) if a == one && b == one => {
             let form = match c {
-                _ if c == two => Expr::Bin(Op::Add, Box::new(x.clone()), Box::new(y()?)),
+                0 => Expr::Bin(Op::Add, Box::new(x.clone()), Box::new(y()?)),
                 _ if c == neg => Expr::Bin(Op::Or, Box::new(x.clone()), Box::new(y()?)),
                 _ if c == neg_two => Expr::Bin(Op::Xor, Box::new(x.clone()), Box::new(y()?)),
                 _ => return None,
@@ -5069,6 +5088,133 @@ mod fold_tests {
         t.fold("(w - 1) - bsr(x)", (Op::Sub, top, scan), w, xs, one);
     }
 
+    /// The general MBA collapse under attack: shapes that smuggle a
+    /// non-linear step past the linear gate, sign-extension layers, stack
+    /// slots as variables, and constants above the width.
+    ///
+    /// Every row is a shape the collapse either rewrites or must refuse;
+    /// [`fold`] comparing it with the unfolded node on the domain's values
+    /// is the ground truth either way. Rows that must come back unchanged
+    /// are pinned structurally in [`mba_refusals_stay_unfolded`].
+    ///
+    /// # Arguments
+    ///
+    /// * `t` - The tally.
+    /// * `d` - The values.
+    fn mba_stress(t: &mut Tally, d: &Domain) {
+        let (w, xs, ys, one) = (d.w, d.xs.as_slice(), d.ys.as_slice(), &[0u64][..]);
+        let sext = |e: Expr| Expr::Sext(Box::new(e), w);
+        for (name, op, l, r, sweep) in [
+            (
+                "(x & ~y) + (~x & y) + ((x & y) << 1)",
+                Op::Add,
+                b(
+                    Op::Add,
+                    &b(Op::And, &X, &u(Y.clone())),
+                    &b(Op::And, &u(X.clone()), &Y),
+                ),
+                b(Op::Shl, &b(Op::And, &X, &Y), &k(1)),
+                ys,
+            ),
+            (
+                "(x ^ y) + (x & y) + (x & y)",
+                Op::Add,
+                b(Op::Add, &b(Op::Xor, &X, &Y), &b(Op::And, &X, &Y)),
+                b(Op::And, &X, &Y),
+                ys,
+            ),
+            (
+                "sext(x ^ y) + sext((x & y) << 1)",
+                Op::Add,
+                sext(b(Op::Xor, &X, &Y)),
+                sext(b(Op::Shl, &b(Op::And, &X, &Y), &k(1))),
+                ys,
+            ),
+            (
+                "sext(~(x + c))",
+                Op::Add,
+                sext(u(b(Op::Add, &X, &k(0x5a)))),
+                k(0),
+                one,
+            ),
+            (
+                "~(~(x + c)) + c",
+                Op::Add,
+                u(u(b(Op::Add, &X, &k(7)))),
+                k(7),
+                one,
+            ),
+            (
+                "(x ^ above) ^ above",
+                Op::Xor,
+                b(Op::Xor, &X, &k(lane(w).wrapping_add(3))),
+                k(lane(w).wrapping_add(3)),
+                one,
+            ),
+            ("~(x + c) + 1", Op::Add, u(b(Op::Add, &X, &k(9))), k(1), one),
+            (
+                "(sp ^ y) + ((sp & y) << 1)",
+                Op::Add,
+                b(Op::Xor, &Expr::Sp(-0x28), &Y),
+                b(Op::Shl, &b(Op::And, &Expr::Sp(-0x28), &Y), &k(1)),
+                ys,
+            ),
+            (
+                "(x | y) - (x & y) - 1",
+                Op::Sub,
+                b(Op::Sub, &b(Op::Or, &X, &Y), &b(Op::And, &X, &Y)),
+                k(1),
+                ys,
+            ),
+        ] {
+            t.fold(name, (op, l, r), w, xs, sweep);
+        }
+        for &c in &d.cs {
+            t.fold(
+                "(x ^ c) ^ c",
+                (Op::Xor, b(Op::Xor, &X, &k(c)), k(c)),
+                w,
+                xs,
+                one,
+            );
+        }
+        // A tree one pad under the node cap still collapses; the cap
+        // itself is pinned in mba_refusals_stay_unfolded.
+        let pad = b(Op::Xor, &b(Op::And, &X, &Y), &b(Op::And, &X, &Y));
+        let mut capped = b(
+            Op::Add,
+            &b(Op::Xor, &X, &Y),
+            &b(Op::Shl, &b(Op::And, &X, &Y), &k(1)),
+        );
+        for _ in 0..2 {
+            capped = b(Op::Add, &capped, &pad.clone());
+        }
+        t.fold("x + y at the node cap", (Op::Add, capped, k(0)), w, xs, ys);
+    }
+
+    /// The MBA collapse's rows hold at width 16, between the exhaustive
+    /// byte sweep and the sampled words, where the negative-looking
+    /// constants `0xff` and `0xfe` sit inside the lane.
+    ///
+    /// # Panics
+    ///
+    /// When a rewrite changed a row's value.
+    #[test]
+    fn mba_rows_hold_at_16_bits() {
+        let wide = harvest();
+        let pick: Vec<u64> = wide.iter().copied().step_by(7).collect();
+        let d = Domain {
+            w: 16,
+            xs: wide,
+            ys: pick.clone(),
+            cs: pick.clone(),
+            ds: pick,
+        };
+        let mut t = Tally::default();
+        mba_stress(&mut t, &d);
+        assert!(t.fails.is_empty(), "counterexamples: {:#?}", t.fails);
+    }
+
     /// The divisions a compiler strength-reduces, as [`fold`] reverses them.
     ///
     /// # Arguments
@@ -5540,6 +5686,7 @@ mod fold_tests {
         };
         let mut t = Tally::default();
         local(&mut t, &d);
+        mba_stress(&mut t, &d);
         builders(&mut t, &d);
         let magics: Vec<(u64, u64)> = (0..=255)
             .flat_map(|m| (0..8).map(move |s| (m, s)))
@@ -5589,6 +5736,7 @@ mod fold_tests {
                 ds: pick.iter().copied().step_by(3).collect(),
             };
             local(&mut t, &d);
+            mba_stress(&mut t, &d);
             builders(&mut t, &d);
             power_quotients(&mut t, w, &wide);
             let mut xs = wide.clone();
@@ -5617,5 +5765,219 @@ mod fold_tests {
             divisions(&mut t, w, &magics, &xs);
         }
         t.verdict();
+    }
+
+    /// What the collapse must refuse, pinned on the tree it returns.
+    ///
+    /// A right shift anywhere in a linear form, a shift whose count is
+    /// the second variable, a multiplication of a selector by a constant
+    /// wider than one bit, a tree past [`MBA_NODES_MAX`] nodes, and a
+    /// negation or a sum inside an and, or or xor (its carries move bits
+    /// between positions, off the lattice the collapse measures) all
+    /// come back unfolded. A stack slot leaf is a variable, so the
+    /// collapse that fires names it, not a constant.
+    ///
+    /// # Panics
+    ///
+    /// When a refused shape is rewritten, or the stack-slot form collapses
+    /// to something but `sp + y`.
+    #[test]
+    fn mba_refusals_stay_unfolded() {
+        let unchanged = |op, l: &Expr, r: &Expr, w| {
+            assert_eq!(
+                fold(op, l.clone(), r.clone(), w),
+                b(op, l, r),
+                "rewrote a refused shape at width {w}"
+            );
+        };
+        let smuggled_l = b(
+            Op::Add,
+            &b(Op::Add, &b(Op::Shr, &X, &k(1)), &Y),
+            &b(Op::And, &X, &Y),
+        );
+        let smuggled_r = b(Op::Add, &Y, &b(Op::And, &X, &Y));
+        unchanged(Op::Sub, &smuggled_l, &smuggled_r, 64);
+        unchanged(
+            Op::Add,
+            &b(Op::Xor, &X, &Y),
+            &b(Op::Shl, &b(Op::And, &X, &Y), &Y),
+            32,
+        );
+        unchanged(Op::Mul, &b(Op::And, &X, &Y), &k(2), 8);
+        unchanged(Op::Mul, &b(Op::And, &X, &Y), &k(3), 8);
+        unchanged(
+            Op::Mul,
+            &k(2),
+            &b(
+                Op::Add,
+                &b(Op::Xor, &X, &Y),
+                &b(Op::Shl, &b(Op::And, &X, &Y), &k(1)),
+            ),
+            32,
+        );
+        // The borrow a negation carries between bit positions is not on
+        // the lattice: this reads as the constant all-ones on every probe
+        // the collapse measures, and still is not one. Found by
+        // rewrites_hold_on_seeded_trees_with_sign_extensions' sweep.
+        let borrows = b(
+            Op::And,
+            &u(Y.clone()),
+            &b(
+                Op::And,
+                &Expr::Un(UnOp::Neg, Box::new(X.clone())),
+                &b(Op::Shl, &k(11_444_343_663_368_143_628), &k(7)),
+            ),
+        );
+        unchanged(Op::Or, &Y, &u(borrows), 32);
+        unchanged(Op::And, &u(b(Op::Add, &X, &k(3))), &Y, 32);
+        let pad = b(Op::Xor, &b(Op::And, &X, &Y), &b(Op::And, &X, &Y));
+        let mut capped = b(
+            Op::Add,
+            &b(Op::Xor, &X, &Y),
+            &b(Op::Shl, &b(Op::And, &X, &Y), &k(1)),
+        );
+        for _ in 0..3 {
+            capped = b(Op::Add, &capped, &pad.clone());
+        }
+        assert_eq!(
+            fold(Op::Add, capped.clone(), k(0), 32),
+            capped,
+            "a tree past MBA_NODES_MAX must come back unfolded"
+        );
+        let sp = b(
+            Op::Add,
+            &b(Op::Xor, &Expr::Sp(-0x28), &Y),
+            &b(Op::Shl, &b(Op::And, &Expr::Sp(-0x28), &Y), &k(1)),
+        );
+        assert_eq!(
+            fold(Op::Add, sp, k(0), 64),
+            b(Op::Add, &Expr::Sp(-0x28), &Y),
+            "a stack slot leaf must collapse as a variable"
+        );
+    }
+
+    /// Builds the next seeded value of a splitmix64 stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The stream state, advanced in place.
+    fn next(s: &mut u64) -> u64 {
+        *s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// Builds one seeded random tree over the folder's algebra.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The stream state, advanced in place.
+    /// * `depth` - Remaining recursion; at zero only leaves are built.
+    /// * `sext` - Whether [`Expr::Sext`] layers may appear.
+    fn tree(s: &mut u64, depth: u8, sext: bool) -> Expr {
+        let pick = |s: &mut u64, n: u64| next(s) % n;
+        let leaf = |s: &mut u64| match pick(s, 4) {
+            0 => X.clone(),
+            1 => Y.clone(),
+            _ => k(next(s)),
+        };
+        let sub = |s: &mut u64, d: u8| tree(s, d, sext);
+        if depth == 0 {
+            return leaf(s);
+        }
+        if sext && pick(s, 6) == 0 {
+            let from = [8u8, 16, 24, 31, 32, 64][usize::try_from(pick(s, 6)).unwrap()];
+            return Expr::Sext(Box::new(sub(s, depth - 1)), from);
+        }
+        match pick(s, 13) {
+            0 => b(Op::And, &sub(s, depth - 1), &sub(s, depth - 1)),
+            1 => b(Op::Or, &sub(s, depth - 1), &sub(s, depth - 1)),
+            2 => b(Op::Xor, &sub(s, depth - 1), &sub(s, depth - 1)),
+            3 => b(Op::Add, &sub(s, depth - 1), &sub(s, depth - 1)),
+            4 => b(Op::Sub, &sub(s, depth - 1), &sub(s, depth - 1)),
+            5 => b(Op::Mul, &sub(s, depth - 1), &k(next(s))),
+            6 => b(Op::Shl, &sub(s, depth - 1), &k(pick(s, 40))),
+            7 => b(Op::Shr, &sub(s, depth - 1), &k(pick(s, 40))),
+            8 => u(sub(s, depth - 1)),
+            9 => Expr::Un(UnOp::Neg, Box::new(sub(s, depth - 1))),
+            _ => leaf(s),
+        }
+    }
+
+    /// Folds seeded random trees and holds every rewrite they survive
+    /// against the unfolded tree on seeded inputs.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The stream state, advanced in place.
+    /// * `sext` - Whether the trees may sign-extend.
+    /// * `name` - The check's name, for the failure message.
+    ///
+    /// # Panics
+    ///
+    /// When a rewrite changes a tree's value, or no tree was rewritten at
+    /// all (the sweep would then check nothing).
+    fn sweep_holds(s: &mut u64, sext: bool, name: &str) {
+        const W: u8 = 32;
+        let mut changed = 0usize;
+        for _ in 0..300 {
+            let op = match next(s) % 5 {
+                0 => Op::Add,
+                1 => Op::Sub,
+                2 => Op::And,
+                3 => Op::Or,
+                _ => Op::Xor,
+            };
+            let l = tree(s, 4, sext);
+            let r = tree(s, 4, sext);
+            let before = b(op, &l, &r);
+            let after = fold(op, l, r, W);
+            changed += usize::from(after != before);
+            for _ in 0..64 {
+                let (x, y) = (next(s), next(s));
+                let Some(want) = ev(&before, W, x, y) else {
+                    continue;
+                };
+                let got = ev(&after, W, x, y);
+                assert_eq!(
+                    got.map(|v| v & lane(W)),
+                    Some(want & lane(W)),
+                    "{name}: {before:?} became {after:?} at x={x:#x} y={y:#x}"
+                );
+            }
+        }
+        assert!(changed > 0, "{name}: no tree was rewritten");
+    }
+
+    /// The folder's rewrites hold on seeded random trees.
+    ///
+    /// # Panics
+    ///
+    /// When a rewrite changes a tree's value.
+    #[test]
+    fn rewrites_hold_on_seeded_trees() {
+        for seed in [0x0123_4567_89ab_cdefu64, 0x243f_6a88_85a3_08d3] {
+            let mut s = seed;
+            sweep_holds(&mut s, false, "plain");
+        }
+    }
+
+    /// The collapse holds with sign-extension layers in the tree.
+    ///
+    /// A [`Expr::Sext`] from fewer bits than the width is not linear on
+    /// the lattice the collapse measures, so this is the shape a misread
+    /// would slip through on.
+    ///
+    /// # Panics
+    ///
+    /// When a rewrite changes a tree's value.
+    #[test]
+    fn rewrites_hold_on_seeded_trees_with_sign_extensions() {
+        for seed in [0xfeed_face_dead_beefu64, 0x1319_8a2e_0370_7344] {
+            let mut s = seed;
+            sweep_holds(&mut s, true, "sext");
+        }
     }
 }

@@ -1627,6 +1627,9 @@ impl<'p> Script<'p> {
                 && mentions(read, param)
             {
                 targets(read, param, &mut found, 8);
+                if let Step::Switch(_, cases, _) = &op.step {
+                    found.extend(cases.iter().take(8).map(|(k, _)| (*k, read)));
+                }
                 if !found.is_empty() {
                     line = op.line;
                     break;
