@@ -188,15 +188,19 @@ def main(argv: list[str]) -> int:
                     # Not a gate yet: running the final text of the
                     # small functions finds defects the passes after the
                     # lifter leave (two-register returns, sunk stores, slot
-                    # and shift widths, calls typed as values) on 279 corpus
-                    # functions and 7 of msvcrt; it joins when both reach 0.
+                    # and shift widths, calls typed as values). The
+                    # unwritten-frame-read model (2026-10-15) took the
+                    # corpus from 3381 differing inputs to 34, each now a
+                    # distinct width/callee-modeling defect; it joins at 0.
                     "--skip",
                     "the_final_text_agrees_with_the_emulator_on_small_functions",
                     # Not a gate yet: the closure sweep lists the lines that
                     # read a value no line sets (the decompile answer marks
                     # them `// !unset:`); most pass a register to a callee
                     # whose signature lists more parameters than the caller
-                    # sets, which the arity work owns.
+                    # sets (corpus census 2026-10-15: 3850 lines in 2955
+                    # functions, 90% register arity r8-15/rax/rcx/rdx),
+                    # which the whole-callgraph arity work owns.
                     "--skip",
                     "every_value_the_text_reads_is_set_or_an_input",
                     # The arm64 sweeps read their own binary

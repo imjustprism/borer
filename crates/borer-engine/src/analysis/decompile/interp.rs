@@ -51,8 +51,11 @@ const SENTINEL_32: u64 = 0x5fff_0000;
 /// Bytes left between the text's lowest frame slot and a callee's frame.
 const CALL_GAP: u64 = 0x100;
 
-/// Most bytes a modeled `memset`, `memcpy` or `strlen` touches.
+/// Most steps a modeled `memset`, `memcpy` or `strlen` touches.
 const BUILTIN_MAX: u64 = 1 << 20;
+
+/// Steps the two verification runs of a solved constraint are given.
+const SOLVE_BUDGET: usize = 50_000;
 
 /// Most steps the closure check ([`Script::unset_reads`]) takes before it
 /// gives up and flags nothing.
@@ -354,6 +357,10 @@ pub(crate) struct Script<'p> {
     callees: FxHashMap<u64, Passing>,
     /// The stack pointer at entry, the base of the frame offsets.
     entry_sp: u64,
+    /// The lowest frame address a declared slot stands at: reads of the
+    /// frame this side of it the machine answers with the fresh stack's
+    /// zeros, and the text does too.
+    frame_low: u64,
     /// The thread block the machine plants, which `NtCurrentTeb()` is.
     teb: u64,
     /// The memory of each 128-bit register variable, zero at entry.
@@ -1338,6 +1345,7 @@ impl<'p> Script<'p> {
             passing: pass,
             callees,
             entry_sp,
+            frame_low,
             teb,
             wide,
             call_sp,
@@ -1432,6 +1440,218 @@ impl<'p> Script<'p> {
             entry_sp: self.entry_sp,
             literals: self.literals.values().flatten().copied().collect(),
         })
+    }
+
+    /// Solves for one parameter the first constraint the compiled body
+    /// tests, by inverting the chain it computes.
+    ///
+    /// The check shapes a key validator and a crackme take - `f(a1) ==
+    /// 0x1337`, a `switch (f(a1))` - hold the answer in the arithmetic
+    /// between the parameter and the constant: every step of a bijective
+    /// chain (`+`, `-`, `^`, a complement, a negation, a multiplication
+    /// by an odd constant, a truncating cast or a left shift that keeps
+    /// its bits) has an inverse, so walking the chain from the constant
+    /// back to the bare parameter states the input that satisfies it. The
+    /// candidate is then run: only one the run answers differently from a
+    /// zero argument is reported, so a misread chain says nothing rather
+    /// than something wrong. A chain step without an inverse - an `&`, an
+    /// `|`, a shift right, a multiplication by an even constant, another
+    /// variable - ends the search.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - The parameter's position from zero.
+    ///
+    /// # Returns
+    ///
+    /// The candidate that satisfies the constraint, the 1-based line the
+    /// constraint's comparison sits on, and what the run of it and of a
+    /// zero argument each answered; `None` when no comparison names the
+    /// parameter, its chain does not invert, or the candidate answers the
+    /// same as zero.
+    pub(crate) fn solve_for(&self, slot: usize) -> Option<(u64, usize, String, String)> {
+        /// Whether an expression names the parameter.
+        fn mentions(e: &Ast, param: &str) -> bool {
+            match e {
+                Ast::Name(n) => n == param,
+                Ast::Int(..) | Ast::Float(..) | Ast::Str(_) => false,
+                Ast::Un(_, a) | Ast::Cast(_, a) => mentions(a, param),
+                Ast::Bin(_, a, b) | Ast::Logic(_, a, b) => mentions(a, param) || mentions(b, param),
+                Ast::Pick(a, b, c) => {
+                    mentions(a, param)
+                        || b.as_ref().is_some_and(|b| mentions(b, param))
+                        || mentions(c, param)
+                }
+                _ => false,
+            }
+        }
+        /// Inverts a chain expression, from the value it must take back
+        /// to the parameter's value.
+        fn invert(e: &Ast, want: u64, param: &str, word: u8, depth: u8) -> Option<u64> {
+            let m = mask(word);
+            if depth == 0 {
+                return None;
+            }
+            match e {
+                Ast::Name(n) if n == param => Some(want & m),
+                Ast::Un(Un::Neg, a) => invert(a, want.wrapping_neg() & m, param, word, depth - 1),
+                Ast::Un(Un::Plus, a) => invert(a, want, param, word, depth - 1),
+                Ast::Un(Un::Not, a) => invert(a, want ^ m, param, word, depth - 1),
+                Ast::Cast(ty, a) => {
+                    let bits = ty.bits(word).unwrap_or(word);
+                    if ty.float().is_some() || bits > word {
+                        return None;
+                    }
+                    invert(a, want & mask(bits), param, word, depth - 1)
+                }
+                Ast::Bin(op, a, b) => {
+                    let (a, b) = (a.as_ref(), b.as_ref());
+                    let k = |e: &Ast| match e {
+                        Ast::Int(v, _) => Some(*v & m),
+                        _ => None,
+                    };
+                    match op {
+                        Bin::Add => k(b)
+                            .and_then(|k| invert(a, want.wrapping_sub(k), param, word, depth - 1))
+                            .or_else(|| {
+                                k(a).and_then(|k| {
+                                    invert(b, want.wrapping_sub(k), param, word, depth - 1)
+                                })
+                            }),
+                        Bin::Sub => k(b)
+                            .and_then(|k| invert(a, want.wrapping_add(k), param, word, depth - 1))
+                            .or_else(|| {
+                                k(a).and_then(|k| {
+                                    invert(b, k.wrapping_sub(want), param, word, depth - 1)
+                                })
+                            }),
+                        Bin::Xor => k(b)
+                            .and_then(|k| invert(a, want ^ k, param, word, depth - 1))
+                            .or_else(|| {
+                                k(a).and_then(|k| invert(b, want ^ k, param, word, depth - 1))
+                            }),
+                        Bin::Mul => {
+                            // An odd constant has an inverse modulo the
+                            // word, by Newton iteration.
+                            let odd = |e: &Ast| k(e).filter(|c| c & 1 == 1);
+                            let inv = |c: u64| {
+                                let mut x = 1u64;
+                                for _ in 0..6 {
+                                    x = x.wrapping_mul(2u64.wrapping_sub(c.wrapping_mul(x)));
+                                }
+                                x
+                            };
+                            odd(b)
+                                .map(inv)
+                                .and_then(|i| {
+                                    invert(a, want.wrapping_mul(i) & m, param, word, depth - 1)
+                                })
+                                .or_else(|| {
+                                    odd(a).map(inv).and_then(|i| {
+                                        invert(b, want.wrapping_mul(i) & m, param, word, depth - 1)
+                                    })
+                                })
+                        }
+                        Bin::Shl => k(b).and_then(|s| {
+                            let s = s & 63;
+                            (want & mask(u8::try_from(s).unwrap_or(64)) == 0)
+                                .then(|| invert(a, want >> s, param, word, depth - 1))
+                                .flatten()
+                        }),
+                        Bin::And => {
+                            // A mask of a power-of-two width is a
+                            // truncation the C spells as a cast anyway.
+                            let width =
+                                |k: u64| (k & m).checked_add(1).filter(|p| p.count_ones() == 1);
+                            k(b).and_then(width)
+                                .and_then(|p| u8::try_from(63 - p.leading_zeros()).ok())
+                                .and_then(|bits| {
+                                    invert(a, want & mask(bits), param, word, depth - 1)
+                                })
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        /// The equality targets inside an expression: each `chain ==
+        /// constant` or `chain != constant` whose chain names the
+        /// parameter, and each constant of a switch on such a chain.
+        fn targets<'e>(e: &'e Ast, param: &str, out: &mut Vec<(u64, &'e Ast)>, depth: u8) {
+            if depth == 0 || out.len() >= 8 {
+                return;
+            }
+            match e {
+                Ast::Bin(Bin::Eq | Bin::Ne, a, b) => {
+                    let k = |x: &Ast| match x {
+                        Ast::Int(v, _) => Some(*v),
+                        _ => None,
+                    };
+                    for (chain, want) in [(a.as_ref(), k(b.as_ref())), (b.as_ref(), k(a.as_ref()))]
+                    {
+                        if let Some(want) = want
+                            && mentions(chain, param)
+                        {
+                            out.push((want, chain));
+                        }
+                    }
+                }
+                Ast::Un(_, a) | Ast::Cast(_, a) => targets(a, param, out, depth - 1),
+                Ast::Bin(_, a, b) | Ast::Logic(_, a, b) => {
+                    targets(a, param, out, depth - 1);
+                    targets(b, param, out, depth - 1);
+                }
+                Ast::Pick(a, b, c) => {
+                    targets(a, param, out, depth - 1);
+                    if let Some(b) = b {
+                        targets(b, param, out, depth - 1);
+                    }
+                    targets(c, param, out, depth - 1);
+                }
+                _ => {}
+            }
+        }
+        let word = self.word;
+        let param = self.sig.params.get(slot)?.0.as_str();
+        let mut found: Vec<(u64, &Ast)> = Vec::new();
+        let mut line = 0;
+        for op in &self.ops {
+            let read = match &op.step {
+                Step::Test(c, _) | Step::Eval(c) => Some(c),
+                Step::Switch(v, ..) => Some(v),
+                Step::Return(Some(v)) => Some(v),
+                _ => None,
+            };
+            if let Some(read) = read
+                && mentions(read, param)
+            {
+                targets(read, param, &mut found, 8);
+                if !found.is_empty() {
+                    line = op.line;
+                    break;
+                }
+            }
+        }
+        let depth = 24;
+        let candidate = found
+            .iter()
+            .find_map(|&(want, chain)| invert(chain, want, param, word, depth))?;
+        let args_of = |v: u64| {
+            (0..self.sig.params.len())
+                .map(|i| if i == slot { v } else { 0 })
+                .collect::<Vec<u64>>()
+        };
+        let zero = self.run(&args_of(0), &[], SOLVE_BUDGET)?;
+        let solved = self.run(&args_of(candidate), &[], SOLVE_BUDGET)?;
+        let say = |r: &TextRun<'_>| match r.end {
+            End::Returned(v) => format!(
+                "returns {}",
+                v.map_or_else(|| "void".to_owned(), |v| format!("{v:#x}"))
+            ),
+            ref other => format!("{other:?}"),
+        };
+        (solved.end != zero.end).then(|| (candidate, line, say(&zero), say(&solved)))
     }
 
     /// The reads of a variable that no line of the text sets before them
@@ -1658,7 +1878,21 @@ impl<'p> Script<'p> {
             }
             Ast::Call(f, args) => {
                 self.reads(f, undeclared, set, note);
-                for a in args {
+                let passing = match f.as_ref() {
+                    Ast::Name(n) => match self.known.get(n) {
+                        Some(Known::Code(at)) => self.callees.get(at),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                for (i, a) in args.iter().enumerate() {
+                    if let (Ast::Name(n), Some(p)) = (a, passing)
+                        && i < 8
+                        && (p.skipped >> i) & 1 != 0
+                        && named_register(n).is_some_and(|r| p.regs.get(i) == Some(&r))
+                    {
+                        continue;
+                    }
                     self.reads(a, undeclared, set, note);
                 }
             }
@@ -2435,13 +2669,27 @@ impl Running<'_, '_> {
                 let mut v = 0u64;
                 for k in (0..n).rev() {
                     let a = at.wrapping_add(k) & mask(self.word());
-                    let Some(b) = self.emu.byte_stated(a) else {
-                        if self.handed.is_some_and(|h| a >= h && a < self.s.entry_sp) {
-                            return unchecked(
-                                "a read of memory the text handed to an import, which the emulator does not fill",
-                            );
+                    let b = match self.emu.byte_stated(a) {
+                        Some(b) => b,
+                        None => {
+                            if self.handed.is_some_and(|h| a >= h && a < self.s.entry_sp) {
+                                return unchecked(
+                                    "a read of memory the text handed to an import, which the emulator does not fill",
+                                );
+                            }
+                            // INVARIANT: the machine reads the function's
+                            // own unwritten frame bytes as the fresh stack's
+                            // zeros (`Emulator::byte` backs the scratch stack
+                            // with zeros), so the text reads them as zeros
+                            // too: a local no line set is undefined in C and
+                            // zero in the machine, not a fault. A store the
+                            // text dropped still differs as a value.
+                            if a >= self.s.frame_low && a < self.s.entry_sp {
+                                0
+                            } else {
+                                return Err(End::Fault(a));
+                            }
                         }
-                        return Err(End::Fault(a));
                     };
                     v = (v << 8) | u64::from(b);
                 }
@@ -3285,6 +3533,91 @@ mod tests {
     use super::{End, Script, Slot, literals};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{Arch, Program, Section};
+
+    /// An unwritten frame byte reads as the fresh stack's zero, the value
+    /// the machine reads there.
+    ///
+    /// A load that spans a written slot and its padding keeps each side's
+    /// bytes: `*(uint64_t*)&local_30` holds the store to `local_30` in its
+    /// low byte, `local_2c`'s store in its high half, and zeros between.
+    ///
+    /// # Panics
+    ///
+    /// When the load picks a written byte up one lane early, or faults.
+    #[test]
+    fn an_unwritten_frame_byte_reads_as_the_fresh_stack() {
+        let mut code = vec![0xccu8; 0x40];
+        code[..0x11].copy_from_slice(&[
+            0x48, 0x83, 0xec, 0x30, // ASM: sub rsp,30h
+            0x89, 0x54, 0x24, 0x04, // ASM: mov [rsp+4],edx
+            0xc6, 0x04, 0x24, 0x0b, // ASM: mov byte [rsp],0Bh
+            0x48, 0x8b, 0x04, 0x24, // ASM: mov rax,[rsp]
+            0xc3, // ASM: ret
+        ]);
+        let p = Program::raw_x64(&code);
+        let a = Analysis::compute(&p);
+        let source = "// signature: uint64_t f(uint64_t a1, uint64_t a2)
+// layout a1: 0x0 u64
+uint8_t local_30;
+uint32_t local_2c;
+
+local_30 = 11;
+local_2c = a2;
+return *(uint64_t*)&local_30;
+";
+        let s = Script::read(&p, &a, &Overlay::default(), 0x1000, source).unwrap();
+        let ends_with = |rhs: &str, x: &str| {
+            let head = format!(
+                "// signature: uint64_t f(uint64_t a1, uint64_t a2)
+uint8_t local_30;
+uint32_t local_2c;
+
+local_30 = 11;
+local_2c = {rhs};
+return {x};
+"
+            );
+            Script::read(&p, &a, &Overlay::default(), 0x1000, &head)
+                .unwrap()
+                .run(&[0x5000, 0x80], &[], 100)
+                .unwrap()
+                .end
+        };
+        assert_eq!(
+            ends_with("0x80", "*(uint8_t*)((char*)&local_30 + 1)"),
+            End::Returned(Some(0)),
+            "a constant write stays off the padding byte"
+        );
+        assert_eq!(
+            ends_with("a2", "*(uint8_t*)((char*)&local_30 + 1)"),
+            End::Returned(Some(0)),
+            "a parameter write stays off the padding byte"
+        );
+        assert_eq!(
+            ends_with("0x80", "*(uint64_t*)&local_30"),
+            End::Returned(Some(0x0000_0080_0000_000b)),
+            "a constant write four bytes up reads in the high half"
+        );
+        let bare = "// signature: uint64_t f(uint64_t a1, uint64_t a2)
+uint8_t local_30;
+
+local_30 = 11;
+return *(uint64_t*)&local_30;
+";
+        assert_eq!(
+            Script::read(&p, &a, &Overlay::default(), 0x1000, bare)
+                .unwrap()
+                .run(&[0x5000, 0x80], &[], 100)
+                .unwrap()
+                .end,
+            End::Returned(Some(11)),
+            "a u64 load over one written byte reads zeros past it"
+        );
+        let r = s
+            .run(&[0x5000, 0x80], &[(0x5000, vec![0; 8])], 100)
+            .unwrap();
+        assert_eq!(r.end, End::Returned(Some(0x0000_0080_0000_000b)));
+    }
 
     /// On a 32-bit target an address wraps at 32 bits, as the machine's do:
     /// `((uint16_t*)a2)[a1]` with `a1` all ones reads the word before `a2`.

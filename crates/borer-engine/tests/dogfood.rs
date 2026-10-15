@@ -756,7 +756,8 @@ fn the_text_agrees_with_the_emulator_on_every_block() {
 /// (20000). An input the binary does not return from, or the text holds a
 /// line this cannot run, is unchecked and counted by reason; each
 /// difference prints as a row: the entry, the input, the line and what
-/// differs.
+/// differs. `BORER_DOGFOOD_ONLY` (`0x`-hex) narrows the sweep to one
+/// entry and prints the text under test.
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn the_final_text_agrees_with_the_emulator_on_small_functions() {
@@ -774,6 +775,9 @@ fn the_final_text_agrees_with_the_emulator_on_small_functions() {
         knob("BORER_DOGFOOD_STEPS", 20_000),
     );
     let seed = u64::try_from(knob("BORER_DOGFOOD_SEED", 1)).unwrap_or(1);
+    let only = std::env::var("BORER_DOGFOOD_ONLY")
+        .ok()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok());
     // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
     // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
@@ -783,8 +787,14 @@ fn the_final_text_agrees_with_the_emulator_on_small_functions() {
         .functions
         .iter()
         .filter(|f| f.thunk.is_none() && f.funclet.is_none() && f.instr_count <= small)
+        .filter(|f| only.is_none_or(|e| f.entry == e))
         .map(|f| f.entry)
         .collect();
+    if let Some(e) = only {
+        let text = borer_engine::analysis::decompile::decompile_named(&p, &a, &o, e)
+            .unwrap_or_else(|| "(no text)".to_owned());
+        eprintln!("TEXT of {e:#x}:\n{text}");
+    }
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let started = std::time::Instant::now();
     type Each = (
@@ -840,6 +850,9 @@ fn the_final_text_agrees_with_the_emulator_on_small_functions() {
                         }
                         Verdict::Unchecked(_, reason) => {
                             unchecked += 1;
+                            if only.is_some() {
+                                eprintln!("UNCHECKED	{e:#x}	{args}	{reason}");
+                            }
                             let class: String = reason
                                 .split(|c: char| c == '`' || c.is_ascii_digit())
                                 .next()
