@@ -516,6 +516,26 @@ pub enum Mnemonic {
     /// `dup`: a scalar or a general register's value replicated through a
     /// `v` register's lanes.
     Dup,
+    /// `mul` (vector): the lane-wise integer product; the scalar form is
+    /// `madd` with a zero addend, so this mnemonic only arises as a
+    /// vector form.
+    Mul,
+    /// `neg` (vector): the lane-wise integer negation; the scalar form is
+    /// an alias of `sub` from the zero register.
+    Neg,
+    /// `abs` (vector): the lane-wise integer absolute value; there is no
+    /// scalar integer `abs` in the architecture.
+    Abs,
+    /// `fmax`: the larger of two floats, scalar or lane-wise; a NaN in
+    /// either operand yields the other.
+    Fmax,
+    /// `fmin`: the smaller of two floats, scalar or lane-wise.
+    Fmin,
+    /// `ld1`: a whole `v` register, or several consecutive ones, loaded
+    /// from memory, one sixteen-byte block per register.
+    Ld1,
+    /// `st1`: the store counterpart of [`Mnemonic::Ld1`].
+    St1,
     /// `movi`: a vector or 64-bit scalar immediate.
     Movi,
     /// `mvni`: the inverse of a vector immediate.
@@ -566,6 +586,40 @@ pub struct Insn {
     pub operands: [Opnd; 4],
     /// How it moves control; [`Op::flow`] of `op`.
     pub flow: Flow,
+}
+
+/// The first `v` register and how many consecutive ones an `ld1` or `st1`
+/// (multiple structures) word moves, wrapping from `v31` to `v0`.
+///
+/// The decoder leaves the register list unmodeled, so the word is read
+/// here for the emulator, the lifter and the register roles alike.
+///
+/// # Arguments
+///
+/// * `word` - The encoded word.
+///
+/// # Returns
+///
+/// The first register's number and the count, one to four; `None` for the
+/// single-structure lane forms and an interleaved (`ld2` to `ld4`) count.
+// SPEC: Arm ARM (DDI 0487) C6.2 LD1/ST1 (multiple structures): opcode
+// bits 12..15 name the register count, 0b0010 four, 0b0110 three, 0b0111
+// one and 0b1010 two; bits 23..27 name the multiple-structures group,
+// where the single-structure lane forms (0b11010 and 0b11011) and the
+// interleaved `ld2` to `ld4` counts sit elsewhere.
+#[must_use]
+pub fn ld1_group(word: u32) -> Option<(u8, u8)> {
+    if !matches!((word >> 23) & 0x1f, 24 | 25) {
+        return None;
+    }
+    let count = match (word >> 12) & 0xf {
+        0b0010 => 4,
+        0b0110 => 3,
+        0b0111 => 1,
+        0b1010 => 2,
+        _ => return None,
+    };
+    Some((crate::num::lo8(u64::from(word & 0x1f)), count))
 }
 
 impl Insn {

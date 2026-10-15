@@ -10,11 +10,25 @@
 
 use super::{Machine, mask_wide, on_stack, unmodeled};
 use crate::emulate::{HISTORY_MAX, MEMORY_MAX, Stop, Written, lo64, mask, sign_extend};
-use crate::isa::a64::{Insn, Mode, Opnd, Reg, Rmw, Width};
+use crate::isa::a64::{self, Insn, Mode, Opnd, Reg, Rmw, Width};
 use crate::num::{from_usize, lo8};
 
 /// A base register and the value an access writes back to it.
 type WriteBack = Option<(Reg, u64)>;
+
+/// Bytes one `ld1`/`st1` register moves.
+const GROUP_LEN: usize = 16;
+
+/// The `v` register `k` places after `first` in an `ld1`/`st1` group,
+/// wrapping from `v31` to `v0` as the architecture numbers them.
+///
+/// # Arguments
+///
+/// * `first` - The first register's number.
+/// * `k` - The offset from it.
+fn reg_at(first: u8, k: u32) -> Reg {
+    Reg::V(first.wrapping_add(lo8(u64::from(k))) % 32)
+}
 
 impl Machine<'_> {
     /// The address a memory operand names, and the write-back it makes.
@@ -231,6 +245,52 @@ impl Machine<'_> {
             bytes,
             self.reg(second),
         )?;
+        self.write_back(back);
+        Ok(())
+    }
+
+    /// `ld1`: one to four consecutive `v` registers loaded from
+    /// consecutive sixteen-byte blocks, the base written back as its
+    /// operand says.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction: register list, then address.
+    ///
+    /// # Errors
+    ///
+    /// When the list is a form the machine does not model (the lane
+    /// forms, the interleaved `ld2` to `ld4` counts), or a load faults.
+    // SPEC: Arm ARM (DDI 0487) C6.2 LD1 (multiple structures).
+    pub(super) fn load_group(&mut self, i: &Insn) -> Result<(), Stop> {
+        let (first, count) = a64::ld1_group(i.word).ok_or_else(|| unmodeled(i))?;
+        let (addr, back) = self.address(i, 1)?;
+        for k in 0..u32::from(count) {
+            let at = addr.wrapping_add(u64::from(k) * from_usize(GROUP_LEN));
+            let v = self.load(at, GROUP_LEN)?;
+            self.set_reg(reg_at(first, k), 128, v);
+        }
+        self.write_back(back);
+        Ok(())
+    }
+
+    /// `st1`: the store counterpart of [`Machine::load_group`].
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction: register list, then address.
+    ///
+    /// # Errors
+    ///
+    /// When the list is a form the machine does not model, or memory is
+    /// full.
+    pub(super) fn store_group(&mut self, i: &Insn) -> Result<(), Stop> {
+        let (first, count) = a64::ld1_group(i.word).ok_or_else(|| unmodeled(i))?;
+        let (addr, back) = self.address(i, 1)?;
+        for k in 0..u32::from(count) {
+            let at = addr.wrapping_add(u64::from(k) * from_usize(GROUP_LEN));
+            self.store(at, GROUP_LEN, self.reg(reg_at(first, k)))?;
+        }
         self.write_back(back);
         Ok(())
     }

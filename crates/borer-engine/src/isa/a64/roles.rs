@@ -14,6 +14,17 @@ const WHOLE_V: u16 = 128;
 /// The width of an address register.
 const ADDRESS: u16 = 64;
 
+/// The `v` register `k` places after `first` in an `ld1`/`st1` group,
+/// wrapping from `v31` to `v0` as the architecture numbers them.
+///
+/// # Arguments
+///
+/// * `first` - The first register's number.
+/// * `k` - The offset from it.
+fn group_reg(first: u8, k: u8) -> Reg {
+    Reg::V(first.wrapping_add(k) % 32)
+}
+
 /// The registers an instruction's operands read and write.
 ///
 /// A register written is written whole: a `w` write clears the upper half
@@ -177,6 +188,26 @@ impl Insn {
                 r.write(ops[1]);
                 r.rest(ops, 2);
             }
+            // INVARIANT: the register list is an operand the decoder
+            // leaves unmodeled, so the word names the registers.
+            Mnemonic::Ld1 => {
+                r.rest(ops, 1);
+                let Some((first, count)) = super::ld1_group(self.word) else {
+                    return;
+                };
+                for k in 0..count {
+                    r.writes.push(group_reg(first, k));
+                }
+            }
+            Mnemonic::St1 => {
+                r.rest(ops, 1);
+                let Some((first, count)) = super::ld1_group(self.word) else {
+                    return;
+                };
+                for k in 0..count {
+                    r.reads.push((group_reg(first, k), WHOLE_V));
+                }
+            }
             Mnemonic::Atomic(..) => {
                 r.read(ops[0]);
                 r.write(ops[1]);
@@ -242,12 +273,17 @@ impl Insn {
             | Mnemonic::Fabs
             | Mnemonic::Fneg
             | Mnemonic::Fcsel
+            | Mnemonic::Fmax
+            | Mnemonic::Fmin
             | Mnemonic::Scvtf
             | Mnemonic::Ucvtf
             | Mnemonic::Fcvtzs
             | Mnemonic::Fcvtzu
             | Mnemonic::Fcvt
             | Mnemonic::Dup
+            | Mnemonic::Mul
+            | Mnemonic::Neg
+            | Mnemonic::Abs
             | Mnemonic::Movi
             | Mnemonic::Mvni
             | Mnemonic::Other => {

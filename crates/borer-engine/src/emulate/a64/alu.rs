@@ -8,7 +8,7 @@
 //! pseudocode exactly: an add's carry is its carry out, a subtract's is
 //! not-borrow, and the logical forms clear carry and overflow.
 
-use super::{Machine, lo32_count, mask_wide, unmodeled};
+use super::{Machine, lo32_count, mask_wide, unmodeled, vector};
 use crate::emulate::{Stop, lo64, mask, rotate_right, sign_extend};
 use crate::isa::a64::{Insn, Opnd, Reg, Shift};
 use crate::num::lo8;
@@ -408,12 +408,14 @@ impl Machine<'_> {
         Ok(())
     }
 
-    /// `fmov` between registers, general and floating-point alike, and
-    /// of a scalar immediate.
+    /// `fmov` between registers, general and floating-point alike, of a
+    /// scalar immediate, and of a vector immediate replicated through the
+    /// lanes.
     ///
     /// A move between registers copies the source's bits at its width and
-    /// zero-extends them into the destination. The immediate is read from
-    /// the word: the decoder expands it to a double whatever the width.
+    /// zero-extends them into the destination. The immediates are read
+    /// from the word: the scalar expands to a double whatever the width,
+    /// and the vector form to one lane's value at the arrangement's width.
     ///
     /// # Arguments
     ///
@@ -421,9 +423,12 @@ impl Machine<'_> {
     ///
     /// # Errors
     ///
-    /// For the vector forms, the lane forms (`fmov v0.d[1], x1`), and any
-    /// other operand.
+    /// For the lane forms (`fmov v0.d[1], x1`), and any other operand or
+    /// immediate the machine does not model.
     pub(super) fn fmov(&mut self, i: &Insn) -> Result<(), Stop> {
+        if vector(i) {
+            return self.fmov_imm_array(i);
+        }
         let Opnd::Reg { reg: dst, bits } = i.operands[0] else {
             return Err(unmodeled(i));
         };
@@ -445,6 +450,46 @@ impl Machine<'_> {
             | Opnd::Mem(_)
             | Opnd::Cond(_) => Err(unmodeled(i)),
         }
+    }
+
+    /// `fmov` (vector, immediate): the expanded imm8 in every lane of the
+    /// arrangement's width, the bits above its span cleared.
+    ///
+    /// Every field is read from the word: the decoder keeps only the
+    /// immediate as an operand, and only for the scalar form.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    ///
+    /// # Errors
+    ///
+    /// For a word that is no vector `fmov` immediate: another `cmode`, or
+    /// the reserved precision bits.
+    // SPEC: Arm ARM (DDI 0487) C7.2 FMOV (vector, immediate): the
+    // modified-immediate group with cmode 1111, its op and o2 bits naming
+    // the lane width; Q names the span and abc with defgh the imm8, as
+    // `movi` reads them.
+    fn fmov_imm_array(&mut self, i: &Insn) -> Result<(), Stop> {
+        let w = i.word;
+        if (w >> 24) & 0x1f != 0b01111 || (w >> 12) & 0xf != 0b1111 {
+            return Err(unmodeled(i));
+        }
+        let lane = match ((w >> 29) & 1 == 1, (w >> 11) & 1 == 1) {
+            (false, false) => 32,
+            (false, true) => 16,
+            (true, false) => 64,
+            (true, true) => return Err(unmodeled(i)),
+        };
+        let span = if (w >> 30) & 1 == 1 { 128 } else { 64 };
+        let imm8 = (((w >> 16) & 7) << 5) | ((w >> 5) & 0x1f);
+        let one = vfp_expand(imm8, lane).ok_or_else(|| unmodeled(i))?;
+        let mut v = 0u128;
+        for k in 0..u32::from(span / lane) {
+            v |= u128::from(one) << (k * u32::from(lane));
+        }
+        self.set_reg(Reg::V(lo8(u64::from(w & 0x1f))), 128, v);
+        Ok(())
     }
 
     /// `movi` and `mvni`: an expanded immediate into a whole `v` register,
@@ -576,6 +621,80 @@ impl Machine<'_> {
         self.set_reg(Reg::V(lo8(u64::from(w & 0x1f))), 128, v);
         Ok(())
     }
+
+    /// `add`, `sub` and `mul` (vector): the operation lane-wise over the
+    /// two sources, each lane wrapping at its width, the bits above the
+    /// arrangement's span cleared.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `f` - The operation on one lane's values and its width in bits.
+    ///
+    /// # Errors
+    ///
+    /// Never; the decoder has already accepted the arrangement.
+    // SPEC: Arm ARM (DDI 0487) C7.2 ADD/SUB/MUL (vector): size bits 22..23
+    // name the lane width and Q bit 30 the span, as every three-register
+    // vector word encodes them.
+    pub(super) fn vector_arith(
+        &mut self,
+        i: &Insn,
+        f: impl Fn(u64, u64, u32) -> u64,
+    ) -> Result<(), Stop> {
+        let w = i.word;
+        let lane = 8u32 << ((w >> 22) & 3);
+        let span = if (w >> 30) & 1 == 1 { 128 } else { 64 };
+        let (x, y) = (self.reg(vreg(w, 5)), self.reg(vreg(w, 16)));
+        let mut v = 0u128;
+        for k in 0..span / lane {
+            let at = k * lane;
+            let (a, b) = (mask(lo64(x >> at), lane), mask(lo64(y >> at), lane));
+            v |= u128::from(f(a, b, lane)) << at;
+        }
+        self.set_reg(vreg(w, 0), 128, v);
+        Ok(())
+    }
+
+    /// `neg` and `abs` (vector): the operation lane-wise over the source.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `f` - The operation on one lane's value and its width in bits.
+    ///
+    /// # Errors
+    ///
+    /// Never; the decoder has already accepted the arrangement.
+    // SPEC: Arm ARM (DDI 0487) C7.2 NEG/ABS (vector): the two-register
+    /// shape, its size and Q fields as every vector word encodes them.
+    pub(super) fn vector_unary(
+        &mut self,
+        i: &Insn,
+        f: impl Fn(u64, u32) -> u64,
+    ) -> Result<(), Stop> {
+        let w = i.word;
+        let lane = 8u32 << ((w >> 22) & 3);
+        let span = if (w >> 30) & 1 == 1 { 128 } else { 64 };
+        let x = self.reg(vreg(w, 5));
+        let mut v = 0u128;
+        for k in 0..span / lane {
+            let at = k * lane;
+            v |= u128::from(f(mask(lo64(x >> at), lane), lane)) << at;
+        }
+        self.set_reg(vreg(w, 0), 128, v);
+        Ok(())
+    }
+}
+
+/// The `v` register a vector word's field names.
+///
+/// # Arguments
+///
+/// * `w` - The encoded word.
+/// * `at` - Where the register's number starts.
+fn vreg(w: u32, at: u32) -> Reg {
+    Reg::V(lo8(u64::from((w >> at) & 0x1f)))
 }
 
 /// The destination of a data-processing instruction: operand 0 as a

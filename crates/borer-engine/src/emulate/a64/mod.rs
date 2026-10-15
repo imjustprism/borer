@@ -7,8 +7,10 @@
 //! [`TRACE_MAX`]) and method names, and models the integer, bitfield,
 //! multiply and divide, conditional, memory and branch instructions such
 //! routines use ([`alu`], [`mem`]), the scalar floating-point arithmetic
-//! and conversions around them ([`fpu`]), and the vector moves and bitwise
-//! logic a compiler puts around them. Every other instruction stops the run
+//! and conversions around them ([`fpu`]), and the vector instructions a
+//! compiler puts around them: the moves, the bitwise logic, the packed
+//! float and integer lane arithmetic, and the block loads and stores
+//! ([`alu`], [`fpu`], [`mem`]). Every other instruction stops the run
 //! with [`Stop::Unmodeled`] and its text: the machine never guesses what an
 //! instruction does.
 //!
@@ -756,6 +758,12 @@ impl<'a> Machine<'a> {
             Mnemonic::Movz => self.move_wide(i, Wide::Zero),
             Mnemonic::Movn => self.move_wide(i, Wide::Not),
             Mnemonic::Movk => self.move_wide(i, Wide::Keep),
+            Mnemonic::Add if vector(i) => {
+                self.vector_arith(i, |x, y, w| mask(x.wrapping_add(y), w))
+            }
+            Mnemonic::Sub if vector(i) => {
+                self.vector_arith(i, |x, y, w| mask(x.wrapping_sub(y), w))
+            }
             Mnemonic::Add => self.arith(i, Form::Add, false),
             Mnemonic::Adds => self.arith(i, Form::Add, true),
             Mnemonic::Sub => self.arith(i, Form::Sub, false),
@@ -768,6 +776,11 @@ impl<'a> Machine<'a> {
             Mnemonic::Bic if vector(i) => self.vector_logical(i, |x, y| x & !y),
             Mnemonic::Orr if vector(i) => self.vector_logical(i, |x, y| x | y),
             Mnemonic::Eor if vector(i) => self.vector_logical(i, |x, y| x ^ y),
+            Mnemonic::Mul => self.vector_arith(i, |x, y, w| mask(x.wrapping_mul(y), w)),
+            Mnemonic::Neg => self.vector_unary(i, |x, w| mask(x.wrapping_neg(), w)),
+            Mnemonic::Abs => self.vector_unary(i, |x, w| {
+                mask(sign_extend(x, w).wrapping_abs().cast_unsigned(), w)
+            }),
             Mnemonic::And => self.logical(i, |x, y| x & y, false),
             Mnemonic::Ands => self.logical(i, |x, y| x & y, true),
             Mnemonic::Orr => self.logical(i, |x, y| x | y, false),
@@ -846,6 +859,11 @@ impl<'a> Machine<'a> {
             Mnemonic::Fsub => self.float_binary(i, |x, y| x - y),
             Mnemonic::Fmul => self.float_binary(i, |x, y| x * y),
             Mnemonic::Fdiv => self.float_binary(i, |x, y| x / y),
+            // SPEC: Arm ARM (DDI 0487) C7.2 FMAX/FMIN: a NaN in either
+            // operand yields the other, as the x86 machine's own max and
+            // min answer.
+            Mnemonic::Fmax => self.float_binary(i, |x, y| if x > y { x } else { y }),
+            Mnemonic::Fmin => self.float_binary(i, |x, y| if x < y { x } else { y }),
             Mnemonic::Fsqrt => self.float_sqrt(i),
             Mnemonic::Fabs => self.float_sign(i, false),
             Mnemonic::Fneg => self.float_sign(i, true),
@@ -864,6 +882,8 @@ impl<'a> Machine<'a> {
             Mnemonic::Str(width) => self.store_one(i, width),
             Mnemonic::Ldp(width) => self.load_pair(i, width),
             Mnemonic::Stp => self.store_pair(i),
+            Mnemonic::Ld1 => self.load_group(i),
+            Mnemonic::St1 => self.store_group(i),
             Mnemonic::Stxr(width) => self.store_exclusive(i, width),
             Mnemonic::Stxp => self.store_exclusive_pair(i),
             Mnemonic::Atomic(op, width) => self.atomic(i, op, width),

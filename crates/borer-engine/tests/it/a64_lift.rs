@@ -558,6 +558,138 @@ fn neon_bitwise_agrees_with_the_emulator() {
     }
 }
 
+/// Packed float arithmetic over registers memory loaded.
+///
+/// The packed operations lift as the intrinsics that name them, whose
+/// values the checker cannot read, while the sign operations, bit masks
+/// over the registers, lift as expressions over them; the checker counts
+/// what it cannot read instead of comparing it, and nothing else may
+/// disagree.
+#[test]
+fn packed_float_agrees_with_the_emulator() {
+    let words = [
+        // ASM: ldr q0, [x0]
+        0x3dc0_0000,
+        // ASM: ldr q1, [x0, #0x10]
+        0x3dc0_0401,
+        // ASM: fadd v2.4s, v0.4s, v1.4s
+        0x4e21_d402,
+        // ASM: fabs v3.4s, v2.4s
+        0x4ea0_f843,
+        // ASM: fmul v4.2d, v0.2d, v1.2d
+        0x6e61_dc04,
+        // ASM: fneg v5.2s, v2.2s
+        0x2ea0_f845,
+        // ASM: str q2, [x1]
+        0x3d80_0022,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    let p = image(&words);
+    let a = Analysis::compute(&p);
+    for seed in 1..=SEEDS {
+        let v = verify(&p, &a, &[BASE], seed);
+        let tsv = verify_tsv(&v);
+        assert_eq!(v.checked, 1, "seed {seed}: {tsv}");
+        assert!(v.mismatches.is_empty(), "seed {seed}: {tsv}");
+        // INVARIANT: the two loads, the four packed operations and the
+        // sixteen-byte store hold what the checker cannot read; every
+        // other register, and nothing else, disagrees with nothing.
+        assert_eq!(v.facts[&Fact::Vector].unreadable, 6, "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Store].unreadable, 1, "seed {seed}: {tsv}");
+        assert_eq!(v.unreadable, 7, "seed {seed}: {tsv}");
+    }
+}
+
+/// The NEON integer operations lift as the intrinsics that name them, over
+/// registers memory loaded; as the packed float ones above, what the
+/// checker cannot read is counted, and everything else agrees.
+#[test]
+fn neon_integer_agrees_with_the_emulator() {
+    let words = [
+        // ASM: ldr q0, [x0]
+        0x3dc0_0000,
+        // ASM: ldr q1, [x0, #0x10]
+        0x3dc0_0401,
+        // ASM: add v6.4s, v0.4s, v1.4s
+        0x4ea1_8406,
+        // ASM: sub v7.8h, v0.8h, v1.8h
+        0x6e61_8407,
+        // ASM: neg v8.16b, v0.16b
+        0x6e20_b808,
+        // ASM: abs v9.2d, v1.2d
+        0x4ee0_b829,
+        // ASM: str q6, [x1]
+        0x3d80_0026,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    let p = image(&words);
+    let a = Analysis::compute(&p);
+    for seed in 1..=SEEDS {
+        let v = verify(&p, &a, &[BASE], seed);
+        let tsv = verify_tsv(&v);
+        assert_eq!(v.checked, 1, "seed {seed}: {tsv}");
+        assert!(v.mismatches.is_empty(), "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Vector].unreadable, 6, "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Store].unreadable, 1, "seed {seed}: {tsv}");
+    }
+}
+
+/// The `ld1` and `st1` block moves agree: the registers hold loads the
+/// checker cannot read, while the base a post-indexed `ld1` advances is a
+/// general register and compares.
+#[test]
+fn ld1_and_st1_agree_with_the_emulator() {
+    let words = [
+        // ASM: ld1 {v0.16b}, [x0], #16
+        0x4cdf_7000,
+        // ASM: ld1 {v1.16b, v2.16b}, [x0]
+        0x4c40_a001,
+        // ASM: st1 {v0.16b}, [x1]
+        0x4c00_7020,
+        // ASM: st1 {v1.16b, v2.16b}, [x1]
+        0x4c00_a021,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    let p = image(&words);
+    let a = Analysis::compute(&p);
+    for seed in 1..=SEEDS {
+        let v = verify(&p, &a, &[BASE], seed);
+        let tsv = verify_tsv(&v);
+        assert_eq!(v.checked, 1, "seed {seed}: {tsv}");
+        assert!(v.mismatches.is_empty(), "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Vector].unreadable, 3, "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Store].unreadable, 3, "seed {seed}: {tsv}");
+        assert_eq!(compared(&v, Fact::Register), 32, "seed {seed}: {tsv}");
+    }
+}
+
+/// The vector `fmov` immediates are the constants their bits expand to,
+/// compared at every register and through the two stores of them.
+#[test]
+fn fmov_vector_immediates_agree_with_the_emulator() {
+    let words = [
+        // ASM: fmov v0.2s, #1.00000000
+        0x0f03_f600,
+        // ASM: fmov v1.2d, #0.12500000
+        0x6f02_f401,
+        // ASM: fmov v2.4s, #-2.50000000
+        0x4f04_f482,
+        // ASM: str d0, [x1]
+        0xfd00_0020,
+        // ASM: str d1, [x1, #0x8]
+        0xfd00_0421,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for v in agrees(&words, 1) {
+        assert_eq!(compared(&v, Fact::Vector), 32, "{}", verify_tsv(&v));
+        assert_eq!(compared(&v, Fact::Store), 2, "{}", verify_tsv(&v));
+    }
+}
+
 /// Pointer authentication and branch targets change no value.
 ///
 /// A frame built under `paciasp` and torn down under `autiasp`, around a
