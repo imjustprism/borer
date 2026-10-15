@@ -405,15 +405,32 @@ pub(super) fn fold_checks(body: &str) -> (String, Vec<String>) {
                 gone[i] = true;
                 gone[i + 1] = true;
                 gone[i + 2] = true;
+                // INVARIANT: the location the `// at` note carried names
+                // the source the check guards, so it moves onto the
+                // statement the fold annotates, not away with the call.
+                let at_note = lines
+                    .get(i + 1)
+                    .and_then(|l| l.split_once("// at ").map(|(_, loc)| loc.trim()))
+                    .map(|loc| format!("  // at {loc}"));
                 let note = if bounds {
                     "  /* bounds-checked */"
                 } else {
                     "  /* checked */"
                 };
                 match &mut tails[at] {
-                    Some(t) if !t.contains(note.trim()) => t.push_str(note),
-                    Some(_) => {}
-                    None => tails[at] = Some(note.to_owned()),
+                    Some(t) => {
+                        if !t.contains(note.trim()) {
+                            t.push_str(note);
+                        }
+                        if let Some(loc) = at_note
+                            && !t.contains("// at ")
+                        {
+                            t.push_str(&loc);
+                        }
+                    }
+                    None => {
+                        tails[at] = Some(format!("{note}{}", at_note.unwrap_or_default()));
+                    }
                 }
             }
             None => {
@@ -422,6 +439,7 @@ pub(super) fn fold_checks(body: &str) -> (String, Vec<String>) {
                 } else {
                     "/* overflow panics */"
                 });
+                // The location note stays on the call the block keeps.
             }
         }
         if !callees.iter().any(|c| c == d.callee) {
@@ -510,7 +528,11 @@ mod tests {
                     rax = a1 * 4;\n\
                     return rax;\n";
         let (out, callees) = fold_checks(body);
-        assert_eq!(out, "rax = a1 * 4;  /* checked */\nreturn rax;\n", "{out}");
+        assert_eq!(
+            out,
+            "rax = a1 * 4;  /* checked */  // at rhai-1.26.1/src/parser.rs:1015:32\nreturn rax;\n",
+            "{out}"
+        );
         assert_eq!(callees, vec!["panic_const_mul_overflow".to_owned()]);
     }
 
@@ -544,7 +566,8 @@ mod tests {
                     return ((uint64_t*)a3)[a1];\n";
         let (out, callees) = fold_checks(body);
         assert_eq!(
-            out, "return ((uint64_t*)a3)[a1];  /* bounds-checked */\n",
+            out,
+            "return ((uint64_t*)a3)[a1];  /* bounds-checked */  // at library/core/src/slice/index.rs:2100:9\n",
             "{out}"
         );
         assert_eq!(callees, vec!["panic_bounds_check".to_owned()]);
@@ -683,7 +706,11 @@ mod tests {
                    rax = f(-a2);\n\
                    return rax;\n";
         let (out, callees) = fold_checks(neg);
-        assert_eq!(out, "rax = f(-a2);  /* checked */\nreturn rax;\n", "{out}");
+        assert_eq!(
+            out,
+            "rax = f(-a2);  /* checked */  // at core/src/num/int_macros.rs:2100:9\nreturn rax;\n",
+            "{out}"
+        );
         assert_eq!(callees, vec!["panic_const_neg_overflow".to_owned()]);
         let add = "if (uaddo64(a1, a2) != 0) {\n  \
                    panic_const_add_overflow(a1, a2, 0x2100);\n\
