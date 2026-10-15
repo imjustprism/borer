@@ -1627,6 +1627,118 @@ fn five_site_fixture() -> Program {
     )
 }
 
+/// Builds a one-function image around hand-assembled code and decompiles
+/// its entry.
+///
+/// # Arguments
+///
+/// * `code` - The function's bytes, placed at 0x1000.
+///
+/// # Returns
+///
+/// The program, its analysis and the entry's decompiled text, or `None`
+/// when the entry decompiled to nothing.
+fn decompiled(code: &[u8]) -> Option<(Program, Analysis, String)> {
+    let mut image = vec![0xccu8; 0x2000];
+    image[0x1000..0x1000 + code.len()].copy_from_slice(code);
+    let p = Program::raw(
+        image,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(
+            ".text", 0x1000, 0x1000, 0x1000, false, true,
+        )],
+    );
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1000)?;
+    Some((p, a, text))
+}
+
+/// A chain of `if`s whose every body is only the next `if` flattens into
+/// one condition.
+///
+/// Four tests in a row, each jumping to the shared `ret` when it fails,
+/// are one `&&` chain over the store, and the text says so as one flat
+/// list: a chain merged block by block reads `a && b && c`, never
+/// `a && (b && c)`. The middle test may read through a register the block
+/// loaded first (`mov eax,[rcx]; test eax,eax`): the load folds into the
+/// term's own condition, and every block but the store became a term of
+/// it, so no `goto` is left.
+#[test]
+fn a_nested_if_chain_flattens_into_one_condition() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+    let agrees = |code: &[u8]| {
+        let Some((p, a, out)) = decompiled(code) else {
+            panic!("the chain did not decompile");
+        };
+        assert_eq!(
+            check_structure(&p, &a, &Overlay::default(), 0x1000, &out),
+            Structure::Agrees,
+            "{out}"
+        );
+        out
+    };
+    let out = agrees(&[
+        0x85, 0xc9, 0x74, 0x14, // ASM: test ecx,ecx; jz 0x1018
+        0x85, 0xd2, 0x74, 0x10, // ASM: test edx,edx; jz 0x1018
+        0x45, 0x85, 0xc0, 0x74, 0x0b, // ASM: test r8d,r8d; jz 0x1018
+        0x45, 0x85, 0xc9, 0x74, 0x06, // ASM: test r9d,r9d; jz 0x1018
+        0xc7, 0x01, 0x2a, 0, 0, 0,    // ASM: mov dword [rcx],42
+        0xc3, // ASM: ret
+    ]);
+    assert!(
+        out.contains("if (a1 != 0 && a2 != 0 && a3 != 0 && a4 != 0) {"),
+        "{out}"
+    );
+    assert!(!out.contains("goto "), "{out}");
+    let out = agrees(&[
+        0x85, 0xc9, 0x74, 0x11, // ASM: test ecx,ecx; jz 0x1015
+        0x8b, 0x01, 0x85, 0xc0, 0x74, 0x0b, // ASM: mov eax,[rcx]; test eax,eax; jz 0x1015
+        0x45, 0x85, 0xc0, 0x74, 0x06, // ASM: test r8d,r8d; jz 0x1015
+        0xc7, 0x01, 0x2a, 0, 0, 0,    // ASM: mov dword [rcx],42
+        0xc3, // ASM: ret
+    ]);
+    assert!(
+        out.contains("if (a1 != 0 && *(uint32_t*)a1 != 0 && a3 != 0) {"),
+        "{out}"
+    );
+    assert!(!out.contains("goto "), "{out}");
+}
+
+/// A guard term's own test, decided by an earlier term of the same
+/// chain, is dropped.
+///
+/// The first test sends `a1 == 0` to the join; the block under it tests
+/// `a1` again in front of its second condition, a test the machine only
+/// ever makes once `a1 != 0` is settled. The merged chain is
+/// `a1 == 0 || (a1 != 0 && a2 == 0)`, whose second term is `a2 == 0`
+/// alone wherever the machine evaluates it, so the text renders the
+/// negation as `a1 != 0 && a2 != 0` with no `goto` and the structure
+/// check agreeing.
+#[test]
+fn a_join_guard_drops_the_test_an_earlier_term_decided() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+    let Some((p, a, out)) = decompiled(&[
+        0x85, 0xc9, 0x74, 0x15, // ASM: test ecx,ecx; jz J
+        0x85, 0xc9, 0x75, 0x0b, // ASM: test ecx,ecx; jnz T1
+        0xc7, 0x01, 0x01, 0, 0, 0, 0xe9, 0x06, 0, 0, 0, // ASM: mov dword [rcx],1; jmp J
+        0x85, 0xd2, 0x74, 0x02, // ASM: T1: test edx,edx; jz J
+        0xeb, 0xef, // ASM: jmp back to the store
+        0xc3, // ASM: J: ret
+    ]) else {
+        panic!("the join did not decompile");
+    };
+    assert!(out.contains("if (a1 != 0 && a2 != 0) {"), "{out}");
+    assert!(!out.contains("a1 == 0 ||"), "{out}");
+    assert!(!out.contains("goto "), "{out}");
+    assert_eq!(
+        check_structure(&p, &a, &Overlay::default(), 0x1000, &out),
+        Structure::Agrees,
+        "{out}"
+    );
+}
+
 /// A shared tail that calls keeps its goto: cloning it would run the call
 /// twice.
 ///

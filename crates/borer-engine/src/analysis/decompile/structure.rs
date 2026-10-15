@@ -291,6 +291,7 @@ pub(super) fn case_labels(ns: &[usize]) -> Vec<String> {
 
 /// A branch condition, possibly a short-circuit chain merged from several
 /// pure condition blocks (`if a goto X; if b goto X;` is `a || b`).
+#[derive(Debug, Clone)]
 pub(super) enum Guard {
     /// One block's condition, with the call it takes in, if any
     /// ([`call_in_cond`]).
@@ -444,11 +445,95 @@ impl Guard {
         }
     }
 
+    /// Returns the guard with the tests an earlier term decided absorbed
+    /// (`C1 || (!C1 && C2)` is `C1 || C2`).
+    ///
+    /// A chain's terms are reached in evaluation order, each only after
+    /// every earlier one failed, so a compound term of the other operator
+    /// whose own test an earlier term decides is constant wherever the
+    /// machine evaluates it and decides nothing. The redundant test goes;
+    /// the term that carried it keeps its remaining operand, which the
+    /// machine reached under exactly the same conditions. A test with a
+    /// call in it ([`Guard::calls`]) stays, since the machine runs the
+    /// call wherever the block ran and dropping the test would drop the
+    /// call.
+    pub(super) fn minimize(self) -> Guard {
+        match self {
+            one @ Guard::One(..) => one,
+            compound => {
+                let or = matches!(compound, Guard::Or(..));
+                compound.absorb(&mut Vec::new(), or)
+            }
+        }
+    }
+
+    /// Walks one chain's operands in evaluation order, absorbing each
+    /// compound term's decided test ([`Guard::minimize`]).
+    ///
+    /// A compound operand of the other operator sits behind every term in
+    /// `seen`, so the operand one of them decides is constant wherever
+    /// the machine evaluates it and the other operand is the whole term.
+    ///
+    /// # Arguments
+    ///
+    /// * `seen` - The one-condition terms the chain decided already,
+    ///   which a later term's own test may not duplicate.
+    /// * `or` - Whether the chain being walked joins by `||`.
+    fn absorb(self, seen: &mut Vec<Guard>, or: bool) -> Guard {
+        let out = match self {
+            Guard::Or(a, b) if or => {
+                Guard::Or(Box::new(a.absorb(seen, or)), Box::new(b.absorb(seen, or)))
+            }
+            Guard::And(a, b) if !or => {
+                Guard::And(Box::new(a.absorb(seen, or)), Box::new(b.absorb(seen, or)))
+            }
+            Guard::Or(a, b) | Guard::And(a, b) => {
+                let (a, b) = (*a, *b);
+                let decided = |g: &Guard| !g.calls() && seen.iter().any(|e| g.negates(e));
+                if decided(&a) {
+                    b
+                } else if decided(&b) {
+                    a
+                } else {
+                    wrap(a, b, !or)
+                }
+            }
+            one @ Guard::One(..) => one,
+        };
+        if matches!(out, Guard::One(..)) {
+            seen.push(out.clone());
+        }
+        out
+    }
+
+    /// Tells whether this one condition is the negation of `other`.
+    ///
+    /// A floating-point comparison never negates by a flipped code (NaN
+    /// makes `a < b` and `a >= b` both false), and neither does a
+    /// condition that carries a call `other` lacks, so those decide
+    /// nothing about each other.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The one condition this one may negate.
+    fn negates(&self, other: &Guard) -> bool {
+        let (Guard::One(a, ka), Guard::One(b, kb)) = (self, other) else {
+            return false;
+        };
+        a.cc.0 != ConditionCode::None
+            && !matches!(a.flags, Flags::Float(..))
+            && ka == kb
+            && b.cc.0 == a.cc.invert().0
+            && b.flags == a.flags
+    }
+
     /// Renders the guard as a C boolean expression.
     ///
     /// De Morgan keeps the inverted form readable (`!(a || b)` renders as
-    /// `!a && !b`); compound operands are parenthesized. A condition that
-    /// takes in its block's call names the call where it named the result.
+    /// `!a && !b`); compound operands of the other operator are
+    /// parenthesized, and a chain's same-operator operands render flat in
+    /// evaluation order ([`Guard::chain`]). A condition that takes in its
+    /// block's call names the call where it named the result.
     ///
     /// # Arguments
     ///
@@ -459,26 +544,49 @@ impl Guard {
         if let Some(members) = self.bit_set(n, side) {
             return members;
         }
-        let part = |g: &Guard| -> String {
-            let text = g.render(n, side);
-            if matches!(g, Guard::One(..)) && logical_operands(&text).is_none() {
-                text
-            } else {
-                format!("({text})")
-            }
-        };
         match (self, side) {
             (Guard::One(c, None), _) => c.render(n, side == Side::Fall),
             (Guard::One(c, Some(call)), _) => {
                 rename_word(&c.render(n, side == Side::Fall), &call.var, &call.call)
             }
-            (Guard::Or(a, b), Side::Fall) | (Guard::And(a, b), Side::Target) => {
-                format!("{} && {}", part(a), part(b))
+            (Guard::Or(..), Side::Fall) | (Guard::And(..), Side::Target) => {
+                self.chain(n, side, " && ")
             }
-            (Guard::Or(a, b), Side::Target) | (Guard::And(a, b), Side::Fall) => {
-                format!("{} || {}", part(a), part(b))
+            (Guard::Or(..), Side::Target) | (Guard::And(..), Side::Fall) => {
+                self.chain(n, side, " || ")
             }
         }
+    }
+
+    /// Renders one short-circuit chain's operands joined by `sep`.
+    ///
+    /// The chain's same-operator descendants are spliced flat, in
+    /// evaluation order, so a condition merged block by block reads as
+    /// one list (`a && b && c`, never `a && (b && c)`); a compound of the
+    /// other operator, or a single condition that renders a chain of its
+    /// own, keeps its parentheses.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Name resolution.
+    /// * `side` - The side the arm is on, as for [`Guard::render`].
+    /// * `sep` - The operator that joins the operands.
+    fn chain(&self, n: &Names<'_>, side: Side, sep: &str) -> String {
+        let or = matches!(self, Guard::Or(..));
+        let mut ops: Vec<&Guard> = Vec::new();
+        splice(self, &mut ops);
+        let parts: Vec<String> = ops
+            .iter()
+            .map(|g| {
+                let text = g.render(n, side);
+                let flat = match g {
+                    Guard::Or(..) | Guard::And(..) => matches!(g, Guard::Or(..)) == or,
+                    Guard::One(..) => logical_operands(&text).is_none(),
+                };
+                if flat { text } else { format!("({text})") }
+            })
+            .collect();
+        parts.join(sep)
     }
 
     /// Renders a range test joined to a bit test of a constant as the set
@@ -547,6 +655,47 @@ impl Guard {
             }))
             .collect();
         Some(tests.join(if member { " || " } else { " && " }))
+    }
+}
+
+/// Wraps two guards in the compound `or` names.
+///
+/// # Arguments
+///
+/// * `a` - One operand.
+/// * `b` - The other operand.
+/// * `or` - Whether the compound joins by `||`.
+fn wrap(a: Guard, b: Guard, or: bool) -> Guard {
+    if or {
+        Guard::Or(Box::new(a), Box::new(b))
+    } else {
+        Guard::And(Box::new(a), Box::new(b))
+    }
+}
+
+/// Splices a compound guard's same-operator operands into `ops`, in
+/// evaluation order.
+///
+/// # Arguments
+///
+/// * `g` - The compound guard.
+/// * `ops` - Receives the chain's operands in order; a compound of the
+///   other operator goes in whole.
+fn splice<'a>(g: &'a Guard, ops: &mut Vec<&'a Guard>) {
+    let (a, b, or) = match g {
+        Guard::Or(a, b) => (a.as_ref(), b.as_ref(), true),
+        Guard::And(a, b) => (a.as_ref(), b.as_ref(), false),
+        one => {
+            ops.push(one);
+            return;
+        }
+    };
+    for c in [a, b] {
+        if matches!(c, Guard::Or(..)) == or {
+            splice(c, ops);
+        } else {
+            ops.push(c);
+        }
     }
 }
 
@@ -904,7 +1053,9 @@ pub(super) fn call_then_test<L: Lifter>(
     Some((s, br, call))
 }
 
-/// Merges the pure condition blocks hanging off `i`'s branch into one guard.
+/// Merges the pure condition blocks hanging off `i`'s branch into one
+/// guard, then absorbs the tests an earlier term decided
+/// ([`Guard::minimize`]).
 ///
 /// Merged blocks are consumed and their successors re-parented to `i`.
 ///
@@ -930,11 +1081,12 @@ pub(super) fn merge_guard<L: Lifter>(
     f: usize,
 ) -> (Guard, usize, usize) {
     let mut journal = Journal::default();
-    merge_chain(ctx, st, i, Guard::One(cond, call), t, f, 0, &mut journal)
+    let (guard, t, f) = merge_chain(ctx, st, i, Guard::One(cond, call), t, f, 0, &mut journal);
+    (guard.minimize(), t, f)
 }
 
 /// Deepest chain of pure condition blocks merged into one guard.
-pub(super) const MAX_GUARD_DEPTH: usize = 3;
+pub(super) const MAX_GUARD_DEPTH: usize = 4;
 
 /// One entry of the structuring state as it stood before a speculative
 /// merge changed it.
