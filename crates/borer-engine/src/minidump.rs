@@ -172,7 +172,7 @@ impl<'a> Streams<'a> {
         let mut out = Vec::new();
         for k in 0..count.min(0x1_0000) {
             // ASM: MINIDUMP_THREAD: ThreadId, Suspend, PriorityClass,
-            // Priority, Teb, then the stack's descriptor.
+            // Priority, Teb (24 bytes in), then the stack's descriptor.
             let Some(entry) = usize::try_from(at)
                 .ok()
                 .and_then(|a| a.checked_add(4 + k * 48))
@@ -180,9 +180,9 @@ impl<'a> Streams<'a> {
                 break;
             };
             let (Some(start), Some(size), Some(at)) = (
-                u64_le(bytes, entry + 16),
-                u32_le(bytes, entry + 24).map(u64::from),
-                u32_le(bytes, entry + 28).map(u64::from),
+                u64_le(bytes, entry + 24),
+                u32_le(bytes, entry + 32).map(u64::from),
+                u32_le(bytes, entry + 36).map(u64::from),
             ) else {
                 break;
             };
@@ -244,6 +244,9 @@ impl<'a> Streams<'a> {
 
     /// The address the `ExceptionStream`'s context stopped at, as the
     /// program's entry.
+    ///
+    /// A context too small to hold the architecture's stop register, or
+    /// one whose bytes do not sit in the file, states nothing.
     fn stopped_at(&self, arch: Arch) -> Option<u64> {
         let (_, at) = self.first(EXCEPTION)?;
         let bytes = self.bytes;
@@ -257,9 +260,11 @@ impl<'a> Streams<'a> {
             Arch::X86 => X86_EIP,
             _ => return None,
         };
-        let end = rva
-            .checked_add(usize::try_from(size).ok()?)?
-            .checked_add(rip)?;
+        let size = usize::try_from(size).ok()?;
+        if size < rip + 8 {
+            return None;
+        }
+        let end = rva.checked_add(rip)?.checked_add(8)?;
         (end <= bytes.len())
             .then(|| u64_le(bytes, rva + rip))
             .flatten()
@@ -287,7 +292,10 @@ impl<'a> Streams<'a> {
         let count = usize::try_from(count).ok()?.min(0x1_0000);
         let header = usize::try_from(header).ok()?;
         for k in 0..count {
-            let Some(e) = header.checked_add(k * entry) else {
+            let Some(e) = at
+                .checked_add(header)
+                .and_then(|h| h.checked_add(k * entry))
+            else {
                 break;
             };
             let (base, size, protect) = (
@@ -365,9 +373,10 @@ pub(crate) fn program(path: std::path::PathBuf, bytes: Vec<u8>) -> Option<Progra
     let mut ranges = streams.memory();
     ranges.extend(streams.memory64());
     for stack in streams.stacks() {
-        let covered = ranges
-            .iter()
-            .any(|r| r.start <= stack.start && r.start + r.size >= stack.start + stack.size);
+        let covered = ranges.iter().any(|r| {
+            r.start <= stack.start
+                && r.start.saturating_add(r.size) >= stack.start.saturating_add(stack.size)
+        });
         if !covered {
             ranges.push(stack);
         }
