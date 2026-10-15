@@ -124,12 +124,12 @@ const ANCHOR_CANDIDATES: usize = 8;
 /// Every candidate the scan tests is an anchor hit, and the anchor is
 /// the one byte a pattern can pick to be tested least: a frequency count
 /// over the file's head answers which fixed byte that is, and the rarest
-/// one wins, ties to the earliest. A byte the sample never sees is the
-/// rarest of all; should the file hold a section that begins with it,
-/// the verify each candidate pays stays correct, only less selective.
-/// At most [`ANCHOR_CANDIDATES`] distinct bytes are counted, each a
-/// word-wise pass over [`ANCHOR_SAMPLE`] bytes, so the choice costs
-/// microseconds against the whole-file scan it narrows.
+/// one wins, ties to the smallest byte value. A byte the sample never
+/// sees is the rarest of all; should the file hold a section that begins
+/// with it, the verify each candidate pays stays correct, only less
+/// selective. At most [`ANCHOR_CANDIDATES`] distinct bytes are counted,
+/// each a word-wise pass over [`ANCHOR_SAMPLE`] bytes, so the choice
+/// costs microseconds against the whole-file scan it narrows.
 ///
 /// # Arguments
 ///

@@ -361,6 +361,10 @@ pub fn find_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
 pub fn find_wide_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
     /// Reports one run of units spanning `first..end`.
     ///
+    /// A run the trim empties reports nothing, at any minimum: a run of
+    /// zero characters is no string (the ASCII walk's own guard, which a
+    /// `min_len` of zero must not talk out of).
+    ///
     /// # Arguments
     ///
     /// * `spans` - Where the run goes.
@@ -384,7 +388,7 @@ pub fn find_wide_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
             first
         };
         let len = (end - start) / 2;
-        if len < min_len {
+        if len == 0 || len < min_len {
             return;
         }
         spans.push(RawStringSpan {

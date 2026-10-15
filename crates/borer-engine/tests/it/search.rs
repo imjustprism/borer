@@ -5,9 +5,9 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::program::{Arch, Program, Section};
+use borer_engine::program::{Arch, FileOff, Program, Section, Va};
 use borer_engine::search::{
-    demangled_name, demangled_or_raw, find_bytes, find_text, parse_pattern,
+    HITS_MAX, demangled_name, demangled_or_raw, find_bytes, find_text, parse_pattern,
 };
 
 /// Builds a one-section program: `48 8b 41 05` at 0x1000, `48 8b 99 05` at
@@ -414,5 +414,465 @@ fn bytes_no_section_maps_are_searched() {
     assert_eq!(
         aob.hits.iter().map(|h| h.file_off).collect::<Vec<_>>(),
         [0x30]
+    );
+}
+
+/// The byte-by-byte reference `find_bytes` must equal.
+///
+/// Every file offset whose window holds the pattern, with the address of
+/// the section that covers it, in the order `find_bytes` reports
+/// (sections in declaration order, then the bytes no section maps in
+/// file order).
+///
+/// # Arguments
+///
+/// * `p` - The program searched.
+/// * `pattern` - Bytes with `None` wildcards.
+///
+/// # Returns
+///
+/// Every expected hit as `(va, file off)`, `None` where no section maps
+/// the start.
+fn naive_byte_hits(p: &Program, pattern: &[Option<u8>]) -> Vec<(Option<u64>, u64)> {
+    let file = p.bytes.as_slice();
+    let end = borer_engine::num::from_usize(file.len());
+    // A section the file cannot wholly back contributes no span and no
+    // covered range, the way `Program::unmapped` and `spans` skip it.
+    let backed = |s: &Section| s.file_size > 0 && s.file_off.0.saturating_add(s.file_size) <= end;
+    let holds = |off: usize| {
+        pattern
+            .iter()
+            .enumerate()
+            .all(|(k, pat)| pat.is_none_or(|b| file.get(off + k) == Some(&b)))
+    };
+    let va = |off: u64| {
+        p.sections.iter().find_map(|s| {
+            backed(s)
+                .then(|| {
+                    (off >= s.file_off.0 && off < s.file_off.0 + s.file_size)
+                        .then(|| s.va.0 + off - s.file_off.0)
+                })
+                .flatten()
+        })
+    };
+    let mut out: Vec<(Option<u64>, u64)> = p
+        .sections
+        .iter()
+        .filter(|s| backed(s))
+        .flat_map(|s| s.file_off.0..s.file_off.0 + s.file_size)
+        .filter(|&off| {
+            let o = borer_engine::num::saturating_usize(off);
+            o + pattern.len() <= file.len() && holds(o)
+        })
+        .map(|off| (va(off), off))
+        .collect();
+    let covered = |off: u64| {
+        p.sections
+            .iter()
+            .any(|s| backed(s) && off >= s.file_off.0 && off < s.file_off.0 + s.file_size)
+    };
+    for off in 0..end {
+        if covered(off) {
+            continue;
+        }
+        let o = borer_engine::num::saturating_usize(off);
+        if o + pattern.len() <= file.len() && holds(o) {
+            out.push((va(off), off));
+        }
+    }
+    out
+}
+
+/// Asserts `find_bytes` answers exactly the naive reference: the page
+/// (capped at [`HITS_MAX`], as the tool's page is) and the total.
+///
+/// # Panics
+///
+/// When the scan's page or total differs from the reference.
+fn assert_naive(p: &Program, pattern: &[Option<u8>]) {
+    let want = naive_byte_hits(p, pattern);
+    let got = find_bytes(p, pattern, 0);
+    assert_eq!(got.total, want.len());
+    let list: Vec<(Option<u64>, u64)> = got.hits.iter().map(|h| (h.va, h.file_off)).collect();
+    let page = &want[..want.len().min(HITS_MAX)];
+    assert_eq!(list, page);
+}
+
+/// Writes a pattern's fixed bytes into `bytes` at `at`, leaving the
+/// wildcards' lanes as they stand.
+///
+/// # Arguments
+///
+/// * `bytes` - The buffer planted into.
+/// * `pattern` - Bytes with `None` wildcards.
+/// * `at` - Offset of the pattern's first byte.
+fn plant_at(bytes: &mut [u8], pattern: &[Option<u8>], at: usize) {
+    for (k, p) in pattern.iter().enumerate() {
+        if let Some(b) = p
+            && let Some(slot) = bytes.get_mut(at + k)
+        {
+            *slot = *b;
+        }
+    }
+}
+
+/// A pattern of pure wildcards matches at every offset that fits it, one
+/// byte long and one byte short of the whole section alike.
+#[test]
+fn all_wildcard_patterns_match_at_every_offset_by_length() {
+    let p = fixture();
+    for len in [1usize, 2, 3, 5, 0x40] {
+        let pattern = vec![None; len];
+        let hits = find_bytes(&p, &pattern, 0);
+        let n = 0x40 - len + 1;
+        assert_eq!(hits.total, n, "len {len}");
+        assert_eq!(hits.hits.len(), n, "len {len}");
+        assert_eq!(hits.hits.first().map(|h| h.file_off), Some(0), "len {len}");
+        assert_eq!(
+            hits.hits.last().map(|h| h.file_off),
+            Some(u64::try_from(0x40 - len).unwrap()),
+            "len {len}"
+        );
+    }
+}
+
+/// A pattern one byte longer than the whole file matches nothing, on the
+/// anchored path and the all-wildcard walk alike.
+#[test]
+fn find_bytes_answers_nothing_when_the_pattern_outgrows_the_file() {
+    let p = fixture();
+    let fixed = vec![Some(0x48u8); 0x41];
+    assert_eq!(find_bytes(&p, &fixed, 0).total, 0);
+    let wild = vec![None; 0x41];
+    let walked = find_bytes(&p, &wild, 0);
+    assert_eq!(walked.total, 0);
+    assert!(walked.hits.is_empty());
+}
+
+/// A pattern ending at the file's last byte is found wherever its anchor
+/// sits: the pattern's first byte, its last, and the tail past the last
+/// whole word.
+#[test]
+fn find_bytes_match_ending_at_the_last_byte_of_the_file() {
+    let mut bytes = vec![0x44u8; 0x12];
+    bytes[0x0e..0x12].copy_from_slice(&[0x48, 0x8b, 0x41, 0x05]);
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(".text", 0x1000, 0, 0x12, false, true)],
+    );
+    for (spec, off) in [
+        ("48 8b 41 05", 0x0e),
+        ("?? ?? 41 05", 0x0e),
+        ("?? ?? ?? 05", 0x0e),
+        ("48 ?? ?? ??", 0x0e),
+        ("8b 41", 0x0f),
+        ("05", 0x11),
+    ] {
+        let pattern = parse_pattern(spec).unwrap();
+        let got = find_bytes(&p, &pattern, 0);
+        assert_eq!(got.total, 1, "spec {spec}");
+        assert_eq!(got.hits[0].file_off, off, "spec {spec}");
+        assert_eq!(got.hits[0].va, Some(0x1000 + off), "spec {spec}");
+        assert_naive(&p, &pattern);
+    }
+}
+
+/// A pattern whose only fixed byte is the file's most common byte still
+/// answers exactly.
+///
+/// Zero padding makes the anchor (a `0x00`) a candidate at nearly every
+/// offset, and the compiled compare must keep every answer true.
+#[test]
+fn find_bytes_anchor_on_the_most_common_byte_stays_exact() {
+    let mut bytes = vec![0u8; 0x100];
+    for at in [0x1f, 0x40, 0x41, 0xf0] {
+        bytes[at] = 0xf0;
+    }
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(".text", 0x1000, 0, 0x100, false, true)],
+    );
+    for spec in ["? 00 ? 00", "00 ?? 00", "?? 00 ?? 00 ?? 00"] {
+        let pattern = parse_pattern(spec).unwrap();
+        let got = find_bytes(&p, &pattern, 0);
+        assert_naive(&p, &pattern);
+        assert!(
+            got.total > 0x80,
+            "the padding keeps the anchor common: {spec}"
+        );
+    }
+}
+
+/// Patterns of two, three and four compare chunks match at every phase
+/// of the section's words.
+///
+/// Lengths 8, 9, 17, 24 and 25 (an all-wildcard middle chunk among them)
+/// are each planted at eight phases and in a window ending at the file's
+/// last byte.
+#[test]
+fn find_bytes_long_patterns_across_chunk_boundaries() {
+    let specs = [
+        "48 8b 41 05 90 90 90 90",
+        "48 8b 41 05 90 90 90 90 90",
+        "48 ?? 8b ?? 41 ?? 05 ?? 90 ?? 11 ?? 22 ?? 33 ?? 44 ?? 55",
+        "48 8b 41 05 90 90 90 90 11 22 33 44 55 66 77 88 de ad be ef 01 23 45 67 89",
+        "48 8b 41 05 ?? ?? ?? ?? ?? ?? ?? ?? 11 22 33 44 55 66 77 88 de ad be ef aa",
+    ];
+    for spec in specs {
+        let pattern = parse_pattern(spec).unwrap();
+        let mut bytes = vec![0xc7u8; 0x120];
+        let mut planted = Vec::new();
+        for k in 0..8 {
+            let at = 33 * k;
+            plant_at(&mut bytes, &pattern, at);
+            planted.push(at);
+        }
+        let last = bytes.len() - pattern.len();
+        plant_at(&mut bytes, &pattern, last);
+        planted.push(last);
+        let p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![Section::mapped(".text", 0x1000, 0, 0x120, false, true)],
+        );
+        assert_naive(&p, &pattern);
+        let got = find_bytes(&p, &pattern, 0);
+        for at in planted {
+            assert!(
+                got.hits
+                    .iter()
+                    .any(|h| h.file_off == u64::try_from(at).unwrap()),
+                "spec {spec}: planting at {at} missing"
+            );
+        }
+    }
+}
+
+/// An alternating fixed/wildcard pattern is found at every phase relative
+/// to the section's eight-byte words.
+#[test]
+fn find_bytes_alternating_pattern_at_every_word_phase() {
+    let spec = "48 ?? 8b ?? 89 ?? 05";
+    let pattern = parse_pattern(spec).unwrap();
+    let mut bytes = vec![0x31u8; 0x80];
+    for phase in 0..8 {
+        plant_at(&mut bytes, &pattern, 13 * phase);
+    }
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(".text", 0x1000, 0, 0x80, false, true)],
+    );
+    assert_naive(&p, &pattern);
+    let got = find_bytes(&p, &pattern, 0);
+    for phase in 0..8 {
+        assert!(
+            got.hits
+                .iter()
+                .any(|h| h.file_off == u64::try_from(13 * phase).unwrap()),
+            "phase {phase} planting missing"
+        );
+    }
+}
+
+/// A match may start in either section or in the bytes no section maps
+/// and run on into the next run's bytes.
+///
+/// Every match is reported exactly once, at the address of the section it
+/// starts in, sections before gaps.
+#[test]
+fn find_bytes_across_sections_gaps_and_the_file_end() {
+    let mut bytes = vec![0x55u8; 0x40];
+    for at in [0x00, 0x0d, 0x1d, 0x3c] {
+        bytes[at..at + 4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    }
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0, 0x10, false, true),
+            Section::mapped(".data", 0x2000, 0x20, 0x20, true, false),
+        ],
+    );
+    for spec in ["de ad be ef", "de ?? be ef"] {
+        let pattern = parse_pattern(spec).unwrap();
+        let got = find_bytes(&p, &pattern, 0);
+        assert_eq!(got.total, 4, "spec {spec}");
+        let list: Vec<(Option<u64>, u64)> = got.hits.iter().map(|h| (h.va, h.file_off)).collect();
+        assert_eq!(
+            list,
+            [
+                (Some(0x1000), 0x00),
+                (Some(0x100d), 0x0d),
+                (Some(0x201c), 0x3c),
+                (None, 0x1d),
+            ],
+            "spec {spec}"
+        );
+        assert_naive(&p, &pattern);
+    }
+
+    // Two contiguous sections: a match starting at .text's last byte runs
+    // straight into .data's file bytes and is found where it starts.
+    let mut bytes = vec![0x55u8; 0x40];
+    bytes[0x0e..0x12].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0, 0x10, false, true),
+            Section::mapped(".data", 0x2000, 0x10, 0x30, true, false),
+        ],
+    );
+    let got = find_bytes(&p, &parse_pattern("de ad be ef").unwrap(), 0);
+    assert_eq!(got.total, 1);
+    assert_eq!((got.hits[0].va, got.hits[0].file_off), (Some(0x100e), 0x0e));
+}
+
+/// A section whose memory size exceeds its file bytes walks only the
+/// file's extent.
+///
+/// A pattern at the extent's end is found there with the address the
+/// section gives, and the file bytes past it belong to no section and say
+/// so.
+#[test]
+fn find_bytes_at_the_end_of_a_short_file_extent() {
+    let mut bytes = vec![0x66u8; 0x40];
+    bytes[0x1d..0x21].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    bytes[0x25..0x29].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    let text = Section {
+        name: ".text".to_owned(),
+        va: Va(0x1000),
+        vsize: 0x40,
+        file_off: FileOff(0),
+        file_size: 0x20,
+        readable: true,
+        writable: false,
+        executable: true,
+    };
+    let p = Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![text]);
+    let pattern = parse_pattern("12 34 56 78").unwrap();
+    let got = find_bytes(&p, &pattern, 0);
+    let list: Vec<(Option<u64>, u64)> = got.hits.iter().map(|h| (h.va, h.file_off)).collect();
+    assert_eq!(list, [(Some(0x101d), 0x1d), (None, 0x25)]);
+    assert_eq!(got.total, 2);
+    assert_naive(&p, &pattern);
+}
+
+/// The page holds at most [`HITS_MAX`] hits.
+///
+/// An offset at the total answers an empty page, one before it the last
+/// hit alone, and one past it nothing at all - the anchored scan and the
+/// all-wildcard walk alike.
+#[test]
+fn find_bytes_pages_at_and_beyond_the_total_and_caps_the_page() {
+    let bytes = vec![0xaau8; 600];
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(".text", 0x1000, 0, 600, false, true)],
+    );
+    for spec in ["aa", "?"] {
+        let pattern = parse_pattern(spec).unwrap();
+        let all = find_bytes(&p, &pattern, 0);
+        assert_eq!(all.total, 600, "spec {spec}");
+        assert_eq!(all.hits.len(), HITS_MAX, "spec {spec}");
+        let tail = find_bytes(&p, &pattern, HITS_MAX);
+        assert_eq!(tail.hits.len(), 100, "spec {spec}");
+        assert_eq!(tail.total, 600, "spec {spec}");
+        assert_eq!(
+            tail.hits.first().map(|h| h.file_off),
+            Some(500),
+            "spec {spec}"
+        );
+        let last = find_bytes(&p, &pattern, 599);
+        assert_eq!(last.hits.len(), 1, "spec {spec}");
+        assert_eq!(last.hits[0].file_off, 599, "spec {spec}");
+        for offset in [600, 601, 9999] {
+            let page = find_bytes(&p, &pattern, offset);
+            assert!(page.hits.is_empty(), "spec {spec} offset {offset}");
+            assert_eq!(page.total, 600, "spec {spec} offset {offset}");
+        }
+    }
+}
+
+/// `find_bytes` answers what a byte-by-byte scan answers.
+///
+/// Two hundred pseudo-random five-to-twelve-byte patterns with wildcards,
+/// planted into a four-kilobyte pseudo-random buffer that two sections
+/// and three unmapped gaps divide, match the naive reference exactly, hit
+/// for hit and in order.
+#[test]
+fn find_bytes_equals_the_naive_scan_on_planted_random_patterns() {
+    /// Size of the pseudo-random buffer.
+    const LEN: usize = 0x1000;
+    /// Patterns tried.
+    const PATTERNS: usize = 200;
+    let mut x = 0x600d_1dea_u32;
+    let mut step = || {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x
+    };
+    let mut bytes: Vec<u8> = Vec::with_capacity(LEN);
+    for _ in 0..LEN {
+        bytes.push(borer_engine::num::lo8(u64::from(step())));
+    }
+    let mut patterns: Vec<Vec<Option<u8>>> = Vec::with_capacity(PATTERNS);
+    for k in 0..PATTERNS {
+        let len = 5 + usize::try_from(step() % 8).unwrap();
+        let mut pattern: Vec<Option<u8>> = (0..len)
+            .map(|_| (step() % 4 == 0).then(|| borer_engine::num::lo8(u64::from(step()))))
+            .collect();
+        if !pattern.iter().any(|p| p.is_some()) {
+            pattern[0] = Some(borer_engine::num::lo8(u64::from(step())));
+        }
+        plant_at(
+            &mut bytes,
+            &pattern,
+            (k * 97 + 13) % (LEN - pattern.len() - 1),
+        );
+        patterns.push(pattern);
+    }
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0x10, 0x7f0, false, true),
+            Section::mapped(".data", 0x2000, 0x900, 0x600, true, false),
+        ],
+    );
+    let mut found = 0;
+    for pattern in &patterns {
+        let want = naive_byte_hits(&p, pattern);
+        let got = find_bytes(&p, pattern, 0);
+        assert_eq!(got.total, want.len());
+        let list: Vec<(Option<u64>, u64)> = got.hits.iter().map(|h| (h.va, h.file_off)).collect();
+        let page = &want[..want.len().min(HITS_MAX)];
+        assert_eq!(list, page);
+        found += got.total;
+    }
+    assert!(
+        found >= PATTERNS / 2,
+        "the plantings must be found, not only the absences: {found}"
     );
 }
