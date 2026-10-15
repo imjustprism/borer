@@ -21,14 +21,29 @@ type WriteBack = Option<(Reg, Expr)>;
 /// The type one element of `width` moves for a register of `bits`, and
 /// whether the load sign-extends it.
 ///
+/// A `v` register at a single's or a double's width moves a float, as the
+/// x86 lifter's `movss` and `movsd` do, so the access itself types it.
+///
 /// # Arguments
 ///
 /// * `width` - What the access moves.
+/// * `r` - The register moved, whose class tells a float.
 /// * `bits` - The register's width: 32 or 64, or 8 to 128 for a `v`
 ///   register.
-fn access(width: Width, bits: u16) -> (Ty, bool) {
+fn access(width: Width, r: Reg, bits: u16) -> (Ty, bool) {
+    let float = match r {
+        Reg::V(_) => matches!(bits, 32 | 64),
+        Reg::X(_) | Reg::Sp | Reg::Zr => false,
+    };
     match width {
-        Width::Reg => (Ty::from_bits(u8::try_from(bits).unwrap_or(u8::MAX)), false),
+        Width::Reg => (
+            match (bits, float) {
+                (32, true) => Ty::F32,
+                (64, true) => Ty::F64,
+                _ => Ty::from_bits(u8::try_from(bits).unwrap_or(u8::MAX)),
+            },
+            false,
+        ),
         Width::Byte => (Ty::U8, false),
         Width::Half => (Ty::U16, false),
         Width::SByte => (Ty::U8, true),
@@ -147,7 +162,7 @@ impl Lift<'_, '_> {
         if self.table_load == Some(i.va) {
             self.ex.switch_idx = self.table_index(i.operands[1]);
         }
-        let (ty, signed) = access(width, bits);
+        let (ty, signed) = access(width, rt, bits);
         let v = self.ex.read_at(addr, ty);
         let v = if signed { sign_extend(v, ty.bits()) } else { v };
         let mut writes = vec![(rt, bits, v)];
@@ -166,7 +181,7 @@ impl Lift<'_, '_> {
     pub(super) fn store(&mut self, i: &Insn, width: Width) -> Option<()> {
         let (rt, bits) = register(i, 0)?;
         let (addr, back) = self.address(i.operands[1])?;
-        let ty = access(width, bits).0;
+        let ty = access(width, rt, bits).0;
         let v = stored(self.reg_at(rt, bits), ty);
         self.ex.store_at(addr, ty, v);
         if let Some((r, a)) = back {
@@ -186,7 +201,7 @@ impl Lift<'_, '_> {
         let (first, bits) = register(i, 0)?;
         let (second, _) = register(i, 1)?;
         let (addr, back) = self.address(i.operands[2])?;
-        let (ty, signed) = access(width, bits);
+        let (ty, signed) = access(width, first, bits);
         let step = Expr::Const(u64::from(ty.bits() / 8));
         let a = self.ex.read_at(addr.clone(), ty);
         let b = self.ex.read_at(fold(Op::Add, addr, step, 64), ty);
@@ -205,7 +220,7 @@ impl Lift<'_, '_> {
     pub(super) fn store_pair(&mut self, i: &Insn) -> Option<()> {
         let (first, bits) = register(i, 0)?;
         let (second, _) = register(i, 1)?;
-        let (ty, _) = access(Width::Reg, bits);
+        let (ty, _) = access(Width::Reg, first, bits);
         let step = Expr::Const(from_usize(usize::from(bits / 8)));
         let (addr, _) = self.address(i.operands[2])?;
         let a = stored(self.reg_at(first, bits), ty);

@@ -143,6 +143,59 @@ fn truth(e: Expr, cc: Cc) -> Cond {
     }
 }
 
+/// The condition over a float compare's flags.
+///
+/// The arm64 conditions map one to one onto the x86 ones a float compare
+/// leaves: `lt` to below, `ge` to above-or-equal, `gt` to above, `le` to
+/// below-or-equal and `vs` to the unordered test, `hi` and `ls` beside
+/// `gt` and `le`.
+///
+/// The sign tests have no x86 counterpart over floats: the arm64 N flag is
+/// the ordered less-than alone, where x86's carry takes an unordered pair
+/// with it, so `mi` (and `lo`, which a float compare leaves the same) is
+/// the less-than and the ordered test together, `pl` and `hs` its inverse.
+///
+/// # Arguments
+///
+/// * `flags` - The float compare's [`Flags::Cmp`].
+/// * `c` - The arm64 condition.
+/// * `cc` - The x86 code that stands for `c`.
+///
+/// # Returns
+///
+/// The condition.
+fn float_condition(flags: &Flags, c: a64::Cond, cc: Cc) -> Cond {
+    use ConditionCode as C;
+    let plain = |cc: Cc| Cond {
+        cc,
+        flags: flags.clone(),
+    };
+    match c {
+        a64::Cond::Eq => plain(Cc(C::e)),
+        a64::Cond::Ne => plain(Cc(C::ne)),
+        a64::Cond::Lt => plain(Cc(C::b)),
+        a64::Cond::Ge => plain(Cc(C::ae)),
+        a64::Cond::Gt | a64::Cond::Hi => plain(Cc(C::a)),
+        a64::Cond::Le | a64::Cond::Ls => plain(Cc(C::be)),
+        a64::Cond::Vs => plain(Cc(C::p)),
+        a64::Cond::Vc => plain(Cc(C::np)),
+        // INVARIANT: the ordered tests are below with not-unordered, and
+        // their inverses; `lo` is `mi` because only a less pair clears C.
+        a64::Cond::Mi | a64::Cond::Lo | a64::Cond::Pl | a64::Cond::Hs => {
+            let less = Expr::Cond(Box::new(Cond {
+                cc: Cc(C::b),
+                flags: flags.clone(),
+            }));
+            let ordered = Expr::Cond(Box::new(Cond {
+                cc: Cc(C::np),
+                flags: flags.clone(),
+            }));
+            truth(fold(Op::And, less, ordered, 64), cc)
+        }
+        a64::Cond::Al | a64::Cond::Nv => truth(Expr::Const(1), Cc(C::ne)),
+    }
+}
+
 /// The condition an arm64 condition code asks of the flags.
 ///
 /// # Arguments
@@ -167,6 +220,7 @@ pub(super) fn condition(flags: &Flags, c: a64::Cond) -> Cond {
         flags: Flags::Unknown,
     };
     match flags {
+        Flags::Float(..) => float_condition(flags, c, cc),
         Flags::Cmp(a, b, bits) => match c {
             a64::Cond::Vs | a64::Cond::Vc => Cond {
                 cc,
@@ -334,6 +388,8 @@ pub(super) fn reads(i: &Insn) -> Option<a64::Cond> {
             | Mnemonic::Csneg
             | Mnemonic::Ccmp
             | Mnemonic::Ccmn
+            | Mnemonic::Fccmp
+            | Mnemonic::Fcsel
     );
     let carries = matches!(
         i.mnemonic,
@@ -351,8 +407,10 @@ pub(super) fn reads(i: &Insn) -> Option<a64::Cond> {
     (!matches!(c, a64::Cond::Al | a64::Cond::Nv)).then_some(c)
 }
 
-/// Tells whether an instruction sets the flags: the flag-setting
-/// arithmetic and logic, the conditional compares, a write of `NZCV`, and
+/// Tells whether an instruction sets the flags.
+///
+/// The flag-setting arithmetic and logic, the compares, integer and
+/// floating-point alike, the conditional compares, a write of `NZCV`, and
 /// a call, after which the flags hold nothing the caller set.
 ///
 /// # Arguments
@@ -370,6 +428,9 @@ pub(super) fn writes(i: &Insn) -> bool {
                 | Mnemonic::Sbcs
                 | Mnemonic::Ccmp
                 | Mnemonic::Ccmn
+                | Mnemonic::Fcmp
+                | Mnemonic::Fcmpe
+                | Mnemonic::Fccmp
                 | Mnemonic::Msr
         )
 }

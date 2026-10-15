@@ -1,7 +1,9 @@
 //! The arm64 emulator.
 //!
 //! Words assembled by LLVM (`clang --target=aarch64-linux-gnu`, linked by
-//! `ld.lld` where an address matters) and checked against `llvm-objdump`,
+//! `ld.lld` where an address matters) and checked against
+//! `llvm-objdump` — the scalar float and vector ones hand-encoded from the
+//! Arm ARM and checked against the decoder —
 //! run in [`Machine`] from a raw arm64 image: a table of short routines
 //! with the registers set before and the registers, memory and vector
 //! registers expected after; the flag truth tables of the adds, subtracts
@@ -933,6 +935,217 @@ const CASES: &[Case] = &[
         ],
     },
     Case {
+        name: "float",
+        words: &[
+            // ASM: fmov d0, x0
+            0x9e67_0000,
+            // ASM: scvtf d1, x1
+            0x9e62_0021,
+            // ASM: scvtf s2, w2
+            0x1e22_0042,
+            // ASM: ucvtf d3, x1
+            0x9e63_0023,
+            // ASM: fadd d4, d0, d1
+            0x1e61_2804,
+            // ASM: fmul d5, d0, d0
+            0x1e60_0805,
+            // ASM: fdiv d6, d0, d0
+            0x1e60_1806,
+            // ASM: fsub d7, d1, d0
+            0x1e60_3827,
+            // ASM: fmul d9, d0, d0
+            0x1e60_0809,
+            // ASM: fsqrt d9, d9
+            0x1e61_c129,
+            // ASM: fneg d10, d0
+            0x1e61_400a,
+            // ASM: fabs d11, d10
+            0x1e60_c14b,
+            // ASM: fabs s12, s2
+            0x1e20_c04c,
+            // ASM: fneg s13, s2
+            0x1e21_404d,
+            // ASM: fcvt s14, d0
+            0x1e62_400e,
+            // ASM: fcvt d15, s14
+            0x1e22_c1cf,
+            // ASM: fcvt h20, d0
+            0x1e63_c014,
+            // ASM: fcvt s24, h20
+            0x1ee2_4298,
+            // ASM: fcvt d25, h20
+            0x1ee2_c299,
+            // ASM: fcvt h28, d7
+            0x1e63_c0fc,
+            // ASM: fcvtzs w16, d0
+            0x1e78_0010,
+            // ASM: fcvtzs x17, d10
+            0x9e78_0151,
+            // ASM: fcvtzu w18, s2
+            0x1e39_0052,
+            // ASM: scvtf d19, w1, #0x4
+            0x1e42_f033,
+            // ASM: scvtf d21, wzr
+            0x1e62_03f5,
+            // ASM: fdiv d22, d0, d21
+            0x1e75_1816,
+            // ASM: fdiv d23, d21, d21
+            0x1e75_1ab7,
+            // ASM: fcvtzs w19, d22
+            0x1e78_02d3,
+            // ASM: fcvtzs w20, d23
+            0x1e78_02f4,
+            // ASM: fadd s30, s2, s2
+            0x1e22_285e,
+            // ASM: fdiv s29, s2, s2
+            0x1e22_185d,
+            // ASM: fcmp d0, d1
+            0x1e61_2000,
+            // ASM: mrs x9, NZCV
+            0xd53b_4209,
+            // ASM: fcmp d1, d0
+            0x1e60_2020,
+            // ASM: mrs x10, NZCV
+            0xd53b_420a,
+            // ASM: fcmp d0, #0.0
+            0x1e60_2008,
+            // ASM: mrs x11, NZCV
+            0xd53b_420b,
+            // ASM: fcmpe d1, d0
+            0x1e60_2030,
+            // ASM: mrs x12, NZCV
+            0xd53b_420c,
+            // ASM: fcmp d0, d1
+            0x1e61_2000,
+            // ASM: fccmp d1, d0, #0xf, gt
+            0x1e60_c42f,
+            // ASM: mrs x13, NZCV
+            0xd53b_420d,
+            // ASM: fccmp d1, d0, #0xf, eq
+            0x1e60_042f,
+            // ASM: mrs x14, NZCV
+            0xd53b_420e,
+            // ASM: fcmp d0, d1
+            0x1e61_2000,
+            // ASM: fcsel d26, d0, d1, gt
+            0x1e61_cc1a,
+            // ASM: fcsel d27, d0, d1, mi
+            0x1e61_4c1b,
+            // ASM: ret
+            0xd65f_03c0,
+        ],
+        set: &[
+            ("x0", 0x4004_0000_0000_0000),
+            ("x1", 0xffff_ffff_ffff_fff9),
+            ("x2", 0x3),
+        ],
+        want: &[
+            ("x9", 0x2000_0000),
+            ("x10", 0x8000_0000),
+            ("x11", 0x2000_0000),
+            ("x12", 0x8000_0000),
+            ("x13", 0x8000_0000),
+            ("x14", 0xf000_0000),
+            ("x16", 0x2),
+            ("x17", 0xffff_ffff_ffff_fffe),
+            ("x18", 0x3),
+            ("x19", 0x7fff_ffff),
+            ("x20", 0x0),
+        ],
+        mem: &[],
+        vregs: &[
+            (0, 0x4004_0000_0000_0000),
+            (1, 0xc01c_0000_0000_0000),
+            (2, 0x4040_0000),
+            (3, 0x43f0_0000_0000_0000),
+            (4, 0xc012_0000_0000_0000),
+            (5, 0x4019_0000_0000_0000),
+            (6, 0x3ff0_0000_0000_0000),
+            (7, 0xc023_0000_0000_0000),
+            (9, 0x4004_0000_0000_0000),
+            (10, 0xc004_0000_0000_0000),
+            (11, 0x4004_0000_0000_0000),
+            (12, 0x4040_0000),
+            (13, 0xc040_0000),
+            (14, 0x4020_0000),
+            (15, 0x4004_0000_0000_0000),
+            (20, 0x4100),
+            (24, 0x4020_0000),
+            (25, 0x4004_0000_0000_0000),
+            (28, 0xc8c0),
+            (19, 0xbfdc_0000_0000_0000),
+            (21, 0x0),
+            (22, 0x7ff0_0000_0000_0000),
+            (26, 0x4004_0000_0000_0000),
+            (27, 0xc01c_0000_0000_0000),
+            (29, 0x3f80_0000),
+            (30, 0x40c0_0000),
+        ],
+    },
+    Case {
+        name: "neon",
+        words: &[
+            // ASM: fmov d0, x0
+            0x9e67_0000,
+            // ASM: fmov d1, x1
+            0x9e67_0021,
+            // ASM: and v2.16b, v0.16b, v1.16b
+            0x4e21_1c02,
+            // ASM: orr v3.16b, v0.16b, v1.16b
+            0x4ea1_1c03,
+            // ASM: eor v4.16b, v0.16b, v1.16b
+            0x6e21_1c04,
+            // ASM: bic v5.16b, v0.16b, v1.16b
+            0x4e61_1c05,
+            // ASM: dup v6.2d, x4
+            0x4e08_0c86,
+            // ASM: orr v6.4s, v6.4s, #0x1
+            0x4f00_1426,
+            // ASM: dup v7.2d, x4
+            0x4e08_0c87,
+            // ASM: bic v7.4s, v7.4s, #0x2
+            0x6f00_1447,
+            // ASM: dup v8.2d, x2
+            0x4e08_0c48,
+            // ASM: dup v9.4s, w2
+            0x4e04_0c49,
+            // ASM: dup v10.16b, w3
+            0x4e01_0c6a,
+            // ASM: mov v11.2d, v8.d[1]
+            0x4e18_050b,
+            // ASM: mov v12.4s, v9.s[3]
+            0x4e1c_052c,
+            // ASM: mov v8.4s, v0.s[1]
+            0x4e0c_0408,
+            // ASM: ret
+            0xd65f_03c0,
+        ],
+        set: &[
+            ("x0", 0xff00_ff00_ff00_ff00),
+            ("x1", 0x0f0f_0f0f_0f0f_0f0f),
+            ("x2", 0x8899_aabb_ccdd_eeff),
+            ("x3", 0xab),
+            ("x4", 0x2222_2222_2222_2222),
+        ],
+        want: &[],
+        mem: &[],
+        vregs: &[
+            (0, 0xff00_ff00_ff00_ff00),
+            (1, 0x0f0f_0f0f_0f0f_0f0f),
+            (2, 0x0f00_0f00_0f00_0f00),
+            (3, 0xff0f_ff0f_ff0f_ff0f),
+            (4, 0xf00f_f00f_f00f_f00f),
+            (5, 0xf000_f000_f000_f000),
+            (6, 0x2222_2223_2222_2223_2222_2223_2222_2223),
+            (7, 0x2222_2220_2222_2220_2222_2220_2222_2220),
+            (8, 0xff00_ff00_ff00_ff00_ff00_ff00_ff00_ff00),
+            (9, 0xccdd_eeff_ccdd_eeff_ccdd_eeff_ccdd_eeff),
+            (10, 0xabab_abab_abab_abab_abab_abab_abab_abab),
+            (11, 0x8899_aabb_ccdd_eeff_8899_aabb_ccdd_eeff),
+            (12, 0xccdd_eeff_ccdd_eeff_ccdd_eeff_ccdd_eeff),
+        ],
+    },
+    Case {
         name: "system",
         words: &[
             // ASM: mrs x0, TPIDR_EL0
@@ -1244,8 +1457,8 @@ fn every_stop_is_named() {
         Stop::Derailed(SP - 0x100)
     );
     let cases: [(&[u32], &str); 5] = [
-        // ASM: fadd d0, d1, d2
-        (&[0x1e62_2820], "fadd d0, d1, d2"),
+        // ASM: fadd v0.4s, v1.4s, v2.4s (the vector form; the scalar one runs)
+        (&[0x4e22_d420], "fadd v0.4s"),
         // ASM: ld1 { v0.16b }, [x0]
         (&[0x4c40_7000], "ld1"),
         // ASM: brk #0x3e8

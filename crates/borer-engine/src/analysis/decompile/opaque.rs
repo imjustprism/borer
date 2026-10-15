@@ -111,7 +111,10 @@ pub(super) fn constant_outcome(cond: &Cond) -> Option<(bool, Evidence)> {
     }
     let mut vars = BTreeSet::new();
     match &cond.flags {
-        Flags::Cmp(l, r, _) | Flags::Test(l, r, _) | Flags::Add(l, r, _) => {
+        Flags::Cmp(l, r, _)
+        | Flags::Float(l, r, _)
+        | Flags::Test(l, r, _)
+        | Flags::Add(l, r, _) => {
             if reads_memory(l) || reads_memory(r) {
                 return None;
             }
@@ -275,7 +278,7 @@ fn exhaust(cond: &Cond, vars: &[Key]) -> Exhaustive {
 /// `None` when the flags read something [`demand`] cannot bound.
 fn depends(cond: &Cond, need: &mut BTreeMap<Key, u8>) -> Option<()> {
     match &cond.flags {
-        Flags::Cmp(l, r, w) | Flags::Add(l, r, w) => {
+        Flags::Cmp(l, r, w) | Flags::Float(l, r, w) | Flags::Add(l, r, w) => {
             demand(l, *w, need)?;
             demand(r, *w, need)
         }
@@ -365,9 +368,10 @@ fn demand(e: &Expr, k: u8, need: &mut BTreeMap<Key, u8>) -> Option<()> {
 fn computes(cond: &Cond) -> bool {
     let operand = |e: &Expr| matches!(e, Expr::Bin(..) | Expr::Un(..));
     match &cond.flags {
-        Flags::Cmp(l, r, _) | Flags::Test(l, r, _) | Flags::Add(l, r, _) => {
-            operand(l) || operand(r)
-        }
+        Flags::Cmp(l, r, _)
+        | Flags::Float(l, r, _)
+        | Flags::Test(l, r, _)
+        | Flags::Add(l, r, _) => operand(l) || operand(r),
         Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => operand(e),
         Flags::Shift(e, _, c) => operand(e) || operand(c),
         Flags::Unknown => false,
@@ -440,7 +444,10 @@ fn reduce(e: &Expr, bits: u8) -> Expr {
 fn pool_for(cond: &Cond) -> Vec<u64> {
     let mut consts = BTreeSet::new();
     match &cond.flags {
-        Flags::Cmp(l, r, _) | Flags::Test(l, r, _) | Flags::Add(l, r, _) => {
+        Flags::Cmp(l, r, _)
+        | Flags::Float(l, r, _)
+        | Flags::Test(l, r, _)
+        | Flags::Add(l, r, _) => {
             constants(l, &mut consts);
             constants(r, &mut consts);
         }

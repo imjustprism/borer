@@ -413,7 +413,11 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Barrier
             | Mnemonic::Msr
             | Mnemonic::Ccmp
-            | Mnemonic::Ccmn => writeback,
+            | Mnemonic::Ccmn
+            // INVARIANT: the floating-point compares write the flags only.
+            | Mnemonic::Fcmp
+            | Mnemonic::Fcmpe
+            | Mnemonic::Fccmp => writeback,
             Mnemonic::Stxr(_) | Mnemonic::Stxp | Mnemonic::Cas(_) => bit(0) | writeback,
             Mnemonic::Ldp(_) => bit(0) | bit(1) | writeback,
             Mnemonic::Atomic(..) => bit(1),
@@ -470,6 +474,20 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Csneg
             | Mnemonic::Ldr(_)
             | Mnemonic::Fmov
+            | Mnemonic::Fadd
+            | Mnemonic::Fsub
+            | Mnemonic::Fmul
+            | Mnemonic::Fdiv
+            | Mnemonic::Fsqrt
+            | Mnemonic::Fabs
+            | Mnemonic::Fneg
+            | Mnemonic::Fcsel
+            | Mnemonic::Scvtf
+            | Mnemonic::Ucvtf
+            | Mnemonic::Fcvtzs
+            | Mnemonic::Fcvtzu
+            | Mnemonic::Fcvt
+            | Mnemonic::Dup
             | Mnemonic::Movi
             | Mnemonic::Mvni
             | Mnemonic::Mrs
@@ -682,6 +700,23 @@ fn data(regs: &Regs, insn: &Insn, found: &mut dyn FnMut(u64, RefKind)) -> Option
         | Mnemonic::Ccmn
         | Mnemonic::Prfm
         | Mnemonic::Fmov
+        | Mnemonic::Fadd
+        | Mnemonic::Fsub
+        | Mnemonic::Fmul
+        | Mnemonic::Fdiv
+        | Mnemonic::Fsqrt
+        | Mnemonic::Fabs
+        | Mnemonic::Fneg
+        | Mnemonic::Fcmp
+        | Mnemonic::Fcmpe
+        | Mnemonic::Fccmp
+        | Mnemonic::Fcsel
+        | Mnemonic::Scvtf
+        | Mnemonic::Ucvtf
+        | Mnemonic::Fcvtzs
+        | Mnemonic::Fcvtzu
+        | Mnemonic::Fcvt
+        | Mnemonic::Dup
         | Mnemonic::Movi
         | Mnemonic::Mvni
         | Mnemonic::Svc
