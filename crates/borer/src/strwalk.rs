@@ -315,4 +315,81 @@ mod tests {
             "a reset program walks again, sharing nothing with the stale rows"
         );
     }
+
+    /// A span row's whole text borrows an ASCII run's bytes and decodes a
+    /// UTF-16LE run's low halves.
+    ///
+    /// Its display text is the span's own materialization: cut with
+    /// `...` past two hundred characters while the whole text keeps every
+    /// one.
+    ///
+    /// # Panics
+    ///
+    /// When a row's texts disagree with its bytes.
+    #[test]
+    fn span_rows_answer_whole_and_display_texts() {
+        let mut bytes: Vec<u8> = b"ascii run\x00".to_vec();
+        bytes.extend(b"wide run".iter().flat_map(|b| [*b, 0]));
+        bytes.push(0xff);
+        bytes.extend(std::iter::repeat_n(b'q', 300));
+        bytes.push(0);
+        let p = Program::raw(
+            bytes,
+            borer_engine::program::Arch::X86_64,
+            0,
+            None,
+            Vec::new(),
+        );
+
+        let ascii = find_ascii_spans(&p.bytes, 5);
+        assert_eq!(ascii.len(), 2, "{ascii:?}");
+        let narrow = StringRow::Span(ascii[0]);
+        assert_eq!(narrow.full_text(&p.bytes), "ascii run");
+        assert_eq!(narrow.display_text(&p.bytes), "ascii run");
+
+        let wide = find_wide_spans(&p.bytes, 5);
+        assert_eq!(wide.len(), 1, "{wide:?}");
+        let wide_row = StringRow::Span(wide[0]);
+        assert_eq!(wide_row.full_text(&p.bytes), "wide run");
+        assert_eq!(wide_row.display_text(&p.bytes), "wide run");
+
+        let long = StringRow::Span(ascii[1]);
+        let shown = long.display_text(&p.bytes);
+        assert_eq!(shown.chars().count(), 203);
+        assert!(shown.ends_with("..."));
+        assert_eq!(long.full_text(&p.bytes).chars().count(), 300);
+        assert!(long.full_text(&p.bytes).ends_with("qqq"));
+    }
+
+    /// A row whose span no longer stands in the program's bytes answers
+    /// empty texts rather than a panic, the way a stale page after a
+    /// reload must.
+    ///
+    /// # Panics
+    ///
+    /// When a vanished span panics or answers text.
+    #[test]
+    fn span_rows_of_vanished_bytes_answer_empty() {
+        let p = Program::raw(
+            b"ab\x00".to_vec(),
+            borer_engine::program::Arch::Unknown,
+            0,
+            None,
+            Vec::new(),
+        );
+        let gone = StringRow::Span(RawStringSpan {
+            off: 50,
+            len: 4,
+            encoding: borer_engine::strings::Encoding::Ascii,
+        });
+        assert_eq!(gone.full_text(&p.bytes), "");
+        assert_eq!(gone.display_text(&p.bytes), "");
+        let overrun = StringRow::Span(RawStringSpan {
+            off: 0,
+            len: 9,
+            encoding: borer_engine::strings::Encoding::Utf16,
+        });
+        assert_eq!(overrun.full_text(&p.bytes), "");
+        assert_eq!(overrun.display_text(&p.bytes), "");
+    }
 }

@@ -51,6 +51,7 @@ mod protos;
 mod regression;
 mod reloc;
 mod search;
+mod strings;
 mod structure;
 mod syscalls;
 mod textcheck;

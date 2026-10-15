@@ -6074,6 +6074,52 @@ mod tests {
         }
     }
 
+    /// The span filter and the text filter agree on the needle edge
+    /// cases: mixed case, a needle longer than the string, one that is
+    /// the string, and one holding NULs.
+    ///
+    /// # Panics
+    ///
+    /// When the span filter and the text filter disagree on a needle.
+    #[test]
+    fn span_filter_agrees_on_needle_edge_cases() {
+        use borer_engine::program::{Arch, Program};
+        let mut bytes: Vec<u8> = b"Kernel32.DLL\x00".to_vec();
+        bytes.extend(b"LoNgWiDe".iter().flat_map(|b| [*b, 0]));
+        bytes.push(0);
+        let p = Program::raw(bytes, Arch::X86_64, 0, None, Vec::new());
+        let rows: Vec<super::StringRow> = borer_engine::strings::find_ascii_spans(&p.bytes, 4)
+            .into_iter()
+            .map(super::StringRow::Span)
+            .chain(
+                borer_engine::strings::find_wide_spans(&p.bytes, 4)
+                    .into_iter()
+                    .map(super::StringRow::Span),
+            )
+            .collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for needle in [
+            "Kernel32.DLL",
+            "KERNEL32.dll",
+            "LoNgWiDe",
+            "lOnGwIdE",
+            "Kernel32.DLL_EXTRA",
+            "\0",
+            "32.D\0L",
+        ] {
+            let filter = super::Filter::new(Some(needle));
+            for row in &rows {
+                let want = filter.accepts(&row.full_text(&p.bytes));
+                assert_eq!(
+                    super::row_matches(&p, row, &filter),
+                    want,
+                    "needle {needle:?} on {:?}",
+                    row.full_text(&p.bytes)
+                );
+            }
+        }
+    }
+
     /// An answer with its evidence line taken off, so two emissions of one
     /// answer compare: the id names the emission, so that is the one line
     /// that differs between them.
