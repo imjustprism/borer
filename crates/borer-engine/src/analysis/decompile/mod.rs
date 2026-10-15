@@ -774,7 +774,10 @@ fn annotate_rodata_strings(program: &Program, text: String) -> String {
             in_body = true;
         }
         out.push_str(line);
-        if in_body && let Some(note) = note_for(line) {
+        if in_body
+            && let Some(note) = note_for(line)
+            && note_fits(&note)
+        {
             out.push_str(" /* ");
             out.push_str(&note);
             out.push_str(" */");
@@ -896,6 +899,7 @@ fn annotate_stack_structures(text: &str) -> Option<String> {
         }
         if pieces >= 2
             && let Some(lit) = decode_coalesced_stack_string(&combined)
+            && note_fits(&lit)
         {
             slot_strings.insert(name, lit.clone());
             if let Some(line) = lines.get_mut(line_idx)
@@ -941,9 +945,10 @@ fn annotate_stack_structures(text: &str) -> Option<String> {
         };
         let amp_string = find_amp_slot_string(code, &slot_strings);
         let new_note = match (array_tag, existing_note.or(amp_string.as_deref())) {
-            (Some(tag), Some(lit)) => Some(format!("{tag} = {lit}")),
+            (Some(tag), Some(lit)) if note_fits(lit) => Some(format!("{tag} = {lit}")),
             (Some(tag), None) => Some(tag),
-            (None, Some(lit)) if existing_note.is_none() => Some(lit.to_owned()),
+            (None, Some(lit)) if existing_note.is_none() && note_fits(lit) => Some(lit.to_owned()),
+            (Some(tag), _) => Some(tag),
             (None, _) => None,
         };
         if let Some(note) = new_note {
@@ -954,6 +959,21 @@ fn annotate_stack_structures(text: &str) -> Option<String> {
     }
     if let Some(arr) = array {
         let mut headers: Vec<String> = Vec::new();
+        // The base slot itself needs a declaration when the body names
+        // it: its address escapes into a call, or an element of it is
+        // read whole. The element fields a note names stay notes, so the
+        // declaration is the storage the array covers, in bytes.
+        let base = format!("local_{:x}", arr.base_off);
+        let names_base = lines.iter().skip(blank_at + 1).any(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//")
+                && t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|w| w == base)
+        });
+        if names_base {
+            let bytes = arr.stride.saturating_mul(arr.count);
+            headers.push(format!("uint8_t {base}[{bytes:#x}];"));
+        }
         let mut header = format!(
             "// stack array local_{:x}[{}] (stride {:#x}):",
             arr.base_off, arr.count, arr.stride
@@ -1066,6 +1086,22 @@ fn find_amp_slot_string(code: &str, slot_strings: &BTreeMap<String, String>) -> 
         }
     }
     None
+}
+
+/// Tells whether a literal sits whole inside a `/* */` note.
+///
+/// No comment marker may run inside it, whose text would cut the note or
+/// the line it rides on, and quotes come paired, whose lone one would
+/// open a string every reader of the text blanks.
+///
+/// # Arguments
+///
+/// * `lit` - The literal as it would be written into the note.
+fn note_fits(lit: &str) -> bool {
+    !lit.contains("//")
+        && !lit.contains("/*")
+        && !lit.contains("*/")
+        && lit.matches('"').count().is_multiple_of(2)
 }
 
 /// Detects a repeating array of stack structs starting at an address-taken

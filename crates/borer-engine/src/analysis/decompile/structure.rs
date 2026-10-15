@@ -1091,7 +1091,15 @@ pub(super) fn merge_chain<L: Lifter>(
     let mut fuel = 8;
     while fuel > 0 {
         fuel -= 1;
-        if let Some(d) = pure_condition(ctx, st, header, f) {
+        // INVARIANT: C evaluates a guard's operands left to right, so a
+        // call a merged term takes in would run after the terms before it
+        // in the text while the machine ran it before them - the checker
+        // compares evaluation order and would flag it, and the order is
+        // observable the moment the call writes anything the earlier
+        // tests read. Only the header's own term, which the chain builds
+        // before this loop, may carry a call; a candidate that has taken
+        // one in stays its own statement and its own test.
+        if let Some(d) = pure_condition(ctx, st, header, f).filter(|d| d.call.is_none()) {
             let consumed = f;
             let decides = d.test.unwrap_or(consumed);
             let mark = journal.mark();
@@ -1099,6 +1107,14 @@ pub(super) fn merge_chain<L: Lifter>(
             let f2 = follow_trampoline(ctx, st, decides, d.f, journal);
             let (g2, t2, f2) =
                 sub_chain(ctx, st, decides, (d.cond, d.call), t2, f2, depth, journal);
+            // INVARIANT: as above, a call anywhere in an appended term
+            // (its own sub-chain can take one in where this loop's filter
+            // cannot see it) breaks evaluation order; the candidate stays
+            // its own statement and test instead.
+            if g2.calls() {
+                journal.restore(st, mark);
+                return (guard, t, f);
+            }
             let (g, nt, nf) = if t2 == t {
                 (Guard::Or(Box::new(guard), Box::new(g2)), t, f2)
             } else if f2 == t {
@@ -1116,7 +1132,7 @@ pub(super) fn merge_chain<L: Lifter>(
             f = nf;
             continue;
         }
-        if let Some(d) = pure_condition(ctx, st, header, t) {
+        if let Some(d) = pure_condition(ctx, st, header, t).filter(|d| d.call.is_none()) {
             let consumed = t;
             let decides = d.test.unwrap_or(consumed);
             let mark = journal.mark();
@@ -1124,6 +1140,13 @@ pub(super) fn merge_chain<L: Lifter>(
             let f2 = follow_trampoline(ctx, st, decides, d.f, journal);
             let (g2, t2, f2) =
                 sub_chain(ctx, st, decides, (d.cond, d.call), t2, f2, depth, journal);
+            // INVARIANT: as above, an appended term that calls anything
+            // breaks evaluation order; the candidate stays its own
+            // statement and test instead.
+            if g2.calls() {
+                journal.restore(st, mark);
+                return (guard, t, f);
+            }
             let (g, nt, nf) = if f2 == f {
                 (Guard::And(Box::new(guard), Box::new(g2)), t2, f)
             } else if t2 == f {
