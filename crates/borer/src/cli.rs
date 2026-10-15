@@ -814,8 +814,8 @@ fn writable(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes the functions of static libraries or objects as a pack of library
-/// signatures: `sigmake <out> <name> <library>...`.
+/// Writes the functions of static libraries, objects or IDA `.pat` signature
+/// files as a pack of library signatures: `sigmake <out> <name> <library>...`.
 ///
 /// # Arguments
 ///
@@ -824,8 +824,9 @@ fn writable(path: &str) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// When an argument is missing, a library cannot be read, is neither an
-/// archive nor an object, or gives no function while members of it are
-/// damaged (each is named on stderr), or the pack cannot be written.
+/// archive, an object nor an IDA `.pat` file, or gives no function while
+/// members of it are damaged (each is named on stderr), or the pack cannot
+/// be written.
 fn sigmake(args: &[String]) -> anyhow::Result<()> {
     let out = arg(args, 1, "sigmake needs an output file")?;
     let name = args

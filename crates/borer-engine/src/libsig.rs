@@ -8,7 +8,10 @@
 //! [`read`] takes the functions out of an object or an archive of them
 //! with the relocated bytes masked: a COFF `.obj` or `.lib`, an ELF `.o`
 //! or `.a`, and a Rust `.rlib`, an archive of ELF or COFF objects beside
-//! its `lib.rmeta`. [`pack_text`] writes them as `[names]` `lib` lines:
+//! its `lib.rmeta`; a text IDA `.pat` signature file is read as it stands
+//! ([`read_pat`]): each line's leading 16 bytes with their wildcards are
+//! the signature and the next word the name. [`pack_text`] writes them as
+//! `[names]` `lib` lines:
 //!
 //! ```text
 //! lib 4883EC28E8????????4883C428C3 ?foo@@YAXXZ 5=?bar@@YAXXZ
@@ -45,6 +48,10 @@ const CLASS_STATIC: u8 = 3;
 const DTYPE_FUNCTION: u16 = 2;
 /// Most fixed bytes a [`Tail`] covers.
 const TAIL_MAX: usize = 255;
+/// The bytes a `.pat` record opens with, the fixed count IDA writes.
+const PAT_SIG_BYTES: usize = 16;
+/// The characters those bytes span, two per byte, `??` a wildcarded one.
+const PAT_SIG_CHARS: usize = PAT_SIG_BYTES * 2;
 
 /// The fixed bytes right after a signature: their count and a hash of
 /// them.
@@ -102,7 +109,8 @@ impl LibFunction {
 /// Reads the functions an object or an archive of objects defines.
 ///
 /// COFF objects of x86 and x64 and ELF relocatable objects of x86, x86-64
-/// and arm64 are read; an archive's import members and objects of other
+/// and arm64 are read, and so is a text IDA `.pat` signature file
+/// ([`read_pat`]); an archive's import members and objects of other
 /// machines are passed over, as are the members that are no object: the
 /// symbol tables (`/`, `/SYM64/`, `__.SYMDEF`), the GNU long-name table
 /// (`//`, which names the members called `/<offset>`) and a Rust
@@ -124,8 +132,8 @@ impl LibFunction {
 ///
 /// # Errors
 ///
-/// When the bytes are neither an archive nor an object, or are an ELF
-/// file that is not a relocatable object.
+/// When the bytes are neither an archive, an object nor an IDA `.pat`
+/// signature file, or are an ELF file that is not a relocatable object.
 pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
     let mut out = Vec::new();
     let mut damaged = Vec::new();
@@ -187,12 +195,83 @@ pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
         return Ok((out, damaged));
     }
     if goblin::pe::Coff::parse(bytes).is_err() {
+        if let Some(found) = read_pat(bytes) {
+            return Ok((found, damaged));
+        }
         anyhow::bail!(
-            "neither an archive (.lib, .a, .rlib) nor an object (a COFF .obj or an ELF .o)"
+            "neither an archive (.lib, .a, .rlib), an object (a COFF .obj or an ELF .o) nor an IDA .pat file"
         );
     }
     object_functions(bytes, &mut out).map_err(anyhow::Error::msg)?;
     Ok((out, damaged))
+}
+
+/// Reads the functions an IDA `.pat` signature file names.
+///
+/// A pattern file is text, one record a line: 16 bytes as 32 hex
+/// characters with `??` for one the pattern leaves free, then the symbol's
+/// name spelled however the line spells it (a mangled name, a
+/// `module!name`), and after it a trail this reader passes over: the
+/// references and further bytes the format carries behind a `#`. No
+/// relocations come with a pattern, so nothing is masked beyond the
+/// wildcards the line itself carries and no reference or tail is kept.
+///
+/// # Arguments
+///
+/// * `bytes` - The file.
+///
+/// # Returns
+///
+/// The named functions in file order, or `None` when the first line is no
+/// record, so the bytes are not a pattern file. Later lines that open with
+/// something else, the format's own `:`-opened lines among them, and
+/// empty ones are passed over.
+///
+/// # Examples
+///
+/// ```
+/// let pat = b"558BEC????????????????????????C3 startup #1#90\r\n\
+///             90 tiniest\r\n";
+/// let found = borer_engine::libsig::read_pat(pat).expect("the file reads");
+/// assert_eq!(found.len(), 1);
+/// assert_eq!(found[0].name, "startup");
+/// assert_eq!(found[0].sig.len(), 16);
+/// ```
+#[must_use]
+pub fn read_pat(bytes: &[u8]) -> Option<Vec<LibFunction>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut lines = text.lines();
+    let mut out = vec![pat_record(lines.next()?)?];
+    out.extend(lines.filter_map(pat_record));
+    Some(out)
+}
+
+/// Reads one `.pat` record: its leading 16 bytes and the name after them.
+///
+/// The rest of the line, the references and further bytes that trail the
+/// name, is passed over.
+///
+/// # Arguments
+///
+/// * `line` - The line, without its terminator.
+///
+/// # Returns
+///
+/// The function, or `None` when the line does not open with 32 hex
+/// characters (`??` a wildcarded byte) and a name after whitespace.
+fn pat_record(line: &str) -> Option<LibFunction> {
+    let (sig_text, rest) = line.split_at_checked(PAT_SIG_CHARS)?;
+    let sig = parse_signature(sig_text).filter(|sig| sig.len() == PAT_SIG_BYTES)?;
+    let name = rest
+        .strip_prefix(char::is_whitespace)?
+        .split_whitespace()
+        .next()?;
+    Some(LibFunction {
+        name: name.to_owned(),
+        sig,
+        tail: None,
+        refs: Vec::new(),
+    })
 }
 
 /// Reads a GNU long member name: the text at `at` in the `//` table, up
@@ -650,7 +729,7 @@ pub fn parse_line(value: &str) -> Option<LibFunction> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LibFunction, pack_text, parse_line, read};
+    use super::{LibFunction, pack_text, parse_line, read, read_pat};
 
     /// A test object's offset or count as the little-endian 32-bit field COFF stores.
     ///
@@ -851,5 +930,55 @@ mod tests {
             "a line without references reads"
         );
         assert!(parse_line("zz name").is_none());
+    }
+
+    /// An IDA `.pat` file's records become functions and reach the pack
+    /// the way an object's do.
+    ///
+    /// The leading 16 bytes are the signature with its wildcards kept,
+    /// the next word the name however spelled (a mangled name, a
+    /// `module!name`), what trails the name is passed over, and lines
+    /// that are no record are skipped.
+    ///
+    /// # Panics
+    ///
+    /// When a record is misread or a line that is no record is kept.
+    #[test]
+    fn a_pat_file_gives_its_functions() {
+        let pat = "558BEC83EC0C535657E8000000005DC3 plain\r\n\
+                   ???????????????????????????????? ?start@@YAXXZ #1#558B\r\n\
+                   \r\n\
+                   : a reference line\r\n\
+                   4883 too short to be a record\r\n\
+                   4883EC??E8????????4883C428C39090 msvcrt!fopen #2#90\r\n";
+        let found = read_pat(pat.as_bytes()).expect("the pattern file reads");
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert_eq!(found[0].name, "plain");
+        assert_eq!(found[0].sig.len(), 16);
+        assert!(found[0].sig.iter().all(Option::is_some), "{found:?}");
+        assert_eq!(found[0].sig[15], Some(0xc3));
+        assert_eq!(found[0].tail, None);
+        assert!(found[0].refs.is_empty());
+        assert_eq!(found[1].name, "?start@@YAXXZ", "the token is kept whole");
+        assert!(found[1].sig.iter().all(Option::is_none), "{found:?}");
+        assert_eq!(found[2].name, "msvcrt!fopen");
+        assert_eq!(found[2].sig[3], None);
+        assert!(found[2].sig[5..9].iter().all(Option::is_none), "{found:?}");
+        assert_eq!(found[2].sig[9], Some(0x48));
+        let (via_read, damaged) = read(pat.as_bytes()).expect("read takes a pattern file");
+        assert!(damaged.is_empty(), "{damaged:?}");
+        assert_eq!(via_read, found);
+        let text = pack_text("ida", "a test", &found);
+        assert!(
+            text.contains("lib 558BEC83EC0C535657E8000000005DC3 plain\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("lib ???????????????????????????????? ?start@@YAXXZ\n"),
+            "{text}"
+        );
+        assert!(read_pat(b"not a pattern file").is_none());
+        assert!(read_pat(b"").is_none());
+        assert!(read_pat("558BEC83EC0C535657E8000000005DC3EXTRA name".as_bytes()).is_none());
     }
 }

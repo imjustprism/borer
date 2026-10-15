@@ -1,4 +1,5 @@
-//! Library signatures from ELF objects and `ar` archives.
+//! Library signatures from ELF objects, `ar` archives and IDA `.pat`
+//! signature files.
 //!
 //! `borer sigmake` reads a static ELF library (`.a`) or a Rust `.rlib` the
 //! way it reads a COFF `.lib`: each function's bytes with the relocated
@@ -298,4 +299,49 @@ fn a_tail_tells_apart_functions_whose_signatures_agree() {
         tsv.contains("# library names ambiguous, so named neither: 0x1200 fc|fd\n"),
         "{tsv}"
     );
+}
+
+/// An IDA `.pat` signature file names a program's copy of a function.
+///
+/// The 16 leading bytes match with the call's displacement wildcarded,
+/// and the references and tail bytes that trail the name on the line are
+/// passed over.
+///
+/// # Panics
+///
+/// When the record is misread or names nothing.
+#[test]
+fn a_pat_file_names_a_static_function() {
+    let body = [
+        0x55, 0x8b, 0xec, // ASM: push ebp; mov ebp,esp
+        0x6a, 0x0a, // ASM: push 0xa
+        0xe8, 0x08, 0x00, 0x00, 0x00, // ASM: call deeper
+        0x83, 0xc4, 0x04, // ASM: add esp,4
+        0x5d, 0xc3, // ASM: pop ebp; ret
+        0x90, 0x90, 0x90, 0x90, // ASM: nops the signature does not reach
+    ];
+    let pat = "558BEC6A0AE8????????83C4045DC390 pat_func #0#90909090\r\n";
+    let (found, damaged) = read(pat.as_bytes()).expect("the pattern file reads");
+    assert!(damaged.is_empty(), "{damaged:?}");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].name, "pat_func");
+    assert_eq!(found[0].fixed(), 12);
+    assert!(found[0].sig[6..10].iter().all(Option::is_none), "{found:?}");
+    let text = pack_text("ida", "a test", &found);
+    assert!(
+        text.contains("lib 558BEC6A0AE8????????83C4045DC390 pat_func\n"),
+        "{text}"
+    );
+    let mut bytes = vec![0xccu8; 0x20];
+    bytes[..body.len()].copy_from_slice(&body);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(".text", 0x1000, 0, 0x20, false, true)],
+    );
+    p.function_ranges = vec![(0x1000, 0x1000 + 19)];
+    let a = with_pack(&p, &text);
+    assert_eq!(library_name(&a, 0x1000).as_deref(), Some("pat_func"));
 }
