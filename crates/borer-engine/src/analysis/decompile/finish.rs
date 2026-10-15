@@ -51,10 +51,82 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&elvis(line));
+        let shortened = elvis(line);
+        out.push_str(&shortened);
+        if let Some(note) = packed_chars_note(&shortened) {
+            out.push_str(" /* ");
+            out.push_str(&note);
+            out.push_str(" */");
+        }
     }
     out.push('\n');
     out
+}
+
+/// Decodes a 64-bit integer constant on the right-hand side of a statement
+/// into the 8-byte ASCII or 4-character UTF-16LE string literal its
+/// little-endian bytes spell, when they unambiguously spell text.
+///
+/// # Arguments
+///
+/// * `line` - One emitted line.
+fn packed_chars_note(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.starts_with("//") || t.contains("/*") || t.contains("//") {
+        return None;
+    }
+    let (_, rhs) = t.strip_suffix(';')?.split_once(" = ")?;
+    let hex = rhs.strip_prefix("0x")?;
+    let v = u64::from_str_radix(hex, 16)
+        .ok()
+        .filter(|&v| v > u64::from(u32::MAX))?;
+    let bytes = v.to_le_bytes();
+    let ascii_len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    if ascii_len >= 5
+        && bytes[ascii_len..].iter().all(|&b| b == 0)
+        && bytes[..ascii_len].iter().all(|b| (0x20..0x7f).contains(b))
+        && bytes[..ascii_len]
+            .iter()
+            .filter(|b| b.is_ascii_alphanumeric())
+            .count()
+            >= ascii_len.saturating_sub(2).max(4)
+    {
+        let s: String = bytes[..ascii_len]
+            .iter()
+            .flat_map(|&b| match b {
+                b'\\' => vec!['\\', '\\'],
+                b'"' => vec!['\\', '"'],
+                _ => vec![char::from(b)],
+            })
+            .collect();
+        return Some(format!("\"{s}\""));
+    }
+    let wide: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let wide_len = wide.iter().position(|&u| u == 0).unwrap_or(wide.len());
+    if wide_len >= 3
+        && wide[wide_len..].iter().all(|&u| u == 0)
+        && wide[..wide_len].iter().all(|&u| (0x20..0x7f).contains(&u))
+        && wide[..wide_len]
+            .iter()
+            .filter(|&&u| u8::try_from(u).is_ok_and(|b| b.is_ascii_alphanumeric()))
+            .count()
+            >= 3
+    {
+        let s: String = wide[..wide_len]
+            .iter()
+            .filter_map(|&u| u8::try_from(u).ok())
+            .flat_map(|b| match b {
+                b'\\' => vec!['\\', '\\'],
+                b'"' => vec!['\\', '"'],
+                _ => vec![char::from(b)],
+            })
+            .collect();
+        return Some(format!("L\"{s}\""));
+    }
+    None
 }
 
 /// Writes `(x != 0 ? x : y)` as `(x ?: y)` on one line.

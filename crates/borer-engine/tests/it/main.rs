@@ -13,6 +13,7 @@ mod elfgen;
 mod gotos;
 #[path = "../common/machogen.rs"]
 mod machogen;
+mod minidump;
 #[path = "../common/nebula.rs"]
 mod nebula;
 #[path = "../common/raw.rs"]

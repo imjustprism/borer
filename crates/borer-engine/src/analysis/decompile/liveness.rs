@@ -660,12 +660,12 @@ pub(super) fn dataflow<L: Lifter>(
     let mut outs: Vec<Env> = vec![Env::unknown(); n];
     let mut processed = vec![false; n];
     let mut recorded: Vec<SlotRec> = vec![SlotRec::default(); n];
-    let mut ran_under: Vec<Option<Option<i64>>> = vec![None; n];
+    let mut ran_under: Vec<Option<(Option<i64>, Option<i64>)>> = vec![None; n];
     if n == 0 {
         return (ins, processed, recorded);
     }
     let mut passes = 0usize;
-    let mut escapes_seen = ctx.escape_floor;
+    let mut escapes_seen = (ctx.escape_floor, ctx.home_escape_floor);
     let mut clock = 0u64;
     let mut stamp: Vec<u64> = vec![0; n];
     let mut met: Vec<Option<u64>> = vec![None; n];
@@ -810,7 +810,7 @@ pub(super) fn dataflow<L: Lifter>(
                 clock += 1;
                 stamp[b] = clock;
             }
-            let floor = ctx.escape_floor;
+            let floor = (ctx.escape_floor, ctx.home_escape_floor);
             if !in_changed && ran_under[b] == Some(floor) {
                 continue;
             }
@@ -860,8 +860,8 @@ pub(super) fn dataflow<L: Lifter>(
             clock += 1;
             stamp[b] = clock;
         }
-        if ctx.escape_floor != escapes_seen {
-            escapes_seen = ctx.escape_floor;
+        if (ctx.escape_floor, ctx.home_escape_floor) != escapes_seen {
+            escapes_seen = (ctx.escape_floor, ctx.home_escape_floor);
             passes = 0;
             changed = true;
         }

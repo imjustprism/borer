@@ -177,17 +177,39 @@ impl<'a> Exec<'_, 'a> {
         } else {
             self.ctx.conv.reg_args()
         };
+        let skipped = target
+            .and_then(|t| callee_shape(self.ctx, t))
+            .map_or(0u8, |shape| {
+                if shape.variadic {
+                    0
+                } else {
+                    (0..shape.conv.args.len().min(8))
+                        .filter(|&j| {
+                            !shape.params.contains(&shape.conv.args[j])
+                                && shape
+                                    .conv
+                                    .float_args
+                                    .get(j)
+                                    .is_none_or(|f| !shape.params.contains(f))
+                        })
+                        .fold(0u8, |m, j| m | (1 << j))
+                }
+            });
         for i in 0..reg_slots {
             let Some(r) = self.ctx.conv.arg_reg(i, floats) else {
                 continue;
             };
             let k = Key::Reg(r);
+            let slot_skipped = i < 8
+                && (skipped >> i) & 1 != 0
+                && !(self.env.fresh.contains(&k) && self.written_here.contains(&k));
             // INVARIANT: a callee that reads the whole register gets a value
             // a 32-bit write left there with its upper half clear
             // ([`Exec::full_value`]): `mov ecx, eax` hands a `uint64_t`
             // parameter the low half of `a1`, not all of it. One that reads
             // its low half alone needs no mask the text would only print.
             let value = match self.env.vals.get(&k) {
+                _ if slot_skipped => None,
                 Some(Expr::Var(Key::Slot(o)))
                     if self.env.slot_bits.get(o).is_some_and(|b| *b <= 32) =>
                 {
@@ -227,17 +249,7 @@ impl<'a> Exec<'_, 'a> {
                         values.push((ArgAt::Reg(r), e));
                     }
                 }
-                None if takes == Some(true) && self.later_argument_binds(i, floats) => {
-                    // INVARIANT: a slot with no value of its own does not
-                    // close the list while a later slot still carries one,
-                    // because the register an earlier call left unknown
-                    // (its second result) is information the call receives
-                    // and the text must not drop the set arguments behind
-                    // it. The register is named for what it is.
-                    self.declare(k, self.word_ty());
-                    out.push(n.key(k));
-                }
-                None if self.names_register(k) => {
+                None if !slot_skipped && self.names_register(k) => {
                     out.push(n.key(k));
                     if emit {
                         values.push((ArgAt::Reg(r), Expr::Var(k)));
@@ -246,9 +258,23 @@ impl<'a> Exec<'_, 'a> {
                 None if takes == Some(true) && self.holds_own_param(k, i) => {
                     out.push(n.key(Key::Param(u8::try_from(i).unwrap_or(u8::MAX))));
                 }
-                None if takes == Some(true) && self.callee_skips(target, r) => {
-                    self.declare(k, self.word_ty());
-                    out.push(n.key(k));
+                None if takes == Some(true)
+                    && (self.later_argument_binds(i, floats) || !stack.is_empty()) =>
+                {
+                    // INVARIANT: a slot with no value of its own does not
+                    // close the list while a later slot or a stack word still
+                    // carries one: a slot the callee skips after the register
+                    // was touched or clobbered renders as `0`, otherwise the
+                    // register is named for what it is so the arguments behind
+                    // it keep their places.
+                    if slot_skipped
+                        && (self.env.touched.contains(&k) || self.env.clobbered.contains(&k))
+                    {
+                        out.push("0".to_owned());
+                    } else {
+                        self.declare(k, self.word_ty());
+                        out.push(n.key(k));
+                    }
                 }
                 None => open = false,
             }
@@ -307,7 +333,7 @@ impl<'a> Exec<'_, 'a> {
                 return false;
             };
             let k = Key::Reg(r);
-            self.env.vals.contains_key(&k) || self.names_register(k)
+            self.env.vals.contains_key(&k) || self.names_register(k) || self.holds_own_param(k, j)
         })
     }
 
@@ -353,19 +379,6 @@ impl<'a> Exec<'_, 'a> {
                         .param_pos(*r, &self.ctx.params)
                         .is_some_and(|s| s >= slot)
                 }))
-    }
-
-    /// Tells whether a callee with a body never reads an argument register:
-    /// its own parameters, as its signature reads them, leave it out.
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - The callee's entry when the call is direct.
-    /// * `r` - The argument register.
-    fn callee_skips(&self, target: Option<u64>, r: Register) -> bool {
-        target
-            .and_then(|t| callee_shape(self.ctx, t))
-            .is_some_and(|shape| !shape.params.contains(&r))
     }
 
     /// Tells whether an argument register goes to a callee whose arity
@@ -1137,6 +1150,10 @@ impl<'a> Exec<'_, 'a> {
             Some(_) => {
                 if let Some(f) = self.ctx.escape_floor {
                     self.call_uses
+                        .push((SlotUse::Window(f, 0), self.written_slots()));
+                }
+                if let Some(f) = self.ctx.home_escape_floor {
+                    self.call_uses
                         .push((SlotUse::Window(f, i64::MAX), self.written_slots()));
                 }
             }
@@ -1146,7 +1163,7 @@ impl<'a> Exec<'_, 'a> {
 
     /// The frame bytes the block's stores wrote so far, which a call made
     /// now reads as the block left them.
-    pub(super) fn written_slots(&self) -> BTreeSet<i64> {
+    pub(in crate::analysis::decompile) fn written_slots(&self) -> BTreeSet<i64> {
         self.slot_def
             .iter()
             .flat_map(|(&o, &b)| o..o.saturating_add(i64::from(b / 8).max(1)))
@@ -1293,13 +1310,15 @@ impl<'a> Exec<'_, 'a> {
         let sp = self.env.sp;
         let shadow = self.ctx.conv.shadow;
         let floor = self.ctx.escape_floor;
+        let home_floor = self.ctx.home_escape_floor;
         let dead: Vec<i64> = self
             .env
             .slot_bits
             .keys()
             .copied()
             .filter(|o| {
-                floor.is_some_and(|f| *o >= f)
+                (*o < 0 && floor.is_some_and(|f| *o >= f))
+                    || (*o >= 0 && home_floor.is_some_and(|f| *o >= f))
                     || match sp {
                         Some(sp) => *o >= sp && *o < sp + shadow,
                         None => true,

@@ -45,6 +45,7 @@ pub mod live;
 mod lsda;
 pub mod macho;
 pub mod memory;
+mod minidump;
 pub mod num;
 pub mod pack;
 pub mod pdb;

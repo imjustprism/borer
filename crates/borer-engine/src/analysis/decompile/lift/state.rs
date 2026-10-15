@@ -304,9 +304,15 @@ impl<'a> Exec<'_, 'a> {
     pub(in crate::analysis::decompile) fn read_at(&mut self, addr: Expr, ty: Ty) -> Expr {
         match addr {
             Expr::Sp(k) => self.slot_read(k, ty),
-            Expr::Const(a) if self.is_data(a) && self.const_float(a, ty).is_some() => self
-                .const_float(a, ty)
-                .map_or(Expr::Const(0), |bits| Expr::FConst(bits, ty)),
+            Expr::Const(a) if self.is_data(a) && self.const_float(a, ty).is_some() => {
+                self.const_float(a, ty).map_or(Expr::Const(0), |bits| {
+                    if self.is_float_literal(a, bits, ty) {
+                        Expr::FConst(bits, ty)
+                    } else {
+                        Expr::Const(bits)
+                    }
+                })
+            }
             Expr::Const(a) if self.is_data(a) => {
                 let key = Key::Global(a, ty.bits());
                 if self.emit {
@@ -637,17 +643,26 @@ impl<'a> Exec<'_, 'a> {
     /// * `e` - The value that escaped (an argument, a stored value, a store address).
     pub(in crate::analysis::decompile) fn note_escape(&mut self, e: &Expr) {
         if let Some(k) = e.min_sp() {
-            self.ctx.escape_floor = Some(self.ctx.escape_floor.map_or(k, |f| f.min(k)));
+            if k < 0 {
+                self.ctx.escape_floor = Some(self.ctx.escape_floor.map_or(k, |f| f.min(k)));
+            } else {
+                self.ctx.home_escape_floor =
+                    Some(self.ctx.home_escape_floor.map_or(k, |f| f.min(k)));
+            }
         }
     }
 
-    /// Tells whether slot `o` is at or above the escape floor.
+    /// Tells whether slot `o` is at or above its frame's escape floor.
     ///
     /// # Arguments
     ///
     /// * `o` - Slot offset.
     pub(super) fn exposed(&self, o: i64) -> bool {
-        self.ctx.escape_floor.is_some_and(|f| o >= f)
+        if o < 0 {
+            self.ctx.escape_floor.is_some_and(|f| o >= f)
+        } else {
+            self.ctx.home_escape_floor.is_some_and(|f| o >= f)
+        }
     }
 
     /// Stores to a stack slot lazily.
@@ -753,6 +768,7 @@ impl<'a> Exec<'_, 'a> {
             let seen = match span {
                 Some((a, b)) => SlotUse::Window(a, b),
                 None if below => SlotUse::All,
+                None if lo < 0 => SlotUse::Window(lo, 0),
                 None => SlotUse::Window(lo, i64::MAX),
             };
             let before = self.written_slots();
@@ -760,7 +776,9 @@ impl<'a> Exec<'_, 'a> {
         }
         let covers = |o: i64, end: i64| match span {
             Some((a, b)) => o < b && a < end,
-            None => below || end > lo,
+            None if below => true,
+            None if lo < 0 => o < 0 && end > lo,
+            None => end > lo,
         };
         let stores: Vec<i64> = self
             .env
@@ -843,13 +861,16 @@ impl<'a> Exec<'_, 'a> {
     /// * `ty` - The store type.
     /// * `v` - The stored value.
     pub(in crate::analysis::decompile) fn store_at(&mut self, addr: Expr, ty: Ty, v: Expr) {
-        let v = match v {
+        let (ty, v) = match v {
             Expr::FConst(bits, fty)
                 if matches!(ty, Ty::U32 | Ty::U64) && fty.bits() == ty.bits() =>
             {
-                Expr::Const(bits)
+                (ty, Expr::Const(bits))
             }
-            other => other,
+            Expr::Const(bits) if bits != 0 && matches!(ty, Ty::F32 | Ty::F64) => {
+                (Ty::from_bits(ty.bits()), Expr::Const(bits))
+            }
+            other => (ty, other),
         };
         match addr {
             Expr::Sp(k) => self.slot_write(k, ty, v),
@@ -917,7 +938,34 @@ impl<'a> Exec<'_, 'a> {
     /// * `ty` - Store type.
     /// * `v` - The stored value.
     pub(super) fn is_register_save(&self, k: i64, ty: Ty, v: &Expr) -> bool {
-        let _ = k;
+        if self.entry
+            && k >= self.ctx.conv.word
+            && k < self.ctx.conv.word + self.ctx.conv.shadow
+            && self.ctx.conv.word > 0
+            && k % self.ctx.conv.word == 0
+            && let Ok(pos) = usize::try_from(k / self.ctx.conv.word - 1)
+            && let Some(&r) = self.ctx.conv.args.get(pos)
+            && !self.ctx.params.contains(&r)
+            && self
+                .ctx
+                .conv
+                .float_args
+                .get(pos)
+                .is_none_or(|f| !self.ctx.params.contains(f))
+        {
+            let is_entry_arg = match v {
+                Expr::Var(Key::Param(p)) => usize::from(*p) == pos,
+                Expr::Var(key @ Key::Reg(reg)) => {
+                    (*reg == r || self.ctx.conv.float_args.get(pos) == Some(reg))
+                        && !self.written_here.contains(key)
+                        && !self.env.vals.contains_key(key)
+                }
+                _ => false,
+            };
+            if is_entry_arg {
+                return true;
+            }
+        }
         let (key, saved) = match v {
             Expr::Var(key @ Key::Reg(r)) => (
                 *key,
@@ -1398,6 +1446,55 @@ impl<'a> Exec<'_, 'a> {
         let mut buf = [0u8; 8];
         buf[..width].copy_from_slice(bytes);
         Some(u64::from_le_bytes(buf))
+    }
+
+    /// Tells whether `bits` read at `a` for `ty` is a genuine floating-point
+    /// literal rather than a string or subnormal integer bit pattern copied
+    /// through a scalar vector move.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - Address of the value in read-only data.
+    /// * `bits` - The raw bit pattern.
+    /// * `ty` - The access type.
+    pub(super) fn is_float_literal(&self, a: u64, bits: u64, ty: Ty) -> bool {
+        if bits == 0 {
+            return true;
+        }
+        if crate::analysis::decompile::string_at(self.ctx.program, a).is_some() {
+            return false;
+        }
+        let width = usize::from(ty.bits() / 8);
+        let le = bits.to_le_bytes();
+        let bytes = le.get(..width).unwrap_or(&[]);
+        let narrow_text = bytes
+            .iter()
+            .all(|&b| b == 0 || crate::strings::literal_byte(b))
+            && bytes
+                .iter()
+                .filter(|&&b| crate::strings::literal_byte(b))
+                .count()
+                >= width.saturating_sub(1);
+        let wide_text = width >= 4
+            && bytes.chunks_exact(2).all(|u| {
+                u.get(1) == Some(&0)
+                    && u.first()
+                        .is_some_and(|&c| c == 0 || crate::strings::literal_byte(c))
+            });
+        if narrow_text || wide_text {
+            return false;
+        }
+        match ty {
+            Ty::F32 => {
+                let exp = (bits >> 23) & 0xff;
+                exp != 0 && exp != 0xff
+            }
+            Ty::F64 => {
+                let exp = (bits >> 52) & 0x7ff;
+                exp != 0 && exp != 0x7ff
+            }
+            Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => false,
+        }
     }
 
     /// Returns the declaration type of a variable.

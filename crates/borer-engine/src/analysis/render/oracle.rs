@@ -185,6 +185,30 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
                 slot + 1
             );
         }
+        // The constants the code compares against do not decide the
+        // answer, but the arithmetic between the argument and the
+        // comparison may: invert it, and run what it states.
+        let text = decompile_named(p, a, o, entry);
+        if let Some(solved) = text
+            .as_ref()
+            .and_then(|t| crate::analysis::decompile::interp::Script::read(p, a, o, entry, t).ok())
+            .and_then(|s| s.solve_for(slot))
+        {
+            let (value, line, zero, with) = solved;
+            let _ = writeln!(
+                out,
+                "# chain: a{} = {value:#x} inverts the comparison at line {line} - the run of it {} where zero {}",
+                slot + 1,
+                with,
+                zero
+            );
+            if let Some(lines) = text
+                .as_ref()
+                .map(|t| t.lines().nth(line - 1).map(str::to_owned))
+            {
+                let _ = lines.map(|l| writeln!(out, "# {l}"));
+            }
+        }
         return Ok(out);
     }
     let mut grouped: Vec<(&String, &Vec<Candidate>)> = answers.iter().collect();

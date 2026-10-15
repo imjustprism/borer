@@ -26,6 +26,8 @@ pub(crate) struct Passing {
     pub(crate) first_stack: u64,
     /// The stack word in bytes.
     pub(crate) word: u64,
+    /// Bitmask of convention register positions (0..8) that the callee skips.
+    pub(crate) skipped: u8,
 }
 
 impl Passing {
@@ -98,26 +100,35 @@ pub(crate) fn passing(
     entry: u64,
 ) -> Passing {
     let bitness = program.arch.bitness().unwrap_or(64);
-    let conv = match analysis.function(entry).filter(|f| f.entry == entry) {
+    let (conv, skipped) = match analysis.function(entry).filter(|f| f.entry == entry) {
         Some(f) => {
-            analysis
-                .derived
-                .get_or_build_item(
-                    "shape",
-                    overlay.fingerprint(),
-                    entry,
-                    || super::shape_built(program, analysis, overlay, f, bitness),
-                    |shape| shape.params.capacity() * size_of::<Register>(),
-                )
-                .conv
+            let shape = analysis.derived.get_or_build_item(
+                "shape",
+                overlay.fingerprint(),
+                entry,
+                || super::shape_built(program, analysis, overlay, f, bitness),
+                |shape| shape.params.capacity() * size_of::<Register>(),
+            );
+            let skipped = (0..shape.conv.args.len().min(8))
+                .filter(|&i| {
+                    !shape.params.contains(&shape.conv.args[i])
+                        && shape
+                            .conv
+                            .float_args
+                            .get(i)
+                            .is_none_or(|r| !shape.params.contains(r))
+                })
+                .fold(0u8, |m, i| m | (1 << i));
+            (shape.conv, skipped)
         }
-        None => lift::conv(program, bitness),
+        None => (lift::conv(program, bitness), 0),
     };
     let word = conv.word.unsigned_abs();
     Passing {
         regs: conv.args.to_vec(),
         first_stack: word.wrapping_add(conv.shadow.unsigned_abs()),
         word,
+        skipped,
     }
 }
 

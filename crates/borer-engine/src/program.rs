@@ -1584,11 +1584,14 @@ impl Program {
     /// A path that names no file but ends in `@<offset>` after one that does
     /// (`dropper.exe@0x4400`) loads the PE, ELF or Mach-O image embedded at
     /// that file offset, as far as its headers state ([`crate::carve`]),
-    /// with [`Program::parent`] saying where it came from.
+    /// with [`Program::parent`] saying where it came from. A Windows
+    /// minidump (`MDMP`) loads as the memory it captured: every range a
+    /// section, every module a symbol at its base ([`crate::minidump`]),
+    /// purely on any platform.
     ///
     /// # Arguments
     ///
-    /// * `path` - A PE, ELF, Mach-O or other file, or `<file>@<offset>`;
+    /// * `path` - A PE, ELF, Mach-O or minidump file, or `<file>@<offset>`;
     ///   unknown formats load as [`BinaryFormat::Raw`].
     ///
     /// # Errors
@@ -1761,6 +1764,14 @@ impl Program {
         let mut phases = crate::timing::Phases::new();
         if bytes.is_empty() {
             return Err(anyhow!("the file is empty: there is nothing to load"));
+        }
+        // A minidump is no image: its streams are read on their own
+        // before any format parse, and none of the rest applies.
+        if bytes.starts_with(b"MDMP") {
+            let dump = crate::minidump::program(path, bytes).ok_or_else(|| {
+                anyhow!("the minidump's header or stream directory does not sit in the file")
+            })?;
+            return Ok(dump);
         }
         let refused_imports = implausible_imports(&bytes);
         let disarmed = disarm_exports(&mut bytes);
