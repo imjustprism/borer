@@ -1301,6 +1301,332 @@ fn a_shared_return_tail_is_cloned_into_its_goto_sites() {
     );
 }
 
+/// A tail at the two-instruction body cap clones into every `goto` site,
+/// and the original emits nothing: no label names it, not even a `goto`.
+///
+/// The loop's exit and the `if` arm both reach the tail by `goto`, so both
+/// clone it; with every predecessor a copy, the driver drops the original.
+/// The loop keeps its `for` shape, the braces balance and the structure
+/// check agrees. One instruction more (the `wide` tail) and the loop's
+/// exit keeps its `goto`, the only site no region owns: the label is back.
+#[test]
+fn a_return_tail_at_the_body_cap_clones_and_past_it_keeps_a_goto() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+    let p = tail_kind_fixture(TailKind::Xor);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let Some(raw) = decompile_raw(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    assert!(!raw_body(&raw).contains("L_100d"), "{raw}");
+    let Some(out) = decompile(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    assert!(out.contains("for (i = 0;"), "{out}");
+    assert_eq!(out.matches('{').count(), out.matches('}').count(), "{out}");
+    assert_eq!(
+        check_structure(&p, &a, &o, 0x1000, &out),
+        Structure::Agrees,
+        "{out}"
+    );
+    let p = tail_kind_fixture(TailKind::Wide);
+    let a = Analysis::compute(&p);
+    let Some(raw) = decompile_raw(&p, &a, &o, 0x1000) else {
+        panic!("the wide fixture did not decompile");
+    };
+    let raw = raw_body(&raw);
+    assert!(raw.contains("goto L_100d;"), "{raw}");
+    assert!(raw.contains("L_100d:"), "{raw}");
+}
+
+/// A tail that stores keeps its `goto`: a copied store is a copied effect,
+/// and only assignments to locals and registers may clone.
+///
+/// The tail is as small as the one that clones ([`TailKind::Xor`]'s two
+/// instructions); the store is the only difference.
+#[test]
+fn a_storing_tail_keeps_its_goto() {
+    let p = tail_kind_fixture(TailKind::Store);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let Some(raw) = decompile_raw(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    let raw = raw_body(&raw);
+    assert!(raw.contains("goto L_100d;"), "{raw}");
+    assert_eq!(raw.matches("*(uint32_t*)a1 = ").count(), 2, "{raw}");
+}
+
+/// A tail that branches, or one whose chain runs back to its own head,
+/// keeps its `goto`.
+///
+/// The branching tail is two instructions too, so only its two ways out
+/// refuse the clone; the cycling one (`xor eax,eax; jmp` to itself) is
+/// walked to the jump that leads nowhere but back.
+#[test]
+fn a_branching_or_cyclic_tail_keeps_its_goto() {
+    for kind in [TailKind::Branch, TailKind::Cycle] {
+        let p = tail_kind_fixture(kind);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let Some(raw) = decompile_raw(&p, &a, &o, 0x1000) else {
+            panic!("the fixture did not decompile");
+        };
+        let raw = raw_body(&raw);
+        assert!(raw.contains("goto L_100d;"), "{raw}");
+        assert!(raw.contains("L_100d:"), "{raw}");
+    }
+}
+
+/// The fifth `goto` site into one shared tail keeps its `goto`.
+///
+/// Four sites clone (the ladder's arms and the loop body's `if`), and the
+/// loop's exit, the fifth, still jumps: the original tail emits behind its
+/// label, and the structure check agrees with the text.
+#[test]
+fn the_fifth_goto_site_keeps_its_goto() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+    let p = five_site_fixture();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let Some(raw) = decompile_raw(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    let raw = raw_body(&raw);
+    assert_eq!(raw.matches("goto L_1028;").count(), 1, "{raw}");
+    assert_eq!(raw.matches("rax = 0;").count(), 5, "{raw}");
+    let Some(out) = decompile(&p, &a, &o, 0x1000) else {
+        panic!("the fixture did not decompile");
+    };
+    assert_eq!(
+        check_structure(&p, &a, &o, 0x1000, &out),
+        Structure::Agrees,
+        "{out}"
+    );
+}
+
+/// The shared tail region a [`tail_kind_fixture`] graph builds.
+#[derive(Clone, Copy)]
+enum TailKind {
+    /// `xor eax,eax; jmp R`: two instructions that render, the body cap.
+    Xor,
+    /// `mov eax,7; mov ecx,9; jmp R`: three that render, past the cap.
+    Wide,
+    /// `mov [rcx],eax; jmp R`: a store through a parameter, no pure assign.
+    Store,
+    /// `test edx,edx; jz T`: a two-way block, refused the moment it bends.
+    Branch,
+    /// `xor eax,eax; jmp` back to its own head: a chain that cycles.
+    Cycle,
+}
+
+/// Builds the tail-clone graph of [`tail_clone_fixture`] with the tail
+/// region shaped by `kind`.
+///
+/// The loop's exit (SITE1) and the `if` arm (SITE2) still jump to the tail
+/// region's first block at 0x100d, and the `else` side still jumps at the
+/// shared `ret`, so no single region owns the tail and both sites reach it
+/// by `goto`.
+///
+/// # Arguments
+///
+/// * `kind` - The tail region's shape.
+///
+/// # Returns
+///
+/// A raw x86-64 program whose entry at 0x1000 holds the graph.
+fn tail_kind_fixture(kind: TailKind) -> Program {
+    let tail = match kind {
+        TailKind::Xor => vec![TailBlock {
+            // ASM: xor eax,eax; jmp R
+            bytes: vec![0x31, 0xc0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(3, 7)],
+        }],
+        TailKind::Wide => vec![TailBlock {
+            // ASM: mov eax,7; mov ecx,9; jmp R
+            bytes: vec![0xb8, 0x07, 0, 0, 0, 0xb9, 0x09, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(11, 7)],
+        }],
+        TailKind::Store => vec![TailBlock {
+            // ASM: mov [rcx],eax; jmp R
+            bytes: vec![0x89, 0x01, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(3, 7)],
+        }],
+        TailKind::Branch => vec![
+            TailBlock {
+                // ASM: test edx,edx; jz T (the next block, 5 bytes on)
+                bytes: vec![0x85, 0xd2, 0x0f, 0x84, 0x05, 0, 0, 0],
+                rel32: vec![],
+            },
+            TailBlock {
+                bytes: vec![0xe9, 0, 0, 0, 0], // ASM: jmp R
+                rel32: vec![(1, 9)],
+            },
+            TailBlock {
+                bytes: vec![0xc3], // ASM: T: ret
+                rel32: vec![],
+            },
+        ],
+        TailKind::Cycle => vec![TailBlock {
+            // ASM: xor eax,eax; jmp back to itself
+            bytes: vec![0x31, 0xc0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(3, 1)],
+        }],
+    };
+    // The graph after the tail region, its blocks' indices moved down by
+    // however many blocks the region holds.
+    let shift = tail.len() - 1;
+    let at = |i: usize| i + shift;
+    let mut blocks = vec![TailBlock {
+        // ASM: test ecx,ecx; jz ELSE; jmp BODY
+        bytes: vec![0x85, 0xc9, 0x0f, 0x84, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+        rel32: vec![(4, at(5)), (9, at(2))],
+    }];
+    blocks.extend(tail);
+    blocks.extend([
+        TailBlock {
+            bytes: vec![0x45, 0x31, 0xc9], // ASM: xor r9d,r9d
+            rel32: vec![],
+        },
+        TailBlock {
+            // ASM: cmp r9d,edx; jae SITE1; inc r9d; jmp HEAD
+            bytes: vec![
+                0x44, 0x39, 0xca, 0x0f, 0x83, 0, 0, 0, 0, 0x41, 0xff, 0xc1, 0xe9, 0, 0, 0, 0,
+            ],
+            rel32: vec![(5, at(4)), (13, at(3))],
+        },
+        TailBlock {
+            // ASM: mov esi,5; jmp TAIL
+            bytes: vec![0xbe, 0x05, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(6, 1)],
+        },
+        TailBlock {
+            // ASM: test r8d,r8d; jz SITE2; mov eax,2; jmp R
+            bytes: vec![
+                0x45, 0x85, 0xc0, 0x0f, 0x84, 0, 0, 0, 0, 0xb8, 0x02, 0, 0, 0, 0xe9, 0, 0, 0, 0,
+            ],
+            rel32: vec![(5, at(6)), (15, at(7))],
+        },
+        TailBlock {
+            // ASM: mov edi,7; jmp TAIL
+            bytes: vec![0xbf, 0x07, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(6, 1)],
+        },
+        TailBlock {
+            bytes: vec![0xc3], // ASM: ret
+            rel32: vec![],
+        },
+    ]);
+    let code = tail_assemble(&blocks);
+    let mut image = vec![0xccu8; 0x2000];
+    image[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    Program::raw(
+        image,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(
+            ".text", 0x1000, 0x1000, 0x1000, false, true,
+        )],
+    )
+}
+
+/// Builds a graph of five `goto` sites into one shared tail.
+///
+/// A ladder of four tests (`a1` through `a4`, each zero sending one arm to
+/// the tail at 0x1028), one arm returning on its own so the shared `ret`
+/// stays shared, and a counting loop whose exit and whose body's `if` arm
+/// both jump to the tail too: five sites in all. Four clone the tail; the
+/// fifth, the loop's exit, keeps its `goto`.
+///
+/// # Returns
+///
+/// A raw x86-64 program whose entry at 0x1000 holds the graph.
+fn five_site_fixture() -> Program {
+    /// A test of one register for zero, sending its `jz` to `arm` and
+    /// falling through a jump to `next`.
+    fn test_block(test: &[u8], arm: usize, next: usize) -> TailBlock {
+        let mut bytes = test.to_vec(); // ASM: test reg,reg
+        bytes.extend_from_slice(&[0x0f, 0x84, 0, 0, 0, 0]); // ASM: jz arm
+        bytes.extend_from_slice(&[0xe9, 0, 0, 0, 0]); // ASM: jmp next
+        let jz = test.len() + 2;
+        TailBlock {
+            bytes,
+            rel32: vec![(jz, arm), (jz + 5, next)],
+        }
+    }
+    /// An arm setting `esi` to `k`, jumping to the tail.
+    fn arm_block(k: u8, tail: usize) -> TailBlock {
+        TailBlock {
+            // ASM: mov esi,k; jmp TAIL
+            bytes: vec![0xbe, k, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(6, tail)],
+        }
+    }
+    const TAIL: usize = 3;
+    const R: usize = 14;
+    let blocks = vec![
+        test_block(&[0x85, 0xc9], 4, 1),       // ASM: test ecx,ecx (a1)
+        test_block(&[0x85, 0xd2], 5, 2),       // ASM: test edx,edx (a2)
+        test_block(&[0x45, 0x85, 0xc0], 6, 7), // ASM: test r8d,r8d (a3)
+        TailBlock {
+            // ASM: TAIL: xor eax,eax; jmp R
+            bytes: vec![0x31, 0xc0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(3, R)],
+        },
+        arm_block(1, TAIL),
+        TailBlock {
+            // ASM: mov eax,2; jmp R (the arm that keeps R shared)
+            bytes: vec![0xb8, 0x02, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(6, R)],
+        },
+        arm_block(3, TAIL),
+        test_block(&[0x45, 0x85, 0xc9], 8, 9), // ASM: test r9d,r9d (a4)
+        arm_block(4, TAIL),
+        TailBlock {
+            // ASM: xor r9d,r9d; test r8d,r8d; jz SITE2
+            bytes: vec![0x45, 0x31, 0xc9, 0x45, 0x85, 0xc0, 0x0f, 0x84, 0, 0, 0, 0],
+            rel32: vec![(8, 11)],
+        },
+        TailBlock {
+            // ASM: cmp r9d,edx; jae SITE1
+            bytes: vec![0x44, 0x39, 0xca, 0x0f, 0x83, 0, 0, 0, 0],
+            rel32: vec![(5, 13)],
+        },
+        TailBlock {
+            // ASM: mov edi,7; jmp TAIL
+            bytes: vec![0xbf, 0x07, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(6, TAIL)],
+        },
+        TailBlock {
+            // ASM: inc r9d; jmp HEAD
+            bytes: vec![0x41, 0xff, 0xc1, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(4, 10)],
+        },
+        TailBlock {
+            // ASM: mov esi,5; jmp TAIL
+            bytes: vec![0xbe, 0x05, 0, 0, 0, 0xe9, 0, 0, 0, 0],
+            rel32: vec![(6, TAIL)],
+        },
+        TailBlock {
+            bytes: vec![0xc3], // ASM: ret
+            rel32: vec![],
+        },
+    ];
+    let code = tail_assemble(&blocks);
+    let mut image = vec![0xccu8; 0x2000];
+    image[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    Program::raw(
+        image,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(
+            ".text", 0x1000, 0x1000, 0x1000, false, true,
+        )],
+    )
+}
+
 /// A shared tail that calls keeps its goto: cloning it would run the call
 /// twice.
 ///

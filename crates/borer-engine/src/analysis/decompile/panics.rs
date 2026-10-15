@@ -582,4 +582,176 @@ mod tests {
         );
         assert_eq!(callees, vec!["panic_bounds_check".to_owned()]);
     }
+
+    /// A diamond whose guarded statement only runs before it (the scan is
+    /// forward-only) keeps its block: the call becomes the note and the
+    /// statement before gains none.
+    #[test]
+    fn a_guarded_statement_before_the_diamond_stays_unnoted() {
+        let body = "while (1) {\n  \
+                    rax = a1 * 4;\n  \
+                    if (mulhi64(a1, 4) != 0) {\n    \
+                      panic_const_mul_overflow(a1, 4, 0x2100);  // at rhai-1.26.1/src/parser.rs:1015:32\n  \
+                    }\n  \
+                    return rax;\n\
+                    }\n";
+        let (out, callees) = fold_checks(body);
+        assert_eq!(
+            out,
+            "while (1) {\n  rax = a1 * 4;\n  \
+             if (mulhi64(a1, 4) != 0) {\n    /* overflow panics */\n  }\n  return rax;\n}\n",
+            "{out}"
+        );
+        assert_eq!(callees, vec!["panic_const_mul_overflow".to_owned()]);
+    }
+
+    /// A guarded statement inside a nested `if` is behind a block opener,
+    /// which stops the scan: the diamond keeps its block.
+    #[test]
+    fn a_guarded_statement_inside_a_nested_if_stops_the_scan() {
+        let body = "if (a1 >= a2) {\n  \
+                    panic_bounds_check(a1, a2, 0x2100);  // at library/core/src/slice/index.rs:2100:9\n\
+                    }\n\
+                    if (a3) {\n  \
+                    return ((uint64_t*)a4)[a1];\n\
+                    }\n\
+                    return 0;\n";
+        let (out, callees) = fold_checks(body);
+        assert_eq!(
+            out,
+            "if (a1 >= a2) {\n  /* bounds panic */\n}\n\
+             if (a3) {\n  return ((uint64_t*)a4)[a1];\n}\nreturn 0;\n",
+            "{out}"
+        );
+        assert_eq!(callees, vec!["panic_bounds_check".to_owned()]);
+    }
+
+    /// An operand in another but equal spelling still guards.
+    ///
+    /// `0x4` in the statement for `4` in the call and the other way round,
+    /// and a cast operand for a bare one. A different number guards
+    /// nothing, so the diamond keeps its block.
+    #[test]
+    fn operands_in_another_spelling_still_guard() {
+        let hex_in_statement = "if (mulhi64(a1, 4) != 0) {\n  \
+                                panic_const_mul_overflow(a1, 4, 0x2100);\n\
+                                }\n\
+                                rax = a1 * 0x4;\n\
+                                return rax;\n";
+        let (out, _) = fold_checks(hex_in_statement);
+        assert_eq!(
+            out, "rax = a1 * 0x4;  /* checked */\nreturn rax;\n",
+            "{out}"
+        );
+        let hex_in_call = "if (mulhi64(a1, 0x4) != 0) {\n  \
+                           panic_const_mul_overflow(a1, 0x4, 0x2100);\n\
+                           }\n\
+                           rax = a1 * 4;\n\
+                           return rax;\n";
+        let (out, _) = fold_checks(hex_in_call);
+        assert_eq!(out, "rax = a1 * 4;  /* checked */\nreturn rax;\n", "{out}");
+        let cast = "if (uaddo64(a1, 4) != 0) {\n  \
+                    panic_const_add_overflow(a1, 4, 0x2100);\n\
+                    }\n\
+                    rax = (uint32_t)a1 + 4;\n\
+                    return rax;\n";
+        let (out, _) = fold_checks(cast);
+        assert_eq!(
+            out, "rax = (uint32_t)a1 + 4;  /* checked */\nreturn rax;\n",
+            "{out}"
+        );
+        let other = "if (mulhi64(a1, 4) != 0) {\n  \
+                     panic_const_mul_overflow(a1, 4, 0x2100);\n\
+                     }\n\
+                     rax = a1 * 5;\n\
+                     return rax;\n";
+        let (out, _) = fold_checks(other);
+        assert_eq!(
+            out,
+            "if (mulhi64(a1, 4) != 0) {\n  /* overflow panics */\n}\nrax = a1 * 5;\nreturn rax;\n",
+            "{out}"
+        );
+    }
+
+    /// A negation buried in a call's argument guards a negation check, and
+    /// a compound `+=` naming both operands guards an add check.
+    #[test]
+    fn a_buried_negation_and_a_compound_add_guard_their_checks() {
+        let neg = "if (a2 != 0) {\n  \
+                   panic_const_neg_overflow(a2, 0x2100);  // at core/src/num/int_macros.rs:2100:9\n\
+                   }\n\
+                   rax = f(-a2);\n\
+                   return rax;\n";
+        let (out, callees) = fold_checks(neg);
+        assert_eq!(out, "rax = f(-a2);  /* checked */\nreturn rax;\n", "{out}");
+        assert_eq!(callees, vec!["panic_const_neg_overflow".to_owned()]);
+        let add = "if (uaddo64(a1, a2) != 0) {\n  \
+                   panic_const_add_overflow(a1, a2, 0x2100);\n\
+                   }\n\
+                   a2 += a1;\n\
+                   return a2;\n";
+        let (out, _) = fold_checks(add);
+        assert_eq!(out, "a2 += a1;  /* checked */\nreturn a2;\n", "{out}");
+    }
+
+    /// A call without an `// at` note drops its last argument only when it
+    /// is address-shaped: `0x2100` goes and the negation folds, a small `4`
+    /// stays an operand and the block keeps.
+    #[test]
+    fn an_unlocated_call_drops_its_last_argument_only_when_address_shaped() {
+        let big = "if (a2 != 0) {\n  panic_const_neg_overflow(a2, 0x2100);\n}\nrax = -a2;\n";
+        let (out, _) = fold_checks(big);
+        assert_eq!(out, "rax = -a2;  /* checked */\n", "{out}");
+        let small = "if (a2 != 0) {\n  panic_const_neg_overflow(a2, 4);\n}\nrax = -a2;\n";
+        let (out, callees) = fold_checks(small);
+        assert_eq!(
+            out, "if (a2 != 0) {\n  /* overflow panics */\n}\nrax = -a2;\n",
+            "{out}"
+        );
+        assert_eq!(callees, vec!["panic_const_neg_overflow".to_owned()]);
+    }
+
+    /// Two diamonds in one body both fold, each onto its own statement,
+    /// and each callee is named once.
+    #[test]
+    fn two_diamonds_fold_without_colliding_notes() {
+        let body = "if (mulhi64(a1, 4) != 0) {\n  \
+                    panic_const_mul_overflow(a1, 4, 0x2100);\n\
+                    }\n\
+                    rax = a1 * 4;\n\
+                    if (a1 >= a2) {\n  \
+                    panic_bounds_check(a1, a2, 0x2100);\n\
+                    }\n\
+                    return ((uint64_t*)a3)[a1];\n";
+        let (out, callees) = fold_checks(body);
+        assert_eq!(
+            out,
+            "rax = a1 * 4;  /* checked */\n\
+             return ((uint64_t*)a3)[a1];  /* bounds-checked */\n",
+            "{out}"
+        );
+        assert_eq!(
+            callees,
+            vec![
+                "panic_const_mul_overflow".to_owned(),
+                "panic_bounds_check".to_owned()
+            ]
+        );
+    }
+
+    /// A diamond whose call the renderer wrote `return`-prefixed is one:
+    /// the `return` is stripped and the fold happens all the same.
+    #[test]
+    fn a_return_prefixed_panic_call_is_a_diamond() {
+        let body = "if (a1 >= a2) {\n  \
+                    return panic_bounds_check(a1, a2, 0x2100);\n\
+                    }\n\
+                    return ((uint64_t*)a3)[a1];\n";
+        let (out, callees) = fold_checks(body);
+        assert_eq!(
+            out, "return ((uint64_t*)a3)[a1];  /* bounds-checked */\n",
+            "{out}"
+        );
+        assert_eq!(callees, vec!["panic_bounds_check".to_owned()]);
+    }
 }

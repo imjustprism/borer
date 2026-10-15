@@ -6015,6 +6015,104 @@ fn a_rust_bounds_check_reads_as_its_panic_and_location() {
     );
 }
 
+/// Two folded checks name their callees in one header note, exactly once.
+///
+/// `f` runs a bounds check and a negation check, each diamond handing its
+/// panic entry the operands and a `core::panic::Location`; the entries are
+/// functions that load their message's template and call on without
+/// returning, which names them. Both diamonds leave whole — the bounds one
+/// onto the indexing it guards, the negation one onto the return that
+/// negates `a2` — and the header's note line appears once, naming both
+/// callees.
+#[test]
+fn two_folded_checks_name_both_callees_in_one_note() {
+    let mut code: Vec<u8> = vec![
+        0x48, 0x39, 0xd1, // ASM: cmp rcx,rdx
+        0x0f, 0x83, 0x24, 0, 0, 0, // ASM: jae FAIL1
+        0x49, 0x8b, 0x04, 0xc8, // ASM: mov rax,[r8+rcx*8]
+        0x49, 0x89, 0x01, // ASM: mov [r9],rax
+        0x49, 0xba, 0, 0, 0, 0, 0, 0, 0, 0x80, // ASM: mov r10,0x8000000000000000
+        0x4c, 0x39, 0xd2, // ASM: cmp rdx,r10
+        0x0f, 0x84, 0x1d, 0, 0, 0, // ASM: je FAIL2
+        0x48, 0xf7, 0xda, // ASM: neg rdx
+        0x48, 0x03, 0xd1, // ASM: add rdx,rcx
+        0x48, 0x03, 0xc2, // ASM: add rax,rdx
+        0xc3, // ASM: ret
+        0x4c, 0x8d, 0x05, 0xcc, 0x11, 0, 0, // ASM: FAIL1: lea r8,[rip+LOC1]
+        0xe8, 0x27, 0, 0, 0, // ASM: call panic_bounds_check
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x4c, 0x8d, 0x05, 0xd9, 0x11, 0, 0, // ASM: FAIL2: lea r8,[rip+LOC2]
+        0xe8, 0x54, 0, 0, 0, // ASM: call panic_const_neg_overflow
+    ]);
+    code.resize(0xe0, 0xcc);
+    // The two panic entries: a frame, the arguments spilled, the message's
+    // template loaded, and a call on into a `ud2` that never returns.
+    for (base, call) in [(0x60usize, 0x60u32), (0xa0, 0x20)] {
+        let mut helper = vec![
+            0x55, // ASM: push rbp
+            0x48, 0x83, 0xec, 0x50, // ASM: sub rsp,0x50
+            0x48, 0x89, 0x4c, 0x24, 0x48, // ASM: mov [rsp+0x48],rcx
+            0x48, 0x89, 0x54, 0x24, 0x40, // ASM: mov [rsp+0x40],rdx
+            0x4c, 0x89, 0x44, 0x24, 0x38, // ASM: mov [rsp+0x38],r8
+            0x48, 0x8d, 0x0d, 0x85, 0x10, 0, 0, // ASM: lea rcx,[rip+MSG]
+        ];
+        helper.extend_from_slice(&call.to_le_bytes()); // ASM: call ud2
+        code[base..base + helper.len()].copy_from_slice(&helper);
+    }
+    code.extend_from_slice(&[0x0f, 0x0b]); // ASM: ud2
+    let file = br"C:\Users\me\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rhai-1.26.1\src\parser.rs";
+    let mut data = vec![0u8; 0x240];
+    data[0x10..0x10 + file.len()].copy_from_slice(file);
+    let bounds = b"\x20index out of bounds: the len is \xc0\x12 but the index is ";
+    data[0x100..0x100 + bounds.len()].copy_from_slice(bounds);
+    let negate = b"\x1dattempt to negate with overflow";
+    data[0x140..0x140 + negate.len()].copy_from_slice(negate);
+    let len = u64::try_from(file.len()).expect("a short path");
+    for (at, line, column) in [(0x200u64, 1015u32, 32u32), (0x220, 1016, 9)] {
+        let at = usize::try_from(at).unwrap_or(0);
+        data[at..at + 8].copy_from_slice(&0x1_4000_2010u64.to_le_bytes());
+        data[at + 8..at + 16].copy_from_slice(&len.to_le_bytes());
+        data[at + 16..at + 20].copy_from_slice(&line.to_le_bytes());
+        data[at + 20..at + 24].copy_from_slice(&column.to_le_bytes());
+    }
+    let p = program64_with_data(&code, &data);
+    let text = decompiled(&p, 0x1_4000_1000);
+    let note = text
+        .lines()
+        .filter(|l| l.starts_with("// note: calls to "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        note,
+        vec![
+            "// note: calls to panic_bounds_check, panic_const_neg_overflow are left out: rust overflow and bounds checks folded"
+        ],
+        "{text}"
+    );
+    assert!(
+        text.contains("var1 = ((uint64_t*)a3)[a1];  /* bounds-checked */"),
+        "{text}"
+    );
+    assert!(
+        text.contains("return var1 + -a2 + a1;  /* checked */"),
+        "{text}"
+    );
+    assert!(!text.contains("panic_bounds_check("), "{text}");
+    assert!(!text.contains("panic_const_neg_overflow("), "{text}");
+    assert_eq!(
+        borer_engine::analysis::decompile::traces::check_structure(
+            &p,
+            &Analysis::compute(&p),
+            &Overlay::default(),
+            0x1_4000_1000,
+            &text
+        ),
+        borer_engine::analysis::decompile::traces::Structure::Agrees,
+        "{text}"
+    );
+}
+
 /// A 16-bit rotate by 8 swaps the half word's bytes and reads as `bswap`.
 #[test]
 fn a_half_word_rotate_by_eight_reads_as_a_byte_swap() {
