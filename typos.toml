@@ -14,6 +14,8 @@ extend-ignore-re = ["(?i)\\b[0-9a-f]{2}( [0-9a-f]{2}){3,}\\b"]
 rela = "rela"
 # the DWARF address-range section is spelled .debug_aranges
 aranges = "aranges"
+# the Windows UNICODE_STRING types (PUNICODE_STRING), as winnt.h spells them
+PUNICODE = "PUNICODE"
 seh = "seh"
 SEH = "SEH"
 # plural of `va` (virtual address), used throughout the tests
