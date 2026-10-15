@@ -702,14 +702,13 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
             );
         }
     };
+    let stack = |v: u64| {
+        v <= t.entry_sp.wrapping_add(STACK_ABOVE) && t.entry_sp - v.min(t.entry_sp) <= STACK_BELOW
+    };
     if let (Some((Kind::Int(..) | Kind::Pointer, bits)), Some(text), Some(machine)) =
         (ret, returned, m.value)
         && text != machine
     {
-        let stack = |v: u64| {
-            v <= t.entry_sp.wrapping_add(STACK_ABOVE)
-                && t.entry_sp - v.min(t.entry_sp) <= STACK_BELOW
-        };
         if t.literals.contains(&text) {
             return Verdict::Unchecked(
                 Some(line),
@@ -720,6 +719,39 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
             return Verdict::Unchecked(
                 Some(line),
                 "both return an address on the stack, which differs with the depth a call is made from".to_owned(),
+            );
+        }
+        // INVARIANT: a return the text holds at a lane narrower than the
+        // declared width states only that lane; the bits above are the
+        // machine's leftovers there, which no line of the text sets.
+        if let Some(lane) = t.ret_lane.filter(|&b| {
+            u64::from(b) < u64::from(bits) && text == machine & (1u64 << b).wrapping_sub(1)
+        }) {
+            return Verdict::Unchecked(
+                Some(line),
+                format!(
+                    "the text states only the low {lane} bits of the result; the bits above are the machine's own"
+                ),
+            );
+        }
+        // INVARIANT: a run whose imports read an address nothing maps, the
+        // binary's own run reading the same one, consumed memory neither
+        // side states; what each answers through it is its own, not a
+        // claim the text makes.
+        if t.emu.api_calls().iter().any(|c| {
+            let reads = match c.api.as_str() {
+                "memcpy" | "memmove" => c.args.get(1),
+                "strlen" | "wcslen" => c.args.first(),
+                _ => None,
+            };
+            reads.is_some_and(|a| {
+                let shown = a.shown();
+                shown.starts_with("ptr ") && m.call_lines.iter().any(|l| l.contains(&shown))
+            })
+        }) {
+            return Verdict::Unchecked(
+                Some(line),
+                "the run reads an address nothing maps through an import, on both sides".to_owned(),
             );
         }
         let low = if bits > 32 && machine >> 32 == 0 && text & 0xffff_ffff == machine {
@@ -753,22 +785,61 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
             continue;
         };
         let text = read_back(|b| t.emu.byte_at(b), *addr, after.len());
-        if let Some(i) = text.iter().zip(after).position(|(x, y)| x != y) {
-            let place = from_usize(i);
-            let writer = t.writers.get(&addr.wrapping_add(place)).copied();
-            let what = format!(
-                "a{}[{i}] is {:#04x} after the text, {:#04x} after the binary{}",
-                k + 1,
-                text.get(i).copied().unwrap_or(0),
-                after.get(i).copied().unwrap_or(0),
-                if writer.is_some() {
-                    ""
-                } else {
-                    "; no line of the text writes it"
-                }
-            );
-            return Verdict::Differs(writer.unwrap_or(line), what);
+        let own = after.len().saturating_sub(GUARD);
+        let word = |buf: &[u8], s: usize| {
+            buf.get(s..s + 8).map(|b| {
+                b.iter()
+                    .enumerate()
+                    .fold(0u64, |w, (n, x)| w | (u64::from(*x) << (8 * n)))
+            })
+        };
+        let mut diff: Option<(usize, u8, u8)> = None;
+        for (i, (x, y)) in text.iter().zip(after.iter()).enumerate() {
+            if x == y {
+                continue;
+            }
+            // INVARIANT: past the argument's own bytes only the fact of a
+            // write is a claim the text makes; what a copy of unwritten
+            // frame bytes leaves there depends on the stack's history.
+            if i >= own && (*x != 0) == (*y != 0) {
+                continue;
+            }
+            diff = Some((i, *x, *y));
+            break;
         }
+        let Some((i, x, y)) = diff else {
+            continue;
+        };
+        for s in i.saturating_sub(7)..=i {
+            if let (Some(tw), Some(mw)) = (word(&text, s), word(after, s)) {
+                if t.literals.contains(&tw) {
+                    return Verdict::Unchecked(
+                        Some(line),
+                        "the text writes a string literal's address, and which copy of its bytes it means the text does not say".to_owned(),
+                    );
+                }
+                if stack(tw) && stack(mw) {
+                    return Verdict::Unchecked(
+                        Some(line),
+                        "both write an address on the stack, which differs with the depth a call is made from".to_owned(),
+                    );
+                }
+            }
+        }
+        let place = from_usize(i);
+        let writer = t.writers.get(&addr.wrapping_add(place)).copied();
+        let what = format!(
+            "a{}[{i}] is {:#04x} after the text, {:#04x} after the binary{}",
+            k + 1,
+            x,
+            y,
+            if writer.is_some() {
+                ""
+            } else {
+                "; no line of the text writes it"
+            }
+        );
+        return Verdict::Differs(writer.unwrap_or(line), what);
     }
     let (machine_calls, text_calls) = (&m.calls, t.emu.api_names());
     if let Some(i) = (0..machine_calls.len().max(text_calls.len()))
