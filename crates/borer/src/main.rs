@@ -5189,7 +5189,7 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://devirt/{address}",
-        "Run a virtualized function and recover the sequence of virtual instructions it executes. The address carries comma-separated settings: budget=<n> raises the step cap (2000000 by default, at most 200000000) for a protector whose dispatch starts after a long bootstrap; strict faults on the first read of an import or of memory the loader would fill, where by default it reads zero and goes on; reg=<value> presets a register, such as the VM's context pointer the entry does not build",
+        "Run a virtualized function and recover the program it executes: handlers summarized once, the trace cleaned of dead stores (writes nothing that runs after them reads) and cut into straight-line runs at every virtual branch, one line per step. The address carries comma-separated settings: budget=<n> raises the step cap (2000000 by default, at most 200000000) for a protector whose dispatch starts after a long bootstrap; strict faults on the first read of an import or of memory the loader would fill, where by default it reads zero and goes on; reg=<value> presets a register, such as the VM's context pointer the entry does not build",
         "borer://devirt/{entry},budget=4000000",
     ),
     (
