@@ -9,6 +9,8 @@ CloseHandle	win	BOOL	-	HANDLE hObject	-
 CoCreateInstance	win	HRESULT	-	REFCLSID rclsid|LPUNKNOWN pUnkOuter|DWORD dwClsContext|REFIID riid|LPVOID *ppv	-|-|clsctx|-|-
 CopyFileW	win	BOOL	-	LPCWSTR lpExistingFileName|LPCWSTR lpNewFileName|BOOL bFailIfExists	-|-|bool
 CopySid	win	BOOL	-	DWORD nDestinationSidLength|PSID pDestinationSid|PSID pSourceSid	-
+CreateDXGIFactory	win	HRESULT	-	REFIID riid|void **ppFactory	-
+CreateDXGIFactory1	win	HRESULT	-	REFIID riid|void **ppFactory	-
 CreateDirectoryW	win	BOOL	-	LPCWSTR lpPathName|LPSECURITY_ATTRIBUTES lpSecurityAttributes	-
 CreateEventW	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpEventAttributes|BOOL bManualReset|BOOL bInitialState|LPCWSTR lpName	-|bool|bool|-
 CreateFileA	win	HANDLE	handle	LPCSTR lpFileName|DWORD dwDesiredAccess|DWORD dwShareMode|LPSECURITY_ATTRIBUTES lpSecurityAttributes|DWORD dwCreationDisposition|DWORD dwFlagsAndAttributes|HANDLE hTemplateFile	-|file_access|file_share|-|file_disposition|file_flags|-
@@ -18,9 +20,12 @@ CreateMutexW	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpMutexAttributes|BOOL bInitialO
 CreateProcessA	win	BOOL	-	LPCSTR lpApplicationName|LPSTR lpCommandLine|LPSECURITY_ATTRIBUTES lpProcessAttributes|LPSECURITY_ATTRIBUTES lpThreadAttributes|BOOL bInheritHandles|DWORD dwCreationFlags|LPVOID lpEnvironment|LPCSTR lpCurrentDirectory|LPSTARTUPINFOA lpStartupInfo|LPPROCESS_INFORMATION lpProcessInformation	-|-|-|-|bool|process_creation|-|-|-|-
 CreateProcessW	win	BOOL	-	LPCWSTR lpApplicationName|LPWSTR lpCommandLine|LPSECURITY_ATTRIBUTES lpProcessAttributes|LPSECURITY_ATTRIBUTES lpThreadAttributes|BOOL bInheritHandles|DWORD dwCreationFlags|LPVOID lpEnvironment|LPCWSTR lpCurrentDirectory|LPSTARTUPINFOW lpStartupInfo|LPPROCESS_INFORMATION lpProcessInformation	-|-|-|-|bool|process_creation|-|-|-|-
 CreateRemoteThread	win	HANDLE	-	HANDLE hProcess|LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPDWORD lpThreadId	-|-|-|-|-|thread_creation|-
+CreateRemoteThreadEx	win	HANDLE	handle	HANDLE hProcess|LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList|LPDWORD lpThreadId	-|-|-|-|-|thread_creation|-|-
 CreateThread	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPDWORD lpThreadId	-|-|-|-|thread_creation|-
 CreateToolhelp32Snapshot	win	HANDLE	handle	DWORD dwFlags|DWORD th32ProcessID	snapshot|-
 CryptReleaseContext	win	BOOL	-	HCRYPTPROV hProv|DWORD dwFlags	-
+D3D11CreateDevice	win	HRESULT	-	IDXGIAdapter *pAdapter|D3D_DRIVER_TYPE DriverType|HMODULE Software|UINT Flags|const D3D_FEATURE_LEVEL *pFeatureLevels|UINT FeatureLevels|UINT SDKVersion|ID3D11Device **ppDevice|D3D_FEATURE_LEVEL *pFeatureLevel|ID3D11DeviceContext **ppImmediateContext	-|d3d_driver_type|-|-|-|-|-|-|-|-
+D3D11CreateDeviceAndSwapChain	win	HRESULT	-	IDXGIAdapter *pAdapter|D3D_DRIVER_TYPE DriverType|HMODULE Software|UINT Flags|const D3D_FEATURE_LEVEL *pFeatureLevels|UINT FeatureLevels|UINT SDKVersion|DXGI_SWAP_CHAIN_DESC *pSwapChainDesc|IDXGISwapChain **ppSwapChain|ID3D11Device **ppDevice|D3D_FEATURE_LEVEL *pFeatureLevel|ID3D11DeviceContext **ppImmediateContext	-|d3d_driver_type|-|-|-|-|-|-|-|-|-|-
 DeleteCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
 DeleteFileA	win	BOOL	-	LPCSTR lpFileName	-
 DeleteFileW	win	BOOL	-	LPCWSTR lpFileName	-
@@ -35,6 +40,9 @@ FindFirstFileA	win	HANDLE	handle	LPCSTR lpFileName|LPWIN32_FIND_DATAA lpFindFile
 FindFirstFileW	win	HANDLE	handle	LPCWSTR lpFileName|LPWIN32_FIND_DATAW lpFindFileData	-
 FindNextFileA	win	BOOL	-	HANDLE hFindFile|LPWIN32_FIND_DATAA lpFindFileData	-
 FindNextFileW	win	BOOL	-	HANDLE hFindFile|LPWIN32_FIND_DATAW lpFindFileData	-
+FindWindowA	win	HWND	handle	LPCSTR lpClassName|LPCSTR lpWindowName	-
+FindWindowW	win	HWND	handle	LPCWSTR lpClassName|LPCWSTR lpWindowName	-
+FlushInstructionCache	win	BOOL	-	HANDLE hProcess|LPCVOID lpBaseAddress|SIZE_T dwSize	-
 FormatMessageW	win	DWORD	-	DWORD dwFlags|LPCVOID lpSource|DWORD dwMessageId|DWORD dwLanguageId|LPWSTR lpBuffer|DWORD nSize|void *Arguments	format_message|-|-|-|-|-|-
 FreeLibrary	win	BOOL	-	HMODULE hLibModule	-
 GetAsyncKeyState	win	SHORT	-	int vKey	-
@@ -64,6 +72,7 @@ GetTickCount	win	DWORD	-	-	-
 GetTickCount64	win	ULONGLONG	-	-	-
 GetTokenInformation	win	BOOL	-	HANDLE TokenHandle|TOKEN_INFORMATION_CLASS TokenInformationClass|LPVOID TokenInformation|DWORD TokenInformationLength|PDWORD ReturnLength	-|token_information_class|-|-|-
 GetUserNameExW	win	BOOLEAN	-	EXTENDED_NAME_FORMAT NameFormat|LPWSTR lpNameBuffer|PULONG nSize	extended_name_format|-|-
+GetWindowThreadProcessId	win	DWORD	-	HWND hWnd|LPDWORD lpdwProcessId	-
 HeapAlloc	win	LPVOID	-	HANDLE hHeap|DWORD dwFlags|SIZE_T dwBytes	-|heap_flags|-
 HeapFree	win	BOOL	-	HANDLE hHeap|DWORD dwFlags|LPVOID lpMem	-|heap_flags|-
 HeapReAlloc	win	LPVOID	-	HANDLE hHeap|DWORD dwFlags|LPVOID lpMem|SIZE_T dwBytes	-
@@ -76,6 +85,7 @@ InternetReadFile	win	BOOL	-	HINTERNET hFile|LPVOID lpBuffer|DWORD dwNumberOfByte
 IsDBCSLeadByte	win	BOOL	-	BYTE TestChar	-
 IsDebuggerPresent	win	BOOL	-	-	-
 IsValidSid	win	BOOL	-	PSID pSid	-
+LdrLoadDll	win	NTSTATUS	-	PWSTR PathToFile|PULONG Flags|PUNICODE_STRING ModuleFileName|PHANDLE ModuleHandle	-
 LeaveCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
 LoadLibraryA	win	HMODULE	-	LPCSTR lpLibFileName	-
 LoadLibraryExW	win	HMODULE	-	LPCWSTR lpLibFileName|HANDLE hFile|DWORD dwFlags	-|-|load_library
@@ -90,12 +100,22 @@ MessageBoxW	win	int	dialog_result	HWND hWnd|LPCWSTR lpText|LPCWSTR lpCaption|UIN
 MoveFileExW	win	BOOL	-	LPCWSTR lpExistingFileName|LPCWSTR lpNewFileName|DWORD dwFlags	-|-|move_file
 MultiByteToWideChar	win	int	-	UINT CodePage|DWORD dwFlags|LPCSTR lpMultiByteStr|int cbMultiByte|LPWSTR lpWideCharStr|int cchWideChar	code_page|-|-|-|-|-
 NetApiBufferFree	win	NET_API_STATUS	-	LPVOID Buffer	-
+NtAllocateVirtualMemory	win	NTSTATUS	-	HANDLE ProcessHandle|PVOID *BaseAddress|ULONG_PTR ZeroBits|PSIZE_T RegionSize|ULONG AllocationType|ULONG Protect	-|-|-|-|mem_type|page_protect
+NtClose	win	NTSTATUS	-	HANDLE Handle	-
+NtOpenProcess	win	NTSTATUS	-	PHANDLE ProcessHandle|ACCESS_MASK DesiredAccess|POBJECT_ATTRIBUTES ObjectAttributes|PCLIENT_ID ClientId	-|process_access|-|-
+NtProtectVirtualMemory	win	NTSTATUS	-	HANDLE ProcessHandle|PVOID *BaseAddress|PSIZE_T RegionSize|ULONG NewProtect|PULONG OldProtect	-|-|-|page_protect|-
+NtQueryInformationProcess	win	NTSTATUS	-	HANDLE ProcessHandle|PROCESSINFOCLASS ProcessInformationClass|PVOID ProcessInformation|ULONG ProcessInformationLength|PULONG ReturnLength	-|process_info_class|-|-|-
+NtQuerySystemInformation	win	NTSTATUS	-	SYSTEM_INFORMATION_CLASS SystemInformationClass|PVOID SystemInformation|ULONG SystemInformationLength|PULONG ReturnLength	system_info_class|-|-|-
+NtReadVirtualMemory	win	NTSTATUS	-	HANDLE ProcessHandle|PVOID BaseAddress|PVOID Buffer|SIZE_T NumberOfBytesToRead|PSIZE_T NumberOfBytesRead	-
+NtUnmapViewOfSection	win	NTSTATUS	-	HANDLE ProcessHandle|PVOID BaseAddress	-
+NtWriteVirtualMemory	win	NTSTATUS	-	HANDLE ProcessHandle|PVOID BaseAddress|PVOID Buffer|SIZE_T NumberOfBytesToWrite|PSIZE_T NumberOfBytesWritten	-
 OpenProcess	win	HANDLE	-	DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwProcessId	process_access|bool|-
 OpenProcessToken	win	BOOL	-	HANDLE ProcessHandle|DWORD DesiredAccess|PHANDLE TokenHandle	-|token_access|-
 OpenThread	win	HANDLE	-	DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwThreadId	thread_access|bool|-
 OutputDebugStringA	win	void	-	LPCSTR lpOutputString	-
 OutputDebugStringW	win	void	-	LPCWSTR lpOutputString	-
 QueryPerformanceCounter	win	BOOL	-	PLARGE_INTEGER lpPerformanceCount	-
+QueueUserAPC	win	DWORD	-	PAPCFUNC pfnAPC|HANDLE hThread|ULONG_PTR dwData	-
 ReadFile	win	BOOL	-	HANDLE hFile|LPVOID lpBuffer|DWORD nNumberOfBytesToRead|LPDWORD lpNumberOfBytesRead|LPOVERLAPPED lpOverlapped	-
 ReadProcessMemory	win	BOOL	-	HANDLE hProcess|LPCVOID lpBaseAddress|LPVOID lpBuffer|SIZE_T nSize|SIZE_T *lpNumberOfBytesRead	-
 RegCloseKey	win	LSTATUS	-	HKEY hKey	hkey
@@ -110,6 +130,7 @@ ReleaseSRWLockExclusive	win	void	-	PSRWLOCK SRWLock	-
 ReleaseSRWLockShared	win	void	-	PSRWLOCK SRWLock	-
 ResumeThread	win	DWORD	-	HANDLE hThread	-
 RtlCaptureContext	win	void	-	PCONTEXT ContextRecord	-
+RtlInitUnicodeString	win	void	-	PUNICODE_STRING DestinationString|PCWSTR SourceString	-
 SHGetFolderPathW	win	HRESULT	-	HWND hwnd|int csidl|HANDLE hToken|DWORD dwFlags|LPWSTR pszPath	-|csidl|-|-|-
 SetConsoleTextAttribute	win	BOOL	-	HANDLE hConsoleOutput|WORD wAttributes	-
 SetCurrentDirectoryA	win	BOOL	-	LPCSTR lpPathName	-
@@ -119,6 +140,7 @@ SetLastError	win	void	-	DWORD dwErrCode	-
 SetThreadUILanguage	win	LANGID	-	LANGID LangId	-
 SetUnhandledExceptionFilter	win	LPTOP_LEVEL_EXCEPTION_FILTER	-	LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter	-
 SetWindowsHookExW	win	HHOOK	-	int idHook|HOOKPROC lpfn|HINSTANCE hmod|DWORD dwThreadId	hook|-|-|-
+ShellExecuteW	win	HINSTANCE	-	HWND hwnd|LPCWSTR lpOperation|LPCWSTR lpFile|LPCWSTR lpParameters|LPCWSTR lpDirectory|INT nShowCmd	-
 ShowWindow	win	BOOL	-	HWND hWnd|int nCmdShow	-|show_window
 Sleep	win	void	-	DWORD dwMilliseconds	timeout
 SuspendThread	win	DWORD	-	HANDLE hThread	-
@@ -131,6 +153,8 @@ VirtualFree	win	BOOL	-	LPVOID lpAddress|SIZE_T dwSize|DWORD dwFreeType	-|-|mem_t
 VirtualProtect	win	BOOL	-	LPVOID lpAddress|SIZE_T dwSize|DWORD flNewProtect|PDWORD lpflOldProtect	-|-|page_protect|-
 VirtualProtectEx	win	BOOL	-	HANDLE hProcess|LPVOID lpAddress|SIZE_T dwSize|DWORD flNewProtect|PDWORD lpflOldProtect	-|-|-|page_protect|-
 VirtualQuery	win	SIZE_T	-	LPCVOID lpAddress|PMEMORY_BASIC_INFORMATION lpBuffer|SIZE_T dwLength	-
+WSACleanup	win	int	-	-	-
+WSAGetLastError	win	int	-	-	-
 WSAStartup	win	int	-	WORD wVersionRequested|LPWSADATA lpWSAData	-
 WaitForSingleObject	win	DWORD	wait_result	HANDLE hHandle|DWORD dwMilliseconds	-|timeout
 WakeAllConditionVariable	win	void	-	PCONDITION_VARIABLE ConditionVariable	-
@@ -170,6 +194,11 @@ getenv	c	char *	-	const char *name	-
 getpid	posix	pid_t	-	-	-
 getppid	posix	pid_t	-	-	-
 getuid	posix	uid_t	-	-	-
+htonl	win	unsigned long	-	unsigned long hostlong	-
+htons	win	u_short	-	u_short hostshort	-
+inet_addr	win	in_addr_t	-	PCSTR cp	-
+inet_ntoa	win	LPSTR	-	in_addr in	-
+keybd_event	win	void	-	BYTE bVk|BYTE bScan|DWORD dwFlags|ULONG_PTR dwExtraInfo	-
 kill	posix	int	-	pid_t pid|int sig	-|signal
 listen	posix	int	-	int sockfd|int backlog	-
 lseek	posix	off_t	-	int fd|off_t offset|int whence	-|-|seek
@@ -183,6 +212,8 @@ memset	c	void *	-	void *s|int c|size_t n	-
 mmap	posix	void *	map_result	void *addr|size_t length|int prot|int flags|int fd|off_t offset	-|-|prot|map_flags|-|-
 mprotect	posix	int	-	void *addr|size_t len|int prot	-|-|prot
 munmap	posix	int	-	void *addr|size_t length	-
+ntohl	win	unsigned long	-	unsigned long netlong	-
+ntohs	win	u_short	-	u_short netshort	-
 open	posix	int	-	const char *pathname|int flags|...	-|open_flags|-
 openat	posix	int	-	int dirfd|const char *pathname|int flags|...	-|-|open_flags|-
 prctl	posix	int	-	int option|...	prctl|-
