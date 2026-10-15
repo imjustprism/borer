@@ -1207,6 +1207,33 @@ fn split(text: &str) -> Option<String> {
 /// # Returns
 ///
 /// The folded text, or `None` when nothing folds.
+/// Tells whether a condition's line short-circuits before token `k`: a
+/// `&&` or `||` ahead of the use, at any depth, can skip evaluating it.
+///
+/// # Arguments
+///
+/// * `l` - The line, an `if (` or `while (` condition expected.
+/// * `k` - The use's token index.
+fn short_circuits_before(l: &Line<'_>, k: usize) -> bool {
+    if !matches!(l.word(0), "if" | "while") {
+        return false;
+    }
+    l.toks
+        .iter()
+        .take(k)
+        .any(|t| t.lex == Lex::Punct && matches!(l.text.get(t.at..t.end), Some("&&" | "||")))
+}
+
+/// Folds the single-use definitions it can into their reads, and the
+/// copies whose sources read the same.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function.
+///
+/// # Returns
+///
+/// The folded text, or `None` when nothing folds.
 fn fold(text: &str) -> Option<String> {
     let t = Text::read(text, |n| is_var_name(n) || splits(n))?;
     let ret = return_type(&t.parts.head);
@@ -2081,6 +2108,18 @@ impl<'t> Text<'t> {
             return None;
         }
         let place = self.place(u, k)?;
+        let un = self.graph.nodes.get(u)?;
+        let ul = self.lines.get(un.line?)?;
+        // INVARIANT: a right side that calls anything always ran at its
+        // statement's place; folded into a condition a `&&` or `||`
+        // before the use could skip, the call would run only when the
+        // text evaluates that far, which the machine never promised.
+        if rhs_does.calls
+            && matches!(place, Place::Truth | Place::Not | Place::Compare)
+            && short_circuits_before(ul, k)
+        {
+            return None;
+        }
         if !self.converts(place, u, ty, ret) {
             return None;
         }
