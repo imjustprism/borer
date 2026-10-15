@@ -900,11 +900,27 @@ impl Expr {
                         (s, sp)
                     }
                 };
+                // INVARIANT: an extension an addend or a subtrahend carries
+                // says the machine added the extended values at the
+                // register's width; read above bit 32, the operand converts
+                // before C's `int` arithmetic wraps at 32 bits.
+                let extended = |e: &Expr, (s, sp): (String, u8)| {
+                    if wide
+                        && !sum
+                        && matches!(op, Op::Add | Op::Sub)
+                        && matches!(e, Expr::Sext(.., b) if *b < 64)
+                    {
+                        let s = if sp < UNARY { format!("({s})") } else { s };
+                        (format!("(int64_t){s}"), UNARY)
+                    } else {
+                        (s, sp)
+                    }
+                };
                 if *op == Op::Add
                     && let Expr::Const(c) = **r
                     && let Some(m) = negative_magnitude(c, n.word)
                 {
-                    let (ls, lp) = widened(l.render_in(n, hexo, sum, inner));
+                    let (ls, lp) = extended(l, widened(l.render_in(n, hexo, sum, inner)));
                     let ls = if lp < p { format!("({ls})") } else { ls };
                     return (format!("{ls} - {m}"), p);
                 }
@@ -932,9 +948,9 @@ impl Expr {
                     (Op::Shr, Expr::Const(v)) if negative_magnitude(*v, n.word).is_some() => {
                         (render_const_in(*v, true, n.word), ATOM)
                     }
-                    _ => widened(operand(l)),
+                    _ => extended(l, widened(operand(l))),
                 };
-                let (rs, rp) = operand(r);
+                let (rs, rp) = extended(r, operand(r));
                 let other_family = |e: &Expr| match e {
                     Expr::Bin(o, ..) => {
                         o.family() != op.family() || (*o != *op && op.family() == 2)
@@ -1015,6 +1031,19 @@ impl Expr {
                 }
             }
             Expr::Un(op, e) => match op.func_name() {
+                // INVARIANT: a byte swap only reorders bits, and the lane it
+                // works on widens unsigned; the cast that lane prints names
+                // a signed type, whose `(uint64_t)` conversion would
+                // sign-extend what `bswap eax; shl rax, 20h` zero-extends.
+                Some(f) if matches!(op, UnOp::Bswap) => {
+                    let s = match e.as_ref() {
+                        Expr::Cast(x, ty @ (Ty::U8 | Ty::U16 | Ty::U32)) => {
+                            format!("({}){}", ty.name(), x.render(n))
+                        }
+                        other => other.render(n),
+                    };
+                    (format!("{f}({s})"), ATOM)
+                }
                 Some(f) => (format!("{f}({})", e.render(n)), ATOM),
                 None => {
                     let (es, ep) = number(e, n, hex);

@@ -323,6 +323,9 @@ pub(crate) struct TextRun<'p> {
     /// The addresses the text's string literals were given: the first copy
     /// of their bytes, which need not be the copy the binary uses.
     pub(crate) literals: Vec<u64>,
+    /// The width the returned value was held at before its conversion to
+    /// the declared return type, when that is a byte or a word.
+    pub(crate) ret_lane: Option<u8>,
 }
 
 /// A function's text, read once and run on any number of inputs.
@@ -1423,6 +1426,8 @@ impl<'p> Script<'p> {
             writers: BTreeMap::new(),
             fuel: budget,
             second_result: false,
+            ret_lane: None,
+            called: false,
             call_memo: None,
             steps: 0,
             line: 0,
@@ -1439,6 +1444,7 @@ impl<'p> Script<'p> {
             sources,
             entry_sp: self.entry_sp,
             literals: self.literals.values().flatten().copied().collect(),
+            ret_lane: run.ret_lane,
         })
     }
 
@@ -2101,6 +2107,12 @@ struct Running<'s, 'p> {
     /// in `rdx`: set while a `__rdx`-suffixed call name is unwound to the
     /// function it names.
     second_result: bool,
+    /// The width the returned value was held at before its conversion to
+    /// the declared return type, when that is a byte or a word.
+    ret_lane: Option<u8>,
+    /// Whether any callee has run on the machine, so the emulator's rax and
+    /// rdx hold a call's leftovers rather than the entry's own state.
+    called: bool,
     /// The last call a statement ran: its target, its argument values, and
     /// what it left in `rax` and `rdx`. A `__rdx` call of the same target
     /// and arguments is that call's second half, answered from here without
@@ -2183,6 +2195,16 @@ impl Running<'_, '_> {
                             self.value(e).and_then(|v| match s.sig.ret {
                                 None => Ok(End::Returned(None)),
                                 Some(ty) => {
+                                    // INVARIANT: a value the return holds at
+                                    // a lane narrower than the declared
+                                    // return type leaves the bits above it
+                                    // the machine's own, which no line of
+                                    // the text states.
+                                    if v.ty.bits(self.s.word).is_some_and(|b| {
+                                        b <= 16 && b < ty.bits(self.s.word).unwrap_or(64)
+                                    }) {
+                                        self.ret_lane = v.ty.bits(self.s.word);
+                                    }
                                     let r = self.convert(v, ty)?;
                                     Ok(End::Returned(Some(r.bits)))
                                 }
@@ -3180,16 +3202,23 @@ impl Running<'_, '_> {
                 let values = self.arg_values(args)?;
                 let callee = self.value(&Ast::Name(base.to_owned()))?;
                 let target = callee.bits & mask(self.word());
-                if let Some((t, a, _, rdx)) = &self.call_memo
+                let rdx = if let Some((t, a, _, rdx)) = &self.call_memo
                     && *t == target
                     && *a == values
                 {
-                    return Ok(self.int(*rdx, CTy::int(self.word(), false)));
-                }
-                self.second_result = true;
-                let out = self.run_callee(target, &values, base);
-                self.second_result = false;
-                return out.map(|rdx| self.int(rdx, CTy::int(self.word(), false)));
+                    *rdx
+                } else {
+                    self.second_result = true;
+                    let out = self.run_callee(target, &values, base);
+                    self.second_result = false;
+                    out?
+                };
+                // INVARIANT: the machine moves the second result into `rax`
+                // wherever it consumes the pair (`mov rax,rdx`), which is
+                // why the text reads it at all; the emulator's rax then
+                // holds it for the next call's leftover.
+                self.emu.set_register("rax", rdx);
+                return Ok(self.int(rdx, CTy::int(self.word(), false)));
             }
             if let [Ast::Name(m)] = args
                 && let Some(code) = crate::winconst::value(&format!("{n}({m})"))
@@ -3263,10 +3292,12 @@ impl Running<'_, '_> {
     ///
     /// The callee's argument registers hold the arguments the text passes
     /// and nothing else; every other register holds what the text's
-    /// variable of its name holds, as the machine's does at the call, or
-    /// zero where the text has none: a `void` callee that leaves `rax` as
-    /// it found it hands back the caller's `rax`, and the bits above the
-    /// `al` a `bool` callee sets are the caller's too.
+    /// variable of its name holds, as the machine's does at the call, and
+    /// `rax` and `rdx` hold the last call's leftovers where the text has
+    /// no variable of their name, as the machine's do: a `void` callee
+    /// that leaves `rax` as it found it hands back the caller's `rax`,
+    /// and the bits above the `al` a `bool` callee sets are the caller's
+    /// too.
     ///
     /// # Arguments
     ///
@@ -3289,11 +3320,27 @@ impl Running<'_, '_> {
         } else {
             SENTINEL_64
         };
+        // INVARIANT: the machine's rax and rdx at a call are the last
+        // call's leftovers where no variable names them, as a `push rax`
+        // prologue reads them; the emulator still holds them, for only a
+        // call or a named variable writes a register.
+        let leftovers = [
+            (Register::RAX, self.emu.register("rax").unwrap_or(0)),
+            (Register::RDX, self.emu.register("rdx").unwrap_or(0)),
+        ];
         for r in [
             "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8", "r9", "r10", "r11", "r12",
             "r13", "r14", "r15",
         ] {
             self.emu.set_register(r, 0);
+        }
+        // INVARIANT: the registers the function itself takes its arguments
+        // in still hold them at a call the machine did not overwrite, as
+        // the text's own statements say; a variable named after one wins.
+        for (i, reg) in s.passing.regs.iter().enumerate() {
+            if let (Some(v), Some(name)) = (self.args.get(i), full_register_name(*reg)) {
+                self.emu.set_register(name, *v);
+            }
         }
         for ((_, reg, _), v) in s.cells.iter().zip(&self.vals) {
             if let Some(r) = reg
@@ -3304,12 +3351,25 @@ impl Running<'_, '_> {
                 self.emu.set_register(name, *v);
             }
         }
+        for (r, left) in leftovers {
+            if !self.called {
+                // INVARIANT: before the first call the machine's registers
+                // are the entry's own, which the argument restore just
+                // said; the emulator's zeros are not them.
+                continue;
+            }
+            if !s.cells.iter().any(|(_, reg, _)| *reg == Some(r)) {
+                self.emu
+                    .set_register(full_register_name(r).unwrap_or("rax"), left);
+            }
+        }
         self.emu.set_register("rsp", s.call_sp);
         poke_word(&mut self.emu, s.call_sp, sentinel, u64::from(s.word / 8));
         callee.place(&mut self.emu, s.call_sp, args);
         self.emu.stop_at(Some(sentinel));
         self.emu.set_budget(self.fuel);
         let imports = self.emu.api_calls().len();
+        self.called = true;
         let run = self.emu.run(target);
         if self.emu.api_calls().len() > imports
             && let Some(low) = args
@@ -3346,6 +3406,21 @@ impl Running<'_, '_> {
             Stop::Fault(x) if x < s.call_sp && s.call_sp - x <= STACK_REACH => unchecked(format!(
                 "the call to {name} reads its own stack where nothing was set; in the binary, earlier calls leave values there"
             )),
+            // INVARIANT: a fault at an instruction outside the callee's own
+            // code is a wild jump's landing, an address an out-of-range
+            // table index or a misaligned decode chose; where the machine
+            // romps from there, the text states nothing.
+            Stop::Fault(_)
+                if !s.analysis.function(target).is_some_and(|f| {
+                    let ip = self.emu.last_ip();
+                    f.blocks.iter().any(|b| b.start <= ip && ip < b.end)
+                }) =>
+            {
+                unchecked(format!(
+                    "the call to {name} jumps to {:#x}, code the text does not show, and faults there",
+                    self.emu.last_ip()
+                ))
+            }
             Stop::Fault(x) => Err(End::Callee(name.to_owned(), Stop::Fault(x))),
             Stop::Unmodeled(what) => unchecked(format!(
                 "the call to {name} stops on {what}, which the emulator does not run from a call's clean state"

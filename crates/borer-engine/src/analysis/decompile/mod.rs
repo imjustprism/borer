@@ -462,6 +462,22 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     };
     let sanitize = |t: String| crate::strings::escape_text(&t);
     let narrow = cstr_text_at(program, addr, min, CAP).filter(|&(len, _)| terminated(len));
+    // INVARIANT: a short string whose terminator pads out its 32-bit unit,
+    // with a nonzero unit after it, is the first entry of a table of 32-bit
+    // values (a Rust `Range<u32>` is `[0x20u32, 0x21]`), no string; the
+    // address says what it is where `" "` would send a reader to another
+    // copy of a space.
+    if narrow.as_ref().is_some_and(|(len, _)| *len < MIN)
+        && addr.is_multiple_of(4)
+        && program
+            .read_va_upto(addr.wrapping_add(2), 2)
+            .is_some_and(|b| b.iter().all(|c| *c == 0))
+        && program
+            .read_va_upto(addr.wrapping_add(4), 4)
+            .is_some_and(|b| b.iter().any(|c| *c != 0))
+    {
+        return None;
+    }
     let run = wide_run_start(program, addr)
         .then(|| wstr_text_at(program, addr, min.max(2), CAP))
         .flatten();

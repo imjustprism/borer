@@ -428,6 +428,78 @@ fn an_unsigned_operation_on_a_sign_extension_casts_it_unsigned() {
     );
 }
 
+/// A wide difference of sign-extended loads converts each side, for the
+/// machine subtracts the extensions at the register's width where C's
+/// `int` arithmetic on the loads wraps at 32 bits.
+///
+/// `movsxd rax,[rcx]; movsxd rdx,[rdx]; sub rax,rdx; ret` of loads whose
+/// difference overflows an `int` once answered the wrapped value
+/// sign-extended.
+///
+/// # Panics
+///
+/// When the text subtracts the loads without converting them.
+#[test]
+fn a_wide_difference_of_extensions_converts_each_side() {
+    let code = [
+        0x48, 0x63, 0x01, // ASM: movsxd rax,qword [rcx] (a 32-bit load)
+        0x48, 0x63, 0x12, // ASM: movsxd rdx,qword [rdx] (a 32-bit load)
+        0x48, 0x29, 0xd0, // ASM: sub rax,rdx
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("(int64_t)"), "{text}");
+}
+
+/// A byte swap's lane widens unsigned, for the register the swap works on
+/// zeroes the bits above it where a signed operand's conversion would
+/// sign-extend them.
+///
+/// `mov rax,rcx; shr rax,20h; mov edx,ecx; bswap edx; add rax,rdx; ret` of
+/// a low half above `0x7fffffff` once answered its sign-extension.
+///
+/// # Panics
+///
+/// When the text swaps a signed lane.
+#[test]
+fn a_byte_swap_widens_its_lane_unsigned() {
+    let code = [
+        0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+        0x48, 0xc1, 0xe8, 0x20, // ASM: shr rax,0x20
+        0x8b, 0xd1, // ASM: mov edx,ecx
+        0x0f, 0xca, // ASM: bswap edx
+        0x48, 0x01, 0xd0, // ASM: add rax,rdx
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("bswap((uint32_t)"), "{text}");
+}
+
+/// A 32-bit table whose first unit reads as a short string renders as its
+/// address, not the string.
+///
+/// A Rust `Range<u32>` of `[0x20u32, 0x21]` is not the literal `" "`,
+/// whose copy elsewhere the callee would read.
+///
+/// `lea rax,[0x140002000]; ret` over `20 00 00 00 21 00 00 00` once
+/// returned `" "`, sending the reader to whichever copy of a space the
+/// image holds first.
+///
+/// # Panics
+///
+/// When the table renders as the string.
+#[test]
+fn a_table_of_32_bit_values_is_no_short_string() {
+    let code = [
+        0x48, 0x8d, 0x05, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea rax,[rip+0xff9]
+        0xc3, // ASM: ret
+    ];
+    let p = program64_with_data(&code, &[0x20, 0, 0, 0, 0x21, 0, 0, 0]);
+    let text = runs_agree(&p, 0x1_4000_1000);
+    assert!(!text.contains("\" \""), "{text}");
+    assert!(text.contains("0x140002000"), "{text}");
+}
+
 /// A term of an address that lands on a zero byte keeps its number: a
 /// table's leading zero is no empty string, and even a real one holds a
 /// single byte no index reads text past.

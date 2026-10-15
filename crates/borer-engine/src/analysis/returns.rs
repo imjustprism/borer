@@ -348,8 +348,8 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 .iter()
                 .filter_map(|site| match site {
                     Site::Used(bits) => Some(*bits),
-                    Site::Unknown => Some(64),
-                    Site::Dead | Site::Tail(_) => None,
+                    Site::Unknown | Site::Tail(_) => Some(64),
+                    Site::Dead => None,
                 })
                 .max()
                 .unwrap_or(64);
