@@ -1812,10 +1812,10 @@ fn decompile_in<L: Lifter>(
     } else {
         (body, None)
     };
-    let body = if cleanup {
-        panics::annotate(&body, program)
+    let (body, panic_checks) = if cleanup {
+        panics::fold_checks(&panics::annotate(&body, program))
     } else {
-        body
+        (body, Vec::new())
     };
     let body = if returns_nothing {
         drop_dead_results(&body, result_reg)
@@ -2062,6 +2062,13 @@ fn decompile_in<L: Lifter>(
     }
     if let Some(folded) = &canary {
         let _ = writeln!(out, "// folded: {}", folded.note());
+    }
+    if !panic_checks.is_empty() {
+        let _ = writeln!(
+            out,
+            "// note: calls to {} are left out: rust overflow and bounds checks folded",
+            panic_checks.join(", ")
+        );
     }
     if let Some(table) = enum_table(&body, &params) {
         /// Most members written into the header line.
