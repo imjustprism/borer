@@ -5951,14 +5951,15 @@ fn a_linux_stack_canary_folds_out_of_the_text() {
     assert!(text.contains("return a1 + 1;"), "{text}");
 }
 
-/// A Rust bounds check reads as the panic it raises, where in the source.
+/// A Rust bounds check folds onto the indexing it guards.
 ///
 /// `f` indexes `a3[a1]` after `cmp rcx, rdx; jae fail`, the failing path
 /// handing `panic_bounds_check` the index, the length and a
 /// `core::panic::Location`; the entry is a function that loads the
 /// message's format template and calls on without returning, which names
-/// it. The location is written beside the call, and its crate file is the
-/// function's source.
+/// it. The check's diamond leaves whole, the indexing statement after it
+/// gains `/* bounds-checked */`, and a header note says whose calls left,
+/// so the structure check still agrees.
 #[test]
 fn a_rust_bounds_check_reads_as_its_panic_and_location() {
     let mut code = vec![
@@ -5994,15 +5995,23 @@ fn a_rust_bounds_check_reads_as_its_panic_and_location() {
     let p = program64_with_data(&code, &data);
     let text = decompiled(&p, 0x1_4000_1000);
     assert!(
-        text.contains(
-            "panic_bounds_check(a1, a2, 0x140002200);  // at rhai-1.26.1/src/parser.rs:1015:32"
-        ),
+        text.contains("return ((uint64_t*)a3)[a1];  /* bounds-checked */"),
         "{text}"
     );
-    let polished = polish(&text, 64, &borer_engine::pack::Packs::default());
     assert!(
-        polished.contains("// source: rhai-1.26.1/src/parser.rs"),
-        "{polished}"
+        text.contains("// note: calls to panic_bounds_check are left out"),
+        "{text}"
+    );
+    assert!(!text.contains("panic_bounds_check("), "{text}");
+    assert!(
+        borer_engine::analysis::decompile::traces::check_structure(
+            &p,
+            &Analysis::compute(&p),
+            &Overlay::default(),
+            0x1_4000_1000,
+            &text
+        ) == borer_engine::analysis::decompile::traces::Structure::Agrees,
+        "{text}"
     );
 }
 
