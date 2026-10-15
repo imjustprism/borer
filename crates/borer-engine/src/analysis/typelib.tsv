@@ -7,6 +7,7 @@ CharUpperW	win	LPWSTR	-	LPWSTR lpsz	-
 CheckRemoteDebuggerPresent	win	BOOL	-	HANDLE hProcess|PBOOL pbDebuggerPresent	-
 CloseHandle	win	BOOL	-	HANDLE hObject	-
 CoCreateInstance	win	HRESULT	-	REFCLSID rclsid|LPUNKNOWN pUnkOuter|DWORD dwClsContext|REFIID riid|LPVOID *ppv	-|-|clsctx|-|-
+ConvertSidToStringSidW	win	BOOL	-	PSID Sid|LPWSTR *StringSid	-
 CopyFileW	win	BOOL	-	LPCWSTR lpExistingFileName|LPCWSTR lpNewFileName|BOOL bFailIfExists	-|-|bool
 CopySid	win	BOOL	-	DWORD nDestinationSidLength|PSID pDestinationSid|PSID pSourceSid	-
 CreateDXGIFactory	win	HRESULT	-	REFIID riid|void **ppFactory	-
@@ -18,6 +19,7 @@ CreateFileMappingW	win	HANDLE	-	HANDLE hFile|LPSECURITY_ATTRIBUTES lpFileMapping
 CreateFileW	win	HANDLE	handle	LPCWSTR lpFileName|DWORD dwDesiredAccess|DWORD dwShareMode|LPSECURITY_ATTRIBUTES lpSecurityAttributes|DWORD dwCreationDisposition|DWORD dwFlagsAndAttributes|HANDLE hTemplateFile	-|file_access|file_share|-|file_disposition|file_flags|-
 CreateMutexW	win	HANDLE	-	LPSECURITY_ATTRIBUTES lpMutexAttributes|BOOL bInitialOwner|LPCWSTR lpName	-|bool|-
 CreateProcessA	win	BOOL	-	LPCSTR lpApplicationName|LPSTR lpCommandLine|LPSECURITY_ATTRIBUTES lpProcessAttributes|LPSECURITY_ATTRIBUTES lpThreadAttributes|BOOL bInheritHandles|DWORD dwCreationFlags|LPVOID lpEnvironment|LPCSTR lpCurrentDirectory|LPSTARTUPINFOA lpStartupInfo|LPPROCESS_INFORMATION lpProcessInformation	-|-|-|-|bool|process_creation|-|-|-|-
+CreateProcessAsUserW	win	BOOL	-	HANDLE hToken|LPCWSTR lpApplicationName|LPWSTR lpCommandLine|LPSECURITY_ATTRIBUTES lpProcessAttributes|LPSECURITY_ATTRIBUTES lpThreadAttributes|BOOL bInheritHandles|DWORD dwCreationFlags|LPVOID lpEnvironment|LPCWSTR lpCurrentDirectory|LPSTARTUPINFOW lpStartupInfo|LPPROCESS_INFORMATION lpProcessInformation	-|-|-|-|-|bool|process_creation|-|-|-|-
 CreateProcessW	win	BOOL	-	LPCWSTR lpApplicationName|LPWSTR lpCommandLine|LPSECURITY_ATTRIBUTES lpProcessAttributes|LPSECURITY_ATTRIBUTES lpThreadAttributes|BOOL bInheritHandles|DWORD dwCreationFlags|LPVOID lpEnvironment|LPCWSTR lpCurrentDirectory|LPSTARTUPINFOW lpStartupInfo|LPPROCESS_INFORMATION lpProcessInformation	-|-|-|-|bool|process_creation|-|-|-|-
 CreateRemoteThread	win	HANDLE	-	HANDLE hProcess|LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPDWORD lpThreadId	-|-|-|-|-|thread_creation|-
 CreateRemoteThreadEx	win	HANDLE	handle	HANDLE hProcess|LPSECURITY_ATTRIBUTES lpThreadAttributes|SIZE_T dwStackSize|LPTHREAD_START_ROUTINE lpStartAddress|LPVOID lpParameter|DWORD dwCreationFlags|LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList|LPDWORD lpThreadId	-|-|-|-|-|thread_creation|-|-
@@ -40,8 +42,10 @@ FindFirstFileA	win	HANDLE	handle	LPCSTR lpFileName|LPWIN32_FIND_DATAA lpFindFile
 FindFirstFileW	win	HANDLE	handle	LPCWSTR lpFileName|LPWIN32_FIND_DATAW lpFindFileData	-
 FindNextFileA	win	BOOL	-	HANDLE hFindFile|LPWIN32_FIND_DATAA lpFindFileData	-
 FindNextFileW	win	BOOL	-	HANDLE hFindFile|LPWIN32_FIND_DATAW lpFindFileData	-
+FindResourceW	win	HRSRC	-	HMODULE hModule|LPCWSTR lpName|LPCWSTR lpType	-
 FindWindowA	win	HWND	handle	LPCSTR lpClassName|LPCSTR lpWindowName	-
 FindWindowW	win	HWND	handle	LPCWSTR lpClassName|LPCWSTR lpWindowName	-
+FlushFileBuffers	win	BOOL	-	HANDLE hFile	-
 FlushInstructionCache	win	BOOL	-	HANDLE hProcess|LPCVOID lpBaseAddress|SIZE_T dwSize	-
 FormatMessageW	win	DWORD	-	DWORD dwFlags|LPCVOID lpSource|DWORD dwMessageId|DWORD dwLanguageId|LPWSTR lpBuffer|DWORD nSize|void *Arguments	format_message|-|-|-|-|-|-
 FreeLibrary	win	BOOL	-	HMODULE hLibModule	-
@@ -52,12 +56,15 @@ GetCurrentDirectoryA	win	DWORD	-	DWORD nBufferLength|LPSTR lpBuffer	-
 GetCurrentProcess	win	HANDLE	-	-	-
 GetCurrentProcessId	win	DWORD	-	-	-
 GetCurrentThreadId	win	DWORD	-	-	-
+GetExitCodeProcess	win	BOOL	-	HANDLE hProcess|LPDWORD lpExitCode	-
 GetFileAttributesA	win	DWORD	-	LPCSTR lpFileName	-
 GetFileAttributesW	win	DWORD	-	LPCWSTR lpFileName	-
 GetFileSize	win	DWORD	-	HANDLE hFile|LPDWORD lpFileSizeHigh	-
 GetFileType	win	DWORD	file_type	HANDLE hFile	-
+GetFileVersionInfoW	win	BOOL	-	LPCWSTR lptstrFilename|DWORD dwHandle|DWORD dwLen|LPVOID lpData	-
 GetLastError	win	DWORD	-	-	-
 GetLengthSid	win	DWORD	-	PSID pSid	-
+GetModuleFileNameA	win	DWORD	-	HMODULE hModule|LPSTR lpFilename|DWORD nSize	-
 GetModuleFileNameW	win	DWORD	-	HMODULE hModule|LPWSTR lpFilename|DWORD nSize	-
 GetModuleHandleA	win	HMODULE	-	LPCSTR lpModuleName	-
 GetModuleHandleW	win	HMODULE	-	LPCWSTR lpModuleName	-
@@ -66,6 +73,7 @@ GetProcessHeap	win	HANDLE	-	-	-
 GetSidSubAuthority	win	PDWORD	-	PSID pSid|DWORD nSubAuthority	-
 GetSidSubAuthorityCount	win	PUCHAR	-	PSID pSid	-
 GetStdHandle	win	HANDLE	handle	DWORD nStdHandle	std_handle
+GetSystemInfo	win	void	-	LPSYSTEM_INFO lpSystemInfo	-
 GetSystemTimeAsFileTime	win	void	-	LPFILETIME lpSystemTimeAsFileTime	-
 GetThreadLocale	win	LCID	-	-	-
 GetTickCount	win	DWORD	-	-	-
@@ -85,18 +93,23 @@ InternetReadFile	win	BOOL	-	HINTERNET hFile|LPVOID lpBuffer|DWORD dwNumberOfByte
 IsDBCSLeadByte	win	BOOL	-	BYTE TestChar	-
 IsDebuggerPresent	win	BOOL	-	-	-
 IsValidSid	win	BOOL	-	PSID pSid	-
+IsWow64Process	win	BOOL	-	HANDLE hProcess|PBOOL Wow64Process	-
 LdrLoadDll	win	NTSTATUS	-	PWSTR PathToFile|PULONG Flags|PUNICODE_STRING ModuleFileName|PHANDLE ModuleHandle	-
 LeaveCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
 LoadLibraryA	win	HMODULE	-	LPCSTR lpLibFileName	-
 LoadLibraryExW	win	HMODULE	-	LPCWSTR lpLibFileName|HANDLE hFile|DWORD dwFlags	-|-|load_library
 LoadLibraryW	win	HMODULE	-	LPCWSTR lpLibFileName	-
+LoadResource	win	HGLOBAL	-	HMODULE hModule|HRSRC hResInfo	-
 LocalAlloc	win	HLOCAL	-	UINT uFlags|SIZE_T uBytes	local_alloc|-
 LocalFree	win	HLOCAL	-	HLOCAL hMem	-
+LockResource	win	LPVOID	-	HGLOBAL hResData	-
 LookupAccountSidW	win	BOOL	-	LPCWSTR lpSystemName|PSID Sid|LPWSTR Name|LPDWORD cchName|LPWSTR ReferencedDomainName|LPDWORD cchReferencedDomainName|PSID_NAME_USE peUse	-
 LookupPrivilegeValueW	win	BOOL	-	LPCWSTR lpSystemName|LPCWSTR lpName|PLUID lpLuid	-
 MapViewOfFile	win	LPVOID	-	HANDLE hFileMappingObject|DWORD dwDesiredAccess|DWORD dwFileOffsetHigh|DWORD dwFileOffsetLow|SIZE_T dwNumberOfBytesToMap	-|file_map|-|-|-
 MessageBoxA	win	int	dialog_result	HWND hWnd|LPCSTR lpText|LPCSTR lpCaption|UINT uType	-|-|-|message_box
 MessageBoxW	win	int	dialog_result	HWND hWnd|LPCWSTR lpText|LPCWSTR lpCaption|UINT uType	-|-|-|message_box
+Module32FirstW	win	BOOL	-	HANDLE hSnapshot|LPMODULEENTRY32W lpme	-
+Module32NextW	win	BOOL	-	HANDLE hSnapshot|LPMODULEENTRY32W lpme	-
 MoveFileExW	win	BOOL	-	LPCWSTR lpExistingFileName|LPCWSTR lpNewFileName|DWORD dwFlags	-|-|move_file
 MultiByteToWideChar	win	int	-	UINT CodePage|DWORD dwFlags|LPCSTR lpMultiByteStr|int cbMultiByte|LPWSTR lpWideCharStr|int cchWideChar	code_page|-|-|-|-|-
 NetApiBufferFree	win	NET_API_STATUS	-	LPVOID Buffer	-
@@ -114,17 +127,23 @@ OpenProcessToken	win	BOOL	-	HANDLE ProcessHandle|DWORD DesiredAccess|PHANDLE Tok
 OpenThread	win	HANDLE	-	DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwThreadId	thread_access|bool|-
 OutputDebugStringA	win	void	-	LPCSTR lpOutputString	-
 OutputDebugStringW	win	void	-	LPCWSTR lpOutputString	-
+Process32FirstW	win	BOOL	-	HANDLE hSnapshot|LPPROCESSENTRY32W lppe	-
+Process32NextW	win	BOOL	-	HANDLE hSnapshot|LPPROCESSENTRY32W lppe	-
 QueryPerformanceCounter	win	BOOL	-	PLARGE_INTEGER lpPerformanceCount	-
 QueueUserAPC	win	DWORD	-	PAPCFUNC pfnAPC|HANDLE hThread|ULONG_PTR dwData	-
 ReadFile	win	BOOL	-	HANDLE hFile|LPVOID lpBuffer|DWORD nNumberOfBytesToRead|LPDWORD lpNumberOfBytesRead|LPOVERLAPPED lpOverlapped	-
+ReadFileEx	win	BOOL	-	HANDLE hFile|LPVOID lpBuffer|DWORD nNumberOfBytesToRead|LPOVERLAPPED lpOverlapped|LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine	-
 ReadProcessMemory	win	BOOL	-	HANDLE hProcess|LPCVOID lpBaseAddress|LPVOID lpBuffer|SIZE_T nSize|SIZE_T *lpNumberOfBytesRead	-
 RegCloseKey	win	LSTATUS	-	HKEY hKey	hkey
 RegCreateKeyExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpSubKey|DWORD Reserved|LPWSTR lpClass|DWORD dwOptions|REGSAM samDesired|LPSECURITY_ATTRIBUTES lpSecurityAttributes|PHKEY phkResult|LPDWORD lpdwDisposition	hkey|-|-|-|reg_options|reg_sam|-|-|-
 RegDeleteValueW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName	hkey|-
+RegEnumValueW	win	LSTATUS	-	HKEY hKey|DWORD dwIndex|LPWSTR lpValueName|LPDWORD lpcchValueName|LPDWORD lpReserved|LPDWORD lpType|LPBYTE lpData|LPDWORD lpcbData	hkey|-|-|-|-|-|-|-
 RegOpenKeyExA	win	LSTATUS	-	HKEY hKey|LPCSTR lpSubKey|DWORD ulOptions|REGSAM samDesired|PHKEY phkResult	hkey|-|reg_options|reg_sam|-
 RegOpenKeyExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpSubKey|DWORD ulOptions|REGSAM samDesired|PHKEY phkResult	hkey|-|reg_options|reg_sam|-
 RegOpenKeyW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpSubKey|PHKEY phkResult	hkey|-|-
+RegQueryValueExA	win	LSTATUS	-	HKEY hKey|LPCSTR lpValueName|LPDWORD lpReserved|LPDWORD lpType|LPBYTE lpData|LPDWORD lpcbData	hkey|-|-|-|-|-
 RegQueryValueExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName|LPDWORD lpReserved|LPDWORD lpType|LPBYTE lpData|LPDWORD lpcbData	hkey|-|-|-|-|-
+RegSetValueExA	win	LSTATUS	-	HKEY hKey|LPCSTR lpValueName|DWORD Reserved|DWORD dwType|const BYTE *lpData|DWORD cbData	hkey|-|-|reg_type|-|-
 RegSetValueExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName|DWORD Reserved|DWORD dwType|const BYTE *lpData|DWORD cbData	hkey|-|-|reg_type|-|-
 ReleaseSRWLockExclusive	win	void	-	PSRWLOCK SRWLock	-
 ReleaseSRWLockShared	win	void	-	PSRWLOCK SRWLock	-
@@ -136,17 +155,23 @@ SetConsoleTextAttribute	win	BOOL	-	HANDLE hConsoleOutput|WORD wAttributes	-
 SetCurrentDirectoryA	win	BOOL	-	LPCSTR lpPathName	-
 SetFileAttributesW	win	BOOL	-	LPCWSTR lpFileName|DWORD dwFileAttributes	-|file_flags
 SetFilePointer	win	DWORD	-	HANDLE hFile|LONG lDistanceToMove|PLONG lpDistanceToMoveHigh|DWORD dwMoveMethod	-|-|-|move_method
+SetFilePointerEx	win	BOOL	-	HANDLE hFile|LARGE_INTEGER liDistanceToMove|PLARGE_INTEGER lpNewFilePointer|DWORD dwMoveMethod	-|-|-|move_method
 SetLastError	win	void	-	DWORD dwErrCode	-
 SetThreadUILanguage	win	LANGID	-	LANGID LangId	-
 SetUnhandledExceptionFilter	win	LPTOP_LEVEL_EXCEPTION_FILTER	-	LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter	-
 SetWindowsHookExW	win	HHOOK	-	int idHook|HOOKPROC lpfn|HINSTANCE hmod|DWORD dwThreadId	hook|-|-|-
 ShellExecuteW	win	HINSTANCE	-	HWND hwnd|LPCWSTR lpOperation|LPCWSTR lpFile|LPCWSTR lpParameters|LPCWSTR lpDirectory|INT nShowCmd	-
 ShowWindow	win	BOOL	-	HWND hWnd|int nCmdShow	-|show_window
+SizeofResource	win	DWORD	-	HMODULE hModule|HRSRC hResInfo	-
 Sleep	win	void	-	DWORD dwMilliseconds	timeout
 SuspendThread	win	DWORD	-	HANDLE hThread	-
 TerminateProcess	win	BOOL	-	HANDLE hProcess|UINT uExitCode	-
+TerminateThread	win	BOOL	-	HANDLE hThread|DWORD dwExitCode	-
+Thread32First	win	BOOL	-	HANDLE hSnapshot|LPTHREADENTRY32 lpte	-
+Thread32Next	win	BOOL	-	HANDLE hSnapshot|LPTHREADENTRY32 lpte	-
 UnhandledExceptionFilter	win	LONG	-	PEXCEPTION_POINTERS ExceptionInfo	-
 UnmapViewOfFile	win	BOOL	-	LPCVOID lpBaseAddress	-
+VerQueryValueW	win	BOOL	-	LPCVOID pBlock|LPCWSTR lpSubBlock|LPVOID *lplpBuffer|PUINT puLen	-
 VirtualAlloc	win	LPVOID	-	LPVOID lpAddress|SIZE_T dwSize|DWORD flAllocationType|DWORD flProtect	-|-|mem_type|page_protect
 VirtualAllocEx	win	LPVOID	-	HANDLE hProcess|LPVOID lpAddress|SIZE_T dwSize|DWORD flAllocationType|DWORD flProtect	-|-|-|mem_type|page_protect
 VirtualFree	win	BOOL	-	LPVOID lpAddress|SIZE_T dwSize|DWORD dwFreeType	-|-|mem_type
@@ -159,8 +184,10 @@ WSAStartup	win	int	-	WORD wVersionRequested|LPWSADATA lpWSAData	-
 WaitForSingleObject	win	DWORD	wait_result	HANDLE hHandle|DWORD dwMilliseconds	-|timeout
 WakeAllConditionVariable	win	void	-	PCONDITION_VARIABLE ConditionVariable	-
 WideCharToMultiByte	win	int	-	UINT CodePage|DWORD dwFlags|LPCWSTR lpWideCharStr|int cchWideChar|LPSTR lpMultiByteStr|int cbMultiByte|LPCSTR lpDefaultChar|LPBOOL lpUsedDefaultChar	code_page|-|-|-|-|-|-|-
+WinExec	win	UINT	-	LPCSTR lpCmdLine|UINT uCmdShow	-|show_window
 WriteConsoleW	win	BOOL	-	HANDLE hConsoleOutput|LPCVOID lpBuffer|DWORD nNumberOfCharsToWrite|LPDWORD lpNumberOfCharsWritten|LPVOID lpReserved	-
 WriteFile	win	BOOL	-	HANDLE hFile|LPCVOID lpBuffer|DWORD nNumberOfBytesToWrite|LPDWORD lpNumberOfBytesWritten|LPOVERLAPPED lpOverlapped	-
+WriteFileEx	win	BOOL	-	HANDLE hFile|LPCVOID lpBuffer|DWORD nNumberOfBytesToWrite|LPOVERLAPPED lpOverlapped|LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine	-
 WriteProcessMemory	win	BOOL	-	HANDLE hProcess|LPVOID lpBaseAddress|LPCVOID lpBuffer|SIZE_T nSize|SIZE_T *lpNumberOfBytesWritten	-
 _exit	posix	void	-	int status	-
 abort	c	void	-	-	-
@@ -171,6 +198,7 @@ bind	posix	int	-	int sockfd|const struct sockaddr *addr|socklen_t addrlen	-
 calloc	c	void *	-	size_t nmemb|size_t size	-
 chmod	posix	int	-	const char *pathname|mode_t mode	-
 close	posix	int	-	int fd	-
+closedir	posix	int	-	DIR *dirp	-
 closesocket	win	int	-	SOCKET s	-
 connect	posix	int	-	int sockfd|const struct sockaddr *addr|socklen_t addrlen	-
 connect	win	int	-	SOCKET s|const struct sockaddr *name|int namelen	-
@@ -178,21 +206,35 @@ dlclose	posix	int	-	void *handle	-
 dlerror	posix	char *	-	-	-
 dlopen	posix	void *	-	const char *filename|int flags	-|dlopen
 dlsym	posix	void *	-	void *handle|const char *symbol	dl_handle|-
+dup2	posix	int	-	int oldfd|int newfd	-
+dup3	posix	int	-	int oldfd|int newfd|int flags	-|-|open_flags
 execve	posix	int	-	const char *pathname|char *const *argv|char *const *envp	-
 exit	c	void	-	int status	-
 fclose	c	int	-	FILE *stream	-
 fcntl	posix	int	-	int fd|int cmd|...	-|fcntl|-
+fdatasync	posix	int	-	int fd	-
 fopen	c	FILE *	-	const char *pathname|const char *mode	-
 fork	posix	pid_t	-	-	-
 fprintf	c	int	-	FILE *stream|const char *format|...	-
 fread	c	size_t	-	void *ptr|size_t size|size_t nmemb|FILE *stream	-
 free	c	void	-	void *ptr	-
+freeaddrinfo	posix	void	-	struct addrinfo *res	-
 fseek	c	int	-	FILE *stream|long offset|int whence	-|-|seek
+fstat	posix	int	-	int fd|struct stat *statbuf	-
+fstatat	posix	int	-	int dirfd|const char *pathname|struct stat *statbuf|int flags	-
+fsync	posix	int	-	int fd	-
 ftell	c	long	-	FILE *stream	-
+ftruncate	posix	int	-	int fd|off_t length	-
 fwrite	c	size_t	-	const void *ptr|size_t size|size_t nmemb|FILE *stream	-
+getaddrinfo	posix	int	-	const char *node|const char *service|const struct addrinfo *hints|struct addrinfo **res	-
+getcwd	posix	char *	-	char *buf|size_t size	-
 getenv	c	char *	-	const char *name	-
+gethostbyname	posix	struct hostent *	-	const char *name	-
+getpeername	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
 getpid	posix	pid_t	-	-	-
 getppid	posix	pid_t	-	-	-
+getsockname	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
+getsockopt	posix	int	-	int sockfd|int level|int optname|void *optval|socklen_t *optlen	-
 getuid	posix	uid_t	-	-	-
 htonl	win	unsigned long	-	unsigned long hostlong	-
 htons	win	u_short	-	u_short hostshort	-
@@ -202,6 +244,7 @@ keybd_event	win	void	-	BYTE bVk|BYTE bScan|DWORD dwFlags|ULONG_PTR dwExtraInfo	-
 kill	posix	int	-	pid_t pid|int sig	-|signal
 listen	posix	int	-	int sockfd|int backlog	-
 lseek	posix	off_t	-	int fd|off_t offset|int whence	-|-|seek
+lstat	posix	int	-	const char *pathname|struct stat *statbuf	-
 lstrlenA	win	int	-	LPCSTR lpString	-
 lstrlenW	win	int	-	LPCWSTR lpString	-
 malloc	c	void *	-	size_t size	-
@@ -209,6 +252,7 @@ memcmp	c	int	-	const void *s1|const void *s2|size_t n	-
 memcpy	c	void *	-	void *dest|const void *src|size_t n	-
 memmove	c	void *	-	void *dest|const void *src|size_t n	-
 memset	c	void *	-	void *s|int c|size_t n	-
+mkdir	posix	int	-	const char *pathname|mode_t mode	-
 mmap	posix	void *	map_result	void *addr|size_t length|int prot|int flags|int fd|off_t offset	-|-|prot|map_flags|-|-
 mprotect	posix	int	-	void *addr|size_t len|int prot	-|-|prot
 munmap	posix	int	-	void *addr|size_t length	-
@@ -216,6 +260,10 @@ ntohl	win	unsigned long	-	unsigned long netlong	-
 ntohs	win	u_short	-	u_short netshort	-
 open	posix	int	-	const char *pathname|int flags|...	-|open_flags|-
 openat	posix	int	-	int dirfd|const char *pathname|int flags|...	-|-|open_flags|-
+opendir	posix	DIR *	-	const char *name	-
+pipe2	posix	int	-	int *pipefd|int flags	-|open_flags
+poll	posix	int	-	struct pollfd *fds|nfds_t nfds|int timeout	-
+ppoll	posix	int	-	struct pollfd *fds|nfds_t nfds|const struct timespec *tmo_p|const sigset_t *sigmask	-
 prctl	posix	int	-	int option|...	prctl|-
 printf	c	int	-	const char *format|...	-
 pthread_create	posix	int	-	pthread_t *thread|const pthread_attr_t *attr|void *start_routine|void *arg	-
@@ -228,18 +276,30 @@ puts	c	int	-	const char *s	-
 raise	posix	int	-	int sig	signal
 rand	c	int	-	-	-
 read	posix	ssize_t	-	int fd|void *buf|size_t count	-
+readdir	posix	struct dirent *	-	DIR *dirp	-
 realloc	c	void *	-	void *ptr|size_t size	-
-recv	posix	ssize_t	-	int sockfd|void *buf|size_t len|int flags	-
-recv	win	int	-	SOCKET s|char *buf|int len|int flags	-
-send	posix	ssize_t	-	int sockfd|const void *buf|size_t len|int flags	-
-send	win	int	-	SOCKET s|const char *buf|int len|int flags	-
+recv	posix	ssize_t	-	int sockfd|void *buf|size_t len|int flags	-|-|-|msg_flags_posix
+recv	win	int	-	SOCKET s|char *buf|int len|int flags	-|-|-|msg_flags_win
+recvfrom	posix	ssize_t	-	int sockfd|void *buf|size_t len|int flags|struct sockaddr *src_addr|socklen_t *addrlen	-|-|-|msg_flags_posix|-|-
+recvmsg	posix	ssize_t	-	int sockfd|struct msghdr *msg|int flags	-|-|msg_flags_posix
+rmdir	posix	int	-	const char *pathname	-
+send	posix	ssize_t	-	int sockfd|const void *buf|size_t len|int flags	-|-|-|msg_flags_posix
+send	win	int	-	SOCKET s|const char *buf|int len|int flags	-|-|-|msg_flags_win
+sendmsg	posix	ssize_t	-	int sockfd|const struct msghdr *msg|int flags	-|-|msg_flags_posix
+sendto	posix	ssize_t	-	int sockfd|const void *buf|size_t len|int flags|const struct sockaddr *dest_addr|socklen_t addrlen	-|-|-|msg_flags_posix|-|-
+setsockopt	posix	int	-	int sockfd|int level|int optname|const void *optval|socklen_t optlen	-
+shutdown	posix	int	-	int sockfd|int how	-|shutdown_how
+sigaction	posix	int	-	int signum|const struct sigaction *act|struct sigaction *oldact	signal|-|-
+sigaltstack	posix	int	-	const stack_t *ss|stack_t *old_ss	-
 signal	posix	sighandler_t	-	int signum|sighandler_t handler	signal|-
+sigprocmask	posix	int	-	int how|const sigset_t *set|sigset_t *oldset	sigmask|-|-
 sleep	posix	unsigned int	-	unsigned int seconds	-
 snprintf	c	int	-	char *str|size_t size|const char *format|...	-
 socket	posix	int	-	int domain|int type|int protocol	af_posix|sock_type_posix|ipproto
 socket	win	SOCKET	-	int af|int type|int protocol	af_win|sock_type_win|ipproto
 sprintf	c	int	-	char *str|const char *format|...	-
 srand	c	void	-	unsigned int seed	-
+stat	posix	int	-	const char *pathname|struct stat *statbuf	-
 strcat	c	char *	-	char *dest|const char *src	-
 strchr	c	char *	-	const char *s|int c	-
 strcmp	c	int	-	const char *s1|const char *s2	-
@@ -251,6 +311,7 @@ strstr	c	char *	-	const char *haystack|const char *needle	-
 strtol	c	long	-	const char *nptr|char **endptr|int base	-
 system	c	int	-	const char *command	-
 time	c	time_t	-	time_t *tloc	-
+truncate	posix	int	-	const char *path|off_t length	-
 unlink	posix	int	-	const char *pathname	-
 usleep	posix	int	-	useconds_t usec	-
 waitpid	posix	pid_t	-	pid_t pid|int *wstatus|int options	-|-|wait_options
