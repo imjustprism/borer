@@ -1258,23 +1258,8 @@ pub(super) fn handler_effect_code(p: &Program, at: u64, code: &[u8]) -> (usize, 
         return (0, "unknown architecture".to_owned());
     };
     let lines = disasm::disassemble(code, at, bitness, HANDLER_INSTRS);
-    let mut ops: Vec<&str> = Vec::new();
-    let mut memory = false;
-    for l in &lines {
-        let mnemonic = l.text.split_whitespace().next().unwrap_or("");
-        if l.text.contains('[') {
-            memory = true;
-        }
-        if matches!(
-            mnemonic,
-            "mov" | "movzx" | "movsx" | "lea" | "nop" | "jmp" | "push" | "pop" | "ret"
-        ) {
-            continue;
-        }
-        if !ops.contains(&mnemonic) {
-            ops.push(mnemonic);
-        }
-    }
+    let ops = handler_ops(&lines);
+    let memory = lines.iter().any(|l| l.text.contains('['));
     let kind = if ops.is_empty() {
         "moves only".to_owned()
     } else {
@@ -1285,6 +1270,36 @@ pub(super) fn handler_effect_code(p: &Program, at: u64, code: &[u8]) -> (usize, 
         lines.len(),
         format!("{}: {kind}{where_}", virtual_op(&ops, memory)),
     )
+}
+
+/// The mnemonics that name a handler's operation, moves excluded.
+///
+/// The same reading [`handler_effect_code`] summarizes: a handler's moves
+/// reach its operands and are not its operation, so the first use of each
+/// remaining mnemonic, in order, is the handler in one word.
+///
+/// # Arguments
+///
+/// * `lines` - The handler's disassembly.
+///
+/// # Returns
+///
+/// The mnemonics in first-seen order, moves excluded.
+pub(super) fn handler_ops(lines: &[disasm::DisasmLine]) -> Vec<&str> {
+    let mut ops: Vec<&str> = Vec::new();
+    for l in lines {
+        let mnemonic = l.text.split_whitespace().next().unwrap_or("");
+        if matches!(
+            mnemonic,
+            "mov" | "movzx" | "movsx" | "lea" | "nop" | "jmp" | "push" | "pop" | "ret"
+        ) {
+            continue;
+        }
+        if !ops.contains(&mnemonic) {
+            ops.push(mnemonic);
+        }
+    }
+    ops
 }
 
 /// Names the virtual operation a handler implements.

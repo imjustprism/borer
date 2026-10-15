@@ -1594,8 +1594,9 @@ fn dynamic_imports_name_a_resolved_api() {
 /// `VM` is a real interpreter: `rsi` is the virtual instruction pointer over
 /// the bytecode `[0, 1, 2, 3]`, the dispatch jumps through a table to a
 /// handler per opcode, and each handler runs an operation and loops back.
-/// Running it recovers the handler sequence `v0 v1 v2 v3`, with each
-/// handler's effect, which is the virtualized function's real logic.
+/// Running it recovers the four steps as one straight-line run, `v0` to
+/// `v3`, with each handler's effect, which is the virtualized function's
+/// real logic.
 #[test]
 fn the_devirtualizer_recovers_a_virtual_program() {
     let code = [
@@ -1628,7 +1629,14 @@ fn the_devirtualizer_recovers_a_virtual_program() {
         text.contains("4 virtual instructions"),
         "the program length is wrong: {text}"
     );
-    assert!(text.contains("v0 v1 v2 v3"), "the trace is wrong: {text}");
+    assert!(
+        text.contains("# virtual program: 4 of 4 instructions in 1 run"),
+        "the program is not rendered as one run: {text}"
+    );
+    assert!(
+        text.contains("  v0 = add;\n  v1 = add;\n  v2 = xor;"),
+        "the steps are wrong: {text}"
+    );
     assert!(
         text.contains("xor"),
         "the handler effects are missing: {text}"

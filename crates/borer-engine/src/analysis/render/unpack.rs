@@ -7,8 +7,11 @@ use crate::text::one_line;
 /// Instructions the devirtualizer runs before giving up.
 pub(super) const DEVIRT_BUDGET: usize = 2_000_000;
 
-/// Most virtual instructions listed in a trace.
-pub(super) const DEVIRT_TRACE_MAX: usize = 2000;
+/// Most steps of the virtual program rendered as lines.
+pub(super) const DEVIRT_PROGRAM_MAX: usize = 200;
+
+/// Most handlers named in the dead-stores clause.
+pub(super) const DEVIRT_DROPPED_MAX: usize = 6;
 
 /// Recovers the virtual program a virtualized function runs.
 ///
@@ -31,6 +34,16 @@ pub(super) const DEVIRT_TRACE_MAX: usize = 2000;
 /// not back. Registers can be set in the target
 /// (`0x140abc,rcx=0x...`) to supply the VM's context pointer where the entry
 /// does not build it.
+///
+/// The trace is then reduced the way a compiler cleans one straight run:
+/// a step whose every write nothing that runs after it reads — the opcode
+/// register the next fetch overwrites, a scratch register no later handler
+/// opens — is a dead store and dropped, and dropping it frees the reads
+/// that fed it, transitively, in one backward walk. Stores to memory,
+/// calls out of the machine and the registers a caller reads at return are
+/// hand-offs the dropping never touches. What survives is cut into runs of
+/// straight-line steps at every virtual branch (a handler that itself
+/// jumps on a condition or returns), each step rendered as one line.
 ///
 /// The run is best-effort by default, like the unpacker's: a VM interpreter
 /// reads through imports and memory the OS loader fills at run time, and
@@ -188,31 +201,483 @@ pub fn devirtualize_tsv(
         run.stop
     );
     out.push_str("# handlers:\n");
-    let span = usize::try_from(HANDLER_SPAN).unwrap_or(0);
+    let mut view: BTreeMap<u64, HandlerView> = BTreeMap::new();
     for h in &order {
-        let live = emu.code_at(*h, span);
-        let (n, effect) = if live.is_empty() {
-            handler_effect(p, a, *h)
+        let bytes = handler_bytes(p, a, &emu, *h);
+        let (n, effect) = if bytes.is_empty() {
+            (0, "unreadable".to_owned())
         } else {
-            handler_effect_code(p, *h, &live)
+            handler_effect_code(p, *h, &bytes)
         };
         let _ = writeln!(
             out,
             "  {:<4} {h:#x}  {n} instrs  {effect}",
             name_of_handler(*h)
         );
+        view.insert(*h, handler_view(p, *h, &bytes));
     }
-    out.push_str("# virtual program:\n");
-    let shown: Vec<String> = trace
-        .iter()
-        .take(DEVIRT_TRACE_MAX)
-        .map(|h| name_of_handler(*h))
-        .collect();
-    for line in shown.chunks(20) {
-        let _ = writeln!(out, "  {}", line.join(" "));
+    let dead = dead_stores(&trace, &view, &dispatch_step(p, a, &emu, dispatch));
+    let kept: Vec<usize> = (0..trace.len()).filter(|i| !dead.contains(i)).collect();
+    if kept.is_empty() {
+        out.push_str(
+            "# virtual program: every step is a dead store, a write nothing after it reads\n",
+        );
+        return Ok(out);
     }
-    elided_line(&mut out, trace.len(), DEVIRT_TRACE_MAX, "");
+    let mut runs = 0usize;
+    let mut after_branch = true;
+    for &i in &kept {
+        let Some(v) = view.get(&trace[i]) else {
+            continue;
+        };
+        if after_branch {
+            runs += 1;
+        }
+        after_branch = v.state.branch;
+    }
+    let mut head = format!(
+        "# virtual program: {} of {} instructions in {} run{}",
+        kept.len(),
+        trace.len(),
+        runs,
+        plural(runs)
+    );
+    if !dead.is_empty() {
+        let mut dropped: Vec<String> = Vec::new();
+        for i in &dead {
+            let name = name_of_handler(trace[*i]);
+            if !dropped.contains(&name) {
+                dropped.push(name);
+            }
+        }
+        let _ = write!(
+            head,
+            ", {} dead store{} dropped ({}{})",
+            dead.len(),
+            plural(dead.len()),
+            dropped
+                .iter()
+                .take(DEVIRT_DROPPED_MAX)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" "),
+            plus_more(dropped.len(), DEVIRT_DROPPED_MAX)
+        );
+    }
+    out.push_str(&head);
+    out.push('\n');
+    let mut run = 0usize;
+    let mut after_branch = true;
+    let mut shown = 0usize;
+    for &i in &kept {
+        if shown >= DEVIRT_PROGRAM_MAX {
+            break;
+        }
+        let Some(v) = view.get(&trace[i]) else {
+            continue;
+        };
+        if after_branch {
+            run += 1;
+            let _ = writeln!(out, "# run {run}");
+        }
+        let _ = writeln!(out, "  {} = {};", name_of_handler(trace[i]), v.expr);
+        after_branch = v.state.branch;
+        shown += 1;
+    }
+    elided_line(&mut out, kept.len(), DEVIRT_PROGRAM_MAX, " steps");
     Ok(out)
+}
+
+/// A place the devirtualizer tracks through a trace: a general register at
+/// full width, or the flags.
+///
+/// The flags stand for every register outside the general set, which is
+/// coarser than the truth in the safe direction: sharing one place keeps
+/// steps alive, never drops one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Place {
+    /// A general-purpose register, widened to its 64-bit form so `edx` and
+    /// `rdx` are one place.
+    Reg(Register),
+    /// The flags.
+    Flags,
+}
+
+/// Every general-purpose register, for the state of a handler whose bytes
+/// do not read.
+const GPRS: [Register; 16] = [
+    Register::RAX,
+    Register::RBX,
+    Register::RCX,
+    Register::RDX,
+    Register::RSI,
+    Register::RDI,
+    Register::RBP,
+    Register::RSP,
+    Register::R8,
+    Register::R9,
+    Register::R10,
+    Register::R11,
+    Register::R12,
+    Register::R13,
+    Register::R14,
+    Register::R15,
+];
+
+/// The registers a call clobbers, plus the stack it pushes a return
+/// address onto.
+const CLOBBERED: [Register; 8] = [
+    Register::RAX,
+    Register::RCX,
+    Register::RDX,
+    Register::R8,
+    Register::R9,
+    Register::R10,
+    Register::R11,
+    Register::RSP,
+];
+
+/// The places live where the trace ends: the return value, the stack, and
+/// the registers a caller may see preserved, so a hand-off at return is
+/// never dropped.
+const EXIT_LIVE: [Place; 10] = [
+    Place::Reg(Register::RAX),
+    Place::Reg(Register::RBX),
+    Place::Reg(Register::RBP),
+    Place::Reg(Register::RDI),
+    Place::Reg(Register::RSI),
+    Place::Reg(Register::RSP),
+    Place::Reg(Register::R12),
+    Place::Reg(Register::R13),
+    Place::Reg(Register::R14),
+    Place::Reg(Register::R15),
+];
+
+/// What one handler does to the places a trace carries, read off its bytes
+/// once per distinct handler.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct StepState {
+    /// Places it reads that a step before it may have written.
+    pub(super) reads: BTreeSet<Place>,
+    /// Places it writes.
+    pub(super) writes: BTreeSet<Place>,
+    /// Whether it does something the model cannot name and so can never be
+    /// dropped: a call, a store to memory, a trap, or a jump off the
+    /// straight line.
+    pub(super) escapes: bool,
+    /// Whether it is a virtual branch: a handler that itself jumps on a
+    /// condition or returns, which keeps its step and ends its run.
+    pub(super) branch: bool,
+}
+
+impl StepState {
+    /// Builds the state of a handler whose bytes this cannot read.
+    ///
+    /// It may read anything, so no earlier write is dead through it; it
+    /// writes nothing the model names, so it kills nothing; and it is
+    /// never dropped.
+    fn unknown() -> Self {
+        let mut reads = BTreeSet::new();
+        for r in GPRS {
+            reads.insert(Place::Reg(r));
+        }
+        reads.insert(Place::Flags);
+        Self {
+            reads,
+            writes: BTreeSet::new(),
+            escapes: true,
+            branch: false,
+        }
+    }
+}
+
+/// One handler's shape for the program rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HandlerView {
+    /// The word a step of it renders as: its mnemonics, moves excluded, or
+    /// `mov` when it only moves.
+    pub(super) expr: String,
+    /// What it does to the places the trace carries.
+    pub(super) state: StepState,
+}
+
+/// The place a register access touches.
+///
+/// # Arguments
+///
+/// * `reg` - The register as the decoder names it.
+///
+/// # Returns
+///
+/// The widened register place, or `None` for the instruction pointer,
+/// which every jump writes and no step computes.
+fn place_of(reg: Register) -> Option<Place> {
+    if reg.is_gpr() {
+        Some(Place::Reg(reg.full_register()))
+    } else if matches!(reg, Register::None | Register::RIP | Register::EIP) {
+        None
+    } else {
+        Some(Place::Flags)
+    }
+}
+
+/// Decodes a byte slice at a known address.
+///
+/// # Arguments
+///
+/// * `code` - The bytes.
+/// * `at` - The first instruction's address.
+/// * `bits` - Decoder bitness.
+///
+/// # Returns
+///
+/// The decoded instructions, stopping where the bytes stop.
+fn decode_at(code: &[u8], at: u64, bits: u32) -> Vec<Instruction> {
+    let mut instrs: Vec<Instruction> = Vec::new();
+    let mut i = Instruction::default();
+    let mut d = Decoder::with_ip(bits, code, at, DecoderOptions::NONE);
+    while d.can_decode() {
+        d.decode_out(&mut i);
+        instrs.push(i);
+    }
+    instrs
+}
+
+/// Reads a decoded handler's body into the place model.
+///
+/// The accesses come from the decoder's instruction info, which names the
+/// implicit operands the text does not spell (`add` reading both its
+/// registers, a call clobbering the volatile set). A store to memory, a
+/// call, or a trap is something the model cannot name, so the step
+/// carrying it is never dropped; a conditional jump or a return is a
+/// virtual branch, which both keeps the step and ends its run.
+///
+/// # Arguments
+///
+/// * `instrs` - The handler's decoded instructions.
+///
+/// # Returns
+///
+/// What it reads, what it writes, and whether it leaves the model.
+fn step_state(instrs: &[Instruction]) -> StepState {
+    let mut info = InstructionInfoFactory::new();
+    let mut st = StepState::default();
+    for i in instrs {
+        match i.flow_control() {
+            FlowControl::ConditionalBranch | FlowControl::Return => {
+                st.branch = true;
+                st.escapes = true;
+            }
+            FlowControl::Call | FlowControl::IndirectCall => {
+                st.escapes = true;
+                for r in CLOBBERED {
+                    st.writes.insert(Place::Reg(r));
+                }
+            }
+            FlowControl::Interrupt | FlowControl::XbeginXabortXend | FlowControl::Exception => {
+                st.escapes = true;
+            }
+            FlowControl::Next | FlowControl::UnconditionalBranch | FlowControl::IndirectBranch => {}
+        }
+        if i.rflags_read() != 0 {
+            st.reads.insert(Place::Flags);
+        }
+        if i.rflags_modified() != 0 {
+            st.writes.insert(Place::Flags);
+        }
+        let ii = info.info(i);
+        for u in ii.used_registers() {
+            let Some(place) = place_of(u.register()) else {
+                continue;
+            };
+            match u.access() {
+                OpAccess::None | OpAccess::NoMemAccess => {}
+                OpAccess::Read | OpAccess::CondRead => {
+                    st.reads.insert(place);
+                }
+                OpAccess::Write | OpAccess::CondWrite => {
+                    st.writes.insert(place);
+                }
+                OpAccess::ReadWrite | OpAccess::ReadCondWrite => {
+                    st.reads.insert(place);
+                    st.writes.insert(place);
+                }
+            }
+        }
+        for m in ii.used_memory() {
+            if matches!(
+                m.access(),
+                OpAccess::Write
+                    | OpAccess::CondWrite
+                    | OpAccess::ReadWrite
+                    | OpAccess::ReadCondWrite
+            ) {
+                st.escapes = true;
+            }
+        }
+    }
+    st
+}
+
+/// A handler's instruction bytes, from the run's memory or the image.
+///
+/// Written bytes take precedence, so a handler the protector decrypted
+/// reads as itself; the length is held to the block the analysis gives the
+/// handler when it gives one, so one handler does not summarize its
+/// neighbors.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for the handler's block.
+/// * `emu` - The finished run.
+/// * `at` - The handler's first instruction.
+///
+/// # Returns
+///
+/// The bytes, empty when neither the run nor the image backs them.
+fn handler_bytes(p: &Program, a: &Analysis, emu: &Emulator<'_>, at: u64) -> Vec<u8> {
+    let bounded = a
+        .function_at(at)
+        .and_then(|f| f.blocks.iter().find(|b| b.start == at).map(|b| b.end))
+        .map_or(HANDLER_SPAN, |end| end.saturating_sub(at))
+        .min(HANDLER_SPAN);
+    let len = usize::try_from(bounded).unwrap_or(0);
+    let live = emu.code_at(at, len);
+    if live.is_empty() {
+        return p.read_va(at, len).map_or_else(Vec::new, <[u8]>::to_vec);
+    }
+    live
+}
+
+/// Reads a handler's bytes into its program shape: the word a step of it
+/// renders as, and what it does to the places the trace carries.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for its architecture.
+/// * `at` - The handler's first instruction.
+/// * `bytes` - Its instruction bytes, from the run or the image.
+///
+/// # Returns
+///
+/// The handler's view, unknowing (`?`, never dropped) when the bytes or
+/// the architecture do not read.
+fn handler_view(p: &Program, at: u64, bytes: &[u8]) -> HandlerView {
+    let Some(bits) = p.arch.bitness() else {
+        return HandlerView {
+            expr: String::from("?"),
+            state: StepState::unknown(),
+        };
+    };
+    if bytes.is_empty() {
+        return HandlerView {
+            expr: String::from("?"),
+            state: StepState::unknown(),
+        };
+    }
+    let lines = disasm::disassemble(bytes, at, bits, HANDLER_INSTRS);
+    let ops = handler_ops(&lines);
+    HandlerView {
+        expr: if ops.is_empty() {
+            String::from("mov")
+        } else {
+            ops.join(" ")
+        },
+        state: step_state(&decode_at(bytes, at, bits)),
+    }
+}
+
+/// The dispatch loop's own block as a step.
+///
+/// Between every two steps the machine fetches again: the handlers jump
+/// back to the block that holds the indirect jump, which reads the virtual
+/// instruction pointer and rewrites the register the opcode was fetched
+/// into. Applying that block between steps is what keeps a write to the
+/// pointer alive and kills a step's write to the opcode register, which
+/// the next fetch overwrites before any handler reads it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for the dispatch's block.
+/// * `emu` - The finished run.
+/// * `site` - The dispatch's indirect jump.
+///
+/// # Returns
+///
+/// The fetch's state, unknowing (nothing dropped through it) when the
+/// block or its bytes do not read.
+fn dispatch_step(p: &Program, a: &Analysis, emu: &Emulator<'_>, site: u64) -> StepState {
+    let Some(f) = a.function_at(site) else {
+        return StepState::unknown();
+    };
+    let Some(b) = f.blocks.iter().find(|b| b.start <= site && site < b.end) else {
+        return StepState::unknown();
+    };
+    let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
+    let bytes = emu.code_at(b.start, len);
+    if bytes.len() != len || bytes.is_empty() {
+        return StepState::unknown();
+    }
+    let Some(bits) = p.arch.bitness() else {
+        return StepState::unknown();
+    };
+    step_state(&decode_at(&bytes, b.start, bits))
+}
+
+/// The trace steps whose writes nothing that runs after them reads.
+///
+/// One backward walk: `live` starts at the registers a caller may read at
+/// return, and between every two steps the dispatch's own fetch runs
+/// first, applied as a step of its own. A step survives when it writes a
+/// live place or leaves the model; a dropped step contributes none of its
+/// reads, which is what frees the step before it. The same walk is the
+/// fixpoint, because each decision is made against the final live set of
+/// everything after it.
+///
+/// # Arguments
+///
+/// * `trace` - The handlers the dispatch jumped to, in order.
+/// * `view` - Each distinct handler's shape.
+/// * `fetch` - The dispatch loop's own block, applied between steps.
+///
+/// # Returns
+///
+/// The positions in `trace` that are dead stores.
+fn dead_stores(
+    trace: &[u64],
+    view: &BTreeMap<u64, HandlerView>,
+    fetch: &StepState,
+) -> BTreeSet<usize> {
+    let mut live: BTreeSet<Place> = EXIT_LIVE.iter().copied().collect();
+    let mut dead: BTreeSet<usize> = BTreeSet::new();
+    for (i, h) in trace.iter().enumerate().rev() {
+        for w in &fetch.writes {
+            live.remove(w);
+        }
+        for r in &fetch.reads {
+            live.insert(*r);
+        }
+        match view.get(h).map(|v| &v.state) {
+            Some(st) if !st.escapes && st.writes.is_disjoint(&live) => {
+                dead.insert(i);
+            }
+            Some(st) => {
+                for w in &st.writes {
+                    live.remove(w);
+                }
+                for r in &st.reads {
+                    live.insert(*r);
+                }
+            }
+            None => {
+                live.extend(GPRS.iter().copied().map(Place::Reg));
+                live.insert(Place::Flags);
+            }
+        }
+    }
+    dead
 }
 
 /// Instructions the unpacking trace runs before giving up.
@@ -1069,6 +1534,96 @@ mod tests {
         );
         assert!(!out.contains("unreadable"), "{out}");
         assert!(!out.contains(" 0 instrs"), "{out}");
+    }
+
+    /// The trace is cleaned of its dead stores and cut into runs at a
+    /// virtual branch.
+    ///
+    /// `VM` walks eight opcodes over seven handlers: `v0` writes `ecx`
+    /// which `v2` later reads, so it survives; `v1` writes `r9d`, which
+    /// nothing after it opens, so it is dropped; `v4` reads `r8d` only to
+    /// write `r9d`, so dropping it frees `v3`'s write of `r8d`, and `v3`
+    /// drops with it. `v6` jumps on a condition, so it ends the first run
+    /// and the last step after it opens the second.
+    ///
+    /// # Panics
+    ///
+    /// When a dead store survives, a live one drops, or a run is not cut
+    /// at the branch.
+    #[test]
+    fn dead_stores_drop_and_a_branch_splits_runs() {
+        /// The entry, the fetch over the bytecode at `0x2000`, the
+        /// dispatch through the table at `0x2100`, and the exit.
+        const HEAD: [u8; 26] = [
+            0x48, 0x8d, 0x35, 0xf9, 0x0f, 0x00,
+            0x00, // ASM: lea rsi,[rip+0xff9] (bytecode at 0x2000)
+            0x0f, 0xb6, 0x06, // ASM: movzx eax,byte [rsi]
+            0x48, 0xff, 0xc6, // ASM: inc rsi
+            0x83, 0xf8, 0x07, // ASM: cmp eax,7
+            0x73, 0x07, // ASM: jae 0x1019
+            0xff, 0x24, 0xc5, 0x00, 0x21, 0x00, 0x00, // ASM: jmp qword [rax*8+0x2100]
+            0xc3, // ASM: ret
+        ];
+        let mut bytes = vec![0xccu8; 0x3000];
+        bytes[0x1000..0x101a].copy_from_slice(&HEAD);
+        let handlers: [(usize, &[u8]); 7] = [
+            (
+                0x1100,
+                &[0xb9, 0x11, 0x00, 0x00, 0x00, 0xe9, 0xfd, 0xfe, 0xff, 0xff],
+            ), // ASM: mov ecx,0x11; jmp 0x1007
+            (
+                0x1200,
+                &[
+                    0x41, 0xb9, 0x22, 0x00, 0x00, 0x00, 0xe9, 0xfc, 0xfd, 0xff, 0xff,
+                ],
+            ), // ASM: mov r9d,0x22; jmp 0x1007
+            (0x1300, &[0x03, 0xd1, 0xe9, 0x00, 0xfd, 0xff, 0xff]), // ASM: add edx,ecx; jmp 0x1007
+            (
+                0x1400,
+                &[
+                    0x41, 0xb8, 0x33, 0x00, 0x00, 0x00, 0xe9, 0xfc, 0xfb, 0xff, 0xff,
+                ],
+            ), // ASM: mov r8d,0x33; jmp 0x1007
+            (0x1500, &[0x45, 0x89, 0xc1, 0xe9, 0xff, 0xfa, 0xff, 0xff]), // ASM: mov r9d,r8d; jmp 0x1007
+            (0x1600, &[0x01, 0xd3, 0xe9, 0x00, 0xfa, 0xff, 0xff]), // ASM: add ebx,edx; jmp 0x1007
+            (
+                0x1700,
+                &[
+                    0x83, 0xf9, 0x10, 0x7f, 0x01, 0xc3, 0xe9, 0xfc, 0xf8, 0xff, 0xff,
+                ],
+            ), // ASM: cmp ecx,0x10; jg 0x1706; ret; jmp 0x1007
+        ];
+        for (at, code) in handlers {
+            bytes[at..at + code.len()].copy_from_slice(code);
+        }
+        bytes[0x2000..0x2008].copy_from_slice(&[0, 1, 2, 3, 4, 5, 6, 5]);
+        for (i, at) in (0x1100usize..=0x1700).step_by(0x100).enumerate() {
+            let slot = 0x2100 + i * 8;
+            bytes[slot..slot + 8].copy_from_slice(&crate::num::from_usize(at).to_le_bytes());
+        }
+        let text = Section::mapped(".text", 0x1000, 0x1000, 0x1000, false, true);
+        let rdata = Section::mapped(".rdata", 0x2000, 0x2000, 0x1000, false, false);
+        let mut p = Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![text, rdata]);
+        p.function_ranges = vec![(0x1000, 0x170b)];
+        let a = Analysis::compute(&p);
+        let out = devirtualize_tsv(&p, &a, &Overlay::default(), "0x1000").unwrap();
+        assert!(
+            out.contains("8 virtual instructions over 7 handlers, dispatch at 0x1012"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "# virtual program: 5 of 8 instructions in 2 runs, 3 dead stores dropped (v1 v3 v4)"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("# run 1\n  v0 = mov;\n  v2 = add;\n  v5 = add;\n  v6 = cmp jg;\n# run 2\n  v5 = add;"),
+            "{out}"
+        );
+        assert!(!out.contains("  v1 = "), "{out}");
+        assert!(!out.contains("  v3 = "), "{out}");
+        assert!(!out.contains("  v4 = "), "{out}");
     }
 
     /// A lone indirect jump is no dispatch loop and is not traced as one.
