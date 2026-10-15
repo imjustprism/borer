@@ -2016,6 +2016,282 @@ fn mba_idiom(op: Op, l: &Expr, r: &Expr) -> Option<Expr> {
     }
 }
 
+/// Most nodes the general MBA collapse walks.
+const MBA_NODES_MAX: usize = 32;
+
+/// Collapses any two-variable linear mixed Boolean-arithmetic expression
+/// to the plain operation it computes, by measuring it on the Boolean
+/// lattice.
+///
+/// A linear MBA is a sum of constants times products of the variables'
+/// bits: over two variables every such expression is `c0 + c1*(x & ~y) +
+/// c2*(~x & y) + c3*(x & y)`, so evaluating it on the four classes of
+/// `(x, y)` - both zero, one all-ones and the other zero, both all-ones -
+/// gives the coefficients (the all-ones mask is odd, so it divides). The
+/// coefficients then name the plain form: `x + y` is `(0, 1, 1, 2)`, the
+/// or is `(0, 1, 1, -1)`, a difference keeps its zero. The collapsed form
+/// is checked against the original on the four class vectors and two
+/// mixed ones before it answers, so a shape this misread - a product, a
+/// variable shift - never survives to say so; only a strictly smaller
+/// node count is returned, so a form already plain stays.
+///
+/// # Arguments
+///
+/// * `op` - The outermost operator of the expression.
+/// * `l` - Its left operand.
+/// * `r` - Its right operand.
+/// * `bits` - The width every value is masked to.
+///
+/// # Returns
+///
+/// The plain expression the MBA computes, or `None` when the expression
+/// has more than two variables, more than [`MBA_NODES_MAX`] nodes, no
+/// bitwise operation to collapse, or no plainly smaller form.
+fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
+    /// Collects the distinct non-constant leaves, bailing on memory,
+    /// conditions, calls and floats, which no plain form names.
+    fn leaves(e: &Expr, out: &mut Vec<Expr>) -> bool {
+        let ok = match e {
+            Expr::Const(_) => true,
+            Expr::Var(_) | Expr::Sp(_) => {
+                if !out.contains(e) {
+                    out.push(e.clone());
+                }
+                out.len() <= 2
+            }
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => leaves(a, out),
+            Expr::Bin(_, a, b) => leaves(a, out) && leaves(b, out),
+            Expr::Str(_)
+            | Expr::Deref(..)
+            | Expr::Cond(_)
+            | Expr::Ternary(..)
+            | Expr::Call(..)
+            | Expr::FConst(..) => false,
+        };
+        ok && out.len() <= 2
+    }
+    /// Whether the tree holds a bitwise operation worth collapsing.
+    fn bitwise(e: &Expr) -> bool {
+        match e {
+            Expr::Bin(Op::And | Op::Or | Op::Xor, ..) => true,
+            Expr::Bin(_, a, b) => bitwise(a) || bitwise(b),
+            Expr::Un(UnOp::Not, _) => true,
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => bitwise(a),
+            _ => false,
+        }
+    }
+    /// Counts the nodes, so only small shapes pay the walk.
+    fn nodes(e: &Expr) -> usize {
+        match e {
+            Expr::Bin(_, a, b) => 1 + nodes(a) + nodes(b),
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => 1 + nodes(a),
+            Expr::Ternary(_, a, b) => 1 + nodes(a) + nodes(b),
+            _ => 1,
+        }
+    }
+    /// Evaluates an arithmetic expression with the leaves substituted,
+    /// bailing on anything this cannot compute.
+    fn eval(e: &Expr, bits: u8, x: &Expr, y: Option<&Expr>, vx: u64, vy: u64) -> Option<u64> {
+        let m = mask_bits(bits);
+        let v = match e {
+            Expr::Const(c) => *c & m,
+            leaf if leaf == x => vx,
+            leaf if y.is_some_and(|y| leaf == y) => vy,
+            Expr::Un(UnOp::Neg, a) => eval(a, bits, x, y, vx, vy)?.wrapping_neg(),
+            Expr::Un(UnOp::Not, a) => eval(a, bits, x, y, vx, vy)? ^ m,
+            Expr::Sext(a, from) => sext(eval(a, bits, x, y, vx, vy)? & mask_bits(*from), *from),
+            Expr::Bin(op, a, b) => {
+                let (a, b) = (eval(a, bits, x, y, vx, vy)?, eval(b, bits, x, y, vx, vy)?);
+                match op {
+                    Op::Add => a.wrapping_add(b),
+                    Op::Sub => a.wrapping_sub(b),
+                    Op::Mul => a.wrapping_mul(b),
+                    Op::And => a & b,
+                    Op::Or => a | b,
+                    Op::Xor => a ^ b,
+                    Op::Shl => a.wrapping_shl(lo32(b) & 63),
+                    Op::Shr => a.wrapping_shr(lo32(b) & 63),
+                    Op::Sar => sext(a, bits)
+                        .cast_signed()
+                        .wrapping_shr(lo32(b) & 63)
+                        .cast_unsigned(),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        Some(v & m)
+    }
+    /// The inverse of the odd all-ones mask modulo `2^bits`, by Newton
+    /// iteration: each round doubles the correct low bits.
+    fn inverse_of_ones(bits: u8) -> u64 {
+        let m = mask_bits(bits);
+        let mut x = 1u64;
+        for _ in 0..6 {
+            x = x.wrapping_mul(2u64.wrapping_sub(m.wrapping_mul(x)));
+        }
+        x
+    }
+    /// Builds `c0 + form`, the constant folded away when zero.
+    fn plus(base: Expr, c0: u64, bits: u8) -> Expr {
+        if c0 & mask_bits(bits) == 0 {
+            return base;
+        }
+        Expr::Bin(
+            Op::Add,
+            Box::new(base),
+            Box::new(Expr::Const(c0 & mask_bits(bits))),
+        )
+    }
+    /// Whether the tree mentions either collected leaf.
+    fn mentions(e: &Expr, x: &Expr, y: Option<&Expr>) -> bool {
+        if e == x || y.is_some_and(|y| e == y) {
+            return true;
+        }
+        match e {
+            Expr::Bin(_, a, b) | Expr::Ternary(_, a, b) => mentions(a, x, y) || mentions(b, x, y),
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => mentions(a, x, y),
+            _ => false,
+        }
+    }
+    /// Whether the tree is selector-linear in its leaves: no shift by a
+    /// leaf, no product or quotient of two leaves, which the Boolean
+    /// lattice the coefficients are read from does not carry.
+    fn linear(e: &Expr, x: &Expr, y: Option<&Expr>) -> bool {
+        match e {
+            Expr::Bin(Op::Shl | Op::Shr | Op::Sar, a, count) => {
+                !mentions(count, x, y) && linear(a, x, y)
+            }
+            Expr::Bin(Op::Mul | Op::Div | Op::Rem | Op::SDiv | Op::SRem, a, b) => {
+                !(mentions(a, x, y) && mentions(b, x, y)) && linear(a, x, y) && linear(b, x, y)
+            }
+            Expr::Bin(_, a, b) | Expr::Ternary(_, a, b) => linear(a, x, y) && linear(b, x, y),
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => linear(a, x, y),
+            _ => true,
+        }
+    }
+    let whole = Expr::Bin(op, Box::new(l.clone()), Box::new(r.clone()));
+    if nodes(&whole) > MBA_NODES_MAX || !bitwise(&whole) {
+        return None;
+    }
+    let mut vars: Vec<Expr> = Vec::new();
+    if !leaves(&whole, &mut vars) || vars.is_empty() {
+        return None;
+    }
+    let (x, y) = (vars[0].clone(), vars.get(1).cloned());
+    if !linear(&whole, &x, y.as_ref()) {
+        return None;
+    }
+    let m = mask_bits(bits);
+    // INVARIANT: the classes a linear MBA is decided by - both variables
+    // zero, one all-ones with the other zero, both all-ones - then four
+    // mixed pairs a shape this misread as linear differs on: alternating
+    // bits, and a sign split, which catches the shifts and sign extracts
+    // a class probe reads as selectors.
+    let sign = m & !m.wrapping_shr(1);
+    let low = m >> 1;
+    let probes: [(u64, u64); 12] = [
+        (0, 0),
+        (m, 0),
+        (0, m),
+        (m, m),
+        (m & 0xaaaa_aaaa_aaaa_aaaa, m & 0x5555_5555_5555_5555),
+        (m & 0x5555_5555_5555_5555, m & 0xaaaa_aaaa_aaaa_aaaa),
+        (sign, low),
+        (low, sign),
+        (m & 0x8000_0000, 0),
+        (0, m & 0x8000_0000),
+        (m & 0xdead_beef_cafe_f00d, m & 0xfeed_face_dead_beef),
+        (m & 0x0f0f_0f0f_0f0f_0f0f, m & 0xf0f0_f0f0_f0f0_f0f0),
+    ];
+    let at = |e: &Expr, (vx, vy): (u64, u64)| eval(e, bits, &x, y.as_ref(), vx, vy);
+    let values: Vec<u64> = probes
+        .iter()
+        .map(|&p| at(&whole, p))
+        .collect::<Option<_>>()?;
+    // The all-ones mask is odd, so it divides: each selector a
+    // coefficient multiplies evaluates to the mask itself.
+    let inv = inverse_of_ones(bits);
+    let k = values[0];
+    let c1 = values[1].wrapping_sub(k).wrapping_mul(inv) & m;
+    let c2 = values[2].wrapping_sub(k).wrapping_mul(inv) & m;
+    let c3 = values[3]
+        .wrapping_sub(values[1])
+        .wrapping_sub(values[2])
+        .wrapping_add(k)
+        .wrapping_mul(inv)
+        & m;
+    let one = 1 & m;
+    let two = 2 & m;
+    let neg = m;
+    let neg_two = m.wrapping_sub(1);
+    let y = || y.clone();
+    // INVARIANT: the coefficients read in the basis `1, x, y, x & y`, so
+    // `x` is `(1, 0, 0)` and the or, an x plus a y less the shared bits,
+    // is `(1, 1, -1)`.
+    let plain = match (c1, c2, c3) {
+        (0, 0, 0) => Some(Expr::Const(k)),
+        (a, 0, 0) if a == one => Some(plus(x.clone(), k, bits)),
+        (a, 0, 0) if a == neg => Some(plus(Expr::Un(UnOp::Neg, Box::new(x.clone())), k, bits)),
+        (0, a, 0) if a == one => Some(plus(y()?, k, bits)),
+        (0, a, 0) if a == neg => Some(plus(Expr::Un(UnOp::Neg, Box::new(y()?)), k, bits)),
+        (a, b, 0) if a == one && b == neg => Some(plus(
+            Expr::Bin(Op::Sub, Box::new(x.clone()), Box::new(y()?)),
+            k,
+            bits,
+        )),
+        (a, b, 0) if a == neg && b == one => Some(plus(
+            Expr::Bin(Op::Sub, Box::new(y()?), Box::new(x.clone())),
+            k,
+            bits,
+        )),
+        (a, b, c) if a == one && b == one => {
+            let form = match c {
+                _ if c == two => Expr::Bin(Op::Add, Box::new(x.clone()), Box::new(y()?)),
+                _ if c == neg => Expr::Bin(Op::Or, Box::new(x.clone()), Box::new(y()?)),
+                _ if c == neg_two => Expr::Bin(Op::Xor, Box::new(x.clone()), Box::new(y()?)),
+                _ => return None,
+            };
+            Some(plus(form, k, bits))
+        }
+        (0, 0, c) if c == one => Some(plus(
+            Expr::Bin(Op::And, Box::new(x.clone()), Box::new(y()?)),
+            k,
+            bits,
+        )),
+        (a, 0, c) if a == one && c == neg => Some(plus(
+            Expr::Bin(
+                Op::And,
+                Box::new(x.clone()),
+                Box::new(Expr::Un(UnOp::Not, Box::new(y()?))),
+            ),
+            k,
+            bits,
+        )),
+        (0, a, c) if a == one && c == neg => Some(plus(
+            Expr::Bin(
+                Op::And,
+                Box::new(Expr::Un(UnOp::Not, Box::new(x.clone()))),
+                Box::new(y()?),
+            ),
+            k,
+            bits,
+        )),
+        _ => None,
+    }?;
+    if nodes(&plain) >= nodes(&whole) {
+        return None;
+    }
+    // INVARIANT: the plain form answers the same as the MBA on every
+    // probe - the four classes a linear MBA is decided by, and two mixed
+    // pairs a non-linear shape differs on.
+    probes
+        .iter()
+        .enumerate()
+        .all(|(i, &p)| at(&plain, p).is_some_and(|v| v == values[i]))
+        .then_some(plain)
+}
+
 /// The `(base, index)` of an address that reads an array element.
 ///
 /// `base + index * size`, with `size` the width of the access, is element
@@ -2091,6 +2367,9 @@ pub(super) fn fold(op: Op, l: Expr, r: Expr, bits: u8) -> Expr {
         return e;
     }
     if let Some(e) = mba_idiom(op, &l, &r) {
+        return e;
+    }
+    if let Some(e) = mba_linear(op, &l, &r, bits) {
         return e;
     }
     if let Some(e) = leading_zeros_idiom(op, &l, &r, bits) {
@@ -4201,6 +4480,15 @@ mod fold_tests {
         Expr::Const(c)
     }
 
+    /// Builds a complement.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The expression complemented.
+    fn u(e: Expr) -> Expr {
+        Expr::Un(UnOp::Not, Box::new(e))
+    }
+
     /// Every rewrite seen and the first counterexample found to each.
     #[derive(Default)]
     struct Tally {
@@ -4619,6 +4907,63 @@ mod fold_tests {
                 b(Op::Or, &X, &Y),
                 b(Op::Xor, &X, &Y),
             ),
+            (
+                "2 * (x & y) + (x ^ y) - (x & y)",
+                Op::Sub,
+                b(
+                    Op::Add,
+                    &b(Op::Mul, &k(2), &b(Op::And, &X, &Y)),
+                    &b(Op::Xor, &X, &Y),
+                ),
+                b(Op::And, &X, &Y),
+            ),
+            (
+                "(x & ~y) + (x & y) + 5",
+                Op::Add,
+                b(Op::Add, &b(Op::And, &X, &u(Y.clone())), &b(Op::And, &X, &Y)),
+                k(5),
+            ),
+            (
+                "(x | y) - (x & y) - (x ^ y)",
+                Op::Sub,
+                b(Op::Sub, &b(Op::Or, &X, &Y), &b(Op::And, &X, &Y)),
+                b(Op::Xor, &X, &Y),
+            ),
+            (
+                "~(x ^ y) & (x | y)",
+                Op::And,
+                u(b(Op::Xor, &X, &Y)),
+                b(Op::Or, &X, &Y),
+            ),
+        ] {
+            t.fold(name, (op, l, r), w, xs, ys);
+        }
+        // The general two-variable collapse: every linear MBA over the
+        // Boolean lattice, checked against the same ground truth.
+        for (name, op, l, r) in [
+            (
+                "(x ^ y) + ((x & y) << 1) - (x & y)",
+                Op::Sub,
+                b(
+                    Op::Add,
+                    &b(Op::Xor, &X, &Y),
+                    &b(Op::Shl, &b(Op::And, &X, &Y), &k(1)),
+                ),
+                b(Op::And, &X, &Y),
+            ),
+            (
+                "(x & ~y) - (~x & y)",
+                Op::Sub,
+                b(Op::And, &X, &u(Y.clone())),
+                b(Op::And, &u(X.clone()), &Y),
+            ),
+            (
+                "(x | y) + (x & y) - (x + y)",
+                Op::Sub,
+                b(Op::Add, &b(Op::Or, &X, &Y), &b(Op::And, &X, &Y)),
+                b(Op::Add, &X, &Y),
+            ),
+            ("~x + y + 1", Op::Add, b(Op::Add, &u(X.clone()), &Y), k(1)),
         ] {
             t.fold(name, (op, l, r), w, xs, ys);
         }

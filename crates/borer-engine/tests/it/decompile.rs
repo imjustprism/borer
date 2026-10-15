@@ -6436,3 +6436,61 @@ fn a_switchtofiber_call_keeps_its_tail_under_one_argument() {
         "the tail after the swap was dropped:\n{text}"
     );
 }
+
+/// `solve` names a value no constant in the function spells, by inverting
+/// the chain between the argument and its comparison.
+///
+/// `((a1 ^ 0x5bd1e995) + 0x1234) == 0xdeadbeef` holds for one input the
+/// code never carries: the prober's constants all answer the same, and
+/// the chain's inverse states it, proven by the run.
+///
+/// # Panics
+///
+/// When the solved value or its run is missing from the report.
+#[test]
+fn solve_inverts_a_chain_the_constants_do_not_name() {
+    use borer_engine::analysis::render::solve_tsv;
+    let code = [
+        0x8b, 0xc1, // ASM: mov eax,ecx
+        0x35, 0x95, 0xe9, 0xd1, 0x5b, // ASM: xor eax,0x5bd1e995
+        0x05, 0x34, 0x12, 0x00, 0x00, // ASM: add eax,0x1234
+        0x3d, 0xef, 0xbe, 0xad, 0xde, // ASM: cmp eax,0xdeadbeef
+        0x75, 0x06, // ASM: jne +6
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let out = solve_tsv(&p, &a, &Overlay::default(), "0x140001000").expect("solves");
+    let want = 0x00deadbeefu64.wrapping_sub(0x1234) ^ 0x5bd1e995;
+    assert!(out.contains(&format!("a1 = {want:#x}")), "{out}");
+    assert!(out.contains("returns 0x1"), "{out}");
+}
+
+/// `solve`'s inversion only answers what a run proves: a chain that
+/// loses bits - a mask, a shift right - says nothing rather than a value
+/// it cannot know to be right.
+///
+/// # Panics
+///
+/// When the report claims a chain it cannot invert.
+#[test]
+fn solve_says_nothing_for_a_chain_it_cannot_invert() {
+    use borer_engine::analysis::render::solve_tsv;
+    let code = [
+        0x8b, 0xc1, // ASM: mov eax,ecx
+        0x25, 0xf0, 0x00, 0x00, 0x00, // ASM: and eax,0xf0
+        0x3d, 0x30, 0x00, 0x00, 0x00, // ASM: cmp eax,0x30
+        0x75, 0x06, // ASM: jne +6
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let out = solve_tsv(&p, &a, &Overlay::default(), "0x140001000").expect("solves");
+    assert!(!out.contains("chain:"), "{out}");
+}
