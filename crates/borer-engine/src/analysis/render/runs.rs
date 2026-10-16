@@ -29,6 +29,11 @@ pub(super) const BUDGET_MAX: usize = 20_000_000;
 /// Bytes of a buffer a report spells before the rest are counted.
 const SHOWN_MAX: usize = 48;
 
+/// Nonzero runs past [`SHOWN_MAX`] a report names before the rest are a
+/// count. A VM context keeps its status past the spelled prefix; the runs
+/// say where, without spelling every byte.
+const SPAN_MAX: usize = 6;
+
 /// Distance between two buffers' addresses: room for the largest buffer
 /// and the guard after it.
 const BUFFER_STRIDE: u64 = 0x1_0000;
@@ -138,6 +143,54 @@ fn bytes_shown(b: &[u8]) -> String {
         String::new()
     };
     format!("hex:{}{more}", hex.join(""))
+}
+
+/// Nonzero runs in `b` past [`SHOWN_MAX`], at most [`SPAN_MAX`].
+///
+/// Empty when the spelled prefix already holds every nonzero byte. A
+/// further run past the cap is a trailing `,+`.
+///
+/// # Arguments
+///
+/// * `b` - The bytes.
+fn later_nonzero(b: &[u8]) -> String {
+    let mut spans = Vec::new();
+    let mut i = SHOWN_MAX;
+    let mut more = false;
+    while i < b.len() {
+        if b[i] == 0 {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && b[i] != 0 {
+            i += 1;
+        }
+        if spans.len() == SPAN_MAX {
+            more = true;
+            break;
+        }
+        spans.push(format!("+{start:#x}:{}", i - start));
+    }
+    if spans.is_empty() {
+        return String::new();
+    }
+    format!(" nz:{}{}", spans.join(","), if more { ",+" } else { "" })
+}
+
+/// Bytes a run left in a buffer: [`bytes_shown`], and where nonzero bytes
+/// sit past the cut.
+///
+/// # Arguments
+///
+/// * `b` - The bytes.
+fn bytes_written(b: &[u8]) -> String {
+    let shown = bytes_shown(b);
+    if shown.starts_with("hex:") {
+        format!("{shown}{}", later_nonzero(b))
+    } else {
+        shown
+    }
 }
 
 /// A parsed run request: the function, the budget, and the inputs.
@@ -977,8 +1030,11 @@ fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: 
 /// and the buffers', with the step budget and no permissive mode, so the
 /// same request answers the same, byte for byte.
 ///
-/// The binary's row says what it returned (at the declared width), how it
-/// stopped, the steps, and what it left in each buffer it changed. The
+/// The binary's row says what it returned (at the declared width, or
+/// `void` when the signature returns nothing, so a leftover `rax` is not
+/// the answer), how it stopped, the steps, and what it left in each buffer
+/// it changed. A buffer longer than the spelled prefix also names the
+/// nonzero runs past that prefix. The
 /// text column says whether the decompiled text, run as C on the same
 /// inputs ([`Script`]), returned the same, left the same bytes and called
 /// the same imports: `agrees`, `differs@L<n>` with the line, or
@@ -1482,6 +1538,7 @@ fn render_runs(
     let agree = count(|v| matches!(v, Verdict::Agrees));
     let differ = count(|v| matches!(v, Verdict::Differs(..)));
     let unchecked = outcomes.len() - agree - differ;
+    let void = matches!(&shared.sig, Ok(s) if s.return_kind().is_none());
     let mut out = format!(
         "# run {signature}: {} input{}, at most {} steps each; the text agrees on {agree}, differs on {differ}, unchecked on {unchecked}\n",
         outcomes.len(),
@@ -1494,7 +1551,11 @@ fn render_runs(
     out.push_str("# args\treturns\tstop\tsteps\twrites\ttext\n");
     for (input, x) in req.inputs.iter().zip(outcomes) {
         let args = args_shown(input);
-        let returns = x.value.map_or_else(|| "-".to_owned(), small_hex);
+        let returns = match (void, x.value) {
+            (true, Some(_)) => "void".to_owned(),
+            (_, Some(v)) => small_hex(v),
+            (_, None) => "-".to_owned(),
+        };
         let writes = writes_shown(x);
         let verdict = match &x.verdict {
             Verdict::Agrees => "agrees".to_owned(),
@@ -1592,7 +1653,8 @@ fn args_shown(input: &[Arg]) -> String {
 }
 
 /// What a run left in the buffers it changed, as a row spells it: `aN=`
-/// and the bytes, with what it wrote past the end; `-` for nothing.
+/// and the bytes, with what it wrote past the end and, for a cut hex
+/// buffer, the nonzero runs past the prefix; `-` for nothing.
 ///
 /// # Arguments
 ///
@@ -1609,7 +1671,7 @@ fn writes_shown(x: &Outcome) -> String {
             } else {
                 String::new()
             };
-            format!("a{}={}{tail}", k + 1, bytes_shown(b))
+            format!("a{}={}{tail}", k + 1, bytes_written(b))
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -2208,7 +2270,8 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        Arg, Kind, args_shown, generated, parse_run, run_tsv, small_hex, vector_inputs, vectors_tsv,
+        Arg, Kind, SHOWN_MAX, args_shown, bytes_written, generated, later_nonzero, parse_run,
+        run_tsv, small_hex, vector_inputs, vectors_tsv,
     };
     use crate::analysis::decompile::decompile_named;
     use crate::analysis::decompile::signature::printed;
@@ -2352,6 +2415,44 @@ mod tests {
             let err = parse_run(&a, &o, bad).unwrap_err();
             assert!(err.contains(says), "{bad}: {err}");
         }
+    }
+
+    /// A cut buffer still names nonzero bytes past the spelled prefix.
+    ///
+    /// # Panics
+    ///
+    /// When the suffix does not name that run, or a short buffer grows one.
+    #[test]
+    fn a_cut_buffer_names_nonzero_bytes_past_the_prefix() {
+        let mut bytes = vec![0u8; SHOWN_MAX + 8];
+        bytes[SHOWN_MAX + 2] = 0x41;
+        bytes[SHOWN_MAX + 3] = 0x42;
+        let shown = bytes_written(&bytes);
+        assert!(shown.contains("...+8"), "{shown}");
+        assert!(
+            shown.contains(&format!("nz:+{:#x}:2", SHOWN_MAX + 2)),
+            "{shown}"
+        );
+        assert!(later_nonzero(&[1, 2, 3]).is_empty());
+    }
+
+    /// A function the signature types as `void` does not report the `rax`
+    /// it left behind. The value lives in the buffer it wrote.
+    ///
+    /// # Panics
+    ///
+    /// When the row spells a number where `void` belongs.
+    #[test]
+    fn a_void_function_does_not_report_its_leftover_rax() {
+        let code = [
+            0xc7, 0x01, 0x01, 0x00, 0x00, 0x00, // ASM: mov dword ptr [rcx], 1
+            0xc3, // ASM: ret
+        ];
+        let p = Program::raw_x64(&code);
+        let a = Analysis::compute(&p);
+        let out = run_tsv(&p, &a, &Overlay::default(), "0x1000/out:4").unwrap();
+        assert!(out.contains("\tvoid\treturned\t"), "{out}");
+        assert!(out.contains("a1=hex:01000000"), "{out}");
     }
 
     /// A callee's stack address is no answer to compare: the text calls it

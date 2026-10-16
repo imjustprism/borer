@@ -17,6 +17,10 @@
 //!   whose names are the image's own imports from that dll, each pointing
 //!   at a cell of its own that is registered as that API's stub, so a call
 //!   the walk computes is serviced like a call through the import table.
+//!   `ntdll.dll` and `kernel32.dll` also export the names a hash resolver
+//!   looks up when the image imports nothing ([`NTDLL_BASELINE`],
+//!   [`KERNEL32_BASELINE`]): an empty directory answers every hash with
+//!   not-found, and the bootstrap then calls a null pointer.
 //!
 //! The bytes are planted as setup ([`Emulator::plant`]): they read as
 //! memory, they never count as code the run unpacked, and a hash over them
@@ -44,6 +48,84 @@ const MODULES_MAX: usize = 64;
 /// Most exports one synthesized module carries; a dll whose imports exceed
 /// this keeps its first names, in the order the symbols hold.
 const EXPORTS_MAX: usize = 256;
+
+/// Names `kernel32.dll` exports even when the image imports none of them.
+///
+/// A protector with no import table hashes these out of the export
+/// directory. `VirtualAlloc` stays first, so a walk that takes the first
+/// name still reaches the allocator. Each name is one the emulator
+/// services, or a vectored-handler registration whose success is a
+/// non-zero handle.
+const KERNEL32_BASELINE: &[&str] = &[
+    "VirtualAlloc",
+    "VirtualAllocEx",
+    "VirtualProtect",
+    "VirtualFree",
+    "LoadLibraryA",
+    "LoadLibraryW",
+    "GetProcAddress",
+    "GetModuleHandleA",
+    "GetModuleHandleW",
+    "HeapAlloc",
+    "IsDebuggerPresent",
+    "CheckRemoteDebuggerPresent",
+    "GetThreadContext",
+    "OutputDebugStringA",
+    "OutputDebugStringW",
+    "AddVectoredExceptionHandler",
+    "RemoveVectoredExceptionHandler",
+];
+
+/// Names `ntdll.dll` exports even when the image imports none of them.
+///
+/// These are the queries whose benign answer is "nothing is attached".
+/// An allocator that lives only in `ntdll` is not among them: handing back
+/// zero for `NtAllocateVirtualMemory` would make a bootstrap believe the
+/// allocation failed.
+const NTDLL_BASELINE: &[&str] = &[
+    "NtQueryInformationProcess",
+    "ZwQueryInformationProcess",
+    "NtSetInformationThread",
+    "ZwSetInformationThread",
+    "NtGetContextThread",
+    "ZwGetContextThread",
+    "NtQuerySystemInformation",
+    "ZwQuerySystemInformation",
+];
+
+/// The names a system dll keeps on top of whatever the image imports.
+///
+/// # Arguments
+///
+/// * `dll` - The dll's name, any case.
+fn baseline(dll: &str) -> &'static [&'static str] {
+    if dll.eq_ignore_ascii_case("kernel32.dll") {
+        KERNEL32_BASELINE
+    } else if dll.eq_ignore_ascii_case("ntdll.dll") {
+        NTDLL_BASELINE
+    } else {
+        &[]
+    }
+}
+
+/// Appends [`baseline`] names the module does not already export, then
+/// holds the list to [`EXPORTS_MAX`].
+///
+/// Imported names stay in front, so the first export of a dll the image
+/// does import is still that import.
+///
+/// # Arguments
+///
+/// * `m` - The module, mutated.
+fn merge_baseline(m: &mut Module) {
+    for name in baseline(&m.dll) {
+        if m.exports.iter().any(|e| e.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        m.exports.push((*name).to_owned());
+    }
+    m.exports.truncate(EXPORTS_MAX);
+}
 
 /// The width-dependent offsets of the loader's structures, Windows' own.
 #[derive(Debug, Clone, Copy)]
@@ -171,16 +253,12 @@ fn modules_of(p: &Program) -> Vec<Module> {
     }
     let mut out: Vec<Module> = Vec::new();
     for dll in ["ntdll.dll", "kernel32.dll"] {
-        match grouped.remove(dll) {
-            Some(mut m) => {
-                m.exports.truncate(EXPORTS_MAX);
-                out.push(m);
-            }
-            None => out.push(Module {
-                dll: dll.to_owned(),
-                exports: Vec::new(),
-            }),
-        }
+        let mut m = grouped.remove(dll).unwrap_or_else(|| Module {
+            dll: dll.to_owned(),
+            exports: Vec::new(),
+        });
+        merge_baseline(&mut m);
+        out.push(m);
     }
     for (_, mut m) in grouped {
         m.exports.truncate(EXPORTS_MAX);
@@ -363,9 +441,9 @@ impl Emulator<'_> {
     /// an optional header whose first data directory is the export table)
     /// and an export directory whose names are the image's imports from
     /// this dll, in order, each function a distinct cell registered as that
-    /// API's stub. A dll with no imports gets the headers and an empty
-    /// directory, which answers every walk with not-found, as a module the
-    /// image imports nothing from would.
+    /// API's stub. A dll with no names gets the headers and an empty
+    /// directory. `ntdll.dll` and `kernel32.dll` are not empty: [`modules_of`]
+    /// has already merged the baseline a hash resolver needs.
     ///
     /// # Arguments
     ///
@@ -621,13 +699,49 @@ mod tests {
         let export = dll + planted(&emu, pe + 0x18 + LAYOUT_64.opt_export_dir, 4);
         let names = dll + planted(&emu, export + 0x20, 4);
         let count = usize::try_from(planted(&emu, export + 0x18, 4)).unwrap_or(0);
-        assert_eq!(count, 1, "the one import from kernel32");
+        assert_eq!(
+            count,
+            KERNEL32_BASELINE.len(),
+            "the one import, plus the baseline, with VirtualAlloc not repeated"
+        );
         let name_rva = planted(&emu, names, 4);
         assert_eq!(planted_text_ascii(&emu, dll + name_rva), "VirtualAlloc");
         let funcs = dll + planted(&emu, export + 0x1c, 4);
         let cell = dll + planted(&emu, funcs, 4);
         let stub = emu.apis.get(&cell).expect("the export is a stub");
         assert!(stub.contains("VirtualAlloc"), "{stub}");
+    }
+
+    /// An image that imports nothing still resolves `VirtualAlloc`.
+    ///
+    /// The export directory used to be empty in that case, so a hash walk
+    /// stored a null and the unpacker called through it. The baseline keeps
+    /// `VirtualAlloc` first, which is the name this walk calls.
+    ///
+    /// # Panics
+    ///
+    /// When the run does not call the resolved API.
+    #[test]
+    fn an_importless_image_still_resolves_virtual_alloc() {
+        let (base, entry) = (0x1_4000_0000, 0x1_4000_1000);
+        let text = Section::mapped(".text", entry, 0, WALK_64.len() as u64, false, true);
+        let p = Program::raw(
+            WALK_64.to_vec(),
+            Arch::X86_64,
+            base,
+            Some(entry),
+            vec![text],
+        );
+        let mut emu = Emulator::new(&p, 1000).expect("x64 emulates");
+        emu.install_imports();
+        let run = emu.run(entry);
+        assert!(
+            emu.api_names().iter().any(|c| c.contains("VirtualAlloc")),
+            "{}, {} steps, calls {:?}",
+            run.stop,
+            run.steps,
+            emu.api_names()
+        );
     }
 
     /// A hand-assembled 64-bit walk that resolves `VirtualAlloc` by reading

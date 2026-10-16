@@ -1885,6 +1885,10 @@ impl<'a> Emulator<'a> {
             rcx
         } else if api.starts_with("VirtualProtect") || api.starts_with("VirtualFree") {
             1
+        } else if api == "AddVectoredExceptionHandler" || api == "RemoveVectoredExceptionHandler" {
+            // A non-zero handle: the registration succeeded and nothing is
+            // attached, so the handler is never asked to run.
+            1
         } else {
             self.neutralize(api).unwrap_or_default()
         };
