@@ -1011,6 +1011,9 @@ pub(super) fn strip_width(line: &str, name: &str, casts: &[&str], mask: Option<u
 /// 0xa` keeps the bits shifted past 32, `a2 << 0xa` of a `uint32_t` loses
 /// them. Where a shift or a product by a constant would lose bits
 /// ([`loses_bits`]), the variable is cast to the machine's word instead.
+/// Equality with a constant other than zero keeps its width cast: that
+/// cast is the partial register the compare read, and a zero test is the
+/// comparison the declared width already is.
 ///
 /// # Arguments
 ///
@@ -1046,6 +1049,23 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
         } else {
             (start, end)
         };
+        let compared = line
+            .get(end..)
+            .and_then(|t| t.strip_prefix(" == ").or_else(|| t.strip_prefix(" != ")));
+        let keep_eq = !masked
+            && found.is_some()
+            && compared.is_some_and(|rest| {
+                let token: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                !token.is_empty() && token != "0" && token != "0x0"
+            });
+        if keep_eq {
+            out.push_str(line.get(from..end).unwrap_or(""));
+            from = end;
+            continue;
+        }
         let (bits, limit, cast) = match mask {
             Some(32) => (32, 32, "(uint64_t)"),
             Some(b) => (u32::from(b), 31, "(uint64_t)"),

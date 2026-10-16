@@ -3183,7 +3183,8 @@ fn copies_of_one_test_are_one_test() {
 /// je S; inc eax; S: inc ecx; cmp ecx,r8d; jae X; jmp L; X: add eax,ecx;
 /// ret`: the latch leaves on its taken side and goes round through a jump,
 /// so the body's last line breaks out, and the loop reads as the bottom
-/// test it is.
+/// test it is. Every use of `r8d` is 32 bits, so `a3` is `uint32_t` and
+/// the condition does not cast it.
 #[test]
 fn a_loop_ending_in_a_conditional_break_is_a_do_while() {
     let code = [
@@ -3195,7 +3196,13 @@ fn a_loop_ending_in_a_conditional_break_is_a_do_while() {
     assert!(!text.contains("while (1)"), "{text}");
     assert!(!text.contains("break;"), "{text}");
     assert!(
-        text.contains("} while ((uint32_t)i < (uint32_t)a3);"),
+        text.lines()
+            .any(|l| l.contains("signature:") && l.contains("uint32_t a3")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.contains("} while (") && l.contains("a3") && !l.contains("(uint32_t)a3")),
         "{text}"
     );
 }

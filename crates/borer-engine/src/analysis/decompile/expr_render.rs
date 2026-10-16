@@ -1092,6 +1092,9 @@ impl Cond {
     /// `test` can never set CF, so `b`/`ae` after it are the constants `0`
     /// and `1` with a comment. A test of `setcc` results joined by `|` or
     /// `&` reads as the `||` or `&&` chain it is ([`render_truth_chain`]).
+    /// A zero test narrower than the machine word casts to that width: a
+    /// bare name would read as the whole register and hide the bits the
+    /// instruction compared.
     ///
     /// # Arguments
     ///
@@ -1291,12 +1294,19 @@ impl Cond {
                 } else {
                     fold(Op::And, l.clone(), r.clone(), *bits)
                 };
+                let zero = |rel: &str| {
+                    let body =
+                        if i64::from(*bits) < n.word * 8 && value_bits(&and) > u64::from(*bits) {
+                            let (s, p) = and.render_prec(n, false, false);
+                            let s = if p < UNARY { format!("({s})") } else { s };
+                            format!("({}){s}", Ty::from_bits(*bits).name())
+                        } else {
+                            paren_if_lower(&and, n, 6)
+                        };
+                    format!("{body} {rel} 0")
+                };
                 match cc.0 {
-                    C::e | C::ne => format!(
-                        "{} {} 0",
-                        paren_if_lower(&and, n, 6),
-                        if cc.0 == C::e { "==" } else { "!=" }
-                    ),
+                    C::e | C::ne => zero(if cc.0 == C::e { "==" } else { "!=" }),
                     C::s | C::l => signed_sign(n, *bits, &and, "<"),
                     C::ns | C::ge => signed_sign(n, *bits, &and, ">="),
                     C::le => signed_sign(n, *bits, &and, "<="),
@@ -1305,8 +1315,8 @@ impl Cond {
                     C::ae => "1 /*CF=0 after test*/".to_owned(),
                     C::o => "0 /*OF=0 after test*/".to_owned(),
                     C::no => "1 /*OF=0 after test*/".to_owned(),
-                    C::be => format!("{} == 0", paren_if_lower(&and, n, 6)),
-                    C::a => format!("{} != 0", paren_if_lower(&and, n, 6)),
+                    C::be => zero("=="),
+                    C::a => zero("!="),
                     C::p | C::np => parity(n, cc, &and),
                     C::None => undecided(n, self.cc, inverted, &[l, r]),
                 }
