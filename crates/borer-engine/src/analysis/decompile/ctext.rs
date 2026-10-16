@@ -623,8 +623,6 @@ pub(super) fn leading_type(toks: &[Tok], word: u8) -> Option<(CTy, usize)> {
         at -= 1;
         stars += 1;
     }
-    // INVARIANT: only the `*`s handed back to the declarators come off the
-    // type: a named pointer type (`HMODULE`) is a pointer whatever follows.
     let base = (0..stars).try_fold(ty, |t, _| t.pointee());
     Some((base.unwrap_or(CTy::of(ty.base)), at))
 }

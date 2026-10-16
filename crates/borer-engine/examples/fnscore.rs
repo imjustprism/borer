@@ -121,7 +121,6 @@ fn options(args: &[String]) -> Result<Options, Box<dyn Error>> {
 /// The cached file, or `None` when the image names no PDB or the fetch
 /// fails.
 fn fetch_pdb(program: &Program) -> Option<PathBuf> {
-    // `<path> (pdb <guid><age>)`, as the headers spell it.
     let id = program.headers.debug_id.as_deref()?;
     let (path, rest) = id.rsplit_once(" (pdb ")?;
     let guid_age = rest.strip_suffix(')')?;
@@ -292,7 +291,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .filter(|(va, _)| exec(*va))
         .collect();
     let starts: Vec<u64> = truth.keys().copied().collect();
-    // Where each truth function ends: its size, else the next start.
     let extent = |va: u64| -> u64 {
         match truth.get(&va).and_then(|t| t.size) {
             Some(n) if n > 0 => va + u64::from(n),
@@ -307,7 +305,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         let s = starts[i];
         (va < extent(s)).then_some(s)
     };
-    // An `__except` body is the function's own code to a PDB as to borer.
     let found: BTreeMap<u64, &Function> = a
         .functions
         .iter()
@@ -371,7 +368,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         extras.entry(class).or_default().push(va);
     }
 
-    // Boundaries over the functions whose size the PDB states.
     let is_pad = |va: u64| program.read_va(va, 1) == Some(&[0xcc][..]);
     let bitness = if program.is_64 { 64 } else { 32 };
     let nop_run = |lo: u64, hi: u64| -> bool {
@@ -406,8 +402,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             if b.start >= va && b.start < end {
                 inside.push((b.start, b.end.min(end)));
             } else {
-                // Only a sized function owns its span; an unsized public's
-                // runs on over cold code to the next one.
                 match truth_owner(b.start) {
                     Some(o) if o != va && truth[&o].size.is_some() => other = other.or(Some(o)),
                     _ => far = true,
@@ -428,7 +422,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             cur = cur.max(hi);
         }
-        // A switch's tables sit after its function, inside the PDB's size.
         let has_switch = f
             .blocks
             .iter()

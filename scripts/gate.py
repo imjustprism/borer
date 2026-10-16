@@ -306,6 +306,12 @@ def main(argv: list[str]) -> int:
         ]
     steps += [
         ("typos", ["typos"], None, "typos"),
+        (
+            "comments",
+            [sys.executable, os.path.join("scripts", "strip_comments.py"), "--check"],
+            None,
+            None,
+        ),
         ("ruff check", ["ruff", "check", "scripts"], None, "ruff"),
         ("ruff format", ["ruff", "format", "--check", "scripts"], None, "ruff"),
         (

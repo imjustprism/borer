@@ -61,8 +61,6 @@ fn decompiled_serial_check_matches_source_shape() {
     let Some(exe) = crackme_exe() else {
         panic!("crackme example not built; run cargo build -p borer-fixtures --examples");
     };
-    // INVARIANT: the dev build's PDB sits beside the exe and its names are
-    // not the dev-shape facts these tests pin.
     let p = Program::load_with(&exe, false).expect("load crackme");
     let a = Analysis::compute(&p);
 
@@ -152,8 +150,6 @@ fn the_serial_check_runs_and_its_text_is_read() {
     let Some(exe) = crackme_exe() else {
         panic!("crackme example not built; run cargo build -p borer-fixtures --examples");
     };
-    // INVARIANT: the dev build's PDB sits beside the exe and its names are
-    // not the dev-shape facts these tests pin.
     let p = Program::load_with(&exe, false).expect("load crackme");
     let a = Analysis::compute(&p);
     let pat = parse_pattern("b8 ef be ad de").expect("pattern");

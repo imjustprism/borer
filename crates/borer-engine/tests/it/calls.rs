@@ -73,8 +73,6 @@ fn every_call_site_lists_its_arguments() {
     assert!(out.contains("VirtualProtect(0x40, "), "{out}");
     assert!(out.contains("&g64_2000"), "{out}");
     assert!(out.contains("\"cmd.exe\""), "{out}");
-    // The import is declared to take four arguments, so a site that sets
-    // only the first pads the rest with `?`.
     assert!(out.contains("VirtualProtect(4, ?, ?, ?)"), "{out}");
     assert!(out.contains("# showing 4 of 4 from 0"), "{out}");
 }

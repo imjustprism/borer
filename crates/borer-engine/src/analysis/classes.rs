@@ -133,9 +133,6 @@ pub fn class_of(name: &str) -> Option<&str> {
             b'<' => depth += 1,
             b'>' if bytes.get(i.wrapping_sub(1)) != Some(&b'-') => depth -= 1,
             b':' if depth == 0 && bytes.get(i + 1) == Some(&b':') => {
-                // INVARIANT: an operator's name ends the class, whatever it
-                // spells after: `Core::Ptr<T>::operator T::U *` converts to a
-                // `T::U *` and is a member of `Core::Ptr<T>`.
                 let rest = name.get(i + 2..).unwrap_or("");
                 if rest.strip_prefix("operator").is_some_and(|op| {
                     !op.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
@@ -568,7 +565,7 @@ pub fn field_names(
 /// guards is the next thing that function does to the object: the first
 /// `var + off` within the lines after the assert, `var` being what the
 /// function bound to the class through a smart pointer, or a copy of it.
-/// `Messaging::UnlockMap::SetMapId` followed by `sub_x(rdi + 32, ...)` names
+/// `Type::SetField` followed by `sub_x(rdi + 32, ...)` names
 /// +0x20 `MapId`. Sites are counted and the offset most sites agree on wins.
 ///
 /// # Arguments
@@ -589,8 +586,6 @@ pub(crate) fn setter_names(
         return BTreeMap::new();
     };
     let overlay_key = overlay.fingerprint();
-    // PERF: every site is a function to decompile, so the sites are read
-    // across the cores and their writes counted in site order.
     let sites: Vec<(&str, u64)> = setters
         .iter()
         .flat_map(|(target, member)| {
@@ -723,9 +718,6 @@ fn method_votes(
     overlay: &Overlay,
     methods: &[u64],
 ) -> BTreeMap<u64, FieldUse> {
-    // PERF: each method's votes come from its own decompilation, so the
-    // methods are read across the cores and their votes added in method
-    // order.
     let mut fields: BTreeMap<u64, FieldUse> = BTreeMap::new();
     let read: Vec<u64> = methods.iter().copied().take(METHODS_MAX).collect();
     for votes in striped(&read, |&entry| {
@@ -1400,10 +1392,6 @@ pub fn field_accesses(
 ) -> Option<BTreeMap<(String, u64), AccessSite>> {
     let text = decompile_plain(program, analysis, overlay, entry)?;
     let mut sites: BTreeMap<(String, u64), AccessSite> = BTreeMap::new();
-    // INVARIANT: what each variable points at is carried down the function:
-    // a smart pointer's `operator ->` names the class, and the accesses
-    // below the assignment are that class's fields until the variable is
-    // reassigned.
     let mut var_class: BTreeMap<String, String> = BTreeMap::new();
     for line in text.lines() {
         let line = line.trim();
@@ -1501,8 +1489,8 @@ pub fn deref_pointee(line: &str) -> Option<&str> {
 /// The class a smart pointer's `operator ->` call yields, when the right-hand
 /// side of an assignment is one.
 ///
-/// `Core::Ptr<Commands::InventoryCommand>::operator ->(&cmd)` yields a
-/// `Commands::InventoryCommand`, so the variable it is assigned to points at
+/// `Core::Ptr<Cmd::Item>::operator ->(&cmd)` yields a
+/// `Cmd::Item`, so the variable it is assigned to points at
 /// one. A nested template argument is left alone rather than guessed at.
 ///
 /// # Arguments
@@ -1547,9 +1535,6 @@ fn collect_general_accesses(
         }
         i = e;
         let base = &line[s..e];
-        // INVARIANT: the offset and the span of the whole `base ± off`
-        // operand come from `base + NUM` to the right, `NUM + base` to the
-        // left, or a bare `base` (offset 0).
         let (offset, span_start, span_end) = if let Some(rest) = line[e..].strip_prefix(" + ") {
             match parse_number(rest) {
                 Some((v, consumed)) => (v, s, e + 3 + consumed),
@@ -1566,11 +1551,6 @@ fn collect_general_accesses(
         let Some(d) = deref_width(&line[..span_start], &line[span_end..]) else {
             continue;
         };
-        // INVARIANT: the key is the object, not the register holding it:
-        // one register carries several objects across a function, so keying
-        // by the register merges a read of one class with a write of another
-        // at the same offset and labels the pair wrongly. A base with no
-        // known class stays itself.
         let base = var_class
             .get(base)
             .cloned()
@@ -1633,7 +1613,7 @@ fn trailing_number(s: &str) -> Option<(u64, usize)> {
 /// The base is the class of the object when an assignment named it (a smart
 /// pointer's `operator ->`), else the variable holding it. Naming the object
 /// is what separates the several objects one register carries: the opcode a
-/// command handler writes reads as `Commands::InventoryCommand 0x24 = 0x13`
+/// command handler writes reads as `Cmd::Item 0x24 = 0x13`
 /// rather than an anonymous store through `rax` merged with a read of the
 /// message at the same offset.
 ///
@@ -2320,20 +2300,20 @@ mod tests {
     /// When an offset disagrees with the sample text.
     #[test]
     fn inlined_setters_name_the_field_they_write() {
-        let text = "rax = Core::Ptr<Messaging::UnlockMap>::operator ->(&home_0);\nrdi = rax;\nif (rax->handled != 0) {\n  assert_failed(\"!this->handled\", \"msg/gameprotocol.h\", 129, __FUNCSIG__(Messaging::UnlockMap::SetMapId));\n}\nif (rbx != rdi + 32) {\n  sub_1(rdi + 32, rbx);\n}\nrsi = other;\nassert_failed(\"x\", \"f\", 1, __FUNCSIG__(Messaging::UnlockMap::SetExitURL));\nsub_1(rsi + 96, rbx);\n";
-        let marker = "__FUNCSIG__(Messaging::UnlockMap::SetMapId)";
+        let text = "rax = Core::Ptr<Type::Item>::operator ->(&home_0);\nrdi = rax;\nif (rax->handled != 0) {\n  assert_failed(\"!this->handled\", \"msg/protocol.h\", 129, __FUNCSIG__(Type::Item::SetMapId));\n}\nif (rbx != rdi + 32) {\n  sub_1(rdi + 32, rbx);\n}\nrsi = other;\nassert_failed(\"x\", \"f\", 1, __FUNCSIG__(Type::Item::SetExitURL));\nsub_1(rsi + 96, rbx);\n";
+        let marker = "__FUNCSIG__(Type::Item::SetMapId)";
         assert_eq!(
-            setter_writes(text, "Messaging::UnlockMap", marker, 4),
+            setter_writes(text, "Type::Item", marker, 4),
             vec![32]
         );
-        let other = "__FUNCSIG__(Messaging::UnlockMap::SetExitURL)";
-        assert!(setter_writes(text, "Messaging::UnlockMap", other, 4).is_empty());
+        let other = "__FUNCSIG__(Type::Item::SetExitURL)";
+        assert!(setter_writes(text, "Type::Item", other, 4).is_empty());
     }
 
     /// A smart pointer's `operator ->` names the class the variable holds.
     ///
     /// That binding is what lets a field report say a write of `0x13` at
-    /// offset 0x24 is an opcode of a `Commands::InventoryCommand` rather than
+    /// offset 0x24 is an opcode of a `Cmd::Item` rather than
     /// an anonymous store through `rax`. A nested template argument is left
     /// alone, and anything that is not such a call names nothing.
     ///
@@ -2343,9 +2323,9 @@ mod tests {
     #[test]
     fn a_smart_pointer_call_names_its_class() {
         assert_eq!(
-            smart_pointer_class("Core::Ptr<Commands::InventoryCommand>::operator ->(&home_10);")
+            smart_pointer_class("Core::Ptr<Cmd::Item>::operator ->(&home_10);")
                 .as_deref(),
-            Some("Commands::InventoryCommand")
+            Some("Cmd::Item")
         );
         assert_eq!(
             smart_pointer_class("Core::Ptr<UI::Icon>::operator ->(this + 120)").as_deref(),

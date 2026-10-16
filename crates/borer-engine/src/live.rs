@@ -824,12 +824,6 @@ pub fn find_words(mem: &dyn Memory, targets: &[u64], word: usize, limit: usize) 
                 break 'regions;
             }
             let len = usize::try_from(end - at).unwrap_or(CHUNK).min(CHUNK);
-            // A page inside a region can stop being readable while the scan
-            // runs - a live process decommits and recommits - and the words
-            // around it still stand. A read stops at the first such page, so
-            // the scan resumes right there and, when even that page does not
-            // read, steps over that one page rather than the chunk or the
-            // rest of the region.
             let Some(bytes) = mem.read(at, len).filter(|b| !b.is_empty()) else {
                 at = (at | (PAGE - 1)).saturating_add(1);
                 continue;

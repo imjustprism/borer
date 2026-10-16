@@ -101,7 +101,6 @@ impl SyscallSite {
 /// The name, or `None` for a number this table does not list.
 #[must_use]
 pub fn i386_syscall_name(nr: u64) -> Option<&'static str> {
-    // SPEC: Linux arch/x86/entry/syscalls/syscall_32.tbl.
     Some(match nr {
         1 => "exit",
         2 => "fork",

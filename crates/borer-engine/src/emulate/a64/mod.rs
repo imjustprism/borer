@@ -77,7 +77,6 @@ const SYSCALL_NR: usize = 8;
 
 /// The Linux arm64 call numbers of `exit` and `exit_group`, which never
 /// return.
-// SPEC: Linux include/uapi/asm-generic/unistd.h, __NR_exit 93 and __NR_exit_group 94.
 const EXIT_CALLS: [u64; 2] = [93, 94];
 
 /// Returns the Linux arm64 name of a syscall number.
@@ -97,7 +96,6 @@ const EXIT_CALLS: [u64; 2] = [93, 94];
 /// The name, or `None` for a number this table does not list.
 #[must_use]
 pub fn a64_syscall_name(nr: u64) -> Option<&'static str> {
-    // SPEC: Linux include/uapi/asm-generic/unistd.h.
     Some(match nr {
         17 => "getcwd",
         19 => "eventfd2",
@@ -859,9 +857,6 @@ impl<'a> Machine<'a> {
             Mnemonic::Fsub => self.float_binary(i, |x, y| x - y),
             Mnemonic::Fmul => self.float_binary(i, |x, y| x * y),
             Mnemonic::Fdiv => self.float_binary(i, |x, y| x / y),
-            // SPEC: Arm ARM (DDI 0487) C7.2 FMAX/FMIN: a NaN in either
-            // operand yields the other, as the x86 machine's own max and
-            // min answer.
             Mnemonic::Fmax => self.float_binary(i, |x, y| if x > y { x } else { y }),
             Mnemonic::Fmin => self.float_binary(i, |x, y| if x < y { x } else { y }),
             Mnemonic::Fsqrt => self.float_sqrt(i),
@@ -929,8 +924,6 @@ impl<'a> Machine<'a> {
                 |addr, wide| self.read_text(addr, wide),
             )
         });
-        // write returns the count it was asked to write (x2); every other
-        // number returns zero, as an unmodeled call does.
         let rv = if nr == 64 {
             self.x.get(2).copied().unwrap_or(0)
         } else {
@@ -975,7 +968,6 @@ impl<'a> Machine<'a> {
     /// When the register is another one, or the `msr` writes a processor
     /// state field by immediate.
     fn system(&mut self, i: &Insn) -> Result<(), Stop> {
-        // SPEC: Arm ARM (DDI 0487) C6.2 MRS/MSR (register): Rt is bits 0..4, o0:op1:CRn:CRm:op2 bits 5..19, with bit 20 set.
         let rt = match i.word & 0x1f {
             0x1f => Reg::Zr,
             n => Reg::X(lo8(u64::from(n))),
@@ -1012,7 +1004,6 @@ impl<'a> Machine<'a> {
     ///
     /// * `cond` - The condition.
     fn holds(&self, cond: Cond) -> bool {
-        // SPEC: Arm ARM (DDI 0487) J1, ConditionHolds.
         match cond {
             Cond::Eq => self.z,
             Cond::Ne => !self.z,

@@ -251,7 +251,6 @@ pub fn find_library_names(program: &Program, analysis: &Analysis) -> LibraryName
                 continue;
             }
             let alone = f.fixed() >= ALONE_MIN;
-            // INVARIANT: a short signature needs a reference that can agree.
             if !alone
                 && !f
                     .refs

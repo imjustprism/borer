@@ -192,8 +192,8 @@ const HANDLER_PREFIX: &str = "Command handler for type '";
 
 /// Derives a handler's name from the type check it prints on a mismatch.
 ///
-/// `Command handler for type 'Commands::ExitInfoCommand' called with ...`
-/// gives `HandleExitInfoCommand`: the type's last segment behind `Handle`,
+/// `Command handler for type 'Cmd::Exit' called with ...`
+/// gives `HandleExit`: the type's last segment behind `Handle`,
 /// the spelling the source gives the handlers it does name.
 ///
 /// # Arguments
@@ -261,8 +261,7 @@ pub(crate) fn infer_handlers(program: &Program, analysis: &mut Analysis) {
     }
 }
 
-/// The member a setter's qualified name sets: `Messaging::UnlockMap::SetMapId`
-/// sets `MapId`.
+/// The member a setter's qualified name sets: `Type::SetField` sets `Field`.
 ///
 /// # Arguments
 ///
@@ -444,8 +443,6 @@ pub(crate) fn parse_signature(text: &str) -> Option<Signature> {
         .iter()
         .any(|k| ret_core.starts_with(k));
     let ret = strip_keywords(ret_raw.trim_end());
-    // INVARIANT: MSVC writes no return type before a conversion operator;
-    // the type it converts to is what it returns.
     let ret = if ret.is_empty() {
         conversion_type(&name).map_or(ret, str::to_owned)
     } else {
@@ -604,21 +601,21 @@ mod tests {
     fn handler_names_come_from_the_type_check() {
         assert_eq!(
             handler_name(
-                "Command handler for type 'Commands::ExitInfoCommand' called with command of \
-                 wrong type. Command is of type '%s' but 'Commands::ExitInfoCommand' is expected."
+                "Command handler for type 'Cmd::Exit' called with command of \
+                 wrong type. Command is of type '%s' but 'Cmd::Exit' is expected."
             )
             .as_deref(),
-            Some("HandleExitInfoCommand")
+            Some("HandleExit")
         );
         assert_eq!(
-            handler_name("Command handler for type 'PVP::PVPFlagCommand' called").as_deref(),
-            Some("HandlePVPFlagCommand")
+            handler_name("Command handler for type 'Mode::Flag' called").as_deref(),
+            Some("HandleFlag")
         );
         assert!(handler_name("Command handler for type '' called").is_none());
         assert!(handler_name("no config for map '%s' found").is_none());
         assert_eq!(
-            setter_member("Messaging::UnlockMap::SetMapId"),
-            Some("MapId")
+            setter_member("Type::SetField"),
+            Some("Field")
         );
         assert_eq!(setter_member("Util::String::Set"), None);
         assert_eq!(setter_member("Settings::Load"), None);

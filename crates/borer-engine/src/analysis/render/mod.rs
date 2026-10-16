@@ -756,7 +756,7 @@ return rax;
     /// When the signature is missing beside a line, or listed beside none.
     #[test]
     fn a_fragment_comes_with_the_signature_enclosing_it() {
-        let full = "// f @ 0x1000: 9 instructions, 3 blocks\n// signature: void f(RakNet::RakNetClient *a1)\n// effects: writes a1+0x24\nuint64_t rax;\n\nif (a1 != 0) {\n  a1->field_0x24 = 9;\n  rax = 1;\n}\nreturn;\n";
+        let full = "// f @ 0x1000: 9 instructions, 3 blocks\n// signature: void f(Net::Client *a1)\n// effects: writes a1+0x24\nuint64_t rax;\n\nif (a1 != 0) {\n  a1->field_0x24 = 9;\n  rax = 1;\n}\nreturn;\n";
         let lines: Vec<&str> = full.lines().collect();
         let headers = |lines: &[&str], picked: &[usize]| -> Vec<usize> {
             super::scope_headers(lines, picked).into_iter().collect()
@@ -771,7 +771,7 @@ return rax;
         assert_eq!(headers(&lines, &[2]), vec![1], "a preamble line");
         assert!(headers(&lines, &[1]).is_empty(), "the signature picked");
         assert!(headers(&lines, &[]).is_empty(), "nothing picked");
-        let skeleton = "// void f(RakNet::RakNetClient *a1) @ 0x1000: 9 instructions, 3 blocks
+        let skeleton = "// void f(Net::Client *a1) @ 0x1000: 9 instructions, 3 blocks
 ...
 if (a1 != 0) {
   a1->field_0x24 = 9;

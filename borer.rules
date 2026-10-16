@@ -24,7 +24,7 @@ workspace:
   crates/borer: the MCP server over stdio and the CLI, both thin adapters over the engine.
   crates/borer-live: read-only access to a running process, the only crate that calls the OS process API.
   crates/borer-fixtures: small programs the tests compile, decompile and check against their source.
-  packs: target knowledge (engine conventions, signatures) and example Rhai scripts.
+  packs: local target knowledge only. The packs directory is gitignored and is not part of the public tree. Never commit a pack or an example script from it.
   scripts: the gate, the smoke test and measurement helpers, all Python.
 
 rules:
@@ -60,7 +60,9 @@ rules:
     - Sections come in this order, each only when it applies. Details prose, then `# Arguments` (one bullet per parameter other than self with its meaning, unit and accepted forms, mandatory when the fn has parameters), `# Returns` (mandatory for a non-unit return, saying what None or Err mean), `# Errors` (mandatory for Result), `# Panics` (mandatory when reachable, and engine or server code must have none, so one is a bug report), `# Safety` (unsafe only) and `# Examples` (public entry points, as a doctest).
     - Fields, variants and consts get one `///` line each with meaning, unit and invariant.
     - Identifiers in prose are backticked and items are intra-doc links like [`Analysis::compute`], never bare CamelCase (clippy::doc_markdown).
-    - No `//` prose comments and no commented-out code. The only `//` lines are single-line tagged notes, namely `// SAFETY:`, `// SPEC:` with a citation, `// INVARIANT:`, `// PERF:`, `// ASM:` with the instruction a hand-assembled byte literal encodes, and `// ---- name ----` section dividers in files over 500 lines. The reason for a block of code belongs in the enclosing item's doc block.
+    - Documentation is rustdoc on the item, not a note beside the code. `///` and `//!` are the only prose. Line 1 is one sentence. The JSDoc sections follow, each only when it applies, in the order above. A function with parameters has `# Arguments`. A non-unit return has `# Returns`. A `Result` has `# Errors`. A reachable panic has `# Panics`. Do not add a section to look complete, and do not restate the signature, narrate the steps, or name a product.
+    - No `//` line comment and no `/* */` block comment, and no commented-out code. Two exceptions sit on the line they justify, because a doc block cannot: `// SAFETY:` on an `unsafe` block, continued on the following `//` lines, and `// ASM:` on a hand-assembled byte literal, naming the instruction those bytes are. `SPEC`, `INVARIANT`, `PERF` and section dividers are not exceptions. That content belongs in the enclosing item's rustdoc, or it is not written.
+    - The gate runs `scripts/strip_comments.py --check`. It removes every other `//` and `/* */` from `crates/**/*.rs`. It leaves rustdoc, `// SAFETY:` and `// ASM:` alone. Do not strip `///` to rewrite it. The item docs are the comments.
     - JSDoc tags map to rustdoc like this. @param becomes an `# Arguments` bullet, @returns `# Returns`, @throws `# Errors`, @example `# Examples`, @see a [`link`], @deprecated `#[deprecated(note)]`, @typedef and @property struct and field docs, @internal a private item that is still documented, and @todo an issue, never a comment in code.
 
   typesafety:
@@ -77,7 +79,7 @@ rules:
     - A memoized value is a pure function of its key and is never compared by address, so dropping one costs time, never a different answer. There is one memo store; never add a second Mutex-guarded map beside it, and never add global state.
     - Output conventions are load-bearing. Tables with a `#` header line, filter, offset, limit and count parameters on every list tool, hard caps with `showing N of M`, and dry-run by default on every tool that changes state.
     - Program holds only facts derived from the file. User annotations (names, comments, types) live in a separate `Overlay`, identified by its fingerprint.
-    - Knowledge about one target (an engine's class conventions, registrars, message ports) lives in packs (`packs/*.borer`), never as a hard-coded name in engine code. Tests may use real names as fixtures.
+    - Knowledge about one target (an engine's class conventions, registrars, message ports) lives in a local pack (`packs/*.borer`, gitignored), never as a hard-coded name in engine code. Tests may use real names as fixtures. Never commit a pack.
     - The MCP server is a thin adapter, and interesting logic belongs in borer-engine behind a test. In the server crate, `main.rs` holds the tool router and resource dispatch only; params, resource handlers, the answer memory (`recall`) and the CLI each live in their own module.
 
   mcp:

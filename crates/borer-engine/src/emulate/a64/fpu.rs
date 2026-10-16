@@ -95,9 +95,6 @@ fn vreg(w: u32, at: u32) -> Reg {
 /// # Arguments
 ///
 /// * `i` - The instruction.
-// SPEC: Arm ARM (DDI 0487) C7.2 FADD..FMIN (vector) and
-// FABS/FNEG/FSQRT (vector): size bit 22 picks the single or the double,
-// Q bit 30 the 128- or 64-bit span.
 fn fp_shape(i: &Insn) -> (u16, u16) {
     let lane = if (i.word >> 22) & 1 == 1 { 64 } else { 32 };
     let span = if (i.word >> 30) & 1 == 1 { 128 } else { 64 };
@@ -287,8 +284,6 @@ impl Machine<'_> {
         let x = value(self, rn, bits);
         let y = match i.operands[1] {
             Opnd::Reg { reg, bits: from } => value(self, reg, from),
-            // SPEC: Arm ARM (DDI 0487) C7.2 FCMP: op2 01 reads the second
-            // operand as zero.
             Opnd::Other => 0.0,
             Opnd::None
             | Opnd::Shifted { .. }
@@ -373,11 +368,7 @@ impl Machine<'_> {
             raw as f64
         };
         let v = match i.operands.get(2) {
-            // SPEC: Arm ARM (DDI 0487) C7.2 SCVTF/UCVTF (scalar,
-            // fixed-point): the integer scales by 2^-fbits.
             Some(Opnd::Imm(v)) if *v != 0 && *v <= u64::from(from) => base / pow2(*v),
-            // The register form names no shift, so the integer converts as
-            // it is.
             Some(Opnd::None) | None => base,
             _ => return Err(unmodeled(i)),
         };
@@ -399,7 +390,6 @@ impl Machine<'_> {
     ///
     /// When an operand is not modeled or the fixed-point shift is out of
     /// range.
-    // SPEC: Arm ARM (DDI 0487) C6.2 FCVTZS/FCVTZU, AArch64.FPToFixed.
     pub(super) fn float_to_int(&mut self, i: &Insn, signed: bool) -> Result<(), Stop> {
         let (
             Opnd::Reg { reg: rd, bits: to },
@@ -469,8 +459,6 @@ fn value_bits(m: &Machine<'_>, reg: Reg, bits: u16) -> u64 {
 /// # Arguments
 ///
 /// * `order` - The comparison's outcome, `None` for an unordered pair.
-// SPEC: Arm ARM (DDI 0487) C7.2 FCMP: 0010 greater, 0110 equal, 1000 less,
-// 0111 unordered.
 fn compare_flags(order: Option<std::cmp::Ordering>) -> u64 {
     match order {
         None => 0b0111,
@@ -493,8 +481,6 @@ fn fixed(x: f64, signed: bool, bits: u16) -> u64 {
     if t.is_nan() {
         return 0;
     }
-    // INVARIANT: the bounds are the powers of two around the width, which
-    // f64 holds exactly; the integers one inside them are the saturates.
     let top = 2f64.powi(i32::from(bits) - 1);
     if signed {
         if t < -top {
@@ -568,9 +554,6 @@ fn to_half(x: f64) -> u16 {
     if a < pow2(25).recip() {
         return sign;
     }
-    // INVARIANT: the exponent straight from the bits is exact for any
-    // nonzero magnitude, and a half's subnormal range starts where its
-    // exponent runs out, at -14.
     let e = u32::try_from((a.to_bits() >> 52) & 0x7ff)
         .unwrap_or(0x7ff)
         .cast_signed()
@@ -590,8 +573,6 @@ fn to_half(x: f64) -> u16 {
         reason = "the scaled magnitude is under 2048, so the rounding keeps every bit"
     )]
     let m = scaled.round_ties_even() as i32;
-    // INVARIANT: a rounding that carries into a new bit (2048) renormalizes
-    // to the next exponent at 1024; past the top exponent it is overflow.
     let (e, m) = if m == 0x800 { (e + 1, 0x400) } else { (e, m) };
     if e > 15 {
         return sign | 0x7c00;

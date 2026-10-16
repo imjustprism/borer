@@ -602,11 +602,6 @@ pub struct Insn {
 ///
 /// The first register's number and the count, one to four; `None` for the
 /// single-structure lane forms and an interleaved (`ld2` to `ld4`) count.
-// SPEC: Arm ARM (DDI 0487) C6.2 LD1/ST1 (multiple structures): opcode
-// bits 12..15 name the register count, 0b0010 four, 0b0110 three, 0b0111
-// one and 0b1010 two; bits 23..27 name the multiple-structures group,
-// where the single-structure lane forms (0b11010 and 0b11011) and the
-// interleaved `ld2` to `ld4` counts sit elsewhere.
 #[must_use]
 pub fn ld1_group(word: u32) -> Option<(u8, u8)> {
     if !matches!((word >> 23) & 0x1f, 24 | 25) {

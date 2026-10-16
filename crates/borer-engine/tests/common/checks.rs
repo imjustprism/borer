@@ -17,21 +17,10 @@ use super::{put, put_rdata};
 ///
 /// * `bytes` - The image being built.
 pub(crate) fn code(bytes: &mut [u8]) {
-    // FX 0x5c00: `lea rcx, [an is_unlocked assertion]; cmp rax,
-    // 0x40000000; cmp rax, 0xc0000000; ret` (pointer-seeded from 0x3e00):
-    // a synchronization wrapper that mentions a check phrase while
-    // comparing rwlock state bits, which the checks listing must report
-    // as a mention, never as a judged key.
     put(bytes, 0x5c00, &[0x48, 0x8d, 0x0d, 0x19, 0xe1, 0xff, 0xff]); // ASM: lea rcx,[rip-0x1ee7] -> 0x3d20 (FX)
     put(bytes, 0x5c07, &[0x48, 0x3d, 0x00, 0x00, 0x00, 0x40]); // ASM: cmp rax,0x40000000
     put(bytes, 0x5c0d, &[0x48, 0x3d, 0x00, 0x00, 0x00, 0xc0]); // ASM: cmp rax,0xc0000000
     put(bytes, 0x5c13, &[0xc3]); // ASM: ret
-    // KC 0x5c40: `push rbx; mov rbx, rcx; lea rcx, ["%d"]; mov rdx, rbx;
-    // call [scanf]; movzx ecx, byte [rbx]; cmp ecx, eax; sete al; movzx
-    // eax, al; pop rbx; ret` (pointer-seeded from 0x3e08): a check with
-    // no phrase to name it, reading input through scanf into the buffer
-    // its parameter points at and comparing a byte of what it read
-    // against the parsed value the call returned.
     put(bytes, 0x5c40, &[0x53]); // ASM: push rbx (KC)
     put(bytes, 0x5c41, &[0x48, 0x8b, 0xd9]); // ASM: mov rbx,rcx
     put(bytes, 0x5c44, &[0x48, 0x8d, 0x0d, 0x15, 0xe1, 0xff, 0xff]); // ASM: lea rcx,[rip-0x1eeb] -> 0x3d60

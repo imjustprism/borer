@@ -163,8 +163,6 @@ fn apply(analysis: &mut Analysis, found: &BTreeMap<u64, Funclet>) {
             continue;
         };
         f.funclet = Some(*funclet);
-        // INVARIANT: a name the program carries wins; a number the vtable
-        // pass or discovery gave loses to the parent's name.
         if f.name.is_some() && !f.name_inferred {
             continue;
         }
@@ -220,9 +218,6 @@ fn handler_thunk(program: &Program, analysis: &Analysis, bitness: u32, entry: u6
     ) {
         return None;
     }
-    // INVARIANT: the jump lands on the frame handler's import thunk, which
-    // the walk may have folded into this one when nothing else reaches it,
-    // so the thunk's own jump through the import slot is read as well.
     let handler = match jump.op0_kind() {
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
             let target = jump.near_branch_target();

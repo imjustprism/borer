@@ -560,7 +560,6 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
                 });
             }
         }
-        // The pointer sections: each slot's symbol is in the indirect table.
         let indirect = m.load_commands.iter().find_map(|lc| match &lc.command {
             CommandVariant::Dysymtab(d) => Some((
                 usize::try_from(d.indirectsymoff).unwrap_or(usize::MAX),
@@ -622,11 +621,6 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         chain_starts,
         m.libs.len().saturating_sub(1),
     );
-    // INVARIANT: every slot a bind names takes its import's name, so a
-    // load or call through it reads as the import, up to
-    // `SLOTS_PER_IMPORT` slots an import in address order: a class's
-    // superclass pointer binds `OBJC_CLASS_$_NSObject` once per subclass,
-    // and the import list is not the place to count them.
     let mut named_slots: BTreeMap<usize, usize> = BTreeMap::new();
     for b in &relocs.binds {
         let (Some(import), slots) = (
@@ -703,9 +697,6 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
     if m.header.flags & MH_NO_HEAP_EXECUTION != 0 {
         headers.mitigations.push("nx");
     }
-    // INVARIANT: goblin seeds `libs` with the image itself ("self", or
-    // its `LC_ID_DYLIB` install name) at index 0, so the linked
-    // libraries begin at the second entry.
     headers.libraries = m.libs.iter().skip(1).map(|l| (*l).to_owned()).collect();
     headers.stripped = Some(named == 0);
     headers.unwind_functions = function_ranges.len();
@@ -754,8 +745,6 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
                     12 => "visionOS simulator",
                     _ => "other",
                 });
-                // The tools follow the command: `{tool, version}` pairs,
-                // the linker being tool 3, its version packed 16.8.8.
                 let first = base.saturating_add(lc.offset).saturating_add(24);
                 for k in 0..usize::try_from(b.ntools).unwrap_or(0).min(16) {
                     let at = first.saturating_add(k * 8);
@@ -807,59 +796,59 @@ mod tests {
         let ind_at = 0x138usize;
         let got_at = 0x140usize;
         let mut f = Vec::new();
-        f.extend_from_slice(&0xfeed_facf_u32.to_le_bytes()); // magic
-        f.extend_from_slice(&0x0100_0007_u32.to_le_bytes()); // cputype x86-64
-        f.extend_from_slice(&3u32.to_le_bytes()); // cpusubtype
-        f.extend_from_slice(&6u32.to_le_bytes()); // filetype dylib
-        f.extend_from_slice(&3u32.to_le_bytes()); // ncmds
-        f.extend_from_slice(&256u32.to_le_bytes()); // sizeofcmds
-        f.extend_from_slice(&[0u8; 8]); // flags, reserved
-        f.extend_from_slice(&0x19u32.to_le_bytes()); // LC_SEGMENT_64
+        f.extend_from_slice(&0xfeed_facf_u32.to_le_bytes());
+        f.extend_from_slice(&0x0100_0007_u32.to_le_bytes());
+        f.extend_from_slice(&3u32.to_le_bytes());
+        f.extend_from_slice(&6u32.to_le_bytes());
+        f.extend_from_slice(&3u32.to_le_bytes());
+        f.extend_from_slice(&256u32.to_le_bytes());
+        f.extend_from_slice(&[0u8; 8]);
+        f.extend_from_slice(&0x19u32.to_le_bytes());
         f.extend_from_slice(&152u32.to_le_bytes());
         let mut segname = [0u8; 16];
         segname[..6].copy_from_slice(b"__DATA");
         f.extend_from_slice(&segname);
-        f.extend_from_slice(&0u64.to_le_bytes()); // vmaddr
-        f.extend_from_slice(&0x1000u64.to_le_bytes()); // vmsize
-        f.extend_from_slice(&u64::try_from(got_at).unwrap().to_le_bytes()); // fileoff
-        f.extend_from_slice(&16u64.to_le_bytes()); // filesize
-        f.extend_from_slice(&1u32.to_le_bytes()); // maxprot
-        f.extend_from_slice(&3u32.to_le_bytes()); // initprot
-        f.extend_from_slice(&1u32.to_le_bytes()); // nsects
-        f.extend_from_slice(&0u32.to_le_bytes()); // flags
+        f.extend_from_slice(&0u64.to_le_bytes());
+        f.extend_from_slice(&0x1000u64.to_le_bytes());
+        f.extend_from_slice(&u64::try_from(got_at).unwrap().to_le_bytes());
+        f.extend_from_slice(&16u64.to_le_bytes());
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.extend_from_slice(&3u32.to_le_bytes());
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.extend_from_slice(&0u32.to_le_bytes());
         let mut sectname = [0u8; 16];
         sectname[..5].copy_from_slice(b"__got");
         f.extend_from_slice(&sectname);
         f.extend_from_slice(&segname);
-        f.extend_from_slice(&addr.to_le_bytes()); // addr
-        f.extend_from_slice(&16u64.to_le_bytes()); // size
-        f.extend_from_slice(&u32::try_from(got_at).unwrap().to_le_bytes()); // offset
-        f.extend_from_slice(&3u32.to_le_bytes()); // align
-        f.extend_from_slice(&[0u8; 8]); // reloff, nreloc
-        f.extend_from_slice(&6u32.to_le_bytes()); // S_NON_LAZY_SYMBOL_POINTERS
-        f.extend_from_slice(&[0u8; 12]); // reserved1..3
-        f.extend_from_slice(&2u32.to_le_bytes()); // LC_SYMTAB
+        f.extend_from_slice(&addr.to_le_bytes());
+        f.extend_from_slice(&16u64.to_le_bytes());
+        f.extend_from_slice(&u32::try_from(got_at).unwrap().to_le_bytes());
+        f.extend_from_slice(&3u32.to_le_bytes());
+        f.extend_from_slice(&[0u8; 8]);
+        f.extend_from_slice(&6u32.to_le_bytes());
+        f.extend_from_slice(&[0u8; 12]);
+        f.extend_from_slice(&2u32.to_le_bytes());
         f.extend_from_slice(&24u32.to_le_bytes());
-        f.extend_from_slice(&0x120u32.to_le_bytes()); // symoff
-        f.extend_from_slice(&1u32.to_le_bytes()); // nsyms
-        f.extend_from_slice(&u32::try_from(str_at).unwrap().to_le_bytes()); // stroff
-        f.extend_from_slice(&6u32.to_le_bytes()); // strsize
-        f.extend_from_slice(&0xbu32.to_le_bytes()); // LC_DYSYMTAB
+        f.extend_from_slice(&0x120u32.to_le_bytes());
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.extend_from_slice(&u32::try_from(str_at).unwrap().to_le_bytes());
+        f.extend_from_slice(&6u32.to_le_bytes());
+        f.extend_from_slice(&0xbu32.to_le_bytes());
         f.extend_from_slice(&80u32.to_le_bytes());
-        f.extend_from_slice(&[0u8; 48]); // the symbol-table indexes before the indirects
-        f.extend_from_slice(&u32::try_from(ind_at).unwrap().to_le_bytes()); // indirectsymoff
-        f.extend_from_slice(&2u32.to_le_bytes()); // nindirectsyms
-        f.extend_from_slice(&[0u8; 16]); // the rest of the command
-        f.extend_from_slice(&1u32.to_le_bytes()); // n_strx
-        f.push(0x01); // n_type: external, no section
-        f.push(0); // n_sect
-        f.extend_from_slice(&0u16.to_le_bytes()); // n_desc
-        f.extend_from_slice(&0u64.to_le_bytes()); // n_value
+        f.extend_from_slice(&[0u8; 48]);
+        f.extend_from_slice(&u32::try_from(ind_at).unwrap().to_le_bytes());
+        f.extend_from_slice(&2u32.to_le_bytes());
+        f.extend_from_slice(&[0u8; 16]);
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.push(0x01);
+        f.push(0);
+        f.extend_from_slice(&0u16.to_le_bytes());
+        f.extend_from_slice(&0u64.to_le_bytes());
         f.extend_from_slice(b"\0_imp\0");
-        f.extend_from_slice(&[0u8; 2]); // pad to the indirect table
-        f.extend_from_slice(&0u32.to_le_bytes()); // slot 0 names symbol 0
-        f.extend_from_slice(&0u32.to_le_bytes()); // slot 1 names symbol 0
-        f.extend_from_slice(&[0u8; 16]); // the __got data
+        f.extend_from_slice(&[0u8; 2]);
+        f.extend_from_slice(&0u32.to_le_bytes());
+        f.extend_from_slice(&0u32.to_le_bytes());
+        f.extend_from_slice(&[0u8; 16]);
         f
     }
 

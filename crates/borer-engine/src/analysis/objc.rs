@@ -403,8 +403,6 @@ fn methods(
         return;
     }
     *refused += usize::from(count > METHODS_MAX);
-    // SPEC: objc4 objc-runtime-new.h, method_t::big and method_t::small:
-    // a small method's fields are offsets from each field's own address.
     let relative = |field: u64| {
         read_u32(p, field)
             .filter(|&o| o != 0)
@@ -453,9 +451,6 @@ fn methods(
 ///
 /// The class, or `None` when its read-only part or name does not read.
 fn class(p: &Program, cls: u64, refused: &mut usize) -> Option<ObjcClass> {
-    // SPEC: objc4 objc-runtime-new.h, class_t (isa, superclass, cache,
-    // vtable, data) and class_ro_t (flags, instanceStart, instanceSize,
-    // reserved, ivarLayout, name, baseMethods, ...).
     let ro = ptr(p, cls.wrapping_add(32))? & FAST_DATA_MASK;
     let name = name_at(p, ptr(p, ro.wrapping_add(24))?)?;
     let mut list = Vec::new();
@@ -487,8 +482,6 @@ fn class(p: &Program, cls: u64, refused: &mut usize) -> Option<ObjcClass> {
 ///
 /// The category, or `None` when its name or class does not read.
 fn category(p: &Program, cat: u64, refused: &mut usize) -> Option<ObjcCategory> {
-    // SPEC: objc4 objc-runtime-new.h, category_t (name, cls,
-    // instanceMethods, classMethods, protocols, instanceProperties).
     let name = name_at(p, ptr(p, cat)?)?;
     let class = class_at_slot(p, cat.wrapping_add(8))?;
     let mut list = Vec::new();
@@ -811,8 +804,6 @@ fn name_methods(
         let Some(base) = names.get(&f.entry) else {
             continue;
         };
-        // INVARIANT: the runtime's metadata names a method over any name
-        // the code was given a guess from, and never over a symbol.
         if f.name.is_some() && !f.name_inferred {
             continue;
         }

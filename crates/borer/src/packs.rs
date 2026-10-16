@@ -4,7 +4,7 @@
 //! A user names packs with `--pack <file>` or `BORER_PACKS`; those load for
 //! every program. A pack with a `[match]` section in a pack directory loads
 //! by itself for a program every one of its `[match]` lines fits
-//! ([`Pack::fit`]), so the Nebula pack reaches a Nebula game without a flag.
+//! ([`Pack::fit`]), so a matching program picks the pack up without a flag.
 //! The pack directories are `BORER_PACK_DIRS` when it is set, else the user's
 //! (`%APPDATA%\borer\packs`, `$XDG_CONFIG_HOME/borer/packs`,
 //! `~/.config/borer/packs`) and the `packs` directory beside the executable

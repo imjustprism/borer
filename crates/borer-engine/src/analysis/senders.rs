@@ -3,8 +3,8 @@
 //! command.
 //!
 //! A command travels from the code that decides to send it to the wire
-//! through its factory: `SendMovement` calls `MoveCommand::create`, the
-//! heartbeat task calls `StillAliveCommand::create`. Joining the slot
+//! through its factory: one function calls `Move::create`, another calls
+//! `Ping::create`. Joining the slot
 //! constants with the callers of each class's factories and constructors
 //! answers "who sends this" for a whole protocol in one table, opcode by
 //! opcode, without a search per class.

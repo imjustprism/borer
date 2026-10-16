@@ -252,10 +252,6 @@ pub fn find_ascii_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
     for (k, w) in words.iter().enumerate() {
         let mut m = unprintable_mask(u64::from_le_bytes(*w));
         if m == HIGH {
-            // PERF: a word of separators alone - padding, code, binary
-            // data - ends whatever run approached it and starts none, so
-            // emitting that run at the word's head and remembering the
-            // word's last byte is all the word has to say.
             emit(&mut spans, ended.map_or(0, |e| e + 1), 8 * k, min_len);
             ended = Some(8 * k + 7);
             continue;
@@ -379,9 +375,6 @@ pub fn find_wide_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
         end: usize,
         min_len: usize,
     ) {
-        // INVARIANT: inside a run every unit's high byte is zero, so only the
-        // first can sit on an ASCII tail; the run is then reported from its
-        // second unit, which is what the per-byte walk answered.
         let start = if first > 0 && printable(bytes[first - 1]) {
             first + 2
         } else {

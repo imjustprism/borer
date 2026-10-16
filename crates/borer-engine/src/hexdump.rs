@@ -37,8 +37,6 @@ pub fn hexdump(bytes: &[u8], base: u64) -> String {
 pub fn hexdump_sparse(bytes: &[Option<u8>], base: u64) -> String {
     let mut out = String::with_capacity(bytes.len() / 16 * 80 + 80);
     for (row, chunk) in bytes.chunks(16).enumerate() {
-        // A dump at the very top of the address space wraps rather than
-        // overflowing: the caller asked for those bytes, not for a panic.
         let addr = base.wrapping_add((row * 16) as u64);
         let mut hexpart = String::with_capacity(49);
         for (i, b) in chunk.iter().enumerate() {

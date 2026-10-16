@@ -171,9 +171,6 @@ fn positioned(c: &Call, conv: &Conv, bitness: u32, n: &Names<'_>) -> Vec<CallArg
         .iter()
         .filter(|(at, _)| matches!(at, ArgAt::Reg(_)))
         .count();
-    // INVARIANT: an arm64 call records its register arguments in position
-    // order, so its stack words (a variadic call's on an Apple platform)
-    // follow them; no return address sits under a tail jump's.
     let regs_a64 = c
         .args
         .iter()

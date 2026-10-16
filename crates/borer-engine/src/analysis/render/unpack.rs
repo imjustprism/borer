@@ -1403,11 +1403,9 @@ pub(super) fn retarget_pe_to_memory_layout(buf: &mut [u8], base: u64, oep: Optio
         let (Some(vsize), Some(vaddr)) = (read_u32(buf, sh + 8), read_u32(buf, sh + 12)) else {
             break;
         };
-        // SPEC: IMAGE_SECTION_HEADER.SizeOfRawData at +0x10 takes VirtualSize.
         if let Some(slot) = buf.get_mut(sh + 0x10..sh + 0x14) {
             slot.copy_from_slice(&vsize.to_le_bytes());
         }
-        // SPEC: IMAGE_SECTION_HEADER.PointerToRawData at +0x14 takes VirtualAddress.
         if let Some(slot) = buf.get_mut(sh + 0x14..sh + 0x18) {
             slot.copy_from_slice(&vaddr.to_le_bytes());
         }

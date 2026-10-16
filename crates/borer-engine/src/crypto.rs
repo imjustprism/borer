@@ -88,10 +88,6 @@ const SIGNATURES: &[(&str, &str)] = &[
         "63 51 e1 b7 b9 79 37 9e",
     ),
     ("xxHash64 PRIME64_1", "87 ca eb 85 b1 79 37 9e"),
-    // A protector generates its strings rather than storing them, and the
-    // generator is almost always one of these mixers. On a binary whose
-    // endpoint is XORed against a splitmix64 keystream, these constants are
-    // the only marks that say so: the cipher tables above protect nothing.
     (
         "splitmix64 multiplier 1 (string obfuscation)",
         "b9 e5 e4 1c 6d 47 58 bf",

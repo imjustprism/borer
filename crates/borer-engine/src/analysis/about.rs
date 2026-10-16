@@ -1,8 +1,8 @@
 //! About: everything the analysis knows about one name, from every catalog,
 //! in one answer.
 //!
-//! An agent meeting a name (`HitPoints`, `MoveCommand`,
-//! `ClientMovementProperty`, `StillAliveTask::OnTick`) would otherwise ask
+//! An agent meeting a name (`Health`, `Move`, `Widget`,
+//! `Task::OnTick`) would otherwise ask
 //! the attribute table, the class map, the message routes, the protocol
 //! tables and the function summary in turn, most of them answering
 //! nothing. This resolves the name against all of them and returns each
@@ -87,8 +87,6 @@ fn class_section(
         .into_iter()
         .find(|c| c.name == class);
     let role = mapped.as_ref().map_or("class", |c| c.role.as_str());
-    // INVARIANT: the count is the one `class` prints, the method index's,
-    // not the namespace map's.
     let methods = super::classes::methods_of(analysis, overlay, class).len();
     let _ = writeln!(
         out,

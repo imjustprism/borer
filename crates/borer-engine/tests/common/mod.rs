@@ -1113,13 +1113,6 @@ pub(crate) fn put_rdata(bytes: &mut [u8], rva: u64, b: &[u8]) {
     let off = 0x1000 + (saturating_usize(rva) - 0x2000);
     bytes[off..off + b.len()].copy_from_slice(b);
 }
-// Every span one build of the fixture writes, so a write over a span
-// another fixture already claimed panics where it happens, naming both
-// writers, instead of quietly corrupting a neighbor's string or pointer -
-// the failure mode of three separate address collisions between fixtures
-// written in parallel. The map is cleared at each build of `fixture`:
-// overlaps within one build are the bug; a later build (another test,
-// another process) starts clean.
 thread_local! {
     /// Each test runs on its own thread, so each build sees its own
     /// claims: a parallel test's build cannot wipe or read another's.
@@ -1147,10 +1140,6 @@ fn claim(va: u64, len: usize, kind: &str) {
             return;
         };
         for (&(start, stop), first) in map.range(..(end, u64::MAX)) {
-            // An exactly-identical span re-claimed is a deliberate
-            // rewrite of the same words (two complete-object locators
-            // sharing one type descriptor); only a partial overlap of
-            // different spans corrupts a neighbor.
             if start < end && stop > va && (start, stop) != (va, end) {
                 panic!(
                     "the fixture writes {kind} at {va:#x}..{end:#x} ({here}) over                      {start:#x}..{stop:#x} ({first}); two fixtures claim one span"
@@ -3341,15 +3330,12 @@ fn code_bytes(bytes: &mut [u8]) {
     put(bytes, 0x5593, &[0xf3, 0x0f, 0x10, 0x0a]); // ASM: movss xmm1,[rdx]
     put(bytes, 0x5597, &[0xe8, 0xe4, 0xff, 0xff, 0xff]); // ASM: call 0x5580
     put(bytes, 0x559c, &[0xc3]); // ASM: ret
-    // UT 0x55c0: the fields of the object the global at 0x3400 points at.
     put(bytes, 0x55c0, &[0x48, 0x8b, 0x05, 0x39, 0xde, 0xff, 0xff]); // ASM: mov rax,[rip+..] -> 0x3400 (UT)
     put(bytes, 0x55c7, &[0x8b, 0x48, 0x18]); // ASM: mov ecx,[rax+0x18]
     put(bytes, 0x55ca, &[0x03, 0x48, 0x1c]); // ASM: add ecx,[rax+0x1c]
     put(bytes, 0x55cd, &[0x89, 0x48, 0x20]); // ASM: mov [rax+0x20],ecx
     put(bytes, 0x55d0, &[0x8b, 0x40, 0x18]); // ASM: mov eax,[rax+0x18]
     put(bytes, 0x55d3, &[0xc3]); // ASM: ret
-    // EN 0x55e0: a function comparing the dword global at 0x3420 against
-    // constants, for a user-applied enum to name.
     put(bytes, 0x55e0, &[0x8b, 0x05, 0x3a, 0xde, 0xff, 0xff]); // ASM: mov eax,[rip+..] -> 0x3420 (EN)
     put(bytes, 0x55e6, &[0x83, 0xf8, 0x01]); // ASM: cmp eax,1
     put(bytes, 0x55e9, &[0x74, 0x09]); // ASM: je 0x55f4
@@ -3361,8 +3347,6 @@ fn code_bytes(bytes: &mut [u8]) {
     put(bytes, 0x55f9, &[0xc3]); // ASM: ret
     put(bytes, 0x55fa, &[0xb8, 0x14, 0x00, 0x00, 0x00]); // ASM: mov eax,20
     put(bytes, 0x55ff, &[0xc3]); // ASM: ret
-    // RM 0x5640 stores a table whose slot 1 holds a datum: the reading
-    // skips it and keeps F1 at the index its byte offset gives.
     put(
         bytes,
         0x5640,
@@ -3375,8 +3359,6 @@ fn code_bytes(bytes: &mut [u8]) {
     put(bytes, 0x5660, &[0x48, 0x8b, 0x01]); // ASM: mov rax,[rcx] (F1)
     put(bytes, 0x5663, &[0xff, 0x10]); // ASM: call [rax]
     put(bytes, 0x5665, &[0xc3]); // ASM: ret
-    // R1 0x5600 and R2 0x5680 store the locator-named tables at 0x3678
-    // (`Ns::Rtti`) and 0x3718 (`Ns::Solo`), the second with one slot.
     put(
         bytes,
         0x5600,
@@ -3404,9 +3386,6 @@ fn code_bytes(bytes: &mut [u8]) {
     put(bytes, 0x56b0, &[0x48, 0x8b, 0x01]); // ASM: mov rax,[rcx] (X)
     put(bytes, 0x56b3, &[0xff, 0x10]); // ASM: call [rax]
     put(bytes, 0x56b5, &[0xc3]); // ASM: ret
-    // EF 0x56c0: a function comparing the dword field at offset 8 of the
-    // object the global at 0x3490 points at, for a user-applied struct with
-    // an enum-typed field to name.
     put(bytes, 0x56c0, &[0x48, 0x8b, 0x05, 0xc9, 0xdd, 0xff, 0xff]); // ASM: mov rax,[rip+..] -> 0x3490 (EF)
     put(bytes, 0x56c7, &[0x8b, 0x48, 0x08]); // ASM: mov ecx,[rax+8]
     put(bytes, 0x56ca, &[0x83, 0xf9, 0x01]); // ASM: cmp ecx,1
@@ -3419,9 +3398,6 @@ fn code_bytes(bytes: &mut [u8]) {
     put(bytes, 0x56dd, &[0xc3]); // ASM: ret
     put(bytes, 0x56de, &[0xb8, 0x14, 0x00, 0x00, 0x00]); // ASM: mov eax,20
     put(bytes, 0x56e3, &[0xc3]); // ASM: ret
-    // RW 0x5700 stores `Ns::Wide`'s table at `[this]` and its further
-    // base `Ns::Tail`'s at `[this+0x10]`, whose slots (`T0` 0x5740,
-    // `T1` 0x5750) are Tail's methods in this image.
     put(
         bytes,
         0x5700,
@@ -3808,25 +3784,12 @@ fn data_bytes(bytes: &mut [u8]) {
         put_rdata(bytes, 0x2070 + i * 4, &0x8000_0000u32.to_le_bytes());
         put_rdata(bytes, 0x2080 + i * 4, &0x7fff_ffffu32.to_le_bytes());
     }
-    // A vtable with a datum between its methods: the table at 0x3730 holds
-    // `F0` at slot 0, the constant `0x9999` (an address of no section) at
-    // slot 1 and `F1` at slot 2, and the pointer at 0x3770 seeds its
-    // constructor `RM` far enough that the padding after `F1` ends the
-    // table before it.
     put_rdata(bytes, 0x3730, &0x5650u64.to_le_bytes());
     put_rdata(bytes, 0x3738, &0x9999u64.to_le_bytes());
     put_rdata(bytes, 0x3740, &0x5660u64.to_le_bytes());
     put_rdata(bytes, 0x3770, &0x5640u64.to_le_bytes());
     put_rdata(bytes, 0x3780, &0x5600u64.to_le_bytes());
     put_rdata(bytes, 0x3790, &0x5680u64.to_le_bytes());
-    // MSVC run-time type information for `Ns::Rtti` (vtable 0x3678),
-    // `Ns::Solo` (vtable 0x3718, one slot) and `Ns::Wide` (primary vtable
-    // 0x32b0, further base `Ns::Tail`'s table 0x32f0 at subobject offset
-    // 0x10), as a 64-bit image carries it: image-relative links, and the
-    // image base is zero. Each class has a type descriptor, a hierarchy
-    // and a complete object locator, whose address is the word before the
-    // vtable; `bases` lists the bases past the class itself as
-    // `(type descriptor, subobject offset)`.
     let rtti =
         |bytes: &mut [u8], td: u32, name: &[u8], vtable: u32, offset: u32, bases: &[(u32, u32)]| {
             let chd = td + 0x20;
@@ -3864,10 +3827,6 @@ fn data_bytes(bytes: &mut [u8]) {
     put_rdata(bytes, 0x3680, &0x5630u64.to_le_bytes());
     rtti(bytes, 0x36a0, b".?AVSolo@Ns@@\0", 0x3718, 0, &[]);
     put_rdata(bytes, 0x3718, &0x56a0u64.to_le_bytes());
-    // `Ns::Wide` derives `Ns::Tail` at offset 0x10: its constructor stores
-    // its own table at `[this]` and Tail's at `[this+0x10]`, which the
-    // scan does not follow, so the subobject's table is found by the
-    // immediates that name it.
     put_rdata(bytes, 0x3260, &[0u8; 16]);
     put_rdata(bytes, 0x3270, b".?AVTail@Ns@@\0");
     rtti(

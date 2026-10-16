@@ -24,7 +24,6 @@ fn u64_at(out: &mut [u8], at: usize, v: u64) {
     out[at..at + 8].copy_from_slice(&v.to_le_bytes());
 }
 
-// ---- fixtures ----
 
 /// A minidump of an x64 process: one module, one memory range holding
 /// `ret`, an exception context naming where it stopped.
@@ -45,11 +44,10 @@ fn u64_at(out: &mut [u8], at: usize, v: u64) {
 fn dump() -> Vec<u8> {
     let mut d = vec![0u8; 0x400];
     d[..4].copy_from_slice(b"MDMP");
-    u32_at(&mut d, 4, 0xA793); // the version's high half
-    u32_at(&mut d, 8, 4); // four streams
+    u32_at(&mut d, 4, 0xA793);
+    u32_at(&mut d, 8, 4);
     let dir = 32;
     u32_at(&mut d, 12, u32::try_from(dir).unwrap_or(0));
-    // MemoryListStream: one range at file 0x380 mapping 0x7ff0_0000.
     u32_at(&mut d, dir, 5);
     u32_at(&mut d, dir + 4, 4 + 16);
     u32_at(&mut d, dir + 8, 0x80);
@@ -57,32 +55,28 @@ fn dump() -> Vec<u8> {
     u64_at(&mut d, 0x84, 0x7ff0_0000);
     u32_at(&mut d, 0x8c, 0x20);
     u32_at(&mut d, 0x90, 0x380);
-    // ModuleListStream: one module at 0x140000000 named a.exe.
     u32_at(&mut d, dir + 12, 4);
     u32_at(&mut d, dir + 16, 4 + 108);
     u32_at(&mut d, dir + 20, 0xa0);
     u32_at(&mut d, 0xa0, 1);
     u64_at(&mut d, 0xa4, 0x1_4000_0000);
     u32_at(&mut d, 0xac, 0x1000);
-    u32_at(&mut d, 0xb8, 0x118); // the name
+    u32_at(&mut d, 0xb8, 0x118);
     let mut name: Vec<u8> = 10u32.to_le_bytes().to_vec();
     for u in "a.exe".encode_utf16() {
         name.extend_from_slice(&u.to_le_bytes());
     }
     d[0x118..0x118 + name.len()].copy_from_slice(&name);
-    // SystemInfoStream: AMD64.
     u32_at(&mut d, dir + 24, 7);
     u32_at(&mut d, dir + 28, 4);
     u32_at(&mut d, dir + 32, 0xd0);
     u32_at(&mut d, 0xd0, 9);
-    // ExceptionStream: a context at 0x200 whose Rip is in the range.
     u32_at(&mut d, dir + 36, 6);
     u32_at(&mut d, dir + 40, 168);
     u32_at(&mut d, dir + 44, 0x100);
-    u32_at(&mut d, 0x100 + 160, 0x4d0); // a full x64 CONTEXT's size
+    u32_at(&mut d, 0x100 + 160, 0x4d0);
     u32_at(&mut d, 0x100 + 164, 0x200);
     u64_at(&mut d, 0x200 + 0xf8, 0x7ff0_0010);
-    // The memory: a ret, and bytes around it.
     d[0x380] = 0xc3;
     d
 }
@@ -197,22 +191,22 @@ fn memory_info(entry: u32, entries: &[(u64, u64, u32)]) -> Vec<u8> {
 fn elf_core() -> Vec<u8> {
     let mut e = vec![0u8; 0x120];
     e[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
-    e[4] = 2; // ELFCLASS64
-    e[5] = 1; // little-endian
-    u16_at(&mut e, 16, 4); // ET_CORE
-    u16_at(&mut e, 18, 62); // x86-64
-    u32_at(&mut e, 20, 1); // EV_CURRENT
-    u64_at(&mut e, 32, 0x40); // the program headers
-    u16_at(&mut e, 52, 64); // the header size
-    u16_at(&mut e, 54, 56); // one header
-    u16_at(&mut e, 56, 1); // of it
-    u32_at(&mut e, 0x40, 1); // PT_LOAD
-    u32_at(&mut e, 0x44, 5); // r-x
-    u64_at(&mut e, 0x48, 0x80); // p_offset
-    u64_at(&mut e, 0x50, 0x7ff0_0000); // p_vaddr
-    u64_at(&mut e, 0x58, 0x7ff0_0000); // p_paddr
-    u64_at(&mut e, 0x60, 0x10); // p_filesz
-    u64_at(&mut e, 0x68, 0x10); // p_memsz
+    e[4] = 2;
+    e[5] = 1;
+    u16_at(&mut e, 16, 4);
+    u16_at(&mut e, 18, 62);
+    u32_at(&mut e, 20, 1);
+    u64_at(&mut e, 32, 0x40);
+    u16_at(&mut e, 52, 64);
+    u16_at(&mut e, 54, 56);
+    u16_at(&mut e, 56, 1);
+    u32_at(&mut e, 0x40, 1);
+    u32_at(&mut e, 0x44, 5);
+    u64_at(&mut e, 0x48, 0x80);
+    u64_at(&mut e, 0x50, 0x7ff0_0000);
+    u64_at(&mut e, 0x58, 0x7ff0_0000);
+    u64_at(&mut e, 0x60, 0x10);
+    u64_at(&mut e, 0x68, 0x10);
     e[0x80] = 0xc3;
     e
 }
@@ -241,7 +235,6 @@ impl SplitMix64 {
     }
 }
 
-// ---- loading ----
 
 /// A minidump loads as a program: its ranges are sections that read back
 /// the dumped bytes, its module names its base, and the exception
@@ -310,7 +303,6 @@ fn version_garbage_still_loads() {
     assert_eq!(p.entry, Some(0x7ff0_0010));
 }
 
-// ---- the memory list ----
 
 /// A range whose file offset sits past the end of the file is skipped:
 /// the dump holds none of its bytes, so no section maps it.
@@ -390,7 +382,6 @@ fn a_huge_range_count_stays_bounded() {
     assert!(sections_sit_in_the_file(&p));
 }
 
-// ---- the memory64 list ----
 
 /// Memory64 ranges packed from a base past the end of the file are
 /// skipped, and the memory list's own range survives beside them.
@@ -442,7 +433,7 @@ fn memory64_ranges_may_overlap_the_memory_list() {
 #[test]
 fn a_read_far_above_a_low_range_refuses_cleanly() {
     let mut d = dump();
-    u32_at(&mut d, 0x80, 0); // the memory list names nothing
+    u32_at(&mut d, 0x80, 0);
     add_stream(&mut d, 9, &memory64(0x380, &[(0x10, u64::MAX - 0x20)]));
     let p = Program::from_bytes("low.dmp".into(), d).expect("loads");
     assert_eq!(p.read_va_upto(0x10, 1).and_then(|b| b.first()), Some(&0xc3));
@@ -453,7 +444,6 @@ fn a_read_far_above_a_low_range_refuses_cleanly() {
     assert!(p.va_to_offset(top).is_none());
 }
 
-// ---- threads ----
 
 /// A thread stack a listed range already covers is not added again.
 #[test]
@@ -496,7 +486,6 @@ fn a_stack_under_a_range_whose_end_overflows_is_covered() {
     assert_eq!(p.sections.len(), 2);
 }
 
-// ---- modules ----
 
 /// A module name RVA pointing at garbage (the memory's 0xc3 read as a
 /// byte length) keeps the module with an empty name.
@@ -545,7 +534,6 @@ fn a_module_at_zero_names_no_symbol_and_no_base() {
     assert_eq!(p.image_base, 0);
 }
 
-// ---- system info and the exception ----
 
 /// Each architecture the system-info stream can state maps, and one it
 /// cannot maps to [`Arch::Unknown`].
@@ -597,7 +585,6 @@ fn an_arm64_dump_has_no_entry() {
     assert_eq!(p.entry, None);
 }
 
-// ---- memory info ----
 
 /// The protections the memory-info stream states set each section's
 /// writable and executable flags, and a range it states nothing about
@@ -655,7 +642,6 @@ fn an_unusable_memory_info_entry_size_leaves_the_default() {
     }
 }
 
-// ---- the mutation sweep ----
 
 /// Five hundred seeded mutations of the valid dump never panic.
 ///
@@ -682,7 +668,6 @@ fn five_hundred_mutations_never_panic() {
     }
 }
 
-// ---- elf cores ----
 
 /// An ELF core maps its `PT_LOAD` segments as the memory they hold.
 #[test]
@@ -699,8 +684,8 @@ fn an_elf_core_loads_its_load_segments() {
 #[test]
 fn core_phdrs_the_file_cannot_hold_are_refused_or_bounded() {
     let mutators: [fn(&mut Vec<u8>); 2] = [
-        |e| u16_at(e, 56, 0xffff),   // e_phnum
-        |e| u64_at(e, 32, 0x1_0000), // e_phoff past the end
+        |e| u16_at(e, 56, 0xffff),
+        |e| u64_at(e, 32, 0x1_0000),
     ];
     for mutate in mutators {
         let mut e = elf_core();
@@ -716,7 +701,7 @@ fn core_phdrs_the_file_cannot_hold_are_refused_or_bounded() {
 #[test]
 fn a_core_segment_longer_than_the_file_is_clamped() {
     let mut e = elf_core();
-    u64_at(&mut e, 0x60, 0x100); // p_filesz from 0x80 in a 0x120 file
+    u64_at(&mut e, 0x60, 0x100);
     let p = Program::from_bytes("core.elf".into(), e).expect("loads");
     let s = p.section_at(0x7ff0_0000).expect("mapped");
     assert_eq!(s.file_size, 0x120 - 0x80);
@@ -731,7 +716,7 @@ fn a_core_segment_longer_than_the_file_is_clamped() {
 #[test]
 fn a_core_segment_whose_end_overflows_is_refused() {
     let mut e = elf_core();
-    u64_at(&mut e, 0x50, u64::MAX - 8); // p_vaddr + memsz 0x10 overflows
+    u64_at(&mut e, 0x50, u64::MAX - 8);
     let p = Program::from_bytes("core.elf".into(), e).expect("loads");
     assert!(p.sections.is_empty());
     assert_eq!(p.headers.dropped_sections, 1);

@@ -321,12 +321,7 @@ impl Conv {
                 self.args.get(i).copied()
             };
         }
-        // INVARIANT: the mask's bits below `i` count the floating
-        // arguments before the position, so `i` less them counts the
-        // integer ones; both stay within their banks.
         let below = u8::try_from((1u16 << i.min(8)) - 1).unwrap_or(u8::MAX);
-        // INVARIANT: the mask fits eight positions, so its popcount is a
-        // small count that widens to `usize` exactly.
         let prior_floats = (floats & below).count_ones() as usize;
         if bit {
             self.float_args.get(prior_floats).copied()

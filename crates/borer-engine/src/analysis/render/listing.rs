@@ -55,9 +55,6 @@ pub fn functions_tsv(
     let q = filter.map(str::to_lowercase);
     let only_thunks = q.as_deref() == Some("thunk");
     let only_funclets = q.as_deref() == Some("funclet");
-    // PERF: the entry-hex needle is the filter minus its `0x` spelling;
-    // stripping it once, outside the loop, keeps the per-function test free
-    // of allocations.
     let hex_q = q
         .as_deref()
         .map_or("", |q| q.strip_prefix("0x").unwrap_or(q));
@@ -90,8 +87,6 @@ pub fn functions_tsv(
     let order_note = match order {
         FunctionOrder::Address => "",
         FunctionOrder::Size => {
-            // PERF: `size()` sums every block, so it is computed once per
-            // function, not once per comparison of the sort.
             matched.sort_by_cached_key(|f| (std::cmp::Reverse(f.size()), f.entry));
             ", largest first"
         }

@@ -319,13 +319,9 @@ impl Emulator<'_> {
         let modules = modules_of(self.program);
         let count = modules.len() + 1;
 
-        // The loader block, then one entry per module, then the strings and
-        // the synthesized images, each at the cursor the last one ended at.
         let mut at = base + 0x40 + from_usize(count) * layout.entry_span;
         let mut entries: Vec<u64> = Vec::with_capacity(count);
 
-        // The image's own entry, from the image's facts: the real base and
-        // headers, so a walk that reads them reads the truth.
         self.zero(base, 0x40);
         self.zero(base + 0x40, layout.entry_span);
         entries.push(base + 0x40);
@@ -374,7 +370,6 @@ impl Emulator<'_> {
             at = self.plant_unicode_string(at, entry + layout.base_name, &upper);
         }
 
-        // The loader block's own fields, then the three circular lists.
         self.plant(base, 0x30, 4);
         self.plant(base + 4, 1, 4);
         self.link_list(base + layout.load_list, &entries, 0);
@@ -472,13 +467,10 @@ impl Emulator<'_> {
             name_rvas.push(strings.wrapping_sub(at));
             strings += from_usize(name.len()) + 1;
         }
-        // The directory's own name, the module's, after the names it sorts.
         let own = strings;
         strings += from_usize(m.dll.len()) + 1;
         let cells = align16(strings);
         let end = align16(cells + 8 * from_usize(m.exports.len().max(1)));
-        // The whole image reads as present before anything is written, so a
-        // walk in strict mode never faults on a field left at zero.
         self.zero(at, end.wrapping_sub(at));
 
         for (name, rva) in m.exports.iter().zip(name_rvas.iter()) {

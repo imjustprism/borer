@@ -171,10 +171,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         return;
     };
     let shared: &Analysis = analysis;
-    // Whether each function reads the argument the x64 convention passes in
-    // `rdx` ([`reads_rdx_arg`]), computed before the call sites are
-    // classified because a boundary read of the second-result lane is
-    // exactly the callee's own second argument.
     let rdx_args: Vec<bool> = striped_with(
         &shared.functions,
         CLASSIFY_MIN,
@@ -312,14 +308,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         x87_results(program, shared, &x87_kept(program, shared))
     };
     let nothing = produces_nothing(analysis, &facts, &handed, &read, &floats);
-    // INVARIANT: a read of the result at a call site is the callers' word,
-    // and it wins, as does a float result ([`float_results`]); a body that
-    // returns nothing ([`produces_nothing`]) says
-    // so whatever its callers do with rax, and that wins over a verdict of
-    // unread sites. Callers that all discard the result make it nothing
-    // only when what the body hands back is a callee's leftover: a body
-    // whose every exit returns a value it computed itself returns that
-    // value, read or not, and the verdict stays open.
     let mut verdicts: Vec<Option<bool>> = facts
         .iter()
         .zip(&read)
@@ -361,8 +349,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .iter()
         .map(|f| (f.body_write <= 16).then_some(f.body_write))
         .collect();
-    // INVARIANT: rax handed on to a caller that returns a float in xmm0 is
-    // no result of that caller's either.
     loop {
         let mut changed = false;
         for (i, f) in facts.iter().enumerate() {
@@ -398,11 +384,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         f.ret_width = width;
         f.ret_partial = partial;
         f.preserves_rax = facts.preserves;
-        // INVARIANT: a second result is the callers' word alone, so only a
-        // read seen at a call site makes one; a site the scan lost is no
-        // evidence (every call site of a `free` wrapper whose scan ran out
-        // rendered a phantom `rdx = f__rdx(..)` line), unlike for `rax`,
-        // where a lost site keeps the one result the function has.
         f.hands_back_rdx = !facts.preserves_rdx
             && facts
                 .sites_rdx
@@ -1166,10 +1147,6 @@ fn preserves(
     f: &Function,
     reg: ResultReg,
 ) -> bool {
-    // A one-instruction function is a thunk or a bare `ret`: the rax lane
-    // cannot tell them apart cheaply, so it claims neither; the rdx one
-    // can, because a transfer of either kind leaves the register not as it
-    // found it ([`writes_rdx`]).
     let floor = match reg {
         ResultReg::Rdx => 0,
         ResultReg::Rax | ResultReg::Xmm0 => 1,
@@ -1917,9 +1894,6 @@ fn classify(
                 }
             }
             ended = true;
-            // INVARIANT: a read narrower than the register is no reason to
-            // stop: `mov cx, ax; shr eax, 0x10` reads the low half and then
-            // the third byte, and the widest read is the result's width.
             if let Some(bits) = read {
                 used = used.max(Some(bits));
                 if bits >= 64 {
@@ -1933,12 +1907,6 @@ fn classify(
             match instr.flow_control() {
                 FlowControl::Return => tail = true,
                 FlowControl::Call | FlowControl::IndirectCall | FlowControl::Exception => {
-                    // SPEC: the x64 calling convention has `rdx` as its
-                    // second argument, so a call the lane carried the value
-                    // to reads it when the callee reads its own second
-                    // argument (a callee that never does cannot have been
-                    // handed it); the read is at the boundary, where no
-                    // instruction names the register.
                     if bitness == 64
                         && reg == Register::RDX
                         && target != 0
@@ -1954,8 +1922,6 @@ fn classify(
                     ended = false;
                     continue;
                 }
-                // INVARIANT: a jump within the caller carries the value on to
-                // its target unread, so the scan goes on there.
                 FlowControl::UnconditionalBranch if in_caller(target) => work.push(target),
                 FlowControl::ConditionalBranch if in_caller(target) => {
                     work.push(target);
@@ -2052,9 +2018,6 @@ fn reads_rdx_arg(
             if wrote {
                 return false;
             }
-            // A call inside the body may read the argument and may clobber
-            // the register; either way this body's own read of it is not
-            // what the boundary sees.
             if matches!(
                 instr.flow_control(),
                 FlowControl::Call | FlowControl::IndirectCall

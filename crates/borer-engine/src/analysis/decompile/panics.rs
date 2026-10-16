@@ -405,9 +405,6 @@ pub(super) fn fold_checks(body: &str) -> (String, Vec<String>) {
                 gone[i] = true;
                 gone[i + 1] = true;
                 gone[i + 2] = true;
-                // INVARIANT: the location the `// at` note carried names
-                // the source the check guards, so it moves onto the
-                // statement the fold annotates, not away with the call.
                 let at_note = lines
                     .get(i + 1)
                     .and_then(|l| l.split_once("// at ").map(|(_, loc)| loc.trim()))
@@ -439,7 +436,6 @@ pub(super) fn fold_checks(body: &str) -> (String, Vec<String>) {
                 } else {
                     "/* overflow panics */"
                 });
-                // The location note stays on the call the block keeps.
             }
         }
         if !callees.iter().any(|c| c == d.callee) {

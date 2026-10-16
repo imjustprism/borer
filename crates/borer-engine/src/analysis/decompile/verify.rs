@@ -672,10 +672,6 @@ pub(super) fn eval<M: Bench>(
             st.read(at, 8)
         }
         Expr::Var(Key::Global(at, bits)) => {
-            // INVARIANT: a TLS slot is a pseudo-global at `TLS_BASE` plus
-            // its offset, which the machine reads at the address the entry
-            // state walks the TLS block to ([`State::resolve_tls`]); reading
-            // the same bytes there makes the comparison ordinary.
             let at =
                 tls_slot(*at).map_or(*at, |off| st.tls_block.wrapping_add(off) & low(st.width));
             let n = u64::from(*bits / 8);
@@ -729,9 +725,6 @@ pub(super) fn eval<M: Bench>(
         Expr::Sext(inner, bits) => sext(eval(inner, st, reads, d)?, *bits),
         Expr::Cast(inner, ty) if ty.bits() <= 64 && !matches!(ty, Ty::F32 | Ty::F64) => {
             let v = eval(inner, st, reads, d)?;
-            // A float converted to an integer truncates, and a value the
-            // integer cannot hold (or a NaN) converts to the "integer
-            // indefinite" the processor gives: the smallest value.
             if let Some(fb) = float_bits(inner, st) {
                 return Some(float_to_int(v, fb, ty.bits()));
             }
@@ -837,9 +830,6 @@ pub(super) fn float_arith(op: Op, l: f64, r: f64, bits: u8) -> Option<u64> {
                 Op::FSub => x - y,
                 Op::FMul => x * y,
                 Op::FDiv => x / y,
-                // SPEC: Intel SDM Vol. 2B, MINSD/MAXSD: the second operand
-                // is returned unless the first is strictly smaller (larger),
-                // so a NaN in either or two zeros yields the second.
                 Op::FMin => {
                     if x < y {
                         x
@@ -1389,17 +1379,6 @@ impl<'p> Sweep<'p> {
         if instrs.iter().any(statement_only) {
             return Err("an atomic or system instruction the lifter writes as a statement");
         }
-        // INVARIANT: `and rsp, -16` aligns the frame by a slack the lifter
-        // takes as zero (the code cannot address the aligned frame through
-        // the entry pointer, so nothing it writes depends on the slack),
-        // while the emulator sees the real one. The check makes the machine
-        // take the slack as zero too, seeding the stack pointer back by the
-        // slack the alignment drops so it writes the value it already
-        // holds; every fact of the block then compares straight. One
-        // alignment whose slack the seed cannot zero — a second alignment,
-        // a mask that is not the complement of a small power of two, a
-        // frame the lifter no longer tracks as offsets — leaves the block
-        // unchecked.
         let mut aligns = instrs.iter().filter(|i| aligns_stack(i));
         let align = aligns.next();
         let aligned = align.is_some();
@@ -1418,8 +1397,6 @@ impl<'p> Sweep<'p> {
         emu.set_permissive(true);
         emu.set_fill(Some(fill));
         if let Some(i) = align {
-            // The lift's own rule for keeping the frame tracked: the mask
-            // is the complement of a power of two a page big at most.
             let Some(to) = i
                 .try_immediate(1)
                 .ok()
@@ -1452,15 +1429,6 @@ impl<'p> Sweep<'p> {
             emu.set_register(name, v);
             st.regs.insert(Key::Reg(reg), v);
         }
-        // INVARIANT: both sides start the segment registers clear, as the
-        // xmm registers start clear, so a segment the lifter wrote nothing
-        // to still compares as the zero both hold. `fs` and `gs` stay
-        // unseeded on purpose: the lift adds their selector to a
-        // segment-prefixed address as though it were the thread-block base
-        // the machine adds, so seeding any value would make a TLS walk's
-        // registers compare against bytes they never name; they stay
-        // unreadable, and the slot reads the walk ends in compare through
-        // the resolved base instead ([`State::resolve_tls`]).
         for &(_, seg) in SEGS
             .iter()
             .filter(|&&(_, s)| !matches!(s, Register::FS | Register::GS))
@@ -1474,17 +1442,12 @@ impl<'p> Sweep<'p> {
                 st.stack.insert(at.wrapping_add(i), b);
             }
         }
-        // INVARIANT: the TLS block's address is resolved after the stack is
-        // seeded, from the same entry-state memory the machine's own walk
-        // reads, so a slot read and the bytes the machine read at it compare
-        // as one memory access.
         st.tls_block = st.resolve_tls();
         emu.stop_at(Some(end));
         let run = emu.run(block.start);
         match run.stop {
             Stop::Stopped(at) if at == end => {}
             Stop::Unmodeled(ref what) => {
-                // A bad opcode names its address; the tally keeps the kind.
                 let kind = what.split(" at 0x").next().unwrap_or(what);
                 *out.unmodeled.entry(kind.to_owned()).or_default() += 1;
                 return Err("an instruction the emulator does not model");
@@ -1587,7 +1550,6 @@ impl<'p> Sweep<'p> {
                 Ok(emu.register("rsp").unwrap_or(0) & to.wrapping_sub(1))
             }
             Stop::Unmodeled(ref what) => {
-                // A bad opcode names its address; the tally keeps the kind.
                 let kind = what.split(" at 0x").next().unwrap_or(what);
                 *out.unmodeled.entry(kind.to_owned()).or_default() += 1;
                 Err("an instruction the emulator does not model")
@@ -1755,11 +1717,6 @@ impl Ran<'_, Emulator<'_>, X86Regs> {
             let Some(mut lifted) = out.count(Fact::Register, read) else {
                 continue;
             };
-            // INVARIANT: a register the lifter holds at a 32-bit lane had
-            // its upper half cleared by the write, so the whole register
-            // is compared with that half zero.
-            // INVARIANT: in 32-bit code every register is 32 bits wide, so
-            // nothing above that lane exists to compare.
             let bits = if width == 32 {
                 bits.min(32)
             } else if bits == 32 {
@@ -2021,10 +1978,6 @@ impl<M: Bench, R> Ran<'_, M, R> {
         let (addr, len) = match effect {
             Effect::Store { addr, ty, .. } => {
                 let a = match addr {
-                    // INVARIANT: only the constant the lift folded names a
-                    // TLS slot; a computed address that merely lands above
-                    // `TLS_BASE` is a wrap the region guards reject, not a
-                    // slot.
                     Expr::Const(a) => tls(*a),
                     other => {
                         let Read::Value(a) = self.read(other) else {
@@ -2690,7 +2643,6 @@ mod tests {
     #[test]
     fn tls_slot_reads_compare_through_the_walked_block() {
         let mut p = tls_image(&[
-            // Tls::Tls (TC): registers its singleton at TLS offset 0x10
             0x48, 0x8b, 0xd9, // ASM: mov rbx,rcx
             0x65, 0x48, 0x8b, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00, // ASM: mov rax,gs:[0x58]
             0x8b, 0x0d, 0xee, 0x0f, 0x00,
@@ -2698,7 +2650,6 @@ mod tests {
             0x48, 0x8b, 0x04, 0xc8, // ASM: mov rax,[rax+rcx*8]
             0x48, 0x89, 0x58, 0x10, // ASM: mov [rax+0x10],rbx
             0xc3, // ASM: ret
-            // TR: reads the slot twice and stores both reads
             0x65, 0x48, 0x8b, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00, // ASM: mov rax,gs:[0x58]
             0x8b, 0x0d, 0xd6, 0x0f, 0x00, 0x00, // ASM: mov ecx,[rip+0xfd6] -> 0x2000
             0x4c, 0x8b, 0x04, 0xc8, // ASM: mov r8,[rax+rcx*8]
@@ -3042,10 +2993,10 @@ mod tests {
             0x00, // ASM: movss [rsp+0x90],xmm0
             0x88, 0x44, 0x24, 0x33, // ASM: mov [rsp+0x33],al
             0xc3, // ASM: ret
-            0xcc, 0xcc, // padding
-            0x00, 0x00, 0x00, 0x33, // b = 2^-25
-            0x00, 0x00, 0x80, 0x3f, // a = 1.0
-            0x00, 0x00, 0x80, 0x3f, // the comparison's 1.0
+            0xcc, 0xcc,
+            0x00, 0x00, 0x00, 0x33,
+            0x00, 0x00, 0x80, 0x3f,
+            0x00, 0x00, 0x80, 0x3f,
         ]);
         let a = Analysis::compute(&p);
         let overlay = Overlay::default();

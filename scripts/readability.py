@@ -890,7 +890,6 @@ def row_of(tag: str, funcs: list[Function], source: str | None, nex: int, quiet:
 # ---- collection ----
 
 INPUTS = [
-    ("whoami", "SystemRoot", ("System32", "whoami.exe"), None),
     ("findstr", "SystemRoot", ("System32", "findstr.exe"), None),
     ("msvcrt32", "SystemRoot", ("SysWOW64", "msvcrt.dll"), None),
     ("sqlite_x64", "BORER_READABILITY_CORPUS", ("sqlite3.x64.elf",), "sqlite3.c"),

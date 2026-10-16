@@ -180,7 +180,6 @@ pub(super) fn accessor_class(name: &str) -> Option<&str> {
         return None;
     }
     let inner = class.strip_suffix('>')?;
-    // The matching `<` of the trailing `>`.
     let mut depth = 0usize;
     let mut open = None;
     for (i, ch) in inner.char_indices().rev() {
@@ -195,7 +194,6 @@ pub(super) fn accessor_class(name: &str) -> Option<&str> {
         }
     }
     let args = inner.get(open? + 1..)?;
-    // The first argument, at template depth zero.
     let mut depth = 0usize;
     let mut end = args.len();
     for (i, ch) in args.char_indices() {
@@ -1040,8 +1038,6 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
             end += mask_text(bits).len();
             masked = true;
         }
-        // The operand as a whole: `(a2 & 0xff)` with the parentheses that
-        // held the mask.
         let (lo, hi) = if masked
             && line.get(..start).is_some_and(|h| h.ends_with('('))
             && line.get(end..).is_some_and(|t| t.starts_with(')'))
@@ -1050,9 +1046,6 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
         } else {
             (start, end)
         };
-        // INVARIANT: a mask leaves an unsigned value of its width; a sign
-        // extension that was stripped leaves a signed one, whose sign C's
-        // `int` keeps and its range does not.
         let (bits, limit, cast) = match mask {
             Some(32) => (32, 32, "(uint64_t)"),
             Some(b) => (u32::from(b), 31, "(uint64_t)"),
@@ -1114,9 +1107,6 @@ fn loses_bits(before: &str, after: &str, bits: u32, limit: u32) -> bool {
         }
     };
     let length = |k: u64| 64 - k.leading_zeros();
-    // INVARIANT: a difference the machine compares unsigned goes below
-    // zero in `int` and compares signed: `a1 - 7 < 3` holds for `a1` 1 in C
-    // and not in the machine's 64 bits.
     if let Some(rest) = after.strip_prefix(" - ") {
         let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
         if [" < ", " <= ", " > ", " >= "]
@@ -1126,12 +1116,6 @@ fn loses_bits(before: &str, after: &str, bits: u32, limit: u32) -> bool {
             return true;
         }
     }
-    // INVARIANT: a sum or a difference of two 32-bit operands carries past
-    // 32 bits in the machine and wraps in C: `(a1 & 0xffffffff) + (a2 &
-    // 0xffffffff)` is `a1 + a2` only when nothing reads its upper half,
-    // which the line does not say. A 64-bit operand on the other side
-    // converts the narrow one, so `(int64_t)(int32_t)rbx + a1` is `rbx +
-    // a1`; only a constant or another masked or cast operand is narrow.
     if bits >= 32
         && [" + ", " - "].iter().any(|op| {
             after
@@ -1144,8 +1128,6 @@ fn loses_bits(before: &str, after: &str, bits: u32, limit: u32) -> bool {
     {
         return true;
     }
-    // INVARIANT: shifts by constants chain left to right, so `a1 >> 7 <<
-    // 0x3f` keeps one bit of a byte and moves it to bit 63.
     let mut shifted = u64::from(bits);
     let mut rest = after;
     loop {

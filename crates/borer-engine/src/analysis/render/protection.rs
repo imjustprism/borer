@@ -415,8 +415,6 @@ pub(super) fn input_readers(
         if phrased.contains_key(&f.entry) {
             continue;
         }
-        // The argv getter itself reads input and compares as it parses, but
-        // it is plumbing, not a check: the function to name is its caller.
         if a.symbol_at(p, f.entry)
             .is_some_and(|s| s.name.contains("env::args"))
         {

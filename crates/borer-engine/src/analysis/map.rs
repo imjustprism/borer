@@ -108,8 +108,8 @@ pub struct MapClass {
 /// A `[roles] prefix` its name starts with comes first, then a `[roles]
 /// class` it derives from, then the nearest ancestor whose last name
 /// component ends with a `[roles] word` (see [`ends_with_word`]), then its
-/// own name. The lineage outranks the name: `Messaging::ShowNpcWidget`
-/// derives from `Messaging::Message` and is a message. A class no rule
+/// own name. The lineage outranks the name: `Msg::ShowWidget`
+/// derives from `Msg::Message` and is a message. A class no rule
 /// places is a `class`.
 ///
 /// # Arguments
@@ -160,8 +160,8 @@ fn role_of(analysis: &Analysis, roles: &Roles<'_>, class: &str) -> String {
 /// Tells whether a name component ends with a role word, in any case, where
 /// a word starts: at the start, at a capital, or after an underscore.
 ///
-/// `NpcWidget`, `QWidget` and `io_service` end with `widget`, `widget` and
-/// `service`; `GodModeTeleport` does not end with `port`.
+/// `ShowWidget`, `QWidget` and `io_service` end with `widget`, `widget` and
+/// `service`; `Teleport` does not end with `port`.
 ///
 /// # Arguments
 ///
@@ -385,12 +385,12 @@ mod tests {
             .by_name
             .insert("Msg::Message".into(), class("Msg::Message", None));
         a.classes.by_name.insert(
-            "Msg::ShowNpcWidget".into(),
-            class("Msg::ShowNpcWidget", Some("Msg::Message")),
+            "Msg::ShowWidget".into(),
+            class("Msg::ShowWidget", Some("Msg::Message")),
         );
         let rules = Roles::of(&a);
-        assert_eq!(role_of(&a, &rules, "Msg::ShowNpcWidget"), "message");
-        assert_eq!(role_of(&a, &rules, "Game::GodModeTeleport"), "class");
+        assert_eq!(role_of(&a, &rules, "Msg::ShowWidget"), "message");
+        assert_eq!(role_of(&a, &rules, "App::Hop"), "class");
         assert_eq!(role_of(&a, &rules, "asio::io_service"), "service");
         assert!(ends_with_word("QWidget", "widget"));
         assert!(!ends_with_word("Teleport", "port"));
@@ -414,10 +414,10 @@ mod tests {
         };
         a.classes
             .by_name
-            .insert("Game::Property".into(), class("Game::Property", None));
+            .insert("Base::Property".into(), class("Base::Property", None));
         a.classes.by_name.insert(
             "Properties::Base".into(),
-            class("Properties::Base", Some("Game::Property")),
+            class("Properties::Base", Some("Base::Property")),
         );
         a.classes.by_name.insert(
             "Properties::Mover".into(),
@@ -429,11 +429,11 @@ mod tests {
         let rules = Roles::of(&a);
         assert_eq!(role_of(&a, &rules, "Properties::Mover"), "property");
         assert_eq!(
-            role_of(&a, &rules, "Game::Property"),
+            role_of(&a, &rules, "Base::Property"),
             "property",
             "a base plays its role by its own name"
         );
-        assert_eq!(role_of(&a, &rules, "Commands::MoveCommand"), "command");
+        assert_eq!(role_of(&a, &rules, "Cmd::MoveCommand"), "command");
         assert_eq!(role_of(&a, &rules, "Util::Thing"), "class");
         assert_eq!(role_of(&a, &rules, "Ui::QPushWidget<int>"), "widget");
         let text = map_tsv(&a, &Overlay::default(), "", 10);

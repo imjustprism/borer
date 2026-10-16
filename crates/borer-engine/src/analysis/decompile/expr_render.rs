@@ -110,9 +110,6 @@ impl Names<'_> {
         if let Some(name) = self.analysis.crypto.get(&v) {
             return Some(crate::crypto::identifier(name));
         }
-        // INVARIANT: a PE reads its own headers through the image base, which
-        // the linker names `__ImageBase`; `*(uint16_t*)&__ImageBase == 0x5a4d`
-        // is the DOS signature check it is.
         if v == self.program.image_base && self.program.format == BinaryFormat::Pe {
             return Some("&__ImageBase".to_owned());
         }
@@ -141,17 +138,12 @@ impl Names<'_> {
                 ));
             }
         }
-        // INVARIANT: a status code is looked up only off the image, so a
-        // 32-bit program large enough to map 0x406d1388 keeps it an address.
         if !mapped && let Some(n) = crate::winconst::name(v) {
             return Some(n.to_owned());
         }
         if literal && let Some(text) = super::literal_at(self.program, v, &self.own_name) {
             return Some(text);
         }
-        // INVARIANT: an address in writable data is a variable's, and the
-        // variable is named by the word as a read of it would be, so the
-        // object passed to one call and read by another has one name.
         self.program
             .section_at(v)
             .filter(|s| s.writable && !s.executable)
@@ -282,7 +274,6 @@ impl Names<'_> {
             Key::A64(r) => a64_name(r),
             Key::Param(0) if self.this_param => "this".to_owned(),
             Key::Param(i) if Some(i) == self.result_param => "result".to_owned(),
-            // The compiler's own name for the parameter, when it left one.
             Key::Param(i) => self
                 .debug_params
                 .get(usize::from(i))
@@ -417,9 +408,6 @@ impl Names<'_> {
         if let Some(name) = self.debug_locals.get(&off) {
             return name.clone();
         }
-        // INVARIANT: a convention whose stack arguments start at the stack
-        // pointer the function is entered with (arm64) leaves no return
-        // address there: every slot from it up is the caller's.
         if self.first_stack == 0 && off >= 0 {
             return format!("arg_{off:x}");
         }
@@ -446,10 +434,6 @@ impl Names<'_> {
     ///
     /// `(text, precedence)`.
     pub(super) fn slot_at(&self, off: i64, ty: Ty) -> (String, u8) {
-        // INVARIANT: an access inside a stack parameter's word, past its
-        // first byte, reaches those bytes of the parameter: `movzx ecx,
-        // word [ebp+0xe]` reads the high half of `_finite`'s double, which
-        // read as a variable of its own was never set.
         let past = off - self.first_stack;
         let within = past.rem_euclid(self.word.max(1));
         if past > 0
@@ -464,8 +448,6 @@ impl Names<'_> {
             );
         }
         let name = self.slot(off);
-        // INVARIANT: a stack parameter is a value of the machine's word; a
-        // narrower read of it is its low bytes (`mov cx, [ebp+8]`).
         if self.stack_param(off).is_some() {
             return if matches!(ty, Ty::U8 | Ty::U16 | Ty::U32)
                 && i64::from(ty.bits()) < self.word * 8
@@ -689,8 +671,8 @@ fn render_number(v: u64, hex: bool, word: i64) -> String {
 /// Renders a constant that spells four printable characters as the
 /// multi-character literal the source wrote, `'AUEV'`.
 ///
-/// Nebula3 registers every class and attribute under such a code and a
-/// DDS header names its pixel format by one; the number is the code read
+/// A registrar often stores a class or an attribute under such a code, and a
+/// DDS header names its pixel format by one. The number is the code read
 /// with its first character in the high byte, as MSVC evaluates the
 /// literal, so `MAKEFOURCC('D','X','T','5')` reads `'5TXD'`. Four
 /// printable bytes with at least three letters or digits among them are
@@ -741,9 +723,6 @@ pub(super) fn negative_magnitude(v: u64, word: i64) -> Option<u64> {
     if word != 4 {
         return wide;
     }
-    // INVARIANT: a 32-bit immediate arrives zero-extended when the decoder
-    // read a 32-bit operand and sign-extended to 64 bits when it read an
-    // 8-bit one; both spell the same number.
     if v > 0x7fff_ffff && v <= 0xffff_ffff {
         let m = (1u64 << 32) - v;
         return (m <= 0xffff).then_some(m);
@@ -843,8 +822,6 @@ impl Expr {
                     let name = if *op == Op::FMin { "fmin" } else { "fmax" };
                     return (format!("{name}({}, {})", l.render(n), r.render(n)), ATOM);
                 }
-                // INVARIANT: a rotate of 16 bits by 8 swaps its two bytes,
-                // which `bswap` of the half word says as C's readers know it.
                 if let (Op::Rol(16) | Op::Ror(16), Expr::Const(8)) = (op, r.as_ref()) {
                     let half = match l.as_ref() {
                         Expr::Deref(_, Ty::U16) | Expr::Cast(_, Ty::U16) => l.render(n),
@@ -882,10 +859,6 @@ impl Expr {
                 let p = op.prec();
                 let hexo = hex || op.hex_operands();
                 let sum = address && matches!(op, Op::Add | Op::Sub);
-                // INVARIANT: the low bits of a sum, a difference, a product,
-                // a left shift or a bitwise operation are read from the low
-                // bits of its operands alone; a mask to 32 bits reads no more,
-                // and any other operation reads them all.
                 let inner = match (op, &**r) {
                     (Op::And, Expr::Const(m)) if *m <= 0xffff_ffff => false,
                     (Op::Add | Op::Sub | Op::Mul | Op::Shl | Op::And | Op::Or | Op::Xor, _) => wide,
@@ -900,10 +873,6 @@ impl Expr {
                         (s, sp)
                     }
                 };
-                // INVARIANT: an extension an addend or a subtrahend carries
-                // says the machine added the extended values at the
-                // register's width; read above bit 32, the operand converts
-                // before C's `int` arithmetic wraps at 32 bits.
                 let extended = |e: &Expr, (s, sp): (String, u8)| {
                     if wide
                         && !sum
@@ -924,14 +893,6 @@ impl Expr {
                     let ls = if lp < p { format!("({ls})") } else { ls };
                     return (format!("{ls} - {m}"), p);
                 }
-                // INVARIANT: a constant a bitwise operator applies is a mask,
-                // never an address, even when its value lands in the image
-                // (`and edi, 0xff00ff` is not `edi & "some literal"`); one
-                // any other operator applies is no string literal unless it
-                // is a term of an address loaded through, or the first
-                // character of a string a sum indexes (`i * 3 +
-                // "SunMonTue"`); the empty string is a lone terminator no
-                // sum indexes, so a term landing on one keeps its address.
                 let indexes = |v: u64| matches!(op, Op::Add | Op::Sub) && n.starts_string(v);
                 let operand = |e: &Expr| match e {
                     Expr::Const(v) if op.hex_operands() => {
@@ -942,9 +903,6 @@ impl Expr {
                     _ => e.render_in(n, hexo, sum, inner),
                 };
                 let (ls, lp) = match (op, &**l) {
-                    // INVARIANT: a logical shift shifts the constant's
-                    // unsigned bits, which only its hex spelling has: `-1 >>
-                    // n` shifts an `int` and keeps its sign.
                     (Op::Shr, Expr::Const(v)) if negative_magnitude(*v, n.word).is_some() => {
                         (render_const_in(*v, true, n.word), ATOM)
                     }
@@ -973,9 +931,6 @@ impl Expr {
                 };
                 match op {
                     Op::SDiv | Op::SRem => {
-                        // INVARIANT: a narrow signed quotient converts back
-                        // to 64 bits by sign extension, so dividing the
-                        // narrow value is dividing its extension.
                         let signed = |side: &Expr, text: String| {
                             if let Expr::Sext(inner, from) = side {
                                 let (s, p) = inner.render_prec(n, hex, false);
@@ -1031,10 +986,6 @@ impl Expr {
                 }
             }
             Expr::Un(op, e) => match op.func_name() {
-                // INVARIANT: a byte swap only reorders bits, and the lane it
-                // works on widens unsigned; the cast that lane prints names
-                // a signed type, whose `(uint64_t)` conversion would
-                // sign-extend what `bswap eax; shl rax, 20h` zero-extends.
                 Some(f) if matches!(op, UnOp::Bswap) => {
                     let s = match e.as_ref() {
                         Expr::Cast(x, ty @ (Ty::U8 | Ty::U16 | Ty::U32)) => {
@@ -1210,9 +1161,6 @@ impl Cond {
                         );
                     }
                     C::b | C::ae => Flags::Carry(c.clone()),
-                    // The overflow of a shift is not its carry: `shl x, 1`
-                    // sets it to the top bit of the result against CF, and
-                    // a longer shift leaves it undefined.
                     C::o | C::no => return undecided(n, self.cc, inverted, &[e, c]),
                     _ => Flags::Result(e.clone(), *bits),
                 };
@@ -1750,10 +1698,6 @@ fn computes_narrow(op: Op, l: &Expr, r: &Expr) -> bool {
 /// * `name` - The type name to print, signed or unsigned.
 /// * `n` - Name resolution.
 fn render_load(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> (String, u8) {
-    // INVARIANT: an integer read at a constant address in the image's data
-    // is a global, named as one the lifter keys (`g64_2f64f0`, or the data
-    // symbol there), which the text's readers resolve to that address and
-    // width; `*(uint64_t*)0x2f64f0` said the same in more words.
     if let Expr::Const(at) = a
         && matches!(ty, Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64)
         && n.program
@@ -1763,10 +1707,6 @@ fn render_load(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> (String, u8) {
     {
         return (n.key(Key::Global(*at, ty.bits())), ATOM);
     }
-    // INVARIANT: a byte read at a data symbol plus a variable is an entry of
-    // the table the symbol names, where base and index are otherwise
-    // ambiguous for one-byte elements: `sqlite3UpperToLower[c]`. The table
-    // holds bytes, so a signed read converts the entry it reads.
     if ty == Ty::U8
         && matches!(name, "uint8_t" | "int8_t")
         && let Expr::Bin(Op::Add, p, q) = a
@@ -1979,7 +1919,6 @@ fn sum_relation(n: &Names<'_>, l: &Expr, r: &Expr, bits: u8, rel: &str) -> Strin
         let negated = Expr::Const(sext(c.wrapping_neg() & m, bits));
         return compare(n, x, &negated, rel, true, bits);
     }
-    // `x + x` (`shl x, 1`) has the sign of `x` and is zero with it.
     if l == r {
         return compare(n, l, &Expr::Const(0), rel, true, bits);
     }
@@ -2060,7 +1999,6 @@ pub(super) fn vector_equality<'a>(l: &'a Expr, r: &Expr) -> Option<(&'a Expr, &'
     if !matches!(lanes.as_str(), "pcmpeqb" | "vpcmpeqb") || args.len() != 2 {
         return None;
     }
-    // One mask bit per byte lane: 16 for an xmm gather, 32 for a ymm one.
     if !matches!(r, Expr::Const(0xffff | 0xffff_ffff)) {
         return None;
     }

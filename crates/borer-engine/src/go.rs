@@ -138,10 +138,6 @@ impl Pclntab {
             word: l.word,
         };
         let i = self.entries.binary_search(&entry).ok()?;
-        // SPEC: runtime/symtab.go `functab`: each row holds its entry
-        // beside the offset of its `_func` record from the records'
-        // start, a 32-bit offset in the 1.18 layouts and a word in the
-        // 1.16 one.
         let record_off = match self.version {
             GoVersion::V1_2 => return None,
             GoVersion::V1_16 => {
@@ -169,9 +165,6 @@ impl Pclntab {
         if fileno < 0 || line < 0 {
             return None;
         }
-        // SPEC: runtime/symtab.go `funcfile`: the record's compilation
-        // unit slots its file numbers into the name blob, `u32::MAX`
-        // marking a file the linker dropped.
         let cu = v.u32(record.checked_add(l.cu_at)?)?;
         if cu == u32::MAX {
             return None;
@@ -305,9 +298,6 @@ fn pcvalue(v: View<'_>, l: Lines, off: usize) -> Option<i64> {
     let (mut pc, mut val) = (0u64, -1i64);
     loop {
         let (uv, after_uv) = varint(v.bytes, l.functab, p)?;
-        // SPEC: runtime/symtab.go `step`: a zero value delta ends the
-        // run, save on an entry the pc has not moved past, and the pc
-        // delta counts `minLC`-byte steps.
         if uv == 0 && pc != 0 {
             return None;
         }
@@ -444,15 +434,6 @@ fn parse<'a>(v: View<'a>, head: usize, code: &dyn Fn(u64) -> bool) -> Option<Par
     if nfunc == 0 || nfunc > FUNCS_MAX {
         return None;
     }
-    // SPEC: Go's runtime/symtab.go `pcHeader`, `functab` and `_func` per
-    // release: 1.18 on store each entry and record offset as 32 bits from
-    // the header's text start, earlier layouts as absolute words, and 1.2
-    // counts its record and name offsets from the header itself.
-    //
-    // SPEC: cmd/link/internal/ld/pcln.go `writeFuncs`: each record holds
-    // its `pcfile` and `pcline` runs and its compilation-unit slot at
-    // `w+16`/`w+20`/`w+28` in the 1.16 layout's pointer-width records,
-    // and at 20/24/32 once entries shrank to 32-bit offsets.
     let at = |k: usize| head.checked_add(v.offset(field(k)?)?);
     let (text, names, table, records, lines) = match version {
         GoVersion::V1_18 | GoVersion::V1_20 => {

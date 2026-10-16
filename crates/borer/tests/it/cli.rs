@@ -67,9 +67,6 @@ impl Drop for Slot {
     reason = "a spawn failure has no useful recovery in a test helper"
 )]
 fn output(args: &[&str]) -> Output {
-    // INVARIANT: the tests pin the binary's own facts, and the dev-profile
-    // binary always has its PDB beside it (and its recorded path valid), so
-    // every run analyzes the image alone.
     let _slot = Slot::take();
     Command::new(env!("CARGO_BIN_EXE_borer"))
         .arg("--no-pdb")
@@ -496,7 +493,6 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
             .enumerate()
             .fold(0, |v, (i, byte)| v | ((*byte as usize) << (8 * i)))
     };
-    // SPEC: the COFF machine field is the first u16 after the PE signature.
     let machine = at(&bytes, 0x3c, 4) + 4;
     let field = bytes
         .get_mut(machine..machine + 2)
@@ -531,8 +527,6 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
 {out}"
     );
 
-    // What genuinely needs the code still says so, rather than answering
-    // "nothing found" with an empty list.
     let (ok, out) = run(&["functions", &path]);
     assert!(!ok, "functions should refuse an arch it cannot disassemble");
     assert!(out.contains("no code analysis") || out.is_empty(), "{out}");
@@ -567,7 +561,6 @@ fn cli_disassembles_and_discovers_an_arm64_image() {
         .map(u32::from_le_bytes)
         .and_then(|at| usize::try_from(at).ok())
         .expect("the fixture names its PE header");
-    // SPEC: the COFF machine field is the first u16 after the PE signature.
     bytes
         .get_mut(pe + 4..pe + 6)
         .expect("the fixture has a COFF header")
@@ -590,8 +583,6 @@ fn cli_disassembles_and_discovers_an_arm64_image() {
     let (ok, out) = run(&["disasm", &path, &format!("{entry:#x}"), "4"]);
     assert!(ok, "disasm failed:\n{out}");
     let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("0x")).collect();
-    // INVARIANT: the listing stops where the discovered entry function's code
-    // ends, which x86 bytes read as arm64 words reach within the four asked.
     assert!(!rows.is_empty() && rows.len() <= 4, "{out}");
     for (row, at) in rows.iter().zip((0u64..).map(|i| entry + 4 * i)) {
         let (va, rest) = row.split_once("  ").expect("an address, then bytes");
@@ -1211,7 +1202,7 @@ fn cli_export_pack_round_trips() {
 )]
 fn cli_script_runs_the_examples() {
     let exe = env!("CARGO_BIN_EXE_borer");
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packs/scripts/");
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/scripts/");
     let (ok, out) = run(&[
         "script",
         exe,
@@ -1456,7 +1447,6 @@ fn cli_set_type_defines_applies_and_refuses() {
         "{out}"
     );
 
-    // An import slot is a data global: applying there types it.
     let (ok, out) = run(&["symbols", exe]);
     assert!(ok, "{out}");
     let slot = out
@@ -1489,7 +1479,6 @@ fn cli_set_type_defines_applies_and_refuses() {
     assert!(!ok, "unknown applied type accepted:\n{out}");
     assert!(out.contains("names nothing defined"), "{out}");
 
-    // The refusals wrote nothing: the listing still holds what did land.
     let (ok, out) = run(&["types", exe, project, "", "0", "1"]);
     assert!(ok, "{out}");
     assert!(out.contains("2 rows"), "{out}");
@@ -1560,7 +1549,6 @@ fn cli_set_type_defines_enums_and_refuses() {
     assert!(!ok, "an odd width accepted:\n{out}");
     assert!(out.contains("4 or 8 wide"), "{out}");
 
-    // The refusals wrote nothing: the listing still holds what did land.
     let (ok, out) = run(&["types", exe, project, "", "0", "1"]);
     assert!(ok, "types failed:\n{out}");
     assert!(out.contains("2 rows"), "{out}");

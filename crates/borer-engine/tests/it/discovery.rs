@@ -207,7 +207,6 @@ fn a_bound_check_in_the_block_before_the_dispatch_is_found() {
         let mark = u8::try_from(k + 1).expect("fits");
         code.extend_from_slice(&[0xb8, mark, 0, 0, 0, 0xc3]); // ASM: mov eax, k+1; ret
     }
-    // the table: each case as an offset from 0x401000
     let mut data = Vec::new();
     for at in [0x30u32, 0x40, 0x50, 0x60] {
         data.extend_from_slice(&at.to_le_bytes());

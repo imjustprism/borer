@@ -1,7 +1,7 @@
 //! borer's code names no one family's classes or namespaces.
 //!
 //! borer's rules are general: what one engine or product does lives in a
-//! pack (`packs/nebula.borer`), not in borer's code. This test reads the
+//! pack the user keeps, not in borer's code. This test reads the
 //! engine's and the CLI's sources and fails on a string literal, outside
 //! comments and test modules, that spells a known family's class or
 //! namespace, so a convention that slips back in is caught by the gate.
@@ -9,8 +9,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Spellings that belong to one family (Nebula3)
-/// and so to its pack, never to engine code.
+/// Spellings that belong to one product family, and so to a pack,
+/// never to engine code. The list does not name the product.
 const FAMILY: &[&str] = &[
     "Game::",
     "Messaging::",
@@ -23,7 +23,6 @@ const FAMILY: &[&str] = &[
     "AttributeDefinitionBase",
     "UI::Widget",
     "StringAtom",
-    "NEBULA",
 ];
 
 /// Collects every `.rs` file under a directory.

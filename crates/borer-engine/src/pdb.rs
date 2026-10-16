@@ -663,8 +663,6 @@ impl Gathered {
         if name.is_empty() {
             return;
         }
-        // INVARIANT: an index under `0x1000` names a primitive, and no
-        // procedure's signature is one.
         if let Some(t) = ty.filter(|t| t.0 >= 0x1000) {
             self.types.insert(rva, t);
         }
@@ -905,14 +903,7 @@ fn gather<'s>(
             let Ok(mut syms) = info.symbols() else {
                 continue;
             };
-            // The procedures this module states, for the line lookups: a
-            // module's line program answers by the internal offsets its own
-            // records state, which leave with the module.
             let mut procs: Vec<(u32, pdb::PdbInternalSectionOffset)> = Vec::new();
-            // The scope stack the locals belong to: a procedure's records
-            // end at its scope's end, a block inside it keeps its frame, and
-            // an inline site's own locals belong to the frame it inlined,
-            // not this procedure's.
             let mut scopes: Vec<Scope> = Vec::new();
             let mut frame = 0i64;
             let mut pending: Option<String> = None;
@@ -987,10 +978,6 @@ fn gather<'s>(
                     pending = None;
                 } else if !inlined && let Some(name) = &pending {
                     let range = match kind {
-                        // The record names no register: a negative offset
-                        // sits below the frame pointer a frame that has
-                        // one, a non-negative one above the stack pointer
-                        // a frame-pointer-less frame's prologue left.
                         S_DEFRANGE_FRAMEPOINTER_REL => {
                             defrange_offset(s.raw_bytes()).map(|off| (off < 0, off))
                         }
@@ -1303,8 +1290,6 @@ fn type_text(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex, depth: u32) ->
         }
         pdb::TypeData::Modifier(m) => {
             let to = inner(m.underlying_type)?;
-            // `const` binds to the pointer, not the pointee, when it
-            // follows one: `char * const`, not `const char *`.
             if m.constant {
                 if to.ends_with('*') {
                     format!("{to} const")
@@ -1353,8 +1338,6 @@ fn type_text(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex, depth: u32) ->
                 .unwrap_or_else(|| "void".into())
         ),
         pdb::TypeData::Bitfield(b) => inner(b.underlying_type)?,
-        // A field, a method list, a nested list: members of a type, not
-        // types a parameter or a return renders as.
         _ => return None,
     })
 }
@@ -1416,9 +1399,6 @@ fn primitive_text(kind: pdb::PrimitiveKind) -> Option<String> {
             P::F128 => "__float128",
             P::Bool8 | P::Bool16 | P::Bool32 | P::Bool64 => "bool",
             P::HRESULT => "long",
-            // `NoType` states nothing, the exotic floats and complex kinds
-            // have no spelling in the text's vocabulary, and the crate
-            // leaves the enum open for kinds it has not met.
             P::NoType | P::F48 | P::Complex32 | P::Complex64 | P::Complex80 | P::Complex128 => {
                 return None;
             }
@@ -1559,9 +1539,6 @@ mod tests {
         }
         expected.push(dir.join("app.pdb"));
         assert_eq!(candidates(&record, &binary, None), expected);
-        // A relative record names only the sibling and the cache, never a
-        // working directory, which would make the answer depend on where
-        // the engine ran from.
         let mut relative = record;
         relative.path = r"build\app.pdb".to_owned();
         let cache = Path::new("cache");
@@ -1900,10 +1877,6 @@ mod tests {
             let v = u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?);
             usize::try_from(v).ok()
         };
-        // SPEC: the MSF superblock holds the block size at 32, the
-        // directory's byte count at 44 and the block of the directory's
-        // block list at 52; the directory is the stream count, each
-        // stream's size, then each stream's blocks.
         let block = word(pdb, 32)?;
         let list = word(pdb, 52)? * block;
         let mut dir = Vec::new();
@@ -1918,7 +1891,6 @@ mod tests {
         } else {
             size0.div_ceil(block)
         };
-        // SPEC: the information stream is stream 1: version, signature, age.
         let at = word(&dir, 4 + 4 * streams + 4 * blocks0)? * block + 8;
         let age = u32::from_le_bytes(pdb.get(at..at + 4)?.try_into().ok()?);
         pdb.get_mut(at..at + 4)?
@@ -1981,8 +1953,6 @@ mod tests {
     /// then nothing is asserted.
     #[test]
     fn the_test_binaries_own_pdb_states_a_known_signature() {
-        // The arguments pass through a black box, or the pure call folds
-        // away before the linker ever sees a procedure to record.
         let probe = gap022_probe(std::hint::black_box(7), std::hint::black_box(0.5));
         assert!(probe >= 7, "the probe ran: {probe}");
         let exe = std::env::current_exe().expect("the test binary has a path");
@@ -2100,8 +2070,6 @@ mod tests {
             "the header does not state the source:
 {text}"
         );
-        // The same binary answers the same rows twice: the walk the first
-        // ask paid is not paid differently by the second.
         let again = super::sources(&exe, &record, None, program.image_base, word);
         assert_eq!(again, rows, "the second walk answered differently");
         let twice = crate::analysis::decompile::decompile(&program, &a, &overlay, sub.low_pc)
@@ -2223,15 +2191,10 @@ mod tests {
     /// pointer, and never the return address or outside a sane span.
     #[test]
     fn frame_offsets_convert_into_slots() {
-        // The frame pointer sits on the pushed register itself, a word
-        // under the return address.
         assert_eq!(frame_slot(-0x18, true, 8, 0x38), Some(-0x20));
         assert_eq!(frame_slot(-0x10, true, 4, 0x20), Some(-0x14));
-        // A frame-pointer-less frame's base sits at the bottom of the
-        // frame its record states.
         assert_eq!(frame_slot(0x20, false, 8, 0x28), Some(-8));
         assert_eq!(frame_slot(2, false, 8, 0x28), Some(-0x26));
-        // The return address's own slot, and offsets no frame holds.
         assert_eq!(frame_slot(8, true, 8, 0), None);
         assert_eq!(frame_slot(0, false, 8, 0), None);
         assert_eq!(frame_slot(-0x20000, true, 8, 0x28), None);
@@ -2245,16 +2208,12 @@ mod tests {
         for name in ["alpha", "beta2", "_pad", "a_1"] {
             assert!(local_name_ok(name), "{name}");
         }
-        // Not identifiers, or empty.
         for name in ["", "2fast", "x; y", "a-b", "x y"] {
             assert!(!local_name_ok(name), "{name}");
         }
-        // Words the text's own grammar reads.
         for name in ["retaddr", "if", "while", "return", "sizeof"] {
             assert!(!local_name_ok(name), "{name}");
         }
-        // Names the text synthesizes for slots, temporaries, parameters
-        // and globals.
         for name in [
             "local_8",
             "home_10",
@@ -2358,9 +2317,6 @@ mod tests {
             program.section_at(sym.addr).is_some_and(|s| !s.executable),
             "the static sits in executable memory: {sym:?}"
         );
-        // The naming surface the decompiler reads: a global the PDB named
-        // renders as that name, not the `gN_` synthesis an unnamed one
-        // gets.
         let a = crate::analysis::Analysis::compute(&program);
         let entry = program
             .debug_functions
@@ -2389,9 +2345,6 @@ mod tests {
         let Ok(mut db) = pdb::PDB::open(std::io::Cursor::new(noise.as_slice())) else {
             return;
         };
-        // Whatever the damaged file answered for its streams is what
-        // `apply` would skip it for; the gather itself must not panic on
-        // either side of that.
         if let Ok(map) = db.address_map() {
             let gathered = super::gather(&mut db, &map, 8, false);
             assert!(gathered.found.is_empty(), "{gathered:?}");

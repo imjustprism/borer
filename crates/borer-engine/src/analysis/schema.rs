@@ -904,8 +904,8 @@ impl<'a> Ctx<'a> {
     }
 
     /// The field names of `class`, or, where it names none, those of the
-    /// class it mirrors: a `Commands::UnlockMapCommand` is filled field by
-    /// field from a `Messaging::UnlockMap`, so the mirror's names apply in
+    /// class it mirrors: one class is filled field by field from another,
+    /// so the mirror's names apply in
     /// order, not by offset (the mirror may hold atoms where the command
     /// holds strings), and are marked `~`.
     ///
@@ -1473,8 +1473,7 @@ fn render_schema(analysis: &Analysis, overlay: &Overlay, s: &Schema, class: &str
 /// The field names of the class `class` mirrors, in field order, each
 /// marked `~`.
 ///
-/// A `Commands::UnlockMapCommand` is filled from a `Messaging::UnlockMap`,
-/// whose names apply in order.
+/// One class is filled from another, whose names apply in order.
 ///
 /// # Arguments
 ///
@@ -1725,10 +1724,10 @@ return 0;
         assert_eq!(object_offset("rbx + 8"), None);
         assert_eq!(
             param_class(
-                "// signature: uint64_t class_1::vfunc_5(Commands::ExitInfoCommand *a1, uint64_t a2)\n"
+                "// signature: uint64_t class_1::vfunc_5(Cmd::Exit *a1, uint64_t a2)\n"
             )
             .as_deref(),
-            Some("Commands::ExitInfoCommand")
+            Some("Cmd::Exit")
         );
         assert_eq!(
             param_class("// signature: uint8_t sub_1(uint64_t a1, void *a2)\n"),
@@ -1740,7 +1739,7 @@ return 0;
         );
         assert_eq!(
             param_names(
-                "// signature: void Properties::ExitProperty::SendUnlockMap(Properties::ExitProperty *this)\n"
+                "// signature: void Widget::Send(Widget *this)\n"
             ),
             vec!["this"]
         );

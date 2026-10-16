@@ -79,10 +79,6 @@ fn kind(machine: u16, r_type: u32) -> Option<Kind> {
     const EM_X86_64: u16 = 62;
     /// `EM_AARCH64`.
     const EM_AARCH64: u16 = 183;
-    // SPEC: System V ABI AMD64 4.4.1 and i386 4-x, `R_*_64`/`R_386_32` = 1,
-    // `GLOB_DAT` = 6, `JUMP_SLOT` = 7, `RELATIVE` = 8; ELF for the Arm 64-bit
-    // Architecture 5.7.12, `ABS64` = 257, `GLOB_DAT` = 1025, `JUMP_SLOT` =
-    // 1026, `RELATIVE` = 1027.
     match (machine, r_type) {
         (EM_X86_64 | EM_386, 8) | (EM_AARCH64, 1027) => Some(Kind::Relative),
         (EM_X86_64 | EM_386, 1) | (EM_AARCH64, 257) => Some(Kind::Absolute),
@@ -419,9 +415,6 @@ pub(crate) fn settle(
     pic: bool,
     relocs: &mut Relocs,
 ) {
-    // INVARIANT: a word is written once: of the entries claiming one, the
-    // lowest address wins, then the first in table order, so a hostile
-    // table cannot make a write depend on anything but the file.
     claims.sort_by_key(|c| c.va);
     let mut last_end = 0u64;
     let mut writes: Vec<(u64, (u64, u64), u64)> = Vec::new();
@@ -487,9 +480,6 @@ fn relr(
         relocs.refused += 1;
         return;
     };
-    // SPEC: the generic ABI's SHT_RELR proposal (2018): an even entry is an
-    // address, an odd one a bitmap of the `8 * word - 1` words after the
-    // last address.
     let bits = word * 8 - 1;
     let mut next = 0u64;
     let mut record = |va: u64, relocs: &mut Relocs| match file_range(sections, va, word)

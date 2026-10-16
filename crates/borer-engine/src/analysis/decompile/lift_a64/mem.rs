@@ -239,11 +239,6 @@ impl Lift<'_, '_> {
         let (addr, _) = self.address(i.operands[2])?;
         let a = stored(self.reg_at(first, bits), ty);
         self.ex.store_at(addr, ty, a);
-        // INVARIANT: the first store may write a register out under its
-        // own name (one whose value reads the memory stored to), which
-        // leaves an expression read before it naming the register's new
-        // value; the second half's address and value are read again after
-        // it, so they name what the registers hold now.
         let (addr, back) = self.address(i.operands[2])?;
         let b = stored(self.reg_at(second, bits), ty);
         self.ex.store_at(fold(Op::Add, addr, step, 64), ty, b);
@@ -260,7 +255,6 @@ impl Lift<'_, '_> {
     /// # Arguments
     ///
     /// * `i` - The instruction: register list, then address.
-    // SPEC: Arm ARM (DDI 0487) C6.2 LD1 (multiple structures).
     pub(super) fn load_group(&mut self, i: &Insn) -> Option<()> {
         let (first, count) = a64::ld1_group(i.word)?;
         let (addr, back) = self.address(i.operands[1])?;

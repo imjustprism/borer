@@ -14,8 +14,8 @@ mod gotos;
 #[path = "../common/machogen.rs"]
 mod machogen;
 mod minidump;
-#[path = "../common/nebula.rs"]
-mod nebula;
+#[path = "../common/fixture_pack.rs"]
+mod fixture_pack;
 #[path = "../common/raw.rs"]
 mod raw;
 

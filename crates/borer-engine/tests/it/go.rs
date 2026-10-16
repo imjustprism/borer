@@ -218,11 +218,11 @@ fn sourced(magic: [u8; 4], absolute: bool, funcs: &[Src], end: u32) -> Vec<u8> {
     out[0..4].copy_from_slice(&magic);
     out[4..8].copy_from_slice(&[0, 0, 1, 8]);
     let mut words = vec![
-        u64::try_from(funcs.len()).expect("fits"), // nfunc
-        1,                                         // nfiles
+        u64::try_from(funcs.len()).expect("fits"),
+        1,
     ];
     if !absolute {
-        words.push(MAIN); // textStart
+        words.push(MAIN);
     }
     words.extend(
         [names_at, cutab_at, file_at, pctab_at, functab_at]
@@ -425,8 +425,6 @@ fn a_corrupt_table_is_refused() {
     let mut truncated = good;
     truncated.truncate(pcln + 8);
     let mut misordered = sourced([0xf1, 0xff, 0xff, 0xff], false, &SRCS, 0x31);
-    // The file index table placed past the name blob it indexes into:
-    // no linker writes that order, so the table is refused.
     let (cu, files) = (
         u64::from_le_bytes(misordered[40..48].try_into().expect("word")),
         u64::from_le_bytes(misordered[48..56].try_into().expect("word")),

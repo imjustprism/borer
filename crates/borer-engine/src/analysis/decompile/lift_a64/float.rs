@@ -86,8 +86,6 @@ pub(super) fn packed_name(name: &str, lane: u16, whole: bool) -> String {
 /// # Arguments
 ///
 /// * `w` - The encoded word.
-// SPEC: Arm ARM (DDI 0487) C7.2 FADD..FMIN, FABS/FNEG/FSQRT (vector):
-// size bit 22 picks the single or the double.
 fn fp_lane(w: u32) -> u16 {
     if (w >> 22) & 1 == 1 { 64 } else { 32 }
 }
@@ -227,9 +225,6 @@ impl Lift<'_, '_> {
         if vector(i) {
             return match op {
                 UnOp::Sqrt => self.float_sqrt_array(i),
-                // INVARIANT: the sign operations are bit operations at
-                // heart, so every lane's sign bit is cleared or flipped as
-                // one mask over the tree's low 64 bits.
                 UnOp::Fabs | UnOp::Neg => {
                     let w = i.word;
                     let lane = fp_lane(w);
@@ -253,9 +248,6 @@ impl Lift<'_, '_> {
         };
         let t = ty(bits)?;
         let x = self.float_source(i, 1, bits)?;
-        // INVARIANT: the tree reads `neg` and `fabs` of a value it does not
-        // hold as a float as integer operations, so those stay asm; `sqrt`
-        // keeps the x86 lifter's shape whatever the operand holds.
         if !matches!(op, UnOp::Sqrt) && !x.is_float() {
             return None;
         }
@@ -374,8 +366,6 @@ impl Lift<'_, '_> {
         };
         let v = Expr::Cast(Box::new(n), t);
         let v = match i.operands.get(2) {
-            // SPEC: Arm ARM (DDI 0487) C7.2 SCVTF/UCVTF (scalar,
-            // fixed-point): the integer scales by 2^-fbits.
             Some(Opnd::Imm(fbits)) if *fbits != 0 && *fbits <= u64::from(from) => {
                 let scale = small_pow2(*fbits, t);
                 fold(Op::FDiv, v, scale, 64)
@@ -457,11 +447,6 @@ impl Lift<'_, '_> {
         let (a, b) = match i.operands[1] {
             Opnd::Other => (self.reg_at(vreg(w, 5), 128), self.reg_at(vreg(w, 16), 128)),
             Opnd::Imm(_) => {
-                // SPEC: Arm ARM (DDI 0487) C7.2 ORR/BIC (vector, immediate):
-                // imm8 bits 5..9, the same cmode shape movi takes, with op
-                // bit 29 naming the operation in place of the move. The
-                // pattern fills both halves of a 128-bit arrangement, which
-                // only a zero can be as one value, as `movi` reads it.
                 let imm8 = u64::from((((w >> 16) & 7) << 5) | ((w >> 5) & 0x1f));
                 let imm = expand_imm((w >> 29) & 1, (w >> 12) & 0xf, imm8)?;
                 if (w >> 30) & 1 == 1 && imm != 0 {
@@ -489,8 +474,6 @@ impl Lift<'_, '_> {
     /// * `i` - The instruction.
     pub(super) fn dup(&mut self, i: &Insn) -> Option<()> {
         let w = i.word;
-        // SPEC: Arm ARM (DDI 0487) C7.2 DUP: imm5 bits 16..20, its lowest
-        // set bit naming the element size and the bits above it the index.
         let imm5 = (w >> 16) & 0x1f;
         let shift = (0..4).find(|&s| imm5 >> s & 1 == 1)?;
         let lane = 8u16 << shift;
@@ -500,9 +483,6 @@ impl Lift<'_, '_> {
             Opnd::Reg { reg, bits } => low(self.reg_at(reg, bits), lane),
             _ => {
                 let at = index * u32::from(lane);
-                // INVARIANT: the tree holds a `v` register's low 64 bits, so
-                // a lane at or above them — a `d` lane's second element, an
-                // `s` lane's third — is one shift past what it can name.
                 if at >= 64 {
                     return None;
                 }

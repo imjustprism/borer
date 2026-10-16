@@ -35,7 +35,6 @@ pub fn text(insn: &Insn) -> String {
         Op::Sme => return format!(".inst {:#010x} ; sme", insn.word),
         Op::Invalid => return BAD.to_owned(),
         Op::Bti => {
-            // SPEC: Arm ARM (DDI 0487), BTI is HINT #(32 | targets << 1), numbered in CRm:op2 (bits 5..11).
             return match (insn.word >> 5) & 0x7f {
                 0x22 => "bti c",
                 0x24 => "bti j",

@@ -1158,9 +1158,6 @@ impl BorerServer {
                     .unwrap_or_default()
             }
             let mut out = String::from("# bench: op rows elapsed throughput\n");
-            // The AOB pattern comes from the program's own entry bytes:
-            // two fixed, two wild, so the scan always has its anchor and
-            // its hits are the shape a real query's are.
             let va = p.entry.unwrap_or(p.image_base);
             let head: Option<[u8; 4]> = p
                 .read_va_upto(va, 4)
@@ -1755,7 +1752,6 @@ fn enum_row(
     )
 }
 
-// ---- help ----
 
 /// Most resources the refusal of an unknown URI names.
 const NEAREST_RESOURCES: usize = 3;

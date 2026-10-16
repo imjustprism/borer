@@ -145,18 +145,8 @@ pub(super) fn constant_outcome(cond: &Cond) -> Option<(bool, Evidence)> {
     let mut agreed: Option<bool> = None;
     for s in 0..samples {
         let mut c = cond.clone();
-        // Every fourth sample gives all variables one value. Spreading them
-        // apart on every sample means two variables never hold the same
-        // thing, and `x != y` then looks like it can never be false.
         let together = s % 4 == 0;
         for (i, k) in vars.iter().enumerate() {
-            // One variable walks the pool a step at a time, which reaches every
-            // value it holds; a stride can miss some whenever it shares a factor
-            // with the size. The others take an offset that changes with the
-            // sample, and their order reverses on alternate samples, because the
-            // pool is sorted: offsets that only ever grow rank the variables the
-            // same way every time, and `a - c >= b - c` then never sees `a`
-            // above `b`.
             let rank = if s % 2 == 0 {
                 i
             } else {
@@ -461,14 +451,7 @@ fn pool_for(cond: &Cond) -> Vec<u64> {
     let mut pool: Vec<u64> = VALUES.to_vec();
     let consts: Vec<u64> = consts.into_iter().collect();
     for &c in &consts {
-        // The value itself, its neighbours, and the input that cancels it: a
-        // width guard is written `size + K <= N`, true only for the handful of
-        // inputs that carry the sum around zero, and a pool that never lands
-        // there reports an ordinary overflow check as a branch that never runs.
         pool.extend([c, c.wrapping_sub(1), c.wrapping_add(1), c.wrapping_neg()]);
-        // The inputs a one-operation guard turns on: `x >> 1 == C` holds for the
-        // two values that shift down to C, and a pool without them reports a
-        // width check written with a shift as a branch that never runs.
         pool.extend([c << 1, (c << 1) | 1, c >> 1]);
         for &d in &consts {
             pool.extend([d.wrapping_sub(c), d.wrapping_sub(c).wrapping_add(1)]);
@@ -641,7 +624,6 @@ mod tests {
         let note = opaque_note(true, false, Evidence::Proven);
         assert!(note.contains("always true"), "{note}");
         assert!(note.contains("the else never runs"), "{note}");
-        // Rendered negated, the same condition kills the body instead.
         let flipped = opaque_note(true, true, Evidence::Proven);
         assert!(flipped.contains("always false"), "{flipped}");
         assert!(flipped.contains("the body never runs"), "{flipped}");

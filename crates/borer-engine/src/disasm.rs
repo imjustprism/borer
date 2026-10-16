@@ -88,7 +88,6 @@ pub fn disassemble(code: &[u8], va: u64, bitness: u32, max_instrs: usize) -> Vec
     let mut text = String::new();
     while out.len() < max_instrs && decoder.can_decode() {
         let mut instr = Instruction::default();
-        // The decoder's position is the instruction's offset into `code`.
         let start = decoder.position();
         decoder.decode_out(&mut instr);
         let end = decoder.position();

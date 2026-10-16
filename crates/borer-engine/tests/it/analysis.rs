@@ -8,14 +8,14 @@
 
 use crate::common;
 use crate::decompiled;
-use crate::nebula;
+use crate::fixture_pack;
 
 use borer_engine::analysis::{Analysis, NameSource, Overlay, RefKind, name_of};
 use borer_engine::num::from_usize;
 use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
 use common::fixture;
 use decompiled::decompiled;
-use nebula::nebula;
+use fixture_pack::fixture_pack;
 use std::collections::BTreeMap;
 
 /// A derived result is built once however many threads ask for it at once,
@@ -325,7 +325,6 @@ fn a_call_path_that_finds_nothing_says_how_far_it_looked() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    // A leaf calls nothing, so nothing is reachable from it but itself.
     let leaf = a
         .functions
         .iter()
@@ -345,7 +344,6 @@ fn a_call_path_that_finds_nothing_says_how_far_it_looked() {
 fn a_callgraph_walks_callers_as_well_as_callees() {
     let p = fixture();
     let a = Analysis::compute(&p);
-    // A function something else calls, so it has a chain above it.
     let leaf = a
         .functions
         .iter()
@@ -356,7 +354,6 @@ fn a_callgraph_walks_callers_as_well_as_callees() {
     let down = borer_engine::analysis::render::callgraph_mermaid(&p, &a, &o, leaf.entry, 30, false);
     assert!(up.contains("callers of the root"), "{up}");
     assert!(down.contains("callees of the root"), "{down}");
-    // The caller walk reaches a node the callee walk does not: what leads here.
     let caller = name_of(&a, &o, leaf.callers[0]);
     assert!(
         up.contains(caller.as_str()),
@@ -367,34 +364,29 @@ fn a_callgraph_walks_callers_as_well_as_callees() {
 
 /// A TLS singleton reads as its class on both sides of a branch.
 ///
-/// Nebula caches every manager in a thread-local block and reaches one as
+/// A runtime caches every manager in a thread-local block and reaches one as
 /// `block[slot]`. The lifter folds such a read into the singleton's name, but
 /// only while the block's register still carries the value inline: after a
 /// branch, where the register has been written out and the join merges the
-/// environments, the same access fell back to `*(uint64_t*)(0x58 + rbx)`. On
-/// one Nebula game client that left all 233 managers unreadable.
+/// environments, the same access fell back to `*(uint64_t*)(0x58 + rbx)`.
+/// On one client that left every manager unreadable.
 ///
 /// The fixture loads the block, reads slot 0x58 before a branch and again
 /// after the join; both must name the class.
 #[test]
 fn a_tls_singleton_reads_as_its_class_after_a_join() {
-    // The shape MSVC emits in that client: the slot offset is
-    // hoisted into a register, so the block is the *index* of `[rdi + rbx]`
-    // rather than the base of `[rbx + 58h]`.
-    // The guarded branch calls the assert helper, as every Nebula
-    // `Instance()` does, so the join follows a call.
     let code: [u8; 41] = [
-        0x65, 0x48, 0x8b, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00, // mov rax,gs:[58h]
-        0x48, 0x8b, 0x1c, 0xc8, // mov rbx,[rax+rcx*8]
-        0xbf, 0x58, 0x00, 0x00, 0x00, // mov edi,58h
-        0x48, 0x8b, 0x14, 0x1f, // mov rdx,[rdi+rbx]   (before the branch)
-        0x48, 0x85, 0xd2, // test rdx,rdx
-        0x74, 0x05, // je +5
-        0xe8, 0x08, 0x00, 0x00, 0x00, // call the assert helper
-        0x48, 0x8b, 0x04, 0x1f, // mov rax,[rdi+rbx]   (after the join)
-        0x48, 0x01, 0xd0, // add rax,rdx
-        0xc3, // ret
-        0xc3, // the callee
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00,
+        0x48, 0x8b, 0x1c, 0xc8,
+        0xbf, 0x58, 0x00, 0x00, 0x00,
+        0x48, 0x8b, 0x14, 0x1f,
+        0x48, 0x85, 0xd2,
+        0x74, 0x05,
+        0xe8, 0x08, 0x00, 0x00, 0x00,
+        0x48, 0x8b, 0x04, 0x1f,
+        0x48, 0x01, 0xd0,
+        0xc3,
+        0xc3,
     ];
     let mut bytes = vec![0u8; 0x2000];
     bytes[0x1000..0x1000 + code.len()].copy_from_slice(&code);
@@ -410,12 +402,12 @@ fn a_tls_singleton_reads_as_its_class_after_a_join() {
     let mut a = Analysis::compute(&p);
     a.classes
         .tls_slots
-        .insert(0x58, "Game::ClientGameWorld".to_owned());
+        .insert(0x58, "App::World".to_owned());
     let o = Overlay::default();
     let text =
         borer_engine::analysis::decompile::decompile(&p, &a, &o, 0x1000).expect("decompiles");
     assert!(
-        text.contains("Game::ClientGameWorld"),
+        text.contains("App::World"),
         "the slot did not read as its singleton:\n{text}"
     );
     assert!(
@@ -613,7 +605,6 @@ fn singletons_list_the_class_at_each_thread_local_slot() {
             .any(|l| l.starts_with("tls\t") && l.ends_with("Tls")),
         "the thread-local singleton was not recovered:\n{out}"
     );
-    // The filter narrows to the named class.
     let filtered = singletons_tsv(&a, &Overlay::default(), "tls");
     assert!(
         filtered.contains("\tTls\n"),
@@ -1139,43 +1130,43 @@ fn a_running_key_fetch_is_named_in_the_dispatch_view() {
     const MIXER: u64 = 0x10b8;
     let mut bytes = vec![0xccu8; 0x1000];
     let mut code: Vec<u8> = Vec::new();
-    code.extend_from_slice(&[0x4c, 0x8d, 0x0d]); // lea r9,[PROG]
+    code.extend_from_slice(&[0x4c, 0x8d, 0x0d]);
     code.extend_from_slice(&i32::try_from(PROG - 0x1007).unwrap().to_le_bytes());
-    code.extend_from_slice(&[0x4c, 0x8d, 0x1d]); // lea r11,[TABLE]
+    code.extend_from_slice(&[0x4c, 0x8d, 0x1d]);
     code.extend_from_slice(&i32::try_from(TABLE - 0x100e).unwrap().to_le_bytes());
-    code.extend_from_slice(&[0x41, 0x0f, 0xb6, 0x11]); // movzx edx,byte [r9]
-    code.extend_from_slice(&[0x45, 0x0f, 0xb6, 0x51, 0x01]); // movzx r10d,byte [r9+1]
-    code.extend_from_slice(&[0x49, 0x8b, 0x49, 0x04]); // mov rcx,[r9+4]
-    code.extend_from_slice(&[0x48, 0x31, 0xd9]); // xor rcx,rbx
-    code.extend_from_slice(&[0x49, 0x83, 0xc1, 0x02]); // add r9,2
-    code.extend_from_slice(&[0x80, 0xfa, 0x0b]); // cmp dl,0xb
-    code.extend_from_slice(&[0x0f, 0x87]); // ja MIXER
+    code.extend_from_slice(&[0x41, 0x0f, 0xb6, 0x11]);
+    code.extend_from_slice(&[0x45, 0x0f, 0xb6, 0x51, 0x01]);
+    code.extend_from_slice(&[0x49, 0x8b, 0x49, 0x04]);
+    code.extend_from_slice(&[0x48, 0x31, 0xd9]);
+    code.extend_from_slice(&[0x49, 0x83, 0xc1, 0x02]);
+    code.extend_from_slice(&[0x80, 0xfa, 0x0b]);
+    code.extend_from_slice(&[0x0f, 0x87]);
     code.extend_from_slice(&(i32::try_from(MIXER - 0x102b).unwrap()).to_le_bytes());
-    code.extend_from_slice(&[0x49, 0x63, 0x14, 0x93]); // movsxd rdx,[r11+rdx*4]
-    code.extend_from_slice(&[0x4c, 0x01, 0xda]); // add rdx,r11
-    code.extend_from_slice(&[0xff, 0xe2]); // jmp rdx
+    code.extend_from_slice(&[0x49, 0x63, 0x14, 0x93]);
+    code.extend_from_slice(&[0x4c, 0x01, 0xda]);
+    code.extend_from_slice(&[0xff, 0xe2]);
     bytes.extend_from_slice(&code);
     for i in 0..12u8 {
         let at = HANDLER + u64::from(i) * 8;
         bytes.resize(usize::try_from(at).unwrap(), 0xcc);
-        bytes.extend_from_slice(&[0x83, 0xc3, i]); // add ebx,i
+        bytes.extend_from_slice(&[0x83, 0xc3, i]);
         let back = i32::try_from(TAIL - (at + 8)).unwrap();
         bytes.extend_from_slice(&[0xe9]);
         bytes.extend_from_slice(&back.to_le_bytes());
     }
     bytes.resize(usize::try_from(TAIL).unwrap(), 0xcc);
-    bytes.extend_from_slice(&[0xe8]); // call MIXER
+    bytes.extend_from_slice(&[0xe8]);
     bytes.extend_from_slice(&i32::try_from(MIXER - (TAIL + 5)).unwrap().to_le_bytes());
-    bytes.extend_from_slice(&[0x4b, 0x33, 0x04, 0xa8]); // xor rax,[r8+r10*8]
-    bytes.extend_from_slice(&[0x48, 0x89, 0xc3]); // mov rbx,rax
-    bytes.extend_from_slice(&[0xe9]); // jmp LOOP
+    bytes.extend_from_slice(&[0x4b, 0x33, 0x04, 0xa8]);
+    bytes.extend_from_slice(&[0x48, 0x89, 0xc3]);
+    bytes.extend_from_slice(&[0xe9]);
     bytes.extend_from_slice(
         &i32::try_from(0x100ei64 - i64::try_from(TAIL).unwrap() - 0x11)
             .unwrap()
             .to_le_bytes(),
     );
     bytes.resize(usize::try_from(MIXER).unwrap(), 0xcc);
-    bytes.extend_from_slice(&[0xc3]); // ret
+    bytes.extend_from_slice(&[0xc3]);
     bytes.resize(usize::try_from(TABLE).unwrap(), 0xcc);
     for i in 0..12u64 {
         let entry = i32::try_from(HANDLER + i * 8).unwrap() - i32::try_from(TABLE).unwrap();
@@ -1489,7 +1480,6 @@ fn the_anti_analysis_report_finds_the_tells() {
     assert!(text.contains("descriptor-table"), "{text}");
     assert!(text.contains("VMware backdoor"), "{text}");
     assert!(text.contains("debugger trap"), "{text}");
-    // A plain binary with only a few cpuid reads is not called out.
     let plain = borer_engine::analysis::render::anti_analysis_tsv(
         &fixture(),
         &Analysis::compute(&fixture()),
@@ -1538,7 +1528,6 @@ fn the_check_finder_pins_a_serial_routine() {
         text.contains("0xdeadbeef"),
         "the tested constant is not shown: {text}"
     );
-    // A plain binary with no such phrases finds nothing.
     let plain = borer_engine::analysis::render::license_checks_tsv(
         &fixture(),
         &Analysis::compute(&fixture()),
@@ -1718,7 +1707,6 @@ fn an_unpacked_pe_materializes_a_virtual_only_section() {
         vec![
             Section::mapped(".text", 0x1000, 0x1000, 0x1000, false, true),
             Section::mapped(".rdata", 0x2000, 0x2000, 0x1000, false, false),
-            // Virtual-only: mapped 0x1000 bytes, backed by none in the file.
             Section {
                 file_size: 0,
                 ..Section::mapped(".themida", 0x3000, 0, 0x1000, true, true)
@@ -2005,8 +1993,6 @@ fn best_effort_skips_an_unresolved_call_to_reach_the_payload() {
     );
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    // Best-effort is the default: the call is skipped, the decrypt runs, and
-    // the payload's entry is reached.
     let best = borer_engine::analysis::render::unpack_tsv(&p, &a, &o, "0x140001000").unwrap();
     assert!(
         best.contains("skipped"),
@@ -2020,7 +2006,6 @@ fn best_effort_skips_an_unresolved_call_to_reach_the_payload() {
         best.contains("mov eax,2Ah") || best.contains("mov eax,0x2a"),
         "the decrypted routine was not recovered: {best}"
     );
-    // `strict` faults at the unresolved call instead of skipping it.
     let strict =
         borer_engine::analysis::render::unpack_tsv(&p, &a, &o, "0x140001000,strict").unwrap();
     assert!(
@@ -2178,10 +2163,10 @@ fn the_per_function_diff_shows_the_changed_line() {
 #[test]
 fn the_fingerprint_manifest_drives_a_diff() {
     fn mk(b_const: &[u8]) -> Program {
-        let a_code = [0x31u8, 0xc0, 0xc3]; // xor eax,eax ; ret
+        let a_code = [0x31u8, 0xc0, 0xc3];
         let mut b_code = vec![0xb8u8];
         b_code.extend_from_slice(b_const);
-        b_code.push(0xc3); // mov eax,imm ; ret
+        b_code.push(0xc3);
         let mut bytes = vec![0u8; 0x2000];
         bytes[0x1000..0x1000 + a_code.len()].copy_from_slice(&a_code);
         bytes[0x1040..0x1040 + b_code.len()].copy_from_slice(&b_code);
@@ -2901,7 +2886,7 @@ fn refs_from_and_summary() {
         ),
         "{pt}"
     );
-    let with_pack = Analysis::compute_with(&p, nebula());
+    let with_pack = Analysis::compute_with(&p, fixture_pack());
     let ec = function_summary(&p, &with_pack, &o, 0x50c0).unwrap();
     assert!(
         ec.contains(
@@ -5337,20 +5322,17 @@ fn overlapping_sections_answer_in_declaration_order() {
         p.section_at(0x1000).map(|s| s.name.as_str()),
         Some(".first")
     );
-    // 0x1100 sits in both spans; the section declared first answers.
     assert_eq!(
         p.section_at(0x1100).map(|s| s.name.as_str()),
         Some(".first")
     );
     assert_eq!(p.read_va(0x1100, 4), Some(&[0xaa, 0xaa, 0xaa, 0xaa][..]));
-    // Past the first section's end, only the second holds the address.
     assert_eq!(
         p.section_at(0x1200).map(|s| s.name.as_str()),
         Some(".second")
     );
     assert_eq!(p.read_va(0x1200, 4), Some(&[0xbb, 0xbb, 0xbb, 0xbb][..]));
     assert!(p.section_at(0x1400).is_none());
-    // Two sections at one address: again the first declared answers.
     let tied = Program::raw(
         vec![0x11, 0x22, 0x33, 0x44],
         Arch::X86_64,

@@ -405,8 +405,6 @@ pub struct Parent {
 /// `a PE`, `an ELF image`, `a Mach-O image`, `a fat Mach-O (or a Java
 /// class file)` or `an archive`, or `None` when the magic is none of them.
 pub(crate) fn magic_name(bytes: &[u8]) -> Option<&'static str> {
-    // SPEC: the Mach-O magics in either byte order, the fat magic (which a
-    // Java class file shares), and the `ar` signature.
     let word = bytes.first_chunk::<4>().map(|b| u32::from_be_bytes(*b));
     match word {
         _ if bytes.first_chunk::<2>() == Some(b"MZ") => Some("a PE"),
@@ -736,8 +734,6 @@ pub(crate) fn pe_signature(bytes: &[u8]) -> Option<usize> {
 /// slot.
 pub(crate) fn directory_entry(bytes: &[u8], index: usize) -> Option<(usize, bool)> {
     let opt = pe_signature(bytes)?.checked_add(24)?;
-    // SPEC: the directory count sits 92 bytes into a PE32 optional header
-    // and 108 into a PE32+ one; the entries follow it.
     let (count_at, plus) = match le_u16(bytes, opt)? {
         0x10b => (opt + 92, false),
         0x20b => (opt + 108, true),
@@ -894,8 +890,6 @@ fn implausible_imports(bytes: &[u8]) -> Option<u64> {
     let mut total = 0u64;
     while let Some(descriptor) = bytes.get(at..at + DESCRIPTOR) {
         let field = |k: usize| le_u32(descriptor, k).unwrap_or(0);
-        // SPEC: a null descriptor ends the table; the parser also stops at
-        // one without a name or an address table.
         if field(12) == 0 || field(16) == 0 {
             break;
         }
@@ -991,9 +985,6 @@ fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
     let limit = crate::num::from_usize(bytes.len() / 4).min(IMPORTS_MAX);
     while let Some(descriptor) = bytes.get(at..at + DESCRIPTOR) {
         let field = |k: usize| le_u32(descriptor, k).unwrap_or(0);
-        // SPEC: ImgDelayDescr is grAttrs, rvaDLLName, rvaHmod, rvaIAT,
-        // rvaINT, rvaBoundIAT, rvaUnloadIAT, dwTimeStamp; a zeroed one
-        // ends the table.
         let (attrs, name, iat, names) = (field(0), field(4), field(12), field(16));
         if name == 0 || iat == 0 {
             break;
@@ -1033,7 +1024,6 @@ fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
                 let import = if thunk & ordinal_bit != 0 {
                     format!("ORDINAL {}", thunk & 0xffff)
                 } else {
-                    // SPEC: a name entry is a two-byte hint and the name.
                     rva_of(u64::from(crate::num::lo32(thunk)))
                         .and_then(|r| file_offset(&sections, r))
                         .and_then(|o| c_name(bytes, o.saturating_add(2)))
@@ -1162,8 +1152,6 @@ struct Disarmed {
 fn disarm_exports(bytes: &mut [u8]) -> Option<Disarmed> {
     let (at, _) = directory_entry(bytes, 0)?;
     let table = file_offset(&raw_sections(bytes)?, u64::from(le_u32(bytes, at)?))?;
-    // SPEC: the address table's entry count sits 20 bytes into the export
-    // directory, the name pointer count 24.
     let count = le_u32(bytes, table + 20)?.max(le_u32(bytes, table + 24)?);
     if count <= EXPORTS_MAX {
         return None;
@@ -1266,8 +1254,6 @@ fn arm64_pdata(
                 Some(Ok(info)) => (info.header.function_length(), false),
                 Some(Err(_)) | None => continue,
             },
-            // SPEC: Microsoft, "ARM64 exception handling", .pdata records:
-            // flag 3 is reserved.
             _ => continue,
         };
         let Some(start) = base.checked_add(u64::from(rf.begin_address)) else {
@@ -1324,9 +1310,6 @@ pub fn unusable_path(path: &Path) -> Option<String> {
         return None;
     }
     let spelled = path.as_os_str().to_string_lossy().replace('/', "\\");
-    // SPEC: `\\.\` opens the device namespace and `\\?\` hands the rest to
-    // the object manager unparsed; either reaches a file only through a
-    // drive (`X:\`) or, for `\\?\`, a `UNC\` share.
     let drive = |rest: &str| {
         let b = rest.as_bytes();
         b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
@@ -1340,15 +1323,12 @@ pub fn unusable_path(path: &Path) -> Option<String> {
     if device {
         return Some(format!("{spelled} names a device, not a file"));
     }
-    // SPEC: the reserved names, matched on the stem so `con.txt` is caught,
-    // and case-insensitively because the filesystem is.
     const DEVICES: [&str; 9] = [
         "con", "prn", "aux", "nul", "com", "lpt", "conin$", "conout$", "clock$",
     ];
     let stem = path.file_stem()?.to_str()?;
     let lower = stem.to_lowercase();
     let named = DEVICES.iter().any(|d| {
-        // COM1..COM9 and LPT1..LPT9 carry a digit; the rest stand alone.
         lower == *d
             || (matches!(*d, "com" | "lpt")
                 && lower.len() == 4
@@ -1384,8 +1364,6 @@ fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
         ));
     }
     let mut file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
-    // INVARIANT: only a regular file is read: a handle that reaches a
-    // device or a pipe under another spelling reads forever or blocks.
     let meta = file
         .metadata()
         .with_context(|| format!("reading {shown}"))?;
@@ -1765,8 +1743,6 @@ impl Program {
         if bytes.is_empty() {
             return Err(anyhow!("the file is empty: there is nothing to load"));
         }
-        // A minidump is no image: its streams are read on their own
-        // before any format parse, and none of the rest applies.
         if bytes.starts_with(b"MDMP") {
             let dump = crate::minidump::program(path, bytes).ok_or_else(|| {
                 anyhow!("the minidump's header or stream directory does not sit in the file")
@@ -1847,13 +1823,6 @@ impl Program {
                         let rawsz = u64::from(s.size_of_raw_data);
                         let rawoff = u64::from(s.pointer_to_raw_data);
                         let fits = rawoff + rawsz.min(file_len) <= file_len;
-                        // INVARIANT: a row the file cannot hold is garbage,
-                        // not a section: a damaged section count runs the
-                        // table into code, where a row in fifty happens to
-                        // fit the file and the rest name sizes it has not.
-                        // Only a sound table's row that starts inside the
-                        // file and runs past its end is a truncated section,
-                        // kept with the bytes the file holds.
                         let cut = !fits && sound && rawoff < file_len;
                         let va = pe.image_base.checked_add(u64::from(s.virtual_address));
                         let sane = rawsz <= SANE_MAX
@@ -1868,9 +1837,6 @@ impl Program {
                             fit.note_cut(rawoff + rawsz);
                         }
                         Some(Section {
-                            // SPEC: PE/COFF section names over 8 bytes are stored as `/NN`,
-                            // an offset into the COFF string table; goblin resolves that into
-                            // `real_name`, and `name()` prefers it.
                             name: s.name().map_or_else(
                                 |_| {
                                     String::from_utf8_lossy(&s.name)
@@ -1911,10 +1877,6 @@ impl Program {
                         imp.name.to_string()
                     };
                     let dll = imp.dll.trim_end_matches('\0');
-                    // SPEC: goblin's `Import::offset` is the IAT slot RVA and
-                    // `rva` the hint/name entry's, so both map through the
-                    // image base like every RVA here, never through the file
-                    // extents `va_of_off` answers.
                     let rva = if imp.offset != 0 { imp.offset } else { imp.rva };
                     let addr = pe.image_base.wrapping_add(rva as u64);
                     symbols.push(Symbol {
@@ -1949,11 +1911,6 @@ impl Program {
                 if arch == Arch::X86_64
                     && let Some(ex) = &pe.exception_data
                 {
-                    // The walk indexes the file by the offsets the exception
-                    // directory states, and a truncated or rewritten file
-                    // states offsets outside it. Losing the ranges costs
-                    // discovery a seed it has other ways to find; losing the
-                    // program costs everything.
                     let (found, registered, chunks) = caught(|| {
                         let mut out = Vec::new();
                         let mut handlers = Vec::new();
@@ -1978,8 +1935,6 @@ impl Program {
                             }
                             let function = image_base + u64::from(rf.begin_address);
                             out.push((function, image_base + u64::from(rf.end_address)));
-                            // The handler's data is a slice of the file; its
-                            // place in the file is its place in the image.
                             let Some(
                                 goblin::pe::exception::UnwindHandler::ExceptionHandler(
                                     handler,
@@ -2019,8 +1974,6 @@ impl Program {
                     function_ranges.extend(found);
                     chained_chunks = fragments;
                 }
-                // The header facts are read through the same directories, so
-                // the same damaged file can fault here too.
                 headers = caught(|| {
                     crate::headers::from_pe(pe, &bytes, file_len, &sections, function_ranges.len())
                 })
@@ -2128,10 +2081,6 @@ impl Program {
                         slots_of.entry(r.r_sym).or_insert_with(|| vec![r.r_offset]);
                     }
                 }
-                // INVARIANT: every slot a GOT bind or an absolute word ties
-                // to an import names it, so a call through any of them reads
-                // as the import; the first slot any relocation names stays
-                // first, as the one a name resolves to.
                 for (sym, slot) in applied.bound {
                     let slots = slots_of.entry(sym).or_default();
                     if !slots.contains(&slot) && slots.len() < SLOTS_PER_IMPORT {
@@ -2171,9 +2120,6 @@ impl Program {
                     let kind = goblin::elf::sym::st_type(sym.st_info);
                     let is_code = kind == goblin::elf::sym::STT_FUNC
                         || kind == goblin::elf::sym::STT_GNU_IFUNC;
-                    // INVARIANT: a sized object symbol names the table or
-                    // variable at its address (`sqlite3UpperToLower`), which
-                    // the text then prints by name instead of `0x201843`.
                     let is_data = kind == goblin::elf::sym::STT_OBJECT && sym.st_size != 0;
                     if !(is_code || is_data) || sym.st_value == 0 {
                         continue;
@@ -2267,24 +2213,9 @@ impl Program {
         headers.truncated = fit.cut;
         headers.implausible_imports = refused_imports;
         headers.implausible_exports = disarmed.map(|d| d.count);
-        // The compiler's own names, where it left them. These are facts from
-        // the file, not guesses, so they take precedence over a synthesized
-        // `sub_` name the way any other symbol does. A stripped image keeps
-        // its DWARF often enough to be worth reading: on a MinGW build the
-        // runtime's whole startup path comes back named.
         let debug = crate::dwarf::read(&sections, &unmapped, &bytes);
         let mut named = debug.subprograms;
         phases.mark("load dwarf");
-        // The PDB the debug record names, when it is on disk where the
-        // record or the loaded file says: the compiler's names for every
-        // function it saw, applied the way the DWARF names are, so a
-        // PDB's name wins nowhere an export or import already holds the
-        // address and DWARF fills nothing a PDB already named. Its
-        // procedure extents join the function ranges where an executable
-        // section holds each one whole, the signatures its type stream
-        // states join the debug functions, and its data records name the
-        // globals as data symbols where a non-executable section maps
-        // them.
         let pdb = if apply_pdb {
             pdb_record.as_ref().and_then(|rec| {
                 crate::pdb::apply(
@@ -2303,18 +2234,12 @@ impl Program {
             None
         };
         phases.mark("load pdb");
-        // The applied PDB's own facts, for the source lines a first header
-        // asks for: the lines stay unread until one does, so a load never
-        // pays for rows no one asked of it.
         let pdb_source = match (&pdb, &pdb_record) {
             (Some(crate::pdb::Outcome::Applied { .. }), Some(rec)) => {
                 crate::pdb::resolved(&path, rec, symsrv).map(|p| (p, rec.clone()))
             }
             _ => None,
         };
-        // INVARIANT: a data symbol marks data, so it blocks no function
-        // name: a DWARF subprogram at an address still takes it over a PDB
-        // data record that disagrees.
         let already: BTreeSet<u64> = symbols
             .iter()
             .filter(|s| s.kind != SymbolKind::Data)
@@ -2329,11 +2254,6 @@ impl Program {
                 });
             }
         }
-        // Every name above came out of the file, and the file is the thing
-        // under analysis: a name holding a newline forges a row in any
-        // listing that prints it, and one holding a terminal escape rewrites
-        // what surrounds it. Defusing them here covers each of the listings
-        // downstream, and any that is added later.
         for s in &mut sections {
             s.name = crate::text::one_line(&s.name);
         }
@@ -2549,9 +2469,6 @@ impl Program {
     /// file sizes) holds `va`, or `None` when the address is unmapped or only
     /// in `.bss`-style memory.
     pub fn section_at(&self, va: u64) -> Option<&Section> {
-        // The first-declared section answers the common read before the
-        // search: it wins every overlap by declaration order anyway, and
-        // most images keep their hottest code in it.
         if let Some(first) = self.sections.first()
             && first.file_size > 0
             && first.va.0 <= va
@@ -2708,8 +2625,6 @@ impl Program {
     /// of its section's file bytes, or maps past any file offset.
     pub fn read_va_upto(&self, va: u64, max: usize) -> Option<&[u8]> {
         let Some(s) = self.section_at(va) else {
-            // The headers are mapped but are not a section; a short read of
-            // them is the same read as a short read of anything else.
             let first = self.sections.first()?;
             let cap = first
                 .va
@@ -2976,8 +2891,6 @@ impl Program {
         }
         out.push_str("  name           va            vsize     file_off  size      rwx  entropy\n");
         for s in self.sections.iter().take(SECTIONS_SHOWN) {
-            // A `/NN` name is a COFF string-table offset this file no
-            // longer resolves, so the content is asked what it is.
             let guess = if s.name.starts_with('/') {
                 self.section_bytes(s)
                     .and_then(crate::headers::sniff_section)
@@ -3245,13 +3158,10 @@ mod tests {
             let refused = Program::load(&dir).expect_err("a directory is no program");
             assert!(refused.to_string().contains("is a directory"), "{refused}");
         }
-        // Names that only look like one.
         assert!(!is_device("control.dll"), "a real name starting with con");
         assert!(!is_device("com0"), "there is no COM0");
         assert!(!is_device("com10"), "nor a two-digit port");
         assert!(!is_device("borer.exe"));
-        // An empty path is refused too, and says so rather than letting
-        // the operating system report a blank one as missing.
         assert!(unusable_path(std::path::Path::new("")).is_some());
     }
 
@@ -3272,8 +3182,6 @@ mod tests {
     fn a_name_out_of_the_file_cannot_forge_a_row() {
         let exe = std::env::current_exe().expect("the test binary has a path");
         let mut bytes = std::fs::read(&exe).expect("the test binary is readable");
-        // Only PE stores a section name as raw bytes in the table; an ELF
-        // build of these tests has nothing to overwrite in place.
         if bytes.first_chunk::<2>() != Some(b"MZ") {
             return;
         }
@@ -3318,9 +3226,6 @@ mod tests {
     #[test]
     fn a_parse_that_faults_is_told_as_an_error() {
         let faulted = caught(|| {
-            // The offset comes through a black box so the compiler cannot
-            // prove the fault and refuse to build it, which is the same
-            // reason a real one only shows on a file nobody checked.
             let small = [0u8; 4];
             let past = std::hint::black_box(small.len() + 5);
             #[expect(clippy::indexing_slicing, reason = "the fault under test")]

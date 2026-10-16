@@ -430,11 +430,6 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
         && let Some(head) = program.read_va_upto(addr, 2)
         && head.first() == Some(&0)
     {
-        // INVARIANT: the empty string lives in a string pool, so either the
-        // byte after its terminator is the next literal's first character
-        // or the bytes before it end the previous literal, text then its
-        // terminator; a zero byte on both sides is a table, a GUID or a
-        // zeroed object, and naming that `""` loses the address for nothing.
         let after_a_literal = addr
             .checked_sub(2)
             .and_then(|at| program.read_va(at, 2))
@@ -447,12 +442,6 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
         return (before_a_literal || after_a_literal).then(|| String::from("\"\""));
     }
     let min = if section.writable { MIN } else { MIN_RODATA };
-    // A C string is null-terminated; a printable run that ends on a non-zero
-    // byte is not one. The only run without a terminator in the window is a
-    // string longer than the cap, truncated at it, so accept the no-terminator
-    // case only at the cap. This rejects the low bytes of a pointer or vtable
-    // (a store of `&vtable` whose first function pointer reads as `"$d-@"`),
-    // while every genuine literal, short or long, still renders.
     let terminated = |len: usize| {
         len >= CAP
             || u64::try_from(len)
@@ -462,11 +451,6 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     };
     let sanitize = |t: String| crate::strings::escape_text(&t);
     let narrow = cstr_text_at(program, addr, min, CAP).filter(|&(len, _)| terminated(len));
-    // INVARIANT: a short string whose terminator pads out its 32-bit unit,
-    // with a nonzero unit after it, is the first entry of a table of 32-bit
-    // values (a Rust `Range<u32>` is `[0x20u32, 0x21]`), no string; the
-    // address says what it is where `" "` would send a reader to another
-    // copy of a space.
     if narrow.as_ref().is_some_and(|(len, _)| *len < MIN)
         && addr.is_multiple_of(4)
         && program
@@ -485,11 +469,6 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     let wide = run.filter(|&(len, _)| terminated(len.saturating_mul(2)));
     let literal = match (narrow, wide) {
         (Some((n, _)), Some((w, t))) if n < MIN && w > n => format!("L\"{}\"", sanitize(t)),
-        // INVARIANT: a one-character string whose terminator is the high
-        // byte of a longer run of wide characters with no terminator of
-        // its own is the first entry of a table of 16-bit values (Rust's
-        // `[0x20u16, 0x22, 0x24, 0x26]`), no string; the address says what
-        // it is where `" "` would send a reader to another copy of a space.
         (Some((n, _)), None) if n < MIN && wide_len >= TABLE_UNITS => return None,
         (Some((_, t)), _) => format!("\"{}\"", sanitize(t)),
         (None, Some((_, t))) => format!("L\"{}\"", sanitize(t)),
@@ -1278,9 +1257,6 @@ fn name_fields(
             }
         }
     }
-    // The names the asserts give parameters, locals and registers, last:
-    // the field and result names above read the variables by the names
-    // the lifter gave them.
     for Rename { var, name } in assert_names(&lines) {
         for line in &mut lines {
             *line = rename_word(line, &var, &name);
@@ -1557,9 +1533,6 @@ fn decompile_in<L: Lifter>(
     let at = |va: &u64| idx.get(va).map(|&i| twins.get(&i).copied().unwrap_or(i));
     ctx.seh_frame = L::seh_frame(&ctx, &code);
     ctx.go_check = L::go_check(&ctx, f.entry, &code, &idx);
-    // INVARIANT: the parameters are read once per function and overlay
-    // ([`callee_shape`]), so the signature below lists exactly what every
-    // call to the function passes.
     let entry_block = ctx.entry_block;
     let shape = L::shape(&mut ctx, f, &code, &succs, entry_block);
     ctx.conv = shape.conv;
@@ -1572,8 +1545,6 @@ fn decompile_in<L: Lifter>(
     ctx.arg_floats = shape.floats();
     ctx.rax_written = L::writes_result(&ctx, &code);
     let word = u8::try_from(bitness).unwrap_or(64);
-    // INVARIANT: a stated prototype says what the function hands back,
-    // ahead of a signature string and of what its callers and exits show.
     let stated_returns = ctx.stated.map(|p| match &p.ret {
         None => lift::Returns::Nothing,
         Some(ty) => lift::Returns::of(ty.pass(&overlay.types, word, program.format), word),
@@ -1602,11 +1573,6 @@ fn decompile_in<L: Lifter>(
             .as_ref()
             .map_or(f.ret_float.is_some(), |s| float_return(&s.ret)),
     };
-    // INVARIANT: a 32-bit function a whole-program compiler gave a
-    // convention of its own hands its double back in `xmm0` (`movsd xmm0,
-    // [ebp-0x10]` on one exit, `xorps xmm0, xmm0` on the other), where its
-    // callers read it; read as returning nothing, its every `return` lost
-    // the value.
     ctx.ret_sse = bitness == 32
         && ctx.stated.is_none()
         && f.signature.is_none()
@@ -1616,12 +1582,7 @@ fn decompile_in<L: Lifter>(
         ctx.ret_float = true;
         ctx.unused_result = false;
     }
-    // INVARIANT: a float result in `xmm0` is the register `ret` hands
-    // back, written on the way to every exit.
     ctx.rax_written |= ctx.ret_float && (bitness == 64 || ctx.ret_sse);
-    // INVARIANT: on a 32-bit target `edx` is scratch a caller reading it
-    // after the call often only finds left over; only a 64-bit function's
-    // own text shows its second result.
     ctx.ret_rdx = bitness == 64 && f.hands_back_rdx && ctx.stated.is_none();
     if let Some(sig) = &f.signature {
         if ctx.this_param
@@ -1790,8 +1751,6 @@ fn decompile_in<L: Lifter>(
             follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
         }
     }
-    // INVARIANT: a float handed back in `xmm0` is read by callers that
-    // read no `eax` ([`Ctx::ret_sse`]), whatever the verdict on `eax` says.
     let body = if f.returns_value == Some(false)
         && f.signature.is_none()
         && ctx.stated.is_none()
@@ -1801,9 +1760,6 @@ fn decompile_in<L: Lifter>(
     } else {
         body
     };
-    // INVARIANT: a function whose every `return` is bare returns nothing,
-    // and so a call's result assigned to the return register right before
-    // one is dead: kept on one path for a join that hands back nothing.
     let returns_nothing = match stated_returns {
         Some(r) => r == lift::Returns::Nothing,
         None => f.signature.as_ref().map_or_else(
@@ -1816,8 +1772,6 @@ fn decompile_in<L: Lifter>(
         ),
     };
     let (result_reg, second_reg) = L::result_names(bitness);
-    // INVARIANT: a 32-bit function's text shows no second result of its
-    // own, but the `edx` its callers read is still no dead value.
     let live_out = ctx.ret_rdx || (bitness == 32 && f.hands_back_rdx);
     let body = if cleanup {
         cleanup_text(&body, live_out.then_some(second_reg))
@@ -1845,18 +1799,12 @@ fn decompile_in<L: Lifter>(
     };
     let body = apply_results(&body, &ctx.result_groups);
     let names = ctx.names();
-    // The fields of globals a user type points at: named here, in the text
-    // every reader of the memo gets, so the layout pass below counts them
-    // the way it counts a class-named field, and before the user enums
-    // below, whose entries key the access a renamed field renders.
     let mut user_typed = typed_globals(
         overlay,
         &ctx.globals,
         &names,
         u64::try_from(ctx.conv.word).unwrap_or(8),
     );
-    // The fields read through a parameter or a local a stated type points
-    // at a user struct, named the way a typed global's are.
     user_typed.extend(declared::typed_pointers(
         overlay,
         f.entry,
@@ -1868,9 +1816,6 @@ fn decompile_in<L: Lifter>(
     } else {
         rename_typed(&body, &user_typed)
     };
-    // The constants a user-enum-typed global is compared against: named
-    // here, beside the binary's own tables, so a decompilation memoized
-    // under the overlay's fingerprint carries them like any other name.
     let user_enums = user_enum_globals(overlay, &ctx.globals, &names);
     let body = if user_enums.is_empty() {
         body
@@ -1881,12 +1826,6 @@ fn decompile_in<L: Lifter>(
     let value_return = body
         .lines()
         .any(|l| matches!(l.trim().strip_prefix("return "), Some(v) if v != ";"));
-    // The compiler's own return type, where it recorded one. Inference reads
-    // the width of what the body leaves in `rax`, which cannot see a `double`
-    // coming back in `xmm0` at all: `ldexp` inferred as `void`.
-    // INVARIANT: a result every exit writes as `eax` is 32 bits wide, the
-    // upper half zeroed; any other result wider than a byte or a word is the
-    // register, and the register is the machine's word.
     let inferred = match (value_return, ctx.ret_bits) {
         (false, _) => "void",
         (true, _) if f.ret_float == Some(32) => "float",
@@ -1902,9 +1841,6 @@ fn decompile_in<L: Lifter>(
     let ret_ty = recorded_ret.unwrap_or(inferred);
     let typed = L::param_types(&ctx, &code, &succs, entry_block);
     let name = name_of(analysis, overlay, f.entry);
-    // A function the binary defines under a library name takes the
-    // library's prototype, when nothing better states one and the code
-    // agrees with it.
     let library = (ctx.stated.is_none()
         && f.signature.is_none()
         && ctx.debug_ret.is_none()
@@ -1961,22 +1897,13 @@ fn decompile_in<L: Lifter>(
         Some(_) => ctx.debug_ret.clone().unwrap_or_else(|| "void".to_owned()),
         None => ret_ty,
     };
-    // INVARIANT: the hidden result pointer leads the declared parameters
-    // where it sits right after `this`, as an x86 caller passes it; an
-    // arm64 one travels in `x8`, outside the positions, and the signature
-    // lists it last.
     let result_at = ctx.result_param.map(usize::from);
     let lead = usize::from(ctx.this_param)
         + usize::from(result_at.is_some_and(|r| r <= usize::from(ctx.this_param)));
-    // INVARIANT: the shape's count is what every call passes, so it is
-    // what the signature lists; a stack slot the body reads past it reads
-    // as the `arg_` slot it is.
     let count = shape.count;
     let floats = shape.floats();
     let mut params: Vec<String> = (0..count)
         .map(|i| {
-            // A parameter the body never reads still has a name when the
-            // compiler recorded one, and it belongs in the signature.
             let unread = || {
                 ctx.debug_params
                     .get(i)
@@ -1992,9 +1919,6 @@ fn decompile_in<L: Lifter>(
                         .is_some_and(|r| ctx.params.contains(&r))
                 })
                 .map_or_else(unread, |p| names.key(Key::Param(p)));
-            // INVARIANT: `this` is the class the name gives, else the one
-            // its callers and tables typed it as (a 32-bit `thiscall` its
-            // name gives no class).
             if ctx.this_param && i == 0 {
                 let this_class = if class.is_empty() {
                     f.param_hints.get(&0).map_or("void", String::as_str)
@@ -2013,19 +1937,12 @@ fn decompile_in<L: Lifter>(
             } else {
                 word_type(ctx.bitness)
             };
-            // INVARIANT: a slot the body reads as floating point holds no
-            // object, whatever a caller happened to leave in the integer
-            // register.
             let hint = hint.filter(|_| !float_only);
-            // The type the compiler recorded, where no signature declared one,
-            // and failing that what the code shows the parameter to be.
             let recorded = ctx
                 .debug_params
                 .get(i)
                 .and_then(|p| p.type_name.clone())
                 .or_else(|| typed.get(&i).cloned());
-            // INVARIANT: a type an agent stated for the parameter beats
-            // what the callers hint, as a declaration does.
             let stated_ty = recorded.clone().filter(|_| var_typed.contains(&i));
             match (
                 stated_ty
@@ -2280,15 +2197,6 @@ fn decompile_in<L: Lifter>(
             .or_default()
             .push(name);
     }
-    // A stack slot whose address escapes to a call but that the function
-    // never reads or writes directly has no entry in `declared`, yet
-    // `&local_N`, `&home_N` or `&arg_N` appears in the body. Stack parameters
-    // render as `aN`, so any `local_`/`home_`/`arg_` name here is a scratch
-    // slot; declare each so the text is valid C. (`home_N` is the register
-    // home area the caller reserved, and `arg_N` a slot above the return
-    // address the caller left for arguments; the function reuses both, and
-    // neither is a parameter.) A local the debug information named is in the
-    // same state when it only escapes, so it is declared the same way.
     let declared_names: BTreeSet<&str> = by_type
         .values()
         .flatten()
@@ -2331,9 +2239,6 @@ fn decompile_in<L: Lifter>(
     }
     for (addr, ty) in &ctx.globals {
         let g = names.key(Key::Global(*addr, ty.bits()));
-        // INVARIANT: an import's slot is named for the function it holds,
-        // which the text calls by that name like any other function, so it
-        // is no variable to declare; one the overlay renamed still is.
         let import = names.import_at(*addr).is_some_and(|n| n == g);
         if used.contains(g.as_str()) && !import {
             match expr::tls_slot(*addr) {
@@ -2774,7 +2679,6 @@ return f(a1, a2, rax);"
         assert!(!text.contains("0x3f800000"), "{text}");
         assert!(text.contains("0x40000000"), "{text}");
         assert!(!text.contains("= 212"), "{text}");
-        // 0x3f000000 read by movss from where an integer move put it is 0.5f.
         let p = crate::program::Program::raw_x64(&[
             0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00,
             0x3f, // ASM: mov dword [rsp+8], 0x3f000000
@@ -2937,20 +2841,20 @@ g(tmp_5);";
         //      xor rax,0; push rcx; pop rcx; not rax; not rax; xchg rax,rax;
         //      lea rax,[rax]; nop; ret
         let code: &[u8] = &[
-            0xb8, 0x03, 0x00, 0x00, 0x00, // mov eax,3
-            0x48, 0x89, 0xc0, // mov rax,rax
-            0x48, 0x83, 0xc0, 0x00, // add rax,0
-            0x48, 0x83, 0xc8, 0x00, // or rax,0
-            0x48, 0x83, 0xe0, 0xff, // and rax,-1
-            0x48, 0x83, 0xf0, 0x00, // xor rax,0
-            0x51, // push rcx
-            0x59, // pop rcx
-            0x48, 0xf7, 0xd0, // not rax
-            0x48, 0xf7, 0xd0, // not rax
-            0x48, 0x90, // xchg rax,rax
-            0x48, 0x8d, 0x00, // lea rax,[rax]
-            0x90, // nop
-            0xc3, // ret
+            0xb8, 0x03, 0x00, 0x00, 0x00,
+            0x48, 0x89, 0xc0,
+            0x48, 0x83, 0xc0, 0x00,
+            0x48, 0x83, 0xc8, 0x00,
+            0x48, 0x83, 0xe0, 0xff,
+            0x48, 0x83, 0xf0, 0x00,
+            0x51,
+            0x59,
+            0x48, 0xf7, 0xd0,
+            0x48, 0xf7, 0xd0,
+            0x48, 0x90,
+            0x48, 0x8d, 0x00,
+            0x90,
+            0xc3,
         ];
         let mut bytes = vec![0u8; 0x2000];
         bytes[0x1000..0x1000 + code.len()].copy_from_slice(code);
@@ -3016,9 +2920,7 @@ g(tmp_5);";
     #[test]
     fn a_pointer_reading_as_text_is_not_a_string() {
         let mut bytes = vec![0u8; 0x2000];
-        // At 0x2000: the pointer 0x1402d6424, low bytes "$d-@" then 0x01.
         bytes[0x1000..0x1008].copy_from_slice(&0x0000_0001_402d_6424u64.to_le_bytes());
-        // At 0x2010: a genuine null-terminated string.
         bytes[0x1010..0x1016].copy_from_slice(b"hello\0");
         let sections = vec![crate::program::Section {
             name: ".rdata".to_owned(),
@@ -3312,7 +3214,6 @@ g(tmp_5);";
         let b = LIFT_TMP_BASE + 9;
         let input = format!("a = tmp_{a}; b = tmp_{b}; c = tmp_{a};\n");
         let out = normalize_temps(&input);
-        // No readable temps present, so leaked ids start at tmp_1.
         assert_eq!(
             out, "a = tmp_1; b = tmp_2; c = tmp_1;\n",
             "inconsistent remap: {out}"

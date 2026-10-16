@@ -393,7 +393,6 @@ pub fn enum_table(body: &str, params: &[String]) -> Option<EnumTable> {
                 forward.push((k, lit.to_owned()));
             }
         }
-        // `switch (v) {` names the value the `case` lines below test.
         if let Some(v) = switch_opener(line)
             && tested.is_none()
         {
@@ -466,9 +465,6 @@ pub fn enum_table(body: &str, params: &[String]) -> Option<EnumTable> {
             typed.or_else(|| tested.as_ref().map(|v| format!("values of {v}"))),
         )
     };
-    // INVARIANT: a name table maps names to distinct values; one value
-    // under every name is a flag tested the same way in every arm, and its
-    // "members" are the other branch's literals.
     let distinct: BTreeSet<u64> = members.iter().map(|(k, _)| *k).collect();
     if members.len() < MIN_MEMBERS || distinct.len() < 2 {
         return None;

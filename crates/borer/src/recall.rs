@@ -265,7 +265,6 @@ fn line_delta(old: &str, new: &str) -> Option<String> {
             }
             i += 1;
         }
-        // SPEC: GNU diffutils manual, "Detailed Unified": an empty range names the line before it.
         let start = |at: usize, lines: &[&str]| if lines.is_empty() { at } else { at + 1 };
         let _ = writeln!(
             out,
@@ -665,8 +664,6 @@ mod tests {
         let b_tag = tag_line(&r.answer("b", None, AGAIN, body(1)));
         let one = r.bytes / 2;
         let _ = r.answer("c", None, AGAIN, body(2));
-        // Three texts over a budget of just under three: down to three
-        // quarters of it lets go of exactly one, the least recently asked.
         let budget = 3 * one - 1;
         r.keep_within(budget);
         assert!(r.bytes <= budget / 4 * 3, "{} > {budget}", r.bytes);

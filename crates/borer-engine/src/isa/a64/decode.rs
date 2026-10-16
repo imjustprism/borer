@@ -311,9 +311,6 @@ fn mnemonic(opcode: Opcode) -> Mnemonic {
         Opcode::CASH(_) => Mnemonic::Cas(Half),
         Opcode::PRFM | Opcode::PRFUM => Mnemonic::Prfm,
         Opcode::FMOV => Mnemonic::Fmov,
-        // SPEC: Arm ARM (DDI 0487) C7.2: the scalar forms below have their
-        // `v` registers as operands, and every vector form of the same name
-        // has the arrangement operands the decoder leaves unmodeled.
         Opcode::FADD => Mnemonic::Fadd,
         Opcode::FSUB => Mnemonic::Fsub,
         Opcode::FMUL => Mnemonic::Fmul,
@@ -335,9 +332,6 @@ fn mnemonic(opcode: Opcode) -> Mnemonic {
         Opcode::DUP => Mnemonic::Dup,
         Opcode::MOVI => Mnemonic::Movi,
         Opcode::MVNI => Mnemonic::Mvni,
-        // SPEC: Arm ARM (DDI 0487) C7.2 MUL/NEG/ABS (vector): scalar
-        // `mul` is `madd` with a zero addend and scalar `neg` an alias of
-        // `sub`, so these opcodes only arise as vector forms.
         Opcode::MUL => Mnemonic::Mul,
         Opcode::NEG => Mnemonic::Neg,
         Opcode::ABS => Mnemonic::Abs,

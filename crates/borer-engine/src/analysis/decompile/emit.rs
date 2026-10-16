@@ -82,8 +82,6 @@ pub(super) fn emit_block<L: Lifter>(
         } else {
             false
         };
-        // The cycle the emitter asks for next is the one just computed
-        // unless the trampoline pass above emitted blocks.
         if !recursed {
             cyc = found;
         }
@@ -257,11 +255,6 @@ pub(super) fn emit_block<L: Lifter>(
         {
             let inc = format!("{v} += 1;");
             let init_of = format!("{v} = ");
-            // The last body line is the increment and the initializer sits
-            // within the four lines already written: both are said by
-            // looking at those lines only, and the initializer leaves by a
-            // byte splice, so a body of any size costs what a small one
-            // does instead of rebuilding everything written so far.
             let body_wo_nl = buf.trim_end_matches('\n');
             let body_last = body_wo_nl.rfind('\n').map_or(0, |at| at + 1);
             let body_has_inc = body_wo_nl[body_last..] == inc;
@@ -354,9 +347,6 @@ pub(super) fn emit_block<L: Lifter>(
             st.copy_calls = false;
             st.copy_stop = false;
             let owns = |r: &Region, b: usize| r.order.contains(&b) && !r.dups.contains(&b);
-            // An exit that leaves the loop being written (a `break`, a
-            // `return` the loop inlines) or continues it is the loop's to
-            // render; an arm may take any number of those and still join.
             let leaves = |e: usize| st.outside(e) || st.loops.contains(&e);
             let then_ok = then.closed
                 && then.exits.iter().all(|e| *e == f || leaves(*e))
@@ -485,11 +475,6 @@ pub(super) fn emit_block<L: Lifter>(
         }
     }
 
-    // A copied tail (a return, a short one-way chain) that the region
-    // placed right after this block, for the branch into it to fold into
-    // the copy: it is the `if`'s body instead, and the other side follows,
-    // which spares the goto to the other side that the copy would sit in
-    // front of.
     let copied_next = |st: &Emit<'_, L>, b: usize| {
         st.dup_stack.last().is_some_and(|d| d.contains(&b))
             && st
@@ -500,8 +485,6 @@ pub(super) fn emit_block<L: Lifter>(
     for (arm, other, side) in [(t, f, Side::Target), (f, t, Side::Fall)] {
         if copied_next(st, arm) && !copied_next(st, other) {
             let body = copy_chain(ctx, st, arm);
-            // A copy that is nothing but a jump (a trampoline) gains nothing
-            // as an arm: it stays a goto either way.
             if body.lines().any(|l| !is_goto(l.trim_start())) {
                 push_if(out, &guard.render(&names, side), &body, guard.calls());
                 let _ = writeln!(out, "{}", goto(st.start(other)));
@@ -713,13 +696,6 @@ pub(super) fn try_loop<L: Lifter>(
     }
     let min = *body.first()?;
     let max = *body.last()?;
-    // A non-body block entered from outside the range (or from another such
-    // block) is not this loop's to emit: it sits in the address span by
-    // accident, and folding it into the loop body would emit it here —
-    // stamping it emitted in a run that never reaches it — so its real
-    // owner emits nothing. It is skipped: a jump to it from the loop is an
-    // exit like one past the range (a fall-through into it is written as
-    // the jump it is), and the driver places it after the loop.
     let mut skipped: BTreeSet<usize> = BTreeSet::new();
     loop {
         let more: Vec<usize> = (min..=max)
@@ -844,14 +820,6 @@ pub(super) fn try_loop<L: Lifter>(
                     let mut text = String::new();
                     emit_run(ctx, st, region, join_va, join_va, &mut text, depth + 1);
                     let mut body_lines: Vec<String> = text.lines().map(str::to_owned).collect();
-                    // `break;` is appended only when the region does not end on
-                    // a transfer of its own, to carry control to the join. An
-                    // absorbed region that never reaches the join (it returns or
-                    // calls a noreturn on every path, so the join is not among
-                    // its exits) needs no such `break`; appending one anyway
-                    // advertises a loop exit to the join and forces a trailing
-                    // `goto L_join`, which dangles when the join was itself
-                    // absorbed as a dup and never labelled.
                     let reaches_join = join.is_some_and(|j| region.exits.contains(&j));
                     if reaches_join && !body_lines.last().is_some_and(|t| transfers(t)) {
                         body_lines.push("break;".to_owned());
@@ -891,12 +859,6 @@ pub(super) fn try_loop<L: Lifter>(
                 closer.push_str(l);
                 closer.push('\n');
             }
-            // A jump to the latch is a `continue`: in a do-while that is
-            // where `continue` goes. The latch's labels stand right before
-            // the condition and stay (a copy of a body block elsewhere may
-            // jump to one); the cleanup drops a label nothing jumps to. A
-            // `continue` the body ends with (the jump of a block that falls
-            // into the latch) goes where the body's end goes anyway.
             let mut body: Vec<String> = lines.get(..at).unwrap_or(&[]).to_vec();
             let mut latch: Vec<String> = Vec::new();
             while body.last().is_some_and(|l| is_label(l)) {
@@ -1136,10 +1098,6 @@ pub(super) fn follow_trampoline<L: Lifter>(
     if st.code[b].len() != 1 {
         return b;
     }
-    // INVARIANT: a jump that writes out values its target does not carry
-    // is a block of the text, not a detour: skipped, the store the machine
-    // made before the branch is never written on that side (`local_60 =
-    // a1->field_0x10` only in the arm that calls).
     if !phi_keys(
         &st.in_envs[b],
         &st.succs[b],
@@ -1466,7 +1424,6 @@ pub(super) fn emit_switch<L: Lifter>(
         .iter()
         .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
         .map(|(b, _)| *b);
-    // The default that is the continuation is no arm: the switch falls out.
     if let Some(d) = default
         && Some(d) == join
         && regions
@@ -1544,9 +1501,6 @@ pub(super) fn emit_run<L: Lifter>(
     depth: usize,
 ) {
     let mut kept: Vec<String> = Vec::new();
-    // The join follows the region's text, so a branch at the region's end
-    // may fall into it: the order ends with the join, past the blocks the
-    // region writes, and a jump to it from the last of them is elided.
     let mut order = region.order.clone();
     if let Some(j) = join_start.and_then(|va| st.index_of(va))
         && !order.contains(&j)

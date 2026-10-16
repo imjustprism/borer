@@ -1537,8 +1537,6 @@ impl<'p> Script<'p> {
                                 k(a).and_then(|k| invert(b, want ^ k, param, word, depth - 1))
                             }),
                         Bin::Mul => {
-                            // An odd constant has an inverse modulo the
-                            // word, by Newton iteration.
                             let odd = |e: &Ast| k(e).filter(|c| c & 1 == 1);
                             let inv = |c: u64| {
                                 let mut x = 1u64;
@@ -1565,8 +1563,6 @@ impl<'p> Script<'p> {
                                 .flatten()
                         }),
                         Bin::And => {
-                            // A mask of a power-of-two width is a
-                            // truncation the C spells as a cast anyway.
                             let width =
                                 |k: u64| (k & m).checked_add(1).filter(|p| p.count_ones() == 1);
                             k(b).and_then(width)
@@ -2195,11 +2191,6 @@ impl Running<'_, '_> {
                             self.value(e).and_then(|v| match s.sig.ret {
                                 None => Ok(End::Returned(None)),
                                 Some(ty) => {
-                                    // INVARIANT: a value the return holds at
-                                    // a lane narrower than the declared
-                                    // return type leaves the bits above it
-                                    // the machine's own, which no line of
-                                    // the text states.
                                     if v.ty.bits(self.s.word).is_some_and(|b| {
                                         b <= 16 && b < ty.bits(self.s.word).unwrap_or(64)
                                     }) {
@@ -2688,13 +2679,6 @@ impl Running<'_, '_> {
                                     "a read of memory the text handed to an import, which the emulator does not fill",
                                 );
                             }
-                            // INVARIANT: the machine reads the function's
-                            // own unwritten frame bytes as the fresh stack's
-                            // zeros (`Emulator::byte` backs the scratch stack
-                            // with zeros), so the text reads them as zeros
-                            // too: a local no line set is undefined in C and
-                            // zero in the machine, not a fault. A store the
-                            // text dropped still differs as a value.
                             if a >= self.s.frame_low && a < self.s.entry_sp {
                                 0
                             } else {
@@ -2792,9 +2776,6 @@ impl Running<'_, '_> {
                 let Some(ty) = base.ty.pointee() else {
                     return unchecked("an index into a value that is no pointer");
                 };
-                // INVARIANT: a table the text names by its data symbol
-                // (`sqlite3UpperToLower[c]`) is an address, a `void *`,
-                // indexed by bytes as GNU C steps one.
                 let ty = if ty == CTy::of(Base::Void) {
                     CTy::int(8, false)
                 } else {
@@ -3193,11 +3174,6 @@ impl Running<'_, '_> {
             && !self.s.vars.contains_key(n)
             && !self.s.known.contains_key(n)
         {
-            // A call rendered under a `__rdx` suffix is the callee's second
-            // result: the name unwinds to the function it spells and the
-            // callee's `rdx`, not its `rax`, is the answer. The call it is
-            // the second half of ran as the statement before, so its memo
-            // answers without running the callee again.
             if let Some(base) = n.strip_suffix("__rdx").filter(|b| !b.is_empty()) {
                 let values = self.arg_values(args)?;
                 let callee = self.value(&Ast::Name(base.to_owned()))?;
@@ -3213,10 +3189,6 @@ impl Running<'_, '_> {
                     self.second_result = false;
                     out?
                 };
-                // INVARIANT: the machine moves the second result into `rax`
-                // wherever it consumes the pair (`mov rax,rdx`), which is
-                // why the text reads it at all; the emulator's rax then
-                // holds it for the next call's leftover.
                 self.emu.set_register("rax", rdx);
                 return Ok(self.int(rdx, CTy::int(self.word(), false)));
             }
@@ -3251,10 +3223,6 @@ impl Running<'_, '_> {
             );
         }
         let rax = self.run_callee(target, &values, &name)?;
-        // INVARIANT: a callee the lifter reads as handing back a byte or a
-        // word is one whose result the text holds at that width, as C
-        // converts it: the bits above are the callee's leftovers, which the
-        // text never reads.
         Ok(match returned_bits(self.s.analysis, target) {
             Some(bits) => self.int(rax, CTy::int(bits, false)),
             None => self.int(rax, CTy::int(self.word(), false)),
@@ -3320,10 +3288,6 @@ impl Running<'_, '_> {
         } else {
             SENTINEL_64
         };
-        // INVARIANT: the machine's rax and rdx at a call are the last
-        // call's leftovers where no variable names them, as a `push rax`
-        // prologue reads them; the emulator still holds them, for only a
-        // call or a named variable writes a register.
         let leftovers = [
             (Register::RAX, self.emu.register("rax").unwrap_or(0)),
             (Register::RDX, self.emu.register("rdx").unwrap_or(0)),
@@ -3334,9 +3298,6 @@ impl Running<'_, '_> {
         ] {
             self.emu.set_register(r, 0);
         }
-        // INVARIANT: the registers the function itself takes its arguments
-        // in still hold them at a call the machine did not overwrite, as
-        // the text's own statements say; a variable named after one wins.
         for (i, reg) in s.passing.regs.iter().enumerate() {
             if let (Some(v), Some(name)) = (self.args.get(i), full_register_name(*reg)) {
                 self.emu.set_register(name, *v);
@@ -3353,9 +3314,6 @@ impl Running<'_, '_> {
         }
         for (r, left) in leftovers {
             if !self.called {
-                // INVARIANT: before the first call the machine's registers
-                // are the entry's own, which the argument restore just
-                // said; the emulator's zeros are not them.
                 continue;
             }
             if !s.cells.iter().any(|(_, reg, _)| *reg == Some(r)) {
@@ -3406,10 +3364,6 @@ impl Running<'_, '_> {
             Stop::Fault(x) if x < s.call_sp && s.call_sp - x <= STACK_REACH => unchecked(format!(
                 "the call to {name} reads its own stack where nothing was set; in the binary, earlier calls leave values there"
             )),
-            // INVARIANT: a fault at an instruction outside the callee's own
-            // code is a wild jump's landing, an address an out-of-range
-            // table index or a misaligned decode chose; where the machine
-            // romps from there, the text states nothing.
             Stop::Fault(_)
                 if !s.analysis.function(target).is_some_and(|f| {
                     let ip = self.emu.last_ip();

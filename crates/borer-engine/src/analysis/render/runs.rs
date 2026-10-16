@@ -774,9 +774,6 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
                 "both return an address on the stack, which differs with the depth a call is made from".to_owned(),
             );
         }
-        // INVARIANT: a return the text holds at a lane narrower than the
-        // declared width states only that lane; the bits above are the
-        // machine's leftovers there, which no line of the text sets.
         if let Some(lane) = t.ret_lane.filter(|&b| {
             u64::from(b) < u64::from(bits) && text == machine & (1u64 << b).wrapping_sub(1)
         }) {
@@ -787,10 +784,6 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
                 ),
             );
         }
-        // INVARIANT: a run whose imports read an address nothing maps, the
-        // binary's own run reading the same one, consumed memory neither
-        // side states; what each answers through it is its own, not a
-        // claim the text makes.
         if t.emu.api_calls().iter().any(|c| {
             let reads = match c.api.as_str() {
                 "memcpy" | "memmove" => c.args.get(1),
@@ -851,9 +844,6 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
             if x == y {
                 continue;
             }
-            // INVARIANT: past the argument's own bytes only the fact of a
-            // write is a claim the text makes; what a copy of unwritten
-            // frame bytes leaves there depends on the stack's history.
             if i >= own && (*x != 0) == (*y != 0) {
                 continue;
             }

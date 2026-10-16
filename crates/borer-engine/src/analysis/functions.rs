@@ -814,9 +814,6 @@ impl<'a> WalkState<'a> {
         if w.overlong {
             return Some("ran longer than any function");
         }
-        // INVARIANT: a funclet a data pointer names (a C++ unwind action in
-        // `FuncInfo`) runs on its parent's frame and is one; a guess from
-        // code or its gaps that does is the rest of a function.
         if self.seed != Seed::Pointer && self.on_callers_frame(w.func.entry) {
             return Some("runs on another function's frame");
         }
@@ -826,17 +823,10 @@ impl<'a> WalkState<'a> {
         if w.undoes_frame {
             return Some("opens by undoing a frame");
         }
-        // INVARIANT: a byte add alone is outweighed by a pointer or a
-        // relocation that names a start opening the way functions open; a
-        // case label or a table the same relocations name opens like none.
         let named = matches!(self.seed, Seed::Pointer | Seed::Reloc) && w.prologue;
         if w.zero_bytes && (w.surely_data || !named) {
             return Some(w.odd.unwrap_or("decoded an instruction no compiler emits"));
         }
-        // INVARIANT: a pointer in data is a witness on its own, and what it
-        // names may loop for ever or end in a call to something unknown that
-        // never returns; only reading data disqualifies it. A padding or gap
-        // seed has no such witness and must look like a function throughout.
         if matches!(self.seed, Seed::Pointer | Seed::Reloc) {
             return None;
         }
@@ -1143,9 +1133,6 @@ impl<'a> WalkState<'a> {
                 incomplete = true;
                 break;
             }
-            // INVARIANT: every walk of the wave reads the starts as they
-            // stood when the wave began, whichever batch it is in; the
-            // commits of an earlier batch change the starts, not the walks.
             let starts = self.starts.clone();
             let shared = self.shared();
             let known = shared.known(&starts);
@@ -1469,9 +1456,6 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         .collect();
     let mut starts = AddrSet::new(program);
     starts.extend(seeds.iter().copied());
-    // INVARIANT: a relocatable image relocates every pointer it holds, so a
-    // word without a relocation is no pointer, and a relocation is never
-    // where an instruction starts.
     let relocated = program.relocated_words();
     let relocated_all: FxHashSet<u64> = relocated.iter().copied().collect();
     let mut reloc_sites = AddrSet::new(program);
@@ -1482,9 +1466,6 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     for (parent, at) in crate::unwind::continuations(program) {
         extra_roots.entry(parent).or_default().push(at);
     }
-    // INVARIANT: an Itanium landing pad is a label of its function that no
-    // instruction of it reaches - only the unwinder jumps there - so each
-    // one is walked as the parent's own code, the way an `__except` body is.
     let throw_sites = crate::lsda::throw_sites(program);
     for (parent, sites) in &throw_sites {
         for at in sites.iter().filter_map(|s| s.landing_pad) {
@@ -1535,8 +1516,6 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     dedup_sorted(&mut ptr_seeds);
     incomplete |= st.run_guesses(ptr_seeds, Seed::Pointer);
     phases.mark("discover pointer seeds");
-    // INVARIANT: an `__except` filter or handler is named by its function's
-    // scope table, a relocated word too, and belongs to that function.
     let covered = Covered::new(&st.functions);
     let spans = Covered::ranges(&st.functions);
     let mut reloc: Vec<u64> = reloc_seeds(program, &covered)
@@ -1579,8 +1558,6 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
                     let Some(&b) = program.read_va(va, 1).and_then(<[u8]>::first) else {
                         break;
                     };
-                    // SPEC: only these bytes open a `nop` form, and a `nop`
-                    // inside a function aligns a loop head, not a start.
                     let run_end = match b {
                         0xcc => int3_end(program, va, hi),
                         0x90 | 0x66 | 0x0f | 0x2e | 0x8d if between_functions => {
@@ -1597,9 +1574,6 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
                         if guess_gaps && gap_open && va % 16 == 0 && st.fresh(va) {
                             gap_seeds.push(va);
                         }
-                        // INVARIANT: a gap is swept an instruction at a time, so a
-                        // `90` inside a displacement is never read as a `nop`
-                        // and a seed never lands inside an instruction.
                         va = decode_at(program, bitness, va)
                             .filter(|i| i.code() != Code::INVALID && i.next_ip() > va)
                             .map_or(va + 1, |i| i.next_ip().min(hi));
@@ -1751,8 +1725,6 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         if f.name.is_none() && st.frame_helpers.contains(&f.entry) {
             f.name = frame_helper_name(program, bitness, f.entry).map(str::to_owned);
         }
-        // INVARIANT: only the epilogue helper opens by unlinking the
-        // caller's registration; a function of that shape is the helper.
         if f.name.is_none() && f.instr_count <= EPILOG_INSTRS_MAX {
             f.name = epilog_helper_name(program, bitness, f.entry).map(str::to_owned);
         }
@@ -2027,8 +1999,6 @@ impl AddrSet {
     fn next_after(&self, va: u64) -> Option<u64> {
         let spilled = self.spill.range(va.saturating_add(1)..).next().copied();
         let Some(first) = va.saturating_add(1).checked_sub(self.base) else {
-            // INVARIANT: before the bits, the lowest set bit, if any, is the
-            // answer.
             return self
                 .bits
                 .iter()
@@ -2185,9 +2155,6 @@ impl FrameFacts {
             {
                 self.rbp_off = Some((addr, crate::disasm::displacement(instr, bitness)));
             }
-            // INVARIANT: `lea rbp, [rax+K]` after `mov rax, rsp` sets the
-            // frame pointer K bytes from where the stack pointer stood at
-            // the `mov`, which is where a read through `rbp` is placed.
             Mnemonic::Lea
                 if instr.op0_kind() == OpKind::Register
                     && instr.op0_register().full_register() == Register::RBP
@@ -2823,20 +2790,12 @@ fn walk_function(
                 bad_entry |= recs.is_empty() && !in_handlers;
                 continue;
             }
-            // INVARIANT: a relocation site is where the loader patches an
-            // address into an instruction's displacement or immediate: never
-            // where an instruction starts, and inside one nowhere else. A
-            // decode that puts an instruction against a site otherwise is
-            // reading a table in the section as code.
             if reloc_sites.is_some_and(|s| s.contains(addr) || misplaced_site(cursors, s, &instr)) {
                 junk |= linear && !in_handlers;
                 bad_entry |= recs.is_empty() && !in_handlers;
                 continue;
             }
             let next = instr.next_ip();
-            // SPEC: Linux's `int 0x80` system call returns to the next
-            // instruction, as `syscall` does; every other `int` but `int3`
-            // ends its path.
             let flow = match instr.flow_control() {
                 FlowControl::Interrupt
                     if instr.mnemonic() == Mnemonic::Int
@@ -2869,11 +2828,6 @@ fn walk_function(
             if matches!(flow, FlowControl::Call | FlowControl::IndirectCall) {
                 after_call.insert(next);
             }
-            // SPEC: 32-bit code pops the arguments of several calls with one
-            // `add esp, N`, not always right after the last call; only the
-            // size the prologue took (`sub esp, N`) is the frame's release,
-            // and `add esp, eax` releases a dynamic frame: no immediate,
-            // never the size the prologue took.
             let arg_cleanup = instr.mnemonic() == Mnemonic::Add
                 && (after_call.contains(&addr)
                     || (bitness == 32
@@ -2883,16 +2837,11 @@ fn walk_function(
             if tears_frame_down(&instr) && !arg_cleanup {
                 after_epilogue.insert(next);
             }
-            // SPEC: the callee-saved registers restored after the frame's
-            // release are the epilogue too: `add rsp, 0x20; pop rbx; jmp f`.
             if instr.mnemonic() == Mnemonic::Pop && after_epilogue.contains(&addr) {
                 after_epilogue.insert(next);
             }
             let patched = reloc_sites.and_then(|s| Some((s, cursors.constant_offsets(&instr)?)));
             record_data_refs(program, &mapped, &instr, addr, &mut data_refs, patched);
-            // SPEC: a 32-bit SEH frame names its `__except` filters and
-            // handlers only in the scope table it pushes; they are this
-            // function's code.
             if bitness == 32
                 && instr.mnemonic() == Mnemonic::Push
                 && matches!(
@@ -2942,9 +2891,6 @@ fn walk_function(
             {
                 chkstk = Some(callee);
             }
-            // INVARIANT: the 32-bit probe moves the stack pointer itself, so no
-            // `sub esp, eax` follows the call; its body is the same in every
-            // MSVC runtime and is known by its first three instructions.
             if flow == FlowControl::Call
                 && let Some(callee) = target
                 && program.read_va(callee, CHKSTK_X86.len()) == Some(&CHKSTK_X86[..])
@@ -2972,13 +2918,6 @@ fn walk_function(
                     }
                 }
                 FlowControl::ConditionalBranch => {
-                    // INVARIANT: a conditional branch into a known function
-                    // start is a conditional tail call (`if (c) return f();`),
-                    // the same as the unconditional case below: record the
-                    // callee and do not walk into it, so the callee's blocks
-                    // are not absorbed. A target not yet a start is followed
-                    // and remembered, so a later split round re-walks this
-                    // function once it proves one.
                     match target {
                         Some(t) if t == entry => pending.push((t, Via::Branch)),
                         Some(t) if starts.contains(t) || after_padding(program, bitness, t) => {
@@ -2994,24 +2933,10 @@ fn walk_function(
                 }
                 FlowControl::UnconditionalBranch | FlowControl::IndirectBranch => match target {
                     Some(t) if t == entry => pending.push((t, Via::Branch)),
-                    // SPEC: a function that is only `jmp $+2` is a hot-patch
-                    // stub (`__CIcos: jmp short $+2`, then `__CIcos_default`):
-                    // what follows is the function it stands for.
                     Some(t) if addr == entry && t == next && instr.len() == 2 => {
                         callees.insert(t);
                         terminated = true;
                     }
-                    // INVARIANT: a jump into a known function, one made after the
-                    // frame was torn down, or one to an address that opens the
-                    // way a function opens, is a tail call: the target is a
-                    // callee and, uncovered, a seed of its own. The third is what
-                    // finds a function that is only ever tail-jumped to: nothing
-                    // calls it, so nothing else would ever make it a start, and
-                    // the walk would absorb it whole. A short jump to the next
-                    // instruction goes nowhere (the delay-load thunk's `jmp
-                    // $+2`): a jump to another function is a `jmp rel32` the
-                    // linker fills in, and 32-bit code packs a tail callee right
-                    // after its caller that way.
                     Some(t)
                         if starts.contains(t)
                             || (!(declared_interior(program, t)
@@ -3051,24 +2976,10 @@ fn walk_function(
                         pending.push((next, Via::Fall));
                         continue;
                     };
-                    // INVARIANT: a near-call target outside executable,
-                    // file-backed memory is not a function: an obfuscated
-                    // operand, or a byte of decrypted data read as code, can
-                    // encode a call to anywhere in the address space, and
-                    // recording it seeds a phantom empty function that nothing
-                    // can walk. The call still falls through, so the walk goes
-                    // on after it, as phases 2 and 3 gate their seeds.
                     if !super::is_executable_va(program, t) {
                         pending.push((next, Via::Fall));
                         continue;
                     }
-                    // SPEC: 32-bit MSVC calls a `__finally` block on the
-                    // normal path as the unwinder does on the other: a call a
-                    // few bytes forward to code on this function's frame, a
-                    // call to a block the scope table names, or a call right
-                    // after the trylevel is restored (`mov dword [ebp-4], -2`)
-                    // in a function with a scope table; the block is this
-                    // function's and returns to the call.
                     let has_seh = !near_handlers.is_empty() || !far_handlers.is_empty();
                     let finally_call = bitness == 32
                         && epilog_helper_name(program, bitness, t).is_none()
@@ -3089,9 +3000,6 @@ fn walk_function(
                         continue;
                     }
                     callees.insert(t);
-                    // INVARIANT: the helper's own arguments, the frame size
-                    // and the scope table `push N; push table` hands it, are
-                    // no pushes of the frame.
                     let helper_args = frame.pushes.iter().all(|&a| {
                         decode_at(program, bitness, a).is_some_and(|i| is_imm(i.op0_kind()))
                     });
@@ -3105,8 +3013,6 @@ fn walk_function(
                     arg_consts.extend(call_arg_consts(program, bitness, addr, t, &recorded));
                     registrations.extend(class_registration(program, bitness, addr, &recorded));
                     let start_after = next != entry && starts.contains(next);
-                    // INVARIANT: what follows the call is padding or a table (a
-                    // relocated word starts one): nothing returns there.
                     let ends_here = start_after
                         || (next != entry
                             && (is_padding(cursors, next)
@@ -3151,9 +3057,6 @@ fn walk_function(
                     }
                 }
                 FlowControl::Exception => terminated = true,
-                // SPEC: `int3` is padding as often as it is a trap and says
-                // nothing; any other interrupt is a deliberate end, `int 29h`
-                // above all.
                 FlowControl::Interrupt => {
                     if instr.mnemonic() != Mnemonic::Int3 {
                         terminated = true;
@@ -3174,8 +3077,6 @@ fn walk_function(
         pending.extend(handler_roots.drain(..).map(|r| (r, Via::Branch)));
     }
 
-    // INVARIANT: a `nop` a path reaches was walked with it: MSVC also puts
-    // one after calls that return, where a jump joins.
     dedup_sorted(&mut after_noreturn);
     let mut tail_nops = Vec::new();
     for va in after_noreturn {
@@ -3214,10 +3115,6 @@ fn walk_function(
             None => h,
         }
     });
-    // INVARIANT: a function that is one jump through a slot is that slot,
-    // so the slot stays in its fingerprint: left out, every such thunk ran
-    // the same code, and `memcpy`'s was called a clone of 24 thunks to
-    // other imports.
     let body_hash = match recs.as_slice() {
         [(addr, r)] if r.flow == FlowControl::IndirectBranch => cursors
             .decode(*addr)
@@ -3345,9 +3242,9 @@ fn refcount_helper_name(program: &Program, bitness: u32, f: &Function) -> Option
 
 /// Whether a function prints an assertion banner of its own.
 ///
-/// The reporter behind `assert` names itself in the text it prints: Nebula's
-/// says `*** NEBULA ASSERTION ***`, the CRT's `Assertion failed`. Reading the
-/// literals a function references is what tells it from the thousands of
+/// The reporter behind `assert` names itself in the text it prints, for
+/// example `Assertion failed`. Reading the literals a function references
+/// is what tells it from the thousands of
 /// functions that merely call it.
 ///
 /// # Arguments
@@ -3772,7 +3669,7 @@ fn call_arg_consts(
 ///
 /// A registrar is handed the class's name and the four-character code that
 /// identifies it on the wire, and the code is what a message's format is
-/// useless without: with it, `Commands::ActivateGodModeCommand` is `GMTg`
+/// useless without: with it, `Type::Move` is `MOVE`
 /// and its encoder's `1 bit, 32 bits` is a packet a reader can find. The
 /// second argument must be a readable name and the third a constant whose
 /// four bytes are all printable.
@@ -4051,8 +3948,6 @@ fn opens_a_function(cursors: &mut Cursors<'_>, va: u64) -> bool {
                     && second.op1_register().full_register() == Register::RSP
             })
         }
-        // SPEC: an SEH frame opens `push N; push offset scopetable; call
-        // __SEH_prolog4`.
         Mnemonic::Push
             if matches!(
                 first.op0_kind(),
@@ -4081,9 +3976,6 @@ fn opens_a_function(cursors: &mut Cursors<'_>, va: u64) -> bool {
                 && first.op1_kind() == OpKind::Register
                 && first.op0_register() == first.op1_register()
         }
-        // SPEC: a frame without `ebp` opens `sub esp, N` and then saves a
-        // register or loads the stack cookie; `sub esp, 8` in the middle
-        // makes room for a `double` argument and is followed by its store.
         Mnemonic::Sub => {
             is(&first, Register::RSP)
                 && first.op1_kind() != OpKind::Register
@@ -4138,10 +4030,6 @@ fn prologue_like(instr: &Instruction) -> bool {
                 )
         }
         Mnemonic::Mov => {
-            // SPEC: the x64 prologue homes an argument register or parks a
-            // nonvolatile one in the four home slots, [rsp+8] to [rsp+20h].
-            // A store of a volatile register, or to any other slot, is the
-            // middle of a function spilling a local.
             let homing = instr.op0_kind() == OpKind::Memory
                 && instr.memory_base().full_register() == Register::RSP
                 && instr.memory_index() == Register::None
@@ -4319,8 +4207,6 @@ fn odd_instruction(instr: &Instruction, bitness: u32, pe: bool) -> bool {
     ) {
         return true;
     }
-    // SPEC: `push es`, `pop ds` touch the segment registers no compiled
-    // code touches.
     if matches!(instr.mnemonic(), M::Push | M::Pop)
         && instr.op0_kind() == OpKind::Register
         && matches!(
@@ -4331,10 +4217,6 @@ fn odd_instruction(instr: &Instruction, bitness: u32, pe: bool) -> bool {
         return true;
     }
     if instr.mnemonic() == M::Int {
-        // SPEC: `int 3` is a trap, `int 29h` is Windows' `__fastfail`,
-        // `int 2ch`/`2dh` its assertion and debug services, `int 2eh` its
-        // system call when `syscall` is not used, `int 80h` the Linux
-        // system call; anything else is a byte that decodes.
         let n = instr.immediate8();
         return if pe {
             !matches!(n, 3 | 0x29 | 0x2c | 0x2d | 0x2e)
@@ -4342,8 +4224,6 @@ fn odd_instruction(instr: &Instruction, bitness: u32, pe: bool) -> bool {
             !matches!(n, 3 | 0x80)
         };
     }
-    // SPEC: `ret N` pops arguments: a multiple of four, and never pages of
-    // them.
     if instr.mnemonic() == M::Ret && instr.op_count() == 1 {
         let n = instr.immediate16();
         if !n.is_multiple_of(4) || n > 0x1000 {
@@ -4802,11 +4682,6 @@ fn read_jump_table(
             bases.insert(i.op0_register(), i.memory_displacement64());
         }
     }
-    // SPEC: MSVC's x64 switch tables hang off the image base, which a long
-    // function loads once at its top (`lea r15, [__ImageBase]`), before the
-    // window: a base register nothing in the window set is taken for it. A
-    // struct offset from some other pointer lands in the headers, not a
-    // section, and the targets are checked either way.
     if program.is_64 && program.format == crate::program::BinaryFormat::Pe {
         for i in window {
             let base = i.memory_base();
@@ -5026,9 +4901,6 @@ fn table_load(
 ///
 /// The targets in table order, or `None` when no encoding reads and validates.
 fn table_targets(program: &Program, table: u64, entries: usize) -> Option<Vec<u64>> {
-    // INVARIANT: a 32-bit program's absolute table holds four-byte
-    // addresses, `jmp dword [eax*4+table]`; reading it eight bytes at a
-    // time pairs every two cases into one impossible target.
     if !program.is_64 {
         let abs32: Option<Vec<u64>> = (0..entries)
             .map(|i| read_u32(program, table + from_usize(i) * 4).map(u64::from))
@@ -5597,14 +5469,10 @@ fn pointer_seeds(program: &Program, sites: Option<&FxHashSet<u64>>) -> Vec<u64> 
     let word = saturating_usize(pointer_size(program));
     let mut out = Vec::new();
     'sec: for s in &program.sections {
-        // INVARIANT: a section that describes addresses or holds resources
-        // has words that look like code addresses and are not pointers.
         let Some(data) = pointer_section_bytes(program, s, word) else {
             continue;
         };
         for (k, chunk) in data.chunks_exact(word).enumerate() {
-            // INVARIANT: a relocatable image relocates every pointer it
-            // holds; a word the loader leaves alone is a number, or text.
             if sites.is_some_and(|set| !set.contains(&(s.va.0 + from_usize(k * word)))) {
                 continue;
             }
@@ -5675,10 +5543,6 @@ fn record_data_refs(
                 }
                 let target = instr.memory_displacement64();
                 if in_image(target) {
-                    // INVARIANT: an operand scaled by an index register names
-                    // a table's base, and a table is what it is wherever it
-                    // lies, in `.text` after the switch that reads it as
-                    // often as not; its base is no instruction to walk.
                     let kind = if instr.memory_index() == Register::None {
                         match instr.flow_control() {
                             FlowControl::IndirectCall => RefKind::Call,
@@ -5890,10 +5754,6 @@ pub(super) fn build_callers_and_names(program: &Program, functions: &mut [Functi
         dedup_sorted(&mut cs);
         f.callers = cs;
     }
-    // PERF: the lookups below are by address, and a linear scan per function
-    // over every symbol was the slowest single pass of a big PDB-carrying
-    // binary; one pass here makes each a hash lookup. `or_insert` keeps the
-    // first symbol of an address in file order, exactly what `find` returned.
     let mut named: FxHashMap<u64, usize> = FxHashMap::default();
     let mut import_slots: FxHashMap<u64, usize> = FxHashMap::default();
     for (i, s) in program.symbols.iter().enumerate() {
@@ -6074,7 +5934,7 @@ mod tests {
     /// When the banner does not decide it.
     #[test]
     fn an_assert_banner_marks_the_reporter() {
-        let yes = image(b"*** NEBULA ASSERTION ***\0");
+        let yes = image(b"*** ASSERTION FAILED ***\0");
         let a = Analysis::compute(&yes);
         let f = a.function(0x1000).expect("the function is discovered");
         assert!(prints_assert_banner(&yes, 64, f));
@@ -6114,10 +5974,6 @@ mod tests {
     #[test]
     fn scope_tables_name_their_handlers() {
         let words = |w: &[u32]| w.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
-        // SPEC: the header says no GS cookie and an EH cookie at [ebp-0x38];
-        // then one outermost record with a filter at 0x1010 and a handler at
-        // 0x1020, then a second enclosed by the first with a handler only
-        // (`__finally`).
         let table = words(&[
             0xffff_fffe,
             0,
@@ -6134,7 +5990,7 @@ mod tests {
         p.is_64 = false;
         p.arch = Arch::X86;
         for va in [0x1010usize, 0x1020, 0x1030] {
-            p.bytes[va] = 0x90; // nop: something that decodes
+            p.bytes[va] = 0x90;
         }
         assert_eq!(
             seh_scope_roots(&p, 0x2000, 0x1000),
@@ -6156,19 +6012,17 @@ mod tests {
     #[test]
     fn an_except_body_is_its_functions_code() {
         let code = [
-            0x48, 0x83, 0xec, 0x28, // sub rsp, 0x28
-            0x31, 0xc0, // xor eax, eax
-            0x90, 0x90, // the guarded code
-            0x48, 0x83, 0xc4, 0x28, // add rsp, 0x28
-            0xc3, // ret
-            0xcc, 0xcc, 0xcc, // padding
-            0xb8, 0x01, 0x00, 0x00, 0x00, // 0x1010, the __except body: mov eax, 1
-            0x48, 0x83, 0xc4, 0x28, // add rsp, 0x28
-            0xc3, // ret
+            0x48, 0x83, 0xec, 0x28,
+            0x31, 0xc0,
+            0x90, 0x90,
+            0x48, 0x83, 0xc4, 0x28,
+            0xc3,
+            0xcc, 0xcc, 0xcc,
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0x48, 0x83, 0xc4, 0x28,
+            0xc3,
         ];
         let mut p = code_image(&code);
-        // SPEC: the handler, named, and its scope table: one `__try` over
-        // 0x1004..0x1008 with no filter (`EXCEPTION_EXECUTE_HANDLER`).
         p.bytes[0x1800] = 0xc3;
         p.symbols.push(Symbol {
             name: "__C_specific_handler".to_owned(),
@@ -6251,7 +6105,7 @@ mod tests {
             0x74, 0x01, // ASM: je 0x100a
             0x90, // ASM: nop
             0xc3, // ASM: ret
-            0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding
+            0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
             0x31, 0xc0, // ASM: 0x1010: xor eax, eax
             0xc3, // ASM: ret
         ];

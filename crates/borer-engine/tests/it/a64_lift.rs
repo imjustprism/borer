@@ -514,10 +514,6 @@ fn float_conversions_agree_with_the_emulator() {
         assert_eq!(v.checked, 1, "seed {seed}: {tsv}");
         assert!(v.mismatches.is_empty(), "seed {seed}: {tsv}");
         assert_eq!(compared(&v, Fact::Store), 0, "seed {seed}: {tsv}");
-        // INVARIANT: the conversions between widths hold values the tree
-        // reads, while the two integer-to-float results, the two
-        // saturating integer results and the two stores of those stay
-        // unreadable, a cast of an integer and a call not being evaluable.
         assert_eq!(v.facts[&Fact::Vector].unreadable, 3, "seed {seed}: {tsv}");
         assert_eq!(v.facts[&Fact::Register].unreadable, 2, "seed {seed}: {tsv}");
         assert_eq!(v.facts[&Fact::Store].unreadable, 2, "seed {seed}: {tsv}");
@@ -592,9 +588,6 @@ fn packed_float_agrees_with_the_emulator() {
         let tsv = verify_tsv(&v);
         assert_eq!(v.checked, 1, "seed {seed}: {tsv}");
         assert!(v.mismatches.is_empty(), "seed {seed}: {tsv}");
-        // INVARIANT: the two loads, the four packed operations and the
-        // sixteen-byte store hold what the checker cannot read; every
-        // other register, and nothing else, disagrees with nothing.
         assert_eq!(v.facts[&Fact::Vector].unreadable, 6, "seed {seed}: {tsv}");
         assert_eq!(v.facts[&Fact::Store].unreadable, 1, "seed {seed}: {tsv}");
         assert_eq!(v.unreadable, 7, "seed {seed}: {tsv}");

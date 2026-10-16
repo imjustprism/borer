@@ -296,8 +296,6 @@ mod tests {
             url(DEFAULT_SERVER, "app.pdb", "KEY1").as_deref(),
             Some("https://msdl.microsoft.com/download/symbols/app.pdb/KEY1/app.pdb")
         );
-        // A trailing slash is fine, and a plain-http local mirror spells
-        // its own path, so a test against a local store works.
         assert_eq!(
             url("http://127.0.0.1:8000/symbols/", "a.pdb", "K").as_deref(),
             Some("http://127.0.0.1:8000/symbols/a.pdb/K/a.pdb")
@@ -390,7 +388,6 @@ mod tests {
         })
         .expect_err("a traversal path is refused");
         assert!(no_name.contains("names no usable pdb file"), "{no_name}");
-        // The hit: a cached file answers without the fetcher ever running.
         let dest = root
             .join("app.pdb")
             .join(record.symsrv_key())
@@ -441,8 +438,6 @@ mod tests {
         };
         assert!(bare.pdb.is_none(), "a pdb=false load applies nothing");
         let root = scratch("gate");
-        // The wrong download: bytes that are no PDB are refused and
-        // deleted, never renamed into the cache.
         let wrong = obtain(&record, &root, DEFAULT_SERVER, false, |_, dest| {
             std::fs::write(dest, b"not a pdb at all").map_err(|e| e.to_string())
         })
@@ -464,9 +459,6 @@ mod tests {
                 .exists(),
             "the partial download survived"
         );
-        // The matching download: the fake fetcher hands over the real
-        // PDB's bytes, the gate accepts them, and the cache holds the
-        // file a load then applies.
         let landed = obtain(&record, &root, DEFAULT_SERVER, false, |_, dest| {
             std::fs::write(dest, &own).map_err(|e| e.to_string())
         })

@@ -550,9 +550,6 @@ fn constraint_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> (usize, usiz
         if low.contains("add") || low.contains("sub") || low.contains("mul") {
             arithmetic += 1;
         }
-        // A conditional operation: the effect names both a test and an
-        // arithmetic or logic change, or a multiply whose result depends
-        // on an operand the text gates.
         if (low.contains("test") || low.contains("cmp") || low.contains("je"))
             && (low.contains("add")
                 || low.contains("sub")
@@ -708,11 +705,6 @@ fn decode_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> String {
     let Some(bitness) = p.arch.bitness() else {
         return String::new();
     };
-    // The blocks that reach the dispatch site, backwards, capped and handler-
-    // free at the edges: the fetch and its mix live above the jump, the key
-    // rebuild in the tail the handlers return through. A call's fallthrough
-    // is an edge the successor lists do not always carry, and the mixer call
-    // sits exactly past one, so it is added here.
     let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for b in &f.blocks {
         for &s in &b.successors {
@@ -764,7 +756,6 @@ fn decode_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> String {
             lines.extend(disasm::disassemble(code, start, bitness, HANDLER_INSTRS));
         }
     }
-    // The fetch: one base register several operands are loaded through.
     let mut fields: Vec<&'static str> = Vec::new();
     let mut bases: Vec<&'static str> = Vec::new();
     let mut loads: Vec<(String, String)> = Vec::new();
@@ -787,11 +778,6 @@ fn decode_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> String {
         let Some(close) = src[open..].find(']') else {
             continue;
         };
-        // An address of a stream fetch is one base and a small displacement
-        // — `[r9+1]` reads the second byte of an instruction. `[r8+1088h]`
-        // reads a field of a state struct and `[r8+rax*8]` a register-file
-        // slot; both are machine state, not program bytes, and neither is
-        // the fetch.
         let inside = &src[open + 1..open + close];
         let parts: Vec<&str> = inside.split(['+', '-']).filter(|p| !p.is_empty()).collect();
         if parts.len() > 2 {
@@ -832,8 +818,6 @@ fn decode_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> String {
     if fields.is_empty() {
         return String::new();
     }
-    // The mix: an xor pairing a fetched field with a register that is
-    // neither fetched nor the base it was loaded through.
     let mut partners: BTreeSet<&'static str> = BTreeSet::new();
     for l in &lines {
         let text = l.text.as_str();
@@ -860,9 +844,6 @@ fn decode_shape(p: &Program, a: &Analysis, d: &DispatchLoop) -> String {
     if partners.is_empty() {
         return String::new();
     }
-    // The rebuild: a call whose result is xored with a register-file slot
-    // and written back into one of the mixing registers. The call's own
-    // target is the mixer; an indirect call falls back to naming the site.
     for (i, l) in lines.iter().enumerate() {
         if !l.text.starts_with("call ") {
             continue;

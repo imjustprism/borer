@@ -84,7 +84,6 @@ use params::{
 use recall::{Narrow, Recall, SINCE_ARG, Tag, budgeted};
 use strwalk::StringRow;
 
-// ---------------------------------------------------------------- server ----
 
 /// The MCP server state: one loaded program, its lazily computed analysis,
 /// and the annotation overlay.
@@ -1244,7 +1243,6 @@ impl BorerServer {
             } else {
                 format!("; {asked:#x} is inside an instruction, listing from {va:#x}")
             };
-            // PERF: a 16 KiB window covers 256 instructions and bounds the read.
             let code = p.read_va_upto(va, 16 * 1024).ok_or_else(|| {
                 format!(
                     "address {va:#x} is not mapped to file bytes; sections: {}",
@@ -2316,9 +2314,6 @@ impl BorerServer {
         let encoding = encoding.unwrap_or_default();
         let page = Page::new(offset, limit, count_only, 200, 500)?;
         self.with_program(|p| {
-            // A floor call (min_length below the cached default) walks
-            // itself: its rows are nearly all noise, and holding them would
-            // cost the cache an order of magnitude more memory.
             let rows: Vec<StringRow> = if min >= strwalk::WALK_MIN {
                 strwalk::load_or_build(&self.strings, p).rows(encoding, min)
             } else {
@@ -2844,7 +2839,6 @@ impl BorerServer {
                 a.dedupe_clones(&all).into_iter().take(max).collect();
             let matched: Vec<u64> = classes.iter().map(|(e, _)| *e).collect();
             let skipped: std::collections::BTreeMap<u64, Vec<u64>> = classes.into_iter().collect();
-            // PERF: functions decompile independently; fan out, then emit in order.
             let texts: Vec<(u64, String)> = matched
                 .par_iter()
                 .map(|&entry| {
@@ -2864,9 +2858,6 @@ impl BorerServer {
                     room
                 })
                 .count();
-            // PERF: only a cut function's header is read, a check each, in
-            // parallel: the note under its cut counts lines as decompile
-            // numbers them, header included.
             let headers: std::collections::BTreeMap<u64, usize> = texts[..printed]
                 .par_iter()
                 .filter(|(_, text)| text.len() > PER_FN)
@@ -2875,9 +2866,6 @@ impl BorerServer {
                     (*entry, lines)
                 })
                 .collect();
-            // INVARIANT: the header counts the functions the body prints and
-            // the clones of those alone, so a body the total cap cut short
-            // never claims the functions it left out.
             let mut body = String::new();
             let (mut shown, mut folded) = (0usize, 0usize);
             for (entry, text) in &texts[..printed] {
@@ -3178,8 +3166,6 @@ impl BorerServer {
         }
         self.with_analysis(Feature::Discover, |p, a, o| {
             let word: u64 = if p.is_64 { 8 } else { 4 };
-            // A function's address states its prototype, or with `var` one
-            // of its variables, where a data global's applies a type.
             let function = match &address {
                 Some(text) => {
                     let va = self.addr(p, text)?;
@@ -3213,8 +3199,6 @@ impl BorerServer {
                 self.names_changed();
                 return Ok(format!("named {what}"));
             }
-            // The definition half: built and validated against the types
-            // already in the overlay before anything is written.
             let defined = match (&name, &fields, &values) {
                 (Some(n), Some(fs), vs) if !fs.is_empty() => {
                     if vs.is_some() {
@@ -3301,8 +3285,6 @@ impl BorerServer {
                 }
                 (None, _, _) => None,
             };
-            // The application half: a data global's type, resolved and in
-            // a section, or a function's prototype.
             let applied = match &address {
                 Some(text) if function.is_none() => {
                     let spelled = ty.as_deref().ok_or_else(|| {
@@ -3321,8 +3303,6 @@ impl BorerServer {
                         "at a function `type` is its prototype: `int f(Player *p, uint32_t n)`"
                             .to_owned()
                     })?;
-                    // INVARIANT: a plain type at a function is a type for a
-                    // data global given the wrong address, and says so.
                     let proto =
                         borer_engine::analysis::protos::Proto::parse(decl).map_err(|e| {
                             if decl.contains('(') {
@@ -3346,9 +3326,6 @@ impl BorerServer {
                 }
                 None => None,
             };
-            // INVARIANT: an application that also defines its type resolves
-            // against the defined-and-current set, so both halves of one
-            // call agree.
             let mut types = o.types.clone();
             if let Some((n, ty)) = &defined {
                 types.insert(n.clone(), ty.clone());
@@ -3398,8 +3375,6 @@ impl BorerServer {
                 }
             }
             if let Some((va, ty, width)) = &applied {
-                // An applied enum names the constants compared with the
-                // global; every other type names the fields read through it.
                 let renders = if borer_engine::analysis::utypes::named_enum(&types, ty).is_some() {
                     "names its values"
                 } else {
@@ -4063,9 +4038,6 @@ fn row_matches(p: &Program, row: &StringRow, filter: &Filter) -> bool {
     };
     let bytes = needle.as_bytes();
     if !bytes.is_ascii() {
-        // INVARIANT: a span's whole text is printable ASCII, which no
-        // non-ASCII needle is contained in; a user string's text may hold
-        // one, so its row decodes.
         return match row {
             StringRow::Span(_) => false,
             StringRow::Hit(_) => filter.accepts(&row.full_text(&p.bytes)),
@@ -5759,7 +5731,6 @@ impl BorerServer {
     }
 }
 
-// ------------------------------------------------------------- hand-over ----
 
 /// What the worker taking over resumes from, written by the one handing
 /// over to the file the relay names.
@@ -7099,7 +7070,6 @@ mod tests {
             ..super::BorerServer::default()
         };
         let fields = || vec!["0x18:hp:u32".to_owned(), "0x1c:mp:u32".to_owned()];
-        // The dry run states what it would do and writes nothing.
         let out = server
             .set_type(Parameters(SetTypeParams {
                 name: Some("Player".to_owned()),
@@ -7125,7 +7095,6 @@ mod tests {
             }))
             .expect("lists");
         assert!(listed.contains("0 rows (0 type(s), 0 applied)"), "{listed}");
-        // Applying writes both halves, and the listing carries them.
         let out = server
             .set_type(Parameters(SetTypeParams {
                 name: Some("Player".to_owned()),
@@ -7156,7 +7125,6 @@ mod tests {
             "{listed}"
         );
         assert!(listed.contains("applied\t0x2000\t-\tPlayer *"), "{listed}");
-        // A type the language does not spell is refused, naming it.
         let bad = server
             .set_type(Parameters(SetTypeParams {
                 name: None,
@@ -7170,7 +7138,6 @@ mod tests {
             }))
             .expect_err("garbage refused");
         assert!(bad.message.contains("'three of them'"), "{}", bad.message);
-        // A field naming nothing defined is refused before anything is written.
         let mut unknown = fields();
         unknown.push("0x20:next:Missing *".to_owned());
         let bad = server
@@ -7190,7 +7157,6 @@ mod tests {
             "{}",
             bad.message
         );
-        // An address inside a function takes no type.
         let bad = server
             .set_type(Parameters(SetTypeParams {
                 name: None,

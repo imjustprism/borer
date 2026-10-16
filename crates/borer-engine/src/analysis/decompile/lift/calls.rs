@@ -99,10 +99,6 @@ impl<'a> Exec<'_, 'a> {
         let floats = self.callee_float_slots(target);
         let method = self.same_class(target);
         let stack: Vec<Expr> = self.outgoing_stack_args(target);
-        // INVARIANT: an argument read out of its own slot (a word pushed on
-        // two paths that meet at the call, a forwarded parameter) hands the
-        // callee the slot's content, not its address: the slot escapes no
-        // more than a constant pushed there would.
         let word = self.ctx.conv.word;
         let first = self
             .env
@@ -121,11 +117,6 @@ impl<'a> Exec<'_, 'a> {
         let emit = self.emit;
         let mut open = true;
         if self.bitness() == 32 {
-            // INVARIANT: on 32-bit the register arguments are the callee's,
-            // not the caller's convention: `this` for a method by prototype
-            // or by its own first reads, nothing for a C import, and for a
-            // call through a pointer or to a method of the caller's class
-            // `ecx` only when it carries an argument for it.
             let regs32 = match prototype {
                 Some(p) => usize::from(p.this),
                 None => cap.unwrap_or(usize::from(target.is_none() || method)),
@@ -136,12 +127,6 @@ impl<'a> Exec<'_, 'a> {
                 let k = Key::Reg(*r);
                 let value = self.env.vals.get(&k).cloned();
                 let passed = known || self.passes(k, value.as_ref(), i == 0 && method);
-                // INVARIANT: a register slot the callee takes that holds
-                // nothing the text names does not close the list while an
-                // argument follows it, a later register or a stack word:
-                // `sub_405146(g, n)` for a `__thiscall` callee whose `ecx`
-                // a call clobbered reads `g` as `this`. The register is
-                // named for what it is and the arguments keep their places.
                 let follows = !stack.is_empty()
                     || regs.iter().skip(i + 1).any(|r| {
                         let k = Key::Reg(*r);
@@ -182,11 +167,6 @@ impl<'a> Exec<'_, 'a> {
                 continue;
             };
             let k = Key::Reg(r);
-            // INVARIANT: a callee that reads the whole register gets a value
-            // a 32-bit write left there with its upper half clear
-            // ([`Exec::full_value`]): `mov ecx, eax` hands a `uint64_t`
-            // parameter the low half of `a1`, not all of it. One that reads
-            // its low half alone needs no mask the text would only print.
             let value = match self.env.vals.get(&k) {
                 Some(Expr::Var(Key::Slot(o)))
                     if self.env.slot_bits.get(o).is_some_and(|b| *b <= 32) =>
@@ -208,11 +188,6 @@ impl<'a> Exec<'_, 'a> {
             if !open || (takes == Some(false) && !variadic) {
                 continue;
             }
-            // INVARIANT: a callee nothing states the arity of takes a slot
-            // the caller did not set for it while a later slot was set for
-            // the call: `mov rdx, rsi; lea r9, [rsp+0x78]; call
-            // [_vsnwprintf]` passes the caller's own `rcx` and `r8` too,
-            // and closing the list at `rcx` showed the call taking nothing.
             let bridged = stated.is_none() && self.later_set_here(i, floats);
             let takes = if bridged { Some(true) } else { takes };
             if takes != Some(true) && !self.passes(k, value.as_ref(), i == 0 && method) {
@@ -228,12 +203,6 @@ impl<'a> Exec<'_, 'a> {
                     }
                 }
                 None if takes == Some(true) && self.later_argument_binds(i, floats) => {
-                    // INVARIANT: a slot with no value of its own does not
-                    // close the list while a later slot still carries one,
-                    // because the register an earlier call left unknown
-                    // (its second result) is information the call receives
-                    // and the text must not drop the set arguments behind
-                    // it. The register is named for what it is.
                     self.declare(k, self.word_ty());
                     out.push(n.key(k));
                 }
@@ -254,9 +223,6 @@ impl<'a> Exec<'_, 'a> {
             }
         }
         let rendered = if open { stack.len() } else { 0 };
-        // INVARIANT: a list that renders fewer stack words than the callee
-        // reads leaves out arguments the machine passes, which no check of
-        // the ones it shows can vouch for; the recorded call says so.
         self.args_short = self
             .call_stack_args(target)
             .and_then(|c| usize::try_from(c).ok())
@@ -430,16 +396,10 @@ impl<'a> Exec<'_, 'a> {
     /// arguments, when nothing says it does, or when the stack pointer is
     /// not tracked at the call.
     pub(super) fn outgoing_stack_args(&mut self, target: Option<u64>) -> Vec<Expr> {
-        // INVARIANT: an unknown callee on a 32-bit target takes what was
-        // pushed for it since the last call; nothing else says its arity.
         let stated = self.call_stack_args(target);
         let Some(sp) = self.env.sp else {
             return Vec::new();
         };
-        // INVARIANT: a tail jump leaves the return address where a call would
-        // push one, so the callee's arguments start one word up, in the
-        // caller's own argument slots, which were never written here and
-        // read as the parameters they are.
         let word = self.ctx.conv.word;
         let base = if self.forwarding { sp + word } else { sp } + self.ctx.conv.shadow;
         let slot = |i: i64| base + i * word;
@@ -455,8 +415,6 @@ impl<'a> Exec<'_, 'a> {
                 .try_into()
                 .unwrap_or(0)
         };
-        // INVARIANT: a variadic callee takes its fixed arguments and what
-        // the caller set past them: on 32-bit what it pushed for the call.
         let variadic = !self.forwarding && self.callee_variadic(target);
         let count = match stated {
             Some(c) if variadic => i64::from(c).max(set),
@@ -467,10 +425,6 @@ impl<'a> Exec<'_, 'a> {
         let mut out = Vec::new();
         for i in 0..count {
             let o = slot(i);
-            // INVARIANT: the call reads the slot, so a value pushed for it
-            // in a block before the call's is live across the edge, and an
-            // argument the text stored there (written out before an earlier
-            // call that read memory) is read by its name.
             let k = Key::Slot(o);
             let e = match self.env.vals.get(&k).cloned() {
                 Some(e) if self.is_save(&e) => break,
@@ -534,9 +488,6 @@ impl<'a> Exec<'_, 'a> {
     /// named import or nothing declares its prototype.
     pub(super) fn callee_import_arity(&self, target: Option<u64>) -> Option<u8> {
         let p = self.callee_prototype(target)?;
-        // INVARIANT: on a 32-bit target the hidden return pointer is a
-        // stack argument like any other and renders as one; on a 64-bit
-        // target it travels in a register the caller's own code shows.
         let params = if self.bitness() == 32 {
             p.stack_params()
         } else {
@@ -780,12 +731,6 @@ impl<'a> Exec<'_, 'a> {
                     let target = near_target(&i);
                     let reached = target.or_else(|| static_target(&i));
                     match stated_pop(self.ctx, target, reached) {
-                        // INVARIANT: a later `__cdecl` callee of known arity
-                        // takes the words beyond what the code pushed for it
-                        // from before this call, and leaves them all for the
-                        // caller's cleanup: `push n; push src; push ecx;
-                        // call [edx+0Ch]; push eax; call memcpy; add esp,
-                        // 0Ch` gives the virtual one word, `memcpy` three.
                         Some(0) => {
                             let wants = self.callee_stack_args(reached).unwrap_or(0);
                             let beyond = wants.saturating_sub(pushed);
@@ -830,8 +775,6 @@ impl<'a> Exec<'_, 'a> {
                         }) => {}
                 (FlowControl::Return, _, _) => {
                     let args = self.args_pushed.saturating_sub(stated);
-                    // INVARIANT: `ret` finds the return address at the entry
-                    // stack pointer, so what the call popped closes the gap.
                     let exact = self
                         .env
                         .sp
@@ -975,8 +918,6 @@ impl<'a> Exec<'_, 'a> {
         operands: &[Key],
     ) -> Vec<Key> {
         let volatile = self.clobbered(keep_rax);
-        // INVARIANT: the dataflow pass renders no arguments, so it holds
-        // every argument register the convention has.
         let mut held: Vec<Key> = if self.emit {
             values
                 .iter()
@@ -997,13 +938,7 @@ impl<'a> Exec<'_, 'a> {
             self.forget_volatile(*r);
         }
         let start = self.effects.len();
-        // INVARIANT: an operand nothing reads after the transfer is read
-        // before the callee runs, so neither its source nor memory changing
-        // under it calls for it to be written out.
         let only_read_here: Vec<Key> = held.iter().copied().filter(|k| self.dead_reg(*k)).collect();
-        // PERF: the window's extra needs are the keys inserted here and
-        // taken back out after it, so the map itself is never cloned
-        // around the call.
         let mut added: Vec<Key> = Vec::new();
         if let Some(m) = self.regs_needed.as_mut() {
             for k in &held {
@@ -1044,10 +979,6 @@ impl<'a> Exec<'_, 'a> {
                 Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => None,
             })
             .filter(|o| {
-                // INVARIANT: a slot the call renders as an argument is not
-                // written out before it, exposed or not: the call passes the
-                // value, and the store would say the same thing twice. Nor
-                // is a register's save: no callee reads it.
                 !self.rendered_arg(*o, rendered)
                     && !self
                         .env
@@ -1444,9 +1375,6 @@ impl<'a> Exec<'_, 'a> {
             va = i.next_ip();
             if i.flow_control() == FlowControl::Return {
                 if let Some(sp) = self.env.sp {
-                    // INVARIANT: the return pops the address the helper pushed
-                    // back; a slot below the stack pointer is dead, and left
-                    // lazy it would render at the next call as a copy.
                     self.env.vals.remove(&Key::Slot(sp));
                     self.env.slot_bits.remove(&sp);
                     self.env.sp = Some(sp + word);
@@ -1653,11 +1581,6 @@ impl<'a> Exec<'_, 'a> {
         let through = self.target_registers(instr);
         let mut args = self.argument_registers();
         args.extend_from_slice(operands);
-        // INVARIANT: the outgoing argument slots are the call's own
-        // operands, rendered at the call when it takes them. They lie below
-        // the caller's return address: a home slot above it is the caller's
-        // own, written out like any local (`home_8 += a2;` before the call
-        // that passes `home_8`).
         let window = self.env.sp.map(|sp| {
             let lo = sp + self.ctx.conv.shadow;
             lo..(lo + STACK_ARG_WINDOW).min(0)
@@ -1680,9 +1603,6 @@ impl<'a> Exec<'_, 'a> {
         if pending.is_empty() {
             return;
         }
-        // PERF: the window's extra needs are the keys inserted here and
-        // taken back out after it, so the map itself is never cloned
-        // around the call.
         let mut added: Vec<Key> = Vec::new();
         if let Some(m) = self.regs_needed.as_mut() {
             for k in args.iter().chain(&through) {
@@ -1696,12 +1616,6 @@ impl<'a> Exec<'_, 'a> {
             if !self.env.vals.contains_key(&k) {
                 continue;
             }
-            // INVARIANT: a rebased argument reads the variable's new value,
-            // so it sits out the write-out, which would protect it as a
-            // reader of the old one. A dead register is not written out, so
-            // an argument that reads its value keeps reading it whole
-            // (`cmovne rbx, rax; mov rdx, rbx` passes the selection, not
-            // the `rbx` from before it).
             if self.dead_reg(k) {
                 self.forget_dead(k);
             } else {
@@ -1894,9 +1808,6 @@ impl<'a> Exec<'_, 'a> {
             self.inline_frame_helper(t, instr.ip(), false);
             return;
         }
-        // INVARIANT: a callee whose whole body is `ret` changes no register,
-        // no flag and no memory, and pops nothing, so on a 64-bit target,
-        // where no argument was pushed for it, the call is no statement.
         if let Some(t) = direct
             && self.returns_at_once(t)
             && !self.passes_text()
@@ -1914,11 +1825,6 @@ impl<'a> Exec<'_, 'a> {
             );
             return;
         }
-        // INVARIANT: a callee that only loads registers and then returns or
-        // jumps on changes exactly those registers and the flags; lifting its
-        // loads here and then calling where it jumps (or nothing, for a
-        // return) is the same program, with the forwarded call or the loaded
-        // value in the text instead of a name that hides it.
         if let Some(t) = direct
             && !self.in_place
             && let Some((loads, on)) = self.trivial_callee(t)
@@ -1950,10 +1856,6 @@ impl<'a> Exec<'_, 'a> {
             }
             return;
         }
-        // INVARIANT: a stack probe or a cookie check leaves every register
-        // and the flags as it found them and touches nothing the function
-        // reads, so it clobbers nothing; it renders as the call it is, with
-        // the frame size the probe was handed in `eax` as its argument.
         if let Some(t) = direct
             && crate::analysis::render::preserves_registers(
                 self.ctx.analysis,
@@ -1983,12 +1885,6 @@ impl<'a> Exec<'_, 'a> {
             );
             return;
         }
-        // INVARIANT: a thunk that ends in a jump through a register (the
-        // CFG dispatcher's `jmp rax`, reached through jumps and read-only
-        // pointers) calls what the register holds with the arguments as
-        // they stand, so the call is that indirect call; a read-only
-        // pointer to a function that only returns (the CFG check's
-        // default) leads to a call that changes nothing.
         match self.dispatch(instr) {
             Some(Dispatch::Through(reg)) => {
                 if self.emit {
@@ -2078,12 +1974,6 @@ impl<'a> Exec<'_, 'a> {
             self.args_pushed = args;
             popped
         });
-        // INVARIANT: a 32-bit callee whose `ret` pops nothing is `__cdecl`,
-        // so the words its caller cleans up right after the call are the
-        // arguments it was passed, however many its body reads by name:
-        // `push`ing twelve words to a `StringCchPrintf` that reads three
-        // before its `va_start` passes twelve, not three and nine dead
-        // stores. A call that pops what it was handed states no cleanup.
         let cdecl = target
             .filter(|_| self.bitness() == 32 && stated == Some(0) && !self.bodyless(target))
             .and_then(|t| callee_shape(self.ctx, t))
@@ -2106,9 +1996,6 @@ impl<'a> Exec<'_, 'a> {
             None => None,
         };
         let (mut args, mut rendered, mut values) = self.args_for(reached);
-        // INVARIANT: a helper takes its operands on the x87 stack and
-        // nothing else, so they are its arguments, in the order they were
-        // pushed, and they leave the stack with the call.
         if let x87::Call::Helper(e) = x87 {
             let n = self.names();
             args = (0..usize::from(e.takes))
@@ -2126,9 +2013,6 @@ impl<'a> Exec<'_, 'a> {
                 self.pop_st();
             }
         }
-        // INVARIANT: the argument window of an unknown callee on a 32-bit
-        // target is what was pushed for it, the same words the call renders,
-        // so their slots are not written out a second time before it.
         let arity = self.call_stack_args(reached);
         let preserves = self.callee_preserves_rax(target);
         let mut held = self.target_registers(instr);
@@ -2137,16 +2021,6 @@ impl<'a> Exec<'_, 'a> {
         let narrow_result = (!preserves && !self.ctx.ret_float)
             .then(|| self.callee_partial_lane(target))
             .flatten();
-        // INVARIANT: a callee whose exits WRITE only a low lane of `rax`
-        // leave the bits above that lane as the caller had them, so the
-        // value after the call is the merge, not the lane alone. The merge
-        // names the caller's own `rax` inline, and the line runs after the
-        // call: a parameter or a stack slot nothing exposes keeps its
-        // value across a C call, a register reads its own written-out
-        // variable, and anything else (a pending register value, an
-        // exposed slot) the call may change cannot be named there. No
-        // value is written out for the merge, so the lines around the
-        // call fold as they did without it.
         let merge_pre = narrow_result
             .filter(|_| {
                 self.result_read(next, rest, raxk, Key::Reg(Register::XMM0))
@@ -2168,8 +2042,6 @@ impl<'a> Exec<'_, 'a> {
                 .as_ref()
                 .is_some_and(|v| written.iter().any(|k| v.receiver.mentions(*k)));
         let virt = if stale && !matches!(x87, x87::Call::Helper(_)) {
-            // INVARIANT: the receiver is read again with the arguments, so
-            // the call shows the object they pass.
             let virt = virt.and_then(|v| {
                 self.virtual_target(instr)
                     .filter(|now| now.entry == v.entry)
@@ -2184,9 +2056,6 @@ impl<'a> Exec<'_, 'a> {
         } else {
             virt
         };
-        // INVARIANT: a 32-bit callee that takes floats in vector registers
-        // reads them at the call, which clobbers them, so they are among
-        // its arguments, after the ones the convention passes.
         let n = self.names();
         args.extend(sse_args(sse).map(|r| {
             let k = Key::Reg(r);
@@ -2274,9 +2143,6 @@ impl<'a> Exec<'_, 'a> {
         let rax = self.canon(self.rax());
         let xmm0 = Key::Reg(Register::XMM0);
         let (uses_result, float_result) = self.result_read(next, rest, rax, xmm0);
-        // INVARIANT: a callee known to return a float leaves one in `xmm0`
-        // for a later call to take as its argument, which the liveness
-        // reads only at [`VECTOR_ARG_LANE`].
         let float_result = float_result
             || (!uses_result
                 && self.bitness() == 64
@@ -2295,13 +2161,6 @@ impl<'a> Exec<'_, 'a> {
             && st0.is_none()
             && !self.preserved.contains(&xmm0)
             && (self.bitness() == 64 || sse.returns);
-        // INVARIANT: a declared callee hands back what its declaration
-        // says, so a register it says holds no result binds none; where the
-        // code reads one anyway, the text follows the declaration and the
-        // call says the code contradicts it.
-        // INVARIANT: a call following a stated prototype passes the
-        // arguments it lists; where the callee's body reads past them, the
-        // ones the text leaves out are passed all the same.
         if let Some(t) = target.filter(|t| self.ctx.overlay.prototypes.contains_key(t))
             && callee_shape(self.ctx, t).is_some_and(|s| s.stated_short.is_some())
         {
@@ -2321,15 +2180,6 @@ impl<'a> Exec<'_, 'a> {
             None if float_result => Some(xmm0),
             None => uses_result.then_some(rax),
         };
-        // INVARIANT: a direct callee whose callers read `rdx` after the
-        // call hands a second result back there (`edx`, the high half of a
-        // 64-bit integer, on a 32-bit target), so the call renders its own
-        // second assignment under the callee's name with a `__rdx` suffix,
-        // and the register is the variable it lands in. It renders only
-        // where this caller reads `rdx`: a read of `rax` alone says nothing
-        // of the second register. A callee the type library declares hands
-        // back what its declaration says, one register unless the type is
-        // wider than the word.
         let rdxk = self.canon(Register::RDX);
         let next_rdx = next.is_some_and(|n| self.reads_register(n, rdxk));
         let uses_rdx = if rest.is_empty() {
@@ -2347,9 +2197,6 @@ impl<'a> Exec<'_, 'a> {
                 .function(t)
                 .is_some_and(|f| f.hands_back_rdx)
         });
-        // INVARIANT: a stated prototype returns one value, so a callee
-        // stated with one hands nothing back in `rdx`; a caller that reads
-        // it anyway contradicts the prototype.
         let stated_callee = target.is_some_and(|t| self.ctx.overlay.prototypes.contains_key(&t));
         if stated_callee && hands_back_rdx && uses_rdx {
             self.stated_contradicted = true;
@@ -2372,12 +2219,6 @@ impl<'a> Exec<'_, 'a> {
             rdxk
         });
         let call = format!("{callee}({})", args.join(", "));
-        // INVARIANT: the second result's line repeats the arguments, which
-        // the machine read before the call; where one names the variable
-        // the first result lands in (`rax = f(rax); rdx = f__rdx(rax);`
-        // read the new `rax`), the call's result goes to a temporary first
-        // and the variable takes it after both lines, so neither line
-        // reads a value the other replaced.
         let call = match (second.take(), result) {
             (Some(line), Some(k)) if names_variable(&args, &self.names().key(k)) => {
                 let t = self.fresh_tmp(if k == xmm0 { Ty::F64 } else { self.word_ty() });
@@ -2421,9 +2262,6 @@ impl<'a> Exec<'_, 'a> {
                 self.note_result_type(target, reached, &callee);
             }
             let n = self.names();
-            // INVARIANT: a narrow result merges into the caller's `rax`,
-            // the merge naming what held it before the call, so the
-            // machine's upper bits survive the call in the text too.
             emit_line!(
                 self,
                 match (&merge_pre, narrow_result) {
@@ -2461,31 +2299,16 @@ impl<'a> Exec<'_, 'a> {
             None
         };
         self.after_call(preserves);
-        // INVARIANT: a second result the text assigns lands in `rdx` under
-        // its own name, as a write of it would: the next call passes it
-        // there (`rax = f(); rdx = f__rdx(); g(rax, rdx)`, a Rust slice
-        // handed on whole), where a register the call only clobbered ends
-        // the argument list. On a 32-bit target `edx` is the high half of a
-        // 64-bit result, which no convention passes on as an argument.
         if let Some(k) = result2.filter(|_| self.bitness() == 64) {
             self.env.clobbered.remove(&k);
             self.env.touched.insert(k);
         }
         self.preserved.clear();
-        // INVARIANT: the merged value spans the whole register, so it is
-        // no narrow lane a later byte copy can drop the mask for.
         if let Some(b) = bits.filter(|_| merge_pre.is_none()) {
             self.env.narrow.insert(rax, b);
         }
         let popped = match (stated, unstated) {
             (Some(bytes), _) => i64::from(bytes),
-            // INVARIANT: a callee that states no pop on a 32-bit target pops
-            // what was pushed for it ([`Exec::stack_after`] reads the code
-            // after it for what it took) unless the caller cleans up right
-            // after, which is how `__cdecl` reads; a `__thiscall` virtual
-            // call leaves the caller nothing to do, and read as `__cdecl` it
-            // would leave the stack pointer a word off at the next join,
-            // where the two paths disagree and every later argument is lost.
             (None, Some(words)) if !cleans_stack(next) => i64::from(words) * self.ctx.conv.word,
             (None, _) => 0,
         };
@@ -3051,9 +2874,6 @@ impl<'a> Exec<'_, 'a> {
         let Expr::Deref(recv, _) = vptr else {
             return None;
         };
-        // INVARIANT: a stack slot's address is no object: `call [esi]` with
-        // `esi` loaded from a parameter slot calls the pointer the parameter
-        // holds, not a method of the slot.
         if matches!(*recv, Expr::Sp(_)) {
             return None;
         }

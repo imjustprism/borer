@@ -174,18 +174,10 @@ fn missing_calls(
     }
     let mut out = Vec::new();
     for c in &function.callees {
-        // Two functions can overlap: a compiler gives the tail of one its own
-        // unwind entry, so an address is both a block of the outer function
-        // and an entry of its own. A jump to it is internal control flow
-        // there, which the renderer spells as a `goto` and elides when the
-        // block follows, so no name is expected in the text.
         if function.blocks.iter().any(|b| b.start == *c) {
             continue;
         }
         let name = name_of(analysis, overlay, *c);
-        // A frame helper is inlined: the prologue builds the caller's frame
-        // and the epilogue tears it down, and neither is a call the text
-        // shows.
         if name.contains("operator ")
             || matches!(
                 name.as_str(),
@@ -214,12 +206,7 @@ fn missing_calls(
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn the_same_binary_answers_the_same_bytes_twice() {
     let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
-    // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
-    // Two analyses of one program, in one process, so the addresses the
-    // allocator hands out differ between them. A map keyed on a pointer, or
-    // iterated in hash order, answers differently here and nowhere else.
     let first = Analysis::compute(&p);
     let second = Analysis::compute(&p);
     let o = Overlay::default();
@@ -231,7 +218,6 @@ fn the_same_binary_answers_the_same_bytes_twice() {
     let entry = p
         .entry
         .unwrap_or_else(|| first.functions.first().map_or(0, |f| f.entry));
-    // One case per renderer family, so a difference names the renderer.
     let cases: Vec<(&str, String, String)> = vec![
         ("binary_info", p.summary(), p.summary()),
         (
@@ -312,8 +298,6 @@ fn the_same_binary_answers_the_same_bytes_twice() {
 fn decompile_every_function() {
     let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
     let t0 = std::time::Instant::now();
-    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
-    // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
     let a = Analysis::compute(&p);
     let analysis_t = t0.elapsed();
@@ -472,8 +456,6 @@ fn the_arm64_text_agrees_with_the_machine_on_every_block() {
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn decompile_every_function_named() {
     let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
-    // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
     let a = Analysis::compute(&p);
     let o = Overlay::default();
@@ -593,8 +575,6 @@ fn integrity_helpers_catch_the_known_shapes() {
 fn the_lifter_agrees_with_the_emulator_on_every_block() {
     use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
     let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
-    // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
     let a = Analysis::compute(&p);
     let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
@@ -661,8 +641,6 @@ fn the_text_agrees_with_the_emulator_on_every_block() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
-    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
-    // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
     let a = Analysis::compute(&p);
     let entries: Vec<u64> = a
@@ -778,8 +756,6 @@ fn the_final_text_agrees_with_the_emulator_on_small_functions() {
     let only = std::env::var("BORER_DOGFOOD_ONLY")
         .ok()
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok());
-    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
-    // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
     let a = Analysis::compute(&p);
     let o = Overlay::default();
@@ -925,8 +901,6 @@ fn every_value_the_text_reads_is_set_or_an_input() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(40);
-    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
-    // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
     let a = Analysis::compute(&p);
     let o = Overlay::default();
@@ -1006,8 +980,6 @@ fn the_structure_agrees_with_the_cfg_on_every_function() {
         Structure, check, check_all, decompile_with_cfg_all,
     };
     let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    // INVARIANT: the sweeps pin the engine's own dev-shape facts, and the
-    // dev build's PDB sits beside the corpus binary.
     let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
     let a = Analysis::compute(&p);
     let o = Overlay::default();

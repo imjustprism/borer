@@ -412,9 +412,6 @@ pub(super) fn merge_return_assignments(lines: &mut Vec<String>) -> bool {
             .and_then(|r| r.split_once(" = "))
             .filter(|(v, _)| is_plain_var(v))
             .filter(|(v, _)| {
-                // The next line is exactly this assignment returned: said
-                // without building the string, the comparison runs per
-                // assignment line of every cleanup pass.
                 let next = lines[i + 1].as_bytes();
                 next.len() == pad.len() + v.len() + 8
                     && next.starts_with(pad.as_bytes())
@@ -699,10 +696,6 @@ pub(super) fn dataflow<L: Lifter>(
                     });
                 }
                 let Some(mut m) = m else { continue };
-                // INVARIANT: a temporary the dataflow pass took within a
-                // predecessor's run names nothing the text sets (the emission
-                // numbers its own), so a value that reads one is the
-                // predecessor's to write out, like any value the join lost.
                 let parked: Vec<Key> = m
                     .vals
                     .iter()
@@ -739,9 +732,6 @@ pub(super) fn dataflow<L: Lifter>(
                         }
                     }
                     let mut written = phis;
-                    // The membership mirror keeps the `written` order (the
-                    // loop below walks it) while the contains test stops
-                    // being a scan of every key so far.
                     let mut marked: BTreeSet<Key> = written.iter().copied().collect();
                     let mut at = 0;
                     while let Some(&k) = written.get(at) {

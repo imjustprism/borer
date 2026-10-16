@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 
-// ---- identifiers ----
 
 /// Tells whether a character can be part of an identifier.
 ///
@@ -237,7 +236,6 @@ pub(super) fn float_like(text: &str) -> bool {
         })
 }
 
-// ---- numbers ----
 
 /// Parses a decimal or `0x` hexadecimal number at the start of `s`.
 ///
@@ -276,7 +274,6 @@ pub(super) fn parse_const(t: &str) -> Option<u64> {
         .map(|(v, _)| v)
 }
 
-// ---- indentation ----
 
 /// Returns the indentation width of a line in spaces.
 ///
@@ -309,7 +306,6 @@ pub(super) fn header_len<S: AsRef<str>>(lines: &[S]) -> usize {
         .unwrap_or(lines.len())
 }
 
-// ---- labels and gotos ----
 
 /// The label of the block starting at `va`: `L_<va>:`.
 ///
@@ -431,7 +427,6 @@ pub(super) fn jumps_contained(
     })
 }
 
-// ---- transfers ----
 
 /// Tells whether a trimmed line begins with the keyword `kw` as a whole
 /// word: `return;` and `return x;` begin with `return`, a call to a
@@ -493,7 +488,6 @@ pub(super) fn continues(t: &str) -> bool {
     t == "continue;" || t.ends_with(" continue;")
 }
 
-// ---- structure ----
 
 /// The condition of an `if (COND) {` line.
 ///
@@ -694,7 +688,6 @@ fn at_level(line: &str, open: &mut Vec<Scope>, nesting: Nesting) -> bool {
     !inside && !edge
 }
 
-// ---- statements ----
 
 /// Splits a plain assignment line `lhs = rhs;`.
 ///
@@ -825,7 +818,6 @@ pub(super) fn ends_in_operator(head: &str) -> bool {
     })
 }
 
-// ---- brackets ----
 
 /// The index of the `)` closing the `(` at `open`.
 ///

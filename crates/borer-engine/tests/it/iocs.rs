@@ -24,8 +24,6 @@ fn planted() -> Program {
         "HKEY_CURRENT_USER\\Software\\Demo\\Run",
         "\\\\.\\pipe\\demo_channel",
         "admin@mail.example.org",
-        // Negatives: a version, a truncated URL, a source path's extension,
-        // a scoped identifier, the loopback address (kept, marked benign).
         "demo version 1.2.3.4 build",
         "see http:// for details",
         "lib/core/src/main.rs",
@@ -38,7 +36,6 @@ fn planted() -> Program {
         bytes[at..at + s.len()].copy_from_slice(s.as_bytes());
         at += s.len() + 1;
     }
-    // A base64 string whose plaintext is a URL, decoded by the second pass.
     let b64 = "aHR0cHM6Ly9iNjQuZXhhbXBsZS5uZXQveA==";
     bytes[at..at + b64.len()].copy_from_slice(b64.as_bytes());
     bytes[0x1000] = 0xc3; // ASM: ret
@@ -101,7 +98,6 @@ fn negatives_are_rejected_and_the_common_marked_benign() {
             .any(|l| l.contains("127.0.0.1") && l.contains("benign-common")),
         "the loopback is not benign: {out}"
     );
-    // The bare matcher agrees on the hardest negatives.
     assert!(classify("demo version 1.2.3.4 build").is_empty());
     assert!(classify("see http:// for details").is_empty());
 }
@@ -151,7 +147,6 @@ fn a_filter_narrows_and_the_listing_is_deterministic() {
     let first = iocs_tsv(&p, &a, &o, "").expect("iocs");
     let second = iocs_tsv(&p, &a, &o, "").expect("iocs");
     assert_eq!(first, second);
-    // The indicators of a plain image with no planted text are none.
     let mut plain_bytes = vec![0xccu8; 0x1000];
     plain_bytes[0] = 0xc3; // ASM: ret
     let plain = Program::raw(

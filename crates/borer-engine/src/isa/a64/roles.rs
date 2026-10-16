@@ -173,8 +173,6 @@ impl Insn {
             | Mnemonic::Prfm
             | Mnemonic::Ccmp
             | Mnemonic::Ccmn
-            // INVARIANT: the floating-point compares write the flags only;
-            // their register operands are all sources.
             | Mnemonic::Fcmp
             | Mnemonic::Fcmpe
             | Mnemonic::Fccmp
@@ -188,8 +186,6 @@ impl Insn {
                 r.write(ops[1]);
                 r.rest(ops, 2);
             }
-            // INVARIANT: the register list is an operand the decoder
-            // leaves unmodeled, so the word names the registers.
             Mnemonic::Ld1 => {
                 r.rest(ops, 1);
                 let Some((first, count)) = super::ld1_group(self.word) else {

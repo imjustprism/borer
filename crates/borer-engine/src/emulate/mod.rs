@@ -645,12 +645,8 @@ fn packed(l: u128, r: u128, bits: u32, f: impl Fn(u64, u64) -> u64) -> u128 {
 /// `(eax, ebx, ecx, edx)` for the leaf; zeros for a leaf not modeled.
 fn cpuid_leaf(leaf: u32) -> (u32, u32, u32, u32) {
     match leaf {
-        // Highest basic leaf, then "GenuineIntel" split across ebx, edx, ecx.
         0 => (0x16, 0x756e_6547, 0x6c65_746e, 0x4965_6e69),
-        // A Skylake-era family/model/stepping, then the usual feature bits.
-        // Bit 31 of ecx, "running under a hypervisor", is clear.
         1 => (0x0009_06e9, 0x0010_0800, 0x7ffa_fbbf, 0x0fab_fbff),
-        // Extended leaves: the highest one, and no long-mode surprises.
         0x8000_0000 => (0x8000_0008, 0, 0, 0),
         0x8000_0001 => (0, 0, 0x0000_0121, 0x2c10_0800),
         _ => (0, 0, 0, 0),
@@ -1237,13 +1233,13 @@ impl<'a> Emulator<'a> {
     /// so the value a later `popf` restores round-trips the flags that gate
     /// branches.
     fn rflags(&self) -> u64 {
-        let mut v = 0x2u64; // bit 1 reads as one on every x86.
-        v |= u64::from(self.flags_carry); // CF, bit 0
-        v |= u64::from(self.flags_parity) << 2; // PF
-        v |= u64::from(self.flags_zero) << 6; // ZF
-        v |= u64::from(self.flags_sign) << 7; // SF
-        v |= u64::from(self.flags_df) << 10; // DF
-        v |= u64::from(self.flags_over.unwrap_or(false)) << 11; // OF
+        let mut v = 0x2u64;
+        v |= u64::from(self.flags_carry);
+        v |= u64::from(self.flags_parity) << 2;
+        v |= u64::from(self.flags_zero) << 6;
+        v |= u64::from(self.flags_sign) << 7;
+        v |= u64::from(self.flags_df) << 10;
+        v |= u64::from(self.flags_over.unwrap_or(false)) << 11;
         v
     }
 
@@ -1844,11 +1840,8 @@ impl<'a> Emulator<'a> {
         let void = calls::returns_void(api, format);
         let rcx = self.api_arg(0);
         let rv: u64 = if api.starts_with("GetModuleHandle") || api.starts_with("LoadLibrary") {
-            // A module handle is the image base; a loaded library, a non-null
-            // handle the bootstrap only checks against zero.
             self.program.image_base
         } else if api.starts_with("GetProcAddress") {
-            // Hand back a fresh stub so a later call through it is modeled too.
             let next = self.api_stub(self.apis.len());
             self.apis.insert(next, format!("{full}:resolved"));
             next
@@ -1864,8 +1857,6 @@ impl<'a> Emulator<'a> {
                 requested
             }
         } else if api == "memcpy" || api == "memmove" {
-            // Copy through the machine's own memory, gathered before it is
-            // written so an overlapping move behaves as the OS's does.
             let (src, len) = (self.api_arg(1), self.api_arg(2));
             let len = usize::try_from(len).unwrap_or(0).min(API_COPY_MAX);
             let bytes: Vec<u8> = (0..len)
@@ -1886,8 +1877,6 @@ impl<'a> Emulator<'a> {
         } else if api.starts_with("VirtualProtect") || api.starts_with("VirtualFree") {
             1
         } else if api == "AddVectoredExceptionHandler" || api == "RemoveVectoredExceptionHandler" {
-            // A non-zero handle: the registration succeeded and nothing is
-            // attached, so the handler is never asked to run.
             1
         } else {
             self.neutralize(api).unwrap_or_default()
@@ -1902,8 +1891,6 @@ impl<'a> Emulator<'a> {
         });
         let ret = self.pop()?;
         if self.bitness == 32 {
-            // INVARIANT: a 32-bit Win32 API pops its own arguments, and a
-            // stub that leaves them makes every later slot one frame off.
             use crate::analysis::prototypes::{arity, is_c_runtime, msvc_prototype};
             let dll = full.split_once('!').map_or("", |(d, _)| d);
             let popped = msvc_prototype(api)
@@ -1973,24 +1960,16 @@ impl<'a> Emulator<'a> {
     fn neutralize(&mut self, api: &str) -> Option<u64> {
         let (rdx, r8, r9) = (self.api_arg(1), self.api_arg(2), self.api_arg(3));
         let rv = match api {
-            // No debugger is present, and the flag the caller reads says so.
             "IsDebuggerPresent" => 0,
             "CheckRemoteDebuggerPresent" => {
                 self.write_zeros(rdx, 4);
                 1
             }
-            // ProcessDebugPort, ProcessDebugObjectHandle and ProcessDebugFlags
-            // all read as "not being debugged" when the buffer is zero, except
-            // ProcessDebugFlags, where zero means "being debugged"; the classes
-            // that matter here are the pointer-shaped ones, so zero the buffer
-            // and report success.
             "NtQueryInformationProcess" | "ZwQueryInformationProcess" => {
                 self.write_zeros(r8, r9.min(64));
                 0
             }
-            // ThreadHideFromDebugger succeeds and changes nothing.
             "NtSetInformationThread" | "ZwSetInformationThread" => 0,
-            // A thread context with no hardware breakpoints set.
             "NtGetContextThread" | "ZwGetContextThread" | "GetThreadContext" => {
                 self.write_zeros(rdx.wrapping_add(0x48), 0x30);
                 1
@@ -2067,7 +2046,6 @@ impl<'a> Emulator<'a> {
             )
         });
         let rv = match nr {
-            // mmap: a fresh mapped region, or the address it hinted at.
             9 => {
                 if rdi == 0 {
                     self.allocate()
@@ -2075,9 +2053,7 @@ impl<'a> Emulator<'a> {
                     rdi
                 }
             }
-            // write: a successful write returns its count.
             1 => rdx,
-            // exit and exit_group: the kernel does not come back.
             60 | 231 => return Err(Stop::Exited),
             _ => 0,
         };
@@ -2090,7 +2066,6 @@ impl<'a> Emulator<'a> {
             caller: i.ip(),
         });
         if self.bitness == 64 {
-            // SPEC: Intel SDM Vol. 2B, SYSCALL: RCX takes the return address and R11 RFLAGS.
             self.set_reg(Register::RCX, i.next_ip());
             self.set_reg(Register::R11, self.rflags());
         }
@@ -2108,7 +2083,6 @@ impl<'a> Emulator<'a> {
     ///
     /// The register value, or zero past the sixth argument.
     fn syscall_arg(&self, n: usize) -> u64 {
-        // SPEC: Linux x86-64 syscall ABI: rdi, rsi, rdx, r10, r8, r9.
         let regs = [
             Register::RDI,
             Register::RSI,
@@ -2231,18 +2205,10 @@ impl<'a> Emulator<'a> {
             if self.oep.is_none() && self.mem.is_dirty(ip) {
                 self.oep = Some(ip);
             }
-            // Code never executes on the scratch stack. A transfer that lands
-            // there is a derailed run, not an instruction to decode: a
-            // protector's VM computed a target from a value the emulator could
-            // not reproduce, or a corrupted return address sent control into
-            // the stack. Reported apart from a plain fault so the ceiling reads
-            // as "the guard won", not "a byte was unmapped".
             if self.on_stack(ip) {
                 break Stop::Derailed(ip);
             }
             let Some(bytes) = self.fetch(ip) else {
-                // In best-effort mode a jump into unmapped memory returns to
-                // the caller instead of ending the run.
                 if self.permissive && self.reg(Register::RSP) < self.stack_base {
                     self.steps += 1;
                     self.skipped += 1;
@@ -2259,9 +2225,6 @@ impl<'a> Emulator<'a> {
             let mut decoder = Decoder::with_ip(self.bitness, &bytes, ip, DecoderOptions::NONE);
             let instr = decoder.decode();
             if instr.is_invalid() {
-                // Reading data as code is a jump gone wrong, not an
-                // instruction the machine lacks, and saying so keeps the two
-                // apart when a run's stop reason is the diagnosis.
                 let executable = self.program.section_at(ip).is_some_and(|s| s.executable);
                 break if executable {
                     Stop::Unmodeled(format!("bad opcode at {ip:#x}"))
@@ -2331,9 +2294,6 @@ impl<'a> Emulator<'a> {
         let m = i.mnemonic();
         match m {
             Mnemonic::Nop | Mnemonic::Endbr64 | Mnemonic::Endbr32 => Ok(None),
-            // Hints and fences change nothing a single thread can observe. A
-            // wait for a store (`mwaitx`) may wake at once, as the hardware
-            // is allowed to, so a spin that polls after it just goes round.
             Mnemonic::Pause
             | Mnemonic::Prefetch
             | Mnemonic::Prefetchw
@@ -2355,7 +2315,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Lahf => {
-                // SPEC: Intel SDM Vol. 2A, LAHF: AH = SF:ZF:0:AF:0:PF:1:CF; the adjust flag is not tracked and reads clear.
                 let ah = u64::from(self.flags_sign) << 7
                     | u64::from(self.flags_zero) << 6
                     | u64::from(self.flags_parity) << 2
@@ -2407,12 +2366,6 @@ impl<'a> Emulator<'a> {
                 self.push(v)?;
                 Ok(None)
             }
-            // SPEC: Intel SDM Vol. 2A, PUSH A/PUSHD: the eight general
-            // registers are pushed in order EAX, ECX, EDX, EBX, ESP (the
-            // value BEFORE the push), EBP, ESI, EDI, and POP A restores
-            // them in reverse, skipping the stored ESP. Every packer stub
-            // opens with this pair, so an unpack run dies at its first
-            // instruction without them.
             Mnemonic::Pusha | Mnemonic::Pushad => {
                 let order = [
                     Register::EAX,
@@ -2435,7 +2388,6 @@ impl<'a> Emulator<'a> {
                 for _ in 0..8 {
                     restored.push(self.pop()?);
                 }
-                // The fifth word is the stored ESP, which POP A discards.
                 let order = [
                     Register::EDI,
                     Register::ESI,
@@ -2469,12 +2421,6 @@ impl<'a> Emulator<'a> {
                 self.flags_df = m == Mnemonic::Std;
                 Ok(None)
             }
-            // A protector saves and restores the flags around its own
-            // arithmetic (`pushf; ...; popf`). The model tracks the flags that
-            // gate branches, so it assembles them into a `RFLAGS` word to push
-            // and reads them back on the pop; the bits it does not track
-            // (parity, adjust) ride along as zero, which no depacker branches
-            // on. Without this the run stops at the first `pushfq` a VM uses.
             Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
                 self.push(self.rflags())?;
                 Ok(None)
@@ -2484,9 +2430,6 @@ impl<'a> Emulator<'a> {
                 self.set_rflags(v);
                 Ok(None)
             }
-            // `movsd` and `cmpsd` name both a string step and an SSE scalar
-            // operation; the string forms address memory through rsi and rdi
-            // and take no vector register.
             _ if let Some((op, bytes)) = StringOp::of(m)
                 && !has_vector_operand(i) =>
             {
@@ -2512,7 +2455,6 @@ impl<'a> Emulator<'a> {
                     !a
                 };
                 if m == Mnemonic::Neg {
-                    // SPEC: Intel SDM Vol. 2B, NEG: the flags are those of `0 - operand`, CF set unless the operand is 0.
                     let bits = op_bits(i);
                     let a = mask(a, bits);
                     self.flags_carry = a != 0;
@@ -2551,7 +2493,6 @@ impl<'a> Emulator<'a> {
                     self.jumps.push((i.ip(), to));
                 }
                 if self.unresolved(to) {
-                    // A tail call into an unresolved import: return instead.
                     self.skipped += 1;
                     return self.pop().map(Some);
                 }
@@ -2560,7 +2501,6 @@ impl<'a> Emulator<'a> {
             Mnemonic::Call => {
                 let to = self.transfer_target(i)?;
                 if self.unresolved(to) {
-                    // An unresolved import call: skip it, yielding zero.
                     self.skipped += 1;
                     self.set_reg(Register::RAX, 0);
                     return Ok(None);
@@ -2573,12 +2513,6 @@ impl<'a> Emulator<'a> {
                     return Err(Stop::Returned);
                 }
                 let ra = self.pop()?;
-                // `ret imm16` releases the caller's stack arguments after
-                // popping the return address: stdcall/`__fastcall` cleanup, and
-                // the form a packer's depacker returns through
-                // (`push...; call unpack; ret 20h`). Dropping the immediate
-                // leaves the caller reading its own pushed words back as the
-                // callee's results, so the next indirect call faults on a zero.
                 if i.op_count() == 1 {
                     let sp = self.narrow(
                         self.reg(Register::RSP)
@@ -2630,10 +2564,6 @@ impl<'a> Emulator<'a> {
             Mnemonic::Movlps | Mnemonic::Movlpd | Mnemonic::Movhps | Mnemonic::Movhpd
                 if i.op_count() == 2 =>
             {
-                // A half move carries eight bytes into or out of one half of
-                // a vector register and leaves the other half alone. A
-                // compiler emits them to load a pair of values, so a routine
-                // that copies a small struct stops on the first one.
                 let high = matches!(m, Mnemonic::Movhps | Mnemonic::Movhpd);
                 let shift = if high { 64 } else { 0 };
                 let half = u128::from(u64::MAX) << shift;
@@ -2658,9 +2588,6 @@ impl<'a> Emulator<'a> {
             | Mnemonic::Pmuludq
                 if i.op_count() == 2 =>
             {
-                // Lane-wise integer math. A keystream written with SSE mixes
-                // several words at once, so a decoder built this way stops on
-                // its first packed add without these.
                 let l = self.vector_operand(i, 0)?;
                 let r = self.vector_operand(i, 1)?;
                 let v = match m {
@@ -2683,8 +2610,6 @@ impl<'a> Emulator<'a> {
             | Mnemonic::Psrlq
                 if i.op_count() == 2 =>
             {
-                // A lane shifted by its own width or more becomes zero, as
-                // the hardware does, which is what a mixer's rotate relies on.
                 let l = self.vector_operand(i, 0)?;
                 let count = if i.op_kind(1) == OpKind::Immediate8 {
                     u64::from(i.immediate8())
@@ -2715,11 +2640,6 @@ impl<'a> Emulator<'a> {
             | Mnemonic::Punpckhqdq
                 if i.op_count() == 2 =>
             {
-                // Interleave one half of each operand, lane by lane: the
-                // destination's lane, then the source's, then the next pair.
-                // `l` takes the low halves and `h` the high ones. A widening
-                // step in vector code is built from these, so a routine that
-                // packs bytes into words stops on the first one.
                 let bits = lane_bits(m);
                 let high = matches!(
                     m,
@@ -2743,8 +2663,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Cbw | Mnemonic::Cwde | Mnemonic::Cdqe => {
-                // Widen the accumulator, keeping its sign: the step a compiler
-                // emits before using a smaller value as an index.
                 let (from, to): (usize, usize) = match m {
                     Mnemonic::Cbw => (1, 2),
                     Mnemonic::Cwde => (2, 4),
@@ -2756,8 +2674,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Cwd | Mnemonic::Cdq | Mnemonic::Cqo => {
-                // Spread the accumulator's sign across the remainder register,
-                // which is what a signed division is set up with.
                 let bytes: usize = match m {
                     Mnemonic::Cwd => 2,
                     Mnemonic::Cdq => 4,
@@ -2770,10 +2686,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Packuswb | Mnemonic::Packsswb | Mnemonic::Packssdw if i.op_count() == 2 => {
-                // Narrow every lane to half its width, clamping rather than
-                // truncating, the destination's lanes first and the source's
-                // after. The counterpart to an unpack, and the last step of a
-                // vector routine that writes bytes.
                 let wide: u32 = if m == Mnemonic::Packssdw { 32 } else { 16 };
                 let narrow = wide / 2;
                 let signed_out = m != Mnemonic::Packuswb;
@@ -2804,8 +2716,6 @@ impl<'a> Emulator<'a> {
             Mnemonic::Shufps | Mnemonic::Shufpd
                 if i.op_count() == 3 && i.op_kind(2) == OpKind::Immediate8 =>
             {
-                // The destination's own lanes fill its low half and the
-                // source's fill its high half, each picked by the immediate.
                 let dst = self.vector_operand(i, 0)?;
                 let src = self.vector_operand(i, 1)?;
                 let sel = i.immediate8();
@@ -2826,8 +2736,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Pshufd if i.op_count() == 3 && i.op_kind(2) == OpKind::Immediate8 => {
-                // Each pair of immediate bits picks one of the source's four
-                // doublewords for the matching slot of the destination.
                 let src = self.vector_operand(i, 1)?;
                 let sel = i.immediate8();
                 let mut v = 0u128;
@@ -2839,11 +2747,6 @@ impl<'a> Emulator<'a> {
                 self.vector_store(i, v)?;
                 Ok(None)
             }
-            // The x87 stack, as far as a decoder or a checksum uses it. The
-            // hardware keeps eighty-bit values; this keeps doubles, which is
-            // exact for every integer these routines load and enough for the
-            // rest, and the difference cannot reach an address or a byte of
-            // recovered text.
             Mnemonic::Fld | Mnemonic::Fild => self.fpu_load(i, m),
             Mnemonic::Fld1 | Mnemonic::Fldz => {
                 self.fpush(if m == Mnemonic::Fld1 { 1.0 } else { 0.0 });
@@ -2856,7 +2759,6 @@ impl<'a> Emulator<'a> {
             | Mnemonic::Fisttp => self.fpu_store(i, m),
             _ if let Some(op) = FpuArith::of(m) => self.fpu_arith(i, m, op),
             Mnemonic::Fxch => {
-                // SPEC: Intel SDM Vol. 2A, FXCH: swaps ST(0) with ST(i), ST(1) with no operand; iced lists ST(i) last.
                 let other = match i.op_count() {
                     0 => 1,
                     n => st_depth_mod8(i.op_register(n - 1)),
@@ -2876,12 +2778,10 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Frndint => {
-                // SPEC: Intel SDM Vol. 2A, FRNDINT: rounds ST(0) to an integer as the control word says, to nearest even by default, the mode `fistp` here stores with.
                 self.set_st(0, self.st(0).round_ties_even());
                 Ok(None)
             }
             Mnemonic::Fsincos | Mnemonic::Fptan => {
-                // SPEC: Intel SDM Vol. 2A, FSINCOS and FPTAN: an operand of magnitude 2^63 or more sets C2 and leaves the stack alone; any other is replaced by its sine and the cosine pushed, or by its tangent and 1.0 pushed.
                 let x = self.st(0);
                 if !(x.is_finite() && x.abs() >= FPU_TRIG_RANGE) {
                     let (below, top) = if m == Mnemonic::Fsincos {
@@ -2895,10 +2795,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Cpuid => {
-                // Answered as a plain machine, the same way the anti-debug
-                // APIs are: a routine that branches on a feature bit gets a
-                // usable answer, and one looking for a hypervisor is told
-                // there is none. The values are fixed, so a run is repeatable.
                 let leaf = lo32(self.reg(Register::RAX));
                 let (a, b, c, d) = cpuid_leaf(leaf);
                 self.set_reg(Register::RAX, u64::from(a));
@@ -2910,16 +2806,8 @@ impl<'a> Emulator<'a> {
                 }
                 Ok(None)
             }
-            // A `syscall` in an ELF is a numbered Linux kernel entry, and the
-            // kernel it asks is modeled the way an unlisted import is: the
-            // few numbers a bootstrap leans on are answered with intent, the
-            // rest benignly, and the exit numbers end the program.
             Mnemonic::Syscall => self.linux_syscall(i),
             Mnemonic::Movlhps | Mnemonic::Movhlps if i.op_count() == 2 => {
-                // Both move one half of the source into the other half of the
-                // destination: `movlhps` the source's low into the
-                // destination's high, `movhlps` the source's high into the
-                // destination's low.
                 let lo = u128::from(u64::MAX);
                 let src = self.vector_operand(i, 1)?;
                 let dst = self.vector_operand(i, 0)?;
@@ -2932,13 +2820,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Cmpxchg if i.op_count() == 2 && i.op_kind(1) == OpKind::Register => {
-                // The accumulator is compared with the destination: equal and
-                // the source lands in the destination, unequal and the
-                // destination lands in the accumulator. A lock-free update
-                // spins on this, so answering it lets the loop leave.
-                // SPEC: Intel SDM Vol. 2A, CMPXCHG: the flags are those of
-                // comparing the accumulator with the destination, every
-                // flag the compare sets and not the zero flag alone.
                 let bits = op_bits(i);
                 let dst = mask(self.operand(i, 0)?, bits);
                 let src = self.operand(i, 1)?;
@@ -2963,7 +2844,6 @@ impl<'a> Emulator<'a> {
                 }
                 let w = operand_bytes(i, 0);
                 let bits = width_bits(w);
-                // SPEC: Intel SDM Vol. 2A, DIV/IDIV: a byte divisor divides AX, a wider one DX:AX, EDX:EAX or RDX:RAX; a quotient that does not fit is #DE.
                 let dividend = if w == 1 {
                     u128::from(self.reg_sized(Register::AX))
                 } else {
@@ -2986,9 +2866,6 @@ impl<'a> Emulator<'a> {
                 let Some((q, r)) = fits else {
                     return Err(Stop::Unmodeled(String::from("divide overflow")));
                 };
-                // INVARIANT: the quotient fits the operand width and the
-                // remainder is smaller than the divisor, so each register
-                // write keeps every bit it holds.
                 self.set_reg_sized(sized_ax(w), q);
                 self.set_reg_sized(remainder(w), r);
                 Ok(None)
@@ -3001,9 +2878,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Rdtsc | Mnemonic::Rdtscp => {
-                // A small, monotonic tick: a timing check compares two reads
-                // and treats a large gap as a debugger, so a counter that
-                // barely advances is what an unwatched process sees.
                 self.ticks = self.ticks.wrapping_add(0x40);
                 let t = self.ticks;
                 self.set_reg(Register::RAX, t & 0xffff_ffff);
@@ -3015,12 +2889,6 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Xadd if i.op_count() == 2 && i.op_kind(1) == OpKind::Register => {
-                // The destination takes the sum and the source takes the old
-                // destination, which is how a lock-free counter reads its own
-                // previous value. `store` honours the operand's width.
-                // SPEC: Intel SDM Vol. 2B, XADD: the flags are those of the
-                // addition itself, so a signed branch after it reads the
-                // sum's sign and overflow, not whatever sat in the flags.
                 let bits = op_bits(i);
                 let a = mask(self.operand(i, 0)?, bits);
                 let b = mask(self.operand(i, 1)?, bits);
@@ -3046,8 +2914,6 @@ impl<'a> Emulator<'a> {
                     && i.op0_kind() == OpKind::Register
                     && i.op0_register().size() == 4
                 {
-                    // SPEC: in 64-bit mode a 32-bit `cmovcc` clears the upper
-                    // half of its destination even when the condition is false.
                     let v = self.reg_sized(i.op0_register());
                     self.store(i, v)?;
                 }
@@ -3071,9 +2937,6 @@ impl<'a> Emulator<'a> {
     /// When an operand cannot be read or written.
     fn alu(&mut self, i: &Instruction, op: Alu) -> Result<Option<u64>, Stop> {
         let bits = op_bits(i);
-        // Mask to the operand width so the carry is the carry out of that
-        // width, not of a 64-bit register: `add dl,dl` with dl >= 0x80 must
-        // set carry, which a packer's bit reader depends on.
         let a = u128::from(mask(self.dest(i)?, bits));
         let b = u128::from(mask(self.source(i)?, bits));
         let cin = u128::from(self.flags_carry);
@@ -3096,9 +2959,6 @@ impl<'a> Emulator<'a> {
         let r = mask(r, bits);
         self.flags_carry = carry;
         self.set_flags(r, bits);
-        // Signed overflow: an add overflows when equal signs produce a
-        // different one, a subtract when opposite signs produce the sign of
-        // the subtrahend. The logical operations clear it.
         let signed = |v: u128| v >> (bits - 1) & 1 == 1;
         self.flags_over = Some(match op {
             Alu::Add | Alu::Adc => signed(a) == signed(b) && signed(u128::from(r)) != signed(a),
@@ -3126,12 +2986,8 @@ impl<'a> Emulator<'a> {
     fn shift(&mut self, i: &Instruction, op: Shift) -> Result<Option<u64>, Stop> {
         let a = self.dest(i)?;
         let bits = op_bits(i);
-        // The count is taken modulo the operand's width, not always 64: a
-        // 32-bit shift by 33 shifts by one, and reading it as 33 clears the
-        // register instead.
         let modulo = if bits == 64 { 0x3f } else { 0x1f };
         let count = lo32(self.source(i)? & modulo);
-        // A shift by zero leaves every flag alone, so nothing may be written.
         if count == 0 {
             self.store(i, mask(a, bits))?;
             return Ok(None);
@@ -3141,7 +2997,6 @@ impl<'a> Emulator<'a> {
         let (r, carry) = match op {
             Shift::Shl => (
                 v.wrapping_shl(count),
-                // The last bit shifted out of the top.
                 count <= bits && (v >> (bits - count)) & 1 == 1,
             ),
             Shift::Shr => (v.wrapping_shr(count), (v >> (count - 1).min(63)) & 1 == 1),
@@ -3157,9 +3012,6 @@ impl<'a> Emulator<'a> {
                 let r = rotate_right(v, count, bits);
                 (r, (r >> top) & 1 == 1)
             }
-            // A rotate through carry turns the carry flag into one more bit
-            // of the operand, so the rotation is over `bits + 1` places. A
-            // bignum add and a compiler's 128-bit shift are built from these.
             Shift::Rcl | Shift::Rcr => {
                 let width = bits + 1;
                 let n = count % width;
@@ -3176,14 +3028,6 @@ impl<'a> Emulator<'a> {
         let r = mask(r, bits);
         self.flags_carry = carry;
         self.set_flags(r, bits);
-        // SPEC: Intel SDM Vol. 2B, SHL/SHR/SAR/ROL/ROR/RCL/RCR: the
-        // overflow of a shift or rotate is defined only for a count of
-        // one. A left shift and the rotates xors the result's sign with
-        // the carry out, a right shift xors the halved operand's sign with
-        // the result's (the zero shifted in), an arithmetic right shift
-        // clears it, and `ror`/`rcr` xor the result's two top bits. A
-        // larger count leaves it undefined, which stays unknown here
-        // rather than guessed.
         let msb = |x: u64| x >> top & 1 == 1;
         self.flags_over = (count == 1).then(|| match op {
             Shift::Shl | Shift::Rol | Shift::Rcl => msb(r) != carry,
@@ -3312,8 +3156,6 @@ impl<'a> Emulator<'a> {
     fn scalar_move(&mut self, i: &Instruction, width: Width) -> Result<(), Stop> {
         let dst_vec = i.op0_kind() == OpKind::Register && xmm_slot(i.op0_register()).is_some();
         let src_vec = i.op_kind(1) == OpKind::Register && xmm_slot(i.op_register(1)).is_some();
-        // Between registers `movss`/`movsd` merge the lane into the rest of
-        // the destination; `movd`/`movq` zero the rest.
         let merge = matches!(i.mnemonic(), Mnemonic::Movss | Mnemonic::Movsd);
         let mask = width.lane();
         if dst_vec {
@@ -3484,8 +3326,6 @@ impl<'a> Emulator<'a> {
     ///
     /// The bytes to decode, or `None` when neither memory nor image backs `ip`.
     fn fetch(&self, ip: u64) -> Option<Vec<u8>> {
-        // The window saturates rather than wrapping: a range whose start is
-        // past its end is not a valid range to ask a set for.
         let window = ip..ip.saturating_add(16);
         if !self.mem.any_dirty(window.clone())
             && self.patched.range(window).next().is_none()
@@ -3895,10 +3735,6 @@ impl<'a> Emulator<'a> {
         } else {
             size
         };
-        // Only `scas`/`cmps` consult the zero flag to stop early; `movs`,
-        // `stos` and `lods` repeat the full count. iced reports `repe` for the
-        // same `f3` byte that means plain `rep` on the latter, so the early
-        // exit is gated on the instruction actually being a compare.
         let zf_sensitive = matches!(op, StringOp::Scas | StringOp::Cmps);
         let repe = zf_sensitive && i.has_repe_prefix();
         let repne = zf_sensitive && i.has_repne_prefix();
@@ -4424,10 +4260,10 @@ mod tests {
     fn vector_moves_and_clears_run() {
         // ASM: xorps xmm0,xmm0; movaps xmm1,xmm0; movss xmm2,xmm1; ret
         let code: &[u8] = &[
-            0x0f, 0x57, 0xc0, // xorps xmm0,xmm0
-            0x0f, 0x28, 0xc8, // movaps xmm1,xmm0
-            0xf3, 0x0f, 0x10, 0xd1, // movss xmm2,xmm1
-            0xc3, // ret
+            0x0f, 0x57, 0xc0,
+            0x0f, 0x28, 0xc8,
+            0xf3, 0x0f, 0x10, 0xd1,
+            0xc3,
         ];
         returned(image(code, &[]));
     }
@@ -4441,10 +4277,10 @@ mod tests {
     fn setcc_writes_the_condition() {
         // ASM: xor eax,eax; cmp eax,0; sete al; ret
         let code: &[u8] = &[
-            0x31, 0xc0, // xor eax,eax
-            0x83, 0xf8, 0x00, // cmp eax,0
-            0x0f, 0x94, 0xc0, // sete al
-            0xc3, // ret
+            0x31, 0xc0,
+            0x83, 0xf8, 0x00,
+            0x0f, 0x94, 0xc0,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(1));
@@ -4465,11 +4301,11 @@ mod tests {
     fn a_division_divides_the_whole_signed_dividend() {
         // ASM: mov eax,-7; cdq; mov ecx,2; idiv ecx; ret
         let code: &[u8] = &[
-            0xb8, 0xf9, 0xff, 0xff, 0xff, // mov eax,-7
-            0x99, // cdq
-            0xb9, 0x02, 0x00, 0x00, 0x00, // mov ecx,2
-            0xf7, 0xf9, // idiv ecx
-            0xc3, // ret
+            0xb8, 0xf9, 0xff, 0xff, 0xff,
+            0x99,
+            0xb9, 0x02, 0x00, 0x00, 0x00,
+            0xf7, 0xf9,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(0xffff_fffd), "quotient -3");
@@ -4477,21 +4313,21 @@ mod tests {
 
         // ASM: mov ax,0x107; mov cl,2; div cl; ret
         let code: &[u8] = &[
-            0x66, 0xb8, 0x07, 0x01, // mov ax,0x107
-            0xb1, 0x02, // mov cl,2
-            0xf6, 0xf1, // div cl
-            0xc3, // ret
+            0x66, 0xb8, 0x07, 0x01,
+            0xb1, 0x02,
+            0xf6, 0xf1,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(0x0183), "263 / 2: al 131, ah 1");
 
         // ASM: mov edx,2; mov eax,0; mov ecx,1; div ecx; ret
         let code: &[u8] = &[
-            0xba, 0x02, 0x00, 0x00, 0x00, // mov edx,2
-            0xb8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
-            0xb9, 0x01, 0x00, 0x00, 0x00, // mov ecx,1
-            0xf7, 0xf1, // div ecx
-            0xc3, // ret
+            0xba, 0x02, 0x00, 0x00, 0x00,
+            0xb8, 0x00, 0x00, 0x00, 0x00,
+            0xb9, 0x01, 0x00, 0x00, 0x00,
+            0xf7, 0xf1,
+            0xc3,
         ];
         let p = image(code, &[]);
         let mut emu = Emulator::new(&p, 100).expect("emulator");
@@ -4516,11 +4352,11 @@ mod tests {
     fn neg_sets_the_flags_of_a_subtraction_from_zero() {
         // ASM: mov eax,5; neg eax; sets cl; setc dl; ret
         let code: &[u8] = &[
-            0xb8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
-            0xf7, 0xd8, // neg eax
-            0x0f, 0x98, 0xc1, // sets cl
-            0x0f, 0x92, 0xc2, // setc dl
-            0xc3, // ret
+            0xb8, 0x05, 0x00, 0x00, 0x00,
+            0xf7, 0xd8,
+            0x0f, 0x98, 0xc1,
+            0x0f, 0x92, 0xc2,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rcx"), Some(1), "-5 is negative");
@@ -4539,11 +4375,11 @@ mod tests {
     fn a_high_byte_register_is_bits_8_to_15() {
         // ASM: mov eax,0x1234; movzx ecx,ah; mov bh,0x56; mov bl,0x78; ret
         let code: &[u8] = &[
-            0xb8, 0x34, 0x12, 0x00, 0x00, // mov eax,0x1234
-            0x0f, 0xb6, 0xcc, // movzx ecx,ah
-            0xb7, 0x56, // mov bh,0x56
-            0xb3, 0x78, // mov bl,0x78
-            0xc3, // ret
+            0xb8, 0x34, 0x12, 0x00, 0x00,
+            0x0f, 0xb6, 0xcc,
+            0xb7, 0x56,
+            0xb3, 0x78,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rcx"), Some(0x12));
@@ -4586,18 +4422,18 @@ mod tests {
         //      mov r10d,0x22; xor r8d,r8d; xor r9d,r9d; syscall;
         //      mov rsi,rax; mov dword [rsi],0x44434241; mov eax,[rsi]; ret
         let code: &[u8] = &[
-            0xb8, 0x09, 0x00, 0x00, 0x00, // mov eax,9
-            0x31, 0xff, // xor edi,edi
-            0xbe, 0x00, 0x10, 0x00, 0x00, // mov esi,0x1000
-            0x31, 0xd2, // xor edx,edx
-            0x41, 0xba, 0x22, 0x00, 0x00, 0x00, // mov r10d,0x22
-            0x45, 0x31, 0xc0, // xor r8d,r8d
-            0x45, 0x31, 0xc9, // xor r9d,r9d
-            0x0f, 0x05, // syscall
-            0x48, 0x89, 0xc6, // mov rsi,rax
-            0xc7, 0x06, 0x41, 0x42, 0x43, 0x44, // mov dword [rsi],0x44434241
-            0x8b, 0x06, // mov eax,[rsi]
-            0xc3, // ret
+            0xb8, 0x09, 0x00, 0x00, 0x00,
+            0x31, 0xff,
+            0xbe, 0x00, 0x10, 0x00, 0x00,
+            0x31, 0xd2,
+            0x41, 0xba, 0x22, 0x00, 0x00, 0x00,
+            0x45, 0x31, 0xc0,
+            0x45, 0x31, 0xc9,
+            0x0f, 0x05,
+            0x48, 0x89, 0xc6,
+            0xc7, 0x06, 0x41, 0x42, 0x43, 0x44,
+            0x8b, 0x06,
+            0xc3,
         ];
         let p = image(code, &[]);
         let mut emu = Emulator::new(&p, 100).expect("emulator");
@@ -4630,16 +4466,16 @@ mod tests {
         // ASM: mov eax,1; mov edi,1; xor esi,esi; mov edx,5; syscall;
         //      mov r8d,eax; mov eax,999; syscall; mov r9d,eax; ret
         let code: &[u8] = &[
-            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-            0xbf, 0x01, 0x00, 0x00, 0x00, // mov edi,1
-            0x31, 0xf6, // xor esi,esi
-            0xba, 0x05, 0x00, 0x00, 0x00, // mov edx,5
-            0x0f, 0x05, // syscall
-            0x41, 0x89, 0xc0, // mov r8d,eax
-            0xb8, 0xe7, 0x03, 0x00, 0x00, // mov eax,999
-            0x0f, 0x05, // syscall
-            0x41, 0x89, 0xc1, // mov r9d,eax
-            0xc3, // ret
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0xbf, 0x01, 0x00, 0x00, 0x00,
+            0x31, 0xf6,
+            0xba, 0x05, 0x00, 0x00, 0x00,
+            0x0f, 0x05,
+            0x41, 0x89, 0xc0,
+            0xb8, 0xe7, 0x03, 0x00, 0x00,
+            0x0f, 0x05,
+            0x41, 0x89, 0xc1,
+            0xc3,
         ];
         let p = image(code, &[]);
         let mut emu = Emulator::new(&p, 100).expect("emulator");
@@ -4660,11 +4496,11 @@ mod tests {
 
         // ASM: mov eax,60; xor edi,edi; syscall; mov eax,1; ret
         let code: &[u8] = &[
-            0xb8, 0x3c, 0x00, 0x00, 0x00, // mov eax,60
-            0x31, 0xff, // xor edi,edi
-            0x0f, 0x05, // syscall
-            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-            0xc3, // ret
+            0xb8, 0x3c, 0x00, 0x00, 0x00,
+            0x31, 0xff,
+            0x0f, 0x05,
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let p = image(code, &[]);
         let mut emu = Emulator::new(&p, 100).expect("emulator");
@@ -4682,7 +4518,6 @@ mod tests {
     /// When the run does not return, or the patch did not execute.
     #[test]
     fn a_patched_instruction_executes() {
-        // ASM at 0x1000: xor eax,eax; ret  -- patched to: mov eax,0x1234; ret
         let p = image(&[0x31, 0xc0, 0xc3], &[]);
         let mut emu = Emulator::new(&p, 100).expect("emulator");
         for (k, b) in [0xb8, 0x34, 0x12, 0x00, 0x00, 0xc3].into_iter().enumerate() {
@@ -4781,13 +4616,13 @@ mod tests {
         // ASM: xor eax,eax; cmp eax,eax; jg .taken; mov eax,1; ret
         //      .taken: mov eax,2; ret
         let code: &[u8] = &[
-            0x31, 0xc0, // xor eax,eax
-            0x39, 0xc0, // cmp eax,eax
-            0x7f, 0x06, // jg .taken
-            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-            0xc3, // ret
-            0xb8, 0x02, 0x00, 0x00, 0x00, // .taken: mov eax,2
-            0xc3, // ret
+            0x31, 0xc0,
+            0x39, 0xc0,
+            0x7f, 0x06,
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
+            0xb8, 0x02, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(1), "the branch was taken");
@@ -4806,13 +4641,13 @@ mod tests {
         // ASM: mov al,0x80; cmp al,1; jl .taken; mov eax,1; ret
         //      .taken: mov eax,2; ret
         let code: &[u8] = &[
-            0xb0, 0x80, // mov al,0x80
-            0x3c, 0x01, // cmp al,1
-            0x7c, 0x06, // jl .taken
-            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-            0xc3, // ret
-            0xb8, 0x02, 0x00, 0x00, 0x00, // .taken: mov eax,2
-            0xc3, // ret
+            0xb0, 0x80,
+            0x3c, 0x01,
+            0x7c, 0x06,
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
+            0xb8, 0x02, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(2), "the branch was not taken");
@@ -4833,13 +4668,13 @@ mod tests {
         // ASM: mov eax,0x40000000; shl eax,1; jo .taken; mov eax,1; ret
         //      .taken: mov eax,2; ret
         let code: &[u8] = &[
-            0xb8, 0x00, 0x00, 0x00, 0x40, // mov eax,0x40000000
-            0xd1, 0xe0, // shl eax,1
-            0x70, 0x06, // jo .taken
-            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-            0xc3, // ret
-            0xb8, 0x02, 0x00, 0x00, 0x00, // .taken: mov eax,2
-            0xc3, // ret
+            0xb8, 0x00, 0x00, 0x00, 0x40,
+            0xd1, 0xe0,
+            0x70, 0x06,
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
+            0xb8, 0x02, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(2), "the branch was not taken");
@@ -4859,13 +4694,13 @@ mod tests {
         // ASM: mov eax,0x80000000; shr eax,1; jo .taken; mov eax,1; ret
         //      .taken: mov eax,2; ret
         let shr: &[u8] = &[
-            0xb8, 0x00, 0x00, 0x00, 0x80, // mov eax,0x80000000
-            0xd1, 0xe8, // shr eax,1
-            0x70, 0x06, // jo .taken
-            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-            0xc3, // ret
-            0xb8, 0x02, 0x00, 0x00, 0x00, // .taken: mov eax,2
-            0xc3, // ret
+            0xb8, 0x00, 0x00, 0x00, 0x80,
+            0xd1, 0xe8,
+            0x70, 0x06,
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
+            0xb8, 0x02, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image(shr, &[]));
         assert_eq!(emu.register("rax"), Some(2), "shr's overflow was clear");
@@ -4873,13 +4708,13 @@ mod tests {
         // ASM: mov eax,0x80000000; sar eax,1; jo .taken; mov eax,1; ret
         //      .taken: mov eax,2; ret
         let sar: &[u8] = &[
-            0xb8, 0x00, 0x00, 0x00, 0x80, // mov eax,0x80000000
-            0xd1, 0xf8, // sar eax,1
-            0x70, 0x06, // jo .taken
-            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-            0xc3, // ret
-            0xb8, 0x02, 0x00, 0x00, 0x00, // .taken: mov eax,2
-            0xc3, // ret
+            0xb8, 0x00, 0x00, 0x00, 0x80,
+            0xd1, 0xf8,
+            0x70, 0x06,
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
+            0xb8, 0x02, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image(sar, &[]));
         assert_eq!(emu.register("rax"), Some(1), "sar's overflow was set");
@@ -4899,11 +4734,11 @@ mod tests {
     fn a_signed_jump_on_unknown_flags_stops() {
         // ASM: mov eax,5; shl eax,2; jg +1; ret; ret
         let code: &[u8] = &[
-            0xb8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
-            0xc1, 0xe0, 0x02, // shl eax,2
-            0x7f, 0x01, // jg +1
-            0xc3, // ret
-            0xc3, // ret
+            0xb8, 0x05, 0x00, 0x00, 0x00,
+            0xc1, 0xe0, 0x02,
+            0x7f, 0x01,
+            0xc3,
+            0xc3,
         ];
         let p = image(code, &[]);
         let mut emu = Emulator::new(&p, 100).expect("emulator");
@@ -4929,13 +4764,13 @@ mod tests {
         // ASM: mov rax,-1; movq xmm0,rax; mov rax,2; movq xmm1,rax;
         //      paddq xmm0,xmm1; movq rax,xmm0; ret
         let code: &[u8] = &[
-            0x48, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // mov rax,-1
-            0x66, 0x48, 0x0f, 0x6e, 0xc0, // movq xmm0,rax
-            0x48, 0xc7, 0xc0, 0x02, 0x00, 0x00, 0x00, // mov rax,2
-            0x66, 0x48, 0x0f, 0x6e, 0xc8, // movq xmm1,rax
-            0x66, 0x0f, 0xd4, 0xc1, // paddq xmm0,xmm1
-            0x66, 0x48, 0x0f, 0x7e, 0xc0, // movq rax,xmm0
-            0xc3, // ret
+            0x48, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0x66, 0x48, 0x0f, 0x6e, 0xc0,
+            0x48, 0xc7, 0xc0, 0x02, 0x00, 0x00, 0x00,
+            0x66, 0x48, 0x0f, 0x6e, 0xc8,
+            0x66, 0x0f, 0xd4, 0xc1,
+            0x66, 0x48, 0x0f, 0x7e, 0xc0,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(1));
@@ -4950,9 +4785,9 @@ mod tests {
     fn the_accumulator_widens_with_its_sign() {
         // ASM: mov eax,0xffffffff; cdqe; ret
         let code: &[u8] = &[
-            0xb8, 0xff, 0xff, 0xff, 0xff, // mov eax,0xffffffff
-            0x48, 0x98, // cdqe
-            0xc3, // ret
+            0xb8, 0xff, 0xff, 0xff, 0xff,
+            0x48, 0x98,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(u64::MAX));
@@ -5111,13 +4946,13 @@ mod tests {
         // ASM: mov eax,3; shr eax,1; jb .taken; mov eax,1; ret
         //      .taken: mov eax,2; ret
         let code: &[u8] = &[
-            0xb8, 0x03, 0x00, 0x00, 0x00, // mov eax,3
-            0xd1, 0xe8, // shr eax,1
-            0x72, 0x06, // jb .taken
-            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-            0xc3, // ret
-            0xb8, 0x02, 0x00, 0x00, 0x00, // .taken: mov eax,2
-            0xc3, // ret
+            0xb8, 0x03, 0x00, 0x00, 0x00,
+            0xd1, 0xe8,
+            0x72, 0x06,
+            0xb8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
+            0xb8, 0x02, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(2), "the carry was not set");
@@ -5152,10 +4987,10 @@ mod tests {
         // ASM: mov eax,0x80000000; shl eax,1; rcl eax,1; ret
         // The shift leaves zero with carry set; the rotate brings it back.
         let code: &[u8] = &[
-            0xb8, 0x00, 0x00, 0x00, 0x80, // mov eax,0x80000000
-            0xd1, 0xe0, // shl eax,1
-            0xd1, 0xd0, // rcl eax,1
-            0xc3, // ret
+            0xb8, 0x00, 0x00, 0x00, 0x80,
+            0xd1, 0xe0,
+            0xd1, 0xd0,
+            0xc3,
         ];
         let emu = returned(image(code, &[]));
         assert_eq!(emu.register("rax"), Some(1));
@@ -5175,13 +5010,12 @@ mod tests {
         // ASM: fild dword [0x2000]; fidiv dword [0x2004];
         //      fistp dword [0x2008]; mov eax,[0x2008]; ret
         let code: &[u8] = &[
-            0xdb, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // fild dword [0x2000]
-            0xda, 0x34, 0x25, 0x04, 0x20, 0x00, 0x00, // fidiv dword [0x2004]
-            0xdb, 0x1c, 0x25, 0x08, 0x20, 0x00, 0x00, // fistp dword [0x2008]
-            0x8b, 0x04, 0x25, 0x08, 0x20, 0x00, 0x00, // mov eax,[0x2008]
-            0xc3, // ret
+            0xdb, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00,
+            0xda, 0x34, 0x25, 0x04, 0x20, 0x00, 0x00,
+            0xdb, 0x1c, 0x25, 0x08, 0x20, 0x00, 0x00,
+            0x8b, 0x04, 0x25, 0x08, 0x20, 0x00, 0x00,
+            0xc3,
         ];
-        // 100 at 0x2000 and 7 at 0x2004; 100 / 7 is 14 once truncated.
         let data: &[u8] = &[0x64, 0, 0, 0, 0x07, 0, 0, 0];
         let emu = returned(image(code, data));
         assert_eq!(emu.register("rax"), Some(14));
@@ -5199,18 +5033,16 @@ mod tests {
         //      fxch st2; fistp dword [0x200c]; fxch; fistp dword [0x2010];
         //      fistp dword [0x2014]; ret
         let code: &[u8] = &[
-            0xdb, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // fild dword [0x2000]
-            0xdb, 0x04, 0x25, 0x04, 0x20, 0x00, 0x00, // fild dword [0x2004]
-            0xdb, 0x04, 0x25, 0x08, 0x20, 0x00, 0x00, // fild dword [0x2008]
-            0xd9, 0xca, // fxch st2
-            0xdb, 0x1c, 0x25, 0x0c, 0x20, 0x00, 0x00, // fistp dword [0x200c]
-            0xd9, 0xc9, // fxch
-            0xdb, 0x1c, 0x25, 0x10, 0x20, 0x00, 0x00, // fistp dword [0x2010]
-            0xdb, 0x1c, 0x25, 0x14, 0x20, 0x00, 0x00, // fistp dword [0x2014]
-            0xc3, // ret
+            0xdb, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00,
+            0xdb, 0x04, 0x25, 0x04, 0x20, 0x00, 0x00,
+            0xdb, 0x04, 0x25, 0x08, 0x20, 0x00, 0x00,
+            0xd9, 0xca,
+            0xdb, 0x1c, 0x25, 0x0c, 0x20, 0x00, 0x00,
+            0xd9, 0xc9,
+            0xdb, 0x1c, 0x25, 0x10, 0x20, 0x00, 0x00,
+            0xdb, 0x1c, 0x25, 0x14, 0x20, 0x00, 0x00,
+            0xc3,
         ];
-        // 1, 2 and 3 loaded in turn: `fxch st2` brings the 1 up, the bare
-        // `fxch` then swaps the 2 under the 3.
         let data: &[u8] = &[1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0];
         let emu = returned(image(code, data));
         assert_eq!(emu.peek(0x200c), Some(1));
@@ -5322,13 +5154,12 @@ mod tests {
     /// immediate desynchronizes every later access to the caller's stack.
     #[test]
     fn ret_with_an_immediate_releases_arguments() {
-        // 0x1000 push 0; push 0; call 0x100a; 0x1009 ret; 0x100a ret 10h
         let code = [
-            0x6a, 0x00, // push 0
-            0x6a, 0x00, // push 0
-            0xe8, 0x01, 0x00, 0x00, 0x00, // call +1 (0x100a)
-            0xc3, // ret  (return lands here; rsp == base -> Returned)
-            0xc2, 0x10, 0x00, // callee: ret 10h
+            0x6a, 0x00,
+            0x6a, 0x00,
+            0xe8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
+            0xc2, 0x10, 0x00,
         ];
         let emu = returned(image(&code, &[]));
         assert_eq!(emu.register("rsp"), Some(super::STACK_BASE));
@@ -5341,11 +5172,11 @@ mod tests {
     #[test]
     fn ret_with_an_immediate_releases_arguments_32() {
         let code = [
-            0x6a, 0x00, // push 0
-            0x6a, 0x00, // push 0
-            0xe8, 0x01, 0x00, 0x00, 0x00, // call +1 (0x100a)
-            0xc3, // ret
-            0xc2, 0x08, 0x00, // callee: ret 8
+            0x6a, 0x00,
+            0x6a, 0x00,
+            0xe8, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
+            0xc2, 0x08, 0x00,
         ];
         let emu = returned(image32(&code, &[]));
         assert_eq!(emu.register("esp"), Some(super::STACK_BASE_32));
@@ -5359,18 +5190,16 @@ mod tests {
     /// before this the run stopped at the first `pushfq` a VM used.
     #[test]
     fn pushf_and_popf_round_trip_the_flags() {
-        // xor eax,eax; pushfq; cmp eax,1; popfq; je +6; mov eax,0xAA; ret;
-        // mov eax,0xBB; ret
         let code = [
-            0x31, 0xc0, // xor eax,eax  (ZF=1)
-            0x9c, // pushfq
-            0x83, 0xf8, 0x01, // cmp eax,1  (ZF=0)
-            0x9d, // popfq  (ZF=1)
-            0x74, 0x06, // je +6
-            0xb8, 0xaa, 0x00, 0x00, 0x00, // mov eax,0xAA (branch not taken)
-            0xc3, // ret
-            0xb8, 0xbb, 0x00, 0x00, 0x00, // mov eax,0xBB (branch taken)
-            0xc3, // ret
+            0x31, 0xc0,
+            0x9c,
+            0x83, 0xf8, 0x01,
+            0x9d,
+            0x74, 0x06,
+            0xb8, 0xaa, 0x00, 0x00, 0x00,
+            0xc3,
+            0xb8, 0xbb, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image(&code, &[]));
         assert_eq!(
@@ -5384,15 +5213,15 @@ mod tests {
     #[test]
     fn pushfd_and_popfd_round_trip_the_flags() {
         let code = [
-            0x31, 0xc0, // xor eax,eax  (ZF=1)
-            0x9c, // pushfd
-            0x83, 0xf8, 0x01, // cmp eax,1  (ZF=0)
-            0x9d, // popfd  (ZF=1)
-            0x74, 0x06, // je +6
-            0xb8, 0xaa, 0x00, 0x00, 0x00, // mov eax,0xAA
-            0xc3, // ret
-            0xb8, 0xbb, 0x00, 0x00, 0x00, // mov eax,0xBB
-            0xc3, // ret
+            0x31, 0xc0,
+            0x9c,
+            0x83, 0xf8, 0x01,
+            0x9d,
+            0x74, 0x06,
+            0xb8, 0xaa, 0x00, 0x00, 0x00,
+            0xc3,
+            0xb8, 0xbb, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image32(&code, &[]));
         assert_eq!(
@@ -5410,11 +5239,10 @@ mod tests {
     #[test]
     fn fisttp_truncates_and_pops() {
         let code = [
-            0xdd, 0x05, 0xfa, 0x0f, 0x00, 0x00, // fld qword [rip+0xffa] = [0x2000]
-            0xdd, 0x0d, 0x04, 0x10, 0x00, 0x00, // fisttp qword [rip+0x1004] = [0x2010]
-            0xc3, // ret
+            0xdd, 0x05, 0xfa, 0x0f, 0x00, 0x00,
+            0xdd, 0x0d, 0x04, 0x10, 0x00, 0x00,
+            0xc3,
         ];
-        // 2.9 as an IEEE-754 double, little-endian.
         let data = [0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x07, 0x40];
         let emu = returned(image(&code, &data));
         assert_eq!(
@@ -5430,13 +5258,13 @@ mod tests {
     #[test]
     fn fistp_rounds_to_nearest_even_at_the_operand_width() {
         let code = [
-            0xdd, 0x05, 0xfa, 0x0f, 0x00, 0x00, // fld qword [0x2000] = 2.5
-            0xdb, 0x1d, 0x1c, 0x10, 0x00, 0x00, // fistp dword [0x2028]
-            0xdd, 0x05, 0xf6, 0x0f, 0x00, 0x00, // fld qword [0x2008] = 3.5
-            0xdf, 0x1d, 0x16, 0x10, 0x00, 0x00, // fistp word [0x202e]
-            0xdd, 0x05, 0xf2, 0x0f, 0x00, 0x00, // fld qword [0x2010] = 1e20
-            0xdb, 0x1d, 0x12, 0x10, 0x00, 0x00, // fistp dword [0x2036]
-            0xc3, // ret
+            0xdd, 0x05, 0xfa, 0x0f, 0x00, 0x00,
+            0xdb, 0x1d, 0x1c, 0x10, 0x00, 0x00,
+            0xdd, 0x05, 0xf6, 0x0f, 0x00, 0x00,
+            0xdf, 0x1d, 0x16, 0x10, 0x00, 0x00,
+            0xdd, 0x05, 0xf2, 0x0f, 0x00, 0x00,
+            0xdb, 0x1d, 0x12, 0x10, 0x00, 0x00,
+            0xc3,
         ];
         let mut data = Vec::new();
         data.extend_from_slice(&2.5f64.to_le_bytes());
@@ -5477,16 +5305,15 @@ mod tests {
         //      fild word [0x2000]; fistp dword [0x200c];
         //      mov eax,[0x2008]; mov ebx,[0x200c]; ret
         let code: &[u8] = &[
-            0xdb, 0x04, 0x25, 0x04, 0x20, 0x00, 0x00, // fild dword [0x2004]
-            0xde, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // fiadd word [0x2000]
-            0xdb, 0x1c, 0x25, 0x08, 0x20, 0x00, 0x00, // fistp dword [0x2008]
-            0xdf, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // fild word [0x2000]
-            0xdb, 0x1c, 0x25, 0x0c, 0x20, 0x00, 0x00, // fistp dword [0x200c]
-            0x8b, 0x04, 0x25, 0x08, 0x20, 0x00, 0x00, // mov eax,[0x2008]
-            0x8b, 0x1c, 0x25, 0x0c, 0x20, 0x00, 0x00, // mov ebx,[0x200c]
-            0xc3, // ret
+            0xdb, 0x04, 0x25, 0x04, 0x20, 0x00, 0x00,
+            0xde, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00,
+            0xdb, 0x1c, 0x25, 0x08, 0x20, 0x00, 0x00,
+            0xdf, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00,
+            0xdb, 0x1c, 0x25, 0x0c, 0x20, 0x00, 0x00,
+            0x8b, 0x04, 0x25, 0x08, 0x20, 0x00, 0x00,
+            0x8b, 0x1c, 0x25, 0x0c, 0x20, 0x00, 0x00,
+            0xc3,
         ];
-        // -2 as a word at 0x2000, 0x7fff after it, 10 as a dword at 0x2004.
         let data: &[u8] = &[0xfe, 0xff, 0xff, 0x7f, 0x0a, 0x00, 0x00, 0x00];
         let emu = returned(image(code, data));
         assert_eq!(emu.register("rax"), Some(8), "10 + (-2)");
@@ -5536,12 +5363,12 @@ mod tests {
         // ASM: fld tbyte [0x2000]; fstp tbyte [0x2010]; fld tbyte [0x2010];
         //      fstp qword [0x2020]; mov rax,[0x2020]; ret
         let code: &[u8] = &[
-            0xdb, 0x2c, 0x25, 0x00, 0x20, 0x00, 0x00, // fld tbyte [0x2000]
-            0xdb, 0x3c, 0x25, 0x10, 0x20, 0x00, 0x00, // fstp tbyte [0x2010]
-            0xdb, 0x2c, 0x25, 0x10, 0x20, 0x00, 0x00, // fld tbyte [0x2010]
-            0xdd, 0x1c, 0x25, 0x20, 0x20, 0x00, 0x00, // fstp qword [0x2020]
-            0x48, 0x8b, 0x04, 0x25, 0x20, 0x20, 0x00, 0x00, // mov rax,[0x2020]
-            0xc3, // ret
+            0xdb, 0x2c, 0x25, 0x00, 0x20, 0x00, 0x00,
+            0xdb, 0x3c, 0x25, 0x10, 0x20, 0x00, 0x00,
+            0xdb, 0x2c, 0x25, 0x10, 0x20, 0x00, 0x00,
+            0xdd, 0x1c, 0x25, 0x20, 0x20, 0x00, 0x00,
+            0x48, 0x8b, 0x04, 0x25, 0x20, 0x20, 0x00, 0x00,
+            0xc3,
         ];
         let extended: [u8; 10] = [0, 0, 0, 0, 0, 0, 0, 0xc0, 0xff, 0x3f];
         let emu = returned(image(code, &extended));
@@ -5617,7 +5444,6 @@ mod tests {
     /// guard that won rather than a byte that happened to be unmapped.
     #[test]
     fn execution_on_the_stack_is_a_derail() {
-        // mov rax,rsp; jmp rax
         let code = [0x48, 0x89, 0xe0, 0xff, 0xe0];
         let p = image(&code, &[]);
         let mut emu = Emulator::new(&p, 100).expect("emulator");
@@ -5666,10 +5492,10 @@ mod tests {
         let mut bytes = vec![0u8; 0x3000];
         bytes[0x10..0x14].copy_from_slice(&[0x4d, 0x5a, 0x90, 0x00]);
         let code: &[u8] = &[
-            0x8b, 0x04, 0x25, 0x10, 0x00, 0x00, 0x10, // mov eax,[0x10000010]
-            0x8b, 0x1c, 0x25, 0x00, 0x08, 0x00, 0x10, // mov ebx,[0x10000800]
-            0x8b, 0x0c, 0x25, 0x00, 0x14, 0x00, 0x10, // mov ecx,[0x10001400]
-            0xc3, // ret
+            0x8b, 0x04, 0x25, 0x10, 0x00, 0x00, 0x10,
+            0x8b, 0x1c, 0x25, 0x00, 0x08, 0x00, 0x10,
+            0x8b, 0x0c, 0x25, 0x00, 0x14, 0x00, 0x10,
+            0xc3,
         ];
         bytes[0x400..0x400 + code.len()].copy_from_slice(code);
         bytes[0x1400..0x1404].copy_from_slice(&[1, 2, 3, 4]);
@@ -5733,10 +5559,10 @@ mod tests {
         ];
         let p = image(&code, &enc);
         let mut emu = Emulator::new(&p, 10_000).expect("bitness");
-        emu.set_arg(0, 0x2800); // dst
-        emu.set_arg(1, 0x2000); // src
-        emu.set_arg(2, enc.len() as u64); // len
-        emu.set_arg(3, 0x5a); // key
+        emu.set_arg(0, 0x2800);
+        emu.set_arg(1, 0x2000);
+        emu.set_arg(2, enc.len() as u64);
+        emu.set_arg(3, 0x5a);
         let run = emu.run(0x1000);
         assert_eq!(run.stop, Stop::Returned, "run did not return: {run:?}");
         let out: String = (0..enc.len())
@@ -5803,12 +5629,12 @@ mod tests {
         // ASM: mov al,[0x2000]; mov al,[0x2000]; mov al,[0x3000];
         //      mov al,[0x3000]; mov al,[0x4000]; ret
         let code: &[u8] = &[
-            0x8a, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // mov al,[0x2000]
-            0x8a, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // mov al,[0x2000]
-            0x8a, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00, // mov al,[0x3000]
-            0x8a, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00, // mov al,[0x3000]
-            0x8a, 0x04, 0x25, 0x00, 0x40, 0x00, 0x00, // mov al,[0x4000]
-            0xc3, // ret
+            0x8a, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00,
+            0x8a, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00,
+            0x8a, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00,
+            0x8a, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00,
+            0x8a, 0x04, 0x25, 0x00, 0x40, 0x00, 0x00,
+            0xc3,
         ];
         let mut bytes = vec![0u8; 0x5000];
         bytes[0x1000..0x1000 + code.len()].copy_from_slice(code);
@@ -5868,11 +5694,11 @@ mod tests {
     #[test]
     fn carry_is_taken_at_the_operand_width() {
         let code = [
-            0xb0, 0x80, // mov al, 0x80
-            0x00, 0xc0, // add al, al   (-> 0x00, carry out of bit 7)
-            0x10, 0xdb, // adc bl, bl   (-> 0 + 0 + carry = 1)
-            0x88, 0x1c, 0x25, 0x00, 0x28, 0x00, 0x00, // mov [0x2800], bl
-            0xc3, // ret
+            0xb0, 0x80,
+            0x00, 0xc0,
+            0x10, 0xdb,
+            0x88, 0x1c, 0x25, 0x00, 0x28, 0x00, 0x00,
+            0xc3,
         ];
         let emu = returned(image(&code, &[]));
         assert_eq!(emu.peek(0x2800), Some(1), "8-bit carry was dropped");
@@ -5882,7 +5708,6 @@ mod tests {
     /// forever.
     #[test]
     fn a_tight_loop_stops_at_the_budget() {
-        // jmp $  (eb fe)
         let p = image(&[0xeb, 0xfe], &[]);
         let mut emu = Emulator::new(&p, 500).expect("bitness");
         let run = emu.run(0x1000);
@@ -5902,8 +5727,8 @@ mod tests {
     #[test]
     fn skipped_returns_spend_the_budget() {
         let code = [
-            0x48, 0xbc, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rsp,0x100000000
-            0xc3, // ret
+            0x48, 0xbc, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0xc3,
         ];
         let mut bytes = vec![0u8; 0x1000];
         bytes[..code.len()].copy_from_slice(&code);
@@ -5928,10 +5753,10 @@ mod tests {
     #[test]
     fn a_rep_iteration_spends_a_step() {
         let code = [
-            0xb9, 0xff, 0xff, 0xff, 0x03, // mov ecx,0x3ffffff
-            0xbf, 0x00, 0x28, 0x00, 0x00, // mov edi,0x2800
-            0x66, 0xf3, 0xab, // rep stosw
-            0xc3, // ret
+            0xb9, 0xff, 0xff, 0xff, 0x03,
+            0xbf, 0x00, 0x28, 0x00, 0x00,
+            0x66, 0xf3, 0xab,
+            0xc3,
         ];
         let p = image(&code, &[]);
         let mut emu = Emulator::new(&p, 5).expect("emulator");
@@ -5951,11 +5776,11 @@ mod tests {
     #[test]
     fn a_32_bit_string_pointer_wraps() {
         let code = [
-            0xbf, 0xff, 0xff, 0xff, 0xff, // mov edi,0xffffffff
-            0xb0, 0x5a, // mov al,0x5a
-            0xaa, // stosb
-            0xaa, // stosb
-            0xc3, // ret
+            0xbf, 0xff, 0xff, 0xff, 0xff,
+            0xb0, 0x5a,
+            0xaa,
+            0xaa,
+            0xc3,
         ];
         let p = image32(&code, &[]);
         let mut emu = Emulator::new(&p, 20).expect("emulator");
@@ -5971,10 +5796,10 @@ mod tests {
     #[test]
     fn memory_stops_growing_at_its_cap() {
         let code = [
-            0xb9, 0x00, 0x10, 0x00, 0x00, // mov ecx,0x1000
-            0xbf, 0x00, 0x28, 0x00, 0x00, // mov edi,0x2800
-            0xf3, 0xaa, // rep stosb
-            0xc3, // ret
+            0xb9, 0x00, 0x10, 0x00, 0x00,
+            0xbf, 0x00, 0x28, 0x00, 0x00,
+            0xf3, 0xaa,
+            0xc3,
         ];
         let p = image(&code, &[]);
         let mut emu = Emulator::new(&p, 100_000).expect("emulator");
@@ -5991,9 +5816,9 @@ mod tests {
     #[test]
     fn an_unbacked_read_reads_the_fill() {
         let code = [
-            0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x50, // mov rax,[0x50000000]
-            0x48, 0x8b, 0x1c, 0x25, 0x08, 0x00, 0x00, 0x50, // mov rbx,[0x50000008]
-            0xc3, // ret
+            0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x50,
+            0x48, 0x8b, 0x1c, 0x25, 0x08, 0x00, 0x00, 0x50,
+            0xc3,
         ];
         let p = image(&code, &[]);
         let word = |at: u64| {
@@ -6041,7 +5866,6 @@ mod tests {
             for start in 0..8u64 {
                 let mut emu = Emulator::new(&p, 400).expect("bitness");
                 let run = emu.run(0x1000 + start);
-                // Any stop reason is fine; the point is that it returned.
                 let _ = run.steps;
             }
         }

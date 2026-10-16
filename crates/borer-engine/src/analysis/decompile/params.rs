@@ -66,18 +66,12 @@ pub(super) fn param_types(
     }
     let word = ctx.conv.word;
     let first = word + ctx.conv.shadow;
-    // INVARIANT: a stack argument's position follows the register ones,
-    // as the signature lists it.
     let position_of = |o: i64| {
         (o >= first && (o - first) % word == 0)
             .then(|| usize::try_from((o - first) / word).ok())
             .flatten()
             .map(|n| ctx.conv.args.len() + n)
     };
-    // Register to the parameter position it carries and its offset from
-    // it, because a function copies an argument into a preserved register
-    // before using it: `mov rsi,rcx` then `[rsi+0x18]` is a field of the
-    // first argument, and watching only `rcx` would see nothing at all.
     let mut holds: BTreeMap<Register, (usize, i64)> = BTreeMap::new();
     for r in &ctx.params {
         if let Some(p) = ctx.conv.param_pos(*r, &ctx.params) {
@@ -88,8 +82,6 @@ pub(super) fn param_types(
     let mut seen: BTreeMap<usize, Seen> = BTreeMap::new();
     let mut floats: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     let mut factory = InstructionInfoFactory::new();
-    // Registers holding a stack address, as its offset from the stack
-    // pointer at the entry: the frame pointer `mov ebp, esp` sets.
     let mut frame: BTreeMap<Register, i64> = BTreeMap::new();
     for (instrs, depth) in code.iter().zip(&depths) {
         let mut sp = *depth;
@@ -107,10 +99,6 @@ pub(super) fn param_types(
                 && let Some((param, at)) = holds.get(&base).copied()
             {
                 let slot = seen.entry(param).or_default();
-                // `lea` computes an address without reading through it, and
-                // computes plain sums as often (`lea eax, [ecx-0x30]` is
-                // `c - '0'`): only a read or a write through the register
-                // shows it is a pointer.
                 if instr.mnemonic() != Mnemonic::Lea {
                     slot.addressed = true;
                     slot.widths.insert(instr.memory_size().size());
@@ -123,8 +111,6 @@ pub(super) fn param_types(
             let direct = instr.memory_index() == Register::None;
             let address =
                 || stack_at(base).map(|a| a + crate::disasm::displacement(instr, ctx.bitness));
-            // A stack address copied or offset into a register, and a stack
-            // argument loaded into one.
             let (to_frame, loaded) = match (instr.mnemonic(), dst) {
                 (Mnemonic::Mov, Some(_)) if instr.op1_kind() == OpKind::Register => (
                     stack_at(lift::canon(instr.op1_register(), ctx.bitness)),
@@ -141,8 +127,6 @@ pub(super) fn param_types(
                 }
                 _ => (None, None),
             };
-            // A `lea` through a carrier moves the offset along; a plain move
-            // carries it unchanged.
             let carried = if instr.mnemonic() == Mnemonic::Lea {
                 holds.get(&base).copied().map(|(p, at)| {
                     (
@@ -325,12 +309,6 @@ impl Shape {
             return mask;
         }
         if self.conv.float_seq {
-            // INVARIANT: the floating parameters list past the integer ones
-            // the body reads, and every float argument below the highest
-            // one read fills the positions between: the second float
-            // argument arrives in `xmm1` whether the callee reads `xmm0`
-            // or not, so the mask runs from `base` to that highest
-            // position, saturated where the byte runs out.
             let base = self.conv.float_base(&self.params);
             let last = self
                 .params
@@ -422,15 +400,6 @@ pub(super) fn shape_of(
         .filter_map(|r| ctx.conv.param_pos(*r, &params))
         .max()
         .map_or(0, |p| p + 1);
-    // INVARIANT: a 32-bit function reading `ecx` or `edx` first is a
-    // `__thiscall` or `__fastcall`, whose callee pops its own stack
-    // arguments, so one that reads none itself and whose `ret` pops
-    // nothing hands none on through its tail jump either:
-    // `__security_check_cookie` is `cmp ecx, [cookie]; jne fail; ret`, and
-    // the word above the return address that `fail` (`__report_gsfailure`,
-    // capturing the frame) takes the address of is no argument its callers
-    // pass. A word the body reads itself stays an argument, whatever
-    // convention a whole-program compiler chose.
     let own = f.stack_args.max(stack_params_read(ctx, code, succs, entry));
     let pops_own = ctx.bitness == 32 && !ctx.conv.args.is_empty();
     let stack = if own == 0 && pops_own && lift::function_pop(ctx, f, lift::TAIL_DEPTH) == Some(0) {
@@ -438,9 +407,6 @@ pub(super) fn shape_of(
     } else {
         own.max(forwarded_stack(ctx, code))
     };
-    // INVARIANT: the positions are counted under the convention as it
-    // stands when they are counted: a method read as a thiscall below has
-    // `this` in `ecx` ahead of its stack words.
     let positions_of = |conv: &Conv, stack: u32| {
         usize::try_from(stack)
             .ok()
@@ -449,15 +415,7 @@ pub(super) fn shape_of(
     };
     let hidden =
         usize::from(stated.is_none() && f.signature.as_ref().is_some_and(|s| s.by_pointer));
-    // INVARIANT: a method's positions are `this`, the hidden result and
-    // the declared parameters; the registers read show the first four,
-    // and a stack argument the frame scan found shows the rest, so a
-    // method with three declared parameters and a hidden result has
-    // `this` though only four registers are read. An assert that says
-    // `this->` says the same outright.
     let positions = used.max(positions_of(ctx.conv, stack));
-    // INVARIANT: a stated prototype lists every position itself, `this`
-    // among them when the agent writes one.
     let mut this_param = match &f.signature {
         _ if stated.is_some() => false,
         Some(s) => {
@@ -485,14 +443,6 @@ pub(super) fn shape_of(
     let mut stated_short = None;
     let (count, stack, variadic) = match declared_arity(ctx, f, lead) {
         Some((count, floats, variadic, source)) => {
-            // INVARIANT: a declared parameter sits in its register at the
-            // entry whether or not the body reads it. The SDK's prototype
-            // for the function's own name states the arity outright, so a
-            // register the body reads past it is no parameter; a signature
-            // attributed from a `__FUNCSIG__` text sets the least arity,
-            // and a body that reads past it shows the attribution is off,
-            // so what it reads stays a parameter and no register reads
-            // undefined.
             let count = match source {
                 Declaration::Prototype => {
                     params.retain(|r| ctx.conv.slot(*r).is_some_and(|s| s < count));
@@ -596,8 +546,6 @@ pub(super) fn declared_arity(
             .enumerate()
             .filter(|(_, q)| matches!(q, Some(Pass::Float(_))))
             .fold(0u8, |m, (j, _)| m | (1 << j));
-        // INVARIANT: on a 32-bit target a position is a stack word past
-        // the convention's registers, and a 64-bit value takes two.
         let count = if ctx.bitness == 32 {
             passes
                 .iter()
@@ -1102,10 +1050,6 @@ pub(super) fn detect_params(
 ) -> Vec<Register> {
     let mut found: Vec<Register> = Vec::new();
     let mut factory = InstructionInfoFactory::new();
-    // INVARIANT: writes are tracked only for the convention's own argument
-    // registers, so a register the convention does not pass is not read by
-    // proxy either: the first scan, under the widest convention, decides
-    // which convention holds, and the second sees only what it passes.
     let forward = |found: &mut Vec<Register>, written: &BTreeSet<Register>, regs: Vec<Register>| {
         for r in regs {
             if ctx.conv.slot(r).is_some() && !written.contains(&r) && !found.contains(&r) {
@@ -1113,11 +1057,6 @@ pub(super) fn detect_params(
             }
         }
     };
-    // INVARIANT: a read counts on any path from the entry that no call
-    // precedes, so a register read in a block placed after a call in the
-    // image is a parameter when its own path is call-free; each path
-    // carries its writes and its pushes, and a block reached again with
-    // the same writes is done.
     type Path = (usize, BTreeSet<Register>, Vec<Option<(Register, bool)>>);
     let mut seen: BTreeSet<(usize, BTreeSet<Register>)> = BTreeSet::new();
     let mut work: Vec<Path> = vec![(entry, BTreeSet::new(), Vec::new())];
@@ -1130,13 +1069,6 @@ pub(super) fn detect_params(
         };
         let mut stopped = false;
         for instr in instrs {
-            // INVARIANT: a push reads its register only when the next call
-            // takes the slot as an argument; MSVC reserves a local's slot
-            // with `push ecx`, which would otherwise make every such
-            // function a method, and a call's arity tells the two apart.
-            // The registers a pushed memory operand's address is made of
-            // are read whatever the callee takes: `push dword ptr
-            // [ecx+38h]` reads `ecx`.
             if instr.mnemonic() == Mnemonic::Push {
                 if instr.op0_kind() == OpKind::Memory {
                     for r in [instr.memory_base(), instr.memory_index()] {
@@ -1169,11 +1101,6 @@ pub(super) fn detect_params(
                     .collect();
                 pushed.clear();
                 forward(&mut found, &written, args);
-                // A stack probe is a call that clobbers nothing, and a
-                // compiler emits one in the prologue of any function with a
-                // large frame, before the arguments are read. Stopping at it
-                // loses every parameter of exactly the functions worth
-                // reading.
                 if crate::analysis::render::preserves_registers(ctx.analysis, ctx.overlay, instr)
                     || crate::analysis::render::frame_helper(ctx.analysis, ctx.overlay, instr)
                 {
@@ -1294,10 +1221,6 @@ pub(super) fn seh_frame(ctx: &Ctx<'_>, code: &[Vec<Instruction>]) -> bool {
             && i.op1_kind() == OpKind::Register
             && i.op1_register() == Register::ESP
     };
-    // INVARIANT: a function that sets up its own frame and links nothing
-    // in its entry registers no handler; a later store to `fs:[0]` puts
-    // back a head it read (an unwinder calling `RtlUnwind`), the evidence
-    // only for a fragment, which has no frame of its own.
     let framed = code.first().is_some_and(|entry| {
         entry.iter().any(|i| {
             i.mnemonic() == Mnemonic::Mov

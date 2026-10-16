@@ -138,7 +138,6 @@ fn walks_match_the_per_byte_state_machines() {
     for at in [0, 1, 7, 8, 15, 16, 31, 32, LEN / 2, LEN - 9, LEN - 6] {
         bytes[at..at + 6].copy_from_slice(b"Tail;!");
     }
-    // wide runs: an ASCII string's terminator before one, and one alone
     for (at, tail) in [(40usize, true), (LEN / 2 + 7, true), (LEN / 2 + 13, false)] {
         let mut p = at;
         if tail {
@@ -661,9 +660,9 @@ fn anti_debug_queries_are_answered_benignly() {
     use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
     // ASM: mov rcx,0; call qword [rel slot]; ret
     let code: Vec<u8> = vec![
-        0x48, 0xc7, 0xc1, 0x00, 0x00, 0x00, 0x00, // mov rcx,0
-        0xff, 0x15, 0xf7, 0x0f, 0x00, 0x00, // call qword [rel 0x2004]
-        0xc3, // ret
+        0x48, 0xc7, 0xc1, 0x00, 0x00, 0x00, 0x00,
+        0xff, 0x15, 0xf7, 0x0f, 0x00, 0x00,
+        0xc3,
     ];
     let mut bytes = code;
     bytes.resize(0x1000, 0);
@@ -695,11 +694,10 @@ fn anti_debug_queries_are_answered_benignly() {
 fn an_allocated_pointer_is_backed_memory() {
     use borer_engine::emulate::{Emulator, Stop};
     use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
-    // malloc; mov rax,[rax]; ret: read the first byte of the allocation.
     let code: Vec<u8> = [
-        0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00, // call [rip+0xffa] -> 0x2000
-        0x8a, 0x00, // mov al,[rax]
-        0xc3, // ret
+        0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00,
+        0x8a, 0x00,
+        0xc3,
     ]
     .to_vec();
     let mut bytes = code;
@@ -741,8 +739,8 @@ fn a_32_bit_call_through_an_import_slot_reaches_the_api() {
     use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
     // ASM: call dword [0x2004]; ret
     let code: Vec<u8> = vec![
-        0xff, 0x15, 0x04, 0x20, 0x00, 0x00, // call dword [0x2004]
-        0xc3, // ret
+        0xff, 0x15, 0x04, 0x20, 0x00, 0x00,
+        0xc3,
     ];
     let mut bytes = code;
     bytes.resize(0x1000, 0);
@@ -789,18 +787,18 @@ fn a_32_bit_allocation_returns_a_pointer_the_image_can_hold() {
     use borer_engine::emulate::{Emulator, Stop};
     use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
     let code: Vec<u8> = vec![
-        0x6a, 0x04, // push 4
-        0x68, 0x00, 0x10, 0x00, 0x00, // push 0x1000
-        0x68, 0x00, 0x20, 0x00, 0x00, // push 0x2000
-        0x6a, 0x00, // push 0
-        0xff, 0x15, 0x04, 0x20, 0x00, 0x00, // call dword [0x2004]
-        0x89, 0xc6, // mov esi,eax
-        0xc7, 0x00, 0x44, 0x33, 0x22, 0x11, // mov dword [eax],0x11223344
-        0x8b, 0x08, // mov ecx,[eax]
-        0x6a, 0x10, // push 0x10
-        0xff, 0x15, 0x08, 0x20, 0x00, 0x00, // call dword [0x2008]
-        0x83, 0xc4, 0x04, // add esp,4
-        0xc3, // ret
+        0x6a, 0x04,
+        0x68, 0x00, 0x10, 0x00, 0x00,
+        0x68, 0x00, 0x20, 0x00, 0x00,
+        0x6a, 0x00,
+        0xff, 0x15, 0x04, 0x20, 0x00, 0x00,
+        0x89, 0xc6,
+        0xc7, 0x00, 0x44, 0x33, 0x22, 0x11,
+        0x8b, 0x08,
+        0x6a, 0x10,
+        0xff, 0x15, 0x08, 0x20, 0x00, 0x00,
+        0x83, 0xc4, 0x04,
+        0xc3,
     ];
     let mut bytes = code;
     bytes.resize(0x1000, 0);

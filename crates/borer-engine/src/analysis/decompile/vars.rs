@@ -48,7 +48,6 @@ const PUNCTS: [&str; 22] = [
 /// The operators that write the variable before them.
 const COMPOUND: [&str; 10] = ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="];
 
-// ---- tokens ----
 
 /// What a token is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +285,6 @@ impl Line<'_> {
     }
 }
 
-// ---- the graph ----
 
 /// What a node does to the tracked variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -550,7 +548,6 @@ impl Graph {
     }
 }
 
-// ---- reads and writes ----
 
 /// What one node reads and writes of the tracked variables: each a
 /// variable and the token naming it.
@@ -781,7 +778,6 @@ fn occs(
     (o, None)
 }
 
-// ---- webs ----
 
 /// A disjoint-set forest over a variable's definitions and the points it
 /// is read at.
@@ -971,7 +967,6 @@ fn webs_of(
     }
 }
 
-// ---- the pass ----
 
 /// The parts of a function's text.
 #[derive(Debug)]
@@ -2110,10 +2105,6 @@ impl<'t> Text<'t> {
         let place = self.place(u, k)?;
         let un = self.graph.nodes.get(u)?;
         let ul = self.lines.get(un.line?)?;
-        // INVARIANT: a right side that calls anything always ran at its
-        // statement's place; folded into a condition a `&&` or `||`
-        // before the use could skip, the call would run only when the
-        // text evaluates that far, which the machine never promised.
         if rhs_does.calls
             && matches!(place, Place::Truth | Place::Not | Place::Compare)
             && short_circuits_before(ul, k)

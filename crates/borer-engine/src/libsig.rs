@@ -164,10 +164,6 @@ pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
                 ));
                 break;
             };
-            // SPEC: System V and GNU ar: `/` and `/SYM64/` are the symbol
-            // tables, `//` the long-name table, `/<offset>` a name at that
-            // offset in it, `name/` a short name; BSD ar's `#1/<len>` puts
-            // the name ahead of the data, which goblin reads.
             let name = match raw.strip_prefix('/') {
                 Some("/") => {
                     long_names = data;
@@ -320,12 +316,11 @@ fn member_functions(data: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'sta
 /// * `kind` - The relocation type.
 fn reloc_width(machine: u16, kind: u16) -> usize {
     match (machine, kind) {
-        // ABSOLUTE is padding in the table and rewrites nothing.
         (_, 0) => 0,
-        (AMD64, 0x1) => 8,               // ADDR64
-        (AMD64 | I386, 0xA) => 2,        // SECTION
-        (AMD64, 0xC) | (I386, 0xD) => 1, // SECREL7
-        (I386, 0x1 | 0x2) => 2,          // DIR16, REL16
+        (AMD64, 0x1) => 8,
+        (AMD64 | I386, 0xA) => 2,
+        (AMD64, 0xC) | (I386, 0xD) => 1,
+        (I386, 0x1 | 0x2) => 2,
         _ => 4,
     }
 }
@@ -341,10 +336,6 @@ fn reloc_width(machine: u16, kind: u16) -> usize {
 /// * `kind` - The relocation type.
 fn elf_reloc_width(machine: u16, kind: u32) -> usize {
     use goblin::elf::header::{EM_386, EM_AARCH64, EM_X86_64};
-    // SPEC: System V ABI AMD64 table 4.10 and i386 table 4.4; ELF for the
-    // Arm 64-bit Architecture 5.7: NONE rewrites nothing, the 64-bit data
-    // relocations eight bytes, the 16- and 8-bit ones two and one, and every
-    // other one a 32-bit field or one instruction word.
     match (machine, kind) {
         (_, 0) => 0,
         (EM_X86_64, 1 | 24 | 25) | (EM_AARCH64, 257 | 260) => 8,
@@ -369,7 +360,6 @@ fn elf_reloc_width(machine: u16, kind: u32) -> usize {
 /// When the bytes are not a COFF object; an import object, a big object
 /// and an object of another machine are passed over without one.
 fn object_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'static str> {
-    // SPEC: an import object and a big object both open `0000 FFFF`.
     if bytes.get(..4) == Some(&[0, 0, 0xff, 0xff][..]) {
         return Ok(());
     }
@@ -381,8 +371,6 @@ fn object_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'st
     let (Some(symbols), Some(strings)) = (&coff.symbols, &coff.strings) else {
         return Ok(());
     };
-    // Names by symbol index, and whether a reference to it says anything
-    // another object could say too.
     let mut names: Vec<(usize, String, bool)> = Vec::new();
     let mut functions: Vec<(usize, u32, String)> = Vec::new();
     for (index, _, sym) in symbols.iter() {
@@ -775,22 +763,22 @@ mod tests {
         let relocs_at = text_at + code.len();
         let symtab_at = relocs_at + relocs.len() * 10;
         o.extend_from_slice(&machine.to_le_bytes());
-        o.extend_from_slice(&1u16.to_le_bytes()); // sections
-        o.extend_from_slice(&0u32.to_le_bytes()); // time stamp
+        o.extend_from_slice(&1u16.to_le_bytes());
+        o.extend_from_slice(&0u32.to_le_bytes());
         o.extend_from_slice(&le32(symtab_at));
         o.extend_from_slice(&le32(symbols.len()));
-        o.extend_from_slice(&0u16.to_le_bytes()); // optional header
-        o.extend_from_slice(&0u16.to_le_bytes()); // characteristics
+        o.extend_from_slice(&0u16.to_le_bytes());
+        o.extend_from_slice(&0u16.to_le_bytes());
         o.extend_from_slice(b".text\0\0\0");
-        o.extend_from_slice(&0u32.to_le_bytes()); // virtual size
-        o.extend_from_slice(&0u32.to_le_bytes()); // virtual address
+        o.extend_from_slice(&0u32.to_le_bytes());
+        o.extend_from_slice(&0u32.to_le_bytes());
         o.extend_from_slice(&le32(code.len()));
         o.extend_from_slice(&le32(text_at));
         o.extend_from_slice(&le32(relocs_at));
-        o.extend_from_slice(&0u32.to_le_bytes()); // line numbers
+        o.extend_from_slice(&0u32.to_le_bytes());
         o.extend_from_slice(&le16(relocs.len()));
         o.extend_from_slice(&0u16.to_le_bytes());
-        o.extend_from_slice(&0x6000_0020u32.to_le_bytes()); // code, execute, read
+        o.extend_from_slice(&0x6000_0020u32.to_le_bytes());
         o.extend_from_slice(code);
         for (at, sym, kind) in relocs {
             o.extend_from_slice(&at.to_le_bytes());
@@ -813,7 +801,7 @@ mod tests {
             o.extend_from_slice(&section.to_le_bytes());
             o.extend_from_slice(&typ.to_le_bytes());
             o.push(*class);
-            o.push(0); // aux symbols
+            o.push(0);
         }
         o.extend_from_slice(&le32(4 + strings.len()));
         o.extend_from_slice(&strings);
@@ -829,12 +817,12 @@ mod tests {
     #[test]
     fn an_object_gives_its_functions_masked() {
         let code = [
-            0x48, 0x83, 0xec, 0x28, // sub rsp,0x28
-            0xe8, 0, 0, 0, 0, // call helper
-            0x48, 0x83, 0xc4, 0x28, // add rsp,0x28
-            0xc3, // ret
-            0xcc, 0xcc, // padding
-            0xe9, 0, 0, 0, 0, // helper: jmp __imp_Sleep's thunk
+            0x48, 0x83, 0xec, 0x28,
+            0xe8, 0, 0, 0, 0,
+            0x48, 0x83, 0xc4, 0x28,
+            0xc3,
+            0xcc, 0xcc,
+            0xe9, 0, 0, 0, 0,
         ];
         let obj = object(
             0x8664,

@@ -123,7 +123,6 @@ const PAGE_ROWS: usize = 200;
 /// Bytes per window the entropy scan measures.
 const ENTROPY_WINDOW: usize = 1024;
 
-// ---- the command line ----
 
 /// A command word, by what it needs before it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -597,7 +596,6 @@ fn search_args(words: &[String]) -> anyhow::Result<(SearchKind, usize)> {
     Ok((kind, offset.unwrap_or(0)))
 }
 
-// ---- positional arguments ----
 
 /// Returns a positional argument.
 ///
@@ -785,7 +783,6 @@ fn entry_at(p: &Program, a: &Analysis, va: u64) -> anyhow::Result<u64> {
     borer_engine::analysis::function_entry(p, a, va).map_err(anyhow::Error::msg)
 }
 
-// ---- files and packs ----
 
 /// Writes a file for a command that was asked to produce one.
 ///
@@ -1144,7 +1141,6 @@ fn open(
     Ok((named, program))
 }
 
-// ---- the session ----
 
 /// A binary with the packs that fit it, as every query reads it.
 #[derive(Debug)]
@@ -1313,10 +1309,7 @@ fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
         "decompile needs an address or name",
         Feature::Decompile,
     )?;
-    // SPEC: BORER_RAW=1 shows the structurer's output before text cleanup.
     let raw = std::env::var_os("BORER_RAW").is_some();
-    // PERF: the check first, so the decompilation it memoizes keeps
-    // the lifter's witness and the text below reads the same cell.
     let header = (!raw)
         .then(|| decompile::checked_header(&s.program, &a, &s.overlay, entry))
         .flatten();
@@ -1335,7 +1328,6 @@ fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
     Ok(window(&text, None, offset, limit))
 }
 
-// ---- running ----
 
 /// The refusal of a word that names no command: an option borer does not
 /// know when it opens with a dash, else a command.
@@ -2483,8 +2475,6 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                             ty.spell()
                         )
                     })?;
-                    // An applied enum names the constants compared with the
-                    // global; every other type names the fields read through it.
                     let renders = if utypes::named_enum(&overlay.types, &ty).is_some() {
                         "names its values"
                     } else {
@@ -2509,9 +2499,6 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Verify => {
             let text = args.get(5).is_some_and(|m| m == "text");
-            // INVARIANT: an arm64 lifting is checked against the arm64
-            // machine block by block, which needs only the functions; its
-            // text's check decompiles them, as for x86.
             let a64 = !text && s.program.arch.isa() == Some(Isa::A64);
             let a = s.analysis(if a64 {
                 Feature::Discover

@@ -1700,9 +1700,6 @@ fn every_stop_is_named() {
     }
     assert_eq!(stop(&[EXIT, SVC], &[], BUDGET), (Stop::Exited, 2, BASE + 4));
     assert_eq!(stop(&[EXIT_GROUP, SVC], &[], BUDGET).0, Stop::Exited);
-    // A non-exit syscall is serviced and the run continues: write is
-    // recorded by name, returns its count (x2), and the `ret` after it ends
-    // the run.
     {
         let p = image(&[WRITE, SVC, RET]);
         let mut m = machine(&p);

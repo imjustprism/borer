@@ -16,7 +16,6 @@ use crate::num::lo8;
 /// The fixed bits of `fmov` (scalar, immediate), as `(mask, value)`: the
 /// one `fmov` whose source is an immediate and whose destination is a
 /// scalar register.
-// SPEC: Arm ARM (DDI 0487) C7.2 FMOV (scalar, immediate): 0001 1110 ty 1 imm8 100 00000 Rd.
 pub(crate) const FMOV_IMM: (u32, u32) = (0xff20_1fe0, 0x1e20_1000);
 
 /// Each byte's low bit, for replicating a byte across a doubleword.
@@ -134,7 +133,6 @@ impl Machine<'_> {
     /// When a 32-bit form shifts by 32 or 48, which is unallocated.
     pub(super) fn move_wide(&mut self, i: &Insn, form: Wide) -> Result<(), Stop> {
         let (rd, bits) = dest(i)?;
-        // SPEC: Arm ARM (DDI 0487) C6.2 MOVZ/MOVN/MOVK: imm16 is bits 5..20 and hw bits 21..22, shifting by hw * 16.
         let pos = ((i.word >> 21) & 3) * 16;
         if pos >= u32::from(bits) {
             return Err(unmodeled(i));
@@ -466,10 +464,6 @@ impl Machine<'_> {
     ///
     /// For a word that is no vector `fmov` immediate: another `cmode`, or
     /// the reserved precision bits.
-    // SPEC: Arm ARM (DDI 0487) C7.2 FMOV (vector, immediate): the
-    // modified-immediate group with cmode 1111, its op and o2 bits naming
-    // the lane width; Q names the span and abc with defgh the imm8, as
-    // `movi` reads them.
     fn fmov_imm_array(&mut self, i: &Insn) -> Result<(), Stop> {
         let w = i.word;
         if (w >> 24) & 0x1f != 0b01111 || (w >> 12) & 0xf != 0b1111 {
@@ -508,7 +502,6 @@ impl Machine<'_> {
     ///
     /// For an encoding that expands to a floating-point immediate.
     pub(super) fn movi(&mut self, i: &Insn, invert: bool) -> Result<(), Stop> {
-        // SPEC: Arm ARM (DDI 0487) C7.2 MOVI/MVNI: Rd bits 0..4, d:e:f:g:h bits 5..9, cmode bits 12..15, a:b:c bits 16..18, op bit 29, Q bit 30.
         let w = i.word;
         let imm8 = u64::from((((w >> 16) & 7) << 5) | ((w >> 5) & 0x1f));
         let imm = expand_imm((w >> 29) & 1, (w >> 12) & 0xf, imm8).ok_or_else(|| unmodeled(i))?;
@@ -538,10 +531,6 @@ impl Machine<'_> {
     /// # Errors
     ///
     /// For the immediate forms' `cmode`, which [`expand_imm`] refuses.
-    // SPEC: Arm ARM (DDI 0487) C7.2 AND/ORR/EOR/BIC (vector): Rd bits 0..4,
-    // Rn bits 5..9, Rm bits 16..20, Q bit 30; the immediate forms share
-    // movi's imm8 and cmode fields, op bit 29 and cmode's low bit naming
-    // the operation in place of the move.
     pub(super) fn vector_logical(
         &mut self,
         i: &Insn,
@@ -594,7 +583,6 @@ impl Machine<'_> {
     /// # Errors
     ///
     /// When `imm5` names no lane width.
-    // SPEC: Arm ARM (DDI 0487) C7.2 DUP: imm5 bits 16..20, its lowest set
     /// bit naming the element size and the bits above it the index; Q bit 30.
     pub(super) fn dup(&mut self, i: &Insn) -> Result<(), Stop> {
         let w = i.word;
@@ -634,9 +622,6 @@ impl Machine<'_> {
     /// # Errors
     ///
     /// Never; the decoder has already accepted the arrangement.
-    // SPEC: Arm ARM (DDI 0487) C7.2 ADD/SUB/MUL (vector): size bits 22..23
-    // name the lane width and Q bit 30 the span, as every three-register
-    // vector word encodes them.
     pub(super) fn vector_arith(
         &mut self,
         i: &Insn,
@@ -666,7 +651,6 @@ impl Machine<'_> {
     /// # Errors
     ///
     /// Never; the decoder has already accepted the arrangement.
-    // SPEC: Arm ARM (DDI 0487) C7.2 NEG/ABS (vector): the two-register
     /// shape, its size and Q fields as every vector word encodes them.
     pub(super) fn vector_unary(
         &mut self,
@@ -766,7 +750,6 @@ pub(super) fn shifted(raw: u64, from: u32, shift: Shift, amount: u8, width: u32)
 ///
 /// The sum masked to `width`, and its flags: C is the unsigned carry out
 /// of the top bit, V the signed overflow.
-// SPEC: Arm ARM (DDI 0487) J1, AddWithCarry.
 fn add_with_carry(x: u64, y: u64, carry: bool, width: u32) -> (u64, Flags) {
     let (x, y) = (mask(x, width), mask(y, width));
     let wide = u128::from(x) + u128::from(y) + u128::from(carry);
@@ -852,7 +835,6 @@ pub(super) fn bfm(old: u64, src: u64, r: u32, s: u32, width: u32) -> u64 {
 /// # Returns
 ///
 /// The bits, or `None` for any other width.
-// SPEC: Arm ARM (DDI 0487) J1, VFPExpandImm.
 pub(crate) fn vfp_expand(imm8: u32, bits: u16) -> Option<u64> {
     let exp_bits: u32 = match bits {
         16 => 5,
@@ -887,7 +869,6 @@ pub(crate) fn vfp_expand(imm8: u32, bits: u16) -> Option<u64> {
 ///
 /// The pattern, or `None` for the `cmode` that encodes a floating-point
 /// immediate.
-// SPEC: Arm ARM (DDI 0487) J1, AdvSIMDExpandImm.
 pub(crate) fn expand_imm(op: u32, cmode: u32, imm8: u64) -> Option<u64> {
     let words = |v: u64| v | (v << 32);
     Some(match cmode >> 1 {

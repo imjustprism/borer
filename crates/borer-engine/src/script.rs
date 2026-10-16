@@ -934,8 +934,6 @@ pub fn run_pack_scripts(program: &Program, analysis: Analysis) -> Analysis {
             }
         })
         .collect();
-    // INVARIANT: every other handle on `shared` lived in a script engine,
-    // and `run` drops its engine before it returns, so this is the last.
     let Some(mut analysis) = Arc::into_inner(shared) else {
         return Analysis::default();
     };

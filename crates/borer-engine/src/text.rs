@@ -84,8 +84,6 @@ pub fn short_path(path: &str) -> String {
 /// * `text` - The outside text.
 /// * `max` - Widest result, before the `...` that marks a cut.
 fn escaped(text: &str, max: usize) -> String {
-    // The common case is a name that needs nothing done to it, and every
-    // listing runs this over every row.
     if text.len() <= max && !text.chars().any(needs_escape) {
         return text.to_owned();
     }
@@ -260,9 +258,6 @@ fn edits_within(a: &str, b: &str, limit: usize) -> Option<usize> {
 ///
 /// * `c` - The character.
 fn needs_escape(c: char) -> bool {
-    // SPEC: U+202A..U+202E are the bidirectional embeddings and overrides and
-    // U+2066..U+2069 the isolates; U+200E, U+200F and U+061C are the marks.
-    // All of them reorder the text that follows without printing anything.
     c.is_control()
         || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         || matches!(c, '\u{200e}' | '\u{200f}' | '\u{061c}')
@@ -329,7 +324,6 @@ mod tests {
     fn an_ordinary_name_is_left_alone() {
         let name = "public: void __cdecl FMOD::Studio::System::release(void)";
         assert_eq!(one_line(name), name);
-        // Non-ASCII is not suspicious in itself and stays readable.
         assert_eq!(one_line("café_init"), "café_init");
     }
 
@@ -375,8 +369,6 @@ mod tests {
         let out = one_line(&"a".repeat(10_000));
         assert_eq!(out.chars().count(), OUTSIDE_MAX + 3);
         assert!(out.ends_with("..."), "{out}");
-        // The longest name seen in a real binary is 239 characters and must
-        // survive whole, or the cap would be hiding real analysis.
         let real = "b".repeat(239);
         assert_eq!(one_line(&real), real);
     }
@@ -406,7 +398,6 @@ mod tests {
     fn a_path_is_bounded_without_losing_its_name() {
         let real = r"C:\Users\someone\Projects\target\release\borer.exe";
         assert_eq!(short_path(real), real, "a real path is left alone");
-        // Windows allows 260 characters without asking for them.
         let deep = format!(r"C:\{}\app.exe", "dir".repeat(80));
         assert_eq!(short_path(&deep), deep, "a legitimately long path survives");
 

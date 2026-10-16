@@ -190,9 +190,6 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
                 slot + 1
             );
         }
-        // The constants the code compares against do not decide the
-        // answer, but the arithmetic between the argument and the
-        // comparison may: invert it, and run what it states.
         let text = decompile_named(p, a, o, entry);
         if let Some(solved) = text
             .as_ref()

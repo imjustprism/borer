@@ -378,7 +378,6 @@ impl Lift<'_, '_> {
     /// * `form` - How the immediate combines with the register.
     fn move_wide(&mut self, i: &Insn, form: Wide) -> Option<()> {
         let (rd, bits) = dest(i)?;
-        // SPEC: Arm ARM (DDI 0487) C6.2 MOVZ/MOVN/MOVK: imm16 is bits 5..20 and hw bits 21..22, shifting by hw * 16.
         let pos = ((i.word >> 21) & 3) * 16;
         if pos >= u32::from(bits) {
             return None;
@@ -722,7 +721,6 @@ impl Lift<'_, '_> {
     /// * `i` - The instruction.
     /// * `invert` - Whether the immediate is inverted (`mvni`).
     fn movi(&mut self, i: &Insn, invert: bool) -> Option<()> {
-        // SPEC: Arm ARM (DDI 0487) C7.2 MOVI/MVNI: Rd bits 0..4, d:e:f:g:h bits 5..9, cmode bits 12..15, a:b:c bits 16..18, op bit 29, Q bit 30.
         let w = i.word;
         let imm8 = u64::from((((w >> 16) & 7) << 5) | ((w >> 5) & 0x1f));
         let v = expand_imm((w >> 29) & 1, (w >> 12) & 0xf, imm8)?;
@@ -742,9 +740,6 @@ impl Lift<'_, '_> {
     /// # Arguments
     ///
     /// * `i` - The instruction.
-    // SPEC: Arm ARM (DDI 0487) C7.2 FMOV (vector, immediate): the
-    // modified-immediate group with cmode 1111, its op and o2 bits naming
-    // the lane width, as the machine's handler reads it.
     fn fmov_imm_array(&mut self, i: &Insn) -> Option<()> {
         let w = i.word;
         if (w >> 24) & 0x1f != 0b01111 || (w >> 12) & 0xf != 0b1111 {
@@ -771,8 +766,6 @@ impl Lift<'_, '_> {
     ///
     /// * `i` - The instruction.
     /// * `name` - The mnemonic.
-    // SPEC: Arm ARM (DDI 0487) C7.2 ADD/SUB/MUL (vector): size bits 22..23
-    // name the lane width, as every three-register vector word encodes it.
     fn vector_arith(&mut self, i: &Insn, name: &str) -> Option<()> {
         let w = i.word;
         let (a, b) = (self.reg_at(vreg(w, 5), 128), self.reg_at(vreg(w, 16), 128));
@@ -792,8 +785,6 @@ impl Lift<'_, '_> {
     ///
     /// * `i` - The instruction.
     /// * `name` - The mnemonic.
-    // SPEC: Arm ARM (DDI 0487) C7.2 NEG/ABS (vector): the two-register
-    // shape, its size and Q fields as every vector word encodes them.
     fn vector_unary(&mut self, i: &Insn, name: &str) -> Option<()> {
         let w = i.word;
         let x = low(self.reg_at(vreg(w, 5), 128), 64);

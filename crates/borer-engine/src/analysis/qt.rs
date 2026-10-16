@@ -189,11 +189,6 @@ pub(super) fn infer(program: &Program, analysis: &mut Analysis) {
             meta_object: meta,
         });
     }
-    // INVARIANT: a QObject's first three virtuals are `metaObject`,
-    // `qt_metacast` and `qt_metacall`, in that order, in every Qt 5 build;
-    // a class's table is trusted to have that layout only when the
-    // function in its first slot is the one returning the class's own
-    // meta-object.
     for class in &classes {
         let Some(info) = analysis.classes.by_name.get(&class.name) else {
             continue;
@@ -234,8 +229,6 @@ pub(super) fn infer(program: &Program, analysis: &mut Analysis) {
         let Some(base) = renames.get(&f.entry) else {
             continue;
         };
-        // INVARIANT: a name `moc` wrote beats one the vtable pass inferred
-        // (`Class::vfunc_11`), and never a symbol the program carries.
         if f.name.is_some() && !f.name_inferred {
             continue;
         }
@@ -290,10 +283,6 @@ fn string_table(program: &Program, va: u64, word: u64) -> Option<Vec<String>> {
     let (Some(first), Some((_, first_offset))) = (names.first(), header(program, va, word)) else {
         return None;
     };
-    // INVARIANT: the class name comes first and the strings begin where the
-    // headers end, which is what tells a table from two stray headers. A
-    // class with nothing to declare has a table of its name alone, which
-    // only the meta-object that points at it tells from a lone literal.
     (is_identifier(first) && first_offset == names.len() as u64 * size).then_some(names)
 }
 
@@ -370,9 +359,6 @@ fn meta_data(
     let methods_at = u64::from(at(5)?);
     let properties = at(6)?;
     let properties_at = u64::from(at(7)?);
-    // INVARIANT: a class with no methods has no method table and an offset
-    // of zero for it; the offset is checked only when there is something
-    // at it.
     if methods > METHODS_MAX
         || properties > METHODS_MAX
         || (methods > 0 && methods_at < HEADER_WORDS)
@@ -597,8 +583,6 @@ fn first_call(
         {
             return call;
         }
-        // INVARIANT: only a block that runs on into the next one is followed
-        // there; past a jump or a return the next block is another case's.
         if !matches!(
             b.term,
             super::BlockTerm::Fall | super::BlockTerm::Cond | super::BlockTerm::Call
@@ -648,12 +632,7 @@ fn calls_in(
         .get(class)
         .map_or(&[][..], |c| c.slots.as_slice());
     let overlay = super::Overlay::default();
-    // INVARIANT: the offset each register was last loaded from through a
-    // base register names the slot: `mov eax,[eax+2Ch]; call eax` calls
-    // slot 11 as `call [eax+2Ch]` does.
     let mut loads: BTreeMap<Register, i64> = BTreeMap::new();
-    // INVARIANT: a slot holding an import thunk (`_purecall` in a pure
-    // virtual's slot) names no method of this image.
     let own_code = |e: u64| analysis.function(e).is_some_and(|g| g.thunk.is_none());
     let slot_of = |k: i64| {
         (k >= 0 && k % word == 0)
@@ -795,10 +774,6 @@ fn literal_parts(program: &Program, at: u64) -> Option<(&'static str, String)> {
                 .collect::<Result<Vec<u16>, _>>()
                 .ok()
         });
-    // INVARIANT: ASCII in UTF-16 is unmistakable, every other byte zero,
-    // and is tried first; a run of bytes ending in a zero is then the byte
-    // array it says it is, printable or not, so that text in some other
-    // encoding is never read as pairs.
     if let Some(units) = &wide
         && let Some((&0, body)) = units.split_last()
         && body.iter().all(|&u| printable(u32::from(u)))

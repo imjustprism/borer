@@ -6,26 +6,25 @@
 //! user learned about one target, lives in a pack instead: a text file that
 //! names a family's conventions (what its per-class static instance is
 //! called, which templates are its serializer streams, which registrar
-//! defines its attributes, which base classes play which role), so a Nebula
-//! pack, a Qt pack or a pack for one product ships beside the engine and
-//! anyone can write their own.
+//! defines its attributes, which base classes play which role). A pack is
+//! a file the user keeps. The engine ships none, and anyone can write one.
 //!
 //! The format is line-based, like the anchors manifest:
 //!
 //! ```text
 //! # comments start with #
-//! pack nebula 1
-//! about Nebula Device 3 conventions
+//! pack example 1
+//! about one family's conventions
 //!
 //! [naming]
-//! singleton Singleton
+//! singleton shared
 //!
 //! [types]
-//! stream Network::
+//! stream Io::
 //!
 //! [roles]
-//! class Game::Property property
-//! prefix Commands:: command
+//! class Base::Node node
+//! prefix Msg:: message
 //! ```
 //!
 //! A line is a key, a space and its value. Keys belong to the section above
@@ -526,7 +525,7 @@ impl Packs {
     }
 
     /// [`Packs::list`]'s values split into their first word and the rest:
-    /// `class Game::Property property` gives `("Game::Property",
+    /// `class Base::Node node` gives `("Base::Node",
     /// "property")`.
     ///
     /// # Arguments

@@ -179,8 +179,6 @@ fn float_condition(flags: &Flags, c: a64::Cond, cc: Cc) -> Cond {
         a64::Cond::Le | a64::Cond::Ls => plain(Cc(C::be)),
         a64::Cond::Vs => plain(Cc(C::p)),
         a64::Cond::Vc => plain(Cc(C::np)),
-        // INVARIANT: the ordered tests are below with not-unordered, and
-        // their inverses; `lo` is `mi` because only a less pair clears C.
         a64::Cond::Mi | a64::Cond::Lo | a64::Cond::Pl | a64::Cond::Hs => {
             let less = Expr::Cond(Box::new(Cond {
                 cc: Cc(C::b),
@@ -348,7 +346,6 @@ fn sub_overflow(a: &Expr, b: &Expr, bits: u8) -> Expr {
 /// * `nzcv` - The flags, N in bit 3 down to V in bit 0.
 pub(super) fn holds(c: a64::Cond, nzcv: u64) -> bool {
     let (n, z, carry, v) = (nzcv & 8 != 0, nzcv & 4 != 0, nzcv & 2 != 0, nzcv & 1 != 0);
-    // SPEC: Arm ARM (DDI 0487) J1, ConditionHolds.
     match c {
         a64::Cond::Eq => z,
         a64::Cond::Ne => !z,

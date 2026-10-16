@@ -263,9 +263,6 @@ fn read_values_with<'a>(
     if !out.is_empty() {
         return Ok(out);
     }
-    // INVARIANT: an address that maps to no file bytes and one that maps to
-    // bytes that are not the kind asked for are two different answers, and
-    // the reader acts differently on each.
     let first = read(start, 1).and_then(|b| b.first().copied());
     Err(why(first))
 }

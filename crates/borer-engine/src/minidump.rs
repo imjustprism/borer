@@ -334,8 +334,6 @@ fn string_at(bytes: &[u8], at: usize) -> Option<String> {
         .map(|k| u16_le(bytes, at + 4 + k * 2))
         .collect::<Option<Vec<u16>>>()?
         .into_iter()
-        // A dump writer counts the terminator in the length; it is not a
-        // character of the name.
         .take_while(|&u| u != 0)
         .collect();
     Some(

@@ -115,7 +115,7 @@ fn static_elf() -> Program {
     let mut text = vec![0xccu8; 0x41];
     text[..6].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3]); // ASM: call 0x1010; ret
     text[0x10..0x28].copy_from_slice(&LIB_MIX);
-    text[0x1e..0x22].copy_from_slice(&0x1eu32.to_le_bytes()); // the call reaches 0x1040
+    text[0x1e..0x22].copy_from_slice(&0x1eu32.to_le_bytes());
     text[0x40] = 0xc3; // ASM: ret
     let bytes = elfgen::build(
         ET_EXEC,

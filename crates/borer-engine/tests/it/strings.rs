@@ -272,7 +272,6 @@ fn wide_spans_trim_the_first_unit_and_respect_the_minimum() {
         bytes.extend(std::iter::repeat_n(b'w', units).flat_map(|b| [b, 0]));
         bytes.extend_from_slice(&[0xff, 0xff]);
     }
-    // a printable byte before the last run: trimmed by one unit
     bytes.push(b'x');
     bytes.extend(b"zvuts".iter().flat_map(|b| [*b, 0]));
     for min_len in 0..=7 {
@@ -400,13 +399,13 @@ fn span_hits_round_trip_the_reference_walks() {
         }
     }
     let monster = LEN / 4;
-    bytes[monster - 1] = 1; // a separator: the run's extent is exactly the plantings
+    bytes[monster - 1] = 1;
     for k in 0..300 {
         bytes[monster + k] = b'm';
     }
     bytes[monster + 300] = 0;
     let wmonster = 3 * LEN / 4;
-    bytes[wmonster - 1] = 1; // not printable: no ASCII tail trims the run's first unit
+    bytes[wmonster - 1] = 1;
     for k in 0..300 {
         bytes[wmonster + k * 2] = b'w';
         bytes[wmonster + k * 2 + 1] = 0;

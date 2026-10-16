@@ -1,16 +1,14 @@
 //! Attributes: the typed attribute definitions a program registers at
-//! start-up (Nebula3's `AttributeDefinitionBase`, say), with their codes,
-//! types, defaults and the code using them.
+//! start-up, with their codes, types, defaults and the code using them.
 //!
-//! An entity's state is a set of attributes (`HitPoints`, `PlayTimeStart`,
-//! `Transform`), each a global definition built once by a typed registrar:
-//! a small function per attribute builds the name into a string, puts the
-//! four-character code in a local, and hands both with the global, the
-//! access mode and the default to the registrar for its type, which calls
-//! `AttributeDefinitionBase::Register`. Each registrar stores a constant
-//! type code at one offset of the definition, and the table accessors
-//! guard that same offset against named types
-//! (`GetColumnValueType(colIndex) == Matrix44Type`), which names the codes.
+//! An object's state is a set of named attributes, each a global definition
+//! built once by a typed registrar: a small function per attribute builds
+//! the name into a string, puts the four-character code in a local, and
+//! hands both with the global, the access mode and the default to the
+//! registrar for its type. Each registrar stores a constant type code at
+//! one offset of the definition, and the table accessors guard that same
+//! offset against a named type (`kind == FloatType`), which names the
+//! codes.
 //! This module reads all of it back into one table. The function every
 //! registrar calls is the framework's own, so a pack names it
 //! (`[attributes] registrar`); with none named the catalog is empty.
@@ -265,7 +263,7 @@ fn type_offset(stores: &[BTreeMap<u64, u64>]) -> Option<u64> {
 
 /// The names the binary's type asserts give the codes stored at `offset`:
 /// `if (*(uint32_t*)(x + 0x50) != 10) { assert_failed("... ==
-/// Matrix44Type", ...) }` names 10 `Matrix44`.
+/// FloatType", ...) }` names 10 `Float`.
 ///
 /// # Arguments
 ///
@@ -642,9 +640,7 @@ pub fn catalog_tsv(
         out.push_str("; borer://attrs/<name> lists one attribute's users");
     }
     if analysis.packs.list("attributes", "registrar").is_empty() {
-        out.push_str(
-            "; no pack names the registrar (an `[attributes] registrar` line, as packs/nebula.borer has)",
-        );
+        out.push_str("; no pack names the registrar (an `[attributes] registrar` line in a pack)");
     }
     out.push('\n');
     if !cat.type_names.is_empty() {
@@ -845,7 +841,7 @@ fn accessor_kind(line: &str) -> Option<Access> {
 mod tests {
     use super::*;
 
-    /// A registration as the game's decompile to: the name built into one
+    /// A registration as decompiled: the name built into one
     /// local, the code in another, the string default in a third.
     const SITE: &str = "// sub_140001220 @ 0x140001220
 uint64_t rdx, local_48, local_88;
@@ -943,7 +939,7 @@ rax = Attr::AttributeTable::GetInt(rax, rdx, 0);
             None
         );
         assert_eq!(
-            accessor_kind("Game::Entity::SetFloat(a1, v);"),
+            accessor_kind("Type::Entity::SetFloat(a1, v);"),
             Some(Access::Write)
         );
         assert_eq!(accessor_kind("Util::String::SetCharPtr(a1);"), None);

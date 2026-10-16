@@ -340,10 +340,6 @@ pub(in crate::analysis::decompile) fn leading_reads(
                 }
                 Some(Home::VaStart) | None => {}
             }
-            // INVARIANT: a frame helper builds the callee's frame and
-            // returns; it reads no argument register, so the scan goes on
-            // past it to the reads that follow, with `eax` written since
-            // the helper leaves the return address it juggled there.
             if crate::analysis::render::frame_helper(ctx.analysis, ctx.overlay, &i) {
                 written.insert(Register::EAX);
                 va = i.next_ip();
@@ -365,9 +361,6 @@ pub(in crate::analysis::decompile) fn leading_reads(
                 }
                 break 'blocks;
             }
-            // INVARIANT: a jump to another function's entry hands the
-            // arguments on, the registers this function set excepted; a
-            // jump within the function is flow.
             if i.flow_control() == FlowControl::UnconditionalBranch
                 && matches!(
                     i.op0_kind(),
@@ -557,9 +550,6 @@ impl Homes {
                 _ => None,
             }
         };
-        // INVARIANT: slot `k` of the arguments, counting the home slots
-        // first; one past them is the first stack argument, whose address
-        // `va_start` takes when every register argument is fixed.
         let arg_slot = |h: &Homes, i: &Instruction| -> Option<usize> {
             if i.memory_index() != Register::None {
                 return None;
@@ -602,8 +592,6 @@ impl Homes {
             self.va_start = Some(self.va_start.map_or(k, |v| v.min(k)));
             out = Some(Home::VaStart);
         }
-        // A 32-bit immediate is signed at its width: `add esp, -0x2d0`
-        // carries 0xfffffd30, which is -0x2d0 to the 32-bit add.
         let signed_imm = |i: &Instruction| match i.op1_kind() {
             OpKind::Immediate32 => i64::from(i.immediate32().cast_signed()),
             OpKind::Immediate16 => i64::from(i.immediate16().cast_signed()),
@@ -817,14 +805,6 @@ pub(in crate::analysis::decompile) fn forwarded_reads(
     let mut seen: BTreeSet<u64> = BTreeSet::from([t]);
     let mut shadow: BTreeSet<Register> = BTreeSet::new();
     let mut out: BTreeSet<Register> = BTreeSet::new();
-    // INVARIANT: a target that reads some registers itself and calls on
-    // hands that callee the others untouched: `mov [rsp+28h], rcx; lea
-    // rcx, [rsp+38h]; call g` reads `rcx` and passes `g` the `rdx` it
-    // never wrote, so on a 64-bit target the reads of every link not
-    // shadowed by a write before it are read. On a 32-bit one the first
-    // link that reads decides: there `ecx` and `edx` are a cdecl callee's
-    // scratch as often as a fastcall's arguments, and a read deeper down
-    // would make a cdecl caller fastcall.
     let deep = ctx.bitness == 64;
     while seen.len() <= FORWARD_MAX {
         let Some(Leading {
@@ -1273,11 +1253,6 @@ pub(super) fn reg_effects(
             }
         }
     }
-    // INVARIANT: a call or a jump out may pass any argument register, a
-    // float one in its vector register as well (`xmm1` for a callee that
-    // takes a `float` second), so a value pending in one is kept for it.
-    // The vector ones are read at [`VECTOR_ARG_LANE`]: live, but no
-    // evidence that a call before it left a float there.
     let args = || {
         ctx.conv.args.iter().map(|r| (Key::Reg(*r), 64u8)).chain(
             ctx.conv
@@ -1287,16 +1262,10 @@ pub(super) fn reg_effects(
         )
     };
     match instr.flow_control() {
-        // A stack probe or a cookie check reads and writes nothing the
-        // function sees.
         FlowControl::Call
             if crate::analysis::render::preserves_registers(ctx.analysis, ctx.overlay, instr) => {}
         FlowControl::Call | FlowControl::IndirectCall => {
             reads.extend(args());
-            // INVARIANT: a 32-bit callee's convention is its own, `thiscall`
-            // reading ecx and `fastcall` ecx and edx whatever the caller's
-            // is, so a call reads both unless the callee is known to read
-            // fewer; a copy into one of them before the call is then live.
             if ctx.bitness == 32 {
                 let sse = sse_callee(ctx, x87::named_target(instr));
                 reads.extend(sse_args(sse).map(|r| (Key::Reg(r), 64u8)));

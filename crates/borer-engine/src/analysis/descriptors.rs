@@ -1,8 +1,7 @@
 //! Class descriptors: the static object per class that an engine's factory
 //! registers and its creators allocate from.
 //!
-//! Engines with their own reflection (Nebula's `Core::Rtti`, Unreal's
-//! `UClass`, Qt's `QMetaObject`) keep one writable object per class and touch
+//! Engines with their own reflection keep one writable object per class and touch
 //! it from three kinds of function: a registration that also spells the
 //! class name as a string literal, a creator that allocates the instance and
 //! calls the constructor, and an initializer that stores the parent class's
@@ -66,9 +65,6 @@ pub(super) fn find(program: &Program, analysis: &Analysis) -> Descriptors {
         votes.entry(object).or_default().insert(name.clone());
     }
     let mut names = unanimous(votes);
-    // INVARIANT: a registration names its class beside its parent's, and the
-    // parent is only known once its own registration was read, so the rule
-    // runs from the roots down until a round names nothing new.
     for _ in 0..ANCESTORS_MAX {
         let mut own_votes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
         for (f, literals) in &names_by_fn {
@@ -325,8 +321,8 @@ pub(super) fn creator_name(
 /// Qualifies the bare class names registrations spelled.
 ///
 /// A class registered from inside its namespace spells only its own name
-/// (`ActorCommand`, `'ACCO'`), where signatures, templates and other
-/// registrations call it `Commands::ActorCommand`. Every qualified name the
+/// (`Actor`, `'ACTR'`), where signatures, templates and other
+/// registrations call it `Cmd::Actor`. Every qualified name the
 /// function names and the registrations carry, and each class prefix of
 /// one, is indexed by its last component; a bare registered name exactly
 /// one of them ends in takes that name in
@@ -396,8 +392,8 @@ fn qualified_registrations<'a>(
 /// The qualified names spelled in a function's name.
 ///
 /// Every run of identifier characters and `::` that joins two or more
-/// components counts, so `Core::Ptr<Commands::ActorCommand>::operator ->`
-/// spells `Core::Ptr` and `Commands::ActorCommand`.
+/// components counts, so `Core::Ptr<Cmd::Actor>::operator ->`
+/// spells `Core::Ptr` and `Cmd::Actor`.
 ///
 /// # Arguments
 ///
@@ -448,16 +444,16 @@ mod tests {
     #[test]
     fn bare_registered_names_take_their_qualified_name() {
         let runs: Vec<&str> =
-            super::qualified_runs("Core::Ptr<Commands::ActorCommand>::operator ->").collect();
-        assert_eq!(runs, vec!["Core::Ptr", "Commands::ActorCommand"]);
+            super::qualified_runs("Core::Ptr<Cmd::Actor>::operator ->").collect();
+        assert_eq!(runs, vec!["Core::Ptr", "Cmd::Actor"]);
         let names = [
-            "Core::Ptr<Commands::ActorCommand>::operator ->",
-            "Game::Inventory::GetItems",
+            "Core::Ptr<Cmd::Actor>::operator ->",
+            "App::Inventory::GetItems",
             "UI::Widget::Load",
-            "Game::Widget::Load",
+            "App::Widget::Load",
         ];
         let ids: BTreeMap<String, u32> = [
-            ("ActorCommand".to_owned(), 1),
+            ("Actor".to_owned(), 1),
             ("Inventory".to_owned(), 2),
             ("Widget".to_owned(), 3),
             ("Lonely".to_owned(), 4),
@@ -467,11 +463,8 @@ mod tests {
         assert_eq!(
             out,
             [
-                (
-                    "ActorCommand".to_owned(),
-                    "Commands::ActorCommand".to_owned()
-                ),
-                ("Inventory".to_owned(), "Game::Inventory".to_owned()),
+                ("Actor".to_owned(), "Cmd::Actor".to_owned()),
+                ("Inventory".to_owned(), "App::Inventory".to_owned()),
             ]
             .into()
         );

@@ -185,8 +185,6 @@ pub fn sniff_section(bytes: &[u8]) -> Option<&'static str> {
     }
     let version = u16_le(bytes, 4);
     let address_size_at = |at: usize| matches!(bytes.get(at), Some(4 | 8));
-    // A call-frame section opens with a CIE whose id says which one it is:
-    // zero for the runtime unwinder's copy, all ones for the debug copy.
     if let Some(id) = u32_le(bytes, 4)
         && bytes.get(8) == Some(&1)
     {
@@ -197,8 +195,6 @@ pub fn sniff_section(bytes: &[u8]) -> Option<&'static str> {
             return Some(".debug_frame");
         }
     }
-    // The line-number program header ends with the standard opcode lengths,
-    // a fixed run that no other section carries.
     if bytes
         .windows(6)
         .take(64)
@@ -206,17 +202,13 @@ pub fn sniff_section(bytes: &[u8]) -> Option<&'static str> {
     {
         return Some(".debug_line");
     }
-    // An address-range table is version 2 to this day, with the address size
-    // and segment selector after the offset into .debug_info.
     if version == Some(2) && address_size_at(10) && bytes.get(11) == Some(&0) {
         return Some(".debug_aranges");
     }
-    // A DWARF 5 unit header: version, then the unit's kind and address size.
     if version == Some(5) {
         if matches!(bytes.get(6), Some(0x01..=0x06)) && address_size_at(7) {
             return Some(".debug_info");
         }
-        // Range lists and location lists share this header exactly.
         if address_size_at(6) && bytes.get(7) == Some(&0) {
             return Some(".debug_rnglists or .debug_loclists");
         }
@@ -224,13 +216,9 @@ pub fn sniff_section(bytes: &[u8]) -> Option<&'static str> {
     if matches!(version, Some(2..=4)) && address_size_at(10) {
         return Some(".debug_info");
     }
-    // An abbreviation table opens with declaration code 1, a small tag, and
-    // the byte saying whether that tag has children.
     if bytes[0] == 0x01 && matches!(bytes[1], 0x01..=0x4b) && matches!(bytes[2], 0 | 1) {
         return Some(".debug_abbrev");
     }
-    // A string table is printable text in NUL-terminated runs. Paths tell the
-    // line-program's file table from the one holding names.
     let text = bytes.iter().take(4096);
     let printable = text
         .clone()
@@ -243,8 +231,6 @@ pub fn sniff_section(bytes: &[u8]) -> Option<&'static str> {
             .take(4096)
             .filter(|b| **b == b'/' || **b == 0x5c)
             .count();
-        // A file table is made of paths, so separators are a percent of it or
-        // more; a name table has almost none.
         let looks_like_paths = separators * 100 > looked;
         return Some(if looks_like_paths {
             ".debug_line_str or .debug_str"
@@ -301,8 +287,6 @@ pub fn sniff_file(bytes: &[u8]) -> Option<&'static str> {
             "Electrum encrypted wallet (base64 of BIE1 ECIES ciphertext)",
         ),
     ];
-    // tar's `ustar` magic sits at offset 257, not the start, so it is
-    // checked there rather than as a leading signature.
     if bytes.len() > 262 && bytes[257..262] == *b"ustar" {
         return Some("tar archive (ustar)");
     }
@@ -612,9 +596,6 @@ pub(crate) fn from_pe(
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
         .count();
-    // A declared symbol table that does not fit in the file is a tamper
-    // mark, and the reason a `/NN` section name cannot be resolved: the
-    // string table sits just past the symbols it does not have.
     let symbols_at = u64::from(pe.header.coff_header.pointer_to_symbol_table);
     let symbol_count = pe.header.coff_header.number_of_symbol_table;
     let declared_end = symbols_at.saturating_add(u64::from(symbol_count).saturating_mul(18));
@@ -675,7 +656,6 @@ pub(crate) fn from_pe(
         .as_ref()
         .and_then(|d| d.codeview_pdb70_debug_info.as_ref())
     {
-        // The debug path is bytes out of the file like any other name.
         let path =
             crate::text::one_line(String::from_utf8_lossy(cv.filename).trim_end_matches('\0'));
         let g = cv.signature;
@@ -776,9 +756,6 @@ pub(crate) fn from_pe(
             .filter(|(_, d)| d.virtual_address != 0 && d.size != 0)
             .map(|(kind, _)| directory_name(kind))
             .collect();
-        // INVARIANT: the checksum field sits 64 bytes into the optional
-        // header on PE32 and PE32+ alike, after the signature and the COFF
-        // header.
         let field = pe_pointer.saturating_add(4 + 20 + 64);
         h.checksum = Some((win.check_sum, pe_checksum(bytes, field)));
         if let Some((cert, size)) = opt
@@ -1046,9 +1023,6 @@ pub(crate) fn from_elf(elf: &Elf<'_>, bytes: &[u8]) -> Headers {
     h.interpreter = elf.interpreter.map(str::to_owned);
     h.libraries = elf.libraries.iter().map(|l| (*l).to_owned()).collect();
     h.stripped = Some(elf.syms.is_empty());
-    // Only an architecture the summary does not already name: x86 (3),
-    // x86-64 (62) and AArch64 (183) are named there, so naming them here
-    // would just repeat the line.
     let machine = elf.header.e_machine;
     if !matches!(machine, 3 | 62 | 183) {
         h.machine = Some(format!(
@@ -1157,8 +1131,6 @@ mod tests {
             Some("OLE2 compound file (MSI/DOC/XLS)")
         );
         assert!(sniff_file(b"-----BEGIN CERTIFICATE-----").is_some_and(|n| n.contains("PEM")));
-        // `ustar` at offset 257 names a tar even though the file opens with
-        // a name field, not a signature.
         let mut tar = vec![0u8; 263];
         tar[257..262].copy_from_slice(b"ustar");
         assert_eq!(sniff_file(&tar), Some("tar archive (ustar)"));
@@ -1234,26 +1206,20 @@ mod tests {
     /// exactly, and the answer names both rather than picking one.
     #[test]
     fn a_debug_section_is_named_from_its_header() {
-        // unit_length, version 2, .debug_info offset, address size, segment
         let aranges = [0x2c, 0, 0, 0, 2, 0, 0, 0, 0, 0, 8, 0];
         assert_eq!(sniff_section(&aranges), Some(".debug_aranges"));
-        // unit_length, version 5, unit type, address size, abbrev offset
         let info = [0x40, 0, 0, 0, 5, 0, 1, 8, 0, 0, 0, 0];
         assert_eq!(sniff_section(&info), Some(".debug_info"));
-        // the standard opcode lengths a line program header ends with
         let line = [
             0x0c, 4, 0, 0, 5, 0, 8, 0x20, 0, 0, 0, 1, 1, 1, 0xfb, 0x0e, 0x0d,
         ];
         assert_eq!(sniff_section(&line), Some(".debug_line"));
-        // a CIE: length, then the id that says which frame section this is
         let eh = [0x14, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0x78];
         assert_eq!(sniff_section(&eh), Some(".eh_frame"));
         let dbg = [0x14, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 1, 0, 1, 0x78];
         assert_eq!(sniff_section(&dbg), Some(".debug_frame"));
-        // declaration code 1, a tag, and whether it has children
         let abbrev = [1, 0x11, 1, 0x25, 0x0e, 0x13, 0x05, 3, 0x0e, 0, 0];
         assert_eq!(sniff_section(&abbrev), Some(".debug_abbrev"));
-        // version 5, address size, segment selector, offset entry count
         let rnglists = [0x20, 0, 0, 0, 5, 0, 8, 0, 0, 0, 0, 0];
         assert_eq!(
             sniff_section(&rnglists),
@@ -1278,7 +1244,6 @@ mod tests {
     fn random_bytes_are_not_named() {
         assert_eq!(sniff_section(&[]), None);
         assert_eq!(sniff_section(&[0xde, 0xad]), None);
-        // The sum runs past 255 for some `k`; the wrapped low byte is the noise.
         let noise: Vec<u8> = (0..256u32)
             .map(|k| lo8(u64::from(k * 37 % 251 + 128)))
             .collect();

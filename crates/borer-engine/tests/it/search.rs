@@ -169,17 +169,15 @@ fn find_text_hits() {
 #[test]
 fn find_text_folds_case_and_finds_wide() {
     let mut bytes = vec![0u8; 0x40];
-    bytes[0x00..0x06].copy_from_slice(b"Needle"); // capitalized
+    bytes[0x00..0x06].copy_from_slice(b"Needle");
     for (k, b) in b"wide".iter().enumerate() {
-        bytes[0x10 + k * 2] = *b; // UTF-16LE "wide" at 0x1010
+        bytes[0x10 + k * 2] = *b;
     }
     let mut p = fixture();
     p.bytes = bytes;
-    // A lower-case query finds the capitalized literal.
     let n = find_text(&p, "needle", 0);
     assert_eq!(n.total, 1);
     assert_eq!(n.hits[0].va, Some(0x1000));
-    // An ASCII query finds the wide string, case-folded.
     assert_eq!(
         find_text(&p, "wide", 0).hits.first().and_then(|h| h.va),
         Some(0x1010)
@@ -436,8 +434,6 @@ fn bytes_no_section_maps_are_searched() {
 fn naive_byte_hits(p: &Program, pattern: &[Option<u8>]) -> Vec<(Option<u64>, u64)> {
     let file = p.bytes.as_slice();
     let end = borer_engine::num::from_usize(file.len());
-    // A section the file cannot wholly back contributes no span and no
-    // covered range, the way `Program::unmapped` and `spans` skip it.
     let backed = |s: &Section| s.file_size > 0 && s.file_off.0.saturating_add(s.file_size) <= end;
     let holds = |off: usize| {
         pattern
@@ -724,8 +720,6 @@ fn find_bytes_across_sections_gaps_and_the_file_end() {
         assert_naive(&p, &pattern);
     }
 
-    // Two contiguous sections: a match starting at .text's last byte runs
-    // straight into .data's file bytes and is found where it starts.
     let mut bytes = vec![0x55u8; 0x40];
     bytes[0x0e..0x12].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
     let p = Program::raw(

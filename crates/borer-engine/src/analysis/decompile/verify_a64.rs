@@ -408,9 +408,6 @@ impl<'p> Sweep<'p> {
             emu.set_register(name, v);
             st.regs.insert(key, v);
         }
-        // INVARIANT: the machine starts every `v` register clear, so a
-        // register the lifter reads as its own variable holds zero on both
-        // sides.
         for n in 0..32 {
             st.regs.insert(Key::A64(Reg::V(n)), 0);
         }
@@ -426,7 +423,6 @@ impl<'p> Sweep<'p> {
         match run.stop {
             Stop::Stopped(at) if at == end => {}
             Stop::Unmodeled(ref what) => {
-                // INVARIANT: a bad opcode names its address; the tally keeps the kind.
                 let kind = what.split(" at 0x").next().unwrap_or(what);
                 *out.unmodeled.entry(kind.to_owned()).or_default() += 1;
                 return Err("an instruction the emulator does not model");

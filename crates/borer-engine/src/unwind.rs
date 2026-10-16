@@ -265,9 +265,6 @@ fn kind(program: &Program, names: &HandlerNames, h: &ExceptionHandler) -> Kind {
     let info = read_u32(program, h.data).map(|rva| program.image_base.wrapping_add(u64::from(rva)));
     let cxx3 =
         info.filter(|&i| read_u32(program, i).is_some_and(|m| MAGIC.contains(&(m & 0x1fff_ffff))));
-    // SPEC: `__GSHandlerCheck_EH` is `__CxxFrameHandler3` with the cookie
-    // check in front, and its data opens the same way; `_EH4` is the
-    // compressed record this does not read.
     if name.contains("cxxframehandler3")
         || (name.contains("gshandlercheck_eh") && !name.contains("eh4"))
     {
@@ -282,9 +279,6 @@ fn kind(program: &Program, names: &HandlerNames, h: &ExceptionHandler) -> Kind {
     if !name.is_empty() {
         return Kind::Other;
     }
-    // Unnamed: the shapes with a signature first, then the scope table
-    // validated record by record, then the compact record, believed only
-    // when everything it names holds together.
     match cxx3 {
         Some(i) => Kind::Cxx3(i),
         None if seh(program, h.function, h.data).is_some() => Kind::Seh,
@@ -383,12 +377,6 @@ fn cxx4(program: &Program, parent: u64, info: u64) -> Option<Cxx4> {
         for state in 0..count {
             let (word, next) = compact(program, q)?;
             q = next;
-            // SPEC: the low two bits are the entry's kind - 0 no action, 1 a
-            // destructor the runtime calls on an object at a frame offset,
-            // 2 the same through a pointer, 3 a funclet - and every kind but
-            // 0 carries an address next. A destructor is a function in its
-            // own right, called from wherever the object dies, and only the
-            // funclet is a piece of this function.
             if word & 3 != 0 {
                 let action = read_u32(program, q)?;
                 q = q.wrapping_add(4);
@@ -436,8 +424,6 @@ fn cxx4(program: &Program, parent: u64, info: u64) -> Option<Cxx4> {
                 }
                 let handler = read_u32(program, h)?;
                 h = h.wrapping_add(4);
-                // SPEC: an image-relative address when the flags say so,
-                // an offset from the parent's start otherwise.
                 for _ in 0..((flags >> 4) & 3) {
                     let at = if flags & 0x08 != 0 {
                         let rva = read_u32(program, h)?;
@@ -631,9 +617,6 @@ mod tests {
     /// Never: the thunk's offset is a constant that fits a `u32`.
     fn image(data: &[u8], handler_name: Option<&str>) -> Program {
         let mut bytes = vec![0u8; 0x3000];
-        // `.text`: a function at +0x1000, a funclet at +0x1100, a second at
-        // +0x1200, an `__except` label at +0x1300, and at +0x1400 the
-        // handler's import thunk `jmp [rip + slot]` with the slot at +0x2800.
         for at in [0x1000usize, 0x1100, 0x1200, 0x1300] {
             bytes[at] = 0xc3; // ASM: ret
         }
@@ -704,11 +687,9 @@ mod tests {
     fn scope_table() -> Vec<u8> {
         let mut d = Vec::new();
         d.extend_from_slice(&2u32.to_le_bytes());
-        // scope 0: __try 0x1000..0x1010 { } __finally at 0x1100
         for v in [0x1000u32, 0x1010, 0x1100, 0] {
             d.extend_from_slice(&v.to_le_bytes());
         }
-        // scope 1: __try 0x1010..0x1020 { } __except(filter at 0x1200) body at 0x1300
         for v in [0x1010u32, 0x1020, 0x1200, 0x1300] {
             d.extend_from_slice(&v.to_le_bytes());
         }
@@ -812,29 +793,21 @@ mod tests {
         let mut d = vec![0u8; 0x100];
         let put =
             |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
-        // the data opens with the record's address: +0x2010
         put(&mut d, 0x0, 0x2010);
-        // FuncInfo4: header (unwind map + try-block map), then the two maps
         d[0x10] = 0x08 | 0x10;
         put(&mut d, 0x11, 0x2040);
         put(&mut d, 0x15, 0x2060);
-        // unwind map: 2 entries; state 0 kind 0; state 1 kind 3 (a plain
-        // address) with the action at +0x1100. Compact ints below 128 are
-        // the value shifted left one.
         d[0x40] = 2 << 1;
-        d[0x41] = 1 << 1; // state 0: kind 1, a destructor called directly
-        put(&mut d, 0x42, 0x1300); // ... the destructor: a function, not a funclet
-        d[0x46] = 0x20 << 1; // ... at frame offset 0x20
-        d[0x47] = 3 << 1; // state 1: kind 3, a funclet
+        d[0x41] = 1 << 1;
+        put(&mut d, 0x42, 0x1300);
+        d[0x46] = 0x20 << 1;
+        d[0x47] = 3 << 1;
         put(&mut d, 0x48, 0x1100);
-        // try-block map: 1 entry; low, high, catch-high 0; handlers at +0x2080
         d[0x60] = 1 << 1;
         d[0x61] = 0;
         d[0x62] = 0;
         d[0x63] = 0;
         put(&mut d, 0x64, 0x2080);
-        // handler array: 1 catch; flags: adjectives present, one continuation
-        // as an RVA; adjectives 0x40 (`catch (...)`), handler +0x1200, continuation +0x1000
         d[0x80] = 1 << 1;
         d[0x81] = 0x01 | 0x08 | 0x10;
         d[0x82] = 0x40 << 1;
@@ -854,9 +827,7 @@ mod tests {
             },
         ];
         assert_eq!(funclets(&image(&d, Some("__CxxFrameHandler4"))), expect);
-        // and by its shape when the handler has no name
         assert_eq!(funclets(&image(&d, None)), expect);
-        // the catch resumes its parent at the continuation
         assert_eq!(
             continuations(&image(&d, None)),
             vec![(parent, BASE + 0x1000)]
@@ -877,27 +848,21 @@ mod tests {
         let mut d = vec![0u8; 0x100];
         let put =
             |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
-        // the data opens with the FuncInfo's address: +0x2010
         put(&mut d, 0x0, 0x2010);
-        // FuncInfo at +0x2010: magic, 2 states, unwind map at +0x2040,
-        // 1 try block, try-block map at +0x2060
         put(&mut d, 0x10, 0x1993_0522);
         put(&mut d, 0x14, 2);
         put(&mut d, 0x18, 0x2040);
         put(&mut d, 0x1c, 1);
         put(&mut d, 0x20, 0x2060);
-        // unwind map: state 0 -> no action, state 1 -> action at +0x1100
         put(&mut d, 0x40, u32::MAX);
         put(&mut d, 0x44, 0);
         put(&mut d, 0x48, 0);
         put(&mut d, 0x4c, 0x1100);
-        // try block 0: low 0, high 0, catchHigh 1, 1 catch, handlers at +0x2080
         put(&mut d, 0x60, 0);
         put(&mut d, 0x64, 0);
         put(&mut d, 0x68, 1);
         put(&mut d, 0x6c, 1);
         put(&mut d, 0x70, 0x2080);
-        // handler 0: adjectives, type, catch object, handler at +0x1200, frame
         put(&mut d, 0x80, 0);
         put(&mut d, 0x84, 0);
         put(&mut d, 0x88, 0);
@@ -917,7 +882,6 @@ mod tests {
             },
         ];
         assert_eq!(funclets(&image(&d, Some("__CxxFrameHandler3"))), expect);
-        // and told by its magic when the handler has no name
         assert_eq!(funclets(&image(&d, None)), expect);
     }
 }

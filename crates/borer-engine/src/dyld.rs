@@ -167,7 +167,6 @@ impl Format {
     ///
     /// The format and its name, or `None` for one this does not read.
     fn of(code: u64) -> Option<(Format, &'static str)> {
-        // SPEC: <mach-o/fixup-chains.h>, the DYLD_CHAINED_PTR_* values.
         let arm64e = |stride, offset, wide| Format::Arm64e {
             stride,
             offset,
@@ -213,8 +212,6 @@ impl Format {
     /// The fixup and the distance to the next word in strides, zero at the
     /// chain's end.
     fn decode(self, w: u64, base: u64) -> (Fixup, u64) {
-        // SPEC: <mach-o/fixup-chains.h>, dyld_chained_ptr_64_rebase/_bind,
-        // dyld_chained_ptr_arm64e_* and dyld_chained_ptr_64_kernel_cache_rebase.
         match self {
             Format::Ptr64 { offset } => {
                 let fixup = if bits(w, 63, 1) == 1 {
@@ -595,8 +592,6 @@ impl Walk<'_> {
         kind: usize,
         packed: usize,
     ) -> Vec<Option<(usize, i64)>> {
-        // SPEC: <mach-o/fixup-chains.h>, dyld_chained_import,
-        // dyld_chained_import_addend and dyld_chained_import_addend64.
         let size = match kind {
             1 => 4,
             2 => 8,
@@ -674,9 +669,6 @@ impl Walk<'_> {
         index: usize,
         table: &[Option<(usize, i64)>],
     ) -> Option<&'static str> {
-        // SPEC: <mach-o/fixup-chains.h>, dyld_chained_starts_in_segment:
-        // size, page_size, pointer_format, segment_offset,
-        // max_valid_pointer, page_count, page_start[].
         let header = (
             u16_le(data, at.saturating_add(4)),
             u16_le(data, at.saturating_add(6)),
@@ -764,7 +756,6 @@ impl Walk<'_> {
     /// * `program` - The opcode bytes.
     /// * `word` - The pointer width in bytes.
     fn rebases(&mut self, program: &[u8], word: u64) {
-        // SPEC: <mach-o/loader.h>, REBASE_OPCODE_*; dyld stops at DONE.
         let mut at = 0usize;
         let mut segment: Option<Segment> = None;
         let mut off = 0u64;
@@ -853,8 +844,6 @@ impl Walk<'_> {
     /// * `lazy` - Whether it is the lazy program, whose entries each end
     ///   with `DONE` rather than the program.
     fn binds(&mut self, program: &[u8], word: u64, lazy: bool) {
-        // SPEC: <mach-o/loader.h>, BIND_OPCODE_*; the lazy program ends
-        // each entry with DONE, the others end there.
         let mut at = 0usize;
         let mut segment: Option<Segment> = None;
         let mut off = 0u64;

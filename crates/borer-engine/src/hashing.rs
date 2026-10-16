@@ -47,7 +47,6 @@ use std::fmt::Write as _;
 
 use crate::program::{Program, SymbolKind};
 
-// ---- md5 ----
 
 /// MD5's per-step sine-derived constants, RFC 1321's `T` table.
 const MD5_K: [u32; 64] = [
@@ -172,7 +171,6 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
     out
 }
 
-// ---- sha-256 ----
 
 /// SHA-256's round constants, the first 64 primes' cube-root fractions
 /// (FIPS 180-4 section 4.2.2).
@@ -206,9 +204,6 @@ fn sha256_block(h: &mut [u32; 8], block: &[u8; 64]) {
         *word = u32::from_be_bytes([block[at], block[at + 1], block[at + 2], block[at + 3]]);
     }
     for i in 16..64 {
-        // SPEC: FIPS 180-4 section 4.1.2's sigma0/sigma1 are rotate-right
-        // functions; rotate_left by the complement writes them as `u32`
-        // rotations with no cast.
         let s0 = w[i - 15].rotate_left(25) ^ w[i - 15].rotate_left(14) ^ (w[i - 15] >> 3);
         let s1 = w[i - 2].rotate_left(15) ^ w[i - 2].rotate_left(13) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16]
@@ -218,8 +213,6 @@ fn sha256_block(h: &mut [u32; 8], block: &[u8; 64]) {
     }
     let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = *h;
     for i in 0..64 {
-        // SPEC: big sigma1/big sigma0 of section 4.1.2, rotate-right
-        // functions written as their rotate-left complements.
         let big_s1 = e.rotate_left(26) ^ e.rotate_left(21) ^ e.rotate_left(7);
         let ch = (e & f) ^ (!e & g);
         let t1 = hh
@@ -347,7 +340,6 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     h.finish()
 }
 
-// ---- imphash ----
 
 /// The names `pefile`'s `ordlookup` gives three DLLs' ordinal exports.
 ///
@@ -505,7 +497,6 @@ pub fn imphash(program: &Program) -> Option<[u8; 16]> {
     Some(md5(joined.as_bytes()))
 }
 
-// ---- authentihash ----
 
 /// The security directory's slot in the data directory table.
 const SECURITY_DIR: usize = 4;
@@ -526,8 +517,6 @@ const SECURITY_DIR: usize = 4;
 #[must_use]
 pub fn authentihash(program: &Program) -> Option<[u8; 32]> {
     let bytes = &program.bytes;
-    // SPEC: the checksum field sits 64 bytes into either optional header,
-    // which begins 24 bytes after the `PE\0\0` signature.
     let checksum = crate::program::pe_signature(bytes)?
         .checked_add(24)?
         .checked_add(64)?;
@@ -540,9 +529,6 @@ pub fn authentihash(program: &Program) -> Option<[u8; 32]> {
     };
     h.update(bytes.get(after_checksum..entry)?);
     let entry_end = entry.checked_add(8)?;
-    // An unsigned PE carries a zeroed entry, and a hostile one any value:
-    // the table cannot start inside the headers, so the start is clamped to
-    // lie between the entry's end and the file's end.
     let start = usize::try_from(u64::from(crate::program::le_u32(bytes, entry)?))
         .ok()?
         .clamp(entry_end, bytes.len());
@@ -557,42 +543,7 @@ pub fn authentihash(program: &Program) -> Option<[u8; 32]> {
     Some(h.finish())
 }
 
-// ---- tlsh ----
 
-// The TLSH tables below and the digest and distance arithmetic that uses
-// them follow Trend Micro's reference implementation
-// (https://github.com/trendmicro/tlsh), which is offered under Apache 2.0
-// or BSD. borer takes it under the BSD license, whose notice follows:
-//
-// Copyright (c) 2013, Trend Micro Incorporated
-// All rights reserved.
-//
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-// 1. Redistributions of source code must retain the above copyright notice,
-//    this list of conditions and the following disclaimer.
-//
-// 2. Redistributions in binary form must reproduce the above copyright
-//    notice, this list of conditions and the following disclaimer in the
-//    documentation and/or other materials provided with the distribution.
-//
-// 3. Neither the name of the copyright holder nor the names of its
-//    contributors may be used to endorse or promote products derived from
-//    this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-// POSSIBILITY OF SUCH DAMAGE.
 
 /// Pearson's permutation as the TLSH reference carries it (`v_table` in
 /// Trend Micro's `tlsh_impl.cpp`): every bucket index and the checksum
@@ -856,8 +807,6 @@ pub fn tlsh(data: &[u8]) -> Option<Tlsh> {
             continue;
         };
         checksum = pearson(1, a4, a3, checksum);
-        // SPEC: the six salted triplets of `tlsh_impl.cpp`'s
-        // `raw_fast_update5`, each with the window's newest byte first.
         for (salt, b, c) in [
             (49, a3, a2),
             (12, a3, a1),
@@ -973,7 +922,6 @@ impl Tlsh {
     }
 }
 
-// ---- borer-lsh ----
 
 /// Borer's 256-byte permutation for the borer-lsh bucket hashes and checksum.
 ///
@@ -1148,7 +1096,6 @@ impl BorerLsh {
     }
 }
 
-// ---- surface ----
 
 /// Renders the content hashes as the `borer://hashes` answer.
 ///

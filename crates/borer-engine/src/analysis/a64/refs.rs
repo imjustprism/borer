@@ -414,7 +414,6 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Msr
             | Mnemonic::Ccmp
             | Mnemonic::Ccmn
-            // INVARIANT: the floating-point compares write the flags only.
             | Mnemonic::Fcmp
             | Mnemonic::Fcmpe
             | Mnemonic::Fccmp
@@ -521,7 +520,6 @@ pub(crate) fn constant_in(insns: &[Insn], reg: usize) -> Option<u64> {
     for insn in insns.iter().filter(|i| writes(i) & bit != 0) {
         value = (insn.mnemonic == Mnemonic::Movz && any_reg(&insn.operands[0]) == Some(reg)).then(
             || {
-                // SPEC: Arm ARM (DDI 0487) C6.2 MOVZ: imm16 is bits 5..20 and hw bits 21..22, shifting by hw * 16.
                 u64::from((insn.word >> 5) & 0xffff) << (((insn.word >> 21) & 3) * 16)
             },
         );

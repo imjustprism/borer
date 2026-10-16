@@ -350,9 +350,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .values()
         .filter_map(|c| c.vtable.map(|v| (v, c.slots.clone())))
         .collect();
-    // INVARIANT: a class with one virtual method, a destructor as a rule,
-    // has a one-slot table, which a lone function pointer in data looks
-    // like; it is a table once a constructor or a stack object stores it.
     let mut singles: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for &target in analysis.xrefs.keys() {
         if tables.contains_key(&target)
@@ -420,11 +417,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .values()
         .flat_map(|s| s.local_stores.iter().copied())
         .collect();
-    // INVARIANT: a one-slot table a constructor, a creator or a stack
-    // object stores is promoted before the locators are read, so a class
-    // with one virtual method is named by its locator as a longer table
-    // is, not by its address; its methods and callers then carry the
-    // compiler's own name for the class everywhere a name reaches.
     for (table, slots) in singles {
         if ctors_of.contains_key(&table)
             || creators_of.contains_key(&table)
@@ -433,10 +425,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
             tables.insert(table, slots);
         }
     }
-    // INVARIANT: a locator is the compiler's own word on a table's class,
-    // so it names the table before any inference from methods or
-    // constructors gets a vote; the first table by address keeps a name
-    // two tables share.
     for (&table, slots) in &tables {
         let Some(name) = super::rtti::class_name(program, table) else {
             continue;
@@ -456,10 +444,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         );
     }
     phases.mark("vtables rtti names");
-    // INVARIANT: a further base's table under multiple inheritance carries
-    // the class's locator with the subobject's offset; it is stored at
-    // `[this+offset]`, which the scan does not follow, so it is found by the
-    // immediates that name it and kept apart from the class's own table.
     let mut secondary: BTreeMap<u64, String> = BTreeMap::new();
     let stored: BTreeSet<u64> = analysis
         .xrefs
@@ -474,11 +458,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         }
         if let Some((class, base)) = super::rtti::secondary(program, target) {
             secondary.insert(target, format!("{class}::vftable_{base}"));
-            // INVARIANT: the subobject's table holds the base's own
-            // virtuals, so its slots are the base's methods wherever the
-            // base's primary table is, and they carry the base's class
-            // into the methods' names and their callers' hints; a base
-            // whose own table this image also holds keeps that one.
             let slots = tables.remove(&target);
             let info = classes.entry(base.clone()).or_insert_with(|| ClassInfo {
                 name: base.clone(),
@@ -746,18 +725,8 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .filter(|&&(_, _, addr)| string_at(program, addr))
         .map(|&(target, p, _)| (target, p))
         .collect();
-    // INVARIANT: a variadic function's arguments past its fixed ones are
-    // whatever each caller set, read through the list as its format says,
-    // and a parameter some caller hands a string literal (an assertion
-    // reporter's file name) holds text, so neither is a typed slot for its
-    // callers: a class one caller hands there types nothing, and a caller
-    // passing a register on takes no class from one. The tables holding a
-    // function still type its `this`: a body the linker folded is one
-    // class's method and another caller's function at once.
     let fixed_slot = |target: u64, p: u8| varargs.get(&target).is_none_or(|&k| usize::from(p) < k);
     let typed_slot = |target: u64, p: u8| !literals.contains(&(target, p)) && fixed_slot(target, p);
-    // The parameters some caller hands constant data that is neither text
-    // nor a class's table: bytes, no object.
     let raw: BTreeSet<(u64, u8)> = scans
         .values()
         .flat_map(|s| &s.data_args)
@@ -775,13 +744,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         }
     }
     holders.retain(|f, _| analysis.function(*f).is_some_and(|x| x.signature.is_none()));
-    // INVARIANT: a member's name says which class it belongs to, so the
-    // `this` it reads is that class or one derived from it: votes that only
-    // reach an ancestor, or none, leave it the class its name gives, and so
-    // do callers of an unrelated class unless a table holds the function
-    // (a destructor a derived class's table holds stores its base's table
-    // and is named after it). A function that never reads its first
-    // argument (a factory, an import's thunk) has no `this` to type.
     let named: BTreeMap<u64, String> = analysis
         .functions
         .iter()
@@ -795,8 +757,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
             Some((f.entry, class_of(name)?.to_owned()))
         })
         .collect();
-    // A named function's scan is in hand from the first round on: its `this`
-    // votes as its name says.
     for f in &analysis.functions {
         let named_class = renames
             .get(&f.entry)
@@ -810,14 +770,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     let held = FirstMembers::gather(analysis, &scans, &renames, &statics, &reads, &classes);
     let locals = Locals::gather(analysis, &scans);
     phases.mark("vtables gather held+locals");
-    // INVARIANT: a class one caller hands on second-hand (its own parameter's,
-    // declared or hinted) weighs below a first-hand vote: it settles on a
-    // callee another caller contradicts only when a second caller hands on a
-    // class too. A caller contradicts it by handing the callee data of no
-    // class (constant bytes) or of an unrelated one (a local copy of its own
-    // parameter of another class): a blob sink such as `sqlite3_bind_blob`,
-    // handed a `matrix44` by one binder and a copied `float4` by another, is
-    // no member of either class.
     let related = |a: &String, b: &String| {
         a == b
             || ancestry(&classes, a).contains(b)
@@ -834,10 +786,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
             })
     };
     let mut inputs = Inputs::default();
-    // INVARIANT: the classes whose tables hold a function vote for its
-    // `this` beside its callers, so a derived override handing its own
-    // `this` to the base method it overrides leaves that method its base
-    // class, the ancestor the two share.
     for (f, set) in &holders {
         inputs
             .firsthand
@@ -854,19 +802,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         inputs.add_slots(scan, &tls_slots);
     }
     phases.mark("vtables inputs");
-    // INVARIANT: a parameter a function hands on as a callee's `this`, or
-    // for a callee parameter of a known class, is that class: the callee
-    // dereferences it as one. A member's own `this` is typed by its name, a
-    // virtual's by the tables holding it (a derived class's override hands
-    // its `this` to its base's methods), and a declared parameter by its
-    // signature. It is the weakest evidence, a class the callee accepts
-    // rather than one a caller hands in, so it types only a parameter no
-    // caller and no table votes for, and every callee bounds the class: the
-    // parameter is the most derived of them, which must descend from all
-    // the others. A callee that never reads the register ([`read_counts`])
-    // bounds it only by its declared signature: neither a class its callers
-    // gave it nor the class its name gives (a factory ignores what its first
-    // register holds) says what the register holds.
     for f in analysis.functions.iter().filter(|f| f.signature.is_none()) {
         let Some(scan) = scans.get(&f.entry) else {
             continue;
@@ -916,8 +851,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         }
     }
     phases.mark("vtables bounds");
-    // One parameter's class from the classes the others had the round
-    // before: its votes, or the bounds of its callees when nothing votes.
     let resolve = |key: (u64, u8),
                    inputs: &Inputs,
                    hints: &BTreeMap<u64, BTreeMap<u8, String>>,
@@ -967,10 +900,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
             let wide = bounds.get(&class).is_some_and(|b| b.wide);
             return Some((class, wide));
         }
-        // INVARIANT: a register a function never reads ([`read_counts`])
-        // holds nothing it uses, so whatever its callers leave there types
-        // nothing (a factory called with its caller's `this` still in
-        // `rcx`); the tables holding it still type its `this`.
         let unread = reads.get(&target).is_some_and(|&k| usize::from(p) >= k);
         let voters = held.outermost(if unread || literals.contains(&key) {
             holders
@@ -981,15 +910,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         } else {
             voters
         });
-        // INVARIANT: a callee's own use of a parameter (handing it to a
-        // member of a class, or to a parameter a signature declares)
-        // outranks the class a single caller casts only from its own hint:
-        // unless that class is the one used or derives from it, or the two
-        // are one object seen at two depths (one names the other among its
-        // template arguments, as a key-value pair does the pointer it starts
-        // with, or holds the other at offset 0), the parameter is the class
-        // used. Of an object and the member it starts with, the parameter is
-        // the object whenever anything names it ([`FirstMembers`]).
         let used = (firsthand.is_none() && relayers.len() == 1)
             .then(|| {
                 let used: BTreeSet<String> = bounds
@@ -1026,27 +946,13 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         Some((class, wide))
     };
     let mut hints: BTreeMap<u64, BTreeMap<u8, String>> = BTreeMap::new();
-    // INVARIANT: a class only the common ancestor of a parameter's votes
-    // reaches, wider than every one of them, is true of the parameter but
-    // says nothing a vote said; a handler takes no class prefix from it,
-    // nor from a callee's class of that kind.
     let mut widened: BTreeSet<(u64, u8)> = BTreeSet::new();
-    // INVARIANT: the rounds run until no class changes, each round typing
-    // every parameter again from the classes the round before gave, so only
-    // a parameter some of whose inputs changed can change: the round types
-    // those again (`dirty`), by function and position. A parameter whose
-    // class still flips when the rounds stop, back to what it was two rounds
-    // before, is held up only by votes that feed each other (a caller typed
-    // by the callee it then votes for): it has no class, never whichever one
-    // the last round happened to give it.
     let mut dirty = inputs.params();
     let mut last: BTreeMap<(u64, u8), Option<String>> = BTreeMap::new();
     let mut before_last: BTreeMap<(u64, u8), Option<String>> = BTreeMap::new();
     let mut settled = false;
     for round in 0..HINT_ROUNDS {
         if round > 0 {
-            // A function only its new class makes vote for its callees is
-            // scanned now, as the round before typed it.
             for &(entry, p) in last.keys() {
                 if p != 0
                     || scans.contains_key(&entry)
@@ -1149,13 +1055,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     } = value_hints(
         analysis, &classes, &scans, &renames, &hints, &statics, &held,
     );
-    // INVARIANT: a constructor storing a base's table at `[this+off]`
-    // initializes an embedded subobject of that table's class in place (an
-    // inlined base constructor under multiple inheritance), so the field at
-    // `off` holds an object of the class the table belongs to: the class's
-    // own table names it, and a further base's table names the base its
-    // locator places at that offset. A table the analysis cannot give a
-    // class that holds slots types nothing.
     for (entry, class) in &ctor_classes {
         let Some(scan) = scans.get(entry) else {
             continue;
@@ -1261,8 +1160,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         if let Some(h) = hints.get(&f.entry) {
             f.param_hints = h.clone();
         }
-        // INVARIANT: a handler's type check names only what it handles; the
-        // object it was handed first is the class it is a method of.
         if f.name_source == NameSource::Handler
             && !widened.contains(&(f.entry, 0))
             && let Some(name) = f.name.as_deref().filter(|n| !n.contains("::"))
@@ -1556,9 +1453,6 @@ fn classify_tables(
         if vtables.contains_key(&table) {
             continue;
         }
-        // INVARIANT: a slot holding an import thunk is an inherited method
-        // of a class another module defines; that class's table is in that
-        // module, so its name is no vote for a table in this one.
         if let Some(class) = analysis
             .function(f)
             .and_then(|x| x.name.as_deref())
@@ -1593,7 +1487,7 @@ fn classify_tables(
 /// address `Class::GetRtti`, where only its vtable slot named it.
 ///
 /// A virtual call through that slot asks the object for its type
-/// (`rax->Core::RefCounted::vfunc_0_1978()`), and the name says so:
+/// (`rax->Base::vfunc_0()`), and the name says so:
 /// `rax->GetRtti()`.
 ///
 /// # Arguments
@@ -1624,8 +1518,7 @@ fn name_descriptor_accessors(
 }
 
 /// The class name each table's type accessor gives it: a slot whose whole
-/// body hands out a named descriptor's address (`lea rax, [RTTI]; ret`,
-/// Nebula's `GetRtti`).
+/// body hands out a named descriptor's address (`lea rax, [RTTI]; ret`).
 ///
 /// An abstract base whose constructor every derived class inlines has no
 /// constructor or creator of its own to name it, but its table still hands
@@ -1676,9 +1569,8 @@ fn accessed_descriptors(
 /// A function sitting in the tables of classes `H` took its name from the
 /// `__FUNCSIG__` string it carries; when that string names a method of a
 /// class that is none of `H` nor any ancestor of theirs, the string came in
-/// with an inlined method of another class: the game's path-engine
-/// property's message handler inlined a message's `SetActor` and was named
-/// `GetPathengineEntity::SetActor`. The name is dropped, so the slot passes
+/// with an inlined method of another class: a handler inlined `SetActor`
+/// and was named `Other::SetActor`. The name is dropped, so the slot passes
 /// name the function after the slot it fills.
 ///
 /// # Arguments
@@ -2421,8 +2313,6 @@ fn named_class(
     if statics.contains(&entry) {
         return None;
     }
-    // PERF: the class substring is cloned straight out of the name;
-    // cloning the whole qualified name per scan was pure churn.
     renames
         .get(&entry)
         .map_or(f.name.as_deref(), |n| Some(n.as_str()))
@@ -2908,8 +2798,6 @@ fn member_class<'a>(
     statics: &'a BTreeSet<u64>,
     scan: &Scan,
 ) -> Option<(&'a str, bool)> {
-    // INVARIANT: a rename wins over the symbol name even where the symbol
-    // table gave none, so the None case is only reached without one.
     let name = match renames.get(&f.entry) {
         Some(renamed) => renamed.as_str(),
         None => f.name.as_deref()?,
@@ -3111,10 +2999,6 @@ fn scan_function(program: &Program, f: &Function, bitness: u32, conv: &Conv) -> 
     let mut info = InstructionInfoFactory::new();
     scan.args_read = entry_reads(f, &blocks, bitness, conv, &mut info);
     for (start, block) in f.blocks.iter().map(|b| b.start).zip(blocks) {
-        // INVARIANT: a block laid out before the entry (code the function
-        // shares with another, which it jumps back to) is reached with
-        // registers the address-ordered scan did not follow there, so what
-        // it hands its callees votes for no class and reads no argument.
         let early = start < f.entry;
         let marks = (
             scan.this_calls.len(),
@@ -3170,8 +3054,6 @@ fn scan_function(program: &Program, f: &Function, bitness: u32, conv: &Conv) -> 
             scan.frame_args.truncate(marks.5);
             scan.frame_copies.truncate(marks.6);
         }
-        // INVARIANT: a frame slot holds one local within the block that
-        // fills it and hands it on; another block may keep another one there.
         for arg in &mut scan.frame_args[marks.5..] {
             arg.3 = start;
         }
@@ -3228,9 +3110,6 @@ fn entry_reads(
             continue;
         }
         for instr in blocks.get(b).into_iter().flatten() {
-            // INVARIANT: MSVC reserves a word of 32-bit frame with `push
-            // ecx`, in a function that takes no `this` as much as in one
-            // that does, so pushing a whole register reads no argument.
             let makes_room = bitness == 32
                 && instr.mnemonic() == Mnemonic::Push
                 && instr.op0_kind() == OpKind::Register;
@@ -3702,10 +3581,6 @@ fn step(
         }
         return;
     }
-    // INVARIANT: a constructor that inlines a base's initializing store
-    // writes that base's table at `[this+off]`, an embedded subobject under
-    // multiple inheritance, so the field at `off` holds an object of the
-    // table's class; the store at offset 0 above is the class's own table.
     if is_mov
         && instr.op0_kind() == OpKind::Memory
         && instr.op1_kind() == OpKind::Register
@@ -3717,9 +3592,6 @@ fn step(
         scan.field_stores.push((instr.memory_displacement64(), *p));
         return;
     }
-    // INVARIANT: 32-bit code stores the table without a register,
-    // `mov dword [ecx], offset vtable`, which no 64-bit encoding can do;
-    // the immediate is the table when it lies in data.
     if is_mov
         && instr.op0_kind() == OpKind::Memory
         && matches!(
@@ -3736,8 +3608,6 @@ fn step(
         }
         return;
     }
-    // INVARIANT: the 32-bit immediate form of an embedded base's store,
-    // `mov dword [ecx+8], offset vtable`, as the register form above.
     if is_mov
         && instr.op0_kind() == OpKind::Memory
         && matches!(
@@ -3748,9 +3618,6 @@ fn step(
         && instr.memory_displacement64() != 0
         && this.contains(&instr.memory_base())
     {
-        // INVARIANT: `immediate64` leaves the memory displacement in the
-        // bits above a 32-bit immediate, so the value is read through the
-        // operand accessor, which goes by the operand's own kind.
         let imm = instr.immediate(1);
         if in_data(program, imm) {
             scan.field_stores.push((instr.memory_displacement64(), imm));
@@ -3769,9 +3636,6 @@ fn step(
         }
         return;
     }
-    // INVARIANT: a word or a vector loaded through a parameter and stored
-    // into the frame copies the object the parameter points at into a
-    // local, a temporary of that object's class.
     let moves = matches!(
         instr.mnemonic(),
         Mnemonic::Mov | Mnemonic::Movaps | Mnemonic::Movups | Mnemonic::Movdqa | Mnemonic::Movdqu
@@ -3807,10 +3671,6 @@ fn step(
         scan.frame_copies.push((local, n, 0));
         return;
     }
-    // INVARIANT: an object built on the stack takes its table through the
-    // frame, `mov [rsp+K], rax` after `lea rax, [table]`, or the immediate
-    // itself on 32-bit; `this` is never the frame register, so the store
-    // is nobody's field.
     if is_mov
         && instr.op0_kind() == OpKind::Memory
         && instr.memory_index() == Register::None
@@ -3939,10 +3799,6 @@ fn read_slots(
             break;
         };
         if !is_executable_va(program, ptr) {
-            // INVARIANT: the word the table resumes at must be code and
-            // must start nothing of its own, and the datum itself must be
-            // unreferenced and carry a value, or the reading is eating a
-            // neighbour, not a slot of this table.
             let next = at + word;
             let resumes = data < DATA_SLOTS_MAX
                 && ptr != 0
@@ -3954,8 +3810,6 @@ fn read_slots(
             if !resumes {
                 break;
             }
-            // INVARIANT: the datum keeps its slot as `0`, never a function
-            // entry, so every index a byte offset names finds its method.
             slots.push(0);
             data += 1;
             at = next;

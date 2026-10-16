@@ -118,9 +118,6 @@ fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
     let ttype = if ttype_enc == OMIT {
         None
     } else {
-        // SPEC: Itanium C++ ABI, LSDA header: the type table's base is the
-        // uleb offset's own field position plus the offset, and the entry a
-        // filter names sits that many entry widths below the base.
         let field = sec.va.0.checked_add(u64::try_from(c.pos).ok()?)?;
         let base = field.wrapping_add(c.uleb()?);
         Some((ttype_enc, base))

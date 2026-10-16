@@ -520,10 +520,7 @@ fn value(
     strings: &Strings<'_>,
 ) -> Option<Value> {
     Some(match form {
-        // DW_FORM_addr
         0x01 => Value::Int(c.uint(address_size)?),
-        // block forms: a length, then that many bytes; the expression
-        // form is kept, for a location is read out of its opcodes
         0x09 => {
             let n = usize::try_from(c.uleb()?).ok()?;
             let end = c.at.checked_add(n)?;
@@ -551,7 +548,6 @@ fn value(
             c.skip(usize::from(n))?;
             Value::Skipped
         }
-        // fixed-width integers, flags and references
         0x0b | 0x0c | 0x11 | 0x25 | 0x29 => Value::Int(c.uint(1)?),
         0x05 | 0x12 | 0x26 | 0x2a => Value::Int(c.uint(2)?),
         0x27 | 0x2b => Value::Int(c.uint(3)?),
@@ -561,12 +557,9 @@ fn value(
             c.skip(16)?;
             Value::Skipped
         }
-        // offsets into another section, sized by the unit's DWARF width
         0x10 | 0x17 | 0x1d => Value::Int(c.uint(offset_size)?),
-        // LEB-encoded integers and indices
         0x0d => Value::Int(c.sleb()?.cast_unsigned()),
         0x0f | 0x15 | 0x1a | 0x1b | 0x22 | 0x23 => Value::Int(c.uleb()?),
-        // strings
         0x08 => Value::Text(c.cstr()?),
         0x0e => {
             let at = c.uint(offset_size)?;
@@ -576,7 +569,6 @@ fn value(
             let at = c.uint(offset_size)?;
             string_at(strings.lines, usize::try_from(at).ok()?).map_or(Value::Skipped, Value::Text)
         }
-        // present by its own existence, and constant in the abbreviation
         0x19 => Value::Int(1),
         FORM_IMPLICIT_CONST => Value::Int(implicit.cast_unsigned()),
         _ => return None,
@@ -661,8 +653,6 @@ fn type_name(nodes: &BTreeMap<u64, TypeNode>, at: Option<u64>, depth: u32) -> Op
         TAG_RVALUE_REFERENCE => Some(format!("{} &&", inner()?)),
         TAG_CONST => {
             let to = inner()?;
-            // `const` binds to the pointer, not the pointee, when it follows
-            // one: `char * const`, not `const char *`.
             Some(if to.ends_with('*') {
                 format!("{to} const")
             } else {
@@ -690,8 +680,6 @@ fn type_name(nodes: &BTreeMap<u64, TypeNode>, at: Option<u64>, depth: u32) -> Op
             .clone()
             .map(|n| format!("enum {n}"))
             .or_else(|| Some(String::from("enum"))),
-        // A base type or a typedef is named outright, and the typedef's own
-        // name is the one the source used.
         _ => node.name.clone().or_else(inner),
     }
 }
@@ -793,22 +781,17 @@ fn fbreg(expr: &[u8]) -> Option<i64> {
 /// spell.
 fn scalar(encoding: u64, size: u64) -> Option<TypeExpr> {
     Some(match (encoding, size) {
-        // DW_ATE_signed
         (0x05, 1) => TypeExpr::I8,
         (0x05, 2) => TypeExpr::I16,
         (0x05, 4) => TypeExpr::I32,
         (0x05, 8) => TypeExpr::I64,
-        // DW_ATE_unsigned
         (0x07, 1) => TypeExpr::U8,
         (0x07, 2) => TypeExpr::U16,
         (0x07, 4) => TypeExpr::U32,
         (0x07, 8) => TypeExpr::U64,
-        // DW_ATE_float
         (0x04, 4) => TypeExpr::F32,
         (0x04, 8) => TypeExpr::F64,
-        // DW_ATE_signed_char: the one byte of text `char` is.
         (0x06, 1) => TypeExpr::Char,
-        // DW_ATE_boolean: a byte that holds true or false.
         (0x02, 1) => TypeExpr::U8,
         _ => return None,
     })
@@ -842,7 +825,6 @@ fn type_expr(nodes: &BTreeMap<u64, TypeNode>, at: Option<u64>, depth: u32) -> Op
     let inner = || type_expr(nodes, node.inner, depth - 1);
     match node.tag {
         TAG_POINTER => Some(TypeExpr::Ptr(Box::new(inner().unwrap_or(TypeExpr::U8)))),
-        // The qualifiers the language does not spell fall away.
         TAG_CONST | TAG_VOLATILE => inner(),
         TAG_TYPEDEF => inner(),
         TAG_STRUCTURE | TAG_CLASS | TAG_UNION | TAG_ENUMERATION => {
@@ -938,25 +920,13 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
         else {
             continue;
         };
-        // Entries arrive in tree order, so the open function is the one a
-        // parameter belongs to. `by_offset` keeps the names other entries
-        // point at with an abstract origin.
         let mut by_offset: BTreeMap<u64, String> = BTreeMap::new();
         let mut depth: Vec<bool> = Vec::new();
         let mut open: Vec<usize> = Vec::new();
-        // The frame base of each entry of `out`, at its index: a variable's
-        // offset converts through the base of the subprogram it is inside.
         let mut bases: Vec<Option<FrameBase>> = Vec::new();
         let mut pending: Vec<(u64, u64)> = Vec::new();
-        // The types this unit states, gathered with their members until the
-        // unit is walked and the members' chains can resolve. A named type
-        // opens a scope its members belong to; any other entry with children
-        // closes it, so a member of a nested or anonymous type never lands
-        // on the one outside it.
         let mut stated: Vec<Stated> = Vec::new();
         let mut type_scopes: Vec<Option<usize>> = Vec::new();
-        // A type reference points forward as often as back, so the chains
-        // are read after the unit is walked, not during it.
         let mut nodes: BTreeMap<u64, TypeNode> = BTreeMap::new();
         let mut unresolved: Vec<(usize, Option<u64>)> = Vec::new();
         let mut unresolved_params: Vec<(usize, usize, Option<u64>)> = Vec::new();
@@ -965,7 +935,6 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             let here = c.at as u64;
             let Some(code) = c.uleb() else { break };
             if code == 0 {
-                // The end of a sibling chain closes the innermost entry.
                 if depth.pop() == Some(true) {
                     open.pop();
                 }
@@ -1013,9 +982,6 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             if let Some(n) = &entry.name {
                 by_offset.insert(here, n.clone());
             }
-            // Only `ref_addr` is section-relative; every other reference
-            // form counts from its own unit's start, and a lookup needs the
-            // section offset.
             let absolute = |r: Option<(u64, bool)>| {
                 r.map(|(v, unit_relative)| {
                     if unit_relative {
@@ -1057,8 +1023,6 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                             locals: BTreeMap::new(),
                         });
                     }
-                    // A cloned or inlined body names itself by pointing at the
-                    // entry it came from, which may not have been read yet.
                     (None, Some(origin)) => pending.push((low_pc, origin)),
                     (None, None) => {}
                 }
@@ -1076,11 +1040,6 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 && let (Some(name), Some(expr)) = (&entry.name, &entry.location)
                 && let Some(owner) = open.last().copied()
             {
-                // The base the offset counts from converts it to the slot
-                // the text names: the caller's frame pointer's word above
-                // the entry stack, the frame pointer's word under it. The
-                // base's `None` and the unconvertible offset both leave the
-                // variable unnamed, never guessed onto a slot.
                 let word = i64::try_from(address_size).unwrap_or(8);
                 let slot = bases
                     .get(owner)
@@ -1117,10 +1076,6 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                     s.values.push((value, name.clone()));
                 }
             }
-            // A named struct or enum with children opens the scope its
-            // members belong to; every other entry with children closes
-            // it, so a member of a nested or anonymous type never lands on
-            // the type outside it.
             let opened = if matches!(
                 abbreviation.tag,
                 TAG_STRUCTURE | TAG_CLASS | TAG_UNION | TAG_ENUMERATION
@@ -1157,7 +1112,6 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 });
             }
         }
-        // The chains resolve now that every entry of the unit is recorded.
         for (index, type_ref) in unresolved {
             if let Some(f) = out.get_mut(index) {
                 f.return_type = type_name(&nodes, type_ref, TYPE_DEPTH).filter(|t| t != "void");
@@ -1170,9 +1124,6 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
         }
         for s in stated {
             if s.is_enum {
-                // The builder's own refusals - a name the language spells,
-                // a value twice named, one past the width - are the
-                // discipline a stated fact meets too.
                 if let Ok(ty) = build_enum(&s.name, s.size, &s.values) {
                     types.insert(s.name, ty);
                 }
@@ -1297,10 +1248,8 @@ mod tests {
     /// Builds an abbreviation table declaring a function and a parameter.
     fn abbrev() -> Vec<u8> {
         vec![
-            // code 1: DW_TAG_subprogram, has children, name (string), low_pc (addr)
             0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x00, 0x00,
-            // code 2: DW_TAG_formal_parameter, no children, name (string)
-            0x02, 0x05, 0x00, 0x03, 0x08, 0x00, 0x00, // end of table
+            0x02, 0x05, 0x00, 0x03, 0x08, 0x00, 0x00,
             0x00,
         ]
     }
@@ -1308,10 +1257,10 @@ mod tests {
     /// Wraps `dies` in a DWARF 5 unit header.
     fn unit(dies: &[u8]) -> Vec<u8> {
         let mut body: Vec<u8> = Vec::new();
-        body.extend_from_slice(&5u16.to_le_bytes()); // version
-        body.push(0x01); // DW_UT_compile
-        body.push(8); // address size
-        body.extend_from_slice(&0u32.to_le_bytes()); // abbreviation offset
+        body.extend_from_slice(&5u16.to_le_bytes());
+        body.push(0x01);
+        body.push(8);
+        body.extend_from_slice(&0u32.to_le_bytes());
         body.extend_from_slice(dies);
         let mut out = u32::try_from(body.len())
             .expect("fits")
@@ -1325,14 +1274,14 @@ mod tests {
     #[test]
     fn a_named_function_is_read() {
         let mut dies: Vec<u8> = Vec::new();
-        dies.push(0x01); // the subprogram
+        dies.push(0x01);
         dies.extend_from_slice(b"main\0");
         dies.extend_from_slice(&0x0001_4000u64.to_le_bytes());
-        dies.push(0x02); // a parameter
+        dies.push(0x02);
         dies.extend_from_slice(b"argc\0");
-        dies.push(0x02); // another
+        dies.push(0x02);
         dies.extend_from_slice(b"argv\0");
-        dies.push(0x00); // end of the subprogram's children
+        dies.push(0x00);
         let info = unit(&dies);
         let strings = Strings {
             text: &[],
@@ -1353,10 +1302,9 @@ mod tests {
     /// A name held in `.debug_str` is resolved through the offset.
     #[test]
     fn a_name_resolves_through_the_string_section() {
-        // code 1: subprogram, no children, name (strp), low_pc (addr)
         let abbrev: Vec<u8> = vec![0x01, 0x2e, 0x00, 0x03, 0x0e, 0x11, 0x01, 0x00, 0x00, 0x00];
         let mut dies: Vec<u8> = vec![0x01];
-        dies.extend_from_slice(&4u32.to_le_bytes()); // offset into .debug_str
+        dies.extend_from_slice(&4u32.to_le_bytes());
         dies.extend_from_slice(&0x2000u64.to_le_bytes());
         let info = unit(&dies);
         let strings = Strings {
@@ -1374,37 +1322,30 @@ mod tests {
     /// at a base type, and only the whole chain says `const char *`.
     #[test]
     fn a_type_chain_reads_as_c_source() {
-        // code 1: subprogram, children, name (string), low_pc (addr), type (ref4)
-        // code 2: formal_parameter, no children, name (string), type (ref4)
-        // code 3: pointer_type, no children, type (ref4)
-        // code 4: const_type, no children, type (ref4)
-        // code 5: base_type, no children, name (string)
         let abbrev: Vec<u8> = vec![
-            0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x49, 0x13, 0x00, 0x00, //
-            0x02, 0x05, 0x00, 0x03, 0x08, 0x49, 0x13, 0x00, 0x00, //
-            0x03, 0x0f, 0x00, 0x49, 0x13, 0x00, 0x00, //
-            0x04, 0x26, 0x00, 0x49, 0x13, 0x00, 0x00, //
-            0x05, 0x24, 0x00, 0x03, 0x08, 0x00, 0x00, //
+            0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x49, 0x13, 0x00, 0x00,
+            0x02, 0x05, 0x00, 0x03, 0x08, 0x49, 0x13, 0x00, 0x00,
+            0x03, 0x0f, 0x00, 0x49, 0x13, 0x00, 0x00,
+            0x04, 0x26, 0x00, 0x49, 0x13, 0x00, 0x00,
+            0x05, 0x24, 0x00, 0x03, 0x08, 0x00, 0x00,
             0x00,
         ];
-        // The unit body starts at offset 12, so the entries sit at known
-        // unit-relative offsets, which is what a ref4 counts from.
         let mut dies: Vec<u8> = Vec::new();
-        dies.push(0x01); // subprogram at 12
+        dies.push(0x01);
         dies.extend_from_slice(b"f\0");
         dies.extend_from_slice(&0x1000u64.to_le_bytes());
-        dies.extend_from_slice(&45u32.to_le_bytes()); // returns the base type
+        dies.extend_from_slice(&45u32.to_le_bytes());
         let param_at = 12 + dies.len();
-        dies.push(0x02); // parameter
+        dies.push(0x02);
         dies.extend_from_slice(b"s\0");
-        dies.extend_from_slice(&35u32.to_le_bytes()); // points at the pointer
-        dies.push(0x00); // end of children
+        dies.extend_from_slice(&35u32.to_le_bytes());
+        dies.push(0x00);
         let pointer_at = 12 + dies.len();
         dies.push(0x03);
-        dies.extend_from_slice(&40u32.to_le_bytes()); // points at the const
+        dies.extend_from_slice(&40u32.to_le_bytes());
         let const_at = 12 + dies.len();
         dies.push(0x04);
-        dies.extend_from_slice(&45u32.to_le_bytes()); // points at the base type
+        dies.extend_from_slice(&45u32.to_le_bytes());
         let base_at = 12 + dies.len();
         dies.push(0x05);
         dies.extend_from_slice(b"char\0");
@@ -1432,14 +1373,9 @@ mod tests {
     /// frame base, variables that state a location, and a lexical block.
     fn locals_abbrev() -> Vec<u8> {
         vec![
-            // code 1: DW_TAG_subprogram, has children, name (string),
-            // low_pc (addr), frame_base (exprloc)
             0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x70, 0x09, 0x00, 0x00,
-            // code 2: DW_TAG_variable, no children, name (string),
-            // location (exprloc)
             0x02, 0x34, 0x00, 0x03, 0x08, 0x02, 0x09, 0x00, 0x00,
-            // code 3: DW_TAG_lexical_block, has children, no attributes
-            0x03, 0x0b, 0x01, 0x00, 0x00, // end of table
+            0x03, 0x0b, 0x01, 0x00, 0x00,
             0x00,
         ]
     }
@@ -1467,37 +1403,34 @@ mod tests {
     #[test]
     fn fbreg_locals_land_by_their_frame_base() {
         let mut dies: Vec<u8> = Vec::new();
-        // subprogram "cfa_fn": frame_base = DW_OP_call_frame_cfa
         dies.push(0x01);
         dies.extend_from_slice(b"cfa_fn\0");
         dies.extend_from_slice(&0x1000u64.to_le_bytes());
         dies.push(1);
-        dies.extend_from_slice(&[0x9c]); // DW_OP_call_frame_cfa
-        variable(&mut dies, 0x02, "a", &[0x91, 0x68]); // fbreg -0x18
-        dies.push(0x03); // a lexical block, whose locals keep the frame
-        variable(&mut dies, 0x02, "b", &[0x91, 0x70]); // fbreg -0x10
-        dies.push(0x00); // end of the block's children
-        variable(&mut dies, 0x02, "local_8", &[0x91, 0x60]); // name refused
-        variable(&mut dies, 0x02, "at_zero", &[0x91, 0x78]); // the retaddr
-        variable(&mut dies, 0x02, "far", &[0x91, 0x80, 0x80, 0x04]); // past span
-        variable(&mut dies, 0x02, "reg", &[0x50]); // not an fbreg
-        variable(&mut dies, 0x02, "empty", &[]); // no location stated
-        variable(&mut dies, 0x02, "again", &[0x91, 0x68]); // a's own slot
-        dies.push(0x00); // end of the subprogram's children
-        // subprogram "bp_fn": frame_base = DW_OP_reg6 (rbp)
+        dies.extend_from_slice(&[0x9c]);
+        variable(&mut dies, 0x02, "a", &[0x91, 0x68]);
+        dies.push(0x03);
+        variable(&mut dies, 0x02, "b", &[0x91, 0x70]);
+        dies.push(0x00);
+        variable(&mut dies, 0x02, "local_8", &[0x91, 0x60]);
+        variable(&mut dies, 0x02, "at_zero", &[0x91, 0x78]);
+        variable(&mut dies, 0x02, "far", &[0x91, 0x80, 0x80, 0x04]);
+        variable(&mut dies, 0x02, "reg", &[0x50]);
+        variable(&mut dies, 0x02, "empty", &[]);
+        variable(&mut dies, 0x02, "again", &[0x91, 0x68]);
+        dies.push(0x00);
         dies.push(0x01);
         dies.extend_from_slice(b"bp_fn\0");
         dies.extend_from_slice(&0x2000u64.to_le_bytes());
         dies.push(1);
-        dies.extend_from_slice(&[0x56]); // DW_OP_reg6
-        variable(&mut dies, 0x02, "c", &[0x91, 0x70]); // fbreg -0x10
+        dies.extend_from_slice(&[0x56]);
+        variable(&mut dies, 0x02, "c", &[0x91, 0x70]);
         dies.push(0x00);
-        // subprogram "odd_fn": a frame base no slot crosses to
         dies.push(0x01);
         dies.extend_from_slice(b"odd_fn\0");
         dies.extend_from_slice(&0x3000u64.to_le_bytes());
         dies.push(2);
-        dies.extend_from_slice(&[0x77, 0x00]); // DW_OP_breg7 +0
+        dies.extend_from_slice(&[0x77, 0x00]);
         variable(&mut dies, 0x02, "h", &[0x91, 0x70]);
         dies.push(0x00);
         let info = unit(&dies);
@@ -1515,9 +1448,6 @@ mod tests {
                 .locals
                 .clone()
         };
-        // The caller's base is a word above entry: fbreg -0x18 is slot
-        // -0x10; the frame pointer's is a word under: fbreg -0x10 is slot
-        // -0x18.
         assert_eq!(
             locals("cfa_fn"),
             [(-0x10, "a".to_owned()), (-0x08, "b".to_owned())]
@@ -1535,24 +1465,22 @@ mod tests {
     /// base crosses by the four-byte word.
     #[test]
     fn a_32_bit_frame_pointer_is_ebp() {
-        // code 1: subprogram, children, name (string), low_pc (addr4),
-        // frame_base (exprloc); code 2: variable, name, location (exprloc)
         let abbrev: Vec<u8> = vec![
-            0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x70, 0x09, 0x00, 0x00, //
-            0x02, 0x34, 0x00, 0x03, 0x08, 0x02, 0x09, 0x00, 0x00, //
+            0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x70, 0x09, 0x00, 0x00,
+            0x02, 0x34, 0x00, 0x03, 0x08, 0x02, 0x09, 0x00, 0x00,
             0x00,
         ];
         let mut body: Vec<u8> = Vec::new();
-        body.extend_from_slice(&5u16.to_le_bytes()); // version
-        body.push(0x01); // DW_UT_compile
-        body.push(4); // address size
-        body.extend_from_slice(&0u32.to_le_bytes()); // abbreviation offset
+        body.extend_from_slice(&5u16.to_le_bytes());
+        body.push(0x01);
+        body.push(4);
+        body.extend_from_slice(&0u32.to_le_bytes());
         body.push(0x01);
         body.extend_from_slice(b"fn32\0");
         body.extend_from_slice(&0x4000u32.to_le_bytes());
         body.push(1);
-        body.extend_from_slice(&[0x55]); // DW_OP_reg5 (ebp)
-        variable(&mut body, 0x02, "d", &[0x91, 0x70]); // fbreg -0x10
+        body.extend_from_slice(&[0x55]);
+        variable(&mut body, 0x02, "d", &[0x91, 0x70]);
         body.push(0x00);
         let mut info = u32::try_from(body.len())
             .expect("fits")
@@ -1565,8 +1493,6 @@ mod tests {
         };
         let found = read_in(&info, &abbrev, &strings).subprograms;
         assert_eq!(found.len(), 1, "{found:?}");
-        // ebp - 0x10 is the entry stack a four-byte word under it, slot
-        // -0x14.
         assert_eq!(
             found[0].locals,
             [(-0x14i64, "d".to_owned())].into_iter().collect()
@@ -1578,26 +1504,13 @@ mod tests {
     /// enumerators.
     fn types_abbrev() -> Vec<u8> {
         vec![
-            // code 1: DW_TAG_structure_type, has children, name (string),
-            // byte_size (data1)
             0x01, 0x13, 0x01, 0x03, 0x08, 0x0b, 0x0b, 0x00, 0x00,
-            // code 2: DW_TAG_member, no children, name (string),
-            // data_member_location (data1), type (ref4)
             0x02, 0x0d, 0x00, 0x03, 0x08, 0x38, 0x0b, 0x49, 0x13, 0x00, 0x00,
-            // code 3: DW_TAG_base_type, no children, name (string),
-            // byte_size (data1), encoding (data1)
             0x03, 0x24, 0x00, 0x03, 0x08, 0x0b, 0x0b, 0x3e, 0x0b, 0x00, 0x00,
-            // code 4: DW_TAG_pointer_type, no children, type (ref4)
             0x04, 0x0f, 0x00, 0x49, 0x13, 0x00, 0x00,
-            // code 5: DW_TAG_enumeration_type, has children, name (string),
-            // byte_size (data1)
             0x05, 0x04, 0x01, 0x03, 0x08, 0x0b, 0x0b, 0x00, 0x00,
-            // code 6: DW_TAG_enumerator, no children, name (string),
-            // const_value (data1)
             0x06, 0x28, 0x00, 0x03, 0x08, 0x1c, 0x0b, 0x00, 0x00,
-            // code 7: DW_TAG_structure_type, has children, byte_size (data1)
-            // alone: the anonymous one
-            0x07, 0x13, 0x01, 0x0b, 0x0b, 0x00, 0x00, // end of table
+            0x07, 0x13, 0x01, 0x0b, 0x0b, 0x00, 0x00,
             0x00,
         ]
     }
@@ -1621,34 +1534,33 @@ mod tests {
         use crate::analysis::utypes::{TypeExpr, UserStruct, UserType};
         use std::collections::BTreeMap;
         let mut dies: Vec<u8> = Vec::new();
-        // The unit body starts at 12, which is what a ref4 counts from.
         let die_at = |dies: &[u8]| u32::try_from(12 + dies.len()).expect("fits");
         let u32_at = die_at(&dies);
         dies.push(0x03);
         named(&mut dies, "unsigned int");
-        dies.push(4); // byte size
-        dies.push(0x07); // DW_ATE_unsigned
+        dies.push(4);
+        dies.push(0x07);
         let char_at = die_at(&dies);
         dies.push(0x03);
         named(&mut dies, "char");
         dies.push(1);
-        dies.push(0x06); // DW_ATE_signed_char
+        dies.push(0x06);
         let ptr_at = die_at(&dies);
         dies.push(0x04);
         dies.extend_from_slice(&char_at.to_le_bytes());
         let enum_at = die_at(&dies);
         dies.push(0x05);
         named(&mut dies, "E");
-        dies.push(4); // byte size
+        dies.push(4);
         for (name, value) in [("A", 0u8), ("B", 3u8)] {
             dies.push(0x06);
             named(&mut dies, name);
             dies.push(value);
         }
-        dies.push(0x00); // end of the enumeration's children
+        dies.push(0x00);
         dies.push(0x01);
         named(&mut dies, "Point");
-        dies.push(16); // byte size
+        dies.push(16);
         for (name, off, ty) in [
             ("x", 0u8, u32_at),
             ("text", 8, ptr_at),
@@ -1661,16 +1573,14 @@ mod tests {
             dies.push(off);
             dies.extend_from_slice(&ty.to_le_bytes());
         }
-        // An anonymous struct inside `Point`: its member states a field of
-        // a type nothing names, and lands nowhere.
         dies.push(0x07);
         dies.push(4);
         dies.push(0x02);
         named(&mut dies, "inner");
         dies.push(0);
         dies.extend_from_slice(&u32_at.to_le_bytes());
-        dies.push(0x00); // end of the anonymous struct's children
-        dies.push(0x00); // end of Point's children
+        dies.push(0x00);
+        dies.push(0x00);
         let info = unit(&dies);
         let strings = Strings {
             text: &[],
@@ -1770,8 +1680,6 @@ mod tests {
     /// the minimum-unit bound and overflowing.
     #[test]
     fn a_huge_stated_length_ends_the_walk() {
-        // The 64-bit escape, then a length whose end offset lands on
-        // `usize::MAX`, then the whole version-5 header the reader wants.
         let mut info = Vec::new();
         info.extend_from_slice(&u32::MAX.to_le_bytes());
         info.extend_from_slice(&(u64::MAX - 12).to_le_bytes());

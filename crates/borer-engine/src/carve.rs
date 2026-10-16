@@ -308,7 +308,6 @@ fn pages(len: u32, page: u64) -> u64 {
     u64::from(len).div_ceil(page).saturating_mul(page)
 }
 
-// ---- programs ----
 
 /// Checks a PE header at the start of `b`.
 ///
@@ -345,8 +344,6 @@ fn pe(b: &[u8]) -> Option<Found> {
     let opt_size = usize::from(le16(b, at + 20)?);
     let dll = le16(b, at + 22)? & 0x2000 != 0;
     let opt = at + 24;
-    // SPEC: PE32's fixed fields end at 96 bytes and PE32+'s at 112, where
-    // the data directory count and the directories follow.
     let (bits, fixed) = match le16(b, opt)? {
         0x10b => ("PE32", 96),
         0x20b => ("PE32+", 112),
@@ -364,8 +361,6 @@ fn pe(b: &[u8]) -> Option<Found> {
             end = end.max(u64::from(le32(b, row + 20)?) + u64::from(raw_size));
         }
     }
-    // SPEC: the certificate table is directory 4, and its address is a
-    // file offset; it trails the sections in a signed image.
     if le32(b, opt + fixed - 4).is_some_and(|count| count > 4)
         && let (Some(cert), Some(cert_size)) =
             (le32(b, opt + fixed + 32), le32(b, opt + fixed + 36))
@@ -446,7 +441,6 @@ fn elf(b: &[u8]) -> Option<Found> {
         0xf3 => "riscv".to_owned(),
         other => format!("machine {other:#x}"),
     };
-    // SPEC: the ELF32 and ELF64 header layouts (System V gABI 4.1).
     let (word, ehsize, phent, shent) = if wide {
         (8usize, 64u16, 56u16, 64u16)
     } else {
@@ -480,8 +474,6 @@ fn elf(b: &[u8]) -> Option<Found> {
             .checked_add(k * u64::from(entry) + field_at)
             .and_then(|r| usize::try_from(r).ok())
     };
-    // SPEC: p_offset and p_filesz sit at 4 and 16 of an ELF32 program
-    // header, at 8 and 32 of an ELF64 one.
     let (off_at, size_at) = if wide { (8, 32) } else { (4, 16) };
     for k in 0..u64::from(phnum) {
         let (Some(off), Some(size)) = (
@@ -492,8 +484,6 @@ fn elf(b: &[u8]) -> Option<Found> {
         };
         end = end.max(off.saturating_add(size));
     }
-    // SPEC: sh_type at 4; sh_offset and sh_size at 16 and 20 (ELF32), 24
-    // and 32 (ELF64). `SHT_NOBITS` (8) holds no file bytes.
     let (off_at, size_at) = if wide { (24, 32) } else { (16, 20) };
     for k in 0..u64::from(shnum) {
         let (Some(kind), Some(off), Some(size)) = (
@@ -581,8 +571,6 @@ fn macho(b: &[u8]) -> Option<Found> {
         if size < 8 || at.saturating_add(size) > header + room {
             return None;
         }
-        // SPEC: LC_SEGMENT (1) carries fileoff and filesize as u32 at 32 and
-        // 36; LC_SEGMENT_64 (0x19) as u64 at 40 and 48.
         let span = match cmd {
             1 => u32_in(b, at + 32, big)
                 .zip(u32_in(b, at + 36, big))
@@ -644,7 +632,6 @@ fn fat_macho(b: &[u8]) -> Option<Found> {
     })
 }
 
-// ---- containers ----
 
 /// Checks a zip local file header at the start of `b`, and looks forward
 /// for the end of central directory record that closes the archive.
@@ -665,7 +652,6 @@ fn zip(b: &[u8], start: usize, fuel: &mut usize) -> Option<Found> {
     if !b.starts_with(b"PK\x03\x04") || *b.get(4)? > 63 {
         return None;
     }
-    // SPEC: APPNOTE.TXT 4.4.5's compression methods.
     if !matches!(
         le16(b, 8)?,
         0..=6 | 8 | 9 | 12 | 14 | 18 | 19 | 93 | 95..=99
@@ -744,8 +730,6 @@ fn gzip(b: &[u8]) -> Option<Found> {
     if flags & 0xe0 != 0 || !matches!(b.get(8)?, 0 | 2 | 4) || !matches!(b.get(9)?, 0..=13 | 255) {
         return None;
     }
-    // SPEC: RFC 1952 2.3: FEXTRA (4) carries a length-prefixed field, FNAME
-    // (8) and FCOMMENT (16) NUL-terminated text, FHCRC (2) two bytes.
     let mut at = 10usize;
     if flags & 4 != 0 {
         at += 2 + usize::from(le16(b, at)?);
@@ -762,7 +746,6 @@ fn gzip(b: &[u8]) -> Option<Found> {
     if flags & 2 != 0 {
         at += 2;
     }
-    // SPEC: RFC 1951 3.2.3: BTYPE 3 is reserved.
     if (b.get(at)? >> 1) & 3 == 3 {
         return None;
     }
@@ -798,8 +781,6 @@ fn xz(b: &[u8], fuel: &mut usize) -> Option<Found> {
         10 => "sha-256",
         _ => "a reserved check",
     };
-    // SPEC: the 12-byte footer is CRC32, backward size, the header's flags
-    // and `YZ`; its CRC covers the backward size and the flags.
     let mut at = 12usize;
     let end = loop {
         let window = b.get(at..)?;
@@ -943,8 +924,6 @@ fn cpio_entry(b: &[u8]) -> Option<(&[u8], usize)> {
         let text = std::str::from_utf8(b.get(6 + 8 * k..14 + 8 * k)?).ok()?;
         usize::from_str_radix(text, 16).ok()
     };
-    // SPEC: the 13 fields are eight hex digits each; filesize is the 7th
-    // and namesize the 12th, the name counting its NUL.
     let size = field(6)?;
     let name_size = field(11)?;
     for k in 0..13 {
@@ -1016,7 +995,6 @@ fn uimage(b: &[u8]) -> Option<Found> {
     if be32(b, 4)? != crc32(&header) {
         return None;
     }
-    // SPEC: U-Boot's include/image.h: IH_ARCH_*, IH_TYPE_*, IH_COMP_*.
     let arch = match b.get(29)? {
         2 => "arm".to_owned(),
         3 => "x86".to_owned(),
@@ -1096,10 +1074,6 @@ fn android_boot(b: &[u8]) -> Option<Found> {
     }
     let version = le32(b, 40)?;
     let kernel = le32(b, 8)?;
-    // SPEC: AOSP's bootimg.h: versions 0 to 2 keep the page size at 36 and
-    // the ramdisk size at 16; 1 adds the recovery dtbo at 1632 and 2 the
-    // dtb at 1648; 3 and 4 fix the page at 4096 with the ramdisk size at
-    // 12, and 4 adds a signature whose size sits at 1580.
     let (page, parts) = match version {
         0..=2 => {
             let page = le32(b, 36)?;
@@ -1137,7 +1111,6 @@ fn android_boot(b: &[u8]) -> Option<Found> {
     })
 }
 
-// ---- scanning ----
 
 /// Runs every format's check at one offset.
 ///

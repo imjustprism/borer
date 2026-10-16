@@ -95,13 +95,13 @@ fn dc_data(code: &[u8], data: &[u8], names: &[(u64, &str)]) -> String {
 #[test]
 fn x87_compare_and_conditional_move_select() {
     let text = dc(&[
-        0xdd, 0x44, 0x24, 0x04, // fld qword [esp+4]
-        0xdd, 0x44, 0x24, 0x0c, // fld qword [esp+12]
-        0xdb, 0xf1, // fcomi st,st(1)
-        0xda, 0xc1, // fcmovb st,st(1)
-        0xdd, 0xd9, // fstp st(1)
-        0xdd, 0x19, // fstp qword [ecx]
-        0xc3, // ret
+        0xdd, 0x44, 0x24, 0x04,
+        0xdd, 0x44, 0x24, 0x0c,
+        0xdb, 0xf1,
+        0xda, 0xc1,
+        0xdd, 0xd9,
+        0xdd, 0x19,
+        0xc3,
     ]);
     assert!(!text.contains("/* asm"), "{text}");
     assert!(text.contains(" ? "), "{text}");
@@ -119,25 +119,25 @@ fn x87_compare_and_conditional_move_select() {
 #[test]
 fn an_aligned_frame_keeps_its_stack_pointer() {
     let text = dc(&[
-        0x53, // push ebx
-        0x8b, 0xdc, // mov ebx,esp
-        0x83, 0xe4, 0xf0, // and esp,-16
-        0x55, // push ebp
-        0x8b, 0xec, // mov ebp,esp
-        0x83, 0xec, 0x10, // sub esp,16
-        0x8b, 0x43, 0x08, // mov eax,[ebx+8]
-        0x89, 0x45, 0xfc, // mov [ebp-4],eax
-        0xff, 0x75, 0xfc, // push dword [ebp-4]
-        0xe8, 0x08, 0x00, 0x00, 0x00, // call f
-        0x59, // pop ecx
-        0x8b, 0xe5, // mov esp,ebp
-        0x5d, // pop ebp
-        0x8b, 0xe3, // mov esp,ebx
-        0x5b, // pop ebx
-        0xc3, // ret
-        0x8b, 0x44, 0x24, 0x04, // f: mov eax,[esp+4]
-        0x83, 0xc0, 0x01, // add eax,1
-        0xc3, // ret
+        0x53,
+        0x8b, 0xdc,
+        0x83, 0xe4, 0xf0,
+        0x55,
+        0x8b, 0xec,
+        0x83, 0xec, 0x10,
+        0x8b, 0x43, 0x08,
+        0x89, 0x45, 0xfc,
+        0xff, 0x75, 0xfc,
+        0xe8, 0x08, 0x00, 0x00, 0x00,
+        0x59,
+        0x8b, 0xe5,
+        0x5d,
+        0x8b, 0xe3,
+        0x5b,
+        0xc3,
+        0x8b, 0x44, 0x24, 0x04,
+        0x83, 0xc0, 0x01,
+        0xc3,
     ]);
     assert!(!text.contains("/* asm"), "{text}");
     assert!(!text.contains("esp"), "{text}");
@@ -153,18 +153,18 @@ fn an_aligned_frame_keeps_its_stack_pointer() {
 #[test]
 fn a_negative_add_to_the_stack_pointer_opens_a_frame() {
     let text = dc(&[
-        0x55, // push ebp
-        0x8b, 0xec, // mov ebp,esp
-        0x81, 0xc4, 0x30, 0xfd, 0xff, 0xff, // add esp,-0x2d0
-        0x53, // push ebx
-        0x8d, 0x85, 0x38, 0xfd, 0xff, 0xff, // lea eax,[ebp-0x2c8]
-        0x50, // push eax
-        0xe8, 0x06, 0x00, 0x00, 0x00, // call stub
-        0x83, 0xc4, 0x04, // add esp,4
-        0x5b, // pop ebx
-        0xc9, // leave
-        0xc3, // ret
-        0xc3, // stub: ret
+        0x55,
+        0x8b, 0xec,
+        0x81, 0xc4, 0x30, 0xfd, 0xff, 0xff,
+        0x53,
+        0x8d, 0x85, 0x38, 0xfd, 0xff, 0xff,
+        0x50,
+        0xe8, 0x06, 0x00, 0x00, 0x00,
+        0x83, 0xc4, 0x04,
+        0x5b,
+        0xc9,
+        0xc3,
+        0xc3,
     ]);
     assert!(text.contains("&local_"), "{text}");
     assert!(!text.contains("arg_ff"), "{text}");
@@ -181,10 +181,10 @@ fn a_negative_add_to_the_stack_pointer_opens_a_frame() {
 #[test]
 fn a_small_32_bit_frame_is_a_frame() {
     let code = [
-        0x83, 0xec, 0x08, // sub esp,8
-        0x8b, 0x44, 0x24, 0x0c, // mov eax,[esp+0xc]
-        0x83, 0xc4, 0x08, // add esp,8
-        0xc3, // ret
+        0x83, 0xec, 0x08,
+        0x8b, 0x44, 0x24, 0x0c,
+        0x83, 0xc4, 0x08,
+        0xc3,
     ];
     let a = Analysis::compute(&image(&code));
     let f = a.function_at(0x401000).expect("the function is discovered");
@@ -201,17 +201,17 @@ fn a_small_32_bit_frame_is_a_frame() {
 fn asserts_name_the_variables_they_test() {
     let p = image_with_data(
         &[
-            0x8b, 0x44, 0x24, 0x04, // mov eax,[esp+4]
-            0x85, 0xc0, // test eax,eax
-            0x75, 0x14, // jnz ok
-            0x6a, 0x07, // push 7
-            0x68, 0x12, 0x20, 0x40, 0x00, // push 0x402012 (the source path)
-            0x68, 0x00, 0x20, 0x40, 0x00, // push 0x402000 (the condition)
-            0xe8, 0x06, 0x00, 0x00, 0x00, // call fail
-            0x83, 0xc4, 0x0c, // add esp,12
-            0x8b, 0x00, // ok: mov eax,[eax]
-            0xc3, // ret
-            0xc3, // fail: ret
+            0x8b, 0x44, 0x24, 0x04,
+            0x85, 0xc0,
+            0x75, 0x14,
+            0x6a, 0x07,
+            0x68, 0x12, 0x20, 0x40, 0x00,
+            0x68, 0x00, 0x20, 0x40, 0x00,
+            0xe8, 0x06, 0x00, 0x00, 0x00,
+            0x83, 0xc4, 0x0c,
+            0x8b, 0x00,
+            0xc3,
+            0xc3,
         ],
         b"reader.isvalid()\0\0src/reader.cc\0",
     );
@@ -1291,13 +1291,10 @@ fn embedded_base_fields_resolve_their_calls() {
     code.resize(0x40, 0xcc);
     code.extend_from_slice(&[0xb8, 0x04, 0x00, 0x00, 0x00, 0xc3]);
     code.resize(0x50, 0xcc);
-    // Foo::vfunc_2 0x401050: mov eax,[ecx+8]; call [eax+4]; ret
     code.extend_from_slice(&[0x8b, 0x41, 0x08, 0xff, 0x50, 0x04, 0xc3]);
     code.resize(0x60, 0xcc);
-    // Foo::vfunc_3 0x401060: the same over the field at 0xc
     code.extend_from_slice(&[0x8b, 0x41, 0x0c, 0xff, 0x50, 0x04, 0xc3]);
     code.resize(0x70, 0xcc);
-    // Bar's constructor 0x401070: mov dword [ecx],0x402158
     code.extend_from_slice(&[0xc7, 0x01, 0x58, 0x21, 0x40, 0x00, 0xc3]);
     let le = |v: u32| v.to_le_bytes();
     let mut data = vec![0u8; 0x170];
@@ -1368,12 +1365,10 @@ fn global_singleton_receivers_resolve_their_calls() {
     code.resize(0x20, 0xcc);
     code.extend_from_slice(&[0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3]);
     code.resize(0x30, 0xcc);
-    // GU2 0x401030: mov ecx,[0x4020e0]; mov eax,[ecx]; call [eax+4]; ret
     code.extend_from_slice(&[
         0x8b, 0x0d, 0xe0, 0x20, 0x40, 0x00, 0x8b, 0x01, 0xff, 0x50, 0x04, 0xc3,
     ]);
     code.resize(0x40, 0xcc);
-    // GU3 0x401040: the same over the unregistered global at 0x4020e4
     code.extend_from_slice(&[
         0x8b, 0x0d, 0xe4, 0x20, 0x40, 0x00, 0x8b, 0x01, 0xff, 0x50, 0x04, 0xc3,
     ]);
@@ -1477,7 +1472,6 @@ fn a_pointer_stored_in_data_is_a_reference_to_what_it_points_at() {
 /// function that nothing could walk. Discovery keeps only the entry.
 #[test]
 fn a_call_outside_executable_memory_seeds_no_function() {
-    // call rel32 -> 0x10000 (0x401005 + 0xffc0effb); ret
     let p = image(&[0xe8, 0xfb, 0xef, 0xc0, 0xff, 0xc3]);
     let a = Analysis::compute(&p);
     assert!(
@@ -1509,10 +1503,9 @@ fn a_call_outside_executable_memory_seeds_no_function() {
 /// the noise a decrypted image otherwise fills with.
 #[test]
 fn a_seed_that_decodes_to_nothing_is_not_a_function() {
-    let mut code = vec![0xc3u8; 0x20]; // ret at the entry, then filler
-    code[0x10] = 0xff; // ff ff: an invalid opcode
+    let mut code = vec![0xc3u8; 0x20];
+    code[0x10] = 0xff;
     code[0x11] = 0xff;
-    // A pointer at .rdata (0x402000) into .text at the invalid bytes.
     let data = 0x0040_1010u32.to_le_bytes();
     let p = image_with_data(&code, &data);
     let a = Analysis::compute(&p);
@@ -1625,9 +1618,6 @@ fn an_import_thunk_is_listed_apart_from_the_functions() {
 /// a plain store.
 #[test]
 fn a_low_lane_move_merges_rather_than_claiming_the_register() {
-    // mov eax,[esp+4]; movlpd xmm0,[esp+8]; movlpd [eax],xmm0; ret
-    // The store goes through the pointer argument, so the value is observable
-    // and the load is not dead.
     let text = dc(&[
         0x8b, 0x44, 0x24, 0x04, 0x66, 0x0f, 0x12, 0x44, 0x24, 0x08, 0x66, 0x0f, 0x13, 0x00, 0xc3,
     ]);
@@ -1645,7 +1635,6 @@ fn a_low_lane_move_merges_rather_than_claiming_the_register() {
 /// that only half the register moved.
 #[test]
 fn a_high_lane_move_names_itself_rather_than_assigning() {
-    // mov eax,[esp+4]; movhpd xmm0,[esp+8]; movlpd [eax],xmm0; ret
     let text = dc(&[
         0x8b, 0x44, 0x24, 0x04, 0x66, 0x0f, 0x16, 0x44, 0x24, 0x08, 0x66, 0x0f, 0x13, 0x00, 0xc3,
     ]);
@@ -4633,8 +4622,6 @@ fn a_locators_class_names_a_one_slot_table_on_a_32_bit_image() {
         0x8b, 0x41, 0x08, // ASM: mov eax,[ecx+8] (S0 at 0x401008)
         0xc3, // ASM: ret
     ];
-    // The RTTI of `One`: a type descriptor, a hierarchy of one class and
-    // a locator whose address is the word before the vtable at 0x402058.
     let mut data = vec![0u8; 0x60];
     let put = |d: &mut Vec<u8>, at: usize, b: &[u8]| d[at..at + b.len()].copy_from_slice(b);
     put(&mut data, 0x08, b".?AVOne@@\0");

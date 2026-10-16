@@ -131,8 +131,6 @@ fn checked(i: &Insn) -> Result<(), &'static str> {
             Err("an instruction outside every checked form")
         }
         a64::Op::Sve | a64::Op::Sme => Err(OUTSIDE_FLOAT),
-        // INVARIANT: a hint's operand (`bti c`'s target class) names no
-        // register; the instruction does nothing the replay compares.
         a64::Op::Nop | a64::Op::Bti => Ok(()),
         a64::Op::B
         | a64::Op::BCond(_)

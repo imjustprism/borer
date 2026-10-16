@@ -121,8 +121,6 @@ fn decoders_image() -> Program {
     place(&mut bytes, &mut ranges, 0x1100, ROLL_DECODE);
     place(&mut bytes, &mut ranges, 0x1200, COPY);
 
-    // The XOR decoder's five ciphertexts at 0x2000, 0x20 apart; each byte is
-    // the plaintext byte XOR 0x5a. The caller at 0x1300 decodes each.
     let xor = plaintexts("xor");
     let mut caller = Vec::new();
     for (i, text) in xor.iter().enumerate() {
@@ -141,8 +139,6 @@ fn decoders_image() -> Program {
     caller.push(0xc3);
     place(&mut bytes, &mut ranges, 0x1300, &caller);
 
-    // The rolling-key decoder's five ciphertexts at 0x2100; byte j is XOR
-    // (0x11 + 7*j). The caller at 0x1500 decodes each.
     let roll = plaintexts("roll");
     let mut caller = Vec::new();
     for (i, text) in roll.iter().enumerate() {
@@ -167,8 +163,6 @@ fn decoders_image() -> Program {
     caller.push(0xc3);
     place(&mut bytes, &mut ranges, 0x1500, &caller);
 
-    // The copier's five sources at 0x2500 hold readable strings already; the
-    // caller at 0x1700 copies each to a scratch buffer at 0x2700.
     let copy = plaintexts("copy");
     let mut caller = Vec::new();
     for (i, text) in copy.iter().enumerate() {
@@ -217,8 +211,6 @@ fn decoders_recover_their_strings_and_the_copier_none() {
         assert!(!out.contains(&text), "copier string listed: {text}\n{out}");
     }
     assert!(out.contains("# 10 decoded strings"), "{out}");
-    // Each recovered row names the call that decoded it: the first site of
-    // each caller is its call at offset 10, after the two argument moves.
     let row = |text: &str| {
         out.lines()
             .find(|l| l.contains(text))
@@ -271,9 +263,6 @@ fn the_listing_filters_and_pages() {
 /// nothing: the region it reads decodes to non-printable bytes.
 #[test]
 fn a_runaway_length_is_bounded_by_the_budget() {
-    // A wide .data of 0x5a bytes: the XOR decoder turns each into a NUL, so
-    // no printable string is produced however far it runs, and the step
-    // budget stops it before it reaches the far end.
     const SPAN: usize = 0x40000;
     let mut bytes = vec![0xccu8; 0x2000 + SPAN];
     let mut ranges: Vec<(u64, u64)> = Vec::new();
@@ -281,7 +270,6 @@ fn a_runaway_length_is_bounded_by_the_budget() {
     for b in bytes.iter_mut().skip(0x2000) {
         *b = 0x5a;
     }
-    // Three sites make it a candidate; each asks for a runaway length.
     let mut caller = Vec::new();
     for _ in 0..3 {
         site2(&mut caller, 0x1300, 0x2000, 0xffff_ffff, 0x1000);

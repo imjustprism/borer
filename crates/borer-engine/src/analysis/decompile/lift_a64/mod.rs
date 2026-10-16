@@ -598,8 +598,6 @@ impl Lift<'_, '_> {
                     width8(bits),
                 ),
             },
-            // INVARIANT: the sign bit tested alone is the sign, `x < 0`,
-            // which a test of the value with itself reads as.
             Test::Bit {
                 reg,
                 bits,
@@ -653,11 +651,6 @@ impl Lift<'_, '_> {
             self.ex.flags = Flags::Unknown;
         }
         self.ex.flags_needed = u32::MAX;
-        // INVARIANT: a `cbz` or `tbz` reads its register where the block
-        // ends, after the phis, whose write-outs may change what its value
-        // reads and forget a register no successor reads; read first, the
-        // value is held where they protect it, as a jump table's index is,
-        // a block ending in a branch having none.
         let tested = match jcc {
             Some((Test::Zero { reg, bits, .. } | Test::Bit { reg, bits, .. }, ..)) => {
                 Some(self.reg_at(reg, bits))

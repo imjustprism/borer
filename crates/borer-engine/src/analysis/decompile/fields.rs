@@ -677,8 +677,6 @@ pub(super) fn struct_fields(
 ) -> TypedFields {
     let mut fields: TypedFields = BTreeMap::new();
     for (off, f) in &s.fields {
-        // A named field is an enum ([`TypeExpr::c_name`] spells no
-        // name); its width is the enum's, the one every member holds.
         let letter =
             f.ty.c_name(word)
                 .as_deref()

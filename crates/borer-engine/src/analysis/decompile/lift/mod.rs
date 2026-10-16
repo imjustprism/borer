@@ -256,10 +256,6 @@ impl Env {
             .retain(|k, v| other.slot_types.get(k) == Some(v));
         self.tls_arrays.retain(|k| other.tls_arrays.contains(k));
         self.tls_blocks.retain(|k| other.tls_blocks.contains(k));
-        // INVARIANT: an arm64 register narrow on both sides fits the wider
-        // of the two on either path (a `w` write's 32 bits, a byte), so a
-        // whole read cuts it there; an x86 call's result is narrow only by
-        // what its callers read, and keeps its width only where both agree.
         self.narrow.retain(|k, v| match (k, other.narrow.get(k)) {
             (Key::A64(_), Some(w)) => {
                 *v = (*v).max(*w);
@@ -320,11 +316,6 @@ impl Env {
             self.fresh.insert(k);
         }
         let bits = match &v {
-            // INVARIANT: `Var(src)` is the text's value of `src`, while the
-            // record for a `src` with a pending value describes that value:
-            // `mov r10, r9; lea r9d, [..]; mov r9, r10` restores the 64-bit
-            // text `r9`, not the 32-bit `lea` pending in it, so the record
-            // carries over only when nothing is pending.
             Expr::Var(src) if self.vals.contains_key(src) => None,
             Expr::Var(src) => self.narrow.get(src).copied(),
             _ => match known_bits(&v) {
@@ -341,12 +332,6 @@ impl Env {
                 self.narrow.remove(&k);
             }
         }
-        // A value that is the TLS array, or this module's TLS block, is
-        // recorded as such the moment it is assigned rather than only when it
-        // is written out. A join meets the two sides, and a fact that only one
-        // path had recorded does not survive the meet: with the block left
-        // inline on one edge and materialized on the other, every singleton
-        // after a branch read as a raw offset from the block.
         let array = is_tls_array_expr(&v, &self.tls_arrays);
         let block = is_tls_block_expr(&v, &self.tls_arrays, &self.tls_blocks);
         if array {
@@ -870,9 +855,6 @@ pub(super) fn exec_block(
             ex.lines.push(format!("// {c}"));
         }
         ex.flags_needed = flags_live_after[idx];
-        // PERF: each instruction's needs overwrite the last one's in place,
-        // so the two maps are allocated once per block execution instead
-        // of cloned once per instruction.
         if let Some(src) = facts.need.and_then(|n| n.get(idx)) {
             ex.regs_needed.get_or_insert_default().clone_from(src);
         } else {
@@ -967,10 +949,6 @@ pub(super) fn exec_block(
     }
     if let Some((cc, target, fall)) = jcc {
         let flags = match &ex.flags {
-            // INVARIANT: a Go stack check's `jbe` is never taken in the
-            // text ([`super::go_stack_check`]): `1 <= 0` folds the branch
-            // the way a constant condition folds, so its slow path is
-            // unreachable and drops out with its edges.
             _ if go_folded => Flags::Cmp(Expr::Const(1), Expr::Const(0), 64),
             Flags::Truth(_, tcc) if *tcc != cc && tcc.invert() != cc => branch_flags,
             _ => ex.flags.clone(),

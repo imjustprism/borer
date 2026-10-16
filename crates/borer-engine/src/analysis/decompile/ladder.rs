@@ -133,7 +133,6 @@ pub(super) fn try_ladder<L: Lifter>(
     }
     let root = test_of(cond)?;
     let v = root.value().clone();
-    // A loop's condition is the loop's, however it tests.
     if cycle_of(st, i).is_some_and(|(_, entry)| entry == i) {
         return None;
     }

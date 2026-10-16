@@ -106,18 +106,15 @@ fn noreturn_loop_exit_leaves_no_dangling_goto() {
 /// `B` — the conditional edge to it is a call, not a swallowed block.
 #[test]
 fn conditional_branch_into_a_function_is_a_tail_call() {
-    // A @ 0x1000: test dl,dl; jne 0x1040(B); call 0x1060(C); ret
-    // B @ 0x1040: mov eax, 7; ret
-    // C @ 0x1060: call 0x1040(B); ret
     let mut code = vec![0xccu8; 0x66];
     code[0x00..0x0e].copy_from_slice(&[
-        0x84, 0xd2, // test dl, dl
-        0x0f, 0x85, 0x38, 0x00, 0x00, 0x00, // jne 0x1040
-        0xe8, 0x53, 0x00, 0x00, 0x00, // call 0x1060
-        0xc3, // ret
+        0x84, 0xd2,
+        0x0f, 0x85, 0x38, 0x00, 0x00, 0x00,
+        0xe8, 0x53, 0x00, 0x00, 0x00,
+        0xc3,
     ]);
-    code[0x40..0x46].copy_from_slice(&[0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3]); // mov eax,7; ret
-    code[0x60..0x66].copy_from_slice(&[0xe8, 0xdb, 0xff, 0xff, 0xff, 0xc3]); // call 0x1040; ret
+    code[0x40..0x46].copy_from_slice(&[0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x60..0x66].copy_from_slice(&[0xe8, 0xdb, 0xff, 0xff, 0xff, 0xc3]);
     let p = raw_program(&code);
     let a = Analysis::compute(&p);
     let text = decompile_raw(&p, &a, &Overlay::default(), BASE).expect("decompile");
@@ -141,7 +138,6 @@ fn conditional_branch_into_a_function_is_a_tail_call() {
 #[test]
 fn migrate_reports_a_field_that_moved_between_builds() {
     use borer_engine::analysis::render::migrate_function_tsv;
-    // mov eax,[rcx+0x10]; add eax,[rcx+OFF]; ret
     let build = |off: u8| {
         let mut code = vec![0xccu8; 8];
         code[..7].copy_from_slice(&[0x8b, 0x41, 0x10, 0x03, 0x41, off, 0xc3]);

@@ -391,7 +391,7 @@ mod tests {
             value: value.to_owned(),
         };
         let before = vec![
-            fact("attr", "HitPoints", "0x4849504f\tInt\trw\t0"),
+            fact("attr", "Health", "0x4849504f\tInt\trw\t0"),
             fact("cmd", "Commands::MoveCommand", "0x5f\tu32@+0x20\t-"),
             fact("route", "Mover Messaging::Tick", "Mover::OnTick"),
         ];
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(read(&text).expect("reads"), before);
         assert!(read("hello\n").is_err());
         let after = vec![
-            fact("attr", "HitPoints", "0x4849504f\tInt64\trw\t0"),
+            fact("attr", "Health", "0x4849504f\tInt64\trw\t0"),
             fact("cmd", "Commands::MoveCommand", "0x5f\tu32@+0x20\t-"),
             fact("cmd", "Commands::JumpCommand", "0x60\tbit@+0x20\t-"),
         ];
@@ -410,7 +410,7 @@ mod tests {
         );
         assert!(
             report.contains(
-                "attr\tchanged\tHitPoints\t0x4849504f | Int | rw | 0\t0x4849504f | Int64 | rw | 0\n"
+                "attr\tchanged\tHealth\t0x4849504f | Int | rw | 0\t0x4849504f | Int64 | rw | 0\n"
             ),
             "{report}"
         );

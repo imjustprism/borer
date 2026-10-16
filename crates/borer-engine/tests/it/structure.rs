@@ -158,8 +158,6 @@ fn program(blocks: &[Term]) -> Program {
     }
     bytes.resize(saturating_usize(callee), 0xcc);
     bytes.extend_from_slice(&[0x8b, 0xc1, 0xc3]);
-    // The noreturn callee is `jmp $`: a self-loop the analysis reads as a
-    // function that never returns, so a `Term::Noreturn` block ends there.
     bytes.resize(saturating_usize(noreturn), 0xcc);
     bytes.extend_from_slice(&[0xeb, 0xfe]);
     bytes.resize(saturating_usize(TABLES), 0xcc);
@@ -1248,8 +1246,6 @@ fn tail_clone_fixture(calls: bool) -> Program {
     ];
     let mut code = tail_assemble(&blocks);
     if calls {
-        // INVARIANT: the entry block is 13 bytes, so the tail's `call F`
-        // ends at offset 20 and its displacement is the four before it.
         code[16..20].copy_from_slice(&lo32(callee.wrapping_sub(base + 20)).to_le_bytes());
     }
     let mut image = vec![0xccu8; 0x2000];
@@ -1473,8 +1469,6 @@ fn tail_kind_fixture(kind: TailKind) -> Program {
             rel32: vec![(3, 1)],
         }],
     };
-    // The graph after the tail region, its blocks' indices moved down by
-    // however many blocks the region holds.
     let shift = tail.len() - 1;
     let at = |i: usize| i + shift;
     let mut blocks = vec![TailBlock {

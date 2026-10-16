@@ -88,18 +88,12 @@ impl<'a> Exec<'_, 'a> {
                 Expr::Var(k) => self.big_written.get(k).is_some_and(relative_table_jump),
                 other => relative_table_jump(other),
             });
-        // INVARIANT: a jump to a callee leaves the return address in place
-        // like a direct tail call, so the callee's stack arguments are the
-        // caller's own, one word up; a computed goto has no callee to feed.
         self.forwarding = reached.is_some();
         self.call_through = reached
             .is_none()
             .then(|| self.through_register(instr))
             .flatten();
         let (mut args, rendered, mut values) = self.args_for(reached);
-        // INVARIANT: the argument window of an unknown callee on a 32-bit
-        // target is what was pushed for it, the same words the call renders,
-        // so their slots are not written out a second time before it.
         let arity = self.callee_stack_args(reached).or_else(|| {
             (self.bitness() == 32 && self.bodyless(reached)).then_some(self.args_pushed)
         });
@@ -314,16 +308,6 @@ impl<'a> Exec<'_, 'a> {
             }
             None => ("return;".to_owned(), None),
         };
-        // INVARIANT: a function whose callers read `rdx` after calling it
-        // hands a second result back there ([`Ctx::ret_rdx`]), which they
-        // read as `f__rdx(...)`; its own text says what that is before
-        // each `return` that still holds it pending, or the value the
-        // callers read is nowhere in it. The register is no read of the
-        // `ret` for the liveness, which would keep it written out behind
-        // every call and compared at every edge to a return, where a
-        // caller's read of it is only a heuristic. A result that reads
-        // `rdx` itself (`eax = [edx]; edx = [edx+4]`) is taken into a
-        // temporary before the line replaces `rdx`.
         let rdx = self.canon(Register::RDX);
         let (line, value) = match self.env.vals.get(&rdx).cloned() {
             Some(second) if self.ctx.ret_rdx && second != Expr::Var(rdx) => {
@@ -346,7 +330,6 @@ impl<'a> Exec<'_, 'a> {
         self.record(EffectKind::Return(value));
     }
 
-    // ------------------------------------------------------------ steps --
 
     /// Executes one non-control instruction.
     ///
@@ -416,13 +399,6 @@ impl<'a> Exec<'_, 'a> {
                 let name = format!("{mn:?}").to_lowercase();
                 self.write_op0(instr, Expr::Call(name, vec![dst, src]));
             }
-            // `movlps`/`movlpd` carry sixty-four bits into the low lane and
-            // leave the high lane as it was, so a whole-register write would
-            // claim what the instruction did not do. Loading is the merge
-            // `movss` between registers already spells; storing writes exactly
-            // the sixty-four bits the destination holds, so it is a plain
-            // store. The high-lane forms stay unmodeled: reading the register
-            // after one is reading the half this model does not keep.
             Mnemonic::Movlps | Mnemonic::Movlpd
                 if instr.op_count() == 2 && instr.op0_kind() == OpKind::Register =>
             {
@@ -481,13 +457,6 @@ impl<'a> Exec<'_, 'a> {
                         self.note_reg_ty(instr, Ty::F64);
                         float_bits(v, Ty::F64)
                     }
-                    // INVARIANT: `movd`/`vmovd` into a vector register writes
-                    // the low 32 bits of the lane and zeroes the rest, so the
-                    // source is narrowed to the 32 bits the machine keeps: a
-                    // general register read whole (a 32-bit read, the known
-                    // roughness) would carry its upper half into the lane.
-                    // The mask folds away on a source already that narrow (a
-                    // 32-bit load, a 32-bit target's register).
                     Mnemonic::Movd | Mnemonic::Vmovd
                         if instr.op0_kind() == OpKind::Register
                             && instr.op0_register().is_vector_register() =>
@@ -722,32 +691,18 @@ impl<'a> Exec<'_, 'a> {
                     return;
                 }
                 let l = self.val(instr, 0);
-                // INVARIANT: a right shift narrower than 64 bits brings what
-                // sits above its lane down into the lane it writes, so its
-                // operand is taken at its width: zero-extended for `shr`,
-                // sign-extended for `sar` (`sar bl, 7` is 0xff for a negative
-                // byte).
                 let l = match (op, bits) {
                     (Op::Shr, b) if b < 64 => mask(l, (1u64 << b) - 1),
                     (Op::Sar, b) if b < 64 => sign_extend(l, b),
                     _ => l,
                 };
                 let r = self.val(instr, 1);
-                // SPEC: Intel SDM Vol. 2B, SAL/SAR/SHL/SHR: the count is masked to 5 bits, to 6 only with a 64-bit operand.
                 let r = match op {
                     Op::Shl | Op::Shr | Op::Sar if bits < 64 => {
                         fold(Op::And, r, Expr::Const(31), bits)
                     }
                     _ => r,
                 };
-                // A 64-bit operation on x64 reads the whole register,
-                // which a 32-bit write left holding the zero-extension of
-                // what it wrote: a value the expression still types as 32
-                // bits widens, or the operation folds at the narrow width
-                // where the machine computes at the wide one
-                // (`mov eax,[rcx]; sub rax,4` on a zero field is
-                // `0xffff_ffff_ffff_fffc`, not `0xffff_fffc`). A 32-bit
-                // operation computes in its own lane and stays as it is.
                 let (l, r) = if bits == 64 && self.bitness() == 64 {
                     (widen64(l), widen64(r))
                 } else {
@@ -762,19 +717,13 @@ impl<'a> Exec<'_, 'a> {
                     }
                     (Mnemonic::Sub, _) => Flags::Cmp(l, r, bits),
                     (Mnemonic::Add, _) => Flags::Add(l, r, bits),
-                    // `shl x, 1` sets every flag `add x, x` does, the
-                    // overflow (SF != OF is `jl`) included.
                     (Mnemonic::Shl | Mnemonic::Sal, Expr::Const(1)) if reads_overflow => {
                         Flags::Add(l.clone(), l, bits)
                     }
-                    // `shr x, 1` sets the overflow to the sign of `x`, which
-                    // no thunk of the result holds.
                     (Mnemonic::Shr, Expr::Const(1)) if reads_overflow && needed != u32::MAX => {
                         Flags::Unknown
                     }
                     (Mnemonic::Rol | Mnemonic::Ror, _) => self.rotate_flags(mn, &r, &v, bits),
-                    // A logical operation leaves the flags `test v, v` would:
-                    // ZF, SF and PF of the result, CF and OF clear.
                     (Mnemonic::And | Mnemonic::Or | Mnemonic::Xor, _) => {
                         Flags::Test(v.clone(), v.clone(), bits)
                     }
@@ -802,9 +751,6 @@ impl<'a> Exec<'_, 'a> {
                 let dst = self.val(instr, 0);
                 let src = self.val(instr, 1);
                 let cnt = fold(Op::And, self.val(instr, 2), Expr::Const(mask), bits);
-                // The far operand moves `bits - cnt`, taken in two steps: a
-                // count of zero leaves the destination alone, and a shift by
-                // the whole width would wrap to no shift at all.
                 let rest = fold(Op::Sub, Expr::Const(u64::from(bits) - 1), cnt.clone(), bits);
                 let (near, far) = if mn == Mnemonic::Shld {
                     (Op::Shl, Op::Shr)
@@ -866,7 +812,6 @@ impl<'a> Exec<'_, 'a> {
             Mnemonic::Imul | Mnemonic::Mul if instr.op_count() == 1 && bits == 8 => {
                 let a = self.reg_read(sized_register(self.rax(), 8));
                 let b = self.val(instr, 0);
-                // `imul` multiplies the bytes as signed: -1 * 2 is 0xfffe.
                 let (wa, wb) = if mn == Mnemonic::Imul {
                     (sign_extend(a.clone(), 8), sign_extend(b.clone(), 8))
                 } else {
@@ -931,17 +876,6 @@ impl<'a> Exec<'_, 'a> {
                 };
                 let x = self.val(instr, 0);
                 let v = fold(op, x.clone(), Expr::Const(1), bits);
-                // `inc` and `dec` leave the carry of the instruction before:
-                // `cmp r13, rcx; inc eax; cmovae r14, r13` moves on the
-                // compare, not on the increment. A reader of the carry alone
-                // gets the earlier flags' below; one that also reads what
-                // the increment set keeps the increment's flags. A reader of
-                // the overflow (`jl` is SF != OF) gets the flags of the add
-                // or subtract of one, which set it: `dec ecx; jl` at
-                // `INT_MIN` jumps, where the sign of `ecx - 1` says not.
-                // Readers of both the carry and the overflow in this block
-                // read flags no one thunk holds; a reader in another block
-                // is most likely a signed one.
                 let others = RflagsBits::ZF | RflagsBits::SF | RflagsBits::OF | RflagsBits::PF;
                 let needed = self.flags_needed;
                 let carry_only = needed & RflagsBits::CF != 0 && needed & others == 0;
@@ -992,9 +926,6 @@ impl<'a> Exec<'_, 'a> {
                 };
                 let src = self.lane_operand(instr, 1, bits);
                 let v = unary(op, src.clone(), bits);
-                // `tzcnt` and `lzcnt` set CF when the source is zero and ZF
-                // when the count is; `bsf`, `bsr` and `popcnt` set ZF when
-                // the source is zero.
                 let counts = matches!(mn, Mnemonic::Tzcnt | Mnemonic::Lzcnt);
                 self.flags = if counts && self.flags_needed & !RflagsBits::CF == 0 {
                     Flags::Truth(
@@ -1131,7 +1062,6 @@ impl<'a> Exec<'_, 'a> {
                         fold(Op::And, fold(Op::Shr, x, top, bits), Expr::Const(1), bits),
                     )
                 };
-                // The carry alone: the overflow a rotate sets is another bit.
                 self.flags = Flags::Truth(out, Cc(ConditionCode::b));
                 self.write_op0(instr, v);
             }
@@ -1169,8 +1099,6 @@ impl<'a> Exec<'_, 'a> {
                     bits,
                 );
                 let v = fold(op, sum, cf, bits);
-                // The carry alone: the overflow is the signed one, which the
-                // carry does not say (`adc; seto` reads another bit).
                 self.flags = Flags::Truth(carry, Cc(ConditionCode::b));
                 self.write_op0(instr, v);
             }
@@ -1180,9 +1108,6 @@ impl<'a> Exec<'_, 'a> {
                 self.flags = self.status_test(&l, &r).unwrap_or(Flags::Test(l, r, bits));
             }
             Mnemonic::Bt if instr.op_count() == 2 => {
-                // A register's bit offset wraps at its width (`bt eax, ecx`
-                // tests bit `ecx & 31`); a register offset into memory
-                // reaches past the operand, into the bit string.
                 let (v, n) = match self.bit_string(instr, bits) {
                     Some((addr, n)) => (self.read_at(addr, Self::mem_ty(instr)), n),
                     None => {
@@ -1253,15 +1178,9 @@ impl<'a> Exec<'_, 'a> {
                     Some(sp) => {
                         let v = self.slot_read(sp, self.word_ty());
                         self.env.sp = Some(sp + word);
-                        // INVARIANT: `push 8; pop eax` loads a constant;
-                        // the word it pushed is no argument of the next call.
                         self.args_pushed = self.args_pushed.saturating_sub(1);
                         self.write_op0(instr, v);
                     }
-                    // INVARIANT: with the stack pointer unknown (`and esp, -8`)
-                    // the popped value is too; a register nothing reads after
-                    // is dropped, and one something does read goes out as asm
-                    // rather than keep a value the pop replaced.
                     None if instr.op0_kind() == OpKind::Register
                         && self.dead_reg(self.canon(instr.op0_register())) =>
                     {
@@ -1406,9 +1325,6 @@ impl<'a> Exec<'_, 'a> {
                 self.record(EffectKind::Unmodeled);
                 self.after_call(false);
             }
-            // `ptest a, b`: ZF says `a & b` is zero, CF that `~a & b` is;
-            // the one the code reads is kept, both being one flag word is
-            // beyond what the flags carry.
             Mnemonic::Ptest | Mnemonic::Vptest
                 if instr.op_count() == 2
                     && instr.op0_kind() == OpKind::Register
@@ -1430,7 +1346,6 @@ impl<'a> Exec<'_, 'a> {
                     Flags::Unknown
                 };
             }
-            // A lane extracted into memory: `pextrd [mem], xmm, 2`.
             Mnemonic::Pextrb
             | Mnemonic::Pextrw
             | Mnemonic::Pextrd
@@ -1443,8 +1358,6 @@ impl<'a> Exec<'_, 'a> {
             {
                 self.vector_op(instr);
             }
-            // `fnstsw ax` carries an x87 compare's outcome, and `sahf` puts it
-            // in the flags as `comisd` would: C3 to ZF, C2 to PF, C0 to CF.
             Mnemonic::Fnstsw | Mnemonic::Fstsw
                 if instr.op0_kind() == OpKind::Register
                     && instr.op0_register() == Register::AX
@@ -1460,8 +1373,6 @@ impl<'a> Exec<'_, 'a> {
                     .clone()
                     .map(|(l, r)| (self.reg_read(Register::AH), Flags::Cmp(l, r, 64)));
             }
-            // `lahf` after a floating-point compare carries its outcome in
-            // `ah` as `fnstsw ax` does: ZF, PF and CF where C3, C2 and C0 sit.
             Mnemonic::Lahf if self.float_flags && matches!(self.flags, Flags::Cmp(..)) => {
                 let saved = self.flags.clone();
                 self.reg_write(Register::AH, Expr::Call("lahf".to_owned(), Vec::new()));
@@ -1585,7 +1496,6 @@ impl<'a> Exec<'_, 'a> {
         if instr.op0_kind() != OpKind::Memory || instr.op1_kind() != OpKind::Register {
             return None;
         }
-        // SPEC: Intel SDM Vol. 2A, BT: a register bit offset is signed; the word is EffectiveAddress + (OperandSize/8) * (BitOffset DIV OperandSize).
         let n = self.val(instr, 1);
         let offset = if bits < 64 {
             sign_extend(n.clone(), bits)
@@ -1624,7 +1534,6 @@ impl<'a> Exec<'_, 'a> {
     /// * `v` - The rotated value.
     /// * `bits` - Operand width.
     fn rotate_flags(&self, mn: Mnemonic, count: &Expr, v: &Expr, bits: u8) -> Flags {
-        // SPEC: Intel SDM Vol. 2B, RCL/RCR/ROL/ROR: the count is masked to 5 bits, to 6 only with a 64-bit operand.
         let count_mask = if bits == 64 { 0x3f } else { 0x1f };
         let needed = self.flags_needed;
         match count {
@@ -1850,7 +1759,6 @@ impl<'a> Exec<'_, 'a> {
             ]);
             let n = self.names();
             let total = fold(Op::Mul, count, Expr::Const(size), 64);
-            // Stepping back, the pointers name the region's last element.
             let low = |p: Expr| {
                 if !backward {
                     return p;
@@ -1915,11 +1823,6 @@ impl<'a> Exec<'_, 'a> {
             }
             self.reg_write(rcx, Expr::Const(0));
         } else {
-            // INVARIANT: a single `movs`/`stos` into or out of the frame
-            // (`movsd` with `edi = esp` copying an argument structure) is a
-            // slot access, as a `mov` at the same place is; written as a
-            // store through a pointer it would leave the slot's earlier
-            // value standing.
             let v = if is_stos {
                 value
             } else {

@@ -265,7 +265,6 @@ impl<'a> Exec<'_, 'a> {
                 };
                 let st0 = self.st(0);
                 if matches!(mn, M::Fcomi | M::Fcomip | M::Fucomi | M::Fucomip) {
-                    // ZF, PF and CF as `comisd` leaves them.
                     self.flags = Flags::Cmp(st0, src, 64);
                 } else {
                     self.env.fpu_cmp = Some((st0, src));
@@ -293,8 +292,6 @@ impl<'a> Exec<'_, 'a> {
                 let Some(i) = reg_of(instr, instr.op_count() - 1) else {
                     return false;
                 };
-                // `fcmovcc` is not among the instructions iced reads a
-                // condition code off; the code is the mnemonic's.
                 let cc = match mn {
                     M::Fcmovb => ConditionCode::b,
                     M::Fcmove => ConditionCode::e,

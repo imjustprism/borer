@@ -1698,10 +1698,10 @@ pub fn encodings_tsv(
 mod tests {
     use super::*;
 
-    /// A string-carrying encoder as the game's decompile to: a length in
+    /// A string-carrying encoder as decompiled: a length in
     /// bits, the bytes under it, and a flag masked from a register.
-    const UNLOCK: &str = "// Commands::UnlockMapCommand::Encode @ 0x1409738d8: 83 instructions
-// signature: uint64_t Commands::UnlockMapCommand::Encode(Commands::UnlockMapCommand *this, uint64_t a2)
+    const UNLOCK: &str = "// Cmd::Open::Encode @ 0x1409738d8: 83 instructions
+// signature: uint64_t Cmd::Open::Encode(Cmd::Open *this, uint64_t a2)
 uint16_t home_0;
 uint64_t rax, rbx, rdi;
 
@@ -1720,8 +1720,8 @@ return (*(uint64_t*)(rax + 0x30))->vtable[21](&home_0, 1);
 
     /// An encoder that packs every field into one local buffer and hands
     /// the stream the buffer once.
-    const MOVE: &str = "// Commands::MoveCommand::Encode @ 0x1409a786c
-// signature: void Commands::MoveCommand::Encode(Commands::MoveCommand *this, const Core::Ptr<Network::BitWriter> &a2)
+    const MOVE: &str = "// Cmd::Move::Encode @ 0x1409a786c
+// signature: void Cmd::Move::Encode(Cmd::Move *this, const Core::Ptr<Network::BitWriter> &a2)
 uint16_t local_b;
 uint32_t local_f;
 uint64_t rax, local_18, local_14, local_16;
@@ -1791,7 +1791,7 @@ rbp = home_0 = *(uint32_t*)(a2 + 8);
 rdi = 0;
 if ((int32_t)(rbp) > 0) {
   do {
-    rax = Util::Dictionary<Util::StringAtom,Game::TimedChallengeInfo>::KeyValuePairAtIndex(a2, rdi);
+    rax = Util::Dictionary<Util::Text,Record>::KeyValuePairAtIndex(a2, rdi);
     rbx = rax;
     sub_140838790(a1, rax);
     sub_140a843a8(a1, rbx + 8);
@@ -1813,8 +1813,8 @@ rdi = home_0 = *(uint32_t*)(a2 + 8);
 rbx = 0;
 if ((int32_t)(rdi) > 0) {
   do {
-    rax = Util::Array<Game::DamageType::Id>::operator [](a2, rbx);
-    IO::Adapter<Network::BitWriter,Game::DamageType::Id>::Write(a1, rax);
+    rax = Util::Array<Kind::Id>::operator [](a2, rbx);
+    IO::Adapter<Network::BitWriter,Kind::Id>::Write(a1, rax);
     rbx += 1;
   } while ((int32_t)rbx < (int32_t)rdi);
 }
@@ -1967,7 +1967,7 @@ return;
         assert_eq!(
             sites[1].raw,
             Raw::Helper {
-                callee: "IO::Adapter<Network::BitWriter,Game::DamageType::Id>::Write".to_owned(),
+                callee: "IO::Adapter<Network::BitWriter,Kind::Id>::Write".to_owned(),
                 index: 1,
                 arg: "rax".to_owned()
             },

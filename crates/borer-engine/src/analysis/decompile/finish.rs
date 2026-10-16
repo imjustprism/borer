@@ -44,8 +44,6 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
         ),
         u8::try_from(bitness).unwrap_or(64),
     ));
-    // PERF: the elvis pass only shortens lines, so the text's own length
-    // caps the result; lines are written straight into it, one pass.
     let mut out = String::with_capacity(text.len() + 1);
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
@@ -195,7 +193,6 @@ pub(super) fn normalize_temps(text: &str) -> String {
             }
             i += len;
         } else {
-            // Copy one UTF-8 character so we never split a codepoint.
             let ch_len = text[i..].chars().next().map_or(1, char::len_utf8);
             out.push_str(&text[i..i + ch_len]);
             i += ch_len;
@@ -236,8 +233,6 @@ pub(super) fn float_return(ret: &str) -> bool {
 /// The text with a `// source:` line, or unchanged.
 pub(super) fn source_file(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    // A source the debug information stated is a fact and stands: the
-    // citations guess at a file, so they do not get a second word in.
     if lines[..header_len(&lines)]
         .iter()
         .any(|l| l.starts_with("// source:"))
@@ -290,9 +285,6 @@ pub(super) fn cited_paths(line: &str) -> Vec<&str> {
             out.push(text);
         }
     }
-    // INVARIANT: a Rust panic's location, written beside its call, cites
-    // the crate file it was raised in; the standard library's own files
-    // are where every crate's panics go, no file of this function's.
     if let Some((_, at)) = line.rsplit_once("  // at ")
         && let Some(path) = at.rsplitn(3, ':').nth(2)
         && path.ends_with(".rs")

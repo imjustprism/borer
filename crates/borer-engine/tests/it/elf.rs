@@ -284,41 +284,26 @@ pub(crate) fn elf_bytes(stripped: bool) -> Vec<u8> {
     im.u32(0x4a4, 0);
 
     let abbrev: &[u8] = &[
-        // code 1: DW_TAG_subprogram, has children, name (string),
-        // low_pc (addr), frame_base (exprloc)
         0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x70, 0x09, 0x00, 0x00,
-        // code 2: DW_TAG_variable, no children, name (string),
-        // location (exprloc)
         0x02, 0x34, 0x00, 0x03, 0x08, 0x02, 0x09, 0x00, 0x00,
-        // code 3: DW_TAG_structure_type, has children, name (string),
-        // byte_size (data1)
         0x03, 0x13, 0x01, 0x03, 0x08, 0x0b, 0x0b, 0x00, 0x00,
-        // code 4: DW_TAG_member, no children, name (string),
-        // data_member_location (data1), type (ref4)
         0x04, 0x0d, 0x00, 0x03, 0x08, 0x38, 0x0b, 0x49, 0x13, 0x00, 0x00,
-        // code 5: DW_TAG_base_type, no children, name (string),
-        // byte_size (data1), encoding (data1)
         0x05, 0x24, 0x00, 0x03, 0x08, 0x0b, 0x0b, 0x3e, 0x0b, 0x00, 0x00,
-        // code 6: DW_TAG_pointer_type, no children, type (ref4)
         0x06, 0x0f, 0x00, 0x49, 0x13, 0x00, 0x00,
-        // code 7: DW_TAG_enumeration_type, has children, name (string),
-        // byte_size (data1)
         0x07, 0x04, 0x01, 0x03, 0x08, 0x0b, 0x0b, 0x00, 0x00,
-        // code 8: DW_TAG_enumerator, no children, name (string),
-        // const_value (data1)
-        0x08, 0x28, 0x00, 0x03, 0x08, 0x1c, 0x0b, 0x00, 0x00, // end of table
+        0x08, 0x28, 0x00, 0x03, 0x08, 0x1c, 0x0b, 0x00, 0x00,
         0x00,
     ];
     im.put(0x580, abbrev);
     let mut dies: Vec<u8> = vec![0x01];
     dies.extend_from_slice(b"frames\0");
     dies.extend_from_slice(&FRAMES.to_le_bytes());
-    dies.extend_from_slice(&[0x01, 0x9c]); // frame_base: DW_OP_call_frame_cfa
+    dies.extend_from_slice(&[0x01, 0x9c]);
     for (name, expr) in [
-        ("count", [0x91u8, 0x68].as_slice()), // fbreg -0x18, slot -0x10
-        ("limit", [0x91, 0x70].as_slice()),   // fbreg -0x10, slot -0x8
-        ("1bad", [0x91, 0x60].as_slice()),    // a name the text refuses
-        ("missing", [].as_slice()),           // no location stated
+        ("count", [0x91u8, 0x68].as_slice()),
+        ("limit", [0x91, 0x70].as_slice()),
+        ("1bad", [0x91, 0x60].as_slice()),
+        ("missing", [].as_slice()),
     ] {
         dies.push(0x02);
         dies.extend_from_slice(name.as_bytes());
@@ -326,22 +311,20 @@ pub(crate) fn elf_bytes(stripped: bool) -> Vec<u8> {
         dies.push(u8::try_from(expr.len()).expect("fits"));
         dies.extend_from_slice(expr);
     }
-    dies.push(0x00); // end of the subprogram's children
-    // The types the unit states, at offsets a ref4 counts from: the unit
-    // body starts 12 bytes into the section.
+    dies.push(0x00);
     let die_at = |dies: &[u8]| u32::try_from(12 + dies.len()).expect("fits");
     let u32_at = die_at(&dies);
     dies.push(0x05);
     dies.extend_from_slice(b"unsigned int");
     dies.push(0);
-    dies.push(4); // byte size
-    dies.push(0x07); // DW_ATE_unsigned
+    dies.push(4);
+    dies.push(0x07);
     let char_at = die_at(&dies);
     dies.push(0x05);
     dies.extend_from_slice(b"char");
     dies.push(0);
     dies.push(1);
-    dies.push(0x06); // DW_ATE_signed_char
+    dies.push(0x06);
     let ptr_at = die_at(&dies);
     dies.push(0x06);
     dies.extend_from_slice(&char_at.to_le_bytes());
@@ -349,18 +332,18 @@ pub(crate) fn elf_bytes(stripped: bool) -> Vec<u8> {
     dies.push(0x07);
     dies.extend_from_slice(b"Mode");
     dies.push(0);
-    dies.push(4); // byte size
+    dies.push(4);
     for (name, value) in [("Off", 0u8), ("On", 1u8)] {
         dies.push(0x08);
         dies.extend_from_slice(name.as_bytes());
         dies.push(0);
         dies.push(value);
     }
-    dies.push(0x00); // end of the enumeration's children
+    dies.push(0x00);
     dies.push(0x03);
     dies.extend_from_slice(b"Point");
     dies.push(0);
-    dies.push(16); // byte size
+    dies.push(16);
     for (name, off, ty) in [
         ("x", 0u8, u32_at),
         ("text", 8, ptr_at),
@@ -372,12 +355,12 @@ pub(crate) fn elf_bytes(stripped: bool) -> Vec<u8> {
         dies.push(off);
         dies.extend_from_slice(&ty.to_le_bytes());
     }
-    dies.push(0x00); // end of the structure's children
+    dies.push(0x00);
     let mut body: Vec<u8> = Vec::new();
-    body.extend_from_slice(&5u16.to_le_bytes()); // version
-    body.push(0x01); // DW_UT_compile
-    body.push(8); // address size
-    body.extend_from_slice(&0u32.to_le_bytes()); // abbreviation offset
+    body.extend_from_slice(&5u16.to_le_bytes());
+    body.push(0x01);
+    body.push(8);
+    body.extend_from_slice(&0u32.to_le_bytes());
     body.extend_from_slice(&dies);
     let mut info = u32::try_from(body.len())
         .expect("fits")
@@ -471,8 +454,6 @@ pub(crate) fn elf_bytes(stripped: bool) -> Vec<u8> {
 #[test]
 fn eh_frame_seeds_the_functions_of_a_stripped_binary() {
     let p = elf_fixture_stripped();
-    // The symtab contributes nothing; the one local name left is the
-    // DWARF's, which a stripped image keeps.
     assert!(
         p.symbols
             .iter()

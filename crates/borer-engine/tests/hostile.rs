@@ -488,8 +488,6 @@ fn an_export_by_ordinal_alone_is_listed() {
     const RDATA: u32 = 0x2000;
     let mut rdata = vec![0u8; 0x400];
     export_directory(&mut rdata, 0, RDATA, 3, 1);
-    // SPEC: the address table sits at +0x40; slot 0 is the named `Exp`,
-    // slot 1 an export by ordinal (base 1, so ordinal 2), slot 2 empty.
     put32(&mut rdata, 0x44, 0x1010);
     let bytes = pe(
         &[
@@ -529,7 +527,6 @@ fn delay_loaded_imports_are_imports() {
     const DELAY_DIR: usize = 13;
     const RDATA: u32 = 0x2000;
     let mut rdata = vec![0u8; 0x400];
-    // SPEC: ImgDelayDescr is grAttrs (1, RVAs), name, module handle, IAT, INT.
     put32(&mut rdata, 0x100, 1);
     put32(&mut rdata, 0x104, RDATA + 0x180);
     put32(&mut rdata, 0x108, RDATA + 0x1f0);
@@ -854,11 +851,8 @@ fn bytes_after_the_certificate_table_are_overlay() {
 fn fields_the_loader_ignores_do_not_refuse_the_file() {
     let _serial = serial();
     let mut bytes = pe(&[Sec::sound(".text", 0x1000, text(), CODE)], &[]);
-    // SPEC: a Rich marker and its key in the DOS stub, with no `DanS`
-    // before it that the key decodes.
     bytes[0x60..0x64].copy_from_slice(b"Rich");
     put32(&mut bytes, 0x64, 0x1234_5678);
-    // SPEC: `NumberOfRvaAndSizes` sits 108 bytes into a PE32+ optional header.
     put32(&mut bytes, PE_AT + 24 + 108, 17);
     let original = bytes.clone();
     let p = load(bytes);

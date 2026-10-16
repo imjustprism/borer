@@ -1,8 +1,9 @@
 //! Ports: which component accepts which message, and the function each
 //! message is dispatched to.
 //!
-//! A message port (Nebula3's entity properties, managers and UI handlers)
-//! declares the messages it accepts in one virtual, handing each message's
+//! A message port (a component that receives messages: a property, a
+//! manager, a UI handler) declares the messages it accepts in one virtual,
+//! handing each message's
 //! id to a helper that inserts it into the port's id list, and handles them
 //! in another, comparing the incoming message's id against each and calling
 //! the function that handles it or handling it inline. Reading both for
@@ -470,9 +471,7 @@ pub fn routes_tsv(
         picked.len()
     );
     if analysis.packs.list("messages", "accept").is_empty() {
-        out.push_str(
-            "; no pack names the accept helpers (`[messages] accept` lines, as packs/nebula.borer has)",
-        );
+        out.push_str("; no pack names the accept helpers (`[messages] accept` lines in a pack)");
     }
     out.push('\n');
     out.push_str("port\tmessage\thandler\tdispatch\n");
@@ -490,7 +489,7 @@ pub fn routes_tsv(
 mod tests {
     use super::*;
 
-    /// The declaring virtual of the game's movement property.
+    /// One port's accept virtual: two ids, each inserted if absent.
     const ACCEPT: &str = "uint64_t rax, home_0;
 home_0 = &g64_1413737c0;
 rax = Util::Array<Messaging::Id const *>::BinarySearchIndex(a1 + 48, &home_0);
@@ -514,7 +513,7 @@ if (g32_14136fec0 != *(uint32_t*)rax) {
   rax = Core::Ptr<Messaging::Message>::operator ->(a2);
   rax = rax->vfunc_3();
   if (g32_1413737c0 == *(uint32_t*)rax) {
-    return Properties::ClientMovementProperty::HandleMoveCommandReceived(a1, a2);
+    return Widget::OnMove(a1, a2);
   }
   rax = Core::Ptr<Messaging::Message>::operator ->(a2);
   rax = rax->vfunc_3();
@@ -568,7 +567,7 @@ return sub_140146334(a1, *(uint32_t*)(rax + 0x20));
         assert_eq!(
             got.get(&0x1_4137_37c0),
             Some(&branch(
-                Some("Properties::ClientMovementProperty::HandleMoveCommandReceived"),
+                Some("Widget::OnMove"),
                 None
             ))
         );

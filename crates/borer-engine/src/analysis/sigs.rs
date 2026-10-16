@@ -229,9 +229,6 @@ pub fn signature(
     entry: u64,
 ) -> Option<Vec<Option<u8>>> {
     let full = masked_bytes(program, analysis, entry)?;
-    // INVARIANT: the signature is at least SIG_MIN bytes, so an entry that
-    // parts from it sooner can never match; every entry sharing the first
-    // SIG_MIN bytes is a candidate, whatever the longer prefix says.
     let head = full.get(..SIG_MIN.min(full.len())).unwrap_or(&[]);
     let need = index
         .candidates(head)

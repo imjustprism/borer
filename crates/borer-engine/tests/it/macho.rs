@@ -69,7 +69,7 @@ impl Image {
         section: Option<(&str, u64, u64, u32, u32)>,
     ) -> usize {
         let nsects = u32::from(section.is_some());
-        self.u32(off, 0x19); // LC_SEGMENT_64
+        self.u32(off, 0x19);
         self.u32(off + 4, 72 + 80 * nsects);
         self.name(off + 8, seg);
         self.u64(off + 24, vmaddr);
@@ -102,7 +102,7 @@ impl Image {
     )]
     fn dylib(&mut self, off: usize, path: &str) -> usize {
         let size = (24 + path.len() + 1).div_ceil(8) * 8;
-        self.u32(off, 0xc); // LC_LOAD_DYLIB
+        self.u32(off, 0xc);
         self.u32(off + 4, u32::try_from(size).expect("small"));
         self.u32(off + 8, 24);
         self.put(off + 24, path.as_bytes());
@@ -120,7 +120,6 @@ impl Image {
 )]
 pub(crate) fn thin() -> Vec<u8> {
     let mut img = Image(vec![0u8; FILE_SIZE]);
-    // Header: MH_MAGIC_64, x86-64, MH_EXECUTE, PIE, no-heap-execution.
     img.u32(0, 0xfeed_facf);
     img.u32(4, 0x0100_0007);
     img.u32(8, 3);
@@ -157,12 +156,10 @@ pub(crate) fn thin() -> Vec<u8> {
         1,
         None,
     );
-    // LC_MAIN.
     img.u32(off, 0x8000_0028);
     img.u32(off + 4, 24);
     img.u64(off + 8, MAIN - TEXT);
     off += 24;
-    // LC_SYMTAB: three nlist_64 at 0x2000, strings at 0x2100.
     img.u32(off, 0x2);
     img.u32(off + 4, 24);
     img.u32(off + 8, 0x2000);
@@ -170,30 +167,24 @@ pub(crate) fn thin() -> Vec<u8> {
     img.u32(off + 16, 0x2100);
     img.u32(off + 20, 0x40);
     off += 24;
-    // LC_DYSYMTAB: one indirect symbol at 0x2180.
     img.u32(off, 0xb);
     img.u32(off + 4, 80);
     img.u32(off + 56, 0x2180);
     img.u32(off + 60, 1);
     off += 80;
-    // LC_FUNCTION_STARTS at 0x2190.
     img.u32(off, 0x26);
     img.u32(off + 4, 16);
     img.u32(off + 8, 0x2190);
     img.u32(off + 12, 8);
     off += 16;
-    // Two LC_LOAD_DYLIBs: the linked libraries, in file order. goblin
-    // lists the image itself first, so these must both survive.
     off = img.dylib(off, "/usr/lib/libSystem.B.dylib");
     off = img.dylib(off, "/usr/lib/libc++.1.dylib");
-    // LC_ENCRYPTION_INFO_64: FairPlay-encrypted, cryptid 1.
     img.u32(off, 0x2c);
     img.u32(off + 4, 24);
     img.u32(off + 16, 1);
     off += 24;
     img.u32(16, 10);
     img.u32(20, u32::try_from(off - 32).expect("small"));
-    // Code.
     let disp = u32::try_from(GOT_PUTS - (MAIN + 6)).expect("near");
     let mut main = vec![0xff, 0x15];
     main.extend_from_slice(&disp.to_le_bytes()); // ASM: call [rip+got]
@@ -201,7 +192,6 @@ pub(crate) fn thin() -> Vec<u8> {
     main.resize(0x10, 0xcc);
     main.extend_from_slice(&[0x8d, 0x47, 0x01, 0xc3]); // ASM: lea eax, [rdi+1]; ret
     img.put(0x300, &main);
-    // Symbols: `_main` external in section 1, `_helper` local, `_puts` undefined.
     let strings = b"\0_main\0_helper\0_puts\0";
     img.put(0x2100, strings);
     for (k, (strx, n_type, sect, value)) in [
@@ -218,8 +208,8 @@ pub(crate) fn thin() -> Vec<u8> {
         img.0[at + 5] = sect;
         img.u64(at + 8, value);
     }
-    img.u32(0x2180, 2); // the got slot binds symbol 2, `_puts`
-    img.put(0x2190, &[0x80, 0x06, 0x10, 0x00]); // ULEB128 0x300, 0x10, end
+    img.u32(0x2180, 2);
+    img.put(0x2190, &[0x80, 0x06, 0x10, 0x00]);
     img.0
 }
 
@@ -350,9 +340,6 @@ fn a_fat_file_reads_its_x86_64_slice() {
 #[test]
 fn a_section_count_past_the_command_reads_no_phantoms() {
     let mut bytes = thin();
-    // SPEC: `__LINKEDIT` is the third segment command, after two 152-byte
-    // ones from offset 32; its `nsects` sits 64 bytes in, and its
-    // `cmdsize` of 72 holds no section header.
     let nsects = 32 + 152 + 152 + 64;
     bytes[nsects..nsects + 4].copy_from_slice(&2u32.to_le_bytes());
     let p = load(&bytes, "phantom");

@@ -139,8 +139,6 @@ pub fn parse_type(text: &str) -> anyhow::Result<TypeExpr> {
     let mut rest = text.trim_start();
     while let Some(c) = rest.chars().next() {
         if c == '*' || c == '[' {
-            // A pointer or an array follows the word it applies to; before
-            // any word it is a typo.
             if base.is_none() {
                 return Err(one_word());
             }
@@ -1400,8 +1398,6 @@ mod tests {
         );
         assert_eq!(built.kind(), "enum");
 
-        // An enum sizes like any named type, through an alias and as a
-        // struct field; one hand-edited past its width is refused.
         let mut known = BTreeMap::new();
         known.insert("State".to_owned(), built);
         known.insert(

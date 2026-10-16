@@ -102,7 +102,6 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
-    // ------------------------------------------------------------ reads --
 
     /// Reads a register as an expression.
     ///
@@ -411,9 +410,6 @@ impl<'a> Exec<'_, 'a> {
         for o in overlapping {
             self.materialize(Key::Slot(o), &mut Vec::new(), None);
         }
-        // INVARIANT: a read one of the block's own stores covers whole reads
-        // nothing from before the block; any other reads bytes a store
-        // before it may have left, under this offset or another.
         let end = k.saturating_add(i64::from(ty.bits() / 8).max(1));
         let covered = self
             .slot_def
@@ -428,10 +424,6 @@ impl<'a> Exec<'_, 'a> {
         {
             return self.assumed(v.clone());
         }
-        // INVARIANT: a slot's text variable is as wide as the store that
-        // wrote it, so a narrower read of its low bytes is the variable
-        // masked to the read (`movzx eax, word [esp]` after a dword store
-        // is `local_8 & 0xffff`), never the whole variable.
         if let Some(&stored) = self.env.slot_bits.get(&k)
             && stored > ty.bits()
             && stored <= 64
@@ -453,7 +445,6 @@ impl<'a> Exec<'_, 'a> {
         self.declare(Key::Slot(k), ty);
     }
 
-    // ----------------------------------------------------------- writes --
 
     /// Assigns a register lazily: the value stays symbolic until needed.
     ///
@@ -472,13 +463,6 @@ impl<'a> Exec<'_, 'a> {
             /// arguments with: a structure passed by value is copied there.
             const ARGS_ROOM_MAX: i64 = 0x100;
             let before = self.env.sp;
-            // INVARIANT: `and esp, -16` aligns the frame by a slack of up
-            // to fifteen bytes nothing here can know; the frame is tracked
-            // as if the slack were zero, which keeps every later push, pop
-            // and local consistent with each other (the arguments are read
-            // through the copy of the entry pointer such a prologue keeps).
-            // A write to `esp` in 64-bit code zero-extends into `rsp`, so the
-            // pointer is no longer a known frame offset.
             self.env.sp = match v {
                 _ if self.bitness() == 64 && r.size() < 8 => None,
                 Expr::Sp(k) => Some(k),
@@ -493,10 +477,6 @@ impl<'a> Exec<'_, 'a> {
                 }
                 _ => None,
             };
-            // INVARIANT: outside the prologue, `sub esp, 0x14` before a call
-            // makes room for an argument copied there (`rep movsd` of a
-            // structure passed by value), so the words count as pushed for
-            // the call, and an `add esp` before one takes them back.
             if let (Some(b), Some(a)) = (before, self.env.sp)
                 && self.bitness() == 32
                 && !self.entry
@@ -521,9 +501,6 @@ impl<'a> Exec<'_, 'a> {
             1 if is_high_byte(r) => {
                 crate::analysis::decompile::expr::merge_bits(self.full_value(key), v, 8, 8)
             }
-            // INVARIANT: a value a call left no wider than the lane (a `bool`
-            // in `al`) fills it already, so the upper bits the mask would
-            // clear are zero: `mov sil, al` after it is `rsi = rax`.
             1 | 2
                 if needed <= lane
                     && matches!(&v, Expr::Var(k) if self.env.narrow.get(k).is_some_and(|b| *b <= lane)) =>
@@ -537,11 +514,6 @@ impl<'a> Exec<'_, 'a> {
         };
         let wide = known_bits(&merged) > 0xffff_ffff;
         self.assign(key, merged);
-        // INVARIANT: on x86-64 a write to a 32-bit register clears its upper
-        // half, so a value that may have upper bits set holds only in the low
-        // 32 and a read of the whole register truncates it (`mov ecx, edx;
-        // mov rax, rcx` returns `(uint32_t)a2`, not `a2`). A value that fits
-        // (a 32-bit load) is exact already.
         if wide
             && r.size() == 4
             && self.ctx.bitness == 64
@@ -566,13 +538,6 @@ impl<'a> Exec<'_, 'a> {
         let v = self.bounded(v);
         self.written_here.insert(key);
         self.env.set(key, v.clone());
-        // Record what the value points at as the assignment happens, not only
-        // when it is written out. A join keeps a fact only if both sides
-        // recorded it, so a receiver left inline on one edge and materialized
-        // on the other lost its class, and the virtual call through it fell
-        // back to a bare vtable slot. Only ever adding a class here: a call's
-        // result is typed from the callee's signature just after it is
-        // assigned, and clearing on the way past would undo that.
         if let Some(c) = self.class_of_expr(&v) {
             self.env.classes.insert(key, c);
         }
@@ -664,10 +629,6 @@ impl<'a> Exec<'_, 'a> {
     /// * `ty` - Store type.
     /// * `v` - The stored value.
     pub(super) fn slot_write(&mut self, k: i64, ty: Ty, v: Expr) {
-        // INVARIANT: before the registration the entry block of a handler
-        // function pushes only the record itself, the try level, the handler
-        // and the chain's head, which renders as nothing, like the unlink
-        // that restores it.
         if !self.seh_registered {
             return;
         }
@@ -745,10 +706,6 @@ impl<'a> Exec<'_, 'a> {
         };
         let below = backward
             || (self.ctx.program.arch.isa() == Some(crate::isa::Isa::A64) && signed_index(addr));
-        // INVARIANT: a read through a frame address reads the slots it may
-        // cover for slot liveness, as a call reads its window: the zeros
-        // eight `push eax` leave for a `bts [esp], eax` live to the loop
-        // that reads them.
         if !writes {
             let seen = match span {
                 Some((a, b)) => SlotUse::Window(a, b),
@@ -814,10 +771,6 @@ impl<'a> Exec<'_, 'a> {
     /// * `instr` - The instruction (operand 0 is the destination).
     /// * `v` - The stored value.
     pub(super) fn store(&mut self, instr: &Instruction, v: Expr) {
-        // INVARIANT: with a handler registered, the unlink of `fs:[0]` and
-        // the try-level stores at `[ebp-4]` are the compiler's bookkeeping,
-        // not the function's work; every return path repeats them, and
-        // rendered they would be the body of each copy.
         if self.ctx.seh_frame && (is_seh_link(instr) || try_level_store(instr, self.ctx.bitness)) {
             self.seh_registered |= is_seh_link(instr);
             return;
@@ -1002,7 +955,6 @@ impl<'a> Exec<'_, 'a> {
         emit_line!(self, line);
     }
 
-    // -------------------------------------------------- materialization --
 
     /// Writes `key`'s symbolic value out as `name = value;`.
     ///
@@ -1104,8 +1056,6 @@ impl<'a> Exec<'_, 'a> {
                 .unwrap_or_else(|| self.ty_of(key).bits()),
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => self.ty_of(key).bits(),
         };
-        // INVARIANT: a slot or global narrower than a word keeps only the
-        // value's low bits, as a store to memory does.
         let val = &match key {
             Key::Slot(_) | Key::Global(..) if bits < 64 && !val.is_float() => {
                 crate::analysis::decompile::expr::low_bits_read(val.clone(), bits)
@@ -1119,8 +1069,6 @@ impl<'a> Exec<'_, 'a> {
         };
         self.record(EffectKind::Assign(key, val.clone(), bits));
         let n = self.names();
-        // INVARIANT: a store narrower or wider than the slot's declaration
-        // writes its own bytes, through the slot's address.
         let name = match key {
             Key::Slot(o) => n.slot_at(o, Ty::from_bits(bits)).0,
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) | Key::A64(_) => n.key(key),
@@ -1200,7 +1148,6 @@ impl<'a> Exec<'_, 'a> {
             )
         );
         self.record(EffectKind::Unmodeled);
-        // SPEC: Intel SDM Vol. 2A, CMPXCHG: the flags are those of comparing the accumulator with the destination, whose old value `rax` now holds.
         self.flags = if self.flags_needed & !RflagsBits::ZF == 0 {
             Flags::Cmp(Expr::Var(rax_key), expected, bits)
         } else {
@@ -1265,10 +1212,6 @@ impl<'a> Exec<'_, 'a> {
             )
         );
         self.record(EffectKind::Unmodeled);
-        // SPEC: Intel SDM Vol. 2B, XADD: the flags are set as an `add` of
-        // the destination's old value and the source would set them; the
-        // old value is read where the exchange stands, before memory is
-        // forgotten around it.
         self.flags = Flags::Add(old, add, bits);
     }
 
@@ -1329,10 +1272,6 @@ impl<'a> Exec<'_, 'a> {
             )
         );
         self.record(EffectKind::Unmodeled);
-        // INVARIANT: the temporary holds the new value, so the old one is
-        // the new less the operand (plus it, for a subtraction): a reader
-        // of the carry or the overflow (`lock dec; jl` at `INT_MIN`) gets
-        // the flags of the arithmetic itself, not the sign of its result.
         let new = Expr::Var(key);
         self.flags = match op {
             _ if self.zero_or_sign_only() => Flags::Result(new, bits),
@@ -1416,10 +1355,7 @@ impl<'a> Exec<'_, 'a> {
             Key::Reg(r) if r.is_vector_register() => {
                 self.ctx.reg_ty.get(&key).copied().unwrap_or(Ty::U128)
             }
-            // INVARIANT: an x87 register holds a floating-point value, which
-            // an integer declaration would truncate on every assignment.
             Key::Reg(r) if r >= Register::ST0 && r <= Register::ST7 => Ty::F64,
-            // INVARIANT: a `v` register's variable holds all 128 bits.
             Key::A64(crate::isa::a64::Reg::V(_)) => Ty::U128,
             Key::Reg(_) | Key::Tmp(_) | Key::Global(..) | Key::Param(_) | Key::A64(_) => {
                 self.word_ty()
@@ -1636,10 +1572,6 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `pred` - Selects the operands about to become stale.
     pub(super) fn protect_flags(&mut self, pred: &dyn Fn(&Expr) -> bool) {
-        // INVARIANT: the compare whose status `ah` holds names the values it
-        // compared, so they are copied as the flags' are while a later
-        // `test ah` may read them; past the last read of `ah` the status
-        // is forgotten.
         if let Some((held, saved)) = self.status_ah.take() {
             let ah = self.canon(Register::AH);
             let read_later = self
@@ -1719,9 +1651,6 @@ impl<'a> Exec<'_, 'a> {
                 marked.subst(&marker, &Expr::Var(key))
             }
         };
-        // INVARIANT: `test r, r` compares a value with itself; rewritten
-        // once, one temporary serves both sides and the condition reads
-        // `t == 0`.
         let pair = |ex: &mut Self, l: Expr, r: Expr| -> (Expr, Expr) {
             let same = l == r;
             let l = rewrite(ex, l);
@@ -1867,7 +1796,6 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
-    // --------------------------------------------------------- control --
 }
 
 /// Recognizes a write to the try level, `[ebp-4]`, in a 32-bit function

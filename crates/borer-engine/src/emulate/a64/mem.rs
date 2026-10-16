@@ -261,7 +261,6 @@ impl Machine<'_> {
     ///
     /// When the list is a form the machine does not model (the lane
     /// forms, the interleaved `ld2` to `ld4` counts), or a load faults.
-    // SPEC: Arm ARM (DDI 0487) C6.2 LD1 (multiple structures).
     pub(super) fn load_group(&mut self, i: &Insn) -> Result<(), Stop> {
         let (first, count) = a64::ld1_group(i.word).ok_or_else(|| unmodeled(i))?;
         let (addr, back) = self.address(i, 1)?;

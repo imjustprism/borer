@@ -585,8 +585,6 @@ impl Replay for arch::X86 {
         w: &Witness,
         width: u8,
     ) -> Vec<u64> {
-        // INVARIANT: the try level at `[ebp-4]` is the compiler's
-        // bookkeeping, which the text leaves out on purpose.
         let mask = low(width);
         let bitness = u32::from(width);
         if w.seh_frame
@@ -900,10 +898,6 @@ fn check_answer_in<L: Replay>(
 ) -> Option<TextCheck> {
     let f = analysis.function(entry)?;
     let template = L::rig(program)?;
-    // PERF: the text the answer shows comes from the memo; built here first,
-    // it keeps the lifter's witness for this check to take, so the answer
-    // pays for one decompilation. A text someone else memoized first kept
-    // none, and the check decompiles again for it: the same statements.
     let shared = decompiled_witnessed(program, analysis, overlay, overlay.fingerprint(), entry);
     let fresh;
     let (d, w) = match shared.as_ref().as_ref().map(|d| (d, d.take_witness())) {
@@ -1472,10 +1466,6 @@ fn scalar_float(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
         return false;
     }
     let m = i.mnemonic();
-    // The sign and magnitude masks a `xorps`/`andps` reads: the lifter
-    // writes them as `-x` and `fabs(x)`, a 16-byte memory operand whose
-    // text never reads the bytes. The register-register forms are the zero
-    // fill's and the packed logic's, left to their own arms.
     let mask = matches!(m, M::Xorps | M::Xorpd | M::Andps | M::Andpd)
         && i.op_count() == 2
         && i.op0_kind() == OpKind::Register
@@ -1621,8 +1611,6 @@ fn packed_integer(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
     if i.has_lock_prefix() || matches!(i.segment_prefix(), Register::FS | Register::GS) {
         return false;
     }
-    // A memory operand, source or destination: sixteen bytes at an address
-    // either side names, off the segment registers this check leaves out.
     let memory = (0..i.op_count()).any(|n| i.op_kind(n) == OpKind::Memory)
         && i.memory_size().size() == 16
         && !matches!(i.memory_segment(), Register::FS | Register::GS)
@@ -2277,8 +2265,6 @@ impl<M: Bench> Text<'_, M> {
             return None;
         }
         match k {
-            // INVARIANT: a slot's name reads the slot as the text declares
-            // it, a `uint8_t` its one byte.
             Key::Slot(o) => {
                 let bits = self.slot_bits.get(&o).copied().unwrap_or(self.width);
                 if bits > 64 {
@@ -2296,10 +2282,6 @@ impl<M: Bench> Text<'_, M> {
             Key::Reg(Register::RSP | Register::ESP) | Key::A64(crate::isa::a64::Reg::Sp) => {
                 self.rsp
             }
-            // INVARIANT: the x87 stack registers hold their values on a
-            // stack the machine runs and the text's state never seeded, so
-            // an expression reading one stays unevaluated; an xmm
-            // register's variable reads the state the trial seeded.
             Key::Reg(r) if !r.is_gpr() && !r.is_xmm() => None,
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
                 Some(self.vars.get(&k).copied().unwrap_or_else(|| self.drawn(k)))
@@ -2477,18 +2459,11 @@ impl<M: Bench> Text<'_, M> {
                     return None;
                 }
                 if matches!(ty, Ty::F32 | Ty::F64) {
-                    // An integer converted to a float is not modelled: the
-                    // conversion the machine makes has no helper here.
                     let from = self.float_bits(x)?;
                     return Some(convert_float(self.eval_at(x, d)?, Some(from), *ty));
                 }
                 let v = self.eval_at(x, d)?;
                 match self.float_bits(x) {
-                    // A float converted to an integer truncates, and a
-                    // value the integer cannot hold (or a NaN) converts to
-                    // the "integer indefinite" the processor gives. A float
-                    // operand with no width this walk can see (an xmm
-                    // register's own variable) is not converted at all.
                     Some(fb) => Some(float_to_int(v, fb, ty.bits())),
                     None if floating(x) => None,
                     None => Some(v & low(ty.bits())),
@@ -2771,17 +2746,9 @@ impl<M: Bench> Text<'_, M> {
     /// * `c` - The condition.
     /// * `d` - How much deeper to look.
     fn cond_at(&self, c: &Cond, d: u8) -> Option<bool> {
-        // A float comparison (`ucomiss` and its kin) reads its flags the
-        // way the machine's compare leaves them, unordered on a NaN. Its
-        // operands carry their width when they are typed, and when they
-        // are not (a parameter's variable) the instruction that set the
-        // flags is the only witness of which way the condition reads.
         if let Flags::Cmp(a, b, w) = &c.flags {
             let from_float = || {
                 let (setters, readers) = &self.flag_setters;
-                // The reader the statement stands at, then the setter
-                // before it: a `setcc` and the folding after it read a
-                // compare that earlier arithmetic no longer overwrote.
                 readers
                     .iter()
                     .rev()
@@ -2852,10 +2819,6 @@ impl<M: Bench> Text<'_, M> {
                 }
             }
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
-                // INVARIANT: a whole-lane write fills the vector's state and
-                // its low half alike; a narrower one rewrites part of a lane
-                // whose rest the machine keeps or clears by its own form, so
-                // the whole-lane state stops holding the register.
                 if bits > 64 {
                     match value {
                         Some(w) => {
@@ -2896,10 +2859,6 @@ impl<M: Bench> Text<'_, M> {
     /// * `ty` - The type stored.
     /// * `v` - The value.
     fn store(&mut self, addr: &Expr, ty: Ty, v: &Expr) {
-        // INVARIANT: the lifter takes a store through a computed frame
-        // address to cover the slots from its base up (an array's index is
-        // not negative); a sampled index that reaches below the base is a
-        // state the text does not speak about.
         if let (Some(k), Some(at)) = (frame_base(addr), self.eval(addr))
             && at
                 .wrapping_sub(self.sp0.wrapping_add_signed(k))
@@ -2910,9 +2869,6 @@ impl<M: Bench> Text<'_, M> {
             self.lost_all = true;
             return;
         }
-        // INVARIANT: a TLS slot is a pseudo-address the machine reaches
-        // through the thread block instead, so a store to one has no
-        // machine bytes to compare.
         let Some(at) = self.eval(addr).filter(|a| *a < TLS_BASE) else {
             self.lost_all = true;
             return;
@@ -3077,12 +3033,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }) {
             return Err("a call the text leaves out or reads in place");
         }
-        // INVARIANT: the arguments a call shows are compared with what the
-        // machine passes there, and the result a return shows with what it
-        // hands back; what the text leaves out is compared with nothing, so
-        // a block that drops a stack argument its callee reads, or returns
-        // nothing where the callers read a result, makes no claim of
-        // agreement.
         if effects
             .iter()
             .any(|e| matches!(&e.kind, EffectKind::Call(c) if c.short))
@@ -3109,9 +3059,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut seen = BTreeSet::new();
         let mut why = "no state compared";
         let mut compared = 0;
-        // INVARIANT: a state the branch into the block rules out is drawn
-        // again, a few times, so a block entered under a narrow condition
-        // is still tried.
         let mut tried = 0;
         for trial in 0..TRIALS + RULED_OUT_RETRIES {
             if tried == TRIALS {
@@ -3323,10 +3270,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             }
             text.vars.insert(k, v);
         }
-        // INVARIANT: a copy of a variable takes the variable's width only
-        // when nothing was pending in it, so the width is the variable's
-        // own text value's, which stays until the copy is written out,
-        // whatever the variable holds pending since.
         for (k, e) in &inn.vals {
             if let (
                 Expr::Var(src @ (Key::Reg(_) | Key::A64(_) | Key::Tmp(_) | Key::Param(_))),
@@ -3342,13 +3285,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         {
             text.vars.insert(k, c & mask);
         }
-        // INVARIANT: a block entered from one branch's one side only runs
-        // where the text's condition went that way. The lifter reads a bit
-        // scan as defined (`bsr; xor 63` as `lzcnt`), as code scans only
-        // what is not zero, while a scan of zero leaves its destination as
-        // it was; so a block that scans is tried only from states its branch
-        // lets in, moved across where the condition compares a variable
-        // with a constant, and not tried where it cannot be.
         if L::scans(code)
             && let Some((c, taken)) = self.guard(b)
             && text.cond(c) == Some(!taken)
@@ -3366,16 +3302,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             };
             emu.set_register(name, v & mask);
         }
-        // INVARIANT: an xmm register's variable is seeded the way a general
-        // register's is: every one drawn first, into the low lane, the rest
-        // zero, so a register-to-register `movss` that merges into the
-        // destination keeps the same bits on both sides; a block that reads
-        // whole lanes (a packed operation, a 128-bit move) draws the full
-        // 128, which its packed statements carry. Then a pending value the
-        // block's IN environment holds is evaluated over that drawn state
-        // into the machine alone, the relation the block runs under: the
-        // text's own lane keeps the drawn entry value, which the pending
-        // expressions, built over entry variables, still read.
         let whole = L::whole_lanes(code);
         for (n, &k) in self.vectors.iter().enumerate() {
             let lo = text.drawn(k);
@@ -3435,9 +3361,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
         let written: FxHashSet<u64> = run.history.iter().map(|x| x.addr).collect();
         text.rsp = emu.register(<L::Rig<'p> as Bench>::SP);
-        // INVARIANT: a register's save and a push that only makes room store
-        // no value of the text's: what they leave in the frame is no
-        // variable's, and a statement reading it reads a variable never set.
         let defs = w.defs.get(b);
         for &x in &written {
             let off = x.wrapping_sub(sp0).cast_signed();
@@ -3480,9 +3403,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         for e in &self.effects[b] {
             self.replay_effect(&mut t, start, end, block, e, out);
         }
-        // A condition the statements leave inside a pending value was set
-        // by an instruction of an earlier block, which this block's flag
-        // setters say nothing about.
         t.text.flag_setters = (Vec::new(), Vec::new());
         let last = end.last().map_or(start, |i| L::start(&i));
         t.called |= end
@@ -3622,9 +3542,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         );
                     }
                 }
-                // INVARIANT: a float result is the low lane of `xmm0`, at the
-                // width its expression computes, the whole low quadword where
-                // it names none; one left on the x87 stack is not compared.
                 if let Some(v) = v
                     && self.w.ret_xmm
                 {
@@ -3673,8 +3590,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 let Some(m) = L::target_value(&t.emu, &jmp, self.width) else {
                     return;
                 };
-                // INVARIANT: the text switches on what the structurer renders:
-                // the index without its sign extension.
                 let shown = match idx {
                     Expr::Sext(e, _) => e.as_ref(),
                     other => other,
@@ -3742,9 +3657,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         out: &mut Replayed,
     ) {
         let mask = low(self.width);
-        // INVARIANT: in 32-bit code an address past the low four gigabytes
-        // is one the emulator reached without the wrap the processor makes,
-        // so what it wrote there has no place to compare.
         if t.text.lost_all || t.written.iter().any(|x| *x > mask) {
             *out.unreadable.entry(Claim::Memory).or_default() += 1;
             return;
@@ -3919,12 +3831,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             let narrow = sin.narrow.get(&k).copied();
             let shown = held.map_or_else(|| "(its own variable)".to_owned(), |e| format!("{e:?}"));
             let (text, at) = t.text.held_value(sin, k, at);
-            // INVARIANT: an integer the text holds by its whole lane (a
-            // packed statement's value, or the register's own state after
-            // one) is compared whole, both halves: the machine's register
-            // and the text's lane were seeded and written together. A lane
-            // the whole-lane state does not hold falls back to the low one
-            // the scalar model keeps.
             if float.is_none() {
                 let whole = match held {
                     Some(e) => t.text.vec(e),
@@ -3977,11 +3883,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     continue;
                 }
             }
-            // INVARIANT: a float's lane is the width its expression computes
-            // at, an integer's the whole low lane the text's variable names,
-            // narrowed where the successor reads it narrower; a lane above
-            // the low 64 bits is a packed read the scalar model stays out
-            // of, compared nowhere.
             let bits = float.or(narrow).unwrap_or(64).min(64);
             #[expect(
                 clippy::cast_possible_truncation,
@@ -4005,8 +3906,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         if t.called {
             return;
         }
-        // INVARIANT: a store the text cannot place may have landed on any
-        // slot, so no slot's bytes can be held against the text's.
         if t.text.lost_all {
             *out.unreadable.entry(Claim::Slot).or_default() += 1;
             return;
@@ -4023,9 +3922,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             if !w.live.is_live(s, *k) {
                 continue;
             }
-            // INVARIANT: a wider value pending is compared a word at a
-            // time, a whole vector lane word by word where the replay
-            // knows it.
             if bits > 64 {
                 let Some(w) = wide_value(&t.text, e, n) else {
                     continue;
@@ -4069,22 +3965,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 || format!("{e:?}"),
             );
         }
-        // INVARIANT: a byte only the machine wrote is the text's claim only
-        // where the lifter stores a value the successor still reads: a
-        // register's save and a push that only makes room store none, and a
-        // store the successor overwrites first is dead whatever wider slot
-        // shares its bytes. A byte below the successor's stack pointer is no
-        // slot's any more.
         let defs = w.defs.get(t.b);
         let defined = |off: i64| {
             defs.is_some_and(|d| covering(d, off).any(|d| w.live.is_live(s, Key::Slot(d))))
         };
-        // INVARIANT: a store pending at the block's start that the edge
-        // drops is dead where the successor's statements overwrite its
-        // bytes before anything may read them, even where a wider slot the
-        // successor reads later shares them, and where no read from the
-        // successor on reaches its slot, a read of any of its bytes making
-        // the slot live.
         let next = self.effects.get(s).map_or(&[][..], Vec::as_slice);
         let inn = &w.ins[t.b];
         let sp0 = t.text.sp0;
@@ -4936,7 +4820,6 @@ mod tests {
         ];
         let p = Program::raw_x64(&code);
         agrees(&p, 0x1000);
-        // the zeros written as a word: the join reads the half left out
         let r = replayed_with(&p, 0x1000, 1, |e| {
             if e.at == 0x100e
                 && let EffectKind::Assign(_, _, bits @ 128) = &mut e.kind
@@ -4967,8 +4850,6 @@ mod tests {
         ];
         let p = Program::raw_x64(&code);
         let a = Analysis::compute(&p);
-        // INVARIANT: the states reaching `a1 == 1` are rare; sixty-four
-        // seeds draw one.
         for seed in 1..=64 {
             let r = replay_function(&p, &a, 0x1000, seed);
             assert_eq!(claims(&r), [], "seed {seed}: {}", replay_tsv(&r));
@@ -5051,8 +4932,6 @@ mod tests {
             let r = replay_function(&p, &a, 0x1000, seed);
             assert_eq!(claims(&r), [], "seed {seed}: {}", replay_tsv(&r));
             assert_eq!(r.checked, 1, "seed {seed}: {}", replay_tsv(&r));
-            // A state whose drawn pointer sits at the top of the address
-            // space stores nowhere comparable, so the count is of states.
             assert!(
                 r.compared.get(&Claim::Memory).copied().unwrap_or(0) > 0,
                 "seed {seed}: {}",
@@ -5105,8 +4984,6 @@ mod tests {
             let r = replay_function(&p, &a, 0x1000, seed);
             assert_eq!(claims(&r), [], "seed {seed}: {}", replay_tsv(&r));
             assert_eq!(r.checked, 3, "seed {seed}: {}", replay_tsv(&r));
-            // A state whose drawn pointer sits at the top of the address
-            // space compares past it, counted as unreadable.
             assert!(
                 r.compared.get(&Claim::Branch).copied().unwrap_or(0) > 0,
                 "seed {seed}: {}",
@@ -5485,8 +5362,8 @@ mod tests {
             0x48, 0x81, 0xc4, 0x98, 0x00, 0x00, 0x00, // ASM: add rsp, 0x98
             0xc3, // ASM: ret
             0xcc, 0xcc, 0xcc, // ASM: int3 (x3)
-            0xe3, 0xff, 0xff, 0xff, // DATA: case 0 at -0x1d
-            0xf0, 0xff, 0xff, 0xff, // DATA: case 1 at -0x10
+            0xe3, 0xff, 0xff, 0xff,
+            0xf0, 0xff, 0xff, 0xff,
         ];
         let p = Program::raw_x64(&code);
         let a = Analysis::compute(&p);
@@ -5512,8 +5389,8 @@ mod tests {
             0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: mov eax, 2
             0xc3, // ASM: ret
             0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 (x4)
-            0xf0, 0xff, 0xff, 0xff, // DATA: case 0 at -0x10
-            0xf6, 0xff, 0xff, 0xff, // DATA: case 1 at -0xa
+            0xf0, 0xff, 0xff, 0xff,
+            0xf6, 0xff, 0xff, 0xff,
         ];
         let p = Program::raw_x64(&code);
         let a = Analysis::compute(&p);

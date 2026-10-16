@@ -1246,12 +1246,6 @@ pub(super) fn merge_chain<L: Lifter>(
     let mut fuel = 8;
     while fuel > 0 {
         fuel -= 1;
-        // INVARIANT: a call a merged term takes in runs in the machine
-        // between the earlier terms' tests and this one — C's `&&`/`||`
-        // short-circuit evaluation matches that order, so the merge is
-        // path-exact. (The vars-level `short_circuits_before` guard
-        // handles the unsound case: a text-level fold moving a call
-        // from its own statement into a later operand.)
         if let Some(d) = pure_condition(ctx, st, header, f) {
             let consumed = f;
             let decides = d.test.unwrap_or(consumed);
@@ -1710,9 +1704,6 @@ pub(super) fn base_of<L: Lifter>(
     };
     let allowed =
         |s: usize| !headers.contains(&s) && Some(s) != stop_at && !st.outside(s) && !st.emitted[s];
-    // PERF: one scratch and one kept bitmap for the whole shed loop, each
-    // cleared through the member list of what it last held instead of a
-    // fresh vec![false; n] per round.
     let mut reached = vec![false; n];
     let mut kept = vec![false; n];
     let mut members: Vec<usize> = Vec::new();
@@ -1757,8 +1748,6 @@ pub(super) fn base_of<L: Lifter>(
         reach(&|s| kept[s], &mut reached, &mut members, &mut work);
     }
     members.sort_unstable();
-    // INVARIANT: reached is false for every non-member, so !reached || inside
-    // is vacuously true there; the members alone decide the boolean.
     let closed = members.iter().all(|&b| inside(&reached, b));
     Base { members, closed }
 }

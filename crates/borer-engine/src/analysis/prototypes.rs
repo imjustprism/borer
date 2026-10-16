@@ -78,8 +78,6 @@ pub fn msvc_prototype(name: &str) -> Option<Prototype> {
         return None;
     }
     let parsed = msvc_demangler::parse(name).ok()?;
-    // INVARIANT: a 64-bit method's `this` is a `__ptr64` and its convention
-    // `__cdecl`, yet it still takes `this` first, in the first register.
     let (conv, params, ret, this) = match parsed.symbol_type {
         Type::MemberFunction(class, conv, params, this, ret) => {
             let own = !class.contains(FuncClass::STATIC);

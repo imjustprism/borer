@@ -1066,8 +1066,6 @@ impl Cond {
         let (l, r, bits) = match &self.flags {
             Flags::Cmp(Expr::Const(l), Expr::Const(r), bits) => (*l, *r, *bits),
             Flags::Float(Expr::Const(l), Expr::Const(r), bits) => {
-                // INVARIANT: the constants hold the values' bits, widened
-                // here to the doubles the comparison computes on.
                 let of = |v: u64| {
                     if *bits == 32 {
                         f64::from(f32::from_bits(lo32(v)))
@@ -1111,9 +1109,6 @@ impl Cond {
                 let (ls, rs) = (sext(lu, *bits).cast_signed(), sext(ru, *bits).cast_signed());
                 let ss = sext(sum, *bits).cast_signed();
                 let signed_ovf = (ls < 0) == (rs < 0) && (ss < 0) != (ls < 0);
-                // INVARIANT: `jl` reads SF != OF, the sign of the sum taken
-                // without wrapping, which overflow makes disagree with the
-                // sign of the machine sum.
                 let true_sum = i128::from(ls) + i128::from(rs);
                 return match self.cc.0 {
                     C::e => Some(sum == 0),
@@ -1124,9 +1119,6 @@ impl Cond {
                     C::ge => Some(true_sum >= 0),
                     C::le => Some(true_sum <= 0),
                     C::g => Some(true_sum > 0),
-                    // A 64-bit carry is the add overflowing `u64` itself, which
-                    // `lu + ru` cannot represent: it panics in debug and wraps
-                    // to a wrong answer in release.
                     C::b => Some(lu.checked_add(ru).is_none_or(|s| s > m)),
                     C::ae => Some(lu.checked_add(ru).is_some_and(|s| s <= m)),
                     C::o => Some(signed_ovf),
@@ -1167,10 +1159,6 @@ impl Cond {
             C::ge => ls >= rs,
             C::le => ls <= rs,
             C::g => ls > rs,
-            // INVARIANT: the sign flag is the top bit of the difference at the
-            // compare's width, which overflow can make disagree with the sign
-            // of the wide difference (`0x7fffffff - -1` at 32 bits is
-            // negative).
             C::s | C::ns => {
                 let top = lu.wrapping_sub(ru) & m & (1u64 << (bits.clamp(1, 64) - 1)) != 0;
                 (self.cc.0 == C::s) == top
@@ -1180,7 +1168,6 @@ impl Cond {
     }
 }
 
-// ------------------------------------------------------------------ folding --
 
 /// Returns the C signed integer type of `bits` bits.
 ///
@@ -1630,9 +1617,6 @@ fn wide_high(op: Op, l: &Expr, r: &Expr) -> Option<Expr> {
     })?;
     let high = |hi: Op| fold(hi, x.clone(), Expr::Const(c), 32);
     let rest = Expr::Const(k - 32);
-    // INVARIANT: the signed high word is shifted as it stands: a shift by
-    // 31 read as the sign of the dividend is that sign at 32 bits only,
-    // and this one is at 64.
     match (op, signed) {
         (Op::Shr, true) if k == 32 => Some(high(Op::SMulHi(32))),
         (Op::Shr, true) => Some(Expr::Bin(
@@ -1719,9 +1703,6 @@ fn low_word(e: &Expr) -> &Expr {
 fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
     match op {
         Op::Sar => {
-            // A 32-bit `sar` takes its operand sign-extended from the lane,
-            // so the idiom is looked for inside that extension too, where
-            // the sum is a 32-bit one whatever the shift's width.
             let k = const_of(r)?;
             match l {
                 Expr::Sext(inner, 32) => signed_power_quotient(inner, k, 32),
@@ -1735,8 +1716,6 @@ fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
                 (None, Some(m)) => (m, l),
                 _ => return None,
             };
-            // INVARIANT: a power of two's high half is an overflow test
-            // (`mul_sat`), never a division a compiler would multiply for.
             let d = magic_divisor(w, m, 0).filter(|d| !d.is_power_of_two())?;
             Some(Expr::Bin(
                 Op::Div,
@@ -1784,9 +1763,6 @@ fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
                 let Some((w, m, x, s, negative)) = signed_quotient_of(q) else {
                     continue;
                 };
-                // A 32-bit copy of the quotient masks it to its lane before
-                // its sign bit is shifted down, and a 64-bit shift reads a
-                // 32-bit lane's sign through its extension.
                 let top = u64::from(w) - 1;
                 let sign_of = match (const_of(amount), sign_of.as_ref()) {
                     (Some(a), Expr::Bin(Op::And, v, k))
@@ -1818,12 +1794,7 @@ fn division_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         Op::Sub | Op::Add => {
             let negated = op == Op::Add;
             let lane = mask_bits(bits);
-            // INVARIANT: at 32 bits or fewer a value and its cut to the low
-            // word agree in every bit read, so `x - (sext(x) / d) * d` is
-            // the remainder `sdiv; msub` leaves.
             let same = |a: &Expr, b: &Expr| a == b || (bits <= 32 && low_word(a) == low_word(b));
-            // INVARIANT: a difference is the remainder only as `x - q * d`;
-            // `q * d - x` is its negation.
             let orders: &[(&Expr, &Expr)] = if negated {
                 &[(l, r), (r, l)]
             } else {
@@ -1956,8 +1927,6 @@ fn leading_zeros_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
     let top = Expr::Const(u64::from(bits).saturating_sub(1));
     let count = |x: &Expr| Expr::Un(UnOp::Lzcnt, Box::new(x.clone()));
     match op {
-        // The exclusive or is the subtraction, since the scan's result fits
-        // in the same bits the constant covers.
         Op::Xor => {
             for (a, b) in [(l, r), (r, l)] {
                 if *b == top
@@ -2033,8 +2002,6 @@ fn mba_idiom(op: Op, l: &Expr, r: &Expr) -> Option<Expr> {
     match op {
         Op::Add => {
             for (first, second) in [(l, r), (r, l)] {
-                // The xor is the sum without carries and the and is exactly
-                // the carries, so adding the carries in twice completes it.
                 if let Some(x) = pair(first, Op::Xor)
                     && let Some(d) = doubled(second)
                     && let Some(y) = pair(d, Op::And)
@@ -2042,16 +2009,12 @@ fn mba_idiom(op: Op, l: &Expr, r: &Expr) -> Option<Expr> {
                 {
                     return Some(sum(x.0, x.1));
                 }
-                // Every bit is in exactly one of the and and the or, except
-                // the bits in both operands, which are in both.
                 if let Some(x) = pair(first, Op::And)
                     && let Some(y) = pair(second, Op::Or)
                     && same_pair(x, y)
                 {
                     return Some(sum(x.0, x.1));
                 }
-                // The or holds each bit once and the xor holds the ones in
-                // only one operand, so their difference is the shared bits.
                 if let Some(x) = pair(first, Op::Xor)
                     && let Some(y) = pair(second, Op::And)
                     && same_pair(x, y)
@@ -2062,15 +2025,12 @@ fn mba_idiom(op: Op, l: &Expr, r: &Expr) -> Option<Expr> {
             None
         }
         Op::Sub => {
-            // Removing the shared bits from the union leaves the bits in
-            // exactly one operand.
             if let Some(x) = pair(l, Op::Or)
                 && let Some(y) = pair(r, Op::And)
                 && same_pair(x, y)
             {
                 return Some(bits(Op::Xor, x.0, x.1));
             }
-            // And removing the bits in exactly one leaves the shared ones.
             if let Some(x) = pair(l, Op::Or)
                 && let Some(y) = pair(r, Op::Xor)
                 && same_pair(x, y)
@@ -2268,11 +2228,6 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         return None;
     }
     let m = mask_bits(bits);
-    // INVARIANT: the classes a linear MBA is decided by - both variables
-    // zero, one all-ones with the other zero, both all-ones - then four
-    // mixed pairs a shape this misread as linear differs on: alternating
-    // bits, and a sign split, which catches the shifts and sign extracts
-    // a class probe reads as selectors.
     let sign = m & !m.wrapping_shr(1);
     let low = m >> 1;
     let probes: [(u64, u64); 12] = [
@@ -2294,8 +2249,6 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         .iter()
         .map(|&p| at(&whole, p))
         .collect::<Option<_>>()?;
-    // The all-ones mask is odd, so it divides: each selector a
-    // coefficient multiplies evaluates to the mask itself.
     let inv = inverse_of_ones(bits);
     let k = values[0];
     let c1 = values[1].wrapping_sub(k).wrapping_mul(inv) & m;
@@ -2310,10 +2263,6 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
     let neg = m;
     let neg_two = m.wrapping_sub(1);
     let y = || y.clone();
-    // INVARIANT: the coefficients read in the basis `1, x, y, x & y`, so
-    // `x` is `(1, 0, 0)`, a sum keeps the shared bits out of the third
-    // coefficient at `(1, 1, 0)`, and the or, an x plus a y less the
-    // shared bits, is `(1, 1, -1)`.
     let plain = match (c1, c2, c3) {
         (0, 0, 0) => Some(Expr::Const(k)),
         (a, 0, 0) if a == one => Some(plus(x.clone(), k, bits)),
@@ -2367,9 +2316,6 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
     if nodes(&plain) >= nodes(&whole) {
         return None;
     }
-    // INVARIANT: the plain form answers the same as the MBA on every
-    // probe - the four classes a linear MBA is decided by, and two mixed
-    // pairs a non-linear shape differs on.
     probes
         .iter()
         .enumerate()
@@ -2554,9 +2500,6 @@ pub(super) fn fold(op: Op, l: Expr, r: Expr, bits: u8) -> Expr {
             return Expr::Const(m);
         }
         (Op::And, _, Expr::Const(c)) => return mask(l, *c),
-        // The constant is signed at the operation's width: a 32-bit
-        // `add esp, 0xfffffd30` moves the pointer down by 0x2d0, not up by
-        // four gigabytes.
         (Op::Add, Expr::Sp(k), Expr::Const(c)) | (Op::Add, Expr::Const(c), Expr::Sp(k)) => {
             return Expr::Sp(k.wrapping_add(sext(*c, bits).cast_signed()));
         }
@@ -2697,21 +2640,12 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
             _ => u64::MAX,
         },
         Expr::Ternary(_, a, b) => known_bits(a) | known_bits(b),
-        // INVARIANT: the unsigned high half of a product at a width, and a
-        // rotate within a width, are no wider than that width; a byte swap
-        // works at its operand's type and is no wider either.
         Expr::Bin(Op::MulHi(w) | Op::Rol(w) | Op::Ror(w), ..) => mask_bits(*w),
         Expr::Un(UnOp::Bswap, x) => match x.as_ref() {
             Expr::Cast(_, ty) | Expr::Deref(_, ty) if ty.bits() < 64 => mask_bits(ty.bits()),
             _ => u64::MAX,
         },
-        // INVARIANT: only 32-bit code keys a register by its 32-bit name
-        // (64-bit code keys every one at full width), and there it holds no
-        // more than 32 bits.
         Expr::Var(Key::Reg(r)) if r.size() == 4 => 0xffff_ffff,
-        // INVARIANT: a global is read at the width its key names and is
-        // declared `uintN_t` at it, so `mov ecx, [tls_index]` leaves `rcx`
-        // no wider than 32 bits and an index read from it needs no mask.
         Expr::Var(Key::Global(_, bits)) => mask_bits(*bits),
         Expr::Var(_)
         | Expr::Str(_)
@@ -2898,9 +2832,6 @@ pub(super) fn unary(op: UnOp, e: Expr, bits: u8) -> Expr {
             UnOp::Tzcnt | UnOp::Bsf => {
                 let masked = c & m;
                 match op {
-                    // INVARIANT: a scan of zero leaves its destination as it
-                    // was, no value the expression can name; `tzcnt` of zero
-                    // is the width.
                     UnOp::Bsf if masked == 0 => return Expr::Un(op, Box::new(e)),
                     _ if masked == 0 => u64::from(bits),
                     _ => u64::from(masked.trailing_zeros()),
@@ -3029,7 +2960,6 @@ mod tests {
         let x = Expr::Var(Key::Reg(crate::isa::x86::Register::RAX));
         let scan = Expr::Un(super::UnOp::Bsr, Box::new(x.clone()));
         let want = Expr::Un(super::UnOp::Lzcnt, Box::new(x));
-        // bsr(x) ^ 63 and 63 ^ bsr(x), at 64 bits
         assert_eq!(
             super::fold(Op::Xor, scan.clone(), Expr::Const(63), 64),
             want
@@ -3038,19 +2968,15 @@ mod tests {
             super::fold(Op::Xor, Expr::Const(63), scan.clone(), 64),
             want
         );
-        // 63 - bsr(x)
         assert_eq!(
             super::fold(Op::Sub, Expr::Const(63), scan.clone(), 64),
             want
         );
-        // the 32-bit form uses 31
         assert_eq!(
             super::fold(Op::Xor, scan.clone(), Expr::Const(31), 32),
             want
         );
-        // a constant that is not the width is left alone
         assert_ne!(super::fold(Op::Xor, scan.clone(), Expr::Const(7), 64), want);
-        // and so is the wrong width for the constant
         assert_ne!(super::fold(Op::Xor, scan, Expr::Const(31), 64), want);
     }
 
@@ -3121,24 +3047,20 @@ mod tests {
         let bin =
             |o: Op, a: &Expr, b: &Expr| Expr::Bin(o, Box::new(a.clone()), Box::new(b.clone()));
         let plain = bin(Op::Add, &x, &y);
-        // (x ^ y) + 2 * (x & y)
         let doubled = bin(Op::Mul, &bin(Op::And, &x, &y), &Expr::Const(2));
         assert_eq!(
             super::fold(Op::Add, bin(Op::Xor, &x, &y), doubled, 64),
             plain
         );
-        // (x ^ y) + ((x & y) << 1), the same form written as a shift
         let shifted = bin(Op::Shl, &bin(Op::And, &x, &y), &Expr::Const(1));
         assert_eq!(
             super::fold(Op::Add, bin(Op::Xor, &x, &y), shifted, 64),
             plain
         );
-        // (x | y) - (x & y) is the exclusive or
         assert_eq!(
             super::fold(Op::Sub, bin(Op::Or, &x, &y), bin(Op::And, &x, &y), 64),
             bin(Op::Xor, &x, &y)
         );
-        // and the operands may arrive the other way round
         let doubled = bin(Op::Mul, &Expr::Const(2), &bin(Op::And, &y, &x));
         assert_eq!(
             super::fold(Op::Add, doubled, bin(Op::Xor, &x, &y), 64),
@@ -5040,8 +4962,6 @@ mod fold_tests {
         ] {
             t.fold(name, (op, l, r), w, xs, ys);
         }
-        // The general two-variable collapse: every linear MBA over the
-        // Boolean lattice, checked against the same ground truth.
         for (name, op, l, r) in [
             (
                 "(x ^ y) + ((x & y) << 1) - (x & y)",
@@ -5178,8 +5098,6 @@ mod fold_tests {
                 one,
             );
         }
-        // A tree one pad under the node cap still collapses; the cap
-        // itself is pinned in mba_refusals_stay_unfolded.
         let pad = b(Op::Xor, &b(Op::And, &X, &Y), &b(Op::And, &X, &Y));
         let mut capped = b(
             Op::Add,
@@ -5815,10 +5733,6 @@ mod fold_tests {
             ),
             32,
         );
-        // The borrow a negation carries between bit positions is not on
-        // the lattice: this reads as the constant all-ones on every probe
-        // the collapse measures, and still is not one. Found by
-        // rewrites_hold_on_seeded_trees_with_sign_extensions' sweep.
         let borrows = b(
             Op::And,
             &u(Y.clone()),

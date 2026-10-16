@@ -198,9 +198,7 @@ fn blob() -> Vec<u8> {
     for (k, f) in forged.iter().enumerate() {
         put(&mut b, FORGED_AT + 0x40 * k, f);
     }
-    // e_lfanew of the forged MZ leads to bytes that are not `PE\0\0`.
     put(&mut b, FORGED_AT + 0x3c, &0x10u32.to_le_bytes());
-    // A gzip header whose deflate block has the reserved type 3.
     put(&mut b, FORGED_AT + 0x300, &gzip_header(b"bad", 3));
     b
 }

@@ -41,7 +41,6 @@ fn createfilew_image() -> Program {
         0xc3,
     ];
     bytes[0x1000..0x1000 + code.len()].copy_from_slice(code);
-    // The wide path "C:\t", UTF-16LE, with its terminator.
     let wide: Vec<u8> = "C:\\t".encode_utf16().flat_map(u16::to_le_bytes).collect();
     bytes[0x2000..0x2000 + wide.len()].copy_from_slice(&wide);
     let mut p = Program::raw(
@@ -192,7 +191,7 @@ fn an_arm64_syscall_is_named_with_its_path() {
     for (k, b) in b"/tmp/x\0".iter().enumerate() {
         m.poke(PATH_AT + u64::try_from(k).expect("a small index"), *b);
     }
-    assert!(m.set_register("x1", PATH_AT)); // openat's path is its second argument.
+    assert!(m.set_register("x1", PATH_AT));
     let run = m.run(BASE);
     assert_eq!(run.stop, Stop::Returned, "{run:?}");
     assert_eq!(m.api_names(), ["openat"]);

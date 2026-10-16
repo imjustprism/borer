@@ -7,7 +7,6 @@ use crate::isa::a64::Reg;
 /// The highest general register a call may change: `x0` to `x18` are the
 /// argument, result and scratch registers, `x18` among them since a
 /// platform that reserves it promises the caller nothing either.
-// SPEC: Arm IHI 0055 (AAPCS64) 6.1.1, general-purpose registers.
 const SCRATCH_X: u8 = 18;
 
 /// The link register, which a call overwrites with its return address.
@@ -15,7 +14,6 @@ const LINK: u8 = 30;
 
 /// The lowest and highest `v` register whose low 64 bits a function
 /// preserves.
-// SPEC: Arm IHI 0055 (AAPCS64) 6.1.2, SIMD and floating-point registers.
 const SAVED_V: (u8, u8) = (8, 15);
 
 /// The highest `v` register number.

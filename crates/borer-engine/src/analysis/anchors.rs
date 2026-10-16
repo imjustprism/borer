@@ -461,17 +461,17 @@ mod tests {
     /// When a parse disagrees with its expectation.
     #[test]
     fn manifests_parse_and_refuse_garbage() {
-        let text = "# pins\nfield Messaging::UnlockMap MapId 0x20\nvconst 3 Commands::UnlockMapCommand 0x60\n\nfunction Game::ClientGameWorld::UpdateExitState 0x1da5b4\nencode Commands::StillAliveCommand u32@+0x20\ndecode Commands::UnlockMapCommand string@+0x20=~MapId u8@+0xe0\n";
+        let text = "# pins\nfield Msg::Open Id 0x20\nvconst 3 Cmd::Open 0x60\n\nfunction App::World::Update 0x1da5b4\nencode Cmd::Ping u32@+0x20\ndecode Cmd::Open string@+0x20=~Id u8@+0xe0\n";
         let anchors = parse_manifest(text).expect("parses");
         assert_eq!(anchors.len(), 5);
         assert_eq!(anchors[0].kind, AnchorKind::Field);
         assert_eq!(anchors[0].expected, 0x20);
         assert_eq!(anchors[1].member, "3");
-        assert_eq!(anchors[2].subject, "Game::ClientGameWorld::UpdateExitState");
+        assert_eq!(anchors[2].subject, "App::World::Update");
         assert_eq!(anchors[3].kind, AnchorKind::Encode);
         assert_eq!(anchors[3].layout, "u32@+0x20");
-        assert_eq!(anchors[4].layout, "string@+0x20=~MapId u8@+0xe0");
-        let err = parse_manifest("encode Commands::X\n").expect_err("refused");
+        assert_eq!(anchors[4].layout, "string@+0x20=~Id u8@+0xe0");
+        let err = parse_manifest("encode Cmd::X\n").expect_err("refused");
         assert!(err.contains("line 1"), "{err}");
         let err = parse_manifest("field only two\n").expect_err("refused");
         assert!(err.starts_with("line 1: not an anchor"), "{err}");

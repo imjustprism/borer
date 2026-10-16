@@ -32,7 +32,6 @@ use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg, Width};
 use crate::program::Program;
 
 /// The general registers an argument travels in, `x0` to `x7`.
-// SPEC: Arm IHI 0055 (AAPCS64) 6.8.2, parameter passing rules.
 pub(in crate::analysis::decompile) const INT_ARGS: u8 = 8;
 /// The `v` registers a floating-point argument travels in, `v0` to `v7`.
 pub(in crate::analysis::decompile) const FLOAT_ARGS: u8 = 8;

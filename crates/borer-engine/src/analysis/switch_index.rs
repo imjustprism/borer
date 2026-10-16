@@ -313,8 +313,6 @@ impl Trace {
         } else {
             None
         };
-        // INVARIANT: an immediate is sign-extended to the operand's width,
-        // whatever width iced hands it back at.
         let imm = (i.op_count() > 1 && is_imm(i.op1_kind())).then(|| {
             let bits = 8 * i.op0_register().size().max(i.memory_size().size()).max(1);
             let v = i.immediate(1);
@@ -341,8 +339,6 @@ impl Trace {
                 }
                 return;
             }
-            // SPEC: MSVC widens the checked index in place before the load
-            // (`cdqe`); a value a check left non-negative is unchanged.
             (
                 Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Cdqe | Mnemonic::Cwde | Mnemonic::Cbw,
                 _,
@@ -396,8 +392,6 @@ impl Trace {
                         Register::None | Register::RIP | Register::EIP
                     ) =>
             {
-                // INVARIANT: a 32-bit address's displacement comes back
-                // zero-extended.
                 let d = i.memory_displacement64();
                 let d = if d > u64::from(u32::MAX) {
                     d.cast_signed()

@@ -106,7 +106,7 @@ pub struct BasicBlock {
 ///
 /// A name read out of the binary and one worked out from the code are not
 /// the same kind of fact, and every listing says which it is, so an agent can
-/// treat `Game::ClientGameWorld::UpdateExitState` (a signature literal the
+/// treat `Ns::Type::Method` (a signature literal the
 /// function itself carries) differently from `class_141212308::vfunc_5_47`
 /// (a slot of a table whose class is itself a guess).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -1141,13 +1141,12 @@ pub struct ClassFacts {
     /// what identifies the class on the wire.
     pub ids: BTreeMap<String, u32>,
     /// A bare class name a registration spelled to the qualified name the
-    /// rest of the program knows the class by (`ActorCommand` to
-    /// `Commands::ActorCommand`), for the names [`ClassFacts::ids`]
+    /// rest of the program knows the class by (`Actor` to
+    /// `Cmd::Actor`), for the names [`ClassFacts::ids`]
     /// was rewritten with.
     pub registered_as: BTreeMap<String, String>,
     /// Each class's type descriptor, by address: the static object its
-    /// registration names and its type accessor hands out (Nebula's
-    /// `Class::RTTI`).
+    /// registration names and its type accessor hands out (`Class::RTTI`).
     pub descriptors: BTreeMap<u64, String>,
 }
 
@@ -1244,10 +1243,6 @@ impl Analysis {
                 .extend(crate::crypto::crc32_slices(program, table));
         }
         phases.mark("analysis crypto");
-        // PERF: each site's own `va` rides along so sorting needs no lookup
-        // back into `xrefs` per element; at equal `va`s the `(target, i)`
-        // tail of the key is the order the walk inserted them in, which the
-        // stable sort the lookup version used produced.
         let mut by_function: BTreeMap<u64, Vec<(u64, u64, usize)>> = BTreeMap::new();
         for (&target, sites) in &analysis.xrefs {
             for (i, site) in sites.iter().enumerate() {

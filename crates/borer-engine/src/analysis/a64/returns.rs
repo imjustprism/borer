@@ -158,9 +158,6 @@ fn classify(program: &Program, analysis: &Analysis, site: u64, from: Option<u64>
                 break Site::Unknown;
             };
             n += 1;
-            // INVARIANT: a vector form names its registers in fields the
-            // decoder leaves unmodeled, read or written alike, so it says
-            // nothing certain of a `v` register.
             if matches!(r, Reg::V(_)) && i.operands.contains(&a64::Opnd::Other) {
                 break Site::Unknown;
             }
@@ -380,10 +377,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 .map(|bits| if bits <= 32 { 32 } else { 64 })
         })
         .collect();
-    // INVARIANT: `x0` is the first argument of the next call too, so a
-    // caller writes or passes it within a few instructions of a call
-    // whose result it drops; a path the scan lost is no evidence either
-    // way, and a function only such paths follow is left unknown.
     let mut verdicts: Vec<Option<bool>> = facts
         .iter()
         .zip(&float)

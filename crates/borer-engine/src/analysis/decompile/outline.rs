@@ -259,7 +259,6 @@ pub(super) fn fold_elided_blocks(lines: &mut Vec<String>) {
             i += 1;
             continue;
         }
-        // The closing line has to belong to this block, not to an outer one.
         if indent_of(&lines[i + 2]) != indent_of(&open) {
             i += 1;
             continue;

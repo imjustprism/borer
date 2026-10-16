@@ -228,11 +228,6 @@ fn compiled_match(rest: &[u8], pattern: &[Option<u8>], chunks: &[(u64, u64)]) ->
         if mask == &0 {
             continue;
         }
-        // INVARIANT: the mask holds no lane past the pattern's length, so
-        // a whole-word compare of a short final chunk is exact: the
-        // lanes it reads past the pattern are masked away. Only a rest
-        // too short to load a whole word - which the caller's bounds
-        // allow only inside the final chunk - compares lane by lane.
         if let Some(word) = rest.get(base..).and_then(|r| r.first_chunk::<8>()) {
             if (u64::from_le_bytes(*word) ^ expected) & mask != 0 {
                 return false;
@@ -253,7 +248,7 @@ fn compiled_match(rest: &[u8], pattern: &[Option<u8>], chunks: &[(u64, u64)]) ->
 /// Matching is case-insensitive for ASCII letters, like the `strings`
 /// filter, so a lower-case query finds a capitalized identifier. Each match
 /// is sought both as the needle's UTF-8 bytes and as its UTF-16LE code
-/// units, because Qt and Nebula hold UI and locale keys as wide strings that
+/// units, because some programs store UI and locale keys as wide strings that
 /// a byte-only scan never sees. A needle outside ASCII is encoded as UTF-16
 /// itself: spreading its UTF-8 bytes over zero high halves spelled no wide
 /// string at all. Hits stay in section-then-address order.
@@ -275,7 +270,6 @@ pub fn find_text(program: &Program, needle: &str, offset: usize) -> Hits {
         return out;
     };
     for span in spans(program, reach) {
-        // Collect both encodings' offsets, then report them in address order.
         let mut here: Vec<u64> = Vec::new();
         ascii_hits(span.data, narrow, &mut here);
         wide_hits(span.data, &wide, &mut here);

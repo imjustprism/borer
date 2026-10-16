@@ -87,9 +87,6 @@ impl StringRow {
     pub(crate) fn full_text<'a>(&'a self, bytes: &'a [u8]) -> std::borrow::Cow<'a, str> {
         match self {
             StringRow::Span(s) => match s.encoding {
-                // INVARIANT: an ASCII run's bytes are printable ASCII,
-                // which is UTF-8 as it stands, so the whole text borrows
-                // its bytes with no copy at all.
                 borer_engine::strings::Encoding::Ascii => {
                     let raw = s.raw_bytes(bytes);
                     std::str::from_utf8(raw).map_or_else(
@@ -97,8 +94,6 @@ impl StringRow {
                         std::borrow::Cow::Borrowed,
                     )
                 }
-                // A UTF-16LE run's text is its low bytes: the high halves
-                // are zero and carry nothing of the text.
                 _ => std::borrow::Cow::Owned(
                     String::from_utf8_lossy(
                         &s.raw_bytes(bytes)
@@ -232,13 +227,13 @@ mod tests {
     /// excludes: a 4-byte ASCII run and a 4-unit wide run.
     fn program() -> Program {
         let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(b"abcdefgh\x00"); // 8, kept at any min
-        bytes.extend_from_slice(b"abcd\x00"); // 4, below the cached minimum
-        bytes.extend_from_slice(b"ijklmno\x00"); // 7
+        bytes.extend_from_slice(b"abcdefgh\x00");
+        bytes.extend_from_slice(b"abcd\x00");
+        bytes.extend_from_slice(b"ijklmno\x00");
         for b in b"wide string" {
             bytes.extend_from_slice(&[*b, 0]);
         }
-        bytes.extend_from_slice(&[b'x', 0, b'y', 0, b'z', 0, b'w', 0]); // 4 units, below it
+        bytes.extend_from_slice(&[b'x', 0, b'y', 0, b'z', 0, b'w', 0]);
         bytes.push(0);
         Program::raw(
             bytes,

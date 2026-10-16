@@ -607,7 +607,6 @@ mod os {
         ///
         /// Bytes read, zero when the piece is not readable.
         fn read_piece(&self, va: u64, buf: &mut [u8]) -> usize {
-            // An address past the pointer width is not readable.
             let Ok(at) = usize::try_from(va) else {
                 return 0;
             };
@@ -636,8 +635,6 @@ mod os {
             if got == len {
                 return Some(buf);
             }
-            // The range runs into memory that is not there: take it page by
-            // page up to the first page that fails.
             let mut total = 0usize;
             while total < len {
                 let next_page = ((va + total as u64) / PAGE as u64 + 1) * PAGE as u64;
@@ -663,7 +660,6 @@ mod os {
         fn regions(&self) -> Vec<Region> {
             let mut out = Vec::new();
             let mut at: u64 = 0;
-            // An address past the pointer width has no region to query.
             while let Ok(here) = usize::try_from(at) {
                 // SAFETY: MEMORY_BASIC_INFORMATION is plain data; every
                 // field is valid as zero.
