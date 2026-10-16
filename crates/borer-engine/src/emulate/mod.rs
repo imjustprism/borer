@@ -1874,9 +1874,11 @@ impl<'a> Emulator<'a> {
                 self.write(dst.wrapping_add(from_usize(k)), u64::from(fill), 1)?;
             }
             rcx
-        } else if api.starts_with("VirtualProtect") || api.starts_with("VirtualFree") {
-            1
-        } else if api == "AddVectoredExceptionHandler" || api == "RemoveVectoredExceptionHandler" {
+        } else if api.starts_with("VirtualProtect")
+            || api.starts_with("VirtualFree")
+            || api == "AddVectoredExceptionHandler"
+            || api == "RemoveVectoredExceptionHandler"
+        {
             1
         } else {
             self.neutralize(api).unwrap_or_default()
