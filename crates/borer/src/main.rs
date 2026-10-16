@@ -84,7 +84,6 @@ use params::{
 use recall::{Narrow, Recall, SINCE_ARG, Tag, budgeted};
 use strwalk::StringRow;
 
-
 /// The MCP server state: one loaded program, its lazily computed analysis,
 /// and the annotation overlay.
 ///
@@ -5730,7 +5729,6 @@ impl BorerServer {
         peer_info
     }
 }
-
 
 /// What the worker taking over resumes from, written by the one handing
 /// over to the file the relay names.

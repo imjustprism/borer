@@ -798,7 +798,6 @@ fn every_word_decodes_to_one_line_of_four_bytes() {
     });
 }
 
-
 /// Returns words as the bytes an image stores.
 fn le_words(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
@@ -1130,7 +1129,6 @@ fn hostile_unwind_info_names_nothing_past_its_end() {
     let p = arm64_macho(&LEAVES, &unwind, &LEAF_STARTS);
     assert_eq!(starts(&p), [at(0), at(8), at(0x10), at(0x18)]);
 }
-
 
 /// Where [`crate::raw::image`] puts `.text`, and the entry with it.
 const TEXT: u64 = 0x40_1000;
@@ -1658,7 +1656,6 @@ fn discovery_survives_hostile_code() {
         }
     }
 }
-
 
 /// A program calling imports, forming a string's address and dispatching
 /// through jump tables.

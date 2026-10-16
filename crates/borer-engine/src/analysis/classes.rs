@@ -2302,10 +2302,7 @@ mod tests {
     fn inlined_setters_name_the_field_they_write() {
         let text = "rax = Core::Ptr<Type::Item>::operator ->(&home_0);\nrdi = rax;\nif (rax->handled != 0) {\n  assert_failed(\"!this->handled\", \"msg/protocol.h\", 129, __FUNCSIG__(Type::Item::SetMapId));\n}\nif (rbx != rdi + 32) {\n  sub_1(rdi + 32, rbx);\n}\nrsi = other;\nassert_failed(\"x\", \"f\", 1, __FUNCSIG__(Type::Item::SetExitURL));\nsub_1(rsi + 96, rbx);\n";
         let marker = "__FUNCSIG__(Type::Item::SetMapId)";
-        assert_eq!(
-            setter_writes(text, "Type::Item", marker, 4),
-            vec![32]
-        );
+        assert_eq!(setter_writes(text, "Type::Item", marker, 4), vec![32]);
         let other = "__FUNCSIG__(Type::Item::SetExitURL)";
         assert!(setter_writes(text, "Type::Item", other, 4).is_empty());
     }
@@ -2323,8 +2320,7 @@ mod tests {
     #[test]
     fn a_smart_pointer_call_names_its_class() {
         assert_eq!(
-            smart_pointer_class("Core::Ptr<Cmd::Item>::operator ->(&home_10);")
-                .as_deref(),
+            smart_pointer_class("Core::Ptr<Cmd::Item>::operator ->(&home_10);").as_deref(),
             Some("Cmd::Item")
         );
         assert_eq!(

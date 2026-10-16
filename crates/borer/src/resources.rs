@@ -1752,7 +1752,6 @@ fn enum_row(
     )
 }
 
-
 /// Most resources the refusal of an unknown URI names.
 const NEAREST_RESOURCES: usize = 3;
 

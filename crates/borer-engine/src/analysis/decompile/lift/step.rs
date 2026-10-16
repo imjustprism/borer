@@ -330,7 +330,6 @@ impl<'a> Exec<'_, 'a> {
         self.record(EffectKind::Return(value));
     }
 
-
     /// Executes one non-control instruction.
     ///
     /// The one-operand multiply and divide come in two shapes: from 16 bits

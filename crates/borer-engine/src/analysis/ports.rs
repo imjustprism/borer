@@ -566,10 +566,7 @@ return sub_140146334(a1, *(uint32_t*)(rax + 0x20));
         };
         assert_eq!(
             got.get(&0x1_4137_37c0),
-            Some(&branch(
-                Some("Widget::OnMove"),
-                None
-            ))
+            Some(&branch(Some("Widget::OnMove"), None))
         );
         assert_eq!(
             got.get(&0x1_4137_6c00),

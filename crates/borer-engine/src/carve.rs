@@ -308,7 +308,6 @@ fn pages(len: u32, page: u64) -> u64 {
     u64::from(len).div_ceil(page).saturating_mul(page)
 }
 
-
 /// Checks a PE header at the start of `b`.
 ///
 /// `MZ`, then `e_lfanew` leading to `PE\0\0` within [`PE_HEADER_MAX`], a
@@ -631,7 +630,6 @@ fn fat_macho(b: &[u8]) -> Option<Found> {
         identity: format!("fat Mach-O, {n} slice{} ({})", plural(n), cpus.join(", ")),
     })
 }
-
 
 /// Checks a zip local file header at the start of `b`, and looks forward
 /// for the end of central directory record that closes the archive.
@@ -1110,7 +1108,6 @@ fn android_boot(b: &[u8]) -> Option<Found> {
         ),
     })
 }
-
 
 /// Runs every format's check at one offset.
 ///

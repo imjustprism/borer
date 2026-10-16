@@ -24,7 +24,6 @@ fn u64_at(out: &mut [u8], at: usize, v: u64) {
     out[at..at + 8].copy_from_slice(&v.to_le_bytes());
 }
 
-
 /// A minidump of an x64 process: one module, one memory range holding
 /// `ret`, an exception context naming where it stopped.
 ///
@@ -235,7 +234,6 @@ impl SplitMix64 {
     }
 }
 
-
 /// A minidump loads as a program: its ranges are sections that read back
 /// the dumped bytes, its module names its base, and the exception
 /// context's stop address is the entry.
@@ -302,7 +300,6 @@ fn version_garbage_still_loads() {
     assert_eq!(p.arch, Arch::X86_64);
     assert_eq!(p.entry, Some(0x7ff0_0010));
 }
-
 
 /// A range whose file offset sits past the end of the file is skipped:
 /// the dump holds none of its bytes, so no section maps it.
@@ -382,7 +379,6 @@ fn a_huge_range_count_stays_bounded() {
     assert!(sections_sit_in_the_file(&p));
 }
 
-
 /// Memory64 ranges packed from a base past the end of the file are
 /// skipped, and the memory list's own range survives beside them.
 #[test]
@@ -444,7 +440,6 @@ fn a_read_far_above_a_low_range_refuses_cleanly() {
     assert!(p.va_to_offset(top).is_none());
 }
 
-
 /// A thread stack a listed range already covers is not added again.
 #[test]
 fn a_covered_thread_stack_is_not_added_again() {
@@ -485,7 +480,6 @@ fn a_stack_under_a_range_whose_end_overflows_is_covered() {
     let p = Program::from_bytes("sat.dmp".into(), d).expect("loads");
     assert_eq!(p.sections.len(), 2);
 }
-
 
 /// A module name RVA pointing at garbage (the memory's 0xc3 read as a
 /// byte length) keeps the module with an empty name.
@@ -533,7 +527,6 @@ fn a_module_at_zero_names_no_symbol_and_no_base() {
     assert!(p.symbols.is_empty());
     assert_eq!(p.image_base, 0);
 }
-
 
 /// Each architecture the system-info stream can state maps, and one it
 /// cannot maps to [`Arch::Unknown`].
@@ -584,7 +577,6 @@ fn an_arm64_dump_has_no_entry() {
     assert!(p.is_64);
     assert_eq!(p.entry, None);
 }
-
 
 /// The protections the memory-info stream states set each section's
 /// writable and executable flags, and a range it states nothing about
@@ -642,7 +634,6 @@ fn an_unusable_memory_info_entry_size_leaves_the_default() {
     }
 }
 
-
 /// Five hundred seeded mutations of the valid dump never panic.
 ///
 /// Each mutation flips one random byte or cuts the file at a random
@@ -668,7 +659,6 @@ fn five_hundred_mutations_never_panic() {
     }
 }
 
-
 /// An ELF core maps its `PT_LOAD` segments as the memory they hold.
 #[test]
 fn an_elf_core_loads_its_load_segments() {
@@ -683,10 +673,7 @@ fn an_elf_core_loads_its_load_segments() {
 /// never panicking.
 #[test]
 fn core_phdrs_the_file_cannot_hold_are_refused_or_bounded() {
-    let mutators: [fn(&mut Vec<u8>); 2] = [
-        |e| u16_at(e, 56, 0xffff),
-        |e| u64_at(e, 32, 0x1_0000),
-    ];
+    let mutators: [fn(&mut Vec<u8>); 2] = [|e| u16_at(e, 56, 0xffff), |e| u64_at(e, 32, 0x1_0000)];
     for mutate in mutators {
         let mut e = elf_core();
         mutate(&mut e);

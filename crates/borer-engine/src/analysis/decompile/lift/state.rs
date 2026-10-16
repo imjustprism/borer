@@ -102,7 +102,6 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
-
     /// Reads a register as an expression.
     ///
     /// The stack pointer reads as its tracked offset; byte and word registers
@@ -444,7 +443,6 @@ impl<'a> Exec<'_, 'a> {
     pub(super) fn note_slot(&mut self, k: i64, ty: Ty) {
         self.declare(Key::Slot(k), ty);
     }
-
 
     /// Assigns a register lazily: the value stays symbolic until needed.
     ///
@@ -954,7 +952,6 @@ impl<'a> Exec<'_, 'a> {
         };
         emit_line!(self, line);
     }
-
 
     /// Writes `key`'s symbolic value out as `name = value;`.
     ///
@@ -1795,7 +1792,6 @@ impl<'a> Exec<'_, 'a> {
             self.env.slot_bits.remove(&o);
         }
     }
-
 }
 
 /// Recognizes a write to the try level, `[ebp-4]`, in a 32-bit function

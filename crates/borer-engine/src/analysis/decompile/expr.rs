@@ -1168,7 +1168,6 @@ impl Cond {
     }
 }
 
-
 /// Returns the C signed integer type of `bits` bits.
 ///
 /// # Arguments

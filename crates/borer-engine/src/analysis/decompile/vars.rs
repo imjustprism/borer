@@ -48,7 +48,6 @@ const PUNCTS: [&str; 22] = [
 /// The operators that write the variable before them.
 const COMPOUND: [&str; 10] = ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="];
 
-
 /// What a token is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Lex {
@@ -284,7 +283,6 @@ impl Line<'_> {
         Some((k + 1, self.toks.len()))
     }
 }
-
 
 /// What a node does to the tracked variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,7 +546,6 @@ impl Graph {
     }
 }
 
-
 /// What one node reads and writes of the tracked variables: each a
 /// variable and the token naming it.
 #[derive(Debug, Default, Clone)]
@@ -778,7 +775,6 @@ fn occs(
     (o, None)
 }
 
-
 /// A disjoint-set forest over a variable's definitions and the points it
 /// is read at.
 #[derive(Debug)]
@@ -966,7 +962,6 @@ fn webs_of(
         live,
     }
 }
-
 
 /// The parts of a function's text.
 #[derive(Debug)]

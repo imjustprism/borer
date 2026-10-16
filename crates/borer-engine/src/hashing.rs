@@ -47,7 +47,6 @@ use std::fmt::Write as _;
 
 use crate::program::{Program, SymbolKind};
 
-
 /// MD5's per-step sine-derived constants, RFC 1321's `T` table.
 const MD5_K: [u32; 64] = [
     0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
@@ -170,7 +169,6 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
     }
     out
 }
-
 
 /// SHA-256's round constants, the first 64 primes' cube-root fractions
 /// (FIPS 180-4 section 4.2.2).
@@ -340,7 +338,6 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     h.finish()
 }
 
-
 /// The names `pefile`'s `ordlookup` gives three DLLs' ordinal exports.
 ///
 /// One `dll<TAB>ordinal<TAB>name` line each, the dll lowercased with its
@@ -497,7 +494,6 @@ pub fn imphash(program: &Program) -> Option<[u8; 16]> {
     Some(md5(joined.as_bytes()))
 }
 
-
 /// The security directory's slot in the data directory table.
 const SECURITY_DIR: usize = 4;
 
@@ -542,8 +538,6 @@ pub fn authentihash(program: &Program) -> Option<[u8; 32]> {
     h.update(bytes.get(cert_end.max(entry_end)..)?);
     Some(h.finish())
 }
-
-
 
 /// Pearson's permutation as the TLSH reference carries it (`v_table` in
 /// Trend Micro's `tlsh_impl.cpp`): every bucket index and the checksum
@@ -922,7 +916,6 @@ impl Tlsh {
     }
 }
 
-
 /// Borer's 256-byte permutation for the borer-lsh bucket hashes and checksum.
 ///
 /// A Fisher-Yates shuffle of `0..=255` driven by an `xorshift64*` generator
@@ -1095,7 +1088,6 @@ impl BorerLsh {
             + u32::from(self.q3.abs_diff(other.q3)).min(15)
     }
 }
-
 
 /// Renders the content hashes as the `borer://hashes` answer.
 ///

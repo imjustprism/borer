@@ -1723,10 +1723,8 @@ return 0;
         assert_eq!(object_offset("&local_38"), None);
         assert_eq!(object_offset("rbx + 8"), None);
         assert_eq!(
-            param_class(
-                "// signature: uint64_t class_1::vfunc_5(Cmd::Exit *a1, uint64_t a2)\n"
-            )
-            .as_deref(),
+            param_class("// signature: uint64_t class_1::vfunc_5(Cmd::Exit *a1, uint64_t a2)\n")
+                .as_deref(),
             Some("Cmd::Exit")
         );
         assert_eq!(
@@ -1738,9 +1736,7 @@ return 0;
             vec!["a1", "a2"]
         );
         assert_eq!(
-            param_names(
-                "// signature: void Widget::Send(Widget *this)\n"
-            ),
+            param_names("// signature: void Widget::Send(Widget *this)\n"),
             vec!["this"]
         );
     }

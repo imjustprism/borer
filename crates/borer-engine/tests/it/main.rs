@@ -9,13 +9,13 @@ mod common;
 mod decompiled;
 #[path = "../common/elfgen.rs"]
 mod elfgen;
+#[path = "../common/fixture_pack.rs"]
+mod fixture_pack;
 #[path = "../common/gotos.rs"]
 mod gotos;
 #[path = "../common/machogen.rs"]
 mod machogen;
 mod minidump;
-#[path = "../common/fixture_pack.rs"]
-mod fixture_pack;
 #[path = "../common/raw.rs"]
 mod raw;
 

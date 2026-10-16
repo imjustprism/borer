@@ -123,7 +123,6 @@ const PAGE_ROWS: usize = 200;
 /// Bytes per window the entropy scan measures.
 const ENTROPY_WINDOW: usize = 1024;
 
-
 /// A command word, by what it needs before it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Command {
@@ -596,7 +595,6 @@ fn search_args(words: &[String]) -> anyhow::Result<(SearchKind, usize)> {
     Ok((kind, offset.unwrap_or(0)))
 }
 
-
 /// Returns a positional argument.
 ///
 /// # Arguments
@@ -782,7 +780,6 @@ impl<'a> SlotQuery<'a> {
 fn entry_at(p: &Program, a: &Analysis, va: u64) -> anyhow::Result<u64> {
     borer_engine::analysis::function_entry(p, a, va).map_err(anyhow::Error::msg)
 }
-
 
 /// Writes a file for a command that was asked to produce one.
 ///
@@ -1141,7 +1138,6 @@ fn open(
     Ok((named, program))
 }
 
-
 /// A binary with the packs that fit it, as every query reads it.
 #[derive(Debug)]
 struct Session {
@@ -1327,7 +1323,6 @@ fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
     let text = decompile::with_header(&text, header.as_deref());
     Ok(window(&text, None, offset, limit))
 }
-
 
 /// The refusal of a word that names no command: an option borer does not
 /// know when it opens with a dash, else a command.

@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 
-
 /// Tells whether a character can be part of an identifier.
 ///
 /// # Arguments
@@ -236,7 +235,6 @@ pub(super) fn float_like(text: &str) -> bool {
         })
 }
 
-
 /// Parses a decimal or `0x` hexadecimal number at the start of `s`.
 ///
 /// # Arguments
@@ -274,7 +272,6 @@ pub(super) fn parse_const(t: &str) -> Option<u64> {
         .map(|(v, _)| v)
 }
 
-
 /// Returns the indentation width of a line in spaces.
 ///
 /// # Arguments
@@ -305,7 +302,6 @@ pub(super) fn header_len<S: AsRef<str>>(lines: &[S]) -> usize {
         .position(|l| !l.as_ref().starts_with("//"))
         .unwrap_or(lines.len())
 }
-
 
 /// The label of the block starting at `va`: `L_<va>:`.
 ///
@@ -427,7 +423,6 @@ pub(super) fn jumps_contained(
     })
 }
 
-
 /// Tells whether a trimmed line begins with the keyword `kw` as a whole
 /// word: `return;` and `return x;` begin with `return`, a call to a
 /// function named `returnBuffer` does not.
@@ -487,7 +482,6 @@ pub(super) fn breaks(t: &str) -> bool {
 pub(super) fn continues(t: &str) -> bool {
     t == "continue;" || t.ends_with(" continue;")
 }
-
 
 /// The condition of an `if (COND) {` line.
 ///
@@ -688,7 +682,6 @@ fn at_level(line: &str, open: &mut Vec<Scope>, nesting: Nesting) -> bool {
     !inside && !edge
 }
 
-
 /// Splits a plain assignment line `lhs = rhs;`.
 ///
 /// # Arguments
@@ -817,7 +810,6 @@ pub(super) fn ends_in_operator(head: &str) -> bool {
             && (rest.trim() == "()" || !rest.contains(['(', ')', ',', ';']))
     })
 }
-
 
 /// The index of the `)` closing the `(` at `open`.
 ///

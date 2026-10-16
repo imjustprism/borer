@@ -217,10 +217,7 @@ fn sourced(magic: [u8; 4], absolute: bool, funcs: &[Src], end: u32) -> Vec<u8> {
     let mut out = vec![0u8; records_at + funcs.len() * RECORD];
     out[0..4].copy_from_slice(&magic);
     out[4..8].copy_from_slice(&[0, 0, 1, 8]);
-    let mut words = vec![
-        u64::try_from(funcs.len()).expect("fits"),
-        1,
-    ];
+    let mut words = vec![u64::try_from(funcs.len()).expect("fits"), 1];
     if !absolute {
         words.push(MAIN);
     }

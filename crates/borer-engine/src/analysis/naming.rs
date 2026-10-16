@@ -613,10 +613,7 @@ mod tests {
         );
         assert!(handler_name("Command handler for type '' called").is_none());
         assert!(handler_name("no config for map '%s' found").is_none());
-        assert_eq!(
-            setter_member("Type::SetField"),
-            Some("Field")
-        );
+        assert_eq!(setter_member("Type::SetField"), Some("Field"));
         assert_eq!(setter_member("Util::String::Set"), None);
         assert_eq!(setter_member("Settings::Load"), None);
     }

@@ -443,8 +443,7 @@ mod tests {
     /// When a name is qualified against the rule.
     #[test]
     fn bare_registered_names_take_their_qualified_name() {
-        let runs: Vec<&str> =
-            super::qualified_runs("Core::Ptr<Cmd::Actor>::operator ->").collect();
+        let runs: Vec<&str> = super::qualified_runs("Core::Ptr<Cmd::Actor>::operator ->").collect();
         assert_eq!(runs, vec!["Core::Ptr", "Cmd::Actor"]);
         let names = [
             "Core::Ptr<Cmd::Actor>::operator ->",

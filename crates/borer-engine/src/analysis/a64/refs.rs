@@ -518,11 +518,8 @@ pub(crate) fn constant_in(insns: &[Insn], reg: usize) -> Option<u64> {
     let bit = 1u32.checked_shl(u32::try_from(reg).ok()?)?;
     let mut value = None;
     for insn in insns.iter().filter(|i| writes(i) & bit != 0) {
-        value = (insn.mnemonic == Mnemonic::Movz && any_reg(&insn.operands[0]) == Some(reg)).then(
-            || {
-                u64::from((insn.word >> 5) & 0xffff) << (((insn.word >> 21) & 3) * 16)
-            },
-        );
+        value = (insn.mnemonic == Mnemonic::Movz && any_reg(&insn.operands[0]) == Some(reg))
+            .then(|| u64::from((insn.word >> 5) & 0xffff) << (((insn.word >> 21) & 3) * 16));
     }
     value
 }
