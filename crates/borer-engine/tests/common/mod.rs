@@ -632,11 +632,8 @@ use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 /// * `LB` 0x5240: nine blocks that each add one to `ecx` and then jump,
 ///   `jmp 0x5258`, `jb 0x525f`, `jmp 0x5287`, `jmp 0x5273`, `jb 0x527d`,
 ///   `jb 0x5247`, `jb 0x525f`, `jb 0x5251` and `jmp 0x5287` (pointer-seeded
-///   from 0x2f68): the loop 0x5247 -> 0x525f -> 0x5269 -> 0x5247 is only
-///   ever entered at 0x525f, below its lowest block, and the blocks the
-///   text writes first sit between the two. The emitter reaches 0x5247
-///   first and hands the loop to its entry, which cannot structure past
-///   the written blocks.
+///   from 0x2f68): three `while (1)` loops, outer entry 0x5273, inner entry
+///   0x525f, self-loop at 0x5287.
 /// * `JO` 0x52a0: `test ecx, ecx; jz 0x3000; xor eax, eax; ret`
 ///   (pointer-seeded from 0x2f68 + 8): the branch leaves for `.data`, which
 ///   holds no code, so no block of this function starts there and there is

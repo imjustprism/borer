@@ -4266,13 +4266,13 @@ fn an_indexed_read_is_not_rewritten_as_a_field() {
     assert!(out.contains("a2 * 8"), "{out}");
 }
 
-/// Every goto lands on a label when a loop is entered below its lowest
-/// block.
+/// Every goto lands on a label, and a cross-loop jump stays a goto.
 ///
-/// `LB`'s loop begins at 0x5247 but is only ever entered at 0x525f, and the
-/// blocks between them are written before either. The emitter used to hand
-/// 0x5247 to the loop's entry, take the entry's word that the block was
-/// written, and drop its label while the jump back to it stayed.
+/// `LB` is three `while (1)` loops. The outer entry is 0x5273, the inner
+/// entry is 0x525f, and 0x5287 jumps to itself. `goto L_5251` falls out of
+/// the inner loop. `goto L_5287` is that self-loop. Either one written as
+/// `break` or `continue` leaves the wrong loop. A `continue` inside the
+/// inner loop still restarts 0x525f.
 #[test]
 fn a_loop_entered_below_its_first_block_keeps_its_label() {
     let out = dc(0x5240);
@@ -4293,6 +4293,26 @@ fn a_loop_entered_below_its_first_block_keeps_its_label() {
         };
         assert!(labels.contains(target), "{target} has no label: {out}");
     }
+    for edge in [
+        "goto L_525f;",
+        "goto L_527d;",
+        "goto L_5251;",
+        "goto L_5287;",
+    ] {
+        assert!(
+            out.contains(edge),
+            "{edge} reads as break or continue: {out}"
+        );
+    }
+    assert!(
+        out.contains("continue;"),
+        "the inner restart of 0x525f is gone: {out}"
+    );
+    assert_eq!(
+        out.matches("while (1)").count(),
+        3,
+        "expected three while (1) loops: {out}"
+    );
 }
 
 /// A branch that leaves the function is a computed goto, not a label.
@@ -4346,6 +4366,8 @@ fn a_break_below_a_nested_loop_still_leaves_the_outer_one() {
 /// `continue` and `break` those jumps left the wrong loop, and the block
 /// after the outer loop, which nothing else reaches, went with them. Each
 /// block hands its own number to 0x5445, so a missing one is plain.
+/// `goto L_5390` and `goto L_5407` both stay gotos. One leftover goto is
+/// not enough.
 #[test]
 fn a_break_leaves_the_loop_it_stands_in() {
     let out = dc(0x5390);
@@ -4359,6 +4381,10 @@ fn a_break_leaves_the_loop_it_stands_in() {
         out.contains("goto L_5390;"),
         "the jump back to the outer loop reads as the inner one's continue: {out}"
     );
+    assert!(
+        out.contains("goto L_5407;"),
+        "the jump to 0x5407 reads as the inner loop's break or continue: {out}"
+    );
 }
 
 /// A block that continues its own loop is not moved into another one.
@@ -4367,7 +4393,8 @@ fn a_break_leaves_the_loop_it_stands_in() {
 /// middle of the other. The block it lands on ends by continuing its own
 /// loop; moved to the jump it continued the loop there instead, and the
 /// rest of its loop was left reachable by nothing. Each block hands its own
-/// number to 0x54cd, so a missing one is plain.
+/// number to 0x54cd, so a missing one is plain. The edge back to the outer
+/// header stays `goto L_548f`. Any leftover goto is not enough.
 #[test]
 fn a_block_that_continues_its_loop_stays_in_it() {
     let out = dc(0x5450);
@@ -4377,6 +4404,10 @@ fn a_block_that_continues_its_loop_stays_in_it() {
             "block {n} is missing: {out}"
         );
     }
+    assert!(
+        out.contains("goto L_548f;"),
+        "the jump back to 0x548f reads as break or continue: {out}"
+    );
 }
 
 /// A float moved into a vector register leaves the rest of it alone.
