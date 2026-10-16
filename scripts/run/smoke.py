@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase -1 termination test: drive the borer MCP server over stdio JSON-RPC.
 
-Usage: python scripts/smoke.py [path-to-borer.exe] [path-to-binary-to-load]
+Usage: python scripts/run/smoke.py [path-to-borer.exe] [path-to-binary-to-load]
 Exits non-zero on any protocol or tool error. Default target binary: borer.exe
 itself (a real PE, self-contained fixture).
 """
@@ -15,8 +15,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from harness.root import ROOT  # noqa: E402
+
 EXE = (
     os.path.abspath(sys.argv[1])
     if len(sys.argv) > 1
@@ -73,6 +77,9 @@ atexit.register(proc.kill)
 watchdog = threading.Timer(900, proc.kill)
 watchdog.daemon = True
 watchdog.start()
+assert proc.stdin is not None and proc.stdout is not None
+stdin = proc.stdin
+stdout = proc.stdout
 
 _next_id = 0
 
@@ -87,14 +94,14 @@ def send(method, params=None, notify=False):
         _next_id += 1
         msg["id"] = _next_id
         rid = _next_id
-    proc.stdin.write(json.dumps(msg) + "\n")
-    proc.stdin.flush()
+    stdin.write(json.dumps(msg) + "\n")
+    stdin.flush()
     return rid
 
 
 def wait_for(rid, allow_error=False):
     while True:
-        line = proc.stdout.readline()
+        line = stdout.readline()
         if not line:
             raise SystemExit("server closed stdout; its stderr follows")
         msg = json.loads(line)
@@ -769,7 +776,7 @@ noparams = wait_for(send("resources/read"), allow_error=True)
 assert noparams.get("error", {}).get("code") == -32602, noparams
 print(f"protocol surface OK (tools/list {len(raw_tools)} bytes, resources, completions)")
 
-proc.stdin.close()
+stdin.close()
 rc = proc.wait(timeout=10)
 if rc != 0:
     raise SystemExit(f"server exited {rc}")
@@ -792,6 +799,9 @@ atexit.register(p2.kill)
 watchdog2 = threading.Timer(60, p2.kill)
 watchdog2.daemon = True
 watchdog2.start()
+assert p2.stdin is not None and p2.stdout is not None
+stdin2 = p2.stdin
+stdout2 = p2.stdout
 META = {
     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
     "io.modelcontextprotocol/clientCapabilities": {},
@@ -799,12 +809,10 @@ META = {
 
 
 def rpc2(i, method, params):
-    p2.stdin.write(
-        json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params}) + "\n"
-    )
-    p2.stdin.flush()
+    stdin2.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params}) + "\n")
+    stdin2.flush()
     while True:
-        line = p2.stdout.readline()
+        line = stdout2.readline()
         if not line:
             raise SystemExit("2026-07-28 session: server closed stdout; its stderr follows")
         r = json.loads(line)
@@ -832,7 +840,7 @@ loaded = rpc2(
 assert not loaded.get("isError"), loaded
 info2 = rpc2(4, "tools/call", {"_meta": META, "name": "binary_info", "arguments": {}})
 assert "format:" in info2["content"][0]["text"], info2
-p2.stdin.close()
+stdin2.close()
 p2.wait(timeout=10)
 watchdog2.cancel()
 print("2026-07-28 lifecycle OK (discover, cache hints, per-request _meta)")

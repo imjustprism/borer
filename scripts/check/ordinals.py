@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the table borer names imports by ordinal with.
 
-    python scripts/ordinals.py [--check]
+    python scripts/check/ordinals.py [--check]
 
 A program that imports a function by its ordinal alone names nothing in its
 import table, so the decompiler printed `ORDINAL 359(...)`. The names are in
@@ -24,11 +24,15 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from harness.root import ROOT  # noqa: E402
 
 DLLS = ["cabinet.dll", "certcli.dll", "wldap32.dll"]
 """The DLLs whose named exports the table lists."""
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "crates", "borer-engine", "src", "import_ordinals.tsv")
 
 
@@ -48,7 +52,10 @@ def rows() -> list[str] | None:
         pe.parse_data_directories(
             directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]]
         )
-        for sym in getattr(pe, "DIRECTORY_ENTRY_EXPORT", None).symbols:
+        exports = getattr(pe, "DIRECTORY_ENTRY_EXPORT", None)
+        if exports is None:
+            return None
+        for sym in exports.symbols:
             if sym.name:
                 out.append(f"{dll}\t{sym.ordinal}\t{sym.name.decode('ascii', 'replace')}")
     return sorted(set(out), key=lambda r: (r.split("\t")[0], int(r.split("\t")[1]), r))
@@ -63,7 +70,7 @@ def main(argv: list[str]) -> int:
     if "--check" in argv:
         with open(OUT, encoding="utf-8") as f:
             if f.read() != text:
-                print(f"{OUT} differs from what scripts/ordinals.py writes")
+                print(f"{OUT} differs from what scripts/check/ordinals.py writes")
                 return 1
         return 0
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:

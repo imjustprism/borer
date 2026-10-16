@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark borer against a corpus of binaries: speed, answer cost, coverage.
 
-Usage: python scripts/bench.py [--borer PATH] <binary>...
+Usage: python scripts/run/bench.py [--borer PATH] <binary>...
 Emits one TSV row per binary and a totals line. Every number comes from a
 real MCP session over stdio: wall time per tool call, bytes per answer (the
 token cost an agent pays), and the decompiler's own checked-blocks ratio
@@ -30,7 +30,9 @@ def _timed(proc: subprocess.Popen, name: str, args: dict) -> float:
 
 def _recv(proc: subprocess.Popen) -> dict:
     """Reads one line-delimited JSON-RPC message."""
-    line = proc.stdout.readline()
+    stdout = proc.stdout
+    assert stdout is not None
+    line = stdout.readline()
     if not line:
         raise EOFError("server closed its stdout")
     return json.loads(line)
@@ -47,8 +49,10 @@ def _send(
         msg["id"] = _ID
     if params is not None:
         msg["params"] = params
-    proc.stdin.write(json.dumps(msg).encode() + b"\n")
-    proc.stdin.flush()
+    stdin = proc.stdin
+    assert stdin is not None
+    stdin.write(json.dumps(msg).encode() + b"\n")
+    stdin.flush()
     return int(msg.get("id", 0))
 
 

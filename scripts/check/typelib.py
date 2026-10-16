@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate borer's typed API library: declarations, C type words, constants.
 
-    python scripts/typelib.py          write the three tables
-    python scripts/typelib.py --check  exit 1 when a table differs from what this writes
+    python scripts/check/typelib.py          write the three tables
+    python scripts/check/typelib.py --check  exit 1 when a table differs from what this writes
 
 The tables live beside `prototypes.tsv` in crates/borer-engine/src/analysis/:
 
@@ -45,8 +45,12 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from harness.root import ROOT  # noqa: E402
+
 OUT = os.path.join(ROOT, "crates", "borer-engine", "src", "analysis")
 
 # ---- C type words -------------------------------------------------------
@@ -3012,7 +3016,7 @@ def main(argv: list[str]) -> int:
         print(f"wrote {os.path.relpath(path, ROOT)}")
     if stale:
         print(
-            f"typelib: {', '.join(stale)} differ from scripts/typelib.py; run it to regenerate",
+            f"typelib: {', '.join(stale)} differ from scripts/check/typelib.py; run it to regenerate",
             file=sys.stderr,
         )
         return 1

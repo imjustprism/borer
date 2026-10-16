@@ -390,7 +390,7 @@ version:
 - Every item has a doc comment. Lints enforce it.
 - Commit titles are one line, `type: summary`, where type is one of `add`,
   `fix`, `improve`, `refactor`, `perf`, `docs`, `test`, `chore`, or
-  `revert`. `scripts/commits.py` checks them.
+  `revert`. `scripts/check/commits.py` checks them.
 
 On Windows, git checks symlinks out as plain text files unless Developer Mode
 is on and `core.symlinks` is `true`. A flat link holds just the path

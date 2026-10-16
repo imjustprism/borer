@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rebuild the MCP server and install it at the path .mcp.json pins.
 
-    python scripts/refresh_mcp.py
+    python scripts/dev/refresh_mcp.py
 
 The server a client launches is a file on disk, and a client holds it open
 for as long as the session lives, so a build cannot overwrite it while
@@ -21,8 +21,12 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from harness.root import ROOT  # noqa: E402
+
 BUILD_DIR = os.path.join(ROOT, "target", "mcpbuild")
 BUILT = os.path.join(BUILD_DIR, "dist", "borer.exe")
 INSTALLED = os.path.join(ROOT, "target", "mcp", "borer.exe")

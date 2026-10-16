@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure blind function discovery against what the compiler declared.
 
-Usage: python scripts/blind.py [path-to-borer.exe] FILE.dll|exe ...
+Usage: python scripts/run/blind.py [path-to-borer.exe] FILE.dll|exe ...
 
 Every x64 PE carries the compiler's own list of function starts in its
 exception directory (`.pdata`), one `RUNTIME_FUNCTION` per function. That is
@@ -35,11 +35,12 @@ import os
 import struct
 import sys
 import time
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mcp import Client  # noqa: E402
+from harness.client import Client  # noqa: E402
+from harness.root import ROOT  # noqa: E402
 
 FUNCLET_OPENER = b"\x48\x89\x54\x24\x10"
 

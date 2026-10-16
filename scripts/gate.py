@@ -6,12 +6,17 @@
                                     and a missing tool fails instead of skipping)
     python scripts/gate.py --fast   skip the slow tail (smoke, deny, doc, dogfood)
 
-Steps, in order: the unpushed commits' messages (scripts/commits.py), cargo fmt, cargo clippy -D warnings, cargo test, cargo doc
+Helpers are grouped under this directory. `check` fails when a generated
+table, the commit messages, or a comment drifts. `run` drives a built server.
+`dev` installs the server a local client launches. `harness` is the shared
+root path and MCP client. This file is the only command CI runs.
+
+Steps, in order: the unpushed commits' messages (scripts/check/commits.py), cargo fmt, cargo clippy -D warnings, cargo test, cargo doc
 with warnings as errors (private items included), cargo deny (offline subset),
 the dogfood sweep over a real binary, the readability benchmark against its
-baseline (scripts/readability.py), typos, ruff check + format, the type
-library regenerated (scripts/typelib.py --check),
-scripts/smoke.py, scripts/agent_eval.py. The first failure stops the run and the exit status is
+baseline (scripts/run/readability.py), typos, ruff check + format, the type
+library regenerated (scripts/check/typelib.py --check),
+scripts/run/smoke.py, scripts/run/agent_eval.py. The first failure stops the run and the exit status is
 non-zero. Tools that are not installed are reported and skipped, never
 silently passed.
 
@@ -21,7 +26,7 @@ the sweep finds lifter bugs in), and requires well-formed text from all of
 it. Smoke runs the optimized dev server against that same corpus binary. It also checks the determinism contract, by analyzing that
 binary twice in one process and comparing every renderer's bytes; running
 the commands twice from the shell instead costs six minutes, which
-scripts/determinism.py still does when a cross-process check is wanted. The fixture cannot stand in for this: a defect that only a
+scripts/run/determinism.py still does when a cross-process check is wanted. The fixture cannot stand in for this: a defect that only a
 real binary's shapes reach, such as a header line repeating an assert's
 quotes, has reached a commit before.
 """
@@ -36,8 +41,11 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from harness.root import ROOT  # noqa: E402
 
 
 def step(
@@ -132,7 +140,7 @@ def main(argv: list[str]) -> int:
     fast = "--fast" in argv
     fmt = ["cargo", "fmt", "--all"] + (["--check"] if check_only else [])
     steps: list[tuple[str, list[str], dict[str, str] | None, str | None]] = [
-        ("commits", [sys.executable, os.path.join("scripts", "commits.py")], None, None),
+        ("commits", [sys.executable, os.path.join("scripts", "check", "commits.py")], None, None),
         ("fmt", fmt, None, None),
         (
             "clippy",
@@ -148,14 +156,14 @@ def main(argv: list[str]) -> int:
         ("test", ["cargo", "test", "--workspace", "--lib", "--bins", "--tests"], None, None),
         ("doctest", ["cargo", "test", "--workspace", "--doc"], None, None),
     ]
+    # Named by platform, not by presence: the build step before the
+    # sweep makes it, so it does not exist yet when this list is built.
+    exe = "borer.exe" if sys.platform == "win32" else "borer"
+    # The build lands where cargo puts it: CARGO_TARGET_DIR when set.
+    target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")
+    server = os.path.join(target, "debug", exe)
+    dogfood = os.path.join(target, "corpus", exe)
     if not fast:
-        # Named by platform, not by presence: the build step before the
-        # sweep makes it, so it does not exist yet when this list is built.
-        exe = "borer.exe" if sys.platform == "win32" else "borer"
-        # The build lands where cargo puts it: CARGO_TARGET_DIR when set.
-        target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")
-        server = os.path.join(target, "debug", exe)
-        dogfood = os.path.join(target, "corpus", exe)
         steps += [
             # `cargo test` builds no binary in a tree that has not been
             # built before (a fresh worktree), and the dogfood sweep and
@@ -275,7 +283,7 @@ def main(argv: list[str]) -> int:
         else:
             print(f"[skip] dogfood x86: no {x86} on this machine")
         # The pseudo-C's noise and distance to source against the baseline
-        # (scripts/readability.py): a rate that rose beyond its tolerance
+        # (scripts/run/readability.py): a rate that rose beyond its tolerance
         # fails. Inputs this machine lacks (the sqlite builds without
         # BORER_READABILITY_CORPUS, the Windows binaries elsewhere) are
         # skipped by the script itself.
@@ -284,11 +292,11 @@ def main(argv: list[str]) -> int:
                 "readability",
                 [
                     sys.executable,
-                    os.path.join("scripts", "readability.py"),
+                    os.path.join("scripts", "run", "readability.py"),
                     "run",
                     server,
                     "--baseline",
-                    os.path.join("scripts", "readability.tsv"),
+                    os.path.join("scripts", "run", "readability.tsv"),
                     "--quiet",
                 ],
                 None,
@@ -308,7 +316,7 @@ def main(argv: list[str]) -> int:
         ("typos", ["typos"], None, "typos"),
         (
             "comments",
-            [sys.executable, os.path.join("scripts", "strip_comments.py"), "--check"],
+            [sys.executable, os.path.join("scripts", "check", "strip_comments.py"), "--check"],
             None,
             None,
         ),
@@ -316,7 +324,7 @@ def main(argv: list[str]) -> int:
         ("ruff format", ["ruff", "format", "--check", "scripts"], None, "ruff"),
         (
             "typelib",
-            [sys.executable, os.path.join("scripts", "typelib.py"), "--check"],
+            [sys.executable, os.path.join("scripts", "check", "typelib.py"), "--check"],
             None,
             None,
         ),
@@ -325,7 +333,7 @@ def main(argv: list[str]) -> int:
         steps.append(
             (
                 "smoke",
-                [sys.executable, os.path.join("scripts", "smoke.py"), server, dogfood],
+                [sys.executable, os.path.join("scripts", "run", "smoke.py"), server, dogfood],
                 None,
                 None,
             )
@@ -334,7 +342,7 @@ def main(argv: list[str]) -> int:
         steps.append(
             (
                 "agent eval",
-                [sys.executable, os.path.join("scripts", "agent_eval.py"), server],
+                [sys.executable, os.path.join("scripts", "run", "agent_eval.py"), server],
                 None,
                 None,
             )

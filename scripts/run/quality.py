@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure how well borer decompiles a binary, over the functions that are hard.
 
-Usage: python scripts/quality.py [path-to-borer.exe] [path-to-binary] [how-many]
+Usage: python scripts/run/quality.py [path-to-borer.exe] [path-to-binary] [how-many]
 
 Defaults to borer.exe against itself, over its 200 largest functions. Prints the
 three things that make decompiled text worse than its source, each as the share
@@ -33,11 +33,12 @@ import collections
 import os
 import re
 import sys
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mcp import Client  # noqa: E402
+from harness.client import Client  # noqa: E402
+from harness.root import ROOT  # noqa: E402
 
 ASM = re.compile(r"/\* asm: ([a-z0-9]+)")
 GOTO = re.compile(r"goto (L_[0-9a-f]+);")
@@ -143,7 +144,9 @@ def main(argv: list[str]) -> int:
         for mnemonic, n in asm.most_common(20):
             print(f"  {n:>5}  {mnemonic}")
 
-    client.proc.stdin.close()
+    stdin = client.proc.stdin
+    assert stdin is not None
+    stdin.close()
     client.proc.wait(timeout=30)
     return 0
 

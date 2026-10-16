@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the messages of every commit not yet pushed against the commit convention.
 
-    python scripts/commits.py [base]
+    python scripts/check/commits.py [base]
 
 A title is one line, `type: summary`, at most 72 characters of plain ASCII:
 the type one of the listed words, no scope in parentheses, no period at

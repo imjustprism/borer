@@ -2,11 +2,11 @@
 """One-shot MCP client for borer: call any tool, prompt, resource or completion
 from a shell, exactly as an agent would over stdio JSON-RPC.
 
-  python scripts/mcp.py --list                             tools, prompts, resources
-  python scripts/mcp.py BIN TOOL [key=value ...]           e.g. decompile address=main
-  python scripts/mcp.py BIN --prompt NAME [key=value ...]  the prompt's text
-  python scripts/mcp.py BIN --resource URI                 e.g. borer://decompile/0x401000
-  python scripts/mcp.py BIN --complete PROMPT ARG PREFIX   argument completion
+  python scripts/run/mcp.py --list                             tools, prompts, resources
+  python scripts/run/mcp.py BIN TOOL [key=value ...]           e.g. decompile address=main
+  python scripts/run/mcp.py BIN --prompt NAME [key=value ...]  the prompt's text
+  python scripts/run/mcp.py BIN --resource URI                 e.g. borer://decompile/0x401000
+  python scripts/run/mcp.py BIN --complete PROMPT ARG PREFIX   argument completion
 
 Options: --exe PATH   server binary (default target/release/borer.exe, else debug)
          --raw        print the JSON-RPC result instead of the text content
@@ -14,15 +14,21 @@ Values: integers, floats, true/false are typed; anything else is a string.
 Exit status is non-zero on any protocol or tool error.
 """
 
+from __future__ import annotations
+
 import json
 import os
-import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from harness.client import Client  # noqa: E402
+from harness.root import ROOT  # noqa: E402
 
 
-def pick_exe(args):
+def pick_exe(args: list[str]) -> str:
     if "--exe" in args:
         i = args.index("--exe")
         exe = args[i + 1]
@@ -35,84 +41,19 @@ def pick_exe(args):
     raise SystemExit("no borer.exe built; run `cargo build --release`")
 
 
-def typed(v):
-    if v in ("true", "false"):
-        return v == "true"
+def typed(value: str) -> Any:
+    """An argument's Python value: bool, int, float, or else the raw string."""
+    if value in ("true", "false"):
+        return value == "true"
     for cast in (int, float):
         try:
-            return cast(v)
+            return cast(value)
         except ValueError:
             pass
-    return v
+    return value
 
 
-class Client:
-    def __init__(self, exe):
-        self.proc = subprocess.Popen(
-            [exe],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-        )
-        self.next_id = 0
-        r = self.call(
-            "initialize",
-            {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": {"name": "borer-mcp.py", "version": "1"},
-            },
-        )
-        self.server = r["serverInfo"]
-        self.instructions = r.get("instructions", "")
-        self.notify("notifications/initialized")
-
-    def notify(self, method, params=None):
-        msg = {"jsonrpc": "2.0", "method": method}
-        if params is not None:
-            msg["params"] = params
-        self.proc.stdin.write(json.dumps(msg) + "\n")
-        self.proc.stdin.flush()
-
-    def request(self, method, params=None):
-        """Send a request and return its whole reply, `result` or `error`."""
-        self.next_id += 1
-        rid = self.next_id
-        msg = {"jsonrpc": "2.0", "id": rid, "method": method}
-        if params is not None:
-            msg["params"] = params
-        self.proc.stdin.write(json.dumps(msg) + "\n")
-        self.proc.stdin.flush()
-        while True:
-            line = self.proc.stdout.readline()
-            if not line:
-                err = self.proc.stderr.read()
-                raise SystemExit(f"server closed the pipe; stderr: {err[-1500:]}")
-            reply = json.loads(line)
-            if reply.get("id") == rid:
-                return reply
-
-    def call(self, method, params=None):
-        reply = self.request(method, params)
-        if "error" in reply:
-            raise SystemExit(f"rpc error: {json.dumps(reply['error'])}")
-        return reply["result"]
-
-    def tool(self, name, args):
-        res = self.call("tools/call", {"name": name, "arguments": args})
-        text = "\n".join(c.get("text", "") for c in res.get("content", []))
-        if res.get("isError"):
-            raise SystemExit(f"tool error: {text}")
-        return res, text
-
-    def close(self):
-        self.proc.stdin.close()
-        self.proc.wait(timeout=10)
-
-
-def main(argv):
+def main(argv: list[str]) -> int:
     args = list(argv)
     exe = pick_exe(args)
     raw = "--raw" in args

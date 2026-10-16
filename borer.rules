@@ -62,7 +62,7 @@ rules:
     - Identifiers in prose are backticked and items are intra-doc links like [`Analysis::compute`], never bare CamelCase (clippy::doc_markdown).
     - Documentation is rustdoc on the item, not a note beside the code. `///` and `//!` are the only prose. Line 1 is one sentence. The JSDoc sections follow, each only when it applies, in the order above. A function with parameters has `# Arguments`. A non-unit return has `# Returns`. A `Result` has `# Errors`. A reachable panic has `# Panics`. Do not add a section to look complete, and do not restate the signature, narrate the steps, or name a product.
     - No `//` line comment and no `/* */` block comment, and no commented-out code. Two exceptions sit on the line they justify, because a doc block cannot: `// SAFETY:` on an `unsafe` block, continued on the following `//` lines, and `// ASM:` on a hand-assembled byte literal, naming the instruction those bytes are. `SPEC`, `INVARIANT`, `PERF` and section dividers are not exceptions. That content belongs in the enclosing item's rustdoc, or it is not written.
-    - The gate runs `scripts/strip_comments.py --check`. It removes every other `//` and `/* */` from `crates/**/*.rs`. It leaves rustdoc, `// SAFETY:` and `// ASM:` alone. Do not strip `///` to rewrite it. The item docs are the comments.
+    - The gate runs `scripts/check/strip_comments.py --check`. It removes every other `//` and `/* */` from `crates/**/*.rs`. It leaves rustdoc, `// SAFETY:` and `// ASM:` alone. Do not strip `///` to rewrite it. The item docs are the comments.
     - JSDoc tags map to rustdoc like this. @param becomes an `# Arguments` bullet, @returns `# Returns`, @throws `# Errors`, @example `# Examples`, @see a [`link`], @deprecated `#[deprecated(note)]`, @typedef and @property struct and field docs, @internal a private item that is still documented, and @todo an issue, never a comment in code.
 
   typesafety:
@@ -108,14 +108,14 @@ rules:
     - From and TryFrom for conversions, `#[must_use]` on builders and results.
 
   testing:
-    - cargo test --workspace covers the units; scripts/smoke.py drives the real server over JSON-RPC stdio and must exit 0. Both run inside the gate.
+    - cargo test --workspace covers the units; scripts/run/smoke.py drives the real server over JSON-RPC stdio and must exit 0. Both run inside the gate.
     - Engine tests are pure. Known byte sequences and hand-built structs; no fixtures on disk unless tiny and license-free.
     - The test binary is itself a real PE, so parsing current_exe() is the end-to-end loader test on Windows.
     - Determinism tests come before convenience features. Same input, two runs, identical bytes.
     - Every fix comes with a test. A decompiler fix extends crates/borer-engine/tests/decompile.rs; a lifter fix adds a test that checks the lift against the emulator, like the existing *_agrees_with_the_emulator ones.
 
   toolchain:
-    - The gate is one command, `python scripts/gate.py`. It runs the commit message check, cargo fmt, cargo clippy --workspace --all-targets with -D warnings, cargo test, cargo doc with private items and warnings as errors, cargo deny (bans, licenses, sources), the dogfood sweep, typos, ruff check and ruff format --check, and scripts/smoke.py. --check is what CI runs and --fast skips the slow tail. Green before every commit; say "gate not run" when it was not.
+    - The gate is one command, `python scripts/gate.py`. It runs the commit message check, cargo fmt, cargo clippy --workspace --all-targets with -D warnings, cargo test, cargo doc with private items and warnings as errors, cargo deny (bans, licenses, sources), the dogfood sweep, typos, ruff check and ruff format --check, and scripts/run/smoke.py. --check is what CI runs and --fast skips the slow tail. Green before every commit; say "gate not run" when it was not. The helpers live in scripts/check, scripts/run, and scripts/dev; scripts/harness is the shared root and MCP client.
     - Check the gate's own exit status, never a pipeline's. Write `python scripts/gate.py > log 2>&1 && git commit ...`, not `gate.py | tail`.
     - Lint levels live in Cargo.toml [workspace.lints], and every crate sets `[lints] workspace = true`. Tool settings live in rustfmt.toml, clippy.toml, deny.toml, typos.toml, ruff.toml and .editorconfig. rust-toolchain.toml pins the toolchain, and rust-version in Cargo.toml moves with it.
     - Never silence a lint to pass the gate. Fix the code, or put `#[expect(lint, reason = "...")]` on the one site with the reason spelled out; a bare `#[allow]` is a review failure.
@@ -154,7 +154,7 @@ git:
   - Plain ASCII, no em or en dashes, no emoji.
   - One commit, one concern, and the tree builds green at every commit. Work that touches several concerns is several commits, each with its own tests.
   - Never commit build output or anything .gitignore covers.
-  - scripts/commits.py checks every unpushed commit message, and the gate runs it first.
+  - scripts/check/commits.py checks every unpushed commit message, and the gate runs it first.
   - Parallel agents never share a working tree. Each works in its own git worktree on its own branch and keeps work in progress as commits there, never in git stash, since every worktree of a repository shares one stash stack.
 
 roadmap:

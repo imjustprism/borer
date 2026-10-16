@@ -12,7 +12,7 @@ ignore = [
 
 [lint.per-file-ignores]
 # smoke.py is one long top-level procedure: late imports mark its sections
-"scripts/smoke.py" = ["E402"]
+"scripts/run/smoke.py" = ["E402"]
 
 [format]
 quote-style = "double"

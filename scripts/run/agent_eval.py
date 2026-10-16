@@ -2,7 +2,7 @@
 """Agent-task eval: replay fixture tasks against the real server and report what
 each one costs an agent.
 
-Usage: python scripts/agent_eval.py [path-to-borer.exe] [--update]
+Usage: python scripts/run/agent_eval.py [path-to-borer.exe] [--update]
 
 Each task is a question with a known answer on the crackme fixture
 (crates/borer-fixtures/examples/crackme.rs, which `cargo build -p
@@ -22,7 +22,7 @@ or the protocol JSON, with the fixture's path counted as `<bin>` and the
 repository's as `<root>`, so the directory a checkout sits in does not move
 the count) and whether the
 fact was found. The rows are compared with the baseline in
-scripts/agent_eval.tsv: a fact the baseline found and this run does not
+scripts/run/agent_eval.tsv: a fact the baseline found and this run does not
 fails the run (exit 1); calls and bytes are reported as deltas, never as a
 failure, so a change that costs or saves bytes shows its effect without
 blocking. --update rewrites the baseline. Two runs print the same bytes.
@@ -34,13 +34,14 @@ import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mcp import Client  # noqa: E402
+from harness.client import Client  # noqa: E402
+from harness.root import ROOT  # noqa: E402
 
-BASELINE = os.path.join(ROOT, "scripts", "agent_eval.tsv")
+BASELINE = str(Path(__file__).resolve().parent / "agent_eval.tsv")
 
 # A call is (tool, arguments); a tool name starting with "@" is a protocol
 # read instead: "@instructions" is the initialize answer's instructions,
@@ -529,7 +530,7 @@ def _dotnet_blob() -> bytes:
         pe[at : at + len(data)] = data
 
     sig, opt = 0x80, 0x80 + 24
-    row = opt + 0xF0
+    section = opt + 0xF0
     put(0, b"MZ")
     put(0x3C, d(0x80))
     put(sig, b"PE\0\0")
@@ -544,9 +545,9 @@ def _dotnet_blob() -> bytes:
     put(opt + 108, d(16))
     put(opt + 112 + 14 * 8, d(0x1000) + d(72))
     raw = len(text_sec) + (-len(text_sec) % 0x200)
-    put(row, b".text")
+    put(section, b".text")
     for at, v in ((8, len(text_sec)), (12, 0x1000), (16, raw), (20, 0x200), (36, 0x60000020)):
-        put(row + at, d(v))
+        put(section + at, d(v))
     return bytes(pe) + pad(text_sec) + bytes(raw - len(pad(text_sec)))
 
 
@@ -944,10 +945,11 @@ def answer(client: Client, tool: str, args: dict) -> str:
     return "\n".join(c.get("text", "") for c in reply["result"].get("content", []))
 
 
-def spellings(path: str) -> list[str]:
+def spellings(path: str | os.PathLike[str]) -> list[str]:
     """A path as the answers may spell it: as given, and with either separator,
     plain or escaped as a C string writes a backslash."""
-    forms = {path, path.replace("\\", "/"), path.replace("/", "\\")}
+    text = os.fspath(path)
+    forms = {text, text.replace("\\", "/"), text.replace("/", "\\")}
     forms |= {f.replace("\\", "\\\\") for f in list(forms)}
     return sorted(forms, key=len, reverse=True)
 

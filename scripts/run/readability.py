@@ -2,15 +2,15 @@
 """Mechanical readability metrics for borer's pseudo-C, with a baseline gate.
 
 Usage:
-  python scripts/readability.py run <borer.exe> [--baseline FILE [--update]]
+  python scripts/run/readability.py run <borer.exe> [--baseline FILE [--update]]
                                 [--only TAG,TAG] [--out DIR] [--quiet]
-  python scripts/readability.py measure <dir> [--source <tag>=<file.c> ...] [--tsv FILE]
+  python scripts/run/readability.py measure <dir> [--source <tag>=<file.c> ...] [--tsv FILE]
   (both take --examples N: example lines printed per pattern, default 2)
 
 `run` decompiles a deterministic sample of each input in INPUTS (all its
 functions up to WANT, else every k-th by entry, functions over INSTR_MAX
 instructions left out), one MCP session per binary, and measures it. With
---baseline (the gate passes scripts/readability.tsv) it compares the counts
+--baseline (the gate passes scripts/run/readability.tsv) it compares the counts
 with the stored ones, prints every metric that moved as better, worse or
 WORSE, and exits 1 when any is WORSE: beyond its tolerance (see `compare`);
 --update merges this run's rows into the baseline instead, which a commit
@@ -50,6 +50,7 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 # ---- lexical sets ----
 
@@ -936,7 +937,7 @@ def collect(client, binary: str, want: int = WANT) -> list[Function]:
 
 EXIT_WAIT = 120
 """Seconds a server is given to exit once its input closes: dropping a
-large binary's analysis takes more than the ten mcp.py waits on a machine
+large binary's analysis takes more than the ten seconds the shared client waits on a machine
 busy with builds, and the measurement is already in hand."""
 
 
@@ -1038,9 +1039,12 @@ def main(argv: list[str]) -> int:
     def opt(name: str) -> str | None:
         return args[args.index(name) + 1] if name in args else None
 
-    sources = dict(
-        a.partition("=")[::2] for i, a in enumerate(args) if i and args[i - 1] == "--source"
-    )
+    sources = {
+        key: value
+        for i, a in enumerate(args)
+        if i and args[i - 1] == "--source"
+        for key, _, value in (a.partition("="),)
+    }
     nex = int(opt("--examples") or 2)
     quiet = "--quiet" in args
     rows: dict[str, dict] = {}
@@ -1049,17 +1053,19 @@ def main(argv: list[str]) -> int:
         for tag in sorted(f[:-4] for f in os.listdir(outdir) if f.endswith(".txt")):
             path = os.path.join(outdir, f"{tag}.txt")
             rows[tag] = row_of(tag, split_dump(path), sources.get(tag), nex, quiet)
-        if opt("--tsv"):
-            write_tsv(opt("--tsv"), rows)
+        tsv = opt("--tsv")
+        if tsv:
+            write_tsv(tsv, rows)
         return 0
     if args[0] != "run":
         print(__doc__)
         return 2
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from mcp import Client  # noqa: PLC0415
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from harness.client import Client
 
     exe = os.path.abspath(args[1])
-    only = set(opt("--only").split(",")) if opt("--only") else None
+    only_arg = opt("--only")
+    only = set(only_arg.split(",")) if only_arg else None
     t0 = time.time()
     for tag, var, parts, src in INPUTS:
         if only is not None and tag not in only:
@@ -1074,9 +1080,10 @@ def main(argv: list[str]) -> int:
             funcs = collect(client, path)
         finally:
             shut(client)
-        if opt("--out"):
-            os.makedirs(opt("--out"), exist_ok=True)
-            with open(os.path.join(opt("--out"), f"{tag}.txt"), "w", encoding="utf-8") as f:
+        out = opt("--out")
+        if out:
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, f"{tag}.txt"), "w", encoding="utf-8") as f:
                 f.writelines(f"==== {fn.entry} {fn.name} 0\n{fn.text}\n" for fn in funcs)
         source = os.path.join(os.path.dirname(path), src) if src else None
         rows[tag] = {"input": digest(path), **row_of(tag, funcs, source, nex, quiet)}

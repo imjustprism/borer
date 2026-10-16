@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the determinism contract: same binary, same query, same bytes.
 
-    python scripts/determinism.py [borer.exe] [target]
+    python scripts/run/determinism.py [borer.exe] [target]
 
 The contract every other guarantee rests on is that an answer does not
 change between runs. Nothing in the engine is allowed to depend on a clock,
@@ -31,8 +31,11 @@ import hashlib
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from harness.root import ROOT  # noqa: E402
 
 # One entry per command shape worth checking, with arguments that reach
 # something on any binary. The emulator-driven ones matter most: they run

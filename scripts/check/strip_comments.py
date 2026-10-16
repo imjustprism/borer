@@ -6,7 +6,7 @@ Rustdoc (`///`, `//!`, `/**`, `/*!`) stays. So does a `// SAFETY:` or
 Every other `//` comment and every `/* */` block comment is deleted.
 Strings, character literals and lifetimes are not comments.
 
-Usage: python scripts/strip_comments.py [--check]
+Usage: python scripts/check/strip_comments.py [--check]
 `--check` exits 1 when a file would change and writes nothing.
 """
 
@@ -15,7 +15,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from harness.root import ROOT  # noqa: E402
+
 CRATES = ROOT / "crates"
 
 
