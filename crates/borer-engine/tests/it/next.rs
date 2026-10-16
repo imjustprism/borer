@@ -9,7 +9,9 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::render::{NEXT_MAX, function_summary, next_steps};
+use borer_engine::analysis::render::{
+    NEXT_MAX, function_summary, next_steps, partial_tsv, solve_tsv,
+};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program};
 
@@ -40,7 +42,8 @@ fn a_switch_on_an_argument_hints_its_scenarios() {
     );
 }
 
-/// A loop that xors a buffer in place points at a run of it.
+/// A loop that xors a buffer in place points at a run of it, and is not a
+/// partial product check.
 #[test]
 fn a_decoder_loop_hints_an_emulation() {
     let code = [
@@ -51,12 +54,73 @@ fn a_decoder_loop_hints_an_emulation() {
         0x72, 0xf3, // ASM: jb 0x401002
         0xc3, // ASM: ret
     ];
+    let hinted = steps(&code);
     assert_eq!(
-        steps(&code),
+        hinted,
         [
             "borer://emulate/0x401000 (a loop that mixes bytes by xor or rotate and stores them: run it)"
         ]
     );
+    let p = image(Arch::X86_64, &code, &[]);
+    let a = Analysis::compute(&p);
+    let err = partial_tsv(&p, &a, &Overlay::default(), "0x401000")
+        .expect_err("a decoder is not this shape");
+    assert!(err.contains("no partial product check"), "{err}");
+    assert!(!err.contains('#'), "{err}");
+}
+
+/// A counted loop comparing the top bits of `secret * k[i]` with a byte
+/// table is a hidden-number problem: lattice reduction, not more samples.
+#[test]
+fn a_partial_product_loop_is_a_hidden_number_problem() {
+    let code = [
+        0x45, 0x31, 0xff, // ASM: xor r15d, r15d
+        0x4c, 0x8d, 0x0d, 0xd6, 0x11, 0x00, 0x00, // ASM: lea r9, [rip+0x11d6] -> 0x4021e0
+        0x4c, 0x8d, 0x05, 0xef, 0x0f, 0x00, 0x00, // ASM: lea r8, [rip+0xfef] -> 0x402000
+        0xeb, 0x00, // ASM: jmp 0x401013
+        0x48, 0x8b, 0xc1, // ASM: mov rax, rcx
+        0x4b, 0xf7, 0x24, 0xf8, // ASM: mul qword [r8+r15*8]
+        0x48, 0xc1, 0xea, 0x3d, // ASM: shr rdx, 61
+        0x43, 0x3a, 0x14, 0x39, // ASM: cmp dl, [r9+r15]
+        0x49, 0xff, 0xc7, // ASM: inc r15
+        0x49, 0x83, 0xff, 0x3c, // ASM: cmp r15, 0x3c
+        0x7d, 0x02, // ASM: jge 0x40102d
+        0xeb, 0xe6, // ASM: jmp 0x401013
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let hinted = steps(&code);
+    assert!(
+        hinted
+            .first()
+            .is_some_and(|s| s.starts_with("borer://partial/0x401000")),
+        "{hinted:?}"
+    );
+    let partial_at = hinted
+        .iter()
+        .position(|s| s.contains("borer://partial/"))
+        .expect("a partial step");
+    for other in ["borer://solve/", "borer://emulate/"] {
+        if let Some(at) = hinted.iter().position(|s| s.contains(other)) {
+            assert!(partial_at < at, "{hinted:?}");
+        }
+    }
+    let p = image(Arch::X86_64, &code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let report = partial_tsv(&p, &a, &o, "0x401000").expect("the loop is this shape");
+    for needle in [
+        "60 iterations",
+        "by 61",
+        "0x4021e0",
+        "rcx",
+        "hidden number problem",
+        "not more samples",
+    ] {
+        assert!(report.contains(needle), "{needle} missing:\n{report}");
+    }
+    let solved = solve_tsv(&p, &a, &o, "0x401000").expect("solves");
+    assert!(solved.contains("borer://partial/0x401000"), "{solved}");
 }
 
 /// A compare of the argument against a telling constant points at the

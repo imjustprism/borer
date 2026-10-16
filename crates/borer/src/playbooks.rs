@@ -83,8 +83,9 @@ pub(crate) const FIND_CHECK: &str = "Find the code that validates the <what> in 
      3. function_summary, then decompile, the referencing functions; follow callers \
      (xrefs) upward until you reach the function that branches on the result.\n\
      4. In the decompilation, identify the comparison (== / != / memcmp-style loop), \
-     the inputs feeding it, and every transformation on the way; quote the exact \
-     pseudo-C lines with their addresses.\n\
+     the inputs feeding it, and every transformation on the way; a counted loop \
+     comparing a few bits of a product is borer://partial/<address> (lattice, not \
+     more samples); quote the exact pseudo-C lines with their addresses.\n\
      5. Explain the algorithm in plain language, state what input would pass, and \
      propose names for the functions and globals involved; apply them with \
      set_name(dry_run=false) and set_comment, then save_project.";
@@ -181,6 +182,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "diverge",
             "vectors",
             "solve",
+            "partial",
             "scenario",
             "scenarios",
             "oracle",

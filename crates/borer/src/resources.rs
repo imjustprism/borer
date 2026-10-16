@@ -657,6 +657,25 @@ impl BorerServer {
         self.refusing(Feature::Emulate, |p, a, o| render::solve_tsv(p, a, o, spec))
     }
 
+    /// Reports a counted loop that compares a few bits of a product.
+    ///
+    /// A loop with no such check is a refusal, not a `#` line: an empty
+    /// success would read as a check the function does not have.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - The function's address or name.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, it has no code analysis, or the function
+    /// has no partial product check.
+    pub(crate) fn partial_text(&self, address: &str) -> Result<String, ErrorData> {
+        self.refusing(Feature::Decompile, |p, a, o| {
+            render::partial_tsv(p, a, o, address)
+        })
+    }
+
     /// Says what is at an address and where each fact came from.
     ///
     /// # Arguments

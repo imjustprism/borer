@@ -74,6 +74,7 @@ commands:
   layout <binary> <addr>[,reg]             propose a struct from what a function does through a pointer
   why <binary> <address|name>              what is at an address, and where each fact came from
   solve <binary> <addr>[,aN]               find an argument value that changes the answer
+  partial <binary> <address>               a counted loop comparing a few bits of a product: lattice, not more samples
   flat <binary> [address]                  functions whose control flow was flattened into a switch
   vm <binary> [address]                    find the VM dispatch loops, or describe one's handlers
   devirt <binary> <address>[,budget=N,...]  run a virtualized function and recover its virtual program; budget=N pushes past a long bootstrap
@@ -286,6 +287,8 @@ enum Query {
     Why,
     /// `solve <addr>[,aN]`: find an argument value that changes the answer.
     Solve,
+    /// `partial <address>`: a counted loop comparing a few bits of a product.
+    Partial,
     /// `flat [address]`: functions whose control flow was flattened into a switch.
     Flat,
     /// `vm [address]`: the VM dispatch loops found, or one loop's handlers.
@@ -379,6 +382,7 @@ impl Query {
             "layout" => Self::Layout,
             "why" => Self::Why,
             "solve" => Self::Solve,
+            "partial" => Self::Partial,
             "flat" => Self::Flat,
             "vm" => Self::Vm,
             "devirt" => Self::Devirt,
@@ -428,6 +432,7 @@ impl Query {
             | Self::Layout
             | Self::Why
             | Self::Solve
+            | Self::Partial
             | Self::Flat
             | Self::Vm
             | Self::Devirt
@@ -2066,6 +2071,15 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!(
                 "{}",
                 render::solve_tsv(&s.program, &a, &s.overlay, spec).map_err(anyhow::Error::msg)?
+            );
+        }
+        Query::Partial => {
+            let a = s.analysis(Feature::Decompile)?;
+            let target = arg(args, 2, "partial needs an address")?;
+            print!(
+                "{}",
+                render::partial_tsv(&s.program, &a, &s.overlay, target)
+                    .map_err(anyhow::Error::msg)?
             );
         }
         Query::Flat => {

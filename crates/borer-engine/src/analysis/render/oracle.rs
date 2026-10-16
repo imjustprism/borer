@@ -69,6 +69,8 @@ pub(super) struct Candidate {
 /// This is not a solver. A check that hashes its input before comparing, or
 /// derives the expected value at run time, has no constant to harvest and
 /// the report says nothing was distinguished rather than inventing a value.
+/// When that flat answer is a counted loop leaking a few bits of a product,
+/// the report names [`partial_tsv`] instead of asking for another sample.
 /// An argument index that cannot be read is refused rather than taken as the
 /// first argument, so a caller who asked about `a2` and mistyped it does not
 /// read a report about `a1` with nothing to say the question changed; so is
@@ -171,6 +173,9 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             out,
             "# every candidate {same}, so none of its own constants decides this"
         );
+        if let Some(hint) = partial::partial_hint(p, a, o, entry) {
+            let _ = writeln!(out, "# next: {hint}");
+        }
         let register = pass.regs.get(slot).map(|r| r.full_register());
         let dereferenced = register.is_some_and(|r| {
             instrs.iter().any(|i| {

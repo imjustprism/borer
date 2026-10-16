@@ -4814,6 +4814,7 @@ impl BorerServer {
             ("layout", Some(spec)) => self.layout_text(&spec)?,
             ("why", Some(target)) => self.why_text(&target)?,
             ("solve", Some(spec)) => self.solve_text(&spec)?,
+            ("partial", Some(address)) => self.partial_text(&address)?,
             ("flat", None) => self.flattening_text("")?,
             ("flat", Some(filter)) => self.flattening_text(&filter)?,
             ("devirt", Some(address)) => self.devirtualize_text(&address)?,
@@ -5166,6 +5167,11 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://solve/{spec}",
         "Find an argument value that makes a check answer differently: spec is <address>[,aN] (the decompiler's aN, a1 by default). Every constant the function compares against is tried and the answers grouped, so a value standing apart is the one it wants, with the comparison it came from",
         "borer://solve/{entry},a1",
+    ),
+    (
+        "borer://partial/{address}",
+        "A counted loop comparing a few bits of a product to a byte table: the iterations, the bit window, the table and the loop-invariant multiplicand. That shape is a hidden-number problem, solved by lattice reduction and not by more samples",
+        "borer://partial/{entry}",
     ),
     (
         "borer://why/{address}",

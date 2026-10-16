@@ -6,8 +6,9 @@
 //! reliably than it reads a catalogue: an agent rebuilt an emulator by hand
 //! while `borer://emulate` was there to be read. Each rule fires on a fact
 //! the analysis already has (a dispatch loop, a flattened switch, a switch
-//! on an argument, a compare against a telling constant, a loop that mixes
-//! and stores bytes, fields read through an argument), the rules are tried
+//! on an argument, a counted loop comparing a few bits of a product, a
+//! compare against a telling constant, a loop that mixes and stores bytes,
+//! fields read through an argument), the rules are tried
 //! in a fixed order, and the first [`NEXT_MAX`] that fire are kept.
 
 use super::*;
@@ -17,7 +18,15 @@ use crate::analysis::decompile::{EXPLODE_MAX, decompile, lift};
 pub const NEXT_MAX: usize = 2;
 
 /// The resources a next step can name, in the order the rules are tried.
-pub const NEXT_RESOURCES: [&str; 6] = ["vm", "flat", "scenarios", "solve", "emulate", "layout"];
+pub const NEXT_RESOURCES: [&str; 7] = [
+    "vm",
+    "flat",
+    "scenarios",
+    "partial",
+    "solve",
+    "emulate",
+    "layout",
+];
 
 /// Fewest distinct offsets a function dereferences through one argument
 /// before the argument reads as a pointer to a structure.
@@ -73,10 +82,11 @@ fn steps_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Vec<String> {
     };
     let text = decompile(p, a, o, entry).unwrap_or_default();
     let params = parameters(&text);
-    let rules: [&dyn Fn() -> Option<String>; 6] = [
+    let rules: [&dyn Fn() -> Option<String>; 7] = [
         &|| vm_step(p, a, f),
         &|| flat_step(a, f),
         &|| switch_step(a, f, &text),
+        &|| partial_step(p, a, o, f),
         &|| check_step(p, a, f, bits, &text, params),
         &|| loop_step(p, f, bits),
         &|| layout_step(p, f, bits, &text, params),
@@ -179,6 +189,24 @@ fn switched_argument(line: &str) -> Option<u32> {
         return None;
     }
     n.parse().ok().filter(|n| *n > 0)
+}
+
+/// Points a counted loop that leaks a few bits of a product at the
+/// hidden-number report ([`partial_tsv`]), ahead of sampling it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// The step, or `None` when the function has no such loop, or the
+/// multiplicand was not shown to be loop-invariant.
+fn partial_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function) -> Option<String> {
+    partial::partial_hint(p, a, o, f.entry)
 }
 
 /// Points a function that takes arguments and compares against a telling

@@ -77,6 +77,7 @@ fn every_template_example_reads() {
     const LACKING: &[(&str, &str)] = &[
         ("flat", "no flattening dispatch"),
         ("solve", "takes no parameters"),
+        ("partial", "no partial product check"),
         ("vm", "no dispatch loop"),
         ("script", "scan.rhai"),
         ("anchors", "client.anchors"),
