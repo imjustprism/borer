@@ -20,6 +20,9 @@ use crate::emulate::a64::{FMOV_IMM, SYSREG_NZCV, SYSREG_TPIDR_EL0, expand_imm, v
 use crate::isa::a64::{self, Insn, Mnemonic, Opnd, Reg};
 use crate::num::lo8;
 
+/// Bits 28 to 31, the only bits an `msr` of `NZCV` writes.
+const NZCV_MASK: u64 = 0xf000_0000;
+
 /// How an add or subtract forms its second operand and its carry in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Form {
@@ -391,9 +394,17 @@ impl Lift<'_, '_> {
                 let word = flags::nzcv_word(&self.ex.flags);
                 self.write(rt, 64, word);
             }
-            (SYSREG_TPIDR_EL0, true) if register_form => self.tpidr = self.read(rt),
+            (SYSREG_TPIDR_EL0, true) if register_form => {
+                let src = self.read(rt);
+                self.tpidr = if src.any_var(&|_| true) {
+                    self.ex.tmp_of(&src, Ty::U64)
+                } else {
+                    src
+                };
+            }
             (SYSREG_NZCV, true) if register_form => {
-                self.ex.flags = flags::nzcv_flags(self.read(rt));
+                self.ex.flags =
+                    Flags::Carry(fold(Op::And, self.read(rt), Expr::Const(NZCV_MASK), 64));
             }
             _ => return None,
         }
@@ -661,10 +672,11 @@ impl Lift<'_, '_> {
     /// `ccmp` and `ccmn`: the flags of a compare when the condition holds,
     /// else the immediate flags.
     ///
-    /// The flags are left as the truth of the condition the next reader
-    /// in the block asks: the condition held and the compare satisfies the
-    /// reader, or it failed and the immediate flags do. With no reader in
-    /// the block, nothing can say which condition the flags answer, and
+    /// An `mrs` of `NZCV` before the next flag write leaves the whole word:
+    /// the compare's N, Z, C and V when the condition holds, else the
+    /// immediate in bits 31 to 28. Otherwise the flags are the truth of the
+    /// condition the next reader in the block asks. With no such reader and
+    /// no such `mrs`, nothing can say which condition the flags answer, and
     /// they are left unknown.
     ///
     /// # Arguments
@@ -690,14 +702,19 @@ impl Lift<'_, '_> {
         } else {
             Flags::Cmp(x, y, width8(bits))
         };
-        self.ex.flags = match next_reader(later) {
-            Some(asked) => {
-                let then = flags::value(&compared, asked);
-                let otherwise = Expr::Const(u64::from(holds(asked, nzcv)));
-                let held = ternary(flags::condition(&self.ex.flags, c), then, otherwise);
-                flags::answer(asked, held)
+        self.ex.flags = if flags::mrs_nzcv_before_write(later) {
+            let held = flags::condition(&self.ex.flags, c);
+            flags::conditional_nzcv(held, &compared, nzcv)
+        } else {
+            match next_reader(later) {
+                Some(asked) => {
+                    let then = flags::value(&compared, asked);
+                    let otherwise = Expr::Const(u64::from(holds(asked, nzcv)));
+                    let held = ternary(flags::condition(&self.ex.flags, c), then, otherwise);
+                    flags::answer(asked, held)
+                }
+                None => Flags::Unknown,
             }
-            None => Flags::Unknown,
         };
         Some(())
     }

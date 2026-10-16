@@ -9,9 +9,12 @@
 //! the x86 carry: `hs` reads as `b` and `lo` as `ae`. An `ands` (and `tst`)
 //! leaves a test with carry and overflow clear. A `ccmp` leaves the truth
 //! of the condition the next reader asks ([`Flags::Truth`]), tagged with
-//! the x86 code standing for that condition ([`tag`]). A register `msr` of
-//! `NZCV` leaves [`Flags::Carry`] holding that word in bits 28 to 31, and
-//! a condition reads those bits; any other `msr` sets no flags.
+//! the x86 code standing for that condition ([`tag`]), unless an `mrs` of
+//! `NZCV` reads those flags before anything sets them again: then it leaves
+//! [`Flags::Carry`] holding the whole word, the compare when the condition
+//! holds and the immediate otherwise. A register `msr` of `NZCV` leaves
+//! [`Flags::Carry`] holding that word in bits 28 to 31, and a condition
+//! reads those bits; any other `msr` sets no flags.
 
 use super::super::expr::{Cc, Cond, Expr, Flags, Op, fold, ternary};
 use crate::emulate::a64::{SYSREG_NZCV, SYSREG_TPIDR_EL0};
@@ -25,10 +28,9 @@ const N_BIT: u64 = 31;
 const Z_BIT: u64 = 30;
 /// Bit 29 of an `NZCV` word: the C flag.
 const C_BIT: u64 = 29;
-/// Bit 28 of an `NZCV` word: the V flag.
+/// Bit 28 of an `NZCV` word: the V flag, and the shift that places a
+/// conditional compare's immediate there.
 const V_BIT: u64 = 28;
-/// Bits 28 to 31, the only bits `msr NZCV` writes and `mrs NZCV` reads back.
-const NZCV_MASK: u64 = 0xf000_0000;
 
 /// What a conditional branch tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -496,7 +498,11 @@ pub(super) fn live_after(instrs: &[Insn], flags_out: bool) -> Vec<u32> {
         if writes(i) {
             live = 0;
         }
-        if reads(i).is_some() || mrs_nzcv(i) {
+        let reads_nzcv = i.mnemonic == Mnemonic::Mrs && {
+            let (_, field, _) = system_access(i);
+            field == SYSREG_NZCV
+        };
+        if reads(i).is_some() || reads_nzcv {
             live = u32::MAX;
         }
     }
@@ -527,6 +533,51 @@ pub(super) fn system_access(i: &Insn) -> (Reg, u32, bool) {
     (rt, field, register_form)
 }
 
+/// Tells whether an `mrs` of `NZCV` reads the flags before anything sets
+/// them again.
+///
+/// [`reads`] does not report that `mrs`: a block that leads with one does
+/// not keep a predecessor's flags, and replay still checks the block. This
+/// only says the flags just set are read back as a whole word.
+///
+/// # Arguments
+///
+/// * `later` - The block's instructions after the one setting the flags.
+pub(super) fn mrs_nzcv_before_write(later: &[Insn]) -> bool {
+    for i in later {
+        if i.mnemonic == Mnemonic::Mrs {
+            let (_, field, _) = system_access(i);
+            if field == SYSREG_NZCV {
+                return true;
+            }
+        }
+        if writes(i) {
+            return false;
+        }
+    }
+    false
+}
+
+/// The flags a conditional compare leaves when an `mrs` of `NZCV` reads
+/// them back.
+///
+/// The word is the compare's N, Z, C and V when `held` is true, and the
+/// immediate `nzcv` in bits 31 to 28 otherwise. A later condition reads
+/// those bits. The word is not the truth of one condition, and it is not
+/// [`Flags::Unknown`], which [`nzcv_word`] would read as zero.
+///
+/// # Arguments
+///
+/// * `held` - Whether the compare's own condition holds.
+/// * `compared` - The compare performed when `held` is true.
+/// * `nzcv` - The immediate flags, N in bit 3 down to V in bit 0.
+pub(super) fn conditional_nzcv(held: Cond, compared: &Flags, nzcv: u64) -> Flags {
+    let then = nzcv_word(compared);
+    let shift = u32::try_from(V_BIT).unwrap_or(0);
+    let otherwise = Expr::Const(nzcv << shift);
+    Flags::Carry(ternary(held, then, otherwise))
+}
+
 /// Tells whether an `mrs` or `msr` is one the lifter models.
 ///
 /// Modeled moves are `TPIDR_EL0` and `NZCV`. An `msr` is modeled only in
@@ -541,28 +592,6 @@ pub(in crate::analysis::decompile) fn modeled_system(i: &Insn) -> bool {
     let known = field == SYSREG_TPIDR_EL0 || field == SYSREG_NZCV;
     (i.mnemonic == Mnemonic::Mrs && known)
         || (i.mnemonic == Mnemonic::Msr && known && register_form)
-}
-
-/// Tells whether an instruction is `mrs NZCV`.
-///
-/// # Arguments
-///
-/// * `i` - The instruction.
-fn mrs_nzcv(i: &Insn) -> bool {
-    if i.mnemonic != Mnemonic::Mrs {
-        return false;
-    }
-    let (_, field, _) = system_access(i);
-    field == SYSREG_NZCV
-}
-
-/// The flags an `msr NZCV` leaves: the source masked to bits 28 to 31.
-///
-/// # Arguments
-///
-/// * `value` - The register written into `NZCV`.
-pub(super) fn nzcv_flags(value: Expr) -> Flags {
-    Flags::Carry(fold(Op::And, value, Expr::Const(NZCV_MASK), 64))
 }
 
 /// The `NZCV` word the flags hold, in bits 28 to 31.

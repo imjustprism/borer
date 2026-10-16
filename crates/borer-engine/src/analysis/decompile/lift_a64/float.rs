@@ -290,6 +290,11 @@ impl Lift<'_, '_> {
     /// `fccmp` and `fccmpe`: the flags of a float compare when the
     /// condition holds, else the immediate flags, read as [`Self::float_compare`].
     ///
+    /// An `mrs` of `NZCV` before the next flag write leaves the whole word:
+    /// the compare's N, Z, C and V when the condition holds, else the
+    /// immediate in bits 31 to 28. Otherwise the flags are the truth of the
+    /// next reader's condition, or unknown when the block has none.
+    ///
     /// # Arguments
     ///
     /// * `i` - The instruction.
@@ -308,14 +313,19 @@ impl Lift<'_, '_> {
             imm(i, 2)?,
         );
         let compared = Flags::Float(a, b, width8(bits));
-        self.ex.flags = match next_reader(later) {
-            Some(asked) => {
-                let then = flags::value(&compared, asked);
-                let otherwise = Expr::Const(u64::from(flags::holds(asked, nzcv)));
-                let held = ternary(flags::condition(&self.ex.flags, c), then, otherwise);
-                flags::answer(asked, held)
+        self.ex.flags = if flags::mrs_nzcv_before_write(later) {
+            let held = flags::condition(&self.ex.flags, c);
+            flags::conditional_nzcv(held, &compared, nzcv)
+        } else {
+            match next_reader(later) {
+                Some(asked) => {
+                    let then = flags::value(&compared, asked);
+                    let otherwise = Expr::Const(u64::from(flags::holds(asked, nzcv)));
+                    let held = ternary(flags::condition(&self.ex.flags, c), then, otherwise);
+                    flags::answer(asked, held)
+                }
+                None => Flags::Unknown,
             }
-            None => Flags::Unknown,
         };
         Some(())
     }

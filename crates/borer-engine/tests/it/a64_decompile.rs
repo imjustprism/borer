@@ -11,7 +11,7 @@
 )]
 
 use borer_engine::analysis::decompile::decompile;
-use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+use borer_engine::analysis::decompile::replay::{Claim, replay_function, replay_tsv};
 use borer_engine::analysis::decompile::verify_a64::{verify, verify_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Feature, Program, Section, Symbol, SymbolKind};
@@ -601,6 +601,125 @@ fn system_registers_are_the_thread_pointer_and_the_flags() {
         0xd65f_03c0,
     ]);
     assert!(svc.contains("/* asm: svc"), "{svc}");
+}
+
+/// A conditional compare read back by `mrs NZCV` is the compare's flags
+/// when its condition holds, and the immediate in bits 31 to 28 when it
+/// does not.
+///
+/// The words are `ccmp`, `ccmn` and `fccmp`, each after a compare that
+/// sets the flags and before `mrs NZCV`. A check compares every register
+/// the `mrs` writes, from several seeds, and replays the text.
+#[test]
+fn conditional_compare_nzcv_matches_the_machine() {
+    const CCMP_NZCV: [u32; 4] = [
+        // ASM: cmp x0, x1
+        0xeb01_001f,
+        // ASM: ccmp x1, x2, #0x4, ne
+        0xfa42_1024,
+        // ASM: mrs x3, NZCV
+        0xd53b_4203,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    const CCMN_NZCV: [u32; 4] = [
+        // ASM: cmp x0, x1
+        0xeb01_001f,
+        // ASM: ccmn w1, #0x3, #0x9, hs
+        0x3a43_2829,
+        // ASM: mrs x4, NZCV
+        0xd53b_4204,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    const FCCMP_NZCV: [u32; 8] = [
+        // ASM: fmov d0, x0
+        0x9e67_0000,
+        // ASM: fmov d1, x1
+        0x9e67_0021,
+        // ASM: fcmp d0, d1
+        0x1e61_2000,
+        // ASM: fccmp d1, d0, #0xf, gt
+        0x1e60_c42f,
+        // ASM: mrs x13, NZCV
+        0xd53b_420d,
+        // ASM: fccmp d1, d0, #0xf, eq
+        0x1e60_042f,
+        // ASM: mrs x14, NZCV
+        0xd53b_420e,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for words in [&CCMP_NZCV[..], &CCMN_NZCV[..], &FCCMP_NZCV[..]] {
+        let (p, a, text) = decompiled_words(words);
+        assert!(!text.contains("/* asm"), "{text}");
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            let tsv = verify_tsv(&v);
+            assert!(v.checked > 0, "seed {seed}: {tsv}");
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{tsv}");
+            assert!(v.mismatches.is_empty(), "seed {seed}: {text}\n{tsv}");
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `msr TPIDR_EL0` keeps the value it captured when a later `mrs` writes
+/// that register.
+///
+/// `x0` is an incoming parameter, so the value `msr` reads there is that
+/// parameter and a later write of `x0` does not rebind it. `x16` is not a
+/// parameter: the captured expression is `x16`'s text variable. `cmp`
+/// makes `mrs x16, NZCV` a word large enough to be written out at once,
+/// which rebinds `x16`. The reload into `x0` must still be the pointer
+/// `msr` captured, not that word. The same three moves on `x0` itself,
+/// with no compare between them, stay the captured parameter.
+#[test]
+fn msr_tpidr_keeps_the_value_it_captured() {
+    const CAPTURED: [u32; 5] = [
+        // ASM: msr TPIDR_EL0, x16
+        0xd51b_d050,
+        // ASM: cmp x1, x2
+        0xeb02_003f,
+        // ASM: mrs x16, NZCV
+        0xd53b_4210,
+        // ASM: mrs x0, TPIDR_EL0
+        0xd53b_d040,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    const RELOADS_X0: [u32; 4] = [
+        // ASM: msr TPIDR_EL0, x0
+        0xd51b_d040,
+        // ASM: mrs x0, NZCV
+        0xd53b_4200,
+        // ASM: mrs x0, TPIDR_EL0
+        0xd53b_d040,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for words in [&CAPTURED[..], &RELOADS_X0[..]] {
+        let (p, a, text) = decompiled_words(words);
+        assert!(!text.contains("/* asm"), "{text}");
+        let entry = p.entry.expect("entry");
+        let v = verify(&p, &a, &[entry], 1);
+        assert!(v.checked > 0, "{}", verify_tsv(&v));
+        assert_eq!(v.unreadable, 0, "{text}\n{}", verify_tsv(&v));
+        assert!(v.mismatches.is_empty(), "{text}\n{}", verify_tsv(&v));
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{}", replay_tsv(&r));
+        assert!(
+            r.compared.get(&Claim::Return).copied().unwrap_or(0) > 0,
+            "{text}\n{}",
+            replay_tsv(&r)
+        );
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
 }
 
 /// An atomic is the load, the modification and the store, and `cas` is the
