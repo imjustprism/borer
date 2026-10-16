@@ -486,3 +486,95 @@ fn exclusive_stores_are_a_store_and_a_zero_status() {
         "status should be the constant 0\n{status}"
     );
 }
+
+/// The `MNEMONICS` atomic and `cas` words, plus `ldsmin` and `ldumax`, then
+/// `ret`.
+const ATOMIC_WORDS: [u32; 16] = [
+    // ASM: ldadd x0, x1, [x2]
+    0xf820_0041,
+    // ASM: ldaddal w0, w1, [x2]
+    0xb8e0_0041,
+    // ASM: ldclr x0, x1, [x2]
+    0xf820_1041,
+    // ASM: ldeor w0, w1, [x2]
+    0xb820_2041,
+    // ASM: ldset x0, x1, [x2]
+    0xf820_3041,
+    // ASM: ldsmax w0, w1, [x2]
+    0xb820_4041,
+    // ASM: ldsmin w0, w10, [x11]
+    0xb820_516a,
+    // ASM: ldumin x0, x1, [x2]
+    0xf820_7041,
+    // ASM: ldumax w13, w14, [x11]
+    0xb82d_616e,
+    // ASM: swp x0, x1, [x2]
+    0xf820_8041,
+    // ASM: swpalb w0, w1, [x2]
+    0x38e0_8041,
+    // ASM: ldaddh w0, w1, [x2]
+    0x7820_0041,
+    // ASM: cas x0, x1, [x2]
+    0xc8a0_7c41,
+    // ASM: casal w0, w1, [x2]
+    0x88e0_fc41,
+    // ASM: casb w0, w1, [x2]
+    0x08a0_7c41,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// The emulate case `atomics`, including `ldsmin` and `ldumax`.
+const ATOMIC_CASE: [u32; 15] = [
+    // ASM: ldadd x0, x1, [x2]
+    0xf820_0041,
+    // ASM: ldaddal x0, x3, [x2]
+    0xf8e0_0043,
+    // ASM: ldclr x7, x5, [x4]
+    0xf827_1085,
+    // ASM: ldset x7, x6, [x4]
+    0xf827_3086,
+    // ASM: ldeor x7, x8, [x4]
+    0xf827_2088,
+    // ASM: swp x0, x9, [x4]
+    0xf820_8089,
+    // ASM: ldsmin w0, w10, [x11]
+    0xb820_516a,
+    // ASM: ldsmax w0, w10, [x11]
+    0xb820_416a,
+    // ASM: ldumax w13, w14, [x11]
+    0xb82d_616e,
+    // ASM: ldumin w13, w14, [x11]
+    0xb82d_716e,
+    // ASM: ldaddb w0, w15, [x2]
+    0x3820_004f,
+    // ASM: cas x16, x17, [x4]
+    0xc8b0_7c91,
+    // ASM: casal x19, x20, [x4]
+    0xc8f3_fc94,
+    // ASM: casb w21, w22, [x2]
+    0x08b5_7c56,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// An atomic is the load, the modification and the store, and `cas` is the
+/// conditional store, not an `/* asm */` line.
+///
+/// The words are the `MNEMONICS` encodings from `ldadd` through `casb`, the
+/// `ldsmin` and `ldumax` words beside them, and the emulate case `atomics`.
+#[test]
+fn atomics_are_a_load_a_modification_and_a_store() {
+    for words in [&ATOMIC_WORDS[..], &ATOMIC_CASE[..]] {
+        let (p, a, text) = decompiled_words(words);
+        assert!(!text.contains("/* asm"), "{text}");
+        assert!(text.contains("if ("), "{text}");
+        let entry = p.entry.expect("entry");
+        let v = verify(&p, &a, &[entry], 1);
+        assert!(v.checked > 0, "{}", verify_tsv(&v));
+        assert!(v.mismatches.is_empty(), "{text}\n{}", verify_tsv(&v));
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}

@@ -833,8 +833,12 @@ const CASES: &[Case] = &[
             0xf827_2088,
             // ASM: swp x0, x9, [x4]
             0xf820_8089,
+            // ASM: ldsmin w0, w10, [x11]
+            0xb820_516a,
             // ASM: ldsmax w0, w10, [x11]
             0xb820_416a,
+            // ASM: ldumax w13, w14, [x11]
+            0xb82d_616e,
             // ASM: ldumin w13, w14, [x11]
             0xb82d_716e,
             // ASM: ldaddb w0, w15, [x2]

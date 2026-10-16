@@ -352,17 +352,14 @@ impl Lift<'_, '_> {
             Mnemonic::Str(width) => self.store(i, width),
             Mnemonic::Stxr(width) => self.store_exclusive(i, width),
             Mnemonic::Stxp => self.store_exclusive_pair(i),
+            Mnemonic::Atomic(op, width) => self.atomic(i, op, width),
+            Mnemonic::Cas(width) => self.compare_swap(i, width),
             Mnemonic::Ldp(width) => self.load_pair(i, width),
             Mnemonic::Stp => self.store_pair(i),
             Mnemonic::Ld1 => self.load_group(i),
             Mnemonic::St1 => self.store_group(i),
             Mnemonic::Prfm | Mnemonic::Barrier => Some(()),
-            Mnemonic::Atomic(..)
-            | Mnemonic::Cas(_)
-            | Mnemonic::Svc
-            | Mnemonic::Mrs
-            | Mnemonic::Msr
-            | Mnemonic::Other => None,
+            Mnemonic::Svc | Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Other => None,
         }
     }
 

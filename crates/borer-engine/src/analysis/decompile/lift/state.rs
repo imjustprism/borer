@@ -94,7 +94,7 @@ impl<'a> Exec<'_, 'a> {
     }
 
     /// Returns the machine word type for this bitness.
-    pub(super) fn word_ty(&self) -> Ty {
+    pub(in crate::analysis::decompile) fn word_ty(&self) -> Ty {
         if self.bitness() == 32 {
             Ty::U32
         } else {
@@ -324,7 +324,7 @@ impl<'a> Exec<'_, 'a> {
     /// # Arguments
     ///
     /// * `a` - A virtual address.
-    pub(super) fn is_data(&self, a: u64) -> bool {
+    pub(in crate::analysis::decompile) fn is_data(&self, a: u64) -> bool {
         crate::analysis::decompile::expr::tls_slot(a).is_some()
             || self
                 .ctx
@@ -686,7 +686,7 @@ impl<'a> Exec<'_, 'a> {
     /// * `len` - Its length in bytes, when known.
     /// * `backward` - The direction flag is set: the region ends at `addr`.
     /// * `writes` - The access writes the region.
-    pub(super) fn settle_frame_region(
+    pub(in crate::analysis::decompile) fn settle_frame_region(
         &mut self,
         addr: &Expr,
         len: Option<&Expr>,
@@ -1439,7 +1439,10 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `flight` - The operands, rewritten in place, each with the type a
     ///   temporary holding it is declared with.
-    pub(super) fn protect_memory_around(&mut self, flight: &mut [(&mut Expr, Ty)]) {
+    pub(in crate::analysis::decompile) fn protect_memory_around(
+        &mut self,
+        flight: &mut [(&mut Expr, Ty)],
+    ) {
         /// The first marker id, counted down: far above any temporary.
         const MARK: u32 = u32::MAX - 1;
         if !self.emit || self.ctx.symbolic_only {

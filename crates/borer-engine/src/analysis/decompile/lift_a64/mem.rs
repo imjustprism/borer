@@ -8,12 +8,16 @@
 //! the offset, after the access, the way the machine orders them. An
 //! acquire or release form is its plain form, as for one thread it is.
 //! A store-exclusive is that store and a status of zero, which is how the
-//! machine runs it; it does not fail. The atomics are statements the
-//! lifter does not model ([`super::step`]).
+//! machine runs it; it does not fail. An atomic is that load, the
+//! modification, and the store, with the old value left in the destination;
+//! `cas` stores only when memory matches, and either way leaves the old
+//! value in the compare register.
 
-use super::super::expr::{Expr, Op, Ty, fold, sign_extend};
+use super::super::expr::{Cc, Cond, Expr, Flags, Op, Ty, UnOp, fold, sign_extend, ternary, unary};
+use super::super::lift::EffectKind;
 use super::{Lift, low, shifted};
-use crate::isa::a64::{self, Insn, Mode, Opnd, Reg, Width};
+use crate::isa::a64::{self, Insn, Mode, Opnd, Reg, Rmw, Width};
+use crate::isa::x86::ConditionCode;
 use crate::num::{from_usize, lo8};
 
 /// A base register and the value an access writes back to it.
@@ -243,6 +247,121 @@ impl Lift<'_, '_> {
         self.ex.store_at(addr.clone(), ty, a);
         self.ex.store_at(fold(Op::Add, addr, step, 64), ty, b);
         self.write(status, 32, Expr::Const(0));
+        Some(())
+    }
+
+    /// An atomic read-modify-write (`ldadd`, `ldclr`, `ldeor`, `ldset`,
+    /// `ldsmax`, `ldsmin`, `ldumax`, `ldumin`, `swp`, in every ordering).
+    ///
+    /// Memory takes `op` of its old value and `Rs`, and `Rt` takes the old
+    /// value. The old value is read into a temporary before anything is
+    /// written, so `Rt` and `Rs` being one register still uses the value
+    /// the instruction read, and a later read of `Rt` does not see the
+    /// bytes the store just wrote. Ordering adds nothing one thread observes.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction: `Rs`, `Rt`, address.
+    /// * `op` - The modification.
+    /// * `width` - What it moves.
+    pub(super) fn atomic(&mut self, i: &Insn, op: Rmw, width: Width) -> Option<()> {
+        let (rs, bits) = register(i, 0)?;
+        let (rt, _) = register(i, 1)?;
+        let (addr, _) = self.address(i.operands[2])?;
+        let ty = access(width, rt, bits).0;
+        let n = ty.bits();
+        let loaded = self.ex.read_at(addr.clone(), ty);
+        let old = self.ex.tmp_of(&loaded, ty);
+        let s = stored(self.reg_at(rs, bits), ty);
+        let pick = |cc, kept: Expr, other: Expr| {
+            ternary(
+                Cond {
+                    cc: Cc(cc),
+                    flags: Flags::Cmp(kept.clone(), other.clone(), n),
+                },
+                kept,
+                other,
+            )
+        };
+        let new = match op {
+            Rmw::Add => fold(Op::Add, old.clone(), s, n),
+            Rmw::Clr => fold(Op::And, old.clone(), unary(UnOp::Not, s, n), n),
+            Rmw::Eor => fold(Op::Xor, old.clone(), s, n),
+            Rmw::Set => fold(Op::Or, old.clone(), s, n),
+            Rmw::Smax => pick(ConditionCode::ge, old.clone(), s),
+            Rmw::Smin => pick(ConditionCode::le, old.clone(), s),
+            Rmw::Umax => pick(ConditionCode::ae, old.clone(), s),
+            Rmw::Umin => pick(ConditionCode::be, old.clone(), s),
+            Rmw::Swp => s,
+        };
+        self.write(rt, bits, old);
+        self.ex.store_at(addr, ty, new);
+        Some(())
+    }
+
+    /// `cas` in every ordering.
+    ///
+    /// Memory takes `Rt` when it equals `Rs`, and `Rs` takes the old value
+    /// either way. The text is an `if` around that store; the recorded
+    /// store is the old bytes when the compare fails, which is the memory
+    /// the machine leaves. The old value is read before `Rs` is written, so
+    /// the compare still sees the register the instruction read. Ordering
+    /// adds nothing one thread observes.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction: `Rs`, `Rt`, address.
+    /// * `width` - What it moves.
+    pub(super) fn compare_swap(&mut self, i: &Insn, width: Width) -> Option<()> {
+        let (rs, bits) = register(i, 0)?;
+        let (rt, _) = register(i, 1)?;
+        let (addr, _) = self.address(i.operands[2])?;
+        let ty = access(width, rt, bits).0;
+        let loaded = self.ex.read_at(addr.clone(), ty);
+        let old = self.ex.tmp_of(&loaded, ty);
+        let mut expect = stored(self.reg_at(rs, bits), ty);
+        let mut new = stored(self.reg_at(rt, bits), ty);
+        let mut at = addr;
+        self.ex.settle_frame_region(&at, None, false, true);
+        let mut seen = old.clone();
+        self.ex.protect_memory_around(&mut [
+            (&mut at, self.ex.word_ty()),
+            (&mut new, ty),
+            (&mut seen, ty),
+            (&mut expect, ty),
+        ]);
+        let n = ty.bits();
+        let new = match ty {
+            Ty::U8 | Ty::U16 | Ty::U32 => crate::analysis::decompile::expr::low_bits_read(new, n),
+            Ty::U64 | Ty::U128 | Ty::F32 | Ty::F64 => new,
+        };
+        let eq = Cond {
+            cc: Cc(ConditionCode::e),
+            flags: Flags::Cmp(seen.clone(), expect, n),
+        };
+        let kept = ternary(eq.clone(), new.clone(), seen);
+        self.ex.note_escape(&kept);
+        self.ex.note_escape(&at);
+        if let Expr::Const(a) = at
+            && self.ex.emit
+            && self.ex.is_data(a)
+        {
+            self.ex.ctx.globals.insert((a, ty));
+        }
+        if let Some(p) = &mut self.ex.ctx.probe {
+            p.store(&at, ty, &kept);
+        }
+        if self.ex.emit {
+            let names = self.ex.names();
+            let cond = eq.render(&names, false);
+            let lhs = Expr::deref(at.clone(), ty).render(&names);
+            let rhs = new.render(&names);
+            self.ex.lines.push(format!("if ({cond}) {{"));
+            self.ex.lines.push(format!("{lhs} = {rhs};"));
+            self.ex.lines.push("}".to_owned());
+        }
+        self.ex.record(EffectKind::Store(Box::new((at, ty, kept))));
+        self.write(rs, bits, old);
         Some(())
     }
 

@@ -18,7 +18,7 @@
 //! push. The scalar floating-point arithmetic, compares and conversions
 //! and the vector moves and bitwise logic are modeled as the x86 lifter
 //! models its own ([`float`], [`step`]); an instruction without a model
-//! (the packed arithmetic, system registers, atomics) stays an `/* asm */`
+//! (the packed arithmetic, system registers) stays an `/* asm */`
 //! comment and forgets what it writes. A call passes its callee the
 //! arguments the arm64 procedure call standard puts in registers and
 //! assigns its result ([`call`]); what a function itself takes and hands

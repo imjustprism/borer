@@ -506,8 +506,12 @@ const MNEMONICS: &[(u32, Mnemonic)] = &[
     (0xf820_3041, Mnemonic::Atomic(Rmw::Set, Width::Reg)),
     // ASM: ldsmax w0, w1, [x2]
     (0xb820_4041, Mnemonic::Atomic(Rmw::Smax, Width::Reg)),
+    // ASM: ldsmin w0, w10, [x11]
+    (0xb820_516a, Mnemonic::Atomic(Rmw::Smin, Width::Reg)),
     // ASM: ldumin x0, x1, [x2]
     (0xf820_7041, Mnemonic::Atomic(Rmw::Umin, Width::Reg)),
+    // ASM: ldumax w13, w14, [x11]
+    (0xb82d_616e, Mnemonic::Atomic(Rmw::Umax, Width::Reg)),
     // ASM: swp x0, x1, [x2]
     (0xf820_8041, Mnemonic::Atomic(Rmw::Swp, Width::Reg)),
     // ASM: swpalb w0, w1, [x2]
