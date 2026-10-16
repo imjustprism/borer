@@ -164,11 +164,11 @@ pub fn a64_syscall_name(nr: u64) -> Option<&'static str> {
 
 /// The system register field (bits 5 to 20) of `TPIDR_EL0`, the thread
 /// pointer: `op0` 3, `op1` 3, `CRn` 13, `CRm` 0, `op2` 2.
-const SYSREG_TPIDR_EL0: u32 = 0xde82;
+pub(crate) const SYSREG_TPIDR_EL0: u32 = 0xde82;
 
 /// The system register field of `NZCV`, the condition flags: `op0` 3,
 /// `op1` 3, `CRn` 4, `CRm` 2, `op2` 0.
-const SYSREG_NZCV: u32 = 0xda10;
+pub(crate) const SYSREG_NZCV: u32 = 0xda10;
 
 /// The names [`Machine::registers`] reports, in register order: the
 /// argument and result registers first, the stack pointer last.

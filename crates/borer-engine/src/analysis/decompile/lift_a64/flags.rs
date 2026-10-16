@@ -9,11 +9,26 @@
 //! the x86 carry: `hs` reads as `b` and `lo` as `ae`. An `ands` (and `tst`)
 //! leaves a test with carry and overflow clear. A `ccmp` leaves the truth
 //! of the condition the next reader asks ([`Flags::Truth`]), tagged with
-//! the x86 code standing for that condition ([`tag`]).
+//! the x86 code standing for that condition ([`tag`]). A register `msr` of
+//! `NZCV` leaves [`Flags::Carry`] holding that word in bits 28 to 31, and
+//! a condition reads those bits; any other `msr` sets no flags.
 
 use super::super::expr::{Cc, Cond, Expr, Flags, Op, fold, ternary};
+use crate::emulate::a64::{SYSREG_NZCV, SYSREG_TPIDR_EL0};
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg};
 use crate::isa::x86::ConditionCode;
+use crate::num::lo8;
+
+/// Bit 31 of an `NZCV` word: the N flag.
+const N_BIT: u64 = 31;
+/// Bit 30 of an `NZCV` word: the Z flag.
+const Z_BIT: u64 = 30;
+/// Bit 29 of an `NZCV` word: the C flag.
+const C_BIT: u64 = 29;
+/// Bit 28 of an `NZCV` word: the V flag.
+const V_BIT: u64 = 28;
+/// Bits 28 to 31, the only bits `msr NZCV` writes and `mrs NZCV` reads back.
+const NZCV_MASK: u64 = 0xf000_0000;
 
 /// What a conditional branch tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,7 +296,8 @@ pub(super) fn condition(flags: &Flags, c: a64::Cond) -> Cond {
             | a64::Cond::Nv => plain(cc),
         },
         Flags::Truth(_, held) if *held == cc || held.invert() == cc => plain(cc),
-        Flags::Truth(..) | Flags::Carry(_) | Flags::Shift(..) | Flags::Unknown => unknown,
+        Flags::Carry(word) => nzcv_condition(word, c, cc),
+        Flags::Truth(..) | Flags::Shift(..) | Flags::Unknown => unknown,
     }
 }
 
@@ -407,29 +423,35 @@ pub(super) fn reads(i: &Insn) -> Option<a64::Cond> {
 /// Tells whether an instruction sets the flags.
 ///
 /// The flag-setting arithmetic and logic, the compares, integer and
-/// floating-point alike, the conditional compares, a write of `NZCV`, and
-/// a call, after which the flags hold nothing the caller set.
+/// floating-point alike, the conditional compares, a register `msr` of
+/// `NZCV`, and a call, after which the flags hold nothing the caller set.
+/// An `msr` of any other register, `TPIDR_EL0` included, sets no flags.
 ///
 /// # Arguments
 ///
 /// * `i` - The instruction.
 pub(super) fn writes(i: &Insn) -> bool {
-    i.flow == Flow::Call
-        || matches!(
-            i.mnemonic,
-            Mnemonic::Subs
-                | Mnemonic::Adds
-                | Mnemonic::Ands
-                | Mnemonic::Bics
-                | Mnemonic::Adcs
-                | Mnemonic::Sbcs
-                | Mnemonic::Ccmp
-                | Mnemonic::Ccmn
-                | Mnemonic::Fcmp
-                | Mnemonic::Fcmpe
-                | Mnemonic::Fccmp
-                | Mnemonic::Msr
-        )
+    if i.flow == Flow::Call {
+        return true;
+    }
+    if i.mnemonic == Mnemonic::Msr {
+        let (_, field, register_form) = system_access(i);
+        return register_form && field == SYSREG_NZCV;
+    }
+    matches!(
+        i.mnemonic,
+        Mnemonic::Subs
+            | Mnemonic::Adds
+            | Mnemonic::Ands
+            | Mnemonic::Bics
+            | Mnemonic::Adcs
+            | Mnemonic::Sbcs
+            | Mnemonic::Ccmp
+            | Mnemonic::Ccmn
+            | Mnemonic::Fcmp
+            | Mnemonic::Fcmpe
+            | Mnemonic::Fccmp
+    )
 }
 
 /// The condition the next reader of the flags asks, before anything sets
@@ -458,6 +480,10 @@ pub(super) fn next_reader(later: &[Insn]) -> Option<a64::Cond> {
 /// every bit where one reads them before they are set again, in the block
 /// or, when `flags_out`, after it; none where they are dead.
 ///
+/// An `mrs` of `NZCV` reads the flags the block already holds. [`reads`]
+/// does not report it, so the block does not keep a predecessor's flags:
+/// a block starts with them clear.
+///
 /// # Arguments
 ///
 /// * `instrs` - The block's instructions.
@@ -470,9 +496,186 @@ pub(super) fn live_after(instrs: &[Insn], flags_out: bool) -> Vec<u32> {
         if writes(i) {
             live = 0;
         }
-        if reads(i).is_some() {
+        if reads(i).is_some() || mrs_nzcv(i) {
             live = u32::MAX;
         }
     }
     after
+}
+
+/// The general register, system-register field and register form of an
+/// `mrs` or `msr`, read from the word as the machine reads them.
+///
+/// The decoder keeps only four bits of an `msr`'s register, so the field
+/// is not an operand.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+///
+/// # Returns
+///
+/// The general register (`x31` as the zero register), bits 5 to 20, and
+/// whether bit 20 selects the register form.
+pub(super) fn system_access(i: &Insn) -> (Reg, u32, bool) {
+    let rt = match i.word & 0x1f {
+        0x1f => Reg::Zr,
+        n => Reg::X(lo8(u64::from(n))),
+    };
+    let field = (i.word >> 5) & 0xffff;
+    let register_form = (i.word >> 20) & 1 == 1;
+    (rt, field, register_form)
+}
+
+/// Tells whether an `mrs` or `msr` is one the lifter models.
+///
+/// Modeled moves are `TPIDR_EL0` and `NZCV`. An `msr` is modeled only in
+/// its register form; an immediate write of a processor-state field is not.
+/// `svc` and every other system register are not.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+pub(in crate::analysis::decompile) fn modeled_system(i: &Insn) -> bool {
+    let (_, field, register_form) = system_access(i);
+    let known = field == SYSREG_TPIDR_EL0 || field == SYSREG_NZCV;
+    (i.mnemonic == Mnemonic::Mrs && known)
+        || (i.mnemonic == Mnemonic::Msr && known && register_form)
+}
+
+/// Tells whether an instruction is `mrs NZCV`.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn mrs_nzcv(i: &Insn) -> bool {
+    if i.mnemonic != Mnemonic::Mrs {
+        return false;
+    }
+    let (_, field, _) = system_access(i);
+    field == SYSREG_NZCV
+}
+
+/// The flags an `msr NZCV` leaves: the source masked to bits 28 to 31.
+///
+/// # Arguments
+///
+/// * `value` - The register written into `NZCV`.
+pub(super) fn nzcv_flags(value: Expr) -> Flags {
+    Flags::Carry(fold(Op::And, value, Expr::Const(NZCV_MASK), 64))
+}
+
+/// The `NZCV` word the flags hold, in bits 28 to 31.
+///
+/// A float compare's C flag is the inverse of N. Flags nothing in the
+/// block set read as zero, which is how a block starts. An `msr` of `NZCV`
+/// leaves the word in [`Flags::Carry`], already masked to those bits.
+///
+/// # Arguments
+///
+/// * `flags` - What set the flags.
+pub(super) fn nzcv_word(flags: &Flags) -> Expr {
+    match flags {
+        Flags::Carry(word) => word.clone(),
+        Flags::Unknown => Expr::Const(0),
+        Flags::Float(..) => {
+            let n = value(flags, a64::Cond::Mi);
+            pack_nzcv(
+                n.clone(),
+                value(flags, a64::Cond::Eq),
+                invert_bit(n),
+                value(flags, a64::Cond::Vs),
+            )
+        }
+        Flags::Cmp(..)
+        | Flags::Add(..)
+        | Flags::Test(..)
+        | Flags::Result(..)
+        | Flags::Truth(..)
+        | Flags::Shift(..) => pack_nzcv(
+            value(flags, a64::Cond::Mi),
+            value(flags, a64::Cond::Eq),
+            value(flags, a64::Cond::Hs),
+            value(flags, a64::Cond::Vs),
+        ),
+    }
+}
+
+/// N, Z, C and V as bits 31 to 28 of one word.
+///
+/// # Arguments
+///
+/// * `n` - The N flag, 1 or 0.
+/// * `z` - The Z flag, 1 or 0.
+/// * `c` - The C flag, 1 or 0.
+/// * `v` - The V flag, 1 or 0.
+fn pack_nzcv(n: Expr, z: Expr, c: Expr, v: Expr) -> Expr {
+    let place = |bit: Expr, at: u64| fold(Op::Shl, bit, Expr::Const(at), 64);
+    fold(
+        Op::Or,
+        fold(Op::Or, place(n, N_BIT), place(z, Z_BIT), 64),
+        fold(Op::Or, place(c, C_BIT), place(v, V_BIT), 64),
+        64,
+    )
+}
+
+/// One bit of an `NZCV` word, as 1 or 0.
+///
+/// # Arguments
+///
+/// * `word` - The word.
+/// * `at` - The bit's index.
+fn flag_bit(word: &Expr, at: u64) -> Expr {
+    fold(
+        Op::And,
+        fold(Op::Shr, word.clone(), Expr::Const(at), 64),
+        Expr::Const(1),
+        64,
+    )
+}
+
+/// The inverse of a flag bit: `1` when `bit` is `0`.
+///
+/// # Arguments
+///
+/// * `bit` - The flag, 1 or 0.
+fn invert_bit(bit: Expr) -> Expr {
+    fold(Op::Xor, bit, Expr::Const(1), 64)
+}
+
+/// A condition on an `NZCV` word an `msr` stored.
+///
+/// # Arguments
+///
+/// * `word` - The word, N in bit 31 down to V in bit 28.
+/// * `c` - The arm64 condition.
+/// * `cc` - The x86 code that stands for `c`.
+fn nzcv_condition(word: &Expr, c: a64::Cond, cc: Cc) -> Cond {
+    let n = flag_bit(word, N_BIT);
+    let z = flag_bit(word, Z_BIT);
+    let carry = flag_bit(word, C_BIT);
+    let v = flag_bit(word, V_BIT);
+    let pred = match c {
+        a64::Cond::Eq => z,
+        a64::Cond::Ne => invert_bit(z),
+        a64::Cond::Hs => carry,
+        a64::Cond::Lo => invert_bit(carry),
+        a64::Cond::Mi => n,
+        a64::Cond::Pl => invert_bit(n),
+        a64::Cond::Vs => v,
+        a64::Cond::Vc => invert_bit(v),
+        a64::Cond::Hi => fold(Op::And, carry, invert_bit(z), 64),
+        a64::Cond::Ls => fold(Op::Or, invert_bit(carry), z, 64),
+        a64::Cond::Ge => invert_bit(fold(Op::Xor, n, v, 64)),
+        a64::Cond::Lt => fold(Op::Xor, n, v, 64),
+        a64::Cond::Gt => fold(
+            Op::And,
+            invert_bit(z),
+            invert_bit(fold(Op::Xor, n, v, 64)),
+            64,
+        ),
+        a64::Cond::Le => fold(Op::Or, z, fold(Op::Xor, n, v, 64), 64),
+        a64::Cond::Al | a64::Cond::Nv => Expr::Const(1),
+    };
+    truth(pred, cc)
 }

@@ -19,10 +19,10 @@
 //! random, except that a register the block compares with a constant, or
 //! with another register, mostly starts next to it; the `v` registers and
 //! the flags start clear on both sides. A block holding an instruction the
-//! lifter writes as a statement (a system register access, a supervisor
-//! call) is not checked, nor one holding an instruction either side does
-//! not model. A pass says the lifting agreed on the seeds tried, not that
-//! it is right.
+//! lifter writes as a statement (an `mrs` or `msr` of a system register
+//! other than `TPIDR_EL0` and `NZCV`, a supervisor call) is not checked,
+//! nor one holding an instruction either side does not model. A pass says
+//! the lifting agreed on the seeds tried, not that it is right.
 
 use std::collections::BTreeMap;
 
@@ -197,14 +197,18 @@ fn straight_line(program: &Program, block: &BasicBlock) -> (Vec<Insn>, Option<In
 }
 
 /// Tells whether the lifter writes an instruction as a statement whose
-/// results the environment does not hold: a system register access, a
-/// supervisor call.
+/// results the environment does not hold.
+///
+/// An `mrs` or `msr` of a system register other than `TPIDR_EL0` and
+/// `NZCV`, or a supervisor call, is such a statement.
 ///
 /// # Arguments
 ///
 /// * `i` - The instruction.
 fn statement_only(i: &Insn) -> bool {
-    matches!(i.mnemonic, Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Svc) || i.op == a64::Op::Syscall
+    (matches!(i.mnemonic, Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Svc)
+        && !super::lift_a64::modeled_system(i))
+        || i.op == a64::Op::Syscall
 }
 
 /// Reads the registers a block compares (`cmp`, `cmn`, `tst`, `ccmp`, and

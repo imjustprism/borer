@@ -16,7 +16,7 @@ use super::super::expr::{Expr, Flags, Op, Ty, UnOp, fold, mask, sign_extend, ter
 use super::flags::{self, holds, next_reader};
 use super::float::{packed_name, vreg};
 use super::{Lift, low, low64, vector, width8};
-use crate::emulate::a64::{FMOV_IMM, expand_imm, vfp_expand};
+use crate::emulate::a64::{FMOV_IMM, SYSREG_NZCV, SYSREG_TPIDR_EL0, expand_imm, vfp_expand};
 use crate::isa::a64::{self, Insn, Mnemonic, Opnd, Reg};
 use crate::num::lo8;
 
@@ -359,8 +359,45 @@ impl Lift<'_, '_> {
             Mnemonic::Ld1 => self.load_group(i),
             Mnemonic::St1 => self.store_group(i),
             Mnemonic::Prfm | Mnemonic::Barrier => Some(()),
-            Mnemonic::Svc | Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Other => None,
+            Mnemonic::Mrs | Mnemonic::Msr => self.system(i),
+            Mnemonic::Svc | Mnemonic::Other => None,
         }
+    }
+
+    /// `mrs` and `msr` of the thread pointer and the flags, the system
+    /// registers the machine models.
+    ///
+    /// The register and the field are read from the word, as
+    /// [`crate::emulate::a64::Machine`] reads them. Any other system
+    /// register, and an `msr` that writes a processor-state field by
+    /// immediate, stays unmodeled.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    ///
+    /// # Returns
+    ///
+    /// `None` when the register is not `TPIDR_EL0` or `NZCV`.
+    fn system(&mut self, i: &Insn) -> Option<()> {
+        let (rt, field, register_form) = flags::system_access(i);
+        let write = i.mnemonic == Mnemonic::Msr;
+        match (field, write) {
+            (SYSREG_TPIDR_EL0, false) => {
+                let held = self.tpidr.clone();
+                self.write(rt, 64, held);
+            }
+            (SYSREG_NZCV, false) => {
+                let word = flags::nzcv_word(&self.ex.flags);
+                self.write(rt, 64, word);
+            }
+            (SYSREG_TPIDR_EL0, true) if register_form => self.tpidr = self.read(rt),
+            (SYSREG_NZCV, true) if register_form => {
+                self.ex.flags = flags::nzcv_flags(self.read(rt));
+            }
+            _ => return None,
+        }
+        Some(())
     }
 
     /// `movz`, `movn` and `movk`.

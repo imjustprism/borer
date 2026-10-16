@@ -17,8 +17,9 @@
 //! must preserve ([`callee_saved`]) is a save, as the x86 lifter reads a
 //! push. The scalar floating-point arithmetic, compares and conversions
 //! and the vector moves and bitwise logic are modeled as the x86 lifter
-//! models its own ([`float`], [`step`]); an instruction without a model
-//! (the packed arithmetic, system registers) stays an `/* asm */`
+//! models its own ([`float`], [`step`]). `mrs` and `msr` move `TPIDR_EL0`
+//! and `NZCV` only; an instruction without a model (the packed arithmetic,
+//! any other system register, a supervisor call) stays an `/* asm */`
 //! comment and forgets what it writes. A call passes its callee the
 //! arguments the arm64 procedure call standard puts in registers and
 //! assigns its result ([`call`]); what a function itself takes and hands
@@ -35,6 +36,7 @@ mod shape;
 mod step;
 
 pub(in crate::analysis::decompile) use conv::{callee_saved, clobbered};
+pub(in crate::analysis::decompile) use flags::modeled_system;
 pub(in crate::analysis::decompile) use live::effects;
 pub(in crate::analysis::decompile) use shape::{
     INT_ARGS, callee_shape, decode_blocks, entry_env, param_types, ret_lane, shape, writes_result,
@@ -111,6 +113,7 @@ pub(in crate::analysis::decompile) fn exec_block_a64(
     let mut lift = Lift {
         ex: Exec::new(ctx, env, pass, &facts, start),
         table_load,
+        tpidr: Expr::Const(0),
     };
     let live = flags::live_after(instrs, facts.flags_out);
     let mut out = BlockOut::default();
@@ -357,6 +360,9 @@ struct Lift<'c, 'a> {
     /// The load of the entry of the jump table the block dispatches
     /// through, whose index is the switch's ([`table_load`]).
     table_load: Option<u64>,
+    /// `TPIDR_EL0`. A block starts at zero and does not inherit another's:
+    /// the machine a check runs starts with the thread pointer clear.
+    tpidr: Expr,
 }
 
 impl Lift<'_, '_> {

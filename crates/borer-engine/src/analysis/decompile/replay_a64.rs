@@ -7,8 +7,9 @@
 //! replay can check, the registers seeded and compared (`x0` to `x30`, and
 //! the `v` registers' low lanes), where a call or a jump goes, and which
 //! registers a call changes. A block holding an instruction the lifter
-//! writes as a statement of its own (a system register access, a
-//! supervisor call) or a vector form it leaves unmodeled is not checked.
+//! writes as a statement of its own (an `mrs` or `msr` of a system
+//! register other than `TPIDR_EL0` and `NZCV`, a supervisor call) or a
+//! vector form it leaves unmodeled is not checked.
 
 use super::arch::A64;
 use super::expr::Key;
@@ -107,6 +108,9 @@ fn reg_value(emu: &Machine<'_>, r: Reg) -> Option<u64> {
 /// models as values, not as a statement of its own nor as a vector form it
 /// leaves alone.
 ///
+/// An `mrs` or `msr` of `TPIDR_EL0` or `NZCV` is modeled. Any other system
+/// register, and a supervisor call, is a statement of its own.
+///
 /// # Arguments
 ///
 /// * `i` - The instruction.
@@ -115,7 +119,8 @@ fn reg_value(emu: &Machine<'_>, r: Reg) -> Option<u64> {
 ///
 /// Why a block holding it is not checked.
 fn checked(i: &Insn) -> Result<(), &'static str> {
-    let own_statement = matches!(i.mnemonic, Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Svc);
+    let own_statement = matches!(i.mnemonic, Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Svc)
+        && !super::lift_a64::modeled_system(i);
     match i.op {
         a64::Op::Syscall | a64::Op::Eret | a64::Op::Trap | a64::Op::Invalid => {
             Err("an instruction outside every checked form")
@@ -138,7 +143,7 @@ fn checked(i: &Insn) -> Result<(), &'static str> {
         | a64::Op::Other => {
             if own_statement {
                 Err("an instruction outside every checked form")
-            } else if i.operands.contains(&Opnd::Other) {
+            } else if i.operands.contains(&Opnd::Other) && !super::lift_a64::modeled_system(i) {
                 Err(OUTSIDE_FLOAT)
             } else {
                 Ok(())

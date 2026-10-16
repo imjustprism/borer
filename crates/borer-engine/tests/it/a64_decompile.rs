@@ -558,6 +558,51 @@ const ATOMIC_CASE: [u32; 15] = [
     0xd65f_03c0,
 ];
 
+/// The emulate case `system`: `mrs` and `msr` of `TPIDR_EL0` and `NZCV`,
+/// then `ret`.
+const SYSTEM_WORDS: [u32; 6] = [
+    // ASM: mrs x0, TPIDR_EL0
+    0xd53b_d040,
+    // ASM: msr TPIDR_EL0, x16
+    0xd51b_d050,
+    // ASM: mrs x1, TPIDR_EL0
+    0xd53b_d041,
+    // ASM: mrs x2, NZCV
+    0xd53b_4202,
+    // ASM: msr NZCV, x3
+    0xd51b_4203,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// `mrs` and `msr` of `TPIDR_EL0` and `NZCV` are moves, not an `/* asm */`
+/// line. `svc #0` stays one: the word is the `MNEMONICS` encoding.
+///
+/// The system-register words are the emulate case `system`. A check starts
+/// with the thread pointer and the flags clear, so the read of `TPIDR_EL0`
+/// is zero and the read of `NZCV` is zero.
+#[test]
+fn system_registers_are_the_thread_pointer_and_the_flags() {
+    let (p, a, text) = decompiled_words(&SYSTEM_WORDS);
+    assert!(!text.contains("/* asm"), "{text}");
+    assert!(!text.contains("mrs"), "{text}");
+    assert!(!text.contains("msr"), "{text}");
+    let entry = p.entry.expect("entry");
+    let v = verify(&p, &a, &[entry], 1);
+    assert!(v.checked > 0, "{}", verify_tsv(&v));
+    assert!(v.mismatches.is_empty(), "{text}\n{}", verify_tsv(&v));
+    let r = replay_function(&p, &a, entry, 1);
+    assert!(r.checked > 0, "{}", replay_tsv(&r));
+    assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    let (_, _, svc) = decompiled_words(&[
+        // ASM: svc #0
+        0xd400_0001,
+        // ASM: ret
+        0xd65f_03c0,
+    ]);
+    assert!(svc.contains("/* asm: svc"), "{svc}");
+}
+
 /// An atomic is the load, the modification and the store, and `cas` is the
 /// conditional store, not an `/* asm */` line.
 ///
