@@ -12,6 +12,7 @@
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+use borer_engine::analysis::decompile::verify_a64::{verify, verify_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Feature, Program, Section, Symbol, SymbolKind};
 
@@ -387,4 +388,101 @@ fn arm64_w_writes_mask_only_where_a_whole_read_needs_it() {
         assert!(r.checked > 0, "+{off:#x}: {}", replay_tsv(&r));
         assert!(r.disagreements.is_empty(), "+{off:#x}: {}", replay_tsv(&r));
     }
+}
+
+/// The words `MNEMONICS` already assembles for an exclusive store, then
+/// `ret` from the emulate case `exclusive`.
+const EXCLUSIVE_WORDS: [u32; 4] = [
+    // ASM: stxr w3, x1, [x2]
+    0xc803_7c41,
+    // ASM: stlxrh w3, w1, [x2]
+    0x4803_fc41,
+    // ASM: stxp w3, x0, x1, [x2]
+    0xc823_0440,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// `stxr` then `msub`, both words `MNEMONICS` already assembles, so the
+/// status the store writes is what the function returns.
+const STATUS_READ: [u32; 3] = [
+    // ASM: stxr w3, x1, [x2]
+    0xc803_7c41,
+    // ASM: msub w0, w1, w2, w3
+    0x1b02_8c20,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// The emulate case `exclusive`, the words that case already runs.
+const EXCLUSIVE_CASE: [u32; 10] = [
+    // ASM: ldxr x0, [x1]
+    0xc85f_7c20,
+    // ASM: add x0, x0, #0x1
+    0x9100_0400,
+    // ASM: stxr w2, x0, [x1]
+    0xc802_7c20,
+    // ASM: ldaxr w3, [x1]
+    0x885f_fc23,
+    // ASM: stlxr w4, w3, [x5]
+    0x8804_fca3,
+    // ASM: ldar x6, [x1]
+    0xc8df_fc26,
+    // ASM: stlr x6, [x5]
+    0xc89f_fca6,
+    // ASM: ldxp x7, x8, [x1]
+    0xc87f_2027,
+    // ASM: stxp w9, x7, x8, [x5]
+    0xc829_20a7,
+    // ASM: ret
+    0xd65f_03c0,
+];
+
+/// Decompiles `words` at the arm64 image helper's entry.
+///
+/// # Arguments
+///
+/// * `words` - The routine.
+fn decompiled_words(words: &[u32]) -> (Program, Analysis, String) {
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let p = crate::raw::image(Arch::Arm64, &code, &[]);
+    let a = Analysis::compute(&p);
+    let entry = p.entry.expect("the image is entered at its code");
+    let text = decompile(&p, &a, &Overlay::default(), entry).unwrap_or_default();
+    (p, a, text)
+}
+
+/// An exclusive store is the store and a status of zero, not an `/* asm */`
+/// line.
+///
+/// The words are the `MNEMONICS` encodings of `stxr`, `stlxrh` and `stxp`,
+/// and the emulate case `exclusive`. Nothing reads that status, so the
+/// listing drops it. `msub`, the `MNEMONICS` word that reads `w3`, returns
+/// `-(a2 * a3)`: the status was the constant 0 the machine writes, and a
+/// subtract of that constant is a negation.
+#[test]
+fn exclusive_stores_are_a_store_and_a_zero_status() {
+    for words in [&EXCLUSIVE_WORDS[..], &EXCLUSIVE_CASE[..], &STATUS_READ[..]] {
+        let (p, a, text) = decompiled_words(words);
+        assert!(!text.contains("/* asm: stxr"), "{text}");
+        assert!(!text.contains("/* asm: stxp"), "{text}");
+        assert!(!text.contains("stlxr"), "{text}");
+        let entry = p.entry.expect("entry");
+        let v = verify(&p, &a, &[entry], 1);
+        assert!(v.checked > 0, "{}", verify_tsv(&v));
+        assert!(v.mismatches.is_empty(), "{text}\n{}", verify_tsv(&v));
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+    let (_, _, words) = decompiled_words(&EXCLUSIVE_WORDS);
+    assert!(words.contains("*(uint64_t*)a3 = a2;"), "{words}");
+    assert!(words.contains("*(uint16_t*)a3 = a2;"), "{words}");
+    assert!(words.contains("*(uint64_t*)a3 = a1;"), "{words}");
+    let (_, _, status) = decompiled_words(&STATUS_READ);
+    assert!(status.contains("*(uint64_t*)a3 = a2;"), "{status}");
+    assert!(
+        status.contains("return -(a2 * a3);"),
+        "status should be the constant 0\n{status}"
+    );
 }

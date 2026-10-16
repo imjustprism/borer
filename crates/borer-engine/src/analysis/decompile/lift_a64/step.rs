@@ -350,14 +350,14 @@ impl Lift<'_, '_> {
             Mnemonic::Mvni => self.movi(i, true),
             Mnemonic::Ldr(width) => self.load(i, width),
             Mnemonic::Str(width) => self.store(i, width),
+            Mnemonic::Stxr(width) => self.store_exclusive(i, width),
+            Mnemonic::Stxp => self.store_exclusive_pair(i),
             Mnemonic::Ldp(width) => self.load_pair(i, width),
             Mnemonic::Stp => self.store_pair(i),
             Mnemonic::Ld1 => self.load_group(i),
             Mnemonic::St1 => self.store_group(i),
             Mnemonic::Prfm | Mnemonic::Barrier => Some(()),
-            Mnemonic::Stxr(_)
-            | Mnemonic::Stxp
-            | Mnemonic::Atomic(..)
+            Mnemonic::Atomic(..)
             | Mnemonic::Cas(_)
             | Mnemonic::Svc
             | Mnemonic::Mrs

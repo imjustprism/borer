@@ -7,9 +7,8 @@
 //! replay can check, the registers seeded and compared (`x0` to `x30`, and
 //! the `v` registers' low lanes), where a call or a jump goes, and which
 //! registers a call changes. A block holding an instruction the lifter
-//! writes as a statement of its own (an exclusive store, an atomic, a
-//! system register access, a supervisor call) or a vector form it leaves
-//! unmodeled is not checked.
+//! writes as a statement of its own (an atomic, a system register access,
+//! a supervisor call) or a vector form it leaves unmodeled is not checked.
 
 use super::arch::A64;
 use super::expr::Key;
@@ -118,13 +117,7 @@ fn reg_value(emu: &Machine<'_>, r: Reg) -> Option<u64> {
 fn checked(i: &Insn) -> Result<(), &'static str> {
     let own_statement = matches!(
         i.mnemonic,
-        Mnemonic::Stxr(_)
-            | Mnemonic::Stxp
-            | Mnemonic::Atomic(..)
-            | Mnemonic::Cas(_)
-            | Mnemonic::Mrs
-            | Mnemonic::Msr
-            | Mnemonic::Svc
+        Mnemonic::Atomic(..) | Mnemonic::Cas(_) | Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Svc
     );
     match i.op {
         a64::Op::Syscall | a64::Op::Eret | a64::Op::Trap | a64::Op::Invalid => {

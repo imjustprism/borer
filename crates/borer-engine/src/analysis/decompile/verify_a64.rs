@@ -19,10 +19,9 @@
 //! random, except that a register the block compares with a constant, or
 //! with another register, mostly starts next to it; the `v` registers and
 //! the flags start clear on both sides. A block holding an instruction the
-//! lifter writes as a statement (an exclusive store, an atomic, a system
-//! register access) is not checked, nor one holding an instruction either
-//! side does not model. A pass says the lifting agreed on the seeds tried,
-//! not that it is right.
+//! lifter writes as a statement (an atomic, a system register access) is
+//! not checked, nor one holding an instruction either side does not model.
+//! A pass says the lifting agreed on the seeds tried, not that it is right.
 
 use std::collections::BTreeMap;
 
@@ -197,8 +196,8 @@ fn straight_line(program: &Program, block: &BasicBlock) -> (Vec<Insn>, Option<In
 }
 
 /// Tells whether the lifter writes an instruction as a statement whose
-/// results the environment does not hold: an exclusive store, an atomic,
-/// a system register access, a supervisor call.
+/// results the environment does not hold: an atomic, a system register
+/// access, a supervisor call.
 ///
 /// # Arguments
 ///
@@ -206,13 +205,7 @@ fn straight_line(program: &Program, block: &BasicBlock) -> (Vec<Insn>, Option<In
 fn statement_only(i: &Insn) -> bool {
     matches!(
         i.mnemonic,
-        Mnemonic::Stxr(_)
-            | Mnemonic::Stxp
-            | Mnemonic::Atomic(..)
-            | Mnemonic::Cas(_)
-            | Mnemonic::Mrs
-            | Mnemonic::Msr
-            | Mnemonic::Svc
+        Mnemonic::Atomic(..) | Mnemonic::Cas(_) | Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Svc
     ) || i.op == a64::Op::Syscall
 }
 

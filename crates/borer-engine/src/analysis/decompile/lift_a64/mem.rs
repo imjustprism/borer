@@ -7,8 +7,9 @@
 //! writes the address back to the base, a post-indexed one the base plus
 //! the offset, after the access, the way the machine orders them. An
 //! acquire or release form is its plain form, as for one thread it is.
-//! The exclusive stores and the atomics are statements the lifter does not
-//! model ([`super::step`]).
+//! A store-exclusive is that store and a status of zero, which is how the
+//! machine runs it; it does not fail. The atomics are statements the
+//! lifter does not model ([`super::step`]).
 
 use super::super::expr::{Expr, Op, Ty, fold, sign_extend};
 use super::{Lift, low, shifted};
@@ -201,6 +202,47 @@ impl Lift<'_, '_> {
         if let Some((r, a)) = back {
             self.write(r, 64, a);
         }
+        Some(())
+    }
+
+    /// A store-exclusive of one register (`stxr`, `stlxr`), which always
+    /// succeeds: the store, then status 0 at 32 bits, as the machine
+    /// writes it. Ordering and a failed monitor add nothing it does.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction: status, register, address.
+    /// * `width` - What it moves.
+    pub(super) fn store_exclusive(&mut self, i: &Insn, width: Width) -> Option<()> {
+        let (status, _) = register(i, 0)?;
+        let (rt, bits) = register(i, 1)?;
+        let (addr, _) = self.address(i.operands[2])?;
+        let ty = access(width, rt, bits).0;
+        let v = stored(self.reg_at(rt, bits), ty);
+        self.ex.store_at(addr, ty, v);
+        self.write(status, 32, Expr::Const(0));
+        Some(())
+    }
+
+    /// A store-exclusive of two registers (`stxp`, `stlxp`), which always
+    /// succeeds: the two stores, then status 0 at 32 bits, as the machine
+    /// writes it.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction: status, two registers, address.
+    pub(super) fn store_exclusive_pair(&mut self, i: &Insn) -> Option<()> {
+        let (status, _) = register(i, 0)?;
+        let (first, bits) = register(i, 1)?;
+        let (second, _) = register(i, 2)?;
+        let (ty, _) = access(Width::Reg, first, bits);
+        let step = Expr::Const(from_usize(usize::from(bits / 8)));
+        let (addr, _) = self.address(i.operands[3])?;
+        let a = stored(self.reg_at(first, bits), ty);
+        let b = stored(self.reg_at(second, bits), ty);
+        self.ex.store_at(addr.clone(), ty, a);
+        self.ex.store_at(fold(Op::Add, addr, step, 64), ty, b);
+        self.write(status, 32, Expr::Const(0));
         Some(())
     }
 
