@@ -1318,7 +1318,7 @@ fn a_return_tail_at_the_body_cap_clones_and_past_it_keeps_a_goto() {
     let Some(out) = decompile(&p, &a, &o, 0x1000) else {
         panic!("the fixture did not decompile");
     };
-    assert!(out.contains("for (i = 0;"), "{out}");
+    assert!(out.contains("for (var1 = 0;"), "{out}");
     assert_eq!(out.matches('{').count(), out.matches('}').count(), "{out}");
     assert_eq!(
         check_structure(&p, &a, &o, 0x1000, &out),

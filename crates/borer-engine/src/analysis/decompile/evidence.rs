@@ -6,14 +6,11 @@
 //! a call that answers yes or no is spelled as the call.
 //!
 //! First match wins, as a reader names them: the parameter of a declared
-//! API a variable is passed to whole (`hKey`), the thing a handle or
-//! pointer API hands back (`ProcessHeap` from `GetProcessHeap`), `len` for
-//! a string's length, `i`, `j` and `k` for the counters of nested loops,
-//! and the field a variable is loaded from (`count` from `p->count`). A
-//! name the text already holds takes a number, so nothing shadows a
-//! function, a global or a parameter, and a variable no evidence names
-//! keeps its number. Names are spelling: no line reads anything else for
-//! them.
+//! API a variable is passed to whole (`hKey`), and the field a variable is
+//! loaded from (`count` from `p->count`). A name the text already holds
+//! takes a number, so nothing shadows a function, a global or a parameter,
+//! and a variable no evidence names keeps its number. Names are spelling:
+//! no line reads anything else for them.
 
 use super::vars::{Lex, Line, declaration, is_var_name, lex, parts};
 use super::*;
@@ -25,43 +22,9 @@ use crate::program::BinaryFormat;
 enum Rank {
     /// Passed whole as a declared API's parameter.
     Param,
-    /// The result of a handle or pointer API.
-    Result,
-    /// A string's length.
-    Length,
-    /// A loop's counter.
-    Counter,
     /// Loaded from a named field.
     Field,
 }
-
-/// The names a counter takes by how deep its loop nests.
-const COUNTERS: [&str; 5] = ["i", "j", "k", "m", "n"];
-
-/// The verbs a handle or pointer API's name opens with, whose rest names
-/// what it hands back.
-const VERBS: [&str; 6] = ["Get", "Create", "Open", "Load", "Find", "Alloc"];
-
-/// The functions whose result is a string's length.
-const LENGTHS: [&str; 8] = [
-    "strlen", "wcslen", "strnlen", "wcsnlen", "lstrlenA", "lstrlenW", "lstrlen", "_mbslen",
-];
-
-/// The types a handle or pointer API hands back.
-const HANDLES: [&str; 12] = [
-    "HANDLE",
-    "HMODULE",
-    "HINSTANCE",
-    "HKEY",
-    "LPVOID",
-    "PVOID",
-    "FARPROC",
-    "HLOCAL",
-    "HGLOBAL",
-    "HINTERNET",
-    "SC_HANDLE",
-    "HWND",
-];
 
 /// The handle types a run reads as a pointer to nothing: what one holds
 /// and how it compares are a machine word's.
@@ -133,32 +96,6 @@ fn nameable(w: &str) -> bool {
         && !RESERVED.contains(&w)
 }
 
-/// What a handle or pointer API's result is: the rest of its name after
-/// its verb, without a trailing `A` or `W` or `Handle`.
-///
-/// # Arguments
-///
-/// * `callee` - The API's name.
-/// * `d` - Its declaration.
-fn result_name(callee: &str, d: &Decl) -> Option<String> {
-    if d.os != Os::Win || !HANDLES.contains(&d.ret) {
-        return None;
-    }
-    let base = callee
-        .strip_suffix(['A', 'W'])
-        .filter(|b| b.ends_with(|c: char| c.is_ascii_lowercase()))
-        .unwrap_or(callee);
-    let rest = VERBS.iter().find_map(|v| {
-        base.strip_prefix(v)
-            .filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase()))
-    })?;
-    let rest = rest
-        .strip_suffix("Handle")
-        .filter(|r| !r.is_empty())
-        .unwrap_or(rest);
-    Some(rest.to_owned())
-}
-
 /// The call a whole argument at token `k` is passed to, and its position.
 ///
 /// # Arguments
@@ -210,65 +147,6 @@ fn argument_of<'t>(l: &Line<'t>, k: usize) -> Option<(&'t str, usize)> {
 fn assignment<'t>(l: &Line<'t>) -> Option<(&'t str, &'t str)> {
     let (lhs, rhs) = l.text.trim().strip_suffix(';')?.split_once(" = ")?;
     (is_var_name(lhs) && !rhs.contains(" = ")).then_some((lhs, rhs))
-}
-
-/// The variable a line counts up by one, if it does: `v += 1;`, `v++;`,
-/// `v = v + 1;` or `v = (v + 1) & 0xff..;`.
-///
-/// # Arguments
-///
-/// * `l` - The line.
-fn counter<'t>(l: &Line<'t>) -> Option<&'t str> {
-    let t = l.text.trim().strip_suffix(';')?;
-    if let Some(v) = t.strip_suffix(" += 1").or_else(|| t.strip_suffix("++")) {
-        return is_var_name(v).then_some(v);
-    }
-    let (v, rhs) = t.split_once(" = ")?;
-    let plus = format!("{v} + 1");
-    let stepped = rhs == plus
-        || rhs
-            .strip_prefix(&format!("({plus}) & 0x"))
-            .is_some_and(|m| m.bytes().all(|b| b == b'f'));
-    (is_var_name(v) && stepped).then_some(v)
-}
-
-/// The variable a `for` header counts up by one: `for (v = ..; ..; v += 1) {`.
-///
-/// # Arguments
-///
-/// * `t` - The trimmed line.
-fn for_counter(t: &str) -> Option<&str> {
-    let header = t.strip_prefix("for (")?.strip_suffix(") {")?;
-    let (init, rest) = header.split_once("; ")?;
-    let (_, step) = rest.rsplit_once("; ")?;
-    let v = init.split_once(" = ")?.0;
-    let stepped = step == format!("{v} += 1") || step == format!("{v}++");
-    (is_var_name(v) && stepped).then_some(v)
-}
-
-/// The variables an ordering comparison reads, as a loop's counter is.
-///
-/// # Arguments
-///
-/// * `lines` - The body's lines.
-fn compared<'t>(lines: &[Line<'t>]) -> BTreeSet<&'t str> {
-    let mut out = BTreeSet::new();
-    for l in lines {
-        for k in 0..l.toks.len() {
-            if !["<", "<=", ">", ">=", "!="].iter().any(|op| l.is(k, op)) {
-                continue;
-            }
-            for side in [k.checked_sub(1), Some(k + 1)].into_iter().flatten() {
-                if let Some(t) = l.toks.get(side)
-                    && let Some(w) = l.text.get(t.at..t.end)
-                    && is_var_name(w)
-                {
-                    out.insert(w);
-                }
-            }
-        }
-    }
-    out
 }
 
 /// Names and types the variables the webs pass made from the evidence the
@@ -633,13 +511,7 @@ fn rename(text: &str) -> Option<String> {
             *slot = Some((rank, name.to_owned()));
         }
     };
-    let compared = compared(&lines);
-    let mut open: Vec<bool> = Vec::new();
     for l in &lines {
-        let t = l.text.trim();
-        if t.starts_with('}') {
-            open.pop();
-        }
         for (k, tok) in l.toks.iter().enumerate() {
             let Some(w) = l.text.get(tok.at..tok.end).filter(|w| is_var_name(w)) else {
                 continue;
@@ -650,39 +522,12 @@ fn rename(text: &str) -> Option<String> {
                 offer(w, Rank::Param, param.name);
             }
         }
-        if let Some((var, rhs)) = assignment(l) {
-            if let Some((callee, _)) = rhs.split_once('(').filter(|_| lone_call(rhs)) {
-                if LENGTHS.contains(&callee) {
-                    offer(var, Rank::Length, "len");
-                }
-                if let Some(n) = decl(callee).and_then(|d| result_name(callee, d)) {
-                    offer(var, Rank::Result, &n);
-                }
-            }
-            if let Some((_, field)) = rhs.rsplit_once("->")
-                && !rhs.contains(['(', ' ', '['])
-                && !field.starts_with("field_")
-            {
-                offer(var, Rank::Field, field);
-            }
-        }
-        let depth = open.iter().filter(|is_loop| **is_loop).count();
-        if let Some(var) = counter(l).filter(|v| depth > 0 && compared.contains(v)) {
-            offer(
-                var,
-                Rank::Counter,
-                COUNTERS.get(depth - 1).copied().unwrap_or("i"),
-            );
-        }
-        if let Some(var) = for_counter(t) {
-            offer(
-                var,
-                Rank::Counter,
-                COUNTERS.get(depth).copied().unwrap_or("i"),
-            );
-        }
-        if t.ends_with('{') {
-            open.push(t.starts_with("while (") || t.starts_with("for (") || t == "do {");
+        if let Some((var, rhs)) = assignment(l)
+            && let Some((_, field)) = rhs.rsplit_once("->")
+            && !rhs.contains(['(', ' ', '['])
+            && !field.starts_with("field_")
+        {
+            offer(var, Rank::Field, field);
         }
     }
     let mut taken: BTreeSet<String> = BTreeSet::new();
@@ -783,7 +628,7 @@ mod tests {
     }
 
     /// A variable passed whole to a declared API takes the parameter's
-    /// name, a handle API's result the rest of its name, a length `len`.
+    /// name. A handle result and a length keep their numbers.
     #[test]
     fn apis_name_what_they_take_and_hand_back() {
         let t = function(
@@ -801,26 +646,25 @@ mod tests {
         assert_eq!(
             body(&out),
             [
-                "ProcessHeap = GetProcessHeap();",
-                "len = lstrlenW(a1);",
+                "var1 = GetProcessHeap();",
+                "var2 = lstrlenW(a1);",
                 "hObject = sub_1(a2);",
                 "CloseHandle(hObject);",
-                "sub_2(ProcessHeap, len);",
+                "sub_2(var1, var2);",
                 "return 0;",
             ],
             "{out}"
         );
         assert!(
             out.contains(
-                "uint64_t len, hObject;
-HANDLE ProcessHeap;"
+                "uint64_t var2, hObject;
+HANDLE var1;"
             ),
             "{out}"
         );
     }
 
-    /// Counters of nested loops are `i` and `j`; a variable no evidence
-    /// names keeps its number.
+    /// Nested counters keep the numbers the text gave them.
     #[test]
     fn counters_are_named_by_depth() {
         let t = function(
@@ -843,15 +687,15 @@ HANDLE ProcessHeap;"
         assert_eq!(
             body(&out),
             [
-                "i = 0;",
-                "while (i < a1) {",
-                "  j = 0;",
-                "  while (j < a2) {",
-                "    var3 = sub_1(i, j);",
+                "var1 = 0;",
+                "while (var1 < a1) {",
+                "  var2 = 0;",
+                "  while (var2 < a2) {",
+                "    var3 = sub_1(var1, var2);",
                 "    sub_2(var3);",
-                "    j += 1;",
+                "    var2 += 1;",
                 "  }",
-                "  i += 1;",
+                "  var1 += 1;",
                 "}",
                 "return 0;",
             ],
@@ -859,7 +703,7 @@ HANDLE ProcessHeap;"
         );
     }
 
-    /// A `for` header's counter is `i`.
+    /// A `for` header's counter keeps the number the text gave it.
     #[test]
     fn a_for_counter_is_i() {
         let t = function(
@@ -875,8 +719,8 @@ HANDLE ProcessHeap;"
         assert_eq!(
             body(&out),
             [
-                "for (i = 0; i < a1; i += 1) {",
-                "  sub_1(i);",
+                "for (var1 = 0; var1 < a1; var1 += 1) {",
+                "  sub_1(var1);",
                 "}",
                 "return 0;"
             ],
@@ -884,8 +728,8 @@ HANDLE ProcessHeap;"
         );
     }
 
-    /// A name the text already holds takes a number, and a field names
-    /// what is loaded from it.
+    /// A field names what is loaded from it. A length keeps its number
+    /// beside a `len` the text already declared.
     #[test]
     fn names_never_shadow() {
         let t = function(
@@ -902,12 +746,13 @@ HANDLE ProcessHeap;"
             body(&out),
             [
                 "count = a1->count;",
-                "len2 = strlen(a2);",
-                "len = count + len2;",
+                "var2 = strlen(a2);",
+                "len = count + var2;",
                 "return len;",
             ],
             "{out}"
         );
+        assert!(out.contains("uint64_t count, var2, len;"), "{out}");
     }
 
     /// A variable holding only one handle API's results is declared by
@@ -924,10 +769,8 @@ HANDLE ProcessHeap;"
             ],
         );
         let out = name_vars(&t, WORD);
-        assert!(
-            out.contains("uint64_t ProcessHeap;\nHANDLE Process;"),
-            "{out}"
-        );
+        assert!(out.contains("uint64_t var2;\nHANDLE var1;"), "{out}");
+        assert!(!out.contains("HANDLE Process;"), "{out}");
     }
 
     /// A constant folded into a declared API's call, or guessed as a

@@ -1701,10 +1701,10 @@ fn const_survives_join() {
 fn while_loop_structured() {
     let out = dc(0x1100);
     assert!(
-        out.contains("for (i = 0; (int32_t)i < 5; i += 1)"),
+        out.contains("for (var2 = 0; (int32_t)var2 < 5; var2 += 1)"),
         "no for sugar:\n{out}"
     );
-    assert!(out.contains("var1 += i;"), "loop body missing:\n{out}");
+    assert!(out.contains("var1 += var2;"), "loop body missing:\n{out}");
     assert!(!out.contains("tmp_"), "spurious temporaries:\n{out}");
     assert!(
         !out.contains("goto L_1107;"),
@@ -1733,7 +1733,7 @@ fn deterministic_output() {
 fn nested_if_inside_while() {
     let out = dc(0x1180);
     assert!(
-        out.contains("for (i = 0; (int32_t)i < 5") || out.contains("while ("),
+        out.contains("for (var1 = 0; (int32_t)var1 < 5") || out.contains("while ("),
         "no loop:
 {out}"
     );
@@ -1748,7 +1748,7 @@ fn nested_if_inside_while() {
 {out}"
     );
     assert!(
-        out.contains("return i;"),
+        out.contains("return var1;"),
         "no return:
 {out}"
     );
@@ -3066,7 +3066,7 @@ fn a_dead_block_inside_a_loop_does_not_veto_it() {
     assert!(text.contains("unreachable"), "{text}");
     assert!(!text.contains("goto"), "{text}");
     assert!(text.contains("do {"), "{text}");
-    assert_eq!(text.matches("i += 1;").count(), 1, "{text}");
+    assert_eq!(text.matches("var1 += 1;").count(), 1, "{text}");
 }
 
 /// A range test joined to a bit test of a constant reads as the values it
