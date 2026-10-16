@@ -196,7 +196,7 @@ fn cli_refuses_what_it_cannot_answer() {
     assert!(
         rows.contains(
             "
-1	0	returned	1	-"
+1	void	returned	1	-	agrees"
         ),
         "{rows}"
     );
