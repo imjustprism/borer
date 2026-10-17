@@ -8328,6 +8328,106 @@ fn a_scalar_min_or_max_keeps_the_operand_the_compare_misses() {
     }
 }
 
+/// `minss xmm0, xmm1; ret` returns the `minss` result, not nothing.
+///
+/// Nobody in the image reads xmm0, and the function writes no integer
+/// result, so the value it leaves is what a caller outside the image gets.
+/// The compare keeps the second operand when it does not hold: `+0` with
+/// `-0` is `-0`, and `1.0` with a NaN is that NaN. C's `fmin` returns the
+/// number and prefers `-0`, so the text is the ternary, not `fmin`. The
+/// register form also keeps the bits above the lane of the first operand,
+/// which `minss` does not clear.
+#[test]
+fn a_minss_return_keeps_the_operand_the_compare_misses() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let code = &[
+        0xf3, 0x0f, 0x5d, 0xc1, // ASM: minss xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let p = program64(code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("// signature: float "), "{text}");
+    assert!(text.contains("a1 < a2 ? a1 : a2"), "{text}");
+    assert!(text.contains("return "), "{text}");
+    assert!(!text.contains("return;"), "{text}");
+    assert!(!text.contains("fmin"), "{text}");
+    assert!(!text.contains("/* asm"), "{text}");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.function(0x1_4000_1000).map(|f| f.ret_float),
+        Some(Some(32))
+    );
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[0x1_4000_1000], seed);
+        assert!(
+            v.checked > 0 && v.mismatches.is_empty(),
+            "{text}\nseed {seed}: {}",
+            verify_tsv(&v)
+        );
+        let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+        assert!(
+            r.checked > 0 && r.wrong().is_empty(),
+            "{text}\nseed {seed}: {}",
+            replay_tsv(&r)
+        );
+    }
+
+    let load = |op: u8| -> Vec<u8> {
+        let mut code = vec![
+            0xf3, 0x0f, 0x10, 0x05, 0xf8, 0x0f, 0x00, 0x00, // ASM: movss xmm0,[rip+0xff8]
+            0xf3, 0x0f, 0x10, 0x0d, 0xf4, 0x0f, 0x00, 0x00, // ASM: movss xmm1,[rip+0xff4]
+        ];
+        code.extend_from_slice(&[
+            0xf3, 0x0f, op, 0xc1, // ASM: minss/maxss xmm0,xmm1
+            0xc3, // ASM: ret
+        ]);
+        code
+    };
+    let nan = 0x7fc0_0000u32;
+    let pos = 0u32;
+    let neg = 0x8000_0000u32;
+    let one = 0x3f80_0000u32;
+    let cases: &[(u8, u32, u32, &[&str], &[&str])] = &[
+        (0x5d, pos, neg, &["?", "<"], &["fmin"]),
+        (0x5d, neg, pos, &["?", "<"], &["fmin"]),
+        (0x5d, one, nan, &["?", "<", "NAN"], &["fmin"]),
+        (0x5d, nan, one, &["?", "<"], &["fmin"]),
+        (0x5f, pos, neg, &["?", ">"], &["fmax"]),
+        (0x5f, one, nan, &["?", ">", "NAN"], &["fmax"]),
+    ];
+    for (op, left, right, has, has_not) in cases {
+        let mut data = Vec::new();
+        data.extend_from_slice(&left.to_le_bytes());
+        data.extend_from_slice(&right.to_le_bytes());
+        let p = program64_with_data(&load(*op), &data);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(text.contains("// signature: float "), "{text}");
+        assert!(!text.contains("return;"), "{text}");
+        for part in *has {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "still has `{part}`\n{text}");
+        }
+        assert!(!text.contains("/* asm"), "{text}");
+        let a = Analysis::compute(&p);
+        let v = verify(&p, &a, &[0x1_4000_1000], 1);
+        assert!(
+            v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+            "{text}\n{}",
+            verify_tsv(&v)
+        );
+        let r = replay_function(&p, &a, 0x1_4000_1000, 1);
+        assert!(
+            r.checked > 0 && r.wrong().is_empty(),
+            "{text}\n{}",
+            replay_tsv(&r)
+        );
+    }
+}
+
 /// A scalar move into a double keeps the bits above the new lane.
 ///
 /// A register-to-register `movss` of a double is that merge, not the call

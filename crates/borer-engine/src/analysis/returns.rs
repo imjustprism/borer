@@ -18,7 +18,8 @@
 //!
 //! A 64-bit target hands a `float` or a `double` back in `xmm0`, and such a
 //! function never writes rax: it returns a value when some caller reads
-//! xmm0 after the call and every exit leaves one there ([`float_results`]).
+//! xmm0 after the call and every exit leaves one there, and also when
+//! nobody calls it and its own exits leave that float ([`float_results`]).
 //! A 32-bit target hands it back on the x87 stack, in `st0`, which every
 //! exit of such a function leaves one value deeper than it was entered
 //! ([`x87_results`]).
@@ -140,6 +141,9 @@ struct Handed {
     /// precision instruction, 64 for a double precision one; sorted, and
     /// empty for rax or a write that names none (`xorps xmm0, xmm0`).
     float_bits: Vec<u8>,
+    /// A store sits between the last write of the result register and the
+    /// `ret`. The value was kept for that store, not handed back.
+    stored: bool,
 }
 
 impl Handed {
@@ -150,6 +154,7 @@ impl Handed {
         calls: Vec::new(),
         unknown: true,
         float_bits: Vec::new(),
+        stored: false,
     };
 }
 
@@ -303,7 +308,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .into_iter()
         .map(Option::unwrap_or_default)
         .collect();
-        float_results(analysis, &uses, &hand_back(ResultReg::Xmm0), &read)
+        float_results(analysis, &uses, &hand_back(ResultReg::Xmm0), &handed, &read)
     } else {
         x87_results(program, shared, &x87_kept(program, shared))
     };
@@ -596,7 +601,11 @@ fn handed_back(
         }
         let instrs = decode_block(program, bitness, blk);
         let skip = usize::from(b == entry && instrs.first().is_some_and(frame_idiom));
+        let mut stored = false;
         let last = instrs.iter().skip(skip).rev().find_map(|i| {
+            if i.op0_kind() == OpKind::Memory {
+                stored = true;
+            }
             if !is_call(i) {
                 return match reg {
                     ResultReg::Rax => rax_write(factory, i).map(|_| Writer::Own(None)),
@@ -614,6 +623,7 @@ fn handed_back(
                 _ => Some(Writer::Indirect),
             }
         });
+        out.stored |= stored;
         match last {
             Some(Writer::Call(callee)) => out.calls.push(callee),
             Some(Writer::Indirect) => out.unknown = true,
@@ -816,19 +826,25 @@ fn float_use(
 /// writes nothing hands back the float argument that arrived in xmm0
 /// (`ceil` returns a large argument as it came). A caller takes it: some
 /// call site reads xmm0 before anything writes it, or hands it on by a
-/// tail call to a function a caller takes it from ([`float_use`]). And no
-/// caller reads rax
-/// instead. A function whose every exit hands back what a function so
-/// found leaves there forwards that float, whoever reads it. The chains
-/// run to a fixpoint, capped at [`PASS_ROUNDS_MAX`] rounds. The width is
-/// 32 bits when every write that names a precision names a single, 64
-/// otherwise.
+/// tail call to a function a caller takes it from ([`float_use`]). A
+/// function nobody calls takes it too, when its own exits leave the float
+/// and it writes no integer result: an export's caller is not in this
+/// image, and dropping the value in xmm0 is a different result. And no
+/// caller reads rax instead. A function that stores between that write
+/// and the `ret` is not one of these: the store is the effect, and the
+/// bits left in the register are not a second result. A function whose
+/// every exit hands back what a function so found leaves there forwards
+/// that float, whoever reads it.
+/// The chains run to a fixpoint, capped at [`PASS_ROUNDS_MAX`] rounds. The
+/// width is 32 bits when every write that names a precision names a
+/// single, 64 otherwise.
 ///
 /// # Arguments
 ///
 /// * `analysis` - The functions, in the order of the other arguments.
 /// * `uses` - What each one's call sites do with xmm0 ([`float_use`]).
 /// * `floats` - What their exits hand back in xmm0 ([`handed_back`]).
+/// * `rax` - What their exits hand back in rax ([`handed_back`]).
 /// * `read` - Whether some caller reads each one's rax.
 ///
 /// # Returns
@@ -838,6 +854,7 @@ fn float_results(
     analysis: &Analysis,
     uses: &[Vec<FloatUse>],
     floats: &[Handed],
+    rax: &[Handed],
     read: &[bool],
 ) -> Vec<Option<u8>> {
     let declared = |j: usize| {
@@ -905,7 +922,17 @@ fn float_results(
         .into_iter()
         .zip(taken)
         .zip(read)
-        .map(|((bits, taken), &read)| bits.filter(|_| taken && !read))
+        .zip(uses)
+        .zip(rax)
+        .zip(floats)
+        .map(|(((((bits, taken), &read), sites), integer), float)| {
+            let alone = sites.is_empty()
+                && !integer.own
+                && !integer.unknown
+                && integer.calls.is_empty()
+                && !float.stored;
+            bits.filter(|_| !read && (taken || alone))
+        })
         .collect();
     for _ in 0..PASS_ROUNDS_MAX {
         let mut changed = false;
