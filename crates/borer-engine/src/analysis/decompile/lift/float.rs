@@ -22,6 +22,23 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
+    /// Sets the scalar type a vector register holds, replacing one already noted.
+    ///
+    /// A sign or magnitude mask leaves integer bits, not the float the
+    /// register held before the mask. The first type would declare that
+    /// float and a later store would convert the bits.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - An instruction whose operand 0 may be a vector register.
+    /// * `ty` - The type the result has, [`Ty::U64`] for a mask's bits.
+    pub(super) fn stamp_reg_ty(&mut self, instr: &Instruction, ty: Ty) {
+        if instr.op0_kind() == OpKind::Register && instr.op0_register().is_vector_register() {
+            let key = self.canon(instr.op0_register());
+            self.ctx.reg_ty.insert(key, ty);
+        }
+    }
+
     /// Writes a scalar float result to operand 0 and types the destination register.
     ///
     /// # Arguments
@@ -34,13 +51,54 @@ impl<'a> Exec<'_, 'a> {
         self.write_op0(instr, v);
     }
 
+    /// Writes a scalar float, keeping bit 63 when `upper` still has it.
+    ///
+    /// A scalar single replaces the low lane and leaves the bits above it.
+    /// A broadcast sign mask set bit 63 of a zero-extended single, so the
+    /// result keeps that bit. Any other value whose bits above the lane
+    /// this function did not clear, including a double, keeps bits 63:32
+    /// beside the new lane. The wrapped value is integer bits: a 32-bit
+    /// store is the new lane, and a 64-bit store still has the half above
+    /// it. A double lane is the whole low qword, so this does not wrap it.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The scalar instruction.
+    /// * `low` - The low lane it computed.
+    /// * `ty` - That lane's type.
+    /// * `upper` - The register whose bits above the lane survive. The
+    ///   destination for a legacy opcode, the first source for AVX.
+    pub(super) fn write_scalar_lane(
+        &mut self,
+        instr: &Instruction,
+        low: Expr,
+        ty: Ty,
+        upper: &Expr,
+    ) {
+        if ty == Ty::F32 && !lane_zeros_above(upper) {
+            self.stamp_reg_ty(instr, Ty::U64);
+            let kept = if sign_above_low(upper).is_some() {
+                with_sign_above(low)
+            } else if let Some((high, _)) = merged_parts(upper) {
+                merge_low_lane(high.clone(), low)
+            } else {
+                merge_low_lane(upper.clone(), low)
+            };
+            self.write_op0(instr, kept);
+            return;
+        }
+        self.float_write(instr, low, ty);
+    }
+
     /// Lifts an x87 instruction against a modelled register stack.
     ///
     /// The eight registers are held as `st0` to `st7`, a load pushes the
     /// others down, a store with `p` pops them back up, and arithmetic
-    /// rewrites `st0` or the register named; `fld dword [a]; fmul dword
-    /// [a+4]; fstp dword [a+8]` is then `*(float*)(a + 8) = *(float*)a *
-    /// *(float*)(a + 4)`. A store that pops pops before it writes: the
+    /// rewrites `st0` or the register named. A single is widened first, so
+    /// `fld dword [a]; fmul dword [a+4]; fstp dword [a+8]` is
+    /// `(double)*(float*)a * (double)*(float*)(a + 4)` stored as a float:
+    /// the product is the double one, and the single store rounds it once.
+    /// A store that pops pops before it writes: the
     /// value leaves the stack with the instruction, so it is stored, never
     /// first written out to the register it leaves. Integer loads and
     /// stores carry the casts. `fxch` swaps `st0` with its last operand:
@@ -49,7 +107,10 @@ impl<'a> Exec<'_, 'a> {
     /// and `fcmovcc` selects on them; one that writes the status word
     /// (`fcom`, `fcompp`) is remembered for the `fnstsw ax; sahf` that moves
     /// it into the flags, and the stack is kept right either way. `frndint`
-    /// is `rint`, which rounds as the control word says; `fsincos` leaves
+    /// is `rint`, which rounds to nearest, ties to even, as the default
+    /// control word says. `fist` and `fistp` store a cast of that rounding;
+    /// `fisttp` truncates toward zero. A value the width cannot hold is the
+    /// indefinite integer, the most negative value of that width. `fsincos` leaves
     /// the sine in place and pushes the cosine, `fptan` the tangent and a
     /// `1.0`, as both do for any operand below 2^63, the one they take. A
     /// control-word instruction or another transcendental one is left to
@@ -130,7 +191,13 @@ impl<'a> Exec<'_, 'a> {
                 }
             }
             M::Fist | M::Fistp | M::Fisttp if instr.op0_kind() == OpKind::Memory => {
-                let v = Expr::Cast(Box::new(self.st(0)), Self::mem_ty(instr));
+                let st = self.st(0);
+                let ty = Self::mem_ty(instr);
+                let v = if mn == M::Fisttp {
+                    Expr::Cast(Box::new(st), ty)
+                } else {
+                    Expr::Cast(Box::new(Expr::Call("rint".to_owned(), vec![st])), ty)
+                };
                 if mn != M::Fist {
                     self.pop_st();
                 }
@@ -187,7 +254,8 @@ impl<'a> Exec<'_, 'a> {
                     };
                     (d, s)
                 };
-                let d = self.st(dest);
+                let d = Self::widened(self.st(dest));
+                let src = Self::widened(src);
                 let v = if reversed {
                     fold(op, src, d, 64)
                 } else {
@@ -207,7 +275,7 @@ impl<'a> Exec<'_, 'a> {
                 self.set_st(0, v);
             }
             M::Fsqrt => {
-                let v = Expr::Un(UnOp::Sqrt, Box::new(self.st(0)));
+                let v = Expr::Un(UnOp::Sqrt, Box::new(Self::widened(self.st(0))));
                 self.set_st(0, v);
             }
             M::Frndint => {
@@ -347,7 +415,13 @@ impl<'a> Exec<'_, 'a> {
     }
 
     /// Reads an x87 instruction's operand: a stack register or a memory
-    /// operand, an integer one cast to `double`.
+    /// operand, an integer one sign-extended and cast to `double`.
+    ///
+    /// `fild` and the `fi` arithmetic read a signed integer. An unsigned
+    /// cast of `0xffffffff` is not `-1.0`. A writable single is not left as
+    /// the named global: that name carries no lane, so two of them would
+    /// multiply at single precision. It is the `float` at that address,
+    /// which an operation then widens.
     ///
     /// # Arguments
     ///
@@ -361,6 +435,29 @@ impl<'a> Exec<'_, 'a> {
         }
         let v = self.mem_read(instr, op);
         if integer {
+            let bits = Self::mem_ty(instr).bits();
+            return Expr::Cast(Box::new(sign_extend(v, bits)), Ty::F64);
+        }
+        if let Expr::Var(Key::Global(addr, _)) = v
+            && Self::mem_ty(instr) == Ty::F32
+            && self.ctx.program.section_at(addr).is_some()
+        {
+            return Expr::deref(Expr::Const(addr), Ty::F32);
+        }
+        v
+    }
+
+    /// A single widened to the precision an x87 operation uses.
+    ///
+    /// The stack holds a double. Multiplying two singles at single
+    /// precision, then keeping the product as a double, is a different
+    /// number. A later store to a single rounds this result once.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The operand.
+    fn widened(v: Expr) -> Expr {
+        if float_lane(&v) == Some(32) {
             Expr::Cast(Box::new(v), Ty::F64)
         } else {
             v
@@ -531,11 +628,14 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// # Returns
     ///
-    /// `(true, ty)` for an absolute-value mask (`0x7fff...`), `(false, ty)` for
-    /// a sign mask (`0x8000...`), where `ty` follows the lane width; `None` for
-    /// any other constant or a non-constant address. Lanes after the first may
-    /// repeat the mask or be zero (scalar code only needs lane zero).
-    pub(super) fn float_mask(&self, instr: &Instruction) -> Option<(bool, Ty)> {
+    /// `(absolute, ty, broadcast)`. `absolute` is the magnitude mask
+    /// (`0x7fff...`); a sign mask (`0x8000...`) is `false`. `ty` follows the
+    /// lane width. `broadcast` is `Some(true)` when every later lane repeats
+    /// the mask, `Some(false)` when every later lane is zero, and `None` when
+    /// the lanes mix the two. A mixed mask still negates or clears lane zero;
+    /// the bits above it are not one shape. `None` for the whole option is any
+    /// other constant or a non-constant address.
+    pub(super) fn float_mask(&self, instr: &Instruction) -> Option<(bool, Ty, Option<bool>)> {
         let Expr::Const(a) = self.addr(instr, 1) else {
             return None;
         };
@@ -548,20 +648,55 @@ impl<'a> Exec<'_, 'a> {
             .chunks_exact(8)
             .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
             .collect();
-        let uniform32 = |m: u32| lanes32[0] == m && lanes32[1..].iter().all(|l| *l == m || *l == 0);
-        let uniform64 = |m: u64| lanes64[0] == m && lanes64[1..].iter().all(|l| *l == m || *l == 0);
+        let fill = |same: bool, zero: bool| {
+            if same {
+                Some(true)
+            } else if zero {
+                Some(false)
+            } else {
+                None
+            }
+        };
+        let later32 = |m: u32| {
+            let rest = &lanes32[1..];
+            lanes32[0] == m && rest.iter().all(|l| *l == m || *l == 0)
+        };
+        let later64 = |m: u64| {
+            let rest = &lanes64[1..];
+            lanes64[0] == m && rest.iter().all(|l| *l == m || *l == 0)
+        };
         let xor = matches!(instr.mnemonic(), Mnemonic::Xorps | Mnemonic::Xorpd);
-        if uniform32(0x8000_0000) && xor {
-            return Some((false, Ty::F32));
+        if later32(0x8000_0000) && xor {
+            let rest = &lanes32[1..];
+            let kind = fill(
+                rest.iter().all(|l| *l == 0x8000_0000),
+                rest.iter().all(|l| *l == 0),
+            );
+            return Some((false, Ty::F32, kind));
         }
-        if uniform32(0x7fff_ffff) && !xor {
-            return Some((true, Ty::F32));
+        if later32(0x7fff_ffff) && !xor {
+            let rest = &lanes32[1..];
+            let kind = fill(
+                rest.iter().all(|l| *l == 0x7fff_ffff),
+                rest.iter().all(|l| *l == 0),
+            );
+            return Some((true, Ty::F32, kind));
         }
-        if uniform64(0x8000_0000_0000_0000) && xor {
-            return Some((false, Ty::F64));
+        if later64(0x8000_0000_0000_0000) && xor {
+            let rest = &lanes64[1..];
+            let kind = fill(
+                rest.iter().all(|l| *l == 0x8000_0000_0000_0000),
+                rest.iter().all(|l| *l == 0),
+            );
+            return Some((false, Ty::F64, kind));
         }
-        if uniform64(0x7fff_ffff_ffff_ffff) && !xor {
-            return Some((true, Ty::F64));
+        if later64(0x7fff_ffff_ffff_ffff) && !xor {
+            let rest = &lanes64[1..];
+            let kind = fill(
+                rest.iter().all(|l| *l == 0x7fff_ffff_ffff_ffff),
+                rest.iter().all(|l| *l == 0),
+            );
+            return Some((true, Ty::F64, kind));
         }
         None
     }

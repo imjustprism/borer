@@ -171,6 +171,8 @@ fn truth(e: Expr, cc: Cc) -> Cond {
 /// the ordered less-than alone, where x86's carry takes an unordered pair
 /// with it, so `mi` (and `lo`, which a float compare leaves the same) is
 /// the less-than and the ordered test together, `pl` and `hs` its inverse.
+/// The inverse is the same test tagged with the opposite code: tagging it
+/// with the code `pl` or `hs` asks would answer the less-than.
 ///
 /// # Arguments
 ///
@@ -205,7 +207,15 @@ fn float_condition(flags: &Flags, c: a64::Cond, cc: Cc) -> Cond {
                 cc: Cc(C::np),
                 flags: flags.clone(),
             }));
-            truth(fold(Op::And, less, ordered, 64), cc)
+            let both = fold(Op::And, less, ordered, 64);
+            if matches!(c, a64::Cond::Pl | a64::Cond::Hs) {
+                Cond {
+                    cc,
+                    flags: Flags::Truth(both, cc.invert()),
+                }
+            } else {
+                truth(both, cc)
+            }
         }
         a64::Cond::Al | a64::Cond::Nv => truth(Expr::Const(1), Cc(C::ne)),
     }

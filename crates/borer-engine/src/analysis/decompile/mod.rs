@@ -2474,6 +2474,79 @@ mod tests {
         assert_eq!(super::elvis(other), other);
     }
 
+    /// A plain name combined with one value is a compound assignment.
+    /// A sum of two values, a call, and a store through a pointer stay
+    /// assignments, and an add is not `++`.
+    #[test]
+    fn a_name_added_to_itself_is_a_compound_assignment() {
+        assert_eq!(
+            super::finish::compound_assign("  var1 = var1 + var2;"),
+            "  var1 += var2;"
+        );
+        assert_eq!(
+            super::finish::compound_assign("var1 = var1 - 1;"),
+            "var1 -= 1;"
+        );
+        assert_eq!(
+            super::finish::compound_assign("var1 = var1 << 2;"),
+            "var1 <<= 2;"
+        );
+        assert_eq!(
+            super::finish::compound_assign("var1 = var1 & 0xff;"),
+            "var1 &= 0xff;"
+        );
+        let sum = "var1 = var1 + var2 + var3;";
+        assert_eq!(super::finish::compound_assign(sum), sum);
+        let call = "var1 = var1 + f();";
+        assert_eq!(super::finish::compound_assign(call), call);
+        let star = "*p = *p + 1;";
+        assert_eq!(super::finish::compound_assign(star), star);
+        let other = "var1 = var2 + var1;";
+        assert_eq!(super::finish::compound_assign(other), other);
+        assert!(!super::finish::compound_assign("var1 = var1 + 1;").contains("++"));
+    }
+
+    /// A pointer compared with zero is `nullptr`. An integer, a field, a
+    /// cast to an integer and a string stay on `0`.
+    #[test]
+    fn a_pointer_compared_with_zero_is_nullptr() {
+        let text = concat!(
+            "// signature: int32_t f(uint32_t*a1, int32_t a2, void *this)\n",
+            "uint64_t *var1;\n",
+            "if (a1 == 0 || *(uint8_t**)a1 != 0) {\n",
+            "  return 0;\n",
+            "}\n",
+            "if (a2 == 0 || *(uint32_t*)a1 == 0) {\n",
+            "  return 1;\n",
+            "}\n",
+            "if (this == 0 && var1 != 0 && 0 == a1) {\n",
+            "  return 2;\n",
+            "}\n",
+            "if (this->head == 0 || (uint32_t)a1 == 0 || a1 + a2 == 0) {\n",
+            "  return 3;\n",
+            "}\n",
+            "f(\"a1 == 0\");\n",
+            "return *(uint32_t*)a1;\n",
+        );
+        let out = super::finish::spell_nullptr(text);
+        assert!(
+            out.contains("if (a1 == nullptr || *(uint8_t**)a1 != nullptr)"),
+            "{out}"
+        );
+        assert!(out.contains("return 0;"), "{out}");
+        assert!(out.contains("if (a2 == 0 || *(uint32_t*)a1 == 0)"), "{out}");
+        assert!(
+            out.contains("if (this == nullptr && var1 != nullptr && nullptr == a1)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("if (this->head == 0 || (uint32_t)a1 == 0 || a1 + a2 == 0)"),
+            "{out}"
+        );
+        assert!(out.contains("f(\"a1 == 0\");"), "{out}");
+        assert!(!out.contains("NULL"), "{out}");
+    }
+
     /// Each class whose `Singleton` a function reads is found once, in the
     /// order it is first read; a longer identifier is not one.
     #[test]

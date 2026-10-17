@@ -119,9 +119,11 @@ fn reg_value(emu: &Machine<'_>, r: Reg) -> Option<u64> {
 ///
 /// Why a block holding it is not checked.
 fn checked(i: &Insn) -> Result<(), &'static str> {
-    let own_statement = matches!(i.mnemonic, Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Svc)
-        && !super::lift_a64::modeled_system(i);
+    let own_statement =
+        matches!(i.mnemonic, Mnemonic::Mrs | Mnemonic::Msr) && !super::lift_a64::modeled_system(i);
+    let svc_zero = i.mnemonic == Mnemonic::Svc && matches!(i.operands.first(), Some(Opnd::Imm(0)));
     match i.op {
+        a64::Op::Syscall if svc_zero => Ok(()),
         a64::Op::Syscall | a64::Op::Eret | a64::Op::Trap | a64::Op::Invalid => {
             Err("an instruction outside every checked form")
         }

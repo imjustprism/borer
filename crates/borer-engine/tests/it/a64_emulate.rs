@@ -1530,6 +1530,58 @@ fn routines_compute_what_the_architecture_says() {
     }
 }
 
+/// `fcvtzu` of a value in `[2^63, 2^64)` keeps that value.
+///
+/// The float is planted with `fmov`, because a vector register has no
+/// name `set_register` accepts. Casting the truncated value through a
+/// signed 64-bit integer saturates at the signed maximum; the architecture
+/// does not.
+#[test]
+fn an_unsigned_conversion_of_two_to_the_63_keeps_the_high_bit() {
+    // (conversion, float bits, x0 after). The 32-bit row moves `w0` into `s0`.
+    let rows: &[(u32, u32, u64, u64)] = &[
+        // ASM: fcvtzu x0, d0
+        (
+            0x9e67_0000,
+            0x9e79_0000,
+            0x43E0_0000_0000_0000,
+            0x8000_0000_0000_0000,
+        ),
+        (
+            0x9e67_0000,
+            0x9e79_0000,
+            0x43EF_FFFF_FFFF_FFFF,
+            0xffff_ffff_ffff_f800,
+        ),
+        (0x9e67_0000, 0x9e79_0000, 0x43F0_0000_0000_0000, u64::MAX),
+        (0x9e67_0000, 0x9e79_0000, 0x7FF0_0000_0000_0000, u64::MAX),
+        (0x9e67_0000, 0x9e79_0000, 0xBFF0_0000_0000_0000, 0),
+        // ASM: fcvtzs x0, d0
+        (
+            0x9e67_0000,
+            0x9e78_0000,
+            0x43E0_0000_0000_0000,
+            0x7fff_ffff_ffff_ffff,
+        ),
+        (
+            0x9e67_0000,
+            0x9e78_0000,
+            0xC3E0_0000_0000_0000,
+            0x8000_0000_0000_0000,
+        ),
+        // ASM: fmov s0, w0 / fcvtzu w0, s0. 2^31 fits; 2^32 saturates.
+        (0x1e27_0000, 0x1e39_0000, 0x4f00_0000, 0x8000_0000),
+        (0x1e27_0000, 0x1e39_0000, 0x4f80_0000, 0xffff_ffff),
+    ];
+    for &(mov, op, bits, want) in rows {
+        let p = image(&[mov, op, RET]);
+        let mut m = machine(&p);
+        assert!(m.set_register("x0", bits), "{bits:#x} sets nothing");
+        assert_eq!(m.run(BASE).stop, Stop::Returned, "{bits:#x}");
+        assert_eq!(m.register("x0"), Some(want), "{op:#x} of {bits:#x}");
+    }
+}
+
 /// `adds w0, w1, w2`.
 // ASM: adds w0, w1, w2
 const ADDS_W: u32 = 0x2b02_0020;

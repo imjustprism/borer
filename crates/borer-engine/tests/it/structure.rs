@@ -1682,7 +1682,7 @@ fn a_nested_if_chain_flattens_into_one_condition() {
         0xc3, // ASM: ret
     ]);
     assert!(
-        out.contains("if (a1 != 0 && a2 != 0 && a3 != 0 && a4 != 0) {"),
+        out.contains("if (a1 != nullptr && a2 != 0 && a3 != 0 && a4 != 0) {"),
         "{out}"
     );
     assert!(!out.contains("goto "), "{out}");
@@ -1694,7 +1694,7 @@ fn a_nested_if_chain_flattens_into_one_condition() {
         0xc3, // ASM: ret
     ]);
     assert!(
-        out.contains("if (a1 != 0 && *(uint32_t*)a1 != 0 && a3 != 0) {"),
+        out.contains("if (a1 != nullptr && *(uint32_t*)a1 != 0 && a3 != 0) {"),
         "{out}"
     );
     assert!(!out.contains("goto "), "{out}");
@@ -1706,10 +1706,10 @@ fn a_nested_if_chain_flattens_into_one_condition() {
 /// The first test sends `a1 == 0` to the join; the block under it tests
 /// `a1` again in front of its second condition, a test the machine only
 /// ever makes once `a1 != 0` is settled. The merged chain is
-/// `a1 == 0 || (a1 != 0 && a2 == 0)`, whose second term is `a2 == 0`
-/// alone wherever the machine evaluates it, so the text renders the
-/// negation as `a1 != 0 && a2 != 0` with no `goto` and the structure
-/// check agreeing.
+/// `a1 == nullptr || (a1 != nullptr && a2 == 0)`, whose second term is
+/// `a2 == 0` alone wherever the machine evaluates it, so the text renders
+/// the negation as `a1 != nullptr && a2 != 0` with no `goto` and the
+/// structure check agreeing. `a1` is a pointer; `a2` is an integer.
 #[test]
 fn a_join_guard_drops_the_test_an_earlier_term_decided() {
     use borer_engine::analysis::decompile::traces::{Structure, check_structure};
@@ -1723,8 +1723,9 @@ fn a_join_guard_drops_the_test_an_earlier_term_decided() {
     ]) else {
         panic!("the join did not decompile");
     };
-    assert!(out.contains("if (a1 != 0 && a2 != 0) {"), "{out}");
+    assert!(out.contains("if (a1 != nullptr && a2 != 0) {"), "{out}");
     assert!(!out.contains("a1 == 0 ||"), "{out}");
+    assert!(!out.contains("a1 == nullptr ||"), "{out}");
     assert!(!out.contains("goto "), "{out}");
     assert_eq!(
         check_structure(&p, &a, &Overlay::default(), 0x1000, &out),

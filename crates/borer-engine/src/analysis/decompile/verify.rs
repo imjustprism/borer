@@ -40,7 +40,11 @@ use crate::isa::x86::{
     st_register,
 };
 
-use super::expr::{Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, fold, tls_slot, unary};
+use super::expr::{
+    Cond, Expr, Flags, Key, Op, RoundToInt, TLS_BASE, Ty, UnOp, abs_bits, align_up_bits, cls_bits,
+    either_width, extremum_bits, fcvt_float_width, fold, midpoint_bits, rbit_bits, rev16_bits,
+    rev32_bits, rint_bits, sub_sat_bits, tls_slot, unary,
+};
 use super::lift::{BlockFacts, Env, Pass, exec_block};
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
@@ -730,9 +734,78 @@ pub(super) fn eval<M: Bench>(
             }
             Some(v & low(ty.bits()))
         }
-        Expr::Cast(inner, ty @ (Ty::F32 | Ty::F64)) if float_bits(inner, st).is_some() => {
-            let v = eval(inner, st, reads, d)?;
-            Some(convert_float(v, float_bits(inner, st), *ty))
+        Expr::Cast(inner, ty @ (Ty::F32 | Ty::F64)) => {
+            if let Some(fb) = float_bits(inner, st) {
+                let v = eval(inner, st, reads, d)?;
+                return Some(convert_float(v, Some(fb), *ty));
+            }
+            if let Some(v) = float_carried(inner, ty.bits(), |e| eval(e, st, reads, d)) {
+                return Some(v);
+            }
+            if let Some(v) = reinterpret_float(inner, *ty, |e| eval(e, st, reads, d)) {
+                return Some(v);
+            }
+            let (v, signed) = cast_integer(inner, |e| eval(e, st, reads, d))?;
+            Some(integer_to_float(v, signed, *ty))
+        }
+        Expr::Call(name, args) => {
+            if let Some(round) = RoundToInt::parse(name) {
+                let src = args.first()?;
+                let fb = fcvt_float_width(args.get(1), float_bits(src, st))?;
+                let v = eval(src, st, reads, d)
+                    .or_else(|| float_scale_at(src, fb, |e| eval(e, st, reads, d)));
+                return round.apply(v?, fb);
+            }
+            match name.as_str() {
+                "min" | "max" | "umin" | "umax" => {
+                    let (a, b) = (args.first()?, args.get(1)?);
+                    extremum_bits(
+                        name,
+                        eval(a, st, reads, d)?,
+                        eval(b, st, reads, d)?,
+                        st.width,
+                    )
+                }
+                "abs" => abs_bits(eval(args.first()?, st, reads, d)?, st.width),
+                "midpoint" => {
+                    let (a, b) = (args.first()?, args.get(1)?);
+                    midpoint_bits(eval(a, st, reads, d)?, eval(b, st, reads, d)?, st.width)
+                }
+                "align_up" => {
+                    let (a, b) = (args.first()?, args.get(1)?);
+                    align_up_bits(eval(a, st, reads, d)?, eval(b, st, reads, d)?, st.width)
+                }
+                "cls" => {
+                    let arg = args.first()?;
+                    let bits = match arg {
+                        Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(st.width),
+                        _ => st.width,
+                    };
+                    cls_bits(eval(arg, st, reads, d)?, bits)
+                }
+                "rbit" | "rev16" | "rev32" => {
+                    let arg = args.first()?;
+                    let bits = match arg {
+                        Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(st.width),
+                        _ => st.width,
+                    };
+                    let v = eval(arg, st, reads, d)?;
+                    match name.as_str() {
+                        "rbit" => rbit_bits(v, bits),
+                        "rev16" => rev16_bits(v, bits),
+                        _ => rev32_bits(v, bits),
+                    }
+                }
+                "sub_sat" => {
+                    let (a, b) = (args.first()?, args.get(1)?);
+                    sub_sat_bits(eval(a, st, reads, d)?, eval(b, st, reads, d)?, st.width)
+                }
+                "rint" => {
+                    let src = args.first()?;
+                    rint_bits(eval(src, st, reads, d)?, float_bits(src, st)?)
+                }
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -756,7 +829,9 @@ pub(super) fn float_bits<M: Bench>(e: &Expr, st: &State<'_, M>) -> Option<u8> {
         Expr::Deref(_, Ty::F64) | Expr::Cast(_, Ty::F64) | Expr::FConst(_, Ty::F64) => Some(64),
         Expr::Var(Key::Tmp(id)) => float_bits(st.temps.get(id)?, st),
         Expr::Bin(op, l, r) if op.is_float() => Some(float_bits(l, st)?.max(float_bits(r, st)?)),
+        Expr::Ternary(_, a, b) => either_width(float_bits(a, st), float_bits(b, st)),
         Expr::Un(_, inner) => float_bits(inner, st),
+        Expr::Call(name, args) if name == "rint" => args.first().and_then(|a| float_bits(a, st)),
         _ => None,
     }
 }
@@ -796,6 +871,125 @@ pub(super) fn float_of(v: u64, fb: u8) -> f64 {
     } else {
         f64::from_bits(v)
     }
+}
+
+/// A float operation a cast names a width for, computed at that width.
+///
+/// The cast is not a conversion. A scalar `fadd` of two bare registers
+/// carries no type of its own, and the cast records the width the
+/// instruction used, so the bits are that operation's. An integer under
+/// the cast is `None` here and converts by [`integer_to_float`]. A float
+/// constant of a different width is `None`, not a value read at the wrong
+/// width.
+///
+/// # Arguments
+///
+/// * `e` - The cast's operand.
+/// * `fb` - The width the cast names, 32 or 64.
+/// * `leaf` - The bits of one operand.
+pub(super) fn float_carried(
+    e: &Expr,
+    fb: u8,
+    mut leaf: impl FnMut(&Expr) -> Option<u64>,
+) -> Option<u64> {
+    if !matches!(fb, 32 | 64) {
+        return None;
+    }
+    let wrong = |e: &Expr| matches!(e, Expr::FConst(_, ty) if ty.bits() != fb);
+    match e {
+        Expr::Bin(op, _, _) if op.is_float() => float_scale_at(e, fb, leaf),
+        Expr::Un(op @ (UnOp::Sqrt | UnOp::Fabs), inner) if !wrong(inner) => {
+            float_un(*op, leaf(inner)?, fb)
+        }
+        Expr::Un(UnOp::Neg, inner) if inner.is_float() && !wrong(inner) => {
+            Some(leaf(inner)? ^ (1u64 << (u32::from(fb) - 1)))
+        }
+        Expr::Const(_)
+        | Expr::FConst(_, _)
+        | Expr::Var(_)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Bin(_, _, _)
+        | Expr::Un(_, _)
+        | Expr::Deref(_, _)
+        | Expr::Cond(_)
+        | Expr::Ternary(_, _, _)
+        | Expr::Sext(_, _)
+        | Expr::Cast(_, _)
+        | Expr::Call(_, _) => None,
+    }
+}
+
+/// A float cast of a bitwise cut of a float, as the bits, not the number.
+///
+/// The cut is the encoding ([`super::interp`] does the same for the
+/// operator). Casting those bits to a float keeps them, zero above a
+/// single: converting them would be the integer the bits happen to be.
+/// Anything other than that cut is `None`, and the cast converts by
+/// [`integer_to_float`].
+///
+/// # Arguments
+///
+/// * `e` - The cast's operand.
+/// * `to` - The float the cast names.
+/// * `leaf` - The bits of one operand.
+pub(super) fn reinterpret_float(
+    e: &Expr,
+    to: Ty,
+    mut leaf: impl FnMut(&Expr) -> Option<u64>,
+) -> Option<u64> {
+    let Expr::Bin(op @ (Op::And | Op::Or | Op::Xor), l, r) = e else {
+        return None;
+    };
+    if !l.is_float() && !r.is_float() {
+        return None;
+    }
+    let (a, b) = (leaf(l)?, leaf(r)?);
+    let v = match op {
+        Op::And => a & b,
+        Op::Or => a | b,
+        Op::Xor => a ^ b,
+        _ => return None,
+    };
+    match to {
+        Ty::F32 => Some(u64::from(lo32(v))),
+        Ty::F64 => Some(v),
+        Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => None,
+    }
+}
+
+/// A float operation whose operands carry no float type, computed at `fb`.
+///
+/// A fixed-point conversion scales its register by a power of two before
+/// rounding. The register's bits are the float; it has no float type of
+/// its own, so the ordinary evaluator stops. The scale is exact at `fb`,
+/// which is the width the conversion recorded. A float constant of a
+/// different width is `None`, not a value read at the wrong width.
+///
+/// # Arguments
+///
+/// * `e` - The operation. Anything other than a float binary is `None`.
+/// * `fb` - The width, 32 or 64.
+/// * `leaf` - The bits of one operand.
+pub(super) fn float_scale_at(
+    e: &Expr,
+    fb: u8,
+    mut leaf: impl FnMut(&Expr) -> Option<u64>,
+) -> Option<u64> {
+    if !matches!(fb, 32 | 64) {
+        return None;
+    }
+    let Expr::Bin(op, l, r) = e else {
+        return None;
+    };
+    if !op.is_float() {
+        return None;
+    }
+    let width_ok = |e: &Expr| !matches!(e, Expr::FConst(_, ty) if ty.bits() != fb);
+    if !width_ok(l) || !width_ok(r) {
+        return None;
+    }
+    float_arith(*op, float_of(leaf(l)?, fb), float_of(leaf(r)?, fb), fb)
 }
 
 /// Applies a float binary operator at the width its operands carry, as the
@@ -908,6 +1102,66 @@ pub(super) fn float_un(op: UnOp, v: u64, bits: u8) -> Option<u64> {
     }
 }
 
+/// The integer a float cast converts, and whether that integer is signed.
+///
+/// A sign extension is signed, including from a full 64-bit register,
+/// which [`sext`] does not re-extend. Anything else is the unsigned value
+/// of its bits: an unsigned conversion masks a narrower source first, so
+/// the high bit of a 32-bit value is already clear.
+///
+/// # Arguments
+///
+/// * `inner` - The cast's operand.
+/// * `eval` - The bits of one subexpression.
+pub(super) fn cast_integer(
+    inner: &Expr,
+    mut eval: impl FnMut(&Expr) -> Option<u64>,
+) -> Option<(u64, bool)> {
+    match inner {
+        Expr::Sext(x, bits) => {
+            let v = eval(x)?;
+            let v = if *bits >= 64 { v } else { sext(v, *bits)? };
+            Some((v, true))
+        }
+        other => Some((eval(other)?, false)),
+    }
+}
+
+/// An integer rounded to `to`, the way `scvtf` and `ucvtf` do.
+///
+/// The value becomes a double first and a single narrows that double.
+/// For an integer that is the same rounding as a direct conversion to a
+/// single, and it is the rounding the fixed-point form divides before.
+///
+/// # Arguments
+///
+/// * `v` - The integer's bits, already sign-extended when `signed`.
+/// * `signed` - Whether those bits are signed.
+/// * `to` - The float written. Anything else returns `v`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "an integer converted to a float rounds, as the conversion does"
+)]
+pub(super) fn integer_to_float(v: u64, signed: bool, to: Ty) -> u64 {
+    let wide = if signed {
+        v.cast_signed() as f64
+    } else {
+        v as f64
+    };
+    match to {
+        Ty::F32 => {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "narrowing the double to a single is the conversion's last rounding"
+            )]
+            let n = wide as f32;
+            u64::from(n.to_bits())
+        }
+        Ty::F64 => wide.to_bits(),
+        Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => v,
+    }
+}
+
 /// Converts a float's bits to the width a store gives it, rounding a
 /// double to a single as an x87 store to a single does.
 ///
@@ -952,17 +1206,30 @@ pub(super) fn agree(a: u64, b: u64, bits: u8, float: bool) -> bool {
 /// zero, and to the integer indefinite (the most negative value) when the
 /// float is a NaN or does not fit.
 ///
+/// A 32-bit or 64-bit destination uses that signed range. An 8-bit or
+/// 16-bit destination uses its own: `fist` and `fisttp` of a word store
+/// the indefinite integer there, not the low bits of a wider conversion.
+///
 /// # Arguments
 ///
 /// * `v` - The float's bits.
 /// * `fb` - The float's width, 32 or 64.
-/// * `bits` - The integer's width, 32 or 64.
+/// * `bits` - The integer's width.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "the range checks guarantee the truncated float fits the integer"
+    clippy::cast_precision_loss,
+    reason = "the range checks guarantee the truncated float fits the integer, and the bound is a power of two"
 )]
 pub(super) fn float_to_int(v: u64, fb: u8, bits: u8) -> u64 {
     let f = float_of(v, fb).trunc();
+    if matches!(bits, 8 | 16) {
+        let shift = u32::from(bits) - 1;
+        let top = (1u64 << shift) as f64;
+        if f.is_nan() || f < -top || f >= top {
+            return 1u64 << shift;
+        }
+        return (f as i64).cast_unsigned() & low(bits);
+    }
     if bits <= 32 {
         if f.is_nan() || !(-2_147_483_648.0..=2_147_483_647.0).contains(&f) {
             return 0x8000_0000;

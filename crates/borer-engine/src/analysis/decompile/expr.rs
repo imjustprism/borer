@@ -183,9 +183,16 @@ pub(super) enum Op {
     FMul,
     /// IEEE-754 division.
     FDiv,
-    /// IEEE-754 minimum (`fmin`).
+    /// The smaller operand when the ordered `<` holds, otherwise the right one.
+    ///
+    /// A NaN comparison fails, and so does an equal pair, so `minss` and the
+    /// emulator's `fmin` keep the right operand's bits, including a NaN and
+    /// the other zero. C's `fmin` returns the number and prefers `-0`.
     FMin,
-    /// IEEE-754 maximum (`fmax`).
+    /// The larger operand when the ordered `>` holds, otherwise the right one.
+    ///
+    /// The same failure rule as [`Op::FMin`]: `maxss` and the emulator's
+    /// `fmax` keep the right operand when the compare does not hold.
     FMax,
 }
 
@@ -860,6 +867,24 @@ impl Expr {
             | Expr::Cond(_)
             | Expr::Sext(..) => false,
         }
+    }
+}
+
+/// The width a select carries when either arm has one.
+///
+/// Both arms sized: the wider. One sized: that width, so a bare register
+/// next to a float does not drop the select's width. Neither sized: none,
+/// and a select of two bare registers stays an integer the write cuts.
+///
+/// # Arguments
+///
+/// * `a` - One arm's width.
+/// * `b` - The other's.
+pub(super) fn either_width(a: Option<u8>, b: Option<u8>) -> Option<u8> {
+    match (a, b) {
+        (Some(l), Some(r)) => Some(l.max(r)),
+        (Some(w), None) | (None, Some(w)) => Some(w),
+        (None, None) => None,
     }
 }
 
@@ -1892,6 +1917,375 @@ pub(super) fn opaque_note(outcome: bool, inverted: bool, evidence: Evidence) -> 
     }
 }
 
+/// A 64-bit absolute value written with the sign splat.
+///
+/// `(x ^ (x >> 63)) - (x >> 63)` and `(x + (x >> 63)) ^ (x >> 63)` are
+/// `abs(x)`, including the minimum value, whose negation wraps. The shift
+/// has to be by 63 and the surrounding operation at least 64 bits wide: a
+/// shift by 31 is a 32-bit sign, and folding it would take the absolute
+/// value of bits the 32-bit operation does not own. `cqo` is that shift
+/// into `rdx`.
+///
+/// # Arguments
+///
+/// * `op` - The operation being folded.
+/// * `l` - Left operand.
+/// * `r` - Right operand.
+/// * `bits` - Width of the operation.
+///
+/// # Returns
+///
+/// `abs` of the operand, or `None` when this is not that shape.
+fn sign_absolute(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
+    if bits < 64 {
+        return None;
+    }
+    /// `x >> 63`, the 64-bit sign splat, or `None`.
+    fn splat(e: &Expr) -> Option<&Expr> {
+        match e {
+            Expr::Bin(Op::Sar, x, n) if const_of(n) == Some(63) => Some(x.as_ref()),
+            _ => None,
+        }
+    }
+    let call = |x: &Expr| Expr::Call("abs".to_owned(), vec![x.clone()]);
+    match op {
+        Op::Sub => {
+            let x = splat(r)?;
+            let Expr::Bin(Op::Xor, a, b) = l else {
+                return None;
+            };
+            let same = (a.as_ref() == x && b.as_ref() == r) || (b.as_ref() == x && a.as_ref() == r);
+            same.then(|| call(x))
+        }
+        Op::Xor => {
+            let (sign, sum) = if splat(l).is_some() { (l, r) } else { (r, l) };
+            let x = splat(sign)?;
+            let Expr::Bin(Op::Add, a, b) = sum else {
+                return None;
+            };
+            let same =
+                (a.as_ref() == x && b.as_ref() == sign) || (b.as_ref() == x && a.as_ref() == sign);
+            same.then(|| call(x))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `e` evaluates a call.
+///
+/// A spelling that names the value once must not replace a tree that
+/// evaluates the call twice, and a tree that evaluates it once may become
+/// a call of that value.
+///
+/// # Arguments
+///
+/// * `e` - The expression.
+fn invokes(e: &Expr) -> bool {
+    match e {
+        Expr::Call(..) => true,
+        Expr::Bin(_, a, b) | Expr::Ternary(_, a, b) => invokes(a) || invokes(b),
+        Expr::Un(_, a) | Expr::Deref(a, _) | Expr::Sext(a, _) | Expr::Cast(a, _) => invokes(a),
+        Expr::Cond(c) => match &c.flags {
+            Flags::Cmp(l, r, _)
+            | Flags::Float(l, r, _)
+            | Flags::Test(l, r, _)
+            | Flags::Add(l, r, _) => invokes(l) || invokes(r),
+            Flags::Result(v, _) | Flags::Carry(v) | Flags::Truth(v, _) => invokes(v),
+            Flags::Shift(v, _, bit) => invokes(v) || invokes(bit),
+            Flags::Unknown => false,
+        },
+        Expr::Const(_) | Expr::Var(_) | Expr::Str(_) | Expr::Sp(_) | Expr::FConst(..) => false,
+    }
+}
+
+/// `(x << n) | (x >> (width - n))` as a rotate.
+///
+/// The shifts are logical, of one value, by constants that add to the
+/// operation width. The width is one `rotl` and `rotr` already name (8,
+/// 16, 32, or 64). The printed count is the smaller of the two, and
+/// `rotl` on a tie. An arithmetic shift is not a rotate: it fills with
+/// the sign. A value that calls stays an or, so the text does not claim
+/// the call ran once. A double shift of a register with itself (`shld rax,
+/// rax, n`) is this shape; two different registers are not. A variable
+/// count is the same rotate when it is masked to a 32-bit or 64-bit
+/// width, which is the form `shld x, x, cl` lifts. The printed count is
+/// the value under that mask. An 8-bit or 16-bit variable count can be
+/// past the operand width, so it stays the shifts.
+///
+/// # Arguments
+///
+/// * `op` - The operation being folded.
+/// * `l` - Left operand.
+/// * `r` - Right operand.
+/// * `bits` - Width of the operation.
+///
+/// # Returns
+///
+/// The rotate, or `None` when this is not that shape.
+fn rotate_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
+    if op != Op::Or || !matches!(bits, 8 | 16 | 32 | 64) {
+        return None;
+    }
+    /// `(left, value, count)` of a logical shift, or `None`.
+    fn shift(e: &Expr) -> Option<(bool, &Expr, u64)> {
+        match e {
+            Expr::Bin(Op::Shl, v, n) => Some((true, v.as_ref(), const_of(n)?)),
+            Expr::Bin(Op::Shr, v, n) => Some((false, v.as_ref(), const_of(n)?)),
+            _ => None,
+        }
+    }
+    if let (Some(a), Some(b)) = (shift(l), shift(r)) {
+        if a.1 != b.1 || a.0 == b.0 || invokes(a.1) {
+            return None;
+        }
+        let (left, right) = if a.0 { (a.2, b.2) } else { (b.2, a.2) };
+        let width = u64::from(bits);
+        if left == 0 || right == 0 || left >= width || right >= width || left + right != width {
+            return None;
+        }
+        let (op, n) = if left <= right {
+            (Op::Rol(bits), left)
+        } else {
+            (Op::Ror(bits), right)
+        };
+        return Some(Expr::Bin(
+            op,
+            Box::new(a.1.clone()),
+            Box::new(Expr::Const(n)),
+        ));
+    }
+    variable_rotate(l, r, bits)
+}
+
+/// `shld` or `shrd` of one value by a count masked to the width.
+///
+/// The lifter writes `shld x, x, n` as `(x << (n & (w - 1))) | ((x >> 1)
+/// >> ((w - 1) - (n & (w - 1))))`, and `shrd` with the shifts swapped.
+/// That is a rotate by `n` at 32 and 64 bits, where the mask keeps the
+/// count inside the width. A rotate reduces its count the same way, so
+/// the printed count is `n`. An unmasked count is not this shape. A call
+/// in the value or the count stays the shifts.
+///
+/// # Arguments
+///
+/// * `l` - Left operand of the or.
+/// * `r` - Right operand of the or.
+/// * `bits` - Width of the operation.
+///
+/// # Returns
+///
+/// The rotate, or `None` when this is not that shape.
+fn variable_rotate(l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
+    if !matches!(bits, 32 | 64) {
+        return None;
+    }
+    let mask = u64::from(bits) - 1;
+    /// `(op, value, count)` of a logical shift, or `None`.
+    fn shift(e: &Expr) -> Option<(Op, &Expr, &Expr)> {
+        match e {
+            Expr::Bin(op @ (Op::Shl | Op::Shr), v, n) => Some((*op, v.as_ref(), n.as_ref())),
+            _ => None,
+        }
+    }
+    /// The value under `& mask`, or `None`.
+    fn under_mask<'a>(e: &'a Expr, mask: u64) -> Option<&'a Expr> {
+        match e {
+            Expr::Bin(Op::And, n, m) if const_of(m) == Some(mask) => Some(n.as_ref()),
+            Expr::Bin(Op::And, m, n) if const_of(m) == Some(mask) => Some(n.as_ref()),
+            _ => None,
+        }
+    }
+    /// `(value, rest)` of a shift by one then by `rest`, or `None`.
+    fn doubled<'a>(e: &'a Expr, op: Op) -> Option<(&'a Expr, &'a Expr)> {
+        let (which, inner, rest) = shift(e)?;
+        if which != op {
+            return None;
+        }
+        let (which, base, one) = shift(inner)?;
+        (which == op && const_of(one) == Some(1)).then_some((base, rest))
+    }
+    /// Whether `rest` is `(width - 1) - cnt`.
+    fn complement(rest: &Expr, cnt: &Expr, mask: u64) -> bool {
+        match rest {
+            Expr::Bin(Op::Sub, top, c) => const_of(top) == Some(mask) && c.as_ref() == cnt,
+            _ => false,
+        }
+    }
+    for (near, far) in [(l, r), (r, l)] {
+        let Some((near_op, base, cnt)) = shift(near) else {
+            continue;
+        };
+        let Some(count) = under_mask(cnt, mask) else {
+            continue;
+        };
+        let far_op = if near_op == Op::Shl { Op::Shr } else { Op::Shl };
+        let Some((other, rest)) = doubled(far, far_op) else {
+            continue;
+        };
+        if other != base || !complement(rest, cnt, mask) || invokes(base) || invokes(count) {
+            continue;
+        }
+        let op = if near_op == Op::Shl {
+            Op::Rol(bits)
+        } else {
+            Op::Ror(bits)
+        };
+        return Some(Expr::Bin(
+            op,
+            Box::new(base.clone()),
+            Box::new(count.clone()),
+        ));
+    }
+    None
+}
+
+/// The floor of the unsigned sum of `a` and `b`, half of it, at `bits`.
+///
+/// This is `(a & b) + ((a ^ b) >> 1)`, which does not drop the carry a
+/// bare `(a + b) >> 1` drops. A width of 0 or above 64 is `None`.
+///
+/// # Arguments
+///
+/// * `a` - The first operand.
+/// * `b` - The second operand.
+/// * `bits` - The width.
+pub(super) fn midpoint_bits(a: u64, b: u64, bits: u8) -> Option<u64> {
+    if bits == 0 || bits > 64 {
+        return None;
+    }
+    let m = mask_bits(bits);
+    let (a, b) = (a & m, b & m);
+    Some((a & b).wrapping_add((a ^ b) >> 1) & m)
+}
+
+/// `(x & y) + ((x ^ y) >> 1)` as `midpoint`.
+///
+/// The shift is logical and by one, and the operation is at least 64
+/// bits: a 32-bit average is not the average of the zero-extended values.
+/// The arguments stay in the and's order. A call in either value stays
+/// the arithmetic. `(x + y) >> 1` is a different value when the sum wraps
+/// and is not this shape.
+///
+/// # Arguments
+///
+/// * `op` - The operation being folded.
+/// * `l` - Left operand.
+/// * `r` - Right operand.
+/// * `bits` - Width of the operation.
+///
+/// # Returns
+///
+/// `midpoint` of the two values, or `None` when this is not that shape.
+fn midpoint_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
+    if bits < 64 || op != Op::Add {
+        return None;
+    }
+    /// The value a logical shift by one shifts, or `None`.
+    fn halved(e: &Expr) -> Option<&Expr> {
+        match e {
+            Expr::Bin(Op::Shr, v, n) if const_of(n) == Some(1) => Some(v.as_ref()),
+            _ => None,
+        }
+    }
+    /// The operands of `want`, or `None`.
+    fn pair(e: &Expr, want: Op) -> Option<(&Expr, &Expr)> {
+        match e {
+            Expr::Bin(o, a, b) if *o == want => Some((a.as_ref(), b.as_ref())),
+            _ => None,
+        }
+    }
+    for (mask, shifted) in [(l, r), (r, l)] {
+        let Some((x, y)) = pair(mask, Op::And) else {
+            continue;
+        };
+        let Some(inner) = halved(shifted) else {
+            continue;
+        };
+        let Some((p, q)) = pair(inner, Op::Xor) else {
+            continue;
+        };
+        let same = (p == x && q == y) || (p == y && q == x);
+        if same && !invokes(x) && !invokes(y) {
+            return Some(Expr::Call(
+                "midpoint".to_owned(),
+                vec![x.clone(), y.clone()],
+            ));
+        }
+    }
+    None
+}
+
+/// `x` rounded up to a multiple of `align`, at `bits`.
+///
+/// `align` is a power of two. The rounding is `(x + align - 1) &
+/// ~(align - 1)` and wraps the way that add does. Anything else, or a
+/// width of 0 or above 64, is `None`.
+///
+/// # Arguments
+///
+/// * `x` - The value.
+/// * `align` - The alignment, a power of two.
+/// * `bits` - The width.
+pub(super) fn align_up_bits(x: u64, align: u64, bits: u8) -> Option<u64> {
+    if bits == 0 || bits > 64 || align < 2 || !align.is_power_of_two() {
+        return None;
+    }
+    let m = mask_bits(bits);
+    let low = align - 1;
+    Some(x.wrapping_add(low) & m & !low)
+}
+
+/// `(x + (a - 1)) & ~(a - 1)` as `align_up`.
+///
+/// `a` is a power of two at least 4, and the mask is all ones above those
+/// low zeros at a width of at least 64 bits. A 32-bit mask also clears
+/// the top half of a 64-bit register, which is not an alignment of that
+/// register. `x & ~m` is not rounded up. An alignment of two stays the
+/// mask.
+///
+/// # Arguments
+///
+/// * `op` - The operation being folded.
+/// * `l` - Left operand.
+/// * `r` - Right operand.
+/// * `bits` - Width of the operation.
+///
+/// # Returns
+///
+/// `align_up` of the value, or `None` when this is not that shape.
+fn align_up_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
+    if bits < 64 || op != Op::And {
+        return None;
+    }
+    let (sum, mask) = match (l, r) {
+        (sum, Expr::Const(m)) => (sum, *m),
+        (Expr::Const(m), sum) => (sum, *m),
+        _ => return None,
+    };
+    let width = mask_bits(bits);
+    let low = (!mask) & width;
+    let align = low
+        .checked_add(1)
+        .filter(|a| *a >= 4 && a.is_power_of_two())?;
+    if mask & width != width & !low {
+        return None;
+    }
+    let Expr::Bin(Op::Add, a, b) = sum else {
+        return None;
+    };
+    let x = if const_of(b) == Some(low) {
+        a.as_ref()
+    } else if const_of(a) == Some(low) {
+        b.as_ref()
+    } else {
+        return None;
+    };
+    Some(Expr::Call(
+        "align_up".to_owned(),
+        vec![x.clone(), Expr::Const(align)],
+    ))
+}
+
 /// Reads the count-leading-zeros idiom a compiler writes with a bit scan.
 ///
 /// There is no `clz` instruction before `lzcnt`, so a compiler computes it as
@@ -2369,8 +2763,10 @@ pub(super) fn indexed(addr: &Expr, ty: Ty) -> Option<(Expr, Expr)> {
 /// `x * 1`, are `x`; `&` with a constant goes through [`mask`]; stack
 /// addresses absorb constant offsets; `(x + c1) + c2` becomes `x + (c1 + c2)`;
 /// `x - c` becomes `x + (-c)`; `(x + c) - y` becomes `(x - y) + c` so the
-/// constant stays outermost. Division by a constant that is zero in its
-/// low `bits` is left symbolic.
+/// constant stays outermost. A complementary logical shift is a rotate,
+/// an unsigned average of the and/xor form is `midpoint`, and an added
+/// power-of-two mask is `align_up`. Division by a constant that is zero
+/// in its low `bits` is left symbolic.
 ///
 /// # Arguments
 ///
@@ -2394,6 +2790,18 @@ pub(super) fn fold(op: Op, l: Expr, r: Expr, bits: u8) -> Expr {
         return e;
     }
     if let Some(e) = select_idiom(op, &l, &r) {
+        return e;
+    }
+    if let Some(e) = sign_absolute(op, &l, &r, bits) {
+        return e;
+    }
+    if let Some(e) = rotate_idiom(op, &l, &r, bits) {
+        return e;
+    }
+    if let Some(e) = midpoint_idiom(op, &l, &r, bits) {
+        return e;
+    }
+    if let Some(e) = align_up_idiom(op, &l, &r, bits) {
         return e;
     }
     if let Some(e) = mba_idiom(op, &l, &r) {
@@ -2644,6 +3052,23 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
             Expr::Cast(_, ty) | Expr::Deref(_, ty) if ty.bits() < 64 => mask_bits(ty.bits()),
             _ => u64::MAX,
         },
+        Expr::Call(name, _) if name == "cls" => 0x3f,
+        Expr::Call(name, _)
+            if matches!(
+                RoundToInt::parse(name),
+                Some(RoundToInt::Signed(32) | RoundToInt::Unsigned(32))
+            ) =>
+        {
+            0xffff_ffff
+        }
+        Expr::Call(name, args) if name == "rbit" || name == "rev16" || name == "rev32" => {
+            match args.first() {
+                Some(Expr::Cast(_, ty) | Expr::Deref(_, ty)) if ty.bits() <= 64 => {
+                    mask_bits(ty.bits())
+                }
+                _ => u64::MAX,
+            }
+        }
         Expr::Var(Key::Reg(r)) if r.size() == 4 => 0xffff_ffff,
         Expr::Var(Key::Global(_, bits)) => mask_bits(*bits),
         Expr::Var(_)
@@ -2698,11 +3123,492 @@ fn saturating(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
     same.then(|| Expr::Call(name.to_owned(), vec![l.clone(), r.clone()]))
 }
 
+/// The leading sign bits of `v` within `bits`, not counting the sign.
+///
+/// This is arm64 `cls`. Zero and all-ones count `bits - 1`. A width other
+/// than 32 or 64 is `None`: those are the widths the instruction has. The
+/// count is at most 63.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+/// * `bits` - The width.
+pub(super) fn cls_bits(v: u64, bits: u8) -> Option<u64> {
+    if !matches!(bits, 32 | 64) {
+        return None;
+    }
+    let v = v & mask_bits(bits);
+    let runs = ((v ^ v.wrapping_shl(1)) & mask_bits(bits)) | 1;
+    Some(u64::from(
+        runs.leading_zeros().saturating_sub(64 - u32::from(bits)),
+    ))
+}
+
+/// The bits of `v` reversed within `bits`.
+///
+/// This is arm64 `rbit`. The low `bits` are reversed and the rest are
+/// zero. A width other than 32 or 64 is `None`: those are the widths the
+/// instruction has.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+/// * `bits` - The width.
+pub(super) fn rbit_bits(v: u64, bits: u8) -> Option<u64> {
+    if !matches!(bits, 32 | 64) {
+        return None;
+    }
+    let v = v & mask_bits(bits);
+    Some(v.reverse_bits() >> (64 - bits))
+}
+
+/// The bytes of each 16-bit half of `v` swapped, within `bits`.
+///
+/// This is arm64 `rev16`. A width other than 32 or 64 is `None`: those
+/// are the widths the instruction has. Bits above `bits` stay zero.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+/// * `bits` - The width.
+pub(super) fn rev16_bits(v: u64, bits: u8) -> Option<u64> {
+    if !matches!(bits, 32 | 64) {
+        return None;
+    }
+    let v = v & mask_bits(bits);
+    let low = 0x00ff_00ff_00ff_00ff;
+    Some((((v & low) << 8) | ((v >> 8) & low)) & mask_bits(bits))
+}
+
+/// The bytes of each 32-bit word of `v` swapped.
+///
+/// This is arm64 `rev32`, which has a 64-bit form only. Any other width
+/// is `None`.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+/// * `bits` - The width.
+pub(super) fn rev32_bits(v: u64, bits: u8) -> Option<u64> {
+    if bits != 64 {
+        return None;
+    }
+    let swap = |x: u64| u64::from((x as u32).swap_bytes());
+    Some((swap(v >> 32) << 32) | swap(v))
+}
+
+/// The float of `fb` bits held in `v`.
+///
+/// A width other than 32 or 64 is `None`.
+///
+/// # Arguments
+///
+/// * `v` - The float's bits.
+/// * `fb` - The float's width.
+fn as_float(v: u64, fb: u8) -> Option<f64> {
+    match fb {
+        32 => Some(f64::from(f32::from_bits(lo32(v)))),
+        64 => Some(f64::from_bits(v)),
+        _ => None,
+    }
+}
+
+/// `v` rounded to the nearest integer, ties to even, still a float of `fb` bits.
+///
+/// This is `frndint`, and the rounding `fist` and `fistp` do before the
+/// integer store. A NaN stays a NaN, and the sign of zero stays. A width
+/// other than 32 or 64 is `None`. Rounding a single in a wider type would
+/// be a different value once the magnitude no longer has a half to spare.
+///
+/// # Arguments
+///
+/// * `v` - The float's bits.
+/// * `fb` - The float's width.
+pub(super) fn rint_bits(v: u64, fb: u8) -> Option<u64> {
+    match fb {
+        32 => Some(u64::from(
+            f32::from_bits(lo32(v)).round_ties_even().to_bits(),
+        )),
+        64 => Some(f64::from_bits(v).round_ties_even().to_bits()),
+        _ => None,
+    }
+}
+
+/// Which `fcvtz` call a name is: the signedness and the integer width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RoundToInt {
+    /// Toward zero into a signed integer of this width.
+    Signed(u8),
+    /// Toward zero into an unsigned integer of this width.
+    Unsigned(u8),
+}
+
+impl RoundToInt {
+    /// `fcvtzs32`, `fcvtzs64`, `fcvtzu32` or `fcvtzu64`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The call's name.
+    pub(super) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "fcvtzs32" => Some(Self::Signed(32)),
+            "fcvtzs64" => Some(Self::Signed(64)),
+            "fcvtzu32" => Some(Self::Unsigned(32)),
+            "fcvtzu64" => Some(Self::Unsigned(64)),
+            _ => None,
+        }
+    }
+
+    /// The operation for a signedness and an integer width.
+    ///
+    /// A width other than 32 or 64 is `None`.
+    ///
+    /// # Arguments
+    ///
+    /// * `signed` - Whether the integer is signed.
+    /// * `bits` - The integer's width.
+    pub(super) fn new(signed: bool, bits: u8) -> Option<Self> {
+        match (signed, bits) {
+            (true, 32 | 64) => Some(Self::Signed(bits)),
+            (false, 32 | 64) => Some(Self::Unsigned(bits)),
+            _ => None,
+        }
+    }
+
+    /// The printed name, or `None` when the width is not 32 or 64.
+    pub(super) fn name(self) -> Option<&'static str> {
+        match self {
+            Self::Signed(32) => Some("fcvtzs32"),
+            Self::Signed(64) => Some("fcvtzs64"),
+            Self::Unsigned(32) => Some("fcvtzu32"),
+            Self::Unsigned(64) => Some("fcvtzu64"),
+            Self::Signed(_) | Self::Unsigned(_) => None,
+        }
+    }
+
+    /// Converts `v`, a float of `fb` bits, as this operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The float's bits.
+    /// * `fb` - The float's width.
+    pub(super) fn apply(self, v: u64, fb: u8) -> Option<u64> {
+        match self {
+            Self::Signed(bits) => fcvtzs_bits(v, fb, bits),
+            Self::Unsigned(bits) => fcvtzu_bits(v, fb, bits),
+        }
+    }
+}
+
+/// The float width a `fcvtz` call records in its second argument.
+///
+/// A missing argument uses `fallback`. A present argument that is not the
+/// constant 32 or 64 is `None`: that is not a width, and it is not read
+/// from the value instead.
+///
+/// # Arguments
+///
+/// * `width` - The call's second argument.
+/// * `fallback` - The width the value's own type gives, when the call
+///   records none.
+pub(super) fn fcvt_float_width(width: Option<&Expr>, fallback: Option<u8>) -> Option<u8> {
+    match width {
+        Some(Expr::Const(32)) => Some(32),
+        Some(Expr::Const(64)) => Some(64),
+        Some(_) => None,
+        None => fallback,
+    }
+}
+
+/// `v` as a float of `fb` bits, rounded toward zero into a signed integer
+/// of `bits`.
+///
+/// This is arm64 `fcvtzs`. A NaN is 0. A value past either signed bound
+/// saturates to that bound. Any width other than 32 or 64, for the float
+/// or the integer, is `None`.
+///
+/// # Arguments
+///
+/// * `v` - The float's bits.
+/// * `fb` - The float's width.
+/// * `bits` - The integer's width.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the bounds keep the truncated value within the signed integer"
+)]
+pub(super) fn fcvtzs_bits(v: u64, fb: u8, bits: u8) -> Option<u64> {
+    if !matches!(bits, 32 | 64) {
+        return None;
+    }
+    let t = as_float(v, fb)?.trunc();
+    if t.is_nan() {
+        return Some(0);
+    }
+    let top = 2f64.powi(i32::from(bits) - 1);
+    let bound = 1u64 << (u32::from(bits) - 1);
+    if t < -top {
+        return Some(bound);
+    }
+    if t >= top {
+        return Some(bound - 1);
+    }
+    Some((t as i64).cast_unsigned() & mask_bits(bits))
+}
+
+/// `v` as a float of `fb` bits, rounded toward zero into an unsigned
+/// integer of `bits`.
+///
+/// This is arm64 `fcvtzu`. A NaN or a negative value is 0. A value past
+/// the unsigned bound saturates to every bit set. Any width other than
+/// 32 or 64, for the float or the integer, is `None`.
+///
+/// # Arguments
+///
+/// * `v` - The float's bits.
+/// * `fb` - The float's width.
+/// * `bits` - The integer's width.
+pub(super) fn fcvtzu_bits(v: u64, fb: u8, bits: u8) -> Option<u64> {
+    if !matches!(bits, 32 | 64) {
+        return None;
+    }
+    let t = as_float(v, fb)?.trunc();
+    if t.is_nan() || t < 0.0 {
+        return Some(0);
+    }
+    let top = 2f64.powi(i32::from(bits) - 1);
+    if t >= top * 2.0 {
+        return Some(mask_bits(bits));
+    }
+    // `[2^63, 2^64)` fits here and does not fit in `i64`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "the bounds keep the truncated value within the unsigned width"
+    )]
+    let v = t as u64;
+    Some(v & mask_bits(bits))
+}
+
+/// `a - b` clamped at zero, at `bits`.
+///
+/// This is the unsigned saturating subtract: below `b` the result is 0,
+/// and otherwise it is the difference. A width of 0 or above 64 is `None`.
+///
+/// # Arguments
+///
+/// * `a` - The minuend.
+/// * `b` - The subtrahend.
+/// * `bits` - The width.
+pub(super) fn sub_sat_bits(a: u64, b: u64, bits: u8) -> Option<u64> {
+    if bits == 0 || bits > 64 {
+        return None;
+    }
+    let m = mask_bits(bits);
+    let (a, b) = (a & m, b & m);
+    Some(if a < b { 0 } else { a - b })
+}
+
+/// An unsigned compare-select of zero and that compare's difference, as
+/// `sub_sat`.
+///
+/// `a < b ? 0 : a - b` clamps the subtract at zero, and so does
+/// `a <= b ? 0 : a - b`: the arms meet at zero when the two values are
+/// equal. The same value with the arms swapped is `a >= b ? a - b : 0`
+/// or `a > b ? a - b : 0`. The compare is unsigned and at least 64 bits.
+/// A signed compare is not this clamp, and a 32-bit subtract does not
+/// clamp the rest of the register. The difference has to be that same
+/// pair, in subtract order.
+///
+/// # Arguments
+///
+/// * `cond` - The select's condition.
+/// * `a` - Value when true.
+/// * `b` - Value when false.
+///
+/// # Returns
+///
+/// `sub_sat` of the two values, or `None` when this is not that shape.
+fn saturating_sub(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
+    use ConditionCode as C;
+    let Flags::Cmp(l, r, bits) = &cond.flags else {
+        return None;
+    };
+    if *bits < 64 {
+        return None;
+    }
+    let zero_on_true = match cond.cc.0 {
+        C::b | C::be => true,
+        C::a | C::ae => false,
+        _ => return None,
+    };
+    let (taken, other) = if zero_on_true { (a, b) } else { (b, a) };
+    let diff = Expr::Bin(Op::Sub, Box::new(l.clone()), Box::new(r.clone()));
+    if !matches!(taken, Expr::Const(0)) || other != &diff {
+        return None;
+    }
+    Some(Expr::Call("sub_sat".to_owned(), vec![l.clone(), r.clone()]))
+}
+
+/// The value of `min`, `max`, `umin`, or `umax` at `bits`.
+///
+/// Signed names compare the sign-extended values. Unsigned names compare
+/// the masked values. Equal values return `a`, the left operand of the
+/// compare the call was folded from. Any other name, or a width of 0 or
+/// above 64, is `None`.
+///
+/// # Arguments
+///
+/// * `name` - `min`, `max`, `umin`, or `umax`.
+/// * `a` - The first operand.
+/// * `b` - The second operand.
+/// * `bits` - The width the compare ran at.
+pub(super) fn extremum_bits(name: &str, a: u64, b: u64, bits: u8) -> Option<u64> {
+    if bits == 0 || bits > 64 {
+        return None;
+    }
+    let mask = mask_bits(bits);
+    let (a, b) = (a & mask, b & mask);
+    let (sa, sb) = (sext(a, bits).cast_signed(), sext(b, bits).cast_signed());
+    let first = match name {
+        "min" => sa <= sb,
+        "max" => sa >= sb,
+        "umin" => a <= b,
+        "umax" => a >= b,
+        _ => return None,
+    };
+    Some(if first { a } else { b })
+}
+
+/// A compare-select of its own operands, as `min` or `max`.
+///
+/// `l <= r ? l : r` is the minimum and `l <= r ? r : l` the maximum, and
+/// the same with the test reversed. Signed condition codes (`l`, `le`,
+/// `g`, `ge`) spell `min` and `max`; unsigned ones (`b`, `be`, `a`, `ae`)
+/// spell `umin` and `umax`. A float compare is not one of those: `fcmovb`
+/// is below or unordered, which is neither `umax` nor `fmax`. The arguments stay in compare order. A compare
+/// narrower than 64 bits stays a ternary: a 32-bit signed minimum is not
+/// the signed minimum of the zero-extended values. An equality test, or a
+/// value that is not one of the two operands, stays a ternary.
+///
+/// # Arguments
+///
+/// * `cond` - The select's condition.
+/// * `a` - Value when true.
+/// * `b` - Value when false.
+///
+/// # Returns
+///
+/// The call, or `None` when the select is not that shape.
+fn extremum(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
+    use ConditionCode as C;
+    let Flags::Cmp(l, r, bits) = &cond.flags else {
+        return None;
+    };
+    if *bits < 64 || l.is_float() || r.is_float() {
+        return None;
+    }
+    let lesser = match cond.cc.0 {
+        C::l | C::le | C::b | C::be => true,
+        C::g | C::ge | C::a | C::ae => false,
+        _ => return None,
+    };
+    let pick_min = if a == l && b == r {
+        lesser
+    } else if a == r && b == l {
+        !lesser
+    } else {
+        return None;
+    };
+    let signed = matches!(cond.cc.0, C::l | C::le | C::g | C::ge);
+    let name = match (signed, pick_min) {
+        (true, true) => "min",
+        (true, false) => "max",
+        (false, true) => "umin",
+        (false, false) => "umax",
+    };
+    Some(Expr::Call(name.to_owned(), vec![l.clone(), r.clone()]))
+}
+
+/// The two's-complement absolute value of `v` at `bits`.
+///
+/// The minimum signed value keeps its bits: negating it wraps, which is
+/// what `neg` then `cmovs` leaves in the register. A width of 0 or above
+/// 64 is `None`.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+/// * `bits` - The width.
+pub(super) fn abs_bits(v: u64, bits: u8) -> Option<u64> {
+    if bits == 0 || bits > 64 {
+        return None;
+    }
+    let v = v & mask_bits(bits);
+    let signed = sext(v, bits).cast_signed();
+    let magnitude = signed.checked_abs().unwrap_or(signed);
+    Some(magnitude.cast_unsigned() & mask_bits(bits))
+}
+
+/// A compare-select of a value and its negation, as `abs`.
+///
+/// `x < 0 ? -x : x` is `abs(x)`, and so is `neg` then `cmovs` of the
+/// original: the sign flag of `0 - x`. The opposite arm order is `-abs(x)`.
+/// The compare has to be against zero, signed (`l`, `le`, `g`, `ge`) or
+/// the sign flag (`s`, `ns`), at 64 bits. A narrower select stays a
+/// ternary. A 32-bit absolute value is not the absolute value of the
+/// zero-extended bits: a negative 32-bit lane would change sign.
+///
+/// # Arguments
+///
+/// * `cond` - The select's condition.
+/// * `a` - Value when true.
+/// * `b` - Value when false.
+///
+/// # Returns
+///
+/// `abs` of the operand, or its negation, or `None` when the select is
+/// not that shape.
+fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
+    use ConditionCode as C;
+    let (src, neg_on_true) = match (a, b) {
+        (Expr::Un(UnOp::Neg, n), other) if other == n.as_ref() => (n.as_ref(), true),
+        (other, Expr::Un(UnOp::Neg, n)) if other == n.as_ref() => (n.as_ref(), false),
+        _ => return None,
+    };
+    let Flags::Cmp(l, r, bits) = &cond.flags else {
+        return None;
+    };
+    if *bits < 64 {
+        return None;
+    }
+    let src_on_left = match (l, r) {
+        (s, Expr::Const(0)) if s == src => true,
+        (Expr::Const(0), s) if s == src => false,
+        _ => return None,
+    };
+    let neg_when_abs = match (src_on_left, cond.cc.0) {
+        (true, C::l | C::le | C::s) | (false, C::g | C::ge | C::ns) => true,
+        (true, C::g | C::ge | C::ns) | (false, C::l | C::le | C::s) => false,
+        _ => return None,
+    };
+    let call = Expr::Call("abs".to_owned(), vec![src.clone()]);
+    if neg_on_true == neg_when_abs {
+        Some(call)
+    } else {
+        Some(Expr::Un(UnOp::Neg, Box::new(call)))
+    }
+}
+
 /// Builds `cond ? a : b` with the boolean idioms folded.
 ///
 /// A decidable condition picks its side; equal sides collapse; `c ? 1 : 0`
 /// is `c` and `c ? 0 : 1` is `!c`; all ones on a carry over the product or
-/// sum that set it is the saturating operation ([`saturating`]).
+/// sum that set it is the saturating operation ([`saturating`]); a
+/// full-width compare that selects one of its own operands is `min`,
+/// `max`, `umin`, or `umax` ([`extremum`]); a full-width select of a
+/// value and its negation is `abs` ([`absolute`]); an unsigned
+/// full-width compare that selects zero over its own difference is
+/// `sub_sat` ([`saturating_sub`]).
 ///
 /// # Arguments
 ///
@@ -2719,6 +3625,15 @@ pub(super) fn ternary(cond: Cond, a: Expr, b: Expr) -> Expr {
         return a;
     }
     if let Some(e) = saturating(&cond, &a, &b) {
+        return e;
+    }
+    if let Some(e) = extremum(&cond, &a, &b) {
+        return e;
+    }
+    if let Some(e) = absolute(&cond, &a, &b) {
+        return e;
+    }
+    if let Some(e) = saturating_sub(&cond, &a, &b) {
         return e;
     }
     match (&a, &b) {
@@ -2883,7 +3798,9 @@ pub(super) fn sign_extend(e: Expr, from_bits: u8) -> Expr {
 /// their operands, so a mask keeping all of them and a sign extension from
 /// at least as many change none of them: `(int32_t)((x & 0xffffffff) + y)`
 /// is `(int32_t)(x + y)`, the shape a whole read of a `w` register leaves
-/// inside a 32-bit operation. A cast stays: from a float it converts.
+/// inside a 32-bit operation. A cast stays: from a float it converts. A
+/// mask of a float stays too, because it is the encoding; without it the
+/// cast converts the number.
 ///
 /// # Arguments
 ///
@@ -2893,7 +3810,9 @@ pub(super) fn low_bits_read(e: Expr, bits: u8) -> Expr {
     let keep = mask_bits(bits);
     let go = |x: Box<Expr>| Box::new(low_bits_read(*x, bits));
     match e {
-        Expr::Bin(Op::And, x, m) if const_of(&m).is_some_and(|c| c & keep == keep) => {
+        Expr::Bin(Op::And, x, m)
+            if !x.is_float() && const_of(&m).is_some_and(|c| c & keep == keep) =>
+        {
             low_bits_read(*x, bits)
         }
         Expr::Bin(op @ (Op::Add | Op::Sub | Op::Mul | Op::And | Op::Or | Op::Xor), a, b) => {
@@ -4078,10 +4997,11 @@ mod cond_tests {
     /// to the processor's outcome (a sign test after `dec` misses it at
     /// `INT_MIN`, a flipped float compare at NaN); one they do not decide
     /// renders as an opaque call whose inversion is the same call under
-    /// `!`. The float `e` and `ne` render as C's `==` and `!=`, which hold
-    /// on NaN the other way from the zero flag; with the parity test before
-    /// them, as compilers emit them, the pair folds to exactly C's
-    /// comparison, so only their inversion is checked here.
+    /// `!`. A lone float `e` is equality or unordered, and `ne` is that
+    /// test inverted: C's `==` and `!=` hold on NaN the other way from the
+    /// zero flag. With the parity test before them, as compilers emit
+    /// them, the pair folds to exactly C's comparison, so only their
+    /// inversion is checked here.
     #[test]
     fn a_condition_means_its_flags_and_inverts_to_its_negation() {
         let mut bytes = vec![0u8; 0x2000];
@@ -4471,7 +5391,24 @@ mod fold_tests {
             Expr::Cond(c) => u64::from(truth(c, x, y)?),
             Expr::Ternary(c, a, b) => v(if truth(c, x, y)? { a } else { b })?,
             Expr::Call(f, args) => {
-                let (a, b) = (v(args.first()?)? & lane(w), v(args.get(1)?)? & lane(w));
+                let a = v(args.first()?)?;
+                if f == "abs" {
+                    return super::abs_bits(a, w);
+                }
+                let b = v(args.get(1)?)?;
+                if f == "midpoint" {
+                    return super::midpoint_bits(a, b, w);
+                }
+                if f == "align_up" {
+                    return super::align_up_bits(a, b, w);
+                }
+                if f == "sub_sat" {
+                    return super::sub_sat_bits(a, b, w);
+                }
+                if let Some(got) = super::extremum_bits(f, a, b, w) {
+                    return Some(got);
+                }
+                let (a, b) = (a & lane(w), b & lane(w));
                 let wide = match f.as_str() {
                     "mul_sat" => u128::from(a) * u128::from(b),
                     "add_sat" => u128::from(a) + u128::from(b),
@@ -5540,6 +6477,395 @@ mod fold_tests {
             );
             t.same("add_sat", &before, &ternary(carry, a, z), w, xs, ys);
         }
+        let diff = b(Op::Sub, &X, &Y);
+        for (cc, zero_first) in [(C::b, true), (C::be, true), (C::a, false), (C::ae, false)] {
+            let test = cond(cc, Flags::Cmp(X, Y, w));
+            let (arm_t, arm_f) = if zero_first {
+                (k(0), diff.clone())
+            } else {
+                (diff.clone(), k(0))
+            };
+            let before = Expr::Ternary(
+                Box::new(test.clone()),
+                Box::new(arm_t.clone()),
+                Box::new(arm_f.clone()),
+            );
+            let after = ternary(test, arm_t, arm_f);
+            if w >= 64 {
+                t.same("sub sat", &before, &after, w, xs, ys);
+                assert!(
+                    matches!(&after, Expr::Call(name, args) if name == "sub_sat" && args.len() == 2 && args[0] == X && args[1] == Y),
+                    "{cc:?} at {w}: {after:?}"
+                );
+            } else {
+                assert!(
+                    matches!(after, Expr::Ternary(..)),
+                    "{cc:?} at {w} folded: {after:?}"
+                );
+            }
+        }
+        let signed = ternary(cond(C::l, Flags::Cmp(X, Y, w)), k(0), diff.clone());
+        let swapped = ternary(cond(C::b, Flags::Cmp(X, Y, w)), k(0), b(Op::Sub, &Y, &X));
+        let other = ternary(cond(C::b, Flags::Cmp(X, Y, w)), k(0), b(Op::Sub, &X, &k(1)));
+        let called = Expr::Call("g".to_owned(), vec![X]);
+        let calling = ternary(
+            cond(C::b, Flags::Cmp(called.clone(), Y, w)),
+            k(0),
+            b(Op::Sub, &called, &Y),
+        );
+        assert!(
+            matches!(signed, Expr::Ternary(..))
+                && !matches!(swapped, Expr::Call(ref name, _) if name == "sub_sat")
+                && !matches!(other, Expr::Call(ref name, _) if name == "sub_sat"),
+            "width {w}: {signed:?} {swapped:?} {other:?}"
+        );
+        if w >= 64 {
+            assert!(
+                matches!(calling, Expr::Call(ref name, ref args) if name == "sub_sat" && args.len() == 2 && args[0] == called && args[1] == Y),
+                "{calling:?}"
+            );
+        } else {
+            assert!(
+                matches!(calling, Expr::Ternary(..)),
+                "width {w} folded a call: {calling:?}"
+            );
+        }
+        for cc in [C::l, C::le, C::g, C::ge, C::b, C::be, C::a, C::ae] {
+            let test = cond(cc, Flags::Cmp(X, Y, w));
+            for (a, z) in [(X, Y), (Y, X)] {
+                let before = Expr::Ternary(
+                    Box::new(test.clone()),
+                    Box::new(a.clone()),
+                    Box::new(z.clone()),
+                );
+                let after = ternary(test.clone(), a, z);
+                if w >= 64 {
+                    t.same("extremum", &before, &after, w, xs, ys);
+                    assert!(
+                        matches!(&after, Expr::Call(_, args) if args.len() == 2 && args[0] == X && args[1] == Y),
+                        "{cc:?} at {w}: {after:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(after, Expr::Ternary(..)),
+                        "{cc:?} at {w} folded: {after:?}"
+                    );
+                }
+            }
+        }
+        for cc in [C::e, C::ne] {
+            let stayed = ternary(cond(cc, Flags::Cmp(X, Y, w)), X, Y);
+            assert!(
+                !matches!(stayed, Expr::Call(..)),
+                "{cc:?} at {w} became {stayed:?}"
+            );
+        }
+        let third = ternary(cond(C::a, Flags::Cmp(X, Y, w)), X, k(1));
+        assert!(
+            matches!(third, Expr::Ternary(..)),
+            "a third value at {w} became {third:?}"
+        );
+        let neg = Expr::Un(UnOp::Neg, Box::new(X));
+        for cc in [C::l, C::le, C::g, C::ge, C::s, C::ns] {
+            for flags in [Flags::Cmp(X, k(0), w), Flags::Cmp(k(0), X, w)] {
+                let test = cond(cc, flags);
+                for (a, z) in [(neg.clone(), X), (X, neg.clone())] {
+                    let before = Expr::Ternary(
+                        Box::new(test.clone()),
+                        Box::new(a.clone()),
+                        Box::new(z.clone()),
+                    );
+                    let after = ternary(test.clone(), a, z);
+                    let is_abs = match &after {
+                        Expr::Call(name, args) => name == "abs" && args.len() == 1 && args[0] == X,
+                        Expr::Un(UnOp::Neg, inner) => {
+                            matches!(inner.as_ref(), Expr::Call(name, args) if name == "abs" && args.len() == 1 && args[0] == X)
+                        }
+                        _ => false,
+                    };
+                    if w >= 64 {
+                        t.same("absolute", &before, &after, w, xs, ys);
+                        assert!(is_abs, "{cc:?} at {w}: {after:?}");
+                    } else {
+                        assert!(
+                            matches!(after, Expr::Ternary(..)),
+                            "{cc:?} at {w} folded: {after:?}"
+                        );
+                    }
+                }
+            }
+        }
+        for cc in [C::e, C::ne, C::b, C::a] {
+            let stayed = ternary(cond(cc, Flags::Cmp(X, k(0), w)), neg.clone(), X);
+            assert!(
+                !matches!(stayed, Expr::Call(..) | Expr::Un(UnOp::Neg, _)),
+                "{cc:?} at {w} became {stayed:?}"
+            );
+        }
+        let other = ternary(cond(C::s, Flags::Cmp(k(0), X, w)), Y, neg.clone());
+        assert!(
+            matches!(other, Expr::Ternary(..)),
+            "a third value at {w} became {other:?}"
+        );
+        let sign = b(Op::Sar, &X, &k(63));
+        let is_sign_abs = |e: &Expr| matches!(e, Expr::Call(name, args) if name == "abs" && args.len() == 1 && args[0] == X);
+        for (before, after) in [
+            (
+                b(Op::Sub, &b(Op::Xor, &X, &sign), &sign),
+                fold(Op::Sub, b(Op::Xor, &X, &sign), sign.clone(), w),
+            ),
+            (
+                b(Op::Xor, &b(Op::Add, &X, &sign), &sign),
+                fold(Op::Xor, b(Op::Add, &X, &sign), sign.clone(), w),
+            ),
+        ] {
+            if w >= 64 {
+                t.same("sign absolute", &before, &after, w, xs, ys);
+                assert!(is_sign_abs(&after), "{after:?}");
+            } else {
+                assert!(!is_sign_abs(&after), "width {w} folded: {after:?}");
+            }
+        }
+        let shifted = b(Op::Sar, &X, &k(31));
+        let narrow = fold(Op::Sub, b(Op::Xor, &X, &shifted), shifted, w);
+        assert!(
+            !is_sign_abs(&narrow),
+            "a 31-bit splat at {w} became {narrow:?}"
+        );
+        let foreign = fold(Op::Sub, b(Op::Xor, &Y, &sign), sign, w);
+        assert!(
+            !matches!(foreign, Expr::Call(ref name, _) if name == "abs"),
+            "a different value at {w} became {foreign:?}"
+        );
+        let width = u64::from(w);
+        let is_rotate = |e: &Expr, n: u64, right: bool| match e {
+            Expr::Bin(op, v, c) => {
+                v.as_ref() == &X
+                    && c.as_ref() == &k(n)
+                    && match op {
+                        Op::Ror(b) => right && *b == w,
+                        Op::Rol(b) => !right && *b == w,
+                        _ => false,
+                    }
+            }
+            _ => false,
+        };
+        let turned = fold(
+            Op::Or,
+            b(Op::Shl, &X, &k(1)),
+            b(Op::Shr, &X, &k(width - 1)),
+            w,
+        );
+        let other_way = fold(
+            Op::Or,
+            b(Op::Shr, &X, &k(1)),
+            b(Op::Shl, &X, &k(width - 1)),
+            w,
+        );
+        t.same(
+            "rotate",
+            &b(
+                Op::Or,
+                &b(Op::Shl, &X, &k(1)),
+                &b(Op::Shr, &X, &k(width - 1)),
+            ),
+            &turned,
+            w,
+            xs,
+            one,
+        );
+        t.same(
+            "rotate",
+            &b(
+                Op::Or,
+                &b(Op::Shr, &X, &k(1)),
+                &b(Op::Shl, &X, &k(width - 1)),
+            ),
+            &other_way,
+            w,
+            xs,
+            one,
+        );
+        assert!(is_rotate(&turned, 1, false), "{turned:?}");
+        assert!(is_rotate(&other_way, 1, true), "{other_way:?}");
+        let mixed = fold(
+            Op::Or,
+            b(Op::Shl, &X, &k(1)),
+            b(Op::Shr, &Y, &k(width - 1)),
+            w,
+        );
+        let arithmetic = fold(
+            Op::Or,
+            b(Op::Shl, &X, &k(1)),
+            b(Op::Sar, &X, &k(width - 1)),
+            w,
+        );
+        let called = Expr::Call("f".to_owned(), vec![X]);
+        let calling = fold(
+            Op::Or,
+            b(Op::Shl, &called, &k(1)),
+            b(Op::Shr, &called, &k(width - 1)),
+            w,
+        );
+        assert!(
+            !matches!(mixed, Expr::Bin(Op::Rol(_) | Op::Ror(_), ..))
+                && !matches!(arithmetic, Expr::Bin(Op::Rol(_) | Op::Ror(_), ..))
+                && !matches!(calling, Expr::Bin(Op::Rol(_) | Op::Ror(_), ..)),
+            "width {w}: {mixed:?} {arithmetic:?} {calling:?}"
+        );
+        let mask_n = u64::from(w) - 1;
+        let cnt = b(Op::And, &X, &k(mask_n));
+        let rest = b(Op::Sub, &k(mask_n), &cnt);
+        let spun = fold(
+            Op::Or,
+            b(Op::Shl, &Y, &cnt),
+            b(Op::Shr, &b(Op::Shr, &Y, &k(1)), &rest),
+            w,
+        );
+        let spun_r = fold(
+            Op::Or,
+            b(Op::Shr, &Y, &cnt),
+            b(Op::Shl, &b(Op::Shl, &Y, &k(1)), &rest),
+            w,
+        );
+        let is_var = |e: &Expr, right: bool| match e {
+            Expr::Bin(op, v, c) => {
+                v.as_ref() == &Y
+                    && c.as_ref() == &X
+                    && match op {
+                        Op::Ror(b) => right && *b == w,
+                        Op::Rol(b) => !right && *b == w,
+                        _ => false,
+                    }
+            }
+            _ => false,
+        };
+        if matches!(w, 32 | 64) {
+            t.same(
+                "variable rotate",
+                &b(
+                    Op::Or,
+                    &b(Op::Shl, &Y, &cnt),
+                    &b(Op::Shr, &b(Op::Shr, &Y, &k(1)), &rest),
+                ),
+                &spun,
+                w,
+                xs,
+                ys,
+            );
+            t.same(
+                "variable rotate",
+                &b(
+                    Op::Or,
+                    &b(Op::Shr, &Y, &cnt),
+                    &b(Op::Shl, &b(Op::Shl, &Y, &k(1)), &rest),
+                ),
+                &spun_r,
+                w,
+                xs,
+                ys,
+            );
+            assert!(
+                is_var(&spun, false) && is_var(&spun_r, true),
+                "{spun:?} {spun_r:?}"
+            );
+        } else {
+            assert!(
+                !matches!(spun, Expr::Bin(Op::Rol(_) | Op::Ror(_), ..))
+                    && !matches!(spun_r, Expr::Bin(Op::Rol(_) | Op::Ror(_), ..)),
+                "width {w} folded: {spun:?} {spun_r:?}"
+            );
+        }
+        let unmasked = fold(
+            Op::Or,
+            b(Op::Shl, &Y, &X),
+            b(Op::Shr, &b(Op::Shr, &Y, &k(1)), &b(Op::Sub, &k(mask_n), &X)),
+            w,
+        );
+        let other = fold(
+            Op::Or,
+            b(Op::Shl, &X, &cnt),
+            b(Op::Shr, &b(Op::Shr, &Y, &k(1)), &rest),
+            w,
+        );
+        let called_y = Expr::Call("g".to_owned(), vec![Y]);
+        let calling_y = fold(
+            Op::Or,
+            b(Op::Shl, &called_y, &cnt),
+            b(Op::Shr, &b(Op::Shr, &called_y, &k(1)), &rest),
+            w,
+        );
+        assert!(
+            !matches!(unmasked, Expr::Bin(Op::Rol(_) | Op::Ror(_), ..))
+                && !matches!(other, Expr::Bin(Op::Rol(_) | Op::Ror(_), ..))
+                && !matches!(calling_y, Expr::Bin(Op::Rol(_) | Op::Ror(_), ..)),
+            "width {w}: {unmasked:?} {other:?} {calling_y:?}"
+        );
+        let average = b(
+            Op::Add,
+            &b(Op::And, &X, &Y),
+            &b(Op::Shr, &b(Op::Xor, &Y, &X), &k(1)),
+        );
+        let averaged = fold(
+            Op::Add,
+            b(Op::And, &X, &Y),
+            b(Op::Shr, &b(Op::Xor, &Y, &X), &k(1)),
+            w,
+        );
+        let is_mid = |e: &Expr| {
+            matches!(e, Expr::Call(name, args)
+                if name == "midpoint" && args.len() == 2 && args[0] == X && args[1] == Y)
+        };
+        if w >= 64 {
+            t.same("midpoint", &average, &averaged, w, xs, ys);
+            assert!(is_mid(&averaged), "{averaged:?}");
+        } else {
+            assert!(!is_mid(&averaged), "width {w} folded: {averaged:?}");
+        }
+        let signed_avg = fold(
+            Op::Add,
+            b(Op::And, &X, &Y),
+            b(Op::Sar, &b(Op::Xor, &X, &Y), &k(1)),
+            w,
+        );
+        let called_avg = fold(
+            Op::Add,
+            b(Op::And, &called, &Y),
+            b(Op::Shr, &b(Op::Xor, &called, &Y), &k(1)),
+            w,
+        );
+        assert!(
+            !is_mid(&signed_avg)
+                && !matches!(called_avg, Expr::Call(ref name, _) if name == "midpoint"),
+            "width {w}: {signed_avg:?} {called_avg:?}"
+        );
+        let rounded = fold(Op::And, b(Op::Add, &X, &k(15)), k(!15u64), w);
+        let is_align = |e: &Expr| {
+            matches!(e, Expr::Call(name, args)
+                if name == "align_up" && args.len() == 2 && args[0] == X && args[1] == k(16))
+        };
+        if w >= 64 {
+            t.same(
+                "align up",
+                &b(Op::And, &b(Op::Add, &X, &k(15)), &k(!15u64)),
+                &rounded,
+                w,
+                xs,
+                one,
+            );
+            assert!(is_align(&rounded), "{rounded:?}");
+        } else {
+            assert!(!is_align(&rounded), "width {w} folded: {rounded:?}");
+        }
+        let bare = fold(Op::And, X.clone(), k(!15u64), w);
+        let bumped = fold(Op::And, b(Op::Add, &X, &k(16)), k(!15u64), w);
+        let pair = fold(Op::And, b(Op::Add, &X, &k(1)), k(!1u64), w);
+        assert!(
+            !matches!(bare, Expr::Call(..))
+                && !matches!(bumped, Expr::Call(..))
+                && !matches!(pair, Expr::Call(..)),
+            "width {w}: {bare:?} {bumped:?} {pair:?}"
+        );
         for cc in [C::e, C::ne] {
             for &c in &d.cs {
                 for &e in &d.ds {
@@ -5892,5 +7218,60 @@ mod fold_tests {
             let mut s = seed;
             sweep_holds(&mut s, true, "sext");
         }
+    }
+
+    /// An unsigned conversion of a value in `[2^63, 2^64)` keeps that value.
+    ///
+    /// Casting the truncated float through `i64` saturates at the signed
+    /// maximum, one binade early. The unsigned result is the value itself
+    /// until `2^64`, and every bit set from there on. A NaN or a negative
+    /// value is 0. The signed conversion still saturates at its own bound,
+    /// including an exact `-2^63`.
+    #[test]
+    fn an_unsigned_conversion_keeps_the_binade_past_the_signed_maximum() {
+        let zu = |bits: u64, fb: u8, width: u8| super::fcvtzu_bits(bits, fb, width);
+        let zs = |bits: u64, fb: u8, width: u8| super::fcvtzs_bits(bits, fb, width);
+        let two63 = 0x43E0_0000_0000_0000;
+        let below64 = 0x43EF_FFFF_FFFF_FFFF;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_precision_loss,
+            reason = "these two values are exact integers inside the unsigned width"
+        )]
+        let (high, near) = (f64::from_bits(two63) as u64, f64::from_bits(below64) as u64);
+        assert_eq!((high, near), (0x8000_0000_0000_0000, 0xffff_ffff_ffff_f800));
+        assert_eq!(zu(two63, 64, 64), Some(0x8000_0000_0000_0000));
+        assert_eq!(zu(below64, 64, 64), Some(0xffff_ffff_ffff_f800));
+        assert_eq!(zu(0x43F0_0000_0000_0000, 64, 64), Some(u64::MAX));
+        assert_eq!(zu(0x7FF0_0000_0000_0000, 64, 64), Some(u64::MAX));
+        assert_eq!(zu(0x7FF8_0000_0000_0000, 64, 64), Some(0));
+        assert_eq!(zu(0xBFF0_0000_0000_0000, 64, 64), Some(0));
+        assert_eq!(zs(two63, 64, 64), Some(0x7fff_ffff_ffff_ffff));
+        assert_eq!(
+            zs(0xC3E0_0000_0000_0000, 64, 64),
+            Some(0x8000_0000_0000_0000)
+        );
+        assert_eq!(zs(0x7FF8_0000_0000_0000, 64, 64), Some(0));
+        assert_eq!(zu(0x4F00_0000, 32, 32), Some(0x8000_0000));
+        assert_eq!(zu(0x4F80_0000, 32, 32), Some(0xffff_ffff));
+        assert_eq!(zu(two63, 64, 32), Some(0xffff_ffff));
+        assert_eq!(zs(0xC1E0_0000_0000_0000, 64, 32), Some(0x8000_0000));
+        assert_eq!(zu(0, 16, 64), None);
+        assert_eq!(zu(two63, 64, 16), None);
+        assert_eq!(super::RoundToInt::parse("fcvtzu"), None);
+        assert_eq!(super::RoundToInt::parse("__fcvtzs64"), None);
+        assert_eq!(
+            super::RoundToInt::parse("fcvtzu64").and_then(|op| op.apply(two63, 64)),
+            Some(0x8000_0000_0000_0000)
+        );
+        assert_eq!(
+            super::fcvt_float_width(Some(&Expr::Const(16)), Some(64)),
+            None
+        );
+        assert_eq!(
+            super::fcvt_float_width(Some(&Expr::Const(32)), None),
+            Some(32)
+        );
+        assert_eq!(super::fcvt_float_width(None, Some(64)), Some(64));
     }
 }

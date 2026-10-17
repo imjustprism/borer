@@ -45,8 +45,8 @@ use crate::isa::x86::{
 };
 
 use super::expr::{
-    Cc, Cond, Expr, Flags, Key, Names, Op, Ty, UnOp, bare, fold, known_bits, mask, sign_extend,
-    table_index, unary, without_addend,
+    Cc, Cond, Expr, Flags, Key, Names, Op, Ty, UnOp, bare, either_width, fold, known_bits, mask,
+    mask_bits, sign_extend, table_index, unary, without_addend,
 };
 use super::{Ctx, callee_shape, literal_at};
 use crate::analysis::name_of;
@@ -1153,6 +1153,571 @@ fn float_bits(v: Expr, ty: Ty) -> Expr {
         (Expr::Const(bits), Ty::F32 | Ty::F64) => Expr::FConst(bits, ty),
         (other, _) => other,
     }
+}
+
+/// The width a scalar float expression already carries.
+///
+/// A bare register carries none: nothing in this function cleared the
+/// bits above an incoming value. A select carries a width when either
+/// arm does.
+///
+/// # Arguments
+///
+/// * `v` - The value a scalar float instruction reads.
+fn float_lane(v: &Expr) -> Option<u8> {
+    match v {
+        Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::FConst(_, ty) => {
+            matches!(ty, Ty::F32 | Ty::F64).then_some(ty.bits())
+        }
+        Expr::Bin(op, l, r) if op.is_float() => Some(float_lane(l)?.max(float_lane(r)?)),
+        Expr::Un(UnOp::Sqrt | UnOp::Fabs | UnOp::Neg, inner) => float_lane(inner),
+        Expr::Ternary(_, a, b) => either_width(float_lane(a), float_lane(b)),
+        Expr::Call(name, args) if name == "fabs" => args.first().and_then(float_lane),
+        Expr::Const(_)
+        | Expr::Var(_)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Bin(..)
+        | Expr::Un(..)
+        | Expr::Cond(_)
+        | Expr::Sext(..)
+        | Expr::Call(..) => None,
+    }
+}
+
+/// Whether a single's bits above bit 31 are zero in this function.
+///
+/// `movss` from memory zeroes them, and a later scalar single keeps them
+/// zero when its destination already had them zero. A legacy scalar single
+/// does not clear them on its own, and a cast down from a double did not
+/// either.
+///
+/// # Arguments
+///
+/// * `v` - The value held before a wider read.
+fn lane_zeros_above(v: &Expr) -> bool {
+    match v {
+        Expr::FConst(_, Ty::F32) | Expr::Deref(_, Ty::F32) => true,
+        Expr::Un(UnOp::Neg | UnOp::Fabs, inner) => lane_zeros_above(inner),
+        Expr::Bin(op, l, r) if op.is_float() => {
+            float_lane(l) == Some(32) && float_lane(r) == Some(32) && lane_zeros_above(l)
+        }
+        Expr::Const(_)
+        | Expr::FConst(_, _)
+        | Expr::Var(_)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Bin(..)
+        | Expr::Un(..)
+        | Expr::Deref(_, _)
+        | Expr::Cond(_)
+        | Expr::Ternary(..)
+        | Expr::Sext(..)
+        | Expr::Cast(..)
+        | Expr::Call(..) => false,
+    }
+}
+
+/// Sign bit of a 32-bit lane.
+const SIGN32: u64 = 0x8000_0000;
+
+/// Sign bit of both 32-bit lanes in a qword: a broadcast `xorps` mask.
+const SIGN32_SPLAT: u64 = 0x8000_0000_8000_0000;
+
+/// Magnitude mask of a 32-bit lane. Anding a qword with it clears the rest.
+const MAG32: u64 = 0x7fff_ffff;
+
+/// Magnitude mask of both 32-bit lanes in a qword.
+const MAG32_SPLAT: u64 = 0x7fff_ffff_7fff_ffff;
+
+/// Bit 63, which a broadcast 32-bit sign mask sets in a zero-extended single.
+const SIGN_ABOVE: u64 = 0x8000_0000_0000_0000;
+
+/// The value `xorps` or `andps` with a sign or magnitude mask leaves.
+///
+/// A 32-bit mask whose later lanes are zero, applied to a single that
+/// already has zeros above, is a negation or an `fabs`: the bits above
+/// stay zero. The same sign mask broadcast over every lane sets bit 63
+/// as well, so a wider read is not that zero-extend. Applied to a double,
+/// a scalar sign mask flips only bit 31 and leaves the high half, a
+/// broadcast sign mask flips bit 31 and bit 63, a scalar magnitude mask
+/// clears everything above the low lane, and a broadcast one clears both
+/// lanes' signs. Anything else stays the unary form: a mixed mask, a
+/// 64-bit lane mask, or a single whose bits above this function did not
+/// clear and does not hold as a double.
+///
+/// # Arguments
+///
+/// * `abs` - Magnitude mask (`andps`), otherwise a sign mask (`xorps`).
+/// * `ty` - The lane width [`Exec::float_mask`] reported.
+/// * `broadcast` - `Some(true)` when later lanes repeat the mask,
+///   `Some(false)` when they are zero, `None` when they mix.
+/// * `x` - The register's value.
+fn masked_lanes(abs: bool, ty: Ty, broadcast: Option<bool>, x: Expr) -> Expr {
+    let plain = Expr::Un(
+        if abs { UnOp::Fabs } else { UnOp::Neg },
+        Box::new(x.clone()),
+    );
+    if ty != Ty::F32 {
+        return plain;
+    }
+    let Some(broadcast) = broadcast else {
+        return plain;
+    };
+    if lane_zeros_above(&x) {
+        if !abs && broadcast {
+            return sign_above_zero(x);
+        }
+        return plain;
+    }
+    if float_lane(&x) != Some(64) {
+        return plain;
+    }
+    let (op, mask) = match (abs, broadcast) {
+        (false, false) => (Op::Xor, SIGN32),
+        (false, true) => (Op::Xor, SIGN32_SPLAT),
+        (true, false) => (Op::And, MAG32),
+        (true, true) => (Op::And, MAG32_SPLAT),
+    };
+    Expr::Bin(op, Box::new(x), Box::new(Expr::Const(mask)))
+}
+
+/// The low 32 bits of `low`, with bit 63 set.
+///
+/// That is the shape a broadcast 32-bit sign mask leaves, and the shape a
+/// later scalar single leaves when it replaces the lane and keeps the bit.
+///
+/// # Arguments
+///
+/// * `low` - The new low lane.
+fn with_sign_above(low: Expr) -> Expr {
+    let low = Expr::Bin(Op::And, Box::new(low), Box::new(Expr::Const(0xffff_ffff)));
+    Expr::Bin(Op::Or, Box::new(low), Box::new(Expr::Const(SIGN_ABOVE)))
+}
+
+/// A zero-extended single with its sign flipped and bit 63 set.
+///
+/// That is a broadcast 32-bit sign mask xored into a `movss` load: lane
+/// zero is the negation, and the next lane is the sign bit rather than zero.
+///
+/// # Arguments
+///
+/// * `x` - The single.
+fn sign_above_zero(x: Expr) -> Expr {
+    with_sign_above(Expr::Un(UnOp::Neg, Box::new(x)))
+}
+
+/// Bits 63:32, which a scalar single leaves alone.
+const HIGH32: u64 = 0xffff_ffff_0000_0000;
+
+/// The low lane of `v` beside the value that holds bits 63:32.
+///
+/// A scalar single replaces the low lane and keeps this half. The two
+/// halves are the masks, in either order.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+fn merged_parts(v: &Expr) -> Option<(&Expr, &Expr)> {
+    let Expr::Bin(Op::Or, a, b) = v else {
+        return None;
+    };
+    match (masked_half(a), masked_half(b)) {
+        (Some((true, low)), Some((false, high))) | (Some((false, high)), Some((true, low))) => {
+            Some((high, low))
+        }
+        _ => None,
+    }
+}
+
+/// One half of a merged scalar single: `true` is the low lane.
+///
+/// # Arguments
+///
+/// * `e` - One side of the `or`.
+fn masked_half(e: &Expr) -> Option<(bool, &Expr)> {
+    let Expr::Bin(Op::And, x, m) = e else {
+        return None;
+    };
+    let Expr::Const(mask) = m.as_ref() else {
+        return None;
+    };
+    match *mask {
+        0xffff_ffff => Some((true, x.as_ref())),
+        HIGH32 => Some((false, x.as_ref())),
+        _ => None,
+    }
+}
+
+/// The low lane of `low`, with the bits above it taken from `upper`.
+///
+/// # Arguments
+///
+/// * `upper` - The value whose bits 63:32 survive.
+/// * `low` - The new low lane.
+fn merge_low_lane(upper: Expr, low: Expr) -> Expr {
+    let high = Expr::Bin(Op::And, Box::new(upper), Box::new(Expr::Const(HIGH32)));
+    let low = Expr::Bin(Op::And, Box::new(low), Box::new(Expr::Const(0xffff_ffff)));
+    Expr::Bin(Op::Or, Box::new(high), Box::new(low))
+}
+
+/// The low lane of a value whose bit 63 a broadcast sign set.
+///
+/// The lane is the negation when the mask itself was the last writer. A
+/// scalar single that ran after the mask leaves its own low lane there
+/// and keeps the same high bit.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+fn sign_above_low(v: &Expr) -> Option<&Expr> {
+    let Expr::Bin(Op::Or, low, high) = v else {
+        return None;
+    };
+    if !matches!(high.as_ref(), Expr::Const(SIGN_ABOVE)) {
+        return None;
+    }
+    let Expr::Bin(Op::And, bits, mask) = low.as_ref() else {
+        return None;
+    };
+    matches!(mask.as_ref(), Expr::Const(0xffff_ffff)).then_some(bits)
+}
+
+/// A double xored with a 32-bit sign mask, scalar or broadcast.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+fn sign_xor(v: &Expr) -> Option<(&Expr, u64)> {
+    let Expr::Bin(Op::Xor, x, m) = v else {
+        return None;
+    };
+    let Expr::Const(mask) = m.as_ref() else {
+        return None;
+    };
+    if !matches!(*mask, SIGN32 | SIGN32_SPLAT) || !x.is_float() {
+        return None;
+    }
+    Some((x, *mask))
+}
+
+/// A double anded with a 32-bit magnitude mask, scalar or broadcast.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+fn mag_and(v: &Expr) -> Option<(&Expr, u64)> {
+    let Expr::Bin(Op::And, x, m) = v else {
+        return None;
+    };
+    let Expr::Const(mask) = m.as_ref() else {
+        return None;
+    };
+    if !matches!(*mask, MAG32 | MAG32_SPLAT) || !x.is_float() {
+        return None;
+    }
+    Some((x, *mask))
+}
+
+/// The low 32 bits of `v` as a float, without converting the number.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+fn low_single(v: Expr) -> Expr {
+    if float_lane(&v) == Some(32) {
+        return v;
+    }
+    Expr::Cast(
+        Box::new(Expr::Bin(
+            Op::And,
+            Box::new(v),
+            Box::new(Expr::Const(0xffff_ffff)),
+        )),
+        Ty::F32,
+    )
+}
+
+/// A 64-bit read of a scalar single that kept bits 63:32.
+///
+/// The low lane is a float so the read is those bits, not the integer
+/// they form converted to a double. The high half is the value the single
+/// left there.
+///
+/// # Arguments
+///
+/// * `high` - The value whose bits 63:32 survive.
+/// * `low` - The low lane.
+fn merged_as_double(high: &Expr, low: &Expr) -> Expr {
+    let bits = Expr::Cast(
+        Box::new(Expr::Bin(
+            Op::And,
+            Box::new(low.clone()),
+            Box::new(Expr::Const(0xffff_ffff)),
+        )),
+        Ty::F64,
+    );
+    let high = Expr::Bin(
+        Op::And,
+        Box::new(high.clone()),
+        Box::new(Expr::Const(HIGH32)),
+    );
+    Expr::Cast(
+        Box::new(Expr::Bin(Op::Or, Box::new(bits), Box::new(high))),
+        Ty::F64,
+    )
+}
+
+/// A 64-bit read of a value whose high bit is [`SIGN_ABOVE`].
+///
+/// The cast keeps the bits. The low half is a float so the read is not an
+/// integer converted to a double.
+///
+/// # Arguments
+///
+/// * `low` - The low lane, the negation or a later scalar single.
+fn sign_above_as_double(low: &Expr) -> Expr {
+    let bits = Expr::Cast(
+        Box::new(Expr::Bin(
+            Op::And,
+            Box::new(low.clone()),
+            Box::new(Expr::Const(0xffff_ffff)),
+        )),
+        Ty::F64,
+    );
+    Expr::Cast(
+        Box::new(Expr::Bin(
+            Op::Or,
+            Box::new(bits),
+            Box::new(Expr::Const(SIGN_ABOVE)),
+        )),
+        Ty::F64,
+    )
+}
+
+/// Reads a sign or magnitude mask at the lane `ty` names, when `v` is one.
+///
+/// A 32-bit read is the lane's negation or `fabs`. A 64-bit read is the
+/// bits the mask left, not a zero-extend and not the number converted.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+/// * `ty` - The lane the instruction reads.
+fn lane_of_mask(v: &Expr, ty: Ty) -> Option<Expr> {
+    if let Some(low) = sign_above_low(v) {
+        return Some(if ty == Ty::F32 {
+            low_single(low.clone())
+        } else {
+            sign_above_as_double(low)
+        });
+    }
+    if let Some((high, low)) = merged_parts(v) {
+        return Some(if ty == Ty::F32 {
+            low_single(low.clone())
+        } else {
+            merged_as_double(high, low)
+        });
+    }
+    if let Some((inner, _)) = sign_xor(v) {
+        return Some(if ty == Ty::F32 {
+            Expr::Un(UnOp::Neg, Box::new(low_single(inner.clone())))
+        } else {
+            Expr::Cast(Box::new(v.clone()), Ty::F64)
+        });
+    }
+    if let Some((inner, _)) = mag_and(v) {
+        return Some(if ty == Ty::F32 {
+            Expr::Un(UnOp::Fabs, Box::new(low_single(inner.clone())))
+        } else {
+            Expr::Cast(Box::new(v.clone()), Ty::F64)
+        });
+    }
+    None
+}
+
+/// Stores a sign or magnitude mask as the bytes `movss` or `movsd` copy.
+///
+/// A 32-bit store of a zero-extended single is the negation, and a 32-bit
+/// store after a scalar single is that single's new lane. A 32-bit store
+/// of a double is the low lane's bits, not a negation of the number: a
+/// numeric negation changes a NaN's payload. A 64-bit store is the integer
+/// the bits are, so it does not convert them and does not drop a sign bit
+/// the mask set above the lane.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+/// * `bits` - The store's width, 32 or 64.
+fn moved_lane_mask(v: &Expr, bits: u8) -> Option<(Ty, Expr)> {
+    if let Some(low) = sign_above_low(v) {
+        return Some(if bits <= 32 {
+            (Ty::F32, low_single(low.clone()))
+        } else {
+            (Ty::U64, v.clone())
+        });
+    }
+    if let Some((_, low)) = merged_parts(v) {
+        return Some(if bits <= 32 {
+            (Ty::F32, low_single(low.clone()))
+        } else {
+            (Ty::U64, v.clone())
+        });
+    }
+    if let Some((inner, mask)) = sign_xor(v) {
+        return Some(if bits <= 32 {
+            let low = Expr::Bin(
+                Op::Xor,
+                Box::new(inner.clone()),
+                Box::new(Expr::Const(mask & 0xffff_ffff)),
+            );
+            (
+                Ty::U32,
+                Expr::Bin(Op::And, Box::new(low), Box::new(Expr::Const(0xffff_ffff))),
+            )
+        } else {
+            (Ty::U64, v.clone())
+        });
+    }
+    if let Some((inner, _)) = mag_and(v) {
+        return Some(if bits <= 32 {
+            (
+                Ty::U32,
+                Expr::Bin(
+                    Op::And,
+                    Box::new(inner.clone()),
+                    Box::new(Expr::Const(MAG32)),
+                ),
+            )
+        } else {
+            (Ty::U64, v.clone())
+        });
+    }
+    None
+}
+
+/// Whether `v` may still hold lanes above the low qword.
+///
+/// A 128-bit load, a vector register this function has not narrowed, or a
+/// move that copied one of those, still has bits a scalar write must not
+/// drop. A scalar load, a merged lane, or float arithmetic does not.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+fn keeps_vector(v: &Expr) -> bool {
+    match v {
+        Expr::Deref(_, Ty::U128) => true,
+        Expr::Var(Key::Reg(r)) => r.is_vector_register(),
+        Expr::Var(Key::Param(_)) => true,
+        Expr::Call(name, _) => matches!(
+            name.as_str(),
+            "movss"
+                | "movsd"
+                | "vmovss"
+                | "vmovsd"
+                | "movups"
+                | "movaps"
+                | "movupd"
+                | "movapd"
+                | "movdqa"
+                | "movdqu"
+                | "vmovups"
+                | "vmovaps"
+                | "vmovupd"
+                | "vmovapd"
+                | "vmovdqa"
+                | "vmovdqu"
+        ),
+        Expr::Const(_)
+        | Expr::FConst(_, _)
+        | Expr::Var(_)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Bin(..)
+        | Expr::Un(..)
+        | Expr::Deref(_, _)
+        | Expr::Cond(_)
+        | Expr::Ternary(..)
+        | Expr::Sext(..)
+        | Expr::Cast(..) => false,
+    }
+}
+
+/// Reads `v` as the scalar lane `ty` names.
+///
+/// A wider value contributes its low bits. That is not a rounding
+/// conversion. A narrower load or constant contributes those bits with
+/// zeros above, which is what `movss` from memory leaves; a computed
+/// single whose bits above the lane were not cleared is left as the
+/// number, because a legacy scalar operation keeps whatever was there.
+/// The same width is unchanged. The mask stays in the expression even
+/// when the value already fits it, so the cast keeps the bits instead of
+/// converting the number. A sign or magnitude mask the register still
+/// holds is that mask's lane ([`lane_of_mask`]), not a zero-extend of a
+/// negation the broadcast form is wider than.
+///
+/// # Arguments
+///
+/// * `v` - The operand.
+/// * `ty` - The lane the instruction reads, [`Ty::F32`] or [`Ty::F64`].
+fn scalar_lane(v: Expr, ty: Ty) -> Expr {
+    if let Some(masked) = lane_of_mask(&v, ty) {
+        return masked;
+    }
+    let want = ty.bits();
+    let Some(have) = float_lane(&v) else {
+        return float_bits(v, ty);
+    };
+    if have == want || !matches!(have, 32 | 64) || !matches!(want, 32 | 64) {
+        return float_bits(v, ty);
+    }
+    if have < want && !lane_zeros_above(&v) {
+        return float_bits(v, ty);
+    }
+    let kept = have.min(want);
+    let bits = Expr::Bin(Op::And, Box::new(v), Box::new(Expr::Const(mask_bits(kept))));
+    Expr::Cast(Box::new(bits), ty)
+}
+
+/// A `movss` or `movsd` into memory, as the bytes it copies.
+///
+/// The same width is that float. A wider float contributes its low bits,
+/// which is not a rounding conversion. A narrower float whose bits above
+/// the lane are zero contributes that encoding; storing the number would
+/// be a different value. Those bits are an unsigned integer, so the store
+/// does not convert them. A narrower float whose bits above the lane this
+/// function did not clear stays the number: the bytes above it are not in
+/// the value. A sign or magnitude mask is the bytes the mask left
+/// ([`moved_lane_mask`]): a 32-bit store of the mask is still the negation or
+/// `fabs`, a 32-bit store after a scalar single is that single's lane, and a
+/// wider store keeps a sign bit the mask set above the lane.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+/// * `bits` - The store's width, 32 or 64.
+fn scalar_moved(v: Expr, bits: u8) -> (Ty, Expr) {
+    if let Some(masked) = moved_lane_mask(&v, bits) {
+        return masked;
+    }
+    let (float, integer) = if bits <= 32 {
+        (Ty::F32, Ty::U32)
+    } else {
+        (Ty::F64, Ty::U64)
+    };
+    let Some(have) = float_lane(&v) else {
+        return (float, v);
+    };
+    if have == bits {
+        return (float, v);
+    }
+    if have > bits || lane_zeros_above(&v) {
+        let kept = have.min(bits);
+        let masked = Expr::Bin(Op::And, Box::new(v), Box::new(Expr::Const(mask_bits(kept))));
+        return (integer, masked);
+    }
+    (float, v)
 }
 
 /// Most instructions before the `ret` or `jmp` of a callee read in place of

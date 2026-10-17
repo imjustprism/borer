@@ -576,7 +576,8 @@ const SYSTEM_WORDS: [u32; 6] = [
 ];
 
 /// `mrs` and `msr` of `TPIDR_EL0` and `NZCV` are moves, not an `/* asm */`
-/// line. `svc #0` stays one: the word is the `MNEMONICS` encoding.
+/// line. `svc #0` is the exit test and the `write` count. Another
+/// immediate stays `/* asm */`.
 ///
 /// The system-register words are the emulate case `system`. A check starts
 /// with the thread pointer and the flags clear, so the read of `TPIDR_EL0`
@@ -594,13 +595,29 @@ fn system_registers_are_the_thread_pointer_and_the_flags() {
     let r = replay_function(&p, &a, entry, 1);
     assert!(r.checked > 0, "{}", replay_tsv(&r));
     assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
-    let (_, _, svc) = decompiled_words(&[
+    let (sp, sa, svc) = decompiled_words(&[
         // ASM: svc #0
         0xd400_0001,
         // ASM: ret
         0xd65f_03c0,
     ]);
-    assert!(svc.contains("/* asm: svc"), "{svc}");
+    assert!(!svc.contains("/* asm"), "{svc}");
+    assert!(svc.contains("== 93 ||"), "{svc}");
+    assert!(svc.contains("== 64 ?"), "{svc}");
+    let sentry = sp.entry.expect("entry");
+    let sv = verify(&sp, &sa, &[sentry], 1);
+    assert!(sv.checked > 0, "{}", verify_tsv(&sv));
+    assert!(sv.mismatches.is_empty(), "{svc}\n{}", verify_tsv(&sv));
+    let sr = replay_function(&sp, &sa, sentry, 1);
+    assert!(sr.checked > 0, "{}", replay_tsv(&sr));
+    assert!(sr.wrong().is_empty(), "{svc}\n{}", replay_tsv(&sr));
+    let (_, _, other) = decompiled_words(&[
+        // ASM: svc #0x80
+        0xd400_1001,
+        // ASM: ret
+        0xd65f_03c0,
+    ]);
+    assert!(other.contains("/* asm: svc"), "{other}");
 }
 
 /// A conditional compare read back by `mrs NZCV` is the compare's flags
@@ -740,5 +757,1834 @@ fn atomics_are_a_load_a_modification_and_a_store() {
         let r = replay_function(&p, &a, entry, 1);
         assert!(r.checked > 0, "{}", replay_tsv(&r));
         assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `rbit` prints as `rbit`, not `__rbit`. The 32-bit form reverses the low
+/// half only: `a2` is declared `int32_t`, so the cast is not printed, and
+/// the return is `uint32_t` with no second mask.
+#[test]
+fn a_bit_reversal_is_rbit() {
+    let cases: &[(&[u32], &str)] = &[
+        (&[0xdac0_0020, 0xd65f_03c0], "uint64_t a2"),
+        (&[0x5ac0_0020, 0xd65f_03c0], "int32_t a2"),
+    ];
+    for (words, param) in cases {
+        let (p, a, text) = decompiled_words(words);
+        assert!(text.contains("return rbit(a2);"), "{text}");
+        assert!(text.contains(param), "{text}");
+        assert!(!text.contains("__rbit"), "{text}");
+        assert!(!text.contains("0xffffffff"), "{text}");
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `rev32` prints as `rev32`, not `__rev32`. It is the 64-bit instruction:
+/// each word's bytes swap, and the whole register is not one `bswap`.
+#[test]
+fn bytes_in_each_word_are_rev32() {
+    let (p, a, text) = decompiled_words(&[0xdac0_0820, 0xd65f_03c0]);
+    assert!(text.contains("return rev32(a2);"), "{text}");
+    assert!(text.contains("uint64_t a2"), "{text}");
+    assert!(!text.contains("__rev32"), "{text}");
+    assert!(!text.contains("bswap"), "{text}");
+    let entry = p.entry.expect("entry");
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[entry], seed);
+        assert!(
+            v.mismatches.is_empty(),
+            "seed {seed}: {text}\n{}",
+            verify_tsv(&v)
+        );
+        assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+    }
+    let r = replay_function(&p, &a, entry, 1);
+    assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+    assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+    assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+}
+
+/// `rev16` prints as `rev16`, not `__rev16`. The 32-bit form swaps each
+/// halfword of the low half only, and that result is not masked again.
+#[test]
+fn bytes_in_each_halfword_are_rev16() {
+    let cases: &[(&[u32], &str)] = &[
+        (&[0xdac0_0420, 0xd65f_03c0], "uint64_t a2"),
+        (&[0x5ac0_0420, 0xd65f_03c0], "int32_t a2"),
+    ];
+    for (words, param) in cases {
+        let (p, a, text) = decompiled_words(words);
+        assert!(text.contains("return rev16(a2);"), "{text}");
+        assert!(text.contains(param), "{text}");
+        assert!(!text.contains("__rev16"), "{text}");
+        assert!(!text.contains("0xffffffff"), "{text}");
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `cls` prints as `cls`, not `__cls`. The 32-bit form counts the low half
+/// only, and the count is not masked.
+#[test]
+fn leading_sign_bits_are_cls() {
+    let cases: &[(&[u32], &str)] = &[
+        (&[0xdac0_1420, 0xd65f_03c0], "uint64_t a2"),
+        (&[0x5ac0_1420, 0xd65f_03c0], "int32_t a2"),
+    ];
+    for (words, param) in cases {
+        let (p, a, text) = decompiled_words(words);
+        assert!(text.contains("return cls(a2);"), "{text}");
+        assert!(text.contains(param), "{text}");
+        assert!(!text.contains("__cls"), "{text}");
+        assert!(!text.contains("0xffffffff"), "{text}");
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `scvtf` and `ucvtf` print as a cast of the integer's own signedness.
+///
+/// A signed source keeps the sign extension, so a negative value is not
+/// an unsigned bit pattern. A fixed-point form divides in a double and
+/// narrows after, which is the conversion's one rounding.
+#[test]
+fn an_integer_to_float_is_a_cast() {
+    // The value is stored. A float left only in `d0` is not the integer
+    // return, so the listing would drop it.
+    // A 32-bit parameter declared at that width drops the redundant
+    // integer cast. The store line is what carries the conversion; the
+    // signature's `int32_t` is not one.
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: scvtf d0, x0 / str d0, [x1] / ret
+        (
+            &[0x9e62_0000, 0xfd00_0020, 0xd65f_03c0],
+            &["(double)(int64_t)"],
+            &["16.0", " & "],
+        ),
+        // ASM: scvtf s0, w0 / str s0, [x1] / ret
+        (
+            &[0x1e22_0000, 0xbd00_0020, 0xd65f_03c0],
+            &["int32_t a1", "(float)a1"],
+            &["16.0", " & ", "(uint32_t)"],
+        ),
+        // ASM: ucvtf d0, x0 / str d0, [x1] / ret
+        (
+            &[0x9e63_0000, 0xfd00_0020, 0xd65f_03c0],
+            &["(double)a1"],
+            &["(int64_t)", "16.0", " & "],
+        ),
+        // ASM: ucvtf s0, w0 / str s0, [x1] / ret
+        (
+            &[0x1e23_0000, 0xbd00_0020, 0xd65f_03c0],
+            &["uint32_t a1", "(float)a1"],
+            &["(int32_t)", " & "],
+        ),
+        // ASM: scvtf d0, x0, #4 / str d0, [x1] / ret
+        (
+            &[0x9e42_f000, 0xfd00_0020, 0xd65f_03c0],
+            &["(double)(int64_t)", "16.0"],
+            &[" & "],
+        ),
+        // ASM: ucvtf s0, w0, #4 / str s0, [x1] / ret
+        (
+            &[0x1e03_f000, 0xbd00_0020, 0xd65f_03c0],
+            &["uint32_t a1", "(float)", "16.0"],
+            &["(int32_t)", " & "],
+        ),
+        // ASM: scvtf d0, w0 / str d0, [x1] / ret
+        (
+            &[0x1e62_0000, 0xfd00_0020, 0xd65f_03c0],
+            &["int32_t a1", "(double)a1"],
+            &["uint32_t a1", "(int32_t)", " & ", "16.0"],
+        ),
+        // ASM: ucvtf d0, w0 / str d0, [x1] / ret
+        (
+            &[0x1e63_0000, 0xfd00_0020, 0xd65f_03c0],
+            &["uint32_t a1", "(double)a1"],
+            &["(int32_t)", " & ", "16.0"],
+        ),
+        // ASM: scvtf s0, x0 / str s0, [x1] / ret
+        (
+            &[0x9e22_0000, 0xbd00_0020, 0xd65f_03c0],
+            &["(float)(int64_t)"],
+            &["int32_t a1", "(int32_t)", "16.0", " & "],
+        ),
+        // ASM: ucvtf s0, x0 / str s0, [x1] / ret
+        (
+            &[0x9e23_0000, 0xbd00_0020, 0xd65f_03c0],
+            &["(float)a1"],
+            &["(int64_t)", "(int32_t)", "16.0", " & "],
+        ),
+        // ASM: scvtf s0, w0, #4 / str s0, [x1] / ret
+        (
+            &[0x1e02_f000, 0xbd00_0020, 0xd65f_03c0],
+            &["int32_t a1", "(float)", "16.0"],
+            &["uint32_t a1", "(int32_t)", " & "],
+        ),
+        // ASM: scvtf d0, w0, #4 / str d0, [x1] / ret
+        (
+            &[0x1e42_f000, 0xfd00_0020, 0xd65f_03c0],
+            &["int32_t a1", "(double)", "16.0"],
+            &["uint32_t a1", "(int32_t)", " & "],
+        ),
+        // ASM: ucvtf d0, w0, #4 / str d0, [x1] / ret
+        (
+            &[0x1e43_f000, 0xfd00_0020, 0xd65f_03c0],
+            &["uint32_t a1", "(double)", "16.0"],
+            &["(int32_t)", " & "],
+        ),
+        // ASM: scvtf s0, x0, #4 / str s0, [x1] / ret
+        (
+            &[0x9e02_f000, 0xbd00_0020, 0xd65f_03c0],
+            &["(float)", "(double)(int64_t)", "16.0"],
+            &[" & "],
+        ),
+        // ASM: ucvtf s0, x0, #4 / str s0, [x1] / ret
+        (
+            &[0x9e03_f000, 0xbd00_0020, 0xd65f_03c0],
+            &["(float)", "16.0"],
+            &["(int64_t)", "(int32_t)", " & "],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// A float stored at another width keeps the bits, not a rounding cast.
+///
+/// `str s0` after `scvtf d0` writes the low 32 bits of the double's
+/// encoding. `str d0` after `scvtf s0` writes that single's encoding in
+/// the low half and zeros above it. Either one as a float store would
+/// round, and a mask written against the parameter would be dropped when
+/// the parameter is narrowed. A scalar add of two bare registers carries
+/// the width the instruction computed it at, so the same cut applies to
+/// the sum and a store at that width stays the float. A wider add reads
+/// a narrower float as that encoding, zero-extended. The cast of the mask
+/// keeps the bits, and `fneg` flips the double's sign bit.
+#[test]
+fn a_float_stored_at_another_width_keeps_its_bits() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: scvtf d0, x0 / str s0, [x1] / ret
+        (
+            &[0x9e62_0000, 0xbd00_0020, 0xd65f_03c0],
+            &["*(uint32_t*)", "((double)(int64_t)a1)", "0xffffffff"],
+            &["*(float*)", "(float)"],
+        ),
+        // ASM: ucvtf d0, x0 / str s0, [x1] / ret
+        (
+            &[0x9e63_0000, 0xbd00_0020, 0xd65f_03c0],
+            &["*(uint32_t*)", "((double)a1)", "0xffffffff"],
+            &["*(float*)", "(int64_t)", "(float)"],
+        ),
+        // ASM: scvtf s0, w0 / str d0, [x1] / ret
+        (
+            &[0x1e22_0000, 0xfd00_0020, 0xd65f_03c0],
+            &["*(uint64_t*)", "((float)a1)", "0xffffffff", "int32_t a1"],
+            &["*(double*)", "(double)", "uint32_t a1"],
+        ),
+        // ASM: fadd d0, d0, d1 / str s0, [x0] / ret
+        (
+            &[0x1e61_2800, 0xbd00_0000, 0xd65f_03c0],
+            &[
+                "*(uint32_t*)",
+                "((double)(a2 + a3))",
+                "0xffffffff",
+                "double a2",
+                "double a3",
+            ],
+            &["*(float*)", "*(double*)", "float a"],
+        ),
+        // ASM: fadd s0, s0, s1 / str d0, [x0] / ret
+        (
+            &[0x1e21_2800, 0xfd00_0000, 0xd65f_03c0],
+            &[
+                "*(uint64_t*)",
+                "((float)(a2 + a3))",
+                "0xffffffff",
+                "float a2",
+                "float a3",
+            ],
+            &["*(double*)", "*(float*)", "double a"],
+        ),
+        // ASM: fadd d0, d0, d1 / str d0, [x0] / ret
+        (
+            &[0x1e61_2800, 0xfd00_0000, 0xd65f_03c0],
+            &["*(double*)", "double a2", "double a3"],
+            &["*(float*)", "*(uint32_t*)", "0xffffffff", "float a"],
+        ),
+        // ASM: fadd s0, s0, s1 / str s0, [x0] / ret
+        (
+            &[0x1e21_2800, 0xbd00_0000, 0xd65f_03c0],
+            &["*(float*)", "float a2", "float a3"],
+            &["*(double*)", "*(uint64_t*)", "0xffffffff", "double a"],
+        ),
+        // ASM: scvtf s0, w1 / fadd d0, d0, d1 / str d0, [x0] / ret
+        // The single's encoding, zero-extended, is what the double add
+        // reads. A cast of that single would be the number.
+        (
+            &[0x1e22_0020, 0x1e61_2800, 0xfd00_0000, 0xd65f_03c0],
+            &[
+                "*(double*)",
+                "(double)(((float)a2) & 0xffffffff)",
+                "+ a4",
+                "int32_t a2",
+                "double a4",
+            ],
+            &["*(float*)", "*(uint64_t*)", "(double)((float)", "(int32_t)"],
+        ),
+        // ASM: scvtf s0, w0 / fneg d0, d0 / str d0, [x1] / ret
+        // The sign bit flipped is the double's, bit 63 of the zero-extended
+        // single, not the negation of the number.
+        (
+            &[0x1e22_0000, 0x1e61_4000, 0xfd00_0020, 0xd65f_03c0],
+            &["*(double*)", "& 0xffffffff", "(float)", "int32_t a1", "-"],
+            &["*(float*)", "(double)((float)"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// A float operation reads its register at the instruction's width.
+///
+/// `scvtf s0, w0` leaves a single. `fcmp d0, #0.0` compares the
+/// zero-extended bits, not the number: the sign bit of that single is bit
+/// 31, so a negative number is not a negative double. `fcsel d` of the
+/// same register stores those bits as a double. `fcvtzs x0, d0` rounds
+/// that double. A single instruction the other way reads the low 32 bits
+/// of a double, not a rounded narrowing. `fcsel` of that single and a bare
+/// register stores a double select, and a narrower store keeps its low
+/// bits. `fcvt` is not this read.
+#[test]
+fn a_wider_float_read_keeps_the_encoding() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: scvtf s0, w0 / fcmp d0, #0.0 / b.mi / mov w0, #2 / ret / mov w0, #1 / ret
+        (
+            &[
+                0x1e22_0000,
+                0x1e60_2008,
+                0x5400_0064,
+                0x5280_0040,
+                0xd65f_03c0,
+                0x5280_0020,
+                0xd65f_03c0,
+            ],
+            &["(double)(((float)a1) & 0xffffffff)", "0.0", "int32_t a1"],
+            &["(float)a1 <", "(float)a1 >", "(float)a1 =="],
+        ),
+        // ASM: scvtf s0, w0 / fcmp d0, d0 / fcsel d0, d0, d0, eq / str d0, [x1] / ret
+        (
+            &[
+                0x1e22_0000,
+                0x1e60_2000,
+                0x1e60_0c00,
+                0xfd00_0020,
+                0xd65f_03c0,
+            ],
+            &[
+                "*(double*)",
+                "(double)(((float)a1) & 0xffffffff)",
+                "int32_t a1",
+            ],
+            &["*(uint64_t*)", "*(float*)"],
+        ),
+        // ASM: scvtf d0, x0 / fcmp s0, #0.0 / b.mi / mov w0, #2 / ret / mov w0, #1 / ret
+        // The low 32 bits of the double are the single compared, not a
+        // rounded narrowing of the number.
+        (
+            &[
+                0x9e62_0000,
+                0x1e20_2008,
+                0x5400_0064,
+                0x5280_0040,
+                0xd65f_03c0,
+                0x5280_0020,
+                0xd65f_03c0,
+            ],
+            &[
+                "(float)(((double)(int64_t)a1) & 0xffffffff)",
+                "0.0",
+                "(int64_t)",
+            ],
+            &["(double)(int64_t)a1 <", "(double)(int64_t)a1 >"],
+        ),
+        // ASM: scvtf d0, x0 / fadd s0, s0, s0 / str d0, [x1] / ret
+        (
+            &[0x9e62_0000, 0x1e20_2800, 0xfd00_0020, 0xd65f_03c0],
+            &[
+                "*(uint64_t*)",
+                "(float)(((double)(int64_t)a1) & 0xffffffff)",
+                "(int64_t)",
+            ],
+            &["*(double*)", "*(float*)"],
+        ),
+        // ASM: scvtf s0, w0 / fcmp d0, d1 / fcsel d0, d0, d1, mi / str d0, [x1] / ret
+        // The other arm is a bare register. It is a double, not an integer
+        // converted by the store. The compare is register against register:
+        // a `#0.0` compare is outside the replay's checked subset.
+        (
+            &[
+                0x1e22_0000,
+                0x1e61_2000,
+                0x1e61_4c00,
+                0xfd00_0020,
+                0xd65f_03c0,
+            ],
+            &[
+                "*(double*)",
+                "(double)(((float)a1) & 0xffffffff)",
+                "double a",
+                "int32_t a1",
+            ],
+            &["*(float*)", "*(uint64_t*)", "float a4"],
+        ),
+        // ASM: scvtf s0, w0 / fcmp d0, d1 / fcsel d0, d0, d1, mi / str s0, [x1] / ret
+        // A narrower store keeps the low bits of that select.
+        (
+            &[
+                0x1e22_0000,
+                0x1e61_2000,
+                0x1e61_4c00,
+                0xbd00_0020,
+                0xd65f_03c0,
+            ],
+            &[
+                "*(uint32_t*)",
+                "(double)(((float)",
+                "double a",
+                "0xffffffff",
+            ],
+            &["*(float*)", "*(double*)", "float a4"],
+        ),
+        // ASM: scvtf s0, w0 / fcvtzs x0, d0 / ret
+        (
+            &[0x1e22_0000, 0x9e78_0000, 0xd65f_03c0],
+            &[
+                "fcvtzs64(",
+                "(double)(((float)a1) & 0xffffffff)",
+                "int32_t a1",
+            ],
+            &["fcvtzs64((float)", "__fcvtzs"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// A float forced out by a store keeps its width for the next store.
+///
+/// `ldr s` then `str s` writes the single out, because the load reads
+/// memory and the store has to keep that read. The register is only its
+/// name afterwards. `str d` still stores that single's encoding in the
+/// low half and zeros above it, not a double conversion of the name.
+#[test]
+fn a_float_written_out_by_a_store_keeps_its_width() {
+    // ASM: ldr s0, [x0] / str s0, [x1] / str d0, [x2] / ret
+    let (p, a, text) = decompiled_words(&[0xbd40_0000, 0xbd00_0020, 0xfd00_0040, 0xd65f_03c0]);
+    assert!(text.contains("*(uint64_t*)"), "{text}");
+    assert!(text.contains("0xffffffff"), "{text}");
+    assert!(text.contains("*(float*)"), "{text}");
+    assert!(!text.contains("*(double*)"), "{text}");
+    let entry = p.entry.expect("entry");
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[entry], seed);
+        assert!(
+            v.mismatches.is_empty(),
+            "seed {seed}: {text}\n{}",
+            verify_tsv(&v)
+        );
+        assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+    }
+    let r = replay_function(&p, &a, entry, 1);
+    assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+    assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+    assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+}
+
+/// `fneg` and `fabs` of a register's name flip or clear the lane's sign
+/// bit. The name is not a float, so a negation of it would be a different
+/// value, and a float store of the bits would convert them.
+#[test]
+fn a_float_sign_of_a_name_keeps_the_bits() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: fneg d0, d0 / str d0, [x0] / ret
+        (
+            &[0x1e61_4000, 0xfd00_0000, 0xd65f_03c0],
+            &["*(uint64_t*)", "0x8000000000000000", "double a"],
+            &["*(double*)", "/* asm"],
+        ),
+        // ASM: fabs d0, d0 / str d0, [x0] / ret
+        (
+            &[0x1e60_c000, 0xfd00_0000, 0xd65f_03c0],
+            &["*(uint64_t*)", "0x7fffffffffffffff", "double a"],
+            &["*(double*)", "/* asm"],
+        ),
+        // ASM: fneg s0, s0 / str s0, [x0] / ret
+        (
+            &[0x1e21_4000, 0xbd00_0000, 0xd65f_03c0],
+            &["*(uint32_t*)", "0x80000000", "float a"],
+            &["*(float*)", "/* asm"],
+        ),
+        // ASM: fneg s0, s0 / str d0, [x0] / ret
+        // The single's sign flip, zero-extended. A double store would
+        // convert the integer.
+        (
+            &[0x1e21_4000, 0xfd00_0000, 0xd65f_03c0],
+            &["*(uint64_t*)", "0x80000000"],
+            &["*(double*)", "*(float*)", "/* asm"],
+        ),
+        // ASM: fabs s0, s0 / str s0, [x0] / ret
+        // The low-half cut folds the sign clear into `& 0x7fffffff`.
+        (
+            &[0x1e20_c000, 0xbd00_0000, 0xd65f_03c0],
+            &["*(uint32_t*)", "0x7fffffff", "float a"],
+            &["*(float*)", "/* asm"],
+        ),
+        // ASM: fabs s0, s0 / str d0, [x0] / ret
+        (
+            &[0x1e20_c000, 0xfd00_0000, 0xd65f_03c0],
+            &["*(uint64_t*)", "0x7fffffff"],
+            &["*(double*)", "*(float*)", "/* asm"],
+        ),
+        // ASM: scvtf s0, w0 / fcmp d0, d1 / fcsel d0, d0, d1, mi / fneg d0, d0 / str d0, [x1] / ret
+        // The select is written out. `fneg` still flips bit 63 of that name.
+        (
+            &[
+                0x1e22_0000,
+                0x1e61_2000,
+                0x1e61_4c00,
+                0x1e61_4000,
+                0xfd00_0020,
+                0xd65f_03c0,
+            ],
+            &["*(uint64_t*)", "0x8000000000000000", "(double)(((float)"],
+            &["*(double*)", "*(float*)", "/* asm"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `fcvt` converts the float the source operand reads.
+///
+/// A register whose value is the other width contributes that encoding,
+/// then the conversion: the number the expression holds is a different
+/// float. An in-place conversion declares the parameter at the width that
+/// was read, so the cast is not dropped as the result's type.
+#[test]
+fn a_float_conversion_reads_the_source_width() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: scvtf d0, x0 / fcvt d1, s0 / str d1, [x1] / ret
+        // The low 32 bits of the double, as a single, converted back.
+        (
+            &[0x9e62_0000, 0x1e22_c001, 0xfd00_0021, 0xd65f_03c0],
+            &[
+                "*(double*)",
+                "(double)",
+                "(float)",
+                "0xffffffff",
+                "(int64_t)",
+            ],
+            &["*(uint64_t*)", "*(float*)", "/* asm"],
+        ),
+        // ASM: scvtf s0, w0 / fcvt s1, d0 / str s1, [x1] / ret
+        // The single's bits, zero-extended, read as a double, then narrowed.
+        (
+            &[0x1e22_0000, 0x1e62_4001, 0xbd00_0021, 0xd65f_03c0],
+            &[
+                "*(float*)",
+                "(float)",
+                "(double)",
+                "0xffffffff",
+                "int32_t a1",
+            ],
+            &["*(uint32_t*)", "*(double*)", "/* asm"],
+        ),
+        // ASM: fcvt d0, s0 / str d0, [x0] / ret
+        (
+            &[0x1e22_c000, 0xfd00_0000, 0xd65f_03c0],
+            &["*(double*)", "(double)a", "float a"],
+            &["double a", "*(uint64_t*)", "/* asm"],
+        ),
+        // ASM: fcvt s0, d0 / str s0, [x0] / ret
+        (
+            &[0x1e62_4000, 0xbd00_0000, 0xd65f_03c0],
+            &["*(float*)", "(float)a", "double a"],
+            &["float a", "*(uint32_t*)", "/* asm"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `fcvt` of bits that are not already the source float converts those
+/// bits, then the number.
+///
+/// A narrower name still holds whatever arrived above that lane. A sign
+/// bit flipped or cleared on a name is that integer pattern. An integer
+/// moved into the lane is those bits, not a cast of the integer. A value
+/// the instruction already computed at the source width stays the number,
+/// and a single written into the same register is the zero-extended
+/// encoding, not the untouched high half.
+#[test]
+fn a_float_conversion_of_bits_converts_those_bits() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: fadd s1, s0, s1 / fcvt s2, d0 / str s2, [x2] / ret
+        // `s0` named v0 a float. `d0` still has the bits above that lane.
+        (
+            &[0x1e21_2801, 0x1e62_4002, 0xbd00_0042, 0xd65f_03c0],
+            &["*(float*)", "(float)", "(double)", "^ 0.0", "float a"],
+            &["^ 0.0f", "/* asm"],
+        ),
+        // ASM: fneg d0, d0 / fcvt s0, d0 / str s0, [x0] / ret
+        (
+            &[0x1e61_4000, 0x1e62_4000, 0xbd00_0000, 0xd65f_03c0],
+            &[
+                "*(float*)",
+                "(float)",
+                "(double)",
+                "0x8000000000000000",
+                "^ 0.0",
+                "double a",
+            ],
+            &["*(uint32_t*)", "/* asm"],
+        ),
+        // ASM: fneg s0, s0 / fcvt d0, s0 / str d0, [x0] / ret
+        (
+            &[0x1e21_4000, 0x1e22_c000, 0xfd00_0000, 0xd65f_03c0],
+            &[
+                "*(double*)",
+                "(double)",
+                "(float)",
+                "0x80000000",
+                "^ 0.0f",
+                "float a",
+            ],
+            &["*(uint64_t*)", "/* asm"],
+        ),
+        // ASM: fabs d0, d0 / fcvt s0, d0 / str s0, [x0] / ret
+        (
+            &[0x1e60_c000, 0x1e62_4000, 0xbd00_0000, 0xd65f_03c0],
+            &[
+                "*(float*)",
+                "(float)",
+                "0x7fffffffffffffff",
+                "^ 0.0",
+                "double a",
+            ],
+            &["*(uint32_t*)", "/* asm"],
+        ),
+        // ASM: fmov d0, x0 / fcvt s0, d0 / str s0, [x1] / ret
+        // The integer stays an integer. The lane's bits are the double.
+        (
+            &[0x9e67_0000, 0x1e62_4000, 0xbd00_0020, 0xd65f_03c0],
+            &["*(float*)", "(float)", "(double)", "^ 0.0"],
+            &["double a1", "*(uint32_t*)", "/* asm"],
+        ),
+        // ASM: fmov s0, w0 / fcvt d0, s0 / str d0, [x1] / ret
+        (
+            &[0x1e27_0000, 0x1e22_c000, 0xfd00_0020, 0xd65f_03c0],
+            &["*(double*)", "(double)", "(float)", "^ 0.0f"],
+            &["float a1", "double a1", "*(uint64_t*)", "/* asm"],
+        ),
+        // ASM: fadd s0, s0, s0 / fcvt s1, d0 / str s1, [x1] / ret
+        // The single write cleared the bits above it.
+        (
+            &[0x1e20_2800, 0x1e62_4001, 0xbd00_0021, 0xd65f_03c0],
+            &["*(float*)", "(float)", "(double)", "0xffffffff"],
+            &["^ 0.0", "/* asm"],
+        ),
+        // ASM: scvtf d0, x0 / fneg d0, d0 / fcvt s0, d0 / str s0, [x1] / ret
+        // The negation is of the number, not a second encoding of its bits.
+        (
+            &[
+                0x9e62_0000,
+                0x1e61_4000,
+                0x1e62_4000,
+                0xbd00_0020,
+                0xd65f_03c0,
+            ],
+            &["*(float*)", "(float)", "-"],
+            &["^ 0.0", "0x8000000000000000", "/* asm"],
+        ),
+        // ASM: fmov s1, s0 / fcvt d1, s1 / str d1, [x1] / ret
+        // The move kept the low half. The conversion is of that single.
+        (
+            &[0x1e20_4001, 0x1e22_c021, 0xfd00_0021, 0xd65f_03c0],
+            &["*(double*)", "(double)", "(float)", "0xffffffff", "^ 0.0f"],
+            &["/* asm"],
+        ),
+        // ASM: scvtf d0, x0 / fmov s1, s0 / fcvt d1, s1 / str d1, [x1] / ret
+        (
+            &[
+                0x9e62_0000,
+                0x1e20_4001,
+                0x1e22_c021,
+                0xfd00_0021,
+                0xd65f_03c0,
+            ],
+            &["*(double*)", "(double)", "(float)", "0xffffffff", "^ 0.0f"],
+            &["/* asm"],
+        ),
+        // ASM: fcmp s0, s1 / fcsel s0, s0, s1, mi / fcvt d0, s0 / str d0, [x0] / ret
+        // The select is the single's bits, with zeros above, then the conversion.
+        (
+            &[
+                0x1e21_2000,
+                0x1e21_4c00,
+                0x1e22_c000,
+                0xfd00_0000,
+                0xd65f_03c0,
+            ],
+            &["*(double*)", "(double)", "(float)", "?", "^ 0.0f"],
+            &["/* asm"],
+        ),
+        // ASM: fcmp d0, d1 / fcsel d0, d0, d1, mi / fcvt s0, d0 / str s0, [x0] / ret
+        (
+            &[
+                0x1e61_2000,
+                0x1e61_4c00,
+                0x1e62_4000,
+                0xbd00_0000,
+                0xd65f_03c0,
+            ],
+            &["*(float*)", "(float)", "(double)", "?", "^ 0.0"],
+            &["/* asm"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// A 32-bit `fcsel` clears the bits above the lane.
+///
+/// One arm that is already a float does not keep the other arm's high
+/// bits. The machine writes zeros there. The select is moved into a
+/// general register so the replay compares all 64 bits.
+#[test]
+fn a_narrow_select_of_a_mixed_pair_keeps_the_low_bits() {
+    // ASM: fmov d0, x0 / scvtf s1, w1 / fcmp s1, s1 / fcsel s2, s0, s1, eq
+    //      / fmov x0, d2 / ret
+    let words = &[
+        0x9e67_0000,
+        0x1e22_0021,
+        0x1e21_2020,
+        0x1e21_0c02,
+        0x9e66_0040,
+        0xd65f_03c0,
+    ];
+    let (p, a, text) = decompiled_words(words);
+    assert!(text.contains("0xffffffff"), "{text}");
+    assert!(!text.contains("/* asm"), "{text}");
+    let entry = p.entry.expect("entry");
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[entry], seed);
+        assert!(
+            v.mismatches.is_empty(),
+            "seed {seed}: {text}\n{}",
+            verify_tsv(&v)
+        );
+        assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        let r = replay_function(&p, &a, entry, seed);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// A scalar `fmov` immediate stored at its width is that float.
+///
+/// The bits are the encoding. Storing them as an integer assigned to a
+/// float converts the integer, which is a different number. The immediate
+/// is an operand the replay does not enter, so the machine check is the
+/// block verify; a replay that does enter must not disagree.
+#[test]
+fn a_float_immediate_stores_its_value() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: fmov d0, #1.0 / str d0, [x0] / ret
+        (
+            &[0x1e6e_1000, 0xfd00_0000, 0xd65f_03c0],
+            &["*(double*)", "1.0"],
+            &["*(uint64_t*)", "0x3ff0000000000000", "/* asm"],
+        ),
+        // ASM: fmov s0, #-2.5 / str s0, [x0] / ret
+        (
+            &[0x1e30_9000, 0xbd00_0000, 0xd65f_03c0],
+            &["*(float*)", "-2.5f"],
+            &["*(uint32_t*)", "/* asm"],
+        ),
+        // ASM: fmov s0, #-2.5 / str d0, [x0] / ret
+        // The immediate is an operand the replay does not enter.
+        (
+            &[0x1e30_9000, 0xfd00_0000, 0xd65f_03c0],
+            &["*(uint64_t*)", "-2.5f"],
+            &["*(double*)", "/* asm"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `fmov` of a general register into a lane stores those bits.
+///
+/// The move does not convert. A float store of the integer would.
+#[test]
+fn a_float_bit_move_stores_the_bits() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: fmov d0, x0 / str d0, [x1] / ret
+        (
+            &[0x9e67_0000, 0xfd00_0020, 0xd65f_03c0],
+            &["*(uint64_t*)"],
+            &["*(double*)", "/* asm"],
+        ),
+        // ASM: fmov s0, w0 / str s0, [x1] / ret
+        (
+            &[0x1e27_0000, 0xbd00_0020, 0xd65f_03c0],
+            &["*(uint32_t*)"],
+            &["*(float*)", "/* asm"],
+        ),
+        // ASM: fmov d0, x0 / str s0, [x1] / ret
+        (
+            &[0x9e67_0000, 0xbd00_0020, 0xd65f_03c0],
+            &["*(uint32_t*)"],
+            &["*(float*)", "*(double*)", "/* asm"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `fmov` of a float into a general register, or into a narrower lane,
+/// stores the lane's bits. A cast of the number is a different value.
+/// An immediate stored at another width is that immediate's encoding,
+/// not a float of the store's width.
+#[test]
+fn a_float_moved_into_an_integer_keeps_the_bits() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: scvtf d0, x0 / fmov x0, d0 / str x0, [x1] / ret
+        (
+            &[0x9e62_0000, 0x9e66_0000, 0xf900_0020, 0xd65f_03c0],
+            &["*(uint64_t*)", "|"],
+            &["*(double*)", "/* asm"],
+        ),
+        // ASM: scvtf s0, w0 / fmov w0, s0 / str w0, [x1] / ret
+        (
+            &[0x1e22_0000, 0x1e26_0000, 0xb900_0020, 0xd65f_03c0],
+            &["*(uint32_t*)"],
+            &["*(float*)", "/* asm"],
+        ),
+        // ASM: scvtf d0, x0 / fmov s1, s0 / str d1, [x1] / ret
+        (
+            &[0x9e62_0000, 0x1e20_4001, 0xfd00_0021, 0xd65f_03c0],
+            &["*(uint64_t*)", "0xffffffff"],
+            &["*(double*)", "/* asm"],
+        ),
+        // ASM: fmov d0, x0 / fadd d0, d0, d0 / ucvtf d1, x0 / str d1, [x1] / ret
+        // The add reads the moved bits as a float. It must not declare the
+        // integer parameter as that float: the conversion is still of the
+        // integer.
+        (
+            &[
+                0x9e67_0000,
+                0x1e60_2800,
+                0x9e63_0001,
+                0xfd00_0021,
+                0xd65f_03c0,
+            ],
+            &["*(double*)", "(double)a1"],
+            &["double a1", "/* asm"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// A store of an incoming lane is that float. An integer store of the
+/// name would convert the number.
+#[test]
+fn a_float_parameter_stored_keeps_its_value() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: str d0, [x0] / ret
+        (
+            &[0xfd00_0000, 0xd65f_03c0],
+            &["*(double*)", "double a"],
+            &["*(uint64_t*)", "float a", "/* asm"],
+        ),
+        // ASM: str s0, [x0] / ret
+        (
+            &[0xbd00_0000, 0xd65f_03c0],
+            &["*(float*)", "float a"],
+            &["*(uint32_t*)", "double a", "/* asm"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// A later narrower read of a double parameter uses the low bits of that
+/// double, not a rounded narrowing of the number.
+#[test]
+fn a_float_reread_at_the_other_width_keeps_the_bits() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: fadd d2, d0, d0 / fadd s0, s0, s0 / str s0, [x1] / ret
+        (
+            &[0x1e60_2802, 0x1e20_2800, 0xbd00_0020, 0xd65f_03c0],
+            &["*(float*)", "double a", "0xffffffff"],
+            &["*(uint32_t*)", "float a2", "/* asm"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `fcvtzu` prints with the integer width on the name and the float width
+/// as its second argument. A negative value saturates to 0, not to the
+/// signed minimum.
+#[test]
+fn an_unsigned_float_to_int_is_fcvtzu() {
+    let cases: &[(&[u32], &str, &str)] = &[
+        (&[0x9e79_0000, 0xd65f_03c0], "fcvtzu64(", ", 64)"),
+        (&[0x9e39_0000, 0xd65f_03c0], "fcvtzu64(", ", 32)"),
+        (&[0x1e79_0000, 0xd65f_03c0], "fcvtzu32(", ", 64)"),
+        (&[0x1e39_0000, 0xd65f_03c0], "fcvtzu32(", ", 32)"),
+    ];
+    for (words, name, width) in cases {
+        let (p, a, text) = decompiled_words(words);
+        assert!(text.contains(name), "{text}");
+        assert!(text.contains(width), "{text}");
+        assert!(text.contains("return "), "{text}");
+        assert!(!text.contains("__fcvtzu"), "{text}");
+        assert!(!text.contains("0xffffffff"), "{text}");
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// A fixed-point `fcvtzu` scales inside the call, at the float's width.
+///
+/// The register has no float type until the conversion reads it. The scale
+/// is a power of two, so the product is exact at that width and the result
+/// is the same integer the machine writes.
+#[test]
+fn a_fixed_point_unsigned_conversion_scales_inside_the_call() {
+    let cases: &[(&[u32], &str, &str)] = &[
+        // ASM: fcvtzu x0, d0, #4 / ret
+        (&[0x9e59_f000, 0xd65f_03c0], "fcvtzu64(", ", 64)"),
+        // ASM: fcvtzu w0, s0, #4 / ret
+        (&[0x1e19_f000, 0xd65f_03c0], "fcvtzu32(", ", 32)"),
+        // ASM: fcvtzs x0, d0, #4 / ret
+        (&[0x9e58_f000, 0xd65f_03c0], "fcvtzs64(", ", 64)"),
+    ];
+    for (words, name, width) in cases {
+        let (p, a, text) = decompiled_words(words);
+        assert!(text.contains(name), "{text}");
+        assert!(text.contains(width), "{text}");
+        assert!(text.contains("16.0"), "{text}");
+        assert!(!text.contains("__fcvt"), "{text}");
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `fcvtzs` prints with the integer width on the name and the float width
+/// as its second argument. A 32-bit destination saturates there, not as a
+/// cut 64-bit conversion.
+#[test]
+fn a_signed_float_to_int_is_fcvtzs() {
+    let cases: &[(&[u32], &str, &str)] = &[
+        (&[0x9e78_0000, 0xd65f_03c0], "fcvtzs64(", ", 64)"),
+        (&[0x9e38_0000, 0xd65f_03c0], "fcvtzs64(", ", 32)"),
+        (&[0x1e78_0000, 0xd65f_03c0], "fcvtzs32(", ", 64)"),
+        (&[0x1e38_0000, 0xd65f_03c0], "fcvtzs32(", ", 32)"),
+    ];
+    for (words, name, width) in cases {
+        let (p, a, text) = decompiled_words(words);
+        assert!(text.contains(name), "{text}");
+        assert!(text.contains(width), "{text}");
+        assert!(text.contains("return "), "{text}");
+        assert!(!text.contains("__fcvtzs"), "{text}");
+        assert!(!text.contains("0xffffffff"), "{text}");
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert_eq!(v.checked, 1, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// `pl` and `hs` after a float compare are the ordered less-than inverted.
+///
+/// N is that less-than, and C is its inverse, so `pl` and `hs` hold
+/// together. Reading either as the less-than takes the other arm: a
+/// branch, an `fcsel` of two bit patterns moved into the lanes, and an
+/// `fccmp` whose predicate is `pl`. An immediate of zero would clear Z,
+/// so the `b.eq` after that `fccmp` would not be the compare's equality.
+#[test]
+fn a_float_positive_condition_is_not_the_less_than() {
+    let cases: &[(&[u32], &[&str], &[&str])] = &[
+        // ASM: fcmp d0, d1 / b.pl / mov w0, #2 / ret / mov w0, #1 / ret
+        (
+            &[
+                0x1e61_2000,
+                0x5400_0065,
+                0x5280_0040,
+                0xd65f_03c0,
+                0x5280_0020,
+                0xd65f_03c0,
+            ],
+            &["isgreaterequal", "||", "isunordered", "float a"],
+            &["/* asm", "&&"],
+        ),
+        // ASM: fcmp d0, d1 / b.hs / mov w0, #2 / ret / mov w0, #1 / ret
+        (
+            &[
+                0x1e61_2000,
+                0x5400_0062,
+                0x5280_0040,
+                0xd65f_03c0,
+                0x5280_0020,
+                0xd65f_03c0,
+            ],
+            &["isgreaterequal", "||", "isunordered", "float a"],
+            &["/* asm", "&&"],
+        ),
+        // ASM: fcmp s0, s1 / b.pl / mov w0, #2 / ret / mov w0, #1 / ret
+        (
+            &[
+                0x1e21_2000,
+                0x5400_0065,
+                0x5280_0040,
+                0xd65f_03c0,
+                0x5280_0020,
+                0xd65f_03c0,
+            ],
+            &["isgreaterequal", "||", "isunordered", "float a"],
+            &["/* asm", "&&"],
+        ),
+        // ASM: fmov d0, x0 / fmov d1, x1 / fcmp d0, d1 / fcsel d2, d0, d1, pl
+        //      / str d2, [x2] / ret
+        (
+            &[
+                0x9e67_0000,
+                0x9e67_0021,
+                0x1e61_2000,
+                0x1e61_5c02,
+                0xfd00_0042,
+                0xd65f_03c0,
+            ],
+            &["isgreaterequal", "||", "isunordered", "*(uint64_t*)"],
+            &["/* asm", "*(double*)", "&&"],
+        ),
+        // ASM: fmov d0, x0 / fmov d1, x1 / fcmp d0, d1 / fcsel d2, d0, d1, hs
+        //      / str d2, [x2] / ret
+        (
+            &[
+                0x9e67_0000,
+                0x9e67_0021,
+                0x1e61_2000,
+                0x1e61_2c02,
+                0xfd00_0042,
+                0xd65f_03c0,
+            ],
+            &["isgreaterequal", "||", "isunordered", "*(uint64_t*)"],
+            &["/* asm", "*(double*)", "&&"],
+        ),
+        // ASM: fcmp d0, d1 / fccmp d0, d1, #0, pl / b.eq / mov w0, #2 / ret
+        // ASM: mov w0, #1 / ret
+        (
+            &[
+                0x1e61_2000,
+                0x1e61_5400,
+                0x5400_0060,
+                0x5280_0040,
+                0xd65f_03c0,
+                0x5280_0020,
+                0xd65f_03c0,
+            ],
+            &["isgreaterequal", "||", "isunordered"],
+            &["/* asm", "&&"],
+        ),
+    ];
+    for (words, has, has_not) in cases {
+        let (p, a, text) = decompiled_words(words);
+        for part in *has {
+            assert!(text.contains(part), "{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "{text}");
+        }
+        let entry = p.entry.expect("entry");
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "seed {seed}: {text}\n{}",
+                verify_tsv(&v)
+            );
+            assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+            assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        }
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.checked > 0, "{text}\n{}", replay_tsv(&r));
+        assert!(r.unreadable.is_empty(), "{text}\n{}", replay_tsv(&r));
+        assert!(r.wrong().is_empty(), "{text}\n{}", replay_tsv(&r));
+    }
+}
+
+/// One scalar float condition, single and double, against the machine.
+///
+/// The bits moved in with `fmov` are the operands, so a seed can be a NaN,
+/// a zero of either sign, or the value compared with itself. `fcmp` and
+/// `fcmpe` leave the same flags. `fcsel` stores the chosen lane. `fccmp`
+/// uses the compare only when its predicate holds.
+#[test]
+fn scalar_float_conditions_match_the_machine() {
+    /// Checks eight seeds of verify and one replay, recording a disagreement.
+    fn check(failures: &mut String, label: &str, words: &[u32]) {
+        let (p, a, text) = decompiled_words(words);
+        if text.contains("/* asm") {
+            failures.push_str(&format!("{label}: asm\n{text}\n"));
+            return;
+        }
+        let entry = p.entry.expect("entry");
+        if label == "fcmp d b.hs" || label == "fcmp d b.pl" {
+            let want = "isgreaterequal(a1, a2) || isunordered(a1, a2)";
+            if !text.contains(want) {
+                failures.push_str(&format!("{label} prints\n{text}\n"));
+            }
+        }
+        if label == "fcmp d b.lo" || label == "fcmp d b.mi" {
+            let want = "!isgreaterequal(a1, a2) && !isunordered(a1, a2)";
+            if !text.contains(want) {
+                failures.push_str(&format!("{label} prints\n{text}\n"));
+            }
+        }
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[entry], seed);
+            if v.checked == 0 || v.unreadable != 0 || !v.mismatches.is_empty() {
+                failures.push_str(&format!(
+                    "{label} verify seed {seed}\n{text}\n{}\n",
+                    verify_tsv(&v)
+                ));
+                return;
+            }
+            let r = replay_function(&p, &a, entry, seed);
+            if r.checked == 0 || !r.wrong().is_empty() {
+                failures.push_str(&format!(
+                    "{label} replay seed {seed}\n{text}\n{}\n",
+                    replay_tsv(&r)
+                ));
+                return;
+            }
+        }
+    }
+
+    let conds: &[(&str, u32)] = &[
+        ("eq", 0),
+        ("ne", 1),
+        ("hs", 2),
+        ("lo", 3),
+        ("mi", 4),
+        ("pl", 5),
+        ("vs", 6),
+        ("vc", 7),
+        ("hi", 8),
+        ("ls", 9),
+        ("ge", 10),
+        ("lt", 11),
+        ("gt", 12),
+        ("le", 13),
+    ];
+    let mut failures = String::new();
+    for &(name, cond) in conds {
+        for (width, fmov, fcmp, fcmpe, fcsel, fmov_back) in [
+            (
+                "d",
+                0x9e67_0000u32,
+                0x1e60_2000u32,
+                0x1e60_2010u32,
+                0x1e60_0c00u32,
+                0x9e66_0000u32,
+            ),
+            (
+                "s",
+                0x1e27_0000,
+                0x1e20_2000,
+                0x1e20_2010,
+                0x1e20_0c00,
+                0x1e26_0000,
+            ),
+        ] {
+            let branch = 0x5400_0060 | cond;
+            let mov = |d: u32, n: u32| fmov | (n << 5) | d;
+            check(
+                &mut failures,
+                &format!("fcmp {width} b.{name}"),
+                &[
+                    mov(0, 0),
+                    mov(1, 1),
+                    fcmp | (1 << 16),
+                    branch,
+                    0x5280_0040,
+                    0xd65f_03c0,
+                    0x5280_0020,
+                    0xd65f_03c0,
+                ],
+            );
+            check(
+                &mut failures,
+                &format!("fcmpe {width} b.{name}"),
+                &[
+                    mov(0, 0),
+                    mov(1, 1),
+                    fcmpe | (1 << 16),
+                    branch,
+                    0x5280_0040,
+                    0xd65f_03c0,
+                    0x5280_0020,
+                    0xd65f_03c0,
+                ],
+            );
+            check(
+                &mut failures,
+                &format!("fcmp {width} self b.{name}"),
+                &[
+                    mov(0, 0),
+                    fcmp,
+                    branch,
+                    0x5280_0040,
+                    0xd65f_03c0,
+                    0x5280_0020,
+                    0xd65f_03c0,
+                ],
+            );
+            check(
+                &mut failures,
+                &format!("fcmp {width} +0 b.{name}"),
+                &[
+                    mov(0, 0),
+                    fmov | (31 << 5) | 1,
+                    fcmp | (1 << 16),
+                    branch,
+                    0x5280_0040,
+                    0xd65f_03c0,
+                    0x5280_0020,
+                    0xd65f_03c0,
+                ],
+            );
+            let select = fcsel | (3 << 16) | (cond << 12) | (2 << 5) | 4;
+            let back = fmov_back | (4 << 5);
+            check(
+                &mut failures,
+                &format!("fcsel {width} {name}"),
+                &[
+                    mov(0, 0),
+                    mov(1, 1),
+                    mov(2, 2),
+                    mov(3, 3),
+                    fcmp | (1 << 16),
+                    select,
+                    back,
+                    0xd65f_03c0,
+                ],
+            );
+            for &nzcv in &[0u32, 0x4, 0x8, 0xf] {
+                for &(ask, ask_cond) in &[("eq", 0u32), ("ne", 1u32)] {
+                    let pred = if width == "d" {
+                        0x1e60_0400u32
+                    } else {
+                        0x1e20_0400u32
+                    };
+                    let fccmp = pred | (3 << 16) | (cond << 12) | (2 << 5) | nzcv;
+                    check(
+                        &mut failures,
+                        &format!("fccmp {width} {name} #{nzcv:x} b.{ask}"),
+                        &[
+                            mov(0, 0),
+                            mov(1, 1),
+                            mov(2, 2),
+                            mov(3, 3),
+                            fcmp | (1 << 16),
+                            fccmp,
+                            0x5400_0060 | ask_cond,
+                            0x5280_0040,
+                            0xd65f_03c0,
+                            0x5280_0020,
+                            0xd65f_03c0,
+                        ],
+                    );
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures}");
+}
+
+/// Eight seeds of one routine against the arm64 machine.
+///
+/// Verify compares the lifted values. Replay compares the printed
+/// statements. Both have to move something, and neither may disagree.
+///
+/// # Arguments
+///
+/// * `words` - The routine, `ret` included.
+fn agrees(words: &[u32]) {
+    let (p, a, text) = decompiled_words(words);
+    assert!(!text.contains("/* asm"), "{text}");
+    let entry = p.entry.expect("entry");
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[entry], seed);
+        assert!(
+            v.mismatches.is_empty(),
+            "seed {seed}: {text}\n{}",
+            verify_tsv(&v)
+        );
+        assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        let r = replay_function(&p, &a, entry, seed);
+        assert!(r.checked > 0, "seed {seed}: {text}\n{}", replay_tsv(&r));
+        assert!(
+            r.wrong().is_empty(),
+            "seed {seed}: {text}\n{}",
+            replay_tsv(&r)
+        );
+    }
+}
+
+/// The same check for a scalar `fmov` immediate.
+///
+/// That operand is not one the replay enters. A replay that does enter
+/// must not disagree, and the block verify is the machine check.
+///
+/// # Arguments
+///
+/// * `words` - The routine, `ret` included.
+fn agrees_immediate(words: &[u32]) {
+    let (p, a, text) = decompiled_words(words);
+    assert!(!text.contains("/* asm"), "{text}");
+    let entry = p.entry.expect("entry");
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[entry], seed);
+        assert!(
+            v.mismatches.is_empty(),
+            "seed {seed}: {text}\n{}",
+            verify_tsv(&v)
+        );
+        assert!(v.checked > 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        assert_eq!(v.unreadable, 0, "seed {seed}: {text}\n{}", verify_tsv(&v));
+        let r = replay_function(&p, &a, entry, seed);
+        assert!(
+            r.unreadable.is_empty(),
+            "seed {seed}: {text}\n{}",
+            replay_tsv(&r)
+        );
+        assert!(
+            r.wrong().is_empty(),
+            "seed {seed}: {text}\n{}",
+            replay_tsv(&r)
+        );
+    }
+}
+
+/// A single written from a 64-bit integer clears bits 63:32. `fcvt`
+/// stored at the other width keeps the result's encoding. A sign bit
+/// moved through a general register is still that bit.
+#[test]
+fn scalar_casts_and_moves_match_the_machine() {
+    let cases: &[&[u32]] = &[
+        // ASM: scvtf s0, x0 / str d0, [x1] / ret
+        &[0x9e22_0000, 0xfd00_0020, 0xd65f_03c0],
+        // ASM: ucvtf s0, x0 / str d0, [x1] / ret
+        &[0x9e23_0000, 0xfd00_0020, 0xd65f_03c0],
+        // ASM: scvtf s0, x0, #4 / str d0, [x1] / ret
+        &[0x9e02_f000, 0xfd00_0020, 0xd65f_03c0],
+        // ASM: ucvtf s0, x0, #4 / str d0, [x1] / ret
+        &[0x9e03_f000, 0xfd00_0020, 0xd65f_03c0],
+        // ASM: add x2, x0, #0 / scvtf d0, w0 / str d0, [x1] / str x2, [x3] / ret
+        &[
+            0x9100_0002,
+            0x1e62_0000,
+            0xfd00_0020,
+            0xf900_0062,
+            0xd65f_03c0,
+        ],
+        // ASM: add x2, x0, #0 / ucvtf d0, w0 / str d0, [x1] / str x2, [x3] / ret
+        &[
+            0x9100_0002,
+            0x1e63_0000,
+            0xfd00_0020,
+            0xf900_0062,
+            0xd65f_03c0,
+        ],
+        // ASM: add x2, x0, #0 / scvtf s0, w0 / str d0, [x1] / str x2, [x3] / ret
+        &[
+            0x9100_0002,
+            0x1e22_0000,
+            0xfd00_0020,
+            0xf900_0062,
+            0xd65f_03c0,
+        ],
+        // ASM: add x2, x0, #0 / ucvtf s0, w0 / str s0, [x1] / str x2, [x3] / ret
+        &[
+            0x9100_0002,
+            0x1e23_0000,
+            0xbd00_0020,
+            0xf900_0062,
+            0xd65f_03c0,
+        ],
+        // ASM: add x2, x0, #0 / scvtf d0, w0, #4 / str d0, [x1] / str x2, [x3] / ret
+        &[
+            0x9100_0002,
+            0x1e42_f000,
+            0xfd00_0020,
+            0xf900_0062,
+            0xd65f_03c0,
+        ],
+        // ASM: add x2, x0, #0 / ucvtf s0, w0, #4 / str d0, [x1] / str x2, [x3] / ret
+        &[
+            0x9100_0002,
+            0x1e03_f000,
+            0xfd00_0020,
+            0xf900_0062,
+            0xd65f_03c0,
+        ],
+        // ASM: scvtf s0, w0 / fcvt d0, s0 / str s0, [x1] / ret
+        &[0x1e22_0000, 0x1e22_c000, 0xbd00_0020, 0xd65f_03c0],
+        // ASM: scvtf d0, x0 / fcvt s0, d0 / str d0, [x1] / ret
+        &[0x9e62_0000, 0x1e62_4000, 0xfd00_0020, 0xd65f_03c0],
+        // ASM: fcvt d0, s0 / str s0, [x0] / ret
+        &[0x1e22_c000, 0xbd00_0000, 0xd65f_03c0],
+        // ASM: fcvt s0, d0 / str d0, [x0] / ret
+        &[0x1e62_4000, 0xfd00_0000, 0xd65f_03c0],
+        // ASM: fcvt d1, s0 / str s1, [x1] / ret
+        &[0x1e22_c001, 0xbd00_0021, 0xd65f_03c0],
+        // ASM: fcvt s1, d0 / str d1, [x1] / ret
+        &[0x1e62_4001, 0xfd00_0021, 0xd65f_03c0],
+        // ASM: fcvt d0, s0 / str s0, [x1] / str d0, [x2] / ret
+        &[0x1e22_c000, 0xbd00_0020, 0xfd00_0040, 0xd65f_03c0],
+        // ASM: fcvt s0, d0 / str d0, [x1] / str s0, [x2] / ret
+        &[0x1e62_4000, 0xfd00_0020, 0xbd00_0040, 0xd65f_03c0],
+        // ASM: fmov d0, x0 / fcvt s0, d0 / str d0, [x1] / ret
+        &[0x9e67_0000, 0x1e62_4000, 0xfd00_0020, 0xd65f_03c0],
+        // ASM: fmov s0, w0 / fcvt d0, s0 / str s0, [x1] / ret
+        &[0x1e27_0000, 0x1e22_c000, 0xbd00_0020, 0xd65f_03c0],
+        // ASM: fmov s0, w0 / str d0, [x1] / ret
+        &[0x1e27_0000, 0xfd00_0020, 0xd65f_03c0],
+        // ASM: fmov d0, x0 / fmov s1, s0 / str d1, [x1] / ret
+        &[0x9e67_0000, 0x1e20_4001, 0xfd00_0021, 0xd65f_03c0],
+        // ASM: fmov s0, w0 / fmov d1, d0 / str d1, [x1] / ret
+        &[0x1e27_0000, 0x1e60_4001, 0xfd00_0021, 0xd65f_03c0],
+        // ASM: fadd d0, d0, d0 / fmov s0, s0 / fcvt d0, s0 / str d0, [x1] / ret
+        &[
+            0x1e60_2800,
+            0x1e20_4000,
+            0x1e22_c000,
+            0xfd00_0020,
+            0xd65f_03c0,
+        ],
+        // ASM: fadd s0, s0, s0 / fmov d0, d0 / fcvt s0, d0 / str s0, [x1] / ret
+        &[
+            0x1e20_2800,
+            0x1e60_4000,
+            0x1e62_4000,
+            0xbd00_0020,
+            0xd65f_03c0,
+        ],
+        // ASM: fneg d0, d0 / fmov x1, d0 / fmov d1, x1 / str d1, [x1] / ret
+        &[
+            0x1e61_4000,
+            0x9e66_0001,
+            0x9e67_0021,
+            0xfd00_0021,
+            0xd65f_03c0,
+        ],
+        // ASM: fabs d0, d0 / fmov x1, d0 / fmov d1, x1 / str d1, [x1] / ret
+        &[
+            0x1e60_c000,
+            0x9e66_0001,
+            0x9e67_0021,
+            0xfd00_0021,
+            0xd65f_03c0,
+        ],
+        // ASM: fneg s0, s0 / fmov w1, s0 / fmov s1, w1 / str d1, [x1] / ret
+        &[
+            0x1e21_4000,
+            0x1e26_0001,
+            0x1e27_0021,
+            0xfd00_0021,
+            0xd65f_03c0,
+        ],
+        // ASM: scvtf d0, x0 / fneg d0, d0 / fmov x1, d0 / fmov d1, x1 / str d1, [x2] / ret
+        &[
+            0x9e62_0000,
+            0x1e61_4000,
+            0x9e66_0001,
+            0x9e67_0021,
+            0xfd00_0041,
+            0xd65f_03c0,
+        ],
+        // ASM: scvtf d0, x0 / fneg d0, d0 / fmov x1, d0 / fmov d1, x1 / fcvt s1, d1 / str s1, [x2] / ret
+        &[
+            0x9e62_0000,
+            0x1e61_4000,
+            0x9e66_0001,
+            0x9e67_0021,
+            0x1e62_4021,
+            0xbd00_0041,
+            0xd65f_03c0,
+        ],
+        // ASM: fneg s0, s0 / fcvt d0, s0 / str s0, [x0] / ret
+        &[0x1e21_4000, 0x1e22_c000, 0xbd00_0000, 0xd65f_03c0],
+        // ASM: fneg d0, d0 / fcvt s0, d0 / str d0, [x0] / ret
+        &[0x1e61_4000, 0x1e62_4000, 0xfd00_0000, 0xd65f_03c0],
+        // ASM: scvtf d0, x0 / fmov w0, s0 / str x0, [x1] / ret
+        &[0x9e62_0000, 0x1e26_0000, 0xf900_0020, 0xd65f_03c0],
+        // ASM: scvtf s0, w0 / fmov x0, d0 / str x0, [x1] / ret
+        &[0x1e22_0000, 0x9e66_0000, 0xf900_0020, 0xd65f_03c0],
+        // ASM: scvtf s0, x0 / fmov x1, d0 / str x1, [x2] / ret
+        &[0x9e22_0000, 0x9e66_0001, 0xf900_0041, 0xd65f_03c0],
+        // ASM: ucvtf s0, x0 / fmov x1, d0 / str x1, [x2] / ret
+        &[0x9e23_0000, 0x9e66_0001, 0xf900_0041, 0xd65f_03c0],
+        // ASM: fsqrt s0, s0 / str d0, [x0] / ret
+        &[0x1e21_c000, 0xfd00_0000, 0xd65f_03c0],
+        // ASM: fsqrt d0, d0 / str s0, [x0] / ret
+        &[0x1e61_c000, 0xbd00_0000, 0xd65f_03c0],
+        // ASM: fsqrt s0, s1 / str d0, [x0] / ret
+        &[0x1e21_c020, 0xfd00_0000, 0xd65f_03c0],
+        // ASM: fsqrt d0, d1 / str s0, [x0] / ret
+        &[0x1e61_c020, 0xbd00_0000, 0xd65f_03c0],
+    ];
+    for words in cases {
+        agrees(words);
+    }
+    let immediates: &[&[u32]] = &[
+        // ASM: fmov d0, #1.0 / str s0, [x0] / ret
+        &[0x1e6e_1000, 0xbd00_0000, 0xd65f_03c0],
+        // ASM: fmov d0, #1.0 / str s0, [x0] / str d0, [x1] / ret
+        &[0x1e6e_1000, 0xbd00_0000, 0xfd00_0020, 0xd65f_03c0],
+        // ASM: fmov s0, #-2.5 / fmov d1, d0 / str d1, [x0] / ret
+        &[0x1e30_9000, 0x1e60_4001, 0xfd00_0001, 0xd65f_03c0],
+    ];
+    for words in immediates {
+        agrees_immediate(words);
     }
 }

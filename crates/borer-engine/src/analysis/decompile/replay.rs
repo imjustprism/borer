@@ -60,15 +60,19 @@ use crate::isa::x86::{
 };
 
 use super::arch::{self, Lifter};
-use super::expr::{Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, a64_code, fold, known_bits, unary};
+use super::expr::{
+    Cond, Expr, Flags, Key, Op, RoundToInt, TLS_BASE, Ty, UnOp, a64_code, abs_bits, align_up_bits,
+    cls_bits, either_width, extremum_bits, fcvt_float_width, fold, known_bits, midpoint_bits,
+    rbit_bits, rev16_bits, rev32_bits, rint_bits, sub_sat_bits, unary,
+};
 use super::lift::{
     ArgAt, Callee, Conv, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
 };
 use super::liveness::Live;
 use super::verify::{
     Bench, EVAL_DEPTH, FRAME_SPAN, GOLDEN, REGION_MAX, REGS, REGS_32, Rng, STACK_WORDS, XMMS,
-    agree, aligns_stack, convert_float, float_arith, float_of, float_to_int, float_un, low, sext,
-    word,
+    agree, aligns_stack, cast_integer, convert_float, float_arith, float_carried, float_of,
+    float_scale_at, float_to_int, float_un, integer_to_float, low, reinterpret_float, sext, word,
 };
 use super::{decompile_with, table_target};
 use crate::analysis::decompiled_witnessed;
@@ -1285,7 +1289,7 @@ fn overwritten_first(effects: &[Effect], off: i64) -> bool {
 fn frame_base(e: &Expr) -> Option<i64> {
     match e {
         Expr::Sp(k) => Some(*k),
-        Expr::Bin(super::expr::Op::Add, l, r) => frame_base(l).or_else(|| frame_base(r)),
+        Expr::Bin(Op::Add, l, r) => frame_base(l).or_else(|| frame_base(r)),
         _ => None,
     }
 }
@@ -1450,11 +1454,14 @@ fn integer(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
 ///
 /// Every such instruction is one the emulator models and the lifter
 /// writes a statement for. Memory stays within a word and off `fs`/`gs`,
-/// and no register but a general one or an `xmm` one is touched, so a
-/// packed or 256-bit form, whose lanes the text does not model one by
-/// one, is left out: a three-source VEX move the lifter writes no
-/// statement for, and a fused multiply-add the emulator does not model,
-/// are left out with it.
+/// and no register but a general one, an `xmm` one, or the `ymm`/`zmm` name
+/// a VEX or EVEX scalar uses when it clears the bits above the xmm, is
+/// touched, so a packed form, whose lanes the text does not model one by
+/// one, is left out. A three-operand `vmovss` or `vmovsd` is in: the low
+/// lane comes from the last source and the bits above it from the first.
+/// `cvtss2si` and `cvtsd2si` are in: nearest, ties to even, then the
+/// integer cast. A fused multiply-add the emulator does not model is left
+/// out with the packed forms.
 ///
 /// # Arguments
 ///
@@ -1480,9 +1487,8 @@ fn scalar_float(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
     let three = i.op_count() == 3;
     let reg_reg = two && i.op0_kind() == OpKind::Register && i.op1_kind() == OpKind::Register;
     let shape = match m {
-        M::Movss | M::Movsd | M::Vmovss | M::Vmovsd | M::Movd | M::Movq | M::Vmovd | M::Vmovq => {
-            two
-        }
+        M::Movss | M::Movsd | M::Movd | M::Movq | M::Vmovd | M::Vmovq => two,
+        M::Vmovss | M::Vmovsd => two || three,
         M::Movaps | M::Movups | M::Movapd | M::Movupd | M::Movdqa | M::Movdqu => reg_reg,
         M::Xorps | M::Xorpd | M::Andps | M::Andpd => mask,
         M::Addss
@@ -1532,7 +1538,11 @@ fn scalar_float(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
         | M::Cvttss2si
         | M::Cvttsd2si
         | M::Vcvttss2si
-        | M::Vcvttsd2si => two,
+        | M::Vcvttsd2si
+        | M::Cvtss2si
+        | M::Cvtsd2si
+        | M::Vcvtss2si
+        | M::Vcvtsd2si => two,
         _ => false,
     };
     shape
@@ -1540,6 +1550,8 @@ fn scalar_float(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
             let r = u.register();
             r.is_gpr()
                 || r.is_xmm()
+                || r.is_ymm()
+                || r.is_zmm()
                 || matches!(r, Register::RIP | Register::EIP)
                 || (r.is_segment_register() && !matches!(r, Register::FS | Register::GS))
         })
@@ -1926,6 +1938,7 @@ fn floating(e: &Expr) -> bool {
         | Expr::Deref(_, Ty::F32 | Ty::F64)
         | Expr::Cast(_, Ty::F32 | Ty::F64)
         | Expr::Un(UnOp::Sqrt | UnOp::Fabs, _) => true,
+        Expr::Call(name, _) if name == "rint" => true,
         Expr::Bin(op, l, r) => op.is_float() || floating(l) || floating(r),
         Expr::Var(Key::Reg(r)) => !r.is_gpr(),
         _ => false,
@@ -2361,7 +2374,11 @@ impl<M: Bench> Text<'_, M> {
             Expr::Bin(op, l, r) if op.is_float() => {
                 Some(self.float_bits(l)?.max(self.float_bits(r)?))
             }
+            Expr::Ternary(_, a, b) => either_width(self.float_bits(a), self.float_bits(b)),
             Expr::Un(_, inner) => self.float_bits(inner),
+            Expr::Call(name, args) if name == "rint" => {
+                args.first().and_then(|a| self.float_bits(a))
+            }
             _ => None,
         }
     }
@@ -2374,7 +2391,10 @@ impl<M: Bench> Text<'_, M> {
     /// A binary operation takes nothing here: a register used at both
     /// widths - a double a stray single computes on - would be compared at
     /// the width the text claims and not the one the machine used, so a
-    /// binary chain over bare variables stays counted.
+    /// binary chain over bare variables stays counted. A cast of the
+    /// variable itself converts at this width: the declaration is the
+    /// float, and an integer conversion of its bits would be a different
+    /// number.
     ///
     /// # Arguments
     ///
@@ -2390,6 +2410,38 @@ impl<M: Bench> Text<'_, M> {
         })
     }
 
+    /// A float cast of a bitwise cut of a declared float, as the bits.
+    ///
+    /// A parameter declared at a float width has no float node, so
+    /// [`reinterpret_float`] does not see the cut. Converting the integer
+    /// the bits happen to be would be a different number.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The cast's operand.
+    /// * `to` - The float the cast names.
+    /// * `depth` - How much deeper to look.
+    fn declared_encoding(&self, e: &Expr, to: Ty, depth: u8) -> Option<u64> {
+        let Expr::Bin(op @ (Op::And | Op::Or | Op::Xor), l, r) = e else {
+            return None;
+        };
+        if self.un_width(l).is_none() && self.un_width(r).is_none() {
+            return None;
+        }
+        let (a, b) = (self.eval_at(l, depth)?, self.eval_at(r, depth)?);
+        let v = match op {
+            Op::And => a & b,
+            Op::Or => a | b,
+            Op::Xor => a ^ b,
+            _ => return None,
+        };
+        match to {
+            Ty::F32 => Some(v & 0xffff_ffff),
+            Ty::F64 => Some(v),
+            Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => None,
+        }
+    }
+
     /// [`Text::eval`] to a depth.
     ///
     /// # Arguments
@@ -2402,7 +2454,62 @@ impl<M: Bench> Text<'_, M> {
         match e {
             Expr::Const(v) | Expr::FConst(v, _) => Some(*v),
             Expr::Var(k) => self.var(*k),
-            Expr::Str(_) | Expr::Call(..) => None,
+            Expr::Str(_) => None,
+            Expr::Call(name, args) => {
+                if let Some(round) = RoundToInt::parse(name) {
+                    let src = args.first()?;
+                    let fb = fcvt_float_width(args.get(1), self.float_bits(src))?;
+                    let v = self
+                        .eval_at(src, d)
+                        .or_else(|| float_scale_at(src, fb, |e| self.eval_at(e, d)));
+                    return round.apply(v?, fb);
+                }
+                match name.as_str() {
+                    "min" | "max" | "umin" | "umax" => {
+                        let (a, b) = (args.first()?, args.get(1)?);
+                        extremum_bits(name, self.eval_at(a, d)?, self.eval_at(b, d)?, w)
+                    }
+                    "abs" => abs_bits(self.eval_at(args.first()?, d)?, w),
+                    "midpoint" => {
+                        let (a, b) = (args.first()?, args.get(1)?);
+                        midpoint_bits(self.eval_at(a, d)?, self.eval_at(b, d)?, w)
+                    }
+                    "align_up" => {
+                        let (a, b) = (args.first()?, args.get(1)?);
+                        align_up_bits(self.eval_at(a, d)?, self.eval_at(b, d)?, w)
+                    }
+                    "cls" => {
+                        let arg = args.first()?;
+                        let bits = match arg {
+                            Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(w),
+                            _ => w,
+                        };
+                        cls_bits(self.eval_at(arg, d)?, bits)
+                    }
+                    "rbit" | "rev16" | "rev32" => {
+                        let arg = args.first()?;
+                        let bits = match arg {
+                            Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(w),
+                            _ => w,
+                        };
+                        let v = self.eval_at(arg, d)?;
+                        match name.as_str() {
+                            "rbit" => rbit_bits(v, bits),
+                            "rev16" => rev16_bits(v, bits),
+                            _ => rev32_bits(v, bits),
+                        }
+                    }
+                    "sub_sat" => {
+                        let (a, b) = (args.first()?, args.get(1)?);
+                        sub_sat_bits(self.eval_at(a, d)?, self.eval_at(b, d)?, w)
+                    }
+                    "rint" => {
+                        let src = args.first()?;
+                        rint_bits(self.eval_at(src, d)?, self.float_bits(src)?)
+                    }
+                    _ => None,
+                }
+            }
             Expr::Sp(o) => Some(self.sp0.wrapping_add_signed(*o) & low(w)),
             Expr::Bin(op, l, r) if op.is_float() => {
                 let fb = self.float_bits(l)?.max(self.float_bits(r)?);
@@ -2459,8 +2566,23 @@ impl<M: Bench> Text<'_, M> {
                     return None;
                 }
                 if matches!(ty, Ty::F32 | Ty::F64) {
-                    let from = self.float_bits(x)?;
-                    return Some(convert_float(self.eval_at(x, d)?, Some(from), *ty));
+                    if let Some(from) = self.float_bits(x) {
+                        return Some(convert_float(self.eval_at(x, d)?, Some(from), *ty));
+                    }
+                    if let Some(v) = float_carried(x, ty.bits(), |e| self.eval_at(e, d)) {
+                        return Some(v);
+                    }
+                    if let Some(v) = reinterpret_float(x, *ty, |e| self.eval_at(e, d)) {
+                        return Some(v);
+                    }
+                    if let Some(v) = self.declared_encoding(x, *ty, d) {
+                        return Some(v);
+                    }
+                    if let Some(from) = self.un_width(x) {
+                        return Some(convert_float(self.eval_at(x, d)?, Some(from), *ty));
+                    }
+                    let (v, signed) = cast_integer(x, |e| self.eval_at(e, d))?;
+                    return Some(integer_to_float(v, signed, *ty));
                 }
                 let v = self.eval_at(x, d)?;
                 match self.float_bits(x) {
@@ -2702,7 +2824,7 @@ impl<M: Bench> Text<'_, M> {
         };
         let (k, d) = match x {
             Expr::Var(k) => (*k, 0),
-            Expr::Bin(super::expr::Op::Add, v, d) => match (v.as_ref(), d.as_ref()) {
+            Expr::Bin(Op::Add, v, d) => match (v.as_ref(), d.as_ref()) {
                 (Expr::Var(k), Expr::Const(d)) => (*k, *d),
                 _ => return false,
             },

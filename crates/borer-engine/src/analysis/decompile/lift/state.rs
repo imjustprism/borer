@@ -535,12 +535,14 @@ impl<'a> Exec<'_, 'a> {
     pub(in crate::analysis::decompile) fn assign(&mut self, key: Key, v: Expr) {
         let v = self.bounded(v);
         self.written_here.insert(key);
+        self.big_written.remove(&key);
         self.env.set(key, v.clone());
         if let Some(c) = self.class_of_expr(&v) {
             self.env.classes.insert(key, c);
         }
         let reads = self.reads_ahead.get(&key).copied().unwrap_or(0);
-        let scalar = !matches!(key, Key::Reg(r) if r.is_vector_register());
+        let scalar = !matches!(key, Key::Reg(r) if r.is_vector_register())
+            && !matches!(key, Key::A64(crate::isa::a64::Reg::V(_)));
         let reuse = scalar && v.size() > INLINE_MAX && reads >= 2 && !v.partial_idiom();
         if v.size() > MAX_EXPR || reuse {
             self.big_written.insert(key, v);
@@ -549,6 +551,20 @@ impl<'a> Exec<'_, 'a> {
                 None => self.materialize(key, &mut Vec::new(), None),
             }
         }
+    }
+
+    /// The expression `key` was written out as, when a later read is only
+    /// its name.
+    ///
+    /// A float's width lives on that expression. The next assignment drops
+    /// it until that assignment is written out too, so a store does not
+    /// keep a width the register no longer holds.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The variable.
+    pub(in crate::analysis::decompile) fn early_value(&self, key: Key) -> Option<&Expr> {
+        self.big_written.get(&key)
     }
 
     /// Writes the registers an instruction sets at once, each value read
@@ -1003,7 +1019,9 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// Writing the variable the block's equality assumption is about ends
     /// that assumption: from here on `name` denotes the new value, not the
-    /// one the branch compared.
+    /// one the branch compared. The expression is kept when the register
+    /// was not already written out for its size, so a later read of the
+    /// name can still see a float's width.
     ///
     /// # Arguments
     ///
@@ -1017,6 +1035,7 @@ impl<'a> Exec<'_, 'a> {
             self.assume = None;
         }
         self.declare(key, self.ty_of(key));
+        self.big_written.entry(key).or_insert_with(|| val.clone());
         self.env.vals.remove(&key);
         if key == self.canon(self.rax()) {
             self.env.result_in_rax = true;
@@ -1070,7 +1089,15 @@ impl<'a> Exec<'_, 'a> {
             Key::Slot(o) => n.slot_at(o, Ty::from_bits(bits)).0,
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) | Key::A64(_) => n.key(key),
         };
-        let compound = match val {
+        // A 32-bit write zero-extends. The value kept for a later read in
+        // this block stays whole; the text has to wrap, or a `uint64_t`
+        // sum of it keeps bits the machine cleared.
+        let shown = if self.ctx.bitness == 64 && self.env.narrow.get(&key) == Some(&32) {
+            mask(val.clone(), 0xffff_ffff)
+        } else {
+            val.clone()
+        };
+        let compound = match &shown {
             Expr::Bin(op, l, r) => match op.compound() {
                 Some(sym) if l.is_var(key) => Some((sym, (**r).clone())),
                 Some(sym) if op.is_commutative() && r.is_var(key) => Some((sym, (**l).clone())),
@@ -1083,7 +1110,7 @@ impl<'a> Exec<'_, 'a> {
                 format!("{name} -= {};", c.wrapping_neg())
             }
             Some((sym, rhs)) => format!("{name} {sym} {};", rhs.render(&n)),
-            None => format!("{name} = {};", val.render(&n)),
+            None => format!("{name} = {};", shown.render(&n)),
         };
         self.lines.push(line);
     }
@@ -1559,6 +1586,7 @@ impl<'a> Exec<'_, 'a> {
     /// * `k` - The register.
     pub(super) fn forget_dead(&mut self, k: Key) {
         self.env.vals.remove(&k);
+        self.big_written.remove(&k);
         self.env.fresh.remove(&k);
         self.env.clobbered.insert(k);
     }

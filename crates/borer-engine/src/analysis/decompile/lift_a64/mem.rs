@@ -13,7 +13,10 @@
 //! `cas` stores only when memory matches, and either way leaves the old
 //! value in the compare register.
 
-use super::super::expr::{Cc, Cond, Expr, Flags, Op, Ty, UnOp, fold, sign_extend, ternary, unary};
+use super::super::expr::{
+    Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, either_width, fold, mask, mask_bits, sign_extend,
+    ternary, unary,
+};
 use super::super::lift::EffectKind;
 use super::{Lift, low, shifted};
 use crate::isa::a64::{self, Insn, Mode, Opnd, Reg, Rmw, Width};
@@ -74,17 +77,393 @@ fn access(width: Width, r: Reg, bits: u16) -> (Ty, bool) {
 /// Returns the value a store of `ty` writes.
 ///
 /// A register's value is cut to a narrower store's width, so a slot
-/// holding it reads back as the bytes the store wrote. A whole register
-/// stored is its own variable, which a prologue's save is recognized by.
+/// holding it reads back as the bytes the store wrote. A float already
+/// no wider than the store is left whole: masking it is a bitwise
+/// operation on the number and prints as `(float)a & 0xffffffff`. A
+/// wider float keeps the cut, which is the low bits of its encoding.
+/// [`put_at`] types that cut as an integer, so the mask is not an
+/// operation on the number. A whole register stored is its own
+/// variable, which a prologue's save is recognized by.
 ///
 /// # Arguments
 ///
 /// * `v` - The register's value.
 /// * `ty` - The store's type.
 fn stored(v: Expr, ty: Ty) -> Expr {
-    match ty.bits() {
+    cut_to(v, ty, None)
+}
+
+/// [`stored`] when the value's width is already known.
+///
+/// `known` is that width. A float already no wider than the cut is left
+/// whole, including one whose expression is only a register name. `None`
+/// reads the width from `v`.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+/// * `ty` - The width the cut keeps.
+/// * `known` - The width `v` was computed at, when the expression no
+///   longer says.
+fn cut_to(v: Expr, ty: Ty, known: Option<u8>) -> Expr {
+    let bits = ty.bits();
+    let fits = match known {
+        Some(width) => width <= bits,
+        None => float_fits(&v, bits),
+    };
+    if bits < 64 && fits {
+        return v;
+    }
+    match bits {
         bits @ 1..=63 => low(v, u16::from(bits)),
         _ => v,
+    }
+}
+
+/// The type and value a store writes.
+///
+/// A float whose width is the store's stays a float. A float of another
+/// width is the bits the store keeps, written as an unsigned integer: a
+/// wider value keeps its low bits, and a narrower one keeps its encoding
+/// in the low bits with zeros above it, which is what a scalar write left
+/// in the register. Storing those bits as a float would round them. A
+/// float written out early is only the register's name by the time a
+/// store reads it, so `known` is that width. `None` reads it from `v`.
+/// A sign bit flipped or cleared on a name is an integer, stored as
+/// that integer: a float store would convert it. An integer constant
+/// stored at a float width is that float: assigning the integer would
+/// convert it, and the bits the instruction writes are the float's.
+/// An integer that is not a float at all (a general register moved into
+/// the lane) is stored as that integer. A float store would convert it.
+///
+/// # Arguments
+///
+/// * `v` - The register's value.
+/// * `ty` - The width the instruction stores, as [`access`] types a `v`
+///   register.
+/// * `known` - The width `v` was computed at, when the expression no
+///   longer says.
+fn put_at(v: Expr, ty: Ty, known: Option<u8>) -> (Ty, Expr) {
+    let bits = ty.bits();
+    if lane_sign(&v) && matches!(ty, Ty::F32 | Ty::F64) {
+        let integer = if bits <= 32 { Ty::U32 } else { Ty::U64 };
+        return (integer, cut_to(v, integer, None));
+    }
+    if known.is_none() && matches!(ty, Ty::F32 | Ty::F64) && matches!(v, Expr::Const(_)) {
+        let cut = cut_to(v, ty, None);
+        if let Expr::Const(bits) = cut {
+            let bits = if ty.bits() <= 32 {
+                bits & 0xffff_ffff
+            } else {
+                bits
+            };
+            return (ty, Expr::FConst(bits, ty));
+        }
+        return (ty, cut);
+    }
+    let have = known.or_else(|| float_width(&v));
+    if matches!(ty, Ty::F32 | Ty::F64) && have.is_none() {
+        let integer = if bits <= 32 { Ty::U32 } else { Ty::U64 };
+        return (integer, cut_to(v, integer, None));
+    }
+    if let Some(have) = have
+        && matches!(ty, Ty::F32 | Ty::F64)
+        && have != bits
+    {
+        let integer = if bits <= 32 { Ty::U32 } else { Ty::U64 };
+        let cut = if have < bits {
+            encoding(v, have)
+        } else {
+            cut_to(v, integer, known)
+        };
+        return (integer, cut);
+    }
+    (ty, cut_to(v, ty, known))
+}
+
+/// The sign bit of a scalar lane, 32 or 64.
+///
+/// `fneg` xors this bit. `fabs` clears it. One definition, so the store
+/// that recognizes the operation cannot drift from the operation that
+/// builds it.
+///
+/// # Arguments
+///
+/// * `bits` - The lane, 32 or 64.
+pub(super) fn lane_sign_bit(bits: u16) -> Option<u64> {
+    match bits {
+        32 => Some(0x8000_0000),
+        64 => Some(0x8000_0000_0000_0000),
+        _ => None,
+    }
+}
+
+/// Whether `v` flips or clears one lane's sign bit.
+///
+/// That is `fneg` or `fabs` of a value that is not itself a float: the
+/// register's name. A 32-bit `fabs` is then cut to its low half, and the
+/// two masks fold into `& 0x7fffffff`. The bits are an integer. A float
+/// store would convert them.
+///
+/// # Arguments
+///
+/// * `v` - The value a store writes.
+fn lane_sign(v: &Expr) -> bool {
+    match v {
+        Expr::Bin(op, l, r) if bin_sign(*op, l, r) => true,
+        Expr::Bin(Op::And, inner, m) if low_mask(m) => lane_sign(inner),
+        Expr::Bin(Op::And, m, inner) if low_mask(m) => lane_sign(inner),
+        Expr::Const(_)
+        | Expr::FConst(_, _)
+        | Expr::Var(_)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Bin(_, _, _)
+        | Expr::Un(_, _)
+        | Expr::Deref(_, _)
+        | Expr::Cond(_)
+        | Expr::Ternary(_, _, _)
+        | Expr::Sext(_, _)
+        | Expr::Cast(_, _)
+        | Expr::Call(_, _) => false,
+    }
+}
+
+/// Whether `l` and `r` under `op` are a lane's sign bit.
+///
+/// The constant may sit on either side. A clear is every bit but the
+/// sign, or, once a 32-bit value has been cut to its low half, just the
+/// low 31 bits.
+///
+/// # Arguments
+///
+/// * `op` - The bitwise operator.
+/// * `l` - Its left operand.
+/// * `r` - Its right operand.
+fn bin_sign(op: Op, l: &Expr, r: &Expr) -> bool {
+    let hit = |e: &Expr, sign: bool| sign_const(e, sign);
+    match op {
+        Op::Xor => hit(l, true) || hit(r, true),
+        Op::And => hit(l, false) || hit(r, false),
+        _ => false,
+    }
+}
+
+/// Whether `e` is the sign bit, or every bit but the sign bit.
+///
+/// # Arguments
+///
+/// * `e` - A bitwise operand.
+/// * `sign` - `true` for the sign bit alone (`fneg`), `false` for the
+///   rest (`fabs`).
+fn sign_const(e: &Expr, sign: bool) -> bool {
+    let Expr::Const(c) = e else {
+        return false;
+    };
+    [32, 64].into_iter().any(|bits| {
+        let Some(b) = lane_sign_bit(bits) else {
+            return false;
+        };
+        if sign {
+            *c == b
+        } else {
+            *c == !b || *c == b.wrapping_sub(1)
+        }
+    })
+}
+
+/// Whether `e` is a mask of some low bits.
+///
+/// # Arguments
+///
+/// * `e` - A bitwise operand.
+fn low_mask(e: &Expr) -> bool {
+    let Expr::Const(c) = e else {
+        return false;
+    };
+    c.checked_add(1).is_some_and(u64::is_power_of_two)
+}
+
+/// The lane's bits as an integer.
+///
+/// A float moved into a general register, or into a narrower lane, is
+/// those bits. A cast of the number would be a different value. At 64
+/// bits a mask of every bit folds away, so the value is ored with itself:
+/// that is the bits, and it is an integer.
+///
+/// # Arguments
+///
+/// * `v` - The float.
+/// * `bits` - The lane, 1 to 64. Zero is no bits.
+pub(super) fn as_integer_bits(v: Expr, bits: u16) -> Expr {
+    if bits >= 64 {
+        fold(Op::Or, v.clone(), v, 64)
+    } else if bits == 0 {
+        Expr::Const(0)
+    } else {
+        mask(v, (1u64 << u32::from(bits)) - 1)
+    }
+}
+
+/// The float width `v` carries, including a variable declared as one.
+///
+/// [`float_width`] sees a float expression. A parameter or a register the
+/// instruction already typed has no float node, so `ty_of` supplies the
+/// width the declaration recorded. A select or a float operation takes a
+/// width when either side has one. Anything else is an integer.
+///
+/// # Arguments
+///
+/// * `v` - The value a store writes.
+/// * `ty_of` - The declared float width of a variable, if it has one.
+fn named_width(v: &Expr, ty_of: &dyn Fn(Key) -> Option<u8>) -> Option<u8> {
+    if let Some(width) = float_width(v) {
+        return Some(width);
+    }
+    match v {
+        Expr::Var(k) => ty_of(*k),
+        Expr::Ternary(_, a, b) => either_width(named_width(a, ty_of), named_width(b, ty_of)),
+        Expr::Bin(op, l, r) if op.is_float() => {
+            either_width(named_width(l, ty_of), named_width(r, ty_of))
+        }
+        Expr::Un(UnOp::Sqrt | UnOp::Fabs | UnOp::Neg, inner) => named_width(inner, ty_of),
+        Expr::Call(name, args) if name == "fabs" => {
+            args.first().and_then(|a| named_width(a, ty_of))
+        }
+        Expr::Const(_)
+        | Expr::FConst(_, _)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Bin(_, _, _)
+        | Expr::Un(_, _)
+        | Expr::Deref(_, _)
+        | Expr::Cond(_)
+        | Expr::Sext(_, _)
+        | Expr::Cast(_, _)
+        | Expr::Call(_, _) => None,
+    }
+}
+
+/// The width of a float declaration, or `None` for an integer one.
+///
+/// # Arguments
+///
+/// * `ty` - The recorded type.
+pub(super) fn float_ty_bits(ty: Ty) -> Option<u8> {
+    match ty {
+        Ty::F32 => Some(32),
+        Ty::F64 => Some(64),
+        Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => None,
+    }
+}
+
+/// The width of a float expression, or `None` when `v` is not one.
+///
+/// A select carries a width when either arm does. Two bare registers
+/// carry none.
+///
+/// # Arguments
+///
+/// * `v` - The value a store writes.
+pub(super) fn float_width(v: &Expr) -> Option<u8> {
+    match v {
+        Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::FConst(_, ty) => {
+            matches!(ty, Ty::F32 | Ty::F64).then_some(ty.bits())
+        }
+        Expr::Bin(op, l, r) if op.is_float() => Some(float_width(l)?.max(float_width(r)?)),
+        Expr::Un(UnOp::Sqrt | UnOp::Fabs | UnOp::Neg, inner) => float_width(inner),
+        Expr::Ternary(_, a, b) => either_width(float_width(a), float_width(b)),
+        Expr::Call(name, args) if name == "fabs" => args.first().and_then(float_width),
+        Expr::Const(_)
+        | Expr::Var(_)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Bin(..)
+        | Expr::Un(..)
+        | Expr::Cond(_)
+        | Expr::Sext(..)
+        | Expr::Call(..) => None,
+    }
+}
+
+/// Whether `v` is a float whose representation already fits in `bits`.
+///
+/// # Arguments
+///
+/// * `v` - The value a store writes.
+/// * `bits` - The store's width.
+fn float_fits(v: &Expr, bits: u8) -> bool {
+    float_width(v).is_some_and(|width| width <= bits)
+}
+
+/// Stamps `t` on a float operation that carries no width of its own.
+///
+/// A scalar `fadd` of two bare `v` registers is a float add, and nothing
+/// in the expression says whether the instruction was a single or a
+/// double. A store of another width would then mask a number, or leave
+/// the store a float and round. A value that already carries a width is
+/// left alone: wrapping it would convert the number, and a load already
+/// typed at the operation's width must not grow a cast. A value that is
+/// not a float is left alone too, so a select of two bare registers still
+/// has the high bits cut off by the write.
+///
+/// # Arguments
+///
+/// * `v` - The operation.
+/// * `t` - The width the instruction computed it at.
+pub(super) fn bear_width(v: Expr, t: Ty) -> Expr {
+    if v.is_float() && float_width(&v).is_none() {
+        Expr::Cast(Box::new(v), t)
+    } else {
+        v
+    }
+}
+
+/// The low `have` bits of a float, which are its encoding.
+///
+/// # Arguments
+///
+/// * `v` - The float.
+/// * `have` - Its width, 32 or fewer.
+fn encoding(v: Expr, have: u8) -> Expr {
+    mask(v, mask_bits(have))
+}
+
+/// A float read at a different width, as that operation reads it.
+///
+/// A scalar write leaves zeros above its lane. A wider operation uses
+/// that encoding; converting the number would be a different value. A
+/// narrower operation uses the low bits of a wider encoding, which is
+/// not a rounding conversion. The cast names the width the operation
+/// reads and keeps those bits. The expression's own width wins. `known`
+/// is the width a parameter was declared at, which a name does not carry,
+/// and only when that width is wider than the read: the bits above an
+/// incoming narrower value were not cleared here.
+/// The same width, or a value that is not a float, is unchanged.
+///
+/// # Arguments
+///
+/// * `v` - The value the register holds.
+/// * `bits` - The width the operation reads, 32 or 64.
+/// * `known` - The declared width, when `v` does not say.
+pub(super) fn as_encoding_at(v: Expr, bits: u16, known: Option<u8>) -> Expr {
+    let Ok(want) = u8::try_from(bits) else {
+        return v;
+    };
+    // A computed float carries its width, and a wider read of it is the
+    // encoding a scalar write left, zeros above a single. A bare name's
+    // declared width is used only to cut a wider value down. Nothing in
+    // this function cleared the bits above an incoming narrower value, so
+    // a wider read of that name is not a zero-extend.
+    let Some(have) = float_width(&v).or(known.filter(|&width| width > want)) else {
+        return v;
+    };
+    if have != want && matches!(want, 32 | 64) && matches!(have, 32 | 64) {
+        let wide = if want == 32 { Ty::F32 } else { Ty::F64 };
+        let kept = if have < want { have } else { want };
+        Expr::Cast(Box::new(encoding(v, kept)), wide)
+    } else {
+        v
     }
 }
 
@@ -190,6 +569,32 @@ impl Lift<'_, '_> {
         Some(())
     }
 
+    /// The type and value a store of `r` writes.
+    ///
+    /// A float written out early is only the register's name. Its width is
+    /// the written expression's, and only while the register still reads as
+    /// that name: a later write leaves its own expression.
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - The register stored.
+    /// * `bits` - The width the register is read at.
+    /// * `ty` - The width the instruction stores.
+    fn put_reg(&self, r: Reg, bits: u16, ty: Ty) -> (Ty, Expr) {
+        let held = self.reg_at(r, bits);
+        let ty_of = |k: Key| {
+            // The value written out carries the width it was computed at.
+            // The register's first note can be a narrower earlier use of
+            // the same name, and that must not replace the value's width.
+            self.ex
+                .early_value(k)
+                .and_then(float_width)
+                .or_else(|| self.ex.ctx.reg_ty.get(&k).copied().and_then(float_ty_bits))
+        };
+        let known = named_width(&held, &ty_of);
+        put_at(held, ty, known)
+    }
+
     /// A store of one register (`str`, `stur`, `stlr`, and the narrow
     /// forms).
     ///
@@ -201,7 +606,8 @@ impl Lift<'_, '_> {
         let (rt, bits) = register(i, 0)?;
         let (addr, back) = self.address(i.operands[1])?;
         let ty = access(width, rt, bits).0;
-        let v = stored(self.reg_at(rt, bits), ty);
+        self.note_stored_param(rt, ty);
+        let (ty, v) = self.put_reg(rt, bits, ty);
         self.ex.store_at(addr, ty, v);
         if let Some((r, a)) = back {
             self.write(r, 64, a);
@@ -222,7 +628,8 @@ impl Lift<'_, '_> {
         let (rt, bits) = register(i, 1)?;
         let (addr, _) = self.address(i.operands[2])?;
         let ty = access(width, rt, bits).0;
-        let v = stored(self.reg_at(rt, bits), ty);
+        self.note_stored_param(rt, ty);
+        let (ty, v) = self.put_reg(rt, bits, ty);
         self.ex.store_at(addr, ty, v);
         self.write(status, 32, Expr::Const(0));
         Some(())
@@ -240,12 +647,14 @@ impl Lift<'_, '_> {
         let (first, bits) = register(i, 1)?;
         let (second, _) = register(i, 2)?;
         let (ty, _) = access(Width::Reg, first, bits);
+        self.note_stored_param(first, ty);
+        self.note_stored_param(second, ty);
         let step = Expr::Const(from_usize(usize::from(bits / 8)));
         let (addr, _) = self.address(i.operands[3])?;
-        let a = stored(self.reg_at(first, bits), ty);
-        let b = stored(self.reg_at(second, bits), ty);
-        self.ex.store_at(addr.clone(), ty, a);
-        self.ex.store_at(fold(Op::Add, addr, step, 64), ty, b);
+        let (ty_a, a) = self.put_reg(first, bits, ty);
+        let (ty_b, b) = self.put_reg(second, bits, ty);
+        self.ex.store_at(addr.clone(), ty_a, a);
+        self.ex.store_at(fold(Op::Add, addr, step, 64), ty_b, b);
         self.write(status, 32, Expr::Const(0));
         Some(())
     }
@@ -396,13 +805,15 @@ impl Lift<'_, '_> {
         let (first, bits) = register(i, 0)?;
         let (second, _) = register(i, 1)?;
         let (ty, _) = access(Width::Reg, first, bits);
+        self.note_stored_param(first, ty);
+        self.note_stored_param(second, ty);
         let step = Expr::Const(from_usize(usize::from(bits / 8)));
         let (addr, _) = self.address(i.operands[2])?;
-        let a = stored(self.reg_at(first, bits), ty);
-        self.ex.store_at(addr, ty, a);
+        let (ty_a, a) = self.put_reg(first, bits, ty);
+        self.ex.store_at(addr, ty_a, a);
         let (addr, back) = self.address(i.operands[2])?;
-        let b = stored(self.reg_at(second, bits), ty);
-        self.ex.store_at(fold(Op::Add, addr, step, 64), ty, b);
+        let (ty_b, b) = self.put_reg(second, bits, ty);
+        self.ex.store_at(fold(Op::Add, addr, step, 64), ty_b, b);
         if let Some((r, a)) = back {
             self.write(r, 64, a);
         }

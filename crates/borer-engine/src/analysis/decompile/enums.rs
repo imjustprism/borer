@@ -83,7 +83,7 @@ pub fn enum_of(text: &str) -> Option<EnumTable> {
                 .collect()
         })
         .unwrap_or_default();
-    enum_table(text, &params)
+    enum_table(text, &params).or_else(|| listed_enum(text).map(ListedEnum::table))
 }
 
 /// Recovers every name table in a binary, one per function that encodes
@@ -312,6 +312,34 @@ pub(super) fn called_tables(
         .collect()
 }
 
+/// Drops one width cast from the front of a call in a zero test.
+///
+/// `(uint32_t)f(x, "LIT")` is the same call as `f(x, "LIT")`. The cast is
+/// the register the test read, and leaving it makes the callee nameless.
+///
+/// # Arguments
+///
+/// * `call` - The call text, semicolon already removed.
+fn without_width_cast(call: &str) -> &str {
+    let call = call.trim();
+    const CASTS: [&str; 8] = [
+        "(uint64_t)",
+        "(int64_t)",
+        "(uint32_t)",
+        "(int32_t)",
+        "(uint16_t)",
+        "(int16_t)",
+        "(uint8_t)",
+        "(int8_t)",
+    ];
+    for cast in CASTS {
+        if let Some(rest) = call.strip_prefix(cast) {
+            return rest.trim_start();
+        }
+    }
+    call
+}
+
 /// Recovers the name table a compare ladder or a constant-to-string chain
 /// encodes.
 ///
@@ -360,13 +388,13 @@ pub fn enum_table(body: &str, params: &[String]) -> Option<EnumTable> {
             } else {
                 return None;
             };
-            Some((call.strip_suffix(';')?, unequal, 1))
+            Some((without_width_cast(call.strip_suffix(';')?), unequal, 1))
         };
         let in_test = || {
             let cond = line.strip_prefix("if (")?.strip_suffix(") {")?;
             match cond.strip_suffix(" != 0") {
-                Some(call) => Some((call, true, 0)),
-                None => Some((cond.strip_suffix(" == 0")?, false, 0)),
+                Some(call) => Some((without_width_cast(call), true, 0)),
+                None => Some((without_width_cast(cond.strip_suffix(" == 0")?), false, 0)),
             }
         };
         if let Some((call, unequal, o)) = assigned().or_else(in_test)
@@ -491,6 +519,224 @@ fn literal_set(stmt: &str) -> Option<&str> {
         .or_else(|| stmt.split_once(" = ").map(|(_, r)| r))
         .and_then(|r| r.strip_suffix(';'))
         .and_then(literal_of)
+}
+
+/// One `// enum` header: the name it prints, the variable it names when
+/// it says `values of v`, and the members it lists.
+pub(super) struct ListedEnum {
+    /// The words after `// enum` and before the colon.
+    name: String,
+    /// The variable the members belong to, when the header names one.
+    var: Option<String>,
+    /// `(constant, literal)` pairs in the order the header lists them.
+    pub(super) members: Vec<(u64, String)>,
+}
+
+impl ListedEnum {
+    /// The table the header states.
+    fn table(self) -> EnumTable {
+        let param = self
+            .var
+            .as_deref()
+            .and_then(|v| v.strip_prefix('a'))
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| n.checked_sub(1));
+        EnumTable {
+            name: self.name,
+            members: self.members,
+            param,
+        }
+    }
+}
+
+/// Reads the `// enum` header a decompilation already printed.
+///
+/// The body of a polished listing names these members, so a reader that
+/// only sees that listing recovers the table from the header. Members the
+/// header truncates with `(+N more)` are not here.
+///
+/// # Arguments
+///
+/// * `text` - A decompilation, header lines included.
+pub(super) fn listed_enum(text: &str) -> Option<ListedEnum> {
+    let line = text.lines().find(|l| l.starts_with("// enum "))?;
+    let (head, rest) = line.split_once(": ")?;
+    let list = rest.split_once(" values, ")?.1;
+    let list = match list.rfind(" (+") {
+        Some(at) if list[at..].ends_with(" more)") => &list[..at],
+        _ => list,
+    };
+    let mut members = Vec::new();
+    for part in list.split(", ") {
+        let (name, k) = part.split_once(" = ")?;
+        if name.is_empty() {
+            return None;
+        }
+        members.push((parse_const(k)?, name.to_owned()));
+    }
+    if members.is_empty() {
+        return None;
+    }
+    let name = head.strip_prefix("// enum ")?.to_owned();
+    let var = name
+        .strip_prefix("values of ")
+        .filter(|v| is_ident(v))
+        .map(str::to_owned);
+    Some(ListedEnum { name, var, members })
+}
+
+/// Names a recovered table's constants where the polished body compares
+/// them or switches on them.
+///
+/// The header stays as printed, numbers included. Only a compare or a
+/// `case` of the variable the header names changes, and only to a member
+/// the header lists. A number anywhere else, including `return 0`, stays.
+///
+/// # Arguments
+///
+/// * `text` - A decompilation, header lines included.
+pub(super) fn spell_own_enum(text: &str) -> String {
+    let Some(listed) = listed_enum(text) else {
+        return text.to_owned();
+    };
+    let Some(var) = listed.var.clone() else {
+        return text.to_owned();
+    };
+    let table = EnumTable {
+        name: String::new(),
+        members: listed.members,
+        param: None,
+    };
+    // The brace depth a switch's body sits at. A case is at the same
+    // indent as `switch`, so the case's `}` is not the switch's.
+    let mut switches: Vec<(usize, bool)> = Vec::new();
+    let mut depth = 0usize;
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let t = line.trim();
+        switches.retain(|(inner, _)| depth >= *inner);
+        let mut written = line.to_owned();
+        if switches.last().is_some_and(|(_, on)| *on) {
+            written = rename_case_labels(&written, &table);
+        }
+        written = rename_compared(&written, &var, &table);
+        let (opens, closes) = brace_delta(t);
+        if let Some(inner) = switch_opener(t) {
+            switches.push((depth + opens, switch_subject(inner, &var)));
+        }
+        depth = depth.saturating_add(opens).saturating_sub(closes);
+        out.push_str(&written);
+        out.push('\n');
+    }
+    out
+}
+
+/// How many `{` and `}` a line holds outside a string.
+///
+/// # Arguments
+///
+/// * `line` - One trimmed line.
+fn brace_delta(line: &str) -> (usize, usize) {
+    let mut opens = 0usize;
+    let mut closes = 0usize;
+    let mut chars = line.chars().peekable();
+    let mut quote = false;
+    while let Some(c) = chars.next() {
+        if quote {
+            if c == '\\' {
+                chars.next();
+            } else if c == '"' {
+                quote = false;
+            }
+            continue;
+        }
+        if c == '/' && chars.peek() == Some(&'/') {
+            break;
+        }
+        match c {
+            '"' => quote = true,
+            '{' => opens += 1,
+            '}' => closes += 1,
+            _ => {}
+        }
+    }
+    (opens, closes)
+}
+
+/// Tells whether a `switch` dispatches on `var`, casts aside.
+///
+/// # Arguments
+///
+/// * `inner` - The text between `switch (` and `) {`.
+/// * `var` - The variable the header names.
+fn switch_subject(inner: &str, var: &str) -> bool {
+    let bare = |s: &str| {
+        let s = without_width_cast(s.trim());
+        if s == var {
+            return true;
+        }
+        s.strip_prefix('(')
+            .and_then(|r| r.strip_suffix(')'))
+            .is_some_and(|m| without_width_cast(m.trim()) == var)
+    };
+    bare(inner)
+}
+
+/// Names each `case K` on a line whose value the table lists.
+///
+/// A value the table does not list stays the number, and a line that is
+/// not a case is unchanged.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+/// * `table` - The function's own table.
+fn rename_case_labels(line: &str, table: &EnumTable) -> String {
+    let trimmed = line.trim_start();
+    let pad = line.len() - trimmed.len();
+    if !trimmed.starts_with("case ") {
+        return line.to_owned();
+    }
+    let mut rest = trimmed;
+    let mut built = String::new();
+    let mut changed = false;
+    loop {
+        let Some(after) = rest.strip_prefix("case ") else {
+            built.push_str(rest);
+            break;
+        };
+        let Some(colon) = after.find(':') else {
+            built.push_str(rest);
+            break;
+        };
+        let token = after[..colon].trim();
+        let tail = &after[colon + 1..];
+        match parse_const(token).and_then(|k| table.member(k)) {
+            Some(name) => {
+                changed = true;
+                built.push_str("case ");
+                built.push_str(name);
+                built.push(':');
+            }
+            None => {
+                built.push_str("case ");
+                built.push_str(token);
+                built.push(':');
+            }
+        }
+        let next = tail.trim_start();
+        if next.starts_with("case ") {
+            built.push_str(&tail[..tail.len() - next.len()]);
+            rest = next;
+            continue;
+        }
+        built.push_str(tail);
+        break;
+    }
+    if !changed {
+        return line.to_owned();
+    }
+    format!("{}{built}", " ".repeat(pad))
 }
 
 /// Renders constants by their member names wherever a body compares a

@@ -206,9 +206,17 @@ fn straight_line(program: &Program, block: &BasicBlock) -> (Vec<Insn>, Option<In
 ///
 /// * `i` - The instruction.
 fn statement_only(i: &Insn) -> bool {
-    (matches!(i.mnemonic, Mnemonic::Mrs | Mnemonic::Msr | Mnemonic::Svc)
-        && !super::lift_a64::modeled_system(i))
-        || i.op == a64::Op::Syscall
+    (matches!(i.mnemonic, Mnemonic::Mrs | Mnemonic::Msr) && !super::lift_a64::modeled_system(i))
+        || (i.op == a64::Op::Syscall && !svc_zero(i))
+}
+
+/// `svc #0`, the supervisor call the lifter models as a value in `x0`.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn svc_zero(i: &Insn) -> bool {
+    i.mnemonic == Mnemonic::Svc && matches!(i.operands.first(), Some(Opnd::Imm(0)))
 }
 
 /// Reads the registers a block compares (`cmp`, `cmn`, `tst`, `ccmp`, and

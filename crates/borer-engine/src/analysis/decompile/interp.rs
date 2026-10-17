@@ -31,10 +31,14 @@ use crate::isa::x86::Register;
 use super::ctext::{
     Ast, Base, Bin, CTy, Tok, Un, closing, expression, float_bits, float_of, split_top, tokens,
 };
-use super::expr::{Expr, Op, TEB_FIELDS, UnOp, fold, unary};
+use super::expr::{
+    Expr, Op, RoundToInt, TEB_FIELDS, Ty, UnOp, abs_bits, align_up_bits, cls_bits, extremum_bits,
+    fold, midpoint_bits, rbit_bits, rev16_bits, rev32_bits, rint_bits, sub_sat_bits, unary,
+};
 use super::line::is_param_name;
 use super::signature::{Passing, Signature, passing, poke_word, printed};
 use super::traces::{INTRINSICS, Stmt, blank, statements};
+use super::verify::integer_to_float;
 use crate::analysis::{Analysis, BlockTerm, Overlay, bare_name, name_of};
 use crate::emulate::{Emulator, Stop};
 use crate::fxmap::FxHashMap;
@@ -235,27 +239,12 @@ fn sext(v: u64, bits: u8) -> u64 {
     ((v << shift).cast_signed() >> shift).cast_unsigned()
 }
 
-/// The double an integer converts to.
-///
-/// # Arguments
-///
-/// * `v` - The integer's bits, sign-extended when it is signed.
-/// * `signed` - Whether to read them as signed.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "an integer converted to a double rounds, as C's conversion does"
-)]
-fn int_to_float(v: u64, signed: bool) -> f64 {
-    if signed {
-        v.cast_signed() as f64
-    } else {
-        v as f64
-    }
-}
-
 /// The integer a double converts to: toward zero, and to the integer
 /// indefinite the processor gives (the most negative value) when it is a
 /// NaN or does not fit.
+///
+/// An 8-bit, 16-bit or 32-bit destination uses that width's signed range.
+/// A wider one uses the signed 64-bit range, then keeps the low `bits`.
 ///
 /// # Arguments
 ///
@@ -263,12 +252,25 @@ fn int_to_float(v: u64, signed: bool) -> f64 {
 /// * `bits` - The integer's width.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "the range check guarantees the truncated value fits"
+    clippy::cast_precision_loss,
+    reason = "the range check guarantees the truncated value fits, and a power-of-two bound converts exactly"
 )]
 fn float_to_int(f: f64, bits: u8) -> u64 {
     let t = f.trunc();
-    if t.is_nan() || !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&t) {
-        return 1u64 << (bits.clamp(1, 64) - 1);
+    let bits = bits.clamp(1, 64);
+    if matches!(bits, 8 | 16 | 32) {
+        let shift = u32::from(bits) - 1;
+        let top = (1u64 << shift) as f64;
+        if t.is_nan() || t < -top || t >= top {
+            return 1u64 << shift;
+        }
+    } else if t.is_nan()
+        || !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&t)
+    {
+        if bits < 2 {
+            return 1;
+        }
+        return 1u64 << (u32::from(bits) - 1);
     }
     (t as i64).cast_unsigned() & mask(bits)
 }
@@ -349,6 +351,9 @@ pub(crate) struct Script<'p> {
     layouts: FxHashMap<String, FxHashMap<u64, CTy>>,
     /// The names that are neither variables nor parameters, resolved.
     known: FxHashMap<String, Known>,
+    /// Enumerator names the function's own `// enum` header lists, and the
+    /// constants they stand for. A `case` of one is that constant.
+    enumerators: FxHashMap<String, u64>,
     /// Each string literal's address in the image, `None` when the image
     /// does not hold it as written.
     literals: FxHashMap<Vec<u8>, Option<u64>>,
@@ -669,6 +674,8 @@ struct Compiler<'t> {
     toks: Vec<Result<Vec<Tok>, String>>,
     /// Tells whether a name holds a value.
     values: &'t dyn Fn(&str) -> bool,
+    /// Enumerator names from the function's `// enum` header.
+    enumerators: &'t FxHashMap<String, u64>,
     /// The machine word in bits.
     word: u8,
     /// The steps so far.
@@ -737,6 +744,19 @@ impl Compiler<'_> {
             Some(Ok(t)) => Ok(t),
             Some(Err(why)) => Err(why.clone()),
             None => Err("a line past the text".to_owned()),
+        }
+    }
+
+    /// The constant a case label stands for: a literal, or an enumerator
+    /// the function's header names.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The label's expression.
+    fn case_value(&self, e: &Ast) -> Option<u64> {
+        match e {
+            Ast::Name(n) => self.enumerators.get(n).copied(),
+            other => constant(other),
         }
     }
 
@@ -997,7 +1017,7 @@ impl Compiler<'_> {
                     match self
                         .expr(rest.get(1..colon).unwrap_or(&[]))
                         .ok()
-                        .and_then(|e| constant(&e))
+                        .and_then(|e| self.case_value(&e))
                     {
                         Some(v) => cases.push((v, l)),
                         None => bad = Some("a case label that is not a number".to_owned()),
@@ -1250,6 +1270,9 @@ impl<'p> Script<'p> {
             vars.insert(name.clone(), Variable { ty: *ty, slot });
         }
         let values = |n: &str| vars.contains_key(n) || is_param_name(n);
+        let enumerators: FxHashMap<String, u64> = super::listed_enum(text)
+            .map(|e| e.members.into_iter().map(|(k, n)| (n, k)).collect())
+            .unwrap_or_default();
         let body: Vec<String> = all
             .get(base..)
             .unwrap_or(&[])
@@ -1277,6 +1300,7 @@ impl<'p> Script<'p> {
         let mut c = Compiler {
             toks,
             values: &values,
+            enumerators: &enumerators,
             word,
             ops: Vec::new(),
             labels: Vec::new(),
@@ -1289,12 +1313,11 @@ impl<'p> Script<'p> {
             all.len(),
             Step::Unreadable("a goto to a label the text lacks".to_owned()),
         );
-        let targets = c
-            .labels
+        let Compiler { ops, labels, .. } = c;
+        let targets = labels
             .iter()
             .map(|l| l.unwrap_or(unplaced))
             .collect::<Vec<_>>();
-        let ops = c.ops;
         let mut read: Vec<&str> = Vec::new();
         let mut strings: Vec<&[u8]> = Vec::new();
         for op in &ops {
@@ -1314,7 +1337,7 @@ impl<'p> Script<'p> {
         }
         let wanted: std::collections::BTreeSet<&str> = read
             .into_iter()
-            .filter(|n| !vars.contains_key(*n))
+            .filter(|n| !vars.contains_key(*n) && !enumerators.contains_key(*n))
             .collect();
         let known = resolve_names(program, analysis, overlay, entry, &wanted);
         let literals = strings
@@ -1343,6 +1366,7 @@ impl<'p> Script<'p> {
             cells,
             layouts: head.layouts,
             known,
+            enumerators,
             literals,
             sig,
             passing: pass,
@@ -2273,6 +2297,10 @@ impl Running<'_, '_> {
 
     /// Converts a value to a type, as C's assignment and cast convert.
     ///
+    /// An integer converted to a float is its low bits when unsigned, and
+    /// sign-extended first when signed. Anything other than a single is
+    /// held as a double.
+    ///
     /// # Arguments
     ///
     /// * `v` - The value.
@@ -2298,10 +2326,11 @@ impl Running<'_, '_> {
                 let wide = if v.ty.signed() {
                     sext(v.bits, from_bits)
                 } else {
-                    v.bits
+                    v.bits & mask(from_bits)
                 };
+                let dest = if tb == 32 { Ty::F32 } else { Ty::F64 };
                 Val {
-                    bits: float_bits(int_to_float(wide, v.ty.signed()), tb),
+                    bits: integer_to_float(wide, v.ty.signed(), dest),
                     ty: to,
                 }
             }
@@ -2315,6 +2344,43 @@ impl Running<'_, '_> {
                 self.int(wide, to)
             }
         })
+    }
+
+    /// A float cast of a bitwise operation, or `None` when `e` is not one.
+    ///
+    /// A cut of a float keeps the bits, zero above a single. Converting
+    /// them would be the integer the bits happen to be, which is not the
+    /// float a wider operation reads. A cut of two integers is that
+    /// integer converted, and it is evaluated once.
+    ///
+    /// # Arguments
+    ///
+    /// * `to` - The type the cast names.
+    /// * `e` - The cast's operand.
+    ///
+    /// # Errors
+    ///
+    /// Unchecked when an operand of the cut cannot be read.
+    fn encoding_cast(&mut self, to: &CTy, e: &Ast) -> Eval<Option<Val>> {
+        let Some(width) = to.float() else {
+            return Ok(None);
+        };
+        let Ast::Bin(op @ (Bin::And | Bin::Or | Bin::Xor), l, r) = e else {
+            return Ok(None);
+        };
+        let (x, y) = (self.value(l)?, self.value(r)?);
+        if x.ty.float().is_none() && y.ty.float().is_none() {
+            let combined = self.binary(*op, x, y)?;
+            return Ok(Some(self.convert(combined, *to)?));
+        }
+        let bits = match op {
+            Bin::And => x.bits & y.bits,
+            Bin::Or => x.bits | y.bits,
+            Bin::Xor => x.bits ^ y.bits,
+            _ => return Ok(None),
+        };
+        let bits = if width == 32 { bits & mask(32) } else { bits };
+        Ok(Some(Val { bits, ty: *to }))
     }
 
     /// The type C promotes an operand to: a narrower integer to `int`.
@@ -2490,6 +2556,9 @@ impl Running<'_, '_> {
             Ast::Name(n) => self.name(n),
             Ast::Un(op, a) => self.unary(*op, a),
             Ast::Cast(ty, a) => {
+                if let Some(v) = self.encoding_cast(ty, a)? {
+                    return Ok(v);
+                }
                 let v = self.value(a)?;
                 self.convert(v, *ty)
             }
@@ -2570,6 +2639,9 @@ impl Running<'_, '_> {
         if let Some(v) = self.s.vars.get(n).copied() {
             return self.read(Self::slot_place(v));
         }
+        if let Some(&v) = self.s.enumerators.get(n) {
+            return Ok(self.int(v, CTy::int(32, true)));
+        }
         match self.s.known.get(n) {
             Some(Known::Code(at) | Known::Address(at)) => {
                 return Ok(self.int(*at, CTy::of(Base::Void).to()));
@@ -2604,7 +2676,7 @@ impl Running<'_, '_> {
                     "`{n}` is read, and the text never declares or sets it"
                 ))
             }
-            "NULL" => Ok(self.int(0, CTy::int(self.word(), false))),
+            "NULL" | "nullptr" => Ok(self.int(0, CTy::int(self.word(), false))),
             _ => match (
                 crate::winconst::value(n),
                 crate::analysis::typelib::value_of(n, self.s.program.format),
@@ -2994,6 +3066,11 @@ impl Running<'_, '_> {
 
     /// Applies a binary operator to two values, as C does.
     ///
+    /// A bitwise operator with a float operand cuts the encoding, not the
+    /// number, and the result is an unsigned integer. That is the low bits
+    /// of a float stored at another width. C has no such operator; shifting
+    /// a float stays unchecked.
+    ///
     /// # Arguments
     ///
     /// * `op` - The operator.
@@ -3008,6 +3085,17 @@ impl Running<'_, '_> {
         let word = self.word();
         if matches!(op, Bin::Add | Bin::Sub) && (x.ty.is_ptr() || y.ty.is_ptr()) {
             return self.pointer_step(op, x, y);
+        }
+        if matches!(op, Bin::And | Bin::Or | Bin::Xor)
+            && (x.ty.float().is_some() || y.ty.float().is_some())
+        {
+            let c = match op {
+                Bin::And => x.bits & y.bits,
+                Bin::Or => x.bits | y.bits,
+                Bin::Xor => x.bits ^ y.bits,
+                _ => return unchecked("an integer operator on a float"),
+            };
+            return Ok(self.int(c, CTy::int(word, false)));
         }
         if matches!(op, Bin::Shl | Bin::Shr) {
             if x.ty.float().is_some() || y.ty.float().is_some() {
@@ -3454,6 +3542,16 @@ impl Running<'_, '_> {
                 _ => unchecked(format!("{name} of zero, which leaves its result undefined")),
             };
         }
+        if let Some(round) = RoundToInt::parse(name) {
+            let a = arg(0)?;
+            let Ok(fb) = u8::try_from(arg(1)?.bits) else {
+                return unchecked(format!("{name} is not a value at this width"));
+            };
+            let Some(v) = round.apply(a.bits, fb) else {
+                return unchecked(format!("{name} is not a value at this width"));
+            };
+            return Ok(self.int(v, CTy::int(word, false)));
+        }
         match name {
             "NtCurrentTeb" if vals.is_empty() => Ok(self.int(self.s.teb, CTy::of(Base::Void).to())),
             "memset" => {
@@ -3511,6 +3609,67 @@ impl Running<'_, '_> {
                 }
                 Ok(self.int(n, CTy::int(word, false)))
             }
+            "abs" => {
+                let ty = CTy::int(word, true);
+                let a = self.convert(arg(0)?, ty)?;
+                let Some(bits) = abs_bits(a.bits, word) else {
+                    return unchecked(format!("{name} is not a value at this width"));
+                };
+                Ok(self.int(bits, ty))
+            }
+            "midpoint" => {
+                let ty = CTy::int(word, false);
+                let (a, b) = (self.convert(arg(0)?, ty)?, self.convert(arg(1)?, ty)?);
+                let Some(bits) = midpoint_bits(a.bits, b.bits, word) else {
+                    return unchecked(format!("{name} is not a value at this width"));
+                };
+                Ok(self.int(bits, ty))
+            }
+            "align_up" => {
+                let ty = CTy::int(word, false);
+                let (a, b) = (self.convert(arg(0)?, ty)?, self.convert(arg(1)?, ty)?);
+                let Some(bits) = align_up_bits(a.bits, b.bits, word) else {
+                    return unchecked(format!("{name} is not a value at this width"));
+                };
+                Ok(self.int(bits, ty))
+            }
+            "cls" => {
+                let a = arg(0)?;
+                let bits = a.ty.bits(word).unwrap_or(word);
+                let Some(v) = cls_bits(a.bits, bits) else {
+                    return unchecked(format!("{name} is not a value at this width"));
+                };
+                Ok(self.int(v, CTy::int(word, false)))
+            }
+            "rbit" | "rev16" | "rev32" => {
+                let a = arg(0)?;
+                let bits = a.ty.bits(word).unwrap_or(word);
+                let Some(v) = (match name {
+                    "rbit" => rbit_bits(a.bits, bits),
+                    "rev16" => rev16_bits(a.bits, bits),
+                    _ => rev32_bits(a.bits, bits),
+                }) else {
+                    return unchecked(format!("{name} is not a value at this width"));
+                };
+                Ok(self.int(v, CTy::int(word, false)))
+            }
+            "sub_sat" => {
+                let ty = CTy::int(word, false);
+                let (a, b) = (self.convert(arg(0)?, ty)?, self.convert(arg(1)?, ty)?);
+                let Some(bits) = sub_sat_bits(a.bits, b.bits, word) else {
+                    return unchecked(format!("{name} is not a value at this width"));
+                };
+                Ok(self.int(bits, ty))
+            }
+            "min" | "max" | "umin" | "umax" => {
+                let signed = matches!(name, "min" | "max");
+                let ty = CTy::int(word, signed);
+                let (a, b) = (self.convert(arg(0)?, ty)?, self.convert(arg(1)?, ty)?);
+                let Some(bits) = extremum_bits(name, a.bits, b.bits, word) else {
+                    return unchecked(format!("{name} is not a value at this width"));
+                };
+                Ok(self.int(bits, ty))
+            }
             "sqrt" | "fabs" => {
                 let a = arg(0)?;
                 let fb =
@@ -3522,6 +3681,16 @@ impl Running<'_, '_> {
                     bits: float_bits(v, fb),
                     ty: a.ty,
                 })
+            }
+            "rint" => {
+                let a = arg(0)?;
+                let fb =
+                    a.ty.float()
+                        .ok_or_else(|| End::Unchecked(format!("{name} of an integer")))?;
+                let bits = rint_bits(a.bits, fb).ok_or_else(|| {
+                    End::Unchecked(format!("{name} is not a value at this width"))
+                })?;
+                Ok(Val { bits, ty: a.ty })
             }
             _ => unchecked(format!("{name} is not modeled")),
         }
@@ -3857,6 +4026,23 @@ return rax + rcx + a1;
         (r.end, r.line)
     }
 
+    /// A case named in the function's enum header is that constant, and so
+    /// is the name compared against the same variable.
+    ///
+    /// # Panics
+    ///
+    /// When a path returns another value.
+    #[test]
+    fn an_enumerator_is_the_constant_its_header_names() {
+        let cases = "// signature: uint64_t f(uint64_t a1)\n// enum values of a1: 2 values, Off = 0, On = 1\n\nswitch (a1) {\ncase Off: {\n  return 10;\n}\ncase On: {\n  return 11;\n}\ndefault: {\n  return 12;\n}\n}\n";
+        assert_eq!(run(cases, &[0]).0, End::Returned(Some(10)));
+        assert_eq!(run(cases, &[1]).0, End::Returned(Some(11)));
+        assert_eq!(run(cases, &[2]).0, End::Returned(Some(12)));
+        let compared = "// signature: uint64_t f(uint64_t a1)\n// enum values of a1: 2 values, Off = 0, On = 1\n\nif (a1 == On) {\n  return 11;\n}\nreturn 0;\n";
+        assert_eq!(run(compared, &[1]).0, End::Returned(Some(11)));
+        assert_eq!(run(compared, &[0]).0, End::Returned(Some(0)));
+    }
+
     /// Loops, switches and gotos run as C runs them, and the return is cut
     /// to the declared type.
     ///
@@ -3882,6 +4068,8 @@ return rax + rcx + a1;
         let text = "// signature: uint64_t f(uint64_t a1)\nuint64_t rax;\nuint8_t rcx;\n\nrcx = 0xff;\nif ((int32_t)a1 < 0) {\n  return (uint64_t)((uint32_t*)0 + 2) + rcx + 1;\n}\nreturn (int64_t)(int8_t)rcx;\n";
         assert_eq!(run(text, &[0xffff_ffff]).0, End::Returned(Some(8 + 0x100)));
         assert_eq!(run(text, &[1]).0, End::Returned(Some(u64::MAX)));
+        let bits = "// signature: int32_t f(int32_t a1)\ndouble d;\n\nd = (double)(((float)a1) & 0xffffffff);\nif (d < 1.0) {\n  return 1;\n}\nreturn 2;\n";
+        assert_eq!(run(bits, &[1]).0, End::Returned(Some(1)));
         let pick = "// signature: uint64_t f(uint64_t a1)
 
 if ((a1 == 0 ? 1 : a1) <= -32) {

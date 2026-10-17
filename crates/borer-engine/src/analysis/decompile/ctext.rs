@@ -3,11 +3,12 @@
 //!
 //! What [`super::interp`] runs. The text is borer's own output, so the
 //! grammar is the part of C it prints: integer, floating, character and
-//! string literals, names (a `Class::method` read as one name), the
-//! operators at C's precedence, casts to the scalar types and pointers to
-//! them, calls, indexing and `->field`. Whatever else a line holds fails to
-//! parse with a message naming it, so the caller can say which line it
-//! could not read instead of guessing what it meant.
+//! string literals, names (a `Class::method` read as one name), `nullptr`
+//! as the integer constant zero, the operators at C's precedence, casts to
+//! the scalar types and pointers to them, calls, indexing and `->field`.
+//! Whatever else a line holds fails to parse with a message naming it, so
+//! the caller can say which line it could not read instead of guessing
+//! what it meant.
 
 use crate::num::lo32;
 
@@ -392,7 +393,12 @@ pub(super) fn tokens(text: &str) -> Result<Vec<Tok>, String> {
                     end += 1 + word.len();
                 }
             }
-            out.push(Tok::Name(rest[..end].to_owned()));
+            let word = &rest[..end];
+            if word == "nullptr" {
+                out.push(Tok::Int(0, CTy::int(32, true)));
+            } else {
+                out.push(Tok::Name(word.to_owned()));
+            }
             while chars.peek().is_some_and(|&(k, _)| k < at + end) {
                 chars.next();
             }
@@ -1185,6 +1191,26 @@ mod tests {
         assert_eq!(
             tokens("operator delete(p)").unwrap()[0],
             Tok::Name("operator delete".to_owned())
+        );
+    }
+
+    /// `nullptr` is the null constant, the same value as the literal `0`.
+    ///
+    /// A longer name that merely starts with those letters stays a name.
+    #[test]
+    fn nullptr_is_a_null_constant() {
+        assert_eq!(
+            tokens("this == nullptr").unwrap(),
+            vec![
+                Tok::Name("this".to_owned()),
+                Tok::Punct("=="),
+                Tok::Int(0, CTy::int(32, true)),
+            ]
+        );
+        assert_eq!(read("p == nullptr"), read("p == 0"));
+        assert_eq!(
+            tokens("nullptr_t").unwrap(),
+            vec![Tok::Name("nullptr_t".to_owned())]
         );
     }
 

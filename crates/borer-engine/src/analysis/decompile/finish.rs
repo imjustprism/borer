@@ -1,6 +1,8 @@
 //! Final text passes: `x ?: y`, temporary names, float returns, and the source
 //! file a function cites.
 
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::num::from_usize;
 
@@ -31,32 +33,84 @@ use crate::num::from_usize;
 pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
-    let text = normalize_temps(&evidence::name_vars(
+    let text = quiet_zero_tests(&normalize_temps(&evidence::name_vars(
         &byte_arithmetic(
             &type_locals(&type_parameters(
-                &apply_layouts(&vars::split_webs(&wire_format(
+                &lane_locals(&apply_layouts(&vars::split_webs(&wire_format(
                     &source_file(&name_own_fields(text)),
                     &streams,
-                ))),
+                )))),
                 word,
             )),
             word,
         ),
         u8::try_from(bitness).unwrap_or(64),
-    ));
+    )));
     let mut out = String::with_capacity(text.len() + 1);
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&elvis(line));
+        out.push_str(&elvis(&compound_assign(line)));
     }
     out.push('\n');
-    out
+    spell_nullptr(&spell_own_enum(&spell_index(&out)))
 }
 
 /// Writes `(x != 0 ? x : y)` as `(x ?: y)` on one line.
 ///
+/// `name = name op value` as `name op= value`, when both reads of `name`
+/// are that plain name and `value` is one name or one number.
+///
+/// `x += y + z` is not `x = (x + y) + z` for every operator, and
+/// `*p = *p + 1` is two loads. A call on either side stays `=`. `++` is
+/// not the spelling of an add.
+///
+/// # Arguments
+///
+/// * `line` - One line of pseudo-C.
+pub(super) fn compound_assign(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let Some(stmt) = trimmed.strip_suffix(';') else {
+        return line.to_owned();
+    };
+    let Some((lhs, rhs)) = stmt.split_once(" = ") else {
+        return line.to_owned();
+    };
+    if !is_ident(lhs) || stmt.contains('(') {
+        return line.to_owned();
+    }
+    const OPS: [&str; 7] = [" + ", " - ", " << ", " >> ", " & ", " | ", " ^ "];
+    for op in OPS {
+        let Some(rest) = rhs.strip_prefix(lhs).and_then(|r| r.strip_prefix(op)) else {
+            continue;
+        };
+        if !primary(rest) {
+            return line.to_owned();
+        }
+        let pad = line.len() - trimmed.len();
+        let sym = op.trim();
+        return format!("{}{lhs} {sym}= {rest};", " ".repeat(pad));
+    }
+    line.to_owned()
+}
+
+/// A name or an integer literal, the only right-hand side a compound
+/// assignment may take without changing the order of operations.
+///
+/// # Arguments
+///
+/// * `text` - The text after `name op`.
+fn primary(text: &str) -> bool {
+    if is_ident(text) {
+        return true;
+    }
+    if let Some(hex) = text.strip_prefix("0x") {
+        return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
+}
+
 /// A value used when it is set and a fallback otherwise, `heapBuffer ?
 /// heapBuffer : localBuffer`, is one load and one test in the code, and
 /// spelling it twice doubles what a reader has to compare. Only a value
@@ -342,4 +396,457 @@ pub(super) fn pick_path<'a>(
         return None;
     };
     Some(only.0)
+}
+
+/// Writes a pointer compared with zero as `nullptr`.
+///
+/// An integer compared with zero stays `0`, and so does `return 0`, a
+/// cast to an integer, and a load of an integer. A name declared as a
+/// pointer, `this`, or a load whose cast type is itself a pointer
+/// (`*(uint8_t**)p`) takes `nullptr`. `NULL` is a call argument, not
+/// this spelling. An enumerator the header already named stays that
+/// name: this runs after [`spell_own_enum`].
+///
+/// # Arguments
+///
+/// * `text` - A decompilation, types and enumerator names already applied.
+pub(super) fn spell_nullptr(text: &str) -> String {
+    let names = pointer_names(text);
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if line.trim_start().starts_with("//") {
+            out.push_str(line);
+        } else {
+            out.push_str(&rewrite_nullptr(line, &names));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Names the text declares as pointers: a signature parameter whose type
+/// has a `*`, including `this`, and a local declaration with a star.
+///
+/// # Arguments
+///
+/// * `text` - The function.
+fn pointer_names(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(sig) = trimmed.strip_prefix("// signature: ") {
+            out.extend(signature_pointers(sig));
+            continue;
+        }
+        let Some((ty, items)) = vars::declaration(line) else {
+            continue;
+        };
+        let typed = ty.trim_end().ends_with('*');
+        for (stars, name) in items {
+            if typed || !stars.is_empty() {
+                out.insert(name.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// The pointer parameters of one signature.
+///
+/// `uint32_t*a1` has no space between the type and the name. A parameter
+/// whose type contains `(` is left out: a function-pointer type is not
+/// one name this pass can see.
+///
+/// # Arguments
+///
+/// * `sig` - The text after `// signature: `.
+fn signature_pointers(sig: &str) -> Vec<String> {
+    let Some(open) = sig.find('(') else {
+        return Vec::new();
+    };
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, c) in sig[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return Vec::new();
+    };
+    split_params(&sig[open + 1..end])
+        .into_iter()
+        .filter_map(|param| {
+            let param = param.trim();
+            if param.is_empty() || param.contains('(') {
+                return None;
+            }
+            let name = trailing_ident(param)?;
+            let ty = param[..param.len() - name.len()].trim();
+            (ty.contains('*') || name == "this").then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Splits a parameter list on commas that are not inside `<` or `(`.
+///
+/// # Arguments
+///
+/// * `params` - The text between the signature's parentheses.
+fn split_params(params: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, c) in params.char_indices() {
+        match c {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&params[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&params[start..]);
+    out
+}
+
+/// The identifier a text ends with, when it ends with one.
+///
+/// # Arguments
+///
+/// * `text` - A parameter or the text before a compare.
+fn trailing_ident(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && is_ident_char(bytes[i - 1] as char) {
+        i -= 1;
+    }
+    let word = text.get(i..)?;
+    word.as_bytes()
+        .first()
+        .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+        .then_some(word)
+}
+
+/// Replaces pointer zero tests on one line, leaving strings and comments.
+///
+/// # Arguments
+///
+/// * `line` - One line of pseudo-C.
+/// * `names` - Pointer names declared in the function.
+fn rewrite_nullptr(line: &str, names: &BTreeSet<String>) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    let mut quote = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if quote {
+            out.push(c as char);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            quote = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            out.push_str(line.get(i..).unwrap_or(""));
+            break;
+        }
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let rest = line.get(i + 2..).unwrap_or("");
+            let Some(end) = rest.find("*/") else {
+                out.push_str(line.get(i..).unwrap_or(""));
+                break;
+            };
+            let stop = i + 2 + end + 2;
+            out.push_str(line.get(i..stop).unwrap_or(""));
+            i = stop;
+            continue;
+        }
+        if let Some(span) = null_compare(line, i, names) {
+            out.push_str("nullptr");
+            i = span;
+            continue;
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    out
+}
+
+/// When `at` is the `0` of a pointer's `== 0` or `!= 0`, the index just
+/// past that `0`.
+///
+/// The `0` is replaced. The operator stays where it is, on either side.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - Index of a candidate `0`.
+/// * `names` - Pointer names.
+fn null_compare(line: &str, at: usize, names: &BTreeSet<String>) -> Option<usize> {
+    let bytes = line.as_bytes();
+    if bytes.get(at) != Some(&b'0') {
+        return None;
+    }
+    if at > 0 && is_ident_char(bytes[at - 1] as char) {
+        return None;
+    }
+    if bytes.get(at + 1).is_some_and(|c| is_ident_char(*c as char)) {
+        return None;
+    }
+    let before = line.get(..at)?;
+    let after = line.get(at + 1..)?;
+    if zero_on_the_right(before, names) || zero_on_the_left(before, after, names) {
+        return Some(at + 1);
+    }
+    None
+}
+
+/// Tells whether `before` ends with `operand ==` or `operand !=` and that
+/// operand is a pointer.
+///
+/// # Arguments
+///
+/// * `before` - The line up to the `0`.
+/// * `names` - Pointer names.
+fn zero_on_the_right(before: &str, names: &BTreeSet<String>) -> bool {
+    let trimmed = before.trim_end();
+    let Some(head) = trimmed
+        .strip_suffix("==")
+        .or_else(|| trimmed.strip_suffix("!="))
+    else {
+        return false;
+    };
+    trailing_operand(head).is_some_and(|operand| operand_is_pointer(operand, names))
+}
+
+/// Tells whether `after` begins with `== operand` or `!= operand` and that
+/// operand is a pointer, and the `0` itself is the whole left side.
+///
+/// # Arguments
+///
+/// * `before` - The line up to the `0`.
+/// * `after` - The line after the `0`.
+/// * `names` - Pointer names.
+fn zero_on_the_left(before: &str, after: &str, names: &BTreeSet<String>) -> bool {
+    if !operand_is_whole(before) {
+        return false;
+    }
+    let rest = after.trim_start();
+    let Some(rel) = rest.strip_prefix("==").or_else(|| rest.strip_prefix("!=")) else {
+        return false;
+    };
+    let right = rel.trim_start();
+    leading_operand(right).is_some_and(|operand| operand_is_pointer(operand, names))
+}
+
+/// The operand that `text` ends with, when a boundary stands before it.
+///
+/// # Arguments
+///
+/// * `text` - The line up to `==` or `!=`.
+fn trailing_operand(text: &str) -> Option<&str> {
+    let t = text.trim_end();
+    if let Some(name) = trailing_ident(t) {
+        let start = t.len() - name.len();
+        if operand_is_whole(t.get(..start).unwrap_or("")) {
+            return Some(name);
+        }
+    }
+    let mut from = 0;
+    while let Some(rel) = t.get(from..).and_then(|s| s.find("*(")) {
+        let at = from + rel;
+        if operand_is_whole(t.get(..at).unwrap_or(""))
+            && let Some(load) = leading_load(t.get(at..).unwrap_or(""))
+            && load.len() == t.len() - at
+        {
+            return t.get(at..);
+        }
+        from = at + 2;
+    }
+    None
+}
+
+/// Tells whether `left` is exactly one pointer operand.
+///
+/// A sum, a cast to an integer, and a field stay what they are: the
+/// operand has to be a declared pointer name or a load of a pointer.
+///
+/// # Arguments
+///
+/// * `left` - The text before the operator, operator excluded.
+/// * `names` - Pointer names.
+fn operand_is_pointer(left: &str, names: &BTreeSet<String>) -> bool {
+    let left = left.trim();
+    if is_ident(left) {
+        return names.contains(left);
+    }
+    leading_load(left).is_some_and(|load| load.len() == left.len())
+}
+
+/// Tells whether the `(` at the start closes on the last character.
+///
+/// # Arguments
+///
+/// * `text` - A candidate address.
+fn paren_spans(text: &str) -> bool {
+    let mut depth = 0i32;
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1 == text.len();
+                }
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The operand at the start of `text`: a name, or a load of a pointer.
+///
+/// # Arguments
+///
+/// * `text` - The text after `==` or `!=`.
+fn leading_operand(text: &str) -> Option<&str> {
+    if let Some(load) = leading_load(text) {
+        return Some(load);
+    }
+    let n = ident_len(text);
+    let name = text.get(..n)?;
+    (is_ident(name) && boundary_after(text.get(n..).unwrap_or(""))).then_some(name)
+}
+
+/// A `*(type*)address` at the start of `text` whose type is a pointer.
+///
+/// # Arguments
+///
+/// * `text` - A candidate load.
+fn leading_load(text: &str) -> Option<&str> {
+    if !text.starts_with("*(") {
+        return None;
+    }
+    let rest = text.get(2..)?;
+    let close = rest.find("*)")?;
+    let ty = rest.get(..close)?.trim();
+    if !ty.ends_with('*') || ty.contains('(') {
+        return None;
+    }
+    let after = rest.get(close + 2..)?;
+    let addr_len = if after.starts_with('(') {
+        take_paren(after)?.len()
+    } else {
+        let n = ident_len(after);
+        let name = after.get(..n)?;
+        if !is_ident(name) {
+            return None;
+        }
+        n
+    };
+    text.get(..2 + close + 2 + addr_len)
+}
+
+/// How many bytes of identifier `text` starts with.
+///
+/// # Arguments
+///
+/// * `text` - The text after an operator.
+fn ident_len(text: &str) -> usize {
+    text.chars()
+        .take_while(|c| is_ident_char(*c))
+        .map(char::len_utf8)
+        .sum()
+}
+
+/// A parenthesized span at the start of `text`.
+///
+/// # Arguments
+///
+/// * `text` - Text starting with `(`.
+fn take_paren(text: &str) -> Option<&str> {
+    if !paren_spans(text) {
+        let mut depth = 0i32;
+        for (i, c) in text.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return text.get(..=i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    Some(text)
+}
+
+/// Tells whether what follows an operand does not continue it.
+///
+/// `->`, `.` and `::` are the same value's field or scope, not a new
+/// operand, so `0 == a1->head` is the field.
+///
+/// # Arguments
+///
+/// * `after` - The text after a candidate operand.
+fn boundary_after(after: &str) -> bool {
+    let after = after.trim_start();
+    !(after.starts_with("->")
+        || after.starts_with('.')
+        || after.starts_with("::")
+        || after.starts_with(|c: char| is_ident_char(c)))
+}
+
+/// Tells whether `text` ends at an operand boundary.
+///
+/// # Arguments
+///
+/// * `text` - The line up to a candidate operand.
+fn operand_is_whole(text: &str) -> bool {
+    let t = text.trim_end();
+    if t.is_empty() {
+        return true;
+    }
+    if t.ends_with(['(', ',', ';', '{', '?', ':']) {
+        return true;
+    }
+    if t.ends_with("&&") || t.ends_with("||") {
+        return true;
+    }
+    if t.ends_with('=') && !t.ends_with("==") && !t.ends_with("<=") && !t.ends_with(">=") {
+        let compound = ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="];
+        return !compound.iter().any(|op| t.ends_with(op));
+    }
+    trailing_ident(t).is_some_and(|w| matches!(w, "return" | "if" | "while" | "for" | "case"))
 }

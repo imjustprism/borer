@@ -228,7 +228,7 @@ fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
 /// * `lines` - The body lines.
 /// * `k` - The opening line.
 /// * `pad` - Its indentation.
-fn closing(lines: &[String], k: usize, pad: usize) -> Option<usize> {
+pub(super) fn closing(lines: &[String], k: usize, pad: usize) -> Option<usize> {
     (k + 1..lines.len())
         .find(|&j| {
             lines

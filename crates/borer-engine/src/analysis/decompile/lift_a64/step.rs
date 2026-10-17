@@ -12,12 +12,15 @@
 //! divide, a rotate, an extension) cuts or sign-extends its operand first,
 //! and a compare's flags carry their width.
 
-use super::super::expr::{Expr, Flags, Op, Ty, UnOp, fold, mask, sign_extend, ternary, unary};
+use super::super::expr::{
+    Cc, Cond, Expr, Flags, Op, Ty, UnOp, fold, mask, sign_extend, ternary, unary,
+};
 use super::flags::{self, holds, next_reader};
 use super::float::{packed_name, vreg};
 use super::{Lift, low, low64, vector, width8};
 use crate::emulate::a64::{FMOV_IMM, SYSREG_NZCV, SYSREG_TPIDR_EL0, expand_imm, vfp_expand};
 use crate::isa::a64::{self, Insn, Mnemonic, Opnd, Reg};
+use crate::isa::x86::ConditionCode;
 use crate::num::lo8;
 
 /// Bits 28 to 31, the only bits an `msr` of `NZCV` writes.
@@ -206,8 +209,8 @@ impl Lift<'_, '_> {
             a64::Op::Adr | a64::Op::Adrp => self.address_of(i),
             a64::Op::Nop | a64::Op::Bti | a64::Op::Pac => Some(()),
             a64::Op::Other => self.compute(i, later),
-            a64::Op::Syscall
-            | a64::Op::Sve
+            a64::Op::Syscall => self.supervisor(i),
+            a64::Op::Sve
             | a64::Op::Sme
             | a64::Op::B
             | a64::Op::BCond(_)
@@ -314,10 +317,10 @@ impl Lift<'_, '_> {
             }),
             Mnemonic::Clz => self.unary_op(i, |x, w| Expr::Un(UnOp::Lzcnt, Box::new(cast(x, w)))),
             Mnemonic::Rev => self.unary_op(i, |x, w| Expr::Un(UnOp::Bswap, Box::new(cast(x, w)))),
-            Mnemonic::Cls => self.unary_op(i, |x, w| call("__cls", x, w)),
-            Mnemonic::Rbit => self.unary_op(i, |x, w| call("__rbit", x, w)),
-            Mnemonic::Rev16 => self.unary_op(i, |x, w| call("__rev16", x, w)),
-            Mnemonic::Rev32 => self.unary_op(i, |x, w| call("__rev32", x, w)),
+            Mnemonic::Cls => self.unary_op(i, |x, w| call("cls", x, w)),
+            Mnemonic::Rbit => self.unary_op(i, |x, w| call("rbit", x, w)),
+            Mnemonic::Rev16 => self.unary_op(i, |x, w| call("rev16", x, w)),
+            Mnemonic::Rev32 => self.unary_op(i, |x, w| call("rev32", x, w)),
             Mnemonic::Csel => self.select(i, |m| m),
             Mnemonic::Csinc => self.select(i, |m| fold(Op::Add, m, Expr::Const(1), 64)),
             Mnemonic::Csinv => self.select(i, |m| unary(UnOp::Not, m, 64)),
@@ -345,8 +348,8 @@ impl Lift<'_, '_> {
             Mnemonic::Fcsel => self.float_select(i),
             Mnemonic::Scvtf => self.int_to_float(i, true),
             Mnemonic::Ucvtf => self.int_to_float(i, false),
-            Mnemonic::Fcvtzs => self.float_to_int(i, "__fcvtzs"),
-            Mnemonic::Fcvtzu => self.float_to_int(i, "__fcvtzu"),
+            Mnemonic::Fcvtzs => self.float_to_int(i, true),
+            Mnemonic::Fcvtzu => self.float_to_int(i, false),
             Mnemonic::Fcvt => self.float_convert(i),
             Mnemonic::Dup => self.dup(i),
             Mnemonic::Movi => self.movi(i, false),
@@ -365,6 +368,41 @@ impl Lift<'_, '_> {
             Mnemonic::Mrs | Mnemonic::Msr => self.system(i),
             Mnemonic::Svc | Mnemonic::Other => None,
         }
+    }
+
+    /// `svc #0`, as the emulator's `syscall` runs it.
+    ///
+    /// An exit number (`93` or `94`) ends the run. `write` (`64`) returns
+    /// the count in `x2`. Every other number returns zero in `x0`. `hvc`,
+    /// `smc`, and any other immediate stay unmodeled.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The supervisor call.
+    fn supervisor(&mut self, i: &Insn) -> Option<()> {
+        if i.mnemonic != Mnemonic::Svc {
+            return None;
+        }
+        let Opnd::Imm(0) = i.operands[0] else {
+            return None;
+        };
+        let nr = self.read(Reg::X(8));
+        let count = self.read(Reg::X(2));
+        let is_write = Cond {
+            cc: Cc(ConditionCode::e),
+            flags: Flags::Cmp(nr.clone(), Expr::Const(64), 64),
+        };
+        if self.ex.emit {
+            let names = self.ex.names();
+            let shown = nr.render(&names);
+            self.ex
+                .lines
+                .push(format!("if ({shown} == 93 || {shown} == 94) {{"));
+            self.ex.lines.push("  return;".to_owned());
+            self.ex.lines.push("}".to_owned());
+        }
+        self.write(Reg::X(0), 64, ternary(is_write, count, Expr::Const(0)));
+        Some(())
     }
 
     /// `mrs` and `msr` of the thread pointer and the flags, the system
@@ -738,7 +776,13 @@ impl Lift<'_, '_> {
         let v = match i.operands[1] {
             Opnd::Reg { reg, bits: from } => {
                 let v = self.reg_at(reg, from);
-                if v.is_float() {
+                let lane = from.min(bits);
+                let other = super::mem::float_width(&v).is_some_and(|w| u16::from(w) != lane);
+                if v.is_float()
+                    && (matches!(dst, Reg::X(_) | Reg::Sp | Reg::Zr) || other || from != bits)
+                {
+                    super::mem::as_integer_bits(v, lane)
+                } else if v.is_float() {
                     v
                 } else if from == 64 {
                     low64(v)
@@ -747,7 +791,18 @@ impl Lift<'_, '_> {
                 }
             }
             Opnd::Other if matches!(dst, Reg::V(_)) && i.word & FMOV_IMM.0 == FMOV_IMM.1 => {
-                Expr::Const(vfp_expand((i.word >> 13) & 0xff, bits)?)
+                let expanded = vfp_expand((i.word >> 13) & 0xff, bits)?;
+                match bits {
+                    32 => {
+                        self.note_lane(dst, Ty::F32);
+                        Expr::FConst(expanded, Ty::F32)
+                    }
+                    64 => {
+                        self.note_lane(dst, Ty::F64);
+                        Expr::FConst(expanded, Ty::F64)
+                    }
+                    _ => Expr::Const(expanded),
+                }
             }
             Opnd::Other
             | Opnd::None

@@ -860,6 +860,332 @@ fn the_lifter_agrees_with_the_emulator_after_an_xadd() {
     }
 }
 
+/// `cqo` then `xor`/`sub`, and `cqo` then `add`/`xor`, are `abs`. A
+/// 32-bit `cdq` of the same shape stays arithmetic: that sign splat is
+/// 31 bits, not the sign of a 64-bit value.
+#[test]
+fn a_sign_splat_subtracted_back_is_abs() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    let cases: &[&[u8]] = &[
+        &[
+            0x48, 0x89, 0xc8, 0x48, 0x99, 0x48, 0x31, 0xd0, 0x48, 0x29, 0xd0, 0xc3,
+        ],
+        &[
+            0x48, 0x89, 0xc8, 0x48, 0x99, 0x48, 0x01, 0xd0, 0x48, 0x31, 0xd0, 0xc3,
+        ],
+    ];
+    for code in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(text.contains("return abs(a1);"), "{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+            assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+            let regs = v.facts.get(&Fact::Register).copied().unwrap_or_default();
+            assert_eq!(regs.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+        }
+    }
+    let text = decompiled(
+        &program64(&[0x89, 0xc8, 0x99, 0x31, 0xd0, 0x29, 0xd0, 0xc3]),
+        0x1_4000_1000,
+    );
+    assert!(!text.contains("abs("), "{text}");
+    assert!(text.contains('^'), "{text}");
+}
+
+/// `shld` of a register with itself is a rotate. Two registers stay the
+/// shifts, and so does an arithmetic shift written as `sar`.
+#[test]
+fn a_complementary_shift_of_one_value_is_a_rotate() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    let cases: &[(&[u8], &str)] = &[
+        (
+            &[0x48, 0x89, 0xc8, 0x48, 0x0f, 0xa4, 0xc0, 0x08, 0xc3],
+            "return rotl64(a1, 8);",
+        ),
+        (
+            &[0x48, 0x89, 0xc8, 0x48, 0x0f, 0xac, 0xc0, 0x08, 0xc3],
+            "return rotr64(a1, 8);",
+        ),
+        (
+            &[0x89, 0xc8, 0x0f, 0xa4, 0xc0, 0x08, 0xc3],
+            "return rotl32(a1, 8);",
+        ),
+    ];
+    for (code, want) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(text.contains(want), "{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+            assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+            let regs = v.facts.get(&Fact::Register).copied().unwrap_or_default();
+            assert_eq!(regs.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+        }
+    }
+    let text = decompiled(
+        &program64(&[0x48, 0x89, 0xc8, 0x48, 0x0f, 0xa4, 0xd0, 0x08, 0xc3]),
+        0x1_4000_1000,
+    );
+    assert!(
+        text.contains("<<") && text.contains(">>") && text.contains(" | "),
+        "{text}"
+    );
+    assert!(!text.contains("rotl") && !text.contains("rotr"), "{text}");
+}
+
+/// `shld` of one register by `cl` is a rotate. The count is masked to the
+/// width, which a rotate already reduces, so the mask is not printed. Two
+/// registers, and a 16-bit `shld`, stay the shifts. There is no 8-bit
+/// `shld`: the same opcode without a `66` prefix is a 32-bit rotate.
+#[test]
+fn a_variable_count_of_one_register_is_a_rotate() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    let cases: &[(&[u8], &str)] = &[
+        (
+            &[0x48, 0x89, 0xd0, 0x48, 0x0f, 0xa5, 0xc0, 0xc3],
+            "return rotl64(a2, a1);",
+        ),
+        (
+            &[0x48, 0x89, 0xd0, 0x48, 0x0f, 0xad, 0xc0, 0xc3],
+            "return rotr64(a2, a1);",
+        ),
+        (
+            &[0x89, 0xd0, 0x0f, 0xa5, 0xc0, 0xc3],
+            "return rotl32(a2, a1);",
+        ),
+    ];
+    for (code, want) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(text.contains(want), "{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+            assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+            let regs = v.facts.get(&Fact::Register).copied().unwrap_or_default();
+            assert_eq!(regs.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+        }
+    }
+    for code in [
+        &[0x48, 0x89, 0xc8, 0x48, 0x0f, 0xa5, 0xd0, 0xc3][..],
+        &[0x66, 0x89, 0xc8, 0x66, 0x0f, 0xa5, 0xc0, 0xc3],
+    ] {
+        let text = decompiled(&program64(code), 0x1_4000_1000);
+        assert!(!text.contains("rotl") && !text.contains("rotr"), "{text}");
+    }
+}
+
+/// `cmovb` of zero over an unsigned subtract clamps at zero. A 32-bit
+/// subtract, a signed `cmovl`, and a select of the other operand do not.
+#[test]
+fn an_unsigned_subtract_that_clamps_is_sub_sat() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    let cases: &[(&[u8], &str)] = &[
+        (
+            &[
+                0x4d, 0x31, 0xc0, 0x48, 0x89, 0xc8, 0x48, 0x29, 0xd0, 0x49, 0x0f, 0x42, 0xc0, 0xc3,
+            ],
+            "return sub_sat(a1, a2);",
+        ),
+        (
+            &[
+                0x4d, 0x31, 0xc0, 0x48, 0x89, 0xc8, 0x48, 0x29, 0xd0, 0x4c, 0x0f, 0x43, 0xc0, 0x4c,
+                0x89, 0xc0, 0xc3,
+            ],
+            "return sub_sat(a1, a2);",
+        ),
+    ];
+    for (code, want) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(text.contains(want), "{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+            assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+            let regs = v.facts.get(&Fact::Register).copied().unwrap_or_default();
+            assert_eq!(regs.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+        }
+    }
+    for code in [
+        &[
+            0x45, 0x31, 0xc0, 0x89, 0xc8, 0x29, 0xd0, 0x41, 0x0f, 0x42, 0xc0, 0xc3,
+        ][..],
+        &[
+            0x4d, 0x31, 0xc0, 0x48, 0x89, 0xc8, 0x48, 0x29, 0xd0, 0x49, 0x0f, 0x4c, 0xc0, 0xc3,
+        ],
+        &[
+            0x4d, 0x31, 0xc0, 0x48, 0x89, 0xc8, 0x48, 0x29, 0xd0, 0x48, 0x0f, 0x42, 0xc2, 0xc3,
+        ],
+    ] {
+        let text = decompiled(&program64(code), 0x1_4000_1000);
+        assert!(!text.contains("sub_sat"), "{text}");
+        assert!(text.contains('?'), "{text}");
+    }
+}
+
+/// `(x & y) + ((x ^ y) >> 1)` is the unsigned average, including when the
+/// sum would wrap. A 32-bit copy of the same instructions is not the
+/// average of the zero-extended values.
+#[test]
+fn an_unsigned_average_is_midpoint() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    let code: &[u8] = &[
+        0x48, 0x89, 0xc8, 0x48, 0x21, 0xd0, 0x49, 0x89, 0xc8, 0x49, 0x31, 0xd0, 0x49, 0xd1, 0xe8,
+        0x4c, 0x01, 0xc0, 0xc3,
+    ];
+    let p = program64(code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("return midpoint(a1, a2);"), "{text}");
+    let a = Analysis::compute(&p);
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[0x1_4000_1000], seed);
+        assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+        assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+        let regs = v.facts.get(&Fact::Register).copied().unwrap_or_default();
+        assert_eq!(regs.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+    }
+    let text = decompiled(
+        &program64(&[
+            0x89, 0xc8, 0x21, 0xd0, 0x41, 0x89, 0xc8, 0x41, 0x31, 0xd0, 0x41, 0xd1, 0xe8, 0x44,
+            0x01, 0xc0, 0xc3,
+        ]),
+        0x1_4000_1000,
+    );
+    assert!(!text.contains("midpoint"), "{text}");
+    assert!(text.contains(">>"), "{text}");
+}
+
+/// `(x + 15) & ~15` rounds up to 16. A bare mask, and the same add in 32
+/// bits, do not: the 32-bit mask clears the top half of the register.
+#[test]
+fn an_added_power_of_two_mask_is_align_up() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    let code: &[u8] = &[
+        0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x0f, 0x48, 0x83, 0xe0, 0xf0, 0xc3,
+    ];
+    let p = program64(code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("return align_up(a1, 0x10);"), "{text}");
+    let a = Analysis::compute(&p);
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[0x1_4000_1000], seed);
+        assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+        assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+        let regs = v.facts.get(&Fact::Register).copied().unwrap_or_default();
+        assert_eq!(regs.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+    }
+    for code in [
+        &[0x48, 0x89, 0xc8, 0x48, 0x83, 0xe0, 0xf0, 0xc3][..],
+        &[0x89, 0xc8, 0x83, 0xc0, 0x0f, 0x83, 0xe0, 0xf0, 0xc3],
+    ] {
+        let text = decompiled(&program64(code), 0x1_4000_1000);
+        assert!(!text.contains("align_up"), "{text}");
+        assert!(text.contains('&'), "{text}");
+    }
+}
+
+/// `neg` then `cmovs` of the original register is `abs`. `cmovns` is
+/// `-abs`. A 32-bit `neg` and a select of a different register stay the
+/// ternary: a negative 32-bit lane is not negative as a 64-bit value.
+#[test]
+fn a_full_width_negation_select_is_abs() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    let cases: &[(&[u8], &str)] = &[
+        (
+            &[
+                0x48, 0x89, 0xc8, 0x48, 0xf7, 0xd8, 0x48, 0x0f, 0x48, 0xc1, 0xc3,
+            ],
+            "return abs(a1);",
+        ),
+        (
+            &[
+                0x48, 0x89, 0xc8, 0x48, 0xf7, 0xd8, 0x48, 0x0f, 0x49, 0xc1, 0xc3,
+            ],
+            "return -abs(a1);",
+        ),
+    ];
+    for (code, want) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(text.contains(want), "{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+            assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+            let regs = v.facts.get(&Fact::Register).copied().unwrap_or_default();
+            assert_eq!(regs.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+        }
+    }
+    for code in [
+        &[0x89, 0xc8, 0xf7, 0xd8, 0x0f, 0x48, 0xc1, 0xc3][..],
+        &[
+            0x48, 0x89, 0xc8, 0x48, 0xf7, 0xd8, 0x48, 0x0f, 0x48, 0xc2, 0xc3,
+        ],
+    ] {
+        let text = decompiled(&program64(code), 0x1_4000_1000);
+        assert!(text.contains('?'), "{text}");
+        assert!(!text.contains("abs("), "{text}");
+    }
+}
+
+/// A full-width compare that keeps one of its own operands is `min` or
+/// `max`. A 32-bit compare, a third register, and an equality test stay
+/// the ternary: a narrower signed minimum is not the minimum of the
+/// zero-extended values.
+#[test]
+fn a_full_width_compare_select_is_min_or_max() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    let cases: &[(&[u8], &str)] = &[
+        (
+            &[
+                0x48, 0x89, 0xc8, 0x48, 0x39, 0xd1, 0x48, 0x0f, 0x47, 0xc2, 0xc3,
+            ],
+            "return umin(a1, a2);",
+        ),
+        (
+            &[
+                0x48, 0x89, 0xc8, 0x48, 0x39, 0xd1, 0x48, 0x0f, 0x4f, 0xc2, 0xc3,
+            ],
+            "return min(a1, a2);",
+        ),
+    ];
+    for (code, want) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(text.contains(want), "{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+            assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+            let regs = v.facts.get(&Fact::Register).copied().unwrap_or_default();
+            assert_eq!(regs.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+        }
+    }
+    for code in [
+        &[0x89, 0xc8, 0x39, 0xd1, 0x0f, 0x47, 0xc2, 0xc3][..],
+        &[
+            0x48, 0x89, 0xc8, 0x48, 0x39, 0xd1, 0x49, 0x0f, 0x47, 0xc0, 0xc3,
+        ],
+        &[
+            0x48, 0x89, 0xc8, 0x48, 0x39, 0xd1, 0x48, 0x0f, 0x45, 0xc2, 0xc3,
+        ],
+    ] {
+        let text = decompiled(&program64(code), 0x1_4000_1000);
+        assert!(text.contains('?'), "{text}");
+        assert!(!text.contains("min(") && !text.contains("max("), "{text}");
+    }
+}
+
 /// A 64-bit signed division reads as the division; telling what rdx held
 /// ahead of it once shifted a lane mask out of a 64-bit word.
 #[test]
@@ -1694,15 +2020,20 @@ fn const_survives_join() {
     );
 }
 
-/// `F` becomes a `for` loop; `cmp ecx,5; jge` is a signed 32-bit compare, so
-/// the cast is the honest rendering on a `uint64_t` variable. No temporaries
-/// and no back-edge goto survive.
+/// `F` becomes a `for` loop. `cmp ecx,5; jge` is a signed 32-bit compare and
+/// both the counter and the sum are 32-bit writes, so the counter is an
+/// `int32_t` and the compare needs no cast. No temporaries and no back-edge
+/// goto survive.
 #[test]
 fn while_loop_structured() {
     let out = dc(0x1100);
     assert!(
-        out.contains("for (var2 = 0; (int32_t)var2 < 5; var2 += 1)"),
+        out.contains("for (var2 = 0; var2 < 5; var2 += 1)"),
         "no for sugar:\n{out}"
+    );
+    assert!(
+        out.contains("int32_t var2;"),
+        "counter not signed 32-bit:\n{out}"
     );
     assert!(out.contains("var1 += var2;"), "loop body missing:\n{out}");
     assert!(!out.contains("tmp_"), "spurious temporaries:\n{out}");
@@ -1711,6 +2042,37 @@ fn while_loop_structured() {
         "back-edge goto survived structuring:\n{out}"
     );
     assert!(out.contains("return var1;"), "return missing:\n{out}");
+}
+
+/// A counted loop whose step is a constant other than one is a `for`.
+///
+/// `xor ecx,ecx; L: cmp ecx,10; jge X; add ecx,2; jmp L; X: mov eax,ecx;
+/// ret`. A step that names another value is not a compound update:
+/// `cmp ecx,edx; jge X; add ecx,edx; jmp` back.
+#[test]
+fn a_constant_step_other_than_one_is_a_for() {
+    let code = [
+        0x31, 0xc9, // ASM: xor ecx, ecx
+        0x83, 0xf9, 0x0a, // ASM: cmp ecx, 10
+        0x7d, 0x05, // ASM: jge +5
+        0x83, 0xc1, 0x02, // ASM: add ecx, 2
+        0xeb, 0xf6, // ASM: jmp -10
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("for (") && text.contains("+= 2"), "{text}");
+    let varied = [
+        0x39, 0xd1, // ASM: cmp ecx, edx
+        0x7d, 0x04, // ASM: jge +4
+        0x01, 0xd1, // ASM: add ecx, edx
+        0xeb, 0xf8, // ASM: jmp -8
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&varied), 0x1_4000_1000);
+    assert!(text.contains("+ a2"), "{text}");
+    assert!(!text.contains("+="), "{text}");
 }
 
 /// Decompiling the same function twice yields byte-identical text.
@@ -2354,12 +2716,13 @@ fn byte_writes_take_only_the_lane_that_is_read() {
 /// returns that lane.
 ///
 /// `RL` gets a `uint8_t` header and returns `1` or `0` with no upper-bit
-/// merge, although its shared `ret` block writes nothing.
+/// merge, although its shared `ret` block writes nothing. The argument is
+/// the 32-bit register `test ecx, ecx` reads.
 #[test]
 fn byte_returns_are_the_low_lane() {
     let rl = dc(0x16c0);
     assert!(
-        rl.contains("// signature: uint8_t sub_16c0(uint64_t a1)"),
+        rl.contains("// signature: uint8_t sub_16c0(uint32_t a1)"),
         "{rl}"
     );
     assert!(rl.contains("1;") && rl.contains("0;"), "{rl}");
@@ -3472,6 +3835,131 @@ fn a_decompilation_reads_only_the_tables_it_calls() {
     assert_eq!(a.derived.held("enum_table"), 1);
 }
 
+/// A recovered table's members name the cases that test them.
+///
+/// `EN2` switches on `a1`. The arms print `case Normal:` through
+/// `case Down:`. The default returns a null pointer, `return 0`, which is
+/// not one of those cases, so it stays a number. The header keeps the
+/// numbers the table was read from.
+#[test]
+fn a_recovered_enum_names_its_cases() {
+    let out = dc(0x4830);
+    assert!(
+        out.contains("// enum values of a1: 4 values, Normal = 0, Pressed = 1, Over = 2, Down = 3"),
+        "{out}"
+    );
+    assert!(out.contains("case Normal:"), "{out}");
+    assert!(out.contains("case Pressed:"), "{out}");
+    assert!(out.contains("case Over:"), "{out}");
+    assert!(out.contains("case Down:"), "{out}");
+    assert!(out.contains("return \"Normal\";"), "{out}");
+    assert!(out.contains("default: {\n  return 0;\n}"), "{out}");
+    assert!(!out.contains("case 0:"), "{out}");
+    assert!(!out.contains("case 1:"), "{out}");
+    assert!(!out.contains("case 2:"), "{out}");
+    assert!(!out.contains("case 3:"), "{out}");
+}
+
+/// A return beside the fall-through is the arm, and the rest is not an `else`.
+///
+/// `jz` to `mov eax, ecx; add eax, 2; ret`, with `mov eax, 1; ret` as the
+/// other side: the zero arm is `return 2` and the other return follows it.
+/// Two `ret`s, `mov eax, 1` and `mov eax, 2`, print the same way. Neither
+/// wraps the second return in `else`.
+#[test]
+fn a_return_beside_a_fall_through_is_not_an_else() {
+    let fall = &[
+        0x85, 0xc9, // ASM: test ecx,ecx
+        0x74, 0x06, // ASM: jz rest
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0x83, 0xc0, 0x02, // ASM: add eax,2
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(fall), 0x1_4000_1000);
+    assert!(
+        text.contains("if (a1 == 0) {\n  return 2;\n}\nreturn 1;"),
+        "{text}"
+    );
+    assert!(!text.contains("else"), "{text}");
+    let both = &[
+        0x85, 0xc9, // ASM: test ecx,ecx
+        0x74, 0x06, // ASM: jz other
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: mov eax,2
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(both), 0x1_4000_1000);
+    assert!(
+        text.contains("if (a1 == 0) {\n  return 2;\n}\nreturn 1;"),
+        "{text}"
+    );
+    assert!(!text.contains("else"), "{text}");
+}
+
+/// A pointer compared with zero is `nullptr`, and an `int32_t` in the same
+/// function stays `0`.
+///
+/// The signature already names the pointer and the integer. The body also
+/// loads through `rcx` and tests `edx`, so the decompiler's own types take
+/// the same spelling: the pointer is `nullptr` and the integer is `0`.
+#[test]
+fn a_pointer_and_an_int_keep_their_own_zero() {
+    let raw = concat!(
+        "// signature: int32_t f(uint32_t*a1, int32_t a2)\n",
+        "if (a1 == 0) {\n",
+        "  return 0;\n",
+        "}\n",
+        "if (a2 == 0) {\n",
+        "  return 1;\n",
+        "}\n",
+        "return *(uint32_t*)a1;\n",
+    );
+    let out = polish(raw, 64, &borer_engine::pack::Packs::default());
+    assert!(out.contains("if (a1 == nullptr)"), "{out}");
+    assert!(out.contains("if (a2 == 0)"), "{out}");
+    assert!(out.contains("return 0;"), "{out}");
+    assert!(!out.contains("a2 == nullptr"), "{out}");
+    assert!(!out.contains("NULL"), "{out}");
+    let code = &[
+        0x48, 0x85, 0xc9, // ASM: test rcx, rcx
+        0x74, 0x09, // ASM: jz zero
+        0x85, 0xd2, // ASM: test edx, edx
+        0x74, 0x05, // ASM: jz zero
+        0x8b, 0x01, // ASM: mov eax, [rcx]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(code), 0x1_4000_1000);
+    assert!(text.contains("uint32_t *a1, uint32_t a2"), "{text}");
+    assert!(text.contains("if (a1 == nullptr || a2 == 0)"), "{text}");
+    assert!(!text.contains("NULL"), "{text}");
+}
+
+/// `((T*)base)[i]` is `base[i]` when `base` is already a `T *`.
+///
+/// A `uint8_t *` read as `uint32_t`, a `void *`, a `uint64_t *`, and the
+/// machine word keep the cast. `IX` is the matching pointer: `a1[a2]`.
+#[test]
+fn an_index_of_a_matching_pointer_drops_the_element_cast() {
+    let raw = concat!(
+        "// signature: uint32_t f(uint32_t *a1, uint8_t *a2, void *a3, uint64_t a4, uint64_t *a5)\n",
+        "return ((uint32_t*)a1)[a4] + ((uint32_t*)a2)[a4] + ((uint32_t*)a3)[a4] + ((uint32_t*)a4)[a4] + ((uint32_t*)a5)[a4];\n",
+    );
+    let out = polish(raw, 64, &borer_engine::pack::Packs::default());
+    assert!(out.contains("a1[a4]"), "{out}");
+    assert!(out.contains("((uint32_t*)a2)[a4]"), "{out}");
+    assert!(out.contains("((uint32_t*)a3)[a4]"), "{out}");
+    assert!(out.contains("((uint32_t*)a4)[a4]"), "{out}");
+    assert!(out.contains("((uint32_t*)a5)[a4]"), "{out}");
+    assert!(!out.contains("((uint32_t*)a1)"), "{out}");
+    let ix = dc(0x4b10);
+    assert!(ix.contains("return a1[a2];"), "{ix}");
+}
+
 /// The `else` of an `else if (v != K)` arm names `K`.
 ///
 /// `EN3`'s chain ends `else if (a1 != 4) { rdx = "Normal"; } else { rdx =
@@ -3523,12 +4011,15 @@ fn selects_through_masks_render_as_ternaries() {
 
 /// A load at `base + index * sizeof(T)` is element `index` of a `T` array.
 ///
-/// `IX` reads `[rcx + rdx * 4]` as a dword: `((uint32_t*)a1)[a2]`, not
-/// `*(uint32_t*)(a1 + a2 * 4)`.
+/// `IX` reads `[rcx + rdx * 4]` as a dword. The parameter is a `uint32_t *`,
+/// so the element cast is the declaration: `a1[a2]`, not
+/// `*(uint32_t*)(a1 + a2 * 4)` and not `((uint32_t*)a1)[a2]`.
 #[test]
 fn indexed_loads_render_as_arrays() {
     let out = dc(0x4b10);
-    assert!(out.contains("return ((uint32_t*)a1)[a2];"), "{out}");
+    assert!(out.contains("uint32_t *a1"), "{out}");
+    assert!(out.contains("return a1[a2];"), "{out}");
+    assert!(!out.contains("((uint32_t*)a1)"), "{out}");
 }
 
 /// A byte-counting loop is the `strlen` it compiles from.
@@ -3583,10 +4074,7 @@ fn carry_guarded_arithmetic_saturates() {
 #[test]
 fn ternary_indexes_drop_their_parentheses() {
     let out = dc(0x4b90);
-    assert!(
-        out.contains("return ((uint32_t*)a1)[a2 != 3 ? a2 + 1 : 0];"),
-        "{out}"
-    );
+    assert!(out.contains("return a1[a2 != 3 ? a2 + 1 : 0];"), "{out}");
 }
 
 /// A mask that clears low bits renders as the complement of those bits.
@@ -4622,12 +5110,13 @@ fn skeleton_folds_assert_helper_calls() {
 }
 
 /// The skeleton folds a guarded assert into one line: `AG`'s
-/// `if (this == 0) { ReportAssertFailure("f.IsValid()", ...); }` becomes
-/// `assert(f.IsValid());` while the full text keeps the guard.
+/// `if (this == nullptr) { ReportAssertFailure("f.IsValid()", ...); }` becomes
+/// `assert(f.IsValid());` while the full text keeps the guard. `this` is a
+/// pointer, so the zero test is `nullptr`, not `0`.
 #[test]
 fn skeleton_folds_guarded_asserts() {
     let full = dc(0x1840);
-    assert!(full.contains("if (this == 0) {"), "{full}");
+    assert!(full.contains("if (this == nullptr) {"), "{full}");
     let skel = skeleton(&full);
     assert!(skel.contains("assert(f.IsValid());"), "{skel}");
     assert!(!skel.contains("ReportAssertFailure"), "{skel}");
@@ -5214,7 +5703,9 @@ fn a_forwarder_passes_its_parameters_through() {
 /// ecx,ecx; je L; call leaf; ret; L: mov eax,r8d; ret`. Read in address
 /// order up to the first call it seemed to take one argument, while its
 /// own signature lists three; the caller, which sets four registers,
-/// passes the three the signature lists.
+/// passes the three the signature lists. `ecx` and `r8d` are 32-bit uses,
+/// so those two parameters are `uint32_t`; the unread `edx` stays
+/// `uint64_t`.
 #[test]
 fn a_call_passes_what_the_callee_signature_lists() {
     let mut code = vec![
@@ -5233,7 +5724,7 @@ fn a_call_passes_what_the_callee_signature_lists() {
     assert!(caller.contains("sub_140001040(1, 2, 3);"), "{caller}");
     let callee = decompiled(&p, 0x1_4000_1040);
     assert!(
-        callee.contains("sub_140001040(uint64_t a1, uint64_t a2, uint64_t a3)"),
+        callee.contains("sub_140001040(uint32_t a1, uint64_t a2, uint32_t a3)"),
         "{callee}"
     );
 }
@@ -5924,7 +6415,7 @@ fn a_rust_bounds_check_reads_as_its_panic_and_location() {
     let p = program64_with_data(&code, &data);
     let text = decompiled(&p, 0x1_4000_1000);
     assert!(
-        text.contains("return ((uint64_t*)a3)[a1];  /* bounds-checked */"),
+        text.contains("return a3[a1];  /* bounds-checked */"),
         "{text}"
     );
     assert!(
@@ -6018,7 +6509,7 @@ fn two_folded_checks_name_both_callees_in_one_note() {
         "{text}"
     );
     assert!(
-        text.contains("var1 = ((uint64_t*)a3)[a1];  /* bounds-checked */"),
+        text.contains("var1 = a3[a1];  /* bounds-checked */"),
         "{text}"
     );
     assert!(
@@ -6752,4 +7243,1198 @@ fn solve_stays_silent_when_the_run_cannot_distinguish() {
     let out = solve_tsv(&p, &a, &Overlay::default(), "0x140001000").expect("solves");
     assert!(out.contains("every candidate returns 0x7"), "{out}");
     assert!(!out.contains("chain:"), "{out}");
+}
+
+/// A scalar `double` operation reads a `movss` load as that load's bits,
+/// with zeros above the lane, not as the number converted to a double.
+///
+/// `cvtss2sd` still converts the number. `cvtsd2ss` of a `movss` load
+/// converts the zero-extended bits, and of a `movsd` load converts the
+/// double. `addss` of a double uses the low 32 bits as a float. A single
+/// add that kept those zeros is the same encoding when a double add reads
+/// it. `cvttsd2si` of a `movss` load truncates that encoding, and
+/// `cvttss2si` of a double truncates its low 32 bits. `comisd` compares
+/// the encoding, not the number.
+#[test]
+fn a_scalar_float_read_at_another_width_keeps_the_bits() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    // (bytes, text that must appear, text that must not)
+    let cases: &[(&[u8], &str, &str)] = &[
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf2, 0x41, 0x0f, 0x10, 0x08, // ASM: movsd xmm1,[r8]
+                0xf2, 0x0f, 0x58, 0xc1, // ASM: addsd xmm0,xmm1
+                0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            "*(double*)a2 = (double)((*(float*)a1) & 0xffffffff) + *(double*)a3;",
+            "(double)*(float*)a1",
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+                0xf3, 0x41, 0x0f, 0x11, 0x00, // ASM: movss [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            "*(float*)a3 = (float)((*(double*)a1) & 0xffffffff) + *(float*)a2;",
+            "(float)*(double*)a1 +",
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf3, 0x0f, 0x5a, 0xc0, // ASM: cvtss2sd xmm0,xmm0
+                0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            "*(double*)a2 = (double)*(float*)a1;",
+            "0xffffffff",
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x5a, 0xc0, // ASM: cvtss2sd xmm0,xmm0
+                0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            "*(double*)a2 = (double)(float)((*(double*)a1) & 0xffffffff);",
+            "(double)*(double*)",
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf2, 0x0f, 0x5a, 0xc0, // ASM: cvtsd2ss xmm0,xmm0
+                0xf3, 0x0f, 0x11, 0x02, // ASM: movss [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            "*(float*)a2 = (float)*(double*)a1;",
+            "0xffffffff",
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf2, 0x0f, 0x5a, 0xc0, // ASM: cvtsd2ss xmm0,xmm0
+                0xf3, 0x0f, 0x11, 0x02, // ASM: movss [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            "*(float*)a2 = (float)(double)((*(float*)a1) & 0xffffffff);",
+            "(float)*(float*)a1;",
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf2, 0x0f, 0x51, 0xc0, // ASM: sqrtsd xmm0,xmm0
+                0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            "*(double*)a2 = sqrt((double)((*(float*)a1) & 0xffffffff));",
+            "sqrt((double)*(float*)",
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+                0xf2, 0x41, 0x0f, 0x10, 0x08, // ASM: movsd xmm1,[r8]
+                0xf2, 0x0f, 0x58, 0xc1, // ASM: addsd xmm0,xmm1
+                0xf2, 0x41, 0x0f, 0x11, 0x01, // ASM: movsd [r9],xmm0
+                0xc3, // ASM: ret
+            ],
+            "*(double*)a4 = (double)((*(float*)a1 + *(float*)a2) & 0xffffffff) + *(double*)a3;",
+            "(double)(*(float*)a1 + *(float*)a2)",
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf2, 0x48, 0x0f, 0x2c, 0xc0, // ASM: cvttsd2si rax,xmm0
+                0xc3, // ASM: ret
+            ],
+            "return (int64_t)(double)((*(float*)a1) & 0xffffffff);",
+            "return (int64_t)*(float*)a1;",
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x2c, 0xc0, // ASM: cvttss2si eax,xmm0
+                0xc3, // ASM: ret
+            ],
+            "return (int32_t)(float)((*(double*)a1) & 0xffffffff);",
+            "return (int32_t)*(double*)a1;",
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0x66, 0x0f, 0x2f, 0x02, // ASM: comisd xmm0,[rdx]
+                0x77, 0x03, // ASM: ja taken
+                0x31, 0xc0, // ASM: xor eax,eax
+                0xc3, // ASM: ret
+                0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+                0xc3, // ASM: ret
+            ],
+            "if ((double)((*(float*)a1) & 0xffffffff) > *(double*)a2)",
+            "if (*(float*)a1 >",
+        ),
+    ];
+    for (code, want, absent) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(
+            text.contains(want),
+            "missing `{want}`\nforbidden `{absent}`\n{text}"
+        );
+        assert!(!text.contains(absent), "still has `{absent}`\n{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty(),
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.checked > 0 && r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// A `movss` or `movsd` into memory copies the lane's bytes.
+///
+/// A single stored as a double is the zero-extended encoding, not the
+/// number widened. A double stored as a single is its low 32 bits, not a
+/// rounded float. The same width stays that float. `addss` of a double
+/// keeps bits 63:32, so a later `movsd` is those bits beside the new lane.
+/// `addsd` after that single adds those bits. It does not convert the
+/// integer they form. `sqrtss` keeps the same half. `cvttsd2si` truncates
+/// that double, not the integer the bits happen to be. `cvtsd2ss` of a
+/// double rounds the number and still keeps bits 63:32. A three-operand
+/// `vmovss` takes its low lane from the second source and bits 63:32 from
+/// the first.
+#[test]
+fn a_scalar_float_store_at_another_width_keeps_the_bits() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let cases: &[(&[u8], &[&str], &[&str])] = &[
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(uint64_t*)", "*(float*)", "0xffffffff"],
+            &["*(double*)"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x11, 0x02, // ASM: movss [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(uint32_t*)", "*(double*)", "0xffffffff"],
+            &["*(float*)"],
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+                0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(uint64_t*)", "0xffffffff", "+"],
+            &["*(double*)"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+                0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(uint64_t*)", "0xffffffff00000000", "+"],
+            &["*(double*)a3 ="],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+                0xf2, 0x41, 0x0f, 0x10, 0x08, // ASM: movsd xmm1,[r8]
+                0xf2, 0x0f, 0x58, 0xc1, // ASM: addsd xmm0,xmm1
+                0xf2, 0x41, 0x0f, 0x11, 0x01, // ASM: movsd [r9],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(double*)", "0xffffffff00000000", "+"],
+            &["*(uint64_t*)", "/* asm"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x51, 0x02, // ASM: sqrtss xmm0,[rdx]
+                0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(uint64_t*)", "0xffffffff00000000", "sqrt"],
+            &["*(double*)a3 =", "/* asm"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+                0xf2, 0x48, 0x0f, 0x2c, 0xc0, // ASM: cvttsd2si rax,xmm0
+                0xc3, // ASM: ret
+            ],
+            &["return (int64_t)", "0xffffffff00000000"],
+            &["/* asm"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf2, 0x0f, 0x5a, 0xc0, // ASM: cvtsd2ss xmm0,xmm0
+                0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(uint64_t*)", "0xffffffff00000000", "(float)"],
+            &["*(double*)a2 =", "/* asm"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x09, // ASM: movsd xmm1,[rcx]
+                0xf3, 0x0f, 0x10, 0x12, // ASM: movss xmm2,[rdx]
+                0xc5, 0xf2, 0x10, 0xc2, // ASM: vmovss xmm0,xmm1,xmm2
+                0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(uint64_t*)", "0xffffffff00000000", "*(float*)"],
+            &["/* asm", "movss("],
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf3, 0x0f, 0x11, 0x02, // ASM: movss [rdx],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(float*)a2 = *(float*)a1;"],
+            &["0xffffffff", "*(uint32_t*)", "*(double*)"],
+        ),
+    ];
+    for (code, has, has_not) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        for part in *has {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "still has `{part}`\n{text}");
+        }
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.checked > 0 && r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// A 32-bit sign or magnitude mask is not a negation with zeros above it
+/// unless the later lanes really are zero.
+///
+/// A broadcast sign mask sets bit 63 of a `movss` load. The 32-bit store
+/// is still the negation; the 64-bit store keeps that bit, and `addsd`
+/// adds those bits. A scalar single (`addss`, `minss`, `sqrtss`, `vaddss`,
+/// `cvtsd2ss`) replaces the low lane and leaves bit 63, so a later `movsd`
+/// still has it and a later `movss` is only the new lane. `addss` after a
+/// broadcast magnitude mask on a double keeps that double's high half. A
+/// scalar sign mask on the same load leaves the zeros.
+/// On a double, a scalar sign mask flips only bit 31, a broadcast one
+/// flips bit 31 and bit 63, a scalar magnitude mask clears the high half,
+/// and a broadcast one clears both lanes' signs. The mask constant sits
+/// at `0x140002000`. `xorps` is at `0x140001004` and ends at
+/// `0x14000100b`, so the displacement is `0xff5`.
+#[test]
+fn a_broadcast_sign_mask_keeps_the_high_bit() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let xorps = [0x0f, 0x57, 0x05, 0xf5, 0x0f, 0x00, 0x00];
+    let andps = [0x0f, 0x54, 0x05, 0xf5, 0x0f, 0x00, 0x00];
+    let mut broadcast_sign = vec![0xf3, 0x0f, 0x10, 0x01];
+    broadcast_sign.extend_from_slice(&xorps);
+    broadcast_sign.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x02, 0xc3]);
+    let scalar_sign = broadcast_sign.clone();
+    let mut broadcast_add = vec![0xf3, 0x0f, 0x10, 0x01];
+    broadcast_add.extend_from_slice(&xorps);
+    broadcast_add.extend_from_slice(&[
+        0xf2, 0x41, 0x0f, 0x10, 0x08, // ASM: movsd xmm1,[r8]
+        0xf2, 0x0f, 0x58, 0xc1, // ASM: addsd xmm0,xmm1
+        0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+        0xc3,
+    ]);
+    let mut double_broadcast = vec![0xf2, 0x0f, 0x10, 0x01];
+    double_broadcast.extend_from_slice(&xorps);
+    double_broadcast.extend_from_slice(&[
+        0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+        0xf3, 0x41, 0x0f, 0x11, 0x00, // ASM: movss [r8],xmm0
+        0xc3,
+    ]);
+    let double_scalar_sign = double_broadcast.clone();
+    let mut double_scalar_mag = vec![0xf2, 0x0f, 0x10, 0x01];
+    double_scalar_mag.extend_from_slice(&andps);
+    double_scalar_mag.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x02, 0xc3]);
+    let double_broadcast_mag = double_scalar_mag.clone();
+    let mut addss_wide = vec![0xf3, 0x0f, 0x10, 0x01];
+    addss_wide.extend_from_slice(&xorps);
+    addss_wide.extend_from_slice(&[
+        0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+        0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+        0xc3,
+    ]);
+    let mut addss_narrow = vec![0xf3, 0x0f, 0x10, 0x01];
+    addss_narrow.extend_from_slice(&xorps);
+    addss_narrow.extend_from_slice(&[
+        0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+        0xf3, 0x41, 0x0f, 0x11, 0x00, // ASM: movss [r8],xmm0
+        0xc3,
+    ]);
+    let mut addss_both = vec![0xf3, 0x0f, 0x10, 0x01];
+    addss_both.extend_from_slice(&xorps);
+    addss_both.extend_from_slice(&[
+        0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+        0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+        0xf3, 0x41, 0x0f, 0x11, 0x01, // ASM: movss [r9],xmm0
+        0xc3,
+    ]);
+    let mut minss_wide = vec![0xf3, 0x0f, 0x10, 0x01];
+    minss_wide.extend_from_slice(&xorps);
+    minss_wide.extend_from_slice(&[
+        0xf3, 0x0f, 0x5d, 0x02, // ASM: minss xmm0,[rdx]
+        0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+        0xc3,
+    ]);
+    let mut sqrtss_wide = vec![0xf3, 0x0f, 0x10, 0x01];
+    sqrtss_wide.extend_from_slice(&xorps);
+    sqrtss_wide.extend_from_slice(&[
+        0xf3, 0x0f, 0x51, 0x02, // ASM: sqrtss xmm0,[rdx]
+        0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+        0xc3,
+    ]);
+    let mut vaddss_wide = vec![0xf3, 0x0f, 0x10, 0x01];
+    vaddss_wide.extend_from_slice(&xorps);
+    vaddss_wide.extend_from_slice(&[
+        0xc5, 0xfa, 0x58, 0x02, // ASM: vaddss xmm0,xmm0,[rdx]
+        0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+        0xc3,
+    ]);
+    let mut mag_addss = vec![0xf2, 0x0f, 0x10, 0x01];
+    mag_addss.extend_from_slice(&andps);
+    mag_addss.extend_from_slice(&[
+        0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+        0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+        0xc3,
+    ]);
+    let mut cvtsd_wide = vec![0xf3, 0x0f, 0x10, 0x01];
+    cvtsd_wide.extend_from_slice(&xorps);
+    cvtsd_wide.extend_from_slice(&[
+        0xf2, 0x0f, 0x5a, 0xc0, // ASM: cvtsd2ss xmm0,xmm0
+        0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+        0xc3,
+    ]);
+
+    let sign = 0x8000_0000u32.to_le_bytes();
+    let mag = 0x7fff_ffffu32.to_le_bytes();
+    let zero = [0u8; 4];
+    let mut bsign = Vec::new();
+    let mut ssign = Vec::new();
+    let mut bmag = Vec::new();
+    let mut smag = Vec::new();
+    for _ in 0..4 {
+        bsign.extend_from_slice(&sign);
+        bmag.extend_from_slice(&mag);
+    }
+    ssign.extend_from_slice(&sign);
+    smag.extend_from_slice(&mag);
+    for _ in 0..3 {
+        ssign.extend_from_slice(&zero);
+        smag.extend_from_slice(&zero);
+    }
+
+    let cases: &[(&[u8], &[u8], &[&str], &[&str])] = &[
+        (
+            &broadcast_sign,
+            &bsign,
+            &["*(uint64_t*)", "-", "0xffffffff", "0x8000000000000000"],
+            &["*(double*)", "/* asm"],
+        ),
+        (
+            &scalar_sign,
+            &ssign,
+            &["*(uint64_t*)", "-", "0xffffffff"],
+            &["*(double*)", "0x8000000000000000", "/* asm"],
+        ),
+        (
+            &broadcast_add,
+            &bsign,
+            &["*(double*)", "-", "0xffffffff", "0x8000000000000000", "+"],
+            &["(double)-", "/* asm"],
+        ),
+        (
+            &double_broadcast,
+            &bsign,
+            &["*(uint64_t*)", "0x8000000080000000", "*(uint32_t*)"],
+            &["*(double*)a2 =", "*(float*)", "/* asm"],
+        ),
+        (
+            &double_scalar_sign,
+            &ssign,
+            &["*(uint64_t*)", "0x80000000", "*(uint32_t*)"],
+            &[
+                "0x8000000080000000",
+                "0x8000000000000000",
+                "*(float*)",
+                "/* asm",
+            ],
+        ),
+        (
+            &double_scalar_mag,
+            &smag,
+            &["*(uint64_t*)", "0x7fffffff"],
+            &["0x7fffffff7fffffff", "*(double*)a2 =", "/* asm"],
+        ),
+        (
+            &double_broadcast_mag,
+            &bmag,
+            &["*(uint64_t*)", "0x7fffffff7fffffff"],
+            &["*(double*)a2 =", "/* asm"],
+        ),
+        (
+            &addss_wide,
+            &bsign,
+            &["*(uint64_t*)", "0x8000000000000000", "+"],
+            &["*(double*)", "/* asm"],
+        ),
+        (
+            &addss_narrow,
+            &bsign,
+            &["*(float*)", "+"],
+            &["0x8000000000000000", "*(uint64_t*)", "/* asm"],
+        ),
+        (
+            &addss_both,
+            &bsign,
+            &["*(uint64_t*)", "0x8000000000000000", "*(float*)", "+"],
+            &["/* asm"],
+        ),
+        (
+            &minss_wide,
+            &bsign,
+            &["*(uint64_t*)", "0x8000000000000000", "?"],
+            &["*(double*)", "fmin", "/* asm"],
+        ),
+        (
+            &sqrtss_wide,
+            &bsign,
+            &["*(uint64_t*)", "0x8000000000000000", "sqrt"],
+            &["*(double*)", "/* asm"],
+        ),
+        (
+            &vaddss_wide,
+            &bsign,
+            &["*(uint64_t*)", "0x8000000000000000", "+"],
+            &["*(double*)", "/* asm"],
+        ),
+        (
+            &cvtsd_wide,
+            &bsign,
+            &["*(uint64_t*)", "0x8000000000000000"],
+            &["/* asm"],
+        ),
+        (
+            &mag_addss,
+            &bmag,
+            &["*(uint64_t*)", "+"],
+            &["*(double*)a3 =", "/* asm"],
+        ),
+    ];
+    for (code, data, has, has_not) in cases {
+        let p = program64_with_data(code, data);
+        let text = decompiled(&p, 0x1_4000_1000);
+        for part in *has {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "still has `{part}`\n{text}");
+        }
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.checked > 0 && r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// `fist` and `fistp` round to nearest, ties to even, then store that integer.
+///
+/// A truncating cast is a different value: `2.5` becomes `2`, and a word
+/// that cannot hold the number is the indefinite integer, not the low bits
+/// of a wider conversion. `fisttp` still truncates toward zero. Replay does
+/// not enter an x87 block, so the machine check is the block verify; a
+/// replay that does enter must not disagree.
+#[test]
+fn an_x87_integer_store_rounds_to_nearest_even() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let cases: &[(&[u8], &[&str], &[&str])] = &[
+        // ASM: fld qword [rcx] / fistp dword [rdx] / ret
+        (
+            &[0xdd, 0x01, 0xdb, 0x1a, 0xc3],
+            &["*(uint32_t*)", "rint("],
+            &["/* asm"],
+        ),
+        // ASM: fld qword [rcx] / fistp word [rdx] / ret
+        (
+            &[0xdd, 0x01, 0xdf, 0x1a, 0xc3],
+            &["*(uint16_t*)", "rint("],
+            &["/* asm"],
+        ),
+        // ASM: fld qword [rcx] / fistp qword [rdx] / ret
+        (
+            &[0xdd, 0x01, 0xdf, 0x3a, 0xc3],
+            &["*(uint64_t*)", "rint("],
+            &["/* asm"],
+        ),
+        // ASM: fld qword [rcx] / fisttp dword [rdx] / ret
+        (
+            &[0xdd, 0x01, 0xdb, 0x0a, 0xc3],
+            &["*(uint32_t*)"],
+            &["rint(", "/* asm"],
+        ),
+    ];
+    for (code, has, has_not) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        for part in *has {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "still has `{part}`\n{text}");
+        }
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// `fild` sign-extends the integer it loads.
+///
+/// An unsigned cast of a dword `0xffffffff` is not `-1.0`. A single
+/// multiplied on the x87 stack is widened first, so a double store keeps
+/// the double product, not the single one.
+#[test]
+fn an_x87_integer_load_is_signed_and_a_single_widens() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let cases: &[(&[u8], &[&str], &[&str])] = &[
+        // ASM: fild dword [rcx] / fstp qword [rdx] / ret
+        (
+            &[0xdb, 0x01, 0xdd, 0x1a, 0xc3],
+            &["*(double*)", "(int32_t)"],
+            &["/* asm"],
+        ),
+        // ASM: fild word [rcx] / fstp qword [rdx] / ret
+        (
+            &[0xdf, 0x01, 0xdd, 0x1a, 0xc3],
+            &["*(double*)", "(int16_t)"],
+            &["/* asm"],
+        ),
+        // ASM: fld dword [rcx] / fmul dword [rcx+4] / fstp qword [rdx] / ret
+        (
+            &[0xd9, 0x01, 0xd8, 0x49, 0x04, 0xdd, 0x1a, 0xc3],
+            &["*(double*)", "(double)", "*"],
+            &["/* asm"],
+        ),
+        // ASM: fld dword [rcx] / fmul dword [rcx+4] / fstp dword [rdx] / ret
+        (
+            &[0xd9, 0x01, 0xd8, 0x49, 0x04, 0xd9, 0x1a, 0xc3],
+            &["*(float*)", "(double)", "*"],
+            &["/* asm"],
+        ),
+    ];
+    for (code, has, has_not) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        for part in *has {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "still has `{part}`\n{text}");
+        }
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// An x87 operation on two writable singles widens each one first.
+///
+/// The product of `8388609.0f` with itself is not the single-precision
+/// product widened afterwards, and neither is `1.0f / 3.0f`. A named
+/// `float` global has no lane, so the listing used to multiply them as
+/// `float`. Replay does not enter an x87 block; a replay that does enter
+/// must not disagree.
+#[test]
+fn an_x87_writable_single_widens_before_the_operation() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+
+    let image = |code: &[u8], data: &[u8]| {
+        let mut bytes = vec![0u8; 0x2000];
+        bytes[..code.len()].copy_from_slice(code);
+        bytes[0x1000..0x1000 + data.len()].copy_from_slice(data);
+        let mut p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0x1_4000_0000,
+            Some(0x1_4000_1000),
+            vec![
+                Section::mapped(".text", 0x1_4000_1000, 0, 0x1000, false, true),
+                Section::mapped(".data", 0x1_4000_2000, 0x1000, 0x1000, true, false),
+            ],
+        );
+        p.format = BinaryFormat::Pe;
+        p
+    };
+    let cases: &[(&[u8], [f32; 2], &str)] = &[
+        // ASM: fld dword [rip+0xffa] / fmul dword [rip+0xff8] / fstp qword [rdx] / ret
+        (
+            &[
+                0xd9, 0x05, 0xfa, 0x0f, 0x00, 0x00, 0xd8, 0x0d, 0xf8, 0x0f, 0x00, 0x00, 0xdd, 0x1a,
+                0xc3,
+            ],
+            [8388609.0, 8388609.0],
+            "*",
+        ),
+        // ASM: fld dword [rip+0xffa] / fdiv dword [rip+0xff8] / fstp qword [rdx] / ret
+        (
+            &[
+                0xd9, 0x05, 0xfa, 0x0f, 0x00, 0x00, 0xd8, 0x35, 0xf8, 0x0f, 0x00, 0x00, 0xdd, 0x1a,
+                0xc3,
+            ],
+            [1.0, 3.0],
+            "/",
+        ),
+    ];
+    for (code, values, op) in cases {
+        let mut data = Vec::new();
+        data.extend_from_slice(&values[0].to_le_bytes());
+        data.extend_from_slice(&values[1].to_le_bytes());
+        let p = image(code, &data);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(
+            text.matches("(double)*(float*)").count() >= 2,
+            "singles were not widened\n{text}"
+        );
+        assert!(text.contains(op), "{text}");
+        assert!(
+            !text.contains("g32_"),
+            "multiplied named float globals\n{text}"
+        );
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// `cvtss2si` and `cvtsd2si` round to nearest, ties to even, then cast.
+///
+/// That is a cast of `rint`. The truncating forms stay a cast with no
+/// `rint`. A value the integer cannot hold is the indefinite integer.
+#[test]
+fn a_nearest_float_to_int_is_a_cast_of_rint() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let cases: &[(&[u8], &[&str], &[&str])] = &[
+        // ASM: cvtss2si eax, dword [rcx] / ret
+        (
+            &[0xf3, 0x0f, 0x2d, 0x01, 0xc3],
+            &["rint", "(int32_t)"],
+            &["/* asm"],
+        ),
+        // ASM: cvtsd2si rax, qword [rcx] / ret
+        (
+            &[0xf2, 0x48, 0x0f, 0x2d, 0x01, 0xc3],
+            &["rint", "(int64_t)"],
+            &["/* asm"],
+        ),
+        // ASM: cvttss2si eax, dword [rcx] / ret
+        (
+            &[0xf3, 0x0f, 0x2c, 0x01, 0xc3],
+            &["(int32_t)"],
+            &["rint", "/* asm"],
+        ),
+        // ASM: cvttsd2si rax, qword [rcx] / ret
+        (
+            &[0xf2, 0x48, 0x0f, 0x2c, 0x01, 0xc3],
+            &["(int64_t)"],
+            &["rint", "/* asm"],
+        ),
+    ];
+    for (code, has, has_not) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        for part in *has {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "still has `{part}`\n{text}");
+        }
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.checked > 0 && r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// `cvtss2si` and `cvtsd2si` round to nearest, ties to even.
+///
+/// A truncating cast is a different integer: `1.5` becomes `2`, and
+/// `2147483647.5` does not fit in 32 bits, so the result is the indefinite
+/// integer rather than `2147483647`. The same rounding is what the VEX
+/// forms do. A 32-bit destination zero-extends, so a later 64-bit store of
+/// `-1.5` rounded is `0xfffffffe`, not a sign-extended word. `cvtsd2si` of
+/// a `movss` load rounds the zero-extended bits, and `cvtss2si` of a
+/// `cvtsd2ss` result rounds that single, not the double the bits form.
+#[test]
+fn a_nearest_float_to_int_rounds_ties_to_even() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let one_half = [0x00u8, 0x00, 0xc0, 0x3f];
+    let neg_half = [0x00u8, 0x00, 0xc0, 0xbf];
+    let dbl_half = [0x00u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x3f];
+    let past_i32 = [0x00u8, 0x00, 0xe0, 0xff, 0xff, 0xff, 0xdf, 0x41];
+    let cases: &[(&[u8], &[u8], &[&str])] = &[
+        (
+            &[
+                0xf3, 0x0f, 0x2d, 0x05, 0xf8, 0x0f, 0x00,
+                0x00, // ASM: cvtss2si eax,[rip+0xff8]
+                0xc3,
+            ],
+            &one_half,
+            &["rint("],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x2d, 0x05, 0xf8, 0x0f, 0x00,
+                0x00, // ASM: cvtsd2si eax,[rip+0xff8]
+                0xc3,
+            ],
+            &past_i32,
+            &["rint("],
+        ),
+        (
+            &[
+                0xf2, 0x48, 0x0f, 0x2d, 0x05, 0xf7, 0x0f, 0x00,
+                0x00, // ASM: cvtsd2si rax,[rip+0xff7]
+                0xc3,
+            ],
+            &dbl_half,
+            &["rint("],
+        ),
+        (
+            &[
+                0xf3, 0x48, 0x0f, 0x2d, 0x05, 0xf7, 0x0f, 0x00,
+                0x00, // ASM: cvtss2si rax,[rip+0xff7]
+                0xc3,
+            ],
+            &one_half,
+            &["rint("],
+        ),
+        (
+            &[
+                0xc5, 0xfa, 0x2d, 0x05, 0xf8, 0x0f, 0x00,
+                0x00, // ASM: vcvtss2si eax,[rip+0xff8]
+                0xc3,
+            ],
+            &one_half,
+            &["rint("],
+        ),
+        (
+            &[
+                0xc4, 0xe1, 0xfb, 0x2d, 0x05, 0xf7, 0x0f, 0x00,
+                0x00, // ASM: vcvtsd2si rax,[rip+0xff7]
+                0xc3,
+            ],
+            &dbl_half,
+            &["rint("],
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x2d, 0x05, 0xf8, 0x0f, 0x00,
+                0x00, // ASM: cvtss2si eax,[rip+0xff8]
+                0x48, 0x89, 0x01, // ASM: mov [rcx],rax
+                0xc3,
+            ],
+            &neg_half,
+            &["rint(", "0xffffffff"],
+        ),
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+                0xf2, 0x48, 0x0f, 0x2d, 0xc0, // ASM: cvtsd2si rax,xmm0
+                0xc3,
+            ],
+            &[],
+            &["rint(", "0xffffffff"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf2, 0x0f, 0x5a, 0xc0, // ASM: cvtsd2ss xmm0,xmm0
+                0xf3, 0x0f, 0x2d, 0xc0, // ASM: cvtss2si eax,xmm0
+                0xc3,
+            ],
+            &[],
+            &["rint(", "(float)"],
+        ),
+    ];
+    for (code, data, parts) in cases {
+        let p = if data.is_empty() {
+            program64(code)
+        } else {
+            program64_with_data(code, data)
+        };
+        let text = decompiled(&p, 0x1_4000_1000);
+        for part in *parts {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        assert!(!text.contains("/* asm"), "{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.checked > 0 && r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// `je` after `comiss` holds on a NaN. C's `==` does not.
+///
+/// The compiler's `jp` then `je` is still C's `==`: unordered takes the
+/// other arm. A lone `je` has no such arm, so the test is equality or
+/// unordered. `jne` is that test inverted, not C's `!=`.
+#[test]
+fn a_float_equality_includes_unordered() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let cases: &[(&[u8], &[&str])] = &[
+        // ASM: movss xmm0,[rcx] / comiss xmm0,[rdx] / je / mov eax,1 / ret
+        // ASM: mov eax,2 / ret
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, 0x0f, 0x2f, 0x02, 0x74, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00,
+                0xc3, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3,
+            ],
+            &["isunordered", "=="],
+        ),
+        // ASM: movss xmm0,[rcx] / comiss xmm0,[rdx] / jne / mov eax,1 / ret
+        // ASM: mov eax,2 / ret
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, 0x0f, 0x2f, 0x02, 0x75, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00,
+                0xc3, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3,
+            ],
+            &["isunordered"],
+        ),
+        // ASM: movss xmm0,[rcx] / comiss xmm0,[rdx] / jp / mov eax,1 / ret
+        // ASM: je / mov eax,2 / ret / mov eax,3 / ret
+        (
+            &[
+                0xf3, 0x0f, 0x10, 0x01, 0x0f, 0x2f, 0x02, 0x7a, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00,
+                0xc3, 0x74, 0x06, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0x03, 0x00, 0x00, 0x00,
+                0xc3,
+            ],
+            &["=="],
+        ),
+    ];
+    for (code, parts) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        for part in *parts {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        assert!(!text.contains("/* asm"), "{text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.checked > 0 && r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
+}
+
+/// `minss` and `maxss` keep the second operand when the compare does not hold.
+///
+/// C's `fmin` returns the number and prefers `-0`. The machine returns the
+/// second operand: `+0` with `-0` is `-0`, and `1.0` with a NaN is that NaN.
+/// The constants sit at `0x140002000`. Each load ends eight bytes later, so
+/// the displacements are `0xff8` and `0xff4`.
+#[test]
+fn a_scalar_min_or_max_keeps_the_operand_the_compare_misses() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let load = |op: u8| -> Vec<u8> {
+        let mut code = vec![
+            0xf3, 0x0f, 0x10, 0x05, 0xf8, 0x0f, 0x00, 0x00, // ASM: movss xmm0,[rip+0xff8]
+        ];
+        code.extend_from_slice(&[
+            0xf3, 0x0f, op, 0x05, 0xf4, 0x0f, 0x00, 0x00, // ASM: minss/maxss xmm0,[rip+0xff4]
+            0xf3, 0x0f, 0x11, 0x01, // ASM: movss [rcx],xmm0
+            0xc3, // ASM: ret
+        ]);
+        code
+    };
+    let nan = 0x7fc0_0000u32;
+    let pos = 0u32;
+    let neg = 0x8000_0000u32;
+    let one = 0x3f80_0000u32;
+    let cases: &[(u8, u32, u32, &[&str], &[&str])] = &[
+        (0x5d, pos, neg, &["?", "<"], &["fmin"]),
+        (0x5d, neg, pos, &["?", "<"], &["fmin"]),
+        (0x5d, one, nan, &["?", "<", "NAN"], &["fmin"]),
+        (0x5d, nan, one, &["?", "<"], &["fmin"]),
+        (0x5f, pos, neg, &["?", ">"], &["fmax"]),
+        (0x5f, one, nan, &["?", ">", "NAN"], &["fmax"]),
+    ];
+    for (op, left, right, has, has_not) in cases {
+        let mut data = Vec::new();
+        data.extend_from_slice(&left.to_le_bytes());
+        data.extend_from_slice(&right.to_le_bytes());
+        let p = program64_with_data(&load(*op), &data);
+        let text = decompiled(&p, 0x1_4000_1000);
+        for part in *has {
+            assert!(text.contains(part), "missing `{part}`\n{text}");
+        }
+        for part in *has_not {
+            assert!(!text.contains(part), "still has `{part}`\n{text}");
+        }
+        assert!(!text.contains("/* asm"), "{text}");
+        let a = Analysis::compute(&p);
+        let v = verify(&p, &a, &[0x1_4000_1000], 1);
+        assert!(
+            v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+            "{text}\n{}",
+            verify_tsv(&v)
+        );
+        let r = replay_function(&p, &a, 0x1_4000_1000, 1);
+        assert!(
+            r.checked > 0 && r.wrong().is_empty(),
+            "{text}\n{}",
+            replay_tsv(&r)
+        );
+    }
+}
+
+/// A scalar move into a double keeps the bits above the new lane.
+///
+/// A register-to-register `movss` of a double is that merge, not the call
+/// `movss(...)`, which hid bits 63:32. The same move of a value that may
+/// still be 128 bits stays the call. `cvtss2si` rounds the low single.
+#[test]
+fn a_scalar_lane_move_and_round_keeps_the_bits() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let cases: &[(&[u8], &[&str], &[&str])] = &[
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x10, 0x0a, // ASM: movss xmm1,[rdx]
+                0xf3, 0x0f, 0x10, 0xc1, // ASM: movss xmm0,xmm1
+                0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["0xffffffff00000000", "*(float*)a2"],
+            &["movss("],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x10, 0x0a, // ASM: movss xmm1,[rdx]
+                0xc5, 0xfa, 0x10, 0xc1, // ASM: vmovss xmm0,xmm0,xmm1
+                0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["0xffffffff00000000", "*(float*)a2"],
+            &["vmovss("],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x09, // ASM: movsd xmm1,[rcx]
+                0xf3, 0x0f, 0x10, 0x12, // ASM: movss xmm2,[rdx]
+                0xc5, 0xf2, 0x10, 0xc2, // ASM: vmovss xmm0,xmm1,xmm2
+                0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["0xffffffff00000000", "*(float*)a2"],
+            &["vmovss("],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf2, 0x0f, 0x10, 0x0a, // ASM: movsd xmm1,[rdx]
+                0xf2, 0x0f, 0x10, 0xc1, // ASM: movsd xmm0,xmm1
+                0xf2, 0x41, 0x0f, 0x11, 0x00, // ASM: movsd [r8],xmm0
+                0xc3, // ASM: ret
+            ],
+            &["*(double*)a3 = *(double*)a2;"],
+            &["movsd("],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x2d, 0xc0, // ASM: cvtss2si eax,xmm0
+                0xc3, // ASM: ret
+            ],
+            &["(int32_t)rint((float)((*(double*)a1) & 0xffffffff))"],
+            &["cvtss2si(", "0xffffffff00000000"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xf3, 0x0f, 0x58, 0x02, // ASM: addss xmm0,[rdx]
+                0xf3, 0x0f, 0x2d, 0xc0, // ASM: cvtss2si eax,xmm0
+                0xc3, // ASM: ret
+            ],
+            &["rint(", "*(float*)a2"],
+            &["cvtss2si(", "0xffffffff00000000"],
+        ),
+        (
+            &[
+                0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+                0xc5, 0xfa, 0x2d, 0xc0, // ASM: vcvtss2si eax,xmm0
+                0xc3, // ASM: ret
+            ],
+            &["(int32_t)rint((float)((*(double*)a1) & 0xffffffff))"],
+            &["vcvtss2si(", "cvtss2si("],
+        ),
+    ];
+    for (code, want, absent) in cases {
+        let p = program64(code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        for needle in *want {
+            assert!(text.contains(needle), "missing `{needle}`\n{text}");
+        }
+        for needle in *absent {
+            assert!(!text.contains(needle), "still has `{needle}`\n{text}");
+        }
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert!(
+                v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+                "{text}\nseed {seed}: {}",
+                verify_tsv(&v)
+            );
+            let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+            assert!(
+                r.checked > 0 && r.wrong().is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+    }
 }

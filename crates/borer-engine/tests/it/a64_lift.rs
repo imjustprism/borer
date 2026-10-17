@@ -477,9 +477,8 @@ fn fccmp_chains_agree_with_the_emulator() {
 /// The conversions between widths agree wherever the tree can hold the
 /// value.
 ///
-/// The integer conversions that saturate or convert an integer a register
-/// holds stay the intrinsics and casts the evaluator cannot read, counted
-/// below rather than compared.
+/// `fcvtzs`, `fcvtzu`, `scvtf` and `ucvtf` are compared, including the
+/// fixed-point scale.
 #[test]
 fn float_conversions_agree_with_the_emulator() {
     let words = [
@@ -513,10 +512,10 @@ fn float_conversions_agree_with_the_emulator() {
         let tsv = verify_tsv(&v);
         assert_eq!(v.checked, 1, "seed {seed}: {tsv}");
         assert!(v.mismatches.is_empty(), "seed {seed}: {tsv}");
-        assert_eq!(compared(&v, Fact::Store), 0, "seed {seed}: {tsv}");
-        assert_eq!(v.facts[&Fact::Vector].unreadable, 3, "seed {seed}: {tsv}");
-        assert_eq!(v.facts[&Fact::Register].unreadable, 2, "seed {seed}: {tsv}");
-        assert_eq!(v.facts[&Fact::Store].unreadable, 2, "seed {seed}: {tsv}");
+        assert_eq!(compared(&v, Fact::Store), 2, "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Vector].unreadable, 0, "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Register].unreadable, 0, "seed {seed}: {tsv}");
+        assert_eq!(v.facts[&Fact::Store].unreadable, 0, "seed {seed}: {tsv}");
     }
 }
 

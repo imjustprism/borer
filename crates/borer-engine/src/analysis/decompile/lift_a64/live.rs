@@ -20,7 +20,7 @@ use super::super::expr::Key;
 use super::super::lift::{Effects, Lanes};
 use super::conv;
 use super::shape::{FLOAT_ARGS, INT_ARGS, RESULT_REG};
-use crate::isa::a64::{self, Insn, Reg};
+use crate::isa::a64::{self, Insn, Mnemonic, Opnd, Reg};
 
 /// The lane an `x` register write covers: all of it.
 const X_WHOLE: u8 = 64;
@@ -109,6 +109,11 @@ pub(in crate::analysis::decompile) fn effects(ctx: &Ctx<'_>, i: &Insn) -> Effect
         a64::Op::Syscall => {
             arguments(&mut reads);
             reads.push((Key::A64(Reg::X(conv::SYSCALL_NUMBER)), X_WHOLE));
+            if i.mnemonic == Mnemonic::Svc && matches!(i.operands.first(), Some(Opnd::Imm(0))) {
+                reads.push((Key::A64(Reg::X(8)), X_WHOLE));
+                reads.push((Key::A64(Reg::X(2)), X_WHOLE));
+                writes.push((Key::A64(Reg::X(0)), X_WHOLE));
+            }
         }
         a64::Op::B
         | a64::Op::BCond(_)

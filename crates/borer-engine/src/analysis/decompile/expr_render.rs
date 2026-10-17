@@ -7,8 +7,8 @@
 //! expressions into the text [`super::emit`] prints.
 
 use super::expr::{
-    ATOM, Cc, Cond, Expr, Flags, Key, LOGICAL, Op, Ty, UNARY, UnOp, fold, indexed, low_bits_read,
-    mask_bits, opaque_note, sext, signed_ty, tls_slot,
+    ATOM, Cc, Cond, Expr, Flags, Key, LOGICAL, Op, RoundToInt, Ty, UNARY, UnOp, fold, indexed,
+    low_bits_read, mask_bits, opaque_note, sext, signed_ty, tls_slot,
 };
 use crate::analysis::Overlay;
 use crate::isa::a64;
@@ -799,9 +799,14 @@ impl Expr {
             Expr::Sp(k) => (format!("&{}", n.slot(*k)), UNARY),
             Expr::FConst(bits, ty) => (render_fconst(*bits, *ty), ATOM),
             Expr::Call(f, args) => {
+                let width = RoundToInt::parse(f).is_some();
                 let args: Vec<String> = args
                     .iter()
-                    .map(|a| a.render_prec(n, true, false).0)
+                    .enumerate()
+                    .map(|(i, a)| match a {
+                        Expr::Const(w @ (32 | 64)) if width && i + 1 == args.len() => w.to_string(),
+                        _ => a.render_prec(n, true, false).0,
+                    })
                     .collect();
                 (format!("{f}({})", args.join(", ")), ATOM)
             }
@@ -819,8 +824,10 @@ impl Expr {
             }
             Expr::Bin(op, l, r) => {
                 if let Op::FMin | Op::FMax = op {
-                    let name = if *op == Op::FMin { "fmin" } else { "fmax" };
-                    return (format!("{name}({}, {})", l.render(n), r.render(n)), ATOM);
+                    let rel = if *op == Op::FMin { "<" } else { ">" };
+                    let l = paren_compared(l, n, 7);
+                    let r = paren_compared(r, n, 7);
+                    return (format!("({l} {rel} {r} ? {l} : {r})"), ATOM);
                 }
                 if let (Op::Rol(16) | Op::Ror(16), Expr::Const(8)) = (op, r.as_ref()) {
                     let half = match l.as_ref() {
@@ -915,7 +922,10 @@ impl Expr {
                     }
                     _ => false,
                 };
-                let wrapped = lp < p || other_family(l);
+                let float_cut = matches!(op, Op::And | Op::Or | Op::Xor)
+                    && l.is_float()
+                    && !matches!(l.as_ref(), Expr::Var(_));
+                let wrapped = lp < p || other_family(l) || float_cut;
                 let ls = if wrapped { format!("({ls})") } else { ls };
                 let cast = |ty: &str, ls: String| {
                     if wrapped || lp >= UNARY {
@@ -1185,6 +1195,7 @@ impl Cond {
             Flags::Float(l, r, _) if matches!(cc.0, C::a | C::ae | C::b | C::be) => {
                 float_relation(n, cc, l, r)
             }
+            Flags::Float(l, r, _) if matches!(cc.0, C::e | C::ne) => float_equality(n, cc, l, r),
             Flags::Float(l, r, bits) => match cc.rel() {
                 Some(rel) => compare(n, l, r, rel, false, *bits),
                 None => undecided(n, self.cc, inverted, &[l, r]),
@@ -1206,6 +1217,11 @@ impl Cond {
                     && matches!(cc.0, C::a | C::ae | C::b | C::be) =>
             {
                 float_relation(n, cc, l, r)
+            }
+            Flags::Cmp(l, r, _)
+                if (l.is_float() || r.is_float()) && matches!(cc.0, C::e | C::ne) =>
+            {
+                float_equality(n, cc, l, r)
             }
             Flags::Cmp(l, r, bits) if matches!(cc.0, C::s | C::ns) => signed_sign(
                 n,
@@ -1861,6 +1877,32 @@ fn widened_difference(e: &Expr) -> bool {
         return false;
     };
     matches!(&**l, Expr::Cast(inner, ty) if ty.bits() == 64 && c_narrow(inner).is_some())
+}
+
+/// Renders equality after a float compare, NaN included.
+///
+/// The zero flag is set for an equal pair and for an unordered one, so
+/// `je` is `a == b || isunordered(a, b)` and `jne` is that test inverted.
+/// C's `==` is false on a NaN and its `!=` is true, which is the other
+/// answer. A parity branch beside this one is the compiler's ordered
+/// compare, and that pair still folds to `==` or `!=`.
+///
+/// # Arguments
+///
+/// * `n` - Name resolution.
+/// * `cc` - `e` or `ne`.
+/// * `l` - Left operand.
+/// * `r` - Right operand.
+fn float_equality(n: &Names<'_>, cc: Cc, l: &Expr, r: &Expr) -> String {
+    use ConditionCode as C;
+    let eq = format!(
+        "{} == {} || isunordered({}, {})",
+        paren_if_lower(l, n, 7),
+        paren_if_lower(r, n, 7),
+        l.render(n),
+        r.render(n)
+    );
+    if cc.0 == C::e { eq } else { format!("!({eq})") }
 }
 
 /// Renders an ordered floating-point comparison exactly, NaN included.

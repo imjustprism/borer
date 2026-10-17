@@ -392,11 +392,33 @@ impl<'a> Exec<'_, 'a> {
                     Mnemonic::Movss | Mnemonic::Vmovss => Ty::F32,
                     _ => Ty::F64,
                 };
-                self.note_reg_ty(instr, ty);
                 let dst = self.val(instr, 0);
-                let src = float_bits(self.val(instr, 1), ty);
-                let name = format!("{mn:?}").to_lowercase();
-                self.write_op0(instr, Expr::Call(name, vec![dst, src]));
+                let src = self.val(instr, 1);
+                let vex = matches!(mn, Mnemonic::Vmovss | Mnemonic::Vmovsd);
+                if vex || !keeps_vector(&dst) {
+                    let low = scalar_lane(src, ty);
+                    if vex {
+                        self.float_write(instr, low, ty);
+                    } else {
+                        self.write_scalar_lane(instr, low, ty, &dst);
+                    }
+                } else {
+                    self.note_reg_ty(instr, ty);
+                    let name = format!("{mn:?}").to_lowercase();
+                    self.write_op0(instr, Expr::Call(name, vec![dst, float_bits(src, ty)]));
+                }
+            }
+            Mnemonic::Vmovss | Mnemonic::Vmovsd
+                if instr.op_count() == 3 && instr.op0_kind() == OpKind::Register =>
+            {
+                let ty = if mn == Mnemonic::Vmovss {
+                    Ty::F32
+                } else {
+                    Ty::F64
+                };
+                let upper = self.val(instr, 1);
+                let low = scalar_lane(self.val(instr, 2), ty);
+                self.write_scalar_lane(instr, low, ty, &upper);
             }
             Mnemonic::Movlps | Mnemonic::Movlpd
                 if instr.op_count() == 2 && instr.op0_kind() == OpKind::Register =>
@@ -412,6 +434,29 @@ impl<'a> Exec<'_, 'a> {
             Mnemonic::Movlps | Mnemonic::Movlpd if instr.op_count() == 2 => {
                 let v = self.val(instr, 1);
                 self.write_op0(instr, v);
+            }
+            Mnemonic::Movss | Mnemonic::Vmovss | Mnemonic::Movsd | Mnemonic::Vmovsd
+                if instr.op_count() == 2 && instr.op0_kind() == OpKind::Memory =>
+            {
+                let bits = if matches!(mn, Mnemonic::Movss | Mnemonic::Vmovss) {
+                    32
+                } else {
+                    64
+                };
+                let src = self.val(instr, 1);
+                let (ty, v) = if let Expr::Var(k) = &src
+                    && self
+                        .big_written
+                        .get(k)
+                        .is_some_and(|full| moved_lane_mask(full, bits).is_some())
+                {
+                    let ty = if bits <= 32 { Ty::U32 } else { Ty::U64 };
+                    (ty, src)
+                } else {
+                    scalar_moved(src, bits)
+                };
+                let addr = self.tls_to_global(self.addr(instr, 0));
+                self.store_at(addr, ty, v);
             }
             Mnemonic::Mov
             | Mnemonic::Movzx
@@ -492,10 +537,11 @@ impl<'a> Exec<'_, 'a> {
                 if instr.op_count() == 2 =>
             {
                 let ty = scalar_ty(mn);
-                let l = float_bits(self.val(instr, 0), ty);
-                let r = float_bits(self.val(instr, 1), ty);
+                let upper = self.val(instr, 0);
+                let l = scalar_lane(upper.clone(), ty);
+                let r = scalar_lane(self.val(instr, 1), ty);
                 let v = fold(float_op(mn), l, r, bits);
-                self.float_write(instr, v, ty);
+                self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Vaddss
             | Mnemonic::Vaddsd
@@ -512,18 +558,23 @@ impl<'a> Exec<'_, 'a> {
                 if instr.op_count() == 3 =>
             {
                 let ty = scalar_ty(mn);
-                let l = float_bits(self.val(instr, 1), ty);
-                let r = float_bits(self.val(instr, 2), ty);
+                let upper = self.val(instr, 1);
+                let l = scalar_lane(upper.clone(), ty);
+                let r = scalar_lane(self.val(instr, 2), ty);
                 let v = fold(float_op(mn), l, r, bits);
-                self.float_write(instr, v, ty);
+                self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Sqrtss | Mnemonic::Sqrtsd if instr.op_count() == 2 => {
-                let v = Expr::Un(UnOp::Sqrt, Box::new(self.val(instr, 1)));
-                self.float_write(instr, v, scalar_ty(mn));
+                let ty = scalar_ty(mn);
+                let upper = self.val(instr, 0);
+                let v = Expr::Un(UnOp::Sqrt, Box::new(scalar_lane(self.val(instr, 1), ty)));
+                self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Vsqrtss | Mnemonic::Vsqrtsd if instr.op_count() == 3 => {
-                let v = Expr::Un(UnOp::Sqrt, Box::new(self.val(instr, 2)));
-                self.float_write(instr, v, scalar_ty(mn));
+                let ty = scalar_ty(mn);
+                let upper = self.val(instr, 1);
+                let v = Expr::Un(UnOp::Sqrt, Box::new(scalar_lane(self.val(instr, 2), ty)));
+                self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Vfmadd132ss
             | Mnemonic::Vfmadd132sd
@@ -539,9 +590,10 @@ impl<'a> Exec<'_, 'a> {
             | Mnemonic::Vfmsub231sd
                 if instr.op_count() == 3 =>
             {
-                let a = self.val(instr, 0);
-                let b = self.val(instr, 1);
-                let c = self.val(instr, 2);
+                let ty = scalar_ty(mn);
+                let a = scalar_lane(self.val(instr, 0), ty);
+                let b = scalar_lane(self.val(instr, 1), ty);
+                let c = scalar_lane(self.val(instr, 2), ty);
                 let (x, y, z) = match mn {
                     Mnemonic::Vfmadd132ss
                     | Mnemonic::Vfmadd132sd
@@ -564,19 +616,21 @@ impl<'a> Exec<'_, 'a> {
                 );
                 let prod = fold(Op::FMul, x, y, bits);
                 let v = fold(if add { Op::FAdd } else { Op::FSub }, prod, z, bits);
-                self.float_write(instr, v, scalar_ty(mn));
+                self.float_write(instr, v, ty);
             }
             Mnemonic::Cvtsi2ss | Mnemonic::Cvtsi2sd if instr.op_count() == 2 => {
                 let ty = scalar_ty(mn);
+                let upper = self.val(instr, 0);
                 let src_bits = src_bits(instr, 1);
                 let v = Expr::Cast(Box::new(sign_extend(self.val(instr, 1), src_bits)), ty);
-                self.float_write(instr, v, ty);
+                self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Vcvtsi2ss | Mnemonic::Vcvtsi2sd if instr.op_count() == 3 => {
                 let ty = scalar_ty(mn);
+                let upper = self.val(instr, 1);
                 let src_bits = src_bits(instr, 2);
                 let v = Expr::Cast(Box::new(sign_extend(self.val(instr, 2), src_bits)), ty);
-                self.float_write(instr, v, ty);
+                self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Cvttss2si
             | Mnemonic::Cvttsd2si
@@ -584,18 +638,45 @@ impl<'a> Exec<'_, 'a> {
             | Mnemonic::Vcvttsd2si
                 if instr.op_count() == 2 =>
             {
-                let v = Expr::Cast(Box::new(self.val(instr, 1)), Ty::from_bits(bits));
+                let src = if matches!(mn, Mnemonic::Cvttss2si | Mnemonic::Vcvttss2si) {
+                    Ty::F32
+                } else {
+                    Ty::F64
+                };
+                let v = Expr::Cast(
+                    Box::new(scalar_lane(self.val(instr, 1), src)),
+                    Ty::from_bits(bits),
+                );
+                self.write_op0(instr, v);
+            }
+            Mnemonic::Cvtss2si | Mnemonic::Cvtsd2si | Mnemonic::Vcvtss2si | Mnemonic::Vcvtsd2si
+                if instr.op_count() == 2 =>
+            {
+                let src = if matches!(mn, Mnemonic::Cvtss2si | Mnemonic::Vcvtss2si) {
+                    Ty::F32
+                } else {
+                    Ty::F64
+                };
+                let lane = scalar_lane(self.val(instr, 1), src);
+                let v = Expr::Cast(
+                    Box::new(Expr::Call("rint".to_owned(), vec![lane])),
+                    Ty::from_bits(bits),
+                );
                 self.write_op0(instr, v);
             }
             Mnemonic::Cvtss2sd | Mnemonic::Cvtsd2ss if instr.op_count() == 2 => {
                 let ty = scalar_ty(mn);
-                let v = Expr::Cast(Box::new(self.val(instr, 1)), ty);
-                self.float_write(instr, v, ty);
+                let from = if ty == Ty::F64 { Ty::F32 } else { Ty::F64 };
+                let upper = self.val(instr, 0);
+                let v = Expr::Cast(Box::new(scalar_lane(self.val(instr, 1), from)), ty);
+                self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Vcvtss2sd | Mnemonic::Vcvtsd2ss if instr.op_count() == 3 => {
                 let ty = scalar_ty(mn);
-                let v = Expr::Cast(Box::new(self.val(instr, 2)), ty);
-                self.float_write(instr, v, ty);
+                let from = if ty == Ty::F64 { Ty::F32 } else { Ty::F64 };
+                let upper = self.val(instr, 1);
+                let v = Expr::Cast(Box::new(scalar_lane(self.val(instr, 2), from)), ty);
+                self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Xorps | Mnemonic::Xorpd | Mnemonic::Andps | Mnemonic::Andpd
                 if instr.op_count() == 2
@@ -603,12 +684,17 @@ impl<'a> Exec<'_, 'a> {
                     && instr.op1_kind() == OpKind::Memory
                     && self.float_mask(instr).is_some() =>
             {
-                let Some((abs, ty)) = self.float_mask(instr) else {
+                let Some((abs, ty, broadcast)) = self.float_mask(instr) else {
                     return;
                 };
                 let x = self.val(instr, 0);
-                let op = if abs { UnOp::Fabs } else { UnOp::Neg };
-                self.float_write(instr, Expr::Un(op, Box::new(x)), ty);
+                let v = masked_lanes(abs, ty, broadcast, x);
+                if matches!(v, Expr::Un(..)) {
+                    self.float_write(instr, v, ty);
+                } else {
+                    self.stamp_reg_ty(instr, Ty::U64);
+                    self.write_op0(instr, v);
+                }
             }
             Mnemonic::Movsx | Mnemonic::Movsxd if instr.op_count() == 2 => {
                 let src_bits = src_bits(instr, 1);
@@ -964,8 +1050,9 @@ impl<'a> Exec<'_, 'a> {
                 } else {
                     32
                 };
-                let l = self.val(instr, 0);
-                let r = self.val(instr, 1);
+                let ty = if fbits == 64 { Ty::F64 } else { Ty::F32 };
+                let l = scalar_lane(self.val(instr, 0), ty);
+                let r = scalar_lane(self.val(instr, 1), ty);
                 self.flags = Flags::Cmp(l, r, fbits);
             }
             Mnemonic::Cmpxchg if instr.op_count() == 2 && instr.op0_kind() == OpKind::Memory => {

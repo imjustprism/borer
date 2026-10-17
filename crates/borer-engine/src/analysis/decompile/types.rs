@@ -849,6 +849,211 @@ fn pointee_of(ty: &str) -> Option<&str> {
     Some(pointee.strip_suffix(" const").unwrap_or(pointee))
 }
 
+/// Writes `((T*)base)[i]` as `base[i]` when `base` is already a `T *`.
+///
+/// The cast stays for a different pointee, a byte or `void` pointer, and
+/// the machine word. A parenthesized base is not a declared name, so it
+/// stays too. No field is invented: an array field already printed as
+/// `base->field` is not this cast.
+///
+/// # Arguments
+///
+/// * `text` - A decompilation, parameter types already applied.
+pub(super) fn spell_index(text: &str) -> String {
+    let pointees = index_pointees(text);
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if line.trim_start().starts_with("//") {
+            out.push_str(line);
+        } else {
+            out.push_str(&rewrite_indexes(line, &pointees));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Pointer names and the type they point at, bytes and `void` left out.
+///
+/// Those two already count bytes, so an element cast on them is the width
+/// the declaration does not give.
+///
+/// # Arguments
+///
+/// * `text` - The function.
+fn index_pointees(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (name, ty) in typed_pointers(text) {
+        if let Some(pointee) = pointee_of(&ty) {
+            out.insert(name, pointee.to_owned());
+        }
+    }
+    for line in text.lines() {
+        let Some((ty, items)) = vars::declaration(line) else {
+            continue;
+        };
+        for (stars, name) in items {
+            let pointee = if !stars.is_empty() {
+                ty.trim()
+            } else if let Some(p) = pointee_of(ty.trim()) {
+                p
+            } else {
+                continue;
+            };
+            if !pointee.is_empty() && !BYTE_POINTEES.contains(&pointee) {
+                out.insert(name.to_owned(), pointee.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// Drops an element cast whose base is already that pointer.
+///
+/// # Arguments
+///
+/// * `line` - One line of pseudo-C.
+/// * `pointees` - Declared pointer names and their pointees.
+fn rewrite_indexes(line: &str, pointees: &BTreeMap<String, String>) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    let mut quote = false;
+    let mut escaped = false;
+    while !rest.is_empty() {
+        if quote {
+            let c = rest.chars().next().unwrap_or('"');
+            out.push(c);
+            rest = rest.get(c.len_utf8()..).unwrap_or("");
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                quote = false;
+            }
+            continue;
+        }
+        if rest.starts_with('"') {
+            quote = true;
+            out.push('"');
+            rest = rest.get(1..).unwrap_or("");
+            continue;
+        }
+        let Some(at) = rest.find("((") else {
+            out.push_str(rest);
+            break;
+        };
+        if rest.get(..at).is_some_and(in_literal) {
+            out.push_str(rest.get(..at + 2).unwrap_or(rest));
+            rest = rest.get(at + 2..).unwrap_or("");
+            continue;
+        }
+        let after = rest.get(at + 2..).unwrap_or("");
+        let Some(cast) = element_cast(after, pointees) else {
+            out.push_str(rest.get(..at + 2).unwrap_or(rest));
+            rest = rest.get(at + 2..).unwrap_or("");
+            continue;
+        };
+        out.push_str(rest.get(..at).unwrap_or(""));
+        out.push_str(&cast);
+        rest = rest
+            .get(at + 2 + cast_len(after).unwrap_or(0)..)
+            .unwrap_or("");
+    }
+    out
+}
+
+/// `base[index]` when `after` is `T*)base)[index]...` and `base` is a `T *`.
+///
+/// # Arguments
+///
+/// * `after` - The text after `((`.
+/// * `pointees` - Declared pointer names and their pointees.
+fn element_cast(after: &str, pointees: &BTreeMap<String, String>) -> Option<String> {
+    let star = after.find("*)")?;
+    let ty = after.get(..star)?.trim();
+    if ty.is_empty() || ty.contains('(') {
+        return None;
+    }
+    let name_at = star + 2;
+    let name = after
+        .get(name_at..)?
+        .get(..ident_span(after.get(name_at..)?))?;
+    if !is_ident(name) || pointees.get(name).is_none_or(|p| p != ty) {
+        return None;
+    }
+    let bracket = after.get(name_at + name.len()..)?;
+    let bracket = bracket.strip_prefix(")[")?;
+    let end = close_bracket(bracket)?;
+    let index = bracket.get(..end)?;
+    Some(format!("{name}[{index}]"))
+}
+
+/// How many bytes of `after` an [`element_cast`] consumes, including the
+/// `T*)base)[index]` it read.
+///
+/// # Arguments
+///
+/// * `after` - The text after `((`.
+fn cast_len(after: &str) -> Option<usize> {
+    let star = after.find("*)")?;
+    let name_at = star + 2;
+    let name_len = ident_span(after.get(name_at..)?);
+    let tail = after.get(name_at + name_len..)?;
+    let bracket = tail.strip_prefix(")[")?;
+    let end = close_bracket(bracket)?;
+    Some(name_at + name_len + 2 + end + 1)
+}
+
+/// The identifier length at the start of `text`.
+///
+/// # Arguments
+///
+/// * `text` - Text that may start with a name.
+fn ident_span(text: &str) -> usize {
+    text.chars()
+        .take_while(|c| is_ident_char(*c))
+        .map(char::len_utf8)
+        .sum()
+}
+
+/// The index of the `]` that closes a `[` at the start of `text`'s caller.
+///
+/// `text` begins just after `[`.
+///
+/// # Arguments
+///
+/// * `text` - The index expression and the rest of the line.
+fn close_bracket(text: &str) -> Option<usize> {
+    let mut depth = 1i32;
+    let mut quote = false;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                quote = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => quote = true,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Tells whether the end of `head` lies inside a string literal.
 ///
 /// # Arguments
@@ -866,6 +1071,760 @@ fn in_literal(head: &str) -> bool {
     inside
 }
 
+/// Declares a local a 32-bit write zero-extended, and spells the sum back
+/// as a compound assignment.
+///
+/// A 32-bit register write keeps the low half and clears the rest. The
+/// lifter prints that as `v = (v + x) & 0xffffffff` so the text wraps where
+/// the machine does. Where every use of `v` is one of those writes, a
+/// constant update, a cast to that width, a `return` of it, or an index in
+/// an address, `v` is a `uint32_t` (or an `int32_t` when the only casts are
+/// signed, it is not returned, and it is not an index). An index is the
+/// zero-extended value, so a signed compare of that local keeps its cast.
+/// The mask then says nothing the declaration does not, so the
+/// write is `v += x` again and a counted `while` of it is a `for`. A use
+/// the mask does not cover stays as it was: narrowing it would sign-extend
+/// or wrap a value the machine kept.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, webs already split.
+///
+/// # Returns
+///
+/// The text with those locals declared at the width their writes used.
+pub(super) fn lane_locals(text: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let declared = uint64_names(&lines);
+    let typed: Vec<(String, &'static str)> = declared
+        .into_iter()
+        .filter_map(|name| lane_type(&lines, &name).map(|ty| (name, ty)))
+        .collect();
+    if typed.is_empty() {
+        return text.to_owned();
+    }
+    let lanes: BTreeSet<&str> = typed.iter().map(|(n, _)| n.as_str()).collect();
+    for line in &mut lines {
+        if let Some(next) = unwrap_lane(line, &lanes).or_else(|| unwrap_for_step(line, &lanes)) {
+            *line = next;
+        }
+    }
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(split) = split_const_chain(&lines[i], &lanes) {
+            let n = split.len();
+            lines.splice(i..=i, split);
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+    redeclare(&mut lines, &typed);
+    for (name, ty) in &typed {
+        let Some((casts, mask)) = narrow_type(ty) else {
+            continue;
+        };
+        for line in &mut lines {
+            if line.starts_with("//") || is_declaration(line) {
+                continue;
+            }
+            *line = strip_width(line, name, casts, mask);
+        }
+    }
+    loops::recover_loops(&mut lines);
+    sugar_gap(&mut lines);
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// The names a `uint64_t` declaration lists.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+fn uint64_names(lines: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in lines {
+        let Some(rest) = line
+            .strip_prefix("uint64_t ")
+            .and_then(|r| r.strip_suffix(';'))
+        else {
+            continue;
+        };
+        for name in rest.split(", ") {
+            let name = name.trim();
+            if is_register_name(name) || vars::is_var_name(name) {
+                out.push(name.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// The 32-bit type `name` has when its uses all agree, if they do.
+///
+/// # Arguments
+///
+/// * `lines` - The function.
+/// * `name` - A `uint64_t` local.
+fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
+    let mut masked = false;
+    let mut signed = false;
+    let mut unsigned = false;
+    let mut returned = false;
+    let mut indexed = false;
+    for line in lines {
+        if line.starts_with("//") || is_declaration(line) {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed == format!("return {name};") {
+            returned = true;
+        }
+        if for_step_masked(trimmed, name) {
+            masked = true;
+        }
+        if const_chain(trimmed).is_some_and(|chain| chain.iter().any(|n| *n == name)) {
+            // A constant assigned through one or several names truncates
+            // each of them to the same bits.
+        } else if let Some(rhs) = masked_rhs(trimmed, name) {
+            masked = true;
+            if rhs.contains('=') {
+                return None;
+            }
+        } else if let Some(rhs) = plain_rhs(trimmed, name) {
+            if !fits_u32(rhs) {
+                return None;
+            }
+        } else if let Some(rhs) = compound_rhs(trimmed, name) {
+            if !fits_u32(rhs) {
+                return None;
+            }
+        }
+        for at in word_positions(line, name) {
+            if address_index(line, at, name) {
+                indexed = true;
+                continue;
+            }
+            if lane_use(line, at, name) {
+                let head = line.get(..at).unwrap_or("");
+                if head.ends_with("(int32_t)") || head.ends_with("(int64_t)(int32_t)") {
+                    signed = true;
+                } else if head.ends_with("(uint32_t)") {
+                    unsigned = true;
+                }
+                continue;
+            }
+            return None;
+        }
+    }
+    if !masked {
+        return None;
+    }
+    if indexed || returned || unsigned || !signed {
+        Some("uint32_t")
+    } else {
+        Some("int32_t")
+    }
+}
+
+/// Tells whether `name` at `at` is an index in a load or a store.
+///
+/// `*(uint8_t*)(a2 + name)` and `((uint8_t*)a2)[name]` add the
+/// zero-extended register. A sum that is not an address is a full-width
+/// add and is not one.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - Byte index of the name.
+/// * `name` - The variable.
+fn address_index(line: &str, at: usize, name: &str) -> bool {
+    let head = line.get(..at).unwrap_or("");
+    let tail = line.get(at + name.len()..).unwrap_or("");
+    let left = head.ends_with(" + ") || head.ends_with(" - ") || head.ends_with(['(', '[']);
+    let right = tail.starts_with(" + ") || tail.starts_with(" - ") || tail.starts_with([')', ']']);
+    if !left || !right {
+        return false;
+    }
+    let from = head.rfind([';', '\n']).map_or(0, |i| i + 1);
+    let region = line.get(from..).unwrap_or(line);
+    region.contains("*(") || region.contains(")[")
+}
+
+/// Tells whether the use of `name` at `at` is a 32-bit one: its own write,
+/// a width cast, or a read under a truncating mask.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - Byte index of the name.
+/// * `name` - The variable.
+fn lane_use(line: &str, at: usize, name: &str) -> bool {
+    if for_part_use(line, at, name) {
+        return true;
+    }
+    let head = line.get(..at).unwrap_or("");
+    let tail = line.get(at + name.len()..).unwrap_or("");
+    if head.ends_with("(int32_t)")
+        || head.ends_with("(uint32_t)")
+        || head.ends_with("(int64_t)(int32_t)")
+    {
+        return true;
+    }
+    if const_chain(line.trim()).is_some_and(|names| names.contains(&name)) {
+        return true;
+    }
+    let trimmed = line.trim();
+    if trimmed == format!("return {name};") {
+        return true;
+    }
+    if masked_rhs(trimmed, name).is_some() && head.trim().is_empty() {
+        return true;
+    }
+    if plain_rhs(trimmed, name).is_some() && head.trim().is_empty() {
+        return true;
+    }
+    if compound_rhs(trimmed, name).is_some() && head.trim().is_empty() {
+        return true;
+    }
+    if let Some((_, _)) = masked_assign(trimmed) {
+        let eq = trimmed.find(" = ").unwrap_or(0);
+        return at > eq;
+    }
+    let _ = tail;
+    false
+}
+
+/// The right-hand side of `name = rhs & 0xffffffff`, when the mask covers it.
+///
+/// # Arguments
+///
+/// * `trimmed` - The line, trimmed, semicolon included.
+/// * `name` - The variable written.
+fn masked_rhs<'a>(trimmed: &'a str, name: &str) -> Option<&'a str> {
+    let (lhs, rhs) = masked_assign(trimmed)?;
+    (lhs == name).then_some(rhs)
+}
+
+/// `name = <expr> & 0xffffffff` split into the name and the masked expression.
+///
+/// # Arguments
+///
+/// * `trimmed` - One trimmed line.
+fn masked_assign(trimmed: &str) -> Option<(&str, &str)> {
+    let body = trimmed.strip_suffix(';')?;
+    let (lhs, rhs) = body.split_once(" = ")?;
+    if !is_ident(lhs) {
+        return None;
+    }
+    let expr = rhs.strip_suffix(" & 0xffffffff")?.trim();
+    balanced(expr).then_some((lhs, expr))
+}
+
+/// The names a `a = b = 0` chain writes, when the value fits in 32 bits.
+///
+/// # Arguments
+///
+/// * `trimmed` - One trimmed line.
+fn const_chain(trimmed: &str) -> Option<Vec<&str>> {
+    let body = trimmed.strip_suffix(';')?;
+    let mut parts: Vec<&str> = body.split(" = ").collect();
+    let value = parts.pop()?.trim();
+    if parts.is_empty() || !fits_u32(value) {
+        return None;
+    }
+    if parts.iter().any(|p| !is_ident(p.trim())) {
+        return None;
+    }
+    Some(parts.iter().map(|p| p.trim()).collect())
+}
+
+/// A plain `name = rhs` that is not a masked write.
+///
+/// # Arguments
+///
+/// * `trimmed` - One trimmed line.
+/// * `name` - The variable.
+fn plain_rhs<'a>(trimmed: &'a str, name: &str) -> Option<&'a str> {
+    if masked_assign(trimmed).is_some() {
+        return None;
+    }
+    let body = trimmed.strip_suffix(';')?;
+    let (lhs, rhs) = body.split_once(" = ")?;
+    (lhs == name && is_ident(lhs)).then_some(rhs.trim())
+}
+
+/// A compound `name += rhs` (and the other compound operators).
+///
+/// # Arguments
+///
+/// * `trimmed` - One trimmed line.
+/// * `name` - The variable.
+fn compound_rhs<'a>(trimmed: &'a str, name: &str) -> Option<&'a str> {
+    let body = trimmed.strip_suffix(';')?;
+    let (lhs, rest) = body.split_once(' ')?;
+    if lhs != name {
+        return None;
+    }
+    let (op, rhs) = rest.split_once(' ')?;
+    matches!(op, "+=" | "-=").then_some(rhs.trim())
+}
+
+/// Tells whether parentheses in `text` balance and never go negative.
+///
+/// # Arguments
+///
+/// * `text` - An expression.
+fn balanced(text: &str) -> bool {
+    let mut depth = 0i32;
+    for c in text.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// Tells whether `text` is a constant that fits in 32 bits.
+///
+/// # Arguments
+///
+/// * `text` - The right-hand side.
+fn fits_u32(text: &str) -> bool {
+    let token = text.trim();
+    let token = token.strip_suffix("u").unwrap_or(token);
+    let value = match token.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => token.parse().ok(),
+    };
+    value.is_some_and(|v| v <= 0xffff_ffff)
+}
+
+/// Rewrites one lane's masked assignment as a compound update when it is
+/// `name = name op rhs`, otherwise as a plain assignment of the low half.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+/// * `lanes` - The locals declared at 32 bits.
+fn unwrap_lane(line: &str, lanes: &BTreeSet<&str>) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, trimmed) = line.split_at(indent_len);
+    let (lhs, expr) = masked_assign(trimmed)?;
+    if !lanes.contains(lhs) {
+        return None;
+    }
+    let inner = peel(expr);
+    let rewritten = compound_of(lhs, inner).unwrap_or_else(|| format!("{lhs} = {inner}"));
+    Some(format!("{indent}{rewritten};"))
+}
+
+/// The three clauses of a `for` header, when `line` is one.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+fn for_clauses(line: &str) -> Option<(&str, &str, &str)> {
+    let rest = line.trim().strip_prefix("for (")?;
+    let header = rest.strip_suffix(") {")?;
+    let mut parts: Vec<&str> = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in header.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ';' if depth == 0 => {
+                parts.push(header.get(start..i)?.trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(header.get(start..)?.trim());
+    (parts.len() == 3).then_some((parts[0], parts[1], parts[2]))
+}
+
+/// Tells whether `name` at `at` is the initializer, the compare, or the
+/// step of a `for` whose step is a 32-bit wrapping update.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - Byte index of the name.
+/// * `name` - The variable.
+fn for_part_use(line: &str, at: usize, name: &str) -> bool {
+    let Some((init, _cond, step)) = for_clauses(line) else {
+        return false;
+    };
+    let step_stmt = format!("{step};");
+    let Some((lhs, _)) = masked_assign(&step_stmt) else {
+        return false;
+    };
+    if lhs != name {
+        return false;
+    }
+    let Some(header_at) = line.find("for (").map(|i| i + "for (".len()) else {
+        return false;
+    };
+    let Some(header) = line.get(header_at..).and_then(|h| h.strip_suffix(") {")) else {
+        return false;
+    };
+    let Some(local) = at.checked_sub(header_at) else {
+        return false;
+    };
+    if local >= header.len() {
+        return false;
+    }
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in header.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ';' if depth == 0 => {
+                ranges.push(start..i);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    ranges.push(start..header.len());
+    let Some(clause) = ranges
+        .iter()
+        .position(|r| r.start <= local && local < r.end)
+    else {
+        return false;
+    };
+    match clause {
+        0 => {
+            let Some(value) = init
+                .strip_prefix(name)
+                .and_then(|r| r.trim_start().strip_prefix('='))
+                .map(str::trim)
+            else {
+                return false;
+            };
+            header
+                .get(ranges[0].clone())
+                .is_some_and(|c| c.trim().starts_with(name))
+                && fits_u32(value)
+        }
+        1 => {
+            let head = line.get(..at).unwrap_or("");
+            head.ends_with("(int32_t)")
+                || head.ends_with("(uint32_t)")
+                || head.ends_with("(int64_t)(int32_t)")
+        }
+        _ => true,
+    }
+}
+
+/// Tells whether a `for` step writes `name` through a 32-bit mask.
+///
+/// # Arguments
+///
+/// * `trimmed` - The line, trimmed.
+/// * `name` - The variable.
+fn for_step_masked(trimmed: &str, name: &str) -> bool {
+    let Some((_, _, step)) = for_clauses(trimmed) else {
+        return false;
+    };
+    let stmt = format!("{step};");
+    masked_assign(&stmt).is_some_and(|(lhs, _)| lhs == name)
+}
+
+/// Rewrites a `for` step `name = (name + n) & 0xffffffff` as `name += n`.
+///
+/// The declaration is already the lane, so the add wraps where the mask did.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+/// * `lanes` - The locals declared at 32 bits.
+fn unwrap_for_step(line: &str, lanes: &BTreeSet<&str>) -> Option<String> {
+    let (init, cond, step) = for_clauses(line)?;
+    let stmt = format!("{step};");
+    let (lhs, expr) = masked_assign(&stmt)?;
+    let lhs = lhs.to_owned();
+    let expr = expr.to_owned();
+    if !lanes.contains(lhs.as_str()) {
+        return None;
+    }
+    let rewritten = compound_of(&lhs, peel(&expr))?;
+    let indent_len = line.len() - line.trim_start().len();
+    let indent = line.get(..indent_len).unwrap_or("");
+    Some(format!("{indent}for ({init}; {cond}; {rewritten}) {{"))
+}
+
+/// Splits `a = b = 0` into one assignment a name when any of them is a lane.
+///
+/// The rightmost name is written first, which is the order the chain
+/// itself writes them.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+/// * `lanes` - The locals declared at 32 bits.
+fn split_const_chain(line: &str, lanes: &BTreeSet<&str>) -> Option<Vec<String>> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, trimmed) = line.split_at(indent_len);
+    let names = const_chain(trimmed)?;
+    if !names.iter().any(|n| lanes.contains(n)) || names.len() < 2 {
+        return None;
+    }
+    let value = trimmed
+        .strip_suffix(';')
+        .and_then(|b| b.rsplit(" = ").next())?
+        .trim();
+    Some(
+        names
+            .into_iter()
+            .rev()
+            .map(|n| format!("{indent}{n} = {value};"))
+            .collect(),
+    )
+}
+
+/// Drops one pair of parentheses that wraps the whole expression.
+///
+/// # Arguments
+///
+/// * `expr` - The masked expression.
+fn peel(expr: &str) -> &str {
+    let expr = expr.trim();
+    if expr.len() >= 2 && expr.starts_with('(') && expr.ends_with(')') {
+        let inner = expr.get(1..expr.len() - 1).unwrap_or(expr);
+        let mut depth = 0i32;
+        let mut wraps = true;
+        for (i, c) in expr.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && i + 1 != expr.len() {
+                        wraps = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if wraps && balanced(inner) {
+            return inner.trim();
+        }
+    }
+    expr
+}
+
+/// `name + rhs` as `name += rhs`, and the same for `-`.
+///
+/// # Arguments
+///
+/// * `name` - The variable written.
+/// * `expr` - The unmasked expression.
+fn compound_of(name: &str, expr: &str) -> Option<String> {
+    let (left, op, right) = top_op(expr)?;
+    if left == name && (op == "+" || op == "-") {
+        let sym = if op == "+" { "+=" } else { "-=" };
+        return Some(format!("{name} {sym} {right}"));
+    }
+    if right == name && op == "+" {
+        return Some(format!("{name} += {left}"));
+    }
+    None
+}
+
+/// The top-level `+` or `-` of an expression, when it has one.
+///
+/// # Arguments
+///
+/// * `expr` - An expression with balanced parentheses.
+fn top_op(expr: &str) -> Option<(&str, &str, &str)> {
+    let bytes = expr.as_bytes();
+    let mut depth = 0i32;
+    let mut found = None;
+    for (i, b) in bytes.iter().copied().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'+' | b'-'
+                if depth == 0
+                    && i > 0
+                    && bytes[i - 1] == b' '
+                    && bytes.get(i + 1) == Some(&b' ') =>
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(i);
+            }
+            _ => {}
+        }
+    }
+    let at = found?;
+    let op = expr.get(at..at + 1)?;
+    let left = expr.get(..at)?.trim();
+    let right = expr.get(at + 1..)?.trim();
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    Some((left, op, right))
+}
+
+/// Moves the typed locals off the `uint64_t` declaration onto their own.
+///
+/// # Arguments
+///
+/// * `lines` - The function, rewritten in place.
+/// * `typed` - Each local and the type it gained.
+fn redeclare(lines: &mut Vec<String>, typed: &[(String, &'static str)]) {
+    let taken: BTreeSet<&str> = typed.iter().map(|(n, _)| n.as_str()).collect();
+    let mut extra: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    for (name, ty) in typed {
+        extra.entry(*ty).or_default().push(name.clone());
+    }
+    let mut at = None;
+    for (i, line) in lines.iter_mut().enumerate() {
+        let Some(kept) = line
+            .strip_prefix("uint64_t ")
+            .and_then(|rest| rest.strip_suffix(';'))
+            .map(|names| {
+                names
+                    .split(", ")
+                    .map(str::trim)
+                    .filter(|n| !taken.contains(n))
+                    .collect::<Vec<&str>>()
+            })
+        else {
+            continue;
+        };
+        *line = if kept.is_empty() {
+            String::from("\u{0}")
+        } else {
+            format!("uint64_t {};", kept.join(", "))
+        };
+        at = Some(i);
+    }
+    if let Some(i) = at {
+        let added: Vec<String> = extra
+            .iter()
+            .map(|(ty, names)| format!("{ty} {};", names.join(", ")))
+            .collect();
+        lines.splice(i + 1..i + 1, added);
+    }
+    lines.retain(|l| l != "\u{0}");
+}
+
+/// Pulls a counter's initializer up to the `while` when another pure
+/// assignment sits between them, and makes the `for` the emitter would
+/// have made from a `+= 1` it can now see.
+///
+/// # Arguments
+///
+/// * `lines` - The body, after lane writes read as compound updates.
+fn sugar_gap(lines: &mut Vec<String>) {
+    let mut k = 0;
+    while k < lines.len() {
+        if !gap_for(lines, k) {
+            k += 1;
+        }
+    }
+}
+
+/// Rewrites `v = init; <pure>; while (C) { B; v += 1; }` at `k` as a `for`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of `v`'s initializer.
+///
+/// # Returns
+///
+/// Whether the `while` became a `for`.
+fn gap_for(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(init) = lines.get(k) else {
+        return false;
+    };
+    let pad = indent_of(init);
+    let Some((v, value)) = plain_assignment(init).filter(|(_, r)| !impure(r)) else {
+        return false;
+    };
+    let mut head = None;
+    let mut between = Vec::new();
+    for j in (k + 1)..lines.len().min(k + 6) {
+        let Some(line) = lines.get(j) else {
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if indent_of(line) != pad {
+            return false;
+        }
+        if let Some(cond) = line
+            .trim()
+            .strip_prefix("while (")
+            .and_then(|r| r.strip_suffix(") {"))
+        {
+            if !mentions_ident(cond, v) {
+                return false;
+            }
+            head = Some((j, cond.to_owned()));
+            break;
+        }
+        let Some((other, rhs)) = plain_assignment(line).filter(|(_, r)| !impure(r)) else {
+            return false;
+        };
+        if other == v || mentions_ident(rhs, v) || mentions_ident(value, other) {
+            return false;
+        }
+        between.push(line.clone());
+    }
+    let Some((head, cond)) = head else {
+        return false;
+    };
+    if between.is_empty() {
+        return false;
+    }
+    let Some(close) = loops::closing(lines, head, pad) else {
+        return false;
+    };
+    if lines.get(close).is_none_or(|l| l.trim() != "}") {
+        return false;
+    }
+    let body = lines.get(head + 1..close).unwrap_or(&[]);
+    if body.iter().any(|l| is_label(l)) {
+        return false;
+    }
+    let Some(step) = body.last().map(|l| l.trim().to_owned()) else {
+        return false;
+    };
+    let Some(step) = step.strip_suffix(';') else {
+        return false;
+    };
+    if step != format!("{v} += 1") && step != format!("{v} -= 1") {
+        return false;
+    }
+    let pad_s = " ".repeat(pad);
+    let mut rewritten = between;
+    rewritten.push(format!("{pad_s}for ({v} = {value}; {cond}; {step}) {{"));
+    rewritten.extend(body.get(..body.len() - 1).unwrap_or(&[]).iter().cloned());
+    rewritten.push(format!("{pad_s}}}"));
+    lines.splice(k..=close, rewritten);
+    true
+}
+
 /// Declares a register variable at the width its uses show, and drops the
 /// casts that width makes redundant.
 ///
@@ -874,7 +1833,10 @@ fn in_literal(head: &str) -> bool {
 /// `int32_t`, one every use masks to a byte was a `uint8_t`. The name moves
 /// off the `uint64_t` line onto one of its own type, dropping that line
 /// when nothing is left on it, and its casts and
-/// masks go, since C promotes the declared type the same way. Only register
+/// masks go, since C promotes the declared type the same way. A local the
+/// text already declares at a narrow width drops that same cast, including
+/// one written `(uint32_t)(name)`, and keeps a cast of a different width.
+/// Only register
 /// names and the variables a register's webs became
 /// ([`super::vars::split_webs`]) move; a stack slot keeps the width its
 /// accesses gave it, which the overlap notes depend on.
@@ -914,7 +1876,8 @@ pub(super) fn type_locals(text: &str) -> String {
             }
         }
     }
-    if narrowed.is_empty() {
+    let declared_narrow = narrow_declarations(&lines);
+    if narrowed.is_empty() && declared_narrow.is_empty() {
         return text.to_owned();
     }
     for (name, ty) in &narrowed {
@@ -962,6 +1925,17 @@ pub(super) fn type_locals(text: &str) -> String {
             .collect();
         lines.splice(i + 1..i + 1, added);
     }
+    for (name, ty) in &declared_narrow {
+        let Some((casts, mask)) = narrow_type(ty) else {
+            continue;
+        };
+        for line in &mut lines {
+            if line.starts_with("//") || is_declaration(line) {
+                continue;
+            }
+            *line = strip_width(line, name, casts, mask);
+        }
+    }
     let mut out: String = lines
         .into_iter()
         .filter(|l| l != "\u{0}")
@@ -990,6 +1964,75 @@ pub(super) fn is_declaration(line: &str) -> bool {
         })
 }
 
+/// Names a declaration already gives a narrow integer type, with that type.
+///
+/// A `uint64_t` line is not one of these: [`type_locals`] retypes those
+/// from their uses. A pointer declaration is not one either.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+fn narrow_declarations(lines: &[String]) -> Vec<(String, &'static str)> {
+    /// Longest first, so `unsigned int` is not read as `unsigned`.
+    const DECLS: &[&str] = &[
+        "unsigned char",
+        "unsigned short",
+        "unsigned int",
+        "unsigned long",
+        "signed char",
+        "int32_t",
+        "int16_t",
+        "int8_t",
+        "uint32_t",
+        "uint16_t",
+        "uint8_t",
+        "HRESULT",
+        "BOOLEAN",
+        "wchar_t",
+        "unsigned",
+        "DWORD",
+        "ULONG",
+        "SHORT",
+        "UINT",
+        "WORD",
+        "BYTE",
+        "LONG",
+        "INT",
+        "short",
+        "bool",
+        "char",
+        "long",
+        "int",
+    ];
+    let mut out = Vec::new();
+    for line in lines {
+        let t = line.trim();
+        if t.starts_with("//") || t.contains('=') || t.contains('(') || !t.ends_with(';') {
+            continue;
+        }
+        let Some(ty) = DECLS
+            .iter()
+            .copied()
+            .find(|ty| t.starts_with(ty) && t.as_bytes().get(ty.len()).is_some_and(|c| *c == b' '))
+        else {
+            continue;
+        };
+        if narrow_type(ty).is_none() {
+            continue;
+        }
+        let Some(names) = t[ty.len()..].trim().strip_suffix(';') else {
+            continue;
+        };
+        if names.is_empty() || !names.split(", ").all(is_ident) {
+            continue;
+        }
+        for name in names.split(", ") {
+            out.push((name.to_owned(), ty));
+        }
+    }
+    out
+}
+
 /// Removes one variable's redundant casts and masks from a line of a 64-bit
 /// function's text.
 ///
@@ -1003,8 +2046,13 @@ pub(super) fn strip_width(line: &str, name: &str, casts: &[&str], mask: Option<u
     unwrap_parens(&strip_casts(line, name, casts, mask, true), name)
 }
 
-/// Removes one variable's redundant casts and masks from a line, leaving
-/// any parentheses that held them.
+/// Removes one variable's redundant casts and masks from a line.
+///
+/// A mask's own grouping parentheses go with it when the character before
+/// them is not a name and they are not the parentheses of `if`, `while`,
+/// or `switch`. `(float)(a1 & 0xffffffff)` becomes `(float)a1`.
+/// `foo(a1 & 0xffffffff)` and `switch (a1 & 0xffff)` keep their parentheses.
+/// Any other parentheses stay for [`unwrap_parens`].
 ///
 /// A narrow type computes in `int` or `unsigned int` where the masked or
 /// extended value computed in the machine's 64 bits: `(a2 & 0xffffffff) <<
@@ -1029,11 +2077,23 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
         if at < from {
             continue;
         }
-        let found = casts
-            .iter()
-            .find(|cast| line.get(..at).is_some_and(|h| h.ends_with(*cast)));
-        let start = found.map_or(at, |cast| at - cast.len());
-        let mut end = at + name.len();
+        let head = line.get(..at).unwrap_or("");
+        let tail = line.get(at + name.len()..).unwrap_or("");
+        let wrapped = casts.iter().find(|cast| {
+            tail.starts_with(')')
+                && head.len() > cast.len()
+                && head.as_bytes().get(head.len() - 1) == Some(&b'(')
+                && head
+                    .get(..head.len() - 1)
+                    .is_some_and(|h| h.ends_with(*cast))
+        });
+        let found = wrapped.or_else(|| casts.iter().find(|cast| head.ends_with(*cast)));
+        let start = match (found, wrapped.is_some()) {
+            (Some(cast), true) => at - cast.len() - 1,
+            (Some(cast), false) => at - cast.len(),
+            (None, _) => at,
+        };
+        let mut end = at + name.len() + usize::from(wrapped.is_some());
         let mut masked = false;
         if let Some(bits) = mask_width(line.get(end..).unwrap_or(""))
             && mask == Some(bits)
@@ -1041,14 +2101,23 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
             end += mask_text(bits).len();
             masked = true;
         }
-        let (lo, hi) = if masked
+        let wrapped_mask = masked
             && line.get(..start).is_some_and(|h| h.ends_with('('))
-            && line.get(end..).is_some_and(|t| t.starts_with(')'))
-        {
+            && line.get(end..).is_some_and(|t| t.starts_with(')'));
+        let (lo, hi) = if wrapped_mask {
             (start - 1, end + 1)
         } else {
             (start, end)
         };
+        let before = line.get(..start - usize::from(wrapped_mask)).unwrap_or("");
+        let call = wrapped_mask && before.ends_with(is_ident_char);
+        let control = wrapped_mask
+            && ["if", "while", "switch"].iter().any(|kw| {
+                before
+                    .strip_suffix(' ')
+                    .and_then(|h| h.strip_suffix(kw))
+                    .is_some_and(|h| !h.ends_with(is_ident_char))
+            });
         let compared = line
             .get(end..)
             .and_then(|t| t.strip_prefix(" == ").or_else(|| t.strip_prefix(" != ")));
@@ -1087,9 +2156,14 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
             from = hi;
             continue;
         }
-        out.push_str(line.get(from..start).unwrap_or(""));
+        let (keep_from, keep_to) = if wrapped_mask && !call && !control {
+            (lo, hi)
+        } else {
+            (start, end)
+        };
+        out.push_str(line.get(from..keep_from).unwrap_or(""));
         out.push_str(name);
-        from = end;
+        from = keep_to;
     }
     out.push_str(line.get(from..).unwrap_or(""));
     out
@@ -1284,8 +2358,10 @@ pub(super) fn unwrap_parens(line: &str, name: &str) -> String {
 /// The narrow type every use of a `uint64_t` variable agrees on, if any.
 ///
 /// A variable's own assignment says nothing about its width, since the value
-/// is truncated to whatever the variable is declared as, so it is skipped;
-/// a parameter never has one.
+/// is truncated to whatever the variable is declared as, so it is skipped.
+/// Storing it through a typed pointer is that pointee's width, and
+/// returning it from a function whose result is a narrow integer is that
+/// result's width.
 ///
 /// # Arguments
 ///
@@ -1312,6 +2388,10 @@ pub(super) fn inferred_type(lines: &[String], param: &str) -> Option<&'static st
                 "uint16_t"
             } else if head.ends_with("(uint8_t)") {
                 "uint8_t"
+            } else if let Some(stored) = stored_width(head, tail) {
+                stored
+            } else if head.trim() == "return" && tail.trim_start().starts_with(';') {
+                scalar_width(signature_result(lines)?)?
             } else {
                 match mask_width(tail)? {
                     8 => "uint8_t",
@@ -1326,6 +2406,222 @@ pub(super) fn inferred_type(lines: &[String], param: &str) -> Option<&'static st
         }
     }
     ty
+}
+
+/// The integer width a store of exactly one name writes.
+///
+/// `*(uint32_t*)p = name` uses the low 32 bits and nothing above them.
+/// A store of a sum does not: the sum may have been computed at 64 bits.
+///
+/// # Arguments
+///
+/// * `head` - The line up to the name.
+/// * `tail` - The line after the name.
+fn stored_width(head: &str, tail: &str) -> Option<&'static str> {
+    if !tail.trim_start().starts_with(';') {
+        return None;
+    }
+    let dest = head.trim_end().strip_suffix(" =")?.trim();
+    let after = dest.strip_prefix("*(")?;
+    let ty = after.split_once("*)")?.0.trim();
+    scalar_width(ty)
+}
+
+/// The narrow integer a C type name denotes, as [`inferred_type`] spells it.
+///
+/// # Arguments
+///
+/// * `ty` - A type as a signature or a cast spells it.
+fn scalar_width(ty: &str) -> Option<&'static str> {
+    match ty {
+        "int32_t" | "int" | "long" | "INT" | "LONG" | "HRESULT" => Some("int32_t"),
+        "int16_t" | "short" | "SHORT" => Some("int16_t"),
+        "int8_t" | "char" | "signed char" => Some("int8_t"),
+        "uint8_t" | "bool" | "unsigned char" | "BYTE" | "BOOLEAN" => Some("uint8_t"),
+        "uint16_t" | "unsigned short" | "WORD" | "wchar_t" => Some("uint16_t"),
+        "uint32_t" | "unsigned int" | "unsigned" | "DWORD" | "unsigned long" | "ULONG" | "UINT" => {
+            Some("uint32_t")
+        }
+        _ => None,
+    }
+}
+
+/// The result type on the `// signature:` line.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+fn signature_result(lines: &[String]) -> Option<&str> {
+    let sig = lines.iter().find(|l| l.starts_with("// signature: "))?;
+    let rest = sig.get("// signature: ".len()..)?.trim();
+    let head = rest.split_once('(')?.0.trim();
+    let ty = head.rsplit_once(' ')?.0.trim();
+    (!ty.is_empty()).then_some(ty)
+}
+
+/// Drops a width cast from a zero test when the declaration already says it.
+///
+/// `test eax, eax` after a call prints `(uint32_t)f() == 0`. The cast is
+/// the register the test read, and it hides the call: a zero test of a
+/// call, of a pointer, or of a name declared no wider than the cast reads
+/// the same without it. A `uint64_t` or `int64_t` that nothing narrowed
+/// keeps the cast, because its high half can be set where the low half is
+/// zero.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, types already applied.
+pub(super) fn quiet_zero_tests(text: &str) -> String {
+    let wide = wide_names(text);
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if line.starts_with("//") {
+            out.push_str(line);
+        } else {
+            out.push_str(&strip_zero_casts(line, &wide));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The names a 64-bit integer declaration still lists.
+///
+/// # Arguments
+///
+/// * `text` - The function.
+fn wide_names(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("uint64_t ")
+            .or_else(|| trimmed.strip_prefix("int64_t "))
+            .and_then(|r| r.strip_suffix(';'))
+        {
+            for name in rest.split(", ") {
+                let name = name.trim();
+                if is_ident(name) {
+                    out.insert(name.to_owned());
+                }
+            }
+        }
+        let Some(sig) = trimmed.strip_prefix("// signature: ") else {
+            continue;
+        };
+        let Some(params) = sig
+            .rsplit_once('(')
+            .and_then(|(_, rest)| rest.rsplit_once(')').map(|(inner, _)| inner))
+        else {
+            continue;
+        };
+        for param in params.split(',') {
+            let Some((ty, name)) = param.trim().rsplit_once(' ') else {
+                continue;
+            };
+            if matches!(ty.trim(), "uint64_t" | "int64_t") && is_ident(name.trim()) {
+                out.insert(name.trim().to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// Removes width casts on zero tests from one line.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+/// * `wide` - Names still declared as a 64-bit integer.
+fn strip_zero_casts(line: &str, wide: &BTreeSet<String>) -> String {
+    const CASTS: [&str; 6] = [
+        "(uint32_t)",
+        "(int32_t)",
+        "(uint16_t)",
+        "(int16_t)",
+        "(uint8_t)",
+        "(int8_t)",
+    ];
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some((at, cast)) = CASTS
+        .iter()
+        .filter_map(|cast| rest.find(cast).map(|at| (at, *cast)))
+        .min_by_key(|(at, _)| *at)
+    {
+        let after = rest.get(at + cast.len()..).unwrap_or("");
+        let Some(end) = operand_end(after) else {
+            out.push_str(rest.get(..at + 1).unwrap_or(rest));
+            rest = rest.get(at + 1..).unwrap_or("");
+            continue;
+        };
+        let operand = after.get(..end).unwrap_or("");
+        let following = after.get(end..).unwrap_or("").trim_start();
+        let zero = following.starts_with("== 0") || following.starts_with("!= 0");
+        let call = operand.contains('(') && !operand.starts_with('(');
+        let bare = is_ident(operand);
+        let drop_cast = zero && (call || (bare && !wide.contains(operand)));
+        out.push_str(rest.get(..at).unwrap_or(""));
+        if !drop_cast {
+            out.push_str(cast);
+        }
+        out.push_str(operand);
+        rest = after.get(end..).unwrap_or("");
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The end of a name, a call, or a parenthesized expression at the start of
+/// `text`.
+///
+/// # Arguments
+///
+/// * `text` - The text after a cast.
+fn operand_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.first() == Some(&b'(') {
+        return balanced_end(text);
+    }
+    let mut i = 0;
+    if bytes
+        .first()
+        .is_none_or(|c| !c.is_ascii_alphabetic() && *c != b'_')
+    {
+        return None;
+    }
+    while bytes
+        .get(i)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b':')
+    {
+        i += 1;
+    }
+    if bytes.get(i) == Some(&b'(') {
+        i += balanced_end(text.get(i..)?)?;
+    }
+    Some(i)
+}
+
+/// The index just past the `)` that closes a `(` at the start of `text`.
+///
+/// # Arguments
+///
+/// * `text` - An expression starting with `(`.
+fn balanced_end(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + c.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The casts and mask a declared parameter type makes redundant.
@@ -1571,6 +2867,170 @@ mod accessor_tests {
         );
         assert_eq!(accessor_class("Core::Ptr<Game::OfferGroup>::Release"), None);
         assert_eq!(accessor_class("Game::OfferGroup::get"), None);
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::lane_locals;
+
+    /// A 32-bit counter compared as signed and the 32-bit sum it feeds are
+    /// declared at those widths, so the compare cast and the truncation
+    /// mask are the declaration's.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_32_bit_counter_and_its_sum_lose_the_truncation_mask() {
+        let text = concat!(
+            "// signature: uint64_t f()\n",
+            "uint64_t var1, var2;\n",
+            "\n",
+            "var1 = var2 = 0;\n",
+            "while ((int32_t)var2 < 5) {\n",
+            "  var1 = (var1 + var2) & 0xffffffff;\n",
+            "  var2 = (var2 + 1) & 0xffffffff;\n",
+            "}\n",
+            "return var1;\n",
+        );
+        let out = lane_locals(text);
+        assert!(out.contains("int32_t var2;"), "{out}");
+        assert!(out.contains("uint32_t var1;"), "{out}");
+        assert!(out.contains("for (var2 = 0; var2 < 5; var2 += 1)"), "{out}");
+        assert!(out.contains("var1 += var2;"), "{out}");
+        assert!(!out.contains("0xffffffff"), "{out}");
+        assert!(!out.contains("(int32_t)"), "{out}");
+    }
+
+    /// A shift of the same register after the truncating add reads the bits
+    /// above 32, so the mask stays and the local stays `uint64_t`.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_later_wide_shift_keeps_the_truncation_mask() {
+        let text = concat!(
+            "uint64_t var1;\n",
+            "\n",
+            "var1 = (var1 + 1) & 0xffffffff;\n",
+            "var1 <<= 4;\n",
+            "return var1;\n",
+        );
+        let out = lane_locals(text);
+        assert!(out.contains("uint64_t var1;"), "{out}");
+        assert!(out.contains("0xffffffff"), "{out}");
+        assert!(out.contains("var1 <<= 4;"), "{out}");
+    }
+
+    /// A counter used as an address index is the zero-extended value, so
+    /// the mask becomes `+=` and the local is `uint32_t`.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn an_index_is_the_zero_extended_counter() {
+        let text = concat!(
+            "// signature: uint32_t f(uint64_t a1, uint8_t *a2, uint32_t a3)\n",
+            "uint64_t var1;\n",
+            "\n",
+            "var1 = 0;\n",
+            "do {\n",
+            "  *(uint8_t*)(a2 + var1) = 65;\n",
+            "  var1 = (var1 + 1) & 0xffffffff;\n",
+            "} while ((uint32_t)var1 < a3);\n",
+            "return 65;\n",
+        );
+        let out = lane_locals(text);
+        assert!(out.contains("uint32_t var1;"), "{out}");
+        assert_eq!(out.matches("var1 += 1;").count(), 1, "{out}");
+        assert!(out.contains("while (var1 < a3);"), "{out}");
+        assert!(!out.contains("0xffffffff"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod declared_cast_tests {
+    use super::type_locals;
+
+    /// A local already declared at the cast's width does not need the cast.
+    /// A different width, a cast of a sum, a nonzero equality, and a zero
+    /// test of a `uint64_t` stay.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_name_declared_at_the_cast_width_drops_the_cast() {
+        let text = concat!(
+            "uint32_t var1;\n",
+            "int32_t var2;\n",
+            "uint64_t var3;\n",
+            "\n",
+            "if ((uint32_t)var1 < 5) {\n",
+            "  return var1;\n",
+            "}\n",
+            "if ((uint32_t)(var1) != 0) {\n",
+            "  return 1;\n",
+            "}\n",
+            "if ((uint32_t)var2 == 6) {\n",
+            "  return 2;\n",
+            "}\n",
+            "if ((int32_t)(var2 + 1) < 0) {\n",
+            "  return 3;\n",
+            "}\n",
+            "var3 = var3 << 4;\n",
+            "if ((uint32_t)var3 != 0) {\n",
+            "  return 4;\n",
+            "}\n",
+        );
+        let out = type_locals(text);
+        assert!(out.contains("if (var1 < 5) {"), "{out}");
+        assert!(out.contains("if (var1 != 0) {"), "{out}");
+        assert!(!out.contains("(uint32_t)var1"), "{out}");
+        assert!(!out.contains("(uint32_t)(var1)"), "{out}");
+        assert!(out.contains("if ((uint32_t)var2 == 6) {"), "{out}");
+        assert!(out.contains("if ((int32_t)(var2 + 1) < 0) {"), "{out}");
+        assert!(out.contains("if ((uint32_t)var3 != 0) {"), "{out}");
+        assert!(out.contains("uint64_t var3;"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod zero_tests {
+    use super::quiet_zero_tests;
+
+    /// A zero test of a call drops the register cast. A `uint64_t` the
+    /// function also uses whole keeps it, and a store of a parameter at 32
+    /// bits declares the parameter at that width.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_zero_test_of_a_call_drops_its_cast() {
+        let text = concat!(
+            "// signature: uint32_t f(uint64_t a1, uint64_t a2)\n",
+            "uint64_t var1;\n",
+            "\n",
+            "if ((uint32_t)sub_1() != 0) {\n",
+            "  *(uint32_t*)a2 = a1;\n",
+            "}\n",
+            "var1 = var1 + a2;\n",
+            "if ((uint32_t)var1 != 0) {\n",
+            "  return a1;\n",
+            "}\n",
+            "return 0;\n",
+        );
+        let out = super::type_parameters(text, "uint64_t");
+        let out = quiet_zero_tests(&super::type_locals(&out));
+        assert!(out.contains("if (sub_1() != 0)"), "{out}");
+        assert!(!out.contains("(uint32_t)sub_1"), "{out}");
+        assert!(out.contains("uint32_t a1"), "{out}");
+        assert!(out.contains("*(uint32_t*)a2 = a1;"), "{out}");
+        assert!(out.contains("(uint32_t)var1 != 0"), "{out}");
     }
 }
 

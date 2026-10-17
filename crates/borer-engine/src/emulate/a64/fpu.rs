@@ -401,6 +401,9 @@ impl Machine<'_> {
         else {
             return Err(unmodeled(i));
         };
+        if !matches!(to, 32 | 64) || !matches!(from, 32 | 64) {
+            return Err(unmodeled(i));
+        }
         let x = match i.operands.get(2) {
             Some(Opnd::Imm(v)) if *v != 0 && *v <= 64 => value(self, src, from) * pow2(*v),
             Some(Opnd::None) | None => value(self, src, from),
@@ -496,10 +499,19 @@ fn fixed(x: f64, signed: bool, bits: u16) -> u64 {
         if t >= top * 2.0 {
             return mask(u64::MAX, u32::from(bits));
         }
+        // A value in `[2^63, 2^64)` fits in the unsigned result and does not
+        // fit in `i64`. Casting through `i64` would saturate a step early.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_precision_loss,
+            reason = "the bounds keep the truncated value within the unsigned width"
+        )]
+        let v = t as u64;
+        return mask(v, u32::from(bits));
     }
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "the bounds above keep the truncated value within the width"
+        reason = "the bounds above keep the truncated value within the signed width"
     )]
     let v = t as i64;
     mask(v.cast_unsigned(), u32::from(bits))

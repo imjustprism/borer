@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::super::expr::{Expr, Key};
+use super::super::expr::{Expr, Key, Ty};
 use super::super::lift::{self, Env};
 use super::super::{Ctx, Shape, declared_arity, new_ctx, pointee_type};
 use super::{decode, live};
@@ -766,7 +766,8 @@ fn copy_of(i: &Insn, holds: &BTreeMap<Reg, (usize, i64)>) -> Option<(Reg, (usize
 /// # Returns
 ///
 /// The C type per parameter position, for the parameters accessed as
-/// pointers.
+/// pointers, and for a floating parameter whose register was first read
+/// as a double.
 pub(in crate::analysis::decompile) fn param_types(
     ctx: &Ctx<'_>,
     code: &[Vec<Insn>],
@@ -819,7 +820,20 @@ pub(in crate::analysis::decompile) fn param_types(
             holds.insert(d, h);
         }
     }
-    seen.into_iter()
+    let mut typed: BTreeMap<usize, String> = seen
+        .into_iter()
         .map(|(p, s)| (p, pointee_type(&s.widths, &s.offsets).to_owned()))
-        .collect()
+        .collect();
+    for p in 0..declared {
+        if typed.contains_key(&p) {
+            continue;
+        }
+        let Some(r @ Reg::V(_)) = arg_reg(p, ctx.arg_floats) else {
+            continue;
+        };
+        if matches!(ctx.reg_ty.get(&Key::A64(r)), Some(Ty::F64)) {
+            typed.insert(p, "double".to_owned());
+        }
+    }
+    typed
 }

@@ -1692,7 +1692,7 @@ fn x87_arithmetic_lifts_through_the_register_stack() {
     ]);
     assert!(!text.contains("/* asm"), "{text}");
     assert!(
-        text.contains("a1->field_0x8 = a1->field_0x0 * a1->field_0x4;"),
+        text.contains("a1->field_0x8 = (double)a1->field_0x0 * (double)a1->field_0x4;"),
         "{text}"
     );
     assert!(
@@ -3681,9 +3681,10 @@ fn a_bit_test_on_memory_indexes_the_bit_string() {
         0xb6, 0xc0, 0xc3,
     ]);
     assert!(
-        text.contains("((uint32_t*)a2)[(int64_t)(int32_t)a1 >> 5] >> (a1 & 0x1f)"),
+        text.contains("a2[(int64_t)(int32_t)a1 >> 5] >> (a1 & 0x1f)"),
         "{text}"
     );
+    assert!(text.contains("uint32_t *a2"), "{text}");
 }
 
 /// A push onto the x87 stack moves the registers' text variables down.
