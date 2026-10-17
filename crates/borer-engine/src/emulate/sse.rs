@@ -494,6 +494,12 @@ impl Emulator<'_> {
             | M::Vsubps
             | M::Vmulps
             | M::Vdivps => self.packed_float(i, m, Width::Single),
+            M::Cmpss | M::Vcmpss => self.scalar_cmp(i, Width::Single),
+            M::Cmpsd | M::Vcmpsd
+                if i.op0_kind() == OpKind::Register && i.op0_register().is_vector_register() =>
+            {
+                self.scalar_cmp(i, Width::Double)
+            }
             M::Comisd | M::Ucomisd | M::Vcomisd | M::Vucomisd => {
                 self.float_compare(i, Width::Double)
             }
@@ -613,6 +619,35 @@ impl Emulator<'_> {
             arith(m, x, y, width).unwrap_or(0)
         });
         self.vector_store(i, v)
+    }
+
+    /// `cmpeqss` and `cmpeqsd`: the low lane becomes all ones when the
+    /// ordered equality holds, and zero otherwise.
+    ///
+    /// A NaN compares false and the two zeros compare true, which is C's
+    /// `==`. The bits above the lane stay. Any other predicate is left
+    /// unmodeled.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The compare.
+    /// * `width` - The lane.
+    ///
+    /// # Errors
+    ///
+    /// When an operand cannot be read or written, or the predicate is not
+    /// ordered equality.
+    fn scalar_cmp(&mut self, i: &Instruction, width: Width) -> Result<(), Stop> {
+        if i.immediate8() & 0x1f != 0 {
+            return Err(Stop::Unmodeled(format!("{:?}", i.mnemonic())));
+        }
+        let rest_op = u32::from(i.op_count() >= 4);
+        let rest = self.vector_operand(i, rest_op)?;
+        let a = lo64(rest & width.lane());
+        let b = self.lane_operand(i, i.op_count() - 2, width.bytes())?;
+        let eq = width.to_f64(a) == width.to_f64(b);
+        let mask = if eq { width.lane() } else { 0 };
+        self.vector_store(i, (rest & !width.lane()) | mask)
     }
 
     /// `comisd`, `ucomisd` and their single forms: zero, parity and carry

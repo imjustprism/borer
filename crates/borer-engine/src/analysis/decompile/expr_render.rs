@@ -823,6 +823,14 @@ impl Expr {
                 (format!("({}){es}", cast_name(*ty)), UNARY)
             }
             Expr::Bin(op, l, r) => {
+                if *op == Op::And
+                    && let Some((a, b)) = ordered_equality(l, r)
+                {
+                    return (
+                        format!("{} == {}", paren_compared(a, n, 7), paren_compared(b, n, 7)),
+                        7,
+                    );
+                }
                 if let Op::FMin | Op::FMax = op {
                     let rel = if *op == Op::FMin { "<" } else { ">" };
                     let l = paren_compared(l, n, 7);
@@ -1877,6 +1885,40 @@ fn widened_difference(e: &Expr) -> bool {
         return false;
     };
     matches!(&**l, Expr::Cast(inner, ty) if ty.bits() == 64 && c_narrow(inner).is_some())
+}
+
+/// The operands of an ordered float equality written as two flag tests.
+///
+/// `cmpeqss` is true only when the pair is ordered and equal. That is the
+/// `and` of the equal-or-unordered test and the ordered test, and it is C's
+/// `==`: a NaN compares false, and the two zeros compare true.
+///
+/// # Arguments
+///
+/// * `l` - One side of the `and`.
+/// * `r` - The other.
+///
+/// # Returns
+///
+/// The two lanes, or `None` when the `and` is not that pair.
+fn ordered_equality<'a>(l: &'a Expr, r: &'a Expr) -> Option<(&'a Expr, &'a Expr)> {
+    let side = |e: &'a Expr| -> Option<(ConditionCode, &'a Expr, &'a Expr)> {
+        let Expr::Cond(c) = e else {
+            return None;
+        };
+        let Flags::Float(a, b, _) = &c.flags else {
+            return None;
+        };
+        Some((c.cc.0, a, b))
+    };
+    let (cl, al, bl) = side(l)?;
+    let (cr, ar, br) = side(r)?;
+    if al != ar || bl != br {
+        return None;
+    }
+    let eq = cl == ConditionCode::e && cr == ConditionCode::np
+        || cl == ConditionCode::np && cr == ConditionCode::e;
+    eq.then_some((al, bl))
 }
 
 /// Renders equality after a float compare, NaN included.

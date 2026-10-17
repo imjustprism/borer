@@ -8428,6 +8428,95 @@ fn a_minss_return_keeps_the_operand_the_compare_misses() {
     }
 }
 
+/// The low bit of `cmpeqss` is C's `==`, not the instruction.
+///
+/// `cmpeqss xmm0, xmm1; movd eax, xmm0; and eax, 1; ret` leaves 1 when the
+/// ordered equality holds. A NaN compares false, so the bit is 0, and the
+/// two zeros compare true. `comiss` then `je` is the other test, equal or
+/// unordered, and this one is not that.
+#[test]
+fn a_cmpeqss_low_bit_is_ordered_equality() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+
+    let code = &[
+        0xf3, 0x0f, 0xc2, 0xc1, 0x00, // ASM: cmpeqss xmm0,xmm1
+        0x66, 0x0f, 0x7e, 0xc0, // ASM: movd eax,xmm0
+        0x83, 0xe0, 0x01, // ASM: and eax,1
+        0xc3, // ASM: ret
+    ];
+    let p = program64(code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("a1 == a2"), "{text}");
+    assert!(!text.contains("cmpss"), "{text}");
+    assert!(!text.contains("isunordered"), "{text}");
+    assert!(!text.contains("/* asm"), "{text}");
+    let a = Analysis::compute(&p);
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[0x1_4000_1000], seed);
+        assert!(
+            v.checked > 0 && v.mismatches.is_empty(),
+            "{text}\nseed {seed}: {}",
+            verify_tsv(&v)
+        );
+        let r = replay_function(&p, &a, 0x1_4000_1000, seed);
+        assert!(
+            r.checked > 0 && r.wrong().is_empty(),
+            "{text}\nseed {seed}: {}",
+            replay_tsv(&r)
+        );
+    }
+
+    let load = || -> Vec<u8> {
+        vec![
+            0xf3, 0x0f, 0x10, 0x05, 0xf8, 0x0f, 0x00, 0x00, // ASM: movss xmm0,[rip+0xff8]
+            0xf3, 0x0f, 0x10, 0x0d, 0xf4, 0x0f, 0x00, 0x00, // ASM: movss xmm1,[rip+0xff4]
+            0xf3, 0x0f, 0xc2, 0xc1, 0x00, // ASM: cmpeqss xmm0,xmm1
+            0x66, 0x0f, 0x7e, 0xc0, // ASM: movd eax,xmm0
+            0x83, 0xe0, 0x01, // ASM: and eax,1
+            0xc3, // ASM: ret
+        ]
+    };
+    let nan = 0x7fc0_0000u32;
+    let pos = 0u32;
+    let neg = 0x8000_0000u32;
+    let one = 0x3f80_0000u32;
+    let two = 0x4000_0000u32;
+    let cases: &[(u32, u32)] = &[
+        (pos, neg),
+        (neg, pos),
+        (one, one),
+        (one, two),
+        (one, nan),
+        (nan, one),
+        (nan, nan),
+    ];
+    for (left, right) in cases {
+        let mut data = Vec::new();
+        data.extend_from_slice(&left.to_le_bytes());
+        data.extend_from_slice(&right.to_le_bytes());
+        let p = program64_with_data(&load(), &data);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(text.contains("=="), "{text}");
+        assert!(!text.contains("cmpss"), "{text}");
+        assert!(!text.contains("isunordered"), "{text}");
+        assert!(!text.contains("/* asm"), "{text}");
+        let a = Analysis::compute(&p);
+        let v = verify(&p, &a, &[0x1_4000_1000], 1);
+        assert!(
+            v.checked > 0 && v.mismatches.is_empty() && v.unreadable == 0,
+            "{text}\n{}",
+            verify_tsv(&v)
+        );
+        let r = replay_function(&p, &a, 0x1_4000_1000, 1);
+        assert!(
+            r.checked > 0 && r.wrong().is_empty(),
+            "{text}\n{}",
+            replay_tsv(&r)
+        );
+    }
+}
+
 /// A scalar move into a double keeps the bits above the new lane.
 ///
 /// A register-to-register `movss` of a double is that merge, not the call

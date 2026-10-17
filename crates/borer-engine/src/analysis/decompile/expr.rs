@@ -3648,8 +3648,9 @@ pub(super) fn ternary(cond: Cond, a: Expr, b: Expr) -> Expr {
 /// The mask is dropped when `e` provably fits in it, the result is `0` when no
 /// bit of `e` survives it (including `(x << s) & m` when the shift moves
 /// everything past the mask), nested masks combine, a mask distributes
-/// over `|`, and a mask of low bits takes the cuts inside `e` those bits
-/// pass through ([`low_bits_read`]).
+/// over `|`, a mask of low bits takes the cuts inside `e` those bits
+/// pass through ([`low_bits_read`]), and the low bit of the negation of a
+/// value that can only be 0 or 1 is that value (`cmpeqss` then `and` by 1).
 ///
 /// # Arguments
 ///
@@ -3672,6 +3673,7 @@ pub(super) fn mask(e: Expr, m: u64) -> Expr {
     match &e {
         Expr::Const(c) => Expr::Const(c & m),
         Expr::Cond(_) => e,
+        Expr::Un(UnOp::Neg, x) if m == 1 && known_bits(x) <= 1 => (**x).clone(),
         Expr::Bin(Op::And, a, c) => {
             if let Expr::Const(c) = **c {
                 if c & m == 0 {

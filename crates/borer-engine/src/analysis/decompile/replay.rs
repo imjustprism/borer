@@ -1460,8 +1460,10 @@ fn integer(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
 /// one, is left out. A three-operand `vmovss` or `vmovsd` is in: the low
 /// lane comes from the last source and the bits above it from the first.
 /// `cvtss2si` and `cvtsd2si` are in: nearest, ties to even, then the
-/// integer cast. A fused multiply-add the emulator does not model is left
-/// out with the packed forms.
+/// integer cast. `cmpeqss` and `cmpeqsd` are in: the ordered equality,
+/// whose low bit is C's `==`. A fused multiply-add the emulator does not
+/// model is left out with the packed forms, and so is any other compare
+/// predicate.
 ///
 /// # Arguments
 ///
@@ -1543,6 +1545,14 @@ fn scalar_float(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
         | M::Cvtsd2si
         | M::Vcvtss2si
         | M::Vcvtsd2si => two,
+        M::Cmpss | M::Cmpsd if i.immediate8() & 0x1f == 0 => {
+            three && i.op0_kind() == OpKind::Register && i.op0_register().is_vector_register()
+        }
+        M::Vcmpss | M::Vcmpsd if i.immediate8() & 0x1f == 0 => {
+            i.op_count() == 4
+                && i.op0_kind() == OpKind::Register
+                && i.op0_register().is_vector_register()
+        }
         _ => false,
     };
     shape

@@ -737,6 +737,34 @@ impl<'a> Exec<'_, 'a> {
         })
     }
 
+    /// The lane `cmpeqss` or `cmpeqsd` writes.
+    ///
+    /// All ones when the ordered equality holds, else zero. A NaN compares
+    /// false and the two zeros compare true, so the lane's low bit is C's
+    /// `==`. The two flag tests are that bit: equal-or-unordered, and
+    /// ordered.
+    ///
+    /// # Arguments
+    ///
+    /// * `l` - The left lane.
+    /// * `r` - The right lane.
+    /// * `bits` - `32` for a single, `64` for a double.
+    pub(super) fn eq_mask(l: Expr, r: Expr, bits: u8) -> Expr {
+        let flags = Flags::Float(l, r, bits);
+        let equal = Expr::Cond(Box::new(Cond {
+            cc: Cc(ConditionCode::e),
+            flags: flags.clone(),
+        }));
+        let ordered = Expr::Cond(Box::new(Cond {
+            cc: Cc(ConditionCode::np),
+            flags,
+        }));
+        mask(
+            unary(UnOp::Neg, fold(Op::And, ordered, equal, bits), bits),
+            mask_bits(bits),
+        )
+    }
+
     /// Lifts a vector instruction as `dst = mnemonic(sources...)`.
     ///
     /// The destination is a source too when the instruction reads it
