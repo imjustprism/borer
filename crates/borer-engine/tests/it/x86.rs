@@ -4459,7 +4459,8 @@ fn runs_agree(p: &Program, entry: u64) -> String {
 /// msvcrt's `strcspn` zeroes 32 bytes with eight `push eax` and sets and
 /// tests bits of them through `bts [esp], eax` and `bt [esp], eax`. No
 /// slot is read by name, so the pushes were dead stores, and the text set
-/// bits of a bitmap it never cleared.
+/// bits of a bitmap it never cleared. The eight words are one array the
+/// index reads across, `uint32_t local_28[8]`.
 #[test]
 fn zeros_pushed_for_a_bitmap_read_through_its_address_are_stored() {
     let code = [
@@ -4493,7 +4494,8 @@ fn zeros_pushed_for_a_bitmap_read_through_its_address_are_stored() {
         0xc3, // ASM: ret
     ];
     let text = runs_agree(&image(&code), 0x401000);
-    assert!(text.contains("local_c = 0;"), "{text}");
+    assert!(text.contains("uint32_t local_28[8];"), "{text}");
+    assert!(text.contains("local_28[7] = 0"), "{text}");
 }
 
 /// A stack parameter read as a word is its low half.

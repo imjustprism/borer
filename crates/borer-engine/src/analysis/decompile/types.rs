@@ -1990,6 +1990,8 @@ fn redeclare(lines: &mut Vec<String>, typed: &[(String, &'static str)]) {
 /// object. The run of same-typed slots that starts at the indexed one and
 /// steps by the type's size, with no gap, becomes `uint128_t local_48[4]`,
 /// and each member reads as its element (`local_38` is `local_48[1]`).
+/// The first slot's address is the array itself, `local_48`, which C
+/// reads as the same address.
 ///
 /// # Arguments
 ///
@@ -2080,6 +2082,7 @@ pub(super) fn stack_arrays(text: &str) -> String {
                 for pos in word_positions(line, member).into_iter().rev() {
                     let head = line.get(..pos).unwrap_or("");
                     if k == 0 && head.ends_with('&') {
+                        line.replace_range(pos - 1..pos + member.len(), name);
                         continue;
                     }
                     line.replace_range(pos..pos + member.len(), &format!("{name}[{k}]"));
@@ -4429,7 +4432,7 @@ mod stack_array_tests {
         assert!(out.contains("uint64_t local_8;"), "{out}");
         assert!(out.contains("local_28[1] = 2;"), "{out}");
         assert!(out.contains("local_28[2] = 3;"), "{out}");
-        assert!(out.contains("((uint32_t*)&local_28)[a1 & 3]"), "{out}");
+        assert!(out.contains("((uint32_t*)local_28)[a1 & 3]"), "{out}");
         let direct = "uint64_t local_28, local_20;\n\nreturn local_28 + local_20;\n";
         assert_eq!(stack_arrays(direct), direct);
     }

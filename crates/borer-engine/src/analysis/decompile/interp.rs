@@ -41,7 +41,7 @@ use super::traces::{INTRINSICS, Stmt, blank, statements};
 use super::verify::integer_to_float;
 use crate::analysis::{Analysis, BlockTerm, Overlay, bare_name, name_of};
 use crate::emulate::{Emulator, Stop};
-use crate::fxmap::FxHashMap;
+use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::num::from_usize;
 use crate::program::{Program, SymbolKind};
 
@@ -345,6 +345,8 @@ pub(crate) struct Script<'p> {
     targets: Vec<usize>,
     /// The names that hold values, with where.
     vars: FxHashMap<String, Variable>,
+    /// The variables declared as arrays: their name is their address.
+    arrays: FxHashSet<String>,
     /// Each C variable's name and the register it starts as, by index.
     cells: Vec<(String, Option<Register>, CTy)>,
     /// Field widths by base and offset, from the layout lines.
@@ -592,6 +594,9 @@ fn pure(e: &Ast) -> bool {
 struct Header {
     /// Declared names: type, and the address a global's `// @` gives.
     declared: Vec<(String, CTy, Option<u64>)>,
+    /// The declared names that are arrays (`uint32_t local_28[8]`), whose
+    /// name reads as the address of their first element.
+    arrays: FxHashSet<String>,
     /// Field widths by base and offset.
     layouts: FxHashMap<String, FxHashMap<u64, CTy>>,
 }
@@ -660,6 +665,9 @@ fn header(lines: &[&str], word: u8) -> Result<Header, String> {
                 .count();
             if let Some(Tok::Name(n)) = decl.get(stars) {
                 let ty = (0..stars).fold(base, |t, _| t.to());
+                if matches!(decl.get(stars + 1), Some(Tok::Punct("["))) {
+                    h.arrays.insert(n.clone());
+                }
                 h.declared.push((n.clone(), ty, at));
             }
         }
@@ -1363,6 +1371,7 @@ impl<'p> Script<'p> {
             ops,
             targets,
             vars,
+            arrays: head.arrays,
             cells,
             layouts: head.layouts,
             known,
@@ -2637,6 +2646,11 @@ impl Running<'_, '_> {
     /// backs.
     fn name(&mut self, n: &str) -> Eval<Val> {
         if let Some(v) = self.s.vars.get(n).copied() {
+            if self.s.arrays.contains(n)
+                && let Slot::Mem(at) = v.slot
+            {
+                return Ok(self.int(at, v.ty.to()));
+            }
             return self.read(Self::slot_place(v));
         }
         if let Some(&v) = self.s.enumerators.get(n) {
