@@ -578,8 +578,13 @@ def measure(fn: Function) -> tuple[collections.Counter, dict[str, list[str]]]:
     return c, ex
 
 
+CAST_TYPE = re.compile(r"\((?:const )?[A-Za-z_][\w ]*(?:\*+|\(\*\)\([\w ,*]*\))\)")
+
+
 def paren_groups(text: str) -> list[str]:
-    """Balanced parenthesized groups of 24+ characters that are not call argument lists."""
+    """Balanced parenthesized groups of 24+ characters that are not call
+    argument lists or cast types (a function pointer cast names a type, not
+    a computation)."""
     out = []
     stack = []
     for i, ch in enumerate(text):
@@ -588,8 +593,15 @@ def paren_groups(text: str) -> list[str]:
         elif ch == ")" and stack:
             j = stack.pop()
             before = text[:j].rstrip()[-1:]
-            if i - j >= 24 and not (before.isalnum() or before == "_"):
-                out.append(text[j : i + 1])
+            group = text[j : i + 1]
+            pointer_params = text[:j].endswith("(*)")
+            if (
+                i - j >= 24
+                and not (before.isalnum() or before == "_")
+                and not CAST_TYPE.fullmatch(group)
+                and not pointer_params
+            ):
+                out.append(group)
     return out
 
 

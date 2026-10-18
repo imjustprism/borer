@@ -1980,6 +1980,15 @@ fn redeclare(lines: &mut Vec<String>, typed: &[(String, &'static str)]) {
     lines.retain(|l| l != "\u{0}");
 }
 
+/// A line without its trailing `//` comment.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+fn uncommented(line: &str) -> &str {
+    line.split_once(" //").map_or(line, |(code, _)| code)
+}
+
 /// The calls through a computed pointer in one line: where `(*` opens,
 /// the callee expression, and how many arguments the call passes.
 ///
@@ -2109,7 +2118,7 @@ pub(super) fn callable_pointers(text: &str) -> String {
     let mut arity: BTreeMap<String, Option<usize>> = BTreeMap::new();
     for line in lines.iter().filter(|l| !l.starts_with("//")) {
         for (_, _, callee, count) in pointer_calls(line) {
-            if is_param_name(&callee) {
+            if is_ident(&callee) {
                 let seen = arity.entry(callee).or_insert(Some(count));
                 if *seen != Some(count) {
                     *seen = None;
@@ -2121,16 +2130,56 @@ pub(super) fn callable_pointers(text: &str) -> String {
         .into_iter()
         .filter_map(|(name, count)| count.map(|c| (name, c)))
         .filter(|(name, _)| {
-            lines.iter().filter(|l| !l.starts_with("//")).all(|l| {
-                let calls = pointer_calls(l)
-                    .iter()
-                    .filter(|(_, _, c, _)| c == name)
-                    .count();
-                word_positions(l, name).len() == calls
-            })
+            lines
+                .iter()
+                .filter(|l| !l.starts_with("//") && !is_declaration(uncommented(l)))
+                .all(|l| {
+                    let calls = pointer_calls(l)
+                        .iter()
+                        .filter(|(_, _, c, _)| c == name)
+                        .count();
+                    word_positions(l, name).len() == calls
+                })
         })
         .collect();
     let mut changed = false;
+    let mut declared: Vec<(usize, String)> = Vec::new();
+    for (k, line) in lines.iter_mut().enumerate() {
+        if line.starts_with("//") || !is_declaration(uncommented(line)) {
+            continue;
+        }
+        let (body, comment) = match line.split_once(" //") {
+            Some((b, c)) => (b.to_owned(), format!(" //{c}")),
+            None => (line.clone(), String::new()),
+        };
+        let Some((ty, names)) = body.strip_suffix(';').and_then(|b| b.split_once(' ')) else {
+            continue;
+        };
+        if !matches!(ty, "uint64_t" | "uint32_t" | "int64_t") {
+            continue;
+        }
+        let mut kept: Vec<&str> = Vec::new();
+        for n in names.split(", ").map(str::trim) {
+            match called.get(n) {
+                Some(&count) => {
+                    declared.push((k, format!("{};{comment}", word_function(count, n))));
+                }
+                None => kept.push(n),
+            }
+        }
+        if kept.len() != names.split(", ").count() {
+            *line = if kept.is_empty() {
+                String::from("\u{0}")
+            } else {
+                format!("{ty} {};{comment}", kept.join(", "))
+            };
+            changed = true;
+        }
+    }
+    for (k, decl) in declared.into_iter().rev() {
+        lines.insert(k + 1, decl);
+    }
+    lines.retain(|l| l != "\u{0}");
     for line in &mut lines {
         if let Some(rest) = line.strip_prefix("// signature: ") {
             let mut sig = rest.to_owned();
@@ -2151,7 +2200,7 @@ pub(super) fn callable_pointers(text: &str) -> String {
             *line = format!("// signature: {sig}");
             continue;
         }
-        if line.starts_with("//") {
+        if line.starts_with("//") || uncommented(line).starts_with("uint64_t (*") {
             continue;
         }
         for (at, end, callee, count) in pointer_calls(line).into_iter().rev() {
@@ -4117,6 +4166,22 @@ mod pointer_call_tests {
             ),
             "{out}"
         );
+        let global = [
+            "// signature: void f(uint64_t a1)",
+            "uint64_t var1, var2;",
+            "uint64_t g64_1008; // @ 0x1008",
+            "",
+            "var1 = (*g64_1008)(a1, 1);",
+            "var2 = (*g64_1008)(var1, 2);",
+        ]
+        .join("\n");
+        let out = callable_pointers(&global);
+        assert!(
+            out.contains("uint64_t (*g64_1008)(uint64_t, uint64_t); // @ 0x1008"),
+            "{out}"
+        );
+        assert!(out.contains("var2 = g64_1008(var1, 2);"), "{out}");
+        assert!(out.contains("uint64_t var1, var2;"), "{out}");
     }
 
     /// A bitwise operation on a float parameter reads its bits; an
