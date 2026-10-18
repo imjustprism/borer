@@ -9410,3 +9410,54 @@ fn an_unbounded_rel32_table_ends_at_its_first_invalid_entry() {
     replays_clean(&p, &a, &[F]);
 }
 
+/// A bytecode interpreter whose loop fetches an opcode, jumps through an
+/// unbounded rel32 table and has its handlers jump back is one function
+/// and one dispatch loop.
+///
+/// `xor eax,eax; lea r8,[T]; L: movzx edx,byte [rcx]; inc rcx; movsxd
+/// rdx,[r8+rdx*4]; add rdx,r8; jmp rdx`, then a `ret` handler for opcode 0
+/// and four that change `eax` and `jmp L`.
+#[test]
+fn an_interpreter_over_an_unbounded_rel32_table_is_a_dispatch_loop() {
+    const F: u64 = 0x1_4000_1000;
+    const T: u64 = 0x1_4000_2000;
+    let code: &[u8] = &[
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x4c, 0x8d, 0x05, 0xf7, 0x0f, 0x00, 0x00, // ASM: lea r8,[rip+0xff7]
+        0x0f, 0xb6, 0x11, // ASM: movzx edx,byte [rcx]
+        0x48, 0xff, 0xc1, // ASM: inc rcx
+        0x49, 0x63, 0x14, 0x90, // ASM: movsxd rdx,dword [r8+rdx*4]
+        0x4c, 0x01, 0xc2, // ASM: add rdx,r8
+        0xff, 0xe2, // ASM: jmp rdx
+        0xc3, // ASM: ret
+        0xff, 0xc0, // ASM: inc eax
+        0xeb, 0xec, // ASM: jmp 0x09
+        0x83, 0xc0, 0x02, // ASM: add eax,2
+        0xeb, 0xe7, // ASM: jmp 0x09
+        0x01, 0xc0, // ASM: add eax,eax
+        0xeb, 0xe3, // ASM: jmp 0x09
+        0xff, 0xc8, // ASM: dec eax
+        0xeb, 0xdf, // ASM: jmp 0x09
+    ];
+    let handlers = [F + 0x18, F + 0x19, F + 0x1d, F + 0x22, F + 0x26];
+    let p = program64_with_data(code, &rel32_entries(T, &handlers));
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(F + 0x16)).map(Vec::as_slice),
+        Some(&handlers[..])
+    );
+    let f = a.function(F);
+    assert!(
+        f.is_some_and(|f| handlers
+            .iter()
+            .all(|h| f.blocks.iter().any(|b| b.start == *h))),
+        "a handler is outside the interpreter"
+    );
+    let o = Overlay::default();
+    let list = borer_engine::analysis::render::vm_dispatch_tsv(&p, &a, &o, "").unwrap();
+    assert!(list.starts_with("# 1 dispatch loop found"), "{list}");
+    let text = decompiled(&p, F);
+    assert!(!text.contains("goto *"), "{text}");
+    assert!(text.contains("switch ("), "{text}");
+    replays_clean(&p, &a, &[F]);
+}

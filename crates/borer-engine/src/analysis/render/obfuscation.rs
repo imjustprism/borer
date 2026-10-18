@@ -1025,8 +1025,10 @@ pub(super) const FETCH_WALK_MAX: usize = 16;
 /// the jump (`movzx ecx, byte [r9+r10-1]`), while an ordinary `switch`
 /// indexes a value it computed (`and eax, 3` over a call's result) or was
 /// handed. The last writer is what matters, so the walk goes backwards
-/// through the blocks that fall into the dispatch, instruction by
-/// instruction, until one writes the index register; a call stops it
+/// from the table read, through the dispatch block and then the blocks
+/// that fall into it, instruction by instruction, until one writes the
+/// index register (an interpreter whose handlers jump back to its fetch
+/// has the fetch in the dispatch block itself); a call stops it
 /// (calls clobber the volatile registers) and so does a plain move. The
 /// fetch must read through a register base other than the stack: a value
 /// reloaded from a stack slot is a variable the program wrote, not a
@@ -1048,9 +1050,20 @@ pub(super) fn fetches_index_from_memory(
     b: &BasicBlock,
     bits: u32,
 ) -> bool {
-    let Some(idx) = table_index_register(&block_instructions(p, f, b.start, bits)) else {
+    let own = block_instructions(p, f, b.start, bits);
+    let Some((read, idx)) = table_index_register(&own) else {
         return false;
     };
+    let mut info = InstructionInfoFactory::new();
+    if let Some(i) = own
+        .get(..read)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .find(|i| writes(i, &mut info, idx))
+    {
+        return fetches(i, idx);
+    }
     let mut at = b.start;
     for _ in 0..FETCH_WALK_MAX {
         let Some(prev) = f
@@ -1062,7 +1075,6 @@ pub(super) fn fetches_index_from_memory(
             return false;
         };
         let block = block_instructions(p, f, prev, bits);
-        let mut info = InstructionInfoFactory::new();
         let mut hit = false;
         for i in block.iter().rev() {
             if writes(i, &mut info, idx) {
@@ -1090,19 +1102,16 @@ pub(super) fn fetches_index_from_memory(
 /// * `instrs` - The block's instructions, in order.
 ///
 /// # Returns
-/// The index register at full width, or `None` when nothing scales an
-/// index.
-fn table_index_register(instrs: &[Instruction]) -> Option<Register> {
-    instrs
-        .iter()
-        .filter(|i| {
-            i.mnemonic() != Mnemonic::Lea
-                && (0..i.op_count()).any(|op| i.op_kind(op) == OpKind::Memory)
-                && matches!(i.memory_index_scale(), 4 | 8)
-                && i.memory_index() != Register::None
-        })
-        .map(|i| i.memory_index().full_register())
-        .next_back()
+/// The read's position in `instrs` and the index register at full width,
+/// or `None` when nothing scales an index.
+fn table_index_register(instrs: &[Instruction]) -> Option<(usize, Register)> {
+    instrs.iter().enumerate().rev().find_map(|(k, i)| {
+        (i.mnemonic() != Mnemonic::Lea
+            && (0..i.op_count()).any(|op| i.op_kind(op) == OpKind::Memory)
+            && matches!(i.memory_index_scale(), 4 | 8)
+            && i.memory_index() != Register::None)
+            .then(|| (k, i.memory_index().full_register()))
+    })
 }
 
 /// Whether an instruction writes `want`, as a destination operand or by
