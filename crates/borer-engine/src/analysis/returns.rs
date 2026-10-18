@@ -993,9 +993,10 @@ fn float_use(
 /// tail call to a function a caller takes it from ([`float_use`]). A
 /// function nobody calls (an export, a callback reached through a
 /// pointer) has no caller to ask, so its body alone answers: it takes the
-/// float when its exits leave one and write no integer result, since an
-/// export's caller is not in this image, or when its instructions write
-/// xmm0 nearest its exits and nothing there writes rax ([`float_last`]).
+/// float when its instructions write a scalar float to xmm0 nearest its
+/// exits and nothing there writes rax ([`float_last`]). An export's caller
+/// is not in this image, and dropping the value in xmm0 is a different
+/// result; packed vector work left there is not a float.
 /// And no caller reads rax instead. A function that stores between that
 /// write and the `ret` is not one of these: the store is the effect, and
 /// the bits left in the register are not a second result. A function
@@ -1115,14 +1116,18 @@ fn float_results(
         .zip(uses)
         .zip(rax)
         .zip(floats)
-        .map(|(((((bits, taken), &read), sites), integer), float)| {
-            let alone = sites.is_empty()
-                && !integer.own
-                && !integer.unknown
-                && integer.calls.is_empty()
-                && !float.stored;
-            bits.filter(|_| !read && (taken || alone))
-        })
+        .zip(last)
+        .map(
+            |((((((bits, taken), &read), sites), integer), float), &last)| {
+                let alone = sites.is_empty()
+                    && last
+                    && !integer.own
+                    && !integer.unknown
+                    && integer.calls.is_empty()
+                    && !float.stored;
+                bits.filter(|_| !read && (taken || alone))
+            },
+        )
         .collect();
     for _ in 0..PASS_ROUNDS_MAX {
         let mut changed = false;
