@@ -1980,6 +1980,199 @@ fn redeclare(lines: &mut Vec<String>, typed: &[(String, &'static str)]) {
     lines.retain(|l| l != "\u{0}");
 }
 
+/// Declares the stack slots a computed index runs across as one array.
+///
+/// `local_N` names the slot `N` bytes below the frame base, so
+/// `local_48`, `local_38`, `local_28` and `local_18`, all `uint128_t`, lie
+/// one after another upward from `local_48`. When the text reads through
+/// `&local_48` at an offset it computes (`((uint32_t*)&local_48)[i]`),
+/// the read can land in any of them, which C allows only inside one
+/// object. The run of same-typed slots that starts at the indexed one and
+/// steps by the type's size, with no gap, becomes `uint128_t local_48[4]`,
+/// and each member reads as its element (`local_38` is `local_48[1]`).
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines included.
+///
+/// # Returns
+///
+/// The text with those slots declared as arrays.
+pub(super) fn stack_arrays(text: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let declared: BTreeMap<String, &'static str> = lines
+        .iter()
+        .filter(|l| is_declaration(l))
+        .flat_map(|l| {
+            let (ty, names) = l.trim_end_matches(';').split_once(' ').unwrap_or(("", ""));
+            let ty = slot_type(ty);
+            names
+                .split(", ")
+                .filter_map(move |n| ty.map(|t| (n.trim().to_owned(), t)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut arrays: Vec<(String, &'static str, Vec<String>)> = Vec::new();
+    for (name, ty) in &declared {
+        let Some(base) = slot_offset(name) else {
+            continue;
+        };
+        if !indexed_through(&lines, name) {
+            continue;
+        }
+        let size = slot_size(ty);
+        let mut members = vec![name.clone()];
+        let mut at = base;
+        while let Some(next) = at.checked_sub(size).filter(|&n| n > 0) {
+            let next_name = format!("local_{next:x}");
+            if declared.get(&next_name) != Some(ty) {
+                break;
+            }
+            members.push(next_name);
+            at = next;
+        }
+        if members.len() > 1 {
+            arrays.push((name.clone(), ty, members));
+        }
+    }
+    if arrays.is_empty() {
+        return text.to_owned();
+    }
+    let gone: BTreeSet<&str> = arrays
+        .iter()
+        .flat_map(|(_, _, m)| m.iter().map(String::as_str))
+        .collect();
+    let mut at = None;
+    for (k, line) in lines.iter_mut().enumerate() {
+        if !is_declaration(line) {
+            continue;
+        }
+        let Some((ty, names)) = line.trim_end_matches(';').split_once(' ') else {
+            continue;
+        };
+        let kept: Vec<&str> = names
+            .split(", ")
+            .filter(|n| !gone.contains(n.trim()))
+            .collect();
+        if kept.len() != names.split(", ").count() {
+            *line = if kept.is_empty() {
+                String::from("\u{0}")
+            } else {
+                format!("{ty} {};", kept.join(", "))
+            };
+            at = Some(k);
+        }
+    }
+    if let Some(k) = at {
+        let decls: Vec<String> = arrays
+            .iter()
+            .map(|(name, ty, members)| format!("{ty} {name}[{}];", members.len()))
+            .collect();
+        lines.splice(k + 1..k + 1, decls);
+    }
+    lines.retain(|l| l != "\u{0}");
+    for (name, _, members) in &arrays {
+        for line in lines
+            .iter_mut()
+            .filter(|l| !l.starts_with("//") && !is_declaration(l))
+        {
+            for (k, member) in members.iter().enumerate() {
+                for pos in word_positions(line, member).into_iter().rev() {
+                    let head = line.get(..pos).unwrap_or("");
+                    if k == 0 && head.ends_with('&') {
+                        continue;
+                    }
+                    line.replace_range(pos..pos + member.len(), &format!("{name}[{k}]"));
+                }
+            }
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// A slot's declared type, when it is one an array of slots is made of.
+///
+/// # Arguments
+///
+/// * `ty` - The declared type.
+fn slot_type(ty: &str) -> Option<&'static str> {
+    [
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "uint128_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+    ]
+    .into_iter()
+    .find(|t| *t == ty)
+}
+
+/// Bytes a slot of type `ty` takes.
+///
+/// # Arguments
+///
+/// * `ty` - One of [`slot_type`]'s types.
+fn slot_size(ty: &str) -> u64 {
+    match ty {
+        "uint8_t" | "int8_t" => 1,
+        "uint16_t" | "int16_t" => 2,
+        "uint32_t" | "int32_t" => 4,
+        "uint128_t" => 16,
+        _ => 8,
+    }
+}
+
+/// The frame offset `local_N` names.
+///
+/// # Arguments
+///
+/// * `name` - A variable name.
+fn slot_offset(name: &str) -> Option<u64> {
+    u64::from_str_radix(name.strip_prefix("local_")?, 16).ok()
+}
+
+/// Tells whether the text reads through `&name` at an offset it computes:
+/// an index or a sum that is not a constant.
+///
+/// # Arguments
+///
+/// * `lines` - The function.
+/// * `name` - A slot.
+fn indexed_through(lines: &[String], name: &str) -> bool {
+    let addr = format!("&{name}");
+    lines.iter().filter(|l| !l.starts_with("//")).any(|l| {
+        let mut from = 0;
+        while let Some(at) = l.get(from..).and_then(|t| t.find(&addr)).map(|k| k + from) {
+            from = at + addr.len();
+            let tail = l.get(from..).unwrap_or("");
+            if tail.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let tail = tail.trim_start_matches(')');
+            let computed = |rest: &str| {
+                let rest = rest.trim_start();
+                !rest.starts_with(|c: char| c.is_ascii_digit())
+            };
+            if let Some(rest) = tail.strip_prefix('[') {
+                if computed(rest) {
+                    return true;
+                }
+            } else if let Some(rest) = tail.trim_start().strip_prefix("+ ")
+                && computed(rest)
+            {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 /// A line without its trailing `//` comment.
 ///
 /// # Arguments
@@ -4205,5 +4398,39 @@ mod pointer_call_tests {
         assert!(out.contains("(*(uint32_t*)&a1 & 0x7fffffff)"), "{out}");
         assert!(out.contains("(*(uint64_t*)&a2 >> 52)"), "{out}");
         assert!(out.contains("(uint32_t)(a1 * 2)"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod stack_array_tests {
+    use super::stack_arrays;
+
+    /// Slots a computed index reads through the first one's address are
+    /// one array; slots only named directly stay apart.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn an_indexed_run_of_slots_is_an_array() {
+        let text = [
+            "// signature: uint32_t f(uint64_t a1)",
+            "uint64_t local_28, local_20, local_18, local_8;",
+            "",
+            "local_28 = 1;",
+            "local_20 = 2;",
+            "local_18 = 3;",
+            "local_8 = 4;",
+            "return ((uint32_t*)&local_28)[a1 & 3] + local_8;",
+        ]
+        .join("\n");
+        let out = stack_arrays(&text);
+        assert!(out.contains("uint64_t local_28[3];"), "{out}");
+        assert!(out.contains("uint64_t local_8;"), "{out}");
+        assert!(out.contains("local_28[1] = 2;"), "{out}");
+        assert!(out.contains("local_28[2] = 3;"), "{out}");
+        assert!(out.contains("((uint32_t*)&local_28)[a1 & 3]"), "{out}");
+        let direct = "uint64_t local_28, local_20;\n\nreturn local_28 + local_20;\n";
+        assert_eq!(stack_arrays(direct), direct);
     }
 }
