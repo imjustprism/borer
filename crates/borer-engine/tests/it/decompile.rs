@@ -9658,3 +9658,20 @@ fn a_scalar_float_reads_a_packed_lane_as_a_float() {
     assert!(text.contains(")[0]"), "{text}");
     assert!(!text.contains("+ (uint128_t)"), "{text}");
 }
+
+/// A scalar float instruction reading a pseudo-call the text does not spell
+/// as vector code reads it as it stands: a lane of it would dress a call no
+/// compiler knows as vector code.
+///
+/// `movlps xmm0,[rcx]; addss xmm0,xmm1; ret`.
+#[test]
+fn a_lane_is_read_only_out_of_vector_code() {
+    let code = [
+        0x0f, 0x12, 0x01, // ASM: movlps xmm0,[rcx]
+        0xf3, 0x0f, 0x58, 0xc1, // ASM: addss xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("movlps("), "{text}");
+    assert!(!text.contains(")movlps("), "{text}");
+}

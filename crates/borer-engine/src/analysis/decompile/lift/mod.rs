@@ -1708,7 +1708,8 @@ fn scalar_lane(v: Expr, ty: Ty) -> Expr {
         return masked;
     }
     if let Expr::Call(name, _) = &v
-        && !matches!(name.as_str(), "fabs" | "rint" | "__lane_f32" | "__lane_f64")
+        && !name.starts_with("__lane_")
+        && super::vector::packs(name)
     {
         let lane = if ty == Ty::F32 {
             "__lane_f32"

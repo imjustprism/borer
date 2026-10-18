@@ -227,6 +227,95 @@ impl V {
     }
 }
 
+/// The x86 packed instructions [`sse`] spells, by lowercased mnemonic.
+const SSE: [&str; 75] = [
+    "pxor",
+    "xorps",
+    "xorpd",
+    "pand",
+    "andps",
+    "andpd",
+    "por",
+    "orps",
+    "orpd",
+    "pandn",
+    "andnps",
+    "andnpd",
+    "paddb",
+    "paddw",
+    "paddd",
+    "paddq",
+    "psubb",
+    "psubw",
+    "psubd",
+    "psubq",
+    "pmullw",
+    "pmulld",
+    "pmuludq",
+    "pcmpeqb",
+    "pcmpeqw",
+    "pcmpeqd",
+    "pcmpeqq",
+    "pcmpgtb",
+    "pcmpgtw",
+    "pcmpgtd",
+    "pcmpgtq",
+    "addps",
+    "subps",
+    "mulps",
+    "divps",
+    "addpd",
+    "subpd",
+    "mulpd",
+    "divpd",
+    "pshufd",
+    "pshuflw",
+    "pshufhw",
+    "shufps",
+    "shufpd",
+    "punpcklbw",
+    "punpcklwd",
+    "punpckldq",
+    "punpcklqdq",
+    "punpckhbw",
+    "punpckhwd",
+    "punpckhdq",
+    "punpckhqdq",
+    "unpcklps",
+    "unpckhps",
+    "unpcklpd",
+    "unpckhpd",
+    "movhlps",
+    "movlhps",
+    "psllw",
+    "pslld",
+    "psllq",
+    "psrlw",
+    "psrld",
+    "psrlq",
+    "psraw",
+    "psrad",
+    "pslldq",
+    "psrldq",
+    "pmaddwd",
+    "packsswb",
+    "packssdw",
+    "packuswb",
+    "cvtdq2ps",
+    "cvtdq2pd",
+    "cvtps2pd",
+];
+
+/// Whether a call names a packed operation the text spells as vector code:
+/// an x86 mnemonic of [`SSE`] or an arm64 `__op_arrangement`.
+///
+/// # Arguments
+///
+/// * `name` - The call's name.
+pub(super) fn packs(name: &str) -> bool {
+    name.starts_with("__") || SSE.contains(&name)
+}
+
 /// Renders a call as the vector expression it names, cast back to the
 /// integer the text holds a register in.
 ///
