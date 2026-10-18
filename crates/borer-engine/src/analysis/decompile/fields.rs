@@ -111,7 +111,7 @@ pub(super) fn guarding_field<'a>(lines: &[&'a str], at: usize) -> Option<(&'a st
             let [(base, off, _)] = fields[..] else {
                 return None;
             };
-            return Some((base, off));
+            return u64::try_from(off).ok().map(|off| (base, off));
         }
         if t.contains('{') || t.contains('}') || t.is_empty() || t.ends_with(':') {
             return None;
@@ -165,17 +165,17 @@ pub(super) const LAYOUT_WIDTH: usize = 100;
 /// # Arguments
 ///
 /// * `fields` - Offset to type letter, edited in place.
-pub(super) fn drop_array_runs(fields: &mut BTreeMap<u64, &'static str>) {
-    let entries: Vec<(u64, &'static str)> = fields.iter().map(|(o, l)| (*o, *l)).collect();
+pub(super) fn drop_array_runs(fields: &mut BTreeMap<i64, &'static str>) {
+    let entries: Vec<(i64, &'static str)> = fields.iter().map(|(o, l)| (*o, *l)).collect();
     let width = |letter: &str| {
         letter
             .get(1..)
-            .and_then(|w| w.parse::<u64>().ok())
+            .and_then(|w| w.parse::<i64>().ok())
             .unwrap_or(0)
             / 8
     };
-    let mut run: Vec<u64> = Vec::new();
-    let mut drop: Vec<u64> = Vec::new();
+    let mut run: Vec<i64> = Vec::new();
+    let mut drop: Vec<i64> = Vec::new();
     for (k, (off, letter)) in entries.iter().enumerate() {
         let continues = k > 0
             && entries[k - 1].1 == *letter
@@ -220,12 +220,16 @@ pub(super) fn layout_type(ty: &str) -> Option<&'static str> {
 }
 
 /// The field-style accesses in one line: `(base, offset, type letter)` for
-/// every `*(T*)(base + off)`, `*(T*)(off + base)` and `*(T*)base`.
+/// every `*(T*)(base + off)`, `*(T*)(off + base)`, `*(T*)(base - off)` and
+/// `*(T*)base`.
+///
+/// A pointer into the middle of a struct reads the members before it at
+/// `base - off`, and those keep their negative offset.
 ///
 /// # Arguments
 ///
 /// * `line` - The line.
-pub(super) fn field_accesses(line: &str) -> Vec<(&str, u64, &'static str)> {
+pub(super) fn field_accesses(line: &str) -> Vec<(&str, i64, &'static str)> {
     let mut out = Vec::new();
     let mut from = 0;
     while let Some(i) = line.get(from..).and_then(|t| t.find("*(")) {
@@ -247,13 +251,24 @@ pub(super) fn field_accesses(line: &str) -> Vec<(&str, u64, &'static str)> {
             let Some(end) = inner.find(')') else {
                 continue;
             };
-            let Some((l, r)) = inner.get(..end).and_then(|t| t.split_once(" + ")) else {
+            let Some(operand) = inner.get(..end) else {
                 continue;
             };
-            let (base, off) = match (number(l), number(r)) {
-                (None, Some((off, _))) => (l, off),
-                (Some((off, _)), None) => (r, off),
-                _ => continue,
+            let below = operand.split_once(" - ").and_then(|(l, r)| {
+                let off = i64::try_from(parse_const(r)?).ok()?;
+                Some((l, off.checked_neg()?))
+            });
+            let above = || {
+                let (l, r) = operand.split_once(" + ")?;
+                let (base, off) = match (number(l), number(r)) {
+                    (None, Some((off, _))) => (l, off),
+                    (Some((off, _)), None) => (r, off),
+                    _ => return None,
+                };
+                Some((base, i64::try_from(off).ok()?))
+            };
+            let Some((base, off)) = below.or_else(above) else {
+                continue;
             };
             if is_ident(base) {
                 out.push((base, off, letter));
@@ -381,7 +396,9 @@ pub(super) fn offset_text(off: u64) -> String {
 /// `// layout base: 0x18 u32, 0x20 u64` line (wrapped at [`LAYOUT_WIDTH`]
 /// columns onto `//  ` lines), and each of those accesses
 /// renders as `base->field_0x18`; a bare `base + 0x18` becomes
-/// `&base->field_0x18`. A field an earlier pass already named counts
+/// `&base->field_0x18`. A pointer into the middle of a struct reads the
+/// members before it at `base - 0x40`: those list at `-0x40` and render as
+/// `base->field_neg0x40`. A field an earlier pass already named counts
 /// toward that total, so naming two of a base's three fields does not cost
 /// the third the offset it would otherwise have had. An offset accessed at two widths stays as it was
 /// (a signed and an unsigned read of one width count as the signed one),
@@ -400,7 +417,7 @@ pub(super) fn offset_text(off: u64) -> String {
 /// The text with layouts applied.
 pub(super) fn apply_layouts(text: &str) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    let mut seen: BTreeMap<&str, BTreeMap<u64, BTreeSet<&str>>> = BTreeMap::new();
+    let mut seen: BTreeMap<&str, BTreeMap<i64, BTreeSet<&str>>> = BTreeMap::new();
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut assigned: BTreeMap<&str, usize> = BTreeMap::new();
     for line in &lines {
@@ -432,7 +449,7 @@ pub(super) fn apply_layouts(text: &str) -> String {
         }
     }
     let mut headers: Vec<String> = Vec::new();
-    let mut renames: Vec<(String, BTreeMap<u64, String>)> = Vec::new();
+    let mut renames = Vec::new();
     for (base, offsets) in &seen {
         if counts.get(base).copied().unwrap_or(0) < LAYOUT_MIN
             || assigned.get(base).copied().unwrap_or(0) > 1
@@ -440,7 +457,7 @@ pub(super) fn apply_layouts(text: &str) -> String {
         {
             continue;
         }
-        let mut fields: BTreeMap<u64, &str> = BTreeMap::new();
+        let mut fields: BTreeMap<i64, &str> = BTreeMap::new();
         for (off, letters) in offsets {
             let letter = match letters.iter().copied().collect::<Vec<_>>().as_slice() {
                 [one] => *one,
@@ -460,7 +477,12 @@ pub(super) fn apply_layouts(text: &str) -> String {
         }
         let mut header = format!("// layout {base}:");
         for (k, (o, l)) in fields.iter().enumerate() {
-            let item = format!("{}{o:#x} {l}", if k == 0 { " " } else { ", " });
+            let item = format!(
+                "{}{}{:#x} {l}",
+                if k == 0 { " " } else { ", " },
+                if *o < 0 { "-" } else { "" },
+                o.unsigned_abs()
+            );
             if header.len() + item.len() > LAYOUT_WIDTH {
                 headers.push(std::mem::replace(&mut header, "//  ".to_owned()));
                 header.push_str(item.trim_start_matches(','));
@@ -469,17 +491,28 @@ pub(super) fn apply_layouts(text: &str) -> String {
             }
         }
         headers.push(header);
-        let names = fields
+        let above: BTreeMap<u64, String> = fields
             .keys()
-            .map(|o| (*o, format!("field_{o:#x}")))
+            .filter_map(|o| u64::try_from(*o).ok())
+            .map(|o| (o, format!("field_{o:#x}")))
             .collect();
-        renames.push(((*base).to_owned(), names));
+        let below: BTreeMap<u64, String> = fields
+            .keys()
+            .filter(|o| **o < 0)
+            .map(|o| {
+                (
+                    o.unsigned_abs(),
+                    format!("field_neg{:#x}", o.unsigned_abs()),
+                )
+            })
+            .collect();
+        renames.push(((*base).to_owned(), above, below));
     }
     if renames.is_empty() {
         return text.to_owned();
     }
     for line in &mut lines {
-        for (base, names) in &renames {
+        for (base, names, below) in &renames {
             for (off, name) in names {
                 let swapped = format!("({} + {base})", offset_text(*off));
                 if line.contains(&swapped) {
@@ -490,6 +523,7 @@ pub(super) fn apply_layouts(text: &str) -> String {
                 }
             }
             *line = rename_fields(line, base, names);
+            *line = rename_fields_at(line, base, below, " - ");
         }
     }
     let at = header_len(&lines);
@@ -548,18 +582,43 @@ pub(super) const NAMED_OBJECTS_MAX: usize = 4;
 /// * `var` - The object variable (`this` or `a1`).
 /// * `names` - Field names by offset.
 pub(super) fn rename_fields(line: &str, var: &str, names: &BTreeMap<u64, String>) -> String {
+    rename_fields_at(line, var, names, " + ")
+}
+
+/// Rewrites the field accesses of `var` on one side of it in one line by
+/// name, as [`rename_fields`] does for `var + off`.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `var` - The object variable.
+/// * `names` - Field names by distance from `var`.
+/// * `op` - ` + ` for the fields above `var`, ` - ` for those below it.
+///
+/// # Returns
+///
+/// The line with those accesses named.
+pub(super) fn rename_fields_at(
+    line: &str,
+    var: &str,
+    names: &BTreeMap<u64, String>,
+    op: &str,
+) -> String {
+    if names.is_empty() {
+        return line.to_owned();
+    }
     let lea = line
         .strip_suffix(';')
         .and_then(|t| t.split_once(" = "))
         .and_then(|(lhs, rhs)| {
-            let operand = rhs.strip_prefix(var)?.strip_prefix(" + ")?;
+            let operand = rhs.strip_prefix(var)?.strip_prefix(op)?;
             let off = parse_const(operand)?;
             Some(format!("{lhs} = &{var}->{};", names.get(&off)?))
         });
     if let Some(named) = lea {
         return named;
     }
-    let needle = format!("({var} + ");
+    let needle = format!("({var}{op}");
     let mut s = line.to_owned();
     let mut from = 0;
     while let Some(i) = s.get(from..).and_then(|t| t.find(&needle)) {

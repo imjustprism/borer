@@ -1370,7 +1370,9 @@ pub struct AccessSite {
 /// moved to is right here instead of a byte search coming up empty.
 ///
 /// Both operand orders are read (`base + 0x10` and `0x10 + base`), and a bare
-/// `*(T*)base` is offset zero. Only dereferences are recorded, so an address
+/// `*(T*)base` is offset zero. A pointer into the middle of a struct reads
+/// the members before it as `*(T*)(base - 0x40)`, kept at the wrapped
+/// offset `-0x40` stands for. Only dereferences are recorded, so an address
 /// taken for arithmetic is not mistaken for a field.
 ///
 /// # Arguments
@@ -1540,6 +1542,13 @@ fn collect_general_accesses(
                 Some((v, consumed)) => (v, s, e + 3 + consumed),
                 None => (0, s, e),
             }
+        } else if line[..s].ends_with('(')
+            && let Some(rest) = line[e..].strip_prefix(" - ")
+        {
+            match parse_number(rest) {
+                Some((v, consumed)) => (0u64.wrapping_sub(v), s, e + 3 + consumed),
+                None => (0, s, e),
+            }
         } else if let Some(head) = line[..s].strip_suffix(" + ") {
             match trailing_number(head) {
                 Some((v, start)) => (v, start, e),
@@ -1663,7 +1672,13 @@ pub fn fields_tsv(
             .map(|c| format!("{c:#x}"))
             .collect::<Vec<_>>()
             .join(",");
-        let _ = writeln!(out, "{base}\t{offset:#x}\t{widths}\t{dir}\t{consts}");
+        let signed = offset.cast_signed();
+        let shown = if signed < 0 {
+            format!("-{:#x}", signed.unsigned_abs())
+        } else {
+            format!("{offset:#x}")
+        };
+        let _ = writeln!(out, "{base}\t{shown}\t{widths}\t{dir}\t{consts}");
     }
     Some(out)
 }
