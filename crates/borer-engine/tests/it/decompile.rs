@@ -9481,3 +9481,50 @@ fn an_interpreter_over_an_unbounded_rel32_table_is_a_dispatch_loop() {
     assert!(text.contains("switch ("), "{text}");
     replays_clean(&p, &a, &[F]);
 }
+
+/// A table no compare bounds ends where the next table begins, even when
+/// the next table's entries, read from the first one's base, land on code.
+///
+/// Two dispatches each `movzx eax,byte [...]; lea rdx,[T]; movsxd
+/// rax,[rdx+rax*4]; add rax,rdx; jmp rax`, over tables of two entries laid
+/// end to end. Read from the first base, the second table's entries name
+/// the second `jmp rax` and the last byte of a `mov`, and the first table
+/// once took both as cases.
+#[test]
+fn an_unbounded_rel32_table_ends_where_the_next_table_begins() {
+    const F: u64 = 0x1_4000_1000;
+    const T: u64 = 0x1_4000_2000;
+    let code: &[u8] = &[
+        0x0f, 0xb6, 0x01, // ASM: movzx eax,byte [rcx]
+        0x48, 0x8d, 0x15, 0xf6, 0x0f, 0x00, 0x00, // ASM: lea rdx,[rip+0xff6]
+        0x48, 0x63, 0x04, 0x82, // ASM: movsxd rax,dword [rdx+rax*4]
+        0x48, 0x01, 0xd0, // ASM: add rax,rdx
+        0xff, 0xe0, // ASM: jmp rax
+        0x0f, 0xb6, 0x41, 0x01, // ASM: movzx eax,byte [rcx+1]
+        0x48, 0x8d, 0x15, 0xea, 0x0f, 0x00, 0x00, // ASM: lea rdx,[rip+0xfea]
+        0x48, 0x63, 0x04, 0x82, // ASM: movsxd rax,dword [rdx+rax*4]
+        0x48, 0x01, 0xd0, // ASM: add rax,rdx
+        0xff, 0xe0, // ASM: jmp rax
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: mov eax,2
+        0xc3, // ASM: ret
+        0xb8, 0x03, 0x00, 0x00, 0x00, // ASM: mov eax,3
+        0xc3, // ASM: ret
+    ];
+    let first = [F + 0x13, F + 0x27];
+    let second = [F + 0x2d, F + 0x33];
+    let mut data = rel32_entries(T, &first);
+    data.extend(rel32_entries(T + 8, &second));
+    let p = program64_with_data(code, &data);
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(F + 0x11)).map(Vec::as_slice),
+        Some(&first[..])
+    );
+    assert_eq!(
+        a.jump_tables.get(&(F + 0x25)).map(Vec::as_slice),
+        Some(&second[..])
+    );
+    replays_clean(&p, &a, &[F]);
+}

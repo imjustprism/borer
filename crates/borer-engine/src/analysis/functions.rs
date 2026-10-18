@@ -191,6 +191,9 @@ const LOOSE_REACH: u64 = 0x10_0000;
 const UNBOUNDED_ENTRIES_MAX: usize = 256;
 /// Fewest cases a table no check bounds must yield to be taken as one.
 const UNBOUNDED_ENTRIES_MIN: usize = 2;
+/// Most instructions decoded after a jump through a table no check bounds,
+/// looking for the code that names the table after it.
+const NEXT_TABLE_SCAN: usize = 256;
 /// Most rounds of gap seeding; each round only ever adds functions.
 pub(super) const GAP_ROUNDS_MAX: usize = 64;
 /// Fewest functions a round of gap seeding must add for another to follow.
@@ -4791,7 +4794,9 @@ fn read_jump_table(
 /// jump's section, off code, past what `within` allows, farther than
 /// [`LOOSE_REACH`] or on bytes that do not decode, and at most
 /// [`UNBOUNDED_ENTRIES_MAX`] of them: the table's end is where its
-/// entries stop being this function's code.
+/// entries stop being this function's code. A slot past the first that
+/// the window or the code after the jump names ([`rip_targets_after`])
+/// starts another table and ends this one.
 ///
 /// # Arguments
 ///
@@ -4827,9 +4832,13 @@ fn unbounded_table(
     }
     let base = added_base(window.get(k + 1..).unwrap_or_default(), load, &lea).unwrap_or(base);
     let section = program.section_at(jmp_va)?.va.0;
+    let named = rip_targets_after(program, bitness, &jmp, within);
     let targets: Vec<u64> = (0..UNBOUNDED_ENTRIES_MAX)
         .map_while(|i| {
             let slot = table.checked_add(from_usize(i).checked_mul(4)?)?;
+            if i > 0 && (named.contains(&slot) || lea.values().any(|v| *v == slot)) {
+                return None;
+            }
             let t = base.wrapping_add_signed(i64::from(read_u32(program, slot)?.cast_signed()));
             (program.section_at(t).is_some_and(|s| s.va.0 == section)
                 && super::is_executable_va(program, t)
@@ -4843,6 +4852,47 @@ fn unbounded_table(
         targets,
         picker: None,
     })
+}
+
+/// The addresses the code after `jmp` names through `rip`, up to
+/// [`NEXT_TABLE_SCAN`] instructions on while `within` holds.
+///
+/// Tables of offsets often lie end to end, and the entries past one table's
+/// end are the next table's, which read from the first base can land on
+/// code. The next table's own dispatch names its start, so a slot named
+/// here is where the table before it ends.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `bitness` - Decoder bitness.
+/// * `jmp` - The jump through the table.
+/// * `within` - Whether an address may be this function's.
+///
+/// # Returns
+///
+/// The named addresses.
+fn rip_targets_after(
+    program: &Program,
+    bitness: u32,
+    jmp: &Instruction,
+    within: &dyn Fn(u64) -> bool,
+) -> FxHashSet<u64> {
+    let mut named = FxHashSet::default();
+    let mut at = jmp.next_ip();
+    for _ in 0..NEXT_TABLE_SCAN {
+        if !within(at) {
+            break;
+        }
+        let Some(i) = decode_at(program, bitness, at).filter(|i| i.code() != Code::INVALID) else {
+            break;
+        };
+        if i.is_ip_rel_memory_operand() {
+            named.insert(i.ip_rel_memory_address());
+        }
+        at = i.next_ip();
+    }
+    named
 }
 
 /// The registers a `lea reg, [rip + X]` in `window` filled, with the
