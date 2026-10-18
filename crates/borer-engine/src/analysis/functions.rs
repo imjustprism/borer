@@ -186,6 +186,11 @@ pub(super) const TABLE_ENTRIES_MAX: u64 = 4096;
 /// table's end pointed 7 MB away, into the middle of other functions'
 /// instructions.
 const LOOSE_REACH: u64 = 0x10_0000;
+/// Most entries read from a table no check bounds, the cases an index
+/// fetched as a byte can select.
+const UNBOUNDED_ENTRIES_MAX: usize = 256;
+/// Fewest cases a table no check bounds must yield to be taken as one.
+const UNBOUNDED_ENTRIES_MIN: usize = 2;
 /// Most rounds of gap seeding; each round only ever adds functions.
 pub(super) const GAP_ROUNDS_MAX: usize = 64;
 /// Fewest functions a round of gap seeding must add for another to follow.
@@ -4545,6 +4550,11 @@ fn prev_instructions(
 /// (`movzx eax, byte [rdx + rcx + D2]`) selects among those targets when
 /// several cases share one.
 ///
+/// When nothing bounds the index, as when an interpreter jumps on an
+/// opcode byte it fetched, only a table of offsets read through a `lea`
+/// base is tried, and it ends at its first entry that is not code of
+/// this function ([`unbounded_table`]).
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -4595,11 +4605,14 @@ fn resolve_jump_table(
             })
         }),
     };
-    let TableBound {
+    let Some(TableBound {
         check_at,
         entries,
         loose,
-    } = bound?;
+    }) = bound
+    else {
+        return unbounded_table(program, bitness, jmp_va, &window, within);
+    };
     let mut table = read_jump_table(program, bitness, jmp_va, &window, check_at, entries)?;
     if !loose {
         return Some(table);
@@ -4676,12 +4689,8 @@ fn read_jump_table(
         }
     }
 
-    let mut bases: BTreeMap<Register, u64> = BTreeMap::new();
-    for i in window {
-        if i.mnemonic() == Mnemonic::Lea && i.memory_base() == Register::RIP {
-            bases.insert(i.op0_register(), i.memory_displacement64());
-        }
-    }
+    let lea = lea_bases(window);
+    let mut bases = lea.clone();
     if program.is_64 && program.format == crate::program::BinaryFormat::Pe {
         for i in window {
             let base = i.memory_base();
@@ -4695,9 +4704,12 @@ fn read_jump_table(
     }
     let mut wide: Option<(u64, u64)> = None;
     let mut narrow: Option<u64> = None;
-    for i in window.iter().skip(cmp_at) {
+    for (k, i) in window.iter().enumerate().skip(cmp_at) {
         match table_load(program, &bases, i) {
-            Some((table, base, 4)) => wide = Some((table, base)),
+            Some((table, base, 4)) => {
+                let after = window.get(k + 1..).unwrap_or_default();
+                wide = Some((table, added_base(after, i, &lea).unwrap_or(base)));
+            }
             Some((table, _, 1)) => narrow = Some(table),
             _ => {}
         }
@@ -4763,6 +4775,115 @@ fn read_jump_table(
         targets,
         picker: None,
     })
+}
+
+/// Reads a table of offsets that no check bounds, entry by entry.
+///
+/// The last load in `window` must read 32-bit entries through a register
+/// a `lea` filled and the jump must go where it, plus the base added back
+/// ([`added_base`]), points. Entries are read until one lands outside the
+/// jump's section, off code, past what `within` allows, farther than
+/// [`LOOSE_REACH`] or on bytes that do not decode, and at most
+/// [`UNBOUNDED_ENTRIES_MAX`] of them: the table's end is where its
+/// entries stop being this function's code.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `bitness` - Decoder bitness.
+/// * `jmp_va` - Address of the indirect jump.
+/// * `window` - The instructions before the jump, in order.
+/// * `within` - Whether a target may be this function's.
+///
+/// # Returns
+///
+/// The case targets in table order, or `None` when no such load feeds the
+/// jump or fewer than [`UNBOUNDED_ENTRIES_MIN`] entries are code.
+fn unbounded_table(
+    program: &Program,
+    bitness: u32,
+    jmp_va: u64,
+    window: &[Instruction],
+    within: &dyn Fn(u64) -> bool,
+) -> Option<TableRead> {
+    let jmp = decode_at(program, bitness, jmp_va)?;
+    if jmp.op0_kind() != OpKind::Register {
+        return None;
+    }
+    let lea = lea_bases(window);
+    let (k, load, (table, base, scale)) = window
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(k, i)| table_load(program, &lea, i).map(|t| (k, i, t)))?;
+    if scale != 4 || load.op0_register().full_register() != jmp.op0_register().full_register() {
+        return None;
+    }
+    let base = added_base(window.get(k + 1..).unwrap_or_default(), load, &lea).unwrap_or(base);
+    let section = program.section_at(jmp_va)?.va.0;
+    let targets: Vec<u64> = (0..UNBOUNDED_ENTRIES_MAX)
+        .map_while(|i| {
+            let slot = table.checked_add(from_usize(i).checked_mul(4)?)?;
+            let t = base.wrapping_add_signed(i64::from(read_u32(program, slot)?.cast_signed()));
+            (program.section_at(t).is_some_and(|s| s.va.0 == section)
+                && super::is_executable_va(program, t)
+                && t.abs_diff(jmp_va) <= LOOSE_REACH
+                && within(t)
+                && decode_at(program, bitness, t).is_some_and(|d| d.code() != Code::INVALID))
+            .then_some(t)
+        })
+        .collect();
+    (targets.len() >= UNBOUNDED_ENTRIES_MIN).then_some(TableRead {
+        targets,
+        picker: None,
+    })
+}
+
+/// The registers a `lea reg, [rip + X]` in `window` filled, with the
+/// address each holds.
+///
+/// # Arguments
+///
+/// * `window` - The instructions before a jump, in order.
+fn lea_bases(window: &[Instruction]) -> BTreeMap<Register, u64> {
+    window
+        .iter()
+        .filter(|i| i.mnemonic() == Mnemonic::Lea && i.memory_base() == Register::RIP)
+        .map(|i| (i.op0_register(), i.memory_displacement64()))
+        .collect()
+}
+
+/// The address added back to what a table load read, when the code adds
+/// a `lea`-filled register other than the one the load went through.
+///
+/// `lea r8, [F]; lea rdx, [T]; movsxd rax, [rdx + rcx * 4]; add rax, r8`
+/// holds offsets from `F`, a label other than the table.
+///
+/// # Arguments
+///
+/// * `after` - The instructions after the load, before the jump.
+/// * `load` - The table load.
+/// * `lea` - The `lea`-filled registers ([`lea_bases`]).
+///
+/// # Returns
+///
+/// The address in the register added to the load's destination, or `None`
+/// when the first such `add` adds no `lea`-filled register.
+fn added_base(
+    after: &[Instruction],
+    load: &Instruction,
+    lea: &BTreeMap<Register, u64>,
+) -> Option<u64> {
+    let dest = load.op0_register().full_register();
+    let add = after.iter().find(|i| {
+        i.mnemonic() == Mnemonic::Add
+            && i.op0_kind() == OpKind::Register
+            && i.op0_register().full_register() == dest
+    })?;
+    if add.op1_kind() != OpKind::Register {
+        return None;
+    }
+    lea.get(&add.op1_register()).copied()
 }
 
 /// Reads a table of signed 32-bit offsets added to `base`, the form a

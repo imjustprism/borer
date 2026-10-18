@@ -9302,3 +9302,111 @@ fn a_scalar_lane_move_and_round_keeps_the_bits() {
         }
     }
 }
+
+/// Builds the `.rdata` bytes of a table of signed 32-bit offsets from
+/// `base` to each of `targets`.
+///
+/// # Arguments
+///
+/// * `base` - What every entry is relative to.
+/// * `targets` - The case addresses, in table order.
+///
+/// # Returns
+///
+/// The entries, little-endian, followed by nothing.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a fixture builder: every target is within 2 GB of its base"
+)]
+fn rel32_entries(base: u64, targets: &[u64]) -> Vec<u8> {
+    targets
+        .iter()
+        .flat_map(|&t| {
+            i32::try_from(t.cast_signed() - base.cast_signed())
+                .unwrap()
+                .to_le_bytes()
+        })
+        .collect()
+}
+
+/// A bounded table of offsets from the function's start, not from the
+/// table, resolves through the register the jump adds back.
+///
+/// `cmp ecx,3; ja D; lea r8,[F]; lea rdx,[T]; movsxd rax,[rdx+rcx*4]; add
+/// rax,r8; jmp rax`: the base is another label than the table, so reading
+/// the entries as offsets from the table lands every case in data.
+#[test]
+fn a_rel32_table_relative_to_another_label_resolves() {
+    const F: u64 = 0x1_4000_1000;
+    let code: &[u8] = &[
+        0x83, 0xf9, 0x03, // ASM: cmp ecx,3
+        0x77, 0x2f, // ASM: ja 0x34
+        0x4c, 0x8d, 0x05, 0xf4, 0xff, 0xff, 0xff, // ASM: lea r8,[rip-0xc]
+        0x48, 0x8d, 0x15, 0xed, 0x0f, 0x00, 0x00, // ASM: lea rdx,[rip+0xfed]
+        0x48, 0x63, 0x04, 0x8a, // ASM: movsxd rax,dword [rdx+rcx*4]
+        0x4c, 0x01, 0xc0, // ASM: add rax,r8
+        0xff, 0xe0, // ASM: jmp rax
+        0xb8, 0x0a, 0x00, 0x00, 0x00, // ASM: mov eax,10
+        0xc3, // ASM: ret
+        0xb8, 0x14, 0x00, 0x00, 0x00, // ASM: mov eax,20
+        0xc3, // ASM: ret
+        0xb8, 0x1e, 0x00, 0x00, 0x00, // ASM: mov eax,30
+        0xc3, // ASM: ret
+        0xb8, 0x28, 0x00, 0x00, 0x00, // ASM: mov eax,40
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let cases = [F + 0x1c, F + 0x22, F + 0x28, F + 0x2e];
+    let p = program64_with_data(code, &rel32_entries(F, &cases));
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(F + 0x1a)).map(Vec::as_slice),
+        Some(&cases[..])
+    );
+    let text = decompiled(&p, F);
+    assert!(!text.contains("goto *"), "{text}");
+    assert!(text.contains("switch (a1)"), "{text}");
+    assert!(text.contains("return 40;"), "{text}");
+    replays_clean(&p, &a, &[F]);
+}
+
+/// A table no compare bounds is read while its entries land on code of the
+/// function, and ends at the first that does not.
+///
+/// `movzx eax,byte [rcx]; lea rdx,[T]; movsxd rax,[rdx+rax*4]; add rax,rdx;
+/// jmp rax` indexes four rel32 entries with a byte read from memory, and
+/// the zero after them reads as the table itself, which is data.
+#[test]
+fn an_unbounded_rel32_table_ends_at_its_first_invalid_entry() {
+    const F: u64 = 0x1_4000_1000;
+    const T: u64 = 0x1_4000_2000;
+    let code: &[u8] = &[
+        0x0f, 0xb6, 0x01, // ASM: movzx eax,byte [rcx]
+        0x48, 0x8d, 0x15, 0xf6, 0x0f, 0x00, 0x00, // ASM: lea rdx,[rip+0xff6]
+        0x48, 0x63, 0x04, 0x82, // ASM: movsxd rax,dword [rdx+rax*4]
+        0x48, 0x01, 0xd0, // ASM: add rax,rdx
+        0xff, 0xe0, // ASM: jmp rax
+        0xb8, 0x0a, 0x00, 0x00, 0x00, // ASM: mov eax,10
+        0xc3, // ASM: ret
+        0xb8, 0x14, 0x00, 0x00, 0x00, // ASM: mov eax,20
+        0xc3, // ASM: ret
+        0xb8, 0x1e, 0x00, 0x00, 0x00, // ASM: mov eax,30
+        0xc3, // ASM: ret
+        0xb8, 0x28, 0x00, 0x00, 0x00, // ASM: mov eax,40
+        0xc3, // ASM: ret
+    ];
+    let cases = [F + 0x13, F + 0x19, F + 0x1f, F + 0x25];
+    let p = program64_with_data(code, &rel32_entries(T, &cases));
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(F + 0x11)).map(Vec::as_slice),
+        Some(&cases[..])
+    );
+    let text = decompiled(&p, F);
+    assert!(!text.contains("goto *"), "{text}");
+    assert!(text.contains("switch ("), "{text}");
+    assert!(text.contains("return 40;"), "{text}");
+    replays_clean(&p, &a, &[F]);
+}
+
