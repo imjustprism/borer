@@ -6,7 +6,7 @@ use crate::analysis::protos::CallConv;
 use crate::analysis::typelib::Pass;
 
 /// Infers which parameters are pointers, from the function dereferencing
-/// them, and which stack parameters are floating point, from the function
+/// them, and which parameters are floating point, from the function
 /// reading them as such.
 ///
 /// A parameter rendered `uint64_t` that the function dereferences is not a
@@ -21,7 +21,9 @@ use crate::analysis::typelib::Pass;
 /// function returning `double` in `st0` that does `fld dword [ebp+0xc]`
 /// returns its second argument widened from a `float`. One width read
 /// names the type; reads at both widths name none, and a parameter the
-/// function also dereferences stays a pointer.
+/// function also dereferences stays a pointer. A parameter arriving in a
+/// vector register is typed the same way, by the precision the scalar
+/// instructions reading it name ([`vector_read_bytes`]).
 ///
 /// A parameter reaches a register in its argument register, or loaded from
 /// its stack slot: `mov eax, [ebp+8]` then `[eax+0x10]` is a field of the
@@ -142,6 +144,17 @@ pub(super) fn param_types(
                 None
             };
             let info = factory.info(instr);
+            if let Some(bytes) = vector_read_bytes(instr) {
+                for ur in info.used_registers() {
+                    let r = lift::canon(ur.register(), ctx.bitness);
+                    if r.is_vector_register()
+                        && matches!(ur.access(), OpAccess::Read | OpAccess::ReadWrite)
+                        && let Some(&(p, 0)) = holds.get(&r)
+                    {
+                        floats.entry(p).or_default().insert(bytes);
+                    }
+                }
+            }
             let float_bytes = match instr.memory_size() {
                 crate::isa::x86::MemorySize::Float32 => Some(4),
                 crate::isa::x86::MemorySize::Float64 => Some(8),
@@ -192,6 +205,37 @@ pub(super) fn param_types(
         types.entry(p).or_insert_with(|| ty.to_owned());
     }
     types
+}
+
+/// The precision a scalar float instruction reads its vector registers at,
+/// in bytes.
+///
+/// A conversion names its source after `cvt` or `cvtt` (`cvtsd2ss` reads a
+/// double, `cvtsi2sd` an integer); any other scalar instruction names it
+/// as its suffix (`ucomisd`, `movss`). Packed and bit instructions name
+/// none.
+///
+/// # Arguments
+///
+/// * `instr` - The instruction.
+fn vector_read_bytes(instr: &Instruction) -> Option<usize> {
+    let name = format!("{:?}", instr.mnemonic()).to_ascii_lowercase();
+    let name = name
+        .strip_prefix('v')
+        .filter(|n| n.starts_with("cvt"))
+        .unwrap_or(&name);
+    let lane = match name
+        .strip_prefix("cvtt")
+        .or_else(|| name.strip_prefix("cvt"))
+    {
+        Some(rest) => rest.get(..2)?,
+        None => name.get(name.len().checked_sub(2)?..)?,
+    };
+    match lane {
+        "ss" => Some(4),
+        "sd" => Some(8),
+        _ => None,
+    }
 }
 
 /// Names what a pointer points at, from the accesses made through it.

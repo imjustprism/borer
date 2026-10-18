@@ -1544,6 +1544,23 @@ fn a_float_no_caller_reads_is_no_result() {
     assert!(text.contains("// signature: void "), "{text}");
 }
 
+/// A float parameter is typed by the precision that reads it.
+///
+/// `mulsd xmm0,xmm0; cvttsd2si eax,xmm0; ret` reads its first argument as
+/// a `double`, not the `float` every vector parameter used to be.
+#[test]
+fn a_float_parameter_takes_the_precision_that_reads_it() {
+    let code = [
+        0xf2, 0x0f, 0x59, 0xc0, // ASM: mulsd xmm0,xmm0
+        0xf2, 0x0f, 0x2c, 0xc0, // ASM: cvttsd2si eax,xmm0
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("(double a1)"), "{text}");
+}
+
 /// A call through the result reads it: after `call 0x140001040; call
 /// [rax+0x10]; ret` the callee `mov eax,1; ret` returns a value.
 #[test]
@@ -5016,7 +5033,7 @@ fn a_sysv_float_argument_is_a_parameter_and_shows_at_the_call() {
     );
     p.format = BinaryFormat::Elf;
     let callee = decompiled(&p, 0x1_4000_1020);
-    assert!(callee.contains("float a2"), "{callee}");
+    assert!(callee.contains("double a2"), "{callee}");
     let caller = decompiled(&p, 0x1_4000_1000);
     assert!(
         caller.contains("sub_140001020(5, 2.5)"),
