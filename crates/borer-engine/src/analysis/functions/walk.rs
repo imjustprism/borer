@@ -1171,7 +1171,7 @@ pub(super) fn walk_function(
                     }
                     None => {
                         if let Some(table) =
-                            resolve_jump_table(program, bitness, addr, &recorded, &|t| {
+                            resolve_jump_table(program, bitness, addr, &recorded, &recs, &|t| {
                                 t >= entry && known.starts.next_after(addr).is_none_or(|s| t < s)
                             })
                         {

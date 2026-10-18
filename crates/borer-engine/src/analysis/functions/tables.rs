@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{Recorded, decode_at};
+use super::{InstrRec, Recorded, decode_at};
 use crate::analysis::switch_index::{TableBound, check_bound, index_bound, table_index};
 use crate::analysis::{read_u32, read_u64};
 use crate::fxmap::FxHashSet;
@@ -137,6 +137,8 @@ fn prev_instructions(
 /// * `bitness` - Decoder bitness.
 /// * `jmp_va` - Address of the indirect jump.
 /// * `recorded` - What the walk's records so far say.
+/// * `walked` - The walk's records so far, for a table base set before a
+///   loop the backward chain cannot leave ([`hoisted_base`]).
 /// * `within` - Whether a target of a loosely sized table may be this
 ///   function's.
 ///
@@ -150,6 +152,7 @@ pub(super) fn resolve_jump_table(
     bitness: u32,
     jmp_va: u64,
     recorded: &Recorded,
+    walked: &[(u64, InstrRec)],
     within: &dyn Fn(u64) -> bool,
 ) -> Option<TableRead> {
     /// Longest backward chain examined for the range check and table base.
@@ -169,6 +172,9 @@ pub(super) fn resolve_jump_table(
     window.reverse();
     if window.len() < 3 {
         window = prev_instructions(program, bitness, jmp_va, 6)?;
+    }
+    if let Some(lea) = hoisted_base(program, bitness, jmp_va, &window, walked) {
+        window.insert(0, lea);
     }
 
     let bound = match table_index(&window, decode_at(program, bitness, jmp_va).as_ref()) {
@@ -460,6 +466,83 @@ fn rip_targets_after(
         at = i.next_ip();
     }
     named
+}
+
+/// The `lea reg, [rip + X]` that filled a table load's base register
+/// before the backward chain's reach.
+///
+/// A compiler hoists the table's address out of the loop around a switch
+/// (sqlite's `strftime` formats in a loop: `lea r14, [T]` before it,
+/// `movsxd rax, [r14 + rax * 4]; add rax, r14; jmp rax` inside), and a
+/// chain that follows one predecessor per instruction circles the loop
+/// without reaching the `lea`. The walk has decoded it, since every path
+/// to the dispatch passes it: the walked instruction nearest below the
+/// jump that writes the register names the base when it is such a `lea`.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `bitness` - Decoder bitness.
+/// * `jmp_va` - Address of the indirect jump.
+/// * `window` - The instructions before the jump, in order.
+/// * `walked` - The walk's records so far.
+///
+/// # Returns
+///
+/// The `lea`, or `None` when the window already fills every base it
+/// loads through, or the nearest write is anything else.
+fn hoisted_base(
+    program: &Program,
+    bitness: u32,
+    jmp_va: u64,
+    window: &[Instruction],
+    walked: &[(u64, InstrRec)],
+) -> Option<Instruction> {
+    /// Most walked instructions decoded looking for the write.
+    const DECODES_MAX: usize = 4096;
+    let filled = lea_bases(window);
+    let mut bases: Vec<Register> = Vec::new();
+    for i in window.iter().rev() {
+        let base = i.memory_base();
+        if matches!(i.mnemonic(), Mnemonic::Mov | Mnemonic::Movsxd)
+            && i.memory_index() != Register::None
+            && base.is_gpr()
+            && !matches!(base.full_register(), Register::RSP | Register::RBP)
+            && !filled.contains_key(&base)
+            && !bases.contains(&base)
+        {
+            bases.push(base);
+        }
+    }
+    if bases.is_empty() {
+        return None;
+    }
+    let mut below: Vec<u64> = walked
+        .iter()
+        .map(|&(va, _)| va)
+        .filter(|&va| va < jmp_va)
+        .collect();
+    below.sort_unstable_by(|l, r| r.cmp(l));
+    let decoded: Vec<Instruction> = below
+        .into_iter()
+        .take(DECODES_MAX)
+        .filter_map(|va| decode_at(program, bitness, va))
+        .collect();
+    bases.into_iter().find_map(|base| {
+        let write = decoded.iter().find(|i| {
+            i.op_count() > 0
+                && i.op0_kind() == OpKind::Register
+                && i.op0_register().full_register() == base.full_register()
+                && !matches!(
+                    i.mnemonic(),
+                    Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Push | Mnemonic::Bt
+                )
+        })?;
+        (write.mnemonic() == Mnemonic::Lea
+            && write.memory_base() == Register::RIP
+            && write.op0_register() == base)
+            .then_some(*write)
+    })
 }
 
 /// The registers a `lea reg, [rip + X]` in `window` filled, with the

@@ -260,6 +260,53 @@ fn a_call_into_bytes_that_are_not_code_is_not_a_function() {
     );
 }
 
+/// A switch whose table address was loaded before its loop resolves.
+///
+/// sqlite's date formatter hoists `lea r14, [table]` out of the loop over
+/// the format string; the dispatch reads `movsxd rax, [r14 + rax*4]; add
+/// rax, r14; jmp rax`, and the loop is entered by a jump over its back
+/// edge, so the chain of predecessors from the dispatch circles the loop
+/// and never reaches the `lea`. Its 22 cases went unread.
+#[test]
+fn a_switch_table_loaded_before_its_loop_is_found() {
+    let mut code = vec![
+        0x4c, 0x8d, 0x35, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea r14, [rip + 0xff9] = 0x402000
+        0x31, 0xc9, // ASM: xor ecx, ecx               (0x401007)
+        0xeb, 0x03, // ASM: jmp short 0x40100e         (0x401009)
+        0x48, 0xff, 0xc1, // ASM: inc rcx             (0x40100b)
+        0x0f, 0xb6, 0x04, 0x0f, // ASM: movzx eax, byte [rdi + rcx]  (0x40100e)
+        0x83, 0xf8, 0x25, // ASM: cmp eax, 0x25       (0x401012)
+        0x74, 0x02, // ASM: je short 0x401019          (0x401015)
+        0xeb, 0xf2, // ASM: jmp short 0x40100b         (0x401017)
+        0x0f, 0xb6, 0x44, 0x0f, 0x01, // ASM: movzx eax, byte [rdi + rcx + 1]  (0x401019)
+        0x83, 0xf8, 0x02, // ASM: cmp eax, 2          (0x40101e)
+        0x77, 0x09, // ASM: ja short 0x40102c          (0x401021)
+        0x49, 0x63, 0x04, 0x86, // ASM: movsxd rax, [r14 + rax*4]    (0x401023)
+        0x4c, 0x01, 0xf0, // ASM: add rax, r14        (0x401027)
+        0xff, 0xe0, // ASM: jmp rax                   (0x40102a)
+        0xc3, // ASM: ret                              (0x40102c)
+    ];
+    assert_eq!(code.len(), 0x2d);
+    for (at, back) in [(0x30usize, 0xd9u8), (0x40, 0xc9), (0x50, 0xb9)] {
+        code.resize(at, 0xcc);
+        code.extend_from_slice(&[0xeb, back]); // ASM: jmp short 0x40100b
+    }
+    let mut data = Vec::new();
+    for at in [0x30i32, 0x40, 0x50] {
+        data.extend_from_slice(&(at - 0x1000).to_le_bytes());
+    }
+    let a = Analysis::compute(&raw::image(Arch::X86_64, &code, &data));
+    assert_eq!(
+        a.jump_tables
+            .get(&(TEXT + 0x2a))
+            .cloned()
+            .unwrap_or_default(),
+        vec![TEXT + 0x30, TEXT + 0x40, TEXT + 0x50],
+        "the table was not resolved: {:x?}",
+        a.jump_tables
+    );
+}
+
 /// A switch whose bound check sits in the block before its dispatch resolves.
 ///
 /// `cmp ecx, 3; jbe dispatch` guards the table, but the block after the
