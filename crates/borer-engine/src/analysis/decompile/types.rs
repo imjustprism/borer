@@ -2923,7 +2923,7 @@ fn drop_unsigned_masks(line: &str, unsigned32: &BTreeSet<String>) -> String {
         {
             continue;
         }
-        let Some(open) = matching_open(&out, at) else {
+        let Some(open) = opening_paren(&out, at) else {
             continue;
         };
         if !is_unsigned32(out.get(open + 1..at).unwrap_or(""), unsigned32) {
@@ -2955,33 +2955,6 @@ fn drop_unsigned_masks(line: &str, unsigned32: &BTreeSet<String>) -> String {
         from = o;
     }
     out
-}
-
-/// The index of the `(` that the `)` at `close` closes.
-///
-/// # Arguments
-///
-/// * `s` - The line.
-/// * `close` - Index of a `)`.
-///
-/// # Returns
-///
-/// `None` when nothing opens it.
-fn matching_open(s: &str, close: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    for (i, c) in s.get(..=close)?.char_indices().rev() {
-        match c {
-            ')' => depth += 1,
-            '(' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Tells whether a line declares variables rather than doing anything.
