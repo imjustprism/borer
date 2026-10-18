@@ -620,6 +620,139 @@ pub(super) fn thread_jumps(lines: &mut [String]) -> bool {
     changed
 }
 
+/// The line that opens the block line `at` sits in: the nearest earlier
+/// line, label lines apart, at a smaller indentation.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `at` - A line inside some block.
+fn block_opener(lines: &[String], at: usize) -> Option<usize> {
+    let ind = indent_of(lines.get(at)?);
+    lines[..at]
+        .iter()
+        .rposition(|l| !l.trim().is_empty() && indent_of(l) < ind && label_name(l).is_none())
+}
+
+/// Tells whether a trimmed line opens a loop body.
+///
+/// # Arguments
+///
+/// * `t` - The line without indentation.
+fn opens_loop(t: &str) -> bool {
+    (t.starts_with("while (") || t.starts_with("for (") || t == "do {") && t.ends_with('{')
+}
+
+/// The loop a line belongs to through nothing but `if`/`else` blocks, and
+/// that loop's closing line.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `at` - A line inside the loop.
+///
+/// # Returns
+///
+/// The opener and closer indices, or `None` when a `switch`, a `case` or
+/// the function's top level comes first.
+fn enclosing_loop(lines: &[String], at: usize) -> Option<(usize, usize)> {
+    let mut k = at;
+    let open = loop {
+        let o = block_opener(lines, k)?;
+        let t = lines[o].trim();
+        if opens_loop(t) {
+            break o;
+        }
+        if !(t.starts_with("if (") || t.starts_with("} else")) || !t.ends_with('{') {
+            return None;
+        }
+        k = o;
+    };
+    let ind = indent_of(&lines[open]);
+    let close = lines
+        .iter()
+        .enumerate()
+        .skip(open + 1)
+        .find(|(_, l)| !l.trim().is_empty() && indent_of(l) <= ind)
+        .map(|(j, _)| j)?;
+    (indent_of(&lines[close]) == ind && lines[close].trim().starts_with('}'))
+        .then_some((open, close))
+}
+
+/// Writes the loop exits the jumps spell as `break`, and a body's closing
+/// `if (c) continue;` before a jump as a test of the jump.
+///
+/// A `goto L;` (bare or under a condition) inside a loop, through nothing
+/// but `if`/`else` blocks, where `L:` follows the loop's closing line
+/// across nothing that runs ([`falls_to_label`]), leaves the loop where
+/// its end does: it is `break;`. A body that ends `if (c) continue;` then
+/// `goto L;` or `break;` repeats exactly when `c` holds, as falling off
+/// the body does, so the two lines are `if (!c) goto L;` or
+/// `if (!c) break;` ([`invert_condition`]).
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+///
+/// # Returns
+///
+/// Whether anything was rewritten.
+pub(super) fn loop_exits(lines: &mut Vec<String>) -> bool {
+    let mut changed = false;
+    for i in 0..lines.len() {
+        let t = lines[i].trim();
+        let Some(target) = goto_target(t).filter(|_| is_goto(t) || conditional_goto(t).is_some())
+        else {
+            continue;
+        };
+        let Some((_, close)) = enclosing_loop(lines, i) else {
+            continue;
+        };
+        if !falls_to_label(lines, close, target) {
+            continue;
+        }
+        let Some(cut) = lines[i]
+            .strip_suffix(&format!("goto {target};"))
+            .map(str::len)
+        else {
+            continue;
+        };
+        lines[i].truncate(cut);
+        lines[i].push_str("break;");
+        changed = true;
+    }
+    let mut j = 2;
+    while j < lines.len() {
+        let closer = lines[j].trim();
+        let Some((_, close)) = closer
+            .starts_with('}')
+            .then(|| enclosing_loop(lines, j - 1))
+            .flatten()
+        else {
+            j += 1;
+            continue;
+        };
+        let body = indent_of(&lines[j - 1]);
+        let leave = lines[j - 1].trim();
+        let cond = lines[j - 2]
+            .trim()
+            .strip_prefix("if (")
+            .and_then(|c| c.strip_suffix(") continue;"));
+        let exit = (leave == "break;" || (is_goto(leave) && leave.ends_with(';')))
+            .then(|| leave.to_owned());
+        if let (true, Some(cond), Some(exit)) = (close == j, cond, exit)
+            && indent_of(&lines[j - 2]) == body
+        {
+            let line = format!("{}if ({}) {exit}", " ".repeat(body), invert_condition(cond));
+            lines.splice(j - 2..j, [line]);
+            changed = true;
+        } else {
+            j += 1;
+        }
+    }
+    changed
+}
+
 /// Swaps the two jumps of `if (c) goto A; goto B;` where the text before
 /// `A:` is `if (!c) goto B;`.
 ///
@@ -1628,7 +1761,58 @@ pub(super) fn fold_conditional_gotos(lines: &mut Vec<String>, labels: RunLabels)
 
 #[cfg(test)]
 mod jump_tests {
-    use super::{flip_jump_pairs, thread_jumps};
+    use super::{flip_jump_pairs, loop_exits, thread_jumps};
+
+    /// A jump to the label after a loop is `break`, and a body that ends
+    /// `if (c) continue; goto L;` tests the jump instead.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_jump_past_the_loop_end_is_a_break() {
+        let mut lines = body(&[
+            "while (1) {",
+            "  if (a1[i] == x) goto L_1;",
+            "  i += 1;",
+            "  if (n != i) continue;",
+            "  goto L_2;",
+            "}",
+            "L_1:",
+            "return i;",
+            "L_2:",
+            "return 0;",
+        ]);
+        assert!(loop_exits(&mut lines));
+        assert_eq!(lines[1], "  if (a1[i] == x) break;");
+        assert_eq!(lines[3], "  if (n == i) goto L_2;");
+        assert_eq!(lines[4], "}");
+    }
+
+    /// A jump out of an inner loop, or out of a `switch`, is no `break` of
+    /// the outer loop.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_jump_past_an_outer_loop_stays() {
+        let mut lines = body(&[
+            "while (1) {",
+            "  while (a2 != 0) {",
+            "    if (a1 == 0) goto L_1;",
+            "    a2 -= 1;",
+            "  }",
+            "  switch (a3) {",
+            "  case 1:",
+            "    goto L_1;",
+            "  }",
+            "}",
+            "L_1:",
+            "return 0;",
+        ]);
+        assert!(!loop_exits(&mut lines));
+    }
 
     /// The lines of a body, one per entry.
     ///

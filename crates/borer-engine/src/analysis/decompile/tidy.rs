@@ -582,7 +582,8 @@ pub fn cleanup(body: &str) -> String {
 /// `if`/`else` end with moves after it ([`hoist_common_tails`]); a jump
 /// to a jump goes to that jump's label ([`thread_jumps`]); a pair of
 /// jumps takes the order of the test before its label
-/// ([`flip_jump_pairs`]); a conditional
+/// ([`flip_jump_pairs`]); a jump out of a loop is `break` ([`loop_exits`]);
+/// a conditional
 /// `goto` whose label
 /// ends a label-free run becomes an `if` around that run
 /// ([`fold_conditional_gotos`]); a long `if` body that never falls out,
@@ -655,6 +656,7 @@ fn drop_fallthrough_gotos(lines: &mut Vec<String>) -> bool {
 /// around a lone `goto` or two arms that now end alike. This reruns only
 /// the folds that move no value: one-line jumps
 /// ([`collapse_lone_gotos`]), shared arm tails ([`hoist_common_tails`]),
+/// loop exits ([`loop_exits`]),
 /// jumps to the next line ([`drop_fallthrough_gotos`]), labels nothing
 /// names, `else` arms ([`absorb_else`]) and guarded runs
 /// ([`fold_conditional_gotos`]), until one changes nothing or the pass
@@ -675,6 +677,7 @@ pub(super) fn refold_jumps(text: &str) -> String {
     for _ in 0..CLEANUP_PASSES {
         let mut changed = collapse_lone_gotos(&mut lines);
         changed |= hoist_common_tails(&mut lines);
+        changed |= loop_exits(&mut lines);
         changed |= drop_fallthrough_gotos(&mut lines);
         let referenced: BTreeSet<String> = goto_index(&lines).into_keys().collect();
         let before = lines.len();
@@ -738,6 +741,7 @@ pub(super) fn cleanup_passes(
         changed |= hoist_common_tails(lines);
         changed |= thread_jumps(lines);
         changed |= flip_jump_pairs(lines);
+        changed |= loop_exits(lines);
         changed |= fold_conditional_gotos(lines, RunLabels::Forbidden);
         changed |= flatten_early_exits(lines);
         changed |= absorb_else(lines);

@@ -5257,8 +5257,8 @@ fn an_indexed_read_is_not_rewritten_as_a_field() {
 /// `LB` is three `while (1)` loops. The outer entry is 0x5273, the inner
 /// entry is 0x525f, and 0x5287 jumps to itself. `goto L_5251` falls out of
 /// the inner loop. `goto L_5287` is that self-loop. Either one written as
-/// `break` or `continue` leaves the wrong loop. A `continue` inside the
-/// inner loop still restarts 0x525f.
+/// `break` or `continue` leaves the wrong loop. The inner loop still
+/// restarts 0x525f, by a `continue` or by falling off its body.
 #[test]
 fn a_loop_entered_below_its_first_block_keeps_its_label() {
     let out = dc(0x5240);
@@ -5290,10 +5290,6 @@ fn a_loop_entered_below_its_first_block_keeps_its_label() {
             "{edge} reads as break or continue: {out}"
         );
     }
-    assert!(
-        out.contains("continue;"),
-        "the inner restart of 0x525f is gone: {out}"
-    );
     assert_eq!(
         out.matches("while (1)").count(),
         3,
