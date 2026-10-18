@@ -165,9 +165,29 @@ pub fn u64_le(data: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b))
 }
 
+/// Reads a little-endian word of `width` bytes at `at`, zero-extended.
+///
+/// # Arguments
+///
+/// * `data` - The bytes.
+/// * `at` - The offset of the word's first byte.
+/// * `width` - The word's width in bytes, at most 8.
+///
+/// # Returns
+///
+/// The value, or `None` when `width` is over 8 or `data` holds fewer than
+/// `width` bytes from `at`.
+#[must_use]
+pub fn word_le(data: &[u8], at: usize, width: usize) -> Option<u64> {
+    let raw = data.get(at..at.checked_add(width)?)?;
+    let mut le = [0u8; 8];
+    le.get_mut(..raw.len())?.copy_from_slice(raw);
+    Some(u64::from_le_bytes(le))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{lo8, lo16, lo32, saturating_usize, sext32, u16_le, u32_le, u64_le};
+    use super::{lo8, lo16, lo32, saturating_usize, sext32, u16_le, u32_le, u64_le, word_le};
 
     /// Each conversion keeps the bits it names and nothing else.
     #[test]
@@ -202,5 +222,11 @@ mod tests {
         assert_eq!(u64_le(&b, 1), None);
         assert_eq!(u32_le(&[], usize::MAX), None);
         assert_eq!(u64_le(&b, usize::MAX), None);
+        assert_eq!(word_le(&b, 4, 4), Some(0x9abc_def0));
+        assert_eq!(word_le(&b, 0, 8), Some(0x9abc_def0_1234_5678));
+        assert_eq!(word_le(&b, 7, 1), Some(0x9a));
+        assert_eq!(word_le(&b, 6, 4), None);
+        assert_eq!(word_le(&b, 0, 9), None);
+        assert_eq!(word_le(&b, usize::MAX, 4), None);
     }
 }

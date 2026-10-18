@@ -31,7 +31,7 @@
 //! through [`settle`] into the same [`Relocs`], so every read of either
 //! format's image goes through one relocated copy.
 
-use crate::num::saturating_usize;
+use crate::num::{saturating_usize, word_le};
 use crate::program::Section;
 
 /// Most entries read from one relocation table, whatever its size claims,
@@ -299,11 +299,7 @@ pub(crate) fn file_range(sections: &[Section], va: u64, len: u64) -> Option<(u64
 /// * `off` - Its file offset.
 /// * `word` - Its width in bytes, 4 or 8.
 fn file_word(bytes: &[u8], off: u64, word: u64) -> Option<u64> {
-    let start = usize::try_from(off).ok()?;
-    let raw = bytes.get(start..start.checked_add(saturating_usize(word))?)?;
-    let mut le = [0u8; 8];
-    le.get_mut(..raw.len())?.copy_from_slice(raw);
-    Some(u64::from_le_bytes(le))
+    word_le(bytes, usize::try_from(off).ok()?, saturating_usize(word))
 }
 
 /// What one ELF's dynamic relocations do to its image.
