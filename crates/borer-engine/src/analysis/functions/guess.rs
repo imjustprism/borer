@@ -268,7 +268,7 @@ pub(super) fn byte_add(instr: &Instruction) -> bool {
 pub(super) fn odd_instruction(instr: &Instruction, bitness: u32, pe: bool) -> bool {
     use crate::isa::x86::Mnemonic as M;
     if instr.code() == Code::Add_rm8_r8 {
-        return true;
+        return instr.op0_kind() == OpKind::Memory;
     }
     if matches!(
         instr.mnemonic(),

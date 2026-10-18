@@ -49,6 +49,20 @@ fn a_function_after_one_int3_is_found() {
     assert_eq!(entries(&code, &[]), vec![TEXT, TEXT + 4]);
 }
 
+/// A function opening with a byte add between registers is found.
+///
+/// `add sil, dil` is how clang adds two `int8_t` arguments (`h_i8_arith`);
+/// only the memory form, `add [rax], al`, is what zero bytes decode to.
+/// Read as data, the exported entry was dropped and so was the function
+/// behind its padding.
+#[test]
+fn a_function_opening_with_a_byte_register_add_is_found() {
+    let mut code = vec![0x40, 0x00, 0xfe, 0x40, 0x0f, 0xbe, 0xc6, 0xc3]; // ASM: add sil, dil; movsx eax, sil; ret
+    code.push(0xcc);
+    code.extend_from_slice(&[0x40, 0x00, 0xfe, 0xc3]); // ASM: add sil, dil; ret
+    assert_eq!(entries(&code, &[]), vec![TEXT, TEXT + 9]);
+}
+
 /// A function behind a run of `nop` padding is found.
 ///
 /// A linker aligns with the multi-byte `nop` forms as well as with `int3`,
