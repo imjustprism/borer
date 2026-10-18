@@ -8,7 +8,7 @@
 )]
 
 use borer_engine::strings::{
-    Encoding, RawStringSpan, find_ascii_spans, find_wide_spans, printable,
+    Encoding, RawStringSpan, drop_code_runs, find_ascii_spans, find_wide_spans, printable,
 };
 
 /// Longest text the engine renders in full before appending `...`
@@ -437,4 +437,80 @@ fn span_hits_round_trip_the_reference_walks() {
     assert!(whit.text.ends_with("..."));
     assert_eq!(whit.full_text(&bytes).chars().count(), 300);
     assert!(whit.full_text(&bytes).ends_with("www"));
+}
+
+/// A walk of `.text` leaves out the runs that are instruction bytes and
+/// keeps the strings beside them.
+///
+/// The prologue `push r14; push r13; push r12; push rsi; push rdi; push
+/// rbp; push rbx` spells `AVAUATVWUSH`, the matching epilogue spells
+/// `([]_^A\A]A^`, and the multi-byte `nop` after the `ret` spells
+/// `fffff.`; none of them is text. A string placed after the second
+/// function's `ret`, which no block decodes, and one in `.rdata` stay.
+#[test]
+fn code_runs_are_not_strings_but_text_beside_code_is() {
+    let mut code: Vec<u8> = Vec::new();
+    // ASM: push r14; push r13; push r12; push rsi; push rdi; push rbp; push rbx
+    code.extend_from_slice(&[0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56, 0x57, 0x55, 0x53]);
+    // ASM: sub rsp, 0x28
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+    // ASM: call 0x401030
+    code.extend_from_slice(&[0xe8, 0x1d, 0x00, 0x00, 0x00]);
+    // ASM: add rsp, 0x28
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28]);
+    // ASM: pop rbx; pop rbp; pop rdi; pop rsi; pop r12; pop r13; pop r14; ret
+    code.extend_from_slice(&[
+        0x5b, 0x5d, 0x5f, 0x5e, 0x41, 0x5c, 0x41, 0x5d, 0x41, 0x5e, 0xc3,
+    ]);
+    // ASM: data16 data16 data16 data16 data16 nop word ptr cs:[rax+rax]
+    code.extend_from_slice(&[
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    assert_eq!(code.len(), 0x30);
+    // ASM: xor eax, eax; ret
+    code.extend_from_slice(&[0x31, 0xc0, 0xc3]);
+    code.extend_from_slice(b"Real string in text\0");
+    let p = crate::raw::image(
+        borer_engine::program::Arch::X86_64,
+        &code,
+        b"Real rdata string\0",
+    );
+    let a = borer_engine::analysis::Analysis::compute(&p);
+    let texts = |spans: &[RawStringSpan]| -> Vec<String> {
+        spans.iter().map(|s| s.text(&p.bytes)).collect()
+    };
+
+    let walked = find_ascii_spans(&p.bytes, 5);
+    assert!(
+        texts(&walked).contains(&"AVAUATVWUSH".to_owned()),
+        "{:?}",
+        texts(&walked)
+    );
+    let kept = drop_code_runs(&p, &a, walked, 5);
+    assert_eq!(
+        texts(&kept),
+        ["Real string in text", "Real rdata string"],
+        "functions {:?}",
+        a.functions.iter().map(|f| f.entry).collect::<Vec<_>>()
+    );
+}
+
+/// A program whose analysis found no functions keeps every run.
+#[test]
+fn code_runs_need_decoded_code() {
+    let p = crate::raw::image(
+        borer_engine::program::Arch::X86_64,
+        &[
+            0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56, 0x57, 0x55, 0x53, 0x48,
+        ],
+        &[],
+    );
+    let walked = find_ascii_spans(&p.bytes, 5);
+    let kept = drop_code_runs(
+        &p,
+        &borer_engine::analysis::Analysis::default(),
+        walked.clone(),
+        5,
+    );
+    assert_eq!(kept, walked);
 }

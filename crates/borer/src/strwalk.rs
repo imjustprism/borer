@@ -17,8 +17,11 @@
 
 use std::sync::{Arc, RwLock};
 
+use borer_engine::analysis::Analysis;
 use borer_engine::program::Program;
-use borer_engine::strings::{RawStringSpan, StringHit, find_ascii_spans, find_wide_spans};
+use borer_engine::strings::{
+    RawStringSpan, StringHit, drop_code_runs, find_ascii_spans, find_wide_spans,
+};
 
 use crate::params::StringEncoding;
 use crate::{read_lock, write_lock};
@@ -190,6 +193,8 @@ impl StringWalks {
 ///
 /// * `cache` - The server's walk cache, reset by `load_binary`.
 /// * `program` - The loaded image.
+/// * `analysis` - Its analysis, whose decoded code the walks leave out
+///   ([`drop_code_runs`]).
 ///
 /// # Returns
 ///
@@ -197,6 +202,7 @@ impl StringWalks {
 pub(crate) fn load_or_build(
     cache: &RwLock<Option<Arc<StringWalks>>>,
     program: &Program,
+    analysis: &Analysis,
 ) -> Arc<StringWalks> {
     let key = (program.bytes.as_ptr() as usize, program.bytes.len());
     if let Some(walks) = read_lock(cache).as_ref().filter(|w| w.key == key) {
@@ -209,8 +215,13 @@ pub(crate) fn load_or_build(
     );
     let walks = Arc::new(StringWalks {
         key,
-        ascii: find_ascii_spans(&program.bytes, WALK_MIN),
-        utf16,
+        ascii: drop_code_runs(
+            program,
+            analysis,
+            find_ascii_spans(&program.bytes, WALK_MIN),
+            WALK_MIN,
+        ),
+        utf16: drop_code_runs(program, analysis, utf16, WALK_MIN),
         user,
     });
     *write_lock(cache) = Some(Arc::clone(&walks));
@@ -297,14 +308,15 @@ mod tests {
     fn load_or_build_builds_once_and_resets_with_the_program() {
         let cache: RwLock<Option<Arc<StringWalks>>> = RwLock::new(None);
         let p = program();
-        let first = load_or_build(&cache, &p);
-        let second = load_or_build(&cache, &p);
+        let a = Analysis::default();
+        let first = load_or_build(&cache, &p, &a);
+        let second = load_or_build(&cache, &p, &a);
         assert!(
             Arc::ptr_eq(&first, &second),
             "the second call walks nothing"
         );
         *write_lock(&cache) = None;
-        let third = load_or_build(&cache, &p);
+        let third = load_or_build(&cache, &p, &a);
         assert!(
             !Arc::ptr_eq(&first, &third),
             "a reset program walks again, sharing nothing with the stale rows"

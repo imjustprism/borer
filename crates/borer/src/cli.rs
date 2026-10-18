@@ -2006,7 +2006,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let filter = Filter::new(args.get(2).map(String::as_str).filter(|f| !f.is_empty()));
             let window = cli_page(args, 3, 100, 500)?;
             let walk = (crate::strwalk::WALK_MIN, StringEncoding::Both);
-            let rows = walk_rows(&s.program, walk.1, walk.0);
+            let rows = walk_rows(&s.program, &s.analysis_or_empty(), walk.1, walk.0);
             print!(
                 "{}",
                 strings_page(&s.program, rows, &filter, walk, window, false)

@@ -68,7 +68,7 @@ use rmcp::{
 
 use borer::project::Identity;
 use borer_engine::live::{self as live, Memory as _, Rebase, Snapshot};
-use borer_engine::strings::{find_ascii_spans, find_wide_spans};
+use borer_engine::strings::{drop_code_runs, find_ascii_spans, find_wide_spans};
 use params::{
     Annotation, AnnotationsParams, CallgraphParams, CfgParams, ClassLayoutParams, CryptoParams,
     DecompileBatchParams, DecompileParams, Detail, DisassembleFunctionParams, DisassembleParams,
@@ -2289,7 +2289,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the encoding is unknown.
     #[tool(
-        description = "Printable ASCII/UTF-16LE strings as `off va len enc \"text\"` rows.",
+        description = "Printable ASCII/UTF-16LE strings as `va len enc \"text\"` rows; runs that are bytes of decoded instructions (prologues, nop padding) are left out.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2313,10 +2313,11 @@ impl BorerServer {
         let encoding = encoding.unwrap_or_default();
         let page = Page::new(offset, limit, count_only, 200, 500)?;
         self.with_program(|p| {
+            let a = self.analysis_or_empty();
             let rows: Vec<StringRow> = if min >= strwalk::WALK_MIN {
-                strwalk::load_or_build(&self.strings, p).rows(encoding, min)
+                strwalk::load_or_build(&self.strings, p, &a).rows(encoding, min)
             } else {
-                walk_rows(p, encoding, min)
+                walk_rows(p, &a, encoding, min)
             };
             Ok(strings_page(
                 p,
@@ -3948,22 +3949,24 @@ fn percent_decode(text: &str) -> String {
 /// # Arguments
 ///
 /// * `p` - The loaded program.
+/// * `a` - Its analysis, whose decoded code the walks leave out
+///   ([`drop_code_runs`]).
 /// * `encoding` - Which walks: ASCII, UTF-16LE, or both merged by offset.
 /// * `min` - Shortest run kept.
 ///
 /// # Returns
 ///
 /// The rows in offset order.
-fn walk_rows(p: &Program, encoding: StringEncoding, min: usize) -> Vec<StringRow> {
+fn walk_rows(p: &Program, a: &Analysis, encoding: StringEncoding, min: usize) -> Vec<StringRow> {
     let ascii = || {
-        find_ascii_spans(&p.bytes, min)
+        drop_code_runs(p, a, find_ascii_spans(&p.bytes, min), min)
             .into_iter()
             .map(StringRow::Span)
     };
     let wide = || {
         let (spans, user) =
             borer_engine::clr::split_user_strings(p, find_wide_spans(&p.bytes, min), min);
-        spans
+        drop_code_runs(p, a, spans, min)
             .into_iter()
             .map(StringRow::Span)
             .chain(user.into_iter().map(StringRow::Hit))

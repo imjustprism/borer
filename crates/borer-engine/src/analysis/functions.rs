@@ -3817,7 +3817,7 @@ fn lea_nop(instr: &Instruction) -> bool {
 /// # Returns
 ///
 /// The first address past the run; `va` itself when nothing pads there.
-fn padding_end(program: &Program, bitness: u32, va: u64, hi: u64) -> u64 {
+pub(crate) fn padding_end(program: &Program, bitness: u32, va: u64, hi: u64) -> u64 {
     let mut cur = va;
     while cur < hi {
         let Some(i) = decode_at(program, bitness, cur) else {

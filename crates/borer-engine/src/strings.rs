@@ -1,5 +1,6 @@
 //! Printable string extraction (ASCII and UTF-16LE) as pure functions.
 
+use crate::analysis::Analysis;
 use crate::program::Program;
 use crate::search::eq_mask;
 
@@ -465,6 +466,127 @@ pub fn find_wide_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
         .into_iter()
         .map(|s| s.hit(bytes))
         .collect()
+}
+
+/// Drops the runs that are instruction bytes rather than text.
+///
+/// A walk of an executable section reads opcodes as text: `push r14;
+/// push r13; push r12; push rsi; ...` spells `AVAUATVW`, and a multi-byte
+/// `nop` between functions spells `fffff.`. A run is code when the bytes
+/// left of it outside every decoded basic block, and outside the `nop` and
+/// `int3` padding after one, hold no stretch of `min_len` characters. A
+/// string the compiler put in `.text` after a `ret`, which no block
+/// decodes, stays; so does every run outside the code, and every run of a
+/// program whose analysis found no functions.
+///
+/// # Arguments
+///
+/// * `program` - The image the spans were walked from.
+/// * `analysis` - Its analysis, whose blocks are the decoded code.
+/// * `spans` - The walked runs, offsets into `program`'s bytes.
+/// * `min_len` - Shortest run the walk reports, in characters.
+///
+/// # Returns
+///
+/// The runs that are not code, in their order.
+#[must_use]
+pub fn drop_code_runs(
+    program: &Program,
+    analysis: &Analysis,
+    spans: Vec<RawStringSpan>,
+    min_len: usize,
+) -> Vec<RawStringSpan> {
+    let code = code_ranges(program, analysis);
+    if code.is_empty() {
+        return spans;
+    }
+    spans
+        .into_iter()
+        .filter(|s| !is_code_run(program, &code, *s, min_len))
+        .collect()
+}
+
+/// The program's decoded code as sorted, disjoint `[start, end)` address
+/// ranges: every basic block, each with the `nop` and `int3` padding that
+/// follows it.
+///
+/// # Arguments
+///
+/// * `program` - The image, read for the padding.
+/// * `analysis` - The analysis whose blocks are the code.
+///
+/// # Returns
+///
+/// The ranges in address order, empty when no function was found.
+fn code_ranges(program: &Program, analysis: &Analysis) -> Vec<(u64, u64)> {
+    let mut blocks: Vec<(u64, u64)> = analysis
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter().map(|b| (b.start, b.end)))
+        .collect();
+    blocks.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(blocks.len());
+    for (start, end) in blocks {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    if let Some(bits) = program.arch.bitness() {
+        let next: Vec<u64> = merged.iter().skip(1).map(|r| r.0).collect();
+        for (r, hi) in merged
+            .iter_mut()
+            .zip(next.into_iter().chain(std::iter::once(u64::MAX)))
+        {
+            r.1 = crate::analysis::functions::padding_end(program, bits, r.1, hi);
+        }
+    }
+    merged
+}
+
+/// Tells whether one run lies in the code `code` covers, with no stretch
+/// of `min_len` characters outside it.
+///
+/// # Arguments
+///
+/// * `program` - The image, for the run's address.
+/// * `code` - The code ranges, sorted and disjoint.
+/// * `span` - The run.
+/// * `min_len` - Shortest stretch that is a string of its own.
+///
+/// # Returns
+///
+/// `true` when the run overlaps the code and what is left is shorter than
+/// `min_len`; `false` for a run at no address.
+fn is_code_run(
+    program: &Program,
+    code: &[(u64, u64)],
+    span: RawStringSpan,
+    min_len: usize,
+) -> bool {
+    let Some(va) = program.offset_to_va(span.off) else {
+        return false;
+    };
+    let unit: u64 = match span.encoding {
+        Encoding::Ascii => 1,
+        Encoding::Utf16 | Encoding::DotnetUs => 2,
+    };
+    let end = va.saturating_add(u64::from(span.len).saturating_mul(unit));
+    let first = code.partition_point(|&(_, hi)| hi <= va);
+    let mut cur = va;
+    let mut longest = 0;
+    for &(lo, hi) in code.get(first..).unwrap_or(&[]) {
+        if lo >= end {
+            break;
+        }
+        longest = longest.max(lo.saturating_sub(cur));
+        cur = cur.max(hi);
+    }
+    if cur == va {
+        return false;
+    }
+    longest = longest.max(end.saturating_sub(cur));
+    longest / unit < crate::num::from_usize(min_len)
 }
 
 /// Tells whether the two bytes at `i` form a printable UTF-16LE ASCII unit.
