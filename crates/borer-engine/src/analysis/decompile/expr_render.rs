@@ -820,6 +820,9 @@ impl Expr {
             Expr::Sp(k) => (format!("&{}", n.slot(*k)), UNARY),
             Expr::FConst(bits, ty) => (render_fconst(*bits, *ty), ATOM),
             Expr::Call(f, args) => {
+                if let Some(v) = super::vector::render(f, args, n) {
+                    return v;
+                }
                 let width = RoundToInt::parse(f).is_some();
                 let args: Vec<String> = args
                     .iter()
@@ -937,6 +940,8 @@ impl Expr {
                     }
                     Expr::Const(v) if !sum && !indexes(*v) => number(e, n, hexo),
                     Expr::Const(v) if sum && n.empty_literal(*v) => number(e, n, hexo),
+                    Expr::Call(..) if op.is_float() => super::vector::float_lane(e, n)
+                        .map_or_else(|| e.render_in(n, hexo, sum, inner), |t| (t, ATOM)),
                     _ => e.render_in(n, hexo, sum, inner),
                 };
                 let (ls, lp) = match (op, &**l) {

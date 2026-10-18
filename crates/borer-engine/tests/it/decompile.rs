@@ -2900,7 +2900,8 @@ fn float_sign_and_magnitude_masks_render_as_neg_and_fabs() {
 }
 
 /// `FL3`: integer-to-float and float-to-double conversions render as casts, a
-/// double store is typed, and an unmodeled vector op becomes an intrinsic call.
+/// double store is typed, and a packed shuffle is C's vector shuffle over
+/// the lanes it reads, the double's bits among them.
 #[test]
 fn float_conversions_and_vector_intrinsics() {
     let out = dc(0x1340);
@@ -2909,9 +2910,12 @@ fn float_conversions_and_vector_intrinsics() {
         "{out}"
     );
     assert!(
-        out.contains("*(uint128_t*)(a2 + 0x10) = shufps(xmm1, ") && out.contains(", 0x1b);"),
+        out.contains(
+            "*(uint128_t*)(a2 + 0x10) = (uint128_t)__builtin_shufflevector((f32x4)(uint128_t)xmm1, (f32x4)(f64x2){"
+        ) && out.contains("}, 3, 2, 5, 4);"),
         "{out}"
     );
+    assert!(!out.contains("shufps("), "{out}");
     assert!(
         !out.contains("/*"),
         "unmodeled instruction survived:\n{out}"
@@ -2920,7 +2924,7 @@ fn float_conversions_and_vector_intrinsics() {
 
 /// `FL`, `FL2` and `FR`: scalar-float blocks are checked against the
 /// binary, not counted as float/vector; `FL3`, whose `shufps` is a packed
-/// operation the text names as an intrinsic, still is.
+/// operation the text writes as a vector shuffle, still is.
 #[test]
 fn scalar_float_blocks_are_checked_not_counted() {
     use borer_engine::analysis::decompile::checked_header;
@@ -9531,6 +9535,48 @@ fn an_unbounded_rel32_table_ends_where_the_next_table_begins() {
         Some(&second[..])
     );
     replays_clean(&p, &a, &[F]);
+}
+
+/// Packed integer work is C over vector types, and the 128-bit constant it
+/// reads is declared with the value the image holds.
+///
+/// `movdqa xmm0,[rip+k]; paddd xmm0,[rcx]; pshufd xmm1,xmm0,0xee; paddd
+/// xmm0,xmm1; movd eax,xmm0; ret` sums lanes, the tail of a vectorized
+/// reduction. Each instruction once printed as a call to its mnemonic,
+/// which no compiler knows, and the constant as an uninitialized local.
+#[test]
+fn packed_integer_work_is_c_over_vector_types() {
+    let code = [
+        0x66, 0x0f, 0x6f, 0x05, 0xf8, 0x0f, 0x00, 0x00, // ASM: movdqa xmm0,[rip+0xff8]
+        0x66, 0x0f, 0xfe, 0x01, // ASM: paddd xmm0,[rcx]
+        0x66, 0x0f, 0x70, 0xc8, 0xee, // ASM: pshufd xmm1,xmm0,0xee
+        0x66, 0x0f, 0xfe, 0xc1, // ASM: paddd xmm0,xmm1
+        0x66, 0x0f, 0x7e, 0xc0, // ASM: movd eax,xmm0
+        0xc3, // ASM: ret
+    ];
+    let data: Vec<u8> = [1u32, 2, 3, 4]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let p = program64_with_data(&code, &data);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(
+        text.contains("typedef uint32_t u32x4 __attribute__((vector_size(16), aligned(1)));"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "static const uint128_t g128_140002000 = (uint128_t)0x400000003 << 64 | 0x200000001; // @ 0x140002000"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("*(u32x4*)a1"), "{text}");
+    assert!(text.contains("__builtin_shufflevector("), "{text}");
+    for name in ["paddd(", "pshufd("] {
+        assert!(!text.contains(name), "{text}");
+    }
+    let a = Analysis::compute(&p);
+    replays_clean(&p, &a, &[0x1_4000_1000]);
 }
 
 /// Every SSE predicate of `cmpsd` is a lane the lifter computes, as the

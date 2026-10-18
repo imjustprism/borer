@@ -61,6 +61,7 @@ mod tidy;
 pub mod traces;
 mod types;
 mod vars;
+mod vector;
 pub mod verify;
 pub mod verify_a64;
 mod wire;
@@ -573,7 +574,10 @@ pub fn decompile_all_settled(
     render_all(program, analysis, overlay, entries, |p, a, o, e| {
         let bitness = p.arch.bitness().unwrap_or(64);
         decompile_plain_full(p, a, o, e).map(|d| {
-            let text = tables::inline_tables(&polish(&d.text, bitness, &a.packs), p);
+            let text = vector::declare(
+                &tables::inline_tables(&polish(&d.text, bitness, &a.packs), p),
+                p,
+            );
             (text, d.settle)
         })
     })
@@ -720,7 +724,12 @@ pub fn decompile(
     decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
         .as_ref()
         .as_ref()
-        .map(|d| tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program))
+        .map(|d| {
+            vector::declare(
+                &tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program),
+                program,
+            )
+        })
 }
 
 /// [`decompile`] built afresh, for a batch ([`decompile_all`]).
@@ -742,8 +751,12 @@ fn decompile_afresh(
     entry: u64,
 ) -> Option<String> {
     let bitness = program.arch.bitness().unwrap_or(64);
-    decompile_plain_full(program, analysis, overlay, entry)
-        .map(|d| tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program))
+    decompile_plain_full(program, analysis, overlay, entry).map(|d| {
+        vector::declare(
+            &tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program),
+            program,
+        )
+    })
 }
 
 /// The source file and line each PDB-named function starts at, read once
@@ -1317,8 +1330,11 @@ fn name_fields(
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    Some(tables::inline_tables(
-        &polish(&out, program.arch.bitness().unwrap_or(64), &analysis.packs),
+    Some(vector::declare(
+        &tables::inline_tables(
+            &polish(&out, program.arch.bitness().unwrap_or(64), &analysis.packs),
+            program,
+        ),
         program,
     ))
 }
