@@ -262,6 +262,7 @@ fn entry_size(word: u64) -> u64 {
 ///
 /// The strings in header order, or `None` when the shape does not hold.
 fn string_table(program: &Program, va: u64, word: u64) -> Option<Vec<String>> {
+    let (_, first_offset) = header(program, va, word)?;
     let size = entry_size(word);
     let mut names = Vec::new();
     let mut at = va;
@@ -280,9 +281,7 @@ fn string_table(program: &Program, va: u64, word: u64) -> Option<Vec<String>> {
         names.push(String::from_utf8_lossy(&text[..len as usize]).into_owned());
         at += size;
     }
-    let (Some(first), Some((_, first_offset))) = (names.first(), header(program, va, word)) else {
-        return None;
-    };
+    let first = names.first()?;
     (is_identifier(first) && first_offset == names.len() as u64 * size).then_some(names)
 }
 
@@ -299,7 +298,9 @@ fn string_table(program: &Program, va: u64, word: u64) -> Option<Vec<String>> {
 /// `(length, offset)` when the reference count is -1, the allocation zero
 /// and the length and offset plausible.
 fn header(program: &Program, at: u64, word: u64) -> Option<(u32, u64)> {
-    let ref_count = read_u32(program, at)?;
+    if read_u32(program, at)? != 0xffff_ffff {
+        return None;
+    }
     let len = read_u32(program, at + 4)?;
     let alloc = read_u32(program, at + 8)?;
     let offset = if word == 8 {
@@ -307,8 +308,7 @@ fn header(program: &Program, at: u64, word: u64) -> Option<(u32, u64)> {
     } else {
         u64::from(read_u32(program, at + 12)?)
     };
-    (ref_count == 0xffff_ffff && alloc == 0 && len < STRING_MAX && offset > 0 && offset < 1 << 20)
-        .then_some((len, offset))
+    (alloc == 0 && len < STRING_MAX && offset > 0 && offset < 1 << 20).then_some((len, offset))
 }
 
 /// Finds the `QMetaObject` whose string-data field points at a table.
