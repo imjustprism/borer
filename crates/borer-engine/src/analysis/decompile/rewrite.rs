@@ -566,6 +566,9 @@ pub(super) fn flatten_else_if(lines: &mut Vec<String>) -> bool {
 ///
 /// Whether any jump was redirected.
 pub(super) fn thread_jumps(lines: &mut [String]) -> bool {
+    if !lines.iter().any(|l| l.contains("goto ")) {
+        return false;
+    }
     let mut next: BTreeMap<String, String> = BTreeMap::new();
     for (k, l) in lines.iter().enumerate() {
         let Some(name) = label_name(l) else {
@@ -758,6 +761,12 @@ fn enclosing_loop(lines: &[String], nest: &Nest, at: usize) -> Option<(usize, us
 ///
 /// Whether anything was rewritten.
 pub(super) fn loop_exits(lines: &mut Vec<String>) -> bool {
+    if !lines
+        .iter()
+        .any(|l| l.contains("goto ") || l.ends_with(" continue;"))
+    {
+        return false;
+    }
     let mut changed = false;
     let mut nest = Nest::of(lines);
     for i in 0..lines.len() {
@@ -817,7 +826,9 @@ pub(super) fn loop_exits(lines: &mut Vec<String>) -> bool {
 /// that falls into `A`, so the run between becomes an `else`
 /// ([`absorb_else`]) and the shared test moves after it
 /// ([`hoist_common_tails`]). The negation must match the other test as
-/// written ([`invert_condition`]).
+/// written ([`invert_condition`]). A pair whose own test already stands
+/// before `B:` is left as it is: it matches that path, and swapping it
+/// would only invite the swap back.
 ///
 /// # Arguments
 ///
@@ -827,6 +838,9 @@ pub(super) fn loop_exits(lines: &mut Vec<String>) -> bool {
 ///
 /// Whether any pair was swapped.
 pub(super) fn flip_jump_pairs(lines: &mut [String]) -> bool {
+    if !lines.iter().any(|l| l.contains("goto ")) {
+        return false;
+    }
     let mut changed = false;
     let at_label: BTreeMap<String, usize> = lines
         .iter()
@@ -855,6 +869,12 @@ pub(super) fn flip_jump_pairs(lines: &mut [String]) -> bool {
         if at <= i + 1 || lines[at - 1].trim() != flipped {
             continue;
         }
+        let matched = at_label
+            .get(second)
+            .is_some_and(|&b| b > 0 && lines[b - 1].trim() == lines[i].trim());
+        if matched {
+            continue;
+        }
         let pad = " ".repeat(ind);
         let jump = format!("{pad}goto {first};");
         lines[i] = format!("{pad}{flipped}");
@@ -878,6 +898,9 @@ pub(super) fn flip_jump_pairs(lines: &mut [String]) -> bool {
 ///
 /// Whether any `if` was collapsed.
 pub(super) fn collapse_lone_gotos(lines: &mut Vec<String>) -> bool {
+    if !lines.iter().any(|l| l.contains("goto ")) {
+        return false;
+    }
     let mut changed = false;
     let mut i = 0;
     while i + 2 < lines.len() {
@@ -1976,5 +1999,15 @@ mod jump_tests {
             "L_1:",
         ]);
         assert!(!flip_jump_pairs(&mut other));
+        let mut both = body(&[
+            "if (a2 == 0) goto L_1;",
+            "goto L_2;",
+            "if (a2 == 0) goto L_1;",
+            "L_2:",
+            "sub_2(a1);",
+            "if (a2 != 0) goto L_2;",
+            "L_1:",
+        ]);
+        assert!(!flip_jump_pairs(&mut both));
     }
 }
