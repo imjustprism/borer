@@ -205,12 +205,13 @@ impl V {
     /// # Arguments
     ///
     /// * `text` - The expression.
+    /// * `whole` - The value is 16 bytes; otherwise 8.
     /// * `tight` - The text binds as tightly as a cast's operand needs.
-    fn untyped(text: String, tight: bool) -> V {
+    fn untyped(text: String, whole: bool, tight: bool) -> V {
         V {
             text,
             ty: None,
-            whole: true,
+            whole,
             tight,
         }
     }
@@ -241,6 +242,9 @@ impl V {
 pub(super) fn render(f: &str, args: &[Expr], n: &Names<'_>) -> Option<(String, u8)> {
     if let Some(mask) = movemask(f, args, n) {
         return Some((mask, ATOM));
+    }
+    if let Some(lane) = lane_result(f, args, n) {
+        return Some(lane);
     }
     let v = packed(f, args, n)?;
     let word = if v.whole { "uint128_t" } else { "uint64_t" };
@@ -473,14 +477,18 @@ fn sse(f: &str, args: &[Expr], n: &Names<'_>) -> Option<V> {
     })
 }
 
-/// An arm64 packed operation, `op_arrangement`: `add_4s`.
+/// The operation and arrangement an arm64 call's name holds:
+/// `cmeq_16b` is `cmeq` over byte lanes, all 128 bits.
 ///
 /// # Arguments
 ///
 /// * `f` - The name after its leading `__`.
-/// * `args` - Its arguments.
-/// * `n` - Name resolution.
-fn neon(f: &str, args: &[Expr], n: &Names<'_>) -> Option<V> {
+///
+/// # Returns
+///
+/// `(operation, lane bits, whole)`, or `None` for a name with no
+/// arrangement of 64 or 128 bits.
+fn arrangement(f: &str) -> Option<(&str, u32, bool)> {
     let (op, arrangement) = f.rsplit_once('_')?;
     let split = arrangement.find(|c: char| !c.is_ascii_digit())?;
     let count: u32 = arrangement.get(..split)?.parse().ok()?;
@@ -496,6 +504,88 @@ fn neon(f: &str, args: &[Expr], n: &Names<'_>) -> Option<V> {
         64 => false,
         _ => return None,
     };
+    Some((op, bits, whole))
+}
+
+/// An arm64 operation whose result is one lane, not a vector.
+///
+/// `addv` is the sum of every lane, the scalar `addp` the sum of two,
+/// `sminv` and its kin the extreme lane as the compiler's reduction
+/// builtin, and `umov` the lane an index names.
+///
+/// # Arguments
+///
+/// * `f` - The call's name.
+/// * `args` - Its arguments.
+/// * `n` - Name resolution.
+///
+/// # Returns
+///
+/// `(text, precedence)`, or `None` for any other call.
+fn lane_result(f: &str, args: &[Expr], n: &Names<'_>) -> Option<(String, u8)> {
+    let (op, bits, whole) = arrangement(f.strip_prefix("__")?)?;
+    let t = Vt {
+        elem: Elem::unsigned(bits),
+        whole,
+    };
+    match (op, args) {
+        ("addv", [a]) => {
+            let v = format!("({})", operand(a, t, n));
+            let sum: Vec<String> = (0..t.lanes()).map(|k| format!("{v}[{k}]")).collect();
+            Some((format!("({})({})", t.elem.c(), sum.join(" + ")), UNARY))
+        }
+        ("umov", [a, Expr::Const(k)]) => Some((format!("({})[{k}]", operand(a, t, n)), ATOM)),
+        ("addp", [a]) => {
+            let v = format!("({})", operand(a, t, n));
+            Some((format!("({})({v}[0] + {v}[1])", t.elem.c()), UNARY))
+        }
+        ("sminv" | "smaxv", [a]) => {
+            let signed = Vt {
+                elem: Elem::signed(bits),
+                whole,
+            };
+            let kind = if op == "sminv" { "min" } else { "max" };
+            Some((
+                format!("__builtin_reduce_{kind}({})", operand(a, signed, n)),
+                ATOM,
+            ))
+        }
+        ("uminv" | "umaxv", [a]) => {
+            let kind = if op == "uminv" { "min" } else { "max" };
+            Some((
+                format!("__builtin_reduce_{kind}({})", operand(a, t, n)),
+                ATOM,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A scalar converted to a lane type, as a vector operation with it
+/// broadcasts it.
+///
+/// # Arguments
+///
+/// * `e` - The scalar.
+/// * `elem` - The lane type.
+/// * `n` - Name resolution.
+fn scalar(e: &Expr, elem: Elem, n: &Names<'_>) -> String {
+    match e {
+        Expr::Const(v) => format!("({}){v:#x}", elem.c()),
+        Expr::Var(_) => format!("({}){}", elem.c(), e.render(n)),
+        _ => format!("({})({})", elem.c(), e.render(n)),
+    }
+}
+
+/// An arm64 packed operation, `op_arrangement`: `add_4s`.
+///
+/// # Arguments
+///
+/// * `f` - The name after its leading `__`.
+/// * `args` - Its arguments.
+/// * `n` - Name resolution.
+fn neon(f: &str, args: &[Expr], n: &Names<'_>) -> Option<V> {
+    let (op, bits, whole) = arrangement(f)?;
     let int = |e: Elem| Vt { elem: e, whole };
     let float = || {
         Some(Vt {
@@ -507,26 +597,182 @@ fn neon(f: &str, args: &[Expr], n: &Names<'_>) -> Option<V> {
             whole,
         })
     };
+    let unsigned = int(Elem::unsigned(bits));
+    let signed = int(Elem::signed(bits));
     Some(match (op, args) {
-        ("add", [a, b]) => binary("+", int(Elem::unsigned(bits)), a, b, n),
-        ("sub", [a, b]) => binary("-", int(Elem::unsigned(bits)), a, b, n),
-        ("mul", [a, b]) => binary("*", int(Elem::unsigned(bits)), a, b, n),
-        ("neg", [a]) => {
-            let t = int(Elem::unsigned(bits));
-            V::of(format!("-{}", operand(a, t, n)), t, false)
-        }
+        ("add", [a, b]) => binary("+", unsigned, a, b, n),
+        ("sub", [a, b]) => binary("-", unsigned, a, b, n),
+        ("mul", [a, b]) => binary("*", unsigned, a, b, n),
+        ("neg", [a]) => V::of(format!("-{}", operand(a, unsigned, n)), unsigned, false),
         ("abs", [a]) => {
-            let t = int(Elem::signed(bits));
-            let s = operand(a, t, n);
+            let s = operand(a, signed, n);
             let sign = format!("({s} >> {})", bits - 1);
-            V::of(format!("({s} ^ {sign}) - {sign}"), t, false)
+            V::of(format!("({s} ^ {sign}) - {sign}"), signed, false)
         }
         ("fadd", [a, b]) => binary("+", float()?, a, b, n),
         ("fsub", [a, b]) => binary("-", float()?, a, b, n),
         ("fmul", [a, b]) => binary("*", float()?, a, b, n),
         ("fdiv", [a, b]) => binary("/", float()?, a, b, n),
+        ("cmeq", [a, b]) => compare("==", unsigned, a, b, n),
+        ("cmhi", [a, b]) => compare(">", unsigned, a, b, n),
+        ("cmhs", [a, b]) => compare(">=", unsigned, a, b, n),
+        ("cmgt", [a, b]) => compare(">", signed, a, b, n),
+        ("cmge", [a, b]) => compare(">=", signed, a, b, n),
+        ("cmle", [a, b]) => compare("<=", signed, a, b, n),
+        ("cmlt", [a, b]) => compare("<", signed, a, b, n),
+        ("ushll" | "ushll2" | "sshll" | "sshll2", [a, Expr::Const(k)]) => {
+            let to = if op.starts_with('s') {
+                signed
+            } else {
+                unsigned
+            };
+            let wide = widened(a, Vt::whole(to.elem), op.ends_with('2'), n);
+            if *k == 0 {
+                V::of(wide, Vt::whole(to.elem), true)
+            } else {
+                V::of(format!("{wide} << {k}"), Vt::whole(to.elem), false)
+            }
+        }
+        ("ext", [a, b, Expr::Const(k)]) => {
+            let t = int(Elem::U8);
+            let from = u32::try_from(*k).ok()?;
+            let order: Vec<u32> = (from..from + t.lanes()).collect();
+            shuffle(t, a, Some(b), &order, n)
+        }
+        ("ins", [d, x, Expr::Const(k)]) => {
+            let t = Vt::whole(Elem::unsigned(bits));
+            let count = t.lanes();
+            let at = u32::try_from(*k).ok()?;
+            let order: Vec<u32> = (0..count)
+                .map(|i| if i == at { count } else { i })
+                .collect();
+            let splat = format!("({}){{0}} + {}", t.name(), scalar(x, t.elem, n));
+            V::of(
+                format!(
+                    "__builtin_shufflevector({}, {splat}, {})",
+                    operand(d, t, n),
+                    list(&order)
+                ),
+                t,
+                true,
+            )
+        }
+        ("smin" | "smax", [a, b]) => elementwise(&op[1..], signed, a, b, n),
+        ("umin" | "umax", [a, b]) => elementwise(&op[1..], unsigned, a, b, n),
+        ("mla", [acc, a, b]) => V::of(
+            format!(
+                "{} + {} * {}",
+                operand(acc, unsigned, n),
+                operand(a, unsigned, n),
+                operand(b, unsigned, n)
+            ),
+            unsigned,
+            false,
+        ),
+        ("addp", [a, b]) => {
+            let count = unsigned.lanes();
+            let evens: Vec<u32> = (0..count).map(|k| 2 * k).collect();
+            let odds: Vec<u32> = evens.iter().map(|k| k + 1).collect();
+            let (x, y) = (operand(a, unsigned, n), operand(b, unsigned, n));
+            V::of(
+                format!(
+                    "__builtin_shufflevector({x}, {y}, {}) + __builtin_shufflevector({x}, {y}, {})",
+                    list(&evens),
+                    list(&odds)
+                ),
+                unsigned,
+                false,
+            )
+        }
+        (
+            "smlal" | "smlal2" | "umlal" | "umlal2" | "smull" | "smull2" | "umull" | "umull2"
+            | "saddw" | "saddw2" | "uaddw" | "uaddw2",
+            _,
+        ) => {
+            let to = Vt::whole(if op.starts_with('s') {
+                Elem::signed(bits)
+            } else {
+                Elem::unsigned(bits)
+            });
+            let upper = op.ends_with('2');
+            let wide = |e: &Expr| widened(e, to, upper, n);
+            let text = match (&op[1..4], args) {
+                ("mla", [acc, a, b]) => {
+                    format!("{} + {} * {}", operand(acc, to, n), wide(a), wide(b))
+                }
+                ("mul", [a, b]) => format!("{} * {}", wide(a), wide(b)),
+                ("add", [acc, b]) => format!("{} + {}", operand(acc, to, n), wide(b)),
+                _ => return None,
+            };
+            V::of(text, to, false)
+        }
+        ("scvtf" | "ucvtf", [a]) => {
+            let from = if op == "scvtf" { signed } else { unsigned };
+            let to = float()?;
+            V::of(
+                format!(
+                    "__builtin_convertvector({}, {})",
+                    operand(a, from, n),
+                    to.name()
+                ),
+                to,
+                true,
+            )
+        }
+        ("dup", [x]) => V::of(
+            format!(
+                "({}){{0}} + {}",
+                unsigned.name(),
+                scalar(x, unsigned.elem, n)
+            ),
+            unsigned,
+            false,
+        ),
         _ => return None,
     })
+}
+
+/// A lane-wise minimum or maximum, as the compiler's element-wise builtin.
+///
+/// # Arguments
+///
+/// * `kind` - `min` or `max`.
+/// * `t` - The lanes' type, whose signedness picks the comparison.
+/// * `a` - The first vector.
+/// * `b` - The second.
+/// * `n` - Name resolution.
+fn elementwise(kind: &str, t: Vt, a: &Expr, b: &Expr, n: &Names<'_>) -> V {
+    V::of(
+        format!(
+            "__builtin_elementwise_{kind}({}, {})",
+            operand(a, t, n),
+            operand(b, t, n)
+        ),
+        t,
+        true,
+    )
+}
+
+/// Half the lanes of a vector at twice their width, as a widening
+/// operation reads its narrow sources.
+///
+/// # Arguments
+///
+/// * `e` - The narrow vector.
+/// * `to` - The wide lanes, whose signedness extends them.
+/// * `upper` - The upper half is read; otherwise the lower.
+/// * `n` - Name resolution.
+fn widened(e: &Expr, to: Vt, upper: bool, n: &Names<'_>) -> String {
+    let narrow = Vt::whole(if matches!(to.elem, Elem::I16 | Elem::I32 | Elem::I64) {
+        Elem::signed(to.elem.bits() / 2)
+    } else {
+        Elem::unsigned(to.elem.bits() / 2)
+    });
+    let count = to.lanes();
+    let first = if upper { count } else { 0 };
+    let order: Vec<u32> = (first..first + count).collect();
+    let half = shuffle(narrow, e, None, &order, n);
+    format!("__builtin_convertvector({}, {})", half.text, to.name())
 }
 
 /// The lane width an x86 integer mnemonic's last letter names: `b`, `w`,
@@ -661,6 +907,7 @@ fn binary(sym: &str, t: Vt, a: &Expr, b: &Expr, n: &Names<'_>) -> V {
 fn compare(sym: &str, t: Vt, a: &Expr, b: &Expr, n: &Names<'_>) -> V {
     V::untyped(
         format!("{} {sym} {}", operand(a, t, n), operand(b, t, n)),
+        t.whole,
         false,
     )
 }
@@ -712,6 +959,7 @@ fn builtin(name: &str, elem: Elem, a: &Expr, b: &Expr, n: &Names<'_>) -> V {
     let t = Vt::whole(elem);
     V::untyped(
         format!("{name}({}, {})", operand(a, t, n), operand(b, t, n)),
+        true,
         true,
     )
 }

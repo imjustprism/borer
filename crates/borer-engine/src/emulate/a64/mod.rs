@@ -889,7 +889,7 @@ impl<'a> Machine<'a> {
             Mnemonic::Cas(width) => self.compare_swap(i, width),
             Mnemonic::Prfm | Mnemonic::Barrier => Ok(()),
             Mnemonic::Mrs | Mnemonic::Msr => self.system(i),
-            Mnemonic::Svc | Mnemonic::Other => Err(unmodeled(i)),
+            Mnemonic::Svc | Mnemonic::Simd(_) | Mnemonic::Other => Err(unmodeled(i)),
         }
         .map(|()| None)
     }

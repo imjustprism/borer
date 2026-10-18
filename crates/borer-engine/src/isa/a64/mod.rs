@@ -561,8 +561,81 @@ pub enum Mnemonic {
     /// A barrier (`dmb`, `dsb`, `isb`, `sb`, `ssbb`, `pssbb`) or `clrex`:
     /// orders memory and execution but changes no register.
     Barrier,
+    /// A lane operation of Advanced SIMD with no scalar form.
+    Simd(Simd),
     /// Every other instruction, the branches among them.
     Other,
+}
+
+/// An Advanced SIMD lane operation, every field of which is read from the
+/// word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Simd {
+    /// `addv`: the sum of every lane, into the lowest.
+    Addv,
+    /// `cmeq`: each lane all ones where equal, register or zero form.
+    Cmeq,
+    /// `cmgt`: each lane all ones where signed greater.
+    Cmgt,
+    /// `cmge`: each lane all ones where signed greater or equal.
+    Cmge,
+    /// `cmhi`: each lane all ones where unsigned higher.
+    Cmhi,
+    /// `cmhs`: each lane all ones where unsigned higher or the same.
+    Cmhs,
+    /// `cmle` against zero: each lane all ones where signed at most zero.
+    Cmle,
+    /// `cmlt` against zero: each lane all ones where signed below zero.
+    Cmlt,
+    /// `ushll` and `ushll2` (`uxtl`): half the lanes zero-extended to
+    /// twice their width, then shifted left.
+    Ushll,
+    /// `sshll` and `sshll2` (`sxtl`): half the lanes sign-extended to
+    /// twice their width, then shifted left.
+    Sshll,
+    /// `ext`: bytes taken from the pair of registers from an index on.
+    Ext,
+    /// `ins` (`mov v.s[1], w0`): one lane replaced by a general register's
+    /// or another lane's value, the rest kept.
+    Ins,
+    /// `umov` (`mov w0, v.s[1]`): one lane into a general register.
+    Umov,
+    /// `smin`: each lane the signed smaller of the two.
+    Smin,
+    /// `smax`: each lane the signed larger of the two.
+    Smax,
+    /// `umin`: each lane the unsigned smaller of the two.
+    Umin,
+    /// `umax`: each lane the unsigned larger of the two.
+    Umax,
+    /// `sminv`: the signed smallest lane, into the lowest.
+    Sminv,
+    /// `smaxv`: the signed largest lane, into the lowest.
+    Smaxv,
+    /// `uminv`: the unsigned smallest lane, into the lowest.
+    Uminv,
+    /// `umaxv`: the unsigned largest lane, into the lowest.
+    Umaxv,
+    /// `smlal` and `smlal2`: half the lanes of two registers multiplied,
+    /// signed, at twice their width, added to the destination's lanes.
+    Smlal,
+    /// `umlal` and `umlal2`: as [`Simd::Smlal`], unsigned.
+    Umlal,
+    /// `smull` and `smull2`: half the lanes of two registers multiplied,
+    /// signed, at twice their width.
+    Smull,
+    /// `umull` and `umull2`: as [`Simd::Smull`], unsigned.
+    Umull,
+    /// `saddw` and `saddw2`: half the lanes of the second register
+    /// sign-extended and added to the first's lanes of twice their width.
+    Saddw,
+    /// `uaddw` and `uaddw2`: as [`Simd::Saddw`], zero-extended.
+    Uaddw,
+    /// `addp`: the sums of adjacent lane pairs, or, scalar, of a
+    /// register's two 64-bit lanes.
+    Addp,
+    /// `mla`: the lane-wise product added to the destination's lanes.
+    Mla,
 }
 
 /// How an instruction moves control.

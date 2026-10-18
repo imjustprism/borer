@@ -5,7 +5,7 @@ use yaxpeax_arm::armv8::a64::{
     InstDecoder, Instruction, Opcode, Operand, SIMDSizeCode, ShiftStyle, SizeCode,
 };
 
-use super::{Cond, Insn, Mem, Mnemonic, Mode, Op, Opnd, Reg, Rmw, Shift, Width};
+use super::{Cond, Insn, Mem, Mnemonic, Mode, Op, Opnd, Reg, Rmw, Shift, Simd, Width};
 use crate::num::lo8;
 
 /// The top-level encoding group (`op1`, bits 25 to 28) of the SVE space.
@@ -337,6 +337,35 @@ fn mnemonic(opcode: Opcode) -> Mnemonic {
         Opcode::MOVI => Mnemonic::Movi,
         Opcode::MVNI => Mnemonic::Mvni,
         Opcode::MUL => Mnemonic::Mul,
+        Opcode::ADDV => Mnemonic::Simd(Simd::Addv),
+        Opcode::CMEQ => Mnemonic::Simd(Simd::Cmeq),
+        Opcode::CMGT => Mnemonic::Simd(Simd::Cmgt),
+        Opcode::CMGE => Mnemonic::Simd(Simd::Cmge),
+        Opcode::CMHI => Mnemonic::Simd(Simd::Cmhi),
+        Opcode::CMHS => Mnemonic::Simd(Simd::Cmhs),
+        Opcode::CMLE => Mnemonic::Simd(Simd::Cmle),
+        Opcode::CMLT => Mnemonic::Simd(Simd::Cmlt),
+        Opcode::USHLL | Opcode::USHLL2 => Mnemonic::Simd(Simd::Ushll),
+        Opcode::SSHLL | Opcode::SSHLL2 => Mnemonic::Simd(Simd::Sshll),
+        Opcode::EXT => Mnemonic::Simd(Simd::Ext),
+        Opcode::INS => Mnemonic::Simd(Simd::Ins),
+        Opcode::UMOV => Mnemonic::Simd(Simd::Umov),
+        Opcode::SMIN => Mnemonic::Simd(Simd::Smin),
+        Opcode::SMAX => Mnemonic::Simd(Simd::Smax),
+        Opcode::UMIN => Mnemonic::Simd(Simd::Umin),
+        Opcode::UMAX => Mnemonic::Simd(Simd::Umax),
+        Opcode::SMINV => Mnemonic::Simd(Simd::Sminv),
+        Opcode::SMAXV => Mnemonic::Simd(Simd::Smaxv),
+        Opcode::UMINV => Mnemonic::Simd(Simd::Uminv),
+        Opcode::UMAXV => Mnemonic::Simd(Simd::Umaxv),
+        Opcode::SMLAL | Opcode::SMLAL2 => Mnemonic::Simd(Simd::Smlal),
+        Opcode::UMLAL | Opcode::UMLAL2 => Mnemonic::Simd(Simd::Umlal),
+        Opcode::SMULL | Opcode::SMULL2 => Mnemonic::Simd(Simd::Smull),
+        Opcode::UMULL | Opcode::UMULL2 => Mnemonic::Simd(Simd::Umull),
+        Opcode::SADDW | Opcode::SADDW2 => Mnemonic::Simd(Simd::Saddw),
+        Opcode::UADDW | Opcode::UADDW2 => Mnemonic::Simd(Simd::Uaddw),
+        Opcode::ADDP => Mnemonic::Simd(Simd::Addp),
+        Opcode::MLA => Mnemonic::Simd(Simd::Mla),
         Opcode::NEG => Mnemonic::Neg,
         Opcode::ABS => Mnemonic::Abs,
         Opcode::LD1 => Mnemonic::Ld1,

@@ -2613,3 +2613,69 @@ fn an_uncalled_arm64_function_returns_the_float_it_computes() {
     let (_, _, text) = decompiled_words(&[fadd, store, ret]);
     assert!(text.contains("// signature: void "), "{text}");
 }
+
+/// Where the lane-operation routine is placed.
+const BASE_SIMD: u64 = 0x5_0000;
+
+/// Lane operations with no scalar form are C over vector types, each read
+/// from the fields its word encodes; none is left as assembly or as a call
+/// to its mnemonic.
+///
+/// The routine compares two 16-byte blocks at `x0`, widens and sums the
+/// comparison's lanes, moves lanes in from general registers and out to
+/// them, stores three more lane results and returns the lane sum.
+#[test]
+fn arm64_lane_operations_are_c_over_vector_types() {
+    let words: [u32; 25] = [
+        0x3dc0_0000, // ASM: ldr q0, [x0]
+        0x3dc0_0401, // ASM: ldr q1, [x0, #0x10]
+        0x6e21_8c00, // ASM: cmeq v0.16b, v0.16b, v1.16b
+        0x4ea0_9825, // ASM: cmeq v5.4s, v1.4s, #0
+        0x2f08_a402, // ASM: ushll v2.8h, v0.8b, #0x0
+        0x6f08_a403, // ASM: ushll2 v3.8h, v0.16b, #0x0
+        0x0f12_a426, // ASM: sshll v6.4s, v1.4h, #0x2
+        0x4e63_8442, // ASM: add v2.8h, v2.8h, v3.8h
+        0x6e02_4044, // ASM: ext v4.16b, v2.16b, v2.16b, #0x8
+        0x4e64_8442, // ASM: add v2.8h, v2.8h, v4.8h
+        0x4e04_0c27, // ASM: dup v7.4s, w1
+        0x4f00_0430, // ASM: movi v16.4s, #0x1
+        0x4e0c_1c42, // ASM: mov v2.s[1], w2
+        0x6e18_04e2, // ASM: mov v2.d[1], v7.d[0]
+        0x0e16_3c43, // ASM: umov w3, v2.h[5]
+        0x4e18_3c44, // ASM: mov x4, v2.d[1]
+        0x6ee5_3431, // ASM: cmhi v17.2d, v1.2d, v5.2d
+        0x3d80_0811, // ASM: str q17, [x0, #0x20]
+        0x3d80_0c06, // ASM: str q6, [x0, #0x30]
+        0x3d80_1010, // ASM: str q16, [x0, #0x40]
+        0x4e71_b840, // ASM: addv h0, v2.8h
+        0x1e26_0000, // ASM: fmov w0, s0
+        0x0b03_0000, // ASM: add w0, w0, w3
+        0x8b04_0000, // ASM: add x0, x0, x4
+        0xd65f_03c0, // ASM: ret
+    ];
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let len = u64::try_from(code.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE_SIMD, 0, len, false, true);
+    let mut p = Program::raw(code, Arch::Arm64, 0, Some(BASE_SIMD), vec![text]);
+    p.symbols = vec![local("lanes", BASE_SIMD)];
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE_SIMD).expect("decompiles");
+    assert!(!out.contains("/* asm"), "{out}");
+    for name in [
+        "__cmeq", "__cmhi", "__ushll", "__sshll", "__ext", "__dup", "__ins", "__umov", "__addv",
+        "__add_",
+    ] {
+        assert!(!out.contains(name), "{name}: {out}");
+    }
+    for spelled in [
+        "typedef uint16_t u16x8 __attribute__((vector_size(16), aligned(1)));",
+        "*(u8x16*)a1 == *(u8x16*)(a1 + 16)",
+        "__builtin_convertvector(",
+        "(u32x4){0} + (uint32_t)a3",
+        "(u64x2){0} + (uint64_t)0x100000001",
+        ")[5]",
+        "(uint16_t)(",
+    ] {
+        assert!(out.contains(spelled), "{spelled}: {out}");
+    }
+}

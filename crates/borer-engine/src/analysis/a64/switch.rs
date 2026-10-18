@@ -360,6 +360,7 @@ fn copied_from(insn: &Insn) -> Option<usize> {
         | Mnemonic::Barrier
         | Mnemonic::Ld1
         | Mnemonic::St1
+        | Mnemonic::Simd(_)
         | Mnemonic::Other => None,
     }
 }

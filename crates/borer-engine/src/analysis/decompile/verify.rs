@@ -651,7 +651,9 @@ pub(super) fn low(bits: u8) -> u64 {
 /// Every operator is folded at the register width, as the text reads it:
 /// in 32-bit code each variable is a `uint32_t`, so `(x << 8) >> 16` drops
 /// the bits the left shift pushed past 32 before the right shift could
-/// bring them back, where 64-bit arithmetic kept them.
+/// bring them back, where 64-bit arithmetic kept them. An arm64 lane
+/// splat (`__dup_4s(x)`) is its lane repeated through the low 64 bits,
+/// all of a vector register the check compares.
 ///
 /// # Arguments
 ///
@@ -803,6 +805,16 @@ pub(super) fn eval<M: Bench>(
                 "rint" => {
                     let src = args.first()?;
                     rint_bits(eval(src, st, reads, d)?, float_bits(src, st)?)
+                }
+                "__dup_16b" | "__dup_8h" | "__dup_4s" | "__dup_2d" => {
+                    let bits = match name.as_bytes().last()? {
+                        b'b' => 8,
+                        b'h' => 16,
+                        b's' => 32,
+                        _ => 64,
+                    };
+                    let one = eval(args.first()?, st, reads, d)? & low(bits);
+                    Some((0..64 / bits).fold(0, |v, k| v | one << (k * bits)))
                 }
                 _ => None,
             }

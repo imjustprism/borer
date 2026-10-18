@@ -751,7 +751,8 @@ impl Lift<'_, '_> {
     }
 
     /// `dup`: one lane's value replicated through the low `span` bits of
-    /// the register.
+    /// the register. A 128-bit span is no one value the tree holds, so it
+    /// is named as the call `__dup_4s(x)`.
     ///
     /// # Arguments
     ///
@@ -781,6 +782,11 @@ impl Lift<'_, '_> {
                 )
             }
         };
+        if span == 128 {
+            let v = Expr::Call(packed_name("dup", lane, true), vec![one]);
+            self.write(vreg(w, 0), 128, v);
+            return Some(());
+        }
         let copies = u32::from(span / lane);
         let v = (1..copies).fold(one.clone(), |acc, k| {
             fold(

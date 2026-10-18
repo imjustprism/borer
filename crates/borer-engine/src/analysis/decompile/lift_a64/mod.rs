@@ -33,6 +33,7 @@ mod float;
 mod live;
 mod mem;
 mod shape;
+mod simd;
 mod step;
 
 pub(in crate::analysis::decompile) use conv::{callee_saved, clobbered};

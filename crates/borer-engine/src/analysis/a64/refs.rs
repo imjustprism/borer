@@ -501,6 +501,7 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Movi
             | Mnemonic::Mvni
             | Mnemonic::Mrs
+            | Mnemonic::Simd(_)
             | Mnemonic::Other => bit(0) | writeback,
         },
     }
@@ -739,7 +740,8 @@ fn data(regs: &Regs, insn: &Insn, found: &mut dyn FnMut(u64, RefKind)) -> Option
         | Mnemonic::Svc
         | Mnemonic::Mrs
         | Mnemonic::Msr
-        | Mnemonic::Barrier => None,
+        | Mnemonic::Barrier
+        | Mnemonic::Simd(_) => None,
     }
 }
 

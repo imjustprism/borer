@@ -286,6 +286,7 @@ impl Insn {
             | Mnemonic::Abs
             | Mnemonic::Movi
             | Mnemonic::Mvni
+            | Mnemonic::Simd(_)
             | Mnemonic::Other => {
                 r.rest(ops, 1);
                 r.write(ops[0]);

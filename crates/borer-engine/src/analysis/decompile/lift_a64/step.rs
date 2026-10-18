@@ -350,6 +350,8 @@ impl Lift<'_, '_> {
             Mnemonic::Fcmp | Mnemonic::Fcmpe => self.float_compare(i),
             Mnemonic::Fccmp => self.float_compare_if(i, later),
             Mnemonic::Fcsel => self.float_select(i),
+            Mnemonic::Scvtf if vector(i) => self.int_to_float_array(i, true),
+            Mnemonic::Ucvtf if vector(i) => self.int_to_float_array(i, false),
             Mnemonic::Scvtf => self.int_to_float(i, true),
             Mnemonic::Ucvtf => self.int_to_float(i, false),
             Mnemonic::Fcvtzs => self.float_to_int(i, true),
@@ -370,6 +372,7 @@ impl Lift<'_, '_> {
             Mnemonic::St1 => self.store_group(i),
             Mnemonic::Prfm | Mnemonic::Barrier => Some(()),
             Mnemonic::Mrs | Mnemonic::Msr => self.system(i),
+            Mnemonic::Simd(op) => self.simd(i, op),
             Mnemonic::Svc | Mnemonic::Other => None,
         }
     }
@@ -821,8 +824,9 @@ impl Lift<'_, '_> {
     }
 
     /// `movi` and `mvni`: an expanded immediate into a whole `v` register,
-    /// replicated into the upper half for a 128-bit arrangement, which only
-    /// a zero can be as one value.
+    /// replicated into the upper half for a 128-bit arrangement: a zero is
+    /// one value, any other the 64-bit immediate in both lanes
+    /// (`__dup_2d`).
     ///
     /// Every field is read from the word, as the machine reads it.
     ///
@@ -835,10 +839,12 @@ impl Lift<'_, '_> {
         let imm8 = u64::from((((w >> 16) & 7) << 5) | ((w >> 5) & 0x1f));
         let v = expand_imm((w >> 29) & 1, (w >> 12) & 0xf, imm8)?;
         let v = if invert { !v } else { v };
-        if (w >> 30) & 1 == 1 && v != 0 {
-            return None;
-        }
-        self.write(Reg::V(lo8(u64::from(w & 0x1f))), 128, Expr::Const(v));
+        let v = if (w >> 30) & 1 == 1 && v != 0 {
+            Expr::Call(packed_name("dup", 64, true), vec![Expr::Const(v)])
+        } else {
+            Expr::Const(v)
+        };
+        self.write(Reg::V(lo8(u64::from(w & 0x1f))), 128, v);
         Some(())
     }
 
