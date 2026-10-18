@@ -1164,6 +1164,9 @@ fn uint64_names(lines: &[String]) -> Vec<String> {
 
 /// The 32-bit type `name` has when its uses all agree, if they do.
 ///
+/// A constant assigned through one or several names truncates each of
+/// them to the same bits, so such a line says nothing against the type.
+///
 /// # Arguments
 ///
 /// * `lines` - The function.
@@ -1185,22 +1188,22 @@ fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
         if for_step_masked(trimmed, name) {
             masked = true;
         }
-        if const_chain(trimmed).is_some_and(|chain| chain.contains(&name)) {
-            // A constant assigned through one or several names truncates
-            // each of them to the same bits.
-        } else if let Some(rhs) = masked_rhs(trimmed, name) {
-            masked = true;
-            if rhs.contains('=') {
+        let chained = const_chain(trimmed).is_some_and(|chain| chain.contains(&name));
+        if !chained {
+            if let Some(rhs) = masked_rhs(trimmed, name) {
+                masked = true;
+                if rhs.contains('=') {
+                    return None;
+                }
+            } else if let Some(rhs) = plain_rhs(trimmed, name) {
+                if !fits_u32(rhs) {
+                    return None;
+                }
+            } else if let Some(rhs) = compound_rhs(trimmed, name)
+                && !fits_u32(rhs)
+            {
                 return None;
             }
-        } else if let Some(rhs) = plain_rhs(trimmed, name) {
-            if !fits_u32(rhs) {
-                return None;
-            }
-        } else if let Some(rhs) = compound_rhs(trimmed, name)
-            && !fits_u32(rhs)
-        {
-            return None;
         }
         for at in word_positions(line, name) {
             if address_index(line, at, name) {

@@ -3361,7 +3361,9 @@ pub(super) fn fcvtzs_bits(v: u64, fb: u8, bits: u8) -> Option<u64> {
 ///
 /// This is arm64 `fcvtzu`. A NaN or a negative value is 0. A value past
 /// the unsigned bound saturates to every bit set. Any width other than
-/// 32 or 64, for the float or the integer, is `None`.
+/// 32 or 64, for the float or the integer, is `None`. A value in
+/// `[2^63, 2^64)` fits the result and not `i64`, so the cast goes
+/// straight to `u64`.
 ///
 /// # Arguments
 ///
@@ -3380,7 +3382,6 @@ pub(super) fn fcvtzu_bits(v: u64, fb: u8, bits: u8) -> Option<u64> {
     if t >= top * 2.0 {
         return Some(mask_bits(bits));
     }
-    // `[2^63, 2^64)` fits here and does not fit in `i64`.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,

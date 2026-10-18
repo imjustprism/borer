@@ -1021,7 +1021,10 @@ impl<'a> Exec<'_, 'a> {
     /// that assumption: from here on `name` denotes the new value, not the
     /// one the branch compared. The expression is kept when the register
     /// was not already written out for its size, so a later read of the
-    /// name can still see a float's width.
+    /// name can still see a float's width. A 32-bit write zero-extends:
+    /// the value kept for a later read in the block stays whole, and the
+    /// text wraps it, or a `uint64_t` sum of it keeps bits the machine
+    /// cleared.
     ///
     /// # Arguments
     ///
@@ -1089,9 +1092,6 @@ impl<'a> Exec<'_, 'a> {
             Key::Slot(o) => n.slot_at(o, Ty::from_bits(bits)).0,
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) | Key::A64(_) => n.key(key),
         };
-        // A 32-bit write zero-extends. The value kept for a later read in
-        // this block stays whole; the text has to wrap, or a `uint64_t`
-        // sum of it keeps bits the machine cleared.
         let shown = if self.ctx.bitness == 64 && self.env.narrow.get(&key) == Some(&32) {
             mask(val.clone(), 0xffff_ffff)
         } else {

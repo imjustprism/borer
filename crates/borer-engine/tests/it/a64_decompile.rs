@@ -888,13 +888,13 @@ fn leading_sign_bits_are_cls() {
 /// A signed source keeps the sign extension, so a negative value is not
 /// an unsigned bit pattern. A fixed-point form divides in a double and
 /// narrows after, which is the conversion's one rounding.
+///
+/// Each value is stored: a float left only in `d0` is not the integer
+/// return, so the listing would drop it. A 32-bit parameter declared at
+/// that width drops the redundant integer cast; the store line carries
+/// the conversion, and the signature's `int32_t` is not one.
 #[test]
 fn an_integer_to_float_is_a_cast() {
-    // The value is stored. A float left only in `d0` is not the integer
-    // return, so the listing would drop it.
-    // A 32-bit parameter declared at that width drops the redundant
-    // integer cast. The store line is what carries the conversion; the
-    // signature's `int32_t` is not one.
     let cases: &[(&[u32], &[&str], &[&str])] = &[
         // ASM: scvtf d0, x0 / str d0, [x1] / ret
         (

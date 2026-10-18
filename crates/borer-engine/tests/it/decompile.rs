@@ -7657,13 +7657,13 @@ fn solve_stays_silent_when_the_run_cannot_distinguish() {
 /// add that kept those zeros is the same encoding when a double add reads
 /// it. `cvttsd2si` of a `movss` load truncates that encoding, and
 /// `cvttss2si` of a double truncates its low 32 bits. `comisd` compares
-/// the encoding, not the number.
+/// the encoding, not the number. Each case is the bytes, a text that
+/// must appear and a text that must not.
 #[test]
 fn a_scalar_float_read_at_another_width_keeps_the_bits() {
     use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
     use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
 
-    // (bytes, text that must appear, text that must not)
     let cases: &[(&[u8], &str, &str)] = &[
         (
             &[

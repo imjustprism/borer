@@ -591,6 +591,8 @@ pub(super) fn listed_enum(text: &str) -> Option<ListedEnum> {
 /// The header stays as printed, numbers included. Only a compare or a
 /// `case` of the variable the header names changes, and only to a member
 /// the header lists. A number anywhere else, including `return 0`, stays.
+/// A switch is tracked by the brace depth its body sits at: a case is at
+/// the same indent as `switch`, so the case's `}` is not the switch's.
 ///
 /// # Arguments
 ///
@@ -607,8 +609,6 @@ pub(super) fn spell_own_enum(text: &str) -> String {
         members: listed.members,
         param: None,
     };
-    // The brace depth a switch's body sits at. A case is at the same
-    // indent as `switch`, so the case's `}` is not the switch's.
     let mut switches: Vec<(usize, bool)> = Vec::new();
     let mut depth = 0usize;
     let mut out = String::with_capacity(text.len());

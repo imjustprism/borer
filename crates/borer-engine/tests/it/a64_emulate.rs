@@ -1535,10 +1535,10 @@ fn routines_compute_what_the_architecture_says() {
 /// The float is planted with `fmov`, because a vector register has no
 /// name `set_register` accepts. Casting the truncated value through a
 /// signed 64-bit integer saturates at the signed maximum; the architecture
-/// does not.
+/// does not. Each row is the conversion, the float's bits and `x0`
+/// after; the 32-bit row moves `w0` into `s0`.
 #[test]
 fn an_unsigned_conversion_of_two_to_the_63_keeps_the_high_bit() {
-    // (conversion, float bits, x0 after). The 32-bit row moves `w0` into `s0`.
     let rows: &[(u32, u32, u64, u64)] = &[
         // ASM: fcvtzu x0, d0
         (

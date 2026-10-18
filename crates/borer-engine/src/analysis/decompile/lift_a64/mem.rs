@@ -450,11 +450,6 @@ pub(super) fn as_encoding_at(v: Expr, bits: u16, known: Option<u8>) -> Expr {
     let Ok(want) = u8::try_from(bits) else {
         return v;
     };
-    // A computed float carries its width, and a wider read of it is the
-    // encoding a scalar write left, zeros above a single. A bare name's
-    // declared width is used only to cut a wider value down. Nothing in
-    // this function cleared the bits above an incoming narrower value, so
-    // a wider read of that name is not a zero-extend.
     let Some(have) = float_width(&v).or(known.filter(|&width| width > want)) else {
         return v;
     };
@@ -573,7 +568,9 @@ impl Lift<'_, '_> {
     ///
     /// A float written out early is only the register's name. Its width is
     /// the written expression's, and only while the register still reads as
-    /// that name: a later write leaves its own expression.
+    /// that name: a later write leaves its own expression. The register's
+    /// first note can be a narrower earlier use of the same name, and that
+    /// does not replace the value's width.
     ///
     /// # Arguments
     ///
@@ -583,9 +580,6 @@ impl Lift<'_, '_> {
     fn put_reg(&self, r: Reg, bits: u16, ty: Ty) -> (Ty, Expr) {
         let held = self.reg_at(r, bits);
         let ty_of = |k: Key| {
-            // The value written out carries the width it was computed at.
-            // The register's first note can be a narrower earlier use of
-            // the same name, and that must not replace the value's width.
             self.ex
                 .early_value(k)
                 .and_then(float_width)

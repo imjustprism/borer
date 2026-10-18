@@ -507,6 +507,9 @@ fn compare_flags(order: Option<std::cmp::Ordering>) -> u64 {
 /// A float rounded toward zero into an integer of `bits` bits: a NaN to
 /// zero, a value out of range saturated to the width's bound.
 ///
+/// A value in `[2^63, 2^64)` fits the unsigned result and not `i64`;
+/// casting through `i64` would saturate a step early.
+///
 /// # Arguments
 ///
 /// * `x` - The value.
@@ -532,8 +535,6 @@ fn fixed(x: f64, signed: bool, bits: u16) -> u64 {
         if t >= top * 2.0 {
             return mask(u64::MAX, u32::from(bits));
         }
-        // A value in `[2^63, 2^64)` fits in the unsigned result and does not
-        // fit in `i64`. Casting through `i64` would saturate a step early.
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
