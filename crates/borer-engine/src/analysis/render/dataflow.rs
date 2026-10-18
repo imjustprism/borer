@@ -31,7 +31,9 @@ impl ValueSpec {
     /// * `p` - The loaded image, whose conventions pick the default.
     /// * `a` - The analysis, for resolving a name and finding the function.
     /// * `o` - User names.
-    /// * `spec` - `<address>` or `<address>,<register>`.
+    /// * `spec` - `<address>` or `<address>,<register>`, where the register
+    ///   may be `aN`, the decompiler's name for the argument the function's
+    ///   convention passes in that register.
     /// * `bitness` - Decoder bitness of the program; `None` refuses the pass.
     /// * `follow` - The register followed when the spec names none.
     ///
@@ -67,20 +69,41 @@ impl ValueSpec {
         let register = |wanted: &str| {
             iced_register(wanted, bitness).ok_or_else(|| {
                 format!(
-                    "{} is not a general register; use {}",
+                    "{} is not a general register; use {} or a1, a2, ...",
                     crate::text::one_line(wanted),
                     names.range
                 )
             })
         };
-        let given = named.as_deref().map(register).transpose()?;
+        let argument = named
+            .as_deref()
+            .and_then(|n| n.strip_prefix('a')?.parse::<usize>().ok())
+            .filter(|&k| k >= 1);
+        let given = match argument {
+            Some(_) => None,
+            None => named.as_deref().map(register).transpose()?,
+        };
         let entry = a
             .function_at(start)
             .ok_or_else(|| format!("no function contains {start:#x}"))?
             .entry;
-        let (wanted, seed) = match named.zip(given) {
-            Some(named) => named,
-            None => {
+        let (wanted, seed) = match (named.zip(given), argument) {
+            (Some(named), _) => named,
+            (None, Some(k)) => {
+                let regs = if bitness == 32 {
+                    &[][..]
+                } else {
+                    argument_registers(p, entry, bitness)
+                };
+                let seed = regs.get(k - 1).map(|r| canonical(*r, bitness)).ok_or_else(|| {
+                    format!(
+                        "a{k} does not arrive in a register under this function's convention ({} register arguments); name the register it is in",
+                        regs.len()
+                    )
+                })?;
+                (format!("{seed:?}").to_lowercase(), seed)
+            }
+            (None, None) => {
                 let seed = match follow {
                     Follow::Result => register(names.result)?,
                     Follow::FirstArgument => argument_registers(p, entry, bitness)
@@ -1447,7 +1470,7 @@ pub(super) fn parse_hex_bytes(text: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExperimentSpec, layout_tsv, parse_count, taint_tsv, why_tsv};
+    use super::{ExperimentSpec, argument_registers, layout_tsv, parse_count, taint_tsv, why_tsv};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{Arch, Program, Section};
 
@@ -1607,6 +1630,35 @@ mod tests {
             layout_tsv(&p, &a, &o, "0x5000").unwrap_err(),
             "no function contains 0x5000"
         );
+    }
+
+    /// A spec naming the argument `aN`, as the decompiler does, follows the
+    /// register the convention passes it in, and an argument past the
+    /// register ones is refused with what to name instead.
+    ///
+    /// Agents read `a1` in `decompile` and asked `taint/<f>,a1`; the spec
+    /// took registers only and refused it.
+    ///
+    /// # Panics
+    ///
+    /// When `a1` answers differently from its register, or `a9` is taken.
+    #[test]
+    fn a_spec_names_an_argument_as_the_decompiler_does() {
+        let p = Program::raw_x64(&[0x48, 0x89, 0xc8, 0xc3]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let first = format!("{:?}", argument_registers(&p, 0x1000, 64)[0]).to_lowercase();
+        assert_eq!(
+            taint_tsv(&p, &a, &o, "0x1000,a1"),
+            taint_tsv(&p, &a, &o, &format!("0x1000,{first}"))
+        );
+        let refused = taint_tsv(&p, &a, &o, "0x1000,a9").unwrap_err();
+        assert!(
+            refused.starts_with("a9 does not arrive in a register"),
+            "{refused}"
+        );
+        let bad = taint_tsv(&p, &a, &o, "0x1000,zz").unwrap_err();
+        assert!(bad.contains("or a1, a2, ..."), "{bad}");
     }
 
     /// A part after the ones a spec takes is refused, where `taint`,

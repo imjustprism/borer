@@ -5177,12 +5177,12 @@ const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://layout/{spec}",
-        "Propose a structure from what a function does through one pointer: spec is <address>[,<register>] (default rcx, the first argument). Each row is a field with the width of the access and what it is passed to. Add ,apply=<Name> at a function's entry to define the fields as struct Name and type that parameter with it, so decompile names them (a dry run; add ,dry_run=false to apply)",
+        "Propose a structure from what a function does through one pointer: spec is <address>[,<register>] (a register, or aN for the argument the decompiler names aN; default the first argument). Each row is a field with the width of the access and what it is passed to. Add ,apply=<Name> at a function's entry to define the fields as struct Name and type that parameter with it, so decompile names them (a dry run; add ,dry_run=false to apply)",
         "borer://layout/{entry},rcx",
     ),
     (
         "borer://taint/{spec}",
-        "Follow a value forward through its function: spec is <address>[,<register>] (default rax, where a call leaves its result). Reports the instructions that carry it, the calls it is passed to and as which argument, the memory it is stored into, and where it still is at the end",
+        "Follow a value forward through its function: spec is <address>[,<register>] (a register, or aN for the argument the decompiler names aN; default rax, where a call leaves its result). Reports the instructions that carry it, the calls it is passed to and as which argument, the memory it is stored into, and where it still is at the end",
         "borer://taint/{entry},rax",
     ),
     (
