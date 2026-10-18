@@ -549,6 +549,64 @@ pub(crate) fn striped_with<T: Sync, S, R: Send>(
     out
 }
 
+/// Runs `side` on a thread of its own while `main` runs on this one.
+///
+/// For two passes that read nothing of each other: the analysis scans the
+/// image for crypto tables, which reads the program alone, while discovery
+/// walks the code. With one core both run here, `main` first.
+///
+/// # Arguments
+///
+/// * `main` - The pass this thread runs.
+/// * `side` - The pass the other thread runs.
+///
+/// # Returns
+///
+/// What `main` returned, and what `side` returned or `None` when its
+/// thread failed.
+pub(crate) fn beside<M, S: Send>(
+    main: impl FnOnce() -> M,
+    side: impl FnOnce() -> S + Send,
+) -> (M, Option<S>) {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    if cores <= 1 {
+        let m = main();
+        return (m, Some(side()));
+    }
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(side);
+        let m = main();
+        (m, handle.join().ok())
+    })
+}
+
+/// The crypto and hash tables the image holds
+/// ([`crate::crypto::find_crypto_constants`]), with the slicing tables
+/// derived from each CRC-32 table, by address.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+///
+/// # Returns
+///
+/// Each table's address and the algorithm's name.
+fn crypto_tables(program: &Program) -> BTreeMap<u64, &'static str> {
+    let mut crypto: BTreeMap<u64, &'static str> = crate::crypto::find_crypto_constants(program)
+        .into_iter()
+        .filter_map(|hit| Some((hit.va?, hit.name)))
+        .collect();
+    let crc_tables: Vec<u64> = crypto
+        .iter()
+        .filter(|(_, name)| name.starts_with("CRC-32 (IEEE"))
+        .map(|(&va, _)| va)
+        .collect();
+    for table in crc_tables {
+        crypto.extend(crate::crypto::crc32_slices(program, table));
+    }
+    crypto
+}
+
 /// Most bytes the item results of one [`Derived`] hold before the least
 /// recently asked for are let go.
 ///
@@ -1205,7 +1263,7 @@ impl Analysis {
     #[must_use]
     pub fn compute_with(program: &Program, packs: Arc<crate::pack::Packs>) -> Analysis {
         let mut phases = crate::timing::Phases::new();
-        let mut analysis = match program.arch.isa() {
+        let discover = || match program.arch.isa() {
             Some(Isa::X86 { bits }) => functions::discover(program, bits),
             Some(Isa::A64) => a64::discover(program),
             None => {
@@ -1214,6 +1272,8 @@ impl Analysis {
                 empty
             }
         };
+        let (mut analysis, crypto) = beside(discover, || crypto_tables(program));
+        let crypto = crypto.unwrap_or_else(|| crypto_tables(program));
         phases.mark("analysis discover");
         analysis.packs = packs;
         naming::infer(program, &mut analysis);
@@ -1237,21 +1297,7 @@ impl Analysis {
         phases.mark("analysis objc");
         eh::infer(program, &mut analysis);
         phases.mark("analysis eh");
-        analysis.crypto = crate::crypto::find_crypto_constants(program)
-            .into_iter()
-            .filter_map(|hit| Some((hit.va?, hit.name)))
-            .collect();
-        let crc_tables: Vec<u64> = analysis
-            .crypto
-            .iter()
-            .filter(|(_, name)| name.starts_with("CRC-32 (IEEE"))
-            .map(|(&va, _)| va)
-            .collect();
-        for table in crc_tables {
-            analysis
-                .crypto
-                .extend(crate::crypto::crc32_slices(program, table));
-        }
+        analysis.crypto = crypto;
         phases.mark("analysis crypto");
         let mut by_function: BTreeMap<u64, Vec<(u64, u64, usize)>> = BTreeMap::new();
         for (&target, sites) in &analysis.xrefs {
