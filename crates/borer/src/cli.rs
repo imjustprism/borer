@@ -1837,7 +1837,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let (index, path, built) =
                 borer::index::load_or_build(&s.program, &a).map_err(anyhow::Error::msg)?;
             if built {
-                eprintln!("indexed in {:.1} s", t0.elapsed().as_secs_f64());
+                eprintln!("indexed in {:.3} s", t0.elapsed().as_secs_f64());
             }
             println!(
                 "# {} {} functions, {} bytes of pseudo-C -> {}",
