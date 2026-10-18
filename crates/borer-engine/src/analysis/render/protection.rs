@@ -728,7 +728,7 @@ pub fn dynamic_imports_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         };
         for line in text.lines() {
             for (api, is_lib) in RESOLVERS {
-                collect_resolved(line, api, is_lib, &mut apis, &mut dlls);
+                collect_resolved(p, line, api, is_lib, &mut apis, &mut dlls);
             }
         }
     }
@@ -764,12 +764,14 @@ pub fn dynamic_imports_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded image, read where a name is spelled as its address.
 /// * `line` - A decompiled line.
 /// * `api` - The resolver's name.
 /// * `is_lib` - Whether it loads a library (vs. resolving a function).
 /// * `apis` - Receives resolved function names.
 /// * `dlls` - Receives loaded library names.
 pub(super) fn collect_resolved(
+    p: &Program,
     line: &str,
     api: &str,
     is_lib: bool,
@@ -783,7 +785,7 @@ pub(super) fn collect_resolved(
         rest = after;
         let end = matching_call_end(after);
         let args = &after[..end.min(after.len())];
-        if let Some(name) = last_quoted(args) {
+        if let Some(name) = last_quoted(args).or_else(|| addressed_name(p, api, args)) {
             if is_lib {
                 if library_name(&name) {
                     dlls.insert(name);
@@ -793,6 +795,38 @@ pub(super) fn collect_resolved(
             }
         }
     }
+}
+
+/// Reads the name a resolver call's last argument points at, when the text
+/// spells it as an address.
+///
+/// A string kept in a code section (a DLL that merges its read-only data
+/// into `.text`) is printed as its address, not as a literal.
+///
+/// msvcrt's `rename` calls `GetProcAddress(hModule, 0x10003ecc)` for
+/// `"MoveFileA"`, and triage called all 19 of its lookups unreadable.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `api` - The resolver; a `W` one reads UTF-16.
+/// * `args` - The call's argument text.
+///
+/// # Returns
+///
+/// The text at that address, or `None` when the last argument is no
+/// address or no string is there.
+pub(super) fn addressed_name(p: &Program, api: &str, args: &str) -> Option<String> {
+    /// Longest name read.
+    const NAME_MAX: usize = 256;
+    let last = args.rsplit(',').next()?.trim();
+    let va = u64::from_str_radix(last.strip_prefix("0x")?, 16).ok()?;
+    let read = if api.ends_with('W') {
+        wstr_at(p, va, 2, NAME_MAX)
+    } else {
+        cstr_at(p, va, 2, NAME_MAX)
+    };
+    read.map(|(_, text)| text)
 }
 
 /// The offset of the `)` that closes the call opened at the start of `s`.
@@ -876,6 +910,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::collect_resolved;
+    use crate::program::Program;
 
     /// A structure the decompiler printed as a wide literal is not taken
     /// for the name of a function resolved at run time, and a decorated
@@ -886,6 +921,7 @@ mod tests {
     /// When the structure's bytes are listed, or the name is not.
     #[test]
     fn a_structure_printed_as_a_literal_names_no_function() {
+        let p = Program::raw_x64(&[0xc3]);
         let (mut apis, mut dlls) = (BTreeSet::new(), BTreeSet::new());
         for (line, api) in [
             (
@@ -894,12 +930,34 @@ mod tests {
             ),
             ("p = GetProcAddress(h, \"?Run@@YAXXZ\");", "GetProcAddress"),
         ] {
-            collect_resolved(line, api, false, &mut apis, &mut dlls);
+            collect_resolved(&p, line, api, false, &mut apis, &mut dlls);
         }
         assert_eq!(apis.into_iter().collect::<Vec<_>>(), ["?Run@@YAXXZ"]);
         assert!(dlls.is_empty());
     }
 
+    /// A name the text spells as the address of a string in a code section
+    /// is read there, as the literal it is.
+    ///
+    /// # Panics
+    ///
+    /// When the name at the address is not listed.
+    #[test]
+    fn a_name_spelled_as_its_address_is_read() {
+        let mut code = vec![0xc3u8; 0x20];
+        code[0x10..0x1a].copy_from_slice(b"MoveFileA\0");
+        let p = Program::raw_x64(&code);
+        let (mut apis, mut dlls) = (BTreeSet::new(), BTreeSet::new());
+        collect_resolved(
+            &p,
+            "var10 = GetProcAddress(hModule, 0x1010);",
+            "GetProcAddress",
+            false,
+            &mut apis,
+            &mut dlls,
+        );
+        assert_eq!(apis.into_iter().collect::<Vec<_>>(), ["MoveFileA"]);
+    }
 }
 
 /// Section names a packer or protector writes, and what it is called.

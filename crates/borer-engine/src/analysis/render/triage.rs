@@ -1214,7 +1214,8 @@ fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, verdict: &str) -> Vec<Str
 }
 
 /// Counts the `GetProcAddress` calls whose name argument the decompiler
-/// cannot read: not a string literal, and not an ordinal.
+/// cannot read: not a string literal, not the address of a string (one in
+/// a code section prints as its address), and not an ordinal.
 ///
 /// # Arguments
 ///
@@ -1243,9 +1244,11 @@ fn unread_lookups(p: &Program, a: &Analysis, o: &Overlay) -> Option<(usize, usiz
         .iter()
         .filter(|f| {
             f.site.as_ref().is_none_or(|s| {
-                s.args
-                    .get(1)
-                    .is_none_or(|n| n.string.is_none() && n.value.is_none_or(|v| v >= ORDINAL_END))
+                s.args.get(1).is_none_or(|n| {
+                    n.string.is_none()
+                        && n.value
+                            .is_none_or(|v| v >= ORDINAL_END && cstr_at(p, v, 2, 256).is_none())
+                })
             })
         })
         .count();
