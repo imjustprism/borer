@@ -1989,8 +1989,11 @@ fn uncommented(line: &str) -> &str {
     line.split_once(" //").map_or(line, |(code, _)| code)
 }
 
-/// The calls through a computed pointer in one line: where `(*` opens,
-/// the callee expression, and how many arguments the call passes.
+/// The calls through a computed pointer in one line.
+///
+/// Each is where `(*` opens, the callee expression, and how many arguments
+/// the call passes. A `(*)` with nothing inside is a function pointer type,
+/// as a demangled template argument spells one, not a call.
 ///
 /// # Arguments
 ///
@@ -2025,6 +2028,9 @@ fn pointer_calls(line: &str) -> Vec<(usize, usize, String, usize)> {
             .filter(|c| balanced(c))
             .unwrap_or(callee)
             .to_owned();
+        if callee.trim().is_empty() {
+            continue;
+        }
         let args = line.get(close + 2..args_close).unwrap_or("");
         let count = if args.trim().is_empty() {
             0
@@ -4181,6 +4187,8 @@ mod pointer_call_tests {
             "{out}"
         );
         assert!(out.contains("var2 = g64_1008(var1, 2);"), "{out}");
+        let named = "// signature: void f(uint64_t a1)\n\nmap_err<u8, u8 (*)(u32)>(a1);\n";
+        assert_eq!(callable_pointers(named), named);
         assert!(out.contains("uint64_t var1, var2;"), "{out}");
     }
 
