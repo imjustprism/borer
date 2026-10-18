@@ -2765,7 +2765,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not inside a discovered function,
     /// or the decompiler produces nothing.
     #[tool(
-        description = "Pseudo-C with locals local_N/arg_N, named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked, `// next:` lines what to read next.",
+        description = "Pseudo-C with locals local_N/arg_N (local_N is N hex bytes below the entry stack pointer: higher N, lower address), named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked, `// next:` lines what to read next.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -6655,6 +6655,26 @@ mod tests {
         );
         let only = super::window(text, Some("char *"), None, None);
         assert!(only.contains("    4  char *p;\n"), "{only}");
+    }
+
+    /// The `decompile` description says which way the stack slots run.
+    ///
+    /// `local_58` is 0x58 bytes below the stack pointer at entry, so
+    /// `local_60` sits below it; agents read the number as an offset upward
+    /// and ordered a structure's fields backwards.
+    ///
+    /// # Panics
+    ///
+    /// When the description does not say it.
+    #[test]
+    fn decompile_says_which_way_stack_slots_run() {
+        let tools = super::BorerServer::tool_router().list_all();
+        let said = tools
+            .iter()
+            .find(|t| t.name == "decompile")
+            .and_then(|t| t.description.as_deref())
+            .unwrap_or_default();
+        assert!(said.contains("higher N, lower address"), "{said}");
     }
 
     /// A filter nothing carries says so rather than returning the whole text.
