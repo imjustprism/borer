@@ -1095,6 +1095,26 @@ fn f64_to_extended(v: f64) -> (u64, u64) {
 }
 
 impl<'a> Emulator<'a> {
+    /// Returns the stack pointer a machine over `program` starts with,
+    /// without building one.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image.
+    ///
+    /// # Returns
+    ///
+    /// The `rsp` [`Emulator::new`] sets, or `None` when the image's
+    /// bitness is unknown.
+    #[must_use]
+    pub fn entry_sp(program: &Program) -> Option<u64> {
+        Some(if program.arch.bitness()? == 32 {
+            STACK_BASE_32
+        } else {
+            STACK_BASE
+        })
+    }
+
     /// Builds an emulator over `program` with a step budget.
     ///
     /// # Arguments
@@ -5437,6 +5457,23 @@ mod tests {
         emu.back_arguments();
         assert!(matches!(emu.run(0x1000).stop, Stop::Returned));
         assert_eq!(emu.register("rax"), Some(0));
+    }
+
+    /// The stack pointer read without a machine is the one a new machine
+    /// starts with, at both widths.
+    ///
+    /// # Panics
+    ///
+    /// When the two differ.
+    #[test]
+    fn the_entry_stack_pointer_is_the_new_machines() {
+        let mut p = image(&[0xc3], &[]);
+        for arch in [Arch::X86_64, Arch::X86] {
+            p.arch = arch;
+            let built = Emulator::new(&p, 0).and_then(|e| e.register("rsp"));
+            assert_eq!(Emulator::entry_sp(&p), built);
+            assert!(built.is_some());
+        }
     }
 
     /// Runs `p` from 0x1000 to its `ret` and returns the machine.

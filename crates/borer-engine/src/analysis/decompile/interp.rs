@@ -1235,9 +1235,7 @@ impl<'p> Script<'p> {
         let sig = printed(text, word)?;
         let head = header(all.get(..base).unwrap_or(&[]), word)?;
         let pass = passing(program, analysis, overlay, entry);
-        let entry_sp = Emulator::new(program, 0)
-            .and_then(|e| e.register("rsp"))
-            .ok_or("this architecture is not emulated")?;
+        let entry_sp = Emulator::entry_sp(program).ok_or("this architecture is not emulated")?;
         let mut vars: FxHashMap<String, Variable> = FxHashMap::default();
         let mut cells: Vec<(String, Option<Register>, CTy)> = Vec::new();
         let mut frame_low = entry_sp;
