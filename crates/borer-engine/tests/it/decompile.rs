@@ -8798,7 +8798,8 @@ fn a_minss_return_keeps_the_operand_the_compare_misses() {
     let pos = 0u32;
     let neg = 0x8000_0000u32;
     let one = 0x3f80_0000u32;
-    let cases: &[(u8, u32, u32, &[&str], &[&str])] = &[
+    type Case<'a> = (u8, u32, u32, &'a [&'a str], &'a [&'a str]);
+    let cases: &[Case<'_>] = &[
         (0x5d, pos, neg, &["?", "<"], &["fmin"]),
         (0x5d, neg, pos, &["?", "<"], &["fmin"]),
         (0x5d, one, nan, &["?", "<", "NAN"], &["fmin"]),

@@ -313,7 +313,14 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .map(Option::unwrap_or_default)
         .collect();
         let last: Vec<bool> = facts.iter().map(|f| f.float_last).collect();
-        float_results(analysis, &uses, &hand_back(ResultReg::Xmm0), &handed, &read, &last)
+        float_results(
+            analysis,
+            &uses,
+            &hand_back(ResultReg::Xmm0),
+            &handed,
+            &read,
+            &last,
+        )
     } else {
         x87_results(program, shared, &x87_kept(program, shared))
     };
