@@ -577,7 +577,13 @@ pub fn cleanup(body: &str) -> String {
 ///
 /// Duplicate spills are chained; a `goto` (bare or `if (...) goto`) whose
 /// label follows it across nothing but the closing braces of `if`/`else`
-/// blocks is dropped ([`falls_to_label`]); a conditional `goto` whose label
+/// blocks is dropped ([`falls_to_label`]); an `if` around one `goto` is
+/// one line ([`collapse_lone_gotos`]); a statement both arms of an
+/// `if`/`else` end with moves after it ([`hoist_common_tails`]); a jump
+/// to a jump goes to that jump's label ([`thread_jumps`]); a pair of
+/// jumps takes the order of the test before its label
+/// ([`flip_jump_pairs`]); a conditional
+/// `goto` whose label
 /// ends a label-free run becomes an `if` around that run
 /// ([`fold_conditional_gotos`]); a long `if` body that never falls out,
 /// followed by a terminal line, becomes an early exit with the body one
@@ -610,6 +616,79 @@ pub(super) fn cleanup_text(body: &str, live_out: Option<&str>) -> String {
     let mut text = lines.join("\n");
     text.push('\n');
     text
+}
+
+/// Drops each `goto` (bare or `if (...) goto`) whose label follows it
+/// across nothing that runs ([`falls_to_label`]).
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+///
+/// # Returns
+///
+/// Whether any jump went.
+fn drop_fallthrough_gotos(lines: &mut Vec<String>) -> bool {
+    let mut changed = false;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let t = lines[i].trim();
+        let goto = t
+            .strip_prefix("goto ")
+            .or_else(|| t.rsplit_once(") goto ").map(|(_, g)| g))
+            .and_then(|r| r.strip_suffix(';'));
+        if let Some(g) = goto
+            && falls_to_label(lines, i, g)
+        {
+            lines.remove(i);
+            changed = true;
+            continue;
+        }
+        i += 1;
+    }
+    changed
+}
+
+/// Folds the jumps the passes after [`cleanup_text`] leave foldable.
+///
+/// Typing and variable passes drop dead stores, which can leave an `if`
+/// around a lone `goto` or two arms that now end alike. This reruns only
+/// the folds that move no value: one-line jumps
+/// ([`collapse_lone_gotos`]), shared arm tails ([`hoist_common_tails`]),
+/// jumps to the next line ([`drop_fallthrough_gotos`]), labels nothing
+/// names, `else` arms ([`absorb_else`]) and guarded runs
+/// ([`fold_conditional_gotos`]), until one changes nothing or the pass
+/// budget ([`CLEANUP_PASSES`]) is spent. Blank lines and the header stay.
+///
+/// # Arguments
+///
+/// * `text` - A polished function.
+///
+/// # Returns
+///
+/// The text with those jumps folded, newline-terminated.
+pub(super) fn refold_jumps(text: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    if !lines.iter().any(|l| l.contains("goto ")) {
+        return text.to_owned();
+    }
+    for _ in 0..CLEANUP_PASSES {
+        let mut changed = collapse_lone_gotos(&mut lines);
+        changed |= hoist_common_tails(&mut lines);
+        changed |= drop_fallthrough_gotos(&mut lines);
+        let referenced: BTreeSet<String> = goto_index(&lines).into_keys().collect();
+        let before = lines.len();
+        lines.retain(|l| label_name(l).is_none_or(|name| referenced.contains(name)));
+        changed |= lines.len() != before;
+        changed |= absorb_else(&mut lines);
+        changed |= fold_conditional_gotos(&mut lines, RunLabels::Forbidden);
+        if !changed {
+            break;
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 /// Passes [`cleanup_passes`] may run beyond one per line of the text.
@@ -646,22 +725,7 @@ pub(super) fn cleanup_passes(
         let mut changed = merge_chains(lines);
         changed |= fold_temp_copies(lines);
         changed |= merge_return_assignments(lines);
-        let mut i = 0;
-        while i + 1 < lines.len() {
-            let t = lines[i].trim();
-            let goto = t
-                .strip_prefix("goto ")
-                .or_else(|| t.rsplit_once(") goto ").map(|(_, g)| g))
-                .and_then(|r| r.strip_suffix(';'));
-            if let Some(g) = goto
-                && falls_to_label(lines, i, g)
-            {
-                lines.remove(i);
-                changed = true;
-                continue;
-            }
-            i += 1;
-        }
+        changed |= drop_fallthrough_gotos(lines);
         let referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
         let before = lines.len();
         lines.retain(|l| match label_name(l) {
@@ -670,6 +734,10 @@ pub(super) fn cleanup_passes(
         });
         changed |= lines.len() != before;
         changed |= flatten_else_if(lines);
+        changed |= collapse_lone_gotos(lines);
+        changed |= hoist_common_tails(lines);
+        changed |= thread_jumps(lines);
+        changed |= flip_jump_pairs(lines);
         changed |= fold_conditional_gotos(lines, RunLabels::Forbidden);
         changed |= flatten_early_exits(lines);
         changed |= absorb_else(lines);
@@ -795,5 +863,47 @@ mod dead_tests {
         let text = cleanup_text(body, None);
         assert!(text.contains("rbx = rdi = a1;"), "{text}");
         assert!(!text.contains("rcx"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod refold_tests {
+    use super::refold_jumps;
+
+    /// Arms a later pass left ending in the same jump, one braced and one
+    /// not, fold into one guard, and the header and blank line stay.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn arms_left_alike_fold_after_polish() {
+        let lines = [
+            "// signature: uint64_t f(uint64_t a1, uint64_t a2)",
+            "uint64_t var1;",
+            "",
+            "if (a1 != 0) {",
+            "  sub_1(a1);",
+            "  if (a2 == 0) goto L_1;",
+            "} else {",
+            "  sub_2(a1);",
+            "  if (a2 == 0) {",
+            "    goto L_1;",
+            "  }",
+            "}",
+            "sub_3(a1);",
+            "L_1:",
+            "return 0;",
+            "",
+        ];
+        let out = refold_jumps(&lines.join("\n"));
+        assert!(!out.contains("goto"), "{out}");
+        assert!(out.contains("if (a2 != 0) {"), "{out}");
+        assert!(
+            out.starts_with(
+                "// signature: uint64_t f(uint64_t a1, uint64_t a2)\nuint64_t var1;\n\n"
+            ),
+            "{out}"
+        );
     }
 }

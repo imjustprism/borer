@@ -4939,10 +4939,12 @@ fn blocks_one_jump_reaches_move_to_it() {
     );
 }
 
-/// A shared tail that nests still copies to the jumps that share it.
+/// A shared tail that nests still leaves no jump to it.
 ///
-/// The exit tests a flag before returning, so the run holds a block; its
-/// braces balance before the `return`, which is what makes copying it safe.
+/// The exit tests a flag before returning, so the run holds a block. Both
+/// jumps skip the same return, so the guards nest around that return and
+/// the tail follows once, or the tail is copied to each jump; either way
+/// no `goto` is left and the block keeps its braces.
 #[test]
 fn shared_tails_may_nest() {
     let text = concat!(
@@ -4958,7 +4960,94 @@ fn shared_tails_may_nest() {
     );
     let out = cleanup(text);
     assert!(!out.contains("goto"), "{out}");
-    assert_eq!(out.matches("sub_1000(a2);").count(), 2, "{out}");
+    assert!(out.contains("return sub_2000(a1);"), "{out}");
+    assert!(out.contains("sub_1000(a2);"), "{out}");
+    assert!(out.contains("if (a2 != 0) {"), "{out}");
+}
+
+/// A jump whose label follows another label falls to it all the same.
+///
+/// `goto L_2;` closes an `if` and `L_1:` stands between the brace and
+/// `L_2:`. A label runs nothing, so the jump goes.
+#[test]
+fn a_jump_falls_to_its_label_past_another_label() {
+    let text = concat!(
+        "if (a1 != 0) {\n",
+        "  sub_1(a1);\n",
+        "  goto L_2;\n",
+        "}\n",
+        "L_1:\n",
+        "L_2:\n",
+        "sub_3(a1);\n",
+        "if (a2 != 0) goto L_1;\n",
+        "return 0;\n",
+    );
+    let out = cleanup(text);
+    assert!(!out.contains("goto L_2"), "{out}");
+}
+
+/// A jump that ends an arm and skips a run that leaves its block is the
+/// `else` of that run.
+///
+/// `goto L_1;` skips `sub_2(a1);`, and the brace after that run falls to
+/// `L_1:`, so the run is the `else` and no jump is left.
+#[test]
+fn an_arm_jump_over_a_run_that_leaves_its_block_is_an_else() {
+    let text = concat!(
+        "if (a1 != 0) {\n",
+        "  if (a2 != 0) {\n",
+        "    sub_1(a1);\n",
+        "    goto L_1;\n",
+        "  }\n",
+        "  sub_2(a1);\n",
+        "}\n",
+        "L_1:\n",
+        "return sub_3(a1);\n",
+    );
+    let out = cleanup(text);
+    assert!(!out.contains("goto"), "{out}");
+    assert!(out.contains("} else {"), "{out}");
+}
+
+/// A test both arms of an `if`/`else` end with is made once after it.
+///
+/// Each arm ends in `if (a2 != 0) goto L_1;`. Moved after the `if`, the
+/// one test guards `sub_3(a1);` and no jump is left.
+#[test]
+fn a_test_both_arms_end_with_is_made_once() {
+    let text = concat!(
+        "if (a1 != 0) {\n",
+        "  sub_1(a1);\n",
+        "  if (a2 != 0) goto L_1;\n",
+        "} else {\n",
+        "  sub_2(a1);\n",
+        "  if (a2 != 0) goto L_1;\n",
+        "}\n",
+        "sub_3(a1);\n",
+        "L_1:\n",
+        "return 0;\n",
+    );
+    let out = cleanup(text);
+    assert!(!out.contains("goto"), "{out}");
+    assert_eq!(out.matches("a2").count(), 1, "{out}");
+}
+
+/// A guard jump over a run that leaves its block folds into an `if`.
+///
+/// `if (a2 == 0) goto L_1;` skips `sub_1(a1);` and the closing brace
+/// after it falls to `L_1:`, so the run is guarded by `a2 != 0`.
+#[test]
+fn a_guard_over_a_run_that_leaves_its_block_folds() {
+    let text = concat!(
+        "if (a1 != 0) {\n",
+        "  if (a2 == 0) goto L_1;\n",
+        "  sub_1(a1);\n",
+        "}\n",
+        "L_1:\n",
+        "return 0;\n",
+    );
+    let out = cleanup(text);
+    assert!(!out.contains("goto"), "{out}");
     assert!(out.contains("if (a2 != 0) {"), "{out}");
 }
 

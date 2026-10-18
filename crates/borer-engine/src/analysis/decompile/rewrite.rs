@@ -531,12 +531,255 @@ pub(super) fn flatten_else_if(lines: &mut Vec<String>) -> bool {
     changed
 }
 
+/// Sends every jump to a label whose code is only another jump straight
+/// to that jump's label.
+///
+/// `goto L;` where `L:` is followed by `goto M;`, across nothing but other
+/// labels and the closing braces of `if`/`else` blocks, is `goto M;`. A
+/// chain resolves to its last label; a cycle is left as it is. The label
+/// line stays, so a path falling into it still takes the jump; once no
+/// jump names it the label pass drops it.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+///
+/// # Returns
+///
+/// Whether any jump was redirected.
+pub(super) fn thread_jumps(lines: &mut [String]) -> bool {
+    let mut next: BTreeMap<String, String> = BTreeMap::new();
+    for (k, l) in lines.iter().enumerate() {
+        let Some(name) = label_name(l) else {
+            continue;
+        };
+        let mut j = k + 1;
+        let target = loop {
+            let Some(m) = lines.get(j) else {
+                break None;
+            };
+            let t = m.trim();
+            if label_name(m).is_some() {
+                j += 1;
+                continue;
+            }
+            if t == "}" {
+                let ind = indent_of(m);
+                let opener = lines[..j]
+                    .iter()
+                    .rev()
+                    .find(|o| indent_of(o) == ind && o.trim().ends_with('{'))
+                    .map(|o| o.trim());
+                if opener.is_some_and(|o| o.starts_with("if (") || o.starts_with("} else")) {
+                    j += 1;
+                    continue;
+                }
+                break None;
+            }
+            break t
+                .strip_prefix("goto ")
+                .and_then(|g| g.strip_suffix(';'))
+                .filter(|g| g.starts_with("L_"));
+        };
+        if let Some(target) = target
+            && target != name
+        {
+            next.insert(name.to_owned(), target.to_owned());
+        }
+    }
+    if next.is_empty() {
+        return false;
+    }
+    let resolve = |start: &str| -> Option<String> {
+        let mut at = next.get(start)?;
+        for _ in 0..next.len() {
+            match next.get(at.as_str()) {
+                Some(m) if m == start => return None,
+                Some(m) => at = m,
+                None => return Some(at.clone()),
+            }
+        }
+        None
+    };
+    let mut changed = false;
+    for l in lines.iter_mut() {
+        let Some(target) = goto_target(l).map(str::to_owned) else {
+            continue;
+        };
+        let Some(last) = resolve(&target) else {
+            continue;
+        };
+        let Some(cut) = l.strip_suffix(&format!("{target};")).map(str::len) else {
+            continue;
+        };
+        l.truncate(cut);
+        l.push_str(&last);
+        l.push(';');
+        changed = true;
+    }
+    changed
+}
+
+/// Swaps the two jumps of `if (c) goto A; goto B;` where the text before
+/// `A:` is `if (!c) goto B;`.
+///
+/// Either order jumps to `A` exactly when `c` holds. Written as
+/// `if (!c) goto B; goto A;`, the pair ends in the same test as the path
+/// that falls into `A`, so the run between becomes an `else`
+/// ([`absorb_else`]) and the shared test moves after it
+/// ([`hoist_common_tails`]). The negation must match the other test as
+/// written ([`invert_condition`]).
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+///
+/// # Returns
+///
+/// Whether any pair was swapped.
+pub(super) fn flip_jump_pairs(lines: &mut [String]) -> bool {
+    let mut changed = false;
+    for i in 0..lines.len().saturating_sub(1) {
+        let ind = indent_of(&lines[i]);
+        let Some((cond, first)) = conditional_goto(lines[i].trim()) else {
+            continue;
+        };
+        let second = lines[i + 1].trim();
+        let Some(second) = second
+            .strip_prefix("goto ")
+            .and_then(|g| g.strip_suffix(';'))
+        else {
+            continue;
+        };
+        if indent_of(&lines[i + 1]) != ind || first == second {
+            continue;
+        }
+        let label = format!("{first}:");
+        let Some(at) = lines.iter().position(|l| l.trim() == label) else {
+            continue;
+        };
+        let flipped = format!("if ({}) goto {second};", invert_condition(cond));
+        if at <= i + 1 || lines[at - 1].trim() != flipped {
+            continue;
+        }
+        let pad = " ".repeat(ind);
+        let jump = format!("{pad}goto {first};");
+        lines[i] = format!("{pad}{flipped}");
+        lines[i + 1] = jump;
+        changed = true;
+    }
+    changed
+}
+
+/// Writes an `if` whose whole body is one `goto` as `if (c) goto L;`.
+///
+/// The braced and the one-line form jump alike; one spelling lets equal
+/// tests read as equal lines ([`hoist_common_tails`]). An `if` with an
+/// `else` keeps its braces.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+///
+/// # Returns
+///
+/// Whether any `if` was collapsed.
+pub(super) fn collapse_lone_gotos(lines: &mut Vec<String>) -> bool {
+    let mut changed = false;
+    let mut i = 0;
+    while i + 2 < lines.len() {
+        let ind = indent_of(&lines[i]);
+        let head = lines[i].trim();
+        let body = lines[i + 1].trim();
+        let lone = head.starts_with("if (")
+            && head.ends_with(") {")
+            && is_goto(body)
+            && indent_of(&lines[i + 1]) == ind + 2
+            && lines[i + 2].trim() == "}"
+            && indent_of(&lines[i + 2]) == ind;
+        if !lone {
+            i += 1;
+            continue;
+        }
+        let line = format!("{}{} {body}", " ".repeat(ind), head.trim_end_matches(" {"));
+        lines.splice(i..i + 3, [line]);
+        changed = true;
+        i += 1;
+    }
+    changed
+}
+
+/// Moves a statement both arms of an `if`/`else` end with to after it.
+///
+/// `if (a) { x; s; } else { y; s; }` runs `s` last on either path, so it
+/// is `if (a) { x; } else { y; }` then `s`. Two arms ending in the same
+/// `if (c) goto L;` leave one test the jump folds can then turn into
+/// structure. The statement is one line ending in `;`, and each arm keeps
+/// at least one line, so no arm is left empty. An `else if` chain is left
+/// as it is.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+///
+/// # Returns
+///
+/// Whether anything moved.
+pub(super) fn hoist_common_tails(lines: &mut Vec<String>) -> bool {
+    let mut changed = false;
+    let mut i = 2;
+    while i < lines.len() {
+        if lines[i].trim() != "} else {" {
+            i += 1;
+            continue;
+        }
+        let ind = indent_of(&lines[i]);
+        let open = lines[..i]
+            .iter()
+            .rposition(|l| !l.trim().is_empty() && indent_of(l) <= ind);
+        let close = lines
+            .iter()
+            .enumerate()
+            .skip(i + 1)
+            .find(|(_, l)| !l.trim().is_empty() && indent_of(l) <= ind)
+            .map(|(k, _)| k);
+        let (Some(open), Some(close)) = (open, close) else {
+            i += 1;
+            continue;
+        };
+        let head = lines[open].trim();
+        let shared = indent_of(&lines[open]) == ind
+            && head.starts_with("if (")
+            && head.ends_with(") {")
+            && indent_of(&lines[close]) == ind
+            && lines[close].trim() == "}"
+            && i - open > 2
+            && close - i > 2
+            && indent_of(&lines[i - 1]) == ind + 2
+            && indent_of(&lines[close - 1]) == ind + 2
+            && lines[i - 1] == lines[close - 1];
+        let t = lines[i - 1].trim();
+        if !shared || !t.ends_with(';') || t.starts_with('}') || is_label(t) {
+            i += 1;
+            continue;
+        }
+        let moved = format!("{}{t}", " ".repeat(ind));
+        lines.remove(close - 1);
+        lines.insert(close, moved);
+        lines.remove(i - 1);
+        changed = true;
+        i -= 1;
+    }
+    changed
+}
+
 /// Tells whether the text after line `from` reaches the label without
 /// running anything.
 ///
-/// Only closing braces of `if`/`else` blocks may lie between them, since
-/// falling out of such a block continues right after it, while falling out
-/// of a loop body repeats the loop and out of a `case` runs the next one.
+/// Only closing braces of `if`/`else` blocks and other labels may lie
+/// between them, since falling out of such a block continues right after
+/// it and a label runs nothing, while falling out of a loop body repeats
+/// the loop and out of a `case` runs the next one.
 ///
 /// # Arguments
 ///
@@ -548,7 +791,14 @@ pub(super) fn falls_to_label(lines: &[String], from: usize, label: &str) -> bool
     while let Some(l) = lines.get(j) {
         let t = l.trim();
         if t != "}" {
-            return t.strip_suffix(':') == Some(label);
+            if t.strip_suffix(':') == Some(label) {
+                return true;
+            }
+            if label_name(l).is_some() {
+                j += 1;
+                continue;
+            }
+            return false;
         }
         let ind = indent_of(l);
         let opener = lines
@@ -1080,8 +1330,10 @@ pub(super) fn second_result(rhs: &str) -> bool {
 /// end in the jump and carry no `else` already; the run must be
 /// self-contained, its lines at or below the `if`'s indentation with
 /// balanced braces, no `case` or `default` line, and a label inside it
-/// only when every jump to it comes from inside the run. Runs longer than
-/// 200 lines are left alone. The arm may close an `if`/`else if` chain
+/// only when every jump to it comes from inside the run. A run may also
+/// end by leaving its block when the closing braces from there fall to
+/// `L` ([`run_to_dedent`], [`falls_to_label`]); it then holds no label.
+/// Runs longer than 200 lines are left alone. The arm may close an `if`/`else if` chain
 /// only when every earlier arm ends in a transfer ([`earlier_arms_leave`]):
 /// an earlier arm that falls out of the chain runs the run too, which the
 /// `else` would skip.
@@ -1126,16 +1378,22 @@ pub(super) fn absorb_else(lines: &mut Vec<String>) -> bool {
         {
             continue;
         }
+        let name = target;
         let target = format!("{target}:");
-        let Some((end, inner)) =
-            run_to_label(lines, i + 2, outer, &target, RunLabels::Contained, RUN_MAX)
-                .filter(|(e, _)| *e > i + 2)
-        else {
-            continue;
+        let end = match run_to_label(lines, i + 2, outer, &target, RunLabels::Contained, RUN_MAX)
+            .filter(|(e, _)| *e > i + 2)
+        {
+            Some((end, inner)) => {
+                if !jumps_contained(&jumps, &inner, i, end) {
+                    continue;
+                }
+                end
+            }
+            None => match run_to_dedent(lines, i + 2, outer, RUN_MAX) {
+                Some(end) if falls_to_label(lines, end - 1, name) => end,
+                Some(_) | None => continue,
+            },
         };
-        if !jumps_contained(&jumps, &inner, i, end) {
-            continue;
-        }
         let pad = " ".repeat(outer);
         let mut arm = vec![format!("{pad}}} else {{")];
         arm.extend(
@@ -1151,6 +1409,39 @@ pub(super) fn absorb_else(lines: &mut Vec<String>) -> bool {
         changed = true;
     }
     changed
+}
+
+/// Finds the closing brace that ends a label-free run starting at `from`
+/// by leaving the block the run sits in.
+///
+/// Every line of the run stands at `ind` or deeper, and none is a label,
+/// a `case` or a `default`; the run does not open with a brace that
+/// closes a block from before it.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `from` - The first line of the run.
+/// * `ind` - The run's indentation.
+/// * `max` - Longest run looked at.
+///
+/// # Returns
+///
+/// The index of the `}` line below `ind`, when the run is not empty.
+fn run_to_dedent(lines: &[String], from: usize, ind: usize, max: usize) -> Option<usize> {
+    if lines.get(from)?.trim().starts_with('}') {
+        return None;
+    }
+    for (j, l) in lines.iter().enumerate().skip(from).take(max) {
+        let t = l.trim();
+        if indent_of(l) < ind {
+            return (t == "}" && j > from).then_some(j);
+        }
+        if is_label(l) || t.starts_with("case ") || t.starts_with("default:") {
+            return None;
+        }
+    }
+    None
 }
 
 /// Tells whether every arm of an `if`/`else if` chain before the
@@ -1273,7 +1564,9 @@ fn run_to_label(
 /// have settled, so an outer guard never wraps a region before the guards
 /// inside it have had their own turn. Falling out of such a jump runs the
 /// whole run and reaches the label, so the run becomes the arm of the
-/// inverted condition and the label is left for the pruning pass. Runs
+/// inverted condition and the label is left for the pruning pass. A run
+/// may also end by leaving its block when the closing braces from there
+/// fall to the label ([`run_to_dedent`]); it then holds no label. Runs
 /// longer than 200 lines are left alone.
 ///
 /// # Arguments
@@ -1302,14 +1595,20 @@ pub(super) fn fold_conditional_gotos(lines: &mut Vec<String>, labels: RunLabels)
         };
         let ind = lines.get(i).map_or(0, |l| indent_of(l));
         let target = format!("{label}:");
-        let Some((end, inner)) =
-            run_to_label(lines, i + 1, ind, &target, labels, SPAN_MAX).filter(|(e, _)| *e > i + 1)
-        else {
-            continue;
+        let end = match run_to_label(lines, i + 1, ind, &target, labels, SPAN_MAX)
+            .filter(|(e, _)| *e > i + 1)
+        {
+            Some((end, inner)) => {
+                if !jumps_contained(&jumps, &inner, i, end) {
+                    continue;
+                }
+                end
+            }
+            None => match run_to_dedent(lines, i + 1, ind, SPAN_MAX) {
+                Some(end) if falls_to_label(lines, end - 1, &label) => end,
+                Some(_) | None => continue,
+            },
         };
-        if !jumps_contained(&jumps, &inner, i, end) {
-            continue;
-        }
         let pad = " ".repeat(ind);
         let mut arm = vec![format!("{pad}if ({}) {{", invert_condition(&cond))];
         arm.extend(
@@ -1325,4 +1624,83 @@ pub(super) fn fold_conditional_gotos(lines: &mut Vec<String>, labels: RunLabels)
         changed = true;
     }
     changed
+}
+
+#[cfg(test)]
+mod jump_tests {
+    use super::{flip_jump_pairs, thread_jumps};
+
+    /// The lines of a body, one per entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The lines.
+    fn body(text: &[&str]) -> Vec<String> {
+        text.iter().map(|l| (*l).to_owned()).collect()
+    }
+
+    /// A jump to a label whose code is one more jump goes to that jump's
+    /// label, through a chain, and a closing brace between does not stop it.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_jump_to_a_jump_goes_to_its_label() {
+        let mut lines = body(&[
+            "if (a1 == 0) goto L_1;",
+            "sub_1(a1);",
+            "if (a2 != 0) {",
+            "  L_1:",
+            "}",
+            "goto L_2;",
+            "L_2:",
+            "goto L_3;",
+            "L_3:",
+            "return 0;",
+        ]);
+        assert!(thread_jumps(&mut lines));
+        assert_eq!(lines[0], "if (a1 == 0) goto L_3;");
+        assert_eq!(lines[5], "goto L_3;");
+    }
+
+    /// A jump that is its own target is left alone.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_cycle_of_jumps_is_left_alone() {
+        let mut lines = body(&["L_1:", "goto L_2;", "L_2:", "goto L_1;"]);
+        assert!(!thread_jumps(&mut lines));
+    }
+
+    /// A jump pair swaps to the order of the test before its label, and
+    /// only then.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_jump_pair_takes_the_order_of_the_test_before_its_label() {
+        let mut lines = body(&[
+            "if (a1 != 0) {",
+            "  if (a2 == 0) goto L_1;",
+            "  goto L_2;",
+            "}",
+            "if (a2 != 0) goto L_2;",
+            "L_1:",
+            "return 0;",
+        ]);
+        assert!(flip_jump_pairs(&mut lines));
+        assert_eq!(lines[1], "  if (a2 != 0) goto L_2;");
+        assert_eq!(lines[2], "  goto L_1;");
+        let mut other = body(&[
+            "if (a2 == 0) goto L_1;",
+            "goto L_2;",
+            "if (a3 != 0) goto L_2;",
+            "L_1:",
+        ]);
+        assert!(!flip_jump_pairs(&mut other));
+    }
 }
