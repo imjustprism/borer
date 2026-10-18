@@ -20,7 +20,7 @@
 //! points at, so a listed function says the source it starts at
 //! ([`Pclntab::source_of`]).
 
-use crate::num::{from_usize, saturating_usize};
+use crate::num::{from_usize, saturating_usize, u32_le};
 use crate::program::{Section, Symbol, SymbolKind};
 
 /// Most functions read from one table, whatever its header claims.
@@ -355,8 +355,7 @@ impl<'a> View<'a> {
     ///
     /// * `at` - Offset into the view.
     fn u32(&self, at: usize) -> Option<u32> {
-        let b = self.bytes.get(at..at.checked_add(4)?)?;
-        Some(u32::from_le_bytes(b.try_into().ok()?))
+        u32_le(self.bytes, at)
     }
 
     /// Reads a little-endian pointer-width word.

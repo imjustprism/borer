@@ -24,6 +24,7 @@ use goblin::mach::load_command::CommandVariant;
 use goblin::mach::{Mach, MachO};
 
 use crate::headers::Headers;
+use crate::num::{u16_le, u32_le, u64_le};
 use crate::program::{Arch, FileOff, Fit, Section, Symbol, SymbolKind, Va, fit_sections};
 
 /// `CPU_TYPE_X86`.
@@ -198,41 +199,6 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
     }
 }
 
-/// Reads a little-endian `u16` at `at` in `file`.
-///
-/// # Arguments
-///
-/// * `file` - The file.
-/// * `at` - The offset.
-fn u16_at(file: &[u8], at: usize) -> Option<u16> {
-    let b = file.get(at..at.checked_add(2)?)?;
-    Some(u16::from_le_bytes([b[0], b[1]]))
-}
-
-/// Reads a little-endian `u32` at `at` in `file`.
-///
-/// # Arguments
-///
-/// * `file` - The file.
-/// * `at` - The offset.
-fn u32_at(file: &[u8], at: usize) -> Option<u32> {
-    let b = file.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
-/// Reads a little-endian `u64` at `at` in `file`.
-///
-/// # Arguments
-///
-/// * `file` - The file.
-/// * `at` - The offset.
-fn u64_at(file: &[u8], at: usize) -> Option<u64> {
-    let b = file.get(at..at.checked_add(8)?)?;
-    Some(u64::from_le_bytes([
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-    ]))
-}
-
 /// A NUL-padded 16-byte name.
 ///
 /// # Arguments
@@ -285,19 +251,19 @@ fn raw_sections(file: &[u8], m: &MachO<'_>, base: usize) -> Vec<RawSection> {
             let segment = name16(&raw[16..32]);
             let (addr, size, offset, flags, reserved1) = if wide {
                 (
-                    u64_at(raw, 32),
-                    u64_at(raw, 40),
-                    u32_at(raw, 48).map(u64::from),
-                    u32_at(raw, 64),
-                    u32_at(raw, 68),
+                    u64_le(raw, 32),
+                    u64_le(raw, 40),
+                    u32_le(raw, 48).map(u64::from),
+                    u32_le(raw, 64),
+                    u32_le(raw, 68),
                 )
             } else {
                 (
-                    u32_at(raw, 32).map(u64::from),
-                    u32_at(raw, 36).map(u64::from),
-                    u32_at(raw, 40).map(u64::from),
-                    u32_at(raw, 56),
-                    u32_at(raw, 60),
+                    u32_le(raw, 32).map(u64::from),
+                    u32_le(raw, 36).map(u64::from),
+                    u32_le(raw, 40).map(u64::from),
+                    u32_le(raw, 56),
+                    u32_le(raw, 60),
                 )
             };
             let (Some(addr), Some(size), Some(offset), Some(flags), Some(reserved1)) =
@@ -438,7 +404,7 @@ fn unwind_starts(file: &[u8], raw: &[RawSection], text: u64) -> Vec<u64> {
     };
     let wide = |v: u32| usize::try_from(v).unwrap_or(usize::MAX);
     let (Some(UNWIND_VERSION), Some(index), Some(count)) =
-        (u32_at(data, 0), u32_at(data, 20), u32_at(data, 24))
+        (u32_le(data, 0), u32_le(data, 20), u32_le(data, 24))
     else {
         return out;
     };
@@ -453,8 +419,8 @@ fn unwind_starts(file: &[u8], raw: &[RawSection], text: u64) -> Vec<u64> {
             break;
         };
         let (Some(first), Some(page)) = (
-            u32_at(data, entry),
-            entry.checked_add(4).and_then(|at| u32_at(data, at)),
+            u32_le(data, entry),
+            entry.checked_add(4).and_then(|at| u32_le(data, at)),
         ) else {
             break;
         };
@@ -464,17 +430,17 @@ fn unwind_starts(file: &[u8], raw: &[RawSection], text: u64) -> Vec<u64> {
         out.push(text.wrapping_add(u64::from(first)));
         let page = wide(page);
         let (Some(kind), Some(entries), Some(n)) = (
-            u32_at(data, page),
-            page.checked_add(4).and_then(|at| u16_at(data, at)),
-            page.checked_add(6).and_then(|at| u16_at(data, at)),
+            u32_le(data, page),
+            page.checked_add(4).and_then(|at| u16_le(data, at)),
+            page.checked_add(6).and_then(|at| u16_le(data, at)),
         ) else {
             continue;
         };
         let entries = page.saturating_add(usize::from(entries));
         for k in 0..usize::from(n) {
             let offset = match kind {
-                UNWIND_REGULAR => u32_at(data, entries.saturating_add(k * 8)),
-                UNWIND_COMPRESSED => u32_at(data, entries.saturating_add(k * 4))
+                UNWIND_REGULAR => u32_le(data, entries.saturating_add(k * 8)),
+                UNWIND_COMPRESSED => u32_le(data, entries.saturating_add(k * 4))
                     .map(|w| first.wrapping_add(w & UNWIND_OFFSET_MASK)),
                 _ => None,
             };
@@ -570,7 +536,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         if let Some((off, count)) = indirect {
             let at = |i: usize| -> Option<u32> {
                 (i < count)
-                    .then(|| u32_at(file, base.checked_add(off)?.checked_add(i.checked_mul(4)?)?))?
+                    .then(|| u32_le(file, base.checked_add(off)?.checked_add(i.checked_mul(4)?)?))?
             };
             for s in raw
                 .iter()
@@ -748,8 +714,8 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
                 let first = base.saturating_add(lc.offset).saturating_add(24);
                 for k in 0..usize::try_from(b.ntools).unwrap_or(0).min(16) {
                     let at = first.saturating_add(k * 8);
-                    if u32_at(file, at) == Some(3)
-                        && let Some(v) = at.checked_add(4).and_then(|a| u32_at(file, a))
+                    if u32_le(file, at) == Some(3)
+                        && let Some(v) = at.checked_add(4).and_then(|a| u32_le(file, a))
                     {
                         headers.linker =
                             Some(format!("ld {}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff));

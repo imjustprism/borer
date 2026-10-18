@@ -14,6 +14,7 @@ use anyhow::{Context, anyhow};
 use crate::entropy::shannon;
 use crate::headers::Headers;
 use crate::isa::Isa;
+use crate::num::{u16_le, u32_le};
 
 /// Container format of the loaded file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,12 +523,12 @@ fn loosen_pe(bytes: &mut [u8]) -> (Vec<Patch>, Vec<String>) {
         notes.push("the Rich header in the DOS stub is damaged; it is not read".to_owned());
     }
     let opt = pe + 24;
-    let count_at = match le_u16(bytes, opt) {
+    let count_at = match u16_le(bytes, opt) {
         Some(0x10b) => opt + 92,
         Some(0x20b) => opt + 108,
         _ => return (patches, notes),
     };
-    if let Some(count) = le_u32(bytes, count_at).filter(|&c| c > DIRECTORIES_MAX)
+    if let Some(count) = u32_le(bytes, count_at).filter(|&c| c > DIRECTORIES_MAX)
         && let Some(slot) = bytes.get_mut(count_at..count_at + 4)
     {
         let saved = Patch::zeroed(count_at, slot);
@@ -681,28 +682,6 @@ pub(crate) fn fit_sections(sections: &mut Vec<Section>, file_len: u64) -> Fit {
     fit
 }
 
-/// Reads a little-endian `u16` at a file offset.
-///
-/// # Arguments
-///
-/// * `bytes` - The file.
-/// * `at` - The offset.
-fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
-    let b = bytes.get(at..at.checked_add(2)?)?;
-    Some(u16::from_le_bytes(b.try_into().ok()?))
-}
-
-/// Reads a little-endian `u32` at a file offset.
-///
-/// # Arguments
-///
-/// * `bytes` - The file.
-/// * `at` - The offset.
-pub(crate) fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    let b = bytes.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes(b.try_into().ok()?))
-}
-
 /// Where the PE signature of an `MZ` file sits.
 ///
 /// # Arguments
@@ -716,7 +695,7 @@ pub(crate) fn pe_signature(bytes: &[u8]) -> Option<usize> {
     if bytes.first_chunk::<2>() != Some(b"MZ") {
         return None;
     }
-    let pe = usize::try_from(le_u32(bytes, 0x3c)?).ok()?;
+    let pe = usize::try_from(u32_le(bytes, 0x3c)?).ok()?;
     (bytes.get(pe..pe.checked_add(4)?)? == b"PE\0\0").then_some(pe)
 }
 
@@ -734,12 +713,12 @@ pub(crate) fn pe_signature(bytes: &[u8]) -> Option<usize> {
 /// slot.
 pub(crate) fn directory_entry(bytes: &[u8], index: usize) -> Option<(usize, bool)> {
     let opt = pe_signature(bytes)?.checked_add(24)?;
-    let (count_at, plus) = match le_u16(bytes, opt)? {
+    let (count_at, plus) = match u16_le(bytes, opt)? {
         0x10b => (opt + 92, false),
         0x20b => (opt + 108, true),
         _ => return None,
     };
-    if usize::try_from(le_u32(bytes, count_at)?).ok()? <= index {
+    if usize::try_from(u32_le(bytes, count_at)?).ok()? <= index {
         return None;
     }
     Some((count_at + 4 + index * DIRECTORY_ENTRY, plus))
@@ -769,18 +748,18 @@ struct RawSection {
 /// size, so nothing maps into it.
 fn raw_sections(bytes: &[u8]) -> Option<Vec<RawSection>> {
     let pe = pe_signature(bytes)?;
-    let count = usize::from(le_u16(bytes, pe + 6)?);
-    let table = pe + 24 + usize::from(le_u16(bytes, pe + 20)?);
+    let count = usize::from(u16_le(bytes, pe + 6)?);
+    let table = pe + 24 + usize::from(u16_le(bytes, pe + 20)?);
     let rows = count.min(bytes.len().saturating_sub(table) / SECTION_ROW);
     let file_len = crate::num::from_usize(bytes.len());
     (0..rows)
         .map(|i| {
             let row = table + i * SECTION_ROW;
-            let file_off = u64::from(le_u32(bytes, row + 20)?);
+            let file_off = u64::from(u32_le(bytes, row + 20)?);
             let file_size =
-                u64::from(le_u32(bytes, row + 16)?).min(file_len.saturating_sub(file_off));
+                u64::from(u32_le(bytes, row + 16)?).min(file_len.saturating_sub(file_off));
             Some(RawSection {
-                rva: u64::from(le_u32(bytes, row + 12)?),
+                rva: u64::from(u32_le(bytes, row + 12)?),
                 file_off,
                 file_size,
             })
@@ -820,7 +799,7 @@ fn sound_section_table(
     let Some(pe) = pe_signature(bytes) else {
         return false;
     };
-    let Some(optional) = le_u16(bytes, pe + 20) else {
+    let Some(optional) = u16_le(bytes, pe + 20) else {
         return false;
     };
     let table_end = rows
@@ -885,11 +864,11 @@ fn implausible_imports(bytes: &[u8]) -> Option<u64> {
     let (entry, plus) = directory_entry(bytes, 1)?;
     let word = if plus { 8 } else { 4 };
     let sections = raw_sections(bytes)?;
-    let mut at = file_offset(&sections, u64::from(le_u32(bytes, entry)?))?;
+    let mut at = file_offset(&sections, u64::from(u32_le(bytes, entry)?))?;
     let limit = crate::num::from_usize(bytes.len() / word).min(IMPORTS_MAX);
     let mut total = 0u64;
     while let Some(descriptor) = bytes.get(at..at + DESCRIPTOR) {
-        let field = |k: usize| le_u32(descriptor, k).unwrap_or(0);
+        let field = |k: usize| u32_le(descriptor, k).unwrap_or(0);
         if field(12) == 0 || field(16) == 0 {
             break;
         }
@@ -971,7 +950,7 @@ fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
     let Some((entry, _)) = directory_entry(bytes, DELAY_DIR) else {
         return out;
     };
-    let (Some(rva), Some(sections)) = (le_u32(bytes, entry), raw_sections(bytes)) else {
+    let (Some(rva), Some(sections)) = (u32_le(bytes, entry), raw_sections(bytes)) else {
         return out;
     };
     let Some(mut at) = file_offset(&sections, u64::from(rva)).filter(|_| rva != 0) else {
@@ -984,7 +963,7 @@ fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
     };
     let limit = crate::num::from_usize(bytes.len() / 4).min(IMPORTS_MAX);
     while let Some(descriptor) = bytes.get(at..at + DESCRIPTOR) {
-        let field = |k: usize| le_u32(descriptor, k).unwrap_or(0);
+        let field = |k: usize| u32_le(descriptor, k).unwrap_or(0);
         let (attrs, name, iat, names) = (field(0), field(4), field(12), field(16));
         if name == 0 || iat == 0 {
             break;
@@ -1014,7 +993,7 @@ fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
                             let b = bytes.get(k..k + 8)?;
                             Some(u64::from_le_bytes(b.try_into().ok()?))
                         } else {
-                            le_u32(bytes, k).map(u64::from)
+                            u32_le(bytes, k).map(u64::from)
                         }
                     })
                     .filter(|&t| t != 0)
@@ -1151,8 +1130,8 @@ struct Disarmed {
 /// What was zeroed, or `None` when the table is plausible or absent.
 fn disarm_exports(bytes: &mut [u8]) -> Option<Disarmed> {
     let (at, _) = directory_entry(bytes, 0)?;
-    let table = file_offset(&raw_sections(bytes)?, u64::from(le_u32(bytes, at)?))?;
-    let count = le_u32(bytes, table + 20)?.max(le_u32(bytes, table + 24)?);
+    let table = file_offset(&raw_sections(bytes)?, u64::from(u32_le(bytes, at)?))?;
+    let count = u32_le(bytes, table + 20)?.max(u32_le(bytes, table + 24)?);
     if count <= EXPORTS_MAX {
         return None;
     }
@@ -2390,7 +2369,7 @@ impl Program {
         let Some((entry, _)) = directory_entry(bytes, 5) else {
             return out;
         };
-        let (Some(rva), Some(size)) = (le_u32(bytes, entry), le_u32(bytes, entry + 4)) else {
+        let (Some(rva), Some(size)) = (u32_le(bytes, entry), u32_le(bytes, entry + 4)) else {
             return out;
         };
         let Some(table) = self.read_va(self.image_base + u64::from(rva), size as usize) else {

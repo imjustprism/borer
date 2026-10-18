@@ -525,14 +525,11 @@ pub fn authentihash(program: &Program) -> Option<[u8; 32]> {
     };
     h.update(bytes.get(after_checksum..entry)?);
     let entry_end = entry.checked_add(8)?;
-    let start = usize::try_from(u64::from(crate::program::le_u32(bytes, entry)?))
+    let start = usize::try_from(u64::from(crate::num::u32_le(bytes, entry)?))
         .ok()?
         .clamp(entry_end, bytes.len());
-    let size = usize::try_from(u64::from(crate::program::le_u32(
-        bytes,
-        entry.checked_add(4)?,
-    )?))
-    .ok()?;
+    let size =
+        usize::try_from(u64::from(crate::num::u32_le(bytes, entry.checked_add(4)?)?)).ok()?;
     let cert_end = start.saturating_add(size).min(bytes.len());
     h.update(bytes.get(entry_end..start)?);
     h.update(bytes.get(cert_end.max(entry_end)..)?);

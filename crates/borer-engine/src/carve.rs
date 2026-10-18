@@ -22,7 +22,7 @@
 
 use std::fmt::Write as _;
 
-use crate::num::{from_usize, saturating_usize};
+use crate::num::{from_usize, saturating_usize, u16_le, u32_le, u64_le};
 use crate::program::{BinaryFormat, Program};
 use crate::text::{plural, quoted};
 
@@ -184,36 +184,6 @@ struct Found {
     identity: String,
 }
 
-/// Reads a little-endian `u16`.
-///
-/// # Arguments
-///
-/// * `b` - The bytes.
-/// * `at` - Offset of the first byte.
-fn le16(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(*b.get(at..)?.first_chunk::<2>()?))
-}
-
-/// Reads a little-endian `u32`.
-///
-/// # Arguments
-///
-/// * `b` - The bytes.
-/// * `at` - Offset of the first byte.
-fn le32(b: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(*b.get(at..)?.first_chunk::<4>()?))
-}
-
-/// Reads a little-endian `u64`.
-///
-/// # Arguments
-///
-/// * `b` - The bytes.
-/// * `at` - Offset of the first byte.
-fn le64(b: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(*b.get(at..)?.first_chunk::<8>()?))
-}
-
 /// Reads a big-endian `u32`.
 ///
 /// # Arguments
@@ -232,7 +202,7 @@ fn be32(b: &[u8], at: usize) -> Option<u32> {
 /// * `at` - Offset of the first byte.
 /// * `big` - Whether the order is big-endian.
 fn u32_in(b: &[u8], at: usize, big: bool) -> Option<u32> {
-    if big { be32(b, at) } else { le32(b, at) }
+    if big { be32(b, at) } else { u32_le(b, at) }
 }
 
 /// Reads a `u64` in the byte order a header states.
@@ -323,11 +293,11 @@ fn pe(b: &[u8]) -> Option<Found> {
     if !b.starts_with(b"MZ") {
         return None;
     }
-    let at = usize::try_from(le32(b, 0x3c)?).ok()?;
+    let at = usize::try_from(u32_le(b, 0x3c)?).ok()?;
     if at > PE_HEADER_MAX || b.get(at..at + 4)? != b"PE\0\0" {
         return None;
     }
-    let machine = match le16(b, at + 4)? {
+    let machine = match u16_le(b, at + 4)? {
         0x14c => "x86",
         0x8664 => "x86-64",
         0xaa64 => "arm64",
@@ -336,14 +306,14 @@ fn pe(b: &[u8]) -> Option<Found> {
         0xebc => "efi-bytecode",
         _ => return None,
     };
-    let sections = usize::from(le16(b, at + 6)?);
+    let sections = usize::from(u16_le(b, at + 6)?);
     if !(1..=PE_SECTIONS_MAX).contains(&sections) {
         return None;
     }
-    let opt_size = usize::from(le16(b, at + 20)?);
-    let dll = le16(b, at + 22)? & 0x2000 != 0;
+    let opt_size = usize::from(u16_le(b, at + 20)?);
+    let dll = u16_le(b, at + 22)? & 0x2000 != 0;
     let opt = at + 24;
-    let (bits, fixed) = match le16(b, opt)? {
+    let (bits, fixed) = match u16_le(b, opt)? {
         0x10b => ("PE32", 96),
         0x20b => ("PE32+", 112),
         _ => return None,
@@ -351,24 +321,24 @@ fn pe(b: &[u8]) -> Option<Found> {
     if opt_size < fixed {
         return None;
     }
-    let mut end = u64::from(le32(b, opt + 60)?);
+    let mut end = u64::from(u32_le(b, opt + 60)?);
     let table = opt + opt_size;
     for k in 0..sections {
         let row = table + 40 * k;
-        let raw_size = le32(b, row + 16)?;
+        let raw_size = u32_le(b, row + 16)?;
         if raw_size > 0 {
-            end = end.max(u64::from(le32(b, row + 20)?) + u64::from(raw_size));
+            end = end.max(u64::from(u32_le(b, row + 20)?) + u64::from(raw_size));
         }
     }
-    if le32(b, opt + fixed - 4).is_some_and(|count| count > 4)
+    if u32_le(b, opt + fixed - 4).is_some_and(|count| count > 4)
         && let (Some(cert), Some(cert_size)) =
-            (le32(b, opt + fixed + 32), le32(b, opt + fixed + 36))
+            (u32_le(b, opt + fixed + 32), u32_le(b, opt + fixed + 36))
         && cert > 0
         && cert_size > 0
     {
         end = end.max(u64::from(cert) + u64::from(cert_size));
     }
-    let subsystem = match le16(b, opt + 68)? {
+    let subsystem = match u16_le(b, opt + 68)? {
         1 => ", native",
         2 => ", gui",
         3 => ", console",
@@ -651,12 +621,12 @@ fn zip(b: &[u8], start: usize, fuel: &mut usize) -> Option<Found> {
         return None;
     }
     if !matches!(
-        le16(b, 8)?,
+        u16_le(b, 8)?,
         0..=6 | 8 | 9 | 12 | 14 | 18 | 19 | 93 | 95..=99
     ) {
         return None;
     }
-    let name_len = usize::from(le16(b, 26)?);
+    let name_len = usize::from(u16_le(b, 26)?);
     let name = b.get(30..30 + name_len)?;
     if name_len == 0 || name.contains(&0) {
         return None;
@@ -676,10 +646,10 @@ fn zip(b: &[u8], start: usize, fuel: &mut usize) -> Option<Found> {
         };
         *fuel -= hit + 4;
         let eocd = at + hit;
-        let entries = le16(b, eocd + 10);
-        let cd_size = le32(b, eocd + 12).and_then(|v| usize::try_from(v).ok());
-        let cd_off = le32(b, eocd + 16).and_then(|v| usize::try_from(v).ok());
-        let comment = le16(b, eocd + 20).map(usize::from);
+        let entries = u16_le(b, eocd + 10);
+        let cd_size = u32_le(b, eocd + 12).and_then(|v| usize::try_from(v).ok());
+        let cd_off = u32_le(b, eocd + 16).and_then(|v| usize::try_from(v).ok());
+        let comment = u16_le(b, eocd + 20).map(usize::from);
         if let (Some(entries), Some(cd_size), Some(cd_off), Some(comment)) =
             (entries, cd_size, cd_off, comment)
             && let Some(cd_start) = eocd.checked_sub(cd_size)
@@ -730,7 +700,7 @@ fn gzip(b: &[u8]) -> Option<Found> {
     }
     let mut at = 10usize;
     if flags & 4 != 0 {
-        at += 2 + usize::from(le16(b, at)?);
+        at += 2 + usize::from(u16_le(b, at)?);
     }
     let mut name = None;
     if flags & 8 != 0 {
@@ -769,7 +739,7 @@ fn xz(b: &[u8], fuel: &mut usize) -> Option<Found> {
         return None;
     }
     let flags = b.get(6..8)?;
-    if flags[0] != 0 || flags[1] & 0xf0 != 0 || le32(b, 8)? != crc32(flags) {
+    if flags[0] != 0 || flags[1] & 0xf0 != 0 || u32_le(b, 8)? != crc32(flags) {
         return None;
     }
     let check = match flags[1] {
@@ -792,7 +762,7 @@ fn xz(b: &[u8], fuel: &mut usize) -> Option<Found> {
         if let Some(footer) = yz.checked_sub(10).and_then(|f| b.get(f..yz + 2))
             && yz >= 22
             && footer.get(8..10) == Some(flags)
-            && le32(footer, 0) == footer.get(4..10).map(crc32)
+            && u32_le(footer, 0) == footer.get(4..10).map(crc32)
         {
             break Some(yz + 2);
         }
@@ -818,10 +788,12 @@ fn seven_zip(b: &[u8]) -> Option<Found> {
     if !b.starts_with(b"7z\xbc\xaf\x27\x1c") || *b.get(6)? != 0 {
         return None;
     }
-    if le32(b, 8)? != crc32(b.get(12..32)?) {
+    if u32_le(b, 8)? != crc32(b.get(12..32)?) {
         return None;
     }
-    let len = le64(b, 12)?.checked_add(le64(b, 20)?)?.checked_add(32)?;
+    let len = u64_le(b, 12)?
+        .checked_add(u64_le(b, 20)?)?
+        .checked_add(32)?;
     Some(Found {
         kind: Kind::SevenZip,
         len: Some(len),
@@ -840,17 +812,17 @@ fn cab(b: &[u8]) -> Option<Found> {
     if !b.starts_with(b"MSCF") {
         return None;
     }
-    let size = le32(b, 8)?;
-    if le32(b, 4)? != 0
-        || le32(b, 12)? != 0
-        || le32(b, 20)? != 0
-        || le32(b, 16)? >= size
+    let size = u32_le(b, 8)?;
+    if u32_le(b, 4)? != 0
+        || u32_le(b, 12)? != 0
+        || u32_le(b, 20)? != 0
+        || u32_le(b, 16)? >= size
         || b.get(24..26)? != [3, 1]
     {
         return None;
     }
-    let folders = u64::from(le16(b, 26)?);
-    let files = u64::from(le16(b, 28)?);
+    let folders = u64::from(u16_le(b, 26)?);
+    let files = u64::from(u16_le(b, 28)?);
     if folders == 0 || files == 0 {
         return None;
     }
@@ -873,17 +845,17 @@ fn cab(b: &[u8]) -> Option<Found> {
 ///
 /// * `b` - The bytes from the candidate offset.
 fn squashfs(b: &[u8]) -> Option<Found> {
-    if !b.starts_with(b"hsqs") || le16(b, 28)? != 4 || le16(b, 30)? != 0 {
+    if !b.starts_with(b"hsqs") || u16_le(b, 28)? != 4 || u16_le(b, 30)? != 0 {
         return None;
     }
-    let block = le32(b, 12)?;
+    let block = u32_le(b, 12)?;
     if !block.is_power_of_two()
         || !(0x1000..=0x10_0000).contains(&block)
-        || u32::from(le16(b, 22)?) != block.trailing_zeros()
+        || u32::from(u16_le(b, 22)?) != block.trailing_zeros()
     {
         return None;
     }
-    let compressor = match le16(b, 20)? {
+    let compressor = match u16_le(b, 20)? {
         1 => "gzip",
         2 => "lzma",
         3 => "lzo",
@@ -892,10 +864,10 @@ fn squashfs(b: &[u8]) -> Option<Found> {
         6 => "zstd",
         _ => return None,
     };
-    let inodes = u64::from(le32(b, 4)?);
+    let inodes = u64::from(u32_le(b, 4)?);
     Some(Found {
         kind: Kind::Squashfs,
-        len: Some(le64(b, 40)?),
+        len: Some(u64_le(b, 40)?),
         identity: format!(
             "squashfs 4.0, {compressor}, {inodes} inode{}, {} KiB blocks",
             plural(inodes),
@@ -1040,7 +1012,7 @@ fn uimage(b: &[u8]) -> Option<Found> {
 ///
 /// * `b` - The bytes from the candidate offset.
 fn cramfs(b: &[u8]) -> Option<Found> {
-    let big = match le32(b, 0)? {
+    let big = match u32_le(b, 0)? {
         0x28cd_3d45 => false,
         0x453d_cd28 => true,
         _ => return None,
@@ -1070,27 +1042,27 @@ fn android_boot(b: &[u8]) -> Option<Found> {
     if !b.starts_with(b"ANDROID!") {
         return None;
     }
-    let version = le32(b, 40)?;
-    let kernel = le32(b, 8)?;
+    let version = u32_le(b, 40)?;
+    let kernel = u32_le(b, 8)?;
     let (page, parts) = match version {
         0..=2 => {
-            let page = le32(b, 36)?;
+            let page = u32_le(b, 36)?;
             if !page.is_power_of_two() || !(0x800..=0x1_0000).contains(&page) {
                 return None;
             }
-            let mut parts = vec![kernel, le32(b, 16)?, le32(b, 24)?];
+            let mut parts = vec![kernel, u32_le(b, 16)?, u32_le(b, 24)?];
             if version >= 1 {
-                parts.push(le32(b, 1632)?);
+                parts.push(u32_le(b, 1632)?);
             }
             if version == 2 {
-                parts.push(le32(b, 1648)?);
+                parts.push(u32_le(b, 1648)?);
             }
             (u64::from(page), parts)
         }
         3 | 4 => {
-            let mut parts = vec![kernel, le32(b, 12)?];
+            let mut parts = vec![kernel, u32_le(b, 12)?];
             if version == 4 {
-                parts.push(le32(b, 1580)?);
+                parts.push(u32_le(b, 1580)?);
             }
             (4096, parts)
         }

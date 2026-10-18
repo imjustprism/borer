@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::num::{from_usize, saturating_usize};
+use crate::num::{from_usize, saturating_usize, u16_le, u32_le, u64_le};
 use crate::program::{Program, Symbol, SymbolKind};
 use crate::strings::{Encoding, StringHit};
 use crate::text::one_line;
@@ -658,36 +658,6 @@ impl Clr {
     }
 }
 
-/// Reads a little-endian `u16` at `at`.
-///
-/// # Arguments
-///
-/// * `b` - The bytes.
-/// * `at` - Offset of the first byte.
-fn u16_at(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(*b.get(at..)?.first_chunk::<2>()?))
-}
-
-/// Reads a little-endian `u32` at `at`.
-///
-/// # Arguments
-///
-/// * `b` - The bytes.
-/// * `at` - Offset of the first byte.
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(*b.get(at..)?.first_chunk::<4>()?))
-}
-
-/// Reads a little-endian `u64` at `at`.
-///
-/// # Arguments
-///
-/// * `b` - The bytes.
-/// * `at` - Offset of the first byte.
-fn u64_at(b: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(*b.get(at..)?.first_chunk::<8>()?))
-}
-
 /// The table stream, its row counts read and every table located.
 #[derive(Debug, Clone, Copy)]
 struct Tables<'a> {
@@ -722,14 +692,14 @@ impl<'a> Tables<'a> {
             )
         };
         let sizes = *data.get(6).ok_or_else(short)?;
-        let valid = u64_at(data, 8).ok_or_else(short)?;
+        let valid = u64_le(data, 8).ok_or_else(short)?;
         let mut rows = [0u32; TABLES];
         let mut at = 24usize;
         for t in 0..64usize {
             if (valid >> t) & 1 == 0 {
                 continue;
             }
-            let n = u32_at(data, at).ok_or_else(|| {
+            let n = u32_le(data, at).ok_or_else(|| {
                 format!(
                     "the table stream's {} bytes end inside its row counts",
                     data.len()
@@ -851,8 +821,8 @@ impl<'a> Tables<'a> {
             .and_then(|o| o.checked_add(before))
             .ok_or_else(|| format!("{name} row {row} is not one of its {} rows", self.count(t)))?;
         let value = match self.col_width(c) {
-            2 => u16_at(self.data, at).map(u32::from),
-            _ => u32_at(self.data, at),
+            2 => u16_le(self.data, at).map(u32::from),
+            _ => u32_le(self.data, at),
         };
         value.ok_or_else(|| format!("{name} row {row} runs past the table stream"))
     }
@@ -987,13 +957,13 @@ fn user_strings(heap: &[u8], file_off: u64) -> (Vec<UserString>, bool) {
 /// stream runs past it.
 fn root(meta: &[u8]) -> Result<(String, Streams<'_>), String> {
     let short = || format!("the metadata's {} bytes end inside its root", meta.len());
-    let signature = u32_at(meta, 0).ok_or_else(short)?;
+    let signature = u32_le(meta, 0).ok_or_else(short)?;
     if signature != BSJB {
         return Err(format!(
             "the metadata root's signature is {signature:#010x}, not BSJB"
         ));
     }
-    let vlen = saturating_usize(u64::from(u32_at(meta, 12).ok_or_else(short)?));
+    let vlen = saturating_usize(u64::from(u32_le(meta, 12).ok_or_else(short)?));
     let version_bytes = meta
         .get(16..16usize.saturating_add(vlen))
         .ok_or_else(short)?;
@@ -1003,11 +973,11 @@ fn root(meta: &[u8]) -> Result<(String, Streams<'_>), String> {
             .trim(),
     );
     let mut at = 16 + vlen;
-    let count = u16_at(meta, at + 2).ok_or_else(short)?;
+    let count = u16_le(meta, at + 2).ok_or_else(short)?;
     at += 4;
     let mut streams = Streams::default();
     for _ in 0..count {
-        let (Some(off), Some(size)) = (u32_at(meta, at), u32_at(meta, at + 4)) else {
+        let (Some(off), Some(size)) = (u32_le(meta, at), u32_le(meta, at + 4)) else {
             return Err(short());
         };
         let name_at = at + 8;
@@ -1123,14 +1093,14 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
     let head = p
         .read_va(at, COR20_LEN)
         .ok_or_else(|| format!("the CLR header at {at:#x} is not in the file"))?;
-    let field = |o: usize| u32_at(head, o).unwrap_or(0);
+    let field = |o: usize| u32_le(head, o).unwrap_or(0);
     let cb = field(0);
     if saturating_usize(u64::from(cb)) < COR20_LEN {
         return Err(format!(
             "the CLR header states {cb} bytes, fewer than its {COR20_LEN}"
         ));
     }
-    let runtime = (u16_at(head, 4).unwrap_or(0), u16_at(head, 6).unwrap_or(0));
+    let runtime = (u16_le(head, 4).unwrap_or(0), u16_le(head, 6).unwrap_or(0));
     let (meta_rva, meta_size) = (field(8), field(12));
     let flags = field(16);
     let entry = field(20);
