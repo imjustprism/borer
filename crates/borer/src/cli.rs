@@ -1757,7 +1757,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .read_va_upto(va, 16 * 1024)
                 .with_context(|| format!("address {va:#x} not mapped"))?;
             let a = s.analysis_or_empty();
-            let window = render::sweep_limit(&a, va)
+            let window = render::sweep_limit(&s.program, &a, va)
                 .and_then(|end| usize::try_from(end - va).ok())
                 .and_then(|n| code.get(..n.min(code.len())))
                 .unwrap_or(code);

@@ -1048,11 +1048,50 @@ pub fn instruction_at_or_before(p: &Program, a: &Analysis, va: u64) -> Option<u6
 ///
 /// The end of the run of blocks covering `va`, or `None` when `va` is not
 /// inside a discovered function, where a sweep has nothing better to go on.
-pub fn sweep_limit(a: &Analysis, va: u64) -> Option<u64> {
+///
+/// Alignment padding between two blocks of the function (`nop` forms and
+/// `int3`, at most 15 bytes) does not end the run: a compiler
+/// aligns a loop head that way, and the sweep stopped there and called the
+/// rest of the function data.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, whose bytes say what a gap holds.
+/// * `a` - The analysis.
+/// * `va` - Where the sweep starts.
+pub fn sweep_limit(p: &Program, a: &Analysis, va: u64) -> Option<u64> {
+    /// Most bytes of padding a sweep crosses between two blocks.
+    const PAD_MAX: u64 = 15;
     let f = a.function(va)?;
+    let padding = |from: u64, to: u64| {
+        let (Some(bits), Some(code)) = (
+            p.arch.bitness(),
+            usize::try_from(to - from)
+                .ok()
+                .and_then(|n| p.read_va(from, n)),
+        ) else {
+            return false;
+        };
+        let mut d = Decoder::with_ip(bits, code, from, DecoderOptions::NONE);
+        d.iter()
+            .all(|i| matches!(i.mnemonic(), Mnemonic::Nop | Mnemonic::Int3))
+    };
     let mut limit = va;
-    while let Some(b) = f.blocks.iter().find(|b| b.start <= limit && limit < b.end) {
-        limit = b.end;
+    loop {
+        if let Some(b) = f.blocks.iter().find(|b| b.start <= limit && limit < b.end) {
+            limit = b.end;
+            continue;
+        }
+        let next = f
+            .blocks
+            .iter()
+            .map(|b| b.start)
+            .filter(|&s| s > limit && s - limit <= PAD_MAX)
+            .min();
+        match next {
+            Some(s) if limit > va && padding(limit, s) => limit = s,
+            Some(_) | None => break,
+        }
     }
     (limit > va).then_some(limit)
 }

@@ -1271,7 +1271,7 @@ impl BorerServer {
                     p.section_list()
                 )
             })?;
-            let limit = render::sweep_limit(&a, va);
+            let limit = render::sweep_limit(p, &a, va);
             let window = limit
                 .and_then(|end| usize::try_from(end - va).ok())
                 .and_then(|n| code.get(..n.min(code.len())))

@@ -5250,16 +5250,54 @@ fn class_layout_collects_field_accesses_of_the_methods() {
 /// run on into them.
 #[test]
 fn a_sweep_stops_at_the_end_of_its_function() {
-    let a = Analysis::compute(&fixture());
+    let p = fixture();
+    let a = Analysis::compute(&p);
     let f = a.function(0x1210).expect("T is a function");
     assert_eq!(
-        borer_engine::analysis::render::sweep_limit(&a, 0x1210),
+        borer_engine::analysis::render::sweep_limit(&p, &a, 0x1210),
         Some(f.end)
     );
     assert_eq!(
-        borer_engine::analysis::render::sweep_limit(&a, 0x2040),
+        borer_engine::analysis::render::sweep_limit(&p, &a, 0x2040),
         None
     );
+}
+
+/// A sweep crosses the alignment padding before a loop head and runs on to
+/// the end of the function's code.
+///
+/// sqlite3 aligns a loop with `nop word [rax+rax]` after a `jmp`, and
+/// `disassemble` said the code ended there and data followed, eight
+/// hundred bytes short of the function's end.
+///
+/// # Panics
+///
+/// When the sweep stops at the padding.
+#[test]
+fn a_sweep_crosses_alignment_padding() {
+    // ASM: jmp 0x1010; nop word [rax+rax] (6 bytes); then at 0x1010:
+    // ASM: inc rdx; cmp rdx,8; jb 0x1010; ret
+    let code: &[u8] = &[
+        0xeb, 0x0e, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0x66,
+        0x90, 0x48, 0xff, 0xc2, 0x48, 0x83, 0xfa, 0x08, 0x72, 0xf7, 0xc3,
+    ];
+    let mut bytes = vec![0xccu8; 0x1000];
+    bytes[..code.len()].copy_from_slice(code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(".text", 0x1000, 0, 0x1000, false, true)],
+    );
+    p.function_ranges = vec![(0x1000, 0x1000 + from_usize(code.len()))];
+    let a = Analysis::compute(&p);
+    let end = a.function(0x1000).expect("a function at 0x1000").end;
+    assert_eq!(
+        borer_engine::analysis::render::sweep_limit(&p, &a, 0x1000),
+        Some(end)
+    );
+    assert!(end > 0x1010, "{end:#x}");
 }
 
 /// A call through an import slot names the import in the disassembly.
