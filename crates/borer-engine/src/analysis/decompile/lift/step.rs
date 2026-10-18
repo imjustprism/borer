@@ -282,6 +282,7 @@ impl<'a> Exec<'_, 'a> {
         };
         let (line, value) = match self.env.vals.get(&rax).cloned() {
             Some(v) if self.ctx.ret_sse => {
+                let v = float_result(v);
                 let bits = match v {
                     Expr::Deref(_, Ty::F32) | Expr::Cast(_, Ty::F32) | Expr::FConst(_, Ty::F32) => {
                         32

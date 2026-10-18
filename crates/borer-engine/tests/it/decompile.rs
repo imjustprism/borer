@@ -1893,6 +1893,31 @@ fn a_32_bit_float_parameter_converts_to_an_integer() {
     replays_clean(&p, &a, &[0x401_020]);
 }
 
+/// A 32-bit function returning a single in `xmm0` returns a `float`.
+///
+/// `cvtsd2ss xmm0,xmm0; ret` keeps the bits above the lane it writes, but
+/// its caller (`call; cvtss2sd xmm0,xmm0; movsd [ecx],xmm0`) reads only
+/// that lane, so the result is the single, not the merged register.
+#[test]
+fn a_32_bit_single_result_is_a_float() {
+    let mut code = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0xf3, 0x0f, 0x5a, 0xc0, // ASM: cvtss2sd xmm0,xmm0
+        0xf2, 0x0f, 0x11, 0x01, // ASM: movsd [ecx],xmm0
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0xf2, 0x0f, 0x5a, 0xc0, // ASM: cvtsd2ss xmm0,xmm0
+        0xc3, // ASM: ret
+    ]);
+    let p = program32(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x401_020).unwrap_or_default();
+    assert!(text.contains("// signature: float "), "{text}");
+    replays_clean(&p, &a, &[0x401_020]);
+}
+
 /// A padding `nop` is no dereference: `mov eax,ecx; nop word
 /// [rax+rax]; add eax,1; ret` takes a number, not a pointer.
 #[test]

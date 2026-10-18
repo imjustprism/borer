@@ -3736,7 +3736,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 if let Some(v) = v
                     && self.w.ret_xmm
                 {
-                    let float = t.text.float_bits(v);
+                    let float = t
+                        .text
+                        .float_bits(v)
+                        .or((self.w.ret_bits == 32).then_some(32));
                     let bits = float.unwrap_or(64);
                     let machine = low64(t.emu.vector(0)) & low(bits);
                     let text = t.text.eval(v);
