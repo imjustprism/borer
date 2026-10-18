@@ -5803,15 +5803,48 @@ pub(super) fn build_callers_and_names(program: &Program, functions: &mut [Functi
             .then(|| import_slots.get(&slot))
             .flatten()
             .map(|&i| crate::search::demangled_name(&program.symbols[i].name));
+        if f.name.is_some() {
+            f.thunk = Some(slot);
+        } else {
+            f.name = bound_function(program, bitness, slot)
+                .and_then(|target| named.get(&target))
+                .map(|&i| crate::search::demangled_name(&program.symbols[i].name));
+        }
         f.name_source = if f.name.is_some() {
             NameSource::Symbol
         } else {
             NameSource::None
         };
-        if f.name.is_some() {
-            f.thunk = Some(slot);
-        }
     }
+}
+
+/// The code address a slot holds once the loader has bound it.
+///
+/// A shared object's PLT entry for a function it defines itself jumps
+/// through a GOT slot its `JUMP_SLOT` relocation fills with that
+/// function's address, so the stub is that function under another
+/// address and takes its name.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, its relocations applied.
+/// * `bitness` - Pointer width in bits.
+/// * `slot` - The slot's address.
+///
+/// # Returns
+///
+/// The bound address, or `None` when the slot cannot be read or is empty.
+fn bound_function(program: &Program, bitness: u32, slot: u64) -> Option<u64> {
+    if slot == 0 {
+        return None;
+    }
+    let word = program.read_va(slot, usize::try_from(bitness / 8).ok()?)?;
+    let value = match *word {
+        [a, b, c, d] => u64::from(u32::from_le_bytes([a, b, c, d])),
+        [a, b, c, d, e, f, g, h] => u64::from_le_bytes([a, b, c, d, e, f, g, h]),
+        _ => return None,
+    };
+    (value != 0).then_some(value)
 }
 
 /// Appends one reference site to the cross-reference index.

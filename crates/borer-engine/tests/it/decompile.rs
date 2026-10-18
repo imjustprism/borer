@@ -1699,6 +1699,52 @@ fn replays_clean(p: &borer_engine::program::Program, a: &Analysis, entries: &[u6
     }
 }
 
+/// A PLT stub for a function the image defines itself takes that name.
+///
+/// A shared object calls its own exports through `jmp [slot]` stubs whose
+/// GOT slot holds the export's address. `caller` calls such a stub for
+/// `helper`, so the call reads `helper(...)`, not `sub_...`. The name still
+/// resolves to the function's own body, not the stub.
+#[test]
+fn a_plt_stub_to_an_own_export_takes_its_name() {
+    use borer_engine::analysis::resolve;
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![0xcc_u8; 0x30];
+    code[..4].copy_from_slice(&[
+        0x8d, 0x41, 0x01, // ASM: lea eax,[rcx+1]
+        0xc3, // ASM: ret
+    ]);
+    code[0x10..0x16].copy_from_slice(&[
+        0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x20
+        0xc3, // ASM: ret
+    ]);
+    code[0x20..0x26].copy_from_slice(&[
+        0xff, 0x25, 0xda, 0x0f, 0x00, 0x00, // ASM: jmp [rip+0xfda]
+    ]);
+    let mut p = program64_with_data(&code, &0x1_4000_1000_u64.to_le_bytes());
+    p.symbols = vec![
+        Symbol {
+            name: "helper".to_owned(),
+            addr: 0x1_4000_1000,
+            kind: SymbolKind::Export,
+        },
+        Symbol {
+            name: "caller".to_owned(),
+            addr: 0x1_4000_1010,
+            kind: SymbolKind::Export,
+        },
+    ];
+    let a = Analysis::compute(&p);
+    let stub = a.function(0x1_4000_1020).and_then(|f| f.name.clone());
+    assert_eq!(stub.as_deref(), Some("helper"));
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1010).unwrap_or_default();
+    assert!(text.contains("helper("), "{text}");
+    assert_eq!(
+        resolve(&p, &a, &Overlay::default(), "helper"),
+        Ok(0x1_4000_1000)
+    );
+}
+
 /// A 64-bit product of two sign-extended 32-bit loads casts an operand.
 ///
 /// `movsxd` both, then `imul rax,rdx`, multiplies at 64 bits. Written as

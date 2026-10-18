@@ -2143,6 +2143,16 @@ fn resolve_noting(
     if hits.iter().any(|(va, _)| analysis.function(*va).is_some()) {
         hits.retain(|(va, _)| analysis.function(*va).is_some());
     }
+    let own: BTreeSet<u64> = program
+        .symbols
+        .iter()
+        .filter(|s| s.addr != 0 && s.kind != SymbolKind::Import)
+        .filter(|s| s.name.to_lowercase() == want || bare_name(&s.name).to_lowercase() == want)
+        .map(|s| s.addr)
+        .collect();
+    if hits.len() > 1 && hits.iter().any(|(va, _)| own.contains(va)) {
+        hits.retain(|(va, _)| own.contains(va));
+    }
     match hits.len() {
         0 => parse_addr(text).ok_or_else(|| {
             format!(
