@@ -80,7 +80,7 @@ rules:
     - Output conventions are load-bearing. Tables with a `#` header line, filter, offset, limit and count parameters on every list tool, hard caps with `showing N of M`, and dry-run by default on every tool that changes state.
     - Program holds only facts derived from the file. User annotations (names, comments, types) live in a separate `Overlay`, identified by its fingerprint.
     - Knowledge about one target (an engine's class conventions, registrars, message ports) lives in a local pack (`packs/*.borer`, gitignored), never as a hard-coded name in engine code. Tests may use real names as fixtures. Never commit a pack.
-    - The MCP server is a thin adapter, and interesting logic belongs in borer-engine behind a test. In the server crate, `main.rs` holds the tool router and resource dispatch only; params, resource handlers, the answer memory (`recall`) and the CLI each live in their own module.
+    - The MCP server is a thin adapter, and interesting logic belongs in borer-engine behind a test. In the server crate, `main.rs` holds the tool router and resource dispatch only; the tool handlers (one module and router per area under `tools/`), the state, params, the resource catalog and handlers, the answer memory (`recall`) and the CLI each live in their own module.
 
   mcp:
     - stdout belongs to the protocol. No println, no banners, no progress output in the server; diagnostics go to stderr or into tool results.

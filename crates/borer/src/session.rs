@@ -12,6 +12,9 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 
+use crate::BorerServer;
+use crate::state::{lock, read_lock};
+
 /// Most changes, and most requests, the ledger keeps; the oldest go first.
 const KEPT: usize = 64;
 
@@ -386,6 +389,68 @@ impl Ledger {
             );
         }
         out
+    }
+}
+
+/// The session ledger's URI, whose reads the ledger does not list.
+pub(crate) const SESSION_URI: &str = "borer://session";
+
+/// The evidence retrieval prefix, whose reads return the retained text
+/// verbatim instead of minting new evidence.
+pub(crate) const EVIDENCE_URI: &str = "borer://session/evidence/";
+
+impl BorerServer {
+    /// Sends an answer with the evidence line naming it, and keeps the
+    /// answer behind that line's id for `borer://session/evidence/<id>`
+    /// ([`session::Evidence`]).
+    ///
+    /// One line is all the answer pays, whatever its size; the text stays
+    /// server-side. The line goes after every other, a `# since=` line
+    /// included, since it names the emission a reader cites.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The answer as sent, the byte budget already applied.
+    pub(crate) fn evidence(&self, mut text: String) -> String {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&lock(&self.ledger).evidence_line(&text));
+        text
+    }
+
+    /// Records in the ledger a tool call that changed what the session
+    /// holds: a load or a save, or a name, comment, type or script applied
+    /// with `dry_run=false` ([`session::changes`]), and what a save or a
+    /// load leaves saved.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool's name.
+    /// * `arguments` - Its arguments, `None` for none.
+    /// * `args` - The same as JSON, as the ledger lists them.
+    pub(crate) fn note_change(
+        &self,
+        tool: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+        args: &str,
+    ) {
+        let dry_run = arguments
+            .and_then(|a| a.get("dry_run"))
+            .and_then(serde_json::Value::as_bool);
+        if !changes(tool, dry_run) {
+            return;
+        }
+        let saved = match tool {
+            "save_project" | "load_project" => Some(Some(read_lock(&self.overlay).fingerprint())),
+            "load_binary" => Some(None),
+            _ => None,
+        };
+        let mut ledger = lock(&self.ledger);
+        ledger.changed(tool, args);
+        if let Some(saved) = saved {
+            ledger.saved(saved);
+        }
     }
 }
 

@@ -12,12 +12,13 @@ use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::program::{Feature, Program};
 use rmcp::ErrorData;
 
-use super::{
-    BorerServer, RESOURCE_TEMPLATES, RESOURCES, err_not_found, err_params, lock,
-    parse_field_offset, read_lock, resource_name,
-};
+use crate::BorerServer;
+use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, resource_name};
+use crate::errors::{err_not_found, err_params};
 use crate::paging::Asked;
+use crate::params::parse_field_offset;
 use crate::session;
+use crate::state::{lock, read_lock};
 
 /// Most rows one listing keyed by a vtable slot returns.
 const SLOT_PAGE: usize = 2000;
@@ -1188,15 +1189,15 @@ impl BorerServer {
                 / walk.as_secs_f64()
                 / 1e9;
             let _ = writeln!(out, "strings\t{}\t{walk:.2?}\t{gb:.1} GB/s", spans.len());
-            let filter = crate::Filter::new(Some("e"));
+            let filter = crate::params::Filter::new(Some("e"));
             let filtered = spans
                 .iter()
-                .filter(|&s| crate::row_matches(p, &crate::strwalk::StringRow::Span(*s), &filter));
+                .filter(|&s| crate::strwalk::row_matches(p, &crate::strwalk::StringRow::Span(*s), &filter));
             let scan = fastest(3, || {
                 let n = spans
                     .iter()
                     .filter(|&s| {
-                        crate::row_matches(p, &crate::strwalk::StringRow::Span(*s), &filter)
+                        crate::strwalk::row_matches(p, &crate::strwalk::StringRow::Span(*s), &filter)
                     })
                     .count();
                 let _ = n;
@@ -2196,7 +2197,7 @@ mod tests {
             server.migrate_text(&format!("f/{nowhere}")),
         ] {
             let e = refused.expect_err("nothing is loaded");
-            assert_eq!(e.message, crate::NO_BINARY);
+            assert_eq!(e.message, crate::state::NO_BINARY);
         }
         let e = server.export_pack_text("x,y").expect_err("not all");
         assert_eq!(e.code, ErrorCode::INVALID_PARAMS);

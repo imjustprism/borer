@@ -162,9 +162,55 @@ impl Asked {
     }
 }
 
+/// Percent-decodes a resource URI argument.
+///
+/// A URI carries an argument in a path segment, where `,`, `=` and `:` are
+/// reserved, so a correct client may send them escaped: an experiment spec
+/// like `0x1400,rax=1` can arrive as `0x1400%2Crax%3D1`. The escaped form is
+/// canonical, so decoding it is what makes those URIs resolve. A `%` that
+/// does not begin a valid escape is left alone, so a name containing one
+/// still resolves, and bytes that are not UTF-8 leave the text as it came.
+///
+/// # Arguments
+///
+/// * `text` - The raw path segment.
+///
+/// # Returns
+///
+/// The decoded argument.
+pub(crate) fn percent_decode(text: &str) -> String {
+    if !text.contains('%') {
+        return text.to_owned();
+    }
+    let raw = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let escape = if raw[i] == b'%' {
+            let hex = |k: usize| {
+                raw.get(k)
+                    .copied()
+                    .map(char::from)
+                    .and_then(|c| c.to_digit(16))
+            };
+            hex(i + 1).zip(hex(i + 2))
+        } else {
+            None
+        };
+        if let Some((high, low)) = escape {
+            out.push(u8::try_from(high * 16 + low).unwrap_or(b'%'));
+            i += 3;
+        } else {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Asked;
+    use super::{Asked, percent_decode};
 
     /// Suffixes come off in any order, a `!` in the argument stays, a
     /// suffix given twice or a count that is not one is refused, and
@@ -200,5 +246,45 @@ mod tests {
             assert!(Asked::read(bad).is_err(), "{bad}");
         }
         assert_eq!(read("borer://iocs!offset=3").spec_words(""), "offset=3");
+    }
+
+    /// An escaped experiment spec decodes to the same spec sent plainly.
+    ///
+    /// A URI path segment reserves `,` and `=`, so a correct client may send
+    /// them escaped; both spellings have to reach the harness as one spec.
+    ///
+    /// # Panics
+    ///
+    /// When an escaped spec does not decode to the plain one.
+
+    #[test]
+    fn an_escaped_spec_decodes() {
+        assert_eq!(
+            percent_decode("0x1400%2Crax%3D1%2Cw0x1400%3D90c3"),
+            "0x1400,rax=1,w0x1400=90c3"
+        );
+        assert_eq!(percent_decode("0x1400%2crax%3d1"), "0x1400,rax=1");
+        assert_eq!(percent_decode("0x1400,rax=1"), "0x1400,rax=1");
+        assert_eq!(
+            percent_decode("std%3A%3Astring%3A%3Aresize"),
+            "std::string::resize"
+        );
+    }
+
+    /// A `%` that begins no escape is left as it came.
+    ///
+    /// A name or filter can contain one, and mangling it would lose a lookup
+    /// that works today.
+    ///
+    /// # Panics
+    ///
+    /// When a stray percent is altered.
+    #[test]
+    fn a_stray_percent_survives() {
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%2"), "%2");
+        assert_eq!(percent_decode("a%%20b"), "a% b");
     }
 }

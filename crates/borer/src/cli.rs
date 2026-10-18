@@ -19,12 +19,14 @@ use borer_engine::table::Window;
 use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, script, search};
 
-use super::{
-    entropy_threshold, env_pack_files, marked, parse_field_offset, read_packs, render_hits,
-    strings_page, walk_rows, window,
-};
+use crate::params::parse_field_offset;
 use crate::params::{Detail, Filter, SearchKind, StringEncoding};
 use crate::resources::ABOUT_NEEDS_A_NAME;
+use crate::state::{env_pack_files, read_packs};
+use crate::strwalk::{strings_page, walk_rows};
+use crate::tools::bytes::entropy_threshold;
+use crate::tools::decompile::{marked, window};
+use crate::tools::search::render_hits;
 
 /// `print!` into the answer, which `crate::term` writes to stdout once,
 /// after the loading line is cleared: the same bytes as printing them here.

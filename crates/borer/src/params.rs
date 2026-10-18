@@ -5,7 +5,7 @@ use borer_engine::analysis::render;
 use borer_engine::program;
 use rmcp::{ErrorData, schemars};
 
-use super::err_params;
+use crate::errors::err_params;
 
 /// What `read` and `live_read` decode the bytes as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
@@ -1199,6 +1199,40 @@ fn admits(
     typed && above_minimum && fits_format
 }
 
+/// Parses a field offset: `0x10`, `16` or `-0x8`.
+///
+/// Hex takes its `0x`, as an address does: an offset is read in a context
+/// full of decimal counts, and reading bare digits as hex turned `16` into a
+/// guess and `abc` into `0xabc` without a word.
+///
+/// # Arguments
+///
+/// * `text` - The offset as typed: an optional minus sign, then `0x` and hex
+///   digits or decimal digits alone.
+///
+/// # Errors
+///
+/// When the text is not one of those forms, or the magnitude does not fit
+/// a signed displacement.
+pub(crate) fn parse_field_offset(text: &str) -> anyhow::Result<i64> {
+    use anyhow::Context as _;
+    let (negative, digits) = text.strip_prefix('-').map_or((false, text), |d| (true, d));
+    let (radix, digits) = match digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        Some(hex) => (16, hex),
+        None => (10, digits),
+    };
+    let magnitude = Some(digits)
+        .filter(|d| !d.is_empty() && d.chars().all(|c| c.is_digit(radix)))
+        .and_then(|d| u64::from_str_radix(d, radix).ok())
+        .with_context(|| format!("bad offset {}", borer_engine::text::quoted(text)))?;
+    let value = i64::try_from(magnitude)
+        .with_context(|| format!("offset {text} does not fit a signed displacement"))?;
+    Ok(if negative { -value } else { value })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1375,5 +1409,29 @@ mod tests {
             "{name}"
         );
         assert_eq!(comment, name.replace("a name", "a comment"));
+    }
+
+    /// A field offset is hex with its `0x` and decimal without, as an
+    /// address is; anything else is refused by name rather than guessed.
+    ///
+    /// # Panics
+    ///
+    /// When a form reads as another number, or a guess is accepted.
+    #[test]
+    fn a_field_offset_is_hex_with_0x_and_decimal_without() {
+        let parse = |t: &str| super::parse_field_offset(t).map_err(|e| e.to_string());
+        assert_eq!(parse("0x10"), Ok(16));
+        assert_eq!(parse("0X1f"), Ok(31));
+        assert_eq!(parse("16"), Ok(16));
+        assert_eq!(parse("-0x8"), Ok(-8));
+        assert_eq!(parse("-8"), Ok(-8));
+        assert_eq!(parse("abc"), Err("bad offset 'abc'".to_owned()));
+        for guess in ["1f", "", "-", "0x", "+5", "0x+5", "--8", "0x1g"] {
+            assert!(
+                parse(guess).is_err_and(|e| e.starts_with("bad offset ")),
+                "{guess:?} was read"
+            );
+        }
+        assert!(parse("0xffffffffffffffff").is_err_and(|e| e.contains("signed displacement")));
     }
 }

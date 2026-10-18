@@ -452,9 +452,9 @@ mod tests {
     #[test]
     fn every_template_is_reachable_from_a_hint_a_playbook_or_the_instructions() {
         let hinted = borer_engine::analysis::render::NEXT_RESOURCES;
-        let templates: Vec<&str> = crate::RESOURCE_TEMPLATES
+        let templates: Vec<&str> = crate::catalog::RESOURCE_TEMPLATES
             .iter()
-            .map(|t| crate::resource_name(t.0))
+            .map(|t| crate::catalog::resource_name(t.0))
             .collect();
         for name in hinted {
             assert!(templates.contains(&name), "a hint names borer://{name}");
@@ -528,7 +528,7 @@ mod tests {
             Some(2)
         );
         assert!(playbook("nosuch", None).is_none());
-        let described = crate::RESOURCE_TEMPLATES
+        let described = crate::catalog::RESOURCE_TEMPLATES
             .iter()
             .find(|t| t.0 == "borer://playbook/{name}")
             .map(|t| t.1)
