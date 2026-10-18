@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 
 use super::{InstrRec, Recorded, decode_at};
-use crate::analysis::switch_index::{TableBound, check_bound, index_bound, table_index};
+use crate::analysis::switch_index::{
+    TableBound, check_bound, flag_reader, index_bound, table_index,
+};
 use crate::analysis::{read_u32, read_u64};
 use crate::fxmap::FxHashSet;
 use crate::isa::x86::{Code, Instruction, Mnemonic, OpKind, Register};
@@ -180,7 +182,8 @@ pub(super) fn resolve_jump_table(
     let bound = match table_index(&window, decode_at(program, bitness, jmp_va).as_ref()) {
         Some((at, index)) => index_bound(&window, jmp_va, at, index),
         None => window.iter().enumerate().rev().find_map(|(k, i)| {
-            check_bound(i, window.get(k + 1)).map(|entries| TableBound {
+            let jcc = flag_reader(&window, k).unwrap_or(k + 1);
+            check_bound(i, window.get(jcc)).map(|entries| TableBound {
                 check_at: k,
                 entries,
                 loose: false,

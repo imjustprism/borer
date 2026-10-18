@@ -74,6 +74,32 @@ pub(super) fn check_bound(i: &Instruction, jcc: Option<&Instruction>) -> Option<
         .next_back()
 }
 
+/// Where the jump that reads a check's flags sits.
+///
+/// Compilers schedule loads between a compare and its jump (`cmp eax, 6;
+/// mov r15, [rsp+0x90]; mov ebx, [rsp+0x44]; ja default`); an instruction
+/// that writes no flag and does not branch leaves the compare's flags to
+/// the jump after it.
+///
+/// # Arguments
+///
+/// * `window` - The instructions before the table jump, in order.
+/// * `check` - Position of the compare in `window`.
+///
+/// # Returns
+///
+/// The position of the conditional jump in `window`, or `None` when an
+/// instruction between writes flags or branches first.
+pub(super) fn flag_reader(window: &[Instruction], check: usize) -> Option<usize> {
+    window
+        .iter()
+        .enumerate()
+        .skip(check + 1)
+        .find(|(_, i)| i.rflags_modified() != 0 || i.flow_control() != FlowControl::Next)
+        .filter(|(_, i)| i.flow_control() == FlowControl::ConditionalBranch)
+        .map(|(k, _)| k)
+}
+
 /// Whether the path to the table leaves a check's jump where the value is
 /// small.
 ///
@@ -472,7 +498,8 @@ pub(super) fn index_bound(
     let end = at.min(window.len());
     let ip = |p: usize| window.get(p).map_or(jmp_va, Instruction::ip);
     for (k, i) in window.iter().enumerate().take(end) {
-        trace.step(k, i, window.get(k + 1), ip(k + 2), &mut info);
+        let jcc = flag_reader(window, k).unwrap_or(k + 1);
+        trace.step(k, i, window.get(jcc), ip(jcc + 1), &mut info);
     }
     let v = trace.read(Home::Reg(index.full_register()));
     let nearest = |checked: Val| {
@@ -557,6 +584,24 @@ mod tests {
             0xff, 0xe0, // ASM: jmp rax
         ];
         assert_eq!(bound(code), Some(4));
+    }
+
+    /// A load scheduled between the compare and its jump leaves the
+    /// compare bounding the table: sqlite's `cmp eax, 4; mov rbx, r10; ja`
+    /// read four of five cases.
+    #[test]
+    fn a_check_with_a_load_before_its_jump_bounds_the_index() {
+        let code: &[u8] = &[
+            0x41, 0x8d, 0x45, 0xff, // ASM: lea eax,[r13-1]
+            0x83, 0xf8, 0x04, // ASM: cmp eax,4
+            0x4c, 0x89, 0xd3, // ASM: mov rbx,r10
+            0x0f, 0x87, 0x84, 0x01, 0x00, 0x00, // ASM: ja +0x184
+            0x48, 0x8d, 0x0d, 0xce, 0x7d, 0x03, 0x00, // ASM: lea rcx,[rip+X]
+            0x48, 0x63, 0x04, 0x81, // ASM: movsxd rax,[rcx+rax*4]
+            0x48, 0x01, 0xc8, // ASM: add rax,rcx
+            0xff, 0xe0, // ASM: jmp rax
+        ];
+        assert_eq!(bound(code), Some(5));
     }
 
     /// An index loaded from a table of its own is checked as itself, not
