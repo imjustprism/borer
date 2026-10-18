@@ -186,6 +186,11 @@ impl Env {
     /// its argument (`a1`, `a2`, ...), so copies of a parameter stay symbolic
     /// when the register itself is clobbered by a call.
     ///
+    /// The registers a compiler pushes only to reserve a word are unset
+    /// ([`Exec::makes_room`]): `ecx` in MSVC's 32-bit prologues, and `rax`,
+    /// which no 64-bit convention passes an argument in, in clang's `push
+    /// rax` for eight bytes of frame.
+    ///
     /// # Arguments
     ///
     /// * `conv` - The calling convention (argument register order).
@@ -195,7 +200,7 @@ impl Env {
         env.unset = conv
             .volatile
             .iter()
-            .filter(|r| **r == Register::ECX && !params.contains(r))
+            .filter(|r| matches!(**r, Register::ECX | Register::RAX) && !params.contains(r))
             .map(|r| Key::Reg(*r))
             .collect();
         for r in params {

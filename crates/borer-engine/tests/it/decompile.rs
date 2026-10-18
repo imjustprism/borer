@@ -1627,6 +1627,24 @@ fn a_float_parameter_takes_the_precision_that_reads_it() {
     assert!(text.contains("(double a1)"), "{text}");
 }
 
+/// A `push rax` at the entry reserves a word, as clang's `/Od` frames do,
+/// and stores nothing: `push rax; mov [rsp],ecx; mov eax,[rsp]; pop rcx;
+/// ret` reads no `rax` the caller left.
+#[test]
+fn a_push_of_rax_at_the_entry_only_makes_room() {
+    let code = [
+        0x50, // ASM: push rax
+        0x89, 0x0c, 0x24, // ASM: mov [rsp],ecx
+        0x8b, 0x04, 0x24, // ASM: mov eax,[rsp]
+        0x59, // ASM: pop rcx
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(!text.contains("rax"), "{text}");
+}
+
 /// A padding `nop` is no dereference: `mov eax,ecx; nop word
 /// [rax+rax]; add eax,1; ret` takes a number, not a pointer.
 #[test]
