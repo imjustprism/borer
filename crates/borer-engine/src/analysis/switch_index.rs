@@ -23,7 +23,7 @@ use crate::isa::x86::{
     FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
 };
 
-use super::functions::TABLE_ENTRIES_MAX;
+use super::functions::tables::TABLE_ENTRIES_MAX;
 use super::is_imm;
 use crate::fxmap::FxHashMap;
 use crate::num::lo32;

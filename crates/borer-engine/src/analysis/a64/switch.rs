@@ -17,7 +17,7 @@
 
 use super::discover::{Text, falls_through};
 use super::refs::{Tracker, Val, any_reg, gpr, mem, writes, x_reg};
-use crate::analysis::functions::{TABLE_ENTRIES_MAX, accept_table};
+use crate::analysis::functions::tables::{TABLE_ENTRIES_MAX, accept_table};
 use crate::isa::a64::{self, Cond, Insn, Mnemonic, Op, Opnd, Shift, Width};
 use crate::num::{from_usize, lo8, lo16, lo32, sext32};
 use crate::program::Program;

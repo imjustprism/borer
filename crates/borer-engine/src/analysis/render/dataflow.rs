@@ -1137,7 +1137,7 @@ pub(in crate::analysis) fn preserves_registers(a: &Analysis, o: &Overlay, i: &In
 ///
 /// Whether the callee is one of the frame helpers.
 pub(in crate::analysis) fn frame_helper(a: &Analysis, o: &Overlay, i: &Instruction) -> bool {
-    /// The MSVC prologue helpers, as [`crate::analysis::functions::frame_helper_name`] names them.
+    /// The MSVC prologue helpers, as [`crate::analysis::functions::helpers::frame_helper_name`] names them.
     const HELPERS: [&str; 2] = ["__SEH_prolog4", "__EH_prolog3"];
     is_near_call(i) && HELPERS.contains(&short_name(a, o, i.near_branch_target()).as_str())
 }
@@ -1160,7 +1160,7 @@ pub(in crate::analysis) fn frame_helper(a: &Analysis, o: &Overlay, i: &Instructi
 ///
 /// Whether the callee is one of the epilogue helpers.
 pub(in crate::analysis) fn epilog_helper(a: &Analysis, o: &Overlay, i: &Instruction) -> bool {
-    /// The MSVC epilogue helpers, as [`crate::analysis::functions::epilog_helper_name`] names them.
+    /// The MSVC epilogue helpers, as [`crate::analysis::functions::helpers::epilog_helper_name`] names them.
     const HELPERS: [&str; 2] = ["__SEH_epilog4", "__EH_epilog3"];
     is_near_call(i) && HELPERS.contains(&short_name(a, o, i.near_branch_target()).as_str())
 }

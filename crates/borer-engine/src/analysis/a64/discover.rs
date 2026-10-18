@@ -38,9 +38,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::refs::{self, Tracker};
 use super::switch::{self, Shape, Table};
 use super::{prologue, stubs};
+use crate::analysis::functions::helpers::is_noreturn_name;
 use crate::analysis::functions::{
     GAP_ROUNDS_MAX, GUESS_WALK_MAX, SEEDS_MAX, SPLIT_ROUNDS_MAX, build_callers_and_names, fuel_for,
-    is_noreturn_name, mix, push_site,
+    mix, push_site,
 };
 use crate::analysis::{
     Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare_name, seeds, striped,
