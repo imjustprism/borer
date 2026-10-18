@@ -551,6 +551,7 @@ fn run_machine(
     };
     let Layout { values, at, pokes } = layout;
     let mut emu = Emulator::new(p, budget)?;
+    emu.back_arguments();
     if traced {
         emu.set_trace(budget);
     }

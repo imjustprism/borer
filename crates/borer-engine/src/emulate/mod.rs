@@ -365,6 +365,10 @@ pub struct Emulator<'a> {
     /// OS loader would resolve. Off by default, because it can fabricate
     /// progress; the trace reports how many transfers it skipped.
     permissive: bool,
+    /// Whether the caller's frame above the stack base reads as zero
+    /// ([`ARGS_SPAN`] bytes): on for a run an agent asked for, off for the
+    /// decompiler's replays, which judge a statement by where it faults.
+    args_backed: bool,
     /// What an unmapped read returns in permissive mode: [`fill_byte`] of
     /// this seed, or zero when `None`.
     fill: Option<u64>,
@@ -580,6 +584,14 @@ const PEB_AT: u64 = 0x1000;
 
 /// The page size the loader rounds section virtual extents up to when mapping.
 const PAGE: u64 = 0x1000;
+
+/// Bytes above the stack base that read as zero.
+///
+/// They are the return address slot and the caller's frame, where a
+/// routine finds its stack arguments and its home space. A run given no
+/// arguments read them there and faulted, so `emulate` of any function
+/// taking a stack argument stopped at once.
+const ARGS_SPAN: u64 = 0x1000;
 
 /// Bytes below [`STACK_BASE`] treated as stack, not materialized code.
 ///
@@ -1139,6 +1151,7 @@ impl<'a> Emulator<'a> {
             alloc_next,
             allocs: Vec::new(),
             permissive: false,
+            args_backed: false,
             fill: None,
             skipped: 0,
             neutralized: BTreeSet::new(),
@@ -1259,6 +1272,13 @@ impl<'a> Emulator<'a> {
         self.flags_sign = v >> 7 & 1 != 0;
         self.flags_df = v >> 10 & 1 != 0;
         self.flags_over = Some(v >> 11 & 1 != 0);
+    }
+
+    /// Backs the caller's frame above the stack base with zeros, so a
+    /// routine given no stack arguments reads zeros there instead of
+    /// faulting at its first one.
+    pub fn back_arguments(&mut self) {
+        self.args_backed = true;
     }
 
     /// Turns on best-effort mode: skip transfers to unmapped memory and read
@@ -2171,7 +2191,8 @@ impl<'a> Emulator<'a> {
     /// read as zero the way an OS stack's do for a stack probe.
     fn in_stack(&self, a: u64) -> bool {
         let deep = self.stack_base.saturating_sub(self.stack_span);
-        (deep..=self.stack_base).contains(&a)
+        let above = if self.args_backed { ARGS_SPAN } else { 1 };
+        (deep..self.stack_base.saturating_add(above)).contains(&a)
     }
 
     /// Runs from `entry` until it returns, exhausts the budget, or stops.
@@ -5394,6 +5415,28 @@ mod tests {
         bytes[0x2000..0x2000 + data.len()].copy_from_slice(data);
         let flat = Section::mapped(".flat", 0, 0, 0x3000, true, true);
         Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![flat])
+    }
+
+    /// A routine reading its stack arguments and home space, none of them
+    /// given, reads zeros and runs on once the frame is backed, as it would
+    /// over a caller's frame, and faults as before when it is not.
+    ///
+    /// # Panics
+    ///
+    /// When the backed read faults or the unbacked one does not.
+    #[test]
+    fn stack_arguments_nobody_set_read_as_zero() {
+        // ASM: mov rax,[rsp+0x28]; add rax,[rsp+8]; ret
+        let code = [
+            0x48, 0x8b, 0x44, 0x24, 0x28, 0x48, 0x03, 0x44, 0x24, 0x08, 0xc3,
+        ];
+        let p = image(&code, &[]);
+        let mut strict = Emulator::new(&p, 200).expect("emulator");
+        assert!(matches!(strict.run(0x1000).stop, Stop::Fault(_)));
+        let mut emu = Emulator::new(&p, 200).expect("emulator");
+        emu.back_arguments();
+        assert!(matches!(emu.run(0x1000).stop, Stop::Returned));
+        assert_eq!(emu.register("rax"), Some(0));
     }
 
     /// Runs `p` from 0x1000 to its `ret` and returns the machine.

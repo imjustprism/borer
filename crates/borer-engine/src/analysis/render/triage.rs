@@ -425,6 +425,7 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
     let mut emu =
         Emulator::new(p, spec.budget).ok_or_else(|| String::from("unknown architecture"))?;
     emu.install_imports();
+    emu.back_arguments();
     emu.stop_at(spec.stop);
     emu.set_trace(spec.trace);
     emu.set_profile(spec.profile > 0);
