@@ -9,7 +9,8 @@
 //! as the per-byte map's was.
 
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Range, RangeBounds};
+use std::sync::Arc;
 
 use crate::num::lo8;
 
@@ -28,11 +29,20 @@ struct Chunk {
 
 /// The bytes a run holds, by address, and which of them it wrote outside
 /// the stack.
+///
+/// The chunks a machine was set up with can be frozen into a layer its
+/// clones share ([`Store::freeze`]): a replay clones one set-up machine
+/// for every trial of every block, and copying the planted loader each
+/// time cost more than the trial. A chunk the run changes is copied up
+/// into the store's own layer first, which then hides the shared one.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Store {
-    /// Chunks by address shifted right three bits.
+    /// Chunks by address shifted right three bits, shared between clones;
+    /// a key in [`Store::chunks`] hides the one here.
+    base: Arc<BTreeMap<u64, Chunk>>,
+    /// Chunks by address shifted right three bits, this store's own.
     chunks: BTreeMap<u64, Chunk>,
-    /// Bytes held: the set `held` bits of every chunk.
+    /// Bytes held: the set `held` bits of every chunk either layer shows.
     len: usize,
 }
 
@@ -68,8 +78,54 @@ impl Store {
     /// * `a` - The address.
     pub(super) fn get(&self, a: u64) -> Option<u8> {
         let (key, k) = place(a);
-        let c = self.chunks.get(&key)?;
+        let c = self.chunk(key)?;
         (c.held & (1 << k) != 0).then_some(c.bytes[usize::from(k)])
+    }
+
+    /// The chunk at `key` as the store shows it: its own, else the shared
+    /// one.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The chunk's key.
+    fn chunk(&self, key: u64) -> Option<&Chunk> {
+        self.chunks.get(&key).or_else(|| self.base.get(&key))
+    }
+
+    /// The chunks at `keys` as the store shows them, in key order.
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The chunk keys.
+    fn shown(&self, keys: impl RangeBounds<u64> + Clone) -> impl Iterator<Item = (u64, &Chunk)> {
+        let mut shared = self.base.range(keys.clone()).peekable();
+        let mut own = self.chunks.range(keys).peekable();
+        std::iter::from_fn(move || {
+            let next = match (shared.peek(), own.peek()) {
+                (Some(s), Some(o)) => match s.0.cmp(o.0) {
+                    std::cmp::Ordering::Less => shared.next(),
+                    std::cmp::Ordering::Greater => own.next(),
+                    std::cmp::Ordering::Equal => {
+                        shared.next();
+                        own.next()
+                    }
+                },
+                (Some(_), None) => shared.next(),
+                (None, _) => own.next(),
+            };
+            next.map(|(&key, c)| (key, c))
+        })
+    }
+
+    /// Moves every chunk into the layer clones share, so a clone copies
+    /// none of them until it changes one.
+    pub(super) fn freeze(&mut self) {
+        let own = std::mem::take(&mut self.chunks);
+        if self.base.is_empty() {
+            self.base = Arc::new(own);
+        } else {
+            Arc::make_mut(&mut self.base).extend(own);
+        }
     }
 
     /// Whether a byte is held at `a`.
@@ -94,7 +150,11 @@ impl Store {
     pub(super) fn set(&mut self, a: u64, v: u8, dirty: bool) {
         let (key, k) = place(a);
         let bit = 1 << k;
-        let c = self.chunks.entry(key).or_default();
+        let base = &self.base;
+        let c = self
+            .chunks
+            .entry(key)
+            .or_insert_with(|| base.get(&key).copied().unwrap_or_default());
         if c.held & bit == 0 {
             self.len += 1;
         }
@@ -105,6 +165,45 @@ impl Store {
         c.bytes[usize::from(k)] = v;
     }
 
+    /// Holds a run of bytes from `at` on as [`Store::set`] does each one
+    /// unmarked, looking each chunk up once rather than once per byte.
+    ///
+    /// The emulator's setup plants pages of zeros and every imported name
+    /// before a run, and a map lookup per byte made building a machine
+    /// cost milliseconds.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address of the first byte; later ones follow it,
+    ///   wrapping at the top of the address space.
+    /// * `bytes` - The bytes, in address order.
+    pub(super) fn plant(&mut self, at: u64, bytes: impl IntoIterator<Item = u8>) {
+        let Self { base, chunks, len } = self;
+        let mut a = at;
+        let mut slot: Option<(u64, &mut Chunk)> = None;
+        for v in bytes {
+            let (key, k) = place(a);
+            a = a.wrapping_add(1);
+            if slot.as_ref().is_none_or(|(held, _)| *held != key) {
+                slot = Some((
+                    key,
+                    chunks
+                        .entry(key)
+                        .or_insert_with(|| base.get(&key).copied().unwrap_or_default()),
+                ));
+            }
+            let Some((_, c)) = slot.as_mut() else {
+                continue;
+            };
+            let bit = 1 << k;
+            if c.held & bit == 0 {
+                *len += 1;
+            }
+            c.held |= bit;
+            c.bytes[usize::from(k)] = v;
+        }
+    }
+
     /// Whether the run wrote the byte at `a` outside the stack.
     ///
     /// # Arguments
@@ -112,9 +211,7 @@ impl Store {
     /// * `a` - The address.
     pub(super) fn is_dirty(&self, a: u64) -> bool {
         let (key, k) = place(a);
-        self.chunks
-            .get(&key)
-            .is_some_and(|c| c.dirty & (1 << k) != 0)
+        self.chunk(key).is_some_and(|c| c.dirty & (1 << k) != 0)
     }
 
     /// Whether any byte in `range` was written outside the stack.
@@ -128,7 +225,7 @@ impl Store {
         }
         let (first, _) = place(range.start);
         let (last, _) = place(range.end - 1);
-        self.chunks.range(first..=last).any(|(&key, c)| {
+        self.shown(first..=last).any(|(key, c)| {
             (0..8).any(|k| c.dirty & (1 << k) != 0 && range.contains(&address(key, k)))
         })
     }
@@ -139,9 +236,8 @@ impl Store {
     ///
     /// * `limit` - The first address not counted.
     pub(super) fn held_below(&self, limit: u64) -> usize {
-        self.chunks
-            .range(..=place(limit).0)
-            .map(|(&key, c)| {
+        self.shown(..=place(limit).0)
+            .map(|(key, c)| {
                 (0..8)
                     .filter(|&k| c.held & (1 << k) != 0 && address(key, k) < limit)
                     .count()
@@ -151,7 +247,7 @@ impl Store {
 
     /// The addresses written outside the stack, in order.
     pub(super) fn dirty(&self) -> impl Iterator<Item = u64> + '_ {
-        self.chunks.iter().flat_map(|(&key, c)| {
+        self.shown(..).flat_map(|(key, c)| {
             (0..8)
                 .filter(move |&k| c.dirty & (1 << k) != 0)
                 .map(move |k| address(key, k))
@@ -195,6 +291,77 @@ mod tests {
         assert!(!s.is_dirty(0x2004));
         assert!(s.contains(0x2003));
         assert!(!s.contains(0x2002));
+    }
+
+    /// A planted run holds what setting each byte unmarked holds: the
+    /// same bytes, count and marks, across chunk edges, over bytes already
+    /// held and marked, and wrapping at the top of the address space.
+    #[test]
+    fn a_planted_run_holds_what_setting_each_byte_holds() {
+        let mut by_byte = Store::default();
+        let mut planted = Store::default();
+        for s in [&mut by_byte, &mut planted] {
+            s.set(0x4005, 9, true);
+            s.set(0x4011, 7, false);
+        }
+        let run: Vec<u8> = (0..30u8).collect();
+        for (k, &v) in run.iter().enumerate() {
+            by_byte.set(0x4003 + crate::num::from_usize(k), v, false);
+        }
+        planted.plant(0x4003, run.iter().copied());
+        for (k, v) in [(u64::MAX - 1, 1u8), (u64::MAX, 2), (0, 3), (1, 4)] {
+            by_byte.set(k, v, false);
+        }
+        planted.plant(u64::MAX - 1, [1, 2, 3, 4]);
+        assert_eq!(planted.len(), by_byte.len());
+        assert_eq!(planted.chunks.len(), by_byte.chunks.len());
+        for (a, b) in planted.chunks.iter().zip(&by_byte.chunks) {
+            assert_eq!(a.0, b.0);
+            assert_eq!(
+                (a.1.bytes, a.1.held, a.1.dirty),
+                (b.1.bytes, b.1.held, b.1.dirty)
+            );
+        }
+        assert!(planted.is_dirty(0x4005));
+    }
+
+    /// A frozen store and its clones read, count and mark exactly as the
+    /// store would unfrozen, and a clone's writes reach neither the store
+    /// nor its other clones.
+    #[test]
+    fn a_frozen_store_answers_as_it_would_unfrozen() {
+        let mut plain = Store::default();
+        plain.plant(0x6000, (0..40u8).map(|v| v + 1));
+        plain.set(0x6100, 5, true);
+        let mut frozen = plain.clone();
+        frozen.freeze();
+        let pristine = frozen.clone();
+        let mut writes: Vec<(u64, u8, bool)> = vec![(0x6003, 9, true), (0x6027, 8, false)];
+        writes.extend([(0x6200, 7, true), (0x6100, 6, false), (0x5fff, 4, false)]);
+        let mut copy = frozen.clone();
+        for &(a, v, d) in &writes {
+            plain.set(a, v, d);
+            copy.set(a, v, d);
+        }
+        copy.plant(0x6010, [0xaa, 0xbb]);
+        plain.plant(0x6010, [0xaa, 0xbb]);
+        assert_eq!(copy.len(), plain.len());
+        for a in 0x5ff0..0x6210u64 {
+            assert_eq!(copy.get(a), plain.get(a), "{a:#x}");
+            assert_eq!(copy.is_dirty(a), plain.is_dirty(a), "{a:#x}");
+        }
+        assert_eq!(
+            copy.dirty().collect::<Vec<_>>(),
+            plain.dirty().collect::<Vec<_>>()
+        );
+        for limit in [0x6000u64, 0x6004, 0x6028, 0x6101, u64::MAX] {
+            assert_eq!(copy.held_below(limit), plain.held_below(limit));
+        }
+        assert!(copy.any_dirty(0x6003..0x6004));
+        assert!(!copy.any_dirty(0x6004..0x6100));
+        assert_eq!(pristine.get(0x6003), Some(4));
+        assert!(!pristine.is_dirty(0x6003));
+        assert_eq!(frozen.get(0x6200), None);
     }
 
     /// The written bytes come out in address order, a window finds one

@@ -348,7 +348,9 @@ pub struct Emulator<'a> {
     /// Synthetic stub address to imported API name. The import table is
     /// prefilled so each slot holds its stub; a call to a stub is modeled as
     /// that API rather than executed, the way the OS would service it.
-    apis: BTreeMap<u64, String>,
+    /// Shared between clones until one adds a stub: the set-up machine a
+    /// replay clones holds every name the image imports.
+    apis: std::sync::Arc<BTreeMap<u64, String>>,
     /// The imported APIs and syscalls the run serviced, in order, each with
     /// its decoded arguments and result: what the program asked the
     /// operating system to do as it ran.
@@ -1166,7 +1168,7 @@ impl<'a> Emulator<'a> {
             step_writes: Vec::new(),
             oep: None,
             last_ip: 0,
-            apis: BTreeMap::new(),
+            apis: std::sync::Arc::default(),
             calls: Vec::new(),
             alloc_next,
             allocs: Vec::new(),
@@ -1187,6 +1189,7 @@ impl<'a> Emulator<'a> {
         emu.set_reg(Register::RSP, stack_base);
         emu.plant_teb();
         emu.plant_loader();
+        emu.mem.freeze();
         Some(emu)
     }
 
@@ -1200,9 +1203,7 @@ impl<'a> Emulator<'a> {
     /// pre-run memory, so they are neither dirty nor a fault.
     fn plant_teb(&mut self) {
         let layout = self.teb_layout();
-        for k in 0..TEB_SPAN {
-            self.mem.set(self.teb.wrapping_add(k), 0, false);
-        }
+        self.mem.plant(self.teb, (0..TEB_SPAN).map(|_| 0));
         let (teb, word) = (self.teb, self.word);
         self.plant(teb, u64::MAX, word);
         self.plant(teb + layout.stack_base, self.stack_base, word);
@@ -1240,9 +1241,8 @@ impl<'a> Emulator<'a> {
     /// * `v` - The value, little-endian.
     /// * `bytes` - How many of its low bytes.
     fn plant(&mut self, addr: u64, v: u64, bytes: usize) {
-        for k in 0..from_usize(bytes) {
-            self.mem.set(addr.wrapping_add(k), lo8(v >> (k * 8)), false);
-        }
+        self.mem
+            .plant(addr, (0..from_usize(bytes)).map(|k| lo8(v >> (k * 8))));
     }
 
     /// Masks a value to the target's register width.
@@ -1776,7 +1776,7 @@ impl<'a> Emulator<'a> {
         for (i, (slot, name)) in slots.into_iter().enumerate() {
             let stub = self.api_stub(i);
             self.plant(slot, stub, self.word);
-            self.apis.insert(stub, name);
+            std::sync::Arc::make_mut(&mut self.apis).insert(stub, name);
         }
     }
 
@@ -1883,7 +1883,7 @@ impl<'a> Emulator<'a> {
             self.program.image_base
         } else if api.starts_with("GetProcAddress") {
             let next = self.api_stub(self.apis.len());
-            self.apis.insert(next, format!("{full}:resolved"));
+            std::sync::Arc::make_mut(&mut self.apis).insert(next, format!("{full}:resolved"));
             next
         } else if api.starts_with("VirtualAlloc") || api == "HeapAlloc" || api == "malloc" {
             let requested = match api {

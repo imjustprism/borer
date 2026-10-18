@@ -393,11 +393,8 @@ impl Emulator<'_> {
     /// * `text` - The string, as the descriptor's buffer holds it.
     fn plant_unicode_string(&mut self, at: u64, field: u64, text: &str) -> u64 {
         let units: Vec<u16> = text.encode_utf16().collect();
-        for (k, u) in units.iter().enumerate() {
-            let bytes = u.to_le_bytes();
-            self.plant(at + from_usize(k * 2), u64::from(bytes[0]), 1);
-            self.plant(at + from_usize(k * 2 + 1), u64::from(bytes[1]), 1);
-        }
+        self.mem
+            .plant(at, units.iter().flat_map(|u| u.to_le_bytes()));
         self.plant(at + from_usize(units.len() * 2), 0, 2);
         let len = u64::try_from(units.len()).unwrap_or(0);
         self.plant(field, len, 2);
@@ -474,19 +471,15 @@ impl Emulator<'_> {
         self.zero(at, end.wrapping_sub(at));
 
         for (name, rva) in m.exports.iter().zip(name_rvas.iter()) {
-            for (k, b) in name.bytes().enumerate() {
-                self.plant(at + *rva + from_usize(k), u64::from(b), 1);
-            }
+            self.mem.plant(at + *rva, name.bytes());
         }
-        for (k, b) in m.dll.bytes().enumerate() {
-            self.plant(own + from_usize(k), u64::from(b), 1);
-        }
+        self.mem.plant(own, m.dll.bytes());
         let mut cell_rvas: Vec<u64> = Vec::with_capacity(m.exports.len());
         for (i, name) in m.exports.iter().enumerate() {
             let cell = cells + from_usize(i) * 8;
             cell_rvas.push(cell.wrapping_sub(at));
             self.plant(cell, 0xc3, 1);
-            self.apis.insert(cell, format!("{}!{}", m.dll, name));
+            std::sync::Arc::make_mut(&mut self.apis).insert(cell, format!("{}!{}", m.dll, name));
         }
 
         self.plant(at, 0x5a4d, 2);
@@ -526,9 +519,7 @@ impl Emulator<'_> {
     /// * `at` - The span's start.
     /// * `span` - The span's bytes.
     fn zero(&mut self, at: u64, span: u64) {
-        for k in 0..span {
-            self.plant(at.wrapping_add(k), 0, 1);
-        }
+        self.mem.plant(at, (0..span).map(|_| 0));
     }
 }
 
