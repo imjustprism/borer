@@ -684,6 +684,9 @@ pub(super) const RESOLVERS: [(&str, bool); 8] = [
     ("LdrLoadDll", true),
 ];
 
+/// Fewest resolver callers worth decompiling across the cores.
+const RESOLVER_PAR_MIN: usize = 8;
+
 /// Most runtime imports listed in one read.
 pub(super) const DYNIMPORTS_MAX: usize = 400;
 
@@ -694,7 +697,7 @@ pub(super) const DYNIMPORTS_MAX: usize = 400;
 /// malware keeps its real capability off the list a quick look reads. The
 /// callers of the resolver APIs are decompiled and the string each passes is
 /// collected, so the hidden imports are named. Only the functions that call
-/// a resolver are decompiled, so this stays cheap.
+/// a resolver are decompiled, across the cores, so this stays cheap.
 ///
 /// # Arguments
 ///
@@ -722,10 +725,14 @@ pub fn dynamic_imports_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     }
     let mut apis: BTreeSet<String> = BTreeSet::new();
     let mut dlls: BTreeSet<String> = BTreeSet::new();
-    for entry in &callers {
-        let Some(text) = crate::analysis::decompile::decompile(p, a, o, *entry) else {
-            continue;
-        };
+    let callers: Vec<u64> = callers.into_iter().collect();
+    let texts = crate::analysis::striped_with(
+        &callers,
+        RESOLVER_PAR_MIN,
+        || (),
+        |(), &entry| crate::analysis::decompile::decompile(p, a, o, entry),
+    );
+    for text in texts.into_iter().flatten().flatten() {
         for line in text.lines() {
             for (api, is_lib) in RESOLVERS {
                 collect_resolved(p, line, api, is_lib, &mut apis, &mut dlls);

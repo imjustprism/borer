@@ -977,20 +977,26 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     if let Some(outcome) = &p.pdb {
         let _ = writeln!(out, "# pdb: {}", outcome.render());
     }
+    let mut phases = crate::timing::Phases::new();
     let protection = protection_tsv(p, a);
     let _ = writeln!(out, "# protection: {}", headline(&protection, "protection"));
+    phases.mark("triage protection");
     let anti = anti_analysis_tsv(p, a, o);
     let _ = writeln!(out, "# anti-analysis: {}", headline(&anti, "anti-analysis"));
+    phases.mark("triage anti-analysis");
     let crypto = crypto_tsv(p, a, o, 0, 1);
     let _ = writeln!(out, "# crypto: {}", headline(&crypto, "crypto"));
+    phases.mark("triage crypto");
     let dynamic = dynamic_imports_tsv(p, a, o);
     let _ = writeln!(
         out,
         "# dynamic imports: {}",
         headline(&dynamic, "dynamic imports")
     );
+    phases.mark("triage dynamic imports");
     let checks = license_checks_tsv(p, a, o);
     let _ = writeln!(out, "# checks: {}", headline(&checks, "checks"));
+    phases.mark("triage checks");
     let recovered = recovered_strings(p, a);
     let _ = writeln!(
         out,
@@ -998,6 +1004,7 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         recovered.found.len(),
         recovered.generators
     );
+    phases.mark("triage generated strings");
     let capabilities = capability_map_tsv(p, Some(a));
     let _ = writeln!(
         out,
@@ -1007,10 +1014,13 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     for line in capabilities.lines().skip(1).take(6) {
         let _ = writeln!(out, "#   {}", line.trim());
     }
+    phases.mark("triage capabilities");
     let _ = writeln!(out, "# iocs: {}", iocs_line(p, a, o));
+    phases.mark("triage iocs");
     for spot in blind_spots(p, a, o, headline(&protection, "protection")) {
         let _ = writeln!(out, "# blind spot: {spot}");
     }
+    phases.mark("triage blind spots");
     let mut reasons: BTreeMap<u64, Vec<String>> = BTreeMap::new();
     let mut score: BTreeMap<u64, usize> = BTreeMap::new();
     for g in &recovered.found {
