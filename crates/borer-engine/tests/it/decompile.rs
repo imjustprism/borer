@@ -1695,6 +1695,33 @@ fn a_float_parameter_converts_as_the_float_it_is() {
     assert!(!text.contains("disagree"), "{text}");
 }
 
+/// A body that names no precision returns the float its callers read.
+///
+/// `movd xmm0,ecx; ret` is `f32::from_bits`: the move names no width, and
+/// the caller's `cvtss2sd xmm0,xmm0` after `call` reads a single, so the
+/// callee returns a `float` and the caller's result is one too.
+#[test]
+fn a_bit_move_returns_the_float_its_callers_read() {
+    let mut code = vec![
+        0xe8, 0x3b, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0xf3, 0x0f, 0x5a, 0xc0, // ASM: cvtss2sd xmm0,xmm0
+        0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x66, 0x0f, 0x6e, 0xc1, // ASM: movd xmm0,ecx
+        0xc3, // ASM: ret
+    ]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let callee = a.function(0x1_4000_1040).map(|f| f.ret_float);
+    assert_eq!(callee, Some(Some(32)));
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(!text.contains("disagree"), "{text}");
+    assert!(!text.contains("double xmm0"), "{text}");
+}
+
 /// A padding `nop` is no dereference: `mov eax,ecx; nop word
 /// [rax+rax]; add eax,1; ret` takes a number, not a pointer.
 #[test]

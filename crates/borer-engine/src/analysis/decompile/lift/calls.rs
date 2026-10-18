@@ -2247,10 +2247,15 @@ impl<'a> Exec<'_, 'a> {
                 emit_line!(self, format!("{call};"));
             }
         } else if float_result {
-            let ty = match next {
-                Some(n) if is_float(n.memory_size()) => Self::mem_ty(n),
-                Some(n) if format!("{:?}", n.mnemonic()).ends_with("ss") => Ty::F32,
-                _ => Ty::F64,
+            let known = target
+                .and_then(|t| self.ctx.analysis.function(t))
+                .and_then(|f| f.ret_float);
+            let ty = match (known, next) {
+                (Some(32), _) => Ty::F32,
+                (Some(_), _) => Ty::F64,
+                (None, Some(n)) if is_float(n.memory_size()) => Self::mem_ty(n),
+                (None, Some(n)) if format!("{:?}", n.mnemonic()).ends_with("ss") => Ty::F32,
+                (None, _) => Ty::F64,
             };
             self.ctx.reg_ty.entry(xmm0).or_insert(ty);
             self.declare(xmm0, ty);

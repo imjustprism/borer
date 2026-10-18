@@ -862,13 +862,44 @@ fn reads_vector(factory: &mut InstructionInfoFactory, i: &Instruction, full: Reg
 /// What the code after a call does with xmm0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FloatUse {
-    /// Read before anything writes it: the caller takes a float result.
-    Read,
+    /// Read before anything writes it: the caller takes a float result,
+    /// at the precision the reading instruction names, when it names one
+    /// ([`xmm0_read_bits`]).
+    Read(Option<u8>),
     /// Handed on by the caller's `ret`, untouched: taken exactly when the
     /// caller's own float result is (the caller's entry).
     Tail(u64),
     /// Written, clobbered by a call, or lost where the scan stops.
     Dropped,
+}
+
+/// The precision a scalar float instruction reads xmm0 at, in bits.
+///
+/// A conversion names its source after `cvt` or `cvtt` (`cvtss2sd` reads a
+/// single); any other scalar instruction names it as its suffix (`movss`,
+/// `addsd`). A packed or bit instruction names none.
+///
+/// # Arguments
+///
+/// * `i` - The instruction that reads xmm0.
+fn xmm0_read_bits(i: &Instruction) -> Option<u8> {
+    let name = format!("{:?}", i.mnemonic()).to_ascii_lowercase();
+    let name = name
+        .strip_prefix('v')
+        .filter(|n| n.starts_with("cvt"))
+        .unwrap_or(&name);
+    let lane = match name
+        .strip_prefix("cvtt")
+        .or_else(|| name.strip_prefix("cvt"))
+    {
+        Some(rest) => rest.get(..2)?,
+        None => name.get(name.len().checked_sub(2)?..)?,
+    };
+    match lane {
+        "ss" => Some(32),
+        "sd" => Some(64),
+        _ => None,
+    }
 }
 
 /// Classifies what the code after the call at `call_va` does with xmm0.
@@ -918,7 +949,7 @@ fn float_use(
             return FloatUse::Dropped;
         };
         if reads_vector(factory, &instr, Register::ZMM0) {
-            return FloatUse::Read;
+            return FloatUse::Read(xmm0_read_bits(&instr));
         }
         if writes_xmm0(factory, &instr) {
             return FloatUse::Dropped;
@@ -964,7 +995,9 @@ fn float_use(
 /// whose every exit hands back what a function so found leaves there
 /// forwards that float, whoever reads it. The chains run to a fixpoint,
 /// capped at [`PASS_ROUNDS_MAX`] rounds. The width is 32 bits when every
-/// write that names a precision names a single, 64 otherwise.
+/// write that names a precision names a single, 64 otherwise; a body
+/// whose writes name none (`movd xmm0, ecx`, a move of bits) takes the
+/// precision its callers read it at.
 ///
 /// # Arguments
 ///
@@ -1015,8 +1048,21 @@ fn float_results(
             let Some(callees) = callees else {
                 continue;
             };
-            let single = h.float_bits.iter().chain(&callees).all(|&b| b == 32)
-                && (!h.float_bits.is_empty() || !callees.is_empty());
+            let read: Vec<u8> = uses
+                .get(i)
+                .into_iter()
+                .flatten()
+                .filter_map(|site| match site {
+                    FloatUse::Read(bits) => *bits,
+                    FloatUse::Tail(_) | FloatUse::Dropped => None,
+                })
+                .collect();
+            let named = !h.float_bits.is_empty() || !callees.is_empty();
+            let single = if named {
+                h.float_bits.iter().chain(&callees).all(|&b| b == 32)
+            } else {
+                !read.is_empty() && read.iter().all(|&b| b == 32)
+            };
             body[i] = Some(if single { 32 } else { 64 });
             changed = true;
         }
@@ -1028,7 +1074,10 @@ fn float_results(
         .iter()
         .zip(floats)
         .zip(last)
-        .map(|((u, h), &last)| u.contains(&FloatUse::Read) || (u.is_empty() && last && h.own))
+        .map(|((u, h), &last)| {
+            u.iter().any(|site| matches!(site, FloatUse::Read(_)))
+                || (u.is_empty() && last && h.own)
+        })
         .collect();
     for _ in 0..PASS_ROUNDS_MAX {
         let mut changed = false;
@@ -1041,7 +1090,7 @@ fn float_results(
                     .entry_index
                     .get(caller)
                     .is_some_and(|&c| taken[c] && body[c].is_some()),
-                FloatUse::Read | FloatUse::Dropped => false,
+                FloatUse::Read(_) | FloatUse::Dropped => false,
             });
             if handed_on {
                 taken[i] = true;
@@ -1643,7 +1692,10 @@ pub(crate) fn sse_call(program: &Program, analysis: &Analysis, f: &Function) -> 
             .iter()
             .filter(|s| s.kind == RefKind::Call)
             .any(|s| {
-                float_use(program, analysis, &mut factory, bitness, s.va, &[]) == FloatUse::Read
+                matches!(
+                    float_use(program, analysis, &mut factory, bitness, s.va, &[]),
+                    FloatUse::Read(_)
+                )
             });
     Sse {
         args: read,
