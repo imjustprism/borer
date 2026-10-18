@@ -29,7 +29,9 @@ pub(super) fn is_padding(cursors: &mut Cursors<'_>, va: u64) -> bool {
 /// A jump to such an address is a tail call. On x64 the frame is taken
 /// once, at the entry: an argument homed to its slot, a callee-saved push,
 /// a `sub rsp, N` never appear in the middle of a function, so any of them
-/// at a jump target says the target is another function. 32-bit code pushes
+/// at a jump target says the target is another function. A short `jmp`
+/// there is no thunk but one jump threaded through another, as unoptimized
+/// code ends a `break` (`jmp L; ... L: jmp short M`). 32-bit code pushes
 /// in its middle to pass arguments, so only the shapes no argument push
 /// makes are believed there: `push ebp; mov ebp, esp`, the hotpatch
 /// `mov edi, edi`, `sub esp, N` then a register saved or the cookie
@@ -47,7 +49,8 @@ pub(super) fn opens_a_function(cursors: &mut Cursors<'_>, va: u64) -> bool {
         return false;
     }
     if cursors.bitness == 64 {
-        return prologue_like(&first);
+        return prologue_like(&first)
+            && !matches!(first.code(), Code::Jmp_rel8_64 | Code::Jmp_rel8_32);
     }
     let is = |i: &Instruction, r: Register| {
         i.op0_kind() == OpKind::Register && i.op0_register().full_register() == r

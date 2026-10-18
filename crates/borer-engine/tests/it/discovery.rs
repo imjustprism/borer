@@ -131,6 +131,24 @@ fn a_leaf_behind_one_int3_reached_by_a_conditional_jump_is_a_function() {
     assert_eq!(entries, vec![IMAGE_BASE + 0x1000, IMAGE_BASE + 0x1010]);
 }
 
+/// A jump onto a short jump inside the same function is not a tail call.
+///
+/// Unoptimized clang ends a `break` with `jmp L` where `L: jmp short M`;
+/// a `jmp` read as a thunk's opening split `h_parse_int` into three
+/// functions.
+#[test]
+fn a_jump_onto_a_short_jump_stays_in_its_function() {
+    let code = [
+        0x83, 0xf9, 0x01, // ASM: cmp ecx, 1
+        0x74, 0x07, // ASM: je short 0x40100c
+        0xe9, 0x00, 0x00, 0x00, 0x00, // ASM: jmp 0x40100a
+        0xeb, 0x00, // ASM: jmp short 0x40100c
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(entries(&code, &[]), vec![TEXT]);
+}
+
 /// A function behind a run of `nop` padding is found.
 ///
 /// A linker aligns with the multi-byte `nop` forms as well as with `int3`,
