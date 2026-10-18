@@ -21,6 +21,7 @@
 
 use super::expr::{ATOM, Expr, Key, Ty, UNARY};
 use super::expr_render::Names;
+use crate::isa::a64;
 use crate::program::Program;
 
 /// One lane's C type.
@@ -999,9 +1000,11 @@ fn cast_to(v: &V, want: Vt) -> String {
 
 /// An operand of a packed operation as a vector of the lanes it reads.
 ///
-/// A register or a narrower load is the integer the text holds it in, and
-/// the bits above a narrower value are zero, as `movd` and `movq` leave
-/// them, so it is widened to the vector's size before the cast. A load of
+/// A vector register's variable (an `xmm`, an arm64 `v`, a web of them)
+/// and a 128-bit global are the vector's size already and are cast as
+/// they are. Any other value is the integer the text holds it in, and the
+/// bits above a narrower value are zero, as `movd` and `movq` leave them,
+/// so it is widened to the vector's size before the cast. A load of
 /// the vector's whole size reads through a pointer to the vector type,
 /// which [`declare`] gives an alignment of one: `movdqu` reads any
 /// address, and a load of a 16-byte-aligned type would not.
@@ -1038,7 +1041,10 @@ fn operand(e: &Expr, want: Vt, n: &Names<'_>) -> String {
             };
             format!("({word}){}", Expr::Deref(a.clone(), bits).render(n))
         }
-        Expr::Var(Key::Global(_, 128)) if want.whole => e.render(n),
+        Expr::Var(Key::Global(_, 128) | Key::Tmp(_) | Key::A64(a64::Reg::V(_))) if want.whole => {
+            e.render(n)
+        }
+        Expr::Var(Key::Reg(r)) if want.whole && r.is_xmm() => e.render(n),
         _ => match float_elem(e) {
             Some(elem) => {
                 let lanes = Vt {

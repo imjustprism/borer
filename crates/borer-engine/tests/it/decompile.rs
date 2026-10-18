@@ -2911,7 +2911,7 @@ fn float_conversions_and_vector_intrinsics() {
     );
     assert!(
         out.contains(
-            "*(uint128_t*)(a2 + 0x10) = (uint128_t)__builtin_shufflevector((f32x4)(uint128_t)xmm1, (f32x4)(f64x2){"
+            "*(uint128_t*)(a2 + 0x10) = (uint128_t)__builtin_shufflevector((f32x4)xmm1, (f32x4)(f64x2){"
         ) && out.contains("}, 3, 2, 5, 4);"),
         "{out}"
     );
