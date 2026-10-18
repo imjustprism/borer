@@ -1561,6 +1561,26 @@ fn a_float_parameter_takes_the_precision_that_reads_it() {
     assert!(text.contains("(double a1)"), "{text}");
 }
 
+/// A padding `nop` is no dereference: `mov eax,ecx; nop word
+/// [rax+rax]; add eax,1; ret` takes a number, not a pointer.
+#[test]
+fn a_padding_nop_makes_no_pointer() {
+    let code = [
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, // ASM: nop word [rax+rax]
+        0x83, 0xc0, 0x01, // ASM: add eax,1
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    let sig = text
+        .lines()
+        .find(|l| l.starts_with("// signature:"))
+        .unwrap_or("");
+    assert!(!sig.contains('*'), "{text}");
+}
+
 /// A call through the result reads it: after `call 0x140001040; call
 /// [rax+0x10]; ret` the callee `mov eax,1; ret` returns a value.
 #[test]

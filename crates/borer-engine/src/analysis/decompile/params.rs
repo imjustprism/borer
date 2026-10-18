@@ -13,7 +13,9 @@ use crate::analysis::typelib::Pass;
 /// number, and saying so is the difference between a signature a reader can
 /// use and one that is merely not wrong about the width. The evidence is the
 /// code's own: a memory access based on the register, or a `lea` taking the
-/// address of a field through it.
+/// address of a field through it. A multi-byte `nop` names a memory operand
+/// it never reads (`nop word [rax+rax]` pads a loop head), so it is no
+/// evidence.
 ///
 /// A stack parameter the function loads as a `float` or a `double` (`fld`,
 /// `movss`, `movsd`, or any instruction reading its slot at one of those
@@ -89,6 +91,9 @@ pub(super) fn param_types(
         let mut sp = *depth;
         for instr in instrs {
             let moved = sp_move(ctx, &mut factory, instr);
+            if instr.mnemonic() == Mnemonic::Nop {
+                continue;
+            }
             let base = lift::canon(instr.memory_base(), ctx.bitness);
             let stack_at = |r: Register| {
                 if r.full_register() == Register::RSP {
