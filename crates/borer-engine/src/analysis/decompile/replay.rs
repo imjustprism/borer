@@ -2600,7 +2600,11 @@ impl<M: Bench> Text<'_, M> {
                     return Some(integer_to_float(v, signed, *ty));
                 }
                 let v = self.eval_at(x, d)?;
-                match self.float_bits(x) {
+                let declared = match x.as_ref() {
+                    Expr::Var(Key::Param(_)) => self.un_width(x),
+                    _ => None,
+                };
+                match self.float_bits(x).or(declared) {
                     Some(fb) => Some(float_to_int(v, fb, ty.bits())),
                     None if floating(x) => None,
                     None => Some(v & low(ty.bits())),

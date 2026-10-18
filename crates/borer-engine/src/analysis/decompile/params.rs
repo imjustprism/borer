@@ -82,6 +82,9 @@ pub(super) fn param_types(
             holds.insert(*r, (p, 0));
         }
     }
+    for (r, p) in vector_params(ctx) {
+        holds.insert(lift::canon(r, ctx.bitness), (p, 0));
+    }
     let depths = block_depths(ctx, code, succs, entry);
     let mut seen: BTreeMap<usize, Seen> = BTreeMap::new();
     let mut floats: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
@@ -273,7 +276,8 @@ pub(super) fn pointee_type(widths: &BTreeSet<usize>, offsets: &BTreeSet<i64>) ->
 
 /// Returns the state at the function's entry.
 ///
-/// The parameters sit in their registers; a funclet also has `ebp` at its
+/// The parameters sit in their registers, a 32-bit function's vector
+/// arguments included ([`vector_params`]); a funclet also has `ebp` at its
 /// parent's frame, the word below the parent's return address, so the
 /// parent's locals read under the parent's names. A position the
 /// signature lists below a parameter the body reads holds a parameter
@@ -301,6 +305,12 @@ pub(super) fn entry_env(ctx: &Ctx<'_>) -> Env {
         if let Ok(pos) = u8::try_from(i) {
             env.vals.insert(Key::Reg(*r), Expr::Var(Key::Param(pos)));
             env.unset.remove(&Key::Reg(*r));
+        }
+    }
+    for (r, i) in vector_params(ctx) {
+        if let Ok(pos) = u8::try_from(i) {
+            env.vals.insert(Key::Reg(r), Expr::Var(Key::Param(pos)));
+            env.unset.remove(&Key::Reg(r));
         }
     }
     for &(reg, value) in &ctx.assume {
@@ -490,7 +500,7 @@ pub(super) fn shape_of(
     let regs = ctx.conv.args.len();
     let read = used.max(positions_of(ctx.conv, stack));
     let mut stated_short = None;
-    let (count, stack, variadic) = match declared_arity(ctx, f, lead) {
+    let (mut count, stack, variadic) = match declared_arity(ctx, f, lead) {
         Some((count, floats, variadic, source)) => {
             let count = match source {
                 Declaration::Prototype => {
@@ -527,6 +537,21 @@ pub(super) fn shape_of(
             false,
         ),
     };
+    let sse = if ctx.bitness == 32 && stated.is_none() && f.signature.is_none() {
+        lift::sse_callee(ctx, Some(f.entry))
+    } else {
+        crate::analysis::returns::Sse::default()
+    };
+    let vectors: Vec<Register> = lift::sse_args(sse).collect();
+    let float_mask = u32::try_from(count)
+        .ok()
+        .zip(u32::try_from(vectors.len()).ok())
+        .filter(|&(at, n)| n > 0 && at + n <= 8)
+        .and_then(|(at, n)| u8::try_from(((1u32 << n) - 1) << at).ok());
+    if float_mask.is_some() {
+        count += vectors.len();
+        params.extend(vectors);
+    }
     Shape {
         conv: ctx.conv,
         params,
@@ -536,8 +561,32 @@ pub(super) fn shape_of(
         count,
         stack,
         stated_short,
-        float_mask: None,
+        float_mask,
     }
+}
+
+/// The vector registers a 32-bit function takes its floats in, with the
+/// parameter position each one is.
+///
+/// The C runtime's SSE2 helpers and whole-program conventions pass floats
+/// in `xmm0` and up ([`lift::sse_callee`]), after every stack argument, as
+/// their callers pass them; the shape marks those positions in its float
+/// mask. No other convention a 32-bit function is read under passes one.
+///
+/// # Arguments
+///
+/// * `ctx` - The function's context, its shape applied.
+pub(super) fn vector_params(ctx: &Ctx<'_>) -> Vec<(Register, usize)> {
+    if ctx.bitness != 32 {
+        return Vec::new();
+    }
+    let positions = (0..8usize).filter(|i| ctx.arg_floats & (1u8 << i) != 0);
+    let vectors = ctx
+        .params
+        .iter()
+        .copied()
+        .filter(|r| r.is_vector_register());
+    vectors.zip(positions).collect()
 }
 
 /// Where the arity a function is declared with comes from
