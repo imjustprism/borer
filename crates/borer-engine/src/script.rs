@@ -942,7 +942,10 @@ pub fn run_pack_scripts(program: &Program, analysis: Analysis) -> Analysis {
             let Some(f) = analysis.function_mut(entry) else {
                 continue;
             };
-            if matches!(f.name_source, NameSource::None | NameSource::Slot) {
+            if matches!(
+                f.name_source,
+                NameSource::None | NameSource::Slot | NameSource::Constants
+            ) {
                 f.name = Some(name);
                 f.name_inferred = false;
                 f.name_source = NameSource::Pack;

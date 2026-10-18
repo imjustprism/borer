@@ -618,6 +618,245 @@ fn the_crypto_table_pages_its_rows() {
     assert!(!last.contains("more hits"), "{last}");
 }
 
+/// The first SHA-256 round constants, as the K table starts.
+const SHA256_K_HEAD: [u32; 8] = [
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+];
+
+/// The first MD5 T constants.
+const MD5_T_HEAD: [u32; 16] = [
+    0xd76a_a478,
+    0xe8c7_b756,
+    0x2420_70db,
+    0xc1bd_ceee,
+    0xf57c_0faf,
+    0x4787_c62a,
+    0xa830_4613,
+    0xfd46_9501,
+    0x6980_98d8,
+    0x8b44_f7af,
+    0xffff_5bb1,
+    0x895c_d7be,
+    0x6b90_1122,
+    0xfd98_7193,
+    0xa679_438e,
+    0x49b4_0821,
+];
+
+/// Code where `sub_1000` calls the function at 0x1010, which loads from
+/// the table at 0x2000, then `tail`.
+///
+/// # Arguments
+///
+/// * `tail` - Instructions placed after the load, before the `ret`.
+fn calls_a_table_reader(tail: &[u8]) -> Vec<u8> {
+    let mut code = vec![
+        0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x1010
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x10, 0xcc);
+    code.extend([0x48, 0x8d, 0x05, 0xe9, 0x0f, 0x00, 0x00]); // ASM: lea rax, [rip+0xfe9]
+    code.extend([0x8b, 0x00]); // ASM: mov eax, [rax]
+    code.extend(tail);
+    code.push(0xc3); // ASM: ret
+    code
+}
+
+/// A function reading the SHA-256 K table is named for the compression it
+/// runs, says what it read in its summary and its decompile header, and
+/// its caller's call site shows the name.
+#[test]
+fn a_function_reading_the_sha256_k_table_is_recognized() {
+    use borer_engine::analysis::{
+        Analysis, NameSource, Overlay, decompile::decompile, recognize::describe,
+        render::function_summary,
+    };
+    let mut data: Vec<u8> = SHA256_K_HEAD.iter().flat_map(|k| k.to_le_bytes()).collect();
+    data.resize(0x40, 0);
+    let p = two_section_program(calls_a_table_reader(&[]), data);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let f = a.function(0x1010).expect("the reader");
+    assert_eq!(
+        (f.name.as_deref(), f.name_source),
+        (Some("sha256_block"), NameSource::Constants)
+    );
+    assert_eq!(
+        describe(&a.recognized[&0x1010]),
+        "SHA-256 (SHA-256 K constants at 0x2000)"
+    );
+    let own = decompile(&p, &a, &o, 0x1010).expect("decompiles");
+    assert!(
+        own.contains("// recognized: SHA-256 (SHA-256 K constants at 0x2000)\n"),
+        "{own}"
+    );
+    let caller = decompile(&p, &a, &o, 0x1000).expect("decompiles");
+    assert!(caller.contains("sha256_block("), "{caller}");
+    let summary = function_summary(&p, &a, &o, 0x1010).expect("a summary");
+    assert!(
+        summary.contains("uses:     SHA-256 (SHA-256 K constants at 0x2000)\n"),
+        "{summary}"
+    );
+}
+
+/// A function reading the ChaCha constant names both ciphers that share
+/// it, and its header line carries no quote of the constant's text.
+#[test]
+fn a_function_reading_the_chacha_constant_is_recognized_without_quotes() {
+    use borer_engine::analysis::{Analysis, Overlay, decompile::decompile};
+    let mut data = b"expand 32-byte k".to_vec();
+    data.resize(0x40, 0);
+    let p = two_section_program(calls_a_table_reader(&[]), data);
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.function(0x1010).expect("the reader").name.as_deref(),
+        Some("chacha_or_salsa20_fn")
+    );
+    let own = decompile(&p, &a, &Overlay::default(), 0x1010).expect("decompiles");
+    let line = own
+        .lines()
+        .find(|l| l.starts_with("// recognized: "))
+        .expect("a recognized line");
+    assert_eq!(
+        line,
+        "// recognized: ChaCha20 or Salsa20 (ChaCha20 / Salsa20 sigma (expand 32-byte k) at 0x2000)"
+    );
+}
+
+/// One SHA-256 constant, read from data and carried as an immediate, is
+/// not the algorithm: the function stays unnamed and unmarked.
+#[test]
+fn a_single_sha256_constant_is_not_recognized() {
+    use borer_engine::analysis::Analysis;
+    let mut data = SHA256_K_HEAD[0].to_le_bytes().to_vec();
+    data.resize(0x40, 0);
+    let p = two_section_program(
+        calls_a_table_reader(&[0xb9, 0x98, 0x2f, 0x8a, 0x42]), // ASM: mov ecx, 0x428a2f98
+        data,
+    );
+    let a = Analysis::compute(&p);
+    assert_eq!(a.function(0x1010).expect("the reader").name, None);
+    assert!(a.recognized.is_empty(), "{:?}", a.recognized);
+}
+
+/// Round constants carried as immediates name the function once a quarter
+/// of the table is there and not before, and SHA-512's 64-bit constants,
+/// whose high halves are SHA-256's, name SHA-512 alone.
+#[test]
+fn inline_round_constants_name_the_function() {
+    use borer_engine::analysis::{Analysis, recognize::describe};
+    let adds = |n: usize| -> Vec<u8> {
+        let mut code: Vec<u8> = MD5_T_HEAD[..n]
+            .iter()
+            .flat_map(|t| {
+                let mut i = vec![0x05]; // ASM: add eax, imm32
+                i.extend(t.to_le_bytes());
+                i
+            })
+            .collect();
+        code.push(0xc3); // ASM: ret
+        code
+    };
+    let a = Analysis::compute(&two_section_program(adds(16), vec![0; 16]));
+    let f = a.function(0x1000).expect("the rounds");
+    assert_eq!(f.name.as_deref(), Some("md5_block"));
+    assert_eq!(
+        describe(&a.recognized[&0x1000]),
+        "MD5 (16 of 64 MD5 T constants inline)"
+    );
+    let a = Analysis::compute(&two_section_program(adds(15), vec![0; 16]));
+    assert_eq!(a.function(0x1000).expect("the rounds").name, None);
+    assert!(a.recognized.is_empty(), "{:?}", a.recognized);
+
+    let k512: [u64; 16] = [
+        0x428a_2f98_d728_ae22,
+        0x7137_4491_23ef_65cd,
+        0xb5c0_fbcf_ec4d_3b2f,
+        0xe9b5_dba5_8189_dbbc,
+        0x3956_c25b_f348_b538,
+        0x59f1_11f1_b605_d019,
+        0x923f_82a4_af19_4f9b,
+        0xab1c_5ed5_da6d_8118,
+        0xd807_aa98_a303_0242,
+        0x1283_5b01_4570_6fbe,
+        0x2431_85be_4ee4_b28c,
+        0x550c_7dc3_d5ff_b4e2,
+        0x72be_5d74_f27b_896f,
+        0x80de_b1fe_3b16_96b1,
+        0x9bdc_06a7_25c7_1235,
+        0xc19b_f174_cf69_2694,
+    ];
+    let mut code: Vec<u8> = k512
+        .iter()
+        .flat_map(|k| {
+            let mut i = vec![0x48, 0xb8]; // ASM: movabs rax, imm64
+            i.extend(k.to_le_bytes());
+            i
+        })
+        .collect();
+    code.push(0xc3); // ASM: ret
+    let a = Analysis::compute(&two_section_program(code, vec![0; 16]));
+    assert_eq!(
+        a.function(0x1000).expect("the rounds").name.as_deref(),
+        Some("sha512_block")
+    );
+    assert_eq!(
+        describe(&a.recognized[&0x1000]),
+        "SHA-512 (16 of 80 SHA-512 K constants inline)"
+    );
+}
+
+/// Initial values MD5 and MD4 share name both, until the function calls
+/// one that runs MD5's rounds: then it is MD5, its role still unsaid.
+#[test]
+fn a_shared_initial_state_is_settled_by_the_rounds_it_calls() {
+    use borer_engine::analysis::{Analysis, recognize::describe};
+    let init: Vec<u8> = [0x6745_2301u32, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476]
+        .iter()
+        .flat_map(|h| {
+            let mut i = vec![0xb8]; // ASM: mov eax, imm32
+            i.extend(h.to_le_bytes());
+            i
+        })
+        .collect();
+    let mut alone = init.clone();
+    alone.push(0xc3); // ASM: ret
+    let a = Analysis::compute(&two_section_program(alone, vec![0; 16]));
+    assert_eq!(
+        a.function(0x1000).expect("the init").name.as_deref(),
+        Some("md5_or_md4_fn")
+    );
+    let mut code = init;
+    code.extend([0xe8, 0x27, 0x00, 0x00, 0x00]); // ASM: call 0x1040
+    code.push(0xc3); // ASM: ret
+    code.resize(0x40, 0xcc);
+    for t in MD5_T_HEAD {
+        code.push(0x05); // ASM: add eax, imm32
+        code.extend(t.to_le_bytes());
+    }
+    code.push(0xc3); // ASM: ret
+    let a = Analysis::compute(&two_section_program(code, vec![0; 16]));
+    assert_eq!(
+        a.function(0x1000).expect("the init").name.as_deref(),
+        Some("md5_fn")
+    );
+    assert_eq!(
+        describe(&a.recognized[&0x1000]),
+        "MD5 (4 of 4 MD5 initial state words inline; calls 0x1040, which uses its round constants)"
+    );
+    assert_eq!(
+        a.function(0x1040).expect("the rounds").name.as_deref(),
+        Some("md5_block")
+    );
+}
+
 /// A PE whose exception directory points nowhere still loads.
 ///
 /// A protector rewrites the data directories so a strict parse of the

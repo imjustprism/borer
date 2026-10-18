@@ -2107,6 +2107,13 @@ fn decompile_in<L: Lifter>(
     {
         let _ = writeln!(out, "// callers pass: {values}");
     }
+    if let Some(evidence) = analysis.recognized.get(&entry) {
+        let _ = writeln!(
+            out,
+            "// recognized: {}",
+            crate::analysis::recognize::describe(evidence)
+        );
+    }
     let clones = analysis.clones_of(entry);
     if let Some(first) = clones.first().filter(|_| clones.len() > 1) {
         let _ = writeln!(

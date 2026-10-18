@@ -393,6 +393,9 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
     } else {
         String::new()
     };
+    let recognized = a.recognized.get(&entry).map_or(String::new(), |ev| {
+        format!("uses:     {}\n", crate::analysis::recognize::describe(ev))
+    });
     let comment = o
         .comments
         .get(&f.entry)
@@ -402,7 +405,7 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
         .map(|step| format!("# next: {step}\n"))
         .collect();
     Some(format!(
-        "name:     {}\nentry:    {:#x}\nrange:    {:#x}..{:#x} ({} bytes)\n{comment}{declared}{hints}{class}{source}{returns}{throws}{scattered}{clones}{effects}{asserts}{passed}{wire}shape:    {} blocks, {} instrs{}{}\ncallers:  {} [{}]\ncallees:  {} [{}]\n{virt}{msgs}strings:  {}\ndata:     {}\n{next}",
+        "name:     {}\nentry:    {:#x}\nrange:    {:#x}..{:#x} ({} bytes)\n{recognized}{comment}{declared}{hints}{class}{source}{returns}{throws}{scattered}{clones}{effects}{asserts}{passed}{wire}shape:    {} blocks, {} instrs{}{}\ncallers:  {} [{}]\ncallees:  {} [{}]\n{virt}{msgs}strings:  {}\ndata:     {}\n{next}",
         name_of(a, o, f.entry),
         f.entry,
         f.start,

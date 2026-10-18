@@ -28,6 +28,7 @@ pub mod protocol;
 pub mod protos;
 pub mod prototypes;
 pub mod qt;
+pub mod recognize;
 pub mod render;
 mod returns;
 mod rtti;
@@ -137,11 +138,14 @@ pub enum NameSource {
     /// Objective-C runtime metadata naming a method's implementation or a
     /// message-send stub ([`objc`]).
     ObjC,
+    /// The known constants of one algorithm the function uses
+    /// ([`recognize`]): a table it reads or immediates it carries.
+    Constants,
 }
 
 impl NameSource {
     /// The short tag listings print: `-`, `sym`, `hlp`, `sig`, `hnd`,
-    /// `slot`, `qt`, `fnl`, `pack`, `lib`, `objc`.
+    /// `slot`, `qt`, `fnl`, `pack`, `lib`, `objc`, `const`.
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
@@ -156,6 +160,7 @@ impl NameSource {
             NameSource::Pack => "pack",
             NameSource::Library => "lib",
             NameSource::ObjC => "objc",
+            NameSource::Constants => "const",
         }
     }
 
@@ -176,6 +181,7 @@ impl NameSource {
                 "a library signature: the function's bytes and what they reference, as the library's object has them"
             }
             NameSource::ObjC => "Objective-C runtime metadata",
+            NameSource::Constants => "inferred from the known constants of an algorithm it uses",
         }
     }
 }
@@ -1060,6 +1066,10 @@ pub struct Analysis {
     /// each with the algorithm's name, so a read through one renders by
     /// name.
     pub crypto: BTreeMap<u64, &'static str>,
+    /// What each function that uses a known algorithm's constants uses, by
+    /// entry ([`recognize`]): the tables it reads and the immediates it
+    /// carries, settled and ordered by algorithm.
+    pub recognized: BTreeMap<u64, Vec<recognize::Evidence>>,
     /// Every reference a function makes, by its entry: pairs of the target
     /// and the index into the target's list in [`Analysis::xrefs`], in
     /// address order, so [`Analysis::refs_from`] is a lookup rather than a
@@ -1271,6 +1281,8 @@ impl Analysis {
         libnames::apply_library_names(&mut analysis, &mut library_names);
         analysis.library_names = library_names;
         phases.mark("analysis libnames");
+        recognize::infer(program, &mut analysis);
+        phases.mark("analysis recognize");
         let analysis = crate::script::run_pack_scripts(program, analysis);
         phases.mark("analysis scripts");
         analysis
