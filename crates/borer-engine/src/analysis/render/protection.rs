@@ -7,6 +7,9 @@ use super::*;
 pub(super) const ANTI_SITES_MAX: usize = 12;
 
 /// The import names that signal an anti-analysis technique.
+///
+/// The ones [`CRT_IMPORTS`] names come with every C runtime as well, so
+/// they are listed but never decide the verdict.
 pub(super) const ANTI_IMPORTS: [(&str, &str); 8] = [
     ("isdebuggerpresent", "IsDebuggerPresent"),
     ("checkremotedebugger", "CheckRemoteDebuggerPresent"),
@@ -27,6 +30,17 @@ pub(super) const ANTI_IMPORTS: [(&str, &str); 8] = [
     ("ntclose", "NtClose (invalid-handle probe)"),
 ];
 
+/// Labels of [`ANTI_IMPORTS`] the C runtime imports by itself (its failure
+/// and timing paths): an ordinary program carries them, so they tip no
+/// verdict.
+const CRT_IMPORTS: [&str; 5] = [
+    "IsDebuggerPresent",
+    "OutputDebugString (exception probe)",
+    "QueryPerformanceCounter (timing)",
+    "GetTickCount (timing)",
+    "NtClose (invalid-handle probe)",
+];
+
 /// Reports the anti-debug and anti-VM techniques the binary carries.
 ///
 /// The loud ones are imports (`IsDebuggerPresent`); the stealthy ones are
@@ -38,6 +52,14 @@ pub(super) const ANTI_IMPORTS: [(&str, &str); 8] = [
 /// (`gs:[0x60]`, `fs:[0x30]`) reaches the `BeingDebugged` byte. A little
 /// `cpuid` is ordinary feature detection; a pile of these together is a
 /// program that does not want to be watched.
+///
+/// Two of these a compiler does emit, and they are not counted: an `int3`
+/// after a call, a branch, a return or another `int3` (nops aside) is the
+/// trap MSVC and clang put after a call that does not return, or padding;
+/// and the imports of [`CRT_IMPORTS`] come with every C runtime, so they
+/// are listed without tipping the verdict. The verdict counts techniques,
+/// not sites: msvcrt's `_inp` is three `in` instructions because reading a
+/// port is its job, and three sites of one instruction are one technique.
 ///
 /// # Arguments
 ///
@@ -53,20 +75,21 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let mut sites: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
     if let Some(bits) = p.arch.bitness() {
         for f in &a.functions {
+            let mut after = FlowControl::Next;
             each_instruction(p, f, bits, |i| {
-                if let Some(tag) = anti_instruction(i) {
+                let trap = i.mnemonic() == Mnemonic::Int3 && after != FlowControl::Next;
+                if let Some(tag) = anti_instruction(i).filter(|_| !trap) {
                     sites.entry(tag).or_default().push(i.ip());
+                }
+                if i.mnemonic() != Mnemonic::Nop {
+                    after = i.flow_control();
                 }
             });
         }
     }
     let mut out = String::new();
     let weak = |tag: &str| tag.starts_with("cpuid") || tag.starts_with("rdtsc");
-    let strong: usize = sites
-        .iter()
-        .filter(|(tag, _)| !weak(tag))
-        .map(|(_, at)| at.len())
-        .sum();
+    let strong = sites.keys().filter(|tag| !weak(tag)).count();
     let instr_count: usize = sites.values().map(Vec::len).sum();
     for (tag, at) in &sites {
         let shown: Vec<String> = at
@@ -109,7 +132,8 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     for label in &imports {
         let _ = writeln!(out, "{label:<32}  import");
     }
-    let verdict = if strong >= 3 || (strong >= 1 && !imports.is_empty()) {
+    let telling = imports.iter().any(|label| !CRT_IMPORTS.contains(label));
+    let verdict = if strong >= 3 || (strong >= 1 && telling) {
         "anti-analysis: a program that resists being watched"
     } else if instr_count + imports.len() == 0 {
         "no anti-analysis tells"
@@ -875,6 +899,7 @@ mod tests {
         assert_eq!(apis.into_iter().collect::<Vec<_>>(), ["?Run@@YAXXZ"]);
         assert!(dlls.is_empty());
     }
+
 }
 
 /// Section names a packer or protector writes, and what it is called.

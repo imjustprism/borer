@@ -1481,6 +1481,64 @@ fn the_anti_analysis_report_finds_the_tells() {
     );
 }
 
+/// The traps a compiler emits and the imports every C runtime carries do
+/// not make a program one that resists being watched.
+///
+/// MSVC follows a call that does not return with `nop; int3`, and its
+/// runtime imports `IsDebuggerPresent`; notepad, msvcrt and sqlite were
+/// each called anti-analysis for exactly that. A real trap (an `int3` the
+/// code runs into) still counts, beside an import only an anti-debugger
+/// uses. Three `in al, dx` are one technique, not three: msvcrt's `_inp`
+/// reads a port because that is what it is for.
+///
+/// # Panics
+///
+/// When the compiler's trap is counted or the runtime import tips the
+/// verdict, or a real trap beside a telling import does not.
+#[test]
+fn compiler_traps_and_runtime_imports_are_not_anti_analysis() {
+    let build = |code: &[u8], import: &str| {
+        let mut bytes = vec![0xc3u8; 0x2000];
+        bytes[0x40..0x40 + code.len()].copy_from_slice(code);
+        let mut p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1040),
+            vec![
+                Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+                Section::mapped(".rdata", 0x2000, 0x1000, 0x1000, false, false),
+            ],
+        );
+        p.function_ranges = vec![(0x1040, 0x1040 + from_usize(code.len()))];
+        p.symbols.push(Symbol {
+            name: format!("KERNEL32.dll!{import}"),
+            addr: 0x2000,
+            kind: SymbolKind::Import,
+        });
+        let a = Analysis::compute(&p);
+        borer_engine::analysis::render::anti_analysis_tsv(&p, &a, &Overlay::default())
+    };
+    let trap_after_call = [
+        0x85u8, 0xc0, 0x74, 0x07, 0xe8, 0xb7, 0x00, 0x00, 0x00, 0x90, 0xcc, 0xc3,
+    ];
+    let quiet = build(&trap_after_call, "IsDebuggerPresent");
+    assert!(!quiet.starts_with("# anti-analysis:"), "{quiet}");
+    assert!(!quiet.contains("debugger trap"), "{quiet}");
+    let real_trap = [0x31u8, 0xc0, 0xcc, 0xc3];
+    let runtime = build(&real_trap, "IsDebuggerPresent");
+    assert!(!runtime.starts_with("# anti-analysis:"), "{runtime}");
+    assert!(runtime.contains("debugger trap"), "{runtime}");
+    let telling = build(&real_trap, "CheckRemoteDebuggerPresent");
+    assert!(telling.starts_with("# anti-analysis:"), "{telling}");
+    let port_reads = [0xecu8, 0xec, 0xec, 0xc3];
+    let one_technique = build(&port_reads, "IsDebuggerPresent");
+    assert!(
+        !one_technique.starts_with("# anti-analysis:"),
+        "{one_technique}"
+    );
+}
+
 /// The check finder pins the serial routine and the value it wants.
 ///
 /// A function that references "incorrect serial" and compares the input to
