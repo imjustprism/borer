@@ -487,6 +487,18 @@ pub enum Mnemonic {
     Fmul,
     /// `fdiv` (scalar): floating-point division.
     Fdiv,
+    /// `fmadd` (scalar): the product of the first two sources plus the
+    /// third, rounded once.
+    Fmadd,
+    /// `fmsub` (scalar): the third source minus the product of the first
+    /// two, rounded once.
+    Fmsub,
+    /// `fnmadd` (scalar): the negated third source minus the product of the
+    /// first two, rounded once.
+    Fnmadd,
+    /// `fnmsub` (scalar): the product of the first two sources minus the
+    /// third, rounded once.
+    Fnmsub,
     /// `fsqrt` (scalar): the floating-point square root.
     Fsqrt,
     /// `fabs` (scalar, register): the floating-point absolute value.

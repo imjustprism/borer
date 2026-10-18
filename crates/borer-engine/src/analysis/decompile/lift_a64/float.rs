@@ -334,6 +334,49 @@ impl Lift<'_, '_> {
         Some(())
     }
 
+    /// `fmadd`, `fmsub`, `fnmadd` and `fnmsub` (scalar): the product of the
+    /// first two sources plus the third, either side negated as the
+    /// mnemonic says, at the destination's width.
+    ///
+    /// The machine rounds the fused result once. The tree has no fused
+    /// operator, so the text spells the product and the sum, as the x86
+    /// lifter spells `vfmadd`; the two differ only in the last bit of a
+    /// result whose product the sum cancels.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `neg_addend` - The third source is negated (`fnmadd`, `fnmsub`).
+    /// * `neg_product` - The product is negated (`fmsub`, `fnmadd`).
+    pub(super) fn float_fused(
+        &mut self,
+        i: &Insn,
+        neg_addend: bool,
+        neg_product: bool,
+    ) -> Option<()> {
+        let Opnd::Reg { reg: dst, bits } = i.operands[0] else {
+            return None;
+        };
+        let t = ty(bits)?;
+        for k in 1..4 {
+            self.note_float(i, k, t);
+        }
+        let n = self.float_read(i, 1, bits)?;
+        let m = self.float_read(i, 2, bits)?;
+        let a = self.float_read(i, 3, bits)?;
+        let prod = fold(Op::FMul, n, m, 64);
+        let v = match (neg_addend, neg_product) {
+            (false, false) => fold(Op::FAdd, a, prod, 64),
+            (false, true) => fold(Op::FSub, a, prod, 64),
+            (true, false) => fold(Op::FSub, prod, a, 64),
+            (true, true) => fold(Op::FSub, Expr::Un(UnOp::Neg, Box::new(a)), prod, 64),
+        };
+        let v = super::mem::bear_width(v, t);
+        self.note(dst, t);
+        self.write(dst, bits, v);
+        Some(())
+    }
+
     /// `fadd`, `fsub`, `fmul`, `fdiv`, `fmax` and `fmin` (vector): the
     /// instruction named as an intrinsic over the two registers, its
     /// arrangement in the name.

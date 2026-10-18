@@ -265,6 +265,10 @@ impl Insn {
             | Mnemonic::Fsub
             | Mnemonic::Fmul
             | Mnemonic::Fdiv
+            | Mnemonic::Fmadd
+            | Mnemonic::Fmsub
+            | Mnemonic::Fnmadd
+            | Mnemonic::Fnmsub
             | Mnemonic::Fsqrt
             | Mnemonic::Fabs
             | Mnemonic::Fneg

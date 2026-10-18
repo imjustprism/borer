@@ -174,6 +174,39 @@ impl Machine<'_> {
         Ok(())
     }
 
+    /// `fmadd`, `fmsub`, `fnmadd` and `fnmsub` (scalar): the product of the
+    /// first two sources fused with the third, rounded once at the
+    /// destination's width.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `f` - The operation on the two factors and the addend, as doubles.
+    ///
+    /// # Errors
+    ///
+    /// When a source is not a scalar register of the destination's width.
+    pub(super) fn float_fused(
+        &mut self,
+        i: &Insn,
+        f: impl Fn(f64, f64, f64) -> f64,
+    ) -> Result<(), Stop> {
+        let (rd, bits) = reg_opnd(i, 0)?;
+        let (rn, from_n) = reg_opnd(i, 1)?;
+        let (rm, from_m) = reg_opnd(i, 2)?;
+        let (ra, from_a) = reg_opnd(i, 3)?;
+        if vector(i) || from_n != bits || from_m != bits || from_a != bits {
+            return Err(unmodeled(i));
+        }
+        let (x, y, z) = (
+            value(self, rn, bits),
+            value(self, rm, bits),
+            value(self, ra, bits),
+        );
+        self.set_reg(rd, bits, u128::from(single(f(x, y, z), bits)));
+        Ok(())
+    }
+
     /// The vector form of a two-source float operation: the operation
     /// lane-wise at the lane's width, each lane a single computing in a
     /// single, the bits above the arrangement's span cleared.

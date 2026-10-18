@@ -479,6 +479,10 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Fsub
             | Mnemonic::Fmul
             | Mnemonic::Fdiv
+            | Mnemonic::Fmadd
+            | Mnemonic::Fmsub
+            | Mnemonic::Fnmadd
+            | Mnemonic::Fnmsub
             | Mnemonic::Fsqrt
             | Mnemonic::Fabs
             | Mnemonic::Fneg
@@ -708,6 +712,10 @@ fn data(regs: &Regs, insn: &Insn, found: &mut dyn FnMut(u64, RefKind)) -> Option
         | Mnemonic::Fsub
         | Mnemonic::Fmul
         | Mnemonic::Fdiv
+        | Mnemonic::Fmadd
+        | Mnemonic::Fmsub
+        | Mnemonic::Fnmadd
+        | Mnemonic::Fnmsub
         | Mnemonic::Fsqrt
         | Mnemonic::Fabs
         | Mnemonic::Fneg

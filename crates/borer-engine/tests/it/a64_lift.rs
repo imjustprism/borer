@@ -402,6 +402,44 @@ fn float_arithmetic_agrees_with_the_emulator() {
     }
 }
 
+/// The fused multiply-adds agree with the machine over loaded values.
+///
+/// `fmadd`, `fmsub`, `fnmadd` and `fnmsub` of the same three sources, the
+/// four results stored back. The machine rounds once; the product and sum the
+/// text spells agree with it on every seed.
+#[test]
+fn fused_multiply_add_agrees_with_the_emulator() {
+    let words = [
+        // ASM: ldr d0, [x0]
+        0xfd40_0000,
+        // ASM: ldr d1, [x0, #0x8]
+        0xfd40_0401,
+        // ASM: ldr d3, [x0, #0x10]
+        0xfd40_0803,
+        // ASM: fmadd d2, d0, d1, d3
+        0x1f41_0c02,
+        // ASM: fmsub d4, d0, d1, d3
+        0x1f41_8c04,
+        // ASM: fnmadd d5, d0, d1, d3
+        0x1f61_0c05,
+        // ASM: fnmsub d6, d0, d1, d3
+        0x1f61_8c06,
+        // ASM: str d2, [x1]
+        0xfd00_0022,
+        // ASM: str d4, [x1, #0x8]
+        0xfd00_0424,
+        // ASM: str d5, [x1, #0x10]
+        0xfd00_0825,
+        // ASM: str d6, [x1, #0x18]
+        0xfd00_0c26,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for v in agrees(&words, 1) {
+        assert_eq!(compared(&v, Fact::Store), 4, "{}", verify_tsv(&v));
+    }
+}
+
 /// A float compare sets the flags its conditions read.
 ///
 /// The block's `mi` branch goes where the machine's goes from every state,
