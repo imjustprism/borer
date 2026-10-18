@@ -2145,6 +2145,11 @@ struct Text<'t, M> {
     /// The declaration type of each vector register the text names a
     /// float, so a bare float variable's unary op carries a width.
     reg_ty: &'t BTreeMap<Key, Ty>,
+    /// The float width a call left in its result register, which stands
+    /// for the register's declaration until the text writes the register
+    /// again: one register holds a `float` from one callee and a `double`
+    /// from another in the same function ([`Function::entry_result_ty`]).
+    result_ty: FxHashMap<Key, Ty>,
     /// Each instruction of the block that sets the flags, as its address
     /// and whether it was a float compare, and each that reads them: the
     /// setter before the reader a condition's statement stands at says
@@ -2411,7 +2416,7 @@ impl<M: Bench> Text<'_, M> {
     /// * `e` - The unary operation's operand.
     fn un_width(&self, e: &Expr) -> Option<u8> {
         self.float_bits(e).or(match e {
-            Expr::Var(k) => match self.reg_ty.get(k) {
+            Expr::Var(k) => match self.result_ty.get(k).or_else(|| self.reg_ty.get(k)) {
                 Some(Ty::F32) => Some(32),
                 Some(Ty::F64) => Some(64),
                 _ => None,
@@ -2951,6 +2956,7 @@ impl<M: Bench> Text<'_, M> {
                 }
             }
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
+                self.result_ty.remove(&k);
                 if bits > 64 {
                     match value {
                         Some(w) => {
@@ -3299,6 +3305,54 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         None
     }
 
+    /// The float width each register holds at a block's start because a
+    /// call left it there.
+    ///
+    /// A call ends its block, so the value it returns reaches the next
+    /// block as that register's incoming value, typed by the callee: a
+    /// direct call to a function whose float result has a known width
+    /// ([`crate::analysis::Function::ret_float`]). Every predecessor must
+    /// end with such a call into the same register at the same width; any
+    /// other way in leaves the register to its declaration.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The block's index.
+    fn entry_result_ty(&self, b: usize) -> FxHashMap<Key, Ty> {
+        let mut found: Option<(Key, Ty)> = None;
+        let mut preds = 0usize;
+        for (p, succs) in self.succs.iter().enumerate() {
+            if !succs.contains(&b) {
+                continue;
+            }
+            preds += 1;
+            let last = self.effects.get(p).and_then(|e| e.last());
+            let left = last.and_then(|e| match &e.kind {
+                EffectKind::Call(c) => {
+                    let k = c.result?;
+                    let Callee::Direct(to) = c.callee else {
+                        return None;
+                    };
+                    let ty = match self.analysis.function(to)?.ret_float? {
+                        32 => Ty::F32,
+                        _ => Ty::F64,
+                    };
+                    Some((k, ty))
+                }
+                _ => None,
+            });
+            match (left, found) {
+                (None, _) => return FxHashMap::default(),
+                (Some(l), Some(f)) if l != f => return FxHashMap::default(),
+                (Some(l), _) => found = Some(l),
+            }
+        }
+        match found {
+            Some((k, ty)) if preds > 0 => [(k, ty)].into_iter().collect(),
+            Some(_) | None => FxHashMap::default(),
+        }
+    }
+
     /// Checks one block from one state.
     ///
     /// # Arguments
@@ -3391,6 +3445,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             names: FxHashMap::default(),
             slot_bits: &w.slot_bits,
             reg_ty: &w.reg_ty,
+            result_ty: self.entry_result_ty(b),
             flag_setters: L::flag_setters(code),
         };
         for &(_, k) in &self.regs {

@@ -1750,9 +1750,10 @@ impl<'a> Exec<'_, 'a> {
     /// rax or, since every call ends its block, when the successors' liveness
     /// says rax is read; without liveness (dataflow rounds) it is bound. A
     /// floating-point result is bound to `xmm0` instead when the next
-    /// instruction reads `xmm0` and not rax, typed by that instruction
-    /// (`movss` makes it a `float`, anything else a `double`), unless the
-    /// callee hands `xmm0` back untouched. On a 32-bit target a float comes
+    /// instruction reads `xmm0` and not rax, typed by the callee's known
+    /// result width or else by that instruction (`movss` makes it a
+    /// `float`, anything else a `double`), unless the callee hands `xmm0`
+    /// back untouched. On a 32-bit target a float comes
     /// back in `st0` ([`Exec::leaves_x87_float`]): the call empties the x87
     /// stack and pushes the result it binds; an x87 helper takes its
     /// operands off the stack as its arguments instead, and a callee that

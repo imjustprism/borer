@@ -1742,6 +1742,63 @@ fn a_bit_move_returns_the_float_its_callers_read() {
     assert!(!text.contains("double xmm0"), "{text}");
 }
 
+/// The check reads each call's float result at that callee's width.
+///
+/// The body is a debug build's `match` on `a2`, copied from one: one arm
+/// returns a `double` callee's result (`cvtsi2sd xmm0,rcx; ret`), the
+/// other widens what `f32::from_bits` returns (`movd xmm0,ecx; ret`, read
+/// by `cvtss2sd`). The function declares `xmm0` once, as the `double`,
+/// yet the block after the second call starts with the single its callee
+/// left, and the check converts it as one.
+#[test]
+fn each_float_call_result_is_checked_at_its_callees_width() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x48, // ASM: sub rsp,0x48
+        0x48, 0x89, 0x4c, 0x24, 0x28, // ASM: mov [rsp+0x28],rcx
+        0x48, 0x89, 0x4c, 0x24, 0x38, // ASM: mov [rsp+0x38],rcx
+        0x66, 0x89, 0x54, 0x24, 0x42, // ASM: mov [rsp+0x42],dx
+        0x66, 0x83, 0xfa, 0x20, // ASM: cmp dx,0x20
+        0x74, 0x12, // ASM: je 0x14000102b
+        0x48, 0x8b, 0x4c, 0x24, 0x28, // ASM: mov rcx,[rsp+0x28]
+        0xe8, 0x3d, 0x00, 0x00, 0x00, // ASM: call 0x140001060
+        0xf2, 0x0f, 0x11, 0x44, 0x24, 0x30, // ASM: movsd [rsp+0x30],xmm0
+        0xeb, 0x21, // ASM: jmp 0x14000104c
+        0x48, 0x8b, 0x4c, 0x24, 0x28, // ASM: mov rcx,[rsp+0x28]
+        0xe8, 0x3b, 0x00, 0x00, 0x00, // ASM: call 0x140001070
+        0x89, 0xc1, // ASM: mov ecx,eax
+        0xe8, 0x44, 0x00, 0x00, 0x00, // ASM: call 0x140001080
+        0xf3, 0x0f, 0x11, 0x44, 0x24, 0x44, // ASM: movss [rsp+0x44],xmm0
+        0xf3, 0x0f, 0x5a, 0xc0, // ASM: cvtss2sd xmm0,xmm0
+        0xf2, 0x0f, 0x11, 0x44, 0x24, 0x30, // ASM: movsd [rsp+0x30],xmm0
+        0xf2, 0x0f, 0x10, 0x44, 0x24, 0x30, // ASM: movsd xmm0,[rsp+0x30]
+        0x48, 0x83, 0xc4, 0x48, // ASM: add rsp,0x48
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x60, 0xcc);
+    code.extend_from_slice(&[
+        0xf2, 0x48, 0x0f, 0x2a, 0xc1, // ASM: cvtsi2sd xmm0,rcx
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x70, 0xcc);
+    code.extend_from_slice(&[
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x80, 0xcc);
+    code.extend_from_slice(&[
+        0x50, // ASM: push rax
+        0x89, 0x4c, 0x24, 0x04, // ASM: mov [rsp+4],ecx
+        0x66, 0x0f, 0x6e, 0xc1, // ASM: movd xmm0,ecx
+        0x58, // ASM: pop rax
+        0xc3, // ASM: ret
+    ]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let widths = [0x1_4000_1060, 0x1_4000_1080].map(|e| a.function(e).and_then(|f| f.ret_float));
+    assert_eq!(widths, [Some(64), Some(32)]);
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}
+
 /// A padding `nop` is no dereference: `mov eax,ecx; nop word
 /// [rax+rax]; add eax,1; ret` takes a number, not a pointer.
 #[test]
