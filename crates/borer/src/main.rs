@@ -6930,7 +6930,7 @@ mod tests {
             pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
             ..super::BorerServer::default()
         };
-        let step = "borer://solve/0x1000 (compares against 0x1337abcd: the a1 it accepts)";
+        let step = "borer://solve/0x1000 (compares against 0x1337abcd: solve tries it as a1)";
         let answer = server
             .decompile(Parameters(DecompileParams {
                 address: "0x1000".to_owned(),

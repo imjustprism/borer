@@ -208,7 +208,11 @@ fn partial_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function) -> Option<
 }
 
 /// Points a function that takes arguments and compares against a telling
-/// constant at the argument value it accepts ([`solve_tsv`]).
+/// constant at [`solve_tsv`], which tries the constant as `a1`.
+///
+/// The step names the constant, not a value `a1` is known to need: the
+/// compare may test anything the function computed, and `_stat64`'s step
+/// said its `a1` was accepted where `solve` found no constant decides it.
 ///
 /// # Arguments
 ///
@@ -239,7 +243,7 @@ fn check_step(
         .copied()
         .or_else(|| compared_constant(text))?;
     Some(format!(
-        "borer://solve/{:#x} (compares against {value:#x}: the a1 it accepts)",
+        "borer://solve/{:#x} (compares against {value:#x}: solve tries it as a1)",
         f.entry
     ))
 }

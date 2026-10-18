@@ -133,7 +133,7 @@ fn a_serial_check_hints_solve_and_the_summary_ends_with_it() {
         0x0f, 0xb6, 0xc0, // ASM: movzx eax, al
         0xc3, // ASM: ret
     ];
-    let step = "borer://solve/0x401000 (compares against 0x1337abcd: the a1 it accepts)";
+    let step = "borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)";
     assert_eq!(steps(&code), [step]);
     let p = image(Arch::X86_64, &code, &[]);
     let a = Analysis::compute(&p);
