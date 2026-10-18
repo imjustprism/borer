@@ -49,17 +49,39 @@ What makes it different:
 
 ## Install
 
-Download an archive from the
+One command downloads the latest release for your machine, checks it against
+the release's SHA256SUMS, and registers borer with every MCP client it finds.
+
+macOS and Linux:
+
+```bash
+curl -fsSL https://borer.lol/install | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://borer.lol/install.ps1 | iex
+```
+
+`setup` finds Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Gemini
+CLI, Codex CLI and Zed. It backs up each file it edits to `<file>.bak`.
+
+As a Claude Code plugin, which fetches the binary on its first session:
+
+```text
+/plugin marketplace add imjustprism/borer
+/plugin install borer@borer
+```
+
+Or by hand: download an archive from the
 [latest release](https://github.com/imjustprism/borer/releases/latest)
-(Windows x64, Linux x64, macOS), then register it with your MCP clients:
+(Windows x64, Linux x64, macOS), then:
 
 ```bash
 ./borer setup           # show what would change
 ./borer setup --apply   # register borer with every client found
 ```
-
-`setup` finds Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Gemini
-CLI, Codex CLI and Zed. It backs up each file it edits to `<file>.bak`.
 
 From source, with the toolchain that `rust-toolchain.toml` pins:
 

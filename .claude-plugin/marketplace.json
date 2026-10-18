@@ -1,0 +1,16 @@
+{
+  "name": "borer",
+  "owner": { "name": "imjustprism" },
+  "metadata": {
+    "description": "borer, the reverse-engineering engine for AI agents, as a Claude Code plugin."
+  },
+  "plugins": [
+    {
+      "name": "borer",
+      "source": "./plugins/borer",
+      "description": "Reverse engineering over MCP: load a PE, ELF or Mach-O file, find functions, decompile to pseudo-C checked against the binary.",
+      "category": "development",
+      "homepage": "https://github.com/imjustprism/borer"
+    }
+  ]
+}
