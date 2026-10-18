@@ -1980,6 +1980,262 @@ fn redeclare(lines: &mut Vec<String>, typed: &[(String, &'static str)]) {
     lines.retain(|l| l != "\u{0}");
 }
 
+/// The calls through a computed pointer in one line: where `(*` opens,
+/// the callee expression, and how many arguments the call passes.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+///
+/// # Returns
+///
+/// Per call, the byte index of `(*`, the index one past the callee's
+/// closing parenthesis, the callee text, and the argument count.
+fn pointer_calls(line: &str) -> Vec<(usize, usize, String, usize)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = line
+        .get(from..)
+        .and_then(|t| t.find("(*"))
+        .map(|k| k + from)
+    {
+        from = at + 2;
+        let Some(close) = matching_close(line, at) else {
+            continue;
+        };
+        if line.get(close + 1..close + 2) != Some("(") {
+            continue;
+        }
+        let Some(args_close) = matching_close(line, close + 1) else {
+            continue;
+        };
+        let callee = line.get(at + 2..close).unwrap_or("");
+        let callee = callee
+            .strip_prefix('(')
+            .and_then(|c| c.strip_suffix(')'))
+            .filter(|c| balanced(c))
+            .unwrap_or(callee)
+            .to_owned();
+        let args = line.get(close + 2..args_close).unwrap_or("");
+        let count = if args.trim().is_empty() {
+            0
+        } else {
+            1 + top_level_commas(args)
+        };
+        out.push((at, close + 1, callee, count));
+    }
+    out
+}
+
+/// The index of the parenthesis that closes the one at `open`.
+///
+/// # Arguments
+///
+/// * `line` - The text.
+/// * `open` - Index of a `(`.
+fn matching_close(line: &str, open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (k, c) in line.char_indices().skip_while(|(k, _)| *k < open) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// How many commas separate arguments at the outermost level of `args`.
+///
+/// # Arguments
+///
+/// * `args` - An argument list without its parentheses.
+fn top_level_commas(args: &str) -> usize {
+    let mut depth = 0i32;
+    let mut n = 0;
+    for c in args.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => n += 1,
+            _ => {}
+        }
+    }
+    n
+}
+
+/// A function pointer type returning a word and taking `count` words.
+///
+/// # Arguments
+///
+/// * `count` - The arguments.
+/// * `name` - The declarator inside the `(*)`, empty for a cast.
+fn word_function(count: usize, name: &str) -> String {
+    let params = if count == 0 {
+        "void".to_owned()
+    } else {
+        vec!["uint64_t"; count].join(", ")
+    };
+    format!("uint64_t (*{name})({params})")
+}
+
+/// Writes every call through a computed pointer as C can call it.
+///
+/// The lifter writes `(*p)(x)` for a call through a register or a loaded
+/// word, and `p` is declared an integer or `void *`, which C cannot call.
+/// A parameter that is only ever called, the same number of arguments
+/// each time, is declared the function pointer it is and called by name:
+/// `uint64_t (*a1)(uint64_t)` and `a1(x)`. Any other callee is cast to a
+/// function pointer taking as many words as the call passes:
+/// `((uint64_t (*)(uint64_t))rax)(x)`.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines included.
+///
+/// # Returns
+///
+/// The text with its pointer calls typed.
+pub(super) fn callable_pointers(text: &str) -> String {
+    if !text.contains("(*") {
+        return text.to_owned();
+    }
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let mut arity: BTreeMap<String, Option<usize>> = BTreeMap::new();
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        for (_, _, callee, count) in pointer_calls(line) {
+            if is_param_name(&callee) {
+                let seen = arity.entry(callee).or_insert(Some(count));
+                if *seen != Some(count) {
+                    *seen = None;
+                }
+            }
+        }
+    }
+    let called: BTreeMap<String, usize> = arity
+        .into_iter()
+        .filter_map(|(name, count)| count.map(|c| (name, c)))
+        .filter(|(name, _)| {
+            lines.iter().filter(|l| !l.starts_with("//")).all(|l| {
+                let calls = pointer_calls(l)
+                    .iter()
+                    .filter(|(_, _, c, _)| c == name)
+                    .count();
+                word_positions(l, name).len() == calls
+            })
+        })
+        .collect();
+    let mut changed = false;
+    for line in &mut lines {
+        if let Some(rest) = line.strip_prefix("// signature: ") {
+            let mut sig = rest.to_owned();
+            for (name, count) in &called {
+                for ty in ["uint64_t ", "void *", "uint32_t "] {
+                    let decl = format!("{ty}{name}");
+                    if let Some(at) = sig.find(&decl)
+                        && sig
+                            .get(at + decl.len()..)
+                            .is_some_and(|t| t.starts_with([',', ')']))
+                    {
+                        sig.replace_range(at..at + decl.len(), &word_function(*count, name));
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            *line = format!("// signature: {sig}");
+            continue;
+        }
+        if line.starts_with("//") {
+            continue;
+        }
+        for (at, end, callee, count) in pointer_calls(line).into_iter().rev() {
+            let with = if called.contains_key(&callee) {
+                callee.clone()
+            } else if is_ident(&callee) {
+                format!("(({}){callee})", word_function(count, ""))
+            } else {
+                format!("(({})({callee}))", word_function(count, ""))
+            };
+            line.replace_range(at..end, &with);
+            changed = true;
+        }
+    }
+    if !changed {
+        return text.to_owned();
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Writes a bitwise operation on a float parameter as an operation on its
+/// bits.
+///
+/// `movd eax, xmm0` and the sign and magnitude masks read a float's
+/// encoding, and the text says `a1 & 0xffffffff` with `a1` a `float`:
+/// C has no bitwise operators on floats. An operand of `&`, `|`, `^`,
+/// `<<` or `>>` that is a `float` parameter is `*(uint32_t*)&a1`, a
+/// `double` one `*(uint64_t*)&a1`: the bits the instruction read.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines included.
+///
+/// # Returns
+///
+/// The text with those reads spelled as bit reads.
+pub(super) fn float_bit_reads(text: &str) -> String {
+    let Some(sig) = text.lines().find_map(|l| l.strip_prefix("// signature: ")) else {
+        return text.to_owned();
+    };
+    let floats: Vec<(String, &'static str)> = sig
+        .split(['(', ',', ')'])
+        .filter_map(|p| {
+            let p = p.trim();
+            let (ty, name) = p.rsplit_once(' ')?;
+            let bits = match ty {
+                "float" => "uint32_t",
+                "double" => "uint64_t",
+                _ => return None,
+            };
+            is_param_name(name).then(|| (name.to_owned(), bits))
+        })
+        .collect();
+    if floats.is_empty() {
+        return text.to_owned();
+    }
+    const BITWISE: [&str; 5] = [" & ", " | ", " ^ ", " << ", " >> "];
+    let mut changed = false;
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    for line in lines.iter_mut().filter(|l| !l.starts_with("//")) {
+        for (name, bits) in &floats {
+            for at in word_positions(line, name).into_iter().rev() {
+                let head = line.get(..at).unwrap_or("");
+                let tail = line.get(at + name.len()..).unwrap_or("");
+                let operand = BITWISE
+                    .iter()
+                    .any(|op| tail.starts_with(op) || head.ends_with(op));
+                if operand && !head.ends_with('&') && !head.ends_with('*') {
+                    line.replace_range(at..at + name.len(), &format!("*({bits}*)&{name}"));
+                    changed = true;
+                }
+            }
+        }
+    }
+    if !changed {
+        return text.to_owned();
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
 /// The kept half and the new low lane of a scalar single's merge,
 /// `(a & 0xffffffff00000000) | (e & 0xffffffff)`.
 ///
@@ -3826,5 +4082,55 @@ mod float_lane_tests {
         let out = float_lanes(&text);
         assert!(out.contains("uint64_t var2;"), "{out}");
         assert!(out.contains("0xffffffff00000000"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod pointer_call_tests {
+    use super::{callable_pointers, float_bit_reads};
+
+    /// A parameter only ever called is a function pointer parameter, and
+    /// any other callee is cast to one taking the call's arguments.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn calls_through_pointers_are_typed() {
+        let text = [
+            "// signature: uint64_t f(uint64_t a1, uint64_t a2)",
+            "uint64_t var1;",
+            "",
+            "var1 = (*a1)(a2);",
+            "return (*(*(uint64_t*)(a2 + 8)))(var1, 3);",
+        ]
+        .join("\n");
+        let out = callable_pointers(&text);
+        assert!(
+            out.contains("uint64_t f(uint64_t (*a1)(uint64_t), uint64_t a2)"),
+            "{out}"
+        );
+        assert!(out.contains("var1 = a1(a2);"), "{out}");
+        assert!(
+            out.contains(
+                "return ((uint64_t (*)(uint64_t, uint64_t))(*(uint64_t*)(a2 + 8)))(var1, 3);"
+            ),
+            "{out}"
+        );
+    }
+
+    /// A bitwise operation on a float parameter reads its bits; an
+    /// arithmetic one keeps the value.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn bitwise_reads_of_a_float_read_its_bits() {
+        let text = "// signature: uint32_t f(float a1, double a2)\nreturn (a1 & 0x7fffffff) + (a2 >> 52) + (uint32_t)(a1 * 2);\n";
+        let out = float_bit_reads(text);
+        assert!(out.contains("(*(uint32_t*)&a1 & 0x7fffffff)"), "{out}");
+        assert!(out.contains("(*(uint64_t*)&a2 >> 52)"), "{out}");
+        assert!(out.contains("(uint32_t)(a1 * 2)"), "{out}");
     }
 }

@@ -55,6 +55,27 @@ pub(super) struct Names<'a> {
     pub slot_types: std::sync::Arc<std::collections::BTreeMap<i64, Ty>>,
 }
 
+/// A data symbol's name as C can spell it.
+///
+/// Compilers name a function's static local `func.name` (clang) or
+/// `name.0` (gcc), and some toolchains use `$` or `@`; none of those is a
+/// C identifier, and `h.ops` reads as a member access. Each such character
+/// becomes `_`. A demangled C++ name (`ns::Class::member`) keeps its
+/// spelling: it is read as the qualified name it is.
+///
+/// # Arguments
+///
+/// * `raw` - The symbol's name.
+fn data_name(raw: &str) -> String {
+    let name = crate::search::demangled_name(raw);
+    if name.contains("::") || name.contains('(') {
+        return name;
+    }
+    name.chars()
+        .map(|c| if matches!(c, '.' | '$' | '@') { '_' } else { c })
+        .collect()
+}
+
 impl Names<'_> {
     /// Names a constant that is the address of a function, a data symbol or
     /// a string literal.
@@ -96,7 +117,7 @@ impl Names<'_> {
             .symbol_at(self.program, v)
             .filter(|s| s.kind != SymbolKind::Import)
         {
-            return Some(format!("&{}", crate::search::demangled_name(&s.name)));
+            return Some(format!("&{}", data_name(&s.name)));
         }
         if let Some(class) = self.analysis.classes.vtables.get(&v) {
             return Some(format!("&{class}::vftable"));
@@ -257,7 +278,7 @@ impl Names<'_> {
                     return n;
                 }
                 if let Some(s) = self.analysis.symbol_at(self.program, addr) {
-                    return crate::search::demangled_name(&s.name);
+                    return data_name(&s.name);
                 }
                 let homes = self.analysis.derived.get_or_build("id_homes", (), || {
                     crate::analysis::messages::id_homes(self.program, self.analysis)
@@ -1754,7 +1775,7 @@ fn render_load(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> (String, u8) {
                     .symbol_at(n.program, at)
                     .filter(|s| s.kind == SymbolKind::Data)
             {
-                let table = crate::search::demangled_name(&s.name);
+                let table = data_name(&s.name);
                 let entry = format!("{table}[{}]", index.render(n));
                 return match name {
                     "int8_t" => (format!("(int8_t){entry}"), UNARY),
@@ -2138,4 +2159,23 @@ pub(super) fn compact_literal(quoted: &str, own_name: &str) -> String {
         }
     }
     quoted.to_owned()
+}
+
+#[cfg(test)]
+mod data_name_tests {
+    use super::data_name;
+
+    /// A static local's compiler name is a C identifier in the text, and a
+    /// qualified C++ name keeps its spelling.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn static_local_names_are_identifiers() {
+        assert_eq!(data_name("h_dispatch.ops"), "h_dispatch_ops");
+        assert_eq!(data_name("counter.0"), "counter_0");
+        assert_eq!(data_name("plain"), "plain");
+        assert_eq!(data_name("ns::Thing::table"), "ns::Thing::table");
+    }
 }

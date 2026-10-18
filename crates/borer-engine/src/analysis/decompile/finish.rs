@@ -54,7 +54,9 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
         out.push_str(&elvis(&compound_assign(line)));
     }
     out.push('\n');
-    refold_jumps(&spell_nullptr(&spell_own_enum(&spell_index(&out))))
+    refold_jumps(&float_bit_reads(&callable_pointers(&spell_nullptr(
+        &spell_own_enum(&spell_index(&out)),
+    ))))
 }
 
 /// Drops an assignment an `if` block opens with when the line before the
