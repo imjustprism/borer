@@ -412,6 +412,10 @@ const DECOMPILE_LINES_DEFAULT: usize = 300;
 /// reads as context and not as a line the filter kept: most lines of a function run only
 /// under a condition the line does not carry, and the bare line states it as unconditional.
 ///
+/// A filter that statements carry leaves out the declaration lines it also hits, and the
+/// header counts them: one declaration line names every local, so a filter for a `local_N`
+/// repeated it in every answer. A filter only declarations carry keeps them.
+///
 /// # Arguments
 ///
 /// * `text` - The decompiled function.
@@ -435,7 +439,24 @@ fn window(text: &str, filter: Option<&str>, offset: Option<u32>, limit: Option<u
         return text.to_owned();
     }
     let needle = Filter::new(filter);
-    let picked: Vec<usize> = (0..total).filter(|&i| needle.accepts(lines[i])).collect();
+    let mut picked: Vec<usize> = (0..total).filter(|&i| needle.accepts(lines[i])).collect();
+    let declared = borer_engine::analysis::decompile::declarations_end(text);
+    let mut left_out = String::new();
+    if let (Some(_), Some(end)) = (needle.needle(), declared) {
+        let declaration = |i: usize| i < end && !lines[i].starts_with("//");
+        let kept: Vec<usize> = picked
+            .iter()
+            .copied()
+            .filter(|&i| !declaration(i))
+            .collect();
+        if !kept.is_empty() && kept.len() < picked.len() {
+            left_out = format!(
+                " ({} more in the declarations, offset=0 limit={end} without filter reads them)",
+                picked.len() - kept.len()
+            );
+            picked = kept;
+        }
+    }
     let from = to_usize(offset.unwrap_or(0));
     let shown: Vec<usize> = picked.iter().skip(from).take(take).copied().collect();
     let context = render::scope_headers(&lines, &shown);
@@ -447,12 +468,12 @@ fn window(text: &str, filter: Option<&str>, offset: Option<u32>, limit: Option<u
     };
     let mut out = match needle.needle() {
         Some(n) => format!(
-            "// {} of {total} lines carry {n:?}, showing {} from {from}{more}",
+            "// {} of {total} lines carry {n:?}{left_out}, showing {} from {from}{more}",
             picked.len(),
             shown.len()
         ),
         None => {
-            let declared = borer_engine::analysis::decompile::declarations_end(text)
+            let declared = declared
                 .filter(|&end| from < end)
                 .map_or(String::new(), |end| {
                     format!("; declarations end at line {end}")
@@ -6608,6 +6629,32 @@ mod tests {
         assert!(out.contains("    3  c\n"), "{out}");
         assert!(!out.contains("    1  a\n"), "{out}");
         assert!(!out.contains("    4  d\n"), "{out}");
+    }
+
+    /// A filter leaves out the declaration lines that also carry it, and
+    /// says how many and how to read them.
+    ///
+    /// The one line declaring every local names each of them, so on
+    /// optimized code it carried every filter for a `local_N` and repeated
+    /// a few hundred bytes in each answer. A filter only the declarations
+    /// carry still finds them.
+    ///
+    /// # Panics
+    ///
+    /// When a declaration line is kept beside statement hits, the count is
+    /// missing, or a declaration-only hit is dropped.
+    #[test]
+    fn a_filter_leaves_out_declarations_beside_statement_hits() {
+        let text = "// f @ 0x1000\n// signature: void f(void)\nuint64_t rax, rcx, local_58, local_60;\nchar *p;\n\nlocal_58 = 1;\nreturn local_58;\n";
+        let out = super::window(text, Some("local_58"), None, None);
+        assert!(!out.contains("uint64_t"), "{out}");
+        assert!(out.contains("    6  local_58 = 1;\n"), "{out}");
+        assert!(
+            out.starts_with("// 2 of 7 lines carry \"local_58\" (1 more in the declarations, offset=0 limit=4 without filter reads them)"),
+            "{out}"
+        );
+        let only = super::window(text, Some("char *"), None, None);
+        assert!(only.contains("    4  char *p;\n"), "{only}");
     }
 
     /// A filter nothing carries says so rather than returning the whole text.

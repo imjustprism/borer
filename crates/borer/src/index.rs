@@ -979,6 +979,9 @@ pub fn load_or_build(
 /// expression, or a literal too short to spell a trigram, scans every
 /// function the name filter leaves.
 ///
+/// A function whose statements hit loses its declaration-line hits
+/// ([`function_hits`]).
+///
 /// # Arguments
 ///
 /// * `index` - The index to scan.
@@ -1004,23 +1007,48 @@ pub fn grep(index: &CodeIndex, matcher: &Matcher, function_filter: &str) -> Vec<
             (q.is_empty() || f.name.to_lowercase().contains(&q))
                 && scope.as_ref().is_none_or(|m| m[*i])
         })
-        .map(|(_, f)| {
-            f.text
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| matcher.is_match(line.trim()))
-                .map(|(i, line)| GrepHit {
-                    entry: f.entry,
-                    name: f.name.clone(),
-                    line_no: i + 1,
-                    line: line.trim().to_owned(),
-                })
-                .collect::<Vec<GrepHit>>()
-        })
+        .map(|(_, f)| function_hits(f, matcher))
         .collect::<Vec<Vec<GrepHit>>>()
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// The lines of one function `matcher` accepts, less its declaration lines
+/// when a statement hits too.
+///
+/// A function whose statements hit loses its declaration-line hits: the
+/// line declaring every local names each of them, and repeated it in every
+/// answer for a `local_N`. A hit only the declarations hold stays.
+///
+/// # Arguments
+///
+/// * `f` - The function.
+/// * `matcher` - The text or expression a line must hold.
+///
+/// # Returns
+///
+/// The kept lines, in line order.
+fn function_hits(f: &IndexedFunction, matcher: &Matcher) -> Vec<GrepHit> {
+    let mut hits: Vec<GrepHit> = f
+        .text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| matcher.is_match(line.trim()))
+        .map(|(i, line)| GrepHit {
+            entry: f.entry,
+            name: f.name.clone(),
+            line_no: i + 1,
+            line: line.trim().to_owned(),
+        })
+        .collect();
+    if let Some(end) = borer_engine::analysis::decompile::declarations_end(&f.text) {
+        let declares = |h: &GrepHit| h.line_no <= end && !h.line.starts_with("//");
+        if hits.iter().any(|h| !declares(h)) {
+            hits.retain(|h| !declares(h));
+        }
+    }
+    hits
 }
 
 /// Which functions a literal can hit, as one membership bit per function.
@@ -1464,6 +1492,40 @@ mod tests {
         assert!(text.contains("0x2000\tsub_2000\t2\treturn x;\n"), "{text}");
     }
 
+    /// A grep leaves out a function's declaration line when its statements
+    /// also hit, and keeps a hit only the declarations hold.
+    ///
+    /// # Panics
+    ///
+    /// When the declaration line comes back beside statement hits, or a
+    /// declaration-only hit is lost.
+    #[test]
+    fn grep_leaves_out_declarations_beside_statement_hits() {
+        let functions = vec![IndexedFunction {
+            entry: 0x1000,
+            name: "f".to_owned(),
+            text: "// f @ 0x1000\nuint64_t rax, local_58, local_60;\nchar *p;\n\nlocal_58 = 1;\n"
+                .to_owned(),
+        }];
+        let index = CodeIndex {
+            key: IndexKey {
+                program: 7,
+                engine: 9,
+            },
+            postings: trigram_postings(&functions),
+            functions,
+        };
+        let literal = |text: &str| Matcher::parse(text).expect("a text always parses");
+        assert_eq!(
+            grep_shape(&index, &literal("local_58"), ""),
+            vec![(0x1000, 5, "local_58 = 1;".to_owned())]
+        );
+        assert_eq!(
+            grep_shape(&index, &literal("local_60"), ""),
+            vec![(0x1000, 2, "uint64_t rax, local_58, local_60;".to_owned())]
+        );
+    }
+
     /// A hit inside a scope comes with the headers enclosing it.
     ///
     /// They are read from its function's whole text: numbered `^N`, each
@@ -1579,8 +1641,11 @@ mod tests {
         );
     }
 
-    /// Every line `matcher` accepts, in entry then line order with the
-    /// name filter applied - the answer a scan of every line owes.
+    /// Every line `matcher` accepts, with no prefilter.
+    ///
+    /// Entry then line order, the name filter applied and each function's
+    /// hits kept as [`function_hits`] keeps them: the answer a scan of
+    /// every function owes.
     ///
     /// # Arguments
     ///
@@ -1593,13 +1658,8 @@ mod tests {
             .functions
             .iter()
             .filter(|f| q.is_empty() || f.name.to_lowercase().contains(&q))
-            .flat_map(|f| {
-                f.text
-                    .lines()
-                    .enumerate()
-                    .filter(|(_, line)| matcher.is_match(line.trim()))
-                    .map(|(i, line)| (f.entry, i + 1, line.trim().to_owned()))
-            })
+            .flat_map(|f| function_hits(f, matcher))
+            .map(|h| (h.entry, h.line_no, h.line))
             .collect()
     }
 
