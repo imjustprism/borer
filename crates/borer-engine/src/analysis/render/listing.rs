@@ -653,13 +653,13 @@ pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
         let group = XrefGroup {
             entry,
             sites: fn_sites,
-            more: 0,
+            others: Vec::new(),
             total: fn_sites.len(),
         };
-        match entry.and_then(|e| a.function(e)).map(|f| f.shape_hash) {
-            Some(shape) => {
+        match entry.and_then(|e| a.function(e).map(|f| (e, f.shape_hash))) {
+            Some((e, shape)) => {
                 if let Some(held) = families.get_mut(&shape) {
-                    held.more += 1;
+                    held.others.push(e);
                     held.total += fn_sites.len();
                 } else {
                     families.insert(shape, group);
@@ -699,14 +699,7 @@ pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
             .map(|s| format!("{:#x} {}", s.va, s.kind.word()))
             .collect();
         let _ = write!(out, "{name}: {}", sites.join(", "));
-        if g.more > 0 {
-            let _ = write!(
-                out,
-                " (+{} function{} running the same code)",
-                g.more,
-                plural(g.more)
-            );
-        }
+        out.push_str(&same_code(a, o, &g.others));
         out.push('\n');
     }
     if page_end < ordered.len() {
@@ -719,16 +712,55 @@ pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
     out
 }
 
+/// Names the functions a row folds in because they run the same code as
+/// the one it shows, so each stays reachable from the listing.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `others` - Entries of the folded functions, in address order.
+///
+/// # Returns
+///
+/// ` (+N functions running the same code): name, name` with at most
+/// [`SAME_CODE_NAMES_MAX`] names and `...` past them; empty when nothing
+/// was folded.
+pub(super) fn same_code(a: &Analysis, o: &Overlay, others: &[u64]) -> String {
+    if others.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = others
+        .iter()
+        .take(SAME_CODE_NAMES_MAX)
+        .map(|&e| name_of(a, o, e))
+        .collect();
+    let more = if others.len() > SAME_CODE_NAMES_MAX {
+        ", ..."
+    } else {
+        ""
+    };
+    format!(
+        " (+{} function{} running the same code): {}{more}",
+        others.len(),
+        plural(others.len()),
+        names.join(", ")
+    )
+}
+
+/// Most folded functions a listing row names; the count covers the rest.
+const SAME_CODE_NAMES_MAX: usize = 8;
+
 /// One row of a cross-reference listing: a function's sites, standing for
 /// every function that runs the same code.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct XrefGroup<'a> {
     /// The function the sites are in; `None` for a pointer stored in data.
     entry: Option<u64>,
     /// Its sites, in address order.
     sites: &'a [&'a RefSite],
-    /// How many other functions run the same code.
-    more: usize,
+    /// The other functions running the same code, in address order.
+    others: Vec<u64>,
     /// Sites across the whole family, what the groups are ordered by.
     total: usize,
 }

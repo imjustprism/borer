@@ -100,24 +100,24 @@ pub fn functions_by_string_tsv(
             return out;
         }
     }
-    let mut families: BTreeMap<(u64, &BTreeSet<u64>), (u64, usize)> = BTreeMap::new();
+    let mut families: BTreeMap<(u64, &BTreeSet<u64>), Vec<u64>> = BTreeMap::new();
     for (&e, strings) in &by_function {
         let shape = a.function(e).map_or(0, |f| f.shape_hash);
-        let family = families.entry((shape, strings)).or_insert((e, 0));
-        if family.0 != e {
-            family.1 += 1;
-        }
+        families.entry((shape, strings)).or_default().push(e);
     }
-    let mut rows: Vec<(u64, usize, &BTreeSet<u64>)> = families
+    let mut rows: Vec<(u64, &[u64], &BTreeSet<u64>)> = families
         .iter()
-        .map(|(&(_, strings), &(e, more))| (e, more, strings))
+        .filter_map(|(&(_, strings), entries)| {
+            let (&e, others) = entries.split_first()?;
+            Some((e, others, strings))
+        })
         .collect();
     rows.sort_unstable_by_key(|r| r.0);
     let mut numbers: BTreeMap<u64, usize> = BTreeMap::new();
     let mut legend: Vec<u64> = Vec::new();
     let mut body = String::new();
     let mut listed = 0usize;
-    for &(e, more, strings) in rows.iter().skip(offset).take(limit) {
+    for &(e, others, strings) in rows.iter().skip(offset).take(limit) {
         let fresh = strings
             .iter()
             .take(STRINGS_PER_FUNCTION)
@@ -148,13 +148,7 @@ pub fn functions_by_string_tsv(
         if rest > 0 {
             let _ = write!(body, " (+{rest} more strings)");
         }
-        if more > 0 {
-            let _ = write!(
-                body,
-                " (+{more} function{} running the same code)",
-                plural(more)
-            );
-        }
+        body.push_str(&same_code(a, o, others));
         body.push('\n');
     }
     let mut out = format!(

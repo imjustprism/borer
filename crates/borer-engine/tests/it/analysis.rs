@@ -2904,6 +2904,33 @@ fn discovered_noreturn_callee_cuts_every_caller() {
     assert_eq!(a.function(0x12b0).unwrap().callers, vec![0x12c0, 0x12d0]);
 }
 
+/// A row folding the functions that run the same code names them, so each
+/// is reachable from the listing: kernelbase's three callers of one helper
+/// listed one and counted two that no agent could then find.
+#[test]
+fn folded_rows_name_the_functions_they_stand_for() {
+    use borer_engine::analysis::render::{functions_by_string_tsv, xrefs_tsv};
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let refs = xrefs_tsv(&a, &o, 0x2040, 0, 60, false);
+    let by_string = functions_by_string_tsv(&p, &a, &o, "BORER", 0, 10);
+    assert!(
+        refs.contains(
+            "sub_4d80: 0x4d80 imm/mem (+1 function running the same code): sub_4d90
+"
+        ),
+        "{refs}"
+    );
+    assert!(
+        by_string.contains(
+            "0x4d80 sub_4d80: 1 (+1 function running the same code): sub_4d90
+"
+        ),
+        "{by_string}"
+    );
+}
+
 /// `S` references the string at 0x2040 and calls `Q`: the summary, the
 /// function-strings table and the by-string lookup all show it, and `U`'s
 /// summary names the import through the thunk.
