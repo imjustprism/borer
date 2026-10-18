@@ -70,7 +70,8 @@ fn brace_imbalance(text: &str) -> i64 {
 ///
 /// A stack slot named in the body must be declared, or the text is not valid
 /// C. Names in `//` comment lines (the escape note) do not count, since they
-/// are not code.
+/// are not code. A function pointer declaration, `uint64_t (*arg_20)(...)`,
+/// declares the name inside its `(*...)`.
 ///
 /// # Arguments
 ///
@@ -106,8 +107,16 @@ fn undeclared_slots(text: &str) -> Vec<String> {
                 || w == "double" || w == "bool" || w == "char" || w == "void"
         ) && t.ends_with(';')
             && !t.contains('=')
-            && !t.contains('(');
+            && (!t.contains('(') || t.contains("(*"));
+        let declared_name = t
+            .split_once("(*")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(name, _)| name);
         for w in tokens(line) {
+            if declared_name.is_some_and(|n| n != w) {
+                used.insert(w);
+                continue;
+            }
             if decl {
                 declared.insert(w);
             } else {
@@ -571,6 +580,10 @@ fn integrity_helpers_catch_the_known_shapes() {
     );
     assert_eq!(brace_imbalance("if (a) {\n  f(\"}\");\n}\n"), 0);
     assert_eq!(brace_imbalance("while (1) {\n  if (b) {\n}\n"), 1);
+    assert_eq!(
+        undeclared_slots("uint64_t (*arg_20)(uint64_t);\narg_20(local_8);\n"),
+        vec!["local_8".to_owned()]
+    );
 }
 
 /// Checks the lifter against the emulator on every block of the
