@@ -46,6 +46,7 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
         ),
         u8::try_from(bitness).unwrap_or(64),
     )));
+    let text = drop_repeated_assignments(&text);
     let mut out = String::with_capacity(text.len() + 1);
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
@@ -55,6 +56,59 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
     }
     out.push('\n');
     spell_nullptr(&spell_own_enum(&spell_index(&out)))
+}
+
+/// Drops an assignment an `if` block opens with when the line before the
+/// `if` made the very same one.
+///
+/// `var1 = 0; if (a1 != 0) { var1 = 0; ... }` sets nothing new: the value
+/// is a constant, an address or a plain name, and the condition between
+/// the two neither names the variable nor assigns anything, so the second
+/// write stores what the first left. A loop's head runs again after its
+/// body, so only an `if` qualifies.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function.
+///
+/// # Returns
+///
+/// The text without those repeats.
+fn drop_repeated_assignments(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i + 2 < lines.len() {
+        let first = lines[i].trim();
+        let cond = lines[i + 1]
+            .trim()
+            .strip_prefix("if (")
+            .and_then(|c| c.strip_suffix(") {"));
+        let repeated = first
+            .strip_suffix(';')
+            .and_then(|b| b.split_once(" = "))
+            .is_some_and(|(name, value)| {
+                let simple = parse_const(value).is_some()
+                    || is_ident(value)
+                    || value.strip_prefix('&').is_some_and(is_ident);
+                simple
+                    && is_ident(name)
+                    && name != value
+                    && cond.is_some_and(|c| {
+                        word_positions(c, name).is_empty()
+                            && !c.contains(" = ")
+                            && !c.contains("++")
+                            && !c.contains("--")
+                    })
+                    && lines[i + 2].trim() == first
+            });
+        if repeated {
+            lines.remove(i + 2);
+        }
+        i += 1;
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 /// Writes `(x != 0 ? x : y)` as `(x ?: y)` on one line.

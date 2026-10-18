@@ -2507,6 +2507,54 @@ mod tests {
         assert!(!super::finish::compound_assign("var1 = var1 + 1;").contains("++"));
     }
 
+    /// An `if` block that opens with the assignment the line before its
+    /// `if` made drops the repeat; a loop, a condition that names the
+    /// variable, and a value that is no constant or name keep theirs.
+    #[test]
+    fn a_repeated_assignment_into_an_if_goes() {
+        let text = concat!(
+            "var1 = 0;
+",
+            "if ((uint32_t)a1 != 0) {
+",
+            "  var1 = 0;
+",
+            "  var2 = a1;
+",
+            "}
+",
+            "var3 = 0;
+",
+            "while (a2 != 0) {
+",
+            "  var3 = 0;
+",
+            "}
+",
+            "var4 = 1;
+",
+            "if (var4 != a2) {
+",
+            "  var4 = 1;
+",
+            "}
+",
+            "var5 = f();
+",
+            "if (a2 != 0) {
+",
+            "  var5 = f();
+",
+            "}
+",
+        );
+        let out = super::finish::polish(text, 64, &crate::pack::Packs::default());
+        assert_eq!(out.matches("var1 = 0;").count(), 1, "{out}");
+        assert_eq!(out.matches("var3 = 0;").count(), 2, "{out}");
+        assert_eq!(out.matches("var4 = 1;").count(), 2, "{out}");
+        assert_eq!(out.matches("var5 = f();").count(), 2, "{out}");
+    }
+
     /// A pointer compared with zero is `nullptr`. An integer, a field, a
     /// cast to an integer and a string stay on `0`.
     #[test]
