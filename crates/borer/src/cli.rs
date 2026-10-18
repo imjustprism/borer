@@ -26,6 +26,32 @@ use super::{
 use crate::params::{Detail, Filter, SearchKind, StringEncoding};
 use crate::resources::ABOUT_NEEDS_A_NAME;
 
+/// `print!` into the answer, which `crate::term` writes to stdout once,
+/// after the loading line is cleared: the same bytes as printing them here.
+macro_rules! print {
+    ($($arg:tt)*) => {
+        crate::term::out(format_args!($($arg)*))
+    };
+}
+/// `println!` into the answer, as [`print!`] does.
+macro_rules! println {
+    () => {
+        crate::term::out(format_args!("
+"))
+    };
+    ($($arg:tt)*) => {{
+        crate::term::out(format_args!($($arg)*));
+        crate::term::out(format_args!("
+"));
+    }};
+}
+/// `eprintln!` through `crate::term::note`, which clears the loading line first.
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        crate::term::note(&format!($($arg)*))
+    };
+}
+
 /// Usage text printed by `help` and on argument errors.
 const USAGE: &str = "usage: borer <command> <binary> [args...]
 commands:
@@ -1131,6 +1157,7 @@ fn open(
         .get(1)
         .with_context(|| needs_a_binary(args.first().map_or("", String::as_str)))?;
     let file = std::path::Path::new(path);
+    crate::term::busy(&format!("loading {}", file_name(file)), &head_bytes(file));
     let program = match layout {
         Some(layout) => Program::load_layout(file, layout),
         None => {
@@ -1140,6 +1167,32 @@ fn open(
     }
     .with_context(|| format!("loading {}", short_path(path)))?;
     Ok((named, program))
+}
+
+/// A file's name without its folder, for the loading line.
+///
+/// # Arguments
+///
+/// * `file` - The path.
+fn file_name(file: &std::path::Path) -> String {
+    file.file_name()
+        .map_or_else(|| file.to_string_lossy(), |n| n.to_string_lossy())
+        .into_owned()
+}
+
+/// The first bytes of a file, for the loading line to stream; none when it
+/// cannot be read.
+///
+/// # Arguments
+///
+/// * `file` - The binary.
+fn head_bytes(file: &std::path::Path) -> Vec<u8> {
+    use std::io::Read as _;
+    let mut head = Vec::with_capacity(256);
+    if let Ok(f) = std::fs::File::open(file) {
+        let _ = f.take(256).read_to_end(&mut head);
+    }
+    head
 }
 
 /// A binary with the packs that fit it, as every query reads it.
@@ -1193,6 +1246,7 @@ impl Session {
         if let Some(why) = self.program.refuses(feature) {
             bail!("{why}");
         }
+        crate::term::busy(&format!("analyzing {}", file_name(&self.program.path)), &[]);
         Ok(Analysis::compute_with(
             &self.program,
             Arc::clone(&self.packs),
@@ -1391,6 +1445,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
                     command_usage(USAGE, topic).with_context(|| unknown_word(topic))?
                 );
             }
+            None if crate::term::styled_out() => print!("{}", crate::term::paint_usage(USAGE)),
             None => println!("{USAGE}"),
         }
         return Ok(());
@@ -1493,7 +1548,11 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
                 Some("--check") => true,
                 Some(other) => bail!("update takes `--check` or nothing, not {}", quoted(other)),
             };
-            print!("{}", crate::update::update(check_only)?);
+            print!(
+                "{}{}",
+                crate::term::mark(true),
+                crate::update::update(check_only)?
+            );
         }
         Command::FetchPdb => {
             let path = args.get(1).with_context(|| needs_a_binary(word))?;

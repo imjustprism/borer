@@ -40,6 +40,7 @@ mod session;
 mod setup;
 mod strwalk;
 mod symsrv;
+mod term;
 mod update;
 
 use borer_engine::analysis::{
@@ -5628,6 +5629,12 @@ fn main() -> anyhow::Result<()> {
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
+        // An MCP client starts borer with pipes; a person typing `borer`
+        // at a terminal gets a welcome instead of a server waiting in silence.
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            print!("{}", term::welcome());
+            return Ok(());
+        }
         return relay::run();
     }
     end_quietly_when_stdout_closes();
@@ -5636,7 +5643,9 @@ fn main() -> anyhow::Result<()> {
     let check = (args.first().map(String::as_str) != Some("update"))
         .then(update::start_check)
         .flatten();
-    cli::cli(&args)?;
+    let result = cli::cli(&args);
+    term::flush();
+    result?;
     if let Some(line) = check.and_then(update::notice) {
         eprintln!("{line}");
     }
