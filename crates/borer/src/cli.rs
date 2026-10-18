@@ -17,7 +17,7 @@ use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
 use borer_engine::table::Window;
 use borer_engine::text::{one_line, quoted, short_path};
-use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, script, search};
+use borer_engine::{disasm, entropy, hexdump as hexfmt, libsig, memory, num, script, search};
 
 use crate::params::parse_field_offset;
 use crate::params::{Detail, Filter, SearchKind, StringEncoding};
@@ -1688,7 +1688,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .program
                 .section_at(va)
                 .map_or_else(String::new, |sec| format!(" {}", sec.name));
-            println!("# {va:#x}..{:#x}{sec}", va + code.len() as u64);
+            println!("# {va:#x}..{:#x}{sec}", va + num::from_usize(code.len()));
             print!("{}", hexfmt::hexdump(code, va));
         }
         Query::Entropy => {
@@ -2272,7 +2272,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             if values.len() < count {
                 let next = values
                     .last()
-                    .map_or(start, |v| v.at.wrapping_add(v.size as u64));
+                    .map_or(start, |v| v.at.wrapping_add(num::from_usize(v.size)));
                 println!(
                     "# {} of {count} {kind_text}: nothing readable at {place}{next:#x}",
                     values.len()

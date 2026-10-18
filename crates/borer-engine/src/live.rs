@@ -555,7 +555,7 @@ pub fn object(
         .map(|(off, f)| off + u64::from(f.widths.iter().max().copied().unwrap_or(64) / 8))
         .max()
         .unwrap_or(0)
-        .max(word as u64);
+        .max(from_usize(word));
     let size = usize::try_from(size).unwrap_or(READ_MAX).min(READ_MAX);
     let bytes = mem
         .read(va, size)
@@ -828,12 +828,12 @@ pub fn find_words(mem: &dyn Memory, targets: &[u64], word: usize, limit: usize) 
                 at = (at | (PAGE - 1)).saturating_add(1);
                 continue;
             };
-            scan.bytes += bytes.len() as u64;
+            scan.bytes += from_usize(bytes.len());
             let mut off = 0usize;
             while off + word <= bytes.len() {
                 let v = le_word(&bytes[off..off + word]) & mask;
                 if targets.contains(&v) {
-                    scan.hits.push(at + off as u64);
+                    scan.hits.push(at + from_usize(off));
                     if scan.hits.len() >= limit {
                         scan.truncated = true;
                         break 'regions;
@@ -841,7 +841,7 @@ pub fn find_words(mem: &dyn Memory, targets: &[u64], word: usize, limit: usize) 
                 }
                 off += word;
             }
-            at = at.saturating_add(bytes.len() as u64);
+            at = at.saturating_add(from_usize(bytes.len()));
         }
     }
     scan

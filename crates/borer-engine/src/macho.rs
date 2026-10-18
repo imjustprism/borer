@@ -24,7 +24,7 @@ use goblin::mach::load_command::CommandVariant;
 use goblin::mach::{Mach, MachO};
 
 use crate::headers::Headers;
-use crate::num::{u16_le, u32_le, u64_le};
+use crate::num::{from_usize, u16_le, u32_le, u64_le};
 use crate::program::{Arch, FileOff, Fit, Section, Symbol, SymbolKind, Va, fit_sections};
 
 /// `CPU_TYPE_X86`.
@@ -275,7 +275,7 @@ fn raw_sections(file: &[u8], m: &MachO<'_>, base: usize) -> Vec<RawSection> {
                 name: format!("{segment},{sect}"),
                 addr,
                 size,
-                offset: offset.saturating_add(base as u64),
+                offset: offset.saturating_add(from_usize(base)),
                 flags,
                 reserved1,
                 prot,
@@ -499,7 +499,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
             executable: s.prot & PROT.2 != 0 && s.flags & INSTRUCTIONS != 0,
         });
     }
-    let fit = fit_sections(&mut sections, crate::num::from_usize(file.len()));
+    let fit = fit_sections(&mut sections, from_usize(file.len()));
 
     let mut symbols: Vec<Symbol> = Vec::new();
     let mut seen: BTreeSet<(u64, String)> = BTreeSet::new();
@@ -558,7 +558,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
                     else {
                         continue;
                     };
-                    let slot = s.addr.wrapping_add(crate::num::from_usize(i) * word);
+                    let slot = s.addr.wrapping_add(from_usize(i) * word);
                     if !name.is_empty() && seen.insert((slot, plain(name).to_owned())) {
                         symbols.push(Symbol {
                             name: plain(name).to_owned(),

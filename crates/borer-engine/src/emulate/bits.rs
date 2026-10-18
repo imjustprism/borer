@@ -9,7 +9,7 @@
 
 use super::{Emulator, Stop, lo64, mask, op_bits, operand_bytes, remainder, sign_extend, sized_ax};
 use crate::isa::x86::{Instruction, Mnemonic, OpKind, Register};
-use crate::num::lo32;
+use crate::num::{lo32, saturating_usize};
 
 impl Emulator<'_> {
     /// `bt`, `bts`, `btr` and `btc`: copies one bit of operand 0 into the
@@ -45,7 +45,7 @@ impl Emulator<'_> {
         } else {
             (None, lo32(offset % u64::from(bits)))
         };
-        let bytes = (bits / 8) as usize;
+        let bytes = saturating_usize(u64::from(bits / 8));
         let v = match at {
             Some(a) => self.load(a, bytes)?,
             None => self.operand(i, 0)?,

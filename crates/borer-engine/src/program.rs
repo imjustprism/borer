@@ -14,7 +14,7 @@ use anyhow::{Context, anyhow};
 use crate::entropy::shannon;
 use crate::headers::Headers;
 use crate::isa::Isa;
-use crate::num::{u16_le, u32_le};
+use crate::num::{from_usize, saturating_usize, u16_le, u32_le};
 
 /// Container format of the loaded file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -751,7 +751,7 @@ fn raw_sections(bytes: &[u8]) -> Option<Vec<RawSection>> {
     let count = usize::from(u16_le(bytes, pe + 6)?);
     let table = pe + 24 + usize::from(u16_le(bytes, pe + 20)?);
     let rows = count.min(bytes.len().saturating_sub(table) / SECTION_ROW);
-    let file_len = crate::num::from_usize(bytes.len());
+    let file_len = from_usize(bytes.len());
     (0..rows)
         .map(|i| {
             let row = table + i * SECTION_ROW;
@@ -865,7 +865,7 @@ fn implausible_imports(bytes: &[u8]) -> Option<u64> {
     let word = if plus { 8 } else { 4 };
     let sections = raw_sections(bytes)?;
     let mut at = file_offset(&sections, u64::from(u32_le(bytes, entry)?))?;
-    let limit = crate::num::from_usize(bytes.len() / word).min(IMPORTS_MAX);
+    let limit = from_usize(bytes.len() / word).min(IMPORTS_MAX);
     let mut total = 0u64;
     while let Some(descriptor) = bytes.get(at..at + DESCRIPTOR) {
         let field = |k: usize| u32_le(descriptor, k).unwrap_or(0);
@@ -878,7 +878,7 @@ fn implausible_imports(bytes: &[u8]) -> Option<u64> {
             && let Some(words) = bytes.get(off..)
         {
             let room = usize::try_from(limit + 1 - total).unwrap_or(usize::MAX);
-            total += crate::num::from_usize(
+            total += from_usize(
                 words
                     .chunks_exact(word)
                     .take_while(|w| w.iter().any(|b| *b != 0))
@@ -961,7 +961,7 @@ fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
     } else {
         (4, 1 << 31)
     };
-    let limit = crate::num::from_usize(bytes.len() / 4).min(IMPORTS_MAX);
+    let limit = from_usize(bytes.len() / 4).min(IMPORTS_MAX);
     while let Some(descriptor) = bytes.get(at..at + DESCRIPTOR) {
         let field = |k: usize| u32_le(descriptor, k).unwrap_or(0);
         let (attrs, name, iat, names) = (field(0), field(4), field(12), field(16));
@@ -982,7 +982,7 @@ fn delay_imports(bytes: &[u8], image_base: u64, is_64: bool) -> Vec<Symbol> {
         let table = rva_of(u64::from(names)).and_then(|r| file_offset(&sections, r));
         if let (Some(iat), Some(table)) = (rva_of(u64::from(iat)), table) {
             for i in 0u64.. {
-                if crate::num::from_usize(out.len()) >= limit {
+                if from_usize(out.len()) >= limit {
                     return out;
                 }
                 let Some(thunk) = usize::try_from(i * word)
@@ -1440,7 +1440,7 @@ fn read_program_bytes(
         Take::Rest => rest.len(),
         Take::Program => match crate::carve::at(&outer, off) {
             Some(child) if child.kind.is_program() => match child.size {
-                crate::carve::Size::Stated(n) => crate::num::saturating_usize(n),
+                crate::carve::Size::Stated(n) => saturating_usize(n),
                 crate::carve::Size::Run(_) | crate::carve::Size::Unknown => rest.len(),
             },
             Some(child) => {
@@ -1463,7 +1463,7 @@ fn read_program_bytes(
         Some(Parent {
             path: file,
             off,
-            len: crate::num::from_usize(len),
+            len: from_usize(len),
         }),
     ))
 }
@@ -1760,7 +1760,7 @@ impl Program {
         let mut chained_chunks: Vec<(u64, u64)> = Vec::new();
         let mut headers = Headers::default();
         let mut flat_fallback = false;
-        let file_len = crate::num::from_usize(bytes.len());
+        let file_len = from_usize(bytes.len());
         let mut fit = Fit::default();
         let mut pdb_record: Option<crate::pdb::Record> = None;
         let mut relocs = crate::reloc::Relocs::default();
@@ -1857,7 +1857,7 @@ impl Program {
                     };
                     let dll = imp.dll.trim_end_matches('\0');
                     let rva = if imp.offset != 0 { imp.offset } else { imp.rva };
-                    let addr = pe.image_base.wrapping_add(rva as u64);
+                    let addr = pe.image_base.wrapping_add(from_usize(rva));
                     symbols.push(Symbol {
                         name: format!("{dll}!{name}"),
                         addr,
@@ -1870,7 +1870,7 @@ impl Program {
                         .map_or_else(|| format!("sub_{:x}", exp.rva), |n| n.to_owned());
                     symbols.push(Symbol {
                         name,
-                        addr: pe.image_base.wrapping_add(exp.rva as u64),
+                        addr: pe.image_base.wrapping_add(from_usize(exp.rva)),
                         kind: if exp.reexport.is_some() {
                             SymbolKind::Forwarder
                         } else {
@@ -1933,7 +1933,7 @@ impl Program {
                                 handlers.push(crate::headers::ExceptionHandler {
                                     function,
                                     handler: image_base + u64::from(handler),
-                                    data: va_of_off(off as u64),
+                                    data: va_of_off(from_usize(off)),
                                 });
                             }
                         }
@@ -2288,7 +2288,7 @@ impl Program {
         let Some(word) = self
             .arch
             .bitness()
-            .map(|b| crate::num::saturating_usize(u64::from(b / 8)))
+            .map(|b| saturating_usize(u64::from(b / 8)))
         else {
             return;
         };
@@ -2372,16 +2372,19 @@ impl Program {
         let (Some(rva), Some(size)) = (u32_le(bytes, entry), u32_le(bytes, entry + 4)) else {
             return out;
         };
-        let Some(table) = self.read_va(self.image_base + u64::from(rva), size as usize) else {
+        let Some(table) = self.read_va(
+            self.image_base + u64::from(rva),
+            saturating_usize(u64::from(size)),
+        ) else {
             return out;
         };
         let wanted = if self.is_64 { DIR64 } else { HIGHLOW };
         let mut at = 0usize;
         while at + 8 <= table.len() && out.len() < WORDS_MAX {
-            let page = u32::from_le_bytes([table[at], table[at + 1], table[at + 2], table[at + 3]]);
-            let block =
-                u32::from_le_bytes([table[at + 4], table[at + 5], table[at + 6], table[at + 7]])
-                    as usize;
+            let (Some(page), Some(block)) = (u32_le(table, at), u32_le(table, at + 4)) else {
+                break;
+            };
+            let block = saturating_usize(u64::from(block));
             if block < 8 {
                 break;
             }
@@ -2515,14 +2518,14 @@ impl Program {
             .map(|s| (s.file_off.0, s.file_off.0.saturating_add(s.file_size)))
             .collect();
         covered.sort_unstable();
-        let len = crate::num::from_usize(self.bytes.len());
+        let len = from_usize(self.bytes.len());
         let mut runs = Vec::new();
         let mut next = 0u64;
         for (start, end) in covered.into_iter().chain([(len, len)]) {
             if start > next
                 && let Some(bytes) = self
                     .bytes
-                    .get(crate::num::saturating_usize(next)..crate::num::saturating_usize(start))
+                    .get(saturating_usize(next)..saturating_usize(start))
             {
                 runs.push((next, bytes));
             }
@@ -2615,8 +2618,8 @@ impl Program {
             return self.header_slice(va, max.min(room));
         };
         let off = s.file_off.0.checked_add(va - s.va.0)?;
-        let limit = (s.file_off.0 + s.file_size).min(self.bytes.len() as u64);
-        let end = (off + max as u64).min(limit);
+        let limit = (s.file_off.0 + s.file_size).min(from_usize(self.bytes.len()));
+        let end = (off + from_usize(max)).min(limit);
         self.image_bytes(off, end).filter(|b| !b.is_empty())
     }
 
@@ -2639,7 +2642,7 @@ impl Program {
             return self.header_slice(va, len);
         };
         let off = s.file_off.0.checked_add(va - s.va.0)?;
-        let end = off.checked_add(len as u64)?;
+        let end = off.checked_add(from_usize(len))?;
         if end > s.file_off.0 + s.file_size {
             return None;
         }
@@ -2678,7 +2681,7 @@ impl Program {
             .checked_sub(self.image_base)?
             .min(first.file_off.0);
         let off = va - self.image_base;
-        let end = off.checked_add(len as u64)?;
+        let end = off.checked_add(from_usize(len))?;
         if end > cap {
             return None;
         }
@@ -3003,14 +3006,7 @@ impl Program {
         const PAGE: usize = 0x1000;
         let mut bytes = vec![0xcc; PAGE];
         bytes[..code.len().min(PAGE)].copy_from_slice(&code[..code.len().min(PAGE)]);
-        let text = Section::mapped(
-            ".text",
-            0x1000,
-            0,
-            crate::num::from_usize(PAGE),
-            false,
-            true,
-        );
+        let text = Section::mapped(".text", 0x1000, 0, from_usize(PAGE), false, true);
         Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![text])
     }
 }

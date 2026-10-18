@@ -28,6 +28,7 @@ use crate::isa::x86::{FlowControl, OpKind, Register};
 use crate::analysis::{FuncletRole, read_u32};
 use crate::fxmap::FxHashMap;
 use crate::headers::ExceptionHandler;
+use crate::num::from_usize;
 use crate::program::{Program, SymbolKind};
 
 /// Most `__try` scopes read from one table.
@@ -323,7 +324,7 @@ fn compact(program: &Program, at: u64) -> Option<(u32, u64)> {
     for (i, b) in bytes.iter().enumerate() {
         v |= u32::from(*b) << (8 * i);
     }
-    Some((v >> shift, at.wrapping_add(len as u64)))
+    Some((v >> shift, at.wrapping_add(from_usize(len))))
 }
 
 /// Reads the funclets a `FuncInfo4` names.

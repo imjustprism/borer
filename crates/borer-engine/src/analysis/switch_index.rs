@@ -26,7 +26,7 @@ use crate::isa::x86::{
 use super::functions::tables::TABLE_ENTRIES_MAX;
 use super::is_imm;
 use crate::fxmap::FxHashMap;
-use crate::num::lo32;
+use crate::num::{lo32, saturating_usize};
 
 /// How many entries a range check allows a jump table, and where the
 /// check sits.
@@ -280,7 +280,10 @@ impl Trace {
 
     /// Whether `v` came into the window rather than being computed in it.
     fn incoming(&self, v: Val) -> bool {
-        matches!(self.bases.get(v.base as usize), Some(Base::Incoming(_)))
+        matches!(
+            self.bases.get(saturating_usize(u64::from(v.base))),
+            Some(Base::Incoming(_))
+        )
     }
 
     /// Applies one instruction; one the trace does not model leaves what it
@@ -484,7 +487,7 @@ pub(super) fn index_bound(
                 loose: c.masked,
             })
     };
-    let source = match trace.bases.get(v.base as usize) {
+    let source = match trace.bases.get(saturating_usize(u64::from(v.base))) {
         Some(Base::Picked(at)) if v.off == 0 => Some(*at),
         _ => None,
     };

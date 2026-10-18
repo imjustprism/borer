@@ -15,6 +15,7 @@
 //! Maps whose iteration order reaches an output still use `BTreeMap`, where
 //! the order is a property of the keys rather than of the insertion history.
 
+use crate::num::from_usize;
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// The odd multiplier rustc's hash uses; chosen for its bit spread.
@@ -86,7 +87,7 @@ impl Hasher for FxHasher {
 
     #[inline]
     fn write_usize(&mut self, v: usize) {
-        self.add(v as u64);
+        self.add(from_usize(v));
     }
 
     #[inline]

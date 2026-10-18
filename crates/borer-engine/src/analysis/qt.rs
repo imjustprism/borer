@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::isa::x86::{FlowControl, Mnemonic, OpKind, Register};
 
 use super::{Analysis, NameSource, RefKind, pointer_size, read_u32, read_word, unique_name};
-use crate::num::from_usize;
+use crate::num::{from_usize, saturating_usize};
 use crate::program::Program;
 
 /// Most headers one string table may hold.
@@ -135,7 +135,7 @@ pub(super) fn infer(program: &Program, analysis: &mut Analysis) {
         while va.saturating_add(16) <= end {
             match string_table(program, va, word) {
                 Some(names) => {
-                    let span = names.len() as u64 * entry_size(word);
+                    let span = from_usize(names.len()) * entry_size(word);
                     tables.push((va, names));
                     va += span;
                 }
@@ -270,19 +270,19 @@ fn string_table(program: &Program, va: u64, word: u64) -> Option<Vec<String>> {
         let Some((len, offset)) = header(program, at, word) else {
             break;
         };
-        let text = program.read_va(at + offset, len as usize + 1)?;
+        let text = program.read_va(at + offset, saturating_usize(u64::from(len)) + 1)?;
         if text.last() != Some(&0)
-            || text[..len as usize]
+            || text[..saturating_usize(u64::from(len))]
                 .iter()
                 .any(|b| *b == 0 || (*b < 0x20 && *b != b'\t'))
         {
             break;
         }
-        names.push(String::from_utf8_lossy(&text[..len as usize]).into_owned());
+        names.push(String::from_utf8_lossy(&text[..saturating_usize(u64::from(len))]).into_owned());
         at += size;
     }
     let first = names.first()?;
-    (is_identifier(first) && first_offset == names.len() as u64 * size).then_some(names)
+    (is_identifier(first) && first_offset == from_usize(names.len()) * size).then_some(names)
 }
 
 /// Reads one `QByteArrayData` header.
@@ -365,7 +365,7 @@ fn meta_data(
     {
         return None;
     }
-    let name = |idx: u32| names.get(idx as usize).cloned();
+    let name = |idx: u32| names.get(saturating_usize(u64::from(idx))).cloned();
     let mut out = Vec::new();
     for i in 0..u64::from(methods) {
         let row = methods_at + 5 * i;

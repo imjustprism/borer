@@ -22,6 +22,7 @@ use crate::analysis::utypes::{
     ENUM_VALUES_MAX, FIELDS_MAX, TypeExpr, UserField, UserStruct, UserType, build_enum,
     check_type_name, is_ident,
 };
+use crate::num::from_usize;
 use crate::program::Section;
 use std::collections::BTreeMap;
 
@@ -932,7 +933,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
         let mut unresolved_params: Vec<(usize, usize, Option<u64>)> = Vec::new();
         let unit_base = u64::try_from(at_start).unwrap_or(0);
         while !c.done(end) {
-            let here = c.at as u64;
+            let here = from_usize(c.at);
             let Some(code) = c.uleb() else { break };
             if code == 0 {
                 if depth.pop() == Some(true) {

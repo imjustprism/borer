@@ -26,6 +26,7 @@ use super::classes::{class_of, field_labels, fourcc};
 use super::render::Legend;
 use super::{Analysis, Overlay, dedup_sorted, name_of, single};
 use crate::fxmap::{FxHashMap, FxHashSet};
+use crate::num::from_usize;
 use crate::program::Program;
 use crate::table::Window;
 
@@ -196,7 +197,7 @@ fn code_referrers(
             if !wanted.contains(&code) {
                 continue;
             }
-            let va = section.va.0.saturating_add(i as u64);
+            let va = section.va.0.saturating_add(from_usize(i));
             if let Some(f) = analysis.function_at(va) {
                 out.entry(code).or_default().push(f.entry);
             }

@@ -1,6 +1,7 @@
 //! Printable string extraction (ASCII and UTF-16LE) as pure functions.
 
 use crate::analysis::Analysis;
+use crate::num::saturating_usize;
 use crate::program::Program;
 use crate::search::eq_mask;
 
@@ -258,7 +259,7 @@ pub fn find_ascii_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
             continue;
         }
         while m != 0 {
-            let z = k * 8 + crate::num::saturating_usize(u64::from(m.trailing_zeros() / 8));
+            let z = k * 8 + saturating_usize(u64::from(m.trailing_zeros() / 8));
             m &= m - 1;
             emit(&mut spans, ended.map_or(0, |e| e + 1), z, min_len);
             ended = Some(z);
@@ -425,7 +426,7 @@ pub fn find_wide_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
     for (k, w) in words.iter().enumerate() {
         let mut m = eq_mask(u64::from_le_bytes(*w), 0);
         while m != 0 {
-            let z = k * 8 + m.trailing_zeros() as usize / 8;
+            let z = k * 8 + saturating_usize(u64::from(m.trailing_zeros())) / 8;
             m &= m - 1;
             if let Some(lo) = z.checked_sub(1).filter(|lo| printable(bytes[*lo])) {
                 see(&mut spans, bytes, &mut run, lo, min_len);

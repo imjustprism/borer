@@ -1,5 +1,7 @@
 //! Classic 16-bytes-per-row hexdump rendering.
 
+use crate::num::from_usize;
+
 /// Renders `bytes` as a hexdump whose first byte sits at address `base`.
 ///
 /// Each row is `address  hex-bytes |ascii|`; the ASCII column shows
@@ -37,7 +39,7 @@ pub fn hexdump(bytes: &[u8], base: u64) -> String {
 pub fn hexdump_sparse(bytes: &[Option<u8>], base: u64) -> String {
     let mut out = String::with_capacity(bytes.len() / 16 * 80 + 80);
     for (row, chunk) in bytes.chunks(16).enumerate() {
-        let addr = base.wrapping_add((row * 16) as u64);
+        let addr = base.wrapping_add(from_usize(row * 16));
         let mut hexpart = String::with_capacity(49);
         for (i, b) in chunk.iter().enumerate() {
             if i == 8 {
@@ -98,7 +100,7 @@ pub fn file_hexdump(
     );
     Ok(format!(
         "# off {off:#x}..{:#x}, rows by file offset; {mapped}\n{}",
-        off + crate::num::from_usize(bytes.len()),
+        off + from_usize(bytes.len()),
         hexdump(bytes, off)
     ))
 }

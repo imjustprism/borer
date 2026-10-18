@@ -17,6 +17,7 @@ use super::naming::{in_data, parse_signature};
 use super::schema::{compact_fields, named_field_offset, schema_for_class};
 use super::vtables::slot_constants;
 use super::{Analysis, Overlay, data_referrers, dedup_sorted, resolve};
+use crate::num::from_usize;
 use crate::program::Program;
 use crate::strings::cstr_at;
 
@@ -343,7 +344,7 @@ pub fn verify(
             } else {
                 let expected = if a.kind == AnchorKind::Function
                     && a.expected >= program.image_base
-                    && a.expected - program.image_base < program.bytes.len() as u64
+                    && a.expected - program.image_base < from_usize(program.bytes.len())
                 {
                     a.expected - program.image_base
                 } else {

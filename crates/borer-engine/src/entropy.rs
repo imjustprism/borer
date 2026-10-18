@@ -16,7 +16,7 @@ use crate::program::Program;
 pub fn shannon(data: &[u8]) -> f64 {
     let mut counts = [0usize; 256];
     for &b in data {
-        counts[b as usize] += 1;
+        counts[usize::from(b)] += 1;
     }
     of_counts(&counts, data.len())
 }
@@ -219,7 +219,7 @@ fn encoded_regions(program: &Program, window: usize, threshold: f64, regions: &m
         let mut counts = [0usize; 256];
         let mut n = 0usize;
         decode(text, encoding, |b| {
-            counts[b as usize] += 1;
+            counts[usize::from(b)] += 1;
             n += 1;
         });
         let e = of_counts(&counts, n);

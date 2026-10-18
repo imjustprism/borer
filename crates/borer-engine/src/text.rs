@@ -92,7 +92,7 @@ fn escaped(text: &str, max: usize) -> String {
     for c in text.chars() {
         let escaped;
         let piece: &str = if needs_escape(c) {
-            escaped = format!("\\x{:02x}", c as u32);
+            escaped = format!("\\x{:02x}", u32::from(c));
             &escaped
         } else {
             escaped = c.to_string();
