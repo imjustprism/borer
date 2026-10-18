@@ -163,13 +163,17 @@ impl std::fmt::Display for StringEncoding {
 #[schemars(transform = names_only)]
 pub(crate) enum SymbolKind {
     /// Imported functions and data.
+    #[serde(alias = "imports")]
     Import,
     /// Exported functions and data.
+    #[serde(alias = "exports")]
     Export,
     /// Local symbols the file names.
+    #[serde(alias = "locals")]
     Local,
     /// Exports forwarded to another module (`NTDLL.RtlX`); the row names
     /// the target.
+    #[serde(alias = "forwards", alias = "forwarder", alias = "forwarders")]
     Forward,
     /// Named data at an address (an applied PDB's data records).
     Data,
@@ -1198,8 +1202,25 @@ fn admits(
 #[cfg(test)]
 mod tests {
     use super::{
-        Annotation, Filter, Page, count_param, misfit, must_be_in_a_section, must_fit_a_row,
+        Annotation, Filter, Page, SymbolKind, count_param, misfit, must_be_in_a_section,
+        must_fit_a_row,
     };
+
+    /// A symbol kind spelled in the plural, as an agent asks for a list,
+    /// reads as the kind.
+    ///
+    /// # Panics
+    ///
+    /// When `imports` or `exports` is refused or read as another kind.
+    #[test]
+    fn a_plural_symbol_kind_reads_as_the_kind() {
+        let kind = |word: &str| serde_json::from_value::<SymbolKind>(word.into()).ok();
+        assert_eq!(kind("imports"), Some(SymbolKind::Import));
+        assert_eq!(kind("exports"), Some(SymbolKind::Export));
+        assert_eq!(kind("locals"), Some(SymbolKind::Local));
+        assert_eq!(kind("forwarders"), Some(SymbolKind::Forward));
+        assert_eq!(kind("export"), Some(SymbolKind::Export));
+    }
 
     /// A refused argument is named from the tool's schema: a string where a
     /// count goes, a negative count, a count past `u32`, null for a required
