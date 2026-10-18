@@ -444,7 +444,11 @@ pub(super) fn plausible_entry(program: &Program, bitness: u32, va: u64) -> bool 
 ///
 /// MSVC pads with `int3` only between functions; inside one, an aligned
 /// loop head follows `nop`s. On x64 the exception table has the last word:
-/// a target inside a function it declares is the function's own.
+/// a target inside a function it declares is the function's own, and
+/// there one `int3` before a 16-byte aligned target is padding too, as
+/// when the function before ends a byte short of the boundary (sqlite's
+/// leaf `btreeParseCellAdjustSizeForOverflow`, reached by a `ja` from two
+/// functions).
 ///
 /// # Arguments
 ///
@@ -452,10 +456,16 @@ pub(super) fn plausible_entry(program: &Program, bitness: u32, va: u64) -> bool 
 /// * `bitness` - Decoder bitness.
 /// * `va` - The jump target.
 pub(super) fn after_padding(program: &Program, bitness: u32, va: u64) -> bool {
-    if program.format != crate::program::BinaryFormat::Pe
-        || va < 2
-        || program.read_va(va - 2, 2) != Some(&[0xcc, 0xcc][..])
-    {
+    /// The alignment a compiler gives a function on x64.
+    const FUNCTION_ALIGN: u64 = 16;
+    if program.format != crate::program::BinaryFormat::Pe || va < 2 {
+        return false;
+    }
+    let two = program.read_va(va - 2, 2) == Some(&[0xcc, 0xcc][..]);
+    let one = bitness == 64
+        && va.is_multiple_of(FUNCTION_ALIGN)
+        && program.read_va(va - 1, 1) == Some(&[0xcc][..]);
+    if !(two || one) {
         return false;
     }
     if bitness == 64 {

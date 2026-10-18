@@ -809,7 +809,7 @@ fn le_words(words: &[u32]) -> Vec<u8> {
 
 /// Where [`crate::protection::pe`] puts the exception directory's row: the
 /// fourth data directory of the PE32+ optional header.
-const EXCEPTION_DIR: usize = crate::protection::PE_AT + 24 + 112 + 3 * 8;
+pub(crate) const EXCEPTION_DIR: usize = crate::protection::PE_AT + 24 + 112 + 3 * 8;
 
 /// Builds the bytes of an arm64 PE: `code` in `.text` at 0x1000, entered
 /// there; the `.pdata` entries at 0x2000, which the exception directory

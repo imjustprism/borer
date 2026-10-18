@@ -3,7 +3,8 @@
 //!
 //! Every fixture is a hand-assembled raw x64 image with nothing declared -
 //! no symbols, no unwind entries - so each test states exactly which bytes
-//! make a function and which do not.
+//! make a function and which do not; the one that needs an exception table
+//! to say where functions are builds a PE with one entry.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -13,7 +14,8 @@
 use crate::raw;
 
 use borer_engine::analysis::Analysis;
-use borer_engine::program::Arch;
+use borer_engine::program::{Arch, Program};
+use std::path::PathBuf;
 
 /// Where [`raw::image`] maps `.text`; the entry point is its first byte.
 const TEXT: u64 = 0x401000;
@@ -86,6 +88,47 @@ fn a_callback_taken_by_lea_with_a_byte_add_is_found() {
         0xc3, // ASM: ret
     ]);
     assert_eq!(entries(&code, &[]), vec![TEXT, TEXT + 0x10]);
+}
+
+/// A leaf function behind one `int3`, reached only by a conditional jump
+/// from a function the exception table declares, is a function.
+///
+/// The function before ends a byte short of the 16-byte boundary, so one
+/// `int3` pads it; the `ja` to the leaf is a tail call, and reading the
+/// leaf as the caller's own block left it out of the function list.
+#[test]
+fn a_leaf_behind_one_int3_reached_by_a_conditional_jump_is_a_function() {
+    use crate::protection::{IMAGE_BASE, data, pe, sec};
+    let code = vec![
+        0x83, 0xf9, 0x05, // ASM: cmp ecx, 5
+        0x77, 0x0b, // ASM: ja short 0x1010
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x01, 0xc8, // ASM: add eax, ecx
+        0x31, 0xd2, // ASM: xor edx, edx
+        0xc3, // ASM: ret
+        0xcc, // ASM: int3
+        0x8d, 0x41, 0x01, // ASM: lea eax, [rcx + 1]
+        0xc3, // ASM: ret
+    ];
+    let pdata: Vec<u8> = [0x1000u32, 0x100f, 0x3000]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let mut bytes = pe(
+        &[
+            sec(".text", 0x1000, code),
+            data(".pdata", 0x2000, pdata),
+            data(".xdata", 0x3000, vec![1, 0, 0, 0]),
+        ],
+        0x1000,
+    );
+    let dir = crate::a64::EXCEPTION_DIR;
+    bytes[dir..dir + 4].copy_from_slice(&0x2000u32.to_le_bytes());
+    bytes[dir + 4..dir + 8].copy_from_slice(&12u32.to_le_bytes());
+    let p = Program::from_bytes(PathBuf::from("tail.exe"), bytes).expect("a PE loads");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    assert_eq!(entries, vec![IMAGE_BASE + 0x1000, IMAGE_BASE + 0x1010]);
 }
 
 /// A function behind a run of `nop` padding is found.
