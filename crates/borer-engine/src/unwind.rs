@@ -25,7 +25,7 @@
 
 use crate::isa::x86::{FlowControl, OpKind, Register};
 
-use crate::analysis::FuncletRole;
+use crate::analysis::{FuncletRole, read_u32};
 use crate::fxmap::FxHashMap;
 use crate::headers::ExceptionHandler;
 use crate::program::{Program, SymbolKind};
@@ -583,17 +583,6 @@ fn seh(program: &Program, parent: u64, data: u64) -> Option<Vec<Funclet>> {
         }
     }
     Some(out)
-}
-
-/// Reads a little-endian `u32`.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `at` - The value's address.
-fn read_u32(program: &Program, at: u64) -> Option<u32> {
-    let bytes = program.read_va(at, 4)?;
-    Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
 
 #[cfg(test)]
