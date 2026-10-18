@@ -1282,6 +1282,39 @@ fn the_capability_map_groups_imports() {
     );
 }
 
+/// What every program that checks its own elevation or paints a window
+/// imports names no injection and no screen capture.
+///
+/// Notepad imports `OpenProcessToken` (reading its own token) and `GetDC`
+/// (painting); the map listed them as process injection and screen
+/// capture, since `openprocess` is a prefix of the token call.
+///
+/// # Panics
+///
+/// When either import lands in either capability, or `OpenProcess` stops
+/// counting as injection.
+#[test]
+fn the_capability_map_does_not_read_token_or_paint_calls_as_attacks() {
+    let mut p = fixture();
+    let imports = |names: &[&str]| -> Vec<Symbol> {
+        names
+            .iter()
+            .map(|n| Symbol {
+                name: format!("KERNEL32.dll!{n}"),
+                addr: 0,
+                kind: SymbolKind::Import,
+            })
+            .collect()
+    };
+    p.symbols = imports(&["OpenProcessToken", "GetDC"]);
+    let text = borer_engine::analysis::render::capability_map_tsv(&p, None);
+    assert!(!text.contains("process injection"), "{text}");
+    assert!(!text.contains("screen capture"), "{text}");
+    p.symbols = imports(&["OpenProcess"]);
+    let text = borer_engine::analysis::render::capability_map_tsv(&p, None);
+    assert!(text.contains("process injection"), "{text}");
+}
+
 /// The emulator runs a self-contained decoder and reads its plaintext.
 ///
 /// A crypter puts a decoder in front of its strings: the routine carries its

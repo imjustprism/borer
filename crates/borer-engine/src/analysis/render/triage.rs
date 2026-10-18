@@ -91,7 +91,7 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "writeprocessmemory",
             "virtualallocex",
             "createremotethread",
-            "openprocess",
+            "=openprocess",
             "ntunmapviewofsection",
             "queueuserapc",
             "setthreadcontext",
@@ -198,7 +198,6 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
         "screen capture",
         &[
             "bitblt",
-            "getdc",
             "createcompatiblebitmap",
             "getdibits",
             "printwindow",
