@@ -20,7 +20,7 @@ ignore = [
 
 [licenses]
 version = 2
-# Permissive licenses only: borer is MIT and ships as one static binary.
+# Permissive licenses only for dependencies: borer ships as one static binary.
 allow = [
   "MIT",
   "Apache-2.0",
@@ -42,7 +42,12 @@ allow = [
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"
-exceptions = []
+# borer's own crates carry its copyleft license; dependencies stay permissive.
+exceptions = [
+  { allow = ["AGPL-3.0-only"], crate = "borer" },
+  { allow = ["AGPL-3.0-only"], crate = "borer-engine" },
+  { allow = ["AGPL-3.0-only"], crate = "borer-live" },
+]
 
 [licenses.private]
 ignore = true

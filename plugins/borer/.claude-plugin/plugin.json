@@ -5,6 +5,6 @@
   "author": { "name": "imjustprism" },
   "homepage": "https://github.com/imjustprism/borer",
   "repository": "https://github.com/imjustprism/borer",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "keywords": ["reverse-engineering", "decompiler", "disassembler", "mcp", "binary-analysis"]
 }

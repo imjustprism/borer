@@ -10,7 +10,7 @@
 <p align="center">
   <a href="https://github.com/imjustprism/borer/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/imjustprism/borer?style=flat-square&labelColor=0b0c0e&color=26272b&label=release"></a>
   <a href="https://github.com/imjustprism/borer/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/imjustprism/borer/ci.yml?branch=main&style=flat-square&labelColor=0b0c0e&color=26272b&label=ci"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-26272b?style=flat-square&labelColor=0b0c0e&color=26272b"></a>
+  <a href="LICENSE"><img alt="AGPL-3.0 license" src="https://img.shields.io/badge/license-AGPL--3.0-26272b?style=flat-square&labelColor=0b0c0e&color=26272b"></a>
   <img alt="Rust 2024" src="https://img.shields.io/badge/rust-2024-26272b?style=flat-square&labelColor=0b0c0e&color=26272b&logo=rust&logoColor=d4d4d8">
   <img alt="MCP server" src="https://img.shields.io/badge/MCP-server-26272b?style=flat-square&labelColor=0b0c0e&color=26272b">
   <img alt="PE, ELF, Mach-O" src="https://img.shields.io/badge/PE%20%C2%B7%20ELF%20%C2%B7%20Mach--O-x86%20%C2%B7%20x64%20%C2%B7%20arm64-26272b?style=flat-square&labelColor=0b0c0e&color=26272b">
@@ -209,7 +209,19 @@ tests, rustdoc, `cargo deny`, typos, ruff and a smoke test of the real server.
 The rules for people and coding agents alike are in
 [`borer.rules`](borer.rules). Commit titles look like `type: summary`.
 
+By opening a pull request you agree that your contribution is licensed under
+the project's license and that the maintainer may relicense it, including under
+commercial terms. The details are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-[MIT](LICENSE). Third-party notices (pefile ordinal tables, the TLSH reference
+borer is free software under the [GNU Affero General Public License
+v3.0](LICENSE) (AGPL-3.0-only). Use it for anything, change it and share it;
+if you distribute borer or a modified version, or run one as a network
+service, you must publish its complete source under the same license.
+Versions 0.1.0 and 0.1.1 were released under MIT. A commercial license, for
+uses the AGPL does not fit, is available: open an issue or reach out on
+GitHub.
+
+Third-party notices (pefile ordinal tables, the TLSH reference
 implementation) are in [NOTICE](NOTICE).
