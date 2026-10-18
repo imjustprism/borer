@@ -39,17 +39,26 @@ no Ghidra, IDA or Binary Ninja underneath.
 
 ## Why borer
 
-| | borer | Ghidra 12.1.4 (headless MCP) |
+| | borer | Ghidra 12.1.3 (headless) |
 | --- | --- | --- |
-| Ready to answer, sqlite3 DLL (1,900 functions) | 0.1 s | 115 s cold, 5 s warm |
-| One decompile, median | 2-7 ms | 220-260 ms |
+| Ready to answer, sqlite3.dll, cold | 0.15 s | 138 s |
+| Ready again, analysis kept | 0.13 s | 3.1 s |
+| Decompile every function of sqlite3.dll | 2.7 s | 48 s |
+| Peak memory, sqlite3.dll | 73 MB | 1.5 GB |
+| Install | 14.6 MB, one file | 1.2 GB with its JDK |
 | Recompiled output gives the source's answer | 359 / 420 | 308 / 420 |
 | Recompiled output compiles but gives a wrong answer | 4 | 50 |
 
-Measured on 60 known C functions built seven ways (x64 ELF and PE at
-O0/Od/O2/Os, arm64 at O0/O2), plus findstr, notepad, msvcrt and sqlite. Each
-decompiled function was compiled again and run against its source. Ghidra
-still prints fewer gotos and fewer width casts on large optimized functions.
+Speed is measured on notepad, msvcrt, sqlite3, ntdll and kernelbase, each
+tool as it ships, one after the other
+([numbers](scripts/run/vs_ghidra.tsv), [harness](scripts/run/vs_ghidra.py)).
+One function at a time the two decompilers take about as long, a few
+milliseconds each; borer's time includes checking every block.
+
+Quality is measured on 60 known C functions built seven ways (x64 ELF and PE
+at O0/Od/O2/Os, arm64 at O0/O2). Each decompiled function was compiled again
+and run against its source. Ghidra still prints fewer gotos and fewer width
+casts on large optimized functions.
 
 What makes it different:
 
