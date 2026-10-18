@@ -1947,7 +1947,7 @@ fn sign_absolute(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
             _ => None,
         }
     }
-    let call = |x: &Expr| Expr::Call("abs".to_owned(), vec![x.clone()]);
+    let call = |x: &Expr| Expr::Call("llabs".to_owned(), vec![x.clone()]);
     match op {
         Op::Sub => {
             let x = splat(r)?;
@@ -3593,7 +3593,7 @@ fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
         (true, C::g | C::ge | C::ns) | (false, C::l | C::le | C::s) => false,
         _ => return None,
     };
-    let call = Expr::Call("abs".to_owned(), vec![src.clone()]);
+    let call = Expr::Call("llabs".to_owned(), vec![src.clone()]);
     if neg_on_true == neg_when_abs {
         Some(call)
     } else {
@@ -5396,7 +5396,7 @@ mod fold_tests {
             Expr::Ternary(c, a, b) => v(if truth(c, x, y)? { a } else { b })?,
             Expr::Call(f, args) => {
                 let a = v(args.first()?)?;
-                if f == "abs" {
+                if f == "abs" || f == "llabs" {
                     return super::abs_bits(a, w);
                 }
                 let b = v(args.get(1)?)?;
@@ -6581,9 +6581,11 @@ mod fold_tests {
                     );
                     let after = ternary(test.clone(), a, z);
                     let is_abs = match &after {
-                        Expr::Call(name, args) => name == "abs" && args.len() == 1 && args[0] == X,
+                        Expr::Call(name, args) => {
+                            name == "llabs" && args.len() == 1 && args[0] == X
+                        }
                         Expr::Un(UnOp::Neg, inner) => {
-                            matches!(inner.as_ref(), Expr::Call(name, args) if name == "abs" && args.len() == 1 && args[0] == X)
+                            matches!(inner.as_ref(), Expr::Call(name, args) if name == "llabs" && args.len() == 1 && args[0] == X)
                         }
                         _ => false,
                     };
@@ -6612,7 +6614,7 @@ mod fold_tests {
             "a third value at {w} became {other:?}"
         );
         let sign = b(Op::Sar, &X, &k(63));
-        let is_sign_abs = |e: &Expr| matches!(e, Expr::Call(name, args) if name == "abs" && args.len() == 1 && args[0] == X);
+        let is_sign_abs = |e: &Expr| matches!(e, Expr::Call(name, args) if name == "llabs" && args.len() == 1 && args[0] == X);
         for (before, after) in [
             (
                 b(Op::Sub, &b(Op::Xor, &X, &sign), &sign),
@@ -6638,7 +6640,7 @@ mod fold_tests {
         );
         let foreign = fold(Op::Sub, b(Op::Xor, &Y, &sign), sign, w);
         assert!(
-            !matches!(foreign, Expr::Call(ref name, _) if name == "abs"),
+            !matches!(foreign, Expr::Call(ref name, _) if name == "llabs"),
             "a different value at {w} became {foreign:?}"
         );
         let width = u64::from(w);

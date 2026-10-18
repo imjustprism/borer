@@ -891,7 +891,7 @@ impl Expr {
                 let extended = |e: &Expr, (s, sp): (String, u8)| {
                     if wide
                         && !sum
-                        && matches!(op, Op::Add | Op::Sub)
+                        && matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Shl)
                         && matches!(e, Expr::Sext(.., b) if *b < 64)
                     {
                         let s = if sp < UNARY { format!("({s})") } else { s };
@@ -963,7 +963,7 @@ impl Expr {
                             }
                         };
                         let rs = match **r {
-                            Expr::Const(c) => c.to_string(),
+                            Expr::Const(c) => c.cast_signed().to_string(),
                             _ => rs,
                         };
                         (

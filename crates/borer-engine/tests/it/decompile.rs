@@ -860,9 +860,11 @@ fn the_lifter_agrees_with_the_emulator_after_an_xadd() {
     }
 }
 
-/// `cqo` then `xor`/`sub`, and `cqo` then `add`/`xor`, are `abs`. A
-/// 32-bit `cdq` of the same shape stays arithmetic: that sign splat is
-/// 31 bits, not the sign of a 64-bit value.
+/// `cqo` then `xor`/`sub`, and `cqo` then `add`/`xor`, are `llabs`.
+///
+/// C's `abs` takes an `int` and would cut the value to 32 bits. A 32-bit
+/// `cdq` of the same shape stays arithmetic: that sign splat is 31 bits,
+/// not the sign of a 64-bit value.
 #[test]
 fn a_sign_splat_subtracted_back_is_abs() {
     use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
@@ -877,7 +879,7 @@ fn a_sign_splat_subtracted_back_is_abs() {
     for code in cases {
         let p = program64(code);
         let text = decompiled(&p, 0x1_4000_1000);
-        assert!(text.contains("return abs(a1);"), "{text}");
+        assert!(text.contains("return llabs(a1);"), "{text}");
         let a = Analysis::compute(&p);
         for seed in 1..=8 {
             let v = verify(&p, &a, &[0x1_4000_1000], seed);
@@ -1107,13 +1109,13 @@ fn a_full_width_negation_select_is_abs() {
             &[
                 0x48, 0x89, 0xc8, 0x48, 0xf7, 0xd8, 0x48, 0x0f, 0x48, 0xc1, 0xc3,
             ],
-            "return abs(a1);",
+            "return llabs(a1);",
         ),
         (
             &[
                 0x48, 0x89, 0xc8, 0x48, 0xf7, 0xd8, 0x48, 0x0f, 0x49, 0xc1, 0xc3,
             ],
-            "return -abs(a1);",
+            "return -llabs(a1);",
         ),
     ];
     for (code, want) in cases {
@@ -1695,6 +1697,48 @@ fn replays_clean(p: &borer_engine::program::Program, a: &Analysis, entries: &[u6
         let r = replay(p, a, entries, seed);
         assert!(r.wrong().is_empty(), "seed {seed}:\n{}", replay_tsv(&r));
     }
+}
+
+/// A 64-bit product of two sign-extended 32-bit loads casts an operand.
+///
+/// `movsxd` both, then `imul rax,rdx`, multiplies at 64 bits. Written as
+/// `*(int32_t*)a1 * *(int32_t*)(a1 + 4)`, C would multiply two `int`s and
+/// overflow at 32 bits, so the text widens the operands first.
+#[test]
+fn a_wide_product_of_narrow_loads_widens_first() {
+    let code = [
+        0x48, 0x63, 0x01, // ASM: movsxd rax,dword [rcx]
+        0x48, 0x63, 0x51, 0x04, // ASM: movsxd rdx,dword [rcx+4]
+        0x48, 0x0f, 0xaf, 0xc2, // ASM: imul rax,rdx
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("(int64_t)*(int32_t*)"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}
+
+/// A signed division by a negative constant prints the constant signed.
+///
+/// `idiv` by -5 is `a1 / -5`. The constant's 64-bit encoding,
+/// `18446744073709551611`, is an unsigned literal in C and would turn the
+/// division unsigned.
+#[test]
+fn a_signed_division_by_a_negative_constant_stays_signed() {
+    let code = [
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0xb9, 0xfb, 0xff, 0xff, 0xff, // ASM: mov ecx,-5
+        0x99, // ASM: cdq
+        0xf7, 0xf9, // ASM: idiv ecx
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("/ -5"), "{text}");
+    assert!(!text.contains("18446744073709551611"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
 }
 
 /// A call block a switch case copies keeps the label its copy jumps to.

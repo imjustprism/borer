@@ -2484,7 +2484,7 @@ impl<M: Bench> Text<'_, M> {
                         let (a, b) = (args.first()?, args.get(1)?);
                         extremum_bits(name, self.eval_at(a, d)?, self.eval_at(b, d)?, w)
                     }
-                    "abs" => abs_bits(self.eval_at(args.first()?, d)?, w),
+                    "abs" | "llabs" => abs_bits(self.eval_at(args.first()?, d)?, w),
                     "midpoint" => {
                         let (a, b) = (args.first()?, args.get(1)?);
                         midpoint_bits(self.eval_at(a, d)?, self.eval_at(b, d)?, w)

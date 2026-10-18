@@ -3609,7 +3609,7 @@ impl Running<'_, '_> {
                 }
                 Ok(self.int(n, CTy::int(word, false)))
             }
-            "abs" => {
+            "abs" | "llabs" => {
                 let ty = CTy::int(word, true);
                 let a = self.convert(arg(0)?, ty)?;
                 let Some(bits) = abs_bits(a.bits, word) else {

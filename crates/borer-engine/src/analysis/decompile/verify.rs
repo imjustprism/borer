@@ -766,7 +766,7 @@ pub(super) fn eval<M: Bench>(
                         st.width,
                     )
                 }
-                "abs" => abs_bits(eval(args.first()?, st, reads, d)?, st.width),
+                "abs" | "llabs" => abs_bits(eval(args.first()?, st, reads, d)?, st.width),
                 "midpoint" => {
                     let (a, b) = (args.first()?, args.get(1)?);
                     midpoint_bits(eval(a, st, reads, d)?, eval(b, st, reads, d)?, st.width)
