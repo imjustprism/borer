@@ -156,6 +156,10 @@ pub(super) struct Found {
     pub(super) site: Option<CallSite>,
 }
 
+/// Fewest callers worth decompiling across the cores: one large caller
+/// takes tens of milliseconds, so even a handful pays for the threads.
+const DECOMPILE_PAR_MIN: usize = 8;
+
 /// The call sites of a callee, as many as the decompiled callers make.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct Gathered {
@@ -173,7 +177,7 @@ pub(super) struct Gathered {
 /// The candidates are the functions with a call or a jump to one of the
 /// callee's entries or slots, and those reading a slot as data (`mov rsi,
 /// [VirtualProtect]` before `call rsi`). Each is decompiled once, through
-/// the memo, and its recorded calls ([`call_sites`]) that reach the callee
+/// the memo and across the cores, and its recorded calls ([`call_sites`]) that reach the callee
 /// are the sites: a call through a register loaded from the slot is found
 /// that way too. A call or jump the cross-references list but no text makes
 /// (the function does not decompile, or the block was cut) is kept without
@@ -217,12 +221,17 @@ pub(super) fn gather(
             }
         }
     }
+    let read_list: Vec<u64> = callers.iter().take(cap).copied().collect();
+    let read = read_list.len();
+    let decompiled = crate::analysis::striped_with(
+        &read_list,
+        DECOMPILE_PAR_MIN,
+        || (),
+        |(), &c| call_sites(p, a, o, c).unwrap_or_default(),
+    );
     let mut found: Vec<Found> = Vec::new();
-    let mut read = 0usize;
-    for &caller in callers.iter().take(cap) {
-        read += 1;
-        let sites = call_sites(p, a, o, caller).unwrap_or_default();
-        for site in sites {
+    for (&caller, sites) in read_list.iter().zip(decompiled) {
+        for site in sites.unwrap_or_default() {
             if site.target.is_some_and(|t| reach.reaches(t)) {
                 branches.remove(&site.at);
                 found.push(Found {
@@ -233,7 +242,7 @@ pub(super) fn gather(
             }
         }
     }
-    let read_set: BTreeSet<u64> = callers.iter().take(cap).copied().collect();
+    let read_set: BTreeSet<u64> = read_list.into_iter().collect();
     found.extend(
         branches
             .into_iter()
