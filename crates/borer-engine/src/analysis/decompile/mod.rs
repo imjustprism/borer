@@ -2523,40 +2523,23 @@ mod tests {
     #[test]
     fn a_repeated_assignment_into_an_if_goes() {
         let text = concat!(
-            "var1 = 0;
-",
-            "if ((uint32_t)a1 != 0) {
-",
-            "  var1 = 0;
-",
-            "  var2 = a1;
-",
-            "}
-",
-            "var3 = 0;
-",
-            "while (a2 != 0) {
-",
-            "  var3 = 0;
-",
-            "}
-",
-            "var4 = 1;
-",
-            "if (var4 != a2) {
-",
-            "  var4 = 1;
-",
-            "}
-",
-            "var5 = f();
-",
-            "if (a2 != 0) {
-",
-            "  var5 = f();
-",
-            "}
-",
+            "var1 = 0;\n",
+            "if ((uint32_t)a1 != 0) {\n",
+            "  var1 = 0;\n",
+            "  var2 = a1;\n",
+            "}\n",
+            "var3 = 0;\n",
+            "while (a2 != 0) {\n",
+            "  var3 = 0;\n",
+            "}\n",
+            "var4 = 1;\n",
+            "if (var4 != a2) {\n",
+            "  var4 = 1;\n",
+            "}\n",
+            "var5 = f();\n",
+            "if (a2 != 0) {\n",
+            "  var5 = f();\n",
+            "}\n",
         );
         let out = super::finish::polish(text, 64, &crate::pack::Packs::default());
         assert_eq!(out.matches("var1 = 0;").count(), 1, "{out}");
@@ -2832,10 +2815,7 @@ return f(a1, a2, rax);"
         let run = |text: &str| {
             let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
             super::fold_temp_copies(&mut lines);
-            lines.join(
-                "
-",
-            )
+            lines.join("\n")
         };
         assert_eq!(
             run("rax = f();

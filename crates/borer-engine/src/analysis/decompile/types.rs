@@ -3040,10 +3040,8 @@ mod paren_tests {
     )]
     fn a_double_takes_the_word_after_it_on_a_32_bit_stack() {
         let text = concat!(
-            "// signature: uint32_t f(void *this, double a2, uint32_t a3, double a4, uint32_t a5)
-",
-            "return a2 > a4 && (a5 & 0x80000000) == 0;
-",
+            "// signature: uint32_t f(void *this, double a2, uint32_t a3, double a4, uint32_t a5)\n",
+            "return a2 > a4 && (a5 & 0x80000000) == 0;\n",
         );
         let typed = type_parameters(text, "uint32_t");
         let sig = typed.lines().next().unwrap_or("");
@@ -3064,18 +3062,12 @@ mod paren_tests {
     )]
     fn a_cast_before_a_field_read_types_the_field() {
         let text = concat!(
-            "// signature: uint32_t f(uint64_t a1, int32_t a2)
-",
-            "// layout a1: 0x0 u32, 0x8 u32
-",
-            "if (a2 >= (int32_t)a1->field_0x0) {
-",
-            "  return a2 < (int32_t)a1->field_0x8;
-",
-            "}
-",
-            "return 0;
-",
+            "// signature: uint32_t f(uint64_t a1, int32_t a2)\n",
+            "// layout a1: 0x0 u32, 0x8 u32\n",
+            "if (a2 >= (int32_t)a1->field_0x0) {\n",
+            "  return a2 < (int32_t)a1->field_0x8;\n",
+            "}\n",
+            "return 0;\n",
         );
         let typed = type_parameters(text, "uint64_t");
         let sig = typed.lines().next().unwrap_or("");
@@ -3266,34 +3258,20 @@ mod lane_tests {
     )]
     fn reads_under_a_mask_anywhere_on_the_line_are_32_bit_reads() {
         let text = concat!(
-            "uint64_t var1, var2, var3, var4;
-",
-            "
-",
-            "var1 = 0;
-",
-            "var2 = (a2 - 1) & 0xffffffff;
-",
-            "var4 = a2 & 0xffffffff;
-",
-            "for (var3 = ((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff; a1[var3 & 0xffffffff] != (uint32_t)a3; var3 = ((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff) {
-",
-            "  if ((int32_t)a1[((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff] >= (int32_t)a3) {
-",
-            "    var2 = (var3 - 1) & 0xffffffff;
-",
-            "  } else {
-",
-            "    var1 = (var3 + 1) & 0xffffffff;
-",
-            "  }
-",
-            "}
-",
-            "var3 = var3 + (var4 >> 3);
-",
-            "return var3;
-",
+            "uint64_t var1, var2, var3, var4;\n",
+            "\n",
+            "var1 = 0;\n",
+            "var2 = (a2 - 1) & 0xffffffff;\n",
+            "var4 = a2 & 0xffffffff;\n",
+            "for (var3 = ((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff; a1[var3 & 0xffffffff] != (uint32_t)a3; var3 = ((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff) {\n",
+            "  if ((int32_t)a1[((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff] >= (int32_t)a3) {\n",
+            "    var2 = (var3 - 1) & 0xffffffff;\n",
+            "  } else {\n",
+            "    var1 = (var3 + 1) & 0xffffffff;\n",
+            "  }\n",
+            "}\n",
+            "var3 = var3 + (var4 >> 3);\n",
+            "return var3;\n",
         );
         let out = lane_locals(text);
         assert!(out.contains("uint32_t var1, var2;"), "{out}");
@@ -3438,18 +3416,12 @@ mod declared_cast_tests {
     )]
     fn a_mask_over_unsigned_int_arithmetic_goes() {
         let text = concat!(
-            "uint32_t var1, var2;
-",
-            "
-",
-            "var1 = ((var2 - var1) & 0xffffffff) >> 1;
-",
-            "var2 = a1[((var1 + 1) & 0xffffffff)];
-",
-            "var1 = ((var2 + var1) & 0xffffffff);
-",
-            "return ((a2 - var1) & 0xffffffff) + ((var1 ^ 0x80000000) & 0xffffffff);
-",
+            "uint32_t var1, var2;\n",
+            "\n",
+            "var1 = ((var2 - var1) & 0xffffffff) >> 1;\n",
+            "var2 = a1[((var1 + 1) & 0xffffffff)];\n",
+            "var1 = ((var2 + var1) & 0xffffffff);\n",
+            "return ((a2 - var1) & 0xffffffff) + ((var1 ^ 0x80000000) & 0xffffffff);\n",
         );
         let out = type_locals(text);
         assert!(out.contains("var1 = (var2 - var1) >> 1;"), "{out}");
