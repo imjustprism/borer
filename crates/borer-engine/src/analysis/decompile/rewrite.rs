@@ -379,6 +379,7 @@ pub(super) fn merge_chains(lines: &mut Vec<String>) -> bool {
 pub(super) fn fold_temp_copies(lines: &mut Vec<String>) -> bool {
     let is_param = |w: &str| w == "this" || is_param_name(w);
     let mut changed = false;
+    let mut uses = temp_uses(lines);
     let mut i = 0;
     while i < lines.len() {
         let t = lines[i].trim();
@@ -404,20 +405,18 @@ pub(super) fn fold_temp_copies(lines: &mut Vec<String>) -> bool {
             continue;
         };
         let plain_targets = targets.iter().all(|w| is_ident(w));
+        let named = uses.get(tmp).map_or(&[][..], Vec::as_slice);
         let fits = plain_targets
             && (is_register_name(var) || is_param(var))
-            && lines
+            && named
                 .iter()
-                .enumerate()
-                .all(|(j, l)| j == i || !writes_var(l.trim(), tmp))
-            && !lines.iter().take(i).any(|l| mentions_ident(l, tmp));
-        let last = lines
-            .iter()
-            .enumerate()
-            .skip(i + 1)
-            .filter(|(_, l)| mentions_ident(l, tmp))
-            .map(|(j, _)| j)
-            .next_back();
+                .all(|&j| j == i || !writes_var(lines[j].trim(), tmp))
+            && named.first().is_none_or(|&j| j >= i);
+        if !fits {
+            i += 1;
+            continue;
+        }
+        let last = named.last().copied().filter(|&j| j > i);
         let ind = indent_of(&lines[i]);
         let clear = last.is_some_and(|last| {
             lines.iter().take(last + 1).skip(i + 1).all(|l| {
@@ -430,7 +429,7 @@ pub(super) fn fold_temp_copies(lines: &mut Vec<String>) -> bool {
                     && !writes_var(lt, var)
             })
         });
-        if !(fits && clear) {
+        if !clear {
             i += 1;
             continue;
         }
@@ -456,9 +455,28 @@ pub(super) fn fold_temp_copies(lines: &mut Vec<String>) -> bool {
                 lines.remove(i);
             }
         }
+        uses = temp_uses(lines);
         changed = true;
     }
     changed
+}
+
+/// The lines each temporary is named on, in order.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+fn temp_uses(lines: &[String]) -> BTreeMap<String, Vec<usize>> {
+    let mut uses: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (k, l) in lines.iter().enumerate() {
+        for tok in tokens(l).filter(|w| is_temp_name(w)) {
+            let at = uses.entry(tok.to_owned()).or_default();
+            if at.last() != Some(&k) {
+                at.push(k);
+            }
+        }
+    }
+    uses
 }
 
 /// Rewrites `} else {` whose block is exactly one `if` statement as
@@ -620,18 +638,64 @@ pub(super) fn thread_jumps(lines: &mut [String]) -> bool {
     changed
 }
 
-/// The line that opens the block line `at` sits in: the nearest earlier
-/// line, label lines apart, at a smaller indentation.
+/// Where each line's block opens and where each line's block closes,
+/// found in one walk.
 ///
-/// # Arguments
-///
-/// * `lines` - The body lines.
-/// * `at` - A line inside some block.
-fn block_opener(lines: &[String], at: usize) -> Option<usize> {
-    let ind = indent_of(lines.get(at)?);
-    lines[..at]
-        .iter()
-        .rposition(|l| !l.trim().is_empty() && indent_of(l) < ind && label_name(l).is_none())
+/// `opener[k]` is the nearest earlier line, label lines apart, at a smaller
+/// indentation than line `k`: the line that opens the block `k` sits in.
+/// `closer[k]` is the first later line at line `k`'s indentation or less,
+/// labels included: for an opener, the line that ends its block. A walk
+/// with two stacks of indentations finds both, where a scan per line would
+/// cost a pass over the text each.
+#[derive(Debug, Default)]
+struct Nest {
+    /// The opener of each line's block.
+    opener: Vec<Option<usize>>,
+    /// The first later line not deeper than each line.
+    closer: Vec<Option<usize>>,
+}
+
+impl Nest {
+    /// Indexes the blocks of a body.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The body lines.
+    fn of(lines: &[String]) -> Self {
+        let mut nest = Self {
+            opener: vec![None; lines.len()],
+            closer: vec![None; lines.len()],
+        };
+        let mut open: Vec<(usize, usize)> = Vec::new();
+        let mut shallow: Vec<(usize, usize)> = Vec::new();
+        for (k, l) in lines.iter().enumerate() {
+            if l.trim().is_empty() {
+                continue;
+            }
+            let d = indent_of(l);
+            while let Some(&(ind, at)) = shallow.last()
+                && ind >= d
+            {
+                nest.closer[at] = Some(k);
+                shallow.pop();
+            }
+            shallow.push((d, k));
+            if label_name(l).is_some() {
+                nest.opener[k] = open
+                    .iter()
+                    .rev()
+                    .find(|(ind, _)| *ind < d)
+                    .map(|&(_, at)| at);
+                continue;
+            }
+            while open.last().is_some_and(|&(ind, _)| ind >= d) {
+                open.pop();
+            }
+            nest.opener[k] = open.last().map(|&(_, at)| at);
+            open.push((d, k));
+        }
+        nest
+    }
 }
 
 /// Tells whether a trimmed line opens a loop body.
@@ -649,16 +713,17 @@ fn opens_loop(t: &str) -> bool {
 /// # Arguments
 ///
 /// * `lines` - The body lines.
+/// * `nest` - Their blocks ([`Nest::of`]).
 /// * `at` - A line inside the loop.
 ///
 /// # Returns
 ///
 /// The opener and closer indices, or `None` when a `switch`, a `case` or
 /// the function's top level comes first.
-fn enclosing_loop(lines: &[String], at: usize) -> Option<(usize, usize)> {
+fn enclosing_loop(lines: &[String], nest: &Nest, at: usize) -> Option<(usize, usize)> {
     let mut k = at;
     let open = loop {
-        let o = block_opener(lines, k)?;
+        let o = (*nest.opener.get(k)?)?;
         let t = lines[o].trim();
         if opens_loop(t) {
             break o;
@@ -669,12 +734,7 @@ fn enclosing_loop(lines: &[String], at: usize) -> Option<(usize, usize)> {
         k = o;
     };
     let ind = indent_of(&lines[open]);
-    let close = lines
-        .iter()
-        .enumerate()
-        .skip(open + 1)
-        .find(|(_, l)| !l.trim().is_empty() && indent_of(l) <= ind)
-        .map(|(j, _)| j)?;
+    let close = (*nest.closer.get(open)?)?;
     (indent_of(&lines[close]) == ind && lines[close].trim().starts_with('}'))
         .then_some((open, close))
 }
@@ -699,13 +759,14 @@ fn enclosing_loop(lines: &[String], at: usize) -> Option<(usize, usize)> {
 /// Whether anything was rewritten.
 pub(super) fn loop_exits(lines: &mut Vec<String>) -> bool {
     let mut changed = false;
+    let mut nest = Nest::of(lines);
     for i in 0..lines.len() {
         let t = lines[i].trim();
         let Some(target) = goto_target(t).filter(|_| is_goto(t) || conditional_goto(t).is_some())
         else {
             continue;
         };
-        let Some((_, close)) = enclosing_loop(lines, i) else {
+        let Some((_, close)) = enclosing_loop(lines, &nest, i) else {
             continue;
         };
         if !falls_to_label(lines, close, target) {
@@ -723,15 +784,6 @@ pub(super) fn loop_exits(lines: &mut Vec<String>) -> bool {
     }
     let mut j = 2;
     while j < lines.len() {
-        let closer = lines[j].trim();
-        let Some((_, close)) = closer
-            .starts_with('}')
-            .then(|| enclosing_loop(lines, j - 1))
-            .flatten()
-        else {
-            j += 1;
-            continue;
-        };
         let body = indent_of(&lines[j - 1]);
         let leave = lines[j - 1].trim();
         let cond = lines[j - 2]
@@ -740,15 +792,19 @@ pub(super) fn loop_exits(lines: &mut Vec<String>) -> bool {
             .and_then(|c| c.strip_suffix(") continue;"));
         let exit = (leave == "break;" || (is_goto(leave) && leave.ends_with(';')))
             .then(|| leave.to_owned());
-        if let (true, Some(cond), Some(exit)) = (close == j, cond, exit)
-            && indent_of(&lines[j - 2]) == body
-        {
-            let line = format!("{}if ({}) {exit}", " ".repeat(body), invert_condition(cond));
-            lines.splice(j - 2..j, [line]);
-            changed = true;
-        } else {
+        let shaped = lines[j].trim().starts_with('}') && indent_of(&lines[j - 2]) == body;
+        let (Some(cond), Some(exit), true) = (cond, exit, shaped) else {
             j += 1;
+            continue;
+        };
+        if enclosing_loop(lines, &nest, j - 1).is_none_or(|(_, close)| close != j) {
+            j += 1;
+            continue;
         }
+        let line = format!("{}if ({}) {exit}", " ".repeat(body), invert_condition(cond));
+        lines.splice(j - 2..j, [line]);
+        nest = Nest::of(lines);
+        changed = true;
     }
     changed
 }
@@ -772,6 +828,11 @@ pub(super) fn loop_exits(lines: &mut Vec<String>) -> bool {
 /// Whether any pair was swapped.
 pub(super) fn flip_jump_pairs(lines: &mut [String]) -> bool {
     let mut changed = false;
+    let at_label: BTreeMap<String, usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(k, l)| label_name(l).map(|n| (n.to_owned(), k)))
+        .collect();
     for i in 0..lines.len().saturating_sub(1) {
         let ind = indent_of(&lines[i]);
         let Some((cond, first)) = conditional_goto(lines[i].trim()) else {
@@ -787,8 +848,7 @@ pub(super) fn flip_jump_pairs(lines: &mut [String]) -> bool {
         if indent_of(&lines[i + 1]) != ind || first == second {
             continue;
         }
-        let label = format!("{first}:");
-        let Some(at) = lines.iter().position(|l| l.trim() == label) else {
+        let Some(&at) = at_label.get(first) else {
             continue;
         };
         let flipped = format!("if ({}) goto {second};", invert_condition(cond));
@@ -1761,7 +1821,37 @@ pub(super) fn fold_conditional_gotos(lines: &mut Vec<String>, labels: RunLabels)
 
 #[cfg(test)]
 mod jump_tests {
-    use super::{flip_jump_pairs, loop_exits, thread_jumps};
+    use super::{Nest, flip_jump_pairs, loop_exits, thread_jumps};
+
+    /// Each line's block opener skips labels, and each opener's closer is
+    /// the first line back at its depth, a label included.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn the_nest_finds_openers_and_closers() {
+        let lines = body(&[
+            "while (1) {",
+            "  if (a1 != 0) {",
+            "    a1 -= 1;",
+            "  L_1:",
+            "    a2 += 1;",
+            "  }",
+            "}",
+            "L_2:",
+            "return 0;",
+        ]);
+        let nest = Nest::of(&lines);
+        assert_eq!(nest.opener[2], Some(1));
+        assert_eq!(nest.opener[4], Some(1));
+        assert_eq!(nest.opener[3], Some(0));
+        assert_eq!(nest.opener[1], Some(0));
+        assert_eq!(nest.opener[0], None);
+        assert_eq!(nest.closer[1], Some(3));
+        assert_eq!(nest.closer[0], Some(6));
+        assert_eq!(nest.closer[6], Some(7));
+    }
 
     /// A jump to the label after a loop is `break`, and a body that ends
     /// `if (c) continue; goto L;` tests the jump instead.

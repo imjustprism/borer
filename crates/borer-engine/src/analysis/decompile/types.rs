@@ -1096,10 +1096,23 @@ fn in_literal(head: &str) -> bool {
 pub(super) fn lane_locals(text: &str) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let declared = uint64_names(&lines);
+    let mut uses: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (k, l) in lines.iter().enumerate() {
+        for tok in tokens(l) {
+            let at = uses.entry(tok).or_default();
+            if at.last() != Some(&k) {
+                at.push(k);
+            }
+        }
+    }
     let typed: Vec<(String, &'static str)> = declared
         .into_iter()
-        .filter_map(|name| lane_type(&lines, &name).map(|ty| (name, ty)))
+        .filter_map(|name| {
+            let at = uses.get(name.as_str()).map_or(&[][..], Vec::as_slice);
+            lane_type(&lines, at, &name).map(|ty| (name, ty))
+        })
         .collect();
+    drop(uses);
     if typed.is_empty() {
         return text.to_owned();
     }
@@ -1174,8 +1187,9 @@ fn uint64_names(lines: &[String]) -> Vec<String> {
 /// # Arguments
 ///
 /// * `lines` - The function.
+/// * `at` - The lines that name `name`, in order.
 /// * `name` - A `uint64_t` local.
-fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
+fn lane_type(lines: &[String], at: &[usize], name: &str) -> Option<&'static str> {
     let mut masked = false;
     let mut signed = false;
     let mut unsigned = false;
@@ -1183,7 +1197,7 @@ fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
     let mut indexed = false;
     let mut compared = false;
     let mut compound = false;
-    for line in lines {
+    for line in at.iter().filter_map(|&k| lines.get(k)) {
         if line.starts_with("//") || is_declaration(line) {
             continue;
         }
