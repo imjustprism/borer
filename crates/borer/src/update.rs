@@ -196,7 +196,6 @@ fn replace(new: &Path, exe: &Path) -> anyhow::Result<()> {
     }
     if cfg!(windows) {
         let old = aside(exe);
-        let _ = std::fs::remove_file(&old);
         std::fs::rename(exe, &old).with_context(|| format!("moving {} aside", exe.display()))?;
         if let Err(e) = std::fs::rename(&staged, exe) {
             let _ = std::fs::rename(&old, exe);
@@ -208,13 +207,30 @@ fn replace(new: &Path, exe: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Where Windows keeps the binary an update replaced.
+/// Where Windows keeps the binary an update replaced: the first of
+/// `borer.old`, `borer.1.old`, `borer.2.old`, ... that is free or can be
+/// removed.
+///
+/// A binary set aside by an earlier update may still run (an MCP client
+/// keeps one open for its session), and Windows refuses to delete or
+/// overwrite a running executable, so its name stays taken until that
+/// process exits.
 ///
 /// # Arguments
 ///
 /// * `exe` - The running binary.
 fn aside(exe: &Path) -> PathBuf {
-    exe.with_extension("old")
+    /// Set-aside names tried before giving up on finding a free one.
+    const TRIES: u32 = 64;
+    let free = |p: &Path| !p.exists() || std::fs::remove_file(p).is_ok();
+    let first = exe.with_extension("old");
+    if free(&first) {
+        return first;
+    }
+    (1..TRIES)
+        .map(|n| exe.with_extension(format!("{n}.old")))
+        .find(|p| free(p))
+        .unwrap_or(first)
 }
 
 /// `borer update [--check]`: says whether a newer release is out and,
@@ -378,6 +394,24 @@ pub(crate) fn notice(check: std::thread::JoinHandle<Option<String>>) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A set-aside name that cannot be removed, as a still-running earlier
+    /// binary's cannot, is skipped for the next free one.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not the next one.
+    #[test]
+    fn a_taken_aside_name_moves_to_the_next() {
+        let dir = std::env::temp_dir().join(format!("borer-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("borer.old")).expect("dir");
+        std::fs::write(dir.join("borer.1.old"), b"stale").expect("write");
+        let exe = dir.join("borer.exe");
+        assert_eq!(aside(&exe), dir.join("borer.1.old"));
+        assert!(!dir.join("borer.1.old").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Tags parse to three numbers and order against this build.
     ///
