@@ -3977,18 +3977,22 @@ fn a_cmpxchg_branch_reads_the_compares_zero_flag() {
 
 /// Decompiling every fixture function at once matches doing it one by one.
 ///
-/// The parallel path stripes the entries over the cores and must return
-/// the same text in the same order as the sequential call.
+/// The parallel path takes the entries from one queue, largest function
+/// first, and must return the same text in the order of the entries as
+/// the sequential call, whatever that order is.
 #[test]
 fn parallel_decompile_matches_sequential() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
-    let all = decompile_all(&p, &a, &o, &entries);
-    assert_eq!(all.len(), entries.len());
-    for (entry, got) in entries.iter().zip(&all) {
-        assert_eq!(*got, decompile(&p, &a, &o, *entry), "{entry:#x}");
+    let mut entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    for _ in 0..2 {
+        let all = decompile_all(&p, &a, &o, &entries);
+        assert_eq!(all.len(), entries.len());
+        for (entry, got) in entries.iter().zip(&all) {
+            assert_eq!(*got, decompile(&p, &a, &o, *entry), "{entry:#x}");
+        }
+        entries.reverse();
     }
 }
 

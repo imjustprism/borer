@@ -602,8 +602,14 @@ pub fn decompile_named_all(
     render_all(program, analysis, overlay, entries, decompile_named_afresh)
 }
 
-/// Renders many functions with `render`, one stripe of them per core, the
-/// results in the order of `entries`.
+/// Renders many functions with `render` across the cores, the results in
+/// the order of `entries`.
+///
+/// The workers take the functions from one queue, largest first. A
+/// binary's few largest functions take seconds each where the rest take
+/// milliseconds, so a sweep lasts as long as its largest function from the
+/// moment a worker starts it; striped by position, one could start last in
+/// its stripe, and the sweep waited the whole stripe longer.
 ///
 /// The renderers a batch takes build their text afresh instead of through
 /// the memo of [`Analysis::derived`]: a sweep over a binary would fill it
@@ -635,17 +641,23 @@ fn render_all<T: Send + Clone>(
         }
         return out;
     }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|&i| {
+        std::cmp::Reverse(analysis.function(entries[i]).map_or(0, Function::size))
+    });
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (order, next) = (&order, &next);
     let stripes: Vec<Vec<(usize, Option<T>)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
-            .map(|t| {
+            .map(|_| {
                 scope.spawn(move || {
-                    entries
-                        .iter()
-                        .enumerate()
-                        .skip(t)
-                        .step_by(threads)
-                        .map(|(i, &entry)| (i, render(program, analysis, overlay, entry)))
-                        .collect::<Vec<_>>()
+                    let mut done = Vec::new();
+                    while let Some(&i) =
+                        order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                    {
+                        done.push((i, render(program, analysis, overlay, entries[i])));
+                    }
+                    done
                 })
             })
             .collect();
