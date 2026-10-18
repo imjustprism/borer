@@ -489,7 +489,7 @@ fn retype(sig: &mut String, word: &str, param: &str, ty: &str) {
 /// `stdcall` one does. An offset past [`FIELD_OFFSET_MAX`] makes the
 /// parameter the index of an absolute address, not a pointer, and a
 /// parameter the body assigns, or casts to a narrow integer, is left as
-/// it is.
+/// it is; a cast in front of `a2->field_0x10` casts the field, not `a2`.
 ///
 /// # Arguments
 ///
@@ -509,15 +509,15 @@ fn pointed_at(lines: &[String], param: &str) -> Option<&'static str> {
         for at in word_positions(line, param) {
             let head = line.get(..at).unwrap_or("");
             let tail = line.get(at + param.len()..).unwrap_or("");
+            if tail.starts_with("->") {
+                offsets.extend([0, 1]);
+                continue;
+            }
             if ["(int8_t)", "(int16_t)", "(int32_t)"]
                 .iter()
                 .any(|c| head.ends_with(c))
             {
                 return None;
-            }
-            if tail.starts_with("->") {
-                offsets.extend([0, 1]);
-                continue;
             }
             for (ty, width) in LOAD_TYPES {
                 let field = head.strip_suffix(&format!("*({ty}*)(")).and_then(|_| {
@@ -2361,7 +2361,8 @@ pub(super) fn unwrap_parens(line: &str, name: &str) -> String {
 /// is truncated to whatever the variable is declared as, so it is skipped.
 /// Storing it through a typed pointer is that pointee's width, and
 /// returning it from a function whose result is a narrow integer is that
-/// result's width.
+/// result's width. A postfix use (`a1->field_0x8`, `a1[i]`) binds before
+/// any cast in front of it, so it says the variable is no narrow integer.
 ///
 /// # Arguments
 ///
@@ -2375,6 +2376,9 @@ pub(super) fn inferred_type(lines: &[String], param: &str) -> Option<&'static st
             let tail = line.get(at + param.len()..).unwrap_or("");
             if head.trim().is_empty() && tail.starts_with(" = ") {
                 continue;
+            }
+            if tail.starts_with("->") || tail.starts_with(['[', '.']) {
+                return None;
             }
             let t = if head.ends_with("(int32_t)") {
                 "int32_t"
@@ -2704,6 +2708,35 @@ mod paren_tests {
             sig.ends_with("(void *this, double a2, double a4, uint32_t a5)"),
             "{sig}"
         );
+    }
+
+    /// A cast in front of a field read casts the field, not the pointer.
+    ///
+    /// `(int32_t)a1->field_0x0` compares the field signed; `a1` stays the
+    /// pointer the layout pass named the field on.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_cast_before_a_field_read_types_the_field() {
+        let text = concat!(
+            "// signature: uint32_t f(uint64_t a1, int32_t a2)
+",
+            "// layout a1: 0x0 u32, 0x8 u32
+",
+            "if (a2 >= (int32_t)a1->field_0x0) {
+",
+            "  return a2 < (int32_t)a1->field_0x8;
+",
+            "}
+",
+            "return 0;
+",
+        );
+        let typed = type_parameters(text, "uint64_t");
+        let sig = typed.lines().next().unwrap_or("");
+        assert!(sig.contains("(void *a1, int32_t a2)"), "{sig}");
     }
 
     /// A parameter the body loads or stores through is a pointer, one on
