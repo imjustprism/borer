@@ -63,9 +63,10 @@ struct Table {
 ///
 /// The text with its tables named and declared, or unchanged.
 pub(super) fn inline_tables(text: &str, program: &Program) -> String {
+    let text = &const_globals(text, program);
     let tables = find_tables(text, program);
     if tables.is_empty() {
-        return text.to_owned();
+        return text.clone();
     }
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     for t in &tables {
@@ -86,6 +87,138 @@ pub(super) fn inline_tables(text: &str, program: &Program) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Gives each global the text only reads, and that lies in read-only data,
+/// its value from the image: `static const uint32_t g32_1020 = 0x3f800000;`.
+///
+/// A constant a function loads (a mask, a magic number, a vector of
+/// lane constants) is fixed by the file, so the reader sees it and the
+/// text means what the machine does when compiled. A global the text
+/// writes, takes the address of (a read through `&g` can reach past its
+/// declared width) or whose bytes the file does not hold keeps its plain
+/// declaration, and so does a float that is not finite.
+///
+/// # Arguments
+///
+/// * `text` - A finished decompilation.
+/// * `program` - The image the values are read from.
+///
+/// # Returns
+///
+/// The text with those declarations initialized, or unchanged.
+pub(super) fn const_globals(text: &str, program: &Program) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let mut changed = false;
+    for k in 0..lines.len() {
+        let Some((ty, name, addr)) = global_declaration(&lines[k]) else {
+            continue;
+        };
+        let readonly = program
+            .section_at(addr)
+            .is_some_and(|s| s.readable && !s.writable && !s.executable);
+        if !readonly || written_or_addressed(&lines, name) {
+            continue;
+        }
+        let Some(value) = constant_value(program, ty, addr) else {
+            continue;
+        };
+        let line = format!("static const {ty} {name} = {value}; // @ {addr:#x}");
+        lines[k] = line;
+        changed = true;
+    }
+    if !changed {
+        return text.to_owned();
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// The type, name and address of a global's declaration line,
+/// `uint32_t g32_1020; // @ 0x1020`.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+fn global_declaration(line: &str) -> Option<(&str, &str, u64)> {
+    let (decl, at) = line.split_once("; // @ 0x")?;
+    let (ty, name) = decl.split_once(' ')?;
+    if !name.starts_with('g') || !is_ident(name) {
+        return None;
+    }
+    let addr = u64::from_str_radix(at.trim(), 16).ok()?;
+    Some((ty, name, addr))
+}
+
+/// Tells whether any code line assigns `name` or takes its address.
+///
+/// # Arguments
+///
+/// * `lines` - The function.
+/// * `name` - The global.
+fn written_or_addressed(lines: &[String], name: &str) -> bool {
+    lines.iter().filter(|l| !l.starts_with("//")).any(|l| {
+        let t = l.trim();
+        let assigned = t.strip_prefix(name).is_some_and(|rest| {
+            let rest = rest.trim_start();
+            rest.starts_with('=') && !rest.starts_with("==")
+                || [
+                    "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "++", "--",
+                ]
+                .iter()
+                .any(|op| rest.starts_with(op))
+        });
+        assigned || l.contains(&format!("&{name}")) || t.contains(&format!("= {name} ="))
+    })
+}
+
+/// The value a global of type `ty` holds in the image, as C spells it.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `ty` - The declared type.
+/// * `addr` - The global's address.
+fn constant_value(program: &Program, ty: &str, addr: u64) -> Option<String> {
+    let size: usize = match ty {
+        "uint8_t" | "int8_t" => 1,
+        "uint16_t" | "int16_t" => 2,
+        "uint32_t" | "int32_t" | "float" => 4,
+        "uint64_t" | "int64_t" | "double" => 8,
+        "uint128_t" => 16,
+        _ => return None,
+    };
+    let bytes = program.read_va(addr, size)?;
+    let word = |b: &[u8]| {
+        let mut raw = [0u8; 8];
+        raw.get_mut(..b.len())?.copy_from_slice(b);
+        Some(u64::from_le_bytes(raw))
+    };
+    match ty {
+        "float" => {
+            let f = f32::from_bits(u32::try_from(word(bytes)?).ok()?);
+            f.is_finite().then(|| format!("{f:?}f"))
+        }
+        "double" => {
+            let f = f64::from_bits(word(bytes)?);
+            f.is_finite().then(|| format!("{f:?}"))
+        }
+        "uint128_t" => {
+            let lo = word(bytes.get(..8)?)?;
+            let hi = word(bytes.get(8..)?)?;
+            Some(if hi == 0 {
+                format!("{lo:#x}")
+            } else {
+                format!("(uint128_t){hi:#x} << 64 | {lo:#x}")
+            })
+        }
+        _ => {
+            let signed = ty.starts_with("int");
+            let width = u64::try_from(size).ok()?;
+            Some(entry(word(bytes)?, width, signed))
+        }
+    }
 }
 
 /// The tables the text indexes with a bound, each once, in address order.

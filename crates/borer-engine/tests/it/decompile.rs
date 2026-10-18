@@ -1647,6 +1647,26 @@ fn a_push_of_rax_at_the_entry_only_makes_room() {
     assert!(!text.contains("rax"), "{text}");
 }
 
+/// A read-only global the text only reads is declared with its value.
+///
+/// `mov rax,[rip+...]; ret` loads a constant from `.rdata`: the text
+/// declares `static const uint64_t g64_140002000 = 0x1122334455667788;`,
+/// so the value is in the text and compiles to what the machine reads.
+#[test]
+fn a_read_only_constant_is_declared_with_its_value() {
+    let code = [
+        0x48, 0x8b, 0x05, 0xf9, 0x0f, 0x00, 0x00, // ASM: mov rax,[rip+0xff9]
+        0xc3, // ASM: ret
+    ];
+    let p = program64_with_data(&code, &0x1122_3344_5566_7788_u64.to_le_bytes());
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(
+        text.contains("static const uint64_t g64_140002000 = 0x1122334455667788;"),
+        "{text}"
+    );
+}
+
 /// A bounded index into a read-only table reads the table the file holds.
 ///
 /// `cmp ecx,6; ja def; mov eax,ecx; lea rdx,[table]; mov eax,[rdx+rax*4];
