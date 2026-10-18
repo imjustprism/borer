@@ -1,9 +1,28 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/banner/banner-dark.png">
-  <img alt="borer" src="assets/banner/banner-light.png" width="100%">
-</picture>
+<p align="center">
+  <a href="https://borer.lol">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.png">
+      <img alt="borer: reverse engineering, rebuilt for AI agents" src=".github/assets/banner-light.png" width="100%">
+    </picture>
+  </a>
+</p>
 
-# borer
+<p align="center">
+  <a href="https://github.com/imjustprism/borer/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/imjustprism/borer?style=flat-square&labelColor=0b0c0e&color=26272b&label=release"></a>
+  <a href="https://github.com/imjustprism/borer/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/imjustprism/borer/ci.yml?branch=main&style=flat-square&labelColor=0b0c0e&color=26272b&label=ci"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-26272b?style=flat-square&labelColor=0b0c0e&color=26272b"></a>
+  <img alt="Rust 2024" src="https://img.shields.io/badge/rust-2024-26272b?style=flat-square&labelColor=0b0c0e&color=26272b&logo=rust&logoColor=d4d4d8">
+  <img alt="MCP server" src="https://img.shields.io/badge/MCP-server-26272b?style=flat-square&labelColor=0b0c0e&color=26272b">
+  <img alt="PE, ELF, Mach-O" src="https://img.shields.io/badge/PE%20%C2%B7%20ELF%20%C2%B7%20Mach--O-x86%20%C2%B7%20x64%20%C2%B7%20arm64-26272b?style=flat-square&labelColor=0b0c0e&color=26272b">
+</p>
+
+<p align="center">
+  <a href="https://borer.lol"><b>borer.lol</b></a> &nbsp;·&nbsp;
+  <a href="https://borer.lol/docs">Docs</a> &nbsp;·&nbsp;
+  <a href="#install">Install</a> &nbsp;·&nbsp;
+  <a href="https://borer.lol/docs/tools">Tools</a> &nbsp;·&nbsp;
+  <a href="https://borer.lol/llms.txt">llms.txt</a>
+</p>
 
 A reverse-engineering engine built for AI agents. One Rust binary: an MCP
 server when run with no arguments, a command-line tool with them. No GUI, and
