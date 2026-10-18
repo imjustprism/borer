@@ -40,6 +40,7 @@ mod session;
 mod setup;
 mod strwalk;
 mod symsrv;
+mod update;
 
 use borer_engine::analysis::{
     Analysis, EnumSource, Overlay, parse_addr, parse_off, render, resolve,
@@ -5630,7 +5631,16 @@ fn main() -> anyhow::Result<()> {
         return relay::run();
     }
     end_quietly_when_stdout_closes();
-    cli::cli(&args)
+    // The daily check runs beside the command and is read once it is done;
+    // `update` checks for itself.
+    let check = (args.first().map(String::as_str) != Some("update"))
+        .then(update::start_check)
+        .flatten();
+    cli::cli(&args)?;
+    if let Some(line) = check.and_then(update::notice) {
+        eprintln!("{line}");
+    }
+    Ok(())
 }
 
 /// Serves the MCP session over this worker's standard handles.

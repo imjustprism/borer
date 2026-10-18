@@ -87,6 +87,7 @@ commands:
   fingerprint <binary> [out]               function fingerprints; with out, write the sidecar borer://diff reads
   doctor [offline]                         the local setup, one line each: version and commit, toolchain, symbol cache and server (offline skips the server), index cache, .mcp.json
   setup [--apply]                          register this binary as the MCP server borer with every agent client installed (Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Gemini CLI, Codex CLI, Zed); a dry run that shows each file and entry unless --apply, which keeps a .bak of each file it changes
+  update [--check]                         install the latest release over this binary, checked against its SHA256SUMS; --check only says whether one is out (a command line run also checks once a day and says so on stderr; BORER_NO_UPDATE_CHECK=1 turns that off)
   fetch-pdb <binary> [server]              fetch the companion PDB the debug record names from a symbol server (default msdl) into the local cache, kept only if its guid+age match; reload to apply
   pack <file>                              read a pack and report its name, its keys by section and what borer does not read
   pack-keys                                every key a pack can set, with its default and meaning
@@ -139,6 +140,8 @@ enum Command {
     /// `setup [--apply]`: register this binary with the installed agent
     /// clients; no binary.
     Setup,
+    /// `update [--check]`: install the latest release over this binary; no binary.
+    Update,
     /// `fetch-pdb <binary> [server]`: fetch the companion PDB the debug
     /// record names; no query.
     FetchPdb,
@@ -164,6 +167,7 @@ impl Command {
             "packs" => Self::Packs,
             "doctor" => Self::Doctor,
             "setup" => Self::Setup,
+            "update" => Self::Update,
             "fetch-pdb" => Self::FetchPdb,
             query => Self::Query(Query::parse(query)?),
         })
@@ -183,7 +187,7 @@ impl Command {
     fn most_args(self) -> Option<usize> {
         match self {
             Self::PackKeys => Some(0),
-            Self::Pack | Self::Packs | Self::Doctor | Self::Setup => Some(1),
+            Self::Pack | Self::Packs | Self::Doctor | Self::Setup | Self::Update => Some(1),
             Self::FetchPdb => Some(2),
             Self::Sigmake => None,
             Self::Query(q) => q.most_args(),
@@ -1415,6 +1419,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         | Command::Packs
         | Command::Doctor
         | Command::Setup
+        | Command::Update
         | Command::FetchPdb => (1, ""),
     };
     let layout = raw.layout()?;
@@ -1425,6 +1430,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         | Command::Sigmake
         | Command::Doctor
         | Command::Setup
+        | Command::Update
         | Command::FetchPdb => false,
     };
     if layout.is_some() && !maps_a_binary {
@@ -1480,6 +1486,14 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
             if failed > 0 {
                 bail!("{failed} client(s) could not be set up; their lines say why");
             }
+        }
+        Command::Update => {
+            let check_only = match args.get(1).map(String::as_str) {
+                None => false,
+                Some("--check") => true,
+                Some(other) => bail!("update takes `--check` or nothing, not {}", quoted(other)),
+            };
+            print!("{}", crate::update::update(check_only)?);
         }
         Command::FetchPdb => {
             let path = args.get(1).with_context(|| needs_a_binary(word))?;
