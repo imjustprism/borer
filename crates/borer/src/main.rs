@@ -5629,8 +5629,6 @@ fn main() -> anyhow::Result<()> {
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        // An MCP client starts borer with pipes; a person typing `borer`
-        // at a terminal gets a welcome instead of a server waiting in silence.
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
             print!("{}", term::welcome());
             return Ok(());
@@ -5638,8 +5636,6 @@ fn main() -> anyhow::Result<()> {
         return relay::run();
     }
     end_quietly_when_stdout_closes();
-    // The daily check runs beside the command and is read once it is done;
-    // `update` checks for itself.
     let check = (args.first().map(String::as_str) != Some("update"))
         .then(update::start_check)
         .flatten();

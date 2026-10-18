@@ -64,7 +64,6 @@ fn target() -> Option<(&'static str, &'static str)> {
 ///
 /// Major, minor and patch, or `None` when the text is not such a version.
 fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    // A pre-release or build suffix (`-beta.1`, `+abc`) is not compared.
     let core = text
         .trim()
         .trim_start_matches('v')
@@ -196,8 +195,6 @@ fn replace(new: &Path, exe: &Path) -> anyhow::Result<()> {
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
     if cfg!(windows) {
-        // A running .exe can be renamed but not replaced; the old one is
-        // removed by the next update.
         let old = aside(exe);
         let _ = std::fs::remove_file(&old);
         std::fs::rename(exe, &old).with_context(|| format!("moving {} aside", exe.display()))?;

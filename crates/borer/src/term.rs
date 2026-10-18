@@ -32,7 +32,6 @@ fn styled(terminal: bool) -> bool {
     if set("NO_COLOR") {
         return false;
     }
-    // FORCE_COLOR and CLICOLOR_FORCE ask for styling even off a terminal.
     if set("FORCE_COLOR") || set("CLICOLOR_FORCE") {
         return true;
     }
@@ -203,7 +202,6 @@ fn draw(done: &AtomicBool, label: &Mutex<String>, hex: &[String]) {
             line.push_str("  ");
             for i in 0..WINDOW {
                 let pair = &hex[(frame + i) % hex.len()];
-                // Brightest where the stream enters, fading toward the left.
                 let shade = 236 + (i * 10 / WINDOW);
                 let _ = write!(line, "\x1b[38;5;{shade}m{pair}\x1b[0m ");
             }
@@ -249,7 +247,6 @@ pub(crate) fn paint_usage(usage: &str) -> String {
         }
         let body = line.trim_start();
         let indent = line.len() - body.len();
-        // The command and its arguments end where two spaces start the description.
         let (head, desc) = body.split_once("  ").unwrap_or((body, ""));
         let (word, rest) = head.split_once(' ').unwrap_or((head, ""));
         let _ = write!(out, "{}\x1b[1m{word}\x1b[0m", " ".repeat(indent));
@@ -259,7 +256,6 @@ pub(crate) fn paint_usage(usage: &str) -> String {
         let desc = desc.trim_start();
         if !desc.is_empty() {
             let used = indent + head.chars().count();
-            // A long head takes its own line; the description starts under the column.
             let start = if used + 2 > DESC {
                 out.push('\n');
                 0
