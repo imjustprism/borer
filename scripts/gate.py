@@ -208,16 +208,20 @@ def git(*args: str) -> str:
 
 
 def shared_target() -> str | None:
-    """The main checkout's target directory, when this is a linked worktree.
+    """A linked worktree's own target directory beside the main checkout's.
 
     A worktree's own `.git` is a file naming the common directory; the main
-    checkout's is that directory itself.
+    checkout's is that directory itself. Each worktree builds into
+    `target-worktrees/<name>` next to the main checkout, never into the main
+    `target`: cargo hashes a workspace's own crates by their path inside the
+    workspace, so two checkouts of the same workspace write the same artifact
+    names, and one checkout's build would link the other's crates.
     """
     git_dir = git("rev-parse", "--absolute-git-dir")
     common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
     if not git_dir or not common or Path(git_dir) == Path(common):
         return None
-    return str(Path(common).parent / "target")
+    return str(Path(common).parent / "target-worktrees" / ROOT.name)
 
 
 class Inputs:
