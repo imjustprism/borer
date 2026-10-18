@@ -34,7 +34,7 @@ no Ghidra, IDA or Binary Ninja underneath.
   identical bytes for the same question every time.
 
 > [!WARNING]
-> Version 0.1.0, beta. Tool names, output spelling and resource URIs can still
+> Version 0.1.1, beta. Tool names, output spelling and resource URIs can still
 > change. See [Limits](#limits).
 
 ## Why borer
@@ -51,7 +51,7 @@ no Ghidra, IDA or Binary Ninja underneath.
 
 Speed is measured on notepad, msvcrt, sqlite3, ntdll and kernelbase, each
 tool as it ships, one after the other
-([numbers](scripts/run/vs_ghidra.tsv), [harness](scripts/run/vs_ghidra.py)).
+([numbers](scripts/run/vs_ghidra.json), [harness](scripts/run/vs_ghidra.py)).
 One function at a time the two decompilers take about as long, a few
 milliseconds each; borer's time includes checking every block.
 

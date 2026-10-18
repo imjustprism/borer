@@ -2,7 +2,7 @@
 """borer against Ghidra headless, on the same binaries, in the scenarios an agent meets.
 
 Usage: python scripts/run/vs_ghidra.py --ghidra <install dir> [--borer PATH]
-       [--sample N] [--all-under MB] <binary>...
+       [--sample N] [--all-under MB] [--tools borer,ghidra] <binary>...
 
 Per binary and per tool it measures:
 
@@ -20,7 +20,9 @@ Per binary and per tool it measures:
   one decompiler process over every function, as a script does it.
 - peak_mb: the largest resident memory of the tool's process tree.
 
-Both tools run one after the other, never at once. Writes a TSV to stdout.
+Both tools run one after the other, never at once. Results go to
+vs_ghidra.json: a rerun replaces the rows it measures, keeps the others, and
+prints how each changed since the last run.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import shutil
 import statistics
@@ -258,45 +261,133 @@ def ghidra_row(ghidra: Path, binary: str, sample: int, do_all: bool) -> dict:
     return row
 
 
+COLUMNS = {
+    "functions": "functions",
+    "ready_cold_s": "readyColdS",
+    "ready_warm_s": "readyWarmS",
+    "decompile_p50_ms": "decompileP50Ms",
+    "decompile_p95_ms": "decompileP95Ms",
+    "decompile_mean_ms": "decompileMeanMs",
+    "first_decompile_ms": "firstDecompileMs",
+    "all_fps": "allFps",
+    "peak_mb": "peakMb",
+}
+
+# Whether a larger value is better, for the comparison with the last run.
+HIGHER = {"functions", "allFps"}
+
+
+def _machine() -> str:
+    """The CPU, core counts, memory and OS, as one line."""
+    cpu = platform.processor()
+    if os.name == "nt":
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+        ) as key:
+            cpu = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+    cores = psutil.cpu_count(logical=False)
+    threads = psutil.cpu_count()
+    ram = round(psutil.virtual_memory().total / 2**30)
+    return f"{cpu}, {cores} cores / {threads} threads, {ram} GB, {platform.system()} {platform.release()}"
+
+
+def _java() -> tuple[str, Path | None]:
+    """The version and home of the java on PATH, which analyzeHeadless runs."""
+    done = subprocess.run(
+        ["java", "-XshowSettings:properties", "-version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    props = dict(line.strip().split(" = ", 1) for line in done.stderr.splitlines() if " = " in line)
+    home = props.get("java.home")
+    return props.get("java.version", "?"), Path(home) if home else None
+
+
+def _tree_mb(root: Path) -> float:
+    """The size of every file under root, in MB."""
+    total = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    return round(total / 2**20, 1)
+
+
+def _meta(borer: str, ghidra: Path) -> dict:
+    """What a reader needs to judge the numbers: machine, versions, install sizes."""
+    said = subprocess.run([borer, "--version"], capture_output=True, text=True, check=False)
+    borer_version = said.stdout.split()[-1] if said.stdout.strip() else "?"
+    props = (ghidra / "Ghidra" / "application.properties").read_text(encoding="utf-8")
+    found = re.search(r"application\.version=(\S+)", props)
+    ghidra_version = found.group(1) if found else "?"
+    java_version, java_home = _java()
+    ghidra_mb = _tree_mb(ghidra) + (_tree_mb(java_home) if java_home else 0)
+    return {
+        "machine": _machine(),
+        "versions": f"borer {borer_version}, Ghidra {ghidra_version} headless, Java {java_version}",
+        "date": time.strftime("%Y-%m-%d"),
+        "installMb": {
+            "borer": round(os.path.getsize(borer) / 2**20, 1),
+            "ghidra": round(ghidra_mb),
+        },
+    }
+
+
+def _compare(old: dict | None, new: dict) -> str:
+    """One line per metric that moved more than 5% since the last run."""
+    if old is None:
+        return "  new"
+    out = []
+    for key in COLUMNS.values():
+        a, b = old.get(key), new.get(key)
+        if not isinstance(a, (int, float)) or not isinstance(b, (int, float)) or a == 0:
+            continue
+        change = (b - a) / a
+        if abs(change) < 0.05:
+            continue
+        better = (change > 0) == (key in HIGHER)
+        out.append(f"  {key}: {a} -> {b} ({change:+.0%}, {'better' if better else 'worse'})")
+    return "\n".join(out) or "  unchanged within 5%"
+
+
 def main() -> int:
-    """Runs both tools over every binary and prints a TSV."""
+    """Runs both tools over every binary and updates the results file."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ghidra", required=True, type=Path, help="Ghidra install directory")
     ap.add_argument("--borer", default="target/release/borer.exe", help="borer binary")
     ap.add_argument("--sample", type=int, default=100, help="functions to decompile each")
     ap.add_argument("--all-under", type=float, default=1.6, help="MB; decompile all below it")
+    ap.add_argument("--out", type=Path, default=HERE / "vs_ghidra.json", help="results file")
+    ap.add_argument("--tools", default="borer,ghidra", help="which tools to run")
     ap.add_argument("binaries", nargs="+")
     a = ap.parse_args()
-    cols = [
-        "binary",
-        "mb",
-        "tool",
-        "functions",
-        "ready_cold_s",
-        "ready_warm_s",
-        "decompile_p50_ms",
-        "decompile_p95_ms",
-        "decompile_mean_ms",
-        "first_decompile_ms",
-        "all_fps",
-        "peak_mb",
-    ]
-    print("\t".join(cols), flush=True)
+    results = json.loads(a.out.read_text(encoding="utf-8")) if a.out.exists() else {"rows": []}
+    results.update(_meta(a.borer, a.ghidra))
+    rows: list[dict] = results["rows"]
     for b in a.binaries:
         mb = round(os.path.getsize(b) / 2**20, 2)
         do_all = mb <= a.all_under
-        for tool in ("borer", "ghidra"):
+        for tool in a.tools.split(","):
             try:
                 measured = (
                     borer_row(a.borer, b, a.sample, do_all)
                     if tool == "borer"
                     else ghidra_row(a.ghidra, b, a.sample, do_all)
                 )
-                row = {"binary": Path(b).name, "mb": mb, "tool": tool, **measured}
             except (RuntimeError, EOFError, OSError, ValueError) as e:
                 print(f"FAIL {tool} {b}: {e}", file=sys.stderr, flush=True)
                 continue
-            print("\t".join(str(row.get(c, "")) for c in cols), flush=True)
+            row = {"binary": Path(b).name, "mb": mb, "tool": tool, "date": results["date"]}
+            row |= {COLUMNS[k]: v for k, v in measured.items() if v != "" and k in COLUMNS}
+            old = next(
+                (r for r in rows if r["binary"] == row["binary"] and r["tool"] == tool), None
+            )
+            print(f"{row['binary']} {tool}\n{_compare(old, row)}", file=sys.stderr, flush=True)
+            if old is not None:
+                rows.remove(old)
+            rows.append(row)
+            # Written after every row, so an interrupted run keeps what it measured.
+            rows.sort(key=lambda r: (r["mb"], r["binary"], r["tool"]))
+            a.out.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     return 0
 
 
