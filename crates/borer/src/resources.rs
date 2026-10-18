@@ -1038,8 +1038,9 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the offset does not parse.
     pub(crate) fn fieldrefs_text(&self, spec: &str, asked: &Asked) -> Result<String, ErrorData> {
-        /// Most rows one read returns.
-        const PAGE: usize = 500;
+        /// Most rows one read returns: 500 rows of a common offset like
+        /// `0x10` ran past 20 KB, a page more than one question needs.
+        const PAGE: usize = 200;
         let (offset_text, filter) = spec.split_once(',').unwrap_or((spec, ""));
         let offset = parse_field_offset(offset_text.trim()).map_err(err_params)?;
         let again = asked.again();
@@ -2000,6 +2001,35 @@ mod tests {
 
     /// A resource handler, as `read_resource` calls it with the URI's argument.
     type Handler = fn(&BorerServer, &str) -> Result<String, ErrorData>;
+
+    /// A field offset most code touches lists one page of 200 sites and
+    /// says where the next starts.
+    ///
+    /// # Panics
+    ///
+    /// When the page holds more than 200 rows or no next page is named.
+    #[test]
+    fn fieldrefs_pages_at_200_sites() {
+        let mut bytes: Vec<u8> = std::iter::repeat_n([0x48u8, 0x8b, 0x41, 0x10], 250)
+            .flatten()
+            .collect();
+        bytes.push(0xc3);
+        bytes.resize(0x1000, 0xcc);
+        let text = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
+        let program = Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = BorerServer {
+            program: Arc::new(RwLock::new(Some(Arc::new(program)))),
+            ..BorerServer::default()
+        };
+        let out = server
+            .fieldrefs_text("0x10", &Asked::whole("borer://fieldrefs/0x10"))
+            .expect("lists the sites");
+        assert!(
+            out.starts_with("# 250 sites touch [reg+0x10], showing 200 from 0\n"),
+            "{out}"
+        );
+        assert!(out.contains("offset=200"), "{out}");
+    }
 
     /// A binary given where a snapshot or a manifest goes is refused as not
     /// text, with what the file should be, where the error was the reader's
