@@ -5664,7 +5664,7 @@ impl BorerServer {
 /// ([`borer_live::run_below_normal`]): an analysis takes every core it is
 /// given, and a machine running several of them at once stays usable
 /// because its desktop goes first. Its allocator commits memory as it is
-/// touched ([`borer_live::commit_on_demand`]).
+/// touched and hands freed memory back soon ([`borer_live::tune_allocator`]).
 ///
 /// # Errors
 ///
@@ -5672,7 +5672,7 @@ impl BorerServer {
 /// or the CLI command fails.
 fn main() -> anyhow::Result<()> {
     borer_live::run_below_normal();
-    borer_live::commit_on_demand();
+    borer_live::tune_allocator();
     if let Some(state) = std::env::var_os(relay::WORKER) {
         let resume = std::env::var_os(relay::RESUME).map(PathBuf::from);
         return tokio::runtime::Runtime::new()?.block_on(serve(PathBuf::from(state), resume));

@@ -11,7 +11,7 @@
 //! process comes here too, to step behind the desktop
 //! ([`run_below_normal`]), and the server's relay to tie the worker it
 //! starts to its own life ([`Tether`]); the allocator's settings and calls
-//! are here too ([`commit_on_demand`], [`release_free_memory`]). On another
+//! are here too ([`tune_allocator`], [`release_free_memory`]). On another
 //! operating system every live entry point says that live access is not
 //! available in this build.
 #![allow(
@@ -38,20 +38,36 @@ unsafe extern "C" {
 /// mimalloc 3.3, the version this build links.
 const PAGE_COMMIT_ON_DEMAND: core::ffi::c_int = 40;
 
+/// The place of `mi_option_purge_delay` among the options of mimalloc 3.3.
+const PURGE_DELAY: core::ffi::c_int = 15;
+
+/// Milliseconds the allocator keeps memory freed before it hands it back
+/// to the system.
+///
+/// mimalloc 3.3 waits a second. An analysis's walker threads each free
+/// their pages within milliseconds and end, so for that second the process
+/// held what all of them had freed beside what it went on to use: on a
+/// 4 MB DLL a peak of a hundred megabytes for eighty live. Ten
+/// milliseconds, mimalloc 2's wait, keeps the peak near what is live and
+/// still reuses the pages a thread frees and its successor takes.
+const PURGE_DELAY_MS: core::ffi::c_long = 10;
+
 /// mimalloc 3.3 as [`mi_version`] reports it, with the patch level
-/// divided away: the version [`PAGE_COMMIT_ON_DEMAND`] is the index for.
+/// divided away: the version [`PAGE_COMMIT_ON_DEMAND`] and [`PURGE_DELAY`]
+/// are the indexes for.
 const MIMALLOC_3_3: core::ffi::c_int = 303;
 
 /// Has the allocator commit a page's memory as it is first touched, rather
-/// than all of the page when it hands the page out.
+/// than all of the page when it hands the page out, and hand memory freed
+/// back to the system after [`PURGE_DELAY_MS`].
 ///
 /// Every thread takes pages of its own, so committing them whole charged an
 /// analysis's sixteen walker threads sixty megabytes they never touched: on
 /// a small program, two thirds of what the process committed, with no gain
-/// in speed. The setting applies to pages handed out after the call, so it
-/// is made first thing in `main`. A mimalloc other than 3.3 numbers its
+/// in speed. The settings apply to pages handed out after the call, so they
+/// are made first thing in `main`. A mimalloc other than 3.3 numbers its
 /// options its own way and is left as it is.
-pub fn commit_on_demand() {
+pub fn tune_allocator() {
     // SAFETY: mi_version takes nothing and reports a constant.
     if unsafe { mi_version() } / 100 != MIMALLOC_3_3 {
         return;
@@ -59,6 +75,8 @@ pub fn commit_on_demand() {
     // SAFETY: the option is the 3.3 index, checked above, and both
     // arguments are plain integers.
     unsafe { mi_option_set(PAGE_COMMIT_ON_DEMAND, 1) };
+    // SAFETY: as above, for the 3.3 index of the purge delay.
+    unsafe { mi_option_set(PURGE_DELAY, PURGE_DELAY_MS) };
 }
 
 /// Hands the memory the allocator holds free back to the system.
@@ -878,8 +896,8 @@ mod tests {
     };
 
     use super::{
-        MIMALLOC_3_3, PAGE_COMMIT_ON_DEMAND, Process, Tether, commit_on_demand, mi_version,
-        release_free_memory, run_below_normal,
+        MIMALLOC_3_3, PAGE_COMMIT_ON_DEMAND, PURGE_DELAY, PURGE_DELAY_MS, Process, Tether,
+        mi_version, release_free_memory, run_below_normal, tune_allocator,
     };
 
     unsafe extern "C" {
@@ -898,8 +916,9 @@ mod tests {
         );
     }
 
-    /// The linked mimalloc is the 3.3 whose option index is written down,
-    /// and after the call it commits pages on demand.
+    /// The linked mimalloc is the 3.3 whose option indexes are written
+    /// down, and after the call it commits pages on demand and purges after
+    /// the delay set.
     ///
     /// A new mimalloc fails here before it can set the wrong option.
     #[test]
@@ -910,9 +929,11 @@ mod tests {
             MIMALLOC_3_3,
             "another mimalloc: check the place of mi_option_page_commit_on_demand"
         );
-        commit_on_demand();
+        tune_allocator();
         // SAFETY: the option is a plain integer naming a 3.3 option.
         assert_eq!(unsafe { mi_option_get(PAGE_COMMIT_ON_DEMAND) }, 1);
+        // SAFETY: as above.
+        assert_eq!(unsafe { mi_option_get(PURGE_DELAY) }, PURGE_DELAY_MS);
     }
 
     /// Bytes this process has committed, as mimalloc reads them.
