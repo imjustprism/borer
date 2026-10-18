@@ -538,6 +538,22 @@ fn truncated(text: &str, cap: usize, entry: u64, header: usize) -> String {
     )
 }
 
+/// Tells whether `text` holds `word` as a whole identifier, not inside a
+/// longer one (`a1` is not in `a12` or `data1`).
+///
+/// # Arguments
+///
+/// * `text` - The text searched.
+/// * `word` - The identifier.
+fn names_word(text: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    !word.is_empty()
+        && text.match_indices(word).any(|(i, _)| {
+            !text[..i].chars().next_back().is_some_and(ident)
+                && !text[i + word.len()..].chars().next().is_some_and(ident)
+        })
+}
+
 /// The lines a `decompile` answer puts under its first line: what of the
 /// text was checked against the binary, then a `// next:` line per resource
 /// the function's facts point at ([`render::next_steps`]).
@@ -3203,6 +3219,19 @@ impl BorerServer {
                 })?;
                 let (key, stated) = plan_var(p, o, entry, var, name.as_deref(), ty.as_deref())?;
                 let (stack, shadow) = frame_words(p);
+                let spelled = key.spell(stack, shadow);
+                let renamed = o.vars.get(&entry).is_some_and(|v| v.contains_key(&key));
+                if !renamed
+                    && let Some(text) =
+                        borer_engine::analysis::decompile::decompile_named(p, a, o, entry)
+                    && !names_word(&text, var)
+                    && !names_word(&text, &spelled)
+                {
+                    return Err(format!(
+                        "{} has no variable {spelled}: its text never names it, so a type there would invent a parameter the code does not take; decompile it for the variables it has",
+                        borer_engine::analysis::name_of(a, o, entry)
+                    ));
+                }
                 let what = format!(
                     "{} of {} ({entry:#x}) {}",
                     key.spell(stack, shadow),
@@ -7751,6 +7780,13 @@ mod tests {
             .expect_err("a variable outside any function was named")
             .message;
         assert!(refused.contains("function"), "{refused}");
+        let refused = call("0x1000", None, Some("a3"), Some("x"), None)
+            .expect_err("a parameter the function does not take was named")
+            .message;
+        assert!(
+            refused.starts_with("sub_1000 has no variable a3"),
+            "{refused}"
+        );
         let refused = call("0x1000", Some("int f(int n"), None, None, None)
             .expect_err("a prototype with an open parameter list was stated")
             .message;
