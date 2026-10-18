@@ -114,11 +114,12 @@ fn read_spec_file(path: &str, kind: &str) -> Result<String, ErrorData> {
     if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
         return Err(err_params(format!("{why}; give a path to {kind}")));
     }
-    std::fs::read_to_string(path).map_err(|e| {
-        err_params(format!(
-            "reading {}: {e}",
-            borer_engine::text::short_path(path)
-        ))
+    let short = borer_engine::text::short_path(path);
+    std::fs::read_to_string(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::InvalidData => {
+            err_params(format!("{short} is not a text file; give a path to {kind}"))
+        }
+        _ => err_params(format!("reading {short}: {e}")),
     })
 }
 
@@ -1450,7 +1451,10 @@ impl BorerServer {
     /// When no binary is loaded, or the file cannot be read or is not a
     /// snapshot.
     pub(crate) fn changes_text(&self, path: &str) -> Result<String, ErrorData> {
-        let text = read_spec_file(path, "a snapshot file")?;
+        let text = read_spec_file(
+            path,
+            "a snapshot file (`borer snapshot <binary> <out>` writes one)",
+        )?;
         let before = borer_engine::analysis::snapshot::read(&text).map_err(err_params)?;
         self.with_analysis(Feature::Decompile, |p, a, o| {
             let after = borer_engine::analysis::snapshot::facts(p, a, o);
@@ -1584,7 +1588,10 @@ impl BorerServer {
                 meta.len()
             )));
         }
-        let text = read_spec_file(path, "a manifest file")?;
+        let text = read_spec_file(
+            path,
+            "an anchors manifest (field, vconst, function, encode and decode lines)",
+        )?;
         let anchors = borer_engine::analysis::anchors::parse_manifest(&text).map_err(err_params)?;
         if anchors.len() > ANCHORS_MAX {
             return Err(err_params(format!(
@@ -1993,6 +2000,27 @@ mod tests {
 
     /// A resource handler, as `read_resource` calls it with the URI's argument.
     type Handler = fn(&BorerServer, &str) -> Result<String, ErrorData>;
+
+    /// A binary given where a snapshot or a manifest goes is refused as not
+    /// text, with what the file should be, where the error was the reader's
+    /// `stream did not contain valid UTF-8`.
+    ///
+    /// # Panics
+    ///
+    /// When the binary reads, or the refusal does not say what to give.
+    #[test]
+    fn a_binary_given_for_a_text_file_says_what_to_give() {
+        let binary = std::env::current_exe().expect("the test binary");
+        let path = binary.to_string_lossy();
+        let refused = super::read_spec_file(&path, "an anchors manifest").unwrap_err();
+        assert!(
+            refused
+                .message
+                .ends_with("is not a text file; give a path to an anchors manifest"),
+            "{}",
+            refused.message
+        );
+    }
 
     /// A resource whose argument names nothing, or is empty where one is
     /// needed, answers an invalid-params error carrying the renderer's
