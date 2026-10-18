@@ -1487,18 +1487,16 @@ impl<'a> Exec<'_, 'a> {
                 if instr.op0_kind() == OpKind::Register
                     && instr.op0_register().is_vector_register() =>
             {
-                if instr.immediate8() & 0x1f != 0 {
-                    self.vector_op(instr);
-                } else {
-                    let single = matches!(mn, Mnemonic::Cmpss | Mnemonic::Vcmpss);
-                    let ty = if single { Ty::F32 } else { Ty::F64 };
-                    let vex = matches!(mn, Mnemonic::Vcmpss | Mnemonic::Vcmpsd);
-                    let left = u32::from(vex);
-                    let upper = self.val(instr, left);
-                    let l = scalar_lane(self.val(instr, left), ty);
-                    let r = scalar_lane(self.val(instr, left + 1), ty);
-                    let mask = Self::eq_mask(l, r, ty.bits());
-                    self.write_scalar_lane(instr, mask, ty, &upper);
+                let single = matches!(mn, Mnemonic::Cmpss | Mnemonic::Vcmpss);
+                let ty = if single { Ty::F32 } else { Ty::F64 };
+                let vex = matches!(mn, Mnemonic::Vcmpss | Mnemonic::Vcmpsd);
+                let left = u32::from(vex);
+                let upper = self.val(instr, left);
+                let l = scalar_lane(self.val(instr, left), ty);
+                let r = scalar_lane(self.val(instr, left + 1), ty);
+                match Self::cmp_mask(l, r, instr.immediate8() & 0x1f, ty.bits()) {
+                    Some(mask) => self.write_scalar_lane(instr, mask, ty, &upper),
+                    None => self.vector_op(instr),
                 }
             }
             _ if self.is_vector_op(instr) => self.vector_op(instr),

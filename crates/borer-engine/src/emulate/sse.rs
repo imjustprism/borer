@@ -621,12 +621,14 @@ impl Emulator<'_> {
         self.vector_store(i, v)
     }
 
-    /// `cmpeqss` and `cmpeqsd`: the low lane becomes all ones when the
-    /// ordered equality holds, and zero otherwise.
+    /// `cmpss` and `cmpsd`: the low lane becomes all ones when the
+    /// predicate holds, and zero otherwise.
     ///
-    /// A NaN compares false and the two zeros compare true, which is C's
-    /// `==`. The bits above the lane stay. Any other predicate is left
-    /// unmodeled.
+    /// The eight SSE predicates are `eq`, `lt`, `le`, `unord`, `neq`,
+    /// `nlt`, `nle` and `ord`. A NaN makes the ordered ones false and the
+    /// negated ones true, and the two zeros compare equal, as C's
+    /// operators do. The bits above the lane stay. A predicate past 7 is
+    /// left unmodeled.
     ///
     /// # Arguments
     ///
@@ -635,18 +637,27 @@ impl Emulator<'_> {
     ///
     /// # Errors
     ///
-    /// When an operand cannot be read or written, or the predicate is not
-    /// ordered equality.
+    /// When an operand cannot be read or written, or the predicate is past
+    /// 7.
     fn scalar_cmp(&mut self, i: &Instruction, width: Width) -> Result<(), Stop> {
-        if i.immediate8() & 0x1f != 0 {
-            return Err(Stop::Unmodeled(format!("{:?}", i.mnemonic())));
-        }
         let rest_op = u32::from(i.op_count() >= 4);
         let rest = self.vector_operand(i, rest_op)?;
         let a = lo64(rest & width.lane());
         let b = self.lane_operand(i, i.op_count() - 2, width.bytes())?;
-        let eq = width.to_f64(a) == width.to_f64(b);
-        let mask = if eq { width.lane() } else { 0 };
+        let (x, y) = (width.to_f64(a), width.to_f64(b));
+        let unordered = x.is_nan() || y.is_nan();
+        let holds = match i.immediate8() & 0x1f {
+            0 => x == y,
+            1 => x < y,
+            2 => x <= y,
+            3 => unordered,
+            4 => x != y,
+            5 => unordered || x >= y,
+            6 => unordered || x > y,
+            7 => !unordered,
+            _ => return Err(Stop::Unmodeled(format!("{:?}", i.mnemonic()))),
+        };
+        let mask = if holds { width.lane() } else { 0 };
         self.vector_store(i, (rest & !width.lane()) | mask)
     }
 

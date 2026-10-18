@@ -9532,3 +9532,33 @@ fn an_unbounded_rel32_table_ends_where_the_next_table_begins() {
     );
     replays_clean(&p, &a, &[F]);
 }
+
+/// Every SSE predicate of `cmpsd` is a lane the lifter computes, as the
+/// emulator does, and none prints as a call to the mnemonic.
+///
+/// `cmpsd xmm0,xmm1,imm; movq rax,xmm0; ret` for the predicates past
+/// `eq`, which once stayed `cmpsd(a1, a2, 4)`.
+#[test]
+fn every_cmpsd_predicate_agrees_with_the_emulator() {
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    for predicate in 1..=7u8 {
+        let code = [
+            0xf2, 0x0f, 0xc2, 0xc1, predicate, // ASM: cmpsd xmm0,xmm1,predicate
+            0x66, 0x48, 0x0f, 0x7e, 0xc0, // ASM: movq rax,xmm0
+            0xc3, // ASM: ret
+        ];
+        let p = program64(&code);
+        let text = decompiled(&p, 0x1_4000_1000);
+        assert!(!text.contains("cmpsd("), "{predicate}: {text}");
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            assert_eq!(v.checked, 1, "{predicate} seed {seed}: {}", verify_tsv(&v));
+            assert!(
+                v.mismatches.is_empty(),
+                "{predicate} seed {seed}: {}",
+                verify_tsv(&v)
+            );
+        }
+    }
+}

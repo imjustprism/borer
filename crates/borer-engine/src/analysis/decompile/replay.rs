@@ -1545,10 +1545,10 @@ fn scalar_float(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
         | M::Cvtsd2si
         | M::Vcvtss2si
         | M::Vcvtsd2si => two,
-        M::Cmpss | M::Cmpsd if i.immediate8() & 0x1f == 0 => {
+        M::Cmpss | M::Cmpsd if i.immediate8() & 0x1f < 8 => {
             three && i.op0_kind() == OpKind::Register && i.op0_register().is_vector_register()
         }
-        M::Vcmpss | M::Vcmpsd if i.immediate8() & 0x1f == 0 => {
+        M::Vcmpss | M::Vcmpsd if i.immediate8() & 0x1f < 8 => {
             i.op_count() == 4
                 && i.op0_kind() == OpKind::Register
                 && i.op0_register().is_vector_register()

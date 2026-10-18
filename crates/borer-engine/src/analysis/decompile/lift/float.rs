@@ -737,32 +737,57 @@ impl<'a> Exec<'_, 'a> {
         })
     }
 
-    /// The lane `cmpeqss` or `cmpeqsd` writes.
+    /// The lane `cmpss` or `cmpsd` writes for one of the eight SSE
+    /// predicates.
     ///
-    /// All ones when the ordered equality holds, else zero. A NaN compares
-    /// false and the two zeros compare true, so the lane's low bit is C's
-    /// `==`. The two flag tests are that bit: equal-or-unordered, and
-    /// ordered.
+    /// All ones where the predicate holds, else zero. The flags are a
+    /// `ucomisd` of the two lanes, which sets CF for less-or-unordered, ZF
+    /// for equal-or-unordered and PF for unordered alone, so each predicate
+    /// is one or two flag tests: `lt` is `r` above `l`, which an unordered
+    /// pair is not, and `nlt` is `r` below-or-equal `l`, which it is. `eq`
+    /// is the ordered equality, whose low bit is C's `==`, and `neq` holds
+    /// where that does not.
     ///
     /// # Arguments
     ///
     /// * `l` - The left lane.
     /// * `r` - The right lane.
+    /// * `predicate` - The immediate's predicate, 0 to 7: `eq`, `lt`,
+    ///   `le`, `unord`, `neq`, `nlt`, `nle`, `ord`.
     /// * `bits` - `32` for a single, `64` for a double.
-    pub(super) fn eq_mask(l: Expr, r: Expr, bits: u8) -> Expr {
-        let flags = Flags::Float(l, r, bits);
-        let equal = Expr::Cond(Box::new(Cond {
-            cc: Cc(ConditionCode::e),
-            flags: flags.clone(),
-        }));
-        let ordered = Expr::Cond(Box::new(Cond {
-            cc: Cc(ConditionCode::np),
-            flags,
-        }));
-        mask(
-            unary(UnOp::Neg, fold(Op::And, ordered, equal, bits), bits),
-            mask_bits(bits),
-        )
+    ///
+    /// # Returns
+    ///
+    /// The lane, or `None` for a predicate past 7.
+    pub(super) fn cmp_mask(l: Expr, r: Expr, predicate: u8, bits: u8) -> Option<Expr> {
+        let test = |cc: ConditionCode, flags: &Flags| {
+            Expr::Cond(Box::new(Cond {
+                cc: Cc(cc),
+                flags: flags.clone(),
+            }))
+        };
+        let ordered = Flags::Float(l.clone(), r.clone(), bits);
+        let swapped = Flags::Float(r, l, bits);
+        let equal = || {
+            fold(
+                Op::And,
+                test(ConditionCode::np, &ordered),
+                test(ConditionCode::e, &ordered),
+                bits,
+            )
+        };
+        let truth = match predicate {
+            0 => equal(),
+            1 => test(ConditionCode::a, &swapped),
+            2 => test(ConditionCode::ae, &swapped),
+            3 => test(ConditionCode::p, &ordered),
+            4 => fold(Op::Xor, equal(), Expr::Const(1), bits),
+            5 => test(ConditionCode::be, &swapped),
+            6 => test(ConditionCode::b, &swapped),
+            7 => test(ConditionCode::np, &ordered),
+            _ => return None,
+        };
+        Some(mask(unary(UnOp::Neg, truth, bits), mask_bits(bits)))
     }
 
     /// Lifts a vector instruction as `dst = mnemonic(sources...)`.
