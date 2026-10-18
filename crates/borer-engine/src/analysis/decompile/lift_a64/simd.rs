@@ -250,7 +250,7 @@ impl Lift<'_, '_> {
 /// * `v` - The register's value.
 /// * `index` - The lane.
 /// * `bits` - The lane's width.
-fn lane_of(v: Expr, index: u32, bits: u16) -> Expr {
+pub(super) fn lane_of(v: Expr, index: u32, bits: u16) -> Expr {
     let at = index * u32::from(bits);
     match at {
         0 => low(low64(v), bits),

@@ -570,7 +570,8 @@ impl Machine<'_> {
     }
 
     /// `dup`: one lane's value replicated through a whole `v` register, the
-    /// upper half zero for a 64-bit arrangement.
+    /// upper half zero for a 64-bit arrangement; the scalar form
+    /// (`mov s0, v1.s[2]`) writes the lane alone, the rest zero.
     ///
     /// Every field is read from the word: the general form takes the low
     /// lane bits of a general register, the element form the lane `imm5`
@@ -602,6 +603,14 @@ impl Machine<'_> {
                 )
             }
         };
+        if (w >> 28) & 1 == 1 {
+            self.set_reg(
+                Reg::V(lo8(u64::from(w & 0x1f))),
+                128,
+                u128::from(lane_value),
+            );
+            return Ok(());
+        }
         let span = if (w >> 30) & 1 == 1 { 128 } else { 64 };
         let v = (0..u32::from(span / lane)).fold(0u128, |acc, k| {
             acc | u128::from(lane_value) << (k * u32::from(lane))

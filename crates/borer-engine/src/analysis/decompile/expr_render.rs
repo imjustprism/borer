@@ -795,7 +795,9 @@ impl Expr {
     /// it is. C's `>>`, `/` and `%` on a signed operand are the signed
     /// ones, so a logical shift, quotient or remainder whose operand's text
     /// is signed ([`signed_text`]) casts it to the unsigned word first:
-    /// `(uint64_t)(int64_t)(int32_t)x >> 1`.
+    /// `(uint64_t)(int64_t)(int32_t)x >> 1`. A cut to a width, which
+    /// elsewhere prints as the signed type of that width, is the unsigned
+    /// one under a logical shift: `(uint64_t)v1 >> 32`.
     ///
     /// # Arguments
     ///
@@ -997,6 +999,15 @@ impl Expr {
                             format!("{} {} {}", signed(l, ls), op.sym(), signed(r, rs)),
                             p,
                         )
+                    }
+                    Op::Shr
+                        if let Expr::Cast(inner, ty @ (Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64)) =
+                            &**l
+                            && !inner.is_float() =>
+                    {
+                        let (s, sp) = inner.render_prec(n, false, false);
+                        let s = if sp < UNARY { format!("({s})") } else { s };
+                        (format!("({}){s} >> {rs}", ty.name()), p)
                     }
                     Op::Shr | Op::Div | Op::Rem
                         if signed_text(l) || (*op != Op::Shr && signed_text(r)) =>

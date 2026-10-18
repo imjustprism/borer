@@ -752,7 +752,8 @@ impl Lift<'_, '_> {
 
     /// `dup`: one lane's value replicated through the low `span` bits of
     /// the register. A 128-bit span is no one value the tree holds, so it
-    /// is named as the call `__dup_4s(x)`.
+    /// is named as the call `__dup_4s(x)`. The scalar form (`mov s0,
+    /// v1.s[2]`) is that one lane alone, the bits above it cleared.
     ///
     /// # Arguments
     ///
@@ -763,6 +764,11 @@ impl Lift<'_, '_> {
         let shift = (0..4).find(|&s| imm5 >> s & 1 == 1)?;
         let lane = 8u16 << shift;
         let index = imm5 >> (shift + 1);
+        if (w >> 28) & 1 == 1 {
+            let one = super::simd::lane_of(self.reg_at(vreg(w, 5), 128), index, lane);
+            self.write(vreg(w, 0), lane, one);
+            return Some(());
+        }
         let span = if (w >> 30) & 1 == 1 { 128 } else { 64 };
         let one = match i.operands[1] {
             Opnd::Reg { reg, bits } => low(self.reg_at(reg, bits), lane),

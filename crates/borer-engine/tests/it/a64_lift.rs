@@ -772,3 +772,38 @@ fn pac_prologue_and_epilogue_agree_with_the_emulator() {
     assert_eq!(v.checked, 1, "{}", verify_tsv(&v));
     assert!(v.mismatches.is_empty(), "{}", verify_tsv(&v));
 }
+
+/// The scalar `dup` (`mov s0, v1.s[1]`) is one lane, the bits above it
+/// clear, in the lifter as in the emulator; both once replicated the lane
+/// as the vector form does.
+#[test]
+fn scalar_dup_agrees_with_the_emulator() {
+    let words = [
+        // ASM: mov s0, v1.s[1]
+        0x5e0c_0420,
+        // ASM: mov h2, v3.h[2]
+        0x5e0a_0462,
+        // ASM: fmov x0, d0
+        0x9e66_0000,
+        // ASM: fmov x1, d2
+        0x9e66_0041,
+        // ASM: add x0, x0, x1
+        0x8b01_0000,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    agrees(&words, 1);
+    let p = image(&words);
+    let a = Analysis::compute(&p);
+    let text = borer_engine::analysis::decompile::decompile(
+        &p,
+        &a,
+        &borer_engine::analysis::Overlay::default(),
+        BASE,
+    )
+    .unwrap_or_default();
+    assert!(
+        text.contains("return ((uint64_t)v1 >> 32) + (((uint64_t)v3 >> 0x20) & 0xffff);"),
+        "{text}"
+    );
+}
