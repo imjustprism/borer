@@ -2590,3 +2590,26 @@ fn scalar_casts_and_moves_match_the_machine() {
         agrees_immediate(words);
     }
 }
+
+/// A function nothing calls returns the float its body leaves in `v0`.
+///
+/// `fmadd s0, s1, s2, s0; ret` is `lerp`'s arm64 body: no caller says what
+/// it reads, so the write nearest the `ret` answers, and it is a `float`.
+/// Storing that value instead, `fadd s0, s0, s1; str s0, [x0]; ret`, is a
+/// `void` function's work.
+#[test]
+fn an_uncalled_arm64_function_returns_the_float_it_computes() {
+    // ASM: fmadd s0, s1, s2, s0
+    let fmadd = 0x1f02_0020;
+    // ASM: ret
+    let ret = 0xd65f_03c0;
+    let (_, _, text) = decompiled_words(&[fmadd, ret]);
+    assert!(text.contains("// signature: float "), "{text}");
+    assert!(!text.contains("/* asm"), "{text}");
+    // ASM: fadd s0, s0, s1
+    let fadd = 0x1e21_2800;
+    // ASM: str s0, [x0]
+    let store = 0xbd00_0000;
+    let (_, _, text) = decompiled_words(&[fadd, store, ret]);
+    assert!(text.contains("// signature: void "), "{text}");
+}

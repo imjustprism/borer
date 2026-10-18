@@ -164,7 +164,9 @@ impl Lift<'_, '_> {
     /// rounded narrower number. A value already at this width, or not a
     /// float, is the register's value. A bare parameter has no float node;
     /// the width recorded for it is that float. `fcvt` converts the value
-    /// this read produced.
+    /// this read produced. A float of this width that a narrow store and a
+    /// reload masked to its own bits (`str s0, [sp]` then `ldr s1, [sp]`)
+    /// is that float again.
     ///
     /// # Arguments
     ///
@@ -173,6 +175,17 @@ impl Lift<'_, '_> {
     /// * `bits` - The width, 32 or 64.
     fn float_read(&self, i: &Insn, k: usize, bits: u16) -> Option<Expr> {
         let v = self.float_source(i, k, bits)?;
+        let v = match v {
+            Expr::Bin(Op::And, inner, m)
+                if matches!(*m, Expr::Const(c) if bits < 64 && c == (1u64 << bits) - 1)
+                    && self
+                        .declared_width(&inner)
+                        .is_some_and(|w| u16::from(w) == bits) =>
+            {
+                *inner
+            }
+            other => other,
+        };
         let known = self.declared_width(&v);
         Some(super::mem::as_encoding_at(v, bits, known))
     }

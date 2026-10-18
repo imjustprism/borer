@@ -25,7 +25,8 @@
 //!
 //! A `float` or a `double` comes back in `v0`: read there as `s0` or `d0`
 //! after the call, and nowhere as `x0`, it is the function's result at
-//! that width. A caller reading `x1` before writing it after the call
+//! that width. A function nothing calls has no call site to ask, so the
+//! writes nearest its returns answer ([`float_left`]). A caller reading `x1` before writing it after the call
 //! reads a second result, which a function returning a pair of words or a
 //! 128-bit integer hands back there.
 
@@ -308,6 +309,97 @@ fn hands_back_own(program: &Program, f: &Function) -> bool {
     true
 }
 
+/// Blocks walked back along a path from a `ret` for the result a function
+/// nothing calls leaves ([`float_left`]).
+const LEFT_DEPTH: u8 = 4;
+
+/// The float a function nothing calls leaves in `v0`, read off the writes
+/// nearest its returns.
+///
+/// No call site says what a caller reads, so the body answers. Walking back
+/// from each `ret`, at most [`LEFT_DEPTH`] blocks along a path: a call, a
+/// write of `x0` or a store of `v0` met first decides against a float, and
+/// a scalar write of `v0` met first is a vote for one at that width. A
+/// path that runs out of blocks first says nothing, which keeps a path the
+/// code cannot take out of the answer.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// 32 or 64 when some return's nearest result write is a scalar `s0` or
+/// `d0` and none is `x0`; `None` otherwise.
+fn float_left(program: &Program, f: &Function) -> Option<u8> {
+    let index: std::collections::BTreeMap<u64, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(k, b)| (b.start, k))
+        .collect();
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
+    for (k, b) in f.blocks.iter().enumerate() {
+        for s in &b.successors {
+            if let Some(&t) = index.get(s) {
+                preds[t].push(k);
+            }
+        }
+    }
+    let mut todo: Vec<(usize, u8)> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.term == BlockTerm::Ret)
+        .map(|(k, _)| (k, 1))
+        .collect();
+    let mut seen = vec![false; f.blocks.len()];
+    let mut width: Option<u8> = None;
+    while let Some((k, depth)) = todo.pop() {
+        if std::mem::replace(&mut seen[k], true) {
+            continue;
+        }
+        let b = &f.blocks[k];
+        let mut insns = Vec::new();
+        let mut at = b.start;
+        while at < b.end {
+            let i = decode(program, at)?;
+            at = next(&i);
+            insns.push(i);
+        }
+        let mut settled = false;
+        for i in insns.iter().rev() {
+            let regs = i.registers();
+            let stored = matches!(i.mnemonic, a64::Mnemonic::Str(_) | a64::Mnemonic::Stp)
+                && regs.reads.iter().any(|(r, _)| *r == Reg::V(0));
+            if i.flow == Flow::Call || stored || regs.writes.contains(&Reg::X(0)) {
+                return None;
+            }
+            if regs.writes.contains(&Reg::V(0)) {
+                let bits = match i.operands[0] {
+                    a64::Opnd::Reg {
+                        reg: Reg::V(0),
+                        bits: 32,
+                    } => 32,
+                    a64::Opnd::Reg {
+                        reg: Reg::V(0),
+                        bits: 64,
+                    } => 64,
+                    _ => return None,
+                };
+                width = Some(width.map_or(bits, |w: u8| w.max(bits)));
+                settled = true;
+                break;
+            }
+        }
+        if !settled && depth < LEFT_DEPTH {
+            todo.extend(preds[k].iter().map(|&p| (p, depth + 1)));
+        }
+    }
+    width
+}
+
 /// What the call sites of one function say about its results.
 #[derive(Debug, Clone, Default)]
 struct Facts {
@@ -370,7 +462,11 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .collect();
     let float: Vec<Option<u8>> = facts
         .iter()
-        .map(|f| {
+        .zip(&shared.functions)
+        .map(|(f, func)| {
+            if f.sites.is_empty() {
+                return float_left(program, func);
+            }
             let int_read = f.sites.iter().any(|s| matches!(s, Site::Used(_)));
             f.float
                 .filter(|_| !int_read)
