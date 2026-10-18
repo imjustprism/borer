@@ -85,6 +85,29 @@ pub struct Schema {
     pub fields: Vec<Field>,
 }
 
+/// The argument list of the call whose `(` is at `open`.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `open` - Index of the opening parenthesis.
+pub(crate) fn args_at(line: &str, open: usize) -> Option<Vec<String>> {
+    let mut depth = 0i32;
+    for (k, b) in line.bytes().enumerate().skip(open) {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(split_args(&line[open + 1..k]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Splits `s` on commas outside parentheses and brackets.
 ///
 /// # Arguments

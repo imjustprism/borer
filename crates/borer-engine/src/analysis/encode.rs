@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 
 use super::classes::{FieldLabel, deref_pointee, field_labels};
 use super::schema::{
-    closing_bound, header_bound, ident_char, is_loop_header, mirror_names, param_class, split_args,
+    args_at, closing_bound, header_bound, ident_char, is_loop_header, mirror_names, param_class,
 };
 use super::{Analysis, Overlay, name_of, plain_text_cached, resolve};
 use crate::fxmap::FxHashMap;
@@ -784,29 +784,6 @@ fn classify(args: &[String]) -> Option<Raw> {
         }
         _ => None,
     }
-}
-
-/// The argument list of the call whose `(` is at `open`.
-///
-/// # Arguments
-///
-/// * `line` - The line.
-/// * `open` - Index of the opening parenthesis.
-fn args_at(line: &str, open: usize) -> Option<Vec<String>> {
-    let mut depth = 0i32;
-    for (k, b) in line.bytes().enumerate().skip(open) {
-        match b {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(split_args(&line[open + 1..k]));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Every write one line makes, in order.

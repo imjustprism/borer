@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 use super::classes::{code_or_hex, four_chars};
 use super::naming::in_data;
 use super::render::Legend;
-use super::schema::{ident_char, split_args};
+use super::schema::{args_at, ident_char};
 use super::{Analysis, Overlay, RefKind, name_of, plain_text_cached};
 use crate::program::Program;
 use crate::strings::cstr_at;
@@ -96,21 +96,7 @@ pub(crate) fn call_args(line: &str, callee: &str) -> Option<Vec<String>> {
         if !bounded {
             continue;
         }
-        let open = at + callee.len();
-        let mut depth = 0i32;
-        for (k, b) in line.bytes().enumerate().skip(open) {
-            match b {
-                b'(' => depth += 1,
-                b')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(split_args(&line[open + 1..k]));
-                    }
-                }
-                _ => {}
-            }
-        }
-        return None;
+        return args_at(line, at + callee.len());
     }
     None
 }
