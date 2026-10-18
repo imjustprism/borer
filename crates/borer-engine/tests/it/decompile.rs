@@ -1677,6 +1677,26 @@ fn a_bounded_lookup_declares_its_table() {
     assert!(text.contains("g32_140002000[a1]"), "{text}");
 }
 
+/// Asserts that the text of each function agrees with the machine on
+/// every block from several seeds, the replay the dogfood sweep runs.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis.
+/// * `entries` - The functions to replay.
+///
+/// # Panics
+///
+/// When a statement disagrees with the machine, with the table.
+fn replays_clean(p: &borer_engine::program::Program, a: &Analysis, entries: &[u64]) {
+    use borer_engine::analysis::decompile::replay::{replay, replay_tsv};
+    for seed in 1..=4 {
+        let r = replay(p, a, entries, seed);
+        assert!(r.wrong().is_empty(), "seed {seed}:\n{}", replay_tsv(&r));
+    }
+}
+
 /// The check reads a float parameter at the width the signature gives it.
 ///
 /// `cvtss2sd xmm0,xmm0; ret`, which nothing calls, is `double f(float a1)`
@@ -1692,7 +1712,7 @@ fn a_float_parameter_converts_as_the_float_it_is() {
     let a = Analysis::compute(&p);
     let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
     assert!(text.contains("(float a1)"), "{text}");
-    assert!(!text.contains("disagree"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
 }
 
 /// A body that names no precision returns the float its callers read.
@@ -1718,7 +1738,7 @@ fn a_bit_move_returns_the_float_its_callers_read() {
     let callee = a.function(0x1_4000_1040).map(|f| f.ret_float);
     assert_eq!(callee, Some(Some(32)));
     let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
-    assert!(!text.contains("disagree"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
     assert!(!text.contains("double xmm0"), "{text}");
 }
 
