@@ -114,6 +114,7 @@ commands:
   doctor [offline]                         the local setup, one line each: version and commit, toolchain, symbol cache and server (offline skips the server), index cache, .mcp.json
   setup [--apply]                          register this binary as the MCP server borer with every agent client installed (Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Gemini CLI, Codex CLI, Zed); a dry run that shows each file and entry unless --apply, which keeps a .bak of each file it changes
   update [--check]                         install the latest release over this binary, checked against its SHA256SUMS; --check only says whether one is out (a command line run also checks once a day and says so on stderr; BORER_NO_UPDATE_CHECK=1 turns that off)
+  version                                  print the version (also --version, -V)
   fetch-pdb <binary> [server]              fetch the companion PDB the debug record names from a symbol server (default msdl) into the local cache, kept only if its guid+age match; reload to apply
   pack <file>                              read a pack and report its name, its keys by section and what borer does not read
   pack-keys                                every key a pack can set, with its default and meaning
@@ -1428,6 +1429,12 @@ const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
 /// missing or unloadable binary, a bad address, or an engine failure; the
 /// message carries the command's usage lines where it helps.
 pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
+    if let [word] = args
+        && matches!(word.as_str(), "--version" | "-V" | "version")
+    {
+        println!("borer {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let (args, raw) = RawFlags::split(args)?;
     let (owned, pack_files, auto, pdb) = split_pack_args(&args)?;
     let args = owned.as_slice();
