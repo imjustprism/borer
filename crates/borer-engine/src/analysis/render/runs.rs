@@ -2248,6 +2248,10 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
             writes_shown(x)
         );
     }
+    if returned == 0 {
+        out.push_str("# harness: none, since no vector returned\n");
+        return Ok(out);
+    }
     out.push_str("# harness: C, asserting the vectors that returned\n");
     out.push_str(&harness(
         &c_name(&short_name(a, o, entry)),
@@ -2299,6 +2303,25 @@ mod tests {
         u64::from(buf.iter().take(n).fold(0x1505u32, |acc, &b| {
             acc.wrapping_mul(33).wrapping_add(u32::from(b))
         }))
+    }
+
+    /// Vectors none of which returned write no harness: it asserted nothing
+    /// and cost some 900 bytes of C in every such answer.
+    ///
+    /// # Panics
+    ///
+    /// When the harness is written anyway.
+    #[test]
+    fn vectors_that_never_return_write_no_harness() {
+        let p = Program::raw_x64(&[0xeb, 0xfe]);
+        let a = Analysis::compute(&p);
+        let out = vectors_tsv(&p, &a, &Overlay::default(), "0x1000,steps=50").unwrap();
+        assert!(out.contains("; 0 returned\n"), "{out}");
+        assert!(
+            out.ends_with("# harness: none, since no vector returned\n"),
+            "{out}"
+        );
+        assert!(!out.contains("#include"), "{out}");
     }
 
     /// Vectors for a buffer checksum: a row per input with the checksum a
