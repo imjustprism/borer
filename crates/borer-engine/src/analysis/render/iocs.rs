@@ -4,6 +4,7 @@
 
 use super::calls::{Reach, gather, listed_args};
 use super::*;
+use crate::analysis::decompile::CallArg;
 use crate::ioc::{Indicator, Kind, classify, named};
 
 /// Most rows one read lists; the rest page with `offset=`.
@@ -21,6 +22,14 @@ const STRING_MIN: usize = 6;
 
 /// Shortest base64 text decoded to look for indicators inside.
 const BASE64_MIN: usize = 16;
+
+/// Longest argument text read for an indicator, in characters.
+const ARG_TEXT_MAX: usize = 512;
+
+/// Openings of the compiler and linker identifications a toolchain leaves
+/// in the file outside the image (an ELF's `.comment`): each names the
+/// toolchain's own repository, which the program never contacts.
+const TOOLCHAIN_IDENTS: [&str; 4] = ["clang version ", "Linker: ", "GCC: (", "rustc version "];
 
 /// APIs whose argument names an indicator: the API, the argument's
 /// position counting from one, and what it names; `None` reads the text
@@ -239,9 +248,10 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
     for (off, text, source) in stored {
         let va = p.offset_to_va(off);
         if source == Source::Static
-            && va
-                .and_then(|v| p.section_at(v))
-                .is_some_and(|s| s.executable)
+            && match va {
+                Some(v) => p.section_at(v).is_some_and(|s| s.executable),
+                None => TOOLCHAIN_IDENTS.iter().any(|t| text.starts_with(t)),
+            }
         {
             continue;
         }
@@ -376,7 +386,7 @@ fn call_arguments(p: &Program, a: &Analysis, o: &Overlay, rows: &mut Vec<Row>) -
                 continue;
             };
             let args = listed_args(site, None);
-            let Some(text) = args.get(pos - 1).and_then(|arg| arg.string.as_deref()) else {
+            let Some(text) = args.get(pos - 1).and_then(|arg| argument_text(p, api, arg)) else {
                 continue;
             };
             let hive = args
@@ -386,7 +396,7 @@ fn call_arguments(p: &Program, a: &Analysis, o: &Overlay, rows: &mut Vec<Row>) -
                 .map(|(_, name)| *name);
             let text = match (kind, hive) {
                 (Some(Kind::Registry), Some(hive)) => format!("{hive}\\{text}"),
-                _ => text.to_owned(),
+                _ => text,
             };
             let mut found = classify(&text);
             if let Some(kind) = kind
@@ -405,6 +415,74 @@ fn call_arguments(p: &Program, a: &Analysis, o: &Overlay, rows: &mut Vec<Row>) -
         }
     }
     (callers, read)
+}
+
+/// The text a naming API's argument names, read the way the API reads it.
+///
+/// A `W` API reads UTF-16 and any other reads bytes, so a constant argument
+/// is read again from the image in the API's width: the decompiler may have
+/// spelled a wide string by its first byte, and `RegCreateKeyW(hkey, "S")`
+/// made a registry indicator `S`. An argument the text spells as a literal
+/// with no address left is that literal, its C escapes undone, except a
+/// narrow literal handed to a `W` API: that is a wide string read by its
+/// first byte, and no indicator beats a wrong one.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `api` - The API's bare name.
+/// * `arg` - The recorded argument.
+///
+/// # Returns
+///
+/// The text, or `None` when the argument names no string.
+fn argument_text(p: &Program, api: &str, arg: &CallArg) -> Option<String> {
+    let Some(v) = arg.value else {
+        if api.ends_with('W') && !arg.text.starts_with("L\"") {
+            return None;
+        }
+        return arg.string.as_deref().map(unescaped);
+    };
+    arg.string.as_ref()?;
+    let read = if api.ends_with('W') {
+        crate::strings::wstr_text_at(p, v, 1, ARG_TEXT_MAX)
+    } else {
+        crate::strings::cstr_text_at(p, v, 1, ARG_TEXT_MAX)
+    };
+    read.map(|(_, text)| text)
+}
+
+/// Undoes the C escapes of a literal's text: a backslash before `n`, `r`,
+/// `t` or `0` stands for that control character, before `xNN` for that
+/// byte, and before anything else for the character itself.
+///
+/// # Arguments
+///
+/// * `text` - The text between the quotes.
+fn unescaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('0') => out.push('\0'),
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                if let Ok(b) = u8::from_str_radix(&hex, 16) {
+                    out.push(char::from(b));
+                }
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// The text a base64 string decodes to, when it decodes to text.
@@ -671,4 +749,54 @@ pub fn iocs_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
         );
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{argument_text, unescaped};
+    use crate::analysis::decompile::CallArg;
+    use crate::program::{Arch, Program, Section};
+
+    /// A wide string handed to a `W` API reads whole, though the text
+    /// spelled it by its first byte, and an escaped literal reads as the
+    /// characters it stands for.
+    ///
+    /// # Panics
+    ///
+    /// When the registry key reads as `S`, or the escapes stay.
+    #[test]
+    fn a_w_api_argument_reads_as_utf16() {
+        let mut bytes = vec![0u8; 0x100];
+        let key: Vec<u8> = r"Software\Notepad"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        bytes[0x10..0x10 + key.len()].copy_from_slice(&key);
+        let p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0x1000,
+            None,
+            vec![Section::mapped(".rdata", 0x1000, 0, 0x100, false, false)],
+        );
+        let arg = CallArg {
+            text: "\"S\"".to_owned(),
+            value: Some(0x1010),
+            string: Some("S".to_owned()),
+        };
+        assert_eq!(
+            argument_text(&p, "RegCreateKeyW", &arg).as_deref(),
+            Some(r"Software\Notepad")
+        );
+        assert_eq!(
+            argument_text(&p, "RegCreateKeyA", &arg).as_deref(),
+            Some("S")
+        );
+        let folded = CallArg { value: None, ..arg };
+        assert_eq!(argument_text(&p, "RegCreateKeyW", &folded), None);
+        assert_eq!(
+            unescaped(r#"Software\\Microsoft\x41\"q\""#),
+            r#"Software\MicrosoftA"q""#
+        );
+    }
 }
