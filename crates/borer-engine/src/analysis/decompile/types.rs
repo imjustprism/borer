@@ -1166,6 +1166,10 @@ fn uint64_names(lines: &[String]) -> Vec<String> {
 ///
 /// A constant assigned through one or several names truncates each of
 /// them to the same bits, so such a line says nothing against the type.
+/// A test `name == k` or `name != k` of a constant below `2^31` reads the
+/// same at either width while every write leaves the high half clear: a
+/// masked write or a constant does, a `+=` can carry into it. Only a
+/// `varN` local qualifies, as a register name can hold an entry value.
 ///
 /// # Arguments
 ///
@@ -1177,6 +1181,8 @@ fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
     let mut unsigned = false;
     let mut returned = false;
     let mut indexed = false;
+    let mut compared = false;
+    let mut compound = false;
     for line in lines {
         if line.starts_with("//") || is_declaration(line) {
             continue;
@@ -1199,15 +1205,20 @@ fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
                 if !fits_u32(rhs) {
                     return None;
                 }
-            } else if let Some(rhs) = compound_rhs(trimmed, name)
-                && !fits_u32(rhs)
-            {
-                return None;
+            } else if let Some(rhs) = compound_rhs(trimmed, name) {
+                compound = true;
+                if !fits_u32(rhs) {
+                    return None;
+                }
             }
         }
         for at in word_positions(line, name) {
             if address_index(line, at, name) {
                 indexed = true;
+                continue;
+            }
+            if small_equality(line, at, name) {
+                compared = true;
                 continue;
             }
             if lane_use(line, at, name) {
@@ -1222,7 +1233,7 @@ fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
             return None;
         }
     }
-    if !masked {
+    if !masked || (compared && (compound || !vars::is_var_name(name))) {
         return None;
     }
     if indexed || returned || unsigned || !signed {
@@ -1254,6 +1265,45 @@ fn address_index(line: &str, at: usize, name: &str) -> bool {
     let from = head.rfind([';', '\n']).map_or(0, |i| i + 1);
     let region = line.get(from..).unwrap_or(line);
     region.contains("*(") || region.contains(")[")
+}
+
+/// Tells whether `name` at `at` is a whole `name == k` or `name != k` test
+/// of a constant below `2^31`.
+///
+/// The test opens a parenthesis or follows `&&` or `||`, and the constant
+/// closes it or comes before `&&`, `||` or `?`, so no operator binds
+/// either side tighter than the compare.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - Byte index of the name.
+/// * `name` - The variable.
+fn small_equality(line: &str, at: usize, name: &str) -> bool {
+    let head = line.get(..at).unwrap_or("");
+    let tail = line.get(at + name.len()..).unwrap_or("");
+    if !(head.ends_with('(') || head.ends_with("&& ") || head.ends_with("|| ")) {
+        return false;
+    }
+    let Some(rest) = tail
+        .strip_prefix(" == ")
+        .or_else(|| tail.strip_prefix(" != "))
+    else {
+        return false;
+    };
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(rest.len());
+    let (constant, after) = rest.split_at(end);
+    let closes = after.starts_with(')')
+        || after.starts_with(" && ")
+        || after.starts_with(" || ")
+        || after.starts_with(" ? ");
+    let value = match constant.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => constant.parse().ok(),
+    };
+    closes && value.is_some_and(|v| v <= 0x7fff_ffff)
 }
 
 /// Tells whether the use of `name` at `at` is a 32-bit one: its own write,
@@ -3354,6 +3404,42 @@ mod lane_tests {
         assert_eq!(out.matches("var1 += 1;").count(), 1, "{out}");
         assert!(out.contains("while (var1 < a3);"), "{out}");
         assert!(!out.contains("0xffffffff"), "{out}");
+    }
+
+    /// A zero test of a counter every write masks reads the same at 32 bits.
+    ///
+    /// The counter is declared there and its masks go. A `+=`
+    /// can carry into the high half, so beside one the test keeps the
+    /// local at 64 bits.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_zero_test_of_a_masked_counter_is_a_32_bit_read() {
+        let text = concat!(
+            "uint64_t var1, var2;\n",
+            "\n",
+            "var2 = a2 & 0xffffffff;\n",
+            "do {\n",
+            "  var2 = (var2 - 1) & 0xffffffff;\n",
+            "  if (var2 == 0 && *(uint8_t*)a1 == 62) {\n",
+            "    return;\n",
+            "  }\n",
+            "} while ((int32_t)var2 > 0);\n",
+            "var1 = a3 & 0xffffffff;\n",
+            "var1 += 1;\n",
+            "if (var1 != 0) {\n",
+            "  return;\n",
+            "}\n",
+        );
+        let out = lane_locals(text);
+        assert!(out.contains("int32_t var2;"), "{out}");
+        assert!(out.contains("var2 -= 1;"), "{out}");
+        assert!(out.contains("if (var2 == 0 && "), "{out}");
+        assert!(out.contains("while (var2 > 0);"), "{out}");
+        assert!(out.contains("uint64_t var1;"), "{out}");
+        assert!(out.contains("var1 = a3 & 0xffffffff;"), "{out}");
     }
 }
 
