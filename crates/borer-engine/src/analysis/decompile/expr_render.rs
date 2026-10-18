@@ -893,6 +893,7 @@ impl Expr {
                         && !sum
                         && matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Shl)
                         && matches!(e, Expr::Sext(.., b) if *b < 64)
+                        && !s.starts_with("(int64_t)")
                     {
                         let s = if sp < UNARY { format!("({s})") } else { s };
                         (format!("(int64_t){s}"), UNARY)

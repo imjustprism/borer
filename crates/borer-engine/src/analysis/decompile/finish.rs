@@ -36,9 +36,8 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
     let text = quiet_zero_tests(&normalize_temps(&evidence::name_vars(
         &byte_arithmetic(
             &type_locals(&type_parameters(
-                &lane_locals(&apply_layouts(&vars::split_webs(&wire_format(
-                    &source_file(&name_own_fields(text)),
-                    &streams,
+                &lane_locals(&float_lanes(&apply_layouts(&vars::split_webs(
+                    &wire_format(&source_file(&name_own_fields(text)), &streams),
                 )))),
                 word,
             )),

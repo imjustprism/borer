@@ -1980,6 +1980,131 @@ fn redeclare(lines: &mut Vec<String>, typed: &[(String, &'static str)]) {
     lines.retain(|l| l != "\u{0}");
 }
 
+/// The kept half and the new low lane of a scalar single's merge,
+/// `(a & 0xffffffff00000000) | (e & 0xffffffff)`.
+///
+/// # Arguments
+///
+/// * `rhs` - An expression, without its `;`.
+fn single_merge(rhs: &str) -> Option<(&str, &str)> {
+    let rest = rhs.strip_prefix('(')?;
+    let (kept, rest) = rest.split_once(" & 0xffffffff00000000) | (")?;
+    let lane = rest.strip_suffix(" & 0xffffffff)")?;
+    if !(balanced(kept) && balanced(lane)) {
+        return None;
+    }
+    let inner = lane
+        .strip_prefix('(')
+        .and_then(|l| l.strip_suffix(')'))
+        .filter(|l| balanced(l));
+    Some((kept, inner.unwrap_or(lane)))
+}
+
+/// Declares a register a scalar single only ever replaces the low lane
+/// of as a `float`, and writes each of those replacements as plain
+/// assignments.
+///
+/// `addss` and its kin keep bits 63:32 of their register, which the
+/// lifter spells `v = (v & 0xffffffff00000000) | (e & 0xffffffff)`. When
+/// every write of `v` is such a merge or a zero, and every read of `v` is
+/// another merge's lane or kept half or a `return` of a `float`
+/// function, nothing reads the kept bits: `v` is the single `e`, and
+/// `float v; v = e;` says the same in C. A `return` of a merge in a
+/// function returning `float` returns its lane. Any other read (a cast, an
+/// integer operation, a copy) keeps the variable as it was.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines included.
+///
+/// # Returns
+///
+/// The text with those registers declared `float`.
+pub(super) fn float_lanes(text: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let returns_float = lines.iter().any(|l| l.starts_with("// signature: float "));
+    let mut changed = false;
+    if returns_float {
+        for line in &mut lines {
+            let indent = line.len() - line.trim_start().len();
+            let lane = line
+                .trim()
+                .strip_prefix("return ")
+                .and_then(|r| r.strip_suffix(';'))
+                .and_then(single_merge)
+                .map(|(_, lane)| lane.to_owned());
+            if let Some(lane) = lane {
+                *line = format!("{}return {lane};", " ".repeat(indent));
+                changed = true;
+            }
+        }
+    }
+    let names = uint64_names(&lines);
+    let mut typed: Vec<(String, &'static str)> = Vec::new();
+    for name in names {
+        let mut merges = 0usize;
+        let fits = lines.iter().all(|line| {
+            if line.starts_with("//")
+                || is_declaration(line)
+                || word_positions(line, &name).is_empty()
+            {
+                return true;
+            }
+            let t = line.trim();
+            let body = t.strip_suffix(';').unwrap_or(t);
+            if let Some((lhs, rhs)) = body.split_once(" = ")
+                && is_ident(lhs)
+                && let Some((kept, lane)) = single_merge(rhs)
+            {
+                merges += usize::from(lhs == name);
+                return !float_cast_of(kept, &name) && !float_cast_of(lane, &name);
+            }
+            if const_chain(t).is_some_and(|chain| chain.contains(&name.as_str())) {
+                return body.ends_with(" = 0");
+            }
+            returns_float && body == format!("return {name}")
+        });
+        if fits && merges > 0 {
+            typed.push((name, "float"));
+        }
+    }
+    if typed.is_empty() && !changed {
+        return text.to_owned();
+    }
+    let floats: BTreeSet<&str> = typed.iter().map(|(n, _)| n.as_str()).collect();
+    for line in &mut lines {
+        let indent = line.len() - line.trim_start().len();
+        let t = line.trim();
+        let Some((lhs, rhs)) = t.strip_suffix(';').and_then(|b| b.split_once(" = ")) else {
+            continue;
+        };
+        if !floats.contains(lhs) {
+            continue;
+        }
+        if let Some((_, lane)) = single_merge(rhs) {
+            *line = format!("{}{lhs} = {lane};", " ".repeat(indent));
+        }
+    }
+    redeclare(&mut lines, &typed);
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Tells whether `name` appears in `expr` right after an integer cast,
+/// which reads its bits rather than its value.
+///
+/// # Arguments
+///
+/// * `expr` - An expression.
+/// * `name` - The variable.
+fn float_cast_of(expr: &str, name: &str) -> bool {
+    word_positions(expr, name).into_iter().any(|at| {
+        let head = expr.get(..at).unwrap_or("");
+        head.ends_with("_t)") || head.ends_with("_t)(") || head.ends_with('&')
+    })
+}
+
 /// Pulls a counter's initializer up to the `while` when another pure
 /// assignment sits between them, and makes the `for` the emitter would
 /// have made from a `+= 1` it can now see.
@@ -3645,4 +3770,61 @@ pub(super) fn typed_results(
         .into_iter()
         .filter_map(|(var, ty)| Some((var, ty?.to_owned())))
         .collect()
+}
+
+#[cfg(test)]
+mod float_lane_tests {
+    use super::float_lanes;
+
+    /// A register only scalar singles replace the low lane of is a `float`,
+    /// and a `float` function's merged `return` returns the lane.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_register_only_singles_write_is_a_float() {
+        let text = [
+            "// signature: float f(float *a1, uint64_t a2, float a3)",
+            "uint64_t var1, var2;",
+            "",
+            "var2 = 0;",
+            "do {",
+            "  var2 = (var2 & 0xffffffff00000000) | ((var2 * a3 + a1[var1]) & 0xffffffff);",
+            "  var1 += 1;",
+            "} while (var1 != a2);",
+            "return var2;",
+        ]
+        .join("\n");
+        let out = float_lanes(&text);
+        assert!(out.contains("float var2;"), "{out}");
+        assert!(out.contains("uint64_t var1;"), "{out}");
+        assert!(out.contains("  var2 = var2 * a3 + a1[var1];"), "{out}");
+        let ret = "// signature: float g(float a1, float a2)\n\nreturn (a2 & 0xffffffff00000000) | ((a2 - a1) & 0xffffffff);\n";
+        assert!(
+            float_lanes(ret).contains("return a2 - a1;"),
+            "{}",
+            float_lanes(ret)
+        );
+    }
+
+    /// A read of the bits (an integer cast) keeps the register as it was.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_bit_read_keeps_the_merge() {
+        let text = [
+            "// signature: uint32_t f(float a1)",
+            "uint64_t var2;",
+            "",
+            "var2 = (var2 & 0xffffffff00000000) | ((var2 + a1) & 0xffffffff);",
+            "return (uint32_t)var2;",
+        ]
+        .join("\n");
+        let out = float_lanes(&text);
+        assert!(out.contains("uint64_t var2;"), "{out}");
+        assert!(out.contains("0xffffffff00000000"), "{out}");
+    }
 }

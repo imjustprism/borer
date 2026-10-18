@@ -544,6 +544,10 @@ enum Writer {
 /// rsp` as the first instruction, rax standing in for the entry stack
 /// pointer while the callee-saved registers are stored to their home slots,
 /// is no write of a result. A lone `ret` is a stub that says nothing.
+/// A float exit whose writes name no precision (`movaps xmm0, xmm1`,
+/// `xorps xmm0, xmm0`) takes the copy's source precision in the block
+/// ([`copied_bits`]), else the one precision every scalar instruction of
+/// the function names, when they agree.
 ///
 /// # Arguments
 ///
@@ -622,7 +626,8 @@ fn handed_back(
                 return match reg {
                     ResultReg::Rax => rax_write(factory, i).map(|_| Writer::Own(None)),
                     ResultReg::Rdx => None,
-                    ResultReg::Xmm0 => writes_xmm0(factory, i).then(|| Writer::Own(float_bits(i))),
+                    ResultReg::Xmm0 => writes_xmm0(factory, i)
+                        .then(|| Writer::Own(float_bits(i).or_else(|| copied_bits(&instrs, i)))),
                 };
             }
             let direct = matches!(
@@ -651,6 +656,19 @@ fn handed_back(
     }
     out.calls.sort_unstable();
     out.calls.dedup();
+    if reg == ResultReg::Xmm0 && out.own && out.float_bits.is_empty() {
+        let mut named: Vec<u8> = f
+            .blocks
+            .iter()
+            .flat_map(|blk| decode_block(program, bitness, blk))
+            .filter_map(|i| float_bits(&i))
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        if let [only] = named[..] {
+            out.float_bits.push(only);
+        }
+    }
     out.float_bits.sort_unstable();
     out.float_bits.dedup();
     out
@@ -794,6 +812,44 @@ fn writes_xmm0(factory: &mut InstructionInfoFactory, i: &Instruction) -> bool {
                     | OpAccess::ReadCondWrite
             )
     })
+}
+
+/// The precision of the value a register-to-register vector copy moves,
+/// read off the last instruction before it in the block that wrote its
+/// source.
+///
+/// `addss xmm2, xmm3; movaps xmm0, xmm2` hands back a single: the copy
+/// names no precision itself ([`float_bits`]), its source's writer does.
+///
+/// # Arguments
+///
+/// * `block` - The block's instructions.
+/// * `copy` - The copy, one of them.
+///
+/// # Returns
+///
+/// The source writer's precision, or `None` when `copy` is no such copy
+/// or no writer in the block names one.
+fn copied_bits(block: &[Instruction], copy: &Instruction) -> Option<u8> {
+    let moves = matches!(
+        copy.mnemonic(),
+        Mnemonic::Movaps
+            | Mnemonic::Movapd
+            | Mnemonic::Movups
+            | Mnemonic::Movupd
+            | Mnemonic::Vmovaps
+            | Mnemonic::Vmovapd
+    );
+    if !moves || copy.op_count() != 2 || copy.op1_kind() != OpKind::Register {
+        return None;
+    }
+    let src = copy.op1_register().full_register();
+    let at = block.iter().position(|i| i.ip() == copy.ip())?;
+    block[..at]
+        .iter()
+        .rev()
+        .find(|i| i.op0_kind() == OpKind::Register && i.op0_register().full_register() == src)
+        .and_then(float_bits)
 }
 
 /// The precision a scalar floating-point instruction names, in bits.

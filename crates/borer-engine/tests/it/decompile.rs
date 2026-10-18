@@ -1745,6 +1745,28 @@ fn a_plt_stub_to_an_own_export_takes_its_name() {
     );
 }
 
+/// A float exit through a bit copy takes the precision of what it copies.
+///
+/// `subss xmm2,xmm0; mulss xmm2,xmm2; movaps xmm0,xmm2; ret`, which
+/// nothing calls, returns the single `mulss` left: the `movaps` that moves
+/// it names no precision of its own, its source's writer does.
+#[test]
+fn a_copied_single_is_a_float_result() {
+    let code = [
+        0xf3, 0x0f, 0x5c, 0xd0, // ASM: subss xmm2,xmm0
+        0xf3, 0x0f, 0x59, 0xd2, // ASM: mulss xmm2,xmm2
+        0x0f, 0x28, 0xc2, // ASM: movaps xmm0,xmm2
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let f = a.function(0x1_4000_1000).map(|f| f.ret_float);
+    assert_eq!(f, Some(Some(32)));
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("// signature: float "), "{text}");
+    assert!(!text.contains("0xffffffff00000000"), "{text}");
+}
+
 /// A 64-bit product of two sign-extended 32-bit loads casts an operand.
 ///
 /// `movsxd` both, then `imul rax,rdx`, multiplies at 64 bits. Written as
