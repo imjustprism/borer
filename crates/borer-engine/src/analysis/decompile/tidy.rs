@@ -610,13 +610,27 @@ pub fn cleanup(body: &str) -> String {
 ///
 /// The cleaned body, newline-terminated.
 pub(super) fn cleanup_text(body: &str, live_out: Option<&str>) -> String {
+    cleanup_settled(body, live_out).0
+}
+
+/// [`cleanup_text`], with how its passes ended.
+///
+/// # Arguments
+///
+/// * `body` - Pseudo-C lines as the emitter writes them.
+/// * `live_out` - The register a second result comes back in, if any.
+///
+/// # Returns
+///
+/// The cleaned body, newline-terminated, and its [`Settle`].
+pub(super) fn cleanup_settled(body: &str, live_out: Option<&str>) -> (String, Settle) {
     let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
     let fuel = CLEANUP_PASSES.saturating_add(lines.len());
-    cleanup_passes(&mut lines, fuel, live_out);
+    let settle = cleanup_passes(&mut lines, fuel, live_out);
     loops::recover_loops(&mut lines);
     let mut text = lines.join("\n");
     text.push('\n');
-    text
+    (text, settle)
 }
 
 /// Drops each `goto` (bare or `if (...) goto`) whose label follows it
@@ -694,6 +708,32 @@ pub(super) fn refold_jumps(text: &str) -> String {
     out
 }
 
+/// How one run of the cleanup passes ended.
+///
+/// The passes stop when one changes nothing or when the budget is spent
+/// ([`CLEANUP_PASSES`]). A text that spends it is written as it stands; that
+/// is a rule and its undoing trading the text back and forth, which costs a
+/// pass per line and leaves jumps a settled run would fold, so a sweep
+/// checks that no function spends it ([`Settle::spent`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settle {
+    /// Passes run.
+    pub passes: usize,
+    /// Passes the text was allowed.
+    pub fuel: usize,
+    /// The passes that still changed the text in the last pass run; empty
+    /// when the text settled.
+    pub churn: Vec<&'static str>,
+}
+
+impl Settle {
+    /// Tells whether the budget ran out before the text settled.
+    #[must_use]
+    pub fn spent(&self) -> bool {
+        !self.churn.is_empty()
+    }
+}
+
 /// Passes [`cleanup_passes`] may run beyond one per line of the text.
 ///
 /// Every pass that runs another changed something, and once the folds
@@ -716,49 +756,88 @@ pub(super) const CLEANUP_PASSES: usize = 64;
 ///
 /// # Returns
 ///
-/// How many passes ran.
+/// How many passes ran, out of how many, and what still changed when the
+/// budget ran out ([`Settle`]).
 pub(super) fn cleanup_passes(
     lines: &mut Vec<String>,
     fuel: usize,
     live_out: Option<&str>,
-) -> usize {
+) -> Settle {
     let mut passes = 0;
+    let mut churn: Vec<&'static str> = Vec::new();
     while passes < fuel {
         passes += 1;
-        let mut changed = merge_chains(lines);
-        changed |= fold_temp_copies(lines);
-        changed |= merge_return_assignments(lines);
-        changed |= drop_fallthrough_gotos(lines);
+        churn.clear();
+        let mut changed = note(&mut churn, "merge_chains", merge_chains(lines));
+        changed |= note(&mut churn, "fold_temp_copies", fold_temp_copies(lines));
+        changed |= note(
+            &mut churn,
+            "merge_return_assignments",
+            merge_return_assignments(lines),
+        );
+        changed |= note(
+            &mut churn,
+            "drop_fallthrough_gotos",
+            drop_fallthrough_gotos(lines),
+        );
         let referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
         let before = lines.len();
         lines.retain(|l| match label_name(l) {
             Some(name) => referenced.contains(name),
             None => !l.trim().is_empty(),
         });
-        changed |= lines.len() != before;
-        changed |= flatten_else_if(lines);
-        changed |= collapse_lone_gotos(lines);
-        changed |= hoist_common_tails(lines);
-        changed |= thread_jumps(lines);
-        changed |= flip_jump_pairs(lines);
-        changed |= loop_exits(lines);
-        changed |= fold_conditional_gotos(lines, RunLabels::Forbidden);
-        changed |= flatten_early_exits(lines);
-        changed |= absorb_else(lines);
-        changed |= fold_unordered_compares(lines);
+        changed |= note(&mut churn, "unnamed labels", lines.len() != before);
+        changed |= note(&mut churn, "flatten_else_if", flatten_else_if(lines));
+        changed |= note(
+            &mut churn,
+            "collapse_lone_gotos",
+            collapse_lone_gotos(lines),
+        );
+        changed |= note(&mut churn, "hoist_common_tails", hoist_common_tails(lines));
+        changed |= note(&mut churn, "thread_jumps", thread_jumps(lines));
+        changed |= note(&mut churn, "flip_jump_pairs", flip_jump_pairs(lines));
+        changed |= note(&mut churn, "loop_exits", loop_exits(lines));
+        changed |= note(
+            &mut churn,
+            "fold_conditional_gotos",
+            fold_conditional_gotos(lines, RunLabels::Forbidden),
+        );
+        changed |= note(
+            &mut churn,
+            "flatten_early_exits",
+            flatten_early_exits(lines),
+        );
+        changed |= note(&mut churn, "absorb_else", absorb_else(lines));
+        changed |= note(
+            &mut churn,
+            "fold_unordered_compares",
+            fold_unordered_compares(lines),
+        );
         if let Some(kept) = drop_dead_assignments(lines, live_out) {
             *lines = kept;
-            changed = true;
+            changed = note(&mut churn, "drop_dead_assignments", true);
         }
-        changed |= strlen_loops(lines);
+        changed |= note(&mut churn, "strlen_loops", strlen_loops(lines));
         if !changed {
-            changed |= fold_conditional_gotos(lines, RunLabels::Contained);
+            changed |= note(
+                &mut churn,
+                "fold_conditional_gotos",
+                fold_conditional_gotos(lines, RunLabels::Contained),
+            );
         }
         if !changed {
-            changed |= inline_terminal_tails(lines);
+            changed |= note(
+                &mut churn,
+                "inline_terminal_tails",
+                inline_terminal_tails(lines),
+            );
         }
         if !changed {
-            changed |= move_single_use_blocks(lines);
+            changed |= note(
+                &mut churn,
+                "move_single_use_blocks",
+                move_single_use_blocks(lines),
+            );
         }
         let endless = endless_loop_closers(lines);
         for k in (0..lines.len()).rev() {
@@ -779,14 +858,37 @@ pub(super) fn cleanup_passes(
             }
             if !has_label && end > k + 1 {
                 lines.drain(k + 1..end);
-                changed = true;
+                changed = note(&mut churn, "unreachable runs", true);
             }
         }
         if !changed {
+            churn.clear();
             break;
         }
     }
-    passes
+    Settle {
+        passes,
+        fuel,
+        churn,
+    }
+}
+
+/// Records a pass that changed the text.
+///
+/// # Arguments
+///
+/// * `churn` - The passes that changed it so far this round.
+/// * `name` - The pass.
+/// * `did` - Whether it changed anything.
+///
+/// # Returns
+///
+/// `did`, so the call stands where the bare result stood.
+fn note(churn: &mut Vec<&'static str>, name: &'static str, did: bool) -> bool {
+    if did {
+        churn.push(name);
+    }
+    did
 }
 
 #[cfg(test)]
@@ -825,13 +927,15 @@ mod fuel_tests {
         ];
         let lines = || -> Vec<String> { body.iter().map(|l| (*l).to_owned()).collect() };
         let mut settled = lines();
-        let passes = cleanup_passes(&mut settled, usize::MAX, None);
+        let passes = cleanup_passes(&mut settled, usize::MAX, None).passes;
         assert!(passes >= 3, "{passes} passes: {settled:?}");
         let mut again = lines();
-        assert_eq!(cleanup_passes(&mut again, passes, None), passes);
+        assert_eq!(cleanup_passes(&mut again, passes, None).passes, passes);
         assert_eq!(again, settled);
         let mut one = lines();
-        assert_eq!(cleanup_passes(&mut one, 1, None), 1);
+        let spent = cleanup_passes(&mut one, 1, None);
+        assert_eq!(spent.passes, 1);
+        assert!(spent.spent(), "{spent:?}");
         assert_ne!(one, settled);
         assert!(one.iter().any(|l| l.contains("goto ")), "{one:?}");
     }

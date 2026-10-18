@@ -549,6 +549,36 @@ pub fn decompile_all(
     render_all(program, analysis, overlay, entries, decompile_afresh)
 }
 
+/// [`decompile_all`], each text with how its cleanup passes ended.
+///
+/// A sweep reads the [`Settle`] to find a function whose passes spent
+/// their budget without settling, which no rendering shows.
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names and comments to apply.
+/// * `entries` - Function entries, in any order.
+///
+/// # Returns
+///
+/// One result per entry, `None` where [`decompile`] returns `None`.
+pub fn decompile_all_settled(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entries: &[u64],
+) -> Vec<Option<(String, Settle)>> {
+    render_all(program, analysis, overlay, entries, |p, a, o, e| {
+        let bitness = p.arch.bitness().unwrap_or(64);
+        decompile_plain_full(p, a, o, e).map(|d| {
+            let text = tables::inline_tables(&polish(&d.text, bitness, &a.packs), p);
+            (text, d.settle)
+        })
+    })
+}
+
 /// Decompiles many functions at once as [`decompile_named`] renders each,
 /// one stripe of them per core: the text the `decompile` tool shows, with
 /// fields named through their class.
@@ -572,9 +602,6 @@ pub fn decompile_named_all(
     render_all(program, analysis, overlay, entries, decompile_named_afresh)
 }
 
-/// A function's pseudo-C as one of the decompile entry points renders it.
-type Render = fn(&Program, &Analysis, &Overlay, u64) -> Option<String>;
-
 /// Renders many functions with `render`, one stripe of them per core, the
 /// results in the order of `entries`.
 ///
@@ -591,24 +618,24 @@ type Render = fn(&Program, &Analysis, &Overlay, u64) -> Option<String>;
 /// * `overlay` - Names and comments to apply.
 /// * `entries` - Function entries, in any order.
 /// * `render` - The entry point that renders one function.
-fn render_all(
+fn render_all<T: Send + Clone>(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     entries: &[u64],
-    render: Render,
-) -> Vec<Option<String>> {
+    render: fn(&Program, &Analysis, &Overlay, u64) -> Option<T>,
+) -> Vec<Option<T>> {
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(entries.len().max(1));
-    let mut out: Vec<Option<String>> = vec![None; entries.len()];
+    let mut out: Vec<Option<T>> = vec![None; entries.len()];
     if threads <= 1 {
         for (slot, &entry) in out.iter_mut().zip(entries) {
             *slot = render(program, analysis, overlay, entry);
         }
         return out;
     }
-    let stripes: Vec<Vec<(usize, Option<String>)>> = std::thread::scope(|scope| {
+    let stripes: Vec<Vec<(usize, Option<T>)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 scope.spawn(move || {
@@ -1323,6 +1350,8 @@ pub(crate) struct Decompiled {
     /// What the lifter knew when it wrote them, kept only when asked for
     /// ([`replay`] checks the text with it) and until the check takes it.
     witness: std::sync::Mutex<Option<Box<replay::Witness>>>,
+    /// How the cleanup passes ended, the default when they did not run.
+    settle: Settle,
 }
 
 impl Decompiled {
@@ -1774,10 +1803,10 @@ fn decompile_in<L: Lifter>(
     };
     let (result_reg, second_reg) = L::result_names(bitness);
     let live_out = ctx.ret_rdx || (bitness == 32 && f.hands_back_rdx);
-    let body = if cleanup {
-        cleanup_text(&body, live_out.then_some(second_reg))
+    let (body, settle) = if cleanup {
+        cleanup_settled(&body, live_out.then_some(second_reg))
     } else {
-        body
+        (body, Settle::default())
     };
     let (body, canary) = if cleanup {
         canary::fold(&body)
@@ -2322,6 +2351,7 @@ fn decompile_in<L: Lifter>(
         live: handed,
         effects,
         witness: std::sync::Mutex::new(witness),
+        settle,
     })
 }
 

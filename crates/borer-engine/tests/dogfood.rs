@@ -24,7 +24,7 @@
 
 use borer_engine::analysis::{
     Analysis, Overlay, decompile::decompile, decompile::decompile_all,
-    decompile::decompile_named_all, name_of, render,
+    decompile::decompile_all_settled, decompile::decompile_named_all, name_of, render,
 };
 use borer_engine::program::Program;
 use std::collections::BTreeSet;
@@ -306,10 +306,20 @@ fn decompile_every_function() {
     let (mut ok, mut empty, mut failed) = (0usize, 0usize, 0usize);
     let mut first_failures: Vec<u64> = Vec::new();
     let mut malformed: Vec<String> = Vec::new();
+    let mut unsettled: Vec<String> = Vec::new();
     let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
-    let texts = decompile_all(&p, &a, &Overlay::default(), &entries);
+    let texts = decompile_all_settled(&p, &a, &Overlay::default(), &entries);
     for (f, r) in a.functions.iter().zip(texts) {
-        match r {
+        if let Some((_, settle)) = &r
+            && settle.spent()
+            && unsettled.len() < 10
+        {
+            unsettled.push(format!(
+                "{:#x}: {} of {} passes, still changing: {:?}",
+                f.entry, settle.passes, settle.fuel, settle.churn
+            ));
+        }
+        match r.map(|(t, _)| t) {
             Some(t) if t.lines().count() > 2 => {
                 ok += 1;
                 let missing = dangling_gotos(&t);
@@ -354,6 +364,10 @@ fn decompile_every_function() {
     );
     assert_eq!(failed, 0, "functions that failed to decompile");
     assert!(malformed.is_empty(), "malformed output: {malformed:?}");
+    assert!(
+        unsettled.is_empty(),
+        "cleanup spent its pass budget: {unsettled:?}"
+    );
 }
 
 /// Decompiles every function of the `BORER_DOGFOOD_A64` binary and
