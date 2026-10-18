@@ -292,6 +292,10 @@ impl<'a> Exec<'_, 'a> {
                 self.ctx.ret_bits = self.ctx.ret_bits.max(bits);
                 (format!("return {};", v.render(&self.names())), Some(v))
             }
+            Some(v) if self.ctx.ret_float && !x87 => {
+                let v = float_result(v);
+                (format!("return {};", v.render(&self.names())), Some(v))
+            }
             Some(v) => {
                 let (v, bits) = strip_partial_result(v);
                 self.ctx.ret_bits = self.ctx.ret_bits.max(bits.min(self.ctx.ret_lane));

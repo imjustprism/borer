@@ -1507,7 +1507,8 @@ fn forwarding_a_double_returns_it() {
 /// `call 0x140001040; movsd [rdx],xmm0; ret` reads the double `cvtsi2sd
 /// xmm0,rcx; ret` leaves, so the entry, `sub rsp,0x28; call 0x140001020;
 /// call 0x140001040; addsd xmm0,xmm0; add rsp,0x28; ret`, which nothing
-/// calls, hands back no value in rax.
+/// calls, hands back no value in rax: what it returns is the double its
+/// own `addsd` leaves in xmm0.
 #[test]
 fn a_float_callee_leaves_nothing_in_rax() {
     let mut code = vec![
@@ -1522,8 +1523,10 @@ fn a_float_callee_leaves_nothing_in_rax() {
     let a = Analysis::compute(&p);
     let leaf = a.function(0x1_4000_1040).map(|f| f.ret_float);
     assert_eq!(leaf, Some(Some(64)));
-    let entry = a.function(0x1_4000_1000).map(|f| f.returns_value);
-    assert_eq!(entry, Some(Some(false)));
+    let entry = a
+        .function(0x1_4000_1000)
+        .map(|f| (f.returns_value, f.ret_float));
+    assert_eq!(entry, Some((Some(true), Some(64))));
 }
 
 /// A float written to xmm0 and stored is no result when no caller reads
@@ -1542,6 +1545,69 @@ fn a_float_no_caller_reads_is_no_result() {
     assert_eq!(f, Some(None));
     let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1040).unwrap_or_default();
     assert!(text.contains("// signature: void "), "{text}");
+}
+
+/// A function nothing calls returns the single it computes.
+///
+/// No call site says what a caller reads, so the body answers: `subss
+/// xmm1,xmm0; mulss xmm1,xmm2; addss xmm0,xmm1; ret` writes xmm0 last and
+/// never writes rax, so it hands back a `float`, and only the lane the
+/// caller reads is returned, not the bits the scalar instructions kept
+/// above it.
+#[test]
+fn a_function_nothing_calls_returns_the_single_it_computes() {
+    let code = [
+        0xf3, 0x0f, 0x5c, 0xc8, // ASM: subss xmm1,xmm0
+        0xf3, 0x0f, 0x59, 0xca, // ASM: mulss xmm1,xmm2
+        0xf3, 0x0f, 0x58, 0xc1, // ASM: addss xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let f = a.function(0x1_4000_1000).map(|f| f.ret_float);
+    assert_eq!(f, Some(Some(32)));
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("// signature: float "), "{text}");
+    assert!(text.contains("return a1 + (a2 - a1) * a3;"), "{text}");
+}
+
+/// A function nothing calls returns the double it moves into xmm0 after
+/// its integer work.
+///
+/// `mov eax,edx; cvtsi2sd xmm1,eax; addsd xmm1,xmm0; movapd xmm0,xmm1;
+/// ret` writes rax first and xmm0 nearest the exit, so the result is the
+/// `double`, and the precision the scalar instructions read names the
+/// parameter's type.
+#[test]
+fn a_function_nothing_calls_returns_the_double_it_moves_back() {
+    let code = [
+        0x89, 0xd0, // ASM: mov eax,edx
+        0xf2, 0x0f, 0x2a, 0xc8, // ASM: cvtsi2sd xmm1,eax
+        0xf2, 0x0f, 0x58, 0xc8, // ASM: addsd xmm1,xmm0
+        0x66, 0x0f, 0x28, 0xc1, // ASM: movapd xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let f = a.function(0x1_4000_1000).map(|f| f.ret_float);
+    assert_eq!(f, Some(Some(64)));
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("// signature: double "), "{text}");
+    assert!(text.contains("double a1"), "{text}");
+}
+
+/// Vector work left in xmm0 is no float result: `paddd xmm0,xmm1; ret`,
+/// which nothing calls, adds packed integers.
+#[test]
+fn vector_work_left_in_xmm0_is_no_float_result() {
+    let code = [
+        0x66, 0x0f, 0xfe, 0xc1, // ASM: paddd xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let f = a.function(0x1_4000_1000).map(|f| f.ret_float);
+    assert_eq!(f, Some(None));
 }
 
 /// A float parameter is typed by the precision that reads it.

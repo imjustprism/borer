@@ -1495,6 +1495,38 @@ fn sign_above_as_double(low: &Expr) -> Expr {
     )
 }
 
+/// The low lane a scalar single wrote beside kept bits, as a float.
+///
+/// The lane is the single the instruction computed, so a float value is
+/// that number already; anything else is reinterpreted bits
+/// ([`low_single`]).
+///
+/// # Arguments
+///
+/// * `low` - The low half of a merged value ([`merged_parts`]).
+fn merged_low(low: &Expr) -> Expr {
+    if low.is_float() {
+        low.clone()
+    } else {
+        low_single(low.clone())
+    }
+}
+
+/// The value a float `return` hands back from xmm0.
+///
+/// A scalar single that kept the bits above its lane leaves a merged
+/// value, of which the caller reads only the low lane.
+///
+/// # Arguments
+///
+/// * `v` - The register's value at the `ret`.
+pub(super) fn float_result(v: Expr) -> Expr {
+    match merged_parts(&v) {
+        Some((_, low)) => merged_low(low),
+        None => v,
+    }
+}
+
 /// Reads a sign or magnitude mask at the lane `ty` names, when `v` is one.
 ///
 /// A 32-bit read is the lane's negation or `fabs`. A 64-bit read is the
@@ -1514,7 +1546,7 @@ fn lane_of_mask(v: &Expr, ty: Ty) -> Option<Expr> {
     }
     if let Some((high, low)) = merged_parts(v) {
         return Some(if ty == Ty::F32 {
-            low_single(low.clone())
+            merged_low(low)
         } else {
             merged_as_double(high, low)
         });
