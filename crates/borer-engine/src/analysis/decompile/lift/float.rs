@@ -849,6 +849,11 @@ impl<'a> Exec<'_, 'a> {
             }
             _ => None,
         };
+        let lane = |e: &Expr| match e {
+            Expr::Call(name, args) if name == "__lane_f64" => args.first().cloned(),
+            _ => None,
+        };
+        let (l, r) = (&lane(l)?, &lane(r)?);
         let n = high_of(l, r).or_else(|| high_of(r, l))?;
         Some(Expr::Cast(Box::new(n), Ty::F64))
     }

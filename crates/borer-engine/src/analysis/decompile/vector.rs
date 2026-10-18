@@ -229,6 +229,9 @@ impl V {
 /// Renders a call as the vector expression it names, cast back to the
 /// integer the text holds a register in.
 ///
+/// A lane read, `__lane_f32(x)`, the float a scalar instruction takes from
+/// a packed result, is that vector's lowest element: `((f32x4)x)[0]`.
+///
 /// # Arguments
 ///
 /// * `f` - The call's name.
@@ -245,6 +248,19 @@ pub(super) fn render(f: &str, args: &[Expr], n: &Names<'_>) -> Option<(String, u
     }
     if let Some(lane) = lane_result(f, args, n) {
         return Some(lane);
+    }
+    if let ("__lane_f32" | "__lane_f64", [x]) = (f, args) {
+        let t = Vt::whole(if f == "__lane_f32" {
+            Elem::F32
+        } else {
+            Elem::F64
+        });
+        let v = match x {
+            Expr::Call(g, inner) => packed(g, inner, n).map(|v| cast_to(&v, t)),
+            _ => None,
+        };
+        let v = v.unwrap_or_else(|| operand(x, t, n));
+        return Some((format!("({v})[0]"), ATOM));
     }
     let v = packed(f, args, n)?;
     let word = if v.whole { "uint128_t" } else { "uint64_t" };

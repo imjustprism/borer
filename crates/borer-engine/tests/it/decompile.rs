@@ -9638,3 +9638,23 @@ fn the_unsigned_to_double_idiom_is_a_cast() {
     assert!(text.contains("return (double)a1;"), "{text}");
     assert!(!text.contains("unpckhpd"), "{text}");
 }
+
+/// A scalar float instruction reading a packed result reads its lowest
+/// lane as a float, not the 128-bit integer the register is held in.
+///
+/// `pshufd xmm1,xmm0,0x55; addss xmm0,xmm1; ret` adds lane 1 to lane 0.
+/// The shuffle once printed as an integer in the float sum, which C
+/// converts by value.
+#[test]
+fn a_scalar_float_reads_a_packed_lane_as_a_float() {
+    let code = [
+        0x66, 0x0f, 0x70, 0xc8, 0x55, // ASM: pshufd xmm1,xmm0,0x55
+        0xf3, 0x0f, 0x58, 0xc1, // ASM: addss xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("(f32x4)__builtin_shufflevector("), "{text}");
+    assert!(text.contains(")[0]"), "{text}");
+    assert!(!text.contains("+ (uint128_t)"), "{text}");
+}

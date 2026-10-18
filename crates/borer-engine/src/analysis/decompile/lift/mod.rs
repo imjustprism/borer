@@ -1178,6 +1178,8 @@ fn float_lane(v: &Expr) -> Option<u8> {
         Expr::Un(UnOp::Sqrt | UnOp::Fabs | UnOp::Neg, inner) => float_lane(inner),
         Expr::Ternary(_, a, b) => either_width(float_lane(a), float_lane(b)),
         Expr::Call(name, args) if name == "fabs" => args.first().and_then(float_lane),
+        Expr::Call(name, _) if name == "__lane_f32" => Some(32),
+        Expr::Call(name, _) if name == "__lane_f64" => Some(64),
         Expr::Const(_)
         | Expr::Var(_)
         | Expr::Str(_)
@@ -1692,7 +1694,10 @@ fn keeps_vector(v: &Expr) -> bool {
 /// when the value already fits it, so the cast keeps the bits instead of
 /// converting the number. A sign or magnitude mask the register still
 /// holds is that mask's lane ([`lane_of_mask`]), not a zero-extend of a
-/// negation the broadcast form is wider than.
+/// negation the broadcast form is wider than. A packed operation's result
+/// is a whole register the expression holds as bits, so its lowest lane
+/// is named with its width, `__lane_f32(paddd(a, b))`, the float the text
+/// reads out of the vector.
 ///
 /// # Arguments
 ///
@@ -1701,6 +1706,16 @@ fn keeps_vector(v: &Expr) -> bool {
 fn scalar_lane(v: Expr, ty: Ty) -> Expr {
     if let Some(masked) = lane_of_mask(&v, ty) {
         return masked;
+    }
+    if let Expr::Call(name, _) = &v
+        && !matches!(name.as_str(), "fabs" | "rint" | "__lane_f32" | "__lane_f64")
+    {
+        let lane = if ty == Ty::F32 {
+            "__lane_f32"
+        } else {
+            "__lane_f64"
+        };
+        return Expr::Call(lane.to_owned(), vec![v]);
     }
     let want = ty.bits();
     let Some(have) = float_lane(&v) else {

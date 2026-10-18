@@ -857,7 +857,7 @@ impl Expr {
             Expr::Var(Key::Reg(r)) => {
                 r.is_vector_register() || (*r >= Register::ST0 && *r <= Register::ST7)
             }
-            Expr::Call(f, _) => f == "fabs",
+            Expr::Call(f, _) => matches!(f.as_str(), "fabs" | "__lane_f32" | "__lane_f64"),
             Expr::Ternary(_, a, b) => a.is_float() || b.is_float(),
             Expr::Const(_)
             | Expr::Var(_)
