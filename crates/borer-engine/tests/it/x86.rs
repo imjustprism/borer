@@ -4603,3 +4603,98 @@ fn a_locators_class_names_a_one_slot_table_on_a_32_bit_image() {
     assert_eq!(name_of(&a, &o, 0x401008), "One::vfunc_0");
     assert_eq!(name_of(&a, &o, 0x401000), "One::ctor_or_dtor");
 }
+
+/// Position-independent code reading its own address stays one function.
+///
+/// `call $+5; pop ebx` goes to the next instruction, so it is no call, and
+/// the rest of the function is no second function. gcc and clang open
+/// every i386 PIC function that reaches a global this way;
+/// `hard_O2.x86.so` listed 110 functions for 85, each split in two.
+#[test]
+fn reading_the_program_counter_is_not_a_call() {
+    // ASM: push ebx; call $+5; pop ebx; add ebx,0x1000; mov eax,1; pop ebx; ret
+    let code = [
+        0x53, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x81, 0xc3, 0x00, 0x10, 0x00, 0x00, 0xb8, 0x01,
+        0x00, 0x00, 0x00, 0x5b, 0xc3,
+    ];
+    let p = image(&code);
+    let a = Analysis::compute(&p);
+    assert!(a.function(0x401006).is_none_or(|f| f.entry == 0x401000));
+    let f = a.function(0x401000).expect("the function");
+    assert!(f.callees.is_empty(), "{:x?}", f.callees);
+    assert_eq!(a.functions.len(), 1);
+}
+
+/// An i386 PLT entry, `jmp [ebx+N]` through the global offset table that
+/// `ebx` holds, is named for the import whose slot it reads.
+///
+/// The slot is `.got.plt` plus N; without that sum no PLT entry of a
+/// 32-bit shared object had a name, `xrefs(strlen)` found no call, and
+/// `symbols` called the import unreferenced.
+#[test]
+fn an_i386_plt_entry_is_named_for_its_import() {
+    let mut bytes = vec![0u8; 0x3000];
+    // ASM: jmp [ebx+0xc]
+    bytes[0x1000..0x1006].copy_from_slice(&[0xff, 0xa3, 0x0c, 0x00, 0x00, 0x00]);
+    // ASM: call 0x1000; ret
+    bytes[0x1008..0x100e].copy_from_slice(&[0xe8, 0xf3, 0xff, 0xff, 0xff, 0xc3]);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86,
+        0,
+        None,
+        vec![
+            Section::mapped(".plt", 0x1000, 0x1000, 0x10, false, true),
+            Section::mapped(".got.plt", 0x2000, 0x2000, 0x20, true, false),
+        ],
+    );
+    p.format = BinaryFormat::Elf;
+    p.function_ranges = vec![(0x1000, 0x1006), (0x1008, 0x100e)];
+    p.symbols.push(Symbol {
+        name: "strlen".to_owned(),
+        addr: 0x200c,
+        kind: SymbolKind::Import,
+    });
+    let a = Analysis::compute(&p);
+    let f = a.function(0x1000).expect("the PLT entry");
+    assert_eq!(f.name.as_deref(), Some("strlen"));
+    assert_eq!(f.thunk, Some(0x200c));
+    let (_, _, listed) = borer_engine::analysis::render::symbols_tsv(&p, &a, None, None, 0, 10);
+    assert!(!listed.contains("unreferenced"), "{listed}");
+}
+
+/// A PE export whose bytes are an integer is not seeded as a function.
+///
+/// msvcrt exports `_sys_nerr` from `.text`; walked as code it made a
+/// 7,500-byte function of the error-string table. The export beside it
+/// that is code stays a function.
+#[test]
+fn a_pe_export_holding_an_integer_is_no_function() {
+    // ASM: mov eax,1; ret
+    let mut code = vec![0x2bu8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    code.resize(0x10, 0xcc);
+    code.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    code.resize(0x1000, 0xcc);
+    let mut p = Program::raw(
+        code,
+        Arch::X86,
+        0x400000,
+        None,
+        vec![Section::mapped(".text", 0x401000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Pe;
+    for (name, addr) in [("_sys_nerr", 0x401000), ("one", 0x401010)] {
+        p.symbols.push(Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Export,
+        });
+    }
+    let a = Analysis::compute(&p);
+    assert!(
+        a.function(0x401000).is_none(),
+        "{:x?}",
+        a.function(0x401000).map(|f| f.entry)
+    );
+    assert_eq!(a.function(0x401010).map(|f| f.entry), Some(0x401010));
+}

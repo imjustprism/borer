@@ -1795,7 +1795,10 @@ pub fn slot_name_of(analysis: &Analysis, overlay: &Overlay, slot: u64) -> String
 /// The entry point, every non-import symbol that marks code, every declared
 /// function range start and every funclet that lies in executable memory,
 /// sorted and deduplicated. A data symbol never seeds: what it names sits
-/// in a data section, which no function lives in.
+/// in a data section, which no function lives in. Nor does a PE export
+/// whose first instructions are two zero bytes' `add [eax], al`
+/// ([`opens_as_data`]): a PE export does not say whether it is code, and a
+/// DLL that merges its read-only data into `.text` exports variables there.
 pub(crate) fn seeds(program: &Program) -> Vec<u64> {
     let mut s: Vec<u64> = Vec::new();
     if let Some(e) = program.entry
@@ -1811,7 +1814,10 @@ pub(crate) fn seeds(program: &Program) -> Vec<u64> {
         {
             continue;
         }
-        if is_executable_va(program, sym.addr) {
+        let data_export = sym.kind == SymbolKind::Export
+            && program.format == crate::program::BinaryFormat::Pe
+            && opens_as_data(program, sym.addr);
+        if is_executable_va(program, sym.addr) && !data_export {
             s.push(sym.addr);
         }
     }
@@ -1830,6 +1836,33 @@ pub(crate) fn seeds(program: &Program) -> Vec<u64> {
     );
     dedup_sorted(&mut s);
     s
+}
+
+/// Tells whether the bytes at `va` read as data rather than as code: one of
+/// the first instructions is `add [eax], al`, the two zero bytes of an
+/// integer's high half.
+///
+/// msvcrt exports `_sys_nerr` (the int 43, `2b 00 00 00`) from `.text`;
+/// seeded as a function it walked 7,500 bytes of the error-string table as
+/// code, read as 109 `in` instructions and an anti-analysis verdict.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `va` - Where the symbol points.
+fn opens_as_data(program: &Program, va: u64) -> bool {
+    /// Instructions read from the symbol's address.
+    const LOOK: usize = 4;
+    let (Some(Isa::X86 { bits }), Some(code)) = (program.arch.isa(), program.read_va_upto(va, 32))
+    else {
+        return false;
+    };
+    let mut d =
+        crate::isa::x86::Decoder::with_ip(bits, code, va, crate::isa::x86::DecoderOptions::NONE);
+    d.iter().take(LOOK).any(|i| {
+        i.code() == crate::isa::x86::Code::Add_rm8_r8
+            && program.read_va_upto(i.ip(), 2) == Some(&[0, 0][..])
+    })
 }
 
 /// Tells whether `va` lies inside an executable, file-backed section.

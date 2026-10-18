@@ -2706,6 +2706,11 @@ enum Via {
 /// they lead into is kept as the function's blocks but tells nothing about
 /// whether the entry is one.
 ///
+/// A call to the very next instruction is 32-bit position-independent
+/// code reading its own address (`call $+5; pop ebx`), not a call: it falls
+/// through and names no callee, where it made the rest of the function a
+/// second function.
+///
 /// # Arguments
 ///
 /// * `worker` - The walk's decoders (they hold the image and its bitness),
@@ -2808,9 +2813,10 @@ fn walk_function(
                 {
                     FlowControl::Next
                 }
+                FlowControl::Call if near_target(&instr) == Some(next) => FlowControl::Next,
                 other => other,
             };
-            let target = near_target(&instr);
+            let target = near_target(&instr).filter(|&t| t != next || flow != FlowControl::Next);
             if odd_instruction(&instr, bitness, pe) && !in_handlers {
                 zero_bytes = true;
                 surely_data |= !byte_add(&instr);
@@ -5912,14 +5918,22 @@ pub(super) fn build_callers_and_names(program: &Program, functions: &mut [Functi
         } else if f.instr_count != 1 {
             continue;
         }
-        if instr.mnemonic() != Mnemonic::Jmp || instr.op0_kind() != OpKind::Memory {
+        if instr.mnemonic() != Mnemonic::Jmp
+            || instr.op0_kind() != OpKind::Memory
+            || instr.memory_index() != Register::None
+        {
             continue;
         }
-        let base = instr.memory_base();
-        if base != Register::None && base != Register::RIP {
-            continue;
-        }
-        let slot = instr.memory_displacement64();
+        let slot = match instr.memory_base() {
+            Register::None | Register::RIP => instr.memory_displacement64(),
+            Register::EBX if bitness == 32 => {
+                let Some(got) = got_base(program) else {
+                    continue;
+                };
+                u64::from(crate::num::lo32(got).wrapping_add(instr.memory_displacement32()))
+            }
+            _ => continue,
+        };
         f.name = (slot != 0)
             .then(|| import_slots.get(&slot))
             .flatten()
@@ -5937,6 +5951,31 @@ pub(super) fn build_callers_and_names(program: &Program, functions: &mut [Functi
             NameSource::None
         };
     }
+}
+
+/// Where `ebx` points in a 32-bit ELF's position-independent code: the
+/// global offset table its PLT entries jump through as `jmp [ebx+N]`.
+///
+/// The i386 ABI keeps `_GLOBAL_OFFSET_TABLE_` at the start of `.got.plt`
+/// (of `.got` when the linker made no `.got.plt`), and every PIC function
+/// loads it into `ebx` before calling through the PLT. Without it no PLT
+/// entry of a 32-bit shared object was named, and `xrefs(strlen)` found no
+/// call.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+///
+/// # Returns
+///
+/// The table's address, or `None` for a file that is not ELF or names
+/// neither section.
+fn got_base(program: &Program) -> Option<u64> {
+    if program.format != crate::program::BinaryFormat::Elf {
+        return None;
+    }
+    let named = |name: &str| program.sections.iter().find(|s| s.name == name);
+    named(".got.plt").or_else(|| named(".got")).map(|s| s.va.0)
 }
 
 /// The code address a slot holds once the loader has bound it.

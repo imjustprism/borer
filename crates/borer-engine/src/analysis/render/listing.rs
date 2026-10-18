@@ -340,7 +340,8 @@ const FORWARD_MAX: usize = 256;
 /// # Arguments
 ///
 /// * `p` - The loaded image, for its symbol table.
-/// * `a` - The analysis, for which import slots are referenced.
+/// * `a` - The analysis, for which import slots are referenced, directly
+///   or through a thunk something calls.
 /// * `kind` - One kind of symbol, or every kind.
 /// * `filter` - Case-insensitive substring of the full name, module
 ///   included, or of the demangled name a row shows.
@@ -388,6 +389,12 @@ pub fn symbols_tsv(
     } else {
         "# kind addr name\n"
     });
+    let called_slots: BTreeSet<u64> = a
+        .functions
+        .iter()
+        .filter(|f| a.xrefs.get(&f.entry).is_some_and(|v| !v.is_empty()))
+        .filter_map(|f| f.thunk)
+        .collect();
     let mut module: Option<&str> = None;
     for s in matched.into_iter().skip(offset).take(limit) {
         let bare = bare_name(&s.name);
@@ -398,7 +405,8 @@ pub fn symbols_tsv(
         module = owner;
         let dead = s.kind == SymbolKind::Import
             && s.addr != 0
-            && a.xrefs.get(&s.addr).is_none_or(Vec::is_empty);
+            && a.xrefs.get(&s.addr).is_none_or(Vec::is_empty)
+            && !called_slots.contains(&s.addr);
         if kind.is_none() {
             let _ = write!(out, "{} ", s.kind.name());
         }
