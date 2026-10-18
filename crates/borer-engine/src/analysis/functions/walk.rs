@@ -286,7 +286,8 @@ impl<'a> WalkState<'a> {
         if w.undoes_frame {
             return Some("opens by undoing a frame");
         }
-        let named = matches!(self.seed, Seed::Pointer | Seed::Reloc) && w.prologue;
+        let named = matches!(self.seed, Seed::Pointer | Seed::Reloc)
+            && (w.prologue || self.taken_by_code(w.func.entry));
         if w.zero_bytes && (w.surely_data || !named) {
             return Some(w.odd.unwrap_or("decoded an instruction no compiler emits"));
         }
@@ -317,6 +318,24 @@ impl<'a> WalkState<'a> {
             Seed::Gap if !w.prologue => Some("opens like no function does"),
             Seed::Gap => None,
         }
+    }
+
+    /// Whether a walked function's code takes the address `va`, as a `lea`
+    /// passing a callback does.
+    ///
+    /// That names an entry as surely as a prologue: sqlite's
+    /// `incrAggDepth`, a walker callback whose `add [rdx+2], al` is a byte
+    /// add, opens with a `cmp` and is reached only through the `lea`.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The guessed entry.
+    fn taken_by_code(&self, va: u64) -> bool {
+        self.xrefs.get(&va).is_some_and(|sites| {
+            sites
+                .iter()
+                .any(|s| s.kind == RefKind::Data && s.from_entry.is_some())
+        })
     }
 
     /// Whether the code at `va` opens by addressing memory through the frame

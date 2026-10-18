@@ -63,6 +63,31 @@ fn a_function_opening_with_a_byte_register_add_is_found() {
     assert_eq!(entries(&code, &[]), vec![TEXT, TEXT + 9]);
 }
 
+/// A callback whose address code takes is found though it adds a byte
+/// register into memory and opens with no prologue.
+///
+/// sqlite passes `incrAggDepth` to its tree walker with a `lea`; the body
+/// is `if (e->op == ..) e->op2 += w->u.n;`, an `add [rdx+2], al`. A byte
+/// add is written by compilers, and a `lea` in walked code names an entry
+/// as a prologue does.
+#[test]
+fn a_callback_taken_by_lea_with_a_byte_add_is_found() {
+    let mut code = vec![
+        0x48, 0x8d, 0x05, 0x09, 0x00, 0x00, 0x00, // ASM: lea rax, [rip + 9] = 0x401010
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x10, 0xcc);
+    code.extend_from_slice(&[
+        0x80, 0x3a, 0xa9, // ASM: cmp byte [rdx], 0xa9
+        0x75, 0x07, // ASM: jne short 0x40101c
+        0x0f, 0xb6, 0x41, 0x28, // ASM: movzx eax, byte [rcx + 0x28]
+        0x00, 0x42, 0x02, // ASM: add [rdx + 2], al
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ]);
+    assert_eq!(entries(&code, &[]), vec![TEXT, TEXT + 0x10]);
+}
+
 /// A function behind a run of `nop` padding is found.
 ///
 /// A linker aligns with the multi-byte `nop` forms as well as with `int3`,
