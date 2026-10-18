@@ -1522,15 +1522,21 @@ pub(super) fn emit_run<L: Lifter>(
             }
             let copy = run_block(ctx, st, b);
             kept.extend(copy.lines.iter().cloned());
-            if let Some(t) = copy.goto {
+            let target = if let Some(t) = copy.goto {
                 kept.push(jump_to(st, t));
+                st.index_of(t)
             } else if runs_on(st, b)
                 && let Some(&s) = st.succs[b].first()
             {
                 kept.push(goto(st.start(s)));
+                Some(s)
             } else if let Some(t) = falls_outside(ctx, st, b) {
                 kept.push(jump_to(st, t));
-            }
+                st.index_of(t)
+            } else {
+                None
+            };
+            st.copy_targets.extend(target);
             continue;
         }
         if st.emitted[b] {

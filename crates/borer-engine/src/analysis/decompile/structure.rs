@@ -63,6 +63,11 @@ pub(super) struct Emit<'e, L: Lifter> {
     /// inner structure may copy them too, since the enclosing one owns every
     /// predecessor and writes no original.
     pub(super) dup_stack: Vec<BTreeSet<usize>>,
+    /// Blocks a copied block jumps to. The copy is a path [`Emit::preds`]
+    /// does not list, so such a block keeps its label: no fold may take it
+    /// into its one listed predecessor's test ([`call_then_test`],
+    /// [`pure_condition`]).
+    pub(super) copy_targets: BTreeSet<usize>,
     /// The block the function is entered at: an entry of any loop it is
     /// in, whatever its predecessors.
     pub(super) entry: usize,
@@ -965,7 +970,12 @@ pub(super) fn pure_condition<L: Lifter>(
     from: usize,
     b: usize,
 ) -> Option<Decision> {
-    if b == from || st.outside(b) || st.emitted[b] || st.preds[b].as_slice() != [from] {
+    if b == from
+        || st.outside(b)
+        || st.emitted[b]
+        || st.preds[b].as_slice() != [from]
+        || st.copy_targets.contains(&b)
+    {
         return None;
     }
     let (out, env) = match st.blocks[b].term {
@@ -1036,6 +1046,7 @@ pub(super) fn call_then_test<L: Lifter>(
         || st.outside(s)
         || st.emitted[s]
         || st.preds[s].as_slice() != [p]
+        || st.copy_targets.contains(&s)
         || st.blocks[s].term != BlockTerm::Cond
     {
         return None;

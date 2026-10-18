@@ -1697,6 +1697,74 @@ fn replays_clean(p: &borer_engine::program::Program, a: &Analysis, entries: &[u6
     }
 }
 
+/// A call block a switch case copies keeps the label its copy jumps to.
+///
+/// `case 111` and the `79` test both enter the block at 0x50 that calls
+/// and falls into the test at 0x55. The case arm gets its own copy of the
+/// call, which jumps to 0x55; that path is not one the block graph lists,
+/// so the original call may not fold 0x55 into its own test and drop the
+/// label. Every `goto` lands on a label, and every block agrees with the
+/// machine.
+#[test]
+fn a_copied_call_block_keeps_the_label_it_jumps_to() {
+    let code = [
+        0x83, 0xf9, 0x4f, // ASM: cmp ecx,0x4f
+        0x74, 0x4b, // ASM: je 0x50
+        0x83, 0xf9, 0x42, // ASM: cmp ecx,0x42
+        0x74, 0x22, // ASM: je 0x2c
+        0x83, 0xf9, 0x5a, // ASM: cmp ecx,0x5a
+        0x7f, 0x03, // ASM: jg 0x12
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+        0x83, 0xf9, 0x62, // ASM: cmp ecx,0x62
+        0x74, 0x27, // ASM: je 0x3e
+        0x83, 0xf9, 0x65, // ASM: cmp ecx,0x65
+        0x74, 0x28, // ASM: je 0x44
+        0x83, 0xf9, 0x6f, // ASM: cmp ecx,0x6f
+        0x74, 0x2f, // ASM: je 0x50
+        0x83, 0xf9, 0x70, // ASM: cmp ecx,0x70
+        0x74, 0x24, // ASM: je 0x4a
+        0xb8, 0x63, 0x00, 0x00, 0x00, // ASM: mov eax,0x63
+        0xc3, // ASM: ret
+        0xb8, 0x0a, 0x00, 0x00, 0x00, // ASM: mov eax,0xa
+        0xc3, // ASM: ret
+        0xb8, 0x0b, 0x00, 0x00, 0x00, // ASM: mov eax,0xb
+        0xc3, // ASM: ret
+        0xb8, 0x0c, 0x00, 0x00, 0x00, // ASM: mov eax,0xc
+        0xc3, // ASM: ret
+        0xb8, 0x0d, 0x00, 0x00, 0x00, // ASM: mov eax,0xd
+        0xc3, // ASM: ret
+        0xb8, 0x0e, 0x00, 0x00, 0x00, // ASM: mov eax,0xe
+        0xc3, // ASM: ret
+        0xb8, 0x0f, 0x00, 0x00, 0x00, // ASM: mov eax,0xf
+        0xc3, // ASM: ret
+        0xe8, 0x10, 0x00, 0x00, 0x00, // ASM: call 0x65
+        0x85, 0xc0, // ASM: test eax,eax
+        0x75, 0x06, // ASM: jne 0x5f
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: mov eax,2
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("case 111:"), "{text}");
+    let labels: std::collections::BTreeSet<&str> = text
+        .lines()
+        .filter_map(|l| l.trim().strip_suffix(':'))
+        .collect();
+    for line in text.lines() {
+        if let Some((_, target)) = line.trim().rsplit_once("goto ") {
+            let target = target.trim_end_matches(';');
+            assert!(labels.contains(target), "{target} has no label: {text}");
+        }
+    }
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}
+
 /// The check reads a float parameter at the width the signature gives it.
 ///
 /// `cvtss2sd xmm0,xmm0; ret`, which nothing calls, is `double f(float a1)`

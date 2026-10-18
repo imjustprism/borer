@@ -1715,6 +1715,7 @@ fn decompile_in<L: Lifter>(
         tail_clones: 0,
         copy_stop: false,
         dup_stack: Vec::new(),
+        copy_targets: BTreeSet::new(),
         entry: entry_block,
     };
     let mut reached = vec![false; n];
