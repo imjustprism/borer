@@ -1799,6 +1799,52 @@ fn each_float_call_result_is_checked_at_its_callees_width() {
     replays_clean(&p, &a, &[0x1_4000_1000]);
 }
 
+/// A 32-bit image of `code` at `0x401000`, entered at its start.
+///
+/// # Arguments
+///
+/// * `code` - The bytes.
+fn program32(code: &[u8]) -> borer_engine::program::Program {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86,
+        0x400_000,
+        Some(0x401_000),
+        vec![Section::mapped(".text", 0x401_000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Pe;
+    p
+}
+
+/// A test of `movd`'s low lane says nothing of the bits above it.
+///
+/// `movd eax,xmm0; cmp eax,0; jne; psrlq xmm0,32; movd eax,xmm0; mov
+/// [ecx],eax` stores the upper half on the path where the lower one is
+/// zero; taking
+/// `eax == 0` there for `xmm0 == 0` made that half zero too.
+#[test]
+fn a_zero_low_lane_leaves_the_upper_lanes_unknown() {
+    let code = [
+        0x66, 0x0f, 0x7e, 0xc0, // ASM: movd eax,xmm0
+        0x83, 0xf8, 0x00, // ASM: cmp eax,0
+        0x75, 0x0c, // ASM: jne 0x401015
+        0x66, 0x0f, 0x73, 0xd0, 0x20, // ASM: psrlq xmm0,32
+        0x66, 0x0f, 0x7e, 0xc0, // ASM: movd eax,xmm0
+        0x89, 0x01, // ASM: mov [ecx],eax
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let p = program32(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x401_000).unwrap_or_default();
+    assert!(!text.contains("psrlq(0,"), "{text}");
+    replays_clean(&p, &a, &[0x401_000]);
+}
+
 /// A padding `nop` is no dereference: `mov eax,ecx; nop word
 /// [rax+rax]; add eax,1; ret` takes a number, not a pointer.
 #[test]

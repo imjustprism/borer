@@ -511,6 +511,12 @@ impl<'a> Exec<'_, 'a> {
                     {
                         mask(v, 0xffff_ffff)
                     }
+                    Mnemonic::Movd | Mnemonic::Vmovd
+                        if instr.op1_kind() == OpKind::Register
+                            && instr.op1_register().is_vector_register() =>
+                    {
+                        mask(v, 0xffff_ffff)
+                    }
                     _ => v,
                 };
                 self.write_op0(instr, v);
