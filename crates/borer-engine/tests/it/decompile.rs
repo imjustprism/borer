@@ -1645,6 +1645,38 @@ fn a_push_of_rax_at_the_entry_only_makes_room() {
     assert!(!text.contains("rax"), "{text}");
 }
 
+/// A bounded index into a read-only table reads the table the file holds.
+///
+/// `cmp ecx,6; ja def; mov eax,ecx; lea rdx,[table]; mov eax,[rdx+rax*4];
+/// ret; def: mov eax,-1; ret` is a `switch` the compiler turned into a
+/// lookup; the text names the table and declares its seven entries, the
+/// bound's, as the bytes in `.rdata` are.
+#[test]
+fn a_bounded_lookup_declares_its_table() {
+    let code = [
+        0x83, 0xf9, 0x06, // ASM: cmp ecx,6
+        0x77, 0x0d, // ASM: ja 0x140001012
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0x48, 0x8d, 0x15, 0xf2, 0x0f, 0x00, 0x00, // ASM: lea rdx,[rip+0xff2]
+        0x8b, 0x04, 0x82, // ASM: mov eax,[rdx+rax*4]
+        0xc3, // ASM: ret
+        0xb8, 0xff, 0xff, 0xff, 0xff, // ASM: mov eax,-1
+        0xc3, // ASM: ret
+    ];
+    let mut data = Vec::new();
+    for v in [2u32, 10, 11, 12, 13, 14, 2, 0xdead] {
+        data.extend_from_slice(&v.to_le_bytes());
+    }
+    let p = program64_with_data(&code, &data);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(
+        text.contains("static const uint32_t g32_140002000[7] = {2, 10, 11, 12, 13, 14, 2};"),
+        "{text}"
+    );
+    assert!(text.contains("g32_140002000[a1]"), "{text}");
+}
+
 /// A padding `nop` is no dereference: `mov eax,ecx; nop word
 /// [rax+rax]; add eax,1; ret` takes a number, not a pointer.
 #[test]

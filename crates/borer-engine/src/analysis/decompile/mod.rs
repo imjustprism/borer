@@ -16,7 +16,8 @@
 //! the arguments, [`liveness`] places the phis, [`structure`] and [`emit`]
 //! recover and write the control flow, then [`rewrite`], [`asserts`],
 //! [`fields`], [`types`], [`enums`], [`wire`], [`tidy`] and [`finish`]
-//! rework the text. [`outline`] and [`scenario`] are other views of the
+//! rework the text, and [`tables`] writes out the read-only tables it
+//! indexes. [`outline`] and [`scenario`] are other views of the
 //! same function; [`opaque`] spots conditions that always go one way;
 //! [`traces`] checks the text's control flow against the binary's.
 //! [`lift_a64`] lifts arm64 blocks into the same expressions,
@@ -55,6 +56,7 @@ mod scenario;
 pub(crate) mod signature;
 mod sites;
 mod structure;
+mod tables;
 mod tidy;
 pub mod traces;
 mod types;
@@ -679,7 +681,7 @@ pub fn decompile(
     decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
         .as_ref()
         .as_ref()
-        .map(|d| polish(&d.text, bitness, &analysis.packs))
+        .map(|d| tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program))
 }
 
 /// [`decompile`] built afresh, for a batch ([`decompile_all`]).
@@ -702,7 +704,7 @@ fn decompile_afresh(
 ) -> Option<String> {
     let bitness = program.arch.bitness().unwrap_or(64);
     decompile_plain_full(program, analysis, overlay, entry)
-        .map(|d| polish(&d.text, bitness, &analysis.packs))
+        .map(|d| tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program))
 }
 
 /// The source file and line each PDB-named function starts at, read once
@@ -1264,10 +1266,9 @@ fn name_fields(
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    Some(polish(
-        &out,
-        program.arch.bitness().unwrap_or(64),
-        &analysis.packs,
+    Some(tables::inline_tables(
+        &polish(&out, program.arch.bitness().unwrap_or(64), &analysis.packs),
+        program,
     ))
 }
 
