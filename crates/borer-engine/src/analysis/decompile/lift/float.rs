@@ -790,6 +790,69 @@ impl<'a> Exec<'_, 'a> {
         Some(mask(unary(UnOp::Neg, truth, bits), mask_bits(bits)))
     }
 
+    /// The unsigned 64-bit integer an `addsd` converts, when it ends the
+    /// compilers' conversion of one to a double without a native
+    /// instruction for it.
+    ///
+    /// `movq x, n; punpckldq x, [k1]; subpd x, [k2]` puts the low and high
+    /// halves of `n` in the mantissas of two doubles whose exponents
+    /// `k1` (`0x43300000`, `0x45300000`) supplies, and `k2` subtracts the
+    /// two biases (`2^52`, `2^84`) back out, leaving the halves' exact
+    /// values. The high lane added to the low one (`unpckhpd`, then
+    /// `addsd`) rounds once, which is `(double)n`. Both constants must be
+    /// read-only data holding exactly those lanes.
+    ///
+    /// # Arguments
+    ///
+    /// * `l` - The left operand of the add.
+    /// * `r` - The right.
+    ///
+    /// # Returns
+    ///
+    /// `(double)n`, or `None` for any other add.
+    pub(super) fn unsigned_to_double(&self, l: &Expr, r: &Expr) -> Option<Expr> {
+        const EXPONENTS: u128 = 0x4530_0000_4330_0000;
+        const BIASES: u128 = 0x4530_0000_0000_0000_4330_0000_0000_0000;
+        let constant = |e: &Expr, want: u128| {
+            let Expr::Var(Key::Global(a, 128)) = e else {
+                return None;
+            };
+            let readonly = self
+                .ctx
+                .program
+                .section_at(*a)
+                .is_some_and(|s| s.readable && !s.writable && !s.executable);
+            let bytes: [u8; 16] = self.ctx.program.read_va(*a, 16)?.try_into().ok()?;
+            (readonly && u128::from_le_bytes(bytes) == want).then_some(())
+        };
+        let split = |e: &Expr| {
+            let Expr::Call(name, args) = e else {
+                return None;
+            };
+            let [joined, biases] = args.as_slice() else {
+                return None;
+            };
+            let Expr::Call(join, halves) = joined else {
+                return None;
+            };
+            let [n, exponents] = halves.as_slice() else {
+                return None;
+            };
+            (name == "subpd" && join == "punpckldq").then_some(())?;
+            constant(biases, BIASES)?;
+            constant(exponents, EXPONENTS)?;
+            Some(n.clone())
+        };
+        let high_of = |hi: &Expr, lo: &Expr| match hi {
+            Expr::Call(name, args) if name == "unpckhpd" => {
+                (args.first() == Some(lo)).then(|| split(lo)).flatten()
+            }
+            _ => None,
+        };
+        let n = high_of(l, r).or_else(|| high_of(r, l))?;
+        Some(Expr::Cast(Box::new(n), Ty::F64))
+    }
+
     /// Lifts a vector instruction as `dst = mnemonic(sources...)`.
     ///
     /// The destination is a source too when the instruction reads it

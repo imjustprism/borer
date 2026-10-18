@@ -551,7 +551,11 @@ impl<'a> Exec<'_, 'a> {
                 let upper = self.val(instr, 0);
                 let l = scalar_lane(upper.clone(), ty);
                 let r = scalar_lane(self.val(instr, 1), ty);
-                let v = fold(float_op(mn), l, r, bits);
+                let v = match mn {
+                    Mnemonic::Addsd => self.unsigned_to_double(&l, &r),
+                    _ => None,
+                }
+                .unwrap_or_else(|| fold(float_op(mn), l, r, bits));
                 self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Vaddss

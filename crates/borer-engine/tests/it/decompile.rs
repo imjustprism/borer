@@ -9608,3 +9608,33 @@ fn every_cmpsd_predicate_agrees_with_the_emulator() {
         }
     }
 }
+
+/// The SSE2 conversion of an unsigned 64-bit integer to a double is that
+/// cast.
+///
+/// `movq xmm0,rcx; punpckldq xmm0,[k1]; subpd xmm0,[k2]; movapd xmm1,xmm0;
+/// unpckhpd xmm1,xmm0; addsd xmm1,xmm0; movapd xmm0,xmm1; ret` with the
+/// exponent and bias constants compilers emit for `(double)n`.
+#[test]
+fn the_unsigned_to_double_idiom_is_a_cast() {
+    let code = [
+        0x66, 0x48, 0x0f, 0x6e, 0xc1, // ASM: movq xmm0,rcx
+        0x66, 0x0f, 0x62, 0x05, 0xf3, 0x0f, 0x00, 0x00, // ASM: punpckldq xmm0,[rip+0xff3]
+        0x66, 0x0f, 0x5c, 0x05, 0xfb, 0x0f, 0x00, 0x00, // ASM: subpd xmm0,[rip+0xffb]
+        0x66, 0x0f, 0x28, 0xc8, // ASM: movapd xmm1,xmm0
+        0x66, 0x0f, 0x15, 0xc8, // ASM: unpckhpd xmm1,xmm0
+        0xf2, 0x0f, 0x58, 0xc8, // ASM: addsd xmm1,xmm0
+        0x66, 0x0f, 0x28, 0xc1, // ASM: movapd xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let mut data: Vec<u8> = [0x4330_0000u32, 0x4530_0000, 0, 0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    data.extend(0x4330_0000_0000_0000u64.to_le_bytes());
+    data.extend(0x4530_0000_0000_0000u64.to_le_bytes());
+    let p = program64_with_data(&code, &data);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("return (double)a1;"), "{text}");
+    assert!(!text.contains("unpckhpd"), "{text}");
+}
