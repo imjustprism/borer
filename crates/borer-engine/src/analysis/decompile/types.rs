@@ -1294,6 +1294,193 @@ fn lane_use(line: &str, at: usize, name: &str) -> bool {
         return at > eq;
     }
     let _ = tail;
+    masked_read(line, at, at + name.len())
+}
+
+/// Most parenthesis levels [`masked_read`] climbs.
+const READ_LEVELS: u8 = 16;
+
+/// Tells whether only the low 32 bits of the operand at `from..to` reach
+/// the line's result.
+///
+/// The walk climbs the parentheses around the operand. At each level the
+/// operators outside every inner parenthesis must all keep low bits low
+/// (`+`, `-`, `*`, `<<`, `&`, `|`, `^`): a carry runs up, never down, so the
+/// operand's high bits reach only high bits. The read is a 32-bit one where
+/// a level ends in ` & 0xffffffff` with no `|` or `^` beside it to take the
+/// operand out from under the mask, or where the group is masked or cast
+/// to a 32-bit integer as a whole. A shift right, a division, a
+/// comparison, a call's argument list, an index or any other cast stops
+/// it: those read the high bits too.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `from` - Byte index where the operand starts.
+/// * `to` - Byte index just past it.
+fn masked_read(line: &str, mut from: usize, mut to: usize) -> bool {
+    for _ in 0..READ_LEVELS {
+        let (open, close) = (level_open(line, from), level_close(line, to));
+        let start = open.map_or_else(
+            || {
+                line.get(..from)
+                    .and_then(|h| h.rfind(';'))
+                    .map_or(0, |k| k + 1)
+            },
+            |o| o + 1,
+        );
+        let end = close.unwrap_or_else(|| {
+            line.get(to..)
+                .and_then(|t| t.find(';'))
+                .map_or(line.len(), |k| to + k)
+        });
+        let Some(level) = line.get(start..end) else {
+            return false;
+        };
+        let level = assigned_value(level);
+        let ops = level_operators(level);
+        let Some(ops) = ops else {
+            return false;
+        };
+        let wide = ops.iter().any(|op| matches!(*op, "|" | "^"));
+        if level.contains(MASK32) && ops.contains(&"&") && !wide && depth0_mask(level) {
+            return true;
+        }
+        let (Some(o), Some(c)) = (open, close) else {
+            return false;
+        };
+        if line.get(o..=o) != Some("(") || line.get(c..=c) != Some(")") {
+            return false;
+        }
+        let head = line.get(..o).unwrap_or("");
+        if head.ends_with(is_ident_char) {
+            return false;
+        }
+        if head.ends_with("(int32_t)") || head.ends_with("(uint32_t)") {
+            return true;
+        }
+        if head.ends_with(')') {
+            return false;
+        }
+        from = o;
+        to = c + 1;
+    }
+    false
+}
+
+/// The value side of `name = value`, or the whole text when it assigns
+/// nothing.
+///
+/// # Arguments
+///
+/// * `level` - One level's text.
+fn assigned_value(level: &str) -> &str {
+    let t = level.trim();
+    match t.split_once(" = ") {
+        Some((lhs, rhs)) if is_ident(lhs) || lhs.starts_with("for (") => rhs,
+        _ => t,
+    }
+}
+
+/// The `(` or `[` that opens the level holding byte `at`, if any.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - A byte index.
+fn level_open(line: &str, at: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in line.get(..at)?.char_indices().rev() {
+        match c {
+            ')' | ']' => depth += 1,
+            '(' | '[' if depth == 0 => return Some(i),
+            '(' | '[' => depth -= 1,
+            ';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `)` or `]` that closes the level holding byte `at`, if any.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - A byte index.
+fn level_close(line: &str, at: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in line.get(at..)?.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' if depth == 0 => return Some(at + i),
+            ')' | ']' => depth -= 1,
+            ';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The binary operators of one level, outside its inner parentheses, when
+/// every one keeps low bits low; `None` when one does not.
+///
+/// # Arguments
+///
+/// * `level` - The text between a level's parentheses.
+fn level_operators(level: &str) -> Option<Vec<&'static str>> {
+    const KEEP: [&str; 7] = [" + ", " - ", " * ", " << ", " & ", " | ", " ^ "];
+    let mut ops = Vec::new();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while let Some(c) = level.get(i..).and_then(|r| r.chars().next()) {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ' ' if depth == 0 => {
+                let rest = level.get(i..).unwrap_or("");
+                if let Some(op) = KEEP.iter().find(|op| rest.starts_with(**op)) {
+                    ops.push(op.trim());
+                    i += op.len();
+                    continue;
+                }
+                if rest.trim_start().starts_with(|c: char| {
+                    !c.is_alphanumeric() && c != '(' && c != '*' && c != '-' && c != '~'
+                }) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        i += c.len_utf8();
+    }
+    Some(ops)
+}
+
+/// Tells whether a level has ` & 0xffffffff` outside its inner parentheses.
+///
+/// # Arguments
+///
+/// * `level` - The text between a level's parentheses.
+fn depth0_mask(level: &str) -> bool {
+    let mut depth = 0i32;
+    for (i, c) in level.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ' ' if depth == 0 => {
+                let rest = level.get(i..).unwrap_or("");
+                if rest.starts_with(MASK32)
+                    && !rest
+                        .get(MASK32.len()..)
+                        .is_some_and(|t| t.starts_with(|c: char| c.is_ascii_hexdigit()))
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
     false
 }
 
@@ -1825,6 +2012,9 @@ fn gap_for(lines: &mut Vec<String>, k: usize) -> bool {
     true
 }
 
+/// Mask a 32-bit write leaves on a value the text holds in 64 bits.
+const MASK32: &str = " & 0xffffffff";
+
 /// Declares a register variable at the width its uses show, and drops the
 /// casts that width makes redundant.
 ///
@@ -1836,7 +2026,8 @@ fn gap_for(lines: &mut Vec<String>, k: usize) -> bool {
 /// masks go, since C promotes the declared type the same way. A local the
 /// text already declares at a narrow width drops that same cast, including
 /// one written `(uint32_t)(name)`, and keeps a cast of a different width.
-/// Only register
+/// A mask over arithmetic C already does in `unsigned int` goes too
+/// ([`drop_unsigned_masks`]). Only register
 /// names and the variables a register's webs became
 /// ([`super::vars::split_webs`]) move; a stack slot keeps the width its
 /// accesses gave it, which the overlap notes depend on.
@@ -1936,6 +2127,20 @@ pub(super) fn type_locals(text: &str) -> String {
             *line = strip_width(line, name, casts, mask);
         }
     }
+    let unsigned32: BTreeSet<String> = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("uint32_t ")?.strip_suffix(';'))
+        .flat_map(|names| names.split(", ").map(str::trim))
+        .filter(|n| is_ident(n))
+        .map(str::to_owned)
+        .collect();
+    if !unsigned32.is_empty() {
+        for line in &mut lines {
+            if !line.starts_with("//") && !is_declaration(line) {
+                *line = drop_unsigned_masks(line, &unsigned32);
+            }
+        }
+    }
     let mut out: String = lines
         .into_iter()
         .filter(|l| l != "\u{0}")
@@ -1943,6 +2148,141 @@ pub(super) fn type_locals(text: &str) -> String {
         .join("\n");
     out.push('\n');
     out
+}
+
+/// Tells whether C evaluates an expression as an `unsigned int`, so its
+/// value already fits 32 bits.
+///
+/// Every leaf is a `uint32_t` variable or a constant below 2^31, at least
+/// one is a variable, and the operators keep the type: arithmetic, bitwise
+/// and shift operators. The usual conversions turn the `int` constants
+/// beside an `unsigned int` into it, so the whole is computed modulo 2^32
+/// and a 32-bit mask on it changes nothing. A call, a dereference, an index,
+/// a field or a cast names something else, so it says no.
+///
+/// # Arguments
+///
+/// * `expr` - The expression inside the mask's parentheses.
+/// * `unsigned32` - The variables declared `uint32_t`.
+fn is_unsigned32(expr: &str, unsigned32: &BTreeSet<String>) -> bool {
+    let mut vars = 0usize;
+    let mut rest = expr.trim();
+    while let Some(c) = rest.chars().next() {
+        if is_ident_char(c) && !c.is_ascii_digit() {
+            let n = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
+            if !unsigned32.contains(rest.get(..n).unwrap_or("")) {
+                return false;
+            }
+            rest = rest.get(n..).unwrap_or("").trim_start();
+            if rest.starts_with(['(', '[', '.']) || rest.starts_with("->") {
+                return false;
+            }
+            vars += 1;
+        } else if c.is_ascii_digit() {
+            let n = rest
+                .find(|c: char| !c.is_ascii_alphanumeric())
+                .unwrap_or(rest.len());
+            if parse_const(rest.get(..n).unwrap_or("")).is_none_or(|k| k > 0x7fff_ffff) {
+                return false;
+            }
+            rest = rest.get(n..).unwrap_or("").trim_start();
+        } else {
+            let Some(op) = ["<<", ">>", "+", "-", "*", "&", "|", "^", "~", "(", ")"]
+                .iter()
+                .find(|op| rest.starts_with(**op))
+            else {
+                return false;
+            };
+            rest = rest.get(op.len()..).unwrap_or("").trim_start();
+        }
+    }
+    vars > 0
+}
+
+/// Drops each `(E) & 0xffffffff` whose `E` is already an `unsigned int`
+/// ([`is_unsigned32`]), and the parentheses that only held it together:
+/// a pair around it, an index's, or an assigned value's.
+///
+/// # Arguments
+///
+/// * `line` - One line of the text.
+/// * `unsigned32` - The variables declared `uint32_t`.
+fn drop_unsigned_masks(line: &str, unsigned32: &BTreeSet<String>) -> String {
+    let needle = format!("){MASK32}");
+    let mut out = line.to_owned();
+    let mut from = 0;
+    while let Some(at) = out
+        .get(from..)
+        .and_then(|t| t.find(&needle))
+        .map(|k| k + from)
+    {
+        from = at + 1;
+        let after = at + needle.len();
+        if out
+            .get(after..)
+            .is_some_and(|t| t.starts_with(|c: char| c.is_ascii_hexdigit()))
+        {
+            continue;
+        }
+        let Some(open) = matching_open(&out, at) else {
+            continue;
+        };
+        if !is_unsigned32(out.get(open + 1..at).unwrap_or(""), unsigned32) {
+            continue;
+        }
+        out.replace_range(at + 1..after, "");
+        let (mut o, mut c) = (open, at);
+        while o > 0 {
+            match (out.get(o - 1..o), out.get(c + 1..c + 2)) {
+                (Some("("), Some(")")) => {
+                    out.replace_range(c + 1..c + 2, "");
+                    out.replace_range(o - 1..o, "");
+                    o -= 1;
+                    c -= 1;
+                }
+                (Some("["), Some("]")) => {
+                    out.replace_range(c..=c, "");
+                    out.replace_range(o..=o, "");
+                    break;
+                }
+                (Some(" "), Some(";" | ")" | ",")) if o >= 2 && out.get(o - 2..o) == Some("= ") => {
+                    out.replace_range(c..=c, "");
+                    out.replace_range(o..=o, "");
+                    break;
+                }
+                _ => break,
+            }
+        }
+        from = o;
+    }
+    out
+}
+
+/// The index of the `(` that the `)` at `close` closes.
+///
+/// # Arguments
+///
+/// * `s` - The line.
+/// * `close` - Index of a `)`.
+///
+/// # Returns
+///
+/// `None` when nothing opens it.
+fn matching_open(s: &str, close: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in s.get(..=close)?.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Tells whether a line declares variables rather than doing anything.
@@ -2907,6 +3247,58 @@ mod accessor_tests {
 mod lane_tests {
     use super::lane_locals;
 
+    /// Reads under a 32-bit mask inside a condition, an index or a `for`
+    /// header are 32-bit reads, so the bounds of a binary search are
+    /// `uint32_t` and their masks go.
+    ///
+    /// Each read of `var1` and `var2` reaches its line's result only through
+    /// `-`, `+` and a ` & 0xffffffff`, which keep low bits low. A shift
+    /// right of the unmasked value reads the high bits, so `var4`, read
+    /// that way, stays as it was, and so does `var3`, which a 64-bit sum
+    /// writes.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn reads_under_a_mask_anywhere_on_the_line_are_32_bit_reads() {
+        let text = concat!(
+            "uint64_t var1, var2, var3, var4;
+",
+            "
+",
+            "var1 = 0;
+",
+            "var2 = (a2 - 1) & 0xffffffff;
+",
+            "var4 = a2 & 0xffffffff;
+",
+            "for (var3 = ((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff; a1[var3 & 0xffffffff] != (uint32_t)a3; var3 = ((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff) {
+",
+            "  if ((int32_t)a1[((((var2 - var1) & 0xffffffff) >> 1) + var1) & 0xffffffff] >= (int32_t)a3) {
+",
+            "    var2 = (var3 - 1) & 0xffffffff;
+",
+            "  } else {
+",
+            "    var1 = (var3 + 1) & 0xffffffff;
+",
+            "  }
+",
+            "}
+",
+            "var3 = var3 + (var4 >> 3);
+",
+            "return var3;
+",
+        );
+        let out = lane_locals(text);
+        assert!(out.contains("uint32_t var1, var2;"), "{out}");
+        assert!(out.contains("uint64_t var3, var4;"), "{out}");
+        assert!(out.contains("var2 = var3 - 1;"), "{out}");
+        assert!(out.contains("var2 = var3 - 1;"), "{out}");
+    }
+
     /// A 32-bit counter compared as signed and the 32-bit sum it feeds are
     /// declared at those widths, so the compare cast and the truncation
     /// mask are the declaration's.
@@ -3028,6 +3420,40 @@ mod declared_cast_tests {
         assert!(out.contains("if ((int32_t)(var2 + 1) < 0) {"), "{out}");
         assert!(out.contains("if ((uint32_t)var3 != 0) {"), "{out}");
         assert!(out.contains("uint64_t var3;"), "{out}");
+    }
+
+    /// A 32-bit mask over arithmetic C already does in `unsigned int`
+    /// changes nothing, so it goes, with the parentheses it needed.
+    ///
+    /// `var1` and `var2` are `uint32_t`, so `(var2 - var1) & 0xffffffff`
+    /// is `var2 - var1`; `a2` is wider and a constant past `INT_MAX` is not
+    /// an `int`, so those masks stay.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_mask_over_unsigned_int_arithmetic_goes() {
+        let text = concat!(
+            "uint32_t var1, var2;
+",
+            "
+",
+            "var1 = ((var2 - var1) & 0xffffffff) >> 1;
+",
+            "var2 = a1[((var1 + 1) & 0xffffffff)];
+",
+            "var1 = ((var2 + var1) & 0xffffffff);
+",
+            "return ((a2 - var1) & 0xffffffff) + ((var1 ^ 0x80000000) & 0xffffffff);
+",
+        );
+        let out = type_locals(text);
+        assert!(out.contains("var1 = (var2 - var1) >> 1;"), "{out}");
+        assert!(out.contains("var2 = a1[var1 + 1];"), "{out}");
+        assert!(out.contains("var1 = var2 + var1;"), "{out}");
+        assert!(out.contains("((a2 - var1) & 0xffffffff)"), "{out}");
+        assert!(out.contains("((var1 ^ 0x80000000) & 0xffffffff)"), "{out}");
     }
 }
 
