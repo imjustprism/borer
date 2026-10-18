@@ -503,7 +503,7 @@ fn fixed(x: f64, signed: bool, bits: u16) -> u64 {
         // fit in `i64`. Casting through `i64` would saturate a step early.
         #[expect(
             clippy::cast_possible_truncation,
-            clippy::cast_precision_loss,
+            clippy::cast_sign_loss,
             reason = "the bounds keep the truncated value within the unsigned width"
         )]
         let v = t as u64;

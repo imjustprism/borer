@@ -1772,7 +1772,9 @@ fn a_float_bit_move_stores_the_bits() {
 }
 
 /// `fmov` of a float into a general register, or into a narrower lane,
-/// stores the lane's bits. A cast of the number is a different value.
+/// stores the lane's bits.
+///
+/// A cast of the number is a different value.
 /// An immediate stored at another width is that immediate's encoding,
 /// not a float of the store's width.
 #[test]

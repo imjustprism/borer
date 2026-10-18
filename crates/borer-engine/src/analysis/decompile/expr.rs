@@ -2059,8 +2059,9 @@ fn rotate_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
 
 /// `shld` or `shrd` of one value by a count masked to the width.
 ///
-/// The lifter writes `shld x, x, n` as `(x << (n & (w - 1))) | ((x >> 1)
-/// >> ((w - 1) - (n & (w - 1))))`, and `shrd` with the shifts swapped.
+/// The lifter writes `shld x, x, n` as the or of `x << (n & (w - 1))` and
+/// `(x >> 1) >> ((w - 1) - (n & (w - 1)))`, and `shrd` with the shifts
+/// swapped.
 /// That is a rotate by `n` at 32 and 64 bits, where the mask keeps the
 /// count inside the width. A rotate reduces its count the same way, so
 /// the printed count is `n`. An unmasked count is not this shape. A call
@@ -2088,7 +2089,7 @@ fn variable_rotate(l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         }
     }
     /// The value under `& mask`, or `None`.
-    fn under_mask<'a>(e: &'a Expr, mask: u64) -> Option<&'a Expr> {
+    fn under_mask(e: &Expr, mask: u64) -> Option<&Expr> {
         match e {
             Expr::Bin(Op::And, n, m) if const_of(m) == Some(mask) => Some(n.as_ref()),
             Expr::Bin(Op::And, m, n) if const_of(m) == Some(mask) => Some(n.as_ref()),
@@ -2096,7 +2097,7 @@ fn variable_rotate(l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         }
     }
     /// `(value, rest)` of a shift by one then by `rest`, or `None`.
-    fn doubled<'a>(e: &'a Expr, op: Op) -> Option<(&'a Expr, &'a Expr)> {
+    fn doubled(e: &Expr, op: Op) -> Option<(&Expr, &Expr)> {
         let (which, inner, rest) = shift(e)?;
         if which != op {
             return None;
@@ -3193,7 +3194,7 @@ pub(super) fn rev32_bits(v: u64, bits: u8) -> Option<u64> {
     if bits != 64 {
         return None;
     }
-    let swap = |x: u64| u64::from((x as u32).swap_bytes());
+    let swap = |x: u64| u64::from(lo32(x).swap_bytes());
     Some((swap(v >> 32) << 32) | swap(v))
 }
 
@@ -3382,7 +3383,7 @@ pub(super) fn fcvtzu_bits(v: u64, fb: u8, bits: u8) -> Option<u64> {
     // `[2^63, 2^64)` fits here and does not fit in `i64`.
     #[expect(
         clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
         reason = "the bounds keep the truncated value within the unsigned width"
     )]
     let v = t as u64;
@@ -3405,7 +3406,7 @@ pub(super) fn sub_sat_bits(a: u64, b: u64, bits: u8) -> Option<u64> {
     }
     let m = mask_bits(bits);
     let (a, b) = (a & m, b & m);
-    Some(if a < b { 0 } else { a - b })
+    Some(a.saturating_sub(b))
 }
 
 /// An unsigned compare-select of zero and that compare's difference, as
@@ -6506,7 +6507,7 @@ mod fold_tests {
                 );
             }
         }
-        let signed = ternary(cond(C::l, Flags::Cmp(X, Y, w)), k(0), diff.clone());
+        let signed = ternary(cond(C::l, Flags::Cmp(X, Y, w)), k(0), diff);
         let swapped = ternary(cond(C::b, Flags::Cmp(X, Y, w)), k(0), b(Op::Sub, &Y, &X));
         let other = ternary(cond(C::b, Flags::Cmp(X, Y, w)), k(0), b(Op::Sub, &X, &k(1)));
         let called = Expr::Call("g".to_owned(), vec![X]);
@@ -6604,7 +6605,7 @@ mod fold_tests {
                 "{cc:?} at {w} became {stayed:?}"
             );
         }
-        let other = ternary(cond(C::s, Flags::Cmp(k(0), X, w)), Y, neg.clone());
+        let other = ternary(cond(C::s, Flags::Cmp(k(0), X, w)), Y, neg);
         assert!(
             matches!(other, Expr::Ternary(..)),
             "a third value at {w} became {other:?}"
@@ -7237,7 +7238,7 @@ mod fold_tests {
         let below64 = 0x43EF_FFFF_FFFF_FFFF;
         #[expect(
             clippy::cast_possible_truncation,
-            clippy::cast_precision_loss,
+            clippy::cast_sign_loss,
             reason = "these two values are exact integers inside the unsigned width"
         )]
         let (high, near) = (f64::from_bits(two63) as u64, f64::from_bits(below64) as u64);

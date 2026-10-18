@@ -938,7 +938,9 @@ fn a_complementary_shift_of_one_value_is_a_rotate() {
     assert!(!text.contains("rotl") && !text.contains("rotr"), "{text}");
 }
 
-/// `shld` of one register by `cl` is a rotate. The count is masked to the
+/// `shld` of one register by `cl` is a rotate.
+///
+/// The count is masked to the
 /// width, which a rotate already reduces, so the mask is not printed. Two
 /// registers, and a 16-bit `shld`, stay the shifts. There is no 8-bit
 /// `shld`: the same opcode without a `66` prefix is a 32-bit rotate.
@@ -1092,7 +1094,9 @@ fn an_added_power_of_two_mask_is_align_up() {
     }
 }
 
-/// `neg` then `cmovs` of the original register is `abs`. `cmovns` is
+/// `neg` then `cmovs` of the original register is `abs`.
+///
+/// `cmovns` is
 /// `-abs`. A 32-bit `neg` and a select of a different register stay the
 /// ternary: a negative 32-bit lane is not negative as a 64-bit value.
 #[test]
@@ -1138,7 +1142,9 @@ fn a_full_width_negation_select_is_abs() {
 }
 
 /// A full-width compare that keeps one of its own operands is `min` or
-/// `max`. A 32-bit compare, a third register, and an equality test stay
+/// `max`.
+///
+/// A 32-bit compare, a third register, and an equality test stay
 /// the ternary: a narrower signed minimum is not the minimum of the
 /// zero-extended values.
 #[test]
@@ -2020,7 +2026,9 @@ fn const_survives_join() {
     );
 }
 
-/// `F` becomes a `for` loop. `cmp ecx,5; jge` is a signed 32-bit compare and
+/// `F` becomes a `for` loop.
+///
+/// `cmp ecx,5; jge` is a signed 32-bit compare and
 /// both the counter and the sum are 32-bit writes, so the counter is an
 /// `int32_t` and the compare needs no cast. No temporaries and no back-edge
 /// goto survive.
@@ -5109,9 +5117,10 @@ fn skeleton_folds_assert_helper_calls() {
     assert!(!sk.contains("sub_1b40"), "{sk}");
 }
 
-/// The skeleton folds a guarded assert into one line: `AG`'s
-/// `if (this == nullptr) { ReportAssertFailure("f.IsValid()", ...); }` becomes
-/// `assert(f.IsValid());` while the full text keeps the guard. `this` is a
+/// The skeleton folds a guarded assert into one line.
+///
+/// `AG`'s `if (this == nullptr) { ReportAssertFailure("f.IsValid()", ...); }`
+/// becomes `assert(f.IsValid());` while the full text keeps the guard. `this` is a
 /// pointer, so the zero test is `nullptr`, not `0`.
 #[test]
 fn skeleton_folds_guarded_asserts() {
@@ -7671,7 +7680,10 @@ fn a_broadcast_sign_mask_keeps_the_high_bit() {
         smag.extend_from_slice(&zero);
     }
 
-    let cases: &[(&[u8], &[u8], &[&str], &[&str])] = &[
+    /// The code, the data, the spellings the text must hold and those it
+    /// must not.
+    type Case<'a> = (&'a [u8], &'a [u8], &'a [&'a str], &'a [&'a str]);
+    let cases: &[Case<'_>] = &[
         (
             &broadcast_sign,
             &bsign,
@@ -8291,7 +8303,10 @@ fn a_scalar_min_or_max_keeps_the_operand_the_compare_misses() {
     let pos = 0u32;
     let neg = 0x8000_0000u32;
     let one = 0x3f80_0000u32;
-    let cases: &[(u8, u32, u32, &[&str], &[&str])] = &[
+    /// The opcode, the two operands' bits, the spellings the text must
+    /// hold and those it must not.
+    type Case<'a> = (u8, u32, u32, &'a [&'a str], &'a [&'a str]);
+    let cases: &[Case<'_>] = &[
         (0x5d, pos, neg, &["?", "<"], &["fmin"]),
         (0x5d, neg, pos, &["?", "<"], &["fmin"]),
         (0x5d, one, nan, &["?", "<", "NAN"], &["fmin"]),

@@ -618,7 +618,7 @@ impl Lift<'_, '_> {
             .ok()
             .and_then(|bits| RoundToInt::new(signed, bits))?;
         let args = vec![x, Expr::Const(u64::from(from))];
-        self.write(dst, to, Expr::Call(round.name()?.to_string(), args));
+        self.write(dst, to, Expr::Call(round.name()?.to_owned(), args));
         Some(())
     }
 

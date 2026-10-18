@@ -1185,7 +1185,7 @@ fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
         if for_step_masked(trimmed, name) {
             masked = true;
         }
-        if const_chain(trimmed).is_some_and(|chain| chain.iter().any(|n| *n == name)) {
+        if const_chain(trimmed).is_some_and(|chain| chain.contains(&name)) {
             // A constant assigned through one or several names truncates
             // each of them to the same bits.
         } else if let Some(rhs) = masked_rhs(trimmed, name) {
@@ -1197,10 +1197,10 @@ fn lane_type(lines: &[String], name: &str) -> Option<&'static str> {
             if !fits_u32(rhs) {
                 return None;
             }
-        } else if let Some(rhs) = compound_rhs(trimmed, name) {
-            if !fits_u32(rhs) {
-                return None;
-            }
+        } else if let Some(rhs) = compound_rhs(trimmed, name)
+            && !fits_u32(rhs)
+        {
+            return None;
         }
         for at in word_positions(line, name) {
             if address_index(line, at, name) {

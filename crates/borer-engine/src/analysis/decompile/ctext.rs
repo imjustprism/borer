@@ -1197,6 +1197,10 @@ mod tests {
     /// `nullptr` is the null constant, the same value as the literal `0`.
     ///
     /// A longer name that merely starts with those letters stays a name.
+    ///
+    /// # Panics
+    ///
+    /// When either spelling tokenizes differently.
     #[test]
     fn nullptr_is_a_null_constant() {
         assert_eq!(

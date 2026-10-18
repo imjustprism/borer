@@ -111,10 +111,12 @@ fn primary(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
 }
 
-/// A value used when it is set and a fallback otherwise, `heapBuffer ?
-/// heapBuffer : localBuffer`, is one load and one test in the code, and
-/// spelling it twice doubles what a reader has to compare. Only a value
-/// that calls nothing is shortened, so reading it once is reading it twice.
+/// Shortens a value used when set and a fallback otherwise to `x ?: y`.
+///
+/// `heapBuffer ? heapBuffer : localBuffer` is one load and one test in the
+/// code, and spelling it twice doubles what a reader has to compare. Only a
+/// value that calls nothing is shortened, so reading it once is reading it
+/// twice.
 ///
 /// # Arguments
 ///
