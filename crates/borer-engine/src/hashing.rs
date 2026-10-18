@@ -513,13 +513,13 @@ const SECURITY_DIR: usize = 4;
 #[must_use]
 pub fn authentihash(program: &Program) -> Option<[u8; 32]> {
     let bytes = &program.bytes;
-    let checksum = crate::program::pe_signature(bytes)?
+    let checksum = crate::program::pe::pe_signature(bytes)?
         .checked_add(24)?
         .checked_add(64)?;
     let after_checksum = checksum.checked_add(4)?;
     let mut h = Sha256::new();
     h.update(bytes.get(..checksum)?);
-    let Some((entry, _)) = crate::program::directory_entry(bytes, SECURITY_DIR) else {
+    let Some((entry, _)) = crate::program::pe::directory_entry(bytes, SECURITY_DIR) else {
         h.update(bytes.get(after_checksum..)?);
         return Some(h.finish());
     };

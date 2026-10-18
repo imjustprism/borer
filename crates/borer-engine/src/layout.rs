@@ -275,7 +275,7 @@ impl Layout {
             })
             .collect();
         let image_base = regions.iter().map(|r| r.va).min().unwrap_or(self.base);
-        let magic = crate::program::magic_name(&bytes);
+        let magic = crate::program::file::magic_name(&bytes);
         let mut program = Program::raw(bytes, self.arch, image_base, entry, sections);
         program.path = path;
         program.headers.kind = Some(KIND);
