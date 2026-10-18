@@ -1677,6 +1677,24 @@ fn a_bounded_lookup_declares_its_table() {
     assert!(text.contains("g32_140002000[a1]"), "{text}");
 }
 
+/// The check reads a float parameter at the width the signature gives it.
+///
+/// `cvtss2sd xmm0,xmm0; ret`, which nothing calls, is `double f(float a1)`
+/// returning `(double)a1`: the machine converts the single in `xmm0`, and
+/// so does the text, so every block agrees.
+#[test]
+fn a_float_parameter_converts_as_the_float_it_is() {
+    let code = [
+        0xf3, 0x0f, 0x5a, 0xc0, // ASM: cvtss2sd xmm0,xmm0
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("(float a1)"), "{text}");
+    assert!(!text.contains("disagree"), "{text}");
+}
+
 /// A padding `nop` is no dereference: `mov eax,ecx; nop word
 /// [rax+rax]; add eax,1; ret` takes a number, not a pointer.
 #[test]

@@ -2301,6 +2301,16 @@ fn decompile_in<L: Lifter>(
                     Ty::F32 | Ty::F64 => Some((*k, *ty)),
                     _ => None,
                 })
+                .chain(params.iter().enumerate().filter_map(|(i, p)| {
+                    let ty = if p.starts_with("float ") {
+                        Ty::F32
+                    } else if p.starts_with("double ") {
+                        Ty::F64
+                    } else {
+                        return None;
+                    };
+                    Some((Key::Param(u8::try_from(i).ok()?), ty))
+                }))
                 .collect(),
         })
     });
