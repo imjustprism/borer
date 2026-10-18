@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="192" height="192" role="img" aria-label="borer">
+<title>borer</title>
+<style>.m0,.m1{stop-color:#08090B}.m2{stop-color:#76787F}.w{fill:#08090B}
+@media (prefers-color-scheme:dark){.m0,.m1{stop-color:#FFFFFF}.m2{stop-color:#7E8087}.w{fill:#F2F1ED}}</style><defs><linearGradient id="m" x1="6" y1="4" x2="42" y2="46" gradientUnits="userSpaceOnUse"><stop class="m0" offset="0"/><stop class="m1" offset=".42"/><stop class="m2" offset="1"/></linearGradient></defs><path d="M9.5 4V30A14 14 0 0 0 37.5 30A11.7 11.7 0 0 0 14.1 30A9.399999999999999 9.399999999999999 0 0 0 32.9 30A7.099999999999999 7.099999999999999 0 0 0 18.7 30A4.799999999999999 4.799999999999999 0 0 0 28.3 30" fill="none" stroke="url(#m)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="butt"/>
+</svg>

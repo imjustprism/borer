@@ -1,5 +1,5 @@
 /target
-# Brand files: made and kept in borer-web; the README's banners are in .github/assets.
+# Brand sources: made and kept in borer-web. The README uses the copies in brand/.
 /assets
 # side build directories (CARGO_TARGET_DIR=target-live and friends)
 /target*/

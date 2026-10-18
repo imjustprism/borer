@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://borer.lol">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.png">
-      <img alt="borer: reverse engineering, rebuilt for AI agents" src=".github/assets/banner-light.png" width="100%">
+      <source media="(prefers-color-scheme: dark)" srcset="brand/banner-dark.png">
+      <img alt="borer: reverse engineering, rebuilt for AI agents" src="brand/banner-light.png" width="100%">
     </picture>
   </a>
 </p>
