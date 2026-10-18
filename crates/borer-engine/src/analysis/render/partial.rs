@@ -412,6 +412,11 @@ fn secret_line(c: &Check) -> String {
 /// The cycles, one per header.
 fn cycles_of(f: &Function) -> Vec<Cycle> {
     let starts: BTreeSet<u64> = f.blocks.iter().map(|b| b.start).collect();
+    let succs: BTreeMap<u64, &[u64]> = f
+        .blocks
+        .iter()
+        .map(|b| (b.start, b.successors.as_slice()))
+        .collect();
     let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for b in &f.blocks {
         for &s in &b.successors {
@@ -430,18 +435,10 @@ fn cycles_of(f: &Function) -> Vec<Cycle> {
     }
     let mut cycles = Vec::new();
     for head in heads {
-        let forward = walk(head, |n| {
-            f.blocks
-                .iter()
-                .find(|b| b.start == n)
-                .map_or(&[], |b| b.successors.as_slice())
-        });
+        let forward = walk(head, |n| succs.get(&n).copied().unwrap_or(&[]));
         let backward = walk(head, |n| preds.get(&n).map_or(&[], Vec::as_slice));
         let body: BTreeSet<u64> = forward.intersection(&backward).copied().collect();
-        let self_loop = f
-            .blocks
-            .iter()
-            .any(|b| b.start == head && b.successors.contains(&head));
+        let self_loop = succs.get(&head).is_some_and(|s| s.contains(&head));
         if body.len() > 1 || self_loop {
             cycles.push(Cycle { head, body });
         }
@@ -484,9 +481,10 @@ fn walk<'a>(start: u64, next: impl Fn(u64) -> &'a [u64]) -> BTreeSet<u64> {
 ///
 /// Whether the instruction is on the cycle.
 fn on_cycle(f: &Function, cycle: &Cycle, ip: u64) -> bool {
-    f.blocks
-        .iter()
-        .any(|b| cycle.body.contains(&b.start) && ip >= b.start && ip < b.end)
+    let at = f.blocks.partition_point(|b| b.start <= ip);
+    at.checked_sub(1)
+        .and_then(|i| f.blocks.get(i))
+        .is_some_and(|b| ip < b.end && cycle.body.contains(&b.start))
 }
 
 /// The cycle's counter: a register incremented on the cycle and compared

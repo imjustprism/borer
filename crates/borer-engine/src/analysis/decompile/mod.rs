@@ -973,7 +973,9 @@ pub(crate) fn decompile_witnessed(
 /// [`classes::field_names`] (one pass over its methods), and every
 /// `*(T*)(var + off)` with a named offset becomes `var->name`, every bare
 /// `var + off` `&var->name`. Offsets no class names still get the layout
-/// treatment of [`decompile`].
+/// treatment of [`decompile`]. The answer is memoized per overlay through
+/// [`Analysis::derived`]: naming and polishing a function of ten thousand
+/// instructions took a second on every call.
 ///
 /// # Arguments
 ///
@@ -991,8 +993,18 @@ pub fn decompile_named(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    let text = plain_text_cached(program, analysis, overlay, overlay.fingerprint(), entry)?;
-    name_fields(program, analysis, overlay, entry, &text)
+    let names = overlay.fingerprint();
+    let memo = analysis.derived.get_or_build_item(
+        "named_text",
+        names,
+        entry,
+        || {
+            let text = plain_text_cached(program, analysis, overlay, names, entry)?;
+            name_fields(program, analysis, overlay, entry, &text)
+        },
+        |text| text.as_ref().map_or(0, String::capacity),
+    );
+    memo.as_ref().clone()
 }
 
 /// What the check of a function's answer found ([`replay::TextCheck`]),
