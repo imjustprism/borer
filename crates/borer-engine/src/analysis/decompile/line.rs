@@ -76,6 +76,12 @@ pub(super) fn is_temp_name(w: &str) -> bool {
 ///
 /// * `name` - The left side of an assignment.
 pub(super) fn is_register_name(name: &str) -> bool {
+    if !matches!(
+        name.as_bytes().first(),
+        Some(b'r' | b'e' | b'x' | b'v' | b't')
+    ) {
+        return false;
+    }
     if is_temp_name(name) || numbered(name, "xmm") {
         return true;
     }

@@ -312,12 +312,14 @@ pub(super) fn merge_chains(lines: &mut Vec<String>) -> bool {
     fn pure(line: &str) -> Option<(&str, &str)> {
         plain_assignment(line).filter(|(_, r)| !impure(r))
     }
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut out: Option<Vec<String>> = None;
     let mut changed = false;
     let mut i = 0;
     while i < lines.len() {
         let Some(first) = pure(&lines[i]) else {
-            out.push(lines[i].clone());
+            if let Some(out) = out.as_mut() {
+                out.push(lines[i].clone());
+            }
             i += 1;
             continue;
         };
@@ -335,10 +337,17 @@ pub(super) fn merge_chains(lines: &mut Vec<String>) -> bool {
             j += 1;
         }
         if run.len() == 1 {
-            out.push(lines[i].clone());
+            if let Some(out) = out.as_mut() {
+                out.push(lines[i].clone());
+            }
             i += 1;
             continue;
         }
+        let out = out.get_or_insert_with(|| {
+            let mut head = Vec::with_capacity(lines.len());
+            head.extend(lines.iter().take(i).cloned());
+            head
+        });
         let mut groups: Vec<(String, Vec<String>)> = Vec::new();
         for (l, r) in run {
             match groups.iter_mut().find(|(gr, _)| *gr == r) {
@@ -354,7 +363,9 @@ pub(super) fn merge_chains(lines: &mut Vec<String>) -> bool {
         }
         i = j;
     }
-    *lines = out;
+    if let Some(out) = out {
+        *lines = out;
+    }
     changed
 }
 
@@ -381,6 +392,9 @@ pub(super) fn fold_temp_copies(lines: &mut Vec<String>) -> bool {
     let is_param = |w: &str| w == "this" || is_param_name(w);
     let mut changed = false;
     let mut uses = temp_uses(lines);
+    if uses.is_empty() {
+        return false;
+    }
     let mut i = 0;
     while i < lines.len() {
         let t = lines[i].trim();
@@ -469,7 +483,7 @@ pub(super) fn fold_temp_copies(lines: &mut Vec<String>) -> bool {
 /// * `lines` - The body lines.
 fn temp_uses(lines: &[String]) -> BTreeMap<String, Vec<usize>> {
     let mut uses: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (k, l) in lines.iter().enumerate() {
+    for (k, l) in lines.iter().enumerate().filter(|(_, l)| l.contains("tmp_")) {
         for tok in tokens(l).filter(|w| is_temp_name(w)) {
             let at = uses.entry(tok.to_owned()).or_default();
             if at.last() != Some(&k) {
@@ -648,15 +662,18 @@ pub(super) fn thread_jumps(lines: &mut [String]) -> bool {
 /// `opener[k]` is the nearest earlier line, label lines apart, at a smaller
 /// indentation than line `k`: the line that opens the block `k` sits in.
 /// `closer[k]` is the first later line at line `k`'s indentation or less,
-/// labels included: for an opener, the line that ends its block. A walk
-/// with two stacks of indentations finds both, where a scan per line would
-/// cost a pass over the text each.
+/// labels included: for an opener, the line that ends its block. `above[k]`
+/// is the last earlier line at line `k`'s indentation or less, labels
+/// included. A walk with three stacks of indentations finds them all,
+/// where a scan per line would cost a pass over the text each.
 #[derive(Debug, Default)]
 struct Nest {
     /// The opener of each line's block.
     opener: Vec<Option<usize>>,
     /// The first later line not deeper than each line.
     closer: Vec<Option<usize>>,
+    /// The last earlier line not deeper than each line.
+    above: Vec<Option<usize>>,
 }
 
 impl Nest {
@@ -669,9 +686,11 @@ impl Nest {
         let mut nest = Self {
             opener: vec![None; lines.len()],
             closer: vec![None; lines.len()],
+            above: vec![None; lines.len()],
         };
         let mut open: Vec<(usize, usize)> = Vec::new();
         let mut shallow: Vec<(usize, usize)> = Vec::new();
+        let mut level: Vec<(usize, usize)> = Vec::new();
         for (k, l) in lines.iter().enumerate() {
             if l.trim().is_empty() {
                 continue;
@@ -684,6 +703,11 @@ impl Nest {
                 shallow.pop();
             }
             shallow.push((d, k));
+            while level.last().is_some_and(|&(ind, _)| ind > d) {
+                level.pop();
+            }
+            nest.above[k] = level.last().map(|&(_, at)| at);
+            level.push((d, k));
             if label_name(l).is_some() {
                 nest.opener[k] = open
                     .iter()
@@ -944,6 +968,7 @@ pub(super) fn collapse_lone_gotos(lines: &mut Vec<String>) -> bool {
 /// Whether anything moved.
 pub(super) fn hoist_common_tails(lines: &mut Vec<String>) -> bool {
     let mut changed = false;
+    let mut nest: Option<Nest> = None;
     let mut i = 2;
     while i < lines.len() {
         if lines[i].trim() != "} else {" {
@@ -951,16 +976,17 @@ pub(super) fn hoist_common_tails(lines: &mut Vec<String>) -> bool {
             continue;
         }
         let ind = indent_of(&lines[i]);
-        let open = lines[..i]
-            .iter()
-            .rposition(|l| !l.trim().is_empty() && indent_of(l) <= ind);
-        let close = lines
-            .iter()
-            .enumerate()
-            .skip(i + 1)
-            .find(|(_, l)| !l.trim().is_empty() && indent_of(l) <= ind)
-            .map(|(k, _)| k);
-        let (Some(open), Some(close)) = (open, close) else {
+        let last = lines[i - 1].trim();
+        if indent_of(&lines[i - 1]) != ind + 2
+            || !last.ends_with(';')
+            || last.starts_with('}')
+            || is_label(last)
+        {
+            i += 1;
+            continue;
+        }
+        let b = nest.get_or_insert_with(|| Nest::of(lines));
+        let (Some(&Some(open)), Some(&Some(close))) = (b.above.get(i), b.closer.get(i)) else {
             i += 1;
             continue;
         };
@@ -984,6 +1010,7 @@ pub(super) fn hoist_common_tails(lines: &mut Vec<String>) -> bool {
         lines.remove(close - 1);
         lines.insert(close, moved);
         lines.remove(i - 1);
+        nest = None;
         changed = true;
         i -= 1;
     }
@@ -1471,8 +1498,8 @@ pub(super) fn drop_dead_assignments(
     lines: &[String],
     live_out: Option<&str>,
 ) -> Option<Vec<String>> {
-    let mut mentions: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut reads: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut mentions: FxHashMap<&str, usize> = FxHashMap::default();
+    let mut reads: FxHashMap<&str, usize> = FxHashMap::default();
     for line in lines {
         for word in tokens(line).filter(|w| is_register_name(w)) {
             *mentions.entry(word).or_default() += 1;
@@ -1491,8 +1518,7 @@ pub(super) fn drop_dead_assignments(
         name.strip_prefix(prefix)
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_hexdigit()))
     };
-    let mut changed = false;
-    let mut out = Vec::with_capacity(lines.len());
+    let mut out: Option<Vec<String>> = None;
     for (at, line) in lines.iter().enumerate() {
         let parts: Vec<&str> = line
             .trim()
@@ -1500,7 +1526,9 @@ pub(super) fn drop_dead_assignments(
             .map(|t| t.split(" = ").collect())
             .unwrap_or_default();
         let Some((rhs, targets)) = parts.split_last().filter(|(_, t)| !t.is_empty()) else {
-            out.push(line.clone());
+            if let Some(out) = out.as_mut() {
+                out.push(line.clone());
+            }
             continue;
         };
         let local = |name: &str| {
@@ -1525,17 +1553,23 @@ pub(super) fn drop_dead_assignments(
             })
             .collect();
         if kept.len() == targets.len() {
-            out.push(line.clone());
+            if let Some(out) = out.as_mut() {
+                out.push(line.clone());
+            }
             continue;
         }
-        changed = true;
+        let out = out.get_or_insert_with(|| {
+            let mut head = Vec::with_capacity(lines.len());
+            head.extend(lines.iter().take(at).cloned());
+            head
+        });
         if !kept.is_empty() {
             out.push(format!("{}{} = {rhs};", pad_of(line), kept.join(" = ")));
         } else if call {
             out.push(format!("{}{rhs};", pad_of(line)));
         }
     }
-    changed.then_some(out)
+    out
 }
 
 /// Tells whether the value line `at` gives `name` is replaced or left
@@ -1696,6 +1730,9 @@ pub(super) fn second_result(rhs: &str) -> bool {
 pub(super) fn absorb_else(lines: &mut Vec<String>) -> bool {
     /// Longest run absorbed into an `else`.
     const RUN_MAX: usize = 200;
+    if !lines.iter().any(|l| l.contains("goto ")) {
+        return false;
+    }
     let mut jumps = goto_index(lines);
     let mut changed = false;
     let mut i = 0;
@@ -1928,6 +1965,9 @@ fn run_to_label(
 pub(super) fn fold_conditional_gotos(lines: &mut Vec<String>, labels: RunLabels) -> bool {
     /// Longest run folded into the arm.
     const SPAN_MAX: usize = 200;
+    if !lines.iter().any(|l| l.contains(") goto ")) {
+        return false;
+    }
     let mut jumps = goto_index(lines);
     let mut changed = false;
     let mut i = 0;
@@ -2006,6 +2046,10 @@ mod jump_tests {
         assert_eq!(nest.closer[1], Some(3));
         assert_eq!(nest.closer[0], Some(6));
         assert_eq!(nest.closer[6], Some(7));
+        assert_eq!(nest.above[5], Some(3));
+        assert_eq!(nest.above[3], Some(1));
+        assert_eq!(nest.above[6], Some(0));
+        assert_eq!(nest.above[0], None);
     }
 
     /// A jump to the label after a loop is `break`, and a body that ends
