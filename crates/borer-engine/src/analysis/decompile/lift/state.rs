@@ -547,6 +547,7 @@ impl<'a> Exec<'_, 'a> {
         match v {
             Expr::Const(_) | Expr::Sext(..) | Expr::Cond(_) => true,
             Expr::Bin(op, ..) => !op.is_float(),
+            Expr::Helper(..) => !v.is_float(),
             Expr::Deref(_, ty) | Expr::Cast(_, ty) => !matches!(ty, Ty::F32 | Ty::F64 | Ty::U128),
             Expr::Var(Key::Param(i)) => self.ctx.arg_floats & (1u8 << (*i).min(7)) == 0,
             Expr::Var(Key::Reg(r)) => r.is_gpr(),
