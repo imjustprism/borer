@@ -521,7 +521,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .and_then(|end| usize::try_from(end - va).ok())
                 .and_then(|n| code.get(..n.min(code.len())))
                 .unwrap_or(code);
-            let lines = disasm::disassemble_isa(window, va, isa, count);
+            let lines = disasm::disassemble_program(&s.program, window, va, isa, count);
             let caveat = render::listing_caveat(&s.program, &a, va);
             if !caveat.is_empty() {
                 println!("# {caveat}");

@@ -98,6 +98,7 @@ pub(crate) fn call_sites(
             (bits, conv.word + conv.shadow)
         }
         crate::isa::Isa::A64 => (64, 0),
+        crate::isa::Isa::A32 => (32, 0),
     };
     let f = analysis.function(caller)?;
     let memo = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), caller);

@@ -904,7 +904,7 @@ pub fn disasm_function_with(
         if b.start != f.entry {
             let _ = writeln!(out, "L_{:x}:", b.start);
         }
-        let lines = disasm::disassemble_isa(code, b.start, isa, budget);
+        let lines = disasm::disassemble_program(p, code, b.start, isa, budget);
         for l in &lines {
             if let Some(n) = o.names.get(&l.va) {
                 let _ = writeln!(out, "            ; = {n} =");
@@ -1053,6 +1053,21 @@ pub fn instruction_at_or_before(p: &Program, a: &Analysis, va: u64) -> Option<u6
     let bitness = match p.isa_for(Feature::Disasm).ok()? {
         Isa::X86 { bits } => bits,
         Isa::A64 => return Some(va - va % from_usize(a64::INSN_LEN)),
+        Isa::A32 => {
+            let Some(b) = a
+                .function_at(va)
+                .and_then(|f| f.blocks.iter().find(|b| b.start <= va && va < b.end))
+            else {
+                return Some(va & !1);
+            };
+            let len = usize::try_from(b.end - b.start).ok()?;
+            let code = p.read_va(b.start, len)?;
+            return disasm::disassemble_program(p, code, b.start, Isa::A32, len)
+                .iter()
+                .map(|l| l.va)
+                .take_while(|&at| at <= va)
+                .last();
+        }
     };
     let f = a.function_at(va)?;
     let b = f.blocks.iter().find(|b| b.start <= va && va < b.end)?;

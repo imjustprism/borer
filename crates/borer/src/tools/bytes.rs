@@ -68,7 +68,7 @@ impl BorerServer {
                 .and_then(|end| usize::try_from(end - va).ok())
                 .and_then(|n| code.get(..n.min(code.len())))
                 .unwrap_or(code);
-            let lines = disasm::disassemble_isa(window, va, isa, n);
+            let lines = disasm::disassemble_program(p, window, va, isa, n);
             let o = self.overlay();
             let ends = limit.map_or(String::new(), |end| {
                 format!("; code ends at {end:#x}, what follows is data")

@@ -474,8 +474,8 @@ fn cli_symbols_page() {
 /// An architecture with no disassembler still answers what the headers say.
 ///
 /// The symbol table is parsed out of the file, not recovered from its code,
-/// so a 32-bit ARM (Thumb-2) image, which borer cannot disassemble, still
-/// has imports, exports and locals to list. An arm64 image used to report
+/// so a 32-bit RISC-V image, which borer cannot disassemble, still has
+/// imports, exports and locals to list. An arm64 image used to report
 /// "locals: N named functions" in its summary and then refuse to name them,
 /// because the listing asked for an analysis it only wanted a dead-import
 /// marker from.
@@ -497,9 +497,10 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
     let field = bytes
         .get_mut(machine..machine + 2)
         .expect("the fixture has a COFF header");
-    field.copy_from_slice(&0x01c4u16.to_le_bytes());
+    field.copy_from_slice(&0x5032u16.to_le_bytes());
 
-    let path = std::env::temp_dir().join(format!("borer_armnt_fixture_{}.bin", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("borer_riscv32_fixture_{}.bin", std::process::id()));
     std::fs::write(&path, &bytes).expect("the fixture is writable");
     let path = path.to_string_lossy().to_string();
 
@@ -510,15 +511,15 @@ fn cli_symbols_survive_an_unanalyzable_arch() {
 {out}"
     );
     assert!(
-        out.contains("ARM_NT"),
-        "the fixture is not 32-bit ARM:
+        out.contains("RISC-V_32"),
+        "the fixture is not 32-bit RISC-V:
 {out}"
     );
 
     let (ok, out) = run(&["symbols", &path]);
     assert!(
         ok,
-        "symbols refused a 32-bit ARM image:
+        "symbols refused a 32-bit RISC-V image:
 {out}"
     );
     assert!(

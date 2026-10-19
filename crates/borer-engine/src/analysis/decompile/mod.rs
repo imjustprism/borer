@@ -374,6 +374,7 @@ impl<'a> Ctx<'a> {
     fn names(&self) -> Names<'a> {
         let (first_stack, reg_params) = match self.program.arch.isa() {
             Some(crate::isa::Isa::A64) => (0, u32::from(lift_a64::INT_ARGS)),
+            Some(crate::isa::Isa::A32) => (0, 4),
             Some(crate::isa::Isa::X86 { .. }) | None => (
                 self.conv.word + self.conv.shadow,
                 u32::try_from(self.conv.args.len()).unwrap_or(0),
@@ -1634,6 +1635,7 @@ fn decompile_in_run(
             decompile_in::<arch::X86>(run, bits, cleanup, assume, witness)
         }
         crate::isa::Isa::A64 => decompile_in::<arch::A64>(run, 64, cleanup, assume, witness),
+        crate::isa::Isa::A32 => None,
     }
 }
 
@@ -3290,6 +3292,7 @@ g(tmp_5);";
             go: None,
             clr: None,
             parent: None,
+            modes: crate::isa::a32::Modes::default(),
         };
         let a = crate::analysis::Analysis::compute(&p);
         let o = crate::analysis::Overlay::default();
@@ -3356,6 +3359,7 @@ g(tmp_5);";
             go: None,
             clr: None,
             parent: None,
+            modes: crate::isa::a32::Modes::default(),
         };
         assert_eq!(
             super::string_at(&p, 0x2000),

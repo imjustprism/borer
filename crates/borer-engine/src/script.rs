@@ -583,6 +583,7 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
                 Dynamic::from_int(INT::from(match p.arch.isa() {
                     Some(Isa::X86 { bits }) => bits,
                     Some(Isa::A64) => 64,
+                    Some(Isa::A32) => 32,
                     None => 0,
                 })),
             ),
@@ -782,7 +783,7 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
         let Some(code) = h.program.read_va_upto(addr(at), n.saturating_mul(15)) else {
             return Array::new();
         };
-        crate::disasm::disassemble_isa(code, addr(at), isa, n)
+        crate::disasm::disassemble_program(&h.program, code, addr(at), isa, n)
             .into_iter()
             .map(|l| {
                 let hex: String = l.bytes.iter().map(|b| format!("{b:02x}")).collect();

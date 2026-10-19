@@ -5,6 +5,7 @@
 //! a code/data cross-reference index. Everything here is a deterministic
 //! function of the program bytes: same input, same output, byte-identical.
 
+mod a32;
 mod a64;
 pub mod about;
 pub mod anchors;
@@ -1440,6 +1441,7 @@ impl Analysis {
         let discover = || match program.arch.isa() {
             Some(Isa::X86 { bits }) => functions::discover(program, bits),
             Some(Isa::A64) => a64::discover(program),
+            Some(Isa::A32) => a32::discover(program),
             None => {
                 let mut empty = Analysis::default();
                 empty.finish_index(program);
@@ -1458,6 +1460,7 @@ impl Analysis {
         phases.mark("analysis descriptors");
         match program.arch.isa() {
             Some(Isa::A64) => a64::infer_returns(program, &mut analysis),
+            Some(Isa::A32) => {}
             Some(Isa::X86 { .. }) | None => returns::infer(program, &mut analysis),
         }
         phases.mark("analysis returns");

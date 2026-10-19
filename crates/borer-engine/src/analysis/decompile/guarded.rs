@@ -78,7 +78,7 @@ pub(super) fn plan(
     let mut out = Plan::default();
     let x86 = match program.arch.isa() {
         Some(crate::isa::Isa::X86 { bits }) => Some(bits),
-        Some(crate::isa::Isa::A64) | None => None,
+        Some(crate::isa::Isa::A64 | crate::isa::Isa::A32) | None => None,
     };
     for g in &guards {
         let pad = g

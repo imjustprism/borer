@@ -1071,6 +1071,7 @@ mod tests {
             go: None,
             clr: None,
             parent: None,
+            modes: crate::isa::a32::Modes::default(),
         }
     }
 

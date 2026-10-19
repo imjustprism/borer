@@ -869,7 +869,7 @@ fn messages(
     let calls_of = |f: &&Function| match p.arch.isa() {
         Some(Isa::A64) => super::a64::calls(p, f),
         Some(Isa::X86 { bits: 64 }) => x86_calls(p, f),
-        Some(Isa::X86 { .. }) | None => Vec::new(),
+        Some(Isa::X86 { .. } | Isa::A32) | None => Vec::new(),
     };
     let found = super::striped(&senders, calls_of);
     let mut out = BTreeMap::new();

@@ -479,22 +479,25 @@ fn eh_frame_seeds_the_functions_of_a_stripped_binary() {
 /// An ELF for an architecture the disassembler does not decode names its
 /// machine and says no code analysis applies, while still loading sections.
 ///
-/// The fixture's `e_machine` is rewritten to `EM_ARM` (40). The summary
+/// The fixture's `e_machine` is rewritten to `EM_RISCV` (243). The summary
 /// then carries a `machine:` line, `refuses` fires, and the sections the
 /// loader read are still there for triage.
 #[test]
 fn a_non_x86_machine_is_named_and_code_analysis_declines() {
     let mut bytes = elf_bytes(false);
-    bytes[0x12] = 40;
+    bytes[0x12] = 243;
     bytes[0x13] = 0;
-    let p = Program::from_bytes(std::path::PathBuf::from("arm.elf"), bytes).expect("parses");
+    let p = Program::from_bytes(std::path::PathBuf::from("riscv.elf"), bytes).expect("parses");
     assert_eq!(
         p.headers.machine.as_deref(),
-        Some("ARM (e_machine 40)"),
+        Some("RISCV (e_machine 243)"),
         "the machine is named"
     );
     let summary = p.summary();
-    assert!(summary.contains("machine: ARM (e_machine 40)"), "{summary}");
+    assert!(
+        summary.contains("machine: RISCV (e_machine 243)"),
+        "{summary}"
+    );
     assert!(
         p.refuses(Feature::Discover).is_some(),
         "no code analysis on a foreign arch"

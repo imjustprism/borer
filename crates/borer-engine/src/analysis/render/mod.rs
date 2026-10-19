@@ -83,6 +83,9 @@ pub(super) fn x86_only(p: &Program, surface: &str) -> Result<(), String> {
         Some(crate::isa::Isa::A64) => Err(format!(
             "{surface} runs x86 and x86-64 code only for now; arm64 code runs under emulate and run"
         )),
+        Some(crate::isa::Isa::A32) => Err(format!(
+            "{surface} runs x86 and x86-64 code only for now; arm code is not emulated by the tools yet"
+        )),
         Some(crate::isa::Isa::X86 { .. }) | None => Ok(()),
     }
 }

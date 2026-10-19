@@ -209,6 +209,7 @@ fn scan(p: &Program, a: &Analysis) -> Vec<SyscallSite> {
                     }
                 }
             }
+            Isa::A32 => {}
             Isa::X86 { bits } => {
                 for (k, pair) in bytes.windows(2).enumerate() {
                     let gate = match pair {

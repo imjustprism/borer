@@ -1184,6 +1184,7 @@ fn materialized(p: &Program, bytes: Vec<u8>, oep: Option<u64>, sections: Vec<Sec
         go: p.go.clone(),
         clr: p.clr.clone(),
         parent: p.parent.clone(),
+        modes: p.modes.clone(),
     }
 }
 

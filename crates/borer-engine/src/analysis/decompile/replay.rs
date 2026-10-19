@@ -792,7 +792,7 @@ pub fn replay(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64
     match program.arch.isa() {
         Some(Isa::X86 { .. }) => replay_in::<arch::X86>(program, analysis, entries, seed),
         Some(Isa::A64) => replay_in::<arch::A64>(program, analysis, entries, seed),
-        None => Replayed::default(),
+        Some(Isa::A32) | None => Replayed::default(),
     }
 }
 
@@ -849,7 +849,7 @@ pub fn replay_function(program: &Program, analysis: &Analysis, entry: u64, seed:
         Some(Isa::A64) => arch::A64::rig(program)
             .map(|t| replay_one::<arch::A64>(program, analysis, &t, entry, seed))
             .unwrap_or_default(),
-        None => Replayed::default(),
+        Some(Isa::A32) | None => Replayed::default(),
     }
 }
 
@@ -917,6 +917,7 @@ pub(crate) fn check_answer(
     match program.arch.isa()? {
         Isa::X86 { .. } => check_answer_in::<arch::X86>(program, analysis, overlay, entry),
         Isa::A64 => check_answer_in::<arch::A64>(program, analysis, overlay, entry),
+        Isa::A32 => None,
     }
 }
 

@@ -33,6 +33,10 @@ const CPU_X86: u32 = 7;
 const CPU_X86_64: u32 = 7 | 0x0100_0000;
 /// `CPU_TYPE_ARM64`.
 const CPU_ARM64: u32 = 12 | 0x0100_0000;
+/// `CPU_TYPE_ARM`: 32-bit ARM (armv7).
+const CPU_ARM: u32 = 12;
+/// `N_ARM_THUMB_DEF`: the symbol names T32 code.
+const N_ARM_THUMB_DEF: u16 = 0x0008;
 /// `MH_PIE`: the image loads at a random base.
 const MH_PIE: u32 = 0x0020_0000;
 /// `MH_NO_HEAP_EXECUTION`: the heap is mapped non-executable.
@@ -478,6 +482,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         CPU_X86_64 => Arch::X86_64,
         CPU_X86 => Arch::X86,
         CPU_ARM64 => Arch::Arm64,
+        CPU_ARM => Arch::Arm,
         _ => Arch::Unknown,
     };
     let is_64 = m.is_64;
@@ -519,9 +524,10 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
                 SymbolKind::Local
             };
             if seen.insert((nlist.n_value, plain(name).to_owned())) {
+                let thumb = arch == Arch::Arm && nlist.n_desc & N_ARM_THUMB_DEF != 0;
                 symbols.push(Symbol {
                     name: plain(name).to_owned(),
-                    addr: nlist.n_value,
+                    addr: nlist.n_value | u64::from(thumb),
                     kind,
                 });
             }

@@ -19,6 +19,8 @@ mod minidump;
 #[path = "../common/raw.rs"]
 mod raw;
 
+mod a32;
+mod a32_emulate;
 mod a64;
 mod a64_decompile;
 mod a64_emulate;

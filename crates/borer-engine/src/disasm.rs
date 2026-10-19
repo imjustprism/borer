@@ -1,12 +1,13 @@
 //! Linear disassembly: x86/x86-64 through iced-x86, AArch64 through
-//! [`crate::isa::a64`].
+//! [`crate::isa::a64`], ARM32 through [`crate::isa::a32`].
 //!
 //! [`disassemble_isa`] picks the decoder an instruction set needs;
 //! [`disassemble`] is the x86 sweep the x86-only passes call directly.
 
 use crate::isa::Isa;
-use crate::isa::a64;
 use crate::isa::x86::{Code, Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+use crate::isa::{a32, a64};
+use crate::program::Program;
 
 /// One decoded instruction as text.
 #[derive(Debug, Clone)]
@@ -155,7 +156,81 @@ pub fn disassemble_isa(code: &[u8], va: u64, isa: Isa, max_instrs: usize) -> Vec
             }
             out
         }
+        Isa::A32 => disassemble_a32(code, va, &a32::Modes::default(), max_instrs),
     }
+}
+
+/// Disassembles up to `max_instrs` instructions from `code` in the
+/// program's instruction set: [`disassemble_isa`], with ARM32 code decoded
+/// in the instruction set the program says each address is in.
+///
+/// # Arguments
+///
+/// * `program` - The image the bytes come from.
+/// * `code` - The bytes to decode.
+/// * `va` - Virtual address of `code[0]`.
+/// * `isa` - The program's instruction set.
+/// * `max_instrs` - Hard cap on the number of instructions returned.
+///
+/// # Returns
+///
+/// The decoded lines in address order.
+pub fn disassemble_program(
+    program: &Program,
+    code: &[u8],
+    va: u64,
+    isa: Isa,
+    max_instrs: usize,
+) -> Vec<DisasmLine> {
+    match isa {
+        Isa::A32 => disassemble_a32(code, va, &program.modes, max_instrs),
+        Isa::X86 { .. } | Isa::A64 => disassemble_isa(code, va, isa, max_instrs),
+    }
+}
+
+/// Disassembles ARM32 code in the instruction sets `modes` names.
+///
+/// Each instruction is read in the instruction set `modes` names for its
+/// address, an `IT` block's conditions carried along; bytes that do not
+/// make an instruction are one `(bad)` line of two bytes.
+///
+/// # Arguments
+///
+/// * `code` - The bytes.
+/// * `va` - Virtual address of `code[0]`.
+/// * `modes` - Which instruction set each address is in.
+/// * `max_instrs` - Hard cap on the number of instructions returned.
+fn disassemble_a32(code: &[u8], va: u64, modes: &a32::Modes, max_instrs: usize) -> Vec<DisasmLine> {
+    let mut out = Vec::new();
+    let mut it = a32::ItState::default();
+    let mut off = 0usize;
+    while out.len() < max_instrs && off < code.len() {
+        let at = va.wrapping_add(crate::num::from_usize(off));
+        let rest = code.get(off..).unwrap_or_default();
+        match a32::decode(rest, at, modes.at(at), &mut it) {
+            Some(i) => {
+                let len = usize::from(i.len);
+                out.push(DisasmLine {
+                    va: at,
+                    bytes: rest.get(..len).map(<[u8]>::to_vec).unwrap_or_default(),
+                    text: a32::text(&i),
+                    target: i.target(),
+                });
+                off += len;
+            }
+            None => {
+                let len = rest.len().min(2);
+                out.push(DisasmLine {
+                    va: at,
+                    bytes: rest.get(..len).map(<[u8]>::to_vec).unwrap_or_default(),
+                    text: "(bad)".to_owned(),
+                    target: None,
+                });
+                off += len;
+            }
+        }
+    }
+    out
 }
 
 /// Renders disassembly lines as `va  text` rows.

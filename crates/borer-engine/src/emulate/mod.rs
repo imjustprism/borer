@@ -16,6 +16,7 @@ use crate::num::{from_usize, lo8, lo32};
 use crate::program::Program;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+pub mod a32;
 pub mod a64;
 mod alu;
 mod api;

@@ -16,6 +16,7 @@ use crate::headers::Headers;
 use crate::isa::Isa;
 use crate::num::{from_usize, saturating_usize, u32_le};
 
+mod arm;
 pub(crate) mod file;
 pub(crate) mod pe;
 
@@ -68,6 +69,9 @@ pub enum Arch {
     X86_64,
     /// 64-bit ARM (AArch64).
     Arm64,
+    /// 32-bit ARM: A32 and T32 (Thumb-2) code, which instruction set at
+    /// which address told by [`Program::modes`].
+    Arm,
     /// Anything else, or a header the loader could not read.
     Unknown,
 }
@@ -79,6 +83,7 @@ impl Arch {
             Arch::X86 => "x86",
             Arch::X86_64 => "x86-64",
             Arch::Arm64 => "arm64",
+            Arch::Arm => "arm",
             Arch::Unknown => "unknown",
         }
     }
@@ -106,6 +111,7 @@ impl Arch {
             Arch::X86 => Some(Isa::X86 { bits: 32 }),
             Arch::X86_64 => Some(Isa::X86 { bits: 64 }),
             Arch::Arm64 => Some(Isa::A64),
+            Arch::Arm => Some(Isa::A32),
             Arch::Unknown => None,
         }
     }
@@ -124,6 +130,10 @@ impl Arch {
             Some(Isa::X86 { .. }) => true,
             Some(Isa::A64) => match feature {
                 Feature::Disasm | Feature::Discover | Feature::Emulate | Feature::Decompile => true,
+            },
+            Some(Isa::A32) => match feature {
+                Feature::Disasm | Feature::Discover | Feature::Decompile => true,
+                Feature::Emulate => false,
             },
             None => false,
         }
@@ -381,6 +391,10 @@ pub struct Program {
     /// as `<file>@<offset>` ([`Program::load`]); `None` for a file loaded
     /// whole.
     pub parent: Option<Parent>,
+    /// Which instruction set the code at each address is in, for ARM32
+    /// code ([`Arch::Arm`]): empty, which is A32 throughout, for every
+    /// other architecture.
+    pub modes: crate::isa::a32::Modes,
 }
 
 /// Rows of [`Program::section_index`]: one file-backed section's span,
@@ -594,6 +608,7 @@ impl Program {
             go: None,
             clr: None,
             parent: None,
+            modes: crate::isa::a32::Modes::default(),
         }
     }
 
@@ -826,6 +841,8 @@ impl Program {
         let mut pdb_record: Option<crate::pdb::Record> = None;
         let mut relocs = crate::reloc::Relocs::default();
         let mut clr_dir: Option<(u32, u32)> = None;
+        let mut arm_marks: Vec<(u64, crate::isa::a32::Mode)> = Vec::new();
+        let mut arm_default = crate::isa::a32::Mode::Arm;
 
         match &obj {
             goblin::Object::PE(pe) => {
@@ -834,8 +851,12 @@ impl Program {
                     0x8664 => Arch::X86_64,
                     0x014c => Arch::X86,
                     0xaa64 => Arch::Arm64,
+                    0x1c0 | 0x1c2 | 0x1c4 => Arch::Arm,
                     _ => Arch::Unknown,
                 };
+                if pe.header.coff_header.machine != 0x1c0 {
+                    arm_default = crate::isa::a32::Mode::Thumb;
+                }
                 is_64 = pe.is_64;
                 image_base = pe.image_base;
                 clr_dir = pe
@@ -1035,9 +1056,16 @@ impl Program {
                     62 => Arch::X86_64,
                     3 => Arch::X86,
                     183 => Arch::Arm64,
+                    40 => Arch::Arm,
                     _ => Arch::Unknown,
                 };
                 entry = (elf.entry != 0).then_some(elf.entry);
+                if arch == Arch::Arm {
+                    arm_marks = arm::mapping_symbols(elf);
+                    if elf.entry & 1 == 1 {
+                        arm_default = crate::isa::a32::Mode::Thumb;
+                    }
+                }
 
                 /// `SHF_WRITE`.
                 const WRITE: u64 = 0x1;
@@ -1224,6 +1252,7 @@ impl Program {
                 format = BinaryFormat::MachO;
                 let loaded = crate::macho::load(&bytes, mach)?;
                 arch = loaded.arch;
+                arm_default = crate::isa::a32::Mode::Thumb;
                 is_64 = loaded.is_64;
                 entry = loaded.entry;
                 image_base = loaded.image_base;
@@ -1241,6 +1270,17 @@ impl Program {
             _ => {}
         }
         drop(obj);
+        let modes = if arch == Arch::Arm {
+            let mut code = arm::Code {
+                entry: &mut entry,
+                symbols: &mut symbols,
+                ranges: &mut function_ranges,
+                sections: &sections,
+            };
+            arm::settle(&mut code, &arm_marks, arm_default)
+        } else {
+            crate::isa::a32::Modes::default()
+        };
         phases.mark("load headers+symbols");
         if let Some(d) = disarmed
             && let Some(slot) = bytes.get_mut(d.at..d.at + DIRECTORY_ENTRY)
@@ -1334,6 +1374,7 @@ impl Program {
             go: None,
             clr: None,
             parent: None,
+            modes,
         };
         program.read_go();
         phases.mark("load go");

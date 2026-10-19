@@ -991,6 +991,10 @@ pub(super) fn x86_reading(p: &Program, what: &str) -> Result<(), String> {
             "{what} follows x86 and x86-64 instructions only; this {} file's arm64 code decompiles (decompile) but is not followed this way yet",
             p.format.name()
         )),
+        Some(crate::isa::Isa::A32) => Err(format!(
+            "{what} follows x86 and x86-64 instructions only; this {} file's arm code decompiles (decompile) but is not followed this way yet",
+            p.format.name()
+        )),
         Some(crate::isa::Isa::X86 { .. }) | None => Ok(()),
     }
 }
