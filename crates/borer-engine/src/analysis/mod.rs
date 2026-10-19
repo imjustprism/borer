@@ -32,6 +32,7 @@ pub mod recognize;
 pub mod render;
 mod returns;
 mod rtti;
+pub mod runtime;
 pub mod schema;
 pub mod senders;
 pub mod sigs;

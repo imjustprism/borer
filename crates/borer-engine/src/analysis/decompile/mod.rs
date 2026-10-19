@@ -2091,6 +2091,16 @@ fn decompile_in<L: Lifter>(
     if let Some(folded) = &canary {
         let _ = writeln!(out, "// folded: {}", folded.note());
     }
+    let mut helpers: Vec<&crate::analysis::runtime::Helper> = f
+        .callees
+        .iter()
+        .filter_map(|&c| lift::runtime_helper(&ctx, c))
+        .collect();
+    helpers.sort_unstable_by_key(|h| h.name);
+    helpers.dedup_by_key(|h| h.name);
+    for h in helpers {
+        let _ = writeln!(out, "// runtime: {}; computes {}", h.proto, h.means);
+    }
     if !panic_checks.is_empty() {
         let _ = writeln!(
             out,

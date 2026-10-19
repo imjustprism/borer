@@ -130,20 +130,55 @@ pub(super) fn import_names(ctx: &Ctx<'_>) -> std::sync::Arc<ImportNames> {
 ///
 /// # Returns
 ///
-/// The prototype, or `None` when the target is not an import with one.
+/// The prototype, or `None` when the target is neither an import with one
+/// nor a compiler runtime helper ([`runtime_helper`]).
 pub(in crate::analysis::decompile) fn import_prototype(
     ctx: &Ctx<'_>,
     target: Option<u64>,
 ) -> Option<crate::analysis::prototypes::Prototype> {
     use crate::analysis::prototypes::{declared, msvc_prototype};
+    let t = target?;
     let names = import_names(ctx);
-    let name = bare(import_raw(ctx, &names, target?)?);
-    msvc_prototype(name)
-        .or_else(|| declared(name, ctx.bitness))
-        .or_else(|| {
-            crate::analysis::typelib::declared(name, ctx.program.format)
-                .map(|d| library_prototype(d, ctx.bitness, ctx.program.format))
+    import_raw(ctx, &names, t)
+        .map(bare)
+        .and_then(|name| {
+            msvc_prototype(name)
+                .or_else(|| declared(name, ctx.bitness))
+                .or_else(|| {
+                    crate::analysis::typelib::declared(name, ctx.program.format)
+                        .map(|d| library_prototype(d, ctx.bitness, ctx.program.format))
+                })
         })
+        .or_else(|| {
+            runtime_helper(ctx, t)
+                .map(|h| crate::analysis::runtime::prototype(h, ctx.bitness, ctx.program.format))
+        })
+}
+
+/// Returns the compiler runtime helper a call or jump reaches
+/// ([`crate::analysis::runtime`]), by the name the agent gave the callee,
+/// else the import's name, else the name the function it enters has.
+///
+/// # Arguments
+///
+/// * `ctx` - The program and its analysis.
+/// * `t` - The callee's entry, or the import slot it calls through.
+///
+/// # Returns
+///
+/// The helper, or `None` when the callee has no helper's name.
+pub(in crate::analysis::decompile) fn runtime_helper(
+    ctx: &Ctx<'_>,
+    t: u64,
+) -> Option<&'static crate::analysis::runtime::Helper> {
+    let names = import_names(ctx);
+    ctx.overlay
+        .names
+        .get(&t)
+        .map(String::as_str)
+        .or_else(|| import_raw(ctx, &names, t))
+        .or_else(|| ctx.analysis.function(t)?.name.as_deref())
+        .and_then(crate::analysis::runtime::helper)
 }
 
 /// Tells whether a call or jump reaches an import of a C runtime, whose

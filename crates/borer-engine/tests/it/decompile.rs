@@ -9802,4 +9802,47 @@ fn a_spilled_double_is_no_pair_of_integer_fields() {
     let a = Analysis::compute(&p);
     let text = decompile(&p, &a, &Overlay::default(), 0x401_000).unwrap_or_default();
     assert!(!text.contains(">> 32"), "{text}");
+
+/// A call to a compiler runtime helper passes what the helper's prototype
+/// takes, not every register the call happens to set, and the function's
+/// header declares the helper with what it computes.
+///
+/// The caller sets `r8` and `r9` before calling a function named
+/// `__umodti3` whose body reads all four argument registers; under the
+/// Microsoft convention it takes two pointers, so the call passes two.
+#[test]
+fn a_runtime_helper_call_takes_its_prototype() {
+    use borer_engine::analysis::decompile::decompile_named;
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x49, 0xc7, 0xc0, 0x07, 0x00, 0x00, 0x00, // ASM: mov r8,7
+        0x49, 0xc7, 0xc1, 0x09, 0x00, 0x00, 0x00, // ASM: mov r9,9
+        0xe8, 0x09, 0x00, 0x00, 0x00, // ASM: call 0x140001020
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend([
+        0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+        0x48, 0x01, 0xd0, // ASM: add rax,rdx
+        0x4c, 0x01, 0xc0, // ASM: add rax,r8
+        0x4c, 0x01, 0xc8, // ASM: add rax,r9
+        0xc3, // ASM: ret
+    ]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names.insert(0x1_4000_1020, "__umodti3".to_owned());
+    let text = decompile_named(&p, &a, &o, 0x1_4000_1000).unwrap_or_default();
+    assert!(
+        text.contains(
+            "// runtime: unsigned __int128 __umodti3(unsigned __int128 a, unsigned __int128 b); computes a % b, unsigned"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("__umodti3(a1, a2)"), "{text}");
+    o.names.insert(0x1_4000_1020, "plain_callee".to_owned());
+    let plain = decompile_named(&p, &a, &o, 0x1_4000_1000).unwrap_or_default();
+    assert!(plain.contains("plain_callee(a1, a2, 7, 9)"), "{plain}");
+    assert!(!plain.contains("// runtime:"), "{plain}");
 }

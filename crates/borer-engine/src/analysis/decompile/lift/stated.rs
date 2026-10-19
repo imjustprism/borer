@@ -149,7 +149,9 @@ pub(in crate::analysis::decompile) fn library_prototype(
 ///
 /// # Returns
 ///
-/// What it hands back, or `None` when nothing declares the callee.
+/// What it hands back, or `None` when nothing declares the callee; a
+/// compiler runtime helper ([`runtime_helper`]) is declared by its
+/// prototype.
 pub(in crate::analysis::decompile) fn stated_returns(
     ctx: &Ctx<'_>,
     target: Option<u64>,
@@ -163,6 +165,16 @@ pub(in crate::analysis::decompile) fn stated_returns(
     }
     library_decl(ctx, reached)
         .map(|d| Returns::of(typelib::pass_of(d.ret, word, ctx.program.format), word))
+        .or_else(|| {
+            let h = runtime_helper(ctx, reached?)?;
+            let (bits, float) =
+                crate::analysis::runtime::returns(h, ctx.bitness, ctx.program.format)?;
+            Some(if float {
+                Returns::Float(bits)
+            } else {
+                Returns::Int(bits)
+            })
+        })
 }
 
 /// Reads a constant argument as the text renders it: decimal, `0x` hex, or

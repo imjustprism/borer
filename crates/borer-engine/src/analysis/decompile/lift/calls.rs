@@ -512,7 +512,9 @@ impl<'a> Exec<'_, 'a> {
     /// Counts the argument registers a known callee takes, as its own
     /// signature lists them ([`callee_shape`]): the registers its body
     /// reads, through the wrappers it hands its arguments on to, or the
-    /// count its declaration states. Results are cached per function.
+    /// count its declaration states. A compiler runtime helper takes what
+    /// its prototype states ([`runtime_helper`]), whatever its body reads.
+    /// Results are cached per function.
     ///
     /// # Arguments
     ///
@@ -523,6 +525,15 @@ impl<'a> Exec<'_, 'a> {
     /// The count, or `None` for an unknown callee or an import thunk.
     pub(super) fn callee_reg_params(&mut self, target: Option<u64>) -> Option<usize> {
         let t = target?;
+        if let Some(h) = runtime_helper(self.ctx, t) {
+            let p =
+                crate::analysis::runtime::prototype(h, self.ctx.bitness, self.ctx.program.format);
+            return Some(if self.bitness() == 32 {
+                0
+            } else {
+                usize::from(p.params)
+            });
+        }
         if let Some((n, _, _)) = self.ctx.callee_arity.get(&t) {
             return Some((*n).max(self.arity_floor));
         }
