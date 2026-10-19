@@ -9802,6 +9802,7 @@ fn a_spilled_double_is_no_pair_of_integer_fields() {
     let a = Analysis::compute(&p);
     let text = decompile(&p, &a, &Overlay::default(), 0x401_000).unwrap_or_default();
     assert!(!text.contains(">> 32"), "{text}");
+}
 
 /// A call to a compiler runtime helper passes what the helper's prototype
 /// takes, not every register the call happens to set, and the function's
