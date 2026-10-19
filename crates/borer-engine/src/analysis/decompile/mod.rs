@@ -220,6 +220,10 @@ struct Ctx<'a> {
     /// exit leaves one there and a caller reads it
     /// ([`lift::sse_callee`]). Implies [`Ctx::ret_float`].
     ret_sse: bool,
+    /// Widest float a 32-bit function hands back in `st0` so far, as its
+    /// own expression types it: 32 when every one is a single, 64 when any
+    /// is wider or untyped, 0 before the first.
+    x87_ret: u8,
     /// The 64-bit function hands a second result back in `rdx`
     /// ([`Function::hands_back_rdx`]): a `return` shows it too.
     ret_rdx: bool,
@@ -316,8 +320,8 @@ struct Ctx<'a> {
     arg_count: usize,
     /// A bit per position passed in a vector register ([`Shape::floats`]).
     arg_floats: u8,
-    /// The vector registers nothing in the function reads above a single
-    /// ([`lanes::solve`]).
+    /// The vector registers nothing in the function reads above a single,
+    /// and those that only ever hold one ([`lanes::solve`]).
     lanes: lanes::Lanes,
     /// The frame's slots and the types solved for them ([`frame::Frame`]).
     frame: frame::Frame,
@@ -927,6 +931,7 @@ fn new_ctx<'a>(
         ret_lane: 64,
         ret_float: false,
         ret_sse: false,
+        x87_ret: 0,
         ret_rdx: false,
         param_class: BTreeMap::new(),
         own_name: std::sync::Arc::from(expr::bare(&name_of(analysis, overlay, f.entry))),
@@ -2026,7 +2031,7 @@ fn decompile_in<L: Lifter>(
         .any(|l| matches!(l.trim().strip_prefix("return "), Some(v) if v != ";"));
     let inferred = match (value_return, ctx.ret_bits) {
         (false, _) => "void",
-        (true, _) if f.ret_float == Some(32) => "float",
+        (true, _) if f.ret_float == Some(32) || ctx.x87_ret == 32 => "float",
         (true, _) if f.ret_float.is_some() => "double",
         (true, 32) if ctx.ret_sse => "float",
         (true, _) if ctx.ret_sse => "double",

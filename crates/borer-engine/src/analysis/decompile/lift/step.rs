@@ -269,7 +269,8 @@ impl<'a> Exec<'_, 'a> {
     /// instead, or in `st0` on a 32-bit target, where the top of the x87
     /// stack is the result whatever wrote it, unless the function returns
     /// in `xmm0` there too ([`Ctx::ret_sse`]), whose width a `float` value
-    /// returned sets.
+    /// returned sets. An `st0` result typed a single at every exit makes
+    /// the function return `float` ([`Ctx::x87_ret`]).
     pub(super) fn ret(&mut self) {
         if !self.emit {
             return;
@@ -280,6 +281,15 @@ impl<'a> Exec<'_, 'a> {
             (true, false) => Key::Reg(Register::XMM0),
             (false, _) => self.canon(self.rax()),
         };
+        if x87 {
+            let bits = self
+                .env
+                .vals
+                .get(&rax)
+                .map_or(Some(64), |v| self.returned_float(v))
+                .unwrap_or(64);
+            self.ctx.x87_ret = self.ctx.x87_ret.max(bits);
+        }
         let (line, value) = match self.env.vals.get(&rax).cloned() {
             Some(v) if self.ctx.ret_sse => {
                 let v = float_result(v);
@@ -334,6 +344,33 @@ impl<'a> Exec<'_, 'a> {
         };
         emit_line!(self, line);
         self.record(EffectKind::Return(value));
+    }
+
+    /// Returns the width of the float a 32-bit function hands back in
+    /// `st0`, as the value's own type says it.
+    ///
+    /// A zero is either width. A vector register that only ever holds a
+    /// single ([`Ctx::lanes`]) is a `float`, and any other value is what its
+    /// shape computes ([`float_lane`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The value in `st0` at the return.
+    ///
+    /// # Returns
+    ///
+    /// 0 for a zero, 32 or 64 for a typed float, `None` for a value whose
+    /// type says no width.
+    fn returned_float(&self, v: &Expr) -> Option<u8> {
+        match v {
+            Expr::Const(0) | Expr::FConst(0, _) => Some(0),
+            Expr::Var(Key::Reg(r)) if r.is_xmm() => u32::try_from(r.number())
+                .ok()
+                .and_then(|n| self.ctx.lanes.single.checked_shr(n))
+                .filter(|m| m & 1 == 1)
+                .map(|_| 32),
+            other => float_lane(other),
+        }
     }
 
     /// Executes one non-control instruction.

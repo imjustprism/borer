@@ -1,4 +1,4 @@
-//! Which vector registers a function only ever reads as a single.
+//! Which vector registers a function only ever uses as a single.
 //!
 //! A legacy scalar single (`addss`, `cvtsi2ss`, `movss xmm, xmm`) replaces
 //! the low 32 bits of its destination and keeps the bits above, so the
@@ -10,31 +10,41 @@
 //!
 //! This is solved once over the whole function, flow-insensitively, like a
 //! type: every instruction says how many low bits of each vector register
-//! it reads (a single's 32, a double's 64, the whole register), and a copy
-//! or a lane-wise operation between two registers joins them, since the
-//! bits of one flow into the other. A register whose joined reads all stop
-//! at 32 bits needs nothing above its single ([`Lanes::read`]). An
-//! instruction this does not know reads the whole of every vector register
-//! it uses, so a guess never drops a bit something reads.
+//! it reads (a single's 32, a double's 64, the whole register) and what it
+//! writes there (a single, a double, a zero, anything else), and a copy or
+//! a lane-wise operation between two registers joins them, since the bits
+//! of one flow into the other. A register whose joined reads all stop at 32
+//! bits needs nothing above its single ([`Lanes::read`]); one whose joined
+//! writes are all singles or zeros holds a `float` wherever it is read
+//! ([`Lanes::single`]). An instruction this does not know reads and writes
+//! the whole of every vector register it uses, so a guess never drops a bit
+//! something reads nor calls an integer a float.
 
 use crate::isa::x86::{
-    FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
+    FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
 };
 
 /// Number of vector registers tracked, `xmm0` to `xmm31`.
 const REGS: usize = 32;
 
-/// Width in bits of the whole register: what an unknown access reads.
+/// Width in bits of the whole register: what an unknown access reads or
+/// writes.
 const WHOLE: u8 = 128;
 
 /// The vector registers a call may pass arguments in, which it reads whole.
 const CALL_ARGS: usize = 8;
+
+/// The vector registers a call may change: the caller-saved ones of every
+/// convention borer reads, which a callee leaves holding anything.
+const CALL_CLOBBERS: usize = 16;
 
 /// The vector registers solved over one function, a bit per register.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Lanes {
     /// Bit `n` set when nothing reads `xmm{n}` above its low 32 bits.
     pub(super) read: u32,
+    /// Bit `n` set when everything `xmm{n}` is given is a single or a zero.
+    pub(super) single: u32,
 }
 
 /// Solves the vector registers of a function.
@@ -47,6 +57,7 @@ pub(super) struct Lanes {
 pub(super) fn solve(code: &[Vec<Instruction>], ret_float: Option<u8>) -> Lanes {
     let mut parent: [usize; REGS] = std::array::from_fn(|i| i);
     let mut read = [0u8; REGS];
+    let mut written = [0u8; REGS];
     let mut info = InstructionInfoFactory::new();
     for i in code.iter().flatten() {
         match uses(i) {
@@ -54,6 +65,7 @@ pub(super) fn solve(code: &[Vec<Instruction>], ret_float: Option<u8>) -> Lanes {
                 for u in us {
                     match u {
                         Use::Read(r, w) => read[r] = read[r].max(w),
+                        Use::Write(r, w) => written[r] = written[r].max(w),
                         Use::Join(a, b) => {
                             let (ra, rb) = (root(&parent, a), root(&parent, b));
                             parent[ra] = rb;
@@ -63,8 +75,12 @@ pub(super) fn solve(code: &[Vec<Instruction>], ret_float: Option<u8>) -> Lanes {
             }
             None => {
                 for u in info.info(i).used_registers() {
-                    if let Some(r) = index(u.register()) {
-                        read[r] = WHOLE;
+                    let Some(r) = index(u.register()) else {
+                        continue;
+                    };
+                    read[r] = WHOLE;
+                    if !matches!(u.access(), OpAccess::Read | OpAccess::CondRead) {
+                        written[r] = WHOLE;
                     }
                 }
             }
@@ -73,6 +89,9 @@ pub(super) fn solve(code: &[Vec<Instruction>], ret_float: Option<u8>) -> Lanes {
             FlowControl::Call | FlowControl::IndirectCall => {
                 for r in read.iter_mut().take(CALL_ARGS) {
                     *r = WHOLE;
+                }
+                for w in written.iter_mut().take(CALL_CLOBBERS) {
+                    *w = WHOLE;
                 }
             }
             FlowControl::Return => {
@@ -90,14 +109,20 @@ pub(super) fn solve(code: &[Vec<Instruction>], ret_float: Option<u8>) -> Lanes {
         }
     }
     let mut widest = [0u8; REGS];
+    let mut wrote = [0u8; REGS];
     for r in 0..REGS {
         let top = root(&parent, r);
         widest[top] = widest[top].max(read[r]);
+        wrote[top] = wrote[top].max(written[r]);
     }
+    let mask = |of: &[u8; REGS]| {
+        (0..REGS)
+            .filter(|&r| of[root(&parent, r)] <= 32)
+            .fold(0u32, |m, r| m | (1 << r))
+    };
     Lanes {
-        read: (0..REGS)
-            .filter(|&r| widest[root(&parent, r)] <= 32)
-            .fold(0u32, |m, r| m | (1 << r)),
+        read: mask(&widest),
+        single: mask(&wrote),
     }
 }
 
@@ -106,6 +131,9 @@ pub(super) fn solve(code: &[Vec<Instruction>], ret_float: Option<u8>) -> Lanes {
 enum Use {
     /// It reads the register's low bits, this many.
     Read(usize, u8),
+    /// It writes the register with a value of this many bits: a single's
+    /// 32, a double's 64, 0 for a zero, [`WHOLE`] for anything else.
+    Write(usize, u8),
     /// The bits of one register flow into the other.
     Join(usize, usize),
 }
@@ -171,7 +199,7 @@ fn reg(i: &Instruction, op: u32) -> Option<usize> {
 /// # Returns
 ///
 /// The uses, or `None` for an instruction this does not model, which reads
-/// every vector register it uses whole.
+/// and writes every vector register it uses whole.
 fn uses(i: &Instruction) -> Option<Vec<Use>> {
     let mn = i.mnemonic();
     let n = i.op_count();
@@ -222,8 +250,9 @@ fn uses(i: &Instruction) -> Option<Vec<Use>> {
         | Mnemonic::Cvtsd2ss
             if n == 2 =>
         {
-            at(0)?;
-            reads(1, source_width(mn)?)
+            let mut us = vec![Use::Write(at(0)?, result_width(mn)?)];
+            us.extend(reads(1, source_width(mn)?));
+            us
         }
         Mnemonic::Vaddss
         | Mnemonic::Vsubss
@@ -248,15 +277,16 @@ fn uses(i: &Instruction) -> Option<Vec<Use>> {
             if n == 3 =>
         {
             let (d, upper) = (at(0)?, at(1)?);
-            let mut us = vec![Use::Join(d, upper)];
+            let mut us = vec![Use::Join(d, upper), Use::Write(d, result_width(mn)?)];
             us.extend(reads(1, source_width(mn)?));
             us
         }
         Mnemonic::Movss | Mnemonic::Movsd | Mnemonic::Vmovss | Mnemonic::Vmovsd if n == 2 => {
             let w = result_width(mn)?;
             match (at(0), at(1)) {
-                (Some(_) | None, Some(s)) => vec![Use::Read(s, w)],
-                (Some(_), None) => Vec::new(),
+                (Some(d), Some(s)) => vec![Use::Write(d, w), Use::Read(s, w)],
+                (None, Some(s)) => vec![Use::Read(s, w)],
+                (Some(d), None) => vec![Use::Write(d, w)],
                 (None, None) => return None,
             }
         }
@@ -266,7 +296,9 @@ fn uses(i: &Instruction) -> Option<Vec<Use>> {
             } else {
                 64
             };
-            at(1).map(|s| Use::Read(s, w)).into_iter().collect()
+            let mut us: Vec<Use> = at(1).map(|s| Use::Read(s, w)).into_iter().collect();
+            us.extend(at(0).map(|d| Use::Write(d, WHOLE)));
+            us
         }
         Mnemonic::Movaps
         | Mnemonic::Movapd
@@ -285,7 +317,7 @@ fn uses(i: &Instruction) -> Option<Vec<Use>> {
             match (at(0), at(1)) {
                 (Some(d), Some(s)) => vec![Use::Join(d, s)],
                 (None, Some(s)) => vec![Use::Read(s, WHOLE)],
-                (Some(_), None) => Vec::new(),
+                (Some(d), None) => vec![Use::Write(d, WHOLE)],
                 (None, None) => return None,
             }
         }
@@ -322,7 +354,7 @@ fn uses(i: &Instruction) -> Option<Vec<Use>> {
                     | Mnemonic::Vpxor
             ) && regs.iter().skip(1).all(|r| *r == Some(d));
             if zero {
-                Vec::new()
+                vec![Use::Write(d, 0)]
             } else {
                 regs.iter()
                     .skip(1)

@@ -3879,6 +3879,7 @@ fn a_call_leaves_its_float_in_st0() {
 ///
 /// `sub_401020` is `fld dword [ecx+4]; ret`; the caller is `mov ecx,
 /// [esp+4]; call sub_401020; mov eax,[esp+4]; fstp dword [eax+8]; ret`.
+/// The value it hands back is a single, so it returns `float`.
 #[test]
 fn a_function_returns_its_float_in_st0() {
     let mut code = vec![
@@ -3895,7 +3896,7 @@ fn a_function_returns_its_float_in_st0() {
     ]);
     let p = image(&code);
     let callee = decompiled(&p, 0x401020);
-    assert!(callee.contains("double sub_401020("), "{callee}");
+    assert!(callee.contains("float sub_401020("), "{callee}");
     assert!(callee.contains("return *(float*)(this + 4);"), "{callee}");
     let caller = decompiled(&p, 0x401000);
     assert!(caller.contains("st0 = sub_401020("), "{caller}");
