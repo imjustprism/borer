@@ -5,7 +5,8 @@
 //! function. Its body calls other functions, indexes tables of them and
 //! calls runtime helpers, and each of those names needs a declaration
 //! before the body for the text to mean what the binary does. The closure
-//! adds them after the header comments, each name once, in a fixed order:
+//! adds them after the header comments as CIR items ([`cir::Item`]), each
+//! name once, in a fixed order:
 //!
 //! - a prototype, `extern uint64_t h_is_odd(uint64_t);`, for each function
 //!   the binary exports, from its ABI facts alone
@@ -28,6 +29,7 @@
 
 use super::*;
 use crate::program::SymbolKind;
+use cir::{CTy, Item, Name, Proto};
 use helper::Helper;
 use std::sync::Arc;
 
@@ -103,38 +105,14 @@ fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index
         })
 }
 
-/// A function's C type: what a pointer to it is declared with.
+/// One function the unit declares: its prototype and, when the unit
+/// defines it, its body.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FnTy {
-    /// The return type.
-    ret: String,
-    /// The parameter types, in order.
-    params: Vec<String>,
-    /// Whether it takes `...` past them.
-    variadic: bool,
-}
-
-/// How the unit declares one function name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Declared {
-    /// A prototype for a definition outside the unit: the line.
-    Extern(String),
-    /// A definition in the unit: its signature and its body on one line.
-    Static {
-        /// The signature, `uint32_t op_add(uint64_t a1, uint64_t a2)`.
-        sig: String,
-        /// The statements, joined by spaces.
-        body: String,
-    },
-}
-
-/// One declared function: how, and its C type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Decl {
-    /// The declaration.
-    how: Declared,
-    /// The function's type.
-    ty: FnTy,
+struct Declared {
+    /// The prototype.
+    proto: Proto,
+    /// The body, `None` for a function defined outside the unit.
+    body: Option<cir::Body>,
 }
 
 /// A table of function addresses the text indexes.
@@ -179,59 +157,78 @@ pub(super) fn close(
     let mut tables = designators(text, program, analysis, overlay, &ix);
     let mut names = words(text);
     names.extend(tables.iter().flat_map(|t| t.entries.iter().cloned()));
-    let mut decls: BTreeMap<String, Decl> = BTreeMap::new();
+    let mut decls: BTreeMap<String, Declared> = BTreeMap::new();
     let mut bodies = 0usize;
     for name in names {
         if name == own || decls.contains_key(&name) || Helper::parse(&name).is_some() {
             continue;
         }
         let define = bodies < BODIES_MAX;
-        if let Some(decl) = declaration(program, analysis, overlay, &ix, &name, define) {
-            bodies += usize::from(matches!(decl.how, Declared::Static { .. }));
-            decls.insert(name, decl);
+        if let Some(d) = declaration(program, analysis, overlay, &ix, &name, define) {
+            bodies += usize::from(d.body.is_some());
+            decls.insert(name, d);
         }
     }
     decls.retain(|name, d| {
-        let want = d.ty.params.len();
+        let p = &d.proto;
         call_arities(text, name)
             .into_iter()
-            .all(|n| n == want || d.ty.variadic && n > want)
+            .all(|n| n == p.params.len() || p.variadic && n > p.params.len())
     });
-    let sig = text
+    let own_proto = text
         .lines()
         .find_map(|l| l.strip_prefix("// signature: "))
-        .map(str::trim);
+        .and_then(|sig| parse_proto(sig.trim(), &own));
     tables.retain(|t| {
         t.entries
             .iter()
-            .all(|e| decls.contains_key(e) || (*e == own && sig.is_some()))
+            .all(|e| decls.contains_key(e) || (*e == own && own_proto.is_some()))
     });
-    let mut head: Vec<String> = Vec::new();
+    let mut items: Vec<Item> = Vec::new();
     if tables.iter().any(|t| t.entries.contains(&own))
-        && let Some(sig) = sig
+        && let Some(p) = &own_proto
     {
-        head.push(format!("extern {sig};"));
+        items.push(Item::Extern(p.clone()));
     }
-    head.extend(decls.values().filter_map(|d| match &d.how {
-        Declared::Extern(line) => Some(line.clone()),
-        Declared::Static { .. } => None,
+    items.extend(
+        decls
+            .values()
+            .filter(|d| d.body.is_none())
+            .map(|d| Item::Extern(d.proto.clone())),
+    );
+    items.extend(decls.values().filter_map(|d| {
+        d.body
+            .as_ref()
+            .map(|b| Item::Inline(d.proto.clone(), b.clone()))
     }));
-    head.extend(decls.values().filter_map(|d| match &d.how {
-        Declared::Static { sig, body } => Some(format!("static inline {sig} {{ {body} }}")),
-        Declared::Extern(_) => None,
-    }));
-    let own_ty = sig.and_then(|s| fn_ty(s, &own));
     for t in &tables {
-        let tys: Vec<Option<&FnTy>> = t
+        let tys: Vec<Option<CTy>> = t
             .entries
             .iter()
-            .map(|e| decls.get(e).map(|d| &d.ty).or(own_ty.as_ref()))
+            .map(|e| {
+                decls
+                    .get(e)
+                    .map(|d| &d.proto)
+                    .or(own_proto.as_ref())
+                    .and_then(pointer_ty)
+            })
             .collect();
-        head.push(table_line(t, &tys));
+        let ty = tys
+            .first()
+            .cloned()
+            .flatten()
+            .filter(|first| tys.iter().all(|t| t.as_ref() == Some(first)));
+        items.push(Item::Table {
+            name: Name::of(&t.name),
+            ty,
+            entries: t.entries.iter().map(|e| Name::of(e)).collect(),
+        });
     }
-    if head.is_empty() {
+    if items.is_empty() {
         return text.to_owned();
     }
+    let mut head = String::new();
+    cir::print_items(&items, &mut head);
     let mut lines: Vec<String> = text
         .lines()
         .map(|l| {
@@ -245,10 +242,23 @@ pub(super) fn close(
         })
         .collect();
     let at = header_len(&lines);
-    lines.splice(at..at, head);
+    lines.splice(at..at, head.lines().map(str::to_owned));
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Returns the type of a pointer to a function, [`CTy::FnPtr`], or `None`
+/// for a variadic one, which that type cannot spell.
+///
+/// # Arguments
+///
+/// * `p` - The function's prototype.
+fn pointer_ty(p: &Proto) -> Option<CTy> {
+    (!p.variadic).then(|| CTy::FnPtr {
+        ret: Box::new(p.ret.clone()),
+        params: p.params.iter().map(|(t, _)| t.clone()).collect(),
+    })
 }
 
 /// Returns how the unit declares one name the text uses, when it names a
@@ -274,85 +284,55 @@ fn declaration(
     ix: &Index,
     name: &str,
     define: bool,
-) -> Option<Decl> {
+) -> Option<Declared> {
+    let outside = |proto| Declared { proto, body: None };
     if let Some(proto) = crate::analysis::runtime::helper(name).map(|h| h.proto) {
-        return Some(Decl {
-            how: Declared::Extern(format!("extern {proto};")),
-            ty: fn_ty(proto, name)?,
-        });
+        return parse_proto(proto, name).map(outside);
     }
     let function = ix.functions.get(name).copied();
     if function.is_none() && !ix.imports.contains(name) {
         return None;
     }
-    if let Some(d) = library(name, program.format) {
-        return Some(d);
+    if let Some(p) = library(name, program.format) {
+        return Some(outside(p));
     }
     let e = function.filter(|&e| analysis.function(e).is_some_and(|f| f.thunk.is_none()))?;
     let internal = !ix.exported.contains(&e) && !ix.exported.contains(&abi::reached(analysis, e));
     if internal
         && define
-        && let Some((sig, body)) = definition(program, analysis, overlay, e, name)
+        && let Some(d) = definition(program, analysis, overlay, e, name)
     {
-        return Some(Decl {
-            ty: fn_ty(&sig, name)?,
-            how: Declared::Static { sig, body },
-        });
+        return Some(d);
     }
-    let p = abi::function::prototype(program, analysis, overlay, e)?;
-    Some(Decl {
-        how: Declared::Extern(format!("extern {}", p.declaration())),
-        ty: FnTy {
-            ret: p.ret.to_owned(),
-            params: p.params.iter().map(|&t| t.to_owned()).collect(),
-            variadic: p.variadic,
-        },
-    })
+    abi::function::prototype(program, analysis, overlay, e).map(|p| outside(p.proto()))
 }
 
-/// Returns the C library's declaration of a function, when the type
-/// library states one in C's own types.
+/// Returns the C library's prototype of a function, when the type library
+/// states one in C's own types.
 ///
 /// # Arguments
 ///
 /// * `name` - The function's name.
 /// * `format` - The binary's format, which picks the platform.
-fn library(name: &str, format: crate::program::BinaryFormat) -> Option<Decl> {
+fn library(name: &str, format: crate::program::BinaryFormat) -> Option<Proto> {
     let d = crate::analysis::typelib::declared(name, format)
         .filter(|d| d.os == crate::analysis::typelib::Os::C)?;
-    if !std::iter::once(d.ret)
+    std::iter::once(d.ret)
         .chain(d.params.iter().map(|p| p.ty))
         .all(plain_type)
-    {
-        return None;
-    }
-    let mut params: Vec<String> = d
-        .params
-        .iter()
-        .map(|p| format!("{} {}", p.ty, p.name))
-        .collect();
-    if d.variadic {
-        params.push("...".to_owned());
-    }
-    if params.is_empty() {
-        params.push("void".to_owned());
-    }
-    let sep = if d.ret.ends_with('*') { "" } else { " " };
-    Some(Decl {
-        how: Declared::Extern(format!(
-            "extern {}{sep}{name}({});",
-            d.ret,
-            params.join(", ")
-        )),
-        ty: FnTy {
-            ret: d.ret.to_owned(),
-            params: d.params.iter().map(|p| p.ty.to_owned()).collect(),
+        .then(|| Proto {
+            ret: CTy::parse(d.ret),
+            name: Name::of(name),
+            params: d
+                .params
+                .iter()
+                .map(|p| (CTy::parse(p.ty), Some(Name::of(p.name))))
+                .collect(),
             variadic: d.variadic,
-        },
-    })
+        })
 }
 
-/// Returns a small leaf function's signature and its body on one line.
+/// Returns a small leaf function's definition: its prototype and body.
 ///
 /// The body qualifies when it fits [`BODY_MAX`] and names nothing but its
 /// parameters, its own locals, C's keywords and types, its labels and the
@@ -372,7 +352,7 @@ fn definition(
     overlay: &Overlay,
     entry: u64,
     name: &str,
-) -> Option<(String, String)> {
+) -> Option<Declared> {
     analysis
         .function(entry)
         .filter(|f| f.entry == entry && f.instr_count <= BODY_INSTRUCTIONS_MAX)?;
@@ -396,35 +376,45 @@ fn definition(
         .lines()
         .find_map(|l| l.strip_prefix("// signature: "))?
         .trim();
-    let ty = fn_ty(sig, name)?;
-    if !std::iter::once(ty.ret.as_str())
-        .chain(ty.params.iter().map(String::as_str))
-        .all(plain_type)
-    {
-        return None;
-    }
+    let proto = parse_proto(sig, name)?;
+    let named: BTreeSet<&str> = proto
+        .params
+        .iter()
+        .filter_map(|(_, n)| n.as_ref().map(Name::as_str))
+        .chain(std::iter::once(name))
+        .collect();
+    let plain = words(sig)
+        .iter()
+        .all(|w| plain_type(w) || named.contains(w.as_str()));
     let own: BTreeSet<String> = words(sig)
         .into_iter()
         .chain(words(&declarations(&text)))
         .collect();
-    let body = text
+    let code: String = text
         .lines()
         .filter(|l| !l.starts_with("//"))
-        .map(|l| code_of(l).trim())
-        .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let closed = words(&body).iter().all(|w| {
+        .map(|l| code_of(l).trim_end())
+        .filter(|l| !l.trim().is_empty())
+        .fold(String::new(), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        });
+    let closed = words(&code).iter().all(|w| {
         own.contains(w)
             || C_WORDS.contains(&w.as_str())
             || plain_type(w)
             || Helper::parse(w).is_some()
             || label_name(&format!("{w}:")).is_some()
     });
-    (closed && body.len() <= BODY_MAX).then(|| (sig.to_owned(), body))
+    let size: usize = code.lines().map(|l| l.trim().len() + 1).sum();
+    (closed && plain && size <= BODY_MAX).then(|| Declared {
+        body: Some(cir::build(&code)),
+        proto,
+    })
 }
 
-/// Reads a function's type from its signature, `uint32_t f(uint64_t a1)`.
+/// Reads a prototype from its spelling, `uint32_t f(uint64_t a1)`.
 ///
 /// # Arguments
 ///
@@ -433,9 +423,9 @@ fn definition(
 ///
 /// # Returns
 ///
-/// The type, or `None` when the signature does not name `name` before its
-/// parameters.
-fn fn_ty(sig: &str, name: &str) -> Option<FnTy> {
+/// The prototype, or `None` when the signature does not name `name`
+/// before its parameters.
+fn parse_proto(sig: &str, name: &str) -> Option<Proto> {
     let (head, rest) = sig.split_once('(')?;
     let ret = head.trim_end().strip_suffix(name)?.trim_end();
     if ret.is_empty()
@@ -444,36 +434,37 @@ fn fn_ty(sig: &str, name: &str) -> Option<FnTy> {
         return None;
     }
     let inner = rest.trim_end().trim_end_matches(';').strip_suffix(')')?;
-    let mut params: Vec<String> = Vec::new();
+    let mut params = Vec::new();
     let mut variadic = false;
     for p in split_arguments(inner) {
         match p {
             "" | "void" => {}
             "..." => variadic = true,
-            _ => params.push(param_type(p).to_owned()),
+            _ => params.push(param(p)),
         }
     }
-    Some(FnTy {
-        ret: ret.to_owned(),
+    Some(Proto {
+        ret: CTy::parse(ret),
+        name: Name::of(name),
         params,
         variadic,
     })
 }
 
-/// Returns a parameter's type: the declaration without its trailing name,
-/// or the whole text when it names none.
+/// Reads one parameter: its type and the name after it, when it has one.
 ///
 /// # Arguments
 ///
-/// * `p` - One parameter, `uint64_t a1` or `const char *s`.
-fn param_type(p: &str) -> &str {
+/// * `p` - One parameter, `uint64_t a1`, `const char *s` or `uint64_t`.
+fn param(p: &str) -> (CTy, Option<Name>) {
     let p = p.trim();
     let name_at = p.rfind(|c: char| !is_ident_char(c)).map_or(0, |i| i + 1);
     let ty = p[..name_at].trim_end();
-    if ty.is_empty() || p[name_at..].starts_with(|c: char| c.is_ascii_digit()) {
-        p
+    let name = &p[name_at..];
+    if ty.is_empty() || name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+        (CTy::parse(p), None)
     } else {
-        ty
+        (CTy::parse(ty), Some(Name::of(name)))
     }
 }
 
@@ -628,41 +619,6 @@ fn function_words(program: &Program, analysis: &Analysis, addr: u64) -> Option<V
     (!out.is_empty()).then_some(out)
 }
 
-/// Returns the declaration of a table of function designators: an array
-/// of pointers of the functions' one type, else of `void *`.
-///
-/// # Arguments
-///
-/// * `t` - The table.
-/// * `tys` - Each entry's type, in table order.
-fn table_line(t: &Table, tys: &[Option<&FnTy>]) -> String {
-    let n = t.entries.len();
-    if let Some(Some(first)) = tys.first()
-        && tys.iter().all(|ty| *ty == Some(*first))
-    {
-        let mut params = first.params.clone();
-        if first.variadic {
-            params.push("...".to_owned());
-        }
-        if params.is_empty() {
-            params.push("void".to_owned());
-        }
-        return format!(
-            "static {} (*const {}[{n}])({}) = {{{}}};",
-            first.ret,
-            t.name,
-            params.join(", "),
-            t.entries.join(", ")
-        );
-    }
-    let entries: Vec<String> = t.entries.iter().map(|e| format!("(void *){e}")).collect();
-    format!(
-        "static void *const {}[{n}] = {{{}}};",
-        t.name,
-        entries.join(", ")
-    )
-}
-
 /// Returns the declaration lines of a text: those after its header
 /// comments and before its first empty line.
 ///
@@ -790,7 +746,8 @@ fn code_of(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{call_arities, code_of, fn_ty, plain_type, words};
+    use super::{Item, call_arities, code_of, parse_proto, plain_type, words};
+    use crate::analysis::decompile::cir;
 
     /// A text's identifiers leave out comments, literals and members.
     ///
@@ -811,21 +768,26 @@ mod tests {
         assert_eq!(code_of("x = \"//\"; // c"), "x = \"//\"; ");
     }
 
-    /// A signature reads back as its function's type, its parameters'
-    /// names dropped.
+    /// A signature reads into a prototype that prints back as written,
+    /// and one that does not name the function is refused.
     ///
     /// # Panics
     ///
-    /// When a type is misread.
+    /// When a prototype is misread.
     #[test]
-    fn a_signature_reads_as_its_type() {
-        let ty = fn_ty("uint32_t op_add(uint64_t a1, const char *s)", "op_add").unwrap();
-        assert_eq!(ty.ret, "uint32_t");
-        assert_eq!(ty.params, ["uint64_t", "const char *"]);
-        let ty = fn_ty("char *f(void)", "f").unwrap();
-        assert_eq!((ty.ret.as_str(), ty.params.len()), ("char *", 0));
-        assert!(fn_ty("uint64_t (*)(uint64_t)", "f").is_none());
-        assert!(fn_ty("uint64_t xf(uint64_t)", "f").is_none());
+    fn a_signature_reads_into_a_prototype() {
+        let p = parse_proto("uint32_t op_add(uint64_t a1, const char *s)", "op_add").unwrap();
+        assert_eq!(p.params.len(), 2);
+        let mut out = String::new();
+        cir::print_items(&[Item::Extern(p)], &mut out);
+        assert_eq!(out, "extern uint32_t op_add(uint64_t a1, const char *s);\n");
+        let p = parse_proto("char *f(void)", "f").unwrap();
+        assert!(p.params.is_empty());
+        let mut out = String::new();
+        cir::print_items(&[Item::Extern(p)], &mut out);
+        assert_eq!(out, "extern char *f(void);\n");
+        assert!(parse_proto("uint64_t (*)(uint64_t)", "f").is_none());
+        assert!(parse_proto("uint64_t xf(uint64_t)", "f").is_none());
         assert!(plain_type("const char *") && plain_type("uint64_t"));
         assert!(!plain_type("HANDLE") && !plain_type("FILE *"));
     }

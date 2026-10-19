@@ -1,7 +1,8 @@
 //! CIR: a function's pseudo-C as one typed C tree, printed once.
 //!
 //! The tree has one node kind per C construct borer prints: declarations
-//! ([`Decl`]), statements ([`Stmt`]), expressions ([`Expr`]), C types
+//! ([`Decl`]), the file-scope items of the unit around the function
+//! ([`Item`]), statements ([`Stmt`]), expressions ([`Expr`]), C types
 //! ([`CTy`]) and casts ([`ExprKind::Cast`]). Every statement and expression
 //! keeps a provenance id ([`Prov`]) naming the instruction addresses it came
 //! from, so a later check that finds a wrong line can say which code it
@@ -38,7 +39,7 @@ mod print;
 
 pub(super) use build::build;
 pub(super) use check::{Holds, Violation, check};
-pub(super) use print::{print, print_decls};
+pub(super) use print::{print, print_decls, print_items};
 
 /// A provenance id: the index of a set of instruction addresses in
 /// [`Body::prov`].
@@ -440,6 +441,42 @@ pub(super) struct Decl {
     pub(super) names: Vec<Name>,
     /// A comment written after the declaration (`@ 0x1000`).
     pub(super) note: Option<String>,
+}
+
+/// A function's prototype: its result type, its name and its parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct Proto {
+    /// The result type.
+    pub(super) ret: CTy,
+    /// The function's name.
+    pub(super) name: Name,
+    /// The parameters in order: each one's type and, when the prototype
+    /// gives one, its name.
+    pub(super) params: Vec<(CTy, Option<Name>)>,
+    /// Whether it takes `...` past them.
+    pub(super) variadic: bool,
+}
+
+/// A file-scope item of the translation unit around a function: what the
+/// body uses that it does not declare itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Item {
+    /// `extern T f(P);`: a function defined outside the unit.
+    Extern(Proto),
+    /// `static inline T f(P) { ... }`: a function the unit defines, its
+    /// body printed on the prototype's line.
+    Inline(Proto, Body),
+    /// `static T (*const t[n])(P) = {f, g};`: a table of function
+    /// designators.
+    Table {
+        /// The array's name.
+        name: Name,
+        /// The entries' one pointer type, [`CTy::FnPtr`]; `None` when
+        /// their types differ, and the array holds `void *`.
+        ty: Option<CTy>,
+        /// The functions, in table order.
+        entries: Vec<Name>,
+    },
 }
 
 impl CTy {

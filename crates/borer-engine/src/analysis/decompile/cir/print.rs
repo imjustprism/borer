@@ -6,8 +6,8 @@
 //! `switch`, and an empty line left empty.
 
 use super::{
-    Arm, ArmBody, BinOp, Body, CTy, CaseLabel, Decl, Else, Expr, ExprKind, PostOp, Stmt, StmtKind,
-    UnOp,
+    Arm, ArmBody, BinOp, Body, CTy, CaseLabel, Decl, Else, Expr, ExprKind, Item, PostOp, Proto,
+    Stmt, StmtKind, UnOp,
 };
 use std::fmt::Write as _;
 
@@ -52,6 +52,102 @@ pub(in crate::analysis::decompile) fn print_decls(decls: &[Decl], out: &mut Stri
         }
         out.push('\n');
     }
+}
+
+/// Prints the file-scope items of a translation unit, one per line: a
+/// defined function's body on its prototype's line.
+///
+/// # Arguments
+///
+/// * `items` - The items, in order.
+/// * `out` - Receives the text.
+pub(in crate::analysis::decompile) fn print_items(items: &[Item], out: &mut String) {
+    for item in items {
+        match item {
+            Item::Extern(p) => {
+                out.push_str("extern ");
+                proto(p, out);
+                out.push(';');
+            }
+            Item::Inline(p, body) => {
+                out.push_str("static inline ");
+                proto(p, out);
+                out.push_str(" {");
+                for line in print(body).lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    out.push(' ');
+                    out.push_str(line);
+                }
+                out.push_str(" }");
+            }
+            Item::Table {
+                name,
+                ty: Some(CTy::FnPtr { ret, params }),
+                entries,
+            } => {
+                out.push_str("static ");
+                ty(ret, out);
+                let _ = write!(out, " (*const {}[{}])(", name.as_str(), entries.len());
+                if params.is_empty() {
+                    out.push_str("void");
+                }
+                for (k, p) in params.iter().enumerate() {
+                    if k > 0 {
+                        out.push_str(", ");
+                    }
+                    ty(p, out);
+                }
+                let names: Vec<&str> = entries.iter().map(super::Name::as_str).collect();
+                let _ = write!(out, ") = {{{}}};", names.join(", "));
+            }
+            Item::Table { name, entries, .. } => {
+                let names: Vec<String> = entries
+                    .iter()
+                    .map(|e| format!("(void *){}", e.as_str()))
+                    .collect();
+                let _ = write!(
+                    out,
+                    "static void *const {}[{}] = {{{}}};",
+                    name.as_str(),
+                    entries.len(),
+                    names.join(", ")
+                );
+            }
+        }
+        out.push('\n');
+    }
+}
+
+/// Prints a prototype without its semicolon: `uint64_t f(uint64_t a1)`, a
+/// pointer result or parameter written against its name.
+///
+/// # Arguments
+///
+/// * `p` - The prototype.
+/// * `out` - Receives the text.
+fn proto(p: &Proto, out: &mut String) {
+    let named = |t: &CTy, name: &str, out: &mut String| {
+        let at = out.len();
+        ty(t, out);
+        if !name.is_empty() && !out[at..].ends_with('*') {
+            out.push(' ');
+        }
+        out.push_str(name);
+    };
+    named(&p.ret, p.name.as_str(), out);
+    out.push('(');
+    for (k, (t, name)) in p.params.iter().enumerate() {
+        if k > 0 {
+            out.push_str(", ");
+        }
+        named(t, name.as_ref().map_or("", super::Name::as_str), out);
+    }
+    if p.variadic {
+        out.push_str(if p.params.is_empty() { "..." } else { ", ..." });
+    }
+    if p.params.is_empty() && !p.variadic {
+        out.push_str("void");
+    }
+    out.push(')');
 }
 
 /// Prints statements at a nesting depth.

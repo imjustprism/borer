@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use super::super::cir;
 use super::super::expr::Key;
 use super::super::{Shape, lift_a64, shape_built};
 use super::conv::{AAPCS64, CDECL_X86, Conv, FASTCALL_X86, GO_X64, MS_X64, SYSV_X64, THISCALL_X86};
@@ -351,17 +352,19 @@ pub(crate) struct Prototype {
 }
 
 impl Prototype {
-    /// Returns the declaration, `uint64_t f(uint64_t, double);`.
-    pub(crate) fn declaration(&self) -> String {
-        let mut params = self.params.clone();
-        if self.variadic {
-            params.push("...");
+    /// Returns the prototype as a CIR node, which prints as
+    /// `uint64_t f(uint64_t, double)`.
+    pub(in crate::analysis::decompile) fn proto(&self) -> cir::Proto {
+        cir::Proto {
+            ret: cir::CTy::parse(self.ret),
+            name: cir::Name::of(&self.name),
+            params: self
+                .params
+                .iter()
+                .map(|t| (cir::CTy::parse(t), None))
+                .collect(),
+            variadic: self.variadic,
         }
-        if params.is_empty() {
-            params.push("void");
-        }
-        let sep = if self.ret.ends_with('*') { "" } else { " " };
-        format!("{}{sep}{}({});", self.ret, self.name, params.join(", "))
     }
 }
 
@@ -419,7 +422,7 @@ pub(crate) fn prototype(
 
 #[cfg(test)]
 mod tests {
-    use super::{Class, Loc, Target, of, prototype};
+    use super::{Class, Loc, Target, cir, of, prototype};
     use crate::analysis::{Analysis, Overlay};
     use crate::isa::{a64, x86::Register};
     use crate::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
@@ -443,6 +446,17 @@ mod tests {
         p
     }
 
+    /// Returns a prototype as a translation unit declares it.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The prototype.
+    fn declared(p: &super::Prototype) -> String {
+        let mut out = String::new();
+        cir::print_items(&[cir::Item::Extern(p.proto())], &mut out);
+        out
+    }
+
     /// A Microsoft x64 function adding its two arguments takes them in
     /// `rcx` and `rdx` and hands an integer back in `rax`, and its
     /// prototype declares two words.
@@ -462,8 +476,8 @@ mod tests {
         assert_eq!(locs, [Loc::X86(Register::RCX), Loc::X86(Register::RDX)]);
         assert_eq!(abi.ret.map(|r| r.class), Some(Class::Int));
         assert_eq!(
-            prototype(&p, &a, &o, 0x1000).unwrap().declaration(),
-            "uint64_t f(uint64_t, uint64_t);"
+            declared(&prototype(&p, &a, &o, 0x1000).unwrap()),
+            "extern uint64_t f(uint64_t, uint64_t);\n"
         );
     }
 
@@ -494,8 +508,8 @@ mod tests {
             Some((Class::IndirectResult, vec![Loc::A64(a64::Reg::X(8))]))
         );
         assert_eq!(
-            prototype(&p, &a, &o, 0x1000).unwrap().declaration(),
-            "void f(void *, uint64_t);"
+            declared(&prototype(&p, &a, &o, 0x1000).unwrap()),
+            "extern void f(void *, uint64_t);\n"
         );
     }
 }
