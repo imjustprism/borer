@@ -71,7 +71,7 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
     /// Longest walk back to a literal's first byte.
     const WINDOW: u64 = 256;
     let sec = p.section_at(va).filter(|s| in_code || !s.executable)?;
-    if cstr_at(p, va, 4, cap).is_some() {
+    if literal_text(cstr_text_at(p, va, 4, cap)).is_some() {
         let floor = va.saturating_sub(WINDOW).max(sec.va.0);
         let mut start = va;
         while start > floor
@@ -81,11 +81,11 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
         {
             start -= 1;
         }
-        if let Some((_, t)) = cstr_at(p, start, 4, cap) {
+        if let Some(t) = literal_text(cstr_text_at(p, start, 4, cap)) {
             return Some((start, format!("\"{t}\"")));
         }
     }
-    wstr_at(p, va, 4, cap)?;
+    literal_text(wstr_text_at(p, va, 4, cap))?;
     let floor = va.saturating_sub(WINDOW).max(sec.va.0);
     let mut start = va;
     while start >= floor.saturating_add(2)
@@ -97,7 +97,36 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
     if start < va && !crate::strings::wide_run_start(p, start) {
         start += 2;
     }
-    wstr_at(p, start, 4, cap).map(|(_, t)| (start, format!("L\"{t}\"")))
+    literal_text(wstr_text_at(p, start, 4, cap)).map(|t| (start, format!("L\"{t}\"")))
+}
+
+/// Returns a literal's text with its tabs and line ends escaped, when it
+/// holds at least four printable characters.
+///
+/// A literal runs over the control characters it can escape, so the words
+/// after a newline (`L"Not implemented.\nUse command line ..."`) are its
+/// own and a search for them finds the function; reading only up to the
+/// first control character cut them off, and missed a literal that opens
+/// with one (`"\nOutputDebugString faulted"`). Four characters of text
+/// keep a run of tabs and newlines from reading as a string.
+///
+/// # Arguments
+///
+/// * `read` - What [`cstr_text_at`] or [`wstr_text_at`] read.
+///
+/// # Returns
+///
+/// The escaped text, or `None` when nothing was read or too little of it
+/// is printable.
+fn literal_text(read: Option<(usize, String)>) -> Option<String> {
+    /// Fewest printable characters a literal holds.
+    const PRINTABLE_MIN: usize = 4;
+    let (_, t) = read?;
+    (t.bytes().filter(|&b| crate::strings::printable(b)).count() >= PRINTABLE_MIN).then(|| {
+        t.replace('\t', "\\t")
+            .replace('\r', "\\r")
+            .replace('\n', "\\n")
+    })
 }
 
 /// Whether a function's code is scattered far across its address span.

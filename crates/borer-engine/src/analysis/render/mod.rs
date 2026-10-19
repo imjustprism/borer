@@ -57,7 +57,7 @@ use crate::isa::x86::{
 };
 use crate::num::from_usize;
 use crate::program::{BinaryFormat, Feature, FileOff, Program, Section, Symbol, SymbolKind};
-use crate::strings::{cstr_at, literal_byte, wstr_at};
+use crate::strings::{cstr_at, cstr_text_at, literal_byte, wstr_at, wstr_text_at};
 use crate::text::plural;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -1131,6 +1131,29 @@ if (a1 != 0) {
         assert_eq!(
             string_literal(&p, 0x2010, 120),
             Some((0x2000, String::from("\"Invalid server response\"")))
+        );
+    }
+
+    /// A literal runs over its newlines and may open with one, in either
+    /// width, so the words after a newline are found by a search.
+    ///
+    /// notepad's `L"Not implemented.\nUse command line ..."` was cut at the
+    /// newline, and kernelbase's `"\nOutputDebugString faulted ..."` read
+    /// as no literal at all.
+    #[test]
+    fn a_literal_runs_over_its_newlines() {
+        let p = rodata(b"\nOutputDebugString faulted\n\0");
+        assert_eq!(
+            string_literal(&p, 0x2000, 120),
+            Some((0x2000, String::from("\"\\nOutputDebugString faulted\\n\"")))
+        );
+        let wide: Vec<u8> = "Not implemented.\nUse it\0"
+            .bytes()
+            .flat_map(|b| [b, 0])
+            .collect();
+        assert_eq!(
+            string_literal(&rodata(&wide), 0x2000, 120),
+            Some((0x2000, String::from("L\"Not implemented.\\nUse it\"")))
         );
     }
 

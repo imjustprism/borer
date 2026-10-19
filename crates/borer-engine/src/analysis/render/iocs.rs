@@ -445,9 +445,9 @@ fn argument_text(p: &Program, api: &str, arg: &CallArg) -> Option<String> {
     };
     arg.string.as_ref()?;
     let read = if api.ends_with('W') {
-        crate::strings::wstr_text_at(p, v, 1, ARG_TEXT_MAX)
+        wstr_text_at(p, v, 1, ARG_TEXT_MAX)
     } else {
-        crate::strings::cstr_text_at(p, v, 1, ARG_TEXT_MAX)
+        cstr_text_at(p, v, 1, ARG_TEXT_MAX)
     };
     read.map(|(_, text)| text)
 }
