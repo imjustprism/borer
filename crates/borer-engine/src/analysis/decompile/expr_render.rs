@@ -846,11 +846,7 @@ impl Expr {
             }
             Expr::Cast(e, ty) => {
                 let (es, ep) = match &**e {
-                    Expr::Sext(inner, bits) => {
-                        let (s, p) = inner.render_prec(n, false, false);
-                        let s = if p < UNARY { format!("({s})") } else { s };
-                        (format!("({}){s}", signed_ty(*bits)), UNARY)
-                    }
+                    Expr::Sext(inner, bits) => (sext_operand(inner, *bits, n, false), UNARY),
                     other => other.render_prec(n, false, false),
                 };
                 let es = if ep < UNARY { format!("({es})") } else { es };
@@ -968,9 +964,7 @@ impl Expr {
                     Op::SDiv | Op::SRem => {
                         let signed = |side: &Expr, text: String| {
                             if let Expr::Sext(inner, from) = side {
-                                let (s, p) = inner.render_prec(n, hex, false);
-                                let s = if p < UNARY { format!("({s})") } else { s };
-                                format!("({}){s}", signed_ty(*from))
+                                sext_operand(inner, *from, n, hex)
                             } else if text.starts_with("(int64_t)")
                                 || matches!(side, Expr::Const(_))
                             {
@@ -1089,10 +1083,42 @@ impl Expr {
                 {
                     return render_load(a, *ty, signed_ty(*bits), n);
                 }
-                let (es, ep) = e.render_prec(n, false, false);
-                let es = if ep < UNARY { format!("({es})") } else { es };
-                (format!("(int64_t)({}){es}", signed_ty(*bits)), UNARY)
+                let text = sext_operand(e, *bits, n, false);
+                if text.starts_with("((int64_t)") {
+                    return (text, ATOM);
+                }
+                (format!("(int64_t){text}"), UNARY)
             }
+        }
+    }
+}
+
+/// Renders the low `bits` bits of a value read as a signed number.
+///
+/// A width C has a type for reads as a cast to it: `(int8_t)x`. Any other
+/// width (the 1-bit mask of a bit test, a 12-bit field) shifts the field to
+/// the top of a 64-bit word and back: `((int64_t)((uint64_t)x << 63) >>
+/// 63)`, where the next C type would keep bits the field does not have.
+///
+/// # Arguments
+///
+/// * `e` - The value whose low bits are the field.
+/// * `bits` - The width of the signed field, 1 to 64.
+/// * `n` - Name resolution.
+/// * `hex` - Render constants in hex.
+///
+/// # Returns
+///
+/// The text, at cast precedence or wholly parenthesized.
+fn sext_operand(e: &Expr, bits: u8, n: &Names<'_>, hex: bool) -> String {
+    let (s, p) = e.render_prec(n, hex, false);
+    let s = if p < UNARY { format!("({s})") } else { s };
+    match bits {
+        8 | 16 | 32 => format!("({}){s}", signed_ty(bits)),
+        0 | 64.. => format!("(int64_t){s}"),
+        1..=63 => {
+            let shift = 64 - bits;
+            format!("((int64_t)((uint64_t){s} << {shift}) >> {shift})")
         }
     }
 }

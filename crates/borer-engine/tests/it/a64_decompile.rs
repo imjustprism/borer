@@ -2838,3 +2838,27 @@ fn arm64_interleaves_narrowings_and_conversions_are_c() {
         assert!(out.contains(spelled), "{spelled}: {out}");
     }
 }
+
+/// A sign extension of a field C has no type for shifts it up and back.
+///
+/// `sbfx x0, x0, #0, #1` makes bit 0 all ones or all zeros. The next C
+/// type, `int8_t`, would keep seven bits the field does not have.
+#[test]
+fn a_one_bit_sign_extension_is_no_byte_cast() {
+    // ASM: sbfx x0, x0, #0, #1 / ret
+    let (p, a, text) = decompiled_words(&[0x9340_0000, 0xd65f_03c0]);
+    assert!(
+        text.contains("((int64_t)((uint64_t)a1 << 63) >> 63)"),
+        "{text}"
+    );
+    assert!(!text.contains("int8_t"), "{text}");
+    let entry = p.entry.expect("entry");
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[entry], seed);
+        assert!(
+            v.mismatches.is_empty(),
+            "seed {seed}: {text}\n{}",
+            verify_tsv(&v)
+        );
+    }
+}
