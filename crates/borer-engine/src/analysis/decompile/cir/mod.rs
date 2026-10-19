@@ -371,6 +371,16 @@ pub(super) enum StmtKind {
     },
     /// A braced block of its own: `{ ... }`.
     Block(Vec<Stmt>),
+    /// A guarded region and its handlers: `try { ... } catch (T) { ... }`,
+    /// or `__try { ... } __except (f) { ... }` and `__finally`.
+    Try {
+        /// Whether it is structured exception handling, written `__try`.
+        seh: bool,
+        /// The protected statements.
+        body: Vec<Stmt>,
+        /// The handlers in the order the runtime tries them; never empty.
+        handlers: Vec<Handler>,
+    },
     /// A whole-line comment: the text after `//`.
     Comment(String),
     /// An instruction the lifter did not model, `/* asm: text */`: the
@@ -389,6 +399,26 @@ pub(super) enum Else {
     Block(Vec<Stmt>),
     /// `else if (...)`: a statement that is itself an [`StmtKind::If`].
     If(Box<Stmt>),
+}
+
+/// One handler of an [`StmtKind::Try`]: what it handles and what runs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct Handler {
+    /// What it handles.
+    pub(super) head: Head,
+    /// The statements it runs.
+    pub(super) body: Vec<Stmt>,
+}
+
+/// What a handler handles.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) enum Head {
+    /// `catch (decl)`: the declaration as C++ writes it, `...` for all.
+    Catch(String),
+    /// `__except (filter)`.
+    Except(Expr),
+    /// `__finally`.
+    Finally,
 }
 
 /// One arm of a `switch`: its labels and what runs.

@@ -134,6 +134,9 @@ impl Walk<'_> {
 
     /// Walks one statement and what it holds.
     ///
+    /// An `__except` filter names a funclet or a constant of the
+    /// exception runtime, nothing the body declares, so it is not walked.
+    ///
     /// # Arguments
     ///
     /// * `s` - The statement.
@@ -194,6 +197,12 @@ impl Walk<'_> {
                 }
             }
             StmtKind::Block(body) => self.stmts(body),
+            StmtKind::Try { body, handlers, .. } => {
+                self.stmts(body);
+                for h in handlers {
+                    self.stmts(&h.body);
+                }
+            }
             StmtKind::Raw(text) if text.contains("goto *") => {
                 self.found.push(Violation::ComputedGoto(text.clone()));
             }

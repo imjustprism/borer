@@ -11,8 +11,8 @@
 //! that does not close) becomes one raw line per line.
 
 use super::{
-    Arm, ArmBody, BinOp, Body, CTy, CaseLabel, Else, Expr, ExprKind, Label, LitKind, Literal, Name,
-    PostOp, Prov, Stmt, StmtKind, UnOp, print,
+    Arm, ArmBody, BinOp, Body, CTy, CaseLabel, Else, Expr, ExprKind, Handler, Head, Label, LitKind,
+    Literal, Name, PostOp, Prov, Stmt, StmtKind, UnOp, print,
 };
 
 /// Deepest nesting an expression or a block is read to, so a hostile text
@@ -229,6 +229,9 @@ impl<'t> Reader<'t> {
             let body = self.braced(depth)?;
             return Some(self.stmt(StmtKind::Block(body)));
         }
+        if t == "try {" || t == "__try {" {
+            return self.try_block(t == "__try {", depth);
+        }
         if let Some(text) = t.strip_prefix("//") {
             return Some(self.stmt(StmtKind::Comment(text.to_owned())));
         }
@@ -276,6 +279,54 @@ impl<'t> Reader<'t> {
         };
         Some(Stmt {
             kind: StmtKind::If { cond, then, other },
+            prov,
+        })
+    }
+
+    /// Reads a guarded region whose `try {` or `__try {` line was just
+    /// read, with its handlers: `} catch (decl) {`, `} __except (filter) {`
+    /// and `} __finally {`, up to the bare `}`.
+    ///
+    /// # Arguments
+    ///
+    /// * `seh` - Whether the opening line was `__try {`.
+    /// * `depth` - The depth of the opening line.
+    ///
+    /// # Returns
+    ///
+    /// The statement, or `None` when a handler line does not read or no
+    /// handler follows the body.
+    fn try_block(&mut self, seh: bool, depth: usize) -> Option<Stmt> {
+        let prov = self.prov;
+        let body = self.block(depth + 1)?;
+        let mut handlers = Vec::new();
+        loop {
+            let closing = self.closer(depth)?;
+            if closing == "}" {
+                break;
+            }
+            let head = if closing == "} __finally {" {
+                Head::Finally
+            } else if let Some(filter) = closing
+                .strip_prefix("} __except (")
+                .and_then(|r| r.strip_suffix(") {"))
+            {
+                Head::Except(self.expr(filter))
+            } else {
+                let decl = closing.strip_prefix("} catch (")?.strip_suffix(") {")?;
+                Head::Catch(decl.to_owned())
+            };
+            handlers.push(Handler {
+                head,
+                body: self.block(depth + 1)?,
+            });
+        }
+        (!handlers.is_empty()).then_some(Stmt {
+            kind: StmtKind::Try {
+                seh,
+                body,
+                handlers,
+            },
             prov,
         })
     }

@@ -233,3 +233,72 @@ fn declarations_print_as_the_header_writes_them() {
         "uint64_t rbx, rsi;\nFoo *a, *b;\nuint32_t g_4000; // @ 0x4000\n"
     );
 }
+
+/// A guarded region and its handlers read into one statement and print
+/// back as written, with `try` nested inside `__try` and every handler
+/// form.
+#[test]
+fn a_guarded_region_prints_back_byte_for_byte() {
+    const TRY: &str = "L_401000:
+__try {
+  try {
+    rax = risky(a1);
+  } catch (const Error &) {
+    rax = 1;
+  } catch (...) {
+    // handler: f::catch$1 @ 0x401200
+  }
+} __except (filter(a1)) {
+  rax = -1;
+}
+__try {
+  rax += 2;
+} __finally {
+}
+return rax;
+";
+    let body = build(TRY);
+    assert_eq!(print(&body), TRY);
+    let StmtKind::Try {
+        seh: true,
+        body: inner,
+        handlers,
+    } = &body.stmts[1].kind
+    else {
+        panic!("not a __try: {:?}", body.stmts[1]);
+    };
+    assert!(matches!(handlers[0].head, Head::Except(_)));
+    let StmtKind::Try {
+        seh: false,
+        handlers: catches,
+        ..
+    } = &inner[0].kind
+    else {
+        panic!("not a try: {inner:?}");
+    };
+    assert_eq!(catches.len(), 2);
+    assert_eq!(catches[0].head, Head::Catch("const Error &".to_owned()));
+    assert!(matches!(
+        body.stmts[2].kind,
+        StmtKind::Try { seh: true, .. }
+    ));
+    assert!(
+        check(&body, &BTreeMap::new())
+            .iter()
+            .all(|v| !matches!(v, Violation::Raw(_)))
+    );
+}
+
+/// A `try` without a handler is no statement the builder reads: the
+/// body falls back to one raw line per line.
+#[test]
+fn a_try_without_a_handler_stays_text() {
+    let body = build("try {\n  x = 1;\n}\n");
+    assert!(
+        body.stmts
+            .iter()
+            .all(|s| matches!(s.kind, StmtKind::Raw(_))),
+        "{:?}",
+        body.stmts
+    );
+}

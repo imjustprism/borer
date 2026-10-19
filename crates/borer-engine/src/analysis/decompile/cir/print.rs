@@ -6,8 +6,8 @@
 //! `switch`, and an empty line left empty.
 
 use super::{
-    Arm, ArmBody, BinOp, Body, CTy, CaseLabel, Decl, Else, Expr, ExprKind, Item, PostOp, Proto,
-    Stmt, StmtKind, UnOp,
+    Arm, ArmBody, BinOp, Body, CTy, CaseLabel, Decl, Else, Expr, ExprKind, Head, Item, PostOp,
+    Proto, Stmt, StmtKind, UnOp,
 };
 use std::fmt::Write as _;
 
@@ -270,6 +270,31 @@ fn line(s: &Stmt, depth: usize, out: &mut String) {
             out.push_str("{\n");
             close(body, depth, out);
         }
+        StmtKind::Try {
+            seh,
+            body,
+            handlers,
+        } => {
+            out.push_str(if *seh { "__try {\n" } else { "try {\n" });
+            stmts(body, depth + 1, out);
+            for h in handlers {
+                pad(depth, out);
+                match &h.head {
+                    Head::Catch(decl) => {
+                        let _ = writeln!(out, "}} catch ({decl}) {{");
+                    }
+                    Head::Except(filter) => {
+                        out.push_str("} __except (");
+                        expr(filter, out);
+                        out.push_str(") {\n");
+                    }
+                    Head::Finally => out.push_str("} __finally {\n"),
+                }
+                stmts(&h.body, depth + 1, out);
+            }
+            pad(depth, out);
+            out.push_str("}\n");
+        }
         StmtKind::Comment(text) => {
             let _ = writeln!(out, "//{text}");
         }
@@ -421,7 +446,7 @@ pub(super) const fn bin_op(op: BinOp) -> &'static str {
 ///
 /// * `e` - The expression.
 /// * `out` - Receives the text.
-pub(super) fn expr(e: &Expr, out: &mut String) {
+fn expr(e: &Expr, out: &mut String) {
     match &e.kind {
         ExprKind::Lit(l) => out.push_str(&l.text),
         ExprKind::Name(n) => out.push_str(n.as_str()),
