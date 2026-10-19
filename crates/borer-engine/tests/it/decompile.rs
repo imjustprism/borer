@@ -2881,7 +2881,11 @@ fn test_same_register_simplifies() {
 fn tail_call_renders_as_return_call() {
     let out = dc(0x1240);
     assert!(out.contains("return sub_1020("), "{out}");
-    assert!(!out.contains("return 1;"), "A's body leaked into W:\n{out}");
+    assert!(
+        !out.lines()
+            .any(|l| !l.starts_with("static inline ") && l.contains("return 1;")),
+        "A's body leaked into W:\n{out}"
+    );
 }
 
 /// `X`: a function address and a string address passed as arguments render
@@ -4186,7 +4190,11 @@ fn copies_of_one_test_are_one_test() {
     let p = program64(&code);
     let text = decompiled(&p, 0x1_4000_1000);
     assert!(!text.contains("goto"), "{text}");
-    assert_eq!(text.matches("sub_140001050(").count(), 1, "{text}");
+    let calls = text
+        .lines()
+        .filter(|l| !l.starts_with("static inline ") && l.contains("sub_140001050("))
+        .count();
+    assert_eq!(calls, 1, "{text}");
     assert_eq!(text.matches("& 2").count(), 1, "{text}");
 }
 

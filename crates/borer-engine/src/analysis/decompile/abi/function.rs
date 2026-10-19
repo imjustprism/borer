@@ -350,13 +350,6 @@ pub(crate) struct Prototype {
     pub(crate) variadic: bool,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the translation-unit closure (J5) declares callees from it"
-    )
-)]
 impl Prototype {
     /// Returns the declaration, `uint64_t f(uint64_t, double);`.
     pub(crate) fn declaration(&self) -> String {
@@ -390,13 +383,6 @@ impl Prototype {
 /// # Returns
 ///
 /// The prototype, or `None` when no function starts at `entry`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the translation-unit closure (J5) declares callees from it"
-    )
-)]
 pub(crate) fn prototype(
     program: &Program,
     analysis: &Analysis,

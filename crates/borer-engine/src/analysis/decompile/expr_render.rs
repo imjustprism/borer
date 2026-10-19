@@ -68,7 +68,7 @@ pub(super) struct Names<'a> {
 /// # Arguments
 ///
 /// * `raw` - The symbol's name.
-fn data_name(raw: &str) -> String {
+pub(super) fn data_name(raw: &str) -> String {
     let name = crate::search::demangled_name(raw);
     if name.contains("::") || name.contains('(') {
         return name;

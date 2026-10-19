@@ -66,6 +66,7 @@ mod tables;
 mod tidy;
 pub mod traces;
 mod types;
+mod unit;
 mod vars;
 mod vector;
 pub mod verify;
@@ -583,9 +584,7 @@ pub fn decompile_all_settled(
     entries: &[u64],
 ) -> Vec<Option<(String, Settle)>> {
     render_all(program, analysis, overlay, entries, |p, a, o, e| {
-        let bitness = p.arch.bitness().unwrap_or(64);
-        decompile_plain_full(p, a, o, e)
-            .map(|d| (finished(&d.text, p, a, (bitness, o.passes)), d.settle))
+        decompile_plain_full(p, a, o, e).map(|d| (finished(&d.text, p, a, o, e), d.settle))
     })
 }
 
@@ -730,11 +729,10 @@ pub fn decompile(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    let bitness = program.arch.bitness().unwrap_or(64);
     decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
         .as_ref()
         .as_ref()
-        .map(|d| finished(&d.text, program, analysis, (bitness, overlay.passes)))
+        .map(|d| finished(&d.text, program, analysis, overlay, entry))
 }
 
 /// [`decompile`] built afresh, for a batch ([`decompile_all`]).
@@ -755,23 +753,24 @@ fn decompile_afresh(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    let bitness = program.arch.bitness().unwrap_or(64);
     decompile_plain_full(program, analysis, overlay, entry)
-        .map(|d| finished(&d.text, program, analysis, (bitness, overlay.passes)))
+        .map(|d| finished(&d.text, program, analysis, overlay, entry))
 }
 
 /// Finishes a body for the tools: [`polish`], then the tables it reads
-/// inline ([`tables::inline_tables`]), then its vector declarations
-/// ([`vector::declare`]) and its helper definitions ([`helper::declare`]),
-/// each step timed ([`crate::timing::Step`]).
+/// inline ([`tables::inline_tables`]), then the translation-unit closure
+/// ([`unit::close`]), then its vector declarations ([`vector::declare`])
+/// and its helper definitions ([`helper::declare`]), each step timed
+/// ([`crate::timing::Step`]) and each left out when the overlay's
+/// [`Passes`] say so.
 ///
 /// # Arguments
 ///
 /// * `text` - The plain or named decompilation.
 /// * `program` - The loaded image.
-/// * `analysis` - Discovery results, for the packs.
-/// * `(bitness, skip)` - The register width in bits, and the passes left
-///   out ([`Passes`]).
+/// * `analysis` - Discovery results, for the packs and the callees.
+/// * `overlay` - User names, and the passes left out.
+/// * `entry` - The function's entry address.
 ///
 /// # Returns
 ///
@@ -780,15 +779,23 @@ fn finished(
     text: &str,
     program: &Program,
     analysis: &Analysis,
-    (bitness, skip): (u32, Passes),
+    overlay: &Overlay,
+    entry: u64,
 ) -> String {
     use crate::timing::{Step, timed};
+    let bitness = program.arch.bitness().unwrap_or(64);
+    let skip = overlay.passes;
     let text = timed(Step::Polish, || {
         polish_skipping(text, bitness, &analysis.packs, skip)
     });
     let text = timed(Step::InlineTables, || {
         skip.apply(Pass::InlineTables, text, |t| {
             tables::inline_tables(t, program)
+        })
+    });
+    let text = timed(Step::UnitClosure, || {
+        skip.apply(Pass::UnitClosure, text, |t| {
+            unit::close(t, program, analysis, overlay, entry)
         })
     });
     let text = timed(Step::Vectors, || {
@@ -1399,12 +1406,7 @@ fn name_fields(
     let mut out = lines.join("\n");
     out.push('\n');
     lap.end(crate::timing::Step::NameFields);
-    Some(finished(
-        &out,
-        program,
-        analysis,
-        (program.arch.bitness().unwrap_or(64), overlay.passes),
-    ))
+    Some(finished(&out, program, analysis, overlay, entry))
 }
 
 /// Returns the entries a function's virtual calls resolve to.

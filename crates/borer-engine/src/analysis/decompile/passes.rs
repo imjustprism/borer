@@ -125,6 +125,9 @@ pub enum Pass {
     SpellFloatRelations,
     /// Writes the read-only tables the text indexes.
     InlineTables,
+    /// Declares the functions and function tables the text uses
+    /// ([`super::unit::close`]).
+    UnitClosure,
     /// Declares the vector variables.
     VectorDeclare,
     /// Defines the helpers the text calls.
@@ -133,7 +136,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 58] = [
+    pub const ALL: [Self; 59] = [
         Self::DropReturnedValues,
         Self::MergeChains,
         Self::FoldTempCopies,
@@ -190,6 +193,7 @@ impl Pass {
         Self::RefoldJumps,
         Self::SpellFloatRelations,
         Self::InlineTables,
+        Self::UnitClosure,
         Self::VectorDeclare,
         Self::HelperDeclare,
     ];
@@ -254,6 +258,7 @@ impl Pass {
             Self::RefoldJumps => "refold_jumps",
             Self::SpellFloatRelations => "spell_float_relations",
             Self::InlineTables => "inline_tables",
+            Self::UnitClosure => "unit::close",
             Self::VectorDeclare => "vector::declare",
             Self::HelperDeclare => "helper::declare",
         }

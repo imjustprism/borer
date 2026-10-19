@@ -85,9 +85,10 @@ pub fn skeleton(text: &str) -> String {
 
 /// The line the declarations at the top of a decompiled function end on.
 ///
-/// The text opens with its `//` header lines, then declares every
-/// variable the body names, a type and names to a line, before the first
-/// statement. On optimized code that block runs to hundreds of lines, so
+/// The text opens with its `//` header lines, then the declarations of
+/// its translation unit (helper definitions, prototypes, the bodies of
+/// small callees, tables) and of every variable the body names, a type
+/// and names to a line, before the first statement. On optimized code that block runs to hundreds of lines, so
 /// the first page of a long function can be mostly declarations; the line
 /// it ends on is where a reader who wants statements starts.
 ///
@@ -108,6 +109,8 @@ pub fn skeleton(text: &str) -> String {
 /// let text = "// f @ 0x1000\n// signature: void f(void)\nuint64_t rax;\nPlayer *p;\n\nrax = 1;\n";
 /// assert_eq!(declarations_end(text), Some(4));
 /// assert_eq!(declarations_end("// f\n\nreturn;\n"), None);
+/// let unit = "// f\nextern uint64_t g(uint64_t);\nuint64_t x;\n\nreturn g(x);\n";
+/// assert_eq!(declarations_end(unit), Some(3));
 /// ```
 #[must_use]
 pub fn declarations_end(text: &str) -> Option<usize> {
@@ -117,6 +120,8 @@ pub fn declarations_end(text: &str) -> Option<usize> {
             && !line.contains(['=', '('])
             && line.split_whitespace().count() >= 2
             && !["return ", "goto "].iter().any(|w| line.starts_with(w))
+            || helper::defines(line)
+            || ["static ", "typedef "].iter().any(|w| line.starts_with(w))
     };
     text.lines()
         .enumerate()

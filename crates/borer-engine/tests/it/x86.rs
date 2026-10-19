@@ -518,7 +518,7 @@ fn a_room_making_push_keeps_its_place_among_the_arguments() {
     let text = dc(&code);
     let call = text
         .lines()
-        .find(|l| l.contains("sub_401040("))
+        .find(|l| l.contains("sub_401040(") && !l.starts_with("static inline "))
         .unwrap_or_default();
     let args = call
         .split_once("sub_401040(")

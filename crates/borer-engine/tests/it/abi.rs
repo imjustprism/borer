@@ -148,7 +148,7 @@ fn an_indirect_result_comes_first() {
     let user = decompile(&p, &a, &o, TEXT + 0x50).expect("decompiles");
     let call = user
         .lines()
-        .find(|l| l.contains("mkrect("))
+        .find(|l| l.contains("mkrect(") && !l.starts_with("extern "))
         .expect("the call is shown");
     assert!(call.contains("mkrect(&"), "{user}");
 }

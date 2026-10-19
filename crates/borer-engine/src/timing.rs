@@ -84,6 +84,8 @@ pub(crate) enum Step {
     Polish,
     /// Writing the tables the text reads inline (`inline_tables`).
     InlineTables,
+    /// Declaring the functions and tables the text uses (`unit::close`).
+    UnitClosure,
     /// Declaring the vector variables (`vector::declare`).
     Vectors,
     /// Defining the helpers the text calls (`helper::declare`).
@@ -94,7 +96,7 @@ pub(crate) enum Step {
 
 impl Step {
     /// Every step, in pipeline order, each at its slot in [`TOTALS`].
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Decode,
         Self::Lift,
         Self::Structure,
@@ -103,6 +105,7 @@ impl Step {
         Self::NameFields,
         Self::Polish,
         Self::InlineTables,
+        Self::UnitClosure,
         Self::Vectors,
         Self::Helpers,
         Self::Replay,
@@ -119,6 +122,7 @@ impl Step {
             Self::NameFields => "name_fields",
             Self::Polish => "polish",
             Self::InlineTables => "inline_tables",
+            Self::UnitClosure => "unit_closure",
             Self::Vectors => "vector_declare",
             Self::Helpers => "helper_declare",
             Self::Replay => "replay",
@@ -136,9 +140,10 @@ impl Step {
             Self::NameFields => 5,
             Self::Polish => 6,
             Self::InlineTables => 7,
-            Self::Vectors => 8,
-            Self::Helpers => 9,
-            Self::Replay => 10,
+            Self::UnitClosure => 8,
+            Self::Vectors => 9,
+            Self::Helpers => 10,
+            Self::Replay => 11,
         }
     }
 }
