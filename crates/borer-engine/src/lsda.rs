@@ -266,8 +266,9 @@ fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
 /// # Returns
 ///
 /// The filter and demangled type of each clause the chain catches, in
-/// clause order, and whether it holds a cleanup; whatever a broken tail
-/// leaves unread is simply not claimed.
+/// clause order (`type_<filter>` for a type whose descriptor does not
+/// read, so the clause still counts), and whether it holds a cleanup;
+/// whatever a broken tail leaves unread is simply not claimed.
 fn chain(
     program: &Program,
     sec: &crate::program::Section,
@@ -306,10 +307,10 @@ fn chain(
         };
         if filter == 0 {
             cleanup = true;
-        } else if filter > 0
-            && let Some((enc, base)) = ttype
-            && let Some(name) = entry(program, sec, bytes, enc, base, filter)
-        {
+        } else if filter > 0 {
+            let name = ttype
+                .and_then(|(enc, base)| entry(program, sec, bytes, enc, base, filter))
+                .unwrap_or_else(|| format!("type_{filter}"));
             catches.push((filter, name));
         }
         let Some(after) = i64::try_from(field)
@@ -533,5 +534,18 @@ mod tests {
             vec![(2, "...".to_owned()), (1, "Error".to_owned())]
         );
         assert!(cleanup);
+    }
+
+    /// A clause whose type entry does not read still counts as a clause,
+    /// named by its filter, so a landing pad's selectors stay matched to
+    /// its clauses.
+    #[test]
+    fn an_unread_type_keeps_its_clause() {
+        let bytes = vec![0x01u8, 0x00];
+        let sec = Section::mapped(".gcc_except_table", 0x3000, 0, 2, false, false);
+        let p = Program::raw(bytes.clone(), Arch::X86_64, 0, None, vec![sec.clone()]);
+        let (clauses, cleanup) = chain(&p, &sec, &bytes, None, 0x3000, 1);
+        assert_eq!(clauses, vec![(1, "type_1".to_owned())]);
+        assert!(!cleanup);
     }
 }
