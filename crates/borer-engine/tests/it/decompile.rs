@@ -7304,7 +7304,8 @@ fn a_logical_shift_of_all_ones_shifts_in_zeros() {
 /// `mov byte [rsp+4],1; mov [rsp+5],r9b; mov [rsp+6],r8w; mov edx,[rsp+4];
 /// mov [rcx+8],edx` packs three slots into one dword, as a Rust enum's
 /// constructor does: the text's `local_c`, a `uint8_t`, read one byte of
-/// the four, and the three above it were lost.
+/// the four, and the three above it were lost. The word the two byte
+/// stores at `[rsp+8]` fill reads as the value they compose.
 #[test]
 fn a_load_wider_than_its_slot_reads_the_slots_above() {
     let code = [
@@ -7329,7 +7330,7 @@ fn a_load_wider_than_its_slot_reads_the_slots_above() {
     ];
     let text = runs_agree(&program64(&code), 0x1_4000_1000);
     assert!(text.contains("*(uint32_t*)&local_c"), "{text}");
-    assert!(text.contains("*(uint16_t*)&local_8"), "{text}");
+    assert!(text.contains("(a2 << 8) | a2"), "{text}");
 }
 
 /// A wrapper that reads one argument and calls on passes its callee the
