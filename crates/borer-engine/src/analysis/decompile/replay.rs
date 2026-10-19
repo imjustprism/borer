@@ -5655,6 +5655,23 @@ mod tests {
         }
     }
 
+    /// The return address a call to the next instruction pushes is a frame
+    /// word the lift does not name; the proof holds it as no known value
+    /// and proves the rest.
+    #[test]
+    fn a_frame_word_the_lift_does_not_name_holds_no_known_value() {
+        let p = x86(&[
+            0xe8, 0x00, 0x00, 0x00, 0x00, // ASM: call 0x1005
+            0x59, // ASM: pop ecx
+            0x89, 0xc8, // ASM: mov eax, ecx
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let r = replay_function(&p, &a, 0x1000, 1);
+        assert_eq!(claims(&r), [], "{}", replay_tsv(&r));
+        assert_eq!((r.checked, r.proved), (1, 1), "{}", replay_tsv(&r));
+    }
+
     /// Every block of a function whose text says what the binary does is
     /// proved over every state, not only checked on the states tried.
     #[test]

@@ -128,6 +128,8 @@ struct Run {
     fresh: u32,
     /// The frame bytes the text holds no value for.
     lost: BTreeSet<u64>,
+    /// The frame bytes the block writes that the lift does not name.
+    hidden: BTreeSet<u64>,
 }
 
 /// The flags an instruction left, with their operands named by
@@ -1079,6 +1081,9 @@ struct Lifted<'a> {
     /// The frame bytes the text holds no value for, which a read through
     /// an address the state picks reads none of either.
     lost: &'a BTreeSet<u64>,
+    /// The frame bytes the block writes that the lift does not name: what
+    /// they hold is not known, so a read of one is not modeled.
+    hidden: &'a BTreeSet<u64>,
 }
 
 impl Lifted<'_> {
@@ -1106,6 +1111,9 @@ impl Lifted<'_> {
                         let x = a.wrapping_add(i) & mask;
                         if self.written.contains(&x) {
                             return Err(STALE);
+                        }
+                        if self.hidden.contains(&x) {
+                            return Err("a read of a write the lift does not name");
                         }
                         Ok(self.overlay.get(&x).cloned().unwrap_or(Byte::Was(x)))
                     })
@@ -1754,10 +1762,24 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 text.lost.insert(x);
             }
         }
-        let machine = self.machine(code, end, rsp, &regs, &overlay, &text.lost)?;
-        let modeled: FxHashSet<u64> = machine.written.iter().copied().collect();
-        if modeled != *observed {
+        let none = BTreeSet::new();
+        let mut machine = self.machine(code, end, rsp, &regs, &overlay, &text.lost, &none)?;
+        if !machine.written.iter().all(|x| observed.contains(x)) {
             return Err("writes the lift does not name");
+        }
+        let hidden: BTreeSet<u64> = observed
+            .iter()
+            .filter(|x| !machine.written.contains(x))
+            .copied()
+            .collect();
+        if !hidden.is_empty() {
+            if hidden
+                .iter()
+                .any(|x| (x.wrapping_sub(rsp).wrapping_add(FRAME_SPAN) & mask) >= 2 * FRAME_SPAN)
+            {
+                return Err("writes the lift does not name");
+            }
+            machine = self.machine(code, end, rsp, &regs, &overlay, &text.lost, &hidden)?;
         }
         text.rsp = machine.sp;
 
@@ -1901,10 +1923,16 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `overlay` - The bytes memory holds where it starts beyond what it
     ///   held before.
     /// * `lost` - The frame bytes the text holds no value for.
+    /// * `hidden` - The frame bytes the block writes that the lift does not
+    ///   name, which the run leaves holding no known value.
     ///
     /// # Errors
     ///
     /// A block or a value outside what the proof models.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one block's starting state, threaded through"
+    )]
     fn machine(
         &self,
         code: &[Instruction],
@@ -1913,6 +1941,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         regs: &FxHashMap<Key, Term>,
         overlay: &BTreeMap<u64, Byte>,
         lost: &BTreeSet<u64>,
+        hidden: &BTreeSet<u64>,
     ) -> Result<Machine, Why> {
         let branches = match end {
             End::Branch(jcc) => matches!(
@@ -1938,7 +1967,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             changed: BTreeSet::new(),
             taken: None,
             fresh: FRESH_FIRST,
-            lost: lost.clone(),
+            lost: lost.union(hidden).copied().collect(),
+            hidden: hidden.clone(),
         };
         let mut run = start.clone();
         match self.step(lifted_code, &mut run, true, branches) {
@@ -1970,11 +2000,17 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 (k, (v, run.known.get(&k).copied().unwrap_or(64)))
             })
             .collect();
+        let mut mem = run.mem;
+        let mut written = run.written;
+        for &x in hidden {
+            mem.insert(x, Byte::Lost);
+            written.insert(x);
+        }
         Ok(Machine {
             regs,
             sp: run.sp,
-            mem: run.mem,
-            written: run.written,
+            mem,
+            written,
             taken: run.taken,
             changed: run.changed,
             lost: run.lost,
@@ -2061,6 +2097,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 }
             },
             lost: &run.lost,
+            hidden: &run.hidden,
         };
         let mut spans: Vec<(u64, u64)> = Vec::new();
         for wrote in &probe.effects {
