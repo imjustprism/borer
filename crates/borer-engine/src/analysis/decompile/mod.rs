@@ -43,6 +43,7 @@ mod fcmp;
 mod fields;
 mod finish;
 mod format;
+mod frame;
 mod helper;
 pub(crate) mod interp;
 mod ladder;
@@ -314,6 +315,8 @@ struct Ctx<'a> {
     arg_count: usize,
     /// A bit per position passed in a vector register ([`Shape::floats`]).
     arg_floats: u8,
+    /// The frame's slots and the types solved for them ([`frame::Frame`]).
+    frame: frame::Frame,
     /// Whether the function hands a value back, as its callers say
     /// ([`Function::returns_value`](super::Function::returns_value)).
     returns_value: Option<bool>,
@@ -956,6 +959,7 @@ fn new_ctx<'a>(
             .unwrap_or(0),
         arg_count: 0,
         arg_floats: 0,
+        frame: frame::Frame::default(),
         returns_value: f.returns_value,
     }
 }
@@ -1768,6 +1772,7 @@ fn decompile_in<L: Lifter>(
     };
     lap.end(crate::timing::Step::Decode);
     let (_, _, mut recorded) = dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &[]);
+    ctx.frame.solve();
     widen_slots(&mut recorded);
     live.slots = Some(slot_liveness(&recorded, &succs));
     let assumes = block_assumptions::<L>(&code, &preds, &recorded);

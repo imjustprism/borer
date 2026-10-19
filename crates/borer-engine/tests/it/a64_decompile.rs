@@ -2863,3 +2863,58 @@ fn a_one_bit_sign_extension_is_no_byte_cast() {
         );
     }
 }
+
+/// `h_hornerf` at `-O0`: `float r = 0; for (...) r = r * x + c[i];`.
+///
+/// The accumulator's slot is first written by `str wzr`, an integer zero,
+/// and only then read and written as a single. Typed by that first access,
+/// it was declared `uint32_t`, and every `local_14 = local_14 * a3 + ...`
+/// converted the float's value to an integer: 1.5 came back as 1.
+const HORNERF_O0: [u32; 27] = [
+    0xd100_83ff, // ASM: sub sp, sp, #0x20
+    0xf900_0fe0, // ASM: str x0, [sp, #0x18]
+    0xb900_17e1, // ASM: str w1, [sp, #0x14]
+    0xbd00_13e0, // ASM: str s0, [sp, #0x10]
+    0xb900_0fff, // ASM: str wzr, [sp, #0xc]
+    0xb940_17e8, // ASM: ldr w8, [sp, #0x14]
+    0x7100_0508, // ASM: subs w8, w8, #0x1
+    0xb900_0be8, // ASM: str w8, [sp, #0x8]
+    0x1400_0001, // ASM: b +0x4
+    0xb940_0be8, // ASM: ldr w8, [sp, #0x8]
+    0x37f8_01c8, // ASM: tbnz w8, #0x1f, +0x38
+    0x1400_0001, // ASM: b +0x4
+    0xbd40_0fe0, // ASM: ldr s0, [sp, #0xc]
+    0xbd40_13e1, // ASM: ldr s1, [sp, #0x10]
+    0xf940_0fe8, // ASM: ldr x8, [sp, #0x18]
+    0xb980_0be9, // ASM: ldrsw x9, [sp, #0x8]
+    0xbc69_7902, // ASM: ldr s2, [x8, x9, lsl #2]
+    0x1f01_0800, // ASM: fmadd s0, s0, s1, s2
+    0xbd00_0fe0, // ASM: str s0, [sp, #0xc]
+    0x1400_0001, // ASM: b +0x4
+    0xb940_0be8, // ASM: ldr w8, [sp, #0x8]
+    0x7100_0508, // ASM: subs w8, w8, #0x1
+    0xb900_0be8, // ASM: str w8, [sp, #0x8]
+    0x17ff_fff2, // ASM: b -0x38
+    0xbd40_0fe0, // ASM: ldr s0, [sp, #0xc]
+    0x9100_83ff, // ASM: add sp, sp, #0x20
+    0xd65f_03c0, // ASM: ret
+];
+
+/// A slot every access but an integer zero reads and writes as a single
+/// is a `float`, whatever touched it first.
+#[test]
+fn a_float_slot_first_zeroed_as_an_integer_is_a_float() {
+    let (_, _, text) = decompiled_words(&HORNERF_O0);
+    let sum = text
+        .lines()
+        .find_map(|l| {
+            let (lhs, rhs) = l.trim().split_once(" = ")?;
+            rhs.contains(" * ").then_some(lhs)
+        })
+        .expect("the accumulator's update");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("float ") && l.contains(sum)),
+        "{text}"
+    );
+}

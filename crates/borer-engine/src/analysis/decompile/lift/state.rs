@@ -2,6 +2,7 @@
 //! writing values out.
 
 use super::*;
+use crate::analysis::decompile::frame::Access;
 
 /// Tells whether an address adds a sign-extended term to its base, an
 /// index that may be negative.
@@ -397,6 +398,7 @@ impl<'a> Exec<'_, 'a> {
     /// * `k` - Slot offset from the entry rsp.
     /// * `ty` - Access type.
     pub(super) fn slot_read(&mut self, k: i64, ty: Ty) -> Expr {
+        self.ctx.frame.note(k, Access::Load(ty));
         self.note_slot(k, ty);
         if let Some(v) = self.slot_view(k, ty) {
             return self.assumed(v);
@@ -787,6 +789,13 @@ impl<'a> Exec<'_, 'a> {
             self.env.slot_bits.remove(&k);
             return;
         }
+        let access = match v {
+            _ if matches!(ty, Ty::F32 | Ty::F64) || v.is_float() => Access::StoreFloat(ty),
+            Expr::Const(_) => Access::StoreConst(ty),
+            _ => Access::StoreInt(ty),
+        };
+        self.ctx.frame.note(k, access);
+        let (ty, v) = self.ctx.frame.store(k, ty, v);
         self.note_slot(k, ty);
         let widest = self.slot_def.entry(k).or_default();
         *widest = (*widest).max(ty.bits());
@@ -1534,6 +1543,10 @@ impl<'a> Exec<'_, 'a> {
     /// * `ty` - Its type.
     pub(in crate::analysis::decompile) fn declare(&mut self, key: Key, ty: Ty) {
         if self.emit && !self.ctx.declared.contains_key(&key) {
+            let ty = match key {
+                Key::Slot(k) => self.ctx.frame.ty(k).unwrap_or(ty),
+                Key::Reg(_) | Key::Param(_) | Key::Tmp(_) | Key::Global(..) | Key::A64(_) => ty,
+            };
             self.ctx.declared.insert(key, ty);
             if let Key::Slot(k) = key {
                 std::sync::Arc::make_mut(&mut self.ctx.slot_types).insert(k, ty);
