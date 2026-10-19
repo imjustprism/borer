@@ -49,6 +49,7 @@ mod lift_a64;
 mod line;
 mod liveness;
 mod loops;
+mod mir;
 mod opaque;
 mod outline;
 mod panics;

@@ -210,7 +210,7 @@ pub(super) enum Query {
     Types,
     /// `set-type <project> struct <name> [size] <off:name:type>... | enum <name> [size] <name:value>... | typedef <name> <type> | apply <address|name> <type>`: define or apply a user type, written to the project.
     SetType,
-    /// `verify [function|all] [limit] [seed] [text]`: check the lifter, or with `text` the text's statements, against the emulator; fails on any disagreement.
+    /// `verify [function|all] [limit] [seed] [text|mir]`: check the lifter, or with `text` the text's statements, against the emulator, with `mir` reading the lifted values through MIR; fails on any disagreement.
     Verify,
 }
 

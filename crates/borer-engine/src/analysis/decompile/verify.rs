@@ -46,6 +46,9 @@ use super::expr::{
 };
 use super::helper::{Helper, eval_call};
 use super::lift::{BlockFacts, Env, Pass, exec_block};
+use super::mir::Val;
+use super::mir::build::Builder;
+use super::mir::eval::{Inputs, eval as mir_eval};
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
 use crate::emulate::{Emulator, Run, Stop, fill_byte};
@@ -545,6 +548,62 @@ pub(super) struct State<'p, M> {
     /// The address the entry state walks the TLS block to, resolved once
     /// per run ([`State::resolve_tls`]); zero where no walk applies.
     pub(super) tls_block: u64,
+    /// The addresses of the block's instructions when the check reads the
+    /// lifted values through MIR ([`super::mir`]) rather than as
+    /// expressions; `None` reads them as expressions.
+    pub(super) mir: Option<Vec<u64>>,
+}
+
+/// A block's starting state as the MIR evaluator reads it, recording the
+/// memory ranges read for the store check.
+struct Entry<'s, 'p, M> {
+    /// The starting state.
+    st: &'s State<'p, M>,
+    /// The memory ranges read, as start and length.
+    reads: &'s mut Vec<(u64, u64)>,
+}
+
+impl<M: Bench> Inputs for Entry<'_, '_, M> {
+    fn reg(&self, k: Key) -> Option<u64> {
+        self.st.regs.get(&k).copied()
+    }
+
+    fn sp(&self) -> u64 {
+        self.st.rsp
+    }
+
+    fn tls(&self) -> u64 {
+        self.st.tls_block
+    }
+
+    fn load(&mut self, at: u64, n: u64) -> Option<u64> {
+        self.reads.push((at, n));
+        self.st.read(at, n)
+    }
+}
+
+/// Evaluates one lifted value through MIR: lowers it into a body of the
+/// block's provenance and runs the body under the starting state.
+///
+/// # Arguments
+///
+/// * `st` - The starting state, whose temporaries the lowering reads.
+/// * `vas` - The addresses of the block's instructions.
+/// * `reads` - The memory ranges it read, gathered for the store check.
+/// * `lower` - Lowers the value into the builder.
+///
+/// # Returns
+///
+/// The value, or `None` when the evaluator cannot read it.
+fn mir_read<M: Bench>(
+    st: &State<'_, M>,
+    vas: &[u64],
+    reads: &mut Vec<(u64, u64)>,
+    lower: impl FnOnce(&mut Builder<'_>) -> Val,
+) -> Option<u64> {
+    let mut b = Builder::new(st.width, &st.temps, vas);
+    let v = lower(&mut b);
+    mir_eval(&b.body, v, &mut Entry { st, reads })
 }
 
 impl<M: Bench> State<'_, M> {
@@ -1306,7 +1365,31 @@ fn statement_only(i: &Instruction) -> bool {
 /// What was compared and every disagreement.
 #[must_use]
 pub fn verify(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    in_parts(entries, |part| verify_some(program, analysis, part, seed))
+    in_parts(entries, |part| {
+        verify_some(program, analysis, part, seed, false)
+    })
+}
+
+/// Checks the lifter against the emulator as [`verify`] does, through MIR.
+///
+/// Every lifted value is lowered to width-explicit ops ([`super::mir`])
+/// and run by the MIR evaluator rather than read as an expression.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - The functions and their blocks.
+/// * `entries` - The functions to check.
+/// * `seed` - The starting state's seed.
+///
+/// # Returns
+///
+/// What was compared and every disagreement.
+#[must_use]
+pub fn verify_mir(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
+    in_parts(entries, |part| {
+        verify_some(program, analysis, part, seed, true)
+    })
 }
 
 /// Checks some functions in parts, one thread per part, and adds up what
@@ -1513,6 +1596,8 @@ struct Sweep<'p> {
     width: u8,
     /// The verification's seed.
     seed: u64,
+    /// Read the lifted values through MIR rather than as expressions.
+    mir: bool,
 }
 
 impl<'p> Sweep<'p> {
@@ -1522,11 +1607,12 @@ impl<'p> Sweep<'p> {
     ///
     /// * `program` - The image.
     /// * `seed` - The verification's seed.
+    /// * `mir` - Read the lifted values through MIR.
     ///
     /// # Returns
     ///
     /// The sweep, or `None` when the image's bitness is unknown.
-    fn new(program: &'p Program, seed: u64) -> Option<Self> {
+    fn new(program: &'p Program, seed: u64, mir: bool) -> Option<Self> {
         let (regs, width): (&'static [(&'static str, Register)], u8) =
             if program.arch.bitness()? == 32 {
                 (&REGS_32, 32)
@@ -1538,6 +1624,7 @@ impl<'p> Sweep<'p> {
             regs,
             width,
             seed,
+            mir,
         })
     }
 
@@ -1662,6 +1749,9 @@ impl<'p> Sweep<'p> {
             width: self.width,
             temps: BTreeMap::new(),
             tls_block: 0,
+            mir: self
+                .mir
+                .then(|| instrs.iter().chain(&jcc).map(Instruction::ip).collect()),
         };
         let near = comparands(&instrs, self.regs, self.width);
         for &(name, reg) in self.regs {
@@ -1874,7 +1964,10 @@ impl<M: Bench, R> Ran<'_, M, R> {
     /// * `e` - The value.
     pub(super) fn read(&self, e: &Expr) -> Read {
         let mut reads = Vec::new();
-        let v = eval(e, &self.st, &mut reads, EVAL_DEPTH);
+        let v = match &self.st.mir {
+            Some(vas) => mir_read(&self.st, vas, &mut reads, |b| b.value(e)),
+            None => eval(e, &self.st, &mut reads, EVAL_DEPTH),
+        };
         if self.touches(&reads) {
             return Read::Stale;
         }
@@ -2441,7 +2534,10 @@ impl<M: Bench, R> Ran<'_, M, R> {
             }
         };
         let mut reads = Vec::new();
-        let lifted = eval_cond(cond, &self.st, &mut reads, EVAL_DEPTH);
+        let lifted = match &self.st.mir {
+            Some(vas) => mir_read(&self.st, vas, &mut reads, |b| b.condition(cond)).map(|v| v != 0),
+            None => eval_cond(cond, &self.st, &mut reads, EVAL_DEPTH),
+        };
         let read = if self.touches(&reads) {
             Read::Stale
         } else {
@@ -2471,9 +2567,16 @@ impl<M: Bench, R> Ran<'_, M, R> {
 /// * `analysis` - The functions and their blocks.
 /// * `entries` - The functions to check.
 /// * `seed` - The starting state's seed.
-fn verify_some(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
+/// * `mir` - Read the lifted values through MIR.
+fn verify_some(
+    program: &Program,
+    analysis: &Analysis,
+    entries: &[u64],
+    seed: u64,
+    mir: bool,
+) -> Verified {
     let mut out = Verified::default();
-    let Some(sweep) = Sweep::new(program, seed) else {
+    let Some(sweep) = Sweep::new(program, seed, mir) else {
         return out;
     };
     let overlay = Overlay::default();
@@ -2581,7 +2684,7 @@ pub(super) fn report(v: &Verified, kinds: &[Fact]) -> String {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Effect, Fact, Sweep, Verified, st_register, verify, verify_tsv};
+    use super::{Effect, Fact, Sweep, Verified, st_register, verify, verify_mir, verify_tsv};
     use crate::analysis::decompile::expr::{Expr, Key, Op, UnOp};
     use crate::analysis::{Analysis, Overlay};
     use crate::isa::x86::Register;
@@ -2618,6 +2721,40 @@ mod tests {
         )
     }
 
+    /// Reading the lifted values through MIR compares what reading them
+    /// as expressions does.
+    ///
+    /// Both agree with the emulator on every fact: 32-bit arithmetic wraps
+    /// at 32 bits and the branch compares the low halves.
+    #[test]
+    fn the_mir_reads_what_the_expressions_read() {
+        let p = Program::raw_x64(&[
+            0x89, 0xc8, // ASM: mov eax, ecx
+            0x29, 0xd0, // ASM: sub eax, edx
+            0x6b, 0xc0, 0x03, // ASM: imul eax, eax, 3
+            0xc1, 0xf8, 0x02, // ASM: sar eax, 2
+            0x0f, 0xaf, 0xc1, // ASM: imul eax, ecx
+            0x83, 0xf8, 0x05, // ASM: cmp eax, 5
+            0x7c, 0x01, // ASM: jl 0x1013
+            0xc3, // ASM: ret
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        for seed in 1..=8 {
+            let expr = verify(&p, &a, &[0x1000], seed);
+            let mir = verify_mir(&p, &a, &[0x1000], seed);
+            assert_eq!(mir, expr, "seed {seed}: {}", verify_tsv(&mir));
+            assert!(
+                mir.mismatches.is_empty(),
+                "seed {seed}: {}",
+                verify_tsv(&mir)
+            );
+            let branches = mir.facts.get(&Fact::Branch).map(|t| t.compared);
+            assert_eq!(branches, Some(1), "seed {seed}: {}", verify_tsv(&mir));
+        }
+    }
+
     /// A lifting with a wrong stored value, or with its branch condition
     /// flipped, is flagged on every seed.
     ///
@@ -2640,7 +2777,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             let ran = sweep.run(&mut ctx, 0x1000, block, &mut out).expect("run");
@@ -2699,7 +2836,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep
@@ -2751,7 +2888,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep
@@ -2807,7 +2944,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep
@@ -2841,7 +2978,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep
@@ -2922,7 +3059,7 @@ mod tests {
             .find(|b| b.start == 0x101b)
             .expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, read);
             let mut out = Verified::default();
             sweep
@@ -2999,7 +3136,7 @@ mod tests {
         let f = a.function(0x1000).expect("constructor");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep
@@ -3053,7 +3190,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep
@@ -3139,7 +3276,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep
@@ -3186,7 +3323,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep
@@ -3244,7 +3381,7 @@ mod tests {
         let f = a.function(0x1000).expect("function");
         let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
         for seed in 1..=8 {
-            let sweep = Sweep::new(&p, seed).expect("sweep");
+            let sweep = Sweep::new(&p, seed, false).expect("sweep");
             let mut ctx = sweep.ctx(&p, &a, &overlay, f);
             let mut out = Verified::default();
             sweep

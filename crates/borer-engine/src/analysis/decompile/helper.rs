@@ -991,7 +991,7 @@ impl fmt::Display for Helper {
 ///
 /// * `e` - The argument.
 /// * `word` - The machine word's width, the width of anything untyped.
-fn arg_bits(e: &Expr, word: u8) -> u8 {
+pub(super) fn arg_bits(e: &Expr, word: u8) -> u8 {
     match e {
         Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(word),
         Expr::Const(_)

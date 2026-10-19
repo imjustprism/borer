@@ -139,6 +139,7 @@ commands:
   set-type <binary> <project> struct <name> [size] <off:name:type>...  define a struct in the project; or set-type <binary> <project> enum <name> [size] <name:value>...; or set-type <binary> <project> typedef <name> <type>; or set-type <binary> <project> apply <address|name> <type>, so decompile names that global's fields or constants
   verify <binary> [function|all] [limit] [seed]check the lifter against the emulator (arm64 code against the arm64 machine) block by block from seeded states; lists every register, stack slot, store and branch they disagree on and fails if any (default all, 2000 functions)
   verify <binary> <function|all> <limit> <seed> text  check the text's statements instead (x86 and x64 only): each block's, replayed under the lifter's witness, against the emulator from three seeded states; lists every claim the machine does not bear out and fails on any but lane roughness
+  verify <binary> <function|all> <limit> <seed> mir  the same check as the first form, every lifted value read through MIR: lowered to width-explicit ops and run by the MIR evaluator
 options:
   --pack <file>                            run the analysis with a pack (repeatable; BORER_PACKS lists more, for the MCP server too)
   --no-auto-packs                          load only the packs --pack and BORER_PACKS name, not the pack directories' (BORER_AUTO_PACKS=0 does the same)
@@ -1332,6 +1333,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Verify => {
             let text = args.get(5).is_some_and(|m| m == "text");
+            let mir = args.get(5).is_some_and(|m| m == "mir");
             let a64 = !text && s.program.arch.isa() == Some(Isa::A64);
             let a = s.analysis(if a64 {
                 Feature::Discover
@@ -1369,14 +1371,22 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 return Ok(());
             }
             if a64 {
-                let v = decompile::verify_a64::verify(&s.program, &a, &entries, seed);
+                let v = if mir {
+                    decompile::verify_a64::verify_mir(&s.program, &a, &entries, seed)
+                } else {
+                    decompile::verify_a64::verify(&s.program, &a, &entries, seed)
+                };
                 print!("{}", decompile::verify_a64::verify_tsv(&v));
                 if !v.mismatches.is_empty() {
                     bail!("the lifter and the emulator disagree; see the table above");
                 }
                 return Ok(());
             }
-            let v = decompile::verify::verify(&s.program, &a, &entries, seed);
+            let v = if mir {
+                decompile::verify::verify_mir(&s.program, &a, &entries, seed)
+            } else {
+                decompile::verify::verify(&s.program, &a, &entries, seed)
+            };
             print!("{}", decompile::verify::verify_tsv(&v));
             if !v.mismatches.is_empty() {
                 bail!("the lifter and the emulator disagree; see the table above");

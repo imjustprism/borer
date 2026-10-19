@@ -118,7 +118,29 @@ impl Bench for Machine<'_> {
 /// ```
 #[must_use]
 pub fn verify(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    in_parts(entries, |part| verify_some(program, analysis, part, seed))
+    in_parts(entries, |part| {
+        verify_some(program, analysis, part, seed, false)
+    })
+}
+
+/// Checks the arm64 lifter against the arm64 machine as [`verify`] does,
+/// reading every lifted value through MIR ([`super::mir`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - The functions and their blocks.
+/// * `entries` - The functions to check.
+/// * `seed` - The starting state's seed.
+///
+/// # Returns
+///
+/// What was compared and every disagreement.
+#[must_use]
+pub fn verify_mir(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
+    in_parts(entries, |part| {
+        verify_some(program, analysis, part, seed, true)
+    })
 }
 
 /// Renders an arm64 verification as a report.
@@ -144,9 +166,16 @@ pub fn verify_tsv(v: &Verified) -> String {
 /// * `analysis` - The functions and their blocks.
 /// * `entries` - The functions to check.
 /// * `seed` - The starting state's seed.
-fn verify_some(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
+/// * `mir` - Read the lifted values through MIR.
+fn verify_some(
+    program: &Program,
+    analysis: &Analysis,
+    entries: &[u64],
+    seed: u64,
+    mir: bool,
+) -> Verified {
     let mut out = Verified::default();
-    let Some(sweep) = Sweep::new(program, seed) else {
+    let Some(sweep) = Sweep::new(program, seed, mir) else {
         return out;
     };
     let overlay = Overlay::default();
@@ -306,6 +335,8 @@ struct Sweep<'p> {
     pristine: Machine<'p>,
     /// The verification's seed.
     seed: u64,
+    /// Read the lifted values through MIR rather than as expressions.
+    mir: bool,
 }
 
 impl<'p> Sweep<'p> {
@@ -315,14 +346,16 @@ impl<'p> Sweep<'p> {
     ///
     /// * `program` - The image.
     /// * `seed` - The verification's seed.
+    /// * `mir` - Read the lifted values through MIR.
     ///
     /// # Returns
     ///
     /// The sweep, or `None` when the image is not arm64 code.
-    fn new(program: &'p Program, seed: u64) -> Option<Self> {
+    fn new(program: &'p Program, seed: u64, mir: bool) -> Option<Self> {
         Some(Self {
             pristine: Machine::new(program, 0)?,
             seed,
+            mir,
         })
     }
 
@@ -397,9 +430,13 @@ impl<'p> Sweep<'p> {
             width: 64,
             temps: BTreeMap::new(),
             tls_block: 0,
+            mir: None,
         };
         let mut all = instrs;
         all.extend(jcc);
+        if self.mir {
+            st.mir = Some(all.iter().map(|i| i.va).collect());
+        }
         let near = comparands(&all);
         for (n, name) in (0u8..).zip(GENERAL) {
             let key = Key::A64(Reg::X(n));

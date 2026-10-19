@@ -646,6 +646,44 @@ fn the_arm64_lifter_agrees_with_the_emulator_on_every_block() {
     assert!(v.mismatches.is_empty(), "{text}");
 }
 
+/// Checks the lifter against the emulator on every block of the
+/// `BORER_DOGFOOD` binary through MIR as well as through the expressions.
+///
+/// Both readings must compare the same facts and agree on every one.
+/// MIR states every width the expressions leave to their reader, so a
+/// lowering that changed what a value means shows here as a fact one
+/// reading compares and the other does not, or as a disagreement. An
+/// arm64 binary is checked against the arm64 machine.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn the_mir_agrees_with_the_emulator_as_the_expressions_do() {
+    use borer_engine::analysis::decompile::{verify, verify_a64};
+    use borer_engine::isa::Isa;
+    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
+    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    let a64 = p.arch.isa() == Some(Isa::A64);
+    let (expr, mir) = if a64 {
+        (
+            verify_a64::verify(&p, &a, &entries, 1),
+            verify_a64::verify_mir(&p, &a, &entries, 1),
+        )
+    } else {
+        (
+            verify::verify(&p, &a, &entries, 1),
+            verify::verify_mir(&p, &a, &entries, 1),
+        )
+    };
+    let text = verify::verify_tsv(&mir);
+    for line in text.lines().take_while(|l| l.starts_with('#')) {
+        eprintln!("{line}");
+    }
+    assert!(mir.checked > 0, "{text}");
+    assert_eq!(mir.facts, expr.facts, "{text}");
+    assert!(mir.mismatches.is_empty(), "{text}");
+}
+
 /// Replays the text of every function of the `BORER_DOGFOOD` binary
 /// against the emulator and requires every claim it makes to hold.
 ///
