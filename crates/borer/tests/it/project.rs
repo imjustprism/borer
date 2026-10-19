@@ -61,10 +61,8 @@ fn types_round_trip_through_json() {
         (0x8, "target".to_owned(), parse_type("Vec *").unwrap()),
     ];
     let mut o = Overlay::default();
-    o.types.insert(
-        "Vec".to_owned(),
-        build_struct("Vec", Some(0x10), &fields, &o.types, 8).unwrap(),
-    );
+    let vec = build_struct("Vec", Some(0x10), &fields, &o.types, 8).unwrap();
+    o.types.insert("Vec".to_owned(), vec);
     o.applied.insert(0x140003000, parse_type("Vec *").unwrap());
     let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

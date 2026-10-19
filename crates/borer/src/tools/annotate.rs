@@ -101,10 +101,11 @@ impl BorerServer {
                 out.push_str("pass dry_run=false to apply.\n");
                 return Ok(out);
             }
+            let before = self.overlay_plain();
             write_lock(&self.overlay)
                 .types
                 .extend(declared.types.into_iter().map(|(name, ty, _)| (name, ty)));
-            self.names_changed();
+            self.names_changed(&before);
             Ok(out)
         })
     }
@@ -162,10 +163,11 @@ impl BorerServer {
                     "dry-run: would set name of {what} {target:#x} ({old}) to '{name}'. pass dry_run=false to apply.{numeric}"
                 ));
             }
+            let before = self.overlay_plain();
             write_lock(&self.overlay)
                 .names
                 .insert(target, name.clone());
-            self.names_changed();
+            self.names_changed(&before);
             Ok(format!("renamed {what} {target:#x}: {old} -> {name}{numeric}"))
         })
     }
@@ -207,10 +209,11 @@ impl BorerServer {
                     "dry-run: would set comment at {va:#x}. pass dry_run=false to apply."
                 ));
             }
+            let before = self.overlay_plain();
             write_lock(&self.overlay)
                 .comments
                 .insert(va, comment.clone());
-            self.names_changed();
+            self.names_changed(&before);
             Ok(format!("comment set at {va:#x}"))
         })
     }
@@ -327,12 +330,13 @@ impl BorerServer {
                         "dry-run: would name {what}; decompile then renders it so. pass dry_run=false to apply."
                     ));
                 }
+                let before = self.overlay_plain();
                 write_lock(&self.overlay)
                     .vars
                     .entry(entry)
                     .or_default()
                     .insert(key, stated);
-                self.names_changed();
+                self.names_changed(&before);
                 return Ok(format!("named {what}"));
             }
             let defined = match (&name, &fields, &values) {
@@ -554,6 +558,7 @@ impl BorerServer {
                     would.join("; ")
                 ));
             }
+            let before = self.overlay_plain();
             let mut overlay = write_lock(&self.overlay);
             if let Some((n, ty)) = defined {
                 overlay.types.insert(n, ty);
@@ -565,7 +570,7 @@ impl BorerServer {
                 overlay.prototypes.insert(entry, proto);
             }
             drop(overlay);
-            self.names_changed();
+            self.names_changed(&before);
             Ok(format!("{}{note}", done.join("; ")))
         })
     }
@@ -769,6 +774,51 @@ mod tests {
             }))
             .expect("comments");
         assert_eq!(held(), 0, "the text without the comment is let go");
+    }
+
+    /// A rename of an address a text did not read keeps the text, filed
+    /// under the new names, so the next decompile builds nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the text is let go, or the decompile after the rename builds
+    /// a result or answers other bytes.
+    #[test]
+    fn a_rename_keeps_the_texts_that_did_not_read_the_name() {
+        use crate::params::DecompileParams;
+        use crate::params::SetNameParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = raw_server();
+        let decompile = || {
+            server
+                .decompile(Parameters(DecompileParams {
+                    address: "0x1000".to_owned(),
+                    detail: None,
+                    filter: None,
+                    offset: None,
+                    limit: Some(0),
+                }))
+                .expect("decompiles")
+        };
+        let derived = || {
+            let a = server
+                .analysis(borer_engine::program::Feature::Decompile)
+                .expect("analyzed");
+            (a.derived.held("plain_text"), a.derived.builds())
+        };
+        let text = decompile();
+        let (held, built) = derived();
+        assert_eq!(held, 1);
+        server
+            .set_name(Parameters(SetNameParams {
+                address: "0x1080".to_owned(),
+                name: "elsewhere".to_owned(),
+                dry_run: Some(false),
+            }))
+            .expect("renames");
+        assert_eq!(derived(), (1, built), "the text is carried over");
+        assert_eq!(decompile(), text);
+        assert_eq!(derived(), (1, built), "the decompile built nothing");
     }
 
     /// A name that reads as a number is noted when set and reaches its

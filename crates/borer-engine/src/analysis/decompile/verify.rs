@@ -1325,10 +1325,14 @@ pub(super) fn in_parts(entries: &[u64], some: impl Fn(&[u64]) -> Verified + Sync
     }
     let chunk = entries.len().div_ceil(threads);
     let some = &some;
+    let here = crate::analysis::reads::Handle::here();
     let parts: Vec<Verified> = std::thread::scope(|scope| {
         let handles: Vec<_> = entries
             .chunks(chunk)
-            .map(|part| scope.spawn(move || some(part)))
+            .map(|part| {
+                let here = here.clone();
+                scope.spawn(move || here.enter(|| some(part)))
+            })
             .collect();
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });

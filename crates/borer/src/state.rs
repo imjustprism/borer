@@ -303,14 +303,21 @@ impl BorerServer {
         read_lock(&self.overlay).clone()
     }
 
-    /// Lets the analysis go of what it read under names the session has
-    /// moved past, after a rename, a comment or a loaded project changed
-    /// them ([`borer_engine::analysis::Derived::forget_names_but`]): a
-    /// rename otherwise leaves every text and catalog read under the old
-    /// names in memory for good.
-    pub(crate) fn names_changed(&self) {
+    /// Carries what the analysis read under `before` over to the names now
+    /// in force, after a rename, a comment, a type or a loaded project
+    /// changed them, and lets go of the rest
+    /// ([`borer_engine::analysis::Derived::moved`]): a result that read none
+    /// of the facts the edit changed is kept, so a rename rebuilds only the
+    /// texts that read the name, and nothing read under the old names stays
+    /// in memory for good.
+    ///
+    /// # Arguments
+    ///
+    /// * `before` - The overlay as it was before the edit
+    ///   ([`BorerServer::overlay_plain`]).
+    pub(crate) fn names_changed(&self, before: &Overlay) {
         if let Some(a) = read_lock(&self.analysis).as_ref() {
-            a.derived.forget_names_but(&self.overlay_plain());
+            a.derived.moved(a, before, &self.overlay_plain());
         }
     }
 

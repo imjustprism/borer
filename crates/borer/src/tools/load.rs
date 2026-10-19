@@ -444,8 +444,9 @@ impl BorerServer {
         if matches!(identity, Identity::PathOnly | Identity::OtherPath) {
             said.push_str("# the project names its binary by path alone (saved before projects recorded its sha-256), so a rebuild at that path loads it too; save_project records the hash\n");
         }
+        let before = self.overlay_plain();
         *write_lock(&self.overlay) = loaded;
-        self.names_changed();
+        self.names_changed(&before);
         Ok(said)
     }
 }

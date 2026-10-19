@@ -190,6 +190,164 @@ fn results_under_names_no_longer_in_force_are_let_go() {
     }
 }
 
+/// An edit carries a result whose reads miss it over to the new names and
+/// lets go of one that read the changed key, one that read the whole map,
+/// and one that took a result that read the key.
+///
+/// The carried result is not built again: asked for under the new names it
+/// is the result built under the old.
+#[test]
+fn an_edit_lets_go_of_only_the_results_that_read_what_it_changed() {
+    use borer_engine::analysis::Derived;
+
+    let derived = Derived::default();
+    let mut old = Overlay::default();
+    old.names.insert(0x10, "ten".to_owned());
+    old.names.insert(0x20, "twenty".to_owned());
+    let build = |o: &Overlay, tag: u8| {
+        let names = o.fingerprint();
+        let key = |k: u64| {
+            derived.get_or_build_item("key", names, k, || (tag, o.names.get(&k).cloned()), |_| 0)
+        };
+        let outer = derived.get_or_build_item(
+            "outer",
+            names,
+            0x10_u64,
+            || (tag, key(0x10).1.clone()),
+            |_| 0,
+        );
+        let whole = derived.get_or_build_named("whole", names, (), || (tag, o.names.len()));
+        let comment = derived.get_or_build_item(
+            "comment",
+            names,
+            0x30_u64,
+            || (tag, o.comments.contains_key(&0x30)),
+            |_| 0,
+        );
+        (key(0x10).0, key(0x20).0, outer.0, whole.0, comment.0)
+    };
+    assert_eq!(build(&old, 1), (1, 1, 1, 1, 1));
+    let mut new = old.clone();
+    new.names.insert(0x20, "renamed".to_owned());
+    derived.moved(&Analysis::default(), &old, &new);
+    assert_eq!(
+        build(&new, 2),
+        (1, 2, 1, 2, 1),
+        "the reads of 0x10 and of comments were carried; 0x20 and the whole map were built again"
+    );
+    let mut commented = new.clone();
+    commented.comments.insert(0x30, "note".to_owned());
+    derived.moved(&Analysis::default(), &new, &commented);
+    assert_eq!(build(&commented, 3), (1, 2, 1, 2, 3));
+    let mut gone = commented.clone();
+    gone.names.remove(&0x10);
+    derived.moved(&Analysis::default(), &commented, &gone);
+    assert_eq!(
+        build(&gone, 4),
+        (4, 2, 4, 4, 3),
+        "the outer result took the key's result, so it read 0x10 too"
+    );
+}
+
+/// After every edit, an analysis that carried what the edit did not touch
+/// decompiles every function to the bytes a fresh analysis builds.
+///
+/// It also rebuilds no more results than the fresh one does, and fewer
+/// after some edit.
+///
+/// The edits are those an agent makes: renames of a called function, of a
+/// function nothing calls and of a global, a comment, a type applied at a
+/// global, a stated prototype, a rename undone, and an edit that changes
+/// nothing.
+#[test]
+fn an_incremental_decompile_after_each_edit_matches_a_full_recompute() {
+    use borer_engine::analysis::decompile::decompile_named;
+    use borer_engine::analysis::protos::Proto;
+    use borer_engine::analysis::utypes::parse_type;
+    use borer_engine::analysis::{Derived, EnumSource};
+
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let mut full = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    let called_by_another = |e: u64| {
+        a.xrefs_to(e)
+            .iter()
+            .any(|r| r.from_entry.is_some_and(|from| from != e))
+    };
+    let called = entries
+        .iter()
+        .copied()
+        .find(|&e| called_by_another(e))
+        .expect("a called function");
+    let lonely = entries
+        .iter()
+        .copied()
+        .rev()
+        .find(|&e| !called_by_another(e))
+        .expect("a function nothing calls");
+    type EditFn = Box<dyn Fn(&mut Overlay)>;
+    let edits: Vec<EditFn> = vec![
+        Box::new(move |o| {
+            o.names.insert(called, "callee_renamed".to_owned());
+        }),
+        Box::new(move |o| {
+            o.names.insert(lonely, "lonely_renamed".to_owned());
+        }),
+        Box::new(move |o| {
+            o.comments.insert(lonely, "a note".to_owned());
+        }),
+        Box::new(move |o| {
+            o.names.insert(0x2040, "greeting".to_owned());
+        }),
+        Box::new(move |o| {
+            o.applied.insert(0x2040, parse_type("char *").unwrap());
+        }),
+        Box::new(move |o| {
+            o.prototypes
+                .insert(called, Proto::parse("int f(int a, int b)").unwrap());
+        }),
+        Box::new(move |o| {
+            o.names.remove(&called);
+        }),
+        Box::new(|_| {}),
+    ];
+    let mut o = Overlay {
+        enum_source: EnumSource::Binary,
+        ..Overlay::default()
+    };
+    for &e in &entries {
+        decompile_named(&p, &a, &o, e);
+    }
+    let mut carried_any = false;
+    for (i, edit) in edits.iter().enumerate() {
+        let before = o.clone();
+        edit(&mut o);
+        a.derived.moved(&a, &before, &o);
+        let start = a.derived.builds();
+        let texts: Vec<_> = entries
+            .iter()
+            .map(|&e| decompile_named(&p, &a, &o, e))
+            .collect();
+        let rebuilt = a.derived.builds() - start;
+        full.derived = Derived::default();
+        let fresh: Vec<_> = entries
+            .iter()
+            .map(|&e| decompile_named(&p, &full, &o, e))
+            .collect();
+        for ((e, mine), theirs) in entries.iter().zip(&texts).zip(&fresh) {
+            assert_eq!(
+                mine, theirs,
+                "edit {i}: {e:#x} differs from a full recompute"
+            );
+        }
+        let built = full.derived.builds();
+        assert!(rebuilt <= built, "edit {i}: rebuilt {rebuilt} of {built}");
+        carried_any |= rebuilt < built;
+    }
+    assert!(carried_any, "no edit carried a result over");
+}
+
 /// The callgraph walks callers as well as callees.
 ///
 /// Asking what a function calls answers "what does this do"; asking what calls
@@ -2743,8 +2901,8 @@ fn overlay_names_win() {
     assert_eq!(name_of(&a, &o, 0x1040), "exported_c");
     assert_eq!(name_of(&a, &o, 0x1020), "sub_1020");
     let empty = Overlay {
-        names: BTreeMap::new(),
-        comments: BTreeMap::new(),
+        names: BTreeMap::new().into(),
+        comments: BTreeMap::new().into(),
         ..Overlay::default()
     };
     assert_eq!(name_of(&a, &empty, 0x1020), "sub_1020");

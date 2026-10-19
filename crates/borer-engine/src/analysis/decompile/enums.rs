@@ -255,6 +255,12 @@ fn table_names(analysis: &Analysis, overlay: &Overlay) -> Vec<TableName> {
 /// with these tables exactly as with every table of the binary, at the
 /// cost of reading only the ones it names ([`table_at`]).
 ///
+/// The list of display names reads every function's name, but which rows
+/// a body finds turns only on the names that occur in it before a `(`, so
+/// the build notes the body rather than the list's reads
+/// ([`crate::analysis::reads::note_body`]): a rename lets go of the
+/// result only when the old or the new name is called in the body.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded binary.
@@ -274,11 +280,14 @@ pub(super) fn called_tables(
 ) -> BTreeMap<String, EnumTable> {
     let plain = overlay.without_tables();
     let key = plain.fingerprint();
-    let rows = analysis
-        .derived
-        .get_or_build_named("enum_table_names", key, (), || {
-            table_names(analysis, &plain)
-        });
+    let rows = crate::analysis::reads::unnoted(|| {
+        analysis
+            .derived
+            .get_or_build_named("enum_table_names", key, (), || {
+                table_names(analysis, &plain)
+            })
+    });
+    crate::analysis::reads::note_body(&std::sync::Arc::from(body));
     let bytes = body.as_bytes();
     let mut named: BTreeSet<usize> = BTreeSet::new();
     for (open, _) in bytes.iter().enumerate().filter(|(_, b)| **b == b'(') {

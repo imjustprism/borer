@@ -656,17 +656,21 @@ fn render_all<T: Send + Clone>(
     });
     let next = std::sync::atomic::AtomicUsize::new(0);
     let (order, next) = (&order, &next);
+    let here = super::reads::Handle::here();
     let stripes: Vec<Vec<(usize, Option<T>)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
+                let here = here.clone();
                 scope.spawn(move || {
-                    let mut done = Vec::new();
-                    while let Some(&i) =
-                        order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-                    {
-                        done.push((i, render(program, analysis, overlay, entries[i])));
-                    }
-                    done
+                    here.enter(|| {
+                        let mut done = Vec::new();
+                        while let Some(&i) =
+                            order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                        {
+                            done.push((i, render(program, analysis, overlay, entries[i])));
+                        }
+                        done
+                    })
                 })
             })
             .collect();
@@ -1552,10 +1556,13 @@ fn decompile_with(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let here = super::reads::Handle::here();
         std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .stack_size(DECOMPILE_STACK)
-                .spawn_scoped(scope, || decompile_in_run(run, cleanup, assume, witness))
+                .spawn_scoped(scope, || {
+                    here.enter(|| decompile_in_run(run, cleanup, assume, witness))
+                })
                 .ok()?
                 .join()
                 .ok()

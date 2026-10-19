@@ -128,6 +128,7 @@ impl BorerServer {
         }
         let (mut named, mut commented) = (HashSet::new(), HashSet::new());
         let mut skipped = 0usize;
+        let before = self.overlay_plain();
         {
             let mut overlay = write_lock(&self.overlay);
             for (at, name) in &run.names {
@@ -153,7 +154,7 @@ impl BorerServer {
             }
         }
         if !named.is_empty() || !commented.is_empty() {
-            self.names_changed();
+            self.names_changed(&before);
         }
         let _ = writeln!(
             text,

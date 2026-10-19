@@ -233,7 +233,7 @@ impl ProjectFile {
             sha256,
             names: by_hex(&o.names),
             comments: by_hex(&o.comments),
-            types: o.types.clone(),
+            types: BTreeMap::clone(&o.types),
             applied: o
                 .applied
                 .iter()
@@ -325,12 +325,12 @@ impl ProjectFile {
             ));
         }
         let o = Overlay {
-            names: by_address("names", &self.names)?,
-            comments: by_address("comments", &self.comments)?,
-            types: self.types.clone(),
-            applied,
-            prototypes,
-            vars,
+            names: by_address("names", &self.names)?.into(),
+            comments: by_address("comments", &self.comments)?.into(),
+            types: self.types.clone().into(),
+            applied: applied.into(),
+            prototypes: prototypes.into(),
+            vars: vars.into(),
             ..Overlay::default()
         };
         borer_engine::analysis::utypes::validate(&o.types, &o.applied)

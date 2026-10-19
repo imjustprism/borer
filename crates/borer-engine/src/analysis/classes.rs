@@ -149,6 +149,12 @@ pub fn class_of(name: &str) -> Option<&str> {
 
 /// Lists the functions named `class::method`.
 ///
+/// The index of every class's methods reads every name, but a build that
+/// asks for one class's methods reads only the names that qualify a
+/// function with that class, so it notes the class rather than the index's
+/// reads ([`super::reads::note_class`]): a rename into or out of another
+/// class leaves what it built standing.
+///
 /// # Arguments
 ///
 /// * `analysis` - Discovery results.
@@ -159,11 +165,14 @@ pub fn class_of(name: &str) -> Option<&str> {
 ///
 /// The method entries in address order.
 pub fn methods_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Vec<u64> {
-    let index = analysis
-        .derived
-        .get_or_build_named("methods", overlay.fingerprint(), (), || {
-            method_index(analysis, overlay)
-        });
+    let index = super::reads::unnoted(|| {
+        analysis
+            .derived
+            .get_or_build_named("methods", overlay.fingerprint(), (), || {
+                method_index(analysis, overlay)
+            })
+    });
+    super::reads::note_class(class);
     index.get(class).cloned().unwrap_or_default()
 }
 

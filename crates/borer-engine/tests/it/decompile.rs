@@ -4403,7 +4403,7 @@ fn callers_render_constants_by_their_enum_names() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let mut o = Overlay::default();
-    o.enums = enums_by_name(&a, &o, &enum_tables(&p, &a, &o));
+    o.enums = enums_by_name(&a, &o, &enum_tables(&p, &a, &o)).into();
     let compare = decompile(&p, &a, &o, 0x4a20).expect("decompile");
     assert!(compare.contains("Clear"), "{compare}");
     assert!(
@@ -4436,7 +4436,7 @@ fn tables_read_on_demand_render_as_the_whole_binarys() {
     tail.names.insert(0x4a50, "Get".to_owned());
     for o in [Overlay::default(), tie, tail] {
         let mut given = o.clone();
-        given.enums = enums_by_name(&a, &o, &enum_tables(&p, &a, &o));
+        given.enums = enums_by_name(&a, &o, &enum_tables(&p, &a, &o)).into();
         let binary = Overlay {
             enum_source: EnumSource::Binary,
             ..o.clone()
@@ -4810,10 +4810,8 @@ fn an_applied_struct_names_the_fields_it_reads() {
         (0x1c, "mp".to_owned(), parse_type("u32").unwrap()),
         (0x20, "gold".to_owned(), parse_type("i64").unwrap()),
     ];
-    o.types.insert(
-        "Player".to_owned(),
-        build_struct("Player", None, &fields, &o.types, 8).unwrap(),
-    );
+    let player = build_struct("Player", None, &fields, &o.types, 8).unwrap();
+    o.types.insert("Player".to_owned(), player);
     o.applied.insert(0x3400, parse_type("Player *").unwrap());
     let text = decompile(&p, &a, &o, 0x55c0).unwrap_or_default();
     assert!(text.contains("g64_3400->hp"), "{text}");
@@ -4878,10 +4876,8 @@ fn an_applied_enum_field_names_its_accesses() {
         build_enum("ItemState", 4, &stated).unwrap(),
     );
     let fields = vec![(8u64, "state".to_owned(), parse_type("ItemState").unwrap())];
-    o.types.insert(
-        "Item".to_owned(),
-        build_struct("Item", None, &fields, &o.types, 8).unwrap(),
-    );
+    let item = build_struct("Item", None, &fields, &o.types, 8).unwrap();
+    o.types.insert("Item".to_owned(), item);
     o.applied.insert(0x3490, parse_type("Item *").unwrap());
     let text = decompile(&p, &a, &o, 0x56c0).unwrap_or_default();
     assert!(text.contains("->state == On"), "{text}");

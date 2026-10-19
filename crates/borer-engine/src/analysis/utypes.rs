@@ -1345,10 +1345,9 @@ mod tests {
             (0x8, "name".to_owned(), parse_type("char").unwrap()),
         ];
         let mut o = Overlay::default();
-        o.types.insert(
-            "Vec".to_owned(),
-            build_struct("Vec", Some(0x10), &fields, &o.types, 8).unwrap_or_else(|e| panic!("{e}")),
-        );
+        let vec =
+            build_struct("Vec", Some(0x10), &fields, &o.types, 8).unwrap_or_else(|e| panic!("{e}"));
+        o.types.insert("Vec".to_owned(), vec);
         o.applied.insert(0x3000, parse_type("Vec *").unwrap());
         let mut other = o.clone();
         assert_eq!(o.fingerprint(), other.fingerprint());

@@ -29,6 +29,7 @@ pub mod protocol;
 pub mod protos;
 pub mod prototypes;
 pub mod qt;
+pub mod reads;
 pub mod recognize;
 pub mod render;
 mod returns;
@@ -530,18 +531,22 @@ pub(crate) fn striped_with<T: Sync, S, R: Send>(
     }
     let init = &init;
     let f = &f;
+    let here = reads::Handle::here();
     let stripes: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
+                let here = here.clone();
                 scope.spawn(move || {
-                    let state = init();
-                    items
-                        .iter()
-                        .enumerate()
-                        .skip(t)
-                        .step_by(threads)
-                        .map(|(i, x)| (i, f(&state, x)))
-                        .collect::<Vec<_>>()
+                    here.enter(|| {
+                        let state = init();
+                        items
+                            .iter()
+                            .enumerate()
+                            .skip(t)
+                            .step_by(threads)
+                            .map(|(i, x)| (i, f(&state, x)))
+                            .collect::<Vec<_>>()
+                    })
                 })
             })
             .collect();
@@ -580,8 +585,9 @@ pub(crate) fn beside<M, S: Send>(
         let m = main();
         return (m, Some(side()));
     }
+    let here = reads::Handle::here();
     std::thread::scope(|scope| {
-        let handle = scope.spawn(side);
+        let handle = scope.spawn(|| here.enter(side));
         let m = main();
         (m, handle.join().ok())
     })
@@ -653,6 +659,10 @@ const ITEMS_KEPT: (usize, usize) = (3, 4);
 /// two results by address. How recently a result was asked for is a count
 /// of the asks, not a clock.
 ///
+/// Each result keeps what it read of the overlay ([`reads::Reads`]), so an
+/// edit ([`Derived::moved`]) carries every result that read none of the
+/// facts it changed over to the new names, and lets go of only the rest.
+///
 /// Each result has one cell, so a thread asking for a result while another
 /// builds it waits for that build instead of repeating it. No lock is held
 /// while a result is built, so a build may ask for other results, never for
@@ -667,6 +677,8 @@ pub struct Derived {
     item_bytes: AtomicUsize,
     /// Most bytes the item results may hold, [`ITEMS_BUDGET`] unless set.
     budget: AtomicUsize,
+    /// Results built so far, of every kind and scope.
+    builds: AtomicU64,
 }
 
 impl Default for Derived {
@@ -676,6 +688,7 @@ impl Default for Derived {
             asks: AtomicU64::new(0),
             item_bytes: AtomicUsize::new(0),
             budget: AtomicUsize::new(ITEMS_BUDGET),
+            builds: AtomicU64::new(0),
         }
     }
 }
@@ -693,10 +706,21 @@ enum Scope {
     Item(u64),
 }
 
+/// What becomes of one result in [`Derived`] when results are let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fate {
+    /// Kept where it is.
+    Keep,
+    /// Let go.
+    Drop,
+    /// Filed under another scope, unless a result is already there.
+    Move(Scope),
+}
+
 /// One result's cell in [`Derived`].
 struct Cell<T> {
-    /// The result, once built.
-    value: OnceLock<Arc<T>>,
+    /// The result, once built, and what its build read of the overlay.
+    value: OnceLock<(Arc<T>, reads::Reads)>,
     /// Bytes an item's result holds, set before the result is.
     weight: AtomicUsize,
     /// [`Derived::asks`] when an item's result was last asked for.
@@ -732,23 +756,27 @@ trait Kind: Any + Send + Sync {
     /// * `out` - Collects `(stamp, bytes)` pairs.
     fn asked(&self, out: &mut Vec<(u64, usize)>);
 
-    /// Lets go of every built result `drop` picks; one being built stays.
+    /// Decides the fate of every built result by `pick`; one being built
+    /// stays where it is.
+    ///
+    /// A result moved onto a scope and key that already hold one is let
+    /// go, so the one there, maybe still being built, stays.
     ///
     /// # Arguments
     ///
-    /// * `drop` - Picks a result by what it was read under and when it was
-    ///   last asked for.
+    /// * `pick` - Decides a result's fate by what it was read under, when
+    ///   it was last asked for, and what it read.
     ///
     /// # Returns
     ///
     /// The bytes the item results let go of held.
-    fn forget(&self, drop: &dyn Fn(Scope, u64) -> bool) -> usize;
+    fn sweep(&self, pick: &dyn Fn(Scope, u64, &reads::Reads) -> Fate) -> usize;
 
     /// The cells as [`Any`], to be downcast to their [`Cells`] type.
     fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
 }
 
-impl<K: Send + 'static, T: Send + Sync + 'static> Kind for Cells<K, T> {
+impl<K: Hash + Eq + Send + 'static, T: Send + Sync + 'static> Kind for Cells<K, T> {
     fn held(&self) -> usize {
         self.lock().map_or(0, |cells| cells.len())
     }
@@ -771,19 +799,40 @@ impl<K: Send + 'static, T: Send + Sync + 'static> Kind for Cells<K, T> {
         }
     }
 
-    fn forget(&self, drop: &dyn Fn(Scope, u64) -> bool) -> usize {
+    fn sweep(&self, pick: &dyn Fn(Scope, u64, &reads::Reads) -> Fate) -> usize {
         let Ok(mut cells) = self.lock() else {
             return 0;
         };
+        let freed_by = |scope: Scope, cell: &Cell<T>| match scope {
+            Scope::Item(_) => cell.weight.load(Ordering::Relaxed),
+            Scope::Program | Scope::Names(_) => 0,
+        };
         let mut freed = 0;
-        cells.retain(|(scope, _), cell| {
-            let gone =
-                cell.value.get().is_some() && drop(*scope, cell.asked.load(Ordering::Relaxed));
-            if gone && matches!(scope, Scope::Item(_)) {
-                freed += cell.weight.load(Ordering::Relaxed);
+        let mut moved = Vec::new();
+        let mut kept = FxHashMap::default();
+        for ((scope, key), cell) in cells.drain() {
+            let fate = cell.value.get().map_or(Fate::Keep, |(_, read)| {
+                pick(scope, cell.asked.load(Ordering::Relaxed), read)
+            });
+            match fate {
+                Fate::Keep => {
+                    kept.insert((scope, key), cell);
+                }
+                Fate::Drop => freed += freed_by(scope, &cell),
+                Fate::Move(to) => moved.push(((to, key), cell)),
             }
-            !gone
-        });
+        }
+        for (at, cell) in moved {
+            match kept.entry(at) {
+                std::collections::hash_map::Entry::Occupied(there) => {
+                    freed += freed_by(there.key().0, &cell);
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(cell);
+                }
+            }
+        }
+        *cells = kept;
         freed
     }
 
@@ -906,23 +955,81 @@ impl Derived {
     ///
     /// * `overlay` - The names and comments now in force.
     pub fn forget_names_but(&self, overlay: &Overlay) {
-        let under = |enum_source| {
-            Overlay {
-                enum_source,
-                ..overlay.clone()
-            }
-            .fingerprint()
-        };
-        let live = [
-            under(EnumSource::Given),
-            under(EnumSource::Binary),
-            overlay.without_tables().fingerprint(),
-            Overlay::default().fingerprint(),
-        ];
+        let live = in_force(overlay);
         self.forget(&|scope, _| match scope {
             Scope::Program => false,
             Scope::Names(names) | Scope::Item(names) => !live.contains(&names),
         });
+    }
+
+    /// Carries every result read under `before` that read none of the facts
+    /// an edit changed over to `after`, and lets go of every other result
+    /// read under names not in force for `after`, as
+    /// [`Derived::forget_names_but`] does.
+    ///
+    /// A result read under one of the overlays [`Derived::forget_names_but`]
+    /// keeps for `before` moves to the same overlay for `after`. A result
+    /// is a function of the overlay facts it read ([`reads::Reads`]), so
+    /// one whose reads miss the edit ([`reads::Edit::touches`]) is the
+    /// result the new names would build, byte for byte; it is filed under
+    /// the new names instead of being built again. When the two overlays
+    /// differ in where name tables come from, which no read-set notes,
+    /// nothing is carried.
+    ///
+    /// # Arguments
+    ///
+    /// * `analysis` - The analysis these results derive from, for the names
+    ///   its functions go by without the overlay's.
+    /// * `before` - The names and comments results were read under.
+    /// * `after` - The names and comments now in force.
+    pub fn moved(&self, analysis: &Analysis, before: &Overlay, after: &Overlay) {
+        let Some(edit) = reads::Edit::between(analysis, before, after) else {
+            self.forget_names_but(after);
+            return;
+        };
+        let (old, live) = (in_force(before), in_force(after));
+        let carry = |names: u64| {
+            old.iter()
+                .zip(live)
+                .find_map(|(&was, now)| (was == names && was != now).then_some(now))
+        };
+        self.sweep(&|scope, _, read| {
+            let (Scope::Names(names) | Scope::Item(names)) = scope else {
+                return Fate::Keep;
+            };
+            if live.contains(&names) {
+                return Fate::Keep;
+            }
+            match carry(names) {
+                Some(now) if !edit.touches(read) => Fate::Move(match scope {
+                    Scope::Item(_) => Scope::Item(now),
+                    Scope::Program | Scope::Names(_) => Scope::Names(now),
+                }),
+                Some(_) | None => Fate::Drop,
+            }
+        });
+    }
+
+    /// Returns what the built results read of the overlay, summed over
+    /// every result read under names.
+    #[must_use]
+    pub fn read_stats(&self) -> reads::ReadStats {
+        let stats = std::cell::Cell::new(reads::ReadStats::default());
+        self.sweep(&|scope, _, read| {
+            if !matches!(scope, Scope::Program) {
+                stats.set(stats.get().with(read));
+            }
+            Fate::Keep
+        });
+        stats.get()
+    }
+
+    /// Returns how many results have been built, of every kind and scope:
+    /// each a cell filled, so a result built again after being let go
+    /// counts again.
+    #[must_use]
+    pub fn builds(&self) -> u64 {
+        self.builds.load(Ordering::Relaxed)
     }
 
     /// Sets the most bytes the item results may hold, letting go of the
@@ -994,16 +1101,19 @@ impl Derived {
                 .store(self.asks.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
         }
         let mut built = false;
-        let value = Arc::clone(cell.value.get_or_init(|| {
-            let value = make();
+        let (value, read) = cell.value.get_or_init(|| {
+            let (value, read) = reads::recording(make);
+            self.builds.fetch_add(1, Ordering::Relaxed);
             if item {
-                let weight = size_of::<(Scope, K, Cell<T>, T)>() + weigh(&value);
+                let weight = size_of::<(Scope, K, Cell<T>, T)>() + weigh(&value) + read.bytes();
                 cell.weight.store(weight, Ordering::Relaxed);
                 self.item_bytes.fetch_add(weight, Ordering::Relaxed);
                 built = true;
             }
-            Arc::new(value)
-        }));
+            (Arc::new(value), read)
+        });
+        reads::absorb(read);
+        let value = Arc::clone(value);
         if built && self.item_bytes() > self.budget.load(Ordering::Relaxed) {
             self.shrink();
         }
@@ -1078,11 +1188,57 @@ impl Derived {
     /// * `drop` - Picks a result by what it was read under and when it was
     ///   last asked for.
     fn forget(&self, drop: &dyn Fn(Scope, u64) -> bool) {
+        self.sweep(&|scope, asked, _| {
+            if drop(scope, asked) {
+                Fate::Drop
+            } else {
+                Fate::Keep
+            }
+        });
+    }
+
+    /// Decides the fate of every built result by `pick`, and lets go of the
+    /// bytes the item results let go of held.
+    ///
+    /// # Arguments
+    ///
+    /// * `pick` - Decides a result's fate by what it was read under, when
+    ///   it was last asked for, and what it read.
+    fn sweep(&self, pick: &dyn Fn(Scope, u64, &reads::Reads) -> Fate) {
         let freed: usize = self.kinds.lock().map_or(0, |kinds| {
-            kinds.values().map(|cells| cells.forget(drop)).sum()
+            kinds.values().map(|cells| cells.sweep(pick)).sum()
         });
         self.item_bytes.fetch_sub(freed, Ordering::Relaxed);
     }
+}
+
+/// Returns the fingerprints of the overlays a caller holding `overlay`
+/// reads results under.
+///
+/// They are `overlay` under either source of name tables, the same names
+/// without tables, and the empty overlay without tables.
+///
+/// # Arguments
+///
+/// * `overlay` - The names and comments in force.
+///
+/// # Returns
+///
+/// The four fingerprints, in that order.
+fn in_force(overlay: &Overlay) -> [u64; 4] {
+    let under = |enum_source| {
+        Overlay {
+            enum_source,
+            ..overlay.clone()
+        }
+        .fingerprint()
+    };
+    [
+        under(EnumSource::Given),
+        under(EnumSource::Binary),
+        overlay.without_tables().fingerprint(),
+        Overlay::default().fingerprint(),
+    ]
 }
 
 /// Derived analysis results: computed once per [`Program`] and shared.
@@ -1517,34 +1673,34 @@ impl Analysis {
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Overlay {
     /// Address to user-chosen name (functions and data globals).
-    pub names: BTreeMap<u64, String>,
+    pub names: reads::Tracked<u64, String, reads::NamesTag>,
     /// Address to user comment.
-    pub comments: BTreeMap<u64, String>,
+    pub comments: reads::Tracked<u64, String, reads::CommentsTag>,
     /// User-defined types by name: the structs, enums and typedefs an agent
     /// stated ([`utypes::UserType`]), applied to globals through
     /// [`Overlay::applied`]. Serialized with the project, validated on
     /// load, and part of [`Overlay::fingerprint`], so a decompilation read
     /// under them names the fields of what they type.
-    pub types: BTreeMap<String, utypes::UserType>,
+    pub types: reads::Tracked<String, utypes::UserType, reads::TypesTag>,
     /// Address to the type applied there: the declared type of the global
     /// the decompiler renders for that address, so a `Player *` applied at
     /// a global's address makes every field read through it render by
     /// name. Structs reach the rendering as pointers; the types
     /// themselves live in [`Overlay::types`].
-    pub applied: BTreeMap<u64, utypes::TypeExpr>,
+    pub applied: reads::Tracked<u64, utypes::TypeExpr, reads::AppliedTag>,
     /// Function entry to the prototype an agent stated for it: the
     /// function's signature, its parameters' names and types, and the
     /// arity and the result every call to it shows, ahead of what debug
     /// information states. Part of [`Overlay::fingerprint`]; saved with a
     /// project, which spells each one ([`protos::Proto::spell`]).
     #[serde(default, skip)]
-    pub prototypes: BTreeMap<u64, protos::Proto>,
+    pub prototypes: reads::Tracked<u64, protos::Proto, reads::PrototypesTag>,
     /// Function entry to the variables an agent named or typed in it: a
     /// parameter renders by the name and the type everywhere, a stack slot
     /// by the name, declared of the type where it is as wide. Part of
     /// [`Overlay::fingerprint`]; saved with a project like the prototypes.
     #[serde(default, skip)]
-    pub vars: BTreeMap<u64, BTreeMap<protos::VarKey, protos::Var>>,
+    pub vars: reads::Tracked<u64, BTreeMap<protos::VarKey, protos::Var>, reads::VarsTag>,
     /// Name tables by the display name of the function encoding each
     /// ([`decompile::enum_tables`]); a caller comparing that function's
     /// result, or passing a constant to it, renders the constant by its
@@ -1552,7 +1708,7 @@ pub struct Overlay {
     /// [`EnumSource::Given`]. Derived from the binary, so never saved with a
     /// project.
     #[serde(default, skip)]
-    pub enums: BTreeMap<String, decompile::EnumTable>,
+    pub enums: reads::Tracked<String, decompile::EnumTable, reads::EnumsTag>,
     /// Where a decompilation finds the name tables it renders constants by.
     /// Never saved with a project.
     #[serde(default, skip)]
@@ -1696,15 +1852,15 @@ impl Overlay {
                 h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
             }
         };
-        for (addr, name) in &self.names {
+        for (addr, name) in self.names.raw() {
             fold(&addr.to_le_bytes());
             fold(name.as_bytes());
         }
-        for (addr, text) in &self.comments {
+        for (addr, text) in self.comments.raw() {
             fold(&addr.to_le_bytes());
             fold(text.as_bytes());
         }
-        for (name, ty) in &self.types {
+        for (name, ty) in self.types.raw() {
             fold(name.as_bytes());
             fold(&[0]);
             match ty {
@@ -1734,18 +1890,18 @@ impl Overlay {
             }
             fold(&[0]);
         }
-        for (addr, ty) in &self.applied {
+        for (addr, ty) in self.applied.raw() {
             fold(&addr.to_le_bytes());
             fold(ty.spell().as_bytes());
             fold(&[0]);
         }
-        for (addr, proto) in &self.prototypes {
+        for (addr, proto) in self.prototypes.raw() {
             fold(&[3]);
             fold(&addr.to_le_bytes());
             fold(proto.spell().as_bytes());
             fold(&[0]);
         }
-        for (addr, vars) in &self.vars {
+        for (addr, vars) in self.vars.raw() {
             for (key, var) in vars {
                 fold(&[4]);
                 fold(&addr.to_le_bytes());
@@ -1760,7 +1916,7 @@ impl Overlay {
                 fold(&[0]);
             }
         }
-        for (function, table) in &self.enums {
+        for (function, table) in self.enums.raw() {
             fold(function.as_bytes());
             fold(&[0]);
             fold(table.name.as_bytes());

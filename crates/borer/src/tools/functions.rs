@@ -57,8 +57,9 @@ impl BorerServer {
             out.push_str("pass dry_run=false to apply.\n");
             return out;
         }
+        let before = self.overlay_plain();
         plan.apply(&mut write_lock(&self.overlay));
-        self.names_changed();
+        self.names_changed(&before);
         out
     }
 }
