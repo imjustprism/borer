@@ -1405,17 +1405,7 @@ impl Cond {
                 } else {
                     fold(Op::And, l.clone(), r.clone(), *bits)
                 };
-                let zero = |rel: &str| {
-                    let body =
-                        if i64::from(*bits) < n.word * 8 && value_bits(&and) > u64::from(*bits) {
-                            let (s, p) = and.render_prec(n, false, false);
-                            let s = if p < UNARY { format!("({s})") } else { s };
-                            format!("({}){s}", Ty::from_bits(*bits).name())
-                        } else {
-                            paren_if_lower(&and, n, 6)
-                        };
-                    format!("{body} {rel} 0")
-                };
+                let zero = |rel: &str| zero_compare(n, &and, *bits, rel);
                 match cc.0 {
                     C::e | C::ne => zero(if cc.0 == C::e { "==" } else { "!=" }),
                     C::s | C::l => signed_sign(n, *bits, &and, "<"),
@@ -1433,8 +1423,8 @@ impl Cond {
                 }
             }
             Flags::Result(e, bits) => match cc.0 {
-                C::e => format!("{} == 0", paren_if_lower(e, n, 6)),
-                C::ne => format!("{} != 0", paren_if_lower(e, n, 6)),
+                C::e => zero_compare(n, e, *bits, "=="),
+                C::ne => zero_compare(n, e, *bits, "!="),
                 C::s | C::l => signed_sign(n, *bits, e, "<"),
                 C::ns | C::ge => signed_sign(n, *bits, e, ">="),
                 C::le => signed_sign(n, *bits, e, "<="),
@@ -1446,6 +1436,32 @@ impl Cond {
             },
         }
     }
+}
+
+/// Renders a value compared with zero at the width its flags were set at:
+/// `x == 0`, or `(uint32_t)(x - y) == 0` where the value may hold bits
+/// above that width.
+///
+/// A 32-bit `sub` or `and` sets the zero flag from its low half, and the
+/// lifter keeps the value unmasked where nothing reads its upper half;
+/// compared whole, a difference whose upper half is not zero reads as
+/// nonzero where the machine's is zero.
+///
+/// # Arguments
+///
+/// * `n` - Names for the rendering.
+/// * `e` - The value.
+/// * `bits` - The width the flags were set at.
+/// * `rel` - `==` or `!=`.
+fn zero_compare(n: &Names<'_>, e: &Expr, bits: u8, rel: &str) -> String {
+    let body = if i64::from(bits) < n.word * 8 && value_bits(e) > u64::from(bits) {
+        let (s, p) = e.render_prec(n, false, false);
+        let s = if p < UNARY { format!("({s})") } else { s };
+        format!("({}){s}", Ty::from_bits(bits).name())
+    } else {
+        paren_if_lower(e, n, 6)
+    };
+    format!("{body} {rel} 0")
 }
 
 /// Tells whether a value is truth values joined by `|` and `&`: what
