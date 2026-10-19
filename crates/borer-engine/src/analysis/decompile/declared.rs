@@ -142,7 +142,7 @@ pub(super) fn typed_pointers(
         let Some(s) = ty.pointee(&overlay.types) else {
             return;
         };
-        let fields = struct_fields(overlay, s, word);
+        let fields = struct_fields(&overlay.types, s, word);
         if !fields.is_empty() && !out.iter().any(|(v, _)| *v == var) {
             out.push((var, fields));
         }
@@ -164,6 +164,48 @@ pub(super) fn typed_pointers(
         }
     }
     out
+}
+
+/// Returns the parameters the debug information types as pointers to its
+/// structures, with their fields.
+///
+/// A parameter declared as one pointer to a structure the debug
+/// information also states ([`crate::program::Program::debug_types`])
+/// names the fields read through it (`p->x`).
+///
+/// # Arguments
+///
+/// * `types` - The structures the debug information states, by name.
+/// * `params` - The function's parameters as its text names them.
+/// * `names` - The name resolver, for each parameter's rendered name.
+/// * `word` - The image's pointer width in bytes (4 or 8).
+///
+/// # Returns
+///
+/// `(parameter, fields)` per typed pointer parameter, in order.
+pub(super) fn debug_pointers(
+    types: &BTreeMap<String, crate::analysis::utypes::UserType>,
+    params: &[Parameter],
+    names: &Names<'_>,
+    word: u64,
+) -> Vec<(String, TypedFields)> {
+    params
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let (base, stars) = crate::analysis::typelib::base_of(p.type_name.as_deref()?);
+            if stars != 1 {
+                return None;
+            }
+            let s = crate::analysis::utypes::pointee_struct(
+                types,
+                &crate::analysis::utypes::TypeExpr::Named(base),
+            )?;
+            let fields = struct_fields(types, s, word);
+            let key = Key::Param(u8::try_from(i).ok()?);
+            (!fields.is_empty()).then(|| (names.key(key), fields))
+        })
+        .collect()
 }
 
 /// What the binary says against a stated prototype, one phrase each.
@@ -204,4 +246,50 @@ pub(super) fn contradictions(
         out.push("a caller reads rdx after the call".to_owned());
     }
     out
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use crate::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
+    use crate::analysis::{Analysis, Overlay};
+    use crate::program::Program;
+
+    /// A parameter the debug information declares as a pointer to a
+    /// structure it states reads its fields by name.
+    #[test]
+    fn a_debug_typed_pointer_parameter_names_its_fields() {
+        let code = [
+            0x8b, 0x41, 0x08, // ASM: mov eax, [rcx+8]
+            0xc3, // ASM: ret
+        ];
+        let mut p = Program::raw_x64(&code);
+        let field = |name: &str| UserField {
+            name: name.to_owned(),
+            ty: TypeExpr::U32,
+        };
+        p.debug_types.insert(
+            "Point".to_owned(),
+            UserType::Struct(UserStruct {
+                size: 16,
+                fields: [(0, field("x")), (8, field("y"))].into_iter().collect(),
+            }),
+        );
+        p.debug_functions.push(crate::dwarf::Subprogram {
+            low_pc: 0x1000,
+            name: "get_y".to_owned(),
+            parameters: vec![crate::dwarf::Parameter {
+                name: "pt".to_owned(),
+                type_name: Some("struct Point *".to_owned()),
+            }],
+            return_type: Some("unsigned int".to_owned()),
+            locals: std::collections::BTreeMap::new(),
+        });
+        let a = Analysis::compute(&p);
+        let text = super::super::decompile(&p, &a, &Overlay::default(), 0x1000).unwrap_or_default();
+        assert!(text.contains("pt->y"), "{text}");
+    }
 }

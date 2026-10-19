@@ -1967,6 +1967,22 @@ fn decompile_in<L: Lifter>(
         &names,
         u64::try_from(ctx.conv.word).unwrap_or(8),
     ));
+    for (var, fields) in declared::debug_pointers(
+        &program.debug_types,
+        &ctx.debug_params,
+        &names,
+        u64::try_from(ctx.conv.word).unwrap_or(8),
+    )
+    .into_iter()
+    .chain(api_typed(
+        &body,
+        program.format,
+        u64::try_from(ctx.conv.word).unwrap_or(8),
+    )) {
+        if !user_typed.iter().any(|(v, _)| *v == var) {
+            user_typed.push((var, fields));
+        }
+    }
     let body = if user_typed.is_empty() || !skip.runs(Pass::RenameTyped) {
         body
     } else {

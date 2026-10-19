@@ -710,7 +710,7 @@ pub(super) fn typed_globals(
         let Some(s) = crate::analysis::utypes::pointee_struct(&overlay.types, expr) else {
             continue;
         };
-        let fields = struct_fields(overlay, s, word);
+        let fields = struct_fields(&overlay.types, s, word);
         if fields.is_empty() {
             continue;
         }
@@ -726,11 +726,11 @@ pub(super) fn typed_globals(
 ///
 /// # Arguments
 ///
-/// * `overlay` - The user types, for an enum field's width.
+/// * `types` - The types a field may name, for an enum field's width.
 /// * `s` - The struct.
 /// * `word` - The image's pointer width in bytes (4 or 8).
 pub(super) fn struct_fields(
-    overlay: &Overlay,
+    types: &BTreeMap<String, crate::analysis::utypes::UserType>,
     s: &crate::analysis::utypes::UserStruct,
     word: u64,
 ) -> TypedFields {
@@ -741,7 +741,7 @@ pub(super) fn struct_fields(
                 .as_deref()
                 .and_then(layout_type)
                 .or_else(|| {
-                    let e = crate::analysis::utypes::named_enum(&overlay.types, &f.ty)?;
+                    let e = crate::analysis::utypes::named_enum(types, &f.ty)?;
                     match e.size {
                         4 => Some("u32"),
                         8 => Some("u64"),
@@ -853,4 +853,206 @@ pub(super) fn rename_typed_fields(line: &str, var: &str, fields: &TypedFields) -
         }
     }
     s
+}
+
+/// Returns the pointers a function hands to an API as SDK structures, with
+/// their fields.
+///
+/// A name passed whole to a declared API whose parameter points at an SDK
+/// structure ([`crate::analysis::sdk::pointee`]) takes that structure:
+/// `EnterCriticalSection(a1)` makes `a1` an `LPCRITICAL_SECTION`, so
+/// `*(uint32_t*)(a1 + 0xc)` is `a1->RecursionCount`.
+///
+/// Only a name the text assigns at most once is typed, so a variable that
+/// holds two different objects in turn is never read as one; a name two
+/// calls type as different structures is left alone.
+///
+/// # Arguments
+///
+/// * `text` - The function's body.
+/// * `format` - The binary's format, which picks the platform's
+///   declarations.
+/// * `word` - The image's pointer width in bytes (4 or 8).
+///
+/// # Returns
+///
+/// `(name, fields)` per typed pointer, by name.
+pub(super) fn api_typed(
+    text: &str,
+    format: crate::program::BinaryFormat,
+    word: u64,
+) -> Vec<(String, TypedFields)> {
+    let mut found: BTreeMap<&str, Option<&'static str>> = BTreeMap::new();
+    for line in text.lines().filter(|l| !l.trim_start().starts_with("//")) {
+        for (callee, args) in calls_in(line) {
+            let Some(decl) = crate::analysis::typelib::declared(callee, format) else {
+                continue;
+            };
+            for (arg, param) in args.into_iter().zip(&decl.params) {
+                if !is_ident(arg) {
+                    continue;
+                }
+                let Some(s) = crate::analysis::sdk::pointee(param.ty) else {
+                    continue;
+                };
+                found
+                    .entry(arg)
+                    .and_modify(|t| {
+                        if *t != Some(s.tag) {
+                            *t = None;
+                        }
+                    })
+                    .or_insert(Some(s.tag));
+            }
+        }
+    }
+    let bits = u8::try_from(word * 8).unwrap_or(64);
+    found
+        .into_iter()
+        .filter_map(|(name, tag)| {
+            let s = crate::analysis::sdk::structure(tag?)?;
+            let assigned = text
+                .lines()
+                .filter(|l| {
+                    l.trim_start()
+                        .strip_prefix(name)
+                        .is_some_and(|r| r.starts_with(" = "))
+                })
+                .count();
+            if assigned > 1 {
+                return None;
+            }
+            let fields: TypedFields = s
+                .at(word)
+                .into_iter()
+                .filter_map(|(off, f)| {
+                    let pass = crate::analysis::typelib::pass_of(f.ty, bits, format)?;
+                    Some((off, (f.name.to_owned(), pass_letter(pass, bits)?)))
+                })
+                .collect();
+            (!fields.is_empty()).then(|| (name.to_owned(), fields))
+        })
+        .collect()
+}
+
+/// The width letter a load of a value passed as `pass` is cast to.
+///
+/// An integer takes the unsigned letter of its width, as the lifting casts
+/// a load whose sign nothing states.
+///
+/// # Arguments
+///
+/// * `pass` - What the machine passes the value as.
+/// * `word` - The pointer width in bits.
+///
+/// # Returns
+///
+/// The letter, or `None` for `void`.
+fn pass_letter(pass: crate::analysis::typelib::Pass, word: u8) -> Option<&'static str> {
+    use crate::analysis::typelib::Pass;
+    let bits = match pass {
+        Pass::Void => return None,
+        Pass::Float(32) => return Some("f32"),
+        Pass::Float(_) => return Some("f64"),
+        Pass::Int { bits, .. } => bits,
+        Pass::Pointer => word,
+    };
+    Some(match bits {
+        8 => "u8",
+        16 => "u16",
+        32 => "u32",
+        _ => "u64",
+    })
+}
+
+/// The calls by plain name in one line, each with its whole arguments.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+///
+/// # Returns
+///
+/// `(callee, arguments)` per call, outermost first; an argument is its
+/// trimmed text between the commas at the call's own depth.
+fn calls_in(line: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    for (open, _) in line.match_indices('(') {
+        let start = line
+            .get(..open)
+            .and_then(|h| {
+                h.rfind(|c: char| !is_ident_char(c))
+                    .map(|i| i + 1)
+                    .or(Some(0))
+            })
+            .unwrap_or(open);
+        let Some(callee) = line.get(start..open).filter(|c| is_ident(c)) else {
+            continue;
+        };
+        let (mut depth, mut from, mut args) = (0usize, open + 1, Vec::new());
+        let mut closed = false;
+        for (i, b) in bytes.iter().enumerate().skip(open + 1) {
+            match b {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' if depth > 0 => depth -= 1,
+                b')' => {
+                    args.extend(line.get(from..i).map(str::trim).filter(|a| !a.is_empty()));
+                    closed = true;
+                    break;
+                }
+                b',' if depth == 0 => {
+                    args.extend(line.get(from..i).map(str::trim));
+                    from = i + 1;
+                }
+                b'"' => break,
+                _ => {}
+            }
+        }
+        if closed {
+            out.push((callee, args));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::{api_typed, calls_in, rename_typed};
+    use crate::program::BinaryFormat;
+
+    /// A call's whole arguments split at its own depth.
+    #[test]
+    fn calls_split_their_arguments() {
+        assert_eq!(
+            calls_in("x = f(a1, g(b, c), *(uint32_t*)(a2 + 8));"),
+            vec![
+                ("f", vec!["a1", "g(b, c)", "*(uint32_t*)(a2 + 8)"]),
+                ("g", vec!["b", "c"]),
+            ]
+        );
+    }
+
+    /// A pointer passed whole to an API declaring a structure pointer reads
+    /// its fields by the structure's names, at the image's word; one the
+    /// text assigns twice stays untyped.
+    #[test]
+    fn a_pointer_handed_to_an_api_takes_its_structure() {
+        let text =
+            "EnterCriticalSection(a1);\nv = *(uint32_t*)(a1 + 0x8);\nLeaveCriticalSection(a1);\n";
+        let typed = api_typed(text, BinaryFormat::Pe, 8);
+        assert_eq!(typed.len(), 1);
+        let renamed = rename_typed(text, &typed);
+        assert!(renamed.contains("v = a1->LockCount;"), "{renamed}");
+        let typed32 = api_typed(text.replace("0x8", "0x4").as_str(), BinaryFormat::Pe, 4);
+        let renamed32 = rename_typed(&text.replace("0x8", "0x4"), &typed32);
+        assert!(renamed32.contains("v = a1->LockCount;"), "{renamed32}");
+        let twice = "var1 = f();\nEnterCriticalSection(var1);\nvar1 = g();\n";
+        assert!(api_typed(twice, BinaryFormat::Pe, 8).is_empty());
+        assert!(api_typed(text, BinaryFormat::Elf, 8).is_empty());
+    }
 }
