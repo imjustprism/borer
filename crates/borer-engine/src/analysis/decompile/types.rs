@@ -2011,6 +2011,13 @@ fn redeclare(lines: &mut Vec<String>, typed: &[(String, &'static str)]) {
 /// The first slot's address is the array itself, `local_48`, which C
 /// reads as the same address.
 ///
+/// An indexed slot no other slot of its type follows is the frame object
+/// it starts: the bytes up to the next slot the text names, or to the
+/// frame's top. One `uint64_t local_58` that `((uint32_t*)&local_58)[i]`
+/// indexes sixteen times over would let C's object rules write the slots
+/// above it; it is `uint64_t local_58[10]`, its elements running up to
+/// `local_c`.
+///
 /// # Arguments
 ///
 /// * `text` - A decompiled function, header lines included.
@@ -2035,8 +2042,20 @@ pub(super) fn stack_arrays(text: &str) -> String {
                 .collect::<Vec<_>>()
         })
         .collect();
+    let named: Vec<u64> = lines
+        .iter()
+        .filter(|l| is_declaration(l))
+        .flat_map(|l| {
+            l.trim_end_matches(';')
+                .split_once(' ')
+                .map_or("", |(_, names)| names)
+                .split(", ")
+                .filter_map(|n| slot_offset(n.trim().trim_start_matches('*')))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     let indexed = indexed_through(&lines);
-    let mut arrays: Vec<(String, &'static str, Vec<String>)> = Vec::new();
+    let mut arrays: Vec<(String, &'static str, Vec<String>, u64)> = Vec::new();
     for (name, ty) in &declared {
         let Some(base) = slot_offset(name) else {
             continue;
@@ -2055,16 +2074,33 @@ pub(super) fn stack_arrays(text: &str) -> String {
             members.push(next_name);
             at = next;
         }
-        if members.len() > 1 {
-            arrays.push((name.clone(), ty, members));
+        let len = if members.len() > 1 {
+            u64::try_from(members.len()).unwrap_or(0)
+        } else {
+            let top = named
+                .iter()
+                .copied()
+                .filter(|&d| d < base)
+                .max()
+                .unwrap_or(0);
+            (base - top).div_ceil(size)
+        };
+        if len > 1 {
+            arrays.push((name.clone(), ty, members, len));
         }
     }
+    let runs: BTreeSet<String> = arrays
+        .iter()
+        .filter(|(_, _, m, _)| m.len() > 1)
+        .flat_map(|(_, _, m, _)| m.iter().cloned())
+        .collect();
+    arrays.retain(|(name, _, m, _)| m.len() > 1 || !runs.contains(name));
     if arrays.is_empty() {
         return text.to_owned();
     }
     let gone: BTreeSet<&str> = arrays
         .iter()
-        .flat_map(|(_, _, m)| m.iter().map(String::as_str))
+        .flat_map(|(_, _, m, _)| m.iter().map(String::as_str))
         .collect();
     let mut at = None;
     for (k, line) in lines.iter_mut().enumerate() {
@@ -2090,12 +2126,12 @@ pub(super) fn stack_arrays(text: &str) -> String {
     if let Some(k) = at {
         let decls: Vec<String> = arrays
             .iter()
-            .map(|(name, ty, members)| format!("{ty} {name}[{}];", members.len()))
+            .map(|(name, ty, _, len)| format!("{ty} {name}[{len}];"))
             .collect();
         lines.splice(k + 1..k + 1, decls);
     }
     lines.retain(|l| l != "\u{0}");
-    for (name, _, members) in &arrays {
+    for (name, _, members, _) in &arrays {
         for line in lines
             .iter_mut()
             .filter(|l| !l.starts_with("//") && !is_declaration(l))
@@ -3962,7 +3998,7 @@ mod pointer_tests {
             "sub_1((uintptr_t)this + 0x48, rcx - (uintptr_t)a3, (uintptr_t)a2 - (uintptr_t)a3 + rcx, *(uint64_t*)a6 + 1);",
             "sub_2(\"a2 + 1\", a6[rcx]);",
             "a3 = (uint16_t *)((uintptr_t)a3 - (uintptr_t)a6);",
-            "local_8 = -(uintptr_t)a3 + *(uint8_t*)((uintptr_t)&local_28 + rcx) + *(uint8_t*)(&local_8 + rcx);",
+            "local_8[0] = -(uintptr_t)a3 + *(uint8_t*)((uintptr_t)local_28 + rcx) + *(uint8_t*)(local_8 + rcx);",
             "return *(uint8_t*)(a4 + 3) + *(uint32_t*)(a5 + 8) + this->field_0x10;",
         ] {
             assert!(out.lines().any(|l| l == want), "{want}\n{out}");
@@ -4505,5 +4541,41 @@ mod stack_array_tests {
         assert!(out.contains("((uint32_t*)local_28)[a1 & 3]"), "{out}");
         let direct = "uint64_t local_28, local_20;\n\nreturn local_28 + local_20;\n";
         assert_eq!(stack_arrays(direct), direct);
+    }
+
+    /// A lone indexed slot is the object up to the next slot the text
+    /// names, and a member of an indexed run is no object of its own.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_lone_indexed_slot_runs_up_to_the_next_named_one() {
+        let text = [
+            "// signature: uint32_t f(uint64_t a1)",
+            "uint32_t local_5c, local_c;",
+            "uint64_t local_58;",
+            "",
+            "local_c = a1;",
+            "((uint32_t*)&local_58)[local_5c] = 1;",
+            "return ((uint32_t*)&local_58)[local_c & 0xf];",
+        ]
+        .join("\n");
+        let out = stack_arrays(&text);
+        assert!(out.contains("uint64_t local_58[10];"), "{out}");
+        assert!(
+            out.contains("return ((uint32_t*)local_58)[local_c & 0xf];"),
+            "{out}"
+        );
+        let run = [
+            "uint64_t local_28, local_20;",
+            "",
+            "((uint32_t*)&local_28)[a1] = 1;",
+            "return ((uint8_t*)&local_20)[a1];",
+        ]
+        .join("\n");
+        let out = stack_arrays(&run);
+        assert!(out.contains("uint64_t local_28[2];"), "{out}");
+        assert!(out.contains("((uint8_t*)&local_28[1])[a1]"), "{out}");
     }
 }
