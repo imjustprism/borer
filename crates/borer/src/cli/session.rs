@@ -14,7 +14,7 @@ use super::USAGE;
 use super::args::{arg, command_usage, decompile_args, entry_at};
 use crate::params::Detail;
 use crate::state::read_packs;
-use crate::tools::decompile::{marked, window};
+use crate::tools::decompile::window;
 
 /// The refusal of a command given no binary: what it needs, then its own
 /// usage lines rather than every command's.
@@ -281,8 +281,7 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     };
     let text = match detail {
         Detail::Skeleton => decompile::skeleton(&text),
-        Detail::Full if raw => text,
-        Detail::Full => marked(&s.program, &a, &s.overlay, entry, &text),
+        Detail::Full => text,
     };
     let text = decompile::with_header(&text, header.as_deref());
     Ok(window(&text, None, offset, limit))

@@ -1209,9 +1209,13 @@ pub fn warnings(
 /// A register variable no line sets holds only what the register held
 /// when the function was entered; unless it is a parameter, that is a
 /// value the text lost on the way (a `mov` dropped, a call taken to
-/// clobber what it keeps), and the line reading it cannot be right as
-/// printed. The per-block replay of [`text_check`] cannot see it: it
-/// rebuilds every block's inputs from the machine.
+/// clobber what it keeps). The per-block replay of [`text_check`] cannot
+/// see it: it rebuilds every block's inputs from the machine.
+///
+/// It is a sweep's measure, not a mark on the answer: a value read unset
+/// that is stored and never used again, or merged under bits a later line
+/// keeps, leaves the text right, and the hard benchmark found such reads
+/// in as many right texts as wrong ones.
 ///
 /// # Arguments
 ///
@@ -1238,41 +1242,6 @@ pub fn unset_reads(
     text: &str,
 ) -> Result<Vec<(usize, Vec<String>)>, String> {
     interp::Script::read(program, analysis, overlay, entry, text).map(|s| s.unset_reads())
-}
-
-/// The mark [`mark_unset`] ends a line with, before the names it reads
-/// unset.
-pub const UNSET_MARK: &str = "// !unset:";
-
-/// Marks each line [`unset_reads`] flagged: `<line>  // !unset: r10`.
-///
-/// Only the tools' rendering carries the marks, like the header line of
-/// [`checked_header`]; the text other readers parse does not.
-///
-/// # Arguments
-///
-/// * `text` - The text the reads were found in.
-/// * `reads` - The flagged lines, 1-based, and their names.
-///
-/// # Returns
-///
-/// The text with each flagged line marked.
-#[must_use]
-pub fn mark_unset(text: &str, reads: &[(usize, Vec<String>)]) -> String {
-    if reads.is_empty() {
-        return text.to_owned();
-    }
-    let mut out = String::with_capacity(text.len() + reads.len() * 24);
-    for (k, line) in text.lines().enumerate() {
-        out.push_str(line);
-        if let Ok(at) = reads.binary_search_by_key(&(k + 1), |(l, _)| *l)
-            && let Some((_, names)) = reads.get(at)
-        {
-            let _ = write!(out, "  {UNSET_MARK} {}", names.join(", "));
-        }
-        out.push('\n');
-    }
-    out
 }
 
 /// [`decompile_named`] built afresh, for a batch ([`decompile_named_all`]).

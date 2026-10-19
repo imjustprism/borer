@@ -8,7 +8,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::decompile::{decompile_named, mark_unset, unset_reads};
+use borer_engine::analysis::decompile::{decompile_named, unset_reads};
 use borer_engine::analysis::render::{Verdict, check_generated, check_generated_iso};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program, Section};
@@ -79,9 +79,9 @@ fn runs_alike(p: &Program, entry: u64) {
 /// A text that reads a register no line sets is flagged at that line.
 ///
 /// One set on some path, or whose address a call takes, is not; one the
-/// text names without declaring it is. The flagged lines are marked.
+/// text names without declaring it is.
 #[test]
-fn a_value_no_line_sets_is_flagged_and_marked() {
+fn a_value_no_line_sets_is_flagged() {
     let p = program(&[0xc3], &[]);
     let a = Analysis::compute(&p);
     let o = Overlay::default();
@@ -102,13 +102,6 @@ fn a_value_no_line_sets_is_flagged_and_marked() {
         reads,
         vec![(5, vec!["r10".to_owned()]), (10, vec!["r11".to_owned()])]
     );
-    let marked = mark_unset(text, &reads);
-    assert!(
-        marked.contains("rax = r10 + a1;  // !unset: r10\n"),
-        "{marked}"
-    );
-    assert_eq!(marked.matches("// !unset").count(), 2, "{marked}");
-    assert_eq!(mark_unset(text, &[]), text);
 }
 
 /// A decompiled function that returns a register it never sets is flagged

@@ -369,8 +369,7 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
                 # joins at 0.
                 "the_final_text_agrees_with_the_emulator_on_small_functions",
                 # Not a gate yet: the closure sweep lists the lines that read
-                # a value no line sets (the decompile answer marks them
-                # `// !unset:`); most pass a register to a callee whose
+                # a value no line sets; most pass a register to a callee whose
                 # signature lists more parameters than the caller sets
                 # (corpus census 2026-10-15: 3850 lines in 2955 functions,
                 # 90% register arity r8-15/rax/rcx/rdx), which the

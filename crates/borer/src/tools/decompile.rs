@@ -211,32 +211,6 @@ pub(crate) fn decompile_header(
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
-/// A function's text with each line that reads a variable no line sets
-/// first marked ([`borer_engine::analysis::decompile::mark_unset`]).
-///
-/// A text the closure check cannot read is left as it is: its lines are no
-/// more proven for it, and the check's line says later text passes went
-/// unchecked.
-///
-/// # Arguments
-///
-/// * `p` - The loaded program.
-/// * `a` - Its analysis.
-/// * `o` - Names in force.
-/// * `entry` - The function's entry.
-/// * `text` - Its text as `decompile_named` wrote it.
-///
-/// # Returns
-///
-/// The text, its flagged lines marked.
-pub(crate) fn marked(p: &Program, a: &Analysis, o: &Overlay, entry: u64, text: &str) -> String {
-    use borer_engine::analysis::decompile;
-    match decompile::unset_reads(p, a, o, entry, text) {
-        Ok(reads) => decompile::mark_unset(text, &reads),
-        Err(_) => text.to_owned(),
-    }
-}
-
 #[tool_router(router = decompile_tools, vis = "pub(crate)")]
 impl BorerServer {
     /// Returns the pseudo-C of one function.
@@ -290,7 +264,7 @@ impl BorerServer {
             let text = decompile::decompile_named(p, &a, &o, entry)
                 .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
             let text = match detail.unwrap_or_default() {
-                Detail::Full => marked(p, &a, &o, entry, &text),
+                Detail::Full => text,
                 Detail::Skeleton => decompile::skeleton(&text),
             };
             let text = decompile::with_header(&text, header.as_deref());
@@ -926,6 +900,45 @@ mod tests {
             "{caller}"
         );
         assert!(!answer("0x1010").contains("// warn:"), "{caller}");
+    }
+
+    /// The `decompile` answer leaves a line that reads a register no line
+    /// sets as the text writes it: such a read is as often harmless as not,
+    /// so it is no mark.
+    ///
+    /// # Panics
+    ///
+    /// When the answer marks the line.
+    #[test]
+    fn a_decompile_answer_does_not_mark_an_unset_read() {
+        use crate::params::DecompileParams;
+        use borer_engine::program::{Arch, Program, Section};
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut code = vec![
+            0x4c, 0x89, 0xd0, // ASM: mov rax, r10
+            0xc3, // ASM: ret
+        ];
+        code.resize(0x10, 0xcc);
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = crate::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..crate::BorerServer::default()
+        };
+        let answer = server
+            .decompile(Parameters(DecompileParams {
+                address: "0x1000".to_owned(),
+                detail: None,
+                filter: None,
+                offset: None,
+                limit: Some(0),
+            }))
+            .expect("decompiles");
+        assert!(answer.contains("r10"), "{answer}");
+        assert!(!answer.contains("!unset"), "{answer}");
     }
 
     /// A batch the total output cap cuts short counts in its header the

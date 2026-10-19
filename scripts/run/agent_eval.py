@@ -62,13 +62,6 @@ RAW_CODE = bytes.fromhex(
 # Headerless x86-64 code that opens a path through a Linux syscall: the
 # emulator records it by name with the path decoded. Loaded at 0x10000, the
 # path "/tmp/x" sits just past the `ret`.
-# Headerless x86-64 code that returns what r10 held, a register no line of
-# its text sets: the decompile answer marks the line that reads it.
-UNSET_CODE = bytes.fromhex(
-    "4c89d0"  # mov rax, r10
-    "c3"  # ret
-)
-
 SYSCALL_CODE = bytes.fromhex(
     "b802000000"  # mov eax, 2 (open)
     "488d3d03000000"  # lea rdi, [rip+3] -> the path
@@ -651,7 +644,6 @@ DIVERGE_CODE = bytes.fromhex(
 # so the directory a checkout sits in does not move the byte count.
 BLOBS = {
     "blob": (RAW_CODE, "<blob>"),
-    "unset": (UNSET_CODE, "<unset>"),
     "syscall": (SYSCALL_CODE, "<syscall>"),
     "decoder": (DECODER_CODE, "<decoder>"),
     "elfargs": (ELF_ARG_CODE, "<elfargs>"),
@@ -787,15 +779,6 @@ TASKS = [
             ("xrefs", {"address": "0x1010"}),
         ],
         "-: 0x2000 table",
-    ),
-    (
-        "unset_read",
-        "which line of a decompilation reads a value no line of it sets",
-        [
-            ("load_binary", {"path": "{unset}", "arch": "x64", "base": "0x10000"}),
-            ("decompile", {"address": "0x10000"}),
-        ],
-        "// !unset: r10",
     ),
     (
         "go_names",
