@@ -531,7 +531,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     .context("no function at address")?
             );
         }
-        Query::Decompile => print!("{}", decompiled(args, s)?),
+        Query::Decompile => {
+            print!("{}", decompiled(args, s)?);
+            if let Some(steps) = decompile::step_times() {
+                eprint!("{steps}");
+            }
+        }
         Query::Class => {
             let a = s.analysis(Feature::Decompile)?;
             let what = arg(args, 2, "class needs a class name or a method address")?;
@@ -588,6 +593,9 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 borer::index::load_or_build(&s.program, &a).map_err(anyhow::Error::msg)?;
             if built {
                 eprintln!("indexed in {:.3} s", t0.elapsed().as_secs_f64());
+            }
+            if let Some(steps) = decompile::step_times() {
+                eprint!("{steps}");
             }
             println!(
                 "# {} {} functions, {} bytes of pseudo-C -> {}",

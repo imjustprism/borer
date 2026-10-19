@@ -71,6 +71,7 @@ pub mod verify_a64;
 mod verify_lanes;
 mod wire;
 
+pub use crate::timing::step_times;
 use arch::Lifter;
 pub use asserts::*;
 use emit::*;
@@ -579,16 +580,7 @@ pub fn decompile_all_settled(
 ) -> Vec<Option<(String, Settle)>> {
     render_all(program, analysis, overlay, entries, |p, a, o, e| {
         let bitness = p.arch.bitness().unwrap_or(64);
-        decompile_plain_full(p, a, o, e).map(|d| {
-            let text = helper::declare(
-                &vector::declare(
-                    &tables::inline_tables(&polish(&d.text, bitness, &a.packs), p),
-                    p,
-                ),
-                p,
-            );
-            (text, d.settle)
-        })
+        decompile_plain_full(p, a, o, e).map(|d| (finished(&d.text, p, a, bitness), d.settle))
     })
 }
 
@@ -733,15 +725,7 @@ pub fn decompile(
     decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
         .as_ref()
         .as_ref()
-        .map(|d| {
-            helper::declare(
-                &vector::declare(
-                    &tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program),
-                    program,
-                ),
-                program,
-            )
-        })
+        .map(|d| finished(&d.text, program, analysis, bitness))
 }
 
 /// [`decompile`] built afresh, for a batch ([`decompile_all`]).
@@ -763,15 +747,31 @@ fn decompile_afresh(
     entry: u64,
 ) -> Option<String> {
     let bitness = program.arch.bitness().unwrap_or(64);
-    decompile_plain_full(program, analysis, overlay, entry).map(|d| {
-        helper::declare(
-            &vector::declare(
-                &tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program),
-                program,
-            ),
-            program,
-        )
-    })
+    decompile_plain_full(program, analysis, overlay, entry)
+        .map(|d| finished(&d.text, program, analysis, bitness))
+}
+
+/// Finishes a body for the tools: [`polish`], then the tables it reads
+/// inline ([`tables::inline_tables`]), then its vector declarations
+/// ([`vector::declare`]) and its helper definitions ([`helper::declare`]),
+/// each step timed ([`crate::timing::Step`]).
+///
+/// # Arguments
+///
+/// * `text` - The plain or named decompilation.
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results, for the packs.
+/// * `bitness` - The register width in bits.
+///
+/// # Returns
+///
+/// The text the tools show.
+fn finished(text: &str, program: &Program, analysis: &Analysis, bitness: u32) -> String {
+    use crate::timing::{Step, timed};
+    let text = timed(Step::Polish, || polish(text, bitness, &analysis.packs));
+    let text = timed(Step::InlineTables, || tables::inline_tables(&text, program));
+    let text = timed(Step::Vectors, || vector::declare(&text, program));
+    timed(Step::Helpers, || helper::declare(&text, program))
 }
 
 /// The source file and line each PDB-named function starts at, read once
@@ -1077,7 +1077,11 @@ pub fn text_check(
         "text_check",
         overlay.fingerprint(),
         entry,
-        || replay::check_answer(program, analysis, overlay, entry),
+        || {
+            crate::timing::timed(crate::timing::Step::Replay, || {
+                replay::check_answer(program, analysis, overlay, entry)
+            })
+        },
         |c| c.as_ref().map_or(0, replay::TextCheck::bytes),
     )
 }
@@ -1244,6 +1248,7 @@ fn name_fields(
     entry: u64,
     text: &str,
 ) -> Option<String> {
+    let mut lap = crate::timing::Lap::new();
     let f = analysis.function(entry)?;
     let name = name_of(analysis, overlay, entry);
     let own =
@@ -1345,15 +1350,12 @@ fn name_fields(
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    Some(helper::declare(
-        &vector::declare(
-            &tables::inline_tables(
-                &polish(&out, program.arch.bitness().unwrap_or(64), &analysis.packs),
-                program,
-            ),
-            program,
-        ),
+    lap.end(crate::timing::Step::NameFields);
+    Some(finished(
+        &out,
         program,
+        analysis,
+        program.arch.bitness().unwrap_or(64),
     ))
 }
 
@@ -1573,6 +1575,7 @@ fn decompile_in<L: Lifter>(
     witness: bool,
 ) -> Option<Decompiled> {
     let (program, analysis, overlay, entry) = run;
+    let mut lap = crate::timing::Lap::new();
     let f = analysis.function(entry)?;
     let blocks = &f.blocks;
     let n = blocks.len();
@@ -1707,12 +1710,14 @@ fn decompile_in<L: Lifter>(
         need,
         slots: None,
     };
+    lap.end(crate::timing::Step::Decode);
     let (_, _, mut recorded) = dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &[]);
     widen_slots(&mut recorded);
     live.slots = Some(slot_liveness(&recorded, &succs));
     let assumes = block_assumptions::<L>(&code, &preds, &recorded);
     let (in_envs, processed, recorded) =
         dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &assumes);
+    lap.end(crate::timing::Step::Lift);
 
     let mut succs_live = succs.clone();
     let mut preds_live = preds.clone();
@@ -1863,11 +1868,13 @@ fn decompile_in<L: Lifter>(
     };
     let (result_reg, second_reg) = L::result_names(bitness);
     let live_out = ctx.ret_rdx || (bitness == 32 && f.hands_back_rdx);
+    lap.end(crate::timing::Step::Structure);
     let (body, settle) = if cleanup {
         cleanup_settled(&body, live_out.then_some(second_reg))
     } else {
         (body, Settle::default())
     };
+    lap.end(crate::timing::Step::Cleanup);
     let (body, canary) = if cleanup {
         canary::fold(&body)
     } else {
@@ -2431,6 +2438,7 @@ fn decompile_in<L: Lifter>(
                 .collect(),
         })
     });
+    lap.end(crate::timing::Step::Header);
     Some(Decompiled {
         text: out,
         virtual_callees: ctx.vcalls.iter().copied().collect(),
