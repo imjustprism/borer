@@ -247,3 +247,34 @@ fn a_zero_test_compares_at_its_flags_width() {
         );
     }
 }
+
+/// `h_mixed_widths` at `-O2` (x86-64 ELF): `movsxd rdi, edi; mov eax, esi;
+/// imul rax, rdi` multiplies in 64 bits, a zero-extended 32-bit value by
+/// a sign-extended one.
+///
+/// Typing the parameters `int32_t a1` and `uint32_t a2` stripped both
+/// widenings and printed `a2 * a1`, which C computes in 32 bits: the
+/// product of -128 and 13107 came back as 4293289600. The product of two
+/// narrow operands keeps one widening, so C multiplies in 64 bits.
+const MIXED_WIDTHS_O2: &[u8] = &[
+    0x48, 0x63, 0xff, 0x89, 0xf0, 0x48, 0x0f, 0xaf, 0xc7, 0x48, 0x63, 0xd2, 0x0f, 0xb6, 0xf1, 0x48,
+    0x0f, 0xaf, 0xf2, 0x48, 0xc1, 0xe9, 0x3c, 0x48, 0x29, 0xc8, 0x48, 0x01, 0xf0, 0xc3,
+];
+
+/// A product of two narrow parameters the machine computed in 64 bits
+/// keeps a 64-bit operand.
+#[test]
+fn a_wide_product_of_narrow_parameters_stays_wide() {
+    let mut p = raw_program(MIXED_WIDTHS_O2);
+    p.format = BinaryFormat::Elf;
+    let text = decompile(&p, &Analysis::compute(&p), &Overlay::default(), BASE).expect("decompile");
+    let body = text
+        .lines()
+        .find(|l| l.starts_with("return "))
+        .unwrap_or_default();
+    assert!(body.contains("(int64_t)a1"), "{text}");
+    assert!(
+        !body.contains("a2 * a1") && !body.contains("a1 * a2"),
+        "{text}"
+    );
+}
