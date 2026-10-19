@@ -330,6 +330,7 @@ fn copied_from(insn: &Insn) -> Option<usize> {
         | Mnemonic::Fsub
         | Mnemonic::Fmul
         | Mnemonic::Fdiv
+        | Mnemonic::Fnmul
         | Mnemonic::Fmadd
         | Mnemonic::Fmsub
         | Mnemonic::Fnmadd
@@ -358,8 +359,8 @@ fn copied_from(insn: &Insn) -> Option<usize> {
         | Mnemonic::Mrs
         | Mnemonic::Msr
         | Mnemonic::Barrier
-        | Mnemonic::Ld1
-        | Mnemonic::St1
+        | Mnemonic::Ldn
+        | Mnemonic::Stn
         | Mnemonic::Simd(_)
         | Mnemonic::Other => None,
     }

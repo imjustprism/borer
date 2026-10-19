@@ -2679,3 +2679,162 @@ fn arm64_lane_operations_are_c_over_vector_types() {
         assert!(out.contains(spelled), "{spelled}: {out}");
     }
 }
+
+/// Where the structure and table routine is placed.
+const BASE_STRUCT: u64 = 0x6_0000;
+
+/// Structure loads and stores, selects, narrowings and tables are C.
+///
+/// The bitwise selects, narrowing shifts, table lookups, the vector bit
+/// reversal and population count and the conversions read from `v`
+/// registers are C over vector types, none left as assembly or as a call
+/// to its mnemonic. The routine loads interleaved, replicated and single-lane structures
+/// from `x0`, selects, narrows, looks up and reverses their lanes, stores
+/// them interleaved, as a lane and whole, and returns a negated product
+/// of a fixed-point conversion.
+#[test]
+fn arm64_structures_selects_and_tables_are_c_over_vector_types() {
+    let words: [u32; 20] = [
+        0x4c40_8800, // ASM: ld2 {v0.4s, v1.4s}, [x0]
+        0x4d60_e002, // ASM: ld4r {v2.16b, v3.16b, v4.16b, v5.16b}, [x0]
+        0x4d40_8006, // ASM: ld1 {v6.s}[2], [x0]
+        0x6e62_1c20, // ASM: bsl v0.16b, v1.16b, v2.16b
+        0x0f0c_8427, // ASM: shrn v7.8b, v1.8h, #4
+        0x6f0e_9c07, // ASM: uqrshrn2 v7.16b, v0.8h, #2
+        0x0f1d_9408, // ASM: sqshrn v8.4h, v0.4s, #3
+        0x4e03_2009, // ASM: tbl v9.16b, {v0.16b, v1.16b}, v3.16b
+        0x4e05_1086, // ASM: tbx v6.16b, {v4.16b}, v5.16b
+        0x6e60_592a, // ASM: rbit v10.16b, v9.16b
+        0x4e20_594a, // ASM: cnt v10.16b, v10.16b
+        0x4f38_e40b, // ASM: scvtf v11.4s, v0.4s, #8
+        0x4c00_4826, // ASM: st3 {v6.4s, v7.4s, v8.4s}, [x1]
+        0x4c00_8049, // ASM: st2 {v9.16b, v10.16b}, [x2]
+        0x4d9f_846a, // ASM: st1 {v10.d}[1], [x3], #8
+        0x3d80_006b, // ASM: str q11, [x3]
+        0x9e67_008d, // ASM: fmov d13, x4
+        0x7f7d_e5ac, // ASM: ucvtf d12, d13, #3
+        0x1e6c_8980, // ASM: fnmul d0, d12, d12
+        0xd65f_03c0, // ASM: ret
+    ];
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let len = u64::try_from(code.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE_STRUCT, 0, len, false, true);
+    let mut p = Program::raw(code, Arch::Arm64, 0, Some(BASE_STRUCT), vec![text]);
+    p.symbols = vec![local("structures", BASE_STRUCT)];
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE_STRUCT).expect("decompiles");
+    assert!(!out.contains("/* asm"), "{out}");
+    for name in [
+        "__ld2",
+        "__ld4",
+        "__st2",
+        "__st3",
+        "__bsl",
+        "__shrn",
+        "__uqrshrn",
+        "__sqshrn",
+        "__tbl",
+        "__tbx",
+        "__rbit",
+        "__cnt",
+        "__scvtf",
+        "__dup",
+        "__ins",
+    ] {
+        assert!(!out.contains(name), "{name}: {out}");
+    }
+    for spelled in [
+        "__builtin_shufflevector(*(u32x4*)a1, *(u32x4*)(a1 + 16), 0, 2, 4, 6)",
+        "__builtin_convertvector(",
+        "__builtin_elementwise_min(",
+        "__builtin_elementwise_max(",
+        "__builtin_elementwise_bitreverse(",
+        "__builtin_elementwise_popcount(",
+        " < 16 ? (",
+        " < 32 ? (",
+        "/ 256.0f",
+        "/ 8.0",
+        "-(",
+    ] {
+        assert!(out.contains(spelled), "{spelled}: {out}");
+    }
+}
+
+/// Where the second structure routine is placed.
+const BASE_STRUCT2: u64 = 0x7_0000;
+
+/// The forms the first structure routine leaves out are C too.
+///
+/// Three- and four-register interleaves, the replicate loads of one and
+/// two registers, the `bit` and `bif` selects, the rounding and unsigned
+/// narrowing shifts, a three-register table, and the integer and
+/// fixed-point conversions from a `v` register, scalar and vector.
+#[test]
+fn arm64_interleaves_narrowings_and_conversions_are_c() {
+    let words: [u32; 28] = [
+        0x4c40_4400, // ASM: ld3 {v0.8h, v1.8h, v2.8h}, [x0]
+        0x0d40_c823, // ASM: ld1r {v3.2s}, [x1]
+        0x0d60_c424, // ASM: ld2r {v4.4h, v5.4h}, [x1]
+        0x4c40_0850, // ASM: ld4 {v16.4s, v17.4s, v18.4s, v19.4s}, [x2]
+        0x6ea2_1c20, // ASM: bit v0.16b, v1.16b, v2.16b
+        0x6ef1_1e01, // ASM: bif v1.16b, v16.16b, v17.16b
+        0x0f0e_8c06, // ASM: rshrn v6.8b, v0.8h, #2
+        0x0f1a_9e07, // ASM: sqrshrn v7.4h, v16.4s, #6
+        0x6f14_9627, // ASM: uqshrn2 v7.8h, v17.4s, #12
+        0x4e13_4214, // ASM: tbl v20.16b, {v16.16b, v17.16b, v18.16b}, v19.16b
+        0x4c00_0870, // ASM: st4 {v16.4s, v17.4s, v18.4s, v19.4s}, [x3]
+        0x4c00_7094, // ASM: st1 {v20.16b}, [x4]
+        0xad00_8480, // ASM: stp q0, q1, [x4, #16]
+        0x6d03_1083, // ASM: stp d3, d4, [x4, #48]
+        0x6d04_1c86, // ASM: stp d6, d7, [x4, #64]
+        0x3d80_1487, // ASM: str q7, [x4, #80]
+        0x1e27_00b5, // ASM: fmov s21, w5
+        0x5e21_dab6, // ASM: scvtf s22, s21
+        0x5f3c_e6b7, // ASM: scvtf s23, s21, #4
+        0x9e67_00d8, // ASM: fmov d24, x6
+        0x7e61_db19, // ASM: ucvtf d25, d24
+        0x6f79_e71a, // ASM: ucvtf v26.2d, v24.2d, #7
+        0x3d80_189a, // ASM: str q26, [x4, #96]
+        0x1e37_2ac0, // ASM: fadd s0, s22, s23
+        0x1e20_8800, // ASM: fnmul s0, s0, s0
+        0x1e22_c000, // ASM: fcvt d0, s0
+        0x1e79_2800, // ASM: fadd d0, d0, d25
+        0xd65f_03c0, // ASM: ret
+    ];
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let len = u64::try_from(code.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE_STRUCT2, 0, len, false, true);
+    let mut p = Program::raw(code, Arch::Arm64, 0, Some(BASE_STRUCT2), vec![text]);
+    p.symbols = vec![local("interleaves", BASE_STRUCT2)];
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE_STRUCT2).expect("decompiles");
+    assert!(!out.contains("/* asm"), "{out}");
+    for name in [
+        "__ld3",
+        "__ld4",
+        "__st4",
+        "__bit",
+        "__bif",
+        "__rshrn",
+        "__sqrshrn",
+        "__uqshrn",
+        "__tbl",
+        "__ucvtf",
+        "__dup",
+    ] {
+        assert!(!out.contains(name), "{name}: {out}");
+    }
+    for spelled in [
+        "__builtin_shufflevector(__builtin_shufflevector(",
+        "(u32x2){0} + (uint32_t)",
+        " >> 1) & 1)",
+        "(i32x4){0} + -32768",
+        " < 48 ? (",
+        "/ 128.0",
+        "(float)",
+        "(double)",
+        "-(",
+    ] {
+        assert!(out.contains(spelled), "{spelled}: {out}");
+    }
+}

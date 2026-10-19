@@ -19,6 +19,14 @@ use crate::isa::a64::{Cond, Insn, Opnd, Reg};
 
 use super::{Machine, mask_wide, unmodeled, vector};
 
+/// Bits 28 to 23 of the vector fixed-point conversions, `scvtf` and
+/// `ucvtf` by an immediate.
+const FIXED_TO_FLOAT: u32 = 0b01_1110;
+
+/// Bits 21 to 17 of a two-register vector word over single and double
+/// lanes; the half-precision forms set others.
+const SINGLE_DOUBLE_MISC: u32 = 0b1_0000;
+
 /// The sign bit of a value `bits` wide, for `fabs` and `fneg`.
 fn sign_bit(bits: u16) -> u64 {
     1u64 << (u32::from(bits) - 1)
@@ -373,7 +381,9 @@ impl Machine<'_> {
 
     /// `scvtf` and `ucvtf`: an integer, signed or unsigned, into the
     /// destination's width, the fixed-point form divided by `2^fbits` and
-    /// the register form as it is.
+    /// the register form as it is. The integer is a general register's, or
+    /// the low lane of a `v` register at the destination's width; the
+    /// vector forms convert every lane ([`Machine::int_to_float_array`]).
     ///
     /// # Arguments
     ///
@@ -385,27 +395,65 @@ impl Machine<'_> {
     /// When an operand is not modeled or the fixed-point shift is out of
     /// the source's width.
     pub(super) fn int_to_float(&mut self, i: &Insn, signed: bool) -> Result<(), Stop> {
-        let (Opnd::Reg { reg: rd, bits: to }, Opnd::Reg { bits: from, .. }) =
-            (i.operands[0], i.operands[1])
+        if vector(i) {
+            return self.int_to_float_array(i, signed);
+        }
+        let (
+            Opnd::Reg { reg: rd, bits: to },
+            Opnd::Reg {
+                reg: rn,
+                bits: from,
+            },
+        ) = (i.operands[0], i.operands[1])
         else {
             return Err(unmodeled(i));
         };
-        let raw = self.int(i, 1)?;
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "the conversion rounds the integer to the float, as the machine does"
-        )]
-        let base = if signed {
-            sign_extend(raw, u32::from(from)) as f64
-        } else {
-            raw as f64
+        let raw = match rn {
+            Reg::V(_) => lo64(mask_wide(self.reg(rn), from)),
+            Reg::X(_) | Reg::Sp | Reg::Zr => self.int(i, 1)?,
         };
-        let v = match i.operands.get(2) {
-            Some(Opnd::Imm(v)) if *v != 0 && *v <= u64::from(from) => base / pow2(*v),
-            Some(Opnd::None) | None => base,
+        let fbits = match i.operands.get(2) {
+            Some(Opnd::Imm(v)) if *v != 0 && *v <= u64::from(from) => *v,
+            Some(Opnd::None) | None => 0,
             _ => return Err(unmodeled(i)),
         };
+        let v = fixed_to_float(raw, signed, from, fbits);
         self.set_reg(rd, to, u128::from(single(v, to)));
+        Ok(())
+    }
+
+    /// `scvtf` and `ucvtf` (vector, integer and fixed-point): each lane
+    /// converted to the float of its width, the fixed-point form divided
+    /// by `2^fbits`; a 64-bit arrangement clears the upper half.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `signed` - Whether the integers are signed.
+    ///
+    /// # Errors
+    ///
+    /// For a half-precision arrangement, and an `immh` naming no lane
+    /// width.
+    fn int_to_float_array(&mut self, i: &Insn, signed: bool) -> Result<(), Stop> {
+        let w = i.word;
+        let (lane, fbits): (u16, u64) = if (w >> 23) & 0x3f == FIXED_TO_FLOAT {
+            let imm = u64::from((w >> 16) & 0x7f);
+            match (w >> 19) & 0xf {
+                4..=7 => (32, 64 - imm),
+                8..=15 => (64, 128 - imm),
+                _ => return Err(unmodeled(i)),
+            }
+        } else if (w >> 17) & 0x1f != SINGLE_DOUBLE_MISC {
+            return Err(unmodeled(i));
+        } else if (w >> 22) & 1 == 1 {
+            (64, 0)
+        } else {
+            (32, 0)
+        };
+        let span = if (w >> 30) & 1 == 1 { 128 } else { 64 };
+        let v = convert_lanes(self.reg(vreg(w, 5)), signed, lane, fbits, span);
+        self.set_reg(vreg(w, 0), 128, v);
         Ok(())
     }
 
@@ -549,6 +597,52 @@ fn fixed(x: f64, signed: bool, bits: u16) -> u64 {
     )]
     let v = t as i64;
     mask(v.cast_unsigned(), u32::from(bits))
+}
+
+/// The lanes of a vector integer-to-float conversion: each lane of `x`
+/// over `span` bits converted to the float of its width, divided by
+/// `2^fbits`; the bits past `span` zero.
+///
+/// # Arguments
+///
+/// * `x` - The integers.
+/// * `signed` - Whether they are signed.
+/// * `lane` - The lane width, 32 or 64.
+/// * `fbits` - The fixed-point fraction bits, 0 for an integer.
+/// * `span` - The arrangement's width, 64 or 128.
+pub(crate) fn convert_lanes(x: u128, signed: bool, lane: u16, fbits: u64, span: u16) -> u128 {
+    let mut v = 0u128;
+    for k in 0..u32::from(span / lane) {
+        let at = k * u32::from(lane);
+        let raw = mask(lo64(x >> at), u32::from(lane));
+        v |= u128::from(single(fixed_to_float(raw, signed, lane, fbits), lane)) << at;
+    }
+    v
+}
+
+/// An integer of `bits` bits as the double it is, divided by `2^fbits`.
+///
+/// A 32-bit integer is exact as a double, which then rounds once to a
+/// single; a 64-bit one rounds once to a double. A division by a power of
+/// two is exact.
+///
+/// # Arguments
+///
+/// * `raw` - The integer's bits.
+/// * `signed` - Whether it is signed.
+/// * `bits` - Its width, 32 or 64.
+/// * `fbits` - The fixed-point fraction bits, 0 for an integer.
+fn fixed_to_float(raw: u64, signed: bool, bits: u16, fbits: u64) -> f64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the conversion rounds the integer to the float, as the machine does"
+    )]
+    let base = if signed {
+        sign_extend(raw, u32::from(bits)) as f64
+    } else {
+        mask(raw, u32::from(bits)) as f64
+    };
+    if fbits == 0 { base } else { base / pow2(fbits) }
 }
 
 /// Two to a power, for the fixed-point shift the conversions scale by.

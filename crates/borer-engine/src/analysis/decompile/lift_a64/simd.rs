@@ -13,11 +13,20 @@
 use super::super::expr::{Expr, Op, fold};
 use super::float::{packed_name, vreg};
 use super::{Lift, low, low64};
-use crate::isa::a64::{Insn, Opnd, Simd};
+use crate::isa::a64::{Insn, Opnd, Reg, Simd};
+use crate::num::lo8;
 
 /// The bits 28 to 24 of an Advanced SIMD vector word's integer forms; a
 /// scalar form sets bit 28, a shift-by-immediate form bit 24.
 const VECTOR_INTEGER: u32 = 0b0_1110;
+
+/// Bits 28 to 23 of the vector fixed-point conversions, `scvtf` and
+/// `ucvtf` by an immediate.
+const FIXED_TO_FLOAT: u32 = 0b01_1110;
+
+/// Bits 21 to 17 of a two-register vector word over single and double
+/// lanes; the half-precision forms set others.
+const SINGLE_DOUBLE_MISC: u32 = 0b1_0000;
 
 /// The name an operation's call takes, its mnemonic.
 ///
@@ -55,6 +64,18 @@ fn mnemonic(op: Simd) -> &'static str {
         Simd::Uaddw => "uaddw",
         Simd::Addp => "addp",
         Simd::Mla => "mla",
+        Simd::Bsl => "bsl",
+        Simd::Bit => "bit",
+        Simd::Bif => "bif",
+        Simd::Shrn => "shrn",
+        Simd::Rshrn => "rshrn",
+        Simd::Sqshrn => "sqshrn",
+        Simd::Sqrshrn => "sqrshrn",
+        Simd::Uqshrn => "uqshrn",
+        Simd::Uqrshrn => "uqrshrn",
+        Simd::Tbl => "tbl",
+        Simd::Tbx => "tbx",
+        Simd::Cnt => "cnt",
     }
 }
 
@@ -204,6 +225,50 @@ impl Lift<'_, '_> {
                     vec![v(self, 0), put, Expr::Const(u64::from(index))],
                 )
             }
+            Simd::Bsl | Simd::Bit | Simd::Bif => {
+                call(name, 8, whole, vec![v(self, 0), v(self, 5), v(self, 16)])
+            }
+            Simd::Shrn
+            | Simd::Rshrn
+            | Simd::Sqshrn
+            | Simd::Sqrshrn
+            | Simd::Uqshrn
+            | Simd::Uqrshrn => {
+                if (w >> 28) & 1 == 1 {
+                    return None;
+                }
+                let lane: u16 = match (w >> 19) & 0xf {
+                    1 => 8,
+                    2 | 3 => 16,
+                    4..=7 => 32,
+                    _ => return None,
+                };
+                let shift = Expr::Const(u64::from(2 * u32::from(lane) - ((w >> 16) & 0x7f)));
+                if whole {
+                    call(
+                        &format!("{name}2"),
+                        lane,
+                        true,
+                        vec![v(self, 0), v(self, 5), shift],
+                    )
+                } else {
+                    call(name, lane, false, vec![v(self, 5), shift])
+                }
+            }
+            Simd::Cnt => call(name, 8, whole, vec![v(self, 5)]),
+            Simd::Tbl | Simd::Tbx => {
+                let first = (w >> 5) & 0x1f;
+                let mut args = Vec::with_capacity(6);
+                if op == Simd::Tbx {
+                    args.push(v(self, 0));
+                }
+                for k in 0..=(w >> 13) & 3 {
+                    let r = Reg::V(lo8(u64::from((first + k) % 32)));
+                    args.push(self.reg_at(r, 128));
+                }
+                args.push(v(self, 16));
+                call(name, 8, whole, args)
+            }
             Simd::Umov => {
                 let (bits, index) = element((w >> 16) & 0x1f)?;
                 let Opnd::Reg { reg, bits: width } = i.operands[0] else {
@@ -217,8 +282,9 @@ impl Lift<'_, '_> {
         Some(())
     }
 
-    /// `scvtf` and `ucvtf` (vector, integer): each lane converted to the
-    /// float of its width.
+    /// `scvtf` and `ucvtf` (vector, integer and fixed-point): each lane
+    /// converted to the float of its width, `__scvtf_4s(x)`, the
+    /// fixed-point form with its fraction bits, `__scvtf_4s(x, 16)`.
     ///
     /// # Arguments
     ///
@@ -226,17 +292,40 @@ impl Lift<'_, '_> {
     /// * `signed` - Whether the integers are signed.
     pub(super) fn int_to_float_array(&mut self, i: &Insn, signed: bool) -> Option<()> {
         let w = i.word;
-        if (w >> 24) & 0x1f != VECTOR_INTEGER {
+        let (lane, fbits) = if (w >> 23) & 0x3f == FIXED_TO_FLOAT {
+            let imm = (w >> 16) & 0x7f;
+            match (w >> 19) & 0xf {
+                4..=7 => (32, Some(64 - imm)),
+                8..=15 => (64, Some(128 - imm)),
+                _ => return None,
+            }
+        } else if (w >> 24) & 0x1f == VECTOR_INTEGER && (w >> 17) & 0x1f == SINGLE_DOUBLE_MISC {
+            (if (w >> 22) & 1 == 1 { 64 } else { 32 }, None)
+        } else {
             return None;
-        }
-        let lane = if (w >> 22) & 1 == 1 { 64 } else { 32 };
+        };
         let whole = (w >> 30) & 1 == 1;
         if lane == 64 && !whole {
             return None;
         }
         let name = if signed { "scvtf" } else { "ucvtf" };
+        let mut args = vec![self.reg_at(vreg(w, 5), 128)];
+        args.extend(fbits.map(|f| Expr::Const(u64::from(f))));
+        let v = Expr::Call(packed_name(name, lane, whole), args);
+        self.write(vreg(w, 0), 128, v);
+        Some(())
+    }
+
+    /// `rbit` (vector): the bits of each byte reversed, named as the
+    /// instruction over the register, `__rbit_16b(x)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    pub(super) fn vector_rbit(&mut self, i: &Insn) -> Option<()> {
+        let w = i.word;
         let x = self.reg_at(vreg(w, 5), 128);
-        let v = Expr::Call(packed_name(name, lane, whole), vec![x]);
+        let v = Expr::Call(packed_name("rbit", 8, (w >> 30) & 1 == 1), vec![x]);
         self.write(vreg(w, 0), 128, v);
         Some(())
     }

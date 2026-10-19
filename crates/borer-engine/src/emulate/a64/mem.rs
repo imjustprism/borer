@@ -10,25 +10,14 @@
 
 use super::{Machine, mask_wide, on_stack, unmodeled};
 use crate::emulate::{HISTORY_MAX, MEMORY_MAX, Stop, Written, lo64, mask, sign_extend};
-use crate::isa::a64::{self, Insn, Mode, Opnd, Reg, Rmw, Width};
+use crate::isa::a64::{self, Insn, Layout, Mode, Opnd, Reg, Rmw, Width};
 use crate::num::{from_usize, lo8};
 
 /// A base register and the value an access writes back to it.
 type WriteBack = Option<(Reg, u64)>;
 
-/// Bytes one `ld1`/`st1` register moves.
+/// Bytes a whole `v` register moves.
 const GROUP_LEN: usize = 16;
-
-/// The `v` register `k` places after `first` in an `ld1`/`st1` group,
-/// wrapping from `v31` to `v0` as the architecture numbers them.
-///
-/// # Arguments
-///
-/// * `first` - The first register's number.
-/// * `k` - The offset from it.
-fn reg_at(first: u8, k: u32) -> Reg {
-    Reg::V(first.wrapping_add(lo8(u64::from(k))) % 32)
-}
 
 impl Machine<'_> {
     /// The address a memory operand names, and the write-back it makes.
@@ -249,9 +238,10 @@ impl Machine<'_> {
         Ok(())
     }
 
-    /// `ld1`: one to four consecutive `v` registers loaded from
-    /// consecutive sixteen-byte blocks, the base written back as its
-    /// operand says.
+    /// `ld1` to `ld4` and `ld1r` to `ld4r` in every form
+    /// ([`a64::structure`]): whole registers, interleaved elements, one
+    /// lane of each register with the rest kept, or one element
+    /// replicated, the base written back as its operand says.
     ///
     /// # Arguments
     ///
@@ -259,21 +249,41 @@ impl Machine<'_> {
     ///
     /// # Errors
     ///
-    /// When the list is a form the machine does not model (the lane
-    /// forms, the interleaved `ld2` to `ld4` counts), or a load faults.
-    pub(super) fn load_group(&mut self, i: &Insn) -> Result<(), Stop> {
-        let (first, count) = a64::ld1_group(i.word).ok_or_else(|| unmodeled(i))?;
+    /// When the word is no structure load the machine reads, or a load
+    /// faults.
+    pub(super) fn load_structure(&mut self, i: &Insn) -> Result<(), Stop> {
+        let s = a64::structure(i.word).ok_or_else(|| unmodeled(i))?;
         let (addr, back) = self.address(i, 1)?;
-        for k in 0..u32::from(count) {
-            let at = addr.wrapping_add(u64::from(k) * from_usize(GROUP_LEN));
-            let v = self.load(at, GROUP_LEN)?;
-            self.set_reg(reg_at(first, k), 128, v);
+        let span = if s.whole { GROUP_LEN } else { GROUP_LEN / 2 };
+        let mut regs = Vec::with_capacity(usize::from(s.count));
+        for k in 0..s.count {
+            regs.push(match s.layout {
+                Layout::Blocks => {
+                    self.load(addr.wrapping_add(u64::from(k) * from_usize(span)), span)?
+                }
+                Layout::Lane(_) => self.reg(s.reg(k)),
+                Layout::Interleaved | Layout::Replicate => 0,
+            });
+        }
+        if s.layout != Layout::Blocks {
+            let bytes = usize::from(s.elem / 8);
+            for slot in s.slots() {
+                let v = self.load(addr.wrapping_add(slot.at), bytes)?;
+                let at = slot.lane * u32::from(s.elem);
+                if let Some(r) = regs.get_mut(usize::from(slot.reg)) {
+                    *r = (*r & !(mask_wide(u128::MAX, s.elem) << at)) | (v << at);
+                }
+            }
+        }
+        for (k, v) in (0u8..).zip(regs) {
+            self.set_reg(s.reg(k), 128, v);
         }
         self.write_back(back);
         Ok(())
     }
 
-    /// `st1`: the store counterpart of [`Machine::load_group`].
+    /// `st1` to `st4` in every form: the store counterpart of
+    /// [`Machine::load_structure`].
     ///
     /// # Arguments
     ///
@@ -281,14 +291,25 @@ impl Machine<'_> {
     ///
     /// # Errors
     ///
-    /// When the list is a form the machine does not model, or memory is
-    /// full.
-    pub(super) fn store_group(&mut self, i: &Insn) -> Result<(), Stop> {
-        let (first, count) = a64::ld1_group(i.word).ok_or_else(|| unmodeled(i))?;
+    /// When the word is no structure store, or memory is full.
+    pub(super) fn store_structure(&mut self, i: &Insn) -> Result<(), Stop> {
+        let s = a64::structure(i.word).ok_or_else(|| unmodeled(i))?;
+        if s.layout == Layout::Replicate {
+            return Err(unmodeled(i));
+        }
         let (addr, back) = self.address(i, 1)?;
-        for k in 0..u32::from(count) {
-            let at = addr.wrapping_add(u64::from(k) * from_usize(GROUP_LEN));
-            self.store(at, GROUP_LEN, self.reg(reg_at(first, k)))?;
+        if s.layout == Layout::Blocks {
+            let span = if s.whole { GROUP_LEN } else { GROUP_LEN / 2 };
+            for k in 0..s.count {
+                let at = addr.wrapping_add(u64::from(k) * from_usize(span));
+                self.store(at, span, self.reg(s.reg(k)))?;
+            }
+        } else {
+            let bytes = usize::from(s.elem / 8);
+            for slot in s.slots() {
+                let v = self.reg(s.reg(slot.reg)) >> (slot.lane * u32::from(s.elem));
+                self.store(addr.wrapping_add(slot.at), bytes, v)?;
+            }
         }
         self.write_back(back);
         Ok(())

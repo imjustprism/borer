@@ -315,6 +315,7 @@ fn mnemonic(opcode: Opcode) -> Mnemonic {
         Opcode::FSUB => Mnemonic::Fsub,
         Opcode::FMUL => Mnemonic::Fmul,
         Opcode::FDIV => Mnemonic::Fdiv,
+        Opcode::FNMUL => Mnemonic::Fnmul,
         Opcode::FMADD => Mnemonic::Fmadd,
         Opcode::FMSUB => Mnemonic::Fmsub,
         Opcode::FNMADD => Mnemonic::Fnmadd,
@@ -366,10 +367,29 @@ fn mnemonic(opcode: Opcode) -> Mnemonic {
         Opcode::UADDW | Opcode::UADDW2 => Mnemonic::Simd(Simd::Uaddw),
         Opcode::ADDP => Mnemonic::Simd(Simd::Addp),
         Opcode::MLA => Mnemonic::Simd(Simd::Mla),
+        Opcode::BSL => Mnemonic::Simd(Simd::Bsl),
+        Opcode::BIT => Mnemonic::Simd(Simd::Bit),
+        Opcode::BIF => Mnemonic::Simd(Simd::Bif),
+        Opcode::SHRN | Opcode::SHRN2 => Mnemonic::Simd(Simd::Shrn),
+        Opcode::RSHRN | Opcode::RSHRN2 => Mnemonic::Simd(Simd::Rshrn),
+        Opcode::SQSHRN | Opcode::SQSHRN2 => Mnemonic::Simd(Simd::Sqshrn),
+        Opcode::SQRSHRN | Opcode::SQRSHRN2 => Mnemonic::Simd(Simd::Sqrshrn),
+        Opcode::UQSHRN | Opcode::UQSHRN2 => Mnemonic::Simd(Simd::Uqshrn),
+        Opcode::UQRSHRN | Opcode::UQRSHRN2 => Mnemonic::Simd(Simd::Uqrshrn),
+        Opcode::TBL => Mnemonic::Simd(Simd::Tbl),
+        Opcode::TBX => Mnemonic::Simd(Simd::Tbx),
+        Opcode::CNT => Mnemonic::Simd(Simd::Cnt),
         Opcode::NEG => Mnemonic::Neg,
         Opcode::ABS => Mnemonic::Abs,
-        Opcode::LD1 => Mnemonic::Ld1,
-        Opcode::ST1 => Mnemonic::St1,
+        Opcode::LD1
+        | Opcode::LD2
+        | Opcode::LD3
+        | Opcode::LD4
+        | Opcode::LD1R
+        | Opcode::LD2R
+        | Opcode::LD3R
+        | Opcode::LD4R => Mnemonic::Ldn,
+        Opcode::ST1 | Opcode::ST2 | Opcode::ST3 | Opcode::ST4 => Mnemonic::Stn,
         Opcode::SVC => Mnemonic::Svc,
         Opcode::MRS => Mnemonic::Mrs,
         Opcode::MSR => Mnemonic::Msr,

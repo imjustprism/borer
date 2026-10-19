@@ -19,27 +19,18 @@ use super::super::expr::{
 };
 use super::super::helper::Helper;
 use super::super::lift::EffectKind;
+use super::float::packed_name;
+use super::simd::lane_of;
 use super::{Lift, low, shifted};
-use crate::isa::a64::{self, Insn, Mode, Opnd, Reg, Rmw, Width};
+use crate::isa::a64::{self, Insn, Layout, Mode, Opnd, Reg, Rmw, Structure, Width};
 use crate::isa::x86::ConditionCode;
-use crate::num::{from_usize, lo8};
+use crate::num::from_usize;
 
 /// A base register and the value an access writes back to it.
 type WriteBack = Option<(Reg, Expr)>;
 
-/// Bytes one `ld1`/`st1` register moves.
+/// Bytes a whole `v` register moves.
 const GROUP_BYTES: u64 = 16;
-
-/// The `v` register `k` places after `first` in an `ld1`/`st1` group,
-/// wrapping from `v31` to `v0` as the architecture numbers them.
-///
-/// # Arguments
-///
-/// * `first` - The first register's number.
-/// * `k` - The offset from it.
-fn group_reg(first: u8, k: u32) -> Reg {
-    Reg::V(first.wrapping_add(lo8(u64::from(k))) % 32)
-}
 
 /// The type one element of `width` moves for a register of `bits`, and
 /// whether the load sign-extends it.
@@ -816,55 +807,140 @@ impl Lift<'_, '_> {
         Some(())
     }
 
-    /// `ld1`: one to four consecutive `v` registers loaded from
-    /// consecutive sixteen-byte blocks, the base written back as its
-    /// operand says — a pair load generalized to its register count.
+    /// `ld1` to `ld4` and `ld1r` to `ld4r` in every form
+    /// ([`a64::structure`]), the base written back as its operand says.
+    ///
+    /// Whole registers are their blocks of memory, as a pair load's are.
+    /// The interleaved forms read every block and name each register as
+    /// the lanes it gathers from them, `__ld2_4s(b0, b1, 0)`; a lane form
+    /// is that lane inserted (`__ins_4s`), a replicate form the element
+    /// broadcast (`__dup_4s`), as the instructions with those names write
+    /// them.
     ///
     /// # Arguments
     ///
     /// * `i` - The instruction: register list, then address.
-    pub(super) fn load_group(&mut self, i: &Insn) -> Option<()> {
-        let (first, count) = a64::ld1_group(i.word)?;
+    pub(super) fn load_structure(&mut self, i: &Insn) -> Option<()> {
+        let s = a64::structure(i.word)?;
         let (addr, back) = self.address(i.operands[1])?;
-        let mut writes = Vec::with_capacity(usize::from(count) + 1);
-        for k in 0..u32::from(count) {
-            let at = if k == 0 {
-                addr.clone()
-            } else {
-                fold(
-                    Op::Add,
-                    addr.clone(),
-                    Expr::Const(u64::from(k) * GROUP_BYTES),
-                    64,
-                )
-            };
-            writes.push((group_reg(first, k), 128, self.ex.read_at(at, Ty::U128)));
+        let (span, block) = block_of(&s);
+        let elem = Ty::from_size(usize::from(s.elem / 8), false);
+        let at = |k: u64| offset(&addr, k);
+        let mut writes = Vec::with_capacity(usize::from(s.count) + 1);
+        match s.layout {
+            Layout::Blocks => {
+                for k in 0..s.count {
+                    let v = self.ex.read_at(at(u64::from(k) * span), block);
+                    writes.push((s.reg(k), 128, v));
+                }
+            }
+            Layout::Interleaved => {
+                let blocks: Vec<Expr> = (0..s.count)
+                    .map(|j| self.ex.read_at(at(u64::from(j) * span), block))
+                    .collect();
+                let name = packed_name(&format!("ld{}", s.count), s.elem, s.whole);
+                for k in 0..s.count {
+                    let mut args = blocks.clone();
+                    args.push(Expr::Const(u64::from(k)));
+                    writes.push((s.reg(k), 128, Expr::Call(name.clone(), args)));
+                }
+            }
+            Layout::Lane(index) => {
+                for k in 0..s.count {
+                    let x = self.ex.read_at(at(u64::from(k) * elem_bytes(&s)), elem);
+                    let args = vec![self.reg_at(s.reg(k), 128), x, Expr::Const(u64::from(index))];
+                    writes.push((
+                        s.reg(k),
+                        128,
+                        Expr::Call(packed_name("ins", s.elem, true), args),
+                    ));
+                }
+            }
+            Layout::Replicate => {
+                for k in 0..s.count {
+                    let x = self.ex.read_at(at(u64::from(k) * elem_bytes(&s)), elem);
+                    let dup = Expr::Call(packed_name("dup", s.elem, s.whole), vec![x]);
+                    writes.push((s.reg(k), 128, dup));
+                }
+            }
         }
         writes.extend(back.map(|(r, a)| (r, 64, a)));
         self.write_all(writes);
         Some(())
     }
 
-    /// `st1`: the store counterpart of [`Lift::load_group`].
+    /// `st1` to `st4` in every form: the store counterpart of
+    /// [`Lift::load_structure`]. An interleaved form stores each block as
+    /// the lanes it gathers from the registers, `__st2_4s(v0, v1, 0)`; a
+    /// lane form stores the lane.
     ///
     /// # Arguments
     ///
     /// * `i` - The instruction: register list, then address.
-    pub(super) fn store_group(&mut self, i: &Insn) -> Option<()> {
-        let (first, count) = a64::ld1_group(i.word)?;
-        for k in 0..u32::from(count) {
+    pub(super) fn store_structure(&mut self, i: &Insn) -> Option<()> {
+        let s = a64::structure(i.word)?;
+        let (span, block) = block_of(&s);
+        let regs: Vec<Expr> = (0..s.count).map(|k| self.reg_at(s.reg(k), 128)).collect();
+        let name = packed_name(&format!("st{}", s.count), s.elem, s.whole);
+        for (k, v) in (0u8..).zip(&regs) {
             let (addr, _) = self.address(i.operands[1])?;
-            let v = stored(self.reg_at(group_reg(first, k), 128), Ty::U128);
-            self.ex.store_at(
-                fold(Op::Add, addr, Expr::Const(u64::from(k) * GROUP_BYTES), 64),
-                Ty::U128,
-                v,
-            );
+            let (at, ty, v) = match s.layout {
+                Layout::Blocks => (u64::from(k) * span, block, stored(v.clone(), block)),
+                Layout::Interleaved => {
+                    let mut args = regs.clone();
+                    args.push(Expr::Const(u64::from(k)));
+                    (u64::from(k) * span, block, Expr::Call(name.clone(), args))
+                }
+                Layout::Lane(index) => (
+                    u64::from(k) * elem_bytes(&s),
+                    Ty::from_size(usize::from(s.elem / 8), false),
+                    lane_of(v.clone(), u32::from(index), s.elem),
+                ),
+                Layout::Replicate => return None,
+            };
+            self.ex.store_at(offset(&addr, at), ty, v);
         }
         let (_, back) = self.address(i.operands[1])?;
         if let Some((r, a)) = back {
             self.write(r, 64, a);
         }
         Some(())
+    }
+}
+
+/// The bytes and type of one register's block of a structure access: a
+/// whole register's sixteen, or the low half's eight.
+///
+/// # Arguments
+///
+/// * `s` - The structure.
+fn block_of(s: &Structure) -> (u64, Ty) {
+    if s.whole {
+        (GROUP_BYTES, Ty::U128)
+    } else {
+        (GROUP_BYTES / 2, Ty::U64)
+    }
+}
+
+/// The bytes one element of a structure access moves.
+///
+/// # Arguments
+///
+/// * `s` - The structure.
+fn elem_bytes(s: &Structure) -> u64 {
+    u64::from(s.elem / 8)
+}
+
+/// An address `k` bytes past another.
+///
+/// # Arguments
+///
+/// * `addr` - The address.
+/// * `k` - The offset in bytes.
+fn offset(addr: &Expr, k: u64) -> Expr {
+    if k == 0 {
+        addr.clone()
+    } else {
+        fold(Op::Add, addr.clone(), Expr::Const(k), 64)
     }
 }

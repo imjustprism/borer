@@ -1,6 +1,6 @@
 //! Which registers an A64 instruction's operands read and write.
 
-use super::{Insn, Mem, Mnemonic, Mode, Op, Opnd, Reg};
+use super::{Insn, Layout, Mem, Mnemonic, Mode, Op, Opnd, Reg, Simd};
 
 /// Mask of a register field in an encoding.
 const FIELD: u32 = 0x1f;
@@ -13,17 +13,6 @@ const RM_AT: u32 = 16;
 const WHOLE_V: u16 = 128;
 /// The width of an address register.
 const ADDRESS: u16 = 64;
-
-/// The `v` register `k` places after `first` in an `ld1`/`st1` group,
-/// wrapping from `v31` to `v0` as the architecture numbers them.
-///
-/// # Arguments
-///
-/// * `first` - The first register's number.
-/// * `k` - The offset from it.
-fn group_reg(first: u8, k: u8) -> Reg {
-    Reg::V(first.wrapping_add(k) % 32)
-}
 
 /// The registers an instruction's operands read and write.
 ///
@@ -186,22 +175,25 @@ impl Insn {
                 r.write(ops[1]);
                 r.rest(ops, 2);
             }
-            Mnemonic::Ld1 => {
+            Mnemonic::Ldn => {
                 r.rest(ops, 1);
-                let Some((first, count)) = super::ld1_group(self.word) else {
+                let Some(s) = super::structure(self.word) else {
                     return;
                 };
-                for k in 0..count {
-                    r.writes.push(group_reg(first, k));
+                for k in 0..s.count {
+                    if matches!(s.layout, Layout::Lane(_)) {
+                        r.reads.push((s.reg(k), WHOLE_V));
+                    }
+                    r.writes.push(s.reg(k));
                 }
             }
-            Mnemonic::St1 => {
+            Mnemonic::Stn => {
                 r.rest(ops, 1);
-                let Some((first, count)) = super::ld1_group(self.word) else {
+                let Some(s) = super::structure(self.word) else {
                     return;
                 };
-                for k in 0..count {
-                    r.reads.push((group_reg(first, k), WHOLE_V));
+                for k in 0..s.count {
+                    r.reads.push((s.reg(k), WHOLE_V));
                 }
             }
             Mnemonic::Atomic(..) => {
@@ -265,6 +257,7 @@ impl Insn {
             | Mnemonic::Fsub
             | Mnemonic::Fmul
             | Mnemonic::Fdiv
+            | Mnemonic::Fnmul
             | Mnemonic::Fmadd
             | Mnemonic::Fmsub
             | Mnemonic::Fnmadd
@@ -292,6 +285,13 @@ impl Insn {
                 r.write(ops[0]);
                 if ops.contains(&Opnd::Other) {
                     r.vector_fields(self.word);
+                }
+                if let Mnemonic::Simd(Simd::Tbl | Simd::Tbx) = self.mnemonic {
+                    let table = (self.word >> RN_AT) & FIELD;
+                    for k in 1..=(self.word >> 13) & 3 {
+                        let n = crate::num::lo8(u64::from((table + k) % 32));
+                        r.reads.push((Reg::V(n), WHOLE_V));
+                    }
                 }
             }
         }

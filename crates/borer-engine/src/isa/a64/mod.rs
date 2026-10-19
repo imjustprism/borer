@@ -20,10 +20,12 @@
 mod decode;
 mod fmt;
 mod roles;
+mod structure;
 
 pub use decode::decode;
 pub use fmt::text;
 pub use roles::Registers;
+pub use structure::{Layout, Slot, Structure, structure};
 
 /// Bytes in every A64 instruction; instructions are also aligned to it.
 pub const INSN_LEN: usize = 4;
@@ -487,6 +489,8 @@ pub enum Mnemonic {
     Fmul,
     /// `fdiv` (scalar): floating-point division.
     Fdiv,
+    /// `fnmul` (scalar): the negated product.
+    Fnmul,
     /// `fmadd` (scalar): the product of the first two sources plus the
     /// third, rounded once.
     Fmadd,
@@ -543,11 +547,13 @@ pub enum Mnemonic {
     Fmax,
     /// `fmin`: the smaller of two floats, scalar or lane-wise.
     Fmin,
-    /// `ld1`: a whole `v` register, or several consecutive ones, loaded
-    /// from memory, one sixteen-byte block per register.
-    Ld1,
-    /// `st1`: the store counterpart of [`Mnemonic::Ld1`].
-    St1,
+    /// A structure load, `ld1` to `ld4` and `ld1r` to `ld4r`, in every
+    /// form: whole registers, interleaved elements, one lane, or one
+    /// element replicated, as [`structure()`] reads the word.
+    Ldn,
+    /// A structure store, `st1` to `st4`: the store counterpart of
+    /// [`Mnemonic::Ldn`].
+    Stn,
     /// `movi`: a vector or 64-bit scalar immediate.
     Movi,
     /// `mvni`: the inverse of a vector immediate.
@@ -636,6 +642,36 @@ pub enum Simd {
     Addp,
     /// `mla`: the lane-wise product added to the destination's lanes.
     Mla,
+    /// `bsl`: each bit from the first source where the destination's is
+    /// set, else from the second.
+    Bsl,
+    /// `bit`: each bit of the first source inserted where the second's is
+    /// set, the destination's kept elsewhere.
+    Bit,
+    /// `bif`: each bit of the first source inserted where the second's is
+    /// clear, the destination's kept elsewhere.
+    Bif,
+    /// `shrn` and `shrn2`: each lane shifted right and cut to half its
+    /// width, into the lower half, or the upper half kept below it.
+    Shrn,
+    /// `rshrn` and `rshrn2`: as [`Simd::Shrn`], rounded.
+    Rshrn,
+    /// `sqshrn` and `sqshrn2`: as [`Simd::Shrn`], signed, saturated.
+    Sqshrn,
+    /// `sqrshrn` and `sqrshrn2`: as [`Simd::Sqshrn`], rounded.
+    Sqrshrn,
+    /// `uqshrn` and `uqshrn2`: as [`Simd::Shrn`], unsigned, saturated.
+    Uqshrn,
+    /// `uqrshrn` and `uqrshrn2`: as [`Simd::Uqshrn`], rounded.
+    Uqrshrn,
+    /// `tbl`: each byte the one of a one-to-four register table its index
+    /// names, zero for an index past it.
+    Tbl,
+    /// `tbx`: as [`Simd::Tbl`], an index past the table keeping the
+    /// destination's byte.
+    Tbx,
+    /// `cnt`: the number of set bits in each byte.
+    Cnt,
 }
 
 /// How an instruction moves control.
@@ -671,35 +707,6 @@ pub struct Insn {
     pub operands: [Opnd; 4],
     /// How it moves control; [`Op::flow`] of `op`.
     pub flow: Flow,
-}
-
-/// The first `v` register and how many consecutive ones an `ld1` or `st1`
-/// (multiple structures) word moves, wrapping from `v31` to `v0`.
-///
-/// The decoder leaves the register list unmodeled, so the word is read
-/// here for the emulator, the lifter and the register roles alike.
-///
-/// # Arguments
-///
-/// * `word` - The encoded word.
-///
-/// # Returns
-///
-/// The first register's number and the count, one to four; `None` for the
-/// single-structure lane forms and an interleaved (`ld2` to `ld4`) count.
-#[must_use]
-pub fn ld1_group(word: u32) -> Option<(u8, u8)> {
-    if !matches!((word >> 23) & 0x1f, 24 | 25) {
-        return None;
-    }
-    let count = match (word >> 12) & 0xf {
-        0b0010 => 4,
-        0b0110 => 3,
-        0b0111 => 1,
-        0b1010 => 2,
-        _ => return None,
-    };
-    Some((crate::num::lo8(u64::from(word & 0x1f)), count))
 }
 
 impl Insn {

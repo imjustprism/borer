@@ -825,6 +825,117 @@ fn neon(f: &str, args: &[Expr], n: &Names<'_>) -> Option<V> {
                 true,
             )
         }
+        ("scvtf" | "ucvtf", [a, Expr::Const(f)]) => {
+            let from = if op == "scvtf" { signed } else { unsigned };
+            let to = float()?;
+            let scale = 2f64.powi(i32::try_from(*f).ok()?);
+            let suffix = if to.elem == Elem::F32 { "f" } else { "" };
+            V::of(
+                format!(
+                    "__builtin_convertvector({}, {}) / {scale:?}{suffix}",
+                    operand(a, from, n),
+                    to.name()
+                ),
+                to,
+                false,
+            )
+        }
+        ("bsl" | "bit" | "bif", [d, a, b]) => {
+            let t = int(Elem::U8);
+            let (d, a, b) = (operand(d, t, n), operand(a, t, n), operand(b, t, n));
+            let text = match op {
+                "bsl" => format!("({d} & {a}) | (~{d} & {b})"),
+                "bit" => format!("({a} & {b}) | ({d} & ~{b})"),
+                _ => format!("({a} & ~{b}) | ({d} & {b})"),
+            };
+            V::of(text, t, false)
+        }
+        ("shrn" | "rshrn" | "sqshrn" | "sqrshrn" | "uqshrn" | "uqrshrn", [x, Expr::Const(k)]) => {
+            narrow(op, bits, x, *k, n)?
+        }
+        (
+            "shrn2" | "rshrn2" | "sqshrn2" | "sqrshrn2" | "uqshrn2" | "uqrshrn2",
+            [d, x, Expr::Const(k)],
+        ) => {
+            let low = Vt {
+                elem: Elem::unsigned(bits),
+                whole: false,
+            };
+            let high = narrow(op.strip_suffix('2')?, bits, x, *k, n)?;
+            let order: Vec<u32> = (0..2 * low.lanes()).collect();
+            V::of(
+                format!(
+                    "__builtin_shufflevector({}, {}, {})",
+                    operand(d, low, n),
+                    cast_to(&high, low),
+                    list(&order)
+                ),
+                Vt::whole(low.elem),
+                true,
+            )
+        }
+        ("tbl" | "tbx", [first, ..]) => {
+            let t = int(Elem::U8);
+            let (keep, rest) = if op == "tbx" {
+                (Some(operand(first, t, n)), args.get(1..)?)
+            } else {
+                (None, args)
+            };
+            let (index, tables) = rest.split_last()?;
+            let index = operand(index, t, n);
+            let tables: Vec<String> = tables
+                .iter()
+                .map(|e| operand(e, Vt::whole(Elem::U8), n))
+                .collect();
+            let lanes: Vec<String> = (0..t.lanes())
+                .map(|k| {
+                    let at = format!("({index})[{k}]");
+                    let missing = keep
+                        .as_ref()
+                        .map_or_else(|| "0".to_owned(), |d| format!("({d})[{k}]"));
+                    (0u32..4)
+                        .zip(&tables)
+                        .rev()
+                        .fold(missing, |rest, (j, table)| {
+                            let within = if j == 0 {
+                                at.clone()
+                            } else {
+                                format!("{at} - {}", 16 * j)
+                            };
+                            format!("{at} < {} ? ({table})[{within}] : {rest}", 16 * (j + 1))
+                        })
+                })
+                .collect();
+            V::of(format!("({}){{{}}}", t.name(), lanes.join(", ")), t, true)
+        }
+        ("rbit" | "cnt", [x]) => {
+            let t = int(Elem::U8);
+            let builtin = if op == "rbit" {
+                "bitreverse"
+            } else {
+                "popcount"
+            };
+            V::of(
+                format!("__builtin_elementwise_{builtin}({})", operand(x, t, n)),
+                t,
+                true,
+            )
+        }
+        ("ld2" | "ld3" | "ld4", [blocks @ .., Expr::Const(k)]) => {
+            let count = u32::try_from(blocks.len()).ok()?;
+            let k = u32::try_from(*k).ok()?;
+            let order: Vec<u32> = (0..unsigned.lanes()).map(|e| e * count + k).collect();
+            gather(unsigned, blocks, &order, n)?
+        }
+        ("st2" | "st3" | "st4", [regs @ .., Expr::Const(j)]) => {
+            let count = u32::try_from(regs.len()).ok()?;
+            let lanes = unsigned.lanes();
+            let j = u32::try_from(*j).ok()?;
+            let order: Vec<u32> = (j * lanes..(j + 1) * lanes)
+                .map(|g| (g % count) * lanes + g / count)
+                .collect();
+            gather(unsigned, regs, &order, n)?
+        }
         ("dup", [x]) => V::of(
             format!(
                 "({}){{0}} + {}",
@@ -836,6 +947,111 @@ fn neon(f: &str, args: &[Expr], n: &Names<'_>) -> Option<V> {
         ),
         _ => return None,
     })
+}
+
+/// A narrowing shift, `__builtin_convertvector(x >> 4, u8x8)`.
+///
+/// Each lane is shifted right by `k`, rounded where the mnemonic says,
+/// saturated for the `sq` and `uq` forms, then converted to the lanes of
+/// half the width. A rounded shift adds the last bit shifted out, `(x >> k) + ((x >> (k -
+/// 1)) & 1)`, the sum the instruction rounds to without the carry out of
+/// the lane that adding half first would lose.
+///
+/// # Arguments
+///
+/// * `op` - The mnemonic, without the `2` of the upper-half form.
+/// * `bits` - The narrow lane's width.
+/// * `x` - The wide source.
+/// * `k` - The shift, 1 to `bits`.
+/// * `n` - Name resolution.
+///
+/// # Returns
+///
+/// The narrow 64-bit vector, or `None` for a shift of zero.
+fn narrow(op: &str, bits: u32, x: &Expr, k: u64, n: &Names<'_>) -> Option<V> {
+    let signed = op.starts_with("sq");
+    let saturate = signed || op.starts_with("uq");
+    let rounded = matches!(op, "rshrn" | "sqrshrn" | "uqrshrn");
+    let elem = |b: u32| {
+        if signed {
+            Elem::signed(b)
+        } else {
+            Elem::unsigned(b)
+        }
+    };
+    let wide = Vt::whole(elem(2 * bits));
+    let to = Vt {
+        elem: elem(bits),
+        whole: false,
+    };
+    let s = operand(x, wide, n);
+    let mut v = if rounded {
+        format!("({s} >> {k}) + (({s} >> {}) & 1)", k.checked_sub(1)?)
+    } else {
+        format!("{s} >> {k}")
+    };
+    if saturate {
+        let splat = |c: i128| format!("({}){{0}} + {c}", wide.name());
+        let top = if signed {
+            (1i128 << (bits - 1)) - 1
+        } else {
+            (1i128 << bits) - 1
+        };
+        v = format!("__builtin_elementwise_min({v}, {})", splat(top));
+        if signed {
+            v = format!(
+                "__builtin_elementwise_max({v}, {})",
+                splat(-(1i128 << (bits - 1)))
+            );
+        }
+    }
+    Some(V::of(
+        format!("__builtin_convertvector({v}, {})", to.name()),
+        to,
+        true,
+    ))
+}
+
+/// Lanes picked from two to four vectors laid end to end: one shuffle of
+/// two, or a shuffle of two pairs, each first joined by one.
+///
+/// # Arguments
+///
+/// * `t` - The vectors' lanes, and the result's.
+/// * `parts` - The vectors.
+/// * `order` - Which lane of the joined vectors each result lane takes.
+/// * `n` - Name resolution.
+///
+/// # Returns
+///
+/// The shuffle, or `None` for fewer than two vectors or more than four.
+fn gather(t: Vt, parts: &[Expr], order: &[u32], n: &Names<'_>) -> Option<V> {
+    match parts {
+        [a, b] => Some(shuffle(t, a, Some(b), order, n)),
+        [a, b, c, rest @ ..] if rest.len() <= 1 => {
+            let d = rest.first().unwrap_or(c);
+            let pair: Vec<u32> = (0..2 * t.lanes()).collect();
+            let join = |x: &Expr, y: &Expr| {
+                format!(
+                    "__builtin_shufflevector({}, {}, {})",
+                    operand(x, t, n),
+                    operand(y, t, n),
+                    list(&pair)
+                )
+            };
+            Some(V::of(
+                format!(
+                    "__builtin_shufflevector({}, {}, {})",
+                    join(a, b),
+                    join(c, d),
+                    list(order)
+                ),
+                t,
+                true,
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// A lane-wise minimum or maximum, as the compiler's element-wise builtin.

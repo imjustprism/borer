@@ -807,3 +807,59 @@ fn scalar_dup_agrees_with_the_emulator() {
         "{text}"
     );
 }
+
+/// Structure accesses, selects, narrowings and tables agree.
+///
+/// The structure loads and stores, the bitwise selects, the narrowing
+/// shifts, the table lookups, the vector bit reversal and population count
+/// and the conversions from a `v` register: every `v` register they leave
+/// reads and compares, as do the lane and 64-bit block stores.
+#[test]
+fn neon_structures_selects_shifts_and_tables_agree_with_the_emulator() {
+    let words = [
+        // ASM: ld2 {v0.4s, v1.4s}, [x0]
+        0x4c40_8800,
+        // ASM: ld3r {v2.8b, v3.8b, v4.8b}, [x1]
+        0x0d40_e022,
+        // ASM: ld1 {v5.h}[3], [x2]
+        0x0d40_5845,
+        // ASM: bsl v0.16b, v1.16b, v2.16b
+        0x6e62_1c20,
+        // ASM: bit v5.16b, v0.16b, v1.16b
+        0x6ea1_1c05,
+        // ASM: bif v4.8b, v1.8b, v0.8b
+        0x2ee0_1c24,
+        // ASM: shrn v6.8b, v1.8h, #3
+        0x0f0d_8426,
+        // ASM: sqrshrn2 v6.16b, v0.8h, #5
+        0x4f0b_9c06,
+        // ASM: uqshrn v7.4h, v1.4s, #9
+        0x2f17_9427,
+        // ASM: tbl v8.16b, {v0.16b, v1.16b}, v2.16b
+        0x4e02_2008,
+        // ASM: tbx v9.8b, {v1.16b}, v3.8b
+        0x0e03_1029,
+        // ASM: rbit v10.16b, v1.16b
+        0x6e60_582a,
+        // ASM: cnt v13.8b, v1.8b
+        0x0e20_582d,
+        // ASM: st2 {v0.s, v1.s}[1], [x3]
+        0x0d20_9060,
+        // ASM: st3 {v2.8b, v3.8b, v4.8b}, [x4]
+        0x0c00_4082,
+        // ASM: fmov s11, w5
+        0x1e27_00ab,
+        // ASM: scvtf s12, s11
+        0x5e21_d96c,
+        // ASM: fnmul s14, s12, s12
+        0x1e2c_898e,
+        // ASM: scvtf v15.4s, v1.4s, #4
+        0x4f3c_e42f,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for v in agrees(&words, 1) {
+        assert_eq!(compared(&v, Fact::Vector), 32, "{}", verify_tsv(&v));
+        assert_eq!(compared(&v, Fact::Store), 5, "{}", verify_tsv(&v));
+    }
+}

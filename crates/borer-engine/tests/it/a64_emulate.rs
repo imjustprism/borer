@@ -1374,6 +1374,208 @@ const CASES: &[Case] = &[
         ],
     },
     Case {
+        name: "neon_structures",
+        words: &[
+            // ASM: ld2 {v0.4s, v1.4s}, [x5]
+            0x4c40_88a0,
+            // ASM: ld3 {v2.8h, v3.8h, v4.8h}, [x5]
+            0x4c40_44a2,
+            // ASM: ld2 {v16.8b, v17.8b}, [x7], #16
+            0x0cdf_80f0,
+            // ASM: ld1 {v5.s}[1], [x5]
+            0x0d40_90a5,
+            // ASM: ld2 {v0.s, v1.s}[3], [x8]
+            0x4d60_9100,
+            // ASM: ld1r {v6.4s}, [x5]
+            0x4d40_c8a6,
+            // ASM: ld3r {v7.8b, v8.8b, v9.8b}, [x5]
+            0x0d40_e0a7,
+            // ASM: ld4 {v20.2d, v21.2d, v22.2d, v23.2d}, [x5]
+            0x4c40_0cb4,
+            // ASM: st2 {v0.4s, v1.4s}, [x6]
+            0x4c00_88c0,
+            // ASM: st3 {v7.8b, v8.8b, v9.8b}, [x10]
+            0x0c00_4147,
+            // ASM: st2 {v16.b, v17.b}[2], [x11], x12
+            0x0dac_0970,
+            // ASM: st4 {v2.4h, v3.4h, v4.4h, v5.4h}, [x13], #32
+            0x0c9f_05a2,
+            // ASM: ret
+            0xd65f_03c0,
+        ],
+        set: &[
+            ("x5", 0x3_0000),
+            ("x6", 0x3_0100),
+            ("x7", 0x3_0000),
+            ("x8", 0x3_0010),
+            ("x10", 0x3_0200),
+            ("x11", 0x3_0300),
+            ("x12", 5),
+            ("x13", 0x3_0400),
+        ],
+        want: &[("x7", 0x3_0010), ("x11", 0x3_0305), ("x13", 0x3_0420)],
+        mem: &[
+            (
+                0x3_0100,
+                &[
+                    0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x80, 0xff, 0x01, 0x80, 0xfe,
+                    0xff, 0xff, 0xff, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x10, 0x20,
+                    0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
+                ],
+            ),
+            (
+                0x3_0200,
+                &[
+                    0x88, 0x77, 0x66, 0x88, 0x77, 0x66, 0x88, 0x77, 0x66, 0x88, 0x77, 0x66, 0x88,
+                    0x77, 0x66, 0x88, 0x77, 0x66, 0x88, 0x77, 0x66, 0x88, 0x77, 0x66,
+                ],
+            ),
+            (0x3_0300, &[0x44, 0x33]),
+            (
+                0x3_0400,
+                &[
+                    0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x00, 0x00, 0x22, 0x11, 0x80, 0xff, 0x01,
+                    0x80, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0x10, 0x20, 0x88, 0x77, 0x30, 0x40,
+                    0x50, 0x60, 0x70, 0x80, 0x66, 0x55,
+                ],
+            ),
+        ],
+        vregs: &[
+            (0, 0x4030_2010_4030_2010_8001_ff80_5566_7788),
+            (1, 0x8070_6050_8070_6050_ffff_fffe_1122_3344),
+            (2, 0x4030_fffe_1122_7788),
+            (3, 0x6050_ffff_ff80_5566),
+            (4, 0x8070_2010_8001_3344),
+            (5, 0x5566_7788_0000_0000),
+            (6, rep(0x5566_7788, 4)),
+            (7, 0x8888_8888_8888_8888),
+            (8, 0x7777_7777_7777_7777),
+            (9, 0x6666_6666_6666_6666),
+            (16, 0xfffe_0180_2244_6688),
+            (17, 0xffff_80ff_1133_5577),
+            (20, 0x1122_3344_5566_7788),
+            (21, 0xffff_fffe_8001_ff80),
+            (22, 0x8070_6050_4030_2010),
+            (23, 0),
+        ],
+    },
+    Case {
+        name: "neon_lanes",
+        words: &[
+            // ASM: ldp q0, q1, [x5]
+            0xad40_04a0,
+            // ASM: movi v2.2d, #0xff00ff00ff00ff00
+            0x6f05_e542,
+            // ASM: mov v3.16b, v2.16b
+            0x4ea2_1c43,
+            // ASM: bsl v3.16b, v0.16b, v1.16b
+            0x6e61_1c03,
+            // ASM: mov v4.16b, v0.16b
+            0x4ea0_1c04,
+            // ASM: bit v4.16b, v1.16b, v2.16b
+            0x6ea2_1c24,
+            // ASM: mov v5.16b, v0.16b
+            0x4ea0_1c05,
+            // ASM: bif v5.16b, v1.16b, v2.16b
+            0x6ee2_1c25,
+            // ASM: mov v6.16b, v0.16b
+            0x4ea0_1c06,
+            // ASM: bif v6.8b, v1.8b, v2.8b
+            0x2ee2_1c26,
+            // ASM: shrn v7.8b, v0.8h, #4
+            0x0f0c_8407,
+            // ASM: shrn2 v7.16b, v1.8h, #8
+            0x4f08_8427,
+            // ASM: rshrn v8.4h, v0.4s, #16
+            0x0f10_8c08,
+            // ASM: sqshrn v9.8b, v0.8h, #4
+            0x0f0c_9409,
+            // ASM: sqshrn2 v9.16b, v0.8h, #1
+            0x4f0f_9409,
+            // ASM: uqshrn v10.4h, v0.4s, #8
+            0x2f18_940a,
+            // ASM: sqrshrn v11.2s, v0.2d, #31
+            0x0f21_9c0b,
+            // ASM: uqrshrn v12.8b, v0.8h, #3
+            0x2f0d_9c0c,
+            // ASM: dup v15.2d, x0
+            0x4e08_0c0f,
+            // ASM: tbl v13.16b, {v0.16b}, v15.16b
+            0x4e0f_000d,
+            // ASM: tbl v16.8b, {v0.16b, v1.16b}, v15.8b
+            0x0e0f_2010,
+            // ASM: mov v17.16b, v2.16b
+            0x4ea2_1c51,
+            // ASM: tbx v17.16b, {v0.16b, v1.16b}, v15.16b
+            0x4e0f_3011,
+            // ASM: rbit v18.16b, v0.16b
+            0x6e60_5812,
+            // ASM: rbit v19.8b, v1.8b
+            0x2e60_5833,
+            // ASM: fmov s20, #1.5
+            0x1e2f_1014,
+            // ASM: fmov s21, #-2.0
+            0x1e30_1015,
+            // ASM: fnmul s22, s20, s21
+            0x1e35_8a96,
+            // ASM: fmov d23, #0.5
+            0x1e6c_1017,
+            // ASM: fnmul d24, d23, d23
+            0x1e77_8af8,
+            // ASM: fmov s26, w1
+            0x1e27_003a,
+            // ASM: scvtf s25, s26
+            0x5e21_db59,
+            // ASM: fmov d28, x2
+            0x9e67_005c,
+            // ASM: ucvtf d27, d28
+            0x7e61_db9b,
+            // ASM: scvtf s29, s26, #1
+            0x5f3f_e75d,
+            // ASM: ucvtf v30.2d, v28.2d, #2
+            0x6f7e_e79e,
+            // ASM: scvtf v31.4s, v26.4s
+            0x4e21_db5f,
+            // ASM: cnt v14.16b, v0.16b
+            0x4e20_580e,
+            // ASM: ret
+            0xd65f_03c0,
+        ],
+        set: &[
+            ("x5", 0x3_0000),
+            ("x0", 0x0001_1f05_0010_ff02),
+            ("x1", 0xffff_ffff_ffff_fff9),
+            ("x2", 10),
+        ],
+        want: &[],
+        mem: &[],
+        vregs: &[
+            (3, 0xff00_ff00_8000_ff00_1170_3350_5530_7710),
+            (4, 0x00ff_00fe_0001_0080_8022_6044_4066_2088),
+            (5, 0xff00_ff00_8000_ff00_1170_3350_5530_7710),
+            (6, 0x1170_3350_5530_7710),
+            (7, 0x8060_4020_ffff_00f8_1234_5678),
+            (8, 0x8002_1122_5566),
+            (9, 0xffff_80c0_7f7f_7f7f_ffff_80f8_7f7f_7f7f),
+            (10, 0xffff_ffff_ffff_ffff),
+            (11, 0xffff_fffd_2244_6689),
+            (12, 0xffff_ffff_ffff_ffff),
+            (13, 0x8877_0033_8800_0066_8877_0033_8800_0066),
+            (14, 0x0808_0807_0101_0801_0202_0402_0404_0602),
+            (16, 0x8877_0033_8810_0066),
+            (17, 0x8877_0033_8810_ff66_8877_0033_8810_ff66),
+            (18, 0xffff_ff7f_0180_ff01_8844_cc22_aa66_ee11),
+            (19, 0x010e_060a_020c_0408),
+            (22, 0x4040_0000),
+            (24, 0xbfd0_0000_0000_0000),
+            (25, 0xc0e0_0000),
+            (27, 0x4024_0000_0000_0000),
+            (29, 0xc060_0000),
+            (30, 0x4004_0000_0000_0000),
+            (31, 0xc0e0_0000),
+        ],
+    },
+    Case {
         name: "system",
         words: &[
             // ASM: mrs x0, TPIDR_EL0
@@ -1739,8 +1941,8 @@ fn every_stop_is_named() {
     let cases: [(&[u32], &str); 5] = [
         // ASM: faddp v0.4s, v0.4s, v1.4s (the pairwise form; the plain one runs)
         (&[0x6e21_d400], "faddp"),
-        // ASM: ld2 { v0.16b, v1.16b }, [x0] (the interleaved form; ld1 runs)
-        (&[0x4c40_8000], "ld2"),
+        // ASM: cmeq v0.16b, v0.16b, v1.16b (a lane compare; the lane selects run)
+        (&[0x6e21_8c00], "cmeq"),
         // ASM: brk #0x3e8
         (&[0xd420_7d00], "brk"),
         // ASM: svc #0x80

@@ -22,7 +22,7 @@ use super::super::expr::{Expr, Flags, Key, Op, RoundToInt, Ty, UnOp, fold, terna
 use super::super::helper::Helper;
 use super::flags::{self, next_reader};
 use super::step::imm;
-use super::{Lift, low, vector, width8};
+use super::{Lift, low, low64, vector, width8};
 use crate::emulate::a64::expand_imm;
 use crate::isa::a64::{Insn, Opnd, Reg};
 use crate::num::lo8;
@@ -335,6 +335,26 @@ impl Lift<'_, '_> {
     /// * `i` - The instruction.
     /// * `op` - The float operator.
     pub(super) fn float_binary(&mut self, i: &Insn, op: Op) -> Option<()> {
+        self.float_binary_negated(i, op, false)
+    }
+
+    /// `fnmul` (scalar): the negated product at the destination's width.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    pub(super) fn float_nmul(&mut self, i: &Insn) -> Option<()> {
+        self.float_binary_negated(i, Op::FMul, true)
+    }
+
+    /// [`Lift::float_binary`], its result negated where `negate` says.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `op` - The float operator.
+    /// * `negate` - The result is negated (`fnmul`).
+    fn float_binary_negated(&mut self, i: &Insn, op: Op, negate: bool) -> Option<()> {
         let Opnd::Reg { reg: dst, bits } = i.operands[0] else {
             return None;
         };
@@ -343,6 +363,11 @@ impl Lift<'_, '_> {
         self.note_float(i, 2, t);
         let (a, b) = (self.float_read(i, 1, bits)?, self.float_read(i, 2, bits)?);
         let v = super::mem::bear_width(fold(op, a, b, 64), t);
+        let v = if negate {
+            Expr::Un(UnOp::Neg, Box::new(v))
+        } else {
+            v
+        };
         self.note(dst, t);
         self.write(dst, bits, v);
         Some(())
@@ -604,7 +629,10 @@ impl Lift<'_, '_> {
     /// A signed source stays a sign extension, so a negative constant is
     /// not an unsigned bit pattern. The fixed-point form divides in a
     /// double and narrows afterwards: dividing a single would round the
-    /// integer before the scale.
+    /// integer before the scale. The integer is a general register, or the
+    /// low lane of a `v` register at the source's width (`scvtf s0, s1`):
+    /// a float load there is the same load read as an integer, and any
+    /// other float the register holds is not modeled.
     ///
     /// # Arguments
     ///
@@ -617,7 +645,26 @@ impl Lift<'_, '_> {
             return None;
         };
         let t = ty(to)?;
-        let raw = self.source(i, 1, from)?;
+        let raw = match i.operands[1] {
+            Opnd::Reg {
+                reg: reg @ Reg::V(_),
+                ..
+            } => match self.reg_at(reg, 128) {
+                Expr::Deref(at, ty @ (Ty::F32 | Ty::F64)) if u16::from(ty.bits()) >= from => {
+                    Expr::Deref(at, if from == 32 { Ty::U32 } else { Ty::U64 })
+                }
+                v if v.is_float() => return None,
+                v => low(low64(v), from),
+            },
+            Opnd::Reg { .. }
+            | Opnd::None
+            | Opnd::Shifted { .. }
+            | Opnd::Imm(_)
+            | Opnd::PcRel(_)
+            | Opnd::Mem(_)
+            | Opnd::Cond(_)
+            | Opnd::Other => self.source(i, 1, from)?,
+        };
         let n = if signed {
             Expr::Sext(Box::new(raw), width8(from))
         } else {

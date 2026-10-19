@@ -417,8 +417,8 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Fcmp
             | Mnemonic::Fcmpe
             | Mnemonic::Fccmp
-            | Mnemonic::Ld1
-            | Mnemonic::St1 => writeback,
+            | Mnemonic::Ldn
+            | Mnemonic::Stn => writeback,
             Mnemonic::Stxr(_) | Mnemonic::Stxp | Mnemonic::Cas(_) => bit(0) | writeback,
             Mnemonic::Ldp(_) => bit(0) | bit(1) | writeback,
             Mnemonic::Atomic(..) => bit(1),
@@ -479,6 +479,7 @@ pub(super) fn writes(insn: &Insn) -> u32 {
             | Mnemonic::Fsub
             | Mnemonic::Fmul
             | Mnemonic::Fdiv
+            | Mnemonic::Fnmul
             | Mnemonic::Fmadd
             | Mnemonic::Fmsub
             | Mnemonic::Fnmadd
@@ -649,8 +650,8 @@ fn data(regs: &Regs, insn: &Insn, found: &mut dyn FnMut(u64, RefKind)) -> Option
         | Mnemonic::Stxp
         | Mnemonic::Atomic(..)
         | Mnemonic::Cas(_)
-        | Mnemonic::Ld1
-        | Mnemonic::St1
+        | Mnemonic::Ldn
+        | Mnemonic::Stn
         | Mnemonic::Other => {
             match pc_rel(insn) {
                 Some(at) => found(at, RefKind::Data),
@@ -713,6 +714,7 @@ fn data(regs: &Regs, insn: &Insn, found: &mut dyn FnMut(u64, RefKind)) -> Option
         | Mnemonic::Fsub
         | Mnemonic::Fmul
         | Mnemonic::Fdiv
+        | Mnemonic::Fnmul
         | Mnemonic::Fmadd
         | Mnemonic::Fmsub
         | Mnemonic::Fnmadd

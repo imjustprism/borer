@@ -67,6 +67,7 @@ mod vars;
 mod vector;
 pub mod verify;
 pub mod verify_a64;
+mod verify_lanes;
 mod wire;
 
 use arch::Lifter;

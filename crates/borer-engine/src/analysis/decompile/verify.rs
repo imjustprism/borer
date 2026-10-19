@@ -766,19 +766,8 @@ pub(super) fn eval<M: Bench>(
                 |e| float_bits(e, st),
             )
         }
-        Expr::Call(name, args) => match name.as_str() {
-            "__dup_16b" | "__dup_8h" | "__dup_4s" | "__dup_2d" => {
-                let bits = match name.as_bytes().last()? {
-                    b'b' => 8,
-                    b'h' => 16,
-                    b's' => 32,
-                    _ => 64,
-                };
-                let one = eval(args.first()?, st, reads, d)? & low(bits);
-                Some((0..64 / bits).fold(0, |v, k| v | one << (k * bits)))
-            }
-            _ => None,
-        },
+        Expr::Call(name, args) => super::verify_lanes::packed(name, args, st, reads, d)
+            .and_then(|v| u64::try_from(v & u128::from(u64::MAX)).ok()),
         _ => None,
     }
 }

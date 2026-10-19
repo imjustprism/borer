@@ -36,10 +36,13 @@ use crate::num::{from_usize, lo8, lo32, sext32};
 use crate::program::Program;
 pub(crate) use alu::{FMOV_IMM, expand_imm, vfp_expand};
 use alu::{Form, Wide};
+pub(crate) use fpu::convert_lanes;
+pub(crate) use simd::{Saturate, lookup, narrow_lanes};
 
 mod alu;
 mod fpu;
 mod mem;
+mod simd;
 
 /// Whether an instruction is in its vector form: the arrangement operands
 /// the decoder leaves unmodeled in place of its registers.
@@ -835,6 +838,7 @@ impl<'a> Machine<'a> {
                 let runs = mask(v ^ (v << 1), width) | 1;
                 u64::from(runs.leading_zeros().saturating_sub(64 - width))
             }),
+            Mnemonic::Rbit if vector(i) => self.vector_rbit(i),
             Mnemonic::Rbit => self.unary(i, |v, width| v.reverse_bits() >> (64 - width)),
             Mnemonic::Rev => self.unary(i, |v, width| v.swap_bytes() >> (64 - width)),
             Mnemonic::Rev16 => self.unary(i, |v, width| {
@@ -857,6 +861,7 @@ impl<'a> Machine<'a> {
             Mnemonic::Fsub => self.float_binary(i, |x, y| x - y),
             Mnemonic::Fmul => self.float_binary(i, |x, y| x * y),
             Mnemonic::Fdiv => self.float_binary(i, |x, y| x / y),
+            Mnemonic::Fnmul => self.float_binary(i, |x, y| -(x * y)),
             Mnemonic::Fmadd => self.float_fused(i, |n, m, a| n.mul_add(m, a)),
             Mnemonic::Fmsub => self.float_fused(i, |n, m, a| (-n).mul_add(m, a)),
             Mnemonic::Fnmadd => self.float_fused(i, |n, m, a| (-n).mul_add(m, -a)),
@@ -881,15 +886,16 @@ impl<'a> Machine<'a> {
             Mnemonic::Str(width) => self.store_one(i, width),
             Mnemonic::Ldp(width) => self.load_pair(i, width),
             Mnemonic::Stp => self.store_pair(i),
-            Mnemonic::Ld1 => self.load_group(i),
-            Mnemonic::St1 => self.store_group(i),
+            Mnemonic::Ldn => self.load_structure(i),
+            Mnemonic::Stn => self.store_structure(i),
             Mnemonic::Stxr(width) => self.store_exclusive(i, width),
             Mnemonic::Stxp => self.store_exclusive_pair(i),
             Mnemonic::Atomic(op, width) => self.atomic(i, op, width),
             Mnemonic::Cas(width) => self.compare_swap(i, width),
             Mnemonic::Prfm | Mnemonic::Barrier => Ok(()),
             Mnemonic::Mrs | Mnemonic::Msr => self.system(i),
-            Mnemonic::Svc | Mnemonic::Simd(_) | Mnemonic::Other => Err(unmodeled(i)),
+            Mnemonic::Simd(op) => self.simd(i, op),
+            Mnemonic::Svc | Mnemonic::Other => Err(unmodeled(i)),
         }
         .map(|()| None)
     }
