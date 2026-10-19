@@ -13,6 +13,11 @@ use crate::program::Program;
 /// [`scan`] instead.
 pub const HITS_MAX: usize = 200;
 
+/// Shortest signature, in bytes, whose xored and added forms are scanned:
+/// the three deltas of a 4-byte polynomial under 510 keys match random
+/// bytes about once per 8 MB.
+const KEYED_MIN: usize = 8;
+
 /// `(algorithm, byte signature as it appears in memory, little-endian)`.
 const SIGNATURES: &[(&str, &str)] = &[
     (
@@ -71,6 +76,8 @@ const SIGNATURES: &[(&str, &str)] = &[
         "CRC-32C (Castagnoli) table",
         "00 00 00 00 03 83 6b f2 f7 70 3b e1 f4 f3 50 13",
     ),
+    ("CRC-32 polynomial (reflected, IEEE 802.3)", "20 83 b8 ed"),
+    ("CRC-32 polynomial (reflected, Castagnoli)", "78 3b f6 82"),
     (
         "ChaCha20 / Salsa20 sigma (\"expand 32-byte k\")",
         "65 78 70 61 6e 64 20 33 32 2d 62 79 74 65 20 6b",
@@ -100,10 +107,10 @@ const SIGNATURES: &[(&str, &str)] = &[
         "splitmix64 / xoshiro golden gamma",
         "15 7c 4a 7f b9 79 37 9e",
     ),
-    ("xoshiro256 jump constant", "5b 01 9b 8d cd 27 0f 18"),
-    ("PCG64 multiplier", "4d ec 89 5c 2f f7 f9 47"),
-    ("MurmurHash3 x64 finalizer 1", "d1 d5 b5 f9 5b d0 6f ff"),
-    ("MurmurHash3 x64 finalizer 2", "45 21 87 c2 17 c6 a5 c4"),
+    ("xoshiro256 jump constant", "ba 0a fd 3c d3 c6 0e 18"),
+    ("PCG64 multiplier", "45 f6 cc 9f 64 df 85 43"),
+    ("MurmurHash3 x64 finalizer 1", "cd 8c 55 ed d7 af 51 ff"),
+    ("MurmurHash3 x64 finalizer 2", "53 ec 85 1a fe b9 ce c4"),
     ("FNV-1 64-bit offset basis", "25 23 22 84 e4 9c f2 cb"),
     ("FNV-1 64-bit prime", "b3 01 00 00 00 01 00 00"),
     (
@@ -393,6 +400,9 @@ pub fn scan(program: &Program, mut visit: impl FnMut(&Seen<'_>) -> ControlFlow<(
                     .collect(),
                 var: Var::Swapped,
             });
+        }
+        if bytes.len() < KEYED_MIN {
+            continue;
         }
         for var in [Var::Xor, Var::Add] {
             forms.push(Form {

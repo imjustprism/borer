@@ -518,6 +518,33 @@ fn crypto_constant_scan() {
     assert!(find_crypto_constants(&two_section_program(vec![0x90; 16], vec![0; 64])).is_empty());
 }
 
+/// Hash constants carried as immediates are found in code.
+///
+/// `h_crc32` carries the reflected CRC-32 polynomial and `h_fmix64` the two
+/// `MurmurHash3` finalizer multipliers, whose signatures held bytes no
+/// build contains.
+#[test]
+fn hash_constants_inside_instructions_are_found() {
+    use borer_engine::crypto::find_crypto_constants;
+    let code: Vec<u8> = [
+        &[0x35, 0x20, 0x83, 0xb8, 0xed][..], // ASM: xor eax, 0xedb88320
+        &[0x48, 0xb9, 0xcd, 0x8c, 0x55, 0xed, 0xd7, 0xaf, 0x51, 0xff], // ASM: mov rcx, 0xff51afd7ed558ccd
+        &[0x48, 0xb9, 0x53, 0xec, 0x85, 0x1a, 0xfe, 0xb9, 0xce, 0xc4], // ASM: mov rcx, 0xc4ceb9fe1a85ec53
+        &[0xc3],
+    ]
+    .concat();
+    let p = two_section_program(code, vec![0; 16]);
+    let names: Vec<&str> = find_crypto_constants(&p).iter().map(|h| h.name).collect();
+    assert_eq!(
+        names,
+        [
+            "CRC-32 polynomial (reflected, IEEE 802.3)",
+            "MurmurHash3 x64 finalizer 1",
+            "MurmurHash3 x64 finalizer 2"
+        ]
+    );
+}
+
 /// Where two runs of one function part ways: the comparison that split
 /// them, the callees each side then visits, and what each returned.
 ///
