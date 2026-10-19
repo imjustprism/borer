@@ -30,6 +30,7 @@ pub(crate) mod abi;
 mod arch;
 mod asserts;
 mod canary;
+mod cir;
 mod ctext;
 mod declared;
 mod emit;
@@ -1837,6 +1838,7 @@ fn decompile_in<L: Lifter>(
             follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
         }
     }
+    let body = cir::print(&cir::build(&body));
     let body = if f.returns_value == Some(false)
         && f.signature.is_none()
         && ctx.stated.is_none()
@@ -2325,30 +2327,36 @@ fn decompile_in<L: Lifter>(
             .or_default()
             .extend(escaped);
     }
-    for (ty, names_of_ty) in &by_type {
-        let _ = match ty.strip_suffix('*') {
-            Some(base) => writeln!(out, "{} *{};", base.trim_end(), names_of_ty.join(", *")),
-            None => writeln!(out, "{ty} {};", names_of_ty.join(", ")),
-        };
-    }
+    let locals: Vec<cir::Decl> = by_type
+        .iter()
+        .map(|(ty, names_of_ty)| cir::Decl {
+            ty: cir::CTy::parse(ty),
+            names: names_of_ty.iter().map(|n| cir::Name::of(n)).collect(),
+            note: None,
+        })
+        .collect();
+    cir::print_decls(&locals, &mut out);
     for n in &notes {
         out.push_str(n);
         out.push('\n');
     }
-    for (addr, ty) in &ctx.globals {
-        let g = names.key(Key::Global(*addr, ty.bits()));
-        let import = names.import_at(*addr).is_some_and(|n| n == g);
-        if used.contains(g.as_str()) && !import {
-            match expr::tls_slot(*addr) {
-                Some(off) => {
-                    let _ = writeln!(out, "{} {g}; // TLS slot {off:#x}", ty.name());
-                }
-                None => {
-                    let _ = writeln!(out, "{} {g}; // @ {addr:#x}", ty.name());
-                }
-            }
-        }
-    }
+    let globals: Vec<cir::Decl> = ctx
+        .globals
+        .iter()
+        .filter_map(|(addr, ty)| {
+            let g = names.key(Key::Global(*addr, ty.bits()));
+            let import = names.import_at(*addr).is_some_and(|n| n == g);
+            (used.contains(g.as_str()) && !import).then(|| cir::Decl {
+                ty: cir::CTy::parse(ty.name()),
+                names: vec![cir::Name::of(&g)],
+                note: Some(match expr::tls_slot(*addr) {
+                    Some(off) => format!("TLS slot {off:#x}"),
+                    None => format!("@ {addr:#x}"),
+                }),
+            })
+        })
+        .collect();
+    cir::print_decls(&globals, &mut out);
     out.push('\n');
     out.push_str(&body);
     let emitted = blocks
