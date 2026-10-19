@@ -175,13 +175,17 @@ pub(super) fn slot_call(text: &Text<'_>, call: &Insn) -> Option<u64> {
     None
 }
 
-/// Names every unnamed function that is a stub after the import its slot
-/// holds, recording the slot as the function's thunk
-/// ([`Function::thunk`]).
+/// Names every unnamed function that is a stub after what its slot holds.
+///
+/// A slot that holds an import names the stub after it and is recorded as
+/// the function's thunk ([`Function::thunk`]). A slot the loader binds to
+/// a function of the program's own names the stub after that function,
+/// recorded as the one it reaches ([`Function::bound`]).
 ///
 /// # Arguments
 ///
-/// * `program` - The loaded image, for the import slots.
+/// * `program` - The loaded image, for the import slots and the bound
+///   slots.
 /// * `text` - The code.
 /// * `functions` - The functions, updated in place.
 pub(super) fn name(program: &Program, text: &Text<'_>, functions: &mut [Function]) {
@@ -191,20 +195,30 @@ pub(super) fn name(program: &Program, text: &Text<'_>, functions: &mut [Function
             imports.entry(s.addr).or_insert(&s.name);
         }
     }
-    if imports.is_empty() {
-        return;
-    }
+    let own: BTreeMap<u64, String> = functions
+        .iter()
+        .filter(|f| f.name_source == NameSource::Symbol)
+        .filter_map(|f| Some((f.entry, f.name.clone()?)))
+        .collect();
     for f in functions
         .iter_mut()
         .filter(|f| f.name.is_none() && f.instr_count <= STUB_INSNS_MAX)
     {
-        let Some((slot, import)) =
-            slot(text, f.entry).and_then(|s| imports.get(&s).map(|n| (s, *n)))
-        else {
+        let Some(slot) = slot(text, f.entry) else {
             continue;
         };
-        f.name = Some(crate::search::demangled_name(import));
+        if let Some(import) = imports.get(&slot) {
+            f.name = Some(crate::search::demangled_name(import));
+            f.thunk = Some(slot);
+        } else if let Some((target, name)) = crate::analysis::decompile::abi::bound(program, slot)
+            .filter(|t| *t != f.entry)
+            .and_then(|t| Some((t, own.get(&t)?)))
+        {
+            f.name = Some(name.clone());
+            f.bound = Some(target);
+        } else {
+            continue;
+        }
         f.name_source = NameSource::Symbol;
-        f.thunk = Some(slot);
     }
 }

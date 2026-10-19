@@ -1156,6 +1156,7 @@ mod tests {
             name_inferred: false,
             name_source: NameSource::None,
             thunk: None,
+            bound: None,
             funclet: None,
             signature: None,
             body_hash: 0,

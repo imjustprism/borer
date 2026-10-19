@@ -1355,6 +1355,7 @@ pub(super) fn walk_function(
         name_inferred: false,
         name_source: NameSource::None,
         thunk: None,
+        bound: None,
         funclet: None,
         signature: None,
         body_hash,

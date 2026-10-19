@@ -441,32 +441,3 @@ pub(super) fn got_base(program: &Program) -> Option<u64> {
     let named = |name: &str| program.sections.iter().find(|s| s.name == name);
     named(".got.plt").or_else(|| named(".got")).map(|s| s.va.0)
 }
-
-/// The code address a slot holds once the loader has bound it.
-///
-/// A shared object's PLT entry for a function it defines itself jumps
-/// through a GOT slot its `JUMP_SLOT` relocation fills with that
-/// function's address, so the stub is that function under another
-/// address and takes its name.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image, its relocations applied.
-/// * `bitness` - Pointer width in bits.
-/// * `slot` - The slot's address.
-///
-/// # Returns
-///
-/// The bound address, or `None` when the slot cannot be read or is empty.
-pub(super) fn bound_function(program: &Program, bitness: u32, slot: u64) -> Option<u64> {
-    if slot == 0 {
-        return None;
-    }
-    let word = program.read_va(slot, usize::try_from(bitness / 8).ok()?)?;
-    let value = match *word {
-        [a, b, c, d] => u64::from(u32::from_le_bytes([a, b, c, d])),
-        [a, b, c, d, e, f, g, h] => u64::from_le_bytes([a, b, c, d, e, f, g, h]),
-        _ => return None,
-    };
-    (value != 0).then_some(value)
-}

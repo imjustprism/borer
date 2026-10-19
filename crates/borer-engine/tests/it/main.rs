@@ -23,6 +23,7 @@ mod a64;
 mod a64_decompile;
 mod a64_emulate;
 mod a64_lift;
+mod abi;
 mod analysis;
 mod calls;
 mod carve;

@@ -215,6 +215,11 @@ pub struct Function {
     /// `jmp [slot]` and nothing else: the import under an address of the
     /// program's own, not code of the program's own.
     pub thunk: Option<u64>,
+    /// The entry of the function this one is a linkage stub for: a PLT
+    /// entry whose slot the loader binds to a function the program defines
+    /// itself, so a call to the stub is a call to that function
+    /// ([`decompile::abi::bound`]).
+    pub bound: Option<u64>,
     /// The funclet this function is: code the C++ exception runtime runs
     /// on another function's frame, found from that function's exception
     /// metadata ([`eh`]) and named after it.

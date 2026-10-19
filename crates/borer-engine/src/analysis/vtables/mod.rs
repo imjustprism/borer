@@ -1262,6 +1262,7 @@ mod tests {
             name_inferred: false,
             name_source: source,
             thunk: None,
+            bound: None,
             funclet: None,
             signature: Some(Signature {
                 ret: "void".to_owned(),

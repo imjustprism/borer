@@ -51,9 +51,7 @@ use helpers::{
     epilog_helper_name, frame_helper_name, is_noreturn_name, panic_helper_name,
     prints_assert_banner, refcount_helper_name,
 };
-use seeds::{
-    bound_function, got_base, mapped_range, pointer_seeds, record_table_refs, reloc_seeds,
-};
+use seeds::{got_base, mapped_range, pointer_seeds, record_table_refs, reloc_seeds};
 use sets::{AddrSet, Covered};
 use tables::ResolvedTable;
 use walk::{Known, WalkState, Walked, Worker, walk_capped};
@@ -1962,10 +1960,11 @@ pub(super) fn build_callers_and_names(program: &Program, functions: &mut [Functi
             .map(|&i| crate::search::demangled_name(&program.symbols[i].name));
         if f.name.is_some() {
             f.thunk = Some(slot);
-        } else {
-            f.name = bound_function(program, bitness, slot)
-                .and_then(|target| named.get(&target))
-                .map(|&i| crate::search::demangled_name(&program.symbols[i].name));
+        } else if let Some((target, &i)) = crate::analysis::decompile::abi::bound(program, slot)
+            .and_then(|target| Some((target, named.get(&target)?)))
+        {
+            f.name = Some(crate::search::demangled_name(&program.symbols[i].name));
+            f.bound = Some(target);
         }
         f.name_source = if f.name.is_some() {
             NameSource::Symbol

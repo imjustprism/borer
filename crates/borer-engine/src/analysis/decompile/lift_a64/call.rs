@@ -20,7 +20,7 @@
 //! nothing; a function whose callers read `x1` after calling it hands a
 //! second result back there, which its text sets before each `return`.
 
-use super::super::abi::a64 as a64_abi;
+use super::super::abi::{self, a64 as a64_abi};
 use super::super::expr::{Expr, Key, Ty};
 use super::super::lift::{ArgAt, Callee, EffectKind, Returns, Shown, SlotUse, stated_returns};
 use super::Lift;
@@ -63,6 +63,9 @@ fn slot_of(v: &Expr) -> Option<u64> {
 impl Lift<'_, '_> {
     /// Reads what a callee takes and hands back.
     ///
+    /// A linkage stub takes and hands back what the function its slot
+    /// binds does ([`abi::reached`]).
+    ///
     /// # Arguments
     ///
     /// * `target` - The callee's entry, when the call names one.
@@ -70,6 +73,7 @@ impl Lift<'_, '_> {
     ///   through.
     fn signature(&self, target: Option<u64>, reached: Option<u64>) -> Signature {
         let ctx = &*self.ex.ctx;
+        let target = target.map(|t| abi::reached(ctx.analysis, t));
         let declared = target
             .and_then(|t| shape::declared_callee(ctx, t))
             .or_else(|| {
