@@ -31,32 +31,66 @@ use crate::num::from_usize;
 /// types and byte offsets through typed pointers applied.
 #[must_use]
 pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
+    polish_skipping(text, bitness, packs, Passes::NONE)
+}
+
+/// [`polish`] with some of its passes left out.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines first.
+/// * `bitness` - Decoder bitness of the program (32 or 64).
+/// * `packs` - The packs in force.
+/// * `skip` - The passes left out ([`Passes`]).
+///
+/// # Returns
+///
+/// The polished text.
+pub(super) fn polish_skipping(
+    text: &str,
+    bitness: u32,
+    packs: &crate::pack::Packs,
+    skip: Passes,
+) -> String {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
-    let text = quiet_zero_tests(&normalize_temps(&evidence::name_vars(
-        &byte_arithmetic(
-            &type_locals(&type_parameters(
-                &lane_locals(&float_lanes(&apply_layouts(&vars::split_webs(
-                    &wire_format(&source_file(&name_own_fields(text)), &streams),
-                )))),
-                word,
-            )),
-            word,
-        ),
-        u8::try_from(bitness).unwrap_or(64),
-    )));
-    let text = drop_repeated_assignments(&text);
+    let text = skip.apply(Pass::NameOwnFields, text.to_owned(), name_own_fields);
+    let text = skip.apply(Pass::SourceFile, text, source_file);
+    let text = skip.apply(Pass::WireFormat, text, |t| wire_format(t, &streams));
+    let text = skip.apply(Pass::SplitWebs, text, vars::split_webs);
+    let text = skip.apply(Pass::ApplyLayouts, text, apply_layouts);
+    let text = skip.apply(Pass::FloatLanes, text, float_lanes);
+    let text = skip.apply(Pass::LaneLocals, text, lane_locals);
+    let text = skip.apply(Pass::TypeParameters, text, |t| type_parameters(t, word));
+    let text = skip.apply(Pass::TypeLocals, text, type_locals);
+    let text = skip.apply(Pass::ByteArithmetic, text, |t| byte_arithmetic(t, word));
+    let text = skip.apply(Pass::NameVars, text, |t| {
+        evidence::name_vars(t, u8::try_from(bitness).unwrap_or(64))
+    });
+    let text = skip.apply(Pass::NormalizeTemps, text, normalize_temps);
+    let text = skip.apply(Pass::QuietZeroTests, text, quiet_zero_tests);
+    let text = skip.apply(
+        Pass::DropRepeatedAssignments,
+        text,
+        drop_repeated_assignments,
+    );
     let mut out = String::with_capacity(text.len() + 1);
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&elvis(&compound_assign(line)));
+        let line = skip.apply(Pass::CompoundAssign, line.to_owned(), compound_assign);
+        out.push_str(&skip.apply(Pass::Elvis, line, elvis));
     }
     out.push('\n');
-    spell_float_relations(&refold_jumps(&float_bit_reads(&callable_pointers(
-        &stack_arrays(&spell_nullptr(&spell_own_enum(&spell_index(&out)))),
-    ))))
+    let text = skip.apply(Pass::SpellIndex, out, spell_index);
+    let text = skip.apply(Pass::SpellOwnEnum, text, spell_own_enum);
+    let text = skip.apply(Pass::SpellNullptr, text, spell_nullptr);
+    let text = skip.apply(Pass::StackArrays, text, stack_arrays);
+    let text = skip.apply(Pass::CallablePointers, text, callable_pointers);
+    let text = skip.apply(Pass::FloatBitReads, text, float_bit_reads);
+    let text = skip.apply(Pass::RefoldJumps, text, refold_jumps);
+    skip.apply(Pass::SpellFloatRelations, text, spell_float_relations)
 }
 
 /// Drops an assignment an `if` block opens with when the line before the

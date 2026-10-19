@@ -6,9 +6,9 @@ use super::{
     Arg, BUDGET, BUDGET_MAX, INPUTS_MAX, Outcome, Shared, Verdict, args_shown, run_one, small_hex,
     writes_shown,
 };
-use crate::analysis::decompile::decompile_named;
 use crate::analysis::decompile::interp::{Mode, Script};
 use crate::analysis::decompile::signature::{Kind, Signature, passing, printed};
+use crate::analysis::decompile::{Pass, Passes, decompile_named};
 use crate::analysis::render::oracle::compared_constants;
 use crate::analysis::render::*;
 use crate::text::one_line;
@@ -265,6 +265,149 @@ fn generated_in(
             (shown.join(" "), outcome.verdict)
         })
         .collect())
+}
+
+/// Where a bisection of a function's text passes under the ISO check
+/// ([`bisect_iso`]) found the text to break.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bisected {
+    /// No input differs on the full text: nothing to bisect.
+    Agrees,
+    /// The text with every pass left out differs already: what the passes
+    /// were handed was wrong, so no pass broke it.
+    Unbisected(Counterexample),
+    /// The text with the passes before `pass` agrees and the text with
+    /// `pass` too differs.
+    Broke {
+        /// The first pass whose text differs.
+        pass: Pass,
+        /// The input it differs on, and where.
+        at: Counterexample,
+        /// Whether the full pipeline with only this pass left out agrees,
+        /// so leaving it out alone repairs the function.
+        alone: bool,
+        /// The text with the passes before `pass`, and with `pass` too.
+        texts: (String, String),
+    },
+}
+
+/// One input a text differs on, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Counterexample {
+    /// The input's arguments, as a report row spells them.
+    pub input: String,
+    /// The line of the text that differs, trimmed; empty when not known.
+    pub line: String,
+    /// What differs there.
+    pub why: String,
+}
+
+/// Finds the first text pass that breaks a function under the ISO check.
+///
+/// The inputs are drawn once, from the signature the full text prints, as
+/// [`check_generated_iso`] draws them, and every text below is run on the
+/// same ones beside the binary. When the full text differs on one, the
+/// passes of [`Pass::ALL`] are bisected: the text built with only the
+/// first `k` of them ([`Passes::after`]) is checked for each `k` a binary
+/// search asks for, from none (which must agree, or no pass is to blame)
+/// to all. A text that does not read, or an input it leaves unchecked,
+/// counts as agreeing: the bisection looks for a difference, not for a
+/// claim.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names; its own [`Overlay::passes`] are replaced.
+/// * `entry` - The function's entry.
+/// * `count` - How many inputs.
+/// * `seed` - The inputs' seed.
+/// * `budget` - Steps each run is given, on either side.
+///
+/// # Returns
+///
+/// Where the text broke ([`Bisected`]).
+///
+/// # Errors
+///
+/// As [`check_generated`].
+pub fn bisect_iso(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    count: usize,
+    seed: u64,
+    budget: usize,
+) -> Result<Bisected, String> {
+    let full = Overlay {
+        passes: Passes::NONE,
+        ..o.clone()
+    };
+    let text = decompile_named(p, a, &full, entry).ok_or("the function does not decompile")?;
+    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let sig = printed(&text, word)?;
+    let inputs = generated(&sig.parameter_kinds(), count, seed, entry)?;
+    let pass = passing(p, a, o, entry);
+    let differs = |skip: Passes| -> Option<Counterexample> {
+        let under = Overlay {
+            passes: skip,
+            ..full.clone()
+        };
+        let text = decompile_named(p, a, &under, entry)?;
+        let shared = Shared {
+            script: Script::read_iso(p, a, &under, entry, &text),
+            sig: Ok(sig.clone()),
+            pass: Some(pass.clone()),
+        };
+        inputs.iter().find_map(
+            |input| match run_one(p, &shared, entry, input, budget).verdict {
+                Verdict::Differs(line, why) => Some(Counterexample {
+                    input: input.iter().map(Arg::shown).collect::<Vec<_>>().join(" "),
+                    line: line
+                        .checked_sub(1)
+                        .and_then(|k| text.lines().nth(k))
+                        .map_or_else(String::new, |l| l.trim().to_owned()),
+                    why,
+                }),
+                Verdict::Agrees | Verdict::Unchecked(..) => None,
+            },
+        )
+    };
+    let Some(mut at) = differs(Passes::NONE) else {
+        return Ok(Bisected::Agrees);
+    };
+    if let Some(before) = differs(Passes::after(0)) {
+        return Ok(Bisected::Unbisected(before));
+    }
+    let (mut good, mut bad) = (0, Pass::ALL.len());
+    while bad - good > 1 {
+        let mid = good + (bad - good) / 2;
+        match differs(Passes::after(mid)) {
+            Some(c) => {
+                bad = mid;
+                at = c;
+            }
+            None => good = mid,
+        }
+    }
+    let Some(&pass) = Pass::ALL.get(good) else {
+        return Ok(Bisected::Unbisected(at));
+    };
+    let alone = differs(Passes::NONE.without(pass)).is_none();
+    let text_of = |k: usize| {
+        let under = Overlay {
+            passes: Passes::after(k),
+            ..full.clone()
+        };
+        decompile_named(p, a, &under, entry).unwrap_or_default()
+    };
+    Ok(Bisected::Broke {
+        pass,
+        at,
+        alone,
+        texts: (text_of(good), text_of(bad)),
+    })
 }
 
 /// Inputs a vector request runs unless its spec says how many.

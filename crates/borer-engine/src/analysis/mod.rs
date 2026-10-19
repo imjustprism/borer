@@ -1557,6 +1557,12 @@ pub struct Overlay {
     /// Never saved with a project.
     #[serde(default, skip)]
     pub enum_source: EnumSource,
+    /// The text passes a decompilation leaves out, none by default: a
+    /// bisection's way to read a function's text without some of them
+    /// ([`decompile::Passes`]). Part of [`Overlay::fingerprint`] when not
+    /// empty. Never saved with a project.
+    #[serde(default, skip)]
+    pub passes: decompile::Passes,
 }
 
 /// Where a decompilation finds the name tables it renders constants by
@@ -1770,6 +1776,10 @@ impl Overlay {
             EnumSource::Given => 0,
             EnumSource::Binary => 1,
         }]);
+        if !self.passes.is_empty() {
+            fold(&[5]);
+            fold(&self.passes.bits().to_le_bytes());
+        }
         h
     }
 

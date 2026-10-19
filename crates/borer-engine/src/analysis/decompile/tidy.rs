@@ -610,7 +610,7 @@ pub fn cleanup(body: &str) -> String {
 ///
 /// The cleaned body, newline-terminated.
 pub(super) fn cleanup_text(body: &str, live_out: Option<&str>) -> String {
-    cleanup_settled(body, live_out).0
+    cleanup_settled(body, live_out, Passes::NONE).0
 }
 
 /// [`cleanup_text`], with how its passes ended.
@@ -619,15 +619,22 @@ pub(super) fn cleanup_text(body: &str, live_out: Option<&str>) -> String {
 ///
 /// * `body` - Pseudo-C lines as the emitter writes them.
 /// * `live_out` - The register a second result comes back in, if any.
+/// * `skip` - The passes left out ([`Passes`]).
 ///
 /// # Returns
 ///
 /// The cleaned body, newline-terminated, and its [`Settle`].
-pub(super) fn cleanup_settled(body: &str, live_out: Option<&str>) -> (String, Settle) {
+pub(super) fn cleanup_settled(
+    body: &str,
+    live_out: Option<&str>,
+    skip: Passes,
+) -> (String, Settle) {
     let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
     let fuel = CLEANUP_PASSES.saturating_add(lines.len());
-    let settle = cleanup_passes(&mut lines, fuel, live_out);
-    loops::recover_loops(&mut lines);
+    let settle = cleanup_passes(&mut lines, fuel, live_out, skip);
+    if skip.runs(Pass::RecoverLoops) {
+        loops::recover_loops(&mut lines);
+    }
     let mut text = lines.join("\n");
     text.push('\n');
     (text, settle)
@@ -762,85 +769,106 @@ pub(super) fn cleanup_passes(
     lines: &mut Vec<String>,
     fuel: usize,
     live_out: Option<&str>,
+    skip: Passes,
 ) -> Settle {
     let mut passes = 0;
     let mut churn: Vec<&'static str> = Vec::new();
+    let run = |churn: &mut Vec<&'static str>,
+               pass: Pass,
+               lines: &mut Vec<String>,
+               f: fn(&mut Vec<String>) -> bool| {
+        skip.runs(pass) && note(churn, pass.name(), f(lines))
+    };
     while passes < fuel {
         passes += 1;
         churn.clear();
-        let mut changed = note(&mut churn, "merge_chains", merge_chains(lines));
-        changed |= note(&mut churn, "fold_temp_copies", fold_temp_copies(lines));
-        changed |= note(
+        let mut changed = run(&mut churn, Pass::MergeChains, lines, merge_chains);
+        changed |= run(&mut churn, Pass::FoldTempCopies, lines, fold_temp_copies);
+        changed |= run(
             &mut churn,
-            "merge_return_assignments",
-            merge_return_assignments(lines),
+            Pass::MergeReturnAssignments,
+            lines,
+            merge_return_assignments,
         );
-        changed |= note(
+        changed |= run(
             &mut churn,
-            "drop_fallthrough_gotos",
-            drop_fallthrough_gotos(lines),
+            Pass::DropFallthroughGotos,
+            lines,
+            drop_fallthrough_gotos,
         );
-        let referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
-        let before = lines.len();
-        lines.retain(|l| match label_name(l) {
-            Some(name) => referenced.contains(name),
-            None => !l.trim().is_empty(),
+        changed |= run(&mut churn, Pass::UnnamedLabels, lines, |lines| {
+            let referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
+            let before = lines.len();
+            lines.retain(|l| match label_name(l) {
+                Some(name) => referenced.contains(name),
+                None => !l.trim().is_empty(),
+            });
+            lines.len() != before
         });
-        changed |= note(&mut churn, "unnamed labels", lines.len() != before);
-        changed |= note(&mut churn, "flatten_else_if", flatten_else_if(lines));
-        changed |= note(
+        changed |= run(&mut churn, Pass::FlattenElseIf, lines, flatten_else_if);
+        changed |= run(
             &mut churn,
-            "collapse_lone_gotos",
-            collapse_lone_gotos(lines),
+            Pass::CollapseLoneGotos,
+            lines,
+            collapse_lone_gotos,
         );
-        changed |= note(&mut churn, "hoist_common_tails", hoist_common_tails(lines));
-        changed |= note(&mut churn, "thread_jumps", thread_jumps(lines));
-        changed |= note(&mut churn, "flip_jump_pairs", flip_jump_pairs(lines));
-        changed |= note(&mut churn, "loop_exits", loop_exits(lines));
-        changed |= note(
+        changed |= run(
             &mut churn,
-            "fold_conditional_gotos",
-            fold_conditional_gotos(lines, RunLabels::Forbidden),
+            Pass::HoistCommonTails,
+            lines,
+            hoist_common_tails,
         );
-        changed |= note(
+        changed |= run(&mut churn, Pass::ThreadJumps, lines, |l| thread_jumps(l));
+        changed |= run(&mut churn, Pass::FlipJumpPairs, lines, |l| {
+            flip_jump_pairs(l)
+        });
+        changed |= run(&mut churn, Pass::LoopExits, lines, loop_exits);
+        changed |= run(&mut churn, Pass::FoldConditionalGotos, lines, |lines| {
+            fold_conditional_gotos(lines, RunLabels::Forbidden)
+        });
+        changed |= run(
             &mut churn,
-            "flatten_early_exits",
-            flatten_early_exits(lines),
+            Pass::FlattenEarlyExits,
+            lines,
+            flatten_early_exits,
         );
-        changed |= note(&mut churn, "absorb_else", absorb_else(lines));
-        changed |= note(
-            &mut churn,
-            "fold_unordered_compares",
-            fold_unordered_compares(lines),
-        );
-        if let Some(kept) = drop_dead_assignments(lines, live_out) {
+        changed |= run(&mut churn, Pass::AbsorbElse, lines, absorb_else);
+        changed |= run(&mut churn, Pass::FoldUnorderedCompares, lines, |l| {
+            fold_unordered_compares(l)
+        });
+        if skip.runs(Pass::DropDeadAssignments)
+            && let Some(kept) = drop_dead_assignments(lines, live_out)
+        {
             *lines = kept;
-            changed = note(&mut churn, "drop_dead_assignments", true);
+            changed = note(&mut churn, Pass::DropDeadAssignments.name(), true);
         }
-        changed |= note(&mut churn, "strlen_loops", strlen_loops(lines));
+        changed |= run(&mut churn, Pass::StrlenLoops, lines, strlen_loops);
         if !changed {
-            changed |= note(
+            changed |= run(&mut churn, Pass::FoldContainedGotos, lines, |lines| {
+                fold_conditional_gotos(lines, RunLabels::Contained)
+            });
+        }
+        if !changed {
+            changed |= run(
                 &mut churn,
-                "fold_conditional_gotos",
-                fold_conditional_gotos(lines, RunLabels::Contained),
+                Pass::InlineTerminalTails,
+                lines,
+                inline_terminal_tails,
             );
         }
         if !changed {
-            changed |= note(
+            changed |= run(
                 &mut churn,
-                "inline_terminal_tails",
-                inline_terminal_tails(lines),
-            );
-        }
-        if !changed {
-            changed |= note(
-                &mut churn,
-                "move_single_use_blocks",
-                move_single_use_blocks(lines),
+                Pass::MoveSingleUseBlocks,
+                lines,
+                move_single_use_blocks,
             );
         }
         let endless = endless_loop_closers(lines);
         for k in (0..lines.len()).rev() {
+            if !skip.runs(Pass::UnreachableRuns) {
+                break;
+            }
             let ind = indent_of(&lines[k]);
             if !(transfers(&lines[k]) || endless.contains(&k)) {
                 continue;
@@ -858,7 +886,7 @@ pub(super) fn cleanup_passes(
             }
             if !has_label && end > k + 1 {
                 lines.drain(k + 1..end);
-                changed = note(&mut churn, "unreachable runs", true);
+                changed = note(&mut churn, Pass::UnreachableRuns.name(), true);
             }
         }
         if !changed {
@@ -893,7 +921,7 @@ fn note(churn: &mut Vec<&'static str>, name: &'static str, did: bool) -> bool {
 
 #[cfg(test)]
 mod fuel_tests {
-    use super::cleanup_passes;
+    use super::{Passes, cleanup_passes};
 
     /// The pass budget stops the rewriting where it stands.
     ///
@@ -927,13 +955,16 @@ mod fuel_tests {
         ];
         let lines = || -> Vec<String> { body.iter().map(|l| (*l).to_owned()).collect() };
         let mut settled = lines();
-        let passes = cleanup_passes(&mut settled, usize::MAX, None).passes;
+        let passes = cleanup_passes(&mut settled, usize::MAX, None, Passes::NONE).passes;
         assert!(passes >= 3, "{passes} passes: {settled:?}");
         let mut again = lines();
-        assert_eq!(cleanup_passes(&mut again, passes, None).passes, passes);
+        assert_eq!(
+            cleanup_passes(&mut again, passes, None, Passes::NONE).passes,
+            passes
+        );
         assert_eq!(again, settled);
         let mut one = lines();
-        let spent = cleanup_passes(&mut one, 1, None);
+        let spent = cleanup_passes(&mut one, 1, None, Passes::NONE);
         assert_eq!(spent.passes, 1);
         assert!(spent.spent(), "{spent:?}");
         assert_ne!(one, settled);

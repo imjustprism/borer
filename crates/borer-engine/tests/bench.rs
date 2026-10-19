@@ -6,6 +6,10 @@
 //! measures the ISO C check of a decompile answer against the answer itself
 //! ([`iso_check_cost`]).
 //!
+//! `BORER_BISECT=bin1;bin2 cargo test -p borer-engine --release --test bench bisect -- --ignored --nocapture`
+//! finds the first text pass that breaks each function the ISO check
+//! rejects ([`bisect_passes`]).
+//!
 //! The dogfood sweep reports a wall time, but its spread across identical
 //! runs is wide enough to hide a small change: 6.7s to 9.4s on one machine
 //! for the same binary. Each figure here is the best of several passes over
@@ -18,10 +22,13 @@
 )]
 
 use borer_engine::analysis::decompile::{decompile_all, decompile_named, step_times, text_check};
-use borer_engine::analysis::render::{Verdict, check_generated, check_generated_iso};
-use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::analysis::render::{
+    Bisected, Verdict, bisect_iso, check_generated, check_generated_iso,
+};
+use borer_engine::analysis::{Analysis, Overlay, name_of};
 use borer_engine::num::usize_f64;
 use borer_engine::program::Program;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// Passes taken; the fastest is reported.
@@ -117,7 +124,7 @@ struct Tally {
     /// Inputs that agreed, differed, or were unchecked.
     inputs: [usize; 3],
     /// Reasons, by their words up to the first backtick or digit.
-    why: std::collections::BTreeMap<String, usize>,
+    why: BTreeMap<String, usize>,
 }
 
 impl Tally {
@@ -271,5 +278,100 @@ fn iso_check_cost() {
     }
     if let Some(steps) = step_times() {
         print!("{steps}");
+    }
+}
+
+/// Inputs [`bisect_passes`] runs per function.
+const BISECT_INPUTS: usize = 64;
+
+/// Bisects the text passes of each function whose text the ISO check
+/// rejects, and counts the functions each pass breaks.
+///
+/// `BORER_BISECT` names the binaries, separated by `;`; `BORER_BISECT_NAMES`,
+/// when set, the functions to check by name, separated by `,` (all others
+/// are skipped); `BORER_BISECT_SHOW`, when set, prints the texts before
+/// and after each breaking pass. One row per function the check rejects: the binary, the
+/// name, then `pass <name>` and whether leaving it out alone repairs the
+/// function, with the counterexample input, the line and what differs; or
+/// `before-passes` when the text differs with every pass left out. The
+/// table after the rows counts functions per first breaking pass.
+#[test]
+#[ignore = "set BORER_BISECT to binary paths separated by ';' to run this harness"]
+fn bisect_passes() {
+    let paths = std::env::var("BORER_BISECT").expect("BORER_BISECT env var");
+    let names = std::env::var("BORER_BISECT_NAMES").ok();
+    let wanted: Option<Vec<&str>> = names.as_deref().map(|n| n.split(',').collect());
+    let show = std::env::var_os("BORER_BISECT_SHOW").is_some();
+    let mut table: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let (mut agree, mut skipped) = (0usize, 0usize);
+    let t = Instant::now();
+    for path in paths.split(';').filter(|p| !p.is_empty()) {
+        let program = Program::load(std::path::Path::new(path)).expect("load");
+        let a = Analysis::compute(&program);
+        let o = Overlay::default();
+        let bin = std::path::Path::new(path)
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        for f in a
+            .functions
+            .iter()
+            .filter(|f| f.thunk.is_none() && f.funclet.is_none())
+        {
+            let name = name_of(&a, &o, f.entry);
+            if wanted.as_ref().is_some_and(|w| !w.contains(&name.as_str())) {
+                continue;
+            }
+            match bisect_iso(
+                &program,
+                &a,
+                &o,
+                f.entry,
+                BISECT_INPUTS,
+                ISO_SEED,
+                ISO_STEPS,
+            ) {
+                Err(_) => skipped += 1,
+                Ok(Bisected::Agrees) => agree += 1,
+                Ok(Bisected::Unbisected(c)) => {
+                    table.entry("(before passes)".to_owned()).or_default().0 += 1;
+                    println!(
+                        "{bin}\t{name}\tbefore-passes\t-\t{}\t{}\t{}",
+                        c.input, c.line, c.why
+                    );
+                }
+                Ok(Bisected::Broke {
+                    pass,
+                    at,
+                    alone,
+                    texts,
+                }) => {
+                    if show {
+                        println!("--- before {}\n{}", pass.name(), texts.0);
+                        println!("--- after {}\n{}", pass.name(), texts.1);
+                    }
+                    let row = table.entry(pass.name().to_owned()).or_default();
+                    row.0 += 1;
+                    row.1 += usize::from(alone);
+                    println!(
+                        "{bin}\t{name}\tpass {}\t{}\t{}\t{}\t{}",
+                        pass.name(),
+                        if alone { "alone" } else { "with-others" },
+                        at.input,
+                        at.line,
+                        at.why
+                    );
+                }
+            }
+        }
+    }
+    println!(
+        "# agree {agree}, skipped {skipped}, {:.1}s",
+        t.elapsed().as_secs_f64()
+    );
+    println!("# first breaking pass\tfunctions\trepaired by leaving it out alone");
+    let mut rows: Vec<(&String, &(usize, usize))> = table.iter().collect();
+    rows.sort_by(|x, y| y.1.0.cmp(&x.1.0).then(x.0.cmp(y.0)));
+    for (pass, (n, alone)) in rows {
+        println!("{pass}\t{n}\t{alone}");
     }
 }

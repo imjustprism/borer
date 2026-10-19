@@ -53,6 +53,7 @@ mod opaque;
 mod outline;
 mod panics;
 mod params;
+mod passes;
 pub mod replay;
 mod replay_a64;
 mod rewrite;
@@ -82,6 +83,7 @@ use line::*;
 pub(in crate::analysis) use liveness::*;
 pub use outline::*;
 use params::*;
+pub use passes::{Pass, Passes};
 use rewrite::*;
 pub use scenario::*;
 pub(crate) use sites::{CallArg, CallSite, call_sites};
@@ -580,7 +582,8 @@ pub fn decompile_all_settled(
 ) -> Vec<Option<(String, Settle)>> {
     render_all(program, analysis, overlay, entries, |p, a, o, e| {
         let bitness = p.arch.bitness().unwrap_or(64);
-        decompile_plain_full(p, a, o, e).map(|d| (finished(&d.text, p, a, bitness), d.settle))
+        decompile_plain_full(p, a, o, e)
+            .map(|d| (finished(&d.text, p, a, (bitness, o.passes)), d.settle))
     })
 }
 
@@ -725,7 +728,7 @@ pub fn decompile(
     decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
         .as_ref()
         .as_ref()
-        .map(|d| finished(&d.text, program, analysis, bitness))
+        .map(|d| finished(&d.text, program, analysis, (bitness, overlay.passes)))
 }
 
 /// [`decompile`] built afresh, for a batch ([`decompile_all`]).
@@ -748,7 +751,7 @@ fn decompile_afresh(
 ) -> Option<String> {
     let bitness = program.arch.bitness().unwrap_or(64);
     decompile_plain_full(program, analysis, overlay, entry)
-        .map(|d| finished(&d.text, program, analysis, bitness))
+        .map(|d| finished(&d.text, program, analysis, (bitness, overlay.passes)))
 }
 
 /// Finishes a body for the tools: [`polish`], then the tables it reads
@@ -761,17 +764,33 @@ fn decompile_afresh(
 /// * `text` - The plain or named decompilation.
 /// * `program` - The loaded image.
 /// * `analysis` - Discovery results, for the packs.
-/// * `bitness` - The register width in bits.
+/// * `(bitness, skip)` - The register width in bits, and the passes left
+///   out ([`Passes`]).
 ///
 /// # Returns
 ///
 /// The text the tools show.
-fn finished(text: &str, program: &Program, analysis: &Analysis, bitness: u32) -> String {
+fn finished(
+    text: &str,
+    program: &Program,
+    analysis: &Analysis,
+    (bitness, skip): (u32, Passes),
+) -> String {
     use crate::timing::{Step, timed};
-    let text = timed(Step::Polish, || polish(text, bitness, &analysis.packs));
-    let text = timed(Step::InlineTables, || tables::inline_tables(&text, program));
-    let text = timed(Step::Vectors, || vector::declare(&text, program));
-    timed(Step::Helpers, || helper::declare(&text, program))
+    let text = timed(Step::Polish, || {
+        polish_skipping(text, bitness, &analysis.packs, skip)
+    });
+    let text = timed(Step::InlineTables, || {
+        skip.apply(Pass::InlineTables, text, |t| {
+            tables::inline_tables(t, program)
+        })
+    });
+    let text = timed(Step::Vectors, || {
+        skip.apply(Pass::VectorDeclare, text, |t| vector::declare(t, program))
+    });
+    timed(Step::Helpers, || {
+        skip.apply(Pass::HelperDeclare, text, |t| helper::declare(t, program))
+    })
 }
 
 /// The source file and line each PDB-named function starts at, read once
@@ -1343,6 +1362,9 @@ fn name_fields(
             }
         }
     }
+    if !overlay.passes.runs(Pass::NameFields) {
+        lines = text.lines().map(str::to_owned).collect();
+    }
     for Rename { var, name } in assert_names(&lines) {
         for line in &mut lines {
             *line = rename_word(line, &var, &name);
@@ -1355,7 +1377,7 @@ fn name_fields(
         &out,
         program,
         analysis,
-        program.arch.bitness().unwrap_or(64),
+        (program.arch.bitness().unwrap_or(64), overlay.passes),
     ))
 }
 
@@ -1846,7 +1868,9 @@ fn decompile_in<L: Lifter>(
         }
     }
     let body = cir::print(&cir::build(&body));
-    let body = if f.returns_value == Some(false)
+    let skip = overlay.passes;
+    let body = if skip.runs(Pass::DropReturnedValues)
+        && f.returns_value == Some(false)
         && f.signature.is_none()
         && ctx.stated.is_none()
         && !ctx.ret_sse
@@ -1870,31 +1894,33 @@ fn decompile_in<L: Lifter>(
     let live_out = ctx.ret_rdx || (bitness == 32 && f.hands_back_rdx);
     lap.end(crate::timing::Step::Structure);
     let (body, settle) = if cleanup {
-        cleanup_settled(&body, live_out.then_some(second_reg))
+        cleanup_settled(&body, live_out.then_some(second_reg), skip)
     } else {
         (body, Settle::default())
     };
     lap.end(crate::timing::Step::Cleanup);
-    let (body, canary) = if cleanup {
+    let (body, canary) = if cleanup && skip.runs(Pass::Canary) {
         canary::fold(&body)
     } else {
         (body, None)
     };
-    let (body, panic_checks) = if cleanup {
+    let (body, panic_checks) = if cleanup && skip.runs(Pass::PanicChecks) {
         panics::fold_checks(&panics::annotate(&body, program))
     } else {
         (body, Vec::new())
     };
-    let body = if returns_nothing {
+    let body = if returns_nothing && skip.runs(Pass::DropDeadResults) {
         drop_dead_results(&body, result_reg)
     } else {
         body
     };
-    let body = match overlay.enum_source {
-        EnumSource::Given => apply_enums(&body, &overlay.enums),
-        EnumSource::Binary => apply_enums(&body, &called_tables(program, analysis, overlay, &body)),
-    };
-    let body = apply_results(&body, &ctx.result_groups);
+    let body = skip.apply(Pass::ApplyEnums, body, |body| match overlay.enum_source {
+        EnumSource::Given => apply_enums(body, &overlay.enums),
+        EnumSource::Binary => apply_enums(body, &called_tables(program, analysis, overlay, body)),
+    });
+    let body = skip.apply(Pass::ApplyResults, body, |body| {
+        apply_results(body, &ctx.result_groups)
+    });
     let names = ctx.names();
     let mut user_typed = typed_globals(
         overlay,
@@ -1908,13 +1934,13 @@ fn decompile_in<L: Lifter>(
         &names,
         u64::try_from(ctx.conv.word).unwrap_or(8),
     ));
-    let body = if user_typed.is_empty() {
+    let body = if user_typed.is_empty() || !skip.runs(Pass::RenameTyped) {
         body
     } else {
         rename_typed(&body, &user_typed)
     };
     let user_enums = user_enum_globals(overlay, &ctx.globals, &names);
-    let body = if user_enums.is_empty() {
+    let body = if user_enums.is_empty() || !skip.runs(Pass::UserEnums) {
         body
     } else {
         apply_user_enums(&body, &user_enums)

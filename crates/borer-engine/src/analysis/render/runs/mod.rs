@@ -16,7 +16,9 @@ mod vectors;
 pub use diff::run_diff_tsv;
 use spec::{RunSpec, parse_run};
 use vectors::VERIFY_SEED;
-pub use vectors::{check_generated, check_generated_iso, vectors_tsv};
+pub use vectors::{
+    Bisected, Counterexample, bisect_iso, check_generated, check_generated_iso, vectors_tsv,
+};
 
 /// Most input sets one request runs.
 const INPUTS_MAX: usize = 64;
