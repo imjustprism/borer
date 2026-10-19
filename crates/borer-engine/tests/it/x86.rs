@@ -4700,3 +4700,23 @@ fn a_pe_export_holding_an_integer_is_no_function() {
     );
     assert_eq!(a.function(0x401010).map(|f| f.entry), Some(0x401010));
 }
+
+/// Decompiles 64-bit `code` at 0x401000 of a raw image.
+///
+/// # Arguments
+///
+/// * `code` - The bytes of `.text`.
+fn dc64(code: &[u8]) -> String {
+    decompiled(&raw::image(Arch::X86_64, code, &[]), 0x401000)
+}
+
+/// A sum of floats keeps the grouping the instructions computed: float
+/// addition is not associative.
+///
+/// `addsd xmm1,xmm2; addsd xmm0,xmm1; ret` is `a + (b + c)`, never
+/// `a + b + c`, which C reads as `(a + b) + c`.
+#[test]
+fn a_float_sum_keeps_its_grouping() {
+    let text = dc64(&[0xf2, 0x0f, 0x58, 0xca, 0xf2, 0x0f, 0x58, 0xc1, 0xc3]);
+    assert!(text.contains(" + ("), "{text}");
+}

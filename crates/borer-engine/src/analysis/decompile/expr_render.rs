@@ -955,7 +955,8 @@ impl Expr {
                         format!("({ty})({ls})")
                     }
                 };
-                let rs = if rp < p || (rp == p && !op.commutative()) || other_family(r) {
+                let regrouped = rp == p && (!op.commutative() || op.is_float());
+                let rs = if rp < p || regrouped || other_family(r) {
                     format!("({rs})")
                 } else {
                     rs
