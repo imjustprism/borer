@@ -261,6 +261,9 @@ pub(super) fn carries_a_transfer(body: &[String]) -> bool {
 ///
 /// Whether a block moved.
 pub(super) fn move_single_use_blocks(lines: &mut Vec<String>) -> bool {
+    if !lines.iter().any(|l| l.contains("goto ")) {
+        return false;
+    }
     let jumps = goto_index(lines);
     for (at, line) in lines.iter().enumerate() {
         let Some(label) = label_name(line) else {
@@ -370,6 +373,9 @@ pub(super) fn move_single_use_blocks(lines: &mut Vec<String>) -> bool {
 pub(super) fn inline_terminal_tails(lines: &mut Vec<String>) -> bool {
     /// Longest tail worth copying.
     const TAIL_MAX: usize = 8;
+    if !lines.iter().any(|l| l.contains("goto ")) {
+        return false;
+    }
     let mut tails: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (i, line) in lines.iter().enumerate() {
         let Some(label) = label_name(line) else {
@@ -772,31 +778,23 @@ pub(super) fn cleanup_passes(
     skip: Passes,
 ) -> Settle {
     let mut passes = 0;
-    let mut churn: Vec<&'static str> = Vec::new();
-    let run = |churn: &mut Vec<&'static str>,
-               pass: Pass,
-               lines: &mut Vec<String>,
-               f: fn(&mut Vec<String>) -> bool| {
-        skip.runs(pass) && note(churn, pass.name(), f(lines))
+    let mut round = Round {
+        skip,
+        idle: Passes::NONE,
+        churn: Vec::new(),
     };
     while passes < fuel {
         passes += 1;
-        churn.clear();
-        let mut changed = run(&mut churn, Pass::MergeChains, lines, merge_chains);
-        changed |= run(&mut churn, Pass::FoldTempCopies, lines, fold_temp_copies);
-        changed |= run(
-            &mut churn,
+        round.churn.clear();
+        let mut changed = round.run(Pass::MergeChains, lines, merge_chains);
+        changed |= round.run(Pass::FoldTempCopies, lines, fold_temp_copies);
+        changed |= round.run(
             Pass::MergeReturnAssignments,
             lines,
             merge_return_assignments,
         );
-        changed |= run(
-            &mut churn,
-            Pass::DropFallthroughGotos,
-            lines,
-            drop_fallthrough_gotos,
-        );
-        changed |= run(&mut churn, Pass::UnnamedLabels, lines, |lines| {
+        changed |= round.run(Pass::DropFallthroughGotos, lines, drop_fallthrough_gotos);
+        changed |= round.run(Pass::UnnamedLabels, lines, |lines| {
             let referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
             let before = lines.len();
             lines.retain(|l| match label_name(l) {
@@ -805,100 +803,135 @@ pub(super) fn cleanup_passes(
             });
             lines.len() != before
         });
-        changed |= run(&mut churn, Pass::FlattenElseIf, lines, flatten_else_if);
-        changed |= run(
-            &mut churn,
-            Pass::CollapseLoneGotos,
-            lines,
-            collapse_lone_gotos,
-        );
-        changed |= run(
-            &mut churn,
-            Pass::HoistCommonTails,
-            lines,
-            hoist_common_tails,
-        );
-        changed |= run(&mut churn, Pass::ThreadJumps, lines, |l| thread_jumps(l));
-        changed |= run(&mut churn, Pass::FlipJumpPairs, lines, |l| {
-            flip_jump_pairs(l)
-        });
-        changed |= run(&mut churn, Pass::LoopExits, lines, loop_exits);
-        changed |= run(&mut churn, Pass::FoldConditionalGotos, lines, |lines| {
+        changed |= round.run(Pass::FlattenElseIf, lines, flatten_else_if);
+        changed |= round.run(Pass::CollapseLoneGotos, lines, collapse_lone_gotos);
+        changed |= round.run(Pass::HoistCommonTails, lines, hoist_common_tails);
+        changed |= round.run(Pass::ThreadJumps, lines, |l| thread_jumps(l));
+        changed |= round.run(Pass::FlipJumpPairs, lines, |l| flip_jump_pairs(l));
+        changed |= round.run(Pass::LoopExits, lines, loop_exits);
+        changed |= round.run(Pass::FoldConditionalGotos, lines, |lines| {
             fold_conditional_gotos(lines, RunLabels::Forbidden)
         });
-        changed |= run(
-            &mut churn,
-            Pass::FlattenEarlyExits,
-            lines,
-            flatten_early_exits,
-        );
-        changed |= run(&mut churn, Pass::AbsorbElse, lines, absorb_else);
-        changed |= run(&mut churn, Pass::FoldUnorderedCompares, lines, |l| {
+        changed |= round.run(Pass::FlattenEarlyExits, lines, flatten_early_exits);
+        changed |= round.run(Pass::AbsorbElse, lines, absorb_else);
+        changed |= round.run(Pass::FoldUnorderedCompares, lines, |l| {
             fold_unordered_compares(l)
         });
-        if skip.runs(Pass::DropDeadAssignments)
-            && let Some(kept) = drop_dead_assignments(lines, live_out)
-        {
-            *lines = kept;
-            changed = note(&mut churn, Pass::DropDeadAssignments.name(), true);
-        }
-        changed |= run(&mut churn, Pass::StrlenLoops, lines, strlen_loops);
+        changed |= round.run(Pass::DropDeadAssignments, lines, |lines| {
+            drop_dead_assignments(lines, live_out)
+                .map(|kept| *lines = kept)
+                .is_some()
+        });
+        changed |= round.run(Pass::StrlenLoops, lines, strlen_loops);
         if !changed {
-            changed |= run(&mut churn, Pass::FoldContainedGotos, lines, |lines| {
+            changed |= round.run(Pass::FoldContainedGotos, lines, |lines| {
                 fold_conditional_gotos(lines, RunLabels::Contained)
             });
         }
         if !changed {
-            changed |= run(
-                &mut churn,
-                Pass::InlineTerminalTails,
-                lines,
-                inline_terminal_tails,
-            );
+            changed |= round.run(Pass::InlineTerminalTails, lines, inline_terminal_tails);
         }
         if !changed {
-            changed |= run(
-                &mut churn,
-                Pass::MoveSingleUseBlocks,
-                lines,
-                move_single_use_blocks,
-            );
+            changed |= round.run(Pass::MoveSingleUseBlocks, lines, move_single_use_blocks);
         }
-        let endless = endless_loop_closers(lines);
-        for k in (0..lines.len()).rev() {
-            if !skip.runs(Pass::UnreachableRuns) {
-                break;
-            }
-            let ind = indent_of(&lines[k]);
-            if !(transfers(&lines[k]) || endless.contains(&k)) {
-                continue;
-            }
-            let mut end = k + 1;
-            let mut has_label = false;
-            while end < lines.len() {
-                let label = is_label(&lines[end]);
-                let li = indent_of(&lines[end]);
-                if li < ind || (li == ind && label) {
-                    break;
-                }
-                has_label |= label;
-                end += 1;
-            }
-            if !has_label && end > k + 1 {
-                lines.drain(k + 1..end);
-                changed = note(&mut churn, Pass::UnreachableRuns.name(), true);
-            }
-        }
+        changed |= round.run(Pass::UnreachableRuns, lines, drop_unreachable_runs);
         if !changed {
-            churn.clear();
+            round.churn.clear();
             break;
         }
     }
+    let churn = round.churn;
     Settle {
         passes,
         fuel,
         churn,
     }
+}
+
+/// The state of one run of [`cleanup_passes`]: which passes it leaves
+/// out, which would find nothing to change, and what changed this round.
+#[derive(Debug)]
+struct Round {
+    /// The passes left out ([`Passes`]).
+    skip: Passes,
+    /// The passes that last ran on the text as it stands and changed
+    /// nothing: a pass is a function of the lines alone, so running one
+    /// again before another pass changes them would change nothing again.
+    idle: Passes,
+    /// The passes that changed the text this round.
+    churn: Vec<&'static str>,
+}
+
+impl Round {
+    /// Runs one pass unless it is left out or idle, and records what it did.
+    ///
+    /// # Arguments
+    ///
+    /// * `pass` - The pass.
+    /// * `lines` - The body lines, rewritten in place.
+    /// * `f` - The pass's rewrite, telling whether it changed the lines.
+    ///
+    /// # Returns
+    ///
+    /// Whether the pass changed the lines; `false` when it did not run.
+    fn run(
+        &mut self,
+        pass: Pass,
+        lines: &mut Vec<String>,
+        f: impl FnOnce(&mut Vec<String>) -> bool,
+    ) -> bool {
+        if !self.skip.runs(pass) || !self.idle.runs(pass) {
+            return false;
+        }
+        let did = f(lines);
+        if did {
+            self.idle = Passes::NONE;
+        } else {
+            self.idle = self.idle.without(pass);
+        }
+        note(&mut self.churn, pass.name(), did)
+    }
+}
+
+/// Drops the text after an unconditional transfer or the closing brace of
+/// a break-less `while (1)`, down to the next label at the same depth or a
+/// dedent, when it holds no label at all.
+///
+/// It walks from the end, so a removal only moves lines already handled
+/// and the closer indices found first stay valid.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+///
+/// # Returns
+///
+/// Whether any run went.
+fn drop_unreachable_runs(lines: &mut Vec<String>) -> bool {
+    let endless = endless_loop_closers(lines);
+    let mut changed = false;
+    for k in (0..lines.len()).rev() {
+        let ind = indent_of(&lines[k]);
+        if !(transfers(&lines[k]) || endless.contains(&k)) {
+            continue;
+        }
+        let mut end = k + 1;
+        let mut has_label = false;
+        while end < lines.len() {
+            let label = is_label(&lines[end]);
+            let li = indent_of(&lines[end]);
+            if li < ind || (li == ind && label) {
+                break;
+            }
+            has_label |= label;
+            end += 1;
+        }
+        if !has_label && end > k + 1 {
+            lines.drain(k + 1..end);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Records a pass that changed the text.
@@ -921,7 +954,40 @@ fn note(churn: &mut Vec<&'static str>, name: &'static str, did: bool) -> bool {
 
 #[cfg(test)]
 mod fuel_tests {
-    use super::{Passes, cleanup_passes};
+    use super::{Pass, Passes, Round, cleanup_passes};
+
+    /// A pass that changed nothing is not run again until another pass
+    /// changes the text, and one left out never runs.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn an_idle_pass_waits_for_a_change() {
+        let mut round = Round {
+            skip: Passes::NONE.without(Pass::LoopExits),
+            idle: Passes::NONE,
+            churn: Vec::new(),
+        };
+        let mut lines = vec![String::from("return 0;")];
+        let runs = std::cell::Cell::new(0);
+        let count = |did: bool| {
+            let runs = &runs;
+            move |_: &mut Vec<String>| {
+                runs.set(runs.get() + 1);
+                did
+            }
+        };
+        assert!(!round.run(Pass::MergeChains, &mut lines, count(false)));
+        assert!(!round.run(Pass::MergeChains, &mut lines, count(false)));
+        assert_eq!(runs.get(), 1);
+        assert!(round.run(Pass::FoldTempCopies, &mut lines, count(true)));
+        assert!(!round.run(Pass::MergeChains, &mut lines, count(false)));
+        assert_eq!(runs.get(), 3);
+        assert!(!round.run(Pass::LoopExits, &mut lines, count(true)));
+        assert_eq!(runs.get(), 3);
+        assert_eq!(round.churn, ["fold_temp_copies"]);
+    }
 
     /// The pass budget stops the rewriting where it stands.
     ///
