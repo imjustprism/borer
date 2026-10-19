@@ -646,7 +646,7 @@ impl<'a> Exec<'_, 'a> {
         if !self.seh_registered {
             return;
         }
-        if self.is_register_save(k, ty, &v) {
+        if self.is_register_save(ty, &v) {
             self.env.vals.remove(&Key::Slot(k));
             self.env.slot_bits.remove(&k);
             return;
@@ -868,36 +868,32 @@ impl<'a> Exec<'_, 'a> {
         matches!(v, Expr::Var(k @ Key::Reg(_)) if self.env.unset.contains(k))
     }
 
-    /// Recognizes a prologue save of a callee-saved register.
+    /// Recognizes the save of a callee-saved register, in the prologue or
+    /// wherever a shrink-wrapped prologue put it.
     ///
-    /// In the entry block, a store of a callee-saved register in full (a
-    /// word for a general register, sixteen bytes for `xmm6` and up under
-    /// the Microsoft x64 convention) that still holds its entry value
-    /// (never assigned in this block, no lazy value) is the compiler
-    /// preserving it for the caller; the slot is left without a value so
-    /// the save never renders, and the matching restore before `ret` is
-    /// dead code.
+    /// A store of a register the function preserves for its caller
+    /// ([`abi::saved`]) in full (a word for a general register, sixteen
+    /// bytes for `xmm6` and up under the Microsoft x64 convention) that
+    /// still holds its entry value (written on no path here, no lazy
+    /// value; [`Env::touched`]) is the compiler preserving it, an ABI event
+    /// and no statement: the slot is left without a value so the save never
+    /// renders, and the matching restore before `ret` is dead code. Under
+    /// the block check ([`super::super::verify`]) a save stays the store it
+    /// is, which the check compares with the machine's.
     ///
     /// # Arguments
     ///
-    /// * `k` - Slot offset.
     /// * `ty` - Store type.
     /// * `v` - The stored value.
-    pub(super) fn is_register_save(&self, k: i64, ty: Ty, v: &Expr) -> bool {
-        let _ = k;
-        let (key, saved) = match v {
-            Expr::Var(key @ Key::Reg(r)) => (
-                *key,
-                u64::try_from(r.size()).is_ok_and(|size| size * 8 == u64::from(ty.bits()))
-                    && self.ctx.conv.callee_saved.contains(r),
-            ),
-            Expr::Var(key @ Key::A64(r)) => (*key, ty.bits() == 64 && abi::a64::callee_saved(*r)),
-            _ => return false,
+    pub(super) fn is_register_save(&self, ty: Ty, v: &Expr) -> bool {
+        let Expr::Var(key) = v else {
+            return false;
         };
-        self.entry
-            && saved
-            && !self.written_here.contains(&key)
-            && !self.env.vals.contains_key(&key)
+        self.ctx.probe.is_none()
+            && abi::saved(self.ctx.conv, *key, ty.bits())
+            && !self.env.touched.contains(key)
+            && !self.written_here.contains(key)
+            && !self.env.vals.contains_key(key)
     }
 
     /// Emits a store to non-slot memory after protecting memory readers.

@@ -159,3 +159,19 @@ fn a_128_bit_helper_prints_as_its_operator() {
     assert!(!text.contains("__umodti3("), "{text}");
     assert!(text.contains(" % (uint128_t)"), "{text}");
 }
+
+/// A save outside the entry block is still a save, which prints nothing.
+///
+/// The prologue is shrink-wrapped past the function's first test, so the
+/// frame record and `x19` are stored after it; those stores printed as
+/// assignments of registers no statement set (`local_20 = x29;`).
+#[test]
+fn a_save_past_the_entry_block_prints_nothing() {
+    let p = image();
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), TEXT + 0xa8).expect("decompiles");
+    for reg in ["x19", "x29", "x30"] {
+        assert!(!text.contains(&format!("= {reg};")), "{reg}: {text}");
+    }
+    assert!(text.contains("walk("), "{text}");
+}

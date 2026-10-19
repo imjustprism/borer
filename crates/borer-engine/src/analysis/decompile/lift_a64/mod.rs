@@ -723,16 +723,18 @@ mod tests {
     use super::{decode, exec_block_a64};
     use crate::analysis::decompile::lift::{BlockFacts, Env, Pass};
     use crate::analysis::decompile::new_ctx;
+    use crate::analysis::decompile::verify::Probe;
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{Arch, Program, Section};
 
     /// A prologue's saves of the frame record and of a callee-saved
     /// register hold no slot.
     ///
-    /// In the entry block those stores, made before anything writes the
-    /// registers, are saves, which no line stores, while a register the
-    /// callee need not preserve stays a stored value; outside the entry
-    /// block every store keeps its value.
+    /// Those stores, made before anything writes the registers, are saves,
+    /// which no line stores, in the entry block and in a block a
+    /// shrink-wrapped prologue moved them to alike, while a register the
+    /// callee need not preserve stays a stored value. Under the block check
+    /// every store keeps its value, which the check compares.
     #[test]
     fn a_prologue_saves_the_frame_record_and_callee_saved_registers() {
         let words: [u32; 4] = [
@@ -749,9 +751,14 @@ mod tests {
         let f = a.function(0x1000).expect("the entry is a function");
         let overlay = Overlay::default();
         let instrs: Vec<_> = (0..4).filter_map(|k| decode(&p, 0x1000 + 4 * k)).collect();
-        for (entry, want) in [(true, vec![-8]), (false, vec![-32, -24, -16, -8])] {
+        for (entry, checked, want) in [
+            (true, false, vec![-8]),
+            (false, false, vec![-8]),
+            (false, true, vec![-32, -24, -16, -8]),
+        ] {
             let starts = f.blocks.iter().map(|b| b.start).collect();
             let mut ctx = new_ctx(&p, &a, &overlay, f, 64, starts, &[]);
+            ctx.probe = checked.then(Probe::default);
             let mut env = Env::entry();
             let facts = BlockFacts {
                 entry,

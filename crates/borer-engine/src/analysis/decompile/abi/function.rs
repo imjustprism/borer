@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use super::super::expr::Key;
 use super::super::{Shape, lift_a64, shape_built};
 use super::conv::{AAPCS64, CDECL_X86, Conv, FASTCALL_X86, GO_X64, MS_X64, SYSV_X64, THISCALL_X86};
 use crate::analysis::{Analysis, Function, Overlay};
@@ -150,6 +151,26 @@ pub(crate) struct FunctionAbi {
 /// * `this` - Whether the function takes `this`.
 pub(crate) fn indirect_result_position(this: bool) -> usize {
     usize::from(this)
+}
+
+/// Tells whether a function preserves a register for its caller, so a
+/// store of it in full while it holds its entry value is a save: an ABI
+/// event that nothing prints.
+///
+/// # Arguments
+///
+/// * `conv` - The function's convention.
+/// * `key` - The stored variable.
+/// * `bits` - The store's width.
+pub(in crate::analysis::decompile) fn saved(conv: &Conv, key: Key, bits: u8) -> bool {
+    match key {
+        Key::Reg(r) => {
+            u64::try_from(r.size()).is_ok_and(|size| size * 8 == u64::from(bits))
+                && conv.callee_saved.contains(&r)
+        }
+        Key::A64(r) => bits == 64 && super::a64::callee_saved(r),
+        Key::Slot(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) => false,
+    }
 }
 
 /// Returns a function's [`Shape`], read once per function and overlay

@@ -1266,7 +1266,7 @@ impl<'a> Exec<'_, 'a> {
                         self.env.slot_bits.remove(&sp);
                         self.env.fresh.insert(Key::Slot(sp));
                     } else {
-                        if self.seh_registered && !self.is_register_save(sp, self.word_ty(), &v) {
+                        if self.seh_registered && !self.is_register_save(self.word_ty(), &v) {
                             self.args_pushed += 1;
                         }
                         self.slot_write(sp, self.word_ty(), v);
