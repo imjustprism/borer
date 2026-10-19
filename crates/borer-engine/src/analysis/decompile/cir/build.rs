@@ -67,7 +67,8 @@ struct Reader<'t> {
     lines: &'t [&'t str],
     /// The next line to read.
     at: usize,
-    /// The provenance of the statements being read: the last label's.
+    /// The provenance of the statements being read: the last label's at
+    /// this depth or above.
     prov: Prov,
     /// The addresses of each provenance id so far.
     sets: Vec<Vec<u64>>,
@@ -76,6 +77,10 @@ struct Reader<'t> {
 impl<'t> Reader<'t> {
     /// Reads statements at a depth up to the line that closes the block
     /// (left unread) or the end.
+    ///
+    /// A label inside a nested block names the code of that block only:
+    /// the statement after the block is back on the provenance it opened
+    /// under.
     ///
     /// # Arguments
     ///
@@ -101,7 +106,11 @@ impl<'t> Reader<'t> {
             }
             let t = indented(l, depth)?;
             self.at += 1;
+            let before = self.prov;
             let s = self.line(t, depth)?;
+            if !matches!(s.kind, StmtKind::Label(_)) {
+                self.prov = before;
+            }
             out.push(s);
         }
         Some(out)

@@ -390,3 +390,22 @@ goto L_1010;
     );
     assert!(text.ends_with(TEXT), "{text}");
 }
+
+/// A label inside a nested block names that block's code only: the
+/// statement after the block is back on the label it opened under.
+#[test]
+fn a_statement_after_a_block_keeps_the_provenance_before_it() {
+    let body = build(
+        "L_10:
+if (a) {
+  L_20:
+  x = 1;
+}
+goto L_30;
+L_30:
+return x;
+",
+    );
+    assert_eq!(body.stmts[2].prov, body.stmts[0].prov, "{:?}", body.stmts);
+    assert_ne!(body.stmts[2].prov, body.stmts[3].prov);
+}
