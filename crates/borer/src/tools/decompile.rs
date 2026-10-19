@@ -168,9 +168,13 @@ pub(crate) fn truncated(text: &str, cap: usize, entry: u64, header: usize) -> St
     )
 }
 
-/// The lines a `decompile` answer puts under its first line: what of the
-/// text was checked against the binary, then a `// next:` line per resource
-/// the function's facts point at ([`render::next_steps`]).
+/// Returns the lines a `decompile` answer puts under its first line.
+///
+/// They are what of the text was checked against the binary, the
+/// `// warn:` line naming what is known wrong in the text
+/// ([`borer_engine::analysis::decompile::warnings`]), then a `// next:`
+/// line per resource the function's facts point at
+/// ([`render::next_steps`]).
 ///
 /// The check is read first, so the decompilation it memoizes keeps the
 /// lifter's witness, and the text the answer shows reads the same cell.
@@ -191,9 +195,14 @@ pub(crate) fn decompile_header(
     o: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    let mut lines: Vec<String> = borer_engine::analysis::decompile::checked_header(p, a, o, entry)
+    use borer_engine::analysis::decompile;
+    let mut lines: Vec<String> = decompile::checked_header(p, a, o, entry)
         .into_iter()
         .collect();
+    lines.extend(
+        decompile::decompile_named(p, a, o, entry)
+            .and_then(|text| decompile::warnings(p, a, o, entry, &text)),
+    );
     lines.extend(
         render::next_steps(p, a, o, entry)
             .iter()
@@ -251,7 +260,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not inside a discovered function,
     /// or the decompiler produces nothing.
     #[tool(
-        description = "Pseudo-C with locals local_N/arg_N (local_N is N hex bytes below the entry stack pointer: higher N, lower address), named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked, `// next:` lines what to read next.",
+        description = "Pseudo-C with locals local_N/arg_N (local_N is N hex bytes below the entry stack pointer: higher N, lower address), named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked; a `// warn:` line names what is known wrong in the text (none: no check fired, not proof), `// next:` lines what to read next.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -855,6 +864,68 @@ mod tests {
             }))
             .expect("summarizes");
         assert!(summary.ends_with(&format!("# next: {step}\n")), "{summary}");
+    }
+
+    /// The `decompile` answer names, on a `// warn:` line under the check
+    /// line, a call to a function of the binary the text gives no
+    /// prototype; the callee's own text, which calls nothing, has no such
+    /// line.
+    ///
+    /// # Panics
+    ///
+    /// When the warning is missing from the caller's answer or found in
+    /// the callee's.
+    #[test]
+    fn a_decompile_answer_warns_of_a_callee_with_no_prototype() {
+        use crate::params::DecompileParams;
+        use borer_engine::program::{Arch, Program, Section};
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut code = vec![
+            0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x1010
+            0xc3, // ASM: ret
+        ];
+        code.resize(0x10, 0xcc);
+        code.extend([
+            0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+            0xc3, // ASM: ret
+        ]);
+        code.resize(0x20, 0xcc);
+        let text = Section::mapped(".text", 0x1000, 0, 0x20, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = crate::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..crate::BorerServer::default()
+        };
+        let answer = |address: &str| {
+            server
+                .decompile(Parameters(DecompileParams {
+                    address: address.to_owned(),
+                    detail: None,
+                    filter: None,
+                    offset: None,
+                    limit: Some(0),
+                }))
+                .expect("decompiles")
+        };
+        let caller = answer("0x1000");
+        let lines: Vec<&str> = caller.lines().collect();
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|l| l.starts_with("// checked vs binary")),
+            "{caller}"
+        );
+        assert_eq!(
+            lines.get(2).copied(),
+            Some(
+                "// warn: callee sub_1010: no prototype in the text, so arguments and result are guesses"
+            ),
+            "{caller}"
+        );
+        assert!(!answer("0x1010").contains("// warn:"), "{caller}");
     }
 
     /// A batch the total output cap cuts short counts in its header the

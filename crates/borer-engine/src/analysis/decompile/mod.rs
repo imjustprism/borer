@@ -70,6 +70,7 @@ mod vector;
 pub mod verify;
 pub mod verify_a64;
 mod verify_lanes;
+mod warn;
 mod wire;
 
 pub use crate::timing::step_times;
@@ -1148,6 +1149,57 @@ pub fn with_header(text: &str, header: Option<&str>) -> String {
         Some((first, rest)) => format!("{first}\n{header}\n{rest}"),
         None => format!("{text}\n{header}\n"),
     }
+}
+
+/// Returns the `// warn:` line a `decompile` answer prints under its check
+/// line: what keeps the text from being the C it claims.
+///
+/// Each item says what it means in a few words: a computed `goto`, a
+/// callee of the binary with no prototype, a helper with no definition, a
+/// name nothing declares, an operator C refuses on a float, a pointer or
+/// an integer, a missing label, an instruction left as asm.
+///
+/// Only the tools' rendering carries it, like [`checked_header`]. Each
+/// warning is a fact of the text, never a guess, so it flags no right
+/// text; a text with no line may still be wrong in ways no fact of the
+/// text shows.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results, which say what the function calls.
+/// * `overlay` - The names the text was written under.
+/// * `entry` - The function's entry.
+/// * `text` - Its text as [`decompile_named`] wrote it.
+///
+/// # Returns
+///
+/// The line without its newline, `None` when nothing is known wrong.
+#[must_use]
+pub fn warnings(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    text: &str,
+) -> Option<String> {
+    let word = program
+        .arch
+        .bitness()
+        .and_then(|b| u8::try_from(b).ok())
+        .unwrap_or(64);
+    let in_binary: BTreeSet<String> = analysis
+        .function(entry)
+        .map(|f| f.callees.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|&c| {
+            let g = analysis.function(c)?;
+            let target = g.bound.unwrap_or(c);
+            (g.thunk.is_none() && target != entry).then(|| name_of(analysis, overlay, target))
+        })
+        .collect();
+    warn::line(text, &in_binary, word)
 }
 
 /// The closure check of a function's text: each line that reads a

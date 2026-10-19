@@ -28,22 +28,16 @@
 //!   [`ExprKind::Raw`] or [`StmtKind::Raw`], which [`check`](check::check) reports, a
 //!   computed `goto` the structurer wrote among them.
 //!
-//! [`check`](check::check) reports; nothing enforces the invariants yet.
+//! [`check`](check::check) reports, and the `// warn:` line of a
+//! `decompile` answer says what it found; nothing enforces the invariants
+//! yet.
 
 mod build;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the repair search over the tree is the first caller outside the tests"
-    )
-)]
 mod check;
 mod print;
 
 pub(super) use build::build;
-#[cfg(test)]
-use check::{Violation, check};
+pub(super) use check::{Holds, Violation, check};
 pub(super) use print::{print, print_decls};
 
 /// A provenance id: the index of a set of instruction addresses in

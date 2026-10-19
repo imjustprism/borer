@@ -1,7 +1,7 @@
 //! Tests of the tree, its printer, its builder and its checks.
 
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 /// A structured body with every statement form the structurer writes.
 const BODY: &str = "rax = 0;
@@ -43,7 +43,7 @@ return rax;
 fn a_body_prints_back_byte_for_byte() {
     let body = build(BODY);
     assert_eq!(print(&body), BODY);
-    let raw: Vec<Violation> = check(&body, &BTreeSet::new())
+    let raw: Vec<Violation> = check(&body, &BTreeMap::new())
         .into_iter()
         .filter(|v| matches!(v, Violation::Raw(_)))
         .collect();
@@ -105,7 +105,7 @@ fn text_that_is_not_c_stays_as_written() {
     }
     let body = build("x = a +  b;\n");
     assert_eq!(
-        check(&body, &BTreeSet::new()),
+        check(&body, &BTreeMap::new()),
         vec![Violation::Raw("x = a +  b;".to_owned())]
     );
 }
@@ -114,7 +114,7 @@ fn text_that_is_not_c_stays_as_written() {
 #[test]
 fn the_checks_name_what_is_not_c() {
     let body = build("x = y;\nFoo::bar(z);\ngoto L_10;\ngoto *x;\n");
-    let declared: BTreeSet<&str> = ["x"].into_iter().collect();
+    let declared: BTreeMap<&str, Holds> = [("x", Holds::Other)].into_iter().collect();
     assert_eq!(
         check(&body, &declared),
         vec![
@@ -125,6 +125,73 @@ fn the_checks_name_what_is_not_c() {
             Violation::DanglingGoto(Label(0x10)),
         ]
     );
+}
+
+/// A call to a name nothing declares is named apart from an undeclared
+/// read, and a declared callee or one called through a variable is not.
+#[test]
+fn the_checks_name_an_undeclared_callee() {
+    let body = build("x = h_is_odd(x);\nx = rotr64(x, 3);\nx = x(1);\n");
+    let declared: BTreeMap<&str, Holds> = [("x", Holds::Other), ("rotr64", Holds::Other)]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        check(&body, &declared),
+        vec![Violation::UndeclaredCall("h_is_odd".to_owned())]
+    );
+}
+
+/// An operator C does not apply to what its operand holds is named.
+///
+/// What it holds is read from declarations, casts and loads through a
+/// typed pointer; the operators C allows, and any on what the check cannot
+/// type, are not named.
+#[test]
+fn the_checks_name_an_operator_c_refuses() {
+    let declared: BTreeMap<&str, Holds> = [
+        ("f", Holds::Float),
+        ("p", Holds::Pointer),
+        ("n", Holds::Integer),
+    ]
+    .into_iter()
+    .collect();
+    for (text, want) in [
+        (
+            "n = ((float)n + f) & 0xffffffff;\n",
+            Violation::BadOperand("&", Holds::Float),
+        ),
+        ("n = p & 3;\n", Violation::BadOperand("&", Holds::Pointer)),
+        ("n = p * 2;\n", Violation::BadOperand("*", Holds::Pointer)),
+        (
+            "n = *(double*)p >> 1;\n",
+            Violation::BadOperand(">>", Holds::Float),
+        ),
+        ("f |= 1;\n", Violation::BadOperand("|", Holds::Float)),
+        ("n = ~f;\n", Violation::BadOperand("~", Holds::Float)),
+        ("n = 1.5 % n;\n", Violation::BadOperand("%", Holds::Float)),
+        (
+            "n = *(n + 4);\n",
+            Violation::BadOperand("unary *", Holds::Integer),
+        ),
+        ("n = n[1];\n", Violation::BadOperand("[]", Holds::Integer)),
+    ] {
+        assert_eq!(check(&build(text), &declared), vec![want], "{text}");
+    }
+    for fine in [
+        "n = (n & 0xff) | (uint32_t)f;\n",
+        "n = p + 8;\n",
+        "f = f * 2.0;\n",
+        "n = *(uint32_t*)p >> 1;\n",
+        "n = (p - p) * 4;\n",
+        "n = q & 1;\n",
+        "n = *(uint32_t*)n + p[n] + *p + *(q + 1);\n",
+    ] {
+        let found: Vec<Violation> = check(&build(fine), &declared)
+            .into_iter()
+            .filter(|v| matches!(v, Violation::BadOperand(..)))
+            .collect();
+        assert!(found.is_empty(), "{fine}: {found:?}");
+    }
 }
 
 /// An identifier is never built from text that is not one.

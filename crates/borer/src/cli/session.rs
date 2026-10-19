@@ -272,6 +272,13 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
         decompile::decompile_named(&s.program, &a, &s.overlay, entry)
     }
     .with_context(|| format!("decompilation failed at {entry:#x}"))?;
+    let warn = (!raw)
+        .then(|| decompile::warnings(&s.program, &a, &s.overlay, entry, &text))
+        .flatten();
+    let header = match (header, warn) {
+        (Some(h), Some(w)) => Some(format!("{h}\n{w}")),
+        (h, w) => h.or(w),
+    };
     let text = match detail {
         Detail::Skeleton => decompile::skeleton(&text),
         Detail::Full if raw => text,
