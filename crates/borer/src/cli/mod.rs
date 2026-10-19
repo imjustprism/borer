@@ -61,7 +61,7 @@ use args::{
     split_pack_args, unknown_word,
 };
 use packs::{pack_report, packs_report, sigmake, writable, write_file};
-use session::{Session, decompiled, needs_a_binary, open};
+use session::{Session, decompiled, needs_a_binary, open, project_overlay};
 
 /// Usage text printed by `help` and on argument errors.
 const USAGE: &str = "usage: borer <command> <binary> [args...]
@@ -145,6 +145,7 @@ options:
   --pack <file>                            run the analysis with a pack (repeatable; BORER_PACKS lists more, for the MCP server too)
   --no-auto-packs                          load only the packs --pack and BORER_PACKS name, not the pack directories' (BORER_AUTO_PACKS=0 does the same)
   --no-pdb                                 do not apply the companion PDB the debug record names, where one is on disk
+  --project <file>                         apply a project file's names, comments and types, as save_project writes it (refused when saved for another build)
   --arch <x86|x64|arm64>                   read the binary as raw code or a memory dump of that architecture, its headers unread
   --base <address>                         with --arch: where the file's first byte maps (default 0)
   --entry <address>                        with --arch: the entry (default the first executable byte)
@@ -252,6 +253,9 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
             "--arch, --base, --entry and --regions say how a query reads its binary; {word} maps none"
         );
     }
+    if raw.project.is_some() && !matches!(command, Command::Query(_)) {
+        bail!("--project names the annotations a query applies; {word} reads none");
+    }
     if let Some(most) = command.most_args()
         && let Some(extra) = args.get(first + most)
     {
@@ -338,7 +342,11 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         }
         Command::Query(q) => {
             let (named, program) = open(args, &pack_files, pdb, layout.as_ref())?;
-            query(q, args, &Session::fit(program, &named, auto))?;
+            let overlay = match &raw.project {
+                Some(path) => project_overlay(path, &program)?,
+                None => Overlay::default(),
+            };
+            query(q, args, &Session::fit(program, &named, auto, overlay))?;
         }
     }
     Ok(())
@@ -1077,7 +1085,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .get(2)
                 .filter(|n| !n.is_empty() && !n.contains(char::is_whitespace))
                 .context("export-pack needs a pack name, one word")?;
-            let mut overlay = Overlay::default();
+            let mut overlay = s.overlay.clone();
             let mut all = false;
             for extra in args.iter().skip(3) {
                 if extra == "all" {
@@ -1165,7 +1173,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", decompile::explode_tsv(&cases, slot, values.len()));
         }
         Query::Types => {
-            let mut overlay = Overlay::default();
+            let mut overlay = s.overlay.clone();
             if let Some(project) = args.get(2).filter(|p| !p.is_empty()) {
                 overlay = borer::project::ProjectFile::load(project)
                     .and_then(|pf| pf.to_overlay())
@@ -1548,5 +1556,50 @@ mod tests {
         assert!(missing.to_string().contains("--c <out.c>"), "{missing}");
         let other = export_args(&line("export", &["--c", "a.c", "b"])).expect_err("a stray word");
         assert!(other.to_string().contains("'b'"), "{other}");
+    }
+
+    /// `--project` is taken off the line wherever it stands, and the
+    /// project it names applies its names to what a query prints; a
+    /// project saved for another build is refused.
+    ///
+    /// # Panics
+    ///
+    /// When the flag stays on the line, the name does not apply, or the
+    /// other build's project loads.
+    #[test]
+    fn a_project_flag_applies_the_project_s_names() {
+        use super::args::RawFlags;
+        use super::project_overlay;
+        let (rest, raw) = RawFlags::split(&line("decompile", &["--project", "p.json", "0x1000"]))
+            .expect("splits");
+        assert_eq!(rest, line("decompile", &["0x1000"]));
+        assert_eq!(raw.project.as_deref(), Some("p.json"));
+        let s = session(3);
+        let mut named = Overlay::default();
+        named.names.insert(0x1000, "store_three".to_owned());
+        let dir = std::env::temp_dir().join(format!("borer-cli-project-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let save = |file: &str, sha: String| {
+            let path = dir.join(file).display().to_string();
+            borer::project::ProjectFile::from_overlay("x", Some(sha), &named)
+                .save(&path)
+                .expect("saves");
+            path
+        };
+        let same = save("same.json", borer::project::identity(&s.program.bytes));
+        let other = save("other.json", "00".repeat(32));
+        let overlay = project_overlay(&same, &s.program);
+        let refused = project_overlay(&other, &s.program);
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        let overlay = overlay.expect("loads");
+        assert!(
+            refused
+                .expect_err("another build")
+                .to_string()
+                .contains("another build")
+        );
+        let s = Session { overlay, ..s };
+        let text = decompiled(&line("decompile", &["store_three"]), &s).expect("decompiles");
+        assert!(text.contains("store_three"), "{text}");
     }
 }

@@ -102,8 +102,51 @@ pub(super) struct Session {
     /// The packs the analysis runs with: the named ones, and the pack
     /// directories' that fit the program.
     pub(super) packs: Arc<Packs>,
-    /// The names and comments: none, the CLI reads no project file.
+    /// The names, comments and types: a `--project` file's, else none.
     pub(super) overlay: Overlay,
+}
+
+/// Reads a project file into the overlay a query applies.
+///
+/// As the `load_project` tool does, a project saved for another build is
+/// refused, and the annotations no section of the binary can hold are
+/// left out and counted on stderr.
+///
+/// # Arguments
+///
+/// * `path` - The project file, as `save_project` writes it.
+/// * `program` - The binary the query reads.
+///
+/// # Returns
+///
+/// The overlay.
+///
+/// # Errors
+///
+/// When the file cannot be read or parsed, states something an overlay
+/// cannot hold, or was saved for another binary.
+pub(super) fn project_overlay(path: &str, program: &Program) -> anyhow::Result<Overlay> {
+    use borer::project::{Identity, ProjectFile};
+    let pf = ProjectFile::load(path).map_err(anyhow::Error::msg)?;
+    match pf.identify(program) {
+        Identity::Same | Identity::PathOnly => {}
+        Identity::Other | Identity::OtherPath => bail!(
+            "the project {} was saved for another build ({}), not {}; nothing was loaded. borer://carry moves its names to a rebuild",
+            short_path(path),
+            short_path(&pf.program),
+            short_path(&program.path.display().to_string())
+        ),
+    }
+    let mut overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
+    let left_out = borer::project::keep_placeable(&mut overlay, program);
+    if !left_out.is_empty() {
+        eprintln!(
+            "borer: {} annotations of {} name no address of the binary and were skipped",
+            left_out.len(),
+            short_path(path)
+        );
+    }
+    Ok(overlay)
 }
 
 impl Session {
@@ -115,7 +158,8 @@ impl Session {
     /// * `program` - The loaded file.
     /// * `named` - The packs the command line and `BORER_PACKS` name.
     /// * `auto` - Whether the pack directories' packs may load by themselves.
-    pub(super) fn fit(program: Program, named: &Packs, auto: bool) -> Self {
+    /// * `overlay` - The names, comments and types to apply.
+    pub(super) fn fit(program: Program, named: &Packs, auto: bool, overlay: Overlay) -> Self {
         let (packs, notes) = borer::packs::for_program(&program, named, auto);
         for note in notes {
             eprintln!("borer: {note}");
@@ -123,7 +167,7 @@ impl Session {
         Self {
             program: Arc::new(program),
             packs,
-            overlay: Overlay::default(),
+            overlay,
         }
     }
 

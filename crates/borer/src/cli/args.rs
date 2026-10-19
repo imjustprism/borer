@@ -797,7 +797,7 @@ pub(super) fn split_pack_args(
     Ok((rest, files, auto, pdb))
 }
 
-/// The raw layout flags of a command line, as given.
+/// The raw layout and project flags of a command line, as given.
 #[derive(Debug, Default)]
 pub(super) struct RawFlags {
     /// `--arch`: the architecture the bytes map as.
@@ -808,12 +808,15 @@ pub(super) struct RawFlags {
     pub(super) entry: Option<String>,
     /// `--regions`: the parts of the file mapped instead of the whole.
     pub(super) regions: Option<String>,
+    /// `--project`: the project file whose names, comments and types a
+    /// query applies, as `save_project` writes it.
+    pub(super) project: Option<String>,
 }
 
 impl RawFlags {
     /// Takes the layout flags (`--arch`, `--base`, `--entry`,
-    /// `--regions`, each `--flag value` or `--flag=value`) out of a command
-    /// line.
+    /// `--regions`) and `--project`, each `--flag value` or
+    /// `--flag=value`, out of a command line.
     ///
     /// # Arguments
     ///
@@ -852,7 +855,7 @@ impl RawFlags {
         Ok((rest, raw))
     }
 
-    /// Returns where a layout flag's value goes.
+    /// Returns where a layout or project flag's value goes.
     ///
     /// # Arguments
     ///
@@ -860,13 +863,14 @@ impl RawFlags {
     ///
     /// # Returns
     ///
-    /// The flag's slot, or `None` when the word is no layout flag.
+    /// The flag's slot, or `None` when the word is neither.
     pub(super) fn slot(&mut self, flag: &str) -> Option<&mut Option<String>> {
         match flag {
             "--arch" => Some(&mut self.arch),
             "--base" => Some(&mut self.base),
             "--entry" => Some(&mut self.entry),
             "--regions" => Some(&mut self.regions),
+            "--project" => Some(&mut self.project),
             _ => None,
         }
     }
