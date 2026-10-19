@@ -233,6 +233,18 @@ impl Line<'_> {
         None
     }
 
+    /// Lists the identifiers among the line's tokens.
+    ///
+    /// # Returns
+    ///
+    /// Each identifier's text, in line order.
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.toks
+            .iter()
+            .filter(|t| t.lex == Lex::Name)
+            .filter_map(|t| self.text.get(t.at..t.end))
+    }
+
     /// The first token at or after `from` that is the punctuation `p`.
     ///
     /// # Arguments
@@ -895,6 +907,7 @@ fn webs_of(
     preds: &[Vec<usize>],
     occs: &[Occs],
     live_out: &BTreeSet<usize>,
+    touch: &[usize],
 ) -> Webs {
     let n = nodes.len();
     let reads = |i: usize| {
@@ -908,8 +921,14 @@ fn webs_of(
         occs.get(i)
             .is_some_and(|o| o.writes_all || o.defs.iter().chain(&o.rmw).any(|(d, _)| *d == v))
     };
-    let uses: Vec<bool> = (0..n).map(reads).collect();
-    let defs: Vec<bool> = (0..n).map(writes).collect();
+    let mut uses = vec![false; n];
+    let mut defs = vec![false; n];
+    for &i in touch.iter().chain(std::iter::once(&EXIT)) {
+        if let (Some(u), Some(d)) = (uses.get_mut(i), defs.get_mut(i)) {
+            *u = reads(i);
+            *d = writes(i);
+        }
+    }
     let mut live = uses;
     let mut work: Vec<usize> = (0..n).filter(|&i| live[i]).collect();
     while let Some(i) = work.pop() {
@@ -933,7 +952,7 @@ fn webs_of(
             }
         }
     }
-    for (i, o) in occs.iter().enumerate() {
+    for (i, o) in touch.iter().filter_map(|&i| Some((i, occs.get(i)?))) {
         if o.rmw.iter().any(|(r, _)| *r == v) {
             sets.union(n + i, i);
         }
@@ -947,7 +966,7 @@ fn webs_of(
     if live_out.contains(&v) {
         sets.union(EXIT, machine);
     }
-    for i in 0..n {
+    for &i in touch.iter().chain(std::iter::once(&EXIT)) {
         let real = occs.get(i).is_some_and(|o| {
             o.reads_all || o.machine.contains(&v) || o.uses.iter().any(|(u, _)| *u == v)
         }) || (i == EXIT && live_out.contains(&v));
@@ -1284,8 +1303,9 @@ fn renumber(text: &str, before: &str) -> String {
         return text.to_owned();
     };
     let mut order: Vec<&str> = Vec::new();
+    let mut placed: BTreeSet<&str> = BTreeSet::new();
     for w in names_in_order(&p.body) {
-        if is_var_name(w) && !theirs.contains(w) && !order.contains(&w) {
+        if is_var_name(w) && !theirs.contains(w) && placed.insert(w) {
             order.push(w);
         }
     }
@@ -1308,6 +1328,9 @@ fn renumber(text: &str, before: &str) -> String {
     }
     let respelled = |line: &str| {
         let mut out = line.to_owned();
+        if !line.contains(PREFIX) {
+            return out;
+        }
         for t in lex(line).iter().rev() {
             if let Some(new) = line.get(t.at..t.end).and_then(|w| map.get(w)) {
                 out.replace_range(t.at..t.end, new);
@@ -1334,7 +1357,7 @@ fn renumber(text: &str, before: &str) -> String {
                 .strip_prefix(PREFIX)
                 .and_then(|n| n.parse::<usize>().ok())
             {
-                Some(n) if order.contains(&name) => mine.push((n, format!("{stars}{new}"))),
+                Some(n) if placed.contains(name) => mine.push((n, format!("{stars}{new}"))),
                 Some(_) | None => rest.push(format!("{stars}{new}")),
             }
         }
@@ -1426,6 +1449,11 @@ struct Text<'t> {
     dropped: BTreeSet<usize>,
     /// The assignment targets that go: node and token.
     gone: BTreeSet<(usize, usize)>,
+    /// Per variable, ascending, every node whose reads or writes could
+    /// name it ([`Text::touching`]): its own occurrences, then the nodes
+    /// that read, write or pin every variable. Nodes only lose
+    /// occurrences after [`Text::read`], so the lists stay a superset.
+    touch: Vec<Vec<usize>>,
 }
 
 /// One tracked token in the final text: where it is and its web.
@@ -1554,6 +1582,7 @@ impl<'t> Text<'t> {
         let tracked: Vec<usize> = (0..vars.names.len())
             .filter(|v| !vars.unsafe_vars.contains(v))
             .collect();
+        let touch = Self::touching(&occs_of, vars.names.len());
         Some(Self {
             parts,
             lines,
@@ -1567,7 +1596,63 @@ impl<'t> Text<'t> {
             types,
             dropped: BTreeSet::new(),
             gone: BTreeSet::new(),
+            touch,
         })
+    }
+
+    /// Lists, per variable, the nodes whose reads or writes could name it.
+    ///
+    /// A node names a variable when it defines, updates, reads or hands it
+    /// to the machine, and every variable when it reads, writes or pins
+    /// them all; every other node leaves a variable's webs, reads and
+    /// definitions alone, so a walk over one variable visits only these.
+    ///
+    /// # Arguments
+    ///
+    /// * `occs` - What each node reads and writes.
+    /// * `count` - How many variables there are.
+    ///
+    /// # Returns
+    ///
+    /// Per variable, its nodes, ascending and without repeats.
+    fn touching(occs: &[Occs], count: usize) -> Vec<Vec<usize>> {
+        let mut touch: Vec<Vec<usize>> = vec![Vec::new(); count];
+        for (i, o) in occs.iter().enumerate() {
+            if o.reads_all || o.writes_all || o.pins_all {
+                for list in &mut touch {
+                    list.push(i);
+                }
+                continue;
+            }
+            let named = o
+                .defs
+                .iter()
+                .chain(&o.rmw)
+                .chain(&o.uses)
+                .map(|(v, _)| *v)
+                .chain(o.machine.iter().copied());
+            for v in named {
+                if let Some(list) = touch.get_mut(v)
+                    && list.last() != Some(&i)
+                {
+                    list.push(i);
+                }
+            }
+        }
+        touch
+    }
+
+    /// The nodes whose reads or writes could name variable `v`.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The variable.
+    ///
+    /// # Returns
+    ///
+    /// Its nodes ([`Text::touching`]), ascending; none for an unknown one.
+    fn nodes_of(&self, v: usize) -> &[usize] {
+        self.touch.get(v).map_or(&[][..], Vec::as_slice)
     }
 
     /// The webs of one variable over what the nodes still do.
@@ -1582,6 +1667,7 @@ impl<'t> Text<'t> {
             &self.preds,
             &self.occs,
             &self.live_out,
+            self.nodes_of(v),
         )
     }
 
@@ -1603,7 +1689,11 @@ impl<'t> Text<'t> {
                 continue;
             };
             let mut w = self.webs(v);
-            for (i, node) in self.graph.nodes.iter().enumerate() {
+            let touch = std::mem::take(self.touch.get_mut(v).unwrap_or(&mut Vec::new()));
+            for &i in &touch {
+                let Some(node) = self.graph.nodes.get(i) else {
+                    continue;
+                };
                 let Some(l) = node.line.and_then(|x| self.lines.get(x)) else {
                     continue;
                 };
@@ -1655,6 +1745,9 @@ impl<'t> Text<'t> {
                     changed = true;
                 }
             }
+            if let Some(slot) = self.touch.get_mut(v) {
+                *slot = touch;
+            }
         }
         changed
     }
@@ -1665,7 +1758,11 @@ impl<'t> Text<'t> {
         let mut seen: Vec<Seen> = Vec::new();
         for &v in &self.tracked {
             let mut w = self.webs(v);
-            for (i, o) in self.occs.iter().enumerate() {
+            for (i, o) in self
+                .nodes_of(v)
+                .iter()
+                .filter_map(|&i| Some((i, self.occs.get(i)?)))
+            {
                 let Some(line) = self.graph.nodes.get(i).and_then(|n| n.line) else {
                     continue;
                 };
@@ -1807,6 +1904,8 @@ impl<'t> Text<'t> {
         newline: bool,
     ) -> String {
         let mut body: Vec<String> = Vec::with_capacity(self.lines.len());
+        let mut respelled: Vec<usize> = Vec::new();
+        let mut after: BTreeSet<&str> = BTreeSet::new();
         for (i, l) in self.lines.iter().enumerate() {
             if gone.contains(&i) {
                 continue;
@@ -1819,11 +1918,18 @@ impl<'t> Text<'t> {
                         text.replace_range(*at..*end, with);
                     }
                 }
+                respelled.push(body.len());
+            } else {
+                after.extend(l.names());
             }
             body.push(text);
         }
-        let before = names_in(self.parts.body.iter().copied());
-        let after = names_in(body.iter().map(String::as_str));
+        let before: BTreeSet<&str> = self.lines.iter().flat_map(Line::names).collect();
+        after.extend(names_in(
+            respelled
+                .iter()
+                .filter_map(|k| body.get(*k).map(String::as_str)),
+        ));
         let gone_name = |n: &str| before.contains(n) && !after.contains(n);
         let mut out: Vec<String> = self
             .parts
@@ -1894,7 +2000,11 @@ impl<'t> Text<'t> {
         }
         let mut w = self.webs(v);
         let mut webs: BTreeMap<usize, Web> = BTreeMap::new();
-        for (i, o) in self.occs.iter().enumerate() {
+        for (i, o) in self
+            .nodes_of(v)
+            .iter()
+            .filter_map(|&i| Some((i, self.occs.get(i)?)))
+        {
             for _ in o.defs.iter().filter(|(x, _)| *x == v) {
                 let r = w.def_at(i);
                 webs.entry(r).or_default().defs.push(i);
@@ -2220,8 +2330,11 @@ impl<'t> Text<'t> {
                 .get(i)
                 .is_some_and(|o| o.writes_all || o.defs.iter().chain(&o.rmw).any(|(x, _)| *x == v))
         };
-        let n = self.graph.nodes.len();
-        if (1..n).any(|i| i != c && defines(i, av)) {
+        if self
+            .nodes_of(av)
+            .iter()
+            .any(|&i| i >= 1 && i != c && defines(i, av))
+        {
             return None;
         }
         let mut w = self.webs(av);
@@ -2229,12 +2342,16 @@ impl<'t> Text<'t> {
         if w.pinned(root) {
             return None;
         }
-        let clash = (0..n).filter(|&m| defines(m, b)).any(|m| {
-            self.graph
-                .nodes
-                .get(m)
-                .is_some_and(|x| x.succ.iter().any(|s| w.live.get(*s) == Some(&true)))
-        });
+        let clash = self
+            .nodes_of(b)
+            .iter()
+            .filter(|&&m| defines(m, b))
+            .any(|&m| {
+                self.graph
+                    .nodes
+                    .get(m)
+                    .is_some_and(|x| x.succ.iter().any(|s| w.live.get(*s) == Some(&true)))
+            });
         if clash {
             return None;
         }
@@ -2247,7 +2364,11 @@ impl<'t> Text<'t> {
             Some((l.toks.get(tok)?.at, l.toks.get(eq + 1)?.at))
         };
         let mut uses = Vec::new();
-        for (i, o) in self.occs.iter().enumerate() {
+        for (i, o) in self
+            .nodes_of(av)
+            .iter()
+            .filter_map(|&i| Some((i, self.occs.get(i)?)))
+        {
             for &(_, k) in o.uses.iter().filter(|(x, _)| *x == av) {
                 if w.read_at(i) != root {
                     return None;
