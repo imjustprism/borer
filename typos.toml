@@ -3,6 +3,8 @@
 extend-exclude = [
   "target/",
   "Cargo.lock",
+  # hashes of decompiled texts, not words
+  "scripts/run/golden.tsv",
 ]
 
 [default]

@@ -18,7 +18,8 @@ then cargo fmt, then typos, the comment check, ruff check and format and the
 type library (scripts/check/typelib.py --check) together. The builds and the
 long checks follow one at a time: cargo clippy -D warnings, cargo test,
 the dogfood sweeps over real binaries, the readability benchmark against its
-baseline (scripts/run/readability.py), cargo doc with warnings as errors
+baseline (scripts/run/readability.py), the golden diff of the `index` output
+(scripts/run/golden.py), cargo doc with warnings as errors
 (private items included), cargo deny (offline subset), scripts/run/smoke.py
 and scripts/run/agent_eval.py. The first failure stops the run and the exit
 status is non-zero. Tools that are not installed are reported and skipped,
@@ -435,6 +436,16 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
                 os.path.join("scripts", "run", "readability.tsv"),
                 "--quiet",
             ],
+            inputs=RUST + SCRIPTS,
+        ),
+        # Every function's `index` text over the notepad, msvcrt32 and
+        # sqlite3 corpus against the hashes in scripts/run/golden.tsv
+        # (scripts/run/golden.py): a change of output names the functions
+        # it changed, and a commit that means to change them records the
+        # new hashes with `golden.py record`. A missing corpus is skipped.
+        Step(
+            "golden",
+            [py, os.path.join("scripts", "run", "golden.py"), "check", server, "--quiet"],
             inputs=RUST + SCRIPTS,
         ),
         Step(
