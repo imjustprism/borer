@@ -198,6 +198,8 @@ pub(super) enum Query {
     Read,
     /// `fingerprint [out]`: one line per function, megabytes on a real client, so `out` writes the file beside a build that `borer://diff` reads.
     Fingerprint,
+    /// `export --c <out.c> [--library]`: every function as one C file, leaves first.
+    Export,
     /// `export-pack <name> [project] [all]`: the names a project file gave as a pack that finds the same functions in another build.
     ExportPack,
     /// `script <file> [args...]`: run a Rhai script in a sandbox; `--save <project>` writes its names and comments.
@@ -282,6 +284,7 @@ impl Query {
             "hidden" => Self::Hidden,
             "read" => Self::Read,
             "fingerprint" => Self::Fingerprint,
+            "export" => Self::Export,
             "export-pack" => Self::ExportPack,
             "script" => Self::Script,
             "scenario" => Self::Scenario,
@@ -352,6 +355,7 @@ impl Query {
             | Self::Strings
             | Self::Symbols
             | Self::Read
+            | Self::Export
             | Self::ExportPack => 3,
             Self::Decompile | Self::Fieldrefs | Self::Grep | Self::Types | Self::Verify => 4,
             Self::Script | Self::SetType => return None,
@@ -556,6 +560,47 @@ pub(super) fn path_arg<'a>(
         bail!("{missing}; the path is empty");
     }
     Ok(path)
+}
+
+/// Reads `export`'s arguments after the binary: `--c <out.c>`, and
+/// `--library` to write library code too.
+///
+/// # Arguments
+///
+/// * `args` - The command line, the command first and the binary second.
+///
+/// # Returns
+///
+/// The C file to write, and whether library code goes into it.
+///
+/// # Errors
+///
+/// When `--c` is missing or has no path after it, or a word is neither.
+pub(super) fn export_args(
+    args: &[String],
+) -> anyhow::Result<(&str, borer_engine::analysis::decompile::export::Library)> {
+    use borer_engine::analysis::decompile::export::Library;
+    let mut out = None;
+    let mut library = Library::Skip;
+    let mut rest = args.iter().skip(2);
+    while let Some(word) = rest.next() {
+        match word.as_str() {
+            "--c" => {
+                out = Some(
+                    rest.next()
+                        .filter(|p| !p.is_empty())
+                        .context("--c needs the C file to write")?
+                        .as_str(),
+                );
+            }
+            "--library" => library = Library::Include,
+            other => bail!(
+                "export takes --c <out.c> and --library, not {}",
+                quoted(other)
+            ),
+        }
+    }
+    Ok((out.context("export needs --c <out.c>")?, library))
 }
 
 /// Reads a CLI listing's `[limit]` argument.
@@ -873,4 +918,4 @@ pub(super) fn unknown_word(word: &str) -> String {
 /// The words beginning `--` that queries read themselves, beside the
 /// options [`split_pack_args`] takes off the line; `setup` and `doctor`
 /// refuse any other word with their own message.
-pub(super) const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
+pub(super) const COMMAND_FLAGS: &[&str] = &["--help", "--save", "--c", "--library"];
