@@ -180,3 +180,155 @@ fn the_serial_check_runs_and_its_text_is_read() {
         run_tsv(&p, &a, &o, &format!("{entry:#x}/0;1;0xdeadbeef")).expect("runs")
     );
 }
+
+/// The identifiers outside every generic argument list of a name, without
+/// the words the two Rust name spellings differ in (`{closure#0}` and
+/// `closure$0`, `impl$2`, `{shim:vtable#0}`).
+///
+/// # Arguments
+///
+/// * `name` - A demangled name.
+/// * `outer` - Whether to leave out what sits between angle brackets.
+fn name_words(name: &str, outer: bool) -> Vec<&str> {
+    /// Words one spelling has and the other does not.
+    const NOISE: &[&str] = &[
+        "closure",
+        "closure_env",
+        "impl",
+        "enum2",
+        "tuple",
+        "ref",
+        "ref_mut",
+        "slice2",
+        "str",
+        "dyn",
+        "as",
+        "mut",
+        "shim",
+        "vtable",
+        "__rustc",
+        "_",
+    ];
+    let mut depth = 0usize;
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, c) in name.char_indices().chain([(name.len(), ' ')]) {
+        let ident = c.is_ascii_alphanumeric() || c == '_';
+        if ident && start.is_none() {
+            start = Some(i);
+        }
+        if !ident && let Some(from) = start.take() {
+            let w = &name[from..i];
+            if (!outer || depth == 0)
+                && !NOISE.contains(&w)
+                && !w.bytes().all(|b| b.is_ascii_digit())
+            {
+                out.push(w);
+            }
+        }
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Reads the public function names a PDB gives each address.
+///
+/// # Arguments
+///
+/// * `path` - The PDB.
+/// * `base` - The image base its addresses are relative to.
+///
+/// # Returns
+///
+/// The names by address, or `None` when the PDB does not read.
+fn pdb_publics(
+    path: &std::path::Path,
+    base: u64,
+) -> Option<std::collections::BTreeMap<u64, Vec<String>>> {
+    use pdb::FallibleIterator;
+    let mut pdb = pdb::PDB::open(std::fs::File::open(path).ok()?).ok()?;
+    let map = pdb.address_map().ok()?;
+    let globals = pdb.global_symbols().ok()?;
+    let mut out: std::collections::BTreeMap<u64, Vec<String>> = std::collections::BTreeMap::new();
+    let mut it = globals.iter();
+    while let Some(s) = it.next().ok()? {
+        if let Ok(pdb::SymbolData::Public(p)) = s.parse()
+            && p.function
+            && let Some(rva) = p.offset.to_rva(&map)
+        {
+            out.entry(base + u64::from(rva.0))
+                .or_default()
+                .push(p.name.to_string().into_owned());
+        }
+    }
+    Some(out)
+}
+
+/// The shipped Rust set names the standard library's functions in a Rust
+/// program built by the toolchain it was read from, and every name it
+/// gives is the one the program's PDB has there.
+///
+/// The crackme is loaded without its PDB, so nothing names its functions
+/// but the set; loaded with it, the PDB says what each entry is, under
+/// every name it gives the address (`rust_begin_unwind` is the link name
+/// of `std::panicking::panic_handler`). Two
+/// spellings of one function (the set's v0 names demangled, the PDB's
+/// MSVC-style ones) agree on the last word outside every argument list,
+/// and every outer word of the PDB's name is among the set's words.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "the crackme is built by the dev profile with the pinned toolchain the set was read from"
+)]
+#[cfg_attr(
+    all(debug_assertions, not(windows)),
+    ignore = "the shipped Rust set is for Windows x64"
+)]
+fn the_shipped_rust_set_names_the_crackme_as_its_pdb_does() {
+    use borer_engine::analysis::NameSource;
+    let Some(exe) = crackme_exe() else {
+        panic!("crackme example not built; run cargo build -p borer-fixtures --examples");
+    };
+    let bare = Program::load_with(&exe, false).expect("load crackme");
+    let a = Analysis::compute(&bare);
+    let truth = Analysis::compute(&Program::load(&exe).expect("load crackme with its PDB"));
+    let publics = pdb_publics(&exe.with_extension("pdb"), bare.image_base).expect("the PDB reads");
+    let named: Vec<(u64, String)> = a
+        .functions
+        .iter()
+        .filter(|f| f.name_source == NameSource::Library)
+        .filter_map(|f| Some((f.entry, f.name.clone()?)))
+        .collect();
+    assert!(named.len() >= 100, "{} named", named.len());
+    let wrong: Vec<String> = named
+        .iter()
+        .filter_map(|(entry, got)| {
+            let wants: Vec<String> = truth
+                .function(*entry)
+                .and_then(|f| f.name.clone())
+                .into_iter()
+                .chain(
+                    publics
+                        .get(entry)
+                        .into_iter()
+                        .flatten()
+                        .map(|n| borer_engine::search::demangled_name(n)),
+                )
+                .collect();
+            let og = name_words(got, true);
+            let agree = wants.iter().any(|want| {
+                let ow = name_words(want, true);
+                og.last().is_some()
+                    && og.last() == ow.last()
+                    && (ow.iter().all(|w| name_words(got, false).contains(w))
+                        || og.iter().all(|w| name_words(want, false).contains(w)))
+            });
+            (!agree).then(|| format!("{entry:#x}: {got} where the PDB says {}", wants.join(" | ")))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

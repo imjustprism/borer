@@ -8,7 +8,7 @@ use borer_engine::analysis::{Analysis, libnames, sigs};
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
 use borer_engine::text::short_path;
-use borer_engine::{libsig, script};
+use borer_engine::{libsets, libsig, script};
 
 use super::args::arg;
 
@@ -46,6 +46,10 @@ pub(super) fn writable(path: &str) -> anyhow::Result<()> {
 
 /// Writes the functions of static libraries, objects or IDA `.pat` signature
 /// files as a pack of library signatures: `sigmake <out> <name> <library>...`.
+///
+/// An output ending in `.bsig` is written as a compact set instead
+/// ([`libsets::encode`]), what borer ships, keeping only what can name a
+/// function ([`libsets::compact`]).
 ///
 /// # Arguments
 ///
@@ -90,6 +94,18 @@ pub(super) fn sigmake(args: &[String]) -> anyhow::Result<()> {
                 .file_name()
                 .map_or_else(|| library.clone(), |f| f.to_string_lossy().into_owned()),
         );
+    }
+    if out.ends_with(".bsig") {
+        let kept = libsets::compact(functions);
+        let bytes = libsets::encode(&kept);
+        write_file(out, &bytes)?;
+        println!(
+            "# wrote {}: {} signatures in {} bytes",
+            short_path(out),
+            kept.len(),
+            bytes.len()
+        );
+        return Ok(());
     }
     let description = format!("the functions of {}", files.join(", "));
     let text = libsig::pack_text(name, &description, &functions);
@@ -140,7 +156,8 @@ pub(super) fn pack_report(pack: &Pack, warnings: &[String]) -> String {
 }
 
 /// Lists the packs borer knows and whether each loads for a program, then
-/// the names and scripts the loading ones give it.
+/// the names and scripts the loading ones and the shipped library sets
+/// give it.
 ///
 /// # Arguments
 ///
@@ -151,7 +168,9 @@ pub(super) fn packs_report(program: &Program, named: &Packs, auto: bool) -> Stri
     let mut out = borer::packs::listing(program, named, auto);
     let (loaded, _) = borer::packs::for_program(program, named, auto);
     let scripts = loaded.packs.iter().any(|p| !p.scripts.is_empty());
-    let names = !loaded.list("names", "fn").is_empty() || !loaded.list("names", "lib").is_empty();
+    let names = !loaded.list("names", "fn").is_empty()
+        || !loaded.list("names", "lib").is_empty()
+        || !libsets::for_program(program).is_empty();
     if (scripts || names) && program.arch.supports(Feature::Discover) {
         let a = Analysis::compute_with(program, loaded);
         out.push_str(&sigs::pack_names_tsv(&a.pack_names));

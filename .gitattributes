@@ -16,3 +16,4 @@
 *.dll binary
 *.bin binary
 *.png binary
+*.bsig binary

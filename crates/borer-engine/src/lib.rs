@@ -40,6 +40,7 @@ pub mod hexdump;
 pub mod ioc;
 pub mod isa;
 pub mod layout;
+pub mod libsets;
 pub mod libsig;
 pub mod live;
 mod lsda;

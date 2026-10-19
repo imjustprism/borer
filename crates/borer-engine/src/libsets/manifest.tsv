@@ -1,0 +1,7 @@
+# library signature sets borer ships; scripts/dev/libsets.py writes this
+# not shipped: libcmt.lib, libvcruntime.lib: Visual Studio license terms: not redistributable
+# not shipped: libucrt.lib: Windows SDK license terms: not redistributable
+set	functions	bytes	license	version	libraries (sha256)
+compiler-rt-22-x64-coff	129	15459	Apache-2.0 WITH LLVM-exception	LLVM 22.1.8	clang_rt.builtins-x86_64.lib (783d92a30f5cedb40060b09c2e63bddc5b98ef93323962a1bb5921464f5215ea)
+msvc-stl-14.44-x64	3723	669664	Apache-2.0 WITH LLVM-exception	MSVC 14.44.35207	libcpmt.lib (da86944db1497552c378e6252a7177fbefbdaeba4e69a6457de4db7fb2d235de)
+rust-1.96-x64-msvc	2365	368652	MIT OR Apache-2.0	rustc 1.96.1	liballoc-40b69bac6acefee6.rlib (15768cf395ce21c55a7e240229982ab158cb6c41585c2004718c8948921b93aa), libcompiler_builtins-4b04731e8ef482ad.rlib (10eed7e37b6d06922be0df29e5ce31a52992601a46f5c564eabcf32e51d06d47), libcore-53e71b1db4932556.rlib (2071cdfbdd202f10d3dc2083b92f1bb62e07075a0321169485a1790b623c6853), libstd-b821e8e7d5c9d821.rlib (70ba489fb8afd0f80a2c1511653acb1c180987dab1d6b24c2947c6a6d2aca7d0)
