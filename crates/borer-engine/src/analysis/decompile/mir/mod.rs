@@ -24,6 +24,14 @@
 //! through MIR as it checks it through the expressions.
 
 pub(super) mod build;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the e-graph is an opt-in pass; the tests and the measurement sweep are its callers"
+    )
+)]
+pub(super) mod egraph;
 pub(super) mod eval;
 #[cfg(test)]
 #[expect(
