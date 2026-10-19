@@ -243,7 +243,7 @@ fn u16_in(b: &[u8], at: usize, big: bool) -> Option<u16> {
 ///
 /// * `data` - The bytes the CRC covers.
 #[must_use]
-fn crc32(data: &[u8]) -> u32 {
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut crc = u32::MAX;
     for &byte in data {
         crc ^= u32::from(byte);

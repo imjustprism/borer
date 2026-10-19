@@ -761,7 +761,8 @@ pub(super) struct Group {
 ///
 /// A group per algorithm with its site and function counts and the
 /// functions it appears in, then a `# showing N of M hits from O` header
-/// over one page of the per-site table.
+/// over one page of the per-site table, then the API hashes the code and
+/// data carry ([`crate::analysis::apihash`]), at most `limit` of them.
 pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: usize) -> String {
     /// Functions named in a group's `where` column before the rest are counted.
     const NAMED_MAX: usize = 8;
@@ -805,8 +806,12 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: 
         }
         std::ops::ControlFlow::Continue(())
     });
+    let api = crate::analysis::apihash::api_hashes_tsv(
+        &crate::analysis::apihash::find_api_hashes(p, a),
+        limit,
+    );
     if total == 0 {
-        return crate::crypto::render(&[]);
+        return crate::crypto::render(&[]) + api.as_str();
     }
     groups.sort_by(|l, r| r.sites.cmp(&l.sites).then(l.family.cmp(r.family)));
     let functions: usize = {
@@ -858,6 +863,7 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: 
             total - next
         );
     }
+    out.push_str(&api);
     out
 }
 /// Answers the first question about a binary in one call.
