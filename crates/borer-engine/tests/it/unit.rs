@@ -150,3 +150,74 @@ fn a_c_library_name_gets_no_abi_prototype() {
         "{text}"
     );
 }
+
+/// Two exports of one binary are the same bytes, whatever order the cores
+/// finish their functions in.
+#[test]
+fn the_export_is_deterministic() {
+    use borer_engine::analysis::decompile::export::{Library, export};
+    let p = image();
+    let file = || {
+        let a = Analysis::compute(&p);
+        let mut bodies = String::new();
+        let hoisted = export(&p, &a, &Overlay::default(), Library::Include, &mut |t| {
+            bodies.push_str(t);
+            Ok(())
+        })
+        .expect("exports");
+        format!("{}{bodies}", hoisted.head("t"))
+    };
+    assert_eq!(file(), file());
+}
+
+/// The whole-binary export defines every function once.
+///
+/// It hoists what the per-function closures declare: the table of
+/// operations once, after the prototypes of the functions it names, and
+/// no `static inline` copy of a function the file defines. The walk from
+/// `even`, the first entry, writes its callee `odd` before it.
+#[test]
+fn the_export_hoists_the_closure_and_defines_each_function_once() {
+    use borer_engine::analysis::decompile::export::{Library, export};
+    let p = image();
+    let a = Analysis::compute(&p);
+    let mut bodies = String::new();
+    let hoisted = export(&p, &a, &Overlay::default(), Library::Skip, &mut |t| {
+        bodies.push_str(t);
+        Ok(())
+    })
+    .expect("exports");
+    let file = format!("{}{bodies}", hoisted.head("t"));
+    let lines: Vec<&str> = file.lines().collect();
+    let def = |name: &str| {
+        let at: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                !l.ends_with(';') && !l.starts_with("//") && l.contains(&format!(" {name}("))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(at.len(), 1, "{name} is defined once: {file}");
+        at[0]
+    };
+    for name in ["even", "odd", "dispatch", "op_add", "op_sub"] {
+        def(name);
+    }
+    assert!(!file.contains("static inline uint32_t op_"), "{file}");
+    let table = lines
+        .iter()
+        .position(|l| l.ends_with("= {op_add, op_sub, op_add, op_sub};"))
+        .unwrap_or_else(|| panic!("the table is declared: {file}"));
+    assert_eq!(file.matches("= {op_add, op_sub").count(), 1, "{file}");
+    let proto = lines
+        .iter()
+        .position(|l| l.ends_with(';') && l.contains(" op_add("))
+        .unwrap_or_else(|| panic!("op_add is declared: {file}"));
+    assert!(proto < table && table < def("op_add"), "{file}");
+    assert!(
+        def("odd") < def("even"),
+        "even's callee comes first: {file}"
+    );
+    assert_eq!(hoisted.written, 5, "{file}");
+}

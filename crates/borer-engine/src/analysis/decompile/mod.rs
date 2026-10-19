@@ -36,6 +36,7 @@ mod declared;
 mod emit;
 mod enums;
 mod evidence;
+pub mod export;
 mod expr;
 mod expr_render;
 mod fcmp;
