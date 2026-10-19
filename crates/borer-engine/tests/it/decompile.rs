@@ -2967,10 +2967,12 @@ fn float_conversions_and_vector_intrinsics() {
 }
 
 /// `FL`, `FL2` and `FR`: scalar-float blocks are checked against the
-/// binary, not counted as float/vector; `FL3`, whose `shufps` is a packed
-/// operation the text writes as a vector shuffle, still is. `FL`'s block
-/// is proved over every state, its float operations the same on both
-/// sides; `FL2`'s whole-lane masks are only tested.
+/// binary, not counted as float/vector.
+///
+/// `FL3`, whose `shufps` is a packed operation the text writes as a vector
+/// shuffle, still is. `FL`'s block is proved over every state, its float
+/// operations the same on both sides; `FL2`'s whole-lane masks are only
+/// tested.
 #[test]
 fn scalar_float_blocks_are_checked_not_counted() {
     use borer_engine::analysis::decompile::checked_header;
