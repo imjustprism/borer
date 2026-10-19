@@ -1452,7 +1452,8 @@ fn extend(g: &mut EGraph, p: Prov, node: &Inst) -> Option<Val> {
 
 /// Folds the shifts and masks of a bit-field read: a left then a right
 /// shift into one shift and a mask, a mask that keeps every bit a shift
-/// left, two masks into one, and a mask a truncation drops.
+/// left or the whole width, two masks into one, a mask a truncation
+/// drops, and `x & x` or `x | x` into `x`.
 ///
 /// # Arguments
 ///
@@ -1479,12 +1480,21 @@ fn field(g: &mut EGraph, p: Prov, node: &Inst) -> Option<Val> {
             bin_k(g, BinOp::And, *w, s, low(keep), p)
         }
         Inst::Bin {
+            op: BinOp::And | BinOp::Or,
+            l,
+            r,
+            ..
+        } if g.same(*l, *r) => Some(*l),
+        Inst::Bin {
             op: BinOp::And,
             w,
             l,
             r,
         } => {
             let m = g.konst(*r)?;
+            if m == low(*w) {
+                return Some(*l);
+            }
             let shifted = with_const(g, *l, BinOp::LShr)
                 .into_iter()
                 .any(|(sw, _, s)| {

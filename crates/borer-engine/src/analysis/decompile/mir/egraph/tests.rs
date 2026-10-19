@@ -935,6 +935,17 @@ fn field_reads_fold_to_one_shift_and_mask() {
         let inner = b.bk(BinOp::And, w, x, 0x7ff0);
         let root = b.bk(BinOp::And, w, inner, 0xff3);
         cases.push(b.done(root, w));
+        let mut b = Seed::new(64);
+        let x = b.leaf(0, w);
+        let root = b.bk(BinOp::And, w, x, u64::MAX);
+        cases.push(b.done(root, w));
+        for op in [BinOp::And, BinOp::Or] {
+            let mut b = Seed::new(64);
+            let x = b.leaf(0, w);
+            let y = b.leaf(0, w);
+            let root = b.bin(op, w, x, y);
+            cases.push(b.done(root, w));
+        }
         if w > 8 {
             let mut b = Seed::new(64);
             let x = b.leaf(0, w);
