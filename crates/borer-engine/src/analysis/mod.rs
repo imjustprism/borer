@@ -371,6 +371,10 @@ pub struct ThrowSite {
     /// The demangled types the landing pad's action chain catches, in the
     /// order its clauses run.
     pub catches: Vec<String>,
+    /// The type filter of each catch in [`ThrowSite::catches`], in the same
+    /// order: the selector the landing pad compares to tell which clause
+    /// matched.
+    pub filters: Vec<i64>,
     /// The action chain holds a cleanup entry, which runs for whatever
     /// passes through, caught or not.
     pub cleanup: bool,

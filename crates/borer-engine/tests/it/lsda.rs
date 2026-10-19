@@ -34,7 +34,7 @@ const PAD: u64 = FUNC + 0x40;
     clippy::expect_used,
     reason = "a fixture that does not parse has no useful recovery"
 )]
-fn throwing(eh_frame: bool) -> Program {
+pub(crate) fn throwing(eh_frame: bool) -> Program {
     let mut text: Vec<u8> = vec![0xcc; 0x100];
     text[0..5].copy_from_slice(&[0xbf, 0x07, 0x00, 0x00, 0x00]); // ASM: mov edi,7
     text[5..10].copy_from_slice(&[0xe8, 0x20, 0x00, 0x00, 0x00]); // ASM: call +0x20
@@ -68,10 +68,10 @@ fn throwing(eh_frame: bool) -> Program {
             table.push(u8::try_from(*v).expect("fits"));
         }
     }
-    let actions: [u8; 4] = [0x01, 0x02, 0x00, 0x00];
+    let actions: [u8; 4] = [0x01, 0x01, 0x00, 0x00];
     let lsda_len = 4 + 1 + table.len() + actions.len();
     let base = LSDA + u64::try_from(lsda_len + 4).expect("fits");
-    let ttype_off = u8::try_from(base - (LSDA + 2)).expect("fits");
+    let ttype_off = u8::try_from(base - (LSDA + 3)).expect("fits");
     eh.push(0xff);
     eh.push(0x0b);
     eh.push(ttype_off);
@@ -81,6 +81,7 @@ fn throwing(eh_frame: bool) -> Program {
     eh.extend_from_slice(&actions);
     eh.extend_from_slice(&i32::try_from(base).expect("fits").to_le_bytes());
     eh.extend_from_slice(&EH.to_le_bytes());
+    eh.extend_from_slice(&(base + 16).to_le_bytes());
     eh.extend_from_slice(b"N3foo3BarE\0");
 
     let text_sec = Section::mapped(".text", FUNC, 0, 0x100, false, true);

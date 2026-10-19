@@ -28,6 +28,9 @@ use crate::program::Program;
 
 /// `DW_EH_PE_omit`: no value present.
 const OMIT: u8 = 0xff;
+/// `DW_EH_PE_indirect`: the value is the address of a slot holding the
+/// pointer.
+const INDIRECT: u8 = 0x80;
 /// Most call-site records read from one LSDA.
 const SITES_MAX: usize = 16384;
 /// Most action entries one call site's catch chain walks.
@@ -55,21 +58,77 @@ const NAME_MAX: usize = 512;
 /// function's entry, each list sorted by site start.
 pub(crate) fn throw_sites(program: &Program) -> BTreeMap<u64, Vec<ThrowSite>> {
     let mut out: BTreeMap<u64, Vec<ThrowSite>> = BTreeMap::new();
-    let Some(sec) = program.sections.iter().find(|s| s.name == ".eh_frame") else {
-        return out;
-    };
-    let Some(bytes) = program.section_bytes(sec) else {
-        return out;
-    };
-    for fde in crate::eh_frame::fdes(bytes, sec.va.0, program.is_64) {
-        let Some(at) = fde.lsda else {
-            continue;
-        };
-        if let Some(sites) = sites_of(program, fde.start, at)
+    let mut lsdas = compact_lsdas(program);
+    if let Some(sec) = program
+        .sections
+        .iter()
+        .find(|s| s.name == ".eh_frame" || s.name == "__TEXT,__eh_frame")
+        && let Some(bytes) = program.section_bytes(sec)
+    {
+        lsdas.extend(
+            crate::eh_frame::fdes(bytes, sec.va.0, program.is_64)
+                .into_iter()
+                .filter_map(|fde| Some((fde.start, fde.lsda?))),
+        );
+    }
+    for (func, at) in lsdas {
+        if let Some(sites) = sites_of(program, func, at)
             && !sites.is_empty()
         {
-            out.insert(fde.start, sites);
+            out.entry(func).or_insert(sites);
         }
+    }
+    out
+}
+
+/// Reads the LSDA index of a Mach-O's compact unwind table.
+///
+/// ld64 and lld keep a function's LSDA pointer out of `__eh_frame` when
+/// its unwind fits a compact encoding: each first-level index entry of
+/// `__unwind_info` names where its run of `{function offset, LSDA offset}`
+/// pairs begins, and the next entry where it ends, both offsets from
+/// `__TEXT`. Past [`SITES_MAX`] pairs the rest is not read.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+///
+/// # Returns
+///
+/// `(function, LSDA)` addresses in table order; none without the section.
+fn compact_lsdas(program: &Program) -> Vec<(u64, u64)> {
+    /// The one `__unwind_info` version there is.
+    const VERSION: u32 = 1;
+    /// Bytes in one first-level index entry.
+    const INDEX_ENTRY: u64 = 12;
+    let mut out = Vec::new();
+    let Some(sec) = program
+        .sections
+        .iter()
+        .find(|s| s.name == "__TEXT,__unwind_info")
+    else {
+        return out;
+    };
+    let base = sec.va.0;
+    let word = |off: u64| crate::analysis::read_u32(program, base.checked_add(off)?);
+    let (Some(VERSION), Some(index), Some(count)) = (word(0), word(20), word(24)) else {
+        return out;
+    };
+    let lsda_at = |k: u32| word(u64::from(index) + u64::from(k) * INDEX_ENTRY + 8);
+    let (Some(first), Some(last)) = (lsda_at(0), count.checked_sub(1).and_then(lsda_at)) else {
+        return out;
+    };
+    let text = program.image_base;
+    let mut at = u64::from(first);
+    while at + 8 <= u64::from(last) && out.len() < SITES_MAX {
+        let (Some(func), Some(lsda)) = (word(at), word(at + 4)) else {
+            break;
+        };
+        out.push((
+            text.wrapping_add(u64::from(func)),
+            text.wrapping_add(u64::from(lsda)),
+        ));
+        at += 8;
     }
     out
 }
@@ -118,9 +177,9 @@ fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
     let ttype = if ttype_enc == OMIT {
         None
     } else {
-        let field = sec.va.0.checked_add(u64::try_from(c.pos).ok()?)?;
-        let base = field.wrapping_add(c.uleb()?);
-        Some((ttype_enc, base))
+        let offset = c.uleb()?;
+        let after = sec.va.0.checked_add(u64::try_from(c.pos).ok()?)?;
+        Some((ttype_enc, after.wrapping_add(offset)))
     };
     let cs_enc = c.u8()?;
     let table_len = usize::try_from(c.uleb()?).ok()?;
@@ -160,16 +219,18 @@ fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
             }
             Some(pad)
         };
-        let (catches, cleanup) = if action == 0 {
+        let (clauses, cleanup) = if action == 0 {
             (Vec::new(), false)
         } else {
             chain(program, sec, bytes, ttype, actions, action)
         };
+        let (filters, catches) = clauses.into_iter().unzip();
         out.push(ThrowSite {
             start: start_va,
             end: end_va,
             landing_pad,
             catches,
+            filters,
             cleanup,
         });
     }
@@ -181,8 +242,9 @@ fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
 ///
 /// A call site's action field is one past the byte offset of its first
 /// action entry into the action table, so zero can mean no entry at all.
-/// Each entry is a type filter and the offset of the next entry from this
-/// one's start, and the chain ends at a non-positive next offset. A
+/// Each entry is a type filter and the offset of the next entry from the
+/// offset field itself, backward as often as forward since chains share
+/// their tails, and the chain ends at a zero offset. A
 /// positive filter indexes the type table; a zero filter is a cleanup,
 /// which runs for whatever passes through, caught or not; a negative one
 /// is an exception specification, which says what a function throws, not
@@ -203,9 +265,9 @@ fn sites_of(program: &Program, func: u64, at: u64) -> Option<Vec<ThrowSite>> {
 ///
 /// # Returns
 ///
-/// The demangled types the chain catches in clause order, and whether it
-/// holds a cleanup; whatever a broken tail leaves unread is simply not
-/// claimed.
+/// The filter and demangled type of each clause the chain catches, in
+/// clause order, and whether it holds a cleanup; whatever a broken tail
+/// leaves unread is simply not claimed.
 fn chain(
     program: &Program,
     sec: &crate::program::Section,
@@ -213,7 +275,7 @@ fn chain(
     ttype: Option<(u8, u64)>,
     actions: u64,
     action: u32,
-) -> (Vec<String>, bool) {
+) -> (Vec<(i64, String)>, bool) {
     let Some(first) = action
         .checked_sub(1)
         .map(u64::from)
@@ -238,6 +300,7 @@ fn chain(
         let Some(filter) = c.sleb() else {
             break;
         };
+        let field = c.pos;
         let Some(next) = c.sleb() else {
             break;
         };
@@ -247,15 +310,14 @@ fn chain(
             && let Some((enc, base)) = ttype
             && let Some(name) = entry(program, sec, bytes, enc, base, filter)
         {
-            catches.push(name);
+            catches.push((filter, name));
         }
-        if next <= 0 {
-            break;
-        }
-        let Some(step) = usize::try_from(next).ok() else {
-            break;
-        };
-        let Some(after) = at.checked_add(step).filter(|p| *p < bytes.len()) else {
+        let Some(after) = i64::try_from(field)
+            .ok()
+            .and_then(|f| f.checked_add(next))
+            .and_then(|p| usize::try_from(p).ok())
+            .filter(|p| next != 0 && *p < bytes.len())
+        else {
             break;
         };
         at = after;
@@ -266,8 +328,10 @@ fn chain(
 /// Reads the type a filter names out of the type table.
 ///
 /// The entry sits that many entry widths below the table's base and holds
-/// the `type_info` object's address in the header's `T` encoding; the name
-/// is the string the object carries after its vtable pointer.
+/// the `type_info` object's address in the header's `T` encoding, or the
+/// address of a slot holding it when the encoding is `indirect`, as
+/// position-independent code writes it; a zero entry is `catch (...)`.
+/// The object is a vtable pointer then a pointer to the mangled name.
 ///
 /// # Arguments
 ///
@@ -299,10 +363,55 @@ fn entry(
         base: sec.va.0,
         ptr64: program.is_64,
     };
-    let descriptor = c.pointer(enc)?;
+    let mut raw = Cursor {
+        bytes,
+        pos,
+        base: sec.va.0,
+        ptr64: program.is_64,
+    };
+    if raw.pointer(enc & 0x0f)? == 0 {
+        return Some("...".to_owned());
+    }
+    let mut descriptor = c.pointer(enc & 0x7f)?;
+    if enc & INDIRECT != 0 {
+        if let Some(name) = import_at(program, descriptor) {
+            return Some(name);
+        }
+        descriptor = crate::analysis::read_word(program, descriptor)?;
+    }
     let word = crate::analysis::pointer_size(program);
-    let (_, raw) = crate::strings::cstr_at(program, descriptor.checked_add(word)?, 1, NAME_MAX)?;
+    let name = crate::analysis::read_word(program, descriptor.checked_add(word)?)?;
+    let (_, raw) = crate::strings::cstr_at(program, name, 1, NAME_MAX)?;
     Some(name_of(&raw))
+}
+
+/// Names the type a GOT slot bound to an imported `type_info` stands for.
+///
+/// A type the image does not define - `std::exception` out of the C++
+/// runtime - is reached through a slot the loader binds to the import
+/// `_ZTI<type>`, so the import's name is the type's: mangled, or as the
+/// loader names it once demangled (`typeinfo for std::exception`).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `slot` - The slot the type-table entry points at.
+///
+/// # Returns
+///
+/// The demangled type, or `None` when no `type_info` import is bound
+/// there.
+fn import_at(program: &Program, slot: u64) -> Option<String> {
+    let s = program
+        .symbols
+        .iter()
+        .find(|s| s.kind == crate::program::SymbolKind::Import && s.addr == slot)?;
+    let bare = s.name.rsplit('!').next()?;
+    if let Some(ty) = bare.strip_prefix("typeinfo for ") {
+        return Some(ty.to_owned());
+    }
+    let mangled = bare.strip_prefix('_').unwrap_or(bare).strip_prefix("ZTI")?;
+    Some(name_of(mangled))
 }
 
 /// The width one type-table entry takes under its encoding.
@@ -389,7 +498,8 @@ fn name_of(raw: &str) -> String {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::name_of;
+    use super::{chain, name_of};
+    use crate::program::{Arch, Program, Section};
 
     /// The type-table names decode as C writes them: builtins by their
     /// letter, classes through the demangler behind the `_Z` a symbol
@@ -403,5 +513,25 @@ mod tests {
         assert_eq!(name_of("N3foo3BarE"), "foo::Bar");
         assert_eq!(name_of("5Error"), "Error");
         assert_eq!(name_of("Pi"), "Pi", "a pointer type keeps its raw name");
+    }
+
+    /// An action chain steps from each entry's offset field, back as
+    /// often as forward, and a null type entry is `catch (...)`; a zero
+    /// filter is a cleanup.
+    #[test]
+    fn a_chain_steps_back_from_its_offset_fields() {
+        let mut bytes = vec![0u8; 0x60];
+        bytes[..6].copy_from_slice(&[0x00, 0x00, 0x01, 0x7d, 0x02, 0x7d]);
+        bytes[0x18..0x20].copy_from_slice(&0x3040u64.to_le_bytes());
+        bytes[0x48..0x50].copy_from_slice(&0x3050u64.to_le_bytes());
+        bytes[0x50..0x57].copy_from_slice(b"5Error\0");
+        let sec = Section::mapped(".gcc_except_table", 0x3000, 0, 0x60, false, false);
+        let p = Program::raw(bytes.clone(), Arch::X86_64, 0, None, vec![sec.clone()]);
+        let (clauses, cleanup) = chain(&p, &sec, &bytes, Some((0x00, 0x3020)), 0x3000, 5);
+        assert_eq!(
+            clauses,
+            vec![(2, "...".to_owned()), (1, "Error".to_owned())]
+        );
+        assert!(cleanup);
     }
 }
