@@ -398,7 +398,7 @@ fn holds(g: &EGraph, v: Val, want: BinOp, x: Val, y: Val) -> bool {
 /// * `p` - The provenance.
 fn konst(g: &mut EGraph, w: u8, bits: u64, p: Prov) -> Option<Val> {
     g.add(
-        Inst::Const {
+        &Inst::Const {
             w,
             bits: bits & low(w),
         },
@@ -418,7 +418,7 @@ fn konst(g: &mut EGraph, w: u8, bits: u64, p: Prov) -> Option<Val> {
 /// * `r` - The right operand.
 /// * `p` - The provenance.
 fn bin(g: &mut EGraph, op: BinOp, w: u8, l: Val, r: Val, p: Prov) -> Option<Val> {
-    g.add(Inst::Bin { op, w, l, r }, MTy::I(w), p)
+    g.add(&Inst::Bin { op, w, l, r }, MTy::I(w), p)
 }
 
 /// Adds a binary op whose right operand is a constant.
@@ -446,7 +446,7 @@ fn bin_k(g: &mut EGraph, op: BinOp, w: u8, l: Val, c: u64, p: Prov) -> Option<Va
 /// * `x` - The operand.
 /// * `p` - The provenance.
 fn un(g: &mut EGraph, op: UnOp, w: u8, x: Val, p: Prov) -> Option<Val> {
-    g.add(Inst::Un { op, w, x }, MTy::I(w), p)
+    g.add(&Inst::Un { op, w, x }, MTy::I(w), p)
 }
 
 /// Adds an extension.
@@ -461,7 +461,7 @@ fn un(g: &mut EGraph, op: UnOp, w: u8, x: Val, p: Prov) -> Option<Val> {
 /// * `p` - The provenance.
 fn ext(g: &mut EGraph, signed: bool, from: u8, to: u8, x: Val, p: Prov) -> Option<Val> {
     g.add(
-        Inst::Ext {
+        &Inst::Ext {
             signed,
             from,
             to,
@@ -481,7 +481,7 @@ fn ext(g: &mut EGraph, signed: bool, from: u8, to: u8, x: Val, p: Prov) -> Optio
 /// * `x` - The operand.
 /// * `p` - The provenance.
 fn trunc(g: &mut EGraph, to: u8, x: Val, p: Prov) -> Option<Val> {
-    g.add(Inst::Trunc { to, x }, MTy::I(to), p)
+    g.add(&Inst::Trunc { to, x }, MTy::I(to), p)
 }
 
 /// Adds a helper of two or one word-wide operands with a result of `w`
@@ -497,7 +497,7 @@ fn trunc(g: &mut EGraph, to: u8, x: Val, p: Prov) -> Option<Val> {
 fn helper(g: &mut EGraph, h: Helper, w: u8, args: Vec<Val>, p: Prov) -> Option<Val> {
     let word = g.word();
     g.add(
-        Inst::Helper {
+        &Inst::Helper {
             h,
             bits: word,
             word,
@@ -611,7 +611,7 @@ fn commute(g: &mut EGraph, p: Prov, node: &Inst) -> Option<Val> {
             bin(g, *op, *w, *r, *l, p)
         }
         Inst::ICmp { pred, w, l, r } if g.konst(*l).is_some() && g.konst(*r).is_none() => g.add(
-            Inst::ICmp {
+            &Inst::ICmp {
                 pred: swapped(*pred),
                 w: *w,
                 l: *r,
@@ -771,7 +771,7 @@ fn udivisor(m: u128, n: u32, k: u8) -> Option<u64> {
 /// fails.
 fn sdivisor(m: u128, n: u32, k: u8) -> Option<u64> {
     let two_n = pow2(n)?;
-    if m == 0 || k < 2 || k > 64 {
+    if m == 0 || !(2..=64).contains(&k) {
         return None;
     }
     let d = two_n.div_ceil(m);
@@ -793,8 +793,9 @@ fn ufloor(g: &EGraph, v: Val, depth: u8) -> Option<Floor> {
     g.nodes(v).iter().find_map(|n| ufloor_node(g, n, d))
 }
 
-/// Recognizes an e-node as an unsigned `floor(x * m / 2^n)`: a
-/// multiply-high, a multiply of a zero-extended value that cannot wrap,
+/// Recognizes an e-node as an unsigned `floor(x * m / 2^n)`.
+///
+/// The forms are a multiply-high, a multiply of a zero-extended value that cannot wrap,
 /// the add-and-halve fix of a multiplier past the width, a logical shift
 /// of one or a truncation that keeps it whole.
 ///
@@ -938,8 +939,9 @@ fn sfloor(g: &EGraph, v: Val, depth: u8) -> Option<Floor> {
     g.nodes(v).iter().find_map(|n| sfloor_node(g, n, d))
 }
 
-/// Recognizes an e-node as a signed `floor(x * m / 2^n)`: a signed
-/// multiply-high by a positive constant, one by a negative constant plus
+/// Recognizes an e-node as a signed `floor(x * m / 2^n)`.
+///
+/// The forms are a signed multiply-high by a positive constant, one by a negative constant plus
 /// the dividend, a multiply of a sign-extended value that cannot
 /// overflow, an arithmetic shift of one or a truncation that keeps it
 /// whole.
@@ -1290,7 +1292,7 @@ fn abs(g: &mut EGraph, w: u8, p: Prov, node: &Inst) -> Option<Val> {
     }
     let zero = konst(g, w, 0, p)?;
     let c = g.add(
-        Inst::ICmp {
+        &Inst::ICmp {
             pred: IPred::Slt,
             w,
             l: x,
@@ -1300,7 +1302,7 @@ fn abs(g: &mut EGraph, w: u8, p: Prov, node: &Inst) -> Option<Val> {
         p,
     )?;
     let t = un(g, UnOp::Neg, w, x, p)?;
-    g.add(Inst::Select { c, t, f: x }, MTy::I(w), p)
+    g.add(&Inst::Select { c, t, f: x }, MTy::I(w), p)
 }
 
 /// Turns a select of the lesser or greater of two word-wide values into
@@ -1365,7 +1367,7 @@ fn extend(g: &mut EGraph, p: Prov, node: &Inst) -> Option<Val> {
                     continue;
                 }
                 let joined = match (s1, *signed) {
-                    (false, false) | (false, true) => Some(false),
+                    (false, false | true) => Some(false),
                     (true, true) => Some(true),
                     (true, false) => None,
                 };
@@ -1450,8 +1452,9 @@ fn extend(g: &mut EGraph, p: Prov, node: &Inst) -> Option<Val> {
     }
 }
 
-/// Folds the shifts and masks of a bit-field read: a left then a right
-/// shift into one shift and a mask, a mask that keeps every bit a shift
+/// Folds the shifts and masks of a bit-field read.
+///
+/// A left then a right shift into one shift and a mask, a mask that keeps every bit a shift
 /// left or the whole width, two masks into one, a mask a truncation
 /// drops, and `x & x` or `x | x` into `x`.
 ///
@@ -1553,7 +1556,7 @@ fn field(g: &mut EGraph, p: Prov, node: &Inst) -> Option<Val> {
 fn negate(g: &mut EGraph, c: Val, p: Prov) -> Option<Val> {
     if let Some((pred, w, l, r)) = icmps(g, c).into_iter().next() {
         return g.add(
-            Inst::ICmp {
+            &Inst::ICmp {
                 pred: inverse(pred),
                 w,
                 l,
@@ -1618,7 +1621,7 @@ fn boolean(g: &mut EGraph, w: u8, p: Prov, node: &Inst) -> Option<Val> {
                 .find(|&(bw, _, _)| bw == *cw)
                 .map(|(_, a, b)| (a, b))?;
             g.add(
-                Inst::ICmp {
+                &Inst::ICmp {
                     pred: *pred,
                     w: *cw,
                     l: a,
@@ -1646,7 +1649,7 @@ fn boolean(g: &mut EGraph, w: u8, p: Prov, node: &Inst) -> Option<Val> {
                 .into_iter()
                 .find(|&(bw, _, k)| bw == 1 && k == 1)?;
             g.add(
-                Inst::Select {
+                &Inst::Select {
                     c: c2,
                     t: *f,
                     f: *t,

@@ -310,7 +310,7 @@ impl EGraph {
                 continue;
             }
             let inst = remap(&node.inst, |v| class.get(index(v)).copied().unwrap_or(v));
-            let id = g.add(inst, node.ty, node.prov)?;
+            let id = g.add(&inst, node.ty, node.prov)?;
             if let Some(c) = class.get_mut(i) {
                 *c = id;
             }
@@ -429,8 +429,8 @@ impl EGraph {
     /// # Returns
     ///
     /// Its class, or `None` when a new form would pass the budget.
-    pub(in super::super) fn add(&mut self, inst: Inst, ty: MTy, prov: Prov) -> Option<Val> {
-        let inst = remap(&inst, |v| self.find(v));
+    pub(in super::super) fn add(&mut self, inst: &Inst, ty: MTy, prov: Prov) -> Option<Val> {
+        let inst = remap(inst, |v| self.find(v));
         if let Some(&id) = self.memo.get(&inst) {
             return Some(self.find(id));
         }

@@ -12,6 +12,8 @@
 //! rules alone make each one cheaper, the time the e-graph takes against
 //! a full decompile, and a sample of forms before and after.
 
+#![expect(clippy::disallowed_methods, reason = "the sweep reports its own time")]
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -194,8 +196,6 @@ impl Tally {
 /// Sweeps every `BORER_EGRAPH` binary and prints what the rules change.
 #[test]
 #[ignore = "set BORER_EGRAPH to binary paths to run this sweep"]
-#[expect(clippy::disallowed_methods, reason = "the sweep reports its own time")]
-#[expect(clippy::print_stdout, reason = "the sweep is a report")]
 fn the_rules_measured_on_real_binaries() {
     let paths = std::env::var("BORER_EGRAPH").expect("BORER_EGRAPH env var");
     for path in paths.split(';').filter(|p| !p.is_empty()) {
