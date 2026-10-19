@@ -9840,7 +9840,7 @@ fn a_runtime_helper_call_takes_its_prototype() {
     let text = decompile_named(&p, &a, &o, 0x1_4000_1000).unwrap_or_default();
     assert!(
         text.contains(
-            "// runtime: unsigned __int128 __umodti3(unsigned __int128 a, unsigned __int128 b); computes a % b, unsigned"
+            "// runtime: uint128_t __umodti3(uint128_t a, uint128_t b); computes a % b, unsigned"
         ),
         "{text}"
     );

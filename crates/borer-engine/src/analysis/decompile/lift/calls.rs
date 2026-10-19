@@ -526,8 +526,11 @@ impl<'a> Exec<'_, 'a> {
     pub(super) fn callee_reg_params(&mut self, target: Option<u64>) -> Option<usize> {
         let t = target?;
         if let Some(h) = runtime_helper(self.ctx, t) {
-            let p =
-                crate::analysis::runtime::prototype(h, self.ctx.bitness, self.ctx.program.format);
+            let p = crate::analysis::runtime::prototype(
+                h,
+                self.ctx.bitness,
+                crate::analysis::runtime::microsoft(self.ctx.program.arch, self.ctx.program.format),
+            );
             return Some(if self.bitness() == 32 {
                 0
             } else {

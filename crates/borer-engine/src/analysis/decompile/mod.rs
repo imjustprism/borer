@@ -2099,10 +2099,12 @@ fn decompile_in<L: Lifter>(
     if let Some(folded) = &canary {
         let _ = writeln!(out, "// folded: {}", folded.note());
     }
+    let halves = !crate::analysis::runtime::microsoft(ctx.program.arch, ctx.program.format);
     let mut helpers: Vec<&crate::analysis::runtime::Helper> = f
         .callees
         .iter()
         .filter_map(|&c| lift::runtime_helper(&ctx, c))
+        .filter(|h| !(halves && abi::runtime::Runtime::named(h.name).is_some()))
         .collect();
     helpers.sort_unstable_by_key(|h| h.name);
     helpers.dedup_by_key(|h| h.name);

@@ -150,8 +150,13 @@ pub(in crate::analysis::decompile) fn import_prototype(
                 })
         })
         .or_else(|| {
-            runtime_helper(ctx, t)
-                .map(|h| crate::analysis::runtime::prototype(h, ctx.bitness, ctx.program.format))
+            runtime_helper(ctx, t).map(|h| {
+                crate::analysis::runtime::prototype(
+                    h,
+                    ctx.bitness,
+                    crate::analysis::runtime::microsoft(ctx.program.arch, ctx.program.format),
+                )
+            })
         })
 }
 

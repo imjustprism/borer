@@ -1,6 +1,8 @@
 //! Runtime helpers: the functions a compiler calls for an operation the
-//! machine has no instruction for, with their prototypes and the C
-//! operator each one is.
+//! machine has no instruction for, and the C operator each one is.
+//!
+//! Their prototypes, and those of every other helper, are in
+//! [`crate::analysis::runtime`].
 //!
 //! A 128-bit division on x86-64 or arm64 is a call to `__umodti3` and its
 //! kin in libgcc or compiler-rt. Each 128-bit operand travels as two
@@ -43,24 +45,6 @@ impl Runtime {
             "__modti3" => Some(Self::Modti3),
             "__multi3" => Some(Self::Multi3),
             _ => None,
-        }
-    }
-
-    /// Returns the helper's C prototype, as libgcc declares it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the translation-unit closure (J5) declares helpers from it"
-        )
-    )]
-    pub(crate) fn prototype(self) -> &'static str {
-        match self {
-            Self::Udivti3 => "uint128_t __udivti3(uint128_t a, uint128_t b)",
-            Self::Umodti3 => "uint128_t __umodti3(uint128_t a, uint128_t b)",
-            Self::Divti3 => "int128_t __divti3(int128_t a, int128_t b)",
-            Self::Modti3 => "int128_t __modti3(int128_t a, int128_t b)",
-            Self::Multi3 => "int128_t __multi3(int128_t a, int128_t b)",
         }
     }
 
@@ -140,8 +124,9 @@ mod tests {
         assert_eq!(call_text("strlen", &args[..1]), "strlen(a)");
         assert_eq!(Runtime::Umodti3.lowered(&args[..2]), None);
         assert_eq!(
-            Runtime::named("__umodti3").map(Runtime::prototype),
-            Some("uint128_t __umodti3(uint128_t a, uint128_t b)")
+            crate::analysis::runtime::helper("__umodti3").map(|h| h.proto),
+            Some("uint128_t __umodti3(uint128_t a, uint128_t b)"),
+            "the prototype comes from the one runtime table"
         );
     }
 }

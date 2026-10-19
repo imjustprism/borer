@@ -15,13 +15,19 @@
 //! ([`prototype`]), types what it returns ([`returns`]), and declares it
 //! in the function's header with what it computes.
 //!
+//! The 128-bit types are spelled as the decompiler prints them
+//! (`uint128_t`, `int128_t`); the decompiler's ABI layer prints the
+//! 128-bit arithmetic helpers as their C operator where the call passes
+//! both operands in halves (`decompile::abi::runtime`) and reads their
+//! prototypes from here.
+//!
 //! The prototypes are the ones compiler-rt's `lib/builtins` sources and
 //! libgcc's documentation (GCC internals, "The GCC low-level runtime
 //! library") state; the MSVC 32-bit helpers (`_alldiv` and its kin) are
 //! `__stdcall` and pop their stack arguments.
 
 use super::prototypes::Prototype;
-use crate::program::BinaryFormat;
+use crate::program::{Arch, BinaryFormat};
 
 /// What a parameter or a result is to the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +99,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__ashlti3",
-        "__int128 __ashlti3(__int128 a, int b)",
+        "int128_t __ashlti3(int128_t a, int b)",
         "a << b",
         [I128, I32],
         I128
@@ -107,7 +113,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__ashrti3",
-        "__int128 __ashrti3(__int128 a, int b)",
+        "int128_t __ashrti3(int128_t a, int b)",
         "a >> b, arithmetic",
         [I128, I32],
         I128
@@ -142,7 +148,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__clzti2",
-        "int __clzti2(unsigned __int128 a)",
+        "int __clzti2(uint128_t a)",
         "leading zero bits of a",
         [I128],
         I32
@@ -156,7 +162,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__cmpti2",
-        "int __cmpti2(__int128 a, __int128 b)",
+        "int __cmpti2(int128_t a, int128_t b)",
         "a < b ? 0 : a == b ? 1 : 2",
         [I128, I128],
         I32
@@ -177,7 +183,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__ctzti2",
-        "int __ctzti2(unsigned __int128 a)",
+        "int __ctzti2(uint128_t a)",
         "trailing zero bits of a",
         [I128],
         I32
@@ -198,7 +204,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__divmodti4",
-        "__int128 __divmodti4(__int128 a, __int128 b, __int128 *rem)",
+        "int128_t __divmodti4(int128_t a, int128_t b, int128_t *rem)",
         "a / b, signed, with *rem = a % b",
         [I128, I128, Ptr],
         I128
@@ -212,7 +218,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__divti3",
-        "__int128 __divti3(__int128 a, __int128 b)",
+        "int128_t __divti3(int128_t a, int128_t b)",
         "a / b, signed",
         [I128, I128],
         I128
@@ -226,7 +232,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__ffsti2",
-        "int __ffsti2(__int128 a)",
+        "int __ffsti2(int128_t a)",
         "one plus the index of a's lowest set bit, 0 for 0",
         [I128],
         I32
@@ -240,8 +246,8 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__fixdfti",
-        "__int128 __fixdfti(double a)",
-        "(__int128)a",
+        "int128_t __fixdfti(double a)",
+        "(int128_t)a",
         [F64],
         I128
     ),
@@ -254,8 +260,8 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__fixsfti",
-        "__int128 __fixsfti(float a)",
-        "(__int128)a",
+        "int128_t __fixsfti(float a)",
+        "(int128_t)a",
         [F32],
         I128
     ),
@@ -275,8 +281,8 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__fixunsdfti",
-        "unsigned __int128 __fixunsdfti(double a)",
-        "(unsigned __int128)a",
+        "uint128_t __fixunsdfti(double a)",
+        "(uint128_t)a",
         [F64],
         I128
     ),
@@ -289,8 +295,8 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__fixunssfti",
-        "unsigned __int128 __fixunssfti(float a)",
-        "(unsigned __int128)a",
+        "uint128_t __fixunssfti(float a)",
+        "(uint128_t)a",
         [F32],
         I128
     ),
@@ -310,14 +316,14 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__floattidf",
-        "double __floattidf(__int128 a)",
+        "double __floattidf(int128_t a)",
         "(double)a",
         [I128],
         F64
     ),
     helper!(
         "__floattisf",
-        "float __floattisf(__int128 a)",
+        "float __floattisf(int128_t a)",
         "(float)a",
         [I128],
         F32
@@ -338,14 +344,14 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__floatuntidf",
-        "double __floatuntidf(unsigned __int128 a)",
+        "double __floatuntidf(uint128_t a)",
         "(double)a",
         [I128],
         F64
     ),
     helper!(
         "__floatuntisf",
-        "float __floatuntisf(unsigned __int128 a)",
+        "float __floatuntisf(uint128_t a)",
         "(float)a",
         [I128],
         F32
@@ -359,7 +365,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__lshrti3",
-        "unsigned __int128 __lshrti3(unsigned __int128 a, int b)",
+        "uint128_t __lshrti3(uint128_t a, int b)",
         "a >> b, logical",
         [I128, I32],
         I128
@@ -380,7 +386,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__modti3",
-        "__int128 __modti3(__int128 a, __int128 b)",
+        "int128_t __modti3(int128_t a, int128_t b)",
         "a % b, signed",
         [I128, I128],
         I128
@@ -401,14 +407,14 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__muloti4",
-        "__int128 __muloti4(__int128 a, __int128 b, int *overflow)",
+        "int128_t __muloti4(int128_t a, int128_t b, int *overflow)",
         "a * b, with *overflow set when it does not fit",
         [I128, I128, Ptr],
         I128
     ),
     helper!(
         "__multi3",
-        "__int128 __multi3(__int128 a, __int128 b)",
+        "int128_t __multi3(int128_t a, int128_t b)",
         "a * b",
         [I128, I128],
         I128
@@ -416,7 +422,7 @@ const HELPERS: &[Helper] = &[
     helper!("__negdi2", "int64_t __negdi2(int64_t a)", "-a", [I64], I64),
     helper!(
         "__negti2",
-        "__int128 __negti2(__int128 a)",
+        "int128_t __negti2(int128_t a)",
         "-a",
         [I128],
         I128
@@ -437,7 +443,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__parityti2",
-        "int __parityti2(unsigned __int128 a)",
+        "int __parityti2(uint128_t a)",
         "1 when a has an odd number of set bits",
         [I128],
         I32
@@ -458,7 +464,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__popcountti2",
-        "int __popcountti2(unsigned __int128 a)",
+        "int __popcountti2(uint128_t a)",
         "set bits of a",
         [I128],
         I32
@@ -486,7 +492,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__ucmpti2",
-        "int __ucmpti2(unsigned __int128 a, unsigned __int128 b)",
+        "int __ucmpti2(uint128_t a, uint128_t b)",
         "a < b ? 0 : a == b ? 1 : 2, unsigned",
         [I128, I128],
         I32
@@ -507,7 +513,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__udivmodti4",
-        "unsigned __int128 __udivmodti4(unsigned __int128 a, unsigned __int128 b, unsigned __int128 *rem)",
+        "uint128_t __udivmodti4(uint128_t a, uint128_t b, uint128_t *rem)",
         "a / b, unsigned, with *rem = a % b",
         [I128, I128, Ptr],
         I128
@@ -521,7 +527,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__udivti3",
-        "unsigned __int128 __udivti3(unsigned __int128 a, unsigned __int128 b)",
+        "uint128_t __udivti3(uint128_t a, uint128_t b)",
         "a / b, unsigned",
         [I128, I128],
         I128
@@ -542,7 +548,7 @@ const HELPERS: &[Helper] = &[
     ),
     helper!(
         "__umodti3",
-        "unsigned __int128 __umodti3(unsigned __int128 a, unsigned __int128 b)",
+        "uint128_t __umodti3(uint128_t a, uint128_t b)",
         "a % b, unsigned",
         [I128, I128],
         I128
@@ -614,18 +620,23 @@ pub fn helper(name: &str) -> Option<&'static Helper> {
     find(name).or_else(|| find(name.strip_prefix('_')?))
 }
 
-/// Whether a format's 64-bit code takes the Microsoft x64 convention, as
-/// the decompiler reads it: a PE, and the raw code and archives it reads
-/// as one.
+/// Whether a program's code takes the Microsoft x64 convention, as the
+/// decompiler reads it.
+///
+/// x86-64 code in a PE does, and so does the raw code and archives the
+/// decompiler reads as one; arm64 and 32-bit code never do.
 ///
 /// # Arguments
 ///
-/// * `format` - The binary's format.
-fn microsoft(format: BinaryFormat) -> bool {
-    match format {
-        BinaryFormat::Pe | BinaryFormat::Raw | BinaryFormat::Archive => true,
-        BinaryFormat::Elf | BinaryFormat::MachO => false,
-    }
+/// * `arch` - The program's machine.
+/// * `format` - The program's format.
+#[must_use]
+pub fn microsoft(arch: Arch, format: BinaryFormat) -> bool {
+    arch == Arch::X86_64
+        && match format {
+            BinaryFormat::Pe | BinaryFormat::Raw | BinaryFormat::Archive => true,
+            BinaryFormat::Elf | BinaryFormat::MachO => false,
+        }
 }
 
 /// Returns what a call to a helper must supply, as the decompiler's
@@ -641,20 +652,21 @@ fn microsoft(format: BinaryFormat) -> bool {
 ///
 /// * `h` - The helper.
 /// * `bitness` - 32 or 64.
-/// * `format` - The calling binary's format.
+/// * `microsoft` - Whether the code takes the Microsoft x64 convention
+///   ([`microsoft`]).
 ///
 /// # Returns
 ///
 /// The prototype.
 #[must_use]
-pub fn prototype(h: &Helper, bitness: u32, format: BinaryFormat) -> Prototype {
+pub fn prototype(h: &Helper, bitness: u32, microsoft: bool) -> Prototype {
     let mut params = 0u8;
     let mut floats = 0u8;
     for a in h.params {
         let (width, float) = match (bitness, a) {
             (32, Arg::I64 | Arg::F64 | Arg::I128) => (2, false),
             (32, Arg::I32 | Arg::Ptr | Arg::F32) => (1, false),
-            (_, Arg::I128) if !microsoft(format) => (2, false),
+            (_, Arg::I128) if !microsoft => (2, false),
             (_, Arg::F32 | Arg::F64) => (1, true),
             (_, Arg::I32 | Arg::I64 | Arg::I128 | Arg::Ptr) => (1, false),
         };
@@ -680,7 +692,8 @@ pub fn prototype(h: &Helper, bitness: u32, format: BinaryFormat) -> Prototype {
 ///
 /// * `h` - The helper.
 /// * `bitness` - 32 or 64.
-/// * `format` - The calling binary's format.
+/// * `microsoft` - Whether the code takes the Microsoft x64 convention
+///   ([`microsoft`]).
 ///
 /// # Returns
 ///
@@ -688,12 +701,12 @@ pub fn prototype(h: &Helper, bitness: u32, format: BinaryFormat) -> Prototype {
 /// x64 convention, which comes back in `xmm0` as no integer the
 /// decompiler reads there.
 #[must_use]
-pub fn returns(h: &Helper, bitness: u32, format: BinaryFormat) -> Option<(u8, bool)> {
+pub fn returns(h: &Helper, bitness: u32, microsoft: bool) -> Option<(u8, bool)> {
     match h.ret {
         Arg::I32 => Some((32, false)),
         Arg::I64 => Some((64, false)),
         Arg::Ptr => Some((if bitness == 32 { 32 } else { 64 }, false)),
-        Arg::I128 if microsoft(format) && bitness == 64 => None,
+        Arg::I128 if microsoft && bitness == 64 => None,
         Arg::I128 => Some((64, false)),
         Arg::F32 => Some((32, true)),
         Arg::F64 => Some((64, true)),
@@ -703,7 +716,7 @@ pub fn returns(h: &Helper, bitness: u32, format: BinaryFormat) -> Option<(u8, bo
 #[cfg(test)]
 mod tests {
     use super::{HELPERS, helper, prototype, returns};
-    use crate::program::BinaryFormat;
+    use crate::program::{Arch, BinaryFormat};
 
     /// The table is sorted, so the lookup finds every row, and the names a
     /// binary spells a helper with all find it.
@@ -737,19 +750,25 @@ mod tests {
     #[test]
     fn arguments_take_what_the_platform_passes() {
         let umod = helper("__umodti3").expect("a helper");
-        assert_eq!(prototype(umod, 64, BinaryFormat::Elf).params, 4);
-        assert_eq!(prototype(umod, 64, BinaryFormat::Pe).params, 2);
-        assert_eq!(returns(umod, 64, BinaryFormat::Elf), Some((64, false)));
-        assert_eq!(returns(umod, 64, BinaryFormat::Pe), None);
+        assert_eq!(prototype(umod, 64, false).params, 4);
+        assert_eq!(prototype(umod, 64, true).params, 2);
+        assert_eq!(returns(umod, 64, false), Some((64, false)));
+        assert_eq!(returns(umod, 64, true), None);
         let udiv = helper("__udivdi3").expect("a helper");
-        let p = prototype(udiv, 32, BinaryFormat::Elf);
+        let p = prototype(udiv, 32, false);
         assert_eq!((p.params, p.callee_pops), (4, false));
         let alldiv = helper("_alldiv").expect("a helper");
-        let p = prototype(alldiv, 32, BinaryFormat::Pe);
+        let p = prototype(alldiv, 32, false);
         assert_eq!((p.params, p.callee_pops), (4, true));
+        assert!(super::microsoft(Arch::X86_64, BinaryFormat::Pe));
+        assert!(
+            !super::microsoft(Arch::Arm64, BinaryFormat::Raw),
+            "arm64 passes halves"
+        );
+        assert!(!super::microsoft(Arch::X86_64, BinaryFormat::Elf));
         let powi = helper("__powidf2").expect("a helper");
-        let p = prototype(powi, 64, BinaryFormat::Elf);
+        let p = prototype(powi, 64, false);
         assert_eq!((p.params, p.floats), (2, 1));
-        assert_eq!(returns(powi, 64, BinaryFormat::Elf), Some((64, true)));
+        assert_eq!(returns(powi, 64, false), Some((64, true)));
     }
 }

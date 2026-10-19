@@ -167,8 +167,11 @@ pub(in crate::analysis::decompile) fn stated_returns(
         .map(|d| Returns::of(typelib::pass_of(d.ret, word, ctx.program.format), word))
         .or_else(|| {
             let h = runtime_helper(ctx, reached?)?;
-            let (bits, float) =
-                crate::analysis::runtime::returns(h, ctx.bitness, ctx.program.format)?;
+            let (bits, float) = crate::analysis::runtime::returns(
+                h,
+                ctx.bitness,
+                crate::analysis::runtime::microsoft(ctx.program.arch, ctx.program.format),
+            )?;
             Some(if float {
                 Returns::Float(bits)
             } else {
