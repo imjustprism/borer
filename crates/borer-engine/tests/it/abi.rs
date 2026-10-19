@@ -13,7 +13,7 @@
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::{Analysis, Overlay};
-use borer_engine::program::{Arch, Program, Symbol, SymbolKind};
+use borer_engine::program::{Arch, BinaryFormat, Program, Symbol, SymbolKind};
 
 /// Where [`crate::raw::image`] maps the code.
 const TEXT: u64 = 0x40_1000;
@@ -87,11 +87,15 @@ const ROUTINES: [u32; 53] = [
     0xd65f_03c0, // ASM: ret
 ];
 
-/// [`ROUTINES`] as a raw arm64 image: slot 0 holds `fib`'s address as the
+/// [`ROUTINES`] as an arm64 ELF image: slot 0 holds `fib`'s address as the
 /// loader binds it, slot 1 is the import `__umodti3`.
+///
+/// The format is ELF's, as the PLT stubs are: the runtime helpers take a
+/// 128-bit operand in two registers there, and by pointer on Windows.
 fn image() -> Program {
     let code: Vec<u8> = ROUTINES.iter().flat_map(|w| w.to_le_bytes()).collect();
     let mut p = crate::raw::image(Arch::Arm64, &code, &TEXT.to_le_bytes());
+    p.format = BinaryFormat::Elf;
     let named = |name: &str, addr: u64, kind: SymbolKind| Symbol {
         name: name.to_owned(),
         addr,
@@ -151,12 +155,16 @@ fn an_indirect_result_comes_first() {
 
 /// A call to `__umodti3` passes two 128-bit operands as four halves and
 /// is the remainder of their `unsigned __int128` values.
+///
+/// The header may name the helper and its prototype; the body calls it
+/// nowhere.
 #[test]
 fn a_128_bit_helper_prints_as_its_operator() {
     let p = image();
     let a = Analysis::compute(&p);
     let text = decompile(&p, &a, &Overlay::default(), TEXT + 0x74).expect("decompiles");
-    assert!(!text.contains("__umodti3("), "{text}");
+    let body: Vec<&str> = text.lines().filter(|l| !l.starts_with("//")).collect();
+    assert!(!body.iter().any(|l| l.contains("__umodti3(")), "{text}");
     assert!(text.contains(" % (uint128_t)"), "{text}");
 }
 
