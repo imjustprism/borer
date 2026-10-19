@@ -1,5 +1,5 @@
 //! The calls a function's text makes, read back from the effects the lifter
-//! recorded beside its lines ([`lift::Effect`]), each argument in the
+//! recorded beside its lines ([`Effect`](super::lift::Effect)), each argument in the
 //! position its callee reads it from.
 //!
 //! Nothing is lifted again: the memoized decompilation already holds every

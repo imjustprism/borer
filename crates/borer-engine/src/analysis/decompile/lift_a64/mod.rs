@@ -14,7 +14,7 @@
 //! identification change no value. The flags are the x86 lifter's, read
 //! through what set them ([`flags`]), and a conditional select is an
 //! [`Expr::Ternary`]. In the entry block a store of a register the callee
-//! must preserve ([`callee_saved`](super::abi::a64::callee_saved)) is a save, as the x86 lifter reads a
+//! must preserve ([`callee_saved`]) is a save, as the x86 lifter reads a
 //! push. The scalar floating-point arithmetic, compares and conversions
 //! and the vector moves and bitwise logic are modeled as the x86 lifter
 //! models its own ([`float`], [`step`]). `mrs` and `msr` move `TPIDR_EL0`
