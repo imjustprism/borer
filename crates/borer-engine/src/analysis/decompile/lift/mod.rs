@@ -651,6 +651,10 @@ pub(super) struct Exec<'c, 'a> {
     /// Slot offsets written in this block, each with the widest store in
     /// bits.
     pub(super) slot_def: BTreeMap<i64, u8>,
+    /// Slot offsets this block stored a floating-point value at: a view of
+    /// their bits is no integer arithmetic on the number
+    /// ([`Exec::slot_read`]).
+    pub(super) float_def: BTreeSet<i64>,
     /// Slots each call may read, with the frame bytes written before it.
     pub(super) call_uses: Vec<(SlotUse, BTreeSet<i64>)>,
     /// Is the return register read by a successor? (`None`: not known yet.)
@@ -770,6 +774,7 @@ impl<'c, 'a> Exec<'c, 'a> {
             info: InstructionInfoFactory::new(),
             slot_use: BTreeMap::new(),
             slot_def: BTreeMap::new(),
+            float_def: BTreeSet::new(),
             call_uses: Vec::new(),
             rax_live_out: None,
             flags_needed: u32::MAX,

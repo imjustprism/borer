@@ -397,6 +397,9 @@ impl<'a> Exec<'_, 'a> {
     /// * `ty` - Access type.
     pub(super) fn slot_read(&mut self, k: i64, ty: Ty) -> Expr {
         self.note_slot(k, ty);
+        if let Some(v) = self.slot_view(k, ty) {
+            return self.assumed(v);
+        }
         let overlapping: Vec<i64> = self
             .env
             .slot_bits
@@ -432,6 +435,130 @@ impl<'a> Exec<'_, 'a> {
             return self.assumed(mask(whole, (1u64 << ty.bits()) - 1));
         }
         self.assumed(Expr::deref(Expr::Sp(k), ty))
+    }
+
+    /// Reads a slot as a view of the stores this block made around it: the
+    /// high part of one wider store, or a word two narrower stores fill.
+    ///
+    /// An aggregate passed or returned by value in registers is spilled at
+    /// `-O0` one way and read back the other: a structure of two `int`s
+    /// arrives in one register, is stored whole and read a field at a time
+    /// (`h_point_cross`), or is built a field at a time and read back whole
+    /// into the result register (`h_mkpoint`). Each slot's text variable
+    /// holds only its own store, so the view is spelled over the stores'
+    /// values ([`Exec::slot_bits_of`]): the high half is a shift of the
+    /// whole, the whole an `|` of the halves.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - Slot offset from the entry rsp.
+    /// * `ty` - Access type, an integer of at most 64 bits.
+    ///
+    /// # Returns
+    ///
+    /// The value, or `None` when the read is no such view: it starts a
+    /// store, another store of this block overlaps it, or a store's bits
+    /// spell no integer ([`Exec::slot_bits_of`]).
+    fn slot_view(&mut self, k: i64, ty: Ty) -> Option<Expr> {
+        if matches!(ty, Ty::F32 | Ty::F64 | Ty::U128) {
+            return None;
+        }
+        let bits = ty.bits();
+        let end = k.saturating_add(i64::from(bits / 8));
+        let stores: Vec<(i64, u8)> = self
+            .slot_def
+            .range(k.saturating_sub(SLOT_BYTES_MAX - 1)..end)
+            .map(|(d, b)| (*d, *b))
+            .filter(|&(d, b)| ranges_overlap(d, b, k, bits))
+            .collect();
+        match *stores.as_slice() {
+            [(d, dbits)]
+                if d < k && d.saturating_add(i64::from(dbits / 8)) >= end && dbits <= 64 =>
+            {
+                let shift = u64::try_from(k - d).ok()?.checked_mul(8)?;
+                let whole = self.slot_bits_of(d, dbits)?;
+                let high = fold(Op::Shr, whole, Expr::Const(shift), dbits);
+                Some(mask(high, mask_bits(bits)))
+            }
+            [(lo, lbits), (hi, hbits)]
+                if lo == k
+                    && lbits < bits
+                    && hi == k.saturating_add(i64::from(lbits / 8))
+                    && hi.saturating_add(i64::from(hbits / 8)) == end =>
+            {
+                let high = self.slot_bits_of(hi, hbits)?;
+                let low = self.slot_bits_of(lo, lbits)?;
+                let upper = fold(
+                    Op::Shl,
+                    mask(high, mask_bits(hbits)),
+                    Expr::Const(u64::from(lbits)),
+                    bits,
+                );
+                Some(fold(Op::Or, upper, mask(low, mask_bits(lbits)), bits))
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the bits a store of this block left in a slot, as an
+    /// integer of the store's width.
+    ///
+    /// A value the environment holds at that width that is an integer
+    /// ([`Exec::integral`]) is itself; any other pending value is written
+    /// out first, and the slot's variable is read at the store's width.
+    ///
+    /// # Arguments
+    ///
+    /// * `d` - The store's slot offset.
+    /// * `dbits` - Its width in bits.
+    ///
+    /// # Returns
+    ///
+    /// The bits, or `None` when the block stored a floating-point value
+    /// there ([`Exec::float_def`]), or a value whose type the text decides
+    /// later: their bits are no integer the slot's variable spells.
+    fn slot_bits_of(&mut self, d: i64, dbits: u8) -> Option<Expr> {
+        if self.float_def.contains(&d) {
+            return None;
+        }
+        if let Some(v) = self.env.vals.get(&Key::Slot(d)) {
+            if self.env.slot_bits.get(&d) != Some(&dbits) {
+                self.materialize(Key::Slot(d), &mut Vec::new(), None);
+            } else if self.integral(v) {
+                return Some(v.clone());
+            } else {
+                return None;
+            }
+        }
+        Some(Expr::deref(Expr::Sp(d), Ty::from_bits(dbits)))
+    }
+
+    /// Tells whether a value is an integer by its own shape: a constant, an
+    /// integer operation or load, a general register, or a parameter the
+    /// convention passes in one.
+    ///
+    /// A variable whose type the text decides later, a temporary or a
+    /// slot's, may hold a float, so it is none.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The value.
+    fn integral(&self, v: &Expr) -> bool {
+        match v {
+            Expr::Const(_) | Expr::Sext(..) | Expr::Cond(_) => true,
+            Expr::Bin(op, ..) => !op.is_float(),
+            Expr::Deref(_, ty) | Expr::Cast(_, ty) => !matches!(ty, Ty::F32 | Ty::F64 | Ty::U128),
+            Expr::Var(Key::Param(i)) => self.ctx.arg_floats & (1u8 << (*i).min(7)) == 0,
+            Expr::Var(Key::Reg(r)) => r.is_gpr(),
+            Expr::Var(Key::A64(r)) => matches!(r, crate::isa::a64::Reg::X(_)),
+            Expr::Var(Key::Slot(_) | Key::Global(..) | Key::Tmp(_))
+            | Expr::Str(_)
+            | Expr::Sp(_)
+            | Expr::Un(..)
+            | Expr::Ternary(..)
+            | Expr::Call(..)
+            | Expr::FConst(..) => false,
+        }
     }
 
     /// Records a slot's declaration type on first sight (emission pass only).
@@ -654,6 +781,9 @@ impl<'a> Exec<'_, 'a> {
         self.note_slot(k, ty);
         let widest = self.slot_def.entry(k).or_default();
         *widest = (*widest).max(ty.bits());
+        if matches!(ty, Ty::F32 | Ty::F64) || v.is_float() {
+            self.float_def.insert(k);
+        }
         let bits = ty.bits();
         let overlapping: Vec<i64> = self
             .env

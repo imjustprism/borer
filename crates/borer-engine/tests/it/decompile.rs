@@ -9715,3 +9715,91 @@ fn a_lane_is_read_only_out_of_vector_code() {
     assert!(text.contains("movlps("), "{text}");
     assert!(!text.contains(")movlps("), "{text}");
 }
+
+/// Two structures of two `int`s passed by value at `-O0`, each spilled
+/// whole from its register and read back a field at a time, and one
+/// built a field at a time and read back whole as the result.
+///
+/// `cross(P p, P q)` is `p.x * q.y - p.y * q.x` and `mk(a, b)` returns
+/// `{a + b, a - b}` in `rax`, as clang `-O0` for System V x86-64 builds
+/// them. The fields' slots lie inside the whole one's, and each slot's text
+/// variable held only its own store: `p.y` read a variable nothing
+/// assigned, and the result read two variables as one.
+#[test]
+fn a_structure_spilled_whole_reads_back_by_field() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let code = [
+        0x55, // ASM: push rbp (cross)
+        0x48, 0x89, 0xe5, // ASM: mov rbp,rsp
+        0x48, 0x89, 0x7d, 0xf8, // ASM: mov [rbp-0x8],rdi
+        0x48, 0x89, 0x75, 0xf0, // ASM: mov [rbp-0x10],rsi
+        0x8b, 0x45, 0xf8, // ASM: mov eax,[rbp-0x8]
+        0x0f, 0xaf, 0x45, 0xf4, // ASM: imul eax,[rbp-0xc]
+        0x8b, 0x4d, 0xfc, // ASM: mov ecx,[rbp-0x4]
+        0x0f, 0xaf, 0x4d, 0xf0, // ASM: imul ecx,[rbp-0x10]
+        0x29, 0xc8, // ASM: sub eax,ecx
+        0x5d, // ASM: pop rbp
+        0xc3, // ASM: ret
+        0x66, 0x90, // ASM: nop
+        0x55, // ASM: push rbp (mk)
+        0x48, 0x89, 0xe5, // ASM: mov rbp,rsp
+        0x89, 0x7d, 0xf4, // ASM: mov [rbp-0xc],edi
+        0x89, 0x75, 0xf0, // ASM: mov [rbp-0x10],esi
+        0x8b, 0x45, 0xf4, // ASM: mov eax,[rbp-0xc]
+        0x03, 0x45, 0xf0, // ASM: add eax,[rbp-0x10]
+        0x89, 0x45, 0xf8, // ASM: mov [rbp-0x8],eax
+        0x8b, 0x45, 0xf4, // ASM: mov eax,[rbp-0xc]
+        0x2b, 0x45, 0xf0, // ASM: sub eax,[rbp-0x10]
+        0x89, 0x45, 0xfc, // ASM: mov [rbp-0x4],eax
+        0x48, 0x8b, 0x45, 0xf8, // ASM: mov rax,[rbp-0x8]
+        0x5d, // ASM: pop rbp
+        0xc3, // ASM: ret
+    ];
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400_000,
+        Some(0x401_000),
+        vec![Section::mapped(".text", 0x401_000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Elf;
+    let cross = runs_agree(&p, 0x401_000);
+    assert!(cross.contains(">> 32)"), "the high field: {cross}");
+    let mk = runs_agree(&p, 0x401_020);
+    assert!(mk.contains("<< 0x20"), "the result's high field: {mk}");
+}
+
+/// A `double` spilled whole and read back a word at a time is no view of
+/// two integer fields: a shift of the number is no C at all.
+///
+/// `hi(double d)` returns the high 32 bits of `d`'s encoding, as clang
+/// `-O0` for System V x86-64 builds it. The view of a spilled structure's
+/// fields (`a1 >> 32` over an `int` pair) must not take a `double` for
+/// one; its bits wait for a bit cast.
+#[test]
+fn a_spilled_double_is_no_pair_of_integer_fields() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let code = [
+        0x55, // ASM: push rbp
+        0x48, 0x89, 0xe5, // ASM: mov rbp,rsp
+        0xf2, 0x0f, 0x11, 0x45, 0xf8, // ASM: movsd [rbp-0x8],xmm0
+        0x8b, 0x45, 0xfc, // ASM: mov eax,[rbp-0x4]
+        0x5d, // ASM: pop rbp
+        0xc3, // ASM: ret
+    ];
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400_000,
+        Some(0x401_000),
+        vec![Section::mapped(".text", 0x401_000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Elf;
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x401_000).unwrap_or_default();
+    assert!(!text.contains(">> 32"), "{text}");
+}
