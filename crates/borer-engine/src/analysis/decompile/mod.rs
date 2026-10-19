@@ -757,8 +757,9 @@ fn decompile_afresh(
         .map(|d| finished(&d.text, program, analysis, overlay, entry))
 }
 
-/// Finishes a body for the tools: [`polish`], then the tables it reads
-/// inline ([`tables::inline_tables`]), then the translation-unit closure
+/// Finishes a body for the tools.
+///
+/// The steps are [`polish`], then the tables it reads inline ([`tables::inline_tables`]), then the translation-unit closure
 /// ([`unit::close`]), then its vector declarations ([`vector::declare`])
 /// and its helper definitions ([`helper::declare`]), each step timed
 /// ([`crate::timing::Step`]) and each left out when the overlay's

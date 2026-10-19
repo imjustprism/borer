@@ -49,6 +49,34 @@ const C_WORDS: [&str; 16] = [
     "goto", "sizeof", "nullptr", "true", "false",
 ];
 
+/// The functions the C standard library's headers declare, separated by
+/// spaces: a name a reader's compiler already knows with its own type.
+const LIBC: &str = "\
+     abort abs acos acosf acosh acosl asctime asin asinf asinh asinl assert atan atan2 atan2f \
+     atanf atanh atanl atexit atof atoi atol atoll bsearch btowc cabs calloc cbrt ceil ceilf \
+     ceill clearerr clock copysign cos cosf cosh coshf cosl ctime difftime div erf erfc exit \
+     exp exp2 expf expl expm1 fabs fabsf fabsl fclose fdim feof ferror fflush fgetc fgetpos \
+     fgets fgetwc fgetws floor floorf floorl fma fmax fmaxf fmin fminf fmod fmodf fmodl fopen \
+     fprintf fputc fputs fputwc fputws fread free freopen frexp fscanf fseek fsetpos ftell \
+     fwide fwprintf fwrite fwscanf getc getchar getenv gets getwc getwchar gmtime hypot ilogb \
+     isalnum isalpha isblank iscntrl isdigit isgraph islower isprint ispunct isspace isupper \
+     iswalnum iswalpha iswblank iswcntrl iswctype iswdigit iswgraph iswlower iswprint iswpunct \
+     iswspace iswupper iswxdigit isxdigit labs ldexp ldexpf ldexpl ldiv llabs lldiv llrint \
+     llround localeconv localtime log log10 log10f log1p log2 logb logf logl longjmp lrint \
+     lround malloc mblen mbrlen mbrtowc mbsinit mbsrtowcs mbstowcs mbtowc memchr memcmp memcpy \
+     memmove memset mktime modf modff nan nanf nearbyint nextafter perror pow powf powl printf \
+     putc putchar puts putwc putwchar qsort quick_exit raise rand realloc remainder remove \
+     remquo rename rewind rint round roundf scalbn scanf setbuf setjmp setlocale setvbuf signal \
+     sin sinf sinh sinhf sinl snprintf sprintf sqrt sqrtf sqrtl srand sscanf strcat strchr \
+     strcmp strcoll strcpy strcspn strerror strftime strlen strncat strncmp strncpy strpbrk \
+     strrchr strspn strstr strtod strtof strtok strtol strtold strtoll strtoul strtoull strxfrm \
+     swprintf swscanf system tan tanf tanh tanhf tanl time tmpfile tmpnam tolower toupper \
+     towlower towupper trunc truncf ungetc ungetwc vfprintf vfwprintf vprintf vsnprintf \
+     vsprintf vswprintf vwprintf wcrtomb wcscat wcschr wcscmp wcscoll wcscpy wcscspn wcsftime \
+     wcslen wcsncat wcsncmp wcsncpy wcspbrk wcsrchr wcsrtombs wcsspn wcsstr wcstod wcstok \
+     wcstol wcstombs wcstoul wcsxfrm wctob wctomb wmemchr wmemcmp wmemcpy wmemmove wmemset \
+     wprintf wscanf";
+
 /// Most entries a table of function addresses is written out with.
 const TABLE_MAX: usize = 256;
 
@@ -296,6 +324,9 @@ fn declaration(
     if let Some(p) = library(name, program.format) {
         return Some(outside(p));
     }
+    if implementation_named(name, program.format) {
+        return None;
+    }
     let e = function.filter(|&e| analysis.function(e).is_some_and(|f| f.thunk.is_none()))?;
     let internal = !ix.exported.contains(&e) && !ix.exported.contains(&abi::reached(analysis, e));
     if internal
@@ -305,6 +336,28 @@ fn declaration(
         return Some(d);
     }
     abi::function::prototype(program, analysis, overlay, e).map(|p| outside(p.proto()))
+}
+
+/// Tells whether a name belongs to the C implementation.
+///
+/// The implementation declares it with a type of its own: a standard
+/// library function, any function
+/// the type library knows but cannot state in C's own types, or a name
+/// C reserves for the implementation (one that starts with `_`).
+///
+/// A prototype from ABI facts alone would contradict that declaration
+/// (`extern uint64_t _exit(uint64_t)` against `void _exit(int)`), so such
+/// a name stays undeclared unless the type library states it plainly
+/// ([`library`]).
+///
+/// # Arguments
+///
+/// * `name` - The function's name.
+/// * `format` - The binary's format, which picks the platform.
+fn implementation_named(name: &str, format: crate::program::BinaryFormat) -> bool {
+    name.starts_with('_')
+        || LIBC.split_whitespace().any(|n| n == name)
+        || crate::analysis::typelib::declared(name, format).is_some()
 }
 
 /// Returns the C library's prototype of a function, when the type library
@@ -359,7 +412,12 @@ fn definition(
     let d = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry);
     let bitness = program.arch.bitness().unwrap_or(64);
     let text = tables::inline_tables(
-        &polish(&d.as_ref().as_ref()?.text, bitness, &analysis.packs),
+        &polish_skipping(
+            &d.as_ref().as_ref()?.text,
+            bitness,
+            &analysis.packs,
+            overlay.passes,
+        ),
         program,
     );
     let notes_global = |l: &str| l.contains("// @ ") || l.contains("// TLS slot");
@@ -746,8 +804,11 @@ fn code_of(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Item, call_arities, code_of, parse_proto, plain_type, words};
+    use super::{
+        Item, call_arities, code_of, implementation_named, parse_proto, plain_type, words,
+    };
     use crate::analysis::decompile::cir;
+    use crate::program::BinaryFormat;
 
     /// A text's identifiers leave out comments, literals and members.
     ///
@@ -790,6 +851,22 @@ mod tests {
         assert!(parse_proto("uint64_t xf(uint64_t)", "f").is_none());
         assert!(plain_type("const char *") && plain_type("uint64_t"));
         assert!(!plain_type("HANDLE") && !plain_type("FILE *"));
+    }
+
+    /// A name the C implementation declares is recognized: a standard
+    /// function, a reserved name and one the type library knows.
+    ///
+    /// # Panics
+    ///
+    /// When one is missed or a program's own name is taken for one.
+    #[test]
+    fn the_implementation_s_names_are_recognized() {
+        for name in ["_exit", "exit", "sqrt", "__scrt_fastfail", "strlen"] {
+            assert!(implementation_named(name, BinaryFormat::Pe), "{name}");
+        }
+        for name in ["h_is_odd", "op_add", "sub_401000"] {
+            assert!(!implementation_named(name, BinaryFormat::Elf), "{name}");
+        }
     }
 
     /// A call's arguments are counted at its own depth.

@@ -132,3 +132,21 @@ fn a_table_of_functions_is_declared_with_their_bodies() {
     assert!(add < table && sub < table, "{text}");
     assert!(!text.contains(&format!("{RDATA:#x}")), "{text}");
 }
+
+/// A function named as the C library names one gets no prototype from
+/// its ABI facts: the library's own declaration, `void _exit(int)`, would
+/// contradict `extern uint32_t _exit(uint64_t);`.
+#[test]
+fn a_c_library_name_gets_no_abi_prototype() {
+    let mut p = image();
+    p.symbols[1].name = "_exit".to_owned();
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), TEXT).expect("decompiles");
+    assert!(text.contains("_exit("), "{text}");
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.starts_with("extern ") && l.contains("_exit(")),
+        "{text}"
+    );
+}
