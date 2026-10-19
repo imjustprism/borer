@@ -57,6 +57,10 @@ const SEARCH_POINTS: u64 = 192;
 /// Most bytes written over memory a read through an address the state
 /// picks is modeled over.
 const OVERRIDES_MAX: usize = 128;
+/// Most term nodes the values a read through a computed address sees
+/// written may hold together, so reads of stores of reads cannot grow
+/// their terms without bound.
+const OVERRIDE_NODES_MAX: usize = 4096;
 /// Claims a block's search looks at before it stops.
 const SEARCHED_CLAIMS: usize = 4;
 /// What the search adds to a value it starts from: nothing, or the sign
@@ -231,11 +235,19 @@ fn byte_value(b: &Byte) -> Term {
 ///
 /// # Errors
 ///
-/// More bytes than a read is worth modeling.
+/// More bytes than a read is worth modeling, or values written there
+/// too large to copy into it.
 fn overrides(bytes: &BTreeMap<u64, Byte>, lost: &BTreeSet<u64>) -> Result<Vec<(u64, Term)>, Why> {
     let keys: BTreeSet<u64> = bytes.keys().chain(lost).copied().collect();
     if keys.len() > OVERRIDES_MAX {
         return Err("a read through a computed address over many writes");
+    }
+    let mut budget = OVERRIDE_NODES_MAX;
+    if !bytes.values().all(|b| match b {
+        Byte::Of(t, _) => t.spend(&mut budget),
+        Byte::Was(_) | Byte::Lost => true,
+    }) {
+        return Err("a read through a computed address over values too large");
     }
     Ok(keys
         .into_iter()

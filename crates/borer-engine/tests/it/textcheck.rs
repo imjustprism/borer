@@ -8,7 +8,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::decompile::{decompile_named, unset_reads};
+use borer_engine::analysis::decompile::{checked_header, decompile_named, unset_reads};
 use borer_engine::analysis::render::{Verdict, check_generated, check_generated_iso};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program, Section};
@@ -574,4 +574,31 @@ fn the_iso_check_agrees_where_the_text_is_c() {
 {rows:?}"
         );
     }
+}
+
+/// A block that reads through a computed address what it just stored,
+/// round after round, is checked in bounded time: each read sees the
+/// bytes written so far, and copying their values into every read grew
+/// the replay's terms eightfold a round.
+#[test]
+fn reads_of_stores_of_reads_are_checked_in_bounded_time() {
+    const ROUNDS: usize = 24;
+    let mut code = vec![0x48, 0x83, 0xec, 0x18]; // ASM: sub rsp,0x18
+    for _ in 0..ROUNDS {
+        code.extend([0x48, 0x8b, 0x07]); // ASM: mov rax,[rdi]
+        code.extend([0x48, 0x89, 0x44, 0x24, 0x08]); // ASM: mov [rsp+8],rax
+        code.extend([0x48, 0x8b, 0x3c, 0x24]); // ASM: mov rdi,[rsp]
+    }
+    code.extend([0x48, 0x83, 0xc4, 0x18, 0xc3]); // ASM: add rsp,0x18; ret
+    let p = program(&code, &[]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        tx.send(checked_header(&p, &a, &o, TEXT).unwrap_or_default())
+    });
+    let header = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the check finishes");
+    assert!(header.contains("checked vs binary"), "{header}");
 }

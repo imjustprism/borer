@@ -210,6 +210,37 @@ impl Term {
         }
     }
 
+    /// Takes the value's nodes out of a budget, stopping once it runs out.
+    ///
+    /// # Arguments
+    ///
+    /// * `budget` - Nodes left, lowered by each node visited.
+    ///
+    /// # Returns
+    ///
+    /// Whether the whole value fits in what the budget had.
+    pub(super) fn spend(&self, budget: &mut usize) -> bool {
+        let Some(left) = budget.checked_sub(1) else {
+            return false;
+        };
+        *budget = left;
+        match self {
+            Term::Const(_) | Term::In(..) | Term::Undef => true,
+            Term::Mem(a, _, d) => a.spend(budget) && d.iter().all(|(_, v)| v.spend(budget)),
+            Term::Un(_, _, a)
+            | Term::Sext(a, _)
+            | Term::FloatUn(_, _, a)
+            | Term::ToInt(_, _, a) => a.spend(budget),
+            Term::Poly(_, p) => p.iter().flat_map(|(m, _)| m).all(|a| a.spend(budget)),
+            Term::Logic(_, _, xs) => xs.iter().all(|x| x.spend(budget)),
+            Term::Bin(_, _, a, b) | Term::Float(_, _, _, a, b) => {
+                a.spend(budget) && b.spend(budget)
+            }
+            Term::Truth(p) => p.spend(budget),
+            Term::Ite(p, a, b) => p.spend(budget) && a.spend(budget) && b.spend(budget),
+        }
+    }
+
     /// Collects the constants the value is built with, the values a search
     /// for a state that tells two values apart starts next to.
     ///
@@ -296,6 +327,30 @@ impl Pred {
                 a.lacks() || b.lacks()
             }
             Pred::Not(p) => p.lacks(),
+        }
+    }
+
+    /// Takes the predicate's nodes out of a budget ([`Term::spend`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `budget` - Nodes left, lowered by each node visited.
+    ///
+    /// # Returns
+    ///
+    /// Whether the whole predicate fits in what the budget had.
+    fn spend(&self, budget: &mut usize) -> bool {
+        let Some(left) = budget.checked_sub(1) else {
+            return false;
+        };
+        *budget = left;
+        match self {
+            Pred::Is(_) | Pred::Undef => true,
+            Pred::Zero(t) | Pred::Bit(_, t) => t.spend(budget),
+            Pred::Ult(a, b) | Pred::Slt(_, a, b) | Pred::Float(_, _, a, b) => {
+                a.spend(budget) && b.spend(budget)
+            }
+            Pred::Not(p) => p.spend(budget),
         }
     }
 
