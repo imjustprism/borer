@@ -1460,7 +1460,7 @@ impl Analysis {
         phases.mark("analysis descriptors");
         match program.arch.isa() {
             Some(Isa::A64) => a64::infer_returns(program, &mut analysis),
-            Some(Isa::A32) => {}
+            Some(Isa::A32) => a32::infer_returns(program, &mut analysis),
             Some(Isa::X86 { .. }) | None => returns::infer(program, &mut analysis),
         }
         phases.mark("analysis returns");

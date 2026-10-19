@@ -818,6 +818,7 @@ impl Sym<'_> {
             }
             Key::Reg(Register::RSP | Register::ESP) => Ok(Term::Const(self.rsp)),
             Key::A64(_) => Err("an arm64 register"),
+            Key::A32(_) => Err("an arm32 register"),
             Key::Reg(r) if !r.is_gpr() && !r.is_xmm() => Ok(Term::Undef),
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) => Ok(self
                 .vars
@@ -1013,7 +1014,7 @@ impl Sym<'_> {
                     self.write(a, u64::from(gb / 8).max(1), &value);
                 }
             }
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => {
                 self.result_ty.remove(&k);
                 if bits > 64 {
                     return Err("a vector variable");
@@ -1268,7 +1269,7 @@ impl Lifted<'_> {
                 }
                 self.read(&Term::Const(*at), u64::from(*bits / 8))?
             }
-            Expr::Var(Key::Param(_) | Key::A64(_)) | Expr::Str(_) => Term::Undef,
+            Expr::Var(Key::Param(_) | Key::A64(_) | Key::A32(_)) | Expr::Str(_) => Term::Undef,
             Expr::Sp(off) => Term::Const(self.rsp.wrapping_add_signed(*off) & low(w)),
             Expr::Bin(op, l, r) if op.is_float() => {
                 let (Some(fl), Some(fr)) = (float_bits(l, temps), float_bits(r, temps)) else {
@@ -1739,7 +1740,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     u64::from(inn.slot_bits.get(&o).copied().unwrap_or(width) / 8),
                 ),
                 Key::Global(a, bits) => (a, u64::from(bits / 8).max(1)),
-                Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => (0, 0),
+                Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => (0, 0),
             };
             for i in 0..n.min(8) {
                 base.insert(
@@ -1766,7 +1767,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
         for (k, e) in &inn.vals {
             if let (
-                Expr::Var(src @ (Key::Reg(_) | Key::A64(_) | Key::Tmp(_) | Key::Param(_))),
+                Expr::Var(
+                    src @ (Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Tmp(_) | Key::Param(_)),
+                ),
                 Some(nb),
             ) = (e, inn.narrow.get(k))
             {
@@ -1776,7 +1779,11 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 narrowed(&mut entry, *src, *nb);
             }
         }
-        if let Some((k @ (Key::Reg(_) | Key::A64(_) | Key::Tmp(_) | Key::Param(_)), c)) = assumed {
+        if let Some((
+            k @ (Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Tmp(_) | Key::Param(_)),
+            c,
+        )) = assumed
+        {
             entry.insert(k, Term::Const(c & mask));
         }
         let mut text = Sym {
@@ -1831,7 +1838,12 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     None => continue,
                 },
                 Key::Global(a, bits) if *a < TLS_BASE => (*a, u64::from(*bits / 8).max(1)),
-                Key::Global(..) | Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
+                Key::Global(..)
+                | Key::Reg(_)
+                | Key::Tmp(_)
+                | Key::Param(_)
+                | Key::A64(_)
+                | Key::A32(_) => {
                     continue;
                 }
             };
@@ -1920,7 +1932,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                                 *bits,
                             ),
                             ArgAt::Reg(r) if r.is_gpr() => (machine.reg(*r, width)?, 64),
-                            ArgAt::Reg(_) | ArgAt::Operand | ArgAt::A64(_) => continue,
+                            ArgAt::Reg(_) | ArgAt::Operand | ArgAt::A64(_) | ArgAt::A32(_) => {
+                                continue;
+                            }
                         };
                         claims.push(Claimed {
                             text: text.eval(arg, EVAL_DEPTH)?,

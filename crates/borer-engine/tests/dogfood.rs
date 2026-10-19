@@ -172,6 +172,9 @@ fn leaked_temps(text: &str) -> Vec<String> {
     out
 }
 
+/// The callees of `function` its text names nowhere, but the frame helpers
+/// and the ARM32 division helpers, which the text prints as the operator
+/// they compute.
 fn missing_calls(
     analysis: &Analysis,
     overlay: &Overlay,
@@ -190,7 +193,16 @@ fn missing_calls(
         if name.contains("operator ")
             || matches!(
                 name.as_str(),
-                "__SEH_prolog4" | "__EH_prolog3" | "__SEH_epilog4" | "__EH_epilog3"
+                "__SEH_prolog4"
+                    | "__EH_prolog3"
+                    | "__SEH_epilog4"
+                    | "__EH_epilog3"
+                    | "__aeabi_idiv"
+                    | "__aeabi_uidiv"
+                    | "__aeabi_idivmod"
+                    | "__aeabi_uidivmod"
+                    | "__rt_sdiv"
+                    | "__rt_udiv"
             )
         {
             continue;
@@ -464,6 +476,106 @@ fn the_arm64_text_agrees_with_the_machine_on_every_block() {
         "# {share:.1}% of blocks checked, {} disagreements; replay took {took:.1?}",
         r.wrong().len()
     );
+    assert!(r.checked > 0, "{text}");
+    assert!(r.wrong().is_empty(), "{} disagreements", r.wrong().len());
+}
+
+/// Decompiles every function of the `BORER_DOGFOOD_A32` binary and
+/// requires well-formed text.
+///
+/// As [`decompile_every_arm64_function`] does for an arm64 build, for an
+/// ARM32 build of any program (an `armv7a-linux-gnueabihf` ELF, A32 or
+/// T32, or a `thumbv7-windows` PE); it prints the tally of each defect
+/// over the whole binary.
+#[test]
+#[ignore = "set BORER_DOGFOOD_A32 to an ARM32 binary path to run this sweep"]
+fn decompile_every_arm32_function() {
+    let path = std::env::var("BORER_DOGFOOD_A32").expect("BORER_DOGFOOD_A32 env var");
+    let p = Program::load(std::path::Path::new(&path)).expect("load");
+    let a = Analysis::compute(&p);
+    let started = std::time::Instant::now();
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    let texts = decompile_all(&p, &a, &Overlay::default(), &entries);
+    let took = started.elapsed();
+    let (mut ok, mut failed, mut asm) = (0usize, 0usize, 0usize);
+    let mut first: Vec<String> = Vec::new();
+    for (f, r) in a.functions.iter().zip(texts) {
+        let Some(t) = r else {
+            failed += 1;
+            continue;
+        };
+        ok += 1;
+        asm += t.matches("/* asm").count();
+        let missing = dangling_gotos(&t);
+        let depth = brace_imbalance(&t);
+        let calls = missing_calls(&a, &Overlay::default(), f, &t);
+        if (!missing.is_empty() || depth != 0 || !calls.is_empty()) && first.len() < 10 {
+            first.push(format!(
+                "{:#x}: dangling gotos {missing:?}, brace depth {depth}, calls not in the text {calls:?}",
+                f.entry
+            ));
+        }
+    }
+    eprintln!(
+        "binary: {path}
+functions: {} decompiled {ok} failed {failed} in {took:.1?}, {asm} asm lines
+first: {first:#?}",
+        a.functions.len()
+    );
+    assert_eq!(failed, 0, "functions that failed to decompile");
+    assert!(first.is_empty(), "malformed output: {first:#?}");
+}
+
+/// Checks the ARM32 lifter against the ARM32 machine on every block of
+/// the `BORER_DOGFOOD_A32` binary and requires them to agree on every
+/// register, VFP register, stack slot, store and branch.
+///
+/// The ARM32 counterpart of
+/// [`the_arm64_lifter_agrees_with_the_emulator_on_every_block`]; it prints
+/// the tally and the share of blocks the check compared.
+#[test]
+#[ignore = "set BORER_DOGFOOD_A32 to an ARM32 binary path to run this sweep"]
+fn the_arm32_lifter_agrees_with_the_emulator_on_every_block() {
+    use borer_engine::analysis::decompile::verify_a32::{verify, verify_tsv};
+    let path = std::env::var("BORER_DOGFOOD_A32").expect("BORER_DOGFOOD_A32 env var");
+    let p = Program::load(std::path::Path::new(&path)).expect("load");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    let v = verify(&p, &a, &entries, 1);
+    let text = verify_tsv(&v);
+    for line in text.lines().take_while(|l| l.starts_with('#')) {
+        eprintln!("{line}");
+    }
+    let share = borer_engine::num::usize_f64(v.checked) * 100.0
+        / borer_engine::num::usize_f64(v.blocks.max(1));
+    eprintln!("# {share:.1}% of blocks checked");
+    assert!(v.checked > 0, "{text}");
+    assert!(v.mismatches.is_empty(), "{text}");
+}
+
+/// Replays the text of every function of the `BORER_DOGFOOD_A32` binary
+/// against the ARM32 machine and requires every claim it makes to hold.
+///
+/// As [`the_arm64_text_agrees_with_the_machine_on_every_block`] does for
+/// an arm64 build.
+#[test]
+#[ignore = "set BORER_DOGFOOD_A32 to an ARM32 binary path to run this sweep"]
+fn the_arm32_text_agrees_with_the_machine_on_every_block() {
+    use borer_engine::analysis::decompile::replay::{replay, replay_tsv};
+    let path = std::env::var("BORER_DOGFOOD_A32").expect("BORER_DOGFOOD_A32 env var");
+    let p = Program::load(std::path::Path::new(&path)).expect("load");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a
+        .functions
+        .iter()
+        .filter(|f| f.thunk.is_none())
+        .map(|f| f.entry)
+        .collect();
+    let r = replay(&p, &a, &entries, 1);
+    let text = replay_tsv(&r);
+    for line in text.lines().take_while(|l| l.starts_with('#')) {
+        eprintln!("{line}");
+    }
     assert!(r.checked > 0, "{text}");
     assert!(r.wrong().is_empty(), "{} disagreements", r.wrong().len());
 }

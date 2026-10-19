@@ -20,7 +20,9 @@ mod minidump;
 mod raw;
 
 mod a32;
+mod a32_decompile;
 mod a32_emulate;
+mod a32_lift;
 mod a64;
 mod a64_decompile;
 mod a64_emulate;

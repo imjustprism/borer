@@ -1359,7 +1359,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let text = args.get(5).is_some_and(|m| m == "text");
             let mir = args.get(5).is_some_and(|m| m == "mir");
             let a64 = !text && s.program.arch.isa() == Some(Isa::A64);
-            let a = s.analysis(if a64 {
+            let a32 = !text && s.program.arch.isa() == Some(Isa::A32);
+            let a = s.analysis(if a64 || a32 {
                 Feature::Discover
             } else {
                 Feature::Decompile
@@ -1391,6 +1392,14 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 print!("{}", decompile::replay::replay_tsv(&r));
                 if !r.wrong().is_empty() {
                     bail!("the text and the emulator disagree; see the table above");
+                }
+                return Ok(());
+            }
+            if a32 {
+                let v = decompile::verify_a32::verify(&s.program, &a, &entries, seed);
+                print!("{}", decompile::verify_a32::verify_tsv(&v));
+                if !v.mismatches.is_empty() {
+                    bail!("the lifter and the emulator disagree; see the table above");
                 }
                 return Ok(());
             }

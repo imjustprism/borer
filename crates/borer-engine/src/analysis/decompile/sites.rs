@@ -177,7 +177,7 @@ fn positioned(c: &Call, conv: &Conv, bitness: u32, n: &Names<'_>) -> Vec<CallArg
     let regs_a64 = c
         .args
         .iter()
-        .filter(|(at, _)| matches!(at, ArgAt::A64(_)))
+        .filter(|(at, _)| matches!(at, ArgAt::A64(_) | ArgAt::A32(_)))
         .count();
     let base = conv.shadow
         + if c.shown == Shown::Tail && regs_a64 == 0 {
@@ -197,7 +197,7 @@ fn positioned(c: &Call, conv: &Conv, bitness: u32, n: &Names<'_>) -> Vec<CallArg
             ArgAt::Reg(r) if conv.args.contains(&r) || !conv.float_seq => {
                 conv.slot(r).unwrap_or(next)
             }
-            ArgAt::Reg(_) | ArgAt::Operand | ArgAt::A64(_) => next,
+            ArgAt::Reg(_) | ArgAt::Operand | ArgAt::A64(_) | ArgAt::A32(_) => next,
             ArgAt::Stack(off, _) => {
                 let first = if bitness == 32 {
                     regs32

@@ -623,14 +623,16 @@ pub(super) enum Declaration {
 ///
 /// The positions the declaration lists with the lead, a bit per position
 /// passed in a vector register, whether a variable list follows, and where
-/// the declaration comes from; on a 32-bit target an SDK prototype counts
-/// stack words.
+/// the declaration comes from; on a 32-bit x86 target an SDK prototype
+/// counts stack words, and ARM32 code counts positions as a 64-bit target
+/// does, each in a register its procedure call standard names.
 pub(super) fn declared_arity(
     ctx: &Ctx<'_>,
     f: &Function,
     lead: usize,
 ) -> Option<(usize, u8, bool, Declaration)> {
     let shifted = |floats: u8| floats.checked_shl(u32::try_from(lead).ok()?);
+    let words = ctx.bitness == 32 && ctx.program.arch != crate::program::Arch::Arm;
     if let Some(p) = ctx.overlay.prototypes.get(&f.entry) {
         let word = u8::try_from(ctx.bitness).unwrap_or(64);
         let passes: Vec<Option<Pass>> = p
@@ -644,7 +646,7 @@ pub(super) fn declared_arity(
             .enumerate()
             .filter(|(_, q)| matches!(q, Some(Pass::Float(_))))
             .fold(0u8, |m, (j, _)| m | (1 << j));
-        let count = if ctx.bitness == 32 {
+        let count = if words {
             passes
                 .iter()
                 .map(|q| crate::analysis::typelib::words32(*q))
@@ -674,7 +676,7 @@ pub(super) fn declared_arity(
             let name = name_of(ctx.analysis, ctx.overlay, f.entry);
             let p = crate::analysis::prototypes::declared(
                 crate::analysis::bare_name(&name),
-                ctx.bitness,
+                if words { 32 } else { 64 },
             )?;
             Some((
                 usize::from(p.params) + lead,

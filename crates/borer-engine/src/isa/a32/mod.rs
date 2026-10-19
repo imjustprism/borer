@@ -44,6 +44,10 @@ pub const PC: Reg = Reg::R(15);
 /// it when not. No ARM32 address reaches this bit.
 pub const SKIP: u64 = 1 << 40;
 
+/// Most instructions a run behind a [`SKIP`] test holds: the run of
+/// instructions under one condition, ending in the one that moves control.
+pub const RUN_MAX: usize = 16;
+
 /// A register an operand names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Reg {
@@ -929,6 +933,40 @@ impl ItState {
     /// * `mask` - Its mask, nonzero.
     pub fn start(&mut self, first: Cond, mask: u8) {
         self.0 = (cond_code(first) << 4) | (mask & 0xf);
+    }
+}
+
+/// Returns the one-byte code of a register: `r0`..`r15` as their
+/// numbers, `s0`..`s31` from 16 and `d0`..`d31` from 48.
+///
+/// # Arguments
+///
+/// * `r` - The register.
+#[must_use]
+pub fn code(r: Reg) -> u8 {
+    match r {
+        Reg::R(n) => n & 0xf,
+        Reg::S(n) => 16 + (n & 0x1f),
+        Reg::D(n) => 48 + (n & 0x1f),
+    }
+}
+
+/// Returns the register a [`code`] names.
+///
+/// # Arguments
+///
+/// * `c` - The code.
+///
+/// # Returns
+///
+/// The register, or `None` for a code past `d31`.
+#[must_use]
+pub fn from_code(c: u8) -> Option<Reg> {
+    match c {
+        0..=15 => Some(Reg::R(c)),
+        16..=47 => Some(Reg::S(c - 16)),
+        48..=79 => Some(Reg::D(c - 48)),
+        _ => None,
     }
 }
 

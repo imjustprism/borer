@@ -138,7 +138,7 @@ pub struct Machine<'a> {
     fpscr: u32,
     /// Memory the routine wrote, over the image's own bytes.
     mem: Store,
-    /// What a load of memory nothing backs reads: [`fill_byte`] of this
+    /// What a load of memory nothing backs reads: [`super::fill_byte`] of this
     /// seed, or a fault when `None`.
     fill: Option<u64>,
     /// Steps a run may take.
@@ -204,8 +204,11 @@ impl<'a> Machine<'a> {
     /// Makes an instruction under a condition that moves control (a
     /// conditional return, call or jump through a register) run whatever
     /// its condition, as the decompiler's blocks read it once the check
-    /// in front of it ([`SKIP`]) let control reach it. Every other
-    /// instruction keeps its condition.
+    /// in front of it ([`SKIP`]) let control reach it, and makes a run
+    /// that starts at an instruction under a condition start with flags
+    /// under which it holds: such a run is one of those blocks, the run of
+    /// instructions under the condition before the one that moves control.
+    /// Every other instruction keeps its condition.
     ///
     /// # Arguments
     ///
@@ -342,7 +345,7 @@ impl<'a> Machine<'a> {
             .or_else(|| image_byte(self.program, addr))
     }
 
-    /// Makes a load of memory nothing backs read [`fill_byte`] of a seed
+    /// Makes a load of memory nothing backs read [`super::fill_byte`] of a seed
     /// instead of faulting.
     ///
     /// # Arguments
@@ -350,6 +353,12 @@ impl<'a> Machine<'a> {
     /// * `seed` - The fill seed, or `None` to fault.
     pub fn set_fill(&mut self, seed: Option<u64>) {
         self.fill = seed;
+    }
+
+    /// The address the machine executes next: where a run stopped.
+    #[must_use]
+    pub fn pc(&self) -> u64 {
+        self.pc
     }
 
     /// The address of the last instruction the run decoded.
@@ -377,6 +386,13 @@ impl<'a> Machine<'a> {
         self.pc = (entry & !SKIP) & WORD & !1;
         self.thumb = self.program.modes.at(self.pc) == Mode::Thumb || entry & 1 == 1;
         self.steps = 0;
+        if self.forced && !tagged {
+            let saved = self.it;
+            if let Some(first) = self.fetch(self.pc).filter(Insn::predicated) {
+                self.set_nzcv(satisfying(first.cond));
+            }
+            self.it = saved;
+        }
         let mut skip = tagged;
         let stop = loop {
             let pc = self.pc;
@@ -403,7 +419,7 @@ impl<'a> Machine<'a> {
                 if self.holds(insn.cond) {
                     self.it = it;
                 } else {
-                    self.pc = insn.next();
+                    self.pc = self.past_run(&insn);
                 }
                 continue;
             }
@@ -426,6 +442,36 @@ impl<'a> Machine<'a> {
                 .held_below(STACK_BASE_32.wrapping_sub(STACK_SPAN_32)),
             history: std::mem::take(&mut self.history),
         }
+    }
+
+    /// The address past the run of instructions under one condition a
+    /// test tagged [`SKIP`] stands in front of, when the condition fails:
+    /// past every instruction under it, up to and including the first that
+    /// moves control. Each is skipped as its failing condition skips it.
+    ///
+    /// # Arguments
+    ///
+    /// * `first` - The run's first instruction, already decoded.
+    fn past_run(&mut self, first: &Insn) -> u64 {
+        let mut at = first.next();
+        if first.flow() != a32::Flow::Next {
+            return at;
+        }
+        for _ in 0..a32::RUN_MAX {
+            let it = self.it;
+            let Some(i) = self
+                .fetch(at)
+                .filter(|i| i.predicated() && i.cond == first.cond)
+            else {
+                self.it = it;
+                break;
+            };
+            at = i.next();
+            if i.flow() != a32::Flow::Next {
+                break;
+            }
+        }
+        at
     }
 
     /// Decodes the instruction at `pc` in the machine's instruction set,
@@ -463,4 +509,29 @@ impl<'a> Machine<'a> {
 /// * `addr` - The address.
 fn on_stack(addr: u64) -> bool {
     addr >= STACK_BASE_32.wrapping_sub(STACK_SPAN_32) && addr < STACK_BASE_32.wrapping_add(0x1000)
+}
+
+/// Flags under which a condition holds, as the APSR holds them in bits 28
+/// to 31.
+///
+/// # Arguments
+///
+/// * `c` - The condition.
+fn satisfying(c: a32::Cond) -> u32 {
+    use a32::Cond;
+    /// The N flag.
+    const N: u32 = 1 << 31;
+    /// The Z flag.
+    const Z: u32 = 1 << 30;
+    /// The C flag.
+    const C: u32 = 1 << 29;
+    /// The V flag.
+    const V: u32 = 1 << 28;
+    match c {
+        Cond::Eq | Cond::Le | Cond::Ls => Z,
+        Cond::Hs | Cond::Hi => C,
+        Cond::Mi | Cond::Lt => N,
+        Cond::Vs => V,
+        Cond::Ne | Cond::Lo | Cond::Pl | Cond::Vc | Cond::Ge | Cond::Gt | Cond::Al | Cond::Nv => 0,
+    }
 }

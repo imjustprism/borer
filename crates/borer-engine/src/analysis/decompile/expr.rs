@@ -38,6 +38,9 @@ pub(super) enum Key {
     /// tracked offset, or `v0`..`v31`. Last, so the order and hash of every
     /// other variable stay as they were.
     A64(a64::Reg),
+    /// An ARM32 register: `r0`..`r14`, the stack pointer while it is no
+    /// tracked offset, a single `s0`..`s31` or a double `d0`..`d31`.
+    A32(crate::isa::a32::Reg),
 }
 
 impl Key {

@@ -271,6 +271,22 @@ pub(crate) const AAPCS64: Conv = Conv {
     shadow: 0,
 };
 
+/// The ARM32 procedure call standard (AAPCS, hard-float).
+///
+/// As far as the shared executor reads a convention, it is a four-byte
+/// word and no shadow space. Its registers are ARM32 ones, which the ARM32
+/// lifter names ([`crate::analysis::decompile::lift_a32`]), so the x86
+/// lists are empty.
+pub(crate) const AAPCS32: Conv = Conv {
+    args: &[],
+    float_args: &[],
+    float_seq: true,
+    volatile: &[],
+    callee_saved: &[],
+    word: 4,
+    shadow: 0,
+};
+
 impl Conv {
     /// The argument slot a register carries, if it carries one.
     ///
@@ -397,6 +413,9 @@ impl Conv {
 pub(crate) fn conv(program: &Program, bitness: u32) -> &'static Conv {
     if program.arch.isa() == Some(crate::isa::Isa::A64) {
         return &AAPCS64;
+    }
+    if program.arch.isa() == Some(crate::isa::Isa::A32) {
+        return &AAPCS32;
     }
     if bitness == 32 {
         return &CDECL_X86;

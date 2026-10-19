@@ -135,7 +135,7 @@ fn cut_to(v: Expr, ty: Ty, known: Option<u8>) -> Expr {
 ///   register.
 /// * `known` - The width `v` was computed at, when the expression no
 ///   longer says.
-fn put_at(v: Expr, ty: Ty, known: Option<u8>) -> (Ty, Expr) {
+pub(in crate::analysis::decompile) fn put_at(v: Expr, ty: Ty, known: Option<u8>) -> (Ty, Expr) {
     let bits = ty.bits();
     if lane_sign(&v) && matches!(ty, Ty::F32 | Ty::F64) {
         let integer = if bits <= 32 { Ty::U32 } else { Ty::U64 };
@@ -182,7 +182,7 @@ fn put_at(v: Expr, ty: Ty, known: Option<u8>) -> (Ty, Expr) {
 /// # Arguments
 ///
 /// * `bits` - The lane, 32 or 64.
-pub(super) fn lane_sign_bit(bits: u16) -> Option<u64> {
+pub(in crate::analysis::decompile) fn lane_sign_bit(bits: u16) -> Option<u64> {
     match bits {
         32 => Some(0x8000_0000),
         64 => Some(0x8000_0000_0000_0000),
@@ -289,7 +289,7 @@ fn low_mask(e: &Expr) -> bool {
 ///
 /// * `v` - The float.
 /// * `bits` - The lane, 1 to 64. Zero is no bits.
-pub(super) fn as_integer_bits(v: Expr, bits: u16) -> Expr {
+pub(in crate::analysis::decompile) fn as_integer_bits(v: Expr, bits: u16) -> Expr {
     if bits >= 64 {
         fold(Op::Or, v.clone(), v, 64)
     } else if bits == 0 {
@@ -359,7 +359,7 @@ pub(super) fn float_ty_bits(ty: Ty) -> Option<u8> {
 /// # Arguments
 ///
 /// * `v` - The value a store writes.
-pub(super) fn float_width(v: &Expr) -> Option<u8> {
+pub(in crate::analysis::decompile) fn float_width(v: &Expr) -> Option<u8> {
     match v {
         Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::FConst(_, ty) => {
             matches!(ty, Ty::F32 | Ty::F64).then_some(ty.bits())
@@ -406,7 +406,7 @@ fn float_fits(v: &Expr, bits: u8) -> bool {
 ///
 /// * `v` - The operation.
 /// * `t` - The width the instruction computed it at.
-pub(super) fn bear_width(v: Expr, t: Ty) -> Expr {
+pub(in crate::analysis::decompile) fn bear_width(v: Expr, t: Ty) -> Expr {
     if v.is_float() && float_width(&v).is_none() {
         Expr::Cast(Box::new(v), t)
     } else {

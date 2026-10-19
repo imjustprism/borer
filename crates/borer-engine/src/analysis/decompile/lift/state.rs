@@ -29,7 +29,7 @@ fn is_register(k: Key) -> bool {
     matches!(
         k,
         Key::Reg(_) | Key::A64(crate::isa::a64::Reg::X(_) | crate::isa::a64::Reg::V(_))
-    )
+    ) || matches!(k, Key::A32(r) if r != crate::isa::a32::SP)
 }
 
 impl<'a> Exec<'_, 'a> {
@@ -577,6 +577,7 @@ impl<'a> Exec<'_, 'a> {
             Expr::Var(Key::Param(i)) => self.ctx.arg_floats & (1u8 << (*i).min(7)) == 0,
             Expr::Var(Key::Reg(r)) => r.is_gpr(),
             Expr::Var(Key::A64(r)) => matches!(r, crate::isa::a64::Reg::X(_)),
+            Expr::Var(Key::A32(r)) => matches!(r, crate::isa::a32::Reg::R(_)),
             Expr::Var(Key::Slot(_) | Key::Global(..) | Key::Tmp(_))
             | Expr::Str(_)
             | Expr::Sp(_)
@@ -1228,7 +1229,9 @@ impl<'a> Exec<'_, 'a> {
                 .get(&o)
                 .copied()
                 .unwrap_or_else(|| self.ty_of(key).bits()),
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => self.ty_of(key).bits(),
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => {
+                self.ty_of(key).bits()
+            }
         };
         let val = &match key {
             Key::Slot(_) | Key::Global(..) if bits < 64 && !val.is_float() => {
@@ -1239,13 +1242,19 @@ impl<'a> Exec<'_, 'a> {
             | Key::Reg(_)
             | Key::Tmp(_)
             | Key::Param(_)
-            | Key::A64(_) => val.clone(),
+            | Key::A64(_)
+            | Key::A32(_) => val.clone(),
         };
         self.record(EffectKind::Assign(key, val.clone(), bits));
         let n = self.names();
         let name = match key {
             Key::Slot(o) => n.slot_at(o, Ty::from_bits(bits)).0,
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) | Key::A64(_) => n.key(key),
+            Key::Reg(_)
+            | Key::Tmp(_)
+            | Key::Param(_)
+            | Key::Global(..)
+            | Key::A64(_)
+            | Key::A32(_) => n.key(key),
         };
         let shown = if self.ctx.bitness == 64 && self.env.narrow.get(&key) == Some(&32) {
             mask(val.clone(), 0xffff_ffff)
@@ -1534,9 +1543,18 @@ impl<'a> Exec<'_, 'a> {
             }
             Key::Reg(r) if r >= Register::ST0 && r <= Register::ST7 => Ty::F64,
             Key::A64(crate::isa::a64::Reg::V(_)) => Ty::U128,
-            Key::Reg(_) | Key::Tmp(_) | Key::Global(..) | Key::Param(_) | Key::A64(_) => {
-                self.word_ty()
+            Key::A32(crate::isa::a32::Reg::D(_)) => {
+                self.ctx.reg_ty.get(&key).copied().unwrap_or(Ty::U64)
             }
+            Key::A32(crate::isa::a32::Reg::S(_)) => {
+                self.ctx.reg_ty.get(&key).copied().unwrap_or(self.word_ty())
+            }
+            Key::Reg(_)
+            | Key::Tmp(_)
+            | Key::Global(..)
+            | Key::Param(_)
+            | Key::A64(_)
+            | Key::A32(_) => self.word_ty(),
             Key::Slot(k) => self
                 .ctx
                 .declared
@@ -1557,7 +1575,12 @@ impl<'a> Exec<'_, 'a> {
         if self.emit && !self.ctx.declared.contains_key(&key) {
             let ty = match key {
                 Key::Slot(k) => self.ctx.frame.ty(k).unwrap_or(ty),
-                Key::Reg(_) | Key::Param(_) | Key::Tmp(_) | Key::Global(..) | Key::A64(_) => ty,
+                Key::Reg(_)
+                | Key::Param(_)
+                | Key::Tmp(_)
+                | Key::Global(..)
+                | Key::A64(_)
+                | Key::A32(_) => ty,
             };
             self.ctx.declared.insert(key, ty);
             if let Key::Slot(k) = key {
@@ -1973,12 +1996,16 @@ impl<'a> Exec<'_, 'a> {
         Expr::Var(key)
     }
 
-    /// Forgets `key` because it is about to change without a modeled value.
+    /// Forgets `key` because it is about to change without a modeled value,
+    /// ending the block's equality assumption when it is about `key`.
     ///
     /// # Arguments
     ///
     /// * `key` - The variable being clobbered.
     pub(in crate::analysis::decompile) fn clobber(&mut self, key: Key) {
+        if self.assume.is_some_and(|(k, _)| k == key) {
+            self.assume = None;
+        }
         self.protect_readers(key, &mut Vec::new(), None);
         self.protect_flags(&|e: &Expr| e.mentions(key));
         self.env.vals.remove(&key);

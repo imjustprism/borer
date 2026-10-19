@@ -27,10 +27,10 @@
 //! registers each instruction reads and writes is [`live`]'s.
 
 mod call;
-mod flags;
+pub(in crate::analysis::decompile) mod flags;
 mod float;
 mod live;
-mod mem;
+pub(in crate::analysis::decompile) mod mem;
 mod shape;
 mod simd;
 mod step;

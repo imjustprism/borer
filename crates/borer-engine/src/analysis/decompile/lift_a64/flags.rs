@@ -213,7 +213,7 @@ fn float_condition(a: &Expr, b: &Expr, bits: u8, c: a64::Cond) -> Cond {
 ///
 /// The condition: one that always holds for `al` and `nv`, and one over
 /// [`Flags::Unknown`] when nothing the lifter knows set the flags.
-pub(super) fn condition(flags: &Flags, c: a64::Cond) -> Cond {
+pub(in crate::analysis::decompile) fn condition(flags: &Flags, c: a64::Cond) -> Cond {
     let Some(cc) = tag(c) else {
         return truth(Expr::Const(1), Cc(ConditionCode::ne));
     };
@@ -306,7 +306,7 @@ pub(super) fn condition(flags: &Flags, c: a64::Cond) -> Cond {
 ///
 /// A [`Flags::Truth`] tagged for `c`, or [`Flags::Unknown`] for `al` and
 /// `nv`, which ask nothing of the flags.
-pub(super) fn answer(c: a64::Cond, e: Expr) -> Flags {
+pub(in crate::analysis::decompile) fn answer(c: a64::Cond, e: Expr) -> Flags {
     tag(c).map_or(Flags::Unknown, |cc| Flags::Truth(e, cc))
 }
 
@@ -316,7 +316,7 @@ pub(super) fn answer(c: a64::Cond, e: Expr) -> Flags {
 ///
 /// * `flags` - What set the flags.
 /// * `c` - The condition.
-pub(super) fn value(flags: &Flags, c: a64::Cond) -> Expr {
+pub(in crate::analysis::decompile) fn value(flags: &Flags, c: a64::Cond) -> Expr {
     ternary(condition(flags, c), Expr::Const(1), Expr::Const(0))
 }
 
@@ -353,7 +353,7 @@ fn sub_overflow(a: &Expr, b: &Expr, bits: u8) -> Expr {
 ///
 /// * `c` - The condition.
 /// * `nzcv` - The flags, N in bit 3 down to V in bit 0.
-pub(super) fn holds(c: a64::Cond, nzcv: u64) -> bool {
+pub(in crate::analysis::decompile) fn holds(c: a64::Cond, nzcv: u64) -> bool {
     let (n, z, carry, v) = (nzcv & 8 != 0, nzcv & 4 != 0, nzcv & 2 != 0, nzcv & 1 != 0);
     match c {
         a64::Cond::Eq => z,
@@ -594,7 +594,7 @@ pub(in crate::analysis::decompile) fn modeled_system(i: &Insn) -> bool {
 /// # Arguments
 ///
 /// * `flags` - What set the flags.
-pub(super) fn nzcv_word(flags: &Flags) -> Expr {
+pub(in crate::analysis::decompile) fn nzcv_word(flags: &Flags) -> Expr {
     match flags {
         Flags::Carry(word) => word.clone(),
         Flags::Unknown => Expr::Const(0),

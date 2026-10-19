@@ -620,7 +620,8 @@ impl<M: Bench> State<'_, M> {
             .unwrap_or_else(|| fill_byte(self.fill, at))
     }
 
-    /// `n` bytes of memory before the block ran, little-endian.
+    /// `n` bytes of memory before the block ran, little-endian, the
+    /// address wrapping at the state's width as the machine's does.
     ///
     /// # Arguments
     ///
@@ -629,7 +630,7 @@ impl<M: Bench> State<'_, M> {
     fn read(&self, at: u64, n: u64) -> Option<u64> {
         (1..=8)
             .contains(&n)
-            .then(|| word(n, |i| self.byte(at.wrapping_add(i))))
+            .then(|| word(n, |i| self.byte(at.wrapping_add(i) & low(self.width))))
     }
 }
 
@@ -729,7 +730,7 @@ pub(super) fn eval<M: Bench>(
     let d = depth.checked_sub(1)?;
     match e {
         Expr::Const(v) | Expr::FConst(v, _) => Some(*v),
-        Expr::Var(k @ (Key::Reg(_) | Key::A64(_))) => st.regs.get(k).copied(),
+        Expr::Var(k @ (Key::Reg(_) | Key::A64(_) | Key::A32(_))) => st.regs.get(k).copied(),
         Expr::Var(Key::Tmp(id)) => eval(st.temps.get(id)?, st, reads, d),
         Expr::Var(Key::Slot(off)) => {
             let at = st.rsp.wrapping_add_signed(*off) & low(st.width);

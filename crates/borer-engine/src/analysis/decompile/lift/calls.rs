@@ -1074,7 +1074,7 @@ impl<'a> Exec<'_, 'a> {
                 .iter()
                 .filter_map(|(at, _)| match at {
                     ArgAt::Reg(r) => Some(Key::Reg(*r)),
-                    ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A64(_) => None,
+                    ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A64(_) | ArgAt::A32(_) => None,
                 })
                 .collect()
         } else {
@@ -1127,7 +1127,12 @@ impl<'a> Exec<'_, 'a> {
             .keys()
             .filter_map(|k| match k {
                 Key::Slot(o) => Some(*o),
-                Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => None,
+                Key::Reg(_)
+                | Key::Global(..)
+                | Key::Tmp(_)
+                | Key::Param(_)
+                | Key::A64(_)
+                | Key::A32(_) => None,
             })
             .filter(|o| {
                 !self.rendered_arg(*o, rendered)
@@ -2182,7 +2187,9 @@ impl<'a> Exec<'_, 'a> {
                 let stable = |k: Key| match k {
                     Key::Param(_) | Key::Global(..) | Key::Tmp(_) => true,
                     Key::Slot(o) => !self.exposed(o),
-                    Key::Reg(_) | Key::A64(_) => self.env.vals.get(&k) == Some(&Expr::Var(k)),
+                    Key::Reg(_) | Key::A64(_) | Key::A32(_) => {
+                        self.env.vals.get(&k) == Some(&Expr::Var(k))
+                    }
                 };
                 (!pre.any_var(&|k| !stable(k))).then_some(pre)
             });
@@ -2955,7 +2962,9 @@ impl<'a> Exec<'_, 'a> {
     pub(super) fn class_of_key(&self, key: Key) -> Option<String> {
         match key {
             Key::Param(i) => self.ctx.param_class.get(&i).cloned(),
-            Key::Reg(_) | Key::Slot(_) | Key::A64(_) => self.env.classes.get(&key).cloned(),
+            Key::Reg(_) | Key::Slot(_) | Key::A64(_) | Key::A32(_) => {
+                self.env.classes.get(&key).cloned()
+            }
             Key::Global(addr, _) => match crate::analysis::decompile::expr::tls_slot(addr) {
                 Some(off) => self.ctx.analysis.classes.tls_slots.get(&off).cloned(),
                 None => self.ctx.analysis.classes.global_hints.get(&addr).cloned(),

@@ -279,7 +279,9 @@ impl<'a> Builder<'a> {
                 MTy::F64,
             ),
             Expr::FConst(v, Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128) => self.konst(64, *v),
-            Expr::Var(k @ (Key::Reg(_) | Key::A64(_))) => self.input(Inst::Reg(*k), MTy::I(64)),
+            Expr::Var(k @ (Key::Reg(_) | Key::A64(_) | Key::A32(_))) => {
+                self.input(Inst::Reg(*k), MTy::I(64))
+            }
             Expr::Var(Key::Tmp(id)) => match self.temps.get(id) {
                 Some(t) => self.lower(t, d),
                 None => self.undef(Hole::Var),

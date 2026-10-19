@@ -70,6 +70,29 @@ pub(crate) fn guarded(i: &Insn) -> bool {
     i.predicated() && i.flow() != Flow::Next
 }
 
+/// Returns the test in front of a run of instructions under one condition.
+///
+/// The run ends in a guarded instruction ([`guarded`]), and the block
+/// before it ends in the test: a conditional branch past the run, under
+/// the inverse of its condition, at the run's first address tagged
+/// [`a32::SKIP`].
+///
+/// # Arguments
+///
+/// * `first` - The run's first instruction.
+/// * `end` - The address after the run.
+pub(crate) fn skip(first: &Insn, end: u64) -> Insn {
+    Insn {
+        va: first.va | a32::SKIP,
+        len: 0,
+        mode: first.mode,
+        cond: a32::invert(first.cond),
+        sets: false,
+        op: Op::B { target: end },
+        word: 0,
+    }
+}
+
 /// The slot a linkage stub at `va` jumps through: a PLT entry (`add ip,
 /// pc, #a; add ip, ip, #b; ldr pc, [ip, #c]!`) or a Windows import thunk
 /// (`movw ip, #lo; movt ip, #hi; ldr pc, [ip]`).
@@ -386,6 +409,55 @@ fn walk(program: &Program, entry: u64, starts: &BTreeSet<u64>, noreturn: &BTreeS
     }
 }
 
+/// Finds the guarded instructions ([`guarded`]) whose condition the block
+/// before them can test, each with the run of instructions under the same
+/// condition leading up to it.
+///
+/// A run starts after an instruction that falls through to it, is no
+/// branch target nor the entry, and holds instructions under the guarded
+/// one's condition that set no flags.
+///
+/// # Arguments
+///
+/// * `entry` - The function's entry.
+/// * `w` - The walk.
+/// * `targets` - The branch and table targets.
+///
+/// # Returns
+///
+/// Each run's first address, with its guarded instruction's.
+fn groups(entry: u64, w: &Walked, targets: &BTreeSet<u64>) -> BTreeMap<u64, u64> {
+    let mut out = BTreeMap::new();
+    for g in w.seen.values().filter(|g| guarded(g)) {
+        let free = |va: u64| va != entry && !targets.contains(&va);
+        let mut start = g.va;
+        let mut held = 1;
+        while let Some((_, p)) = w.seen.range(..start).next_back() {
+            held += 1;
+            let joins = held <= a32::RUN_MAX
+                && free(start)
+                && p.next() == start
+                && p.predicated()
+                && p.cond == g.cond
+                && p.flow() == Flow::Next
+                && !p.sets;
+            if !joins {
+                break;
+            }
+            start = p.va;
+        }
+        let opens = free(start)
+            && w.seen
+                .range(..start)
+                .next_back()
+                .is_some_and(|(_, p)| p.next() == start && p.flow() == Flow::Next && !guarded(p));
+        if opens {
+            out.insert(start, g.va);
+        }
+    }
+    out
+}
+
 /// Builds a function's record and its references from its walk.
 ///
 /// # Arguments
@@ -408,24 +480,16 @@ fn assemble(entry: u64, w: &Walked) -> (Function, Vec<(u64, u64, RefKind)>) {
     for t in &w.tables {
         targets.extend(t.targets.iter().copied().filter(|t| present(*t)));
     }
-    let checked: BTreeSet<u64> = insns
-        .iter()
-        .filter(|g| guarded(g) && g.va != entry && !targets.contains(&g.va))
-        .filter(|g| {
-            w.seen
-                .range(..g.va)
-                .next_back()
-                .is_some_and(|(_, p)| p.next() == g.va && p.flow() == Flow::Next)
-        })
-        .map(|g| g.va)
-        .collect();
+    let groups = groups(entry, w, &targets);
+    let checked: BTreeSet<u64> = groups.values().copied().collect();
     let mut leaders: BTreeSet<u64> = targets;
     leaders.insert(entry);
+    leaders.extend(groups.keys().copied());
     for i in &insns {
         if i.flow() != Flow::Next || guarded(i) {
             leaders.insert(i.next());
         }
-        if guarded(i) {
+        if guarded(i) && !checked.contains(&i.va) {
             leaders.insert(i.va);
         }
     }
@@ -443,8 +507,11 @@ fn assemble(entry: u64, w: &Walked) -> (Function, Vec<(u64, u64, RefKind)>) {
             }
         };
         let (term, mut succs) = match l.flow() {
-            Flow::Next if checked.contains(&next) => {
-                let after = w.seen.get(&next).map_or(next, Insn::next);
+            Flow::Next if groups.contains_key(&next) => {
+                let after = groups
+                    .get(&next)
+                    .and_then(|g| w.seen.get(g))
+                    .map_or(next, Insn::next);
                 (BlockTerm::Cond, vec![after, next])
             }
             Flow::Next => (BlockTerm::Fall, unguarded_fall()),
@@ -673,7 +740,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         if w.seen.is_empty() {
             continue;
         }
-        let (mut f, sites) = assemble(entry, w);
+        let (f, sites) = assemble(entry, w);
         for (t, va, kind) in sites {
             push_site(&mut analysis.xrefs, t, va, kind, Some(entry));
         }
@@ -683,17 +750,156 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         for t in &w.tables {
             analysis.jump_tables.insert(t.site, t.targets.clone());
         }
-        if let Some(slot) = stub_slot(program, entry)
+        functions.push(f);
+    }
+    build_callers_and_names(program, &mut functions);
+    for f in &mut functions {
+        if let Some(slot) = stub_slot(program, f.entry)
             && let Some(name) = imports.get(&slot)
         {
             f.name = Some(crate::search::demangled_name(name));
             f.name_source = NameSource::Symbol;
             f.thunk = Some(slot);
         }
-        functions.push(f);
     }
-    build_callers_and_names(program, &mut functions);
     analysis.functions = functions;
     analysis.finish_index(program);
     analysis
+}
+
+/// Most jumps on from function to function a float result is followed
+/// through.
+const TAIL_LINKS: usize = 4;
+
+/// What the last write of a result register in a stretch of code was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Last {
+    /// `r0`.
+    Int,
+    /// `s0` or `d0`, with the width in bits.
+    Float(u8),
+}
+
+/// The result register an instruction other than a call writes, a base
+/// register a transfer writes back left out.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn last_write(i: &Insn) -> Option<Last> {
+    if i.flow() == Flow::Call {
+        return None;
+    }
+    let base = if let Op::Load { addr, .. }
+    | Op::Store { addr, .. }
+    | Op::LoadDual { addr, .. }
+    | Op::StoreDual { addr, .. } = i.op
+        && addr.index != Index::Offset
+    {
+        Some(addr.base)
+    } else if let Op::Ldm { rn, wback, .. }
+    | Op::Stm { rn, wback, .. }
+    | Op::VLdm { rn, wback, .. }
+    | Op::VStm { rn, wback, .. } = i.op
+    {
+        wback.then_some(rn)
+    } else if let Op::Neon { base, .. } = i.op {
+        base
+    } else {
+        None
+    };
+    let mut w = i.registers().writes;
+    w.retain(|r| Some(*r) != base);
+    if w.contains(&a32::Reg::R(0)) {
+        Some(Last::Int)
+    } else if w.contains(&a32::Reg::D(0)) {
+        Some(Last::Float(64))
+    } else if w.contains(&a32::Reg::S(0)) {
+        Some(Last::Float(32))
+    } else {
+        None
+    }
+}
+
+/// Says which ARM32 functions hand back a float.
+///
+/// One does whose returning blocks last write `s0` or `d0` rather than
+/// `r0`, or, when no returning block writes either and none jumps on to
+/// another function, that writes `s0` or `d0` outside a call and never
+/// `r0`; one that only jumps on hands back what the function it jumps to
+/// does, up to [`TAIL_LINKS`] jumps away. The width goes into
+/// [`Function::ret_float`].
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - The functions, updated in place.
+pub(crate) fn infer_returns(program: &Program, analysis: &mut Analysis) {
+    let float_of = |ls: &[Last]| {
+        ls.iter().find_map(|l| {
+            if let Last::Float(w) = l {
+                Some(*w)
+            } else {
+                None
+            }
+        })
+    };
+    let mut onward: Vec<(usize, u64)> = Vec::new();
+    for (k, f) in analysis.functions.iter_mut().enumerate() {
+        let mut at_return: Vec<Last> = Vec::new();
+        let mut any: Vec<Last> = Vec::new();
+        for b in &f.blocks {
+            let mut it = ItState::default();
+            let mut va = b.start;
+            let mut in_block = None;
+            while va < b.end {
+                let Some(i) = decode(program, va, &mut it) else {
+                    break;
+                };
+                if let Some(l) = last_write(&i) {
+                    in_block = Some(l);
+                    any.push(l);
+                }
+                va = i.next();
+            }
+            if b.term == BlockTerm::Ret {
+                at_return.extend(in_block);
+            }
+        }
+        let inside = |t: &u64| f.blocks.iter().any(|x| x.start == *t);
+        let tail = f
+            .blocks
+            .iter()
+            .find(|b| b.term == BlockTerm::Jmp && !b.successors.iter().any(inside));
+        if at_return.is_empty()
+            && let Some(&t) = tail.and_then(|b| b.successors.first())
+        {
+            onward.push((k, t));
+        }
+        let tail = tail.is_some();
+        let float = if at_return.is_empty() {
+            float_of(&any).filter(|_| !tail && !any.contains(&Last::Int))
+        } else {
+            float_of(&at_return).filter(|_| !at_return.contains(&Last::Int))
+        };
+        if float.is_some() {
+            f.ret_float = float;
+            f.returns_value = Some(true);
+        }
+    }
+    for _ in 0..TAIL_LINKS {
+        for &(k, t) in &onward {
+            let float = analysis
+                .function(t)
+                .filter(|g| g.entry == t)
+                .and_then(|g| g.ret_float);
+            if let Some(f) = analysis.functions.get_mut(k)
+                && f.ret_float.is_none()
+                && float.is_some()
+            {
+                f.ret_float = float;
+                f.returns_value = Some(true);
+            }
+        }
+    }
 }

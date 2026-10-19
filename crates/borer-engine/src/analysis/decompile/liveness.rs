@@ -38,7 +38,7 @@ impl Live {
     pub(super) fn is_live(&self, b: usize, k: Key) -> bool {
         match k {
             Key::Reg(_) => k.is_x87() || self.regs[b].contains_key(&k),
-            Key::A64(_) => self.regs[b].contains_key(&k),
+            Key::A64(_) | Key::A32(_) => self.regs[b].contains_key(&k),
             Key::Slot(o) => self.slots.as_ref().is_none_or(|s| s[b].contains(&o)),
             Key::Global(..) | Key::Tmp(_) | Key::Param(_) => false,
         }

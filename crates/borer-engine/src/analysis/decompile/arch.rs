@@ -12,7 +12,7 @@
 //! lifter ([`lift_a64`]) and the arm64 procedure call standard.
 
 use super::*;
-use crate::isa::a64;
+use crate::isa::{a32, a64};
 
 /// What the decompiler's pipeline asks of an instruction set.
 ///
@@ -566,5 +566,141 @@ impl Lifter for A64 {
 
     fn result_names(_bitness: u32) -> (&'static str, &'static str) {
         ("x0", "x1")
+    }
+}
+
+/// ARM32 (A32 and T32), decoded by [`crate::isa::a32`] and lifted by
+/// [`lift_a32`] under the ARM32 procedure call standard.
+pub(super) struct A32;
+
+impl Lifter for A32 {
+    type Insn = a32::Insn;
+
+    fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<a32::Insn>> {
+        lift_a32::decode_blocks(ctx, f)
+    }
+
+    fn start(i: &a32::Insn) -> u64 {
+        i.va
+    }
+
+    fn exec_block(
+        ctx: &mut Ctx<'_>,
+        instrs: &[a32::Insn],
+        _prev: Option<&[a32::Insn]>,
+        env: &mut Env,
+        pass: lift::Pass,
+        phi: Option<(&lift::PhiFn<'_>, &lift::LiveFn<'_>)>,
+        facts: BlockFacts<'_>,
+    ) -> BlockOut {
+        lift_a32::exec_block_a32(ctx, instrs, env, pass, phi, facts)
+    }
+
+    fn reads_inherited_flags(instrs: &[a32::Insn]) -> bool {
+        lift_a32::reads_inherited_flags(instrs)
+    }
+
+    fn join_reader_cc(_instrs: &[a32::Insn]) -> Option<Cc> {
+        None
+    }
+
+    fn live_in(
+        ctx: &Ctx<'_>,
+        code: &[Vec<a32::Insn>],
+        succs: &[Vec<usize>],
+    ) -> Vec<FxHashMap<Key, u8>> {
+        let effects: Vec<Vec<lift::Effects>> = code
+            .iter()
+            .map(|b| b.iter().map(|i| lift_a32::effects(ctx, i)).collect())
+            .collect();
+        lift::live_from(&effects, succs)
+    }
+
+    fn need_after(
+        ctx: &Ctx<'_>,
+        instrs: &[a32::Insn],
+        out: &FxHashMap<Key, u8>,
+    ) -> Vec<FxHashMap<Key, u8>> {
+        let effects: Vec<lift::Effects> =
+            instrs.iter().map(|i| lift_a32::effects(ctx, i)).collect();
+        lift::need_from(&effects, out)
+    }
+
+    fn after(_code: &[Vec<a32::Insn>], _s: usize) -> Option<Instruction> {
+        None
+    }
+
+    fn prologue_block(ctx: &Ctx<'_>, _code: &[Vec<a32::Insn>], b: usize) -> bool {
+        b == ctx.entry_block
+    }
+
+    fn body_len(instrs: &[a32::Insn]) -> usize {
+        lift_a32::body_len(instrs)
+    }
+
+    fn same_test(_a: &[a32::Insn], _b: &[a32::Insn]) -> bool {
+        false
+    }
+
+    fn seh_frame(_ctx: &Ctx<'_>, _code: &[Vec<a32::Insn>]) -> bool {
+        false
+    }
+
+    fn go_check(
+        _ctx: &Ctx<'_>,
+        _entry: u64,
+        _code: &[Vec<a32::Insn>],
+        _idx: &BTreeMap<u64, usize>,
+    ) -> Option<(u64, String)> {
+        None
+    }
+
+    fn shape(
+        ctx: &mut Ctx<'_>,
+        f: &Function,
+        code: &[Vec<a32::Insn>],
+        succs: &[Vec<usize>],
+        entry: usize,
+    ) -> std::sync::Arc<Shape> {
+        lift_a32::callee_shape(ctx, f.entry)
+            .unwrap_or_else(|| std::sync::Arc::new(lift_a32::shape(ctx, f, code, succs, entry)))
+    }
+
+    fn entry_env(ctx: &Ctx<'_>) -> Env {
+        lift_a32::entry_env(ctx)
+    }
+
+    fn writes_result(ctx: &Ctx<'_>, code: &[Vec<a32::Insn>]) -> bool {
+        lift_a32::writes_result(ctx, code)
+    }
+
+    fn lanes(_code: &[Vec<a32::Insn>], _ret_float: Option<u8>) -> lanes::Lanes {
+        lanes::Lanes::default()
+    }
+
+    fn ret_lane(
+        code: &[Vec<a32::Insn>],
+        _succs: &[Vec<usize>],
+        declared: Option<&str>,
+        _analysis: &Analysis,
+    ) -> u8 {
+        lift_a32::ret_lane(code, declared)
+    }
+
+    fn param_types(
+        ctx: &Ctx<'_>,
+        code: &[Vec<a32::Insn>],
+        _succs: &[Vec<usize>],
+        entry: usize,
+    ) -> BTreeMap<usize, String> {
+        lift_a32::param_types(ctx, code, entry)
+    }
+
+    fn witness(code: Vec<Vec<a32::Insn>>) -> replay::Code {
+        replay::Code::A32(code)
+    }
+
+    fn result_names(_bitness: u32) -> (&'static str, &'static str) {
+        ("r0", "r1")
     }
 }

@@ -23,6 +23,7 @@
 //! A store of a register the function preserves is a save, which
 //! nothing prints ([`saved`]).
 
+pub(crate) mod a32;
 pub(crate) mod a64;
 mod conv;
 pub(crate) mod function;

@@ -254,9 +254,12 @@ impl Env {
             other.vals.get(k) == Some(v)
                 && match k {
                     Key::Slot(o) => self.slot_bits.contains_key(o),
-                    Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => {
-                        true
-                    }
+                    Key::Reg(_)
+                    | Key::Global(..)
+                    | Key::Tmp(_)
+                    | Key::Param(_)
+                    | Key::A64(_)
+                    | Key::A32(_) => true,
                 }
         });
         self.classes.retain(|k, v| other.classes.get(k) == Some(v));
@@ -265,7 +268,7 @@ impl Env {
         self.tls_arrays.retain(|k| other.tls_arrays.contains(k));
         self.tls_blocks.retain(|k| other.tls_blocks.contains(k));
         self.narrow.retain(|k, v| match (k, other.narrow.get(k)) {
-            (Key::A64(_), Some(w)) => {
+            (Key::A64(_) | Key::A32(_), Some(w)) => {
                 *v = (*v).max(*w);
                 true
             }
@@ -317,10 +320,10 @@ impl Env {
     fn set(&mut self, k: Key, v: Expr) {
         self.unset.remove(&k);
         self.clobbered.remove(&k);
-        if matches!(k, Key::Reg(_) | Key::A64(_)) {
+        if matches!(k, Key::Reg(_) | Key::A64(_) | Key::A32(_)) {
             self.touched.insert(k);
         }
-        if matches!(k, Key::Reg(_) | Key::Slot(_) | Key::A64(_)) {
+        if matches!(k, Key::Reg(_) | Key::Slot(_) | Key::A64(_) | Key::A32(_)) {
             self.fresh.insert(k);
         }
         let bits = match &v {

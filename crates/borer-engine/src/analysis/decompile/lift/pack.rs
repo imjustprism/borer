@@ -340,6 +340,10 @@ impl Writer<'_> {
                 self.byte(4);
                 self.byte(i);
             }
+            Key::A32(r) => {
+                self.byte(6);
+                self.byte(crate::isa::a32::code(r));
+            }
             Key::A64(r) => {
                 self.byte(5);
                 self.byte(a64_code(r));
@@ -556,6 +560,10 @@ impl Writer<'_> {
                     self.byte(3);
                     self.byte(a64_code(*r));
                 }
+                ArgAt::A32(r) => {
+                    self.byte(4);
+                    self.byte(crate::isa::a32::code(*r));
+                }
             }
             self.expr(e);
         }
@@ -703,6 +711,7 @@ impl Reader<'_> {
             3 => Key::Tmp(u32::try_from(self.num()?).ok()?),
             4 => Key::Param(self.byte()?),
             5 => Key::A64(a64_reg(self.byte()?)?),
+            6 => Key::A32(crate::isa::a32::from_code(self.byte()?)?),
             _ => return None,
         })
     }
@@ -843,6 +852,7 @@ impl Reader<'_> {
                 }
                 2 => ArgAt::Operand,
                 3 => ArgAt::A64(a64_reg(self.byte()?)?),
+                4 => ArgAt::A32(crate::isa::a32::from_code(self.byte()?)?),
                 _ => return None,
             };
             args.push((at, self.expr()?));

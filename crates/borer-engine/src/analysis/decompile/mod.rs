@@ -52,6 +52,7 @@ pub(crate) mod interp;
 mod ladder;
 mod lanes;
 pub(crate) mod lift;
+mod lift_a32;
 mod lift_a64;
 mod line;
 mod liveness;
@@ -63,6 +64,7 @@ mod panics;
 mod params;
 mod passes;
 pub mod replay;
+mod replay_a32;
 mod replay_a64;
 mod rewrite;
 mod scenario;
@@ -77,6 +79,7 @@ mod unit;
 mod vars;
 mod vector;
 pub mod verify;
+pub mod verify_a32;
 pub mod verify_a64;
 mod verify_lanes;
 mod warn;
@@ -1635,7 +1638,7 @@ fn decompile_in_run(
             decompile_in::<arch::X86>(run, bits, cleanup, assume, witness)
         }
         crate::isa::Isa::A64 => decompile_in::<arch::A64>(run, 64, cleanup, assume, witness),
-        crate::isa::Isa::A32 => None,
+        crate::isa::Isa::A32 => decompile_in::<arch::A32>(run, 32, cleanup, assume, witness),
     }
 }
 
@@ -1752,6 +1755,7 @@ fn decompile_in<L: Lifter>(
             .map_or(f.ret_float.is_some(), |s| float_return(&s.ret)),
     };
     ctx.ret_sse = bitness == 32
+        && matches!(program.arch.isa(), Some(crate::isa::Isa::X86 { .. }))
         && ctx.stated.is_none()
         && f.signature.is_none()
         && f.ret_float.is_none()
@@ -2419,7 +2423,12 @@ fn decompile_in<L: Lifter>(
         .iter()
         .filter_map(|(k, t)| match k {
             Key::Slot(o) => Some((*o, *t)),
-            Key::Reg(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) => None,
+            Key::Reg(_)
+            | Key::Global(..)
+            | Key::Tmp(_)
+            | Key::Param(_)
+            | Key::A64(_)
+            | Key::A32(_) => None,
         })
         .collect();
     let mut by_type: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -2449,7 +2458,7 @@ fn decompile_in<L: Lifter>(
             }
         }
         let stated = match k {
-            Key::Reg(_) | Key::A64(_) => result_typed.get(&name).cloned(),
+            Key::Reg(_) | Key::A64(_) | Key::A32(_) => result_typed.get(&name).cloned(),
             Key::Slot(o) => slot_stated.get(o).cloned(),
             Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
         };
@@ -2584,9 +2593,12 @@ fn decompile_in<L: Lifter>(
                 .iter()
                 .filter_map(|(k, ty)| match k {
                     Key::Slot(o) => Some((*o, ty.bits())),
-                    Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::Global(..) | Key::A64(_) => {
-                        None
-                    }
+                    Key::Reg(_)
+                    | Key::Tmp(_)
+                    | Key::Param(_)
+                    | Key::Global(..)
+                    | Key::A64(_)
+                    | Key::A32(_) => None,
                 })
                 .collect(),
             reg_ty: ctx
