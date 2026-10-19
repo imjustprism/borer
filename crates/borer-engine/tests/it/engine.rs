@@ -94,6 +94,21 @@ fn wide_strings_do_not_start_on_an_ascii_tail() {
     assert_eq!(hits[0].off, 7);
 }
 
+/// A UTF-16LE literal on an aligned offset keeps its first character after
+/// a printable byte.
+///
+/// kernelbase puts `L"Unknown Region"` right after the double 25.4, whose
+/// last bytes read `9@`; the ASCII-tail trim took the `U` away and listed
+/// the string from its second character, two bytes late.
+#[test]
+fn an_aligned_wide_literal_keeps_its_first_character() {
+    let bytes = b"uH\xbc\xa3)\x16\xc6Affffff9@U\x00n\x00k\x00n\x00o\x00w\x00n\x00\x00\x00";
+    let hits = strings::find_wide_strings(bytes, 5);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].text, "Unknown");
+    assert_eq!(hits[0].off, 16);
+}
+
 /// A long string's display text is cut, and its whole text still holds
 /// what lies past the cut, in either encoding: a filter tested against the
 /// cut text missed it.
@@ -179,7 +194,7 @@ fn walks_match_the_per_byte_state_machines() {
         let mut i = 0;
         while i + 1 < bytes.len() {
             let unit = strings::printable(bytes[i]) && bytes[i + 1] == 0;
-            let tail = i > 0 && strings::printable(bytes[i - 1]);
+            let tail = strings::ascii_tail(&bytes[..i], i.is_multiple_of(strings::WIDE_ALIGN));
             if !unit || tail {
                 i += 1;
                 continue;

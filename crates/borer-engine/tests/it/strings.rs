@@ -8,7 +8,8 @@
 )]
 
 use borer_engine::strings::{
-    Encoding, RawStringSpan, drop_code_runs, find_ascii_spans, find_wide_spans, printable,
+    Encoding, RawStringSpan, WIDE_ALIGN, ascii_tail, drop_code_runs, find_ascii_spans,
+    find_wide_spans, printable,
 };
 
 /// Longest text the engine renders in full before appending `...`
@@ -96,7 +97,7 @@ fn ascii_reference(bytes: &[u8], min_len: usize) -> Vec<(u64, usize, String)> {
 /// reproduce.
 ///
 /// Maximal runs of printable UTF-16LE code units of at least `min_len`
-/// units, none starting on the byte after a printable one.
+/// units, none starting on an ASCII tail.
 ///
 /// # Arguments
 ///
@@ -111,7 +112,7 @@ fn wide_reference(bytes: &[u8], min_len: usize) -> Vec<(u64, usize, String)> {
     let mut i = 0;
     while i + 1 < bytes.len() {
         let unit = printable(bytes[i]) && bytes[i + 1] == 0;
-        let tail = i > 0 && printable(bytes[i - 1]);
+        let tail = ascii_tail(&bytes[..i], i.is_multiple_of(WIDE_ALIGN));
         if !unit || tail {
             i += 1;
             continue;

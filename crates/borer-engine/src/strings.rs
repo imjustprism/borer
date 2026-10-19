@@ -336,9 +336,9 @@ pub fn find_strings(bytes: &[u8], min_len: usize) -> Vec<StringHit> {
 /// Finds runs of UTF-16LE code units at least `min_len` characters long.
 ///
 /// A code unit counts when its low byte is printable ASCII and its high byte
-/// is zero. Runs may start at any byte offset, odd ones included, except one
-/// whose preceding byte is printable ASCII: there the first code unit is the
-/// last character of an adjacent ASCII string paired with that string's
+/// is zero. Runs may start at any byte offset, odd ones included, except on
+/// an ASCII tail ([`ascii_tail`]): there the first code unit is the last
+/// character of an adjacent ASCII string paired with that string's
 /// terminator, and taking it yields a character that is not in the data.
 /// `"rand_s\0" L"advapi32.dll"` read that way gives `L"sadvapi32.dll"`.
 ///
@@ -377,7 +377,10 @@ pub fn find_wide_spans(bytes: &[u8], min_len: usize) -> Vec<RawStringSpan> {
         end: usize,
         min_len: usize,
     ) {
-        let start = if first > 0 && printable(bytes[first - 1]) {
+        let start = if ascii_tail(
+            &bytes[first.saturating_sub(TAIL_SCAN_MAX)..first],
+            first.is_multiple_of(WIDE_ALIGN),
+        ) {
             first + 2
         } else {
             first
@@ -590,6 +593,49 @@ fn is_code_run(
     longest / unit < crate::num::from_usize(min_len)
 }
 
+/// The alignment, in bytes, a compiler gives a wide string literal at the
+/// least ([`ascii_tail`]).
+pub const WIDE_ALIGN: usize = 4;
+
+/// Shortest ASCII string, in bytes before its last character, whose tail
+/// an aligned UTF-16 run is taken to start on ([`ascii_tail`]).
+const TAIL_MIN: usize = 4;
+
+/// Most bytes before a UTF-16 run [`ascii_tail`] looks at.
+const TAIL_SCAN_MAX: usize = 256;
+
+/// Tells whether a UTF-16 run's first unit is the last character of an
+/// ASCII string and that string's terminator, and not text of its own.
+///
+/// The byte before the unit must be printable. Off [`WIDE_ALIGN`] that is
+/// enough, since no compiler places a wide literal there. On it, the bytes
+/// before must also be a string: at least [`TAIL_MIN`] printable bytes
+/// after a terminator. What sits before an aligned wide literal is often a
+/// short run or binary data instead: `L"Unknown Region"` follows the
+/// double 25.4 (`ffffff9@`) and notepad's registry key a GUID ending in
+/// `F`, and trimming listed both from their second character.
+///
+/// # Arguments
+///
+/// * `before` - The bytes before the unit, the nearest last; its start
+///   counts as a terminator.
+/// * `aligned` - Whether the unit's offset is a multiple of [`WIDE_ALIGN`].
+#[must_use]
+pub fn ascii_tail(before: &[u8], aligned: bool) -> bool {
+    if !before.last().is_some_and(|&b| printable(b)) {
+        return false;
+    }
+    if !aligned {
+        return true;
+    }
+    let run = before.iter().rev().take_while(|&&b| printable(b)).count();
+    run >= TAIL_MIN
+        && before
+            .len()
+            .checked_sub(run + 1)
+            .is_none_or(|k| before.get(k) == Some(&0))
+}
+
 /// Tells whether the two bytes at `i` form a printable UTF-16LE ASCII unit.
 ///
 /// # Arguments
@@ -602,11 +648,9 @@ fn wide_unit(bytes: &[u8], i: usize) -> bool {
 
 /// Tells whether a UTF-16LE run may begin at `va`.
 ///
-/// The address form of the rule [`find_wide_strings`] applies: a run whose
-/// preceding byte is printable ASCII starts on the last character of an
-/// adjacent ASCII string rather than on a string of its own. A genuine run
-/// follows a terminator or padding, so the test costs one byte and rejects
-/// only the overlap.
+/// The address form of the rule [`find_wide_strings`] applies: a run on an
+/// ASCII tail ([`ascii_tail`]) starts on the last character of an adjacent
+/// ASCII string rather than on a string of its own.
 ///
 /// # Arguments
 ///
@@ -615,12 +659,20 @@ fn wide_unit(bytes: &[u8], i: usize) -> bool {
 ///
 /// # Returns
 ///
-/// `true` when the preceding byte is unmapped or outside printable ASCII.
+/// `true` unless the bytes before `va` in its section end in an ASCII tail.
 pub fn wide_run_start(program: &Program, va: u64) -> bool {
-    va.checked_sub(1)
-        .and_then(|p| program.read_va_upto(p, 1))
-        .and_then(|b| b.first().copied())
-        .is_none_or(|b| !printable(b))
+    let floor = program
+        .section_at(va)
+        .map_or(va, |s| s.va.0)
+        .max(va.saturating_sub(crate::num::from_usize(TAIL_SCAN_MAX)));
+    let before = usize::try_from(va - floor)
+        .ok()
+        .and_then(|n| program.read_va_upto(floor, n))
+        .unwrap_or_default();
+    !ascii_tail(
+        before,
+        va.is_multiple_of(crate::num::from_usize(WIDE_ALIGN)),
+    )
 }
 
 /// Decodes `raw` as lossy UTF-8 and cuts it to [`DISPLAY_MAX`] characters.
