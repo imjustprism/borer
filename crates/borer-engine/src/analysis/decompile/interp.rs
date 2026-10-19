@@ -31,10 +31,8 @@ use crate::isa::x86::Register;
 use super::ctext::{
     Ast, Base, Bin, CTy, Tok, Un, closing, expression, float_bits, float_of, split_top, tokens,
 };
-use super::expr::{
-    Expr, Op, RoundToInt, TEB_FIELDS, Ty, UnOp, abs_bits, align_up_bits, cls_bits, extremum_bits,
-    fold, midpoint_bits, rbit_bits, rev16_bits, rev32_bits, rint_bits, sub_sat_bits, unary,
-};
+use super::expr::{Expr, Op, TEB_FIELDS, Ty, UnOp, abs_bits, fold, unary};
+use super::helper::{Helper, Operands, Yields, defines};
 use super::line::is_param_name;
 use super::signature::{Passing, Signature, passing, poke_word, printed};
 use super::traces::{INTRINSICS, Stmt, blank, statements};
@@ -1227,7 +1225,10 @@ impl<'p> Script<'p> {
         text: &str,
     ) -> Result<Self, String> {
         let word = u8::try_from(program.arch.bitness().unwrap_or(64)).unwrap_or(64);
-        let all: Vec<&str> = text.lines().collect();
+        let all: Vec<&str> = text
+            .lines()
+            .map(|l| if defines(l) { "//" } else { l })
+            .collect();
         let base = all
             .iter()
             .position(|l| l.trim().is_empty())
@@ -2147,10 +2148,6 @@ struct Running<'s, 'p> {
     /// see twice.
     call_memo: Option<(u64, Vec<u64>, u64, u64)>,
 }
-
-/// An operator the lifter takes a width for (`rotl32`, `mulhi64`), by the
-/// width.
-type OpOfWidth = fn(u8) -> Op;
 
 /// The result of evaluating one piece of the text.
 type Eval<T> = Result<T, End>;
@@ -3511,58 +3508,8 @@ impl Running<'_, '_> {
                 .copied()
                 .ok_or_else(|| End::Unchecked(format!("{name} without its arguments")))
         };
-        let widths: [(&str, u8); 4] = [("8", 8), ("16", 16), ("32", 32), ("64", 64)];
-        let ops: [(&str, OpOfWidth); 7] = [
-            ("rotl", Op::Rol),
-            ("rotr", Op::Ror),
-            ("mulhi", Op::MulHi),
-            ("smulhi", Op::SMulHi),
-            ("uaddo", Op::UAddO),
-            ("usubo", Op::USubO),
-            ("smulo", Op::SMulO),
-        ];
-        for (stem, make) in ops {
-            let Some(w) = name
-                .strip_prefix(stem)
-                .and_then(|w| widths.iter().find(|(s, _)| *s == w))
-                .map(|(_, w)| *w)
-            else {
-                continue;
-            };
-            let (a, b) = (arg(0)?, arg(1)?);
-            let ty = CTy::int(64, false);
-            let (a, b) = (self.convert(a, ty)?, self.convert(b, ty)?);
-            return match fold(make(w), Expr::Const(a.bits), Expr::Const(b.bits), w) {
-                Expr::Const(c) => Ok(self.int(c, CTy::int(w, false))),
-                _ => unchecked(format!("{name} the lifter does not fold")),
-            };
-        }
-        let un = match name {
-            "bswap" => Some(UnOp::Bswap),
-            "tzcnt" => Some(UnOp::Tzcnt),
-            "lzcnt" => Some(UnOp::Lzcnt),
-            "popcnt" => Some(UnOp::Popcnt),
-            "bsf" => Some(UnOp::Bsf),
-            "bsr" => Some(UnOp::Bsr),
-            _ => None,
-        };
-        if let Some(op) = un {
-            let a = arg(0)?;
-            let bits = a.ty.bits(word).unwrap_or(64);
-            return match unary(op, Expr::Const(a.bits), bits) {
-                Expr::Const(c) => Ok(self.int(c, a.ty)),
-                _ => unchecked(format!("{name} of zero, which leaves its result undefined")),
-            };
-        }
-        if let Some(round) = RoundToInt::parse(name) {
-            let a = arg(0)?;
-            let Ok(fb) = u8::try_from(arg(1)?.bits) else {
-                return unchecked(format!("{name} is not a value at this width"));
-            };
-            let Some(v) = round.apply(a.bits, fb) else {
-                return unchecked(format!("{name} is not a value at this width"));
-            };
-            return Ok(self.int(v, CTy::int(word, false)));
+        if let Some(h) = Helper::parse(name) {
+            return self.helper(h, name, &vals);
         }
         match name {
             "NtCurrentTeb" if vals.is_empty() => Ok(self.int(self.s.teb, CTy::of(Base::Void).to())),
@@ -3621,7 +3568,7 @@ impl Running<'_, '_> {
                 }
                 Ok(self.int(n, CTy::int(word, false)))
             }
-            "abs" | "llabs" => {
+            "abs" => {
                 let ty = CTy::int(word, true);
                 let a = self.convert(arg(0)?, ty)?;
                 let Some(bits) = abs_bits(a.bits, word) else {
@@ -3629,83 +3576,74 @@ impl Running<'_, '_> {
                 };
                 Ok(self.int(bits, ty))
             }
-            "midpoint" => {
-                let ty = CTy::int(word, false);
-                let (a, b) = (self.convert(arg(0)?, ty)?, self.convert(arg(1)?, ty)?);
-                let Some(bits) = midpoint_bits(a.bits, b.bits, word) else {
-                    return unchecked(format!("{name} is not a value at this width"));
-                };
-                Ok(self.int(bits, ty))
-            }
-            "align_up" => {
-                let ty = CTy::int(word, false);
-                let (a, b) = (self.convert(arg(0)?, ty)?, self.convert(arg(1)?, ty)?);
-                let Some(bits) = align_up_bits(a.bits, b.bits, word) else {
-                    return unchecked(format!("{name} is not a value at this width"));
-                };
-                Ok(self.int(bits, ty))
-            }
-            "cls" => {
-                let a = arg(0)?;
-                let bits = a.ty.bits(word).unwrap_or(word);
-                let Some(v) = cls_bits(a.bits, bits) else {
-                    return unchecked(format!("{name} is not a value at this width"));
-                };
-                Ok(self.int(v, CTy::int(word, false)))
-            }
-            "rbit" | "rev16" | "rev32" => {
-                let a = arg(0)?;
-                let bits = a.ty.bits(word).unwrap_or(word);
-                let Some(v) = (match name {
-                    "rbit" => rbit_bits(a.bits, bits),
-                    "rev16" => rev16_bits(a.bits, bits),
-                    _ => rev32_bits(a.bits, bits),
-                }) else {
-                    return unchecked(format!("{name} is not a value at this width"));
-                };
-                Ok(self.int(v, CTy::int(word, false)))
-            }
-            "sub_sat" => {
-                let ty = CTy::int(word, false);
-                let (a, b) = (self.convert(arg(0)?, ty)?, self.convert(arg(1)?, ty)?);
-                let Some(bits) = sub_sat_bits(a.bits, b.bits, word) else {
-                    return unchecked(format!("{name} is not a value at this width"));
-                };
-                Ok(self.int(bits, ty))
-            }
-            "min" | "max" | "umin" | "umax" => {
-                let signed = matches!(name, "min" | "max");
-                let ty = CTy::int(word, signed);
-                let (a, b) = (self.convert(arg(0)?, ty)?, self.convert(arg(1)?, ty)?);
-                let Some(bits) = extremum_bits(name, a.bits, b.bits, word) else {
-                    return unchecked(format!("{name} is not a value at this width"));
-                };
-                Ok(self.int(bits, ty))
-            }
-            "sqrt" | "fabs" => {
-                let a = arg(0)?;
-                let fb =
-                    a.ty.float()
-                        .ok_or_else(|| End::Unchecked(format!("{name} of an integer")))?;
-                let f = float_of(a.bits, fb);
-                let v = if name == "sqrt" { f.sqrt() } else { f.abs() };
-                Ok(Val {
-                    bits: float_bits(v, fb),
-                    ty: a.ty,
-                })
-            }
-            "rint" => {
-                let a = arg(0)?;
-                let fb =
-                    a.ty.float()
-                        .ok_or_else(|| End::Unchecked(format!("{name} of an integer")))?;
-                let bits = rint_bits(a.bits, fb).ok_or_else(|| {
-                    End::Unchecked(format!("{name} is not a value at this width"))
-                })?;
-                Ok(Val { bits, ty: a.ty })
-            }
             _ => unchecked(format!("{name} is not modeled")),
         }
+    }
+
+    /// Evaluates a helper call with its arguments' values.
+    ///
+    /// The arguments convert as [`Helper::operands`] says and the result
+    /// has the type [`Helper::yields`] gives it, the types the helper's C
+    /// definition has.
+    ///
+    /// # Arguments
+    ///
+    /// * `h` - The helper.
+    /// * `name` - Its name as the text spells it, for the reason a run
+    ///   stops.
+    /// * `vals` - The arguments' values.
+    ///
+    /// # Errors
+    ///
+    /// Unchecked for a helper without a value here: a bit scan of zero, a
+    /// width the helper does not have, a float helper of an integer, or one
+    /// that reads machine state.
+    fn helper(&mut self, h: Helper, name: &str, vals: &[Val]) -> Eval<Val> {
+        let word = self.word();
+        let first = vals.first().copied();
+        let no_value = || End::Unchecked(format!("{name} is not a value at this width"));
+        if let Helper::RoundToInt(round) = h {
+            let (a, fb) = (
+                first.ok_or_else(no_value)?,
+                vals.get(1).ok_or_else(no_value)?,
+            );
+            let fb = u8::try_from(fb.bits).map_err(|_| no_value())?;
+            let v = round.apply(a.bits, fb).ok_or_else(no_value)?;
+            return Ok(self.int(v, CTy::int(word, false)));
+        }
+        let (bits, args) = match h.operands() {
+            Operands::Raw => (
+                first.map_or(word, |a| a.ty.bits(word).unwrap_or(64)),
+                vals.iter().map(|v| v.bits).collect(),
+            ),
+            Operands::Float => {
+                let a = first.ok_or_else(no_value)?;
+                let fb =
+                    a.ty.float()
+                        .ok_or_else(|| End::Unchecked(format!("{name} of an integer")))?;
+                (fb, vec![a.bits])
+            }
+            Operands::Word { signed } => (
+                word,
+                vals.iter()
+                    .map(|v| self.convert(*v, CTy::int(word, signed)).map(|v| v.bits))
+                    .collect::<Eval<Vec<u64>>>()?,
+            ),
+            Operands::Wide => (
+                word,
+                vals.iter()
+                    .map(|v| self.convert(*v, CTy::int(64, false)).map(|v| v.bits))
+                    .collect::<Eval<Vec<u64>>>()?,
+            ),
+        };
+        let v = h.eval(&args, bits, word).ok_or_else(no_value)?;
+        Ok(match (h.yields(), first) {
+            (Yields::Arg, Some(a)) if a.ty.float().is_some() => Val { bits: v, ty: a.ty },
+            (Yields::Arg, Some(a)) => self.int(v, a.ty),
+            (Yields::Arg, None) => return Err(no_value()),
+            (Yields::Unsigned(w), _) => self.int(v, CTy::int(w, false)),
+            (Yields::Word { signed }, _) => self.int(v, CTy::int(word, signed)),
+        })
     }
 
     /// A length a builtin is handed, bounded.
@@ -3816,6 +3754,30 @@ return *(uint64_t*)&local_30;
             .run(&[0x5000, 0x80], &[(0x5000, vec![0; 8])], 100)
             .unwrap();
         assert_eq!(r.end, End::Returned(Some(0x0000_0080_0000_000b)));
+    }
+
+    /// A helper the text writes only in a condition runs.
+    ///
+    /// The overflow tests and the parity flag are helpers of the closed
+    /// vocabulary, which the reader evaluates instead of leaving the run
+    /// unchecked.
+    ///
+    /// # Panics
+    ///
+    /// When the run stops unchecked or returns another value.
+    #[test]
+    fn a_condition_helper_runs() {
+        let p = Program::raw_x64(&[0xc3; 0x10]);
+        let a = Analysis::compute(&p);
+        let source = "// signature: uint64_t f(uint64_t a1, uint64_t a2)
+
+return saddo16(a1, a2) + parity8(a1) + uaddo64(a1, a2);
+";
+        let s = Script::read(&p, &a, &Overlay::default(), 0x1000, source).unwrap();
+        let r = s.run(&[0x7fff, 1], &[], 100).unwrap();
+        assert_eq!(r.end, End::Returned(Some(2)));
+        let r = s.run(&[u64::MAX, 1], &[], 100).unwrap();
+        assert_eq!(r.end, End::Returned(Some(2)));
     }
 
     /// On a 32-bit target an address wraps at 32 bits, as the machine's do:

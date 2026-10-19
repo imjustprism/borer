@@ -7,9 +7,10 @@
 //! expressions into the text [`super::emit`] prints.
 
 use super::expr::{
-    ATOM, Cc, Cond, Expr, Flags, Key, LOGICAL, Op, RoundToInt, Ty, UNARY, UnOp, fold, indexed,
-    low_bits_read, mask_bits, opaque_note, sext, signed_ty, tls_slot,
+    ATOM, Cc, Cond, Expr, Flags, Key, LOGICAL, Op, Ty, UNARY, UnOp, fold, indexed, low_bits_read,
+    mask_bits, opaque_note, sext, signed_ty, tls_slot,
 };
+use super::helper::Helper;
 use crate::analysis::Overlay;
 use crate::isa::a64;
 use crate::isa::x86::{ConditionCode, Register};
@@ -825,7 +826,14 @@ impl Expr {
                 if let Some(v) = super::vector::render(f, args, n) {
                     return v;
                 }
-                let width = RoundToInt::parse(f).is_some();
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|a| a.render_prec(n, true, false).0)
+                    .collect();
+                (format!("{f}({})", args.join(", ")), ATOM)
+            }
+            Expr::Helper(h, args) => {
+                let width = matches!(h, Helper::RoundToInt(_));
                 let args: Vec<String> = args
                     .iter()
                     .enumerate()
@@ -834,7 +842,7 @@ impl Expr {
                         _ => a.render_prec(n, true, false).0,
                     })
                     .collect();
-                (format!("{f}({})", args.join(", ")), ATOM)
+                (format!("{h}({})", args.join(", ")), ATOM)
             }
             Expr::Cast(e, ty) => {
                 let (es, ep) = match &**e {
@@ -869,31 +877,11 @@ impl Expr {
                         other => Expr::Cast(Box::new(low_bits_read(other.clone(), 16)), Ty::U16)
                             .render(n),
                     };
-                    return (format!("bswap({half})"), ATOM);
+                    return (format!("{}({half})", Helper::Bswap), ATOM);
                 }
-                if let Op::Rol(w)
-                | Op::Ror(w)
-                | Op::MulHi(w)
-                | Op::SMulHi(w)
-                | Op::SMulO(w)
-                | Op::UAddO(w)
-                | Op::USubO(w) = op
-                {
-                    let name = match op {
-                        Op::Rol(_) => "rotl",
-                        Op::Ror(_) => "rotr",
-                        Op::MulHi(_) => "mulhi",
-                        Op::SMulHi(_) => "smulhi",
-                        Op::UAddO(_) => "uaddo",
-                        Op::USubO(_) => "usubo",
-                        _ => "smulo",
-                    };
+                if let Some(h) = op.helper() {
                     return (
-                        format!(
-                            "{name}{w}({}, {})",
-                            number(l, n, false).0,
-                            number(r, n, false).0
-                        ),
+                        format!("{h}({}, {})", number(l, n, false).0, number(r, n, false).0),
                         ATOM,
                     );
                 }
@@ -1041,7 +1029,7 @@ impl Expr {
                     _ => (format!("{ls} {} {rs}", op.sym()), p),
                 }
             }
-            Expr::Un(op, e) => match op.func_name() {
+            Expr::Un(op, e) => match op.helper() {
                 Some(f) if matches!(op, UnOp::Bswap) => {
                     let s = match e.as_ref() {
                         Expr::Cast(x, ty @ (Ty::U8 | Ty::U16 | Ty::U32)) => {
@@ -1290,14 +1278,16 @@ impl Cond {
                 Some(rel) => compare(n, l, r, rel, cc.signed(), *bits),
                 None => match cc.0 {
                     C::o => format!(
-                        "ssubo{bits}({}, {}) != 0",
+                        "{h}({}, {}) != 0",
                         number(l, n, false).0,
-                        number(r, n, false).0
+                        number(r, n, false).0,
+                        h = Helper::SSubO(*bits)
                     ),
                     C::no => format!(
-                        "ssubo{bits}({}, {}) == 0",
+                        "{h}({}, {}) == 0",
                         number(l, n, false).0,
-                        number(r, n, false).0
+                        number(r, n, false).0,
+                        h = Helper::SSubO(*bits)
                     ),
                     _ => undecided(n, self.cc, inverted, &[l, r]),
                 },
@@ -1314,36 +1304,42 @@ impl Cond {
                     C::le => sum_relation(n, l, r, *bits, "<="),
                     C::g => sum_relation(n, l, r, *bits, ">"),
                     C::b => format!(
-                        "uaddo{bits}({}, {}) != 0",
+                        "{h}({}, {}) != 0",
                         number(l, n, false).0,
-                        number(r, n, false).0
+                        number(r, n, false).0,
+                        h = Helper::UAddO(*bits)
                     ),
                     C::ae => format!(
-                        "uaddo{bits}({}, {}) == 0",
+                        "{h}({}, {}) == 0",
                         number(l, n, false).0,
-                        number(r, n, false).0
+                        number(r, n, false).0,
+                        h = Helper::UAddO(*bits)
                     ),
                     C::o => format!(
-                        "saddo{bits}({}, {}) != 0",
+                        "{h}({}, {}) != 0",
                         number(l, n, false).0,
-                        number(r, n, false).0
+                        number(r, n, false).0,
+                        h = Helper::SAddO(*bits)
                     ),
                     C::no => format!(
-                        "saddo{bits}({}, {}) == 0",
+                        "{h}({}, {}) == 0",
                         number(l, n, false).0,
-                        number(r, n, false).0
+                        number(r, n, false).0,
+                        h = Helper::SAddO(*bits)
                     ),
                     C::be => format!(
-                        "(uaddo{bits}({}, {}) != 0 || {} == 0)",
+                        "({h}({}, {}) != 0 || {} == 0)",
                         number(l, n, false).0,
                         number(r, n, false).0,
-                        paren_if_lower(&sum, n, 6)
+                        paren_if_lower(&sum, n, 6),
+                        h = Helper::UAddO(*bits)
                     ),
                     C::a => format!(
-                        "(uaddo{bits}({}, {}) == 0 && {} != 0)",
+                        "({h}({}, {}) == 0 && {} != 0)",
                         number(l, n, false).0,
                         number(r, n, false).0,
-                        paren_if_lower(&sum, n, 6)
+                        paren_if_lower(&sum, n, 6),
+                        h = Helper::UAddO(*bits)
                     ),
                     C::p | C::np => parity(n, cc, &sum),
                     C::None => undecided(n, self.cc, inverted, &[l, r]),
@@ -1486,7 +1482,7 @@ fn undecided(n: &Names<'_>, cc: Cc, inverted: bool, operands: &[&Expr]) -> Strin
 /// * `e` - The value the flags were set from.
 fn parity(n: &Names<'_>, cc: Cc, e: &Expr) -> String {
     let not = if cc.0 == ConditionCode::np { "!" } else { "" };
-    format!("{not}parity8({})", e.render(n))
+    format!("{not}{}({})", Helper::Parity8, e.render(n))
 }
 
 /// Renders `e`, parenthesized when its precedence is below `prec`.
@@ -2057,11 +2053,12 @@ fn sum_relation(n: &Names<'_>, l: &Expr, r: &Expr, bits: u8, rel: &str) -> Strin
     let ty = signed_ty(bits);
     let sum = fold(Op::Add, l.clone(), r.clone(), bits);
     format!(
-        "(saddo{bits}({}, {}) ? ({ty}){} : ({ty}){}) {rel} 0",
+        "({h}({}, {}) ? ({ty}){} : ({ty}){}) {rel} 0",
         number(l, n, false).0,
         number(r, n, false).0,
         paren_if_lower(l, n, UNARY),
-        paren_if_lower(&sum, n, UNARY)
+        paren_if_lower(&sum, n, UNARY),
+        h = Helper::SAddO(bits)
     )
 }
 

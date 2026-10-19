@@ -61,10 +61,10 @@ use crate::isa::x86::{
 
 use super::arch::{self, Lifter};
 use super::expr::{
-    Cond, Expr, Flags, Key, Op, RoundToInt, TLS_BASE, Ty, UnOp, a64_code, abs_bits, align_up_bits,
-    cls_bits, either_width, extremum_bits, fcvt_float_width, fold, known_bits, midpoint_bits,
-    rbit_bits, rev16_bits, rev32_bits, rint_bits, sub_sat_bits, unary,
+    Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, a64_code, either_width, fcvt_float_width, fold,
+    known_bits, unary,
 };
+use super::helper::{Helper, eval_call};
 use super::lift::{
     ArgAt, Callee, Conv, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
 };
@@ -1186,7 +1186,7 @@ fn named_slots(effects: &[Vec<Effect>], word: u64) -> BTreeMap<i64, u64> {
                 stack.push(a);
                 stack.push(b);
             }
-            Expr::Call(_, args) => stack.extend(args.iter()),
+            Expr::Call(_, args) | Expr::Helper(_, args) => stack.extend(args.iter()),
             Expr::Const(_) | Expr::Var(_) | Expr::Str(_) | Expr::Sp(_) | Expr::FConst(..) => {}
         }
     }
@@ -1269,7 +1269,7 @@ fn overwritten_first(effects: &[Effect], off: i64) -> bool {
                     reads.push(a);
                     reads.push(b);
                 }
-                Expr::Call(_, args) => reads.extend(args.iter()),
+                Expr::Call(_, args) | Expr::Helper(_, args) => reads.extend(args.iter()),
                 Expr::Const(_) | Expr::Var(_) | Expr::Str(_) | Expr::Sp(_) | Expr::FConst(..) => {}
             }
         }
@@ -1948,7 +1948,7 @@ fn floating(e: &Expr) -> bool {
         | Expr::Deref(_, Ty::F32 | Ty::F64)
         | Expr::Cast(_, Ty::F32 | Ty::F64)
         | Expr::Un(UnOp::Sqrt | UnOp::Fabs, _) => true,
-        Expr::Call(name, _) if name == "rint" => true,
+        Expr::Helper(Helper::Rint, _) => true,
         Expr::Bin(op, l, r) => op.is_float() || floating(l) || floating(r),
         Expr::Var(Key::Reg(r)) => !r.is_gpr(),
         _ => false,
@@ -2391,9 +2391,7 @@ impl<M: Bench> Text<'_, M> {
             }
             Expr::Ternary(_, a, b) => either_width(self.float_bits(a), self.float_bits(b)),
             Expr::Un(_, inner) => self.float_bits(inner),
-            Expr::Call(name, args) if name == "rint" => {
-                args.first().and_then(|a| self.float_bits(a))
-            }
+            Expr::Helper(Helper::Rint, args) => args.first().and_then(|a| self.float_bits(a)),
             _ => None,
         }
     }
@@ -2470,8 +2468,8 @@ impl<M: Bench> Text<'_, M> {
             Expr::Const(v) | Expr::FConst(v, _) => Some(*v),
             Expr::Var(k) => self.var(*k),
             Expr::Str(_) => None,
-            Expr::Call(name, args) => {
-                if let Some(round) = RoundToInt::parse(name) {
+            Expr::Helper(h, args) => {
+                if let Helper::RoundToInt(round) = h {
                     let src = args.first()?;
                     let fb = fcvt_float_width(args.get(1), self.float_bits(src))?;
                     let v = self
@@ -2479,52 +2477,9 @@ impl<M: Bench> Text<'_, M> {
                         .or_else(|| float_scale_at(src, fb, |e| self.eval_at(e, d)));
                     return round.apply(v?, fb);
                 }
-                match name.as_str() {
-                    "min" | "max" | "umin" | "umax" => {
-                        let (a, b) = (args.first()?, args.get(1)?);
-                        extremum_bits(name, self.eval_at(a, d)?, self.eval_at(b, d)?, w)
-                    }
-                    "abs" | "llabs" => abs_bits(self.eval_at(args.first()?, d)?, w),
-                    "midpoint" => {
-                        let (a, b) = (args.first()?, args.get(1)?);
-                        midpoint_bits(self.eval_at(a, d)?, self.eval_at(b, d)?, w)
-                    }
-                    "align_up" => {
-                        let (a, b) = (args.first()?, args.get(1)?);
-                        align_up_bits(self.eval_at(a, d)?, self.eval_at(b, d)?, w)
-                    }
-                    "cls" => {
-                        let arg = args.first()?;
-                        let bits = match arg {
-                            Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(w),
-                            _ => w,
-                        };
-                        cls_bits(self.eval_at(arg, d)?, bits)
-                    }
-                    "rbit" | "rev16" | "rev32" => {
-                        let arg = args.first()?;
-                        let bits = match arg {
-                            Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(w),
-                            _ => w,
-                        };
-                        let v = self.eval_at(arg, d)?;
-                        match name.as_str() {
-                            "rbit" => rbit_bits(v, bits),
-                            "rev16" => rev16_bits(v, bits),
-                            _ => rev32_bits(v, bits),
-                        }
-                    }
-                    "sub_sat" => {
-                        let (a, b) = (args.first()?, args.get(1)?);
-                        sub_sat_bits(self.eval_at(a, d)?, self.eval_at(b, d)?, w)
-                    }
-                    "rint" => {
-                        let src = args.first()?;
-                        rint_bits(self.eval_at(src, d)?, self.float_bits(src)?)
-                    }
-                    _ => None,
-                }
+                eval_call(*h, args, w, |e| self.eval_at(e, d), |e| self.float_bits(e))
             }
+            Expr::Call(..) => None,
             Expr::Sp(o) => Some(self.sp0.wrapping_add_signed(*o) & low(w)),
             Expr::Bin(op, l, r) if op.is_float() => {
                 let fb = self.float_bits(l)?.max(self.float_bits(r)?);
@@ -2667,6 +2622,7 @@ impl<M: Bench> Text<'_, M> {
             }
             Expr::Call(name, args) => self.packed_op(name, args, d),
             Expr::Str(_) | Expr::FConst(..) | Expr::Sp(_) | Expr::Sext(..) | Expr::Cast(..) => None,
+            Expr::Helper(..) => None,
             Expr::Bin(..) | Expr::Un(..) | Expr::Cond(..) | Expr::Ternary(..) => None,
             Expr::Deref(..) => None,
         }

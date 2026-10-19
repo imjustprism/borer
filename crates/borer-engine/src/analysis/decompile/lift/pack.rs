@@ -10,6 +10,7 @@
 use crate::isa::x86::{ConditionCode, Register};
 
 use super::super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, a64_code, a64_reg};
+use super::super::helper::Helper;
 use super::{ArgAt, Call, Callee, Effect, EffectKind, Routine, Shown};
 
 /// The routines a [`Callee::Builtin`] names, by packed code.
@@ -421,6 +422,14 @@ impl Writer<'_> {
                 self.byte(ty_code(*ty));
                 self.num(*bits);
             }
+            Expr::Helper(h, args) => {
+                self.byte(13);
+                self.text(&h.to_string());
+                self.num(crate::num::from_usize(args.len()));
+                for a in args {
+                    self.expr(a);
+                }
+            }
         }
     }
 
@@ -733,6 +742,12 @@ impl Reader<'_> {
                 let ty = self.ty()?;
                 Expr::FConst(self.num()?, ty)
             }
+            13 => {
+                let h = Helper::parse(&self.text()?)?;
+                let n = self.len()?;
+                let args = (0..n).map(|_| self.expr()).collect::<Option<Vec<_>>>()?;
+                Expr::Helper(h, args)
+            }
             _ => return None,
         })
     }
@@ -869,6 +884,7 @@ mod tests {
         Packed, ROUTINES, SHOWNS, TYS, UNOPS, op_code, op_of, pack, shown_code, ty_code, unop_code,
     };
     use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp};
+    use crate::analysis::decompile::helper::Helper;
     use crate::analysis::decompile::lift::{
         ArgAt, Call, Callee, Effect, EffectKind, Routine, Shown,
     };
@@ -961,6 +977,10 @@ mod tests {
                         (
                             ArgAt::Operand,
                             Expr::Call("x".to_owned(), vec![Expr::Var(Key::Tmp(3))]),
+                        ),
+                        (
+                            ArgAt::Operand,
+                            Expr::Helper(Helper::UAddO(16), vec![Expr::Const(1), Expr::Const(2)]),
                         ),
                     ],
                     result: Some(Key::Reg(Register::RAX)),

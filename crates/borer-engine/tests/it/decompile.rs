@@ -1143,6 +1143,46 @@ fn a_full_width_negation_select_is_abs() {
     }
 }
 
+/// A helper call comes with its C definition at the top of the text, once.
+///
+/// The text then compiles as printed: `umin` is a `static inline` function
+/// of the machine word, and `min` first drops the `min` macro a C library
+/// may define.
+///
+/// # Panics
+///
+/// When a definition is missing, doubled, or below the code that calls it.
+#[test]
+fn a_helper_call_comes_with_its_definition() {
+    let cases: &[(&[u8], &str, &str)] = &[
+        (
+            &[
+                0x48, 0x89, 0xc8, 0x48, 0x39, 0xd1, 0x48, 0x0f, 0x47, 0xc2, 0xc3,
+            ],
+            "static inline uint64_t umin(uint64_t a, uint64_t b) { return a <= b ? a : b; }",
+            "return umin(a1, a2);",
+        ),
+        (
+            &[
+                0x48, 0x89, 0xc8, 0x48, 0x39, 0xd1, 0x48, 0x0f, 0x4f, 0xc2, 0xc3,
+            ],
+            "static inline int64_t min(int64_t a, int64_t b) { return a <= b ? a : b; }",
+            "return min(a1, a2);",
+        ),
+    ];
+    for (code, def, call) in cases {
+        let text = decompiled(&program64(code), 0x1_4000_1000);
+        assert_eq!(text.matches(def).count(), 1, "{text}");
+        let (at_def, at_call) = (text.find(def), text.find(call));
+        assert!(at_def.is_some() && at_def < at_call, "{text}");
+    }
+    let text = decompiled(&program64(cases[1].0), 0x1_4000_1000);
+    assert!(
+        text.contains("#undef min\nstatic inline int64_t min("),
+        "{text}"
+    );
+}
+
 /// A full-width compare that keeps one of its own operands is `min` or
 /// `max`.
 ///

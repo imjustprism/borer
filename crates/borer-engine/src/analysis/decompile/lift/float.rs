@@ -137,7 +137,7 @@ impl<'a> Exec<'_, 'a> {
             M::Fld if extended => {
                 let addr = self.addr(instr, 0);
                 self.settle_frame_region(&addr, Some(&Expr::Const(EXTENDED_BYTES)), false, false);
-                self.push_st(Expr::Call("x87_load80".to_owned(), vec![addr]));
+                self.push_st(Expr::Helper(Helper::X87Load80, vec![addr]));
                 let st0 = Key::Reg(st_register(0));
                 self.materialize(st0, &mut Vec::new(), None);
             }
@@ -196,7 +196,7 @@ impl<'a> Exec<'_, 'a> {
                 let v = if mn == M::Fisttp {
                     Expr::Cast(Box::new(st), ty)
                 } else {
-                    Expr::Cast(Box::new(Expr::Call("rint".to_owned(), vec![st])), ty)
+                    Expr::Cast(Box::new(Expr::Helper(Helper::Rint, vec![st])), ty)
                 };
                 if mn != M::Fist {
                     self.pop_st();
@@ -271,7 +271,7 @@ impl<'a> Exec<'_, 'a> {
                 self.set_st(0, v);
             }
             M::Fabs => {
-                let v = Expr::Call("fabs".to_owned(), vec![self.st(0)]);
+                let v = Expr::Helper(Helper::Fabs, vec![self.st(0)]);
                 self.set_st(0, v);
             }
             M::Fsqrt => {
@@ -279,19 +279,19 @@ impl<'a> Exec<'_, 'a> {
                 self.set_st(0, v);
             }
             M::Frndint => {
-                let v = Expr::Call("rint".to_owned(), vec![self.st(0)]);
+                let v = Expr::Helper(Helper::Rint, vec![self.st(0)]);
                 self.set_st(0, v);
             }
             M::Fsincos | M::Fptan => {
                 let x = self.st(0);
                 let (below, top) = if mn == M::Fsincos {
                     (
-                        Expr::Call("sin".to_owned(), vec![x.clone()]),
-                        Expr::Call("cos".to_owned(), vec![x]),
+                        Expr::Helper(Helper::Sin, vec![x.clone()]),
+                        Expr::Helper(Helper::Cos, vec![x]),
                     )
                 } else {
                     (
-                        Expr::Call("tan".to_owned(), vec![x]),
+                        Expr::Helper(Helper::Tan, vec![x]),
                         Expr::FConst(1.0f64.to_bits(), Ty::F64),
                     )
                 };

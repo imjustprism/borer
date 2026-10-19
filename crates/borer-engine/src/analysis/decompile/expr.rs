@@ -9,6 +9,7 @@
 use crate::isa::a64;
 use crate::isa::x86::{ConditionCode, Register};
 
+use super::helper::Helper;
 use super::opaque::Evidence;
 use crate::num::{lo16, lo32};
 
@@ -293,6 +294,43 @@ impl Op {
         }
     }
 
+    /// Returns the helper a function-style operator prints as.
+    ///
+    /// # Returns
+    ///
+    /// The helper, or `None` for an operator C spells (`+`) and for
+    /// [`Op::FMin`] and [`Op::FMax`], which print as a select.
+    pub(super) fn helper(self) -> Option<Helper> {
+        match self {
+            Op::Rol(w) => Some(Helper::Rotl(w)),
+            Op::Ror(w) => Some(Helper::Rotr(w)),
+            Op::MulHi(w) => Some(Helper::MulHi(w)),
+            Op::SMulHi(w) => Some(Helper::SMulHi(w)),
+            Op::SMulO(w) => Some(Helper::SMulO(w)),
+            Op::UAddO(w) => Some(Helper::UAddO(w)),
+            Op::USubO(w) => Some(Helper::USubO(w)),
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Rem
+            | Op::SDiv
+            | Op::SRem
+            | Op::And
+            | Op::Or
+            | Op::Xor
+            | Op::Shl
+            | Op::Shr
+            | Op::Sar
+            | Op::FAdd
+            | Op::FSub
+            | Op::FMul
+            | Op::FDiv
+            | Op::FMin
+            | Op::FMax => None,
+        }
+    }
+
     /// Tells whether `a op b == b op a` (the public form of [`Op::commutative`]).
     pub(super) fn is_commutative(self) -> bool {
         self.commutative()
@@ -359,18 +397,19 @@ pub(super) enum UnOp {
 }
 
 impl UnOp {
-    /// Returns the function-style spelling, or `None` for the prefix operators.
-    pub(super) fn func_name(self) -> Option<&'static str> {
+    /// Returns the helper the operator prints as, or `None` for the prefix
+    /// operators.
+    pub(super) fn helper(self) -> Option<Helper> {
         match self {
             UnOp::Neg | UnOp::Not => None,
-            UnOp::Bswap => Some("bswap"),
-            UnOp::Tzcnt => Some("tzcnt"),
-            UnOp::Lzcnt => Some("lzcnt"),
-            UnOp::Popcnt => Some("popcnt"),
-            UnOp::Sqrt => Some("sqrt"),
-            UnOp::Fabs => Some("fabs"),
-            UnOp::Bsf => Some("bsf"),
-            UnOp::Bsr => Some("bsr"),
+            UnOp::Bswap => Some(Helper::Bswap),
+            UnOp::Tzcnt => Some(Helper::Tzcnt),
+            UnOp::Lzcnt => Some(Helper::Lzcnt),
+            UnOp::Popcnt => Some(Helper::Popcnt),
+            UnOp::Sqrt => Some(Helper::Sqrt),
+            UnOp::Fabs => Some(Helper::Fabs),
+            UnOp::Bsf => Some(Helper::Bsf),
+            UnOp::Bsr => Some(Helper::Bsr),
         }
     }
 }
@@ -564,9 +603,13 @@ pub(super) enum Expr {
     Sext(Box<Expr>, u8),
     /// Convert to another type (`(float)x`, `(int32_t)x`).
     Cast(Box<Expr>, Ty),
-    /// An intrinsic or library call the C vocabulary has no operator for;
-    /// constant arguments render in hex (shuffle and blend masks).
+    /// A packed vector operation by the instruction's name, which
+    /// [`super::vector`] spells as C; constant arguments render in hex
+    /// (shuffle and blend masks).
     Call(String, Vec<Expr>),
+    /// A helper call: an operation C has no operator for, from the closed
+    /// vocabulary of [`Helper`].
+    Helper(Helper, Vec<Expr>),
     /// An IEEE-754 constant: its bit pattern and type.
     FConst(u64, Ty),
 }
@@ -653,7 +696,9 @@ impl Expr {
             Expr::Un(_, e) | Expr::Deref(e, _) | Expr::Sext(e, _) | Expr::Cast(e, _) => {
                 1 + e.size()
             }
-            Expr::Call(_, args) => 1 + args.iter().map(Expr::size).sum::<usize>(),
+            Expr::Call(_, args) | Expr::Helper(_, args) => {
+                1 + args.iter().map(Expr::size).sum::<usize>()
+            }
             Expr::Cond(c) => 1 + c.size(),
             Expr::Ternary(c, a, b) => 1 + c.size() + a.size() + b.size(),
         }
@@ -692,7 +737,9 @@ impl Expr {
             Expr::Const(_) | Expr::Str(_) | Expr::Sp(_) | Expr::Var(_) | Expr::FConst(..) => None,
             Expr::Bin(_, l, r) => min_opt(l.frame_read_base(), r.frame_read_base()),
             Expr::Un(_, e) | Expr::Sext(e, _) | Expr::Cast(e, _) => e.frame_read_base(),
-            Expr::Call(_, args) => args.iter().filter_map(Expr::frame_read_base).min(),
+            Expr::Call(_, args) | Expr::Helper(_, args) => {
+                args.iter().filter_map(Expr::frame_read_base).min()
+            }
             Expr::Cond(c) => c.frame_read_base(),
             Expr::Ternary(c, a, b) => min_opt(
                 c.frame_read_base(),
@@ -716,6 +763,7 @@ impl Expr {
             | Expr::FConst(..)
             | Expr::Deref(..)
             | Expr::Call(..)
+            | Expr::Helper(..)
             | Expr::Cond(_) => None,
         }
     }
@@ -739,7 +787,7 @@ impl Expr {
             Expr::Un(_, e) | Expr::Deref(e, _) | Expr::Sext(e, _) | Expr::Cast(e, _) => {
                 e.any_var(pred)
             }
-            Expr::Call(_, args) => args.iter().any(|a| a.any_var(pred)),
+            Expr::Call(_, args) | Expr::Helper(_, args) => args.iter().any(|a| a.any_var(pred)),
             Expr::Cond(c) => c.any_var(pred),
             Expr::Ternary(c, a, b) => c.any_var(pred) || a.any_var(pred) || b.any_var(pred),
         }
@@ -759,7 +807,7 @@ impl Expr {
             Expr::Un(_, e) | Expr::Deref(e, _) | Expr::Sext(e, _) | Expr::Cast(e, _) => {
                 e.partial_idiom()
             }
-            Expr::Call(_, args) => args.iter().any(Expr::partial_idiom),
+            Expr::Call(_, args) | Expr::Helper(_, args) => args.iter().any(Expr::partial_idiom),
             Expr::Cond(_) => false,
             Expr::Ternary(_, a, b) => a.partial_idiom() || b.partial_idiom(),
         }
@@ -776,7 +824,7 @@ impl Expr {
             Expr::Const(_) | Expr::Str(_) | Expr::Sp(_) | Expr::Var(_) | Expr::FConst(..) => false,
             Expr::Bin(_, l, r) => l.mem_dependent() || r.mem_dependent(),
             Expr::Un(_, e) | Expr::Sext(e, _) | Expr::Cast(e, _) => e.mem_dependent(),
-            Expr::Call(_, args) => args.iter().any(Expr::mem_dependent),
+            Expr::Call(_, args) | Expr::Helper(_, args) => args.iter().any(Expr::mem_dependent),
             Expr::Cond(c) => c.mem_dependent(),
             Expr::Ternary(c, a, b) => c.mem_dependent() || a.mem_dependent() || b.mem_dependent(),
         }
@@ -789,7 +837,9 @@ impl Expr {
             Expr::Const(_) | Expr::Str(_) | Expr::Var(_) | Expr::FConst(..) => None,
             Expr::Bin(_, l, r) => min_opt(l.min_sp(), r.min_sp()),
             Expr::Un(_, e) | Expr::Deref(e, _) | Expr::Sext(e, _) | Expr::Cast(e, _) => e.min_sp(),
-            Expr::Call(_, args) => args.iter().filter_map(Expr::min_sp).min(),
+            Expr::Call(_, args) | Expr::Helper(_, args) => {
+                args.iter().filter_map(Expr::min_sp).min()
+            }
             Expr::Cond(c) => c.min_sp(),
             Expr::Ternary(c, a, b) => min_opt(c.min_sp(), min_opt(a.min_sp(), b.min_sp())),
         }
@@ -820,6 +870,9 @@ impl Expr {
             Expr::Cast(e, t) => Expr::Cast(Box::new(e.subst(from, to)), *t),
             Expr::Call(f, args) => {
                 Expr::Call(f.clone(), args.iter().map(|a| a.subst(from, to)).collect())
+            }
+            Expr::Helper(h, args) => {
+                Expr::Helper(*h, args.iter().map(|a| a.subst(from, to)).collect())
             }
             Expr::Cond(c) => Expr::Cond(Box::new(c.subst(from, to))),
             Expr::Ternary(c, a, b) => Expr::Ternary(
@@ -857,7 +910,8 @@ impl Expr {
             Expr::Var(Key::Reg(r)) => {
                 r.is_vector_register() || (*r >= Register::ST0 && *r <= Register::ST7)
             }
-            Expr::Call(f, _) => matches!(f.as_str(), "fabs" | "__lane_f32" | "__lane_f64"),
+            Expr::Call(f, _) => matches!(f.as_str(), "__lane_f32" | "__lane_f64"),
+            Expr::Helper(h, _) => *h == Helper::Fabs,
             Expr::Ternary(_, a, b) => a.is_float() || b.is_float(),
             Expr::Const(_)
             | Expr::Var(_)
@@ -1947,7 +2001,7 @@ fn sign_absolute(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
             _ => None,
         }
     }
-    let call = |x: &Expr| Expr::Call("llabs".to_owned(), vec![x.clone()]);
+    let call = |x: &Expr| Expr::Helper(Helper::Llabs, vec![x.clone()]);
     match op {
         Op::Sub => {
             let x = splat(r)?;
@@ -1982,7 +2036,7 @@ fn sign_absolute(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
 /// * `e` - The expression.
 fn invokes(e: &Expr) -> bool {
     match e {
-        Expr::Call(..) => true,
+        Expr::Call(..) | Expr::Helper(..) => true,
         Expr::Bin(_, a, b) | Expr::Ternary(_, a, b) => invokes(a) || invokes(b),
         Expr::Un(_, a) | Expr::Deref(a, _) | Expr::Sext(a, _) | Expr::Cast(a, _) => invokes(a),
         Expr::Cond(c) => match &c.flags {
@@ -2207,10 +2261,7 @@ fn midpoint_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         };
         let same = (p == x && q == y) || (p == y && q == x);
         if same && !invokes(x) && !invokes(y) {
-            return Some(Expr::Call(
-                "midpoint".to_owned(),
-                vec![x.clone(), y.clone()],
-            ));
+            return Some(Expr::Helper(Helper::Midpoint, vec![x.clone(), y.clone()]));
         }
     }
     None
@@ -2281,8 +2332,8 @@ fn align_up_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
     } else {
         return None;
     };
-    Some(Expr::Call(
-        "align_up".to_owned(),
+    Some(Expr::Helper(
+        Helper::AlignUp,
         vec![x.clone(), Expr::Const(align)],
     ))
 }
@@ -2488,6 +2539,7 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
             | Expr::Cond(_)
             | Expr::Ternary(..)
             | Expr::Call(..)
+            | Expr::Helper(..)
             | Expr::FConst(..) => false,
         };
         ok && out.len() <= 2
@@ -3022,6 +3074,7 @@ pub(super) fn table_index(e: &Expr) -> Option<Expr> {
         | Expr::Sp(_)
         | Expr::Cond(_)
         | Expr::Call(..)
+        | Expr::Helper(..)
         | Expr::FConst(..) => None,
         Expr::Ternary(_, a, b) => table_index(a).or_else(|| table_index(b)),
     }
@@ -3053,23 +3106,14 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
             Expr::Cast(_, ty) | Expr::Deref(_, ty) if ty.bits() < 64 => mask_bits(ty.bits()),
             _ => u64::MAX,
         },
-        Expr::Call(name, _) if name == "cls" => 0x3f,
-        Expr::Call(name, _)
-            if matches!(
-                RoundToInt::parse(name),
-                Some(RoundToInt::Signed(32) | RoundToInt::Unsigned(32))
-            ) =>
-        {
+        Expr::Helper(Helper::Cls, _) => 0x3f,
+        Expr::Helper(Helper::RoundToInt(RoundToInt::Signed(32) | RoundToInt::Unsigned(32)), _) => {
             0xffff_ffff
         }
-        Expr::Call(name, args) if name == "rbit" || name == "rev16" || name == "rev32" => {
-            match args.first() {
-                Some(Expr::Cast(_, ty) | Expr::Deref(_, ty)) if ty.bits() <= 64 => {
-                    mask_bits(ty.bits())
-                }
-                _ => u64::MAX,
-            }
-        }
+        Expr::Helper(Helper::Rbit | Helper::Rev16 | Helper::Rev32, args) => match args.first() {
+            Some(Expr::Cast(_, ty) | Expr::Deref(_, ty)) if ty.bits() <= 64 => mask_bits(ty.bits()),
+            _ => u64::MAX,
+        },
         Expr::Var(Key::Reg(r)) if r.size() == 4 => 0xffff_ffff,
         Expr::Var(Key::Global(_, bits)) => mask_bits(*bits),
         Expr::Var(_)
@@ -3080,6 +3124,7 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
         | Expr::Sext(..)
         | Expr::Cast(..)
         | Expr::Call(..)
+        | Expr::Helper(..)
         | Expr::FConst(..) => u64::MAX,
     }
 }
@@ -3107,21 +3152,23 @@ fn saturating(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
         C::ae | C::no => (b, a),
         _ => return None,
     };
-    let (name, l, r, bits) = match &cond.flags {
-        Flags::Carry(Expr::Bin(Op::MulHi(w), l, r)) => ("mul_sat", l.as_ref(), r.as_ref(), *w),
-        Flags::Add(l, r, w) if matches!(cond.cc.0, C::b | C::ae) => ("add_sat", l, r, *w),
+    let (helper, l, r, bits) = match &cond.flags {
+        Flags::Carry(Expr::Bin(Op::MulHi(w), l, r)) => {
+            (Helper::MulSat(*w), l.as_ref(), r.as_ref(), *w)
+        }
+        Flags::Add(l, r, w) if matches!(cond.cc.0, C::b | C::ae) => (Helper::AddSat(*w), l, r, *w),
         _ => return None,
     };
     if !matches!(taken, Expr::Const(c) if *c == mask_bits(bits)) {
         return None;
     }
     let (x, y) = match other {
-        Expr::Bin(Op::Mul, x, y) if name == "mul_sat" => (x.as_ref(), y.as_ref()),
-        Expr::Bin(Op::Add, x, y) if name == "add_sat" => (x.as_ref(), y.as_ref()),
+        Expr::Bin(Op::Mul, x, y) if matches!(helper, Helper::MulSat(_)) => (x.as_ref(), y.as_ref()),
+        Expr::Bin(Op::Add, x, y) if matches!(helper, Helper::AddSat(_)) => (x.as_ref(), y.as_ref()),
         _ => return None,
     };
     let same = (x == l && y == r) || (x == r && y == l);
-    same.then(|| Expr::Call(name.to_owned(), vec![l.clone(), r.clone()]))
+    same.then(|| Expr::Helper(helper, vec![l.clone(), r.clone()]))
 }
 
 /// The leading sign bits of `v` within `bits`, not counting the sign.
@@ -3236,7 +3283,7 @@ pub(super) fn rint_bits(v: u64, fb: u8) -> Option<u64> {
 }
 
 /// Which `fcvtz` call a name is: the signedness and the integer width.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum RoundToInt {
     /// Toward zero into a signed integer of this width.
     Signed(u8),
@@ -3448,37 +3495,7 @@ fn saturating_sub(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
     if !matches!(taken, Expr::Const(0)) || other != &diff {
         return None;
     }
-    Some(Expr::Call("sub_sat".to_owned(), vec![l.clone(), r.clone()]))
-}
-
-/// The value of `min`, `max`, `umin`, or `umax` at `bits`.
-///
-/// Signed names compare the sign-extended values. Unsigned names compare
-/// the masked values. Equal values return `a`, the left operand of the
-/// compare the call was folded from. Any other name, or a width of 0 or
-/// above 64, is `None`.
-///
-/// # Arguments
-///
-/// * `name` - `min`, `max`, `umin`, or `umax`.
-/// * `a` - The first operand.
-/// * `b` - The second operand.
-/// * `bits` - The width the compare ran at.
-pub(super) fn extremum_bits(name: &str, a: u64, b: u64, bits: u8) -> Option<u64> {
-    if bits == 0 || bits > 64 {
-        return None;
-    }
-    let mask = mask_bits(bits);
-    let (a, b) = (a & mask, b & mask);
-    let (sa, sb) = (sext(a, bits).cast_signed(), sext(b, bits).cast_signed());
-    let first = match name {
-        "min" => sa <= sb,
-        "max" => sa >= sb,
-        "umin" => a <= b,
-        "umax" => a >= b,
-        _ => return None,
-    };
-    Some(if first { a } else { b })
+    Some(Expr::Helper(Helper::SubSat, vec![l.clone(), r.clone()]))
 }
 
 /// A compare-select of its own operands, as `min` or `max`.
@@ -3522,13 +3539,13 @@ fn extremum(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
         return None;
     };
     let signed = matches!(cond.cc.0, C::l | C::le | C::g | C::ge);
-    let name = match (signed, pick_min) {
-        (true, true) => "min",
-        (true, false) => "max",
-        (false, true) => "umin",
-        (false, false) => "umax",
+    let helper = match (signed, pick_min) {
+        (true, true) => Helper::Min,
+        (true, false) => Helper::Max,
+        (false, true) => Helper::UMin,
+        (false, false) => Helper::UMax,
     };
-    Some(Expr::Call(name.to_owned(), vec![l.clone(), r.clone()]))
+    Some(Expr::Helper(helper, vec![l.clone(), r.clone()]))
 }
 
 /// The two's-complement absolute value of `v` at `bits`.
@@ -3593,7 +3610,7 @@ fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
         (true, C::g | C::ge | C::ns) | (false, C::l | C::le | C::s) => false,
         _ => return None,
     };
-    let call = Expr::Call("llabs".to_owned(), vec![src.clone()]);
+    let call = Expr::Helper(Helper::Llabs, vec![src.clone()]);
     if neg_on_true == neg_when_abs {
         Some(call)
     } else {
@@ -3720,6 +3737,7 @@ pub(super) fn mask(e: Expr, m: u64) -> Expr {
         | Expr::Sext(..)
         | Expr::Cast(..)
         | Expr::Call(..)
+        | Expr::Helper(..)
         | Expr::FConst(..) => Expr::Bin(Op::And, Box::new(e), Box::new(Expr::Const(m))),
     }
 }
@@ -5165,8 +5183,8 @@ mod fold_tests {
     use crate::isa::x86::{ConditionCode as C, Register};
 
     use super::{
-        Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, fold, lo64, mask, merge_bits, sign_extend,
-        ternary, unary, without_addend,
+        Cc, Cond, Expr, Flags, Helper, Key, Op, Ty, UnOp, fold, lo64, mask, merge_bits,
+        sign_extend, ternary, unary, without_addend,
     };
     use crate::num::{lo16, lo32};
 
@@ -5394,31 +5412,9 @@ mod fold_tests {
             Expr::Deref(a, ty) => v(a)?.wrapping_mul(0x9e37_79b9_7f4a_7c15) & lane(ty.bits()),
             Expr::Cond(c) => u64::from(truth(c, x, y)?),
             Expr::Ternary(c, a, b) => v(if truth(c, x, y)? { a } else { b })?,
-            Expr::Call(f, args) => {
-                let a = v(args.first()?)?;
-                if f == "abs" || f == "llabs" {
-                    return super::abs_bits(a, w);
-                }
-                let b = v(args.get(1)?)?;
-                if f == "midpoint" {
-                    return super::midpoint_bits(a, b, w);
-                }
-                if f == "align_up" {
-                    return super::align_up_bits(a, b, w);
-                }
-                if f == "sub_sat" {
-                    return super::sub_sat_bits(a, b, w);
-                }
-                if let Some(got) = super::extremum_bits(f, a, b, w) {
-                    return Some(got);
-                }
-                let (a, b) = (a & lane(w), b & lane(w));
-                let wide = match f.as_str() {
-                    "mul_sat" => u128::from(a) * u128::from(b),
-                    "add_sat" => u128::from(a) + u128::from(b),
-                    _ => return None,
-                };
-                lo64(wide.min(u128::from(lane(w))))
+            Expr::Helper(h, args) => {
+                let vals = args.iter().map(v).collect::<Option<Vec<u64>>>()?;
+                h.eval(&vals, w, w)?
             }
             _ => return None,
         })
@@ -6498,7 +6494,7 @@ mod fold_tests {
             if w >= 64 {
                 t.same("sub sat", &before, &after, w, xs, ys);
                 assert!(
-                    matches!(&after, Expr::Call(name, args) if name == "sub_sat" && args.len() == 2 && args[0] == X && args[1] == Y),
+                    matches!(&after, Expr::Helper(Helper::SubSat, args) if args.len() == 2 && args[0] == X && args[1] == Y),
                     "{cc:?} at {w}: {after:?}"
                 );
             } else {
@@ -6519,13 +6515,13 @@ mod fold_tests {
         );
         assert!(
             matches!(signed, Expr::Ternary(..))
-                && !matches!(swapped, Expr::Call(ref name, _) if name == "sub_sat")
-                && !matches!(other, Expr::Call(ref name, _) if name == "sub_sat"),
+                && !matches!(swapped, Expr::Helper(Helper::SubSat, _))
+                && !matches!(other, Expr::Helper(Helper::SubSat, _)),
             "width {w}: {signed:?} {swapped:?} {other:?}"
         );
         if w >= 64 {
             assert!(
-                matches!(calling, Expr::Call(ref name, ref args) if name == "sub_sat" && args.len() == 2 && args[0] == called && args[1] == Y),
+                matches!(calling, Expr::Helper(Helper::SubSat, ref args) if args.len() == 2 && args[0] == called && args[1] == Y),
                 "{calling:?}"
             );
         } else {
@@ -6546,7 +6542,7 @@ mod fold_tests {
                 if w >= 64 {
                     t.same("extremum", &before, &after, w, xs, ys);
                     assert!(
-                        matches!(&after, Expr::Call(_, args) if args.len() == 2 && args[0] == X && args[1] == Y),
+                        matches!(&after, Expr::Helper(_, args) if args.len() == 2 && args[0] == X && args[1] == Y),
                         "{cc:?} at {w}: {after:?}"
                     );
                 } else {
@@ -6560,7 +6556,7 @@ mod fold_tests {
         for cc in [C::e, C::ne] {
             let stayed = ternary(cond(cc, Flags::Cmp(X, Y, w)), X, Y);
             assert!(
-                !matches!(stayed, Expr::Call(..)),
+                !matches!(stayed, Expr::Helper(..)),
                 "{cc:?} at {w} became {stayed:?}"
             );
         }
@@ -6581,11 +6577,9 @@ mod fold_tests {
                     );
                     let after = ternary(test.clone(), a, z);
                     let is_abs = match &after {
-                        Expr::Call(name, args) => {
-                            name == "llabs" && args.len() == 1 && args[0] == X
-                        }
+                        Expr::Helper(Helper::Llabs, args) => args.len() == 1 && args[0] == X,
                         Expr::Un(UnOp::Neg, inner) => {
-                            matches!(inner.as_ref(), Expr::Call(name, args) if name == "llabs" && args.len() == 1 && args[0] == X)
+                            matches!(inner.as_ref(), Expr::Helper(Helper::Llabs, args) if args.len() == 1 && args[0] == X)
                         }
                         _ => false,
                     };
@@ -6604,7 +6598,7 @@ mod fold_tests {
         for cc in [C::e, C::ne, C::b, C::a] {
             let stayed = ternary(cond(cc, Flags::Cmp(X, k(0), w)), neg.clone(), X);
             assert!(
-                !matches!(stayed, Expr::Call(..) | Expr::Un(UnOp::Neg, _)),
+                !matches!(stayed, Expr::Helper(..) | Expr::Un(UnOp::Neg, _)),
                 "{cc:?} at {w} became {stayed:?}"
             );
         }
@@ -6614,7 +6608,7 @@ mod fold_tests {
             "a third value at {w} became {other:?}"
         );
         let sign = b(Op::Sar, &X, &k(63));
-        let is_sign_abs = |e: &Expr| matches!(e, Expr::Call(name, args) if name == "llabs" && args.len() == 1 && args[0] == X);
+        let is_sign_abs = |e: &Expr| matches!(e, Expr::Helper(Helper::Llabs, args) if args.len() == 1 && args[0] == X);
         for (before, after) in [
             (
                 b(Op::Sub, &b(Op::Xor, &X, &sign), &sign),
@@ -6640,7 +6634,7 @@ mod fold_tests {
         );
         let foreign = fold(Op::Sub, b(Op::Xor, &Y, &sign), sign, w);
         assert!(
-            !matches!(foreign, Expr::Call(ref name, _) if name == "llabs"),
+            !matches!(foreign, Expr::Helper(Helper::Llabs, _)),
             "a different value at {w} became {foreign:?}"
         );
         let width = u64::from(w);
@@ -6819,8 +6813,8 @@ mod fold_tests {
             w,
         );
         let is_mid = |e: &Expr| {
-            matches!(e, Expr::Call(name, args)
-                if name == "midpoint" && args.len() == 2 && args[0] == X && args[1] == Y)
+            matches!(e, Expr::Helper(Helper::Midpoint, args)
+                if args.len() == 2 && args[0] == X && args[1] == Y)
         };
         if w >= 64 {
             t.same("midpoint", &average, &averaged, w, xs, ys);
@@ -6841,14 +6835,13 @@ mod fold_tests {
             w,
         );
         assert!(
-            !is_mid(&signed_avg)
-                && !matches!(called_avg, Expr::Call(ref name, _) if name == "midpoint"),
+            !is_mid(&signed_avg) && !matches!(called_avg, Expr::Helper(Helper::Midpoint, _)),
             "width {w}: {signed_avg:?} {called_avg:?}"
         );
         let rounded = fold(Op::And, b(Op::Add, &X, &k(15)), k(!15u64), w);
         let is_align = |e: &Expr| {
-            matches!(e, Expr::Call(name, args)
-                if name == "align_up" && args.len() == 2 && args[0] == X && args[1] == k(16))
+            matches!(e, Expr::Helper(Helper::AlignUp, args)
+                if args.len() == 2 && args[0] == X && args[1] == k(16))
         };
         if w >= 64 {
             t.same(
@@ -6867,9 +6860,9 @@ mod fold_tests {
         let bumped = fold(Op::And, b(Op::Add, &X, &k(16)), k(!15u64), w);
         let pair = fold(Op::And, b(Op::Add, &X, &k(1)), k(!1u64), w);
         assert!(
-            !matches!(bare, Expr::Call(..))
-                && !matches!(bumped, Expr::Call(..))
-                && !matches!(pair, Expr::Call(..)),
+            !matches!(bare, Expr::Helper(..))
+                && !matches!(bumped, Expr::Helper(..))
+                && !matches!(pair, Expr::Helper(..)),
             "width {w}: {bare:?} {bumped:?} {pair:?}"
         );
         for cc in [C::e, C::ne] {

@@ -1144,7 +1144,7 @@ fn operand(e: &Expr, want: Vt, n: &Names<'_>) -> String {
             }
             None if matches!(
                 e,
-                Expr::Var(_) | Expr::Deref(..) | Expr::Call(..) | Expr::Cast(..)
+                Expr::Var(_) | Expr::Deref(..) | Expr::Call(..) | Expr::Helper(..) | Expr::Cast(..)
             ) =>
             {
                 format!("({word}){}", e.render(n))
@@ -1177,6 +1177,7 @@ fn float_elem(e: &Expr) -> Option<Elem> {
         | Expr::Str(_)
         | Expr::Sp(_)
         | Expr::Call(..)
+        | Expr::Helper(..)
         | Expr::Cast(..)
         | Expr::Sext(..)
         | Expr::Bin(..)

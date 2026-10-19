@@ -19,6 +19,7 @@
 //! bits instead.
 
 use super::super::expr::{Expr, Flags, Key, Op, RoundToInt, Ty, UnOp, fold, ternary, unary};
+use super::super::helper::Helper;
 use super::flags::{self, next_reader};
 use super::step::imm;
 use super::{Lift, low, vector, width8};
@@ -674,7 +675,7 @@ impl Lift<'_, '_> {
             .ok()
             .and_then(|bits| RoundToInt::new(signed, bits))?;
         let args = vec![x, Expr::Const(u64::from(from))];
-        self.write(dst, to, Expr::Call(round.name()?.to_owned(), args));
+        self.write(dst, to, Expr::Helper(Helper::RoundToInt(round), args));
         Some(())
     }
 

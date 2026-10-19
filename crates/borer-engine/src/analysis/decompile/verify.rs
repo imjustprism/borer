@@ -41,10 +41,10 @@ use crate::isa::x86::{
 };
 
 use super::expr::{
-    Cond, Expr, Flags, Key, Op, RoundToInt, TLS_BASE, Ty, UnOp, abs_bits, align_up_bits, cls_bits,
-    either_width, extremum_bits, fcvt_float_width, fold, midpoint_bits, rbit_bits, rev16_bits,
-    rev32_bits, rint_bits, sub_sat_bits, tls_slot, unary,
+    Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, either_width, fcvt_float_width, fold, tls_slot,
+    unary,
 };
+use super::helper::{Helper, eval_call};
 use super::lift::{BlockFacts, Env, Pass, exec_block};
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
@@ -750,75 +750,35 @@ pub(super) fn eval<M: Bench>(
             let (v, signed) = cast_integer(inner, |e| eval(e, st, reads, d))?;
             Some(integer_to_float(v, signed, *ty))
         }
-        Expr::Call(name, args) => {
-            if let Some(round) = RoundToInt::parse(name) {
+        Expr::Helper(h, args) => {
+            if let Helper::RoundToInt(round) = h {
                 let src = args.first()?;
                 let fb = fcvt_float_width(args.get(1), float_bits(src, st))?;
                 let v = eval(src, st, reads, d)
                     .or_else(|| float_scale_at(src, fb, |e| eval(e, st, reads, d)));
                 return round.apply(v?, fb);
             }
-            match name.as_str() {
-                "min" | "max" | "umin" | "umax" => {
-                    let (a, b) = (args.first()?, args.get(1)?);
-                    extremum_bits(
-                        name,
-                        eval(a, st, reads, d)?,
-                        eval(b, st, reads, d)?,
-                        st.width,
-                    )
-                }
-                "abs" | "llabs" => abs_bits(eval(args.first()?, st, reads, d)?, st.width),
-                "midpoint" => {
-                    let (a, b) = (args.first()?, args.get(1)?);
-                    midpoint_bits(eval(a, st, reads, d)?, eval(b, st, reads, d)?, st.width)
-                }
-                "align_up" => {
-                    let (a, b) = (args.first()?, args.get(1)?);
-                    align_up_bits(eval(a, st, reads, d)?, eval(b, st, reads, d)?, st.width)
-                }
-                "cls" => {
-                    let arg = args.first()?;
-                    let bits = match arg {
-                        Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(st.width),
-                        _ => st.width,
-                    };
-                    cls_bits(eval(arg, st, reads, d)?, bits)
-                }
-                "rbit" | "rev16" | "rev32" => {
-                    let arg = args.first()?;
-                    let bits = match arg {
-                        Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(st.width),
-                        _ => st.width,
-                    };
-                    let v = eval(arg, st, reads, d)?;
-                    match name.as_str() {
-                        "rbit" => rbit_bits(v, bits),
-                        "rev16" => rev16_bits(v, bits),
-                        _ => rev32_bits(v, bits),
-                    }
-                }
-                "sub_sat" => {
-                    let (a, b) = (args.first()?, args.get(1)?);
-                    sub_sat_bits(eval(a, st, reads, d)?, eval(b, st, reads, d)?, st.width)
-                }
-                "rint" => {
-                    let src = args.first()?;
-                    rint_bits(eval(src, st, reads, d)?, float_bits(src, st)?)
-                }
-                "__dup_16b" | "__dup_8h" | "__dup_4s" | "__dup_2d" => {
-                    let bits = match name.as_bytes().last()? {
-                        b'b' => 8,
-                        b'h' => 16,
-                        b's' => 32,
-                        _ => 64,
-                    };
-                    let one = eval(args.first()?, st, reads, d)? & low(bits);
-                    Some((0..64 / bits).fold(0, |v, k| v | one << (k * bits)))
-                }
-                _ => None,
-            }
+            eval_call(
+                *h,
+                args,
+                st.width,
+                |e| eval(e, st, reads, d),
+                |e| float_bits(e, st),
+            )
         }
+        Expr::Call(name, args) => match name.as_str() {
+            "__dup_16b" | "__dup_8h" | "__dup_4s" | "__dup_2d" => {
+                let bits = match name.as_bytes().last()? {
+                    b'b' => 8,
+                    b'h' => 16,
+                    b's' => 32,
+                    _ => 64,
+                };
+                let one = eval(args.first()?, st, reads, d)? & low(bits);
+                Some((0..64 / bits).fold(0, |v, k| v | one << (k * bits)))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -843,7 +803,7 @@ pub(super) fn float_bits<M: Bench>(e: &Expr, st: &State<'_, M>) -> Option<u8> {
         Expr::Bin(op, l, r) if op.is_float() => Some(float_bits(l, st)?.max(float_bits(r, st)?)),
         Expr::Ternary(_, a, b) => either_width(float_bits(a, st), float_bits(b, st)),
         Expr::Un(_, inner) => float_bits(inner, st),
-        Expr::Call(name, args) if name == "rint" => args.first().and_then(|a| float_bits(a, st)),
+        Expr::Helper(Helper::Rint, args) => args.first().and_then(|a| float_bits(a, st)),
         _ => None,
     }
 }
@@ -928,7 +888,8 @@ pub(super) fn float_carried(
         | Expr::Ternary(_, _, _)
         | Expr::Sext(_, _)
         | Expr::Cast(_, _)
-        | Expr::Call(_, _) => None,
+        | Expr::Call(_, _)
+        | Expr::Helper(_, _) => None,
     }
 }
 

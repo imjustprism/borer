@@ -48,6 +48,7 @@ use super::expr::{
     Cc, Cond, Expr, Flags, Key, Names, Op, Ty, UnOp, bare, either_width, fold, known_bits, mask,
     mask_bits, sign_extend, table_index, unary, without_addend,
 };
+use super::helper::Helper;
 use super::{Ctx, callee_shape, literal_at};
 use crate::analysis::name_of;
 use crate::analysis::returns::{RET_LANE_DEPTH, lane_before, last_rax_write};
@@ -1177,7 +1178,7 @@ fn float_lane(v: &Expr) -> Option<u8> {
         Expr::Bin(op, l, r) if op.is_float() => Some(float_lane(l)?.max(float_lane(r)?)),
         Expr::Un(UnOp::Sqrt | UnOp::Fabs | UnOp::Neg, inner) => float_lane(inner),
         Expr::Ternary(_, a, b) => either_width(float_lane(a), float_lane(b)),
-        Expr::Call(name, args) if name == "fabs" => args.first().and_then(float_lane),
+        Expr::Helper(Helper::Fabs, args) => args.first().and_then(float_lane),
         Expr::Call(name, _) if name == "__lane_f32" => Some(32),
         Expr::Call(name, _) if name == "__lane_f64" => Some(64),
         Expr::Const(_)
@@ -1188,7 +1189,8 @@ fn float_lane(v: &Expr) -> Option<u8> {
         | Expr::Un(..)
         | Expr::Cond(_)
         | Expr::Sext(..)
-        | Expr::Call(..) => None,
+        | Expr::Call(..)
+        | Expr::Helper(..) => None,
     }
 }
 
@@ -1221,7 +1223,8 @@ fn lane_zeros_above(v: &Expr) -> bool {
         | Expr::Ternary(..)
         | Expr::Sext(..)
         | Expr::Cast(..)
-        | Expr::Call(..) => false,
+        | Expr::Call(..)
+        | Expr::Helper(..) => false,
     }
 }
 
@@ -1679,7 +1682,8 @@ fn keeps_vector(v: &Expr) -> bool {
         | Expr::Cond(_)
         | Expr::Ternary(..)
         | Expr::Sext(..)
-        | Expr::Cast(..) => false,
+        | Expr::Cast(..)
+        | Expr::Helper(..) => false,
     }
 }
 

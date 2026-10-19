@@ -17,6 +17,7 @@ use super::super::expr::{
     Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, either_width, fold, mask, mask_bits, sign_extend,
     ternary, unary,
 };
+use super::super::helper::Helper;
 use super::super::lift::EffectKind;
 use super::{Lift, low, shifted};
 use crate::isa::a64::{self, Insn, Mode, Opnd, Reg, Rmw, Width};
@@ -225,7 +226,8 @@ fn lane_sign(v: &Expr) -> bool {
         | Expr::Ternary(_, _, _)
         | Expr::Sext(_, _)
         | Expr::Cast(_, _)
-        | Expr::Call(_, _) => false,
+        | Expr::Call(_, _)
+        | Expr::Helper(_, _) => false,
     }
 }
 
@@ -327,9 +329,7 @@ fn named_width(v: &Expr, ty_of: &dyn Fn(Key) -> Option<u8>) -> Option<u8> {
             either_width(named_width(l, ty_of), named_width(r, ty_of))
         }
         Expr::Un(UnOp::Sqrt | UnOp::Fabs | UnOp::Neg, inner) => named_width(inner, ty_of),
-        Expr::Call(name, args) if name == "fabs" => {
-            args.first().and_then(|a| named_width(a, ty_of))
-        }
+        Expr::Helper(Helper::Fabs, args) => args.first().and_then(|a| named_width(a, ty_of)),
         Expr::Const(_)
         | Expr::FConst(_, _)
         | Expr::Str(_)
@@ -340,7 +340,8 @@ fn named_width(v: &Expr, ty_of: &dyn Fn(Key) -> Option<u8>) -> Option<u8> {
         | Expr::Cond(_)
         | Expr::Sext(_, _)
         | Expr::Cast(_, _)
-        | Expr::Call(_, _) => None,
+        | Expr::Call(_, _)
+        | Expr::Helper(_, _) => None,
     }
 }
 
@@ -373,7 +374,7 @@ pub(super) fn float_width(v: &Expr) -> Option<u8> {
         Expr::Bin(op, l, r) if op.is_float() => Some(float_width(l)?.max(float_width(r)?)),
         Expr::Un(UnOp::Sqrt | UnOp::Fabs | UnOp::Neg, inner) => float_width(inner),
         Expr::Ternary(_, a, b) => either_width(float_width(a), float_width(b)),
-        Expr::Call(name, args) if name == "fabs" => args.first().and_then(float_width),
+        Expr::Helper(Helper::Fabs, args) => args.first().and_then(float_width),
         Expr::Const(_)
         | Expr::Var(_)
         | Expr::Str(_)
@@ -382,7 +383,8 @@ pub(super) fn float_width(v: &Expr) -> Option<u8> {
         | Expr::Un(..)
         | Expr::Cond(_)
         | Expr::Sext(..)
-        | Expr::Call(..) => None,
+        | Expr::Call(..)
+        | Expr::Helper(..) => None,
     }
 }
 

@@ -164,6 +164,9 @@ TYPES = re.compile(r"\b(?:u?int(?:8|16|32|64|ptr)_t|void|char|float|double|bool|
 IDENT = re.compile(r"[A-Za-z_]\w*")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"' r"|'(?:[^'\\]|\\.)*'")
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/")
+# The C definitions of the helpers a text calls, which follow its header:
+# no declaration of the function's own.
+HELPER_DEFINITION = ("static inline ", "#define ", "#undef ", "extern ")
 ASSIGN = re.compile(r"^((?:[A-Za-z_]\w*\s*=(?!=)\s*)+)(.*);$")
 COMPOUND = re.compile(r"^([A-Za-z_]\w*)\s*(?:[-+*/%&|^]|<<|>>)=\s*(.*);$")
 INCDEC = re.compile(r"^([A-Za-z_]\w*)\s*(?:\+\+|--);$")
@@ -208,6 +211,8 @@ class Function:
         i = 0
         while i < len(lines) and lines[i].startswith("//"):
             self.header.append(lines[i])
+            i += 1
+        while i < len(lines) and lines[i].startswith(HELPER_DEFINITION):
             i += 1
         while i < len(lines) and lines[i].strip():
             self.decls.append(lines[i])

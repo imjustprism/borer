@@ -15,6 +15,7 @@
 use super::super::expr::{
     Cc, Cond, Expr, Flags, Op, Ty, UnOp, fold, mask, sign_extend, ternary, unary,
 };
+use super::super::helper::Helper;
 use super::flags::{self, holds, next_reader};
 use super::float::{packed_name, vreg};
 use super::{Lift, low, low64, vector, width8};
@@ -317,10 +318,10 @@ impl Lift<'_, '_> {
             }),
             Mnemonic::Clz => self.unary_op(i, |x, w| Expr::Un(UnOp::Lzcnt, Box::new(cast(x, w)))),
             Mnemonic::Rev => self.unary_op(i, |x, w| Expr::Un(UnOp::Bswap, Box::new(cast(x, w)))),
-            Mnemonic::Cls => self.unary_op(i, |x, w| call("cls", x, w)),
-            Mnemonic::Rbit => self.unary_op(i, |x, w| call("rbit", x, w)),
-            Mnemonic::Rev16 => self.unary_op(i, |x, w| call("rev16", x, w)),
-            Mnemonic::Rev32 => self.unary_op(i, |x, w| call("rev32", x, w)),
+            Mnemonic::Cls => self.unary_op(i, |x, w| call(Helper::Cls, x, w)),
+            Mnemonic::Rbit => self.unary_op(i, |x, w| call(Helper::Rbit, x, w)),
+            Mnemonic::Rev16 => self.unary_op(i, |x, w| call(Helper::Rev16, x, w)),
+            Mnemonic::Rev32 => self.unary_op(i, |x, w| call(Helper::Rev32, x, w)),
             Mnemonic::Csel => self.select(i, |m| m),
             Mnemonic::Csinc => self.select(i, |m| fold(Op::Add, m, Expr::Const(1), 64)),
             Mnemonic::Csinv => self.select(i, |m| unary(UnOp::Not, m, 64)),
@@ -931,9 +932,9 @@ fn cast(e: Expr, width: u16) -> Expr {
 ///
 /// # Arguments
 ///
-/// * `name` - The intrinsic.
+/// * `helper` - The helper.
 /// * `e` - The value.
 /// * `width` - The width, 32 or 64.
-fn call(name: &str, e: Expr, width: u16) -> Expr {
-    Expr::Call(name.to_owned(), vec![cast(e, width)])
+fn call(helper: Helper, e: Expr, width: u16) -> Expr {
+    Expr::Helper(helper, vec![cast(e, width)])
 }

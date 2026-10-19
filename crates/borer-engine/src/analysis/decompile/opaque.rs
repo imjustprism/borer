@@ -334,6 +334,7 @@ fn demand(e: &Expr, k: u8, need: &mut BTreeMap<Key, u8>) -> Option<()> {
         | Expr::Cond(_)
         | Expr::Ternary(..)
         | Expr::Call(..)
+        | Expr::Helper(..)
         | Expr::Str(_)
         | Expr::Sp(_)
         | Expr::FConst(..) => None,
@@ -484,7 +485,7 @@ fn constants(e: &Expr, out: &mut BTreeSet<u64>) {
             constants(a, out);
             constants(b, out);
         }
-        Expr::Call(_, args) => {
+        Expr::Call(_, args) | Expr::Helper(_, args) => {
             for a in args {
                 constants(a, out);
             }
@@ -518,7 +519,7 @@ fn collect(e: &Expr, out: &mut BTreeSet<Key>) {
             collect(a, out);
             collect(b, out);
         }
-        Expr::Call(_, args) => {
+        Expr::Call(_, args) | Expr::Helper(_, args) => {
             for a in args {
                 collect(a, out);
             }
@@ -542,7 +543,7 @@ fn reads_memory(e: &Expr) -> bool {
         Expr::Deref(..) => true,
         Expr::Bin(_, l, r) | Expr::Ternary(_, l, r) => reads_memory(l) || reads_memory(r),
         Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) => reads_memory(x),
-        Expr::Call(_, args) => args.iter().any(reads_memory),
+        Expr::Call(_, args) | Expr::Helper(_, args) => args.iter().any(reads_memory),
         Expr::Const(_)
         | Expr::Var(_)
         | Expr::Str(_)

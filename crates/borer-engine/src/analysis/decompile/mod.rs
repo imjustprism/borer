@@ -38,6 +38,7 @@ mod expr;
 mod expr_render;
 mod fields;
 mod finish;
+mod helper;
 pub(crate) mod interp;
 mod ladder;
 pub(crate) mod lift;
@@ -574,8 +575,11 @@ pub fn decompile_all_settled(
     render_all(program, analysis, overlay, entries, |p, a, o, e| {
         let bitness = p.arch.bitness().unwrap_or(64);
         decompile_plain_full(p, a, o, e).map(|d| {
-            let text = vector::declare(
-                &tables::inline_tables(&polish(&d.text, bitness, &a.packs), p),
+            let text = helper::declare(
+                &vector::declare(
+                    &tables::inline_tables(&polish(&d.text, bitness, &a.packs), p),
+                    p,
+                ),
                 p,
             );
             (text, d.settle)
@@ -725,8 +729,11 @@ pub fn decompile(
         .as_ref()
         .as_ref()
         .map(|d| {
-            vector::declare(
-                &tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program),
+            helper::declare(
+                &vector::declare(
+                    &tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program),
+                    program,
+                ),
                 program,
             )
         })
@@ -752,8 +759,11 @@ fn decompile_afresh(
 ) -> Option<String> {
     let bitness = program.arch.bitness().unwrap_or(64);
     decompile_plain_full(program, analysis, overlay, entry).map(|d| {
-        vector::declare(
-            &tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program),
+        helper::declare(
+            &vector::declare(
+                &tables::inline_tables(&polish(&d.text, bitness, &analysis.packs), program),
+                program,
+            ),
             program,
         )
     })
@@ -1330,9 +1340,12 @@ fn name_fields(
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    Some(vector::declare(
-        &tables::inline_tables(
-            &polish(&out, program.arch.bitness().unwrap_or(64), &analysis.packs),
+    Some(helper::declare(
+        &vector::declare(
+            &tables::inline_tables(
+                &polish(&out, program.arch.bitness().unwrap_or(64), &analysis.packs),
+                program,
+            ),
             program,
         ),
         program,

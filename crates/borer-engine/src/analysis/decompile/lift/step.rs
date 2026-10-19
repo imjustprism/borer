@@ -525,7 +525,7 @@ impl<'a> Exec<'_, 'a> {
             Mnemonic::Stmxcsr | Mnemonic::Vstmxcsr
                 if instr.op_count() == 1 && instr.op0_kind() == OpKind::Memory =>
             {
-                self.store(instr, Expr::Call("stmxcsr".to_owned(), Vec::new()));
+                self.store(instr, Expr::Helper(Helper::Stmxcsr, Vec::new()));
             }
             Mnemonic::Ldmxcsr | Mnemonic::Vldmxcsr if instr.op_count() == 1 => {
                 let v = self.val(instr, 0);
@@ -674,7 +674,7 @@ impl<'a> Exec<'_, 'a> {
                 };
                 let lane = scalar_lane(self.val(instr, 1), src);
                 let v = Expr::Cast(
-                    Box::new(Expr::Call("rint".to_owned(), vec![lane])),
+                    Box::new(Expr::Helper(Helper::Rint, vec![lane])),
                     Ty::from_bits(bits),
                 );
                 self.write_op0(instr, v);
@@ -1410,9 +1410,9 @@ impl<'a> Exec<'_, 'a> {
                 let ecx = self.reg_read(Register::ECX);
                 self.reg_write(
                     Register::EAX,
-                    Expr::Call("xgetbv".to_owned(), vec![ecx.clone()]),
+                    Expr::Helper(Helper::Xgetbv, vec![ecx.clone()]),
                 );
-                self.reg_write(Register::EDX, Expr::Call("xgetbv_hi".to_owned(), vec![ecx]));
+                self.reg_write(Register::EDX, Expr::Helper(Helper::XgetbvHi, vec![ecx]));
                 self.flags = Flags::Unknown;
             }
             Mnemonic::Syscall => {
@@ -1464,10 +1464,7 @@ impl<'a> Exec<'_, 'a> {
                     && instr.op0_register() == Register::AX
                     && self.env.fpu_cmp.is_some() =>
             {
-                self.reg_write(
-                    Register::AX,
-                    Expr::Call("fpu_status".to_owned(), Vec::new()),
-                );
+                self.reg_write(Register::AX, Expr::Helper(Helper::FpuStatus, Vec::new()));
                 self.status_ah = self
                     .env
                     .fpu_cmp
@@ -1476,7 +1473,7 @@ impl<'a> Exec<'_, 'a> {
             }
             Mnemonic::Lahf if self.float_flags && matches!(self.flags, Flags::Cmp(..)) => {
                 let saved = self.flags.clone();
-                self.reg_write(Register::AH, Expr::Call("lahf".to_owned(), Vec::new()));
+                self.reg_write(Register::AH, Expr::Helper(Helper::Lahf, Vec::new()));
                 self.status_ah = Some((self.reg_read(Register::AH), saved));
             }
             Mnemonic::Sahf => {
