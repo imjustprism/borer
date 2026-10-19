@@ -7,6 +7,7 @@
 //!   --bounds         list the functions found short, with what was missed
 //!   --probe <a,b..>  say what the PDB and borer each have at these addresses
 //!   --pack <file>    run with a pack, and score the library names it gives
+//!                    (the shipped sets' names are scored whenever one fits)
 //! ```
 //!
 //! Without a pdb, the public one is fetched from the Microsoft symbol server
@@ -38,6 +39,9 @@ struct Truth {
     size: Option<u32>,
     /// The name, decorated as the PDB has it.
     name: String,
+    /// Every name the PDB gives the address: identical functions the
+    /// linker folded into one keep each of theirs.
+    aliases: Vec<String>,
 }
 
 /// What the command line asked for.
@@ -169,10 +173,15 @@ fn truth(path: &Path) -> Result<BTreeMap<u32, Truth>, pdb::Error> {
             && (p.function || p.code)
             && let Some(rva) = p.offset.to_rva(&map)
         {
-            out.entry(rva.0).or_insert(Truth {
-                size: None,
-                name: p.name.to_string().into_owned(),
-            });
+            let name = p.name.to_string().into_owned();
+            out.entry(rva.0)
+                .or_insert_with(|| Truth {
+                    size: None,
+                    name: name.clone(),
+                    aliases: Vec::new(),
+                })
+                .aliases
+                .push(name);
         }
     }
     let dbi = pdb.debug_information()?;
@@ -197,17 +206,100 @@ fn truth(path: &Path) -> Result<BTreeMap<u32, Truth>, pdb::Error> {
                 _ => continue,
             };
             let Some(rva) = rva else { continue };
-            let e = out.entry(rva.0).or_insert(Truth {
+            let e = out.entry(rva.0).or_insert_with(|| Truth {
                 size: None,
                 name: name.clone(),
+                aliases: Vec::new(),
             });
             e.size = Some(len);
             if e.name.is_empty() {
-                e.name = name;
+                e.name.clone_from(&name);
             }
+            e.aliases.push(name);
         }
     }
     Ok(out)
+}
+
+/// The identifiers of a name, the words demanglers spell differently left
+/// out.
+///
+/// `{closure#0}` and `closure$0`, `impl$2` and `enum2$` are such words.
+/// With `outer`, only the identifiers outside every template or generic
+/// argument list are kept.
+///
+/// # Arguments
+///
+/// * `name` - A name as [`plain_name`] gives it.
+/// * `outer` - Whether to leave out what sits between angle brackets.
+fn words(name: &str, outer: bool) -> Vec<&str> {
+    /// Words one spelling has and the other does not.
+    const NOISE: &[&str] = &[
+        "closure",
+        "closure_env",
+        "impl",
+        "enum2",
+        "tuple",
+        "ref",
+        "ref_mut",
+        "slice2",
+        "str",
+        "dyn",
+        "as",
+        "mut",
+        "shim",
+        "vtable",
+        "dynamic",
+        "initializer",
+        "for",
+        "const",
+        "class",
+        "struct",
+        "__rustc",
+        "_",
+    ];
+    let mut depth = 0usize;
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, c) in name.char_indices().chain([(name.len(), ' ')]) {
+        let ident = c.is_ascii_alphanumeric() || c == '_';
+        if ident && start.is_none() {
+            start = Some(i);
+        }
+        if !ident && let Some(from) = start.take() {
+            let w = &name[from..i];
+            if (!outer || depth == 0)
+                && !NOISE.contains(&w)
+                && !w.bytes().all(|b| b.is_ascii_digit())
+            {
+                out.push(w);
+            }
+        }
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether two names spell one function.
+///
+/// They do when they share the last word outside every argument list and
+/// one name's outer words are all among the other's words
+/// (`<std::path::Component as core::cmp::PartialEq>::eq` and
+/// `std::path::impl$124::eq`).
+///
+/// # Arguments
+///
+/// * `a` / `b` - The names, as [`plain_name`] gives them.
+fn same_function(a: &str, b: &str) -> bool {
+    let (oa, ob) = (words(a, true), words(b, true));
+    let (wa, wb) = (words(a, false), words(b, false));
+    oa.last().is_some()
+        && oa.last() == ob.last()
+        && (ob.iter().all(|w| wa.contains(w)) || oa.iter().all(|w| wb.contains(w)))
 }
 
 /// A name as both a PDB and a library spell it: demangled and bare, the
@@ -515,29 +607,60 @@ fn main() -> Result<(), Box<dyn Error>> {
         let b = owner(va).map_or_else(|| "none".to_owned(), |e| format!("{e:#x}"));
         println!("  PROBE {va:#x}: truth {t}; borer {b}");
     }
-    if opts.pack.is_some() {
-        let (mut right, mut wrong) = (0, 0);
+    if opts.pack.is_some() || a.library_names.shipped > 0 {
+        let (mut right, mut spelled, mut wrong) = (0, 0, 0);
         for f in a
             .functions
             .iter()
             .filter(|f| f.name_source == NameSource::Library)
         {
             let got = plain_name(f.name.as_deref().unwrap_or(""));
-            let want = truth
+            let aliases: Vec<&String> = truth
                 .get(&f.entry)
-                .map(|t| plain_name(&t.name))
+                .map(|t| t.aliases.iter().collect())
                 .unwrap_or_default();
-            if got == want {
+            if aliases.iter().any(|w| plain_name(w) == got) {
                 right += 1;
+            } else if aliases.iter().any(|w| same_function(&plain_name(w), &got)) {
+                spelled += 1;
             } else {
                 wrong += 1;
                 if wrong <= opts.samples {
-                    println!("  LIBRARY NAME {:#x}: {got}, the PDB says {want}", f.entry);
+                    let want: Vec<String> = aliases.iter().map(|w| plain_name(w)).collect();
+                    println!(
+                        "  LIBRARY NAME {:#x}: {got}, the PDB says {}",
+                        f.entry,
+                        if want.is_empty() {
+                            "nothing".to_owned()
+                        } else {
+                            want.join(" | ")
+                        }
+                    );
                 }
             }
         }
+        let shipped: BTreeSet<&str> = borer_engine::libsets::for_program(&program)
+            .into_iter()
+            .flat_map(|(_, set)| set.iter().map(|f| f.name.as_str()))
+            .collect();
+        let known: Vec<u64> = truth
+            .iter()
+            .filter(|(_, t)| t.aliases.iter().any(|n| shipped.contains(n.as_str())))
+            .map(|(va, _)| *va)
+            .collect();
+        let found = known
+            .iter()
+            .filter(|va| {
+                a.function(**va)
+                    .is_some_and(|f| f.entry == **va && f.name_source == NameSource::Library)
+            })
+            .count();
         println!(
-            "  library names: {right} as the PDB has them, {wrong} differ; {}",
+            "  shipped sets: the PDB names {} functions a shipped set holds, {found} of them named by it",
+            known.len()
+        );
+        println!(
+            "  library names: {right} as the PDB has them, {spelled} spelled otherwise, {wrong} differ; {}",
             borer_engine::analysis::libnames::library_names_tsv(&a.library_names).trim()
         );
     }
