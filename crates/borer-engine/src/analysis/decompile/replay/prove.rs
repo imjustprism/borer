@@ -30,6 +30,7 @@ use crate::isa::x86::{
 };
 
 use super::super::expr::{Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, either_width, tls_slot};
+use super::super::fcmp::FPred;
 use super::super::helper::Helper;
 use super::super::lift::{
     ArgAt, BlockFacts, Callee, EffectKind, Env, Pass, exec_block, try_level_store,
@@ -175,6 +176,7 @@ fn hold_flags(f: &Flags, lifted: &Lifted<'_>) -> Result<Option<Held>, Why> {
             }
         }
         Flags::Float(x, y, w) => (Flags::Float(l, r, *w), ev(x)?, Some(ev(y)?)),
+        Flags::FCmp(p, x, y, w) => (Flags::FCmp(*p, l, r, *w), ev(x)?, Some(ev(y)?)),
         Flags::Test(x, y, w) => (Flags::Test(l, r, *w), ev(x)?, Some(ev(y)?)),
         Flags::Add(x, y, w) => (Flags::Add(l, r, *w), ev(x)?, Some(ev(y)?)),
         Flags::Result(x, w) => (Flags::Result(l, *w), ev(x)?, None),
@@ -343,6 +345,50 @@ fn float_pred(cc: ConditionCode, fb: u8, a: &Term, b: &Term) -> Pred {
     }
 }
 
+/// The outcomes of a float compare a predicate holds for.
+///
+/// # Arguments
+///
+/// * `p` - The predicate.
+fn pred_set(p: FPred) -> u8 {
+    match p {
+        FPred::False => 0,
+        FPred::Oeq => EQ,
+        FPred::Ogt => GT,
+        FPred::Oge => GT | EQ,
+        FPred::Olt => LT,
+        FPred::Ole => LT | EQ,
+        FPred::One => LT | GT,
+        FPred::Ord => LT | EQ | GT,
+        FPred::Ueq => UN | EQ,
+        FPred::Ugt => UN | GT,
+        FPred::Uge => UN | GT | EQ,
+        FPred::Ult => UN | LT,
+        FPred::Ule => UN | LT | EQ,
+        FPred::Une => UN | LT | GT,
+        FPred::Uno => UN,
+        FPred::True => LT | EQ | GT | UN,
+    }
+}
+
+/// The truth of a float compare's condition ([`Cond::fcmp`]), the set of
+/// outcomes its predicate holds for.
+///
+/// # Arguments
+///
+/// * `c` - The condition, over [`Flags::Float`] or [`Flags::FCmp`].
+/// * `eval` - Evaluates an operand.
+///
+/// # Errors
+///
+/// What `eval` refuses.
+fn fcmp_pred(c: &Cond, eval: impl Fn(&Expr) -> Result<Term, Why>) -> Result<Pred, Why> {
+    Ok(match c.fcmp() {
+        Some((p, a, b, fb)) => float_rel(pred_set(p), fb, &eval(a)?, &eval(b)?),
+        None => Pred::Undef,
+    })
+}
+
 /// What the flags hold, with terms for the values a condition compares.
 #[derive(Debug)]
 enum Flagged {
@@ -486,8 +532,14 @@ fn flags_pred(cc: super::super::expr::Cc, f: Flagged) -> Result<Pred, Why> {
 ///   side, which reads a temporary as its own variable.
 fn float_bits(e: &Expr, temps: Option<&BTreeMap<u32, Expr>>) -> Option<u8> {
     match e {
-        Expr::Deref(_, Ty::F32) | Expr::Cast(_, Ty::F32) | Expr::FConst(_, Ty::F32) => Some(32),
-        Expr::Deref(_, Ty::F64) | Expr::Cast(_, Ty::F64) | Expr::FConst(_, Ty::F64) => Some(64),
+        Expr::Deref(_, Ty::F32)
+        | Expr::Cast(_, Ty::F32)
+        | Expr::Bitcast(_, Ty::F32)
+        | Expr::FConst(_, Ty::F32) => Some(32),
+        Expr::Deref(_, Ty::F64)
+        | Expr::Cast(_, Ty::F64)
+        | Expr::Bitcast(_, Ty::F64)
+        | Expr::FConst(_, Ty::F64) => Some(64),
         Expr::Var(Key::Tmp(id)) => float_bits(temps?.get(id)?, temps),
         Expr::Bin(op, l, r) if op.is_float() => {
             Some(float_bits(l, temps)?.max(float_bits(r, temps)?))
@@ -497,6 +549,7 @@ fn float_bits(e: &Expr, temps: Option<&BTreeMap<u32, Expr>>) -> Option<u8> {
         Expr::Helper(Helper::Rint, args) => args.first().and_then(|a| float_bits(a, temps)),
         Expr::Deref(..)
         | Expr::Cast(..)
+        | Expr::Bitcast(..)
         | Expr::FConst(..)
         | Expr::Var(_)
         | Expr::Bin(..)
@@ -808,6 +861,8 @@ impl Sym<'_> {
             Expr::Cond(c) => truth(self.cond(c, d)?),
             Expr::Ternary(c, a, b) => ite(self.cond(c, d)?, self.eval(a, d)?, self.eval(b, d)?),
             Expr::Sext(x, bits) => term::sign_extend(&self.eval(x, d)?, *bits),
+            Expr::Bitcast(_, Ty::U128) => Term::Undef,
+            Expr::Bitcast(x, ty) => narrow(&self.eval(x, d)?, ty.bits()),
             Expr::Cast(x, ty) => match ty {
                 Ty::U128 => Term::Undef,
                 Ty::F32 | Ty::F64 => return Err("a float conversion"),
@@ -862,13 +917,8 @@ impl Sym<'_> {
                 return Ok(float_pred(c.cc.0, fb, &self.eval(a, d)?, &self.eval(b, d)?));
             }
         }
-        if let Flags::Float(a, b, fb) = &c.flags {
-            return Ok(float_pred(
-                c.cc.0,
-                *fb,
-                &self.eval(a, d)?,
-                &self.eval(b, d)?,
-            ));
+        if let Flags::Float(..) | Flags::FCmp(..) = &c.flags {
+            return fcmp_pred(c, |e| self.eval(e, d));
         }
         let k = |e: &Expr| {
             if floating(e) {
@@ -879,7 +929,7 @@ impl Sym<'_> {
         };
         let flags = match &c.flags {
             Flags::Cmp(a, b, w) => Flagged::Cmp(k(a)?, k(b)?, *w),
-            Flags::Float(..) | Flags::Unknown => return Ok(Pred::Undef),
+            Flags::Float(..) | Flags::FCmp(..) | Flags::Unknown => return Ok(Pred::Undef),
             Flags::Test(a, b, w) => Flagged::Test(k(a)?, k(b)?, *w),
             Flags::Result(a, w) => Flagged::Result(k(a)?, *w),
             Flags::Add(a, b, w) => Flagged::Add(k(a)?, k(b)?, *w),
@@ -977,6 +1027,7 @@ impl Sym<'_> {
             | Expr::Ternary(..)
             | Expr::Sext(..)
             | Expr::Cast(..)
+            | Expr::Bitcast(..)
             | Expr::Helper(..)
             | Expr::FConst(..) => None,
         })
@@ -1211,6 +1262,8 @@ impl Lifted<'_> {
             Expr::Cond(c) => truth(self.cond(c, d)?),
             Expr::Ternary(c, a, b) => ite(self.cond(c, d)?, self.eval(a, d)?, self.eval(b, d)?),
             Expr::Sext(inner, bits) => term::sign_extend(&self.eval(inner, d)?, *bits),
+            Expr::Bitcast(_, Ty::U128) => Term::Undef,
+            Expr::Bitcast(inner, ty) => narrow(&self.eval(inner, d)?, ty.bits()),
             Expr::Cast(inner, ty) if ty.bits() <= 64 && !matches!(ty, Ty::F32 | Ty::F64) => {
                 let v = self.eval(inner, d)?;
                 match float_bits(inner, temps) {
@@ -1236,13 +1289,8 @@ impl Lifted<'_> {
     /// A condition outside what the proof models.
     fn cond(&self, c: &Cond, d: u8) -> Result<Pred, Why> {
         let temps = Some(self.temps);
-        if let Flags::Float(a, b, fb) = &c.flags {
-            return Ok(float_pred(
-                c.cc.0,
-                *fb,
-                &self.eval(a, d)?,
-                &self.eval(b, d)?,
-            ));
+        if let Flags::Float(..) | Flags::FCmp(..) = &c.flags {
+            return fcmp_pred(c, |e| self.eval(e, d));
         }
         if let Flags::Cmp(a, b, _) = &c.flags
             && let Some(fb) = float_bits(a, temps).or_else(|| float_bits(b, temps))
@@ -1263,7 +1311,7 @@ impl Lifted<'_> {
         let k = |e: &Expr| self.eval(e, d);
         let flags = match &c.flags {
             Flags::Cmp(a, b, w) => Flagged::Cmp(k(a)?, k(b)?, *w),
-            Flags::Float(..) | Flags::Unknown => return Ok(Pred::Undef),
+            Flags::Float(..) | Flags::FCmp(..) | Flags::Unknown => return Ok(Pred::Undef),
             Flags::Test(a, b, w) => Flagged::Test(k(a)?, k(b)?, *w),
             Flags::Result(a, w) => Flagged::Result(k(a)?, *w),
             Flags::Add(a, b, w) => Flagged::Add(k(a)?, k(b)?, *w),
@@ -2632,8 +2680,9 @@ fn full(machine: &Machine, k: Key, bits: u8) -> Result<Term, Why> {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Flagged, compare, flags_pred, float_pred};
+    use super::{Flagged, compare, fcmp_pred, flags_pred, float_pred};
     use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, float_cc};
+    use crate::analysis::decompile::fcmp::FPred;
     use crate::analysis::decompile::replay::term::{Point, Term, holds};
     use crate::analysis::decompile::verify::float_of;
     use crate::fxmap::FxHashMap;
@@ -2723,6 +2772,70 @@ mod tests {
                 }
                 let p = compare(cc, &x, &x, w);
                 assert!(p.is_ok(), "{cc:?}");
+            }
+        }
+    }
+
+    /// Every float compare predicate, over the flags a float compare sets
+    /// or as one compare of its own, holds as its outcome set where the
+    /// lifter's condition logic says it does.
+    #[test]
+    fn every_float_predicate_holds_as_its_outcome_set() {
+        let floats = [0.0f64, -0.0, 1.0, -1.0, f64::INFINITY, f64::NAN];
+        let (x, y) = (Expr::Var(KEYS[0]), Expr::Var(KEYS[1]));
+        let term = |e: &Expr| {
+            Ok(Term::In(
+                if *e == Expr::Var(KEYS[0]) {
+                    KEYS[0]
+                } else {
+                    KEYS[1]
+                },
+                64,
+            ))
+        };
+        let mut conds: Vec<(ConditionCode, Flags, Flags)> = Vec::new();
+        for &cc in &CODES {
+            conds.push((
+                cc,
+                Flags::Float(x.clone(), y.clone(), 64),
+                Flags::Float(x.clone(), y.clone(), 64),
+            ));
+        }
+        for p in FPred::ALL {
+            for cc in [ConditionCode::e, ConditionCode::ne] {
+                conds.push((
+                    cc,
+                    Flags::FCmp(p, x.clone(), y.clone(), 64),
+                    Flags::FCmp(p, x.clone(), y.clone(), 64),
+                ));
+            }
+        }
+        for (cc, symbolic, shape) in conds {
+            let p = fcmp_pred(
+                &Cond {
+                    cc: Cc(cc),
+                    flags: symbolic,
+                },
+                term,
+            )
+            .expect("modeled");
+            for &a in &floats {
+                for &b in &floats {
+                    let (ba, bb) = (a.to_bits(), b.to_bits());
+                    let ins: FxHashMap<Key, u64> = KEYS.iter().copied().zip([ba, bb]).collect();
+                    let at = Point {
+                        ins: &ins,
+                        seed: 1,
+                        width: 64,
+                    };
+                    let flags = if let Flags::FCmp(q, ..) = &shape {
+                        Flags::FCmp(*q, Expr::Const(ba), Expr::Const(bb), 64)
+                    } else {
+                        Flags::Float(Expr::Const(ba), Expr::Const(bb), 64)
+                    };
+                    let want = Cond { cc: Cc(cc), flags }.eval();
+                    assert_eq!(holds(&p, &at), want, "{cc:?} {shape:?} {a} {b}");
+                }
             }
         }
     }
