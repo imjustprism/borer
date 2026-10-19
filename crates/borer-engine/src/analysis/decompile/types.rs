@@ -3191,8 +3191,10 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
 ///
 /// The count of a shift is read when it is a constant (`<< 0x20` of a word
 /// does, `<< 8` of a byte does not); any other count may. A product by a
-/// constant loses bits when the two lengths add up past the limit; one by
-/// a variable is the variable's type's, which the text does not say here.
+/// constant loses bits when the two lengths add up past the limit. One by
+/// anything else may: it computes in the wider of the two types, and the
+/// other factor may be narrowed too (`(a2 & 0xffffffff) *
+/// (int64_t)(int32_t)a1` would be `a2 * a1`, a 32-bit product).
 ///
 /// # Arguments
 ///
@@ -3255,11 +3257,20 @@ fn loses_bits(before: &str, after: &str, bits: u32, limit: u32) -> bool {
         }
         rest = count.trim_start_matches(|c: char| c.is_ascii_alphanumeric());
     }
-    let factor = after.strip_prefix(" * ").and_then(constant).or_else(|| {
-        let head = before.strip_suffix(" * ")?;
-        let token = head.rsplit(|c: char| !c.is_ascii_alphanumeric()).next()?;
-        constant(token)
-    });
+    let after_factor = after.strip_prefix(" * ");
+    let before_factor = before
+        .strip_suffix(" * ")
+        .and_then(|head| head.rsplit(|c: char| !c.is_ascii_alphanumeric()).next());
+    if after_factor
+        .into_iter()
+        .chain(before_factor)
+        .any(|t| constant(t).is_none())
+    {
+        return true;
+    }
+    let factor = after_factor
+        .and_then(constant)
+        .or_else(|| before_factor.and_then(constant));
     factor.is_some_and(|k| bits + length(k) > limit)
 }
 
@@ -3800,6 +3811,30 @@ if (a1 & 0xffff) {
         assert_eq!(
             super::unwrap_parens("rax = Ptr<Item>::operator ->(a2);", "a2"),
             "rax = Ptr<Item>::operator ->(a2);"
+        );
+    }
+
+    /// Two parameters the text widens before multiplying keep a 64-bit
+    /// product once both are narrowed.
+    ///
+    /// `(a2 & 0xffffffff) * (int64_t)(int32_t)a1` multiplies in 64 bits;
+    /// `a2 * a1` of a `uint32_t` and an `int32_t` would multiply in 32 and
+    /// lose the high half, so each factor keeps a cast to the word.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_product_of_narrowed_parameters_stays_wide() {
+        let text = "// signature: uint64_t f(uint64_t a1, uint64_t a2, uint64_t a3)\nreturn (a2 & 0xffffffff) * (int64_t)(int32_t)a1 + a3 * 3;\n";
+        let typed = type_parameters(text, "uint64_t");
+        assert!(
+            typed.contains("f(int32_t a1, uint32_t a2, uint64_t a3)"),
+            "{typed}"
+        );
+        assert!(
+            typed.contains("return (uint64_t)a2 * (int64_t)a1 + a3 * 3;"),
+            "{typed}"
         );
     }
 
