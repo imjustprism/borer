@@ -127,3 +127,24 @@ fn a_plt_stub_calls_the_function_its_slot_binds() {
     assert!(text.contains("fib((a1 - 1)"), "{text}");
     assert!(!text.contains("sub_"), "{text}");
 }
+
+/// An indirect result's address in `x8` is an ABI fact, not the last
+/// parameter: the signature and every call list it first, where the
+/// source prototype has it, so the text calls the same on any host.
+#[test]
+fn an_indirect_result_comes_first() {
+    let p = image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let mkrect = decompile(&p, &a, &o, TEXT + 0x40).expect("decompiles");
+    assert!(
+        mkrect.contains("// signature: void mkrect(void *result, uint64_t a1)"),
+        "{mkrect}"
+    );
+    let user = decompile(&p, &a, &o, TEXT + 0x50).expect("decompiles");
+    let call = user
+        .lines()
+        .find(|l| l.contains("mkrect("))
+        .expect("the call is shown");
+    assert!(call.contains("mkrect(&"), "{user}");
+}

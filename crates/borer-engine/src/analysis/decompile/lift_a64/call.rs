@@ -82,7 +82,9 @@ impl Lift<'_, '_> {
                     .and_then(|r| shape::declared_callee(ctx, r))
             });
         let body = target.and_then(|t| shape::callee_shape(ctx, t));
-        let result_ptr = body.as_ref().is_some_and(|s| s.result_param.is_some());
+        let result_ptr = target
+            .and_then(|t| abi::of(ctx.program, ctx.analysis, ctx.overlay, t))
+            .is_some_and(|a| a.indirect_result.is_some());
         let args = declared
             .map(|(count, floats, _)| (count, floats))
             .or_else(|| {
@@ -164,8 +166,10 @@ impl Lift<'_, '_> {
     /// # Returns
     ///
     /// The register arguments in position order, the indirect result's
-    /// address last, and the stack words of a variadic call on an Apple
-    /// platform after them, with their offsets above the stack pointer.
+    /// address where the source prototype has it
+    /// ([`abi::indirect_result_position`]), and the stack words of a
+    /// variadic call on an Apple platform after them, with their offsets
+    /// above the stack pointer.
     fn arguments(&mut self, sig: Signature, tail: bool) -> Vec<(ArgAt, Expr)> {
         let (fixed, floats) = sig.args.unwrap_or((0, 0));
         let mut regs: Vec<Reg> = (0..fixed).filter_map(|p| arg_reg(p, floats)).collect();
@@ -196,7 +200,7 @@ impl Lift<'_, '_> {
             }
         }
         if sig.result_ptr {
-            regs.push(Reg::X(RESULT_REG));
+            regs.insert(abi::indirect_result_position(false), Reg::X(RESULT_REG));
         }
         let mut out: Vec<(ArgAt, Expr)> = regs
             .into_iter()

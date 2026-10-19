@@ -2048,6 +2048,11 @@ fn decompile_in<L: Lifter>(
             }
         })
         .collect();
+    if let Some(r) = result_at.filter(|r| *r < params.len()) {
+        let at = abi::indirect_result_position(ctx.this_param);
+        let result = params.remove(r);
+        params.insert(at.min(params.len()), result);
+    }
     if ctx.variadic {
         params.push("...".to_owned());
     }

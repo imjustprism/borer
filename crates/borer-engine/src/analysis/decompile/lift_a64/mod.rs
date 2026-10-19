@@ -38,8 +38,8 @@ mod step;
 pub(in crate::analysis::decompile) use flags::modeled_system;
 pub(in crate::analysis::decompile) use live::effects;
 pub(in crate::analysis::decompile) use shape::{
-    INT_ARGS, built as built_shape, callee_shape, decode_blocks, entry_env, param_types, ret_lane,
-    shape, writes_result,
+    INT_ARGS, RESULT_REG, arg_reg, built as built_shape, callee_shape, decode_blocks, entry_env,
+    param_types, ret_lane, shape, writes_result,
 };
 
 use std::collections::btree_map::Entry;

@@ -6,8 +6,9 @@
 //! signature lists the integer parameters a body reads in register order
 //! and the floating ones after them, as a declaration interleaves them
 //! when one states the positions. A function returning a structure too
-//! large for registers takes the address to write it at in `x8`, which
-//! the signature lists last as `result`. A parameter is a register of
+//! large for registers takes the address to write it at in `x8`, an ABI
+//! fact and no parameter, which the signature lists first as `result`
+//! ([`abi::indirect_result_position`]). A parameter is a register of
 //! these the function reads before writing it on a path from its entry
 //! that no call precedes; a call or a jump out of the function reads what
 //! its target takes ([`forwarded`]). A function that stores the argument

@@ -10,12 +10,19 @@
 //!
 //! A linkage stub reaches the function its slot binds ([`bound`],
 //! [`reached`]).
+//!
+//! Per function the layer places each parameter and the result, with
+//! their classes ([`of`], [`function::FunctionAbi`]), an indirect result's
+//! pointer an ABI fact rather than a parameter
+//! ([`indirect_result_position`]), so any stage reads a callee's
+//! prototype ([`function::prototype`]) without decompiling it.
 
 pub(crate) mod a64;
 mod conv;
-mod function;
+pub(crate) mod function;
 mod stubs;
 
 pub(crate) use conv::*;
 pub(in crate::analysis::decompile) use function::shape;
+pub(crate) use function::{indirect_result_position, of};
 pub(crate) use stubs::{bound, reached};
