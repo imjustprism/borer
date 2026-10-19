@@ -29,7 +29,7 @@ mod state;
 mod stated;
 mod step;
 
-pub(crate) use conv::*;
+pub(in crate::analysis::decompile) use conv::*;
 pub(in crate::analysis::decompile) use effects::*;
 pub(in crate::analysis::decompile) use pack::*;
 pub(in crate::analysis::decompile) use record::*;
@@ -44,6 +44,7 @@ use crate::isa::x86::{
     st_depth, st_register,
 };
 
+use super::abi::{self, Conv, FASTCALL_X86, conv};
 use super::expr::{
     Cc, Cond, Expr, Flags, Key, Names, Op, Ty, UnOp, bare, either_width, fold, known_bits, mask,
     mask_bits, sign_extend, table_index, unary, without_addend,

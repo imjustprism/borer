@@ -8,8 +8,8 @@
 
 use crate::isa::x86::Register;
 
+use super::abi;
 use super::ctext::{Base, CTy, Tok, closing, leading_type, split_top, tokens};
-use super::lift;
 use crate::analysis::{Analysis, Overlay};
 use crate::emulate::Emulator;
 use crate::num::from_usize;
@@ -99,19 +99,8 @@ pub(crate) fn passing(
 ) -> Passing {
     let bitness = program.arch.bitness().unwrap_or(64);
     let conv = match analysis.function(entry).filter(|f| f.entry == entry) {
-        Some(f) => {
-            analysis
-                .derived
-                .get_or_build_item(
-                    "shape",
-                    overlay.fingerprint(),
-                    entry,
-                    || super::shape_built(program, analysis, overlay, f, bitness),
-                    |shape| shape.params.capacity() * size_of::<Register>(),
-                )
-                .conv
-        }
-        None => lift::conv(program, bitness),
+        Some(f) => abi::shape(program, analysis, overlay, f, bitness).conv,
+        None => abi::conv(program, bitness),
     };
     let word = conv.word.unsigned_abs();
     Passing {

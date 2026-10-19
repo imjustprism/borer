@@ -59,6 +59,7 @@ use crate::isa::x86::{
     FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
 };
 
+use super::abi::Conv;
 use super::arch::{self, Lifter};
 use super::expr::{
     Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, a64_code, either_width, fcvt_float_width, fold,
@@ -66,7 +67,7 @@ use super::expr::{
 };
 use super::helper::{Helper, eval_call};
 use super::lift::{
-    ArgAt, Callee, Conv, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
+    ArgAt, Callee, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
 };
 use super::liveness::Live;
 use super::verify::{

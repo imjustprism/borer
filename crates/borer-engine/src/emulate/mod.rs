@@ -977,7 +977,7 @@ impl<'a> Emulator<'a> {
     /// Sets an argument where the program's calling convention puts it.
     ///
     /// The convention is the one the decompiler names `a1`..`aN` by on this
-    /// program ([`lift::conv`](crate::analysis::decompile::lift::conv)): on a PE the first four arguments live in
+    /// program ([`abi::conv`](crate::analysis::decompile::abi::conv)): on a PE the first four arguments live in
     /// `rcx`, `rdx`, `r8` and `r9`, on an ELF or Mach-O the first six in
     /// `rdi`, `rsi`, `rdx`, `rcx`, `r8` and `r9`, and in 32-bit code none.
     /// The rest are on the stack as the callee sees it on entry, past the

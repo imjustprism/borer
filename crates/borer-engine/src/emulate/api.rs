@@ -3,7 +3,7 @@
 
 use super::calls::ApiCall;
 use super::{Emulator, Stop, image_byte, linux_syscall_name};
-use crate::analysis::decompile::lift;
+use crate::analysis::decompile::abi;
 use crate::isa::x86::{Instruction, Register};
 use crate::num::{from_usize, lo8};
 
@@ -64,7 +64,7 @@ impl Emulator<'_> {
 
     /// Where the `n`th argument lives as the callee sees it on entry.
     ///
-    /// The registers are those of the program's convention ([`lift::conv`]);
+    /// The registers are those of the program's convention ([`abi::conv`]);
     /// the stack slots count from the one past the return address, which
     /// the stack pointer still points at, and past any shadow space.
     ///
@@ -72,7 +72,7 @@ impl Emulator<'_> {
     ///
     /// * `n` - Argument index from zero.
     pub(super) fn arg_slot(&self, n: usize) -> ArgSlot {
-        let conv = lift::conv(self.program, self.bitness);
+        let conv = abi::conv(self.program, self.bitness);
         if let Some(r) = conv.args.get(n) {
             return ArgSlot::Register(*r);
         }

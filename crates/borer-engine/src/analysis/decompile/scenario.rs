@@ -33,7 +33,7 @@ pub fn decompile_scenario(
     assume: &[(u8, u64)],
 ) -> Option<String> {
     let bitness = program.arch.bitness().unwrap_or(64);
-    let registers = lift::conv(program, bitness).args.len();
+    let registers = abi::conv(program, bitness).args.len();
     let d = decompile_with(program, analysis, overlay, entry, true, assume, false)?;
     let text = polish(&d.text, bitness, &analysis.packs);
     let said: Vec<String> = assume

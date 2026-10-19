@@ -891,10 +891,7 @@ impl<'a> Exec<'_, 'a> {
                 u64::try_from(r.size()).is_ok_and(|size| size * 8 == u64::from(ty.bits()))
                     && self.ctx.conv.callee_saved.contains(r),
             ),
-            Expr::Var(key @ Key::A64(r)) => (
-                *key,
-                ty.bits() == 64 && crate::analysis::decompile::lift_a64::callee_saved(*r),
-            ),
+            Expr::Var(key @ Key::A64(r)) => (*key, ty.bits() == 64 && abi::a64::callee_saved(*r)),
             _ => return false,
         };
         self.entry

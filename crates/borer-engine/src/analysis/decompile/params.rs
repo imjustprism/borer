@@ -433,18 +433,18 @@ pub(super) fn shape_of(
     let stated = ctx.overlay.prototypes.get(&f.entry);
     if ctx.bitness == 32 {
         ctx.conv = match stated.and_then(|p| p.conv) {
-            Some(CallConv::Fastcall) => &lift::FASTCALL_X86,
-            Some(CallConv::Thiscall) => &lift::THISCALL_X86,
-            Some(CallConv::Cdecl | CallConv::Stdcall) => &lift::CDECL_X86,
+            Some(CallConv::Fastcall) => &abi::FASTCALL_X86,
+            Some(CallConv::Thiscall) => &abi::THISCALL_X86,
+            Some(CallConv::Cdecl | CallConv::Stdcall) => &abi::CDECL_X86,
             None => {
-                ctx.conv = &lift::FASTCALL_X86;
+                ctx.conv = &abi::FASTCALL_X86;
                 let regs = detect_params(ctx, code, succs, entry);
                 if regs.contains(&Register::EDX) {
-                    &lift::FASTCALL_X86
+                    &abi::FASTCALL_X86
                 } else if regs.contains(&Register::ECX) {
-                    &lift::THISCALL_X86
+                    &abi::THISCALL_X86
                 } else {
-                    &lift::CDECL_X86
+                    &abi::CDECL_X86
                 }
             }
         };
@@ -489,10 +489,10 @@ pub(super) fn shape_of(
             own.is_some() && own == f.param_hints.get(&0).map(String::as_str)
         }
     };
-    if ctx.bitness == 32 && this_param && *ctx.conv == lift::CDECL_X86 {
-        ctx.conv = &lift::THISCALL_X86;
+    if ctx.bitness == 32 && this_param && *ctx.conv == abi::CDECL_X86 {
+        ctx.conv = &abi::THISCALL_X86;
     }
-    if *ctx.conv == lift::THISCALL_X86 && stated.is_none() {
+    if *ctx.conv == abi::THISCALL_X86 && stated.is_none() {
         this_param = true;
     }
     let result_param = (hidden == 1).then_some(u8::from(this_param));
@@ -1004,12 +1004,12 @@ pub(super) fn callee_shape(ctx: &Ctx<'_>, target: u64) -> Option<std::sync::Arc<
             && f.thunk.is_none()
             && (f.instr_count > 1 || ctx.decode(target).is_some_and(forwards))
     })?;
-    Some(ctx.analysis.derived.get_or_build_item(
-        "shape",
-        ctx.overlay_key,
-        target,
-        || shape_built(ctx.program, ctx.analysis, ctx.overlay, f, ctx.bitness),
-        |shape| shape.params.capacity() * size_of::<Register>(),
+    Some(abi::shape(
+        ctx.program,
+        ctx.analysis,
+        ctx.overlay,
+        f,
+        ctx.bitness,
     ))
 }
 
@@ -1349,7 +1349,7 @@ pub(super) fn seh_frame(ctx: &Ctx<'_>, code: &[Vec<Instruction>]) -> bool {
 /// below-or-equal to a block that calls `runtime.morestack` and starts
 /// over. It is the runtime's bookkeeping, not the function's logic: read
 /// as a branch it doubles every body with a path that re-enters it. Only
-/// a function taking Go's arguments ([`lift::takes_go_registers`]) is
+/// a function taking Go's arguments ([`abi::takes_go_registers`]) is
 /// looked at, and only when the slow path's call is named
 /// `runtime.morestack*`.
 ///
@@ -1372,7 +1372,7 @@ pub(super) fn go_stack_check(
 ) -> Option<(u64, String)> {
     /// The stack guard's offset in the goroutine (`g.stackguard0`).
     const STACKGUARD: u64 = 0x10;
-    if !lift::takes_go_registers(ctx.program, entry) {
+    if !abi::takes_go_registers(ctx.program, entry) {
         return None;
     }
     let [.., cmp, jbe] = code.get(ctx.entry_block)?.as_slice() else {

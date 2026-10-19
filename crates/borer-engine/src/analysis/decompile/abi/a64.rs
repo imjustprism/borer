@@ -21,7 +21,7 @@ const LAST_V: u8 = 31;
 
 /// The register a Darwin system call takes its number in; Linux takes it
 /// in `x8`, which a call reads as an argument register already.
-pub(super) const SYSCALL_NUMBER: u8 = 16;
+pub(in crate::analysis::decompile) const SYSCALL_NUMBER: u8 = 16;
 
 /// Tells whether a function must give `r` back to its caller as it found
 /// it.

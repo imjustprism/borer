@@ -8,8 +8,9 @@
 
 use std::sync::Arc;
 
+use super::abi::{self, Conv};
 use super::expr::{Expr, Key, Names, negative_magnitude};
-use super::lift::{self, ArgAt, Call, Callee, Conv, EffectKind, Shown};
+use super::lift::{ArgAt, Call, Callee, EffectKind, Shown};
 use super::{Analysis, Overlay, decompiled_cached, name_of};
 use crate::program::Program;
 use crate::strings::{cstr_text_at, wstr_text_at};
@@ -93,7 +94,7 @@ pub(crate) fn call_sites(
 ) -> Option<Vec<CallSite>> {
     let (bitness, first_stack) = match program.arch.isa()? {
         crate::isa::Isa::X86 { bits } => {
-            let conv = lift::conv(program, bits);
+            let conv = abi::conv(program, bits);
             (bits, conv.word + conv.shadow)
         }
         crate::isa::Isa::A64 => (64, 0),
@@ -101,7 +102,7 @@ pub(crate) fn call_sites(
     let f = analysis.function(caller)?;
     let memo = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), caller);
     let d = memo.as_ref().as_ref()?;
-    let conv = lift::conv(program, bitness);
+    let conv = abi::conv(program, bitness);
     let names = Names {
         program,
         analysis,

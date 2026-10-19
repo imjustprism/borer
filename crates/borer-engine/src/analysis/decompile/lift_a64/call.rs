@@ -20,10 +20,11 @@
 //! nothing; a function whose callers read `x1` after calling it hands a
 //! second result back there, which its text sets before each `return`.
 
+use super::super::abi::a64 as a64_abi;
 use super::super::expr::{Expr, Key, Ty};
 use super::super::lift::{ArgAt, Callee, EffectKind, Returns, Shown, SlotUse, stated_returns};
+use super::Lift;
 use super::shape::{self, FLOAT_ARGS, INT_ARGS, RESULT_REG, arg_reg};
-use super::{Lift, conv};
 use crate::isa::a64::{Insn, Opnd, Reg};
 use crate::program::BinaryFormat;
 
@@ -253,7 +254,7 @@ impl Lift<'_, '_> {
         if target.is_none() && through.is_none() {
             return self.unmodeled(i);
         }
-        let dying: Vec<Key> = conv::clobbered().map(Key::A64).collect();
+        let dying: Vec<Key> = a64_abi::clobbered().map(Key::A64).collect();
         let outlives: Vec<Key> = self
             .ex
             .env
@@ -317,7 +318,7 @@ impl Lift<'_, '_> {
     ///
     /// * `result` - The register the call's result is assigned to.
     fn after_call(&mut self, result: Option<Key>) {
-        for r in conv::clobbered() {
+        for r in a64_abi::clobbered() {
             let k = Key::A64(r);
             self.ex.env.vals.remove(&k);
             self.ex.env.narrow.remove(&k);

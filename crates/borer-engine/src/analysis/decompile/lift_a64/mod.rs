@@ -14,7 +14,7 @@
 //! identification change no value. The flags are the x86 lifter's, read
 //! through what set them ([`flags`]), and a conditional select is an
 //! [`Expr::Ternary`]. In the entry block a store of a register the callee
-//! must preserve ([`callee_saved`]) is a save, as the x86 lifter reads a
+//! must preserve ([`callee_saved`](super::abi::a64::callee_saved)) is a save, as the x86 lifter reads a
 //! push. The scalar floating-point arithmetic, compares and conversions
 //! and the vector moves and bitwise logic are modeled as the x86 lifter
 //! models its own ([`float`], [`step`]). `mrs` and `msr` move `TPIDR_EL0`
@@ -27,7 +27,6 @@
 //! registers each instruction reads and writes is [`live`]'s.
 
 mod call;
-mod conv;
 mod flags;
 mod float;
 mod live;
@@ -36,16 +35,17 @@ mod shape;
 mod simd;
 mod step;
 
-pub(in crate::analysis::decompile) use conv::{callee_saved, clobbered};
 pub(in crate::analysis::decompile) use flags::modeled_system;
 pub(in crate::analysis::decompile) use live::effects;
 pub(in crate::analysis::decompile) use shape::{
-    INT_ARGS, callee_shape, decode_blocks, entry_env, param_types, ret_lane, shape, writes_result,
+    INT_ARGS, built as built_shape, callee_shape, decode_blocks, entry_env, param_types, ret_lane,
+    shape, writes_result,
 };
 
 use std::collections::btree_map::Entry;
 
 use super::Ctx;
+use super::abi::a64::callee_saved;
 use super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, fold, known_bits, mask, sign_extend};
 use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn, pack};
 use crate::fxmap::FxHashMap;

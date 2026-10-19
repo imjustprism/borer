@@ -1342,7 +1342,7 @@ pub(super) fn walk_function(
     let shape_hash = recs
         .iter()
         .fold(0xcbf2_9ce4_8422_2325, |h, (_, r)| mix(h, r.shape));
-    let conv = crate::analysis::decompile::lift::conv(program, bitness);
+    let conv = crate::analysis::decompile::abi::conv(program, bitness);
     let func = Function {
         entry,
         start,

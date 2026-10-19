@@ -2,7 +2,7 @@
 //! register conventions they share.
 
 use super::*;
-use crate::analysis::decompile::lift;
+use crate::analysis::decompile::abi;
 
 /// Where a value pass starts and what it follows: `<address>[,<register>]`.
 #[derive(Debug, Clone)]
@@ -1041,7 +1041,7 @@ pub(super) fn parse_count(text: &str) -> Option<usize> {
 /// makes, travel in, in convention order, as the value passes read them.
 ///
 /// On a 64-bit target they are the function's own convention's, as the
-/// decompiler names its `a1`..`aN` ([`lift::conv_at`]): `rcx`, `rdx`, `r8`,
+/// decompiler names its `a1`..`aN` ([`abi::conv_at`]): `rcx`, `rdx`, `r8`,
 /// `r9` on a PE, `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9` on an ELF or
 /// Mach-O, Go's for a function its table lists. A 32-bit `cdecl` or
 /// `stdcall` call passes every argument on the stack, so a value left in
@@ -1058,12 +1058,12 @@ pub(super) fn argument_registers(p: &Program, entry: u64, bitness: u32) -> &'sta
     if bitness == 32 {
         &[Register::ECX]
     } else {
-        lift::conv_at(p, entry, bitness).args
+        abi::conv_at(p, entry, bitness).args
     }
 }
 
 /// The registers a call made by a function lets the callee destroy, by the
-/// function's own convention ([`lift::conv_at`]).
+/// function's own convention ([`abi::conv_at`]).
 ///
 /// # Arguments
 ///
@@ -1071,7 +1071,7 @@ pub(super) fn argument_registers(p: &Program, entry: u64, bitness: u32) -> &'sta
 /// * `entry` - The function's entry.
 /// * `bitness` - Decoder bitness of the program.
 pub(super) fn volatile_registers(p: &Program, entry: u64, bitness: u32) -> &'static [Register] {
-    lift::conv_at(p, entry, bitness).volatile
+    abi::conv_at(p, entry, bitness).volatile
 }
 
 /// Names what a call goes to: the target of a direct call of any width,

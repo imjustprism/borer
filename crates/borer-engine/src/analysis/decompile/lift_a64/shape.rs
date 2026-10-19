@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use super::super::abi;
 use super::super::expr::{Expr, Key, Ty};
 use super::super::lift::{self, Env};
 use super::super::{Ctx, Shape, declared_arity, new_ctx, pointee_type};
@@ -472,7 +473,7 @@ pub(in crate::analysis::decompile) fn shape(
     let result = read.contains(&Reg::X(RESULT_REG));
     let result_param = result.then(|| u8::try_from(count).ok()).flatten();
     Shape {
-        conv: &lift::AAPCS64,
+        conv: &abi::AAPCS64,
         params: Vec::new(),
         variadic,
         this_param: false,
@@ -511,13 +512,7 @@ pub(in crate::analysis::decompile) fn callee_shape(
             && f.thunk.is_none()
             && (f.instr_count > 1 || decode(ctx.program, target).is_some_and(forwards))
     })?;
-    Some(ctx.analysis.derived.get_or_build_item(
-        "shape",
-        ctx.overlay_key,
-        target,
-        || built(ctx.program, ctx.analysis, ctx.overlay, f),
-        |_| 0,
-    ))
+    Some(abi::shape(ctx.program, ctx.analysis, ctx.overlay, f, 64))
 }
 
 /// Reads a function's [`Shape`] afresh: its blocks decoded, its context
@@ -529,7 +524,12 @@ pub(in crate::analysis::decompile) fn callee_shape(
 /// * `analysis` - Discovery results.
 /// * `overlay` - User names.
 /// * `f` - The function.
-fn built(program: &Program, analysis: &Analysis, overlay: &Overlay, f: &Function) -> Shape {
+pub(in crate::analysis::decompile) fn built(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    f: &Function,
+) -> Shape {
     let starts = f.blocks.iter().map(|b| b.start).collect();
     let ctx = new_ctx(program, analysis, overlay, f, 64, starts, &[]);
     let g = graph(&ctx, f);

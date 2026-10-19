@@ -26,6 +26,7 @@
 //! [`arch::Lifter`], what it asks of an instruction set, which x86 and
 //! arm64 both answer.
 
+pub(crate) mod abi;
 mod arch;
 mod asserts;
 mod canary;
@@ -93,8 +94,9 @@ use crate::isa::x86::{
     Mnemonic, OpAccess, OpKind, Register,
 };
 
+use abi::Conv;
 use expr::{Cc, Expr, Flags, Key, Names, Ty};
-use lift::{BlockFacts, BlockOut, Branch, Conv, Env, Rebase, SlotUse, exec_block};
+use lift::{BlockFacts, BlockOut, Branch, Env, Rebase, SlotUse, exec_block};
 
 use super::{
     Analysis, BasicBlock, BlockTerm, EnumSource, Funclet, Function, Overlay, classes,
@@ -849,7 +851,7 @@ fn new_ctx<'a>(
     let debug = program.debug_functions.iter().find(|d| d.low_pc == f.entry);
     let stated = overlay.prototypes.get(&f.entry);
     let vars = overlay.vars.get(&f.entry);
-    let conv = lift::conv_at(program, f.entry, bitness);
+    let conv = abi::conv_at(program, f.entry, bitness);
     Ctx {
         program,
         analysis,

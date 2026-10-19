@@ -2322,7 +2322,7 @@ fn reads_rdx_arg(
 /// * `bitness` - Decoder bitness.
 /// * `f` - The function.
 fn rdx_variable(program: &Program, bitness: u32, f: &Function) -> bool {
-    use super::decompile::lift;
+    use super::decompile::{abi, lift};
     /// Most instructions of a prologue read before its first call.
     const PROLOGUE_MAX: usize = 64;
     let mut prologue = Vec::new();
@@ -2337,6 +2337,6 @@ fn rdx_variable(program: &Program, bitness: u32, f: &Function) -> bool {
         }
     }
     lift::vararg_fixed(program, bitness, &prologue)
-        .zip(lift::conv(program, bitness).slot(Register::RDX))
+        .zip(abi::conv(program, bitness).slot(Register::RDX))
         .is_some_and(|(fixed, rdx)| fixed <= rdx)
 }

@@ -12,7 +12,7 @@
 //! in a fixed order, and the first [`NEXT_MAX`] that fire are kept.
 
 use super::*;
-use crate::analysis::decompile::{EXPLODE_MAX, decompile, lift};
+use crate::analysis::decompile::{EXPLODE_MAX, abi, decompile};
 
 /// Most next steps one function is given.
 pub const NEXT_MAX: usize = 2;
@@ -380,7 +380,7 @@ fn stores(i: &Instruction, factory: &mut InstructionInfoFactory) -> bool {
 /// The step, naming the register the argument arrives in, or `None` when
 /// no register argument is dereferenced at [`LAYOUT_FIELDS_MIN`] offsets.
 fn layout_step(p: &Program, f: &Function, bits: u32, text: &str, params: usize) -> Option<String> {
-    let registers = lift::conv(p, bits).args;
+    let registers = abi::conv(p, bits).args;
     registers
         .iter()
         .take(params)

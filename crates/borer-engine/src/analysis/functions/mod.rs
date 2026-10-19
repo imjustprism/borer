@@ -1249,7 +1249,7 @@ fn call_arg_consts(
     callee: u64,
     recorded: &Recorded,
 ) -> Vec<ArgConst> {
-    let args = crate::analysis::decompile::lift::conv(program, bitness).args;
+    let args = crate::analysis::decompile::abi::conv(program, bitness).args;
     let window = straight_line_before(program, bitness, call_va, recorded);
     let mut held: BTreeMap<Register, Option<u64>> = BTreeMap::new();
     for i in &window {
@@ -1311,7 +1311,7 @@ fn class_registration(
     call_va: u64,
     recorded: &Recorded,
 ) -> Option<Registration> {
-    let args = crate::analysis::decompile::lift::conv(program, bitness).args;
+    let args = crate::analysis::decompile::abi::conv(program, bitness).args;
     let (name_reg, code_reg) = (*args.get(1)?, *args.get(2)?);
     let window = straight_line_before(program, bitness, call_va, recorded);
     let (mut name_at, mut code) = (None, None);

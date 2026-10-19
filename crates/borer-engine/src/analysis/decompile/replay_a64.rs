@@ -181,7 +181,7 @@ impl Replay for A64 {
     }
 
     fn volatile(_w: &Witness) -> Vec<Key> {
-        super::lift_a64::clobbered().map(Key::A64).collect()
+        super::abi::a64::clobbered().map(Key::A64).collect()
     }
 
     fn transfer(i: &Insn) -> Transfer {

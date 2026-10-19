@@ -16,9 +16,9 @@
 //! line writes.
 
 use super::super::Ctx;
+use super::super::abi::a64 as a64_abi;
 use super::super::expr::Key;
 use super::super::lift::{Effects, Lanes};
-use super::conv;
 use super::shape::{FLOAT_ARGS, INT_ARGS, RESULT_REG};
 use crate::isa::a64::{self, Insn, Mnemonic, Opnd, Reg};
 
@@ -94,7 +94,7 @@ pub(in crate::analysis::decompile) fn effects(ctx: &Ctx<'_>, i: &Insn) -> Effect
     match i.op {
         a64::Op::Bl | a64::Op::Blr => {
             arguments(&mut reads);
-            writes.extend(conv::clobbered().map(|c| (Key::A64(c), written_lane(c))));
+            writes.extend(a64_abi::clobbered().map(|c| (Key::A64(c), written_lane(c))));
         }
         a64::Op::B if i.target().is_some_and(|t| !ctx.block_starts.contains(&t)) => {
             arguments(&mut reads);
@@ -108,7 +108,7 @@ pub(in crate::analysis::decompile) fn effects(ctx: &Ctx<'_>, i: &Insn) -> Effect
         }
         a64::Op::Syscall => {
             arguments(&mut reads);
-            reads.push((Key::A64(Reg::X(conv::SYSCALL_NUMBER)), X_WHOLE));
+            reads.push((Key::A64(Reg::X(a64_abi::SYSCALL_NUMBER)), X_WHOLE));
             if i.mnemonic == Mnemonic::Svc && matches!(i.operands.first(), Some(Opnd::Imm(0))) {
                 reads.push((Key::A64(Reg::X(8)), X_WHOLE));
                 reads.push((Key::A64(Reg::X(2)), X_WHOLE));
