@@ -135,7 +135,7 @@ impl Ty {
 }
 
 /// Binary operator of an [`Expr::Bin`] node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Op {
     /// Wrapping addition.
     Add,
@@ -373,7 +373,7 @@ impl Op {
 }
 
 /// Unary operator of an [`Expr::Un`] node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum UnOp {
     /// Two's-complement negation.
     Neg,

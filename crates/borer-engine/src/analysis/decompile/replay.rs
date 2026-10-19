@@ -47,11 +47,22 @@
 //! statements it checks are the ones the emission wrote, before the text
 //! passes rewrote them.
 //!
+//! A block the states tried agree on is then proved, where it can be,
+//! over every state ([`prove`]): the same claims as equalities of
+//! symbolic values ([`term`]), the text's side replayed over terms and the
+//! machine's read from the lifter's semantics of the block's
+//! instructions. A block is proved when every claim's two sides are one
+//! normal form; a claim whose sides differ yields states that may tell
+//! them apart, which are run as one more trial, and a disagreement there
+//! refutes the block ([`Replayed::refuted`]). Anything else leaves the
+//! block to the states tried, counted by why ([`Replayed::unproved`]).
+//!
 //! The replay is written against [`Replay`], what it asks of an
 //! instruction set (its machine, its registers, how its blocks end and
 //! which of them it can check), and [`Rig`], what it asks of that
 //! instruction set's machine.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
@@ -75,7 +86,7 @@ use super::verify::{
     agree, aligns_stack, cast_integer, convert_float, float_arith, float_carried, float_of,
     float_scale_at, float_to_int, float_un, integer_to_float, low, reinterpret_float, sext, word,
 };
-use super::{decompile_with, table_target};
+use super::{Ctx, decompile_with, table_target};
 use crate::analysis::decompiled_witnessed;
 use crate::analysis::{Analysis, BasicBlock, Overlay, striped_with};
 use crate::emulate::{Emulator, Stop, fill_byte};
@@ -83,6 +94,9 @@ use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::isa::Isa;
 use crate::num::{from_usize, lo8};
 use crate::program::Program;
+
+mod prove;
+mod term;
 
 /// States each block is tried from.
 const TRIALS: u64 = 3;
@@ -124,6 +138,9 @@ const OVER_BUDGET: &str = "beyond the answer's block budget";
 pub const ANSWER_BLOCKS: usize = 256;
 /// The seed of an answer's check.
 pub const ANSWER_SEED: u64 = 1;
+/// Why a block is not proved: a claim's two sides differ as terms, and
+/// no state the proof chose told them apart on the emulator.
+const UNSETTLED: &str = "a claim the proof could neither prove nor refute";
 /// Disagreements a report lists.
 pub const LISTED_MAX: usize = 400;
 /// Instructions of disagreeing statements an answer's header names.
@@ -710,6 +727,16 @@ pub struct Replayed {
     pub unreadable: BTreeMap<Claim, usize>,
     /// The disagreements, in function, block and trial order.
     pub disagreements: Vec<Disagreement>,
+    /// Blocks whose every claim holds in every state: compared and proved
+    /// over symbolic values, not only the states tried.
+    pub proved: usize,
+    /// Blocks compared but not proved, by why the proof left them to the
+    /// states tried.
+    pub unproved: BTreeMap<&'static str, usize>,
+    /// Disagreements the proof found where the states tried agreed: a
+    /// state it chose to tell a claim's two sides apart, run on the
+    /// emulator.
+    pub refuted: Vec<Disagreement>,
 }
 
 impl Replayed {
@@ -733,6 +760,11 @@ impl Replayed {
             *self.unreadable.entry(k).or_default() += n;
         }
         self.disagreements.extend(part.disagreements);
+        self.proved += part.proved;
+        for (k, n) in part.unproved {
+            *self.unproved.entry(k).or_default() += n;
+        }
+        self.refuted.extend(part.refuted);
     }
 
     /// The disagreements that are wrong values, not lane roughness.
@@ -851,6 +883,7 @@ fn replay_one<L: Replay>(
     replay_effects::<L>(
         program,
         analysis,
+        &overlay,
         template,
         entry,
         seed,
@@ -917,6 +950,7 @@ fn check_answer_in<L: Replay>(
     let r = replay_effects::<L>(
         program,
         analysis,
+        overlay,
         &template,
         entry,
         ANSWER_SEED,
@@ -935,10 +969,13 @@ pub struct TextCheck {
     pub blocks: usize,
     /// Blocks compared from at least one state.
     pub checked: usize,
+    /// Of those, blocks proved over every state.
+    pub proved: usize,
     /// Blocks not compared, by what kept them out, most first.
     pub unchecked: Vec<(&'static str, usize)>,
     /// The instructions of the statements the machine does not bear out,
-    /// lane roughness aside, in address order.
+    /// lane roughness aside, in address order: from a state tried or one
+    /// the proof chose.
     pub disagree: Vec<u64>,
 }
 
@@ -955,12 +992,18 @@ impl TextCheck {
         }
         let mut unchecked: Vec<(&'static str, usize)> = why.into_iter().collect();
         unchecked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        let mut disagree: Vec<u64> = r.wrong().iter().map(|d| d.at).collect();
+        let mut disagree: Vec<u64> = r
+            .wrong()
+            .iter()
+            .map(|d| d.at)
+            .chain(r.refuted.iter().map(|d| d.at))
+            .collect();
         disagree.sort_unstable();
         disagree.dedup();
         Self {
             blocks: r.blocks,
             checked: r.checked,
+            proved: r.proved,
             unchecked,
             disagree,
         }
@@ -980,23 +1023,38 @@ impl TextCheck {
     /// Checked means the statements as the lifter emitted them were
     /// replayed from [`TRIALS`] states per block (one random, the others
     /// drawn from the block's own constants and their neighbors) and
-    /// compared with the emulator. A statement the machine does not bear
-    /// out is named by its instruction, the first [`DISAGREE_SHOWN`] of
-    /// them, so a block that was compared and found wrong never reads as
-    /// agreement; the blocks left out are counted by why. What a statement
-    /// computes is checked, not how its C is spelled (a cast that makes C's
-    /// `>>` the signed one, a constant written as a literal), and the text
-    /// passes after the emission are not checked either, which the line
-    /// says too. One line on every answer costs tokens, so it is terse:
-    /// `// checked vs binary: statements as emitted, 41/44 blocks x3
-    /// states; disagree at 0x401a2c; unchecked: 2 float/vector, 1 over
-    /// budget, C spelling, later text passes`.
+    /// compared with the emulator. Each checked block is graded: proved
+    /// when its claims hold over every state, symbolically against the
+    /// lifter's semantics of its instructions, tested when only the states
+    /// tried agree; blocks not checked are unknown. A statement the
+    /// machine does not bear out, on a state tried or on one the proof
+    /// chose to tell a claim's sides apart, is named by its instruction,
+    /// the first [`DISAGREE_SHOWN`] of them, so a block that was compared
+    /// and found wrong never reads as agreement; the blocks left out are
+    /// counted by why. What a statement computes is checked, not how its C
+    /// is spelled (a cast that makes C's `>>` the signed one, a constant
+    /// written as a literal), and the text passes after the emission are
+    /// not checked either, which the line says too. One line on every
+    /// answer costs tokens, so it is terse, and a grade no block has is
+    /// left out: `// checked vs binary: statements as emitted, 41/44
+    /// blocks: 30 proved, 11 tested x3 states, 3 unknown; disagree at
+    /// 0x401a2c; unchecked: 2 float/vector, 1 over budget, C spelling,
+    /// later text passes`.
     #[must_use]
     pub fn header(&self) -> String {
         let mut out = format!(
-            "// checked vs binary: statements as emitted, {}/{} blocks x{TRIALS} states; ",
-            self.checked, self.blocks
+            "// checked vs binary: statements as emitted, {}/{} blocks: {} proved",
+            self.checked, self.blocks, self.proved
         );
+        let tested = self.checked.saturating_sub(self.proved);
+        if tested > 0 {
+            let _ = write!(out, ", {tested} tested x{TRIALS} states");
+        }
+        let unknown = self.blocks.saturating_sub(self.checked);
+        if unknown > 0 {
+            let _ = write!(out, ", {unknown} unknown");
+        }
+        out.push_str("; ");
         if !self.disagree.is_empty() {
             let shown: Vec<String> = self
                 .disagree
@@ -1066,6 +1124,8 @@ fn effects_of(d: &super::Decompiled, f: &crate::analysis::Function) -> Vec<Vec<E
 ///
 /// * `program` - The image.
 /// * `analysis` - Its functions.
+/// * `overlay` - The names the text was decompiled under, which the
+///   proof's lifting of each block reads too.
 /// * `template` - The image's emulator before any run, cloned per state.
 /// * `entry` - The function's entry.
 /// * `seed` - The states' seed.
@@ -1081,6 +1141,7 @@ fn effects_of(d: &super::Decompiled, f: &crate::analysis::Function) -> Vec<Vec<E
 fn replay_effects<L: Replay>(
     program: &Program,
     analysis: &Analysis,
+    overlay: &Overlay,
     template: &L::Rig<'_>,
     entry: u64,
     seed: u64,
@@ -1098,6 +1159,9 @@ fn replay_effects<L: Replay>(
     out.functions = 1;
     let named = named_slots(effects, u64::from(width / 8));
     let function = Function::<L> {
+        program,
+        overlay,
+        lifting: RefCell::new(None),
         analysis,
         template,
         entry,
@@ -1358,6 +1422,17 @@ pub fn replay_tsv(r: &Replayed) -> String {
     for (reason, n) in &r.skipped {
         let _ = writeln!(out, "# not checked: {n} for {reason}");
     }
+    let refuted: BTreeSet<(u64, u64)> = r.refuted.iter().map(|d| (d.function, d.block)).collect();
+    let _ = writeln!(
+        out,
+        "# proved over every state: {} of {} checked blocks; {} refuted by a state the proof chose",
+        r.proved,
+        r.checked,
+        refuted.len()
+    );
+    for (reason, n) in &r.unproved {
+        let _ = writeln!(out, "# not proved: {n} for {reason}");
+    }
     if r.disagreements.len() > LISTED_MAX {
         let _ = writeln!(
             out,
@@ -1366,7 +1441,7 @@ pub fn replay_tsv(r: &Replayed) -> String {
         );
     }
     out.push_str("function\tblock\tat\tclaim\tplace\ttext\tmachine\tbits\tlane\texpression\n");
-    for d in r.disagreements.iter().take(LISTED_MAX) {
+    for d in r.disagreements.iter().chain(&r.refuted).take(LISTED_MAX) {
         let _ = writeln!(
             out,
             "{:#x}\t{:#x}\t{:#x}\t{}\t{}\t{:#x}\t{:#x}\t{}\t{}\t{}",
@@ -2130,6 +2205,9 @@ struct Text<'t, M> {
     seed: u64,
     /// The values a draw prefers, empty for a random state.
     pool: &'t [u64],
+    /// Values variables start with in place of a draw: a state the proof
+    /// chose to tell a claim's two sides apart.
+    forced: &'t FxHashMap<Key, u64>,
     /// The instruction of the statement being replayed.
     at: u64,
     /// The stack pointer where the block's run stops: what the text's
@@ -2177,6 +2255,9 @@ impl<M: Bench> Text<'_, M> {
     ///
     /// * `k` - The variable.
     fn drawn(&self, k: Key) -> u64 {
+        if let Some(v) = self.forced.get(&k) {
+            return v & low(self.width);
+        }
         let h = mix(self.seed ^ mix(key_spot(k)));
         let v = match self.pool.len() {
             0 => h,
@@ -3051,6 +3132,13 @@ impl<M: Bench> Text<'_, M> {
 
 /// A function being replayed: what all its blocks share.
 struct Function<'f, 'p, L: Replay> {
+    /// The image.
+    program: &'f Program,
+    /// The names the text was decompiled under.
+    overlay: &'f Overlay,
+    /// The decompilation state the proof lifts the function's blocks in,
+    /// symbolic only, built when the first block is proved.
+    lifting: RefCell<Option<Ctx<'f>>>,
     /// The functions, for a jump table's targets.
     analysis: &'f Analysis,
     /// The image's machine before any run, cloned per state.
@@ -3176,17 +3264,22 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let end = End::of::<L>(code)?;
         *room = room.checked_sub(1).ok_or(OVER_BUDGET)?;
         let pool = L::comparands(code, self.width);
+        let none = FxHashMap::default();
         let mut seen = BTreeSet::new();
         let mut why = "no state compared";
         let mut compared = 0;
         let mut tried = 0;
+        let mut wrote = None;
         for trial in 0..TRIALS + RULED_OUT_RETRIES {
             if tried == TRIALS {
                 break;
             }
             let pool: &[u64] = if trial == 0 { &[] } else { &pool };
-            match self.trial(b, block, code, sp, end, pool, trial, &mut seen, out) {
-                Ok(()) => compared += 1,
+            match self.trial(b, block, code, sp, end, pool, trial, &none, &mut seen, out) {
+                Ok(w) => {
+                    compared += 1;
+                    wrote.get_or_insert(w);
+                }
                 Err(e) if e == RULED_OUT => {
                     why = e;
                     continue;
@@ -3196,7 +3289,76 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             tried += 1;
         }
         out.trials += compared;
-        if compared == 0 { Err(why) } else { Ok(()) }
+        if compared == 0 {
+            return Err(why);
+        }
+        if let Some(wrote) = wrote
+            && seen.is_empty()
+        {
+            self.settle(b, block, code, sp, end, &wrote, out);
+        }
+        Ok(())
+    }
+
+    /// Proves a block the states tried agreed on, or tries the states the
+    /// proof found that may refute it.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The block's index.
+    /// * `block` - The block.
+    /// * `code` - Its instructions.
+    /// * `sp` - The stack pointer at its start, from the function's entry.
+    /// * `end` - How it ends.
+    /// * `wrote` - The bytes a run from a state tried wrote.
+    /// * `out` - Where the outcome goes.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one block's facts, threaded through"
+    )]
+    fn settle(
+        &self,
+        b: usize,
+        block: &BasicBlock,
+        code: &[L::Insn],
+        sp: i64,
+        end: End<L::Insn>,
+        wrote: &FxHashSet<u64>,
+        out: &mut Replayed,
+    ) {
+        let states = match self.prove(b, block, wrote) {
+            prove::Proof::Proved => {
+                out.proved += 1;
+                return;
+            }
+            prove::Proof::Unknown(why) => {
+                *out.unproved.entry(why).or_default() += 1;
+                return;
+            }
+            prove::Proof::Differ(states) => states,
+        };
+        for forced in &states {
+            let mut found = Replayed::default();
+            let mut seen = BTreeSet::new();
+            let ran = self.trial(
+                b,
+                block,
+                code,
+                sp,
+                end,
+                &[],
+                0,
+                forced,
+                &mut seen,
+                &mut found,
+            );
+            if ran.is_ok() && found.disagreements.iter().any(|d| !d.lane) {
+                out.refuted
+                    .extend(found.disagreements.into_iter().filter(|d| !d.lane));
+                return;
+            }
+        }
+        *out.unproved.entry(UNSETTLED).or_default() += 1;
     }
 
     /// Tells whether the flags a block leaves reach a reader whose condition
@@ -3346,8 +3508,13 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `end` - How it ends.
     /// * `pool` - The values the state's variables are drawn from.
     /// * `trial` - Which state.
+    /// * `forced` - Values variables start with in place of a draw.
     /// * `seen` - The block's disagreements so far, by claim and place.
     /// * `out` - Where the counts and disagreements go.
+    ///
+    /// # Returns
+    ///
+    /// The bytes the machine wrote.
     ///
     /// # Errors
     ///
@@ -3365,9 +3532,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         end: End<L::Insn>,
         pool: &[u64],
         trial: u64,
+        forced: &FxHashMap<Key, u64>,
         seen: &mut BTreeSet<(Claim, String)>,
         out: &mut Replayed,
-    ) -> Result<(), &'static str> {
+    ) -> Result<FxHashSet<u64>, &'static str> {
         let w = self.w;
         let inn = &w.ins[b];
         let mask = low(self.width);
@@ -3420,6 +3588,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             width: self.width,
             seed: mix(self.seed ^ block.start ^ trial.rotate_left(40)),
             pool,
+            forced,
             at: block.start,
             rsp: None,
             writers: FxHashMap::default(),
@@ -3586,7 +3755,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             }
         }
         *seen = t.seen;
-        Ok(())
+        Ok(t.written)
     }
 
     /// Replays one effect, comparing what it claims at its point.
@@ -4322,7 +4491,7 @@ mod tests {
     use crate::isa::x86::Register;
 
     use super::{Claim, Replayed, TextCheck, replay_effects, replay_function, replay_tsv};
-    use crate::analysis::decompile::expr::{Expr, UnOp};
+    use crate::analysis::decompile::expr::{Expr, Flags, Op, UnOp};
     use crate::analysis::decompile::lift::{ArgAt, Effect, EffectKind};
     use crate::analysis::decompile::{decompile, decompile_with};
     use crate::analysis::{Analysis, Overlay};
@@ -4359,6 +4528,7 @@ mod tests {
         replay_effects::<crate::analysis::decompile::arch::X86>(
             p,
             &a,
+            &Overlay::default(),
             &template,
             entry,
             seed,
@@ -5370,7 +5540,7 @@ mod tests {
         let header = checked_header(&p, &a, &o, 0x1000).expect("checked");
         assert_eq!(
             header,
-            "// checked vs binary: statements as emitted, 3/3 blocks x3 states; unchecked: C spelling, later text passes"
+            "// checked vs binary: statements as emitted, 3/3 blocks: 3 proved; unchecked: C spelling, later text passes"
         );
         let text = decompile_named(&p, &a, &o, 0x1000).expect("text");
         assert!(!text.contains("checked vs binary"), "{text}");
@@ -5443,21 +5613,114 @@ mod tests {
         let check = TextCheck {
             blocks: 8,
             checked: 8,
+            proved: 5,
             unchecked: Vec::new(),
             disagree: vec![0x404171],
         };
         assert_eq!(
             check.header(),
-            "// checked vs binary: statements as emitted, 8/8 blocks x3 states; disagree at 0x404171; unchecked: C spelling, later text passes"
+            "// checked vs binary: statements as emitted, 8/8 blocks: 5 proved, 3 tested x3 states; disagree at 0x404171; unchecked: C spelling, later text passes"
         );
         let many = TextCheck {
+            blocks: 9,
             disagree: (0..6).map(|i| 0x401000 + i).collect(),
             unchecked: vec![("float/vector", 1)],
             ..check
         };
         assert_eq!(
             many.header(),
-            "// checked vs binary: statements as emitted, 8/8 blocks x3 states; disagree at 0x401000, 0x401001, 0x401002, 0x401003 (+2 more); unchecked: 1 float/vector, C spelling, later text passes"
+            "// checked vs binary: statements as emitted, 8/9 blocks: 5 proved, 3 tested x3 states, 1 unknown; disagree at 0x401000, 0x401001, 0x401002, 0x401003 (+2 more); unchecked: 1 float/vector, C spelling, later text passes"
+        );
+    }
+
+    /// Every block of a function whose text says what the binary does is
+    /// proved over every state, not only checked on the states tried.
+    #[test]
+    fn a_true_text_is_proved_over_every_state() {
+        let p = Program::raw_x64(&THREE_BLOCKS);
+        let a = Analysis::compute(&p);
+        let r = replay_function(&p, &a, 0x1000, 1);
+        assert_eq!((r.checked, r.proved), (3, 3), "{}", replay_tsv(&r));
+        assert!(r.refuted.is_empty(), "{}", replay_tsv(&r));
+    }
+
+    /// A branch the text writes wrong for one value in two to the 31 is
+    /// refuted by a state the proof chose.
+    ///
+    /// No state tried draws that value: `2 * x == 10` at 32 bits holds for
+    /// `x == 0x80000005` too, where `x == 5` does not.
+    #[test]
+    fn a_claim_no_state_tried_tells_apart_is_refuted() {
+        let p = Program::raw_x64(&[
+            0x83, 0xf9, 0x05, // ASM: cmp ecx, 5
+            0x74, 0x06, // ASM: je 0x100b
+            0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+            0xc3, // ASM: ret
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+        ]);
+        for seed in 1..=4 {
+            let r = replayed_with(&p, 0x1000, seed, |e| {
+                if let EffectKind::Branch(c) = &mut e.kind
+                    && let Flags::Cmp(x, Expr::Const(5), w) = &c.flags
+                {
+                    c.flags = Flags::Cmp(
+                        Expr::Bin(Op::Mul, Box::new(x.clone()), Box::new(Expr::Const(2))),
+                        Expr::Const(10),
+                        *w,
+                    );
+                }
+            });
+            assert_eq!(claims(&r), [], "seed {seed}: {}", replay_tsv(&r));
+            assert!(
+                r.refuted
+                    .iter()
+                    .any(|d| d.claim == Claim::Branch && !d.lane),
+                "seed {seed}: {}",
+                replay_tsv(&r)
+            );
+            assert_eq!(r.proved, r.checked - 1, "seed {seed}: {}", replay_tsv(&r));
+        }
+    }
+
+    /// A block outside what the proof models is left to the states tried,
+    /// counted by why, never proved.
+    #[test]
+    fn a_block_the_proof_does_not_model_is_only_tested() {
+        let p = Program::raw_x64(&[
+            0x0f, 0xbc, 0xc1, // ASM: bsf eax, ecx
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let r = replay_function(&p, &a, 0x1000, 1);
+        assert_eq!((r.checked, r.proved), (1, 0), "{}", replay_tsv(&r));
+        assert_eq!(r.unproved.get("a bit scan"), Some(&1), "{}", replay_tsv(&r));
+    }
+
+    /// Blocks proved over every state are graded apart from those only the
+    /// states tried agree on, and a grade no block has is left out.
+    #[test]
+    fn the_header_grades_blocks_proved_tested_and_unknown() {
+        let all = TextCheck {
+            blocks: 4,
+            checked: 4,
+            proved: 4,
+            unchecked: Vec::new(),
+            disagree: Vec::new(),
+        };
+        assert_eq!(
+            all.header(),
+            "// checked vs binary: statements as emitted, 4/4 blocks: 4 proved; unchecked: C spelling, later text passes"
+        );
+        let none = TextCheck {
+            checked: 3,
+            proved: 0,
+            unchecked: vec![("over budget", 1)],
+            ..all
+        };
+        assert_eq!(
+            none.header(),
+            "// checked vs binary: statements as emitted, 3/4 blocks: 0 proved, 3 tested x3 states, 1 unknown; unchecked: 1 over budget, C spelling, later text passes"
         );
     }
 
@@ -5495,6 +5758,7 @@ mod tests {
         let r = replay_effects::<crate::analysis::decompile::arch::X86>(
             &p,
             &a,
+            &Overlay::default(),
             &template,
             0x1000,
             1,
@@ -5504,7 +5768,7 @@ mod tests {
         );
         assert_eq!(
             TextCheck::of(&r).header(),
-            "// checked vs binary: statements as emitted, 1/3 blocks x3 states; unchecked: 2 over budget, C spelling, later text passes"
+            "// checked vs binary: statements as emitted, 1/3 blocks: 1 proved, 2 unknown; unchecked: 2 over budget, C spelling, later text passes"
         );
     }
 
@@ -5708,11 +5972,7 @@ mod tests {
                 if let EffectKind::Call(c) = &mut e.kind {
                     for (at, v) in &mut c.args {
                         if *at == ArgAt::Reg(Register::RCX) {
-                            *v = Expr::Bin(
-                                crate::analysis::decompile::expr::Op::Add,
-                                Box::new(v.clone()),
-                                Box::new(Expr::Const(1)),
-                            );
+                            *v = Expr::Bin(Op::Add, Box::new(v.clone()), Box::new(Expr::Const(1)));
                         }
                     }
                 }

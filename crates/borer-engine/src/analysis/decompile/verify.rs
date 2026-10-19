@@ -1332,7 +1332,7 @@ pub(super) fn eval_cond<M: Bench>(
 /// # Arguments
 ///
 /// * `i` - The instruction.
-fn statement_only(i: &Instruction) -> bool {
+pub(super) fn statement_only(i: &Instruction) -> bool {
     i.has_lock_prefix()
         || matches!(
             i.mnemonic(),
@@ -1483,7 +1483,7 @@ fn straight_line(
 ///
 /// * `instrs` - The block's instructions.
 /// * `width` - The register width, 32 or 64.
-fn written_registers(instrs: &[Instruction], width: u8) -> Vec<Register> {
+pub(super) fn written_registers(instrs: &[Instruction], width: u8) -> Vec<Register> {
     let mut written = Vec::new();
     let mut info = InstructionInfoFactory::new();
     for i in instrs {
