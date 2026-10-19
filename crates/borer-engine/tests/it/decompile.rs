@@ -7648,6 +7648,29 @@ fn a_fiber_proc_handed_to_createfiber_is_seeded() {
     );
 }
 
+/// A `printf` whose format is a literal passes what the format asks for.
+///
+/// The `double` a `%f` reads goes in `xmm1`, so the call shows the value
+/// and not the copy the variadic convention also leaves in `rdx`.
+#[test]
+fn a_printf_format_types_its_variable_arguments() {
+    let code = [
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp, 28h
+        0xf2, 0x0f, 0x10, 0x0d, 0xfc, 0x0f, 0x00, 0x00, // ASM: movsd xmm1, [0x140002008]
+        0x66, 0x48, 0x0f, 0x7e, 0xca, // ASM: movq rdx, xmm1
+        0x48, 0x8d, 0x0d, 0xf8, 0x0f, 0x00, 0x00, // ASM: lea rcx, [0x140002010]
+        0xff, 0x15, 0xe2, 0x0f, 0x00, 0x00, // ASM: call [0x140002000]
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp, 28h
+        0xc3, // ASM: ret
+    ];
+    let mut data = vec![0u8; 0x20];
+    data[8..16].copy_from_slice(&1.5f64.to_le_bytes());
+    data[0x10..0x14].copy_from_slice(b"%f\n\0");
+    let p = program64_with_imports(&code, &data, &[(0x1_4000_2000, "msvcrt.dll!printf")]);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains(r#"printf("%f\n", 1.5);"#), "{text}");
+}
+
 /// A `SwitchToFiber` call is an ordinary call: one argument, no result,
 /// and the text after the swap stays.
 ///

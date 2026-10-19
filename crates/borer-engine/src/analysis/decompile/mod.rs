@@ -41,6 +41,7 @@ mod expr_render;
 mod fcmp;
 mod fields;
 mod finish;
+mod format;
 mod helper;
 pub(crate) mod interp;
 mod ladder;

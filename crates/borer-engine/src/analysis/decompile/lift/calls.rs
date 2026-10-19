@@ -506,7 +506,143 @@ impl<'a> Exec<'_, 'a> {
         &self,
         target: Option<u64>,
     ) -> Option<crate::analysis::prototypes::Prototype> {
-        import_prototype(self.ctx, target)
+        let p = import_prototype(self.ctx, target)?;
+        Some(self.format_prototype(target, p).unwrap_or(p))
+    }
+
+    /// Returns the prototype a call to a `printf` or `scanf` import passes
+    /// when its format is a literal: the fixed parameters and one per
+    /// argument the format asks for ([`super::super::format::arguments`]), no longer
+    /// variadic, with each `double` in a float slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The callee's entry when the call is direct, or the
+    ///   import slot it calls through.
+    /// * `p` - The import's declared prototype.
+    ///
+    /// # Returns
+    ///
+    /// The prototype, or `None` when the callee is no variadic format
+    /// function of the library, or its format is not a literal the call
+    /// passes.
+    fn format_prototype(
+        &self,
+        target: Option<u64>,
+        p: crate::analysis::prototypes::Prototype,
+    ) -> Option<crate::analysis::prototypes::Prototype> {
+        if !p.variadic || self.forwarding {
+            return None;
+        }
+        let decl = library_decl(self.ctx, target)?;
+        let family = super::super::format::Family::of(decl.name)?;
+        let at = decl.params.len().checked_sub(1)?;
+        let wide = format_wide(decl.params.get(at)?.ty)?;
+        let chars = self.format_text(at, wide)?;
+        let secure = family == super::super::format::Family::Scan && decl.name.contains("_s");
+        let args = super::super::format::arguments(&chars, family, secure)?;
+        let fixed = usize::from(p.params);
+        let params = if self.bitness() == 32 {
+            args.iter()
+                .fold(p.params, |n, a| n.saturating_add(a.words32()))
+        } else {
+            u8::try_from(fixed + args.len()).ok()?
+        };
+        let floats = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| **a == super::super::format::Arg::Double)
+            .filter_map(|(i, _)| u32::try_from(fixed + i).ok())
+            .filter(|i| *i < 8)
+            .fold(p.floats, |m, i| m | (1u8 << i));
+        Some(crate::analysis::prototypes::Prototype {
+            params,
+            variadic: false,
+            floats,
+            ..p
+        })
+    }
+
+    /// Reads the format string a call passes as its argument `at`, when it
+    /// is a literal: one the lifting already read ([`Expr::Str`]) or the
+    /// address of one in the image.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The format parameter's position from zero.
+    /// * `wide` - The format is a `wchar_t` string.
+    ///
+    /// # Returns
+    ///
+    /// The characters, or `None` when the argument is no literal, or one cut
+    /// at the renderer's cap.
+    fn format_text(&self, at: usize, wide: bool) -> Option<Vec<char>> {
+        /// Longest format read from the image, in characters.
+        const FORMAT_MAX: usize = 1024;
+        let word = self.ctx.conv.word;
+        let key = if self.bitness() == 32 {
+            Key::Slot(self.env.sp? + i64::try_from(at).ok()? * word)
+        } else if at < self.ctx.conv.args.len() {
+            Key::Reg(self.ctx.conv.arg_reg(at, 0)?)
+        } else {
+            let past = i64::try_from(at - self.ctx.conv.args.len()).ok()?;
+            Key::Slot(self.env.sp? + self.ctx.conv.shadow + past * word)
+        };
+        match self.env.vals.get(&key)? {
+            Expr::Str(lit) => {
+                if lit.ends_with("...\"") {
+                    return None;
+                }
+                let Ok(toks) = super::super::ctext::tokens(lit) else {
+                    return None;
+                };
+                let [super::super::ctext::Tok::Str(bytes)] = toks.as_slice() else {
+                    return None;
+                };
+                Some(if lit.starts_with('L') {
+                    char::decode_utf16(
+                        bytes
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                    )
+                    .map(|c| c.unwrap_or('?'))
+                    .take_while(|c| u32::from(*c) != 0)
+                    .collect()
+                } else {
+                    bytes
+                        .iter()
+                        .take_while(|b| **b != 0)
+                        .map(|b| char::from(*b))
+                        .collect()
+                })
+            }
+            Expr::Const(addr) => {
+                let unit = if wide { 2 } else { 1 };
+                let bytes = self.ctx.program.read_va_upto(*addr, FORMAT_MAX * unit)?;
+                let mut out = Vec::new();
+                for c in bytes.chunks_exact(unit) {
+                    let v = c.iter().rev().fold(0u32, |v, b| (v << 8) | u32::from(*b));
+                    if v == 0 {
+                        return Some(out);
+                    }
+                    out.push(char::from_u32(v).unwrap_or('?'));
+                }
+                None
+            }
+            Expr::Var(_)
+            | Expr::Sp(_)
+            | Expr::Bin(..)
+            | Expr::Un(..)
+            | Expr::Deref(..)
+            | Expr::Cond(_)
+            | Expr::Ternary(..)
+            | Expr::Sext(..)
+            | Expr::Cast(..)
+            | Expr::Bitcast(..)
+            | Expr::Call(..)
+            | Expr::Helper(..)
+            | Expr::FConst(..) => None,
+        }
     }
 
     /// Counts the argument registers a known callee takes, as its own
@@ -3003,4 +3139,23 @@ fn pure_stubs(analysis: &crate::analysis::Analysis) -> BTreeSet<u64> {
             })
         })
         .collect()
+}
+
+/// Tells whether a format parameter's type is a wide string.
+///
+/// # Arguments
+///
+/// * `ty` - The parameter's type as declared.
+///
+/// # Returns
+///
+/// `false` for a `char` string, `true` for a `wchar_t` one, `None` for
+/// anything else: no format.
+fn format_wide(ty: &str) -> Option<bool> {
+    let (base, stars) = crate::analysis::typelib::base_of(ty);
+    match (base.as_str(), stars) {
+        ("char" | "CHAR", 1) | ("LPCSTR" | "LPSTR" | "PCSTR" | "PSTR", 0) => Some(false),
+        ("wchar_t" | "WCHAR", 1) | ("LPCWSTR" | "LPWSTR" | "PCWSTR" | "PWSTR", 0) => Some(true),
+        _ => None,
+    }
 }
