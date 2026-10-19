@@ -9,6 +9,7 @@
 use crate::isa::a64;
 use crate::isa::x86::{ConditionCode, Register};
 
+use super::fcmp::FPred;
 use super::helper::Helper;
 use super::opaque::Evidence;
 use crate::num::{lo16, lo32};
@@ -485,6 +486,13 @@ pub(super) enum Flags {
     /// that set the flags, which the values alone no longer say once a
     /// store protects its operands into temporaries.
     Float(Expr, Expr, u8),
+    /// A floating-point compare of the two values at this width, asked one
+    /// predicate: the code `ne` holds where the predicate does and `e`
+    /// where it does not, so inverting the condition negates the predicate.
+    ///
+    /// It names the predicates no code over [`Flags::Float`] asks, such as
+    /// the ordered equality arm64's `eq` and the lane `cmpsd` writes test.
+    FCmp(FPred, Expr, Expr, u8),
     /// `test l, r` at this operand width.
     Test(Expr, Expr, u8),
     /// Flags set by an arithmetic result of this width (`dec`, `shl`, ...).
@@ -515,11 +523,58 @@ impl Flags {
         match self {
             Flags::Cmp(l, r, _)
             | Flags::Float(l, r, _)
+            | Flags::FCmp(_, l, r, _)
             | Flags::Test(l, r, _)
             | Flags::Add(l, r, _) => l.any_var(pred) || r.any_var(pred),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.any_var(pred),
             Flags::Shift(e, _, c) => e.any_var(pred) || c.any_var(pred),
             Flags::Unknown => false,
+        }
+    }
+
+    /// Returns the float compare predicate a condition code asks of these
+    /// flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `cc` - The code: any [`FPred::of_flags`] decides over
+    ///   [`Flags::Float`], `ne` (the predicate) or `e` (its negation) over
+    ///   [`Flags::FCmp`].
+    ///
+    /// # Returns
+    ///
+    /// The predicate, or `None` for other flags or a code that asks them
+    /// nothing.
+    pub(super) fn fpred(&self, cc: Cc) -> Option<FPred> {
+        match self {
+            Flags::Float(..) => FPred::of_flags(cc.0),
+            Flags::FCmp(p, ..) => match cc.0 {
+                ConditionCode::ne => Some(*p),
+                ConditionCode::e => Some(p.negate()),
+                ConditionCode::None
+                | ConditionCode::o
+                | ConditionCode::no
+                | ConditionCode::b
+                | ConditionCode::ae
+                | ConditionCode::be
+                | ConditionCode::a
+                | ConditionCode::s
+                | ConditionCode::ns
+                | ConditionCode::p
+                | ConditionCode::np
+                | ConditionCode::l
+                | ConditionCode::ge
+                | ConditionCode::le
+                | ConditionCode::g => None,
+            },
+            Flags::Cmp(..)
+            | Flags::Test(..)
+            | Flags::Result(..)
+            | Flags::Add(..)
+            | Flags::Carry(_)
+            | Flags::Shift(..)
+            | Flags::Truth(..)
+            | Flags::Unknown => None,
         }
     }
 
@@ -558,24 +613,7 @@ pub(super) struct Cond {
 ///
 /// The truth, or `None` for a code a float compare does not decide.
 pub(super) fn float_cc(cc: ConditionCode, a: f64, b: f64) -> Option<bool> {
-    use ConditionCode as C;
-    let unordered = a.is_nan() || b.is_nan();
-    let (zf, pf, cf) = if unordered {
-        (true, true, true)
-    } else {
-        (a == b, false, a < b)
-    };
-    Some(match cc {
-        C::a => !cf && !zf,
-        C::ae => !cf,
-        C::b => cf,
-        C::be => cf || zf,
-        C::e => zf,
-        C::ne => !zf,
-        C::p => pf,
-        C::np => !pf,
-        C::None | C::s | C::ns | C::o | C::no | C::l | C::ge | C::le | C::g => return None,
-    })
+    FPred::of_flags(cc).map(|p| p.holds(a, b))
 }
 
 /// A symbolic value.
@@ -601,8 +639,11 @@ pub(super) enum Expr {
     Ternary(Box<Cond>, Box<Expr>, Box<Expr>),
     /// Sign-extend the low `bits` of the operand to 64 bits.
     Sext(Box<Expr>, u8),
-    /// Convert to another type (`(float)x`, `(int32_t)x`).
+    /// Convert the value to another type (`(float)x`, `(int32_t)x`).
     Cast(Box<Expr>, Ty),
+    /// The same bits read as another type of the same width: `movd eax,
+    /// xmm0`, or a float stored and loaded back as an integer.
+    Bitcast(Box<Expr>, Ty),
     /// A packed vector operation by the instruction's name, which
     /// [`super::vector`] spells as C; constant arguments render in hex
     /// (shuffle and blend masks).
@@ -693,9 +734,11 @@ impl Expr {
         match self {
             Expr::Const(_) | Expr::Var(_) | Expr::Str(_) | Expr::Sp(_) | Expr::FConst(..) => 1,
             Expr::Bin(_, l, r) => 1 + l.size() + r.size(),
-            Expr::Un(_, e) | Expr::Deref(e, _) | Expr::Sext(e, _) | Expr::Cast(e, _) => {
-                1 + e.size()
-            }
+            Expr::Un(_, e)
+            | Expr::Deref(e, _)
+            | Expr::Sext(e, _)
+            | Expr::Cast(e, _)
+            | Expr::Bitcast(e, _) => 1 + e.size(),
             Expr::Call(_, args) | Expr::Helper(_, args) => {
                 1 + args.iter().map(Expr::size).sum::<usize>()
             }
@@ -736,7 +779,9 @@ impl Expr {
             },
             Expr::Const(_) | Expr::Str(_) | Expr::Sp(_) | Expr::Var(_) | Expr::FConst(..) => None,
             Expr::Bin(_, l, r) => min_opt(l.frame_read_base(), r.frame_read_base()),
-            Expr::Un(_, e) | Expr::Sext(e, _) | Expr::Cast(e, _) => e.frame_read_base(),
+            Expr::Un(_, e) | Expr::Sext(e, _) | Expr::Cast(e, _) | Expr::Bitcast(e, _) => {
+                e.frame_read_base()
+            }
             Expr::Call(_, args) | Expr::Helper(_, args) => {
                 args.iter().filter_map(Expr::frame_read_base).min()
             }
@@ -755,7 +800,9 @@ impl Expr {
         match self {
             Expr::Sp(k) => Some(*k),
             Expr::Bin(_, l, r) => min_opt(l.frame_address(), r.frame_address()),
-            Expr::Un(_, e) | Expr::Sext(e, _) | Expr::Cast(e, _) => e.frame_address(),
+            Expr::Un(_, e) | Expr::Sext(e, _) | Expr::Cast(e, _) | Expr::Bitcast(e, _) => {
+                e.frame_address()
+            }
             Expr::Ternary(_, a, b) => min_opt(a.frame_address(), b.frame_address()),
             Expr::Const(_)
             | Expr::Str(_)
@@ -784,9 +831,11 @@ impl Expr {
                 Expr::Sp(k) => pred(Key::Slot(k)),
                 _ => false,
             },
-            Expr::Un(_, e) | Expr::Deref(e, _) | Expr::Sext(e, _) | Expr::Cast(e, _) => {
-                e.any_var(pred)
-            }
+            Expr::Un(_, e)
+            | Expr::Deref(e, _)
+            | Expr::Sext(e, _)
+            | Expr::Cast(e, _)
+            | Expr::Bitcast(e, _) => e.any_var(pred),
             Expr::Call(_, args) | Expr::Helper(_, args) => args.iter().any(|a| a.any_var(pred)),
             Expr::Cond(c) => c.any_var(pred),
             Expr::Ternary(c, a, b) => c.any_var(pred) || a.any_var(pred) || b.any_var(pred),
@@ -804,9 +853,11 @@ impl Expr {
             Expr::Bin(Op::MulHi(_) | Op::SMulHi(_), ..) => true,
             Expr::Const(_) | Expr::Str(_) | Expr::Sp(_) | Expr::Var(_) | Expr::FConst(..) => false,
             Expr::Bin(_, l, r) => l.partial_idiom() || r.partial_idiom(),
-            Expr::Un(_, e) | Expr::Deref(e, _) | Expr::Sext(e, _) | Expr::Cast(e, _) => {
-                e.partial_idiom()
-            }
+            Expr::Un(_, e)
+            | Expr::Deref(e, _)
+            | Expr::Sext(e, _)
+            | Expr::Cast(e, _)
+            | Expr::Bitcast(e, _) => e.partial_idiom(),
             Expr::Call(_, args) | Expr::Helper(_, args) => args.iter().any(Expr::partial_idiom),
             Expr::Cond(_) => false,
             Expr::Ternary(_, a, b) => a.partial_idiom() || b.partial_idiom(),
@@ -823,7 +874,9 @@ impl Expr {
             Expr::Var(Key::Global(..)) => true,
             Expr::Const(_) | Expr::Str(_) | Expr::Sp(_) | Expr::Var(_) | Expr::FConst(..) => false,
             Expr::Bin(_, l, r) => l.mem_dependent() || r.mem_dependent(),
-            Expr::Un(_, e) | Expr::Sext(e, _) | Expr::Cast(e, _) => e.mem_dependent(),
+            Expr::Un(_, e) | Expr::Sext(e, _) | Expr::Cast(e, _) | Expr::Bitcast(e, _) => {
+                e.mem_dependent()
+            }
             Expr::Call(_, args) | Expr::Helper(_, args) => args.iter().any(Expr::mem_dependent),
             Expr::Cond(c) => c.mem_dependent(),
             Expr::Ternary(c, a, b) => c.mem_dependent() || a.mem_dependent() || b.mem_dependent(),
@@ -836,7 +889,11 @@ impl Expr {
             Expr::Sp(k) => Some(*k),
             Expr::Const(_) | Expr::Str(_) | Expr::Var(_) | Expr::FConst(..) => None,
             Expr::Bin(_, l, r) => min_opt(l.min_sp(), r.min_sp()),
-            Expr::Un(_, e) | Expr::Deref(e, _) | Expr::Sext(e, _) | Expr::Cast(e, _) => e.min_sp(),
+            Expr::Un(_, e)
+            | Expr::Deref(e, _)
+            | Expr::Sext(e, _)
+            | Expr::Cast(e, _)
+            | Expr::Bitcast(e, _) => e.min_sp(),
             Expr::Call(_, args) | Expr::Helper(_, args) => {
                 args.iter().filter_map(Expr::min_sp).min()
             }
@@ -868,6 +925,7 @@ impl Expr {
             Expr::Deref(e, t) => Expr::Deref(Box::new(e.subst(from, to)), *t),
             Expr::Sext(e, b) => Expr::Sext(Box::new(e.subst(from, to)), *b),
             Expr::Cast(e, t) => Expr::Cast(Box::new(e.subst(from, to)), *t),
+            Expr::Bitcast(e, t) => Expr::Bitcast(Box::new(e.subst(from, to)), *t),
             Expr::Call(f, args) => {
                 Expr::Call(f.clone(), args.iter().map(|a| a.subst(from, to)).collect())
             }
@@ -903,7 +961,9 @@ impl Expr {
     pub(super) fn is_float(&self) -> bool {
         match self {
             Expr::FConst(..) => true,
-            Expr::Deref(_, ty) | Expr::Cast(_, ty) => matches!(ty, Ty::F32 | Ty::F64),
+            Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) => {
+                matches!(ty, Ty::F32 | Ty::F64)
+            }
             Expr::Bin(op, ..) => op.is_float(),
             Expr::Un(UnOp::Sqrt | UnOp::Fabs, _) => true,
             Expr::Un(UnOp::Neg, inner) => inner.is_float(),
@@ -963,6 +1023,7 @@ impl Cond {
         match &self.flags {
             Flags::Cmp(l, r, _)
             | Flags::Float(l, r, _)
+            | Flags::FCmp(_, l, r, _)
             | Flags::Test(l, r, _)
             | Flags::Add(l, r, _) => min_opt(l.frame_read_base(), r.frame_read_base()),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.frame_read_base(),
@@ -976,11 +1037,36 @@ impl Cond {
         match &self.flags {
             Flags::Cmp(l, r, _)
             | Flags::Float(l, r, _)
+            | Flags::FCmp(_, l, r, _)
             | Flags::Test(l, r, _)
             | Flags::Add(l, r, _) => min_opt(l.min_sp(), r.min_sp()),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.min_sp(),
             Flags::Shift(e, _, c) => min_opt(e.min_sp(), c.min_sp()),
             Flags::Unknown => None,
+        }
+    }
+
+    /// Returns the float compare predicate the condition asks, with its
+    /// operands and width.
+    ///
+    /// # Returns
+    ///
+    /// The predicate, the left and right values and the width, or `None`
+    /// when the flags are no float compare or the code asks a float
+    /// compare nothing ([`FPred::of_flags`]).
+    pub(super) fn fcmp(&self) -> Option<(FPred, &Expr, &Expr, u8)> {
+        match &self.flags {
+            Flags::Float(l, r, w) | Flags::FCmp(_, l, r, w) => {
+                Some((self.flags.fpred(self.cc)?, l, r, *w))
+            }
+            Flags::Cmp(..)
+            | Flags::Test(..)
+            | Flags::Result(..)
+            | Flags::Add(..)
+            | Flags::Carry(_)
+            | Flags::Shift(..)
+            | Flags::Truth(..)
+            | Flags::Unknown => None,
         }
     }
 
@@ -1068,6 +1154,7 @@ impl Cond {
             Flags::Cmp(l, Expr::Const(0), _) => Some(l),
             Flags::Cmp(..)
             | Flags::Float(..)
+            | Flags::FCmp(..)
             | Flags::Test(..)
             | Flags::Add(..)
             | Flags::Carry(_)
@@ -1081,6 +1168,7 @@ impl Cond {
         match &self.flags {
             Flags::Cmp(l, r, _)
             | Flags::Float(l, r, _)
+            | Flags::FCmp(_, l, r, _)
             | Flags::Test(l, r, _)
             | Flags::Add(l, r, _) => l.size() + r.size(),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.size(),
@@ -1103,6 +1191,7 @@ impl Cond {
         match &self.flags {
             Flags::Cmp(l, r, _)
             | Flags::Float(l, r, _)
+            | Flags::FCmp(_, l, r, _)
             | Flags::Test(l, r, _)
             | Flags::Add(l, r, _) => l.mem_dependent() || r.mem_dependent(),
             Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => e.mem_dependent(),
@@ -1121,6 +1210,7 @@ impl Cond {
         let flags = match &self.flags {
             Flags::Cmp(l, r, b) => Flags::Cmp(l.subst(from, to), r.subst(from, to), *b),
             Flags::Float(l, r, b) => Flags::Float(l.subst(from, to), r.subst(from, to), *b),
+            Flags::FCmp(p, l, r, b) => Flags::FCmp(*p, l.subst(from, to), r.subst(from, to), *b),
             Flags::Test(l, r, b) => Flags::Test(l.subst(from, to), r.subst(from, to), *b),
             Flags::Result(e, b) => Flags::Result(e.subst(from, to), *b),
             Flags::Add(l, r, b) => Flags::Add(l.subst(from, to), r.subst(from, to), *b),
@@ -1144,7 +1234,8 @@ impl Cond {
         }
         let (l, r, bits) = match &self.flags {
             Flags::Cmp(Expr::Const(l), Expr::Const(r), bits) => (*l, *r, *bits),
-            Flags::Float(Expr::Const(l), Expr::Const(r), bits) => {
+            Flags::Float(Expr::Const(l), Expr::Const(r), bits)
+            | Flags::FCmp(_, Expr::Const(l), Expr::Const(r), bits) => {
                 let of = |v: u64| {
                     if *bits == 32 {
                         f64::from(f32::from_bits(lo32(v)))
@@ -1152,7 +1243,7 @@ impl Cond {
                         f64::from_bits(v)
                     }
                 };
-                return float_cc(self.cc.0, of(*l), of(*r));
+                return Some(self.fcmp()?.0.holds(of(*l), of(*r)));
             }
             Flags::Test(Expr::Const(l), Expr::Const(r), bits) => (l & r, 0, *bits),
             Flags::Result(Expr::Const(e), bits) => (*e, 0, *bits),
@@ -1216,6 +1307,7 @@ impl Cond {
             }
             Flags::Cmp(..)
             | Flags::Float(..)
+            | Flags::FCmp(..)
             | Flags::Test(..)
             | Flags::Result(..)
             | Flags::Add(..)
@@ -2038,10 +2130,15 @@ fn invokes(e: &Expr) -> bool {
     match e {
         Expr::Call(..) | Expr::Helper(..) => true,
         Expr::Bin(_, a, b) | Expr::Ternary(_, a, b) => invokes(a) || invokes(b),
-        Expr::Un(_, a) | Expr::Deref(a, _) | Expr::Sext(a, _) | Expr::Cast(a, _) => invokes(a),
+        Expr::Un(_, a)
+        | Expr::Deref(a, _)
+        | Expr::Sext(a, _)
+        | Expr::Cast(a, _)
+        | Expr::Bitcast(a, _) => invokes(a),
         Expr::Cond(c) => match &c.flags {
             Flags::Cmp(l, r, _)
             | Flags::Float(l, r, _)
+            | Flags::FCmp(_, l, r, _)
             | Flags::Test(l, r, _)
             | Flags::Add(l, r, _) => invokes(l) || invokes(r),
             Flags::Result(v, _) | Flags::Carry(v) | Flags::Truth(v, _) => invokes(v),
@@ -2532,7 +2629,9 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
                 }
                 out.len() <= 2
             }
-            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => leaves(a, out),
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) | Expr::Bitcast(a, _) => {
+                leaves(a, out)
+            }
             Expr::Bin(_, a, b) => leaves(a, out) && leaves(b, out),
             Expr::Str(_)
             | Expr::Deref(..)
@@ -2550,7 +2649,9 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
             Expr::Bin(Op::And | Op::Or | Op::Xor, ..) => true,
             Expr::Bin(_, a, b) => bitwise(a) || bitwise(b),
             Expr::Un(UnOp::Not, _) => true,
-            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => bitwise(a),
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) | Expr::Bitcast(a, _) => {
+                bitwise(a)
+            }
             _ => false,
         }
     }
@@ -2558,7 +2659,9 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
     fn nodes(e: &Expr) -> usize {
         match e {
             Expr::Bin(_, a, b) => 1 + nodes(a) + nodes(b),
-            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => 1 + nodes(a),
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) | Expr::Bitcast(a, _) => {
+                1 + nodes(a)
+            }
             Expr::Ternary(_, a, b) => 1 + nodes(a) + nodes(b),
             _ => 1,
         }
@@ -2624,7 +2727,9 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
         }
         match e {
             Expr::Bin(_, a, b) | Expr::Ternary(_, a, b) => mentions(a, x, y) || mentions(b, x, y),
-            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => mentions(a, x, y),
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) | Expr::Bitcast(a, _) => {
+                mentions(a, x, y)
+            }
             _ => false,
         }
     }
@@ -2657,7 +2762,9 @@ fn mba_linear(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
             }
             Expr::Bin(Op::And | Op::Or | Op::Xor, a, b) => bitwise(a, x, y) && bitwise(b, x, y),
             Expr::Bin(_, a, b) | Expr::Ternary(_, a, b) => linear(a, x, y) && linear(b, x, y),
-            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) => linear(a, x, y),
+            Expr::Un(_, a) | Expr::Sext(a, _) | Expr::Cast(a, _) | Expr::Bitcast(a, _) => {
+                linear(a, x, y)
+            }
             _ => true,
         }
     }
@@ -3067,7 +3174,11 @@ pub(super) fn table_index(e: &Expr) -> Option<Expr> {
             table_index(a).or_else(|| table_index(b))
         }
         Expr::Bin(_, a, b) => table_index(a).or_else(|| table_index(b)),
-        Expr::Un(_, x) | Expr::Deref(x, _) | Expr::Sext(x, _) | Expr::Cast(x, _) => table_index(x),
+        Expr::Un(_, x)
+        | Expr::Deref(x, _)
+        | Expr::Sext(x, _)
+        | Expr::Cast(x, _)
+        | Expr::Bitcast(x, _) => table_index(x),
         Expr::Const(_)
         | Expr::Var(_)
         | Expr::Str(_)
@@ -3089,7 +3200,7 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
     match e {
         Expr::Const(c) => *c,
         Expr::Cond(_) => 1,
-        Expr::Deref(_, ty) => mask_bits(ty.bits().min(64)),
+        Expr::Deref(_, ty) | Expr::Bitcast(_, ty) => mask_bits(ty.bits().min(64)),
         Expr::Bin(Op::And, a, b) => known_bits(a) & known_bits(b),
         Expr::Bin(Op::Or | Op::Xor, a, b) => known_bits(a) | known_bits(b),
         Expr::Bin(Op::Shl, a, s) => match **s {
@@ -3103,7 +3214,9 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
         Expr::Ternary(_, a, b) => known_bits(a) | known_bits(b),
         Expr::Bin(Op::MulHi(w) | Op::Rol(w) | Op::Ror(w), ..) => mask_bits(*w),
         Expr::Un(UnOp::Bswap, x) => match x.as_ref() {
-            Expr::Cast(_, ty) | Expr::Deref(_, ty) if ty.bits() < 64 => mask_bits(ty.bits()),
+            Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::Deref(_, ty) if ty.bits() < 64 => {
+                mask_bits(ty.bits())
+            }
             _ => u64::MAX,
         },
         Expr::Helper(Helper::Cls, _) => 0x3f,
@@ -3111,7 +3224,11 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
             0xffff_ffff
         }
         Expr::Helper(Helper::Rbit | Helper::Rev16 | Helper::Rev32, args) => match args.first() {
-            Some(Expr::Cast(_, ty) | Expr::Deref(_, ty)) if ty.bits() <= 64 => mask_bits(ty.bits()),
+            Some(Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::Deref(_, ty))
+                if ty.bits() <= 64 =>
+            {
+                mask_bits(ty.bits())
+            }
             _ => u64::MAX,
         },
         Expr::Var(Key::Reg(r)) if r.size() == 4 => 0xffff_ffff,
@@ -3662,6 +3779,49 @@ pub(super) fn ternary(cond: Cond, a: Expr, b: Expr) -> Expr {
     }
 }
 
+/// Reads the bits of a value as another type of the same width.
+///
+/// Bits read back as the type they came from are the value itself, a
+/// constant's bits are the constant at the other type, and
+/// the bits of a float with the sign bit flipped or cleared, read back as
+/// the float, are its negation or its magnitude: `movq rax, xmm0; xor
+/// rax, rcx; movq xmm0, rax` with `rcx` the sign bit is `-x`, exactly, NaN
+/// included.
+///
+/// # Arguments
+///
+/// * `e` - The value.
+/// * `ty` - The type its bits are read as.
+///
+/// # Returns
+///
+/// The value at `ty`.
+pub(super) fn bitcast(e: Expr, ty: Ty) -> Expr {
+    let bits = ty.bits();
+    let sign = 1u64 << (bits.clamp(1, 64) - 1);
+    if matches!(ty, Ty::F32 | Ty::F64)
+        && let Expr::Bin(op @ (Op::Xor | Op::And), l, r) = &e
+        && let (Expr::Bitcast(f, t), Expr::Const(c)) | (Expr::Const(c), Expr::Bitcast(f, t)) =
+            (l.as_ref(), r.as_ref())
+        && t.bits() == bits
+    {
+        if *op == Op::Xor && *c == sign {
+            return Expr::Un(UnOp::Neg, f.clone());
+        }
+        if *op == Op::And && *c == sign - 1 {
+            return Expr::Un(UnOp::Fabs, f.clone());
+        }
+    }
+    match e {
+        Expr::Bitcast(inner, t) if t.bits() == bits => *inner,
+        Expr::FConst(c, t) if t.bits() == bits && !matches!(ty, Ty::F32 | Ty::F64) => {
+            Expr::Const(c)
+        }
+        Expr::Const(c) if matches!(ty, Ty::F32 | Ty::F64) => Expr::FConst(c & mask_bits(bits), ty),
+        other => Expr::Bitcast(Box::new(other), ty),
+    }
+}
+
 /// Builds `e & m` simplified.
 ///
 /// The mask is dropped when `e` provably fits in it, the result is `0` when no
@@ -3736,6 +3896,7 @@ pub(super) fn mask(e: Expr, m: u64) -> Expr {
         | Expr::Ternary(..)
         | Expr::Sext(..)
         | Expr::Cast(..)
+        | Expr::Bitcast(..)
         | Expr::Call(..)
         | Expr::Helper(..)
         | Expr::FConst(..) => Expr::Bin(Op::And, Box::new(e), Box::new(Expr::Const(m))),
@@ -5128,8 +5289,8 @@ mod cond_tests {
     /// under the other operator, and means the chain's negation.
     ///
     /// Nested chains keep their parentheses, a negated operand loses its
-    /// `!`, and an ordered comparison of floats, which NaN keeps from
-    /// flipping, keeps the whole chain under one `!`.
+    /// `!`, and a float relation, a comparison macro in the text, negates
+    /// as a whole call.
     #[test]
     fn a_negated_chain_negates_each_operand() {
         use super::super::rewrite::invert_condition;
@@ -5158,9 +5319,94 @@ mod cond_tests {
             "rax >= rcx || rax == 5"
         );
         assert_eq!(
-            invert_condition("xmm0 < xmm1 && rax == 0"),
-            "!(xmm0 < xmm1 && rax == 0)"
+            invert_condition("isless(xmm0, xmm1) && rax == 0"),
+            "!isless(xmm0, xmm1) || rax != 0"
         );
+    }
+
+    /// A float compare means its predicate, NaN order included, through
+    /// every way the text reaches C.
+    ///
+    /// Each of the sixteen predicates, and each code over a float compare's
+    /// flags, renders as the predicate and inverts to its negation, both by
+    /// the renderer and by the text pass that inverts a written condition,
+    /// and still means the same once the comparison macros are spelled as
+    /// operators.
+    #[test]
+    fn a_float_predicate_survives_inversion_and_spelling() {
+        use super::super::fcmp::FPred;
+        use super::super::rewrite::{invert_condition, spell_float_relations};
+        let mut bytes = vec![0u8; 0x2000];
+        bytes[0] = 0xc3;
+        let p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0x40_0000,
+            Some(0x40_1000),
+            vec![Section::mapped(".text", 0x40_1000, 0, 0x1000, false, true)],
+        );
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let n = names(&p, &a, &o);
+        let (x, y) = (
+            Expr::Var(Key::Reg(Register::XMM0)),
+            Expr::Var(Key::Reg(Register::XMM1)),
+        );
+        let mut conds: Vec<Cond> = FPred::ALL
+            .iter()
+            .map(|&pred| Cond {
+                cc: Cc(ConditionCode::ne),
+                flags: Flags::FCmp(pred, x.clone(), y.clone(), 64),
+            })
+            .collect();
+        conds.extend(CCS.iter().map(|&cc| Cond {
+            cc: Cc(cc),
+            flags: Flags::Float(x.clone(), y.clone(), 64),
+        }));
+        let floats = [f64::NAN, -1.0, 0.0, 1.0, f64::INFINITY];
+        for cond in conds {
+            let Some((pred, ..)) = cond.fcmp() else {
+                continue;
+            };
+            let normal = cond.render(&n, false);
+            let inverted = cond.render(&n, true);
+            let flipped = invert_condition(&normal);
+            let shown = |t: &str| {
+                spell_float_relations(&format!("if ({t}) {{"))
+                    .trim()
+                    .to_owned()
+            };
+            for &fa in &floats {
+                for &fb in &floats {
+                    let want = pred.holds(fa, fb);
+                    let at = |t: &str| eval(t, (0, 0), (fa, fb));
+                    let spelled = |t: &str| {
+                        let line = shown(t);
+                        let inner = line
+                            .strip_prefix("if (")
+                            .and_then(|l| l.strip_suffix(") {"))
+                            .unwrap_or_default()
+                            .to_owned();
+                        at(&inner)
+                    };
+                    assert_eq!(at(&normal), want, "{pred:?}: {normal} at {fa}, {fb}");
+                    assert_eq!(at(&inverted), !want, "{pred:?}: {inverted} at {fa}, {fb}");
+                    assert_eq!(at(&flipped), !want, "{pred:?}: {flipped} at {fa}, {fb}");
+                    assert_eq!(
+                        spelled(&normal),
+                        want,
+                        "{pred:?}: {} at {fa}, {fb}",
+                        shown(&normal)
+                    );
+                    assert_eq!(
+                        spelled(&flipped),
+                        !want,
+                        "{pred:?}: {} at {fa}, {fb}",
+                        shown(&flipped)
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -5363,6 +5609,22 @@ mod fold_tests {
                     Some(set)
                 } else {
                     (c.cc == cc.invert()).then_some(!set)
+                };
+            }
+            Flags::FCmp(p, l, r, w) => {
+                let f = |e: &Expr| -> Option<f64> {
+                    let bits = v(e, *w)?;
+                    Some(if *w == 32 {
+                        f64::from(f32::from_bits(u32::try_from(bits).ok()?))
+                    } else {
+                        f64::from_bits(bits)
+                    })
+                };
+                let held = p.holds(f(l)?, f(r)?);
+                return match c.cc.0 {
+                    C::ne => Some(held),
+                    C::e => Some(!held),
+                    _ => None,
                 };
             }
             Flags::Shift(..) | Flags::Unknown => return None,

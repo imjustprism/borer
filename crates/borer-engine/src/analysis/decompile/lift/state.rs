@@ -210,7 +210,7 @@ impl<'a> Exec<'_, 'a> {
         match &v {
             _ if bits >= self.word_ty().bits() => v,
             Expr::Const(_) => v,
-            Expr::Deref(_, ty) | Expr::Cast(_, ty) if ty.bits() == bits => v,
+            Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) if ty.bits() == bits => v,
             _ => Expr::Cast(Box::new(v), Ty::from_bits(bits)),
         }
     }
@@ -388,8 +388,9 @@ impl<'a> Exec<'_, 'a> {
     /// so is the slot itself when its pending store has another width
     /// (`movups [rsp+40h], xmm0; movzx r9d, word [rsp+40h]` reads two bytes
     /// of the sixteen the store has not written yet). A slot whose value is
-    /// known at exactly this width yields that value; otherwise the slot's
-    /// text variable is read at this width.
+    /// known at exactly this width yields that value, its bits when a float
+    /// is read as an integer ([`bitcast`]); otherwise the slot's text
+    /// variable is read at this width.
     ///
     /// # Arguments
     ///
@@ -424,7 +425,12 @@ impl<'a> Exec<'_, 'a> {
         if self.env.slot_bits.get(&k) == Some(&ty.bits())
             && let Some(v) = self.env.vals.get(&Key::Slot(k))
         {
-            return self.assumed(v.clone());
+            let v = match ty {
+                Ty::U32 | Ty::U64 if v.is_float() || self.float_param(v) => bitcast(v.clone(), ty),
+                Ty::F32 | Ty::F64 if matches!(v, Expr::Bitcast(..)) => bitcast(v.clone(), ty),
+                Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::F32 | Ty::F64 => v.clone(),
+            };
+            return self.assumed(v);
         }
         if let Some(&stored) = self.env.slot_bits.get(&k)
             && stored > ty.bits()
@@ -548,7 +554,9 @@ impl<'a> Exec<'_, 'a> {
             Expr::Const(_) | Expr::Sext(..) | Expr::Cond(_) => true,
             Expr::Bin(op, ..) => !op.is_float(),
             Expr::Helper(..) => !v.is_float(),
-            Expr::Deref(_, ty) | Expr::Cast(_, ty) => !matches!(ty, Ty::F32 | Ty::F64 | Ty::U128),
+            Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) => {
+                !matches!(ty, Ty::F32 | Ty::F64 | Ty::U128)
+            }
             Expr::Var(Key::Param(i)) => self.ctx.arg_floats & (1u8 << (*i).min(7)) == 0,
             Expr::Var(Key::Reg(r)) => r.is_gpr(),
             Expr::Var(Key::A64(r)) => matches!(r, crate::isa::a64::Reg::X(_)),
@@ -1730,9 +1738,9 @@ impl<'a> Exec<'_, 'a> {
                 .regs_needed
                 .as_ref()
                 .is_none_or(|m| m.get(&ah).is_some_and(|lane| *lane >= 16));
-            if let (true, Flags::Cmp(l, r, bits)) = (read_later, saved) {
+            if let (true, Flags::Float(l, r, bits)) = (read_later, saved) {
                 let (l, r) = self.tmp_pair(l, r, pred);
-                self.status_ah = Some((held, Flags::Cmp(l, r, bits)));
+                self.status_ah = Some((held, Flags::Float(l, r, bits)));
             }
         }
         let flags = std::mem::replace(&mut self.flags, Flags::Unknown);
@@ -1745,6 +1753,10 @@ impl<'a> Exec<'_, 'a> {
             Flags::Float(l, r, b) => {
                 let (l, r) = self.tmp_pair(l, r, pred);
                 Flags::Float(l, r, b)
+            }
+            Flags::FCmp(p, l, r, b) => {
+                let (l, r) = self.tmp_pair(l, r, pred);
+                Flags::FCmp(p, l, r, b)
             }
             Flags::Test(l, r, b) => {
                 let (l, r) = self.tmp_pair(l, r, pred);
@@ -1818,6 +1830,10 @@ impl<'a> Exec<'_, 'a> {
             Flags::Float(l, r, b) => {
                 let (l, r) = pair(self, l, r);
                 Flags::Float(l, r, b)
+            }
+            Flags::FCmp(p, l, r, b) => {
+                let (l, r) = pair(self, l, r);
+                Flags::FCmp(p, l, r, b)
             }
             Flags::Test(l, r, b) => {
                 let (l, r) = pair(self, l, r);

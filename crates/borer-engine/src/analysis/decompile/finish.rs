@@ -54,8 +54,8 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
         out.push_str(&elvis(&compound_assign(line)));
     }
     out.push('\n');
-    refold_jumps(&float_bit_reads(&callable_pointers(&stack_arrays(
-        &spell_nullptr(&spell_own_enum(&spell_index(&out))),
+    spell_float_relations(&refold_jumps(&float_bit_reads(&callable_pointers(
+        &stack_arrays(&spell_nullptr(&spell_own_enum(&spell_index(&out)))),
     ))))
 }
 

@@ -1180,7 +1180,9 @@ fn named_slots(effects: &[Vec<Effect>], word: u64) -> BTreeMap<i64, u64> {
                 stack.push(l);
                 stack.push(r);
             }
-            Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) => stack.push(x),
+            Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) | Expr::Bitcast(x, _) => {
+                stack.push(x);
+            }
             Expr::Cond(c) => cond_exprs(c, &mut stack),
             Expr::Ternary(c, a, b) => {
                 cond_exprs(c, &mut stack);
@@ -1263,7 +1265,9 @@ fn overwritten_first(effects: &[Effect], off: i64) -> bool {
                     reads.push(l);
                     reads.push(rr);
                 }
-                Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) => reads.push(x),
+                Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) | Expr::Bitcast(x, _) => {
+                    reads.push(x);
+                }
                 Expr::Cond(c) => cond_exprs(c, &mut reads),
                 Expr::Ternary(c, a, b) => {
                     cond_exprs(c, &mut reads);
@@ -1305,6 +1309,7 @@ fn cond_exprs<'e>(c: &'e Cond, out: &mut Vec<&'e Expr>) {
     match &c.flags {
         Flags::Cmp(a, b, _)
         | Flags::Float(a, b, _)
+        | Flags::FCmp(_, a, b, _)
         | Flags::Test(a, b, _)
         | Flags::Add(a, b, _)
         | Flags::Shift(a, _, b) => {
@@ -1948,6 +1953,7 @@ fn floating(e: &Expr) -> bool {
         Expr::FConst(..)
         | Expr::Deref(_, Ty::F32 | Ty::F64)
         | Expr::Cast(_, Ty::F32 | Ty::F64)
+        | Expr::Bitcast(_, Ty::F32 | Ty::F64)
         | Expr::Un(UnOp::Sqrt | UnOp::Fabs, _) => true,
         Expr::Helper(Helper::Rint, _) => true,
         Expr::Bin(op, l, r) => op.is_float() || floating(l) || floating(r),
@@ -1970,7 +1976,7 @@ fn floating(e: &Expr) -> bool {
 fn op_width(op: UnOp, x: &Expr, width: u8) -> u8 {
     match op {
         UnOp::Bswap | UnOp::Tzcnt | UnOp::Lzcnt | UnOp::Popcnt | UnOp::Bsf | UnOp::Bsr => match x {
-            Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(width),
+            Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(width),
             _ => width,
         },
         UnOp::Neg | UnOp::Not | UnOp::Sqrt | UnOp::Fabs => width,
@@ -2385,8 +2391,14 @@ impl<M: Bench> Text<'_, M> {
     /// * `e` - The expression.
     fn float_bits(&self, e: &Expr) -> Option<u8> {
         match e {
-            Expr::Deref(_, Ty::F32) | Expr::Cast(_, Ty::F32) | Expr::FConst(_, Ty::F32) => Some(32),
-            Expr::Deref(_, Ty::F64) | Expr::Cast(_, Ty::F64) | Expr::FConst(_, Ty::F64) => Some(64),
+            Expr::Deref(_, Ty::F32)
+            | Expr::Cast(_, Ty::F32)
+            | Expr::Bitcast(_, Ty::F32)
+            | Expr::FConst(_, Ty::F32) => Some(32),
+            Expr::Deref(_, Ty::F64)
+            | Expr::Cast(_, Ty::F64)
+            | Expr::Bitcast(_, Ty::F64)
+            | Expr::FConst(_, Ty::F64) => Some(64),
             Expr::Bin(op, l, r) if op.is_float() => {
                 Some(self.float_bits(l)?.max(self.float_bits(r)?))
             }
@@ -2532,6 +2544,8 @@ impl<M: Bench> Text<'_, M> {
                 }
             }
             Expr::Sext(x, bits) => sext(self.eval_at(x, d)?, *bits),
+            Expr::Bitcast(_, Ty::U128) => None,
+            Expr::Bitcast(x, ty) => Some(self.eval_at(x, d)? & low(ty.bits())),
             Expr::Cast(x, ty) => {
                 if *ty == Ty::U128 {
                     return None;
@@ -2622,7 +2636,12 @@ impl<M: Bench> Text<'_, M> {
                 self.read_vec(at)
             }
             Expr::Call(name, args) => self.packed_op(name, args, d),
-            Expr::Str(_) | Expr::FConst(..) | Expr::Sp(_) | Expr::Sext(..) | Expr::Cast(..) => None,
+            Expr::Str(_)
+            | Expr::FConst(..)
+            | Expr::Sp(_)
+            | Expr::Sext(..)
+            | Expr::Cast(..)
+            | Expr::Bitcast(..) => None,
             Expr::Helper(..) => None,
             Expr::Bin(..) | Expr::Un(..) | Expr::Cond(..) | Expr::Ternary(..) => None,
             Expr::Deref(..) => None,
@@ -2864,10 +2883,11 @@ impl<M: Bench> Text<'_, M> {
                 return super::expr::float_cc(c.cc.0, l, r);
             }
         }
-        if let Flags::Float(a, b, fb) = &c.flags {
-            let l = float_of(self.eval_at(a, d)?, *fb);
-            let r = float_of(self.eval_at(b, d)?, *fb);
-            return super::expr::float_cc(c.cc.0, l, r);
+        if let Flags::Float(..) | Flags::FCmp(..) = &c.flags {
+            let (p, a, b, fb) = c.fcmp()?;
+            let l = float_of(self.eval_at(a, d)?, fb);
+            let r = float_of(self.eval_at(b, d)?, fb);
+            return Some(p.holds(l, r));
         }
         let k = |e: &Expr| {
             if floating(e) {
@@ -2879,6 +2899,7 @@ impl<M: Bench> Text<'_, M> {
         let flags = match &c.flags {
             Flags::Cmp(a, b, w) => Flags::Cmp(k(a)?, k(b)?, *w),
             Flags::Float(a, b, w) => Flags::Float(k(a)?, k(b)?, *w),
+            Flags::FCmp(p, a, b, w) => Flags::FCmp(*p, k(a)?, k(b)?, *w),
             Flags::Test(a, b, w) => Flags::Test(k(a)?, k(b)?, *w),
             Flags::Result(a, w) => Flags::Result(k(a)?, *w),
             Flags::Add(a, b, w) => Flags::Add(k(a)?, k(b)?, *w),

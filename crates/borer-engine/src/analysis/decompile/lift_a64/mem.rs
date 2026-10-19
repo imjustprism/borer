@@ -218,6 +218,7 @@ fn lane_sign(v: &Expr) -> bool {
         | Expr::Sext(_, _)
         | Expr::Cast(_, _)
         | Expr::Call(_, _)
+        | Expr::Bitcast(_, _)
         | Expr::Helper(_, _) => false,
     }
 }
@@ -332,6 +333,7 @@ fn named_width(v: &Expr, ty_of: &dyn Fn(Key) -> Option<u8>) -> Option<u8> {
         | Expr::Sext(_, _)
         | Expr::Cast(_, _)
         | Expr::Call(_, _)
+        | Expr::Bitcast(_, _)
         | Expr::Helper(_, _) => None,
     }
 }
@@ -359,7 +361,7 @@ pub(super) fn float_ty_bits(ty: Ty) -> Option<u8> {
 /// * `v` - The value a store writes.
 pub(super) fn float_width(v: &Expr) -> Option<u8> {
     match v {
-        Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::FConst(_, ty) => {
+        Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::FConst(_, ty) => {
             matches!(ty, Ty::F32 | Ty::F64).then_some(ty.bits())
         }
         Expr::Bin(op, l, r) if op.is_float() => Some(float_width(l)?.max(float_width(r)?)),

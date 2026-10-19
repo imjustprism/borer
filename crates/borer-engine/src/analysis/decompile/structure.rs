@@ -513,10 +513,10 @@ impl Guard {
 
     /// Tells whether this one condition is the negation of `other`.
     ///
-    /// A floating-point comparison never negates by a flipped code (NaN
-    /// makes `a < b` and `a >= b` both false), and neither does a
-    /// condition that carries a call `other` lacks, so those decide
-    /// nothing about each other.
+    /// The flipped code over the same flags is the exact negation, a float
+    /// compare's included: its predicate negates within the set
+    /// ([`super::fcmp::FPred::negate`]), NaN order and all. A condition
+    /// that carries a call decides nothing, which the caller checks.
     ///
     /// # Arguments
     ///
@@ -525,11 +525,7 @@ impl Guard {
         let (Guard::One(a, ka), Guard::One(b, kb)) = (self, other) else {
             return false;
         };
-        a.cc.0 != ConditionCode::None
-            && !matches!(a.flags, Flags::Float(..))
-            && ka == kb
-            && b.cc.0 == a.cc.invert().0
-            && b.flags == a.flags
+        a.cc.0 != ConditionCode::None && ka == kb && b.cc.0 == a.cc.invert().0 && b.flags == a.flags
     }
 
     /// Renders the guard as a C boolean expression.
@@ -887,9 +883,8 @@ pub(super) fn logical_operands(cond: &str) -> Option<(&'static str, Vec<&str>)> 
 /// the other one, in the order the operands were evaluated, so a short
 /// circuit still skips what it skipped. An operand that is a parenthesized
 /// chain is negated the same way and keeps its parentheses. The chain stays
-/// whole when an operand would only negate as `!(...)`: a bare value, or an
-/// ordered comparison of floating-point operands, which NaN keeps from
-/// flipping.
+/// whole when an operand would only negate as `!(...)`, as a bare value
+/// does.
 ///
 /// # Arguments
 ///

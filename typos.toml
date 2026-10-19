@@ -47,3 +47,5 @@ Aas = "Aas"
 Aad = "Aad"
 Aam = "Aam"
 Setp = "Setp"
+# LLVM's ordered less-than float compare predicate (`fcmp olt`)
+Olt = "Olt"

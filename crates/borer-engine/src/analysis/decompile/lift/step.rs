@@ -284,9 +284,10 @@ impl<'a> Exec<'_, 'a> {
             Some(v) if self.ctx.ret_sse => {
                 let v = float_result(v);
                 let bits = match v {
-                    Expr::Deref(_, Ty::F32) | Expr::Cast(_, Ty::F32) | Expr::FConst(_, Ty::F32) => {
-                        32
-                    }
+                    Expr::Deref(_, Ty::F32)
+                    | Expr::Cast(_, Ty::F32)
+                    | Expr::Bitcast(_, Ty::F32)
+                    | Expr::FConst(_, Ty::F32) => 32,
                     Expr::Const(_) => 0,
                     _ => 64,
                 };
@@ -505,6 +506,30 @@ impl<'a> Exec<'_, 'a> {
                     Mnemonic::Movsd | Mnemonic::Vmovsd => {
                         self.note_reg_ty(instr, Ty::F64);
                         float_bits(v, Ty::F64)
+                    }
+                    Mnemonic::Movd | Mnemonic::Vmovd | Mnemonic::Movq | Mnemonic::Vmovq
+                        if instr.op0_kind() == OpKind::Register
+                            && instr.op0_register().is_vector_register()
+                            && instr.op1_kind() == OpKind::Register
+                            && !instr.op1_register().is_vector_register() =>
+                    {
+                        let wide = matches!(mn, Mnemonic::Movq | Mnemonic::Vmovq);
+                        let float = if wide { Ty::F64 } else { Ty::F32 };
+                        match bitcast(v.clone(), float) {
+                            Expr::Bitcast(..) if wide => v,
+                            Expr::Bitcast(..) => mask(v, 0xffff_ffff),
+                            f => f,
+                        }
+                    }
+                    Mnemonic::Movd | Mnemonic::Vmovd | Mnemonic::Movq | Mnemonic::Vmovq
+                        if instr.op1_kind() == OpKind::Register
+                            && instr.op1_register().is_vector_register()
+                            && instr.op0_kind() == OpKind::Register
+                            && !instr.op0_register().is_vector_register()
+                            && self.holds_float(instr.op1_register(), &v) =>
+                    {
+                        let wide = matches!(mn, Mnemonic::Movq | Mnemonic::Vmovq);
+                        bitcast(v, if wide { Ty::U64 } else { Ty::U32 })
                     }
                     Mnemonic::Movd | Mnemonic::Vmovd
                         if instr.op0_kind() == OpKind::Register
@@ -1068,7 +1093,7 @@ impl<'a> Exec<'_, 'a> {
                 let ty = if fbits == 64 { Ty::F64 } else { Ty::F32 };
                 let l = scalar_lane(self.val(instr, 0), ty);
                 let r = scalar_lane(self.val(instr, 1), ty);
-                self.flags = Flags::Cmp(l, r, fbits);
+                self.flags = Flags::Float(l, r, fbits);
             }
             Mnemonic::Cmpxchg if instr.op_count() == 2 && instr.op0_kind() == OpKind::Memory => {
                 self.cmpxchg(instr, bits);
@@ -1469,9 +1494,9 @@ impl<'a> Exec<'_, 'a> {
                     .env
                     .fpu_cmp
                     .clone()
-                    .map(|(l, r)| (self.reg_read(Register::AH), Flags::Cmp(l, r, 64)));
+                    .map(|(l, r)| (self.reg_read(Register::AH), Flags::Float(l, r, 64)));
             }
-            Mnemonic::Lahf if self.float_flags && matches!(self.flags, Flags::Cmp(..)) => {
+            Mnemonic::Lahf if self.float_flags && matches!(self.flags, Flags::Float(..)) => {
                 let saved = self.flags.clone();
                 self.reg_write(Register::AH, Expr::Helper(Helper::Lahf, Vec::new()));
                 self.status_ah = Some((self.reg_read(Register::AH), saved));
@@ -1480,7 +1505,7 @@ impl<'a> Exec<'_, 'a> {
                 let ah = self.reg_read(Register::AH);
                 self.flags = match (self.status_ah.clone(), self.env.fpu_cmp.clone()) {
                     (Some((held, saved)), _) if held == ah => saved,
-                    (_, Some((l, r))) => Flags::Cmp(l, r, 64),
+                    (_, Some((l, r))) => Flags::Float(l, r, 64),
                     (_, None) => Flags::Unknown,
                 };
             }
@@ -1678,13 +1703,10 @@ impl<'a> Exec<'_, 'a> {
     /// at 0x40, PF (C2) at 0x04 and CF (C0) at 0x01, and the four outcomes
     /// set them as greater 000, less 001, equal 100 and unordered 111. The
     /// jump after the test reads the parity (`jp`) or the zero flag (`je`)
-    /// of the masked bits, so it is taken on a set of outcomes; when that
-    /// set or its complement is what a C comparison of the operands holds
-    /// on (`a != b` on greater, less and unordered, `a < b` on less alone),
-    /// the flags are that comparison's truth: `test ah, 0x44; jp` is
-    /// `a != b`, `test ah, 5; jnp` is `a < b`. A comparison holding on less
-    /// alone (or on less and equal) is the flags' `a` (`ae`) with the
-    /// operands swapped, since the flags' `b` (`be`) holds on unordered too.
+    /// of the masked bits, so it is taken on a set of outcomes, and every
+    /// set is one float compare predicate ([`FPred::of_outcomes`]): `test
+    /// ah, 0x44; jp` is the unordered not-equal, `test ah, 5; jnp` the
+    /// ordered less-than.
     ///
     /// # Arguments
     ///
@@ -1696,23 +1718,13 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// The flags, or `None` when `l` is not the status `ah` holds, the
     /// mask reaches other bits, the reader is not one parity or zero test,
-    /// or no comparison holds on the set.
+    /// or the status holds no float compare.
     pub(super) fn status_test(&self, l: &Expr, r: &Expr) -> Option<Flags> {
         /// ZF, PF and CF (C3, C2 and C0) in the byte.
         const STATUS: u64 = 0x45;
         /// The byte each outcome leaves, by bit of an outcome set: greater,
         /// less, equal, unordered.
         const OUTCOMES: [u64; 4] = [0x00, 0x01, 0x40, 0x45];
-        /// The comparisons, by the outcomes they hold on: the condition
-        /// code, whether it reads the operands swapped, and the set.
-        const RELATIONS: [(ConditionCode, bool, u8); 6] = [
-            (ConditionCode::a, false, 0b0001),
-            (ConditionCode::a, true, 0b0010),
-            (ConditionCode::e, false, 0b0100),
-            (ConditionCode::ae, false, 0b0101),
-            (ConditionCode::ae, true, 0b0110),
-            (ConditionCode::ne, false, 0b1011),
-        ];
         let (held, cmp) = self.status_ah.as_ref()?;
         let mask = match (l, r) {
             (l, &Expr::Const(m)) if l == held => m,
@@ -1743,24 +1755,13 @@ impl<'a> Exec<'_, 'a> {
         } else {
             ConditionCode::e
         });
-        let (relation, swapped, reader) = RELATIONS.iter().find_map(|&(cc, swapped, set)| {
-            if set == taken {
-                Some((cc, swapped, reader))
-            } else if set == !taken & 0b1111 {
-                Some((cc, swapped, reader.invert()))
-            } else {
-                None
-            }
-        })?;
-        let flags = match cmp {
-            Flags::Cmp(l, r, b) if swapped => Flags::Cmp(r.clone(), l.clone(), *b),
-            _ if swapped => return None,
-            other => other.clone(),
+        let Flags::Float(a, b, w) = cmp else {
+            return None;
         };
         Some(Flags::Truth(
             Expr::Cond(Box::new(Cond {
-                cc: Cc(relation),
-                flags,
+                cc: Cc(ConditionCode::ne),
+                flags: Flags::FCmp(FPred::of_outcomes(taken), a.clone(), b.clone(), *w),
             })),
             reader,
         ))
@@ -2111,7 +2112,7 @@ fn widen(e: Expr, bits: u8, signed: bool) -> Expr {
 /// * `e` - The operand as the environment holds it.
 fn widen64(e: Expr) -> Expr {
     match &e {
-        Expr::Deref(_, ty) | Expr::Cast(_, ty) if ty.bits() == 32 => {
+        Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) if ty.bits() == 32 => {
             Expr::Cast(Box::new(e), Ty::U64)
         }
         _ => e,

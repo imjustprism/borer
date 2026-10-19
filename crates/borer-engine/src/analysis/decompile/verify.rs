@@ -729,6 +729,9 @@ pub(super) fn eval<M: Bench>(
             }
         }
         Expr::Sext(inner, bits) => sext(eval(inner, st, reads, d)?, *bits),
+        Expr::Bitcast(inner, ty) if ty.bits() <= 64 => {
+            Some(eval(inner, st, reads, d)? & low(ty.bits()))
+        }
         Expr::Cast(inner, ty) if ty.bits() <= 64 && !matches!(ty, Ty::F32 | Ty::F64) => {
             let v = eval(inner, st, reads, d)?;
             if let Some(fb) = float_bits(inner, st) {
@@ -786,8 +789,14 @@ pub(super) fn eval<M: Bench>(
 /// * `st` - The starting state, whose temporaries are looked through.
 pub(super) fn float_bits<M: Bench>(e: &Expr, st: &State<'_, M>) -> Option<u8> {
     match e {
-        Expr::Deref(_, Ty::F32) | Expr::Cast(_, Ty::F32) | Expr::FConst(_, Ty::F32) => Some(32),
-        Expr::Deref(_, Ty::F64) | Expr::Cast(_, Ty::F64) | Expr::FConst(_, Ty::F64) => Some(64),
+        Expr::Deref(_, Ty::F32)
+        | Expr::Cast(_, Ty::F32)
+        | Expr::Bitcast(_, Ty::F32)
+        | Expr::FConst(_, Ty::F32) => Some(32),
+        Expr::Deref(_, Ty::F64)
+        | Expr::Cast(_, Ty::F64)
+        | Expr::Bitcast(_, Ty::F64)
+        | Expr::FConst(_, Ty::F64) => Some(64),
         Expr::Var(Key::Tmp(id)) => float_bits(st.temps.get(id)?, st),
         Expr::Bin(op, l, r) if op.is_float() => Some(float_bits(l, st)?.max(float_bits(r, st)?)),
         Expr::Ternary(_, a, b) => either_width(float_bits(a, st), float_bits(b, st)),
@@ -878,6 +887,7 @@ pub(super) fn float_carried(
         | Expr::Sext(_, _)
         | Expr::Cast(_, _)
         | Expr::Call(_, _)
+        | Expr::Bitcast(_, _)
         | Expr::Helper(_, _) => None,
     }
 }
@@ -1220,10 +1230,11 @@ pub(super) fn eval_cond<M: Bench>(
     reads: &mut Vec<(u64, u64)>,
     d: u8,
 ) -> Option<bool> {
-    if let Flags::Float(a, b, fb) = &c.flags {
-        let l = float_of(eval(a, st, reads, d)?, *fb);
-        let r = float_of(eval(b, st, reads, d)?, *fb);
-        return super::expr::float_cc(c.cc.0, l, r);
+    if let Flags::Float(..) | Flags::FCmp(..) = &c.flags {
+        let (p, a, b, fb) = c.fcmp()?;
+        let l = float_of(eval(a, st, reads, d)?, fb);
+        let r = float_of(eval(b, st, reads, d)?, fb);
+        return Some(p.holds(l, r));
     }
     if let Flags::Cmp(a, b, _) = &c.flags
         && let Some(fb) = float_bits(a, st).or_else(|| float_bits(b, st))
@@ -1235,7 +1246,7 @@ pub(super) fn eval_cond<M: Bench>(
     let mut k = |e: &Expr| eval(e, st, reads, d).map(Expr::Const);
     let flags = match &c.flags {
         Flags::Cmp(a, b, w) => Flags::Cmp(k(a)?, k(b)?, *w),
-        Flags::Float(..) => return None,
+        Flags::Float(..) | Flags::FCmp(..) => return None,
         Flags::Test(a, b, w) => Flags::Test(k(a)?, k(b)?, *w),
         Flags::Result(a, w) => Flags::Result(k(a)?, *w),
         Flags::Add(a, b, w) => Flags::Add(k(a)?, k(b)?, *w),

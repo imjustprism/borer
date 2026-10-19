@@ -523,6 +523,7 @@ impl Helper {
                 | Expr::Ternary(..)
                 | Expr::Sext(..)
                 | Expr::Cast(..)
+                | Expr::Bitcast(..)
                 | Expr::Call(..)
                 | Expr::Helper(..)
                 | Expr::FConst(..) => None,
@@ -541,6 +542,7 @@ impl Helper {
                 | Expr::Ternary(..)
                 | Expr::Sext(..)
                 | Expr::Cast(..)
+                | Expr::Bitcast(..)
                 | Expr::Call(..)
                 | Expr::Helper(..)
                 | Expr::FConst(..) => None,
@@ -991,7 +993,7 @@ impl fmt::Display for Helper {
 /// * `word` - The machine word's width, the width of anything untyped.
 fn arg_bits(e: &Expr, word: u8) -> u8 {
     match e {
-        Expr::Cast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(word),
+        Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::Deref(_, ty) => ty.bits().min(word),
         Expr::Const(_)
         | Expr::Var(_)
         | Expr::Str(_)

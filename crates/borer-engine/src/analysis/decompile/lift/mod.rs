@@ -46,9 +46,10 @@ use crate::isa::x86::{
 
 use super::abi::{self, Conv, FASTCALL_X86, conv};
 use super::expr::{
-    Cc, Cond, Expr, Flags, Key, Names, Op, Ty, UnOp, bare, either_width, fold, known_bits, mask,
-    mask_bits, sign_extend, table_index, unary, without_addend,
+    Cc, Cond, Expr, Flags, Key, Names, Op, Ty, UnOp, bare, bitcast, either_width, fold, known_bits,
+    mask, mask_bits, sign_extend, table_index, unary, without_addend,
 };
+use super::fcmp::FPred;
 use super::helper::Helper;
 use super::{Ctx, callee_shape, literal_at};
 use crate::analysis::name_of;
@@ -1178,7 +1179,7 @@ fn float_bits(v: Expr, ty: Ty) -> Expr {
 /// * `v` - The value a scalar float instruction reads.
 fn float_lane(v: &Expr) -> Option<u8> {
     match v {
-        Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::FConst(_, ty) => {
+        Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::FConst(_, ty) => {
             matches!(ty, Ty::F32 | Ty::F64).then_some(ty.bits())
         }
         Expr::Bin(op, l, r) if op.is_float() => Some(float_lane(l)?.max(float_lane(r)?)),
@@ -1230,6 +1231,7 @@ fn lane_zeros_above(v: &Expr) -> bool {
         | Expr::Sext(..)
         | Expr::Cast(..)
         | Expr::Call(..)
+        | Expr::Bitcast(..)
         | Expr::Helper(..) => false,
     }
 }
@@ -1689,6 +1691,7 @@ fn keeps_vector(v: &Expr) -> bool {
         | Expr::Ternary(..)
         | Expr::Sext(..)
         | Expr::Cast(..)
+        | Expr::Bitcast(..)
         | Expr::Helper(..) => false,
     }
 }

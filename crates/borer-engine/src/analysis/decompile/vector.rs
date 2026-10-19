@@ -1360,7 +1360,12 @@ fn operand(e: &Expr, want: Vt, n: &Names<'_>) -> String {
             }
             None if matches!(
                 e,
-                Expr::Var(_) | Expr::Deref(..) | Expr::Call(..) | Expr::Helper(..) | Expr::Cast(..)
+                Expr::Var(_)
+                    | Expr::Deref(..)
+                    | Expr::Call(..)
+                    | Expr::Helper(..)
+                    | Expr::Cast(..)
+                    | Expr::Bitcast(..)
             ) =>
             {
                 format!("({word}){}", e.render(n))
@@ -1378,12 +1383,14 @@ fn operand(e: &Expr, want: Vt, n: &Names<'_>) -> String {
 /// * `e` - The expression.
 fn float_elem(e: &Expr) -> Option<Elem> {
     match e {
-        Expr::Deref(_, Ty::F32) | Expr::Cast(_, Ty::F32) | Expr::FConst(_, Ty::F32) => {
-            Some(Elem::F32)
-        }
-        Expr::Deref(_, Ty::F64) | Expr::Cast(_, Ty::F64) | Expr::FConst(_, Ty::F64) => {
-            Some(Elem::F64)
-        }
+        Expr::Deref(_, Ty::F32)
+        | Expr::Cast(_, Ty::F32)
+        | Expr::Bitcast(_, Ty::F32)
+        | Expr::FConst(_, Ty::F32) => Some(Elem::F32),
+        Expr::Deref(_, Ty::F64)
+        | Expr::Cast(_, Ty::F64)
+        | Expr::Bitcast(_, Ty::F64)
+        | Expr::FConst(_, Ty::F64) => Some(Elem::F64),
         Expr::Bin(op, l, r) if op.is_float() => float_elem(l).or_else(|| float_elem(r)),
         Expr::Un(_, inner) => float_elem(inner),
         Expr::Ternary(_, a, b) => float_elem(a).or_else(|| float_elem(b)),
@@ -1395,6 +1402,7 @@ fn float_elem(e: &Expr) -> Option<Elem> {
         | Expr::Call(..)
         | Expr::Helper(..)
         | Expr::Cast(..)
+        | Expr::Bitcast(..)
         | Expr::Sext(..)
         | Expr::Bin(..)
         | Expr::Cond(_)

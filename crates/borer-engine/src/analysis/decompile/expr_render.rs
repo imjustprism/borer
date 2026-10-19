@@ -10,6 +10,7 @@ use super::expr::{
     ATOM, Cc, Cond, Expr, Flags, Key, LOGICAL, Op, Ty, UNARY, UnOp, fold, indexed, low_bits_read,
     mask_bits, opaque_note, sext, signed_ty, tls_slot,
 };
+use super::fcmp::FPred;
 use super::helper::Helper;
 use crate::analysis::Overlay;
 use crate::isa::a64;
@@ -852,6 +853,7 @@ impl Expr {
                 let es = if ep < UNARY { format!("({es})") } else { es };
                 (format!("({}){es}", cast_name(*ty)), UNARY)
             }
+            Expr::Bitcast(e, ty) => render_bitcast(e, *ty, n),
             Expr::Bin(op, l, r) => {
                 if *op == Op::And
                     && let Some((a, b)) = ordered_equality(l, r)
@@ -1094,6 +1096,46 @@ impl Expr {
     }
 }
 
+/// Renders the bits of a value read as another type of the same width.
+///
+/// A name reads through a pointer to it (`*(uint32_t*)&a1`), a load is
+/// the load at the other type, and any other value goes through a union
+/// literal, the one C99 spelling of a bit cast that needs no object.
+///
+/// # Arguments
+///
+/// * `e` - The value whose bits are read.
+/// * `ty` - The type they are read as.
+/// * `n` - Name resolution.
+///
+/// # Returns
+///
+/// The text and its precedence.
+fn render_bitcast(e: &Expr, ty: Ty, n: &Names<'_>) -> (String, u8) {
+    let from = match ty {
+        Ty::U32 => Ty::F32,
+        Ty::U64 => Ty::F64,
+        Ty::F32 => Ty::U32,
+        Ty::F64 => Ty::U64,
+        Ty::U8 | Ty::U16 | Ty::U128 => return e.render_prec(n, false, false),
+    };
+    if let Expr::Deref(a, _) = e {
+        return Expr::Deref(a.clone(), ty).render_prec(n, false, false);
+    }
+    let (s, p) = e.render_prec(n, false, false);
+    if p == ATOM && s.chars().all(super::line::is_ident_char) {
+        return (format!("*({}*)&{s}", ty.name()), UNARY);
+    }
+    (
+        format!(
+            "((union {{ {} from; {} to; }}){{ .from = {s} }}).to",
+            from.name(),
+            ty.name()
+        ),
+        ATOM,
+    )
+}
+
 /// Renders the low `bits` bits of a value read as a signed number.
 ///
 /// A width C has a type for reads as a cast to it: `(int8_t)x`. Any other
@@ -1249,40 +1291,24 @@ impl Cond {
                 None => format!("!{}", paren_if_lower(e, n, UNARY)),
             },
             Flags::Truth(e, _) => undecided(n, self.cc, inverted, &[e]),
-            Flags::Float(l, r, bits) if matches!(cc.0, C::p | C::np) => {
-                let not = if cc.0 == C::np { "!" } else { "" };
-                format!("{not}isunordered({}, {})", l.render(n), r.render(n))
-            }
-            Flags::Float(l, r, _) if matches!(cc.0, C::a | C::ae | C::b | C::be) => {
-                float_relation(n, cc, l, r)
-            }
-            Flags::Float(l, r, _) if matches!(cc.0, C::e | C::ne) => float_equality(n, cc, l, r),
-            Flags::Float(l, r, bits) => match cc.rel() {
-                Some(rel) => compare(n, l, r, rel, false, *bits),
+            Flags::Float(l, r, _) | Flags::FCmp(_, l, r, _) => match self.flags.fpred(cc) {
+                Some(p) => render_fcmp(n, p, l, r),
                 None => undecided(n, self.cc, inverted, &[l, r]),
             },
-            Flags::Cmp(l, r, bits) if matches!(cc.0, C::p | C::np) => {
-                let unordered = l.is_float()
-                    || r.is_float()
-                    || super::line::float_like(&l.render(n))
-                    || super::line::float_like(&r.render(n));
-                let not = if cc.0 == C::np { "!" } else { "" };
-                if unordered {
-                    format!("{not}isunordered({}, {})", l.render(n), r.render(n))
-                } else {
-                    parity(n, cc, &fold(Op::Sub, l.clone(), r.clone(), *bits))
-                }
-            }
             Flags::Cmp(l, r, _)
                 if (l.is_float() || r.is_float())
-                    && matches!(cc.0, C::a | C::ae | C::b | C::be) =>
+                    && matches!(
+                        cc.0,
+                        C::a | C::ae | C::b | C::be | C::e | C::ne | C::p | C::np
+                    ) =>
             {
-                float_relation(n, cc, l, r)
+                match FPred::of_flags(cc.0) {
+                    Some(p) => render_fcmp(n, p, l, r),
+                    None => undecided(n, self.cc, inverted, &[l, r]),
+                }
             }
-            Flags::Cmp(l, r, _)
-                if (l.is_float() || r.is_float()) && matches!(cc.0, C::e | C::ne) =>
-            {
-                float_equality(n, cc, l, r)
+            Flags::Cmp(l, r, bits) if matches!(cc.0, C::p | C::np) => {
+                parity(n, cc, &fold(Op::Sub, l.clone(), r.clone(), *bits))
             }
             Flags::Cmp(l, r, bits) if matches!(cc.0, C::s | C::ns) => signed_sign(
                 n,
@@ -1982,67 +2008,44 @@ fn ordered_equality<'a>(l: &'a Expr, r: &'a Expr) -> Option<(&'a Expr, &'a Expr)
     eq.then_some((al, bl))
 }
 
-/// Renders equality after a float compare, NaN included.
+/// Renders a float compare predicate, NaN order included.
 ///
-/// The zero flag is set for an equal pair and for an unordered one, so
-/// `je` is `a == b || isunordered(a, b)` and `jne` is that test inverted.
-/// C's `==` is false on a NaN and its `!=` is true, which is the other
-/// answer. A parity branch beside this one is the compiler's ordered
-/// compare, and that pair still folds to `==` or `!=`.
-///
-/// # Arguments
-///
-/// * `n` - Name resolution.
-/// * `cc` - `e` or `ne`.
-/// * `l` - Left operand.
-/// * `r` - Right operand.
-fn float_equality(n: &Names<'_>, cc: Cc, l: &Expr, r: &Expr) -> String {
-    use ConditionCode as C;
-    let eq = format!(
-        "{} == {} || isunordered({}, {})",
-        paren_if_lower(l, n, 7),
-        paren_if_lower(r, n, 7),
-        l.render(n),
-        r.render(n)
-    );
-    if cc.0 == C::e { eq } else { format!("!({eq})") }
-}
-
-/// Renders an ordered floating-point comparison exactly, NaN included.
-///
-/// `comiss`/`ucomiss` and `fcomi` set ZF, PF and CF all three on an
-/// unordered outcome, so `ja` and `jae` hold on ordered operands only, as
-/// C's `>` and `>=` do, while `jb` and `jbe` also hold on a NaN: they are
-/// `!(a >= b)` and `!(a > b)`, never `a < b` and `a <= b`. When neither
-/// operand's text shows it is a float ([`super::line::float_like`]), the
-/// C99 comparison macros spell it instead, so a text pass that negates a
-/// condition can always tell a float comparison from an integer one.
+/// `==` and `!=` are C's own `oeq` and `une`, and each negates into the
+/// other as text. The four ordered relations are spelled as C99's
+/// comparison macros (`isless(a, b)`), and the unordered ones as their
+/// negation (`!isless(a, b)` for `uge`), so a text pass that inverts a
+/// condition by its operator never meets a float relation: it negates the
+/// call whole. [`super::rewrite::spell_float_relations`] turns the macros
+/// back into operators once no pass inverts anything.
 ///
 /// # Arguments
 ///
 /// * `n` - Name resolution.
-/// * `cc` - `a`, `ae`, `b` or `be`.
+/// * `p` - The predicate.
 /// * `l` - Left operand.
 /// * `r` - Right operand.
-fn float_relation(n: &Names<'_>, cc: Cc, l: &Expr, r: &Expr) -> String {
-    use ConditionCode as C;
-    let (rel, call, negated) = match cc.0 {
-        C::a => (">", "isgreater", false),
-        C::ae => (">=", "isgreaterequal", false),
-        C::b => (">=", "isgreaterequal", true),
-        _ => (">", "isgreater", true),
-    };
+fn render_fcmp(n: &Names<'_>, p: FPred, l: &Expr, r: &Expr) -> String {
     let (ls, rs) = (paren_if_lower(l, n, 7), paren_if_lower(r, n, 7));
-    let not = if negated { "!" } else { "" };
-    if super::line::float_like(&ls) || super::line::float_like(&rs) {
-        let relation = format!("{ls} {rel} {rs}");
-        return if negated {
-            format!("!({relation})")
-        } else {
-            relation
-        };
+    let unordered = || format!("isunordered({}, {})", l.render(n), r.render(n));
+    let call = |name: &str, not: &str| format!("{not}{name}({ls}, {rs})");
+    match p {
+        FPred::False => "0".to_owned(),
+        FPred::True => "1".to_owned(),
+        FPred::Oeq => format!("{ls} == {rs}"),
+        FPred::Une => format!("{ls} != {rs}"),
+        FPred::Ogt => call("isgreater", ""),
+        FPred::Oge => call("isgreaterequal", ""),
+        FPred::Olt => call("isless", ""),
+        FPred::Ole => call("islessequal", ""),
+        FPred::Ule => call("isgreater", "!"),
+        FPred::Ult => call("isgreaterequal", "!"),
+        FPred::Uge => call("isless", "!"),
+        FPred::Ugt => call("islessequal", "!"),
+        FPred::Ueq => format!("{ls} == {rs} || {}", unordered()),
+        FPred::One => format!("!({ls} == {rs} || {})", unordered()),
+        FPred::Uno => unordered(),
+        FPred::Ord => format!("!{}", unordered()),
     }
-    format!("{not}{call}({}, {})", l.render(n), r.render(n))
 }
 
 /// Renders the signed relation to zero of a sum taken without wrapping.

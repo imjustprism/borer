@@ -1355,7 +1355,8 @@ fn a_float_sign_of_a_name_keeps_the_bits() {
             &["*(double*)", "*(float*)", "/* asm"],
         ),
         // ASM: scvtf s0, w0 / fcmp d0, d1 / fcsel d0, d0, d1, mi / fneg d0, d0 / str d0, [x1] / ret
-        // The select is written out. `fneg` still flips bit 63 of that name.
+        // The select stays inline, a double, so `fneg` negates it: the
+        // same flip of bit 63.
         (
             &[
                 0x1e22_0000,
@@ -1365,8 +1366,8 @@ fn a_float_sign_of_a_name_keeps_the_bits() {
                 0xfd00_0020,
                 0xd65f_03c0,
             ],
-            &["*(uint64_t*)", "0x8000000000000000", "(double)(((float)"],
-            &["*(double*)", "*(float*)", "/* asm"],
+            &["-(", "(double)(((float)"],
+            &["*(float*)", "/* asm"],
         ),
     ];
     for (words, has, has_not) in cases {
@@ -2053,8 +2054,8 @@ fn a_float_positive_condition_is_not_the_less_than() {
                 0x5280_0020,
                 0xd65f_03c0,
             ],
-            &["isgreaterequal", "||", "isunordered", "float a"],
-            &["/* asm", "&&"],
+            &["!(a1 < a2)", "float a"],
+            &["/* asm", "&&", "isunordered"],
         ),
         // ASM: fcmp d0, d1 / b.hs / mov w0, #2 / ret / mov w0, #1 / ret
         (
@@ -2066,8 +2067,8 @@ fn a_float_positive_condition_is_not_the_less_than() {
                 0x5280_0020,
                 0xd65f_03c0,
             ],
-            &["isgreaterequal", "||", "isunordered", "float a"],
-            &["/* asm", "&&"],
+            &["!(a1 < a2)", "float a"],
+            &["/* asm", "&&", "isunordered"],
         ),
         // ASM: fcmp s0, s1 / b.pl / mov w0, #2 / ret / mov w0, #1 / ret
         (
@@ -2079,8 +2080,8 @@ fn a_float_positive_condition_is_not_the_less_than() {
                 0x5280_0020,
                 0xd65f_03c0,
             ],
-            &["isgreaterequal", "||", "isunordered", "float a"],
-            &["/* asm", "&&"],
+            &["!(a1 < a2)", "float a"],
+            &["/* asm", "&&", "isunordered"],
         ),
         // ASM: fmov d0, x0 / fmov d1, x1 / fcmp d0, d1 / fcsel d2, d0, d1, pl
         //      / str d2, [x2] / ret
@@ -2093,8 +2094,8 @@ fn a_float_positive_condition_is_not_the_less_than() {
                 0xfd00_0042,
                 0xd65f_03c0,
             ],
-            &["isgreaterequal", "||", "isunordered", "*(uint64_t*)"],
-            &["/* asm", "*(double*)", "&&"],
+            &["!(*(double*)&a1 < *(double*)&a2)", "*(uint64_t*)a3"],
+            &["/* asm", "*(double*)a3", "&&"],
         ),
         // ASM: fmov d0, x0 / fmov d1, x1 / fcmp d0, d1 / fcsel d2, d0, d1, hs
         //      / str d2, [x2] / ret
@@ -2107,8 +2108,8 @@ fn a_float_positive_condition_is_not_the_less_than() {
                 0xfd00_0042,
                 0xd65f_03c0,
             ],
-            &["isgreaterequal", "||", "isunordered", "*(uint64_t*)"],
-            &["/* asm", "*(double*)", "&&"],
+            &["!(*(double*)&a1 < *(double*)&a2)", "*(uint64_t*)a3"],
+            &["/* asm", "*(double*)a3", "&&"],
         ),
         // ASM: fcmp d0, d1 / fccmp d0, d1, #0, pl / b.eq / mov w0, #2 / ret
         // ASM: mov w0, #1 / ret
@@ -2122,8 +2123,8 @@ fn a_float_positive_condition_is_not_the_less_than() {
                 0x5280_0020,
                 0xd65f_03c0,
             ],
-            &["isgreaterequal", "||", "isunordered"],
-            &["/* asm", "&&"],
+            &["!(a1 < a2)", "a1 == a2"],
+            &["/* asm", "isunordered"],
         ),
     ];
     for (words, has, has_not) in cases {
@@ -2169,13 +2170,13 @@ fn scalar_float_conditions_match_the_machine() {
         }
         let entry = p.entry.expect("entry");
         if label == "fcmp d b.hs" || label == "fcmp d b.pl" {
-            let want = "isgreaterequal(a1, a2) || isunordered(a1, a2)";
+            let want = "if (!(*(double*)&a1 < *(double*)&a2)) {";
             if !text.contains(want) {
                 failures.push_str(&format!("{label} prints\n{text}\n"));
             }
         }
         if label == "fcmp d b.lo" || label == "fcmp d b.mi" {
-            let want = "!isgreaterequal(a1, a2) && !isunordered(a1, a2)";
+            let want = "if (*(double*)&a1 < *(double*)&a2) {";
             if !text.contains(want) {
                 failures.push_str(&format!("{label} prints\n{text}\n"));
             }

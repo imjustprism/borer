@@ -1784,6 +1784,28 @@ fn an_unsigned_conversion_of_two_to_the_63_keeps_the_high_bit() {
     }
 }
 
+/// A float compare with a NaN leaves `NZCV` at `0011`: unordered is not
+/// equal, and C and V are set.
+#[test]
+fn an_unordered_float_compare_sets_only_carry_and_overflow() {
+    let rows: &[(u64, u64, u64)] = &[
+        (0x7ff8_0000_0000_0000, 0x3ff0_0000_0000_0000, C | V),
+        (0x3ff0_0000_0000_0000, 0x7ff8_0000_0000_0000, C | V),
+        (0x3ff0_0000_0000_0000, 0x3ff0_0000_0000_0000, Z | C),
+        (0x0000_0000_0000_0000, 0x3ff0_0000_0000_0000, N),
+        (0x4000_0000_0000_0000, 0x3ff0_0000_0000_0000, C),
+    ];
+    // ASM: fmov d0, x0 / fmov d1, x1 / fcmp d0, d1 / mrs x0, NZCV / ret
+    let p = image(&[0x9e67_0000, 0x9e67_0021, 0x1e61_2000, 0xd53b_4200, RET]);
+    for &(a, b, want) in rows {
+        let mut m = machine(&p);
+        assert!(m.set_register("x0", a), "{a:#x} sets nothing");
+        assert!(m.set_register("x1", b), "{b:#x} sets nothing");
+        assert_eq!(m.run(BASE).stop, Stop::Returned, "{a:#x} {b:#x}");
+        assert_eq!(m.register("x0"), Some(want), "{a:#x} vs {b:#x}");
+    }
+}
+
 /// `adds w0, w1, w2`.
 // ASM: adds w0, w1, w2
 const ADDS_W: u32 = 0x2b02_0020;

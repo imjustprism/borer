@@ -10,6 +10,7 @@
 use crate::isa::x86::{ConditionCode, Register};
 
 use super::super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp, a64_code, a64_reg};
+use super::super::fcmp::FPred;
 use super::super::helper::Helper;
 use super::{ArgAt, Call, Callee, Effect, EffectKind, Routine, Shown};
 
@@ -409,6 +410,11 @@ impl Writer<'_> {
                 self.byte(ty_code(*ty));
                 self.expr(x);
             }
+            Expr::Bitcast(x, ty) => {
+                self.byte(14);
+                self.byte(ty_code(*ty));
+                self.expr(x);
+            }
             Expr::Call(name, args) => {
                 self.byte(11);
                 self.text(name);
@@ -443,6 +449,15 @@ impl Writer<'_> {
         match &c.flags {
             Flags::Cmp(a, b, w) => self.pair(0, *w, a, b),
             Flags::Float(a, b, w) => self.pair(8, *w, a, b),
+            Flags::FCmp(p, a, b, w) => {
+                self.byte(9);
+                self.num(crate::num::from_usize(
+                    FPred::ALL.iter().position(|q| q == p).unwrap_or(0),
+                ));
+                self.byte(*w);
+                self.expr(a);
+                self.expr(b);
+            }
             Flags::Test(a, b, w) => self.pair(1, *w, a, b),
             Flags::Add(a, b, w) => self.pair(3, *w, a, b),
             Flags::Result(a, w) => {
@@ -732,6 +747,10 @@ impl Reader<'_> {
                 let ty = self.ty()?;
                 Expr::Cast(self.boxed()?, ty)
             }
+            14 => {
+                let ty = self.ty()?;
+                Expr::Bitcast(self.boxed()?, ty)
+            }
             11 => {
                 let name = self.text()?;
                 let n = self.len()?;
@@ -782,6 +801,12 @@ impl Reader<'_> {
                 Flags::Truth(self.expr()?, truth)
             }
             7 => Flags::Unknown,
+            9 => {
+                let p = *FPred::ALL.get(usize::try_from(self.num()?).ok()?)?;
+                let w = self.byte()?;
+                let a = self.expr()?;
+                Flags::FCmp(p, a, self.expr()?, w)
+            }
             _ => return None,
         };
         Some(Cond { cc, flags })

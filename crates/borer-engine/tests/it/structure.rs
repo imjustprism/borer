@@ -697,25 +697,57 @@ fn a_call_named_like_return_is_not_a_return() {
 
 /// A comparison of floats negates as a whole, never by flipping it.
 ///
-/// `a < b` and `a >= b` are both false on a NaN, so the arm a `goto`
-/// skipped runs under `!(a < b)`. An integer comparison still flips, and a
-/// negation loses its `!`.
+/// The renderer writes `a < b` over floats as `isless(a, b)` until the text
+/// is final, because `a < b` and `a >= b` are both false on a NaN: the arm
+/// a `goto` skipped runs under `!isless(a, b)`. An integer comparison still
+/// flips, and a negation loses its `!`.
 #[test]
 fn a_float_comparison_negates_as_a_whole() {
-    let float = cleanup("if (xmm0 < 1.0f) goto L_1;\nsub_1(a1);\nL_1:\nreturn 0;\n");
+    let float = cleanup(
+        "if (isless(xmm0, 1.0f)) goto L_1;
+sub_1(a1);
+L_1:
+return 0;
+",
+    );
     assert!(
-        float.contains("if (!(xmm0 < 1.0f)) {\n  sub_1(a1);\n}"),
+        float.contains(
+            "if (!isless(xmm0, 1.0f)) {
+  sub_1(a1);
+}"
+        ),
         "{float}"
     );
-    let int = cleanup("if (a1 < 5) goto L_1;\nsub_1(a1);\nL_1:\nreturn 0;\n");
-    assert!(int.contains("if (a1 >= 5) {\n  sub_1(a1);\n}"), "{int}");
-    let negated = cleanup("if (!(xmm0 >= 1.0f)) goto L_1;\nsub_1(a1);\nL_1:\nreturn 0;\n");
+    let int = cleanup(
+        "if (a1 < 5) goto L_1;
+sub_1(a1);
+L_1:
+return 0;
+",
+    );
     assert!(
-        negated.contains("if (xmm0 >= 1.0f) {\n  sub_1(a1);\n}"),
+        int.contains(
+            "if (a1 >= 5) {
+  sub_1(a1);
+}"
+        ),
+        "{int}"
+    );
+    let negated = cleanup(
+        "if (!isgreaterequal(xmm0, 1.0f)) goto L_1;
+sub_1(a1);
+L_1:
+return 0;
+",
+    );
+    assert!(
+        negated.contains(
+            "if (isgreaterequal(xmm0, 1.0f)) {
+  sub_1(a1);
+}"
+        ),
         "{negated}"
     );
-    let call = cleanup("if (isgreater(a1, a2)) goto L_1;\nsub_1(a1);\nL_1:\nreturn 0;\n");
-    assert!(call.contains("if (!(isgreater(a1, a2))) {"), "{call}");
 }
 
 /// A block that breaks out of a loop does not move into a switch arm.

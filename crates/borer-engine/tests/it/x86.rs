@@ -4710,6 +4710,49 @@ fn dc64(code: &[u8]) -> String {
     decompiled(&raw::image(Arch::X86_64, code, &[]), 0x401000)
 }
 
+/// A float compare's flags stay a float compare when the next block reads
+/// them.
+///
+/// `mov eax,-1; ucomisd xmm1,xmm0; ja L; mov eax,1; ucomisd xmm0,xmm1; ja
+/// L; cmpneqsd xmm0,xmm1; movq rax,xmm0; and eax,1; add eax,eax; L: ret`,
+/// the three-way compare of two doubles. Each `ja` is an ordered greater
+/// than: a NaN takes neither, so neither may read as `<=` of the other.
+#[test]
+fn a_float_compare_read_after_a_block_keeps_its_nan_order() {
+    let text = dc64(&[
+        0xb8, 0xff, 0xff, 0xff, 0xff, 0x66, 0x0f, 0x2e, 0xc8, 0x77, 0x1a, 0xb8, 0x01, 0x00, 0x00,
+        0x00, 0x66, 0x0f, 0x2e, 0xc1, 0x77, 0x0f, 0xf2, 0x0f, 0xc2, 0xc1, 0x04, 0x66, 0x48, 0x0f,
+        0x7e, 0xc0, 0x83, 0xe0, 0x01, 0x01, 0xc0, 0xc3,
+    ]);
+    assert!(!text.contains(" <= "), "{text}");
+    assert!(!text.contains("parity"), "{text}");
+    assert!(!text.contains("isgreater"), "{text}");
+}
+
+/// A float read back as an integer of its width is its bits, and the bits
+/// of a float with the sign bit flipped, read back as the float, are its
+/// negation.
+///
+/// `movss [rbp-4],xmm0; movss xmm0,[rbp-4]; movss [rbp-8],xmm0; mov
+/// eax,[rbp-8]` returns the single's encoding, never the number converted.
+/// `mulsd xmm0,xmm2; movq rax,xmm0; mov rcx,1<<63; xor rax,rcx; movq
+/// xmm0,rax; addsd xmm0,xmm1` is `-(x * z) + y`.
+#[test]
+fn a_float_read_as_an_integer_is_its_bits() {
+    let bits = dc64(&[
+        0x55, 0x48, 0x89, 0xe5, 0xf3, 0x0f, 0x11, 0x45, 0xfc, 0xf3, 0x0f, 0x10, 0x45, 0xfc, 0xf3,
+        0x0f, 0x11, 0x45, 0xf8, 0x8b, 0x45, 0xf8, 0x5d, 0xc3,
+    ]);
+    assert!(bits.contains("*(uint32_t*)&"), "{bits}");
+    let negated = dc64(&[
+        0xf2, 0x0f, 0x59, 0xc2, 0x66, 0x48, 0x0f, 0x7e, 0xc0, 0x48, 0xb9, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x80, 0x48, 0x31, 0xc8, 0x66, 0x48, 0x0f, 0x6e, 0xc0, 0xf2, 0x0f, 0x58,
+        0xc1, 0xc3,
+    ]);
+    assert!(!negated.contains("0x8000000000000000"), "{negated}");
+    assert!(negated.contains("-(a1 * a3)"), "{negated}");
+}
+
 /// A sum of floats keeps the grouping the instructions computed: float
 /// addition is not associative.
 ///

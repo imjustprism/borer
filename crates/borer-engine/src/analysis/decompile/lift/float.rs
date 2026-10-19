@@ -22,6 +22,44 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
+    /// Tells whether a vector register's value is a float, so that a move
+    /// of it into a general register reads its bits.
+    ///
+    /// A value built by float operations is one. A bare register is one
+    /// only when the function moved a scalar float into it: vector
+    /// registers carry integer lanes as well.
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - The vector register.
+    /// * `v` - Its value.
+    pub(super) fn holds_float(&self, r: Register, v: &Expr) -> bool {
+        self.float_param(v)
+            || v.is_float()
+                && (!matches!(v, Expr::Var(_))
+                    || self
+                        .ctx
+                        .reg_ty
+                        .get(&self.canon(r))
+                        .is_some_and(|ty| matches!(ty, Ty::F32 | Ty::F64)))
+    }
+
+    /// Tells whether a value is a parameter the convention passes in a
+    /// vector register: a float.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The value.
+    pub(super) fn float_param(&self, v: &Expr) -> bool {
+        let Expr::Var(Key::Param(i)) = v else {
+            return false;
+        };
+        self.ctx.params.iter().any(|r| {
+            r.is_vector_register()
+                && self.ctx.conv.param_pos(*r, &self.ctx.params) == Some(usize::from(*i))
+        })
+    }
+
     /// Sets the scalar type a vector register holds, replacing one already noted.
     ///
     /// A sign or magnitude mask leaves integer bits, not the float the
@@ -333,7 +371,7 @@ impl<'a> Exec<'_, 'a> {
                 };
                 let st0 = self.st(0);
                 if matches!(mn, M::Fcomi | M::Fcomip | M::Fucomi | M::Fucomip) {
-                    self.flags = Flags::Cmp(st0, src, 64);
+                    self.flags = Flags::Float(st0, src, 64);
                 } else {
                     self.env.fpu_cmp = Some((st0, src));
                 }
@@ -740,13 +778,10 @@ impl<'a> Exec<'_, 'a> {
     /// The lane `cmpss` or `cmpsd` writes for one of the eight SSE
     /// predicates.
     ///
-    /// All ones where the predicate holds, else zero. The flags are a
-    /// `ucomisd` of the two lanes, which sets CF for less-or-unordered, ZF
-    /// for equal-or-unordered and PF for unordered alone, so each predicate
-    /// is one or two flag tests: `lt` is `r` above `l`, which an unordered
-    /// pair is not, and `nlt` is `r` below-or-equal `l`, which it is. `eq`
-    /// is the ordered equality, whose low bit is C's `==`, and `neq` holds
-    /// where that does not.
+    /// All ones where the predicate holds, else zero. Each SSE predicate is
+    /// one float compare predicate ([`FPred`]): `eq`, `lt` and `le` are
+    /// ordered, their negations `neq`, `nlt` and `nle` unordered, and
+    /// `unord` and `ord` test for a NaN.
     ///
     /// # Arguments
     ///
@@ -760,33 +795,21 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// The lane, or `None` for a predicate past 7.
     pub(super) fn cmp_mask(l: Expr, r: Expr, predicate: u8, bits: u8) -> Option<Expr> {
-        let test = |cc: ConditionCode, flags: &Flags| {
-            Expr::Cond(Box::new(Cond {
-                cc: Cc(cc),
-                flags: flags.clone(),
-            }))
-        };
-        let ordered = Flags::Float(l.clone(), r.clone(), bits);
-        let swapped = Flags::Float(r, l, bits);
-        let equal = || {
-            fold(
-                Op::And,
-                test(ConditionCode::np, &ordered),
-                test(ConditionCode::e, &ordered),
-                bits,
-            )
-        };
-        let truth = match predicate {
-            0 => equal(),
-            1 => test(ConditionCode::a, &swapped),
-            2 => test(ConditionCode::ae, &swapped),
-            3 => test(ConditionCode::p, &ordered),
-            4 => fold(Op::Xor, equal(), Expr::Const(1), bits),
-            5 => test(ConditionCode::be, &swapped),
-            6 => test(ConditionCode::b, &swapped),
-            7 => test(ConditionCode::np, &ordered),
+        let p = match predicate {
+            0 => FPred::Oeq,
+            1 => FPred::Olt,
+            2 => FPred::Ole,
+            3 => FPred::Uno,
+            4 => FPred::Une,
+            5 => FPred::Uge,
+            6 => FPred::Ugt,
+            7 => FPred::Ord,
             _ => return None,
         };
+        let truth = Expr::Cond(Box::new(Cond {
+            cc: Cc(ConditionCode::ne),
+            flags: Flags::FCmp(p, l, r, bits),
+        }));
         Some(mask(unary(UnOp::Neg, truth, bits), mask_bits(bits)))
     }
 

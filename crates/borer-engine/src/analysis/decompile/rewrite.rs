@@ -1,6 +1,7 @@
 //! Text rewrites after emission: strlen loops, merged chains, folded copies,
 //! inverted conditions, and dead code.
 
+use super::fcmp::FPred;
 use super::*;
 
 /// Renders byte-counting loops as the `strlen` they compile from.
@@ -1035,11 +1036,13 @@ pub(super) fn falls_to_label(lines: &[String], from: usize, label: &str) -> bool
 
 /// Inverts a rendered condition.
 ///
-/// A condition negated as a whole (`!(c)`, `!f(x)`) loses its negation.
-/// One comparison outside every bracket and string flips its operator,
-/// unless it is an ordered comparison of floating-point operands
-/// ([`float_like`]): `a < b` is false on NaN and so is `a >= b`, so its
-/// negation is `!(a < b)`. A guard chain negates operand by operand
+/// A condition negated as a whole (`!(c)`, `!f(x)`) loses its negation,
+/// and a lone call (`f(x)`) gains one.
+/// One comparison outside every bracket and string flips its operator: a
+/// float relation is a comparison macro until the text is final
+/// ([`spell_float_relations`]), so every operator here compares integers,
+/// or floats by `==` and `!=`, which flip exactly. A guard chain negates
+/// operand by operand
 /// ([`de_morgan`]) where each operand does; anything else (a template
 /// name's angle brackets, a bare value) is negated as a whole.
 ///
@@ -1049,6 +1052,10 @@ pub(super) fn falls_to_label(lines: &[String], from: usize, label: &str) -> bool
 pub(super) fn invert_condition(cond: &str) -> String {
     if let Some(inner) = negated_whole(cond) {
         return inner.to_owned();
+    }
+    if cond.ends_with(')') && !cond.starts_with('(') && negated_whole(&format!("!{cond}")).is_some()
+    {
+        return format!("!{cond}");
     }
     let mut depth = 0i32;
     let mut in_str = false;
@@ -1095,10 +1102,6 @@ pub(super) fn invert_condition(cond: &str) -> String {
     match found {
         Some((at, len)) if count == 1 && !logical => {
             let op = &cond[at..at + len];
-            let ordered = !matches!(op, "==" | "!=");
-            if ordered && (float_like(&cond[..at]) || float_like(&cond[at + len..])) {
-                return format!("!({cond})");
-            }
             format!("{}{}{}", &cond[..at], flip(op), &cond[at + len..])
         }
         _ => de_morgan(cond).unwrap_or_else(|| format!("!({cond})")),
@@ -1164,13 +1167,10 @@ pub(super) fn negated_whole(cond: &str) -> Option<&str> {
 /// `comiss` and `ucomiss` set the parity flag when either operand is NaN,
 /// so a C++ `x != y` on floats compiles to `jp` then `jne` and a `x == y`
 /// to `jnp` then `je`. The renderer writes the parity test as the C99
-/// `isunordered(x, y)` (or, in older text, the marker `/*p*/ (x, y)`),
-/// leaving `isunordered(x, y) || x != y`; but C's `!=` on floating point is
-/// already true when an operand is NaN and its `==` already false, so each
-/// pair is the comparison alone, and `!isunordered(x, y) && x == y` is
-/// `x == y`. A marker with no such partner becomes `isunordered(x, y)`, an
-/// ordered one its negation; only floating-point operands qualify there,
-/// since parity after an integer compare means the parity of a byte.
+/// `isunordered(x, y)`, leaving `isunordered(x, y) || x != y`; but C's
+/// `!=` on floating point is already true when an operand is NaN and its
+/// `==` already false, so each pair is the comparison alone, and
+/// `!isunordered(x, y) && x == y` is `x == y`.
 ///
 /// # Arguments
 ///
@@ -1184,7 +1184,7 @@ pub(super) fn fold_unordered_compares(lines: &mut [String]) -> bool {
     for line in lines.iter_mut() {
         let mut from = 0;
         while let Some(found) = line.get(from..).and_then(unordered_test) {
-            let (offset, len, unordered, marker) = found;
+            let (offset, len, unordered) = found;
             let at = from + offset;
             let open = at + len - 1;
             let Some(close) = matching_paren(line, open) else {
@@ -1201,10 +1201,6 @@ pub(super) fn fold_unordered_compares(lines: &mut [String]) -> bool {
                 (" && ", "==")
             };
             let compare = format!("{joiner}{l} {rel} {r}");
-            if marker && !float_like(l) && !float_like(r) {
-                from = close;
-                continue;
-            }
             if line
                 .get(close + 1..)
                 .is_some_and(|t| t.starts_with(&compare))
@@ -1225,25 +1221,167 @@ pub(super) fn fold_unordered_compares(lines: &mut [String]) -> bool {
                 changed = true;
                 continue;
             }
-            if !marker {
-                from = close;
-                continue;
-            }
-            let text = if unordered {
-                format!("isunordered({l}, {r})")
-            } else {
-                format!("!isunordered({l}, {r})")
-            };
-            line.replace_range(at..close + 1, &text);
-            from = at + text.len();
-            changed = true;
+            from = close;
         }
     }
     changed
 }
 
+/// The C99 comparison macros the renderer spells an ordered float relation
+/// with, each with the predicate it asks; the longer names come first, so
+/// `isgreater` is never found inside `isgreaterequal`.
+const RELATION_MACROS: [(&str, FPred); 4] = [
+    ("isgreaterequal", FPred::Oge),
+    ("islessequal", FPred::Ole),
+    ("isgreater", FPred::Ogt),
+    ("isless", FPred::Olt),
+];
+
+/// Writes each float relation macro of finished text as the C operator.
+///
+/// The renderer spells `a < b` over floats as `isless(a, b)` so that no
+/// text pass inverts it into `a >= b`, which NaN tells apart from
+/// `!(a < b)` ([`super::fcmp::FPred`]). Once no pass inverts anything, the
+/// call reads better as the operator: `isless(a, b)` becomes `a < b` and
+/// `!isless(a, b)` becomes `!(a < b)`. The relation is parenthesized
+/// unless what surrounds the call binds looser than a comparison, and an
+/// operand is parenthesized when it holds an operator as loose.
+///
+/// # Arguments
+///
+/// * `text` - The finished function.
+///
+/// # Returns
+///
+/// The text with the macros spelled as operators.
+pub(super) fn spell_float_relations(text: &str) -> String {
+    if !RELATION_MACROS.iter().any(|(name, _)| text.contains(name)) {
+        return text.to_owned();
+    }
+    text.split_inclusive('\n').map(spell_relations_in).collect()
+}
+
+/// Writes each float relation macro of one line as the C operator
+/// ([`spell_float_relations`]).
+///
+/// # Arguments
+///
+/// * `line` - One line.
+fn spell_relations_in(line: &str) -> String {
+    let mut out = line.to_owned();
+    let mut from = 0;
+    while let Some((at, name, p)) = next_relation_macro(&out, from) {
+        let open = at + name.len();
+        let Some(close) = matching_paren(&out, open) else {
+            from = open;
+            continue;
+        };
+        let Some(((l, r), Some((rel, false)))) = out
+            .get(open + 1..close)
+            .and_then(split_pair)
+            .map(|pair| (pair, p.operator()))
+        else {
+            from = close;
+            continue;
+        };
+        let side = |t: &str| {
+            if loose(t) {
+                format!("({t})")
+            } else {
+                t.to_owned()
+            }
+        };
+        let relation = format!("{} {rel} {}", side(l), side(r));
+        let negated = out[..at].ends_with('!');
+        let start = if negated { at - 1 } else { at };
+        let text = if negated || !looser_around(&out[..start], &out[close + 1..]) {
+            let not = if negated { "!" } else { "" };
+            format!("{not}({relation})")
+        } else {
+            relation
+        };
+        out.replace_range(start..=close, &text);
+        from = start + text.len();
+    }
+    out
+}
+
+/// The first float relation macro called at or after an offset.
+///
+/// # Arguments
+///
+/// * `line` - The text.
+/// * `from` - The byte offset to search from.
+///
+/// # Returns
+///
+/// The call's offset, the macro's name and the predicate it asks.
+fn next_relation_macro(line: &str, from: usize) -> Option<(usize, &'static str, FPred)> {
+    RELATION_MACROS
+        .iter()
+        .filter_map(|&(name, p)| {
+            let mut at = from;
+            loop {
+                let i = at + line.get(at..)?.find(name)?;
+                at = i + 1;
+                let before = line[..i].chars().next_back();
+                let called = line[i + name.len()..].starts_with('(');
+                if called && !before.is_some_and(is_ident_char) {
+                    return Some((i, name, p));
+                }
+            }
+        })
+        .min_by_key(|(i, ..)| *i)
+}
+
+/// Tells whether an operand holds, outside brackets, an operator that binds
+/// as loosely as a comparison or looser, so that it needs parentheses as one
+/// side of one.
+///
+/// # Arguments
+///
+/// * `t` - The operand's text.
+fn loose(t: &str) -> bool {
+    const LOOSE: [&str; 13] = [
+        " < ", " > ", " <= ", " >= ", " == ", " != ", " & ", " | ", " ^ ", " && ", " || ", " ? ",
+        " = ",
+    ];
+    let mut depth = 0i32;
+    t.char_indices().any(|(i, c)| {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            _ => {}
+        }
+        depth == 0 && LOOSE.iter().any(|op| t[i..].starts_with(op))
+    })
+}
+
+/// Tells whether what surrounds a value binds looser than a comparison, so
+/// that a comparison put in the value's place needs no parentheses.
+///
+/// # Arguments
+///
+/// * `before` - The text before the value.
+/// * `after` - The text after it.
+fn looser_around(before: &str, after: &str) -> bool {
+    let b = before.trim_end();
+    let a = after.trim_start();
+    let assigns = b.ends_with('=') && !["==", "!=", "<=", ">="].iter().any(|op| b.ends_with(op));
+    let left = b.is_empty()
+        || assigns
+        || ["(", ",", "&&", "||", "?", ":", "{", ";", "return"]
+            .iter()
+            .any(|t| b.ends_with(t));
+    let right = a.is_empty()
+        || [")", ",", "&&", "||", "?", ":", ";", "]"]
+            .iter()
+            .any(|t| a.starts_with(t));
+    left && right
+}
+
 /// The first unordered test in a text: the `isunordered(` call, negated or
-/// not, or the parity marker `/*p*/ (` or `/*np*/ (`.
+/// not.
 ///
 /// # Arguments
 ///
@@ -1252,12 +1390,8 @@ pub(super) fn fold_unordered_compares(lines: &mut [String]) -> bool {
 /// # Returns
 ///
 /// The test's offset, the length of its head up to and including the `(`,
-/// whether it holds on an unordered outcome, and whether it is a marker.
-fn unordered_test(t: &str) -> Option<(usize, usize, bool, bool)> {
-    let markers = [("/*p*/ (", true), ("/*np*/ (", false)]
-        .into_iter()
-        .filter_map(|(m, u)| t.find(m).map(|i| (i, m.len(), u, true)));
-    let mut calls = Vec::new();
+/// and whether it holds on an unordered outcome.
+fn unordered_test(t: &str) -> Option<(usize, usize, bool)> {
     let mut from = 0;
     while let Some(i) = t
         .get(from..)
@@ -1265,15 +1399,13 @@ fn unordered_test(t: &str) -> Option<(usize, usize, bool, bool)> {
         .map(|i| from + i)
     {
         from = i + 1;
-        let before = t.get(..i).and_then(|h| h.chars().next_back());
-        match before {
-            Some('!') => calls.push((i - 1, "!isunordered(".len(), false, false)),
-            Some(c) if is_ident_char(c) => continue,
-            _ => calls.push((i, "isunordered(".len(), true, false)),
+        match t.get(..i).and_then(|h| h.chars().next_back()) {
+            Some('!') => return Some((i - 1, "!isunordered(".len(), false)),
+            Some(c) if is_ident_char(c) => {}
+            _ => return Some((i, "isunordered(".len(), true)),
         }
-        break;
     }
-    markers.chain(calls).min_by_key(|(i, ..)| *i)
+    None
 }
 
 /// Splits `a, b` at the comma that is not inside parentheses.
@@ -2009,5 +2141,42 @@ mod jump_tests {
             "L_1:",
         ]);
         assert!(!flip_jump_pairs(&mut both));
+    }
+}
+
+#[cfg(test)]
+mod spell_tests {
+    use super::spell_float_relations;
+
+    /// A comparison macro becomes the operator, parenthesized where what
+    /// surrounds it or one of its operands binds as tightly, and a negated
+    /// macro becomes the negated comparison.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn float_relations_spell_as_operators() {
+        let cases = [
+            ("if (isless(a1, a2)) {\n", "if (a1 < a2) {\n"),
+            ("return !isgreater(a1, a2);\n", "return !(a1 > a2);\n"),
+            ("x = isless(a1, a2) + 1;\n", "x = (a1 < a2) + 1;\n"),
+            (
+                "if (isgreaterequal(a1 + 1.0, a2) && a3 != 0) {\n",
+                "if (a1 + 1.0 >= a2 && a3 != 0) {\n",
+            ),
+            (
+                "v = islessequal(a1 ? a2 : a3, 2.0);\n",
+                "v = (a1 ? a2 : a3) <= 2.0;\n",
+            ),
+            ("thisless(a1, a2);\n", "thisless(a1, a2);\n"),
+            (
+                "if (!islessequal(a1, a2) || isunordered(a1, a2)) {\n",
+                "if (!(a1 <= a2) || isunordered(a1, a2)) {\n",
+            ),
+        ];
+        for (text, want) in cases {
+            assert_eq!(spell_float_relations(text), want, "{text}");
+        }
     }
 }

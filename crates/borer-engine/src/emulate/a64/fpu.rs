@@ -540,12 +540,15 @@ fn value_bits(m: &Machine<'_>, reg: Reg, bits: u16) -> u64 {
 
 /// The flags word (N in bit 3 down to V in bit 0) of a float's order.
 ///
+/// An unordered pair sets C and V and clears N and Z (`0011`), so `eq`
+/// fails on a NaN and `vs` holds.
+///
 /// # Arguments
 ///
 /// * `order` - The comparison's outcome, `None` for an unordered pair.
 fn compare_flags(order: Option<std::cmp::Ordering>) -> u64 {
     match order {
-        None => 0b0111,
+        None => 0b0011,
         Some(std::cmp::Ordering::Less) => 0b1000,
         Some(std::cmp::Ordering::Equal) => 0b0110,
         Some(std::cmp::Ordering::Greater) => 0b0010,

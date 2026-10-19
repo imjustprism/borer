@@ -17,6 +17,7 @@
 //! reads those bits; any other `msr` sets no flags.
 
 use super::super::expr::{Cc, Cond, Expr, Flags, Op, fold, ternary};
+use super::super::fcmp::FPred;
 use crate::emulate::a64::{SYSREG_NZCV, SYSREG_TPIDR_EL0};
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg};
 use crate::isa::x86::ConditionCode;
@@ -162,62 +163,42 @@ fn truth(e: Expr, cc: Cc) -> Cond {
 
 /// The condition over a float compare's flags.
 ///
-/// The arm64 conditions map one to one onto the x86 ones a float compare
-/// leaves: `lt` to below, `ge` to above-or-equal, `gt` to above, `le` to
-/// below-or-equal and `vs` to the unordered test, `hi` and `ls` beside
-/// `gt` and `le`.
-///
-/// The sign tests have no x86 counterpart over floats: the arm64 N flag is
-/// the ordered less-than alone, where x86's carry takes an unordered pair
-/// with it, so `mi` (and `lo`, which a float compare leaves the same) is
-/// the less-than and the ordered test together, `pl` and `hs` its inverse.
-/// The inverse is the same test tagged with the opposite code: tagging it
-/// with the code `pl` or `hs` asks would answer the less-than.
+/// An unordered `fcmp` sets N, Z, C and V to `0011`, so each arm64
+/// condition asks one predicate ([`FPred`]): `eq` is the ordered equality
+/// and `ne` its negation, `mi` and `lo` the ordered less-than, `pl` and
+/// `hs` its negation, `ge` and `gt` ordered, `lt` and `le` unordered, `hi`
+/// the unordered greater-than, `ls` the ordered less-or-equal, `vs` the
+/// unordered test and `vc` its negation.
 ///
 /// # Arguments
 ///
-/// * `flags` - The float compare's [`Flags::Cmp`].
+/// * `a` - The compare's first value.
+/// * `b` - Its second.
+/// * `bits` - Their width.
 /// * `c` - The arm64 condition.
-/// * `cc` - The x86 code that stands for `c`.
 ///
 /// # Returns
 ///
-/// The condition.
-fn float_condition(flags: &Flags, c: a64::Cond, cc: Cc) -> Cond {
-    use ConditionCode as C;
-    let plain = |cc: Cc| Cond {
-        cc,
-        flags: flags.clone(),
+/// The condition: [`Flags::FCmp`] asked by `ne`.
+fn float_condition(a: &Expr, b: &Expr, bits: u8, c: a64::Cond) -> Cond {
+    let p = match c {
+        a64::Cond::Eq => FPred::Oeq,
+        a64::Cond::Ne => FPred::Une,
+        a64::Cond::Hs | a64::Cond::Pl => FPred::Uge,
+        a64::Cond::Lo | a64::Cond::Mi => FPred::Olt,
+        a64::Cond::Vs => FPred::Uno,
+        a64::Cond::Vc => FPred::Ord,
+        a64::Cond::Hi => FPred::Ugt,
+        a64::Cond::Ls => FPred::Ole,
+        a64::Cond::Ge => FPred::Oge,
+        a64::Cond::Lt => FPred::Ult,
+        a64::Cond::Gt => FPred::Ogt,
+        a64::Cond::Le => FPred::Ule,
+        a64::Cond::Al | a64::Cond::Nv => FPred::True,
     };
-    match c {
-        a64::Cond::Eq => plain(Cc(C::e)),
-        a64::Cond::Ne => plain(Cc(C::ne)),
-        a64::Cond::Lt => plain(Cc(C::b)),
-        a64::Cond::Ge => plain(Cc(C::ae)),
-        a64::Cond::Gt | a64::Cond::Hi => plain(Cc(C::a)),
-        a64::Cond::Le | a64::Cond::Ls => plain(Cc(C::be)),
-        a64::Cond::Vs => plain(Cc(C::p)),
-        a64::Cond::Vc => plain(Cc(C::np)),
-        a64::Cond::Mi | a64::Cond::Lo | a64::Cond::Pl | a64::Cond::Hs => {
-            let less = Expr::Cond(Box::new(Cond {
-                cc: Cc(C::b),
-                flags: flags.clone(),
-            }));
-            let ordered = Expr::Cond(Box::new(Cond {
-                cc: Cc(C::np),
-                flags: flags.clone(),
-            }));
-            let both = fold(Op::And, less, ordered, 64);
-            if matches!(c, a64::Cond::Pl | a64::Cond::Hs) {
-                Cond {
-                    cc,
-                    flags: Flags::Truth(both, cc.invert()),
-                }
-            } else {
-                truth(both, cc)
-            }
-        }
-        a64::Cond::Al | a64::Cond::Nv => truth(Expr::Const(1), Cc(C::ne)),
+    Cond {
+        cc: Cc(ConditionCode::ne),
+        flags: Flags::FCmp(p, a.clone(), b.clone(), bits),
     }
 }
 
@@ -245,7 +226,7 @@ pub(super) fn condition(flags: &Flags, c: a64::Cond) -> Cond {
         flags: Flags::Unknown,
     };
     match flags {
-        Flags::Float(..) => float_condition(flags, c, cc),
+        Flags::Float(a, b, bits) => float_condition(a, b, *bits, c),
         Flags::Cmp(a, b, bits) => match c {
             a64::Cond::Vs | a64::Cond::Vc => Cond {
                 cc,
@@ -309,7 +290,7 @@ pub(super) fn condition(flags: &Flags, c: a64::Cond) -> Cond {
         },
         Flags::Truth(_, held) if *held == cc || held.invert() == cc => plain(cc),
         Flags::Carry(word) => nzcv_condition(word, c, cc),
-        Flags::Truth(..) | Flags::Shift(..) | Flags::Unknown => unknown,
+        Flags::Truth(..) | Flags::Shift(..) | Flags::FCmp(..) | Flags::Unknown => unknown,
     }
 }
 
@@ -631,6 +612,7 @@ pub(super) fn nzcv_word(flags: &Flags) -> Expr {
         | Flags::Test(..)
         | Flags::Result(..)
         | Flags::Truth(..)
+        | Flags::FCmp(..)
         | Flags::Shift(..) => pack_nzcv(
             value(flags, a64::Cond::Mi),
             value(flags, a64::Cond::Eq),

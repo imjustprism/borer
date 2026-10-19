@@ -4993,22 +4993,25 @@ fn assignments_nothing_reads_are_dropped() {
 ///
 /// `x != y` on floats compiles to a parity branch and then a not-equal
 /// branch; C's `!=` is already true when an operand is NaN, so the pair is
-/// the comparison alone, and a parity test with no partner is
-/// `isunordered`. An integer parity test keeps its marker.
+/// the comparison alone, and `!isunordered(x, y) && x == y` is `x == y`.
 #[test]
 fn unordered_float_compares_fold_to_the_comparison() {
-    let text = "if (/*p*/ (xmm8, 0) || xmm8 != 0) {\n  return 1;\n}\nif (/*np*/ (xmm6, local_3f0) && xmm6 == local_3f0) {\n  return 2;\n}\nif (rax > 0 || (/*p*/ (rcx, rdx) || rcx != rdx)) {\n  return 3;\n}\nreturn 0;\n";
+    let text = "if (isunordered(xmm8, 0.0) || xmm8 != 0.0) {
+  return 1;
+}
+if (!isunordered(xmm6, local_3f0) && xmm6 == local_3f0) {
+  return 2;
+}
+if (rax > 0 || (isunordered(xmm1, xmm2) || xmm1 != xmm2)) {
+  return 3;
+}
+return 0;
+";
     let out = cleanup(text);
-    assert!(out.contains("if (xmm8 != 0) {"), "{out}");
+    assert!(out.contains("if (xmm8 != 0.0) {"), "{out}");
     assert!(out.contains("if (xmm6 == local_3f0) {"), "{out}");
-    assert!(
-        out.contains("/*p*/ (rcx, rdx)"),
-        "integer parity folded:\n{out}"
-    );
-    let lone = "if (/*p*/ (xmm6, xmm0)) {\n  return 1;\n}\nif (/*np*/ (xmm3, 0.0f)) {\n  return 2;\n}\nreturn 0;\n";
-    let out = cleanup(lone);
-    assert!(out.contains("if (isunordered(xmm6, xmm0)) {"), "{out}");
-    assert!(out.contains("if (!isunordered(xmm3, 0.0f)) {"), "{out}");
+    assert!(out.contains("xmm1 != xmm2"), "{out}");
+    assert!(!out.contains("isunordered"), "{out}");
 }
 
 /// Stack-passed arguments are parameters, not stack slots.

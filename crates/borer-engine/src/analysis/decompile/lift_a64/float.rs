@@ -18,7 +18,9 @@
 //! the sign operations, which are bit operations at heart, mask the sign
 //! bits instead.
 
-use super::super::expr::{Expr, Flags, Key, Op, RoundToInt, Ty, UnOp, fold, ternary, unary};
+use super::super::expr::{
+    Expr, Flags, Key, Op, RoundToInt, Ty, UnOp, bitcast, fold, ternary, unary,
+};
 use super::super::helper::Helper;
 use super::flags::{self, next_reader};
 use super::step::imm;
@@ -546,8 +548,56 @@ impl Lift<'_, '_> {
             | Opnd::Mem(_)
             | Opnd::Cond(_) => return None,
         };
+        let (a, b) = (self.compared(a, bits), self.compared(b, bits));
         self.ex.flags = Flags::Float(a, b, width8(bits));
         Some(())
+    }
+
+    /// The float a compare reads from a register that holds integer bits.
+    ///
+    /// `fmov d0, x0` leaves `x0`'s bits, which name an integer: comparing
+    /// them as written would compare integers, where the compare orders the
+    /// float they encode (two zeros are equal, a NaN equals nothing). Those
+    /// bits are read as the float ([`bitcast`]). A float, a name declared
+    /// as one and a `v` register's own name read as they are.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The operand.
+    /// * `bits` - The compare's width, 32 or 64.
+    fn compared(&self, v: Expr, bits: u16) -> Expr {
+        let float = if bits == 32 { Ty::F32 } else { Ty::F64 };
+        let named_float = match &v {
+            Expr::Var(Key::Param(i)) => {
+                super::shape::arg_reg(usize::from(*i), self.ex.ctx.arg_floats)
+                    .is_some_and(|r| matches!(r, Reg::V(_)))
+            }
+            Expr::Var(Key::A64(r)) => matches!(r, Reg::V(_)),
+            Expr::Var(_) => true,
+            Expr::Const(_)
+            | Expr::Str(_)
+            | Expr::Sp(_)
+            | Expr::Bin(..)
+            | Expr::Un(..)
+            | Expr::Deref(..)
+            | Expr::Cond(_)
+            | Expr::Ternary(..)
+            | Expr::Sext(..)
+            | Expr::Cast(..)
+            | Expr::Bitcast(..)
+            | Expr::Call(..)
+            | Expr::Helper(..)
+            | Expr::FConst(..) => false,
+        };
+        if named_float
+            || v.is_float()
+            || super::mem::float_width(&v).is_some()
+            || self.declared_width(&v).is_some()
+        {
+            v
+        } else {
+            bitcast(v, float)
+        }
     }
 
     /// `fccmp` and `fccmpe`: the flags of a float compare when the
@@ -575,6 +625,7 @@ impl Lift<'_, '_> {
             self.float_read(i, 1, bits)?,
             imm(i, 2)?,
         );
+        let (a, b) = (self.compared(a, bits), self.compared(b, bits));
         let compared = Flags::Float(a, b, width8(bits));
         self.ex.flags = if flags::mrs_nzcv_before_write(later) {
             let held = flags::condition(&self.ex.flags, c);

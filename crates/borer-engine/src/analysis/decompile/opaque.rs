@@ -113,6 +113,7 @@ pub(super) fn constant_outcome(cond: &Cond) -> Option<(bool, Evidence)> {
     match &cond.flags {
         Flags::Cmp(l, r, _)
         | Flags::Float(l, r, _)
+        | Flags::FCmp(_, l, r, _)
         | Flags::Test(l, r, _)
         | Flags::Add(l, r, _) => {
             if reads_memory(l) || reads_memory(r) {
@@ -268,7 +269,10 @@ fn exhaust(cond: &Cond, vars: &[Key]) -> Exhaustive {
 /// `None` when the flags read something [`demand`] cannot bound.
 fn depends(cond: &Cond, need: &mut BTreeMap<Key, u8>) -> Option<()> {
     match &cond.flags {
-        Flags::Cmp(l, r, w) | Flags::Float(l, r, w) | Flags::Add(l, r, w) => {
+        Flags::Cmp(l, r, w)
+        | Flags::Float(l, r, w)
+        | Flags::FCmp(_, l, r, w)
+        | Flags::Add(l, r, w) => {
             demand(l, *w, need)?;
             demand(r, *w, need)
         }
@@ -330,6 +334,7 @@ fn demand(e: &Expr, k: u8, need: &mut BTreeMap<Key, u8>) -> Option<()> {
         | Expr::Un(..)
         | Expr::Sext(..)
         | Expr::Cast(..)
+        | Expr::Bitcast(..)
         | Expr::Deref(..)
         | Expr::Cond(_)
         | Expr::Ternary(..)
@@ -361,6 +366,7 @@ fn computes(cond: &Cond) -> bool {
     match &cond.flags {
         Flags::Cmp(l, r, _)
         | Flags::Float(l, r, _)
+        | Flags::FCmp(_, l, r, _)
         | Flags::Test(l, r, _)
         | Flags::Add(l, r, _) => operand(l) || operand(r),
         Flags::Result(e, _) | Flags::Carry(e) | Flags::Truth(e, _) => operand(e),
@@ -437,6 +443,7 @@ fn pool_for(cond: &Cond) -> Vec<u64> {
     match &cond.flags {
         Flags::Cmp(l, r, _)
         | Flags::Float(l, r, _)
+        | Flags::FCmp(_, l, r, _)
         | Flags::Test(l, r, _)
         | Flags::Add(l, r, _) => {
             constants(l, &mut consts);
@@ -478,7 +485,11 @@ fn constants(e: &Expr, out: &mut BTreeSet<u64>) {
             constants(l, out);
             constants(r, out);
         }
-        Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) | Expr::Deref(x, _) => {
+        Expr::Un(_, x)
+        | Expr::Sext(x, _)
+        | Expr::Cast(x, _)
+        | Expr::Bitcast(x, _)
+        | Expr::Deref(x, _) => {
             constants(x, out);
         }
         Expr::Ternary(_, a, b) => {
@@ -512,7 +523,11 @@ fn collect(e: &Expr, out: &mut BTreeSet<Key>) {
             collect(l, out);
             collect(r, out);
         }
-        Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) | Expr::Deref(x, _) => {
+        Expr::Un(_, x)
+        | Expr::Sext(x, _)
+        | Expr::Cast(x, _)
+        | Expr::Bitcast(x, _)
+        | Expr::Deref(x, _) => {
             collect(x, out);
         }
         Expr::Ternary(_, a, b) => {
@@ -542,7 +557,9 @@ fn reads_memory(e: &Expr) -> bool {
     match e {
         Expr::Deref(..) => true,
         Expr::Bin(_, l, r) | Expr::Ternary(_, l, r) => reads_memory(l) || reads_memory(r),
-        Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) => reads_memory(x),
+        Expr::Un(_, x) | Expr::Sext(x, _) | Expr::Cast(x, _) | Expr::Bitcast(x, _) => {
+            reads_memory(x)
+        }
         Expr::Call(_, args) | Expr::Helper(_, args) => args.iter().any(reads_memory),
         Expr::Const(_)
         | Expr::Var(_)

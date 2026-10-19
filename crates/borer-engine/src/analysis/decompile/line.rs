@@ -209,32 +209,6 @@ pub(super) fn rename_word(line: &str, old: &str, new: &str) -> String {
     out
 }
 
-/// Tells whether an operand's text shows a floating-point value: a vector
-/// or x87 register, a `float` or `double` load or cast, a decimal literal,
-/// `NAN` or `INFINITY`.
-///
-/// The renderer spells every ordered floating-point comparison with such
-/// an operand or as a C99 comparison macro, so a text pass that inverts a
-/// comparison can tell one whose negation is not the flipped operator
-/// (`!(a < b)` holds on NaN, `a >= b` does not). A false positive only
-/// keeps an integer comparison negated as a whole.
-///
-/// # Arguments
-///
-/// * `text` - The operand as rendered.
-pub(super) fn float_like(text: &str) -> bool {
-    text.contains("xmm")
-        || text.contains("ymm")
-        || text.contains("float")
-        || text.contains("double")
-        || text.contains('.')
-        || tokens(text).any(|w| {
-            matches!(w, "NAN" | "INFINITY")
-                || w.strip_prefix("st")
-                    .is_some_and(|d| d.len() == 1 && d.bytes().all(|b| b.is_ascii_digit()))
-        })
-}
-
 /// Parses a decimal or `0x` hexadecimal number at the start of `s`.
 ///
 /// # Arguments

@@ -38,6 +38,7 @@ mod enums;
 mod evidence;
 mod expr;
 mod expr_render;
+mod fcmp;
 mod fields;
 mod finish;
 mod helper;
