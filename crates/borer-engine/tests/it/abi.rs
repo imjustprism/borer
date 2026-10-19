@@ -148,3 +148,14 @@ fn an_indirect_result_comes_first() {
         .expect("the call is shown");
     assert!(call.contains("mkrect(&"), "{user}");
 }
+
+/// A call to `__umodti3` passes two 128-bit operands as four halves and
+/// is the remainder of their `unsigned __int128` values.
+#[test]
+fn a_128_bit_helper_prints_as_its_operator() {
+    let p = image();
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), TEXT + 0x74).expect("decompiles");
+    assert!(!text.contains("__umodti3("), "{text}");
+    assert!(text.contains(" % (uint128_t)"), "{text}");
+}

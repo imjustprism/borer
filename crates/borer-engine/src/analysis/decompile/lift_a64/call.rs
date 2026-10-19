@@ -297,7 +297,7 @@ impl Lift<'_, '_> {
             let names = self.ex.names();
             let mut rendered: Vec<String> = args.iter().map(|(_, e)| e.render(&names)).collect();
             self.ex.name_arguments(reached.or(target), &mut rendered);
-            let call = format!("{text}({})", rendered.join(", "));
+            let call = abi::call_text(&text, &rendered);
             let line = if let Some((k, ty)) = result {
                 if matches!(k, Key::A64(Reg::V(_))) {
                     self.ex.ctx.reg_ty.entry(k).or_insert(ty);
@@ -371,7 +371,7 @@ impl Lift<'_, '_> {
             let names = self.ex.names();
             let mut rendered: Vec<String> = args.iter().map(|(_, e)| e.render(&names)).collect();
             self.ex.name_arguments(reached, &mut rendered);
-            let call = format!("{text}({})", rendered.join(", "));
+            let call = abi::call_text(&text, &rendered);
             if !self.ex.ctx.unused_result && sig.returns != Returns::Nothing {
                 self.ex.lines.push(format!("return {call};"));
             } else {

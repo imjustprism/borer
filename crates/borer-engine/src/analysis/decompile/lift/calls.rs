@@ -2219,7 +2219,7 @@ impl<'a> Exec<'_, 'a> {
             self.declare(rdxk, self.word_ty());
             rdxk
         });
-        let call = format!("{callee}({})", args.join(", "));
+        let call = abi::call_text(&callee, &args);
         let call = match (second.take(), result) {
             (Some(line), Some(k)) if names_variable(&args, &self.names().key(k)) => {
                 let t = self.fresh_tmp(if k == xmm0 { Ty::F64 } else { self.word_ty() });

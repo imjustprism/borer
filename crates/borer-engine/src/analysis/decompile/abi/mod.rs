@@ -16,13 +16,18 @@
 //! pointer an ABI fact rather than a parameter
 //! ([`indirect_result_position`]), so any stage reads a callee's
 //! prototype ([`function::prototype`]) without decompiling it.
+//!
+//! A runtime helper is a call with a prototype and the C operator it
+//! computes ([`runtime::Runtime`]).
 
 pub(crate) mod a64;
 mod conv;
 pub(crate) mod function;
+pub(crate) mod runtime;
 mod stubs;
 
 pub(crate) use conv::*;
 pub(in crate::analysis::decompile) use function::shape;
 pub(crate) use function::{indirect_result_position, of};
+pub(crate) use runtime::call_text;
 pub(crate) use stubs::{bound, reached};
