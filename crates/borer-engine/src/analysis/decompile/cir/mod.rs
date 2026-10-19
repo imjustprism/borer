@@ -36,10 +36,12 @@
 mod build;
 mod check;
 mod print;
+mod wrap;
 
 pub(super) use build::build;
 pub(super) use check::{Holds, Violation, check};
 pub(super) use print::{print, print_decls, print_items};
+pub(super) use wrap::{Region, RegionHandler, wrap};
 
 /// A provenance id: the index of a set of instruction addresses in
 /// [`Body::prov`].

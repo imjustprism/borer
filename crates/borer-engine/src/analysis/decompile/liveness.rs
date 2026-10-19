@@ -582,6 +582,35 @@ pub(super) fn join_rebase(
 /// facts are exactly those of the fixpoint it reaches.
 const WIDEN_AFTER: usize = MAX_PASSES / 4;
 
+/// The state a block only the exception runtime enters starts from: every
+/// register and local its own value, on the frame the protected blocks
+/// share.
+///
+/// The runtime restores the stack pointer of the frame it resumes, and
+/// nothing a register held survives the throw that a reader may assume,
+/// so only the stack pointer is carried: the one every protected block
+/// that has run leaves, when they agree.
+///
+/// # Arguments
+///
+/// * `feeders` - The protected blocks.
+/// * `outs` - The OUT state of each block.
+/// * `processed` - Which blocks have run.
+///
+/// # Returns
+///
+/// The state.
+fn eh_env(feeders: &[usize], outs: &[Env], processed: &[bool]) -> Env {
+    let mut env = Env::unknown();
+    let mut sps = feeders
+        .iter()
+        .filter(|&&p| processed.get(p).copied().unwrap_or(false))
+        .filter_map(|&p| outs.get(p).map(|o| o.sp));
+    let first = sps.next().flatten();
+    env.sp = first.filter(|_| sps.all(|sp| sp == first));
+    env
+}
+
 #[cfg(test)]
 thread_local! {
     /// How many times [`dataflow`] stopped at the pass budget on this
@@ -676,7 +705,13 @@ pub(super) fn dataflow<L: Lifter>(
         let mut changed = false;
         let entry = ctx.entry_block;
         for b in (entry..n).chain(0..entry) {
+            let root = ctx
+                .eh_roots
+                .iter()
+                .find(|r| r.0 == b)
+                .map(|r| eh_env(&r.1, &outs, &processed));
             let unchanged = b != entry
+                && root.is_none()
                 && met[b].is_some_and(|t| {
                     preds[b].iter().all(|&p| {
                         stamp[p] <= t && succs[p].iter().all(|&s| s == b || stamp[s] <= t)
@@ -685,7 +720,7 @@ pub(super) fn dataflow<L: Lifter>(
             let in_changed = if unchanged {
                 false
             } else {
-                let mut m: Option<Env> = (b == entry).then(|| L::entry_env(&*ctx));
+                let mut m: Option<Env> = (b == entry).then(|| L::entry_env(&*ctx)).or(root);
                 for &p in &preds[b] {
                     if !processed[p] {
                         continue;

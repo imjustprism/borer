@@ -25,6 +25,7 @@
 
 use crate::isa::x86::{FlowControl, OpKind, Register};
 
+use crate::analysis::guards::{Clause, ClauseKind, Dialect, Guard};
 use crate::analysis::{FuncletRole, read_u32};
 use crate::fxmap::FxHashMap;
 use crate::headers::ExceptionHandler;
@@ -39,6 +40,8 @@ const STATES_MAX: u32 = 4096;
 const TRY_BLOCKS_MAX: u32 = 1024;
 /// Most catch clauses read from one try block.
 const CATCHES_MAX: u32 = 64;
+/// Most IP-to-state entries read from one `FuncInfo`.
+const IP_MAP_MAX: u32 = 1 << 16;
 /// The `FuncInfo` magic numbers `__CxxFrameHandler3` accepts.
 const MAGIC: std::ops::RangeInclusive<u32> = 0x1993_0520..=0x1993_0522;
 
@@ -151,6 +154,401 @@ pub fn continuations(program: &Program) -> Vec<(u64, u64)> {
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// Reads the guarded regions every x64 function's handler data declares.
+///
+/// A `FuncInfo` (either encoding) gives each try block a range of states
+/// and the IP-to-state map gives each state its instruction ranges; a
+/// scope table gives each `__try` its range directly. Records of one
+/// table that share a handler and a target are one `__try` laid out in
+/// pieces.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+///
+/// # Returns
+///
+/// The guards of each function whose table holds any, by entry.
+#[must_use]
+pub(crate) fn guards(program: &Program) -> std::collections::BTreeMap<u64, Vec<Guard>> {
+    let mut out = std::collections::BTreeMap::new();
+    if !program.is_64 {
+        return out;
+    }
+    let names = HandlerNames::of(program);
+    for h in &program.headers.exception_handlers {
+        let found = match kind(program, &names, h) {
+            Kind::Cxx3(info) => cxx3_guards(program, h.function, info),
+            Kind::Cxx4(info) => cxx4_guards(program, h.function, info),
+            Kind::Seh => seh_guards(program, h.function, h.data),
+            Kind::Other => None,
+        };
+        if let Some(found) = found.filter(|g| !g.is_empty()) {
+            out.entry(h.function).or_insert(found);
+        }
+    }
+    out
+}
+
+/// Returns where the function the exception table declares at `parent`
+/// ends.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `parent` - The function's entry.
+///
+/// # Returns
+///
+/// The end, or `None` when the table declares no function there.
+fn parent_end(program: &Program, parent: u64) -> Option<u64> {
+    let ranges = &program.function_ranges;
+    let k = ranges.partition_point(|r| r.0 < parent);
+    ranges.get(k).filter(|r| r.0 == parent).map(|r| r.1)
+}
+
+/// Turns an IP-to-state map into the instruction ranges of each state.
+///
+/// Each entry holds from its address to the next entry's, and the last to
+/// the parent's end; ranges outside the parent's own extent (a funclet's
+/// entries, kept in the same map) are dropped.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `parent` - The function's entry.
+/// * `map` - `(address, state)` entries in any order.
+///
+/// # Returns
+///
+/// `(start, end, state)` for each non-empty range.
+fn state_spans(program: &Program, parent: u64, mut map: Vec<(u64, i64)>) -> Vec<(u64, u64, i64)> {
+    map.sort_unstable();
+    let end = parent_end(program, parent).unwrap_or(u64::MAX);
+    let mut out = Vec::new();
+    for (k, &(ip, state)) in map.iter().enumerate() {
+        let next = map.get(k + 1).map_or(end, |n| n.0).min(end);
+        if ip >= parent && ip < next {
+            out.push((ip, next, state));
+        }
+    }
+    out
+}
+
+/// Builds a guard from the states a try block spans.
+///
+/// # Arguments
+///
+/// * `spans` - The ranges of each state ([`state_spans`]).
+/// * `low` - The try block's lowest state.
+/// * `high` - Its highest.
+/// * `clauses` - Its catch clauses.
+///
+/// # Returns
+///
+/// The guard, or `None` when no instruction is in its states or it has no
+/// clause.
+fn try_block(
+    spans: &[(u64, u64, i64)],
+    low: i64,
+    high: i64,
+    clauses: Vec<Clause>,
+) -> Option<Guard> {
+    let ranges: Vec<(u64, u64)> = spans
+        .iter()
+        .filter(|s| (low..=high).contains(&s.2))
+        .map(|s| (s.0, s.1))
+        .collect();
+    (!ranges.is_empty() && !clauses.is_empty()).then(|| Guard {
+        dialect: Dialect::Cxx,
+        ranges: crate::analysis::guards::merged(ranges),
+        clauses,
+    })
+}
+
+/// Spells the declaration a catch handler names.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `adjectives` - The handler's `HT_*` flags.
+/// * `descriptor` - The caught type's descriptor, `None` for `catch (...)`.
+///
+/// # Returns
+///
+/// The declaration as C++ writes it (`const Error &`), or `...`.
+pub(crate) fn catch_decl(program: &Program, adjectives: u32, descriptor: Option<u64>) -> String {
+    /// `HT_IsConst`.
+    const CONST: u32 = 0x01;
+    /// `HT_IsReference`.
+    const REFERENCE: u32 = 0x08;
+    /// `HT_IsStdDotDot`.
+    const DOT_DOT: u32 = 0x40;
+    let Some(ty) = descriptor
+        .filter(|_| adjectives & DOT_DOT == 0)
+        .and_then(|d| crate::analysis::rtti::caught_type(program, d))
+    else {
+        return "...".to_owned();
+    };
+    let constant = if adjectives & CONST != 0 {
+        "const "
+    } else {
+        ""
+    };
+    let reference = if adjectives & REFERENCE != 0 {
+        " &"
+    } else {
+        ""
+    };
+    format!("{constant}{ty}{reference}")
+}
+
+/// Reads the try blocks a `FuncInfo` declares.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `parent` - The function the record belongs to.
+/// * `info` - The `FuncInfo` address.
+///
+/// # Returns
+///
+/// The guards, or `None` when the maps do not hold together.
+fn cxx3_guards(program: &Program, parent: u64, info: u64) -> Option<Vec<Guard>> {
+    let base = program.image_base;
+    let rva = |at: u64| {
+        read_u32(program, at)
+            .filter(|&v| v != 0)
+            .map(|v| base.wrapping_add(u64::from(v)))
+    };
+    let blocks = read_u32(program, info.wrapping_add(12))?;
+    let n_ip = read_u32(program, info.wrapping_add(20))?;
+    if blocks == 0 || blocks > TRY_BLOCKS_MAX || n_ip > IP_MAP_MAX {
+        return None;
+    }
+    let tmap = rva(info.wrapping_add(16))?;
+    let ipmap = rva(info.wrapping_add(24))?;
+    let mut map = Vec::new();
+    for k in 0..u64::from(n_ip) {
+        let at = ipmap.wrapping_add(k * 8);
+        let ip = base.wrapping_add(u64::from(read_u32(program, at)?));
+        let state = read_u32(program, at.wrapping_add(4))?.cast_signed();
+        map.push((ip, i64::from(state)));
+    }
+    let spans = state_spans(program, parent, map);
+    let mut out = Vec::new();
+    for block in 0..u64::from(blocks) {
+        let entry = tmap.wrapping_add(block * 20);
+        let low = read_u32(program, entry)?.cast_signed();
+        let high = read_u32(program, entry.wrapping_add(4))?.cast_signed();
+        let catches = read_u32(program, entry.wrapping_add(12))?.min(CATCHES_MAX);
+        let handlers = rva(entry.wrapping_add(16))?;
+        let mut clauses = Vec::new();
+        for clause in 0..u64::from(catches) {
+            let h = handlers.wrapping_add(clause * 20);
+            let adjectives = read_u32(program, h)?;
+            let funclet = rva(h.wrapping_add(12))?;
+            if !crate::analysis::is_executable_va(program, funclet) {
+                return None;
+            }
+            clauses.push(Clause {
+                kind: ClauseKind::Catch(catch_decl(program, adjectives, rva(h.wrapping_add(4)))),
+                funclet: Some(funclet),
+                resume: None,
+                selector: None,
+            });
+        }
+        out.extend(try_block(&spans, i64::from(low), i64::from(high), clauses));
+    }
+    Some(out)
+}
+
+/// Reads the try blocks a compact `FuncInfo4` declares.
+///
+/// The header byte says which maps follow; the IP-to-state map is always
+/// there, a count then pairs of compact integers: the distance from the
+/// previous entry's address (the first from the function's start) and the
+/// state plus one. A separated function, whose map is split by code
+/// segment, is not read.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `parent` - The function the record belongs to.
+/// * `info` - The `FuncInfo4` address.
+///
+/// # Returns
+///
+/// The guards, or `None` when the record does not hold together.
+fn cxx4_guards(program: &Program, parent: u64, info: u64) -> Option<Vec<Guard>> {
+    /// `isSeparated`: the IP-to-state map is split by code segment.
+    const SEPARATED: u8 = 0x02;
+    let base = program.image_base;
+    let header = *program.read_va(info, 1)?.first()?;
+    if header & SEPARATED != 0 || header & 0x10 == 0 {
+        return None;
+    }
+    let mut at = info.wrapping_add(1);
+    if header & 0x04 != 0 {
+        at = at.wrapping_add(4);
+    }
+    if header & 0x08 != 0 {
+        at = at.wrapping_add(4);
+    }
+    let try_map = base.wrapping_add(u64::from(read_u32(program, at)?));
+    let ipmap = base.wrapping_add(u64::from(read_u32(program, at.wrapping_add(4))?));
+    let (n_ip, mut q) = compact(program, ipmap)?;
+    if n_ip > IP_MAP_MAX {
+        return None;
+    }
+    let mut map = Vec::new();
+    let mut ip = parent;
+    for _ in 0..n_ip {
+        let (delta, next) = compact(program, q)?;
+        let (state, next) = compact(program, next)?;
+        q = next;
+        ip = ip.wrapping_add(u64::from(delta));
+        map.push((ip, i64::from(state) - 1));
+    }
+    let spans = state_spans(program, parent, map);
+    let (count, mut q) = compact(program, try_map)?;
+    if count > TRY_BLOCKS_MAX {
+        return None;
+    }
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let (low, next) = compact(program, q)?;
+        let (high, next) = compact(program, next)?;
+        q = compact(program, next)?.1;
+        let handlers = base.wrapping_add(u64::from(read_u32(program, q)?));
+        q = q.wrapping_add(4);
+        let (catches, mut h) = compact(program, handlers)?;
+        if catches > CATCHES_MAX {
+            return None;
+        }
+        let mut clauses = Vec::new();
+        for _ in 0..catches {
+            let flags = *program.read_va(h, 1)?.first()?;
+            h = h.wrapping_add(1);
+            let mut adjectives = 0;
+            if flags & 0x01 != 0 {
+                let (v, next) = compact(program, h)?;
+                adjectives = v;
+                h = next;
+            }
+            let mut descriptor = None;
+            if flags & 0x02 != 0 {
+                descriptor = Some(read_u32(program, h)?)
+                    .filter(|&v| v != 0)
+                    .map(|v| base.wrapping_add(u64::from(v)));
+                h = h.wrapping_add(4);
+            }
+            if flags & 0x04 != 0 {
+                h = compact(program, h)?.1;
+            }
+            let funclet = base.wrapping_add(u64::from(read_u32(program, h)?));
+            h = h.wrapping_add(4);
+            let mut resume = None;
+            for _ in 0..((flags >> 4) & 3) {
+                let cont = if flags & 0x08 != 0 {
+                    let rva = read_u32(program, h)?;
+                    h = h.wrapping_add(4);
+                    base.wrapping_add(u64::from(rva))
+                } else {
+                    let (offset, next) = compact(program, h)?;
+                    h = next;
+                    parent.wrapping_add(u64::from(offset))
+                };
+                resume = resume.or(Some(cont));
+            }
+            if !crate::analysis::is_executable_va(program, funclet) {
+                return None;
+            }
+            clauses.push(Clause {
+                kind: ClauseKind::Catch(catch_decl(program, adjectives, descriptor)),
+                funclet: Some(funclet),
+                resume,
+                selector: None,
+            });
+        }
+        out.extend(try_block(&spans, i64::from(low), i64::from(high), clauses));
+    }
+    Some(out)
+}
+
+/// Reads the `__try` regions a scope table declares.
+///
+/// Records that share a handler and a target are one `__try` laid out in
+/// pieces and become one guard. An `__except` body inside the parent is
+/// where the parent resumes; one moved out of it is a funclet.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `parent` - The function the table belongs to.
+/// * `data` - The table's address.
+///
+/// # Returns
+///
+/// The guards in table order, or `None` when the table does not hold
+/// together ([`seh`]).
+fn seh_guards(program: &Program, parent: u64, data: u64) -> Option<Vec<Guard>> {
+    seh(program, parent, data)?;
+    let count = read_u32(program, data)?;
+    let base = program.image_base;
+    let end = parent_end(program, parent);
+    let mut out: Vec<(u32, u32, Guard)> = Vec::new();
+    for i in 0..u64::from(count) {
+        let rec = data.wrapping_add(4 + i * 16);
+        let begin = base.wrapping_add(u64::from(read_u32(program, rec)?));
+        let stop = base.wrapping_add(u64::from(read_u32(program, rec.wrapping_add(4))?));
+        let handler = read_u32(program, rec.wrapping_add(8))?;
+        let target = read_u32(program, rec.wrapping_add(12))?;
+        if let Some((.., g)) = out
+            .iter_mut()
+            .find(|(h, t, _)| *h == handler && *t == target)
+        {
+            g.ranges.push((begin, stop));
+            continue;
+        }
+        let at = |rva: u32| base.wrapping_add(u64::from(rva));
+        let clause = if target == 0 {
+            Clause {
+                kind: ClauseKind::Finally,
+                funclet: Some(at(handler)),
+                resume: None,
+                selector: None,
+            }
+        } else {
+            let body = at(target);
+            let inside = body > parent && end.is_some_and(|e| body < e);
+            Clause {
+                kind: ClauseKind::Except((handler > 1).then(|| at(handler))),
+                funclet: (!inside).then_some(body),
+                resume: Some(body),
+                selector: None,
+            }
+        };
+        out.push((
+            handler,
+            target,
+            Guard {
+                dialect: Dialect::Seh,
+                ranges: vec![(begin, stop)],
+                clauses: vec![clause],
+            },
+        ));
+    }
+    Some(
+        out.into_iter()
+            .map(|(.., mut g)| {
+                g.ranges = crate::analysis::guards::merged(g.ranges);
+                g
+            })
+            .collect(),
+    )
 }
 
 /// Whether a funclet is an `__except` body inside the range the exception
@@ -590,8 +988,9 @@ fn seh(program: &Program, parent: u64, data: u64) -> Option<Vec<Funclet>> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Funclet, continuations, funclets};
+    use super::{Funclet, continuations, funclets, guards};
     use crate::analysis::FuncletRole;
+    use crate::analysis::guards::{Clause, ClauseKind, Dialect, Guard};
     use crate::headers::{ExceptionHandler, Headers};
     use crate::program::{Arch, BinaryFormat, FileOff, Program, Section, Symbol, SymbolKind, Va};
 
@@ -873,5 +1272,142 @@ mod tests {
         ];
         assert_eq!(funclets(&image(&d, Some("__CxxFrameHandler3"))), expect);
         assert_eq!(funclets(&image(&d, None)), expect);
+    }
+
+    /// A `FuncInfo`'s try block covers the instructions its IP-to-state map
+    /// puts in its states, and its catch names the type its descriptor
+    /// spells.
+    ///
+    /// # Panics
+    ///
+    /// When the guard is missed or misread.
+    #[test]
+    fn a_funcinfo_try_block_spans_its_states() {
+        let mut d = vec![0u8; 0x100];
+        let put =
+            |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut d, 0x0, 0x2010);
+        for (k, v) in [0x1993_0522u32, 1, 0x2040, 1, 0x2060, 3, 0x20a0]
+            .iter()
+            .enumerate()
+        {
+            put(&mut d, 0x10 + 4 * k, *v);
+        }
+        put(&mut d, 0x40, u32::MAX);
+        for (k, v) in [0u32, 0, 0, 1, 0x2080].iter().enumerate() {
+            put(&mut d, 0x60 + 4 * k, *v);
+        }
+        for (k, v) in [0x08u32, 0x20c0, 0, 0x1200, 0].iter().enumerate() {
+            put(&mut d, 0x80 + 4 * k, *v);
+        }
+        for (k, v) in [0x1000u32, u32::MAX, 0x1004, 0, 0x1010, u32::MAX]
+            .iter()
+            .enumerate()
+        {
+            put(&mut d, 0xa0 + 4 * k, *v);
+        }
+        d[0xd0..0xdc].copy_from_slice(b".?AVError@@\0");
+        let mut p = image(&d, Some("__CxxFrameHandler3"));
+        p.function_ranges = vec![(BASE + 0x1000, BASE + 0x1100)];
+        let found = guards(&p);
+        assert_eq!(
+            found.get(&(BASE + 0x1000)),
+            Some(&vec![Guard {
+                dialect: Dialect::Cxx,
+                ranges: vec![(BASE + 0x1004, BASE + 0x1010)],
+                clauses: vec![Clause {
+                    kind: ClauseKind::Catch("Error &".to_owned()),
+                    funclet: Some(BASE + 0x1200),
+                    resume: None,
+                    selector: None,
+                }],
+            }]),
+            "{found:x?}"
+        );
+    }
+
+    /// A compact `FuncInfo4`'s IP-to-state map counts each entry from the
+    /// one before, its states stored one up, and a catch keeps the
+    /// continuation its record names.
+    ///
+    /// # Panics
+    ///
+    /// When the guard is missed or misread.
+    #[test]
+    fn a_compact_funcinfo_try_block_spans_its_states() {
+        let mut d = vec![0u8; 0x100];
+        let put =
+            |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut d, 0x0, 0x2010);
+        d[0x10] = 0x10;
+        put(&mut d, 0x11, 0x2060);
+        put(&mut d, 0x15, 0x20a0);
+        d[0x60] = 1 << 1;
+        put(&mut d, 0x64, 0x2080);
+        d[0x80] = 1 << 1;
+        d[0x81] = 0x01 | 0x08 | 0x10;
+        d[0x82] = 0x40 << 1;
+        put(&mut d, 0x83, 0x1200);
+        put(&mut d, 0x87, 0x1080);
+        d[0xa0..0xa5].copy_from_slice(&[2 << 1, 4 << 1, 1 << 1, 0xc << 1, 0]);
+        let mut p = image(&d, Some("__CxxFrameHandler4"));
+        p.function_ranges = vec![(BASE + 0x1000, BASE + 0x1100)];
+        let found = guards(&p);
+        assert_eq!(
+            found.get(&(BASE + 0x1000)),
+            Some(&vec![Guard {
+                dialect: Dialect::Cxx,
+                ranges: vec![(BASE + 0x1004, BASE + 0x1010)],
+                clauses: vec![Clause {
+                    kind: ClauseKind::Catch("...".to_owned()),
+                    funclet: Some(BASE + 0x1200),
+                    resume: Some(BASE + 0x1080),
+                    selector: None,
+                }],
+            }]),
+            "{found:x?}"
+        );
+    }
+
+    /// Each scope-table record is a `__try` over its range: a `__finally`
+    /// names its funclet, an `__except` its filter and the body inside
+    /// the function the runtime resumes at.
+    ///
+    /// # Panics
+    ///
+    /// When a guard is missed or misread.
+    #[test]
+    fn a_scope_table_record_is_a_guard() {
+        let mut p = image(&scope_table(), Some("__C_specific_handler"));
+        p.function_ranges = vec![(BASE + 0x1000, BASE + 0x1400)];
+        let found = guards(&p);
+        let seh = |ranges, kind, funclet, resume| Guard {
+            dialect: Dialect::Seh,
+            ranges,
+            clauses: vec![Clause {
+                kind,
+                funclet,
+                resume,
+                selector: None,
+            }],
+        };
+        assert_eq!(
+            found.get(&(BASE + 0x1000)),
+            Some(&vec![
+                seh(
+                    vec![(BASE + 0x1000, BASE + 0x1010)],
+                    ClauseKind::Finally,
+                    Some(BASE + 0x1100),
+                    None
+                ),
+                seh(
+                    vec![(BASE + 0x1010, BASE + 0x1020)],
+                    ClauseKind::Except(Some(BASE + 0x1200)),
+                    None,
+                    Some(BASE + 0x1300)
+                ),
+            ]),
+            "{found:x?}"
+        );
     }
 }

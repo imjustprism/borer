@@ -71,6 +71,9 @@ pub(super) struct Emit<'e, L: Lifter> {
     /// The block the function is entered at: an entry of any loop it is
     /// in, whatever its predecessors.
     pub(super) entry: usize,
+    /// Blocks only the exception runtime enters ([`guarded::Plan::roots`]):
+    /// written though no predecessor of theirs is.
+    pub(super) eh_roots: BTreeSet<usize>,
     /// Emission orders of the structures being written, innermost last, each
     /// with the position of the block currently being emitted. Top level is
     /// address order.
@@ -165,6 +168,7 @@ impl<L: Lifter> Emit<'_, L> {
     /// * `named` - The labels the text written so far jumps to ([`note_jumps`]).
     pub(super) fn unread(&self, b: usize, named: &BTreeSet<u64>) -> bool {
         b != self.entry
+            && !self.eh_roots.contains(&b)
             && self.preds[b].iter().all(|&p| self.emitted[p])
             && !named.contains(&self.start(b))
     }

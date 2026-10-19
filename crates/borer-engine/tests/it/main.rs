@@ -31,6 +31,7 @@ mod clr;
 mod decoded;
 mod decompile;
 mod discovery;
+mod eh;
 mod elf;
 mod emulate_calls;
 mod engine;

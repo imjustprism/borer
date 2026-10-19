@@ -446,7 +446,7 @@ pub(super) const fn bin_op(op: BinOp) -> &'static str {
 ///
 /// * `e` - The expression.
 /// * `out` - Receives the text.
-fn expr(e: &Expr, out: &mut String) {
+pub(super) fn expr(e: &Expr, out: &mut String) {
     match &e.kind {
         ExprKind::Lit(l) => out.push_str(&l.text),
         ExprKind::Name(n) => out.push_str(n.as_str()),

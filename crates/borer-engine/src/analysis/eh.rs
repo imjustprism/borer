@@ -202,7 +202,12 @@ fn apply(analysis: &mut Analysis, found: &BTreeMap<u64, Funclet>) {
 /// # Returns
 ///
 /// The `FuncInfo` address, or `None` when the function is not such a thunk.
-fn handler_thunk(program: &Program, analysis: &Analysis, bitness: u32, entry: u64) -> Option<u64> {
+pub(super) fn handler_thunk(
+    program: &Program,
+    analysis: &Analysis,
+    bitness: u32,
+    entry: u64,
+) -> Option<u64> {
     let load = super::functions::decode_at(program, bitness, entry)?;
     if load.mnemonic() != Mnemonic::Mov
         || load.op0_kind() != OpKind::Register

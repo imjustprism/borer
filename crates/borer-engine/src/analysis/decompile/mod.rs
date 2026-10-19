@@ -44,6 +44,7 @@ mod fields;
 mod finish;
 mod format;
 mod frame;
+mod guarded;
 mod helper;
 pub(crate) mod interp;
 mod ladder;
@@ -178,6 +179,10 @@ struct Ctx<'a> {
     /// restores `fs:[0]` before every return, is the compiler's and renders
     /// as nothing ([`lift::Exec::store`]).
     seh_frame: bool,
+    /// Blocks only the exception runtime enters (a landing pad, an
+    /// `__except` body, a catch's continuation), each with the protected
+    /// blocks whose frame it starts from ([`guarded::Plan::roots`]).
+    eh_roots: Vec<(usize, Vec<usize>)>,
     /// A Go function's stack-growth check ([`go_stack_check`]): the address
     /// of its `jbe` to the `runtime.morestack` call, which the lifter takes
     /// as never taken, and the header's note of what was folded.
@@ -916,6 +921,7 @@ fn new_ctx<'a>(
         symbolic_only: false,
         probe: None,
         seh_frame: false,
+        eh_roots: Vec::new(),
         go_check: None,
         params: Vec::new(),
         declared: BTreeMap::new(),
@@ -1776,6 +1782,8 @@ fn decompile_in<L: Lifter>(
     for (i, c) in &f.param_hints {
         ctx.param_class.entry(*i).or_insert_with(|| c.clone());
     }
+    let plan = guarded::plan(program, analysis, overlay, f, &succs, ctx.entry_block);
+    ctx.eh_roots.clone_from(&plan.roots);
     ctx.flag_readers = code.iter().map(|b| L::reads_inherited_flags(b)).collect();
     ctx.rebase_flags = vec![None; code.len()];
     let regs = L::live_in(&ctx, &code, &succs);
@@ -1799,7 +1807,13 @@ fn decompile_in<L: Lifter>(
     let (_, _, mut recorded) = dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &[]);
     ctx.frame.solve();
     widen_slots(&mut recorded);
-    live.slots = Some(slot_liveness(&recorded, &succs));
+    let mut succs_eh = succs.clone();
+    for (root, feeders) in &plan.roots {
+        for &p in feeders {
+            succs_eh[p].push(*root);
+        }
+    }
+    live.slots = Some(slot_liveness(&recorded, &succs_eh));
     let assumes = block_assumptions::<L>(&code, &preds, &recorded);
     let (in_envs, processed, recorded) =
         dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &assumes);
@@ -1866,9 +1880,12 @@ fn decompile_in<L: Lifter>(
         dup_stack: Vec::new(),
         copy_targets: BTreeSet::new(),
         entry: entry_block,
+        eh_roots: plan.root_blocks().collect(),
     };
     let mut reached = vec![false; n];
-    let mut work = vec![entry_block];
+    let mut work: Vec<usize> = std::iter::once(entry_block)
+        .chain(plan.root_blocks())
+        .collect();
     while let Some(b) = work.pop() {
         if b >= n || std::mem::replace(&mut reached[b], true) {
             continue;
@@ -1931,7 +1948,7 @@ fn decompile_in<L: Lifter>(
             follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
         }
     }
-    let body = cir::print(&cir::build(&body));
+    let body = cir::print(&cir::wrap(cir::build(&body), &plan.regions).0);
     let skip = overlay.passes;
     let body = if skip.runs(Pass::DropReturnedValues)
         && f.returns_value == Some(false)

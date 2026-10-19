@@ -1099,17 +1099,7 @@ impl<'scope> Lanes<'scope> {
 }
 
 /// The `__except` filters and handlers of the 32-bit SEH scope table at
-/// `table`, when one is there.
-///
-/// A frame pushes its table's address, to `__SEH_prolog4` or into its own
-/// registration. An `EH4` table opens with four cookie offsets, each a
-/// small negative frame offset (`-2` for no cookie) or a small XOR
-/// adjustment, then records `{enclosing level, filter, handler}`: the
-/// first outermost (`-2`), each later one enclosed by an earlier, and a
-/// `__finally` with no filter. The blocks they name are reached from no
-/// instruction, so without the table a walk never decodes them and a
-/// guess later takes each for a function of its own. The header is held
-/// to that shape so that some other table is not read as one.
+/// `table`, when one is there ([`seh_scope_records`]).
 ///
 /// # Arguments
 ///
@@ -1123,26 +1113,86 @@ impl<'scope> Lanes<'scope> {
 /// The filters and handlers in record order, empty when `table` does not
 /// hold a scope table.
 fn seh_scope_roots(program: &Program, table: u64, entry: u64) -> Vec<u64> {
+    seh_scope_records(program, table, entry, true)
+        .into_iter()
+        .flat_map(|r| {
+            (r.filter != 0)
+                .then_some(u64::from(r.filter))
+                .into_iter()
+                .chain([u64::from(r.handler)])
+        })
+        .collect()
+}
+
+/// One record of a 32-bit SEH scope table: one `__try`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScopeRecord {
+    /// The index of the record whose `__try` encloses this one, or the
+    /// outermost level.
+    pub(crate) enclosing: u32,
+    /// The `__except` filter, or `0` for a `__finally`.
+    pub(crate) filter: u32,
+    /// The `__except` body, or the `__finally` block.
+    pub(crate) handler: u32,
+}
+
+/// Reads the records of the 32-bit SEH scope table at `table`, when one is
+/// there.
+///
+/// A frame pushes its table's address, to `__SEH_prolog4` or into its own
+/// registration. An `EH4` table opens with four cookie offsets, each a
+/// small negative frame offset (`-2` for no cookie) or a small XOR
+/// adjustment, then records `{enclosing level, filter, handler}`: the
+/// first outermost (`-2`), each later one enclosed by an earlier, and a
+/// `__finally` with no filter. An `EH3` table is the records alone, its
+/// outermost level `-1`. The blocks they name are reached from no
+/// instruction, so without the table a walk never decodes them and a
+/// guess later takes each for a function of its own. The header is held
+/// to that shape so that some other table is not read as one, and the
+/// records end at the first that does not hold together.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `table` - The pushed address.
+/// * `entry` - The pushing function's entry, whose section its handlers
+///   share.
+/// * `eh4` - Whether the table is `_except_handler4`'s, with the cookie
+///   header, rather than `_except_handler3`'s.
+///
+/// # Returns
+///
+/// The records in table order, empty when `table` does not hold a scope
+/// table.
+pub(crate) fn seh_scope_records(
+    program: &Program,
+    table: u64,
+    entry: u64,
+    eh4: bool,
+) -> Vec<ScopeRecord> {
     /// Most records read from one table.
     const RECORDS_MAX: u64 = 64;
     /// Largest frame offset or XOR adjustment a cookie field holds.
     const FRAME_MAX: i32 = 0x1_0000;
-    /// The outermost enclosing level, and the no-cookie offset.
+    /// The outermost enclosing level of `EH4`, and the no-cookie offset.
     const TOPMOST: u32 = 0xffff_fffe;
     let Some(home) = program.section_at(entry).map(|s| s.va.0) else {
         return Vec::new();
     };
     let word = |va: u64| read_u32(program, va);
-    let Some(header) = (0..4)
-        .map(|k| word(table + 4 * k).map(u32::cast_signed))
-        .collect::<Option<Vec<i32>>>()
-    else {
-        return Vec::new();
-    };
-    let offset = |v: i32| v == TOPMOST.cast_signed() || (-FRAME_MAX..0).contains(&v);
-    let adjust = |v: i32| (-FRAME_MAX..FRAME_MAX).contains(&v);
-    if !(offset(header[0]) && adjust(header[1]) && offset(header[2]) && adjust(header[3])) {
-        return Vec::new();
+    let outermost = if eh4 { TOPMOST } else { u32::MAX };
+    if eh4 {
+        let Some(header) = (0..4)
+            .map(|k| word(table + 4 * k).map(u32::cast_signed))
+            .collect::<Option<Vec<i32>>>()
+        else {
+            return Vec::new();
+        };
+        let offset = |v: i32| v == TOPMOST.cast_signed() || (-FRAME_MAX..0).contains(&v);
+        let adjust = |v: i32| (-FRAME_MAX..FRAME_MAX).contains(&v);
+        if !(offset(header[0]) && adjust(header[1]) && offset(header[2]) && adjust(header[3])) {
+            return Vec::new();
+        }
     }
     let code = |va: u32| {
         let va = u64::from(va);
@@ -1150,27 +1200,25 @@ fn seh_scope_roots(program: &Program, table: u64, entry: u64) -> Vec<u64> {
             && program.section_at(va).is_some_and(|s| s.va.0 == home)
             && plausible_entry(program, 32, va)
     };
-    let mut roots = Vec::new();
+    let first = table + if eh4 { 16 } else { 0 };
+    let mut out = Vec::new();
     for k in 0..RECORDS_MAX {
-        let at = table + 16 + 12 * k;
+        let at = first + 12 * k;
         let (Some(level), Some(filter), Some(handler)) = (word(at), word(at + 4), word(at + 8))
         else {
             break;
         };
-        let enclosed = if k == 0 {
-            level == TOPMOST
-        } else {
-            level == TOPMOST || u64::from(level) < k
-        };
+        let enclosed = level == outermost || (k > 0 && u64::from(level) < k);
         if !enclosed || !code(handler) || (filter != 0 && !code(filter)) {
             break;
         }
-        if filter != 0 {
-            roots.push(u64::from(filter));
-        }
-        roots.push(u64::from(handler));
+        out.push(ScopeRecord {
+            enclosing: level,
+            filter,
+            handler,
+        });
     }
-    roots
+    out
 }
 
 /// Most distinct values kept for one parameter.
@@ -1645,33 +1693,7 @@ fn catch_continuations(program: &Program, functions: &[Function]) -> FxHashMap<u
         .collect();
     let covered = Covered::new(functions);
     for f in functions.iter().filter(|f| catches.contains(&f.entry)) {
-        for b in f.blocks.iter().filter(|b| b.term == BlockTerm::Ret) {
-            let Some(bytes) = usize::try_from(b.end - b.start)
-                .ok()
-                .and_then(|n| program.read_va(b.start, n))
-            else {
-                continue;
-            };
-            let mut decoder = Decoder::with_ip(64, bytes, b.start, DecoderOptions::NONE);
-            let mut label = None;
-            for i in &mut decoder {
-                if i.mnemonic() == Mnemonic::Lea
-                    && i.op0_kind() == OpKind::Register
-                    && i.op0_register().full_register() == Register::RAX
-                    && i.memory_base() == Register::RIP
-                {
-                    label = Some(i.memory_displacement64());
-                } else if i.op0_kind() == OpKind::Register
-                    && i.op0_register().full_register() == Register::RAX
-                    && !matches!(
-                        i.mnemonic(),
-                        Mnemonic::Push | Mnemonic::Cmp | Mnemonic::Test
-                    )
-                {
-                    label = None;
-                }
-            }
-            let Some(label) = label else { continue };
+        for label in returned_labels(program, f) {
             let k = ranges.partition_point(|r| r.0 <= label);
             let Some(&(parent, end)) = k.checked_sub(1).and_then(|k| ranges.get(k)) else {
                 continue;
@@ -1687,6 +1709,58 @@ fn catch_continuations(program: &Program, functions: &[Function]) -> FxHashMap<u
     }
     for labels in out.values_mut() {
         dedup_sorted(labels);
+    }
+    out
+}
+
+/// Lists the labels a catch funclet hands back to the runtime: the `lea
+/// rax, [label]` (x64) or `mov eax, label` (x86) that last sets the result
+/// register before each of its `ret`s.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `f` - The catch funclet.
+///
+/// # Returns
+///
+/// One label per returning block that loads one, in block order.
+pub(crate) fn returned_labels(program: &Program, f: &Function) -> Vec<u64> {
+    let mut out = Vec::new();
+    for b in f.blocks.iter().filter(|b| b.term == BlockTerm::Ret) {
+        let Some(bytes) = usize::try_from(b.end - b.start)
+            .ok()
+            .and_then(|n| program.read_va(b.start, n))
+        else {
+            continue;
+        };
+        let mut label = None;
+        let bits = if program.is_64 { 64 } else { 32 };
+        for i in Decoder::with_ip(bits, bytes, b.start, DecoderOptions::NONE) {
+            if i.mnemonic() == Mnemonic::Lea
+                && i.op0_kind() == OpKind::Register
+                && i.op0_register().full_register() == Register::RAX
+                && i.memory_base() == Register::RIP
+            {
+                label = Some(i.memory_displacement64());
+            } else if bits == 32
+                && i.mnemonic() == Mnemonic::Mov
+                && i.op0_kind() == OpKind::Register
+                && i.op0_register() == Register::EAX
+                && i.op1_kind() == OpKind::Immediate32
+            {
+                label = Some(u64::from(i.immediate32()));
+            } else if i.op0_kind() == OpKind::Register
+                && i.op0_register().full_register() == Register::RAX
+                && !matches!(
+                    i.mnemonic(),
+                    Mnemonic::Push | Mnemonic::Cmp | Mnemonic::Test
+                )
+            {
+                label = None;
+            }
+        }
+        out.extend(label);
     }
     out
 }

@@ -302,3 +302,91 @@ fn a_try_without_a_handler_stays_text() {
         body.stmts
     );
 }
+
+/// The region a body's blocks are wrapped by in the tests below: a
+/// protected call at `0x1000` caught at `0x1040`.
+///
+/// # Arguments
+///
+/// * `protected` - The protected blocks.
+fn region(protected: &[u64]) -> Region {
+    Region {
+        seh: false,
+        protected: protected.iter().copied().collect(),
+        handlers: vec![RegionHandler {
+            head: Head::Catch("Error &".to_owned()),
+            note: Some("runs f::catch$0 @ 0x2000".to_owned()),
+            entry: Some(0x1040),
+            owned: [0x1040].into_iter().collect(),
+        }],
+        dropped: [0x1050].into_iter().collect(),
+        ranges: vec![(0x1000, 0x1008)],
+    }
+}
+
+/// The statements of the protected blocks become a `try`, the handler's
+/// run moves into its `catch`, the runtime's own dispatch goes, and a
+/// jump to the label right after the `try` becomes falling out of it.
+#[test]
+fn a_region_with_exact_bounds_wraps() {
+    let body = build(
+        "L_1000:
+rax = f();
+goto L_1010;
+L_1010:
+return rax;
+L_1050:
+_Unwind_Resume();
+L_1040:
+rax = 1;
+goto L_1010;
+",
+    );
+    let (wrapped, failed) = wrap(body, &[region(&[0x1000])]);
+    assert_eq!(failed, 0, "{}", print(&wrapped));
+    assert_eq!(
+        print(&wrapped),
+        "L_1000:
+try {
+  rax = f();
+} catch (Error &) {
+  // runs f::catch$0 @ 0x2000
+  L_1040:
+  rax = 1;
+}
+L_1010:
+return rax;
+"
+    );
+}
+
+/// A jump from outside into the middle of the protected statements makes
+/// the bounds inexact: no `try` is drawn, and a comment names the handler.
+#[test]
+fn a_jump_into_the_region_leaves_a_comment() {
+    const TEXT: &str = "L_1000:
+rax = f();
+goto L_1008;
+L_1008:
+rax += 1;
+goto L_1010;
+L_1010:
+if (rax) goto L_1008;
+return rax;
+L_1040:
+rax = 1;
+goto L_1010;
+";
+    let (wrapped, failed) = wrap(build(TEXT), &[region(&[0x1000, 0x1008])]);
+    assert_eq!(failed, 1);
+    let text = print(&wrapped);
+    assert!(!text.contains("try {"), "{text}");
+    assert!(
+        text.starts_with(
+            "// try 0x1000..0x1008 not structured, its bounds are not exact: \
+             catch (Error &) at 0x1040, runs f::catch$0 @ 0x2000\nL_1000:\n"
+        ),
+        "{text}"
+    );
+    assert!(text.ends_with(TEXT), "{text}");
+}

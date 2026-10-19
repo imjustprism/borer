@@ -215,6 +215,36 @@ fn type_name(program: &Program, descriptor: u64) -> Option<String> {
     Some(parts.join("::"))
 }
 
+/// Reads the C++ type a `catch` clause's type descriptor names.
+///
+/// A class or a struct reads as [`type_name`] reads it; any other type
+/// (`.H` for `int`, `.PEAD` for `char *`) goes through the demangler as
+/// the descriptor's own symbol would, and its `__ptr64` qualifiers are
+/// dropped since every pointer of the image has that width.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `descriptor` - Address of the type descriptor.
+///
+/// # Returns
+///
+/// The type as C++ spells it, or `None` when nothing readable is there.
+pub(crate) fn caught_type(program: &Program, descriptor: u64) -> Option<String> {
+    if let Some(name) = type_name(program, descriptor) {
+        return Some(name);
+    }
+    let word = pointer_size(program);
+    let (_, raw) = cstr_at(program, descriptor.checked_add(2 * word)?, 2, NAME_MAX)?;
+    let demangled = msvc_demangler::demangle(
+        &format!("??_R0{}@8", raw.strip_prefix('.')?),
+        msvc_demangler::DemangleFlags::NAME_ONLY,
+    )
+    .ok()?;
+    let ty = demangled.strip_suffix(" `RTTI Type Descriptor'")?;
+    Some(ty.replace(" __ptr64", ""))
+}
+
 /// Reads a locator-relative link: an absolute pointer on a 32-bit image,
 /// an image-relative offset on a 64-bit one.
 ///

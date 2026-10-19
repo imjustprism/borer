@@ -160,6 +160,9 @@ struct Known<'a> {
     /// The code the functions kept so far cover, as sorted, disjoint
     /// extents ([`Discovery::covered`]); empty for a wave of facts.
     covered: &'a [(u64, u64)],
+    /// Each function's Itanium landing pads, by entry: labels of its own
+    /// that only the unwinder reaches ([`crate::lsda`]).
+    pads: &'a BTreeMap<u64, Vec<u64>>,
 }
 
 impl Known<'_> {
@@ -409,6 +412,14 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
     let mut seen: FxHashSet<u64> = FxHashSet::default();
     let mut words: Vec<(u64, u32)> = Vec::new();
     let mut pending: Vec<(u64, Via)> = vec![(entry, Via::Fall)];
+    pending.extend(
+        known
+            .pads
+            .get(&entry)
+            .into_iter()
+            .flatten()
+            .map(|&pad| (pad, Via::Branch)),
+    );
     let mut torn_down: FxHashSet<u64> = FxHashSet::default();
     let mut callees: BTreeSet<u64> = BTreeSet::new();
     let mut followed: BTreeSet<u64> = BTreeSet::new();
@@ -897,6 +908,8 @@ fn rejected(w: &Walked, guess: bool) -> bool {
 struct Discovery<'a> {
     /// The loaded image.
     program: &'a Program,
+    /// Each function's Itanium landing pads, by entry.
+    pads: &'a BTreeMap<u64, Vec<u64>>,
     /// Instructions left to decode across every walk.
     fuel: u64,
     /// The fuel ran out, or a walk reached its cap, before discovery
@@ -1015,6 +1028,7 @@ impl Discovery<'_> {
                 declared: &program.function_ranges,
                 fragments: &program.headers.chained_chunks,
                 covered: &covered,
+                pads: self.pads,
             };
             for batch in wave.chunks(WAVE_BATCH) {
                 let guessed = &self.guessed;
@@ -1250,8 +1264,14 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         .filter(|s| is_noreturn_name(bare_name(&crate::search::demangled_name(&s.name))))
         .map(|s| s.addr)
         .collect();
+    let throw_sites = crate::lsda::throw_sites(program);
+    let pads: BTreeMap<u64, Vec<u64>> = throw_sites
+        .iter()
+        .map(|(&f, sites)| (f, sites.iter().filter_map(|s| s.landing_pad).collect()))
+        .collect();
     let mut d = Discovery {
         program,
+        pads: &pads,
         fuel: fuel_for(program),
         incomplete: false,
         starts: seeds.iter().copied().collect(),
@@ -1285,6 +1305,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
     }
     let mut analysis = Analysis {
         incomplete: d.incomplete,
+        throw_sites,
         ..Analysis::default()
     };
     for (&entry, k) in &d.walked {
