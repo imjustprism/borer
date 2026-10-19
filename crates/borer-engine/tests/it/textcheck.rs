@@ -9,7 +9,7 @@
 )]
 
 use borer_engine::analysis::decompile::{decompile_named, mark_unset, unset_reads};
-use borer_engine::analysis::render::{Verdict, check_generated};
+use borer_engine::analysis::render::{Verdict, check_generated, check_generated_iso};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program, Section};
 
@@ -552,4 +552,33 @@ fn a_call_that_never_returns_ends_the_path() {
     assert!(!thrown.contains("goto *"), "{thrown}");
     let (looped, _) = text_of(&p, TEXT + 0x60);
     assert!(!looped.contains("goto *"), "{looped}");
+}
+
+/// The ISO check agrees where the text is the C it claims to be: a
+/// computed value returned, and a value handed to a callee and returned
+/// from it, each run on the machine by its prototype alone.
+#[test]
+fn the_iso_check_agrees_where_the_text_is_c() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0x89, 0xc1, // ASM: mov ecx,eax
+        0xe8, 0x33, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0x48, 0x89, 0xc8, 0xc3]); // ASM: mov rax,rcx; ret
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    for entry in [TEXT, TEXT + 0x40] {
+        let rows = check_generated_iso(&p, &a, &o, entry, 8, 1, 20_000).expect("the text reads");
+        let text = decompile_named(&p, &a, &o, entry).unwrap_or_default();
+        assert!(
+            rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+            "{text}
+{rows:?}"
+        );
+    }
 }

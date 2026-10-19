@@ -16,7 +16,7 @@ mod vectors;
 pub use diff::run_diff_tsv;
 use spec::{RunSpec, parse_run};
 use vectors::VERIFY_SEED;
-pub use vectors::{check_generated, vectors_tsv};
+pub use vectors::{check_generated, check_generated_iso, vectors_tsv};
 
 /// Most input sets one request runs.
 const INPUTS_MAX: usize = 64;
@@ -525,6 +525,9 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
     let returned = match &t.end {
         End::Returned(v) => *v,
         End::Unchecked(why) => return Verdict::Unchecked(Some(line), why.clone()),
+        End::Refused(why) => {
+            return Verdict::Differs(line, format!("as ISO C, {why}; the binary returned"));
+        }
         End::Trap => {
             return Verdict::Differs(line, "the text stops here; the binary returned".to_owned());
         }

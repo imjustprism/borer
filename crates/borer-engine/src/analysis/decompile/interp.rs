@@ -23,6 +23,16 @@
 //! run (a vector value, an intrinsic it does not model, a virtual call, a
 //! field the layout does not size) stops the run and says which line it
 //! was, rather than guessing: the answer is then unchecked, never wrong.
+//!
+//! In ISO mode ([`Mode::Iso`]) the text is read as ISO C instead, with no
+//! machine leaking into its meaning. Each local stack slot (`local_N`, a
+//! named local) is an object of its own, away from the frame, so two that
+//! overlap no longer share bytes and a pointer past one reads nothing. A
+//! variable no line set, and a byte of a local no line wrote, is poison:
+//! reading it ends the run as [`End::Refused`], as does a name the text
+//! never declares (a register, a parameter the signature does not list).
+//! A callee gets the arguments the text passes and nothing of the text's
+//! registers. The operators, conversions and builtins are the same.
 
 use std::collections::BTreeMap;
 
@@ -62,6 +72,28 @@ const UNSET_ROUNDS: usize = 1 << 20;
 
 /// Steps the two verification runs of a solved constraint are given.
 const SOLVE_BUDGET: usize = 50_000;
+
+/// Where ISO mode places the first local object on a 64-bit target: memory
+/// no image or stack takes, below the vector variables.
+const ISO_BASE_64: u64 = 0x0000_5ffd_0000_0000;
+
+/// Where ISO mode places the first local object on a 32-bit target.
+const ISO_BASE_32: u64 = 0x5f00_0000;
+
+/// Bytes between two local objects in ISO mode: room for the largest local
+/// array, and a gap after it no other object starts in.
+const ISO_STRIDE: u64 = 0x1000;
+
+/// How a script reads the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Mode {
+    /// As the machine runs it: slots share the frame, registers start as
+    /// the machine's, a callee sees the text's registers.
+    Machine,
+    /// As ISO C: locals are objects of their own, a read of what no line
+    /// set and a name no line declares are refused.
+    Iso,
+}
 
 /// Bytes below a callee's frame its own stack reaches: a read there that
 /// nothing set is the leftovers of earlier calls, not an argument.
@@ -299,6 +331,9 @@ pub(crate) enum End {
     Callee(String, Stop),
     /// Something this reader does not run.
     Unchecked(String),
+    /// A read ISO C does not define, in [`Mode::Iso`]: a variable or a
+    /// local's byte no line set, or a name the text never declares.
+    Refused(String),
 }
 
 /// What running the text on one input did.
@@ -375,6 +410,14 @@ pub(crate) struct Script<'p> {
     wide: Vec<u64>,
     /// The stack pointer a call from the text enters its callee with.
     call_sp: u64,
+    /// How the text is read.
+    mode: Mode,
+    /// Per C variable, whether it holds an input at entry (a parameter,
+    /// the stack pointer) rather than poison.
+    inputs: Vec<bool>,
+    /// The addresses ISO mode's local objects take, start included and end
+    /// excluded; empty in [`Mode::Machine`].
+    objects: (u64, u64),
 }
 
 /// The tokens of the parenthesized group after the keyword `word` in a
@@ -1224,6 +1267,55 @@ impl<'p> Script<'p> {
         entry: u64,
         text: &str,
     ) -> Result<Self, String> {
+        Self::read_as(program, analysis, overlay, entry, text, Mode::Machine)
+    }
+
+    /// Reads a function's decompiled text into a program to run as ISO C
+    /// ([`Mode::Iso`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `analysis` - Its functions.
+    /// * `overlay` - The names the text was written under.
+    /// * `entry` - The function's entry.
+    /// * `text` - Its text, header first.
+    ///
+    /// # Errors
+    ///
+    /// As [`Script::read`].
+    pub(crate) fn read_iso(
+        program: &'p Program,
+        analysis: &'p Analysis,
+        overlay: &Overlay,
+        entry: u64,
+        text: &str,
+    ) -> Result<Self, String> {
+        Self::read_as(program, analysis, overlay, entry, text, Mode::Iso)
+    }
+
+    /// Reads a function's decompiled text in one [`Mode`].
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `analysis` - Its functions.
+    /// * `overlay` - The names the text was written under.
+    /// * `entry` - The function's entry.
+    /// * `text` - Its text, header first.
+    /// * `mode` - How to read it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Script::read`].
+    fn read_as(
+        program: &'p Program,
+        analysis: &'p Analysis,
+        overlay: &Overlay,
+        entry: u64,
+        text: &str,
+        mode: Mode,
+    ) -> Result<Self, String> {
         let word = u8::try_from(program.arch.bitness().unwrap_or(64)).unwrap_or(64);
         let all: Vec<&str> = text
             .lines()
@@ -1256,6 +1348,12 @@ impl<'p> Script<'p> {
             WIDE_BASE_32
         };
         let mut wide: Vec<u64> = Vec::new();
+        let iso_base = if program.is_64 {
+            ISO_BASE_64
+        } else {
+            ISO_BASE_32
+        };
+        let mut objects = (iso_base, iso_base);
         for (name, ty, at) in &head.declared {
             let slot = if let Some(addr) = at {
                 Slot::Mem(*addr)
@@ -1263,9 +1361,15 @@ impl<'p> Script<'p> {
                 .or_else(|| stated_local(overlay, entry, name))
                 .or_else(|| debug_local(program, entry, name))
             {
-                let addr = entry_sp.wrapping_add_signed(off);
-                frame_low = frame_low.min(addr);
-                Slot::Mem(addr)
+                if mode == Mode::Iso && off < 0 {
+                    let addr = objects.1;
+                    objects.1 = objects.1.wrapping_add(ISO_STRIDE);
+                    Slot::Mem(addr)
+                } else {
+                    let addr = entry_sp.wrapping_add_signed(off);
+                    frame_low = frame_low.min(addr);
+                    Slot::Mem(addr)
+                }
             } else if *ty == CTy::of(Base::Wide) {
                 let addr = wide_base.wrapping_add(from_usize(wide.len()).wrapping_mul(WIDE_BYTES));
                 wide.push(addr);
@@ -1363,6 +1467,12 @@ impl<'p> Script<'p> {
             .derived
             .get_or_build("thread_block", (), || thread_block(program));
         let teb = teb.ok_or("the thread block does not read")?;
+        let inputs = cells
+            .iter()
+            .map(|(name, reg, _)| {
+                *reg == Some(Register::RSP) || sig.params.iter().any(|(p, _)| p == name)
+            })
+            .collect();
         Ok(Self {
             program,
             analysis,
@@ -1384,6 +1494,9 @@ impl<'p> Script<'p> {
             teb,
             wide,
             call_sp,
+            mode,
+            inputs,
+            objects,
         })
     }
 
@@ -2681,9 +2794,11 @@ impl Running<'_, '_> {
                 ty: CTy::of(Base::Float(64)),
             }),
             _ if named_register(n).is_some() || n.starts_with("xmm") || n.starts_with("st") => {
-                unchecked(format!(
-                    "`{n}` is read, and the text never declares or sets it"
-                ))
+                let why = format!("`{n}` is read, and the text never declares or sets it");
+                match self.s.mode {
+                    Mode::Machine => unchecked(why),
+                    Mode::Iso => Err(End::Refused(why)),
+                }
             }
             "NULL" | "nullptr" => Ok(self.int(0, CTy::int(self.word(), false))),
             _ => match (
@@ -2708,6 +2823,12 @@ impl Running<'_, '_> {
     ///
     /// A fault when its stack slot is unbacked.
     fn parameter(&mut self, i: usize) -> Eval<Val> {
+        if self.s.mode == Mode::Iso {
+            return Err(End::Refused(format!(
+                "`a{}` is read, and the signature does not list it",
+                i + 1
+            )));
+        }
         let word = CTy::int(self.word(), false);
         if i < self.s.passing.regs.len() {
             return Ok(self.int(self.args.get(i).copied().unwrap_or(0), word));
@@ -2741,10 +2862,21 @@ impl Running<'_, '_> {
     /// value.
     fn read(&mut self, p: Place) -> Eval<Val> {
         match p {
-            Place::Var(k, ty) => Ok(Val {
-                bits: self.vals.get(k).copied().unwrap_or(0),
-                ty,
-            }),
+            Place::Var(k, ty) => {
+                if self.s.mode == Mode::Iso
+                    && self.set_at.get(k) == Some(&0)
+                    && self.s.inputs.get(k) == Some(&false)
+                {
+                    let name = self.s.cells.get(k).map_or("?", |c| c.0.as_str());
+                    return Err(End::Refused(format!(
+                        "`{name}` is read before any line sets it"
+                    )));
+                }
+                Ok(Val {
+                    bits: self.vals.get(k).copied().unwrap_or(0),
+                    ty,
+                })
+            }
             Place::Mem(at, ty) => {
                 let Some(n) = ty.bits(self.word()).map(|b| u64::from(b / 8)) else {
                     return unchecked("a load of a type without a value");
@@ -2755,6 +2887,11 @@ impl Running<'_, '_> {
                     let b = match self.emu.byte_stated(a) {
                         Some(b) => b,
                         None => {
+                            if a >= self.s.objects.0 && a < self.s.objects.1 {
+                                return Err(End::Refused(format!(
+                                    "a byte of a local at {a:#x} is read before any line writes it"
+                                )));
+                            }
                             if self.handed.is_some_and(|h| a >= h && a < self.s.entry_sp) {
                                 return unchecked(
                                     "a read of memory the text handed to an import, which the emulator does not fill",
@@ -3395,12 +3532,16 @@ impl Running<'_, '_> {
         ] {
             self.emu.set_register(r, 0);
         }
-        for (i, reg) in s.passing.regs.iter().enumerate() {
+        let leaked = match s.mode {
+            Mode::Machine => usize::MAX,
+            Mode::Iso => 0,
+        };
+        for (i, reg) in s.passing.regs.iter().enumerate().take(leaked) {
             if let (Some(v), Some(name)) = (self.args.get(i), full_register_name(*reg)) {
                 self.emu.set_register(name, *v);
             }
         }
-        for ((_, reg, _), v) in s.cells.iter().zip(&self.vals) {
+        for ((_, reg, _), v) in s.cells.iter().zip(&self.vals).take(leaked) {
             if let Some(r) = reg
                 && *r != Register::RSP
                 && !callee.regs.iter().any(|a| a.full_register() == *r)
@@ -3410,7 +3551,7 @@ impl Running<'_, '_> {
             }
         }
         for (r, left) in leftovers {
-            if !self.called {
+            if !self.called || s.mode == Mode::Iso {
                 continue;
             }
             if !s.cells.iter().any(|(_, reg, _)| *reg == Some(r)) {
@@ -4086,6 +4227,98 @@ return 0;
         ));
         let r = s.run(&[], &[], 100).unwrap();
         assert_eq!(r.end, End::Returned(Some(0x5566_7788)));
+    }
+
+    /// Runs a text once as ISO C on a function that only returns.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text, header first.
+    /// * `args` - The argument values.
+    ///
+    /// # Panics
+    ///
+    /// When the text does not read.
+    fn run_iso(text: &str, args: &[u64]) -> End {
+        let p = Program::raw_x64(&[0xc3]);
+        let a = Analysis::compute(&p);
+        let s = Script::read_iso(&p, &a, &Overlay::default(), 0x1000, text).unwrap();
+        s.run(args, &[], 10_000).unwrap().end
+    }
+
+    /// In ISO mode each local is an object of its own: the overlapping
+    /// slots that share the frame's bytes in the machine's reading keep
+    /// their own, and the control flow and conversions are C's as before.
+    ///
+    /// # Panics
+    ///
+    /// When a store to one local reaches another, or a run differs.
+    #[test]
+    fn iso_locals_are_objects_of_their_own() {
+        let text = "// signature: uint64_t f(void)
+uint64_t local_10;
+uint32_t local_c;
+
+local_10 = 0x1122334455667788;
+local_c = 0;
+return local_10;
+";
+        assert_eq!(
+            run_iso(text, &[]),
+            End::Returned(Some(0x1122_3344_5566_7788))
+        );
+        let text = "// signature: uint32_t f(uint64_t a1, uint64_t a2)
+uint64_t rax, rcx;
+
+rax = 0;
+for (rcx = 0; rcx < a1; rcx += 1) {
+  rax += rcx;
+}
+if (a2 == 3) {
+  rax += 1;
+}
+return rax;
+";
+        assert_eq!(run_iso(text, &[4, 3]), End::Returned(Some(7)));
+        assert_eq!(run_iso(text, &[4, 1]), End::Returned(Some(6)));
+    }
+
+    /// In ISO mode a read of what no line set is refused.
+    ///
+    /// That is a variable, a local's byte past the one written, a register
+    /// the text never declares and a parameter the signature does not
+    /// list. The machine's reading answers the first from the entry's
+    /// register.
+    ///
+    /// # Panics
+    ///
+    /// When a read of poison runs on.
+    #[test]
+    fn iso_refuses_a_read_of_what_no_line_set() {
+        let unset = "// signature: uint64_t f(uint64_t a1)
+uint64_t rax;
+
+return rax + a1;
+";
+        assert!(matches!(run_iso(unset, &[1]), End::Refused(why) if why.contains("`rax`")));
+        assert_eq!(run(unset, &[1]).0, End::Returned(Some(1)));
+        let past = "// signature: uint64_t f(void)
+uint8_t local_30;
+
+local_30 = 11;
+return *(uint64_t*)&local_30;
+";
+        assert!(matches!(run_iso(past, &[]), End::Refused(why) if why.contains("local")));
+        let register = "// signature: uint64_t f(uint64_t a1)
+
+return rdx;
+";
+        assert!(matches!(run_iso(register, &[1]), End::Refused(why) if why.contains("`rdx`")));
+        let unlisted = "// signature: uint64_t f(uint64_t a1)
+
+return a2;
+";
+        assert!(matches!(run_iso(unlisted, &[1]), End::Refused(why) if why.contains("`a2`")));
     }
 
     /// A callee finds the text's register variables in the registers no

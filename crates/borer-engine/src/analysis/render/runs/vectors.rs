@@ -7,7 +7,7 @@ use super::{
     writes_shown,
 };
 use crate::analysis::decompile::decompile_named;
-use crate::analysis::decompile::interp::Script;
+use crate::analysis::decompile::interp::{Mode, Script};
 use crate::analysis::decompile::signature::{Kind, Signature, passing, printed};
 use crate::analysis::render::oracle::compared_constants;
 use crate::analysis::render::*;
@@ -179,12 +179,81 @@ pub fn check_generated(
     seed: u64,
     budget: usize,
 ) -> Result<Vec<(String, Verdict)>, String> {
+    generated_in(p, a, o, entry, (count, seed, budget), Mode::Machine)
+}
+
+/// Checks a function's printed text, read as ISO C, against the binary on
+/// inputs generated from its signature.
+///
+/// As [`check_generated`], with the text run in ISO mode ([`Mode::Iso`]):
+/// each local is an object of its own, and a read of a variable or a
+/// local's byte no line set, or of a name the text never declares, is a
+/// difference at that line. Nothing gates on it yet; it measures how often
+/// the text is the C it claims to be.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `entry` - The function's entry.
+/// * `count` - How many inputs.
+/// * `seed` - The inputs' seed.
+/// * `budget` - Steps each run is given, on either side.
+///
+/// # Returns
+///
+/// Each input's arguments as a report row spells them, with the verdict of
+/// the ISO run on it.
+///
+/// # Errors
+///
+/// As [`check_generated`].
+pub fn check_generated_iso(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    count: usize,
+    seed: u64,
+    budget: usize,
+) -> Result<Vec<(String, Verdict)>, String> {
+    generated_in(p, a, o, entry, (count, seed, budget), Mode::Iso)
+}
+
+/// [`check_generated`] with the text read in one [`Mode`].
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `entry` - The function's entry.
+/// * `(count, seed, budget)` - How many inputs, their seed, and the steps
+///   each run is given.
+/// * `mode` - How the text is read.
+///
+/// # Errors
+///
+/// As [`check_generated`].
+fn generated_in(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    (count, seed, budget): (usize, u64, usize),
+    mode: Mode,
+) -> Result<Vec<(String, Verdict)>, String> {
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
     let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
     let sig = printed(&text, word)?;
     let inputs = generated(&sig.parameter_kinds(), count, seed, entry)?;
+    let script = match mode {
+        Mode::Machine => Script::read(p, a, o, entry, &text),
+        Mode::Iso => Script::read_iso(p, a, o, entry, &text),
+    };
     let shared = Shared {
-        script: Script::read(p, a, o, entry, &text),
+        script,
         sig: Ok(sig),
         pass: Some(passing(p, a, o, entry)),
     };
