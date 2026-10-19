@@ -238,6 +238,16 @@ pub(super) trait Lifter {
     /// * `code` - Each block's instructions.
     fn writes_result(ctx: &Ctx<'_>, code: &[Vec<Self::Insn>]) -> bool;
 
+    /// Solves which vector registers nothing reads above a single and which
+    /// only ever hold one ([`lanes::solve`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - Each block's instructions.
+    /// * `ret_float` - The width in bits of the float the function returns,
+    ///   or `None` when it returns none.
+    fn lanes(code: &[Vec<Self::Insn>], ret_float: Option<u8>) -> lanes::Lanes;
+
     /// Returns the width in bits of the value a return hands back.
     ///
     /// # Arguments
@@ -388,6 +398,10 @@ impl Lifter for X86 {
         writes_rax(ctx, code)
     }
 
+    fn lanes(code: &[Vec<Instruction>], ret_float: Option<u8>) -> lanes::Lanes {
+        lanes::solve(code, ret_float)
+    }
+
     fn ret_lane(
         code: &[Vec<Instruction>],
         succs: &[Vec<usize>],
@@ -522,6 +536,10 @@ impl Lifter for A64 {
 
     fn writes_result(ctx: &Ctx<'_>, code: &[Vec<a64::Insn>]) -> bool {
         lift_a64::writes_result(ctx, code)
+    }
+
+    fn lanes(_code: &[Vec<a64::Insn>], _ret_float: Option<u8>) -> lanes::Lanes {
+        lanes::Lanes::default()
     }
 
     fn ret_lane(

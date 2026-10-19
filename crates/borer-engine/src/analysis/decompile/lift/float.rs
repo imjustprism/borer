@@ -89,9 +89,26 @@ impl<'a> Exec<'_, 'a> {
         self.write_op0(instr, v);
     }
 
+    /// Tells whether nothing in the function reads the destination of a
+    /// scalar instruction above its low single ([`Ctx::lanes`]), so the
+    /// single it writes is the register's whole value.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The scalar instruction.
+    fn single_lane(&self, instr: &Instruction) -> bool {
+        instr.op0_kind() == OpKind::Register
+            && u32::try_from(instr.op0_register().number())
+                .ok()
+                .and_then(|n| self.ctx.lanes.read.checked_shr(n))
+                .is_some_and(|m| m & 1 == 1)
+    }
+
     /// Writes a scalar float, keeping bit 63 when `upper` still has it.
     ///
     /// A scalar single replaces the low lane and leaves the bits above it.
+    /// When nothing reads those bits ([`Exec::single_lane`]), the single is
+    /// the whole value.
     /// A broadcast sign mask set bit 63 of a zero-extended single, so the
     /// result keeps that bit. Any other value whose bits above the lane
     /// this function did not clear, including a double, keeps bits 63:32
@@ -113,7 +130,7 @@ impl<'a> Exec<'_, 'a> {
         ty: Ty,
         upper: &Expr,
     ) {
-        if ty == Ty::F32 && !lane_zeros_above(upper) {
+        if ty == Ty::F32 && !lane_zeros_above(upper) && !self.single_lane(instr) {
             self.stamp_reg_ty(instr, Ty::U64);
             let kept = if sign_above_low(upper).is_some() {
                 with_sign_above(low)

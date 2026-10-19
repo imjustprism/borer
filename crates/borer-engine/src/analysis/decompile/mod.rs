@@ -47,6 +47,7 @@ mod frame;
 mod helper;
 pub(crate) mod interp;
 mod ladder;
+mod lanes;
 pub(crate) mod lift;
 mod lift_a64;
 mod line;
@@ -315,6 +316,9 @@ struct Ctx<'a> {
     arg_count: usize,
     /// A bit per position passed in a vector register ([`Shape::floats`]).
     arg_floats: u8,
+    /// The vector registers nothing in the function reads above a single
+    /// ([`lanes::solve`]).
+    lanes: lanes::Lanes,
     /// The frame's slots and the types solved for them ([`frame::Frame`]).
     frame: frame::Frame,
     /// Whether the function hands a value back, as its callers say
@@ -959,6 +963,7 @@ fn new_ctx<'a>(
             .unwrap_or(0),
         arg_count: 0,
         arg_floats: 0,
+        lanes: lanes::Lanes::default(),
         frame: frame::Frame::default(),
         returns_value: f.returns_value,
     }
@@ -1734,6 +1739,21 @@ fn decompile_in<L: Lifter>(
         ctx.unused_result = false;
     }
     ctx.rax_written |= ctx.ret_float && (bitness == 64 || ctx.ret_sse);
+    let ret_width = match stated_returns {
+        Some(lift::Returns::Float(w)) => Some(w),
+        Some(lift::Returns::Nothing | lift::Returns::Int(_)) => None,
+        None => ctx.ret_float.then(|| {
+            f.ret_float.unwrap_or_else(|| {
+                if f.signature.as_ref().is_some_and(|s| s.ret == "float") {
+                    32
+                } else {
+                    64
+                }
+            })
+        }),
+    }
+    .filter(|_| bitness == 64 || ctx.ret_sse);
+    ctx.lanes = L::lanes(&code, ret_width);
     ctx.ret_rdx = bitness == 64 && f.hands_back_rdx && ctx.stated.is_none();
     if let Some(sig) = &f.signature {
         if ctx.this_param
