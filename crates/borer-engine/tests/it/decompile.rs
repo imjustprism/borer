@@ -7642,7 +7642,10 @@ fn a_fiber_proc_handed_to_createfiber_is_seeded() {
     let fiber = decompiled(&p, 0x1_4000_101b);
     assert!(fiber.contains("return 42;"), "{fiber}");
     let text = decompiled(&p, 0x1_4000_1000);
-    assert!(text.contains("CreateFiber(0, sub_14000101b, 0);"), "{text}");
+    assert!(
+        text.contains("CreateFiber(0, sub_14000101b, NULL);"),
+        "{text}"
+    );
 }
 
 /// A `SwitchToFiber` call is an ordinary call: one argument, no result,

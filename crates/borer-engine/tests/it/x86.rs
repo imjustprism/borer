@@ -4561,7 +4561,10 @@ fn an_unwinder_restoring_the_chain_head_registers_no_handler() {
         0xc2, 0x08, 0x00, // ASM: ret 8
     ];
     let text = dc_with(&code, &[(0x402000, "RtlUnwind")]);
-    assert!(text.contains("RtlUnwind(a1, 0x40102c, a2, 0);"), "{text}");
+    assert!(
+        text.contains("RtlUnwind(a1, 0x40102c, a2, NULL);"),
+        "{text}"
+    );
     assert!(
         text.contains("local_c = NtCurrentTeb()->NtTib.ExceptionList;"),
         "{text}"

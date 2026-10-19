@@ -95,9 +95,10 @@ pub(in crate::analysis::decompile) fn library_decl(
 ///
 /// On a 64-bit target a parameter is one position, a float one in a vector
 /// register; on a 32-bit target it is the stack words it takes (two for a
-/// 64-bit integer or a `double`), popped by the callee for a fixed Windows
-/// API (`WINAPI` is `__stdcall`) and by the caller for the C library and
-/// POSIX.
+/// 64-bit integer or a `double`), popped by the callee when the
+/// declaration's convention says so (`WINAPI` is `__stdcall`) and by the
+/// caller for a `__cdecl` one: the C library, POSIX and every variadic
+/// function.
 ///
 /// # Arguments
 ///
@@ -129,7 +130,7 @@ pub(in crate::analysis::decompile) fn library_prototype(
     crate::analysis::prototypes::Prototype {
         params: u8::try_from(params).unwrap_or(u8::MAX),
         this: false,
-        callee_pops: decl.os == typelib::Os::Win && !decl.variadic,
+        callee_pops: decl.conv != typelib::Conv::Cdecl && !decl.variadic,
         hidden_return: false,
         variadic: decl.variadic,
         floats,

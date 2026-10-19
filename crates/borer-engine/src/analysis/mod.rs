@@ -36,6 +36,7 @@ mod returns;
 mod rtti;
 pub mod runtime;
 pub mod schema;
+pub mod sdk;
 pub mod senders;
 pub mod sigs;
 pub mod snapshot;

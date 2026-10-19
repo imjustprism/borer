@@ -86,6 +86,19 @@ pub struct Group {
     pub members: Vec<(u64, &'static str)>,
 }
 
+/// Who pops a call's stack arguments on a 32-bit target, and where the
+/// first ones go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Conv {
+    /// The caller pops them (`__cdecl`), as every variadic function does.
+    Cdecl,
+    /// The callee pops them (`__stdcall`, `WINAPI`).
+    Stdcall,
+    /// The callee pops them, the first two in `ecx` and `edx`
+    /// (`__fastcall`).
+    Fastcall,
+}
+
 /// One declared parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Param {
@@ -112,6 +125,8 @@ pub struct Decl {
     pub params: Vec<Param>,
     /// A variable argument list follows the fixed parameters.
     pub variadic: bool,
+    /// The calling convention on a 32-bit target.
+    pub conv: Conv,
 }
 
 /// What the machine passes a C type as.
@@ -169,8 +184,8 @@ pub fn words32(pass: Option<Pass>) -> usize {
 
 /// Splits a C type into its base words and the pointers over them.
 ///
-/// Qualifiers and tags (`const`, `volatile`, `struct`, `union`, `enum`)
-/// say nothing of how the value passes and are dropped; a `*` anywhere
+/// Qualifiers and tags (`const`, `volatile`, `restrict`, `__unaligned`,
+/// `struct`, `union`, `enum`) say nothing of how the value passes and are dropped; a `*` anywhere
 /// counts one pointer, and a function type (`(`) counts as a pointer to
 /// one.
 ///
@@ -188,7 +203,20 @@ pub fn base_of(spelled: &str) -> (String, usize) {
     let base: Vec<&str> = spelled
         .split(|c: char| c == '*' || c.is_whitespace())
         .filter(|w| {
-            !w.is_empty() && !matches!(*w, "const" | "volatile" | "struct" | "union" | "enum")
+            !w.is_empty()
+                && !matches!(
+                    *w,
+                    "const"
+                        | "volatile"
+                        | "struct"
+                        | "union"
+                        | "enum"
+                        | "restrict"
+                        | "__restrict"
+                        | "__unaligned"
+                        | "__ptr32"
+                        | "__ptr64"
+                )
         })
         .collect();
     (base.join(" "), stars)
@@ -205,8 +233,9 @@ pub fn base_of(spelled: &str) -> (String, usize) {
 ///
 /// # Returns
 ///
-/// The pass, or `None` when the type is a word the library does not know
-/// and no pointer: a name only the program defines.
+/// The pass, or `None` when the type is a word neither the library nor
+/// the SDK's typedefs ([`super::sdk::typedef`]) know and no pointer: a
+/// name only the program defines, or a structure passed by value.
 #[must_use]
 pub fn pass_of(spelled: &str, word: u8, format: BinaryFormat) -> Option<Pass> {
     let (base, stars) = base_of(spelled);
@@ -215,7 +244,11 @@ pub fn pass_of(spelled: &str, word: u8, format: BinaryFormat) -> Option<Pass> {
     }
     let long = if format == BinaryFormat::Pe { 32 } else { word };
     let int = |bits, signed| Some(Pass::Int { bits, signed });
-    match *CTYPES.get(base.as_str())? {
+    let known = CTYPES
+        .get(base.as_str())
+        .copied()
+        .or_else(|| super::sdk::typedef(&base)?.pass)?;
+    match known {
         "void" => Some(Pass::Void),
         "char" | "i8" => int(8, true),
         "u8" => int(8, false),
@@ -239,6 +272,9 @@ pub fn pass_of(spelled: &str, word: u8, format: BinaryFormat) -> Option<Pass> {
 /// Returns the declaration the library holds for a function a binary of
 /// `format` calls.
 ///
+/// A curated row comes first; the SDK library ([`super::sdk`]) answers
+/// for every other function its headers declare.
+///
 /// # Arguments
 ///
 /// * `name` - The function's bare name, matched exactly.
@@ -253,10 +289,12 @@ pub fn pass_of(spelled: &str, word: u8, format: BinaryFormat) -> Option<Pass> {
 pub fn declared(name: &str, format: BinaryFormat) -> Option<&'static Decl> {
     let first = DECLS.partition_point(|d| d.name < name);
     DECLS
-        .get(first..)?
-        .iter()
+        .get(first..)
+        .into_iter()
+        .flatten()
         .take_while(|d| d.name == name)
         .find(|d| d.os.serves(format))
+        .or_else(|| super::sdk::declared(name, |os| os.serves(format)))
 }
 
 /// Returns a constant group by its name.
@@ -453,6 +491,11 @@ static DECLS: LazyLock<Vec<Decl>> = LazyLock::new(|| {
                 ret_group,
                 params: fixed,
                 variadic,
+                conv: if os == Os::Win {
+                    Conv::Stdcall
+                } else {
+                    Conv::Cdecl
+                },
             })
         })
         .collect()
@@ -567,6 +610,38 @@ mod tests {
                 .and_then(|d| d.params.get(1))
                 .map(|p| p.ty),
             Some("const void *")
+        );
+        let fiber = declared("CreateFiber", BinaryFormat::Pe).expect("the SDK declares it");
+        let names: Vec<&str> = fiber.params.iter().map(|p| p.name).collect();
+        assert_eq!(names, ["dwStackSize", "lpStartAddress", "lpParameter"]);
+        assert_eq!(fiber.conv, super::Conv::Stdcall);
+        assert!(declared("CreateFiber", BinaryFormat::Elf).is_none());
+        assert_eq!(create.conv, super::Conv::Stdcall);
+        assert_eq!(open.conv, super::Conv::Cdecl);
+    }
+
+    /// A typedef only the SDK library spells passes as its representation.
+    #[test]
+    fn sdk_typedefs_pass_by_their_representation() {
+        let pe = BinaryFormat::Pe;
+        assert_eq!(pass_of("LPSTARTUPINFOW", 64, pe), Some(Pass::Pointer));
+        assert_eq!(
+            pass_of("SECURITY_INFORMATION", 64, pe),
+            Some(Pass::Int {
+                bits: 32,
+                signed: false
+            })
+        );
+        assert_eq!(
+            pass_of("HCRYPTKEY", 32, pe),
+            Some(Pass::Int {
+                bits: 32,
+                signed: false
+            })
+        );
+        assert_eq!(
+            base_of("const WCHAR __unaligned *"),
+            ("WCHAR".to_owned(), 1)
         );
     }
 

@@ -1,0 +1,14 @@
+# borer SDK type library: facts restated from the Windows SDK headers, no header text
+# sdk	Windows SDK 10.0.26100.0
+# parser	clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)
+# targets	x86_64-pc-windows-msvc, i686-pc-windows-msvc (structure offsets)
+# um	winsock2.h ws2tcpip.h mswsock.h windows.h winternl.h shlobj.h shlwapi.h shellapi.h wincrypt.h bcrypt.h ncrypt.h wintrust.h softpub.h wininet.h urlmon.h psapi.h tlhelp32.h dbghelp.h iphlpapi.h setupapi.h winsvc.h userenv.h wtsapi32.h lm.h sddl.h aclapi.h accctrl.h security.h wincred.h dpapi.h commctrl.h commdlg.h objbase.h oleauto.h ole2.h winver.h mmsystem.h winspool.h uxtheme.h dwmapi.h winevt.h evntprov.h evntrace.h pdh.h powrprof.h d3d9.h d3d11.h dxgi.h winioctl.h netfw.h wlanapi.h icmpapi.h shlguid.h propsys.h msi.h cfgmgr32.h hidsdi.h winusb.h rpc.h rpcdce.h ktmw32.h restartmanager.h processsnapshot.h werapi.h winscard.h wtypes.h assert.h conio.h ctype.h direct.h errno.h fcntl.h float.h io.h locale.h malloc.h math.h mbstring.h memory.h process.h search.h setjmp.h signal.h stdint.h stdio.h stdlib.h string.h sys/stat.h sys/timeb.h sys/utime.h time.h wchar.h wctype.h uchar.h
+# km	ntifs.h fltKernel.h ntstrsafe.h wdmsec.h aux_klib.h
+# refused	ExInitializeDeviceAts IoCreateDisk IoReadPartitionTableEx IoSetPartitionInformationEx IoWritePartitionTableEx Shell_GetCachedImageIndex
+# origins	c=223 crt=1334 km=2196 um=9127
+file	rows	bytes
+functions.tsv	12880	557966
+names.tsv	12170	153135
+structs.tsv	1404	126691
+types.tsv	2937	102089
+words.tsv	4069	78022
