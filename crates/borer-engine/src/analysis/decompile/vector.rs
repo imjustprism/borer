@@ -1428,15 +1428,13 @@ fn float_elem(e: &Expr) -> Option<Elem> {
 ///
 /// The text with its vector types and constants declared, or unchanged.
 pub(super) fn declare(text: &str, program: &Program) -> String {
-    let body_names = |name: &str| {
-        text.lines().filter(|l| !l.starts_with("//")).any(|l| {
-            l.match_indices(name).any(|(at, _)| {
-                let before = l.get(..at).and_then(|s| s.chars().next_back());
-                let after = l.get(at + name.len()..).and_then(|s| s.chars().next());
-                !before.is_some_and(is_word) && !after.is_some_and(is_word)
-            })
-        })
-    };
+    let words: std::collections::BTreeSet<&str> = text
+        .lines()
+        .filter(|l| !l.starts_with("//"))
+        .flat_map(|l| l.split(|c: char| !is_word(c)))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let body_names = |name: &str| words.contains(name);
     let typedefs: Vec<String> = Elem::ALL
         .into_iter()
         .flat_map(|elem| [Vt { elem, whole: true }, Vt { elem, whole: false }])

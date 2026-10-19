@@ -158,19 +158,24 @@ fn global_declaration(line: &str) -> Option<(&str, &str, u64)> {
 /// * `lines` - The function.
 /// * `name` - The global.
 fn written_or_addressed(lines: &[String], name: &str) -> bool {
-    lines.iter().filter(|l| !l.starts_with("//")).any(|l| {
-        let t = l.trim();
-        let assigned = t.strip_prefix(name).is_some_and(|rest| {
-            let rest = rest.trim_start();
-            rest.starts_with('=') && !rest.starts_with("==")
-                || [
-                    "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "++", "--",
-                ]
-                .iter()
-                .any(|op| rest.starts_with(op))
-        });
-        assigned || l.contains(&format!("&{name}")) || t.contains(&format!("= {name} ="))
-    })
+    let address = format!("&{name}");
+    let chained = format!("= {name} =");
+    lines
+        .iter()
+        .filter(|l| !l.starts_with("//") && l.contains(name))
+        .any(|l| {
+            let t = l.trim();
+            let assigned = t.strip_prefix(name).is_some_and(|rest| {
+                let rest = rest.trim_start();
+                rest.starts_with('=') && !rest.starts_with("==")
+                    || [
+                        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "++", "--",
+                    ]
+                    .iter()
+                    .any(|op| rest.starts_with(op))
+            });
+            assigned || l.contains(&address) || t.contains(&chained)
+        })
 }
 
 /// The value a global of type `ty` holds in the image, as C spells it.
@@ -229,11 +234,18 @@ fn constant_value(program: &Program, ty: &str, addr: u64) -> Option<String> {
 /// * `program` - The image.
 fn find_tables(text: &str, program: &Program) -> Vec<Table> {
     let mut found: BTreeMap<u64, Table> = BTreeMap::new();
-    for line in text.lines().filter(|l| !l.starts_with("//")) {
-        for &(ty, size, signed) in &ELEMENTS {
-            let head = format!("(({ty}*)0x");
+    let mut bounds: BTreeMap<&str, Option<u64>> = BTreeMap::new();
+    let heads: Vec<String> = ELEMENTS
+        .iter()
+        .map(|(ty, _, _)| format!("(({ty}*)0x"))
+        .collect();
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with("//") && l.contains("*)0x"))
+    {
+        for (&(ty, size, signed), head) in ELEMENTS.iter().zip(&heads) {
             let mut rest = line;
-            while let Some(k) = rest.find(&head) {
+            while let Some(k) = rest.find(head.as_str()) {
                 let after = rest.get(k + head.len()..).unwrap_or("");
                 rest = after;
                 let digits = after
@@ -249,7 +261,7 @@ fn find_tables(text: &str, program: &Program) -> Vec<Table> {
                 let Ok(addr) = u64::from_str_radix(after.get(..digits).unwrap_or(""), 16) else {
                     continue;
                 };
-                let Some(len) = bound(text, index) else {
+                let Some(len) = *bounds.entry(index).or_insert_with(|| bound(text, index)) else {
                     continue;
                 };
                 let readonly = program
@@ -322,7 +334,10 @@ fn bound(text: &str, index: &str) -> Option<u64> {
         (format!(" <= {index}"), false, 0),
     ];
     let mut widest: Option<u64> = None;
-    for line in text.lines().filter(|l| !l.starts_with("//")) {
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with("//") && l.contains(index))
+    {
         for (form, after, extra) in &forms {
             for (k, _) in line.match_indices(form.as_str()) {
                 let constant = if *after {

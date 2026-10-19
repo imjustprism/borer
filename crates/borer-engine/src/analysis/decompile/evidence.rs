@@ -199,6 +199,9 @@ fn retype(text: &str, word: u8) -> Option<String> {
             }
         }
     }
+    if found.is_empty() {
+        return None;
+    }
     let mut refused: BTreeSet<&str> = BTreeSet::new();
     for t in &p.body {
         let l = Line {
@@ -330,8 +333,8 @@ fn name_constants(text: &str, word: u8) -> Option<String> {
     let mut out: Vec<String> = Vec::new();
     let mut in_body = false;
     for line in text.lines() {
-        if !in_body {
-            in_body = line.trim().is_empty();
+        if !in_body || !line.contains('(') {
+            in_body |= line.trim().is_empty();
             out.push(line.to_owned());
             continue;
         }

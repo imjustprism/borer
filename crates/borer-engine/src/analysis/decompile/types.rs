@@ -1096,15 +1096,7 @@ fn in_literal(head: &str) -> bool {
 pub(super) fn lane_locals(text: &str) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let declared = uint64_names(&lines);
-    let mut uses: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for (k, l) in lines.iter().enumerate() {
-        for tok in tokens(l) {
-            let at = uses.entry(tok).or_default();
-            if at.last() != Some(&k) {
-                at.push(k);
-            }
-        }
-    }
+    let uses = word_lines(&lines);
     let typed: Vec<(String, &'static str)> = declared
         .into_iter()
         .filter_map(|name| {
@@ -1138,7 +1130,7 @@ pub(super) fn lane_locals(text: &str) -> String {
             continue;
         };
         for line in &mut lines {
-            if line.starts_with("//") || is_declaration(line) {
+            if !line.contains(name.as_str()) || line.starts_with("//") || is_declaration(line) {
                 continue;
             }
             *line = strip_width(line, name, casts, mask);
@@ -1149,6 +1141,32 @@ pub(super) fn lane_locals(text: &str) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Each word of `lines` ([`tokens`]), with the lines it is on, in order.
+///
+/// A whole-word search for an identifier ([`word_positions`]) finds it
+/// only on these lines, so a scan over them reads what one over every
+/// line reads.
+///
+/// # Arguments
+///
+/// * `lines` - The text's lines.
+///
+/// # Returns
+///
+/// Per word, the indices of its lines, ascending and without repeats.
+fn word_lines(lines: &[String]) -> BTreeMap<&str, Vec<usize>> {
+    let mut uses: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (k, l) in lines.iter().enumerate() {
+        for tok in tokens(l) {
+            let at = uses.entry(tok).or_default();
+            if at.last() != Some(&k) {
+                at.push(k);
+            }
+        }
+    }
+    uses
 }
 
 /// The names a `uint64_t` declaration lists.
@@ -2001,6 +2019,9 @@ fn redeclare(lines: &mut Vec<String>, typed: &[(String, &'static str)]) {
 ///
 /// The text with those slots declared as arrays.
 pub(super) fn stack_arrays(text: &str) -> String {
+    if !text.contains("&local_") {
+        return text.to_owned();
+    }
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let declared: BTreeMap<String, &'static str> = lines
         .iter()
@@ -2014,12 +2035,13 @@ pub(super) fn stack_arrays(text: &str) -> String {
                 .collect::<Vec<_>>()
         })
         .collect();
+    let indexed = indexed_through(&lines);
     let mut arrays: Vec<(String, &'static str, Vec<String>)> = Vec::new();
     for (name, ty) in &declared {
         let Some(base) = slot_offset(name) else {
             continue;
         };
-        if !indexed_through(&lines, name) {
+        if !indexed.contains(name.as_str()) {
             continue;
         }
         let size = slot_size(ty);
@@ -2140,40 +2162,42 @@ fn slot_offset(name: &str) -> Option<u64> {
     u64::from_str_radix(name.strip_prefix("local_")?, 16).ok()
 }
 
-/// Tells whether the text reads through `&name` at an offset it computes:
-/// an index or a sum that is not a constant.
+/// The names the text reads through `&name` at an offset it computes: an
+/// index or a sum that is not a constant.
 ///
 /// # Arguments
 ///
 /// * `lines` - The function.
-/// * `name` - A slot.
-fn indexed_through(lines: &[String], name: &str) -> bool {
-    let addr = format!("&{name}");
-    lines.iter().filter(|l| !l.starts_with("//")).any(|l| {
-        let mut from = 0;
-        while let Some(at) = l.get(from..).and_then(|t| t.find(&addr)).map(|k| k + from) {
-            from = at + addr.len();
-            let tail = l.get(from..).unwrap_or("");
-            if tail.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+///
+/// # Returns
+///
+/// Every name some code line reads through that way.
+fn indexed_through(lines: &[String]) -> BTreeSet<&str> {
+    let computed = |rest: &str| {
+        let rest = rest.trim_start();
+        !rest.starts_with(|c: char| c.is_ascii_digit())
+    };
+    let mut out = BTreeSet::new();
+    for l in lines.iter().filter(|l| !l.starts_with("//")) {
+        for after in l.split('&').skip(1) {
+            let end = after
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            let (name, tail) = after.split_at(end);
+            if name.is_empty() {
                 continue;
             }
             let tail = tail.trim_start_matches(')');
-            let computed = |rest: &str| {
-                let rest = rest.trim_start();
-                !rest.starts_with(|c: char| c.is_ascii_digit())
+            let through = match tail.strip_prefix('[') {
+                Some(rest) => computed(rest),
+                None => tail.trim_start().strip_prefix("+ ").is_some_and(computed),
             };
-            if let Some(rest) = tail.strip_prefix('[') {
-                if computed(rest) {
-                    return true;
-                }
-            } else if let Some(rest) = tail.trim_start().strip_prefix("+ ")
-                && computed(rest)
-            {
-                return true;
+            if through {
+                out.insert(name);
             }
         }
-        false
-    })
+    }
+    out
 }
 
 /// A line without its trailing `//` comment.
@@ -2328,12 +2352,15 @@ pub(super) fn callable_pointers(text: &str) -> String {
             }
         }
     }
+    let uses = word_lines(&lines);
     let called: BTreeMap<String, usize> = arity
         .into_iter()
         .filter_map(|(name, count)| count.map(|c| (name, c)))
         .filter(|(name, _)| {
-            lines
+            uses.get(name.as_str())
+                .map_or(&[][..], Vec::as_slice)
                 .iter()
+                .filter_map(|k| lines.get(*k))
                 .filter(|l| !l.starts_with("//") && !is_declaration(uncommented(l)))
                 .all(|l| {
                     let calls = pointer_calls(l)
@@ -2344,6 +2371,7 @@ pub(super) fn callable_pointers(text: &str) -> String {
                 })
         })
         .collect();
+    drop(uses);
     let mut changed = false;
     let mut declared: Vec<(usize, String)> = Vec::new();
     for (k, line) in lines.iter_mut().enumerate() {
@@ -2487,6 +2515,10 @@ pub(super) fn float_bit_reads(text: &str) -> String {
     out
 }
 
+/// What joins the kept half of a scalar single's merge to its new low
+/// lane ([`single_merge`]); a text without it holds no merge.
+const MERGE_KEEP: &str = " & 0xffffffff00000000) | (";
+
 /// The kept half and the new low lane of a scalar single's merge,
 /// `(a & 0xffffffff00000000) | (e & 0xffffffff)`.
 ///
@@ -2495,7 +2527,7 @@ pub(super) fn float_bit_reads(text: &str) -> String {
 /// * `rhs` - An expression, without its `;`.
 fn single_merge(rhs: &str) -> Option<(&str, &str)> {
     let rest = rhs.strip_prefix('(')?;
-    let (kept, rest) = rest.split_once(" & 0xffffffff00000000) | (")?;
+    let (kept, rest) = rest.split_once(MERGE_KEEP)?;
     let lane = rest.strip_suffix(" & 0xffffffff)")?;
     if !(balanced(kept) && balanced(lane)) {
         return None;
@@ -2528,6 +2560,9 @@ fn single_merge(rhs: &str) -> Option<(&str, &str)> {
 ///
 /// The text with those registers declared `float`.
 pub(super) fn float_lanes(text: &str) -> String {
+    if !text.contains(MERGE_KEEP) {
+        return text.to_owned();
+    }
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let returns_float = lines.iter().any(|l| l.starts_with("// signature: float "));
     let mut changed = false;
@@ -2745,6 +2780,7 @@ pub(super) fn type_locals(text: &str) -> String {
         .filter(|l| !is_declaration(l))
         .cloned()
         .collect();
+    let uses = word_lines(&body);
     let mut narrowed: Vec<(String, &'static str)> = Vec::new();
     for line in &lines {
         let Some(names) = line
@@ -2761,11 +2797,14 @@ pub(super) fn type_locals(text: &str) -> String {
             continue;
         };
         for name in names {
-            if let Some(ty) = inferred_type(&body, &name) {
+            let rows = uses.get(name.as_str()).map_or(&[][..], Vec::as_slice);
+            let on = rows.iter().filter_map(|k| body.get(*k));
+            if let Some(ty) = inferred_type_on(&body, on, &name) {
                 narrowed.push((name, ty));
             }
         }
     }
+    drop(uses);
     let declared_narrow = narrow_declarations(&lines);
     if narrowed.is_empty() && declared_narrow.is_empty() {
         return text.to_owned();
@@ -2775,7 +2814,10 @@ pub(super) fn type_locals(text: &str) -> String {
             continue;
         };
         for line in &mut lines {
-            if line.starts_with("//") || line.starts_with("uint64_t ") {
+            if !line.contains(name.as_str())
+                || line.starts_with("//")
+                || line.starts_with("uint64_t ")
+            {
                 continue;
             }
             *line = strip_width(line, name, casts, mask);
@@ -2820,7 +2862,7 @@ pub(super) fn type_locals(text: &str) -> String {
             continue;
         };
         for line in &mut lines {
-            if line.starts_with("//") || is_declaration(line) {
+            if !line.contains(name.as_str()) || line.starts_with("//") || is_declaration(line) {
                 continue;
             }
             *line = strip_width(line, name, casts, mask);
@@ -2835,7 +2877,7 @@ pub(super) fn type_locals(text: &str) -> String {
         .collect();
     if !unsigned32.is_empty() {
         for line in &mut lines {
-            if !line.starts_with("//") && !is_declaration(line) {
+            if line.contains(MASK32) && !line.starts_with("//") && !is_declaration(line) {
                 *line = drop_unsigned_masks(line, &unsigned32);
             }
         }
@@ -3392,8 +3434,28 @@ pub(super) fn unwrap_parens(line: &str, name: &str) -> String {
 /// * `lines` - The function, header lines included.
 /// * `param` - The parameter name.
 pub(super) fn inferred_type(lines: &[String], param: &str) -> Option<&'static str> {
+    inferred_type_on(lines, lines.iter(), param)
+}
+
+/// [`inferred_type`] over only the lines that can name the variable.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `uses` - The lines of `lines` to read, in order: every line that
+///   names `param` must be among them.
+/// * `param` - The variable's name.
+///
+/// # Returns
+///
+/// The type every use agrees on, `None` when they disagree or say none.
+fn inferred_type_on<'a>(
+    lines: &[String],
+    uses: impl Iterator<Item = &'a String>,
+    param: &str,
+) -> Option<&'static str> {
     let mut ty: Option<&'static str> = None;
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+    for line in uses.filter(|l| !l.starts_with("//")) {
         for at in word_positions(line, param) {
             let head = line.get(..at).unwrap_or("");
             let tail = line.get(at + param.len()..).unwrap_or("");

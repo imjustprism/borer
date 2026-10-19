@@ -440,8 +440,10 @@ pub(super) fn apply_layouts(text: &str) -> String {
         {
             *assigned.entry(lhs).or_default() += 1;
         }
-        for op in ["+=", "-=", "|=", "&=", "^=", "<<=", ">>=", "*="] {
-            if let Some((lhs, _)) = t.split_once(&format!(" {op} "))
+        for op in [
+            " += ", " -= ", " |= ", " &= ", " ^= ", " <<= ", " >>= ", " *= ",
+        ] {
+            if let Some((lhs, _)) = t.split_once(op)
                 && is_ident(lhs)
             {
                 *assigned.entry(lhs).or_default() += 1;
@@ -513,6 +515,9 @@ pub(super) fn apply_layouts(text: &str) -> String {
     }
     for line in &mut lines {
         for (base, names, below) in &renames {
+            if !line.contains(base.as_str()) {
+                continue;
+            }
             for (off, name) in names {
                 let swapped = format!("({} + {base})", offset_text(*off));
                 if line.contains(&swapped) {
