@@ -283,7 +283,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Pseudo-C for many functions: filter on name or entry hex, max_functions (10, max 50); 6000 chars per function, 40000 total.",
+        description = "Pseudo-C for many functions: filter on name or entry hex, max_functions (10, max 50); 6000 chars per function, 40000 total; out=<file.c> writes every function there uncapped, leaves first.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -296,8 +296,32 @@ impl BorerServer {
         Parameters(DecompileBatchParams {
             filter,
             max_functions,
+            out,
+            library,
         }): Parameters<DecompileBatchParams>,
     ) -> Result<String, ErrorData> {
+        if let Some(out) = out {
+            if filter.is_some() || max_functions.is_some() {
+                return Err(crate::errors::err_params(
+                    "out writes every function; leave filter and max_functions out with it",
+                ));
+            }
+            let library = if library.unwrap_or(false) {
+                borer_engine::analysis::decompile::export::Library::Include
+            } else {
+                borer_engine::analysis::decompile::export::Library::Skip
+            };
+            return self.with_program(|p| {
+                if let Some(why) = p.refuses(Feature::Decompile) {
+                    return Err(why);
+                }
+                let a = self.ensure_analysis()?;
+                let o = self.overlay();
+                borer::export::write_c(p, &a, &o, library, &out)
+                    .map(|w| w.line(&out))
+                    .map_err(|e| format!("{e:#}"))
+            });
+        }
         /// Longest text kept per function.
         const PER_FN: usize = 6_000;
         /// Longest total output.
@@ -502,6 +526,59 @@ mod tests {
         );
     }
 
+    /// A batch with `out` writes every function to a C file whole, past the
+    /// share a batch answer cuts at, and refuses a filter beside it.
+    ///
+    /// # Panics
+    ///
+    /// When the file is cut or the filter is taken.
+    #[test]
+    fn a_batch_with_out_writes_the_whole_function_to_a_file() {
+        use crate::params::DecompileBatchParams;
+        use borer_engine::program::{Arch, Program, Section};
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut code = Vec::new();
+        for n in 0u32..400 {
+            // ASM: mov dword [rcx + n*8], n
+            code.extend_from_slice(&[0xc7, 0x81]);
+            code.extend_from_slice(&(n * 8).to_le_bytes());
+            code.extend_from_slice(&n.to_le_bytes());
+        }
+        code.push(0xc3); // ASM: ret
+        let len = u64::try_from(code.len()).expect("small");
+        let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let server = crate::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..crate::BorerServer::default()
+        };
+        let dir = std::env::temp_dir().join(format!("borer-batch-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let out = dir.join("all.c").display().to_string();
+        let batch = |filter: Option<&str>| {
+            server.decompile_batch(Parameters(DecompileBatchParams {
+                filter: filter.map(str::to_owned),
+                max_functions: None,
+                out: Some(out.clone()),
+                library: None,
+            }))
+        };
+        let refused = batch(Some("sub")).expect_err("a filter with out");
+        let said = batch(None).expect("writes");
+        let c = std::fs::read_to_string(&out).expect("reads");
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        assert!(refused.message.contains("leave filter"), "{refused:?}");
+        assert!(said.starts_with("wrote 1 functions to "), "{said}");
+        assert!(
+            c.contains("= 399;") || c.contains("= 0x18f;"),
+            "the last store is written: {c}"
+        );
+        assert!(!c.contains("// truncated"), "{c}");
+    }
+
     /// A function a batch cuts at its share ends with a note whose offset,
     /// passed to `decompile`, picks it up at the line after the last one
     /// the batch shows, counted as `decompile` numbers its lines.
@@ -537,6 +614,8 @@ mod tests {
             .decompile_batch(Parameters(DecompileBatchParams {
                 filter: None,
                 max_functions: Some(1),
+                out: None,
+                library: None,
             }))
             .expect("batch");
         let note = batch
@@ -766,6 +845,8 @@ mod tests {
             .decompile_batch(Parameters(DecompileBatchParams {
                 filter: None,
                 max_functions: Some(1),
+                out: None,
+                library: None,
             }))
             .expect("batch");
         assert!(!batch.contains("checked vs binary"), "{batch}");
@@ -998,6 +1079,8 @@ mod tests {
             .decompile_batch(Parameters(DecompileBatchParams {
                 filter: None,
                 max_functions: Some(50),
+                out: None,
+                library: None,
             }))
             .expect("batch");
         let printed = batch.lines().filter(|l| l.starts_with("==== ")).count();

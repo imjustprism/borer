@@ -566,6 +566,12 @@ pub(crate) struct DecompileBatchParams {
     pub(crate) filter: Option<String>,
     /// Maximum functions to decompile (default 10, max 50).
     pub(crate) max_functions: Option<u32>,
+    /// Write every function to this C file instead, uncapped, leaves
+    /// first, declarations once at the top; not with `filter` or
+    /// `max_functions`.
+    pub(crate) out: Option<String>,
+    /// With out: also write library functions (default false).
+    pub(crate) library: Option<bool>,
 }
 
 /// Parameters for `search`.
