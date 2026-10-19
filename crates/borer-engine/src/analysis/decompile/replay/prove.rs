@@ -120,8 +120,8 @@ struct Run {
     /// The flags left so far, as operands named by [`FLAG_LEFT`] and
     /// [`FLAG_RIGHT`] with their values.
     flags: Option<Held>,
-    /// Some vector register was written.
-    vectors: bool,
+    /// The vector registers written so far, whose whole lane may differ.
+    changed: BTreeSet<Key>,
     /// Whether the block's conditional branch is taken.
     taken: Option<Pred>,
     /// The last fresh variable named.
@@ -508,6 +508,22 @@ fn float_bits(e: &Expr, temps: Option<&BTreeMap<u32, Expr>>) -> Option<u8> {
     }
 }
 
+/// The width of a float a store writes, as the verifier reads it: a
+/// data global a float store copies is read as a float of its width.
+///
+/// # Arguments
+///
+/// * `value` - The stored value.
+/// * `temps` - The temporaries the lifter made.
+fn stored_float(value: &Expr, temps: &BTreeMap<u32, Expr>) -> Option<u8> {
+    if let Expr::Var(Key::Global(at, bits @ (32 | 64))) = value
+        && *at < TLS_BASE
+    {
+        return Some(*bits);
+    }
+    float_bits(value, Some(temps))
+}
+
 /// The text's state over terms: [`super::Text`] with terms for bits.
 #[derive(Debug)]
 struct Sym<'t> {
@@ -527,6 +543,9 @@ struct Sym<'t> {
     vars: FxHashMap<Key, Term>,
     /// Variables a call left unknown.
     unknown: BTreeSet<Key>,
+    /// Vector registers the statements wrote, whose whole lane the text
+    /// no longer holds.
+    unvec: BTreeSet<Key>,
     /// Memory the text wrote.
     mem: BTreeMap<u64, Byte>,
     /// Bytes both sides start from that the block's equality fixes.
@@ -904,6 +923,9 @@ impl Sym<'_> {
                 if bits > 64 {
                     return Err("a vector variable");
                 }
+                if matches!(k, Key::Reg(r) if r.is_xmm()) {
+                    self.unvec.insert(k);
+                }
                 if value == Term::Undef {
                     self.unknown.insert(k);
                 } else {
@@ -913,6 +935,49 @@ impl Sym<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The low 64 bits of the whole 128-bit lane the text holds for an
+    /// expression ([`super::Text::vec`]), whose high 64 are zero.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The expression.
+    ///
+    /// # Returns
+    ///
+    /// The low bits, `None` where the text holds no whole lane for it.
+    ///
+    /// # Errors
+    ///
+    /// A lane read from memory or computed by a packed operation, whose
+    /// high bits the proof does not model.
+    fn whole_lane(&self, e: &Expr) -> Result<Option<Term>, Why> {
+        Ok(match e {
+            Expr::Const(v) => Some(Term::Const(*v)),
+            Expr::Var(k @ Key::Reg(r))
+                if r.is_xmm() && !self.unvec.contains(k) && !self.unknown.contains(k) =>
+            {
+                Some(self.var(*k)?)
+            }
+            Expr::Var(Key::Slot(_) | Key::Global(..))
+            | Expr::Deref(_, Ty::U128)
+            | Expr::Call(..) => {
+                return Err("a whole vector lane from memory");
+            }
+            Expr::Var(_)
+            | Expr::Str(_)
+            | Expr::Sp(_)
+            | Expr::Bin(..)
+            | Expr::Un(..)
+            | Expr::Deref(..)
+            | Expr::Cond(_)
+            | Expr::Ternary(..)
+            | Expr::Sext(..)
+            | Expr::Cast(..)
+            | Expr::Helper(..)
+            | Expr::FConst(..) => None,
+        })
     }
 
     /// A value written to `n` bytes ([`super::wide_value`]).
@@ -1217,8 +1282,9 @@ struct Machine {
     written: BTreeSet<u64>,
     /// Whether the block's conditional branch is taken.
     taken: Option<Pred>,
-    /// Vector registers the block's instructions write.
-    vectors: bool,
+    /// The vector registers the block's instructions write, whose whole
+    /// lane may differ from where it started.
+    changed: BTreeSet<Key>,
     /// The frame bytes the text holds no value for.
     lost: BTreeSet<u64>,
 }
@@ -1618,6 +1684,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             entry,
             vars: FxHashMap::default(),
             unknown: BTreeSet::new(),
+            unvec: BTreeSet::new(),
             mem: BTreeMap::new(),
             base: &base,
             lost: BTreeSet::new(),
@@ -1697,16 +1764,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut claims: Vec<Claimed> = Vec::new();
         let mut called = false;
         let mut settled = false;
-        let mut texted_vectors = false;
         for e in effects {
             text.at = e.at;
             match &e.kind {
-                EffectKind::Assign(k, v, bits) => {
-                    if matches!(k, Key::Reg(r) if r.is_xmm()) {
-                        texted_vectors = true;
-                    }
-                    text.assign(*k, v, *bits)?;
-                }
+                EffectKind::Assign(k, v, bits) => text.assign(*k, v, *bits)?,
                 EffectKind::Store(s) => text.store(&s.0, s.1, &s.2)?,
                 EffectKind::Call(c) => {
                     if matches!(c.callee, Callee::Builtin(..)) {
@@ -1760,8 +1821,18 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     text.unknown.extend(c.result2);
                 }
                 EffectKind::Return(v) => {
-                    if v.is_some() && w.ret_xmm {
-                        return Err("a float return");
+                    if let Some(v) = v
+                        && w.ret_xmm
+                    {
+                        let bits = float_bits(v, None)
+                            .or((w.ret_bits == 32).then_some(32))
+                            .unwrap_or(64);
+                        let first = self.vectors.first().copied().ok_or("no vector registers")?;
+                        claims.push(Claimed {
+                            text: text.eval(v, EVAL_DEPTH)?,
+                            machine: full(&machine, first, bits)?,
+                            bits,
+                        });
                     }
                     if let Some(v) = v
                         && !w.ret_float
@@ -1806,17 +1877,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
         for &s in self.succs.get(b).map_or(&[][..], Vec::as_slice) {
             if w.processed.get(s).copied().unwrap_or(false) {
-                let vectors = machine.vectors || texted_vectors;
-                self.successor_claims(
-                    &text,
-                    &machine,
-                    b,
-                    s,
-                    called,
-                    vectors,
-                    &pending,
-                    &mut claims,
-                )?;
+                self.successor_claims(&text, &machine, b, s, called, &pending, &mut claims)?;
             }
         }
         Ok(decide(&claims, width))
@@ -1874,7 +1935,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             mem: overlay.clone(),
             written: BTreeSet::new(),
             flags: None,
-            vectors: false,
+            changed: BTreeSet::new(),
             taken: None,
             fresh: FRESH_FIRST,
             lost: lost.clone(),
@@ -1902,7 +1963,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let regs = self
             .regs
             .iter()
-            .map(|&(_, k)| {
+            .map(|&(_, k)| k)
+            .chain(self.vectors.iter().copied())
+            .map(|k| {
                 let v = run.regs.get(&k).cloned().unwrap_or(Term::Undef);
                 (k, (v, run.known.get(&k).copied().unwrap_or(64)))
             })
@@ -1913,7 +1976,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             mem: run.mem,
             written: run.written,
             taken: run.taken,
-            vectors: run.vectors,
+            changed: run.changed,
             lost: run.lost,
         })
     }
@@ -2002,9 +2065,14 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut spans: Vec<(u64, u64)> = Vec::new();
         for wrote in &probe.effects {
             match wrote {
-                Wrote::Store { addr, ty, .. } => {
-                    if matches!(ty, Ty::F32 | Ty::F64 | Ty::U128) {
-                        return Err("a float or vector store");
+                Wrote::Store { addr, ty, value } => {
+                    if *ty == Ty::U128 {
+                        return Err("a vector store");
+                    }
+                    if matches!(ty, Ty::F32 | Ty::F64)
+                        && stored_float(value, &probe.temps).is_some_and(|fb| fb != ty.bits())
+                    {
+                        return Err("a float a store converts");
                     }
                     let Term::Const(a) = narrow(&first.eval(addr, EVAL_DEPTH)?, width) else {
                         return Err("a store through an address the state picks");
@@ -2113,12 +2181,22 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             };
             regs.push((k, v, known));
         }
-        let mut xmms: Vec<(Key, Option<Term>)> = Vec::new();
         for &k in &self.vectors {
             let Key::Reg(reg) = k else { continue };
+            let wrote = vectors.contains(&reg.full_register());
             match env.vals.get(&k) {
-                Some(e) => xmms.push((k, Some(lifted.eval(e, EVAL_DEPTH)?))),
-                None if vectors.contains(&reg.full_register()) => xmms.push((k, None)),
+                Some(e) => {
+                    let known = if matches!(e, Expr::Var(Key::Reg(r)) if r.is_gpr()) {
+                        32
+                    } else {
+                        float_bits(e, Some(&probe.temps))
+                            .or_else(|| env.narrow.get(&k).copied())
+                            .unwrap_or(64)
+                            .min(64)
+                    };
+                    regs.push((k, lifted.eval(e, EVAL_DEPTH)?, known));
+                }
+                None if wrote => regs.push((k, Term::Undef, 0)),
                 None => {}
             }
         }
@@ -2147,11 +2225,17 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
         run.written.extend(written);
         for (k, v, known) in regs {
-            let full = if known >= width {
+            let lane = if matches!(k, Key::Reg(r) if r.is_xmm()) {
+                run.changed.insert(k);
+                64
+            } else {
+                width
+            };
+            let full = if known >= lane {
                 v
             } else {
                 run.fresh = run.fresh.wrapping_sub(1);
-                let upper = Term::In(Key::Tmp(run.fresh), width - known);
+                let upper = Term::In(Key::Tmp(run.fresh), lane - known);
                 if known == 0 || v == Term::Undef {
                     upper
                 } else {
@@ -2162,14 +2246,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             run.regs.insert(k, full);
             run.known.insert(k, known);
         }
-        for (k, v) in xmms {
-            let v = v.unwrap_or_else(|| {
-                run.fresh = run.fresh.wrapping_sub(1);
-                Term::In(Key::Tmp(run.fresh), 64)
-            });
-            run.regs.insert(k, v);
-        }
-        run.vectors |= !vectors.is_empty();
         run.sp = sp;
         run.flags = flags;
         if taken.is_some() {
@@ -2313,7 +2389,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `b` - The block's index.
     /// * `s` - The successor's index.
     /// * `called` - The block made a call.
-    /// * `vectors` - Some vector register changed on either side.
     /// * `pending` - The bytes pending at the block's start.
     /// * `claims` - Where the claims go.
     ///
@@ -2331,7 +2406,6 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         b: usize,
         s: usize,
         called: bool,
-        vectors: bool,
         pending: &BTreeSet<u64>,
         claims: &mut Vec<Claimed>,
     ) -> Result<(), Why> {
@@ -2380,13 +2454,37 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             {
                 continue;
             }
-            if vectors
-                || sin.vals.contains_key(&k)
-                || w.ins[b].vals.contains_key(&k)
-                || text.vars.contains_key(&k)
-            {
-                return Err("a vector register a successor reads");
+            let lane_held = sin.vals.get(&k);
+            let float = lane_held.and_then(|e| float_bits(e, None));
+            let narrow_to = sin.narrow.get(&k).copied();
+            if float.is_none() {
+                let whole = match lane_held {
+                    Some(e) => text.whole_lane(e)?,
+                    None if text.unvec.contains(&k) || text.unknown.contains(&k) => None,
+                    None => Some(text.var(k)?),
+                };
+                if let Some(low) = whole {
+                    let bits = match narrow_to {
+                        Some(nb) => nb,
+                        None if machine.changed.contains(&k) => {
+                            return Err("a whole vector lane the block writes");
+                        }
+                        None => 64,
+                    };
+                    claims.push(Claimed {
+                        text: low,
+                        machine: full(machine, k, bits.min(64))?,
+                        bits: bits.min(64),
+                    });
+                    continue;
+                }
             }
+            let bits = float.or(narrow_to).unwrap_or(64).min(64);
+            claims.push(Claimed {
+                text: held(k)?,
+                machine: full(machine, k, bits)?,
+                bits,
+            });
         }
         if called || text.lost_all {
             return Ok(());

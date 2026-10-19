@@ -5633,6 +5633,28 @@ mod tests {
         );
     }
 
+    /// A float a function returns in `xmm0`, and one a successor reads
+    /// there, is proved in the low lane the claim compares: the same float
+    /// operations on the same operands on both sides.
+    #[test]
+    fn a_float_in_a_vector_register_is_proved_in_its_lane() {
+        let p = Program::raw_x64(&[
+            0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0, [rcx]
+            0xf2, 0x0f, 0x58, 0x41, 0x08, // ASM: addsd xmm0, [rcx+8]
+            0x66, 0x0f, 0x2e, 0xc1, // ASM: ucomisd xmm0, xmm1
+            0x77, 0x04, // ASM: ja 0x1013
+            0xf2, 0x0f, 0x59, 0xc0, // ASM: mulsd xmm0, xmm0
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        for seed in 1..=4 {
+            let r = replay_function(&p, &a, 0x1000, seed);
+            assert_eq!(claims(&r), [], "seed {seed}: {}", replay_tsv(&r));
+            assert!(r.checked >= 2, "seed {seed}: {}", replay_tsv(&r));
+            assert_eq!(r.proved, r.checked, "seed {seed}: {}", replay_tsv(&r));
+        }
+    }
+
     /// Every block of a function whose text says what the binary does is
     /// proved over every state, not only checked on the states tried.
     #[test]
