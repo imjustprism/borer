@@ -25,6 +25,20 @@ use crate::analysis::utypes::{
 use crate::num::from_usize;
 use crate::program::Section;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// Longest string a name is read from, in bytes. A longer one names
+/// nothing: no compiler writes a name that long, and every entry that
+/// referred to one copied it whole.
+const STRING_MAX: usize = 4096;
+
+/// Most bytes of names and type text one file's walk copies into its answer.
+///
+/// Function, parameter and local names and the type text built for them
+/// count. Past it the walk stops where it is and keeps what it read, so a
+/// file whose entries all name one long string costs this much, not
+/// entries times length.
+const TEXT_MAX: usize = 1 << 28;
 
 /// `DW_TAG_subprogram`: a function.
 const TAG_SUBPROGRAM: u64 = 0x2e;
@@ -409,17 +423,25 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Reads a NUL-terminated string.
-    fn cstr(&mut self) -> Option<String> {
+    /// Reads a NUL-terminated string, moving past it whatever its length.
+    ///
+    /// # Returns
+    ///
+    /// `None` when no NUL ends it; `Some(None)` when it is longer than
+    /// [`STRING_MAX`] and names nothing.
+    fn cstr(&mut self) -> Option<Option<Arc<str>>> {
         let rest = self.bytes.get(self.at..)?;
         let len = rest.iter().position(|b| *b == 0)?;
-        let s = String::from_utf8_lossy(rest.get(..len)?).into_owned();
+        let s = (len <= STRING_MAX).then(|| Arc::from(String::from_utf8_lossy(&rest[..len])));
         self.at += len + 1;
         Some(s)
     }
 }
 
 /// Reads a NUL-terminated string at `at` in a string section.
+///
+/// Only the first [`STRING_MAX`] bytes are searched for its end, so a
+/// section with no NUL costs each reference that much, not the section.
 ///
 /// # Arguments
 ///
@@ -428,11 +450,103 @@ impl<'a> Cursor<'a> {
 ///
 /// # Returns
 ///
-/// The string, or `None` when the offset is outside the section.
+/// The string, or `None` when the offset is outside the section or the
+/// string is longer than [`STRING_MAX`].
 fn string_at(section: &[u8], at: usize) -> Option<String> {
     let rest = section.get(at..)?;
+    let rest = rest.get(..=STRING_MAX).unwrap_or(rest);
     let len = rest.iter().position(|b| *b == 0)?;
     Some(String::from_utf8_lossy(rest.get(..len)?).into_owned())
+}
+
+/// The text one file's walk reads and copies, within its budgets.
+///
+/// A string-section string is read once per offset and shared by every
+/// entry that names it; the distinct strings read cost at most twice the
+/// string sections' size (an offset into the middle of a string reads
+/// its tail, so offsets alone could read the section over and over), and
+/// what the walk copies into its answer at most [`TEXT_MAX`].
+struct Text {
+    /// The strings read, by section (`true` for `.debug_line_str`) and
+    /// offset.
+    interned: BTreeMap<(bool, usize), Arc<str>>,
+    /// Bytes the interned strings may still take.
+    intern_left: usize,
+    /// Bytes the answer may still copy.
+    copy_left: usize,
+}
+
+impl Text {
+    /// Starts the budgets for one file.
+    ///
+    /// # Arguments
+    ///
+    /// * `strings` - The file's string sections.
+    fn new(strings: &Strings<'_>) -> Self {
+        Text {
+            interned: BTreeMap::new(),
+            intern_left: strings
+                .text
+                .len()
+                .saturating_add(strings.lines.len())
+                .saturating_mul(2),
+            copy_left: TEXT_MAX,
+        }
+    }
+
+    /// Reads the string at an offset of a string section, once.
+    ///
+    /// # Arguments
+    ///
+    /// * `strings` - The string sections.
+    /// * `lines` - Whether the offset is into `.debug_line_str`.
+    /// * `at` - The offset.
+    ///
+    /// # Returns
+    ///
+    /// The string, or `None` when [`string_at`] reads none or the interned
+    /// strings' budget is spent.
+    fn at(&mut self, strings: &Strings<'_>, lines: bool, at: usize) -> Option<Arc<str>> {
+        if let Some(s) = self.interned.get(&(lines, at)) {
+            return Some(Arc::clone(s));
+        }
+        let section = if lines { strings.lines } else { strings.text };
+        let s: Arc<str> = Arc::from(string_at(section, at)?);
+        self.intern_left = self.intern_left.checked_sub(s.len())?;
+        self.interned.insert((lines, at), Arc::clone(&s));
+        Some(s)
+    }
+
+    /// Takes `n` bytes of the copy budget.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Bytes about to be copied into the answer.
+    ///
+    /// # Returns
+    ///
+    /// Whether they fit; once one does not, none does again.
+    fn copy(&mut self, n: usize) -> bool {
+        match self.copy_left.checked_sub(n) {
+            Some(left) => {
+                self.copy_left = left;
+                true
+            }
+            None => {
+                self.copy_left = 0;
+                false
+            }
+        }
+    }
+
+    /// Whether the copy budget is spent.
+    ///
+    /// # Returns
+    ///
+    /// `true` once [`Text::copy`] refused.
+    fn spent(&self) -> bool {
+        self.copy_left == 0
+    }
 }
 
 /// One attribute of an abbreviation: what it is and how it is encoded.
@@ -506,8 +620,9 @@ fn abbreviations(abbrev: &[u8], offset: usize) -> Option<BTreeMap<u64, Abbreviat
 enum Value {
     /// An integer: an address, a constant or a reference.
     Int(u64),
-    /// A string, resolved out of its section.
-    Text(String),
+    /// A string, resolved out of its section, shared with every entry
+    /// naming the same one.
+    Text(Arc<str>),
     /// The bytes of an expression, for the attributes whose opcodes place
     /// a variable.
     Expr(Vec<u8>),
@@ -538,6 +653,7 @@ struct Strings<'a> {
 /// * `address_size` - The unit's address size in bytes.
 /// * `offset_size` - Four for 32-bit DWARF, eight for 64-bit.
 /// * `strings` - The string sections.
+/// * `text` - The file's strings read so far, and the budget for more.
 ///
 /// # Returns
 ///
@@ -549,6 +665,7 @@ fn value(
     address_size: usize,
     offset_size: usize,
     strings: &Strings<'_>,
+    text: &mut Text,
 ) -> Option<Value> {
     Some(match form {
         0x01 => Value::Int(c.uint(address_size)?),
@@ -586,14 +703,11 @@ fn value(
         0x10 | 0x17 | 0x1d => Value::Int(c.uint(offset_size)?),
         0x0d => Value::Int(c.sleb()?.cast_unsigned()),
         0x0f | 0x15 | 0x1a | 0x1b | 0x22 | 0x23 => Value::Int(c.uleb()?),
-        0x08 => Value::Text(c.cstr()?),
-        0x0e => {
-            let at = c.uint(offset_size)?;
-            string_at(strings.text, usize::try_from(at).ok()?).map_or(Value::Skipped, Value::Text)
-        }
-        0x1f => {
-            let at = c.uint(offset_size)?;
-            string_at(strings.lines, usize::try_from(at).ok()?).map_or(Value::Skipped, Value::Text)
+        0x08 => c.cstr()?.map_or(Value::Skipped, Value::Text),
+        0x0e | 0x1f => {
+            let at = usize::try_from(c.uint(offset_size)?).ok()?;
+            text.at(strings, form == 0x1f, at)
+                .map_or(Value::Skipped, Value::Text)
         }
         0x19 => Value::Int(1),
         FORM_IMPLICIT_CONST => Value::Int(implicit.cast_unsigned()),
@@ -605,7 +719,7 @@ fn value(
 #[derive(Default)]
 struct Entry {
     /// `DW_AT_name`.
-    name: Option<String>,
+    name: Option<Arc<str>>,
     /// `DW_AT_low_pc`.
     low_pc: Option<u64>,
     /// `DW_AT_abstract_origin` or `DW_AT_specification`: where the name is.
@@ -635,7 +749,7 @@ struct TypeNode {
     /// `DW_TAG_*`.
     tag: u64,
     /// `DW_AT_name`, for the tags that carry one.
-    name: Option<String>,
+    name: Option<Arc<str>>,
     /// `DW_AT_type`, absolute in the section.
     inner: Option<u64>,
     /// `DW_AT_encoding` with `DW_AT_byte_size`: the base type's own facts,
@@ -695,20 +809,20 @@ fn type_name(nodes: &BTreeMap<u64, TypeNode>, at: Option<u64>, depth: u32) -> Op
         )),
         TAG_STRUCTURE | TAG_CLASS => node
             .name
-            .clone()
+            .as_ref()
             .map(|n| format!("struct {n}"))
             .or_else(|| Some(String::from("struct"))),
         TAG_UNION => node
             .name
-            .clone()
+            .as_ref()
             .map(|n| format!("union {n}"))
             .or_else(|| Some(String::from("union"))),
         TAG_ENUMERATION => node
             .name
-            .clone()
+            .as_ref()
             .map(|n| format!("enum {n}"))
             .or_else(|| Some(String::from("enum"))),
-        _ => node.name.clone().or_else(inner),
+        _ => node.name.as_deref().map(str::to_owned).or_else(inner),
     }
 }
 
@@ -855,9 +969,11 @@ fn type_expr(nodes: &BTreeMap<u64, TypeNode>, at: Option<u64>, depth: u32) -> Op
         TAG_POINTER => Some(TypeExpr::Ptr(Box::new(inner().unwrap_or(TypeExpr::U8)))),
         TAG_CONST | TAG_VOLATILE => inner(),
         TAG_TYPEDEF => inner(),
-        TAG_STRUCTURE | TAG_CLASS | TAG_UNION | TAG_ENUMERATION => {
-            node.name.clone().map(TypeExpr::Named)
-        }
+        TAG_STRUCTURE | TAG_CLASS | TAG_UNION | TAG_ENUMERATION => node
+            .name
+            .as_deref()
+            .filter(|n| is_ident(n))
+            .map(|n| TypeExpr::Named(n.to_owned())),
         _ => node
             .scalar
             .and_then(|(encoding, size)| scalar(encoding, size)),
@@ -920,6 +1036,8 @@ fn unit_header(c: &mut Cursor<'_>) -> Option<(usize, usize, u64, usize)> {
 ///
 /// A unit that does not parse is skipped and the rest of the file still
 /// reads, which matters on a rebuilt image where one section may be damaged.
+/// The names and type text copied out are held to [`TEXT_MAX`] bytes
+/// ([`Text`]): the walk stops at the unit that spends it.
 ///
 /// # Arguments
 ///
@@ -935,8 +1053,9 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
     let mut types: BTreeMap<String, UserType> = BTreeMap::new();
     let mut typedefs: BTreeMap<String, String> = BTreeMap::new();
     let mut globals: Vec<Global> = Vec::new();
+    let mut text = Text::new(strings);
     let mut at = 0usize;
-    while at.saturating_add(11) < info.len() {
+    while !text.spent() && at.saturating_add(11) < info.len() {
         let at_start = at;
         let mut c = Cursor::new(info, at);
         let Some((body_end, address_size, abbrev_offset, offset_size)) = unit_header(&mut c) else {
@@ -950,7 +1069,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
         else {
             continue;
         };
-        let mut by_offset: BTreeMap<u64, String> = BTreeMap::new();
+        let mut by_offset: BTreeMap<u64, Arc<str>> = BTreeMap::new();
         let mut depth: Vec<bool> = Vec::new();
         let mut open: Vec<usize> = Vec::new();
         let mut open_level: Vec<usize> = Vec::new();
@@ -990,6 +1109,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                     address_size,
                     offset_size,
                     strings,
+                    &mut text,
                 ) else {
                     read = false;
                     break;
@@ -1041,6 +1161,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             if abbreviation.tag == TAG_VARIABLE
                 && let Some(name) = entry.name.as_ref().filter(|n| is_ident(n))
                 && globals.len() + unit_globals.len() < GLOBALS_MAX
+                && text.copy(name.len())
             {
                 let word = address_size;
                 let addr = entry
@@ -1053,7 +1174,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                         Some(_) | None => None,
                     });
                 if addr.is_some() || (open.is_empty() && entry.location.is_none()) {
-                    unit_globals.push((name.clone(), addr, absolute(entry.type_ref)));
+                    unit_globals.push((name.to_string(), addr, absolute(entry.type_ref)));
                 }
             }
             if abbreviation.tag == TAG_SUBRANGE
@@ -1069,6 +1190,9 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             {
                 match (&entry.name, entry.origin) {
                     (Some(name), _) => {
+                        if !text.copy(name.len()) {
+                            break;
+                        }
                         open.push(out.len());
                         open_level.push(depth.len());
                         unresolved.push((out.len(), absolute(entry.type_ref)));
@@ -1079,7 +1203,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                         );
                         out.push(Subprogram {
                             low_pc,
-                            name: name.clone(),
+                            name: name.to_string(),
                             parameters: Vec::new(),
                             return_type: None,
                             locals: BTreeMap::new(),
@@ -1094,9 +1218,12 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 && let Some(owner) = open.last().copied()
                 && let Some(f) = out.get_mut(owner)
             {
+                if !text.copy(name.len()) {
+                    break;
+                }
                 unresolved_params.push((owner, f.parameters.len(), absolute(entry.type_ref)));
                 f.parameters.push(Parameter {
-                    name,
+                    name: name.to_string(),
                     type_name: None,
                 });
             } else if abbreviation.tag == TAG_VARIABLE
@@ -1116,6 +1243,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                         }
                     });
                 if local_name_ok(name)
+                    && text.copy(name.len())
                     && let Some(f) = out.get_mut(owner)
                 {
                     take_local(&mut f.locals, slot, name);
@@ -1131,12 +1259,12 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                     && s.members.len() < FIELDS_MAX
                 {
                     s.members
-                        .push((name.clone(), off, absolute(entry.type_ref)));
+                        .push((name.to_string(), off, absolute(entry.type_ref)));
                 } else if abbreviation.tag == TAG_ENUMERATOR
                     && let Some(value) = entry.const_value
                     && s.values.len() < ENUM_VALUES_MAX
                 {
-                    s.values.push((value, name.clone()));
+                    s.values.push((value, name.to_string()));
                 }
             }
             let opened = if matches!(
@@ -1148,7 +1276,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 && check_type_name(name).is_ok()
             {
                 stated.push(Stated {
-                    name: name.clone(),
+                    name: name.to_string(),
                     size,
                     members: Vec::new(),
                     values: Vec::new(),
@@ -1165,11 +1293,13 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             }
         }
         for (low_pc, origin) in pending {
-            if let Some(name) = by_offset.get(&origin) {
+            if let Some(name) = by_offset.get(&origin)
+                && text.copy(name.len())
+            {
                 bases.push(None);
                 out.push(Subprogram {
                     low_pc,
-                    name: name.clone(),
+                    name: name.to_string(),
                     parameters: Vec::new(),
                     return_type: None,
                     locals: BTreeMap::new(),
@@ -1177,15 +1307,18 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             }
         }
         for (index, type_ref) in unresolved {
-            if let Some(f) = out.get_mut(index) {
-                f.return_type = type_name(&nodes, type_ref, TYPE_DEPTH).filter(|t| t != "void");
+            if let Some(f) = out.get_mut(index)
+                && !text.spent()
+            {
+                f.return_type = type_name(&nodes, type_ref, TYPE_DEPTH)
+                    .filter(|t| t != "void" && text.copy(t.len()));
             }
         }
         for node in nodes.values().filter(|n| n.tag == TAG_TYPEDEF) {
-            let Some(name) = node.name.as_ref().filter(|n| is_ident(n)) else {
+            let Some(name) = node.name.as_deref().filter(|n| is_ident(n)) else {
                 continue;
             };
-            if typedefs.len() >= TYPES_MAX || typedefs.contains_key(name) {
+            if typedefs.len() >= TYPES_MAX || typedefs.contains_key(name) || text.spent() {
                 continue;
             }
             let Some(to) = type_name(&nodes, node.inner, TYPE_DEPTH) else {
@@ -1200,13 +1333,16 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 words.iter().zip(words.iter().skip(1)).all(|(kw, next)| {
                     !matches!(*kw, "struct" | "union" | "enum") || is_ident(next)
                 }) && !matches!(words.last(), Some(&("struct" | "union" | "enum")));
-            if tagged && !to.contains(['(', '[', '&']) && to != *name {
-                typedefs.insert(name.clone(), to);
+            if tagged && !to.contains(['(', '[', '&']) && to != name && text.copy(to.len()) {
+                typedefs.insert(name.to_owned(), to);
             }
         }
         for (owner, slot, type_ref) in unresolved_params {
-            if let Some(p) = out.get_mut(owner).and_then(|f| f.parameters.get_mut(slot)) {
-                p.type_name = type_name(&nodes, type_ref, TYPE_DEPTH);
+            if let Some(p) = out.get_mut(owner).and_then(|f| f.parameters.get_mut(slot))
+                && !text.spent()
+            {
+                p.type_name =
+                    type_name(&nodes, type_ref, TYPE_DEPTH).filter(|t| text.copy(t.len()));
             }
         }
         for (name, addr, type_ref) in unit_globals {
@@ -1222,10 +1358,14 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                     }),
                 Some(_) | None => type_expr(&nodes, type_ref, TYPE_DEPTH),
             };
+            let type_name = (!text.spent())
+                .then(|| type_name(&nodes, type_ref, TYPE_DEPTH))
+                .flatten()
+                .filter(|t| text.copy(t.len()));
             globals.push(Global {
                 name,
                 addr,
-                type_name: type_name(&nodes, type_ref, TYPE_DEPTH),
+                type_name,
                 ty,
             });
         }
@@ -1980,6 +2120,97 @@ mod tests {
         for cut in 0..truncated.len() {
             let _ = read_in(&truncated[..cut], &abbrev(), &strings);
         }
+    }
+
+    /// A name longer than [`super::STRING_MAX`] names nothing, inline or
+    /// out of the string section, and a section with no NUL is not read
+    /// past the cap.
+    #[test]
+    fn a_name_past_the_string_cap_names_nothing() {
+        let long = "n".repeat(super::STRING_MAX + 1);
+        let mut dies: Vec<u8> = vec![0x01];
+        dies.extend_from_slice(long.as_bytes());
+        dies.push(0);
+        dies.extend_from_slice(&0x1000u64.to_le_bytes());
+        dies.push(0x00);
+        dies.push(0x01);
+        dies.extend_from_slice(b"kept\0");
+        dies.extend_from_slice(&0x2000u64.to_le_bytes());
+        dies.push(0x00);
+        let strings = Strings {
+            text: &[],
+            lines: &[],
+        };
+        let found = read_in(&unit(&dies), &abbrev(), &strings).subprograms;
+        let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["kept"]);
+        let abbrev: Vec<u8> = vec![0x01, 0x2e, 0x00, 0x03, 0x0e, 0x11, 0x01, 0x00, 0x00, 0x00];
+        let mut section = long.into_bytes();
+        section.push(0);
+        let mut dies: Vec<u8> = vec![0x01];
+        dies.extend_from_slice(&0u32.to_le_bytes());
+        dies.extend_from_slice(&0x2000u64.to_le_bytes());
+        let strings = Strings {
+            text: &section,
+            lines: &[],
+        };
+        assert!(
+            read_in(&unit(&dies), &abbrev, &strings)
+                .subprograms
+                .is_empty()
+        );
+    }
+
+    /// Entries that all name one long string stop at the copy budget.
+    ///
+    /// The string is not copied once per entry past it, and offsets into
+    /// the middle of one string read no more than the budget for distinct
+    /// strings allows.
+    #[test]
+    fn one_long_name_named_everywhere_stops_at_the_budget() {
+        let abbrev: Vec<u8> = vec![0x01, 0x2e, 0x00, 0x03, 0x0e, 0x11, 0x01, 0x00, 0x00, 0x00];
+        let name_len = super::STRING_MAX;
+        let mut section = vec![b'n'; name_len];
+        section.push(0);
+        let entries = super::TEXT_MAX / name_len + 16;
+        let mut info = Vec::new();
+        let mut dies: Vec<u8> = Vec::new();
+        for k in 0..entries {
+            if dies.len() > 1 << 20 {
+                info.extend_from_slice(&unit(&dies));
+                dies.clear();
+            }
+            dies.push(0x01);
+            dies.extend_from_slice(&0u32.to_le_bytes());
+            dies.extend_from_slice(&u64::try_from(k).expect("fits").to_le_bytes());
+        }
+        info.extend_from_slice(&unit(&dies));
+        let strings = Strings {
+            text: &section,
+            lines: &[],
+        };
+        let found = read_in(&info, &abbrev, &strings).subprograms;
+        assert!(!found.is_empty());
+        assert!(
+            found.len() <= super::TEXT_MAX / name_len,
+            "{} entries copied a {name_len}-byte name",
+            found.len()
+        );
+        let mut dies: Vec<u8> = Vec::new();
+        for k in 0..name_len {
+            dies.push(0x01);
+            dies.extend_from_slice(&u32::try_from(k).expect("fits").to_le_bytes());
+            dies.extend_from_slice(&u64::try_from(k).expect("fits").to_le_bytes());
+        }
+        let mut text = super::Text::new(&strings);
+        let budget = text.intern_left;
+        let mut read = 0usize;
+        for k in 0..name_len {
+            read += text.at(&strings, false, k).map_or(0, |s| s.len());
+        }
+        assert!(read <= budget, "{read} bytes read past {budget}");
+        let tails = read_in(&unit(&dies), &abbrev, &strings).subprograms;
+        assert!(tails.len() < name_len, "{} tails read", tails.len());
     }
 
     /// A unit whose stated length runs to the top of the offset space
