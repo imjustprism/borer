@@ -64,6 +64,15 @@ pub(in crate::analysis::decompile) fn print_decls(decls: &[Decl], out: &mut Stri
 pub(in crate::analysis::decompile) fn print_items(items: &[Item], out: &mut String) {
     for item in items {
         match item {
+            Item::Alias(t, name) => {
+                let _ = write!(out, "#define {} ", name.as_str());
+                ty(t, out);
+            }
+            Item::Data(t, name) => {
+                out.push_str("extern ");
+                ty(t, out);
+                let _ = write!(out, " {};", name.as_str());
+            }
             Item::Extern(p) => {
                 out.push_str("extern ");
                 proto(p, out);

@@ -297,6 +297,95 @@ pub fn declared(name: &str, format: BinaryFormat) -> Option<&'static Decl> {
         .or_else(|| super::sdk::declared(name, |os| os.serves(format)))
 }
 
+/// The data objects the GNU C library exports that a text reads, with
+/// their C types: what `<stdio.h>`, `<unistd.h>` and `<time.h>` declare
+/// them as.
+const GLIBC_DATA: [(&str, &str); 14] = [
+    ("__environ", "char**"),
+    ("daylight", "int"),
+    ("environ", "char**"),
+    ("optarg", "char*"),
+    ("opterr", "int"),
+    ("optind", "int"),
+    ("optopt", "int"),
+    ("program_invocation_name", "char*"),
+    ("program_invocation_short_name", "char*"),
+    ("signgam", "int"),
+    ("stderr", "FILE*"),
+    ("stdin", "FILE*"),
+    ("stdout", "FILE*"),
+    ("timezone", "long"),
+];
+
+/// The type names the GNU C library's headers define that a text spells,
+/// with what each stands for on x86-64: a structure the text only points
+/// at stays opaque.
+const GLIBC_TYPES: [(&str, &str); 21] = [
+    ("DIR", "struct __dirstream"),
+    ("FILE", "struct _IO_FILE"),
+    ("blkcnt_t", "long"),
+    ("blksize_t", "long"),
+    ("clock_t", "long"),
+    ("dev_t", "unsigned long"),
+    ("gid_t", "unsigned int"),
+    ("ino_t", "unsigned long"),
+    ("mode_t", "unsigned int"),
+    ("nlink_t", "unsigned long"),
+    ("off_t", "long"),
+    ("pid_t", "int"),
+    ("socklen_t", "unsigned int"),
+    ("ssize_t", "long"),
+    ("suseconds_t", "long"),
+    ("time_t", "long"),
+    ("u_char", "unsigned char"),
+    ("u_int", "unsigned int"),
+    ("u_long", "unsigned long"),
+    ("u_short", "unsigned short"),
+    ("uid_t", "unsigned int"),
+];
+
+/// Returns the C type a C library data object is declared with, when the
+/// binary's library exports it by that name.
+///
+/// Only the GNU C library's ELF images name these objects as the headers
+/// spell them; a PE's `stdin` is a call to `__acrt_iob_func`, not data.
+///
+/// # Arguments
+///
+/// * `name` - The object's name as the text spells it.
+/// * `format` - The binary's format, which picks the library.
+///
+/// # Returns
+///
+/// The type (`FILE*`), or `None` when the library exports no such object.
+#[must_use]
+pub fn data_type(name: &str, format: BinaryFormat) -> Option<&'static str> {
+    (format == BinaryFormat::Elf)
+        .then(|| GLIBC_DATA.iter().find(|(n, _)| *n == name))
+        .flatten()
+        .map(|(_, ty)| *ty)
+}
+
+/// Returns what a C library type name stands for, when the binary's
+/// library headers define it.
+///
+/// # Arguments
+///
+/// * `name` - The type's name as the text spells it (`FILE`, `time_t`).
+/// * `format` - The binary's format, which picks the library.
+///
+/// # Returns
+///
+/// The type it names (`struct _IO_FILE`, `long`), or `None` when the
+/// headers define no such name.
+#[must_use]
+pub fn type_definition(name: &str, format: BinaryFormat) -> Option<&'static str> {
+    (format == BinaryFormat::Elf)
+        .then(|| GLIBC_TYPES.iter().find(|(n, _)| *n == name))
+        .flatten()
+        .map(|(_, ty)| *ty)
+}
+
 /// Returns a constant group by its name.
 ///
 /// # Arguments

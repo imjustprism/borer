@@ -493,6 +493,14 @@ pub(super) struct Proto {
 /// body uses that it does not declare itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Item {
+    /// `#define n T`: a type name the body spells that a library's
+    /// headers define. A macro rather than a `typedef`, because a line
+    /// that opens with a type reads as one of the function's own
+    /// declarations; `extern`, `static inline` and `#define` open the
+    /// unit's lines.
+    Alias(CTy, Name),
+    /// `extern T x;`: a data object defined outside the unit.
+    Data(CTy, Name),
     /// `extern T f(P);`: a function defined outside the unit.
     Extern(Proto),
     /// `static inline T f(P) { ... }`: a function the unit defines, its

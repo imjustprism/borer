@@ -8,6 +8,10 @@
 //! adds them after the header comments as CIR items ([`cir::Item`]), each
 //! name once, in a fixed order:
 //!
+//! - a definition for each C library type name the text or its signature
+//!   spells (`FILE`, `time_t`), and an `extern` for each C library data
+//!   object it reads (`stderr`, `optind`), from the type library
+//!   ([`crate::analysis::typelib::data_type`]);
 //! - a prototype, `extern uint64_t h_is_odd(uint64_t);`, for each function
 //!   the binary exports, from its ABI facts alone
 //!   ([`prototype`](abi::function::prototype)), so two functions that call
@@ -212,7 +216,7 @@ pub(super) fn close(
             .iter()
             .all(|e| decls.contains_key(e) || (*e == own && own_proto.is_some()))
     });
-    let mut items: Vec<Item> = Vec::new();
+    let mut items = library_items(text, program.format, &ix, &own, &decls);
     if tables.iter().any(|t| t.entries.contains(&own))
         && let Some(p) = &own_proto
     {
@@ -274,6 +278,73 @@ pub(super) fn close(
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Returns the C library's type names and data objects a text uses that
+/// it does not declare: a definition for each type name the library's
+/// headers define ([`Item::Alias`]), then an `extern` for each object the
+/// library exports (`extern FILE* stderr;`).
+///
+/// The signature line counts as code here: a reader compiles it as the
+/// function's prototype, so a `FILE *stream` parameter needs `FILE`.
+///
+/// # Arguments
+///
+/// * `text` - The decompilation.
+/// * `format` - The binary's format, which picks the library.
+/// * `ix` - The program's names: an object must be data or an import.
+/// * `own` - The function's own name.
+/// * `decls` - The functions the unit declares.
+///
+/// # Returns
+///
+/// The type names first, in order of first use, then the objects.
+fn library_items(
+    text: &str,
+    format: crate::program::BinaryFormat,
+    ix: &Index,
+    own: &str,
+    decls: &BTreeMap<String, Declared>,
+) -> Vec<Item> {
+    let declared = words(&declarations(text));
+    let used = words(text);
+    let objects: Vec<(&String, &'static str)> = used
+        .iter()
+        .filter(|w| {
+            *w != own
+                && !declared.contains(w)
+                && !decls.contains_key(*w)
+                && (ix.data.contains_key(*w) || ix.imports.contains(*w))
+        })
+        .filter_map(|w| crate::analysis::typelib::data_type(w, format).map(|t| (w, t)))
+        .collect();
+    let signature = text
+        .lines()
+        .find_map(|l| l.strip_prefix("// signature: "))
+        .unwrap_or("");
+    let mut named: Vec<String> = Vec::new();
+    for w in words(signature)
+        .into_iter()
+        .chain(used.iter().cloned())
+        .chain(objects.iter().flat_map(|(_, t)| words(t)))
+    {
+        if !named.contains(&w) && !declared.contains(&w) {
+            named.push(w);
+        }
+    }
+    let mut items: Vec<Item> = named
+        .iter()
+        .filter_map(|w| {
+            crate::analysis::typelib::type_definition(w, format)
+                .map(|t| Item::Alias(CTy::parse(t), Name::of(w)))
+        })
+        .collect();
+    items.extend(
+        objects
+            .into_iter()
+            .map(|(w, t)| Item::Data(CTy::parse(t), Name::of(w))),
+    );
+    items
 }
 
 /// Returns the type of a pointer to a function, [`CTy::FnPtr`], or `None`
@@ -805,10 +876,12 @@ fn code_of(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Item, call_arities, code_of, implementation_named, parse_proto, plain_type, words,
+        Index, Item, call_arities, code_of, implementation_named, library_items, parse_proto,
+        plain_type, words,
     };
     use crate::analysis::decompile::cir;
     use crate::program::BinaryFormat;
+    use std::collections::BTreeMap;
 
     /// A text's identifiers leave out comments, literals and members.
     ///
@@ -867,6 +940,30 @@ mod tests {
         for name in ["h_is_odd", "op_add", "sub_401000"] {
             assert!(!implementation_named(name, BinaryFormat::Elf), "{name}");
         }
+    }
+
+    /// The C library's `stderr` a text reads is declared with the type
+    /// the headers give it, and `FILE` before it, the signature's use of
+    /// `FILE` counted; a PE's library names no such object.
+    ///
+    /// # Panics
+    ///
+    /// When a declaration is missing or made for the wrong platform.
+    #[test]
+    fn the_library_s_data_and_types_are_declared() {
+        let mut ix = Index::default();
+        ix.data.insert("stderr".to_owned(), 0x4040);
+        let text = "// signature: int f(FILE *s, time_t t)\n\
+                    \n\
+                    fputs(\"x\", *(uint64_t*)&stderr);\n";
+        let mut out = String::new();
+        let items = library_items(text, BinaryFormat::Elf, &ix, "f", &BTreeMap::new());
+        cir::print_items(&items, &mut out);
+        assert_eq!(
+            out,
+            "#define FILE struct _IO_FILE\n#define time_t long\nextern FILE* stderr;\n"
+        );
+        assert!(library_items(text, BinaryFormat::Pe, &ix, "f", &BTreeMap::new()).is_empty());
     }
 
     /// A call's arguments are counted at its own depth.
