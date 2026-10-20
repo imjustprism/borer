@@ -139,11 +139,11 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
-# The shipped server: everything release does, plus no unwinding tables and no
-# symbols. Kept separate from `release` because tests built from it (the
-# sweep profile inherits it) need unwinding for libtest to report which test
-# failed.
+# The shipped server: everything release does, plus no symbols. It unwinds on
+# panic: every request runs under a `catch_unwind` guard, so a panic a hostile
+# file reaches answers that one request with an error instead of ending the
+# session, which aborting would.
 [profile.dist]
 inherits = "release"
-panic = "abort"
+panic = "unwind"
 strip = true

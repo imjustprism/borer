@@ -522,6 +522,28 @@ mod tests {
         assert_eq!(server.analysis_pending(), None);
     }
 
+    /// The shipped build unwinds on panic, so the request guard in
+    /// [`super::BorerServer::with_program`] catches a fault instead of the
+    /// process aborting and ending the session.
+    ///
+    /// # Panics
+    ///
+    /// When the `dist` profile aborts on panic.
+    #[test]
+    fn the_shipped_build_unwinds_on_panic() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let dist: Vec<&str> = manifest
+            .lines()
+            .skip_while(|l| l.trim() != "[profile.dist]")
+            .skip(1)
+            .take_while(|l| !l.starts_with('['))
+            .collect();
+        assert!(
+            dist.iter().any(|l| l.trim() == "panic = \"unwind\""),
+            "{dist:?}"
+        );
+    }
+
     /// A fresh session renders constants by the binary's name tables, as a
     /// session that has already decompiled does: no answer depends on the
     /// calls before it.
