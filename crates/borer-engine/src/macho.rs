@@ -470,6 +470,11 @@ fn plain(name: &str) -> &str {
     name.strip_prefix('_').unwrap_or(name)
 }
 
+/// Bytes of the smallest symbol table entry (a 32-bit `nlist`): a file
+/// of `n` bytes holds at most `n / NLIST_MIN` symbols, whatever count its
+/// header states.
+const NLIST_MIN: usize = 12;
+
 /// Reads one image.
 ///
 /// # Arguments
@@ -510,7 +515,11 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
     let mut seen: BTreeSet<(u64, String)> = BTreeSet::new();
     let mut named = 0usize;
     if let Some(table) = &m.symbols {
-        for (name, nlist) in table.iter().filter_map(Result::ok) {
+        for (name, nlist) in table
+            .iter()
+            .take(file.len() / NLIST_MIN)
+            .filter_map(Result::ok)
+        {
             if nlist.n_type & N_STAB != 0 || name.is_empty() {
                 continue;
             }
