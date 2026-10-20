@@ -1,0 +1,60 @@
+name: fuzz
+
+# libFuzzer over the loaders (PE, ELF, Mach-O with DWARF, minidump, raw)
+# and over load, analyze and decompile: a minute per target on every pull
+# request and push, ten minutes per target weekly. An input that panics,
+# runs past ten seconds or takes 2 GB fails the job and is uploaded; replay
+# it with `cargo +nightly fuzz run <target> <file>` and keep it as a test.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # cargo-fuzz needs nightly; a dated one keeps the build reproducible.
+  NIGHTLY: nightly-2026-10-01
+  SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && 600 || 60 }}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: toolchain
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --no-self-update
+
+      - name: cargo-fuzz
+        run: cargo +"$NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+
+      - name: fuzz
+        working-directory: fuzz
+        run: |
+          for target in load analyze; do
+            cargo +"$NIGHTLY" fuzz run "$target" -- \
+              -max_total_time="$SECONDS_PER_TARGET" -timeout=10 -rss_limit_mb=2048
+          done
+
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
