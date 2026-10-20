@@ -2664,20 +2664,20 @@ fn const_survives_join() {
 ///
 /// `cmp ecx,5; jge` is a signed 32-bit compare and
 /// both the counter and the sum are 32-bit writes, so the counter is an
-/// `int32_t` and the compare needs no cast. No temporaries and no back-edge
-/// goto survive.
+/// `int32_t` and the compare needs no cast. The counter lives only in the
+/// loop, so it is `i`. No temporaries and no back-edge goto survive.
 #[test]
 fn while_loop_structured() {
     let out = dc(0x1100);
     assert!(
-        out.contains("for (var2 = 0; var2 < 5; var2 += 1)"),
+        out.contains("for (i = 0; i < 5; i += 1)"),
         "no for sugar:\n{out}"
     );
     assert!(
-        out.contains("int32_t var2;"),
+        out.contains("int32_t i;"),
         "counter not signed 32-bit:\n{out}"
     );
-    assert!(out.contains("var1 += var2;"), "loop body missing:\n{out}");
+    assert!(out.contains("var1 += i;"), "loop body missing:\n{out}");
     assert!(!out.contains("tmp_"), "spurious temporaries:\n{out}");
     assert!(
         !out.contains("goto L_1107;"),
