@@ -2188,7 +2188,7 @@ pub fn parse_off(s: &str) -> Option<u64> {
 /// # Errors
 ///
 /// Says the address is an import's slot or an IL body, or that no
-/// discovered function contains it.
+/// discovered function contains it ([`no_function_at`]).
 pub fn function_entry(program: &Program, analysis: &Analysis, va: u64) -> Result<u64, String> {
     if let Some(m) = program
         .clr()
@@ -2212,7 +2212,63 @@ pub fn function_entry(program: &Program, analysis: &Analysis, va: u64) -> Result
             "{va:#x} is the import slot of {}: its code is in another module, so no function here; xrefs {va:#x} lists its callers",
             s.name
         )),
-        None => Err(format!("no discovered function contains {va:#x}")),
+        None => Err(no_function_at(program, analysis, va)),
+    }
+}
+
+/// Says that no discovered function contains `va`, and what to try.
+///
+/// An address outside every section names the image's span and, when
+/// the image base plus it is mapped, that address, since an RVA passed
+/// for a virtual address is the usual slip; one inside names the nearest
+/// function before it.
+///
+/// # Arguments
+///
+/// * `program` - Supplies the sections and the image base.
+/// * `analysis` - Supplies the functions.
+/// * `va` - The address no function contains.
+///
+/// # Returns
+///
+/// The sentence a tool answers with.
+#[must_use]
+pub fn no_function_at(program: &Program, analysis: &Analysis, va: u64) -> String {
+    let span = program
+        .sections
+        .iter()
+        .map(|s| (s.va.0, s.va.0.saturating_add(s.vsize.max(s.file_size))))
+        .reduce(|(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
+    match span {
+        Some((lo, hi)) if program.section_at(va).is_none() => {
+            let rva = program
+                .image_base
+                .checked_add(va)
+                .filter(|&at| at != va && program.section_at(at).is_some())
+                .map_or_else(String::new, |at| {
+                    format!("; as an RVA it is {at:#x}, which is mapped")
+                });
+            format!(
+                "no discovered function contains {va:#x}: it is outside the image ({lo:#x}..{hi:#x}){rva}"
+            )
+        }
+        Some(_) | None => {
+            let before = analysis
+                .functions
+                .iter()
+                .take_while(|f| f.entry <= va)
+                .last()
+                .map_or_else(String::new, |f| {
+                    format!(
+                        "; the nearest function before it is {} at {:#x}",
+                        f.name
+                            .as_deref()
+                            .map_or_else(|| format!("sub_{:x}", f.entry), str::to_owned),
+                        f.entry
+                    )
+                });
+            format!("no discovered function contains {va:#x}{before}")
+        }
     }
 }
 

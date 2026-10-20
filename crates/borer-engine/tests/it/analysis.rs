@@ -3013,6 +3013,42 @@ fn an_import_slot_is_no_function_and_says_so() {
     );
     let err = function_entry(&p, &a, 0x1_4000_2100).unwrap_err();
     assert!(err.contains("no discovered function contains"), "{err}");
+    assert!(
+        err.ends_with("; the nearest function before it is sub_140001000 at 0x140001000"),
+        "{err}"
+    );
+    let err = function_entry(&p, &a, 0x1000).unwrap_err();
+    assert_eq!(
+        err,
+        "no discovered function contains 0x1000: it is outside the image (0x140001000..0x140003000); as an RVA it is 0x140001000, which is mapped"
+    );
+    let err = function_entry(&p, &a, 0x9_0000_0000).unwrap_err();
+    assert!(
+        err.ends_with("outside the image (0x140001000..0x140003000)"),
+        "{err}"
+    );
+}
+
+/// A file the loader does not recognize and maps no code from says which
+/// `arch` to load it with; a recognized one does not.
+///
+/// # Panics
+///
+/// When the hint is missing from the raw file's refusal or added to
+/// another's.
+#[test]
+fn a_raw_file_of_unknown_arch_says_to_name_one() {
+    use borer_engine::program::Feature;
+    let mut p = Program::raw(vec![0u8; 16], Arch::Unknown, 0, None, Vec::new());
+    p.format = BinaryFormat::Raw;
+    let why = p.refuses(Feature::Disasm).expect("no code analysis");
+    assert!(
+        why.ends_with("load it again with arch=x86|x64|arm64 (CLI: --arch)"),
+        "{why}"
+    );
+    p.format = BinaryFormat::Elf;
+    let why = p.refuses(Feature::Disasm).expect("no code analysis");
+    assert!(!why.contains("arch="), "{why}");
 }
 
 /// A name that spells a number resolves to what it names; `0x` text is

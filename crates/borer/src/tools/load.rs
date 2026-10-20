@@ -2,7 +2,7 @@
 //! that restarts the server in place.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use borer::project::Identity;
@@ -23,6 +23,34 @@ use crate::symsrv;
 /// first ten of a triage would, where `binary_info` would only repeat the
 /// summary.
 pub(crate) const LOAD_NEXT: &str = "# next: query borer://triage (a whole triage in one call)\n";
+
+/// Says where a relative path was looked for, when it was relative.
+///
+/// The server's working directory is the client's choice (often the
+/// system directory or `/`), not one an agent can know.
+///
+/// # Arguments
+///
+/// * `path` - The path asked for.
+/// * `cwd` - The server's working directory, `None` when unknown.
+///
+/// # Returns
+///
+/// A `; ...` clause for a relative path, empty for an absolute one.
+pub(crate) fn relative_note(path: &Path, cwd: Option<&Path>) -> String {
+    if path.is_absolute() {
+        return String::new();
+    }
+    cwd.map_or_else(
+        || "; the path is relative and the server's working directory is unknown: pass an absolute path".to_owned(),
+        |dir| {
+            format!(
+                "; the path is relative to the server's working directory {}: pass an absolute path",
+                dir.display()
+            )
+        },
+    )
+}
 
 #[tool_router(router = load_tools, vis = "pub(crate)")]
 impl BorerServer {
@@ -106,7 +134,12 @@ impl BorerServer {
                 fault_text(e.as_ref())
             ))
         })?;
-        let mut program = loaded.map_err(|e| err_params(format!("load failed: {e:#}")))?;
+        let mut program = loaded.map_err(|e| {
+            err_params(format!(
+                "load failed: {e:#}{}",
+                relative_note(Path::new(&path), std::env::current_dir().ok().as_deref())
+            ))
+        })?;
         if let Some(off) = entry_file_offset {
             if off >= num::from_usize(program.bytes.len()) {
                 return Err(err_params(format!(
@@ -453,6 +486,25 @@ impl BorerServer {
 
 #[cfg(test)]
 mod tests {
+    /// A relative path that does not load says the directory it was
+    /// looked for in and asks for an absolute one; an absolute one adds
+    /// nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the note is missing or added to an absolute path.
+    #[test]
+    fn a_relative_path_names_the_directory_it_was_read_from() {
+        let dir = std::env::temp_dir();
+        let note = super::relative_note(std::path::Path::new("notepad.exe"), Some(&dir));
+        assert!(
+            note.contains(&dir.display().to_string()) && note.ends_with("pass an absolute path"),
+            "{note}"
+        );
+        let absolute = dir.join("notepad.exe");
+        assert_eq!(super::relative_note(&absolute, Some(&dir)), "");
+    }
+
     /// A refused `load_binary` changes nothing.
     ///
     /// The session keeps the program it had and the load options it was loaded

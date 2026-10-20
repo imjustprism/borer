@@ -1864,7 +1864,12 @@ impl Program {
                 ))
             }
             Some(_) | None => Err(format!(
-                "{format} file, arch '{arch}': borer decodes only x86, x86-64 and arm64 code, so no code analysis applies; triage, entropy and strings read any file"
+                "{format} file, arch '{arch}': borer decodes only x86, x86-64, arm64 and 32-bit arm code, so no code analysis applies; triage, entropy and strings read any file{}",
+                if self.format == BinaryFormat::Raw {
+                    "; if this is raw code or a memory dump, load it again with arch=x86|x64|arm64 (CLI: --arch)"
+                } else {
+                    ""
+                }
             )),
         }
     }
