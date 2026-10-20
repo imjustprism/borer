@@ -1,5 +1,8 @@
 # borer SDK type library: facts restated from the Windows SDK headers, no header text
+# basis	declarations as facts (names, conventions, types, offsets, values), no header text or comment; see scripts/dev/sdklib.py and NOTICE
 # sdk	Windows SDK 10.0.26100.0
+# wdk	Windows Driver Kit 10.0.26100.0 (km headers)
+# msvc	MSVC 14.44.35207 include (read before the kit's ucrt headers)
 # parser	clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)
 # targets	x86_64-pc-windows-msvc, i686-pc-windows-msvc (structure offsets)
 # um	winsock2.h ws2tcpip.h mswsock.h windows.h winternl.h shlobj.h shlwapi.h shellapi.h wincrypt.h bcrypt.h ncrypt.h wintrust.h softpub.h wininet.h urlmon.h psapi.h tlhelp32.h dbghelp.h iphlpapi.h setupapi.h winsvc.h userenv.h wtsapi32.h lm.h sddl.h aclapi.h accctrl.h security.h wincred.h dpapi.h commctrl.h commdlg.h objbase.h oleauto.h ole2.h winver.h mmsystem.h winspool.h uxtheme.h dwmapi.h winevt.h evntprov.h evntrace.h pdh.h powrprof.h d3d9.h d3d11.h dxgi.h winioctl.h netfw.h wlanapi.h icmpapi.h shlguid.h propsys.h msi.h cfgmgr32.h hidsdi.h winusb.h rpc.h rpcdce.h ktmw32.h restartmanager.h processsnapshot.h werapi.h winscard.h wtypes.h assert.h conio.h ctype.h direct.h errno.h fcntl.h float.h io.h locale.h malloc.h math.h mbstring.h memory.h process.h search.h setjmp.h signal.h stdint.h stdio.h stdlib.h string.h sys/stat.h sys/timeb.h sys/utime.h time.h wchar.h wctype.h uchar.h

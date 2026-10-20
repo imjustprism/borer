@@ -32,8 +32,24 @@ Where the data comes from. clang parses the SDK headers (`um`, `shared`,
 i686 Windows targets. Each row restates a declaration as facts: a name,
 a calling convention, parameter types and names, a typedef's
 representation, a structure's field names, types and offsets. No header
-text is copied. `manifest.tsv` records the SDK and clang versions, the
+text is copied. `manifest.tsv` records the Windows SDK, Windows Driver Kit
+(the `km` headers) and MSVC include versions, the clang version, the
 headers each unit includes and the row counts.
+
+Why declarations ship and libraries do not. A declaration is the interface a
+program is compiled against: a function's name, calling convention and
+parameter types and names, a structure's field names, types and offsets, a
+constant's name and value. borer ships those as facts, restated without any
+header text or comment, as MinGW-w64 and Wine restate them. A signature set
+is different: it is derived from a library's compiled code, so only a
+library whose license allows redistributing what is derived from its code is
+read. The two scripts that write borer's data (this one and
+scripts/dev/libsets.py) state this same rule.
+
+A future regeneration should prefer the MinGW-w64 headers (mostly public
+domain) as the clean-room source, with the Windows SDK only to check them
+against: the facts are the same, and the source then carries no license
+question at all.
 
 A kernel declaration takes its convention from an i686 parse of its unit,
 where one that states none is `__stdcall`: the kernel builds with `/Gz`.
@@ -287,6 +303,11 @@ def msvc_include() -> str:
     if not found:
         raise SystemExit("no MSVC include directory")
     return found[-1]
+
+
+def msvc_version(include: str) -> str:
+    """Return the MSVC toolset version an include directory belongs to."""
+    return os.path.basename(os.path.dirname(include))
 
 
 def unit_args(target: str, dirs: list[str], defines: list[str]) -> list[str]:
@@ -815,9 +836,14 @@ def main(argv: list[str]) -> int:
         "structs.tsv": len(struct_rows),
     }
     origins = {o: sum(1 for d in decls if d[2] == o) for o in sorted(ORIGIN)}
+    wdk = f"Windows Driver Kit {version} (km headers)" if km else "-"
     manifest = [
         "# borer SDK type library: facts restated from the Windows SDK headers, no header text",
+        "# basis\tdeclarations as facts (names, conventions, types, offsets, values), no header"
+        " text or comment; see scripts/dev/sdklib.py and NOTICE",
         f"# sdk\tWindows SDK {version}",
+        f"# wdk\t{wdk}",
+        f"# msvc\tMSVC {msvc_version(msvc)} include (read before the kit's ucrt headers)",
         f"# parser\t{clang_version}",
         "# targets\tx86_64-pc-windows-msvc, i686-pc-windows-msvc (structure offsets)",
         f"# um\t{' '.join(um)}",

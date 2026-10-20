@@ -345,7 +345,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 const ORDINALS: &str = include_str!("ordinals.tsv");
 
 /// The names of system DLLs' exports that programs import by ordinal, from
-/// their export tables (`scripts/ordinals.py` writes it).
+/// their export tables (`scripts/check/ordinals.py` writes it).
 ///
 /// One `dll<TAB>ordinal<TAB>name` line each, the dll lowercased with its
 /// extension.

@@ -20,8 +20,26 @@ to the manifest as comment lines so the reason travels with the data:
   MIT OR Apache-2.0.
 * The MSVC C runtime and vcruntime (libcmt.lib, libvcruntime.lib) and the
   Universal CRT (libucrt.lib) are under the Visual Studio and Windows SDK
-  license terms, which do not allow redistributing them or what is derived
-  from them; a user builds a local pack from them with `borer sigmake`.
+  license terms, which do not allow redistributing their compiled code or
+  signatures derived from that code; a user builds a local pack from them
+  with `borer sigmake`. The refusal is about code: the declarations of the
+  same functions ship in the SDK type library (scripts/dev/sdklib.py).
+
+libcpmt.lib is read as Visual Studio 2022 installs it (MSVC 14.44.35207).
+It is built from github.com/microsoft/STL, whose code is Apache-2.0 WITH
+LLVM-exception; NOTICE records that provenance. A build from a tagged
+microsoft/STL commit would make it independent of the Visual Studio
+install.
+
+Why declarations ship and libraries do not. A declaration is the interface a
+program is compiled against: a function's name, calling convention and
+parameter types and names, a structure's field names, types and offsets, a
+constant's name and value. borer ships those as facts, restated without any
+header text or comment, as MinGW-w64 and Wine restate them. A signature set
+is different: it is derived from a library's compiled code, so only a
+library whose license allows redistributing what is derived from its code is
+read. The two scripts that write borer's data (this one and the other of
+scripts/dev/libsets.py and scripts/dev/sdklib.py) state this same rule.
 
 A set is rewritten only when a library it names is found; one whose
 libraries are missing keeps its file and row, so the script runs on any
@@ -81,8 +99,14 @@ SETS = [
 ]
 
 REFUSED = [
-    ("libcmt.lib, libvcruntime.lib", "Visual Studio license terms: not redistributable"),
-    ("libucrt.lib", "Windows SDK license terms: not redistributable"),
+    (
+        "libcmt.lib, libvcruntime.lib",
+        "Visual Studio license terms: their code, and signatures of it, are not redistributable",
+    ),
+    (
+        "libucrt.lib",
+        "Windows SDK license terms: its code, and signatures of it, are not redistributable",
+    ),
 ]
 
 HEADER = "set\tfunctions\tbytes\tlicense\tversion\tlibraries (sha256)\n"
