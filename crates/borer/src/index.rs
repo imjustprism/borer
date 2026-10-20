@@ -48,7 +48,11 @@ const CACHE_MAX: u64 = 1 << 30;
 /// the borer build, file format and packs that decompiled it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IndexKey {
-    /// FNV-1a of the program's bytes, shared by every index of the program.
+    /// The first 64 bits of the SHA-256 of the program's bytes, shared by
+    /// every index of the program. A hash a file can be built to collide
+    /// with (FNV-1a was) let an analyzed file store its index under the key
+    /// of a known binary, which then read the other's text; a second
+    /// preimage of 64 bits of SHA-256 costs 2^64 hashes.
     pub program: u64,
     /// FNV-1a of the file format, the packs, and the borer executable's
     /// size and modification time.
@@ -366,6 +370,23 @@ pub fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
     })
 }
 
+/// The program half of an index key ([`IndexKey::program`]).
+///
+/// # Arguments
+///
+/// * `bytes` - The program's bytes.
+///
+/// # Returns
+///
+/// The first eight bytes of their SHA-256, little-endian.
+#[must_use]
+pub fn program_key(bytes: &[u8]) -> u64 {
+    borer_engine::hashing::sha256(bytes)
+        .first_chunk::<8>()
+        .copied()
+        .map_or(0, u64::from_le_bytes)
+}
+
 /// The key an index for `program` is stored under: the program's bytes,
 /// then the borer executable's size and modification time, the file format,
 /// and the packs the analysis ran with.
@@ -407,7 +428,7 @@ pub fn index_key(program: &Program, packs: &Packs) -> IndexKey {
         h = fnv1a(h, &modified.to_le_bytes());
     }
     IndexKey {
-        program: fnv1a(FNV_SEED, &program.bytes),
+        program: program_key(&program.bytes),
         engine: h,
     }
 }
@@ -1185,6 +1206,18 @@ pub fn grep_tsv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The program half of an index key is SHA-256, not a hash a file can
+    /// be built to collide with.
+    ///
+    /// # Panics
+    ///
+    /// When the key is not the digest's first eight bytes.
+    #[test]
+    fn the_program_key_is_sha256() {
+        assert_eq!(program_key(b"abc"), 0xeacf_018f_bf16_78ba);
+        assert_ne!(program_key(b"abc"), fnv1a(FNV_SEED, b"abc"));
+    }
 
     /// A two-function index with a shared line and a distinct one.
     fn sample() -> CodeIndex {
