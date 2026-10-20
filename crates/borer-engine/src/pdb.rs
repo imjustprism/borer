@@ -40,6 +40,13 @@ use std::path::{Path, PathBuf};
 /// statics; this sits a grain under the relocation cap's million words.
 const SYMBOLS_MAX: usize = 1 << 19;
 
+/// Largest PDB file read, in bytes.
+///
+/// A PDB is read whole into memory before it is parsed, so its size is the
+/// load's memory; the largest a linker writes with its default page size is
+/// 4 GiB, and a bigger file is refused rather than read.
+const PDB_LEN_MAX: u64 = 1 << 32;
+
 /// `S_FRAMEPROC`: the frame facts that follow a procedure record, whose
 /// first word is the frame's size in bytes.
 const S_FRAMEPROC: u16 = 0x1012;
@@ -187,6 +194,13 @@ impl Outcome {
 /// `\` or `/`, since a record written on Windows names a Windows path that
 /// another host's [`Path`] reads as one component.
 ///
+/// The record is bytes out of the analyzed file, so its path is the file
+/// author's choice: a recorded path that is not a local one (a network
+/// share, a device; [`crate::program::unusable_path`]) is never tried,
+/// since only asking whether it exists would connect to the named host,
+/// and a file name holding a `:` (a drive-relative path or a stream) or
+/// naming a device names no candidate at all.
+///
 /// # Arguments
 ///
 /// * `record` - The image's debug record.
@@ -201,11 +215,14 @@ impl Outcome {
 fn candidates(record: &Record, binary: &Path, symsrv: Option<&Path>) -> Vec<PathBuf> {
     let recorded = Path::new(&record.path);
     let mut out = Vec::new();
-    if recorded.is_absolute() {
+    if recorded.is_absolute() && crate::program::unusable_path(recorded).is_none() {
         out.push(recorded.to_path_buf());
     }
     let name = record.path.rsplit(['/', '\\']).next().unwrap_or_default();
-    if !matches!(name, "" | "." | "..") {
+    if !matches!(name, "" | "." | "..")
+        && !name.contains(':')
+        && crate::program::unusable_path(Path::new(name)).is_none()
+    {
         if let Some(dir) = binary.parent() {
             out.push(dir.join(name));
         }
@@ -287,9 +304,42 @@ fn same_build<'s, S: pdb::Source<'s> + 's>(
 ///
 /// As [`same_build`], `None` also when the file does not open as a PDB.
 fn file_names_build(path: &Path, record: &Record) -> Option<bool> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut db = pdb::PDB::open(file).ok()?;
+    let mut db = pdb::PDB::open(open_capped(path)?).ok()?;
     same_build(&mut db, record)
+}
+
+/// Opens a candidate PDB when it is a regular file no larger than
+/// [`PDB_LEN_MAX`].
+///
+/// # Arguments
+///
+/// * `path` - The candidate file.
+///
+/// # Returns
+///
+/// The open file, or `None` when it does not open, is not a regular file
+/// (a directory, a pipe, a device) or is larger than the cap.
+fn open_capped(path: &Path) -> Option<std::fs::File> {
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    (meta.is_file() && meta.len() <= PDB_LEN_MAX).then_some(file)
+}
+
+/// Reads a candidate PDB whole, within [`open_capped`]'s limits.
+///
+/// # Arguments
+///
+/// * `path` - The candidate file.
+///
+/// # Returns
+///
+/// The file's bytes, or `None` when [`open_capped`] refuses it or the read
+/// fails.
+fn read_capped(path: &Path) -> Option<Vec<u8>> {
+    let mut file = open_capped(path)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes).ok()?;
+    Some(bytes)
 }
 
 /// Whether a PDB's bytes name the build a record does, without applying it.
@@ -389,7 +439,7 @@ pub(crate) fn apply(
         return skip.map(Outcome::Skipped);
     };
     let unreadable = || Some(Outcome::Skipped(Skip::Unreadable));
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Some(bytes) = read_capped(&path) else {
         return unreadable();
     };
     phases.mark("pdb read");
@@ -506,7 +556,7 @@ pub(crate) fn sources(
 ) -> Option<BTreeMap<u64, (String, u32)>> {
     let path = resolved(binary, record, symsrv)?;
     let unreadable = || None;
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Some(bytes) = read_capped(&path) else {
         return unreadable();
     };
     let Ok(mut db) = pdb::PDB::open(Cursor::new(bytes.as_slice())) else {
@@ -1526,6 +1576,34 @@ mod tests {
     /// in.
     #[test]
     fn the_record_names_three_places_and_no_others() {
+        let bin = Path::new("bin").join("app.exe");
+        for remote in [
+            r"\\attacker\share\app.pdb",
+            "//attacker/share/app.pdb",
+            r"\\?\UNC\attacker\share\app.pdb",
+        ] {
+            let record = Record {
+                path: remote.to_owned(),
+                guid: [0; 16],
+                age: 1,
+            };
+            assert!(
+                !cfg!(windows)
+                    || !candidates(&record, &bin, None)
+                        .iter()
+                        .any(|p| p.to_string_lossy().contains("attacker")),
+                "{remote} is a share and is never tried"
+            );
+        }
+        for hostile in [r"build\C:app.pdb", r"build\app.pdb:stream"] {
+            let record = Record {
+                path: hostile.to_owned(),
+                guid: [0; 16],
+                age: 1,
+            };
+            let tried = candidates(&record, &bin, Some(Path::new("cache")));
+            assert!(tried.is_empty(), "{hostile} names no candidate: {tried:?}");
+        }
         let dir = Path::new("bin");
         let binary = dir.join("app.exe");
         let record = Record {

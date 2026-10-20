@@ -124,7 +124,14 @@ pub(super) fn parse_object(
 /// stream and ended it silently, with no reply to the call that asked. A
 /// path in the device namespace (`\\.\pipe\x`, `\\.\PhysicalDrive0`, the
 /// same with `/`) is refused whole unless it spells a drive path, and so is
-/// an unparsed `\\?\` path that is neither a drive nor a `UNC` path.
+/// an unparsed `\\?\` path that is not a drive path.
+///
+/// A network share (`\\host\share\x`, `//host/share/x`,
+/// `\\?\UNC\host\share\x`) is refused too: opening one, or only asking
+/// whether it exists, makes Windows connect to the host and authenticate as
+/// the user, so a path out of an analyzed file or an agent's argument would
+/// hand the user's credentials to whoever named the host. borer reads local
+/// files only.
 ///
 /// # Arguments
 ///
@@ -134,7 +141,7 @@ pub(super) fn parse_object(
 ///
 /// The reason, ready to put in a message, or `None` when the path is an
 /// ordinary one. Only emptiness is checked off Windows, where these names
-/// are names like any other.
+/// are names like any other and a share is a mounted directory.
 #[must_use]
 pub fn unusable_path(path: &Path) -> Option<String> {
     if path.as_os_str().is_empty() {
@@ -148,12 +155,18 @@ pub fn unusable_path(path: &Path) -> Option<String> {
         let b = rest.as_bytes();
         b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
     };
+    let long = spelled.strip_prefix("\\\\?\\");
+    let share = long.is_some_and(|rest| rest.to_ascii_uppercase().starts_with("UNC\\"))
+        || (spelled.starts_with("\\\\") && long.is_none() && !spelled.starts_with("\\\\.\\"));
+    if share {
+        return Some(format!(
+            "{spelled} names a network share; borer reads local files only"
+        ));
+    }
     let device = spelled
         .strip_prefix("\\\\.\\")
         .is_some_and(|rest| !drive(rest))
-        || spelled
-            .strip_prefix("\\\\?\\")
-            .is_some_and(|rest| !drive(rest) && !rest.to_ascii_uppercase().starts_with("UNC\\"));
+        || long.is_some_and(|rest| !drive(rest));
     if device {
         return Some(format!("{spelled} names a device, not a file"));
     }
@@ -276,6 +289,9 @@ pub(super) fn read_program_bytes(
     take: Take,
     depth: usize,
 ) -> anyhow::Result<(Vec<u8>, Option<Parent>)> {
+    if let Some(why) = unusable_path(path) {
+        return Err(anyhow!("{why}; give a path to a program to analyze"));
+    }
     let Some((file, off)) = child_path(path).filter(|_| depth < NESTING_MAX) else {
         return Ok((read_program_file(path)?, None));
     };

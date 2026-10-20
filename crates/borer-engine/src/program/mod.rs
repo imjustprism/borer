@@ -2250,7 +2250,22 @@ mod tests {
             );
             assert!(is_device(r"\\?\GLOBALROOT\Device\Null"), "an object path");
             assert!(!is_device(r"\\?\C:\tmp\a.exe"), "a long drive path");
-            assert!(!is_device(r"\\?\UNC\host\share\a.exe"), "a long share path");
+            for share in [
+                r"\\?\UNC\host\share\a.exe",
+                r"\\host\share\a.exe",
+                "//host/share/a.exe",
+                r"\\?\unc\host\share\a.pdb",
+            ] {
+                let why = unusable_path(std::path::Path::new(share));
+                assert!(
+                    why.as_deref()
+                        .is_some_and(|w| w.contains("names a network share")),
+                    "{share}: {why:?}"
+                );
+                let refused = Program::load(std::path::Path::new(share))
+                    .expect_err("a share is never opened");
+                assert!(refused.to_string().contains("network share"), "{refused}");
+            }
             assert!(
                 !is_device(r"\\.\C:\tmp\a.exe"),
                 "a drive path in the device space"
