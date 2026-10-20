@@ -1,0 +1,33 @@
+# Fuzz targets for the loaders and the analysis, run by cargo-fuzz:
+#   cargo +nightly fuzz run load -- -max_total_time=60
+# Outside the main workspace: libFuzzer needs a nightly toolchain and its
+# own instrumented build, which the gate's builds must not share.
+[package]
+name = "borer-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+borer-engine = { path = "../crates/borer-engine" }
+
+[[bin]]
+name = "load"
+path = "fuzz_targets/load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "analyze"
+path = "fuzz_targets/analyze.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
