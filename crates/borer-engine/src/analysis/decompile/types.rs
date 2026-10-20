@@ -359,7 +359,9 @@ pub(super) fn result_bindings(
 /// and masks go, as C promotes the declared type the same way. A parameter
 /// the header already declares narrow (`int a2` from an assert, `bool a3`)
 /// keeps its type and loses the casts and masks that agree with it
-/// ([`narrow_type`]). One the body loads or stores through is a pointer
+/// ([`narrow_type`]), and so does one the debug information names
+/// (`int total_stored`) when the type is a signed one, whose casts are
+/// all it drops. One the body loads or stores through is a pointer
 /// ([`pointed_at`]). On a 32-bit target the word after a `double` is the
 /// double's high half, not a parameter ([`drop_high_halves`]).
 ///
@@ -385,7 +387,10 @@ pub(super) fn type_parameters(text: &str, word: &str) -> String {
         .split(['(', ',', ')'])
         .filter_map(|p| {
             let (ty, name) = p.trim().rsplit_once(' ')?;
-            is_param_name(name).then(|| (ty.trim().to_owned(), name.to_owned()))
+            let ty = ty.trim();
+            let named_signed =
+                is_ident(name) && narrow_type(ty).is_some_and(|(_, mask)| mask.is_none());
+            (is_param_name(name) || named_signed).then(|| (ty.to_owned(), name.to_owned()))
         })
         .collect();
     for (declared, param) in params {
@@ -4935,3 +4940,28 @@ mod signed_read_tests {
     }
 }
 
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod named_parameter_tests {
+    use super::type_parameters;
+
+    /// A parameter the debug information names with a signed type drops
+    /// the casts that type makes redundant, as an `aN` one does.
+    #[test]
+    fn a_named_signed_parameter_drops_its_casts() {
+        let text = [
+            "// signature: uint32_t f(int total, unsigned int mask)",
+            "",
+            "return ((int64_t)(int32_t)total >> 5) + (int32_t)total / 3 + (mask & 0xffffffff);",
+        ]
+        .join("\n");
+        let out = type_parameters(&text, "uint64_t");
+        assert!(
+            out.contains("return (total >> 5) + total / 3 + (mask & 0xffffffff);"),
+            "{out}"
+        );
+    }
+}
