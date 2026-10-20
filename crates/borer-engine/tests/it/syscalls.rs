@@ -13,6 +13,7 @@
 )]
 
 use crate::elfgen::{self, AX, EM_X86_64, ET_EXEC, PROGBITS, Sec};
+use borer_engine::analysis::decompile::{checked_header, decompile};
 use borer_engine::analysis::render::{capability_map_tsv, disasm_function, function_summary};
 use borer_engine::analysis::syscalls::{Gate, syscall_sites};
 use borer_engine::analysis::{Analysis, Overlay};
@@ -182,4 +183,30 @@ fn int_0x80_and_svc_are_tagged_by_their_tables() {
             (0x100c, Gate::Svc, Some(203), Some("connect")),
         ]
     );
+}
+
+/// A Linux `syscall` decompiles as the call its number names, with the
+/// arguments the C library's function of that name takes, from the
+/// registers the kernel reads them from.
+///
+/// The kernel leaves the argument registers alone, so `connect` and
+/// `execve` still read the `1` and `0` set for `socket`, and both read the
+/// descriptor `socket` returned. A number copied from `edi` is named by no
+/// table and stays the C library's `syscall(nr, ...)`.
+#[test]
+fn syscalls_decompile_as_the_calls_they_name() {
+    let p = static_x64();
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), 0x1000).expect("the entry decompiles");
+    assert!(
+        out.contains("s = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);"),
+        "{out}"
+    );
+    assert!(out.contains("connect(s, 1, 0);"), "{out}");
+    assert!(out.contains("execve(FileName, 1, NULL);"), "{out}");
+    assert!(out.contains("return syscall(FileName);"), "{out}");
+    assert!(!out.contains("undeclared"), "{out}");
+    let header = checked_header(&p, &a, &Overlay::default(), 0x1000).unwrap_or_default();
+    assert!(header.contains("checked vs binary"), "{header}");
+    assert!(!header.contains("differ"), "{header}");
 }

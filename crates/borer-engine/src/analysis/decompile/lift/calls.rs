@@ -28,15 +28,6 @@ impl<'a> Exec<'_, 'a> {
         self.ctx.conv.slot(r).map(|_| r)
     }
 
-    /// Renders the known argument values of a call positionally.
-    ///
-    /// A register never written in this function is one of our own
-    /// parameters when it was detected as such; the list stops at the first
-    /// unknown register so partial lists stay positionally honest.
-    pub(super) fn args(&mut self) -> Vec<String> {
-        self.args_for(None).0
-    }
-
     /// Renders the register arguments of a call to `target`.
     ///
     /// A callee whose arity is known gets that many: an import's prototype
@@ -1933,6 +1924,10 @@ impl<'a> Exec<'_, 'a> {
         next: Option<&Instruction>,
         rest: &[Instruction],
     ) {
+        if instr.mnemonic() == Mnemonic::Syscall {
+            self.kernel_call(KernelGate::Syscall);
+            return;
+        }
         let direct = self.direct_target(instr);
         let noreturn = next.is_none();
         if let Some(t) = direct
@@ -2491,6 +2486,83 @@ impl<'a> Exec<'_, 'a> {
             }
             self.env.sp = Some(sp + popped);
         }
+    }
+
+    /// Lifts a call into the kernel as the call it names.
+    ///
+    /// On Linux the number in `eax` names the call, by the table of the
+    /// entry used ([`crate::emulate::linux_syscall_name`] for `syscall`,
+    /// [`crate::analysis::syscalls::i386_syscall_name`] for `int 0x80`),
+    /// and the call reads its arguments from the entry's registers: `rdi`,
+    /// `rsi`, `rdx`, `r10`, `r8`, `r9` for `syscall`, `ebx`, `ecx`, `edx`,
+    /// `esi`, `edi`, `ebp` for `int 0x80`. A named call takes as many as
+    /// the C library's function of that name declares, so `mov eax, 1;
+    /// syscall` is `rax = write(rdi, rsi, rdx);`. A number no table names,
+    /// or one the block does not set, is the C library's `syscall(nr,
+    /// ...)` with the registers set since the last call. The result is in
+    /// `rax`. The kernel leaves the argument registers as they were, so
+    /// they are the call's preserved registers ([`Exec::preserved`]); any
+    /// other volatile value is forgotten, as after any call.
+    ///
+    /// # Arguments
+    ///
+    /// * `gate` - How the kernel is entered.
+    pub(super) fn kernel_call(&mut self, gate: KernelGate) {
+        const INT80_ARGS: [Register; 6] = [
+            Register::EBX,
+            Register::ECX,
+            Register::EDX,
+            Register::ESI,
+            Register::EDI,
+            Register::EBP,
+        ];
+        let regs = match gate {
+            KernelGate::Syscall => &SYSCALL_ARGS,
+            KernelGate::Int80 => &INT80_ARGS,
+        };
+        let raxk = self.canon(self.rax());
+        let nr = match self.env.vals.get(&raxk) {
+            Some(Expr::Const(n)) => Some(*n),
+            _ => None,
+        };
+        let linux = self.ctx.program.format == BinaryFormat::Elf;
+        let name = nr.filter(|_| linux).and_then(|n| match gate {
+            KernelGate::Syscall => crate::emulate::linux_syscall_name(n),
+            KernelGate::Int80 => crate::analysis::syscalls::i386_syscall_name(n),
+        });
+        let arity = name
+            .and_then(|n| crate::analysis::typelib::declared(n, BinaryFormat::Elf))
+            .map(|d| d.params.len());
+        let n = self.names();
+        let mut args = Vec::new();
+        let mut values = Vec::new();
+        if name.is_none() {
+            args.push(self.reg_read(self.rax()).render(&n));
+        }
+        for (i, r) in regs.iter().enumerate() {
+            let k = self.canon(*r);
+            let value = match arity {
+                Some(a) if i < a => self.reg_read(*r),
+                Some(_) => break,
+                None if self.env.fresh.contains(&k) => self.reg_read(*r),
+                None => break,
+            };
+            args.push(value.render(&n));
+            if self.emit {
+                values.push((ArgAt::Reg(*r), value));
+            }
+        }
+        self.preserved = regs.iter().map(|r| self.canon(*r)).collect();
+        self.before_call(Some(0), false, 0, &values, &[]);
+        self.enter_call(false, &[]);
+        self.declare(raxk, self.word_ty());
+        let callee = name.unwrap_or("syscall");
+        let shown = n.key(raxk);
+        emit_line!(self, format!("{shown} = {callee}({});", args.join(", ")));
+        self.record(EffectKind::Unmodeled);
+        self.after_call(false);
+        self.preserved.clear();
+        self.env.result_in_rax = true;
     }
 
     /// Empties the x87 stack, as a call made with it empty leaves it.
@@ -3167,4 +3239,53 @@ fn format_wide(ty: &str) -> Option<bool> {
         ("wchar_t" | "WCHAR", 1) | ("LPCWSTR" | "LPWSTR" | "PCWSTR" | "PWSTR", 0) => Some(true),
         _ => None,
     }
+}
+
+/// The registers x86-64 Linux `syscall` takes its arguments from, in order.
+const SYSCALL_ARGS: [Register; 6] = [
+    Register::RDI,
+    Register::RSI,
+    Register::RDX,
+    Register::R10,
+    Register::R8,
+    Register::R9,
+];
+
+/// Returns the argument registers a Linux `syscall` reads.
+///
+/// They are known when its block sets a number the table names and the C
+/// library declares a function of that name: `mov eax, 1; syscall` reads
+/// `rdi`, `rsi` and `rdx` for `write`.
+///
+/// # Arguments
+///
+/// * `ctx` - The program and its analysis.
+/// * `instr` - The `syscall`.
+///
+/// # Returns
+///
+/// The registers in argument order; none for a number not named, or one
+/// its block does not set.
+pub(in crate::analysis::decompile) fn kernel_reads(
+    ctx: &Ctx<'_>,
+    instr: &Instruction,
+) -> Vec<Register> {
+    let sites = crate::analysis::syscalls::syscall_sites(ctx.program, ctx.analysis);
+    let arity = sites
+        .binary_search_by_key(&instr.ip(), |s| s.at)
+        .ok()
+        .and_then(|k| sites.get(k)?.name)
+        .and_then(|n| crate::analysis::typelib::declared(n, BinaryFormat::Elf))
+        .map_or(0, |d| d.params.len());
+    SYSCALL_ARGS.iter().copied().take(arity).collect()
+}
+
+/// How a program enters the kernel, which says where the call's number
+/// and arguments are and which table names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KernelGate {
+    /// x86-64 `syscall`: the number in `rax`, the x86-64 table.
+    Syscall,
+    /// `int 0x80`: the number in `eax`, the i386 table.
+    Int80,
 }
