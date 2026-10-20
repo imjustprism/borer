@@ -46,8 +46,8 @@ use super::term::{
     self, EQ, GT, LT, Logic, Point, Pred, Term, UN, float_rel, ite, narrow, not, truth, zero,
 };
 use super::{
-    Bench, Code, End, Function, Replay, Transfer, covering, floating, frame_base, op_width,
-    overwritten_first, value_lane,
+    Bench, Code, End, Function, Replay, Transfer, covering, floating, frame_base,
+    lose_frame_writes, op_width, overwritten_first, value_lane,
 };
 use crate::analysis::BasicBlock;
 use crate::fxmap::{FxHashMap, FxHashSet};
@@ -1860,21 +1860,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             }
         }
 
-        let defs = w.defs.get(b);
-        #[expect(
-            clippy::iter_over_hash_type,
-            reason = "each address is tested alone and inserted into a set"
-        )]
-        for &x in observed {
-            let off = x.wrapping_sub(sp0).cast_signed();
-            let frame = (x.wrapping_sub(rsp).wrapping_add(FRAME_SPAN) & mask) < 2 * FRAME_SPAN;
-            if frame
-                && !pending.contains(&x)
-                && defs.is_none_or(|d| covering(d, off).next().is_none())
-            {
-                text.lost.insert(x);
-            }
-        }
+        let frame = (sp0, rsp, mask);
+        let pending_at = |x: &u64| pending.contains(x);
+        lose_frame_writes(observed, w.defs.get(b), pending_at, frame, &mut text.lost);
         let none = BTreeSet::new();
         let mut machine = self.machine(code, end, rsp, &regs, &overlay, &text.lost, &none)?;
         if !machine.written.iter().all(|x| observed.contains(x)) {

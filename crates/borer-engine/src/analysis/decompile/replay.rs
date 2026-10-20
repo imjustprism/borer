@@ -1331,6 +1331,38 @@ fn named_slots(effects: &[Vec<Effect>], word: u64) -> BTreeMap<i64, u64> {
     out
 }
 
+/// Marks lost the frame bytes a run wrote that the text holds no value
+/// for: none pending from the block's start, and no store of the block
+/// covering them.
+///
+/// # Arguments
+///
+/// * `written` - The bytes the machine wrote.
+/// * `defs` - The block's stores, each with its widest width in bits.
+/// * `pending` - Whether a byte's value is pending from the block's start.
+/// * `frame` - The stack pointer at the function's entry and at the
+///   block's start, and the address mask.
+/// * `lost` - Collects the bytes lost.
+fn lose_frame_writes(
+    written: &FxHashSet<u64>,
+    defs: Option<&BTreeMap<i64, u8>>,
+    pending: impl Fn(&u64) -> bool,
+    (sp0, rsp, mask): (u64, u64, u64),
+    lost: &mut impl Extend<u64>,
+) {
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "each address is tested alone and inserted into a set"
+    )]
+    for &x in written {
+        let off = x.wrapping_sub(sp0).cast_signed();
+        let frame = (x.wrapping_sub(rsp).wrapping_add(FRAME_SPAN) & mask) < 2 * FRAME_SPAN;
+        if frame && !pending(&x) && defs.is_none_or(|d| covering(d, off).next().is_none()) {
+            lost.extend([x]);
+        }
+    }
+}
+
 /// The stores of a block whose bytes cover the frame byte at `off`, by
 /// their offsets.
 ///
@@ -3530,21 +3562,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
         let written: FxHashSet<u64> = run.history.iter().map(|x| x.addr).collect();
         text.rsp = emu.register(<L::Rig<'p> as Bench>::SP);
-        let defs = w.defs.get(b);
-        #[expect(
-            clippy::iter_over_hash_type,
-            reason = "each address is tested alone and inserted into a set"
-        )]
-        for &x in &written {
-            let off = x.wrapping_sub(sp0).cast_signed();
-            let frame = (x.wrapping_sub(rsp).wrapping_add(FRAME_SPAN) & mask) < 2 * FRAME_SPAN;
-            if frame
-                && !pending.contains(&x)
-                && defs.is_none_or(|d| covering(d, off).next().is_none())
-            {
-                text.lost.insert(x);
-            }
-        }
+        let frame = (sp0, rsp, mask);
+        let pending_at = |x: &u64| pending.contains(x);
+        lose_frame_writes(&written, w.defs.get(b), pending_at, frame, &mut text.lost);
         let taken = Self::taken(&emu, end);
         let mut t = Trial {
             emu,
