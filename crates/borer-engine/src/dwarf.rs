@@ -924,6 +924,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
         let mut by_offset: BTreeMap<u64, String> = BTreeMap::new();
         let mut depth: Vec<bool> = Vec::new();
         let mut open: Vec<usize> = Vec::new();
+        let mut open_level: Vec<usize> = Vec::new();
         let mut bases: Vec<Option<FrameBase>> = Vec::new();
         let mut pending: Vec<(u64, u64)> = Vec::new();
         let mut stated: Vec<Stated> = Vec::new();
@@ -938,6 +939,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             if code == 0 {
                 if depth.pop() == Some(true) {
                     open.pop();
+                    open_level.pop();
                 }
                 type_scopes.pop();
                 continue;
@@ -1010,6 +1012,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 match (&entry.name, entry.origin) {
                     (Some(name), _) => {
                         open.push(out.len());
+                        open_level.push(depth.len());
                         unresolved.push((out.len(), absolute(entry.type_ref)));
                         bases.push(
                             entry.frame_base.as_deref().and_then(|expr| {
@@ -1029,6 +1032,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 }
             } else if abbreviation.tag == TAG_FORMAL_PARAMETER
                 && let Some(name) = entry.name.clone()
+                && open_level.last().is_some_and(|l| l + 1 == depth.len())
                 && let Some(owner) = open.last().copied()
                 && let Some(f) = out.get_mut(owner)
             {
@@ -1297,6 +1301,40 @@ mod tests {
             .map(|p| p.name.as_str())
             .collect();
         assert_eq!(names, vec!["argc", "argv"]);
+    }
+
+    /// The parameters of a call inlined into a function are the inlined
+    /// callee's, not the function's: `sgr_dbname` took none, and the
+    /// `__dest` of the `memcpy` inlined into it read as its parameter.
+    #[test]
+    fn an_inlined_call_s_parameters_are_not_the_function_s() {
+        let mut abbrev = abbrev();
+        abbrev.pop();
+        abbrev.extend_from_slice(&[0x03, 0x1d, 0x01, 0x00, 0x00, 0x00]);
+        let mut dies: Vec<u8> = Vec::new();
+        dies.push(0x01);
+        dies.extend_from_slice(b"f\0");
+        dies.extend_from_slice(&0x1000u64.to_le_bytes());
+        dies.push(0x02);
+        dies.extend_from_slice(b"argc\0");
+        dies.push(0x03);
+        dies.push(0x02);
+        dies.extend_from_slice(b"__dest\0");
+        dies.push(0x00);
+        dies.push(0x00);
+        let info = unit(&dies);
+        let strings = Strings {
+            text: &[],
+            lines: &[],
+        };
+        let found = read_in(&info, &abbrev, &strings).subprograms;
+        assert_eq!(found.len(), 1, "{found:?}");
+        let names: Vec<&str> = found[0]
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["argc"]);
     }
 
     /// A name held in `.debug_str` is resolved through the offset.
