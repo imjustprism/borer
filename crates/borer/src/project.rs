@@ -92,6 +92,10 @@ fn by_hex(map: &BTreeMap<u64, String>) -> BTreeMap<String, String> {
 /// Most keys a refusal of unreadable keys names before it counts the rest.
 const BAD_KEYS_SHOWN: usize = 8;
 
+/// Largest project file read, in bytes: past any overlay the caps on names,
+/// comments, types and prototypes let a session hold.
+const PROJECT_MAX: u64 = 1 << 26;
+
 /// Reads a table's address keys, refusing any key that is not an address.
 ///
 /// A key reads as an address argument does
@@ -415,14 +419,13 @@ impl ProjectFile {
     ///
     /// # Errors
     ///
-    /// When the file cannot be read or is not a valid project file.
+    /// When the path is a device, a share or not a regular file, the file
+    /// is past [`PROJECT_MAX`] bytes or cannot be read, or it is not a valid
+    /// project file.
     pub fn load(path: &str) -> Result<ProjectFile, String> {
-        if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
-            return Err(why);
-        }
         let shown = borer_engine::text::short_path(path);
-        let text =
-            std::fs::read_to_string(Path::new(path)).map_err(|e| format!("read {shown}: {e}"))?;
-        serde_json::from_str(&text).map_err(|e| format!("parse {shown}: {e}"))
+        let bytes = borer_engine::program::read_regular(Path::new(path), PROJECT_MAX)
+            .map_err(|e| format!("{e:#}"))?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse {shown}: {e}"))
     }
 }

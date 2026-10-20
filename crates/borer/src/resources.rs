@@ -100,6 +100,10 @@ fn file_label(path: &Path) -> String {
     )
 }
 
+/// Largest text file a resource reads, in bytes: a script, a manifest or
+/// a fingerprint sidecar is text an agent wrote or borer did.
+const SPEC_FILE_MAX: u64 = 1 << 24;
+
 /// Reads a file a resource names, refusing a device and naming the file in
 /// any failure.
 ///
@@ -110,17 +114,16 @@ fn file_label(path: &Path) -> String {
 ///
 /// # Errors
 ///
-/// When the path is a device or the file does not read.
+/// When the path is a device, a share or not a regular file, the file is
+/// past [`SPEC_FILE_MAX`] bytes, does not read, or is not text.
 fn read_spec_file(path: &str, kind: &str) -> Result<String, ErrorData> {
-    if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
-        return Err(err_params(format!("{why}; give a path to {kind}")));
-    }
-    let short = borer_engine::text::short_path(path);
-    std::fs::read_to_string(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::InvalidData => {
-            err_params(format!("{short} is not a text file; give a path to {kind}"))
-        }
-        _ => err_params(format!("reading {short}: {e}")),
+    let bytes = borer_engine::program::read_regular(Path::new(path), SPEC_FILE_MAX)
+        .map_err(|e| err_params(format!("{e:#}; give a path to {kind}")))?;
+    String::from_utf8(bytes).map_err(|_| {
+        err_params(format!(
+            "{} is not a text file; give a path to {kind}",
+            borer_engine::text::short_path(path)
+        ))
     })
 }
 
@@ -505,7 +508,8 @@ impl BorerServer {
                 "{why}; give a path to a program or a fingerprint sidecar"
             )));
         }
-        if let Ok(text) = std::fs::read_to_string(other)
+        if let Ok(bytes) = borer_engine::program::read_regular(Path::new(other), SPEC_FILE_MAX)
+            && let Ok(text) = String::from_utf8(bytes)
             && text.starts_with("# borer fingerprint")
         {
             let old_prints = render::parse_prints(&text);

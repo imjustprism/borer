@@ -201,27 +201,70 @@ pub fn unusable_path(path: &Path) -> Option<String> {
 /// that is a device, a directory or anything else that is not a regular
 /// file.
 fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    read_regular(path, u64::MAX).map_err(|e| anyhow!("{e:#}; give a path to a program to analyze"))
+}
+
+/// Reads a file whole when it is a regular one no larger than a cap.
+///
+/// The path is judged before it is opened: on Linux and macOS opening a
+/// pipe blocks until a writer comes and a device such as `/dev/zero`
+/// reads forever, so what is not a regular file is refused by its
+/// metadata, and the open file is judged again in case the name changed
+/// in between. The read itself stops one byte past the cap.
+///
+/// # Arguments
+///
+/// * `path` - The file.
+/// * `max` - Most bytes it may hold.
+///
+/// # Returns
+///
+/// The file's bytes.
+///
+/// # Errors
+///
+/// When the path is unusable ([`unusable_path`]), is a directory, a
+/// device, a pipe or anything else that is not a regular file, holds more
+/// than `max` bytes, or does not read.
+pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
     if let Some(why) = unusable_path(path) {
-        return Err(anyhow!("{why}; give a path to a program to analyze"));
+        return Err(anyhow!("{why}"));
     }
     let shown = crate::text::short_path(&path.display().to_string());
-    if path.is_dir() {
-        return Err(anyhow!(
-            "{shown} is a directory; give the path of a program file inside it"
-        ));
-    }
-    let mut file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
-    let meta = file
-        .metadata()
-        .with_context(|| format!("reading {shown}"))?;
-    if !meta.is_file() {
-        return Err(anyhow!(
-            "{shown} is not a regular file (a device or a pipe); give a path to a program to analyze"
-        ));
-    }
+    let judge = |meta: &std::fs::Metadata| {
+        if meta.is_dir() {
+            Err(anyhow!(
+                "{shown} is a directory; give the path of a file inside it"
+            ))
+        } else if !meta.is_file() {
+            Err(anyhow!(
+                "{shown} is not a regular file (a device or a pipe)"
+            ))
+        } else if meta.len() > max {
+            Err(anyhow!(
+                "{shown} is {} bytes, past the {max} it may hold",
+                meta.len()
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    judge(&std::fs::metadata(path).with_context(|| format!("reading {shown}"))?)?;
+    let file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
+    judge(
+        &file
+            .metadata()
+            .with_context(|| format!("reading {shown}"))?,
+    )?;
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut file, &mut bytes)
-        .with_context(|| format!("reading {shown}"))?;
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, max.saturating_add(1)),
+        &mut bytes,
+    )
+    .with_context(|| format!("reading {shown}"))?;
+    if from_usize(bytes.len()) > max {
+        return Err(anyhow!("{shown} grew past the {max} bytes it may hold"));
+    }
     Ok(bytes)
 }
 

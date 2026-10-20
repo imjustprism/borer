@@ -20,7 +20,7 @@ mod arm;
 pub(crate) mod file;
 pub(crate) mod pe;
 
-pub use file::{Parent, unusable_path};
+pub use file::{Parent, read_regular, unusable_path};
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
     DIRECTORY_ENTRY, SANE_MAX, arm64_pdata, delay_imports, directory_entry, disarm_exports,
@@ -2279,6 +2279,50 @@ mod tests {
         assert!(!is_device("com10"), "nor a two-digit port");
         assert!(!is_device("borer.exe"));
         assert!(unusable_path(std::path::Path::new("")).is_some());
+    }
+
+    /// A read by path takes only a regular file within its cap, judged
+    /// before it is opened, so a pipe or a device never blocks or reads
+    /// forever.
+    ///
+    /// # Panics
+    ///
+    /// When a directory, a device, a pipe or an oversized file is read.
+    #[test]
+    fn a_read_takes_only_a_regular_file_within_its_cap() {
+        use super::read_regular;
+        let dir = std::env::temp_dir().join(format!("borer-regular-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let file = dir.join("ten.txt");
+        std::fs::write(&file, b"0123456789").expect("written");
+        assert_eq!(
+            read_regular(&file, 10).expect("within the cap"),
+            b"0123456789"
+        );
+        let over = read_regular(&file, 9).expect_err("past the cap");
+        assert!(over.to_string().contains("past the 9"), "{over}");
+        let isdir = read_regular(&dir, u64::MAX).expect_err("a directory");
+        assert!(isdir.to_string().contains("is a directory"), "{isdir}");
+        #[cfg(unix)]
+        {
+            let device =
+                read_regular(std::path::Path::new("/dev/zero"), u64::MAX).expect_err("a device");
+            assert!(
+                device.to_string().contains("not a regular file"),
+                "{device}"
+            );
+            let fifo = dir.join("pipe");
+            if std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .is_ok_and(|s| s.success())
+            {
+                let pipe = read_regular(&fifo, u64::MAX).expect_err("a pipe");
+                assert!(pipe.to_string().contains("not a regular file"), "{pipe}");
+                assert!(Program::load(&fifo).is_err(), "a pipe is no program");
+            }
+        }
+        std::fs::remove_dir_all(&dir).expect("cleans up");
     }
 
     /// A name out of the file cannot forge a row in a listing.
