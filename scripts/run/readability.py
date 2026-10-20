@@ -1007,8 +1007,11 @@ def compare(rows: dict[str, dict], base: dict[str, dict[str, str]]) -> int:
     Counts are compared as counts while the sample holds the same functions,
     so deleting noise lines moves only the metrics it should; when the
     sample changed they are compared per 100 body lines. An input whose
-    digest differs from the baseline's is not compared: the binary changed,
-    not the decompiler.
+    digest differs from the baseline's (a system DLL another Windows build
+    ships) is compared per 100 body lines and printed, but does not fail
+    the run: the binary changed as well as the decompiler, so a move is
+    not the decompiler's alone. Such a move beyond tolerance is marked
+    `WORSE (other input)`.
     """
     worse = 0
     for tag, row in rows.items():
@@ -1016,12 +1019,15 @@ def compare(rows: dict[str, dict], base: dict[str, dict[str, str]]) -> int:
         if old is None:
             print(f"{tag}: no baseline row (run with --update)")
             continue
-        if old.get("input") != row["input"]:
-            print(f"{tag}: input changed ({old.get('input')} -> {row['input']}), not compared")
-            continue
+        other = old.get("input") != row["input"]
+        if other:
+            print(
+                f"{tag}: input changed ({old.get('input')} -> {row['input']}): "
+                "compared per 100 body lines, not gated"
+            )
         body_old = max(1.0, float(old.get("body_lines") or 1))
         body_new = max(1, row["body_lines"])
-        same = str(row["functions"]) == old.get("functions")
+        same = not other and str(row["functions"]) == old.get("functions")
         print(
             f"{tag}: {old.get('functions')} -> {row['functions']} functions, "
             f"{old.get('body_lines')} -> {row['body_lines']} body lines"
@@ -1041,8 +1047,10 @@ def compare(rows: dict[str, dict], base: dict[str, dict[str, str]]) -> int:
                 continue
             bad = (v > b) != (k in LOWER_IS_WORSE)
             fail = bad and abs(v - b) > slack(k, b, count and same)
-            worse += fail
+            worse += fail and not other
             mark = "WORSE" if fail else ("worse" if bad else "better")
+            if fail and other:
+                mark += " (other input)"
             print(f"{tag:<12} {k:<34} {b:>9g} -> {v:<9g} {mark}{rate if count and same else ''}")
     return worse
 
