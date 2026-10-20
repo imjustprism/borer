@@ -1125,7 +1125,7 @@ thread_local! {
 /// When another write of the same build already covers any byte of the
 /// span: the message names both writers' source lines.
 #[track_caller]
-#[allow(
+#[expect(
     clippy::panic,
     reason = "a corrupted fixture is worthless; the panic names both writers"
 )]
@@ -1158,6 +1158,10 @@ pub(crate) fn reset_claims() {
 /// For a new fixture to allocate from, instead of hand-picking an address
 /// another fixture may already hold; zero when no build has claimed.
 ///
+#[expect(
+    clippy::allow_attributes,
+    reason = "dead in some test binaries only, where an `expect` would go unfulfilled"
+)]
 #[allow(
     dead_code,
     reason = "the analysis test reads it; the other test binaries build the module whole"

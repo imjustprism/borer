@@ -676,6 +676,10 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
             .copied()
             .filter(|&p| st.functions.iter().any(|f| f.entry == p))
             .collect();
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "each parent's labels go to its own entry"
+        )]
         for (parent, labels) in continuations {
             Arc::make_mut(&mut st.extra_roots)
                 .entry(parent)
@@ -1724,6 +1728,7 @@ fn catch_continuations(program: &Program, functions: &[Function]) -> FxHashMap<u
             }
         }
     }
+    #[expect(clippy::iter_over_hash_type, reason = "each list is sorted on its own")]
     for labels in out.values_mut() {
         dedup_sorted(labels);
     }

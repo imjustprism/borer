@@ -1517,6 +1517,10 @@ pub(in crate::analysis::decompile) fn join_need(
     into: &mut FxHashMap<Key, u8>,
     from: &FxHashMap<Key, u8>,
 ) {
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "a max per key is the same in any order"
+    )]
     for (k, w) in from {
         let e = into.entry(*k).or_insert(0);
         *e = (*e).max(*w);

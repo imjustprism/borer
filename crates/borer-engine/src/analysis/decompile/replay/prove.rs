@@ -1861,6 +1861,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
 
         let defs = w.defs.get(b);
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "each address is tested alone and inserted into a set"
+        )]
         for &x in observed {
             let off = x.wrapping_sub(sp0).cast_signed();
             let frame = (x.wrapping_sub(rsp).wrapping_add(FRAME_SPAN) & mask) < 2 * FRAME_SPAN;

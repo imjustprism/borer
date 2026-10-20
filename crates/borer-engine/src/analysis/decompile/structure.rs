@@ -1955,8 +1955,7 @@ pub(super) fn fold_static(program: &Program, e: &Expr, depth: u8) -> Option<u64>
         Expr::Sext(inner, bits) => {
             let v = fold_static(program, inner, d)?;
             let shift = 64u32.checked_sub(u32::from(*bits)).filter(|s| *s < 64)?;
-            let wide = i64::from_ne_bytes(v.checked_shl(shift)?.to_ne_bytes()) >> shift;
-            Some(u64::from_ne_bytes(wide.to_ne_bytes()))
+            Some((v.checked_shl(shift)?.cast_signed() >> shift).cast_unsigned())
         }
         Expr::Cast(inner, ty) if !matches!(ty, Ty::F32 | Ty::F64) => {
             let v = fold_static(program, inner, d)?;

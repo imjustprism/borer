@@ -924,8 +924,9 @@ mod tests {
     #[test]
     fn the_allocator_commits_pages_on_demand() {
         // SAFETY: mi_version takes nothing.
+        let version = unsafe { mi_version() };
         assert_eq!(
-            unsafe { mi_version() } / 100,
+            version / 100,
             MIMALLOC_3_3,
             "another mimalloc: check the place of mi_option_page_commit_on_demand"
         );

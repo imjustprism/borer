@@ -3873,6 +3873,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let written: FxHashSet<u64> = run.history.iter().map(|x| x.addr).collect();
         text.rsp = emu.register(<L::Rig<'p> as Bench>::SP);
         let defs = w.defs.get(b);
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "each address is tested alone and inserted into a set"
+        )]
         for &x in &written {
             let off = x.wrapping_sub(sp0).cast_signed();
             let frame = (x.wrapping_sub(rsp).wrapping_add(FRAME_SPAN) & mask) < 2 * FRAME_SPAN;

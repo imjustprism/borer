@@ -976,7 +976,13 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            print!("{}", term::welcome());
+            #[expect(
+                clippy::print_stdout,
+                reason = "a terminal on stdin means no protocol client is reading stdout"
+            )]
+            {
+                print!("{}", term::welcome());
+            }
             return Ok(());
         }
         return relay::run();

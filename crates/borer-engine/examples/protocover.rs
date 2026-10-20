@@ -10,6 +10,8 @@
 //! directly or through a thunk that jumps to it. Output lines are
 //! `key=value` pairs so a script can parse them.
 
+#![expect(clippy::print_stdout, reason = "it reports on stdout")]
+
 use std::error::Error;
 
 use borer_engine::analysis::{Analysis, RefKind, sdk, typelib};

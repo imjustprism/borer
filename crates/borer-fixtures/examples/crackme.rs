@@ -3,6 +3,7 @@
 //! A real compiler-emitted serial check that the test suite locates by its
 //! final-comparison constant and verifies structurally after decompilation.
 
+#![expect(clippy::print_stdout, reason = "it reports on stdout")]
 #![expect(
     unsafe_code,
     reason = "`#[unsafe(no_mangle)]` keeps the checked function findable by name"

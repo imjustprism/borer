@@ -13,8 +13,9 @@ keywords = ["reverse-engineering", "decompiler", "disassembler", "mcp", "binary-
 categories = ["development-tools", "parsing"]
 
 # Lint policy for every crate (each crate opts in with `[lints] workspace = true`).
-# Levels are `warn`: the gate runs clippy with `-D warnings`, so a warning is a
-# failure there while `cargo build` stays quiet during development.
+# Style and docs lints are `warn`: the gate runs clippy with `-D warnings`, so
+# they fail there and still let a half-done edit build. Lints that flag a bug
+# (a panic, unsafe, nondeterminism) are `deny` everywhere.
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
@@ -25,6 +26,12 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 trivial_casts = "warn"
 trivial_numeric_casts = "warn"
 unused_lifetimes = "warn"
+non_ascii_idents = "deny"
+unit_bindings = "warn"
+redundant_lifetimes = "warn"
+meta_variable_misuse = "warn"
+unused_import_braces = "warn"
+explicit_outlives_requirements = "warn"
 
 [workspace.lints.rustdoc]
 all = { level = "warn", priority = -1 }
@@ -84,14 +91,33 @@ cast_possible_truncation = "warn"
 cast_sign_loss = "warn"
 cast_possible_wrap = "warn"
 cast_precision_loss = "warn"
-# Errors: engine and server never panic on input (tests may, see clippy.toml)
-unwrap_used = "warn"
-expect_used = "warn"
-panic = "warn"
-todo = "warn"
-unimplemented = "warn"
-unreachable = "warn"
-dbg_macro = "warn"
+# Safety: engine and server never panic on input (tests may, see clippy.toml).
+# These flag bugs, not style, so they are errors even outside the gate.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+dbg_macro = "deny"
+get_unwrap = "deny"
+exit = "deny"
+mem_forget = "deny"
+infinite_loop = "deny"
+large_stack_arrays = "deny"
+large_stack_frames = "deny"
+fn_to_numeric_cast_any = "deny"
+float_cmp_const = "deny"
+suspicious_xor_used_as_pow = "deny"
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+# stdout belongs to the MCP protocol; the CLI's one print says why
+print_stdout = "deny"
+# Determinism and portability: no answer depends on hash order or host endianness
+iter_over_hash_type = "deny"
+host_endian_bytes = "deny"
 # Idioms: the small, always-right idioms
 redundant_clone = "warn"
 needless_pass_by_value = "warn"
