@@ -973,6 +973,10 @@ fn main() -> anyhow::Result<()> {
         let resume = std::env::var_os(relay::RESUME).map(PathBuf::from);
         return tokio::runtime::Runtime::new()?.block_on(serve(PathBuf::from(state), resume));
     }
+    if std::env::var_os(update::REFRESH).is_some() {
+        update::refresh();
+        return Ok(());
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -983,18 +987,21 @@ fn main() -> anyhow::Result<()> {
             {
                 print!("{}", term::welcome());
             }
+            if let Some(line) = update::check() {
+                eprintln!("{line}");
+            }
             return Ok(());
         }
         return relay::run();
     }
     end_quietly_when_stdout_closes();
-    let check = (args.first().map(String::as_str) != Some("update"))
-        .then(update::start_check)
+    let notice = (args.first().map(String::as_str) != Some("update"))
+        .then(update::check)
         .flatten();
     let result = cli::cli(&args);
     term::flush();
     result?;
-    if let Some(line) = check.and_then(update::notice) {
+    if let Some(line) = notice {
         eprintln!("{line}");
     }
     Ok(())

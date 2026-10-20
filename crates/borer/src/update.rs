@@ -7,10 +7,11 @@
 //! aside first (Windows lets a running executable be renamed, not
 //! overwritten), elsewhere by renaming the new file over it.
 //!
-//! The notice is a once-a-day check that a command line run makes in the
-//! background: its answer is kept in the cache, and a newer release is
-//! named on stderr after the command's own output. It never delays a
-//! command and never runs for the MCP server. `BORER_NO_UPDATE_CHECK=1`
+//! The notice is a once-a-day check that a command line run starts as a
+//! detached copy of this binary: its answer is kept in the cache, and a
+//! newer release the cache names is printed on stderr after the command's
+//! own output. It never delays a command and never runs for the MCP
+//! server. `BORER_NO_UPDATE_CHECK=1`
 //! turns it off, and it is skipped where nobody reads the notice: with `CI`
 //! set, or stderr not a terminal (a script, a pipe).
 //!
@@ -364,13 +365,24 @@ fn check_wanted(opt_out: Option<&str>, ci: bool, terminal: bool) -> bool {
     opt_out != Some("1") && !ci && terminal
 }
 
-/// Starts the daily check for a command line run, in the background.
+/// The environment variable that starts this binary as the daily check
+/// ([`refresh`]) instead of a command.
+pub(crate) const REFRESH: &str = "BORER_UPDATE_REFRESH";
+
+/// The daily check for a command line run.
+///
+/// The last kept answer is read now, so the notice costs a file read. When
+/// that answer is older than a day, or there is none, a detached copy of
+/// this binary ([`REFRESH`]) asks GitHub and keeps the answer for the next
+/// run: a thread would die with a quick command before the answer came
+/// back, and the command never waits for it.
 ///
 /// # Returns
 ///
-/// A handle that [`notice`] reads once the command is done, or `None`
-/// when the check is turned off or nobody would read it ([`check_wanted`]).
-pub(crate) fn start_check() -> Option<std::thread::JoinHandle<Option<String>>> {
+/// The line to print after the command when a newer release is out, or
+/// `None` when this build is current, nothing is known yet, or the check
+/// is turned off or nobody would read it ([`check_wanted`]).
+pub(crate) fn check() -> Option<String> {
     let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
     if !check_wanted(
         std::env::var(OPT_OUT).ok().as_deref(),
@@ -379,37 +391,49 @@ pub(crate) fn start_check() -> Option<std::thread::JoinHandle<Option<String>>> {
     ) {
         return None;
     }
-    Some(std::thread::spawn(|| {
-        if let Some((tag, true)) = recalled() {
-            return Some(tag);
-        }
-        let tag = latest_tag(4).ok()?;
-        remember(&tag);
-        Some(tag)
-    }))
-}
-
-/// The line to print after a command when a newer release is out.
-///
-/// It waits for nothing: a check still running is left to finish on its
-/// own, and its answer is kept for the next run.
-///
-/// # Arguments
-///
-/// * `check` - The handle [`start_check`] returned.
-///
-/// # Returns
-///
-/// The notice, or `None` when this build is current or the answer is not in.
-pub(crate) fn notice(check: std::thread::JoinHandle<Option<String>>) -> Option<String> {
-    if !check.is_finished() {
-        return None;
+    let kept = recalled();
+    if !kept.as_ref().is_some_and(|(_, fresh)| *fresh) {
+        spawn_refresh();
     }
-    let tag = check.join().ok()??;
+    let (tag, _) = kept?;
     is_newer(&tag).then(|| {
         let shown = tag.trim_start_matches('v');
         format!("borer {shown} is out (this is {VERSION}); run `borer update`")
     })
+}
+
+/// Starts this binary again as the daily check, detached from the command:
+/// no standard handles shared, and on Windows no console window.
+fn spawn_refresh() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.env(REFRESH, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        /// `CREATE_NO_WINDOW`: a console of its own that never shows.
+        const NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(NO_WINDOW);
+    }
+    let _ = cmd.spawn();
+}
+
+/// The daily check itself, run by the detached copy [`spawn_refresh`]
+/// starts: asks GitHub for the latest tag and keeps it.
+///
+/// A failed check keeps the last known tag with the new time, so an
+/// offline machine asks once a day, not on every command.
+pub(crate) fn refresh() {
+    let tag = latest_tag(15)
+        .ok()
+        .or_else(|| recalled().map(|(tag, _)| tag))
+        .unwrap_or_else(|| "none".to_owned());
+    remember(&tag);
 }
 
 #[cfg(test)]
