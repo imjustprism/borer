@@ -499,6 +499,11 @@ pub(super) enum Item {
     /// declarations; `extern`, `static inline` and `#define` open the
     /// unit's lines.
     Alias(CTy, Name),
+    /// `#define N v`: a constant a library's headers name, its value.
+    Constant(Name, u64),
+    /// `#define nullptr ((void *)0)`: C23's null pointer constant, for a
+    /// reader whose C is older.
+    Nullptr,
     /// `extern T x;`: a data object defined outside the unit.
     Data(CTy, Name),
     /// `extern T f(P);`: a function defined outside the unit.

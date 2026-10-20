@@ -9,8 +9,9 @@
 //! name once, in a fixed order:
 //!
 //! - a definition for each C library type name the text or its signature
-//!   spells (`FILE`, `time_t`), and an `extern` for each C library data
-//!   object it reads (`stderr`, `optind`), from the type library
+//!   spells (`FILE`, `time_t`), a `#define` for each constant it names
+//!   (`SIGALRM`), and an `extern` for each C library data object it
+//!   reads (`stderr`, `optind`), from the type library
 //!   ([`crate::analysis::typelib::data_type`]);
 //! - a prototype, `extern uint64_t h_is_odd(uint64_t);`, for each function
 //!   the binary exports, from its ABI facts alone
@@ -280,10 +281,13 @@ pub(super) fn close(
     out
 }
 
-/// Returns the C library's type names and data objects a text uses that
-/// it does not declare: a definition for each type name the library's
-/// headers define ([`Item::Alias`]), then an `extern` for each object the
-/// library exports (`extern FILE* stderr;`).
+/// Returns the C library's type names, constants and data objects a text
+/// uses that it does not declare: a definition for each type name the
+/// library's headers define ([`Item::Alias`]), C23's `nullptr` for an
+/// older C ([`Item::Nullptr`]), a `#define` for each constant the type
+/// library names by value (`SIGALRM`, `O_RDWR`), then
+/// an `extern` for each object the library exports
+/// (`extern FILE* stderr;`).
 ///
 /// The signature line counts as code here: a reader compiles it as the
 /// function's prototype, so a `FILE *stream` parameter needs `FILE`.
@@ -298,7 +302,8 @@ pub(super) fn close(
 ///
 /// # Returns
 ///
-/// The type names first, in order of first use, then the objects.
+/// The type names first, in order of first use, then the constants, then
+/// the objects.
 fn library_items(
     text: &str,
     format: crate::program::BinaryFormat,
@@ -339,6 +344,17 @@ fn library_items(
                 .map(|t| Item::Alias(CTy::parse(t), Name::of(w)))
         })
         .collect();
+    if used.iter().any(|w| w == "nullptr") {
+        items.push(Item::Nullptr);
+    }
+    items.extend(
+        used.iter()
+            .filter(|w| !declared.contains(w) && !w.contains(|c: char| c.is_ascii_lowercase()))
+            .filter_map(|w| {
+                crate::analysis::typelib::value_of(w, format)
+                    .map(|v| Item::Constant(Name::of(w), v))
+            }),
+    );
     items.extend(
         objects
             .into_iter()
@@ -964,6 +980,34 @@ mod tests {
             "#define FILE struct _IO_FILE\n#define time_t long\nextern FILE* stderr;\n"
         );
         assert!(library_items(text, BinaryFormat::Pe, &ix, "f", &BTreeMap::new()).is_empty());
+    }
+
+    /// A constant the type library names in the text is defined by its
+    /// value on the binary's platform, and `nullptr` for a C before C23.
+    ///
+    /// # Panics
+    ///
+    /// When a constant is left undefined or given the other platform's
+    /// value.
+    #[test]
+    fn the_library_s_constants_are_defined() {
+        let text = "// signature: int f(char *a1)\n\
+                    \n\
+                    if (a1 == nullptr) {\n  signal(SIGALRM, 0);\n}\n\
+                    return open(a1, O_RDWR);\n";
+        let mut out = String::new();
+        let items = library_items(
+            text,
+            BinaryFormat::Elf,
+            &Index::default(),
+            "f",
+            &BTreeMap::new(),
+        );
+        cir::print_items(&items, &mut out);
+        assert_eq!(
+            out,
+            "#define nullptr ((void *)0)\n#define SIGALRM 14\n#define O_RDWR 2\n"
+        );
     }
 
     /// A call's arguments are counted at its own depth.

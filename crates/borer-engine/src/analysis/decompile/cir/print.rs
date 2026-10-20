@@ -68,6 +68,15 @@ pub(in crate::analysis::decompile) fn print_items(items: &[Item], out: &mut Stri
                 let _ = write!(out, "#define {} ", name.as_str());
                 ty(t, out);
             }
+            Item::Constant(name, v) => {
+                let value = super::super::expr_render::render_const(*v, false);
+                if value.starts_with('-') {
+                    let _ = write!(out, "#define {} ({value})", name.as_str());
+                } else {
+                    let _ = write!(out, "#define {} {value}", name.as_str());
+                }
+            }
+            Item::Nullptr => out.push_str("#define nullptr ((void *)0)"),
             Item::Data(t, name) => {
                 out.push_str("extern ");
                 ty(t, out);
