@@ -31,7 +31,7 @@ critical:
   - 'Commit titles: `type: summary`, lowercase, imperative, plain ASCII, at most 72 characters, no scope, no period; only Co-Authored-By trailers below. Types: add, fix, improve, refactor, perf, docs, test, chore, revert (scripts/check/commits.py).'
   - One commit, one concern, green at every commit. Never commit build output, packs or ignored files.
   gate:
-  - '`python scripts/gate.py` is the termination test; green before every commit, or say gate not run. CI runs `--check`; `--fast` skips the slow tail; passed steps are cached; one gate runs per machine.'
+  - '`python scripts/gate.py` is the termination test; green before every commit, or say gate not run. CI runs `--check --fast` on dev and its pull requests, the full `--check` on a pull request into main, a push to main and a manual run; `--fast` skips the slow tail; passed steps are cached; one gate runs per machine.'
   - Never silence a lint. Fix it, or put `#[expect(lint, reason = "...")]` on the one site; `#[allow]` is denied (allow_attributes).
   - 'Lint levels live in Cargo.toml [workspace.lints]: lints that flag a bug deny, style warn (an error under the gate''s -D warnings). Tool settings live in clippy.toml, rustfmt.toml, deny.toml, typos.toml, ruff.toml, .jscpd.json and .editorconfig.'
   - 'Builds and borer processes are heavy: at most two borer processes per task, many functions through one process (decompile_batch), one build at a time.'
