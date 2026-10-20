@@ -906,6 +906,7 @@ fn unit_header(c: &mut Cursor<'_>) -> Option<(usize, usize, u64, usize)> {
 fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
     let mut out: Vec<Subprogram> = Vec::new();
     let mut types: BTreeMap<String, UserType> = BTreeMap::new();
+    let mut typedefs: BTreeMap<String, String> = BTreeMap::new();
     let mut at = 0usize;
     while at.saturating_add(11) < info.len() {
         let at_start = at;
@@ -1122,6 +1123,29 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 f.return_type = type_name(&nodes, type_ref, TYPE_DEPTH).filter(|t| t != "void");
             }
         }
+        for node in nodes.values().filter(|n| n.tag == TAG_TYPEDEF) {
+            let Some(name) = node.name.as_ref().filter(|n| is_ident(n)) else {
+                continue;
+            };
+            if typedefs.len() >= TYPES_MAX || typedefs.contains_key(name) {
+                continue;
+            }
+            let Some(to) = type_name(&nodes, node.inner, TYPE_DEPTH) else {
+                continue;
+            };
+            let to = match to.as_str() {
+                "struct" | "union" | "enum" => format!("{to} {name}"),
+                _ => to,
+            };
+            let words: Vec<&str> = to.split_whitespace().collect();
+            let tagged =
+                words.iter().zip(words.iter().skip(1)).all(|(kw, next)| {
+                    !matches!(*kw, "struct" | "union" | "enum") || is_ident(next)
+                }) && !matches!(words.last(), Some(&("struct" | "union" | "enum")));
+            if tagged && !to.contains(['(', '[', '&']) && to != *name {
+                typedefs.insert(name.clone(), to);
+            }
+        }
         for (owner, slot, type_ref) in unresolved_params {
             if let Some(p) = out.get_mut(owner).and_then(|f| f.parameters.get_mut(slot)) {
                 p.type_name = type_name(&nodes, type_ref, TYPE_DEPTH);
@@ -1160,6 +1184,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
     Debug {
         subprograms: out,
         types,
+        typedefs,
     }
 }
 
@@ -1208,6 +1233,11 @@ pub struct Debug {
     /// proposals: nothing applies them, because the overlay is the agent's
     /// own record and a file's fact is not the agent's choice.
     pub types: BTreeMap<String, UserType>,
+    /// Each typedef's name with the C type it stands for (`uLong` to
+    /// `unsigned long`, `z_streamp` to `z_stream *`); a typedef of an
+    /// unnamed structure stands for `struct` under its own name, and one
+    /// of a function or an array type is left out.
+    pub typedefs: BTreeMap<String, String>,
 }
 
 /// Reads what a program's debug information states.
@@ -1335,6 +1365,46 @@ mod tests {
             .map(|p| p.name.as_str())
             .collect();
         assert_eq!(names, vec!["argc"]);
+    }
+
+    /// A typedef reads as the C type it stands for, and one of an unnamed
+    /// structure as that structure under the typedef's own name.
+    #[test]
+    fn a_typedef_reads_as_what_it_stands_for() {
+        let abbrev: Vec<u8> = vec![
+            0x01, 0x16, 0x00, 0x03, 0x08, 0x49, 0x13, 0x00, 0x00, 0x02, 0x24, 0x00, 0x03, 0x08,
+            0x00, 0x00, 0x03, 0x13, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let mut dies: Vec<u8> = vec![0x01];
+        dies.extend_from_slice(b"uLong\0");
+        dies.extend_from_slice(&33u32.to_le_bytes());
+        dies.push(0x01);
+        dies.extend_from_slice(b"Bits\0");
+        dies.extend_from_slice(&52u32.to_le_bytes());
+        let base_at = 12 + dies.len();
+        dies.push(0x02);
+        dies.extend_from_slice(b"long unsigned int\0");
+        let struct_at = 12 + dies.len();
+        dies.push(0x03);
+        assert_eq!(
+            (base_at, struct_at),
+            (33, 52),
+            "the offsets the references assume"
+        );
+        let info = unit(&dies);
+        let strings = Strings {
+            text: &[],
+            lines: &[],
+        };
+        let typedefs = read_in(&info, &abbrev, &strings).typedefs;
+        let got: Vec<(&str, &str)> = typedefs
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("Bits", "struct Bits"), ("uLong", "long unsigned int")]
+        );
     }
 
     /// A name held in `.debug_str` is resolved through the offset.

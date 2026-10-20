@@ -8,11 +8,11 @@
 //! adds them after the header comments as CIR items ([`cir::Item`]), each
 //! name once, in a fixed order:
 //!
-//! - a definition for each C library type name the text or its signature
-//!   spells (`FILE`, `time_t`), a `#define` for each constant it names
-//!   (`SIGALRM`), and an `extern` for each C library data object it
-//!   reads (`stderr`, `optind`), from the type library
-//!   ([`crate::analysis::typelib::data_type`]);
+//! - a definition for each C library type name or debug information
+//!   typedef the text or its signature spells (`FILE`, `uLong`), a
+//!   `#define` for each constant it names (`SIGALRM`), and an `extern`
+//!   for each C library data object it reads (`stderr`, `optind`), from
+//!   the type library ([`crate::analysis::typelib::data_type`]);
 //! - a prototype, `extern uint64_t h_is_odd(uint64_t);`, for each function
 //!   the binary exports, from its ABI facts alone
 //!   ([`prototype`](abi::function::prototype)), so two functions that call
@@ -85,6 +85,10 @@ const LIBC: &str = "\
 /// The segment registers a Linux text reads its thread block through,
 /// with the width of the block's first word: `fs` on x86-64, `gs` on x86.
 const THREAD_BASES: [(&str, u8); 2] = [("fs", 64), ("gs", 32)];
+
+/// Most type names one unit defines from the libraries and the debug
+/// information, typedefs they name included.
+const ALIASES_MAX: usize = 64;
 
 /// Most entries a table of function addresses is written out with.
 const TABLE_MAX: usize = 256;
@@ -221,7 +225,14 @@ pub(super) fn close(
             .iter()
             .all(|e| decls.contains_key(e) || (*e == own && own_proto.is_some()))
     });
-    let mut items = library_items(text, program.format, &ix, &own, &decls);
+    let mut items = library_items(
+        text,
+        program.format,
+        &program.debug_typedefs,
+        &ix,
+        &own,
+        &decls,
+    );
     if tables.iter().any(|t| t.entries.contains(&own))
         && let Some(p) = &own_proto
     {
@@ -285,23 +296,27 @@ pub(super) fn close(
     out
 }
 
-/// Returns the C library's type names, constants and data objects a text
-/// uses that it does not declare: a definition for each type name the
-/// library's headers define ([`Item::Alias`]), C23's `nullptr` for an
-/// older C ([`Item::Nullptr`]), on Linux the thread block's address a
-/// segment register's reads are spelled from ([`Item::ThreadBase`]), a
-/// `#define` for each constant the type
-/// library names by value (`SIGALRM`, `O_RDWR`), then
-/// an `extern` for each object the library exports
-/// (`extern FILE* stderr;`).
+/// Returns the type names, constants and C library data objects a text
+/// uses that it does not declare.
+///
+/// They are a definition ([`Item::Alias`]) for each
+/// type name the library's headers define or the debug information
+/// states as a typedef, and each typedef those name; C23's `nullptr` for
+/// an older C ([`Item::Nullptr`]); on Linux the thread block's address a
+/// segment register's reads are spelled from ([`Item::ThreadBase`]); a
+/// `#define` for each constant the type library names by value
+/// (`SIGALRM`, `O_RDWR`); then an `extern` for each object the library
+/// exports (`extern FILE* stderr;`).
 ///
 /// The signature line counts as code here: a reader compiles it as the
-/// function's prototype, so a `FILE *stream` parameter needs `FILE`.
+/// function's prototype, so a `FILE *stream` parameter needs `FILE`. A
+/// type name is read only where a type stands ([`typed_words`]).
 ///
 /// # Arguments
 ///
 /// * `text` - The decompilation.
 /// * `format` - The binary's format, which picks the library.
+/// * `typedefs` - The debug information's typedefs, by name.
 /// * `ix` - The program's names: an object must be data or an import.
 /// * `own` - The function's own name.
 /// * `decls` - The functions the unit declares.
@@ -313,11 +328,12 @@ pub(super) fn close(
 fn library_items(
     text: &str,
     format: crate::program::BinaryFormat,
+    typedefs: &BTreeMap<String, String>,
     ix: &Index,
     own: &str,
     decls: &BTreeMap<String, Declared>,
 ) -> Vec<Item> {
-    let declared = words(&declarations(text));
+    let (types, declared) = typed_words(text);
     let used = words(text);
     let objects: Vec<(&String, &'static str)> = used
         .iter()
@@ -329,27 +345,27 @@ fn library_items(
         })
         .filter_map(|w| crate::analysis::typelib::data_type(w, format).map(|t| (w, t)))
         .collect();
-    let signature = text
-        .lines()
-        .find_map(|l| l.strip_prefix("// signature: "))
-        .unwrap_or("");
     let mut named: Vec<String> = Vec::new();
-    for w in words(signature)
+    let mut items: Vec<Item> = Vec::new();
+    let mut pending: Vec<String> = types
         .into_iter()
-        .chain(used.iter().cloned())
         .chain(objects.iter().flat_map(|(_, t)| words(t)))
-    {
-        if !named.contains(&w) && !declared.contains(&w) {
-            named.push(w);
+        .collect();
+    pending.reverse();
+    while let Some(w) = pending.pop() {
+        if named.contains(&w) || declared.contains(&w) || named.len() >= ALIASES_MAX {
+            continue;
+        }
+        named.push(w);
+        let Some(w) = named.last() else { continue };
+        if let Some(t) = crate::analysis::typelib::type_definition(w, format) {
+            items.push(Item::Alias(CTy::parse(t), Name::of(w)));
+        } else if let Some(t) = typedefs.get(w).filter(|_| !standard_type(w)) {
+            let t = if t.starts_with("enum ") { "int" } else { t };
+            items.push(Item::Alias(CTy::Named(t.to_owned()), Name::of(w)));
+            pending.extend(untagged(words(t)).into_iter().rev());
         }
     }
-    let mut items: Vec<Item> = named
-        .iter()
-        .filter_map(|w| {
-            crate::analysis::typelib::type_definition(w, format)
-                .map(|t| Item::Alias(CTy::parse(t), Name::of(w)))
-        })
-        .collect();
     if used.iter().any(|w| w == "nullptr") {
         items.push(Item::Nullptr);
     }
@@ -377,6 +393,102 @@ fn library_items(
             .map(|(w, t)| Item::Data(CTy::parse(t), Name::of(w))),
     );
     items
+}
+
+/// Returns the words a text spells types with and the names it declares:
+/// the signature's result and parameter types and its parameters' names,
+/// and each declaration's type and declared names.
+///
+/// A type name can be a variable's name elsewhere (`buffer`), so only a
+/// word in a type's place reads as one.
+///
+/// # Arguments
+///
+/// * `text` - The decompilation.
+///
+/// # Returns
+///
+/// The type words in order of first use, each once, and the declared
+/// names.
+fn typed_words(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut types: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut declarator = |part: &str, typed: bool, named: bool| {
+        let head = part.split(['=', '[']).next().unwrap_or(part);
+        let mut ws = untagged(words(head));
+        if named && let Some(name) = ws.pop() {
+            names.push(name);
+        }
+        if typed {
+            for w in ws {
+                if !types.contains(&w) {
+                    types.push(w);
+                }
+            }
+        }
+    };
+    if let Some(sig) = text.lines().find_map(|l| l.strip_prefix("// signature: "))
+        && let Some((head, rest)) = sig.split_once('(')
+    {
+        declarator(head, true, true);
+        let inner = rest.trim_end().trim_end_matches(';');
+        let inner = inner.strip_suffix(')').unwrap_or(inner);
+        for p in split_arguments(inner)
+            .into_iter()
+            .filter(|p| !matches!(*p, "" | "void" | "..."))
+        {
+            declarator(p, true, param(p).1.is_some());
+        }
+    }
+    for line in declarations(text).lines().filter(|l| !l.starts_with("//")) {
+        let code = code_of(line).trim().trim_end_matches(';');
+        for (k, part) in split_arguments(code).into_iter().enumerate() {
+            declarator(part, k == 0, true);
+        }
+    }
+    (types, names)
+}
+
+/// Tells whether a type name is one the C headers every text assumes
+/// define (`size_t`, `uint32_t`, `bool`): a typedef the debug information
+/// restates for it must not shadow theirs.
+///
+/// # Arguments
+///
+/// * `name` - The type's name.
+fn standard_type(name: &str) -> bool {
+    plain_type(name)
+        || matches!(
+            name,
+            "bool"
+                | "intmax_t"
+                | "intptr_t"
+                | "max_align_t"
+                | "ptrdiff_t"
+                | "uintmax_t"
+                | "uintptr_t"
+                | "wchar_t"
+        )
+}
+
+/// Returns a type's words without the tags it names: `struct`, `union`
+/// and `enum` and the word after each, which names a tag and not a type.
+///
+/// # Arguments
+///
+/// * `ws` - The words, in order.
+fn untagged(ws: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(ws.len());
+    let mut tag = false;
+    for w in ws {
+        if std::mem::replace(&mut tag, matches!(w.as_str(), "struct" | "union" | "enum")) {
+            continue;
+        }
+        if !tag {
+            out.push(w);
+        }
+    }
+    out
 }
 
 /// Returns the type of a pointer to a function, [`CTy::FnPtr`], or `None`
@@ -989,13 +1101,30 @@ mod tests {
                     \n\
                     fputs(\"x\", *(uint64_t*)&stderr);\n";
         let mut out = String::new();
-        let items = library_items(text, BinaryFormat::Elf, &ix, "f", &BTreeMap::new());
+        let items = library_items(
+            text,
+            BinaryFormat::Elf,
+            &BTreeMap::new(),
+            &ix,
+            "f",
+            &BTreeMap::new(),
+        );
         cir::print_items(&items, &mut out);
         assert_eq!(
             out,
             "#define FILE struct _IO_FILE\n#define time_t long\nextern FILE* stderr;\n"
         );
-        assert!(library_items(text, BinaryFormat::Pe, &ix, "f", &BTreeMap::new()).is_empty());
+        assert!(
+            library_items(
+                text,
+                BinaryFormat::Pe,
+                &BTreeMap::new(),
+                &ix,
+                "f",
+                &BTreeMap::new()
+            )
+            .is_empty()
+        );
     }
 
     /// A constant the type library names in the text is defined by its
@@ -1015,6 +1144,7 @@ mod tests {
         let items = library_items(
             text,
             BinaryFormat::Elf,
+            &BTreeMap::new(),
             &Index::default(),
             "f",
             &BTreeMap::new(),
@@ -1023,6 +1153,50 @@ mod tests {
         assert_eq!(
             out,
             "#define nullptr ((void *)0)\n#define SIGALRM 14\n#define O_RDWR 2\n"
+        );
+    }
+
+    /// A typedef the debug information states is defined where the text
+    /// spells a type with it.
+    ///
+    /// So is each typedef its definition names; a word that names a
+    /// variable or a tag is no type, a standard header's type keeps the
+    /// header's definition, and an enumeration is an `int`.
+    ///
+    /// # Panics
+    ///
+    /// When a typedef is left undefined or a variable's name is defined.
+    #[test]
+    fn the_debug_typedefs_a_text_spells_are_defined() {
+        let typedefs: BTreeMap<String, String> = [
+            ("z_streamp", "z_stream *"),
+            ("z_stream", "struct z_stream_s"),
+            ("z_stream_s", "int"),
+            ("uLong", "unsigned long"),
+            ("buffer", "int"),
+            ("size_t", "long unsigned int"),
+            ("code_t", "enum code_e"),
+        ]
+        .into_iter()
+        .map(|(n, t)| (n.to_owned(), t.to_owned()))
+        .collect();
+        let text = "// signature: code_t f(z_streamp strm, char *buffer, size_t n)\n\
+                    uLong var1;\n\
+                    \n\
+                    var1 = buffer[0];\n";
+        let mut out = String::new();
+        let items = library_items(
+            text,
+            BinaryFormat::Elf,
+            &typedefs,
+            &Index::default(),
+            "f",
+            &BTreeMap::new(),
+        );
+        cir::print_items(&items, &mut out);
+        assert_eq!(
+            out,
+            "#define code_t int\n#define z_streamp z_stream *\n#define z_stream struct z_stream_s\n#define uLong unsigned long\n"
         );
     }
 
@@ -1041,6 +1215,7 @@ mod tests {
         let items = library_items(
             text,
             BinaryFormat::Elf,
+            &BTreeMap::new(),
             &Index::default(),
             "f",
             &BTreeMap::new(),
@@ -1051,6 +1226,7 @@ mod tests {
             library_items(
                 text,
                 BinaryFormat::Pe,
+                &BTreeMap::new(),
                 &Index::default(),
                 "f",
                 &BTreeMap::new()

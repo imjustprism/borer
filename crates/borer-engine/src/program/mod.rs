@@ -338,6 +338,9 @@ pub struct Program {
     /// and not in the overlay - nothing applies it until an agent chooses
     /// to, by stating the same entry as a user type.
     pub debug_types: BTreeMap<String, crate::analysis::utypes::UserType>,
+    /// The typedefs the debug information states, by name, with the C
+    /// type each stands for ([`crate::dwarf::Debug::typedefs`]).
+    pub debug_typedefs: BTreeMap<String, String>,
     /// What applying the PDB the debug record named did: how many of its
     /// function symbols joined [`Program::symbols`], or why a found PDB was
     /// skipped. `None` when the image names no PDB or none was on disk to
@@ -577,6 +580,7 @@ impl Program {
             headers: Headers::default(),
             debug_functions: Vec::new(),
             debug_types: BTreeMap::new(),
+            debug_typedefs: BTreeMap::new(),
             pdb: None,
             pdb_record: None,
             pdb_source: None,
@@ -1315,6 +1319,7 @@ impl Program {
             headers,
             debug_functions: named,
             debug_types: debug.types,
+            debug_typedefs: debug.typedefs,
             pdb,
             pdb_record,
             pdb_source,
