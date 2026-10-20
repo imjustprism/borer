@@ -18,7 +18,7 @@ use crate::raw;
 use borer_engine::analysis::decompile::{decompile, decompile_named};
 use borer_engine::analysis::{Analysis, Overlay, RefKind, name_of};
 use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
-use decompiled::decompiled;
+use decompiled::{decompiled, runs_agree};
 
 /// Builds a raw 32-bit image with `code` in `.text` at 0x401000, entered
 /// there, and `data` in a read-only `.rdata` at 0x402000.
@@ -4419,39 +4419,6 @@ fn an_exception_funclet_of_a_linked_handler_belongs_to_its_parent() {
     );
     let text = decompile(&p, &a, &Overlay::default(), 0x401050).unwrap_or_default();
     assert!(text.contains("return local_8;"), "{text}");
-}
-
-/// Runs a function's final text as C beside the binary in the emulator on
-/// 64 inputs its signature types, and requires every run the binary
-/// returns from to agree.
-///
-/// # Arguments
-///
-/// * `p` - The program.
-/// * `entry` - The function.
-///
-/// # Returns
-///
-/// The final text, for the caller's own assertions.
-fn runs_agree(p: &Program, entry: u64) -> String {
-    use borer_engine::analysis::render::{Verdict, check_generated};
-    let a = Analysis::compute(p);
-    let o = Overlay::default();
-    let text = decompile_named(p, &a, &o, entry).unwrap_or_default();
-    let runs = check_generated(p, &a, &o, entry, 64, 1, 20_000).unwrap_or_default();
-    let differ: Vec<String> = runs
-        .iter()
-        .filter_map(|(args, v)| match v {
-            Verdict::Differs(line, what) => Some(format!("{args}: L{line} {what}")),
-            Verdict::Agrees | Verdict::Unchecked(..) => None,
-        })
-        .collect();
-    assert!(differ.is_empty(), "{}\n{text}", differ.join("\n"));
-    assert!(
-        runs.iter().any(|(_, v)| *v == Verdict::Agrees),
-        "{runs:?}\n{text}"
-    );
-    text
 }
 
 /// The zeros pushed for a bitmap that only a computed address reads are

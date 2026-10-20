@@ -1,7 +1,11 @@
-//! The analysis-then-decompile step every pseudo-C test takes.
+//! The analysis-then-decompile step every pseudo-C test takes, the image
+//! hand-assembled code is decompiled from, and the check that the text
+//! runs as the binary does.
 
-use borer_engine::analysis::{Analysis, Overlay, decompile::decompile};
-use borer_engine::program::Program;
+use borer_engine::analysis::decompile::{decompile, decompile_named};
+use borer_engine::analysis::render::{Verdict, check_generated};
+use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::program::{Arch, BinaryFormat, Program, Section};
 
 /// Decompiles one function of `p` under a fresh analysis and an empty
 /// overlay.
@@ -18,4 +22,67 @@ use borer_engine::program::Program;
 pub(crate) fn decompiled(p: &Program, entry: u64) -> String {
     let a = Analysis::compute(p);
     decompile(p, &a, &Overlay::default(), entry).unwrap_or_default()
+}
+
+/// Builds a 64-bit PE-shaped program of `code` at 0x140001000 with no
+/// symbols.
+///
+/// # Arguments
+///
+/// * `code` - The bytes of `.text`, at most a page.
+pub(crate) fn program64(code: &[u8]) -> Program {
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x1_4000_0000,
+        Some(0x1_4000_1000),
+        vec![Section::mapped(
+            ".text",
+            0x1_4000_1000,
+            0,
+            0x1000,
+            false,
+            true,
+        )],
+    );
+    p.format = BinaryFormat::Pe;
+    p
+}
+
+/// Runs a function's final text as C beside the binary in the emulator on
+/// 64 inputs its signature types, and requires every run the binary
+/// returns from to agree.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `entry` - The function.
+///
+/// # Returns
+///
+/// The final text, for the caller's own assertions.
+///
+/// # Panics
+///
+/// When a run of the text differs from the binary, or none agrees.
+pub(crate) fn runs_agree(p: &Program, entry: u64) -> String {
+    let a = Analysis::compute(p);
+    let o = Overlay::default();
+    let text = decompile_named(p, &a, &o, entry).unwrap_or_default();
+    let runs = check_generated(p, &a, &o, entry, 64, 1, 20_000).unwrap_or_default();
+    let differ: Vec<String> = runs
+        .iter()
+        .filter_map(|(args, v)| match v {
+            Verdict::Differs(line, what) => Some(format!("{args}: L{line} {what}")),
+            Verdict::Agrees | Verdict::Unchecked(..) => None,
+        })
+        .collect();
+    assert!(differ.is_empty(), "{}\n{text}", differ.join("\n"));
+    assert!(
+        runs.iter().any(|(_, v)| *v == Verdict::Agrees),
+        "{runs:?}\n{text}"
+    );
+    text
 }

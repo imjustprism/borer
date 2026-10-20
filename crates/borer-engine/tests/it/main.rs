@@ -44,6 +44,7 @@ mod fixups;
 mod go;
 mod groundtruth;
 mod hashing;
+mod idioms;
 mod iocs;
 mod layout;
 mod libsig;
