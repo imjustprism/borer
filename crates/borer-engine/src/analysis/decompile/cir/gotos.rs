@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::wrap::{count, each, jumps, lists};
-use super::{ArmBody, Body, Else, Expr, ExprKind, Label, LitKind, Stmt, StmtKind};
+use super::{ArmBody, Body, Else, Expr, ExprKind, Label, LitKind, Stmt, StmtKind, UnOp};
 
 /// Most rounds of the rules one body gets.
 const ROUNDS: usize = 256;
@@ -596,25 +596,27 @@ fn negate(cond: &Expr) -> Expr {
     )
 }
 
-/// Tells whether an expression holds a call, or text that may be one, so
-/// dropping it would drop the call.
+/// Tells whether evaluating an expression does anything beyond its value:
+/// a call, text that may be one, an assignment, or an increment or
+/// decrement, so dropping it would drop that effect.
 ///
 /// # Arguments
 ///
 /// * `e` - The expression.
-fn has_call(e: &Expr) -> bool {
+fn has_effect(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Call(..) | ExprKind::Raw(_) => true,
+        ExprKind::Call(..)
+        | ExprKind::Raw(_)
+        | ExprKind::Assign(..)
+        | ExprKind::Postfix(..)
+        | ExprKind::Unary(UnOp::PreInc | UnOp::PreDec, _) => true,
         ExprKind::Lit(_) | ExprKind::Name(_) => false,
         ExprKind::Unary(_, a)
-        | ExprKind::Postfix(_, a)
         | ExprKind::Cast(_, a)
         | ExprKind::Paren(a)
-        | ExprKind::Member { base: a, .. } => has_call(a),
-        ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) | ExprKind::Index(a, b) => {
-            has_call(a) || has_call(b)
-        }
-        ExprKind::Cond(a, b, c) => has_call(a) || has_call(b) || has_call(c),
+        | ExprKind::Member { base: a, .. } => has_effect(a),
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => has_effect(a) || has_effect(b),
+        ExprKind::Cond(a, b, c) => has_effect(a) || has_effect(b) || has_effect(c),
     }
 }
 
@@ -999,7 +1001,7 @@ fn leave(s: &mut Stmt, frames: &[Frame]) -> bool {
 
 /// Drops each jump to where control goes from it anyway.
 ///
-/// The jump is alone or guarded by a condition that calls nothing: a
+/// The jump is alone or guarded by a condition with no effect: a
 /// `goto` to the label it reaches running nothing, or a `continue` where
 /// the loop's next round starts.
 ///
@@ -1016,7 +1018,7 @@ fn falls(list: &mut Vec<Stmt>, cx: &Cx) -> bool {
     let mut k = 0;
     while k < list.len() {
         let quiet = if let StmtKind::Guard { cond, .. } = &list[k].kind {
-            !has_call(cond)
+            !has_effect(cond)
         } else {
             true
         };
@@ -1988,6 +1990,20 @@ mod tests {
             got,
             "if (a1 != 0) {\n  a2 = g();\n  if (a2 != 0) {\n    h(a2);\n  } else {\n    log(a1);\n  }\n} else {\n  log(a1);\n}\na3 = 1;\ndo {\n  f(a3);\n} while (a4 != 0);\nreturn 0;\n"
         );
+    }
+
+    /// A jump to where control goes anyway keeps the effect of its guard:
+    /// `if (a1++ != 0) continue;` at a loop's end still counts.
+    #[test]
+    fn a_dropped_jump_keeps_its_guards_effect() {
+        let got = folded(
+            "while (a1 < 3) {
+  if (a1++ != 0) continue;
+}
+return a1;
+",
+        );
+        assert!(got.contains("a1++"), "{got}");
     }
 
     /// A run after a `while (1)` whose `break` leaves a `__try` stays after
