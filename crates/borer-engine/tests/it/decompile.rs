@@ -9957,3 +9957,75 @@ fn a_noreturn_import_behind_an_endbr64_stub_ends_the_text() {
     assert!(!text.contains("= __stack_chk_fail("), "{text}");
     assert!(text.contains("return 7;"), "{text}");
 }
+
+/// Builds a 64-bit ELF image with `code` in `.text` at 0x140001000,
+/// entered there, a writable data page at 0x140003000, and data symbols
+/// naming addresses in it.
+///
+/// # Arguments
+///
+/// * `code` - The bytes of `.text`, at most a page.
+/// * `zero_filled` - The data page is a `.bss` the file holds no bytes
+///   for, rather than a `.data` it does.
+/// * `symbols` - `(name, address)` of each data symbol.
+fn program64_with_globals(
+    code: &[u8],
+    zero_filled: bool,
+    symbols: &[(&str, u64)],
+) -> borer_engine::program::Program {
+    use borer_engine::program::{
+        Arch, BinaryFormat, FileOff, Program, Section, Symbol, SymbolKind, Va,
+    };
+    let mut bytes = vec![0u8; 0x2000];
+    bytes[..code.len()].copy_from_slice(code);
+    let data = Section {
+        name: if zero_filled { ".bss" } else { ".data" }.to_owned(),
+        va: Va(0x1_4000_3000),
+        vsize: 0x1000,
+        file_off: FileOff(if zero_filled { 0 } else { 0x1000 }),
+        file_size: if zero_filled { 0 } else { 0x1000 },
+        readable: true,
+        writable: true,
+        executable: false,
+    };
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x1_4000_0000,
+        Some(0x1_4000_1000),
+        vec![
+            Section::mapped(".text", 0x1_4000_1000, 0, 0x1000, false, true),
+            data,
+        ],
+    );
+    p.format = BinaryFormat::Elf;
+    p.symbols = symbols
+        .iter()
+        .map(|&(name, addr)| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Data,
+        })
+        .collect();
+    p
+}
+
+/// `mov rax,[rip+0x1ff9]; ret`: returns the word at 0x140003000.
+const READ_GLOBAL: [u8; 8] = [
+    0x48, 0x8b, 0x05, 0xf9, 0x1f, 0x00, 0x00, // ASM: mov rax,[rip+0x1ff9]
+    0xc3, // ASM: ret
+];
+
+/// A global the C library exports is declared at the type it gives the
+/// object of that name.
+///
+/// `mov rax,[rip+stdout]; ret` reads the copy of `stdout` an ELF keeps in
+/// its own data: the text declares `FILE *stdout;`, not `uint64_t
+/// stdout;`.
+#[test]
+fn a_library_object_is_declared_at_its_library_type() {
+    let p = program64_with_globals(&READ_GLOBAL, false, &[("stdout", 0x1_4000_3000)]);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("FILE *stdout;"), "{text}");
+    assert!(text.contains("return stdout;"), "{text}");
+}

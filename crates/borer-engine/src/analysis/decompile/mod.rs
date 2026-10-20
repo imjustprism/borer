@@ -44,6 +44,7 @@ mod fields;
 mod finish;
 mod format;
 mod frame;
+mod globals;
 mod guarded;
 mod helper;
 pub(crate) mod interp;
@@ -2026,6 +2027,12 @@ fn decompile_in<L: Lifter>(
         &body,
         program.format,
         u64::try_from(ctx.conv.word).unwrap_or(8),
+    ))
+    .chain(globals::debug_typed(
+        program,
+        &ctx.globals,
+        &names,
+        u64::try_from(ctx.conv.word).unwrap_or(8),
     )) {
         if !user_typed.iter().any(|(v, _)| *v == var) {
             user_typed.push((var, fields));
@@ -2490,9 +2497,19 @@ fn decompile_in<L: Lifter>(
         .filter_map(|(addr, ty)| {
             let g = names.key(Key::Global(*addr, ty.bits()));
             let import = names.import_at(*addr).is_some_and(|n| n == g);
+            let word = u64::try_from(ctx.conv.word).unwrap_or(8);
+            let (base, stars) = globals::stated(program, *addr, &g)
+                .filter(|s| s.is_pointer() && s.fits(*ty, word))
+                .map_or_else(
+                    || (ty.name().to_owned(), String::new()),
+                    |s| {
+                        let base = s.spelled.trim_end_matches(['*', ' ']);
+                        (base.to_owned(), s.spelled[base.len()..].replace(' ', ""))
+                    },
+                );
             (used.contains(g.as_str()) && !import).then(|| cir::Decl {
-                ty: cir::CTy::parse(ty.name()),
-                names: vec![cir::Name::of(&g)],
+                ty: cir::CTy::parse(&base),
+                names: vec![cir::Name::of(&format!("{stars}{g}"))],
                 note: Some(match expr::tls_slot(*addr) {
                     Some(off) => format!("TLS slot {off:#x}"),
                     None => format!("@ {addr:#x}"),
