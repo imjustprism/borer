@@ -31,18 +31,30 @@ def git(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8")
 
 
+def has_commit(ref: str) -> bool:
+    """Whether ref names a commit this clone holds."""
+    return git("cat-file", "-e", f"{ref}^{{commit}}").returncode == 0
+
+
 def base_ref(argv: list[str]) -> str | None:
     """The commit the unpushed range starts after, or None when none is known.
 
     An argument wins, then BORER_COMMITS_BASE (CI sets it to the commit the
     push started from, since after a push origin/main is the pushed commit
-    itself), then the branch's upstream, then origin/main.
+    itself), then the branch's upstream, then origin/main. A force push's
+    start is fetched when the clone lacks it, since nothing reachable holds
+    it any more; when it cannot be had the check fails rather than pass
+    commits it never read.
     """
     if argv:
         return argv[0]
     env = os.environ.get("BORER_COMMITS_BASE", "").strip()
-    if env and env.strip("0") and git("rev-parse", "--verify", "--quiet", env).returncode == 0:
-        return env
+    if env and env.strip("0"):
+        if not has_commit(env):
+            git("fetch", "--quiet", "--no-tags", "origin", env)
+        if has_commit(env):
+            return env
+        sys.exit(f"commits: the push started from {env}, which cannot be fetched; pass a base")
     for ref in ("@{upstream}", "origin/main"):
         if git("rev-parse", "--verify", "--quiet", ref).returncode == 0:
             return ref
