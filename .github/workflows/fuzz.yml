@@ -1,16 +1,16 @@
 name: fuzz
 
 # libFuzzer over the loaders (PE, ELF, Mach-O with DWARF, minidump, raw)
-# and over load, analyze and decompile: a minute per target on every pull
-# request and push, ten minutes per target weekly. An input that panics,
+# and over load, analyze and decompile: a minute per target on the way to
+# main (its pull requests and pushes), ten minutes per target weekly. An input that panics,
 # runs past ten seconds or takes 2 GB fails the job and is uploaded; replay
 # it with `cargo +nightly fuzz run <target> <file>` and keep it as a test.
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
-    branches: [main, dev]
+    branches: [main]
   schedule:
     - cron: "41 4 * * 1"
   workflow_dispatch:
