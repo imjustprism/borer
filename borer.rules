@@ -86,7 +86,7 @@ rules:
 
   mcp:
     - stdout belongs to the protocol. No println, no banners, no progress output in the server; diagnostics go to stderr or into tool results.
-    - Errors are ErrorData results so clients see isError, never error text inside a success.
+    - A tool handler returns its failure as an ErrorData; `call_tool` turns a known tool's failure into a result with isError set (`errors::tool_failure`), so the agent reads it. Only an unknown tool is a protocol error. Never error text inside a success.
     - Tool descriptions and parameter docs are written for an agent that has never seen the project. Say what the tool returns, its caps and its defaults.
     - Addresses accept 0x-hex, decimal or a name at the boundary (`parse_addr`, `resolve`); inside, they are u64 virtual addresses.
 

@@ -334,9 +334,13 @@ bad_name = wait_for(
     send("tools/call", {"name": "decompile", "arguments": {"address": "no_such_symbol_xyz"}}),
     allow_error=True,
 )
-assert "error" in bad_name or bad_name.get("isError"), (
-    f"unknown name should error: {str(bad_name)[:200]}"
+# a tool that ran and failed answers with isError, not a protocol error, so
+# the agent reads the message
+assert bad_name.get("isError") and "error" not in bad_name, (
+    f"unknown name should be an isError result: {str(bad_name)[:200]}"
 )
+no_tool = wait_for(send("tools/call", {"name": "no_such_tool", "arguments": {}}), allow_error=True)
+assert "error" in no_tool, f"an unknown tool is a protocol error: {str(no_tool)[:200]}"
 
 import tempfile
 
@@ -373,7 +377,7 @@ bad = wait_for(
     send("tools/call", {"name": "disassemble", "arguments": {"address": "0x414141414141"}}),
     allow_error=True,
 )
-assert "error" in bad or bad.get("isError"), f"unmapped address should error, got: {str(bad)[:200]}"
+assert bad.get("isError"), f"unmapped address should error, got: {str(bad)[:200]}"
 print("error path OK (unmapped address -> clean error)")
 
 # 7b. hostile parameters: a zero count and an unknown kind are refused, not guessed
@@ -381,7 +385,7 @@ zero = wait_for(
     send("tools/call", {"name": "functions", "arguments": {"limit": 0}}),
     allow_error=True,
 )
-assert "error" in zero or zero.get("isError"), f"limit=0 should error, got: {str(zero)[:200]}"
+assert zero.get("isError"), f"limit=0 should error, got: {str(zero)[:200]}"
 banana = wait_for(
     send("tools/call", {"name": "symbols", "arguments": {"kind": "banana"}}),
     allow_error=True,
@@ -393,9 +397,7 @@ empty = wait_for(
     send("tools/call", {"name": "search", "arguments": {"query": "", "kind": "text"}}),
     allow_error=True,
 )
-assert "error" in empty or empty.get("isError"), (
-    f"empty query should error, got: {str(empty)[:200]}"
-)
+assert empty.get("isError"), f"empty query should error, got: {str(empty)[:200]}"
 print("hostile parameters OK (limit=0, kind=banana, query='' -> clean errors)")
 
 # 8. the server survived the error: another call still answers
@@ -700,7 +702,8 @@ assert without_evidence(
 qmissing = wait_for(
     send("tools/call", {"name": "query", "arguments": {"uri": "borer://nope"}}), allow_error=True
 )
-assert qmissing.get("error") == missing["error"], (qmissing, missing)
+assert qmissing.get("isError"), qmissing
+assert qmissing["content"][0]["text"] == missing["error"]["message"], (qmissing, missing)
 assert missing["error"]["message"].endswith("borer://help lists every resource"), missing
 # a miss names the nearest resources, not all of them; a template read bare
 # says its grammar with an example, and borer://help lists every resource

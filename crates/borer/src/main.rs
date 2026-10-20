@@ -192,10 +192,13 @@ impl ServerHandler for BorerServer {
     /// * `request` - The tool and its arguments.
     /// * `context` - Request context.
     ///
+    /// A tool that runs and fails answers with `isError` set and its
+    /// message as the text ([`errors::tool_failure`]), so the agent reads
+    /// it; only a request the server cannot run is a protocol error.
+    ///
     /// # Errors
     ///
-    /// When the tool is unknown, its arguments do not parse, or `since` is
-    /// not a tag.
+    /// When the tool is unknown or `since` is not a tag.
     async fn call_tool(
         &self,
         mut request: CallToolRequestParams,
@@ -233,6 +236,7 @@ impl ServerHandler for BorerServer {
         let reloading = request.name == "reload";
         let peer_info = context.peer.peer_info();
         let named = (request.name.clone(), request.arguments.clone());
+        let known = Self::tool_router().has_route(&request.name);
         let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let response = Self::tool_router().call(call).await;
         if reloading {
@@ -250,7 +254,10 @@ impl ServerHandler for BorerServer {
                 raw: read_lock(&self.raw_load).clone(),
             });
         }
-        let response = response?;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => errors::tool_failure(known, error)?,
+        };
         Ok(match response {
             CallToolResponse::Complete(mut result)
                 if remembered && result.is_error != Some(true) =>
