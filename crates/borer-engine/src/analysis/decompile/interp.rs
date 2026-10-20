@@ -3695,7 +3695,9 @@ impl Running<'_, '_> {
     /// Evaluates the call of a name no variable and no function holds: the
     /// operators the lifter writes as functions, the routines it reads a
     /// string instruction or a counting loop as, and `alloca`, which hands
-    /// out a fresh zeroed block of memory no other object takes.
+    /// out a fresh zeroed block of memory no other object takes. The
+    /// compares answer the sign C promises, `-1`, `0` or `1`, which is all
+    /// `repe cmpsb` leaves in the flags.
     ///
     /// # Arguments
     ///
@@ -3762,6 +3764,31 @@ impl Running<'_, '_> {
                     self.writers.insert(to, self.line);
                 }
                 Ok(d)
+            }
+            "memcmp" | "strcmp" | "strncmp" => {
+                let (x, y) = (arg(0)?, arg(1)?);
+                let n = match name {
+                    "strcmp" => BUILTIN_MAX,
+                    _ => self.length(arg(2)?)?,
+                };
+                let text = name != "memcmp";
+                let mut sign = 0i64;
+                for k in 0..n {
+                    let (at, bt) = (x.bits.wrapping_add(k), y.bits.wrapping_add(k));
+                    let a = self.emu.byte_at(at).ok_or(End::Fault(at))?;
+                    let b = self.emu.byte_at(bt).ok_or(End::Fault(bt))?;
+                    if a != b {
+                        sign = if a < b { -1 } else { 1 };
+                        break;
+                    }
+                    if text && a == 0 {
+                        break;
+                    }
+                    if k + 1 == BUILTIN_MAX {
+                        return unchecked(format!("{name} past {BUILTIN_MAX} characters"));
+                    }
+                }
+                Ok(self.int(sign.cast_unsigned(), CTy::int(32, true)))
             }
             "strlen" | "wcslen" => {
                 let s = arg(0)?;

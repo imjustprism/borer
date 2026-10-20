@@ -1470,6 +1470,13 @@ impl<'a> Exec<'_, 'a> {
             Mnemonic::Stosb | Mnemonic::Stosw | Mnemonic::Stosd | Mnemonic::Stosq => {
                 self.string_op(instr, true, bits);
             }
+            Mnemonic::Cmpsb
+                if instr.has_repe_prefix()
+                    && self.env.df == Some(false)
+                    && let Some(count) = self.string_count() =>
+            {
+                self.compare_strings(count);
+            }
             Mnemonic::Int3 => {
                 emit_line!(self, "__debugbreak();".to_owned());
                 self.record(EffectKind::Unmodeled);
@@ -1876,6 +1883,79 @@ impl<'a> Exec<'_, 'a> {
         let v = crate::analysis::decompile::expr::ternary(cond, taken, kept);
         let _ = bits;
         self.reg_write(instr.op0_register(), v);
+    }
+
+    /// Lifts `repe cmpsb` as the `memcmp` or `strcmp` it compiles from.
+    ///
+    /// `repe cmpsb` compares the bytes at `rsi` and `rdi` forward while they
+    /// agree, at most `rcx` of them, and leaves the flags of the last pair
+    /// compared: zero exactly when all agreed, which is `memcmp`'s answer
+    /// being zero. A count set to a constant (a compiler expanding a
+    /// compare with a literal) becomes `t = memcmp(rsi, rdi, n);` with the
+    /// zero flag `t`'s: an equality test of the flags reads as one of `t`.
+    /// The other flags are those of one byte's subtraction, which no test
+    /// of `t` spells, so any other test is left undecided. With `rdi` a
+    /// literal of `n - 1`
+    /// characters the compare stops at the literal's end where `strcmp`
+    /// does, and reads as `strcmp(rsi, literal)`. The pointers and the
+    /// count are left wherever the compare stopped, which nothing models.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - The constant count ([`Exec::string_count`]).
+    pub(super) fn compare_strings(&mut self, count: u64) {
+        let (rsi, rdi, rcx) = if self.bitness() == 32 {
+            (Register::ESI, Register::EDI, Register::ECX)
+        } else {
+            (Register::RSI, Register::RDI, Register::RCX)
+        };
+        let (a, b) = (self.reg_read(rsi), self.reg_read(rdi));
+        let literal = |e: &Expr| match e {
+            Expr::Const(at) => crate::strings::cstr_at(self.ctx.program, *at, 0, 1)
+                .is_some_and(|(len, _)| crate::num::from_usize(len) + 1 == count),
+            Expr::Str(quoted) => {
+                use crate::analysis::decompile::ctext::{Tok, tokens};
+                matches!(tokens(quoted).as_deref(), Ok([Tok::Str(bytes)])
+                    if crate::num::from_usize(bytes.len()) == count
+                        && bytes.iter().position(|b| *b == 0) == bytes.len().checked_sub(1))
+            }
+            _ => false,
+        };
+        let strcmp = literal(&b);
+        let t = self.fresh_tmp(Ty::U32);
+        let n = self.names();
+        let line = if strcmp {
+            format!("{} = strcmp({}, {});", n.key(t), a.render(&n), b.render(&n))
+        } else {
+            format!(
+                "{} = memcmp({}, {}, {});",
+                n.key(t),
+                a.render(&n),
+                b.render(&n),
+                crate::analysis::decompile::expr::render_const(count, true)
+            )
+        };
+        emit_line!(self, line);
+        self.record(EffectKind::Unmodeled);
+        for r in [rsi, rdi, rcx] {
+            let k = self.canon(r);
+            self.clobber(k);
+        }
+        self.flags = Flags::Truth(Expr::Var(t), Cc(ConditionCode::ne));
+    }
+
+    /// The count a repeated string instruction runs for, when a nonzero
+    /// constant gives it; a count of zero runs nothing and changes no flag.
+    pub(super) fn string_count(&self) -> Option<u64> {
+        let rcx = if self.bitness() == 32 {
+            Register::ECX
+        } else {
+            Register::RCX
+        };
+        match self.reg_read(rcx) {
+            Expr::Const(c) if c != 0 => Some(c),
+            _ => None,
+        }
     }
 
     /// Lifts the string instructions.

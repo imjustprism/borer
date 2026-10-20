@@ -950,3 +950,63 @@ fn wide_moves_between_objects_are_a_memcpy() {
         );
     }
 }
+
+/// `repe cmpsb` over a constant count is the compare it expands.
+///
+/// The first function compares its argument with the six bytes of
+/// `"hello"`, terminator included, and tests the zero flag: it stops
+/// where `strcmp` does, so the text reads `strcmp(a1, "hello")`. The
+/// second compares three bytes: `memcmp(a1, "hello", 3)`. Run as ISO C
+/// each agrees with the binary.
+#[test]
+fn repe_cmpsb_is_the_compare_it_expands() {
+    let mut code = vec![
+        0x56, // ASM: push rsi
+        0x57, // ASM: push rdi
+        0x48, 0x89, 0xce, // ASM: mov rsi,rcx
+        0x48, 0x8d, 0x3d, 0xf4, 0x0f, 0x00, 0x00, // ASM: lea rdi,[rip+0xff4]
+        0xb9, 0x06, 0x00, 0x00, 0x00, // ASM: mov ecx,6
+        0xf3, 0xa6, // ASM: repe cmpsb
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0x0f, 0xb6, 0xc0, // ASM: movzx eax,al
+        0x5f, // ASM: pop rdi
+        0x5e, // ASM: pop rsi
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend([
+        0x56, // ASM: push rsi
+        0x57, // ASM: push rdi
+        0x48, 0x89, 0xce, // ASM: mov rsi,rcx
+        0x48, 0x8d, 0x3d, 0xd4, 0x0f, 0x00, 0x00, // ASM: lea rdi,[rip+0xfd4]
+        0xb9, 0x03, 0x00, 0x00, 0x00, // ASM: mov ecx,3
+        0xf3, 0xa6, // ASM: repe cmpsb
+        0x0f, 0x95, 0xc0, // ASM: setne al
+        0x0f, 0xb6, 0xc0, // ASM: movzx eax,al
+        0x5f, // ASM: pop rdi
+        0x5e, // ASM: pop rsi
+        0xc3, // ASM: ret
+    ]);
+    let p = program(&code, b"hello ");
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    for (entry, call) in [
+        (TEXT, "strcmp(a1, \"hello\")"),
+        (TEXT + 0x20, "memcmp(a1, \"hello\", 3)"),
+    ] {
+        let text = decompile_named(&p, &a, &o, entry).unwrap_or_default();
+        assert!(text.contains(call), "{text}");
+        assert!(!text.contains("asm"), "{text}");
+        let rows = check_generated_iso(&p, &a, &o, entry, 8, 1, 20_000).expect("the text reads");
+        assert!(
+            rows.iter().any(|(_, v)| *v == Verdict::Agrees),
+            "{text}
+{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|(_, v)| matches!(v, Verdict::Differs(..))),
+            "{text}
+{rows:?}"
+        );
+    }
+}
