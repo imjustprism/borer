@@ -7190,6 +7190,74 @@ fn a_rust_bounds_check_reads_as_its_panic_and_location() {
     );
 }
 
+/// A call the header says the text leaves out, written where its check
+/// did not fold, ends the text's path when it never returns.
+///
+/// `f` calls `y`, then on `a1 == 0` calls `panic_const_add_overflow`,
+/// which never returns, and else calls `x` and `z`. A text that writes
+/// the panic at the end of its arm and lets C fall past it claims nothing
+/// after it, so the steps it writes there are no path of its own; read as
+/// a step it may skip, the panic would let the text go on to `x` and `y`,
+/// which no path of the binary does.
+#[test]
+fn a_left_out_call_the_text_writes_ends_the_path_when_it_never_returns() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp, 0x28
+        0xe8, 0x37, 0x00, 0x00, 0x00, // ASM: call y
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x74, 0x13, // ASM: je panics
+        0xe8, 0x3e, 0x00, 0x00, 0x00, // ASM: call x
+        0xe8, 0x49, 0x00, 0x00, 0x00, // ASM: call z
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp, 0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend([0xe8, 0x4b, 0x00, 0x00, 0x00]); // ASM: call panic_const_add_overflow
+    code.resize(0x40, 0xcc);
+    code.push(0xc3); // ASM: ret
+    code.resize(0x50, 0xcc);
+    code.push(0xc3); // ASM: ret
+    code.resize(0x60, 0xcc);
+    code.push(0xc3); // ASM: ret
+    code.resize(0x70, 0xcc);
+    code.extend([0x0f, 0x0b]); // ASM: ud2
+    let mut p = program64(&code);
+    for (name, addr) in [
+        ("y", 0x1_4000_1040),
+        ("x", 0x1_4000_1050),
+        ("z", 0x1_4000_1060),
+        ("panic_const_add_overflow", 0x1_4000_1070),
+    ] {
+        p.symbols.push(Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Local,
+        });
+    }
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = "// f @ 0x140001000\n\
+                // note: calls to panic_const_add_overflow are left out: rust overflow and bounds checks folded\n\
+                \n\
+                y();\n\
+                if (a1 == 0) {\n\
+                \x20 panic_const_add_overflow(0);\n\
+                \x20 x();\n\
+                \x20 y();\n\
+                \x20 return;\n\
+                }\n\
+                x();\n\
+                z();\n\
+                return;\n";
+    assert_eq!(
+        check_structure(&p, &a, &o, 0x1_4000_1000, text),
+        Structure::Agrees,
+        "{text}"
+    );
+}
+
 /// Two folded checks name their callees in one header note, exactly once.
 ///
 /// `f` runs a bounds check and a negation check, each diamond handing its
