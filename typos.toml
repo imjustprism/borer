@@ -12,6 +12,8 @@ extend-exclude = [
 extend-ignore-re = ["(?i)\\b[0-9a-f]{2}( [0-9a-f]{2}){3,}\\b"]
 
 [default.extend-words]
+# the transposed name (WinMian for WinMain) the name suggestions are tested with
+Mian = "Mian"
 # ELF relocation sections (.rela.plt) and Windows structured exception handling.
 rela = "rela"
 # the DWARF address-range section is spelled .debug_aranges

@@ -218,8 +218,12 @@ pub fn nearest<'a>(
     ranked.into_iter().take(n).map(|(_, c)| c).collect()
 }
 
-/// Counts the single-character edits (insertions, deletions and
-/// substitutions) that turn `a` into `b`, when there are at most `limit`.
+/// Counts the single-character edits (insertions, deletions,
+/// substitutions and swaps of two neighbours) that turn `a` into `b`,
+/// when there are at most `limit`.
+///
+/// A swap costs one edit, as a typo makes it (`WinMian` for `WinMain`);
+/// no character is edited twice (the optimal string alignment distance).
 ///
 /// # Arguments
 ///
@@ -236,20 +240,26 @@ fn edits_within(a: &str, b: &str, limit: usize) -> Option<usize> {
     if a.len().abs_diff(b.len()) > limit {
         return None;
     }
-    let mut row: Vec<usize> = (0..=b.len()).collect();
+    let mut before: Vec<usize> = Vec::new();
+    let mut last: Vec<usize> = (0..=b.len()).collect();
     for (i, ca) in a.iter().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
+        let mut row = Vec::with_capacity(b.len() + 1);
+        row.push(i + 1);
         for (j, cb) in b.iter().enumerate() {
-            let substitute = diagonal + usize::from(ca != cb);
-            diagonal = row[j + 1];
-            row[j + 1] = substitute.min(row[j] + 1).min(diagonal + 1);
+            let mut d = (last[j] + usize::from(ca != cb))
+                .min(last[j + 1] + 1)
+                .min(row[j] + 1);
+            if i > 0 && j > 0 && *ca == b[j - 1] && a[i - 1] == *cb {
+                d = d.min(before[j - 1] + 1);
+            }
+            row.push(d);
         }
         if row.iter().min().is_some_and(|&least| least > limit) {
             return None;
         }
+        before = std::mem::replace(&mut last, row);
     }
-    row.last().copied().filter(|&d| d <= limit)
+    last.last().copied().filter(|&d| d <= limit)
 }
 
 /// Tells whether `c` must be escaped to stay on its own line and in place.
@@ -445,6 +455,9 @@ mod tests {
         assert_eq!(edits_within("same", "same", 0), Some(0));
         assert_eq!(edits_within("kitten", "sitting", 2), None);
         assert_eq!(edits_within("a", "abcdef", 2), None);
+        assert_eq!(edits_within("winmian", "winmain", 2), Some(1));
+        assert_eq!(edits_within("winmian", "wwinmain", 2), Some(2));
+        assert_eq!(edits_within("xy", "yx", 1), Some(1));
     }
 
     /// A misspelled name finds the names it meant, nearest first.
@@ -484,6 +497,10 @@ mod tests {
         assert_eq!(
             nearest("disassemble", ["dis", "decompile", "disasm"], 3),
             vec!["disasm"]
+        );
+        assert_eq!(
+            nearest("WinMian", ["wWinMain", "WinMainCRTStartup", "main"], 3),
+            vec!["wWinMain", "WinMainCRTStartup"]
         );
         assert!(nearest("zzzzqqqq", names, 3).is_empty());
         assert!(nearest("  ", names, 3).is_empty());
