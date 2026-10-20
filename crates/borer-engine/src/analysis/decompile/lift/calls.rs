@@ -5,7 +5,7 @@ use super::*;
 use crate::analysis::returns::Sse;
 use crate::analysis::x87;
 
-impl<'a> Exec<'_, 'a> {
+impl Exec<'_, '_> {
     /// The argument register an indirect call or jump goes through.
     ///
     /// `call [r8]` with the vtable pointer in `r8`, or `jmp rdx`: the

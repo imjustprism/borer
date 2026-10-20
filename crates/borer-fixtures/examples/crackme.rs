@@ -22,6 +22,7 @@ const MARKER: &str = "BORER-CRACKME-MARKER";
 /// `1` when the key passes, else `0`.
 #[unsafe(no_mangle)]
 #[expect(
+    clippy::no_mangle_with_rust_abi,
     clippy::cast_possible_truncation,
     reason = "`i` is below eight, so the rotate count and the index both fit; a helper call would change the compiled shape the ground-truth test decompiles"
 )]

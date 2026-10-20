@@ -331,11 +331,11 @@ mod os {
         let mut out = Vec::new();
         // SAFETY: `entry` is a properly sized PROCESSENTRY32W that outlives
         // the call, and the snapshot handle is valid.
-        let mut more = unsafe { Process32FirstW(snap.0, &mut entry) } != 0;
+        let mut more = unsafe { Process32FirstW(snap.0, &raw mut entry) } != 0;
         while more {
             out.push((entry.th32ProcessID, wide(&entry.szExeFile)));
             // SAFETY: as for Process32FirstW.
-            more = unsafe { Process32NextW(snap.0, &mut entry) } != 0;
+            more = unsafe { Process32NextW(snap.0, &raw mut entry) } != 0;
         }
         Ok(out)
     }
@@ -375,7 +375,7 @@ mod os {
             let mut out = Vec::new();
             // SAFETY: `entry` is a properly sized MODULEENTRY32W that
             // outlives the call, and the snapshot handle is valid.
-            let mut more = unsafe { Module32FirstW(snap.0, &mut entry) } != 0;
+            let mut more = unsafe { Module32FirstW(snap.0, &raw mut entry) } != 0;
             while more {
                 out.push(Module {
                     name: wide(&entry.szModule),
@@ -384,7 +384,7 @@ mod os {
                     size: u64::from(entry.modBaseSize),
                 });
                 // SAFETY: as for Module32FirstW.
-                more = unsafe { Module32NextW(snap.0, &mut entry) } != 0;
+                more = unsafe { Module32NextW(snap.0, &raw mut entry) } != 0;
             }
             let mut seen = std::collections::HashSet::new();
             out.retain(|m| seen.insert(m.base));
@@ -518,7 +518,7 @@ mod os {
             let mut wow64 = 0;
             // SAFETY: `wow64` outlives the call and the handle is open with
             // QUERY_INFORMATION, which IsWow64Process requires.
-            let ok = unsafe { IsWow64Process(self.handle.0, &mut wow64) } != 0;
+            let ok = unsafe { IsWow64Process(self.handle.0, &raw mut wow64) } != 0;
             if cfg!(target_pointer_width = "64") && !(ok && wow64 != 0) {
                 8
             } else {
@@ -537,7 +537,7 @@ mod os {
             let mut code = 0u32;
             // SAFETY: `code` outlives the call and the handle is open with
             // QUERY_INFORMATION, which GetExitCodeProcess requires.
-            let ok = unsafe { GetExitCodeProcess(self.handle.0, &mut code) } != 0;
+            let ok = unsafe { GetExitCodeProcess(self.handle.0, &raw mut code) } != 0;
             (ok && code.cast_signed() != STILL_ACTIVE).then_some(code)
         }
 
@@ -561,13 +561,13 @@ mod os {
             let mut out = Vec::new();
             // SAFETY: `entry` is a properly sized THREADENTRY32 that outlives
             // the call, and the snapshot handle is valid.
-            let mut more = unsafe { Thread32First(snap.0, &mut entry) } != 0;
+            let mut more = unsafe { Thread32First(snap.0, &raw mut entry) } != 0;
             while more {
                 if entry.th32OwnerProcessID == self.pid {
                     out.push(entry.th32ThreadID);
                 }
                 // SAFETY: as for Thread32First.
-                more = unsafe { Thread32Next(snap.0, &mut entry) } != 0;
+                more = unsafe { Thread32Next(snap.0, &raw mut entry) } != 0;
             }
             Ok(out)
         }
@@ -605,7 +605,7 @@ mod os {
                     ThreadBasicInformation,
                     (&raw mut info).cast::<c_void>(),
                     u32::try_from(size_of::<ThreadBasics>()).unwrap_or(0),
-                    &mut len,
+                    &raw mut len,
                 )
             };
             if status < 0 {
@@ -639,7 +639,7 @@ mod os {
                     at as *const c_void,
                     buf.as_mut_ptr().cast::<c_void>(),
                     buf.len(),
-                    &mut got,
+                    &raw mut got,
                 )
             };
             if ok == 0 { 0 } else { got.min(buf.len()) }
@@ -688,7 +688,7 @@ mod os {
                     VirtualQueryEx(
                         self.handle.0,
                         here as *const c_void,
-                        &mut info,
+                        &raw mut info,
                         size_of::<MEMORY_BASIC_INFORMATION>(),
                     )
                 };

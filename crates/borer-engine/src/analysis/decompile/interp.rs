@@ -1712,9 +1712,9 @@ impl<'p> Script<'p> {
                         }),
                         Bin::And => {
                             let width =
-                                |k: u64| (k & m).checked_add(1).filter(|p| p.count_ones() == 1);
+                                |k: u64| (k & m).checked_add(1).filter(|p| p.is_power_of_two());
                             k(b).and_then(width)
-                                .and_then(|p| u8::try_from(63 - p.leading_zeros()).ok())
+                                .and_then(|p| u8::try_from(p.ilog2()).ok())
                                 .and_then(|bits| {
                                     invert(a, want & mask(bits), param, word, depth - 1)
                                 })

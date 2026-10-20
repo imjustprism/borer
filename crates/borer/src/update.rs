@@ -33,7 +33,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPT_OUT: &str = "BORER_NO_UPDATE_CHECK";
 
 /// How long a checked answer is trusted before the next check.
-const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const CHECK_EVERY: Duration = Duration::from_hours(24);
 
 /// The release archive's target triple and extension for this machine, as
 /// the release workflow names them.

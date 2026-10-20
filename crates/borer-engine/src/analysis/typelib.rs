@@ -424,7 +424,7 @@ pub fn render(group: &Group, value: u64, bits: u8) -> Option<String> {
         (1u64 << bits) - 1
     };
     let v = value & mask;
-    let same = |m: u64| v == m & mask || (m <= u64::from(u32::MAX) && v == sext32(m) & mask);
+    let same = |m: u64| v == m & mask || (u32::try_from(m).is_ok() && v == sext32(m) & mask);
     match group.kind {
         Kind::Enum => group
             .members

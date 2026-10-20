@@ -602,7 +602,7 @@ fn reads_of_stores_of_reads_are_checked_in_bounded_time() {
         tx.send(checked_header(&p, &a, &o, TEXT).unwrap_or_default())
     });
     let header = rx
-        .recv_timeout(std::time::Duration::from_secs(60))
+        .recv_timeout(std::time::Duration::from_mins(1))
         .expect("the check finishes");
     assert!(header.contains("checked vs binary"), "{header}");
 }
@@ -631,7 +631,7 @@ fn values_that_double_each_round_are_checked_in_bounded_time() {
         tx.send(checked_header(&p, &a, &o, TEXT).unwrap_or_default())
     });
     let header = rx
-        .recv_timeout(std::time::Duration::from_secs(60))
+        .recv_timeout(std::time::Duration::from_mins(1))
         .expect("the check finishes");
     assert!(header.contains("checked vs binary"), "{header}");
 }

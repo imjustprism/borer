@@ -241,7 +241,10 @@ impl FrameFacts {
     /// first link encountered winning as a scan's first match would, answers
     /// each step of that walk in constant time.
     pub(super) fn epilogues(&self) -> BTreeSet<u64> {
-        let mut leads = FxHashMap::with_capacity_and_hasher(self.links.len(), Default::default());
+        let mut leads = FxHashMap::with_capacity_and_hasher(
+            self.links.len(),
+            std::hash::BuildHasherDefault::default(),
+        );
         for &(addr, next) in &self.links {
             leads.entry(next).or_insert(addr);
         }

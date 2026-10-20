@@ -51,7 +51,7 @@ pub(super) const WARN: &str = "// warn:";
 pub(super) fn line(text: &str, in_binary: &BTreeSet<String>, word: u8) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let base = lines.iter().position(|l| l.trim().is_empty());
-    let body_lines = base.map_or(&lines[..], |b| lines.get(b + 1..).unwrap_or(&[]));
+    let body_lines = base.map_or(&*lines, |b| lines.get(b + 1..).unwrap_or(&[]));
     let asm = body_lines
         .iter()
         .filter(|l| l.trim_start().starts_with("/* asm"))

@@ -657,7 +657,7 @@ pub(super) fn telling_constant(v: u64) -> bool {
         return false;
     }
     let bytes = crate::num::lo32(v).to_le_bytes();
-    if v <= u64::from(u32::MAX) && bytes.iter().all(|c| (0x20..0x7f).contains(c)) {
+    if u32::try_from(v).is_ok() && bytes.iter().all(|c| (0x20..0x7f).contains(c)) {
         return true;
     }
     if v >= 0x4000_0000 && v & 0x3fff_ffff == 0 {

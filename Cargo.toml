@@ -31,6 +31,38 @@ all = { level = "warn", priority = -1 }
 private_intra_doc_links = "allow"
 
 [workspace.lints.clippy]
+# Pedantic is on as a group. Left off: what a reverse engineer's code reads
+# better with (hex constants from specs, register and operand names), what
+# scripts/check/sizes.py budgets instead (function length), and what
+# fires on most of the tree without finding a defect.
+pedantic = { level = "warn", priority = -1 }
+unreadable_literal = "allow"
+many_single_char_names = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+must_use_candidate = "allow"
+items_after_statements = "allow"
+single_match_else = "allow"
+match_same_arms = "allow"
+wildcard_imports = "allow"
+struct_excessive_bools = "allow"
+unnecessary_wraps = "allow"
+float_cmp = "allow"
+format_push_string = "allow"
+format_collect = "allow"
+verbose_bit_mask = "allow"
+option_option = "allow"
+struct_field_names = "allow"
+naive_bytecount = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+assigning_clones = "allow"
+trivially_copy_pass_by_ref = "allow"
+self_only_used_in_recursion = "allow"
+decimal_bitwise_operands = "allow"
+manual_assert = "allow"
+needless_for_each = "allow"
+range_plus_one = "allow"
+redundant_closure_for_method_calls = "allow"
 # documentation: JSDoc discipline in rustdoc form
 missing_docs_in_private_items = "warn"
 missing_errors_doc = "warn"
@@ -81,6 +113,11 @@ ref_option = "warn"
 return_self_not_must_use = "warn"
 inconsistent_struct_constructor = "warn"
 large_types_passed_by_value = "warn"
+# Simplicity: the same behavior in fewer, plainer lines
+needless_raw_strings = "warn"
+redundant_type_annotations = "warn"
+deref_by_slicing = "warn"
+equatable_if_let = "warn"
 
 # Tests run the analysis on real binaries, borer's own build among them;
 # unoptimized, one `functions` call on it took 32 s and the test step most of

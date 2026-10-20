@@ -2174,8 +2174,8 @@ mod tests {
     /// procedure exists.
     #[inline(never)]
     fn gap022_locals_probe(x: u32) -> u64 {
-        let alpha: u64 = u64::from(x).wrapping_mul(3);
-        let beta: u32 = x.wrapping_add(7);
+        let alpha = u64::from(x).wrapping_mul(3);
+        let beta = x.wrapping_add(7);
         let gamma: u16 = (x & 0xff) as u16;
         let (a, b, g) = std::hint::black_box((&alpha, &beta, &gamma));
         let keep = gap022_sides(std::hint::black_box(x));
