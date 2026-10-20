@@ -11,7 +11,8 @@
 //! background: its answer is kept in the cache, and a newer release is
 //! named on stderr after the command's own output. It never delays a
 //! command and never runs for the MCP server. `BORER_NO_UPDATE_CHECK=1`
-//! turns it off.
+//! turns it off, and it is skipped where nobody reads the notice: with `CI`
+//! set, or stderr not a terminal (a script, a pipe).
 //!
 //! Downloads are `curl` run as a process, as [`crate::symsrv`] fetches
 //! PDBs, and unpacking is `tar`; Windows 10 1803 and later ship both.
@@ -348,14 +349,34 @@ fn recalled() -> Option<(String, bool)> {
     Some((tag.to_owned(), age < CHECK_EVERY))
 }
 
+/// Whether a command line run checks for a newer release.
+///
+/// # Arguments
+///
+/// * `opt_out` - The `BORER_NO_UPDATE_CHECK` value, `None` when unset.
+/// * `ci` - Whether `CI` is set, as continuous integration sets it.
+/// * `terminal` - Whether stderr, where the notice goes, is a terminal.
+///
+/// # Returns
+///
+/// True only for a person at a terminal who has not opted out.
+fn check_wanted(opt_out: Option<&str>, ci: bool, terminal: bool) -> bool {
+    opt_out != Some("1") && !ci && terminal
+}
+
 /// Starts the daily check for a command line run, in the background.
 ///
 /// # Returns
 ///
 /// A handle that [`notice`] reads once the command is done, or `None`
-/// when the check is turned off.
+/// when the check is turned off or nobody would read it ([`check_wanted`]).
 pub(crate) fn start_check() -> Option<std::thread::JoinHandle<Option<String>>> {
-    if std::env::var(OPT_OUT).is_ok_and(|v| v == "1") {
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    if !check_wanted(
+        std::env::var(OPT_OUT).ok().as_deref(),
+        std::env::var_os("CI").is_some(),
+        terminal,
+    ) {
         return None;
     }
     Some(std::thread::spawn(|| {
@@ -393,6 +414,21 @@ pub(crate) fn notice(check: std::thread::JoinHandle<Option<String>>) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    /// The check runs for a person at a terminal, and not when opted out,
+    /// under CI or with stderr redirected.
+    ///
+    /// # Panics
+    ///
+    /// When one of the four reads otherwise.
+    #[test]
+    fn the_check_runs_only_where_someone_reads_it() {
+        assert!(check_wanted(None, false, true));
+        assert!(check_wanted(Some("0"), false, true));
+        assert!(!check_wanted(Some("1"), false, true));
+        assert!(!check_wanted(None, true, true));
+        assert!(!check_wanted(None, false, false));
+    }
+
     use super::*;
 
     /// A set-aside name that cannot be removed, as a still-running earlier

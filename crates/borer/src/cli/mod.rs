@@ -124,7 +124,7 @@ commands:
   fingerprint <binary> [out]               function fingerprints; with out, write the sidecar borer://diff reads
   doctor [offline]                         the local setup, one line each: version and commit, toolchain, symbol cache and server (offline skips the server), index cache, .mcp.json
   setup [--apply] [--replace|--remove]     register this binary as the MCP server borer with every agent client installed (Claude Code, Claude Desktop, Cursor, Windsurf, Devin Desktop, VS Code, VS Code Insiders, Gemini CLI, Codex CLI, Zed); an entry whose program is gone is replaced, --replace replaces any other, --remove takes borer out; a dry run that shows each file and entry unless --apply, which keeps a .bak of each file it changes
-  update [--check]                         install the latest release over this binary, checked against its SHA256SUMS; --check only says whether one is out (a command line run also checks once a day and says so on stderr; BORER_NO_UPDATE_CHECK=1 turns that off)
+  update [--check]                         install the latest release over this binary, checked against its SHA256SUMS; --check only says whether one is out (a command line run at a terminal also checks once a day and says so on stderr; not under CI, and BORER_NO_UPDATE_CHECK=1 turns it off)
   version                                  print the version (also --version, -V)
   fetch-pdb <binary> [server]              fetch the companion PDB the debug record names from a symbol server (default msdl) into the local cache, kept only if its guid+age match; reload to apply
   pack <file>                              read a pack and report its name, its keys by section and what borer does not read
