@@ -1780,7 +1780,7 @@ fn sink_rhs<'a>(raw: &'a str, sinks: &BTreeSet<&str>) -> Option<&'a str> {
         " = ", " += ", " -= ", " *= ", " <<= ", " &= ", " |= ", " ^= ",
     ];
     let t = raw.trim_start();
-    let lhs_end = t.find(" ")?;
+    let lhs_end = t.find(' ')?;
     let lhs = t.get(..lhs_end)?;
     let rest = t.get(lhs_end..)?;
     if is_ident(lhs) && sinks.contains(lhs) {
