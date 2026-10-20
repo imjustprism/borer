@@ -200,6 +200,12 @@ impl ServerHandler for BorerServer {
     /// * `request` - The tool and its arguments.
     /// * `context` - Request context.
     ///
+    /// A call that carries a progress token and will pay for the first
+    /// analysis gets a notification every few seconds while it runs
+    /// ([`analysis_progress`]). The ticker is spawned onto this worker,
+    /// whose next slot no other worker takes, so the call yields once to
+    /// start it before the analysis holds the worker.
+    ///
     /// A tool that runs and fails answers with `isError` set and its
     /// message as the text ([`errors::tool_failure`]), so the agent reads
     /// it; only a request the server cannot run is a protocol error.
@@ -245,8 +251,21 @@ impl ServerHandler for BorerServer {
         let peer_info = context.peer.peer_info();
         let named = (request.name.clone(), request.arguments.clone());
         let known = Self::tool_router().has_route(&request.name);
+        let ticker = context
+            .meta
+            .get_progress_token()
+            .zip(self.analysis_pending())
+            .map(|(token, file)| {
+                tokio::spawn(analysis_progress(context.peer.clone(), token, file))
+            });
+        if ticker.is_some() {
+            tokio::task::yield_now().await;
+        }
         let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let response = Self::tool_router().call(call).await;
+        if let Some(ticker) = ticker {
+            ticker.abort();
+        }
         if reloading {
             self.hand_over.schedule(Resume {
                 peer_info: peer_info.as_deref().cloned(),
@@ -754,6 +773,38 @@ const CHECK_KINDS: &[&str] = &[
     "signature",
     "token",
 ];
+
+/// Time between two progress notifications while a first analysis runs.
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Sends a progress notification every [`PROGRESS_EVERY`] until aborted.
+///
+/// The first call that needs the analysis pays for all of it, which on a
+/// large binary outlasts a client's tool timeout (Codex's is 60 s);
+/// a client that asked for progress resets its timer on each one. The
+/// walk has no total to report, so the progress is the ticks so far.
+///
+/// # Arguments
+///
+/// * `peer` - The client.
+/// * `token` - The progress token the request carried.
+/// * `file` - The file being analyzed, for the message.
+async fn analysis_progress(
+    peer: rmcp::Peer<RoleServer>,
+    token: rmcp::model::ProgressToken,
+    file: String,
+) {
+    let mut ticks: u32 = 0;
+    loop {
+        tokio::time::sleep(PROGRESS_EVERY).await;
+        ticks = ticks.saturating_add(1);
+        let note = rmcp::model::ProgressNotificationParam::new(token.clone(), f64::from(ticks))
+            .with_message(format!("analyzing {file}"));
+        if peer.notify_progress(note).await.is_err() {
+            break;
+        }
+    }
+}
 
 /// Strips schema noise an agent never needs.
 ///

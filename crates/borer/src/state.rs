@@ -228,6 +228,25 @@ impl BorerServer {
         self.ensure_analysis().unwrap_or_default()
     }
 
+    /// Names the loaded file when its analysis has not been computed yet,
+    /// so the next call that reads code will pay for all of it.
+    ///
+    /// # Returns
+    ///
+    /// The file's name, or `None` when nothing is loaded or the analysis
+    /// is already held.
+    pub(crate) fn analysis_pending(&self) -> Option<String> {
+        if read_lock(&self.analysis).is_some() {
+            return None;
+        }
+        self.loaded().map(|p| {
+            p.path.file_name().map_or_else(
+                || p.path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        })
+    }
+
     /// Returns the derived analysis of the current program, computing and
     /// caching it on first use.
     ///
@@ -486,6 +505,21 @@ pub(crate) fn read_packs(files: &[String]) -> anyhow::Result<Arc<Packs>> {
 
 #[cfg(test)]
 mod tests {
+    /// The loaded file is named as pending until its analysis is held,
+    /// and nothing is pending with no file loaded.
+    ///
+    /// # Panics
+    ///
+    /// When the pending state reads otherwise.
+    #[test]
+    fn a_first_analysis_is_pending_until_computed() {
+        assert_eq!(crate::BorerServer::default().analysis_pending(), None);
+        let server = crate::testing::raw_server();
+        assert!(server.analysis_pending().is_some());
+        server.ensure_analysis().expect("analyzes");
+        assert_eq!(server.analysis_pending(), None);
+    }
+
     /// A fresh session renders constants by the binary's name tables, as a
     /// session that has already decompiled does: no answer depends on the
     /// calls before it.
