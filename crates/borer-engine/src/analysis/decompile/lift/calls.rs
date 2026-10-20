@@ -2508,6 +2508,13 @@ impl Exec<'_, '_> {
     /// they are the call's preserved registers ([`Exec::preserved`]); any
     /// other volatile value is forgotten, as after any call.
     ///
+    /// Windows numbers its services anew in every build and borer holds no
+    /// table of them, so a Windows `syscall` stays `syscall(nr, ...)`. Its
+    /// arguments are in `r10`, `rdx`, `r8` and `r9`; inside a native API's
+    /// stub (a function named `NtClose` or `ZwClose`, the service the
+    /// number stands for) they are as many as the API takes, the first
+    /// four of them.
+    ///
     /// # Arguments
     ///
     /// * `gate` - How the kernel is entered.
@@ -2520,7 +2527,9 @@ impl Exec<'_, '_> {
             Register::EDI,
             Register::EBP,
         ];
-        let regs = match gate {
+        let windows = self.ctx.program.format == BinaryFormat::Pe;
+        let regs: &[Register] = match gate {
+            KernelGate::Syscall if windows => &NT_ARGS,
             KernelGate::Syscall => &SYSCALL_ARGS,
             KernelGate::Int80 => &INT80_ARGS,
         };
@@ -2534,9 +2543,12 @@ impl Exec<'_, '_> {
             KernelGate::Syscall => crate::emulate::linux_syscall_name(n),
             KernelGate::Int80 => crate::analysis::syscalls::i386_syscall_name(n),
         });
-        let arity = name
-            .and_then(|n| crate::analysis::typelib::declared(n, BinaryFormat::Elf))
-            .map(|d| d.params.len());
+        let arity = if windows {
+            native_service(&self.ctx.own_name)
+        } else {
+            name.and_then(|n| crate::analysis::typelib::declared(n, BinaryFormat::Elf))
+                .map(|d| d.params.len())
+        };
         let n = self.names();
         let mut args = Vec::new();
         let mut values = Vec::new();
@@ -3255,11 +3267,41 @@ const SYSCALL_ARGS: [Register; 6] = [
     Register::R9,
 ];
 
+/// The registers a Windows `syscall` takes the first four arguments from.
+const NT_ARGS: [Register; 4] = [Register::R10, Register::RDX, Register::R8, Register::R9];
+
+/// Returns how many arguments the native API a function's name names
+/// takes, when the function is that API's stub.
+///
+/// `NtClose` and `ZwClose` both name the service `NtClose`, which takes
+/// one.
+///
+/// # Arguments
+///
+/// * `own` - The function's name.
+///
+/// # Returns
+///
+/// The count, or `None` for a name the type library declares no native
+/// API by.
+fn native_service(own: &str) -> Option<usize> {
+    let service = own
+        .strip_prefix("Zw")
+        .map_or_else(|| own.to_owned(), |rest| format!("Nt{rest}"));
+    service
+        .starts_with("Nt")
+        .then(|| crate::analysis::typelib::declared(&service, BinaryFormat::Pe))
+        .flatten()
+        .map(|d| d.params.len())
+}
+
 /// Returns the argument registers a Linux `syscall` reads.
 ///
 /// They are known when its block sets a number the table names and the C
 /// library declares a function of that name: `mov eax, 1; syscall` reads
-/// `rdi`, `rsi` and `rdx` for `write`.
+/// `rdi`, `rsi` and `rdx` for `write`. In a Windows native API's stub
+/// they are the registers of as many of the API's arguments as the
+/// registers carry ([`native_service`]).
 ///
 /// # Arguments
 ///
@@ -3274,6 +3316,10 @@ pub(in crate::analysis::decompile) fn kernel_reads(
     ctx: &Ctx<'_>,
     instr: &Instruction,
 ) -> Vec<Register> {
+    if ctx.program.format == BinaryFormat::Pe {
+        let arity = native_service(&ctx.own_name).unwrap_or(0);
+        return NT_ARGS.iter().copied().take(arity).collect();
+    }
     let sites = crate::analysis::syscalls::syscall_sites(ctx.program, ctx.analysis);
     let arity = sites
         .binary_search_by_key(&instr.ip(), |s| s.at)

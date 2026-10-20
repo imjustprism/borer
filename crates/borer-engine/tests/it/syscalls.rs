@@ -235,3 +235,37 @@ fn arm64_syscalls_decompile_as_the_calls_they_name() {
     assert!(header.contains("checked vs binary"), "{header}");
     assert!(!header.contains("differ"), "{header}");
 }
+
+/// A Windows `syscall` keeps its number and reads `r10`, `rdx`, `r8`, `r9`.
+///
+/// The service tables are per build, so no name replaces the number. In
+/// the stub of a native API it takes as many arguments as the API does,
+/// the stub's own parameters.
+#[test]
+fn a_native_api_stub_passes_its_parameters_to_syscall() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let code = [
+        0x4c, 0x8b, 0xd1, // ASM: mov r10,rcx
+        0xb8, 0x18, 0x00, 0x00, 0x00, // ASM: mov eax,0x18
+        0x0f, 0x05, // ASM: syscall
+        0xc3, // ASM: ret
+    ];
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400_000,
+        Some(0x401_000),
+        vec![Section::mapped(".text", 0x401_000, 0, 0x1000, false, true)],
+    );
+    p.format = BinaryFormat::Pe;
+    p.symbols = vec![Symbol {
+        name: "NtAllocateVirtualMemory".to_owned(),
+        addr: 0x401_000,
+        kind: SymbolKind::Export,
+    }];
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), 0x401_000).expect("the stub decompiles");
+    assert!(out.contains("return syscall(24, a1, a2, a3, a4);"), "{out}");
+}
