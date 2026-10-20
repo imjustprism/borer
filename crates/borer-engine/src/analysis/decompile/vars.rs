@@ -1231,11 +1231,7 @@ fn renumber(text: &str, before: &str) -> String {
     }
     out.push(String::new());
     out.extend(p.body.iter().map(|l| respelled(l)));
-    let mut joined = out.join("\n");
-    if text.ends_with('\n') {
-        joined.push('\n');
-    }
-    joined
+    rejoin(&out, text)
 }
 
 /// The identifiers of some lines in the order they first appear.

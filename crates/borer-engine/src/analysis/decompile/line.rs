@@ -283,6 +283,20 @@ pub(super) fn header_len<S: AsRef<str>>(lines: &[S]) -> usize {
         .unwrap_or(lines.len())
 }
 
+/// Joins lines back into a text, ending in a newline where `like` does.
+///
+/// # Arguments
+///
+/// * `lines` - The lines.
+/// * `like` - The text they were read from.
+pub(super) fn rejoin<S: std::borrow::Borrow<str>>(lines: &[S], like: &str) -> String {
+    let mut joined = lines.join("\n");
+    if like.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// The label of the block starting at `va`: `L_<va>:`.
 ///
 /// # Arguments
