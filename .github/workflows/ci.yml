@@ -76,9 +76,9 @@ jobs:
   # The same workspace built, linted and tested on Linux and macOS, so an
   # assumption that only holds on Windows fails here. The tests that read
   # borer's own build pin it as the Windows x64 PE and are ignored off
-  # Windows; macos-latest is Apple silicon, whose arm64 binaries borer
-  # loads but does not disassemble. Doctests are left out for the same
-  # reason: they decompile the running binary.
+  # Windows, and macos-latest is Apple silicon, so the running test binary
+  # is an arm64 Mach-O there. Doctests are left out for the same reason:
+  # they decompile the running binary as the Windows x64 PE.
   portable:
     name: test (${{ matrix.os }})
     strategy:

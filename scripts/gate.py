@@ -34,10 +34,11 @@ memory lives beside the build (`gate-cache.json` in the target directory);
 `--check` and `--no-cache` ignore it, and a build step is never skipped,
 since cargo answers an up-to-date one in a second anyway.
 
-A linked worktree builds in the main checkout's target directory unless
-`CARGO_TARGET_DIR` says otherwise: its dependencies are already built
-there, so a fresh worktree compiles only the workspace's own crates. The
-machine lock below keeps two gates from building there at once.
+A linked worktree builds in its own `target-worktrees/<name>` directory
+beside the main checkout unless `CARGO_TARGET_DIR` says otherwise
+(`shared_target`): two checkouts of one workspace write the same artifact
+names, so sharing the main `target` would link one checkout's crates into
+the other. The machine lock below keeps two gates from building at once.
 
 The sweep decompiles every function of the workspace's own server binary
 built with the `corpus` profile (unoptimized throughout, the debug codegen
