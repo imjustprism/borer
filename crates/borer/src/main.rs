@@ -1626,11 +1626,11 @@ mod tests {
                 offset: None,
                 limit: Some(0),
             }))
-            .expect_err("nothing is loaded");
+            .expect_err("a zero limit is refused");
         assert_eq!(
             all.message,
-            crate::state::NO_BINARY,
-            "zero is every line, not refused"
+            crate::tools::decompile::LIMIT_ZERO,
+            "zero is refused as every list tool refuses it"
         );
     }
 

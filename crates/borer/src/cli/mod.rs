@@ -78,7 +78,7 @@ commands:
   findstr <binary> <filter>                functions referencing a matching string
   disasm <binary> <address|name> [count]   disassemble at a virtual address or name (default 32, max 256)
   disasmfn <binary> <address|name>         a whole function, block by block
-  decompile <binary> <address|name> [skeleton|full] [offset] [limit]  structured pseudo-C (skeleton: flow and calls only); 300 lines a page, limit 0 for all
+  decompile <binary> <address|name> [skeleton|full] [offset] [limit]  structured pseudo-C (skeleton: flow and calls only); 300 lines a page, a limit past the last line for all
   class <binary> <class|method address>    class layout from its methods' field accesses
   fieldrefs <binary> <offset> [filter] [skip] [limit]  every instruction touching [reg+offset]; filter names the function (100 a page, max 500)
   vslot <binary> <slot> [filter] [limit]   classes whose virtual at a slot returns a constant (a wire id, a type tag); filter names the class (max 2000)
@@ -1524,7 +1524,8 @@ mod tests {
             head.starts_with("// showing 5 of ") && head.contains(" lines from 300"),
             "{head}"
         );
-        let all = decompiled(&line("decompile", &["0x1000", "full", "", "0"]), &s).expect("all");
+        let all =
+            decompiled(&line("decompile", &["0x1000", "full", "", "1000000"]), &s).expect("all");
         let total: usize = head
             .strip_prefix("// showing 5 of ")
             .and_then(|r| r.split(' ').next())

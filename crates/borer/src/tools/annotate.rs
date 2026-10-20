@@ -836,7 +836,7 @@ mod tests {
                     detail: None,
                     filter: None,
                     offset: None,
-                    limit: Some(0),
+                    limit: Some(u32::MAX),
                 }))
                 .expect("decompiles")
         };
@@ -891,7 +891,7 @@ mod tests {
                     detail: None,
                     filter: None,
                     offset: None,
-                    limit: Some(0),
+                    limit: Some(u32::MAX),
                 }))
                 .expect("decompiles")
         };

@@ -302,6 +302,9 @@ impl Session {
 /// or names no function, or a function that does not decompile.
 pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
     let (detail, offset, limit) = decompile_args(args.get(3..).unwrap_or_default())?;
+    if limit == Some(0) {
+        bail!("{}", crate::tools::decompile::LIMIT_ZERO);
+    }
     let (a, entry) = s.function_arg(
         args,
         2,

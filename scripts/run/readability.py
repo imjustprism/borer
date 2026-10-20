@@ -947,7 +947,7 @@ def collect(client, binary: str, want: int = WANT) -> list[Function]:
     step = max(1, math.ceil(len(rows) / want))
     out = []
     for _, entry, _, name in rows[::step]:
-        _, text = client.tool("decompile", {"address": entry, "limit": 0})
+        _, text = client.tool("decompile", {"address": entry, "limit": 1_000_000})
         out.append(Function(entry, name, text))
     return out
 

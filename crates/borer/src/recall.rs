@@ -18,8 +18,15 @@ use std::fmt::Write as _;
 /// note in their place would save nothing.
 const RECALL_MIN: usize = 512;
 /// Environment variable capping every answer at this many bytes, cut at a
-/// line with a note saying how to get the rest; unset for no cap.
+/// line with a note saying how to get the rest; unset for
+/// [`BUDGET_DEFAULT`], `0` for no cap.
 const BUDGET_ENV: &str = "BORER_BUDGET";
+/// The byte budget when `BORER_BUDGET` sets none.
+///
+/// It is under the 25,000 tokens Claude Code takes from one MCP answer,
+/// at about three bytes a token of pseudo-C, so a whole `decompile` of a
+/// huge function is cut with a note rather than refused whole by the host.
+const BUDGET_DEFAULT: usize = 72_000;
 /// The tool argument that passes back the tag of the answer the reader
 /// holds; the server takes it off before the tool sees its arguments.
 pub(crate) const SINCE_ARG: &str = "since";
@@ -437,12 +444,27 @@ pub(crate) fn budgeted(text: String, narrow: Narrow) -> String {
     }
 }
 
-/// The byte budget `BORER_BUDGET` sets, `None` when it sets none.
+/// The byte budget `BORER_BUDGET` sets ([`budget_of`]).
 fn budget() -> Option<usize> {
-    std::env::var(BUDGET_ENV)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&b| b > 0)
+    budget_of(std::env::var(BUDGET_ENV).ok().as_deref())
+}
+
+/// Reads a `BORER_BUDGET` value.
+///
+/// # Arguments
+///
+/// * `value` - The variable's value, `None` when it is unset.
+///
+/// # Returns
+///
+/// [`BUDGET_DEFAULT`] when unset or not a number, `None` (no cap) at `0`,
+/// else the number.
+fn budget_of(value: Option<&str>) -> Option<usize> {
+    match value.map(|v| v.trim().parse::<usize>()) {
+        Some(Ok(0)) => None,
+        Some(Ok(bytes)) => Some(bytes),
+        Some(Err(_)) | None => Some(BUDGET_DEFAULT),
+    }
 }
 
 /// Whether an answer of `len` bytes is past the byte budget, and so cut
@@ -686,6 +708,20 @@ mod tests {
             body(1).replace("line 1 50\n", "renamed\n"),
         );
         assert!(delta.starts_with("# changed since"), "{delta}");
+    }
+
+    /// An unset or unreadable `BORER_BUDGET` caps answers at the default,
+    /// `0` lifts the cap, and a number sets it.
+    ///
+    /// # Panics
+    ///
+    /// When a value reads otherwise.
+    #[test]
+    fn the_budget_defaults_and_zero_lifts_it() {
+        assert_eq!(super::budget_of(None), Some(super::BUDGET_DEFAULT));
+        assert_eq!(super::budget_of(Some("lots")), Some(super::BUDGET_DEFAULT));
+        assert_eq!(super::budget_of(Some("0")), None);
+        assert_eq!(super::budget_of(Some(" 4096 ")), Some(4096));
     }
 
     /// An answer over the budget is cut at its last whole line with a note;

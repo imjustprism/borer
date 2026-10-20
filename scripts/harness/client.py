@@ -9,6 +9,7 @@ times each call, the other drives the handshake itself.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import Any
 
@@ -19,6 +20,7 @@ class Client:
     """A borer process spoken to as an agent would, over stdio JSON-RPC."""
 
     def __init__(self, exe: str) -> None:
+        # The measurements read whole answers, so no default byte budget.
         self.proc = subprocess.Popen(
             [exe],
             stdin=subprocess.PIPE,
@@ -26,6 +28,7 @@ class Client:
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            env=os.environ | {"BORER_BUDGET": "0"},
         )
         self.next_id = 0
         result = self.call(

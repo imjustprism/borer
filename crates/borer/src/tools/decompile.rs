@@ -16,6 +16,11 @@ use crate::params::{DecompileBatchParams, DecompileParams, Detail, Filter, count
 /// otherwise.
 pub(crate) const DECOMPILE_LINES_DEFAULT: usize = 300;
 
+/// What a `decompile` asked for no lines is told: zero is refused, as
+/// every list tool and resource refuses it, and the whole text is a limit
+/// past its last line.
+pub(crate) const LIMIT_ZERO: &str = "limit must be at least 1; a limit past the last line (the paged header gives the count) returns all";
+
 /// Narrows a decompiled function to the lines a caller asked for.
 ///
 /// A function of a few thousand instructions renders to a few thousand lines, and an agent
@@ -58,11 +63,7 @@ pub(crate) fn window(
     offset: Option<u32>,
     limit: Option<u32>,
 ) -> String {
-    let take = match limit {
-        None => DECOMPILE_LINES_DEFAULT,
-        Some(0) => usize::MAX,
-        Some(n) => to_usize(n),
-    };
+    let take = limit.map_or(DECOMPILE_LINES_DEFAULT, to_usize);
     let lines: Vec<&str> = text.lines().collect();
     let total = lines.len();
     if filter.is_none() && offset.is_none() && total <= take {
@@ -253,6 +254,9 @@ impl BorerServer {
         }): Parameters<DecompileParams>,
     ) -> Result<String, ErrorData> {
         use borer_engine::analysis::decompile;
+        if limit == Some(0) {
+            return Err(crate::errors::err_params(LIMIT_ZERO));
+        }
         self.with_program(|p| {
             if let Some(why) = p.refuses(Feature::Decompile) {
                 return Err(why);
@@ -459,8 +463,8 @@ mod tests {
         assert_eq!(super::window(text, None, None, None), text);
     }
 
-    /// A function longer than the page is paged unasked, and `limit=0`
-    /// asks for every line.
+    /// A function longer than the page is paged unasked, and a limit past
+    /// its last line asks for every line.
     ///
     /// # Panics
     ///
@@ -479,7 +483,7 @@ mod tests {
         );
         assert!(paged.starts_with(&head), "{paged}");
         assert_eq!(paged.lines().count(), super::DECOMPILE_LINES_DEFAULT + 1);
-        assert_eq!(super::window(&long, None, None, Some(0)), long);
+        assert_eq!(super::window(&long, None, None, Some(u32::MAX)), long);
     }
 
     /// A cut page names the line the declarations end on while it starts
@@ -644,7 +648,7 @@ mod tests {
                 }))
                 .expect("decompiles")
         };
-        let whole = decompile(None, 0);
+        let whole = decompile(None, u32::MAX);
         let lines: Vec<&str> = whole.lines().collect();
         let at = usize::try_from(offset).expect("small");
         let kept: Vec<&str> = batch.lines().take_while(|l| *l != note).collect();
@@ -825,7 +829,7 @@ mod tests {
                     detail,
                     filter: None,
                     offset: None,
-                    limit: Some(0),
+                    limit: Some(u32::MAX),
                 }))
                 .expect("decompiles")
         };
@@ -898,7 +902,7 @@ mod tests {
                 detail: None,
                 filter: None,
                 offset: None,
-                limit: Some(0),
+                limit: Some(u32::MAX),
             }))
             .expect("decompiles");
         let lines: Vec<&str> = answer.lines().collect();
@@ -969,7 +973,7 @@ mod tests {
                     detail: None,
                     filter: None,
                     offset: None,
-                    limit: Some(0),
+                    limit: Some(u32::MAX),
                 }))
                 .expect("decompiles")
         };
@@ -1023,7 +1027,7 @@ mod tests {
                 detail: None,
                 filter: None,
                 offset: None,
-                limit: Some(0),
+                limit: Some(u32::MAX),
             }))
             .expect("decompiles");
         assert!(answer.contains("r10"), "{answer}");

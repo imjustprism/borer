@@ -217,6 +217,7 @@ def _env(cache: Path) -> dict:
         k: v for k, v in os.environ.items() if k not in {"BORER_PACKS", "BORER_BUDGET", "BORER_RAW"}
     }
     return env | {
+        "BORER_BUDGET": "0",
         "BORER_CACHE_DIR": str(cache / "index"),
         "BORER_SYMCACHE": str(cache / "symsrv"),
         "LOCALAPPDATA": str(cache),
@@ -306,7 +307,7 @@ def borer_run(borer: str, binary: str, sample: int) -> dict:
         proc, watch, cold, first = _ready(borer, binary, env)
         try:
             row["ready_cold_s"] = round(cold, 3)
-            _tool(proc, "decompile", {"address": first, "limit": 0})
+            _tool(proc, "decompile", {"address": first, "limit": 1_000_000})
             row["first_decompile_s"] = round(time.perf_counter() - t0, 3)
             entries = _entries(proc)
             row["functions"] = len(entries)
@@ -315,7 +316,9 @@ def borer_run(borer: str, binary: str, sample: int) -> dict:
             times = []
             for i in range(want):
                 t = time.perf_counter()
-                _tool(proc, "decompile", {"address": entries[1 + int(i * step)], "limit": 0})
+                _tool(
+                    proc, "decompile", {"address": entries[1 + int(i * step)], "limit": 1_000_000}
+                )
                 times.append((time.perf_counter() - t) * 1000)
             row |= _spread(times)
         finally:

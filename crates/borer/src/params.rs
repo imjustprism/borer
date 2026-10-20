@@ -536,7 +536,7 @@ pub(crate) struct DecompileParams {
     pub(crate) filter: Option<String>,
     /// Skip this many lines of the answer.
     pub(crate) offset: Option<u32>,
-    /// Return at most this many lines (default 300; 0 for all).
+    /// Return at most this many lines (default 300; more than the text has for all).
     pub(crate) limit: Option<u32>,
 }
 
