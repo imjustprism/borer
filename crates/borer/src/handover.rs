@@ -49,7 +49,7 @@ impl Resume {
     pub(crate) fn hand_over(&self, file: &Path) -> ! {
         if let Err(e) = serde_json::to_vec(self)
             .map_err(std::io::Error::other)
-            .and_then(|json| std::fs::write(file, json))
+            .and_then(|json| write_fresh(file, &json))
         {
             eprintln!(
                 "borer: the session's state does not survive the reload ({}): {e}",
@@ -76,6 +76,28 @@ impl Resume {
         }
         serde_json::from_slice(&json).map_err(|e| format!("parse {}: {e}", file.display()))
     }
+}
+
+/// Writes a file that must not exist yet, never through a link.
+///
+/// The state file lives in the relay's private directory
+/// ([`relay::state_dir`]) and the worker taking over removes it once read,
+/// so one already there was put there by someone else.
+///
+/// # Arguments
+///
+/// * `file` - The file.
+/// * `bytes` - What it holds.
+///
+/// # Errors
+///
+/// When anything is already at `file`, or the write fails.
+fn write_fresh(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(file)?;
+    std::io::Write::write_all(&mut out, bytes)
 }
 
 /// The hand-over to the next worker, shared between the server, which asks
@@ -239,4 +261,44 @@ pub(crate) fn end_quietly_when_stdout_closes() {
         }
         default(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_fresh;
+    use crate::relay::state_dir;
+
+    /// Each session's state directory is fresh and its own, and the state
+    /// file is never written over what is already there or through a link.
+    ///
+    /// # Panics
+    ///
+    /// When two sessions share a directory, or a planted file or link is
+    /// written through.
+    #[test]
+    fn the_state_lives_in_a_fresh_directory_and_a_fresh_file() {
+        let base = std::env::temp_dir().join(format!("borer-state-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("a temp dir");
+        let one = state_dir(&base).expect("a directory");
+        let two = state_dir(&base).expect("another");
+        assert_ne!(one, two);
+        let file = one.join("resume.json");
+        write_fresh(&file, b"{}").expect("a fresh file");
+        assert!(
+            write_fresh(&file, b"{}").is_err(),
+            "an existing file is kept"
+        );
+        let victim = base.join("victim.txt");
+        std::fs::write(&victim, b"untouched").expect("written");
+        let link = two.join("resume.json");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&victim, &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&victim, &link).is_ok();
+        if linked {
+            assert!(write_fresh(&link, b"{}").is_err(), "a link is not followed");
+        }
+        assert_eq!(std::fs::read(&victim).expect("read"), b"untouched");
+        std::fs::remove_dir_all(&base).expect("cleans up");
+    }
 }

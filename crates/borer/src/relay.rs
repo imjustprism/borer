@@ -47,6 +47,56 @@ pub(crate) const HAND_OVER: i32 = 75;
 /// (killed by a signal) or could not be waited for.
 const NO_CODE: i32 = 1;
 
+/// Names tried for the session's state directory before giving up.
+const STATE_DIR_TRIES: usize = 16;
+
+/// Makes the private directory the session's state crosses in.
+///
+/// The name is unguessable (the process id and 64 random bits) and made
+/// fresh, never an existing directory, readable only by its owner on Unix;
+/// a file planted in the shared temporary directory beforehand, or a link
+/// there, cannot stand in for the state.
+///
+/// # Arguments
+///
+/// * `base` - The directory to make it in, the temporary directory in
+///   production.
+///
+/// # Returns
+///
+/// The directory.
+///
+/// # Errors
+///
+/// When no fresh name could be made after [`STATE_DIR_TRIES`] tries, or
+/// the directory cannot be made.
+pub(crate) fn state_dir(base: &Path) -> std::io::Result<PathBuf> {
+    for _ in 0..STATE_DIR_TRIES {
+        let salt = std::hash::BuildHasher::hash_one(
+            &std::collections::hash_map::RandomState::new(),
+            std::process::id(),
+        );
+        let dir = base.join(format!("borer-{}-{salt:016x}", std::process::id()));
+        #[cfg(unix)]
+        let builder = {
+            let mut owner_only = std::fs::DirBuilder::new();
+            std::os::unix::fs::DirBuilderExt::mode(&mut owner_only, 0o700);
+            owner_only
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "no fresh state directory under {} after {STATE_DIR_TRIES} tries",
+        base.display()
+    )))
+}
+
 /// A running worker.
 #[derive(Debug)]
 struct Worker {
@@ -116,6 +166,7 @@ impl Worker {
             .stdout
             .take()
             .context("the server's output is not piped")?;
+        let state = state.to_path_buf();
         let pump = std::thread::spawn(move || {
             let mut stdout = std::io::stdout().lock();
             if let Err(e) = std::io::copy(&mut out, &mut stdout).and_then(|_| stdout.flush()) {
@@ -130,6 +181,7 @@ impl Worker {
                 }
             };
             if code != HAND_OVER {
+                forget_state(&state);
                 std::process::exit(code);
             }
         });
@@ -182,11 +234,42 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let exe = std::env::args_os()
         .next()
         .map_or_else(std::env::current_exe, |a| Ok(PathBuf::from(a)))?;
-    let state = std::env::temp_dir().join(format!("borer-resume-{}.json", std::process::id()));
+    let state = state_dir(&std::env::temp_dir())
+        .context("making the session's state directory")?
+        .join("resume.json");
+    let served = serve(&exe, &state);
+    forget_state(&state);
+    served
+}
+
+/// Removes the session's state directory ([`state_dir`]) as the relay ends.
+///
+/// # Arguments
+///
+/// * `state` - The state file, whose directory goes.
+fn forget_state(state: &Path) {
+    if let Some(dir) = state.parent()
+        && let Err(e) = std::fs::remove_dir_all(dir)
+    {
+        eprintln!("borer: remove {}: {e}", dir.display());
+    }
+}
+
+/// Relays the host's lines to a worker until the host closes the session.
+///
+/// # Arguments
+///
+/// * `exe` - The binary each worker runs.
+/// * `state` - The file a worker hands its state over in.
+///
+/// # Errors
+///
+/// As [`run`].
+fn serve(exe: &Path, state: &Path) -> anyhow::Result<()> {
     let tether = borer_live::Tether::new()
         .inspect_err(|e| eprintln!("borer: the server will not end with this process: {e}"))
         .ok();
-    let mut worker = Worker::start(&exe, &state, None, tether.as_ref())?;
+    let mut worker = Worker::start(exe, state, None, tether.as_ref())?;
     let mut host = std::io::stdin().lock();
     let mut line = Vec::new();
     loop {
@@ -205,7 +288,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         }
         if is_reload(&line) {
             ended(worker.pump)?;
-            worker = Worker::start(&exe, &state, Some(&state), tether.as_ref())?;
+            worker = Worker::start(exe, state, Some(state), tether.as_ref())?;
         }
     }
 }
