@@ -15,7 +15,8 @@
 //! a parameter, and a variable no evidence names keeps its number. Names
 //! are spelling: no line reads anything else for them.
 
-use super::vars::{Lex, Line, declaration, is_var_name, lex, parts};
+use super::lexer::{Lex, Line, lex};
+use super::vars::{declaration, is_var_name, parts};
 use super::*;
 use crate::analysis::typelib::{self, Decl, Os, Pass};
 use crate::program::BinaryFormat;
