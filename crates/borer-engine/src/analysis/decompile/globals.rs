@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use super::expr::{Key, Names, Ty};
 use super::fields::{TypedFields, struct_fields};
-use crate::analysis::utypes::{TypeExpr, pointee_struct};
+use crate::analysis::utypes::{TypeExpr, UserType, pointee_struct, width_of};
 use crate::dwarf::Global;
 use crate::program::Program;
 
@@ -71,6 +71,168 @@ pub(super) fn stated(program: &Program, addr: u64, name: &str) -> Option<Stated>
             })
         }
     }
+}
+
+/// An array global the debug information states, as a text declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Table {
+    /// The array's address.
+    pub(super) start: u64,
+    /// How many elements it holds.
+    pub(super) len: u64,
+    /// One element's size in bytes.
+    pub(super) size: u64,
+    /// The element type it is declared with: `struct prec_assoc`, or for
+    /// a scalar element the unsigned integer of its width (`uint32_t` of
+    /// an `int`), the type the lifter reads every unsigned load as.
+    pub(super) declared: String,
+}
+
+/// One element of a [`Table`], as an access at some address reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Element {
+    /// The array.
+    pub(super) table: Table,
+    /// The element the address lies in, counted from the array's start.
+    pub(super) index: u64,
+    /// The field the access reads, `.prec`, or empty for a whole scalar
+    /// element.
+    pub(super) field: String,
+    /// The C type the access reads as: a field's own type, or the
+    /// declared type of a scalar element.
+    pub(super) reads: String,
+}
+
+/// Returns the array global the debug information states at `at`, with
+/// its element type.
+///
+/// An array of integers, pointers or structs counts; one of floats or of
+/// arrays does not, since a table is declared and read in integers.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, with its debug information.
+/// * `at` - An address.
+///
+/// # Returns
+///
+/// The table and its element type, or `None` when no such array holds
+/// `at`.
+fn stated_table(program: &Program, at: u64) -> Option<(Table, &TypeExpr)> {
+    let globals = &program.debug_globals;
+    let defined = globals.get(globals.partition_point(|g| g.addr.is_none())..)?;
+    let g = defined.get(
+        defined
+            .partition_point(|g| g.addr <= Some(at))
+            .checked_sub(1)?,
+    )?;
+    let (Some(start), Some(TypeExpr::Array(elem, len))) = (g.addr, &g.ty) else {
+        return None;
+    };
+    let word = u64::from(program.arch.bitness().unwrap_or(64) / 8);
+    let types = &program.debug_types;
+    let size = width_of(types, elem, word).filter(|s| *s > 0)?;
+    if at - start >= size.checked_mul(*len)? {
+        return None;
+    }
+    let declared = match pointee_struct(types, &TypeExpr::Ptr(elem.clone())) {
+        Some(_) => {
+            let TypeExpr::Named(tag) = elem.as_ref() else {
+                return None;
+            };
+            match types.get(tag) {
+                Some(UserType::Alias(TypeExpr::Named(t))) => format!("struct {t}"),
+                Some(UserType::Struct(_) | UserType::Enum(_) | UserType::Alias(_)) | None => {
+                    format!("struct {tag}")
+                }
+            }
+        }
+        None if matches!(**elem, TypeExpr::Array(..) | TypeExpr::F32 | TypeExpr::F64) => {
+            return None;
+        }
+        None => match size {
+            1 => "uint8_t",
+            2 => "uint16_t",
+            4 => "uint32_t",
+            8 => "uint64_t",
+            _ => return None,
+        }
+        .to_owned(),
+    };
+    Some((
+        Table {
+            start,
+            len: *len,
+            size,
+            declared,
+        },
+        elem,
+    ))
+}
+
+/// Returns the array global the debug information states at `at`
+/// ([`stated_table`]), whatever an access there reads.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, with its debug information.
+/// * `at` - An address.
+///
+/// # Returns
+///
+/// The table, or `None` when no stated array holds `at`.
+pub(super) fn table_holding(program: &Program, at: u64) -> Option<Table> {
+    stated_table(program, at).map(|(t, _)| t)
+}
+
+/// Returns the element of a stated array global an access of `bytes` at
+/// `at` reads.
+///
+/// The access must be one whole integer or pointer: a scalar element, or
+/// the field of a struct element the remaining offset lands on, at the
+/// field's width. A scalar element reads as its table's declared type, so
+/// a read needs no cast; a field keeps its stated type.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, with its debug information.
+/// * `at` - The access's address.
+/// * `bytes` - The access's width in bytes.
+///
+/// # Returns
+///
+/// The element, or `None` when no stated array holds `at` or the access is
+/// not one whole scalar of it.
+pub(super) fn table_at(program: &Program, at: u64, bytes: u64) -> Option<Element> {
+    let (table, elem) = stated_table(program, at)?;
+    let word = u64::from(program.arch.bitness().unwrap_or(64) / 8);
+    let types = &program.debug_types;
+    let off = at - table.start;
+    let (index, within) = (off / table.size, off % table.size);
+    let (field, reads) = match pointee_struct(types, &TypeExpr::Ptr(Box::new(elem.clone()))) {
+        Some(s) => {
+            let f = s.fields.get(&within)?;
+            if width_of(types, &f.ty, word)? != bytes {
+                return None;
+            }
+            let reads = match &f.ty {
+                TypeExpr::Char => "int8_t".to_owned(),
+                TypeExpr::Array(..) | TypeExpr::Named(_) | TypeExpr::F32 | TypeExpr::F64 => {
+                    return None;
+                }
+                other => other.c_name(word)?,
+            };
+            (format!(".{}", f.name), reads)
+        }
+        None if within == 0 && table.size == bytes => (String::new(), table.declared.clone()),
+        None => return None,
+    };
+    Some(Element {
+        table,
+        index,
+        field,
+        reads,
+    })
 }
 
 /// Reads a debug-information variable's type as a declaration states it.

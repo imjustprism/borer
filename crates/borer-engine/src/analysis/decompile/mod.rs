@@ -2499,32 +2499,50 @@ fn decompile_in<L: Lifter>(
         out.push_str(n);
         out.push('\n');
     }
-    let globals: Vec<cir::Decl> = ctx
-        .globals
-        .iter()
-        .filter(|(addr, ty)| ctx.global_types.get(addr).is_none_or(|t| t == ty))
-        .filter_map(|(addr, ty)| {
-            let g = names.key(Key::Global(*addr, ty.bits()));
-            let import = names.import_at(*addr).is_some_and(|n| n == g);
-            let word = u64::try_from(ctx.conv.word).unwrap_or(8);
-            let (base, stars) = globals::stated(program, *addr, &g)
-                .filter(|s| s.is_pointer() && s.fits(*ty, word))
-                .map_or_else(
-                    || (ty.name().to_owned(), String::new()),
-                    |s| {
-                        let base = s.spelled.trim_end_matches(['*', ' ']);
-                        (base.to_owned(), s.spelled[base.len()..].replace(' ', ""))
-                    },
-                );
-            (used.contains(g.as_str()) && !import).then(|| cir::Decl {
-                ty: cir::CTy::parse(&base),
-                names: vec![cir::Name::of(&format!("{stars}{g}"))],
-                note: Some(match expr::tls_slot(*addr) {
-                    Some(off) => format!("TLS slot {off:#x}"),
-                    None => format!("@ {addr:#x}"),
+    let mut tables: BTreeMap<u64, cir::Decl> = BTreeMap::new();
+    for (addr, _) in &ctx.globals {
+        let Some(t) = globals::table_holding(program, *addr) else {
+            continue;
+        };
+        let table = names.key(Key::Global(t.start, 8));
+        if used.contains(table.as_str()) {
+            tables.entry(t.start).or_insert_with(|| cir::Decl {
+                ty: cir::CTy::parse(&t.declared),
+                names: vec![cir::Name::of(&format!("{table}[{}]", t.len))],
+                note: Some(format!("@ {:#x}", t.start)),
+            });
+        }
+    }
+    let globals: Vec<cir::Decl> = tables
+        .into_values()
+        .chain(
+            ctx.globals
+                .iter()
+                .filter(|(addr, ty)| ctx.global_types.get(addr).is_none_or(|t| t == ty))
+                .filter(|(addr, _)| globals::table_holding(program, *addr).is_none())
+                .filter_map(|(addr, ty)| {
+                    let g = names.key(Key::Global(*addr, ty.bits()));
+                    let import = names.import_at(*addr).is_some_and(|n| n == g);
+                    let word = u64::try_from(ctx.conv.word).unwrap_or(8);
+                    let (base, stars) = globals::stated(program, *addr, &g)
+                        .filter(|s| s.is_pointer() && s.fits(*ty, word))
+                        .map_or_else(
+                            || (ty.name().to_owned(), String::new()),
+                            |s| {
+                                let base = s.spelled.trim_end_matches(['*', ' ']);
+                                (base.to_owned(), s.spelled[base.len()..].replace(' ', ""))
+                            },
+                        );
+                    (used.contains(g.as_str()) && !import).then(|| cir::Decl {
+                        ty: cir::CTy::parse(&base),
+                        names: vec![cir::Name::of(&format!("{stars}{g}"))],
+                        note: Some(match expr::tls_slot(*addr) {
+                            Some(off) => format!("TLS slot {off:#x}"),
+                            None => format!("@ {addr:#x}"),
+                        }),
+                    })
                 }),
-            })
-        })
+        )
         .collect();
     cir::print_decls(&globals, &mut out);
     out.push('\n');

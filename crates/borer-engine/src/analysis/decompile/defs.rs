@@ -65,23 +65,25 @@ pub(super) fn declare(text: &str, program: &Program) -> String {
     let mut tables: Vec<String> = Vec::new();
     let mut by_value: Vec<String> = Vec::new();
     for g in &program.debug_globals {
-        let Some(TypeExpr::Array(elem, len)) = &g.ty else {
+        let Some(t) = g
+            .addr
+            .and_then(|at| super::globals::table_holding(program, at))
+            .filter(|t| Some(t.start) == g.addr)
+        else {
             continue;
         };
-        if g.addr.is_none()
-            || !code.iter().any(|l| indexes(l, &g.name))
-            || code.iter().any(|l| declares(l, &g.name))
-            || tables.len() >= STRUCTS_MAX
+        if !code.iter().any(|l| indexes(l, &g.name)) || tables.len() >= STRUCTS_MAX {
+            continue;
+        }
+        let declaration = code.iter().find(|l| declares(l, &g.name));
+        if let Some(tag) = t.declared.strip_prefix("struct ")
+            && declaration.is_none_or(|l| l.contains(t.declared.as_str()))
         {
-            continue;
+            by_value.push(tag.to_owned());
         }
-        let Some(spelled) = spell(types, elem, &format!("{}[{len}]", g.name)) else {
-            continue;
-        };
-        if let Some(tag) = struct_tag(types, elem) {
-            by_value.push(tag);
+        if declaration.is_none() {
+            tables.push(format!("extern {} {}[{}];", t.declared, g.name, t.len));
         }
-        tables.push(format!("extern {spelled};"));
     }
     let mut roots: Vec<String> = Vec::new();
     for w in &words {

@@ -10121,3 +10121,31 @@ fn an_indexed_read_of_a_stated_table_names_the_field() {
     let text = decompiled(&p, 0x1_4000_1000);
     assert!(text.contains("return table[a1].name;"), "{text}");
 }
+
+/// A read of one element of a stated array global is that element, and
+/// the array is declared once, whole.
+///
+/// `mov eax,[rip+fds+4]; add eax,[rip+fds]; ret` reads both elements of
+/// `int fds[2]`: the text declares `uint32_t fds[2];` and returns `fds[1] +
+/// fds[0]`, where two scalars named after one array would not compile.
+#[test]
+fn a_stated_array_global_is_declared_whole() {
+    use borer_engine::analysis::utypes::TypeExpr;
+    use borer_engine::dwarf::Global;
+    let code = [
+        0x8b, 0x05, 0xfe, 0x1f, 0x00, 0x00, // ASM: mov eax,[rip+0x1ffe]
+        0x03, 0x05, 0xf4, 0x1f, 0x00, 0x00, // ASM: add eax,[rip+0x1ff4]
+        0xc3, // ASM: ret
+    ];
+    let mut p = program64_with_globals(&code, true, &[("fds", 0x1_4000_3000)]);
+    p.debug_globals = vec![Global {
+        name: "fds".to_owned(),
+        addr: Some(0x1_4000_3000),
+        type_name: Some("int[]".to_owned()),
+        ty: Some(TypeExpr::Array(Box::new(TypeExpr::I32), 2)),
+    }];
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert_eq!(text.matches("fds[2];").count(), 1, "{text}");
+    assert!(text.contains("uint32_t fds[2];"), "{text}");
+    assert!(text.contains("fds[1]") && text.contains("fds[0]"), "{text}");
+}

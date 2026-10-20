@@ -1098,7 +1098,7 @@ impl<'a> Exec<'_, 'a> {
         let n = self.names();
         let line = match addr {
             Expr::Const(a) if self.is_data(a) => {
-                format!("{} = {};", n.global(a, ty.bits()).0, v.render(&n))
+                format!("{} = {};", n.global_place(a, ty.bits()).0, v.render(&n))
             }
             other => {
                 let lhs = Expr::deref(other, ty);

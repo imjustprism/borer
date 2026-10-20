@@ -1442,7 +1442,7 @@ impl<'a> Exec<'_, 'a> {
             }
             if self.is_data(a) {
                 self.note_global(a, ty);
-                return Some(format!("(*{})", n.global(a, ty.bits()).0));
+                return Some(format!("(*{})", n.global_place(a, ty.bits()).0));
             }
         }
         let v = match addr {

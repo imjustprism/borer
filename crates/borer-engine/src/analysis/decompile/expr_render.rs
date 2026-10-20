@@ -509,10 +509,10 @@ impl Names<'_> {
         }
     }
 
-    /// Names an access of `bits` to the global at `addr`: its name where
-    /// the access is as wide as its declaration ([`Names::global_types`]),
-    /// else a load or a store of that width through its address,
-    /// `*(uint128_t*)&newtime` beside a `uint64_t newtime`.
+    /// Names a read of `bits` from the global at `addr`: the place
+    /// [`Names::global_place`] names, cast to the read's unsigned type
+    /// where an element of a stated table reads as another,
+    /// `(uint16_t)prec_table[0].prec`.
     ///
     /// # Arguments
     ///
@@ -523,6 +523,46 @@ impl Names<'_> {
     ///
     /// `(text, precedence)`.
     pub(super) fn global(&self, addr: u64, bits: u8) -> (String, u8) {
+        let read = Ty::from_bits(bits).name();
+        match super::globals::table_at(self.program, addr, u64::from(bits) / 8) {
+            Some(e) if e.reads != read => (
+                format!("({read}){}", self.global_place(addr, bits).0),
+                UNARY,
+            ),
+            Some(_) | None => self.global_place(addr, bits),
+        }
+    }
+
+    /// Names an access of `bits` to the global at `addr` as a place: the
+    /// element of a stated table it lies in, `file_desc[1]` or
+    /// `prec_table[0].prec`, or the bytes of that table it reads,
+    /// `*(uint16_t*)((uint8_t*)&file_desc + 0x2)`; else its name where the
+    /// access is as wide as
+    /// its declaration ([`Names::global_types`]); else a load or a store of
+    /// that width through its address, `*(uint128_t*)&newtime` beside a
+    /// `uint64_t newtime`.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The global's address.
+    /// * `bits` - The access width in bits.
+    ///
+    /// # Returns
+    ///
+    /// `(text, precedence)`.
+    pub(super) fn global_place(&self, addr: u64, bits: u8) -> (String, u8) {
+        if let Some(e) = super::globals::table_at(self.program, addr, u64::from(bits) / 8) {
+            let table = self.key(Key::Global(e.table.start, 8));
+            return (format!("{table}[{}]{}", e.index, e.field), ATOM);
+        }
+        if let Some(t) = super::globals::table_holding(self.program, addr) {
+            let table = self.key(Key::Global(t.start, 8));
+            let ty = Ty::from_bits(bits).name();
+            return match addr - t.start {
+                0 => (format!("*({ty}*)&{table}"), UNARY),
+                off => (format!("*({ty}*)((uint8_t*)&{table} + {off:#x})"), UNARY),
+            };
+        }
         match self.global_types.get(&addr) {
             Some(declared) if declared.bits() != bits => {
                 let name = self.key(Key::Global(addr, declared.bits()));
@@ -1947,7 +1987,6 @@ fn render_load(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> (String, u8) {
 /// `(text, precedence)`, or `None` when the address is no element of a
 /// stated array or the read is not one whole scalar of it.
 fn global_element(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> Option<(String, u8)> {
-    use crate::analysis::utypes::{TypeExpr, pointee_struct, width_of};
     let (sum, extra) = match a {
         Expr::Bin(Op::Add, inner, k) if matches!(**inner, Expr::Bin(Op::Add, ..)) => match **k {
             Expr::Const(k) => (inner.as_ref(), k),
@@ -1965,47 +2004,15 @@ fn global_element(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> Option<(String
         let (index, factor) = term_of(term);
         (!matches!(index, Expr::Const(_))).then(|| (c.wrapping_add(extra), index, factor))
     })?;
-    let globals = &n.program.debug_globals;
-    let defined = globals.get(globals.partition_point(|g| g.addr.is_none())..)?;
-    let g = defined.get(
-        defined
-            .partition_point(|g| g.addr <= Some(at))
-            .checked_sub(1)?,
-    )?;
-    let (Some(start), Some(TypeExpr::Array(elem, len))) = (g.addr, &g.ty) else {
-        return None;
-    };
-    let word = u64::try_from(n.word).unwrap_or(8);
-    let types = &n.program.debug_types;
-    let size = width_of(types, elem, word).filter(|s| *s == factor)?;
-    let off = at - start;
-    if off >= size.checked_mul(*len)? {
-        return None;
-    }
-    let (shift, within) = (off / size, off % size);
-    let (field, fty) = match pointee_struct(types, &TypeExpr::Ptr(elem.clone())) {
-        Some(s) => {
-            let f = s.fields.get(&within)?;
-            (format!(".{}", f.name), &f.ty)
-        }
-        None if within == 0 => (String::new(), elem.as_ref()),
-        None => return None,
-    };
-    if width_of(types, fty, word)? != u64::from(ty.bits()) / 8 {
-        return None;
-    }
-    let reads = match fty {
-        TypeExpr::Char => "int8_t".to_owned(),
-        TypeExpr::Array(..) | TypeExpr::Named(_) => return None,
-        other => other.c_name(word)?,
-    };
-    let table = n.key(Key::Global(start, ty.bits()));
-    let index = match shift {
+    let e = super::globals::table_at(n.program, at, u64::from(ty.bits()) / 8)
+        .filter(|e| e.table.size == factor)?;
+    let table = n.key(Key::Global(e.table.start, 8));
+    let index = match e.index {
         0 => index.render(n),
         k => format!("{} + {k}", index.render(n)),
     };
-    let element = format!("{table}[{index}]{field}");
-    Some(if reads == name {
+    let element = format!("{table}[{index}]{}", e.field);
+    Some(if e.reads == name {
         (element, ATOM)
     } else {
         (format!("({name}){element}"), UNARY)
