@@ -2,13 +2,13 @@ name: ci
 
 # The project's own gate on Windows: the same `scripts/gate.py --check` a
 # commit passes locally, so CI and the local gate cannot drift apart; and
-# clippy and the tests on Linux and macOS. It runs on what lands on main,
-# on every pull request into main, and on demand; a newer run on the same
-# ref cancels the older one.
+# clippy and the tests on Linux and macOS. It runs on what lands on dev or
+# main, on every pull request into main, and on demand; a newer run on the
+# same ref cancels the older one.
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     branches: [main]
   workflow_dispatch:
