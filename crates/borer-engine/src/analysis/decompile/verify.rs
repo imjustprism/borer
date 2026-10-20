@@ -1963,16 +1963,24 @@ impl<M: Bench, R> Ran<'_, M, R> {
     /// # Arguments
     ///
     /// * `e` - The value.
+    ///
+    /// # Returns
+    ///
+    /// Unreadable when the evaluator cannot read the value, whatever memory
+    /// it read on the way, so the count does not hang on the order an
+    /// evaluator reads operands in; stale when the value read memory the
+    /// block wrote; else the value.
     pub(super) fn read(&self, e: &Expr) -> Read {
         let mut reads = Vec::new();
         let v = match &self.st.mir {
             Some(vas) => mir_read(&self.st, vas, &mut reads, |b| b.value(e)),
             None => eval(e, &self.st, &mut reads, EVAL_DEPTH),
         };
-        if self.touches(&reads) {
-            return Read::Stale;
+        match v {
+            None => Read::Unreadable,
+            Some(_) if self.touches(&reads) => Read::Stale,
+            Some(v) => Read::Value(v),
         }
-        v.map_or(Read::Unreadable, Read::Value)
     }
 
     /// Tells whether memory ranges overlap a byte the emulator wrote.
@@ -2539,10 +2547,10 @@ impl<M: Bench, R> Ran<'_, M, R> {
             Some(vas) => mir_read(&self.st, vas, &mut reads, |b| b.condition(cond)).map(|v| v != 0),
             None => eval_cond(cond, &self.st, &mut reads, EVAL_DEPTH),
         };
-        let read = if self.touches(&reads) {
-            Read::Stale
-        } else {
-            lifted.map_or(Read::Unreadable, |b| Read::Value(u64::from(b)))
+        let read = match lifted {
+            None => Read::Unreadable,
+            Some(_) if self.touches(&reads) => Read::Stale,
+            Some(b) => Read::Value(u64::from(b)),
         };
         let Some(lifted) = out.count(Fact::Branch, read) else {
             return;
@@ -2685,8 +2693,8 @@ pub(super) fn report(v: &Verified, kinds: &[Fact]) -> String {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Effect, Fact, Sweep, Verified, st_register, verify, verify_mir, verify_tsv};
-    use crate::analysis::decompile::expr::{Expr, Key, Op, UnOp};
+    use super::{Effect, Fact, Read, Sweep, Verified, st_register, verify, verify_mir, verify_tsv};
+    use crate::analysis::decompile::expr::{Expr, Key, Op, Ty, UnOp};
     use crate::analysis::{Analysis, Overlay};
     use crate::isa::x86::Register;
     use crate::program::{Arch, Program, Section, Symbol, SymbolKind};
@@ -2753,6 +2761,38 @@ mod tests {
             );
             let branches = mir.facts.get(&Fact::Branch).map(|t| t.compared);
             assert_eq!(branches, Some(1), "seed {seed}: {}", verify_tsv(&mir));
+        }
+    }
+
+    /// A value the evaluator cannot read is unreadable even when a load on
+    /// the way read memory the block wrote, as expressions and through MIR.
+    ///
+    /// The block stores to `[rcx]`. `[rcx] + t` with `t` a temporary no
+    /// state holds reads the stored bytes, then fails: which of the two an
+    /// evaluator meets first is its own order, so the count must not hang
+    /// on it. `[rcx]` alone still reads as stale.
+    #[test]
+    fn an_unreadable_value_stays_unreadable_whatever_it_read() {
+        let p = Program::raw_x64(&[
+            0x48, 0x89, 0x11, // ASM: mov [rcx], rdx
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let overlay = Overlay::default();
+        let f = a.function(0x1000).expect("function");
+        let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
+        let stored = Expr::Deref(Box::new(Expr::Var(Key::Reg(Register::RCX))), Ty::U64);
+        let unknown = Expr::Var(Key::Tmp(u32::MAX));
+        let sum = |l: &Expr, r: &Expr| Expr::Bin(Op::Add, Box::new(l.clone()), Box::new(r.clone()));
+        for mir in [false, true] {
+            let sweep = Sweep::new(&p, 1, mir).expect("sweep");
+            let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+            let mut out = Verified::default();
+            let ran = sweep.run(&mut ctx, 0x1000, block, &mut out).expect("run");
+            assert_eq!(ran.read(&stored), Read::Stale, "mir {mir}");
+            for e in [sum(&stored, &unknown), sum(&unknown, &stored)] {
+                assert_eq!(ran.read(&e), Read::Unreadable, "mir {mir}: {e:?}");
+            }
         }
     }
 
