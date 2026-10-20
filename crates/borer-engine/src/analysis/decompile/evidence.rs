@@ -6,11 +6,14 @@
 //! a call that answers yes or no is spelled as the call.
 //!
 //! First match wins, as a reader names them: the parameter of a declared
-//! API a variable is passed to whole (`hKey`), and the field a variable is
-//! loaded from (`count` from `p->count`). A name the text already holds
-//! takes a number, so nothing shadows a function, a global or a parameter,
-//! and a variable no evidence names keeps its number. Names are spelling:
-//! no line reads anything else for them.
+//! API a variable is passed to whole (`hKey`), the field a variable is
+//! loaded from (`count` from `p->count`), and what its type says it holds
+//! (`fp` for a C stream, `hFile` for the handle `CreateFileW` hands back).
+//! A `for` loop's counter no line outside the loop names is `i`, `j` or
+//! `k` by how deep the loop nests. A name the text already holds takes a
+//! number or the next letter, so nothing shadows a function, a global or
+//! a parameter, and a variable no evidence names keeps its number. Names
+//! are spelling: no line reads anything else for them.
 
 use super::vars::{Lex, Line, declaration, is_var_name, lex, parts};
 use super::*;
@@ -24,7 +27,19 @@ enum Rank {
     Param,
     /// Loaded from a named field.
     Field,
+    /// Holding a C stream or a handle, by the API's declared types.
+    Type,
 }
+
+/// The names a loop counter takes, by how deep its loop nests, the next
+/// one when the text already holds the first.
+const COUNTERS: [&str; 5] = ["i", "j", "k", "m", "n"];
+
+/// The verbs a handle API's name opens with, whose rest names the handle.
+const HANDLE_VERBS: [&str; 6] = ["Create", "Open", "Get", "Duplicate", "Find", "Load"];
+
+/// The type a C stream has, as the type library spells it.
+const STREAM: &str = "FILE *";
 
 /// The handle types a run reads as a pointer to nothing: what one holds
 /// and how it compares are a machine word's.
@@ -514,15 +529,31 @@ fn rename(text: &str) -> Option<String> {
             *slot = Some((rank, name.to_owned()));
         }
     };
+    let handles: BTreeSet<&str> = p
+        .head
+        .get(p.decls..)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|d| declaration(d))
+        .filter(|(ty, _)| *ty == "HANDLE")
+        .flat_map(|(_, items)| items.into_iter().map(|(_, n)| n))
+        .collect();
     for l in &lines {
         for (k, tok) in l.toks.iter().enumerate() {
             let Some(w) = l.text.get(tok.at..tok.end).filter(|w| is_var_name(w)) else {
                 continue;
             };
-            if let Some((callee, i)) = argument_of(l, k)
-                && let Some(param) = decl(callee).and_then(|d| d.params.get(i))
-            {
+            let Some((callee, i)) = argument_of(l, k) else {
+                continue;
+            };
+            if let Some(param) = decl(callee).and_then(|d| d.params.get(i)) {
                 offer(w, Rank::Param, param.name);
+            }
+            if any_decl(callee)
+                .and_then(|(d, _)| d.params.get(i))
+                .is_some_and(|param| param.ty == STREAM)
+            {
+                offer(w, Rank::Type, "fp");
             }
         }
         if let Some((var, rhs)) = assignment(l)
@@ -532,7 +563,18 @@ fn rename(text: &str) -> Option<String> {
         {
             offer(var, Rank::Field, field);
         }
+        if let Some((var, rhs)) = assignment(l).filter(|(_, rhs)| lone_call(rhs))
+            && let Some((callee, _)) = rhs.split_once('(')
+            && let Some((d, _)) = any_decl(callee)
+        {
+            if d.ret == STREAM {
+                offer(var, Rank::Type, "fp");
+            } else if d.ret == "HANDLE" && handles.contains(var) {
+                offer(var, Rank::Type, &handle_name(callee));
+            }
+        }
     }
+    let counters = loop_counters(&lines);
     let mut taken: BTreeSet<String> = BTreeSet::new();
     for h in &p.head {
         taken.extend(tokens(h).map(str::to_owned));
@@ -567,6 +609,16 @@ fn rename(text: &str) -> Option<String> {
         taken.insert(name.clone());
         renames.insert(var, name);
     }
+    for (var, depth) in counters {
+        if !matches!(vars.get(var), Some(None)) {
+            continue;
+        }
+        let free = COUNTERS.iter().skip(depth).find(|c| !taken.contains(**c));
+        if let Some(c) = free {
+            taken.insert((*c).to_owned());
+            renames.insert(var, (*c).to_owned());
+        }
+    }
     if renames.is_empty() {
         return None;
     }
@@ -591,6 +643,106 @@ fn rename(text: &str) -> Option<String> {
         joined.push('\n');
     }
     Some(joined)
+}
+
+/// The name of the handle a handle API hands back.
+///
+/// It is `h` and the API's name after its verb, without a trailing `A` or
+/// `W` or `Handle`: `hFile` from `CreateFileW`, `hProcess` from
+/// `OpenProcess`.
+///
+/// # Arguments
+///
+/// * `callee` - The API's name.
+fn handle_name(callee: &str) -> String {
+    let base = callee
+        .strip_suffix(['A', 'W'])
+        .filter(|b| b.ends_with(|c: char| c.is_ascii_lowercase()))
+        .unwrap_or(callee);
+    let rest = HANDLE_VERBS
+        .iter()
+        .find_map(|v| {
+            base.strip_prefix(v)
+                .filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase()))
+        })
+        .unwrap_or(base);
+    let rest = rest
+        .strip_suffix("Handle")
+        .filter(|r| !r.is_empty())
+        .unwrap_or(rest);
+    format!("h{rest}")
+}
+
+/// The counters of the `for` loops whose counter no line outside the
+/// loop names, each with how many such loops enclose its own.
+///
+/// A counter is the variable a header starts (`for (v = 0; ...`) and steps
+/// by one (`v += 1`, `v++`, `v -= 1`, `v--`), named by its condition, and
+/// named by no line before the header or after the loop's closing brace:
+/// the loop is its whole life, which is what `i` says.
+///
+/// # Arguments
+///
+/// * `lines` - The body's lines.
+///
+/// # Returns
+///
+/// The counters in the order their loops open.
+fn loop_counters<'t>(lines: &[Line<'t>]) -> Vec<(&'t str, usize)> {
+    let mut loops: Vec<(&'t str, usize, usize)> = Vec::new();
+    for (a, l) in lines.iter().enumerate() {
+        let t = l.text.trim();
+        let Some(header) = t.strip_prefix("for (").and_then(|h| h.strip_suffix(") {")) else {
+            continue;
+        };
+        let clauses: Vec<&str> = header.split("; ").collect();
+        let [init, cond, step] = clauses.as_slice() else {
+            continue;
+        };
+        let Some((var, _)) = init.split_once(" = ") else {
+            continue;
+        };
+        let steps = [
+            format!("{var} += 1"),
+            format!("{var}++"),
+            format!("++{var}"),
+            format!("{var} -= 1"),
+            format!("{var}--"),
+            format!("--{var}"),
+        ];
+        if !is_var_name(var)
+            || !steps.iter().any(|s| s == step)
+            || word_positions(cond, var).is_empty()
+        {
+            continue;
+        }
+        let pad = indent_of(l.text);
+        let Some(b) = (a + 1..lines.len()).find(|&b| {
+            lines
+                .get(b)
+                .is_some_and(|e| indent_of(e.text) == pad && e.text.trim_start().starts_with('}'))
+        }) else {
+            continue;
+        };
+        let alone = lines
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| *k < a || *k > b)
+            .all(|(_, o)| word_positions(o.text, var).is_empty());
+        if alone {
+            loops.push((var, a, b));
+        }
+    }
+    loops
+        .iter()
+        .map(|&(var, a, b)| {
+            let depth = loops
+                .iter()
+                .filter(|&&(_, oa, ob)| oa < a && b <= ob)
+                .count();
+            (var, depth)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -631,7 +783,8 @@ mod tests {
     }
 
     /// A variable passed whole to a declared API takes the parameter's
-    /// name. A handle result and a length keep their numbers.
+    /// name. A handle result is named for what its API opens; a length
+    /// keeps its number.
     #[test]
     fn apis_name_what_they_take_and_hand_back() {
         let t = function(
@@ -649,11 +802,11 @@ mod tests {
         assert_eq!(
             body(&out),
             [
-                "var1 = GetProcessHeap();",
+                "hProcessHeap = GetProcessHeap();",
                 "var2 = lstrlenW(a1);",
                 "hObject = sub_1(a2);",
                 "CloseHandle(hObject);",
-                "sub_2(var1, var2);",
+                "sub_2(hProcessHeap, var2);",
                 "return 0;",
             ],
             "{out}"
@@ -661,7 +814,7 @@ mod tests {
         assert!(
             out.contains(
                 "uint64_t var2, hObject;
-HANDLE var1;"
+HANDLE hProcessHeap;"
             ),
             "{out}"
         );
@@ -706,29 +859,70 @@ HANDLE var1;"
         );
     }
 
-    /// A `for` header's counter keeps the number the text gave it.
+    /// A `for` header's counter no line outside the loop names is `i`, a
+    /// nested one `j`, and a later loop at the first depth takes the next
+    /// free letter. A counter read after its loop keeps its number.
     #[test]
     fn a_for_counter_is_i() {
         let t = function(
-            &["uint64_t var1;"],
+            &["uint64_t var1, var2, var3, var4;"],
             &[
                 "for (var1 = 0; var1 < a1; var1 += 1) {",
-                "  sub_1(var1);",
+                "  for (var2 = a2; var2 < a1; var2++) {",
+                "    sub_1(var1, var2);",
+                "  }",
                 "}",
-                "return 0;",
+                "for (var3 = 0; var3 < a2; var3 += 1) {",
+                "  sub_1(var3);",
+                "}",
+                "for (var4 = 0; var4 < a2; var4 += 1) {",
+                "  sub_1(var4);",
+                "}",
+                "return var4;",
             ],
         );
         let out = name_vars(&t, WORD);
         assert_eq!(
             body(&out),
             [
-                "for (var1 = 0; var1 < a1; var1 += 1) {",
-                "  sub_1(var1);",
+                "for (i = 0; i < a1; i += 1) {",
+                "  for (j = a2; j < a1; j++) {",
+                "    sub_1(i, j);",
+                "  }",
                 "}",
-                "return 0;"
+                "for (k = 0; k < a2; k += 1) {",
+                "  sub_1(k);",
+                "}",
+                "for (var4 = 0; var4 < a2; var4 += 1) {",
+                "  sub_1(var4);",
+                "}",
+                "return var4;",
             ],
             "{out}"
         );
+    }
+
+    /// A C stream is `fp`, by the API that opens it or one it is passed
+    /// to, and a handle typed by the API that hands it back is named for
+    /// what that API opens.
+    #[test]
+    fn streams_and_handles_are_named_by_their_types() {
+        let t = function(
+            &["uint64_t var1, var2, var3;"],
+            &[
+                "var1 = fopen(a1, \"r\");",
+                "var2 = sub_1(a2);",
+                "fclose(var2);",
+                "var3 = CreateFileW(a1, 0, 0, 0, 3, 0, 0);",
+                "sub_2(var3);",
+                "return var1;",
+            ],
+        );
+        let out = name_vars(&t, WORD);
+        assert!(out.contains("fp = fopen(a1, \"r\");"), "{out}");
+        assert!(out.contains("fclose(fp2);"), "{out}");
+        assert!(out.contains("hFile = CreateFileW("), "{out}");
+        assert!(out.contains("HANDLE hFile;"), "{out}");
     }
 
     /// A field names what is loaded from it. A length keeps its number
@@ -759,7 +953,8 @@ HANDLE var1;"
     }
 
     /// A variable holding only one handle API's results is declared by
-    /// that type; one read in arithmetic keeps its width.
+    /// that type and named for what the API opens; one read in arithmetic
+    /// keeps its width and its number.
     #[test]
     fn handles_are_typed_by_their_api() {
         let t = function(
@@ -772,7 +967,7 @@ HANDLE var1;"
             ],
         );
         let out = name_vars(&t, WORD);
-        assert!(out.contains("uint64_t var2;\nHANDLE var1;"), "{out}");
+        assert!(out.contains("uint64_t var2;\nHANDLE hProcess;"), "{out}");
         assert!(!out.contains("HANDLE Process;"), "{out}");
     }
 
