@@ -863,7 +863,77 @@ fn constant_stores_that_spell_a_string_are_a_strcpy() {
     let o = Overlay::default();
     for (entry, copy) in [
         (TEXT, "strcpy(local_10, \"abcde\");"),
-        (TEXT + 0x70, "strcpy((char*)a1, \"hello, world\");"),
+        (TEXT + 0x70, "strcpy(a1, \"hello, world\");"),
+    ] {
+        let text = decompile_named(&p, &a, &o, entry).unwrap_or_default();
+        assert!(text.contains(copy), "{text}");
+        let rows = check_generated_iso(&p, &a, &o, entry, 8, 1, 20_000).expect("the text reads");
+        assert!(
+            rows.iter().any(|(_, v)| *v == Verdict::Agrees),
+            "{text}
+{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|(_, v)| matches!(v, Verdict::Differs(..))),
+            "{text}
+{rows:?}"
+        );
+    }
+}
+
+/// Wide moves from one object to the same places in another are a
+/// `memcpy`.
+///
+/// `scopy` assigns a 32-byte structure through two pointers as two
+/// 16-byte moves; `scopy_local` copies one into its frame and hands the
+/// copy to a callee that changes and sums it, so the two frame slots are
+/// one array the copy fills. Run as ISO C, each text agrees with the
+/// binary: the buffer holds the same bytes, and the callee sums the same
+/// copy.
+#[test]
+fn wide_moves_between_objects_are_a_memcpy() {
+    let mut code = vec![
+        0x0f, 0x10, 0x02, // ASM: movups xmm0,[rdx]
+        0x0f, 0x10, 0x4a, 0x10, // ASM: movups xmm1,[rdx+0x10]
+        0x0f, 0x11, 0x49, 0x10, // ASM: movups [rcx+0x10],xmm1
+        0x0f, 0x11, 0x01, // ASM: movups [rcx],xmm0
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x10, 0xcc);
+    code.extend([
+        0x48, 0x83, 0xec, 0x48, // ASM: sub rsp,0x48
+        0x0f, 0x10, 0x01, // ASM: movups xmm0,[rcx]
+        0x0f, 0x10, 0x49, 0x10, // ASM: movups xmm1,[rcx+0x10]
+        0x0f, 0x29, 0x4c, 0x24, 0x30, // ASM: movaps [rsp+0x30],xmm1
+        0x0f, 0x29, 0x44, 0x24, 0x20, // ASM: movaps [rsp+0x20],xmm0
+        0x48, 0x8d, 0x4c, 0x24, 0x20, // ASM: lea rcx,[rsp+0x20]
+        0xe8, 0x11, 0x00, 0x00, 0x00, // ASM: call 0x1040
+        0x90, // ASM: nop
+        0x48, 0x83, 0xc4, 0x48, // ASM: add rsp,0x48
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x40, 0xcc);
+    code.extend([
+        0x48, 0x8b, 0x41, 0x18, // ASM: mov rax,[rcx+0x18]
+        0x48, 0x8b, 0x11, // ASM: mov rdx,[rcx]
+        0x48, 0x01, 0xc2, // ASM: add rdx,rax
+        0x48, 0x89, 0x11, // ASM: mov [rcx],rdx
+        0x48, 0x8d, 0x14, 0x52, // ASM: lea rdx,[rdx+rdx*2]
+        0x4c, 0x8b, 0x41, 0x08, // ASM: mov r8,[rcx+8]
+        0x48, 0x8b, 0x49, 0x10, // ASM: mov rcx,[rcx+0x10]
+        0x4f, 0x8d, 0x04, 0x80, // ASM: lea r8,[r8+r8*4]
+        0x49, 0x01, 0xc0, // ASM: add r8,rax
+        0x49, 0x01, 0xd0, // ASM: add r8,rdx
+        0x49, 0x8d, 0x04, 0xc8, // ASM: lea rax,[r8+rcx*8]
+        0x48, 0x29, 0xc8, // ASM: sub rax,rcx
+        0xc3, // ASM: ret
+    ]);
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    for (entry, copy) in [
+        (TEXT, "memcpy(a1, a2, 0x20);"),
+        (TEXT + 0x10, "memcpy(local_28, a1, 0x20);"),
     ] {
         let text = decompile_named(&p, &a, &o, entry).unwrap_or_default();
         assert!(text.contains(copy), "{text}");
