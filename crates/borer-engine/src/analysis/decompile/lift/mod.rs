@@ -104,6 +104,11 @@ pub(super) struct Env {
     /// rax held this constant at the last call (`__chkstk` keeps it): the
     /// `sub rsp, rax` that follows adjusts the frame by it.
     pub chkstk: Option<u64>,
+    /// The blocks an `alloca` made room for ([`Exec::alloca`]), each as the
+    /// stack offset it was taken below, its size, and the variable holding
+    /// its address: an address computed as that offset less that size is
+    /// the variable.
+    pub allocas: Vec<(i64, Expr, Key)>,
     /// Flags left for a successor that reads them before setting any
     /// (`cmp; jae A; ... A: jne B` reuses one compare); Unknown otherwise.
     pub flags: Flags,
@@ -169,6 +174,7 @@ impl Env {
             slot_bits: BTreeMap::new(),
             sp: Some(0),
             chkstk: None,
+            allocas: Vec::new(),
             flags: Flags::Unknown,
             df: Some(false),
             classes: BTreeMap::new(),
@@ -223,6 +229,7 @@ impl Env {
             slot_bits: BTreeMap::new(),
             sp: None,
             chkstk: None,
+            allocas: Vec::new(),
             flags: Flags::Unknown,
             df: None,
             classes: BTreeMap::new(),
@@ -285,6 +292,7 @@ impl Env {
         if self.chkstk != other.chkstk {
             self.chkstk = None;
         }
+        self.allocas.retain(|a| other.allocas.contains(a));
         if self.flags != other.flags {
             self.flags = Flags::Unknown;
         }

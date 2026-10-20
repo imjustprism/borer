@@ -118,7 +118,12 @@ impl<'a> Exec<'_, 'a> {
         if r == self.rsp() {
             return match self.env.sp {
                 Some(k) => Expr::Sp(k),
-                None => Expr::Var(self.canon(r)),
+                None => self
+                    .env
+                    .vals
+                    .get(&self.canon(r))
+                    .cloned()
+                    .unwrap_or(Expr::Var(self.canon(r))),
             };
         }
         let key = self.canon(r);
@@ -259,7 +264,49 @@ impl<'a> Exec<'_, 'a> {
         if matches!(seg, Register::FS | Register::GS) {
             e = fold(Op::Add, Expr::Var(Key::Reg(seg)), e, 64);
         }
-        e
+        self.in_alloca(e)
+    }
+
+    /// Spells an address inside a block an `alloca` made room for through
+    /// the variable that holds the block's address.
+    ///
+    /// `[rcx+rax]` with `rcx` the stack pointer before the `alloca` and
+    /// `rax` its size negated is the block's first byte, whichever way the
+    /// sum is written ([`dynamic_room`]), and a constant past it is an
+    /// offset into the block.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The address.
+    ///
+    /// # Returns
+    ///
+    /// The address through the block's variable, or `e` itself.
+    fn in_alloca(&self, e: Expr) -> Expr {
+        if self.env.allocas.is_empty() {
+            return e;
+        }
+        let (room, past) = match &e {
+            Expr::Bin(Op::Add, l, r) => match (&**l, &**r) {
+                (inner, Expr::Const(c)) if !matches!(inner, Expr::Sp(_)) => (inner.clone(), *c),
+                _ => (e.clone(), 0),
+            },
+            _ => (e.clone(), 0),
+        };
+        let Some((k, size)) = room_below(&room) else {
+            return e;
+        };
+        let held = self
+            .env
+            .allocas
+            .iter()
+            .find(|(at, n, _)| *at == k && *n == size)
+            .map(|(_, _, t)| Expr::Var(*t));
+        match held {
+            Some(t) if past == 0 => t,
+            Some(t) => fold(Op::Add, t, Expr::Const(past), 64),
+            None => e,
+        }
     }
 
     /// Returns the access type of the instruction's memory operand.
@@ -588,6 +635,48 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
+    /// Lifts a drop of the stack pointer by a run-time amount as the
+    /// `alloca` it compiles from.
+    ///
+    /// `sub rsp, rax` after a `__chkstk` of a computed size, or `mov rsp,
+    /// rcx` with `rcx` the old stack pointer less one, makes room on the
+    /// stack the frame does not have: the text gets `t = alloca(n);` and
+    /// every value that is the new stack pointer, the stack pointer itself
+    /// among them, is `t` from here on. The size the compiler rounded up to
+    /// the stack's alignment (`align_up(n, 0x10)`) is written as the size
+    /// asked for. The statement is checked as the assignment of the new
+    /// stack pointer it is on the machine.
+    ///
+    /// # Arguments
+    ///
+    /// * `sp` - The stack pointer's variable.
+    /// * `v` - The new stack pointer: the old one less `size`.
+    /// * `size` - The bytes made room for.
+    pub(super) fn alloca(&mut self, sp: Key, v: &Expr, size: Expr) {
+        let t = self.fresh_tmp(Ty::U64);
+        let n = self.names();
+        let asked = match &size {
+            Expr::Helper(Helper::AlignUp, args) if args.len() == 2 => args.first(),
+            _ => None,
+        }
+        .unwrap_or(&size);
+        emit_line!(
+            self,
+            format!("{} = alloca({});", n.key(t), asked.render(&n))
+        );
+        self.record(EffectKind::Assign(t, v.clone(), 64));
+        for held in self.env.vals.values_mut() {
+            if held == v {
+                *held = Expr::Var(t);
+            }
+        }
+        if let Some((k, _)) = room_below(v) {
+            self.env.allocas.push((k, size, t));
+        }
+        self.env.vals.insert(sp, Expr::Var(t));
+        self.env.sp = None;
+    }
+
     /// Records a slot's declaration type on first sight (emission pass only).
     ///
     /// # Arguments
@@ -600,7 +689,9 @@ impl<'a> Exec<'_, 'a> {
 
     /// Assigns a register lazily: the value stays symbolic until needed.
     ///
-    /// Writing the stack pointer updates the tracked offset instead. A byte
+    /// Writing the stack pointer updates the tracked offset instead; a write
+    /// that lowers it by an amount no constant gives is an `alloca`
+    /// ([`Exec::alloca`]). A byte
     /// or word write merges into the parent register only when some later
     /// instruction reads bits it keeps; otherwise the lane is the whole value
     /// (`mov al, [p]; mov [q], al` never mentions `rax`).
@@ -614,6 +705,21 @@ impl<'a> Exec<'_, 'a> {
             /// Most bytes a `sub esp` outside the prologue makes room for
             /// arguments with: a structure passed by value is copied there.
             const ARGS_ROOM_MAX: i64 = 0x100;
+            let sp_key = self.canon(r);
+            let region = self.env.vals.remove(&sp_key);
+            if self.bitness() == 64 && r.size() == 8 {
+                if let Some(size) = dynamic_room(&v) {
+                    self.alloca(sp_key, &v, size);
+                    return;
+                }
+                if let Some(Expr::Var(t)) = region
+                    && v.mentions(t)
+                {
+                    self.env.vals.insert(sp_key, v);
+                    self.env.sp = None;
+                    return;
+                }
+            }
             let before = self.env.sp;
             self.env.sp = match v {
                 _ if self.bitness() == 64 && r.size() < 8 => None,
@@ -2042,4 +2148,46 @@ pub(in crate::analysis::decompile) fn try_level_store(instr: &Instruction, bitne
                 | OpKind::Immediate8to32
                 | OpKind::Immediate32to64
         )
+}
+
+/// The bytes a new stack pointer makes room for below a tracked one, when
+/// no constant gives them: `sp - n` or `sp + -n` with `n` computed.
+///
+/// # Arguments
+///
+/// * `v` - The new stack pointer.
+///
+/// # Returns
+///
+/// The amount, or `None` for a constant one or a value not relative to a
+/// tracked stack offset.
+fn dynamic_room(v: &Expr) -> Option<Expr> {
+    room_below(v).map(|(_, size)| size)
+}
+
+/// Reads a value as a stack offset less an amount no constant gives: `sp -
+/// n`, `sp + -n` or `-n + sp`.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+///
+/// # Returns
+///
+/// The offset and the amount, or `None` for any other value.
+fn room_below(v: &Expr) -> Option<(i64, Expr)> {
+    let (k, size) = match v {
+        Expr::Bin(Op::Sub, base, size) => match **base {
+            Expr::Sp(k) => (k, &**size),
+            _ => return None,
+        },
+        Expr::Bin(Op::Add, l, r) => match (&**l, &**r) {
+            (Expr::Sp(k), Expr::Un(UnOp::Neg, size)) | (Expr::Un(UnOp::Neg, size), Expr::Sp(k)) => {
+                (*k, &**size)
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (!matches!(size, Expr::Const(_))).then(|| (k, size.clone()))
 }

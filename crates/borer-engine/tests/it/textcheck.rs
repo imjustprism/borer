@@ -734,3 +734,79 @@ fn a_hash_stored_at_32_bits_needs_no_mask() {
 {rows:?}"
     );
 }
+
+/// A stack pointer lowered by a size computed at run time is an `alloca`.
+///
+/// `dyn_sum` asks `__chkstk` to probe `n * 4` bytes rounded to sixteen,
+/// lowers `rsp` by them, and fills and sums the block through `rdx`, the
+/// new stack pointer. The text asks `alloca` for the size the source did
+/// and indexes the block through the variable holding it; the probe is
+/// no statement. Run as ISO C on its own block it agrees with the binary.
+#[test]
+fn a_run_time_stack_drop_is_an_alloca() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![
+        0x55, // ASM: push rbp
+        0x48, 0x89, 0xe5, // ASM: mov rbp,rsp
+        0x4c, 0x63, 0xc9, // ASM: movsxd r9,ecx
+        0x4a, 0x8d, 0x04, 0x8d, 0x0f, 0x00, 0x00, 0x00, // ASM: lea rax,[r9*4+0xf]
+        0x48, 0x83, 0xe0, 0xf0, // ASM: and rax,-0x10
+        0xe8, 0x58, 0x00, 0x00, 0x00, // ASM: call 0x1070
+        0x48, 0x29, 0xc4, // ASM: sub rsp,rax
+        0x48, 0x89, 0xe2, // ASM: mov rdx,rsp
+        0x41, 0x89, 0xc8, // ASM: mov r8d,ecx
+        0x45, 0x85, 0xc9, // ASM: test r9d,r9d
+        0x7e, 0x1d, // ASM: jle 0x1043
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, // ASM: nop dword [rax+rax]
+        0x41, 0x89, 0xc1, // ASM: mov r9d,eax
+        0x44, 0x0f, 0xaf, 0xc8, // ASM: imul r9d,eax
+        0x44, 0x89, 0x0c, 0x82, // ASM: mov [rdx+rax*4],r9d
+        0x48, 0xff, 0xc0, // ASM: inc rax
+        0x49, 0x39, 0xc0, // ASM: cmp r8,rax
+        0x75, 0xed, // ASM: jne 0x1030
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x85, 0xc9, // ASM: test ecx,ecx
+        0x7e, 0x19, // ASM: jle 0x1062
+        0x31, 0xc9, // ASM: xor ecx,ecx
+        0x0f, 0x1f, 0x44, 0x00, 0x00, // ASM: nop dword [rax+rax]
+        0x44, 0x8b, 0x0c, 0x8a, // ASM: mov r9d,[rdx+rcx*4]
+        0x41, 0x31, 0xc9, // ASM: xor r9d,ecx
+        0x44, 0x01, 0xc8, // ASM: add eax,r9d
+        0x48, 0xff, 0xc1, // ASM: inc rcx
+        0x49, 0x39, 0xc8, // ASM: cmp r8,rcx
+        0x75, 0xee, // ASM: jne 0x1050
+        0x48, 0x89, 0xec, // ASM: mov rsp,rbp
+        0x5d, // ASM: pop rbp
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x70, 0xcc);
+    code.push(0xc3); // ASM: ret
+    let mut p = program(&code, &[]);
+    p.symbols = vec![Symbol {
+        name: "__chkstk".to_owned(),
+        addr: TEXT + 0x70,
+        kind: SymbolKind::Local,
+    }];
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+    assert!(
+        text.contains("var1 = alloca((int64_t)(int32_t)a1 * 4);"),
+        "{text}"
+    );
+    assert!(text.contains("((uint32_t*)var1)["), "{text}");
+    assert!(!text.contains("__chkstk"), "{text}");
+    assert!(!text.contains("rsp"), "{text}");
+    let rows = check_generated_iso(&p, &a, &o, TEXT, 8, 1, 200_000).expect("the text reads");
+    assert!(
+        rows.iter().any(|(_, v)| *v == Verdict::Agrees),
+        "{text}
+{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|(_, v)| matches!(v, Verdict::Differs(..))),
+        "{text}
+{rows:?}"
+    );
+}

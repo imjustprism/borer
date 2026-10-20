@@ -84,6 +84,17 @@ const ISO_BASE_32: u64 = 0x5f00_0000;
 /// array, and a gap after it no other object starts in.
 const ISO_STRIDE: u64 = 0x1000;
 
+/// Where the blocks the text's `alloca` calls hand out start on a 64-bit
+/// target: memory no image, stack or local object takes.
+const ALLOCA_BASE_64: u64 = 0x0000_5ffc_0000_0000;
+
+/// Where the text's `alloca` blocks start on a 32-bit target.
+const ALLOCA_BASE_32: u64 = 0x5e00_0000;
+
+/// Bytes left between two `alloca` blocks, past the alignment each starts
+/// at.
+const ALLOCA_GAP: u64 = 0x100;
+
 /// How a script reads the text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Mode {
@@ -1581,6 +1592,11 @@ impl<'p> Script<'p> {
             line: 0,
             args: args.to_vec(),
             handed: None,
+            alloca: if self.program.is_64 {
+                ALLOCA_BASE_64
+            } else {
+                ALLOCA_BASE_32
+            },
         };
         let (end, sources) = run.go();
         Some(TextRun {
@@ -2263,6 +2279,8 @@ struct Running<'s, 'p> {
     /// running the callee again, whose side effects the machine would then
     /// see twice.
     call_memo: Option<(u64, Vec<u64>, u64, u64)>,
+    /// Where the next `alloca` block starts.
+    alloca: u64,
 }
 
 /// The result of evaluating one piece of the text.
@@ -3630,8 +3648,9 @@ impl Running<'_, '_> {
     }
 
     /// Evaluates the call of a name no variable and no function holds: the
-    /// operators the lifter writes as functions and the routines it reads a
-    /// string instruction or a counting loop as.
+    /// operators the lifter writes as functions, the routines it reads a
+    /// string instruction or a counting loop as, and `alloca`, which hands
+    /// out a fresh zeroed block of memory no other object takes.
     ///
     /// # Arguments
     ///
@@ -3658,6 +3677,15 @@ impl Running<'_, '_> {
         }
         match name {
             "NtCurrentTeb" if vals.is_empty() => Ok(self.int(self.s.teb, CTy::of(Base::Void).to())),
+            "alloca" => {
+                let n = self.length(arg(0)?)?;
+                let at = self.alloca;
+                self.alloca = at.wrapping_add(n).wrapping_add(ALLOCA_GAP + 0xf) & !0xf;
+                for k in 0..n {
+                    self.emu.poke(at.wrapping_add(k), 0);
+                }
+                Ok(self.int(at, CTy::of(Base::Void).to()))
+            }
             "memset" => {
                 let (d, c, n) = (arg(0)?, arg(1)?, arg(2)?);
                 let n = self.length(n)?;
