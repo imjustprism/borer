@@ -157,7 +157,7 @@ git:
   - One commit, one concern, and the tree builds green at every commit. Work that touches several concerns is several commits, each with its own tests.
   - Never commit build output or anything .gitignore covers.
   - scripts/check/commits.py checks every unpushed commit message, and the gate runs it first.
-  - Work lands on `dev`, never directly on `main`. Commit to dev (or merge a worktree branch into it) and push dev. `main` only moves by fast-forwarding to a dev commit whose full gate (`python scripts/gate.py`) and CI both passed.
+  - Every change lands through a pull request into `dev`, never a direct push to `dev` or `main`. Work on a branch named `type/topic` (fix/, perf/, add/, docs/, chore/...), one concern per pull request, push the branch and open the pull request against `dev`. It merges once CI is green and the Greptile review's findings are fixed or answered. `main` only moves through a pull request from `dev` whose full gate (`python scripts/gate.py`) and CI both passed.
   - Parallel agents never share a working tree. Each works in its own git worktree on its own branch and keeps work in progress as commits there, never in git stash, since every worktree of a repository shares one stash stack.
 
 roadmap:
