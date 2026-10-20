@@ -2,8 +2,9 @@
 //! results, allocations, and Linux system calls.
 
 use super::calls::ApiCall;
-use super::{Emulator, Stop, image_byte, linux_syscall_name};
+use super::{Emulator, Stop, image_byte};
 use crate::analysis::decompile::abi;
+use crate::analysis::syscalls::linux_syscall_name;
 use crate::isa::x86::{Instruction, Register};
 use crate::num::{from_usize, lo8};
 

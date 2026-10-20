@@ -85,7 +85,7 @@ const EXIT_CALLS: [u64; 2] = [93, 94];
 /// Returns the Linux arm64 name of a syscall number.
 ///
 /// arm64 uses the architecture-generic numbering, so the numbers differ
-/// from the x86-64 table ([`super::linux_syscall_name`]): there is no
+/// from the x86-64 table ([`crate::analysis::syscalls::linux_syscall_name`]): there is no
 /// `open` or `stat`, only `openat` and `newfstatat`. The table holds the
 /// calls a static ELF reaches for, in the order of
 /// `include/uapi/asm-generic/unistd.h`; unlisted numbers are reported bare.

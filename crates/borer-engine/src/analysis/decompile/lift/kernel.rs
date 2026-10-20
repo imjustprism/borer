@@ -7,7 +7,7 @@ impl Exec<'_, '_> {
     /// Lifts a call into the kernel as the call it names.
     ///
     /// On Linux the number in `eax` names the call, by the table of the
-    /// entry used ([`crate::emulate::linux_syscall_name`] for `syscall`,
+    /// entry used ([`crate::analysis::syscalls::linux_syscall_name`] for `syscall`,
     /// [`crate::analysis::syscalls::i386_syscall_name`] for `int 0x80`),
     /// and the call reads its arguments from the entry's registers: `rdi`,
     /// `rsi`, `rdx`, `r10`, `r8`, `r9` for `syscall`, `ebx`, `ecx`, `edx`,
@@ -52,7 +52,7 @@ impl Exec<'_, '_> {
         };
         let linux = self.ctx.program.format == BinaryFormat::Elf;
         let name = nr.filter(|_| linux).and_then(|n| match gate {
-            KernelGate::Syscall => crate::emulate::linux_syscall_name(n),
+            KernelGate::Syscall => crate::analysis::syscalls::linux_syscall_name(n),
             KernelGate::Int80 => crate::analysis::syscalls::i386_syscall_name(n),
         });
         let arity = if windows {
