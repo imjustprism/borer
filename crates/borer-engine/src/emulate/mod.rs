@@ -398,12 +398,6 @@ pub struct Emulator<'a> {
     /// names as reading a region is found from it. Interior mutability
     /// because a load is a read of the machine, not a change.
     page_reads: std::cell::RefCell<crate::fxmap::FxHashMap<u64, (u64, u64)>>,
-    /// Addresses set up before the run by [`Emulator::poke`].
-    ///
-    /// Kept apart from `dirty` so a deliberate patch is not reported as code
-    /// the program unpacked, while still being fetched as code: an experiment
-    /// that nops a check out has to see the nops execute.
-    patched: BTreeSet<u64>,
     /// The first address the run both wrote and then executed: a packer's
     /// original entry point, where its unpacked code begins.
     oep: Option<u64>,
@@ -875,7 +869,6 @@ impl<'a> Emulator<'a> {
             steps: 0,
             memory_max: MEMORY_MAX,
             jumps: Vec::new(),
-            patched: BTreeSet::new(),
             trace_cap: 0,
             trace: VecDeque::new(),
             step_memory: std::cell::RefCell::new(Vec::new()),
@@ -1430,8 +1423,19 @@ impl<'a> Emulator<'a> {
     /// * `addr` - The address.
     /// * `value` - The byte.
     pub fn poke(&mut self, addr: u64, value: u8) {
-        self.mem.set(addr, value, false);
-        self.patched.insert(addr);
+        self.mem.poke(addr, value);
+    }
+
+    /// Writes a run of bytes into memory before a run, as [`Emulator::poke`]
+    /// writes each one.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address of the first byte; later ones follow it,
+    ///   wrapping at the top of the address space.
+    /// * `bytes` - The bytes, in address order.
+    pub fn poke_run(&mut self, at: u64, bytes: &[u8]) {
+        self.mem.poke_run(at, bytes);
     }
 
     /// Reads a byte the routine has written, or `None` if it wrote none there.

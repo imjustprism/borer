@@ -272,6 +272,19 @@ pub(super) trait Rig: Bench {
     /// * `n` - Its number, as [`Replay::vectors`] lists it.
     /// * `v` - The value.
     fn set_vector(&mut self, n: usize, v: u128);
+
+    /// Writes a run of bytes of memory before a run, as [`Rig::poke`]
+    /// writes each one.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address of the first byte; later ones follow it.
+    /// * `bytes` - The bytes, in address order.
+    fn poke_run(&mut self, at: u64, bytes: &[u8]) {
+        for (&byte, i) in bytes.iter().zip(0u64..) {
+            self.poke(at.wrapping_add(i), byte);
+        }
+    }
 }
 
 impl Rig for Emulator<'_> {
@@ -297,6 +310,10 @@ impl Rig for Emulator<'_> {
 
     fn set_vector(&mut self, n: usize, v: u128) {
         self.set_xmm(n, v);
+    }
+
+    fn poke_run(&mut self, at: u64, bytes: &[u8]) {
+        Emulator::poke_run(self, at, bytes);
     }
 }
 
@@ -2209,7 +2226,7 @@ struct Text<'t, M> {
     lost_all: bool,
     /// The bytes both sides start from: the seeded stack and any
     /// variable in memory the block's equality fixes.
-    base: &'t FxHashMap<u64, u8>,
+    base: &'t Seeded,
     /// The image's memory before any run.
     template: &'t M,
     /// The seed of the bytes nothing backs ([`fill_byte`]).
@@ -2296,8 +2313,8 @@ impl<M: Bench> Text<'_, M> {
         Some(
             self.mem
                 .get(&at)
-                .or_else(|| self.base.get(&at))
                 .copied()
+                .or_else(|| self.base.get(at))
                 .or_else(|| self.template.byte_at(at))
                 .unwrap_or_else(|| fill_byte(self.fill, at)),
         )
@@ -3149,6 +3166,38 @@ impl<M: Bench> Text<'_, M> {
     }
 }
 
+/// The bytes both sides of a trial start from.
+///
+/// They are the seeded stack, held as one run where its addresses do not
+/// wrap, and the bytes of a variable in memory the block's equality
+/// fixes, which win over the stack's.
+struct Seeded {
+    /// The address of the run's first byte.
+    lo: u64,
+    /// The stack's bytes in address order from `lo`; empty where the
+    /// stack wraps and its bytes are in `other`.
+    run: Vec<u8>,
+    /// Every other byte, by address.
+    other: FxHashMap<u64, u8>,
+}
+
+impl Seeded {
+    /// The byte both sides start with at an address, `None` when neither
+    /// the stack nor a fixed variable holds one.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address.
+    fn get(&self, at: u64) -> Option<u8> {
+        self.other.get(&at).copied().or_else(|| {
+            usize::try_from(at.wrapping_sub(self.lo))
+                .ok()
+                .and_then(|i| self.run.get(i))
+                .copied()
+        })
+    }
+}
+
 /// A function being replayed: what all its blocks share.
 struct Function<'f, 'p, L: Replay> {
     /// The image.
@@ -3572,11 +3621,29 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             .register(<L::Rig<'p> as Bench>::SP)
             .ok_or("no stack pointer")?;
         let sp0 = rsp.wrapping_sub(sp.cast_unsigned()) & mask;
-        let mut base: FxHashMap<u64, u8> = FxHashMap::default();
-        for word in -STACK_WORDS..STACK_WORDS {
-            let at = rsp.wrapping_add_signed(word * 8);
-            for (i, byte) in (0u64..).zip(rng.next().to_le_bytes()) {
-                base.insert(at.wrapping_add(i) & mask, byte);
+        let lo = rsp.wrapping_add_signed(-STACK_WORDS * 8);
+        let span = usize::try_from(STACK_WORDS * 16).unwrap_or(0);
+        let mut run: Vec<u8> = Vec::with_capacity(span);
+        for _ in -STACK_WORDS..STACK_WORDS {
+            run.extend(rng.next().to_le_bytes());
+        }
+        let mut base = Seeded {
+            lo,
+            run: Vec::new(),
+            other: FxHashMap::default(),
+        };
+        if lo & mask == lo
+            && lo
+                .checked_add(from_usize(span.saturating_sub(1)))
+                .is_some_and(|e| e <= mask)
+        {
+            emu.poke_run(lo, &run);
+            base.run = run;
+        } else {
+            for (k, byte) in (0u64..).zip(run) {
+                let at = lo.wrapping_add(k) & mask;
+                base.other.insert(at, byte);
+                emu.poke(at, byte);
             }
         }
         if let Some((k @ (Key::Slot(_) | Key::Global(..)), c)) = w.assumes.get(b).copied().flatten()
@@ -3590,11 +3657,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => (0, 0),
             };
             for i in 0..n.min(8) {
-                base.insert(at.wrapping_add(i) & mask, lo8(c >> (8 * i)));
+                let (at, byte) = (at.wrapping_add(i) & mask, lo8(c >> (8 * i)));
+                base.other.insert(at, byte);
+                emu.poke(at, byte);
             }
-        }
-        for (&at, &byte) in &base {
-            emu.poke(at, byte);
         }
         let mut text = Text {
             vars: FxHashMap::default(),
