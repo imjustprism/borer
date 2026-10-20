@@ -549,7 +549,7 @@ pub(crate) fn fit_sections(sections: &mut Vec<Section>, file_len: u64) -> Fit {
             return false;
         }
         let end = s.file_off.0.saturating_add(s.file_size);
-        if end > file_len {
+        if s.file_size > 0 && end > file_len {
             fit.note_cut(end);
             s.file_size = file_len - s.file_off.0;
         }
