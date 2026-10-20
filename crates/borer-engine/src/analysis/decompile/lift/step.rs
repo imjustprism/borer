@@ -1490,7 +1490,7 @@ impl Exec<'_, '_> {
                 self.record(EffectKind::Unmodeled);
             }
             Mnemonic::Int if instr.op_count() == 1 && instr.immediate(0) == 0x80 => {
-                self.kernel_call(calls::KernelGate::Int80);
+                self.kernel_call(kernel::KernelGate::Int80);
             }
             Mnemonic::Int if instr.op_count() == 1 => {
                 let n = instr.immediate(0);
