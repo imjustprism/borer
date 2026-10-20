@@ -1281,7 +1281,7 @@ mod tests {
             "{err}"
         );
         let err = go(&format!(
-            r#"for i in 0..{} {{ decompile(0x1010); }}"#,
+            "for i in 0..{} {{ decompile(0x1010); }}",
             DECOMPILES_MAX + 1
         ))
         .expect_err("the decompile budget stops it");
@@ -1370,7 +1370,7 @@ mod tests {
     #[test]
     fn a_long_run_is_capped_in_its_text() {
         let run = go_with_query(&format!(
-            r#"for i in 0..{n} {{ print(`line ${{i}}`); rename(0x1010, `n${{i}}`); }} oops();"#,
+            "for i in 0..{n} {{ print(`line ${{i}}`); rename(0x1010, `n${{i}}`); }} oops();",
             n = PRINTED_SHOWN + 5
         ));
         let text = run_tsv(&run);

@@ -13,7 +13,7 @@ use borer_engine::analysis::render::{
     NEXT_MAX, function_summary, next_steps, partial_tsv, solve_tsv,
 };
 use borer_engine::analysis::{Analysis, Overlay};
-use borer_engine::program::{Arch, Program};
+use borer_engine::program::Arch;
 
 use crate::common::fixture;
 use crate::raw::image;
@@ -177,7 +177,7 @@ fn steps_are_few_and_the_same_every_time() {
 #[test]
 fn an_arm64_function_gets_no_step() {
     let ret = [0xc0, 0x03, 0x5f, 0xd6]; // ASM: ret
-    let p: Program = image(Arch::Arm64, &ret, &[]);
+    let p = image(Arch::Arm64, &ret, &[]);
     let a = Analysis::compute(&p);
     assert!(next_steps(&p, &a, &Overlay::default(), 0x40_1000).is_empty());
 }

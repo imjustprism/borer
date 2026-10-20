@@ -29,7 +29,7 @@ pub fn effects_line(body: &str) -> Option<String> {
     let mut other = 0usize;
     let field = |lhs: &str| -> Option<String> {
         let inner = lhs.strip_prefix("*(")?;
-        let (_, target) = inner.split_once(")")?;
+        let (_, target) = inner.split_once(')')?;
         let target = target.trim();
         let (base, off) = match target.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
             Some(t) => match t.split_once(" + ") {

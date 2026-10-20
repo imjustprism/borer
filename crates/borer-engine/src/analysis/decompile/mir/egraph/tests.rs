@@ -879,7 +879,7 @@ fn extension_chains_fold() {
             let root = b.ext(s2, m, w, e);
             cases.push(b.done(root, k));
         }
-        for to in [k, (k + m) / 2, m] {
+        for to in [k, u8::midpoint(k, m), m] {
             for signed in [false, true] {
                 let mut b = Seed::new(64);
                 let x = b.leaf(0, k);

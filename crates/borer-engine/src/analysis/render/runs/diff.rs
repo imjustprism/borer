@@ -184,7 +184,7 @@ pub fn run_diff_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Resul
         .map(|input| diff_one(p, &shared, req.entry, input, budget))
         .collect::<Option<Vec<_>>>()
         .ok_or("this architecture is not emulated")?;
-    let [one, two] = &runs[..] else {
+    let [one, two] = &*runs else {
         return Ok(String::new());
     };
     let title = shared

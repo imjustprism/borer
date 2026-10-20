@@ -974,7 +974,7 @@ impl Emulator<'_> {
     fn insert_word(&mut self, i: &Instruction) -> Result<(), Stop> {
         let n = i.op_count() - 2;
         let word = u128::from(self.lane_operand(i, n, 2)? & 0xffff);
-        let rest = self.vector_operand(i, if i.op_count() >= 4 { 1 } else { 0 })?;
+        let rest = self.vector_operand(i, u32::from(i.op_count() >= 4))?;
         let at = u32::from(i.immediate8() & 7) * 16;
         self.vector_store(i, (rest & !(0xffff << at)) | word << at)
     }

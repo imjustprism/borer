@@ -257,7 +257,7 @@ pub(super) fn slot_liveness(recorded: &[SlotRec], succs: &[Vec<usize>]) -> Vec<B
         bits_of(d, &mut r.defs.iter().copied());
         for (cu, defs_before) in &r.calls {
             let seen = match cu {
-                SlotUse::All => &universe[..],
+                SlotUse::All => &*universe,
                 SlotUse::Window(lo, hi) => {
                     &universe
                         [universe.partition_point(|o| o < lo)..universe.partition_point(|o| o < hi)]

@@ -38,7 +38,7 @@ fn relative_table_jump(target: &Expr) -> bool {
     }
 }
 
-impl<'a> Exec<'_, 'a> {
+impl Exec<'_, '_> {
     /// Lifts `jmp target` leaving the function as a tail call.
     ///
     /// # Arguments

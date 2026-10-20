@@ -182,7 +182,7 @@ impl Layout {
         let regions = if self.regions.is_empty() {
             &whole[..]
         } else {
-            &self.regions[..]
+            &*self.regions
         };
         let top = if self.arch == Arch::X86 {
             X86_TOP

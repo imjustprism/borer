@@ -690,7 +690,7 @@ fn splice<'a>(g: &'a Guard, ops: &mut Vec<&'a Guard>) {
     let (a, b, or) = match g {
         Guard::Or(a, b) => (a.as_ref(), b.as_ref(), true),
         Guard::And(a, b) => (a.as_ref(), b.as_ref(), false),
-        one => {
+        one @ Guard::One(..) => {
             ops.push(one);
             return;
         }

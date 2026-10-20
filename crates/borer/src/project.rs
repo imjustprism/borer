@@ -339,7 +339,7 @@ impl ProjectFile {
         };
         borer_engine::analysis::utypes::validate(&o.types, &o.applied)
             .map_err(|e| e.to_string())
-            .map(|_| o)
+            .map(|()| o)
     }
 
     /// Judges whether the project was saved for the loaded binary.

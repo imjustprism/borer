@@ -990,7 +990,7 @@ fn the_assertion_index_lists_a_named_field() {
     );
     assert!(
         one.lines()
-            .any(|l| l.starts_with("\t") && l.contains("this->tail")),
+            .any(|l| l.starts_with('\t') && l.contains("this->tail")),
         "a condition is one tab-indented line: {one}"
     );
     assert!(

@@ -234,7 +234,7 @@ pub(super) struct WalkState<'a> {
     pub(super) rejected: AddrSet,
 }
 
-impl<'a> WalkState<'a> {
+impl WalkState<'_> {
     /// Walks `seeds` as guesses of the given kind, then goes back to facts.
     ///
     /// # Arguments

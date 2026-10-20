@@ -94,7 +94,7 @@ impl Emulator<'_> {
                 if m == Mnemonic::Bsf {
                     v.trailing_zeros()
                 } else {
-                    63 - v.leading_zeros()
+                    v.ilog2()
                 }
             }
             Mnemonic::Tzcnt | Mnemonic::Lzcnt => {

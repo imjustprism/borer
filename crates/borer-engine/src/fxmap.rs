@@ -107,7 +107,7 @@ impl Hasher for FxHasher {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{FxHashMap, FxHasher};
+    use super::{FxHashMap, FxHashSet, FxHasher};
     use std::hash::{Hash, Hasher};
 
     /// The hash carries no seed, so one value always hashes the same.
@@ -148,11 +148,11 @@ mod tests {
     #[test]
     fn iteration_order_is_reproducible() {
         let build = || -> Vec<u64> {
-            let mut m: FxHashMap<u64, ()> = FxHashMap::default();
+            let mut m = FxHashSet::default();
             for k in [9u64, 3, 27, 1, 81, 5, 243] {
-                m.insert(k, ());
+                m.insert(k);
             }
-            m.keys().copied().collect()
+            m.into_iter().collect()
         };
         assert_eq!(build(), build());
     }

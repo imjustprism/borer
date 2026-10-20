@@ -6,7 +6,7 @@ use super::*;
 /// Bytes of an x87 extended-precision value in memory (`tword`).
 const EXTENDED_BYTES: u64 = 10;
 
-impl<'a> Exec<'_, 'a> {
+impl Exec<'_, '_> {
     /// Records the scalar float type a vector register holds after `instr`.
     ///
     /// The first type seen becomes the register's declaration type.
@@ -911,7 +911,7 @@ impl<'a> Exec<'_, 'a> {
             self.info.info(instr).op0_access(),
             OpAccess::Read | OpAccess::CondRead | OpAccess::ReadWrite | OpAccess::ReadCondWrite
         );
-        let first = if reads_dst { 0 } else { 1 };
+        let first = u32::from(!reads_dst);
         let args: Vec<Expr> = (first..instr.op_count())
             .map(|i| self.val(instr, i))
             .collect();

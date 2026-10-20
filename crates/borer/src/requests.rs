@@ -25,7 +25,7 @@ use crate::errors::err_internal;
 pub(crate) const DEADLINE_ENV: &str = "BORER_DEADLINE_SECS";
 
 /// The deadline when the environment names none.
-const DEADLINE_DEFAULT: Duration = Duration::from_secs(300);
+const DEADLINE_DEFAULT: Duration = Duration::from_mins(5);
 
 /// Most requests the engine works on at once.
 const REQUESTS_MAX: usize = 2;

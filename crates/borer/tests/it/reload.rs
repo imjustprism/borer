@@ -36,7 +36,7 @@ pub(crate) struct Client {
 impl Client {
     /// Longest wait for one reply; the analysis of this binary is the
     /// slowest thing a reply here waits for.
-    const REPLY: Duration = Duration::from_secs(300);
+    const REPLY: Duration = Duration::from_mins(5);
 
     /// Starts the server, initializes the session and loads `load`.
     ///
