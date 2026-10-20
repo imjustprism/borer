@@ -3010,8 +3010,9 @@ pub(super) fn type_locals(text: &str) -> String {
         }
     }
     drop(uses);
+    let signed = sign_signed_reads(&mut lines);
     let declared_narrow = narrow_declarations(&lines);
-    if narrowed.is_empty() && declared_narrow.is_empty() {
+    if narrowed.is_empty() && declared_narrow.is_empty() && !signed {
         return text.to_owned();
     }
     for (name, ty) in &narrowed {
@@ -3094,6 +3095,112 @@ pub(super) fn type_locals(text: &str) -> String {
         .join("\n");
     out.push('\n');
     out
+}
+
+/// Declares a `uint32_t` local or global `int32_t` when the text reads it
+/// only as one.
+///
+/// Every occurrence is cast `(int32_t)` or `(int64_t)(int32_t)`, is the
+/// target of an assignment, an increment or a decrement, or is what a
+/// function returning 32 bits returns.
+///
+/// The casts are the sign extensions the machine applied (`movsxd`), so
+/// the variable was an `int`; [`narrow_declarations`] then drops them,
+/// since C converts an `int` the same way. A write stores the same 32
+/// bits in either type. A local the text reads any other way (its
+/// address, a partial read, an unsigned operation) keeps its type.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header and declaration lines included.
+///
+/// # Returns
+///
+/// Whether any declaration changed.
+fn sign_signed_reads(lines: &mut Vec<String>) -> bool {
+    const CASTS: [&str; 2] = ["(int64_t)(int32_t)", "(int32_t)"];
+    const WRITES: [&str; 5] = [" = ", " += ", " -= ", "++", "--"];
+    let returns32 = signature_result(lines)
+        .and_then(scalar_width)
+        .is_some_and(|w| matches!(w, "int32_t" | "uint32_t"));
+    let signed_only = |name: &str| {
+        let mut read = false;
+        for line in lines
+            .iter()
+            .filter(|l| !l.starts_with("//") && !declares(l))
+        {
+            for at in word_positions(line, name) {
+                let head = line.get(..at).unwrap_or("");
+                let tail = line.get(at + name.len()..).unwrap_or("");
+                let returned = returns32 && head.trim() == "return" && tail.starts_with(';');
+                let written =
+                    WRITES.iter().any(|w| tail.starts_with(w)) && !head.ends_with(['*', '&']);
+                if CASTS.iter().any(|c| head.ends_with(c)) {
+                    read = true;
+                } else if !returned && !written {
+                    return false;
+                }
+            }
+        }
+        read
+    };
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    let mut retyped: Vec<String> = Vec::new();
+    for line in lines.iter() {
+        let (decl, note) = line.split_once("; //").unwrap_or((line.as_str(), ""));
+        let names: Vec<&str> = decl
+            .strip_prefix("uint32_t ")
+            .map(|r| r.strip_suffix(';').unwrap_or(r))
+            .filter(|_| note.is_empty() == decl.ends_with(';'))
+            .map(|r| r.split(", ").map(str::trim).collect())
+            .unwrap_or_default();
+        let (signed, kept): (Vec<&str>, Vec<&str>) = names
+            .iter()
+            .filter(|n| is_ident(n))
+            .partition(|n| signed_only(n));
+        if signed.is_empty() || signed.len() + kept.len() != names.len() {
+            out.push(line.clone());
+            continue;
+        }
+        let note = if note.is_empty() {
+            String::new()
+        } else {
+            format!(" //{note}")
+        };
+        if !kept.is_empty() {
+            out.push(format!("uint32_t {};{note}", kept.join(", ")));
+        }
+        out.push(format!("int32_t {};{note}", signed.join(", ")));
+        retyped.extend(signed.iter().map(|n| (*n).to_owned()));
+    }
+    *lines = out;
+    let Some((casts, mask)) = narrow_type("int32_t") else {
+        return false;
+    };
+    for line in lines
+        .iter_mut()
+        .filter(|l| !l.starts_with("//") && !declares(l))
+    {
+        for name in &retyped {
+            if line.contains(name.as_str()) {
+                *line = strip_width(line, name, casts, mask);
+            }
+        }
+    }
+    !retyped.is_empty()
+}
+
+/// Tells whether a line declares variables: a [`is_declaration`] line, or
+/// one of a global with its `// @ address` note.
+///
+/// # Arguments
+///
+/// * `line` - One line of the text.
+fn declares(line: &str) -> bool {
+    match line.split_once("; //") {
+        Some((decl, _)) => is_declaration(&format!("{decl};")),
+        None => is_declaration(line),
+    }
 }
 
 /// Tells whether C evaluates an expression as an `unsigned int`, so its
@@ -4786,6 +4893,45 @@ mod char_index_tests {
         );
         assert!(out.contains("return (uint8_t)str[var1 & 3];"), "{out}");
         assert!(out.contains("return *str + (uint8_t)str[var1];"), "{out}");
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod signed_read_tests {
+    use super::type_locals;
+
+    /// A `uint32_t` local or global the text only reads sign-extended is
+    /// an `int32_t`, and its casts go; one read any other way keeps its
+    /// type.
+    #[test]
+    fn a_name_read_only_signed_is_declared_signed() {
+        let text = [
+            "// signature: uint32_t f(const char *str)",
+            "uint32_t local_10, local_c;",
+            "uint32_t limit; // @ 0x4010",
+            "",
+            "for (local_10 = 0; str[(int64_t)(int32_t)local_10] != 0; local_10 += 1) {",
+            "  if ((int32_t)local_10 > (int32_t)limit) {",
+            "    return local_c >> 1;",
+            "  }",
+            "}",
+            "return limit;",
+        ]
+        .join("\n");
+        let out = type_locals(&text);
+        assert!(out.contains("uint32_t local_c;"), "{out}");
+        assert!(out.contains("int32_t local_10;"), "{out}");
+        assert!(out.contains("int32_t limit; // @ 0x4010"), "{out}");
+        assert!(out.contains("str[local_10] != 0"), "{out}");
+        assert!(out.contains("if (local_10 > limit) {"), "{out}");
+        let unsigned = text.replace("return local_c >> 1;", "return local_10 >> 1;");
+        let out = type_locals(&unsigned);
+        assert!(out.contains("uint32_t local_10, local_c;"), "{out}");
+        assert!(out.contains("(int64_t)(int32_t)local_10"), "{out}");
     }
 }
 

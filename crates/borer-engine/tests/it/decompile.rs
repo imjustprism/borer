@@ -2733,11 +2733,16 @@ fn deterministic_output() {
 /// `K` is a loop; the inner `if (rbx != 0) return rax;` may fold into the
 /// loop guard (`while (rax < 5 && rbx == 0)`), which is the same program. The
 /// latch goto never survives.
+///
+/// The counter may be declared `int32_t`, which its compare then reads
+/// without a cast.
 #[test]
 fn nested_if_inside_while() {
     let out = dc(0x1180);
     assert!(
-        out.contains("for (var1 = 0; (int32_t)var1 < 5") || out.contains("while ("),
+        out.contains("for (var1 = 0; (int32_t)var1 < 5")
+            || out.contains("for (var1 = 0; var1 < 5")
+            || out.contains("while ("),
         "no loop:
 {out}"
     );
