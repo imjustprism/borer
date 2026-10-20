@@ -19,8 +19,8 @@
 //! ([`crate::headers::sniff_section`]) rather than by name.
 
 use crate::analysis::utypes::{
-    ENUM_VALUES_MAX, FIELDS_MAX, TypeExpr, UserField, UserStruct, UserType, build_enum,
-    check_type_name, is_ident,
+    ARRAY_LEN_MAX, ENUM_VALUES_MAX, FIELDS_MAX, TypeExpr, UserField, UserStruct, UserType,
+    build_enum, check_type_name, is_ident,
 };
 use crate::num::from_usize;
 use crate::program::Section;
@@ -78,6 +78,19 @@ const TAG_MEMBER: u64 = 0x0d;
 const TAG_ENUMERATOR: u64 = 0x28;
 /// `DW_TAG_typedef`: a name standing for another type.
 const TAG_TYPEDEF: u64 = 0x16;
+/// `DW_TAG_subrange_type`: the index range of an array, a child of it.
+const TAG_SUBRANGE: u64 = 0x21;
+/// `DW_AT_upper_bound`: a subrange's last index.
+const AT_UPPER_BOUND: u64 = 0x2f;
+/// `DW_AT_count`: a subrange's element count.
+const AT_COUNT: u64 = 0x37;
+/// `DW_OP_addr`: the one location opcode that places a variable at a
+/// fixed address, followed by that address.
+const OP_ADDR: u8 = 0x03;
+/// Most globals one program's debug information states.
+///
+/// Past this the reader stops taking them, as it does for types.
+const GLOBALS_MAX: usize = 1 << 15;
 /// `DW_AT_location`: where a variable lives at run time.
 const AT_LOCATION: u64 = 0x02;
 /// `DW_AT_byte_size`: a type's width in bytes.
@@ -130,6 +143,23 @@ pub struct Parameter {
     pub name: String,
     /// Its type as C source, when the type chain resolved.
     pub type_name: Option<String>,
+}
+
+/// One variable of static storage the debug information states: a global,
+/// a static local, or the declaration of one another module defines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Global {
+    /// The name the compiler recorded.
+    pub name: String,
+    /// Where it lives, as linked; `None` for a declaration of a variable
+    /// another module defines (`extern FILE *stdout`), found by its name.
+    pub addr: Option<u64>,
+    /// Its type as C source, an array's as `T[]`, when the chain resolved.
+    pub type_name: Option<String>,
+    /// Its type in the language the user types spell, an array's as
+    /// [`TypeExpr::Array`] of its stated length (1 when the unit leaves
+    /// the length open), when the chain resolves into that language.
+    pub ty: Option<TypeExpr>,
 }
 
 /// One function the debug information names.
@@ -522,7 +552,7 @@ fn value(
 ) -> Option<Value> {
     Some(match form {
         0x01 => Value::Int(c.uint(address_size)?),
-        0x09 => {
+        0x09 | 0x18 => {
             let n = usize::try_from(c.uleb()?).ok()?;
             let end = c.at.checked_add(n)?;
             let bytes = c.bytes.get(c.at..end)?.to_vec();
@@ -536,11 +566,6 @@ fn value(
         }
         0x04 => {
             let n = c.uint(4)?;
-            c.skip(usize::try_from(n).ok()?)?;
-            Value::Skipped
-        }
-        0x18 => {
-            let n = c.uleb()?;
             c.skip(usize::try_from(n).ok()?)?;
             Value::Skipped
         }
@@ -600,6 +625,8 @@ struct Entry {
     member_off: Option<u64>,
     /// `DW_AT_const_value`: an enumerator's value.
     const_value: Option<u64>,
+    /// `DW_AT_upper_bound` plus one, or `DW_AT_count`: a subrange's length.
+    count: Option<u64>,
 }
 
 /// What one entry contributes to reading a type: its kind, its name, and
@@ -907,6 +934,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
     let mut out: Vec<Subprogram> = Vec::new();
     let mut types: BTreeMap<String, UserType> = BTreeMap::new();
     let mut typedefs: BTreeMap<String, String> = BTreeMap::new();
+    let mut globals: Vec<Global> = Vec::new();
     let mut at = 0usize;
     while at.saturating_add(11) < info.len() {
         let at_start = at;
@@ -933,6 +961,9 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
         let mut nodes: BTreeMap<u64, TypeNode> = BTreeMap::new();
         let mut unresolved: Vec<(usize, Option<u64>)> = Vec::new();
         let mut unresolved_params: Vec<(usize, usize, Option<u64>)> = Vec::new();
+        let mut unit_globals: Vec<(String, Option<u64>, Option<u64>)> = Vec::new();
+        let mut array_scopes: Vec<Option<u64>> = Vec::new();
+        let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
         let unit_base = u64::try_from(at_start).unwrap_or(0);
         while !c.done(end) {
             let here = from_usize(c.at);
@@ -943,6 +974,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                     open_level.pop();
                 }
                 type_scopes.pop();
+                array_scopes.pop();
                 continue;
             }
             let Some(abbreviation) = table.get(&code) else {
@@ -977,6 +1009,8 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                     (AT_ENCODING, Value::Int(v)) => entry.encoding = Some(v),
                     (AT_MEMBER_LOCATION, Value::Int(v)) => entry.member_off = Some(v),
                     (AT_CONST_VALUE, Value::Int(v)) => entry.const_value = Some(v),
+                    (AT_UPPER_BOUND, Value::Int(v)) => entry.count = v.checked_add(1),
+                    (AT_COUNT, Value::Int(v)) => entry.count = Some(v),
                     _ => {}
                 }
             }
@@ -1004,6 +1038,29 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                     scalar: entry.encoding.zip(entry.byte_size),
                 },
             );
+            if abbreviation.tag == TAG_VARIABLE
+                && let Some(name) = entry.name.as_ref().filter(|n| is_ident(n))
+                && globals.len() + unit_globals.len() < GLOBALS_MAX
+            {
+                let word = address_size;
+                let addr = entry
+                    .location
+                    .as_deref()
+                    .and_then(|e| match e.split_first() {
+                        Some((&OP_ADDR, rest)) if rest.len() == word => {
+                            Cursor::new(rest, 0).uint(word)
+                        }
+                        Some(_) | None => None,
+                    });
+                if addr.is_some() || (open.is_empty() && entry.location.is_none()) {
+                    unit_globals.push((name.clone(), addr, absolute(entry.type_ref)));
+                }
+            }
+            if abbreviation.tag == TAG_SUBRANGE
+                && let (Some(Some(array)), Some(n)) = (array_scopes.last(), entry.count)
+            {
+                counts.insert(*array, n);
+            }
             let named_function = abbreviation.tag == TAG_SUBPROGRAM
                 && entry.low_pc.is_some()
                 && entry.name.is_some();
@@ -1104,6 +1161,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             if abbreviation.children {
                 depth.push(named_function);
                 type_scopes.push(opened);
+                array_scopes.push((abbreviation.tag == TAG_ARRAY).then_some(here));
             }
         }
         for (low_pc, origin) in pending {
@@ -1151,6 +1209,26 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                 p.type_name = type_name(&nodes, type_ref, TYPE_DEPTH);
             }
         }
+        for (name, addr, type_ref) in unit_globals {
+            let ty = match type_ref.and_then(|at| nodes.get(&at)) {
+                Some(node) if node.tag == TAG_ARRAY => type_expr(&nodes, node.inner, TYPE_DEPTH)
+                    .map(|elem| {
+                        let len = type_ref
+                            .and_then(|at| counts.get(&at))
+                            .copied()
+                            .filter(|n| (1..=ARRAY_LEN_MAX).contains(n))
+                            .unwrap_or(1);
+                        TypeExpr::Array(Box::new(elem), len)
+                    }),
+                Some(_) | None => type_expr(&nodes, type_ref, TYPE_DEPTH),
+            };
+            globals.push(Global {
+                name,
+                addr,
+                type_name: type_name(&nodes, type_ref, TYPE_DEPTH),
+                ty,
+            });
+        }
         for s in stated {
             if s.is_enum {
                 if let Ok(ty) = build_enum(&s.name, s.size, &s.values) {
@@ -1181,10 +1259,13 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
     }
     out.sort_by(|l, r| l.low_pc.cmp(&r.low_pc).then_with(|| l.name.cmp(&r.name)));
     out.dedup_by(|l, r| l.low_pc == r.low_pc);
+    globals.sort_by(|l, r| l.addr.cmp(&r.addr).then_with(|| l.name.cmp(&r.name)));
+    globals.dedup_by(|l, r| l.addr == r.addr && l.name == r.name);
     Debug {
         subprograms: out,
         types,
         typedefs,
+        globals,
     }
 }
 
@@ -1238,6 +1319,9 @@ pub struct Debug {
     /// unnamed structure stands for `struct` under its own name, and one
     /// of a function or an array type is left out.
     pub typedefs: BTreeMap<String, String>,
+    /// The variables of static storage: the declarations of ones defined
+    /// elsewhere first, by name, then the defined ones by address.
+    pub globals: Vec<Global>,
 }
 
 /// Reads what a program's debug information states.
@@ -1726,6 +1810,77 @@ mod tests {
                     }
                 ),
             ])
+        );
+    }
+
+    /// The variables of static storage land with their addresses and
+    /// types: a scalar, an array of its stated length, and a declaration of
+    /// one another unit defines, found by its name and ordered first.
+    #[test]
+    fn globals_land_with_their_addresses_and_types() {
+        use super::Global;
+        use crate::analysis::utypes::TypeExpr;
+        let abbrev: Vec<u8> = vec![
+            0x01, 0x24, 0x00, 0x03, 0x08, 0x0b, 0x0b, 0x3e, 0x0b, 0x00, 0x00, 0x02, 0x34, 0x00,
+            0x03, 0x08, 0x49, 0x13, 0x02, 0x18, 0x00, 0x00, 0x03, 0x34, 0x00, 0x03, 0x08, 0x49,
+            0x13, 0x00, 0x00, 0x04, 0x01, 0x01, 0x49, 0x13, 0x00, 0x00, 0x05, 0x21, 0x00, 0x2f,
+            0x0b, 0x00, 0x00, 0x06, 0x0f, 0x00, 0x49, 0x13, 0x00, 0x00, 0x00,
+        ];
+        let mut dies: Vec<u8> = Vec::new();
+        let die_at = |dies: &[u8]| u32::try_from(12 + dies.len()).expect("fits");
+        let int_at = die_at(&dies);
+        dies.push(0x01);
+        named(&mut dies, "int");
+        dies.extend_from_slice(&[4, 0x05]);
+        let char_at = die_at(&dies);
+        dies.push(0x01);
+        named(&mut dies, "char");
+        dies.extend_from_slice(&[1, 0x06]);
+        let ptr_at = die_at(&dies);
+        dies.push(0x06);
+        dies.extend_from_slice(&char_at.to_le_bytes());
+        let array_at = die_at(&dies);
+        dies.push(0x04);
+        dies.extend_from_slice(&int_at.to_le_bytes());
+        dies.extend_from_slice(&[0x05, 9, 0x00]);
+        for (name, ty, addr) in [("count", int_at, 0x4010u64), ("table", array_at, 0x4020)] {
+            dies.push(0x02);
+            named(&mut dies, name);
+            dies.extend_from_slice(&ty.to_le_bytes());
+            dies.extend_from_slice(&[9, 0x03]);
+            dies.extend_from_slice(&addr.to_le_bytes());
+        }
+        dies.push(0x03);
+        named(&mut dies, "optarg");
+        dies.extend_from_slice(&ptr_at.to_le_bytes());
+        let info = unit(&dies);
+        let strings = Strings {
+            text: &[],
+            lines: &[],
+        };
+        let globals = read_in(&info, &abbrev, &strings).globals;
+        assert_eq!(
+            globals,
+            vec![
+                Global {
+                    name: "optarg".to_owned(),
+                    addr: None,
+                    type_name: Some("char *".to_owned()),
+                    ty: Some(TypeExpr::Ptr(Box::new(TypeExpr::Char))),
+                },
+                Global {
+                    name: "count".to_owned(),
+                    addr: Some(0x4010),
+                    type_name: Some("int".to_owned()),
+                    ty: Some(TypeExpr::I32),
+                },
+                Global {
+                    name: "table".to_owned(),
+                    addr: Some(0x4020),
+                    type_name: Some("int[]".to_owned()),
+                    ty: Some(TypeExpr::Array(Box::new(TypeExpr::I32), 10)),
+                },
+            ]
         );
     }
 

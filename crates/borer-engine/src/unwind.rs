@@ -1062,6 +1062,7 @@ mod tests {
             debug_functions: Vec::new(),
             debug_types: std::collections::BTreeMap::new(),
             debug_typedefs: std::collections::BTreeMap::new(),
+            debug_globals: Vec::new(),
             pdb: None,
             pdb_record: None,
             pdb_source: None,

@@ -1175,6 +1175,7 @@ fn materialized(p: &Program, bytes: Vec<u8>, oep: Option<u64>, sections: Vec<Sec
         debug_functions: p.debug_functions.clone(),
         debug_types: p.debug_types.clone(),
         debug_typedefs: p.debug_typedefs.clone(),
+        debug_globals: p.debug_globals.clone(),
         pdb: p.pdb,
         pdb_record: p.pdb_record.clone(),
         pdb_source: p.pdb_source.clone(),
