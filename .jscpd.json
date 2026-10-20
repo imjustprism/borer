@@ -1,0 +1,10 @@
+{
+  "format": ["rust"],
+  "pattern": "crates/**/*.rs",
+  "minTokens": 70,
+  "minLines": 6,
+  "threshold": 1.1,
+  "reporters": ["console"],
+  "gitignore": true,
+  "silent": false
+}
