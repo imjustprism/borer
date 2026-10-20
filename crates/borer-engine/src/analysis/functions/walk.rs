@@ -1076,6 +1076,7 @@ pub(super) fn walk_function(
     let mut zero_bytes = false;
     let mut surely_data = false;
     let mut after_noreturn: Vec<u64> = Vec::new();
+    let mut ended: Vec<u64> = Vec::new();
     let mut odd: Option<&'static str> = None;
     let mut prologue = false;
     let mut frame_opened = false;
@@ -1337,6 +1338,7 @@ pub(super) fn walk_function(
                         || thunk_slot(cursors, t).is_some_and(|s| noreturn_slots.contains(&s));
                     if ends_here || known {
                         terminated = true;
+                        ended.push(addr);
                         if !ends_here && unwind_nop(cursors, next) {
                             after_noreturn.push(next);
                         }
@@ -1352,6 +1354,7 @@ pub(super) fn walk_function(
                         .then(|| instr.memory_displacement64());
                     if slot.is_some_and(|s| noreturn_slots.contains(&s)) {
                         terminated = true;
+                        ended.push(addr);
                         if unwind_nop(cursors, next) {
                             after_noreturn.push(next);
                         }
@@ -1415,7 +1418,8 @@ pub(super) fn walk_function(
         visited.remove(*addr);
     }
     recs.sort_unstable_by_key(|(addr, _)| *addr);
-    let blocks = build_blocks(entry, &recs, &tables, &tail_nops);
+    dedup_sorted(&mut ended);
+    let blocks = build_blocks(entry, &recs, &tables, &tail_nops, &ended);
     let start = recs.first().map_or(entry, |(addr, _)| *addr);
     let end = recs.iter().map(|(_, r)| r.next).max().unwrap_or(entry);
     let body_hash = recs.iter().fold(0xcbf2_9ce4_8422_2325, |h, (addr, r)| {

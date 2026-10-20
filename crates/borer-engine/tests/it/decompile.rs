@@ -9913,3 +9913,47 @@ fn a_clone_s_dotted_name_reads_as_a_c_identifier() {
     assert!(text.contains("helper_constprop_0("), "{text}");
     assert!(!text.contains("helper.constprop"), "{text}");
 }
+
+/// A call to a no-return import through a CET stub ends the path in the
+/// text.
+///
+/// The stub opens with `endbr64` before its jump through the slot, and
+/// GCC at `-O0` lays the return right after `call __stack_chk_fail`, so
+/// a walk past the call read its result as the function's.
+#[test]
+fn a_noreturn_import_behind_an_endbr64_stub_ends_the_text() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
+    let mut bytes = vec![0xccu8; 0x2000];
+    let code: &[(usize, &[u8])] = &[
+        (0x0, &[0xf3, 0x0f, 0x1e, 0xfa]),                   // ASM: endbr64
+        (0x4, &[0xf2, 0xff, 0x25, 0xf5, 0x0f, 0x00, 0x00]), // ASM: bnd jmp [rip+0xff5]
+        (0x40, &[0xb8, 0x07, 0x00, 0x00, 0x00]),            // ASM: mov eax,7
+        (0x45, &[0x85, 0xff]),                              // ASM: test edi,edi
+        (0x47, &[0x74, 0x05]),                              // ASM: je 0x104e
+        (0x49, &[0xe8, 0xb2, 0xff, 0xff, 0xff]),            // ASM: call 0x1000
+        (0x4e, &[0xc3]),                                    // ASM: ret
+    ];
+    for (at, b) in code {
+        bytes[*at..*at + b.len()].copy_from_slice(b);
+    }
+    bytes[0x1000..0x1008].fill(0);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1040),
+        vec![
+            Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+            Section::mapped(".got", 0x2000, 0x1000, 0x1000, false, false),
+        ],
+    );
+    p.format = BinaryFormat::Elf;
+    p.symbols.push(Symbol {
+        name: "__stack_chk_fail".to_owned(),
+        addr: 0x2000,
+        kind: SymbolKind::Import,
+    });
+    let text = decompiled(&p, 0x1040);
+    assert!(!text.contains("= __stack_chk_fail("), "{text}");
+    assert!(text.contains("return 7;"), "{text}");
+}

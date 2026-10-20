@@ -1592,8 +1592,11 @@ pub(crate) fn call_ends_path(program: &Program, analysis: &Analysis, b: &BasicBl
 }
 
 /// Tells whether the last instruction of a block calls a function that
-/// never returns by name: a direct callee, the import a thunk it reaches
-/// jumps through, or the import slot it calls through.
+/// never returns by name.
+///
+/// The callee is a direct one, the import a thunk it reaches jumps
+/// through (past the `endbr64` a CET stub opens with), or the import slot
+/// it calls through.
 ///
 /// # Arguments
 ///
@@ -1622,6 +1625,13 @@ fn calls_noreturn(program: &Program, analysis: &Analysis, bitness: u32, b: &Basi
                     .and_then(|g| g.name.as_deref())
                     .is_some_and(named)
                 || decode_at(program, bitness, t)
+                    .and_then(|i| {
+                        if matches!(i.mnemonic(), Mnemonic::Endbr64 | Mnemonic::Endbr32) {
+                            decode_at(program, bitness, i.next_ip())
+                        } else {
+                            Some(i)
+                        }
+                    })
                     .and_then(|i| slot_jump(&i))
                     .is_some_and(import)
         }
@@ -1838,6 +1848,9 @@ pub(crate) fn string_at(program: &Program, va: u64) -> bool {
 /// * `recs` - The decoded instructions in address order.
 /// * `tables` - Resolved jump tables.
 /// * `tail_nops` - The `nop`s that end the function after such a call.
+/// * `ended` - The calls the walk found never return, sorted: each ends
+///   its block with no successor, though the instruction after it may
+///   start a block other paths reach.
 ///
 /// # Returns
 ///
@@ -1847,6 +1860,7 @@ fn build_blocks(
     recs: &[(u64, InstrRec)],
     tables: &[ResolvedTable],
     tail_nops: &[u64],
+    ended: &[u64],
 ) -> Vec<BasicBlock> {
     let mut leaders: Vec<u64> = vec![entry];
     for t in tables {
@@ -1936,7 +1950,9 @@ fn build_blocks(
             }
             FlowControl::Call | FlowControl::IndirectCall => {
                 block.term = BlockTerm::Call;
-                block.successors.push(rec.next);
+                if ended.binary_search(&addr).is_err() {
+                    block.successors.push(rec.next);
+                }
             }
             FlowControl::Return => block.term = BlockTerm::Ret,
             FlowControl::Interrupt | FlowControl::Exception => block.term = BlockTerm::Invalid,
