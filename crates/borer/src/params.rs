@@ -595,9 +595,13 @@ pub(crate) struct SearchParams {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetNameParams {
     /// Function entry, any address inside it, or a data address.
-    pub(crate) address: String,
-    /// New name.
-    pub(crate) name: String,
+    pub(crate) address: Option<String>,
+    /// New name, an identifier (C++ `::<>~`, `@$?.` kept).
+    pub(crate) name: Option<String>,
+    /// Many at once instead: `address=name` each (max 500).
+    pub(crate) names: Option<Vec<String>>,
+    /// Take a name another address holds (default false).
+    pub(crate) force: Option<bool>,
     /// Preview only (default true); false applies.
     pub(crate) dry_run: Option<bool>,
 }
@@ -997,6 +1001,43 @@ pub(crate) fn must_fit_a_row(text: &str, what: Annotation) -> Result<(), ErrorDa
         )));
     }
     Ok(())
+}
+
+/// Punctuation a name may hold besides letters and digits: C++ scopes,
+/// templates and destructors (`::`, `<>`, `~`), MSVC and Itanium mangling
+/// (`?`, `@`, `$`), ELF's split parts (`foo.cold`) and `_`.
+const NAME_PUNCTUATION: &str = "_:<>~?@$.";
+
+/// Refuses a name the pseudo-C or a later lookup could not carry.
+///
+/// A name is printed where C expects an identifier and is looked up as
+/// one, so a space, a parenthesis or a leading digit would break both.
+///
+/// # Arguments
+///
+/// * `name` - The name asked for.
+///
+/// # Errors
+///
+/// When the name opens with a digit or holds a character no identifier
+/// or mangled name has; the message names the character.
+pub(crate) fn must_be_a_name(name: &str) -> Result<(), ErrorData> {
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        return Err(err_params(format!(
+            "{} opens with a digit; a name must not, or it reads as a number",
+            borer_engine::text::quoted(name)
+        )));
+    }
+    match name
+        .chars()
+        .find(|&c| !c.is_alphanumeric() && !NAME_PUNCTUATION.contains(c))
+    {
+        Some(c) => Err(err_params(format!(
+            "{} holds {c:?}; a name is letters, digits and {NAME_PUNCTUATION}",
+            borer_engine::text::quoted(name)
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Refuses an annotation at an address no section maps.

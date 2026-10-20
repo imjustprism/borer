@@ -12,7 +12,7 @@ use crate::BorerServer;
 use crate::errors::err_params;
 use crate::params::{
     Annotation, AnnotationsParams, Filter, Page, SetCommentParams, SetNameParams, SetTypeParams,
-    TypesParams, frame_words, must_be_in_a_section, must_fit_a_row, plan_var,
+    TypesParams, frame_words, must_be_a_name, must_be_in_a_section, must_fit_a_row, plan_var,
 };
 use crate::state::{read_lock, write_lock};
 
@@ -115,16 +115,23 @@ impl BorerServer {
 impl BorerServer {
     /// Names a function or data address in the overlay (dry-run by default).
     ///
+    /// `names` renames many at once, each `address=name`, all checked
+    /// before any is applied. A name must be an identifier
+    /// ([`must_be_a_name`]), and one another address already answers to
+    /// is refused unless `force`: two places of one name make every later
+    /// lookup of it ambiguous.
+    ///
     /// # Arguments
     ///
     /// * `SetNameParams` - Destructured tool parameters (see its field docs).
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, the address does not resolve, or no section
-    /// holds it.
+    /// When no binary is loaded, neither `address` and `name` nor `names`
+    /// is given, a name is not an identifier or is taken, an address does
+    /// not resolve, or no section holds it.
     #[tool(
-        description = "Name a function (any address inside it) or a data global in the overlay, not the binary; dry-run unless dry_run=false.",
+        description = "Name a function (any address inside it) or a data global in the overlay, not the binary; names=[\"addr=name\",...] renames many. A name taken elsewhere needs force=true. Dry-run unless dry_run=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -137,38 +144,124 @@ impl BorerServer {
         Parameters(SetNameParams {
             address,
             name,
+            names,
+            force,
             dry_run,
         }): Parameters<SetNameParams>,
     ) -> Result<String, ErrorData> {
+        /// Most renames one call takes.
+        const NAMES_MAX: usize = 500;
+        /// What a call naming nothing, or naming both ways, is told.
+        const ASKED: &str = "give address and name, or names=[\"address=name\", ...]";
         let dry = dry_run.unwrap_or(true);
-        must_fit_a_row(&name, Annotation::Name)?;
+        let pairs: Vec<(String, String)> = if let Some(names) = names {
+            if address.is_some() || name.is_some() || names.is_empty() {
+                return Err(err_params(ASKED));
+            }
+            if names.len() > NAMES_MAX {
+                return Err(err_params(format!(
+                    "{} names; one call takes at most {NAMES_MAX}",
+                    names.len()
+                )));
+            }
+            names
+                .iter()
+                .map(|pair| {
+                    pair.split_once('=')
+                        .map(|(a, n)| (a.trim().to_owned(), n.trim().to_owned()))
+                        .ok_or_else(|| {
+                            err_params(format!(
+                                "{} is not address=name",
+                                borer_engine::text::quoted(pair)
+                            ))
+                        })
+                })
+                .collect::<Result<_, _>>()?
+        } else if let (Some(address), Some(name)) = (address, name) {
+            vec![(address, name)]
+        } else {
+            return Err(err_params(ASKED));
+        };
+        for (_, name) in &pairs {
+            must_fit_a_row(name, Annotation::Name)?;
+            must_be_a_name(name)?;
+        }
+        let force = force.unwrap_or(false);
+        let single = pairs.len() == 1;
         self.with_analysis(Feature::Discover, |p, a, o| {
-            let va = self.addr(p, &address)?;
-            must_be_in_a_section(p, va, Annotation::Name)?;
-            let target = a.function_at(va).map_or(va, |f| f.entry);
-            let old = borer_engine::analysis::name_of(a, o, target);
-            let what = if a.function(target).is_some() {
-                "function"
-            } else {
-                "data"
-            };
-            let numeric = parse_addr(&name).map_or_else(String::new, |n| {
-                format!(
-                    "
+            let mut working = o.clone();
+            let mut renamed = Vec::with_capacity(pairs.len());
+            let mut lines = Vec::with_capacity(pairs.len());
+            for (address, name) in &pairs {
+                let item = |e: String| {
+                    if single {
+                        e
+                    } else {
+                        format!("{address}={name}: {e}")
+                    }
+                };
+                let va = self.addr(p, address).map_err(item)?;
+                must_be_in_a_section(p, va, Annotation::Name).map_err(item)?;
+                let target = a.function_at(va).map_or(va, |f| f.entry);
+                let old = borer_engine::analysis::name_of(a, &working, target);
+                working.names.insert(target, name.clone());
+                if !force {
+                    match borer_engine::analysis::resolve(p, a, &working, name) {
+                        Ok(at) if at == target => {}
+                        Ok(at) => {
+                            return Err(item(format!(
+                                "'{name}' already names {at:#x}; pick another name, or force=true to take it"
+                            )));
+                        }
+                        Err(why) => {
+                            return Err(item(format!(
+                                "'{name}' is taken ({why}); pick another name, or force=true to take it"
+                            )));
+                        }
+                    }
+                }
+                let what = if a.function(target).is_some() {
+                    "function"
+                } else {
+                    "data"
+                };
+                let numeric = parse_addr(name).map_or_else(String::new, |n| {
+                    format!(
+                        "
 # note: '{name}' also reads as the number {n:#x}; an address argument finds the name first, and 0x-prefixed text is always an address"
-                )
-            });
+                    )
+                });
+                let line = if dry {
+                    format!("would set name of {what} {target:#x} ({old}) to '{name}'")
+                } else {
+                    format!("renamed {what} {target:#x}: {old} -> {name}")
+                };
+                lines.push((line, numeric));
+                renamed.push((target, name.clone()));
+            }
+            let joined = || {
+                lines
+                    .iter()
+                    .map(|(line, numeric)| format!("{line}{numeric}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             if dry {
-                return Ok(format!(
-                    "dry-run: would set name of {what} {target:#x} ({old}) to '{name}'. pass dry_run=false to apply.{numeric}"
-                ));
+                return Ok(match lines.as_slice() {
+                    [(line, numeric)] => {
+                        format!("dry-run: {line}. pass dry_run=false to apply.{numeric}")
+                    }
+                    more => format!(
+                        "dry-run: {} names\n{}\npass dry_run=false to apply.",
+                        more.len(),
+                        joined()
+                    ),
+                });
             }
             let before = self.overlay_plain();
-            write_lock(&self.overlay)
-                .names
-                .insert(target, name.clone());
+            write_lock(&self.overlay).names.extend(renamed);
             self.names_changed(&before);
-            Ok(format!("renamed {what} {target:#x}: {old} -> {name}{numeric}"))
+            Ok(joined())
         })
     }
 
@@ -758,8 +851,10 @@ mod tests {
         assert_eq!(held(), 1);
         server
             .set_name(Parameters(SetNameParams {
-                address: "0x1000".to_owned(),
-                name: "renamed".to_owned(),
+                address: Some("0x1000".to_owned()),
+                name: Some("renamed".to_owned()),
+                names: None,
+                force: None,
                 dry_run: Some(false),
             }))
             .expect("renames");
@@ -811,14 +906,79 @@ mod tests {
         assert_eq!(held, 1);
         server
             .set_name(Parameters(SetNameParams {
-                address: "0x1080".to_owned(),
-                name: "elsewhere".to_owned(),
+                address: Some("0x1080".to_owned()),
+                name: Some("elsewhere".to_owned()),
+                names: None,
+                force: None,
                 dry_run: Some(false),
             }))
             .expect("renames");
         assert_eq!(derived(), (1, built), "the text is carried over");
         assert_eq!(decompile(), text);
         assert_eq!(derived(), (1, built), "the decompile built nothing");
+    }
+
+    /// `set_name` refuses a name that is not an identifier and one another
+    /// address holds unless forced, and `names` renames many in one call,
+    /// checking all before applying any.
+    ///
+    /// # Panics
+    ///
+    /// When a bad or taken name is accepted, or the batch applies in part.
+    #[test]
+    fn set_name_refuses_bad_and_taken_names_and_renames_in_batches() {
+        use crate::params::SetNameParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = raw_server();
+        let set = |address: Option<&str>, name: Option<&str>, names: Option<&[&str]>, force| {
+            server.set_name(Parameters(SetNameParams {
+                address: address.map(str::to_owned),
+                name: name.map(str::to_owned),
+                names: names.map(|n| n.iter().map(|s| (*s).to_owned()).collect()),
+                force,
+                dry_run: Some(false),
+            }))
+        };
+        let spaced = set(Some("0x1000"), Some("foo bar"), None, None).expect_err("a space");
+        assert!(spaced.message.contains("holds ' '"), "{}", spaced.message);
+        let digit = set(Some("0x1000"), Some("1st"), None, None).expect_err("a digit");
+        assert!(
+            digit.message.contains("opens with a digit"),
+            "{}",
+            digit.message
+        );
+        set(Some("0x1000"), Some("Foo::bar<int>"), None, None).expect("a C++ name");
+        set(Some("0x1010"), Some("main"), None, None).expect("a free name");
+        let taken = set(Some("0x1020"), Some("main"), None, None).expect_err("taken");
+        assert!(
+            taken.message.contains("0x1010") && taken.message.ends_with("force=true to take it"),
+            "{}",
+            taken.message
+        );
+        set(Some("0x1020"), Some("main"), None, Some(true)).expect("forced");
+        assert!(set(None, None, None, None).is_err(), "nothing asked");
+        let half = set(None, None, Some(&["0x1030=one", "0x1040=two words"]), None);
+        assert!(half.is_err(), "one bad name refuses the batch");
+        let bad_pair =
+            set(None, None, Some(&["0x1030=one", "0x1040=one"]), None).expect_err("one name twice");
+        assert!(
+            bad_pair.message.starts_with("0x1040=one: 'one' ")
+                && bad_pair.message.contains("0x1030"),
+            "{}",
+            bad_pair.message
+        );
+        assert!(
+            !crate::state::read_lock(&server.overlay)
+                .names
+                .values()
+                .any(|n| n == "one"),
+            "a refused batch applies nothing"
+        );
+        let both = set(None, None, Some(&["0x1030=one", "0x1040 = two"]), None).expect("renames");
+        assert_eq!(both.lines().count(), 2, "{both}");
+        let names = &crate::state::read_lock(&server.overlay).names;
+        assert_eq!(names.get(&0x1030).map(String::as_str), Some("one"));
+        assert_eq!(names.get(&0x1040).map(String::as_str), Some("two"));
     }
 
     /// A name that reads as a number is noted when set and reaches its
@@ -840,8 +1000,10 @@ mod tests {
         let server = raw_server();
         let set = server
             .set_name(Parameters(SetNameParams {
-                address: "0x1000".to_owned(),
-                name: "cafe".to_owned(),
+                address: Some("0x1000".to_owned()),
+                name: Some("cafe".to_owned()),
+                names: None,
+                force: None,
                 dry_run: Some(false),
             }))
             .expect("renames");
@@ -1557,8 +1719,10 @@ mod tests {
         assert!(comment("0x1", None).is_err(), "a dry run is refused too");
         let named = server
             .set_name(Parameters(SetNameParams {
-                address: "0x1".to_owned(),
-                name: "typo".to_owned(),
+                address: Some("0x1".to_owned()),
+                name: Some("typo".to_owned()),
+                names: None,
+                force: None,
                 dry_run: None,
             }))
             .expect_err("outside the image");
