@@ -3399,6 +3399,37 @@ mod tests {
         assert_eq!(emu.registers().first().map(|(n, _)| *n), Some("eax"));
     }
 
+    /// A 32-bit access that runs past `0xffff_ffff` wraps to address zero,
+    /// byte by byte, as the machine's linear addresses do.
+    ///
+    /// `mov eax, 0xfffffffe; mov dword [eax], 0x11223344; mov ecx, [eax]`
+    /// stores the high half at 0 and 1 and reads the word back whole; with
+    /// the store unwrapped, the high half lands above 4 GiB and the load
+    /// mixes it with the fill the verifier's own wrapped read never sees.
+    #[test]
+    fn a_32_bit_access_past_the_top_wraps_to_zero() {
+        let p = image32(
+            &[
+                0xb8, 0xfe, 0xff, 0xff, 0xff, // ASM: mov eax, 0xfffffffe
+                0xc7, 0x00, 0x44, 0x33, 0x22, 0x11, // ASM: mov dword [eax], 0x11223344
+                0x8b, 0x08, // ASM: mov ecx, [eax]
+                0xc3, // ASM: ret
+            ],
+            &[],
+        );
+        let mut emu = Emulator::new(&p, 10).expect("emulator");
+        emu.set_permissive(true);
+        emu.set_fill(Some(7));
+        assert_eq!(emu.run(0x1000).stop, Stop::Returned);
+        assert_eq!(emu.register("ecx"), Some(0x1122_3344));
+        assert_eq!(emu.byte_at(0), Some(0x22));
+        assert_eq!(emu.byte_at(1), Some(0x11));
+        assert_eq!(
+            emu.byte_at(0x1_0000_0000),
+            Some(fill_byte(7, 0x1_0000_0000))
+        );
+    }
+
     /// A 32-bit allocation steps over an image loaded where allocations
     /// start, and fails as the OS would once the space below the API stubs
     /// is spent, rather than run into the stubs and the stack above them.

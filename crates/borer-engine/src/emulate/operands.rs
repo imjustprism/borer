@@ -310,6 +310,9 @@ impl Emulator<'_> {
 
     /// Loads `bytes` bytes from `addr`, little-endian.
     ///
+    /// On a 32-bit target the bytes past `0xffff_ffff` wrap to address
+    /// zero, as the machine's linear addresses do.
+    ///
     /// # Errors
     ///
     /// A fault when a byte is neither written nor backed by the image.
@@ -321,7 +324,7 @@ impl Emulator<'_> {
         }
         let mut v = 0u64;
         for k in 0..from_usize(bytes) {
-            let a = addr.wrapping_add(k);
+            let a = self.narrow(addr.wrapping_add(k));
             let byte = self.byte_at(a).ok_or(Stop::Fault(a))?;
             v |= u64::from(byte) << (k * 8);
         }
@@ -335,6 +338,7 @@ impl Emulator<'_> {
     ///
     /// A write outside the stack is recorded as materialized: the bytes a
     /// packer decrypts into memory, which [`Emulator::run`] can then execute.
+    /// On a 32-bit target the bytes past `0xffff_ffff` wrap to address zero.
     ///
     /// # Errors
     ///
@@ -345,7 +349,7 @@ impl Emulator<'_> {
             self.step_memory.borrow_mut().push((true, addr, bytes, v));
         }
         for k in 0..from_usize(bytes) {
-            let a = addr.wrapping_add(k);
+            let a = self.narrow(addr.wrapping_add(k));
             if self.mem.len() >= self.memory_max && !self.mem.contains(a) {
                 return Err(Stop::MemoryFull(a));
             }
