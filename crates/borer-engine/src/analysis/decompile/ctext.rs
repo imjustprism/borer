@@ -779,8 +779,15 @@ pub(super) enum Ast {
     Step(bool, bool, Box<Ast>),
 }
 
-/// Deepest nesting an expression is read to, so a hostile line cannot run
-/// the reader out of stack.
+/// Deepest nesting an expression is read to.
+///
+/// A hostile line cannot run the reader out of stack. A chain an operator
+/// or a postfix extends
+/// (`a + b + c`, `a[0][1]`) nests its tree one level per link though the
+/// reader loops over it, so each link counts too: the tree the reader
+/// hands back is never deeper than this, and every walk over it (the
+/// interpreter's evaluation, its search for a parameter, dropping it)
+/// recurses at most this far.
 const DEPTH_MAX: u16 = 200;
 
 /// A reader of one expression's tokens.
@@ -929,6 +936,7 @@ impl Parser<'_> {
             self.logic(true)?
         };
         let op = if and { "&&" } else { "||" };
+        let mut links = 0;
         while self.eat(op) {
             let right = if and {
                 self.binary(0)?
@@ -936,7 +944,10 @@ impl Parser<'_> {
                 self.logic(true)?
             };
             left = Ast::Logic(and, Box::new(left), Box::new(right));
+            self.deeper()?;
+            links += 1;
         }
+        self.depth -= links;
         Ok(left)
     }
 
@@ -952,6 +963,7 @@ impl Parser<'_> {
     /// When the tokens do not read as an expression.
     fn binary(&mut self, min: u8) -> Result<Ast, String> {
         let mut left = self.unary()?;
+        let mut links = 0;
         while let Some(Tok::Punct(p)) = self.peek() {
             let Some((op, prec)) = Bin::of(p) else { break };
             if prec < min {
@@ -960,9 +972,10 @@ impl Parser<'_> {
             self.at += 1;
             self.deeper()?;
             let right = self.binary(prec + 1)?;
-            self.depth -= 1;
             left = Ast::Bin(op, Box::new(left), Box::new(right));
+            links += 1;
         }
+        self.depth -= links;
         Ok(left)
     }
 
@@ -1052,6 +1065,7 @@ impl Parser<'_> {
                 return Err(format!("expected a value, read {}", self.shown()));
             }
         };
+        let mut links = 0;
         loop {
             if self.eat("(") {
                 let mut args = Vec::new();
@@ -1089,7 +1103,10 @@ impl Parser<'_> {
             } else {
                 break;
             }
+            self.deeper()?;
+            links += 1;
         }
+        self.depth -= links;
         Ok(e)
     }
 }
@@ -1168,6 +1185,30 @@ mod tests {
     /// When the text does not read.
     fn read(text: &str) -> Ast {
         expression(&tokens(text).unwrap(), &|_| true, 64).unwrap()
+    }
+
+    /// The tree a line reads into is never deeper than the reader's limit.
+    ///
+    /// A chain of operators, of `||` or of indexes read in a loop counts a
+    /// level per link, so a hostile line of thousands is refused instead of
+    /// handing the interpreter a tree its walks recurse through to the end
+    /// of the stack.
+    ///
+    /// # Panics
+    ///
+    /// When a chain past the limit reads, or one within it does not.
+    #[test]
+    fn a_chain_past_the_depth_limit_is_refused() {
+        let read_all = |text: &str| expression(&tokens(text).unwrap(), &|_| true, 64);
+        let long = |sep: &str, n: usize| vec!["a"; n].join(sep);
+        for sep in [" + ", " || ", " && ", " * "] {
+            assert!(read_all(&long(sep, 50)).is_ok(), "{sep}");
+            let err = read_all(&long(sep, 5000)).expect_err("too deep");
+            assert!(err.contains("nested too deep"), "{sep}: {err}");
+        }
+        assert!(read_all(&format!("a{}", "[0]".repeat(50))).is_ok());
+        let err = read_all(&format!("a{}", "[0]".repeat(5000))).expect_err("too deep");
+        assert!(err.contains("nested too deep"), "{err}");
     }
 
     /// Literals take the type C gives them, strings carry their terminator,
