@@ -274,6 +274,20 @@ pub struct Run {
     pub history: Vec<Written>,
 }
 
+/// What a new machine over one image is set up with before any run
+/// ([`Emulator::planted`]).
+///
+/// Building it plants a thread block and a stub for every import, which
+/// cost a replay check most of a millisecond per answer, so it is built
+/// once per image and shared.
+#[derive(Debug, Clone)]
+pub(crate) struct Planted {
+    /// The planted memory, frozen into the layer clones share.
+    mem: Store,
+    /// The stub cells, by address, with the API each stands for.
+    apis: std::sync::Arc<BTreeMap<u64, String>>,
+}
+
 /// A step-bounded machine over one program image.
 ///
 /// A clone is a separate machine over the same image: cloning one that is
@@ -776,6 +790,66 @@ impl<'a> Emulator<'a> {
     /// when the image's bitness is unknown.
     #[must_use]
     pub fn new(program: &'a Program, budget: usize) -> Option<Self> {
+        let mut emu = Self::bare(program, budget)?;
+        emu.plant_teb();
+        emu.plant_loader();
+        emu.mem.freeze();
+        Some(emu)
+    }
+
+    /// What this machine was set up with before any run: the memory and
+    /// the stubs [`Emulator::new`] plants, a function of the image alone.
+    ///
+    /// # Returns
+    ///
+    /// The planted state, which [`Emulator::with_planted`] builds a
+    /// machine over without planting again.
+    #[must_use]
+    pub(crate) fn planted(&self) -> Planted {
+        Planted {
+            mem: self.mem.clone(),
+            apis: std::sync::Arc::clone(&self.apis),
+        }
+    }
+
+    /// Builds an emulator as [`Emulator::new`] does, over memory and stubs
+    /// an earlier machine over the same image planted.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image whose bytes back unwritten memory; the one
+    ///   `planted` was read from.
+    /// * `budget` - Most instructions to run before stopping.
+    /// * `planted` - What [`Emulator::planted`] read from a new machine.
+    ///
+    /// # Returns
+    ///
+    /// The machine [`Emulator::new`] would build, or `None` when the
+    /// image's bitness is unknown.
+    #[must_use]
+    pub(crate) fn with_planted(
+        program: &'a Program,
+        budget: usize,
+        planted: &Planted,
+    ) -> Option<Self> {
+        let mut emu = Self::bare(program, budget)?;
+        emu.mem = planted.mem.clone();
+        emu.apis = std::sync::Arc::clone(&planted.apis);
+        Some(emu)
+    }
+
+    /// Builds an emulator with nothing planted: zeroed registers but the
+    /// scratch stack pointer, and empty memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image whose bytes back unwritten memory.
+    /// * `budget` - Most instructions to run before stopping.
+    ///
+    /// # Returns
+    ///
+    /// The machine, or `None` when the image's bitness is unknown.
+    fn bare(program: &'a Program, budget: usize) -> Option<Self> {
         let bitness = program.arch.bitness()?;
         let (word, stack_base, stack_span, teb, alloc_next) = if bitness == 32 {
             (4, STACK_BASE_32, STACK_SPAN_32, TEB_32, ALLOC_BASE_32)
@@ -835,9 +909,6 @@ impl<'a> Emulator<'a> {
             segs: [0; 6],
         };
         emu.set_reg(Register::RSP, stack_base);
-        emu.plant_teb();
-        emu.plant_loader();
-        emu.mem.freeze();
         Some(emu)
     }
 

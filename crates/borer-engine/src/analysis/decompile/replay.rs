@@ -335,12 +335,14 @@ pub(super) trait Replay: Lifter {
     /// # Arguments
     ///
     /// * `program` - The image.
+    /// * `analysis` - Its analysis, whose memo may keep what the machine
+    ///   is set up with.
     ///
     /// # Returns
     ///
     /// The machine, or `None` when the image is not this instruction
     /// set's.
-    fn rig(program: &Program) -> Option<Self::Rig<'_>>;
+    fn rig<'p>(program: &'p Program, analysis: &Analysis) -> Option<Self::Rig<'p>>;
 
     /// Returns the register width in bits the image runs at.
     ///
@@ -493,8 +495,11 @@ pub(super) trait Replay: Lifter {
 impl Replay for arch::X86 {
     type Rig<'p> = Emulator<'p>;
 
-    fn rig(program: &Program) -> Option<Emulator<'_>> {
-        Emulator::new(program, 0)
+    fn rig<'p>(program: &'p Program, analysis: &Analysis) -> Option<Emulator<'p>> {
+        let planted = analysis.derived.get_or_build("replay_rig", (), || {
+            Emulator::new(program, 0).map(|e| e.planted())
+        });
+        Emulator::with_planted(program, 0, planted.as_ref().as_ref()?)
     }
 
     fn width(program: &Program) -> Option<u8> {
@@ -819,7 +824,7 @@ fn replay_in<L: Replay>(
     let parts = striped_with(
         entries,
         PAR_MIN,
-        || L::rig(program),
+        || L::rig(program, analysis),
         |template, &entry| {
             template
                 .as_ref()
@@ -849,13 +854,13 @@ fn replay_in<L: Replay>(
 #[must_use]
 pub fn replay_function(program: &Program, analysis: &Analysis, entry: u64, seed: u64) -> Replayed {
     match program.arch.isa() {
-        Some(Isa::X86 { .. }) => arch::X86::rig(program)
+        Some(Isa::X86 { .. }) => arch::X86::rig(program, analysis)
             .map(|t| replay_one::<arch::X86>(program, analysis, &t, entry, seed))
             .unwrap_or_default(),
-        Some(Isa::A64) => arch::A64::rig(program)
+        Some(Isa::A64) => arch::A64::rig(program, analysis)
             .map(|t| replay_one::<arch::A64>(program, analysis, &t, entry, seed))
             .unwrap_or_default(),
-        Some(Isa::A32) => arch::A32::rig(program)
+        Some(Isa::A32) => arch::A32::rig(program, analysis)
             .map(|t| replay_one::<arch::A32>(program, analysis, &t, entry, seed))
             .unwrap_or_default(),
         None => Replayed::default(),
@@ -945,7 +950,7 @@ fn check_answer_in<L: Replay>(
     entry: u64,
 ) -> Option<TextCheck> {
     let f = analysis.function(entry)?;
-    let template = L::rig(program)?;
+    let template = L::rig(program, analysis)?;
     let shared = decompiled_witnessed(program, analysis, overlay, overlay.fingerprint(), entry);
     let fresh;
     let (d, w) = match shared.as_ref().as_ref().map(|d| (d, d.take_witness())) {
