@@ -24,7 +24,7 @@
 //!   `name.type.off64.off32` per field.
 
 use std::collections::BTreeMap;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use super::typelib::{Conv, Decl, Os, Param};
 
@@ -210,13 +210,39 @@ fn decl_of(line: &'static str) -> Option<Decl> {
     })
 }
 
-/// The declarations, sorted by name (`functions.tsv`).
-static DECLS: LazyLock<Vec<Decl>> = LazyLock::new(|| {
+/// One row of `functions.tsv`: the function's name, the row, and the
+/// declaration the row reads as, read the first time it is asked for.
+type Row = (&'static str, &'static str, OnceLock<Option<Decl>>);
+
+/// The declarations' rows, sorted by name (`functions.tsv`).
+///
+/// Reading every row into a [`Decl`] up front cost the first decompile
+/// of a process milliseconds for the few declarations it reads, so only
+/// the names are split out here and a row is read when it is first asked
+/// for ([`decl`]).
+static DECLS: LazyLock<Vec<Row>> = LazyLock::new(|| {
     include_str!("sdk/functions.tsv")
         .lines()
-        .filter_map(decl_of)
+        .map(|line| {
+            let name = line.split_once('\t').map_or(line, |(n, _)| n);
+            (name, line, OnceLock::new())
+        })
         .collect()
 });
+
+/// Returns the declaration a row of [`DECLS`] reads as, reading it the
+/// first time.
+///
+/// # Arguments
+///
+/// * `row` - The row.
+///
+/// # Returns
+///
+/// The declaration, or `None` when the row does not read as one.
+fn decl(row: &'static Row) -> Option<&'static Decl> {
+    row.2.get_or_init(|| decl_of(row.1)).as_ref()
+}
 
 /// The typedefs the declarations and fields spell (`types.tsv`).
 static TYPES: LazyLock<BTreeMap<&'static str, Typedef>> = LazyLock::new(|| {
@@ -282,8 +308,12 @@ static STRUCTS: LazyLock<BTreeMap<&'static str, Struct>> = LazyLock::new(|| {
 /// The declaration, or `None` when the SDK declares none the caller's
 /// platform calls.
 pub fn declared(fn_name: &str, serves: impl Fn(Os) -> bool) -> Option<&'static Decl> {
-    let at = DECLS.partition_point(|d| d.name < fn_name);
-    DECLS.get(at).filter(|d| d.name == fn_name && serves(d.os))
+    let at = DECLS.partition_point(|row| row.0 < fn_name);
+    DECLS
+        .get(at)
+        .filter(|row| row.0 == fn_name)
+        .and_then(decl)
+        .filter(|d| serves(d.os))
 }
 
 /// Returns what a typedef the SDK spells stands for.
@@ -397,7 +427,7 @@ fn declarator(ty: &str, n: &str) -> String {
 )]
 mod tests {
     use super::{
-        DECLS, NAMES, STRUCTS, TYPES, WORDS, declared, pointee, spell, structure, typedef,
+        DECLS, NAMES, STRUCTS, TYPES, WORDS, decl, declared, pointee, spell, structure, typedef,
     };
     use crate::analysis::typelib::{Conv, Os};
 
@@ -406,12 +436,15 @@ mod tests {
     #[test]
     fn the_tables_parse_whole() {
         let lines = |t: &str| t.lines().count();
-        assert_eq!(DECLS.len(), lines(include_str!("sdk/functions.tsv")));
+        assert_eq!(
+            DECLS.iter().filter_map(decl).count(),
+            lines(include_str!("sdk/functions.tsv"))
+        );
         assert_eq!(TYPES.len(), lines(include_str!("sdk/types.tsv")));
         assert_eq!(STRUCTS.len(), lines(include_str!("sdk/structs.tsv")));
         assert_eq!(WORDS.len(), lines(include_str!("sdk/words.tsv")));
         assert_eq!(NAMES.len(), lines(include_str!("sdk/names.tsv")));
-        assert!(DECLS.windows(2).all(|w| w[0].name < w[1].name));
+        assert!(DECLS.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(DECLS.len() > 10_000, "{}", DECLS.len());
         for s in STRUCTS.values() {
             assert!(
