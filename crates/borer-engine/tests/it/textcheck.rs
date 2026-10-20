@@ -680,3 +680,49 @@ fn the_repair_search_masks_a_signed_quotient_to_its_lane() {
     assert!(note.is_none());
     assert_eq!(same.fingerprint(), o.fingerprint());
 }
+
+/// A 32-bit hash the function keeps in a 64-bit register is a `uint32_t`.
+///
+/// `lanes3` folds bytes into `h = (h << 5) - h + *p` and stores `h` as a
+/// dword: no read needs more than its low half, so the text declares it
+/// at 32 bits and writes no mask, and run as ISO C it agrees with the
+/// binary.
+#[test]
+fn a_hash_stored_at_32_bits_needs_no_mask() {
+    let code = [
+        0x45, 0x85, 0xc0, // ASM: test r8d,r8d
+        0x74, 0x24, // ASM: je 0x1029
+        0x45, 0x89, 0xc0, // ASM: mov r8d,r8d
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x45, 0x31, 0xc9, // ASM: xor r9d,r9d
+        0x41, 0x89, 0xc2, // ASM: mov r10d,eax
+        0x41, 0xc1, 0xe2, 0x05, // ASM: shl r10d,5
+        0x41, 0x29, 0xc2, // ASM: sub r10d,eax
+        0x42, 0x0f, 0xb6, 0x04, 0x0a, // ASM: movzx eax,byte [rdx+r9]
+        0x44, 0x01, 0xd0, // ASM: add eax,r10d
+        0x49, 0xff, 0xc1, // ASM: inc r9
+        0x45, 0x39, 0xc8, // ASM: cmp r8d,r9d
+        0x75, 0xe6, // ASM: jne 0x100d
+        0xeb, 0x02, // ASM: jmp 0x102b
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x89, 0x01, // ASM: mov [rcx],eax
+        0xc3, // ASM: ret
+    ];
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+    assert!(!text.contains("0xffffffff"), "{text}");
+    assert!(text.contains("uint32_t"), "{text}");
+    let rows = check_generated_iso(&p, &a, &o, TEXT, 8, 1, 20_000).expect("the text reads");
+    assert!(
+        rows.iter().any(|(_, v)| *v == Verdict::Agrees),
+        "{text}
+{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|(_, v)| matches!(v, Verdict::Differs(..))),
+        "{text}
+{rows:?}"
+    );
+}

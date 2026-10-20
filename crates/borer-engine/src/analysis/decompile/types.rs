@@ -1251,14 +1251,18 @@ fn in_literal(head: &str) -> bool {
 /// A 32-bit register write keeps the low half and clears the rest. The
 /// lifter prints that as `v = (v + x) & 0xffffffff` so the text wraps where
 /// the machine does. Where every use of `v` is one of those writes, a
-/// constant update, a cast to that width, a `return` of it, or an index in
-/// an address, `v` is a `uint32_t` (or an `int32_t` when the only casts are
-/// signed, it is not returned, and it is not an index). An index is the
-/// zero-extended value, so a signed compare of that local keeps its cast.
+/// constant update, a 32-bit load, a cast to that width, a `return` of it,
+/// an index in an address, or its value handed on whole (a call's
+/// argument, the value an assignment stores), `v` is a `uint32_t` (or an
+/// `int32_t` when the only casts are signed, it is not returned, handed
+/// on or an index). An index or a value handed on is the zero-extended
+/// value, so a signed compare of that local keeps its cast.
 /// The mask then says nothing the declaration does not, so the
 /// write is `v += x` again and a counted `while` of it is a `for`. A use
 /// the mask does not cover stays as it was: narrowing it would sign-extend
-/// or wrap a value the machine kept.
+/// or wrap a value the machine kept. A local no read needs more than the
+/// low 32 bits of ([`low_demand`]) is a `uint32_t` too, and a value
+/// written to it is a 32-bit read of its own.
 ///
 /// # Arguments
 ///
@@ -1271,13 +1275,33 @@ pub(super) fn lane_locals(text: &str) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let declared = uint64_names(&lines);
     let uses = word_lines(&lines);
+    let narrow = narrow_declarations(&lines);
+    let low = low_demand(&lines, &uses, &declared, &narrow);
+    let mut sinks: BTreeSet<&str> = low.iter().map(String::as_str).collect();
+    sinks.extend(
+        narrow
+            .iter()
+            .filter(|(_, ty)| integer_bits(ty).is_some())
+            .map(|(n, _)| n.as_str()),
+    );
+    let mut held: BTreeSet<&str> = low.iter().map(String::as_str).collect();
+    held.extend(
+        narrow
+            .iter()
+            .filter(|(_, ty)| narrow_type(ty).is_some_and(|(_, mask)| mask.is_some()))
+            .map(|(n, _)| n.as_str()),
+    );
     let typed: Vec<(String, &'static str)> = declared
         .into_iter()
         .filter_map(|name| {
             let at = uses.get(name.as_str()).map_or(&[][..], Vec::as_slice);
-            lane_type(&lines, at, &name).map(|ty| (name, ty))
+            lane_type(&lines, at, &name, &sinks, &held)
+                .or_else(|| low.contains(&name).then_some("uint32_t"))
+                .map(|ty| (name, ty))
         })
         .collect();
+    drop(held);
+    drop(sinks);
     drop(uses);
     if typed.is_empty() {
         return text.to_owned();
@@ -1381,7 +1405,17 @@ fn uint64_names(lines: &[String]) -> Vec<String> {
 /// * `lines` - The function.
 /// * `at` - The lines that name `name`, in order.
 /// * `name` - A `uint64_t` local.
-fn lane_type(lines: &[String], at: &[usize], name: &str) -> Option<&'static str> {
+/// * `sinks` - The locals only the low 32 bits of a value reach
+///   ([`masked_read`]).
+/// * `held` - The locals that hold an unsigned value of at most 32 bits,
+///   which a plain write may copy.
+fn lane_type(
+    lines: &[String],
+    at: &[usize],
+    name: &str,
+    sinks: &BTreeSet<&str>,
+    held: &BTreeSet<&str>,
+) -> Option<&'static str> {
     let mut masked = false;
     let mut signed = false;
     let mut unsigned = false;
@@ -1389,6 +1423,7 @@ fn lane_type(lines: &[String], at: &[usize], name: &str) -> Option<&'static str>
     let mut indexed = false;
     let mut compared = false;
     let mut compound = false;
+    let mut whole = false;
     for line in at.iter().filter_map(|&k| lines.get(k)) {
         if line.starts_with("//") || is_declaration(line) {
             continue;
@@ -1408,7 +1443,7 @@ fn lane_type(lines: &[String], at: &[usize], name: &str) -> Option<&'static str>
                     return None;
                 }
             } else if let Some(rhs) = plain_rhs(trimmed, name) {
-                if !fits_u32(rhs) {
+                if !fits_u32(rhs) && !narrow_load(rhs) && !held.contains(rhs) {
                     return None;
                 }
             } else if let Some(rhs) = compound_rhs(trimmed, name) {
@@ -1427,7 +1462,11 @@ fn lane_type(lines: &[String], at: &[usize], name: &str) -> Option<&'static str>
                 compared = true;
                 continue;
             }
-            if lane_use(line, at, name) {
+            if whole_value(line, at, name) {
+                whole = true;
+                continue;
+            }
+            if lane_use(line, at, name, sinks) {
                 let head = line.get(..at).unwrap_or("");
                 if head.ends_with("(int32_t)") || head.ends_with("(int64_t)(int32_t)") {
                     signed = true;
@@ -1442,7 +1481,7 @@ fn lane_type(lines: &[String], at: &[usize], name: &str) -> Option<&'static str>
     if !masked || (compared && (compound || !vars::is_var_name(name))) {
         return None;
     }
-    if indexed || returned || unsigned || !signed {
+    if indexed || returned || unsigned || whole || !signed {
         Some("uint32_t")
     } else {
         Some("int32_t")
@@ -1471,6 +1510,67 @@ fn address_index(line: &str, at: usize, name: &str) -> bool {
     let from = head.rfind([';', '\n']).map_or(0, |i| i + 1);
     let region = line.get(from..).unwrap_or(line);
     region.contains("*(") || region.contains(")[")
+}
+
+/// Tells whether `name` at `at` hands its value on whole: the entire
+/// argument of a call by name, or the entire value an assignment, a store
+/// or a `+=`, `-=`, `&=`, `|=` or `^=` writes.
+///
+/// Every write of a lane local leaves a value below `2^32`, so a
+/// `uint32_t` holding it hands on the very number the `uint64_t` did: a
+/// parameter or a destination converts the same value either way, and
+/// those compound operators keep the low bits of a narrower destination
+/// and all of a wider one. A `sizeof` reads the type, not the value, and
+/// is not one.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - Byte index of the name.
+/// * `name` - The variable.
+fn whole_value(line: &str, at: usize, name: &str) -> bool {
+    let head = line.get(..at).unwrap_or("");
+    let tail = line.get(at + name.len()..).unwrap_or("");
+    if tail == ";" {
+        return [" = ", " += ", " -= ", " &= ", " |= ", " ^= "]
+            .iter()
+            .any(|op| {
+                head.strip_suffix(op)
+                    .map(str::trim)
+                    .is_some_and(|lhs| !lhs.is_empty() && lhs != name)
+            });
+    }
+    if !(head.ends_with('(') || head.ends_with(", ")) || !tail.starts_with([')', ',']) {
+        return false;
+    }
+    let Some(open) = level_open(line, at) else {
+        return false;
+    };
+    let callee = line.get(..open).unwrap_or("");
+    let word = callee
+        .rfind(|c: char| !is_ident_char(c))
+        .map_or(callee, |k| callee.get(k + 1..).unwrap_or(""));
+    line.get(open..=open) == Some("(") && is_ident(word) && word != "sizeof"
+}
+
+/// Tells whether `rhs` is one load of an unsigned integer of at most 32
+/// bits: `*(uint32_t*)p`, `*(uint16_t*)(p + 8)` or `((uint8_t*)p)[i]`.
+///
+/// # Arguments
+///
+/// * `rhs` - The right-hand side of a plain write.
+fn narrow_load(rhs: &str) -> bool {
+    ["uint32_t", "uint16_t", "uint8_t"].iter().any(|ty| {
+        let deref = rhs.strip_prefix(&format!("*({ty}*)")).is_some_and(|p| {
+            is_ident(p) || (p.starts_with('(') && p.ends_with(')') && peel(p) != p)
+        });
+        let index = rhs
+            .strip_prefix(&format!("(({ty}*)"))
+            .and_then(|r| r.strip_suffix(']'))
+            .and_then(|r| r.split_once(")["))
+            .is_some_and(|(base, i)| is_ident(base) && is_ident(i));
+        deref || index
+    })
 }
 
 /// Tells whether `name` at `at` is a whole `name == k` or `name != k` test
@@ -1520,7 +1620,8 @@ fn small_equality(line: &str, at: usize, name: &str) -> bool {
 /// * `line` - The line.
 /// * `at` - Byte index of the name.
 /// * `name` - The variable.
-fn lane_use(line: &str, at: usize, name: &str) -> bool {
+/// * `sinks` - The locals only the low 32 bits of a value reach.
+fn lane_use(line: &str, at: usize, name: &str, sinks: &BTreeSet<&str>) -> bool {
     if for_part_use(line, at, name) {
         return true;
     }
@@ -1553,7 +1654,7 @@ fn lane_use(line: &str, at: usize, name: &str) -> bool {
         return at > eq;
     }
     let _ = tail;
-    masked_read(line, at, at + name.len())
+    masked_read(line, at, at + name.len(), sinks)
 }
 
 /// Most parenthesis levels [`masked_read`] climbs.
@@ -1566,19 +1667,32 @@ const READ_LEVELS: u8 = 16;
 /// operators outside every inner parenthesis must all keep low bits low
 /// (`+`, `-`, `*`, `<<`, `&`, `|`, `^`): a carry runs up, never down, so the
 /// operand's high bits reach only high bits. The read is a 32-bit one where
-/// a level ends in ` & 0xffffffff` with no `|` or `^` beside it to take the
+/// a level ends in a 32-bit mask ([`depth0_mask`]) with no `|` or `^` beside it to take the
 /// operand out from under the mask, or where the group is masked or cast
 /// to a 32-bit integer as a whole. A shift right, a division, a
 /// comparison, a call's argument list, an index or any other cast stops
-/// it: those read the high bits too.
+/// it, as does a dereference, an address taken, a member read or an index
+/// of the operand itself: those read the high bits too. A statement that
+/// writes the whole
+/// line to a sink keeps only the low bits as well ([`sink_rhs`]).
 ///
 /// # Arguments
 ///
 /// * `line` - The line.
 /// * `from` - Byte index where the operand starts.
 /// * `to` - Byte index just past it.
-fn masked_read(line: &str, mut from: usize, mut to: usize) -> bool {
+/// * `sinks` - The locals only the low 32 bits of a value reach.
+fn masked_read(line: &str, mut from: usize, mut to: usize, sinks: &BTreeSet<&str>) -> bool {
     for _ in 0..READ_LEVELS {
+        let before = line.get(..from).unwrap_or("");
+        let after = line.get(to..).unwrap_or("");
+        if before.ends_with([')', '*', '&', '!', '.'])
+            || before.ends_with("->")
+            || after.starts_with(['[', '(', '.'])
+            || after.starts_with("->")
+        {
+            return false;
+        }
         let (open, close) = (level_open(line, from), level_close(line, to));
         let start = open.map_or_else(
             || {
@@ -1593,16 +1707,22 @@ fn masked_read(line: &str, mut from: usize, mut to: usize) -> bool {
                 .and_then(|t| t.find(';'))
                 .map_or(line.len(), |k| to + k)
         });
-        let Some(level) = line.get(start..end) else {
+        let Some(raw) = line.get(start..end) else {
             return false;
         };
-        let level = assigned_value(level);
+        if open.is_none()
+            && let Some(rhs) = sink_rhs(raw, sinks)
+        {
+            let rhs_at = end - rhs.len();
+            return from >= rhs_at && level_operators(rhs).is_some();
+        }
+        let level = assigned_value(raw);
         let ops = level_operators(level);
         let Some(ops) = ops else {
             return false;
         };
         let wide = ops.iter().any(|op| matches!(*op, "|" | "^"));
-        if level.contains(MASK32) && ops.contains(&"&") && !wide && depth0_mask(level) {
+        if ops.contains(&"&") && !wide && depth0_mask(level) {
             return true;
         }
         let (Some(o), Some(c)) = (open, close) else {
@@ -1625,6 +1745,159 @@ fn masked_read(line: &str, mut from: usize, mut to: usize) -> bool {
         to = c + 1;
     }
     false
+}
+
+/// The value a statement writes where only its low 32 bits land: a sink
+/// local assigned or updated by an operator that keeps low bits low, or a
+/// store of at most 32 bits.
+///
+/// `low = v * 31;`, `low += v;` and `*(uint16_t*)(a1 + 4) = v;` keep only
+/// the low bits of what they write, whatever `v` holds above them.
+///
+/// # Arguments
+///
+/// * `raw` - One statement, without its semicolon.
+/// * `sinks` - The locals only the low 32 bits of a value reach.
+///
+/// # Returns
+///
+/// The written value's text, a suffix of `raw`, or `None` for any other
+/// statement.
+fn sink_rhs<'a>(raw: &'a str, sinks: &BTreeSet<&str>) -> Option<&'a str> {
+    const OPS: [&str; 8] = [
+        " = ", " += ", " -= ", " *= ", " <<= ", " &= ", " |= ", " ^= ",
+    ];
+    let t = raw.trim_start();
+    let lhs_end = t.find(" ")?;
+    let lhs = t.get(..lhs_end)?;
+    let rest = t.get(lhs_end..)?;
+    if is_ident(lhs) && sinks.contains(lhs) {
+        let op = OPS.iter().find(|op| rest.starts_with(**op))?;
+        return rest.get(op.len()..);
+    }
+    let store = [
+        "uint32_t", "int32_t", "uint16_t", "int16_t", "uint8_t", "int8_t",
+    ]
+    .iter()
+    .any(|ty| t.starts_with(&format!("*({ty}*)")));
+    if !store {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, c) in t.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ' ' if depth == 0 => {
+                return t
+                    .get(i..)
+                    .and_then(|r| r.strip_prefix(" = "))
+                    .filter(|_| balanced(t.get(..i).unwrap_or("")));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Returns the `uint64_t` locals no read needs more than the low 32 bits of.
+///
+/// Every read is under a 32-bit mask, a cast to 32 bits or narrower, or in
+/// what a statement writes to a sink ([`sink_rhs`]) through operators that
+/// keep low bits low.
+///
+/// Such a local is a `uint32_t` whatever its writes compute, since what is
+/// truncated is what no reader looks at. A local's own updates
+/// (`v = v * 31 + x`) read it into itself, so the set is the largest one
+/// that holds up: every local starts in it and leaves when a read it does
+/// not cover turns up, until none does. Only `varN` locals qualify, as a
+/// register name can hold an entry value.
+///
+/// # Arguments
+///
+/// * `lines` - The function.
+/// * `uses` - Each word's lines ([`word_lines`]).
+/// * `declared` - The `uint64_t` locals.
+/// * `narrow` - The locals declared at a narrow integer type, sinks
+///   already.
+///
+/// # Returns
+///
+/// The locals whose reads need only their low 32 bits.
+fn low_demand(
+    lines: &[String],
+    uses: &BTreeMap<&str, Vec<usize>>,
+    declared: &[String],
+    narrow: &[(String, &'static str)],
+) -> BTreeSet<String> {
+    let mut low: BTreeSet<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|n| vars::is_var_name(n))
+        .collect();
+    loop {
+        let mut sinks = low.clone();
+        sinks.extend(
+            narrow
+                .iter()
+                .filter(|(_, ty)| integer_bits(ty).is_some())
+                .map(|(n, _)| n.as_str()),
+        );
+        let gone: Vec<&str> = low
+            .iter()
+            .copied()
+            .filter(|name| {
+                let at = uses.get(name).map_or(&[][..], Vec::as_slice);
+                !at.iter().filter_map(|&k| lines.get(k)).all(|line| {
+                    line.starts_with("//")
+                        || is_declaration(line)
+                        || word_positions(line, name)
+                            .into_iter()
+                            .all(|p| low_read(line, p, name, &sinks))
+                })
+            })
+            .collect();
+        if gone.is_empty() {
+            return low.into_iter().map(str::to_owned).collect();
+        }
+        for name in gone {
+            low.remove(name);
+        }
+    }
+}
+
+/// Tells whether the occurrence of `name` at `at` needs only its low 32 bits.
+///
+/// It does as a plain write of it, an update by an operator that keeps low
+/// bits low, a cast to 32 bits or narrower, or a read [`masked_read`]
+/// accepts.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `at` - Byte index of the name.
+/// * `name` - The variable.
+/// * `sinks` - The locals only the low 32 bits of a value reach.
+fn low_read(line: &str, at: usize, name: &str, sinks: &BTreeSet<&str>) -> bool {
+    const KEEP: [&str; 8] = [
+        " = ", " += ", " -= ", " *= ", " <<= ", " &= ", " |= ", " ^= ",
+    ];
+    let head = line.get(..at).unwrap_or("");
+    let tail = line.get(at + name.len()..).unwrap_or("");
+    if head.trim().is_empty() && KEEP.iter().any(|op| tail.starts_with(op)) {
+        return sinks.contains(name);
+    }
+    let narrow_cast = [
+        "(int32_t)",
+        "(uint32_t)",
+        "(int16_t)",
+        "(uint16_t)",
+        "(int8_t)",
+        "(uint8_t)",
+    ]
+    .iter()
+    .any(|c| head.ends_with(c));
+    narrow_cast || masked_read(line, at, at + name.len(), sinks)
 }
 
 /// The value side of `name = value`, or the whole text when it assigns
@@ -1716,7 +1989,12 @@ fn level_operators(level: &str) -> Option<Vec<&'static str>> {
     Some(ops)
 }
 
-/// Tells whether a level has ` & 0xffffffff` outside its inner parentheses.
+/// Tells whether a level's value depends on no bit above the low 32.
+///
+/// It has a ` & k` outside its inner parentheses whose constant `k` fits in
+/// 32 bits: ` & 0xffffffff`, ` & 0xff` or the ` & 0x1f` of a shift count.
+/// The constant ends the level or another ` & ` follows it, so no operator
+/// binding tighter takes it as an operand.
 ///
 /// # Arguments
 ///
@@ -1728,11 +2006,17 @@ fn depth0_mask(level: &str) -> bool {
             '(' | '[' => depth += 1,
             ')' | ']' => depth -= 1,
             ' ' if depth == 0 => {
-                let rest = level.get(i..).unwrap_or("");
-                if rest.starts_with(MASK32)
-                    && !rest
-                        .get(MASK32.len()..)
-                        .is_some_and(|t| t.starts_with(|c: char| c.is_ascii_hexdigit()))
+                let Some(rest) = level.get(i..).and_then(|r| r.strip_prefix(" & ")) else {
+                    continue;
+                };
+                let end = rest
+                    .find(|c: char| !c.is_ascii_alphanumeric())
+                    .unwrap_or(rest.len());
+                let last = rest
+                    .get(end..)
+                    .is_none_or(|t| t.is_empty() || t.starts_with(" & "));
+                if last
+                    && parse_const(rest.get(..end).unwrap_or("")).is_some_and(|k| k <= 0xffff_ffff)
                 {
                     return true;
                 }
@@ -3079,6 +3363,17 @@ pub(super) fn type_locals(text: &str) -> String {
             *line = strip_width(line, name, casts, mask);
         }
     }
+    let widths: BTreeMap<&str, u8> = declared_narrow
+        .iter()
+        .chain(&narrowed)
+        .filter_map(|(n, ty)| Some((n.as_str(), integer_bits(ty)?)))
+        .collect();
+    let unmasked: Vec<Option<String>> = lines.iter().map(|l| unmask_write(l, &widths)).collect();
+    for (line, next) in lines.iter_mut().zip(unmasked) {
+        if let Some(next) = next {
+            *line = next;
+        }
+    }
     let unsigned32: BTreeSet<String> = lines
         .iter()
         .filter_map(|l| l.strip_prefix("uint32_t ")?.strip_suffix(';'))
@@ -3255,6 +3550,76 @@ fn is_unsigned32(expr: &str, unsigned32: &BTreeSet<String>) -> bool {
         }
     }
     vars > 0
+}
+
+/// The width in bits of a narrow integer type a declaration gives, when
+/// it does not depend on the data model (`long` does).
+///
+/// # Arguments
+///
+/// * `ty` - The declared type.
+///
+/// # Returns
+///
+/// 8, 16 or 32, or `None` for any other type.
+fn integer_bits(ty: &str) -> Option<u8> {
+    match ty {
+        "int32_t" | "int" | "INT" | "HRESULT" | "uint32_t" | "unsigned int" | "unsigned"
+        | "DWORD" | "UINT" => Some(32),
+        "int16_t" | "short" | "SHORT" | "uint16_t" | "unsigned short" | "WORD" | "wchar_t" => {
+            Some(16)
+        }
+        "int8_t" | "char" | "signed char" | "uint8_t" | "unsigned char" | "BYTE" => Some(8),
+        _ => None,
+    }
+}
+
+/// Drops the mask from a write of a masked value to a narrow local that
+/// the mask covers: `local_dc = v & 0xffffffff;` is `local_dc = v;` when
+/// `local_dc` is a `uint32_t`.
+///
+/// Converting a value to an integer type of `n` bits keeps its low `n`
+/// bits, and a mask at least that wide leaves those alone, so the mask
+/// changes nothing the store keeps. The mask must cover the whole value:
+/// one under a `|`, `^`, `&&`, `||` or `?:` at the top binds only to the
+/// operand beside it.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+/// * `widths` - The narrow locals, with their widths in bits.
+///
+/// # Returns
+///
+/// The line without the mask, or `None` when it is no such write.
+fn unmask_write(line: &str, widths: &BTreeMap<&str, u8>) -> Option<String> {
+    let indent = line.len() - line.trim_start().len();
+    let (pad, trimmed) = line.split_at(indent);
+    let (lhs, rhs) = trimmed.strip_suffix(';')?.split_once(" = ")?;
+    let bits = *widths.get(lhs)?;
+    let expr = [32u8, 16, 8]
+        .into_iter()
+        .filter(|m| *m >= bits)
+        .find_map(|m| rhs.strip_suffix(mask_text(m)))?
+        .trim();
+    let mut depth = 0i32;
+    for (i, c) in expr.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ' ' if depth == 0 => {
+                let rest = expr.get(i..).unwrap_or("");
+                if [" | ", " ^ ", " && ", " || ", " ? ", " = ", " & "]
+                    .iter()
+                    .any(|op| rest.starts_with(op))
+                {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    (balanced(expr) && depth == 0).then(|| format!("{pad}{lhs} = {};", peel(expr)))
 }
 
 /// Drops each `(E) & 0xffffffff` whose `E` is already an `unsigned int`
@@ -4474,11 +4839,97 @@ mod lane_tests {
         assert!(out.contains("uint64_t var1;"), "{out}");
         assert!(out.contains("var1 = a3 & 0xffffffff;"), "{out}");
     }
+
+    /// A lane local whose value is handed on whole is a `uint32_t`.
+    ///
+    /// A call's argument, a store's value or an assignment's each reads the
+    /// same number at either width. A signed compare keeps its cast, and a
+    /// use in a ternary arm keeps the local as it was.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_lane_handed_on_whole_is_unsigned() {
+        let text = concat!(
+            "uint64_t var1, var2, var3;
+",
+            "
+",
+            "var1 = *(uint32_t*)(a1 + 4);
+",
+            "var1 = (var1 + 1) & 0xffffffff;
+",
+            "if ((int32_t)var1 > 3) {
+",
+            "  sub_1(a1, var1);
+",
+            "}
+",
+            "*(uint32_t*)(a1 + 8) = var1;
+",
+            "var2 = var1;
+",
+            "var3 = (a2 - 1) & 0xffffffff;
+",
+            "var2 = a3 != 0 ? var3 : a2;
+",
+            "return sizeof(var3) + var2;
+",
+        );
+        let out = lane_locals(text);
+        assert!(out.contains("uint32_t var1;"), "{out}");
+        assert!(out.contains("var1 += 1;"), "{out}");
+        assert!(out.contains("if ((int32_t)var1 > 3) {"), "{out}");
+        assert!(out.contains("uint64_t var2, var3;"), "{out}");
+        assert!(out.contains("var3 = (a2 - 1) & 0xffffffff;"), "{out}");
+    }
 }
 
 #[cfg(test)]
 mod declared_cast_tests {
     use super::type_locals;
+
+    /// A masked value written to a narrow local the mask covers loses the
+    /// mask; a narrower mask, a mask under `|`, and a wider local keep it.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_narrow_local_drops_the_mask_of_what_it_stores() {
+        let text = concat!(
+            "uint32_t local_dc, local_d0;
+",
+            "uint8_t local_8a;
+",
+            "uint64_t local_c0;
+",
+            "
+",
+            "local_dc = a1 & 0xffffffff;
+",
+            "local_d0 = (a2 + a1) & 0xffffffff;
+",
+            "local_8a = (a2 >> 3) & 0xffff;
+",
+            "local_dc = a2 & 0xffff;
+",
+            "local_d0 = a1 | a2 & 0xffffffff;
+",
+            "local_c0 = a1 & 0xffffffff;
+",
+            "return local_dc + local_d0 + local_8a + local_c0;
+",
+        );
+        let out = type_locals(text);
+        assert!(out.contains("local_dc = a1;"), "{out}");
+        assert!(out.contains("local_d0 = a2 + a1;"), "{out}");
+        assert!(out.contains("local_8a = a2 >> 3;"), "{out}");
+        assert!(out.contains("local_dc = a2 & 0xffff;"), "{out}");
+        assert!(out.contains("local_d0 = a1 | a2 & 0xffffffff;"), "{out}");
+        assert!(out.contains("local_c0 = a1 & 0xffffffff;"), "{out}");
+    }
 
     /// A local already declared at the cast's width does not need the cast.
     /// A different width, a cast of a sum, a nonzero equality, and a zero
