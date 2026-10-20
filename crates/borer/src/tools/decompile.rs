@@ -291,7 +291,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Pseudo-C for many functions: filter on name or entry hex, max_functions (10, max 50); 6000 chars per function, 40000 total; out=<file.c> writes every function there uncapped, leaves first, under the output root (BORER_OUTPUT_DIR, else the binary's project directory), refusing an existing file unless overwrite=true, and answers the absolute path written.",
+        description = "Pseudo-C for many functions: filter on name or entry hex, max_functions (10, max 50); 6000 chars per function, 40000 total; out=<file.c> writes all of them uncapped, leaves first, under the output root (BORER_OUTPUT_DIR or the binary's project dir); overwrite=true replaces a file.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

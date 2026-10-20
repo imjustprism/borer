@@ -288,7 +288,7 @@ impl BorerServer {
     /// cache directory resolves, the name or server is refused, or the
     /// fetch or its validation fails.
     #[tool(
-        description = "Fetch the loaded PE's missing companion PDB over https from the configured symbol server (Microsoft's, or BORER_SYMBOL_SERVER; public hosts only) into the cache; guid+age must match; dry-run unless dry_run=false; the next load_binary applies it.",
+        description = "Fetch the loaded PE's missing companion PDB over https from the symbol server (Microsoft's or BORER_SYMBOL_SERVER) into the cache; guid+age must match; dry-run unless dry_run=false; the next load_binary applies it.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -413,7 +413,7 @@ impl BorerServer {
     /// the output root, not `.json`, or an existing file without
     /// `overwrite`); internal error when the file cannot be written.
     #[tool(
-        description = "Save the annotation overlay (names, comments, types) to a .json project file, keyed to the binary by its SHA-256, under the output root (BORER_OUTPUT_DIR, else the binary's project directory); an existing file is refused unless overwrite=true; answers the absolute path written.",
+        description = "Save the annotation overlay (names, comments, types) to a .json project file keyed by the binary's SHA-256, under the output root (BORER_OUTPUT_DIR or the binary's project dir); overwrite=true replaces a file.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

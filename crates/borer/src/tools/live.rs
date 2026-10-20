@@ -369,7 +369,7 @@ impl BorerServer {
     /// ([`runs_loaded`]) and the server was not started with
     /// `BORER_LIVE_ANY=1`.
     #[tool(
-        description = "Attach read-only to a running process (name or pid) whose main image is the loaded binary (any process only when the server runs with BORER_LIVE_ANY=1); maps the loaded binary onto it so live tools take static addresses and names. Replaces an earlier attach and its watches.",
+        description = "Attach read-only to a running process (name or pid) running the loaded binary (any process with BORER_LIVE_ANY=1); maps the binary onto it so live tools take static addresses and names. Replaces an earlier attach.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
