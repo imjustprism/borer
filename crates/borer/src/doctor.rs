@@ -115,6 +115,40 @@ fn size(bytes: u64) -> String {
     }
 }
 
+/// This build's version: the release's own for a build of its tag, else
+/// the version with `-dev` and where the build stands from the last
+/// release tag ([`version_of`]).
+pub(crate) fn version() -> String {
+    version_of(env!("CARGO_PKG_VERSION"), env!("BORER_DESCRIBE"))
+}
+
+/// Spells a build's version from its package version and its `git
+/// describe --long` against the release tags.
+///
+/// A build of the tag `v<version>` is that version; any other (commits
+/// past the tag, another tag, or no tag known) is `<version>-dev`, with
+/// the description when there is one, so a report or `update --check`
+/// can tell a development build from the release it started from.
+///
+/// # Arguments
+///
+/// * `version` - The package version.
+/// * `describe` - `v<tag>-<commits>-g<hash>`, or empty when git did not say.
+///
+/// # Returns
+///
+/// The version to print.
+fn version_of(version: &str, describe: &str) -> String {
+    if describe.starts_with(&format!("v{version}-0-g")) {
+        return version.to_owned();
+    }
+    if describe.is_empty() {
+        format!("{version}-dev")
+    } else {
+        format!("{version}-dev ({describe})")
+    }
+}
+
 /// The line naming this binary, its version and the commit it was built
 /// from.
 ///
@@ -124,7 +158,7 @@ fn size(bytes: u64) -> String {
 fn version_line(exe: &Path) -> String {
     format!(
         "version    borer {}, commit {} ({})",
-        env!("CARGO_PKG_VERSION"),
+        version(),
         env!("BORER_COMMIT"),
         exe.display()
     )
@@ -353,6 +387,26 @@ pub(crate) fn doctor(offline: bool) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A build of its own release tag is that version; one past it, of
+    /// another tag, or with no tag known says `-dev`.
+    ///
+    /// # Panics
+    ///
+    /// When a version is spelled otherwise.
+    #[test]
+    fn a_build_off_its_release_tag_says_dev() {
+        assert_eq!(super::version_of("0.2.0", "v0.2.0-0-gabc1234"), "0.2.0");
+        assert_eq!(
+            super::version_of("0.2.0", "v0.1.1-179-ga059e357"),
+            "0.2.0-dev (v0.1.1-179-ga059e357)"
+        );
+        assert_eq!(
+            super::version_of("0.1.1", "v0.1.1-3-gdeadbee"),
+            "0.1.1-dev (v0.1.1-3-gdeadbee)"
+        );
+        assert_eq!(super::version_of("0.2.0", ""), "0.2.0-dev");
+    }
+
     use std::path::Path;
 
     use super::{Reach, mcp_line, report, symbols_line, toolchain_line};

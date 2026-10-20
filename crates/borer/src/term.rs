@@ -314,7 +314,7 @@ pub(crate) fn welcome() -> String {
     } else {
         ("", "", "")
     };
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::doctor::version();
     let mut out = format!(
         "{b}borer{r} {d}{version}{r}  reverse engineering, rebuilt for AI agents\n\n\
          borer is an MCP server: your agent starts it over stdin and stdout.\n\n"

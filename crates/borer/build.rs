@@ -1,6 +1,7 @@
-//! Records what `borer doctor` reports about the build: the commit the
-//! binary is built from, the toolchain the repository pins, and the
-//! compiler that built it.
+//! Records what `borer doctor` and `borer --version` report about the
+//! build: the commit the binary is built from and where it stands from the
+//! last release tag, the toolchain the repository pins, and the compiler
+//! that built it.
 
 use std::path::Path;
 use std::process::Command;
@@ -25,6 +26,8 @@ fn main() {
     let git = |args: &[&str]| output("git", args);
     let commit = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=BORER_COMMIT={commit}");
+    let describe = git(&["describe", "--tags", "--long", "--match", "v[0-9]*"]).unwrap_or_default();
+    println!("cargo:rustc-env=BORER_DESCRIBE={describe}");
     for path in ["HEAD", "packed-refs"] {
         if let Some(p) = git(&["rev-parse", "--git-path", path]) {
             println!("cargo:rerun-if-changed={p}");

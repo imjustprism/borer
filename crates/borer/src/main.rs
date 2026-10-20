@@ -168,10 +168,7 @@ impl ServerHandler for BorerServer {
                 .enable_completions()
                 .build(),
         )
-        .with_server_info(rmcp::model::Implementation::new(
-            "borer",
-            env!("CARGO_PKG_VERSION"),
-        ))
+        .with_server_info(rmcp::model::Implementation::new("borer", doctor::version()))
         .with_instructions(playbooks::instructions(
             &tools,
             &Self::prompt_router().list_all(),

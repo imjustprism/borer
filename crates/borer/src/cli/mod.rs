@@ -185,7 +185,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
     if let [word] = args
         && matches!(word.as_str(), "--version" | "-V" | "version")
     {
-        println!("borer {}", env!("CARGO_PKG_VERSION"));
+        println!("borer {}", crate::doctor::version());
         return Ok(());
     }
     let (args, raw) = RawFlags::split(args)?;
