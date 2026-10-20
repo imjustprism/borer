@@ -247,6 +247,10 @@ impl Transport<RoleServer> for HandOverTransport {
 /// by panicking.
 ///
 /// Every other panic still reaches the default hook.
+#[expect(
+    clippy::exit,
+    reason = "a closed stdout ends a CLI pipe; there is no caller left to answer"
+)]
 pub(crate) fn end_quietly_when_stdout_closes() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

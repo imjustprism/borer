@@ -23,6 +23,7 @@
 //! for the same binary. Each figure here is the best of several passes over
 //! a fixed slice of the program, which is the number a change has to move.
 
+#![expect(clippy::print_stdout, reason = "it reports on stdout")]
 #![expect(clippy::disallowed_methods, reason = "a timing harness measures time")]
 #![expect(
     clippy::missing_panics_doc,

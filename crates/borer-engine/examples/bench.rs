@@ -13,6 +13,7 @@
 //! least twenty instructions each) to make such a set.
 //! Output lines are `key=value` pairs so a script can parse them.
 
+#![expect(clippy::print_stdout, reason = "it reports on stdout")]
 #![expect(clippy::disallowed_methods, reason = "a benchmark measures time")]
 
 use std::error::Error;

@@ -671,6 +671,10 @@ impl WalkState<'_> {
     pub(super) fn forget(&mut self, entries: &[u64]) {
         let set: FxHashSet<u64> = entries.iter().copied().collect();
         self.functions.retain(|f| !set.contains(&f.entry));
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "each entry is removed on its own"
+        )]
         for e in &set {
             self.done.remove(*e);
             self.followed.remove(e);

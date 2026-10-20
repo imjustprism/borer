@@ -44,8 +44,10 @@ fn bump(n: usize) {
     unsafe_code,
     reason = "a global allocator is the one way to measure what a load allocates"
 )]
+// SAFETY: every method forwards to `System` unchanged and only counts bytes.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's `alloc` contract is passed on unchanged.
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
             bump(layout.size());
@@ -54,6 +56,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's `alloc_zeroed` contract is passed on unchanged.
         let p = unsafe { System.alloc_zeroed(layout) };
         if !p.is_null() {
             bump(layout.size());
@@ -62,11 +65,13 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr` came from `System` through this allocator with `layout`.
         unsafe { System.dealloc(ptr, layout) };
         LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: `ptr` came from `System` through this allocator with `layout`.
         let p = unsafe { System.realloc(ptr, layout, new_size) };
         if !p.is_null() {
             LIVE.fetch_sub(layout.size(), Ordering::Relaxed);

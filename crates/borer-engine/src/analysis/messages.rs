@@ -203,6 +203,7 @@ fn code_referrers(
             }
         }
     }
+    #[expect(clippy::iter_over_hash_type, reason = "each list is sorted on its own")]
     for list in out.values_mut() {
         dedup_sorted(list);
     }

@@ -827,6 +827,10 @@ impl<K: Hash + Eq + Send + 'static, T: Send + Sync + 'static> Kind for Cells<K, 
         let mut freed = 0;
         let mut moved = Vec::new();
         let mut kept = FxHashMap::default();
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "each cell's fate is its own and the kept map is keyed"
+        )]
         for ((scope, key), cell) in cells.drain() {
             let fate = match cell.value.get() {
                 None => Fate::Keep,
@@ -1193,6 +1197,10 @@ impl Derived {
         }
         let mut asked = Vec::new();
         if let Ok(kinds) = self.kinds.lock() {
+            #[expect(
+                clippy::iter_over_hash_type,
+                reason = "the list is sorted by stamp after"
+            )]
             for cells in kinds.values() {
                 cells.asked(&mut asked);
             }

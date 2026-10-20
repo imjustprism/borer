@@ -1716,7 +1716,7 @@ impl<'a> Emulator<'a> {
                     mem_bytes(i) * 8
                 };
                 let from = u32::try_from(from).unwrap_or(64);
-                let v = u64::from_ne_bytes(sign_extend(v, from).to_ne_bytes());
+                let v = sign_extend(v, from).cast_unsigned();
                 self.store(i, v)?;
                 Ok(None)
             }

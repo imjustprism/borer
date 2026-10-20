@@ -209,7 +209,7 @@ struct Host {
 ///
 /// * `v` - The address.
 fn int(v: u64) -> INT {
-    INT::from_ne_bytes(v.to_ne_bytes())
+    v.cast_signed()
 }
 
 /// A script's integer as an address.
@@ -218,7 +218,7 @@ fn int(v: u64) -> INT {
 ///
 /// * `v` - The integer.
 fn addr(v: INT) -> u64 {
-    u64::from_ne_bytes(v.to_ne_bytes())
+    v.cast_unsigned()
 }
 
 /// A count as a script's integer.

@@ -688,8 +688,7 @@ pub(super) fn word(n: u64, byte: impl Fn(u64) -> u8) -> u64 {
 /// * `bits` - The width, 1 to 64.
 pub(super) fn sext(v: u64, bits: u8) -> Option<u64> {
     let shift = 64u32.checked_sub(u32::from(bits)).filter(|s| *s < 64)?;
-    let wide = i64::from_ne_bytes(v.checked_shl(shift)?.to_ne_bytes()) >> shift;
-    Some(u64::from_ne_bytes(wide.to_ne_bytes()))
+    Some((v.checked_shl(shift)?.cast_signed() >> shift).cast_unsigned())
 }
 
 /// A mask of the low `bits`.

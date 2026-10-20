@@ -39,7 +39,7 @@ pub fn decompile_scenario(
     let said: Vec<String> = assume
         .iter()
         .map(|&(slot, v)| {
-            let value = match i64::from_ne_bytes(v.to_ne_bytes()) {
+            let value = match v.cast_signed() {
                 n if (-9..=9).contains(&n) => n.to_string(),
                 n if n < 0 => format!("-{:#x}", n.unsigned_abs()),
                 _ => format!("{v:#x}"),

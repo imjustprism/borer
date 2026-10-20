@@ -2315,7 +2315,7 @@ mod tests {
         g.take_local(0x1000, Some(-8), "shadowed");
         g.take_local(0x1000, None, "refused");
         g.take_local(0x2000, Some(-8), "another frame");
-        let map = g.locals.get(&0x1000).unwrap();
+        let map = &g.locals[&0x1000];
         assert_eq!(
             map.iter().collect::<Vec<_>>(),
             vec![(&-8i64, &"alpha".to_owned())],

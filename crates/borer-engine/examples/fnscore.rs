@@ -22,6 +22,8 @@
 //! taken. An `__except` body inside its function is the function's own
 //! code to both, and is left out of the count.
 
+#![expect(clippy::print_stdout, reason = "it reports on stdout")]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
