@@ -781,7 +781,7 @@ fn leaves(list: &mut [Stmt]) -> bool {
             level(body, true, &mut |x| {
                 hidden |= matches!(x.kind, StmtKind::Raw(_)) && says(x, &StmtKind::Break);
             });
-            if breaks > 0 && !hidden {
+            if breaks > 0 && !hidden && !breaks_in_try(body) {
                 before_breaks(body, std::slice::from_ref(&ret));
                 changed = true;
             }
@@ -1293,6 +1293,63 @@ fn append(s: &mut Stmt, run: &[Stmt], f: &Facts<'_>) {
     }
 }
 
+/// Tells whether a run breaks out from inside a guarded region at its own
+/// level: code put in front of such a `break` would run inside the
+/// `__try`, before its `__finally` and under its handler.
+///
+/// # Arguments
+///
+/// * `list` - The statements.
+fn breaks_in_try(list: &[Stmt]) -> bool {
+    list.iter().any(|s| match &s.kind {
+        StmtKind::Try { body, handlers, .. } => {
+            let mut found = false;
+            level(body, true, &mut |x| found |= says(x, &StmtKind::Break));
+            for h in handlers {
+                level(&h.body, true, &mut |x| found |= says(x, &StmtKind::Break));
+            }
+            found
+        }
+        StmtKind::If { then, other, .. } => {
+            breaks_in_try(then)
+                || match other {
+                    None => false,
+                    Some(Else::Block(b)) => breaks_in_try(b),
+                    Some(Else::If(next)) => breaks_in_try(std::slice::from_ref(next)),
+                }
+        }
+        StmtKind::Block(b) => breaks_in_try(b),
+        StmtKind::Expr(_)
+        | StmtKind::Return(_)
+        | StmtKind::Goto(_)
+        | StmtKind::Label(_)
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Guard { .. }
+        | StmtKind::While { .. }
+        | StmtKind::DoWhile { .. }
+        | StmtKind::For { .. }
+        | StmtKind::Switch { .. }
+        | StmtKind::Comment(_)
+        | StmtKind::Asm(_)
+        | StmtKind::Blank
+        | StmtKind::Raw(_) => false,
+    })
+}
+
+/// Returns a `while` loop's body, and nothing for any other statement.
+///
+/// # Arguments
+///
+/// * `s` - The statement.
+fn loop_body(s: &Stmt) -> &[Stmt] {
+    if let StmtKind::While { body, .. } = &s.kind {
+        body
+    } else {
+        &[]
+    }
+}
+
 /// Puts a run in front of every `break` of a list at its own level, a
 /// guarded one becoming an `if` around the run and the `break`.
 ///
@@ -1377,7 +1434,7 @@ fn sinks(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>, copy: bool) -> bool {
                 || n > RUN_MAX
                 || copies == 0
                 || labelled(run)
-                || (looped && loose(run))
+                || (looped && (loose(run) || breaks_in_try(loop_body(&list[k]))))
                 || (copies > 1 && (!copy || n > SINK_MAX))
             {
                 continue;
@@ -1931,6 +1988,18 @@ mod tests {
             got,
             "if (a1 != 0) {\n  a2 = g();\n  if (a2 != 0) {\n    h(a2);\n  } else {\n    log(a1);\n  }\n} else {\n  log(a1);\n}\na3 = 1;\ndo {\n  f(a3);\n} while (a4 != 0);\nreturn 0;\n"
         );
+    }
+
+    /// A run after a `while (1)` whose `break` leaves a `__try` stays after
+    /// the loop: in front of that `break` it would run before the
+    /// `__finally`, and under the region's handler.
+    #[test]
+    fn a_loop_exit_run_stays_out_of_a_guarded_region() {
+        let got = folded(
+            "while (1) {\n  __try {\n    if (a1 == 0) break;\n    if (a2 == 0) goto L_10;\n  } __finally {\n    z();\n  }\n}\ny();\nL_10:\nreturn 0;\n",
+        );
+        let (y, z) = (got.find("y();"), got.find("z();"));
+        assert!(matches!((y, z), (Some(y), Some(z)) if y > z), "{got}");
     }
 
     /// The run after a `while (1)` that only its `break` reaches moves in
