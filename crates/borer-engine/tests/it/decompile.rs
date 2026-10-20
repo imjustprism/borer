@@ -10248,3 +10248,26 @@ fn a_stated_array_global_is_declared_whole() {
     assert!(text.contains("uint32_t fds[2];"), "{text}");
     assert!(text.contains("fds[1]") && text.contains("fds[0]"), "{text}");
 }
+
+/// The code a catch the text could not wrap runs stays in the text.
+///
+/// The structurer writes it after the body under the label of the block
+/// the runtime enters, which no `goto` names; the region's comment names
+/// that block, and the label and its code are kept rather than read as
+/// dead text after the `return`, while a label nothing names still goes
+/// with the code after it.
+#[test]
+fn an_unwrapped_catch_keeps_the_code_it_runs() {
+    let body = "// try 0x1000..0x1008 not structured, its bounds are not exact: \
+                catch (...) at 0x1010, runs f::__catch_0_0 @ 0x2000\n\
+                f();\n\
+                return;\n\
+                L_1010:\n\
+                g();\n\
+                return;\n\
+                L_1020:\n\
+                h();\n";
+    let out = cleanup(body);
+    assert!(out.contains("L_1010:\ng();"), "{out}");
+    assert!(!out.contains("h();"), "{out}");
+}
