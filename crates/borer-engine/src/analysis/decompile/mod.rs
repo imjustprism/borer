@@ -729,6 +729,11 @@ fn render_all<T: Send + Clone>(
 /// locals, omitted unreachable blocks), the declarations of every variable
 /// the body names (grouped per type), then the body.
 ///
+/// The text is memoized per function under the names through
+/// [`Analysis::derived`], and [`decompile_named`] hands out the same text
+/// where naming the fields changes no line: a `decompile` answer reads
+/// both, and finishing the one text twice cost a quarter of the answer.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -762,10 +767,20 @@ pub fn decompile(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
-        .as_ref()
-        .as_ref()
-        .map(|d| finished(&d.text, program, analysis, overlay, entry))
+    let names = overlay.fingerprint();
+    let memo = analysis.derived.get_or_build_item(
+        "layout_text",
+        names,
+        entry,
+        || {
+            decompiled_cached(program, analysis, overlay, names, entry)
+                .as_ref()
+                .as_ref()
+                .map(|d| finished(&d.text, program, analysis, overlay, entry))
+        },
+        |text| text.as_ref().map_or(0, String::capacity),
+    );
+    memo.as_ref().clone()
 }
 
 /// [`decompile`] built afresh, for a batch ([`decompile_all`]).
@@ -1114,7 +1129,11 @@ pub fn decompile_named(
         entry,
         || {
             let text = plain_text_cached(program, analysis, overlay, names, entry)?;
-            name_fields(program, analysis, overlay, entry, &text)
+            let out = name_fields(program, analysis, overlay, entry, &text)?;
+            if out == text {
+                return decompile(program, analysis, overlay, entry);
+            }
+            Some(finished(&out, program, analysis, overlay, entry))
         },
         |text| text.as_ref().map_or(0, String::capacity),
     );
@@ -1356,11 +1375,12 @@ fn decompile_named_afresh(
 ) -> Option<String> {
     let text = decompile_plain_full(program, analysis, overlay, entry)?.text;
     name_fields(program, analysis, overlay, entry, &text)
+        .map(|out| finished(&out, program, analysis, overlay, entry))
 }
 
 /// Renders the fields of class-typed objects in a plain decompilation by
-/// name and polishes it: the work of [`decompile_named`] after the plain
-/// text.
+/// name: the work of [`decompile_named`] after the plain text and before
+/// [`finished`].
 ///
 /// # Arguments
 ///
@@ -1372,7 +1392,8 @@ fn decompile_named_afresh(
 ///
 /// # Returns
 ///
-/// The pseudo-C, or `None` when no function starts at `entry`.
+/// The text with the fields named, or `None` when no function starts at
+/// `entry`.
 fn name_fields(
     program: &Program,
     analysis: &Analysis,
@@ -1486,7 +1507,7 @@ fn name_fields(
     let mut out = lines.join("\n");
     out.push('\n');
     lap.end(crate::timing::Step::NameFields);
-    Some(finished(&out, program, analysis, overlay, entry))
+    Some(out)
 }
 
 /// Returns the entries a function's virtual calls resolve to.
