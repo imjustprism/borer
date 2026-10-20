@@ -175,6 +175,9 @@ fn leaked_temps(text: &str) -> Vec<String> {
 /// The callees of `function` its text names nowhere, but the frame helpers
 /// and the ARM32 division helpers, which the text prints as the operator
 /// they compute.
+///
+/// A clone's dotted name (`f.constprop.0`) counts under the C identifier
+/// the text spells it as (`f_constprop_0`).
 fn missing_calls(
     analysis: &Analysis,
     overlay: &Overlay,
@@ -214,7 +217,10 @@ fn missing_calls(
             .rsplit('!')
             .next()
             .unwrap_or(&name);
-        if !text.contains(bare) && !text.contains(&format!("{c:#x}")) {
+        if !text.contains(bare)
+            && !text.contains(&bare.replace(['.', '$', '@'], "_"))
+            && !text.contains(&format!("{c:#x}"))
+        {
             out.push(name);
         }
     }
