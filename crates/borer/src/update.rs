@@ -393,6 +393,9 @@ pub(crate) fn check() -> Option<String> {
     }
     let kept = recalled();
     if !kept.as_ref().is_some_and(|(_, fresh)| *fresh) {
+        // Claims the day's check first, so commands run while it is out
+        // read the cache as fresh and start no second one.
+        remember(kept.as_ref().map_or("none", |(tag, _)| tag.as_str()));
         spawn_refresh();
     }
     let (tag, _) = kept?;
@@ -420,7 +423,10 @@ fn spawn_refresh() {
         const NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(NO_WINDOW);
     }
-    let _ = cmd.spawn();
+    // Reaped if this command outlives it; a quick command just exits.
+    if let Ok(mut child) = cmd.spawn() {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 /// The daily check itself, run by the detached copy [`spawn_refresh`]
