@@ -795,7 +795,8 @@ pub(super) fn cleanup_passes(
         );
         changed |= round.run(Pass::DropFallthroughGotos, lines, drop_fallthrough_gotos);
         changed |= round.run(Pass::UnnamedLabels, lines, |lines| {
-            let referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
+            let mut referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
+            referenced.extend(handler_labels(lines));
             let before = lines.len();
             lines.retain(|l| match label_name(l) {
                 Some(name) => referenced.contains(name),
@@ -846,6 +847,36 @@ pub(super) fn cleanup_passes(
         fuel,
         churn,
     }
+}
+
+/// Lists the labels of the handler code a guarded region left unwrapped
+/// runs: the entries its comment names (`catch (...) at 0x1000`), which
+/// only the runtime enters, so no `goto` names them.
+///
+/// The structurer writes that code after the body under its label
+/// ([`cir::wrap`]); without the label, the code would read as dead text
+/// after a `return` and go.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+///
+/// # Returns
+///
+/// The labels, as `L_<addr>`.
+fn handler_labels(lines: &[String]) -> BTreeSet<String> {
+    lines
+        .iter()
+        .filter_map(|l| l.trim_start().strip_prefix("// "))
+        .filter(|c| {
+            (c.starts_with("try ") || c.starts_with("__try ")) && c.contains(" not structured, ")
+        })
+        .flat_map(|c| c.split(" at 0x").skip(1))
+        .map(|rest| {
+            let hex: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
+            format!("L_{hex}")
+        })
+        .collect()
 }
 
 /// The state of one run of [`cleanup_passes`]: which passes it leaves
