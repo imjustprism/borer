@@ -115,7 +115,8 @@ pub fn functions_tsv(
     };
     let mut out = format!("# showing {shown} of {total} {noun}{order_note}{left_out}\n");
     if a.incomplete {
-        out.push_str("# warning: analysis incomplete, instruction budget exhausted\n");
+        out.push_str(INCOMPLETE_NOTE);
+        out.push('\n');
     }
     out.push_str("# entry size blocks instrs callers callees src name\n");
     for f in matched.iter().skip(offset).take(limit) {
@@ -675,10 +676,22 @@ pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
     } else {
         "groups"
     };
+    let count = if sites.len() >= crate::analysis::functions::XREF_SITES_PER_TARGET {
+        format!(
+            "{}+ (capped: more sites exist than are kept per target)",
+            sites.len()
+        )
+    } else {
+        sites.len().to_string()
+    };
+    let incomplete = if a.incomplete {
+        format!("{INCOMPLETE_NOTE}\n")
+    } else {
+        String::new()
+    };
     let XrefView::Page { offset, limit } = view else {
         return format!(
-            "# {} xrefs to {target:#x} in {} {groups_word}\n",
-            sites.len(),
+            "# {count} xrefs to {target:#x} in {} {groups_word}\n{incomplete}",
             ordered.len()
         );
     };
@@ -686,8 +699,7 @@ pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
     let page_end = offset.saturating_add(limit).min(ordered.len());
     let shown = page_end.saturating_sub(offset.min(page_end));
     let mut out = format!(
-        "# {} xrefs to {target:#x} in {} {groups_word}, showing {shown} of {} from {offset}\n# function: site kind, ...\n",
-        sites.len(),
+        "# {count} xrefs to {target:#x} in {} {groups_word}, showing {shown} of {} from {offset}\n{incomplete}# function: site kind, ...\n",
         ordered.len(),
         ordered.len()
     );
@@ -1155,6 +1167,51 @@ pub fn sweep_limit(p: &Program, a: &Analysis, va: u64) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::analysis::NameSource;
+
+    /// A target whose sites filled the per-target cap says its count is a
+    /// floor, and an analysis whose walk ran out says so under the xrefs
+    /// header; a short list and a finished walk say neither.
+    ///
+    /// # Panics
+    ///
+    /// When a cap or a cut walk goes unsaid, or one is said of neither.
+    #[test]
+    fn a_capped_xref_list_and_a_cut_walk_say_so() {
+        let cap = crate::analysis::functions::XREF_SITES_PER_TARGET;
+        let site = |va| RefSite {
+            va,
+            kind: RefKind::Call,
+            from_entry: None,
+        };
+        let mut a = Analysis::default();
+        a.xrefs.insert(
+            0x1000,
+            (0..cap).map(|i| site(0x2000 + from_usize(i))).collect(),
+        );
+        a.xrefs.insert(0x3000, vec![site(0x4000)]);
+        let o = Overlay::default();
+        let page = XrefView::Page {
+            offset: 0,
+            limit: 1,
+        };
+        let capped = xrefs(&a, &o, 0x1000, page);
+        assert!(
+            capped.starts_with(&format!("# {cap}+ (capped: ")),
+            "{capped}"
+        );
+        let short = xrefs(&a, &o, 0x3000, page);
+        assert!(short.starts_with("# 1 xrefs to 0x3000"), "{short}");
+        assert!(!short.contains(INCOMPLETE_NOTE), "{short}");
+        a.incomplete = true;
+        let cut = xrefs(&a, &o, 0x3000, XrefView::Count);
+        assert!(
+            cut.ends_with(&format!(
+                "{INCOMPLETE_NOTE}
+"
+            )),
+            "{cut}"
+        );
+    }
 
     /// Builds the bare function a filter test needs: an entry, a name when
     /// one was given, and nothing else discovered.

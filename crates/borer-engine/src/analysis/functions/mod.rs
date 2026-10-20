@@ -105,7 +105,7 @@ pub(super) const GUESS_WALK_MAX: u64 = 1 << 16;
 /// while every other target keeps all of its references. A program-wide cap
 /// once dropped most data references of a large binary, and with them the
 /// strings a function could be named from.
-const XREF_SITES_PER_TARGET: usize = 65_536;
+pub(crate) const XREF_SITES_PER_TARGET: usize = 65_536;
 /// Fewest entries of a batch worth walking across the cores.
 const WAVE_MIN: usize = 64;
 /// Most entries of a wave walked before their results are committed.

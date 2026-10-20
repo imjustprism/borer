@@ -298,6 +298,13 @@ pub(super) fn each_instruction(
     }
 }
 
+/// Warns that the function walk ran out of its instruction budget.
+///
+/// An answer built on the walk carries it when [`Analysis::incomplete`]
+/// is set: functions past it were never found, so a list, a caller count
+/// or an xref may be short.
+pub const INCOMPLETE_NOTE: &str = "# warning: analysis incomplete, instruction budget exhausted: functions past it were not discovered, so lists, callers and xrefs may be short";
+
 /// The tail of a fragment answer's header line when it shows the scope
 /// headers ([`scope_headers`]) of its lines, numbered `^N`.
 pub const SCOPE_NOTE: &str = "; ^N marks context: the signature and the if/else/loop/switch/case headers enclosing the lines shown";

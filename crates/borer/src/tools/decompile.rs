@@ -199,6 +199,10 @@ pub(crate) fn decompile_header(
     use borer_engine::analysis::decompile;
     let mut lines: Vec<String> = decompile::checked_header(p, a, o, entry)
         .into_iter()
+        .chain(
+            a.incomplete
+                .then(|| format!("//{}", render::INCOMPLETE_NOTE.trim_start_matches('#'))),
+        )
         .collect();
     lines.extend(
         decompile::decompile_named(p, a, o, entry)

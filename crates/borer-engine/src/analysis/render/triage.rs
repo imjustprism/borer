@@ -973,6 +973,10 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
             .count(),
         a.functions.len()
     );
+    if a.incomplete {
+        out.push_str(INCOMPLETE_NOTE);
+        out.push('\n');
+    }
     if !p.debug_functions.is_empty() {
         let _ = writeln!(
             out,
