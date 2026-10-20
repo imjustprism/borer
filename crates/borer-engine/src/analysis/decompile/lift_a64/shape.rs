@@ -221,6 +221,11 @@ fn walk(ctx: &Ctx<'_>, g: Walked<'_>, follow: bool) -> BTreeSet<Reg> {
                 Flow::Return => continue,
                 Flow::Next | Flow::CondJump | Flow::Jump | Flow::Invalid => {}
             }
+            if follow {
+                for r in kernel_reads(ctx, i) {
+                    take(&mut found, written, r);
+                }
+            }
             let vector = i.operands.contains(&Opnd::Other);
             let regs = i.registers();
             for (r, _) in regs.reads {
@@ -241,6 +246,36 @@ fn walk(ctx: &Ctx<'_>, g: Walked<'_>, follow: bool) -> BTreeSet<Reg> {
         }
     }
     found
+}
+
+/// The argument registers a Linux `svc #0` reads, when `x8` holds a
+/// number the generic table names and the C library declares a function
+/// of that name: `x0` up, as many as the function takes.
+///
+/// # Arguments
+///
+/// * `ctx` - The program and its analysis.
+/// * `i` - The instruction.
+///
+/// # Returns
+///
+/// The registers in argument order; none for any other instruction.
+fn kernel_reads(ctx: &Ctx<'_>, i: &Insn) -> Vec<Reg> {
+    if i.op != a64::Op::Syscall {
+        return Vec::new();
+    }
+    let sites = crate::analysis::syscalls::syscall_sites(ctx.program, ctx.analysis);
+    let arity = sites
+        .binary_search_by_key(&i.va, |s| s.at)
+        .ok()
+        .and_then(|k| sites.get(k)?.name)
+        .filter(|n| !matches!(*n, "exit" | "exit_group"))
+        .and_then(|n| crate::analysis::typelib::declared(n, crate::program::BinaryFormat::Elf))
+        .map_or(0, |d| d.params.len());
+    (0..arity)
+        .filter_map(|k| u8::try_from(k).ok())
+        .map(Reg::X)
+        .collect()
 }
 
 /// The argument registers a call or jump to `target` hands on to it.

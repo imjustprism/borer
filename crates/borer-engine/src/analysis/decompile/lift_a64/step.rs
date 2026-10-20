@@ -18,11 +18,12 @@ use super::super::expr::{
 use super::super::helper::Helper;
 use super::flags::{self, holds, next_reader};
 use super::float::{packed_name, vreg};
-use super::{Lift, low, low64, vector, width8};
+use super::{EffectKind, Lift, low, low64, vector, width8};
 use crate::emulate::a64::{FMOV_IMM, SYSREG_NZCV, SYSREG_TPIDR_EL0, expand_imm, vfp_expand};
 use crate::isa::a64::{self, Insn, Mnemonic, Opnd, Reg};
 use crate::isa::x86::ConditionCode;
 use crate::num::lo8;
+use crate::program::BinaryFormat;
 
 /// Bits 28 to 31, the only bits an `msr` of `NZCV` writes.
 const NZCV_MASK: u64 = 0xf000_0000;
@@ -386,6 +387,11 @@ impl Lift<'_, '_> {
     /// the count in `x2`. Every other number returns zero in `x0`. `hvc`,
     /// `smc`, and any other immediate stay unmodeled.
     ///
+    /// A Linux image's `x8` set to a number the generic table names, other
+    /// than an exit, whose name the C library declares, is that call:
+    /// `x0 = write(x0, x1, x2);`, its arguments in `x0` up, its result in
+    /// `x0`, and every other register as the kernel leaves it.
+    ///
     /// # Arguments
     ///
     /// * `i` - The supervisor call.
@@ -397,6 +403,28 @@ impl Lift<'_, '_> {
             return None;
         };
         let nr = self.read(Reg::X(8));
+        if let Expr::Const(n) = nr
+            && !matches!(n, 93 | 94)
+            && self.ex.ctx.program.format == BinaryFormat::Elf
+            && let Some(name) = crate::emulate::a64::a64_syscall_name(n)
+            && let Some(d) = crate::analysis::typelib::declared(name, BinaryFormat::Elf)
+        {
+            let args: Vec<Expr> = (0..d.params.len())
+                .filter_map(|k| u8::try_from(k).ok())
+                .map(|k| self.read(Reg::X(k)))
+                .collect();
+            let t = self.ex.fresh_tmp(Ty::U64);
+            if self.ex.emit {
+                let names = self.ex.names();
+                let shown: Vec<String> = args.iter().map(|a| a.render(&names)).collect();
+                self.ex
+                    .lines
+                    .push(format!("{} = {name}({});", names.key(t), shown.join(", ")));
+                self.ex.record(EffectKind::Unmodeled);
+            }
+            self.write(Reg::X(0), 64, Expr::Var(t));
+            return Some(());
+        }
         let count = self.read(Reg::X(2));
         let is_write = Cond {
             cc: Cc(ConditionCode::e),
