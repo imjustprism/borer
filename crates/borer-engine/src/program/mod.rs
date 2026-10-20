@@ -1534,6 +1534,23 @@ impl Program {
         best.and_then(|i| self.sections.get(i))
     }
 
+    /// Finds the zero-filled section containing `va`: one the loader maps
+    /// but the file holds no bytes for (`.bss`, a PE section with no raw
+    /// data), where a program keeps its uninitialized globals.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - A virtual address.
+    ///
+    /// # Returns
+    ///
+    /// The first-declared such section holding `va`, or `None`.
+    pub fn zero_fill_at(&self, va: u64) -> Option<&Section> {
+        self.sections
+            .iter()
+            .find(|s| s.file_size == 0 && s.va.0 <= va && va < s.va.0.saturating_add(s.vsize))
+    }
+
     /// Converts a virtual address to its file offset.
     ///
     /// # Arguments

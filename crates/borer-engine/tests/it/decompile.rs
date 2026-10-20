@@ -10029,3 +10029,16 @@ fn a_library_object_is_declared_at_its_library_type() {
     assert!(text.contains("FILE *stdout;"), "{text}");
     assert!(text.contains("return stdout;"), "{text}");
 }
+
+/// A global in `.bss` is a declared variable like one in `.data`.
+///
+/// `mov rax,[rip+stdout]; ret` where the copy of `stdout` sits in a
+/// section the file holds no bytes for: the text returns `stdout`, not
+/// `*(uint64_t*)&stdout`.
+#[test]
+fn a_zero_filled_global_is_a_variable() {
+    let p = program64_with_globals(&READ_GLOBAL, true, &[("stdout", 0x1_4000_3000)]);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("FILE *stdout;"), "{text}");
+    assert!(text.contains("return stdout;"), "{text}");
+}

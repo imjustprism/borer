@@ -326,11 +326,11 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `a` - A virtual address.
     pub(in crate::analysis::decompile) fn is_data(&self, a: u64) -> bool {
+        let program = self.ctx.program;
         crate::analysis::decompile::expr::tls_slot(a).is_some()
-            || self
-                .ctx
-                .program
+            || program
                 .section_at(a)
+                .or_else(|| program.zero_fill_at(a))
                 .is_some_and(|s| !s.executable)
     }
 
