@@ -158,7 +158,7 @@ impl BorerServer {
     /// both a kind and a type; internal error when the address does not
     /// resolve or the bytes are not mapped.
     #[tool(
-        description = "Read `count` typed values (kind u8..u64, i8..i64, f32, f64, ptr, cstr, wstr; default u64, count 1, max 256) as `va value` rows; pointers are named. `type` reads a user type instead: one row per field.",
+        description = "Read `count` values of `kind` (default one u64) as `va value` rows; pointers are named. `type` reads a user type instead: one row per field.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -260,7 +260,7 @@ impl BorerServer {
     /// When no binary is loaded, the threshold is outside 0..8 or the
     /// limit is zero.
     #[tool(
-        description = "High-entropy regions (packed/encrypted data) as `off va len entropy` rows at or above threshold bits/byte (default 7.2, window 1024) under a `# showing N of M` header; paging (200, max 200; the scan stops at 200 regions).",
+        description = "High-entropy regions (packed/encrypted data) as `off va len entropy` rows at or above threshold bits/byte under a `# showing N of M` header; the scan stops at 200 regions.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

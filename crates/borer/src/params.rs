@@ -218,7 +218,7 @@ pub(crate) enum SearchKind {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LoadBinaryParams {
-    /// Path to the binary on disk (PE, ELF, Mach-O, or any file as raw bytes).
+    /// Absolute path to the file.
     pub(crate) path: String,
     /// File offset to use as the entry instead of the header's.
     pub(crate) entry_file_offset: Option<u64>,
@@ -359,11 +359,11 @@ pub(crate) struct StringsParams {
     pub(crate) filter: Option<String>,
     /// Which strings to scan for (default both).
     pub(crate) encoding: Option<StringEncoding>,
-    /// Matches to skip first (paging).
+    /// Matches to skip (paging).
     pub(crate) offset: Option<u32>,
     /// Max rows (default 200, max 500).
     pub(crate) limit: Option<u32>,
-    /// Header line only (default false).
+    /// Header only (default false).
     pub(crate) count_only: Option<bool>,
 }
 
@@ -373,14 +373,13 @@ pub(crate) struct StringsParams {
 pub(crate) struct SymbolsParams {
     /// One kind of symbol only (default every kind); drops the kind column.
     pub(crate) kind: Option<SymbolKind>,
-    /// Case-insensitive substring of the raw name (module included) or of
-    /// the demangled name a row shows.
+    /// Case-insensitive substring of the raw (module included) or demangled name.
     pub(crate) filter: Option<String>,
-    /// Matches to skip first (paging).
+    /// Matches to skip (paging).
     pub(crate) offset: Option<u32>,
     /// Max rows (default 50, max 1000).
     pub(crate) limit: Option<u32>,
-    /// Header line only (default false).
+    /// Header only (default false).
     pub(crate) count_only: Option<bool>,
 }
 
@@ -412,11 +411,11 @@ pub(crate) struct FunctionsParams {
     pub(crate) filter: Option<String>,
     /// `address` (default) or `size` for the largest first.
     pub(crate) sort: Option<FunctionSort>,
-    /// Matches to skip first (paging).
+    /// Matches to skip (paging).
     pub(crate) offset: Option<u32>,
     /// Max rows (default 50, max 300).
     pub(crate) limit: Option<u32>,
-    /// Header line only (default false).
+    /// Header only (default false).
     pub(crate) count_only: Option<bool>,
 }
 
@@ -464,7 +463,7 @@ pub(crate) struct XrefsParams {
     pub(crate) offset: Option<u32>,
     /// Max groups (default 60, max 500).
     pub(crate) limit: Option<u32>,
-    /// Header line only (default false).
+    /// Header only (default false).
     pub(crate) count_only: Option<bool>,
 }
 
@@ -586,7 +585,7 @@ pub(crate) struct SearchParams {
     pub(crate) offset: Option<usize>,
     /// Max hits (default 200, max 500).
     pub(crate) limit: Option<u32>,
-    /// Only the count (default false).
+    /// Header only (default false).
     pub(crate) count_only: Option<bool>,
 }
 
@@ -622,19 +621,19 @@ pub(crate) struct SetCommentParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetTypeParams {
-    /// Name to define (struct/enum/typedef with `fields`/`values`/`type`), or `var`'s new name.
+    /// Struct, enum or typedef to define, or `var`'s new name.
     pub(crate) name: Option<String>,
-    /// The struct's fields, each `offset:name:type` (`0x1c:mp:u32`).
+    /// Struct fields, each `offset:name:type` (`0x1c:mp:u32`).
     pub(crate) fields: Option<Vec<String>>,
-    /// The enum's values, each `name:value` (`Run:1`); width 4 by default.
+    /// Enum values, each `name:value` (`Run:1`).
     pub(crate) values: Option<Vec<String>>,
     /// Size past the last field, or an enum's width (4 or 8).
     pub(crate) size: Option<u64>,
     /// Data global to type, or a function for a prototype or `var`.
     pub(crate) address: Option<String>,
-    /// The type to apply, a typedef's target (`Player *`), a prototype (`int f(Player *p)`), or alone C declarations (struct/enum/typedef, #pragma pack, `// @0x10` offset asserts).
+    /// Type to apply or typedef (`Player *`), a prototype, or alone C declarations.
     pub(crate) r#type: Option<String>,
-    /// Variable of the function at `address` to name/type (`a1`, `local_58`).
+    /// Function variable to name/type (`a1`, `local_58`).
     pub(crate) var: Option<String>,
     /// Preview only; false applies.
     pub(crate) dry_run: Option<bool>,
@@ -650,7 +649,7 @@ pub(crate) struct TypesParams {
     pub(crate) offset: Option<u32>,
     /// Max rows (default 50, max 500).
     pub(crate) limit: Option<u32>,
-    /// Header line only (default false).
+    /// Header only (default false).
     pub(crate) count_only: Option<bool>,
 }
 
@@ -664,7 +663,7 @@ pub(crate) struct AnnotationsParams {
     pub(crate) offset: Option<u32>,
     /// Max rows (default 200, max 1000).
     pub(crate) limit: Option<u32>,
-    /// Header line only (default false).
+    /// Header only (default false).
     pub(crate) count_only: Option<bool>,
 }
 
@@ -682,8 +681,7 @@ pub(crate) struct SaveProjectParams {
 pub(crate) struct LoadProjectParams {
     /// Project JSON path.
     pub(crate) path: String,
-    /// Load a project saved for another binary anyway (default false, which
-    /// refuses one and leaves the overlay as it was).
+    /// Load a project saved for another binary anyway (default false).
     pub(crate) force: Option<bool>,
 }
 

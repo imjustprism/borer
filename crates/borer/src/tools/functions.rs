@@ -223,7 +223,7 @@ impl BorerServer {
     /// When no binary is loaded or the target resolves to neither an address
     /// nor a class field.
     #[tool(
-        description = "References to an address or name, one `function: site kind, ...` row per referencing function (calls, data reads, pointers in data), same-code functions folded; an import lists calls through its slot; `Class+0x24` lists who touches that field; paged by function (60, max 500).",
+        description = "References to an address or name, one `function: site kind, ...` row per referencing function, same-code functions folded; an import lists calls through its slot; `Class+0x24` lists who touches that field.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -355,7 +355,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Callgraph from a function as mermaid: callees (callers=true: what reaches it), six per function before the rest is shared out, imports as leaves; a trailing %% line counts what was hidden (max_nodes 30, max 100).",
+        description = "Callgraph from a function as mermaid: callees (callers=true: what reaches it), six per function before the rest is shared out, imports as leaves; a trailing %% line counts what was hidden.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -404,7 +404,7 @@ impl BorerServer {
     /// When no binary is loaded, `from` is not inside a discovered function,
     /// or `to` is neither inside one nor an import.
     #[tool(
-        description = "Shortest call chain from one function to another (or to an import, called through its slot or a thunk), or that there is none and how far it looked: answers \"does this ever reach the send / this check\" on a whole binary.",
+        description = "Shortest call chain from one function to another (or to an import, called through its slot or a thunk), or that there is none and how far it looked.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

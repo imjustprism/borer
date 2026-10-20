@@ -33,7 +33,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Crypto tables and constants (AES, SHA-1/2, MD5, CRC-32, ChaCha, Blowfish, RC5/6, xxHash/FNV/SipHash, Base64) anywhere in the file: `va section algorithm` rows per algorithm (`off=<n>` if unmapped), offset/limit (200, max 500). Then API hashes: 32-bit constants in code or data that hash a known export name under ROR13 (with or without NUL, or module+name as Metasploit's block_api), djb2, FNV-1a or CRC-32, each with every candidate name and `corroborated` only when another constant beside it resolves under the same scheme (at most `limit` rows).",
+        description = "Crypto tables and constants (AES, SHA-1/2, MD5, CRC-32, ChaCha, Blowfish, RC5/6, xxHash/FNV/SipHash, Base64) in the file as `va section algorithm` rows (`off=<n>` if unmapped); then API hashes, 32-bit constants hashing an export name (ROR13 as block_api, djb2, FNV-1a, CRC-32) with the candidates, `corroborated` when a neighbour resolves alike. offset/limit (200, max 500).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

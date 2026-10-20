@@ -235,7 +235,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not inside a discovered function,
     /// or the decompiler produces nothing.
     #[tool(
-        description = "Pseudo-C with locals local_N/arg_N (local_N is N hex bytes below the entry stack pointer: higher N, lower address), named calls and if/else/while/for/switch; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked; a `// warn:` line names what is known wrong in the text (none: no check fired, not proof), `// next:` lines what to read next.",
+        description = "Pseudo-C with locals local_N/arg_N (N hex bytes below the entry sp: higher N, lower address), named calls, structured flow; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked; a `// warn:` line names what is known wrong in the text (none: no check fired, not proof), `// next:` lines what to read next.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

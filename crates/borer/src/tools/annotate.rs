@@ -341,7 +341,7 @@ impl BorerServer {
     /// or a variable is refused, or the address does not resolve or no
     /// section holds it.
     #[tool(
-        description = "Define a user type and/or apply one: at a data global, `type` types it (a `Player *` names the fields read through it, an enum the constants compared with it); at a function, `type` is its C prototype, or with `var` (a1, local_58) names/types that variable; `type` alone defines C structs. Dry-run unless dry_run=false.",
+        description = "Define or apply a user type: at a data global `type` types it (a `Player *` names the fields read through it); at a function it is the C prototype, or with `var` (a1, local_58) that variable's; `type` alone declares C types. Dry-run unless dry_run=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
