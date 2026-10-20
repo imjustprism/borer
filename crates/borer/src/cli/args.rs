@@ -24,8 +24,8 @@ pub(super) enum Command {
     Packs,
     /// `doctor [offline]`: the local setup, one line per item; no binary.
     Doctor,
-    /// `setup [--apply]`: register this binary with the installed agent
-    /// clients; no binary.
+    /// `setup [--apply] [--replace|--remove]`: register this binary with
+    /// the installed agent clients, or take it out; no binary.
     Setup,
     /// `update [--check]`: install the latest release over this binary; no binary.
     Update,

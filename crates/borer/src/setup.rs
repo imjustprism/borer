@@ -9,11 +9,14 @@
 //! it would add, or that the entry is already there. With `--apply` it
 //! writes, first copying each file it changes to `<file>.bak`.
 //!
-//! An edit only ever inserts: the entry goes into the file's text, so the
-//! rest of the file, comments, trailing commas and key order included,
-//! stays byte for byte. A file that already names a server `borer` is left
-//! as it is, and one that does not parse even as JSONC is not touched; the
-//! report then gives the entry to add by hand.
+//! An edit only inserts or removes the `borer` entry in the file's text,
+//! so the rest of the file, comments, trailing commas and key order
+//! included, stays byte for byte. An entry that runs another program is
+//! replaced when that program no longer exists or `--replace` asks, and
+//! left as it is otherwise; `--remove` takes the entry out. A file that
+//! does not parse even as JSONC is not touched; the report then gives the
+//! entry to add by hand. An applied run ends by naming the clients to
+//! restart, since none reads its configuration again while it runs.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -113,6 +116,25 @@ struct Target {
     /// How the file holds its servers.
     format: Format,
 }
+
+/// What `setup` does with each client's `borer` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// Add the entry where there is none, and replace one whose program no
+    /// longer exists.
+    Add,
+    /// Add the entry, and replace one that runs any other program.
+    Replace,
+    /// Take the entry out.
+    Remove,
+}
+
+/// Seconds Codex waits for borer to start, written into its table.
+const CODEX_STARTUP_SEC: u32 = 30;
+
+/// Seconds Codex waits for one tool call, written into its table: its
+/// default of 60 is less than the first analysis of a large binary takes.
+const CODEX_TOOL_SEC: u32 = 600;
 
 /// What adding the entry to a file's text comes to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,6 +437,114 @@ fn indent_at(text: &str, at: usize) -> &str {
     &rest[..rest.len() - rest.trim_start_matches([' ', '\t']).len()]
 }
 
+/// Finds a member of a JSON object by name.
+///
+/// # Arguments
+///
+/// * `plain` - The text as strict JSON ([`plain_json`]).
+/// * `open` - The position of the object's `{`.
+/// * `name` - The member's key.
+///
+/// # Returns
+///
+/// Where the member's key opens and where its value ends, or `None` when
+/// the object has no such member.
+fn member_span(plain: &str, open: usize, name: &str) -> Option<(usize, usize)> {
+    let bytes = plain.as_bytes();
+    let string_end = |from: usize| {
+        let mut j = from + 1;
+        while let Some(&c) = bytes.get(j) {
+            match c {
+                b'\\' => j += 2,
+                b'"' => return Some(j),
+                _ => j += 1,
+            }
+        }
+        None
+    };
+    let mut depth = 0usize;
+    let mut key: Option<(usize, bool)> = None;
+    let mut i = open + 1;
+    while let Some(&c) = bytes.get(i) {
+        match c {
+            b'"' => {
+                let end = string_end(i)?;
+                if depth == 0 && key.is_none() {
+                    key = Some((i, plain.get(i + 1..end) == Some(name)));
+                }
+                i = end + 1;
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' | b']' if depth > 0 => {
+                depth -= 1;
+                i += 1;
+            }
+            b',' | b'}' | b']' if depth == 0 => {
+                if let Some((at, true)) = key {
+                    return Some((at, plain[..i].trim_end().len()));
+                }
+                if c != b',' {
+                    return None;
+                }
+                key = None;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Takes the server entry out of a JSON configuration's text.
+///
+/// The member goes with the comma that joined it to its neighbour;
+/// nothing else in the text changes.
+///
+/// # Arguments
+///
+/// * `text` - The file's text, possibly with comments.
+/// * `key` - The top-level key holding the servers.
+///
+/// # Returns
+///
+/// The text without the entry.
+///
+/// # Errors
+///
+/// When the text has no servers object naming `borer`, or the text left
+/// is not JSON.
+fn remove_json(text: &str, key: &str) -> Result<String, String> {
+    let plain = plain_json(text);
+    let open = member_open(&plain, key).ok_or_else(|| format!("it has no {key} object"))?;
+    let (start, end) =
+        member_span(&plain, open, NAME).ok_or_else(|| format!("its {key} names no {NAME}"))?;
+    let next = end + plain[end..].len() - plain[end..].trim_start().len();
+    let before = plain[..start].trim_end().len();
+    let (from, to) = if plain.as_bytes().get(next) == Some(&b',') {
+        let after = next + 1;
+        (
+            start,
+            after + plain[after..].len() - plain[after..].trim_start().len(),
+        )
+    } else if before > 0 && plain.as_bytes().get(before - 1) == Some(&b',') {
+        (before - 1, end)
+    } else {
+        (open + 1, end)
+    };
+    let out = format!("{}{}", &text[..from], &text[to..]);
+    let gone = serde_json::from_str::<serde_json::Value>(&plain_json(&out))
+        .ok()
+        .is_some_and(|v| v.get(key).is_some_and(|s| s.get(NAME).is_none()));
+    if gone {
+        Ok(out)
+    } else {
+        Err(format!("taking {NAME} out of {key} did not give JSON"))
+    }
+}
+
 /// Adds a server entry to a JSON configuration's text.
 ///
 /// The entry is inserted as the first member of the servers object, which
@@ -558,7 +688,7 @@ fn add_toml(text: &str, command: &str) -> Result<Change, String> {
                     .unwrap_or_default(),
             );
             if name == own || name.starts_with(&format!("{own}.")) {
-                return Ok(Change::Present(None));
+                return Ok(Change::Present(toml_command(text)));
             }
             table = Some(name);
             continue;
@@ -594,10 +724,102 @@ fn add_toml(text: &str, command: &str) -> Result<Change, String> {
     }
     let _ = write!(
         out,
-        "[{own}]{nl}command = {}{nl}args = []{nl}",
+        "[{own}]{nl}command = {}{nl}args = []{nl}startup_timeout_sec = {CODEX_STARTUP_SEC}{nl}tool_timeout_sec = {CODEX_TOOL_SEC}{nl}",
         toml_string(command)
     );
     Ok(Change::Text(out))
+}
+
+/// The squashed name of a TOML table header line, `None` for any other
+/// line: quotes and spaces dropped, so `[mcp_servers."borer"]` reads
+/// `mcp_servers.borer`.
+///
+/// # Arguments
+///
+/// * `line` - One line of the file.
+fn toml_header(line: &str) -> Option<String> {
+    let header = line.trim().strip_prefix('[')?;
+    Some(
+        header
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !matches!(c, ' ' | '\t' | '"' | '\''))
+            .collect(),
+    )
+}
+
+/// Reads the program the `[mcp_servers.borer]` table runs.
+///
+/// # Arguments
+///
+/// * `text` - A Codex `config.toml`'s text.
+///
+/// # Returns
+///
+/// The `command` value of the table, or `None` when there is no such
+/// table or it states no command as a plain string.
+fn toml_command(text: &str) -> Option<String> {
+    let own = format!("mcp_servers.{NAME}");
+    let mut inside = false;
+    for line in text.lines() {
+        if let Some(name) = toml_header(line) {
+            inside = name == own;
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if inside && key.trim() == "command" {
+            let value = value.trim();
+            return match value.strip_prefix('\'') {
+                Some(rest) => rest.strip_suffix('\'').map(str::to_owned),
+                None => serde_json::from_str::<String>(value).ok(),
+            };
+        }
+    }
+    None
+}
+
+/// Takes the `[mcp_servers.borer]` table, and its sub-tables, out of a
+/// Codex `config.toml`'s text, with the blank line `setup` put before it.
+///
+/// # Arguments
+///
+/// * `text` - The file's text.
+///
+/// # Returns
+///
+/// The text without the table.
+///
+/// # Errors
+///
+/// When the file has no such table: an entry spelled as a key inside
+/// `[mcp_servers]` or as a dotted key is left to remove by hand.
+fn remove_toml(text: &str) -> Result<String, String> {
+    let own = format!("mcp_servers.{NAME}");
+    let ours = |name: &str| name == own || name.starts_with(&format!("{own}."));
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let start = lines
+        .iter()
+        .position(|l| toml_header(l).is_some_and(|n| ours(&n)))
+        .ok_or_else(|| format!("it has no [{own}] table; remove the {NAME} entry by hand"))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, l)| toml_header(l).is_some_and(|n| !ours(&n)))
+        .map_or(lines.len(), |(i, _)| i);
+    let from = if start > 0 && lines[start - 1].trim().is_empty() {
+        start - 1
+    } else {
+        start
+    };
+    let mut out = lines[..from].concat();
+    out.push_str(&lines[end..].concat());
+    Ok(out)
 }
 
 /// The entry a target's file gets, as its format writes it.
@@ -613,7 +835,10 @@ fn entry(format: Format, command: &str) -> String {
             format!("{{\"type\": \"stdio\", \"command\": {quoted}, \"args\": []}}")
         }
         Format::Json { typed: false, .. } => format!("{{\"command\": {quoted}, \"args\": []}}"),
-        Format::Toml => format!("[mcp_servers.{NAME}] command = {}", toml_string(command)),
+        Format::Toml => format!(
+            "[mcp_servers.{NAME}] command = {}, startup_timeout_sec = {CODEX_STARTUP_SEC}, tool_timeout_sec = {CODEX_TOOL_SEC}",
+            toml_string(command)
+        ),
     }
 }
 
@@ -629,25 +854,37 @@ fn backup_path(file: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Adds the entry to one client's file, or says what adding it would do.
+/// Whether an entry's program is gone, so the entry can only fail.
+///
+/// # Arguments
+///
+/// * `command` - The program the entry runs.
+fn stale(command: &str) -> bool {
+    !Path::new(command).exists()
+}
+
+/// Adds, replaces or removes the entry in one client's file, or says what
+/// that would do.
 ///
 /// # Arguments
 ///
 /// * `target` - The client's file.
 /// * `command` - The program the entry runs.
+/// * `mode` - What to do with the entry ([`Mode`]).
 /// * `apply` - Write the change; otherwise only describe it.
 ///
 /// # Returns
 ///
-/// The report's text for the client, after its name, and whether the
-/// client failed: a file that could not be read, edited or written.
-fn register_file(target: &Target, command: &str, apply: bool) -> (String, bool) {
+/// The report's text for the client, after its name; whether the client
+/// failed (a file that could not be read, edited or written); and whether
+/// the file changed, or would.
+fn register_file(target: &Target, command: &str, mode: Mode, apply: bool) -> (String, bool, bool) {
     let file = target.file.display();
     let existed = target.file.is_file();
     let text = if existed {
         match std::fs::read_to_string(&target.file) {
             Ok(text) => text,
-            Err(e) => return (format!("{file}: cannot read it: {e}"), true),
+            Err(e) => return (format!("{file}: cannot read it: {e}"), true, false),
         }
     } else {
         String::new()
@@ -657,33 +894,90 @@ fn register_file(target: &Target, command: &str, apply: bool) -> (String, bool) 
         Format::Json { key, .. } => (add_json(&text, key, &entry), format!("under {key}")),
         Format::Toml => (add_toml(&text, command), "as a table".to_owned()),
     };
-    let new = match change {
-        Ok(Change::Text(new)) => new,
-        Ok(Change::Present(Some(other))) if other != command => {
+    let added = match target.format {
+        Format::Json { .. } => format!("\"{NAME}\": {entry}"),
+        Format::Toml => entry.clone(),
+    };
+    let removed = || match target.format {
+        Format::Json { key, .. } => remove_json(&text, key),
+        Format::Toml => remove_toml(&text),
+    };
+    let (new, done, would) = match (change, mode) {
+        (Ok(Change::Text(_)), Mode::Remove) => {
+            return (format!("{file}: registers no {NAME}"), false, false);
+        }
+        (Ok(Change::Present(_)), Mode::Remove) => match removed() {
+            Ok(new) => (
+                new,
+                format!("removed {NAME}"),
+                format!("would remove {NAME}"),
+            ),
+            Err(why) => return (format!("{file}: cannot edit it: {why}"), true, false),
+        },
+        (Ok(Change::Text(new)), Mode::Add | Mode::Replace) => {
+            let verb = if existed {
+                "would add"
+            } else {
+                "would create it with"
+            };
+            let done = if existed { "added" } else { "created with" };
+            (
+                new,
+                format!("{done} {added} {place}"),
+                format!("{verb} {added} {place}"),
+            )
+        }
+        (Ok(Change::Present(Some(other))), Mode::Add | Mode::Replace)
+            if other != command && (mode == Mode::Replace || stale(&other)) =>
+        {
+            let why = if stale(&other) {
+                "which no longer exists"
+            } else {
+                "as --replace asks"
+            };
+            let replaced = removed().and_then(|without| match target.format {
+                Format::Json { key, .. } => add_json(&without, key, &entry),
+                Format::Toml => add_toml(&without, command),
+            });
+            match replaced {
+                Ok(Change::Text(new)) => (
+                    new,
+                    format!("replaced {other} ({why}) with {added}"),
+                    format!("would replace {other} ({why}) with {added}"),
+                ),
+                Ok(Change::Present(_)) | Err(_) => {
+                    return (
+                        format!(
+                            "{file}: cannot replace {other}; set it to {entry} {place} by hand"
+                        ),
+                        true,
+                        false,
+                    );
+                }
+            }
+        }
+        (Ok(Change::Present(Some(other))), Mode::Add | Mode::Replace) if other != command => {
             return (
-                format!("{file}: already registers {NAME}, running {other}; left as it is"),
+                format!(
+                    "{file}: already registers {NAME}, running {other}; left as it is (setup --apply --replace points it here)"
+                ),
+                false,
                 false,
             );
         }
-        Ok(Change::Present(_)) => return (format!("{file}: already registers {NAME}"), false),
-        Err(why) => {
+        (Ok(Change::Present(_)), Mode::Add | Mode::Replace) => {
+            return (format!("{file}: already registers {NAME}"), false, false);
+        }
+        (Err(why), Mode::Add | Mode::Replace | Mode::Remove) => {
             return (
                 format!("{file}: cannot edit it: {why}; add {entry} {place} by hand"),
                 true,
+                false,
             );
         }
     };
-    let added = match target.format {
-        Format::Json { .. } => format!("\"{NAME}\": {entry}"),
-        Format::Toml => entry,
-    };
     if !apply {
-        let verb = if existed {
-            "would add"
-        } else {
-            "would create it with"
-        };
-        return (format!("{file}: {verb} {added} {place}"), false);
+        return (format!("{file}: {would}"), false, true);
     }
     let backup = backup_path(&target.file);
     if existed && let Err(e) = std::fs::copy(&target.file, &backup) {
@@ -693,21 +987,20 @@ fn register_file(target: &Target, command: &str, apply: bool) -> (String, bool) 
                 backup.display()
             ),
             true,
+            false,
         );
     }
     if let Err(e) = std::fs::write(&target.file, new) {
-        return (format!("{file}: cannot write it: {e}"), true);
+        return (format!("{file}: cannot write it: {e}"), true, false);
     }
     if existed {
         (
-            format!(
-                "{file}: added {added} {place}; the old file is {}",
-                backup.display()
-            ),
+            format!("{file}: {done}; the old file is {}", backup.display()),
             false,
+            true,
         )
     } else {
-        (format!("{file}: created with {added} {place}"), false)
+        (format!("{file}: {done}"), false, true)
     }
 }
 
@@ -727,111 +1020,231 @@ fn claude_cli() -> Option<PathBuf> {
         .find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
 }
 
-/// Registers borer with Claude Code through its CLI, or says what that
-/// would run.
+/// Reads the program a `claude mcp get` report says a server runs.
+///
+/// # Arguments
+///
+/// * `report` - The command's standard output.
+///
+/// # Returns
+///
+/// The `Command:` line's value, or `None` when the report has none.
+fn claude_command(report: &str) -> Option<String> {
+    report
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Command:"))
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty())
+}
+
+/// Runs one `claude mcp` command for its status and first message line.
+///
+/// # Arguments
+///
+/// * `claude` - The `claude` program.
+/// * `args` - The arguments after `claude`.
+///
+/// # Returns
+///
+/// Whether it succeeded, with its standard output on success and its
+/// first error line otherwise.
+///
+/// # Errors
+///
+/// When the program cannot be run.
+fn run_claude(claude: &Path, args: &[&str]) -> std::io::Result<(bool, String)> {
+    let out = Command::new(claude)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()?;
+    if out.status.success() {
+        return Ok((true, String::from_utf8_lossy(&out.stdout).into_owned()));
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let why = err
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("no message");
+    Ok((false, format!("{} ({})", why.trim(), out.status)))
+}
+
+/// Registers borer with Claude Code through its CLI, replaces or removes
+/// it, or says what that would run.
 ///
 /// `claude mcp get borer` succeeds when a server by that name is already
-/// configured; `claude mcp add --scope user` adds it for every project.
+/// configured and names its command; `claude mcp add --scope user` adds it
+/// for every project and `claude mcp remove --scope user` takes it out.
 ///
 /// # Arguments
 ///
 /// * `claude` - The `claude` program.
 /// * `command` - The program the server runs.
-/// * `apply` - Run the add; otherwise only describe it.
+/// * `mode` - What to do with the entry ([`Mode`]).
+/// * `apply` - Run the commands; otherwise only describe them.
 ///
 /// # Returns
 ///
-/// The report's text for Claude Code, after its name, and whether it
-/// failed.
-fn register_claude_cli(claude: &Path, command: &str, apply: bool) -> (String, bool) {
-    let shown = format!("claude mcp add --scope user {NAME} -- {command}");
-    let present = Command::new(claude)
-        .args(["mcp", "get", NAME])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    match present {
-        Ok(s) if s.success() => {
-            return (format!("claude mcp get {NAME}: already registered"), false);
+/// The report's text for Claude Code, after its name, whether it failed,
+/// and whether its registration changed, or would.
+fn register_claude_cli(
+    claude: &Path,
+    command: &str,
+    mode: Mode,
+    apply: bool,
+) -> (String, bool, bool) {
+    let add = ["mcp", "add", "--scope", "user", NAME, "--", command];
+    let remove = ["mcp", "remove", "--scope", "user", NAME];
+    let present = match run_claude(claude, &["mcp", "get", NAME]) {
+        Ok((true, report)) => Some(claude_command(&report)),
+        Ok((false, _)) => None,
+        Err(e) => return (format!("cannot run {}: {e}", claude.display()), true, false),
+    };
+    let steps: Vec<&[&str]> = match (present, mode) {
+        (None, Mode::Remove) => {
+            return (
+                format!("claude mcp get {NAME}: not registered"),
+                false,
+                false,
+            );
         }
-        Ok(_) => {}
-        Err(e) => return (format!("cannot run {}: {e}", claude.display()), true),
-    }
+        (Some(_), Mode::Remove) => vec![&remove],
+        (None, Mode::Add | Mode::Replace) => vec![&add],
+        (Some(Some(other)), Mode::Add | Mode::Replace)
+            if other != command && (mode == Mode::Replace || stale(&other)) =>
+        {
+            vec![&remove, &add]
+        }
+        (Some(Some(other)), Mode::Add | Mode::Replace) if other != command => {
+            return (
+                format!(
+                    "claude mcp get {NAME}: registered, running {other}; left as it is (setup --apply --replace points it here)"
+                ),
+                false,
+                false,
+            );
+        }
+        (Some(_), Mode::Add | Mode::Replace) => {
+            return (
+                format!("claude mcp get {NAME}: already registered"),
+                false,
+                false,
+            );
+        }
+    };
+    let shown = steps
+        .iter()
+        .map(|args| format!("claude {}", args.join(" ")))
+        .collect::<Vec<_>>()
+        .join(", then ");
     if !apply {
-        return (format!("would run: {shown}"), false);
+        return (format!("would run: {shown}"), false, true);
     }
-    let added = Command::new(claude)
-        .args(["mcp", "add", "--scope", "user", NAME, "--", command])
-        .stdin(Stdio::null())
-        .output();
-    match added {
-        Ok(out) if out.status.success() => (format!("ran: {shown}"), false),
-        Ok(out) => {
-            let why = String::from_utf8_lossy(&out.stderr);
-            let why = why
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("no message");
-            (
-                format!("{shown} failed ({}): {}", out.status, why.trim()),
-                true,
-            )
+    for args in &steps {
+        match run_claude(claude, args) {
+            Ok((true, _)) => {}
+            Ok((false, why)) => {
+                return (
+                    format!("claude {} failed: {why}", args.join(" ")),
+                    true,
+                    false,
+                );
+            }
+            Err(e) => return (format!("cannot run {}: {e}", claude.display()), true, false),
         }
-        Err(e) => (format!("cannot run {}: {e}", claude.display()), true),
     }
+    (format!("ran: {shown}"), false, true)
 }
 
-/// Registers this binary with every installed client, or says what that
-/// would do: the CLI's `setup`.
+/// What a client needs after its configuration changed, beyond a restart.
 ///
 /// # Arguments
 ///
+/// * `client` - The client, as the report names it.
+fn restart_note(client: &str) -> &'static str {
+    match client {
+        "claude desktop" => " (quit it from the tray icon, not the window)",
+        "cursor" => " (then turn borer on under Settings > MCP)",
+        "vs code" | "vs code insiders" => " (or run MCP: List Servers and start borer)",
+        _ => "",
+    }
+}
+
+/// Registers this binary with every installed client, replaces a stale
+/// registration, or removes it: the CLI's `setup`.
+///
+/// # Arguments
+///
+/// * `mode` - What to do with each client's entry ([`Mode`]).
 /// * `apply` - Make the changes; otherwise report them only.
 ///
 /// # Returns
 ///
 /// The report, one line per installed client after a header and with the
-/// clients not found last, and how many clients failed.
+/// clients not found and, after an applied change, the clients to restart
+/// last, and how many clients failed.
 ///
 /// # Errors
 ///
 /// When this binary's path does not read or is not UTF-8, which a
 /// configuration file cannot hold.
-pub(crate) fn setup(apply: bool) -> anyhow::Result<(String, usize)> {
+pub(crate) fn setup(mode: Mode, apply: bool) -> anyhow::Result<(String, usize)> {
     let exe = std::env::current_exe()?;
     let command = exe
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("{} is not a UTF-8 path", exe.display()))?;
     let (found, mut missing) = targets(Os::HOST, &Env::read());
     let claude = claude_cli();
+    let what = match mode {
+        Mode::Add => format!("registering {command} as the MCP server {NAME}"),
+        Mode::Replace => {
+            format!("registering {command} as the MCP server {NAME}, replacing another")
+        }
+        Mode::Remove => format!("removing the MCP server {NAME}"),
+    };
+    let flag = match mode {
+        Mode::Add => "--apply",
+        Mode::Replace => "--apply --replace",
+        Mode::Remove => "--apply --remove",
+    };
     let mut out = if apply {
-        format!("# setup: registering {command} as the MCP server {NAME}\n")
+        format!("# setup: {what}\n")
     } else {
-        format!(
-            "# setup: dry run; `borer setup --apply` registers {command} as the MCP server {NAME}\n"
-        )
+        format!("# setup: dry run; `borer setup {flag}` goes on {what}\n")
     };
     let mut failed = 0;
-    let mut line = |client: &str, (text, bad): (String, bool)| {
+    let mut changed: Vec<String> = Vec::new();
+    let mut line = |client: &str, (text, bad, did): (String, bool, bool)| {
         failed += usize::from(bad);
+        if did {
+            changed.push(format!("{client}{}", restart_note(client)));
+        }
         let _ = writeln!(out, "{client:<CLIENT_WIDTH$} {text}");
     };
     if let Some(claude) = &claude {
         missing.retain(|c| *c != "claude code");
-        line("claude code", register_claude_cli(claude, command, apply));
+        line(
+            "claude code",
+            register_claude_cli(claude, command, mode, apply),
+        );
     }
     for target in &found {
         if claude.is_some() && target.client == "claude code" {
             continue;
         }
-        line(target.client, register_file(target, command, apply));
+        line(target.client, register_file(target, command, mode, apply));
     }
     if found.is_empty() && claude.is_none() {
         out.push_str("# no agent client found; add the server by hand: see README.md\n");
     }
     if !missing.is_empty() {
         let _ = writeln!(out, "# not found: {}", missing.join(", "));
+    }
+    if apply && !changed.is_empty() {
+        let _ = writeln!(
+            out,
+            "# restart each changed client to load it: {}",
+            changed.join("; ")
+        );
     }
     Ok((out, failed))
 }
@@ -841,8 +1254,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Change, Env, Format, Os, Target, add_json, add_toml, backup_path, plain_json,
-        register_file, targets,
+        Change, Env, Format, Mode, Os, Target, add_json, add_toml, backup_path, claude_command,
+        plain_json, register_file, remove_json, remove_toml, targets, toml_command,
     };
 
     /// A directory of its own under the temporary directory, emptied.
@@ -977,15 +1390,21 @@ mod tests {
         let new = text(add_toml(old, r"C:\bin\borer.exe"));
         assert_eq!(
             new,
-            "model = \"o4\"\n\n[mcp_servers.other]\ncommand = \"node\"\n\n[mcp_servers.borer]\ncommand = 'C:\\bin\\borer.exe'\nargs = []\n"
+            "model = \"o4\"\n\n[mcp_servers.other]\ncommand = \"node\"\n\n[mcp_servers.borer]\ncommand = 'C:\\bin\\borer.exe'\nargs = []\nstartup_timeout_sec = 30\ntool_timeout_sec = 600\n"
         );
-        assert_eq!(add_toml(&new, "x"), Ok(Change::Present(None)));
+        assert_eq!(
+            add_toml(&new, "x"),
+            Ok(Change::Present(Some(r"C:\bin\borer.exe".to_owned())))
+        );
         assert_eq!(
             text(add_toml("", "/it's/borer")),
-            "[mcp_servers.borer]\ncommand = \"/it's/borer\"\nargs = []\n"
+            "[mcp_servers.borer]\ncommand = \"/it's/borer\"\nargs = []\nstartup_timeout_sec = 30\ntool_timeout_sec = 600\n"
+        );
+        assert_eq!(
+            add_toml("[mcp_servers.\"borer\"]\ncommand = 'x'\n", "y"),
+            Ok(Change::Present(Some("x".to_owned())))
         );
         for present in [
-            "[mcp_servers.\"borer\"]\ncommand = 'x'\n",
             "[mcp_servers.borer.env]\nA = '1'\n",
             "[mcp_servers]\nborer = { command = 'x' }\n",
             "mcp_servers.borer.command = 'x'\n",
@@ -1003,8 +1422,73 @@ mod tests {
         );
         assert_eq!(
             text(add_toml("[other]\nborer = 1\n", "/b")),
-            "[other]\nborer = 1\n\n[mcp_servers.borer]\ncommand = '/b'\nargs = []\n"
+            "[other]\nborer = 1\n\n[mcp_servers.borer]\ncommand = '/b'\nargs = []\nstartup_timeout_sec = 30\ntool_timeout_sec = 600\n"
         );
+    }
+
+    /// The entry comes out of a servers object with the comma that joined
+    /// it, wherever it sits, and every other byte stays; a file naming no
+    /// `borer` is refused.
+    ///
+    /// # Panics
+    ///
+    /// When a removal leaves a byte it should not, or takes one it should
+    /// keep.
+    #[test]
+    fn an_entry_comes_out_with_its_comma_and_nothing_else() {
+        let first = "{\n  \"mcpServers\": {\n    \"borer\": {\"command\": \"/b\"},\n    \"other\": {}\n  }\n}\n";
+        assert_eq!(
+            remove_json(first, "mcpServers").expect("removed"),
+            "{\n  \"mcpServers\": {\n    \"other\": {}\n  }\n}\n"
+        );
+        let last =
+            "{\"mcpServers\": {\"other\": {}, // keep\n \"borer\": {\"args\": [1, {}]}}, \"x\": 1}";
+        assert_eq!(
+            remove_json(last, "mcpServers").expect("removed"),
+            "{\"mcpServers\": {\"other\": {}}, \"x\": 1}"
+        );
+        let only = "{\"servers\": {\"borer\": {\"type\": \"stdio\"}}}";
+        assert_eq!(
+            remove_json(only, "servers").expect("removed"),
+            "{\"servers\": {}}"
+        );
+        assert!(remove_json("{\"mcpServers\": {\"other\": {}}}", "mcpServers").is_err());
+        let added = add_json(first, "mcpServers", "{}").map(|c| matches!(c, Change::Present(_)));
+        assert_eq!(added, Ok(true));
+    }
+
+    /// The Codex table comes out with its sub-tables and the blank line
+    /// before it, and the command it runs reads in either string form; an
+    /// entry spelled as a key is left to remove by hand.
+    ///
+    /// # Panics
+    ///
+    /// When the table, a neighbour or the command reads otherwise.
+    #[test]
+    fn the_codex_table_comes_out_whole() {
+        let text = "model = 'o4'\n\n[mcp_servers.borer]\ncommand = \"C:\\\\b.exe\"\nargs = []\n[mcp_servers.borer.env]\nA = '1'\n[other]\nx = 1\n";
+        assert_eq!(toml_command(text).as_deref(), Some(r"C:\b.exe"));
+        assert_eq!(
+            remove_toml(text).expect("removed"),
+            "model = 'o4'\n[other]\nx = 1\n"
+        );
+        assert_eq!(
+            toml_command("[mcp_servers.borer]\ncommand = '/b'\n").as_deref(),
+            Some("/b")
+        );
+        assert!(remove_toml("[mcp_servers]\nborer = { command = 'x' }\n").is_err());
+    }
+
+    /// A `claude mcp get` report names the program on its `Command:` line.
+    ///
+    /// # Panics
+    ///
+    /// When the program reads otherwise.
+    #[test]
+    fn the_claude_report_names_the_command() {
+        let report = "borer:\n  Scope: User config\n  Type: stdio\n  Command: C:\\bin\\borer.exe\n  Args: \n";
+        assert_eq!(claude_command(report).as_deref(), Some(r"C:\bin\borer.exe"));
+        assert_eq!(claude_command("borer:\n  Type: http\n"), None);
     }
 
     /// A dry run writes nothing; an applied change keeps the old file as
@@ -1030,7 +1514,7 @@ mod tests {
                 typed: true,
             },
         };
-        let (said, failed) = register_file(&target, "/opt/borer", false);
+        let (said, failed, _) = register_file(&target, "/opt/borer", Mode::Add, false);
         assert!(
             !failed && said.contains("would add \"borer\": {\"type\": \"stdio\""),
             "{said}"
@@ -1038,8 +1522,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).expect("read"), old);
         assert!(!backup_path(&file).exists());
 
-        let (said, failed) = register_file(&target, "/opt/borer", true);
-        assert!(!failed && said.contains("added"), "{said}");
+        let (said, failed, changed) = register_file(&target, "/opt/borer", Mode::Add, true);
+        assert!(!failed && changed && said.contains("added"), "{said}");
         assert_eq!(
             std::fs::read_to_string(backup_path(&file)).expect("the copy"),
             old
@@ -1049,9 +1533,9 @@ mod tests {
         assert_eq!(parsed["mcpServers"]["borer"]["type"], "stdio");
         assert_eq!(parsed["keep"], true);
 
-        let (said, failed) = register_file(&target, "/opt/borer", true);
+        let (said, failed, changed) = register_file(&target, "/opt/borer", Mode::Add, true);
         assert!(
-            !failed && said.ends_with("already registers borer"),
+            !failed && !changed && said.ends_with("already registers borer"),
             "{said}"
         );
         assert_eq!(std::fs::read_to_string(&file).expect("read"), new);
@@ -1059,8 +1543,37 @@ mod tests {
             std::fs::read_to_string(backup_path(&file)).expect("the copy"),
             old
         );
-        let (said, _) = register_file(&target, "/elsewhere/borer", true);
-        assert!(said.contains("running /opt/borer; left as it is"), "{said}");
+        let (said, _, _) = register_file(&target, "/elsewhere/borer", Mode::Add, true);
+        assert!(
+            said.contains("replaced /opt/borer (which no longer exists)"),
+            "{said}"
+        );
+        let alive = std::env::current_exe().expect("the test binary");
+        let alive = alive.to_str().expect("utf-8");
+        let (said, _, _) = register_file(&target, alive, Mode::Add, true);
+        assert!(
+            said.contains("replaced /elsewhere/borer (which no longer exists)"),
+            "{said}"
+        );
+        let (said, _, changed) = register_file(&target, "/third/borer", Mode::Add, true);
+        assert!(
+            !changed && said.contains(&format!("running {alive}; left as it is")),
+            "{said}"
+        );
+        let other = dir.to_str().expect("utf-8");
+        let (said, _, changed) = register_file(&target, other, Mode::Replace, true);
+        assert!(changed && said.contains("as --replace asks"), "{said}");
+        let (said, failed, changed) = register_file(&target, "/any", Mode::Remove, true);
+        assert!(
+            !failed && changed && said.contains("removed borer"),
+            "{said}"
+        );
+        let left: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).expect("read")).expect("parses");
+        assert!(left["mcpServers"].get("borer").is_none(), "{left}");
+        assert_eq!(left["keep"], true);
+        let (said, _, changed) = register_file(&target, "/any", Mode::Remove, true);
+        assert!(!changed && said.ends_with("registers no borer"), "{said}");
 
         let toml = Target {
             client: "codex cli",
@@ -1068,8 +1581,14 @@ mod tests {
             file: dir.join("config.toml"),
             format: Format::Toml,
         };
-        let (said, failed) = register_file(&toml, "/opt/borer", true);
+        let (said, failed, _) = register_file(&toml, "/opt/borer", Mode::Add, true);
         assert!(!failed && said.contains("created with"), "{said}");
+        assert!(
+            std::fs::read_to_string(&toml.file)
+                .expect("read")
+                .contains("tool_timeout_sec = 600"),
+            "{said}"
+        );
         assert!(!backup_path(&toml.file).exists());
         std::fs::remove_dir_all(&dir).ok();
     }

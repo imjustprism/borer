@@ -252,7 +252,7 @@ fn setup_refuses_a_word_it_does_not_take() {
     assert_eq!(refused.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        stderr.contains("Error: setup takes `--apply` or nothing, not '--yes'"),
+        stderr.contains("Error: setup takes --apply with --replace or --remove, not '--yes'"),
         "{stderr}"
     );
     assert!(refused.stdout.is_empty(), "it reported a plan: {stderr}");
