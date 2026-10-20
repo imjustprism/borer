@@ -156,6 +156,7 @@ fn trailing_goto(text: &str) -> Option<u64> {
 }
 
 /// Per-function decompilation state shared by the lifter and the emitter.
+#[derive(Clone)]
 struct Ctx<'a> {
     /// The loaded image.
     program: &'a Program,
