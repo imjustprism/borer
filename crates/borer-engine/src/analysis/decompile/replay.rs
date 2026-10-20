@@ -1201,6 +1201,7 @@ fn replay_effects<L: Replay>(
         w,
         code,
         succs,
+        preds: predecessors(succs),
         effects,
         named: &named,
         regs: L::regs(width),
@@ -1218,6 +1219,33 @@ fn replay_effects<L: Replay>(
         }
     }
     out
+}
+
+/// The predecessors of each block, each once and in index order.
+///
+/// # Arguments
+///
+/// * `succs` - The successors of each block.
+///
+/// # Returns
+///
+/// By block index, the blocks with an edge to it, as long as the highest
+/// block either side names.
+fn predecessors(succs: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); succs.len()];
+    for (p, to) in succs.iter().enumerate() {
+        for &s in to {
+            if s >= preds.len() {
+                preds.resize(s + 1, Vec::new());
+            }
+            if let Some(from) = preds.get_mut(s)
+                && from.last() != Some(&p)
+            {
+                from.push(p);
+            }
+        }
+    }
+    preds
 }
 
 /// The stack slots the text's statements name anywhere in a function, with
@@ -3221,6 +3249,9 @@ struct Function<'f, 'p, L: Replay> {
     code: &'f [Vec<L::Insn>],
     /// The successors of each block in the graph the text was written for.
     succs: &'f [Vec<usize>],
+    /// The predecessors of each block in that graph, each once, in index
+    /// order.
+    preds: Vec<Vec<usize>>,
     /// Each block's effects.
     effects: &'f [Vec<Effect>],
     /// The stack slots the text names, with their widest access in bytes.
@@ -3483,11 +3514,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     fn guard(&self, b: usize) -> Option<(&Cond, bool)> {
         let mut b = b;
         for _ in 0..GUARD_JUMPS {
-            let mut preds = (0..self.succs.len()).filter(|&p| self.succs[p].contains(&b));
-            let p = preds.next()?;
-            if preds.next().is_some() {
+            let &[p] = self.preds.get(b)?.as_slice() else {
                 return None;
-            }
+            };
             let jcc = self.code.get(p)?.last()?;
             let (target, fall) = match L::transfer(jcc) {
                 Transfer::Jump if self.effects.get(p).is_some_and(Vec::is_empty) => {
@@ -3536,10 +3565,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     fn entry_result_ty(&self, b: usize) -> FxHashMap<Key, Ty> {
         let mut found: Option<(Key, Ty)> = None;
         let mut preds = 0usize;
-        for (p, succs) in self.succs.iter().enumerate() {
-            if !succs.contains(&b) {
-                continue;
-            }
+        for &p in self.preds.get(b).map_or(&[][..], Vec::as_slice) {
             preds += 1;
             let last = self.effects.get(p).and_then(|e| e.last());
             let left = last.and_then(|e| match &e.kind {
