@@ -44,6 +44,7 @@ mod expr_render;
 mod fcmp;
 mod fields;
 mod finish;
+mod floats;
 mod format;
 mod frame;
 mod globals;

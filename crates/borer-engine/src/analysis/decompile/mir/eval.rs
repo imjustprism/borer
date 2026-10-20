@@ -10,10 +10,11 @@
 //! unknown, and so is everything computed from it.
 
 use super::super::expr::{Op, Ty, UnOp as EUn, sext as sext64};
-use super::super::helper::Helper;
-use super::super::verify::{
-    convert_float, float_arith, float_of, float_to_int, float_un, integer_to_float, low,
+use super::super::floats::{
+    convert_float, float_arith, float_of, float_to_int, float_un, integer_to_float,
 };
+use super::super::helper::Helper;
+use super::super::verify::low;
 use super::{BinOp, Body, FOp, FUnOp, IPred, Inst, Lane, MTy, OvfOp, UnOp, Val, WideOp};
 use crate::num::lo32;
 

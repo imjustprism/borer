@@ -42,11 +42,11 @@ use super::ctext::{
     Ast, Base, Bin, CTy, Tok, Un, closing, expression, float_bits, float_of, split_top, tokens,
 };
 use super::expr::{Expr, Op, TEB_FIELDS, Ty, UnOp, abs_bits, fold, unary};
+use super::floats::integer_to_float;
 use super::helper::{Helper, Operands, Yields, defines};
 use super::line::is_param_name;
 use super::signature::{Passing, Signature, passing, poke_word, printed};
 use super::traces::{INTRINSICS, Stmt, blank, statements};
-use super::verify::integer_to_float;
 use crate::analysis::{Analysis, BlockTerm, Overlay, bare_name, name_of};
 use crate::emulate::{Emulator, Stop};
 use crate::fxmap::{FxHashMap, FxHashSet};

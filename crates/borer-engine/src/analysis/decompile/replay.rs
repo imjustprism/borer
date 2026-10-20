@@ -76,6 +76,10 @@ use super::expr::{
     Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, a64_code, either_width, fcvt_float_width, fold,
     known_bits, unary,
 };
+use super::floats::{
+    agree, cast_integer, convert_float, float_arith, float_carried, float_of, float_scale_at,
+    float_to_int, float_un, integer_to_float, reinterpret_float,
+};
 use super::helper::{Helper, eval_call};
 use super::lift::{
     ArgAt, Call, Callee, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
@@ -83,8 +87,7 @@ use super::lift::{
 use super::liveness::Live;
 use super::verify::{
     Bench, EVAL_DEPTH, FRAME_SPAN, GOLDEN, REGION_MAX, REGS, REGS_32, Rng, STACK_WORDS, XMMS,
-    agree, aligns_stack, cast_integer, convert_float, float_arith, float_carried, float_of,
-    float_scale_at, float_to_int, float_un, integer_to_float, low, reinterpret_float, sext, word,
+    aligns_stack, low, sext, word,
 };
 use super::{Ctx, decompile_with, table_target};
 use crate::analysis::decompiled_witnessed;
