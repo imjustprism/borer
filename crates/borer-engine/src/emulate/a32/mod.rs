@@ -152,6 +152,9 @@ pub struct Machine<'a> {
     history: Vec<Written>,
     /// The address of the last instruction the run decoded.
     last_ip: u64,
+    /// The cancel flag in force where the machine was made, looked at
+    /// every [`super::CANCEL_EVERY`] steps.
+    cancel: Option<crate::cancel::Cancel>,
     /// Whether an instruction under a condition that moves control runs
     /// whatever its condition ([`Machine::set_forced`]).
     forced: bool,
@@ -197,6 +200,7 @@ impl<'a> Machine<'a> {
             stop_at: None,
             history: Vec::new(),
             last_ip: 0,
+            cancel: crate::cancel::Cancel::current(),
             forced: false,
         })
     }
@@ -404,6 +408,14 @@ impl<'a> Machine<'a> {
             }
             if self.steps >= self.budget {
                 break Stop::Budget;
+            }
+            if self.steps.is_multiple_of(super::CANCEL_EVERY)
+                && self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(crate::cancel::Cancel::is_raised)
+            {
+                break Stop::Limit(super::Limit::Time);
             }
             if on_stack(pc) {
                 break Stop::Derailed(pc);

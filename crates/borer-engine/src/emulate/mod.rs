@@ -46,6 +46,11 @@ use strops::StringOp;
 /// what a context window or the machine holds.
 pub const RECORDS_MAX: usize = 1 << 16;
 
+/// Steps between two looks at the caller's cancel flag
+/// ([`crate::cancel::Cancel`]): a run stops only at a step boundary, and
+/// looking every step would cost more than the steps.
+pub const CANCEL_EVERY: usize = 1 << 12;
+
 /// What cut a run short before its step budget did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Limit {
@@ -53,6 +58,8 @@ pub enum Limit {
     Calls,
     /// It took [`RECORDS_MAX`] indirect jumps.
     Jumps,
+    /// The caller's cancel flag was raised: its time ran out.
+    Time,
 }
 
 impl std::fmt::Display for Limit {
@@ -61,6 +68,7 @@ impl std::fmt::Display for Limit {
         f.write_str(match self {
             Self::Calls => "api call",
             Self::Jumps => "indirect jump",
+            Self::Time => "time",
         })
     }
 }
@@ -110,7 +118,10 @@ impl std::fmt::Display for Stop {
             Self::Stopped(at) => write!(f, "stopped at {at:#x}"),
             Self::Derailed(at) => write!(f, "derailed at {at:#x}"),
             Self::Exited => write!(f, "the program exited"),
-            Self::Limit(what) => write!(f, "stopped: {what} limit ({RECORDS_MAX} recorded)"),
+            Self::Limit(Limit::Time) => f.write_str("stopped: time limit"),
+            Self::Limit(what @ (Limit::Calls | Limit::Jumps)) => {
+                write!(f, "stopped: {what} limit ({RECORDS_MAX} recorded)")
+            }
         }
     }
 }
@@ -385,6 +396,9 @@ pub struct Emulator<'a> {
     /// The address of the last instruction the run decoded: where it stopped,
     /// or the instruction that transferred to a faulting address.
     last_ip: u64,
+    /// The cancel flag in force where the emulator was made, looked at
+    /// every [`CANCEL_EVERY`] steps.
+    cancel: Option<crate::cancel::Cancel>,
     /// The stub each `GetProcAddress` name was handed, so asking for one
     /// name again answers the same stub instead of adding another.
     resolved: BTreeMap<String, u64>,
@@ -802,6 +816,7 @@ impl<'a> Emulator<'a> {
             last_ip: 0,
             apis: std::sync::Arc::default(),
             resolved: BTreeMap::new(),
+            cancel: crate::cancel::Cancel::current(),
             calls: Vec::new(),
             alloc_next,
             allocs: Vec::new(),
@@ -1457,6 +1472,14 @@ impl<'a> Emulator<'a> {
             }
             if let Some(limit) = self.filled() {
                 break Stop::Limit(limit);
+            }
+            if self.steps.is_multiple_of(CANCEL_EVERY)
+                && self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(crate::cancel::Cancel::is_raised)
+            {
+                break Stop::Limit(Limit::Time);
             }
             if self.apis.contains_key(&ip) {
                 self.steps += 1;
@@ -2737,6 +2760,7 @@ mod tests {
                 Stop::Limit(super::Limit::Calls),
                 "stopped: api call limit (65536 recorded)",
             ),
+            (Stop::Limit(super::Limit::Time), "stopped: time limit"),
         ] {
             assert_eq!(stop.to_string(), words);
         }
@@ -3981,6 +4005,28 @@ mod tests {
         let run = emu.run(0x1000);
         assert_eq!(run.stop, Stop::Limit(super::Limit::Jumps), "{}", run.stop);
         assert_eq!(emu.indirect_jumps().len(), super::RECORDS_MAX);
+    }
+
+    /// A raised cancel flag stops a run at a step boundary, and an
+    /// emulator made outside its scope never sees it.
+    ///
+    /// # Panics
+    ///
+    /// When the run ignores the raised flag or stops off a boundary.
+    #[test]
+    fn a_raised_cancel_flag_stops_the_run() {
+        let p = image(&[0xeb, 0xfe], &[]);
+        let flag = crate::cancel::Cancel::new();
+        let mut free = Emulator::new(&p, 10_000).expect("bitness");
+        let mut cut = flag.within(|| Emulator::new(&p, 10_000).expect("bitness"));
+        let first = cut.run(0x1000);
+        assert_eq!(first.stop, Stop::Budget, "an unraised flag stops nothing");
+        flag.raise();
+        let run = cut.run(0x1000);
+        assert_eq!(run.stop, Stop::Limit(super::Limit::Time), "{}", run.stop);
+        assert_eq!(run.stop.to_string(), "stopped: time limit");
+        assert_eq!(run.steps % super::CANCEL_EVERY, 0);
+        assert_eq!(free.run(0x1000).stop, Stop::Budget);
     }
 
     /// A run that never returns stops at its step budget rather than looping

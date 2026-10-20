@@ -406,11 +406,13 @@ impl BorerServer {
         })
     }
 
-    /// A server with nothing loaded, the packs `BORER_PACKS` names, and
-    /// live attaching opened to any process when `BORER_LIVE_ANY` is `1`.
+    /// A server with nothing loaded, the packs `BORER_PACKS` names, live
+    /// attaching opened to any process when `BORER_LIVE_ANY` is `1`, and
+    /// the request deadline `BORER_DEADLINE_SECS` names.
     pub(crate) fn new() -> BorerServer {
         BorerServer {
             live_any: std::env::var_os(crate::tools::live::LIVE_ANY_ENV).is_some_and(|v| v == "1"),
+            gate: crate::requests::Gate::from_env(),
             packs: read_packs(&env_pack_files()).unwrap_or_else(|e| {
                 eprintln!("borer: {e:#}; running without packs");
                 Arc::default()

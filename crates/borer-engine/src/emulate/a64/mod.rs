@@ -298,6 +298,9 @@ pub struct Machine<'a> {
     /// The Linux syscalls the run serviced, in order, each with its decoded
     /// arguments and result: what an ELF asked the kernel for.
     calls: Vec<ApiCall>,
+    /// The cancel flag in force where the machine was made, looked at
+    /// every [`super::CANCEL_EVERY`] steps.
+    cancel: Option<crate::cancel::Cancel>,
 }
 
 impl<'a> Machine<'a> {
@@ -344,6 +347,7 @@ impl<'a> Machine<'a> {
             history: Vec::new(),
             last_ip: 0,
             calls: Vec::new(),
+            cancel: crate::cancel::Cancel::current(),
         })
     }
 
@@ -614,6 +618,14 @@ impl<'a> Machine<'a> {
             }
             if self.calls.len() >= super::RECORDS_MAX {
                 break Stop::Limit(super::Limit::Calls);
+            }
+            if self.steps.is_multiple_of(super::CANCEL_EVERY)
+                && self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(crate::cancel::Cancel::is_raised)
+            {
+                break Stop::Limit(super::Limit::Time);
             }
             if on_stack(pc) {
                 break Stop::Derailed(pc);

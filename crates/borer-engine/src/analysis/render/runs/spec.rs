@@ -201,6 +201,7 @@ pub(super) fn parse_run(a: &Analysis, o: &Overlay, spec: &str) -> Result<RunSpec
     if out.len() > INPUTS_MAX {
         return Err(format!("at most {INPUTS_MAX} inputs a run"));
     }
+    within_total(out.len(), budget)?;
     Ok(RunSpec {
         entry,
         budget,

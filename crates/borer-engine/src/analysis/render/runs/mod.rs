@@ -35,6 +35,32 @@ const BUDGET: usize = 1_000_000;
 /// Most steps a spec may ask for, of `run` and of `emulate`.
 pub(super) const BUDGET_MAX: usize = 20_000_000;
 
+/// Most steps one request's runs take together: the inputs times the steps
+/// each is given, so a request's cost is bounded by a count, not by how
+/// long the caller waits.
+const STEPS_TOTAL_MAX: usize = 100_000_000;
+
+/// Refuses runs that together would take more than [`STEPS_TOTAL_MAX`]
+/// steps.
+///
+/// # Arguments
+///
+/// * `inputs` - How many inputs the request runs.
+/// * `budget` - The steps each run is given.
+///
+/// # Errors
+///
+/// When the product is past the cap, saying what to lower.
+pub(super) fn within_total(inputs: usize, budget: usize) -> Result<(), String> {
+    let total = inputs.saturating_mul(budget);
+    if total > STEPS_TOTAL_MAX {
+        return Err(format!(
+            "{inputs} inputs of {budget} steps is {total} steps, past the {STEPS_TOTAL_MAX} one request runs; lower steps= or pass fewer inputs"
+        ));
+    }
+    Ok(())
+}
+
 /// Bytes of a buffer a report spells before the rest are counted.
 const SHOWN_MAX: usize = 48;
 
@@ -1362,6 +1388,25 @@ mod tests {
             let err = vectors_tsv(&p, &a, &o, bad).unwrap_err();
             assert!(err.contains(says), "{bad}: {err}");
         }
+    }
+
+    /// A request whose inputs times their steps pass the per-request total
+    /// is refused before anything runs, for `run` and for `vectors`.
+    ///
+    /// # Panics
+    ///
+    /// When the request is taken, or one within the total refused.
+    #[test]
+    fn a_request_past_the_total_steps_is_refused() {
+        let p = Program::raw_x64(&[0xc3]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let six = "0x1000,steps=20000000/1;2;3;4;5;6";
+        let err = parse_run(&a, &o, six).map(|s| s.budget).unwrap_err();
+        assert!(err.contains("past the 100000000"), "{err}");
+        assert!(parse_run(&a, &o, "0x1000,steps=20000000/1;2;3;4;5").is_ok());
+        let err = vectors_tsv(&p, &a, &o, "0x1000,count=64,steps=2000000").unwrap_err();
+        assert!(err.contains("past the 100000000"), "{err}");
     }
 
     /// The forms of an argument read, and a malformed one is refused naming

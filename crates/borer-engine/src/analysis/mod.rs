@@ -53,7 +53,7 @@ mod x87;
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::isa::Isa;
@@ -540,20 +540,24 @@ pub(crate) fn striped_with<T: Sync, S, R: Send>(
     let init = &init;
     let f = &f;
     let here = reads::Handle::here();
+    let cancel = crate::cancel::Cancel::current();
     let stripes: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 let here = here.clone();
+                let cancel = cancel.clone();
                 scope.spawn(move || {
-                    here.enter(|| {
-                        let state = init();
-                        items
-                            .iter()
-                            .enumerate()
-                            .skip(t)
-                            .step_by(threads)
-                            .map(|(i, x)| (i, f(&state, x)))
-                            .collect::<Vec<_>>()
+                    crate::cancel::Cancel::carried(cancel.as_ref(), || {
+                        here.enter(|| {
+                            let state = init();
+                            items
+                                .iter()
+                                .enumerate()
+                                .skip(t)
+                                .step_by(threads)
+                                .map(|(i, x)| (i, f(&state, x)))
+                                .collect::<Vec<_>>()
+                        })
                     })
                 })
             })
@@ -733,6 +737,10 @@ struct Cell<T> {
     weight: AtomicUsize,
     /// [`Derived::asks`] when an item's result was last asked for.
     asked: AtomicU64,
+    /// Whether the build ended after the caller's cancel flag was raised
+    /// ([`crate::cancel::Cancel`]), so an emulation in it may have been cut
+    /// short; such a result is let go at once.
+    cut: AtomicBool,
 }
 
 impl<T> Default for Cell<T> {
@@ -741,6 +749,7 @@ impl<T> Default for Cell<T> {
             value: OnceLock::new(),
             weight: AtomicUsize::new(0),
             asked: AtomicU64::new(0),
+            cut: AtomicBool::new(false),
         }
     }
 }
@@ -819,9 +828,11 @@ impl<K: Hash + Eq + Send + 'static, T: Send + Sync + 'static> Kind for Cells<K, 
         let mut moved = Vec::new();
         let mut kept = FxHashMap::default();
         for ((scope, key), cell) in cells.drain() {
-            let fate = cell.value.get().map_or(Fate::Keep, |(_, read)| {
-                pick(scope, cell.asked.load(Ordering::Relaxed), read)
-            });
+            let fate = match cell.value.get() {
+                None => Fate::Keep,
+                Some(_) if cell.cut.load(Ordering::Relaxed) => Fate::Drop,
+                Some((_, read)) => pick(scope, cell.asked.load(Ordering::Relaxed), read),
+            };
             match fate {
                 Fate::Keep => {
                     kept.insert((scope, key), cell);
@@ -1087,7 +1098,9 @@ impl Derived {
     ///
     /// # Returns
     ///
-    /// The shared result, as for [`Derived::get_or_build`].
+    /// The shared result, as for [`Derived::get_or_build`]; built afresh
+    /// and not kept when the caller's cancel flag is raised, and let go
+    /// again when it was raised while this call built it.
     fn fetch<K, T>(
         &self,
         kind: &'static str,
@@ -1100,6 +1113,9 @@ impl Derived {
         K: Hash + Eq + Send + 'static,
         T: Send + Sync + 'static,
     {
+        if crate::cancel::Cancel::raised() {
+            return Arc::new(make());
+        }
         let Some(cell) = self.cell(kind, scope, key) else {
             return Arc::new(make());
         };
@@ -1109,9 +1125,11 @@ impl Derived {
                 .store(self.asks.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
         }
         let mut built = false;
+        let mut fresh = false;
         let (value, read) = cell.value.get_or_init(|| {
             let (value, read) = reads::recording(make);
             self.builds.fetch_add(1, Ordering::Relaxed);
+            fresh = true;
             if item {
                 let weight = size_of::<(Scope, K, Cell<T>, T)>() + weigh(&value) + read.bytes();
                 cell.weight.store(weight, Ordering::Relaxed);
@@ -1122,7 +1140,10 @@ impl Derived {
         });
         reads::absorb(read);
         let value = Arc::clone(value);
-        if built && self.item_bytes() > self.budget.load(Ordering::Relaxed) {
+        if fresh && crate::cancel::Cancel::raised() {
+            cell.cut.store(true, Ordering::Relaxed);
+            self.sweep(&|_, _, _| Fate::Keep);
+        } else if built && self.item_bytes() > self.budget.load(Ordering::Relaxed) {
             self.shrink();
         }
         value

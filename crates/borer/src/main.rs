@@ -35,6 +35,7 @@ mod playbooks;
 mod prompts;
 mod recall;
 mod relay;
+mod requests;
 mod resources;
 mod session;
 mod setup;
@@ -126,6 +127,9 @@ struct BorerServer {
     /// by the transport once the reload reply and every earlier one are
     /// written.
     hand_over: Arc<HandOver>,
+    /// The permits tool calls and resource reads run under, and the
+    /// deadline their emulation stops at ([`requests::Gate`]).
+    gate: requests::Gate,
 }
 
 impl BorerServer {
@@ -262,8 +266,16 @@ impl ServerHandler for BorerServer {
         if ticker.is_some() {
             tokio::task::yield_now().await;
         }
-        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let response = Self::tool_router().call(call).await;
+        let server = self.clone();
+        let ran = self
+            .gate
+            .run(move || {
+                let call =
+                    rmcp::handler::server::tool::ToolCallContext::new(&server, request, context);
+                tokio::runtime::Handle::current().block_on(Self::tool_router().call(call))
+            })
+            .await?;
+        let response = ran.answer;
         if let Some(ticker) = ticker {
             ticker.abort();
         }
@@ -282,10 +294,17 @@ impl ServerHandler for BorerServer {
                 raw: read_lock(&self.raw_load).clone(),
             });
         }
-        let response = match response {
+        let mut response = match response {
             Ok(response) => response,
             Err(error) => errors::tool_failure(known, error)?,
         };
+        if ran.cut
+            && named.0 != "query"
+            && let CallToolResponse::Complete(result) = &mut response
+            && let [ContentBlock::Text(t)] = result.content.as_mut_slice()
+        {
+            t.text = format!("{}\n{}\n", t.text.trim_end(), self.gate.note());
+        }
         Ok(match response {
             CallToolResponse::Complete(mut result)
                 if remembered && result.is_error != Some(true) =>
@@ -440,7 +459,9 @@ impl ServerHandler for BorerServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        let (uri, text) = self.read_uri(&request.uri)?;
+        let server = self.clone();
+        let ran = self.gate.run(move || server.read_uri(&request.uri)).await?;
+        let (uri, text) = ran.answer?;
         Ok(ReadResourceResult::new(vec![ResourceContents::text(text, uri)]).into())
     }
 
@@ -561,7 +582,9 @@ impl BorerServer {
     ///
     /// # Returns
     ///
-    /// The URI with only its page suffixes, and the text to send.
+    /// The URI with only its page suffixes, and the text to send; a text
+    /// whose request ran past its deadline says so on a line of its own
+    /// ([`requests::Gate::note`]).
     ///
     /// # Errors
     ///
@@ -569,7 +592,10 @@ impl BorerServer {
     /// that does not read; otherwise the handler's error.
     pub(crate) fn read_uri(&self, uri: &str) -> Result<(String, String), ErrorData> {
         let asked = paging::Asked::read(uri).map_err(err_params)?;
-        let text = self.listing(&asked)?;
+        let mut text = self.listing(&asked)?;
+        if borer_engine::cancel::Cancel::raised() {
+            text = format!("{}\n{}\n", text.trim_end(), self.gate.note());
+        }
         let key = asked.key();
         if asked.core.starts_with(EVIDENCE_URI) {
             return Ok((key, budgeted(text, Narrow::Uri)));

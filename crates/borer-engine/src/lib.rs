@@ -23,6 +23,7 @@
 //! ```
 
 pub mod analysis;
+pub mod cancel;
 pub mod carve;
 pub mod clr;
 pub mod crypto;

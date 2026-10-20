@@ -252,7 +252,8 @@ impl Replay for A32 {
             | Stop::MemoryFull(_)
             | Stop::Stopped(_)
             | Stop::Derailed(_)
-            | Stop::Exited => None,
+            | Stop::Exited
+            | Stop::Limit(_) => None,
         }
     }
 

@@ -371,7 +371,8 @@ fn run<'p>(
         | Stop::MemoryFull(_)
         | Stop::Stopped(_)
         | Stop::Derailed(_)
-        | Stop::Exited => return Err("the emulator stopped early"),
+        | Stop::Exited
+        | Stop::Limit(_) => return Err("the emulator stopped early"),
     }
     let stored: FxHashSet<u64> = run.history.iter().map(|w| w.addr).collect();
     ctx.probe = Some(Probe::default());

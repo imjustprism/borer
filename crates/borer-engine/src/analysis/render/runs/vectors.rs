@@ -725,6 +725,7 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
             }
         }
     }
+    within_total(count, budget)?;
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
     let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
     let sig = printed(&text, word)?;

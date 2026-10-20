@@ -243,7 +243,7 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://run/{spec}",
-        "Call a function on inputs typed by its recovered signature and check its decompiled text on them: <function>[,steps=N]/<input>[;<input>...], each input its arguments in order: 5, -1, \"text\", hex:0102 or out:16 (a zeroed buffer). A row per input: the return value, the stop, the steps, the bytes each buffer holds after, and whether the text run as C agrees, differs (at a line) or is unchecked (at most 64 inputs, 1000000 steps each by default); then the imported APIs and syscalls the runs serviced as api(args) -> ret with each argument decoded",
+        "Call a function on inputs typed by its recovered signature and check its decompiled text on them: <function>[,steps=N]/<input>[;<input>...], each input its arguments in order: 5, -1, \"text\", hex:0102 or out:16 (a zeroed buffer). A row per input: the return value, the stop, the steps, the bytes each buffer holds after, and whether the text run as C agrees, differs (at a line) or is unchecked (at most 64 inputs, 1000000 steps each by default, 100000000 in all); then the imported APIs and syscalls the runs serviced as api(args) -> ret with each argument decoded",
         "borer://run/{entry}/5;-1",
     ),
     (
