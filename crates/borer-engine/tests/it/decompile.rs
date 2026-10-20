@@ -10062,3 +10062,57 @@ fn a_global_read_at_two_widths_is_declared_once() {
     assert!(text.contains("uint64_t counter;"), "{text}");
     assert!(text.contains("*(uint32_t*)&counter"), "{text}");
 }
+
+/// A read through a scaled index into an array global the debug
+/// information types is that element's field.
+///
+/// `movsxd rax,edi; shl rax,4; lea rdx,[rip+table+8]; mov rax,[rax+rdx];
+/// ret` reads the pointer at offset 8 of the 16-byte element `a1` of
+/// `struct pair table[4]`: the text returns `table[a1].name`.
+#[test]
+fn an_indexed_read_of_a_stated_table_names_the_field() {
+    use borer_engine::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
+    use borer_engine::dwarf::Global;
+    let code = [
+        0x48, 0x63, 0xc7, // ASM: movsxd rax,edi
+        0x48, 0xc1, 0xe0, 0x04, // ASM: shl rax,4
+        0x48, 0x8d, 0x15, 0xfa, 0x1f, 0x00, 0x00, // ASM: lea rdx,[rip+0x1ffa]
+        0x48, 0x8b, 0x04, 0x10, // ASM: mov rax,[rax+rdx]
+        0xc3, // ASM: ret
+    ];
+    let mut p = program64_with_globals(&code, false, &[("table", 0x1_4000_3000)]);
+    p.debug_types.insert(
+        "pair".to_owned(),
+        UserType::Struct(UserStruct {
+            size: 16,
+            fields: [
+                (
+                    0,
+                    UserField {
+                        name: "key".to_owned(),
+                        ty: TypeExpr::I16,
+                    },
+                ),
+                (
+                    8,
+                    UserField {
+                        name: "name".to_owned(),
+                        ty: TypeExpr::Ptr(Box::new(TypeExpr::Char)),
+                    },
+                ),
+            ]
+            .into(),
+        }),
+    );
+    p.debug_globals = vec![Global {
+        name: "table".to_owned(),
+        addr: Some(0x1_4000_3000),
+        type_name: Some("struct pair[]".to_owned()),
+        ty: Some(TypeExpr::Array(
+            Box::new(TypeExpr::Named("pair".to_owned())),
+            4,
+        )),
+    }];
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("return table[a1].name;"), "{text}");
+}

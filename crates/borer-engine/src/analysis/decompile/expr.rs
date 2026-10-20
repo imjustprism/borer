@@ -1358,7 +1358,7 @@ pub(super) fn signed_ty(bits: u8) -> &'static str {
 /// # Arguments
 ///
 /// * `e` - The expression.
-fn term_of(e: &Expr) -> (&Expr, u64) {
+pub(super) fn term_of(e: &Expr) -> (&Expr, u64) {
     match e {
         Expr::Bin(Op::Mul, a, b) => match (const_of(a), const_of(b)) {
             (None, Some(c)) => (a, c),

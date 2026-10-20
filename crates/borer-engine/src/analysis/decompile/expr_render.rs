@@ -8,7 +8,7 @@
 
 use super::expr::{
     ATOM, Cc, Cond, Expr, Flags, Key, LOGICAL, Op, Ty, UNARY, UnOp, fold, indexed, low_bits_read,
-    mask_bits, opaque_note, sext, signed_ty, tls_slot,
+    mask_bits, opaque_note, sext, signed_ty, term_of, tls_slot,
 };
 use super::fcmp::FPred;
 use super::helper::Helper;
@@ -1906,6 +1906,9 @@ fn render_load(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> (String, u8) {
             }
         }
     }
+    if let Some(element) = global_element(a, ty, name, n) {
+        return element;
+    }
     if let Some((base, index)) = indexed(a, ty) {
         let (bs, bp) = base.render_prec(n, true, true);
         let bs = if bp < UNARY { format!("({bs})") } else { bs };
@@ -1920,6 +1923,93 @@ fn render_load(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> (String, u8) {
     let (as_, ap) = a.render_prec(n, true, true);
     let as_ = if ap < UNARY { format!("({as_})") } else { as_ };
     (format!("*({name}*){as_}"), UNARY)
+}
+
+/// Renders a load from an element of an array global the debug
+/// information states, `table[i]` or `table[i].field`.
+///
+/// The address is the array's start, or a place inside it, plus an index
+/// scaled by the element's size: `(i << 4) + &prec_table` reads the
+/// 16-byte element `i`, and the field the remaining offset lands on when
+/// the read is that field's width. A field whose sign differs from the
+/// read keeps the read's type as a cast, `(uint16_t)prec_table[i].prec`,
+/// so the value is the one the machine read.
+///
+/// # Arguments
+///
+/// * `a` - The address.
+/// * `ty` - The access type.
+/// * `name` - The type name of the read, signed or unsigned.
+/// * `n` - Name resolution, which carries the loaded image.
+///
+/// # Returns
+///
+/// `(text, precedence)`, or `None` when the address is no element of a
+/// stated array or the read is not one whole scalar of it.
+fn global_element(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> Option<(String, u8)> {
+    use crate::analysis::utypes::{TypeExpr, pointee_struct, width_of};
+    let (sum, extra) = match a {
+        Expr::Bin(Op::Add, inner, k) if matches!(**inner, Expr::Bin(Op::Add, ..)) => match **k {
+            Expr::Const(k) => (inner.as_ref(), k),
+            _ => return None,
+        },
+        other => (other, 0),
+    };
+    let Expr::Bin(Op::Add, p, q) = sum else {
+        return None;
+    };
+    let (at, index, factor) = [(p, q), (q, p)].into_iter().find_map(|(c, term)| {
+        let Expr::Const(c) = **c else {
+            return None;
+        };
+        let (index, factor) = term_of(term);
+        (!matches!(index, Expr::Const(_))).then(|| (c.wrapping_add(extra), index, factor))
+    })?;
+    let globals = &n.program.debug_globals;
+    let defined = globals.get(globals.partition_point(|g| g.addr.is_none())..)?;
+    let g = defined.get(
+        defined
+            .partition_point(|g| g.addr <= Some(at))
+            .checked_sub(1)?,
+    )?;
+    let (Some(start), Some(TypeExpr::Array(elem, len))) = (g.addr, &g.ty) else {
+        return None;
+    };
+    let word = u64::try_from(n.word).unwrap_or(8);
+    let types = &n.program.debug_types;
+    let size = width_of(types, elem, word).filter(|s| *s == factor)?;
+    let off = at - start;
+    if off >= size.checked_mul(*len)? {
+        return None;
+    }
+    let (shift, within) = (off / size, off % size);
+    let (field, fty) = match pointee_struct(types, &TypeExpr::Ptr(elem.clone())) {
+        Some(s) => {
+            let f = s.fields.get(&within)?;
+            (format!(".{}", f.name), &f.ty)
+        }
+        None if within == 0 => (String::new(), elem.as_ref()),
+        None => return None,
+    };
+    if width_of(types, fty, word)? != u64::from(ty.bits()) / 8 {
+        return None;
+    }
+    let reads = match fty {
+        TypeExpr::Char => "int8_t".to_owned(),
+        TypeExpr::Array(..) | TypeExpr::Named(_) => return None,
+        other => other.c_name(word)?,
+    };
+    let table = n.key(Key::Global(start, ty.bits()));
+    let index = match shift {
+        0 => index.render(n),
+        k => format!("{} + {k}", index.render(n)),
+    };
+    let element = format!("{table}[{index}]{field}");
+    Some(if reads == name {
+        (element, ATOM)
+    } else {
+        (format!("({name}){element}"), UNARY)
+    })
 }
 
 /// Renders a comparison, casting both sides to the signed type when the
