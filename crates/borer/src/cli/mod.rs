@@ -964,7 +964,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                         format!("; the run reached its original entry at {e:#x}")
                     });
                     let partial_note = if truncated {
-                        "; the step budget ran out, so the image may be partial \u{2014} pass a larger budget= (e.g. 0x...,budget=200000000) for a fuller dump"
+                        "; the step budget ran out, so the image may be partial \u{2014} pass a larger budget= (e.g. 0x...,budget=100000000) for a fuller dump"
                     } else {
                         ""
                     };

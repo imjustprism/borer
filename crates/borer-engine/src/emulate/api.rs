@@ -212,9 +212,18 @@ impl Emulator<'_> {
         let rv: u64 = if api.starts_with("GetModuleHandle") || api.starts_with("LoadLibrary") {
             self.program.image_base
         } else if api.starts_with("GetProcAddress") {
-            let next = self.api_stub(self.apis.len());
-            std::sync::Arc::make_mut(&mut self.apis).insert(next, format!("{full}:resolved"));
-            next
+            let asked = self.api_arg(1);
+            let key = self
+                .read_memory_text(asked, false)
+                .unwrap_or_else(|| format!("#{asked:#x}"));
+            if let Some(&stub) = self.resolved.get(&key) {
+                stub
+            } else {
+                let next = self.api_stub(self.apis.len());
+                std::sync::Arc::make_mut(&mut self.apis).insert(next, format!("{full}:resolved"));
+                self.resolved.insert(key, next);
+                next
+            }
         } else if api.starts_with("VirtualAlloc") || api == "HeapAlloc" || api == "malloc" {
             let requested = match api {
                 "VirtualAlloc" => rcx,

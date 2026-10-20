@@ -1981,6 +1981,20 @@ fn every_stop_is_named() {
     assert_eq!(stop(&[EXIT, SVC], &[], BUDGET), (Stop::Exited, 2, BASE + 4));
     assert_eq!(stop(&[EXIT_GROUP, SVC], &[], BUDGET).0, Stop::Exited);
     {
+        // ASM: b .-8
+        const BACK: u32 = 0x17ff_fffe;
+        let p = image(&[WRITE, SVC, BACK]);
+        let mut m = machine(&p);
+        m.set_budget(1_000_000);
+        let run = m.run(BASE);
+        assert_eq!(
+            run.stop,
+            Stop::Limit(borer_engine::emulate::Limit::Calls),
+            "a syscall loop stops when its record is full"
+        );
+        assert_eq!(m.api_names().len(), borer_engine::emulate::RECORDS_MAX);
+    }
+    {
         let p = image(&[WRITE, SVC, RET]);
         let mut m = machine(&p);
         m.set_budget(BUDGET);

@@ -684,7 +684,7 @@ fn dead_stores(
 pub(super) const UNPACK_BUDGET: usize = 10_000_000;
 
 /// Ceiling on a caller-supplied `budget=`, so a request cannot run unbounded.
-pub(super) const UNPACK_BUDGET_MAX: usize = 200_000_000;
+pub(super) const UNPACK_BUDGET_MAX: usize = 100_000_000;
 
 /// Most materialized regions listed before the rest are summarized.
 pub(super) const UNPACK_REGION_MAX: usize = 32;

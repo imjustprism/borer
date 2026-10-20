@@ -612,6 +612,9 @@ impl<'a> Machine<'a> {
             if self.steps >= self.budget {
                 break Stop::Budget;
             }
+            if self.calls.len() >= super::RECORDS_MAX {
+                break Stop::Limit(super::Limit::Calls);
+            }
             if on_stack(pc) {
                 break Stop::Derailed(pc);
             }

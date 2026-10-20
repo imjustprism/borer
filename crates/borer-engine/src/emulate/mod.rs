@@ -37,6 +37,34 @@ use sse::Width;
 use store::Store;
 use strops::StringOp;
 
+/// Most entries each record of a run keeps.
+///
+/// The records are the API calls and syscalls it serviced (every region
+/// its allocator hands out is one's answer, so they are bounded too) and
+/// the indirect jumps it took; a run that would record one more stops
+/// with [`Stop::Limit`] instead, so a guest loop cannot grow a record past
+/// what a context window or the machine holds.
+pub const RECORDS_MAX: usize = 1 << 16;
+
+/// What cut a run short before its step budget did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Limit {
+    /// It serviced [`RECORDS_MAX`] imported API calls and syscalls.
+    Calls,
+    /// It took [`RECORDS_MAX`] indirect jumps.
+    Jumps,
+}
+
+impl std::fmt::Display for Limit {
+    /// Names the record that filled.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Calls => "api call",
+            Self::Jumps => "indirect jump",
+        })
+    }
+}
+
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stop {
@@ -61,6 +89,8 @@ pub enum Stop {
     /// A `syscall` for `exit` or `exit_group`: the program asked the kernel
     /// to end it, and the kernel does not return.
     Exited,
+    /// A record of the run filled before its step budget ran out.
+    Limit(Limit),
 }
 
 impl std::fmt::Display for Stop {
@@ -80,6 +110,7 @@ impl std::fmt::Display for Stop {
             Self::Stopped(at) => write!(f, "stopped at {at:#x}"),
             Self::Derailed(at) => write!(f, "derailed at {at:#x}"),
             Self::Exited => write!(f, "the program exited"),
+            Self::Limit(what) => write!(f, "stopped: {what} limit ({RECORDS_MAX} recorded)"),
         }
     }
 }
@@ -354,6 +385,9 @@ pub struct Emulator<'a> {
     /// The address of the last instruction the run decoded: where it stopped,
     /// or the instruction that transferred to a faulting address.
     last_ip: u64,
+    /// The stub each `GetProcAddress` name was handed, so asking for one
+    /// name again answers the same stub instead of adding another.
+    resolved: BTreeMap<String, u64>,
     /// Synthetic stub address to imported API name. The import table is
     /// prefilled so each slot holds its stub; a call to a stub is modeled as
     /// that API rather than executed, the way the OS would service it.
@@ -767,6 +801,7 @@ impl<'a> Emulator<'a> {
             oep: None,
             last_ip: 0,
             apis: std::sync::Arc::default(),
+            resolved: BTreeMap::new(),
             calls: Vec::new(),
             alloc_next,
             allocs: Vec::new(),
@@ -1386,6 +1421,20 @@ impl<'a> Emulator<'a> {
         (deep..self.stack_base.saturating_add(above)).contains(&a)
     }
 
+    /// The record of this run that is full, when one is.
+    ///
+    /// # Returns
+    ///
+    /// The calls or the indirect jumps when either holds [`RECORDS_MAX`]
+    /// entries, or `None` while both have room.
+    fn filled(&self) -> Option<Limit> {
+        if self.calls.len() >= RECORDS_MAX {
+            Some(Limit::Calls)
+        } else {
+            (self.jumps.len() >= RECORDS_MAX).then_some(Limit::Jumps)
+        }
+    }
+
     /// Runs from `entry` until it returns, exhausts the budget, or stops.
     ///
     /// # Arguments
@@ -1405,6 +1454,9 @@ impl<'a> Emulator<'a> {
             }
             if self.steps >= self.budget {
                 break Stop::Budget;
+            }
+            if let Some(limit) = self.filled() {
+                break Stop::Limit(limit);
             }
             if self.apis.contains_key(&ip) {
                 self.steps += 1;
@@ -2681,6 +2733,10 @@ mod tests {
             (Stop::Returned, "returned"),
             (Stop::Budget, "budget exhausted"),
             (Stop::Exited, "the program exited"),
+            (
+                Stop::Limit(super::Limit::Calls),
+                "stopped: api call limit (65536 recorded)",
+            ),
         ] {
             assert_eq!(stop.to_string(), words);
         }
@@ -3903,6 +3959,28 @@ mod tests {
         ];
         let emu = returned(image(&code, &[]));
         assert_eq!(emu.peek(0x2800), Some(1), "8-bit carry was dropped");
+    }
+
+    /// A loop of syscalls or of indirect jumps stops when its record is
+    /// full, not at the step budget with every call and jump kept.
+    ///
+    /// # Panics
+    ///
+    /// When a record grows past the cap or the run ends another way.
+    #[test]
+    fn a_record_that_fills_stops_the_run() {
+        // ASM: mov eax,39; syscall; jmp 0x1000
+        let calls = image(&[0xb8, 0x27, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xeb, 0xf7], &[]);
+        let mut emu = Emulator::new(&calls, 1_000_000).expect("emulator");
+        let run = emu.run(0x1000);
+        assert_eq!(run.stop, Stop::Limit(super::Limit::Calls), "{}", run.stop);
+        assert_eq!(emu.api_calls().len(), super::RECORDS_MAX);
+        // ASM: lea rax,[rip-7]; jmp rax
+        let jumps = image(&[0x48, 0x8d, 0x05, 0xf9, 0xff, 0xff, 0xff, 0xff, 0xe0], &[]);
+        let mut emu = Emulator::new(&jumps, 1_000_000).expect("emulator");
+        let run = emu.run(0x1000);
+        assert_eq!(run.stop, Stop::Limit(super::Limit::Jumps), "{}", run.stop);
+        assert_eq!(emu.indirect_jumps().len(), super::RECORDS_MAX);
     }
 
     /// A run that never returns stops at its step budget rather than looping

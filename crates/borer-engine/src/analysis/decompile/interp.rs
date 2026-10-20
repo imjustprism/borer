@@ -3621,7 +3621,8 @@ impl Running<'_, '_> {
             | Stop::MemoryFull(_)
             | Stop::Stopped(_)
             | Stop::Derailed(_)
-            | Stop::Exited) => unchecked(format!("the call to {name} ends as {other}")),
+            | Stop::Exited
+            | Stop::Limit(_)) => unchecked(format!("the call to {name} ends as {other}")),
         }
     }
 
