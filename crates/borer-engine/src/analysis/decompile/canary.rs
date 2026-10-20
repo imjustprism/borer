@@ -110,6 +110,10 @@ fn fail_callee(t: &str) -> Option<&str> {
     name.starts_with("__stack_chk_fail").then_some(name)
 }
 
+/// What a protector's fold found: the line spans that leave, the line
+/// spans that stay one level shallower, and what left.
+type Found = (Vec<(usize, usize)>, Vec<(usize, usize)>, Folded);
+
 /// A canary check: the lines it spans, the guard and the slots it names.
 struct Check<'l> {
     /// Its first line.
@@ -123,11 +127,45 @@ struct Check<'l> {
     slot: Option<&'l str>,
     /// The function it fails through.
     callee: &'l str,
+    /// The lines inside an inverted check, `if (GUARD == local_N) { .. }`
+    /// followed by the failing call, which stay one level shallower.
+    inside: Option<(usize, usize)>,
 }
 
-/// The canary check an `if` line opens: a compare of the guard with its
-/// slot, or with itself where the lifter forwarded the slot's value,
-/// whose body only fails and that has no `else`.
+/// The guard and the slot a condition compares, `GUARD op local_N` or
+/// the difference GCC subtracts, `local_N - GUARD op 0`.
+///
+/// # Arguments
+///
+/// * `cond` - The condition.
+/// * `op` - The comparison, ` != ` or ` == `.
+///
+/// # Returns
+///
+/// The guard and the slot, `None` for the slot where the lifter forwarded
+/// its value and the guard is compared with itself; `None` when the
+/// condition compares no guard.
+fn compared<'l>(cond: &'l str, op: &str) -> Option<(&'l str, Option<&'l str>)> {
+    let (a, b) = cond.split_once(op)?;
+    let (a, b) = match (b, a.split_once(" - ")) {
+        ("0", Some(diff)) => diff,
+        _ => (a, b),
+    };
+    match (is_guard(a), is_guard(b)) {
+        (true, _) if a == b => Some((a, None)),
+        (true, false) => b.starts_with("local_").then_some((a, Some(b))),
+        (false, true) => a.starts_with("local_").then_some((b, Some(a))),
+        (true, true) | (false, false) => None,
+    }
+}
+
+/// Returns the canary check an `if` line opens.
+///
+/// The check compares the guard with its slot ([`compared`]) in a body
+/// that only fails and has no `else`; the inverted check is an `if` on
+/// the guard's being intact whose body is the function's own and ends in
+/// a `return` or a `goto`, and whose closing line the failing call
+/// follows.
 ///
 /// # Arguments
 ///
@@ -136,18 +174,9 @@ struct Check<'l> {
 fn check_at<'l>(lines: &[&'l str], at: usize) -> Option<Check<'l>> {
     let line = lines.get(at)?;
     let t = line.trim_start();
-    let compared = |cond: &'l str| -> Option<(&'l str, Option<&'l str>)> {
-        let (a, b) = cond.split_once(" != ")?;
-        match (is_guard(a), is_guard(b)) {
-            (true, _) if a == b => Some((a, None)),
-            (true, false) => b.starts_with("local_").then_some((a, Some(b))),
-            (false, true) => a.starts_with("local_").then_some((b, Some(a))),
-            (true, true) | (false, false) => None,
-        }
-    };
     if let Some((cond, then)) = t.strip_prefix("if (").and_then(|r| r.rsplit_once(") "))
         && let Some(callee) = fail_callee(then)
-        && let Some((guard, slot)) = compared(cond)
+        && let Some((guard, slot)) = compared(cond, " != ")
     {
         return Some(Check {
             from: at,
@@ -155,10 +184,35 @@ fn check_at<'l>(lines: &[&'l str], at: usize) -> Option<Check<'l>> {
             guard,
             slot,
             callee,
+            inside: None,
         });
     }
-    let (guard, mut slot) = compared(if_opener(t)?)?;
     let pad = indent_of(line);
+    if let Some((guard, slot)) = compared(if_opener(t)?, " == ") {
+        let close =
+            (at + 1..lines.len()).find(|&i| lines.get(i).is_some_and(|l| indent_of(l) <= pad))?;
+        let fail = close + 1;
+        let shut = lines
+            .get(close)
+            .is_some_and(|l| indent_of(l) == pad && l.trim_start() == "}")
+            && lines.get(close.checked_sub(1)?).is_some_and(|l| {
+                let last = l.trim_start();
+                indent_of(l) == pad + 2 && (last.starts_with("return") || last.starts_with("goto "))
+            });
+        let failed = lines
+            .get(fail)
+            .filter(|l| indent_of(l) == pad)
+            .and_then(|l| fail_callee(l.trim_start()));
+        return failed.filter(|_| shut).map(|callee| Check {
+            from: at,
+            to: fail,
+            guard,
+            slot,
+            callee,
+            inside: Some((at + 1, close - 1)),
+        });
+    }
+    let (guard, mut slot) = compared(if_opener(t)?, " != ")?;
     let mut to = at + 1;
     let mut failed = None;
     while let Some(inner) = lines.get(to) {
@@ -170,6 +224,7 @@ fn check_at<'l>(lines: &[&'l str], at: usize) -> Option<Check<'l>> {
                 guard,
                 slot,
                 callee,
+                inside: None,
             });
         }
         if indent_of(inner) <= pad {
@@ -190,7 +245,9 @@ fn check_at<'l>(lines: &[&'l str], at: usize) -> Option<Check<'l>> {
 ///
 /// The canary's checks are the `if (GUARD != local_N)` blocks that only
 /// call `__stack_chk_fail` (or store the guard first, a setup the lifter
-/// sank there); its setups are the lines `local_N = GUARD;`. The cookie's
+/// sank there), and the `if (GUARD == local_N) { .. }` blocks the failing
+/// call follows, whose body stays one level shallower; its setups are the
+/// lines `local_N = GUARD;`. The cookie's
 /// checks are the calls to `__security_check_cookie`; its setups the lines
 /// `local_N = COOKIE ^ &local_M;`. Checks and setups leave together, and
 /// only when the slot is read nowhere else; an `if` left with an empty
@@ -207,14 +264,20 @@ fn check_at<'l>(lines: &[&'l str], at: usize) -> Option<Check<'l>> {
 pub(super) fn fold(body: &str) -> (String, Option<Folded>) {
     let lines: Vec<&str> = body.lines().collect();
     let found = cookie(&lines).or_else(|| canary(&lines));
-    let Some((gone, folded)) = found else {
+    let Some((gone, inside, folded)) = found else {
         return (body.to_owned(), None);
     };
     let kept: Vec<(usize, &str)> = lines
         .iter()
         .enumerate()
         .filter(|(i, _)| !gone.iter().any(|(a, b)| (a..=b).contains(&i)))
-        .map(|(i, l)| (i, *l))
+        .map(|(i, l)| {
+            let deeper = inside.iter().filter(|(a, b)| (a..=b).contains(&&i)).count();
+            (
+                i,
+                (0..deeper).fold(*l, |l, _| l.strip_prefix("  ").unwrap_or(l)),
+            )
+        })
         .collect();
     if let Some(slot) = &folded.slot
         && kept.iter().any(|(_, l)| mentions_ident(l, slot))
@@ -234,7 +297,7 @@ pub(super) fn fold(body: &str) -> (String, Option<Folded>) {
 /// # Arguments
 ///
 /// * `lines` - The body.
-fn cookie(lines: &[&str]) -> Option<(Vec<(usize, usize)>, Folded)> {
+fn cookie(lines: &[&str]) -> Option<Found> {
     let mut callees: Vec<&str> = Vec::new();
     let checks: Vec<(usize, usize)> = lines
         .iter()
@@ -272,7 +335,7 @@ fn cookie(lines: &[&str]) -> Option<(Vec<(usize, usize)>, Folded)> {
     };
     let mut gone = checks;
     gone.extend(setups.map(|(i, _)| (i, i)));
-    Some((gone, folded))
+    Some((gone, Vec::new(), folded))
 }
 
 /// The stack canary's checks and setups, and what folding them leaves
@@ -281,7 +344,7 @@ fn cookie(lines: &[&str]) -> Option<(Vec<(usize, usize)>, Folded)> {
 /// # Arguments
 ///
 /// * `lines` - The body.
-fn canary(lines: &[&str]) -> Option<(Vec<(usize, usize)>, Folded)> {
+fn canary(lines: &[&str]) -> Option<Found> {
     let mut checks: Vec<Check<'_>> = Vec::new();
     let mut at = 0;
     while at < lines.len() {
@@ -302,7 +365,17 @@ fn canary(lines: &[&str]) -> Option<(Vec<(usize, usize)>, Folded)> {
     {
         return None;
     }
-    let mut gone: Vec<(usize, usize)> = checks.iter().map(|c| (c.from, c.to)).collect();
+    let mut gone: Vec<(usize, usize)> = Vec::new();
+    let mut inside: Vec<(usize, usize)> = Vec::new();
+    for c in &checks {
+        match c.inside {
+            Some((first, last)) => {
+                gone.extend([(c.from, c.from), (last + 1, c.to)]);
+                inside.push((first, last));
+            }
+            None => gone.push((c.from, c.to)),
+        }
+    }
     gone.extend(
         lines
             .iter()
@@ -324,7 +397,7 @@ fn canary(lines: &[&str]) -> Option<(Vec<(usize, usize)>, Folded)> {
         checks: checks.len(),
         callee: callees.join(", "),
     };
-    Some((gone, folded))
+    Some((gone, inside, folded))
 }
 
 /// Drops each `if (COND) {` the fold left directly followed by its closing
@@ -388,6 +461,48 @@ mod tests {
             folded.note(),
             "stack canary in local_10, 1 check; calls to __stack_chk_fail are left out (still replayed)"
         );
+    }
+
+    /// GCC's check subtracts the guard from its copy and tests the
+    /// difference, `local_10 - GUARD != 0`; it folds as the compare does.
+    #[test]
+    fn a_subtracted_canary_folds() {
+        let body = "local_10 = *(uint64_t*)(fs + 0x28);\n\
+                    var1 = f(a1);\n\
+                    if (local_10 - *(uint64_t*)(fs + 0x28) != 0) {\n  __stack_chk_fail();\n}\n\
+                    return var1;\n";
+        let (out, folded) = fold(body);
+        assert_eq!(folded.map(|f| f.checks), Some(1));
+        assert_eq!(out, "var1 = f(a1);\nreturn var1;\n");
+    }
+
+    /// Where the failing call is no-return, the structurer writes the
+    /// check inverted: the return under `if (GUARD == local_N)` and the
+    /// call after it. The return stays, one level shallower.
+    #[test]
+    fn an_inverted_canary_folds() {
+        let body = "local_10 = *(uint64_t*)(fs + 0x28);\n\
+                    if (a1 != 0) {\n  var1 = f(a1);\n}\n\
+                    if (local_10 - *(uint64_t*)(fs + 0x28) == 0) {\n  return var1;\n}\n\
+                    __stack_chk_fail();\n\
+                    L_10:\n\
+                    return 0;\n";
+        let (out, folded) = fold(body);
+        assert_eq!(folded.map(|f| f.checks), Some(1));
+        assert_eq!(
+            out,
+            "if (a1 != 0) {\n  var1 = f(a1);\n}\nreturn var1;\nL_10:\nreturn 0;\n"
+        );
+    }
+
+    /// An inverted check whose body may fall into the failing call is no
+    /// check: folding it would run on past the call.
+    #[test]
+    fn an_inverted_check_that_falls_through_stays() {
+        let body = "local_10 = *(uint64_t*)(fs + 0x28);\n\
+                    if (local_10 - *(uint64_t*)(fs + 0x28) == 0) {\n  g = 1;\n}\n\
+                    __stack_chk_fail();\n";
+        assert_eq!(fold(body).1, None);
     }
 
     /// A check whose slot the lifter forwarded compares the guard with
