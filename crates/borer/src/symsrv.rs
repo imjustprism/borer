@@ -243,8 +243,31 @@ fn sanitize_name(recorded: &str) -> Option<&str> {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !device_name(stem)
         && borer_engine::program::unusable_path(Path::new(name)).is_none())
     .then_some(name)
+}
+
+/// Whether a file name's stem is a name Windows reserves for a device
+/// (`con`, `nul`, `com1`), on every host, so a cache built anywhere can be
+/// read on Windows.
+///
+/// # Arguments
+///
+/// * `stem` - The name before its extension.
+///
+/// # Returns
+///
+/// True for a reserved device name in any letter case.
+fn device_name(stem: &str) -> bool {
+    let head = stem.split('.').next().unwrap_or_default();
+    let lower = head.to_ascii_lowercase();
+    matches!(lower.as_str(), "con" | "prn" | "aux" | "nul")
+        || ["com", "lpt"].iter().any(|port| {
+            lower
+                .strip_prefix(port)
+                .is_some_and(|n| n.len() == 1 && n.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// The URL one PDB is fetched from.

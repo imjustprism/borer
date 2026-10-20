@@ -2051,9 +2051,12 @@ mod tests {
     /// When the binary reads, or the refusal does not say what to give.
     #[test]
     fn a_binary_given_for_a_text_file_says_what_to_give() {
-        let binary = std::env::current_exe().expect("the test binary");
+        let binary =
+            std::env::temp_dir().join(format!("borer-not-text-{}.bin", std::process::id()));
+        std::fs::write(&binary, [0x4d, 0x5a, 0x90, 0x00, 0xff, 0xfe, 0x00, 0xc3]).expect("write");
         let path = binary.to_string_lossy();
         let refused = super::read_spec_file(&path, "an anchors manifest").unwrap_err();
+        std::fs::remove_file(&binary).ok();
         assert!(
             refused
                 .message
