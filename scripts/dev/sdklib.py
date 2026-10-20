@@ -179,8 +179,7 @@ UM_HEADERS = [
 
 KM_HEADERS = ["ntifs.h", "fltKernel.h", "ntstrsafe.h", "wdmsec.h", "aux_klib.h"]
 
-C_STANDARD = set(
-    """
+C_STANDARD_NAMES = """
 abort abs acos acosf acosh acoshf acoshl acosl asctime asin asinf asinh asinhf
 asinhl asinl atan atan2 atan2f atan2l atanf atanh atanhf atanhl atanl atexit
 atof atoi atol atoll bsearch btowc calloc cbrt cbrtf cbrtl ceil ceilf ceill
@@ -217,8 +216,8 @@ wcscoll wcscpy wcscspn wcsftime wcslen wcsncat wcsncmp wcsncpy wcspbrk
 wcsrchr wcsrtombs wcsspn wcsstr wcstod wcstof wcstok wcstol wcstold wcstoll
 wcstombs wcstoul wcstoull wcsxfrm wctob wctomb wctrans wctype wmemchr wmemcmp
 wmemcpy wmemmove wmemset wprintf wscanf aligned_alloc at_quick_exit
-""".split()
-)
+"""
+C_STANDARD = set(C_STANDARD_NAMES.split())
 
 BUILTIN_WORDS = {
     "void": "void",
@@ -301,7 +300,9 @@ def unit_args(target: str, dirs: list[str], defines: list[str]) -> list[str]:
     return args
 
 
-def run_unit(headers: list[str], target: str, dirs: list[str], defines: list[str], extra: list[str]) -> str:
+def run_unit(
+    headers: list[str], target: str, dirs: list[str], defines: list[str], extra: list[str]
+) -> str:
     """Parse a unit including `headers` and return clang's stdout."""
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "unit.c")
@@ -477,12 +478,19 @@ def param_name(name: str, origin: str) -> str:
     """
     if not name:
         return "-"
-    if origin in ("crt", "c") and name.startswith("_") and len(name) > 1 and not name.startswith("__"):
+    if (
+        origin in ("crt", "c")
+        and name.startswith("_")
+        and len(name) > 1
+        and not name.startswith("__")
+    ):
         return name[1:]
     return name
 
 
-def resolve(name: str, typedefs: dict[str, str], enums: set[str], depth: int = 0) -> tuple[str, str | None, int]:
+def resolve(
+    name: str, typedefs: dict[str, str], enums: set[str], depth: int = 0
+) -> tuple[str, str | None, int]:
     """Return a typedef's pass word, the structure under it and its pointer count."""
     if name in WORD_TYPEDEFS:
         return (WORD_TYPEDEFS[name], None, 0)
@@ -523,7 +531,7 @@ def parse_layouts(text: str) -> dict[str, tuple[int, list[tuple[str, str, int]]]
     line_re = re.compile(r"^\s*([0-9]+)(?::[0-9-]+)? \| (\s*)(.*)$")
     size_re = re.compile(r"\[sizeof=([0-9]+)")
     for block in blocks[1:]:
-        lines = [l for l in block.splitlines() if "|" in l]
+        lines = [row for row in block.splitlines() if "|" in row]
         if not lines:
             continue
         head = line_re.match(lines[0])
@@ -531,24 +539,29 @@ def parse_layouts(text: str) -> dict[str, tuple[int, list[tuple[str, str, int]]]
             continue
         title = head.group(3).strip()
         parts = title.split(" ", 1)
-        if len(parts) != 2 or parts[0] not in ("struct", "union") or "(" in parts[1] or "::" in parts[1]:
+        if (
+            len(parts) != 2
+            or parts[0] not in ("struct", "union")
+            or "(" in parts[1]
+            or "::" in parts[1]
+        ):
             continue
         tag = parts[1]
         size = None
         fields: list[tuple[str, str, int]] = []
         anon_depth = None
-        for l in lines[1:]:
-            s = size_re.search(l)
+        for row in lines[1:]:
+            s = size_re.search(row)
             if s:
                 size = int(s.group(1))
                 continue
-            m = line_re.match(l)
+            m = line_re.match(row)
             if not m:
                 continue
             off = int(m.group(1))
             indent = len(m.group(2))
             body = m.group(3).strip()
-            bitfield = re.match(r"^\s*[0-9]+:[0-9]", l) is not None
+            bitfield = re.match(r"^\s*[0-9]+:[0-9]", row) is not None
             if indent == 2:
                 anon_depth = None
                 if "(anonymous" in body:
@@ -576,11 +589,32 @@ def parse_layouts(text: str) -> dict[str, tuple[int, list[tuple[str, str, int]]]
 ORIGIN = {"um": "u", "km": "k", "crt": "r", "c": "c"}
 
 PORTABLE = {
-    "void", "char", "signed char", "unsigned char", "short", "unsigned short",
-    "int", "unsigned int", "long", "unsigned long", "long long",
-    "unsigned long long", "float", "double", "size_t", "FILE", "time_t",
-    "va_list", "fpos_t", "div_t", "ldiv_t", "lldiv_t", "clock_t",
-    "struct tm", "struct lconv", "intmax_t",
+    "void",
+    "char",
+    "signed char",
+    "unsigned char",
+    "short",
+    "unsigned short",
+    "int",
+    "unsigned int",
+    "long",
+    "unsigned long",
+    "long long",
+    "unsigned long long",
+    "float",
+    "double",
+    "size_t",
+    "FILE",
+    "time_t",
+    "va_list",
+    "fpos_t",
+    "div_t",
+    "ldiv_t",
+    "lldiv_t",
+    "clock_t",
+    "struct tm",
+    "struct lconv",
+    "intmax_t",
 }
 
 
@@ -616,15 +650,39 @@ def main(argv: list[str]) -> int:
     """Generate the tables."""
     version, inc = sdk_include()
     msvc = msvc_include()
-    um_dirs = [msvc, os.path.join(inc, "ucrt"), os.path.join(inc, "shared"), os.path.join(inc, "um")]
-    km_dirs = [msvc, os.path.join(inc, "km"), os.path.join(inc, "ucrt"), os.path.join(inc, "shared")]
+    um_dirs = [
+        msvc,
+        os.path.join(inc, "ucrt"),
+        os.path.join(inc, "shared"),
+        os.path.join(inc, "um"),
+    ]
+    km_dirs = [
+        msvc,
+        os.path.join(inc, "km"),
+        os.path.join(inc, "ucrt"),
+        os.path.join(inc, "shared"),
+    ]
     km_defines = DEFINES + ["_AMD64_", "_KERNEL_MODE"]
     um = usable(UM_HEADERS, "x86_64-pc-windows-msvc", um_dirs, DEFINES)
     km = usable(KM_HEADERS, "x86_64-pc-windows-msvc", km_dirs, km_defines)
-    um_unit = Unit(json.loads(run_unit(um, "x86_64-pc-windows-msvc", um_dirs, DEFINES, ["-Xclang", "-ast-dump=json"])))
-    km_unit = Unit(json.loads(run_unit(km, "x86_64-pc-windows-msvc", km_dirs, km_defines, ["-Xclang", "-ast-dump=json"])))
+    um_unit = Unit(
+        json.loads(
+            run_unit(um, "x86_64-pc-windows-msvc", um_dirs, DEFINES, ["-Xclang", "-ast-dump=json"])
+        )
+    )
+    km_unit = Unit(
+        json.loads(
+            run_unit(
+                km, "x86_64-pc-windows-msvc", km_dirs, km_defines, ["-Xclang", "-ast-dump=json"]
+            )
+        )
+    )
     km32 = [d for d in km_defines if d != "_AMD64_"] + ["_X86_"]
-    km_x86 = Unit(json.loads(run_unit(km, "i686-pc-windows-msvc", km_dirs, km32, ["-Xclang", "-ast-dump=json"])))
+    km_x86 = Unit(
+        json.loads(
+            run_unit(km, "i686-pc-windows-msvc", km_dirs, km32, ["-Xclang", "-ast-dump=json"])
+        )
+    )
     for name, f in km_unit.funcs.items():
         x86 = km_x86.funcs.get(name, {})
         if f.get("skip") or x86.get("skip") or "conv32" not in x86:
@@ -818,7 +876,9 @@ def verify(decls: list[tuple], headers: list[str], dirs: list[str], defines: lis
     return bad
 
 
-def keep_valid(decls: list[tuple], headers: list[str], dirs: list[str], defines: list[str], picks) -> list[str]:
+def keep_valid(
+    decls: list[tuple], headers: list[str], dirs: list[str], defines: list[str], picks
+) -> list[str]:
     """Return the names of the declarations `picks` selects that do not
     compile beside their headers, rechecking until the rest all do."""
     chosen = [d for d in decls if picks(d)]
@@ -831,6 +891,7 @@ def keep_valid(decls: list[tuple], headers: list[str], dirs: list[str], defines:
         refused += sorted(bad)
         chosen = [d for d in chosen if d[0] not in bad]
     raise SystemExit("declarations still fail after four rounds")
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
