@@ -10,8 +10,12 @@ extend-exclude = [
 ]
 
 [default]
-# hex byte strings ("fe dc ba 98") are data, not words
-extend-ignore-re = ["(?i)\\b[0-9a-f]{2}( [0-9a-f]{2}){3,}\\b"]
+# hex byte strings ("fe dc ba 98") are data, not words, and so is the
+# commit the benchmark records ("borerCommit": "321abd71")
+extend-ignore-re = [
+  "(?i)\\b[0-9a-f]{2}( [0-9a-f]{2}){3,}\\b",
+  "\"borerCommit\": \"[0-9a-f]+\"",
+]
 
 [default.extend-words]
 # the transposed name (WinMian for WinMain) the name suggestions are tested with
