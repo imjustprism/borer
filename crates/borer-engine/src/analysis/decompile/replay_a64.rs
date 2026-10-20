@@ -17,6 +17,7 @@ use super::lift::ArgAt;
 use super::lift_a64::{flags_read, flags_set};
 use super::replay::{Code, OUTSIDE_FLOAT, Replay, Rig, Transfer, Witness, word_limits};
 use super::verify::Bench;
+use crate::analysis::Analysis;
 use crate::emulate::a64::Machine;
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg};
 use crate::program::Program;
@@ -157,7 +158,7 @@ fn checked(i: &Insn) -> Result<(), &'static str> {
 impl Replay for A64 {
     type Rig<'p> = Machine<'p>;
 
-    fn rig(program: &Program) -> Option<Machine<'_>> {
+    fn rig<'p>(program: &'p Program, _analysis: &Analysis) -> Option<Machine<'p>> {
         Machine::new(program, 0)
     }
 

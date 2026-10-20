@@ -19,6 +19,7 @@ use super::lift::ArgAt;
 use super::lift_a32::{flags_read, sets_flags};
 use super::replay::{Code, OUTSIDE_FLOAT, Replay, Rig, Transfer, Witness, word_limits};
 use super::verify_a32::GENERAL;
+use crate::analysis::Analysis;
 use crate::emulate::Stop;
 use crate::emulate::a32::Machine;
 use crate::isa::a32::{DpKind, Flow, Insn, Op, Operand, Reg, SKIP, Shift};
@@ -115,7 +116,7 @@ fn checked(i: &Insn) -> Result<(), &'static str> {
 impl Replay for A32 {
     type Rig<'p> = Machine<'p>;
 
-    fn rig(program: &Program) -> Option<Machine<'_>> {
+    fn rig<'p>(program: &'p Program, _analysis: &Analysis) -> Option<Machine<'p>> {
         let mut m = Machine::new(program, 0)?;
         m.set_forced(true);
         Some(m)
