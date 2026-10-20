@@ -210,3 +210,28 @@ fn syscalls_decompile_as_the_calls_they_name() {
     assert!(header.contains("checked vs binary"), "{header}");
     assert!(!header.contains("differ"), "{header}");
 }
+
+/// An arm64 `svc #0` whose `x8` names a call decompiles as that call, its
+/// arguments from `x0` up and its result in `x0`; an exit keeps the run's
+/// end.
+#[test]
+fn arm64_syscalls_decompile_as_the_calls_they_name() {
+    let p = raw_elf(
+        Arch::Arm64,
+        &[
+            0x08, 0x08, 0x80, 0x52, // ASM: mov w8,#64
+            0x01, 0x00, 0x00, 0xd4, // ASM: svc #0
+            0x88, 0x15, 0x80, 0x52, // ASM: mov w8,#172
+            0x01, 0x00, 0x00, 0xd4, // ASM: svc #0
+            0xc0, 0x03, 0x5f, 0xd6, // ASM: ret
+        ],
+    );
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), 0x1000).expect("the entry decompiles");
+    assert!(out.contains("write(a1, a2, a3);"), "{out}");
+    assert!(out.contains("return getpid();"), "{out}");
+    assert!(!out.contains("== 93"), "{out}");
+    let header = checked_header(&p, &a, &Overlay::default(), 0x1000).unwrap_or_default();
+    assert!(header.contains("checked vs binary"), "{header}");
+    assert!(!header.contains("differ"), "{header}");
+}

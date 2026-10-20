@@ -2066,7 +2066,7 @@ impl<'a> Exec<'_, 'a> {
     /// # Returns
     ///
     /// The temporary's key.
-    pub(super) fn fresh_tmp(&mut self, ty: Ty) -> Key {
+    pub(in crate::analysis::decompile) fn fresh_tmp(&mut self, ty: Ty) -> Key {
         let id = if self.emit {
             self.ctx.tmp_count += 1;
             self.ctx.tmp_count
