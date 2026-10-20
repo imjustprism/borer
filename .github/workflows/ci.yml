@@ -5,7 +5,10 @@ name: ci
 # and the tests on Linux (x64 and arm64) and macOS (arm64); clippy on Windows
 # arm64; and the RustSec advisories. It runs on what lands on dev or main, on
 # every pull request into either, weekly for new advisories, and on demand; a
-# newer run on the same ref cancels the older one.
+# newer run on the same ref cancels the older one. Work on dev runs the gate's
+# fast form (`--fast`: no dogfood sweeps, smoke, deny or doc); a pull request
+# into main, a push to main and a manual run take the full gate, so main never
+# moves without it.
 
 on:
   push:
@@ -82,7 +85,7 @@ jobs:
       # --check: verify only, and a tool the gate needs that is missing is
       # a failure here, never a skip.
       - name: gate
-        run: python scripts/gate.py --check
+        run: python scripts/gate.py --check ${{ github.event_name != 'workflow_dispatch' && (github.base_ref == 'dev' || github.ref == 'refs/heads/dev') && '--fast' || '' }}
         env:
           # Where the commits under test start: a pull request's base, or
           # the commit a push started from (empty on a manual run).
