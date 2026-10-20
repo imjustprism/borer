@@ -3424,6 +3424,12 @@ impl Running<'_, '_> {
     fn call(&mut self, f: &Ast, args: &[Ast]) -> Eval<Val> {
         if let Ast::Name(n) = f
             && !self.s.vars.contains_key(n)
+            && let Some(done) = self.literal_copy(n, args)
+        {
+            return done;
+        }
+        if let Ast::Name(n) = f
+            && !self.s.vars.contains_key(n)
             && !self.s.known.contains_key(n)
         {
             if let Some(base) = n.strip_suffix("__rdx").filter(|b| !b.is_empty()) {
@@ -3642,6 +3648,48 @@ impl Running<'_, '_> {
             | Stop::Exited
             | Stop::Limit(_)) => unchecked(format!("the call to {name} ends as {other}")),
         }
+    }
+
+    /// Evaluates a `strcpy` or `memcpy` from a string literal by the
+    /// literal's bytes, imported or not.
+    ///
+    /// The text writes a string a function builds in place as such a copy
+    /// ([`super::stores`]), and the literal is in no image: its bytes are
+    /// what the copy writes, and C fixes what either routine does with
+    /// them, so the copy needs no address for its source.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The callee's name.
+    /// * `args` - The arguments.
+    ///
+    /// # Returns
+    ///
+    /// The copy's outcome, the destination on success; `None` for any
+    /// other call.
+    fn literal_copy(&mut self, name: &str, args: &[Ast]) -> Option<Eval<Val>> {
+        let [dst, Ast::Str(bytes), rest @ ..] = args else {
+            return None;
+        };
+        let wanted = match (name, rest) {
+            ("strcpy", []) => Ok(bytes.iter().position(|b| *b == 0).map_or(0, |k| k + 1)),
+            ("memcpy", [len]) => self.value(len).and_then(|n| self.length(n)).and_then(|n| {
+                usize::try_from(n)
+                    .ok()
+                    .filter(|n| *n <= bytes.len())
+                    .ok_or_else(|| End::Unchecked("a copy past its literal".to_owned()))
+            }),
+            _ => return None,
+        };
+        Some(wanted.and_then(|n| {
+            let d = self.value(dst)?;
+            for (k, b) in bytes.iter().take(n).enumerate() {
+                let to = d.bits.wrapping_add(from_usize(k));
+                self.emu.poke(to, *b);
+                self.writers.insert(to, self.line);
+            }
+            Ok(d)
+        }))
     }
 
     /// Evaluates the call of a name no variable and no function holds: the

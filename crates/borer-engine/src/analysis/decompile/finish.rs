@@ -86,6 +86,7 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::SpellIndex, out, spell_index);
     let text = skip.apply(Pass::SpellOwnEnum, text, spell_own_enum);
     let text = skip.apply(Pass::SpellNullptr, text, spell_nullptr);
+    let text = skip.apply(Pass::StoreStrings, text, store_strings);
     let text = skip.apply(Pass::StackArrays, text, stack_arrays);
     let text = skip.apply(Pass::CallablePointers, text, callable_pointers);
     let text = skip.apply(Pass::FloatBitReads, text, float_bit_reads);

@@ -802,3 +802,81 @@ fn a_run_time_stack_drop_is_an_alloca() {
 {rows:?}"
     );
 }
+
+/// Constant stores that spell a string are a `strcpy` of it.
+///
+/// `sh2` writes `"abcde"` to its frame as a dword and a word and hashes
+/// it through a callee: the two slots are one `char` array the text
+/// copies the literal into and hands on. `fill` writes `"hello, world"`
+/// through its argument as two overlapping qwords. Run as ISO C, each
+/// text agrees with the binary: the callee hashes the same bytes, and the
+/// buffer holds the same bytes after the copy.
+#[test]
+fn constant_stores_that_spell_a_string_are_a_strcpy() {
+    let mut code = vec![
+        0x56, // ASM: push rsi
+        0x48, 0x83, 0xec, 0x30, // ASM: sub rsp,0x30
+        0x89, 0xce, // ASM: mov esi,ecx
+        0xc7, 0x44, 0x24, 0x28, 0x61, 0x62, 0x63,
+        0x64, // ASM: mov dword [rsp+0x28],0x64636261
+        0x66, 0xc7, 0x44, 0x24, 0x2c, 0x65, 0x00, // ASM: mov word [rsp+0x2c],0x65
+        0x48, 0x8d, 0x4c, 0x24, 0x28, // ASM: lea rcx,[rsp+0x28]
+        0xe8, 0x10, 0x00, 0x00, 0x00, // ASM: call 0x1030
+        0x01, 0xf0, // ASM: add eax,esi
+        0x48, 0x83, 0xc4, 0x30, // ASM: add rsp,0x30
+        0x5e, // ASM: pop rsi
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x30, 0xcc);
+    code.extend([
+        0x0f, 0xb6, 0x11, // ASM: movzx edx,byte [rcx]
+        0x84, 0xd2, // ASM: test dl,dl
+        0x74, 0x24, // ASM: je 0x105b
+        0x48, 0xff, 0xc1, // ASM: inc rcx
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x0f, 0x1f, 0x40, 0x00, // ASM: nop dword [rax]
+        0x41, 0x89, 0xc0, // ASM: mov r8d,eax
+        0x41, 0xc1, 0xe0, 0x05, // ASM: shl r8d,5
+        0x41, 0x29, 0xc0, // ASM: sub r8d,eax
+        0x0f, 0xbe, 0xc2, // ASM: movsx eax,dl
+        0x44, 0x01, 0xc0, // ASM: add eax,r8d
+        0x0f, 0xb6, 0x11, // ASM: movzx edx,byte [rcx]
+        0x48, 0xff, 0xc1, // ASM: inc rcx
+        0x84, 0xd2, // ASM: test dl,dl
+        0x75, 0xe6, // ASM: jne 0x1040
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x70, 0xcc);
+    code.extend([
+        0x48, 0xb8, 0x2c, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64,
+        0x00, // ASM: mov rax,0x646c726f77202c
+        0x48, 0x89, 0x41, 0x05, // ASM: mov [rcx+5],rax
+        0x48, 0xb8, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20,
+        0x77, // ASM: mov rax,0x77202c6f6c6c6568
+        0x48, 0x89, 0x01, // ASM: mov [rcx],rax
+        0xc3, // ASM: ret
+    ]);
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    for (entry, copy) in [
+        (TEXT, "strcpy(local_10, \"abcde\");"),
+        (TEXT + 0x70, "strcpy((char*)a1, \"hello, world\");"),
+    ] {
+        let text = decompile_named(&p, &a, &o, entry).unwrap_or_default();
+        assert!(text.contains(copy), "{text}");
+        let rows = check_generated_iso(&p, &a, &o, entry, 8, 1, 20_000).expect("the text reads");
+        assert!(
+            rows.iter().any(|(_, v)| *v == Verdict::Agrees),
+            "{text}
+{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|(_, v)| matches!(v, Verdict::Differs(..))),
+            "{text}
+{rows:?}"
+        );
+    }
+}

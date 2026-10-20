@@ -15,8 +15,8 @@
 //! [`verify`] checks that lifting against the emulator, [`params`] finds
 //! the arguments, [`liveness`] places the phis, [`structure`] and [`emit`]
 //! recover and write the control flow, then [`rewrite`], [`asserts`],
-//! [`fields`], [`types`], [`enums`], [`wire`], [`tidy`] and [`finish`]
-//! rework the text, and [`tables`] writes out the read-only tables it
+//! [`fields`], [`types`], [`enums`], [`wire`], [`stores`], [`tidy`] and
+//! [`finish`] rework the text, and [`tables`] writes out the read-only tables it
 //! indexes. [`outline`] and [`scenario`] are other views of the
 //! same function; [`opaque`] spots conditions that always go one way;
 //! [`traces`] checks the text's control flow against the binary's.
@@ -71,6 +71,7 @@ mod rewrite;
 mod scenario;
 pub(crate) mod signature;
 mod sites;
+mod stores;
 mod structure;
 mod tables;
 mod tidy;
@@ -102,6 +103,7 @@ pub use passes::{Pass, Passes};
 use rewrite::*;
 pub use scenario::*;
 pub(crate) use sites::{CallArg, CallSite, call_sites};
+use stores::*;
 use structure::*;
 pub use tidy::*;
 use types::*;
