@@ -14,6 +14,10 @@
 //! runs the full repair search on every function and reports how often it
 //! runs, what it costs and what it repairs ([`repair_search`]).
 //!
+//! `BORER_LATENCY=bin1;bin2 cargo test -p borer-engine --release --test bench latency -- --ignored --nocapture`
+//! times one cold `decompile` answer per sampled function as the MCP tool
+//! builds it, and hashes every answer ([`mcp_latency`]).
+//!
 //! The dogfood sweep reports a wall time, but its spread across identical
 //! runs is wide enough to hide a small change: 6.7s to 9.4s on one machine
 //! for the same binary. Each figure here is the best of several passes over
@@ -25,10 +29,12 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::decompile::{decompile_all, decompile_named, step_times, text_check};
+use borer_engine::analysis::decompile::{
+    checked_header, decompile_all, decompile_named, step_times, text_check, warnings, with_header,
+};
 use borer_engine::analysis::render::{
-    Bisected, Budget, Evidence, Repair, Verdict, bisect_iso, check_generated, check_generated_iso,
-    repair_iso,
+    Bisected, Budget, Evidence, INCOMPLETE_NOTE, Repair, Verdict, answered, bisect_iso,
+    check_generated, check_generated_iso, next_steps, repair_iso,
 };
 use borer_engine::analysis::{Analysis, Overlay, name_of};
 use borer_engine::num::usize_f64;
@@ -475,4 +481,124 @@ fn repair_search() {
         ms(searched.last().copied().unwrap_or_default()),
         usize_f64(checks) / usize_f64(runs.max(1))
     );
+}
+
+/// Functions [`mcp_latency`] samples per binary, evenly by entry, unless
+/// `BORER_LATENCY_SAMPLE` names another count.
+const LATENCY_SAMPLE: usize = 150;
+
+/// Builds one `decompile` answer the way the MCP tool does.
+///
+/// That is the names the repair search renders it under ([`answered`]),
+/// then the check line, the incomplete note, the warnings and the next
+/// steps over the text, then the text.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `a` - Its analysis.
+/// * `user` - Names in force.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The answer, empty when the function does not decompile.
+fn mcp_answer(program: &Program, a: &Analysis, user: &Overlay, entry: u64) -> String {
+    let (o, differs) = answered(program, a, user, entry);
+    let o = &o;
+    let mut lines: Vec<String> = checked_header(program, a, o, entry)
+        .into_iter()
+        .chain(
+            a.incomplete
+                .then(|| format!("//{}", INCOMPLETE_NOTE.trim_start_matches('#'))),
+        )
+        .collect();
+    lines.extend(
+        decompile_named(program, a, o, entry)
+            .and_then(|text| warnings(program, a, o, entry, &text, differs.as_deref())),
+    );
+    lines.extend(
+        next_steps(program, a, o, entry)
+            .iter()
+            .map(|step| format!("// next: {step}")),
+    );
+    let header = (!lines.is_empty()).then(|| lines.join("\n"));
+    decompile_named(program, a, o, entry)
+        .map(|text| with_header(&text, header.as_deref()))
+        .unwrap_or_default()
+}
+
+/// Times one cold `decompile` answer per sampled function, as the MCP tool
+/// builds it, and hashes every answer so a speedup can be shown to change
+/// no byte.
+///
+/// `BORER_LATENCY` names the binaries, separated by `;`, and
+/// `BORER_LATENCY_SAMPLE` how many functions to sample from each
+/// ([`LATENCY_SAMPLE`] by default). Per binary it
+/// prints the p50, p95 and mean of an answer, the first answer's time
+/// (the one that finds the memo cold), and one hash over every
+/// answer in entry order; with `BORER_LATENCY_OUT` set to a directory it
+/// writes each answer's hash there, one `<entry>\t<hash>` line per
+/// function. With `BORER_TIMING` set it prints the decompile step totals.
+#[test]
+#[ignore = "set BORER_LATENCY to binary paths separated by ';' to run this harness"]
+fn mcp_latency() {
+    use std::fmt::Write as _;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let paths = std::env::var("BORER_LATENCY").expect("BORER_LATENCY env var");
+    let out_dir = std::env::var_os("BORER_LATENCY_OUT");
+    for path in paths.split(';').filter(|p| !p.is_empty()) {
+        let program = Program::load(std::path::Path::new(path)).expect("load");
+        let a = Analysis::compute(&program);
+        let o = Overlay::default();
+        let all: Vec<u64> = a
+            .functions
+            .iter()
+            .filter(|f| f.thunk.is_none() && f.funclet.is_none())
+            .map(|f| f.entry)
+            .collect();
+        let sample = std::env::var("BORER_LATENCY_SAMPLE")
+            .ok()
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(LATENCY_SAMPLE)
+            .max(1);
+        let stride = (all.len() / sample).max(1);
+        let entries: Vec<u64> = all.iter().step_by(stride).take(sample).copied().collect();
+        let mut times = Vec::with_capacity(entries.len());
+        let mut whole = DefaultHasher::new();
+        let mut rows = String::new();
+        for &e in &entries {
+            let t = Instant::now();
+            let answer = mcp_answer(&program, &a, &o, e);
+            times.push(t.elapsed());
+            let mut h = DefaultHasher::new();
+            answer.hash(&mut h);
+            answer.hash(&mut whole);
+            writeln!(rows, "{e:#x}\t{:016x}", h.finish()).expect("write");
+        }
+        if let Some(dir) = &out_dir {
+            let name = std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            std::fs::write(std::path::Path::new(dir).join(format!("{name}.tsv")), &rows)
+                .expect("write hashes");
+        }
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        let mean = times.iter().sum::<Duration>() / u32::try_from(times.len().max(1)).unwrap_or(1);
+        let first = times.first().copied().unwrap_or_default();
+        times.sort_unstable();
+        println!(
+            "latency\t{path}\t{}\tp50 {:.3}\tp95 {:.3}\tmean {:.3}\tfirst {:.3}\thash {:016x}",
+            entries.len(),
+            ms(percentile(&times, 50)),
+            ms(percentile(&times, 95)),
+            ms(mean),
+            ms(first),
+            whole.finish()
+        );
+    }
+    if let Some(steps) = step_times() {
+        print!("{steps}");
+    }
 }
