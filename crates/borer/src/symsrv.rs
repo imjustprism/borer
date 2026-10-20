@@ -66,11 +66,12 @@ pub(crate) fn server() -> String {
         .unwrap_or_else(|| DEFAULT_SERVER.to_owned())
 }
 
-/// Whether an address is one a fetch may reach: none of loopback,
-/// unspecified, private, shared (carrier-grade NAT), link-local,
-/// benchmarking, documentation, broadcast, multicast or reserved, and for
-/// IPv6 none of unique-local or link-local, an IPv4-mapped or -compatible
-/// address judged as the IPv4 one it holds.
+/// Whether an address is one a fetch may reach.
+///
+/// It is none of loopback, unspecified, private, shared (carrier-grade
+/// NAT), link-local, benchmarking, documentation, broadcast, multicast or
+/// reserved, and for IPv6 none of unique-local or link-local; an
+/// IPv4-mapped or -compatible address is judged as the IPv4 one it holds.
 ///
 /// # Arguments
 ///

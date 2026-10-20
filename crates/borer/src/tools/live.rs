@@ -919,10 +919,12 @@ mod tests {
         server.live_detach().expect("detach");
     }
 
-    /// Only a process running the loaded binary is attached: with nothing
-    /// loaded, or another binary loaded, attaching to this test process is
-    /// refused, and with the test binary itself loaded it is taken. A copy
-    /// of the loaded file at another path is the same image by its bytes.
+    /// Only a process running the loaded binary is attached.
+    ///
+    /// With nothing loaded, or another binary loaded, attaching to this
+    /// test process is refused, and with the test binary itself loaded it
+    /// is taken. A copy of the loaded file at another path is the same
+    /// image by its bytes.
     ///
     /// # Panics
     ///
