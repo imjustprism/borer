@@ -82,6 +82,10 @@ const LIBC: &str = "\
      wcstol wcstombs wcstoul wcsxfrm wctob wctomb wmemchr wmemcmp wmemcpy wmemmove wmemset \
      wprintf wscanf";
 
+/// The segment registers a Linux text reads its thread block through,
+/// with the width of the block's first word: `fs` on x86-64, `gs` on x86.
+const THREAD_BASES: [(&str, u8); 2] = [("fs", 64), ("gs", 32)];
+
 /// Most entries a table of function addresses is written out with.
 const TABLE_MAX: usize = 256;
 
@@ -284,7 +288,9 @@ pub(super) fn close(
 /// Returns the C library's type names, constants and data objects a text
 /// uses that it does not declare: a definition for each type name the
 /// library's headers define ([`Item::Alias`]), C23's `nullptr` for an
-/// older C ([`Item::Nullptr`]), a `#define` for each constant the type
+/// older C ([`Item::Nullptr`]), on Linux the thread block's address a
+/// segment register's reads are spelled from ([`Item::ThreadBase`]), a
+/// `#define` for each constant the type
 /// library names by value (`SIGALRM`, `O_RDWR`), then
 /// an `extern` for each object the library exports
 /// (`extern FILE* stderr;`).
@@ -346,6 +352,16 @@ fn library_items(
         .collect();
     if used.iter().any(|w| w == "nullptr") {
         items.push(Item::Nullptr);
+    }
+    if format == crate::program::BinaryFormat::Elf {
+        items.extend(
+            THREAD_BASES
+                .iter()
+                .filter(|(seg, _)| {
+                    used.iter().any(|w| w == seg) && !declared.iter().any(|w| w == seg)
+                })
+                .map(|(seg, bits)| Item::ThreadBase(Name::of(seg), *bits)),
+        );
     }
     items.extend(
         used.iter()
@@ -1007,6 +1023,39 @@ mod tests {
         assert_eq!(
             out,
             "#define nullptr ((void *)0)\n#define SIGALRM 14\n#define O_RDWR 2\n"
+        );
+    }
+
+    /// A Linux text's read through `fs` declares the thread block's
+    /// address `fs` stands for; a PE's has no such convention.
+    ///
+    /// # Panics
+    ///
+    /// When the block is left undeclared or declared for a PE.
+    #[test]
+    fn the_thread_block_is_declared_on_linux() {
+        let text = "// signature: uint64_t f(void)\n\
+                    \n\
+                    return *(uint64_t*)(fs + 0x28);\n";
+        let mut out = String::new();
+        let items = library_items(
+            text,
+            BinaryFormat::Elf,
+            &Index::default(),
+            "f",
+            &BTreeMap::new(),
+        );
+        cir::print_items(&items, &mut out);
+        assert_eq!(out, "#define fs (*(uint64_t __seg_fs *)0)\n");
+        assert!(
+            library_items(
+                text,
+                BinaryFormat::Pe,
+                &Index::default(),
+                "f",
+                &BTreeMap::new()
+            )
+            .is_empty()
         );
     }
 

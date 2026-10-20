@@ -504,6 +504,11 @@ pub(super) enum Item {
     /// `#define nullptr ((void *)0)`: C23's null pointer constant, for a
     /// reader whose C is older.
     Nullptr,
+    /// `#define fs (*(uint64_t __seg_fs *)0)`: the address of the thread
+    /// block a segment register selects, the word of that width the
+    /// block's first field holds (Linux points it at the block itself):
+    /// the register's name, and the word's width in bits.
+    ThreadBase(Name, u8),
     /// `extern T x;`: a data object defined outside the unit.
     Data(CTy, Name),
     /// `extern T f(P);`: a function defined outside the unit.

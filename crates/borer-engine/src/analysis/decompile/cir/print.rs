@@ -77,6 +77,10 @@ pub(in crate::analysis::decompile) fn print_items(items: &[Item], out: &mut Stri
                 }
             }
             Item::Nullptr => out.push_str("#define nullptr ((void *)0)"),
+            Item::ThreadBase(seg, bits) => {
+                let seg = seg.as_str();
+                let _ = write!(out, "#define {seg} (*(uint{bits}_t __seg_{seg} *)0)");
+            }
             Item::Data(t, name) => {
                 out.push_str("extern ");
                 ty(t, out);
