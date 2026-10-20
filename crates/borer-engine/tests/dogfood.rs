@@ -71,7 +71,10 @@ fn brace_imbalance(text: &str) -> i64 {
 /// A stack slot named in the body must be declared, or the text is not valid
 /// C. Names in `//` comment lines (the escape note) do not count, since they
 /// are not code. A function pointer declaration, `uint64_t (*arg_20)(...)`,
-/// declares the name inside its `(*...)`.
+/// declares the name inside its `(*...)`. A `static inline` function the
+/// unit defines on one line is a scope of its own: the slots it names must
+/// be declared in its body, and its body declares nothing for the function
+/// the text is about.
 ///
 /// # Arguments
 ///
@@ -81,6 +84,38 @@ fn brace_imbalance(text: &str) -> i64 {
 ///
 /// The undeclared slot names, without duplicates.
 fn undeclared_slots(text: &str) -> Vec<String> {
+    let mut declared: BTreeSet<String> = BTreeSet::new();
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            continue;
+        }
+        if t.starts_with("static inline ") {
+            let body = t.split_once('{').map_or("", |(_, b)| b);
+            let (mut own, mut reads) = (BTreeSet::new(), BTreeSet::new());
+            for stmt in body.split(['{', '}']).flat_map(|s| s.split_inclusive(';')) {
+                slots_of(stmt.trim(), &mut own, &mut reads);
+            }
+            out.extend(reads.difference(&own).cloned());
+            continue;
+        }
+        slots_of(t, &mut declared, &mut used);
+    }
+    out.extend(used.difference(&declared).cloned());
+    out.into_iter().collect()
+}
+
+/// Sorts the slot names of one line or statement into those it declares
+/// and those it uses.
+///
+/// # Arguments
+///
+/// * `t` - The line or statement, trimmed.
+/// * `declared` - Receives the names a declaration declares.
+/// * `used` - Receives the names anything else uses.
+fn slots_of(t: &str, declared: &mut BTreeSet<String>, used: &mut BTreeSet<String>) {
     let is_slot = |w: &str| {
         w.split_once('_').is_some_and(|(head, digits)| {
             matches!(head, "local" | "home" | "arg")
@@ -88,43 +123,27 @@ fn undeclared_slots(text: &str) -> Vec<String> {
                 && digits.bytes().all(|b| b.is_ascii_hexdigit())
         })
     };
-    let tokens = |line: &str| {
-        line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .filter(|w| is_slot(w))
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    };
-    let mut declared: BTreeSet<String> = BTreeSet::new();
-    let mut used: BTreeSet<String> = BTreeSet::new();
-    for line in text.lines() {
-        let t = line.trim_start();
-        if t.starts_with("//") {
-            continue;
-        }
-        let decl = matches!(
-            t.split_whitespace().next(),
-            Some(w) if w.starts_with("uint") || w.starts_with("int") || w == "float"
-                || w == "double" || w == "bool" || w == "char" || w == "void"
-        ) && t.ends_with(';')
-            && !t.contains('=')
-            && (!t.contains('(') || t.contains("(*"));
-        let declared_name = t
-            .split_once("(*")
-            .and_then(|(_, rest)| rest.split_once(')'))
-            .map(|(name, _)| name);
-        for w in tokens(line) {
-            if declared_name.is_some_and(|n| n != w) {
-                used.insert(w);
-                continue;
-            }
-            if decl {
-                declared.insert(w);
-            } else {
-                used.insert(w);
-            }
+    let decl = matches!(
+        t.split_whitespace().next(),
+        Some(w) if w.starts_with("uint") || w.starts_with("int") || w == "float"
+            || w == "double" || w == "bool" || w == "char" || w == "void"
+    ) && t.ends_with(';')
+        && !t.contains('=')
+        && (!t.contains('(') || t.contains("(*"));
+    let declared_name = t
+        .split_once("(*")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(name, _)| name);
+    for w in t
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| is_slot(w))
+    {
+        if decl && declared_name.is_none_or(|n| n == w) {
+            declared.insert(w.to_owned());
+        } else {
+            used.insert(w.to_owned());
         }
     }
-    used.difference(&declared).cloned().collect()
 }
 
 /// `sub_` names run straight into an identifier, outside strings: a pass that
@@ -700,6 +719,23 @@ fn integrity_helpers_catch_the_known_shapes() {
     assert_eq!(brace_imbalance("while (1) {\n  if (b) {\n}\n"), 1);
     assert_eq!(
         undeclared_slots("uint64_t (*arg_20)(uint64_t);\narg_20(local_8);\n"),
+        vec!["local_8".to_owned()]
+    );
+    let inline = "static inline uint64_t f(void *a1) { uint64_t local_8; \
+                  *(uint64_t*)a1 = local_8; return a1; }\n";
+    assert_eq!(
+        undeclared_slots(&format!("{inline}return f(a1);\n")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        undeclared_slots(&format!("{inline}local_8 = f(a1);\n")),
+        vec!["local_8".to_owned()]
+    );
+    assert_eq!(
+        undeclared_slots(
+            "static inline uint64_t g(void *a1) { *(uint64_t*)a1 = local_8; return a1; }\n\
+             uint64_t local_8;\nlocal_8 = g(a1);\n"
+        ),
         vec!["local_8".to_owned()]
     );
 }
