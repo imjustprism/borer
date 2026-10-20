@@ -25,6 +25,7 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use crate::isa::x86::{
     ConditionCode, Instruction, InstructionInfoFactory, OpAccess, OpKind, Register,
@@ -248,7 +249,7 @@ fn byte_value(b: &Byte) -> Term {
             &term::bin(Op::Shr, 64, t, &Term::Const(8 * u64::from(*i))),
             8,
         ),
-        Byte::Was(x) => Term::Mem(Box::new(Term::Const(*x)), 1, Vec::new()),
+        Byte::Was(x) => Term::Mem(Rc::new(Term::Const(*x)), 1, Rc::from([])),
         Byte::Lost => Term::Undef,
     }
 }
@@ -332,7 +333,7 @@ fn assemble(bytes: &[Byte], mask: u64) -> Term {
                 .zip(0u64..)
                 .all(|(b, i)| matches!(b, Byte::Was(x) if *x == a.wrapping_add(i) & mask)) =>
         {
-            return Term::Mem(Box::new(Term::Const(*a)), count, Vec::new());
+            return Term::Mem(Rc::new(Term::Const(*a)), count, Rc::from([]));
         }
         Some(_) => {}
     }
@@ -729,9 +730,9 @@ impl Sym<'_> {
                 let mut written = self.base.clone();
                 written.extend(self.mem.iter().map(|(x, b)| (*x, b.clone())));
                 Ok(Term::Mem(
-                    Box::new(narrow(a, self.width)),
+                    Rc::new(narrow(a, self.width)),
                     u8::try_from(n.min(8)).unwrap_or(8),
-                    overrides(&written, &self.lost)?,
+                    overrides(&written, &self.lost)?.into(),
                 ))
             }
         }
@@ -1221,9 +1222,9 @@ impl Lifted<'_> {
                     return Err(BESIDE);
                 }
                 Ok(Term::Mem(
-                    Box::new(narrow(a, self.width)),
+                    Rc::new(narrow(a, self.width)),
                     u8::try_from(n).unwrap_or(8),
-                    overrides(self.overlay, self.lost)?,
+                    overrides(self.overlay, self.lost)?.into(),
                 ))
             }
         }
@@ -1423,9 +1424,9 @@ impl Machine {
             }
             Term::Undef => Ok(Term::Undef),
             a => Ok(Term::Mem(
-                Box::new(narrow(a, width)),
+                Rc::new(narrow(a, width)),
                 u8::try_from(n.min(8)).unwrap_or(8),
-                overrides(&self.mem, &self.lost)?,
+                overrides(&self.mem, &self.lost)?.into(),
             )),
         }
     }

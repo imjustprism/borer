@@ -26,6 +26,7 @@
 //! points to look for a state that tells them apart.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use super::super::expr::{Expr, Key, Op, UnOp, fold, unary};
 use super::super::verify::{float_arith, float_of, float_to_int, float_un, low, sext};
@@ -77,7 +78,7 @@ pub(super) enum Term {
     /// read, by address, each its byte's value (none where the replay
     /// reads no value). No value where the bytes run past the top of the
     /// address space.
-    Mem(Box<Term>, u8, Vec<(u64, Term)>),
+    Mem(Rc<Term>, u8, Rc<[(u64, Term)]>),
     /// A value no state has.
     Undef,
     /// A sum of monomials modulo `2^w`: the width, and the monomials
@@ -87,23 +88,23 @@ pub(super) enum Term {
     /// the width.
     Logic(Logic, u8, Vec<Term>),
     /// Another integer operator at a width, as [`fold`] computes it.
-    Bin(Op, u8, Box<Term>, Box<Term>),
+    Bin(Op, u8, Rc<Term>, Rc<Term>),
     /// An integer unary operator at a width, as [`unary`] computes it.
-    Un(UnOp, u8, Box<Term>),
+    Un(UnOp, u8, Rc<Term>),
     /// The low bits of a value sign-extended to 64 bits ([`sext`]).
-    Sext(Box<Term>, u8),
+    Sext(Rc<Term>, u8),
     /// 1 where a predicate holds, else 0.
-    Truth(Box<Pred>),
+    Truth(Rc<Pred>),
     /// One of two values, as a predicate holds.
-    Ite(Box<Pred>, Box<Term>, Box<Term>),
+    Ite(Rc<Pred>, Rc<Term>, Rc<Term>),
     /// A float operator over two values of these widths, computed at the
     /// wider ([`float_arith`]).
-    Float(Op, u8, u8, Box<Term>, Box<Term>),
+    Float(Op, u8, u8, Rc<Term>, Rc<Term>),
     /// A float unary operator at a width ([`float_un`]).
-    FloatUn(UnOp, u8, Box<Term>),
+    FloatUn(UnOp, u8, Rc<Term>),
     /// A float of a width converted to an integer of a width
     /// ([`float_to_int`]).
-    ToInt(u8, u8, Box<Term>),
+    ToInt(u8, u8, Rc<Term>),
 }
 
 /// A truth over every state, in normal form.
@@ -123,7 +124,7 @@ pub(super) enum Pred {
     /// outcomes ([`LT`], [`EQ`], [`GT`], [`UN`]).
     Float(u8, u8, Term, Term),
     /// The predicate does not hold.
-    Not(Box<Pred>),
+    Not(Rc<Pred>),
     /// No state decides it.
     Undef,
 }
@@ -772,7 +773,7 @@ fn opaque(op: Op, w: u8, a: Term, b: Term) -> Term {
             Term::Undef
         };
     }
-    Term::Bin(op, w, Box::new(a), Box::new(b))
+    Term::Bin(op, w, Rc::new(a), Rc::new(b))
 }
 
 /// An integer operator at a width, as [`fold`] computes it with bits.
@@ -852,7 +853,7 @@ pub(super) fn un(op: UnOp, w: u8, a: &Term) -> Term {
             Term::Const(c) => {
                 const_of(&unary(op, Expr::Const(c), w)).map_or(Term::Undef, Term::Const)
             }
-            x => Term::Un(op, w, Box::new(x)),
+            x => Term::Un(op, w, Rc::new(x)),
         },
     }
 }
@@ -873,7 +874,7 @@ pub(super) fn sign_extend(a: &Term, bits: u8) -> Term {
     }
     match a {
         Term::Const(c) => sext(c, bits).map_or(Term::Undef, Term::Const),
-        other => Term::Sext(Box::new(other), bits),
+        other => Term::Sext(Rc::new(other), bits),
     }
 }
 
@@ -894,7 +895,7 @@ pub(super) fn float_bin(op: Op, fa: u8, fb: u8, a: &Term, b: &Term) -> Term {
             float_arith(op, float_of(x, fa), float_of(y, fb), fa.max(fb))
                 .map_or(Term::Undef, Term::Const)
         }
-        (x, y) => Term::Float(op, fa, fb, Box::new(x), Box::new(y)),
+        (x, y) => Term::Float(op, fa, fb, Rc::new(x), Rc::new(y)),
     }
 }
 
@@ -909,7 +910,7 @@ pub(super) fn float_unary(op: UnOp, fb: u8, a: &Term) -> Term {
     match a {
         Term::Undef => Term::Undef,
         Term::Const(x) => float_un(op, *x, fb).map_or(Term::Undef, Term::Const),
-        x => Term::FloatUn(op, fb, Box::new(x.clone())),
+        x => Term::FloatUn(op, fb, Rc::new(x.clone())),
     }
 }
 
@@ -924,7 +925,7 @@ pub(super) fn to_int(fb: u8, bits: u8, a: &Term) -> Term {
     match narrow(a, fb) {
         Term::Undef => Term::Undef,
         Term::Const(x) => Term::Const(float_to_int(x, fb, bits)),
-        x => Term::ToInt(fb, bits, Box::new(x)),
+        x => Term::ToInt(fb, bits, Rc::new(x)),
     }
 }
 
@@ -941,8 +942,8 @@ pub(super) fn ite(p: Pred, a: Term, b: Term) -> Term {
         Pred::Is(false) => b,
         Pred::Undef => Term::Undef,
         _ if a == b => a,
-        Pred::Not(q) => ite(*q, b, a),
-        p => Term::Ite(Box::new(p), Box::new(a), Box::new(b)),
+        Pred::Not(q) => ite(Rc::unwrap_or_clone(q), b, a),
+        p => Term::Ite(Rc::new(p), Rc::new(a), Rc::new(b)),
     }
 }
 
@@ -955,7 +956,7 @@ pub(super) fn truth(p: Pred) -> Term {
     match p {
         Pred::Is(b) => Term::Const(u64::from(b)),
         Pred::Undef => Term::Undef,
-        p => Term::Truth(Box::new(p)),
+        p => Term::Truth(Rc::new(p)),
     }
 }
 
@@ -967,9 +968,9 @@ pub(super) fn truth(p: Pred) -> Term {
 pub(super) fn not(p: Pred) -> Pred {
     match p {
         Pred::Is(b) => Pred::Is(!b),
-        Pred::Not(q) => *q,
+        Pred::Not(q) => Rc::unwrap_or_clone(q),
         Pred::Undef => Pred::Undef,
-        p => Pred::Not(Box::new(p)),
+        p => Pred::Not(Rc::new(p)),
     }
 }
 
@@ -986,7 +987,7 @@ pub(super) fn zero(t: Term) -> Pred {
     match t {
         Term::Const(c) => Pred::Is(c == 0),
         Term::Undef => Pred::Undef,
-        Term::Truth(p) => not(*p),
+        Term::Truth(p) => not(Rc::unwrap_or_clone(p)),
         Term::Logic(Logic::Xor, w, xs) if xs.len() == 2 => zero(sub(w, &xs[0], &xs[1])),
         Term::Poly(w, p) => {
             if let Some((a, b)) = sides(w, &p) {
