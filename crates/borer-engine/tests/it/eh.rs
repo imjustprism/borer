@@ -51,31 +51,46 @@ fn an_itanium_landing_pad_is_a_catch() {
     );
 }
 
-/// Builds an x64 image with one function whose scope table guards its
-/// call with `__except (EXCEPTION_EXECUTE_HANDLER)`, the `__except` body
-/// inside the function.
+/// The code of [`seh64`]'s guarded function: a call the scope table
+/// guards, and the `__except` body that returns -1.
+const SEH64_CALL: &[(usize, &[u8])] = &[
+    (0x1000, &[0x48, 0x83, 0xec, 0x28]),       // ASM: sub rsp, 0x28
+    (0x1004, &[0xe8, 0xf7, 0x00, 0x00, 0x00]), // ASM: call 0x1100
+    (0x1009, &[0x48, 0x83, 0xc4, 0x28]),       // ASM: add rsp, 0x28
+    (0x100d, &[0xc3]),                         // ASM: ret
+    (0x1010, &[0xb8, 0xff, 0xff, 0xff, 0xff]), // ASM: mov eax, -1
+    (0x1015, &[0x48, 0x83, 0xc4, 0x28]),       // ASM: add rsp, 0x28
+    (0x1019, &[0xc3]),                         // ASM: ret
+];
+
+/// Builds an x64 image whose function at `0x1000` has a scope record.
+///
+/// The record guards part of the function with
+/// `__except (EXCEPTION_EXECUTE_HANDLER)`, its `__except` body inside the
+/// function, and a callee at `0x1100` loads through its argument.
+///
+/// # Arguments
+///
+/// * `code` - The function's instructions, each at its offset.
+/// * `record` - The scope record: guarded start, end and the `__except`
+///   body, each an offset.
+/// * `end` - The offset the function ends at.
 ///
 /// # Panics
 ///
-/// Never: the layout is fixed.
-fn seh64() -> Program {
+/// When `code` reaches past the text section.
+fn seh64(code: &[(usize, &[u8])], record: [u32; 3], end: u64) -> Program {
     let mut bytes = vec![0xccu8; 0x2100];
-    let code: &[(usize, &[u8])] = &[
-        (0x1000, &[0x48, 0x83, 0xec, 0x28]),       // ASM: sub rsp, 0x28
-        (0x1004, &[0xe8, 0xf7, 0x00, 0x00, 0x00]), // ASM: call 0x1100
-        (0x1009, &[0x48, 0x83, 0xc4, 0x28]),       // ASM: add rsp, 0x28
-        (0x100d, &[0xc3]),                         // ASM: ret
-        (0x1010, &[0xb8, 0xff, 0xff, 0xff, 0xff]), // ASM: mov eax, -1
-        (0x1015, &[0x48, 0x83, 0xc4, 0x28]),       // ASM: add rsp, 0x28
-        (0x1019, &[0xc3]),                         // ASM: ret
-        (0x1100, &[0x8b, 0x01]),                   // ASM: mov eax, [rcx]
-        (0x1102, &[0xc3]),                         // ASM: ret
-        (0x1180, &[0xc3]),                         // ASM: ret
+    let callee: &[(usize, &[u8])] = &[
+        (0x1100, &[0x8b, 0x01]), // ASM: mov eax, [rcx]
+        (0x1102, &[0xc3]),       // ASM: ret
+        (0x1180, &[0xc3]),       // ASM: ret
     ];
-    for (at, b) in code {
+    for (at, b) in code.iter().chain(callee) {
         bytes[*at..*at + b.len()].copy_from_slice(b);
     }
-    for (k, v) in [1u32, 0x1004, 0x1009, 1, 0x1010].iter().enumerate() {
+    let [start, stop, target] = record;
+    for (k, v) in [1u32, start, stop, 1, target].iter().enumerate() {
         bytes[0x2000 + 4 * k..0x2004 + 4 * k].copy_from_slice(&v.to_le_bytes());
     }
     let sections = vec![
@@ -83,10 +98,7 @@ fn seh64() -> Program {
         Section::mapped(".rdata", BASE + 0x2000, 0x2000, 0x100, false, false),
     ];
     let mut p = Program::raw(bytes, Arch::X86_64, BASE, Some(BASE + 0x1000), sections);
-    p.function_ranges = vec![
-        (BASE + 0x1000, BASE + 0x101a),
-        (BASE + 0x1100, BASE + 0x1103),
-    ];
+    p.function_ranges = vec![(BASE + 0x1000, BASE + end), (BASE + 0x1100, BASE + 0x1103)];
     p.headers.exception_handlers = vec![ExceptionHandler {
         function: BASE + 0x1000,
         handler: BASE + 0x1180,
@@ -104,7 +116,10 @@ fn seh64() -> Program {
 /// When the `__try` or the `__except` is missing.
 #[test]
 fn a_scope_table_record_is_a_try_except() {
-    let text = decompiled(&seh64(), BASE + 0x1000);
+    let text = decompiled(
+        &seh64(SEH64_CALL, [0x1004, 0x1009, 0x1010], 0x101a),
+        BASE + 0x1000,
+    );
     in_order(
         &text,
         &[
@@ -115,6 +130,50 @@ fn a_scope_table_record_is_a_try_except() {
             "}\n",
         ],
     );
+}
+
+/// The registers a guarded region sets become variables like any others:
+/// a `__try` around a call and the sum of its result keeps no `rax` or
+/// `rdx` in the text, and the call stays inside the `__try`.
+///
+/// # Panics
+///
+/// When the text names a register or the call left the `__try`.
+#[test]
+fn a_guarded_region_names_its_values_as_variables() {
+    let code: &[(usize, &[u8])] = &[
+        (0x1000, &[0x48, 0x83, 0xec, 0x28]),       // ASM: sub rsp, 0x28
+        (0x1004, &[0xe8, 0xf7, 0x00, 0x00, 0x00]), // ASM: call 0x1100
+        (0x1009, &[0x8d, 0x50, 0x01]),             // ASM: lea edx, [rax+1]
+        (0x100c, &[0x89, 0xd0]),                   // ASM: mov eax, edx
+        (0x100e, &[0x48, 0x83, 0xc4, 0x28]),       // ASM: add rsp, 0x28
+        (0x1012, &[0xc3]),                         // ASM: ret
+        (0x1013, &[0xb8, 0xff, 0xff, 0xff, 0xff]), // ASM: mov eax, -1
+        (0x1018, &[0x48, 0x83, 0xc4, 0x28]),       // ASM: add rsp, 0x28
+        (0x101c, &[0xc3]),                         // ASM: ret
+    ];
+    let text = decompiled(
+        &seh64(code, [0x1004, 0x100c, 0x1013], 0x101d),
+        BASE + 0x1000,
+    );
+    in_order(
+        &text,
+        &[
+            "__try {
+",
+            "sub_140001100(",
+            "} __except (",
+        ],
+    );
+    for reg in ["rax", "rdx", "eax", "edx"] {
+        assert!(
+            !text
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|w| w == reg),
+            "{reg} left in:
+{text}"
+        );
+    }
 }
 
 /// Builds a 32-bit image whose function registers `_except_handler4`

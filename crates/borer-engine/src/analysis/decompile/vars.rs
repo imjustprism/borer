@@ -20,9 +20,12 @@
 //! reads, since those read the machine register, not a C variable. A jump
 //! out of the text (`goto *x;`) keeps every value alive. A register whose
 //! address the text takes or that an expression assigns inside itself is
-//! left alone, and a text this cannot read is returned unchanged.
+//! left alone, and a text this cannot read is returned unchanged. A
+//! guarded region's handler starts from what the exception runtime leaves
+//! in the registers, so a register it reads before setting keeps its name,
+//! and no value moves into or out of the region.
 
-use super::traces::{Stmt, blank, statements};
+use super::traces::{Handler, Stmt, blank, statements};
 use super::*;
 
 /// Most nodes times tracked variables one text is analysed for: the
@@ -301,6 +304,9 @@ impl Line<'_> {
 enum Form {
     /// Nothing: a label, a loop head, a join.
     Join,
+    /// Nothing, at the edge of a guarded region: no fold carries a value
+    /// across it, so nothing moves into or out of what the region guards.
+    Fence,
     /// The function's entry, which gives every variable the value its
     /// register holds.
     Entry,
@@ -554,6 +560,32 @@ impl Graph {
                 self.link(ins, n);
                 Vec::new()
             }
+            Stmt::Try(_, body, handlers) => {
+                let enter = self.add(None, (0, 0), Form::Fence);
+                self.link(ins, enter);
+                let mut outs = self.run(body, vec![enter], brk, cont, lines)?;
+                for (head, at, arm) in handlers {
+                    let thrown = self.add(None, (0, 0), Form::Machine);
+                    let h = match head {
+                        Handler::Except => {
+                            self.add(line_of(*at), get(*at)?.parenthesized()?, Form::Expr)
+                        }
+                        Handler::Catch | Handler::Finally => self.add(None, (0, 0), Form::Join),
+                    };
+                    self.link(&[thrown], h);
+                    let ends = self.run(arm, vec![h], brk, cont, lines)?;
+                    if *head == Handler::Finally {
+                        self.link(&outs, h);
+                        self.link(&ends, EXIT);
+                        outs = ends;
+                    } else {
+                        outs.extend(ends);
+                    }
+                }
+                let after = self.add(None, (0, 0), Form::Fence);
+                self.link(&outs, after);
+                vec![after]
+            }
         })
     }
 }
@@ -687,7 +719,7 @@ fn occs(
 ) -> (Occs, Option<Assign>) {
     let mut o = Occs::default();
     match node.form {
-        Form::Join | Form::Exit => return (o, None),
+        Form::Join | Form::Fence | Form::Exit => return (o, None),
         Form::Entry => {
             o.writes_all = true;
             return (o, None);
@@ -719,7 +751,7 @@ fn occs(
             vars.reads(l, (start, end), &mut o.uses, bad);
             return (o, None);
         }
-        Form::Join | Form::Exit | Form::Entry | Form::Machine | Form::Statement => {}
+        Form::Join | Form::Fence | Form::Exit | Form::Entry | Form::Machine | Form::Statement => {}
     }
     let mut depth = 0usize;
     let mut eqs: Vec<usize> = Vec::new();
@@ -2061,7 +2093,7 @@ impl<'t> Text<'t> {
             }
             match self.graph.nodes.get(*s)?.form {
                 Form::Join if !calls => {}
-                Form::Join => return None,
+                Form::Join | Form::Fence => return None,
                 _ if out.len() == REACH => return None,
                 _ => out.push(*s),
             }
@@ -2714,6 +2746,43 @@ mod tests {
     /// * `text` - The text.
     fn body(text: &str) -> Vec<&str> {
         text.lines().skip_while(|l| !l.is_empty()).skip(1).collect()
+    }
+
+    /// A register a guarded region sets becomes a variable.
+    ///
+    /// A register its handler reads before setting keeps its name, since
+    /// the exception runtime set it, and no call folds out of the region
+    /// into a read after it.
+    #[test]
+    fn a_guarded_region_splits_and_keeps_its_calls() {
+        let t = function(
+            &["uint64_t rax, rdx;"],
+            &[
+                "__try {",
+                "  rax = sub_1(a1);",
+                "  rdx = rax + 1;",
+                "} __except (EXCEPTION_EXECUTE_HANDLER) {",
+                "  sub_2(rax);",
+                "  return 0;",
+                "}",
+                "return rdx;",
+            ],
+        );
+        let out = split_webs(&t);
+        assert!(
+            body(&out)
+                == [
+                    "__try {",
+                    "  var1 = sub_1(a1);",
+                    "  var2 = var1 + 1;",
+                    "} __except (EXCEPTION_EXECUTE_HANDLER) {",
+                    "  sub_2(rax);",
+                    "  return 0;",
+                    "}",
+                    "return var2;",
+                ],
+            "{out}"
+        );
     }
 
     /// Two values a register holds one after the other become two
