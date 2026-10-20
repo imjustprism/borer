@@ -145,7 +145,7 @@ Any address argument takes `0x` hex, decimal, or a name.
 | Read code | `function_summary`, `function_strings`, `decompile`, `decompile_batch`, `disassemble`, `disassemble_function`, `cfg`, `callgraph`, `reaches`, `xrefs`, `class_layout` |
 | Read data | `read`, `hexdump` |
 | Annotate | `set_name`, `set_comment`, `set_type`, `types`, `annotations`, `save_project`, `load_project` |
-| Live process | `live_attach`, `live_detach`, `live_modules`, `live_read`, `live_object`, `live_instances`, `live_watch` |
+| Live process (Windows only) | `live_attach`, `live_detach`, `live_modules`, `live_read`, `live_object`, `live_instances`, `live_watch` |
 | Anything else | `query`, `script` |
 
 Deeper analyses are `borer://` resources: taint, struct layout, emulation,

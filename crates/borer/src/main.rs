@@ -127,14 +127,22 @@ struct BorerServer {
 impl BorerServer {
     /// Returns every tool the server answers, one router per area
     /// ([`tools`]).
+    ///
+    /// The live tools read another process through the Windows API, so
+    /// off Windows they are left out rather than listed and always refused.
     fn tool_router() -> ToolRouter<Self> {
+        let live = if cfg!(windows) {
+            Self::live_tools()
+        } else {
+            ToolRouter::new()
+        };
         Self::load_tools()
             + Self::bytes_tools()
             + Self::search_tools()
             + Self::function_tools()
             + Self::decompile_tools()
             + Self::annotate_tools()
-            + Self::live_tools()
+            + live
             + Self::query_tools()
     }
 }

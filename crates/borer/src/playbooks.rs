@@ -162,13 +162,15 @@ const RESOURCES_LEAD: &str = "Resources are read by URI through resources/read o
      !limit=<n> on its URI, and borer://session says what this session loaded, \
      annotated and was answered. By intent:";
 
-/// The instructions after the resources: the live tools and the reload.
+/// The instructions on the live tools, given only where they are listed.
 const LIVE: &str = "Live: {live_attach}(process) opens the running program read-only and \
      maps the binary onto it; then {live_object} reads an object by its class's fields, \
      {live_instances} finds a class's objects by vtable, {live_read} reads typed values, \
      and {live_watch}(name, address) then {live_watch}(name) shows what changed; every \
-     live address may be a static address or a name. After a rebuild of borer, \
-     {reload} restarts the server in place.";
+     live address may be a static address or a name. ";
+
+/// The instructions' last sentence: the reload.
+const RELOAD: &str = "After a rebuild of borer, {reload} restarts the server in place.";
 
 /// The resources by what an agent wants of them: every resource name in
 /// exactly one group, which the instructions list them under.
@@ -329,9 +331,14 @@ pub(crate) fn instructions(tools: &[String], prompts: &[Prompt]) -> String {
         })
         .collect();
     let text = format!(
-        "{WORKFLOW}\nPrompts, each also a resource the agent can read, borer://playbook/<name>: {}.\n{RESOURCES_LEAD} {}.\n{LIVE}",
+        "{WORKFLOW}\nPrompts, each also a resource the agent can read, borer://playbook/<name>: {}.\n{RESOURCES_LEAD} {}.\n{}{RELOAD}",
         prompts.join(", "),
-        groups.join("; ")
+        groups.join("; "),
+        if tools.iter().any(|t| t == "live_attach") {
+            LIVE
+        } else {
+            ""
+        }
     );
     with_tools(&text, tools)
 }
@@ -439,6 +446,32 @@ mod tests {
             assert!(listed.contains(name), "{name} is grouped but not listed");
         }
         assert!(!text.contains("other: "), "{text}");
+    }
+
+    /// The live tools are listed, and the instructions describe them, on
+    /// Windows only; the reload sentence ends the instructions everywhere.
+    ///
+    /// # Panics
+    ///
+    /// When the live tools are listed off Windows or missing on it, or the
+    /// instructions describe tools the list lacks.
+    #[test]
+    fn the_live_tools_are_offered_only_where_they_run() {
+        let tools = tools();
+        let prompts = BorerServer::prompt_router().list_all();
+        let text = instructions(&tools, &prompts);
+        let listed = tools.iter().filter(|t| t.starts_with("live_")).count();
+        assert_eq!(listed > 0, cfg!(windows), "{tools:?}");
+        assert_eq!(text.contains("Live: live_attach"), cfg!(windows), "{text}");
+        assert!(
+            text.ends_with("reload restarts the server in place."),
+            "{text}"
+        );
+        let without: Vec<String> = tools
+            .into_iter()
+            .filter(|t| !t.starts_with("live_"))
+            .collect();
+        assert!(!instructions(&without, &prompts).contains("Live:"));
     }
 
     /// Every template is reachable from a `# next:` hint, a playbook or the
