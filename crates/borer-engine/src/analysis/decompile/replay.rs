@@ -78,7 +78,7 @@ use super::expr::{
 };
 use super::helper::{Helper, eval_call};
 use super::lift::{
-    ArgAt, Callee, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
+    ArgAt, Call, Callee, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
 };
 use super::liveness::Live;
 use super::verify::{
@@ -94,8 +94,10 @@ use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::isa::Isa;
 use crate::num::{from_usize, lo8};
 use crate::program::Program;
+use subset::{integer_or_zero_fill, outside_subset, reads_whole_lanes};
 
 mod prove;
+mod subset;
 mod term;
 
 /// States each block is tried from.
@@ -429,7 +431,7 @@ pub(super) trait Replay: Lifter {
 
     /// Returns the instructions of a block that set the flags, each with
     /// whether it was a float compare, beside those that read them
-    /// ([`flag_setters`]).
+    /// ([`subset::flag_setters`]).
     ///
     /// # Arguments
     ///
@@ -588,7 +590,7 @@ impl Replay for arch::X86 {
     }
 
     fn flag_setters(code: &[Instruction]) -> (Vec<(u64, bool)>, Vec<u64>) {
-        flag_setters(code)
+        subset::flag_setters(code)
     }
 
     fn sets_flags(i: &Instruction) -> bool {
@@ -1568,388 +1570,6 @@ impl<I: Copy> End<I> {
             Self::Fall(_) => None,
         }
     }
-}
-
-/// Tells whether the replay can check an instruction: general registers
-/// only, no `lock`, no access through `fs` or `gs`, memory no wider than
-/// a word.
-///
-/// # Arguments
-///
-/// * `i` - The instruction.
-/// * `info` - Register-access facts.
-fn integer(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
-    let segment = |r: Register| matches!(r, Register::FS | Register::GS);
-    if i.has_lock_prefix() || segment(i.segment_prefix()) {
-        return false;
-    }
-    let memory = (0..i.op_count()).any(|n| i.op_kind(n) == OpKind::Memory);
-    if memory && (i.memory_size().size() > 8 || segment(i.memory_segment())) {
-        return false;
-    }
-    info.info(i).used_registers().iter().all(|u| {
-        let r = u.register();
-        r.is_gpr()
-            || matches!(r, Register::RIP | Register::EIP)
-            || (r.is_segment_register() && !segment(r))
-    })
-}
-
-/// Tells whether the replay can check a scalar-float instruction: a move,
-/// an arithmetic operation, a compare or a conversion on the low lane of
-/// an `xmm` register.
-///
-/// Every such instruction is one the emulator models and the lifter
-/// writes a statement for. Memory stays within a word and off `fs`/`gs`,
-/// and no register but a general one, an `xmm` one, or the `ymm`/`zmm` name
-/// a VEX or EVEX scalar uses when it clears the bits above the xmm, is
-/// touched, so a packed form, whose lanes the text does not model one by
-/// one, is left out. A three-operand `vmovss` or `vmovsd` is in: the low
-/// lane comes from the last source and the bits above it from the first.
-/// `cvtss2si` and `cvtsd2si` are in: nearest, ties to even, then the
-/// integer cast. `cmpeqss` and `cmpeqsd` are in: the ordered equality,
-/// whose low bit is C's `==`. A fused multiply-add the emulator does not
-/// model is left out with the packed forms, and so is any other compare
-/// predicate.
-///
-/// # Arguments
-///
-/// * `i` - The instruction.
-/// * `info` - Register-access facts.
-fn scalar_float(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
-    use Mnemonic as M;
-    if i.has_lock_prefix() || matches!(i.segment_prefix(), Register::FS | Register::GS) {
-        return false;
-    }
-    let m = i.mnemonic();
-    let mask = matches!(m, M::Xorps | M::Xorpd | M::Andps | M::Andpd)
-        && i.op_count() == 2
-        && i.op0_kind() == OpKind::Register
-        && i.op1_kind() == OpKind::Memory;
-    if !mask
-        && (0..i.op_count()).any(|n| i.op_kind(n) == OpKind::Memory)
-        && (i.memory_size().size() > 8 || matches!(i.memory_segment(), Register::FS | Register::GS))
-    {
-        return false;
-    }
-    let two = i.op_count() == 2;
-    let three = i.op_count() == 3;
-    let reg_reg = two && i.op0_kind() == OpKind::Register && i.op1_kind() == OpKind::Register;
-    let shape = match m {
-        M::Movss | M::Movsd | M::Movd | M::Movq | M::Vmovd | M::Vmovq => two,
-        M::Vmovss | M::Vmovsd => two || three,
-        M::Movaps | M::Movups | M::Movapd | M::Movupd | M::Movdqa | M::Movdqu => reg_reg,
-        M::Xorps | M::Xorpd | M::Andps | M::Andpd => mask,
-        M::Addss
-        | M::Subss
-        | M::Mulss
-        | M::Divss
-        | M::Minss
-        | M::Maxss
-        | M::Sqrtss
-        | M::Addsd
-        | M::Subsd
-        | M::Mulsd
-        | M::Divsd
-        | M::Minsd
-        | M::Maxsd
-        | M::Sqrtsd => two,
-        M::Vaddss
-        | M::Vsubss
-        | M::Vmulss
-        | M::Vdivss
-        | M::Vminss
-        | M::Vmaxss
-        | M::Vsqrtss
-        | M::Vaddsd
-        | M::Vsubsd
-        | M::Vmulsd
-        | M::Vdivsd
-        | M::Vminsd
-        | M::Vmaxsd
-        | M::Vsqrtsd
-        | M::Vcvtsi2ss
-        | M::Vcvtsi2sd
-        | M::Vcvtss2sd
-        | M::Vcvtsd2ss => three,
-        M::Comiss
-        | M::Ucomiss
-        | M::Comisd
-        | M::Ucomisd
-        | M::Vcomiss
-        | M::Vucomiss
-        | M::Vcomisd
-        | M::Vucomisd
-        | M::Cvtsi2ss
-        | M::Cvtsi2sd
-        | M::Cvtss2sd
-        | M::Cvtsd2ss
-        | M::Cvttss2si
-        | M::Cvttsd2si
-        | M::Vcvttss2si
-        | M::Vcvttsd2si
-        | M::Cvtss2si
-        | M::Cvtsd2si
-        | M::Vcvtss2si
-        | M::Vcvtsd2si => two,
-        M::Cmpss | M::Cmpsd if i.immediate8() & 0x1f < 8 => {
-            three && i.op0_kind() == OpKind::Register && i.op0_register().is_vector_register()
-        }
-        M::Vcmpss | M::Vcmpsd if i.immediate8() & 0x1f < 8 => {
-            i.op_count() == 4
-                && i.op0_kind() == OpKind::Register
-                && i.op0_register().is_vector_register()
-        }
-        _ => false,
-    };
-    shape
-        && info.info(i).used_registers().iter().all(|u| {
-            let r = u.register();
-            r.is_gpr()
-                || r.is_xmm()
-                || r.is_ymm()
-                || r.is_zmm()
-                || matches!(r, Register::RIP | Register::EIP)
-                || (r.is_segment_register() && !matches!(r, Register::FS | Register::GS))
-        })
-}
-
-/// The instructions of a block that set the flags, each as its address
-/// and whether it was a float compare (`comiss` and its kin), beside the
-/// addresses of those that read them.
-///
-/// The lifter writes a float compare's condition as a `Cmp` no differently
-/// from an integer one, and its operands may carry no float type (a
-/// parameter's variable), so the instructions themselves are the only
-/// witness of which way the condition a reader stands at reads: the
-/// setter before the reader (`setcc` and `and` both follow a compare,
-/// only the first reading its flags).
-///
-/// # Arguments
-///
-/// * `code` - The block's instructions.
-fn flag_setters(code: &[Instruction]) -> (Vec<(u64, bool)>, Vec<u64>) {
-    (
-        code.iter()
-            .filter(|i| i.rflags_modified() != 0)
-            .map(|i| {
-                (
-                    i.ip(),
-                    matches!(
-                        i.mnemonic(),
-                        Mnemonic::Comiss
-                            | Mnemonic::Ucomiss
-                            | Mnemonic::Comisd
-                            | Mnemonic::Ucomisd
-                            | Mnemonic::Vcomiss
-                            | Mnemonic::Vucomiss
-                            | Mnemonic::Vcomisd
-                            | Mnemonic::Vucomisd
-                    ),
-                )
-            })
-            .collect(),
-        code.iter()
-            .filter(|i| i.rflags_read() != 0)
-            .map(Instruction::ip)
-            .collect(),
-    )
-}
-
-/// Tells whether the replay can check a packed-integer instruction.
-///
-/// That is a 128-bit vector move to or from memory, a bitwise operation,
-/// lane-wise addition and subtraction, a pack, an unpack or a shuffle:
-/// each an instruction the emulator runs lane by lane and the lifter
-/// writes a statement for, as the operation's own call.
-///
-/// The forms the two sides do not share stay out, each named: `pshufb`,
-/// `palignr` and the VEX arithmetic (`vpaddb` and its kin), which the
-/// emulator does not model; the lane compares, byte extremes, masks,
-/// inserts, extracts and word shuffles, which both sides model but a
-/// later slice admits; the 256-bit and `mmx` forms, whose registers no
-/// word of this holds. A shift's count is an immediate, the only form
-/// whose statement's argument names the count whole.
-///
-/// # Arguments
-///
-/// * `i` - The instruction.
-/// * `info` - Register-access facts.
-fn packed_integer(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
-    use Mnemonic as M;
-    if i.has_lock_prefix() || matches!(i.segment_prefix(), Register::FS | Register::GS) {
-        return false;
-    }
-    let memory = (0..i.op_count()).any(|n| i.op_kind(n) == OpKind::Memory)
-        && i.memory_size().size() == 16
-        && !matches!(i.memory_segment(), Register::FS | Register::GS)
-        && (matches!(
-            i.memory_base(),
-            Register::None | Register::RIP | Register::EIP
-        ) || i.memory_base().is_gpr())
-        && (i.memory_index() == Register::None || i.memory_index().is_gpr());
-    let dst = i.op0_kind() == OpKind::Register && i.op0_register().is_xmm();
-    let src = matches!(i.op1_kind(), OpKind::Register if i.op1_register().is_xmm()) || memory;
-    let imm = i.op1_kind() == OpKind::Immediate8;
-    let shape = match i.mnemonic() {
-        M::Movaps | M::Movups | M::Movapd | M::Movupd | M::Movdqa | M::Movdqu => {
-            i.op_count() == 2 && memory
-        }
-        M::Xorps
-        | M::Xorpd
-        | M::Andps
-        | M::Andpd
-        | M::Orps
-        | M::Orpd
-        | M::Andnps
-        | M::Andnpd
-        | M::Pxor
-        | M::Pand
-        | M::Pandn
-        | M::Por
-        | M::Paddb
-        | M::Paddw
-        | M::Paddd
-        | M::Paddq
-        | M::Psubb
-        | M::Psubw
-        | M::Psubd
-        | M::Psubq
-        | M::Packssdw
-        | M::Packsswb
-        | M::Packuswb
-        | M::Punpcklbw
-        | M::Punpcklwd
-        | M::Punpckldq
-        | M::Punpcklqdq
-        | M::Punpckhbw
-        | M::Punpckhwd
-        | M::Punpckhdq
-        | M::Punpckhqdq => i.op_count() == 2 && dst && src,
-        M::Pshufd => {
-            i.op_count() == 3
-                && dst
-                && (matches!(i.op1_kind(), OpKind::Register if i.op1_register().is_xmm()) || memory)
-                && i.op2_kind() == OpKind::Immediate8
-        }
-        M::Psllw
-        | M::Pslld
-        | M::Psllq
-        | M::Psrlw
-        | M::Psrld
-        | M::Psrlq
-        | M::Psraw
-        | M::Psrad
-        | M::Pslldq
-        | M::Psrldq => i.op_count() == 2 && dst && imm,
-        _ => false,
-    };
-    shape
-        && info.info(i).used_registers().iter().all(|u| {
-            let r = u.register();
-            r.is_gpr()
-                || r.is_xmm()
-                || matches!(r, Register::RIP | Register::EIP)
-                || (r.is_segment_register() && !matches!(r, Register::FS | Register::GS))
-        })
-}
-
-/// Tells whether the replay can check a block.
-///
-/// Every instruction is in the integer subset ([`integer`]), is a
-/// scalar-float one ([`scalar_float`]), is a packed-integer one
-/// ([`packed_integer`]), or is the zero fill of a structure, a vector
-/// register zeroed (`xorps xmm0, xmm0`) and stored sixteen bytes at a
-/// time (`movups [rsp+0x20], xmm0`), whose bytes both sides know.
-///
-/// # Arguments
-///
-/// * `code` - The block's instructions.
-/// * `info` - Register-access facts.
-fn integer_or_zero_fill(code: &[Instruction], info: &mut InstructionInfoFactory) -> bool {
-    let mut zeroed: Vec<Register> = Vec::new();
-    code.iter().all(|i| {
-        if integer(i, info) || scalar_float(i, info) {
-            return true;
-        }
-        let regs = i.op_count() == 2 && i.op1_kind() == OpKind::Register;
-        match i.mnemonic() {
-            Mnemonic::Xorps | Mnemonic::Xorpd | Mnemonic::Pxor
-                if regs
-                    && i.op0_kind() == OpKind::Register
-                    && i.op0_register() == i.op1_register()
-                    && i.op0_register().is_xmm() =>
-            {
-                zeroed.push(i.op0_register());
-                true
-            }
-            Mnemonic::Movups
-            | Mnemonic::Movaps
-            | Mnemonic::Movupd
-            | Mnemonic::Movapd
-            | Mnemonic::Movdqu
-            | Mnemonic::Movdqa
-                if regs
-                    && i.op0_kind() == OpKind::Memory
-                    && i.memory_size().size() == 16
-                    && zeroed.contains(&i.op1_register())
-                    && !matches!(i.memory_segment(), Register::FS | Register::GS)
-                    && i.memory_base().is_gpr()
-                    && (i.memory_index() == Register::None || i.memory_index().is_gpr()) =>
-            {
-                true
-            }
-            _ => packed_integer(i, info),
-        }
-    })
-}
-
-/// Why a block outside the checked subset ([`integer_or_zero_fill`]) is not
-/// checked, by its first instruction outside it.
-///
-/// A memory access through `fs` or `gs` reads the thread block (the
-/// exception chain, the stack bounds, thread-local storage), which is no
-/// float; an instruction naming a floating-point or vector register, or an
-/// x87 one, is the float/vector form the replay leaves alone; anything
-/// else is an instruction no model covers.
-///
-/// # Arguments
-///
-/// * `code` - The block's instructions.
-/// * `info` - Register-access facts.
-fn outside_subset(code: &[Instruction], info: &mut InstructionInfoFactory) -> &'static str {
-    let Some(i) = code
-        .iter()
-        .find(|i| !(integer(i, info) || scalar_float(i, info) || packed_integer(i, info)))
-    else {
-        return OUTSIDE_FLOAT;
-    };
-    let memory = (0..i.op_count()).any(|n| i.op_kind(n) == OpKind::Memory);
-    if memory && matches!(i.memory_segment(), Register::FS | Register::GS) {
-        return "a read or write through the thread block";
-    }
-    let float = format!("{:?}", i.mnemonic()).starts_with('F')
-        || info.info(i).used_registers().iter().any(|u| {
-            let r = u.register();
-            r.is_vector_register() || r.is_st() || r.is_mm() || r.is_k()
-        });
-    if float {
-        OUTSIDE_FLOAT
-    } else {
-        "an instruction outside every checked form"
-    }
-}
-
-/// Tells whether a block reads whole vector lanes: any of its instructions
-/// is a packed-integer one ([`packed_integer`]), whose statements carry the
-/// full 128 bits the machine's own registers hold.
-///
-/// # Arguments
-///
-/// * `code` - The block's instructions.
-/// * `info` - Register-access facts.
-fn reads_whole_lanes(code: &[Instruction], info: &mut InstructionInfoFactory) -> bool {
-    code.iter().any(|i| packed_integer(i, info))
 }
 
 /// A value stored `n` bytes wide as the text holds it.
@@ -3215,6 +2835,54 @@ struct Seeded {
 }
 
 impl Seeded {
+    /// Seeds the stack around a stack pointer with drawn bytes, on the
+    /// machine and for the text.
+    ///
+    /// # Arguments
+    ///
+    /// * `emu` - The machine.
+    /// * `rng` - Where the bytes are drawn from.
+    /// * `rsp` - The stack pointer.
+    /// * `mask` - The address mask.
+    fn stack(emu: &mut impl Rig, rng: &mut Rng, rsp: u64, mask: u64) -> Self {
+        let lo = rsp.wrapping_add_signed(-STACK_WORDS * 8);
+        let span = usize::try_from(STACK_WORDS * 16).unwrap_or(0);
+        let mut run: Vec<u8> = Vec::with_capacity(span);
+        for _ in -STACK_WORDS..STACK_WORDS {
+            run.extend(rng.next().to_le_bytes());
+        }
+        let mut base = Self {
+            lo,
+            run: Vec::new(),
+            other: FxHashMap::default(),
+        };
+        if lo & mask == lo
+            && lo
+                .checked_add(from_usize(span.saturating_sub(1)))
+                .is_some_and(|e| e <= mask)
+        {
+            emu.poke_run(lo, &run);
+            base.run = run;
+        } else {
+            for (k, byte) in (0u64..).zip(run) {
+                base.fix(emu, lo.wrapping_add(k) & mask, byte);
+            }
+        }
+        base
+    }
+
+    /// Fixes the byte both sides start with at an address.
+    ///
+    /// # Arguments
+    ///
+    /// * `emu` - The machine.
+    /// * `at` - The address.
+    /// * `byte` - The byte.
+    fn fix(&mut self, emu: &mut impl Rig, at: u64, byte: u8) {
+        self.other.insert(at, byte);
+        emu.poke(at, byte);
+    }
+
     /// The byte both sides start with at an address, `None` when neither
     /// the stack nor a fixed variable holds one.
     ///
@@ -3345,52 +3013,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         room: &mut usize,
         out: &mut Replayed,
     ) -> Result<(), &'static str> {
-        let w = self.w;
-        let code = self
-            .code
-            .get(b)
-            .filter(|c| !c.is_empty())
-            .ok_or("no instructions")?;
-        if !w.emitted.get(b).copied().unwrap_or(false) {
-            return Err("not in the text");
-        }
-        if !w.processed.get(b).copied().unwrap_or(false) {
-            return Err("not run by the dataflow");
-        }
-        if w.flag_readers.get(b).copied().unwrap_or(true) || self.flags_lost(b) {
-            return Err("flags set in another block");
-        }
-        let inn = w.ins.get(b).ok_or("no witness")?;
-        let sp = inn.sp.ok_or("the stack pointer unknown at its start")?;
-        let effects = self.effects.get(b).ok_or("no effects")?;
-        if effects.iter().any(|e| e.kind == EffectKind::Unmodeled) {
-            return Err("a statement no effect models");
-        }
-        if effects.iter().any(|e| {
-            matches!(&e.kind, EffectKind::Call(c) if matches!(c.shown, Shown::Elided | Shown::InPlace))
-        }) {
-            return Err("a call the text leaves out or reads in place");
-        }
-        if effects
-            .iter()
-            .any(|e| matches!(&e.kind, EffectKind::Call(c) if c.short))
-        {
-            return Err(SHORT_CALL);
-        }
-        if effects
-            .iter()
-            .any(|e| matches!(&e.kind, EffectKind::Call(c) if c.contradicted))
-            || (w.stated_contradicted
-                && code
-                    .last()
-                    .is_some_and(|i| L::transfer(i) == Transfer::Return))
-        {
-            return Err(CONTRADICTED);
-        }
-        if w.result_read && effects.iter().any(|e| e.kind == EffectKind::Return(None)) {
-            return Err(BARE_RETURN);
-        }
-        L::subset(code)?;
+        let (code, sp) = self.admit(b)?;
         let end = End::of::<L>(code)?;
         *room = room.checked_sub(1).ok_or(OVER_BUDGET)?;
         let pool = L::comparands(code, self.width);
@@ -3449,6 +3072,64 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             (Some(_) | None, None) => {}
         }
         Ok(())
+    }
+
+    /// The instructions of a block the replay can check and the stack
+    /// pointer at its start, or why it cannot check it.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The block's index.
+    ///
+    /// # Errors
+    ///
+    /// Why the block is not checked.
+    fn admit(&self, b: usize) -> Result<(&[L::Insn], i64), &'static str> {
+        let w = self.w;
+        let code = self
+            .code
+            .get(b)
+            .filter(|c| !c.is_empty())
+            .ok_or("no instructions")?;
+        if !w.emitted.get(b).copied().unwrap_or(false) {
+            return Err("not in the text");
+        }
+        if !w.processed.get(b).copied().unwrap_or(false) {
+            return Err("not run by the dataflow");
+        }
+        if w.flag_readers.get(b).copied().unwrap_or(true) || self.flags_lost(b) {
+            return Err("flags set in another block");
+        }
+        let inn = w.ins.get(b).ok_or("no witness")?;
+        let sp = inn.sp.ok_or("the stack pointer unknown at its start")?;
+        let effects = self.effects.get(b).ok_or("no effects")?;
+        if effects.iter().any(|e| e.kind == EffectKind::Unmodeled) {
+            return Err("a statement no effect models");
+        }
+        let call = |f: fn(&Call) -> bool| {
+            effects
+                .iter()
+                .any(|e| matches!(&e.kind, EffectKind::Call(c) if f(c)))
+        };
+        if call(|c| matches!(c.shown, Shown::Elided | Shown::InPlace)) {
+            return Err("a call the text leaves out or reads in place");
+        }
+        if call(|c| c.short) {
+            return Err(SHORT_CALL);
+        }
+        if call(|c| c.contradicted)
+            || (w.stated_contradicted
+                && code
+                    .last()
+                    .is_some_and(|i| L::transfer(i) == Transfer::Return))
+        {
+            return Err(CONTRADICTED);
+        }
+        if w.result_read && effects.iter().any(|e| e.kind == EffectKind::Return(None)) {
+            return Err(BARE_RETURN);
+        }
+        L::subset(code)?;
+        Ok((code, sp))
     }
 
     /// Records the proof of a block the states tried agreed on, or tries
@@ -3697,31 +3378,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             .register(<L::Rig<'p> as Bench>::SP)
             .ok_or("no stack pointer")?;
         let sp0 = rsp.wrapping_sub(sp.cast_unsigned()) & mask;
-        let lo = rsp.wrapping_add_signed(-STACK_WORDS * 8);
-        let span = usize::try_from(STACK_WORDS * 16).unwrap_or(0);
-        let mut run: Vec<u8> = Vec::with_capacity(span);
-        for _ in -STACK_WORDS..STACK_WORDS {
-            run.extend(rng.next().to_le_bytes());
-        }
-        let mut base = Seeded {
-            lo,
-            run: Vec::new(),
-            other: FxHashMap::default(),
-        };
-        if lo & mask == lo
-            && lo
-                .checked_add(from_usize(span.saturating_sub(1)))
-                .is_some_and(|e| e <= mask)
-        {
-            emu.poke_run(lo, &run);
-            base.run = run;
-        } else {
-            for (k, byte) in (0u64..).zip(run) {
-                let at = lo.wrapping_add(k) & mask;
-                base.other.insert(at, byte);
-                emu.poke(at, byte);
-            }
-        }
+        let mut base = Seeded::stack(&mut emu, &mut rng, rsp, mask);
         if let Some((k @ (Key::Slot(_) | Key::Global(..)), c)) = w.assumes.get(b).copied().flatten()
         {
             let (at, n) = match k {
@@ -3733,9 +3390,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => (0, 0),
             };
             for i in 0..n.min(8) {
-                let (at, byte) = (at.wrapping_add(i) & mask, lo8(c >> (8 * i)));
-                base.other.insert(at, byte);
-                emu.poke(at, byte);
+                base.fix(&mut emu, at.wrapping_add(i) & mask, lo8(c >> (8 * i)));
             }
         }
         let mut text = Text {
@@ -3887,21 +3542,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 text.lost.insert(x);
             }
         }
-        let taken = match end.last().map(|jcc| (jcc, L::transfer(&jcc))) {
-            Some((jcc, Transfer::Branch { target, next }))
-                if matches!(end, End::Branch(_)) && target != next =>
-            {
-                let mut step = emu.clone();
-                step.set_budget(1);
-                step.stop_at(Some(target));
-                match step.run(L::start(&jcc)).stop {
-                    Stop::Stopped(_) => Some(true),
-                    Stop::Budget => Some(false),
-                    _ => None,
-                }
-            }
-            Some(_) | None => None,
-        };
+        let taken = Self::taken(&emu, end);
         let mut t = Trial {
             emu,
             text,
@@ -3933,6 +3574,32 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
         *seen = t.seen;
         Ok(t.written)
+    }
+
+    /// Whether the machine takes the branch ending a block, run one step
+    /// from where the block stopped; `None` when the block ends in no
+    /// branch or the step does not tell.
+    ///
+    /// # Arguments
+    ///
+    /// * `emu` - The machine, stopped before the branch.
+    /// * `end` - How the block ends.
+    fn taken(emu: &L::Rig<'p>, end: End<L::Insn>) -> Option<bool> {
+        match end.last().map(|jcc| (jcc, L::transfer(&jcc))) {
+            Some((jcc, Transfer::Branch { target, next }))
+                if matches!(end, End::Branch(_)) && target != next =>
+            {
+                let mut step = emu.clone();
+                step.set_budget(1);
+                step.stop_at(Some(target));
+                match step.run(L::start(&jcc)).stop {
+                    Stop::Stopped(_) => Some(true),
+                    Stop::Budget => Some(false),
+                    _ => None,
+                }
+            }
+            Some(_) | None => None,
+        }
     }
 
     /// Replays one effect, comparing what it claims at its point.
