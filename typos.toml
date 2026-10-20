@@ -5,6 +5,8 @@ extend-exclude = [
   "Cargo.lock",
   # hashes of decompiled texts, not words
   "scripts/run/golden.tsv",
+  # API and type names generated from the Windows SDK headers, not prose
+  "crates/borer-engine/src/analysis/sdk/*.tsv",
 ]
 
 [default]
@@ -41,6 +43,14 @@ Sme = "Sme"
 sme = "sme"
 
 [default.extend-identifiers]
+# clang's JSON AST node kind for a function parameter
+ParmVarDecl = "ParmVarDecl"
+# the Windows kernel's I/O manager call, as wdm.h spells it
+IofCallDriver = "IofCallDriver"
+# Arm EABI runtime helpers, as the ABI names them
+__aeabi_d2iz = "__aeabi_d2iz"
+__aeabi_d2uiz = "__aeabi_d2uiz"
+__aeabi_lasr = "__aeabi_lasr"
 # iced-x86 operand kind
 Immediate8_2nd = "Immediate8_2nd"
 # the x86 BCD adjust mnemonics, as iced-x86 spells them

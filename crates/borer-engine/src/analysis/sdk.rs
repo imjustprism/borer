@@ -192,10 +192,10 @@ fn decl_of(line: &'static str) -> Option<Decl> {
             variadic = true;
             continue;
         }
-        let (ty, pn) = col.split_once('.')?;
+        let (ty, pname) = col.split_once('.')?;
         params.push(Param {
             ty: word(ty)?,
-            name: name(pn)?,
+            name: name(pname)?,
             group: None,
         });
     }

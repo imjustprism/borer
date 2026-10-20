@@ -727,7 +727,7 @@ def main(argv: list[str]) -> int:
         origin = origin_of(f["file"], is_km)
         if origin == "crt" and name in C_STANDARD and portable(f):
             origin = "c"
-        params = [(ty, param_name(pn, origin)) for ty, pn in f["params"]]
+        params = [(ty, param_name(pname, origin)) for ty, pname in f["params"]]
         decls.append((name, f["conv"], origin, f["ret"], params, f["variadic"]))
         for ty in [f["ret"]] + [t for t, _ in f["params"]]:
             used_words.add(strip_quals(ty).replace("*", "").strip())
@@ -794,9 +794,9 @@ def main(argv: list[str]) -> int:
     named: dict[str, int] = {}
     for _, _, _, ret, params, _ in decls:
         spelled[ret] = spelled.get(ret, 0) + 1
-        for ty, pn in params:
+        for ty, pname in params:
             spelled[ty] = spelled.get(ty, 0) + 1
-            named[pn] = named.get(pn, 0) + 1
+            named[pname] = named.get(pname, 0) + 1
     for _, _, _, fields in structs:
         for fname, ftype, _, _ in fields:
             spelled[ftype] = spelled.get(ftype, 0) + 1
@@ -808,7 +808,7 @@ def main(argv: list[str]) -> int:
     rows = []
     for name, conv, origin, ret, params, variadic in decls:
         cols = [name, conv + ORIGIN[origin], wi[ret]]
-        cols += [f"{wi[ty]}.{ni[pn]}" for ty, pn in params]
+        cols += [f"{wi[ty]}.{ni[pname]}" for ty, pname in params]
         if variadic:
             cols.append("...")
         rows.append("\t".join(cols))
@@ -871,7 +871,7 @@ def spell(decl: tuple) -> str:
     same name does not expand."""
     conv = {"s": "__stdcall ", "f": "__fastcall ", "c": ""}
     name, cc, _, ret, params, variadic = decl
-    ps = [declarator(ty, pn if pn != "-" else f"a{i + 1}") for i, (ty, pn) in enumerate(params)]
+    ps = [declarator(ty, pname if pname != "-" else f"a{i + 1}") for i, (ty, pname) in enumerate(params)]
     if variadic:
         ps.append("...")
     return f"{ret} ({conv[cc]}{name})({', '.join(ps) or 'void'});"

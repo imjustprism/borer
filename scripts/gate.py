@@ -58,6 +58,7 @@ import concurrent.futures
 import contextlib
 import dataclasses
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -476,6 +477,9 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
 
 
 def main(argv: list[str]) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     check_only = "--check" in argv
     fast = "--fast" in argv
     use_cache = not check_only and "--no-cache" not in argv

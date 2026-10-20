@@ -2892,17 +2892,18 @@ mod tests {
             .expect("modeled");
             for &a in &floats {
                 for &b in &floats {
-                    let (ba, bb) = (a.to_bits(), b.to_bits());
-                    let ins: FxHashMap<Key, u64> = KEYS.iter().copied().zip([ba, bb]).collect();
+                    let (a_bits, b_bits) = (a.to_bits(), b.to_bits());
+                    let ins: FxHashMap<Key, u64> =
+                        KEYS.iter().copied().zip([a_bits, b_bits]).collect();
                     let at = Point {
                         ins: &ins,
                         seed: 1,
                         width: 64,
                     };
                     let flags = if let Flags::FCmp(q, ..) = &shape {
-                        Flags::FCmp(*q, Expr::Const(ba), Expr::Const(bb), 64)
+                        Flags::FCmp(*q, Expr::Const(a_bits), Expr::Const(b_bits), 64)
                     } else {
-                        Flags::Float(Expr::Const(ba), Expr::Const(bb), 64)
+                        Flags::Float(Expr::Const(a_bits), Expr::Const(b_bits), 64)
                     };
                     let want = Cond { cc: Cc(cc), flags }.eval();
                     assert_eq!(holds(&p, &at), want, "{cc:?} {shape:?} {a} {b}");
@@ -2929,14 +2930,15 @@ mod tests {
         for &cc in &CODES {
             for &a in &floats {
                 for &b in &floats {
-                    let (ba, bb) = (a.to_bits(), b.to_bits());
-                    let ins: FxHashMap<Key, u64> = KEYS.iter().copied().zip([ba, bb]).collect();
+                    let (a_bits, b_bits) = (a.to_bits(), b.to_bits());
+                    let ins: FxHashMap<Key, u64> =
+                        KEYS.iter().copied().zip([a_bits, b_bits]).collect();
                     let at = Point {
                         ins: &ins,
                         seed: 1,
                         width: 64,
                     };
-                    let want = float_cc(cc, float_of(ba, 64), float_of(bb, 64));
+                    let want = float_cc(cc, float_of(a_bits, 64), float_of(b_bits, 64));
                     let p = float_pred(cc, 64, &x, &y);
                     let got = holds(&p, &at);
                     match want {
