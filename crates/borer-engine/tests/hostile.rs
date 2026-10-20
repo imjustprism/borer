@@ -933,3 +933,26 @@ fn an_empty_section_past_the_file_is_not_cut() {
     ];
     _ = Program::from_bytes(PathBuf::from("elf"), bytes);
 }
+
+/// Heap a load may take beyond the file's own bytes, per byte of file.
+const LOAD_HEAP_PER_BYTE: usize = 8;
+
+/// Loading a real binary, this test's own, takes heap bounded by its size.
+///
+/// The running test binary is a PE, ELF or Mach-O as the host builds it,
+/// with tens of megabytes of debug sections, so the bound covers the
+/// section table, symbols, DWARF and relocations a real file has.
+#[test]
+fn loading_a_real_binary_takes_heap_bounded_by_its_size() {
+    let _one = serial();
+    let path = std::env::current_exe().expect("the test binary has a path");
+    let bytes = std::fs::read(&path).expect("the test binary is readable");
+    let size = bytes.len();
+    let (program, extra) = measured(|| Program::from_bytes_with(path, bytes, false, None));
+    assert!(program.is_ok(), "the test binary loads");
+    println!("load: {size} byte file, {extra} bytes of heap beyond it");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a {size} byte file took {extra} bytes of heap to load"
+    );
+}

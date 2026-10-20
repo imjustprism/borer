@@ -17,6 +17,9 @@
 //! `BORER_LATENCY=bin1;bin2 cargo test -p borer-engine --release --test bench latency -- --ignored --nocapture`
 //! times one cold `decompile` answer per sampled function as the MCP tool
 //! builds it, and hashes every answer ([`mcp_latency`]).
+//! `timings` also holds each function's cold decompile to a p95 and a
+//! maximum ([`DECOMPILE_P95_MS`], [`DECOMPILE_MAX_MS`]), the bars the
+//! notepad of the golden corpus is measured against.
 //!
 //! The dogfood sweep reports a wall time, but its spread across identical
 //! runs is wide enough to hide a small change: 6.7s to 9.4s on one machine
@@ -31,7 +34,8 @@
 )]
 
 use borer_engine::analysis::decompile::{
-    checked_header, decompile_all, decompile_named, step_times, text_check, warnings, with_header,
+    checked_header, decompile, decompile_all, decompile_named, step_times, text_check, warnings,
+    with_header,
 };
 use borer_engine::analysis::render::{
     Bisected, Budget, Evidence, INCOMPLETE_NOTE, Repair, Verdict, answered, bisect_iso,
@@ -66,7 +70,21 @@ fn best<T>(mut f: impl FnMut() -> T) -> Duration {
     best
 }
 
-/// Reports the best time for analysis and for decompiling a fixed slice.
+/// The p95 of one function's cold decompile, in milliseconds, that
+/// [`timings`] holds an optimized build to.
+///
+/// Notepad measured 7 ms (2026-10-20, `--profile sweep`); the bar leaves
+/// room for a slower machine, not for a slower engine.
+const DECOMPILE_P95_MS: u128 = 25;
+
+/// The slowest one function's cold decompile may be, in milliseconds.
+///
+/// Notepad's slowest measured 1.7 s, at 0x140013154.
+const DECOMPILE_MAX_MS: u128 = 5000;
+
+/// Reports the best time for analysis and for decompiling a fixed slice,
+/// then each function of the slice cold and alone: its p50, p95 and
+/// slowest, held to [`DECOMPILE_P95_MS`] and [`DECOMPILE_MAX_MS`].
 #[test]
 #[ignore = "set BORER_BENCH to a binary path to run this harness"]
 fn timings() {
@@ -76,8 +94,8 @@ fn timings() {
     let a = Analysis::compute(&program);
     let o = Overlay::default();
     let entries: Vec<u64> = a.functions.iter().take(SLICE).map(|f| f.entry).collect();
-    let decompile = best(|| decompile_all(&program, &a, &o, &entries));
-    let per = decompile.as_nanos() / entries.len().max(1) as u128;
+    let all = best(|| decompile_all(&program, &a, &o, &entries));
+    let per = all.as_nanos() / entries.len().max(1) as u128;
     println!("binary:     {path}");
     println!(
         "functions:  {} total, {} timed",
@@ -90,9 +108,33 @@ fn timings() {
     );
     println!(
         "decompile:  {:.1} ms for {} functions, {} ns each (best of {PASSES})",
-        decompile.as_secs_f64() * 1e3,
+        all.as_secs_f64() * 1e3,
         entries.len(),
         per
+    );
+    let cold = Analysis::compute(&program);
+    let mut each: Vec<(Duration, u64)> = entries
+        .iter()
+        .map(|&e| {
+            let t = Instant::now();
+            _ = decompile(&program, &cold, &o, e);
+            (t.elapsed(), e)
+        })
+        .collect();
+    each.sort_unstable();
+    let times: Vec<Duration> = each.iter().map(|&(t, _)| t).collect();
+    let (p95, (max, slowest)) = (
+        percentile(&times, 95),
+        each.last().copied().unwrap_or_default(),
+    );
+    println!(
+        "each:       p50 {:?}, p95 {p95:?}, max {max:?} at {slowest:#x}",
+        percentile(&times, 50)
+    );
+    assert!(p95.as_millis() <= DECOMPILE_P95_MS, "decompile p95 {p95:?}");
+    assert!(
+        max.as_millis() <= DECOMPILE_MAX_MS,
+        "decompiling {slowest:#x} took {max:?}"
     );
 }
 
