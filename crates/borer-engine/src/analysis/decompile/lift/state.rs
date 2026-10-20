@@ -308,15 +308,30 @@ impl<'a> Exec<'_, 'a> {
                 .map_or(Expr::Const(0), |bits| Expr::FConst(bits, ty)),
             Expr::Const(a) if self.is_data(a) => {
                 let key = Key::Global(a, ty.bits());
-                if self.emit {
-                    self.ctx.globals.insert((a, ty));
-                }
+                self.note_global(a, ty);
                 self.assumed(Expr::Var(key))
             }
             other => {
                 self.settle_frame_region(&other, None, false, false);
                 Expr::deref(other, ty)
             }
+        }
+    }
+
+    /// Records an access of `ty` to the global at `a` (emission pass only),
+    /// the first one fixing the type it is declared with.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The global's address.
+    /// * `ty` - The access type.
+    pub(in crate::analysis::decompile) fn note_global(&mut self, a: u64, ty: Ty) {
+        if !self.emit {
+            return;
+        }
+        self.ctx.globals.insert((a, ty));
+        if !self.ctx.global_types.contains_key(&a) {
+            std::sync::Arc::make_mut(&mut self.ctx.global_types).insert(a, ty);
         }
     }
 
@@ -1072,10 +1087,9 @@ impl<'a> Exec<'_, 'a> {
             p.store(&addr, ty, v);
         }
         if let Expr::Const(a) = addr
-            && self.emit
             && self.is_data(a)
         {
-            self.ctx.globals.insert((a, ty));
+            self.note_global(a, ty);
         }
         if !self.emit {
             return;
@@ -1084,7 +1098,7 @@ impl<'a> Exec<'_, 'a> {
         let n = self.names();
         let line = match addr {
             Expr::Const(a) if self.is_data(a) => {
-                format!("{} = {};", n.key(Key::Global(a, ty.bits())), v.render(&n))
+                format!("{} = {};", n.global(a, ty.bits()).0, v.render(&n))
             }
             other => {
                 let lhs = Expr::deref(other, ty);
@@ -1274,9 +1288,7 @@ impl<'a> Exec<'_, 'a> {
                 Expr::deref(Expr::Sp(k), ty)
             }
             Expr::Const(a) if self.is_data(a) => {
-                if self.emit {
-                    self.ctx.globals.insert((a, ty));
-                }
+                self.note_global(a, ty);
                 Expr::Var(Key::Global(a, ty.bits()))
             }
             other => Expr::deref(other, ty),

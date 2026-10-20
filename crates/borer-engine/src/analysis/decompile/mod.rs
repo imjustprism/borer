@@ -195,6 +195,9 @@ struct Ctx<'a> {
     /// The stack slots among `declared`, shared with the renderer
     /// ([`Names::slot_types`]).
     slot_types: std::sync::Arc<BTreeMap<i64, Ty>>,
+    /// The type each of `globals` is declared with, shared with the
+    /// renderer ([`Names::global_types`]).
+    global_types: std::sync::Arc<BTreeMap<u64, Ty>>,
     /// Absolute data accesses hoisted to named globals.
     globals: BTreeSet<(u64, Ty)>,
     /// Lowest stack offset whose address reached a callee or memory: slots
@@ -389,6 +392,7 @@ impl<'a> Ctx<'a> {
             reg_params,
             word: self.conv.word,
             slot_types: self.slot_types.clone(),
+            global_types: self.global_types.clone(),
         }
     }
 }
@@ -927,6 +931,7 @@ fn new_ctx<'a>(
         params: Vec::new(),
         declared: BTreeMap::new(),
         slot_types: std::sync::Arc::default(),
+        global_types: std::sync::Arc::default(),
         globals: BTreeSet::new(),
         escape_floor: None,
         rax_written: false,
@@ -2494,6 +2499,7 @@ fn decompile_in<L: Lifter>(
     let globals: Vec<cir::Decl> = ctx
         .globals
         .iter()
+        .filter(|(addr, ty)| ctx.global_types.get(addr).is_none_or(|t| t == ty))
         .filter_map(|(addr, ty)| {
             let g = names.key(Key::Global(*addr, ty.bits()));
             let import = names.import_at(*addr).is_some_and(|n| n == g);

@@ -55,6 +55,10 @@ pub(super) struct Names<'a> {
     /// The type each stack slot the text names is declared with, by its
     /// frame offset: what its name reads and writes.
     pub slot_types: std::sync::Arc<std::collections::BTreeMap<i64, Ty>>,
+    /// The type each global the text names is declared with, by its
+    /// address: the width it was first accessed at, which its name reads
+    /// and writes.
+    pub global_types: std::sync::Arc<std::collections::BTreeMap<u64, Ty>>,
 }
 
 /// A data symbol's name as C can spell it.
@@ -505,6 +509,29 @@ impl Names<'_> {
         }
     }
 
+    /// Names an access of `bits` to the global at `addr`: its name where
+    /// the access is as wide as its declaration ([`Names::global_types`]),
+    /// else a load or a store of that width through its address,
+    /// `*(uint128_t*)&newtime` beside a `uint64_t newtime`.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The global's address.
+    /// * `bits` - The access width in bits.
+    ///
+    /// # Returns
+    ///
+    /// `(text, precedence)`.
+    pub(super) fn global(&self, addr: u64, bits: u8) -> (String, u8) {
+        match self.global_types.get(&addr) {
+            Some(declared) if declared.bits() != bits => {
+                let name = self.key(Key::Global(addr, declared.bits()));
+                (format!("*({}*)&{name}", Ty::from_bits(bits).name()), UNARY)
+            }
+            Some(_) | None => (self.key(Key::Global(addr, bits)), ATOM),
+        }
+    }
+
     /// The parameter index of an incoming stack-argument slot.
     ///
     /// # Arguments
@@ -832,6 +859,7 @@ impl Expr {
                     .unwrap_or_else(|| render_const_in(*v, hex, n.word)),
                 ATOM,
             ),
+            Expr::Var(Key::Global(a, bits)) => n.global(*a, *bits),
             Expr::Var(k) => (n.key(*k), ATOM),
             Expr::Str(s) => (s.clone(), ATOM),
             Expr::Sp(k) => (format!("&{}", n.slot(*k)), UNARY),

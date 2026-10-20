@@ -119,6 +119,7 @@ pub(crate) fn call_sites(
         reg_params: u32::try_from(conv.args.len()).unwrap_or(0),
         word: conv.word,
         slot_types: Arc::default(),
+        global_types: Arc::default(),
     };
     let mut out = Vec::new();
     for (i, b) in f.blocks.iter().enumerate() {

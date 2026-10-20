@@ -10042,3 +10042,23 @@ fn a_zero_filled_global_is_a_variable() {
     assert!(text.contains("FILE *stdout;"), "{text}");
     assert!(text.contains("return stdout;"), "{text}");
 }
+
+/// A global read at two widths is one variable, declared at the first.
+///
+/// `mov rax,[rip+g]; mov ecx,[rip+g]; add rax,rcx; ret` reads the same
+/// eight bytes whole and then their low half: one declaration, the second
+/// read through its address, as C reads part of an object.
+#[test]
+fn a_global_read_at_two_widths_is_declared_once() {
+    let code = [
+        0x48, 0x8b, 0x05, 0xf9, 0x1f, 0x00, 0x00, // ASM: mov rax,[rip+0x1ff9]
+        0x8b, 0x0d, 0xf3, 0x1f, 0x00, 0x00, // ASM: mov ecx,[rip+0x1ff3]
+        0x48, 0x01, 0xc8, // ASM: add rax,rcx
+        0xc3, // ASM: ret
+    ];
+    let p = program64_with_globals(&code, false, &[("counter", 0x1_4000_3000)]);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert_eq!(text.matches(" counter;").count(), 1, "{text}");
+    assert!(text.contains("uint64_t counter;"), "{text}");
+    assert!(text.contains("*(uint32_t*)&counter"), "{text}");
+}

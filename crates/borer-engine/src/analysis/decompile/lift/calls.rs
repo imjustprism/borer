@@ -1441,10 +1441,8 @@ impl<'a> Exec<'_, 'a> {
                 return Some(imp);
             }
             if self.is_data(a) {
-                if self.emit {
-                    self.ctx.globals.insert((a, ty));
-                }
-                return Some(format!("(*{})", n.key(Key::Global(a, ty.bits()))));
+                self.note_global(a, ty);
+                return Some(format!("(*{})", n.global(a, ty.bits()).0));
             }
         }
         let v = match addr {

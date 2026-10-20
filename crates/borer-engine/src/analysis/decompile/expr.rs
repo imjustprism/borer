@@ -5168,6 +5168,7 @@ mod cond_tests {
             reg_params: 0,
             word: 8,
             slot_types: Arc::default(),
+            global_types: Arc::default(),
         }
     }
 
