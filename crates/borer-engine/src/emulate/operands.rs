@@ -299,7 +299,7 @@ impl Emulator<'_> {
     pub(super) fn fetch(&self, ip: u64) -> Option<Vec<u8>> {
         let window = ip..ip.saturating_add(16);
         if !self.mem.any_dirty(window.clone())
-            && self.patched.range(window).next().is_none()
+            && !self.mem.any_patched(window)
             && let Some(s) = self.program.read_va_upto(ip, 16)
         {
             return Some(s.to_vec());

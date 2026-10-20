@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
-use crate::num::lo8;
+use crate::num::{from_usize, lo8};
 
 /// Eight neighbouring bytes: the addresses that agree in all but the low
 /// three bits.
@@ -25,6 +25,12 @@ struct Chunk {
     /// Bit `k` set: the run wrote byte `k` outside the stack; always a
     /// subset of `held`.
     dirty: u8,
+    /// Bit `k` set: byte `k` was set up before the run ([`Store::poke`]);
+    /// always a subset of `held`. Kept apart from `dirty` so a deliberate
+    /// patch is not reported as code the program unpacked, while still
+    /// being fetched as code: an experiment that nops a check out has to
+    /// see the nops execute.
+    patched: u8,
 }
 
 /// The bytes a run holds, by address, and which of them it wrote outside
@@ -178,6 +184,76 @@ impl Store {
     ///   wrapping at the top of the address space.
     /// * `bytes` - The bytes, in address order.
     pub(super) fn plant(&mut self, at: u64, bytes: impl IntoIterator<Item = u8>) {
+        self.plant_marked(at, bytes, false);
+    }
+
+    /// Holds a byte set up before a run: as [`Store::set`] unmarked, and
+    /// marked patched.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The address.
+    /// * `v` - The byte.
+    pub(super) fn poke(&mut self, a: u64, v: u8) {
+        self.plant_marked(a, [v], true);
+    }
+
+    /// Holds a run of bytes set up before a run, as [`Store::poke`] does
+    /// each one, looking each chunk up once.
+    ///
+    /// A store that holds none of its own yet (a clone of a frozen machine,
+    /// as a replay sets up every trial) builds its layer from the run in
+    /// one pass, reading the shared chunks the run covers in one walk:
+    /// a lookup and an insert per chunk was most of a trial's setup.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address of the first byte; later ones follow it,
+    ///   wrapping at the top of the address space.
+    /// * `bytes` - The bytes, in address order.
+    pub(super) fn poke_run(&mut self, at: u64, bytes: &[u8]) {
+        let end = at.checked_add(from_usize(bytes.len()));
+        let (Some(end), true, false) = (end, self.chunks.is_empty(), bytes.is_empty()) else {
+            self.plant_marked(at, bytes.iter().copied(), true);
+            return;
+        };
+        let (first, _) = place(at);
+        let (last, _) = place(end - 1);
+        let mut shared = self.base.range(first..=last).peekable();
+        let mut fresh: Vec<(u64, Chunk)> = Vec::new();
+        for (&v, i) in bytes.iter().zip(0u64..) {
+            let (key, k) = place(at + i);
+            if fresh.last().is_none_or(|(held, _)| *held != key) {
+                while shared.next_if(|(s, _)| **s < key).is_some() {}
+                let c = shared
+                    .next_if(|(s, _)| **s == key)
+                    .map_or_else(Chunk::default, |(_, c)| *c);
+                fresh.push((key, c));
+            }
+            let Some((_, c)) = fresh.last_mut() else {
+                continue;
+            };
+            let bit = 1 << k;
+            if c.held & bit == 0 {
+                self.len += 1;
+            }
+            c.held |= bit;
+            c.patched |= bit;
+            c.bytes[usize::from(k)] = v;
+        }
+        self.chunks = fresh.into_iter().collect();
+    }
+
+    /// Holds a run of bytes unmarked as written, marked patched when
+    /// `patched`.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address of the first byte; later ones follow it,
+    ///   wrapping at the top of the address space.
+    /// * `bytes` - The bytes, in address order.
+    /// * `patched` - Whether they were set up before the run.
+    fn plant_marked(&mut self, at: u64, bytes: impl IntoIterator<Item = u8>, patched: bool) {
         let Self { base, chunks, len } = self;
         let mut a = at;
         let mut slot: Option<(u64, &mut Chunk)> = None;
@@ -200,6 +276,9 @@ impl Store {
                 *len += 1;
             }
             c.held |= bit;
+            if patched {
+                c.patched |= bit;
+            }
             c.bytes[usize::from(k)] = v;
         }
     }
@@ -227,6 +306,22 @@ impl Store {
         let (last, _) = place(range.end - 1);
         self.shown(first..=last).any(|(key, c)| {
             (0..8).any(|k| c.dirty & (1 << k) != 0 && range.contains(&address(key, k)))
+        })
+    }
+
+    /// Whether any byte in `range` was set up before the run.
+    ///
+    /// # Arguments
+    ///
+    /// * `range` - The addresses, start included, end excluded.
+    pub(super) fn any_patched(&self, range: Range<u64>) -> bool {
+        if range.is_empty() {
+            return false;
+        }
+        let (first, _) = place(range.start);
+        let (last, _) = place(range.end - 1);
+        self.shown(first..=last).any(|(key, c)| {
+            (0..8).any(|k| c.patched & (1 << k) != 0 && range.contains(&address(key, k)))
         })
     }
 
