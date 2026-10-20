@@ -23,6 +23,7 @@ mod calls;
 mod conv;
 mod effects;
 mod float;
+mod kernel;
 mod pack;
 mod record;
 mod state;
