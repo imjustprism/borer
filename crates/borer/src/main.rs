@@ -118,6 +118,10 @@ struct BorerServer {
     program_packs: Arc<RwLock<Arc<Packs>>>,
     /// The process attached for reading, `None` until `live_attach`.
     live: Arc<Mutex<Option<LiveSession>>>,
+    /// Whether `live_attach` takes any process the user can read, set at
+    /// start by `BORER_LIVE_ANY=1`; otherwise only one whose main image is
+    /// the loaded binary ([`tools::live::runs_loaded`]).
+    live_any: bool,
     /// The hand-over to the next worker: asked for by `reload`, carried out
     /// by the transport once the reload reply and every earlier one are
     /// written.

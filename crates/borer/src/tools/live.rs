@@ -18,6 +18,63 @@ use crate::params::{
 };
 use crate::state::{NO_BINARY, lock};
 
+/// The environment variable that, set to `1`, lets `live_attach` take any
+/// process the user can read rather than only one running the loaded
+/// binary.
+pub(crate) const LIVE_ANY_ENV: &str = "BORER_LIVE_ANY";
+
+/// Whether a process's main image is the loaded binary, the one process
+/// `live_attach` reads unless the user opened it to any.
+///
+/// A process name or id is a tool argument, and a tool argument can come
+/// from text inside the analyzed binary, so without this an agent could be
+/// talked into reading a browser's or a password manager's memory. The
+/// image is the loaded binary when both paths name one file, or when the
+/// image's file holds the loaded bytes exactly (a copy run from elsewhere).
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary, `None` before `load_binary`.
+/// * `image` - The process's main module, `None` when it lists none.
+/// * `who` - The process as a message names it.
+///
+/// # Errors
+///
+/// When nothing is loaded, the process lists no main module, or its image
+/// is another file; the message says how to attach anyway.
+pub(crate) fn runs_loaded(
+    program: Option<&Program>,
+    image: Option<&live::Module>,
+    who: &str,
+) -> Result<(), String> {
+    let anyway =
+        format!("set {LIVE_ANY_ENV}=1 in the server's environment to attach to any process");
+    let program = program.ok_or_else(|| {
+        format!("load the binary {who} runs first: live_attach reads only a process whose main image is the loaded binary; or {anyway}")
+    })?;
+    let image = image.ok_or_else(|| format!("{who} lists no main module; {anyway}"))?;
+    let path = std::path::Path::new(&image.path);
+    if borer_engine::program::unusable_path(path).is_none() {
+        let same_file = matches!(
+            (std::fs::canonicalize(path), std::fs::canonicalize(&program.path)),
+            (Ok(a), Ok(b)) if a == b
+        );
+        let same_bytes = || {
+            std::fs::metadata(path)
+                .is_ok_and(|m| m.is_file() && num::from_usize(program.bytes.len()) == m.len())
+                && std::fs::read(path).is_ok_and(|b| b == program.bytes)
+        };
+        if same_file || same_bytes() {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "{who} runs {}, not the loaded binary {}: live_attach reads only a process running the loaded binary; load_binary its image first, or {anyway}",
+        borer_engine::text::short_path(&image.path),
+        borer_engine::text::short_path(&program.path.display().to_string())
+    ))
+}
+
 /// A process attached for reading, with where the loaded binary sits in it
 /// and the snapshots taken of its memory.
 #[derive(Debug)]
@@ -307,11 +364,14 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no process matches, several do, or the system refuses a read handle.
+    /// When no process matches, several do, the system refuses a read
+    /// handle, or the process does not run the loaded binary
+    /// ([`runs_loaded`]) and the server was not started with
+    /// `BORER_LIVE_ANY=1`.
     #[tool(
-        description = "Attach read-only to a running process (name or pid); maps the loaded binary onto it so live tools take static addresses and names.",
+        description = "Attach read-only to a running process (name or pid) whose main image is the loaded binary (any process only when the server runs with BORER_LIVE_ANY=1); maps the loaded binary onto it so live tools take static addresses and names. Replaces an earlier attach and its watches.",
         annotations(
-            read_only_hint = true,
+            read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false,
             open_world_hint = true
@@ -323,6 +383,14 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let proc = borer_live::Process::attach(&process).map_err(err_params)?;
         let modules = proc.modules();
+        if !self.live_any {
+            let image = modules
+                .iter()
+                .find(|m| m.name.eq_ignore_ascii_case(proc.name()))
+                .or_else(|| modules.first());
+            let who = format!("process {} ({})", proc.pid(), proc.name());
+            runs_loaded(self.loaded().as_deref(), image, &who).map_err(err_params)?;
+        }
         let mut out = format!(
             "attached to {} (pid {}), {} modules, read-only\n",
             proc.name(),
@@ -384,8 +452,8 @@ impl BorerServer {
     #[tool(
         description = "Detach from the attached process and drop its watches.",
         annotations(
-            read_only_hint = true,
-            destructive_hint = false,
+            read_only_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = false
         )
@@ -790,7 +858,10 @@ mod tests {
         use crate::params::LiveReadParams;
         use rmcp::handler::server::wrapper::Parameters;
         let exe = std::env::current_exe().expect("the test binary has a path");
-        let server = crate::BorerServer::default();
+        let server = crate::BorerServer {
+            live_any: true,
+            ..crate::BorerServer::default()
+        };
         let attached = server
             .live_attach(Parameters(LiveAttachParams {
                 process: std::process::id().to_string(),
@@ -848,6 +919,76 @@ mod tests {
         server.live_detach().expect("detach");
     }
 
+    /// Only a process running the loaded binary is attached: with nothing
+    /// loaded, or another binary loaded, attaching to this test process is
+    /// refused, and with the test binary itself loaded it is taken. A copy
+    /// of the loaded file at another path is the same image by its bytes.
+    ///
+    /// # Panics
+    ///
+    /// When another program's process is attached or the binary's own is
+    /// refused.
+    #[cfg(windows)]
+    #[test]
+    fn live_attach_takes_only_a_process_running_the_loaded_binary() {
+        use crate::params::LiveAttachParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let me = std::process::id().to_string();
+        let attach = |server: &crate::BorerServer| {
+            server.live_attach(Parameters(LiveAttachParams {
+                process: me.clone(),
+            }))
+        };
+        let empty = crate::BorerServer::default();
+        let none = attach(&empty).expect_err("nothing loaded");
+        assert!(none.message.contains("load the binary"), "{}", none.message);
+        assert!(
+            none.message.contains("BORER_LIVE_ANY=1"),
+            "{}",
+            none.message
+        );
+        let other = attach(&raw_server()).expect_err("another binary loaded");
+        assert!(
+            other.message.contains("not the loaded binary"),
+            "{}",
+            other.message
+        );
+        assert!(crate::state::lock(&empty.live).is_none());
+        let server = crate::BorerServer::default();
+        let exe = std::env::current_exe().expect("the test binary has a path");
+        load_into(&server, &exe);
+        attach(&server).expect("the loaded binary's own process");
+        server.live_detach().expect("detach");
+        let exe_module = |path: &std::path::Path| borer_engine::live::Module {
+            name: "x.exe".to_owned(),
+            path: path.display().to_string(),
+            base: 0,
+            size: 0,
+        };
+        let program = server.loaded().expect("loaded");
+        let dir = std::env::temp_dir().join(format!("borer-live-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let copy = dir.join("copy.exe");
+        std::fs::copy(&exe, &copy).expect("copy the test binary");
+        let changed = dir.join("changed.exe");
+        let mut bytes = std::fs::read(&exe).expect("read");
+        if let Some(last) = bytes.last_mut() {
+            *last ^= 0xff;
+        }
+        std::fs::write(&changed, &bytes).expect("write");
+        let by_copy = super::runs_loaded(Some(&program), Some(&exe_module(&copy)), "p");
+        let by_change = super::runs_loaded(Some(&program), Some(&exe_module(&changed)), "p");
+        let by_share = super::runs_loaded(
+            Some(&program),
+            Some(&exe_module(std::path::Path::new(r"\\host\share\x.exe"))),
+            "p",
+        );
+        std::fs::remove_dir_all(&dir).expect("clean up");
+        assert!(by_copy.is_ok(), "{by_copy:?}");
+        assert!(by_change.is_err(), "another file's bytes");
+        assert!(by_share.is_err(), "a share is never opened");
+    }
+
     /// Every live refusal is invalid params, as a static one is, so one code
     /// tells the agent to change the call: nothing attached, an address not
     /// readable, a process name that is empty.
@@ -861,7 +1002,10 @@ mod tests {
         use crate::params::LiveReadParams;
         use rmcp::handler::server::wrapper::Parameters;
         use rmcp::model::ErrorCode;
-        let server = crate::BorerServer::default();
+        let server = crate::BorerServer {
+            live_any: true,
+            ..crate::BorerServer::default()
+        };
         let read = |address: &str| {
             server
                 .live_read(Parameters(LiveReadParams {
@@ -908,7 +1052,10 @@ mod tests {
         use crate::params::LiveModulesParams;
         use crate::params::LiveWatchParams;
         use rmcp::handler::server::wrapper::Parameters;
-        let server = raw_server();
+        let server = crate::BorerServer {
+            live_any: true,
+            ..raw_server()
+        };
         let attach = || {
             server
                 .live_attach(Parameters(LiveAttachParams {
@@ -974,7 +1121,10 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .expect("ping starts");
-        let server = crate::BorerServer::default();
+        let server = crate::BorerServer {
+            live_any: true,
+            ..crate::BorerServer::default()
+        };
         let mut tries = 0;
         while let Err(e) = server.live_attach(Parameters(LiveAttachParams {
             process: child.id().to_string(),
@@ -1030,7 +1180,10 @@ mod tests {
         use crate::params::LiveAttachParams;
         use crate::params::LiveWatchParams;
         use rmcp::handler::server::wrapper::Parameters;
-        let server = raw_server();
+        let server = crate::BorerServer {
+            live_any: true,
+            ..raw_server()
+        };
         server
             .live_attach(Parameters(LiveAttachParams {
                 process: std::process::id().to_string(),
