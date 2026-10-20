@@ -1262,7 +1262,9 @@ fn in_literal(head: &str) -> bool {
 /// the mask does not cover stays as it was: narrowing it would sign-extend
 /// or wrap a value the machine kept. A local no read needs more than the
 /// low 32 bits of ([`low_demand`]) is a `uint32_t` too, and a value
-/// written to it is a 32-bit read of its own.
+/// written to it is a 32-bit read of its own. A local every read of which
+/// says a byte or a word is left to [`type_locals`], which declares it at
+/// that width.
 ///
 /// # Arguments
 ///
@@ -1295,6 +1297,16 @@ pub(super) fn lane_locals(text: &str) -> String {
         .into_iter()
         .filter_map(|name| {
             let at = uses.get(name.as_str()).map_or(&[][..], Vec::as_slice);
+            let reads = at
+                .iter()
+                .filter_map(|&k| lines.get(k))
+                .filter(|l| !is_declaration(l));
+            if inferred_type_on(&lines, reads, &name)
+                .and_then(integer_bits)
+                .is_some_and(|bits| bits < 32)
+            {
+                return None;
+            }
             lane_type(&lines, at, &name, &sinks, &held)
                 .or_else(|| low.contains(&name).then_some("uint32_t"))
                 .map(|ty| (name, ty))
@@ -4883,6 +4895,34 @@ mod lane_tests {
         assert!(out.contains("if ((int32_t)var1 > 3) {"), "{out}");
         assert!(out.contains("uint64_t var2, var3;"), "{out}");
         assert!(out.contains("var3 = (a2 - 1) & 0xffffffff;"), "{out}");
+    }
+
+    /// A local every read of which takes its low byte is left to the
+    /// typing that declares it a byte, though a 32-bit mask writes it.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_local_read_as_a_byte_stays_for_the_byte_typing() {
+        let text = concat!(
+            "// signature: uint64_t f(uint64_t a1, uint64_t a2)
+",
+            "uint64_t var2;
+",
+            "
+",
+            "var2 = (a1 + 1) & 0xffffffff;
+",
+            "sub_1(((var2 & 0xff) | a2) != 0);
+",
+            "return var2 & 0xff;
+",
+        );
+        let lanes = lane_locals(text);
+        assert!(lanes.contains("uint64_t var2;"), "{lanes}");
+        let out = super::type_locals(&lanes);
+        assert!(out.contains("uint8_t var2;"), "{out}");
     }
 }
 
