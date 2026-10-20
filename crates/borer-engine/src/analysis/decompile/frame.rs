@@ -12,9 +12,15 @@
 //! ([`Frame::store`]), never the integer converted. A slot whose
 //! votes conflict, or that shares bytes with another, keeps the type of
 //! its first access, as before: a conflict never picks a side.
+//!
+//! Each slot solved as a float is a choice point ([`Site::Slot`]): a
+//! decompile whose [`Choices`] render it literally leaves it unsolved, so
+//! it keeps the machine type of its first access and its float accesses
+//! read it through bit casts.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::choice::{Choices, Site};
 use super::expr::{Expr, Ty};
 
 /// How one access uses a slot.
@@ -83,7 +89,12 @@ impl Frame {
 
     /// Solves the slots' types from the votes recorded so far, and stops
     /// recording.
-    pub(super) fn solve(&mut self) {
+    ///
+    /// # Arguments
+    ///
+    /// * `literal` - The choice points rendered literally: a slot among
+    ///   them is left unsolved.
+    pub(super) fn solve(&mut self, literal: &Choices) {
         let spans: Vec<(i64, i64)> = self
             .votes
             .iter()
@@ -103,10 +114,16 @@ impl Frame {
                     [64] => Ty::F64,
                     _ => return None,
                 };
-                (v.float && !v.int && alone(*k, end)).then_some((*k, ty))
+                (v.float && !v.int && alone(*k, end) && !literal.literal(Site::Slot(*k)))
+                    .then_some((*k, ty))
             })
             .collect();
         self.solved = Some(solved);
+    }
+
+    /// Returns the offsets of the slots solved as floats, in order.
+    pub(super) fn floats(&self) -> impl Iterator<Item = i64> + '_ {
+        self.solved.iter().flat_map(BTreeMap::keys).copied()
     }
 
     /// Returns the solved type of a slot.
@@ -143,5 +160,36 @@ impl Frame {
             }
             (_, v) => (ty, v),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Access, Choices, Frame, Site, Ty};
+    use crate::analysis::Overlay;
+
+    /// A slot read and written only as a float is solved as one and is a
+    /// choice point; rendered literally, it keeps its first access's type.
+    ///
+    /// # Panics
+    ///
+    /// When the check fails.
+    #[test]
+    fn a_literal_slot_is_left_unsolved() {
+        let votes = |literal: &Choices| {
+            let mut f = Frame::default();
+            f.note(-0xc, Access::StoreConst(Ty::U32));
+            f.note(-0xc, Access::Load(Ty::F32));
+            f.note(-0x10, Access::Load(Ty::U32));
+            f.solve(literal);
+            f
+        };
+        let solved = votes(&Choices::default());
+        assert_eq!(solved.ty(-0xc), Some(Ty::F32));
+        assert_eq!(solved.floats().collect::<Vec<_>>(), [-0xc]);
+        let literal = Site::Slot(-0xc).moved(&Overlay::default()).choices;
+        let kept = votes(&literal);
+        assert_eq!(kept.ty(-0xc), None);
+        assert_eq!(kept.floats().count(), 0);
     }
 }

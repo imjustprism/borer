@@ -7,7 +7,7 @@ use super::{
     writes_shown,
 };
 use crate::analysis::decompile::interp::{Mode, Script};
-use crate::analysis::decompile::signature::{Kind, Signature, passing, printed};
+use crate::analysis::decompile::signature::{Kind, Passing, Signature, passing, printed};
 use crate::analysis::decompile::{Pass, Passes, decompile_named};
 use crate::analysis::render::oracle::compared_constants;
 use crate::analysis::render::*;
@@ -344,35 +344,13 @@ pub fn bisect_iso(
         passes: Passes::NONE,
         ..o.clone()
     };
-    let text = decompile_named(p, a, &full, entry).ok_or("the function does not decompile")?;
-    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
-    let sig = printed(&text, word)?;
-    let inputs = generated(&sig.parameter_kinds(), count, seed, entry)?;
-    let pass = passing(p, a, o, entry);
+    let drawn = draw(p, a, &full, entry, count, seed)?;
     let differs = |skip: Passes| -> Option<Counterexample> {
         let under = Overlay {
             passes: skip,
             ..full.clone()
         };
-        let text = decompile_named(p, a, &under, entry)?;
-        let shared = Shared {
-            script: Script::read_iso(p, a, &under, entry, &text),
-            sig: Ok(sig.clone()),
-            pass: Some(pass.clone()),
-        };
-        inputs.iter().find_map(
-            |input| match run_one(p, &shared, entry, input, budget).verdict {
-                Verdict::Differs(line, why) => Some(Counterexample {
-                    input: input.iter().map(Arg::shown).collect::<Vec<_>>().join(" "),
-                    line: line
-                        .checked_sub(1)
-                        .and_then(|k| text.lines().nth(k))
-                        .map_or_else(String::new, |l| l.trim().to_owned()),
-                    why,
-                }),
-                Verdict::Agrees | Verdict::Unchecked(..) => None,
-            },
-        )
+        first_difference(p, a, &under, entry, &drawn, budget).differs
     };
     let Some(mut at) = differs(Passes::NONE) else {
         return Ok(Bisected::Agrees);
@@ -380,16 +358,9 @@ pub fn bisect_iso(
     if let Some(before) = differs(Passes::after(0)) {
         return Ok(Bisected::Unbisected(before));
     }
-    let (mut good, mut bad) = (0, Pass::ALL.len());
-    while bad - good > 1 {
-        let mid = good + (bad - good) / 2;
-        match differs(Passes::after(mid)) {
-            Some(c) => {
-                bad = mid;
-                at = c;
-            }
-            None => good = mid,
-        }
+    let (good, bad, c) = first_breaking(&differs);
+    if let Some(c) = c {
+        at = c;
     }
     let Some(&pass) = Pass::ALL.get(good) else {
         return Ok(Bisected::Unbisected(at));
@@ -408,6 +379,156 @@ pub fn bisect_iso(
         alone,
         texts: (text_of(good), text_of(bad)),
     })
+}
+
+/// Bisects [`Pass::ALL`] for the first pass whose text differs, given that
+/// the text with none of them agrees and the text with all of them does
+/// not.
+///
+/// # Arguments
+///
+/// * `differs` - Checks the text built without a set of passes: the input
+///   it differs on, or `None` when it agrees.
+///
+/// # Returns
+///
+/// How many passes run in the last text that agreed and in the first that
+/// differed, and the counterexample of the narrowest text that differed,
+/// `None` when the bisection probed none.
+pub(super) fn first_breaking(
+    differs: &impl Fn(Passes) -> Option<Counterexample>,
+) -> (usize, usize, Option<Counterexample>) {
+    let (mut good, mut bad, mut at) = (0, Pass::ALL.len(), None);
+    while bad - good > 1 {
+        let mid = good + (bad - good) / 2;
+        match differs(Passes::after(mid)) {
+            Some(c) => {
+                bad = mid;
+                at = Some(c);
+            }
+            None => good = mid,
+        }
+    }
+    (good, bad, at)
+}
+
+/// The inputs a function's texts are checked on, drawn once from the
+/// signature one of them prints, with the convention the binary is called
+/// by.
+#[derive(Debug, Clone)]
+pub(super) struct Drawn {
+    /// The signature the inputs were drawn from.
+    sig: Signature,
+    /// The inputs.
+    inputs: Vec<Vec<Arg>>,
+    /// How the binary takes its arguments.
+    pass: Passing,
+}
+
+/// Draws the inputs a function's texts are checked on, as
+/// [`check_generated_iso`] draws them.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - The overlay whose text's signature types the inputs.
+/// * `entry` - The function's entry.
+/// * `count` - How many inputs.
+/// * `seed` - The inputs' seed.
+///
+/// # Returns
+///
+/// The inputs, the signature and the convention.
+///
+/// # Errors
+///
+/// As [`check_generated`].
+pub(super) fn draw(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    count: usize,
+    seed: u64,
+) -> Result<Drawn, String> {
+    let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
+    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let sig = printed(&text, word)?;
+    let inputs = generated(&sig.parameter_kinds(), count, seed, entry)?;
+    Ok(Drawn {
+        sig,
+        inputs,
+        pass: passing(p, a, o, entry),
+    })
+}
+
+/// What one text did on drawn inputs under the ISO check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Checked {
+    /// The first input the text differs on, and where; `None` when none.
+    pub(super) differs: Option<Counterexample>,
+    /// Inputs the text agreed on before it differed, or in all.
+    pub(super) agreed: usize,
+}
+
+/// Runs a function's text, read as ISO C, beside the binary on drawn
+/// inputs, until the first input it differs on.
+///
+/// A text that does not decompile or read, or an input it leaves
+/// unchecked, differs on nothing: the check looks for a difference, not
+/// for a claim.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `u` - The overlay the text is built under.
+/// * `entry` - The function's entry.
+/// * `drawn` - The inputs.
+/// * `budget` - Steps each run is given, on either side.
+///
+/// # Returns
+///
+/// The first difference and how many inputs agreed.
+pub(super) fn first_difference(
+    p: &Program,
+    a: &Analysis,
+    u: &Overlay,
+    entry: u64,
+    drawn: &Drawn,
+    budget: usize,
+) -> Checked {
+    let mut out = Checked {
+        differs: None,
+        agreed: 0,
+    };
+    let Some(text) = decompile_named(p, a, u, entry) else {
+        return out;
+    };
+    let shared = Shared {
+        script: Script::read_iso(p, a, u, entry, &text),
+        sig: Ok(drawn.sig.clone()),
+        pass: Some(drawn.pass.clone()),
+    };
+    for input in &drawn.inputs {
+        match run_one(p, &shared, entry, input, budget).verdict {
+            Verdict::Differs(line, why) => {
+                out.differs = Some(Counterexample {
+                    input: input.iter().map(Arg::shown).collect::<Vec<_>>().join(" "),
+                    line: line
+                        .checked_sub(1)
+                        .and_then(|k| text.lines().nth(k))
+                        .map_or_else(String::new, |l| l.trim().to_owned()),
+                    why,
+                });
+                return out;
+            }
+            Verdict::Agrees => out.agreed += 1,
+            Verdict::Unchecked(..) => {}
+        }
+    }
+    out
 }
 
 /// Inputs a vector request runs unless its spec says how many.

@@ -8,8 +8,10 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::decompile::{checked_header, decompile_named, unset_reads};
-use borer_engine::analysis::render::{Verdict, check_generated, check_generated_iso};
+use borer_engine::analysis::decompile::{Site, checked_header, decompile_named, unset_reads};
+use borer_engine::analysis::render::{
+    Budget, Evidence, Repair, Verdict, answered, check_generated, check_generated_iso, repair_iso,
+};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program, Section};
 
@@ -631,4 +633,50 @@ fn values_that_double_each_round_are_checked_in_bounded_time() {
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("the check finishes");
     assert!(header.contains("checked vs binary"), "{header}");
+}
+
+/// The repair search masks a signed quotient returned in `rax` to its lane.
+///
+/// The text spells the value as C converts it, which widens it by its sign where the machine's `idiv`
+/// cleared the upper half; the ISO check finds the difference and the
+/// repair search keeps the rendering that masks the value to its lane.
+/// A function the check agrees with is answered as it was.
+#[test]
+fn the_repair_search_masks_a_signed_quotient_to_its_lane() {
+    let mut code = vec![
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0xb9, 0xfb, 0xff, 0xff, 0xff, // ASM: mov ecx,0xfffffffb
+        0x99, // ASM: cdq
+        0xf7, 0xf9, // ASM: idiv ecx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0x48, 0x89, 0xc8, 0xc3]); // ASM: mov rax,rcx; ret
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let plain = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+    let rows = check_generated_iso(&p, &a, &o, TEXT, 8, 1, 20_000).expect("the text reads");
+    assert!(
+        rows.iter().any(|(_, v)| matches!(v, Verdict::Differs(..))),
+        "{plain}\n{rows:?}"
+    );
+    let r = repair_iso(&p, &a, &o, TEXT, Budget::ANSWER);
+    let Repair::Repaired { moved, tried, .. } = &r else {
+        panic!("{plain}\n{r:?}");
+    };
+    assert_eq!(moved, &[Site::Return]);
+    assert!(matches!(tried.last().map(|t| &t.evidence), Some(Evidence::Tested(n)) if *n > 0));
+    let (u, note) = answered(&p, &a, &o, TEXT);
+    assert!(note.is_none());
+    let text = decompile_named(&p, &a, &u, TEXT).unwrap_or_default();
+    assert!(text.contains("& 0xffffffff;"), "{text}");
+    let rows = check_generated_iso(&p, &a, &u, TEXT, 8, 1, 20_000).expect("the text reads");
+    assert!(
+        rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+        "{text}\n{rows:?}"
+    );
+    let (same, note) = answered(&p, &a, &o, TEXT + 0x40);
+    assert!(note.is_none());
+    assert_eq!(same.fingerprint(), o.fingerprint());
 }

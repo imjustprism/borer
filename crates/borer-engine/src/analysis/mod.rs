@@ -1754,6 +1754,12 @@ pub struct Overlay {
     /// empty. Never saved with a project.
     #[serde(default, skip)]
     pub passes: decompile::Passes,
+    /// The choice points a decompilation renders at their literal rung,
+    /// none by default: the repair search's way to read a function's text
+    /// with some guesses undone ([`decompile::Choices`]). Part of
+    /// [`Overlay::fingerprint`] when not empty. Never saved with a project.
+    #[serde(default, skip)]
+    pub choices: decompile::Choices,
 }
 
 /// Where a decompilation finds the name tables it renders constants by
@@ -1970,6 +1976,14 @@ impl Overlay {
         if !self.passes.is_empty() {
             fold(&[5]);
             fold(&self.passes.bits().to_le_bytes());
+        }
+        for site in self.choices.sites() {
+            fold(&[6]);
+            match site {
+                decompile::Site::Pass(p) => fold(p.name().as_bytes()),
+                decompile::Site::Slot(k) => fold(&k.to_le_bytes()),
+                decompile::Site::Return => fold(&[1]),
+            }
         }
         h
     }

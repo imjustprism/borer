@@ -30,6 +30,7 @@ pub(crate) mod abi;
 mod arch;
 mod asserts;
 mod canary;
+pub mod choice;
 mod cir;
 mod ctext;
 mod declared;
@@ -88,6 +89,7 @@ mod wire;
 pub use crate::timing::step_times;
 use arch::Lifter;
 pub use asserts::*;
+pub use choice::{Choices, Site};
 use emit::*;
 pub use enums::*;
 use fields::*;
@@ -338,6 +340,8 @@ struct Ctx<'a> {
     lanes: lanes::Lanes,
     /// The frame's slots and the types solved for them ([`frame::Frame`]).
     frame: frame::Frame,
+    /// The choice points the lift met besides the passes ([`choice::Site`]).
+    sites: BTreeSet<Site>,
     /// Whether the function hands a value back, as its callers say
     /// ([`Function::returns_value`](super::Function::returns_value)).
     returns_value: Option<bool>,
@@ -989,6 +993,7 @@ fn new_ctx<'a>(
         arg_floats: 0,
         lanes: lanes::Lanes::default(),
         frame: frame::Frame::default(),
+        sites: BTreeSet::new(),
         returns_value: f.returns_value,
     }
 }
@@ -1154,6 +1159,36 @@ pub fn text_check(
     )
 }
 
+/// Returns the choice points the lift met in a function besides the text
+/// passes ([`Site`]): the frame slots it solved as floats and a 64-bit
+/// integer return.
+///
+/// They are read from the memoized decompilation, so asking costs what
+/// the text cost, once.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results, holding the memo.
+/// * `overlay` - Names in force.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The sites in order, none when the function does not decompile.
+#[must_use]
+pub fn choice_points(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> Vec<Site> {
+    decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
+        .as_ref()
+        .as_ref()
+        .map_or_else(Vec::new, |d| d.sites.clone())
+}
+
 /// The header line a `decompile` answer prints under its first line: what
 /// of the text was checked against the binary ([`text_check`]).
 ///
@@ -1210,7 +1245,9 @@ pub fn with_header(text: &str, header: Option<&str>) -> String {
 /// Only the tools' rendering carries it, like [`checked_header`]. Each
 /// warning is a fact of the text, never a guess, so it flags no right
 /// text; a text with no line may still be wrong in ways no fact of the
-/// text shows.
+/// text shows. The input a run of the text still differs on after the
+/// repair search ([`crate::analysis::render::Repair::note`]) is the last
+/// item.
 ///
 /// # Arguments
 ///
@@ -1219,6 +1256,7 @@ pub fn with_header(text: &str, header: Option<&str>) -> String {
 /// * `overlay` - The names the text was written under.
 /// * `entry` - The function's entry.
 /// * `text` - Its text as [`decompile_named`] wrote it.
+/// * `differs` - The repair search's note, when the text still differs.
 ///
 /// # Returns
 ///
@@ -1230,6 +1268,7 @@ pub fn warnings(
     overlay: &Overlay,
     entry: u64,
     text: &str,
+    differs: Option<&str>,
 ) -> Option<String> {
     let word = program
         .arch
@@ -1247,7 +1286,11 @@ pub fn warnings(
             (g.thunk.is_none() && target != entry).then(|| name_of(analysis, overlay, target))
         })
         .collect();
-    warn::line(text, &in_binary, word)
+    match (warn::line(text, &in_binary, word), differs) {
+        (Some(line), Some(d)) => Some(format!("{line}; {d}")),
+        (None, Some(d)) => Some(format!("{} {d}", warn::WARN)),
+        (line, None) => line,
+    }
 }
 
 /// The closure check of a function's text: each line that reads a
@@ -1498,6 +1541,8 @@ pub(crate) struct Decompiled {
     witness: std::sync::Mutex<Option<Box<replay::Witness>>>,
     /// How the cleanup passes ended, the default when they did not run.
     settle: Settle,
+    /// The choice points the lift met besides the passes, in order.
+    pub(crate) sites: Vec<Site>,
 }
 
 impl Decompiled {
@@ -1820,7 +1865,9 @@ fn decompile_in<L: Lifter>(
     };
     lap.end(crate::timing::Step::Decode);
     let (_, _, mut recorded) = dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &[]);
-    ctx.frame.solve();
+    ctx.frame.solve(&ctx.overlay.choices);
+    let floats: Vec<i64> = ctx.frame.floats().collect();
+    ctx.sites.extend(floats.into_iter().map(Site::Slot));
     widen_slots(&mut recorded);
     let mut succs_eh = succs.clone();
     for (root, feeders) in &plan.roots {
@@ -2631,6 +2678,7 @@ fn decompile_in<L: Lifter>(
         effects,
         witness: std::sync::Mutex::new(witness),
         settle,
+        sites: ctx.sites.iter().copied().collect(),
     })
 }
 

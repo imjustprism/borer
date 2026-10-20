@@ -10,6 +10,10 @@
 //! finds the first text pass that breaks each function the ISO check
 //! rejects ([`bisect_passes`]).
 //!
+//! `BORER_REPAIR=bin1;bin2 cargo test -p borer-engine --release --test bench repair -- --ignored --nocapture`
+//! runs the full repair search on every function and reports how often it
+//! runs, what it costs and what it repairs ([`repair_search`]).
+//!
 //! The dogfood sweep reports a wall time, but its spread across identical
 //! runs is wide enough to hide a small change: 6.7s to 9.4s on one machine
 //! for the same binary. Each figure here is the best of several passes over
@@ -23,7 +27,8 @@
 
 use borer_engine::analysis::decompile::{decompile_all, decompile_named, step_times, text_check};
 use borer_engine::analysis::render::{
-    Bisected, Verdict, bisect_iso, check_generated, check_generated_iso,
+    Bisected, Budget, Evidence, Repair, Verdict, bisect_iso, check_generated, check_generated_iso,
+    repair_iso,
 };
 use borer_engine::analysis::{Analysis, Overlay, name_of};
 use borer_engine::num::usize_f64;
@@ -374,4 +379,100 @@ fn bisect_passes() {
     for (pass, (n, alone)) in rows {
         println!("{pass}\t{n}\t{alone}");
     }
+}
+
+/// Runs the full repair search ([`Budget::FULL`]) on every function of each
+/// binary and reports how often it runs and what it costs.
+///
+/// `BORER_REPAIR` names the binaries, separated by `;`. One row per
+/// function whose text disagrees: the binary, the name, `repaired` with the
+/// sites the agreeing rendering moved, or `disagrees` with the note the
+/// answer carries (`-` for none); then the renderings tried with their
+/// evidence. The summary counts the functions the search ran on, the
+/// repaired and the noted ones, and the time and checks per search, beside
+/// the time of the first check every function pays.
+#[test]
+#[ignore = "set BORER_REPAIR to binary paths separated by ';' to run this harness"]
+fn repair_search() {
+    let paths = std::env::var("BORER_REPAIR").expect("BORER_REPAIR env var");
+    let (mut agree, mut repaired, mut left, mut noted) = (0usize, 0usize, 0usize, 0usize);
+    let (mut first, mut searched, mut checks) = (Vec::new(), Vec::new(), 0usize);
+    for path in paths.split(';').filter(|p| !p.is_empty()) {
+        let program = Program::load(std::path::Path::new(path)).expect("load");
+        let a = Analysis::compute(&program);
+        let o = Overlay::default();
+        let bin = std::path::Path::new(path)
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        for f in a
+            .functions
+            .iter()
+            .filter(|f| f.thunk.is_none() && f.funclet.is_none())
+        {
+            drop(decompile_named(&program, &a, &o, f.entry));
+            let t = Instant::now();
+            let r = repair_iso(&program, &a, &o, f.entry, Budget::FULL);
+            let spent = t.elapsed();
+            let name = name_of(&a, &o, f.entry);
+            let tried = |t: &[borer_engine::analysis::render::Tried]| {
+                t.iter()
+                    .map(|x| {
+                        let sites: Vec<String> = x.sites.iter().map(|s| s.name()).collect();
+                        let ev = match &x.evidence {
+                            Evidence::Tested(n) => format!("tested x{n}"),
+                            Evidence::Refuted(c) => format!("refuted: {}", c.why),
+                            Evidence::Unchecked => "unchecked".to_owned(),
+                        };
+                        format!("[{}: {ev}]", sites.join(" + "))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            match &r {
+                Repair::Agrees => {
+                    agree += 1;
+                    first.push(spent);
+                    continue;
+                }
+                Repair::Repaired {
+                    moved, tried: t, ..
+                } => {
+                    repaired += 1;
+                    let sites: Vec<String> = moved.iter().map(|s| s.name()).collect();
+                    println!("{bin}	{name}	repaired	{}	{}", sites.join(" + "), tried(t));
+                }
+                Repair::Disagrees { at, tried: t, .. } => {
+                    left += 1;
+                    noted += usize::from(r.note().is_some());
+                    println!(
+                        "{bin}	{name}	disagrees	{}	{} | {}",
+                        r.note().unwrap_or_else(|| "-".to_owned()),
+                        at.why,
+                        tried(t)
+                    );
+                }
+            }
+            checks += r.checks();
+            searched.push(spent);
+        }
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let runs = searched.len();
+    let total = runs + first.len();
+    for v in [&mut first, &mut searched] {
+        v.sort_unstable();
+    }
+    println!(
+        "# {total} functions: {agree} agree, the search ran on {runs} ({:.1}%): {repaired} repaired, {left} still disagree ({noted} noted)",
+        100.0 * usize_f64(runs) / usize_f64(total.max(1))
+    );
+    println!(
+        "# first check: p50 {:.2} ms, p90 {:.2} ms; search: p50 {:.2} ms, p90 {:.2} ms, max {:.2} ms, {:.1} checks each",
+        ms(percentile(&first, 50)),
+        ms(percentile(&first, 90)),
+        ms(percentile(&searched, 50)),
+        ms(percentile(&searched, 90)),
+        ms(searched.last().copied().unwrap_or_default()),
+        usize_f64(checks) / usize_f64(runs.max(1))
+    );
 }

@@ -10,10 +10,12 @@ use crate::emulate::calls::ApiCall;
 use crate::isa::Isa;
 
 mod diff;
+mod repair;
 mod spec;
 mod vectors;
 
 pub use diff::run_diff_tsv;
+pub use repair::{Budget, Evidence, Repair, Tried, answered, repair_iso, repaired};
 use spec::{RunSpec, parse_run};
 use vectors::VERIFY_SEED;
 pub use vectors::{

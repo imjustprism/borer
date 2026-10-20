@@ -321,17 +321,22 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
         Feature::Decompile,
     )?;
     let raw = std::env::var_os("BORER_RAW").is_some();
+    let (o, differs) = if raw {
+        (s.overlay.clone(), None)
+    } else {
+        borer_engine::analysis::render::answered(&s.program, &a, &s.overlay, entry)
+    };
     let header = (!raw)
-        .then(|| decompile::checked_header(&s.program, &a, &s.overlay, entry))
+        .then(|| decompile::checked_header(&s.program, &a, &o, entry))
         .flatten();
     let text = if raw {
-        decompile::decompile_raw(&s.program, &a, &s.overlay, entry)
+        decompile::decompile_raw(&s.program, &a, &o, entry)
     } else {
-        decompile::decompile_named(&s.program, &a, &s.overlay, entry)
+        decompile::decompile_named(&s.program, &a, &o, entry)
     }
     .with_context(|| format!("decompilation failed at {entry:#x}"))?;
     let warn = (!raw)
-        .then(|| decompile::warnings(&s.program, &a, &s.overlay, entry, &text))
+        .then(|| decompile::warnings(&s.program, &a, &o, entry, &text, differs.as_deref()))
         .flatten();
     let header = match (header, warn) {
         (Some(h), Some(w)) => Some(format!("{h}\n{w}")),

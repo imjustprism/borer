@@ -11,7 +11,7 @@
 //! find the first pass whose text the ISO check rejects.
 
 /// One text pass of the decompile pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Pass {
     /// Drops the values a function returning nothing returns.
     DropReturnedValues,

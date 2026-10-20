@@ -2,6 +2,7 @@
 //! instructions left unmodeled.
 
 use super::*;
+use crate::analysis::decompile::Site;
 
 /// Tells whether a jump goes to `T + sext(*(int32_t*)(T + i * 4))`.
 ///
@@ -260,6 +261,39 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
+    /// Returns the value a 64-bit integer return hands back, as its choice
+    /// point ([`Site::Return`]) is rendered.
+    ///
+    /// Any value but a constant returned through all of `rax` of a 64-bit
+    /// function is the site: C converts a signed 32-bit result to the
+    /// 64-bit return type by its sign, where a machine that wrote `eax`
+    /// cleared the upper half. Its literal rung masks the value to its
+    /// 32-bit lane, which C computes as `unsigned int` and so widens with
+    /// zeros.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The returned value.
+    /// * `bits` - The lane of `rax` the value fills.
+    ///
+    /// # Returns
+    ///
+    /// The value, masked when the site is rendered literally.
+    fn returned(&mut self, v: Expr, bits: u8) -> Expr {
+        if bits != 64 || self.ctx.ret_lane != 64 || self.bitness() != 64 {
+            return v;
+        }
+        if matches!(v, Expr::Const(_)) {
+            return v;
+        }
+        self.ctx.sites.insert(Site::Return);
+        if self.ctx.overlay.choices.literal(Site::Return) {
+            Expr::Bin(Op::And, Box::new(v), Box::new(Expr::Const(0xffff_ffff)))
+        } else {
+            v
+        }
+    }
+
     /// Lifts `ret`.
     ///
     /// A byte or word written into rax before the return (`mov al, x`,
@@ -311,6 +345,7 @@ impl<'a> Exec<'_, 'a> {
             Some(v) => {
                 let (v, bits) = strip_partial_result(v);
                 self.ctx.ret_bits = self.ctx.ret_bits.max(bits.min(self.ctx.ret_lane));
+                let v = self.returned(v, bits);
                 (format!("return {};", v.render(&self.names())), Some(v))
             }
             None if (self.ctx.rax_written || self.env.result_in_rax || x87)

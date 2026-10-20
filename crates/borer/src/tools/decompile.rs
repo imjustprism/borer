@@ -186,6 +186,8 @@ pub(crate) fn truncated(text: &str, cap: usize, entry: u64, header: usize) -> St
 /// * `a` - Its analysis.
 /// * `o` - Names in force.
 /// * `entry` - The function's entry.
+/// * `differs` - The repair search's note, when the text still differs
+///   ([`render::answered`]).
 ///
 /// # Returns
 ///
@@ -195,6 +197,7 @@ pub(crate) fn decompile_header(
     a: &Analysis,
     o: &Overlay,
     entry: u64,
+    differs: Option<&str>,
 ) -> Option<String> {
     use borer_engine::analysis::decompile;
     let mut lines: Vec<String> = decompile::checked_header(p, a, o, entry)
@@ -206,7 +209,7 @@ pub(crate) fn decompile_header(
         .collect();
     lines.extend(
         decompile::decompile_named(p, a, o, entry)
-            .and_then(|text| decompile::warnings(p, a, o, entry, &text)),
+            .and_then(|text| decompile::warnings(p, a, o, entry, &text, differs)),
     );
     lines.extend(
         render::next_steps(p, a, o, entry)
@@ -267,8 +270,8 @@ impl BorerServer {
             }
             let a = self.ensure_analysis()?;
             let entry = self.function_entry(p, &a, &address)?;
-            let o = self.overlay();
-            let header = decompile_header(p, &a, &o, entry);
+            let (o, differs) = render::answered(p, &a, &self.overlay(), entry);
+            let header = decompile_header(p, &a, &o, entry, differs.as_deref());
             let text = decompile::decompile_named(p, &a, &o, entry)
                 .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
             let text = match detail.unwrap_or_default() {
@@ -390,7 +393,7 @@ impl BorerServer {
                 .par_iter()
                 .filter(|(_, text)| text.len() > PER_FN)
                 .map(|(entry, _)| {
-                    let lines = decompile_header(p, &a, &o, *entry).map_or(0, |h| h.lines().count());
+                    let lines = decompile_header(p, &a, &o, *entry, None).map_or(0, |h| h.lines().count());
                     (*entry, lines)
                 })
                 .collect();
