@@ -217,10 +217,12 @@ pub(crate) fn cache_dir() -> Option<PathBuf> {
 /// The file name a record's PDB is cached and asked for.
 ///
 /// The recorded path is bytes out of the image, so it can hold anything a
-/// hostile linker wrote; only its final component is ever used, and a
-/// component that is empty, `.` or `..`, longer than [`NAME_MAX`], or
-/// holds a control character is refused outright: a refused name is told
-/// to the caller, never guessed into a path or a URL.
+/// hostile linker wrote; only its final component is ever used, and it must
+/// be a `.pdb` name of letters, digits, `.`, `_` and `-` no longer than
+/// [`NAME_MAX`]. Anything else - empty, `.` or `..`, a drive letter
+/// (`C:x.pdb` joins to a path off the cache root on Windows), a stream,
+/// a device name, a space or a control character - is refused outright: a
+/// refused name is told to the caller, never guessed into a path or a URL.
 ///
 /// # Arguments
 ///
@@ -231,10 +233,17 @@ pub(crate) fn cache_dir() -> Option<PathBuf> {
 /// The final component, or `None` when there is none worth using.
 fn sanitize_name(recorded: &str) -> Option<&str> {
     let name = recorded.rsplit(['/', '\\']).next().unwrap_or_default();
-    (!name.is_empty()
-        && !matches!(name, "." | "..")
-        && name.len() <= NAME_MAX
-        && !name.chars().any(char::is_control))
+    let stem = name.get(..name.len().checked_sub(4)?)?;
+    (name.len() <= NAME_MAX
+        && name
+            .get(stem.len()..)
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(".pdb"))
+        && !stem.is_empty()
+        && !stem.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && borer_engine::program::unusable_path(Path::new(name)).is_none())
     .then_some(name)
 }
 
@@ -553,6 +562,19 @@ mod tests {
         assert_eq!(sanitize_name("x/."), None);
         assert_eq!(sanitize_name(&"n".repeat(256)), None);
         assert_eq!(sanitize_name("a\u{7}.pdb"), None);
+        for hostile in [
+            r"x\C:evil.pdb",
+            "C:evil.pdb",
+            "a.pdb:stream",
+            "app.exe",
+            "con.pdb",
+            "my app.pdb",
+            ".pdb",
+            "..pdb",
+        ] {
+            assert_eq!(sanitize_name(hostile), None, "{hostile}");
+        }
+        assert_eq!(sanitize_name(r"C:\b\My-App_2.PDB"), Some("My-App_2.PDB"));
         let root = Path::new("cache");
         assert_eq!(
             cache_path(root, "app.pdb", "K1"),
