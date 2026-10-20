@@ -247,7 +247,8 @@ fn check_at<'l>(lines: &[&'l str], at: usize) -> Option<Check<'l>> {
 /// call `__stack_chk_fail` (or store the guard first, a setup the lifter
 /// sank there), and the `if (GUARD == local_N) { .. }` blocks the failing
 /// call follows, whose body stays one level shallower; its setups are the
-/// lines `local_N = GUARD;`. The cookie's
+/// lines `local_N = GUARD;`. A return of what GCC's check subtracted,
+/// `return local_N - GUARD;`, past the check that it is zero, returns 0. The cookie's
 /// checks are the calls to `__security_check_cookie`; its setups the lines
 /// `local_N = COOKIE ^ &local_M;`. Checks and setups leave together, and
 /// only when the slot is read nowhere else; an `if` left with an empty
@@ -279,6 +280,17 @@ pub(super) fn fold(body: &str) -> (String, Option<Folded>) {
             )
         })
         .collect();
+    let zeroed = |l: &str| -> Option<String> {
+        let diff = l.trim_start().strip_prefix("return ")?.strip_suffix(';')?;
+        let (a, b) = diff.split_once(" - ")?;
+        (Some(a) == folded.slot.as_deref() && is_guard(b))
+            .then(|| format!("{}return 0;", &l[..indent_of(l)]))
+    };
+    let owned: Vec<(usize, String)> = kept
+        .iter()
+        .map(|(i, l)| (*i, zeroed(l).unwrap_or_else(|| (*l).to_owned())))
+        .collect();
+    let kept: Vec<(usize, &str)> = owned.iter().map(|(i, l)| (*i, l.as_str())).collect();
     if let Some(slot) = &folded.slot
         && kept.iter().any(|(_, l)| mentions_ident(l, slot))
     {
@@ -493,6 +505,18 @@ mod tests {
             out,
             "if (a1 != 0) {\n  var1 = f(a1);\n}\nreturn var1;\nL_10:\nreturn 0;\n"
         );
+    }
+
+    /// A function whose result register still holds the checked
+    /// difference returns it past the check, where it is zero.
+    #[test]
+    fn a_returned_difference_reads_as_zero() {
+        let body = "local_40 = *(uint64_t*)(fs + 0x28);\n\
+                    if (local_40 - *(uint64_t*)(fs + 0x28) != 0) {\n  __stack_chk_fail();\n}\n\
+                    return local_40 - *(uint64_t*)(fs + 0x28);\n";
+        let (out, folded) = fold(body);
+        assert_eq!(folded.map(|f| f.checks), Some(1));
+        assert_eq!(out, "return 0;\n");
     }
 
     /// An inverted check whose body may fall into the failing call is no
