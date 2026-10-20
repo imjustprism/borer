@@ -35,7 +35,7 @@ use goblin::mach::load_command::CommandVariant;
 use crate::fxmap::FxHashSet;
 use crate::macho::uleb;
 use crate::num::{u16_le, u32_le, u64_le};
-use crate::program::Section;
+use crate::program::{Program, Section, SectionRow};
 use crate::reloc::{Bind, Claim, ENTRIES_MAX, Import, Relocs, Table, file_range, settle};
 
 /// `DYLD_CHAINED_PTR_START_NONE`: a page no chain starts in.
@@ -329,6 +329,8 @@ struct Walk<'a> {
     file: &'a [u8],
     /// The image's mapped sections.
     sections: &'a [Section],
+    /// Their lookup rows, for [`file_range`].
+    index: Vec<SectionRow>,
     /// The image's segments, in load-command order.
     segments: &'a [Segment],
     /// The image base offsets count from.
@@ -417,7 +419,7 @@ impl Walk<'_> {
     /// * `bind` - The bind naming the slot, `None` for a rebase.
     /// * `auth` - Whether the loader signs it.
     fn claim(&mut self, va: u64, width: u64, value: Option<u64>, bind: Option<Bind>, auth: bool) {
-        match file_range(self.sections, va, width) {
+        match file_range(self.sections, &self.index, va, width) {
             Some(at) => self.claims.push(Claim {
                 va,
                 at,
@@ -1052,6 +1054,7 @@ pub(crate) fn read(
     let mut walk = Walk {
         file,
         sections,
+        index: Program::index_sections(sections),
         segments: &segments,
         base: image_base,
         libraries,

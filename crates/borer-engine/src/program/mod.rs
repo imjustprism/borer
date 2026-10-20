@@ -397,22 +397,86 @@ pub struct Program {
     pub modes: crate::isa::a32::Modes,
 }
 
-/// Rows of [`Program::section_index`]: one file-backed section's span,
-/// where the section was declared, and the largest span of the rows before
-/// it.
+/// Rows of [`Program::section_index`]: one stretch of addresses and the
+/// first-declared file-backed section holding all of it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SectionRow {
-    /// The section's first virtual address.
+    /// The stretch's first virtual address.
     va: u64,
-    /// One past the section's last virtual address (the larger of its
-    /// memory and file sizes, saturating).
+    /// One past its last.
     end: u64,
-    /// The largest `end` of the rows sorted before this one: a walk back
-    /// past this row can stop when no earlier row reaches that far.
-    max_end_before: u64,
-    /// The section's index in [`Program::sections`], the declaration order
-    /// a linear scan of the table answers by.
+    /// The section's index in [`Program::sections`]: the lowest of every
+    /// file-backed section whose span (the larger of its memory and file
+    /// sizes) holds the stretch, the one a linear scan in file order finds.
     index: usize,
+}
+
+/// Finds the first-declared file-backed section holding an address, by a
+/// binary search of a table's rows ([`Program::index_sections`]).
+///
+/// # Arguments
+///
+/// * `sections` - The section table.
+/// * `index` - Its rows.
+/// * `va` - A virtual address.
+///
+/// # Returns
+///
+/// The section, or `None` when no file-backed section holds `va`.
+pub(crate) fn section_in<'s>(
+    sections: &'s [Section],
+    index: &[SectionRow],
+    va: u64,
+) -> Option<&'s Section> {
+    let row = index.get(index.partition_point(|r| r.va <= va).checked_sub(1)?)?;
+    (va < row.end).then(|| sections.get(row.index)).flatten()
+}
+
+/// The union of some spans, sorted and merged, so whether an address falls
+/// in one of them costs a binary search instead of a scan of every span.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Spans(Vec<(u64, u64)>);
+
+impl Spans {
+    /// Merges spans.
+    ///
+    /// # Arguments
+    ///
+    /// * `spans` - Each as `(first address, one past the last)`; an empty
+    ///   one is left out.
+    ///
+    /// # Returns
+    ///
+    /// Their union.
+    pub(crate) fn of(spans: impl IntoIterator<Item = (u64, u64)>) -> Self {
+        let mut sorted: Vec<(u64, u64)> = spans.into_iter().filter(|(a, b)| b > a).collect();
+        sorted.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+        for (a, b) in sorted {
+            match merged.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                Some(_) | None => merged.push((a, b)),
+            }
+        }
+        Spans(merged)
+    }
+
+    /// Whether one of the spans holds an address.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The address.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a span holds it.
+    pub(crate) fn holds(&self, va: u64) -> bool {
+        self.0
+            .partition_point(|&(a, _)| a <= va)
+            .checked_sub(1)
+            .and_then(|k| self.0.get(k))
+            .is_some_and(|&(_, b)| va < b)
+    }
 }
 
 /// Most sections the summary's table and [`Program::section_list`] name.
@@ -1230,16 +1294,14 @@ impl Program {
                     )
                     && let Some(slice) = off.checked_add(size).and_then(|end| bytes.get(off..end))
                 {
-                    let in_code = |va: u64| {
-                        sections.iter().any(|s| {
-                            s.executable
-                                && !s.name.starts_with(".plt")
-                                && va >= s.va.0
-                                && va < s.va.0.saturating_add(s.vsize)
-                        })
-                    };
+                    let code = Spans::of(
+                        sections
+                            .iter()
+                            .filter(|s| s.executable && !s.name.starts_with(".plt"))
+                            .map(|s| (s.va.0, s.va.0.saturating_add(s.vsize))),
+                    );
                     for (start, end) in crate::eh_frame::function_ranges(slice, sec.va.0, is_64) {
-                        if in_code(start) {
+                        if code.holds(start) {
                             unwind += 1;
                             function_ranges.push((start, end));
                         }
@@ -1507,13 +1569,12 @@ impl Program {
 
     /// Builds the address-ordered lookup rows of a section table.
     ///
-    /// Rows keep only the file-backed sections ([`Program::section_at`]'s
-    /// answers), sorted by `(va, end, declaration index)` so a binary search
-    /// narrows a look-up to the rows whose `va` can hold the address, and a
-    /// walk back over them - stopped by each row's `max_end_before` - finds
-    /// the first-declared section that contains it, the same section a linear
-    /// scan of the table in file order returns, however the sections nest or
-    /// overlap.
+    /// The file-backed sections' spans ([`Program::section_at`]'s answers)
+    /// are cut at every span's start and end into stretches that do not
+    /// overlap, each naming the first-declared section holding it: the
+    /// same section a linear scan of the table in file order returns,
+    /// however the sections nest or overlap, found by one binary search
+    /// ([`section_in`]) even when every section overlaps every other.
     ///
     /// # Arguments
     ///
@@ -1523,22 +1584,52 @@ impl Program {
     ///
     /// The rows, sorted by virtual address.
     pub(crate) fn index_sections(sections: &[Section]) -> Vec<SectionRow> {
-        let mut rows: Vec<SectionRow> = sections
+        let mut spans: Vec<(u64, u64, usize)> = sections
             .iter()
             .enumerate()
             .filter(|&(_, s)| s.file_size > 0)
-            .map(|(index, s)| SectionRow {
-                va: s.va.0,
-                end: s.va.0.saturating_add(s.vsize.max(s.file_size)),
-                max_end_before: 0,
-                index,
+            .map(|(index, s)| {
+                (
+                    s.va.0,
+                    s.va.0.saturating_add(s.vsize.max(s.file_size)),
+                    index,
+                )
             })
+            .filter(|&(va, end, _)| end > va)
             .collect();
-        rows.sort_unstable_by_key(|r| (r.va, r.end, r.index));
-        let mut max_end = 0;
-        for r in &mut rows {
-            r.max_end_before = max_end;
-            max_end = max_end.max(r.end);
+        spans.sort_unstable();
+        let mut ends: Vec<(u64, usize)> =
+            spans.iter().map(|&(_, end, index)| (end, index)).collect();
+        ends.sort_unstable();
+        let mut bounds: Vec<u64> = spans.iter().flat_map(|&(va, end, _)| [va, end]).collect();
+        bounds.sort_unstable();
+        bounds.dedup();
+        let (mut opened, mut closed) = (0, 0);
+        let mut live: BTreeSet<usize> = BTreeSet::new();
+        let mut rows: Vec<SectionRow> = Vec::new();
+        for pair in bounds.windows(2) {
+            let &[lo, hi] = pair else {
+                continue;
+            };
+            while let Some(&(_, index)) = ends.get(closed).filter(|&&(end, _)| end <= lo) {
+                live.remove(&index);
+                closed += 1;
+            }
+            while let Some(&(_, _, index)) = spans.get(opened).filter(|&&(va, ..)| va <= lo) {
+                live.insert(index);
+                opened += 1;
+            }
+            let Some(&index) = live.first() else {
+                continue;
+            };
+            match rows.last_mut() {
+                Some(row) if row.end == lo && row.index == index => row.end = hi,
+                Some(_) | None => rows.push(SectionRow {
+                    va: lo,
+                    end: hi,
+                    index,
+                }),
+            }
         }
         rows
     }
@@ -1562,17 +1653,7 @@ impl Program {
         {
             return Some(first);
         }
-        let rows = &self.section_index[..self.section_index.partition_point(|r| r.va <= va)];
-        let mut best: Option<usize> = None;
-        for r in rows.iter().rev() {
-            if r.end > va {
-                best = Some(best.map_or(r.index, |b| b.min(r.index)));
-            }
-            if r.max_end_before <= va {
-                break;
-            }
-        }
-        best.and_then(|i| self.sections.get(i))
+        section_in(&self.sections, &self.section_index, va)
     }
 
     /// Finds the zero-filled section containing `va`: one the loader maps
@@ -2279,6 +2360,54 @@ mod tests {
         assert!(!is_device("com10"), "nor a two-digit port");
         assert!(!is_device("borer.exe"));
         assert!(unusable_path(std::path::Path::new("")).is_some());
+    }
+
+    /// The section index answers what a scan of the table in file order does.
+    ///
+    /// However the sections nest or overlap, its rows do not overlap: a
+    /// table of sections that all overlap one another costs a look-up one
+    /// binary search, where a walk back over the rows visited every one of
+    /// them.
+    ///
+    /// # Panics
+    ///
+    /// When a look-up differs from the scan, or the rows overlap.
+    #[test]
+    fn the_section_index_answers_as_a_scan_does() {
+        use super::{Section, section_in};
+        let mut sections: Vec<Section> = (0..2000u64)
+            .map(|k| {
+                let va = 0x1000 + (k % 37) * 0x100;
+                let size = 0x10_0000 - k * 0x80;
+                Section::mapped(&format!("s{k}"), va, 0, size, false, k % 3 == 0)
+            })
+            .collect();
+        sections.push(Section::mapped("bss", 0x9000_0000, 0, 0, false, false));
+        sections.push(Section::mapped("far", 0x8000_0000, 0, 0x100, false, false));
+        let index = Program::index_sections(&sections);
+        assert!(index.len() <= 2 * sections.len(), "{} rows", index.len());
+        assert!(
+            index.windows(2).all(|w| w[0].end <= w[1].va),
+            "rows overlap"
+        );
+        let scan = |va: u64| {
+            sections
+                .iter()
+                .find(|s| s.file_size > 0 && va >= s.va.0 && va - s.va.0 < s.vsize.max(s.file_size))
+        };
+        for va in (0..0x11_0000u64).step_by(0x3f).chain([
+            0x8000_0000,
+            0x8000_00ff,
+            0x8000_0100,
+            0x9000_0000,
+            u64::MAX,
+        ]) {
+            assert_eq!(
+                section_in(&sections, &index, va).map(|s| s.name.as_str()),
+                scan(va).map(|s| s.name.as_str()),
+                "{va:#x}"
+            );
+        }
     }
 
     /// A read by path takes only a regular file within its cap, judged

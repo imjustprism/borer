@@ -525,11 +525,13 @@ pub(crate) fn find<'a>(
     bytes: impl Fn(&'a Section) -> Option<&'a [u8]>,
     word: usize,
 ) -> Option<(Pclntab, Vec<(u64, &'a str)>)> {
-    let code = |va: u64| {
+    let spans = crate::program::Spans::of(
         sections
             .iter()
-            .any(|s| s.executable && va >= s.va.0 && va - s.va.0 < s.vsize.max(s.file_size))
-    };
+            .filter(|s| s.executable)
+            .map(|s| (s.va.0, s.va.0.saturating_add(s.vsize.max(s.file_size)))),
+    );
+    let code = |va: u64| spans.holds(va);
     let named = |s: &Section| s.name == ".gopclntab" || s.name.ends_with("__gopclntab");
     let read = |s: &'a Section, head: usize| {
         let parsed = parse(

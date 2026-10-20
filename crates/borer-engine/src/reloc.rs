@@ -32,7 +32,7 @@
 //! format's image goes through one relocated copy.
 
 use crate::num::{saturating_usize, word_le};
-use crate::program::Section;
+use crate::program::{Program, Section, SectionRow, section_in};
 
 /// Most entries read from one relocation table, whatever its size claims,
 /// and most words one Mach-O's fixups claim.
@@ -274,6 +274,8 @@ impl Relocs {
 /// # Arguments
 ///
 /// * `sections` - The mapped sections, as the loader reads the image.
+/// * `index` - Their lookup rows ([`Program::index_sections`]), built once
+///   per image so each word costs a binary search, not a scan.
 /// * `va` - The first byte's address.
 /// * `len` - The byte count.
 ///
@@ -281,10 +283,13 @@ impl Relocs {
 ///
 /// The first byte's file offset and the file extent of the section holding
 /// them all, or `None` when no file-backed section does.
-pub(crate) fn file_range(sections: &[Section], va: u64, len: u64) -> Option<(u64, (u64, u64))> {
-    let s = sections
-        .iter()
-        .find(|s| s.file_size > 0 && va >= s.va.0 && va - s.va.0 < s.vsize.max(s.file_size))?;
+pub(crate) fn file_range(
+    sections: &[Section],
+    index: &[SectionRow],
+    va: u64,
+    len: u64,
+) -> Option<(u64, (u64, u64))> {
+    let s = section_in(sections, index, va)?;
     let rel = va - s.va.0;
     let end = rel.checked_add(len)?;
     let extent_end = s.file_off.0.checked_add(s.file_size)?;
@@ -330,13 +335,14 @@ pub(crate) fn read_elf(elf: &goblin::elf::Elf<'_>, bytes: &[u8], sections: &[Sec
     let word: u64 = if elf.is_64 { 8 } else { 4 };
     let mut out = Applied::default();
     let mut claims: Vec<Claim> = Vec::new();
+    let index = Program::index_sections(sections);
     for table in [&elf.dynrelas, &elf.dynrels, &elf.pltrelocs] {
         out.relocs.refused += table.len().saturating_sub(ENTRIES_MAX);
         for r in table.iter().take(ENTRIES_MAX) {
             let Some(kind) = kind(machine, r.r_type) else {
                 continue;
             };
-            let Some(at) = file_range(sections, r.r_offset, word) else {
+            let Some(at) = file_range(sections, &index, r.r_offset, word) else {
                 out.relocs.refused += 1;
                 continue;
             };
@@ -368,7 +374,15 @@ pub(crate) fn read_elf(elf: &goblin::elf::Elf<'_>, bytes: &[u8], sections: &[Sec
             });
         }
     }
-    relr(elf, bytes, sections, word, &mut claims, &mut out.relocs);
+    relr(
+        elf,
+        bytes,
+        sections,
+        &index,
+        word,
+        &mut claims,
+        &mut out.relocs,
+    );
     let pic = elf.header.e_type == goblin::elf::header::ET_DYN;
     settle(bytes, claims, word, pic, &mut out.relocs);
     out
@@ -448,6 +462,7 @@ pub(crate) fn settle(
 /// * `elf` - The parsed ELF.
 /// * `bytes` - The file.
 /// * `sections` - The mapped sections.
+/// * `index` - Their lookup rows ([`Program::index_sections`]).
 /// * `word` - The pointer width in bytes.
 /// * `claims` - Receives the slots, as pointers with nothing to write.
 /// * `relocs` - Counts what is refused.
@@ -455,6 +470,7 @@ fn relr(
     elf: &goblin::elf::Elf<'_>,
     bytes: &[u8],
     sections: &[Section],
+    index: &[SectionRow],
     word: u64,
     claims: &mut Vec<Claim>,
     relocs: &mut Relocs,
@@ -466,7 +482,7 @@ fn relr(
     let (Some(at), Some(size)) = (tag(DT_RELR), tag(DT_RELRSZ).filter(|s| *s > 0)) else {
         return;
     };
-    let table = file_range(sections, at, size)
+    let table = file_range(sections, index, at, size)
         .filter(|_| tag(DT_RELRENT).is_none_or(|e| e == word))
         .and_then(|(off, _)| {
             let start = usize::try_from(off).ok()?;
@@ -478,7 +494,7 @@ fn relr(
     };
     let bits = word * 8 - 1;
     let mut next = 0u64;
-    let mut record = |va: u64, relocs: &mut Relocs| match file_range(sections, va, word)
+    let mut record = |va: u64, relocs: &mut Relocs| match file_range(sections, index, va, word)
         .filter(|_| claims.len() < SITES_MAX)
     {
         Some(at) => claims.push(Claim {
