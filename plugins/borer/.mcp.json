@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "borer": {
+      "command": "${CLAUDE_PLUGIN_DATA}/borer"
+    }
+  }
+}

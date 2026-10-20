@@ -4,8 +4,9 @@
 # side build directories (CARGO_TARGET_DIR=target-live and friends)
 /target*/
 
-# local MCP registration (absolute path, machine-specific)
-.mcp.json
+# local MCP registration (absolute path, machine-specific); the plugin's own
+# .mcp.json under plugins/ is part of the plugin
+/.mcp.json
 
 # Debug builds dropped in the tree. A dev binary embeds this machine's
 # source paths (C:\Users\...), so it does not belong in a public checkout.
