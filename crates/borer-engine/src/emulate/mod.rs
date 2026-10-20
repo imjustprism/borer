@@ -146,93 +146,6 @@ pub const MEMORY_MAX: usize = 1 << 24;
 /// hundred-million-step run to a crawl recording all of it.
 pub const TRACE_MAX: usize = 4096;
 
-/// Returns the x86-64 Linux name of a syscall number.
-///
-/// The table holds the numbers a bootstrap reaches for: memory and
-/// mapping, process and thread control, the tracing and identity probes,
-/// files and descriptors, and the clock. Unlisted numbers are reported bare
-/// rather than guessed. The numbers are those of
-/// `arch/x86/entry/syscalls/syscall_64.tbl` in the Linux source.
-///
-/// # Arguments
-///
-/// * `nr` - The number in `rax` at the `syscall`.
-///
-/// # Returns
-///
-/// The name, or `None` for a number this table does not list.
-#[must_use]
-pub fn linux_syscall_name(nr: u64) -> Option<&'static str> {
-    Some(match nr {
-        0 => "read",
-        1 => "write",
-        2 => "open",
-        3 => "close",
-        4 => "stat",
-        5 => "fstat",
-        8 => "lseek",
-        9 => "mmap",
-        10 => "mprotect",
-        11 => "munmap",
-        12 => "brk",
-        13 => "rt_sigaction",
-        14 => "rt_sigprocmask",
-        16 => "ioctl",
-        17 => "pread64",
-        21 => "access",
-        22 => "pipe",
-        23 => "select",
-        24 => "sched_yield",
-        25 => "mremap",
-        28 => "madvise",
-        32 => "dup",
-        33 => "dup2",
-        35 => "nanosleep",
-        39 => "getpid",
-        41 => "socket",
-        42 => "connect",
-        43 => "accept",
-        44 => "sendto",
-        45 => "recvfrom",
-        49 => "bind",
-        50 => "listen",
-        56 => "clone",
-        57 => "fork",
-        58 => "vfork",
-        59 => "execve",
-        60 => "exit",
-        61 => "wait4",
-        62 => "kill",
-        63 => "uname",
-        72 => "fcntl",
-        89 => "readlink",
-        96 => "gettimeofday",
-        101 => "ptrace",
-        102 => "getuid",
-        110 => "getppid",
-        157 => "prctl",
-        158 => "arch_prctl",
-        186 => "gettid",
-        200 => "tkill",
-        202 => "futex",
-        218 => "set_tid_address",
-        228 => "clock_gettime",
-        230 => "clock_nanosleep",
-        231 => "exit_group",
-        234 => "tgkill",
-        257 => "openat",
-        262 => "newfstatat",
-        273 => "set_robust_list",
-        302 => "prlimit64",
-        318 => "getrandom",
-        319 => "memfd_create",
-        322 => "execveat",
-        334 => "rseq",
-        435 => "clone3",
-        _ => return None,
-    })
-}
-
 /// A run of adjacent pages a profiled run read equally often.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageRun {
@@ -4054,15 +3967,6 @@ mod tests {
             ],
             "two equal adjacent pages merge; the odd one stands alone"
         );
-    }
-
-    /// A syscall number the table lists is named; one it does not stays bare.
-    #[test]
-    fn linux_syscall_numbers_are_named_where_listed() {
-        assert_eq!(super::linux_syscall_name(10), Some("mprotect"));
-        assert_eq!(super::linux_syscall_name(101), Some("ptrace"));
-        assert_eq!(super::linux_syscall_name(231), Some("exit_group"));
-        assert_eq!(super::linux_syscall_name(999), None);
     }
 
     /// Three-operand `imul` is modeled: a key schedule that multiplies runs.
