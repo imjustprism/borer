@@ -3062,6 +3062,57 @@ fn discovered_noreturn_callee_cuts_every_caller() {
     assert_eq!(a.function(0x12b0).unwrap().callers, vec![0x12c0, 0x12d0]);
 }
 
+/// A function whose own code ends every path at a no-return call ends
+/// its callers at their calls to it.
+///
+/// It calls `exit` through its PLT stub, no name says it never returns,
+/// and its caller lays out live code right after the call.
+///
+/// GCC's `mallocFail.constprop.0` in bzip2recover is this shape, and the
+/// caller's walk past the call printed `goto *0x1e60;` after it.
+#[test]
+fn a_function_whose_body_never_returns_ends_its_callers() {
+    let mut bytes = vec![0xccu8; 0x2000];
+    let code: &[(usize, &[u8])] = &[
+        (0x0, &[0xf3, 0x0f, 0x1e, 0xfa]),                   // ASM: endbr64
+        (0x4, &[0xf2, 0xff, 0x25, 0xf5, 0x0f, 0x00, 0x00]), // ASM: bnd jmp [rip+0xff5]
+        (0x10, &[0xbf, 0x01, 0x00, 0x00, 0x00]),            // ASM: mov edi,1
+        (0x15, &[0xe8, 0xe6, 0xff, 0xff, 0xff]),            // ASM: call 0x1000
+        (0x40, &[0x48, 0x85, 0xff]),                        // ASM: test rdi,rdi
+        (0x43, &[0x74, 0x01]),                              // ASM: je 0x1046
+        (0x45, &[0xc3]),                                    // ASM: ret
+        (0x46, &[0xe8, 0xc5, 0xff, 0xff, 0xff]),            // ASM: call 0x1010
+        (0x4b, &[0x31, 0xc0]),                              // ASM: xor eax,eax
+        (0x4d, &[0xc3]),                                    // ASM: ret
+    ];
+    for (at, b) in code {
+        bytes[*at..*at + b.len()].copy_from_slice(b);
+    }
+    bytes[0x1000..0x1008].fill(0);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1040),
+        vec![
+            Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+            Section::mapped(".got", 0x2000, 0x1000, 0x1000, false, false),
+        ],
+    );
+    p.format = BinaryFormat::Elf;
+    p.symbols.push(Symbol {
+        name: "exit".to_owned(),
+        addr: 0x2000,
+        kind: SymbolKind::Import,
+    });
+    let a = Analysis::compute(&p);
+    let caller = a.function(0x1040).unwrap();
+    assert_eq!(
+        caller.end, 0x104b,
+        "the caller ran past the call: {caller:?}"
+    );
+}
+
 /// A row folding the functions that run the same code names them, so each
 /// is reachable from the listing: kernelbase's three callers of one helper
 /// listed one and counted two that no agent could then find.

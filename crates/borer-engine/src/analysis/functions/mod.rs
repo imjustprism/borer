@@ -705,6 +705,11 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         &Covered::new(&st.functions),
         &mut st.xrefs,
     );
+    analysis.noreturn = entries
+        .iter()
+        .copied()
+        .filter(|&e| st.noreturn.contains(e))
+        .collect();
     analysis.functions = st.functions;
     analysis.xrefs = st.xrefs;
     analysis.jump_tables = st.jump_tables;
@@ -1557,7 +1562,8 @@ pub(crate) fn decode_block(program: &Program, bitness: u32, blk: &BasicBlock) ->
 /// what follows it is padding (`int3`, `ud2`, bytes that do not decode,
 /// Rust's `call; ud2` after a panic), another function's entry, or when the
 /// callee, or the import it jumps or calls through, is a function that never
-/// returns by name ([`is_noreturn_name`]).
+/// returns by name ([`is_noreturn_name`]) or one discovery found never
+/// returns ([`Analysis::noreturn`]).
 ///
 /// # Arguments
 ///
@@ -1609,11 +1615,12 @@ fn calls_noreturn(program: &Program, analysis: &Analysis, bitness: u32, b: &Basi
     match call.op0_kind() {
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
             let t = call.near_branch_target();
-            analysis
-                .function(t)
-                .filter(|g| g.entry == t)
-                .and_then(|g| g.name.as_deref())
-                .is_some_and(named)
+            analysis.noreturn.contains(&t)
+                || analysis
+                    .function(t)
+                    .filter(|g| g.entry == t)
+                    .and_then(|g| g.name.as_deref())
+                    .is_some_and(named)
                 || decode_at(program, bitness, t)
                     .and_then(|i| slot_jump(&i))
                     .is_some_and(import)

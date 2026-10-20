@@ -1283,6 +1283,10 @@ pub struct Analysis {
     pub pack_scripts: Vec<crate::script::PackScript>,
     /// The instruction fuel ran out before the walk finished.
     pub incomplete: bool,
+    /// Entries of the functions discovery found never return: by name, by
+    /// what follows their calls, or by their own code
+    /// ([`functions::call_ends_path`] reads it).
+    pub noreturn: BTreeSet<u64>,
     /// The `QObject` subclasses `moc` described, with their signals, slots
     /// and properties and the functions its dispatchers map them to.
     pub qt: Vec<qt::QtClass>,

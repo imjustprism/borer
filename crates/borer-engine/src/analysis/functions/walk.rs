@@ -194,7 +194,7 @@ pub(super) struct WalkState<'a> {
     /// Functions that never return: named ones from the symbol table, every
     /// callee some walk found a function start right after, and every
     /// learned callee no walk ever followed, each unless its own code is
-    /// seen to return.
+    /// seen to return, and every function whose own code never returns.
     pub(super) noreturn: Arc<AddrSet>,
     /// Callees some walk found a function start right after, held until
     /// the round ends and checked against their own code: the call site
@@ -450,7 +450,8 @@ impl<'a> WalkState<'a> {
     /// Makes the noreturn candidates known, so later walks end at their
     /// calls: every callee a function start was found right after, and the
     /// weakly learned ones no walk ever followed, each unless its own code
-    /// can be seen to return ([`WalkState::can_return`]).
+    /// can be seen to return ([`WalkState::can_return`]), and every walked
+    /// function whose own code never returns ([`WalkState::ends_every_path`]).
     ///
     /// A function start right after a call proves the call site never
     /// returns, not always the callee: a call through Control Flow Guard's
@@ -488,6 +489,99 @@ impl<'a> WalkState<'a> {
             })
             .collect();
         Arc::make_mut(&mut self.noreturn).extend(promoted);
+        let ending: Vec<u64> = self
+            .functions
+            .iter()
+            .filter(|f| !self.noreturn.contains(f.entry) && self.ends_every_path(f))
+            .map(|f| f.entry)
+            .collect();
+        Arc::make_mut(&mut self.noreturn).extend(ending);
+    }
+
+    /// Tells whether a walked function's own code never returns: no block
+    /// returns or leaves the function by a jump, and the paths that end
+    /// end at a trap or at a call to a function known never to return.
+    ///
+    /// A compiler's clone of a function that never returns (GCC's
+    /// `.constprop`, `.isra` and `.part` copies) carries no name the
+    /// symbol table's no-return list knows, and its callers may lay out
+    /// live code right after the call, so only its body says it never
+    /// returns.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The walked function.
+    fn ends_every_path(&self, f: &Function) -> bool {
+        let inside: FxHashSet<u64> = f.blocks.iter().map(|b| b.start).collect();
+        let mut ends = false;
+        for b in &f.blocks {
+            let stays = b.successors.iter().all(|s| inside.contains(s));
+            match b.term {
+                BlockTerm::Ret => return false,
+                BlockTerm::Jmp | BlockTerm::Cond | BlockTerm::Fall | BlockTerm::Indirect => {
+                    if !stays || b.successors.is_empty() {
+                        return false;
+                    }
+                }
+                BlockTerm::Invalid => ends = true,
+                BlockTerm::Call if stays && !b.successors.is_empty() => {}
+                BlockTerm::Call => {
+                    if !self.calls_noreturn(b.start, b.end) {
+                        return false;
+                    }
+                    ends = true;
+                }
+            }
+        }
+        ends
+    }
+
+    /// Tells whether the call ending a block reaches a function known never
+    /// to return, directly, through a linker's thunk, or through an import's
+    /// slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The block's first instruction.
+    /// * `end` - The end of the block's last instruction, the call.
+    fn calls_noreturn(&self, start: u64, end: u64) -> bool {
+        let program = self.worker.cursors.program;
+        let bitness = self.worker.cursors.bitness;
+        let mut va = start;
+        let call = loop {
+            let Some(i) = decode_at(program, bitness, va) else {
+                return false;
+            };
+            if i.is_invalid() || i.next_ip() > end || i.next_ip() <= va {
+                return false;
+            }
+            if i.next_ip() == end {
+                break i;
+            }
+            va = i.next_ip();
+        };
+        if call.flow_control() != FlowControl::Call {
+            return false;
+        }
+        if call.op0_kind() == OpKind::Memory {
+            return call.memory_index() == Register::None
+                && matches!(call.memory_base(), Register::None | Register::RIP)
+                && self.noreturn_slots.contains(&call.memory_displacement64());
+        }
+        let t = call.near_branch_target();
+        if self.noreturn.contains(t) {
+            return true;
+        }
+        let Some(mut first) = decode_at(program, bitness, t) else {
+            return false;
+        };
+        if matches!(first.mnemonic(), Mnemonic::Endbr64 | Mnemonic::Endbr32) {
+            let Some(next) = decode_at(program, bitness, first.next_ip()) else {
+                return false;
+            };
+            first = next;
+        }
+        slot_jump(&first).is_some_and(|slot| self.noreturn_slots.contains(&slot))
     }
 
     /// Whether the code a call reaches can be seen to return.
