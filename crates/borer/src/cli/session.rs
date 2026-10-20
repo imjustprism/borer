@@ -56,6 +56,15 @@ pub(super) fn open(
         .get(1)
         .with_context(|| needs_a_binary(args.first().map_or("", String::as_str)))?;
     let file = std::path::Path::new(path);
+    crate::tools::load::file_fits(
+        file,
+        crate::tools::load::max_file_size(
+            std::env::var(crate::tools::load::MAX_FILE_ENV)
+                .ok()
+                .as_deref(),
+        ),
+    )
+    .map_err(anyhow::Error::msg)?;
     crate::term::busy(&format!("loading {}", file_name(file)), &head_bytes(file));
     let program = match layout {
         Some(layout) => Program::load_layout(file, layout),

@@ -24,6 +24,72 @@ use crate::symsrv;
 /// summary.
 pub(crate) const LOAD_NEXT: &str = "# next: query borer://triage (a whole triage in one call)\n";
 
+/// Environment variable naming the largest file borer loads, in bytes
+/// or with a `K`, `M` or `G` suffix (binary units); `0` lifts the limit.
+pub(crate) const MAX_FILE_ENV: &str = "BORER_MAX_FILE";
+
+/// The largest file loaded when `BORER_MAX_FILE` sets none: 1 GiB.
+///
+/// A file is read into memory whole and analysis takes many times its
+/// size, so past this a load would end in an allocator abort, not a
+/// message.
+const MAX_FILE_DEFAULT: u64 = 1 << 30;
+
+/// Reads a `BORER_MAX_FILE` value.
+///
+/// # Arguments
+///
+/// * `value` - The variable's value, `None` when it is unset.
+///
+/// # Returns
+///
+/// The limit in bytes: [`MAX_FILE_DEFAULT`] when unset or unreadable,
+/// `u64::MAX` at `0`.
+pub(crate) fn max_file_size(value: Option<&str>) -> u64 {
+    let Some(text) = value.map(str::trim) else {
+        return MAX_FILE_DEFAULT;
+    };
+    let (digits, shift) = match text.chars().last().map(|c| c.to_ascii_uppercase()) {
+        Some('K') => (&text[..text.len() - 1], 10),
+        Some('M') => (&text[..text.len() - 1], 20),
+        Some('G') => (&text[..text.len() - 1], 30),
+        Some(_) | None => (text, 0),
+    };
+    match digits.trim().parse::<u64>() {
+        Ok(0) => u64::MAX,
+        Ok(n) => n
+            .checked_shl(shift)
+            .filter(|v| v >> shift == n)
+            .unwrap_or(u64::MAX),
+        Err(_) => MAX_FILE_DEFAULT,
+    }
+}
+
+/// Refuses a file larger than borer loads, before it is read.
+///
+/// A path that names no file (or a `<file>@<offset>` slice) passes, so
+/// the load says what is wrong with it.
+///
+/// # Arguments
+///
+/// * `path` - The file asked for.
+/// * `max` - The largest size loaded, in bytes ([`max_file_size`]).
+///
+/// # Errors
+///
+/// When the file is larger than `max`, naming both sizes, the variable
+/// that raises the limit and the ways to load a part.
+pub(crate) fn file_fits(path: &Path, max: u64) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() > max => Err(format!(
+            "{} is {} bytes, past the {max}-byte limit: borer reads a file into memory whole and its analysis takes several times that. Set {MAX_FILE_ENV} (bytes, or 4G; 0 for no limit) to load it anyway, or load a part: <file>@<offset> for an embedded program, or arch with regions for raw ranges",
+            borer_engine::text::short_path(&path.display().to_string()),
+            meta.len()
+        )),
+        Ok(_) | Err(_) => Ok(()),
+    }
+}
+
 /// Says where a relative path was looked for, when it was relative.
 ///
 /// The server's working directory is the client's choice (often the
@@ -119,6 +185,11 @@ impl BorerServer {
             raw.regions.as_deref(),
         )
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;
+        file_fits(
+            Path::new(&path),
+            max_file_size(std::env::var(MAX_FILE_ENV).ok().as_deref()),
+        )
+        .map_err(err_params)?;
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let path = PathBuf::from(&path);
             match &layout {
@@ -486,6 +557,31 @@ impl BorerServer {
 
 #[cfg(test)]
 mod tests {
+    /// `BORER_MAX_FILE` reads bytes or a binary suffix, `0` lifts the
+    /// limit and junk keeps the default; a file past the limit is refused
+    /// naming the variable, and one within it, or no file, passes.
+    ///
+    /// # Panics
+    ///
+    /// When a value reads otherwise or the refusal is missing.
+    #[test]
+    fn a_file_past_the_size_limit_is_refused_by_name() {
+        use super::{MAX_FILE_DEFAULT, MAX_FILE_ENV, file_fits, max_file_size};
+        assert_eq!(max_file_size(None), MAX_FILE_DEFAULT);
+        assert_eq!(max_file_size(Some("4096")), 4096);
+        assert_eq!(max_file_size(Some("2k")), 2048);
+        assert_eq!(max_file_size(Some("3G")), 3 << 30);
+        assert_eq!(max_file_size(Some("0")), u64::MAX);
+        assert_eq!(max_file_size(Some("lots")), MAX_FILE_DEFAULT);
+        assert_eq!(max_file_size(Some("99999999999999G")), u64::MAX);
+        let exe = std::env::current_exe().expect("the test binary");
+        let refused = file_fits(&exe, 16).expect_err("past the limit");
+        assert!(refused.contains(MAX_FILE_ENV), "{refused}");
+        assert!(refused.contains("16-byte limit"), "{refused}");
+        assert!(file_fits(&exe, u64::MAX).is_ok());
+        assert!(file_fits(std::path::Path::new("no/such/file"), 16).is_ok());
+    }
+
     /// A relative path that does not load says the directory it was
     /// looked for in and asks for an absolute one; an absolute one adds
     /// nothing.
