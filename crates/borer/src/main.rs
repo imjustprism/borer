@@ -1733,6 +1733,37 @@ mod tests {
         }
     }
 
+    /// Every resource that takes a file path refuses a network share
+    /// before it touches it, where opening one authenticated to the
+    /// named host as the user.
+    ///
+    /// # Panics
+    ///
+    /// When a share path is let through to the filesystem.
+    #[test]
+    fn a_path_resource_refuses_a_network_share() {
+        if !cfg!(windows) {
+            return;
+        }
+        let server = tiny_server();
+        for uri in [
+            r"borer://diff/\\attacker\share\x.exe",
+            r"borer://difffn/0x1000/\\attacker\share\x.exe",
+            r"borer://migrate/0x1000/\\attacker\share\x.exe",
+            r"borer://carry/\\attacker\share\x.exe",
+            r"borer://script/\\attacker\share\x.rhai",
+            r"borer://changes/\\attacker\share\x.exe",
+            r"borer://anchors/\\attacker\share\x.txt",
+        ] {
+            let refused = server.read_uri(uri).expect_err("a share is refused");
+            assert!(
+                refused.message.contains("network share"),
+                "{uri}: {}",
+                refused.message
+            );
+        }
+    }
+
     /// A failing script file answers as the `script` tool answers one:
     /// what it printed before the error, then the error; the resource
     /// answered the error alone and the printed lines were lost.

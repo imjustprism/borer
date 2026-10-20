@@ -288,7 +288,7 @@ impl BorerServer {
     /// cache directory resolves, the name or server is refused, or the
     /// fetch or its validation fails.
     #[tool(
-        description = "Fetch the loaded PE's missing companion PDB from a symbol server into the cache; guid+age must match; dry-run unless dry_run=false; the next load_binary applies it.",
+        description = "Fetch the loaded PE's missing companion PDB over https from the configured symbol server (Microsoft's, or BORER_SYMBOL_SERVER; public hosts only) into the cache; guid+age must match; dry-run unless dry_run=false; the next load_binary applies it.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -298,7 +298,7 @@ impl BorerServer {
     )]
     pub(crate) fn fetch_pdb(
         &self,
-        Parameters(FetchPdbParams { dry_run, server }): Parameters<FetchPdbParams>,
+        Parameters(FetchPdbParams { dry_run }): Parameters<FetchPdbParams>,
     ) -> Result<String, ErrorData> {
         self.with_program(|p| {
             if let Some(outcome) = &p.pdb
@@ -327,7 +327,7 @@ impl BorerServer {
             symsrv::obtain(
                 record,
                 &root,
-                server.as_deref().unwrap_or(symsrv::DEFAULT_SERVER),
+                &symsrv::server(),
                 dry_run.unwrap_or(true),
                 symsrv::curl,
             )
@@ -697,10 +697,7 @@ mod tests {
         }
         let said = server
             .fetch_pdb(rmcp::handler::server::wrapper::Parameters(
-                crate::params::FetchPdbParams {
-                    dry_run: None,
-                    server: None,
-                },
+                crate::params::FetchPdbParams { dry_run: None },
             ))
             .expect("the dry run answers");
         assert!(said.contains("nothing to fetch"), "{said}");

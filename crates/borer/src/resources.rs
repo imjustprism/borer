@@ -1581,6 +1581,11 @@ impl BorerServer {
         /// Most rows one read lists.
         const PAGE: usize = 500;
         let short = borer_engine::text::short_path(path);
+        if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
+            return Err(err_params(format!(
+                "{why}; give a path to an anchors manifest"
+            )));
+        }
         if let Ok(meta) = std::fs::metadata(path)
             && meta.is_file()
             && meta.len() > MANIFEST_MAX

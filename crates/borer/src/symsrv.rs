@@ -7,6 +7,14 @@
 //! `{server}/download/symbols/{name}/{guid+age}/{name}`, answered by the
 //! public Microsoft store and by any store that speaks its layout.
 //!
+//! The server is configuration, never a tool argument: the Microsoft store,
+//! or the one `BORER_SYMBOL_SERVER` names. Only `https` is spoken, every
+//! host (the server's and each redirect's) must resolve to public
+//! addresses only - no loopback, private, link-local, shared or multicast
+//! address - and `curl` is pinned to the address that was checked, so a
+//! name that resolves differently the second time cannot reach the
+//! intranet or a cloud metadata service.
+//!
 //! A download lands in the cache only after the engine's identity check
 //! ([`borer_engine::pdb::identifies`]) confirms it states the loaded
 //! image's GUID and age, so a wrong or hostile file is discarded, never
@@ -34,6 +42,154 @@ pub(crate) const DEFAULT_SERVER: &str = "https://msdl.microsoft.com/download/sym
 
 /// The environment variable naming the cache directory.
 pub(crate) const CACHE_ENV: &str = "BORER_SYMCACHE";
+
+/// The environment variable naming the symbol server, in place of
+/// [`DEFAULT_SERVER`].
+pub(crate) const SERVER_ENV: &str = "BORER_SYMBOL_SERVER";
+
+/// Most redirects one fetch follows.
+const REDIRECTS_MAX: usize = 5;
+
+/// Largest PDB a fetch downloads, in bytes: the largest the engine reads.
+const DOWNLOAD_MAX: u64 = 1 << 32;
+
+/// The symbol server fetches go to.
+///
+/// # Returns
+///
+/// `$BORER_SYMBOL_SERVER` when it is set and not empty, else
+/// [`DEFAULT_SERVER`].
+pub(crate) fn server() -> String {
+    std::env::var(SERVER_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SERVER.to_owned())
+}
+
+/// Whether an address is one a fetch may reach: none of loopback,
+/// unspecified, private, shared (carrier-grade NAT), link-local,
+/// benchmarking, documentation, broadcast, multicast or reserved, and for
+/// IPv6 none of unique-local or link-local, an IPv4-mapped or -compatible
+/// address judged as the IPv4 one it holds.
+///
+/// # Arguments
+///
+/// * `ip` - The resolved address.
+///
+/// # Returns
+///
+/// `true` for a public unicast address.
+fn is_public(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || a == 0
+                || a >= 240
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (18..20).contains(&b))
+                || (a == 192 && b == 0 && c == 0))
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4() {
+                return is_public(std::net::IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || first == 0x2001 && v6.segments()[1] == 0x0db8)
+        }
+    }
+}
+
+/// The host, port and checked address one `https` URL is fetched from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    /// The host as the URL names it, without brackets.
+    host: String,
+    /// The port, 443 unless the URL names one.
+    port: u16,
+    /// The public address the host resolved to, the one `curl` is pinned
+    /// to.
+    ip: std::net::IpAddr,
+}
+
+/// Checks one URL a fetch would request and resolves its host.
+///
+/// # Arguments
+///
+/// * `address` - The URL: the server's, or a redirect's.
+///
+/// # Returns
+///
+/// Where to connect.
+///
+/// # Errors
+///
+/// When the URL is not `https` with a host, names credentials, does not
+/// resolve, or resolves to any address that is not public ([`is_public`]).
+fn target(address: &str) -> Result<Target, String> {
+    let shown = borer_engine::text::quoted(address);
+    let rest = address.strip_prefix("https://").ok_or_else(|| {
+        format!("{shown} is not an https URL; symbol servers are fetched over https only")
+    })?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err(format!(
+            "{shown} names credentials; give the server without them"
+        ));
+    }
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(v6) => {
+            let (host, after) = v6
+                .split_once(']')
+                .ok_or_else(|| format!("{shown} has an unclosed ["))?;
+            (host, after.strip_prefix(':'))
+        }
+        None => match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        },
+    };
+    let port = match port {
+        Some(p) => p
+            .parse::<u16>()
+            .map_err(|_| format!("{shown} names port {p}, which is not a port"))?,
+        None => 443,
+    };
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("{shown} names no host"));
+    }
+    let ips: Vec<std::net::IpAddr> = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+            .map_err(|e| format!("{host} does not resolve: {e}"))?
+            .map(|a| a.ip())
+            .collect(),
+    };
+    if let Some(bad) = ips.iter().find(|ip| !is_public(**ip)) {
+        return Err(format!(
+            "{host} resolves to {bad}, a loopback, private or link-local address; symbol servers must be public hosts"
+        ));
+    }
+    let ip = *ips
+        .first()
+        .ok_or_else(|| format!("{host} resolves to no address"))?;
+    Ok(Target {
+        host: host.to_owned(),
+        port,
+        ip,
+    })
+}
 
 /// A PDB file name longer than this is refused rather than fetched: the
 /// widest a path component is on the filesystems the cache lives on.
@@ -85,7 +241,7 @@ fn sanitize_name(recorded: &str) -> Option<&str> {
 ///
 /// # Arguments
 ///
-/// * `server` - The store's base URL, `http(s)://host[:port][/path]`,
+/// * `server` - The store's base URL, `https://host[:port][/path]`,
 ///   already holding the store's own path (`/download/symbols` for the
 ///   public one) the way a symbol-path entry is written.
 /// * `name` - The PDB's file name, [`sanitize_name`]'s answer.
@@ -94,13 +250,11 @@ fn sanitize_name(recorded: &str) -> Option<&str> {
 /// # Returns
 ///
 /// `{server}/{name}/{key}/{name}`, or `None` when the server is not an
-/// absolute `http` or `https` URL with a host (a bare word, a file path,
-/// a scheme a store does not speak).
+/// absolute `https` URL with a host (a bare word, a file path, plain
+/// `http`, a scheme a store does not speak).
 fn url(server: &str, name: &str, key: &str) -> Option<String> {
     let server = server.trim_end_matches('/');
-    let rest = server
-        .strip_prefix("https://")
-        .or_else(|| server.strip_prefix("http://"))?;
+    let rest = server.strip_prefix("https://")?;
     let host = rest.split('/').next().unwrap_or_default();
     (!host.is_empty() && !host.chars().any(char::is_whitespace))
         .then(|| format!("{server}/{name}/{key}/{name}"))
@@ -125,9 +279,12 @@ fn cache_path(root: &Path, name: &str, key: &str) -> PathBuf {
 /// Fetches one URL into `dest` with `curl`, the process Windows ships.
 ///
 /// `curl` is quiet but says why it failed (`-sS`), is bounded by a
-/// connect and a total timeout, follows the store's redirects, and names
-/// the store's own client so it is served the bytes the Microsoft tools
-/// get.
+/// connect and a total timeout and by [`DOWNLOAD_MAX`], speaks `https`
+/// only, and names the store's own client so it is served the bytes the
+/// Microsoft tools get. Each request is pinned to the address [`target`]
+/// checked, and `curl` follows no redirect itself: a redirect's URL is
+/// checked the same way and fetched as the next request, up to
+/// [`REDIRECTS_MAX`] of them.
 ///
 /// # Arguments
 ///
@@ -136,33 +293,63 @@ fn cache_path(root: &Path, name: &str, key: &str) -> PathBuf {
 ///
 /// # Errors
 ///
-/// When `curl` does not start (most often: not installed) or exits
-/// nonzero; the message carries `curl`'s own error line.
+/// When a URL is refused ([`target`]), `curl` does not start (most often:
+/// not installed) or exits nonzero, the store answers an error status, or
+/// it redirects too often; the message carries `curl`'s own error line or
+/// the status.
 pub(crate) fn curl(address: &str, dest: &Path) -> Result<(), String> {
-    let out = std::process::Command::new("curl")
-        .args([
-            "-sSfL",
-            "--connect-timeout",
-            "15",
-            "--max-time",
-            "600",
-            "-A",
-            "Microsoft-Symbol-Server/10.0.0.0",
-            "-o",
-        ])
-        .arg(dest)
-        .arg(address)
-        .output()
-        .map_err(|e| format!("curl does not run ({e}); Windows 10 1803+ ships it"))?;
-    out.status.success().then_some(()).ok_or_else(|| {
-        let said = String::from_utf8_lossy(&out.stderr);
-        format!(
-            "fetch failed: {}",
-            said.lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("no error text")
-        )
-    })
+    let mut address = address.to_owned();
+    for _ in 0..=REDIRECTS_MAX {
+        let to = target(&address)?;
+        let ip = match to.ip {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        };
+        let out = std::process::Command::new("curl")
+            .args([
+                "-sS",
+                "--proto",
+                "=https",
+                "--max-redirs",
+                "0",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "600",
+                "--max-filesize",
+                &DOWNLOAD_MAX.to_string(),
+                "--resolve",
+                &format!("{}:{}:{ip}", to.host, to.port),
+                "-A",
+                "Microsoft-Symbol-Server/10.0.0.0",
+                "-w",
+                "%{http_code} %{redirect_url}",
+                "-o",
+            ])
+            .arg(dest)
+            .arg(&address)
+            .output()
+            .map_err(|e| format!("curl does not run ({e}); Windows 10 1803+ ships it"))?;
+        if !out.status.success() {
+            let said = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "fetch failed: {}",
+                said.lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("no error text")
+            ));
+        }
+        let said = String::from_utf8_lossy(&out.stdout);
+        let (status, next) = said.trim().split_once(' ').unwrap_or((said.trim(), ""));
+        match status {
+            "200" => return Ok(()),
+            "301" | "302" | "303" | "307" | "308" if !next.is_empty() => {
+                next.clone_into(&mut address);
+            }
+            other => return Err(format!("fetch failed: the server answered status {other}")),
+        }
+    }
+    Err(format!("fetch failed: more than {REDIRECTS_MAX} redirects"))
 }
 
 /// Fetches the companion PDB a record names into the cache, or says what
@@ -211,7 +398,7 @@ pub(crate) fn obtain(
     let key = record.symsrv_key();
     let address = url(server, name, &key).ok_or_else(|| {
         format!(
-            "server {} is not an absolute http(s) URL",
+            "server {} is not an absolute https URL; set {SERVER_ENV} to one",
             borer_engine::text::quoted(server)
         )
     })?;
@@ -268,7 +455,7 @@ pub(crate) fn obtain(
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SERVER, cache_path, obtain, sanitize_name, url};
+    use super::{DEFAULT_SERVER, cache_path, is_public, obtain, sanitize_name, target, url};
     use borer_engine::program::Program;
     use std::path::{Path, PathBuf};
 
@@ -297,12 +484,55 @@ mod tests {
             Some("https://msdl.microsoft.com/download/symbols/app.pdb/KEY1/app.pdb")
         );
         assert_eq!(
-            url("http://127.0.0.1:8000/symbols/", "a.pdb", "K").as_deref(),
-            Some("http://127.0.0.1:8000/symbols/a.pdb/K/a.pdb")
+            url("https://symbols.example/s/", "a.pdb", "K").as_deref(),
+            Some("https://symbols.example/s/a.pdb/K/a.pdb")
         );
-        for nonsense in ["msdl", "ftp://x", "https://", "//host", "https://a b/"] {
+        for nonsense in [
+            "msdl",
+            "ftp://x",
+            "https://",
+            "//host",
+            "https://a b/",
+            "http://msdl.microsoft.com/download/symbols",
+            "file:///C:/x",
+        ] {
             assert!(url(nonsense, "a.pdb", "K").is_none(), "{nonsense}");
         }
+    }
+
+    /// A URL that reaches the machine itself, the intranet, a link-local
+    /// metadata service or speaks anything but https is refused before
+    /// `curl` runs; a public literal address is let through.
+    ///
+    /// # Panics
+    ///
+    /// When a private target is accepted or a public one refused.
+    #[test]
+    fn a_fetch_reaches_only_public_https_hosts() {
+        for refused in [
+            "http://msdl.microsoft.com/download/symbols/a.pdb",
+            "https://127.0.0.1/a.pdb",
+            "https://localhost/a.pdb",
+            "https://10.0.0.5/a.pdb",
+            "https://172.16.1.1/a.pdb",
+            "https://192.168.1.1:8443/a.pdb",
+            "https://169.254.169.254/latest/meta-data",
+            "https://100.64.0.1/a.pdb",
+            "https://0.0.0.0/a.pdb",
+            "https://[::1]/a.pdb",
+            "https://[fe80::1]/a.pdb",
+            "https://[fd00::1]/a.pdb",
+            "https://[::ffff:127.0.0.1]/a.pdb",
+            "https://user:pw@example.com/a.pdb",
+            "https://host:notaport/a.pdb",
+        ] {
+            assert!(target(refused).is_err(), "{refused} was let through");
+        }
+        let ok = target("https://8.8.8.8:8443/download/a.pdb").expect("a public address");
+        assert_eq!(ok.port, 8443);
+        assert_eq!(ok.host, "8.8.8.8");
+        assert!(is_public("2606:4700::1111".parse().expect("an address")));
+        assert!(!is_public("224.0.0.1".parse().expect("an address")));
     }
 
     /// A recorded path names only its final component, and a name that
@@ -378,7 +608,7 @@ mod tests {
         })
         .expect_err("a nonsense server is refused");
         assert!(
-            no_server.contains("not an absolute http(s) URL"),
+            no_server.contains("not an absolute https URL"),
             "{no_server}"
         );
         let mut hostile = record.clone();

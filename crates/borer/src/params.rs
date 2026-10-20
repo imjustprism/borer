@@ -268,10 +268,9 @@ impl From<RawArch> for program::Arch {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FetchPdbParams {
-    /// Preview only (default true); false fetches.
+    /// Preview only (default true); false fetches. The symbol server is the
+    /// Microsoft one, or the one `BORER_SYMBOL_SERVER` names.
     pub(crate) dry_run: Option<bool>,
-    /// Symbol-server base URL, overriding the default msdl.
-    pub(crate) server: Option<String>,
 }
 
 /// Parameters for `disassemble`.
