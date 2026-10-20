@@ -31,3 +31,7 @@ CLAUDE.local.md
 # Tool caches.
 .ruff_cache/
 .delta/
+
+# Written by scripts/dev/licenses.py for a release archive
+/THIRD-PARTY-LICENSES
+/RUST-STD-COPYRIGHT.html

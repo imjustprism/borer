@@ -1,7 +1,9 @@
 name: release
 
 # Builds the shipped binary (the `dist` profile) for four targets, packs
-# each with LICENSE, NOTICE and README.md, and attaches the archives and their
+# each with LICENSE, NOTICE, README.md and the licenses of everything the
+# binary links (THIRD-PARTY-LICENSES and RUST-STD-COPYRIGHT.html, written by
+# scripts/dev/licenses.py for that target), and attaches the archives and their
 # SHA-256 sums to the GitHub Release of a pushed `v*` tag. Run by hand on
 # a branch, it builds and uploads the archives as workflow artifacts and
 # publishes nothing; run by hand on a tag, it publishes that tag.
@@ -55,6 +57,15 @@ jobs:
       - name: build
         run: cargo build --locked --profile dist -p borer --target ${{ matrix.target }}
 
+      # The licenses of the crates, the standard library and the C sources
+      # this target's binary links; rust-docs (rust-toolchain.toml) holds the
+      # standard library's texts.
+      - name: third-party licenses
+        shell: bash
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" scripts/dev/licenses.py --target ${{ matrix.target }} --out THIRD-PARTY-LICENSES
+
       # The archive name: borer-<tag or branch>-<target>.
       - name: name
         shell: bash
@@ -65,7 +76,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path $env:NAME | Out-Null
-          Copy-Item target/${{ matrix.target }}/dist/borer.exe, LICENSE, NOTICE, README.md -Destination $env:NAME
+          Copy-Item target/${{ matrix.target }}/dist/borer.exe, LICENSE, NOTICE, README.md, THIRD-PARTY-LICENSES, RUST-STD-COPYRIGHT.html -Destination $env:NAME
           Compress-Archive -Path $env:NAME -DestinationPath "$env:NAME.zip"
 
       - name: package (tar.gz)
@@ -73,7 +84,7 @@ jobs:
         shell: bash
         run: |
           mkdir "$NAME"
-          cp target/${{ matrix.target }}/dist/borer LICENSE NOTICE README.md "$NAME/"
+          cp target/${{ matrix.target }}/dist/borer LICENSE NOTICE README.md THIRD-PARTY-LICENSES RUST-STD-COPYRIGHT.html "$NAME/"
           tar -czf "$NAME.tar.gz" "$NAME"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
