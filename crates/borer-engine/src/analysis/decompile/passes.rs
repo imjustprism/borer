@@ -115,6 +115,8 @@ pub enum Pass {
     SpellNullptr,
     /// Reads runs of constant stores that spell a string as a copy of it.
     StoreStrings,
+    /// Reads runs of wide moves from one object to another as a `memcpy`.
+    CopyRuns,
     /// Writes stack buffers as arrays.
     StackArrays,
     /// Calls through a pointer as a function pointer.
@@ -141,7 +143,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 62] = [
         Self::DropReturnedValues,
         Self::MergeChains,
         Self::FoldTempCopies,
@@ -193,6 +195,7 @@ impl Pass {
         Self::SpellOwnEnum,
         Self::SpellNullptr,
         Self::StoreStrings,
+        Self::CopyRuns,
         Self::StackArrays,
         Self::CallablePointers,
         Self::FloatBitReads,
@@ -260,6 +263,7 @@ impl Pass {
             Self::SpellOwnEnum => "spell_own_enum",
             Self::SpellNullptr => "spell_nullptr",
             Self::StoreStrings => "store_strings",
+            Self::CopyRuns => "copy_runs",
             Self::StackArrays => "stack_arrays",
             Self::CallablePointers => "callable_pointers",
             Self::FloatBitReads => "float_bit_reads",
