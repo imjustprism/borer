@@ -628,6 +628,23 @@ pub(super) fn byte_arithmetic(text: &str, word: &str) -> String {
 ///
 /// * `text` - A decompiled function, header lines first.
 fn typed_pointers(text: &str) -> Vec<(String, String)> {
+    signature_params(text)
+        .into_iter()
+        .filter(|(_, ty)| pointee_of(ty).is_some_and(|p| !BYTE_POINTEES.contains(&p)))
+        .collect()
+}
+
+/// The parameters the signature declares, by name, with their declared
+/// types.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines first.
+///
+/// # Returns
+///
+/// `(name, type)` per parameter, in order; empty without a signature.
+fn signature_params(text: &str) -> Vec<(String, String)> {
     let Some(sig) = text.lines().find_map(|l| l.strip_prefix("// signature: ")) else {
         return Vec::new();
     };
@@ -668,9 +685,7 @@ fn typed_pointers(text: &str) -> Vec<(String, String)> {
             let p = p.trim();
             let name_at = p.rfind(|c: char| !is_ident_char(c))? + 1;
             let (ty, name) = (p.get(..name_at)?.trim(), p.get(name_at..)?);
-            let pointee = pointee_of(ty)?;
-            (is_ident(name) && !BYTE_POINTEES.contains(&pointee))
-                .then(|| (name.to_owned(), ty.to_owned()))
+            is_ident(name).then(|| (name.to_owned(), ty.to_owned()))
         })
         .collect()
 }
@@ -861,16 +876,170 @@ fn pointee_of(ty: &str) -> Option<&str> {
 /// * `text` - A decompilation, parameter types already applied.
 pub(super) fn spell_index(text: &str) -> String {
     let pointees = index_pointees(text);
+    let chars = char_pointers(text);
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
         if line.trim_start().starts_with("//") {
             out.push_str(line);
         } else {
-            out.push_str(&rewrite_indexes(line, &pointees));
+            out.push_str(&char_indexes(&rewrite_indexes(line, &pointees), &chars));
         }
         out.push('\n');
     }
     out
+}
+
+/// The names a function declares as pointers to `char`, with the type a
+/// load of one of their elements reads as.
+///
+/// Its parameters and its locals count; an element of a `char` or `signed
+/// char` reads as `int8_t`, one of an `unsigned char` as `uint8_t`.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines first.
+fn char_pointers(text: &str) -> BTreeMap<String, &'static str> {
+    let reads = |pointee: &str| match pointee {
+        "char" | "signed char" => Some("int8_t"),
+        "unsigned char" => Some("uint8_t"),
+        _ => None,
+    };
+    let mut out = BTreeMap::new();
+    for (name, ty) in signature_params(text) {
+        if let Some(r) = pointee_of(&ty).and_then(reads) {
+            out.insert(name, r);
+        }
+    }
+    for line in text.lines() {
+        let Some((ty, items)) = vars::declaration(line) else {
+            continue;
+        };
+        let ty = ty.trim();
+        let ty = ty.strip_prefix("const ").unwrap_or(ty);
+        for (stars, name) in items {
+            if stars == "*"
+                && let Some(r) = reads(ty)
+            {
+                out.insert(name.to_owned(), r);
+            }
+        }
+    }
+    out
+}
+
+/// Writes a byte load through a `char` pointer as the element it reads:
+/// `*(int8_t*)(str + i)` as `str[i]` and `*(int8_t*)str` as `*str`.
+///
+/// A read of the other sign keeps it as a cast, `(uint8_t)str[i]`, so the
+/// value is the one the machine read; a store needs none, since C
+/// converts what it stores to the element's type and keeps the same low
+/// byte, and neither does a test against zero, which either sign passes
+/// alike. The index is all that follows `str + ` inside the parentheses,
+/// and only sums, differences and products of terms qualify, which group
+/// the same way in both spellings.
+///
+/// # Arguments
+///
+/// * `line` - One line of pseudo-C.
+/// * `chars` - The `char` pointers and their element reads
+///   ([`char_pointers`]).
+fn char_indexes(line: &str, chars: &BTreeMap<String, &'static str>) -> String {
+    if chars.is_empty() || !line.contains("int8_t*)") {
+        return line.to_owned();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut from = 0;
+    let mut search = 0;
+    while let Some(at) = line
+        .get(search..)
+        .and_then(|t| t.find("*("))
+        .map(|k| k + search)
+    {
+        search = at + 2;
+        let after = line.get(at + 2..).unwrap_or("");
+        let Some(read) = ["int8_t", "uint8_t"]
+            .into_iter()
+            .find(|r| after.starts_with(&format!("{r}*)")))
+        else {
+            continue;
+        };
+        if in_literal(line.get(..at).unwrap_or("")) {
+            continue;
+        }
+        let address = at + 2 + read.len() + 2;
+        let Some((element, reads, used)) = element_of(line.get(address..).unwrap_or(""), chars)
+        else {
+            continue;
+        };
+        let end = address + used;
+        let tail = line.get(end..).unwrap_or("");
+        let stored = [" = ", " += ", " -= ", " |= ", " &= ", " ^= "]
+            .iter()
+            .any(|op| tail.starts_with(op));
+        let zero_test = [" != 0", " == 0"].iter().any(|op| {
+            tail.strip_prefix(op)
+                .is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphanumeric()))
+        });
+        out.push_str(line.get(from..at).unwrap_or(""));
+        if reads == read || stored || zero_test {
+            out.push_str(&element);
+        } else {
+            out.push_str(&format!("({read}){element}"));
+        }
+        from = end;
+        search = end;
+    }
+    out.push_str(line.get(from..).unwrap_or(""));
+    out
+}
+
+/// Reads `(name + index)` or `name` at the start of `text`, `name` a
+/// `char` pointer.
+///
+/// # Arguments
+///
+/// * `text` - The text after a load's cast.
+/// * `chars` - The `char` pointers and their element reads.
+///
+/// # Returns
+///
+/// The element (`name[index]` or `*name`), the type its load reads, and
+/// how many bytes of `text` it spans; `None` when `text` starts with no
+/// such address.
+fn element_of(
+    text: &str,
+    chars: &BTreeMap<String, &'static str>,
+) -> Option<(String, &'static str, usize)> {
+    let span = ident_span(text);
+    if span > 0 {
+        let name = text.get(..span)?;
+        let read = chars.get(name)?;
+        let next = text.get(span..)?;
+        return (!next.starts_with(['[', '(', '.']) && !next.starts_with("->"))
+            .then(|| (format!("*{name}"), *read, span));
+    }
+    let inner = text.strip_prefix('(')?;
+    let name = inner.get(..ident_span(inner))?;
+    let read = chars.get(name)?;
+    inner.get(name.len()..)?.strip_prefix(" + ")?;
+    let close = matching_paren(text, 0)?;
+    let index = text.get(1 + name.len() + 3..close)?;
+    let mut depth = 0i32;
+    for c in index.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            c if depth == 0 && !(is_ident_char(c) || matches!(c, ' ' | '+' | '-' | '*')) => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    let index = match index.strip_prefix('(').and_then(|i| i.strip_suffix(')')) {
+        Some(inner) if matching_paren(index, 0) == Some(index.len() - 1) => inner,
+        Some(_) | None => index,
+    };
+    (!index.is_empty()).then(|| (format!("{name}[{index}]"), *read, close + 1))
 }
 
 /// Pointer names and the type they point at, bytes and `void` left out.
@@ -4579,3 +4748,44 @@ mod stack_array_tests {
         assert!(out.contains("((uint8_t*)&local_28[1])[a1]"), "{out}");
     }
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod char_index_tests {
+    use super::spell_index;
+
+    /// A byte load through a `char` pointer is the element it reads.
+    ///
+    /// The signed read stays as it is, the unsigned one is cast, a store
+    /// and a zero test take no cast, an index's own parentheses go, and a
+    /// pointer to something else is untouched.
+    #[test]
+    fn a_byte_load_through_a_char_pointer_is_an_element() {
+        let text = [
+            "// signature: int f(const char *str, int *n, char *out)",
+            "uint64_t var1;",
+            "",
+            "if (*(int8_t*)(str + var1 + 1) > 127) {",
+            "  *(uint8_t*)(out + var1) = 32;",
+            "}",
+            "if (*(uint8_t*)(str + var1) != 0 && *(uint8_t*)n == 1) {",
+            "  return *(uint8_t*)(str + (var1 & 3));",
+            "}",
+            "return *(int8_t*)str + *(uint8_t*)(str + var1);",
+        ]
+        .join("\n");
+        let out = spell_index(&text);
+        assert!(out.contains("if (str[var1 + 1] > 127) {"), "{out}");
+        assert!(out.contains("  out[var1] = 32;"), "{out}");
+        assert!(
+            out.contains("if (str[var1] != 0 && *(uint8_t*)n == 1) {"),
+            "{out}"
+        );
+        assert!(out.contains("return (uint8_t)str[var1 & 3];"), "{out}");
+        assert!(out.contains("return *str + (uint8_t)str[var1];"), "{out}");
+    }
+}
+
