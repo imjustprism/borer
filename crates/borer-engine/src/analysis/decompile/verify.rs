@@ -357,7 +357,7 @@ pub(super) enum Read {
 /// The memory it wrote, in program order, and the temporaries it made:
 /// the lifter records them only while `Ctx::probe` is set, which only
 /// [`verify`] does.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct Probe {
     /// The memory writes, in program order.
     pub(super) effects: Vec<Effect>,
@@ -416,7 +416,7 @@ impl Probe {
 }
 
 /// One memory write of the lifter's.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) enum Effect {
     /// A store through a pointer.
     Store {

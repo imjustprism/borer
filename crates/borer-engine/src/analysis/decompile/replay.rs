@@ -921,6 +921,7 @@ fn replay_one<L: Replay>(
         (&w, &d.live.succs),
         &effects,
         usize::MAX,
+        Sampling::Every,
     )
 }
 
@@ -989,6 +990,7 @@ fn check_answer_in<L: Replay>(
         (&w, &d.live.succs),
         &effects,
         ANSWER_BLOCKS,
+        Sampling::UntilProved,
     );
     (r.functions == 1).then(|| TextCheck::of(&r))
 }
@@ -1166,6 +1168,7 @@ fn effects_of(d: &super::Decompiled, f: &crate::analysis::Function) -> Vec<Vec<E
 /// * `effects` - Each block's effects, by block index.
 /// * `budget` - Blocks to try states for, in address order; the rest are
 ///   not checked.
+/// * `sampling` - Which states a block the proof settles is tried from.
 #[expect(
     clippy::too_many_arguments,
     reason = "one function's facts, threaded through"
@@ -1180,6 +1183,7 @@ fn replay_effects<L: Replay>(
     witnessed: (&Witness, &[Vec<usize>]),
     effects: &[Vec<Effect>],
     budget: usize,
+    sampling: Sampling,
 ) -> Replayed {
     let mut out = Replayed::default();
     let (w, succs) = witnessed;
@@ -1209,6 +1213,7 @@ fn replay_effects<L: Replay>(
         volatile: L::volatile(w),
         width,
         proof_nodes: Cell::new(prove::PROOF_NODES),
+        sampling,
     };
     let mut room = budget;
     for (b, block) in f.blocks.iter().enumerate() {
@@ -3268,6 +3273,20 @@ struct Function<'f, 'p, L: Replay> {
     /// The term nodes the proofs of the function's blocks may still write
     /// ([`prove::PROOF_NODES`]).
     proof_nodes: Cell<usize>,
+    /// Which states a block the proof settles is tried from.
+    sampling: Sampling,
+}
+
+/// Which states a block is tried from when the proof settles it after
+/// the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sampling {
+    /// Every state: a sweep's report counts the states and the claims
+    /// compared.
+    Every,
+    /// No more once the block is proved: an answer's header grades the
+    /// blocks and counts no state.
+    UntilProved,
 }
 
 /// One state a block is tried from, part way through: the emulator stopped
@@ -3299,6 +3318,15 @@ struct Trial<'t, M> {
 
 impl<'p, L: Replay> Function<'_, 'p, L> {
     /// Checks one block from each of its states.
+    ///
+    /// Under [`Sampling::UntilProved`] the block is proved as soon as the
+    /// first state it is compared from agrees, from that state's writes,
+    /// as it would be after the last; a block proved there is tried from
+    /// no more states, since none can tell its text from the machine. A
+    /// later state that disagrees leaves the block unproved, as it would
+    /// have been, and puts back what the proof spent of the function's
+    /// budget and changed in its lifting state, so later blocks are
+    /// proved from what they would have been.
     ///
     /// # Arguments
     ///
@@ -3372,6 +3400,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut compared = 0;
         let mut tried = 0;
         let mut wrote = None;
+        let mut early = None;
         for trial in 0..TRIALS + RULED_OUT_RETRIES {
             if tried == TRIALS {
                 break;
@@ -3380,6 +3409,17 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             match self.trial(b, block, code, sp, end, pool, trial, &none, &mut seen, out) {
                 Ok(w) => {
                     compared += 1;
+                    if wrote.is_none() && self.sampling == Sampling::UntilProved && seen.is_empty()
+                    {
+                        let undo = (self.lifting.borrow().clone(), self.proof_nodes.get());
+                        let proof = self.prove(b, block, &w);
+                        if matches!(proof, prove::Proof::Proved) {
+                            out.trials += compared;
+                            out.proved += 1;
+                            return Ok(());
+                        }
+                        early = Some((proof, undo));
+                    }
                     wrote.get_or_insert(w);
                 }
                 Err(e) if e == RULED_OUT => {
@@ -3394,16 +3434,25 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         if compared == 0 {
             return Err(why);
         }
-        if let Some(wrote) = wrote
-            && seen.is_empty()
-        {
-            self.settle(b, block, code, sp, end, &wrote, out);
+        match (wrote, early) {
+            (Some(_), Some((proof, _))) if seen.is_empty() => {
+                self.settle(b, block, code, sp, end, proof, out);
+            }
+            (Some(wrote), None) if seen.is_empty() => {
+                let proof = self.prove(b, block, &wrote);
+                self.settle(b, block, code, sp, end, proof, out);
+            }
+            (_, Some((_, (lifting, nodes)))) => {
+                *self.lifting.borrow_mut() = lifting;
+                self.proof_nodes.set(nodes);
+            }
+            (Some(_) | None, None) => {}
         }
         Ok(())
     }
 
-    /// Proves a block the states tried agreed on, or tries the states the
-    /// proof found that may refute it.
+    /// Records the proof of a block the states tried agreed on, or tries
+    /// the states the proof found that may refute it.
     ///
     /// # Arguments
     ///
@@ -3412,7 +3461,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `code` - Its instructions.
     /// * `sp` - The stack pointer at its start, from the function's entry.
     /// * `end` - How it ends.
-    /// * `wrote` - The bytes a run from a state tried wrote.
+    /// * `proof` - The block's proof from the bytes a run from the first
+    ///   state compared wrote ([`Function::prove`]).
     /// * `out` - Where the outcome goes.
     #[expect(
         clippy::too_many_arguments,
@@ -3425,10 +3475,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         code: &[L::Insn],
         sp: i64,
         end: End<L::Insn>,
-        wrote: &FxHashSet<u64>,
+        proof: prove::Proof,
         out: &mut Replayed,
     ) {
-        let states = match self.prove(b, block, wrote) {
+        let states = match proof {
             prove::Proof::Proved => {
                 out.proved += 1;
                 return;
@@ -4617,7 +4667,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
 mod tests {
     use crate::isa::x86::Register;
 
-    use super::{Claim, Replayed, TextCheck, replay_effects, replay_function, replay_tsv};
+    use super::{
+        Claim, Replayed, Sampling, TextCheck, replay_effects, replay_function, replay_tsv,
+    };
     use crate::analysis::decompile::expr::{Expr, Flags, Op, UnOp};
     use crate::analysis::decompile::lift::{ArgAt, Effect, EffectKind};
     use crate::analysis::decompile::{decompile, decompile_with};
@@ -4662,6 +4714,7 @@ mod tests {
             (&w, &d.live.succs),
             &effects,
             usize::MAX,
+            Sampling::Every,
         )
     }
 
@@ -5931,6 +5984,7 @@ mod tests {
             (&w, &d.live.succs),
             &effects,
             1,
+            Sampling::UntilProved,
         );
         assert_eq!(
             TextCheck::of(&r).header(),
