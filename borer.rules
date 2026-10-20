@@ -26,7 +26,7 @@ critical:
   - Every parser is reachable from a fuzz target (fuzz/, CI). A crashing input becomes a test in tests/hostile.rs.
   - unsafe lives only in borer-live and tests, each block under a `// SAFETY:` line (unsafe_code, undocumented_unsafe_blocks).
   workflow:
-  - Work lands on dev without pull requests: work on a `type/topic` branch in its own worktree, one concern per commit; before pushing, run `greptile review -b dev --agent` on the branch and fix or answer every finding, then fast-forward dev to it and push. Never push to main; main moves only by a pull request from dev whose full gate and CI passed.
+  - Work lands on dev without pull requests: work on a `type/topic` branch in its own worktree, one concern per commit; before pushing, run `greptile review -b dev --agent` on the branch and fix or answer every finding, then fast-forward dev to it and push. No pull requests into main either: main moves by fast-forwarding it to dev and pushing, and that push runs the full gate and CI; a red main is fixed on dev and fast-forwarded again.
   - Parallel agents never share a working tree, and never use git stash (all worktrees share one stack).
   - 'Commit titles: `type: summary`, lowercase, imperative, plain ASCII, at most 72 characters, no scope, no period; only Co-Authored-By trailers below. Types: add, fix, improve, refactor, perf, docs, test, chore, revert (scripts/check/commits.py).'
   - One commit, one concern, green at every commit. Never commit build output, packs or ignored files.
