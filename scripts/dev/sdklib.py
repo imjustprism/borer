@@ -871,7 +871,10 @@ def spell(decl: tuple) -> str:
     same name does not expand."""
     conv = {"s": "__stdcall ", "f": "__fastcall ", "c": ""}
     name, cc, _, ret, params, variadic = decl
-    ps = [declarator(ty, pname if pname != "-" else f"a{i + 1}") for i, (ty, pname) in enumerate(params)]
+    ps = [
+        declarator(ty, pname if pname != "-" else f"a{i + 1}")
+        for i, (ty, pname) in enumerate(params)
+    ]
     if variadic:
         ps.append("...")
     return f"{ret} ({conv[cc]}{name})({', '.join(ps) or 'void'});"
