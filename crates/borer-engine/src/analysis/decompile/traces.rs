@@ -27,11 +27,11 @@ use std::rc::Rc;
 
 use crate::isa::x86::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind};
 
+use super::expr_render::bare;
 use super::{decompile_plain_full, lift, matching_paren, name_fields};
 use crate::analysis::render::{epilog_helper, frame_helper};
 use crate::analysis::{
-    Analysis, BlockTerm, Function, Overlay, bare_name, decompiled_cached, is_executable_va,
-    name_of, striped,
+    Analysis, BlockTerm, Function, Overlay, decompiled_cached, is_executable_va, name_of, striped,
 };
 use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::program::{Program, SymbolKind};
@@ -424,7 +424,7 @@ fn import_at(program: &Program, analysis: &Analysis, slot: u64) -> Option<String
         .filter(import)
         .or_else(|| program.symbols.iter().find(import))
         .filter(|_| slot != 0)
-        .map(|s| bare_name(&crate::search::demangled_name(&s.name)).to_owned())
+        .map(|s| bare(&crate::search::demangled_name(&s.name)).into_owned())
 }
 
 /// What a call or jump out of the function reaches, as a callee.
@@ -475,7 +475,7 @@ fn callee(
     } else {
         let full = name_of(analysis, overlay, key.1);
         match quiet(notes, &full) {
-            Quiet::Shown => Some(Callee::Named(names.intern(bare_name(&full)))),
+            Quiet::Shown => Some(Callee::Named(names.intern(&bare(&full)))),
             Quiet::Dropped => None,
             Quiet::Other => Some(Callee::Maybe(None)),
         }
