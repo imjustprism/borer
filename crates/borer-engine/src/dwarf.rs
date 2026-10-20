@@ -32,6 +32,16 @@ use std::sync::Arc;
 /// referred to one copied it whole.
 const STRING_MAX: usize = 4096;
 
+/// Most units one file's walk reads; past it the rest name nothing.
+const UNITS_MAX: usize = 1 << 20;
+
+/// Bytes of `.debug_abbrev` one walk may parse past the section's size.
+///
+/// Tables are read once per offset ([`Abbrevs`]), so a real file parses
+/// each byte once; units pointing into the middle of one table read
+/// overlapping tails, and this is what bounds them.
+const ABBREV_SLACK: usize = 1 << 16;
+
 /// Most bytes of names and type text one file's walk copies into its answer.
 ///
 /// Function, parameter and local names and the type text built for them
@@ -570,18 +580,68 @@ struct Abbreviation {
     attributes: Vec<Attribute>,
 }
 
-/// Reads the abbreviation table at `offset`.
+/// The abbreviation tables one file's walk has read, by offset.
+///
+/// Units of one file commonly share a table, and a hostile file points
+/// every unit at one large one; each offset is parsed once, and all the
+/// parsing together reads at most the section's size plus
+/// [`ABBREV_SLACK`] bytes.
+struct Abbrevs<'a> {
+    /// The `.debug_abbrev` section.
+    section: &'a [u8],
+    /// Tables read, `None` for an offset that did not parse.
+    tables: BTreeMap<usize, Option<std::rc::Rc<BTreeMap<u64, Abbreviation>>>>,
+    /// Bytes the parsing may still read.
+    left: usize,
+}
+
+impl<'a> Abbrevs<'a> {
+    /// Starts with nothing read.
+    ///
+    /// # Arguments
+    ///
+    /// * `section` - The `.debug_abbrev` section.
+    fn new(section: &'a [u8]) -> Self {
+        Abbrevs {
+            section,
+            tables: BTreeMap::new(),
+            left: section.len().saturating_add(ABBREV_SLACK),
+        }
+    }
+
+    /// The table at an offset, read the first time it is asked for.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The unit's abbreviation offset.
+    ///
+    /// # Returns
+    ///
+    /// The table, or `None` when it does not parse or does not end within
+    /// the bytes the parse budget has left.
+    fn at(&mut self, offset: usize) -> Option<std::rc::Rc<BTreeMap<u64, Abbreviation>>> {
+        if let Some(table) = self.tables.get(&offset) {
+            return table.clone();
+        }
+        let end = offset.saturating_add(self.left).min(self.section.len());
+        let mut c = Cursor::new(self.section.get(..end).unwrap_or_default(), offset);
+        let table = abbreviations(&mut c).map(std::rc::Rc::new);
+        self.left = self.left.saturating_sub(c.at.saturating_sub(offset).max(1));
+        self.tables.insert(offset, table.clone());
+        table
+    }
+}
+
+/// Reads one abbreviation table.
 ///
 /// # Arguments
 ///
-/// * `abbrev` - The `.debug_abbrev` section.
-/// * `offset` - Offset of this unit's table.
+/// * `c` - A cursor at the table, left where the parse stopped.
 ///
 /// # Returns
 ///
 /// The abbreviations by code, or `None` when the table does not parse.
-fn abbreviations(abbrev: &[u8], offset: usize) -> Option<BTreeMap<u64, Abbreviation>> {
-    let mut c = Cursor::new(abbrev, offset);
+fn abbreviations(c: &mut Cursor<'_>) -> Option<BTreeMap<u64, Abbreviation>> {
     let mut out = BTreeMap::new();
     loop {
         let code = c.uleb()?;
@@ -1054,8 +1114,11 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
     let mut typedefs: BTreeMap<String, String> = BTreeMap::new();
     let mut globals: Vec<Global> = Vec::new();
     let mut text = Text::new(strings);
+    let mut tables = Abbrevs::new(abbrev);
     let mut at = 0usize;
-    while !text.spent() && at.saturating_add(11) < info.len() {
+    let mut units = 0usize;
+    while !text.spent() && units < UNITS_MAX && at.saturating_add(11) < info.len() {
+        units += 1;
         let at_start = at;
         let mut c = Cursor::new(info, at);
         let Some((body_end, address_size, abbrev_offset, offset_size)) = unit_header(&mut c) else {
@@ -1065,7 +1128,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
         let end = body_end.min(info.len());
         let Some(table) = usize::try_from(abbrev_offset)
             .ok()
-            .and_then(|o| abbreviations(abbrev, o))
+            .and_then(|o| tables.at(o))
         else {
             continue;
         };
@@ -2211,6 +2274,61 @@ mod tests {
         assert!(read <= budget, "{read} bytes read past {budget}");
         let tails = read_in(&unit(&dies), &abbrev, &strings).subprograms;
         assert!(tails.len() < name_len, "{} tails read", tails.len());
+    }
+
+    /// Units that share one large abbreviation table parse it once, and
+    /// units pointing into its middle stop parsing at the budget, so the
+    /// walk costs the table's size, not units times the table.
+    #[test]
+    fn a_shared_abbreviation_table_is_parsed_once() {
+        let entries = 1usize << 14;
+        let mut abbrev: Vec<u8> = Vec::new();
+        for code in 1..=entries {
+            let mut n = code;
+            loop {
+                let byte = u8::try_from(n & 0x7f).expect("seven bits");
+                n >>= 7;
+                if n == 0 {
+                    abbrev.push(byte);
+                    break;
+                }
+                abbrev.push(byte | 0x80);
+            }
+            abbrev.extend_from_slice(&[0x2e, 0x00, 0x03, 0x08, 0x11, 0x01, 0x00, 0x00]);
+        }
+        abbrev.push(0);
+        let mut tables = super::Abbrevs::new(&abbrev);
+        let first = tables.at(0).expect("the table parses");
+        assert_eq!(first.len(), entries);
+        let left = tables.left;
+        for _ in 0..1000 {
+            assert!(tables.at(0).is_some());
+        }
+        assert_eq!(tables.left, left, "a second unit parses nothing again");
+        let mut parsed = 0usize;
+        for offset in (1..abbrev.len()).step_by(3) {
+            parsed += tables.at(offset).map_or(0, |t| t.len());
+        }
+        assert!(
+            parsed <= 2 * entries,
+            "{parsed} abbreviations parsed from tails of one table"
+        );
+        let mut info = Vec::new();
+        let die: Vec<u8> = {
+            let mut d = vec![0x01];
+            d.extend_from_slice(b"f\0");
+            d.extend_from_slice(&0x1000u64.to_le_bytes());
+            d
+        };
+        for _ in 0..4000 {
+            info.extend_from_slice(&unit(&die));
+        }
+        let strings = Strings {
+            text: &[],
+            lines: &[],
+        };
+        let found = read_in(&info, &abbrev, &strings).subprograms;
+        assert_eq!(found.len(), 1, "every unit names f at one address");
     }
 
     /// A unit whose stated length runs to the top of the offset space
