@@ -7,40 +7,13 @@
     reason = "assertions are the point of a test"
 )]
 #![expect(
-    clippy::expect_used,
     clippy::panic,
     reason = "a server that cannot be driven has no useful recovery in a test client"
 )]
 
 use crate::contract::tiny_pe;
 use crate::reload::Client;
-
-/// Reads a URI through `resources/read`.
-///
-/// # Arguments
-///
-/// * `client` - The session.
-/// * `uri` - The URI.
-///
-/// # Returns
-///
-/// The text.
-///
-/// # Errors
-///
-/// The error's message, when the server refuses the URI.
-fn read(client: &mut Client, uri: &str) -> Result<String, String> {
-    let params = serde_json::json!({ "uri": uri }).to_string();
-    let line = client.call("resources/read", &params);
-    let reply: serde_json::Value = serde_json::from_str(&line).expect("a reply is JSON");
-    match reply["result"]["contents"][0]["text"].as_str() {
-        Some(text) => Ok(text.to_owned()),
-        None => Err(reply["error"]["message"]
-            .as_str()
-            .unwrap_or_else(|| panic!("neither text nor an error: {line}"))
-            .to_owned()),
-    }
-}
+use crate::resources::read;
 
 /// The evidence id an answer's last line names.
 ///
