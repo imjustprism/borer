@@ -1912,6 +1912,10 @@ impl<'a> Exec<'_, 'a> {
     /// write and sit above the stack pointer afterwards, so their values
     /// are forgotten with them.
     ///
+    /// A `syscall` is a call into the kernel ([`Exec::kernel_call`]). A
+    /// 64-bit stack probe of a size computed at run time is no statement:
+    /// the `sub rsp, rax` after it is the `alloca` ([`Exec::alloca`]).
+    ///
     /// # Arguments
     ///
     /// * `instr` - The call.
@@ -2019,20 +2023,20 @@ impl<'a> Exec<'_, 'a> {
             };
             self.env.chkstk = size;
             let name = bare(&name_of(self.ctx.analysis, self.ctx.overlay, t)).into_owned();
-            let arg = size.map_or(String::new(), |c| {
-                crate::analysis::decompile::expr::render_const(c, true)
-            });
-            emit_line!(self, format!("{name}({arg});"));
+            let probe = self.bitness() == 64 && name.contains("chkstk");
+            let shown = match size {
+                None if probe => Shown::Elided,
+                _ => {
+                    let arg = size.map_or(String::new(), |c| {
+                        crate::analysis::decompile::expr::render_const(c, true)
+                    });
+                    emit_line!(self, format!("{name}({arg});"));
+                    Shown::Statement
+                }
+            };
             let args =
                 size.map_or_else(Vec::new, |c| vec![(ArgAt::Reg(self.rax()), Expr::Const(c))]);
-            self.record_call(
-                Callee::Direct(t),
-                args,
-                None,
-                None,
-                noreturn,
-                Shown::Statement,
-            );
+            self.record_call(Callee::Direct(t), args, None, None, noreturn, shown);
             return;
         }
         match self.dispatch(instr) {
