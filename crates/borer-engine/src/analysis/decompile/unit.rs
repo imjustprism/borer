@@ -689,6 +689,10 @@ fn definition(
 
 /// Reads a prototype from its spelling, `uint32_t f(uint64_t a1)`.
 ///
+/// A signature that names two parameters alike (debug information can
+/// hand a function an inlined callee's) keeps its types and loses its
+/// names, which C would refuse.
+///
 /// # Arguments
 ///
 /// * `sig` - The signature, parameter names optional.
@@ -714,6 +718,16 @@ fn parse_proto(sig: &str, name: &str) -> Option<Proto> {
             "" | "void" => {}
             "..." => variadic = true,
             _ => params.push(param(p)),
+        }
+    }
+    let named: Vec<&Name> = params.iter().filter_map(|(_, n)| n.as_ref()).collect();
+    if named
+        .iter()
+        .enumerate()
+        .any(|(i, n)| named.iter().skip(i + 1).any(|m| m == n))
+    {
+        for (_, n) in &mut params {
+            *n = None;
         }
     }
     Some(Proto {
@@ -1068,6 +1082,19 @@ mod tests {
         assert!(parse_proto("uint64_t xf(uint64_t)", "f").is_none());
         assert!(plain_type("const char *") && plain_type("uint64_t"));
         assert!(!plain_type("HANDLE") && !plain_type("FILE *"));
+    }
+
+    /// A signature naming two parameters alike keeps their types only.
+    ///
+    /// # Panics
+    ///
+    /// When a name survives.
+    #[test]
+    fn a_signature_with_a_repeated_name_loses_its_names() {
+        let p = parse_proto("char *f(void *d, size_t n, void *d)", "f").unwrap();
+        let mut out = String::new();
+        cir::print_items(&[Item::Extern(p)], &mut out);
+        assert_eq!(out, "extern char *f(void *, size_t, void *);\n");
     }
 
     /// A name the C implementation declares is recognized: a standard
