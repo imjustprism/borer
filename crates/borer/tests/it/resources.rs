@@ -29,7 +29,7 @@ use crate::reload::Client;
 /// # Errors
 ///
 /// The error's message, when the server refuses the URI.
-fn read(client: &mut Client, uri: &str) -> Result<String, String> {
+pub(crate) fn read(client: &mut Client, uri: &str) -> Result<String, String> {
     let params = serde_json::json!({ "uri": uri }).to_string();
     let line = client.call("resources/read", &params);
     let reply: serde_json::Value = serde_json::from_str(&line).expect("a reply is JSON");
