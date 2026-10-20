@@ -101,8 +101,9 @@ fn file_label(path: &Path) -> String {
 }
 
 /// Largest text file a resource reads, in bytes: a script, a manifest or
-/// a fingerprint sidecar is text an agent wrote or borer did.
-const SPEC_FILE_MAX: u64 = 1 << 24;
+/// a fingerprint sidecar is text an agent wrote or borer did, and a large
+/// binary's sidecar runs to tens of megabytes.
+const SPEC_FILE_MAX: u64 = 1 << 26;
 
 /// Reads a file a resource names, refusing a device and naming the file in
 /// any failure.
