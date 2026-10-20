@@ -23,6 +23,7 @@
 //! ([`Proof::Differ`]) are tried on the emulator, and only a disagreement
 //! the emulator confirms refutes the block.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::isa::x86::{
@@ -61,6 +62,15 @@ const OVERRIDES_MAX: usize = 128;
 /// written may hold together, so reads of stores of reads cannot grow
 /// their terms without bound.
 const OVERRIDE_NODES_MAX: usize = 4096;
+/// Most term nodes the proofs of one function's blocks may write.
+///
+/// The budget covers their states and claims together, so that no
+/// function's proof runs long however its values grow: the blocks after
+/// it is spent are left to the samples.
+pub(super) const PROOF_NODES: usize = 1 << 20;
+/// Why a block is left to the samples once its function's proofs spent
+/// [`PROOF_NODES`].
+const SPENT: &str = "the function's proof budget spent";
 /// Claims a block's search looks at before it stops.
 const SEARCHED_CLAIMS: usize = 4;
 /// What the search adds to a value it starts from: nothing, or the sign
@@ -194,6 +204,24 @@ fn hold_flags(f: &Flags, lifted: &Lifted<'_>) -> Result<Option<Held>, Why> {
         held.insert(FLAG_RIGHT, b);
     }
     Ok(Some((shape, held)))
+}
+
+/// Takes a value's nodes out of a function's proof budget
+/// ([`PROOF_NODES`]).
+///
+/// # Arguments
+///
+/// * `fuel` - The nodes the function's proofs may still write.
+/// * `t` - A value a proof writes into its state or a claim.
+///
+/// # Errors
+///
+/// The budget ran out.
+fn spend(fuel: &Cell<usize>, t: &Term) -> Result<(), Why> {
+    let mut left = fuel.get();
+    let fits = t.spend(&mut left);
+    fuel.set(left);
+    if fits { Ok(()) } else { Err(SPENT) }
 }
 
 /// One byte of memory as a side holds it.
@@ -634,6 +662,8 @@ struct Sym<'t> {
     at: u64,
     /// The block's flag setters and readers, as the replay keeps them.
     setters: (Vec<(u64, bool)>, Vec<u64>),
+    /// The nodes the function's proofs may still write ([`PROOF_NODES`]).
+    fuel: &'t Cell<usize>,
 }
 
 impl Sym<'_> {
@@ -969,6 +999,7 @@ impl Sym<'_> {
         if bits <= 64 {
             value = narrow(&value, bits);
         }
+        spend(self.fuel, &value)?;
         match k {
             Key::Slot(o) => {
                 let at = self.sp0.wrapping_add_signed(o);
@@ -1111,6 +1142,7 @@ impl Sym<'_> {
         }
         let n = u64::from(ty.bits() / 8).max(1);
         let value = self.wide(v, n)?;
+        spend(self.fuel, &value)?;
         self.write(at, n, &value);
         Ok(())
     }
@@ -1661,6 +1693,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         block: &BasicBlock,
         observed: &FxHashSet<u64>,
     ) -> Result<Proof, Why> {
+        if self.proof_nodes.get() == 0 {
+            return Err(SPENT);
+        }
         let Code::X86(all) = &self.w.code else {
             return Err("an arm64 block");
         };
@@ -1763,6 +1798,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             result_ty: self.entry_result_ty(b),
             at: block.start,
             setters: <super::super::arch::X86 as Replay>::flag_setters(code),
+            fuel: &self.proof_nodes,
         };
 
         let mut regs: FxHashMap<Key, Term> = FxHashMap::default();
@@ -1961,6 +1997,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             if w.processed.get(s).copied().unwrap_or(false) {
                 self.successor_claims(&text, &machine, b, s, called, &pending, &mut claims)?;
             }
+        }
+        for c in &claims {
+            spend(&self.proof_nodes, &c.text)?;
+            spend(&self.proof_nodes, &c.machine)?;
         }
         Ok(decide(&claims, width))
     }
@@ -2226,6 +2266,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             };
             lifted.eval(addr, EVAL_DEPTH)?;
             let v = lifted.eval(value, EVAL_DEPTH)?;
+            spend(&self.proof_nodes, &v)?;
             for i in 0..n {
                 bytes.push((
                     a.wrapping_add(i) & mask,
@@ -2244,6 +2285,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 }
                 None => Term::Undef,
             };
+            spend(&self.proof_nodes, &v)?;
             for i in 0..n {
                 let byte = match &v {
                     Term::Undef => Byte::Lost,
@@ -2317,6 +2359,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             (true, None) => return Err("a branch the lift has no condition for"),
             (false, _) => None,
         };
+        for (_, v, _) in &regs {
+            spend(&self.proof_nodes, v)?;
+        }
         for (a, byte) in bytes {
             run.mem.insert(a, byte);
         }

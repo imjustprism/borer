@@ -62,7 +62,7 @@
 //! which of them it can check), and [`Rig`], what it asks of that
 //! instruction set's machine.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
@@ -1175,6 +1175,7 @@ fn replay_effects<L: Replay>(
         vectors: L::vectors(),
         volatile: L::volatile(w),
         width,
+        proof_nodes: Cell::new(prove::PROOF_NODES),
     };
     let mut room = budget;
     for (b, block) in f.blocks.iter().enumerate() {
@@ -3166,6 +3167,9 @@ struct Function<'f, 'p, L: Replay> {
     volatile: Vec<Key>,
     /// The register width, 32 or 64.
     width: u8,
+    /// The term nodes the proofs of the function's blocks may still write
+    /// ([`prove::PROOF_NODES`]).
+    proof_nodes: Cell<usize>,
 }
 
 /// One state a block is tried from, part way through: the emulator stopped

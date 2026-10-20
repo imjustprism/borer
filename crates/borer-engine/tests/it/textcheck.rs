@@ -577,9 +577,10 @@ fn the_iso_check_agrees_where_the_text_is_c() {
 }
 
 /// A block that reads through a computed address what it just stored,
-/// round after round, is checked in bounded time: each read sees the
-/// bytes written so far, and copying their values into every read grew
-/// the replay's terms eightfold a round.
+/// round after round, is checked in bounded time.
+///
+/// Each read sees the bytes written so far, and copying their values
+/// into every read grew the replay's terms eightfold a round.
 #[test]
 fn reads_of_stores_of_reads_are_checked_in_bounded_time() {
     const ROUNDS: usize = 24;
@@ -590,6 +591,35 @@ fn reads_of_stores_of_reads_are_checked_in_bounded_time() {
         code.extend([0x48, 0x8b, 0x3c, 0x24]); // ASM: mov rdi,[rsp]
     }
     code.extend([0x48, 0x83, 0xc4, 0x18, 0xc3]); // ASM: add rsp,0x18; ret
+    let p = program(&code, &[]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        tx.send(checked_header(&p, &a, &o, TEXT).unwrap_or_default())
+    });
+    let header = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the check finishes");
+    assert!(header.contains("checked vs binary"), "{header}");
+}
+
+/// A block that squares the value it holds round after round is checked
+/// in bounded time.
+///
+/// A product past the polynomials' degree stays an opaque multiply of
+/// two copies of its operand, so its terms double a round, and the
+/// function's proof budget leaves the block to the samples once they
+/// outgrow it.
+#[test]
+fn values_that_double_each_round_are_checked_in_bounded_time() {
+    const ROUNDS: usize = 48;
+    let mut code = vec![0x48, 0x89, 0xf8]; // ASM: mov rax,rdi
+    for _ in 0..ROUNDS {
+        code.extend([0x48, 0x0f, 0xaf, 0xc0]); // ASM: imul rax,rax
+        code.extend([0x48, 0x01, 0xf8]); // ASM: add rax,rdi
+    }
+    code.push(0xc3); // ASM: ret
     let p = program(&code, &[]);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
