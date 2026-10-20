@@ -59,6 +59,9 @@ def dump_stderr_on_failure():
 
 atexit.register(dump_stderr_on_failure)
 
+# The servers write project files under the system temp directory, so it is
+# their output root.
+os.environ["BORER_OUTPUT_DIR"] = tempfile.gettempdir()
 proc = subprocess.Popen(
     [EXE],
     stdin=subprocess.PIPE,
@@ -341,8 +344,6 @@ assert bad_name.get("isError") and "error" not in bad_name, (
 )
 no_tool = wait_for(send("tools/call", {"name": "no_such_tool", "arguments": {}}), allow_error=True)
 assert "error" in no_tool, f"an unknown tool is a protocol error: {str(no_tool)[:200]}"
-
-import tempfile
 
 # One project file per run: every agent runs smoke, and a shared name let a
 # concurrent run's save land between this run's save and its load.

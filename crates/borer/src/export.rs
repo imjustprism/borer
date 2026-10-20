@@ -14,6 +14,8 @@ use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::Program;
 use borer_engine::text::short_path;
 
+use crate::output::{Existing, create};
+
 /// What an export wrote.
 #[derive(Debug)]
 pub struct Written {
@@ -52,7 +54,9 @@ impl Written {
 /// * `analysis` - Its analysis.
 /// * `overlay` - Names, types and comments to apply.
 /// * `library` - Whether library code is written.
-/// * `out` - The C file to write, replaced if it exists.
+/// * `out` - The C file to write.
+/// * `existing` - Whether a regular file already at `out` is replaced;
+///   a link there is never written through.
 ///
 /// # Returns
 ///
@@ -60,13 +64,15 @@ impl Written {
 ///
 /// # Errors
 ///
-/// When the file or its `.part` beside it cannot be written.
+/// When the file or its `.part` beside it cannot be written, or a file
+/// is at `out` and `existing` keeps it.
 pub fn write_c(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     library: Library,
     out: &str,
+    existing: Existing,
 ) -> anyhow::Result<Written> {
     let path = Path::new(out);
     if let Some(why) = borer_engine::program::unusable_path(path) {
@@ -75,8 +81,11 @@ pub fn write_c(
     let part_name = format!("{out}.part");
     let part = Path::new(&part_name);
     let shown = short_path(out);
+    if existing == Existing::Keep && std::fs::symlink_metadata(path).is_ok() {
+        anyhow::bail!("{shown} exists; nothing was written");
+    }
     let mut bodies = std::io::BufWriter::new(
-        std::fs::File::create(part).with_context(|| format!("creating {shown}.part"))?,
+        create(part, Existing::Replace).with_context(|| format!("creating {shown}.part"))?,
     );
     let hoisted = export(program, analysis, overlay, library, &mut |text| {
         bodies
@@ -89,7 +98,7 @@ pub fn write_c(
     drop(bodies);
     let binary = short_path(&program.path.display().to_string());
     let mut file = std::io::BufWriter::new(
-        std::fs::File::create(path).with_context(|| format!("creating {shown}"))?,
+        create(path, existing).with_context(|| format!("creating {shown}"))?,
     );
     file.write_all(hoisted.head(&binary).as_bytes())
         .with_context(|| format!("writing {shown}"))?;
@@ -106,7 +115,7 @@ pub fn write_c(
 
 #[cfg(test)]
 mod tests {
-    use super::{Library, write_c};
+    use super::{Existing, Library, write_c};
     use borer_engine::analysis::{Analysis, Overlay};
     use borer_engine::program::{Arch, Program, Section};
 
@@ -136,7 +145,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("borer-export-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temp dir");
         let out = dir.join("t.c").display().to_string();
-        let written = write_c(&p, &a, &o, Library::Skip, &out).expect("writes");
+        let written = write_c(&p, &a, &o, Library::Skip, &out, Existing::Keep).expect("writes");
+        assert!(
+            write_c(&p, &a, &o, Library::Skip, &out, Existing::Keep).is_err(),
+            "a second write keeps the first file"
+        );
         let c = std::fs::read_to_string(&out).expect("reads");
         let part_left = std::path::Path::new(&format!("{out}.part")).exists();
         std::fs::remove_dir_all(&dir).expect("cleans up");

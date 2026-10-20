@@ -565,12 +565,17 @@ pub(crate) struct DecompileBatchParams {
     pub(crate) filter: Option<String>,
     /// Maximum functions to decompile (default 10, max 50).
     pub(crate) max_functions: Option<u32>,
-    /// Write every function to this C file instead, uncapped, leaves
+    /// Write every function to this `.c` file instead, uncapped, leaves
     /// first, declarations once at the top; not with `filter` or
-    /// `max_functions`.
+    /// `max_functions`. Relative to the output root (`BORER_OUTPUT_DIR`,
+    /// else the binary's project directory under the borer data
+    /// directory), or absolute under it.
     pub(crate) out: Option<String>,
     /// With out: also write library functions (default false).
     pub(crate) library: Option<bool>,
+    /// With out: replace a file already there (default false, which
+    /// refuses it).
+    pub(crate) overwrite: Option<bool>,
 }
 
 /// Parameters for `search`.
@@ -671,8 +676,12 @@ pub(crate) struct AnnotationsParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SaveProjectParams {
-    /// Output JSON path.
+    /// Output `.json` path, relative to the output root (`BORER_OUTPUT_DIR`,
+    /// else the binary's project directory under the borer data
+    /// directory), or absolute under it.
     pub(crate) path: String,
+    /// Replace a file already there (default false, which refuses it).
+    pub(crate) overwrite: Option<bool>,
 }
 
 /// Parameters for `load_project`.

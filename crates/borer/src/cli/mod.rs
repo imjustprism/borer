@@ -1085,7 +1085,14 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 ),
                 &[],
             );
-            let written = borer::export::write_c(&s.program, &a, &s.overlay, library, out)?;
+            let written = borer::export::write_c(
+                &s.program,
+                &a,
+                &s.overlay,
+                library,
+                out,
+                borer::output::Existing::Replace,
+            )?;
             println!("{}", written.line(out));
         }
         Query::ExportPack => {
@@ -1143,7 +1150,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     Some(borer::project::identity(&s.program.bytes)),
                     &overlay,
                 )
-                .save(&path)
+                .save(&path, borer::output::Existing::Replace)
                 .map_err(anyhow::Error::msg)?;
                 eprintln!(
                     "borer: saved {} names and {} comments to {}",
@@ -1359,7 +1366,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 ),
             }
             borer::project::ProjectFile::from_overlay(&program, sha256, &overlay)
-                .save(project)
+                .save(project, borer::output::Existing::Replace)
                 .map_err(anyhow::Error::msg)?;
             println!("{say}; written to {}", short_path(project));
         }
@@ -1619,7 +1626,7 @@ mod tests {
         let save = |file: &str, sha: String| {
             let path = dir.join(file).display().to_string();
             borer::project::ProjectFile::from_overlay("x", Some(sha), &named)
-                .save(&path)
+                .save(&path, borer::output::Existing::Replace)
                 .expect("saves");
             path
         };

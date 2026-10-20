@@ -409,10 +409,11 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// Invalid params when no binary is loaded; internal error when the file cannot
-    /// be written.
+    /// Invalid params when no binary is loaded or the path is refused (outside
+    /// the output root, not `.json`, or an existing file without
+    /// `overwrite`); internal error when the file cannot be written.
     #[tool(
-        description = "Save the annotation overlay (names, comments, types) to a JSON project file, keyed to the binary by its SHA-256.",
+        description = "Save the annotation overlay (names, comments, types) to a .json project file, keyed to the binary by its SHA-256, under the output root (BORER_OUTPUT_DIR, else the binary's project directory); an existing file is refused unless overwrite=true; answers the absolute path written.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -422,15 +423,20 @@ impl BorerServer {
     )]
     pub(crate) fn save_project(
         &self,
-        Parameters(SaveProjectParams { path }): Parameters<SaveProjectParams>,
+        Parameters(SaveProjectParams { path, overwrite }): Parameters<SaveProjectParams>,
     ) -> Result<String, ErrorData> {
         let program = self.require_loaded()?;
+        let existing = borer::output::Existing::from_flag(overwrite);
+        let path = borer::output::for_program(&program, &path, &["json"], existing)
+            .map_err(err_params)?
+            .display()
+            .to_string();
         let pf = borer::project::ProjectFile::from_overlay(
             &program.path.display().to_string(),
             Some(borer::project::identity(&program.bytes)),
             &read_lock(&self.overlay),
         );
-        pf.save(&path).map_err(err_internal)?;
+        pf.save(&path, existing).map_err(err_internal)?;
         let vars: usize = pf.vars.values().map(std::collections::BTreeMap::len).sum();
         let stated = if pf.prototypes.is_empty() && vars == 0 {
             String::new()

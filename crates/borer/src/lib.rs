@@ -3,5 +3,6 @@
 
 pub mod export;
 pub mod index;
+pub mod output;
 pub mod packs;
 pub mod project;

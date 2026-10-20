@@ -388,17 +388,23 @@ impl ProjectFile {
     /// # Arguments
     ///
     /// * `path` - Destination path.
+    /// * `existing` - Whether a regular file already at `path` is
+    ///   replaced; a link there is never written through.
     ///
     /// # Errors
     ///
-    /// When the path is a device, or serialization or the write fails.
-    pub fn save(&self, path: &str) -> Result<(), String> {
+    /// When the path is a device, a file is there and `existing` keeps it,
+    /// or serialization or the write fails.
+    pub fn save(&self, path: &str, existing: crate::output::Existing) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
         if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
             return Err(format!("{why}; nothing was written"));
         }
-        std::fs::write(Path::new(path), json)
-            .map_err(|e| format!("write {}: {e}", borer_engine::text::short_path(path)))
+        let shown = borer_engine::text::short_path(path);
+        let mut file = crate::output::create(Path::new(path), existing)
+            .map_err(|e| format!("write {shown}: {e}"))?;
+        std::io::Write::write_all(&mut file, json.as_bytes())
+            .map_err(|e| format!("write {shown}: {e}"))
     }
 
     /// Reads and parses a project file.

@@ -291,11 +291,11 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Pseudo-C for many functions: filter on name or entry hex, max_functions (10, max 50); 6000 chars per function, 40000 total; out=<file.c> writes every function there uncapped, leaves first.",
+        description = "Pseudo-C for many functions: filter on name or entry hex, max_functions (10, max 50); 6000 chars per function, 40000 total; out=<file.c> writes every function there uncapped, leaves first, under the output root (BORER_OUTPUT_DIR, else the binary's project directory), refusing an existing file unless overwrite=true, and answers the absolute path written.",
         annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
             open_world_hint = false
         )
     )]
@@ -306,6 +306,7 @@ impl BorerServer {
             max_functions,
             out,
             library,
+            overwrite,
         }): Parameters<DecompileBatchParams>,
     ) -> Result<String, ErrorData> {
         if let Some(out) = out {
@@ -323,10 +324,13 @@ impl BorerServer {
                 if let Some(why) = p.refuses(Feature::Decompile) {
                     return Err(why);
                 }
+                let existing = borer::output::Existing::from_flag(overwrite);
+                let dest = borer::output::for_program(p, &out, &["c"], existing)?;
+                let dest = dest.display().to_string();
                 let a = self.ensure_analysis()?;
                 let o = self.overlay();
-                borer::export::write_c(p, &a, &o, library, &out)
-                    .map(|w| w.line(&out))
+                borer::export::write_c(p, &a, &o, library, &dest, existing)
+                    .map(|w| w.line(&dest))
                     .map_err(|e| format!("{e:#}"))
             });
         }
@@ -563,23 +567,42 @@ mod tests {
             pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
             ..crate::BorerServer::default()
         };
-        let dir = std::env::temp_dir().join(format!("borer-batch-out-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a temp dir");
-        let out = dir.join("all.c").display().to_string();
-        let batch = |filter: Option<&str>| {
+        let away = std::env::temp_dir()
+            .join(format!("borer-batch-out-{}.c", std::process::id()))
+            .display()
+            .to_string();
+        let out = format!("batch-out-{}/all.c", std::process::id());
+        let batch = |filter: Option<&str>, out: &str, overwrite: Option<bool>| {
             server.decompile_batch(Parameters(DecompileBatchParams {
                 filter: filter.map(str::to_owned),
                 max_functions: None,
-                out: Some(out.clone()),
+                out: Some(out.to_owned()),
                 library: None,
+                overwrite,
             }))
         };
-        let refused = batch(Some("sub")).expect_err("a filter with out");
-        let said = batch(None).expect("writes");
-        let c = std::fs::read_to_string(&out).expect("reads");
-        std::fs::remove_dir_all(&dir).expect("cleans up");
+        let refused = batch(Some("sub"), &out, None).expect_err("a filter with out");
+        let outside = batch(None, &away, None).expect_err("a path outside the root");
+        assert!(
+            outside.message.contains("outside the output root"),
+            "{outside:?}"
+        );
+        assert!(!std::path::Path::new(&away).exists());
+        let said = batch(None, &out, None).expect("writes");
+        let written = said
+            .strip_prefix("wrote 1 functions to ")
+            .and_then(|rest| rest.split(" (").next())
+            .unwrap_or_else(|| panic!("{said}"));
+        let written = std::path::Path::new(written);
+        assert!(written.is_absolute(), "{said}");
+        let again = batch(None, &out, None).expect_err("an existing file is kept");
+        assert!(again.message.contains("overwrite=true"), "{again:?}");
+        batch(None, &out, Some(true)).expect("overwrite replaces it");
+        let c = std::fs::read_to_string(written).expect("reads");
+        if let Some(dir) = written.parent() {
+            std::fs::remove_dir_all(dir).expect("cleans up");
+        }
         assert!(refused.message.contains("leave filter"), "{refused:?}");
-        assert!(said.starts_with("wrote 1 functions to "), "{said}");
         assert!(
             c.contains("= 399;") || c.contains("= 0x18f;"),
             "the last store is written: {c}"
@@ -624,6 +647,7 @@ mod tests {
                 max_functions: Some(1),
                 out: None,
                 library: None,
+                overwrite: None,
             }))
             .expect("batch");
         let note = batch
@@ -855,6 +879,7 @@ mod tests {
                 max_functions: Some(1),
                 out: None,
                 library: None,
+                overwrite: None,
             }))
             .expect("batch");
         assert!(!batch.contains("checked vs binary"), "{batch}");
@@ -1091,6 +1116,7 @@ mod tests {
                 max_functions: Some(50),
                 out: None,
                 library: None,
+                overwrite: None,
             }))
             .expect("batch");
         let printed = batch.lines().filter(|l| l.starts_with("==== ")).count();

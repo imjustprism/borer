@@ -29,7 +29,7 @@ fn overlay_round_trip_through_json() {
     let path = path.to_str().unwrap();
 
     let pf = ProjectFile::from_overlay("D:/some/binary.exe", Some(identity(b"abc")), &o);
-    pf.save(path).unwrap();
+    pf.save(path, borer::output::Existing::Replace).unwrap();
 
     let loaded = ProjectFile::load(path).unwrap();
     assert_eq!(loaded.program, "D:/some/binary.exe");
@@ -46,7 +46,8 @@ fn empty_overlay_round_trip() {
     let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("empty.json");
-    pf.save(path.to_str().unwrap()).unwrap();
+    pf.save(path.to_str().unwrap(), borer::output::Existing::Replace)
+        .unwrap();
     let loaded = ProjectFile::load(path.to_str().unwrap()).unwrap();
     assert!(loaded.to_overlay().unwrap().names.is_empty());
 }
@@ -68,7 +69,7 @@ fn types_round_trip_through_json() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("types.json");
     ProjectFile::from_overlay("bin", None, &o)
-        .save(path.to_str().unwrap())
+        .save(path.to_str().unwrap(), borer::output::Existing::Replace)
         .unwrap();
     let loaded = ProjectFile::load(path.to_str().unwrap()).unwrap();
     let restored = loaded.to_overlay().unwrap();
@@ -101,7 +102,7 @@ fn an_enum_round_trips_through_json() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("enum.json");
     ProjectFile::from_overlay("bin", None, &o)
-        .save(path.to_str().unwrap())
+        .save(path.to_str().unwrap(), borer::output::Existing::Replace)
         .unwrap();
     let loaded = ProjectFile::load(path.to_str().unwrap()).unwrap();
     let restored = loaded.to_overlay().unwrap();
@@ -261,8 +262,12 @@ fn a_project_is_identified_by_its_binarys_bytes() {
     let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let (one, two) = (dir.join("one.json"), dir.join("two.json"));
-    hashed.save(one.to_str().unwrap()).unwrap();
-    hashed.save(two.to_str().unwrap()).unwrap();
+    hashed
+        .save(one.to_str().unwrap(), borer::output::Existing::Replace)
+        .unwrap();
+    hashed
+        .save(two.to_str().unwrap(), borer::output::Existing::Replace)
+        .unwrap();
     assert_eq!(std::fs::read(one).unwrap(), std::fs::read(two).unwrap());
 }
 
@@ -439,7 +444,8 @@ fn prototypes_and_variables_round_trip_through_json() {
             .map(String::as_str),
         Some("wchar_t *path")
     );
-    pf.save(path.to_str().unwrap()).unwrap();
+    pf.save(path.to_str().unwrap(), borer::output::Existing::Replace)
+        .unwrap();
     let restored = ProjectFile::load(path.to_str().unwrap())
         .unwrap()
         .to_overlay()
@@ -450,7 +456,7 @@ fn prototypes_and_variables_round_trip_through_json() {
 
     let plain = dir.join("plain.json");
     ProjectFile::from_overlay("bin", None, &Overlay::default())
-        .save(plain.to_str().unwrap())
+        .save(plain.to_str().unwrap(), borer::output::Existing::Replace)
         .unwrap();
     let text = std::fs::read_to_string(&plain).unwrap();
     assert!(

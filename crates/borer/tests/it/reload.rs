@@ -46,6 +46,7 @@ impl Client {
     pub(crate) fn start(load: &str) -> Client {
         let exe = env!("CARGO_BIN_EXE_borer");
         let mut child = Command::new(exe)
+            .env("BORER_OUTPUT_DIR", std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
