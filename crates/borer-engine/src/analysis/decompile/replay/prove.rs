@@ -2759,8 +2759,8 @@ mod tests {
     use super::{Flagged, compare, fcmp_pred, flags_pred, float_pred};
     use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, float_cc};
     use crate::analysis::decompile::fcmp::FPred;
+    use crate::analysis::decompile::floats::float_of;
     use crate::analysis::decompile::replay::term::{Point, Term, holds};
-    use crate::analysis::decompile::verify::float_of;
     use crate::fxmap::FxHashMap;
     use crate::isa::x86::{ConditionCode, Register};
 

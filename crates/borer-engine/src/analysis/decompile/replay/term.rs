@@ -29,7 +29,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use super::super::expr::{Expr, Key, Op, UnOp, fold, unary};
-use super::super::verify::{float_arith, float_of, float_to_int, float_un, low, sext};
+use super::super::floats::{float_arith, float_of, float_to_int, float_un};
+use super::super::verify::{low, sext};
 use crate::fxmap::FxHashMap;
 
 /// Most monomials a product of two sums keeps before the product stays an
