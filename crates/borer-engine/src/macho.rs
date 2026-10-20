@@ -150,7 +150,7 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
         Mach::Binary(m) => Ok(image(file, m, 0)),
         Mach::Fat(multi) => {
             let arches: Vec<goblin::mach::fat::FatArch> =
-                multi.iter_arches().filter_map(Result::ok).collect();
+                multi.iter_arches().map_while(Result::ok).collect();
             let pick = arches
                 .iter()
                 .position(|a| a.cputype == CPU_X86_64)

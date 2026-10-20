@@ -871,3 +871,16 @@ fn fields_the_loader_ignores_do_not_refuse_the_file() {
     );
     assert_eq!(p.sections.len(), 1);
 }
+
+/// A fat Mach-O header naming four billion slices in a 14-byte file is
+/// refused at once.
+///
+/// The fuzzer's first find: every entry past the end failed to read and
+/// was skipped, one at a time, for all 0xfafe0000 of them. The table
+/// stops at the first entry the file cannot hold.
+#[test]
+fn a_fat_header_counting_past_the_file_stops_at_the_end() {
+    let bytes = vec![0xca, 0xfe, 0xba, 0xbe, 0xfa, 0xfe, 0, 0, 0, 0, 1, 0, 0, 0];
+    let err = Program::from_bytes(PathBuf::from("fat"), bytes).expect_err("no slice fits");
+    assert!(err.to_string().contains("names no slice"), "{err}");
+}
