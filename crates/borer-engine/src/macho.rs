@@ -656,6 +656,34 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         })
         .or_else(|| (m.entry != 0).then_some(m.entry));
 
+    let headers = headers(file, m, base, named == 0, function_ranges.len());
+    Loaded {
+        arch,
+        is_64,
+        entry,
+        image_base: text,
+        sections,
+        symbols,
+        function_ranges,
+        headers,
+        fit,
+        lenient: None,
+        relocs,
+    }
+}
+
+/// Reads what an image's header and load commands say of it: its kind,
+/// mitigations, libraries, identity, signature, encryption, interpreter,
+/// platform and linker.
+///
+/// # Arguments
+///
+/// * `file` - The whole file.
+/// * `m` - The image.
+/// * `base` - Where the image begins in the file: zero for a thin file.
+/// * `stripped` - Whether its symbol table names nothing.
+/// * `functions` - How many functions its unwind and start tables give.
+fn headers(file: &[u8], m: &MachO<'_>, base: usize, stripped: bool, functions: usize) -> Headers {
     let kind = match m.header.filetype {
         0x1 => "object",
         0x2 => "executable",
@@ -679,8 +707,8 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         headers.mitigations.push("nx");
     }
     headers.libraries = m.libs.iter().skip(1).map(|l| (*l).to_owned()).collect();
-    headers.stripped = Some(named == 0);
-    headers.unwind_functions = function_ranges.len();
+    headers.stripped = Some(stripped);
+    headers.unwind_functions = functions;
     for lc in &m.load_commands {
         match &lc.command {
             CommandVariant::Uuid(u) => {
@@ -740,19 +768,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
             _ => {}
         }
     }
-    Loaded {
-        arch,
-        is_64,
-        entry,
-        image_base: text,
-        sections,
-        symbols,
-        function_ranges,
-        headers,
-        fit,
-        lenient: None,
-        relocs,
-    }
+    headers
 }
 
 #[cfg(test)]
