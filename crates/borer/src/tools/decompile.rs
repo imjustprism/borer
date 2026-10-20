@@ -187,7 +187,7 @@ pub(crate) fn truncated(text: &str, cap: usize, entry: u64, header: usize) -> St
 /// * `o` - Names in force.
 /// * `entry` - The function's entry.
 /// * `differs` - The repair search's note, when the text still differs
-///   ([`render::answered`]).
+///   ([`render::answered_flagged`]).
 ///
 /// # Returns
 ///
@@ -270,7 +270,7 @@ impl BorerServer {
             }
             let a = self.ensure_analysis()?;
             let entry = self.function_entry(p, &a, &address)?;
-            let (o, differs) = render::answered(p, &a, &self.overlay(), entry);
+            let (o, differs) = render::answered_flagged(p, &a, &self.overlay(), entry);
             let header = decompile_header(p, &a, &o, entry, differs.as_deref());
             let text = decompile::decompile_named(p, &a, &o, entry)
                 .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;

@@ -15,7 +15,9 @@ mod spec;
 mod vectors;
 
 pub use diff::run_diff_tsv;
-pub use repair::{Budget, Evidence, Repair, Tried, answered, repair_iso, repaired};
+pub use repair::{
+    Budget, Evidence, Repair, Tried, answered, answered_flagged, repair_iso, repaired,
+};
 use spec::{RunSpec, parse_run};
 use vectors::VERIFY_SEED;
 pub use vectors::{

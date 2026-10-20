@@ -390,6 +390,42 @@ pub fn answered(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> (Overlay,
     (r.rendered(o).unwrap_or_else(|| o.clone()), r.note())
 }
 
+/// [`answered`] for a function the answer check flags, and the overlay
+/// as it is otherwise.
+///
+/// The search costs several times a decompile, so a `decompile` answer
+/// runs it only where the replay the answer already pays for found a
+/// statement the machine does not bear out.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, holding the memo.
+/// * `o` - User names.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// [`answered`]'s overlay and note for a flagged function, else a copy
+/// of `o` and no note.
+#[must_use]
+pub fn answered_flagged(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+) -> (Overlay, Option<String>) {
+    let flagged = text_check(p, a, o, entry)
+        .as_ref()
+        .as_ref()
+        .is_some_and(|c| !c.disagree.is_empty());
+    if flagged {
+        answered(p, a, o, entry)
+    } else {
+        (o.clone(), None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Counterexample, Repair, Site, implicated};

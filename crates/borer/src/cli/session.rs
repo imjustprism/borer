@@ -324,7 +324,7 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     let (o, differs) = if raw {
         (s.overlay.clone(), None)
     } else {
-        borer_engine::analysis::render::answered(&s.program, &a, &s.overlay, entry)
+        borer_engine::analysis::render::answered_flagged(&s.program, &a, &s.overlay, entry)
     };
     let header = (!raw)
         .then(|| decompile::checked_header(&s.program, &a, &o, entry))
