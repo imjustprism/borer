@@ -10,7 +10,8 @@
 
 use borer_engine::analysis::decompile::{Site, checked_header, decompile_named, unset_reads};
 use borer_engine::analysis::render::{
-    Budget, Evidence, Repair, Verdict, answered, check_generated, check_generated_iso, repair_iso,
+    Budget, Evidence, Repair, Verdict, answered, answered_flagged, check_generated,
+    check_generated_iso, repair_iso,
 };
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program, Section};
@@ -679,4 +680,11 @@ fn the_repair_search_masks_a_signed_quotient_to_its_lane() {
     let (same, note) = answered(&p, &a, &o, TEXT + 0x40);
     assert!(note.is_none());
     assert_eq!(same.fingerprint(), o.fingerprint());
+    let (kept, note) = answered_flagged(&p, &a, &o, TEXT);
+    assert!(note.is_none());
+    assert_eq!(
+        kept.fingerprint(),
+        o.fingerprint(),
+        "the replay bears every statement out, so an answer runs no search"
+    );
 }
