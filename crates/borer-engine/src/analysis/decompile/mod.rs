@@ -33,6 +33,7 @@ mod canary;
 mod cir;
 mod ctext;
 mod declared;
+mod defs;
 mod emit;
 mod enums;
 mod evidence;
@@ -785,8 +786,9 @@ fn decompile_afresh(
 /// The steps are [`polish`], then the tables it reads inline ([`tables::inline_tables`]), then the translation-unit closure
 /// ([`unit::close`]), then its vector declarations ([`vector::declare`])
 /// and its helper definitions ([`helper::declare`]), each step timed
-/// ([`crate::timing::Step`]) and each left out when the overlay's
-/// [`Passes`] say so.
+/// ([`crate::timing::Step`]), and last the structs and tables it names
+/// ([`defs::declare`]), each left out when the overlay's [`Passes`] say
+/// so.
 ///
 /// # Arguments
 ///
@@ -825,9 +827,10 @@ fn finished(
     let text = timed(Step::Vectors, || {
         skip.apply(Pass::VectorDeclare, text, |t| vector::declare(t, program))
     });
-    timed(Step::Helpers, || {
+    let text = timed(Step::Helpers, || {
         skip.apply(Pass::HelperDeclare, text, |t| helper::declare(t, program))
-    })
+    });
+    skip.apply(Pass::TypeDeclare, text, |t| defs::declare(t, program))
 }
 
 /// The source file and line each PDB-named function starts at, read once

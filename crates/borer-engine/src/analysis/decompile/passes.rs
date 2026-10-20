@@ -132,11 +132,14 @@ pub enum Pass {
     VectorDeclare,
     /// Defines the helpers the text calls.
     HelperDeclare,
+    /// Defines the structs and declares the tables the text names
+    /// ([`super::defs::declare`]).
+    TypeDeclare,
 }
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 60] = [
         Self::DropReturnedValues,
         Self::MergeChains,
         Self::FoldTempCopies,
@@ -196,6 +199,7 @@ impl Pass {
         Self::UnitClosure,
         Self::VectorDeclare,
         Self::HelperDeclare,
+        Self::TypeDeclare,
     ];
 
     /// The pass's name: the function that runs it.
@@ -261,6 +265,7 @@ impl Pass {
             Self::UnitClosure => "unit::close",
             Self::VectorDeclare => "vector::declare",
             Self::HelperDeclare => "helper::declare",
+            Self::TypeDeclare => "defs::declare",
         }
     }
 

@@ -1044,13 +1044,14 @@ pub(super) fn eval_call(
 const DEFINING: [&str; 4] = ["static inline ", "#define ", "#undef ", "extern "];
 
 /// Tells whether a line of a finished text is one of the helper
-/// definitions [`declare`] put there.
+/// definitions [`declare`] put there, or a struct definition
+/// [`super::defs::declare`] did.
 ///
 /// # Arguments
 ///
 /// * `line` - The line.
 pub(super) fn defines(line: &str) -> bool {
-    DEFINING.iter().any(|d| line.starts_with(d))
+    DEFINING.iter().any(|d| line.starts_with(d)) || super::defs::defines(line)
 }
 
 /// Returns the helpers a text calls, in [`Ord`] order.
