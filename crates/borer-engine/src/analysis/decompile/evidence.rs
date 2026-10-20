@@ -296,11 +296,7 @@ fn retype(text: &str, word: u8) -> Option<String> {
     }
     out.push(String::new());
     out.extend(p.body.iter().map(|l| (*l).to_owned()));
-    let mut joined = out.join("\n");
-    if text.ends_with('\n') {
-        joined.push('\n');
-    }
-    Some(joined)
+    Some(rejoin(&out, text))
 }
 
 /// Tells whether the read at token `k` hands the value on whole: an
@@ -407,11 +403,7 @@ fn name_constants(text: &str, word: u8) -> Option<String> {
     if !changed {
         return None;
     }
-    let mut joined = out.join("\n");
-    if text.ends_with('\n') {
-        joined.push('\n');
-    }
-    Some(joined)
+    Some(rejoin(&out, text))
 }
 
 /// Spells the test of a call that answers yes or no (a declared `BOOL`,
@@ -489,11 +481,7 @@ fn bool_tests(text: &str) -> Option<String> {
     if !changed {
         return None;
     }
-    let mut joined = out.join("\n");
-    if text.ends_with('\n') {
-        joined.push('\n');
-    }
-    Some(joined)
+    Some(rejoin(&out, text))
 }
 
 /// [`name_vars`], `None` when nothing changes.
@@ -530,66 +518,13 @@ fn rename(text: &str) -> Option<String> {
             *slot = Some((rank, name.to_owned()));
         }
     };
-    let handles: BTreeSet<&str> = p
-        .head
-        .get(p.decls..)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|d| declaration(d))
-        .filter(|(ty, _)| *ty == "HANDLE")
-        .flat_map(|(_, items)| items.into_iter().map(|(_, n)| n))
-        .collect();
-    for l in &lines {
-        for (k, tok) in l.toks.iter().enumerate() {
-            let Some(w) = l.text.get(tok.at..tok.end).filter(|w| is_var_name(w)) else {
-                continue;
-            };
-            let Some((callee, i)) = argument_of(l, k) else {
-                continue;
-            };
-            if let Some(param) = decl(callee).and_then(|d| d.params.get(i)) {
-                offer(w, Rank::Param, param.name);
-            }
-            if any_decl(callee)
-                .and_then(|(d, _)| d.params.get(i))
-                .is_some_and(|param| param.ty == STREAM)
-            {
-                offer(w, Rank::Type, "fp");
-            }
-        }
-        if let Some((var, rhs)) = assignment(l)
-            && let Some((_, field)) = rhs.rsplit_once("->")
-            && !rhs.contains(['(', ' ', '['])
-            && !field.starts_with("field_")
-        {
-            offer(var, Rank::Field, field);
-        }
-        if let Some((var, rhs)) = assignment(l).filter(|(_, rhs)| lone_call(rhs))
-            && let Some((callee, _)) = rhs.split_once('(')
-            && let Some((d, _)) = any_decl(callee)
-        {
-            if d.ret == STREAM {
-                offer(var, Rank::Type, "fp");
-            } else if d.ret == "HANDLE" && handles.contains(var) {
-                offer(var, Rank::Type, &handle_name(callee));
-            }
-        }
-    }
+    offer_names(
+        p.head.get(p.decls..).unwrap_or_default(),
+        &lines,
+        &mut offer,
+    );
     let counters = loop_counters(&lines);
-    let mut taken: BTreeSet<String> = BTreeSet::new();
-    for h in &p.head {
-        taken.extend(tokens(h).map(str::to_owned));
-    }
-    for l in &lines {
-        for (k, t) in l.toks.iter().enumerate() {
-            let field = k
-                .checked_sub(1)
-                .is_some_and(|q| l.is(q, "->") || l.is(q, "."));
-            if t.lex == Lex::Name && !field {
-                taken.insert(l.word(k).to_owned());
-            }
-        }
-    }
+    let mut taken = taken_names(&p.head, &lines);
     let mut order: Vec<(usize, &str)> = vars
         .iter()
         .filter(|(_, e)| e.is_some())
@@ -639,11 +574,86 @@ fn rename(text: &str) -> Option<String> {
         }
         out.push(line);
     }
-    let mut joined = out.join("\n");
-    if text.ends_with('\n') {
-        joined.push('\n');
+    Some(rejoin(&out, text))
+}
+
+/// Offers each variable the names the text gives evidence for: the
+/// declared parameter it is passed as, the field it is loaded from, and a
+/// stream or handle by the API that hands it over.
+///
+/// # Arguments
+///
+/// * `decls` - The declaration lines.
+/// * `lines` - The body's lines.
+/// * `offer` - Takes a variable, the evidence's rank and the name.
+fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, Rank, &str)) {
+    let handles: BTreeSet<&str> = decls
+        .iter()
+        .filter_map(|d| declaration(d))
+        .filter(|(ty, _)| *ty == "HANDLE")
+        .flat_map(|(_, items)| items.into_iter().map(|(_, n)| n))
+        .collect();
+    for l in lines {
+        for (k, tok) in l.toks.iter().enumerate() {
+            let Some(w) = l.text.get(tok.at..tok.end).filter(|w| is_var_name(w)) else {
+                continue;
+            };
+            let Some((callee, i)) = argument_of(l, k) else {
+                continue;
+            };
+            if let Some(param) = decl(callee).and_then(|d| d.params.get(i)) {
+                offer(w, Rank::Param, param.name);
+            }
+            if any_decl(callee)
+                .and_then(|(d, _)| d.params.get(i))
+                .is_some_and(|param| param.ty == STREAM)
+            {
+                offer(w, Rank::Type, "fp");
+            }
+        }
+        if let Some((var, rhs)) = assignment(l)
+            && let Some((_, field)) = rhs.rsplit_once("->")
+            && !rhs.contains(['(', ' ', '['])
+            && !field.starts_with("field_")
+        {
+            offer(var, Rank::Field, field);
+        }
+        if let Some((var, rhs)) = assignment(l).filter(|(_, rhs)| lone_call(rhs))
+            && let Some((callee, _)) = rhs.split_once('(')
+            && let Some((d, _)) = any_decl(callee)
+        {
+            if d.ret == STREAM {
+                offer(var, Rank::Type, "fp");
+            } else if d.ret == "HANDLE" && handles.contains(var) {
+                offer(var, Rank::Type, &handle_name(callee));
+            }
+        }
     }
-    Some(joined)
+}
+
+/// Every name the text already spells, which a new name must not be: the
+/// header's words and the body's identifiers that are not fields.
+///
+/// # Arguments
+///
+/// * `head` - The header and declaration lines.
+/// * `lines` - The body's lines.
+fn taken_names(head: &[&str], lines: &[Line<'_>]) -> BTreeSet<String> {
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+    for h in head {
+        taken.extend(tokens(h).map(str::to_owned));
+    }
+    for l in lines {
+        for (k, t) in l.toks.iter().enumerate() {
+            let field = k
+                .checked_sub(1)
+                .is_some_and(|q| l.is(q, "->") || l.is(q, "."));
+            if t.lex == Lex::Name && !field {
+                taken.insert(l.word(k).to_owned());
+            }
+        }
+    }
+    taken
 }
 
 /// The name of the handle a handle API hands back.
