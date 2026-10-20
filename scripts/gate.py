@@ -14,8 +14,9 @@ root path and MCP client. This file is the only command CI runs.
 
 The run is ordered for the fastest answer. The checks that take seconds go
 first, side by side: the unpushed commits' messages (scripts/check/commits.py),
-then cargo fmt, then typos, the comment check, ruff check and format and the
-type library (scripts/check/typelib.py --check) together. The builds and the
+then cargo fmt, then typos, the comment check, ruff check and format, the
+type library (scripts/check/typelib.py --check), the size budgets
+(scripts/check/sizes.py) and the duplicate scan (jscpd) together. The builds and the
 long checks follow one at a time: cargo clippy -D warnings, cargo test,
 the dogfood sweeps over real binaries, the readability benchmark against its
 baseline (scripts/run/readability.py), the golden diff of the `index` output
@@ -323,6 +324,14 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
             "typelib",
             [py, os.path.join("scripts", "check", "typelib.py"), "--check"],
             inputs=RUST + SCRIPTS,
+        ),
+        Step("sizes", [py, os.path.join("scripts", "check", "sizes.py")], inputs=RUST + SCRIPTS),
+        # Duplicated Rust over the threshold in .jscpd.json fails.
+        Step(
+            "dupes",
+            [shutil.which("npx") or "npx", "--yes", "jscpd@4.0.5", "."],
+            tool="npx",
+            inputs=("crates/", ".jscpd.json"),
         ),
     ]
     rest = [
