@@ -1,12 +1,14 @@
 # borer development rules.
 #
 # One file for every contributor and every coding agent. Each name a coding
-# agent looks for is a symlink to it: AGENTS.md (Codex, Cursor, Copilot,
-# Jules, Windsurf, Zed, Aider, Devin and most others), AGENT.md (Amp, Zed),
-# CLAUDE.md (Claude Code), GEMINI.md (Gemini CLI), QWEN.md (Qwen Code),
-# .rules (Zed), .cursorrules, .windsurfrules, .clinerules, .roorules,
-# .junie/guidelines.md (JetBrains Junie) and .github/copilot-instructions.md.
-# Edit this file, never a link. It is valid YAML.
+# agent looks for is a one-line pointer to it, a plain file so it works on
+# Windows checkouts without symlinks: CLAUDE.md imports it (`@borer.rules`),
+# and AGENTS.md (Codex, Cursor, Copilot, Jules, Windsurf, Zed, Aider, Devin
+# and most others), AGENT.md (Amp, Zed), GEMINI.md (Gemini CLI), QWEN.md
+# (Qwen Code), .rules (Zed), .cursorrules, .windsurfrules, .clinerules,
+# .roorules, .junie/guidelines.md (JetBrains Junie) and
+# .github/copilot-instructions.md tell the agent to read it.
+# Edit this file, never a pointer. It is valid YAML.
 
 title: borer development rules
 
