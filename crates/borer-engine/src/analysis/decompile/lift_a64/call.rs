@@ -228,7 +228,7 @@ impl Lift<'_, '_> {
                     self.ex.ctx.overlay,
                     *t,
                 ))
-                .to_owned(),
+                .into_owned(),
                 Some(*t),
             ),
             Callee::Through(e) => match slot_of(e).and_then(|s| Some((names.import_at(s)?, s))) {

@@ -87,7 +87,7 @@ pub(in crate::analysis::decompile) fn library_decl(
     reached: Option<u64>,
 ) -> Option<&'static Decl> {
     let names = import_names(ctx);
-    let name = bare(import_raw(ctx, &names, reached?)?);
+    let name = crate::analysis::bare_name(import_raw(ctx, &names, reached?)?);
     typelib::declared(name, ctx.program.format)
 }
 

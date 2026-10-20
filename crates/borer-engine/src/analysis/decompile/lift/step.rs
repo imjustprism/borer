@@ -53,7 +53,7 @@ impl<'a> Exec<'_, 'a> {
         }
         self.forwarding = false;
         self.enter_call(false, &[]);
-        let name = bare(&name_of(self.ctx.analysis, self.ctx.overlay, target)).to_owned();
+        let name = bare(&name_of(self.ctx.analysis, self.ctx.overlay, target)).into_owned();
         emit_line!(self, format!("return {name}({});", args.join(", ")));
         self.record_call(
             Callee::Direct(target),

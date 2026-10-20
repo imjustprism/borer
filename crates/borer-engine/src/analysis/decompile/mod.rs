@@ -1326,8 +1326,8 @@ fn name_fields(
     let mut lap = crate::timing::Lap::new();
     let f = analysis.function(entry)?;
     let name = name_of(analysis, overlay, entry);
-    let own =
-        classes::class_of(expr::bare(&name)).or_else(|| f.param_hints.get(&0).map(String::as_str));
+    let own = classes::class_of(crate::analysis::bare_name(&name))
+        .or_else(|| f.param_hints.get(&0).map(String::as_str));
     let has_this = own.is_some_and(|c| text.contains(&format!("{c} *this")));
     let mut objects: Vec<(String, String)> = Vec::new();
     if let (true, Some(c)) = (has_this, own) {
@@ -2067,7 +2067,7 @@ fn decompile_in<L: Lifter>(
         && ctx.debug_params.is_empty())
     .then(|| {
         signature::library_prototype(
-            expr::bare(&name),
+            crate::analysis::bare_name(&name),
             program.format,
             shape.count,
             ctx.variadic,
@@ -2101,7 +2101,7 @@ fn decompile_in<L: Lifter>(
             | (crate::analysis::protos::VarKey::Slot(_), _) => None,
         })
         .collect();
-    let class = classes::class_of(expr::bare(&name)).unwrap_or("");
+    let class = classes::class_of(crate::analysis::bare_name(&name)).unwrap_or("");
     let ret_ty = f.signature.as_ref().map_or_else(
         || match &library {
             Some((ret, _)) => (*ret).to_owned(),
@@ -2303,8 +2303,8 @@ fn decompile_in<L: Lifter>(
     if let Some(asserts) = asserts_of(&body) {
         let _ = writeln!(out, "// asserts: {asserts}");
     }
-    if let Some(code) =
-        classes::class_of(expr::bare(&name)).and_then(|c| analysis.classes.ids.get(c))
+    if let Some(code) = classes::class_of(crate::analysis::bare_name(&name))
+        .and_then(|c| analysis.classes.ids.get(c))
     {
         let _ = writeln!(out, "// wire id: {}", classes::fourcc(*code));
     }

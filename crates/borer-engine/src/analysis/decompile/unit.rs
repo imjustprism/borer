@@ -108,13 +108,13 @@ fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index
         .get_or_build_named("unit_index", overlay.fingerprint(), (), || {
             let mut ix = Index::default();
             for f in &analysis.functions {
-                let name = expr::bare(&name_of(analysis, overlay, f.entry)).to_owned();
+                let name = expr::bare(&name_of(analysis, overlay, f.entry)).into_owned();
                 ix.functions.entry(name).or_insert(f.entry);
             }
             for s in &program.symbols {
                 match s.kind {
                     SymbolKind::Import => {
-                        ix.imports.insert(expr::bare(&s.name).to_owned());
+                        ix.imports.insert(expr::bare(&s.name).into_owned());
                     }
                     SymbolKind::Export | SymbolKind::Local | SymbolKind::Data => {
                         if s.kind == SymbolKind::Export {
@@ -181,7 +181,7 @@ pub(super) fn close(
     entry: u64,
 ) -> String {
     let ix = index(program, analysis, overlay);
-    let own = expr::bare(&name_of(analysis, overlay, entry)).to_owned();
+    let own = expr::bare(&name_of(analysis, overlay, entry)).into_owned();
     let mut tables = designators(text, program, analysis, overlay, &ix);
     let mut names = words(text);
     names.extend(tables.iter().flat_map(|t| t.entries.iter().cloned()));
@@ -628,7 +628,7 @@ fn designators(
         .filter_map(|(addr, (spelled, renamed, name))| {
             let entries = function_words(program, analysis, addr)?
                 .into_iter()
-                .map(|e| expr::bare(&name_of(analysis, overlay, e)).to_owned())
+                .map(|e| expr::bare(&name_of(analysis, overlay, e)).into_owned())
                 .collect();
             Some(Table {
                 spelled,

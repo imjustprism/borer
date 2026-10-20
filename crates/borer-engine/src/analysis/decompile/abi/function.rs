@@ -413,7 +413,7 @@ pub(crate) fn prototype(
         name: crate::analysis::decompile::expr::bare(&crate::analysis::name_of(
             analysis, overlay, entry,
         ))
-        .to_owned(),
+        .into_owned(),
         ret,
         params,
         variadic: abi.variadic,

@@ -485,7 +485,7 @@ pub(super) fn shape_of(
         }
         None => {
             let full = name_of(ctx.analysis, ctx.overlay, f.entry);
-            let own = classes::class_of(expr::bare(&full));
+            let own = classes::class_of(crate::analysis::bare_name(&full));
             own.is_some() && own == f.param_hints.get(&0).map(String::as_str)
         }
     };
@@ -672,7 +672,10 @@ pub(super) fn declared_arity(
         }
         None => {
             let name = name_of(ctx.analysis, ctx.overlay, f.entry);
-            let p = crate::analysis::prototypes::declared(expr::bare(&name), ctx.bitness)?;
+            let p = crate::analysis::prototypes::declared(
+                crate::analysis::bare_name(&name),
+                ctx.bitness,
+            )?;
             Some((
                 usize::from(p.params) + lead,
                 shifted(p.floats).unwrap_or(0),

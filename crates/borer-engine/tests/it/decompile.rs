@@ -9888,3 +9888,28 @@ fn a_runtime_helper_call_takes_its_prototype() {
     assert!(plain.contains("plain_callee(a1, a2, 7, 9)"), "{plain}");
     assert!(!plain.contains("// runtime:"), "{plain}");
 }
+
+/// A call to a compiler's clone names it as C can: GCC's
+/// `helper.constprop.0` reads `helper_constprop_0`, so the text and the
+/// declaration the unit gives it are valid identifiers.
+#[test]
+fn a_clone_s_dotted_name_reads_as_a_c_identifier() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x08, // ASM: sub rsp, 8
+        0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x1_4000_1020
+        0x48, 0x83, 0xc4, 0x08, // ASM: add rsp, 8
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend([0x8d, 0x41, 0x01, 0xc3]); // ASM: lea eax, [rcx + 1]; ret
+    let mut p = program64(&code);
+    p.symbols.push(Symbol {
+        name: "helper.constprop.0".to_owned(),
+        addr: 0x1_4000_1020,
+        kind: SymbolKind::Local,
+    });
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(text.contains("helper_constprop_0("), "{text}");
+    assert!(!text.contains("helper.constprop"), "{text}");
+}

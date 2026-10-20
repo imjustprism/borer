@@ -372,7 +372,8 @@ impl<'a> Exec<'_, 'a> {
         };
         let own = crate::analysis::classes::class_of(&self.ctx.own_name);
         let theirs = name_of(self.ctx.analysis, self.ctx.overlay, t);
-        own.is_some() && own == crate::analysis::classes::class_of(bare(&theirs))
+        own.is_some()
+            && own == crate::analysis::classes::class_of(crate::analysis::bare_name(&theirs))
     }
 
     /// Reads the outgoing stack arguments a call passes above its register slots.
@@ -1412,7 +1413,7 @@ impl<'a> Exec<'_, 'a> {
                     self.ctx.overlay,
                     instr.near_branch_target(),
                 ))
-                .to_owned(),
+                .into_owned(),
             ),
             OpKind::Memory => {
                 let addr = self.addr(instr, 0);
@@ -1558,7 +1559,7 @@ impl<'a> Exec<'_, 'a> {
         match v {
             Expr::Var(Key::Global(a, _)) if n.import_at(a).is_some() => n.import_at(a),
             Expr::Const(a) if self.ctx.analysis.function(a).is_some() => {
-                Some(bare(&name_of(self.ctx.analysis, self.ctx.overlay, a)).to_owned())
+                Some(bare(&name_of(self.ctx.analysis, self.ctx.overlay, a)).into_owned())
             }
             other => Some(call_through(&other, &n)),
         }
@@ -2019,7 +2020,7 @@ impl<'a> Exec<'_, 'a> {
                 _ => None,
             };
             self.env.chkstk = size;
-            let name = bare(&name_of(self.ctx.analysis, self.ctx.overlay, t)).to_owned();
+            let name = bare(&name_of(self.ctx.analysis, self.ctx.overlay, t)).into_owned();
             let arg = size.map_or(String::new(), |c| {
                 crate::analysis::decompile::expr::render_const(c, true)
             });
@@ -2244,7 +2245,8 @@ impl<'a> Exec<'_, 'a> {
                     },
                     |k| n.key(k),
                 );
-                let full = bare(&name_of(self.ctx.analysis, self.ctx.overlay, v.entry)).to_owned();
+                let full =
+                    bare(&name_of(self.ctx.analysis, self.ctx.overlay, v.entry)).into_owned();
                 let method = match crate::analysis::classes::class_of(&full) {
                     Some(c) if c == v.class => {
                         slot_method(full.get(c.len() + 2..).unwrap_or(&full))

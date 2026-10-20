@@ -111,7 +111,7 @@ impl Names<'_> {
                     self.overlay,
                     f.entry,
                 ))
-                .to_owned(),
+                .into_owned(),
             );
         }
         if let Some(s) = self
@@ -223,7 +223,7 @@ impl Names<'_> {
             .symbols
             .iter()
             .find(|s| s.kind == SymbolKind::Import && s.addr == addr && s.addr != 0)
-            .map(|s| bare(&crate::search::demangled_name(&s.name)).to_owned())?;
+            .map(|s| bare(&crate::search::demangled_name(&s.name)).into_owned())?;
         Some(if name == *self.own_name {
             format!("__imp_{name}")
         } else {
@@ -370,13 +370,26 @@ fn a64_name(r: a64::Reg) -> String {
     }
 }
 
-/// Strips the `dll!` prefix from an import name.
+/// Returns a function's name as the text spells it.
+///
+/// An import's `dll!` prefix goes, and the `.`, `$` and `@` a compiler's
+/// clone (`mallocFail.constprop.0`, `f.isra.0`, `g.part.1`, `h.cold`) or
+/// a versioned symbol puts in a C name turn to `_`. A qualified C++ name
+/// is read as the name it is and kept whole.
 ///
 /// # Arguments
 ///
 /// * `name` - A symbol name, possibly `DLL!name`.
-pub(super) fn bare(name: &str) -> &str {
-    crate::analysis::bare_name(name)
+///
+/// # Returns
+///
+/// The name, borrowed where nothing in it changes.
+pub(super) fn bare(name: &str) -> std::borrow::Cow<'_, str> {
+    let name = crate::analysis::bare_name(name);
+    if name.contains("::") || name.contains('(') || !name.contains(['.', '$', '@']) {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    std::borrow::Cow::Owned(name.replace(['.', '$', '@'], "_"))
 }
 
 /// Renders the text name of a stack slot.

@@ -140,7 +140,7 @@ pub(in crate::analysis::decompile) fn import_prototype(
     let t = target?;
     let names = import_names(ctx);
     import_raw(ctx, &names, t)
-        .map(bare)
+        .map(crate::analysis::bare_name)
         .and_then(|name| {
             msvc_prototype(name)
                 .or_else(|| declared(name, ctx.bitness))

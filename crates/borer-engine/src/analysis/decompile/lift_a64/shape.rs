@@ -354,7 +354,7 @@ pub(in crate::analysis::decompile) fn declared_callee(
 fn library_arity(ctx: &Ctx<'_>, f: &Function) -> Option<(usize, u8, bool)> {
     let name = crate::analysis::name_of(ctx.analysis, ctx.overlay, f.entry);
     let d =
-        crate::analysis::typelib::declared(super::super::expr::bare(&name), ctx.program.format)?;
+        crate::analysis::typelib::declared(crate::analysis::bare_name(&name), ctx.program.format)?;
     let p = lift::library_prototype(d, 64, ctx.program.format);
     Some((usize::from(p.params), p.floats, p.variadic))
 }

@@ -522,7 +522,7 @@ pub fn export(
         analysis
             .functions
             .iter()
-            .map(|f| super::expr_render::bare(&name_of(analysis, overlay, f.entry)).to_owned())
+            .map(|f| super::expr_render::bare(&name_of(analysis, overlay, f.entry)).into_owned())
             .collect(),
     );
     hoisted.left_out = analysis.functions.len().saturating_sub(entries.len());
