@@ -1257,6 +1257,18 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
             );
         }
     }
+    for (name, to) in &typedefs {
+        if let Some(tag) = to.strip_prefix("struct ")
+            && tag != name
+            && matches!(types.get(tag), Some(UserType::Struct(_)))
+            && !types.contains_key(name)
+        {
+            types.insert(
+                name.clone(),
+                UserType::Alias(TypeExpr::Named(tag.to_owned())),
+            );
+        }
+    }
     out.sort_by(|l, r| l.low_pc.cmp(&r.low_pc).then_with(|| l.name.cmp(&r.name)));
     out.dedup_by(|l, r| l.low_pc == r.low_pc);
     globals.sort_by(|l, r| l.addr.cmp(&r.addr).then_with(|| l.name.cmp(&r.name)));
@@ -1882,6 +1894,47 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A typedef of a struct lands as an alias of it, so a pointer to the
+    /// typedef (`ARRAY *`) reaches the struct's fields.
+    #[test]
+    fn a_typedef_of_a_struct_is_its_alias() {
+        use crate::analysis::utypes::{TypeExpr, UserType};
+        let abbrev: Vec<u8> = vec![
+            0x01, 0x13, 0x01, 0x03, 0x08, 0x0b, 0x0b, 0x00, 0x00, 0x02, 0x0d, 0x00, 0x03, 0x08,
+            0x38, 0x0b, 0x49, 0x13, 0x00, 0x00, 0x03, 0x24, 0x00, 0x03, 0x08, 0x0b, 0x0b, 0x3e,
+            0x0b, 0x00, 0x00, 0x04, 0x16, 0x00, 0x03, 0x08, 0x49, 0x13, 0x00, 0x00, 0x00,
+        ];
+        let mut dies: Vec<u8> = Vec::new();
+        let die_at = |dies: &[u8]| u32::try_from(12 + dies.len()).expect("fits");
+        let int_at = die_at(&dies);
+        dies.push(0x03);
+        named(&mut dies, "int");
+        dies.extend_from_slice(&[4, 0x05]);
+        let struct_at = die_at(&dies);
+        dies.push(0x01);
+        named(&mut dies, "array");
+        dies.push(8);
+        dies.push(0x02);
+        named(&mut dies, "num");
+        dies.push(0);
+        dies.extend_from_slice(&int_at.to_le_bytes());
+        dies.push(0x00);
+        dies.push(0x04);
+        named(&mut dies, "ARRAY");
+        dies.extend_from_slice(&struct_at.to_le_bytes());
+        let info = unit(&dies);
+        let strings = Strings {
+            text: &[],
+            lines: &[],
+        };
+        let types = read_in(&info, &abbrev, &strings).types;
+        assert_eq!(
+            types.get("ARRAY"),
+            Some(&UserType::Alias(TypeExpr::Named("array".to_owned())))
+        );
+        assert!(matches!(types.get("array"), Some(UserType::Struct(_))));
     }
 
     /// An enum a value names twice is refused whole, and one whose width
