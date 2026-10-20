@@ -294,6 +294,17 @@ class Cache:
             Path(self.path).write_text(json.dumps(self.passed, indent=1), encoding="utf-8")
 
 
+# The dogfood sweeps that read a binary of another arch than the corpus.
+OWN_BINARY_SWEEPS = (
+    "the_arm64_lifter_agrees_with_the_emulator_on_every_block",
+    "decompile_every_arm64_function",
+    "the_arm64_text_agrees_with_the_machine_on_every_block",
+    "the_arm32_lifter_agrees_with_the_emulator_on_every_block",
+    "decompile_every_arm32_function",
+    "the_arm32_text_agrees_with_the_machine_on_every_block",
+)
+
+
 def dogfood_skips(*names: str) -> list[str]:
     """`--skip NAME` for each sweep a dogfood step leaves out."""
     out: list[str] = []
@@ -377,12 +388,10 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
                 # 90% register arity r8-15/rax/rcx/rdx), which the
                 # whole-callgraph arity work owns.
                 "every_value_the_text_reads_is_set_or_an_input",
-                # The arm64 sweeps read their own binary (BORER_DOGFOOD_A64),
-                # which a fresh clone does not have: set it to an arm64
-                # build and run them by name.
-                "the_arm64_lifter_agrees_with_the_emulator_on_every_block",
-                "decompile_every_arm64_function",
-                "the_arm64_text_agrees_with_the_machine_on_every_block",
+                # The arm sweeps read their own binaries (BORER_DOGFOOD_A64,
+                # BORER_DOGFOOD_A32), which a fresh clone does not have: set
+                # one to a build of that arch and run them by name.
+                *OWN_BINARY_SWEEPS,
             ),
             {"BORER_DOGFOOD": dogfood},
             inputs=RUST,
@@ -409,9 +418,7 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
                 + dogfood_skips(
                     "the_final_text_agrees_with_the_emulator_on_small_functions",
                     "every_value_the_text_reads_is_set_or_an_input",
-                    "the_arm64_lifter_agrees_with_the_emulator_on_every_block",
-                    "decompile_every_arm64_function",
-                    "the_arm64_text_agrees_with_the_machine_on_every_block",
+                    *OWN_BINARY_SWEEPS,
                 ),
                 {"BORER_DOGFOOD": x86},
                 inputs=RUST,
