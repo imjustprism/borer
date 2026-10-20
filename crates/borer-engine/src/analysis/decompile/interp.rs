@@ -53,6 +53,10 @@ use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::num::from_usize;
 use crate::program::{Program, SymbolKind};
 
+mod compile;
+
+use compile::Compiler;
+
 /// The return address a call from the text pushes: the emulator stops when
 /// the callee returns to it, before fetching anything there.
 const SENTINEL_64: u64 = 0x0000_5fff_0000_0000;
@@ -725,384 +729,6 @@ fn header(lines: &[&str], word: u8) -> Result<Header, String> {
         }
     }
     Ok(h)
-}
-
-/// Turns a function's statements into steps and labels.
-struct Compiler<'t> {
-    /// Each body line's tokens, or why it does not tokenize, by its index
-    /// in the whole text.
-    toks: Vec<Result<Vec<Tok>, String>>,
-    /// Tells whether a name holds a value.
-    values: &'t dyn Fn(&str) -> bool,
-    /// Enumerator names from the function's `// enum` header.
-    enumerators: &'t FxHashMap<String, u64>,
-    /// The machine word in bits.
-    word: u8,
-    /// The steps so far.
-    ops: Vec<Op1>,
-    /// Each label's step, once placed.
-    labels: Vec<Option<usize>>,
-    /// The label of each block a `goto` or a `L_x:` names.
-    blocks: FxHashMap<u64, usize>,
-}
-
-impl Compiler<'_> {
-    /// A new label, not yet placed.
-    fn label(&mut self) -> usize {
-        self.labels.push(None);
-        self.labels.len() - 1
-    }
-
-    /// Places a label at the next step; a label placed already stays.
-    ///
-    /// # Arguments
-    ///
-    /// * `l` - The label.
-    fn place(&mut self, l: usize) {
-        if let Some(slot) = self.labels.get_mut(l)
-            && slot.is_none()
-        {
-            *slot = Some(self.ops.len());
-        }
-    }
-
-    /// The label of a block.
-    ///
-    /// # Arguments
-    ///
-    /// * `addr` - The block's address.
-    fn block(&mut self, addr: u64) -> usize {
-        if let Some(&l) = self.blocks.get(&addr) {
-            return l;
-        }
-        let l = self.label();
-        self.blocks.insert(addr, l);
-        l
-    }
-
-    /// Adds a step.
-    ///
-    /// # Arguments
-    ///
-    /// * `line` - Its 1-based line.
-    /// * `step` - The step.
-    fn emit(&mut self, line: usize, step: Step) {
-        self.ops.push(Op1 { line, step });
-    }
-
-    /// A line's tokens.
-    ///
-    /// # Arguments
-    ///
-    /// * `line` - The 1-based line.
-    ///
-    /// # Errors
-    ///
-    /// When the line does not tokenize.
-    fn line(&self, line: usize) -> Result<&[Tok], String> {
-        match self.toks.get(line.wrapping_sub(1)) {
-            Some(Ok(t)) => Ok(t),
-            Some(Err(why)) => Err(why.clone()),
-            None => Err("a line past the text".to_owned()),
-        }
-    }
-
-    /// The constant a case label stands for: a literal, or an enumerator
-    /// the function's header names.
-    ///
-    /// # Arguments
-    ///
-    /// * `e` - The label's expression.
-    fn case_value(&self, e: &Ast) -> Option<u64> {
-        match e {
-            Ast::Name(n) => self.enumerators.get(n).copied(),
-            other => constant(other),
-        }
-    }
-
-    /// Reads an expression out of a line's tokens.
-    ///
-    /// # Arguments
-    ///
-    /// * `toks` - The tokens.
-    ///
-    /// # Errors
-    ///
-    /// When they do not read as one expression.
-    fn expr(&self, toks: &[Tok]) -> Result<Ast, String> {
-        expression(toks, self.values, self.word)
-    }
-
-    /// The condition of the structure a line opens.
-    ///
-    /// # Arguments
-    ///
-    /// * `line` - The 1-based line.
-    /// * `word` - The keyword whose group holds it.
-    ///
-    /// # Errors
-    ///
-    /// When the line or its condition does not read.
-    fn condition(&self, line: usize, word: &str) -> Result<Ast, String> {
-        let toks = self.line(line)?;
-        let group = group_after(toks, word).ok_or_else(|| format!("no {word} condition"))?;
-        self.expr(group)
-    }
-
-    /// Adds a step, or the reason it does not read.
-    ///
-    /// # Arguments
-    ///
-    /// * `line` - Its 1-based line.
-    /// * `step` - The step, or why it does not read.
-    fn emit_or(&mut self, line: usize, step: Result<Step, String>) {
-        let step = step.unwrap_or_else(Step::Unreadable);
-        self.emit(line, step);
-    }
-
-    /// Compiles a run of statements.
-    ///
-    /// # Arguments
-    ///
-    /// * `stmts` - The statements.
-    /// * `brk` - Where `break` goes.
-    /// * `cont` - Where `continue` goes.
-    fn run(&mut self, stmts: &[Stmt], brk: Option<usize>, cont: Option<usize>) {
-        for s in stmts {
-            self.stmt(s, brk, cont);
-        }
-    }
-
-    /// Compiles one statement.
-    ///
-    /// # Arguments
-    ///
-    /// * `s` - The statement.
-    /// * `brk` - Where `break` goes.
-    /// * `cont` - Where `continue` goes.
-    fn stmt(&mut self, s: &Stmt, brk: Option<usize>, cont: Option<usize>) {
-        match s {
-            Stmt::Label(addr, _) => {
-                let l = self.block(*addr);
-                self.place(l);
-            }
-            Stmt::Plain(line) => {
-                let step = self.line(*line).and_then(|toks| {
-                    let part = statement_part(toks);
-                    let body = part
-                        .strip_suffix(&[Tok::Punct(";")])
-                        .ok_or("a statement without its `;`")?;
-                    if body == [Tok::Name("__asm".to_owned())] {
-                        return Err("an instruction left as asm".to_owned());
-                    }
-                    self.expr(body).map(Step::Eval)
-                });
-                self.emit_or(*line, step);
-            }
-            Stmt::Return(line) => {
-                let step = self.line(*line).and_then(|toks| {
-                    let part = statement_part(toks);
-                    let body = part
-                        .strip_suffix(&[Tok::Punct(";")])
-                        .and_then(|b| b.strip_prefix(&[Tok::Name("return".to_owned())]))
-                        .ok_or("a return that does not read")?;
-                    if body.is_empty() {
-                        Ok(Step::Return(None))
-                    } else {
-                        self.expr(body).map(|e| Step::Return(Some(e)))
-                    }
-                });
-                self.emit_or(*line, step);
-            }
-            Stmt::Halt(line) => {
-                let jumps = self
-                    .line(*line)
-                    .is_ok_and(|t| t.contains(&Tok::Name("goto".to_owned())));
-                self.emit(*line, if jumps { Step::Leave } else { Step::Halt });
-            }
-            Stmt::If(line, then, other) => {
-                let otherwise = self.label();
-                let cond = self.condition(*line, "if");
-                self.emit_or(*line, cond.map(|c| Step::Test(c, otherwise)));
-                self.run(then, brk, cont);
-                if other.is_empty() {
-                    self.place(otherwise);
-                } else {
-                    let end = self.label();
-                    self.emit(*line, Step::Jump(end));
-                    self.place(otherwise);
-                    self.run(other, brk, cont);
-                    self.place(end);
-                }
-            }
-            Stmt::Loop(body) => {
-                let (top, end) = (self.label(), self.label());
-                self.place(top);
-                self.run(body, Some(end), Some(top));
-                let line = self.ops.last().map_or(0, |o| o.line);
-                self.emit(line, Step::Jump(top));
-                self.place(end);
-            }
-            Stmt::While(line, body) => {
-                let (top, end) = (self.label(), self.label());
-                self.place(top);
-                let cond = self.condition(*line, "while");
-                self.emit_or(*line, cond.map(|c| Step::Test(c, end)));
-                self.run(body, Some(end), Some(top));
-                self.emit(*line, Step::Jump(top));
-                self.place(end);
-            }
-            Stmt::For(line, body) => self.for_loop(*line, body),
-            Stmt::Do(body, line) => {
-                let (top, test, end) = (self.label(), self.label(), self.label());
-                self.place(top);
-                self.run(body, Some(end), Some(test));
-                self.place(test);
-                let cond = self.condition(*line, "while");
-                self.emit_or(*line, cond.map(|c| Step::Test(c, end)));
-                self.emit(*line, Step::Jump(top));
-                self.place(end);
-            }
-            Stmt::Switch(line, arms) => self.switch(*line, arms, cont),
-            Stmt::Try(line, ..) => {
-                self.emit(*line, Step::Unreadable("a guarded region".to_owned()));
-            }
-            Stmt::Goto(addr) => {
-                let l = self.block(*addr);
-                let line = self.ops.last().map_or(0, |o| o.line);
-                self.emit(line, Step::Jump(l));
-            }
-            Stmt::Break => match brk {
-                Some(l) => self.emit(self.last_line(), Step::Jump(l)),
-                None => self.emit(
-                    self.last_line(),
-                    Step::Unreadable("a stray break".to_owned()),
-                ),
-            },
-            Stmt::Continue => match cont {
-                Some(l) => self.emit(self.last_line(), Step::Jump(l)),
-                None => self.emit(
-                    self.last_line(),
-                    Step::Unreadable("a stray continue".to_owned()),
-                ),
-            },
-        }
-    }
-
-    /// The line of the last step, for a step that has none of its own.
-    fn last_line(&self) -> usize {
-        self.ops.last().map_or(0, |o| o.line)
-    }
-
-    /// Compiles a `for` loop.
-    ///
-    /// # Arguments
-    ///
-    /// * `line` - The header's line.
-    /// * `body` - The body.
-    fn for_loop(&mut self, line: usize, body: &[Stmt]) {
-        let parts = self.line(line).and_then(|toks| {
-            let group = group_after(toks, "for").ok_or("no for header")?;
-            let parts = split_top(group, ";");
-            let [init, test, step] = parts.as_slice() else {
-                return Err("a for header without three parts".to_owned());
-            };
-            let read = |t: &[Tok]| -> Result<Option<Ast>, String> {
-                if t.is_empty() {
-                    Ok(None)
-                } else {
-                    self.expr(t).map(Some)
-                }
-            };
-            Ok((read(init)?, read(test)?, read(step)?))
-        });
-        let (init, test, step) = match parts {
-            Ok(p) => p,
-            Err(why) => {
-                self.emit(line, Step::Unreadable(why));
-                return;
-            }
-        };
-        let (top, next, end) = (self.label(), self.label(), self.label());
-        if let Some(i) = init {
-            self.emit(line, Step::Eval(i));
-        }
-        self.place(top);
-        if let Some(t) = test {
-            self.emit(line, Step::Test(t, end));
-        }
-        self.run(body, Some(end), Some(next));
-        self.place(next);
-        if let Some(s) = step {
-            self.emit(line, Step::Eval(s));
-        }
-        self.emit(line, Step::Jump(top));
-        self.place(end);
-    }
-
-    /// Compiles a `switch`: a dispatch to each arm's label, the arms in
-    /// order falling into each other as C's do.
-    ///
-    /// # Arguments
-    ///
-    /// * `line` - The line of the value switched on.
-    /// * `arms` - Each arm: whether it is the default, its labels' line,
-    ///   its body.
-    /// * `cont` - Where `continue` goes.
-    fn switch(&mut self, line: usize, arms: &[(bool, usize, Vec<Stmt>)], cont: Option<usize>) {
-        let end = self.label();
-        let mut cases: Vec<(u64, usize)> = Vec::new();
-        let mut default = end;
-        let mut entries = Vec::with_capacity(arms.len());
-        let mut bad: Option<String> = None;
-        for (is_default, at, _) in arms {
-            let l = self.label();
-            entries.push(l);
-            if *is_default {
-                default = l;
-            }
-            let toks = match self.line(*at) {
-                Ok(t) => t.to_vec(),
-                Err(why) => {
-                    bad = Some(why);
-                    continue;
-                }
-            };
-            let mut rest: &[Tok] = &toks;
-            while let Some(Tok::Name(n)) = rest.first() {
-                if n == "default" {
-                    rest = rest.get(2..).unwrap_or(&[]);
-                } else if n == "case" {
-                    let colon = rest
-                        .iter()
-                        .position(|t| *t == Tok::Punct(":"))
-                        .unwrap_or(rest.len());
-                    match self
-                        .expr(rest.get(1..colon).unwrap_or(&[]))
-                        .ok()
-                        .and_then(|e| self.case_value(&e))
-                    {
-                        Some(v) => cases.push((v, l)),
-                        None => bad = Some("a case label that is not a number".to_owned()),
-                    }
-                    rest = rest.get(colon + 1..).unwrap_or(&[]);
-                } else {
-                    break;
-                }
-            }
-        }
-        let value = self.condition(line, "switch");
-        let step = match (value, bad) {
-            (Ok(v), None) => Step::Switch(v, cases, default),
-            (Err(why), _) | (_, Some(why)) => Step::Unreadable(why),
-        };
-        self.emit(line, step);
-        for ((_, _, body), l) in arms.iter().zip(entries) {
-            self.place(l);
-            self.run(body, Some(end), cont);
-        }
-        self.place(end);
-    }
 }
 
 /// Every name an expression reads, in order.
@@ -3099,11 +2725,7 @@ impl Running<'_, '_> {
                     None => return unchecked("a 128-bit value this does not compute"),
                 },
             };
-            for (k, b) in bytes.into_iter().enumerate() {
-                let to = at.wrapping_add(from_usize(k));
-                self.emu.poke(to, b);
-                self.writers.insert(to, self.line);
-            }
+            self.store(at, bytes);
             return Ok(Val { bits: at, ty });
         }
         let v = self.value(source)?;
@@ -3163,11 +2785,35 @@ impl Running<'_, '_> {
     /// A fault for a byte nothing backs.
     fn wide_bytes(&self, at: u64) -> Eval<Vec<u8>> {
         (0..WIDE_BYTES)
-            .map(|k| {
-                let a = at.wrapping_add(k);
-                self.emu.byte_at(a).ok_or(End::Fault(a))
-            })
+            .map(|k| self.byte(at.wrapping_add(k)))
             .collect()
+    }
+
+    /// The byte at an address.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address.
+    ///
+    /// # Errors
+    ///
+    /// A fault for a byte nothing backs.
+    fn byte(&self, at: u64) -> Eval<u8> {
+        self.emu.byte_at(at).ok_or(End::Fault(at))
+    }
+
+    /// Writes bytes from an address on, each recorded as this line's.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address of the first byte; later ones follow it.
+    /// * `bytes` - The bytes, in address order.
+    fn store(&mut self, at: u64, bytes: impl IntoIterator<Item = u8>) {
+        for (k, b) in (0u64..).zip(bytes) {
+            let to = at.wrapping_add(k);
+            self.emu.poke(to, b);
+            self.writers.insert(to, self.line);
+        }
     }
 
     /// Applies a unary operator.
@@ -3686,11 +3332,7 @@ impl Running<'_, '_> {
         };
         Some(wanted.and_then(|n| {
             let d = self.value(dst)?;
-            for (k, b) in bytes.iter().take(n).enumerate() {
-                let to = d.bits.wrapping_add(from_usize(k));
-                self.emu.poke(to, *b);
-                self.writers.insert(to, self.line);
-            }
+            self.store(d.bits, bytes.iter().take(n).copied());
             Ok(d)
         }))
     }
@@ -3739,11 +3381,7 @@ impl Running<'_, '_> {
             "memset" => {
                 let (d, c, n) = (arg(0)?, arg(1)?, arg(2)?);
                 let n = self.length(n)?;
-                for k in 0..n {
-                    let at = d.bits.wrapping_add(k);
-                    self.emu.poke(at, crate::num::lo8(c.bits));
-                    self.writers.insert(at, self.line);
-                }
+                self.store(d.bits, (0..n).map(|_| crate::num::lo8(c.bits)));
                 Ok(d)
             }
             "memcpy" | "memmove" => {
@@ -3751,21 +3389,14 @@ impl Running<'_, '_> {
                 let n = self.length(n)?;
                 let mut bytes = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
                 for k in 0..n {
-                    let at = src.bits.wrapping_add(k);
+                    let b = self.byte(src.bits.wrapping_add(k))?;
                     if name == "memcpy" {
-                        let b = self.emu.byte_at(at).ok_or(End::Fault(at))?;
-                        let to = d.bits.wrapping_add(k);
-                        self.emu.poke(to, b);
-                        self.writers.insert(to, self.line);
+                        self.store(d.bits.wrapping_add(k), [b]);
                     } else {
-                        bytes.push(self.emu.byte_at(at).ok_or(End::Fault(at))?);
+                        bytes.push(b);
                     }
                 }
-                for (k, b) in bytes.into_iter().enumerate() {
-                    let to = d.bits.wrapping_add(from_usize(k));
-                    self.emu.poke(to, b);
-                    self.writers.insert(to, self.line);
-                }
+                self.store(d.bits, bytes);
                 Ok(d)
             }
             "memcmp" | "strcmp" | "strncmp" => {
@@ -3777,9 +3408,8 @@ impl Running<'_, '_> {
                 let text = name != "memcmp";
                 let mut sign = 0i64;
                 for k in 0..n {
-                    let (at, bt) = (x.bits.wrapping_add(k), y.bits.wrapping_add(k));
-                    let a = self.emu.byte_at(at).ok_or(End::Fault(at))?;
-                    let b = self.emu.byte_at(bt).ok_or(End::Fault(bt))?;
+                    let a = self.byte(x.bits.wrapping_add(k))?;
+                    let b = self.byte(y.bits.wrapping_add(k))?;
                     if a != b {
                         sign = if a < b { -1 } else { 1 };
                         break;
@@ -3794,26 +3424,7 @@ impl Running<'_, '_> {
                 Ok(self.int(sign.cast_unsigned(), CTy::int(32, true)))
             }
             "strlen" | "wcslen" => {
-                let s = arg(0)?;
-                let unit = if name == "strlen" { 1 } else { 2 };
-                let mut n = 0u64;
-                loop {
-                    if n >= BUILTIN_MAX {
-                        return unchecked(format!("{name} past {BUILTIN_MAX} characters"));
-                    }
-                    let at = s.bits.wrapping_add(n * unit);
-                    let lo = self.emu.byte_at(at).ok_or(End::Fault(at))?;
-                    let hi = if unit == 2 {
-                        let at = at.wrapping_add(1);
-                        self.emu.byte_at(at).ok_or(End::Fault(at))?
-                    } else {
-                        0
-                    };
-                    if lo == 0 && hi == 0 {
-                        break;
-                    }
-                    n += 1;
-                }
+                let n = self.string_length(name, arg(0)?.bits)?;
                 Ok(self.int(n, CTy::int(word, false)))
             }
             "abs" => {
@@ -3825,6 +3436,39 @@ impl Running<'_, '_> {
                 Ok(self.int(bits, ty))
             }
             _ => unchecked(format!("{name} is not modeled")),
+        }
+    }
+
+    /// The characters before a string's terminating zero, as `strlen`
+    /// counts bytes and `wcslen` counts 16-bit units.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - `strlen` or `wcslen`.
+    /// * `at` - The string's address.
+    ///
+    /// # Errors
+    ///
+    /// Unchecked past [`BUILTIN_MAX`] characters; a fault for a byte
+    /// nothing backs.
+    fn string_length(&self, name: &str, at: u64) -> Eval<u64> {
+        let unit = if name == "strlen" { 1 } else { 2 };
+        let mut n = 0u64;
+        loop {
+            if n >= BUILTIN_MAX {
+                return unchecked(format!("{name} past {BUILTIN_MAX} characters"));
+            }
+            let at = at.wrapping_add(n * unit);
+            let lo = self.byte(at)?;
+            let hi = if unit == 2 {
+                self.byte(at.wrapping_add(1))?
+            } else {
+                0
+            };
+            if lo == 0 && hi == 0 {
+                return Ok(n);
+            }
+            n += 1;
         }
     }
 
