@@ -53,6 +53,8 @@ const IMPL_MAP: u32 = 0x1c;
 const ASSEMBLY: u32 = 0x20;
 /// `AssemblyRef`.
 const ASSEMBLY_REF: u32 = 0x23;
+/// `NestedClass`.
+const NESTED_CLASS: u32 = 0x29;
 
 /// A `#Strings` heap under construction: each name's index by name.
 #[derive(Default)]
@@ -392,6 +394,37 @@ fn a_managed_pe_lists_its_types_methods_pinvoke_and_strings() {
         info.contains(".net:    assembly Hello 1.0.0.0, runtime 2.5, metadata v4.0.30319, ilonly 32bitreq 32bitpref; entry 0x06000001 Ns.Program::Main; types 2, methods 3 (native 1), pinvokes 1, assembly refs 1, user strings 2"),
         "{info}"
     );
+}
+
+/// A type nested in a cycle with a long name is named within the cap.
+///
+/// Two types each nested in the other join their names up to the nesting
+/// limit; every row naming such a type copied the whole join, so names are
+/// cut at 1024 bytes and end in `...`.
+#[test]
+fn a_long_nested_name_is_cut() {
+    let mut m = meta();
+    let long = "P".repeat(250);
+    let at = u16::try_from(m.strings.len()).expect("a small heap");
+    m.strings.extend_from_slice(long.as_bytes());
+    m.strings.push(0);
+    while !m.strings.len().is_multiple_of(4) {
+        m.strings.push(0);
+    }
+    m.tables[m.program_name..m.program_name + 2].copy_from_slice(&c2(at));
+    m.rows.push((NESTED_CLASS, 2));
+    for (nested, enclosing) in [(2u16, 1u16), (1, 2)] {
+        m.tables.extend_from_slice(&c2(nested));
+        m.tables.extend_from_slice(&c2(enclosing));
+    }
+    let p = load(&root(&m));
+    let clr = p.clr().expect("the metadata reads");
+    let program = clr.types.get(1).expect("the second type");
+    assert!(program.name.len() <= 1024, "{} bytes", program.name.len());
+    assert!(program.name.ends_with("..."), "{}", program.name);
+    for method in &clr.methods {
+        assert!(method.name.len() <= 1024, "{} bytes", method.name.len());
+    }
 }
 
 /// Method names are symbols, and `why` says the .NET metadata named them.

@@ -56,6 +56,17 @@ const DISPLAY_MAX: usize = 200;
 /// Deepest nesting followed for a nested type's name.
 const NEST_MAX: usize = 16;
 
+/// Longest qualified name kept, in bytes: a nested type's name joins up to
+/// [`NEST_MAX`] names and a member's adds its owner's, and a longer one is
+/// cut to end in `...`.
+const QUALIFIED_MAX: usize = 1024;
+
+/// Most bytes of names one file's tables yield, every row's together.
+///
+/// Past it a name reads `?` and the answer says it is capped, so a million
+/// rows of the longest names cost this much, not rows times length.
+const NAMES_TOTAL_MAX: usize = 1 << 27;
+
 /// Rows one read of the `borer://clr` listing shows.
 pub const CLR_PAGE: usize = 200;
 
@@ -1039,8 +1050,6 @@ struct Names {
     type_refs: Vec<String>,
     /// Each `TypeRef` row's scope: an assembly's or module's name.
     scopes: Vec<String>,
-    /// Each `MethodDef` row's full name, by row less one.
-    methods: Vec<String>,
     /// Each `ModuleRef` row's name, by row less one.
     modules: Vec<String>,
     /// Each `AssemblyRef` row's name, by row less one.
@@ -1057,6 +1066,34 @@ fn by_row(names: &[String], row: u32) -> &str {
     row.checked_sub(1)
         .and_then(|r| names.get(saturating_usize(u64::from(r))))
         .map_or("?", String::as_str)
+}
+
+/// Takes one name out of the budget for a file's names.
+///
+/// # Arguments
+///
+/// * `left` - Bytes the file's names may still take, lowered by this one.
+/// * `name` - The name, cut to [`QUALIFIED_MAX`] bytes first.
+///
+/// # Returns
+///
+/// The name, or `?` once the budget is spent.
+fn kept(left: &mut usize, mut name: String) -> String {
+    if name.len() > QUALIFIED_MAX {
+        let mut cut = QUALIFIED_MAX - 3;
+        while !name.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        name.truncate(cut);
+        name.push_str("...");
+    }
+    if let Some(rest) = left.checked_sub(name.len()) {
+        *left = rest;
+        name
+    } else {
+        *left = 0;
+        "?".to_owned()
+    }
 }
 
 /// Joins a namespace and a name the way `ildasm` writes a type.
@@ -1118,6 +1155,7 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
     let mut capped = TABLES_READ.iter().any(|table| t.count(*table) > ROWS_MAX);
 
     let mut names = Names::default();
+    let mut left = NAMES_TOTAL_MAX;
     let str_cell = |table: u8, row: u32, col: usize| -> Result<String, String> {
         let idx = t.cell(table, row, col)?;
         let (name, _) = SCHEMAS
@@ -1160,7 +1198,7 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
                 }
             }
             parts.reverse();
-            qualified(namespace, &parts.join("/"))
+            kept(&mut left, qualified(namespace, &parts.join("/")))
         })
         .collect();
 
@@ -1192,8 +1230,8 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
             Some((MODULE, _)) => "this module".to_owned(),
             Some(_) | None => "-".to_owned(),
         };
-        names.type_refs.push(full);
-        names.scopes.push(scope);
+        names.type_refs.push(kept(&mut left, full));
+        names.scopes.push(kept(&mut left, scope));
     }
 
     let defs = rows(&t, METHOD_DEF, |r| {
@@ -1256,13 +1294,17 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
                 .map_or("?", String::as_str);
             Method {
                 token: 0x0600_0000 | u32::try_from(i + 1).unwrap_or(0),
-                name: format!("{owner}::{name}"),
+                name: kept(&mut left, format!("{owner}::{name}")),
                 rva: *rva,
                 body,
             }
         })
         .collect();
-    names.methods = methods.iter().map(|m| m.name.clone()).collect();
+    let method_name = |row: u32| {
+        row.checked_sub(1)
+            .and_then(|r| methods.get(saturating_usize(u64::from(r))))
+            .map_or("?", |m| m.name.as_str())
+    };
 
     let types = names
         .types
@@ -1271,7 +1313,7 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
         .enumerate()
         .map(|(i, (name, n))| TypeDef {
             token: 0x0200_0000 | u32::try_from(i + 1).unwrap_or(0),
-            name: name.clone(),
+            name: kept(&mut left, name.clone()),
             methods: *n,
         })
         .collect();
@@ -1280,7 +1322,10 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
     let pinvokes = rows(&t, IMPL_MAP, |r| {
         let member = t.cell(IMPL_MAP, r, 1)?;
         let (token, method) = match forwarded.split(member) {
-            Some((METHOD_DEF, row)) => (0x0600_0000 | row, by_row(&names.methods, row).to_owned()),
+            Some((METHOD_DEF, row)) => (
+                0x0600_0000 | row,
+                kept(&mut left, method_name(row).to_owned()),
+            ),
             Some((table, row)) => ((u32::from(table) << 24) | row, "?".to_owned()),
             None => {
                 return Err(format!(
@@ -1302,19 +1347,13 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
         let member = str_cell(MEMBER_REF, r, 1)?;
         let (owner, scope) = match parent.split(class) {
             Some((TYPE_REF, row)) => (
-                by_row(&names.type_refs, row).to_owned(),
-                by_row(&names.scopes, row).to_owned(),
+                by_row(&names.type_refs, row),
+                kept(&mut left, by_row(&names.scopes, row).to_owned()),
             ),
-            Some((TYPE_DEF, row)) => (
-                by_row(&names.types, row).to_owned(),
-                "this module".to_owned(),
-            ),
-            Some((MODULE_REF, row)) => (by_row(&names.modules, row).to_owned(), "-".to_owned()),
-            Some((METHOD_DEF, row)) => (
-                by_row(&names.methods, row).to_owned(),
-                "this module".to_owned(),
-            ),
-            Some(_) => ("<generic>".to_owned(), "-".to_owned()),
+            Some((TYPE_DEF, row)) => (by_row(&names.types, row), "this module".to_owned()),
+            Some((MODULE_REF, row)) => (by_row(&names.modules, row), "-".to_owned()),
+            Some((METHOD_DEF, row)) => (method_name(row), "this module".to_owned()),
+            Some(_) => ("<generic>", "-".to_owned()),
             None => {
                 return Err(format!(
                     "MemberRef row {r}'s parent {class:#x} names no table"
@@ -1323,10 +1362,11 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
         };
         Ok(MemberRef {
             token: 0x0a00_0000 | r,
-            name: format!("{owner}::{member}"),
+            name: kept(&mut left, format!("{owner}::{member}")),
             scope,
         })
     })?;
+    capped |= left == 0;
 
     let version_of = |table: u8, row: u32, first: usize| -> Result<String, String> {
         let parts = (first..first + 4)
