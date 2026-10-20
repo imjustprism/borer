@@ -20,6 +20,10 @@ const BASE: u64 = 0x1_4000_0000;
 /// # Panics
 ///
 /// When one is missing or out of order.
+#[expect(
+    clippy::panic,
+    reason = "a test helper; the panic names the missing needle and the text"
+)]
 fn in_order(text: &str, needles: &[&str]) {
     let mut at = 0;
     for n in needles {

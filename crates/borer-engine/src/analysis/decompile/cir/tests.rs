@@ -324,6 +324,8 @@ fn region(protected: &[u64]) -> Region {
     }
 }
 
+/// Wraps a region whose bounds are exact in a `try` and `catch`.
+///
 /// The statements of the protected blocks become a `try`, the handler's
 /// run moves into its `catch`, the runtime's own dispatch goes, and a
 /// jump to the label right after the `try` becomes falling out of it.

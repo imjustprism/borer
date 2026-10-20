@@ -921,6 +921,8 @@ mod tests {
         assert!(summary.ends_with(&format!("# next: {step}\n")), "{summary}");
     }
 
+    /// Warns in a `decompile` answer of a callee the text gives no prototype.
+    ///
     /// The `decompile` answer names, on a `// warn:` line under the check
     /// line, a call to a function of the binary the text gives no
     /// prototype; the callee's own text, which calls nothing, has no such

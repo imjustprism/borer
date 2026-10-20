@@ -747,6 +747,7 @@ impl BorerServer {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use crate::testing::raw_server;
 
     /// Loads a file into a server, without its PDB, and returns the summary.

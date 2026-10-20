@@ -5,7 +5,7 @@
 //! The structurer lays the body out as if no exception could happen: the
 //! protected blocks among the others, and the code only the runtime enters
 //! (a landing pad, an `__except` body, a catch's continuation) after
-//! them. Every statement carries the block it came from ([`Prov`]), so a
+//! them. Every statement carries the block it came from ([`Prov`](super::Prov)), so a
 //! region is wrapped only where its boundaries are exact: the protected
 //! statements form one run of one statement list, nothing else in the body
 //! comes from a protected block, no jump enters the run past its first
