@@ -3895,7 +3895,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                             start,
                             e.at,
                             Claim::Target,
-                            "callee".to_owned(),
+                            || "callee".to_owned(),
                             text,
                             m,
                             self.width,
@@ -3929,7 +3929,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         start,
                         e.at,
                         Claim::Argument,
-                        format!("{at:?}"),
+                        || format!("{at:?}"),
                         text,
                         m,
                         bits,
@@ -3968,7 +3968,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                             start,
                             e.at,
                             Claim::Return,
-                            "result".to_owned(),
+                            || "result".to_owned(),
                             text,
                             m,
                             bits,
@@ -3993,7 +3993,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         start,
                         e.at,
                         Claim::Return,
-                        "result".to_owned(),
+                        || "result".to_owned(),
                         text,
                         machine,
                         bits,
@@ -4013,7 +4013,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         start,
                         e.at,
                         Claim::Branch,
-                        format!("{:#x}", e.at),
+                        || format!("{:#x}", e.at),
                         text,
                         u64::from(m),
                         1,
@@ -4042,7 +4042,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     start,
                     e.at,
                     Claim::Switch,
-                    "arm".to_owned(),
+                    || "arm".to_owned(),
                     text,
                     m,
                     self.width,
@@ -4062,7 +4062,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     start,
                     e.at,
                     Claim::Target,
-                    "goto".to_owned(),
+                    || "goto".to_owned(),
                     text,
                     m,
                     self.width,
@@ -4231,7 +4231,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     start,
                     at,
                     Claim::Narrow,
-                    format!("{name} at {succ:#x}"),
+                    || format!("{name} at {succ:#x}"),
                     Some(v),
                     v & low(nb),
                     64,
@@ -4245,7 +4245,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 start,
                 at,
                 Claim::Register,
-                format!("{name} at {succ:#x}"),
+                || format!("{name} at {succ:#x}"),
                 text,
                 m,
                 bits,
@@ -4283,7 +4283,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                             start,
                             at,
                             Claim::Register,
-                            format!("xmm{n} at {succ:#x}"),
+                            || format!("xmm{n} at {succ:#x}"),
                             Some(low64(v)),
                             low64(machine),
                             nb,
@@ -4298,7 +4298,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         start,
                         at,
                         Claim::Register,
-                        format!("xmm{n} at {succ:#x}"),
+                        || format!("xmm{n} at {succ:#x}"),
                         Some(low64(v)),
                         low64(machine),
                         64,
@@ -4311,7 +4311,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         start,
                         at,
                         Claim::Register,
-                        format!("xmm{n}+8 at {succ:#x}"),
+                        || format!("xmm{n}+8 at {succ:#x}"),
                         Some(low64(v >> 64)),
                         low64(machine >> 64),
                         64,
@@ -4333,7 +4333,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 start,
                 at,
                 Claim::Register,
-                format!("xmm{n} at {succ:#x}"),
+                || format!("xmm{n} at {succ:#x}"),
                 text,
                 machine,
                 bits,
@@ -4375,7 +4375,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         start,
                         at,
                         Claim::Slot,
-                        format!("{:+#x} at {succ:#x}", o.wrapping_add_unsigned(word)),
+                        || format!("{:+#x} at {succ:#x}", o.wrapping_add_unsigned(word)),
                         Some(low64(w >> (8 * word))),
                         m,
                         64,
@@ -4395,7 +4395,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 start,
                 at,
                 Claim::Slot,
-                format!("{o:+#x} at {succ:#x}"),
+                || format!("{o:+#x} at {succ:#x}"),
                 text,
                 m,
                 bits,
@@ -4447,7 +4447,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 .iter()
                 .map(|&x| Some((t.text.byte(x)?, t.emu.byte_at(x)?)))
                 .collect();
-            let place = format!("{o:+#x} at {succ:#x}");
+            let place = || format!("{o:+#x} at {succ:#x}");
             match pairs {
                 None => *out.unreadable.entry(Claim::Slot).or_default() += 1,
                 Some(pairs) => {
@@ -4511,7 +4511,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 start,
                 at,
                 Claim::StackPointer,
-                format!("at {succ:#x}"),
+                || format!("at {succ:#x}"),
                 Some(expected),
                 now,
                 self.width,
@@ -4531,7 +4531,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `start` - The block's start.
     /// * `at` - The statement's instruction.
     /// * `claim` - What kind of claim.
-    /// * `place` - Which one.
+    /// * `place` - Which one, rendered only for a disagreement.
     /// * `text` - What the text says, `None` when the replay cannot tell.
     /// * `machine` - What the machine holds.
     /// * `bits` - The width compared.
@@ -4549,7 +4549,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         start: u64,
         at: u64,
         claim: Claim,
-        place: String,
+        place: impl FnOnce() -> String,
         text: Option<u64>,
         machine: u64,
         bits: u8,
@@ -4561,7 +4561,11 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             return;
         };
         *out.compared.entry(claim).or_default() += 1;
-        if agree(tv, machine, bits, float) || !t.seen.insert((claim, place.clone())) {
+        if agree(tv, machine, bits, float) {
+            return;
+        }
+        let place = place();
+        if !t.seen.insert((claim, place.clone())) {
             return;
         }
         out.disagreements.push(Disagreement {
