@@ -2292,6 +2292,11 @@ pub fn resolve_suggesting(
     })
 }
 
+/// What a name nothing matches ends with: the tools that list the names,
+/// in the MCP tools' syntax. A caller speaking another syntax (the CLI)
+/// replaces it with its own.
+pub const LIST_HINT: &str = "; try functions(filter=...) or symbols(filter=...)";
+
 /// Most names a miss suggests ([`resolve_suggesting`]).
 pub const NEAREST_NAMES: usize = 3;
 
@@ -2434,7 +2439,7 @@ fn resolve_noting(
     match hits.len() {
         0 => parse_addr(text).ok_or_else(|| {
             format!(
-                "{} is neither an address nor a known name{}; try functions(filter=...) or symbols(filter=...)",
+                "{} is neither an address nor a known name{}{LIST_HINT}",
                 crate::text::quoted(text),
                 miss()
             )

@@ -217,9 +217,11 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// When the text is neither, naming the nearest names.
+    /// When the text is neither, naming the nearest names and the commands
+    /// that list them ([`cli_hint`]).
     pub(super) fn resolve(&self, a: &Analysis, text: &str) -> anyhow::Result<u64> {
-        resolve_suggesting(&self.program, a, &self.overlay, text).map_err(anyhow::Error::msg)
+        resolve_suggesting(&self.program, a, &self.overlay, text)
+            .map_err(|e| anyhow::Error::msg(cli_hint(&e)))
     }
 
     /// Resolves an address argument as the MCP tools do: `0x`-hex text
@@ -329,4 +331,24 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     };
     let text = decompile::with_header(&text, header.as_deref());
     Ok(window(&text, None, offset, limit))
+}
+
+/// Says an engine message's listing hint in the CLI's syntax.
+///
+/// The engine words it as the MCP tools take it
+/// ([`borer_engine::analysis::LIST_HINT`]); at a shell the commands are
+/// `borer functions` and `borer symbols`.
+///
+/// # Arguments
+///
+/// * `message` - The engine's message.
+///
+/// # Returns
+///
+/// The message with the hint replaced, or as it was when it has none.
+pub(super) fn cli_hint(message: &str) -> String {
+    message.replace(
+        borer_engine::analysis::LIST_HINT,
+        "; list them with `borer functions <binary> <filter>` or `borer symbols <binary> <filter>`",
+    )
 }

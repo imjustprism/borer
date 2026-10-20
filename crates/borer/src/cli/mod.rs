@@ -1485,6 +1485,25 @@ mod tests {
         }
     }
 
+    /// A name nothing matches is answered with the CLI commands that list
+    /// names, not the MCP tools' call syntax.
+    ///
+    /// # Panics
+    ///
+    /// When the miss is resolved or its hint is the tools'.
+    #[test]
+    fn a_missed_name_points_at_the_cli_listing_commands() {
+        let s = session(1);
+        let a = s.analysis_or_empty();
+        let miss = s.resolve(&a, "no_such_name").expect_err("nothing matches");
+        let text = miss.to_string();
+        assert!(
+            text.contains("`borer functions <binary> <filter>`"),
+            "{text}"
+        );
+        assert!(!text.contains("functions(filter="), "{text}");
+    }
+
     /// `decompile` pages a long function as the `decompile` tool does: 300
     /// lines under a `// showing` line, an offset and a limit after the
     /// function (zero for every line), and a short one untouched.
