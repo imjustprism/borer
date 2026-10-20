@@ -3,12 +3,11 @@ name: ci
 # The project's own gate on Windows: the same `scripts/gate.py --check` a
 # commit passes locally, so CI and the local gate cannot drift apart; clippy
 # and the tests on Linux (x64 and arm64) and macOS (arm64); clippy on Windows
-# arm64; and the RustSec advisories. It runs on what lands on dev or main, on
-# every pull request into either, weekly for new advisories, and on demand; a
-# newer run on the same ref cancels the older one. Work on dev runs the gate's
-# fast form (`--fast`: no dogfood sweeps, smoke, deny or doc); a pull request
-# into main, a push to main and a manual run take the full gate, so main never
-# moves without it.
+# arm64; and the RustSec advisories. Work on dev (its pull requests and
+# pushes) runs only `quick`: format, lints, clippy and the commit messages, in
+# minutes. The full set runs on a pull request into main, a push to main and a
+# manual run, so main never moves without it; advisories also run weekly. A
+# newer run on the same ref cancels the older one.
 
 on:
   push:
@@ -31,9 +30,51 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # The fast checks every change on its way into dev passes: format, the
+  # comment and spelling checks, Python lint, clippy and the commit messages.
+  quick:
+    if: github.event_name != 'schedule' && !(github.base_ref == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: toolchain
+        run: rustup toolchain install --no-self-update
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: typos@1.50.3
+
+      - name: format
+        run: cargo fmt --all --check
+
+      - name: commits
+        run: python3 scripts/check/commits.py
+        env:
+          BORER_COMMITS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+      - name: comments
+        run: python3 scripts/check/strip_comments.py --check
+
+      - name: typos
+        run: typos
+
+      - name: ruff
+        run: pipx run ruff==0.16.10 check scripts && pipx run ruff==0.16.10 format --check scripts
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   # Advisories need the network, which the local gate does not assume, and
   # a new one can land with no change here, hence the weekly run.
   advisories:
+    if: github.base_ref == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -48,7 +89,7 @@ jobs:
 
   gate:
     name: gate (windows)
-    if: github.event_name != 'schedule'
+    if: github.base_ref == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -85,7 +126,7 @@ jobs:
       # --check: verify only, and a tool the gate needs that is missing is
       # a failure here, never a skip.
       - name: gate
-        run: python scripts/gate.py --check ${{ github.event_name != 'workflow_dispatch' && (github.base_ref == 'dev' || github.ref == 'refs/heads/dev') && '--fast' || '' }}
+        run: python scripts/gate.py --check
         env:
           # Where the commits under test start: a pull request's base, or
           # the commit a push started from (empty on a manual run).
@@ -100,7 +141,7 @@ jobs:
   # they decompile the running binary as the Windows x64 PE.
   portable:
     name: test (${{ matrix.os }})
-    if: github.event_name != 'schedule'
+    if: github.base_ref == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -126,7 +167,7 @@ jobs:
   # ones that read borer's own build pin it as an x64 PE.
   windows-arm64:
     name: clippy (windows-11-arm)
-    if: github.event_name != 'schedule'
+    if: github.base_ref == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: windows-11-arm
     timeout-minutes: 60
     steps:
