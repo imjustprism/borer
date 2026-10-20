@@ -1,16 +1,19 @@
 name: ci
 
 # The project's own gate on Windows: the same `scripts/gate.py --check` a
-# commit passes locally, so CI and the local gate cannot drift apart; and
-# clippy and the tests on Linux and macOS. It runs on what lands on dev or
-# main, on every pull request into dev or main, and on demand; a newer run on the
-# same ref cancels the older one.
+# commit passes locally, so CI and the local gate cannot drift apart; clippy
+# and the tests on Linux (x64 and arm64) and macOS (arm64); clippy on Windows
+# arm64; and the RustSec advisories. It runs on what lands on dev or main, on
+# every pull request into either, weekly for new advisories, and on demand; a
+# newer run on the same ref cancels the older one.
 
 on:
   push:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  schedule:
+    - cron: "17 5 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -25,8 +28,24 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # Advisories need the network, which the local gate does not assume, and
+  # a new one can land with no change here, hence the weekly run.
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: advisories
+        run: cargo deny check advisories
+
   gate:
     name: gate (windows)
+    if: github.event_name != 'schedule'
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -60,10 +79,6 @@ jobs:
       - name: ruff
         run: python -m pip install ruff==0.16.10
 
-      # Advisories need the network, which the local gate does not assume.
-      - name: advisories
-        run: cargo deny check advisories
-
       # --check: verify only, and a tool the gate needs that is missing is
       # a failure here, never a skip.
       - name: gate
@@ -73,18 +88,20 @@ jobs:
           # the commit a push started from (empty on a manual run).
           BORER_COMMITS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
 
-  # The same workspace built, linted and tested on Linux and macOS, so an
-  # assumption that only holds on Windows fails here. The tests that read
+  # The same workspace built, linted and tested on Linux and macOS, x64 and
+  # arm64 hosts, so an assumption that only holds on Windows or on x64 fails
+  # here. The tests that read
   # borer's own build pin it as the Windows x64 PE and are ignored off
   # Windows, and macos-latest is Apple silicon, so the running test binary
   # is an arm64 Mach-O there. Doctests are left out for the same reason:
   # they decompile the running binary as the Windows x64 PE.
   portable:
     name: test (${{ matrix.os }})
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -100,3 +117,22 @@ jobs:
 
       - name: test
         run: cargo test --workspace --lib --bins --tests
+
+  # Windows on arm64: clippy compiles every target there, the C the
+  # allocator builds included. The tests stay on x64 Windows, since the
+  # ones that read borer's own build pin it as an x64 PE.
+  windows-arm64:
+    name: clippy (windows-11-arm)
+    if: github.event_name != 'schedule'
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: toolchain
+        run: rustup toolchain install --no-self-update
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
