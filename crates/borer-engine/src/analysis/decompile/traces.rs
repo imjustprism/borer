@@ -286,6 +286,9 @@ struct Names {
     /// Names whose call never returns: the block that calls it has no
     /// successor.
     noreturn: BTreeSet<u32>,
+    /// Names the header says the text leaves out: a call to one is a step
+    /// the text may write or not, as it writes a check it could not fold.
+    dropped: BTreeSet<u32>,
     /// What each call target reads as, worked out once: a near target
     /// (`true`) or a slot read through (`false`), by address.
     seen: FxHashMap<(bool, u64), Option<Callee>>,
@@ -443,7 +446,10 @@ fn import_at(program: &Program, analysis: &Analysis, slot: u64) -> Option<String
 ///
 /// # Returns
 ///
-/// The callee, or `None` for a call the text leaves out.
+/// The callee, or `None` for a frame helper's call, which the text never
+/// writes. A call the header says the text leaves out is one it may still
+/// write, where it could not fold the check around it, so it is a step
+/// the text may take or not, under the name it would write.
 fn callee(
     program: &Program,
     analysis: &Analysis,
@@ -476,7 +482,11 @@ fn callee(
         let full = name_of(analysis, overlay, key.1);
         match quiet(notes, &full) {
             Quiet::Shown => Some(Callee::Named(names.intern(&bare(&full)))),
-            Quiet::Dropped => None,
+            Quiet::Dropped => {
+                let k = names.intern(&bare(&full));
+                names.dropped.insert(k);
+                Some(Callee::Maybe(Some(k)))
+            }
             Quiet::Other => Some(Callee::Maybe(None)),
         }
     };
@@ -554,6 +564,7 @@ fn binary_graph(
                 let out = last.and_then(|i| callee(program, analysis, overlay, notes, names, i));
                 let at = last.map_or(b.start, Instruction::ip);
                 match out {
+                    Some(Callee::Maybe(Some(k))) if names.dropped.contains(&k) => halt,
                     Some(c) => {
                         let ret = g.add(Node::Ret, at);
                         g.add(Node::Call(c, ret), at)
@@ -567,7 +578,7 @@ fn binary_graph(
                         && outside
                         && crate::analysis::functions::call_ends_path(program, analysis, b)) =>
             {
-                if let Some((Callee::Named(n), _)) = calls.last() {
+                if let Some((Callee::Named(n) | Callee::Maybe(Some(n)), _)) = calls.last() {
                     names.noreturn.insert(*n);
                 }
                 halt
@@ -1031,7 +1042,7 @@ impl Builder<'_> {
                 ends = true;
             }
             let name = self.names.name(n).unwrap_or("");
-            let callee = if INTRINSICS.contains(&name) {
+            let callee = if INTRINSICS.contains(&name) || self.names.dropped.contains(&n) {
                 Callee::Maybe(Some(n))
             } else {
                 Callee::Named(n)
