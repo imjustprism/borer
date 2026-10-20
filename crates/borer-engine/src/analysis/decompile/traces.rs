@@ -635,6 +635,20 @@ pub(super) enum Stmt {
     Return(usize),
     /// A path the text ends: `goto *x;` or a trap.
     Halt(usize),
+    /// `try {` or `__try {` on this line, its body, and its handlers in
+    /// order, each with the line of its head.
+    Try(usize, Vec<Stmt>, Vec<(Handler, usize, Vec<Stmt>)>),
+}
+
+/// The head of a guarded region's handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Handler {
+    /// `} catch (decl) {`: entered by a throw the body makes.
+    Catch,
+    /// `} __except (filter) {`: entered by a fault the filter accepts.
+    Except,
+    /// `} __finally {`: run however the body is left.
+    Finally,
 }
 
 /// Reads the text's lines into its structures.
@@ -752,7 +766,40 @@ impl<'t> Parser<'t> {
         if t.starts_with("switch (") && t.ends_with(") {") {
             return self.switch(line, depth);
         }
+        if t == "try {" || t == "__try {" {
+            return self.guarded(line, depth);
+        }
         simple(t, line)
+    }
+
+    /// Reads a guarded region after its opening line, up to the `}` that
+    /// closes its last handler.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The line of `try {` or `__try {`.
+    /// * `depth` - How deep the structures nest here.
+    ///
+    /// # Errors
+    ///
+    /// The text ends inside the region or closes a part of it with a line
+    /// no handler has.
+    fn guarded(&mut self, line: usize, depth: usize) -> Result<Stmt, &'static str> {
+        let body = self.block(depth + 1)?;
+        let mut handlers = Vec::new();
+        loop {
+            let (at, closer) = self.closer().ok_or("text ends inside a try")?;
+            let head = match closer {
+                "}" if !handlers.is_empty() => return Ok(Stmt::Try(line, body, handlers)),
+                "} __finally {" => Handler::Finally,
+                _ if closer.starts_with("} catch (") && closer.ends_with(") {") => Handler::Catch,
+                _ if closer.starts_with("} __except (") && closer.ends_with(") {") => {
+                    Handler::Except
+                }
+                _ => return Err("unknown closer of a try"),
+            };
+            handlers.push((head, self.line(at), self.block(depth + 1)?));
+        }
     }
 
     /// Reads an `if` chain after its opening line, its `else if` arms nested
@@ -1257,6 +1304,7 @@ impl Builder<'_> {
                 self.chain(*line, None, ret)
             }
             Stmt::Halt(line) => self.chain(*line, None, self.halt),
+            Stmt::Try(..) => return Err("a guarded region"),
         })
     }
 }

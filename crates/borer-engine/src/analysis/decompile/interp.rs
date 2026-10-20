@@ -953,6 +953,9 @@ impl Compiler<'_> {
                 self.place(end);
             }
             Stmt::Switch(line, arms) => self.switch(*line, arms, cont),
+            Stmt::Try(line, ..) => {
+                self.emit(*line, Step::Unreadable("a guarded region".to_owned()));
+            }
             Stmt::Goto(addr) => {
                 let l = self.block(*addr);
                 let line = self.ops.last().map_or(0, |o| o.line);
