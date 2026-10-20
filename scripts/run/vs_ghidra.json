@@ -1,157 +1,1699 @@
 {
-  "machine": "AMD Ryzen 7 9800X3D, 8 cores / 16 threads, 31 GB, Windows 11 Pro",
-  "versions": "borer 0.1.0, Ghidra 12.1.3 headless, Java 25.0.3",
-  "date": "2026-10-18",
-  "installMb": {
-    "borer": 14.6,
-    "ghidra": 1167
-  },
   "rows": [
     {
       "binary": "notepad.exe",
       "mb": 0.34,
       "tool": "borer",
-      "date": "2026-10-18",
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 3.5,
+          "at": "18:46:53",
+          "readyColdS": 0.055,
+          "firstDecompileS": 0.061,
+          "functions": 481,
+          "decompileP50Ms": 1.94,
+          "decompileP95Ms": 7.9,
+          "decompileMeanMs": 3.35,
+          "peakMb": 50,
+          "readyWarmS": 0.05,
+          "allFps": 662.9,
+          "indexFunctions": 523,
+          "allPeakMb": 100,
+          "allFps1Core": 364.5
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 481,
+          "min": 481,
+          "max": 481,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "indexFunctions": {
+          "median": 523,
+          "min": 523,
+          "max": 523,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 0.055,
+          "min": 0.055,
+          "max": 0.055,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 0.061,
+          "min": 0.061,
+          "max": 0.061,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 0.05,
+          "min": 0.05,
+          "max": 0.05,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 1.94,
+          "min": 1.94,
+          "max": 1.94,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 7.9,
+          "min": 7.9,
+          "max": 7.9,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 3.35,
+          "min": 3.35,
+          "max": 3.35,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 662.9,
+          "min": 662.9,
+          "max": 662.9,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 364.5,
+          "min": 364.5,
+          "max": 364.5,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 50,
+          "min": 50,
+          "max": 50,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 100,
+          "min": 100,
+          "max": 100,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
       "functions": 481,
-      "readyColdS": 0.61,
-      "readyWarmS": 0.06,
-      "decompileP50Ms": 8.8,
-      "decompileP95Ms": 172.3,
-      "decompileMeanMs": 50.5,
-      "firstDecompileMs": 12443.0,
-      "allFps": 219,
-      "peakMb": 51
+      "indexFunctions": 523,
+      "readyColdS": 0.055,
+      "firstDecompileS": 0.061,
+      "readyWarmS": 0.05,
+      "decompileP50Ms": 1.94,
+      "decompileP95Ms": 7.9,
+      "decompileMeanMs": 3.35,
+      "allFps": 662.9,
+      "allFps1Core": 364.5,
+      "peakMb": 50,
+      "allPeakMb": 100,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 481,
+          "indexFunctions": 523,
+          "readyColdS": 0.055,
+          "firstDecompileS": 0.061,
+          "readyWarmS": 0.05,
+          "decompileP50Ms": 1.94,
+          "decompileP95Ms": 7.9,
+          "decompileMeanMs": 3.35,
+          "allFps": 662.9,
+          "allFps1Core": 364.5,
+          "peakMb": 50,
+          "allPeakMb": 100
+        }
+      },
+      "failures": []
     },
     {
       "binary": "notepad.exe",
       "mb": 0.34,
       "tool": "ghidra",
-      "date": "2026-10-18",
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 3.2,
+          "at": "18:46:59",
+          "readyColdS": 145.059,
+          "firstDecompileS": 145.289,
+          "functions": 474,
+          "decompileP50Ms": 2.42,
+          "decompileP95Ms": 23.65,
+          "decompileMeanMs": 4.84,
+          "sampleFailed": 0,
+          "peakMb": 2428,
+          "readyWarmS": 2.951,
+          "allFpsParallel": 7.5,
+          "allFailed": 1,
+          "allPeakMb": 1351,
+          "allDecompilers": 10,
+          "allFps1Core": 7.5,
+          "allFailed1Core": 1,
+          "allFps": 7.5
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 474,
+          "min": 474,
+          "max": 474,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 145.059,
+          "min": 145.059,
+          "max": 145.059,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 145.289,
+          "min": 145.289,
+          "max": 145.289,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 2.951,
+          "min": 2.951,
+          "max": 2.951,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 2.42,
+          "min": 2.42,
+          "max": 2.42,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 23.65,
+          "min": 23.65,
+          "max": 23.65,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 4.84,
+          "min": 4.84,
+          "max": 4.84,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "sampleFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 7.5,
+          "min": 7.5,
+          "max": 7.5,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFpsParallel": {
+          "median": 7.5,
+          "min": 7.5,
+          "max": 7.5,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed": {
+          "median": 1,
+          "min": 1,
+          "max": 1,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 7.5,
+          "min": 7.5,
+          "max": 7.5,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed1Core": {
+          "median": 1,
+          "min": 1,
+          "max": 1,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 2428,
+          "min": 2428,
+          "max": 2428,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 1351,
+          "min": 1351,
+          "max": 1351,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allDecompilers": {
+          "median": 10,
+          "min": 10,
+          "max": 10,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
       "functions": 474,
-      "readyColdS": 482.44,
-      "readyWarmS": 4.73,
-      "decompileP50Ms": 3.3,
-      "decompileP95Ms": 27.1,
-      "decompileMeanMs": 7.4,
-      "firstDecompileMs": 11.4,
-      "allFps": 7,
-      "peakMb": 2208
+      "readyColdS": 145.059,
+      "firstDecompileS": 145.289,
+      "readyWarmS": 2.951,
+      "decompileP50Ms": 2.42,
+      "decompileP95Ms": 23.65,
+      "decompileMeanMs": 4.84,
+      "sampleFailed": 0,
+      "allFps": 7.5,
+      "allFpsParallel": 7.5,
+      "allFailed": 1,
+      "allFps1Core": 7.5,
+      "allFailed1Core": 1,
+      "peakMb": 2428,
+      "allPeakMb": 1351,
+      "allDecompilers": 10,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 474,
+          "readyColdS": 145.059,
+          "firstDecompileS": 145.289,
+          "readyWarmS": 2.951,
+          "decompileP50Ms": 2.42,
+          "decompileP95Ms": 23.65,
+          "decompileMeanMs": 4.84,
+          "sampleFailed": 0,
+          "allFps": 7.5,
+          "allFpsParallel": 7.5,
+          "allFailed": 1,
+          "allFps1Core": 7.5,
+          "allFailed1Core": 1,
+          "peakMb": 2428,
+          "allPeakMb": 1351,
+          "allDecompilers": 10
+        }
+      },
+      "failures": []
     },
     {
       "binary": "msvcrt.dll",
-      "mb": 0.67,
+      "mb": 0.68,
       "tool": "borer",
-      "date": "2026-10-18",
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 0.5,
+          "at": "18:51:44",
+          "readyColdS": 0.076,
+          "firstDecompileS": 0.084,
+          "functions": 1891,
+          "decompileP50Ms": 1.83,
+          "decompileP95Ms": 23.07,
+          "decompileMeanMs": 5.21,
+          "peakMb": 65,
+          "readyWarmS": 0.071,
+          "allFps": 4982.5,
+          "indexFunctions": 1998,
+          "allPeakMb": 137,
+          "allFps1Core": 549.8
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 1891,
+          "min": 1891,
+          "max": 1891,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "indexFunctions": {
+          "median": 1998,
+          "min": 1998,
+          "max": 1998,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 0.076,
+          "min": 0.076,
+          "max": 0.076,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 0.084,
+          "min": 0.084,
+          "max": 0.084,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 0.071,
+          "min": 0.071,
+          "max": 0.071,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 1.83,
+          "min": 1.83,
+          "max": 1.83,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 23.07,
+          "min": 23.07,
+          "max": 23.07,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 5.21,
+          "min": 5.21,
+          "max": 5.21,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 4982.5,
+          "min": 4982.5,
+          "max": 4982.5,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 549.8,
+          "min": 549.8,
+          "max": 549.8,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 65,
+          "min": 65,
+          "max": 65,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 137,
+          "min": 137,
+          "max": 137,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
       "functions": 1891,
-      "readyColdS": 0.08,
-      "readyWarmS": 0.08,
-      "decompileP50Ms": 4.6,
-      "decompileP95Ms": 59.8,
-      "decompileMeanMs": 14.5,
-      "firstDecompileMs": 2926.0,
-      "allFps": 3782,
-      "peakMb": 60
+      "indexFunctions": 1998,
+      "readyColdS": 0.076,
+      "firstDecompileS": 0.084,
+      "readyWarmS": 0.071,
+      "decompileP50Ms": 1.83,
+      "decompileP95Ms": 23.07,
+      "decompileMeanMs": 5.21,
+      "allFps": 4982.5,
+      "allFps1Core": 549.8,
+      "peakMb": 65,
+      "allPeakMb": 137,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 1891,
+          "indexFunctions": 1998,
+          "readyColdS": 0.076,
+          "firstDecompileS": 0.084,
+          "readyWarmS": 0.071,
+          "decompileP50Ms": 1.83,
+          "decompileP95Ms": 23.07,
+          "decompileMeanMs": 5.21,
+          "allFps": 4982.5,
+          "allFps1Core": 549.8,
+          "peakMb": 65,
+          "allPeakMb": 137
+        }
+      },
+      "failures": []
     },
     {
       "binary": "msvcrt.dll",
-      "mb": 0.67,
+      "mb": 0.68,
       "tool": "ghidra",
-      "date": "2026-10-18",
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 0.7,
+          "at": "18:51:52",
+          "readyColdS": 23.695,
+          "firstDecompileS": 23.929,
+          "functions": 1920,
+          "decompileP50Ms": 3.44,
+          "decompileP95Ms": 25.22,
+          "decompileMeanMs": 8.27,
+          "sampleFailed": 0,
+          "peakMb": 1404,
+          "readyWarmS": 2.999,
+          "allFpsParallel": 333.2,
+          "allFailed": 0,
+          "allPeakMb": 719,
+          "allDecompilers": 10,
+          "allFps1Core": 145.7,
+          "allFailed1Core": 0,
+          "allFps": 333.2
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 1920,
+          "min": 1920,
+          "max": 1920,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 23.695,
+          "min": 23.695,
+          "max": 23.695,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 23.929,
+          "min": 23.929,
+          "max": 23.929,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 2.999,
+          "min": 2.999,
+          "max": 2.999,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 3.44,
+          "min": 3.44,
+          "max": 3.44,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 25.22,
+          "min": 25.22,
+          "max": 25.22,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 8.27,
+          "min": 8.27,
+          "max": 8.27,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "sampleFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 333.2,
+          "min": 333.2,
+          "max": 333.2,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFpsParallel": {
+          "median": 333.2,
+          "min": 333.2,
+          "max": 333.2,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 145.7,
+          "min": 145.7,
+          "max": 145.7,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed1Core": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 1404,
+          "min": 1404,
+          "max": 1404,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 719,
+          "min": 719,
+          "max": 719,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allDecompilers": {
+          "median": 10,
+          "min": 10,
+          "max": 10,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
       "functions": 1920,
-      "readyColdS": 38.06,
-      "readyWarmS": 3.15,
-      "decompileP50Ms": 4.2,
-      "decompileP95Ms": 31.7,
-      "decompileMeanMs": 12.4,
-      "firstDecompileMs": 11.2,
-      "allFps": 90,
-      "peakMb": 1380
+      "readyColdS": 23.695,
+      "firstDecompileS": 23.929,
+      "readyWarmS": 2.999,
+      "decompileP50Ms": 3.44,
+      "decompileP95Ms": 25.22,
+      "decompileMeanMs": 8.27,
+      "sampleFailed": 0,
+      "allFps": 333.2,
+      "allFpsParallel": 333.2,
+      "allFailed": 0,
+      "allFps1Core": 145.7,
+      "allFailed1Core": 0,
+      "peakMb": 1404,
+      "allPeakMb": 719,
+      "allDecompilers": 10,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 1920,
+          "readyColdS": 23.695,
+          "firstDecompileS": 23.929,
+          "readyWarmS": 2.999,
+          "decompileP50Ms": 3.44,
+          "decompileP95Ms": 25.22,
+          "decompileMeanMs": 8.27,
+          "sampleFailed": 0,
+          "allFps": 333.2,
+          "allFpsParallel": 333.2,
+          "allFailed": 0,
+          "allFps1Core": 145.7,
+          "allFailed1Core": 0,
+          "peakMb": 1404,
+          "allPeakMb": 719,
+          "allDecompilers": 10
+        }
+      },
+      "failures": []
     },
     {
       "binary": "sqlite3.dll",
       "mb": 1.51,
       "tool": "borer",
-      "date": "2026-10-18",
-      "functions": 2562,
-      "readyColdS": 0.15,
-      "readyWarmS": 0.13,
-      "decompileP50Ms": 6.6,
-      "decompileP95Ms": 75.3,
-      "decompileMeanMs": 20.8,
-      "firstDecompileMs": 9.5,
-      "allFps": 949,
-      "peakMb": 73
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 1.3,
+          "at": "18:52:49",
+          "readyColdS": 0.117,
+          "firstDecompileS": 0.124,
+          "functions": 2563,
+          "decompileP50Ms": 3.33,
+          "decompileP95Ms": 40.16,
+          "decompileMeanMs": 10.18,
+          "peakMb": 77,
+          "readyWarmS": 0.108,
+          "allFps": 2146.6,
+          "indexFunctions": 2679,
+          "allPeakMb": 216,
+          "allFps1Core": 261.9
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 2563,
+          "min": 2563,
+          "max": 2563,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "indexFunctions": {
+          "median": 2679,
+          "min": 2679,
+          "max": 2679,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 0.117,
+          "min": 0.117,
+          "max": 0.117,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 0.124,
+          "min": 0.124,
+          "max": 0.124,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 0.108,
+          "min": 0.108,
+          "max": 0.108,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 3.33,
+          "min": 3.33,
+          "max": 3.33,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 40.16,
+          "min": 40.16,
+          "max": 40.16,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 10.18,
+          "min": 10.18,
+          "max": 10.18,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 2146.6,
+          "min": 2146.6,
+          "max": 2146.6,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 261.9,
+          "min": 261.9,
+          "max": 261.9,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 77,
+          "min": 77,
+          "max": 77,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 216,
+          "min": 216,
+          "max": 216,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
+      "functions": 2563,
+      "indexFunctions": 2679,
+      "readyColdS": 0.117,
+      "firstDecompileS": 0.124,
+      "readyWarmS": 0.108,
+      "decompileP50Ms": 3.33,
+      "decompileP95Ms": 40.16,
+      "decompileMeanMs": 10.18,
+      "allFps": 2146.6,
+      "allFps1Core": 261.9,
+      "peakMb": 77,
+      "allPeakMb": 216,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 2563,
+          "indexFunctions": 2679,
+          "readyColdS": 0.117,
+          "firstDecompileS": 0.124,
+          "readyWarmS": 0.108,
+          "decompileP50Ms": 3.33,
+          "decompileP95Ms": 40.16,
+          "decompileMeanMs": 10.18,
+          "allFps": 2146.6,
+          "allFps1Core": 261.9,
+          "peakMb": 77,
+          "allPeakMb": 216
+        }
+      },
+      "failures": []
     },
     {
       "binary": "sqlite3.dll",
       "mb": 1.51,
       "tool": "ghidra",
-      "date": "2026-10-18",
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 0.8,
+          "at": "18:53:05",
+          "readyColdS": 51.544,
+          "firstDecompileS": 51.786,
+          "functions": 2428,
+          "decompileP50Ms": 5.12,
+          "decompileP95Ms": 76.55,
+          "decompileMeanMs": 17.15,
+          "sampleFailed": 0,
+          "peakMb": 1664,
+          "readyWarmS": 2.997,
+          "allFpsParallel": 260.7,
+          "allFailed": 0,
+          "allPeakMb": 1158,
+          "allDecompilers": 10,
+          "allFps1Core": 63.9,
+          "allFailed1Core": 0,
+          "allFps": 260.7
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 2428,
+          "min": 2428,
+          "max": 2428,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 51.544,
+          "min": 51.544,
+          "max": 51.544,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 51.786,
+          "min": 51.786,
+          "max": 51.786,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 2.997,
+          "min": 2.997,
+          "max": 2.997,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 5.12,
+          "min": 5.12,
+          "max": 5.12,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 76.55,
+          "min": 76.55,
+          "max": 76.55,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 17.15,
+          "min": 17.15,
+          "max": 17.15,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "sampleFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 260.7,
+          "min": 260.7,
+          "max": 260.7,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFpsParallel": {
+          "median": 260.7,
+          "min": 260.7,
+          "max": 260.7,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 63.9,
+          "min": 63.9,
+          "max": 63.9,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed1Core": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 1664,
+          "min": 1664,
+          "max": 1664,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 1158,
+          "min": 1158,
+          "max": 1158,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allDecompilers": {
+          "median": 10,
+          "min": 10,
+          "max": 10,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
       "functions": 2428,
-      "readyColdS": 138.21,
-      "readyWarmS": 3.08,
-      "decompileP50Ms": 6.1,
-      "decompileP95Ms": 87.8,
-      "decompileMeanMs": 19.6,
-      "firstDecompileMs": 17.4,
-      "allFps": 51,
-      "peakMb": 1509
+      "readyColdS": 51.544,
+      "firstDecompileS": 51.786,
+      "readyWarmS": 2.997,
+      "decompileP50Ms": 5.12,
+      "decompileP95Ms": 76.55,
+      "decompileMeanMs": 17.15,
+      "sampleFailed": 0,
+      "allFps": 260.7,
+      "allFpsParallel": 260.7,
+      "allFailed": 0,
+      "allFps1Core": 63.9,
+      "allFailed1Core": 0,
+      "peakMb": 1664,
+      "allPeakMb": 1158,
+      "allDecompilers": 10,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 2428,
+          "readyColdS": 51.544,
+          "firstDecompileS": 51.786,
+          "readyWarmS": 2.997,
+          "decompileP50Ms": 5.12,
+          "decompileP95Ms": 76.55,
+          "decompileMeanMs": 17.15,
+          "sampleFailed": 0,
+          "allFps": 260.7,
+          "allFpsParallel": 260.7,
+          "allFailed": 0,
+          "allFps1Core": 63.9,
+          "allFailed1Core": 0,
+          "peakMb": 1664,
+          "allPeakMb": 1158,
+          "allDecompilers": 10
+        }
+      },
+      "failures": []
     },
     {
       "binary": "ntdll.dll",
       "mb": 2.44,
       "tool": "borer",
-      "date": "2026-10-18",
-      "functions": 4420,
-      "readyColdS": 0.17,
-      "readyWarmS": 0.16,
-      "decompileP50Ms": 2.6,
-      "decompileP95Ms": 16.2,
-      "decompileMeanMs": 6.9,
-      "firstDecompileMs": 15.5,
-      "peakMb": 67
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 1.1,
+          "at": "18:54:59",
+          "readyColdS": 0.138,
+          "firstDecompileS": 0.148,
+          "functions": 4441,
+          "decompileP50Ms": 2.3,
+          "decompileP95Ms": 17.69,
+          "decompileMeanMs": 4.5,
+          "peakMb": 79,
+          "readyWarmS": 0.135,
+          "allFps": 4240.5,
+          "indexFunctions": 4690,
+          "allPeakMb": 206,
+          "allFps1Core": 459.7
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 4441,
+          "min": 4441,
+          "max": 4441,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "indexFunctions": {
+          "median": 4690,
+          "min": 4690,
+          "max": 4690,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 0.138,
+          "min": 0.138,
+          "max": 0.138,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 0.148,
+          "min": 0.148,
+          "max": 0.148,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 0.135,
+          "min": 0.135,
+          "max": 0.135,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 2.3,
+          "min": 2.3,
+          "max": 2.3,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 17.69,
+          "min": 17.69,
+          "max": 17.69,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 4.5,
+          "min": 4.5,
+          "max": 4.5,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 4240.5,
+          "min": 4240.5,
+          "max": 4240.5,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 459.7,
+          "min": 459.7,
+          "max": 459.7,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 79,
+          "min": 79,
+          "max": 79,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 206,
+          "min": 206,
+          "max": 206,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
+      "functions": 4441,
+      "indexFunctions": 4690,
+      "readyColdS": 0.138,
+      "firstDecompileS": 0.148,
+      "readyWarmS": 0.135,
+      "decompileP50Ms": 2.3,
+      "decompileP95Ms": 17.69,
+      "decompileMeanMs": 4.5,
+      "allFps": 4240.5,
+      "allFps1Core": 459.7,
+      "peakMb": 79,
+      "allPeakMb": 206,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 4441,
+          "indexFunctions": 4690,
+          "readyColdS": 0.138,
+          "firstDecompileS": 0.148,
+          "readyWarmS": 0.135,
+          "decompileP50Ms": 2.3,
+          "decompileP95Ms": 17.69,
+          "decompileMeanMs": 4.5,
+          "allFps": 4240.5,
+          "allFps1Core": 459.7,
+          "peakMb": 79,
+          "allPeakMb": 206
+        }
+      },
+      "failures": []
     },
     {
       "binary": "ntdll.dll",
       "mb": 2.44,
       "tool": "ghidra",
-      "date": "2026-10-18",
-      "functions": 4543,
-      "readyColdS": 42.35,
-      "readyWarmS": 6.35,
-      "decompileP50Ms": 4.5,
-      "decompileP95Ms": 39.5,
-      "decompileMeanMs": 10.4,
-      "firstDecompileMs": 28.0,
-      "peakMb": 1527
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 1.0,
+          "at": "18:55:15",
+          "readyColdS": 28.283,
+          "firstDecompileS": 28.535,
+          "functions": 4545,
+          "decompileP50Ms": 3.21,
+          "decompileP95Ms": 27.03,
+          "decompileMeanMs": 8.07,
+          "sampleFailed": 0,
+          "peakMb": 1614,
+          "readyWarmS": 2.981,
+          "allFpsParallel": 464.7,
+          "allFailed": 0,
+          "allPeakMb": 1114,
+          "allDecompilers": 10,
+          "allFps1Core": 123.0,
+          "allFailed1Core": 0,
+          "allFps": 464.7
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 4545,
+          "min": 4545,
+          "max": 4545,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 28.283,
+          "min": 28.283,
+          "max": 28.283,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 28.535,
+          "min": 28.535,
+          "max": 28.535,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 2.981,
+          "min": 2.981,
+          "max": 2.981,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 3.21,
+          "min": 3.21,
+          "max": 3.21,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 27.03,
+          "min": 27.03,
+          "max": 27.03,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 8.07,
+          "min": 8.07,
+          "max": 8.07,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "sampleFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 464.7,
+          "min": 464.7,
+          "max": 464.7,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFpsParallel": {
+          "median": 464.7,
+          "min": 464.7,
+          "max": 464.7,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 123.0,
+          "min": 123.0,
+          "max": 123.0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed1Core": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 1614,
+          "min": 1614,
+          "max": 1614,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 1114,
+          "min": 1114,
+          "max": 1114,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allDecompilers": {
+          "median": 10,
+          "min": 10,
+          "max": 10,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
+      "functions": 4545,
+      "readyColdS": 28.283,
+      "firstDecompileS": 28.535,
+      "readyWarmS": 2.981,
+      "decompileP50Ms": 3.21,
+      "decompileP95Ms": 27.03,
+      "decompileMeanMs": 8.07,
+      "sampleFailed": 0,
+      "allFps": 464.7,
+      "allFpsParallel": 464.7,
+      "allFailed": 0,
+      "allFps1Core": 123.0,
+      "allFailed1Core": 0,
+      "peakMb": 1614,
+      "allPeakMb": 1114,
+      "allDecompilers": 10,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 4545,
+          "readyColdS": 28.283,
+          "firstDecompileS": 28.535,
+          "readyWarmS": 2.981,
+          "decompileP50Ms": 3.21,
+          "decompileP95Ms": 27.03,
+          "decompileMeanMs": 8.07,
+          "sampleFailed": 0,
+          "allFps": 464.7,
+          "allFpsParallel": 464.7,
+          "allFailed": 0,
+          "allFps1Core": 123.0,
+          "allFailed1Core": 0,
+          "peakMb": 1614,
+          "allPeakMb": 1114,
+          "allDecompilers": 10
+        }
+      },
+      "failures": []
     },
     {
       "binary": "kernelbase.dll",
       "mb": 4.06,
       "tool": "borer",
-      "date": "2026-10-18",
-      "functions": 5931,
-      "readyColdS": 0.49,
-      "readyWarmS": 0.4,
-      "decompileP50Ms": 15.9,
-      "decompileP95Ms": 76.9,
-      "decompileMeanMs": 22.6,
-      "firstDecompileMs": 66.2,
-      "peakMb": 92
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 1.9,
+          "at": "18:56:44",
+          "readyColdS": 0.177,
+          "firstDecompileS": 0.188,
+          "functions": 6046,
+          "decompileP50Ms": 2.68,
+          "decompileP95Ms": 21.62,
+          "decompileMeanMs": 5.42,
+          "peakMb": 98,
+          "readyWarmS": 0.169,
+          "allFps": 4780.0,
+          "indexFunctions": 6257,
+          "allPeakMb": 264,
+          "allFps1Core": 532.1
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 6046,
+          "min": 6046,
+          "max": 6046,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "indexFunctions": {
+          "median": 6257,
+          "min": 6257,
+          "max": 6257,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 0.177,
+          "min": 0.177,
+          "max": 0.177,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 0.188,
+          "min": 0.188,
+          "max": 0.188,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 0.169,
+          "min": 0.169,
+          "max": 0.169,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 2.68,
+          "min": 2.68,
+          "max": 2.68,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 21.62,
+          "min": 21.62,
+          "max": 21.62,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 5.42,
+          "min": 5.42,
+          "max": 5.42,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 4780.0,
+          "min": 4780.0,
+          "max": 4780.0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 532.1,
+          "min": 532.1,
+          "max": 532.1,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 98,
+          "min": 98,
+          "max": 98,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 264,
+          "min": 264,
+          "max": 264,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
+      "functions": 6046,
+      "indexFunctions": 6257,
+      "readyColdS": 0.177,
+      "firstDecompileS": 0.188,
+      "readyWarmS": 0.169,
+      "decompileP50Ms": 2.68,
+      "decompileP95Ms": 21.62,
+      "decompileMeanMs": 5.42,
+      "allFps": 4780.0,
+      "allFps1Core": 532.1,
+      "peakMb": 98,
+      "allPeakMb": 264,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 6046,
+          "indexFunctions": 6257,
+          "readyColdS": 0.177,
+          "firstDecompileS": 0.188,
+          "readyWarmS": 0.169,
+          "decompileP50Ms": 2.68,
+          "decompileP95Ms": 21.62,
+          "decompileMeanMs": 5.42,
+          "allFps": 4780.0,
+          "allFps1Core": 532.1,
+          "peakMb": 98,
+          "allPeakMb": 264
+        }
+      },
+      "failures": []
     },
     {
       "binary": "kernelbase.dll",
       "mb": 4.06,
       "tool": "ghidra",
-      "date": "2026-10-18",
-      "functions": 6301,
-      "readyColdS": 152.85,
-      "readyWarmS": 4.38,
-      "decompileP50Ms": 4.2,
-      "decompileP95Ms": 50.4,
-      "decompileMeanMs": 13.4,
-      "firstDecompileMs": 33.9,
-      "peakMb": 1873
+      "runs": [
+        {
+          "pass": "2026-10-20T18:46",
+          "run": 1,
+          "loadPct": 2.3,
+          "at": "18:57:02",
+          "readyColdS": 65.502,
+          "firstDecompileS": 65.766,
+          "functions": 6309,
+          "decompileP50Ms": 3.42,
+          "decompileP95Ms": 32.81,
+          "decompileMeanMs": 11.34,
+          "sampleFailed": 0,
+          "peakMb": 2463,
+          "readyWarmS": 2.976,
+          "allFpsParallel": 142.7,
+          "allFailed": 0,
+          "allPeakMb": 2120,
+          "allDecompilers": 10,
+          "allFps1Core": 68.1,
+          "allFailed1Core": 0,
+          "allFps": 142.7
+        }
+      ],
+      "stats": {
+        "functions": {
+          "median": 6309,
+          "min": 6309,
+          "max": 6309,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyColdS": {
+          "median": 65.502,
+          "min": 65.502,
+          "max": 65.502,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "firstDecompileS": {
+          "median": 65.766,
+          "min": 65.766,
+          "max": 65.766,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "readyWarmS": {
+          "median": 2.976,
+          "min": 2.976,
+          "max": 2.976,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP50Ms": {
+          "median": 3.42,
+          "min": 3.42,
+          "max": 3.42,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileP95Ms": {
+          "median": 32.81,
+          "min": 32.81,
+          "max": 32.81,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "decompileMeanMs": {
+          "median": 11.34,
+          "min": 11.34,
+          "max": 11.34,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "sampleFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps": {
+          "median": 142.7,
+          "min": 142.7,
+          "max": 142.7,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFpsParallel": {
+          "median": 142.7,
+          "min": 142.7,
+          "max": 142.7,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFps1Core": {
+          "median": 68.1,
+          "min": 68.1,
+          "max": 68.1,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allFailed1Core": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "peakMb": {
+          "median": 2463,
+          "min": 2463,
+          "max": 2463,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allPeakMb": {
+          "median": 2120,
+          "min": 2120,
+          "max": 2120,
+          "spreadPct": 0.0,
+          "n": 1
+        },
+        "allDecompilers": {
+          "median": 10,
+          "min": 10,
+          "max": 10,
+          "spreadPct": 0.0,
+          "n": 1
+        }
+      },
+      "functions": 6309,
+      "readyColdS": 65.502,
+      "firstDecompileS": 65.766,
+      "readyWarmS": 2.976,
+      "decompileP50Ms": 3.42,
+      "decompileP95Ms": 32.81,
+      "decompileMeanMs": 11.34,
+      "sampleFailed": 0,
+      "allFps": 142.7,
+      "allFpsParallel": 142.7,
+      "allFailed": 0,
+      "allFps1Core": 68.1,
+      "allFailed1Core": 0,
+      "peakMb": 2463,
+      "allPeakMb": 2120,
+      "allDecompilers": 10,
+      "passes": {
+        "2026-10-20T18:46": {
+          "functions": 6309,
+          "readyColdS": 65.502,
+          "firstDecompileS": 65.766,
+          "readyWarmS": 2.976,
+          "decompileP50Ms": 3.42,
+          "decompileP95Ms": 32.81,
+          "decompileMeanMs": 11.34,
+          "sampleFailed": 0,
+          "allFps": 142.7,
+          "allFpsParallel": 142.7,
+          "allFailed": 0,
+          "allFps1Core": 68.1,
+          "allFailed1Core": 0,
+          "peakMb": 2463,
+          "allPeakMb": 2120,
+          "allDecompilers": 10
+        }
+      },
+      "failures": []
     }
-  ]
+  ],
+  "machine": "AMD Ryzen 7 9800X3D 8-Core Processor, 8 cores / 16 threads, 31 GB, Windows 11",
+  "versions": "borer 0.2.0, Ghidra 12.1.4 headless, Java 25.0.3",
+  "borerCommit": "321abd71",
+  "date": "2026-10-20",
+  "installMb": {
+    "borer": 26.8,
+    "ghidra": 1154
+  },
+  "installParts": {
+    "ghidraFiles": 863.9,
+    "jdk": 289.7
+  },
+  "method": "Every metric is measured --runs times (default 5), the runs of all binaries\nand both tools interleaved, and a row keeps every run and its median, min,\nmax and spread. Before each run the script waits for a quiet machine (no\ncompiler process, CPU under --idle-pct), records the load it saw, and redoes\na run a compiler started during. Per binary and per tool:\n\n- ready_cold_s: from starting the tool to its first answer about the\n  binary's code, with nothing of this binary kept by the tool. borer: a\n  fresh MCP server with empty caches (index, symbols, packs off), load_binary\n  and functions. Ghidra: analyzeHeadless into a new project, importing the\n  file and running its default auto-analysis, up to when a post-script\n  starts. The Windows file cache cannot be emptied without admin, so for\n  both the tool's own files and the binary are in it: one untimed start of\n  each tool on another binary comes first, and the binary is read before\n  every run.\n- first_decompile_s: the same start up to the first function's (lowest\n  address) whole decompile, including starting the decompiler.\n- ready_warm_s: the same once the work is kept. borer keeps no analysis, so\n  this is a fresh server again; Ghidra reopens the analyzed project with\n  -noanalysis.\n- decompile_ms p50/p95/mean: one function at a time over an even sample of\n  each tool's own functions, the first one left out, the whole function.\n- all_fps: every function decompiled, in functions per second, analysis\n  excluded. borer: `index` on every core. Ghidra: the faster of its\n  ParallelDecompiler on every core (what its C exporter uses,\n  all_parallel_fps) and one decompiler driven one function at a time, which\n  wins on small binaries. On one core (all_1core_fps): borer `index` pinned\n  to one CPU against Ghidra's one decompiler.\n- peak_mb: the largest resident memory of the tool's process tree over the\n  cold run (analysis and the decompile sample); all_peak_mb over the every\n  core sweep. The tree is polled every 20 ms, and the largest single\n  process's own peak working set is a floor, so neither is overstated.\n\nEach tool's functions are its own: Ghidra's without thunks and externals,\nborer's as `functions` lists them and `index` decompiles them; rates are per\nfunction, and both counts are kept. A run that fails is recorded with its\nerror, never dropped. Results go to vs_ghidra.json: a rerun replaces the\nrows it measures and keeps the others; with --add it adds its runs to the\nrows' runs, so two occasions can be pooled and compared (`pass`).",
+  "ratios": {
+    "readyColdS": {
+      "median": 370.07,
+      "perBinary": [
+        370.07,
+        311.78,
+        2637.44,
+        204.95,
+        440.55
+      ]
+    },
+    "firstDecompileS": {
+      "median": 349.82,
+      "perBinary": [
+        349.82,
+        284.87,
+        2381.79,
+        192.8,
+        417.63
+      ]
+    },
+    "readyWarmS": {
+      "median": 27.75,
+      "perBinary": [
+        17.61,
+        42.24,
+        59.02,
+        22.08,
+        27.75
+      ]
+    },
+    "decompileP50Ms": {
+      "median": 1.4,
+      "perBinary": [
+        1.28,
+        1.88,
+        1.25,
+        1.4,
+        1.54
+      ]
+    },
+    "allFps": {
+      "median": 14.95,
+      "perBinary": [
+        33.5,
+        14.95,
+        88.39,
+        9.13,
+        8.23
+      ]
+    },
+    "allFps1Core": {
+      "median": 4.1,
+      "perBinary": [
+        7.81,
+        3.77,
+        48.6,
+        3.74,
+        4.1
+      ]
+    },
+    "peakMb": {
+      "median": 21.61,
+      "perBinary": [
+        25.13,
+        21.6,
+        48.56,
+        20.43,
+        21.61
+      ]
+    },
+    "allPeakMb": {
+      "median": 5.41,
+      "perBinary": [
+        8.03,
+        5.25,
+        13.51,
+        5.41,
+        5.36
+      ]
+    }
+  }
 }
