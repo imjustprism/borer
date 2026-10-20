@@ -811,7 +811,9 @@ pub(super) fn base_below_of(
 /// # Returns
 ///
 /// The registers the target, or a callee it passes them on to, reads
-/// before writing them; none when the target is unknown or reads none.
+/// before writing them; none when the target is unknown or reads none. A
+/// Linux `syscall` reads the arguments its number's call takes
+/// ([`calls::kernel_reads`]).
 pub(in crate::analysis::decompile) fn forwarded_reads(
     ctx: &Ctx<'_>,
     info: &mut InstructionInfoFactory,
@@ -819,6 +821,9 @@ pub(in crate::analysis::decompile) fn forwarded_reads(
 ) -> Vec<Register> {
     /// Most wrappers followed to the function that reads the arguments.
     const FORWARD_MAX: usize = 4;
+    if instr.mnemonic() == Mnemonic::Syscall {
+        return calls::kernel_reads(ctx, instr);
+    }
     let Some(t) = static_target(instr).filter(|&t| t != 0) else {
         return Vec::new();
     };

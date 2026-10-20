@@ -1482,6 +1482,9 @@ impl Exec<'_, '_> {
                 emit_line!(self, "__halt();".to_owned());
                 self.record(EffectKind::Unmodeled);
             }
+            Mnemonic::Int if instr.op_count() == 1 && instr.immediate(0) == 0x80 => {
+                self.kernel_call(calls::KernelGate::Int80);
+            }
             Mnemonic::Int if instr.op_count() == 1 => {
                 let n = instr.immediate(0);
                 emit_line!(self, format!("__interrupt({n});"));
@@ -1511,17 +1514,6 @@ impl Exec<'_, '_> {
                 );
                 self.reg_write(Register::EDX, Expr::Helper(Helper::XgetbvHi, vec![ecx]));
                 self.flags = Flags::Unknown;
-            }
-            Mnemonic::Syscall => {
-                let (mut args, _, values) = self.args_for(None);
-                let written = self.before_call(Some(0), false, 0, &values, &[]);
-                if Self::reads_any(&values, &written) {
-                    args = self.args();
-                }
-                self.enter_call(false, &[]);
-                emit_line!(self, format!("syscall({});", args.join(", ")));
-                self.record(EffectKind::Unmodeled);
-                self.after_call(false);
             }
             Mnemonic::Ptest | Mnemonic::Vptest
                 if instr.op_count() == 2
