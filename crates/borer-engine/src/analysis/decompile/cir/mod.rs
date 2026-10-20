@@ -35,11 +35,36 @@
 
 mod build;
 mod check;
+mod gotos;
 mod print;
 mod wrap;
 
 pub(super) use build::build;
 pub(super) use check::{Holds, Violation, check};
+/// Reads the structurer's text into the tree, wraps its guarded regions,
+/// folds its jumps when asked, and prints it.
+///
+/// # Arguments
+///
+/// * `text` - The structurer's text.
+/// * `regions` - The guarded regions to wrap.
+/// * `ends` - The blocks that end in a call that never returns
+///   ([`gotos::fold_jumps`]), or `None` to leave the jumps as written.
+///
+/// # Returns
+///
+/// The text the tree prints.
+pub(super) fn fold(
+    text: &str,
+    regions: &[Region],
+    ends: Option<&std::collections::BTreeSet<u64>>,
+) -> String {
+    let (mut tree, _) = wrap(build(text), regions);
+    if let Some(ends) = ends {
+        gotos::fold_jumps(&mut tree, ends);
+    }
+    print(&tree)
+}
 pub(super) use print::{print, print_decls, print_items};
 pub(super) use wrap::{Region, RegionHandler, wrap};
 

@@ -13,6 +13,8 @@
 /// One text pass of the decompile pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Pass {
+    /// Folds the structurer's jumps on the tree ([`super::cir::fold`]).
+    FoldJumps,
     /// Drops the values a function returning nothing returns.
     DropReturnedValues,
     /// Chains duplicate spills.
@@ -21,24 +23,14 @@ pub enum Pass {
     FoldTempCopies,
     /// Merges an assignment into the `return` that reads it.
     MergeReturnAssignments,
-    /// Drops a `goto` whose label follows it.
-    DropFallthroughGotos,
     /// Drops labels no `goto` names, and blank lines.
     UnnamedLabels,
     /// Flattens `else { if ... }` into `else if`.
     FlattenElseIf,
-    /// Writes an `if` around one `goto` on one line.
-    CollapseLoneGotos,
     /// Moves a statement both arms end with after the `if`.
     HoistCommonTails,
-    /// Sends a jump to a jump to that jump's label.
-    ThreadJumps,
     /// Orders a pair of jumps as the test before their label.
     FlipJumpPairs,
-    /// Writes a jump out of a loop as `break`.
-    LoopExits,
-    /// Writes a conditional `goto` over a label-free run as an `if`.
-    FoldConditionalGotos,
     /// Turns a long `if` that never falls out into an early exit.
     FlattenEarlyExits,
     /// Absorbs an `else` arm after an arm that never falls out.
@@ -143,20 +135,16 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 58] = [
+        Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
         Self::FoldTempCopies,
         Self::MergeReturnAssignments,
-        Self::DropFallthroughGotos,
         Self::UnnamedLabels,
         Self::FlattenElseIf,
-        Self::CollapseLoneGotos,
         Self::HoistCommonTails,
-        Self::ThreadJumps,
         Self::FlipJumpPairs,
-        Self::LoopExits,
-        Self::FoldConditionalGotos,
         Self::FlattenEarlyExits,
         Self::AbsorbElse,
         Self::FoldUnorderedCompares,
@@ -212,19 +200,15 @@ impl Pass {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::FoldJumps => "cir::fold_jumps",
             Self::DropReturnedValues => "drop_returned_values",
             Self::MergeChains => "merge_chains",
             Self::FoldTempCopies => "fold_temp_copies",
             Self::MergeReturnAssignments => "merge_return_assignments",
-            Self::DropFallthroughGotos => "drop_fallthrough_gotos",
             Self::UnnamedLabels => "unnamed labels",
             Self::FlattenElseIf => "flatten_else_if",
-            Self::CollapseLoneGotos => "collapse_lone_gotos",
             Self::HoistCommonTails => "hoist_common_tails",
-            Self::ThreadJumps => "thread_jumps",
             Self::FlipJumpPairs => "flip_jump_pairs",
-            Self::LoopExits => "loop_exits",
-            Self::FoldConditionalGotos => "fold_conditional_gotos",
             Self::FlattenEarlyExits => "flatten_early_exits",
             Self::AbsorbElse => "absorb_else",
             Self::FoldUnorderedCompares => "fold_unordered_compares",

@@ -153,6 +153,35 @@ impl<L: Lifter> Emit<'_, L> {
         Some(self.twins.get(&i).copied().unwrap_or(i))
     }
 
+    /// Returns the start addresses of the blocks that end in a call the
+    /// binary never returns from, for folding the text's jumps.
+    ///
+    /// Such a block has no successor left, and its call ends its path
+    /// ([`crate::analysis::functions::call_ends_path`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - Per-function state: the program and its functions.
+    /// * `cleanup` - Whether the body is cleaned at all.
+    /// * `skip` - The passes left out.
+    ///
+    /// # Returns
+    ///
+    /// The addresses, or `None` when the jumps stay as written: the body is
+    /// not cleaned, or [`Pass::FoldJumps`] is left out.
+    pub(super) fn ends(&self, ctx: &Ctx<'_>, cleanup: bool, skip: Passes) -> Option<BTreeSet<u64>> {
+        let ends = self
+            .blocks
+            .iter()
+            .zip(&self.succs)
+            .filter(|(b, succs)| {
+                succs.is_empty()
+                    && crate::analysis::functions::call_ends_path(ctx.program, ctx.analysis, b)
+            })
+            .map(|(b, _)| b.start);
+        (cleanup && skip.runs(Pass::FoldJumps)).then(|| ends.collect())
+    }
+
     /// Tells whether no path of the text can reach block `b` any more.
     ///
     /// Every predecessor is written, so none still to come can jump to it,

@@ -564,98 +564,6 @@ pub(super) fn flatten_else_if(lines: &mut Vec<String>) -> bool {
     changed
 }
 
-/// Sends every jump to a label whose code is only another jump straight
-/// to that jump's label.
-///
-/// `goto L;` where `L:` is followed by `goto M;`, across nothing but other
-/// labels and the closing braces of `if`/`else` blocks, is `goto M;`. A
-/// chain resolves to its last label; a cycle is left as it is. The label
-/// line stays, so a path falling into it still takes the jump; once no
-/// jump names it the label pass drops it.
-///
-/// # Arguments
-///
-/// * `lines` - The body lines, rewritten in place.
-///
-/// # Returns
-///
-/// Whether any jump was redirected.
-pub(super) fn thread_jumps(lines: &mut [String]) -> bool {
-    if !lines.iter().any(|l| l.contains("goto ")) {
-        return false;
-    }
-    let mut next: BTreeMap<String, String> = BTreeMap::new();
-    for (k, l) in lines.iter().enumerate() {
-        let Some(name) = label_name(l) else {
-            continue;
-        };
-        let mut j = k + 1;
-        let target = loop {
-            let Some(m) = lines.get(j) else {
-                break None;
-            };
-            let t = m.trim();
-            if label_name(m).is_some() {
-                j += 1;
-                continue;
-            }
-            if t == "}" {
-                let ind = indent_of(m);
-                let opener = lines[..j]
-                    .iter()
-                    .rev()
-                    .find(|o| indent_of(o) == ind && o.trim().ends_with('{'))
-                    .map(|o| o.trim());
-                if opener.is_some_and(|o| o.starts_with("if (") || o.starts_with("} else")) {
-                    j += 1;
-                    continue;
-                }
-                break None;
-            }
-            break t
-                .strip_prefix("goto ")
-                .and_then(|g| g.strip_suffix(';'))
-                .filter(|g| g.starts_with("L_"));
-        };
-        if let Some(target) = target
-            && target != name
-        {
-            next.insert(name.to_owned(), target.to_owned());
-        }
-    }
-    if next.is_empty() {
-        return false;
-    }
-    let resolve = |start: &str| -> Option<String> {
-        let mut at = next.get(start)?;
-        for _ in 0..next.len() {
-            match next.get(at.as_str()) {
-                Some(m) if m == start => return None,
-                Some(m) => at = m,
-                None => return Some(at.clone()),
-            }
-        }
-        None
-    };
-    let mut changed = false;
-    for l in lines.iter_mut() {
-        let Some(target) = goto_target(l).map(str::to_owned) else {
-            continue;
-        };
-        let Some(last) = resolve(&target) else {
-            continue;
-        };
-        let Some(cut) = l.strip_suffix(&format!("{target};")).map(str::len) else {
-            continue;
-        };
-        l.truncate(cut);
-        l.push_str(&last);
-        l.push(';');
-        changed = true;
-    }
-    changed
-}
-
 /// Where each line's block opens and where each line's block closes,
 /// found in one walk.
 ///
@@ -2016,7 +1924,7 @@ pub(super) fn fold_conditional_gotos(lines: &mut Vec<String>, labels: RunLabels)
 
 #[cfg(test)]
 mod jump_tests {
-    use super::{Nest, flip_jump_pairs, loop_exits, thread_jumps};
+    use super::{Nest, flip_jump_pairs, loop_exits};
 
     /// Each line's block opener skips labels, and each opener's closer is
     /// the first line back at its depth, a label included.
@@ -2110,42 +2018,6 @@ mod jump_tests {
     /// * `text` - The lines.
     fn body(text: &[&str]) -> Vec<String> {
         text.iter().map(|l| (*l).to_owned()).collect()
-    }
-
-    /// A jump to a label whose code is one more jump goes to that jump's
-    /// label, through a chain, and a closing brace between does not stop it.
-    #[test]
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "assertions are the point of a test"
-    )]
-    fn a_jump_to_a_jump_goes_to_its_label() {
-        let mut lines = body(&[
-            "if (a1 == 0) goto L_1;",
-            "sub_1(a1);",
-            "if (a2 != 0) {",
-            "  L_1:",
-            "}",
-            "goto L_2;",
-            "L_2:",
-            "goto L_3;",
-            "L_3:",
-            "return 0;",
-        ]);
-        assert!(thread_jumps(&mut lines));
-        assert_eq!(lines[0], "if (a1 == 0) goto L_3;");
-        assert_eq!(lines[5], "goto L_3;");
-    }
-
-    /// A jump that is its own target is left alone.
-    #[test]
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "assertions are the point of a test"
-    )]
-    fn a_cycle_of_jumps_is_left_alone() {
-        let mut lines = body(&["L_1:", "goto L_2;", "L_2:", "goto L_1;"]);
-        assert!(!thread_jumps(&mut lines));
     }
 
     /// A jump pair swaps to the order of the test before its label, and

@@ -650,7 +650,7 @@ fn lex(text: &str) -> Option<Vec<(Tok<'_>, usize)>> {
 ///
 /// The tree, or [`ExprKind::Raw`] holding the text when it does not read
 /// as C or its reading prints otherwise.
-fn expression(text: &str, prov: Prov) -> Expr {
+pub(super) fn expression(text: &str, prov: Prov) -> Expr {
     let read = lex(text).and_then(|toks| {
         let mut p = Parser {
             src: text,

@@ -1878,8 +1878,8 @@ fn decompile_in<L: Lifter>(
             follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
         }
     }
-    let body = cir::print(&cir::wrap(cir::build(&body), &plan.regions).0);
     let skip = overlay.passes;
+    let body = cir::fold(&body, &plan.regions, st.ends(&ctx, cleanup, skip).as_ref());
     let body = if skip.runs(Pass::DropReturnedValues)
         && f.returns_value == Some(false)
         && f.signature.is_none()

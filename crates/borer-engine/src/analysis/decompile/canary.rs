@@ -104,7 +104,7 @@ fn fails(t: &str) -> bool {
 /// # Arguments
 ///
 /// * `t` - The line without indentation.
-fn fail_callee(t: &str) -> Option<&str> {
+pub(super) fn fail_callee(t: &str) -> Option<&str> {
     let call = t.split_once(" = ").map_or(t, |(_, c)| c);
     let (name, _) = call.strip_suffix(");")?.split_once('(')?;
     name.starts_with("__stack_chk_fail").then_some(name)

@@ -250,7 +250,7 @@ fn own(s: &Stmt, sets: &[Vec<u64>], blocks: &BTreeSet<u64>) -> bool {
 /// # Returns
 ///
 /// How many statements it holds for.
-fn count(list: &[Stmt], pred: &dyn Fn(&Stmt) -> bool) -> usize {
+pub(super) fn count(list: &[Stmt], pred: &dyn Fn(&Stmt) -> bool) -> usize {
     let mut n = 0;
     for s in list {
         each(s, &mut |x| n += usize::from(pred(x)));
@@ -264,7 +264,7 @@ fn count(list: &[Stmt], pred: &dyn Fn(&Stmt) -> bool) -> usize {
 ///
 /// * `s` - The statement.
 /// * `f` - The visitor.
-fn each(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+pub(super) fn each(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
     f(s);
     match &s.kind {
         StmtKind::If { then, other, .. } => {
@@ -317,7 +317,7 @@ fn each(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
 /// # Returns
 ///
 /// The lists, in the order the statement prints them.
-fn lists(s: &mut Stmt) -> Vec<&mut Vec<Stmt>> {
+pub(super) fn lists(s: &mut Stmt) -> Vec<&mut Vec<Stmt>> {
     match &mut s.kind {
         StmtKind::If { then, other, .. } => {
             let mut out = vec![then];
@@ -364,7 +364,7 @@ fn lists(s: &mut Stmt) -> Vec<&mut Vec<Stmt>> {
 ///
 /// * `s` - The statement.
 /// * `out` - Receives one count per jump.
-fn jumps(s: &Stmt, out: &mut BTreeMap<Label, usize>) {
+pub(super) fn jumps(s: &Stmt, out: &mut BTreeMap<Label, usize>) {
     match &s.kind {
         StmtKind::Goto(l) => *out.entry(*l).or_default() += 1,
         StmtKind::Raw(text) => {

@@ -4554,7 +4554,8 @@ fn values_read_twice_are_written_once() {
 /// The trailing jump of an `if` arm becomes the `else` around what it skips.
 ///
 /// The arm ends `goto L_1;` and `L_1:` follows the run at the `if`'s own
-/// indentation, so the run is what runs when the condition is false.
+/// indentation, so the run is what runs when the condition is false. A run
+/// a later jump goes back into is that jump's loop, kept whole.
 #[test]
 fn trailing_jumps_of_an_arm_become_an_else() {
     let text = "if (a1 == 1) {\n  rax = sub_1000(a1);\n  goto L_1;\n}\nrax = 20;\nsub_1010(rax);\nL_1:\nreturn rax;\n";
@@ -4567,8 +4568,8 @@ fn trailing_jumps_of_an_arm_become_an_else() {
     let entered = "if (a1 == 1) {\n  goto L_1;\n}\nL_2:\nrax = 20;\nif (rax != 0) goto L_2;\nL_1:\nreturn rax;\n";
     let out = cleanup(entered);
     assert!(
-        out.contains("L_2:"),
-        "a run entered from outside was absorbed:\n{out}"
+        out.contains("if (a1 != 1) {\n  do {\n    rax = 20;\n  } while (rax != 0);\n}"),
+        "a run entered from outside was not kept whole as its loop:\n{out}"
     );
 }
 
@@ -5240,10 +5241,12 @@ fn a_break_leaves_the_loop_it_stands_in() {
 /// middle of the other. The block it lands on ends by continuing its own
 /// loop; moved to the jump it continued the loop there instead, and the
 /// rest of its loop was left reachable by nothing. Each block hands its own
-/// number to 0x54cd, so a missing one is plain. The edge back to the outer
-/// header stays `goto L_548f`. Any leftover goto is not enough.
+/// number to 0x54cd, so a missing one is plain, and the text's paths must
+/// be the binary's, so the jump back to the outer header read as the inner
+/// loop's `break` or `continue` is plain too.
 #[test]
 fn a_block_that_continues_its_loop_stays_in_it() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
     let out = dc(0x5450);
     for n in 1..=8 {
         assert!(
@@ -5251,10 +5254,9 @@ fn a_block_that_continues_its_loop_stays_in_it() {
             "block {n} is missing: {out}"
         );
     }
-    assert!(
-        out.contains("goto L_548f;"),
-        "the jump back to 0x548f reads as break or continue: {out}"
-    );
+    let (p, o) = (fixture(), Overlay::default());
+    let agrees = check_structure(&p, &Analysis::compute(&p), &o, 0x5450, &out);
+    assert_eq!(agrees, Structure::Agrees, "{out}");
 }
 
 /// A float moved into a vector register leaves the rest of it alone.

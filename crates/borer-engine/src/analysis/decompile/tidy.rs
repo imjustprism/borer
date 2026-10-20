@@ -560,12 +560,13 @@ pub(super) fn flatten_early_exits(lines: &mut Vec<String>) -> bool {
     false
 }
 
-/// Runs the text-level cleanup over a body on its own.
+/// Runs the cleanup over a body on its own.
 ///
-/// The same passes [`decompile`] applies after emission (goto and label
+/// The same steps [`decompile`] applies after emission (the jumps folded
+/// on the tree, [`super::cir::fold`], then the text passes: label
 /// cancellation, folds, early exits, copied tails, dead text), exposed so
 /// a rendering can be normalized or a cleanup rule pinned without a
-/// binary.
+/// binary. No call is known to end its path here.
 ///
 /// # Arguments
 ///
@@ -575,23 +576,19 @@ pub(super) fn flatten_early_exits(lines: &mut Vec<String>) -> bool {
 ///
 /// The cleaned text.
 pub fn cleanup(body: &str) -> String {
-    cleanup_text(body, None)
+    cleanup_text(&cir::fold(body, &[], Some(&BTreeSet::new())), None)
 }
 
 /// The passes behind [`cleanup`], run to a fixpoint or to the pass budget
 /// ([`CLEANUP_PASSES`]).
 ///
-/// Duplicate spills are chained; a `goto` (bare or `if (...) goto`) whose
-/// label follows it across nothing but the closing braces of `if`/`else`
-/// blocks is dropped ([`falls_to_label`]); an `if` around one `goto` is
-/// one line ([`collapse_lone_gotos`]); a statement both arms of an
-/// `if`/`else` end with moves after it ([`hoist_common_tails`]); a jump
-/// to a jump goes to that jump's label ([`thread_jumps`]); a pair of
+/// The tree has folded the structurer's own jumps already
+/// ([`super::cir::fold`]); these passes fold the ones the text
+/// passes expose. Duplicate spills are chained; a statement both arms of an
+/// `if`/`else` end with moves after it ([`hoist_common_tails`]); a pair of
 /// jumps takes the order of the test before its label
-/// ([`flip_jump_pairs`]); a jump out of a loop is `break` ([`loop_exits`]);
-/// a conditional
-/// `goto` whose label
-/// ends a label-free run becomes an `if` around that run
+/// ([`flip_jump_pairs`]); a conditional `goto` whose label ends a run whose
+/// own labels only it enters becomes an `if` around that run
 /// ([`fold_conditional_gotos`]); a long `if` body that never falls out,
 /// followed by a terminal line, becomes an early exit with the body one
 /// level flatter ([`flatten_early_exits`]); a short returning tail is
@@ -793,7 +790,6 @@ pub(super) fn cleanup_passes(
             lines,
             merge_return_assignments,
         );
-        changed |= round.run(Pass::DropFallthroughGotos, lines, drop_fallthrough_gotos);
         changed |= round.run(Pass::UnnamedLabels, lines, |lines| {
             let mut referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
             referenced.extend(handler_labels(lines));
@@ -805,14 +801,8 @@ pub(super) fn cleanup_passes(
             lines.len() != before
         });
         changed |= round.run(Pass::FlattenElseIf, lines, flatten_else_if);
-        changed |= round.run(Pass::CollapseLoneGotos, lines, collapse_lone_gotos);
         changed |= round.run(Pass::HoistCommonTails, lines, hoist_common_tails);
-        changed |= round.run(Pass::ThreadJumps, lines, |l| thread_jumps(l));
         changed |= round.run(Pass::FlipJumpPairs, lines, |l| flip_jump_pairs(l));
-        changed |= round.run(Pass::LoopExits, lines, loop_exits);
-        changed |= round.run(Pass::FoldConditionalGotos, lines, |lines| {
-            fold_conditional_gotos(lines, RunLabels::Forbidden)
-        });
         changed |= round.run(Pass::FlattenEarlyExits, lines, flatten_early_exits);
         changed |= round.run(Pass::AbsorbElse, lines, absorb_else);
         changed |= round.run(Pass::FoldUnorderedCompares, lines, |l| {
@@ -864,7 +854,7 @@ pub(super) fn cleanup_passes(
 /// # Returns
 ///
 /// The labels, as `L_<addr>`.
-fn handler_labels(lines: &[String]) -> BTreeSet<String> {
+pub(super) fn handler_labels(lines: &[String]) -> BTreeSet<String> {
     lines
         .iter()
         .filter_map(|l| l.trim_start().strip_prefix("// "))
@@ -996,7 +986,7 @@ mod fuel_tests {
     )]
     fn an_idle_pass_waits_for_a_change() {
         let mut round = Round {
-            skip: Passes::NONE.without(Pass::LoopExits),
+            skip: Passes::NONE.without(Pass::AbsorbElse),
             idle: Passes::NONE,
             churn: Vec::new(),
         };
@@ -1015,7 +1005,7 @@ mod fuel_tests {
         assert!(round.run(Pass::FoldTempCopies, &mut lines, count(true)));
         assert!(!round.run(Pass::MergeChains, &mut lines, count(false)));
         assert_eq!(runs.get(), 3);
-        assert!(!round.run(Pass::LoopExits, &mut lines, count(true)));
+        assert!(!round.run(Pass::AbsorbElse, &mut lines, count(true)));
         assert_eq!(runs.get(), 3);
         assert_eq!(round.churn, ["fold_temp_copies"]);
     }
