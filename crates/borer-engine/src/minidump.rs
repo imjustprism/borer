@@ -270,13 +270,28 @@ impl<'a> Streams<'a> {
             .flatten()
     }
 
-    /// The protection the `MemoryInfoListStream` states for the address,
-    /// as `(executable, writable)`.
+    /// The protections the `MemoryInfoListStream` states, read once and
+    /// sorted by base so each range finds its own by a binary search
+    /// ([`protection_at`]) rather than a scan of every entry.
     ///
-    /// # Arguments
+    /// # Returns
     ///
-    /// * `addr` - The address a memory range starts at.
-    fn protects(&self, addr: u64) -> Option<(bool, bool)> {
+    /// Each entry as `(base, end, executable, writable)`, by base and then
+    /// list order; empty when the stream is missing or does not read.
+    fn protections(&self) -> Vec<(u64, u64, bool, bool)> {
+        let mut out = self.protection_list().unwrap_or_default();
+        out.sort_by_key(|&(base, ..)| base);
+        out
+    }
+
+    /// Reads the `MemoryInfoListStream`'s entries in list order, stopping
+    /// at the first that does not sit in the file.
+    ///
+    /// # Returns
+    ///
+    /// The entries as [`Streams::protections`] states them, or `None` when
+    /// the stream's header does not read.
+    fn protection_list(&self) -> Option<Vec<(u64, u64, bool, bool)>> {
         let (_, at) = self.first(MEMORY_INFO)?;
         let bytes = self.bytes;
         let at = usize::try_from(at).ok()?;
@@ -291,6 +306,7 @@ impl<'a> Streams<'a> {
         }
         let count = usize::try_from(count).ok()?.min(0x1_0000);
         let header = usize::try_from(header).ok()?;
+        let mut out = Vec::with_capacity(count);
         for k in 0..count {
             let Some(e) = at
                 .checked_add(header)
@@ -298,20 +314,103 @@ impl<'a> Streams<'a> {
             else {
                 break;
             };
-            let (base, size, protect) = (
-                u64_le(bytes, e)?,
-                u64_le(bytes, e + 24)?,
-                u32_le(bytes, e + 36)?,
-            );
-            if base <= addr && addr < base.saturating_add(size) {
-                // ASM: the execute protections run 0x10..0x80 with no low
-                // bits; the writable ones are 0x04, 0x08, 0x40 and 0x80.
-                let exec = protect & 0xf0 != 0 && protect & 0x0f == 0;
-                let write = protect & (0x04 | 0x08 | 0x40 | 0x80) != 0;
-                return Some((exec, write));
-            }
+            let (Some(base), Some(size), Some(protect)) = (
+                u64_le(bytes, e),
+                u64_le(bytes, e + 24),
+                u32_le(bytes, e + 36),
+            ) else {
+                break;
+            };
+            // ASM: the execute protections run 0x10..0x80 with no low
+            // bits; the writable ones are 0x04, 0x08, 0x40 and 0x80.
+            let exec = protect & 0xf0 != 0 && protect & 0x0f == 0;
+            let write = protect & (0x04 | 0x08 | 0x40 | 0x80) != 0;
+            out.push((base, base.saturating_add(size), exec, write));
         }
-        None
+        Some(out)
+    }
+}
+
+/// The protection stated for an address, as `(executable, writable)`.
+///
+/// # Arguments
+///
+/// * `table` - [`Streams::protections`]: sorted by base.
+/// * `addr` - The address a memory range starts at.
+///
+/// # Returns
+///
+/// The protection of the entry with the highest base at or below `addr`
+/// (the first listed, of several there) when it holds `addr`, or `None`.
+fn protection_at(table: &[(u64, u64, bool, bool)], addr: u64) -> Option<(bool, bool)> {
+    let below = table.partition_point(|&(base, ..)| base <= addr);
+    let last = table.get(below.checked_sub(1)?)?.0;
+    let first = table.partition_point(|&(base, ..)| base < last);
+    table
+        .get(first)
+        .filter(|&&(_, end, ..)| addr < end)
+        .map(|&(_, _, exec, write)| (exec, write))
+}
+
+/// The furthest end the spans added so far reach from each start, a
+/// prefix-maximum tree over every start a span may have, so asking whether
+/// the spans hold one whole costs a logarithm, not a scan.
+struct Reach {
+    /// Every start a span may have, sorted and distinct.
+    starts: Vec<u64>,
+    /// The tree: entry `k` holds the furthest end of the spans whose
+    /// start's place falls in the block `k` covers.
+    far: Vec<u64>,
+}
+
+impl Reach {
+    /// Starts with no span added.
+    ///
+    /// # Arguments
+    ///
+    /// * `starts` - Every start a span added or asked about may have.
+    fn new(mut starts: Vec<u64>) -> Self {
+        starts.sort_unstable();
+        starts.dedup();
+        let far = vec![0; starts.len()];
+        Reach { starts, far }
+    }
+
+    /// Adds a span.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Its start, one [`Reach::new`] was given.
+    /// * `end` - One past its last address.
+    fn add(&mut self, start: u64, end: u64) {
+        let Ok(mut k) = self.starts.binary_search(&start) else {
+            return;
+        };
+        while let Some(slot) = self.far.get_mut(k) {
+            *slot = (*slot).max(end);
+            k |= k + 1;
+        }
+    }
+
+    /// Whether an added span holds `(start, end)` whole.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The span's start.
+    /// * `end` - One past its last address.
+    ///
+    /// # Returns
+    ///
+    /// `true` when an added span starts at or below `start` and ends at or
+    /// past `end`.
+    fn holds(&self, start: u64, end: u64) -> bool {
+        let mut upto = self.starts.partition_point(|&s| s <= start);
+        let mut far = 0;
+        while upto > 0 {
+            far = far.max(self.far.get(upto - 1).copied().unwrap_or(0));
+            upto &= upto - 1;
+        }
+        far >= end
     }
 }
 
@@ -370,16 +469,20 @@ pub(crate) fn program(path: std::path::PathBuf, bytes: Vec<u8>) -> Option<Progra
     let arch = streams.arch();
     let mut ranges = streams.memory();
     ranges.extend(streams.memory64());
-    for stack in streams.stacks() {
-        let covered = ranges.iter().any(|r| {
-            r.start <= stack.start
-                && r.start.saturating_add(r.size) >= stack.start.saturating_add(stack.size)
-        });
-        if !covered {
+    let stacks = streams.stacks();
+    let mut reach = Reach::new(ranges.iter().chain(&stacks).map(|r| r.start).collect());
+    for r in &ranges {
+        reach.add(r.start, r.start.saturating_add(r.size));
+    }
+    for stack in stacks {
+        let end = stack.start.saturating_add(stack.size);
+        if !reach.holds(stack.start, end) {
+            reach.add(stack.start, end);
             ranges.push(stack);
         }
     }
     ranges.sort_unstable_by_key(|r| r.start);
+    let protections = streams.protections();
     let file_len = crate::num::from_usize(bytes.len());
     let mut sections: Vec<Section> = Vec::new();
     for (k, r) in ranges.iter().enumerate() {
@@ -387,7 +490,7 @@ pub(crate) fn program(path: std::path::PathBuf, bytes: Vec<u8>) -> Option<Progra
             continue;
         }
         let held = r.size.min(file_len - r.at);
-        let (exec, write) = streams.protects(r.start).unwrap_or((true, true));
+        let (exec, write) = protection_at(&protections, r.start).unwrap_or((true, true));
         sections.push(Section {
             name: format!("mem{k}"),
             va: crate::program::Va(r.start),

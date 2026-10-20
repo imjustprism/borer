@@ -252,6 +252,58 @@ fn a_minidump_loads_as_its_memory() {
     assert!(p.headers.kind.is_some_and(|k| k.contains("minidump")));
 }
 
+/// A dump stating the most ranges, stacks and protections it may maps
+/// each range with its own protection, leaves out every stack a range or
+/// an earlier stack holds, and maps each other stack once.
+#[test]
+fn a_dump_of_many_ranges_maps_each_once_with_its_protection() {
+    const N: u64 = 0x1_0000;
+    let mut d = dump();
+    let base = u64::try_from(d.len()).expect("fits");
+    d.extend(std::iter::repeat_n(
+        0xc3u8,
+        usize::try_from(N).expect("fits"),
+    ));
+    let ranges: Vec<(u64, u64)> = (0..N).map(|k| (0x1000_0000 + k * 0x1000, 1)).collect();
+    add_stream(&mut d, 9, &memory64(base, &ranges));
+    let stacks: Vec<(u64, u32, u32)> = (0..N)
+        .map(|k| {
+            if k % 2 == 0 {
+                (0x1000_0000 + k / 2 * 0x1000, 1, 0x380)
+            } else {
+                (0x9000_0000 + k % 16 * 0x1000, 0x10, 0x380)
+            }
+        })
+        .collect();
+    add_stream(&mut d, 3, &threads(&stacks));
+    let info: Vec<(u64, u64, u32)> = (0..N)
+        .map(|k| {
+            (
+                0x1000_0000 + k * 0x1000,
+                0x1000,
+                if k == 7 { 0x20 } else { 0x04 },
+            )
+        })
+        .collect();
+    add_stream(&mut d, 16, &memory_info(48, &info));
+    let p = Program::from_bytes("many.dmp".into(), d).expect("loads");
+    let at = |va: u64| {
+        p.sections
+            .iter()
+            .find(|s| s.va.0 == va)
+            .unwrap_or_else(|| panic!("no section at {va:#x}"))
+    };
+    let held = usize::try_from(N).expect("fits");
+    assert_eq!(
+        p.sections.len(),
+        1 + held + 8,
+        "each stack a range holds is left out"
+    );
+    assert!(at(0x1000_7000).executable && !at(0x1000_7000).writable);
+    assert!(at(0x1000_0000).writable && !at(0x1000_0000).executable);
+    assert!(at(0x9000_1000).executable && at(0x9000_1000).writable);
+}
+
 /// A dump whose directory or header does not sit in the file refuses to
 /// load, saying so, rather than answering empty.
 #[test]
