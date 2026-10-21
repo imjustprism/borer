@@ -40,10 +40,7 @@ fn shape(s: &str) -> Option<Encoding> {
         && s.len() - body.len() <= 2
         && body
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_'))
-        && body.bytes().any(|b| b.is_ascii_digit())
-        && body.bytes().any(|b| b.is_ascii_uppercase())
-        && body.bytes().any(|b| b.is_ascii_lowercase());
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_'));
     base64.then_some(Encoding::Base64)
 }
 
@@ -191,7 +188,12 @@ mod tests {
         assert_eq!(shape("aHR0cHM6Ly9leGFtcGxlLmNvbS8"), Some(Encoding::Base64));
         assert_eq!(shape("aHR0cHM6Ly9leGFtcGxlLmNvbS8x="), None);
         assert_eq!(shape("68747470733a2f2f6578616d706c65"), Some(Encoding::Hex));
-        assert_eq!(shape("GetProcAddressForCaller"), None);
+        assert_eq!(shape("QUJDREVGYWJjZGVm"), Some(Encoding::Base64));
+        let mut bytes = Vec::new();
+        crate::entropy::decode(b"GetProcAddressForCaller", Encoding::Base64, |b| {
+            bytes.push(b);
+        });
+        assert_eq!(reading(&bytes), None, "an identifier decodes to no text");
         assert_eq!(shape("short"), None);
     }
 

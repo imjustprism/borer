@@ -259,9 +259,9 @@ fn yara_string(p: &Program, a: &Analysis, target: u64) -> Option<(String, bool)>
     let (start, lit) = referenced_literal(p, a, target, CAP)?;
     let wide = lit.starts_with('L');
     let (len, text) = if wide {
-        crate::strings::wstr_at(p, start, 4, CAP)?
+        crate::strings::wstr_text_at(p, start, 4, CAP)?
     } else {
-        crate::strings::cstr_at(p, start, 4, CAP)?
+        crate::strings::cstr_text_at(p, start, 4, CAP)?
     };
     let shown = if len > CAP {
         text.strip_suffix("...").unwrap_or(&text)
