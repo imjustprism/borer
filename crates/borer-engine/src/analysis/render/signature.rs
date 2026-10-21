@@ -263,6 +263,24 @@ fn yara_string(p: &Program, a: &Analysis, target: u64) -> Option<(String, bool)>
     (text.chars().count() >= 4).then(|| (yara_quoted(&text), wide))
 }
 
+/// The YARA condition a file of this format meets by its first bytes: a
+/// PE's `MZ`, an ELF's magic, a thin Mach-O's 32- or 64-bit magic or a
+/// universal one's `CAFEBABE` (read big-endian, as the header stores it).
+///
+/// # Arguments
+///
+/// * `format` - The file's format.
+fn yara_magic(format: BinaryFormat) -> &'static str {
+    match format {
+        BinaryFormat::Pe => "uint16(0) == 0x5A4D",
+        BinaryFormat::Elf => "uint32(0) == 0x464C457F",
+        BinaryFormat::MachO => {
+            "(uint32(0) == 0xFEEDFACF or uint32(0) == 0xFEEDFACE or uint32be(0) == 0xCAFEBABE)"
+        }
+        _ => "true",
+    }
+}
+
 /// A YARA identifier from a file name: `borer_` and its letters, digits
 /// and underscores, so no name is a keyword (`rule`, `global`) or starts
 /// with a digit.
@@ -343,12 +361,7 @@ pub fn yara_rule(
         .path
         .file_stem()
         .map_or_else(|| "sample".to_owned(), |s| s.to_string_lossy().into_owned());
-    let magic = match p.format {
-        BinaryFormat::Pe => "uint16(0) == 0x5A4D",
-        BinaryFormat::Elf => "uint32(0) == 0x464C457F",
-        BinaryFormat::MachO => "(uint32(0) == 0xFEEDFACF or uint32(0) == 0xFEEDFACE)",
-        _ => "true",
-    };
+    let magic = yara_magic(p.format);
     let mut out = String::new();
     for n in &notes {
         let _ = writeln!(out, "// {n}");
@@ -392,7 +405,22 @@ pub fn yara_rule(
 
 #[cfg(test)]
 mod tests {
-    use super::{rule_name, signature, yara_quoted};
+    use super::{rule_name, signature, yara_magic, yara_quoted};
+    use crate::program::BinaryFormat;
+
+    /// Each format's rule opens on the bytes its files start with, a
+    /// universal Mach-O's included.
+    ///
+    /// # Panics
+    ///
+    /// When a format's magic is missing.
+    #[test]
+    fn every_format_is_matched_by_its_magic() {
+        assert_eq!(yara_magic(BinaryFormat::Pe), "uint16(0) == 0x5A4D");
+        assert!(yara_magic(BinaryFormat::MachO).contains("uint32be(0) == 0xCAFEBABE"));
+        assert!(yara_magic(BinaryFormat::MachO).contains("0xFEEDFACF"));
+        assert_eq!(yara_magic(BinaryFormat::Raw), "true");
+    }
     use crate::program::{Arch, Program, Section};
 
     /// An absolute address in an immediate operand that is not the first
