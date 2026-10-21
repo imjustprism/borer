@@ -3,6 +3,7 @@
 mod cli;
 mod contract;
 mod evidence;
+mod index;
 mod project;
 mod reload;
 mod resources;
