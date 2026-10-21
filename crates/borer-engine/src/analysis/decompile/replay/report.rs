@@ -15,7 +15,7 @@ use super::{Claim, LISTED_MAX, Replayed};
 ///
 /// # Arguments
 ///
-/// * `r` - What [`replay`] found.
+/// * `r` - What [`replay`](super::replay) found.
 #[must_use]
 pub fn replay_tsv(r: &Replayed) -> String {
     let skipped: usize = r.skipped.values().sum();
