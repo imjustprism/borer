@@ -489,8 +489,7 @@ impl BorerServer {
     /// When no binary is loaded, a function names nothing, or nothing is
     /// left to match on.
     pub(crate) fn yara_text(&self, list: &str) -> Result<String, ErrorData> {
-        let (list, out) = export_target(list);
-        let text = self.with_analysis(Feature::Discover, |p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             let entries = list
                 .split(',')
                 .map(str::trim)
@@ -498,8 +497,7 @@ impl BorerServer {
                 .map(|f| borer_engine::analysis::resolve_suggesting(p, a, o, f))
                 .collect::<Result<Vec<u64>, String>>()?;
             render::yara_rule(p, a, o, &entries)
-        })?;
-        export(text, out)
+        })
     }
 
     /// borer's names and comments as a script or database another tool
@@ -513,7 +511,6 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the tool is not one of those.
     pub(crate) fn names_text(&self, tool: &str) -> Result<String, ErrorData> {
-        let (tool, out) = export_target(tool);
         let Some(tool) = render::Tool::parse(tool) else {
             return Err(err_params(format!(
                 "unknown tool {}; use one of: {}",
@@ -521,10 +518,9 @@ impl BorerServer {
                 render::Tool::NAMES
             )));
         };
-        let text = self.with_analysis(Feature::Discover, |p, a, o| {
+        self.with_analysis(Feature::Discover, |p, a, o| {
             Ok(render::names_export(p, a, o, tool))
-        })?;
-        export(text, out)
+        })
     }
 
     /// One place as virtual address, relative address, file offset,
@@ -2081,45 +2077,6 @@ pub(crate) fn unknown_resource(uri: &str) -> ErrorData {
         return err_not_found(format!("{fixed} takes no argument; read {fixed}"));
     }
     unknown_name(uri, name)
-}
-
-/// Splits a trailing `,out=<path>` off an export's spec.
-///
-/// # Arguments
-///
-/// * `spec` - The spec as the URI carries it.
-///
-/// # Returns
-///
-/// The spec without it, and the path when one was given.
-fn export_target(spec: &str) -> (&str, Option<&str>) {
-    match spec.rsplit_once(",out=") {
-        Some((rest, path)) if !path.trim().is_empty() => (rest, Some(path.trim())),
-        _ => (spec, None),
-    }
-}
-
-/// Writes an export whole to the path asked for, or answers it as text.
-///
-/// A file a reader loads as it is (a YARA rule, an x64dbg database) has to
-/// reach it whole, without the paging and evidence lines a text answer
-/// carries, so `out=<path>` writes it and answers where.
-///
-/// # Arguments
-///
-/// * `text` - The export.
-/// * `out` - Where to write it, `None` to answer it.
-///
-/// # Errors
-///
-/// When the file cannot be written.
-fn export(text: String, out: Option<&str>) -> Result<String, ErrorData> {
-    let Some(path) = out else {
-        return Ok(text);
-    };
-    std::fs::write(path, text.as_bytes())
-        .map_err(|e| err_params(format!("cannot write {path}: {e}")))?;
-    Ok(format!("wrote {} bytes to {path}\n", text.len()))
 }
 
 /// Refuses a resource name nothing lists, with the nearest names' URIs.

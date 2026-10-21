@@ -197,12 +197,12 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://yara/{functions}",
-        "A YARA rule that finds the functions again: each one's unique byte signature and the strings it references, under the file's magic; functions are names or entries, comma-separated. Add ,out=<path> to write the rule whole to a file: the text answer carries borer's own note lines, which YARA does not read",
+        "A YARA rule that finds the functions again: each one's unique byte signature and the strings it references, under the file's magic; functions are names or entries, comma-separated. The rule ends at its closing brace: save it up to there, since borer's own note lines follow, or use the CLI's borer yara, which writes it alone",
         "borer://yara/{entry}",
     ),
     (
         "borer://names/{tool}",
-        "borer's names and comments for another tool to apply: tool is ida (an IDAPython script), ghidra (a Ghidra Python script), binja (a Binary Ninja script) or x64dbg (a database to load); a PE's scripts rebase to the tool's image base. Add ,out=<path> to write the export whole to a file, as an x64dbg database must be: the text answer carries borer's own note lines",
+        "borer's names and comments for another tool to apply: tool is ida (an IDAPython script), ghidra (a Ghidra Python script), binja (a Binary Ninja script) or x64dbg (a database to load); a PE's scripts rebase to the tool's image base. An x64dbg database ends at its closing brace: save it up to there, since borer's own note lines follow, or use the CLI's borer names, which writes the file alone",
         "borer://names/ida",
     ),
     (

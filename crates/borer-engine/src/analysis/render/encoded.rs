@@ -31,7 +31,12 @@ fn shape(s: &str) -> Option<Encoding> {
         return Some(Encoding::Hex);
     }
     let body = s.trim_end_matches('=');
-    let base64 = s.len().is_multiple_of(4)
+    let whole = if body.len() < s.len() {
+        s.len().is_multiple_of(4)
+    } else {
+        body.len() % 4 != 1
+    };
+    let base64 = whole
         && s.len() - body.len() <= 2
         && body
             .bytes()
@@ -183,6 +188,8 @@ mod tests {
             shape("aHR0cHM6Ly9leGFtcGxlLmNvbS8="),
             Some(Encoding::Base64)
         );
+        assert_eq!(shape("aHR0cHM6Ly9leGFtcGxlLmNvbS8"), Some(Encoding::Base64));
+        assert_eq!(shape("aHR0cHM6Ly9leGFtcGxlLmNvbS8x="), None);
         assert_eq!(shape("68747470733a2f2f6578616d706c65"), Some(Encoding::Hex));
         assert_eq!(shape("GetProcAddressForCaller"), None);
         assert_eq!(shape("short"), None);
