@@ -63,10 +63,11 @@ impl Exec<'_, '_> {
     /// Writes what a sign or magnitude mask from memory leaves in operand 0.
     ///
     /// A mask over a float the text declares is its negation or magnitude
-    /// ([`masked_lanes`]). A register the text declares as an integer, or a
-    /// value not known as a float (a global's bits), holds the bits, where
-    /// C's `-` would negate the integer, so the mask is applied as the bit
-    /// operation it is ([`lane_mask`]).
+    /// ([`masked_lanes`]). A register the text declares as an integer holds
+    /// the bits, where C's `-` would negate the integer, so the mask is
+    /// applied as the bit operation it is ([`lane_mask`]), over a float
+    /// expression's bits at its own width, since `^` over a float would not
+    /// be C.
     ///
     /// # Arguments
     ///
@@ -75,15 +76,20 @@ impl Exec<'_, '_> {
         let Some((abs, ty, broadcast)) = self.float_mask(instr) else {
             return;
         };
+        let x = self.val(instr, 0);
         let bits = lane_mask(abs, ty, broadcast)
             .filter(|_| self.ctx.bitness == 64 && !self.mask_negates(instr, ty));
-        let x = self.val(instr, 0);
-        let v = masked_lanes(abs, ty, broadcast, x.clone());
-        if let (Expr::Un(..), Some((op, mask))) = (&v, bits) {
+        let operand = match &x {
+            Expr::Var(_) => Some(x.clone()),
+            e if e.is_float() => float_lane(e).map(|w| bitcast(x.clone(), Ty::from_bits(w))),
+            _ => Some(x.clone()),
+        };
+        let v = masked_lanes(abs, ty, broadcast, x);
+        if let (Expr::Un(..), Some((op, mask)), Some(operand)) = (&v, bits, operand) {
             self.stamp_reg_ty(instr, Ty::U64);
             self.write_op0(
                 instr,
-                Expr::Bin(op, Box::new(x), Box::new(Expr::Const(mask))),
+                Expr::Bin(op, Box::new(operand), Box::new(Expr::Const(mask))),
             );
         } else if matches!(v, Expr::Un(..)) {
             self.float_write(instr, v, ty);
@@ -97,15 +103,19 @@ impl Exec<'_, '_> {
     /// ([`Exec::mask_write`]): one from memory, or one loaded into another
     /// register that negates or clears a float the text declares at the
     /// mask's own width, every lane the register is known to hold of one
-    /// shape.
+    /// shape. A float expression of another width (a single under a
+    /// double's mask) is vector work.
     ///
     /// # Arguments
     ///
     /// * `instr` - A two-operand `xorps`, `xorpd`, `andps` or `andpd`.
     pub(super) fn mask_applies(&self, instr: &Instruction) -> bool {
+        let key = self.canon(instr.op0_register());
+        let lane = self.env.vals.get(&key).and_then(float_lane);
         self.float_mask(instr).is_some_and(|(_, ty, broadcast)| {
-            instr.op1_kind() == OpKind::Memory
-                || ((ty == Ty::F64 || broadcast.is_some()) && self.mask_negates(instr, ty))
+            lane.is_none_or(|w| w == ty.bits())
+                && (instr.op1_kind() == OpKind::Memory
+                    || ((ty == Ty::F64 || broadcast.is_some()) && self.mask_negates(instr, ty)))
         })
     }
 
@@ -120,11 +130,21 @@ impl Exec<'_, '_> {
     fn mask_negates(&self, instr: &Instruction, ty: Ty) -> bool {
         let key = self.canon(instr.op0_register());
         let x = self.env.vals.get(&key).cloned().unwrap_or(Expr::Var(key));
-        let float = match &x {
-            Expr::Var(k) => self.float_param(&x) || self.declared_float(*k),
+        self.float_value(&x) && self.declared_ty(key) == ty
+    }
+
+    /// Tells whether a value is a float in the text: a float expression, a
+    /// float parameter or a variable the text declares a float. An integer
+    /// bit operation over one would not be C.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - The value.
+    fn float_value(&self, x: &Expr) -> bool {
+        match x {
+            Expr::Var(k) => self.float_param(x) || self.declared_float(*k),
             e => e.is_float(),
-        };
-        float && self.declared_ty(key) == ty
+        }
     }
 
     /// The float a conversion reads from operand `k`, at width `from`.

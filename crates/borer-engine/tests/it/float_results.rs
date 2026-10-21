@@ -344,3 +344,24 @@ fn a_mixed_mask_over_a_double_is_no_negation() {
     assert!(!text.contains("= -"), "{text}");
     replays_clean(&p, &a, &[0x1_4000_1000]);
 }
+
+/// A double's sign mask over a single loaded through a pointer is vector
+/// work on the register, never an integer bit operation over a float,
+/// which would not be C.
+#[test]
+fn a_mask_over_a_float_of_another_width_is_no_bit_operation() {
+    let mut code = vec![
+        0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0,[rcx]
+        0x66, 0x0f, 0x57, 0x05, 0xf4, 0x00, 0x00, 0x00, // ASM: xorpd xmm0,[rip+0xf4]
+        0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x100, 0xcc);
+    code.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(!text.contains(" ^ 0x8000000000000000"), "{text}");
+    assert!(!text.contains("^= 0x8000000000000000"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}
