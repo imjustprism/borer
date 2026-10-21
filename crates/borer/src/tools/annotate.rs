@@ -902,8 +902,7 @@ mod tests {
             (a.derived.held("plain_text"), a.derived.builds())
         };
         let text = decompile();
-        let (held, built) = derived();
-        assert_eq!(held, 1);
+        assert_eq!(derived().0, 1);
         server
             .set_name(Parameters(SetNameParams {
                 address: Some("0x1080".to_owned()),
@@ -913,7 +912,8 @@ mod tests {
                 dry_run: Some(false),
             }))
             .expect("renames");
-        assert_eq!(derived(), (1, built), "the text is carried over");
+        let (held, built) = derived();
+        assert_eq!(held, 1, "the text is carried over");
         assert_eq!(decompile(), text);
         assert_eq!(derived(), (1, built), "the decompile built nothing");
     }

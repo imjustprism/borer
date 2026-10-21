@@ -2467,6 +2467,57 @@ pub fn nearest_names(
         .collect()
 }
 
+/// What [`resolve`] finds a name by besides the overlay: a function, by its
+/// entry, or a mapped symbol, by its place in [`Program::symbols`].
+#[derive(Debug, Clone, Copy)]
+enum Named {
+    /// The function with this entry.
+    Function(u64),
+    /// The symbol at this index.
+    Symbol(usize),
+}
+
+/// Returns every function and mapped symbol by each lowercased name
+/// [`resolve`] matches it by, built once per analysis.
+///
+/// A function goes under its name and bare name, a symbol under its name,
+/// bare name and demangled form. A lookup walked every function and
+/// symbol, demangling each, per name: most of a millisecond on a DLL of a
+/// few thousand functions, in every tool given a name.
+///
+/// # Arguments
+///
+/// * `program` - Supplies the symbol table.
+/// * `analysis` - Supplies function names and entries, and holds the index.
+fn name_index(program: &Program, analysis: &Analysis) -> Arc<FxHashMap<String, Vec<Named>>> {
+    analysis.derived.get_or_build("name_index", (), || {
+        let mut ix: FxHashMap<String, Vec<Named>> = FxHashMap::default();
+        for f in &analysis.functions {
+            if let Some(n) = &f.name {
+                for key in [n.to_lowercase(), bare_name(n).to_lowercase()] {
+                    ix.entry(key).or_default().push(Named::Function(f.entry));
+                }
+            }
+        }
+        for (i, s) in program
+            .symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.addr != 0)
+        {
+            let demangled = crate::search::demangled_or_raw(&s.name).to_lowercase();
+            for key in [
+                s.name.to_lowercase(),
+                bare_name(&s.name).to_lowercase(),
+                demangled,
+            ] {
+                ix.entry(key).or_default().push(Named::Symbol(i));
+            }
+        }
+        ix
+    })
+}
+
 /// [`resolve`], with `miss` saying more about a name nothing matches.
 ///
 /// # Arguments
@@ -2509,13 +2560,18 @@ fn resolve_noting(
             hits.push((*va, n.clone()));
         }
     }
-    for f in &analysis.functions {
-        if let Some(n) = &f.name
-            && (n.to_lowercase() == want || bare_name(n).to_lowercase() == want)
-        {
-            hits.push((f.entry, n.clone()));
-        }
-    }
+    let index = name_index(program, analysis);
+    let named = index.get(&want).map_or(&[][..], Vec::as_slice);
+    let symbols = || {
+        named.iter().filter_map(|n| match *n {
+            Named::Symbol(i) => program.symbols.get(i),
+            Named::Function(_) => None,
+        })
+    };
+    hits.extend(named.iter().filter_map(|n| match *n {
+        Named::Function(entry) => analysis.function(entry)?.name.clone().map(|n| (entry, n)),
+        Named::Symbol(_) => None,
+    }));
     if let Some(class) = want.strip_suffix("::instance") {
         for (addr, c) in &analysis.classes.global_hints {
             if c.to_lowercase() == class {
@@ -2530,27 +2586,14 @@ fn resolve_noting(
             }
         }
     }
-    for s in &program.symbols {
-        if s.addr == 0 {
-            continue;
-        }
-        let demangled = crate::search::demangled_or_raw(&s.name);
-        if s.name.to_lowercase() == want
-            || bare_name(&s.name).to_lowercase() == want
-            || demangled.to_lowercase() == want
-        {
-            hits.push((s.addr, format!("{} {}", s.kind.name(), s.name)));
-        }
-    }
+    hits.extend(symbols().map(|s| (s.addr, format!("{} {}", s.kind.name(), s.name))));
     hits.sort();
     hits.dedup_by_key(|h| h.0);
     if hits.iter().any(|(va, _)| analysis.function(*va).is_some()) {
         hits.retain(|(va, _)| analysis.function(*va).is_some());
     }
-    let own: BTreeSet<u64> = program
-        .symbols
-        .iter()
-        .filter(|s| s.addr != 0 && s.kind != SymbolKind::Import)
+    let own: BTreeSet<u64> = symbols()
+        .filter(|s| s.kind != SymbolKind::Import)
         .filter(|s| s.name.to_lowercase() == want || bare_name(&s.name).to_lowercase() == want)
         .map(|s| s.addr)
         .collect();
