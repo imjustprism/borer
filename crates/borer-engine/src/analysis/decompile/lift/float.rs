@@ -104,7 +104,8 @@ impl Exec<'_, '_> {
     /// register that negates or clears a float the text declares at the
     /// mask's own width, every lane the register is known to hold of one
     /// shape. A single under a double's mask is vector work; a double under
-    /// a single's mask is the bits [`masked_lanes`] spells.
+    /// a single's mask is the bits [`masked_lanes`] spells when the mask's
+    /// later lanes are of one shape, and vector work when they mix.
     ///
     /// # Arguments
     ///
@@ -113,7 +114,7 @@ impl Exec<'_, '_> {
         let key = self.canon(instr.op0_register());
         let lane = self.env.vals.get(&key).and_then(float_lane);
         self.float_mask(instr).is_some_and(|(_, ty, broadcast)| {
-            lane.is_none_or(|w| w >= ty.bits())
+            lane.is_none_or(|w| w == ty.bits() || (w > ty.bits() && broadcast.is_some()))
                 && (instr.op1_kind() == OpKind::Memory
                     || ((ty == Ty::F64 || broadcast.is_some()) && self.mask_negates(instr, ty)))
         })
