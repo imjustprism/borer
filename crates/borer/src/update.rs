@@ -394,7 +394,7 @@ pub(crate) fn check() -> Option<String> {
         return None;
     }
     let kept = recalled();
-    if !kept.as_ref().is_some_and(|(_, fresh)| *fresh) {
+    if !kept.as_ref().is_some_and(|(_, fresh)| *fresh) && claim_file().is_some_and(|f| claim(&f)) {
         remember(kept.as_ref().map_or("none", |(tag, _)| tag.as_str()));
         spawn_refresh();
     }
@@ -431,6 +431,50 @@ fn spawn_refresh() {
     }
 }
 
+/// Seconds after which a claim on the daily check ([`claim`]) that no
+/// refresh let go of, as a refresh that crashed would not, is taken over.
+const CLAIM_STALE_SECS: u64 = 120;
+
+/// The file a command holds while the daily check it started runs.
+fn claim_file() -> Option<PathBuf> {
+    Some(check_file()?.with_extension("claim"))
+}
+
+/// Claims starting the daily check, across every process at once.
+///
+/// The file is made only if it is not there, which the system does for one caller
+/// alone, so two commands started together start one check between them.
+///
+/// # Arguments
+///
+/// * `file` - The claim's file ([`claim_file`]).
+///
+/// # Returns
+///
+/// True for the one caller that holds the claim, including one taking over
+/// a claim older than [`CLAIM_STALE_SECS`].
+fn claim(file: &Path) -> bool {
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let make = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(file)
+            .is_ok()
+    };
+    if make() {
+        return true;
+    }
+    let age = std::fs::metadata(file)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(u64::MAX, |d| now_secs().saturating_sub(d.as_secs()));
+    age >= CLAIM_STALE_SECS && std::fs::remove_file(file).is_ok() && make()
+}
+
 /// The daily check itself, run by the detached copy [`spawn_refresh`]
 /// starts: asks GitHub for the latest tag and keeps it.
 ///
@@ -442,6 +486,9 @@ pub(crate) fn refresh() {
         .or_else(|| recalled().map(|(tag, _)| tag))
         .unwrap_or_else(|| "none".to_owned());
     remember(&tag);
+    if let Some(file) = claim_file() {
+        let _ = std::fs::remove_file(file);
+    }
 }
 
 #[cfg(test)]
@@ -462,6 +509,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// Commands racing to start the daily check start it once: of eight
+    /// claims made together, one holds.
+    ///
+    /// # Panics
+    ///
+    /// When no claim or more than one holds.
+    #[test]
+    fn one_of_many_racing_commands_claims_the_check() {
+        let dir = std::env::temp_dir().join(format!("borer-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("latest-release.claim");
+        let held = std::thread::scope(|s| {
+            let racers: Vec<_> = (0..8).map(|_| s.spawn(|| claim(&file))).collect();
+            racers
+                .into_iter()
+                .map(|r| r.join().unwrap_or(false))
+                .filter(|&held| held)
+                .count()
+        });
+        assert_eq!(held, 1);
+        assert!(!claim(&file), "a fresh claim is not taken over");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A set-aside name that cannot be removed, as a still-running earlier
     /// binary's cannot, is skipped for the next free one.
