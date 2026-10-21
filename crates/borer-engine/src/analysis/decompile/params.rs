@@ -1013,6 +1013,7 @@ pub(super) fn callee_shape(ctx: &Ctx<'_>, target: u64) -> Option<std::sync::Arc<
         ctx.program,
         ctx.analysis,
         ctx.overlay,
+        ctx.overlay_key,
         f,
         ctx.bitness,
     ))

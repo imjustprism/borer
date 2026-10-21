@@ -261,7 +261,7 @@ fn generated_in(
         .iter()
         .map(|input| {
             let shown: Vec<String> = input.iter().map(Arg::shown).collect();
-            let outcome = run_one(p, &shared, entry, input, budget);
+            let outcome = run_one(p, a, &shared, entry, input, budget);
             (shown.join(" "), outcome.verdict)
         })
         .collect())
@@ -512,7 +512,7 @@ pub(super) fn first_difference(
         pass: Some(drawn.pass.clone()),
     };
     for input in &drawn.inputs {
-        match run_one(p, &shared, entry, input, budget).verdict {
+        match run_one(p, a, &shared, entry, input, budget).verdict {
             Verdict::Differs(line, why) => {
                 out.differs = Some(Counterexample {
                     input: input.iter().map(Arg::shown).collect::<Vec<_>>().join(" "),
@@ -870,7 +870,7 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
                 "fn_run",
                 names,
                 (entry, budget, input.clone()),
-                || run_one(p, &shared, entry, input, budget),
+                || run_one(p, a, &shared, entry, input, budget),
                 Outcome::bytes,
             )
         })

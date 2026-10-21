@@ -361,6 +361,7 @@ fn read_back(byte_at: impl Fn(u64) -> Option<u8>, at: u64, len: usize) -> Vec<u8
 /// # Arguments
 ///
 /// * `p` - The loaded image.
+/// * `a` - Its analysis, holding the machine's setup.
 /// * `entry` - The function.
 /// * `pass` - How it takes its arguments on x86; `None` on arm64, whose
 ///   machine places them by the procedure call standard ([`run_a64`]).
@@ -374,6 +375,7 @@ fn read_back(byte_at: impl Fn(u64) -> Option<u8>, at: u64, len: usize) -> Vec<u8
 )]
 fn run_machine(
     p: &Program,
+    a: &Analysis,
     entry: u64,
     pass: Option<&Passing>,
     ret_bits: Option<u8>,
@@ -386,12 +388,11 @@ fn run_machine(
         return run_a64(p, entry, ret_bits, input, layout, budget, traced);
     };
     let Layout { values, at, pokes } = layout;
-    let mut emu = Emulator::new(p, budget)?;
+    let mut emu = Emulator::with_imports(p, a, budget)?;
     emu.back_arguments();
     if traced {
         emu.set_trace(budget);
     }
-    emu.install_imports();
     for (addr, bytes) in pokes {
         poke_all(&mut emu, *addr, bytes);
     }
@@ -800,16 +801,25 @@ struct Shared<'p> {
 /// # Arguments
 ///
 /// * `p` - The loaded image.
+/// * `a` - Its analysis.
 /// * `shared` - The text and the convention.
 /// * `entry` - The function.
 /// * `input` - The arguments.
 /// * `budget` - Steps.
-fn run_one(p: &Program, shared: &Shared<'_>, entry: u64, input: &[Arg], budget: usize) -> Outcome {
+fn run_one(
+    p: &Program,
+    a: &Analysis,
+    shared: &Shared<'_>,
+    entry: u64,
+    input: &[Arg],
+    budget: usize,
+) -> Outcome {
     let buffers = input.iter().filter(|a| a.is_buffer()).count();
     let layout = lay_out(buffer_base(p, buffers.max(input.len())), input);
     let ret = shared.sig.as_ref().ok().and_then(Signature::return_kind);
     let Some(m) = run_machine(
         p,
+        a,
         entry,
         shared.pass.as_ref(),
         ret.map(|(_, bits)| bits),
@@ -948,7 +958,7 @@ pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Str
                 "fn_run",
                 names,
                 (entry, req.budget, input.clone()),
-                || run_one(p, &shared, entry, input, req.budget),
+                || run_one(p, a, &shared, entry, input, req.budget),
                 Outcome::bytes,
             )
         })

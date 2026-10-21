@@ -192,18 +192,23 @@ pub(in crate::analysis::decompile) fn saved(conv: &Conv, key: Key, bits: u8) -> 
 /// * `program` - The loaded image.
 /// * `analysis` - Its functions.
 /// * `overlay` - User names and prototypes.
+/// * `key` - [`Overlay::fingerprint`] of `overlay`, as a lift keeps it
+///   ([`Ctx::overlay_key`](super::super::Ctx::overlay_key)): a lift asks
+///   for a callee's shape at every call it lifts, and a fingerprint walks
+///   every name the overlay holds.
 /// * `f` - The function.
 /// * `bitness` - Decoder bitness, `32` or `64`.
 pub(in crate::analysis::decompile) fn shape(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
+    key: u64,
     f: &Function,
     bitness: u32,
 ) -> Arc<Shape> {
     analysis.derived.get_or_build_item(
         "shape",
-        overlay.fingerprint(),
+        key,
         f.entry,
         || match program.arch.isa() {
             Some(Isa::A64) => lift_a64::built_shape(program, analysis, overlay, f),
@@ -239,7 +244,14 @@ pub(crate) fn of(
     let entry = super::reached(analysis, entry);
     let f = analysis.function(entry).filter(|f| f.entry == entry)?;
     let bitness = program.arch.bitness().unwrap_or(64);
-    let s = shape(program, analysis, overlay, f, bitness);
+    let s = shape(
+        program,
+        analysis,
+        overlay,
+        overlay.fingerprint(),
+        f,
+        bitness,
+    );
     Some(placed(&s, f))
 }
 

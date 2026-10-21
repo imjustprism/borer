@@ -110,6 +110,11 @@ struct Index {
 /// Returns the [`Index`] of a program under the names in force, built once
 /// through [`Analysis::derived`].
 ///
+/// The index reads the names alone, so it is keyed without the passes and
+/// choice points ([`Overlay::names_key`]): the texts a repair search builds
+/// under other passes and choices share it, where each of them built the
+/// whole index again.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -118,7 +123,7 @@ struct Index {
 fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index> {
     analysis
         .derived
-        .get_or_build_named("unit_index", overlay.fingerprint(), (), || {
+        .get_or_build_named("unit_index", overlay.names_key(), (), || {
             let mut ix = Index::default();
             for f in &analysis.functions {
                 let name = expr::bare(&name_of(analysis, overlay, f.entry)).into_owned();

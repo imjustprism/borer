@@ -3,10 +3,12 @@
 
 use super::calls::ApiCall;
 use super::{Emulator, Stop, image_byte};
+use crate::analysis::Analysis;
 use crate::analysis::decompile::abi;
 use crate::analysis::syscalls::linux_syscall_name;
 use crate::isa::x86::{Instruction, Register};
 use crate::num::{from_usize, lo8};
+use crate::program::Program;
 
 /// Base of the synthetic addresses that stand in for imported functions.
 ///
@@ -43,6 +45,40 @@ pub(super) enum ArgSlot {
     Register(Register),
     /// A stack address past the return address the call pushed.
     Stack(u64),
+}
+
+impl<'a> Emulator<'a> {
+    /// Builds an emulator as [`Emulator::new`] does, with every import's
+    /// stub installed ([`Emulator::install_imports`]).
+    ///
+    /// The setup is planted once per image, through [`Analysis::derived`],
+    /// and each machine is built over it: planting the loader and a stub
+    /// per import took half a millisecond, and the check of one `decompile`
+    /// answer built two machines for each input it ran.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image whose bytes back unwritten memory.
+    /// * `analysis` - Its analysis, holding the setup.
+    /// * `budget` - Most instructions to run before stopping.
+    ///
+    /// # Returns
+    ///
+    /// The machine, or `None` when the image's bitness is unknown.
+    #[must_use]
+    pub(crate) fn with_imports(
+        program: &'a Program,
+        analysis: &Analysis,
+        budget: usize,
+    ) -> Option<Self> {
+        let planted = analysis.derived.get_or_build("import_rig", (), || {
+            let mut emu = Self::new(program, 0)?;
+            emu.install_imports();
+            emu.mem.freeze();
+            Some(emu.planted())
+        });
+        Self::with_planted(program, budget, planted.as_ref().as_ref()?)
+    }
 }
 
 impl Emulator<'_> {

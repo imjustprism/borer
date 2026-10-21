@@ -1158,8 +1158,7 @@ impl<'p> Script<'p> {
         pokes: &[(u64, Vec<u8>)],
         budget: usize,
     ) -> Option<TextRun<'p>> {
-        let mut emu = Emulator::new(self.program, budget)?;
-        emu.install_imports();
+        let mut emu = Emulator::with_imports(self.program, self.analysis, budget)?;
         for (at, bytes) in pokes {
             for (k, b) in bytes.iter().enumerate() {
                 emu.poke(at.wrapping_add(from_usize(k)), *b);
@@ -1787,7 +1786,12 @@ fn names(
 }
 
 /// Resolves the names the text uses that it does not declare, through the
-/// table of [`names`] built once per overlay.
+/// table of [`names`] built once per set of names in force.
+///
+/// The table reads the names alone, so it is keyed without the passes and
+/// choice points ([`Overlay::names_key`]): the texts a repair search builds
+/// under other passes and choices share it, where each of them built the
+/// whole table again.
 ///
 /// Where several things share a name (overloads of one C++ name), the one
 /// the function refers to is meant, else the first. A name the text also
@@ -1817,12 +1821,11 @@ fn resolve_names(
     if wanted.is_empty() {
         return FxHashMap::default();
     }
-    let table =
-        analysis
-            .derived
-            .get_or_build_named("text_names", overlay.fingerprint(), (), || {
-                names(program, analysis, overlay)
-            });
+    let table = analysis
+        .derived
+        .get_or_build_named("text_names", overlay.names_key(), (), || {
+            names(program, analysis, overlay)
+        });
     let referred = |k: &Known| {
         let (Known::Code(at) | Known::Address(at) | Known::Slot(at)) = *k;
         analysis

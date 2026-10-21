@@ -1996,6 +1996,28 @@ impl Overlay {
         h
     }
 
+    /// Returns the [`Overlay::fingerprint`] of these names without the
+    /// passes left out and the choice points moved: the key of a table read
+    /// over the whole program under the names, which the renderings a
+    /// repair search tries then share instead of each building its own.
+    ///
+    /// # Returns
+    ///
+    /// The fingerprint itself when nothing is left out or moved, the common
+    /// case, which costs no copy.
+    #[must_use]
+    pub(crate) fn names_key(&self) -> u64 {
+        if self.passes.is_empty() && self.choices.is_empty() {
+            return self.fingerprint();
+        }
+        Self {
+            passes: decompile::Passes::NONE,
+            choices: decompile::Choices::default(),
+            ..self.clone()
+        }
+        .fingerprint()
+    }
+
     /// Returns the names, comments, types, applications, prototypes and
     /// variables alone, without name tables: the overlay the binary's own
     /// tables are read under, so reading one table never needs another.

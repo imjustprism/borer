@@ -99,7 +99,17 @@ pub(crate) fn passing(
 ) -> Passing {
     let bitness = program.arch.bitness().unwrap_or(64);
     let conv = match analysis.function(entry).filter(|f| f.entry == entry) {
-        Some(f) => abi::shape(program, analysis, overlay, f, bitness).conv,
+        Some(f) => {
+            abi::shape(
+                program,
+                analysis,
+                overlay,
+                overlay.fingerprint(),
+                f,
+                bitness,
+            )
+            .conv
+        }
         None => abi::conv(program, bitness),
     };
     let word = conv.word.unsigned_abs();

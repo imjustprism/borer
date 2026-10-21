@@ -50,6 +50,11 @@ pub(super) struct Store {
     chunks: BTreeMap<u64, Chunk>,
     /// Bytes held: the set `held` bits of every chunk either layer shows.
     len: usize,
+    /// The address the bytes held below are counted at as they are held
+    /// ([`Store::split_at`]), zero when they are not.
+    split: u64,
+    /// Bytes held below [`Store::split`].
+    below: usize,
 }
 
 /// The chunk key of an address and the position of its byte in the chunk.
@@ -72,6 +77,24 @@ fn address(key: u64, k: u8) -> u64 {
 }
 
 impl Store {
+    /// Returns an empty store that counts the bytes it holds below `split`
+    /// as it holds them, so [`Store::held_below`] answers for that address
+    /// without a walk.
+    ///
+    /// A machine asks how much it holds below its stack at the end of every
+    /// run, and a 32-bit one plants its thread block and loader there:
+    /// walking them took longer than a short run.
+    ///
+    /// # Arguments
+    ///
+    /// * `split` - The address.
+    pub(super) fn split_at(split: u64) -> Self {
+        Self {
+            split,
+            ..Self::default()
+        }
+    }
+
     /// How many bytes are held.
     pub(super) fn len(&self) -> usize {
         self.len
@@ -163,6 +186,7 @@ impl Store {
             .or_insert_with(|| base.get(&key).copied().unwrap_or_default());
         if c.held & bit == 0 {
             self.len += 1;
+            self.below += usize::from(a < self.split);
         }
         c.held |= bit;
         if dirty {
@@ -236,6 +260,7 @@ impl Store {
             let bit = 1 << k;
             if c.held & bit == 0 {
                 self.len += 1;
+                self.below += usize::from(at + i < self.split);
             }
             c.held |= bit;
             c.patched |= bit;
@@ -254,7 +279,13 @@ impl Store {
     /// * `bytes` - The bytes, in address order.
     /// * `patched` - Whether they were set up before the run.
     fn plant_marked(&mut self, at: u64, bytes: impl IntoIterator<Item = u8>, patched: bool) {
-        let Self { base, chunks, len } = self;
+        let Self {
+            base,
+            chunks,
+            len,
+            split,
+            below,
+        } = self;
         let mut a = at;
         let mut slot: Option<(u64, &mut Chunk)> = None;
         for v in bytes {
@@ -274,6 +305,7 @@ impl Store {
             let bit = 1 << k;
             if c.held & bit == 0 {
                 *len += 1;
+                *below += usize::from(address(key, k) < *split);
             }
             c.held |= bit;
             if patched {
@@ -325,12 +357,17 @@ impl Store {
         })
     }
 
-    /// How many bytes are held at addresses below `limit`.
+    /// How many bytes are held at addresses below `limit`: the count kept
+    /// as they were held when `limit` is the store's split
+    /// ([`Store::split_at`]), else a walk of the chunks below it.
     ///
     /// # Arguments
     ///
     /// * `limit` - The first address not counted.
     pub(super) fn held_below(&self, limit: u64) -> usize {
+        if limit == self.split {
+            return self.below;
+        }
         self.shown(..=place(limit).0)
             .map(|(key, c)| {
                 (0..8)
@@ -457,6 +494,33 @@ mod tests {
         assert_eq!(pristine.get(0x6003), Some(4));
         assert!(!pristine.is_dirty(0x6003));
         assert_eq!(frozen.get(0x6200), None);
+    }
+
+    /// A store split at an address counts the bytes it holds below it as a
+    /// walk of its chunks counts them, through plants, sets, a freeze, and
+    /// a clone's poked run and pokes over the frozen layer.
+    #[test]
+    fn a_split_store_counts_below_its_split_as_a_walk_does() {
+        let split = 0x6004;
+        let (mut counted, mut walked) = (Store::split_at(split), Store::default());
+        for s in [&mut counted, &mut walked] {
+            s.plant(0x5ff8, (0..24u8).map(|v| v + 1));
+            s.set(0x6100, 5, true);
+            s.set(0x5000, 1, false);
+            s.freeze();
+        }
+        let (mut copy, mut walked_copy) = (counted.clone(), walked.clone());
+        for s in [&mut copy, &mut walked_copy] {
+            s.poke_run(0x5ff0, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+            s.poke(0x4fff, 9);
+            s.set(0x6003, 4, true);
+            s.plant(0x6000, [1, 2, 3, 4, 5, 6]);
+        }
+        assert_eq!(counted.held_below(split), 13);
+        assert_eq!(walked.held_below(split), 13);
+        assert_eq!(copy.held_below(split), 22);
+        assert_eq!(walked_copy.held_below(split), 22);
+        assert_eq!(copy.held_below(0x6100), walked_copy.held_below(0x6100));
     }
 
     /// The written bytes come out in address order, a window finds one

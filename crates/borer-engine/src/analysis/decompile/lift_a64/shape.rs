@@ -548,7 +548,14 @@ pub(in crate::analysis::decompile) fn callee_shape(
             && f.thunk.is_none()
             && (f.instr_count > 1 || decode(ctx.program, target).is_some_and(forwards))
     })?;
-    Some(abi::shape(ctx.program, ctx.analysis, ctx.overlay, f, 64))
+    Some(abi::shape(
+        ctx.program,
+        ctx.analysis,
+        ctx.overlay,
+        ctx.overlay_key,
+        f,
+        64,
+    ))
 }
 
 /// Reads a function's [`Shape`] afresh: its blocks decoded, its context

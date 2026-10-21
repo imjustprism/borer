@@ -340,7 +340,14 @@ pub(in crate::analysis::decompile) fn callee_shape(
         .analysis
         .function(target)
         .filter(|f| f.entry == target && f.thunk.is_none())?;
-    Some(abi::shape(ctx.program, ctx.analysis, ctx.overlay, f, 32))
+    Some(abi::shape(
+        ctx.program,
+        ctx.analysis,
+        ctx.overlay,
+        ctx.overlay_key,
+        f,
+        32,
+    ))
 }
 
 /// Reads a function's [`Shape`] afresh.

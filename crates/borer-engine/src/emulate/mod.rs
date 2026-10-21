@@ -705,7 +705,7 @@ impl<'a> Emulator<'a> {
     }
 
     /// What this machine was set up with before any run: the memory and
-    /// the stubs [`Emulator::new`] plants, a function of the image alone.
+    /// the stubs it planted, a function of the image alone.
     ///
     /// # Returns
     ///
@@ -719,20 +719,20 @@ impl<'a> Emulator<'a> {
         }
     }
 
-    /// Builds an emulator as [`Emulator::new`] does, over memory and stubs
-    /// an earlier machine over the same image planted.
+    /// Builds an emulator as the machine `planted` was read from was set
+    /// up, over the memory and stubs it planted.
     ///
     /// # Arguments
     ///
     /// * `program` - The image whose bytes back unwritten memory; the one
     ///   `planted` was read from.
     /// * `budget` - Most instructions to run before stopping.
-    /// * `planted` - What [`Emulator::planted`] read from a new machine.
+    /// * `planted` - What [`Emulator::planted`] read from a machine that
+    ///   had not run.
     ///
     /// # Returns
     ///
-    /// The machine [`Emulator::new`] would build, or `None` when the
-    /// image's bitness is unknown.
+    /// The machine, or `None` when the image's bitness is unknown.
     #[must_use]
     pub(crate) fn with_planted(
         program: &'a Program,
@@ -771,7 +771,7 @@ impl<'a> Emulator<'a> {
             stack_span,
             teb,
             regs: [0; 16],
-            mem: Store::default(),
+            mem: Store::split_at(stack_base),
             flags_zero: false,
             flags_carry: false,
             flags_sign: false,

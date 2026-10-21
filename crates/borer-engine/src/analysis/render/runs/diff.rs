@@ -29,6 +29,7 @@ pub(super) struct DiffRun {
 /// # Arguments
 ///
 /// * `p` - The loaded image.
+/// * `a` - Its analysis.
 /// * `shared` - The text and convention [`shared_for`] built.
 /// * `entry` - The function.
 /// * `input` - The arguments.
@@ -39,6 +40,7 @@ pub(super) struct DiffRun {
 /// The traced run, or `None` when the architecture is not emulated.
 fn diff_one(
     p: &Program,
+    a: &Analysis,
     shared: &Shared<'_>,
     entry: u64,
     input: &[Arg],
@@ -49,6 +51,7 @@ fn diff_one(
     let ret = shared.sig.as_ref().ok().and_then(Signature::return_kind);
     let m = run_machine(
         p,
+        a,
         entry,
         shared.pass.as_ref(),
         ret.map(|(_, bits)| bits),
@@ -181,7 +184,7 @@ pub fn run_diff_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Resul
     let runs: Vec<DiffRun> = req
         .inputs
         .iter()
-        .map(|input| diff_one(p, &shared, req.entry, input, budget))
+        .map(|input| diff_one(p, a, &shared, req.entry, input, budget))
         .collect::<Option<Vec<_>>>()
         .ok_or("this architecture is not emulated")?;
     let [one, two] = &*runs else {
