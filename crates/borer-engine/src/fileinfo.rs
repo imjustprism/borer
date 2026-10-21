@@ -449,10 +449,14 @@ pub fn locate(
     let _ = writeln!(
         out,
         "offset:   {}",
-        program.va_to_offset(va).map_or_else(
-            || "- (in no file bytes: uninitialized or unmapped)".to_owned(),
-            |o| format!("{o:#x}")
-        )
+        program
+            .section_at(va)
+            .filter(|s| va - s.va.0 < s.file_size)
+            .and_then(|_| program.va_to_offset(va))
+            .map_or_else(
+                || "- (in no file bytes: uninitialized or unmapped)".to_owned(),
+                |o| format!("{o:#x}")
+            )
     );
     let _ = writeln!(
         out,
@@ -514,9 +518,13 @@ mod tests {
     /// When a form reads otherwise.
     #[test]
     fn every_form_of_an_address_names_one_place() {
-        let text = Section::mapped(".text", 0x1000, 0x400, 0x200, false, true);
+        let mut text = Section::mapped(".text", 0x1000, 0x400, 0x200, false, true);
+        text.vsize = 0x1000;
         let p = Program::raw(vec![0xc3; 0x600], Arch::X86_64, 0, Some(0x1000), vec![text]);
         let o = Overlay::default();
+        let tail = locate(&p, None, &o, "0x1300").expect("a va past the file bytes");
+        assert!(tail.contains("offset:   - (in no file bytes"), "{tail}");
+        assert!(tail.contains("section:  .text"), "{tail}");
         let by_va = locate(&p, None, &o, "0x1010").expect("a va");
         assert!(by_va.contains("offset:   0x410"), "{by_va}");
         assert!(by_va.contains("section:  .text"), "{by_va}");

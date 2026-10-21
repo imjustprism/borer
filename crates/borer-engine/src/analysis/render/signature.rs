@@ -253,19 +253,29 @@ fn yara_quoted(text: &str) -> String {
 /// The quoted text and whether it is UTF-16, or `None` when no string of
 /// four characters or more is there.
 fn yara_string(p: &Program, a: &Analysis, target: u64) -> Option<(String, bool)> {
-    let (start, lit) = referenced_literal(p, a, target, 120)?;
+    /// Longest string a rule matches whole; a longer one is matched by
+    /// this much of its start.
+    const CAP: usize = 120;
+    let (start, lit) = referenced_literal(p, a, target, CAP)?;
     let wide = lit.starts_with('L');
-    let (_, text) = if wide {
-        crate::strings::wstr_at(p, start, 4, 120)?
+    let (len, text) = if wide {
+        crate::strings::wstr_at(p, start, 4, CAP)?
     } else {
-        crate::strings::cstr_at(p, start, 4, 120)?
+        crate::strings::cstr_at(p, start, 4, CAP)?
     };
-    (text.chars().count() >= 4).then(|| (yara_quoted(&text), wide))
+    let shown = if len > CAP {
+        text.strip_suffix("...").unwrap_or(&text)
+    } else {
+        &text
+    };
+    (shown.chars().count() >= 4).then(|| (yara_quoted(shown), wide))
 }
 
-/// The YARA condition a file of this format meets by its first bytes: a
-/// PE's `MZ`, an ELF's magic, a thin Mach-O's 32- or 64-bit magic or a
-/// universal one's `CAFEBABE` (read big-endian, as the header stores it).
+/// The YARA condition a file of this format meets by its first bytes.
+///
+/// That is a PE's `MZ`, an ELF's magic, a thin Mach-O's 32- or 64-bit magic
+/// or a universal one's `CAFEBABE` (read big-endian, as the header stores
+/// it).
 ///
 /// # Arguments
 ///
