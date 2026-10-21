@@ -13,6 +13,7 @@ pub mod apihash;
 pub mod apply;
 pub mod attributes;
 pub mod cdecl;
+mod cell;
 pub mod classes;
 pub mod decompile;
 mod descriptors;
@@ -53,8 +54,10 @@ mod x87;
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use cell::{Cell, Publish};
 
 use crate::isa::Isa;
 use crate::isa::x86::OpKind;
@@ -729,31 +732,6 @@ enum Fate {
     Move(Scope),
 }
 
-/// One result's cell in [`Derived`].
-struct Cell<T> {
-    /// The result, once built, and what its build read of the overlay.
-    value: OnceLock<(Arc<T>, reads::Reads)>,
-    /// Bytes an item's result holds, set before the result is.
-    weight: AtomicUsize,
-    /// [`Derived::asks`] when an item's result was last asked for.
-    asked: AtomicU64,
-    /// Whether the build ended after the caller's cancel flag was raised
-    /// ([`crate::cancel::Cancel`]), so an emulation in it may have been cut
-    /// short; such a result is let go at once.
-    cut: AtomicBool,
-}
-
-impl<T> Default for Cell<T> {
-    fn default() -> Self {
-        Self {
-            value: OnceLock::new(),
-            weight: AtomicUsize::new(0),
-            asked: AtomicU64::new(0),
-            cut: AtomicBool::new(false),
-        }
-    }
-}
-
 /// Each kind's cells in [`Derived`], by the kind's name and its cells' type.
 type Kinds = FxHashMap<(&'static str, TypeId), Arc<dyn Kind>>;
 
@@ -804,7 +782,7 @@ impl<K: Hash + Eq + Send + 'static, T: Send + Sync + 'static> Kind for Cells<K, 
                 cells
                     .iter()
                     .filter(|((scope, _), cell)| {
-                        matches!(scope, Scope::Item(_)) && cell.value.get().is_some()
+                        matches!(scope, Scope::Item(_)) && matches!(cell.value.get(), Some(Some(_)))
                     })
                     .map(|(_, cell)| {
                         (
@@ -834,8 +812,8 @@ impl<K: Hash + Eq + Send + 'static, T: Send + Sync + 'static> Kind for Cells<K, 
         for ((scope, key), cell) in cells.drain() {
             let fate = match cell.value.get() {
                 None => Fate::Keep,
-                Some(_) if cell.cut.load(Ordering::Relaxed) => Fate::Drop,
-                Some((_, read)) => pick(scope, cell.asked.load(Ordering::Relaxed), read),
+                Some(None) => Fate::Drop,
+                Some(Some((_, read))) => pick(scope, cell.asked.load(Ordering::Relaxed), read),
             };
             match fate {
                 Fate::Keep => {
@@ -1104,7 +1082,9 @@ impl Derived {
     ///
     /// The shared result, as for [`Derived::get_or_build`]; built afresh
     /// and not kept when the caller's cancel flag is raised, and let go
-    /// again when it was raised while this call built it.
+    /// again when it was raised while this call built it. A thread that
+    /// waited for a build left with nothing to share builds its own, not
+    /// kept: the cancel flag is the builder's, never the waiter's.
     fn fetch<K, T>(
         &self,
         kind: &'static str,
@@ -1128,26 +1108,28 @@ impl Derived {
             cell.asked
                 .store(self.asks.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
         }
-        let mut built = false;
-        let mut fresh = false;
-        let (value, read) = cell.value.get_or_init(|| {
-            let (value, read) = reads::recording(make);
-            self.builds.fetch_add(1, Ordering::Relaxed);
-            fresh = true;
-            if item {
-                let weight = size_of::<(Scope, K, Cell<T>, T)>() + weigh(&value) + read.bytes();
-                cell.weight.store(weight, Ordering::Relaxed);
-                self.item_bytes.fetch_add(weight, Ordering::Relaxed);
-                built = true;
-            }
-            (Arc::new(value), read)
-        });
-        reads::absorb(read);
-        let value = Arc::clone(value);
-        if fresh && crate::cancel::Cancel::raised() {
-            cell.cut.store(true, Ordering::Relaxed);
+        if cell.claimed.swap(true, Ordering::AcqRel) {
+            let Some((value, read)) = cell.value.wait() else {
+                return Arc::new(make());
+            };
+            reads::absorb(read);
+            return Arc::clone(value);
+        }
+        let mut publish = Publish(&cell.value, None);
+        let (value, read) = reads::recording(make);
+        self.builds.fetch_add(1, Ordering::Relaxed);
+        reads::absorb(&read);
+        let (value, cut) = (Arc::new(value), crate::cancel::Cancel::raised());
+        if item && !cut {
+            let weight = size_of::<(Scope, K, Cell<T>, T)>() + weigh(&value) + read.bytes();
+            cell.weight.store(weight, Ordering::Relaxed);
+            self.item_bytes.fetch_add(weight, Ordering::Relaxed);
+        }
+        publish.1 = (!cut).then(|| (Arc::clone(&value), read));
+        drop(publish);
+        if cut {
             self.sweep(&|_, _, _| Fate::Keep);
-        } else if built && self.item_bytes() > self.budget.load(Ordering::Relaxed) {
+        } else if item && self.item_bytes() > self.budget.load(Ordering::Relaxed) {
             self.shrink();
         }
         value
@@ -1899,6 +1881,11 @@ impl Overlay {
     /// caller whose overlay has none, or the other way round. The binary's
     /// own tables ([`EnumSource::Binary`]) follow from the names and the
     /// binary, so their source alone tells them apart.
+    ///
+    /// Each name and comment starts with its field's own byte and its
+    /// length, so the two maps fold different bytes: a name and a comment
+    /// of one text at one address fingerprinted alike, and each was handed
+    /// the other's text.
     #[must_use]
     pub fn fingerprint(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1907,13 +1894,13 @@ impl Overlay {
                 h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
             }
         };
-        for (addr, name) in self.names.raw() {
-            fold(&addr.to_le_bytes());
-            fold(name.as_bytes());
-        }
-        for (addr, text) in self.comments.raw() {
-            fold(&addr.to_le_bytes());
-            fold(text.as_bytes());
+        for (field, map) in [(7, self.names.raw()), (8, self.comments.raw())] {
+            for (addr, text) in map {
+                fold(&[field]);
+                fold(&addr.to_le_bytes());
+                fold(&crate::num::from_usize(text.len()).to_le_bytes());
+                fold(text.as_bytes());
+            }
         }
         for (name, ty) in self.types.raw() {
             fold(name.as_bytes());

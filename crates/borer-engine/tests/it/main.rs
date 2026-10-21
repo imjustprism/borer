@@ -50,6 +50,7 @@ mod layout;
 mod libsig;
 mod lsda;
 mod macho;
+mod memo;
 mod negfields;
 mod next;
 mod noise;
