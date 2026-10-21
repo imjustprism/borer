@@ -387,6 +387,20 @@ pub(crate) fn doctor(offline: bool) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The Claude Code plugin fetches the release its `plugin.json` names,
+    /// so that version is this build's: a release that forgets to bump it
+    /// keeps every plugin user on the old binary.
+    ///
+    /// # Panics
+    ///
+    /// When the versions differ.
+    #[test]
+    fn the_plugin_names_this_version() {
+        let manifest = include_str!("../../../plugins/borer/.claude-plugin/plugin.json");
+        let named: serde_json::Value = serde_json::from_str(manifest).expect("plugin.json parses");
+        assert_eq!(named["version"], env!("CARGO_PKG_VERSION"));
+    }
     /// A build of its own release tag is that version; one past it, of
     /// another tag, or with no tag known says `-dev`.
     ///

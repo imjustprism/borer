@@ -35,7 +35,7 @@ no Ghidra, IDA or Binary Ninja underneath.
   identical bytes for the same question every time.
 
 > [!WARNING]
-> Version 0.2.0, beta. Tool names, output spelling and resource URIs can still
+> Version 0.2.1, beta. Tool names, output spelling and resource URIs can still
 > change. See [Limits](#limits).
 
 ## Why borer
