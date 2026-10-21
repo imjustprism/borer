@@ -1351,7 +1351,7 @@ function	block	fact	place	emulated	lifted	bits	expression
 )]
 fn cli_verify_text_checks_the_statements() {
     let exe = env!("CARGO_BIN_EXE_borer");
-    let (ok, out) = run(&["verify", exe, "all", "40", "1", "text"]);
+    let (ok, out) = run_all(&["verify", exe, "all", "40", "1", "text"]);
     assert!(
         ok || out.contains("the text and the emulator disagree"),
         "{out}"
