@@ -76,7 +76,7 @@ impl Exec<'_, '_> {
             return;
         };
         let bits = lane_mask(abs, ty, broadcast)
-            .filter(|_| self.ctx.bitness == 64 && !self.mask_negates(instr));
+            .filter(|_| self.ctx.bitness == 64 && !self.mask_negates(instr, ty));
         let x = self.val(instr, 0);
         let v = masked_lanes(abs, ty, broadcast, x.clone());
         if let (Expr::Un(..), Some((op, mask))) = (&v, bits) {
@@ -95,30 +95,36 @@ impl Exec<'_, '_> {
 
     /// Tells whether a sign or magnitude mask is one the lifter applies
     /// ([`Exec::mask_write`]): one from memory, or one loaded into another
-    /// register that negates or clears a float the text declares.
+    /// register that negates or clears a float the text declares at the
+    /// mask's own width, every lane the register is known to hold of one
+    /// shape.
     ///
     /// # Arguments
     ///
     /// * `instr` - A two-operand `xorps`, `xorpd`, `andps` or `andpd`.
     pub(super) fn mask_applies(&self, instr: &Instruction) -> bool {
-        self.float_mask(instr).is_some()
-            && (instr.op1_kind() == OpKind::Memory || self.mask_negates(instr))
+        self.float_mask(instr).is_some_and(|(_, ty, broadcast)| {
+            instr.op1_kind() == OpKind::Memory
+                || ((ty == Ty::F64 || broadcast.is_some()) && self.mask_negates(instr, ty))
+        })
     }
 
-    /// Tells whether a mask's destination holds a float the text declares,
-    /// so the mask is that float's negation or magnitude, not bits.
+    /// Tells whether a mask's destination holds a float the text declares
+    /// at the mask's width, so the mask is that float's negation or
+    /// magnitude, not bits.
     ///
     /// # Arguments
     ///
     /// * `instr` - The masking instruction.
-    fn mask_negates(&self, instr: &Instruction) -> bool {
+    /// * `ty` - The float width the mask is for.
+    fn mask_negates(&self, instr: &Instruction, ty: Ty) -> bool {
         let key = self.canon(instr.op0_register());
         let x = self.env.vals.get(&key).cloned().unwrap_or(Expr::Var(key));
         let float = match &x {
             Expr::Var(k) => self.float_param(&x) || self.declared_float(*k),
             e => e.is_float(),
         };
-        float && self.declared_float(key)
+        float && self.declared_ty(key) == ty
     }
 
     /// The float a conversion reads from operand `k`, at width `from`.
@@ -156,13 +162,21 @@ impl Exec<'_, '_> {
     ///
     /// * `key` - The variable.
     pub(super) fn declared_float(&self, key: Key) -> bool {
-        let ty = self
-            .ctx
+        matches!(self.declared_ty(key), Ty::F32 | Ty::F64)
+    }
+
+    /// The type the text declares a variable with: the first declaration,
+    /// else the one it would be declared with now.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The variable.
+    fn declared_ty(&self, key: Key) -> Ty {
+        self.ctx
             .declared
             .get(&key)
             .copied()
-            .unwrap_or_else(|| self.ty_of(key));
-        matches!(ty, Ty::F32 | Ty::F64)
+            .unwrap_or_else(|| self.ty_of(key))
     }
 
     /// Sets the scalar type a vector register holds, replacing one already noted.

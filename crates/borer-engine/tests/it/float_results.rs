@@ -325,3 +325,22 @@ fn a_single_held_in_a_register_is_no_mask() {
     assert!(decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).is_some());
     replays_clean(&p, &a, &[0x1_4000_1000]);
 }
+
+/// A mask in a register whose lanes are not of one shape over a `double`
+/// is bits, not the `double`'s negation: the machine flips bit 31 too.
+#[test]
+fn a_mixed_mask_over_a_double_is_no_negation() {
+    let mut code = vec![
+        0xf2, 0x0f, 0x59, 0xc0, // ASM: mulsd xmm0,xmm0
+        0xf2, 0x0f, 0x10, 0x0d, 0xf4, 0x00, 0x00, 0x00, // ASM: movsd xmm1,[rip+0xf4]
+        0x0f, 0x57, 0xc1, // ASM: xorps xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x100, 0xcc);
+    code.extend_from_slice(&[0, 0, 0, 0x80, 0, 0, 0, 0x80]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(!text.contains("= -"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}
