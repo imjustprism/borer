@@ -100,8 +100,11 @@ use crate::program::Program;
 use subset::{integer_or_zero_fill, outside_subset, reads_whole_lanes};
 
 mod prove;
+mod report;
 mod subset;
 mod term;
+
+pub use report::replay_tsv;
 
 /// States each block is tried from.
 const TRIALS: u64 = 3;
@@ -197,8 +200,8 @@ pub(super) struct Witness {
     /// The width in bits each stack slot the text declares is declared
     /// with: what the slot's name reads.
     pub(super) slot_bits: BTreeMap<i64, u8>,
-    /// The declaration type of each vector register the text names a
-    /// float: the width its own variable reads.
+    /// The float type of each variable the text declares or the lift typed
+    /// a float: the width its own variable reads.
     pub(super) reg_ty: BTreeMap<Key, Ty>,
 }
 
@@ -1486,72 +1489,6 @@ fn cond_exprs<'e>(c: &'e Cond, out: &mut Vec<&'e Expr>) {
         Flags::Result(a, _) | Flags::Carry(a) | Flags::Truth(a, _) => out.push(a),
         Flags::Unknown => {}
     }
-}
-
-/// Renders a replay as a report.
-///
-/// A `#` summary, a line per kind of claim with what was compared, the
-/// reasons blocks were not checked, then a row per disagreement, at most
-/// [`LISTED_MAX`]; rows whose values differ only above the low 32 bits
-/// or whose claim is a lane's say so in their `lane` column.
-///
-/// # Arguments
-///
-/// * `r` - What [`replay`] found.
-#[must_use]
-pub fn replay_tsv(r: &Replayed) -> String {
-    let skipped: usize = r.skipped.values().sum();
-    let lane = r.disagreements.iter().filter(|d| d.lane).count();
-    let mut out = format!(
-        "# replayed {} functions, {} blocks: {} checked from {} states, {skipped} not checked, {} disagreements ({lane} of a lane only)\n",
-        r.functions,
-        r.blocks,
-        r.checked,
-        r.trials,
-        r.disagreements.len()
-    );
-    for claim in Claim::ALL {
-        let _ = writeln!(
-            out,
-            "# {claim}: {} compared, {} not readable, {} disagree",
-            r.compared.get(&claim).copied().unwrap_or(0),
-            r.unreadable.get(&claim).copied().unwrap_or(0),
-            r.disagreements
-                .iter()
-                .filter(|d| d.claim == claim && !d.lane)
-                .count()
-        );
-    }
-    for (reason, n) in &r.skipped {
-        let _ = writeln!(out, "# not checked: {n} for {reason}");
-    }
-    let refuted: BTreeSet<(u64, u64)> = r.refuted.iter().map(|d| (d.function, d.block)).collect();
-    let _ = writeln!(
-        out,
-        "# proved over every state: {} of {} checked blocks; {} refuted by a state the proof chose",
-        r.proved,
-        r.checked,
-        refuted.len()
-    );
-    for (reason, n) in &r.unproved {
-        let _ = writeln!(out, "# not proved: {n} for {reason}");
-    }
-    if r.disagreements.len() > LISTED_MAX {
-        let _ = writeln!(
-            out,
-            "# showing {LISTED_MAX} of {} disagreements",
-            r.disagreements.len()
-        );
-    }
-    out.push_str("function\tblock\tat\tclaim\tplace\ttext\tmachine\tbits\tlane\texpression\n");
-    for d in r.disagreements.iter().chain(&r.refuted).take(LISTED_MAX) {
-        let _ = writeln!(
-            out,
-            "{:#x}\t{:#x}\t{:#x}\t{}\t{}\t{:#x}\t{:#x}\t{}\t{}\t{}",
-            d.function, d.block, d.at, d.claim, d.place, d.text, d.machine, d.bits, d.lane, d.expr
-        );
-    }
-    out
 }
 
 /// How a block ends, which says where its run stops.
