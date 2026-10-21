@@ -46,14 +46,18 @@ impl Client for Cline {
     }
 
     fn place(&self, _: Os, env: &Env) -> Option<(PathBuf, PathBuf)> {
-        let dir = env.var("CLINE_DIR").or_else(|| env.home(".cline"))?;
-        let file = env.var("CLINE_MCP_SETTINGS_PATH").unwrap_or_else(|| {
-            env.var("CLINE_DATA_DIR")
-                .unwrap_or_else(|| dir.join("data"))
-                .join("settings")
-                .join("cline_mcp_settings.json")
-        });
-        Some((dir, file))
+        if let Some(file) = env.var("CLINE_MCP_SETTINGS_PATH") {
+            return Some((file.parent()?.to_path_buf(), file));
+        }
+        let (dir, data) = match env.var("CLINE_DATA_DIR") {
+            Some(data) => (data.clone(), data),
+            None => {
+                let dir = env.var("CLINE_DIR").or_else(|| env.home(".cline"))?;
+                let data = dir.join("data");
+                (dir, data)
+            }
+        };
+        Some((dir, data.join("settings").join("cline_mcp_settings.json")))
     }
 
     fn format(&self) -> Format {
@@ -69,5 +73,43 @@ impl Client for Cline {
             auto_approve: [],
             timeout: TIMEOUT_SEC,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::client::Client as _;
+    use super::super::env::{Env, Os};
+    use super::Cline;
+
+    /// A settings file or data folder moved by its variable is where the
+    /// entry goes, and its folder is what says Cline is there.
+    ///
+    /// # Panics
+    ///
+    /// When a place reads otherwise.
+    #[test]
+    fn moved_settings_are_followed() {
+        let env = |name: &'static str, path: &str| Env {
+            home: Some("/h".into()),
+            vars: vec![(name, path.into())],
+            ..Env::default()
+        };
+        let place = |e: &Env| Cline.place(Os::Linux, e).expect("a place");
+        let (dir, file) = place(&env("CLINE_MCP_SETTINGS_PATH", "/s/m.json"));
+        assert_eq!((dir, file), ("/s".into(), "/s/m.json".into()));
+        let (dir, file) = place(&env("CLINE_DATA_DIR", "/d"));
+        assert_eq!(
+            (dir, file),
+            (
+                "/d".into(),
+                std::path::Path::new("/d/settings/cline_mcp_settings.json").to_path_buf()
+            )
+        );
+        let (dir, _) = place(&Env {
+            home: Some("/h".into()),
+            ..Env::default()
+        });
+        assert_eq!(dir, std::path::Path::new("/h/.cline").to_path_buf());
     }
 }
