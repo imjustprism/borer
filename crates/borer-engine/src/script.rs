@@ -879,7 +879,9 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
 /// the ones before it have not yet named anything, so their order does not
 /// change what any of them sees. A name goes on a function borer left
 /// unnamed or named by vtable slot, the first script's first; a failing
-/// script names nothing and its error is kept.
+/// script names nothing and its error is kept. When a name goes on, the
+/// results the scripts built while they ran, the name index among them,
+/// are let go of: they read the names from before.
 ///
 /// # Arguments
 ///
@@ -938,6 +940,7 @@ pub fn run_pack_scripts(program: &Program, analysis: Analysis) -> Analysis {
     let Some(mut analysis) = Arc::into_inner(shared) else {
         return Analysis::default();
     };
+    let mut renamed = false;
     for (mut report, names) in runs {
         for (entry, name) in names {
             let Some(f) = analysis.function_mut(entry) else {
@@ -951,11 +954,15 @@ pub fn run_pack_scripts(program: &Program, analysis: Analysis) -> Analysis {
                 f.name_inferred = false;
                 f.name_source = NameSource::Pack;
                 report.named += 1;
+                renamed = true;
             } else {
                 report.kept += 1;
             }
         }
         analysis.pack_scripts.push(report);
+    }
+    if renamed {
+        analysis.derived.forget_all();
     }
     analysis
 }

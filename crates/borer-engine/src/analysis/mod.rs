@@ -1217,6 +1217,12 @@ impl Derived {
         self.forget(&|scope, asked| matches!(scope, Scope::Item(_)) && asked <= last);
     }
 
+    /// Lets go of every built result, for when the analysis they were read
+    /// from changed under them.
+    pub(crate) fn forget_all(&self) {
+        self.forget(&|_, _| true);
+    }
+
     /// Lets go of every built result `drop` picks, and of the bytes the
     /// item results among them held.
     ///
