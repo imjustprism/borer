@@ -70,15 +70,20 @@ fn in_image(p: &Program, value: u64) -> bool {
 /// Builds the shortest byte signature for code at an address that matches
 /// the image once.
 ///
+/// It reads no further than `end`: a function's signature is its own
+/// bytes, never the code that happens to follow it.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
 /// * `va` - Where the code starts: a function's entry or any instruction.
+/// * `end` - Where the code stops: the function's end, or `None` to read
+///   up to the longest signature tried.
 ///
 /// # Errors
 ///
 /// When the image is not x86 or x86-64 code, or nothing is mapped at `va`.
-pub fn signature(p: &Program, va: u64) -> Result<Signature, String> {
+pub fn signature(p: &Program, va: u64, end: Option<u64>) -> Result<Signature, String> {
     let bitness = match p.arch {
         Arch::X86_64 => 64,
         Arch::X86 => 32,
@@ -89,8 +94,11 @@ pub fn signature(p: &Program, va: u64) -> Result<Signature, String> {
             ));
         }
     };
+    let room = end.map_or(SIGNATURE_MAX, |e| {
+        crate::num::saturating_usize(e.saturating_sub(va)).min(SIGNATURE_MAX)
+    });
     let bytes = p
-        .read_va_upto(va, SIGNATURE_MAX)
+        .read_va_upto(va, room)
         .filter(|b| !b.is_empty())
         .ok_or_else(|| format!("nothing is mapped at {va:#x}"))?;
     let mut decoder = Decoder::with_ip(bitness, bytes, va, DecoderOptions::NONE);
@@ -150,7 +158,14 @@ pub fn signature(p: &Program, va: u64) -> Result<Signature, String> {
         }
     }
     if best.pattern.is_empty() {
-        return Err(format!("no instruction decodes at {va:#x}"));
+        while pattern.last().is_some_and(Option::is_none) {
+            pattern.pop();
+        }
+        if pattern.is_empty() {
+            return Err(format!("no instruction decodes at {va:#x}"));
+        }
+        let matches = search::find_bytes(p, &pattern, 0).total;
+        return Ok(Signature { pattern, matches });
     }
     Ok(best)
 }
@@ -169,7 +184,8 @@ pub fn signature(p: &Program, va: u64) -> Result<Signature, String> {
 ///
 /// As [`signature`].
 pub fn signature_tsv(p: &Program, a: &Analysis, o: &Overlay, va: u64) -> Result<String, String> {
-    let sig = signature(p, va)?;
+    let end = a.function_at(va).map(|f| f.end);
+    let sig = signature(p, va, end)?;
     let (code, mask) = sig.code_and_mask();
     let named = a.function_at(va).map_or_else(
         || format!("{va:#x}"),
@@ -185,7 +201,7 @@ pub fn signature_tsv(p: &Program, a: &Analysis, o: &Overlay, va: u64) -> Result<
         1 => "unique in the image".to_owned(),
         0 => "matches nothing: the bytes were read past mapped code".to_owned(),
         n => format!(
-            "still matches {n} places after {SIGNATURE_MAX} bytes: the code is duplicated; sign a caller or a longer region"
+            "still matches {n} places at the end of the code read: the function's body is duplicated; sign a caller instead"
         ),
     };
     Ok(format!(
@@ -296,7 +312,7 @@ pub fn yara_rule(
             .function_at(entry)
             .ok_or_else(|| format!("no function at {entry:#x}"))?;
         let name = name_of(a, o, f.entry);
-        match signature(p, f.entry) {
+        match signature(p, f.entry, Some(f.end)) {
             Ok(s) if s.matches == 1 => sigs.push((name.clone(), s.spaced())),
             Ok(s) => notes.push(format!(
                 "{name}: its signature matches {} places, left out",
@@ -339,14 +355,15 @@ pub fn yara_rule(
     }
     let _ = writeln!(out, "rule {} {{", rule_name(&stem));
     let _ = writeln!(out, "    meta:");
-    let _ = writeln!(out, "        description = \"code and strings of {}\"", {
+    let described = format!(
+        "code and strings of {}",
         entries
             .iter()
             .filter_map(|&e| a.function_at(e).map(|f| name_of(a, o, f.entry)))
             .collect::<Vec<_>>()
             .join(", ")
-            .replace('"', "'")
-    });
+    );
+    let _ = writeln!(out, "        description = {}", yara_quoted(&described));
     let _ = writeln!(out, "        generator = \"borer\"");
     let _ = writeln!(out, "    strings:");
     for (i, (name, pattern)) in sigs.iter().enumerate() {
@@ -391,13 +408,34 @@ mod tests {
         code[10..12].copy_from_slice(&[0x00, 0xc3]);
         let text = Section::mapped(".text", 0x40_1000, 0, 0x1000, false, true);
         let p = Program::raw(code, Arch::X86, 0x40_0000, Some(0x40_1000), vec![text]);
-        let sig = signature(&p, 0x40_1000).expect("a signature");
+        let sig = signature(&p, 0x40_1000, None).expect("a signature");
         assert!(
             sig.spaced().starts_with("55 89 E5 53 56 57"),
             "{}",
             sig.spaced()
         );
         assert!(!sig.spaced().contains("00 18 40 00"), "{}", sig.spaced());
+    }
+
+    /// A function whose whole body is duplicated gets no signature borrowed
+    /// from the bytes after it: it reports the places it matches.
+    ///
+    /// # Panics
+    ///
+    /// When the signature is called unique.
+    #[test]
+    fn a_duplicated_body_borrows_no_bytes_past_its_end() {
+        let body = [0x55, 0x48, 0x89, 0xe5, 0x31, 0xc0, 0x5d, 0xc3];
+        let mut code = vec![0xcc_u8; 0x1000];
+        code[..8].copy_from_slice(&body);
+        code[8] = 0x90;
+        code[0x100..0x108].copy_from_slice(&body);
+        code[0x108] = 0x91;
+        let text = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
+        let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let sig = signature(&p, 0x1000, Some(0x1008)).expect("a signature");
+        assert_eq!(sig.matches, 2, "{}", sig.spaced());
+        assert_eq!(sig.pattern.len(), 8);
     }
 
     /// A signature grows past a prefix found twice, wildcarding the
@@ -419,7 +457,7 @@ mod tests {
         code[0x80b] = 0xc3;
         let text = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
         let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
-        let sig = signature(&p, 0x1000).expect("a signature");
+        let sig = signature(&p, 0x1000, None).expect("a signature");
         assert_eq!(sig.spaced(), "55 48 89 E5 48 8B 05 ?? ?? ?? ?? E8");
         assert_eq!(sig.matches, 1);
     }

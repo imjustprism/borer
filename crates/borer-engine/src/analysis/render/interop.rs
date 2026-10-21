@@ -2,10 +2,11 @@
 //! an `IDAPython` script, a Ghidra script, a Binary Ninja script, or an
 //! x64dbg database.
 //!
-//! The scripts take every address relative to the image base borer loaded
-//! the file at, and add the base the tool loaded it at, so they apply to a
-//! rebased database too; x64dbg keys its database by module and relative
-//! address already.
+//! For a PE the scripts take every address relative to the image base its
+//! header names and add the base the tool loaded it at, so they apply to a
+//! rebased database too; other formats' addresses are written as borer
+//! loaded the file. x64dbg keys its database by module and relative address
+//! already.
 
 use super::{Analysis, Overlay, name_of};
 use crate::program::Program;
@@ -161,7 +162,23 @@ pub fn names_export(p: &Program, a: &Analysis, o: &Overlay, tool: Tool) -> Strin
                 }
             };
             let _ = writeln!(out, "BASE = {base:#x}");
-            out.push_str(prelude);
+            if p.format == crate::program::BinaryFormat::Pe {
+                out.push_str(prelude);
+            } else {
+                let fixed = prelude
+                    .lines()
+                    .map(|l| {
+                        if l.starts_with("delta = ") {
+                            "delta = 0  # the addresses as borer loaded the file"
+                        } else {
+                            l
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                out.push_str(&fixed);
+                out.push('\n');
+            }
             for (va, n) in &names {
                 let _ = writeln!(out, "n({va:#x}, {})", quoted(n));
             }
@@ -212,6 +229,30 @@ mod tests {
             script.lines().all(|l| !l.starts_with("__import__")),
             "{script}"
         );
+    }
+
+    /// A file that is not a PE is exported at the addresses borer loaded
+    /// it at: no rebase by the tool's image base.
+    ///
+    /// # Panics
+    ///
+    /// When the script rebases.
+    #[test]
+    fn only_a_pe_rebases() {
+        use crate::analysis::{Analysis, Overlay};
+        use crate::program::{Arch, Program, Section};
+        let text = Section::mapped(".text", 0x40_1000, 0, 0x100, false, true);
+        let p = Program::raw(
+            vec![0xc3; 0x100],
+            Arch::X86_64,
+            0,
+            Some(0x40_1000),
+            vec![text],
+        );
+        let script =
+            super::names_export(&p, &Analysis::default(), &Overlay::default(), Tool::Ghidra);
+        assert!(script.contains("delta = 0  #"), "{script}");
+        assert!(!script.contains("getImageBase"), "{script}");
     }
 
     /// Each tool parses by its usual names.
