@@ -42,16 +42,16 @@ no Ghidra, IDA or Binary Ninja underneath.
 
 | | borer | Ghidra 12.1.4 (headless) |
 | --- | --- | --- |
-| Load sqlite3.dll and list its functions, cold (Ghidra: import and auto-analysis) | 0.12 s | 52 s |
-| The same, analysis kept from an earlier run | 0.11 s | 3.0 s |
-| Decompile every function of sqlite3.dll (both on every core) | 1.2 s | 9.3 s |
-| Peak memory, sqlite3.dll | 77 MB | 1.7 GB |
+| Load sqlite3.dll and list its functions, cold (Ghidra: import and auto-analysis) | 0.11 s | 54 s |
+| The same, analysis kept from an earlier run | 0.11 s | 3.7 s |
+| Decompile every function of sqlite3.dll (both on every core) | 0.96 s | 9.6 s |
+| Peak memory, sqlite3.dll | 78 MB | 1.7 GB |
 | Install | one file | 1.2 GB with its JDK |
 
 Speed is measured on notepad, msvcrt, sqlite3, ntdll and kernelbase, each
 tool as it ships, one after the other
 ([numbers](scripts/run/vs_ghidra.json), [harness](scripts/run/vs_ghidra.py)).
-The rows above are borer 0.2.0's run of that harness. Listing functions is
+The rows above are borer 0.2.1's run of that harness. Listing functions is
 not decompiling them: borer analyzes on the first call that needs it, so its
 first decompile of a large binary pays for that analysis, while Ghidra's has
 paid already. One function
