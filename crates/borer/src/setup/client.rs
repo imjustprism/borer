@@ -5,15 +5,31 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use super::amp::Amp;
+use super::antigravity::Antigravity;
+use super::auggie::Auggie;
 use super::claude::{ClaudeCode, ClaudeDesktop};
+use super::cline::Cline;
 use super::codex::Codex;
+use super::continuedev::Continue;
+use super::copilot::Copilot;
 use super::cursor::Cursor;
 use super::devin::Devin;
+use super::droid::Droid;
 use super::env::{Env, Os};
 use super::gemini::Gemini;
+use super::grok::Grok;
+use super::junie::Junie;
+use super::kilo::Kilo;
+use super::kimi::Kimi;
+use super::kiro::Kiro;
+use super::lmstudio::LmStudio;
 use super::opencode::OpenCode;
 use super::pi::Pi;
+use super::qwen::Qwen;
+use super::roo::Roo;
 use super::vscode::VsCode;
+use super::warp::Warp;
 use super::windsurf::Windsurf;
 use super::zed::Zed;
 
@@ -66,7 +82,7 @@ pub(super) trait Client: Sync + std::fmt::Debug {
 }
 
 /// Every client, in report order.
-const CLIENTS: [&'static dyn Client; 12] = [
+const CLIENTS: [&'static dyn Client; 28] = [
     &ClaudeCode,
     &ClaudeDesktop,
     &Cursor,
@@ -75,10 +91,26 @@ const CLIENTS: [&'static dyn Client; 12] = [
     &VsCode { insiders: false },
     &VsCode { insiders: true },
     &Gemini,
+    &Antigravity,
     &Codex,
     &Zed,
     &OpenCode,
     &Pi,
+    &Copilot,
+    &Grok,
+    &Cline,
+    &Roo,
+    &Kilo,
+    &Continue,
+    &Amp,
+    &Qwen,
+    &Kiro,
+    &Droid,
+    &Kimi,
+    &Junie,
+    &Auggie,
+    &Warp,
+    &LmStudio,
 ];
 
 /// An installed client's configuration file.
@@ -183,13 +215,135 @@ pub(super) fn targets(os: Os, env: &Env) -> (Vec<Target>, Vec<&'static str>) {
     (found, missing)
 }
 
+/// Picks a client's file where it may be written as JSON or JSONC: the
+/// `.jsonc` when only it is there, else the `.json`.
+///
+/// # Arguments
+///
+/// * `dir` - The client's directory, `None` when it has no known base.
+/// * `stem` - The file's name without its extension.
+pub(super) fn json_or_jsonc(dir: Option<PathBuf>, stem: &str) -> Option<(PathBuf, PathBuf)> {
+    let dir = dir?;
+    let jsonc = dir.join(format!("{stem}.jsonc"));
+    let json = dir.join(format!("{stem}.json"));
+    let file = if jsonc.is_file() && !json.is_file() {
+        jsonc
+    } else {
+        json
+    };
+    Some((dir, file))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
     use super::super::env::{Env, Os};
-    use super::super::scratch;
-    use super::targets;
+    use super::super::jsonc::add_json;
+    use super::super::toml::add_toml;
+    use super::super::{Change, scratch};
+    use super::{CLIENTS, Format, targets};
+
+    /// Every client's entry is JSON (or a TOML table) that reads back the
+    /// command it was written for, as an applied `setup` finds it again.
+    ///
+    /// # Panics
+    ///
+    /// When an entry does not read back.
+    #[test]
+    fn every_entry_reads_back_its_command() {
+        let command = r"C:\it's here\borer.exe";
+        for client in CLIENTS {
+            let entry = client.entry(command);
+            let again = match client.format() {
+                Format::Json { key } => {
+                    let text = format!("{{\"{key}\": {{\"borer\": {entry}}}}}");
+                    add_json(&text, key, "{}")
+                }
+                Format::Toml => {
+                    let Ok(Change::Text(text)) = add_toml("", &entry) else {
+                        panic!("{}: no table", client.name());
+                    };
+                    add_toml(&text, &entry)
+                }
+            };
+            assert_eq!(
+                again,
+                Ok(Change::Present(Some(command.to_owned()))),
+                "{}: {entry}",
+                client.name()
+            );
+        }
+    }
+
+    /// Each client added for the other agents is found by its folder, its
+    /// file where that agent reads it.
+    ///
+    /// # Panics
+    ///
+    /// When one is missed or its file is misplaced.
+    #[test]
+    fn the_other_agents_are_found_where_they_live() {
+        let home = scratch("agents");
+        let env = Env {
+            home: Some(home.clone()),
+            config: Some(home.join(".config")),
+            local: Some(home.join("local")),
+            ..Env::default()
+        };
+        for dir in [
+            ".copilot",
+            ".cline",
+            ".continue",
+            ".qwen",
+            ".kiro",
+            ".factory",
+            ".kimi-code",
+            ".junie",
+            ".augment",
+            ".warp",
+            ".grok",
+            ".lmstudio",
+            ".gemini/antigravity",
+            ".config/kilo",
+            ".config/amp",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).expect("made");
+        }
+        std::fs::write(home.join(".lmstudio-home-pointer"), "").expect("written");
+        let (found, _) = targets(Os::Windows, &env);
+        let found: Vec<(&str, PathBuf)> = found
+            .into_iter()
+            .map(|t| (t.client.name(), t.file))
+            .collect();
+        for want in [
+            ("copilot cli", home.join(".copilot/mcp-config.json")),
+            (
+                "cline",
+                home.join(".cline/data/settings/cline_mcp_settings.json"),
+            ),
+            ("continue", home.join(".continue/mcpServers/borer.json")),
+            ("qwen code", home.join(".qwen/settings.json")),
+            ("kiro", home.join(".kiro/settings/mcp.json")),
+            ("factory droid", home.join(".factory/mcp.json")),
+            ("kimi code", home.join(".kimi-code/mcp.json")),
+            ("junie", home.join(".junie/mcp/mcp.json")),
+            ("augment", home.join(".augment/settings.json")),
+            ("warp", home.join(".warp/.mcp.json")),
+            ("grok build", home.join(".grok/config.toml")),
+            ("lm studio", home.join(".lmstudio/mcp.json")),
+            ("antigravity", home.join(".gemini/config/mcp_config.json")),
+            ("kilo code", home.join(".config/kilo/kilo.json")),
+            ("amp", home.join(".config/amp/settings.json")),
+        ] {
+            assert!(found.contains(&want), "{want:?} in {found:?}");
+        }
+        assert!(!found.iter().any(|(c, _)| *c == "gemini cli"), "{found:?}");
+        std::fs::write(home.join(".grok/user-settings.json"), "{}").expect("written");
+        let (found, _) = targets(Os::Windows, &env);
+        assert!(!found.iter().any(|t| t.client.name() == "grok build"));
+        std::fs::remove_dir_all(&home).ok();
+    }
 
     /// A client is installed when its directory exists, and its file is
     /// where that operating system keeps it; Claude Code's file sits
@@ -209,6 +363,7 @@ mod tests {
             codex: Some(home.join(".codex")),
             pi: Some(home.join(".pi/agent")),
             opencode: Some(home.join(".config/opencode")),
+            vars: Vec::new(),
         };
         for dir in [
             ".claude",

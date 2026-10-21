@@ -29,17 +29,34 @@ use client::{Format, Target};
 use env::{Env, Os};
 use jsonc::{add_json, remove_json};
 
+mod amp;
+mod antigravity;
+mod auggie;
 mod claude;
 mod client;
+mod cline;
 mod codex;
+mod continuedev;
+mod copilot;
 mod cursor;
 mod devin;
+mod droid;
 mod env;
 mod gemini;
+mod grok;
 mod jsonc;
+mod junie;
+mod kilo;
+mod kimi;
+mod kiro;
+mod lmstudio;
 mod opencode;
 mod pi;
+mod qwen;
+mod roo;
+mod toml;
 mod vscode;
+mod warp;
 mod windsurf;
 mod zed;
 
@@ -149,15 +166,15 @@ fn register_file(target: &Target, command: &str, mode: Mode, apply: bool) -> (St
     let entry = target.client.entry(command);
     let (change, place) = match format {
         Format::Json { key } => (add_json(&text, key, &entry), format!("under {key}")),
-        Format::Toml => (codex::add_toml(&text, command), "as a table".to_owned()),
+        Format::Toml => (toml::add_toml(&text, &entry), "as a table".to_owned()),
     };
     let added = match format {
         Format::Json { .. } => format!("\"{NAME}\": {entry}"),
-        Format::Toml => entry.clone(),
+        Format::Toml => format!("[mcp_servers.{NAME}] {}", entry.replace('\n', ", ")),
     };
     let removed = || match format {
         Format::Json { key } => remove_json(&text, key),
-        Format::Toml => codex::remove_toml(&text),
+        Format::Toml => toml::remove_toml(&text),
     };
     let (new, done, would) = match (change, mode) {
         (Ok(Change::Text(_)), Mode::Remove) => {
@@ -194,7 +211,7 @@ fn register_file(target: &Target, command: &str, mode: Mode, apply: bool) -> (St
             };
             let replaced = removed().and_then(|without| match format {
                 Format::Json { key } => add_json(&without, key, &entry),
-                Format::Toml => codex::add_toml(&without, command),
+                Format::Toml => toml::add_toml(&without, &entry),
             });
             match replaced {
                 Ok(Change::Text(new)) => (
@@ -263,6 +280,11 @@ fn write_file(file_path: &Path, existed: bool, new: &str, done: &str) -> (String
             true,
             false,
         );
+    }
+    if let Some(dir) = file_path.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        return (format!("{file}: cannot make its folder: {e}"), true, false);
     }
     if let Err(e) = std::fs::write(file_path, new) {
         return (format!("{file}: cannot write it: {e}"), true, false);

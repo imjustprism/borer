@@ -91,7 +91,7 @@ Windows (PowerShell):
 irm https://borer.lol/install.ps1 | iex
 ```
 
-`setup` finds Claude Code, Claude Desktop, Cursor, Windsurf, Devin Desktop, VS Code, VS Code Insiders, Gemini CLI, Codex CLI, Zed, OpenCode and pi.
+`setup` finds Claude Code, Claude Desktop, Cursor, Windsurf, Devin Desktop, VS Code, VS Code Insiders, Gemini CLI, Antigravity, Codex CLI, Zed, OpenCode, pi, Copilot CLI, Grok Build, Cline, Roo Code, Kilo Code, Continue, Amp, Qwen Code, Kiro, Factory Droid, Kimi Code, Junie, Augment, Warp and LM Studio.
 It backs up each file it edits to `<file>.bak`, replaces an entry whose
 program no longer exists (`--replace` replaces any other), and ends by naming
 the clients to restart: none reads its configuration again while it runs
@@ -129,7 +129,10 @@ target/release/borer setup --apply
 ```
 
 To register it by hand, use an absolute path. Claude Desktop, Cursor,
-Windsurf and Gemini CLI read `mcpServers`:
+Windsurf, Gemini CLI, Antigravity, Qwen Code, Kimi Code, Junie, Augment,
+Warp, LM Studio and Factory Droid read `mcpServers` (Continue too, from a
+file of its own, `~/.continue/mcpServers/borer.json`; Amp under
+`amp.mcpServers`):
 
 ```json
 { "mcpServers": { "borer": { "command": "/path/to/borer", "args": [] } } }
@@ -147,8 +150,8 @@ Zed (`settings.json`) reads `context_servers`:
 { "context_servers": { "borer": { "command": "/path/to/borer", "args": [] } } }
 ```
 
-OpenCode (`~/.config/opencode/opencode.json`) reads `mcp`, with the command as
-an array:
+OpenCode (`~/.config/opencode/opencode.json`) and Kilo Code
+(`~/.config/kilo/kilo.json`) read `mcp`, with the command as an array:
 
 ```json
 { "mcp": { "borer": { "type": "local", "command": ["/path/to/borer"], "enabled": true } } }
@@ -161,7 +164,19 @@ pi (`~/.pi/agent/mcp.json`, or `pi mcp add borer -- /path/to/borer`) reads
 { "mcpServers": { "borer": { "command": "/path/to/borer", "args": [], "timeout": 600, "exposure": "direct" } } }
 ```
 
-Codex CLI (`~/.codex/config.toml`):
+Copilot CLI (`~/.copilot/mcp-config.json`) wants a `local` server and its
+tools named:
+
+```json
+{ "mcpServers": { "borer": { "type": "local", "command": "/path/to/borer", "args": [], "tools": ["*"] } } }
+```
+
+Cline (`~/.cline/data/settings/cline_mcp_settings.json`), Roo Code and Kiro
+read `mcpServers` with a `timeout` (seconds; Kiro's in milliseconds), which
+`setup` raises for a first analysis.
+
+Codex CLI (`~/.codex/config.toml`) and Grok Build (`~/.grok/config.toml`,
+which takes the same table without the timeouts):
 
 ```toml
 [mcp_servers.borer]

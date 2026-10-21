@@ -1,7 +1,7 @@
 //! The operating system and the directories client configurations hang
 //! from.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The three operating systems whose configuration paths differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,24 @@ pub(super) struct Env {
     /// `OpenCode`'s directory, `$OPENCODE_CONFIG_DIR`, else `opencode` in the
     /// configuration directory, on Windows too.
     pub(super) opencode: Option<PathBuf>,
+    /// The other clients' directory overrides that are set, by variable
+    /// ([`OVERRIDES`]).
+    pub(super) vars: Vec<(&'static str, PathBuf)>,
 }
+
+/// The variables a client reads its directory or file from, read once.
+const OVERRIDES: [&str; 10] = [
+    "CLINE_DIR",
+    "CLINE_DATA_DIR",
+    "CLINE_MCP_SETTINGS_PATH",
+    "CONTINUE_GLOBAL_DIR",
+    "COPILOT_HOME",
+    "GROK_HOME",
+    "KILO_CONFIG_DIR",
+    "KIMI_CODE_HOME",
+    "KIRO_HOME",
+    "QWEN_HOME",
+];
 
 impl Env {
     /// Reads the directories from the environment.
@@ -66,6 +83,10 @@ impl Env {
                 .or_else(|| config.as_ref().map(|c| c.join("opencode"))),
             config,
             codex: var("CODEX_HOME").or_else(|| home.as_ref().map(|h| h.join(".codex"))),
+            vars: OVERRIDES
+                .iter()
+                .filter_map(|&name| Some((name, var(name)?)))
+                .collect(),
             pi: var("PI_CODING_AGENT_DIR")
                 .or_else(|| home.as_ref().map(|h| h.join(".pi").join("agent"))),
             appdata: var("APPDATA"),
@@ -76,13 +97,35 @@ impl Env {
 }
 
 impl Env {
+    /// An override variable's path, when it is set ([`OVERRIDES`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The variable.
+    pub(super) fn var(&self, name: &str) -> Option<PathBuf> {
+        self.vars
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, p)| p.clone())
+    }
+
+    /// The configuration home on every system, Windows included, as the
+    /// clients written for Unix keep it: `$XDG_CONFIG_HOME`, else `~/.config`.
+    ///
+    /// # Arguments
+    ///
+    /// * `rest` - The path below that directory.
+    pub(super) fn xdg(&self, rest: &str) -> Option<PathBuf> {
+        self.config.as_ref().map(|c| below(c, rest))
+    }
+
     /// A directory under the user's home.
     ///
     /// # Arguments
     ///
     /// * `rest` - The path below the home directory.
     pub(super) fn home(&self, rest: &str) -> Option<PathBuf> {
-        self.home.as_ref().map(|h| h.join(rest))
+        self.home.as_ref().map(|h| below(h, rest))
     }
 
     /// A directory under the per-user configuration directory: `%APPDATA%`
@@ -94,8 +137,8 @@ impl Env {
     /// * `rest` - The path below that directory.
     pub(super) fn config(&self, os: Os, rest: &str) -> Option<PathBuf> {
         match os {
-            Os::Windows => self.appdata.as_ref().map(|a| a.join(rest)),
-            Os::Mac | Os::Linux => self.config.as_ref().map(|c| c.join(rest)),
+            Os::Windows => self.appdata.as_ref().map(|a| below(a, rest)),
+            Os::Mac | Os::Linux => self.config.as_ref().map(|c| below(c, rest)),
         }
     }
 
@@ -110,8 +153,21 @@ impl Env {
         match os {
             Os::Mac => self
                 .home("Library/Application Support")
-                .map(|d| d.join(rest)),
+                .map(|d| below(&d, rest)),
             Os::Windows | Os::Linux => self.config(os, rest),
         }
     }
+}
+
+/// A path below a directory, written with `/` between its parts and
+/// joined part by part, so it reads in the system's own separators.
+///
+/// # Arguments
+///
+/// * `base` - The directory.
+/// * `rest` - The parts below it, `/`-separated.
+fn below(base: &Path, rest: &str) -> PathBuf {
+    rest.split('/')
+        .filter(|part| !part.is_empty())
+        .fold(base.to_path_buf(), |path, part| path.join(part))
 }

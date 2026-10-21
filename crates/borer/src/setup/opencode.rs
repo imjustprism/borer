@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use super::client::{Client, Format, at};
+use super::client::{Client, Format, json_or_jsonc};
 use super::env::{Env, Os};
 use super::jsonc::inline;
 
@@ -43,13 +43,7 @@ impl Client for OpenCode {
     }
 
     fn place(&self, _: Os, env: &Env) -> Option<(PathBuf, PathBuf)> {
-        let dir = env.opencode.clone()?;
-        let file = if dir.join("opencode.jsonc").is_file() && !dir.join("opencode.json").is_file() {
-            "opencode.jsonc"
-        } else {
-            "opencode.json"
-        };
-        at(Some(dir), file)
+        json_or_jsonc(env.opencode.clone(), "opencode")
     }
 
     fn format(&self) -> Format {
