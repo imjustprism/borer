@@ -17,9 +17,10 @@
 //! left there, returns nothing whatever its callers seem to do.
 //!
 //! A 64-bit target hands a `float` or a `double` back in `xmm0`, and such a
-//! function never writes rax: it returns a value when some caller reads
-//! xmm0 after the call and every exit leaves one there, and also when
-//! nobody calls it and its own exits leave that float ([`float_results`]).
+//! function never writes rax: it returns a value when its declaration says
+//! so, when some caller reads xmm0 after the call and every exit leaves one
+//! there, and also when nobody calls it and its own exits leave that float
+//! ([`float_results`]).
 //! A 32-bit target hands it back on the x87 stack, in `st0`, which every
 //! exit of such a function leaves one value deeper than it was entered
 //! ([`x87_results`]).
@@ -34,8 +35,12 @@ use crate::isa::x86::{
 };
 
 use super::functions::{decode_at, decode_block};
+use super::typelib;
 use super::{Analysis, BlockTerm, Function, RefKind, is_imm, striped_with, x87};
 use crate::program::{Program, SymbolKind};
+use uses::{FloatUse, float_use};
+
+mod uses;
 
 /// Fewest functions worth a worker each when the call sites are classified.
 const CLASSIFY_MIN: usize = 256;
@@ -144,9 +149,6 @@ struct Handed {
     /// precision instruction, 64 for a double precision one; sorted, and
     /// empty for rax or a write that names none (`xorps xmm0, xmm0`).
     float_bits: Vec<u8>,
-    /// A store sits between the last write of the result register and the
-    /// `ret`. The value was kept for that store, not handed back.
-    stored: bool,
 }
 
 impl Handed {
@@ -157,7 +159,6 @@ impl Handed {
         calls: Vec::new(),
         unknown: true,
         float_bits: Vec::new(),
-        stored: false,
     };
 }
 
@@ -314,10 +315,10 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .collect();
         let last: Vec<bool> = facts.iter().map(|f| f.float_last).collect();
         float_results(
+            program,
             analysis,
             &uses,
             &hand_back(ResultReg::Xmm0),
-            &handed,
             &read,
             &last,
         )
@@ -617,11 +618,7 @@ fn handed_back(
         }
         let instrs = decode_block(program, bitness, blk);
         let skip = usize::from(b == entry && instrs.first().is_some_and(frame_idiom));
-        let mut stored = false;
         let last = instrs.iter().skip(skip).rev().find_map(|i| {
-            if i.op0_kind() == OpKind::Memory {
-                stored = true;
-            }
             if !is_call(i) {
                 return match reg {
                     ResultReg::Rax => rax_write(factory, i).map(|_| Writer::Own(None)),
@@ -640,7 +637,6 @@ fn handed_back(
                 _ => Some(Writer::Indirect),
             }
         });
-        out.stored |= stored;
         match last {
             Some(Writer::Call(callee)) => out.calls.push(callee),
             Some(Writer::Indirect) => out.unknown = true,
@@ -678,16 +674,22 @@ fn handed_back(
 /// than an integer in rax, read off the writes nearest each exit.
 ///
 /// From every `ret` the blocks are walked backwards, at most
-/// [`RET_LANE_DEPTH`] blocks along a path: a write of rax or a call met
-/// first decides against a float, and so does a write of xmm0 that is
-/// vector work rather than a float result ([`scalar_float_write`]); any
-/// other write of xmm0 met first is a vote for one, and a path that runs
-/// out of blocks first says nothing. A path the code cannot take (a loop
-/// counter left in rax on the way to a test that skips the division) lies
-/// beyond the nearest writes, so the depth keeps it out. A store of xmm0
-/// met first (`movss [rdi], xmm0`) is where a `void` function put the
-/// value it computed, so it decides against a float too. `vzeroupper`
-/// clears only the upper lanes, so the walk looks past it.
+/// [`RET_LANE_DEPTH`] blocks along a path: a write of xmm0 that is vector
+/// work rather than a float result ([`scalar_float_write`]) decides
+/// against a float, any other write of xmm0 met first is a vote for one,
+/// and a path that runs out of blocks first says nothing. A call met
+/// first hands back what its callee leaves, which [`float_results`]
+/// weighs by the callee, so it says nothing here either: the error path
+/// of `ceilf` ends calling the handler that returns its float. A write of
+/// rax met first decides against a float unless xmm0 still holds the
+/// float argument there ([`argument_kept`]): that path hands the argument
+/// back, and the write is scratch (`ceil` compares the argument's bits
+/// with a constant in rax). A path the code cannot take (a loop counter
+/// left in rax on the way to a test that skips the division) lies beyond
+/// the nearest writes, so the depth keeps it out. A store of xmm0 met
+/// first (`movss [rdi], xmm0`) is where a `void` function put the value it
+/// computed, so it decides against a float too. `vzeroupper` clears only
+/// the upper lanes, so the walk looks past it.
 ///
 /// # Arguments
 ///
@@ -698,8 +700,8 @@ fn handed_back(
 ///
 /// # Returns
 ///
-/// True when some exit's nearest result write is to xmm0 and none is to
-/// rax.
+/// True when some exit's nearest result write is to xmm0 and nothing
+/// decides against a float.
 fn float_last(
     program: &Program,
     factory: &mut InstructionInfoFactory,
@@ -716,7 +718,7 @@ fn float_last(
         .map(|(i, _)| (i, 1))
         .collect();
     let mut seen = vec![false; f.blocks.len()];
-    let mut votes = false;
+    let (mut votes, mut scratch) = (false, Vec::new());
     while let Some((b, depth)) = stack.pop() {
         let Some(blk) = f.blocks.get(b) else {
             return false;
@@ -724,31 +726,72 @@ fn float_last(
         if std::mem::replace(&mut seen[b], true) {
             continue;
         }
-        let mut settled = false;
-        for i in decode_block(program, bitness, blk).iter().rev() {
-            if is_call(i) || rax_write(factory, i).is_some() {
-                return false;
+        let instrs = decode_block(program, bitness, blk);
+        let nearest = instrs.iter().rev().find(|i| {
+            i.mnemonic() != Mnemonic::Vzeroupper
+                && (is_call(i)
+                    || rax_write(factory, i).is_some()
+                    || stores_xmm0(factory, i)
+                    || writes_xmm0(factory, i))
+        });
+        match nearest {
+            None if depth < RET_LANE_DEPTH => {
+                stack.extend(preds.get(b).into_iter().flatten().map(|&p| (p, depth + 1)));
             }
-            if matches!(i.mnemonic(), Mnemonic::Vzeroupper) {
-                continue;
-            }
-            if stores_xmm0(factory, i) {
-                return false;
-            }
-            if writes_xmm0(factory, i) {
-                if !scalar_float_write(i) {
-                    return false;
-                }
-                votes = true;
-                settled = true;
-                break;
-            }
-        }
-        if !settled && depth < RET_LANE_DEPTH {
-            stack.extend(preds.get(b).into_iter().flatten().map(|&p| (p, depth + 1)));
+            None => {}
+            Some(i) if is_call(i) => {}
+            Some(i) if rax_write(factory, i).is_some() => scratch.push(i.ip()),
+            Some(i) if stores_xmm0(factory, i) || !scalar_float_write(i) => return false,
+            Some(_) => votes = true,
         }
     }
-    votes
+    votes && (scratch.is_empty() || argument_kept(program, factory, bitness, f, &scratch))
+}
+
+/// Tells whether xmm0 still holds the float the function was handed at
+/// each of the rax writes `at`.
+///
+/// The function takes a float in xmm0 when it reads the register before
+/// any path writes it, and the register still holds that float at a write
+/// when no path from the entry to it writes xmm0 or calls. Whether some
+/// path wrote it runs forward from the entry to a fixpoint, each block
+/// taken at most twice, and the answer reads each block's last pass.
+///
+/// # Arguments
+///
+/// * `program` - The image the function is decoded from.
+/// * `factory` - Register-access facts.
+/// * `bitness` - 32 or 64.
+/// * `f` - The function.
+/// * `at` - Addresses of writes of rax in its body.
+fn argument_kept(
+    program: &Program,
+    factory: &mut InstructionInfoFactory,
+    bitness: u32,
+    f: &Function,
+    at: &[u64],
+) -> bool {
+    let idx = block_index(f);
+    let mut touched: Vec<Option<bool>> = vec![None; f.blocks.len()];
+    let mut passes = vec![(false, true); f.blocks.len()];
+    let mut work: Vec<(usize, bool)> = idx.get(&f.entry).map(|&e| (e, false)).into_iter().collect();
+    while let Some((b, mut t)) = work.pop() {
+        let Some(blk) = f.blocks.get(b).filter(|_| touched[b] < Some(t)) else {
+            continue;
+        };
+        touched[b] = Some(t);
+        let (mut read, mut kept) = (false, true);
+        for i in decode_block(program, bitness, blk) {
+            read |= !t && reads_vector(factory, &i, Register::ZMM0);
+            kept &= !t || !at.contains(&i.ip());
+            t |= is_call(&i) || writes_xmm0(factory, &i);
+        }
+        passes[b] = (read, kept);
+        for s in &blk.successors {
+            work.extend(idx.get(s).map(|&s| (s, t)));
+        }
+    }
+    passes.iter().any(|p| p.0) && passes.iter().all(|p| p.1)
 }
 
 /// Tells whether an instruction's write of a vector register is the kind
@@ -922,127 +965,16 @@ fn reads_vector(factory: &mut InstructionInfoFactory, i: &Instruction, full: Reg
         })
 }
 
-/// What the code after a call does with xmm0.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FloatUse {
-    /// Read before anything writes it: the caller takes a float result,
-    /// at the precision the reading instruction names, when it names one
-    /// ([`xmm0_read_bits`]).
-    Read(Option<u8>),
-    /// Handed on by the caller's `ret`, untouched: taken exactly when the
-    /// caller's own float result is (the caller's entry).
-    Tail(u64),
-    /// Written, clobbered by a call, or lost where the scan stops.
-    Dropped,
-}
-
-/// The precision a scalar float instruction reads xmm0 at, in bits.
-///
-/// A conversion names its source after `cvt` or `cvtt` (`cvtss2sd` reads a
-/// single); any other scalar instruction names it as its suffix (`movss`,
-/// `addsd`). A packed or bit instruction names none.
-///
-/// # Arguments
-///
-/// * `i` - The instruction that reads xmm0.
-fn xmm0_read_bits(i: &Instruction) -> Option<u8> {
-    let name = format!("{:?}", i.mnemonic()).to_ascii_lowercase();
-    let name = name
-        .strip_prefix('v')
-        .filter(|n| n.starts_with("cvt"))
-        .unwrap_or(&name);
-    let lane = match name
-        .strip_prefix("cvtt")
-        .or_else(|| name.strip_prefix("cvt"))
-    {
-        Some(rest) => rest.get(..2)?,
-        None => name.get(name.len().checked_sub(2)?..)?,
-    };
-    match lane {
-        "ss" => Some(32),
-        "sd" => Some(64),
-        _ => None,
-    }
-}
-
-/// Classifies what the code after the call at `call_va` does with xmm0.
-///
-/// The scan follows the return address, jumps within the caller and calls
-/// to functions that hand xmm0 back untouched ([`preserves`]), one path
-/// only: a read of xmm0 takes the result, a `ret` hands it on, and a
-/// write, another call, a branch or the end of [`SCAN_MAX`] instructions
-/// drops it.
-///
-/// # Arguments
-///
-/// * `program` - The image.
-/// * `analysis` - For the caller's blocks.
-/// * `factory` - Reused instruction-info factory.
-/// * `bitness` - Decoder bitness.
-/// * `call_va` - Address of the call instruction.
-/// * `preserving` - Per function, in order, whether it hands xmm0 back
-///   untouched.
-fn float_use(
-    program: &Program,
-    analysis: &Analysis,
-    factory: &mut InstructionInfoFactory,
-    bitness: u32,
-    call_va: u64,
-    preserving: &[bool],
-) -> FloatUse {
-    let Some(caller) = analysis.function_at(call_va) else {
-        return FloatUse::Dropped;
-    };
-    let Some(call) = decode_at(program, bitness, call_va) else {
-        return FloatUse::Dropped;
-    };
-    let within = |va: u64| caller.blocks.iter().any(|b| b.start <= va && va < b.end);
-    let preserves = |target: u64| {
-        analysis
-            .entry_index
-            .get(&target)
-            .is_some_and(|&i| preserving.get(i).copied().unwrap_or(false))
-    };
-    let mut va = call.next_ip();
-    for _ in 0..SCAN_MAX {
-        if !within(va) {
-            return FloatUse::Dropped;
-        }
-        let Some(instr) = decode_at(program, bitness, va) else {
-            return FloatUse::Dropped;
-        };
-        if reads_vector(factory, &instr, Register::ZMM0) {
-            return FloatUse::Read(xmm0_read_bits(&instr));
-        }
-        if writes_xmm0(factory, &instr) {
-            return FloatUse::Dropped;
-        }
-        let target = instr.near_branch_target();
-        va = match instr.flow_control() {
-            FlowControl::Next => instr.next_ip(),
-            FlowControl::UnconditionalBranch if within(target) => target,
-            FlowControl::Call if preserves(target) => instr.next_ip(),
-            FlowControl::Return => return FloatUse::Tail(caller.entry),
-            FlowControl::UnconditionalBranch
-            | FlowControl::ConditionalBranch
-            | FlowControl::IndirectBranch
-            | FlowControl::Call
-            | FlowControl::IndirectCall
-            | FlowControl::Interrupt
-            | FlowControl::Exception
-            | FlowControl::XbeginXabortXend => return FloatUse::Dropped,
-        };
-    }
-    FloatUse::Dropped
-}
-
 /// The width of the floating-point result each function hands back in
 /// xmm0, for the functions that hand one back.
 ///
-/// A function hands one back when three things hold. Its body leaves one
-/// there: every exit's last write of xmm0 is its own instruction, or a
-/// call or jump to a function whose body does or whose signature declares
-/// a `float` or `double`, and at least one exit writes it; an exit that
+/// A function whose declaration states its result
+/// ([`typelib::declared_floats`]) hands back what it states, whatever its
+/// body and its callers seem to say. Any other hands one back when three
+/// things hold. Its body leaves one there: every exit's last write of xmm0
+/// is its own instruction, or a call or jump to a function whose body does
+/// or whose declaration states a `float` or `double`, and at least one
+/// exit writes it; an exit that
 /// writes nothing hands back the float argument that arrived in xmm0
 /// (`ceil` returns a large argument as it came). A caller takes it: some
 /// call site reads xmm0 before anything writes it, or hands it on by a
@@ -1050,25 +982,22 @@ fn float_use(
 /// function nobody calls (an export, a callback reached through a
 /// pointer) has no caller to ask, so its body alone answers: it takes the
 /// float when its instructions write a scalar float to xmm0 nearest its
-/// exits and nothing there writes rax ([`float_last`]). An export's caller
-/// is not in this image, and dropping the value in xmm0 is a different
-/// result; packed vector work left there is not a float.
-/// And no caller reads rax instead. A function that stores between that
-/// write and the `ret` is not one of these: the store is the effect, and
-/// the bits left in the register are not a second result. A function
-/// whose every exit hands back what a function so found leaves there
-/// forwards that float, whoever reads it. The chains run to a fixpoint,
-/// capped at [`PASS_ROUNDS_MAX`] rounds. The width is 32 bits when every
-/// write that names a precision names a single, 64 otherwise; a body
-/// whose writes name none (`movd xmm0, ecx`, a move of bits) takes the
-/// precision its callers read it at.
+/// exits and nothing there decides against one ([`float_last`]). An
+/// export's caller is not in this image, and dropping the value in xmm0
+/// is a different result; packed vector work left there is not a float.
+/// And no caller reads rax instead. A function whose every exit hands back
+/// what a function so found leaves there forwards that float, whoever
+/// reads it. The chains run to a fixpoint, capped at [`PASS_ROUNDS_MAX`]
+/// rounds. The width is 32 bits when every write that names a precision
+/// names a single, 64 otherwise; a body whose writes name none (`movd
+/// xmm0, ecx`, a move of bits) takes the precision its callers read it at.
 ///
 /// # Arguments
 ///
+/// * `program` - The image, for the declarations.
 /// * `analysis` - The functions, in the order of the other arguments.
 /// * `uses` - What each one's call sites do with xmm0 ([`float_use`]).
 /// * `floats` - What their exits hand back in xmm0 ([`handed_back`]).
-/// * `rax` - What their exits hand back in rax ([`handed_back`]).
 /// * `read` - Whether some caller reads each one's rax.
 /// * `last` - Whether each one's exits write xmm0 after rax ([`float_last`]).
 ///
@@ -1076,39 +1005,30 @@ fn float_use(
 ///
 /// One width per function, in order, `None` for no float result.
 fn float_results(
+    program: &Program,
     analysis: &Analysis,
     uses: &[Vec<FloatUse>],
     floats: &[Handed],
-    rax: &[Handed],
     read: &[bool],
     last: &[bool],
 ) -> Vec<Option<u8>> {
-    let declared = |j: usize| {
-        analysis
-            .functions
-            .get(j)
-            .and_then(|f| f.signature.as_ref())
-            .and_then(|s| match s.ret.as_str() {
-                "float" => Some(32),
-                "double" => Some(64),
-                _ => None,
-            })
+    let declared = typelib::declared_floats(program, &analysis.functions);
+    let callee = |c: &u64, known: &[Option<u8>]| {
+        let j = *analysis.entry_index.get(c)?;
+        declared[j].unwrap_or(known[j])
     };
-    let mut body: Vec<Option<u8>> = vec![None; floats.len()];
+    let mut body: Vec<Option<u8>> = declared.iter().map(|d| d.flatten()).collect();
     for _ in 0..PASS_ROUNDS_MAX {
         let mut changed = false;
         for (i, h) in floats.iter().enumerate() {
-            if body[i].is_some() || h.unknown || (!h.own && h.calls.is_empty()) {
+            if declared[i].is_some()
+                || body[i].is_some()
+                || h.unknown
+                || (!h.own && h.calls.is_empty())
+            {
                 continue;
             }
-            let callees: Option<Vec<u8>> = h
-                .calls
-                .iter()
-                .map(|c| {
-                    let j = *analysis.entry_index.get(c)?;
-                    declared(j).or(body[j])
-                })
-                .collect();
+            let callees: Option<Vec<u8>> = h.calls.iter().map(|c| callee(c, &body)).collect();
             let Some(callees) = callees else {
                 continue;
             };
@@ -1138,9 +1058,13 @@ fn float_results(
         .iter()
         .zip(floats)
         .zip(last)
-        .map(|((u, h), &last)| {
-            u.iter().any(|site| matches!(site, FloatUse::Read(_)))
-                || (u.is_empty() && last && h.own)
+        .zip(&declared)
+        .map(|(((u, h), &last), d)| match d {
+            Some(d) => d.is_some(),
+            None => {
+                u.iter().any(|site| matches!(site, FloatUse::Read(_)))
+                    || (u.is_empty() && last && h.own)
+            }
         })
         .collect();
     for _ in 0..PASS_ROUNDS_MAX {
@@ -1169,26 +1093,17 @@ fn float_results(
         .into_iter()
         .zip(taken)
         .zip(read)
-        .zip(uses)
-        .zip(rax)
-        .zip(floats)
-        .zip(last)
-        .map(
-            |((((((bits, taken), &read), sites), integer), float), &last)| {
-                let alone = sites.is_empty()
-                    && last
-                    && !integer.own
-                    && !integer.unknown
-                    && integer.calls.is_empty()
-                    && !float.stored;
-                bits.filter(|_| !read && (taken || alone))
-            },
-        )
+        .zip(&declared)
+        .map(|(((bits, taken), &read), d)| match d {
+            Some(d) => *d,
+            None => bits.filter(|_| !read && taken),
+        })
         .collect();
     for _ in 0..PASS_ROUNDS_MAX {
         let mut changed = false;
         for (i, h) in floats.iter().enumerate() {
             if found[i].is_some()
+                || declared[i].is_some()
                 || read[i]
                 || h.own
                 || h.nothing
@@ -1197,14 +1112,7 @@ fn float_results(
             {
                 continue;
             }
-            let callees: Option<Vec<u8>> = h
-                .calls
-                .iter()
-                .map(|c| {
-                    let j = *analysis.entry_index.get(c)?;
-                    declared(j).or(found[j])
-                })
-                .collect();
+            let callees: Option<Vec<u8>> = h.calls.iter().map(|c| callee(c, &found)).collect();
             if let Some(callees) = callees {
                 found[i] = Some(if callees.iter().all(|&b| b == 32) {
                     32

@@ -269,10 +269,10 @@ pub struct Function {
     /// zeroes the upper half) or hands it back from a call.
     pub ret_partial: Option<u8>,
     /// Width in bits, 32 or 64, of the `float` or `double` the function
-    /// hands back in `xmm0` on a 64-bit target, where every exit leaves one
-    /// and some caller reads it, or in `st0` on a 32-bit one, where every
-    /// exit leaves the x87 stack one value deeper ([`returns`]). `None` for
-    /// a result in rax or none.
+    /// hands back in `xmm0` on a 64-bit target, where its declaration
+    /// states one or every exit leaves one and some caller reads it, or in
+    /// `st0` on a 32-bit one, where every exit leaves the x87 stack one
+    /// value deeper ([`returns`]). `None` for a result in rax or none.
     pub ret_float: Option<u8>,
     /// The function hands `rax` back untouched: on every path to a `ret`
     /// nothing writes it and nothing is called (a stack-cookie check), so a

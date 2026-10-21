@@ -18,7 +18,7 @@ use borer_engine::analysis::{
     },
 };
 use common::fixture;
-use decompiled::{decompiled, program64, runs_agree};
+use decompiled::{decompiled, program64, replays_clean, runs_agree};
 use fixture_pack::fixture_pack;
 
 /// Three arms that name three literals under one value are a flag tested
@@ -1335,26 +1335,6 @@ fn a_bounded_lookup_declares_its_table() {
         "{text}"
     );
     assert!(text.contains("g32_140002000[a1]"), "{text}");
-}
-
-/// Asserts that the text of each function agrees with the machine on
-/// every block from several seeds, the replay the dogfood sweep runs.
-///
-/// # Arguments
-///
-/// * `p` - The program.
-/// * `a` - Its analysis.
-/// * `entries` - The functions to replay.
-///
-/// # Panics
-///
-/// When a statement disagrees with the machine, with the table.
-fn replays_clean(p: &borer_engine::program::Program, a: &Analysis, entries: &[u64]) {
-    use borer_engine::analysis::decompile::replay::{replay, replay_tsv};
-    for seed in 1..=4 {
-        let r = replay(p, a, entries, seed);
-        assert!(r.wrong().is_empty(), "seed {seed}:\n{}", replay_tsv(&r));
-    }
 }
 
 /// A PLT stub for a function the image defines itself takes that name.

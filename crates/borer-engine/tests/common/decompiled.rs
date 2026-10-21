@@ -51,6 +51,26 @@ pub(crate) fn program64(code: &[u8]) -> Program {
     p
 }
 
+/// Asserts that the text of each function agrees with the machine on
+/// every block from several seeds, the replay the dogfood sweep runs.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis.
+/// * `entries` - The functions to replay.
+///
+/// # Panics
+///
+/// When a statement disagrees with the machine, with the table.
+pub(crate) fn replays_clean(p: &Program, a: &Analysis, entries: &[u64]) {
+    use borer_engine::analysis::decompile::replay::{replay, replay_tsv};
+    for seed in 1..=4 {
+        let r = replay(p, a, entries, seed);
+        assert!(r.wrong().is_empty(), "seed {seed}:\n{}", replay_tsv(&r));
+    }
+}
+
 /// Runs a function's final text as C beside the binary in the emulator on
 /// 64 inputs its signature types, and requires every run the binary
 /// returns from to agree.

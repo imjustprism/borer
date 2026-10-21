@@ -41,6 +41,7 @@ mod emulate_calls;
 mod engine;
 mod families;
 mod fixups;
+mod float_results;
 mod go;
 mod groundtruth;
 mod hashing;

@@ -1163,12 +1163,16 @@ fn slot_method(method: &str) -> &str {
     }
 }
 
-/// Spells a constant a float instruction reads as the float its bits are.
+/// Spells the value a float instruction reads at the width it reads.
 ///
 /// A float constant reaches a float instruction through an integer move
 /// (`mov dword [rsp+0x60], 0x3f800000` then `movss xmm0, [rsp+0x60]`), so
 /// the value arrives as integer bits; a float instruction reading them
-/// reads `1.0f`, exactly.
+/// reads `1.0f`, exactly. A single reads only the low 32 bits of any other
+/// integer ([`integer_bits`]), as `movd` cuts its source: `mov [rsp+8],
+/// ecx` then `movss xmm0, [rsp+8]` loads the 32 bits of `ecx`, not the
+/// 64-bit value the lifter holds `rcx` as. A double's integer is all 64
+/// bits already, and a value that may be a float stays as it is.
 ///
 /// # Arguments
 ///
@@ -1177,7 +1181,38 @@ fn slot_method(method: &str) -> &str {
 fn float_bits(v: Expr, ty: Ty) -> Expr {
     match (v, ty) {
         (Expr::Const(bits), Ty::F32 | Ty::F64) => Expr::FConst(bits, ty),
+        (v, Ty::F32) if integer_bits(&v) => mask(v, 0xffff_ffff),
         (other, _) => other,
+    }
+}
+
+/// Tells whether a value is integer bits by its own shape: a constant, an
+/// integer operation or load, or a general register.
+///
+/// A variable whose type the text decides later, a parameter, a temporary,
+/// a slot's or a global's, may hold a float, so it is none.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+fn integer_bits(v: &Expr) -> bool {
+    match v {
+        Expr::Const(_) | Expr::Sext(..) | Expr::Cond(_) => true,
+        Expr::Bin(op, ..) => !op.is_float(),
+        Expr::Helper(..) => !v.is_float(),
+        Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) => {
+            !matches!(ty, Ty::F32 | Ty::F64 | Ty::U128)
+        }
+        Expr::Var(Key::Reg(r)) => r.is_gpr(),
+        Expr::Var(Key::A64(r)) => matches!(r, crate::isa::a64::Reg::X(_)),
+        Expr::Var(Key::A32(r)) => matches!(r, crate::isa::a32::Reg::R(_)),
+        Expr::Var(Key::Param(_) | Key::Slot(_) | Key::Global(..) | Key::Tmp(_))
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Un(..)
+        | Expr::Ternary(..)
+        | Expr::Call(..)
+        | Expr::FConst(..) => false,
     }
 }
 
@@ -1304,13 +1339,38 @@ fn masked_lanes(abs: bool, ty: Ty, broadcast: Option<bool>, x: Expr) -> Expr {
     if float_lane(&x) != Some(64) {
         return plain;
     }
-    let (op, mask) = match (abs, broadcast) {
-        (false, false) => (Op::Xor, SIGN32),
-        (false, true) => (Op::Xor, SIGN32_SPLAT),
-        (true, false) => (Op::And, MAG32),
-        (true, true) => (Op::And, MAG32_SPLAT),
+    let Some((op, mask)) = lane_mask(abs, ty, Some(broadcast)) else {
+        return plain;
     };
     Expr::Bin(op, Box::new(x), Box::new(Expr::Const(mask)))
+}
+
+/// The bit operation a sign or magnitude mask applies to a register's low
+/// 64 bits.
+///
+/// # Arguments
+///
+/// * `abs` - A magnitude mask (`and`), else a sign mask (`xor`).
+/// * `ty` - The float width the mask is for.
+/// * `broadcast` - For a single, whether the mask covers the next lane too;
+///   `None` when that is not known.
+///
+/// # Returns
+///
+/// The operation and its mask, `None` for a single whose next lane is not
+/// known.
+fn lane_mask(abs: bool, ty: Ty, broadcast: Option<bool>) -> Option<(Op, u64)> {
+    let mask = match (ty, broadcast) {
+        (Ty::F32, Some(false)) => SIGN32,
+        (Ty::F32, Some(true)) => SIGN32_SPLAT,
+        (Ty::F32, None) => return None,
+        _ => SIGN_ABOVE,
+    };
+    Some(if abs {
+        (Op::And, if mask == SIGN32 { MAG32 } else { !mask })
+    } else {
+        (Op::Xor, mask)
+    })
 }
 
 /// The low 32 bits of `low`, with bit 63 set.
@@ -1937,6 +1997,7 @@ pub(crate) fn vararg_fixed<'i>(
 mod tests {
     use super::slot_method;
     use crate::analysis::decompile::decompile;
+    use crate::analysis::decompile::verify::{verify, verify_tsv};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{Arch, Program};
 
@@ -1997,5 +2058,78 @@ mod tests {
         assert_eq!(slot_method("vfunc_12"), "vfunc_12");
         assert_eq!(slot_method("vfunc_3_x"), "vfunc_3_x");
         assert_eq!(slot_method("GetId_2"), "GetId_2");
+    }
+
+    /// A single a float instruction reads out of integer bits is the 32 bits
+    /// the machine moves, in the lifter and the emulator alike.
+    ///
+    /// `mov [rsp+8], ecx` stores the low half of the `rcx` the lifter holds
+    /// whole, and `movss xmm0, [rsp+8]` left that 64-bit value in the lane
+    /// (msvcrt's `_copysignf`, `_scalbf`, `ceilf`, `floorf` and `expf`; a
+    /// bare register was set aside as the lane known roughness), as did
+    /// `movss` and `vmovss` from a register a `movq` filled, over a single
+    /// whose bits above the lane a load had cleared. A double read after a
+    /// 32-bit or a 64-bit store already agreed. Every seed puts bits above
+    /// bit 31.
+    ///
+    /// # Panics
+    ///
+    /// When a seed disagrees, sets a lane aside or cannot read a fact.
+    #[test]
+    fn a_single_read_out_of_integer_bits_agrees_with_the_emulator() {
+        let cases: [&[u8]; 7] = [
+            &[
+                0x0f, 0xba, 0xf9, 0x1f, // ASM: btc ecx, 0x1f
+                0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8], ecx
+                0xf3, 0x0f, 0x10, 0x44, 0x24, 0x08, // ASM: movss xmm0, [rsp+8]
+                0xc3, // ASM: ret
+            ],
+            &[
+                0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8], ecx
+                0xf3, 0x0f, 0x10, 0x44, 0x24, 0x08, // ASM: movss xmm0, [rsp+8]
+                0xc3, // ASM: ret
+            ],
+            &[
+                0x01, 0xd1, // ASM: add ecx, edx
+                0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8], ecx
+                0xc5, 0xfa, 0x10, 0x74, 0x24, 0x08, // ASM: vmovss xmm6, [rsp+8]
+                0xc3, // ASM: ret
+            ],
+            &[
+                0xf3, 0x0f, 0x10, 0x01, // ASM: movss xmm0, [rcx]
+                0x66, 0x48, 0x0f, 0x6e, 0xca, // ASM: movq xmm1, rdx
+                0xf3, 0x0f, 0x10, 0xc1, // ASM: movss xmm0, xmm1
+                0xc3, // ASM: ret
+            ],
+            &[
+                0xf3, 0x0f, 0x10, 0x11, // ASM: movss xmm2, [rcx]
+                0x66, 0x48, 0x0f, 0x6e, 0xca, // ASM: movq xmm1, rdx
+                0xc5, 0xea, 0x10, 0xc1, // ASM: vmovss xmm0, xmm2, xmm1
+                0xc3, // ASM: ret
+            ],
+            &[
+                0x01, 0xd1, // ASM: add ecx, edx
+                0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8], ecx
+                0xf2, 0x0f, 0x10, 0x54, 0x24, 0x08, // ASM: movsd xmm2, [rsp+8]
+                0xc3, // ASM: ret
+            ],
+            &[
+                0x48, 0x01, 0xd1, // ASM: add rcx, rdx
+                0x48, 0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8], rcx
+                0xf2, 0x0f, 0x10, 0x5c, 0x24, 0x08, // ASM: movsd xmm3, [rsp+8]
+                0xc3, // ASM: ret
+            ],
+        ];
+        for code in cases {
+            let p = Program::raw_x64(code);
+            let a = Analysis::compute(&p);
+            for seed in 1..=16 {
+                let v = verify(&p, &a, &[0x1000], seed);
+                assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+                assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+                assert_eq!(v.lane, 0, "seed {seed}: {}", verify_tsv(&v));
+                assert_eq!(v.unreadable, 0, "seed {seed}: {}", verify_tsv(&v));
+            }
+        }
     }
 }

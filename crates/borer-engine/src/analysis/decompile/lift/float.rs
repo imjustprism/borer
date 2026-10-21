@@ -60,6 +60,111 @@ impl Exec<'_, '_> {
         })
     }
 
+    /// Writes what a sign or magnitude mask from memory leaves in operand 0.
+    ///
+    /// A mask over a float the text declares is its negation or magnitude
+    /// ([`masked_lanes`]). A register the text declares as an integer, or a
+    /// value not known as a float (a global's bits), holds the bits, where
+    /// C's `-` would negate the integer, so the mask is applied as the bit
+    /// operation it is ([`lane_mask`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The `xorps`, `xorpd`, `andps` or `andpd` with the mask.
+    pub(super) fn mask_write(&mut self, instr: &Instruction) {
+        let Some((abs, ty, broadcast)) = self.float_mask(instr) else {
+            return;
+        };
+        let bits = lane_mask(abs, ty, broadcast)
+            .filter(|_| self.ctx.bitness == 64 && !self.mask_negates(instr));
+        let x = self.val(instr, 0);
+        let v = masked_lanes(abs, ty, broadcast, x.clone());
+        if let (Expr::Un(..), Some((op, mask))) = (&v, bits) {
+            self.stamp_reg_ty(instr, Ty::U64);
+            self.write_op0(
+                instr,
+                Expr::Bin(op, Box::new(x), Box::new(Expr::Const(mask))),
+            );
+        } else if matches!(v, Expr::Un(..)) {
+            self.float_write(instr, v, ty);
+        } else {
+            self.stamp_reg_ty(instr, Ty::U64);
+            self.write_op0(instr, v);
+        }
+    }
+
+    /// Tells whether a sign or magnitude mask is one the lifter applies
+    /// ([`Exec::mask_write`]): one from memory, or one loaded into another
+    /// register that negates or clears a float the text declares.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - A two-operand `xorps`, `xorpd`, `andps` or `andpd`.
+    pub(super) fn mask_applies(&self, instr: &Instruction) -> bool {
+        self.float_mask(instr).is_some()
+            && (instr.op1_kind() == OpKind::Memory || self.mask_negates(instr))
+    }
+
+    /// Tells whether a mask's destination holds a float the text declares,
+    /// so the mask is that float's negation or magnitude, not bits.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The masking instruction.
+    fn mask_negates(&self, instr: &Instruction) -> bool {
+        let key = self.canon(instr.op0_register());
+        let x = self.env.vals.get(&key).cloned().unwrap_or(Expr::Var(key));
+        let float = match &x {
+            Expr::Var(k) => self.float_param(&x) || self.declared_float(*k),
+            e => e.is_float(),
+        };
+        float && self.declared_float(key)
+    }
+
+    /// The float a conversion reads from operand `k`, at width `from`.
+    ///
+    /// A conversion reads its source's bits as a float. A register the text
+    /// declares as an integer (a sign mask's bits, [`Exec::stamp_reg_ty`],
+    /// then the declaration the register keeps for every value it holds)
+    /// would convert as that integer in C, so its bits are reinterpreted.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The conversion.
+    /// * `k` - The operand it reads.
+    /// * `from` - The float width it reads, [`Ty::F32`] or [`Ty::F64`].
+    pub(super) fn float_source(&mut self, instr: &Instruction, k: u32, from: Ty) -> Expr {
+        let lane = scalar_lane(self.val(instr, k), from);
+        let Expr::Var(key) = lane else {
+            return lane;
+        };
+        let integral = instr.op_kind(k) == OpKind::Register
+            && instr.op_register(k).is_vector_register()
+            && !self.float_param(&lane)
+            && !self.declared_float(key);
+        if integral { bitcast(lane, from) } else { lane }
+    }
+
+    /// Tells whether the text declares a variable as a float: the type it
+    /// was first declared with, else the one it would be declared with now.
+    ///
+    /// A register keeps one declaration for every value it holds, so a value
+    /// the text must spell as bits is one whose register is declared an
+    /// integer.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The variable.
+    pub(super) fn declared_float(&self, key: Key) -> bool {
+        let ty = self
+            .ctx
+            .declared
+            .get(&key)
+            .copied()
+            .unwrap_or_else(|| self.ty_of(key));
+        matches!(ty, Ty::F32 | Ty::F64)
+    }
+
     /// Sets the scalar type a vector register holds, replacing one already noted.
     ///
     /// A sign or magnitude mask leaves integer bits, not the float the
@@ -675,11 +780,13 @@ impl Exec<'_, '_> {
     }
 
     /// Recognizes the sign and magnitude masks scalar float code applies with
-    /// `xorps`/`andps` on a constant.
+    /// `xorps`/`andps` on a constant: in memory, or loaded into another
+    /// register first (`tanf` keeps its sign mask in `xmm5`), where only the
+    /// lanes the register is known to hold count.
     ///
     /// # Arguments
     ///
-    /// * `instr` - A two-operand `xorps`, `xorpd`, `andps` or `andpd` with a memory source.
+    /// * `instr` - A two-operand `xorps`, `xorpd`, `andps` or `andpd`.
     ///
     /// # Returns
     ///
@@ -691,10 +798,24 @@ impl Exec<'_, '_> {
     /// the bits above it are not one shape. `None` for the whole option is any
     /// other constant or a non-constant address.
     pub(super) fn float_mask(&self, instr: &Instruction) -> Option<(bool, Ty, Option<bool>)> {
-        let Expr::Const(a) = self.addr(instr, 1) else {
-            return None;
+        let loaded = |a: &Expr, n: usize| match a {
+            Expr::Const(a) => self.ctx.program.read_va(*a, n).map(<[u8]>::to_vec),
+            _ => None,
         };
-        let bytes = self.ctx.program.read_va(a, 16)?;
+        let bytes = match instr.op1_kind() {
+            OpKind::Memory => loaded(&self.addr(instr, 1), 16)?,
+            OpKind::Register
+                if instr.op1_register().is_vector_register()
+                    && instr.op1_register() != instr.op0_register() =>
+            {
+                match self.env.vals.get(&self.canon(instr.op1_register()))? {
+                    Expr::Const(c) => c.to_le_bytes().to_vec(),
+                    Expr::Deref(a, ty) => loaded(a, usize::from(ty.bits() / 8))?,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
         let lanes32: Vec<u32> = bytes
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))

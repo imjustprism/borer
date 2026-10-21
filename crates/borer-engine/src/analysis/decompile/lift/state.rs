@@ -603,35 +603,17 @@ impl<'a> Exec<'_, 'a> {
         Some(Expr::deref(Expr::Sp(d), Ty::from_bits(dbits)))
     }
 
-    /// Tells whether a value is an integer by its own shape: a constant, an
-    /// integer operation or load, a general register, or a parameter the
-    /// convention passes in one.
-    ///
-    /// A variable whose type the text decides later, a temporary or a
-    /// slot's, may hold a float, so it is none.
+    /// Tells whether a value is an integer by its own shape
+    /// ([`integer_bits`]), or a parameter the convention passes in a
+    /// general register.
     ///
     /// # Arguments
     ///
     /// * `v` - The value.
     fn integral(&self, v: &Expr) -> bool {
         match v {
-            Expr::Const(_) | Expr::Sext(..) | Expr::Cond(_) => true,
-            Expr::Bin(op, ..) => !op.is_float(),
-            Expr::Helper(..) => !v.is_float(),
-            Expr::Deref(_, ty) | Expr::Cast(_, ty) | Expr::Bitcast(_, ty) => {
-                !matches!(ty, Ty::F32 | Ty::F64 | Ty::U128)
-            }
             Expr::Var(Key::Param(i)) => self.ctx.arg_floats & (1u8 << (*i).min(7)) == 0,
-            Expr::Var(Key::Reg(r)) => r.is_gpr(),
-            Expr::Var(Key::A64(r)) => matches!(r, crate::isa::a64::Reg::X(_)),
-            Expr::Var(Key::A32(r)) => matches!(r, crate::isa::a32::Reg::R(_)),
-            Expr::Var(Key::Slot(_) | Key::Global(..) | Key::Tmp(_))
-            | Expr::Str(_)
-            | Expr::Sp(_)
-            | Expr::Un(..)
-            | Expr::Ternary(..)
-            | Expr::Call(..)
-            | Expr::FConst(..) => false,
+            _ => integer_bits(v),
         }
     }
 
@@ -1928,13 +1910,55 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
+    /// Returns what reads a variable's pending value back once it is
+    /// written out: the variable itself, or a stack slot read at the width
+    /// the value was stored at when its name is declared at another.
+    ///
+    /// A slot's name reads as many bits as it is declared with, so a
+    /// `uint32_t local_58` holds only the low half of the qword stored to
+    /// it (`*(uint64_t*)&local_58 = x;`), and a dword stored to a `uint64_t`
+    /// leaves the name's high half what it was. A read at the store's width
+    /// is the value when the value is an integer the store keeps whole, or
+    /// when its reader looks at no bit above the store's; the name itself
+    /// is when its reader looks at exactly the bits it is declared with, all
+    /// of them stored. A slot declared wider than a word is named bare at
+    /// every width ([`Names::slot_at`]), so no read of it is spelled at the
+    /// store's.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The variable.
+    /// * `value` - Its pending value.
+    /// * `need` - The low bits of the value its reader looks at, when that
+    ///   is all it looks at: a compare of that width of the value itself.
+    ///
+    /// # Returns
+    ///
+    /// The read, or `None` when no read of the variable is the value: a
+    /// float, a slot declared wider than a word, or bits the store did not
+    /// keep.
+    fn read_back(&self, key: Key, value: &Expr, need: Option<u8>) -> Option<Expr> {
+        let Key::Slot(o) = key else {
+            return Some(Expr::Var(key));
+        };
+        let declared = self.ty_of(key).bits();
+        let stored = self.env.slot_bits.get(&o).copied().unwrap_or(declared);
+        if stored == declared || (need == Some(declared) && declared < stored) {
+            return Some(Expr::Var(key));
+        }
+        let kept = known_bits(value) & !mask_bits(stored) == 0 || need.is_some_and(|b| b <= stored);
+        (declared <= 64 && stored <= 64 && !value.is_float() && kept)
+            .then(|| Expr::deref(Expr::Sp(o), Ty::from_bits(stored)))
+    }
+
     /// Places a phi: writes `key = value;` at the block's end.
     ///
     /// The values that read the old `key` are written out first. Then
     /// condition and switch-index operands that computed exactly `value`
-    /// simply read `key` (a copy or constant is not worth naming, so only
-    /// real computations are rewritten); operands reading the old `key` any
-    /// other way are copied to temporaries. The readers go first because
+    /// read it back from `key` ([`Exec::read_back`]; a copy or constant is
+    /// not worth naming, so only real computations are rewritten);
+    /// operands reading the old `key` any other way are copied to
+    /// temporaries. The readers go first because
     /// writing one out copies the operands that read it into temporaries,
     /// which would otherwise copy a rewritten operand before `key` holds
     /// what it reads (`tmp_1 = r11 | r8;` ahead of `r8 <<= 12` for `r11 |
@@ -1954,54 +1978,64 @@ impl<'a> Exec<'_, 'a> {
         };
         let value = &value;
         let marker = Expr::Var(Key::Tmp(0));
-        let rewrite = |ex: &mut Self, e: Expr| -> Expr {
+        let rewrite = |ex: &mut Self, e: Expr, bits: Option<u8>| -> Expr {
             if matches!(e, Expr::Const(_)) {
                 return e;
             }
-            let marked = if value.size() > 1 {
-                e.subst(value, &marker)
-            } else {
-                e.clone()
+            let back = (value.size() > 1)
+                .then(|| ex.read_back(key, value, bits.filter(|_| e == *value)))
+                .flatten();
+            let marked = match &back {
+                Some(_) => e.subst(value, &marker),
+                None => e.clone(),
             };
-            if marked.mentions(key) {
-                ex.tmp_if(e, &|_| true)
-            } else {
-                marked.subst(&marker, &Expr::Var(key))
+            match &back {
+                _ if marked.mentions(key) => ex.tmp_if(e, &|_| true),
+                Some(b) => marked.subst(&marker, b),
+                None => marked,
             }
         };
-        let pair = |ex: &mut Self, l: Expr, r: Expr| -> (Expr, Expr) {
+        let pair = |ex: &mut Self, l: Expr, r: Expr, bits: Option<u8>| -> (Expr, Expr) {
             let same = l == r;
-            let l = rewrite(ex, l);
-            let r = if same { l.clone() } else { rewrite(ex, r) };
+            let l = rewrite(ex, l, bits);
+            let r = if same {
+                l.clone()
+            } else {
+                rewrite(ex, r, bits)
+            };
             (l, r)
         };
         let flags = std::mem::replace(&mut self.flags, Flags::Unknown);
         self.flags = match flags {
             Flags::Cmp(l, r, b) => {
-                let (l, r) = pair(self, l, r);
+                let (l, r) = pair(self, l, r, Some(b));
                 Flags::Cmp(l, r, b)
             }
             Flags::Float(l, r, b) => {
-                let (l, r) = pair(self, l, r);
+                let (l, r) = pair(self, l, r, None);
                 Flags::Float(l, r, b)
             }
             Flags::FCmp(p, l, r, b) => {
-                let (l, r) = pair(self, l, r);
+                let (l, r) = pair(self, l, r, None);
                 Flags::FCmp(p, l, r, b)
             }
             Flags::Test(l, r, b) => {
-                let (l, r) = pair(self, l, r);
+                let (l, r) = pair(self, l, r, Some(b));
                 Flags::Test(l, r, b)
             }
-            Flags::Result(e, b) => Flags::Result(rewrite(self, e), b),
-            Flags::Shift(e, b, c) => Flags::Shift(rewrite(self, e), b, rewrite(self, c)),
-            Flags::Add(l, r, b) => Flags::Add(rewrite(self, l), rewrite(self, r), b),
-            Flags::Carry(e) => Flags::Carry(rewrite(self, e)),
-            Flags::Truth(e, cc) => Flags::Truth(rewrite(self, e), cc),
+            Flags::Result(e, b) => Flags::Result(rewrite(self, e, Some(b)), b),
+            Flags::Shift(e, b, c) => {
+                Flags::Shift(rewrite(self, e, None), b, rewrite(self, c, None))
+            }
+            Flags::Add(l, r, b) => {
+                Flags::Add(rewrite(self, l, Some(b)), rewrite(self, r, Some(b)), b)
+            }
+            Flags::Carry(e) => Flags::Carry(rewrite(self, e, None)),
+            Flags::Truth(e, cc) => Flags::Truth(rewrite(self, e, None), cc),
             Flags::Unknown => Flags::Unknown,
         };
         if let Some(idx) = self.switch_idx.take() {
-            self.switch_idx = Some(rewrite(self, idx));
+            self.switch_idx = Some(rewrite(self, idx, None));
         }
         let Some(val) = self.env.vals.remove(&key) else {
             return;

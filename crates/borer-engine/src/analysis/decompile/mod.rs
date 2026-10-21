@@ -2512,18 +2512,14 @@ fn decompile_in<L: Lifter>(
             reg_ty: ctx
                 .reg_ty
                 .iter()
+                .chain(&ctx.declared)
                 .filter_map(|(k, ty)| match ty {
                     Ty::F32 | Ty::F64 => Some((*k, *ty)),
                     _ => None,
                 })
                 .chain(params.iter().enumerate().filter_map(|(i, p)| {
-                    let ty = if p.starts_with("float ") {
-                        Ty::F32
-                    } else if p.starts_with("double ") {
-                        Ty::F64
-                    } else {
-                        return None;
-                    };
+                    let floats = [("float ", Ty::F32), ("double ", Ty::F64)];
+                    let (_, ty) = floats.into_iter().find(|(t, _)| p.starts_with(t))?;
                     Some((Key::Param(u8::try_from(i).ok()?), ty))
                 }))
                 .collect(),

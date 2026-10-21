@@ -756,7 +756,7 @@ impl Exec<'_, '_> {
                     Ty::F64
                 };
                 let v = Expr::Cast(
-                    Box::new(scalar_lane(self.val(instr, 1), src)),
+                    Box::new(self.float_source(instr, 1, src)),
                     Ty::from_bits(bits),
                 );
                 self.write_op0(instr, v);
@@ -769,7 +769,7 @@ impl Exec<'_, '_> {
                 } else {
                     Ty::F64
                 };
-                let lane = scalar_lane(self.val(instr, 1), src);
+                let lane = self.float_source(instr, 1, src);
                 let v = Expr::Cast(
                     Box::new(Expr::Helper(Helper::Rint, vec![lane])),
                     Ty::from_bits(bits),
@@ -780,33 +780,22 @@ impl Exec<'_, '_> {
                 let ty = scalar_ty(mn);
                 let from = if ty == Ty::F64 { Ty::F32 } else { Ty::F64 };
                 let upper = self.val(instr, 0);
-                let v = Expr::Cast(Box::new(scalar_lane(self.val(instr, 1), from)), ty);
+                let v = Expr::Cast(Box::new(self.float_source(instr, 1, from)), ty);
                 self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Vcvtss2sd | Mnemonic::Vcvtsd2ss if instr.op_count() == 3 => {
                 let ty = scalar_ty(mn);
                 let from = if ty == Ty::F64 { Ty::F32 } else { Ty::F64 };
                 let upper = self.val(instr, 1);
-                let v = Expr::Cast(Box::new(scalar_lane(self.val(instr, 2), from)), ty);
+                let v = Expr::Cast(Box::new(self.float_source(instr, 2, from)), ty);
                 self.write_scalar_lane(instr, v, ty, &upper);
             }
             Mnemonic::Xorps | Mnemonic::Xorpd | Mnemonic::Andps | Mnemonic::Andpd
                 if instr.op_count() == 2
                     && instr.op0_kind() == OpKind::Register
-                    && instr.op1_kind() == OpKind::Memory
-                    && self.float_mask(instr).is_some() =>
+                    && self.mask_applies(instr) =>
             {
-                let Some((abs, ty, broadcast)) = self.float_mask(instr) else {
-                    return;
-                };
-                let x = self.val(instr, 0);
-                let v = masked_lanes(abs, ty, broadcast, x);
-                if matches!(v, Expr::Un(..)) {
-                    self.float_write(instr, v, ty);
-                } else {
-                    self.stamp_reg_ty(instr, Ty::U64);
-                    self.write_op0(instr, v);
-                }
+                self.mask_write(instr);
             }
             Mnemonic::Movsx | Mnemonic::Movsxd if instr.op_count() == 2 => {
                 let src_bits = src_bits(instr, 1);

@@ -1018,3 +1018,71 @@ fn repe_cmpsb_is_the_compare_it_expands() {
         );
     }
 }
+
+/// A compare of the value a block just stored to a slot reads the slot at
+/// the width the store wrote, not the width its name is declared with.
+///
+/// The first function stores `ecx` to `[rsp]` first, so `local_18` is a
+/// `uint32_t`, then stores `movsxd rax,edx` there whole and compares `r8`
+/// with `rax - 1 + r8`; the second stores `rcx` first, so its `local_18`
+/// is a `uint64_t`, then the byte `movzx eax,byte [rdx]` as a dword and
+/// compares `rax` whole. A loop reading the slot follows each, so the
+/// block writes the slot out at its end and its compare reads the stored
+/// value back from it: by the slot's name, that read only the low half of
+/// the first store, and the high half the second store left alone, so a
+/// negative `a2` or a wide `a1` sent the branch the other way.
+#[test]
+fn a_compare_reads_a_slot_at_the_width_it_was_stored() {
+    use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x18, // ASM: sub rsp,0x18
+        0x89, 0x0c, 0x24, // ASM: mov [rsp],ecx
+        0x48, 0x63, 0xc2, // ASM: movsxd rax,edx
+        0x48, 0x89, 0x04, 0x24, // ASM: mov [rsp],rax
+        0x4c, 0x8d, 0x48, 0xff, // ASM: lea r9,[rax-1]
+        0x4d, 0x01, 0xc1, // ASM: add r9,r8
+        0x4d, 0x39, 0xc8, // ASM: cmp r8,r9
+        0x73, 0x0d, // ASM: jae 0x1027
+        0x48, 0x8b, 0x04, 0x24, // ASM: mov rax,[rsp]
+        0x48, 0xd1, 0xe8, // ASM: shr rax,1
+        0x48, 0x89, 0x04, 0x24, // ASM: mov [rsp],rax
+        0x75, 0xf3, // ASM: jne 0x101a
+        0x48, 0x8b, 0x04, 0x24, // ASM: mov rax,[rsp]
+        0x48, 0x83, 0xc4, 0x18, // ASM: add rsp,0x18
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([
+        0x48, 0x83, 0xec, 0x18, // ASM: sub rsp,0x18
+        0x48, 0x89, 0x0c, 0x24, // ASM: mov [rsp],rcx
+        0x0f, 0xb6, 0x02, // ASM: movzx eax,byte [rdx]
+        0x89, 0x04, 0x24, // ASM: mov [rsp],eax
+        0x4c, 0x39, 0xc0, // ASM: cmp rax,r8
+        0x73, 0x0d, // ASM: jae 0x1060
+        0x48, 0x8b, 0x04, 0x24, // ASM: mov rax,[rsp]
+        0x48, 0xd1, 0xe8, // ASM: shr rax,1
+        0x48, 0x89, 0x04, 0x24, // ASM: mov [rsp],rax
+        0x75, 0xf3, // ASM: jne 0x1053
+        0x48, 0x8b, 0x04, 0x24, // ASM: mov rax,[rsp]
+        0x48, 0x83, 0xc4, 0x18, // ASM: add rsp,0x18
+        0xc3, // ASM: ret
+    ]);
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    for (entry, compare) in [
+        (TEXT, "a3 < *(uint64_t*)&local_18 - 1 + a3"),
+        (TEXT + 0x40, "*(uint32_t*)&local_18 < a3"),
+    ] {
+        let (text, _) = text_of(&p, entry);
+        assert!(text.contains(compare), "{text}");
+        for seed in 1..=4 {
+            let r = replay_function(&p, &a, entry, seed);
+            assert!(
+                r.checked > 0 && r.wrong().is_empty() && r.refuted.is_empty(),
+                "{text}\nseed {seed}: {}",
+                replay_tsv(&r)
+            );
+        }
+        runs_alike(&p, entry);
+    }
+}

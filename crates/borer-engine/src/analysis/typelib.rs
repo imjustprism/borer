@@ -297,6 +297,48 @@ pub fn declared(name: &str, format: BinaryFormat) -> Option<&'static Decl> {
         .or_else(|| super::sdk::declared(name, |os| os.serves(format)))
 }
 
+/// Returns what each function of a 64-bit program is declared to hand
+/// back in `xmm0`.
+///
+/// The signature string a function carries comes first, then the return
+/// type its debug information records, then the library's row for its
+/// name ([`declared`]: `ceil` returns a `double`, `ceilf` a `float`).
+///
+/// # Arguments
+///
+/// * `program` - The image, for its debug information and its format.
+/// * `functions` - Its functions.
+///
+/// # Returns
+///
+/// Per function, in order: `Some(Some(bits))` for a declared `float` (32)
+/// or `double` (64), `Some(None)` for any other declared result, and
+/// `None` when nothing declares the function or its type does not read.
+pub(crate) fn declared_floats(
+    program: &crate::program::Program,
+    functions: &[super::Function],
+) -> Vec<Option<Option<u8>>> {
+    let debug: BTreeMap<u64, &str> = program
+        .debug_functions
+        .iter()
+        .filter_map(|d| Some((d.low_pc, d.return_type.as_deref()?)))
+        .collect();
+    functions
+        .iter()
+        .map(|f| {
+            let ret = match (&f.signature, debug.get(&f.entry)) {
+                (Some(s), _) => s.ret.as_str(),
+                (None, Some(&ty)) => ty,
+                (None, None) => declared(super::bare_name(f.name.as_deref()?), program.format)?.ret,
+            };
+            Some(match pass_of(ret, 64, program.format)? {
+                Pass::Float(bits) => Some(bits),
+                Pass::Void | Pass::Int { .. } | Pass::Pointer => None,
+            })
+        })
+        .collect()
+}
+
 /// The data objects the GNU C library exports that a text reads, with
 /// their C types: what `<stdio.h>`, `<unistd.h>` and `<time.h>` declare
 /// them as.
