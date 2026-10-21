@@ -42,6 +42,14 @@ use std::sync::Arc;
 /// a unit that calls it.
 const BODY_MAX: usize = 240;
 
+/// Bytes a kept definition ([`definition`]) is charged in the memo.
+///
+/// A bound on its prototype and statement tree, which a body of at most
+/// [`BODY_MAX`] bytes of text keeps to a dozen statements or so. The memo
+/// lets results go by weight, so a bound that is too high only lets go
+/// sooner.
+const DEFINITION_WEIGHT: usize = 8 * 1024;
+
 /// Most function bodies one unit defines.
 const BODIES_MAX: usize = 8;
 
@@ -637,7 +645,7 @@ fn definition(
             overlay.fingerprint(),
             (entry, name.to_owned()),
             || defined_body(program, analysis, overlay, entry, name),
-            |d| d.as_ref().map_or(0, |_| BODY_MAX),
+            |d| d.as_ref().map_or(0, |_| DEFINITION_WEIGHT),
         )
         .as_ref()
         .clone()
