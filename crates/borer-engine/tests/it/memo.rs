@@ -83,3 +83,26 @@ fn overlays_holding_different_facts_fingerprint_apart() {
         "the text read under the name was handed to the overlay with the comment"
     );
 }
+
+/// A build that panics leaves no cell behind that stops the next request
+/// from building the result and keeping it.
+///
+/// # Panics
+///
+/// When the panic is not caught, or the result after it is not kept.
+#[test]
+fn a_build_that_panics_lets_the_next_one_keep_its_result() {
+    let a = Analysis::default();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a.derived
+            .get_or_build("after_panic", (), || -> u32 { panic!("the build fails") })
+    }));
+    assert!(failed.is_err(), "the panic reaches the caller");
+    let first = a.derived.get_or_build("after_panic", (), || 7_u32);
+    let again = a.derived.get_or_build("after_panic", (), || 8_u32);
+    assert_eq!(
+        (*first, *again),
+        (7, 7),
+        "the result after the panic is kept"
+    );
+}

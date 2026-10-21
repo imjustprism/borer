@@ -26,6 +26,9 @@ use borer_engine::program::Program;
 use borer_engine::table::Window;
 use rayon::prelude::*;
 
+mod key;
+pub use key::index_key;
+
 /// Magic bytes opening an index file.
 const MAGIC: &[u8; 8] = b"BORERIDX";
 /// Layout version of the file; bump when the record shape changes.
@@ -385,55 +388,6 @@ pub fn program_key(bytes: &[u8]) -> u64 {
         .first_chunk::<8>()
         .copied()
         .map_or(0, u64::from_le_bytes)
-}
-
-/// Returns the key an index for `program` is stored under.
-///
-/// That is the program's bytes, then the borer executable's size and
-/// modification time, the file format, the packs the analysis ran with,
-/// and what the load made of the bytes. The executable goes in because the text is what the decompiler of that
-/// build renders; a newer borer must not read an older one's index. The
-/// packs go in because they change the names the text uses. The load goes
-/// in because one file loaded another way is another program: a raw load's
-/// `arch`, `base` and `regions`, an `entry_file_offset`, and a companion
-/// PDB applied or not move every address, name and type the text shows
-/// while the bytes stay the same; it is the architecture, base, entry,
-/// section table, and the counts of symbols, function ranges and debug
-/// types. All are kept apart from the program's half, so a new index finds
-/// and replaces the stale ones of its program by name.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `packs` - The packs the analysis ran with.
-#[must_use]
-pub fn index_key(program: &Program, packs: &Packs) -> IndexKey {
-    let load = format!(
-        "{FORMAT} {packs:?} {:?} {:#x} {:?} {:?} {} {} {}",
-        program.arch,
-        program.image_base,
-        program.entry,
-        program.sections,
-        program.symbols.len(),
-        program.function_ranges.len(),
-        program.debug_types.len()
-    );
-    let mut h = fnv1a(FNV_SEED, load.as_bytes());
-    if let Ok(exe) = std::env::current_exe()
-        && let Ok(meta) = std::fs::metadata(exe)
-    {
-        h = fnv1a(h, &meta.len().to_le_bytes());
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs());
-        h = fnv1a(h, &modified.to_le_bytes());
-    }
-    IndexKey {
-        program: program_key(&program.bytes),
-        engine: h,
-    }
 }
 
 /// Where indexes live: `$BORER_CACHE_DIR`, else the platform cache directory

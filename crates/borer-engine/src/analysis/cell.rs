@@ -40,14 +40,27 @@ impl<T> Default for Cell<T> {
 /// short, or one that unwound; such a cell is let go at once.
 pub(super) type Shared<T> = Option<(Arc<T>, reads::Reads)>;
 
-/// Hands a build's result to the threads waiting on its cell when dropped.
+/// Hands a build's result to the threads waiting on its cell, when the
+/// build returns, is cut short, or unwinds.
 ///
-/// It hands what the build filled in, else nothing, so a build cut short or
-/// unwound still lets them go on, each to build its own.
-pub(super) struct Publish<'a, T>(pub(super) &'a OnceLock<Shared<T>>, pub(super) Shared<T>);
+/// A cell that receives nothing (a cut build, or one whose `make` panicked)
+/// can never be built again, so the guard then runs `sweep`, which lets go
+/// of such cells and lets the next request build and keep the result.
+pub(super) struct Publish<'a, T>(
+    /// The cell's result.
+    pub(super) &'a OnceLock<Shared<T>>,
+    /// What to hand over: `None` until the build has a whole result.
+    pub(super) Shared<T>,
+    /// Lets go of every cell that received nothing.
+    pub(super) &'a dyn Fn(),
+);
 
 impl<T> Drop for Publish<'_, T> {
     fn drop(&mut self) {
+        let empty = self.1.is_none();
         self.0.get_or_init(|| self.1.take());
+        if empty {
+            (self.2)();
+        }
     }
 }

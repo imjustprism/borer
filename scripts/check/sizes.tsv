@@ -196,8 +196,8 @@ crates/borer-engine/tests/it/x86.rs	3378
 crates/borer/src/cli/mod.rs	1513
 crates/borer/src/cli/mod.rs::cli#1	176
 crates/borer/src/cli/mod.rs::query#1	1049
-crates/borer/src/index.rs	1610
-crates/borer/src/main.rs::call_tool#1	122
+crates/borer/src/index.rs	1581
+crates/borer/src/main.rs::call_tool#1	112
 crates/borer/src/main.rs::listing#1	132
 crates/borer/src/recall.rs::line_delta#1	101
 crates/borer/src/resources.rs::an_argument_naming_nothing_is_an_invalid_params_error#1	115

@@ -1115,7 +1115,8 @@ impl Derived {
             reads::absorb(read);
             return Arc::clone(value);
         }
-        let mut publish = Publish(&cell.value, None);
+        let sweep = || self.sweep(&|_, _, _| Fate::Keep);
+        let mut publish = Publish(&cell.value, None, &sweep);
         let (value, read) = reads::recording(make);
         self.builds.fetch_add(1, Ordering::Relaxed);
         reads::absorb(&read);
@@ -1127,9 +1128,7 @@ impl Derived {
         }
         publish.1 = (!cut).then(|| (Arc::clone(&value), read));
         drop(publish);
-        if cut {
-            self.sweep(&|_, _, _| Fate::Keep);
-        } else if item && self.item_bytes() > self.budget.load(Ordering::Relaxed) {
+        if !cut && item && self.item_bytes() > self.budget.load(Ordering::Relaxed) {
             self.shrink();
         }
         value
