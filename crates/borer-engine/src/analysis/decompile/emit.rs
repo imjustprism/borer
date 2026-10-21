@@ -1027,11 +1027,13 @@ pub(super) fn cycle_of<L: Lifter>(st: &Emit<'_, L>, i: usize) -> Option<(BTreeSe
     let n = st.blocks.len();
     let open = |b: usize| !st.outside(b) && !st.emitted[b] && !st.loops.contains(&b);
     let mut forward = vec![false; n];
+    let mut reached: Vec<usize> = Vec::new();
     let mut work = vec![i];
     while let Some(b) = work.pop() {
         for &s in &st.succs[b] {
             if open(s) && !forward[s] {
                 forward[s] = true;
+                reached.push(s);
                 work.push(s);
             }
         }
@@ -1049,7 +1051,7 @@ pub(super) fn cycle_of<L: Lifter>(st: &Emit<'_, L>, i: usize) -> Option<(BTreeSe
             }
         }
     }
-    let body: BTreeSet<usize> = (0..n).filter(|&b| forward[b] && backward[b]).collect();
+    let body: BTreeSet<usize> = reached.into_iter().filter(|&b| backward[b]).collect();
     let mut entries = body
         .iter()
         .copied()

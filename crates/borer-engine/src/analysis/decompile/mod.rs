@@ -75,7 +75,9 @@ mod rewrite;
 mod scenario;
 pub(crate) mod signature;
 mod sites;
+mod stack;
 mod stores;
+mod strlen;
 mod structure;
 mod tables;
 mod tidy;
@@ -110,6 +112,7 @@ use rewrite::*;
 pub use scenario::*;
 pub(crate) use sites::{CallArg, CallSite, call_sites};
 use stores::*;
+use strlen::*;
 use structure::*;
 pub use tidy::*;
 use types::*;
@@ -354,6 +357,9 @@ struct Ctx<'a> {
     /// Whether the function hands a value back, as its callers say
     /// ([`Function::returns_value`](super::Function::returns_value)).
     returns_value: Option<bool>,
+    /// The program's import name tables, taken from the memo the first time
+    /// the lift reads them ([`lift::ImportNames`]).
+    imports: std::sync::OnceLock<std::sync::Arc<lift::ImportNames>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -499,6 +505,9 @@ pub fn decompile_named_all(
 /// moment a worker starts it; striped by position, one could start last in
 /// its stripe, and the sweep waited the whole stripe longer.
 ///
+/// Each worker has a decompile's stack and runs its decompiles in place
+/// ([`stack::worker`]).
+///
 /// The renderers a batch takes build their text afresh instead of through
 /// the memo of [`Analysis::derived`]: a sweep over a binary would fill it
 /// with every function's text, which the caller holds already, and a
@@ -538,9 +547,9 @@ fn render_all<T: Send + Clone>(
     let here = super::reads::Handle::here();
     let stripes: Vec<Vec<(usize, Option<T>)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
-            .map(|_| {
+            .filter_map(|_| {
                 let here = here.clone();
-                scope.spawn(move || {
+                stack::worker(scope, move || {
                     here.enter(|| {
                         let mut done = Vec::new();
                         while let Some(&i) =
@@ -857,6 +866,7 @@ fn new_ctx<'a>(
         frame: frame::Frame::default(),
         sites: BTreeSet::new(),
         returns_value: f.returns_value,
+        imports: std::sync::OnceLock::new(),
     }
 }
 
@@ -1471,7 +1481,7 @@ pub fn decompile_raw(
 /// a block not yet written (the goto/label pair then cancels), else takes
 /// the lowest unwritten block. Only variables the body names are declared.
 ///
-/// The work runs on a thread with [`DECOMPILE_STACK`] bytes: structuring
+/// The work runs with a decompile's stack ([`stack::roomy`]): structuring
 /// nests [`MAX_DEPTH`] emitter frames deep, and one inlined monolith (a
 /// Zig `main` holding the whole program, 3,890 blocks) fills each frame
 /// with kilobytes of its own, where the cap was sized for a megabyte in
@@ -1508,26 +1518,9 @@ fn decompile_with(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let here = super::reads::Handle::here();
-        std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(DECOMPILE_STACK)
-                .spawn_scoped(scope, || {
-                    here.enter(|| decompile_in_run(run, cleanup, assume, witness))
-                })
-                .ok()?
-                .join()
-                .ok()
-                .flatten()
-        })
+        stack::roomy(|| decompile_in_run(run, cleanup, assume, witness))
     }
 }
-
-/// Stack bytes the decompile thread runs on: deep structure is not a
-/// fault, so the thread is sized for [`MAX_DEPTH`] frames of a fat
-/// function.
-#[cfg(not(target_arch = "wasm32"))]
-const DECOMPILE_STACK: usize = 64 << 20;
 
 /// [`decompile_with`] past the stack choice: pick the instruction set's
 /// lifter.

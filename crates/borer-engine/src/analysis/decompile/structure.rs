@@ -1794,6 +1794,11 @@ pub(super) fn base_of<L: Lifter>(
 /// [`closed_run_from`] with the region's base computed already, or
 /// computed here when `base` is `None`.
 ///
+/// PERF: the region and the blocks its walk has seen are bitmaps over the
+/// function's blocks: it is asked for twice per attempt at every branch,
+/// and as tree sets they made a big function's structuring quadratic in
+/// set operations.
+///
 /// # Arguments
 ///
 /// * `st` - Emission state.
@@ -1865,11 +1870,15 @@ pub(super) fn closed_run_with<L: Lifter>(
         }
     };
     let closed = base.closed;
-    let mut region: BTreeSet<usize> = base.members.iter().copied().collect();
+    let mut in_region = vec![false; st.blocks.len()];
+    let mut region: Vec<usize> = base.members.clone();
+    for &b in &region {
+        mark(&mut in_region, b);
+    }
     let mut exits: BTreeSet<usize> = region
         .iter()
         .flat_map(|b| st.succs[*b].iter().copied())
-        .filter(|s| !region.contains(s))
+        .filter(|&s| !is_marked(&in_region, s))
         .collect();
     let mut dups: BTreeSet<usize> = BTreeSet::new();
     loop {
@@ -1890,23 +1899,74 @@ pub(super) fn closed_run_with<L: Lifter>(
         }
         for s in more.into_iter().flatten() {
             dups.insert(s);
-            region.insert(s);
+            if mark(&mut in_region, s) {
+                region.push(s);
+            }
             exits.remove(&s);
         }
     }
+    region.sort_unstable();
+    Region {
+        order: region_order(&st.succs, start, &in_region, &region),
+        exits,
+        closed,
+        dups,
+    }
+}
+
+/// Tells whether a block is set in a bitmap over the function's blocks.
+///
+/// # Arguments
+///
+/// * `set` - The bitmap.
+/// * `b` - Block index.
+fn is_marked(set: &[bool], b: usize) -> bool {
+    set.get(b).copied().unwrap_or(false)
+}
+
+/// Sets a block in a bitmap over the function's blocks.
+///
+/// # Arguments
+///
+/// * `set` - The bitmap.
+/// * `b` - Block index.
+///
+/// # Returns
+///
+/// Whether it was not set before.
+fn mark(set: &mut [bool], b: usize) -> bool {
+    set.get_mut(b).is_some_and(|x| !std::mem::replace(x, true))
+}
+
+/// Returns the order a region's blocks are written in: reverse postorder
+/// from its start over the edges inside it, then the blocks that walk
+/// never reaches, ascending.
+///
+/// # Arguments
+///
+/// * `succs` - Successor block indices per block.
+/// * `start` - The region's first block.
+/// * `in_region` - The region, as a bitmap over the blocks.
+/// * `region` - The region's blocks, ascending.
+fn region_order(
+    succs: &[Vec<usize>],
+    start: usize,
+    in_region: &[bool],
+    region: &[usize],
+) -> Vec<usize> {
     let mut order: Vec<usize> = Vec::with_capacity(region.len());
-    let mut seen: BTreeSet<usize> = BTreeSet::new();
+    let mut seen = vec![false; in_region.len()];
     let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
-    seen.insert(start);
+    mark(&mut seen, start);
     while let Some((b, next_child)) = stack.pop() {
-        let children: Vec<usize> = st.succs[b]
+        let child = succs[b]
             .iter()
             .copied()
-            .filter(|s| region.contains(s))
-            .collect();
-        if let Some(&c) = children.get(next_child) {
+            .filter(|&s| is_marked(in_region, s))
+            .nth(next_child);
+        if let Some(c) = child {
             stack.push((b, next_child + 1));
-            if seen.insert(c) {
+            if mark(&mut seen, c) {
                 stack.push((c, 0));
             }
         } else {
@@ -1914,17 +1974,8 @@ pub(super) fn closed_run_with<L: Lifter>(
         }
     }
     order.reverse();
-    for b in &region {
-        if !seen.contains(b) {
-            order.push(*b);
-        }
-    }
-    Region {
-        order,
-        exits,
-        closed,
-        dups,
-    }
+    order.extend(region.iter().copied().filter(|&b| !is_marked(&seen, b)));
+    order
 }
 
 /// Renders a jump to `va` as a statement.

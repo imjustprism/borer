@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::wrap::{count, each, jumps, lists};
+use super::wrap::{count, each, jumps, lists, weighs};
 use super::{ArmBody, Body, Else, Expr, ExprKind, Label, LitKind, Stmt, StmtKind, UnOp};
 
 /// Most rounds of the rules one body gets.
@@ -209,7 +209,7 @@ fn visit(
 ) -> bool {
     let mut changed = false;
     for k in 0..list.len() {
-        let after = lead(list, k + 1, &cx.after);
+        let after = || lead(list, k + 1, &cx.after);
         *ids += 1;
         let inside = |kind: Kind, exit: Lead, next: Vec<Label>, after: Lead| {
             let mut frames = cx.frames.clone();
@@ -223,22 +223,22 @@ fn visit(
         };
         let inner = match &list[k].kind {
             StmtKind::If { .. } | StmtKind::Block(_) => Cx {
-                after,
+                after: after(),
                 frames: cx.frames.clone(),
             },
             StmtKind::While { body, .. } => {
                 let mut next = trailing(body);
                 next.extend(labels_before(list, k));
                 let end = round(&next);
-                inside(Kind::Loop, after, next, end)
+                inside(Kind::Loop, after(), next, end)
             }
             StmtKind::DoWhile { body, .. } | StmtKind::For { body, .. } => {
                 let next = trailing(body);
                 let end = round(&next);
-                inside(Kind::Loop, after, next, end)
+                inside(Kind::Loop, after(), next, end)
             }
-            StmtKind::Switch { .. } => inside(Kind::Switch, after, Vec::new(), Lead::default()),
-            StmtKind::Try { .. } => inside(Kind::Try, Lead::default(), Vec::new(), after),
+            StmtKind::Switch { .. } => inside(Kind::Switch, after(), Vec::new(), Lead::default()),
+            StmtKind::Try { .. } => inside(Kind::Try, Lead::default(), Vec::new(), after()),
             StmtKind::Expr(_)
             | StmtKind::Return(_)
             | StmtKind::Goto(_)
@@ -351,7 +351,9 @@ fn trailing(list: &[Stmt]) -> Vec<Label> {
 ///
 /// * `run` - The statements.
 fn labelled(run: &[Stmt]) -> bool {
-    count(run, &|s| matches!(s.kind, StmtKind::Label(_))) > 0
+    weighs(run, 1, &|s| {
+        usize::from(matches!(s.kind, StmtKind::Label(_)))
+    })
 }
 
 /// Counts the statements of a run that print, nested ones included.
@@ -361,6 +363,17 @@ fn labelled(run: &[Stmt]) -> bool {
 /// * `run` - The statements.
 fn size(run: &[Stmt]) -> usize {
     count(run, &|s| !idle(s))
+}
+
+/// Tells whether a run holds more than `n` statements that print, nested
+/// ones included: `size(run) > n`, counted no further than that.
+///
+/// # Arguments
+///
+/// * `run` - The statements.
+/// * `n` - The size the run must pass.
+fn larger(run: &[Stmt], n: usize) -> bool {
+    weighs(run, n.saturating_add(1), &|s| usize::from(!idle(s)))
 }
 
 /// Calls `f` on every jump of a run at the run's own level: not inside a
@@ -676,26 +689,27 @@ fn flattens(list: &mut Vec<Stmt>) -> bool {
         else {
             continue;
         };
-        let lines = size(then)
-            + count(then, &|s| {
-                matches!(
-                    s.kind,
-                    StmtKind::If { .. }
-                        | StmtKind::While { .. }
-                        | StmtKind::DoWhile { .. }
-                        | StmtKind::For { .. }
-                        | StmtKind::Switch { .. }
-                        | StmtKind::Block(_)
-                        | StmtKind::Try { .. }
-                )
-            });
         let leaves = then.iter().rfind(|s| !idle(s)).is_some_and(|s| {
             matches!(
                 s.kind,
                 StmtKind::Return(_) | StmtKind::Goto(_) | StmtKind::Break | StmtKind::Continue
             )
         });
-        if lines < EARLY_EXIT_MIN || !leaves {
+        if !leaves
+            || !weighs(then, EARLY_EXIT_MIN, &|s| {
+                usize::from(!idle(s))
+                    + usize::from(matches!(
+                        s.kind,
+                        StmtKind::If { .. }
+                            | StmtKind::While { .. }
+                            | StmtKind::DoWhile { .. }
+                            | StmtKind::For { .. }
+                            | StmtKind::Switch { .. }
+                            | StmtKind::Block(_)
+                            | StmtKind::Try { .. }
+                    ))
+            })
+        {
             continue;
         }
         let tail = list[k + 1..]
@@ -937,13 +951,11 @@ fn guards(list: &mut [Stmt]) -> bool {
 fn exits(list: &mut [Stmt], cx: &Cx) -> bool {
     let mut changed = false;
     for k in 0..list.len() {
-        let after = lead(list, k + 1, &cx.after);
-        let returns_after = list[k + 1..]
-            .iter()
-            .find(|x| !idle(x) && !matches!(x.kind, StmtKind::Label(_)))
-            .is_some_and(|x| matches!(x.kind, StmtKind::Return(_)));
-        let s = &mut list[k];
-        if let StmtKind::Switch { arms, .. } = &mut s.kind {
+        if matches!(list[k].kind, StmtKind::Switch { .. }) {
+            let returns_after = list[k + 1..]
+                .iter()
+                .find(|x| !idle(x) && !matches!(x.kind, StmtKind::Label(_)))
+                .is_some_and(|x| matches!(x.kind, StmtKind::Return(_)));
             if returns_after {
                 continue;
             }
@@ -951,18 +963,20 @@ fn exits(list: &mut [Stmt], cx: &Cx) -> bool {
             frames.push(Frame {
                 id: 0,
                 kind: Kind::Switch,
-                exit: after,
+                exit: lead(list, k + 1, &cx.after),
                 next: Vec::new(),
             });
-            for a in arms {
-                if let ArmBody::Inline(x) = &mut a.body {
-                    changed |= leave(x, &frames);
+            if let StmtKind::Switch { arms, .. } = &mut list[k].kind {
+                for a in arms {
+                    if let ArmBody::Inline(x) = &mut a.body {
+                        changed |= leave(x, &frames);
+                    }
                 }
             }
-        } else if let StmtKind::Guard { then, .. } = &mut s.kind {
+        } else if let StmtKind::Guard { then, .. } = &mut list[k].kind {
             changed |= leave(then, &cx.frames);
         } else {
-            changed |= leave(s, &cx.frames);
+            changed |= leave(&mut list[k], &cx.frames);
         }
     }
     changed
@@ -1017,18 +1031,19 @@ fn falls(list: &mut Vec<Stmt>, cx: &Cx) -> bool {
     let mut changed = false;
     let mut k = 0;
     while k < list.len() {
-        let quiet = if let StmtKind::Guard { cond, .. } = &list[k].kind {
-            !has_effect(cond)
-        } else {
-            true
+        let quiet = || {
+            if let StmtKind::Guard { cond, .. } = &list[k].kind {
+                !has_effect(cond)
+            } else {
+                true
+            }
         };
-        let next = lead(list, k + 1, &cx.after);
         let fall = match word(&list[k]) {
-            Some(StmtKind::Goto(l)) => next.reaches(*l),
-            Some(StmtKind::Continue) => next.round,
+            Some(StmtKind::Goto(l)) => lead(list, k + 1, &cx.after).reaches(*l),
+            Some(StmtKind::Continue) => lead(list, k + 1, &cx.after).round,
             Some(_) | None => false,
         };
-        if quiet && fall {
+        if fall && quiet() {
             list.remove(k);
             changed = true;
         } else {
@@ -1071,9 +1086,17 @@ fn dead(list: &mut Vec<Stmt>, f: &Facts<'_>) -> bool {
 /// label or `goto` from which control reaches `l` running nothing, else the
 /// list's end when its end does.
 ///
+/// Control reaches `l` running nothing from a label or `goto` exactly when
+/// only labels and idle lines lie between it and the first meeting of `l`
+/// ([`meetings`]), or between it and the list's end when the end reaches
+/// `l`; so the first such place is found from that meeting, walking back
+/// over the labels before it, instead of reading every place from `from`
+/// on ([`lead`] at each).
+///
 /// # Arguments
 ///
 /// * `list` - The statements.
+/// * `met` - Where each label is met in `list` ([`meetings`]).
 /// * `from` - The run's first position.
 /// * `l` - The label.
 /// * `after` - Where the list's end goes.
@@ -1082,13 +1105,39 @@ fn dead(list: &mut Vec<Stmt>, f: &Facts<'_>) -> bool {
 ///
 /// The position the run ends before, or `None` when the run never meets
 /// the label.
-fn run_to(list: &[Stmt], from: usize, l: Label, after: &Lead) -> Option<usize> {
-    (from..list.len())
-        .find(|&p| {
-            matches!(list[p].kind, StmtKind::Label(_) | StmtKind::Goto(_))
-                && lead(list, p, after).reaches(l)
-        })
-        .or_else(|| after.reaches(l).then_some(list.len()))
+fn run_to(
+    list: &[Stmt],
+    met: &[(Label, usize)],
+    from: usize,
+    l: Label,
+    after: &Lead,
+) -> Option<usize> {
+    let passes = |s: &Stmt| matches!(s.kind, StmtKind::Label(_)) || idle(s);
+    let first = met
+        .get(met.partition_point(|&m| m < (l, from)))
+        .filter(|(m, _)| *m == l)
+        .map(|&(_, q)| q);
+    let Some(q) = first else {
+        if !after.reaches(l) {
+            return None;
+        }
+        let tail = list.iter().rposition(|s| !passes(s)).map_or(0, |p| p + 1);
+        return Some(
+            (tail.max(from)..list.len())
+                .find(|&p| matches!(list[p].kind, StmtKind::Label(_)))
+                .unwrap_or(list.len()),
+        );
+    };
+    let mut start = q;
+    for p in (from..q).rev() {
+        if !passes(&list[p]) {
+            break;
+        }
+        if matches!(list[p].kind, StmtKind::Label(_)) {
+            start = p;
+        }
+    }
+    Some(start)
 }
 
 /// Tells whether every jump to a label inside a run comes from inside it,
@@ -1099,6 +1148,9 @@ fn run_to(list: &[Stmt], from: usize, l: Label, after: &Lead) -> Option<usize> {
 /// * `run` - The statements.
 /// * `f` - The facts: every label's jumps.
 fn sealed(run: &[Stmt], f: &Facts<'_>) -> bool {
+    if !labelled(run) {
+        return true;
+    }
     let mut inner = BTreeMap::new();
     for s in run {
         each(s, &mut |x| jumps(x, &mut inner));
@@ -1114,12 +1166,44 @@ fn sealed(run: &[Stmt], f: &Facts<'_>) -> bool {
     ok
 }
 
+/// Returns the places in a list where control meets a label running
+/// nothing: its own statement and the `goto`s to it, the only statements
+/// of the list [`lead`] reads one from.
+///
+/// # Arguments
+///
+/// * `list` - The statements.
+///
+/// # Returns
+///
+/// Each label with a place of it, ascending by label and then place.
+fn meetings(list: &[Stmt]) -> Vec<(Label, usize)> {
+    let mut met: Vec<(Label, usize)> = list
+        .iter()
+        .enumerate()
+        .filter_map(|(k, s)| {
+            if let StmtKind::Label(l) | StmtKind::Goto(l) = s.kind {
+                Some((l, k))
+            } else {
+                None
+            }
+        })
+        .collect();
+    met.sort_unstable();
+    met
+}
+
 /// Writes a conditional jump over a run, `if (c) goto L; run; L:`, as an
 /// `if` around the run under the opposite condition.
 ///
 /// The run ends where control reaches the label running nothing: at the
 /// label, at another jump to it (which stays), or at the list's end when
 /// that falls to it. Nothing may enter the run past its start ([`sealed`]).
+///
+/// PERF: where each label is met is read once per call ([`meetings`]),
+/// and each guard's run found from it ([`run_to`]): read from the guard
+/// on, the runs of the guards that jump far or out of their list were half
+/// of a big function's jump folding.
 ///
 /// # Arguments
 ///
@@ -1131,15 +1215,17 @@ fn sealed(run: &[Stmt], f: &Facts<'_>) -> bool {
 ///
 /// Whether a run was folded.
 fn skips(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>) -> bool {
+    let mut met = None;
     for k in 0..list.len() {
         let (StmtKind::Guard { cond, .. }, Some(l)) = (&list[k].kind, target(&list[k])) else {
             continue;
         };
-        let Some(end) = run_to(list, k + 1, l, &cx.after) else {
+        let met = met.get_or_insert_with(|| meetings(list));
+        let Some(end) = run_to(list, met, k + 1, l, &cx.after) else {
             continue;
         };
         let run = &list[k + 1..end];
-        if !run.iter().any(|s| !idle(s)) || size(run) > RUN_MAX || !sealed(run, f) {
+        if !run.iter().any(|s| !idle(s)) || larger(run, RUN_MAX) || !sealed(run, f) {
             continue;
         }
         let cond = negate(cond);
@@ -1415,6 +1501,7 @@ fn before_breaks(list: &mut Vec<Stmt>, run: &[Stmt]) {
 ///
 /// Whether a run moved.
 fn sinks(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>, copy: bool) -> bool {
+    let mut met = None;
     for k in 0..list.len() {
         let looped = forever(&list[k]);
         if !looped && !matches!(list[k].kind, StmtKind::If { .. } | StmtKind::Block(_)) {
@@ -1426,7 +1513,8 @@ fn sinks(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>, copy: bool) -> bool {
             if tails(&list[k], l) == 0 {
                 continue;
             }
-            let Some(end) = run_to(list, k + 1, l, &cx.after) else {
+            let met = met.get_or_insert_with(|| meetings(list));
+            let Some(end) = run_to(list, met, k + 1, l, &cx.after) else {
                 continue;
             };
             let run = &list[k + 1..end];
@@ -1587,7 +1675,7 @@ fn survey(
                     .unwrap_or(inner.len());
                 let prev = inner[..k].iter().rposition(|x| !idle(x));
                 let block = &inner[k + 1..end];
-                let back = count(block, &|x| target(x) == Some(l)) > 0;
+                let back = weighs(block, 1, &|x| usize::from(target(x) == Some(l)));
                 let returns = block
                     .iter()
                     .rfind(|x| !idle(x))
@@ -1599,7 +1687,7 @@ fn survey(
                     entered: prev.is_none_or(|p| !stops(inner, p, f)),
                     whole: !back && ends(block, f),
                     loose,
-                    tail: returns && !loose && !labelled(block) && size(block) <= TAIL_MAX,
+                    tail: returns && !loose && !labelled(block) && !larger(block, TAIL_MAX),
                 };
                 spots.insert(l, spot);
             }

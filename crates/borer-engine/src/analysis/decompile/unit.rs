@@ -215,12 +215,8 @@ pub(super) fn close(
             decls.insert(name, d);
         }
     }
-    decls.retain(|name, d| {
-        let p = &d.proto;
-        call_arities(text, name)
-            .into_iter()
-            .all(|n| n == p.params.len() || p.variadic && n > p.params.len())
-    });
+    let calls = identifier_arities(text, |w| decls.contains_key(w));
+    decls.retain(|name, d| called_as_declared(text, &calls, name, &d.proto));
     let own_proto = text
         .lines()
         .find_map(|l| l.strip_prefix("// signature: "))
@@ -612,6 +608,11 @@ fn library(name: &str, format: crate::program::BinaryFormat) -> Option<Proto> {
 /// helpers the prelude defines: no call, no global, no layout of a
 /// pointee, no vector type.
 ///
+/// PERF: the definition is built once per function and name under the
+/// names in force, through [`Analysis::derived`] ([`defined_body`]): the
+/// unit of every caller defines its small callees, and each polished the
+/// callee's text again.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -629,6 +630,36 @@ fn definition(
     analysis
         .function(entry)
         .filter(|f| f.entry == entry && f.instr_count <= BODY_INSTRUCTIONS_MAX)?;
+    analysis
+        .derived
+        .get_or_build_item(
+            "unit_definition",
+            overlay.fingerprint(),
+            (entry, name.to_owned()),
+            || defined_body(program, analysis, overlay, entry, name),
+            |d| d.as_ref().map_or(0, |_| BODY_MAX),
+        )
+        .as_ref()
+        .clone()
+}
+
+/// Builds the definition [`definition`] returns, for a function small
+/// enough to qualify.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its functions.
+/// * `overlay` - User names.
+/// * `entry` - The function's entry.
+/// * `name` - Its name as the text spells it.
+fn defined_body(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    name: &str,
+) -> Option<Declared> {
     let d = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry);
     let bitness = program.arch.bitness().unwrap_or(64);
     let text = tables::inline_tables(
@@ -987,24 +1018,99 @@ fn call_arities(text: &str, name: &str) -> Vec<usize> {
     let mut out = Vec::new();
     for line in text.lines().filter(|l| !l.starts_with("//")) {
         let code = code_of(line);
-        for at in word_positions(code, name) {
-            let open = at + name.len();
-            let member = code[..at].ends_with('.') || code[..at].ends_with("->");
-            if member || !code[open..].starts_with('(') {
+        out.extend(
+            word_positions(code, name)
+                .into_iter()
+                .filter_map(|at| arity_at(code, at, name.len())),
+        );
+    }
+    out
+}
+
+/// Tells whether every call of `name` in a text passes the arguments its
+/// prototype takes: as many, or more for a variadic one.
+///
+/// # Arguments
+///
+/// * `text` - The text.
+/// * `calls` - The argument counts of the identifiers' calls
+///   ([`identifier_arities`]); a name that is no identifier is read from
+///   the text ([`call_arities`]).
+/// * `name` - The callee.
+/// * `p` - Its prototype.
+fn called_as_declared(
+    text: &str,
+    calls: &BTreeMap<&str, Vec<usize>>,
+    name: &str,
+    p: &Proto,
+) -> bool {
+    let fits = |n: &usize| *n == p.params.len() || p.variadic && *n > p.params.len();
+    if is_ident(name) {
+        calls.get(name).is_none_or(|ns| ns.iter().all(fits))
+    } else {
+        call_arities(text, name).iter().all(fits)
+    }
+}
+
+/// Returns, by name, the argument counts of the calls of each identifier
+/// `wanted` accepts.
+///
+/// One pass over the text reads what [`call_arities`] reads for each
+/// name, since a whole-word occurrence of an identifier is a whole run of
+/// identifier characters.
+///
+/// PERF: the unit read the whole text again for each name it declares.
+///
+/// # Arguments
+///
+/// * `text` - The text.
+/// * `wanted` - Picks the callees.
+fn identifier_arities(text: &str, wanted: impl Fn(&str) -> bool) -> BTreeMap<&str, Vec<usize>> {
+    let mut out: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for line in text.lines().filter(|l| !l.starts_with("//")) {
+        let code = code_of(line);
+        let mut start: Option<usize> = None;
+        for (i, c) in code
+            .char_indices()
+            .chain(std::iter::once((code.len(), ' ')))
+        {
+            if is_ident_char(c) {
+                start.get_or_insert(i);
                 continue;
             }
-            let Some(close) = matching_paren(code, open) else {
-                continue;
-            };
-            let inner = code[open + 1..close].trim();
-            out.push(if inner.is_empty() {
-                0
-            } else {
-                split_arguments(inner).len()
-            });
+            let Some(s) = start.take() else { continue };
+            let w = &code[s..i];
+            if wanted(w)
+                && let Some(n) = arity_at(code, s, w.len())
+            {
+                out.entry(w).or_default().push(n);
+            }
         }
     }
     out
+}
+
+/// Returns the argument count of the call a name at `at` makes, when the
+/// name is no member and a parenthesized list follows it.
+///
+/// # Arguments
+///
+/// * `code` - One line's code ([`code_of`]).
+/// * `at` - Where the name starts.
+/// * `len` - The name's length in bytes.
+fn arity_at(code: &str, at: usize, len: usize) -> Option<usize> {
+    let open = at + len;
+    let member = code[..at].ends_with('.') || code[..at].ends_with("->");
+    if member || !code[open..].starts_with('(') {
+        return None;
+    }
+    let close = matching_paren(code, open)?;
+    let inner = code[open + 1..close].trim();
+    Some(if inner.is_empty() {
+        0
+    } else {
+        split_arguments(inner).len()
+    })
 }
 
 /// Returns a line without the comment that ends it, outside string and

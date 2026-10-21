@@ -258,6 +258,25 @@ pub(super) fn count(list: &[Stmt], pred: &dyn Fn(&Stmt) -> bool) -> usize {
     n
 }
 
+/// Tells whether the statements, nested ones included, weigh at least
+/// `n`: what [`count`] would sum, read only until the sum reaches `n`.
+///
+/// # Arguments
+///
+/// * `list` - The statements.
+/// * `n` - The weight asked for.
+/// * `weight` - Each statement's weight.
+pub(super) fn weighs(list: &[Stmt], n: usize, weight: &dyn Fn(&Stmt) -> usize) -> bool {
+    let mut left = n;
+    left == 0
+        || list.iter().any(|s| {
+            each_until(s, &mut |x| {
+                left = left.saturating_sub(weight(x));
+                left == 0
+            })
+        })
+}
+
 /// Visits a statement and every statement it holds, outermost first.
 ///
 /// # Arguments
@@ -265,34 +284,50 @@ pub(super) fn count(list: &[Stmt], pred: &dyn Fn(&Stmt) -> bool) -> usize {
 /// * `s` - The statement.
 /// * `f` - The visitor.
 pub(super) fn each(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
-    f(s);
+    each_until(s, &mut |x| {
+        f(x);
+        false
+    });
+}
+
+/// Visits a statement and every statement it holds, outermost first, until
+/// the visitor says to stop.
+///
+/// # Arguments
+///
+/// * `s` - The statement.
+/// * `f` - The visitor, `true` to stop.
+///
+/// # Returns
+///
+/// Whether the visitor stopped the walk.
+fn each_until(s: &Stmt, f: &mut dyn FnMut(&Stmt) -> bool) -> bool {
+    if f(s) {
+        return true;
+    }
     match &s.kind {
         StmtKind::If { then, other, .. } => {
-            then.iter().for_each(|x| each(x, f));
-            match other {
-                None => {}
-                Some(Else::Block(b)) => b.iter().for_each(|x| each(x, f)),
-                Some(Else::If(next)) => each(next, f),
-            }
+            then.iter().any(|x| each_until(x, f))
+                || match other {
+                    None => false,
+                    Some(Else::Block(b)) => b.iter().any(|x| each_until(x, f)),
+                    Some(Else::If(next)) => each_until(next, f),
+                }
         }
-        StmtKind::Guard { then, .. } => each(then, f),
+        StmtKind::Guard { then, .. } => each_until(then, f),
         StmtKind::While { body, .. }
         | StmtKind::DoWhile { body, .. }
         | StmtKind::For { body, .. }
-        | StmtKind::Block(body) => body.iter().for_each(|x| each(x, f)),
-        StmtKind::Switch { arms, .. } => {
-            for a in arms {
-                match &a.body {
-                    ArmBody::Inline(x) => each(x, f),
-                    ArmBody::Block(b) => b.iter().for_each(|x| each(x, f)),
-                }
-            }
-        }
+        | StmtKind::Block(body) => body.iter().any(|x| each_until(x, f)),
+        StmtKind::Switch { arms, .. } => arms.iter().any(|a| match &a.body {
+            ArmBody::Inline(x) => each_until(x, f),
+            ArmBody::Block(b) => b.iter().any(|x| each_until(x, f)),
+        }),
         StmtKind::Try { body, handlers, .. } => {
-            body.iter().for_each(|x| each(x, f));
-            for h in handlers {
-                h.body.iter().for_each(|x| each(x, f));
-            }
+            body.iter().any(|x| each_until(x, f))
+                || handlers
+                    .iter()
+                    .any(|h| h.body.iter().any(|x| each_until(x, f)))
         }
         StmtKind::Expr(_)
         | StmtKind::Return(_)
@@ -303,7 +338,7 @@ pub(super) fn each(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
         | StmtKind::Comment(_)
         | StmtKind::Asm(_)
         | StmtKind::Blank
-        | StmtKind::Raw(_) => {}
+        | StmtKind::Raw(_) => false,
     }
 }
 

@@ -93,17 +93,9 @@ pub(super) fn lane_locals(text: &str) -> String {
         }
     }
     redeclare(&mut lines, &typed);
-    for (name, ty) in &typed {
-        let Some((casts, mask)) = narrow_type(ty) else {
-            continue;
-        };
-        for line in &mut lines {
-            if !line.contains(name.as_str()) || line.starts_with("//") || is_declaration(line) {
-                continue;
-            }
-            *line = strip_width(line, name, casts, mask);
-        }
-    }
+    strip_widths(&mut lines, &typed, |l| {
+        !l.starts_with("//") && !is_declaration(l)
+    });
     loops::recover_loops(&mut lines);
     sugar_gap(&mut lines);
     let mut out = lines.join("\n");
@@ -135,6 +127,63 @@ pub(super) fn word_lines(lines: &[String]) -> BTreeMap<&str, Vec<usize>> {
         }
     }
     uses
+}
+
+/// Strips each typed variable's redundant casts and masks
+/// ([`strip_width`]) from every line `keep` accepts, the variables taken
+/// in order.
+///
+/// A line changes only where an identifier is a whole word of it, so each
+/// line is read for the variables it names, in their order, rather than
+/// every variable being looked for in every line: a function of thousands
+/// of lines declares hundreds of narrow locals. A name that is no
+/// identifier is looked for as text, as before.
+///
+/// # Arguments
+///
+/// * `lines` - The lines, rewritten in place.
+/// * `typed` - The variables with their declared types.
+/// * `keep` - Whether a line, as it stands, may change.
+pub(super) fn strip_widths(
+    lines: &mut [String],
+    typed: &[(String, &'static str)],
+    keep: impl Fn(&str) -> bool,
+) {
+    let mut at: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut loose: Vec<usize> = Vec::new();
+    for (k, (name, _)) in typed.iter().enumerate() {
+        if is_ident(name) {
+            at.entry(name.as_str()).or_default().push(k);
+        } else {
+            loose.push(k);
+        }
+    }
+    for line in lines {
+        let mut from = 0;
+        while let Some(k) = tokens(line)
+            .filter_map(|w| at.get(w))
+            .flatten()
+            .copied()
+            .chain(
+                loose
+                    .iter()
+                    .copied()
+                    .filter(|&k| typed.get(k).is_some_and(|(n, _)| line.contains(n.as_str()))),
+            )
+            .filter(|&k| k >= from)
+            .min()
+        {
+            from = k + 1;
+            let Some((name, ty)) = typed.get(k) else {
+                break;
+            };
+            if let Some((casts, mask)) = narrow_type(ty)
+                && keep(line)
+            {
+                *line = strip_width(line, name, casts, mask);
+            }
+        }
+    }
 }
 
 /// The names a `uint64_t` declaration lists.

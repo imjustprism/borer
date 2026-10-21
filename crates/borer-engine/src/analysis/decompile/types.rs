@@ -2137,32 +2137,13 @@ pub(super) fn type_locals(text: &str) -> String {
     if narrowed.is_empty() && declared_narrow.is_empty() && !signed {
         return text.to_owned();
     }
-    for (name, ty) in &narrowed {
-        let Some((casts, mask)) = narrow_type(ty) else {
-            continue;
-        };
-        for line in &mut lines {
-            if !line.contains(name.as_str())
-                || line.starts_with("//")
-                || line.starts_with("uint64_t ")
-            {
-                continue;
-            }
-            *line = strip_width(line, name, casts, mask);
-        }
-    }
+    strip_widths(&mut lines, &narrowed, |l| {
+        !l.starts_with("//") && !l.starts_with("uint64_t ")
+    });
     redeclare(&mut lines, &narrowed);
-    for (name, ty) in &declared_narrow {
-        let Some((casts, mask)) = narrow_type(ty) else {
-            continue;
-        };
-        for line in &mut lines {
-            if !line.contains(name.as_str()) || line.starts_with("//") || is_declaration(line) {
-                continue;
-            }
-            *line = strip_width(line, name, casts, mask);
-        }
-    }
+    strip_widths(&mut lines, &declared_narrow, |l| {
+        !l.starts_with("//") && !is_declaration(l)
+    });
     let widths: BTreeMap<&str, u8> = declared_narrow
         .iter()
         .chain(&narrowed)
@@ -2206,6 +2187,11 @@ pub(super) fn type_locals(text: &str) -> String {
 /// bits in either type. A local the text reads any other way (its
 /// address, a partial read, an unsigned operation) keeps its type.
 ///
+/// PERF: each local's occurrences are read on the lines that hold it as a
+/// word ([`word_lines`]), not on every line: a function of thousands of
+/// lines declares hundreds of these locals, and the scan of every line for
+/// each was a sixth of its decompile.
+///
 /// # Arguments
 ///
 /// * `lines` - The function, header and declaration lines included.
@@ -2219,10 +2205,16 @@ fn sign_signed_reads(lines: &mut Vec<String>) -> bool {
     let returns32 = signature_result(lines)
         .and_then(scalar_width)
         .is_some_and(|w| matches!(w, "int32_t" | "uint32_t"));
+    let uses = std::cell::OnceCell::new();
     let signed_only = |name: &str| {
         let mut read = false;
-        for line in lines
+        let rows = uses
+            .get_or_init(|| word_lines(lines))
+            .get(name)
+            .map_or(&[][..], Vec::as_slice);
+        for line in rows
             .iter()
+            .filter_map(|&k| lines.get(k))
             .filter(|l| !l.starts_with("//") && !declares(l))
         {
             for at in word_positions(line, name) {

@@ -81,7 +81,7 @@ pub(super) fn read_counts(
 /// demangling every import for each one cost ten milliseconds a call on a
 /// mutant whose symbol table was corrupt, seconds for a function of thirty
 /// blocks.
-pub(super) struct ImportNames {
+pub(in crate::analysis::decompile) struct ImportNames {
     /// The raw symbol name of the first import at each address.
     by_addr: BTreeMap<u64, String>,
     /// The raw symbol name of the first import carrying each demangled name.
@@ -90,25 +90,32 @@ pub(super) struct ImportNames {
 
 /// Returns the import name tables of the program, built the first time.
 ///
+/// PERF: the tables are taken from the memo once per function and kept in
+/// its context: the lift asks for them at every call it executes, over a
+/// thousand times a function, and each ask locked the memo twice, which
+/// the threads of a sweep queued on.
+///
 /// # Arguments
 ///
 /// * `ctx` - The program and its analysis, whose memo holds the tables.
-pub(super) fn import_names(ctx: &Ctx<'_>) -> std::sync::Arc<ImportNames> {
-    ctx.analysis.derived.get_or_build("import_names", (), || {
-        let mut by_addr = BTreeMap::new();
-        let mut by_name = BTreeMap::new();
-        for s in ctx
-            .program
-            .symbols
-            .iter()
-            .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
-        {
-            by_addr.entry(s.addr).or_insert_with(|| s.name.clone());
-            by_name
-                .entry(crate::search::demangled_name(&s.name))
-                .or_insert_with(|| s.name.clone());
-        }
-        ImportNames { by_addr, by_name }
+pub(super) fn import_names<'c>(ctx: &'c Ctx<'_>) -> &'c ImportNames {
+    ctx.imports.get_or_init(|| {
+        ctx.analysis.derived.get_or_build("import_names", (), || {
+            let mut by_addr = BTreeMap::new();
+            let mut by_name = BTreeMap::new();
+            for s in ctx
+                .program
+                .symbols
+                .iter()
+                .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
+            {
+                by_addr.entry(s.addr).or_insert_with(|| s.name.clone());
+                by_name
+                    .entry(crate::search::demangled_name(&s.name))
+                    .or_insert_with(|| s.name.clone());
+            }
+            ImportNames { by_addr, by_name }
+        })
     })
 }
 
@@ -139,7 +146,7 @@ pub(in crate::analysis::decompile) fn import_prototype(
     use crate::analysis::prototypes::{declared, msvc_prototype};
     let t = target?;
     let names = import_names(ctx);
-    import_raw(ctx, &names, t)
+    import_raw(ctx, names, t)
         .map(crate::analysis::bare_name)
         .and_then(|name| {
             msvc_prototype(name)
@@ -181,7 +188,7 @@ pub(in crate::analysis::decompile) fn runtime_helper(
         .names
         .get(&t)
         .map(String::as_str)
-        .or_else(|| import_raw(ctx, &names, t))
+        .or_else(|| import_raw(ctx, names, t))
         .or_else(|| ctx.analysis.function(t)?.name.as_deref())
         .and_then(crate::analysis::runtime::helper)
 }
@@ -197,7 +204,7 @@ pub(in crate::analysis::decompile) fn runtime_helper(
 pub(in crate::analysis::decompile) fn runtime_import(ctx: &Ctx<'_>, target: Option<u64>) -> bool {
     let names = import_names(ctx);
     target
-        .and_then(|t| import_raw(ctx, &names, t))
+        .and_then(|t| import_raw(ctx, names, t))
         .is_some_and(|raw| {
             crate::analysis::prototypes::is_c_runtime(raw.split_once('!').map_or("", |(d, _)| d))
         })
@@ -1094,7 +1101,7 @@ pub(in crate::analysis::decompile) fn sse_callee(ctx: &Ctx<'_>, target: Option<u
     let name = match (ctx.overlay.names.get(&t), ctx.analysis.function(t)) {
         (Some(n), _) => Some(n.as_str()),
         (None, Some(f)) => f.name.as_deref(),
-        (None, None) => import_raw(ctx, &imports, t),
+        (None, None) => import_raw(ctx, imports, t),
     };
     if let Some(s) = name.and_then(crate::analysis::returns::sse_helper) {
         return s;
@@ -1176,7 +1183,7 @@ pub(in crate::analysis::decompile) fn x87_callee(ctx: &Ctx<'_>, target: Option<u
     let name = match (ctx.overlay.names.get(&t), ctx.analysis.function(t)) {
         (Some(n), _) => Some(n.as_str()),
         (None, Some(f)) => f.name.as_deref(),
-        (None, None) => import_raw(ctx, &imports, t),
+        (None, None) => import_raw(ctx, imports, t),
     };
     if let Some(e) = name.and_then(x87::helper) {
         return x87::Call::Helper(e);
