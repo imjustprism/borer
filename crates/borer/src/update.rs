@@ -431,19 +431,18 @@ fn spawn_refresh() {
     }
 }
 
-/// Seconds after which a claim on the daily check ([`claim`]) that no
-/// refresh let go of, as a refresh that crashed would not, is taken over.
-const CLAIM_STALE_SECS: u64 = 120;
-
-/// The file a command holds while the daily check it started runs.
+/// The file a command makes to start the daily check of the current
+/// window of [`CHECK_EVERY`]: one name per window, so a check that never
+/// finished holds its window alone and the next window tries again.
 fn claim_file() -> Option<PathBuf> {
-    Some(check_file()?.with_extension("claim"))
+    let window = now_secs() / CHECK_EVERY.as_secs();
+    Some(check_file()?.with_file_name(format!("latest-release.{window}.claim")))
 }
 
 /// Claims starting the daily check, across every process at once.
 ///
-/// The file is made only if it is not there, which the system does for one caller
-/// alone, so two commands started together start one check between them.
+/// The file is made only if it is not there, which the system does for one
+/// caller alone, so commands started together start one check between them.
 ///
 /// # Arguments
 ///
@@ -451,43 +450,37 @@ fn claim_file() -> Option<PathBuf> {
 ///
 /// # Returns
 ///
-/// True for the one caller that holds the claim, including one taking over
-/// a claim older than [`CLAIM_STALE_SECS`].
+/// True for the one caller that made the file.
 fn claim(file: &Path) -> bool {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let make = || {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(file)
-            .is_ok()
-    };
-    if make() {
-        return true;
-    }
-    let age = std::fs::metadata(file)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(u64::MAX, |d| now_secs().saturating_sub(d.as_secs()));
-    age >= CLAIM_STALE_SECS && std::fs::remove_file(file).is_ok() && make()
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(file)
+        .is_ok()
 }
 
 /// The daily check itself, run by the detached copy [`spawn_refresh`]
 /// starts: asks GitHub for the latest tag and keeps it.
 ///
 /// A failed check keeps the last known tag with the new time, so an
-/// offline machine asks once a day, not on every command.
+/// offline machine asks once a day, not on every command. The claims that
+/// started checks ([`claim_file`]) go once the answer is kept.
 pub(crate) fn refresh() {
     let tag = latest_tag(15)
         .ok()
         .or_else(|| recalled().map(|(tag, _)| tag))
         .unwrap_or_else(|| "none".to_owned());
     remember(&tag);
-    if let Some(file) = claim_file() {
-        let _ = std::fs::remove_file(file);
+    let claims = check_file().and_then(|f| Some(f.parent()?.read_dir().ok()?.flatten()));
+    for found in claims.into_iter().flatten() {
+        let name = found.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("latest-release.") && name.ends_with(".claim") {
+            let _ = std::fs::remove_file(found.path());
+        }
     }
 }
 
@@ -530,7 +523,7 @@ mod tests {
                 .count()
         });
         assert_eq!(held, 1);
-        assert!(!claim(&file), "a fresh claim is not taken over");
+        assert!(!claim(&file), "a held claim stays held");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
