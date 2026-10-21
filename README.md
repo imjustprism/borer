@@ -91,13 +91,15 @@ Windows (PowerShell):
 irm https://borer.lol/install.ps1 | iex
 ```
 
-`setup` finds Claude Code, Claude Desktop, Cursor, Windsurf, Devin Desktop, VS Code, VS Code Insiders, Gemini CLI, Codex CLI and Zed.
+`setup` finds Claude Code, Claude Desktop, Cursor, Windsurf, Devin Desktop, VS Code, VS Code Insiders, Gemini CLI, Codex CLI, Zed, OpenCode and pi.
 It backs up each file it edits to `<file>.bak`, replaces an entry whose
 program no longer exists (`--replace` replaces any other), and ends by naming
 the clients to restart: none reads its configuration again while it runs
 (quit Claude Desktop from the tray; in Cursor, turn borer on under Settings >
-MCP). For Codex it also sets `tool_timeout_sec = 600`, since the first
-analysis of a large binary can take longer than Codex's default minute.
+MCP; in pi, `/reload`). For Codex it also sets `tool_timeout_sec = 600`, and
+for pi `"timeout": 600`, since the first analysis of a large binary can take
+longer than their default minute; pi also gets `"exposure": "direct"`, so
+borer's tools are offered like built-in ones rather than only to codemode.
 
 As a Claude Code plugin, which fetches the binary of the plugin's version
 when a session starts and replaces it when the plugin updates:
@@ -143,6 +145,20 @@ Zed (`settings.json`) reads `context_servers`:
 
 ```json
 { "context_servers": { "borer": { "command": "/path/to/borer", "args": [] } } }
+```
+
+OpenCode (`~/.config/opencode/opencode.json`) reads `mcp`, with the command as
+an array:
+
+```json
+{ "mcp": { "borer": { "type": "local", "command": ["/path/to/borer"], "enabled": true } } }
+```
+
+pi (`~/.pi/agent/mcp.json`, or `pi mcp add borer -- /path/to/borer`) reads
+`mcpServers`:
+
+```json
+{ "mcpServers": { "borer": { "command": "/path/to/borer", "args": [], "timeout": 600, "exposure": "direct" } } }
 ```
 
 Codex CLI (`~/.codex/config.toml`):

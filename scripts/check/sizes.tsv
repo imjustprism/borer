@@ -78,7 +78,7 @@ crates/borer-engine/src/analysis/decompile/replay/prove.rs	2236
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::prove_or#1	313
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::step#1	254
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::successor_claims#1	159
-crates/borer-engine/src/analysis/decompile/rewrite.rs	1609
+crates/borer-engine/src/analysis/decompile/rewrite.rs	1503
 crates/borer-engine/src/analysis/decompile/structure.rs::closed_run_with#1	118
 crates/borer-engine/src/analysis/decompile/traces.rs::included#1	106
 crates/borer-engine/src/analysis/decompile/types.rs	2983
@@ -204,7 +204,7 @@ crates/borer/src/main.rs::call_tool#1	122
 crates/borer/src/main.rs::listing#1	135
 crates/borer/src/recall.rs::line_delta#1	101
 crates/borer/src/resources.rs::an_argument_naming_nothing_is_an_invalid_params_error#1	115
-crates/borer/src/setup.rs::register_file#1	125
+crates/borer/src/setup/mod.rs::register_file#1	104
 crates/borer/src/tools/annotate.rs::set_name#1	114
 crates/borer/src/tools/annotate.rs::set_type#1	305
 crates/borer/src/tools/annotate.rs::set_type_defines_applies_and_refuses#1	127
