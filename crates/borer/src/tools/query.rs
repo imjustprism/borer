@@ -12,7 +12,6 @@ use crate::BorerServer;
 use crate::errors::err_params;
 use crate::paging;
 use crate::params::{Annotation, QueryParams, ScriptParams, must_be_in_a_section, must_fit_a_row};
-use crate::state::write_lock;
 
 #[tool_router(router = query_tools, vis = "pub(crate)")]
 impl BorerServer {
@@ -128,9 +127,7 @@ impl BorerServer {
         }
         let (mut named, mut commented) = (HashSet::new(), HashSet::new());
         let mut skipped = 0usize;
-        let before = self.overlay_plain();
-        {
-            let mut overlay = write_lock(&self.overlay);
+        let applied = self.edit_overlay_of(&program, |overlay| {
             for (at, name) in &run.names {
                 if must_fit_a_row(name, Annotation::Name).is_ok()
                     && must_be_in_a_section(&program, *at, Annotation::Name).is_ok()
@@ -152,9 +149,10 @@ impl BorerServer {
                     skipped += 1;
                 }
             }
-        }
-        if !named.is_empty() || !commented.is_empty() {
-            self.names_changed(&before);
+        });
+        if let Err(why) = applied {
+            let _ = writeln!(text, "# nothing applied: {why}");
+            return Ok(text);
         }
         let _ = writeln!(
             text,
@@ -235,6 +233,52 @@ mod tests {
         assert_eq!(
             overlay.comments.get(&0x1001).map(String::as_str),
             Some("here")
+        );
+    }
+
+    /// A script lands nothing on a program `load_binary` put in place of the
+    /// one it ran over.
+    ///
+    /// The script reads the program it found loaded, outside the program's
+    /// lock, and applies what it proposed after it ends; names it found on
+    /// one build must not land at the same addresses of the next one,
+    /// where other code sits.
+    ///
+    /// # Panics
+    ///
+    /// When the new program's overlay holds the script's name.
+    #[test]
+    fn a_script_lands_nothing_on_a_program_loaded_while_it_ran() {
+        use crate::params::ScriptParams;
+        use crate::testing::load_raw;
+        use rmcp::handler::server::wrapper::Parameters;
+        let dir = std::env::temp_dir().join(format!("borer-script-swap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let (one, two) = (dir.join("one.bin"), dir.join("two.bin"));
+        std::fs::write(&one, [0xc3; 16]).expect("written");
+        std::fs::write(&two, [0x90; 16]).expect("written");
+        let server = crate::BorerServer::default();
+        let load = |path: &std::path::Path| load_raw(&server, path, "0x10000");
+        load(&one).expect("the first program loads");
+        std::thread::scope(|s| {
+            let ran = s.spawn(|| {
+                server.script(Parameters(ScriptParams {
+                    code:
+                        r#"let n = 0; while n < 3000000 { n += 1; } rename(0x10000, "from_one");"#
+                            .to_owned(),
+                    dry_run: Some(false),
+                }))
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            load(&two).expect("the second program loads");
+            let said = ran.join().expect("the script ends").expect("it answers");
+            assert!(said.contains("from_one"), "{said}");
+        });
+        let names = crate::state::read_lock(&server.overlay).names.clone();
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        assert!(
+            names.is_empty(),
+            "a name the script found on the first program landed on the second: {names:?}"
         );
     }
 

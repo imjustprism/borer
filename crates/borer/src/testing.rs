@@ -44,6 +44,36 @@ pub(crate) fn listed_rows(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Loads a file into a server as raw x86-64 code mapped at `base`, without
+/// a PDB, through `load_binary`.
+///
+/// # Arguments
+///
+/// * `server` - The server.
+/// * `path` - The file.
+/// * `base` - Where its bytes map, as `load_binary` reads it.
+///
+/// # Errors
+///
+/// As `load_binary` refuses the file.
+pub(crate) fn load_raw(
+    server: &crate::BorerServer,
+    path: &std::path::Path,
+    base: &str,
+) -> Result<String, rmcp::ErrorData> {
+    server.load_binary(rmcp::handler::server::wrapper::Parameters(
+        crate::params::LoadBinaryParams {
+            path: path.display().to_string(),
+            entry_file_offset: None,
+            pdb: Some(false),
+            arch: Some(crate::params::RawArch::X64),
+            base: Some(base.to_owned()),
+            entry: None,
+            regions: None,
+        },
+    ))
+}
+
 /// A server with a one-instruction program loaded, for a handler test
 /// that needs an analysis but not a real binary.
 pub(crate) fn tiny_server() -> crate::BorerServer {

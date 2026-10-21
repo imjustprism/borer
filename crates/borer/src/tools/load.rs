@@ -16,7 +16,7 @@ use crate::BorerServer;
 use crate::catalog::template_names;
 use crate::errors::{err_internal, err_params};
 use crate::params::{FetchPdbParams, LoadBinaryParams, LoadProjectParams, SaveProjectParams};
-use crate::state::{RawLoad, fault_text, lock, read_lock, write_lock};
+use crate::state::{RawLoad, fault_text, lock, read_lock};
 use crate::symsrv;
 
 /// The line `load_binary` ends with: the one call that answers what the
@@ -227,9 +227,12 @@ impl BorerServer {
             program.entry = Some(va);
         }
         let mut summary = program.summary();
-        let dropped = std::mem::take(&mut *write_lock(&self.overlay));
+        let (packs, notes) = self.packs_for(&program);
+        let program = Arc::new(program);
+        let loaded = (apply_pdb, entry_file_offset, raw);
+        let (previous, dropped) = self.install(Arc::clone(&program), packs, loaded);
         if !dropped.names.is_empty() || !dropped.comments.is_empty() {
-            let previous = self.loaded().map_or_else(
+            let previous = previous.map_or_else(
                 || "the previous binary".to_owned(),
                 |p| p.path.display().to_string(),
             );
@@ -239,15 +242,11 @@ impl BorerServer {
                 dropped.comments.len()
             ));
         }
-        let (packs, notes) = self.packs_for(&program);
         for note in notes {
             let _ = writeln!(summary, "{note}");
         }
-        *write_lock(&self.pdb_applied) = apply_pdb;
-        *write_lock(&self.entry_file_offset) = entry_file_offset;
-        *write_lock(&self.raw_load) = raw;
         if let Some(s) = lock(&self.live).as_mut() {
-            let mapped = s.map(Some(&program));
+            let mapped = s.map(Some(program.as_ref()));
             let _ = write!(
                 summary,
                 "live {} (pid {}): {mapped}",
@@ -259,10 +258,6 @@ impl BorerServer {
             summary.push('\n');
         }
         summary.push_str(LOAD_NEXT);
-        *write_lock(&self.program_packs) = packs;
-        *write_lock(&self.program) = Some(Arc::new(program));
-        *write_lock(&self.analysis) = None;
-        *write_lock(&self.strings) = None;
         Ok(summary)
     }
 
@@ -554,9 +549,8 @@ impl BorerServer {
         if matches!(identity, Identity::PathOnly | Identity::OtherPath) {
             said.push_str("# the project names its binary by path alone (saved before projects recorded its sha-256), so a rebuild at that path loads it too; save_project records the hash\n");
         }
-        let before = self.overlay_plain();
-        *write_lock(&self.overlay) = loaded;
-        self.names_changed(&before);
+        self.edit_overlay_of(&program, |o| *o = loaded)
+            .map_err(err_params)?;
         Ok(said)
     }
 }

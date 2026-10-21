@@ -250,6 +250,12 @@ impl BorerServer {
     /// Returns the derived analysis of the current program, computing and
     /// caching it on first use.
     ///
+    /// A caller outside a tool body holds no lock on the program while the
+    /// analysis is computed, so a `load_binary` may finish meanwhile: the
+    /// analysis is kept only when the program it was computed for is still
+    /// the one loaded, checked under the program's lock, which
+    /// `load_binary` takes to replace the program and drop its analysis.
+    ///
     /// # Errors
     ///
     /// When no binary is loaded or its architecture has no code analysis.
@@ -263,8 +269,63 @@ impl BorerServer {
         }
         let packs = Arc::clone(&read_lock(&self.program_packs));
         let a = Arc::new(Analysis::compute_with(&program, packs));
-        *write_lock(&self.analysis) = Some(a.clone());
+        let loaded = read_lock(&self.program);
+        if loaded
+            .as_ref()
+            .is_some_and(|now| Arc::ptr_eq(now, &program))
+        {
+            *write_lock(&self.analysis) = Some(a.clone());
+        }
         Ok(a)
+    }
+
+    /// Puts `program` in place of the loaded one, with the way it was
+    /// loaded, and lets go of what belonged to the old one: its names and
+    /// comments, its analysis and its string walks.
+    ///
+    /// All of it changes under the program's write lock, so no tool body
+    /// (which holds the read lock for its whole run, [`Self::with_program`])
+    /// sees the new program with the old one's names or analysis, or writes
+    /// a name it checked against the old program into the new one's
+    /// overlay. The lock is tried, never queued for: a body takes the read
+    /// lock again inside (the analysis it asks for, an address it
+    /// resolves), and a writer queued for the lock makes that second read
+    /// wait behind it while the writer waits for the body, so neither would
+    /// end. While a body holds it, the writer waits a moment and tries
+    /// again.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The program loaded.
+    /// * `packs` - The packs its analysis runs with.
+    /// * `(pdb, entry_file_offset, raw)` - How it was loaded, for a reload.
+    ///
+    /// # Returns
+    ///
+    /// The program it replaced, and that program's overlay.
+    pub(crate) fn install(
+        &self,
+        program: Arc<Program>,
+        packs: Arc<Packs>,
+        (pdb, entry_file_offset, raw): (bool, Option<u64>, RawLoad),
+    ) -> (Option<Arc<Program>>, Overlay) {
+        /// How long the writer waits before trying the lock again.
+        const RETRY: std::time::Duration = std::time::Duration::from_millis(1);
+        let mut loaded = loop {
+            match self.program.try_write() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(RETRY),
+            }
+        };
+        let dropped = std::mem::take(&mut *write_lock(&self.overlay));
+        *write_lock(&self.pdb_applied) = pdb;
+        *write_lock(&self.entry_file_offset) = entry_file_offset;
+        *write_lock(&self.raw_load) = raw;
+        *write_lock(&self.program_packs) = packs;
+        *write_lock(&self.analysis) = None;
+        *write_lock(&self.strings) = None;
+        (loaded.replace(program), dropped)
     }
 
     /// Runs `f` against the loaded program, its analysis and a snapshot of
@@ -338,6 +399,42 @@ impl BorerServer {
         if let Some(a) = read_lock(&self.analysis).as_ref() {
             a.derived.moved(a, before, &self.overlay_plain());
         }
+    }
+
+    /// Edits the overlay with `edit` when `program` is still the program
+    /// loaded, then carries the analysis over to the names it leaves
+    /// ([`Self::names_changed`]).
+    ///
+    /// A tool that read the program outside its lock (a script's run, a
+    /// project's identity check) must not land what it found on another
+    /// program a `load_binary` put in its place meanwhile: the check and
+    /// the edit hold the program's lock, which `load_binary` takes to swap
+    /// the program ([`Self::install`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The program the edit was worked out for.
+    /// * `edit` - The edit.
+    ///
+    /// # Errors
+    ///
+    /// When another program is loaded now; nothing was edited.
+    pub(crate) fn edit_overlay_of(
+        &self,
+        program: &Arc<Program>,
+        edit: impl FnOnce(&mut Overlay),
+    ) -> Result<(), String> {
+        let loaded = read_lock(&self.program);
+        if !loaded.as_ref().is_some_and(|now| Arc::ptr_eq(now, program)) {
+            return Err(format!(
+                "{} is no longer the loaded binary (a load_binary ran meanwhile); nothing was applied",
+                program.path.display()
+            ));
+        }
+        let before = self.overlay_plain();
+        edit(&mut write_lock(&self.overlay));
+        self.names_changed(&before);
+        Ok(())
     }
 
     /// Resolves an address argument: `0x`-hex text, else a name looked up
@@ -418,6 +515,29 @@ impl BorerServer {
                 Arc::default()
             }),
             ..BorerServer::default()
+        }
+    }
+
+    /// Returns the session's state as it stands, for the worker taking over
+    /// on `reload` ([`Self::resume`]): the loaded file, the way it was
+    /// loaded, and its names and comments.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_info` - What the client sent at initialize.
+    pub(crate) fn resume_state(&self, peer_info: Option<&InitializeRequestParams>) -> Resume {
+        Resume {
+            peer_info: peer_info.cloned(),
+            project: self.loaded().map(|p| {
+                borer::project::ProjectFile::from_overlay(
+                    &p.path.display().to_string(),
+                    None,
+                    &read_lock(&self.overlay),
+                )
+            }),
+            pdb: Some(*read_lock(&self.pdb_applied)),
+            entry_file_offset: *read_lock(&self.entry_file_offset),
+            raw: read_lock(&self.raw_load).clone(),
         }
     }
 
@@ -522,6 +642,199 @@ mod tests {
         assert!(server.analysis_pending().is_some());
         server.ensure_analysis().expect("analyzes");
         assert_eq!(server.analysis_pending(), None);
+    }
+
+    /// An analysis a request computed for the program it found loaded is
+    /// not kept once `load_binary` loaded another program meanwhile.
+    ///
+    /// A resource read or a script asks for the analysis outside the
+    /// program's lock, so a `load_binary` can finish while the first
+    /// analysis of the old program runs; every later tool would then read
+    /// the new program's bytes through the old program's functions.
+    ///
+    /// # Panics
+    ///
+    /// When the analysis held after the load is not the new program's.
+    #[test]
+    fn an_analysis_of_a_program_loaded_over_is_not_kept() {
+        use crate::testing::load_raw;
+        use borer_engine::analysis::Analysis;
+        use borer_engine::program::Feature;
+        /// Functions in the big program, each calling the next.
+        const CHAINED: usize = 60_000;
+        let dir = std::env::temp_dir().join(format!("borer-loaded-over-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let (big, small) = (dir.join("big.bin"), dir.join("small.bin"));
+        let mut code = Vec::with_capacity(CHAINED * 16);
+        for _ in 1..CHAINED {
+            // ASM: call $+16; ret; int3 x10
+            code.extend_from_slice(&[0xe8, 0x0b, 0, 0, 0, 0xc3]);
+            code.extend_from_slice(&[0xcc; 10]);
+        }
+        code.push(0xc3);
+        std::fs::write(&big, &code).expect("written");
+        std::fs::write(&small, [0xc3]).expect("written");
+        let server = crate::BorerServer::default();
+        let load = |path: &std::path::Path| load_raw(&server, path, "0x10000");
+        load(&big).expect("the big program loads");
+        std::thread::scope(|s| {
+            let first = s.spawn(|| {
+                server
+                    .analysis(Feature::Discover)
+                    .map(|a| a.functions.len())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            load(&small).expect("the small program loads");
+            let first = first.join().expect("the first analysis ends");
+            assert_eq!(first.expect("the big program analyzes"), CHAINED);
+        });
+        let held = server.ensure_analysis().expect("analyzes");
+        let program = server.loaded().expect("a program is loaded");
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        assert_eq!(
+            held.functions.len(),
+            Analysis::compute(&program).functions.len(),
+            "the analysis of the program loaded over was kept for the new one"
+        );
+    }
+
+    /// A name set on one program never lands on the program `load_binary`
+    /// puts in its place.
+    ///
+    /// `set_name` checks the address against the program it holds the lock
+    /// of and writes the overlay; `load_binary` took the overlay away before
+    /// it waited for that lock, so a rename running at that moment wrote
+    /// the first program's name into the overlay the second one then took.
+    /// The two programs sit at different bases, so the name's address is
+    /// in no section of the second.
+    ///
+    /// # Panics
+    ///
+    /// When the second program's overlay holds the first one's name.
+    #[test]
+    fn a_name_set_on_one_program_never_lands_on_the_next() {
+        use crate::params::SetNameParams;
+        use crate::testing::load_raw;
+        use rmcp::handler::server::wrapper::Parameters;
+        /// Loads of the second program the test checks after.
+        const ROUNDS: usize = 300;
+        let dir = std::env::temp_dir().join(format!("borer-name-swap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let file = dir.join("code.bin");
+        std::fs::write(&file, [0xc3; 16]).expect("written");
+        let server = crate::BorerServer::default();
+        let load = |base: &str| load_raw(&server, &file, base);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let landed = std::thread::scope(|s| {
+            s.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let named = server.set_name(Parameters(SetNameParams {
+                        address: Some("0x10000".to_owned()),
+                        name: Some("from_one".to_owned()),
+                        names: None,
+                        force: None,
+                        dry_run: Some(false),
+                    }));
+                    if named.is_err() {
+                        std::thread::yield_now();
+                    }
+                }
+            });
+            let landed = (0..ROUNDS).find_map(|_| {
+                load("0x10000").expect("the first program loads");
+                load("0x20000").expect("the second program loads");
+                let names = super::read_lock(&server.overlay).names.clone();
+                (!names.is_empty()).then_some(names)
+            });
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            landed
+        });
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        assert_eq!(
+            landed, None,
+            "the first program's name landed on the second"
+        );
+    }
+
+    /// A tool reading the program and a `load_binary` running at once both
+    /// finish.
+    ///
+    /// A tool body holds the program's read lock for its whole run
+    /// ([`super::BorerServer::with_program`]); a body that takes the read
+    /// lock again (the analysis asked for, which reads the program) while
+    /// `load_binary` waits for the write lock waits behind that writer,
+    /// which waits for the body: neither ends, and with both request
+    /// permits held the server answers nothing again. A file with no code
+    /// analysis takes the lock again on every call that asks for the
+    /// analysis.
+    ///
+    /// # Panics
+    ///
+    /// When the two have not both finished their rounds in time.
+    #[test]
+    fn a_tool_and_a_load_running_at_once_both_finish() {
+        use crate::params::{LoadBinaryParams, StringsParams};
+        use rmcp::handler::server::wrapper::Parameters;
+        /// Rounds each side runs.
+        const ROUNDS: usize = 2_000;
+        let path = std::env::temp_dir().join(format!("borer-relock-{}.bin", std::process::id()));
+        std::fs::write(&path, b"no code here, only some text to find").expect("written");
+        let shown = path.display().to_string();
+        let server = crate::BorerServer::default();
+        let load = {
+            let server = server.clone();
+            move || {
+                server.load_binary(Parameters(LoadBinaryParams {
+                    path: shown.clone(),
+                    entry_file_offset: None,
+                    pdb: Some(false),
+                    arch: None,
+                    base: None,
+                    entry: None,
+                    regions: None,
+                }))
+            }
+        };
+        load().expect("the file loads");
+        let (done, finished) = std::sync::mpsc::channel();
+        let reader = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let read = server.strings(Parameters(StringsParams {
+                        min_length: None,
+                        filter: None,
+                        encoding: None,
+                        offset: None,
+                        limit: None,
+                        count_only: Some(true),
+                    }));
+                    assert!(read.is_ok(), "{read:?}");
+                }
+                done.send("reader").expect("the test waits");
+            })
+        };
+        let loader = std::thread::spawn(move || {
+            for _ in 0..ROUNDS {
+                load().expect("the file loads");
+            }
+            done.send("loader").expect("the test waits");
+        });
+        let ended: Vec<&str> = (0..2)
+            .map_while(|_| {
+                finished
+                    .recv_timeout(std::time::Duration::from_mins(1))
+                    .ok()
+            })
+            .collect();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            ended.len(),
+            2,
+            "only {ended:?} finished: the tool and the load hold each other"
+        );
+        reader.join().expect("the reader ends");
+        loader.join().expect("the loader ends");
     }
 
     /// The shipped build unwinds on panic, so the request guard in
