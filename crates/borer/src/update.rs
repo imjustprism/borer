@@ -375,7 +375,9 @@ pub(crate) const REFRESH: &str = "BORER_UPDATE_REFRESH";
 /// that answer is older than a day, or there is none, a detached copy of
 /// this binary ([`REFRESH`]) asks GitHub and keeps the answer for the next
 /// run: a thread would die with a quick command before the answer came
-/// back, and the command never waits for it.
+/// back, and the command never waits for it. The day's check is claimed
+/// in the cache before the copy starts, so commands run while it is out
+/// read the answer as fresh and start no second one.
 ///
 /// # Returns
 ///
@@ -393,8 +395,6 @@ pub(crate) fn check() -> Option<String> {
     }
     let kept = recalled();
     if !kept.as_ref().is_some_and(|(_, fresh)| *fresh) {
-        // Claims the day's check first, so commands run while it is out
-        // read the cache as fresh and start no second one.
         remember(kept.as_ref().map_or("none", |(tag, _)| tag.as_str()));
         spawn_refresh();
     }
@@ -407,6 +407,9 @@ pub(crate) fn check() -> Option<String> {
 
 /// Starts this binary again as the daily check, detached from the command:
 /// no standard handles shared, and on Windows no console window.
+///
+/// A thread waits on it, so a command that outlives it reaps it; a quick command
+/// just exits.
 fn spawn_refresh() {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -423,7 +426,6 @@ fn spawn_refresh() {
         const NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(NO_WINDOW);
     }
-    // Reaped if this command outlives it; a quick command just exits.
     if let Ok(mut child) = cmd.spawn() {
         std::thread::spawn(move || child.wait());
     }
