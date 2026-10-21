@@ -35,26 +35,26 @@ no Ghidra, IDA or Binary Ninja underneath.
   identical bytes for the same question every time.
 
 > [!WARNING]
-> Version 0.1.1, beta. Tool names, output spelling and resource URIs can still
+> Version 0.2.0, beta. Tool names, output spelling and resource URIs can still
 > change. See [Limits](#limits).
 
 ## Why borer
 
-| | borer | Ghidra 12.1.3 (headless) |
+| | borer | Ghidra 12.1.4 (headless) |
 | --- | --- | --- |
-| Load sqlite3.dll and list its functions, cold (Ghidra: import and auto-analysis) | 0.15 s | 138 s |
-| The same, analysis kept from an earlier run | 0.13 s | 3.1 s |
-| Decompile every function of sqlite3.dll (borer on every core, Ghidra one function at a time) | 2.7 s | 48 s |
-| Peak memory, sqlite3.dll | 73 MB | 1.5 GB |
+| Load sqlite3.dll and list its functions, cold (Ghidra: import and auto-analysis) | 0.12 s | 52 s |
+| The same, analysis kept from an earlier run | 0.11 s | 3.0 s |
+| Decompile every function of sqlite3.dll (both on every core) | 1.2 s | 9.3 s |
+| Peak memory, sqlite3.dll | 77 MB | 1.7 GB |
 | Install | one file | 1.2 GB with its JDK |
 
 Speed is measured on notepad, msvcrt, sqlite3, ntdll and kernelbase, each
 tool as it ships, one after the other
 ([numbers](scripts/run/vs_ghidra.json), [harness](scripts/run/vs_ghidra.py)).
-The rows above are borer 0.1.0's run of that harness; a rerun on the current
-build will replace them. Listing functions is not decompiling them: borer
-analyzes on the first call that needs it, so its first decompile of a large
-binary pays for that analysis, while Ghidra's has paid already. One function
+The rows above are borer 0.2.0's run of that harness. Listing functions is
+not decompiling them: borer analyzes on the first call that needs it, so its
+first decompile of a large binary pays for that analysis, while Ghidra's has
+paid already. One function
 at a time the two decompilers take about as long, a few milliseconds each;
 borer's time includes checking every block. Ghidra still prints fewer gotos
 and fewer width casts on large optimized functions.
