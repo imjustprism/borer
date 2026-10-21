@@ -85,11 +85,38 @@ fn backup_path(file: &Path) -> PathBuf {
 
 /// Whether an entry's program is gone, so the entry can only fail.
 ///
+/// A bare name (`npx`, `env`) is looked up on `PATH` as the client would
+/// run it, with Windows' `PATHEXT` endings; a path is checked as it is.
+///
 /// # Arguments
 ///
 /// * `command` - The program the entry runs.
 fn stale(command: &str) -> bool {
-    !Path::new(command).exists()
+    let path = Path::new(command);
+    if path.is_absolute() || path.components().count() > 1 {
+        return !path.exists();
+    }
+    let endings: Vec<String> = if cfg!(windows) {
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT".to_owned());
+        std::iter::once(String::new())
+            .chain(
+                pathext
+                    .split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_owned),
+            )
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    let found = std::env::var_os("PATH").is_some_and(|dirs| {
+        std::env::split_paths(&dirs).any(|dir| {
+            endings
+                .iter()
+                .any(|end| dir.join(format!("{command}{end}")).is_file())
+        })
+    });
+    !found
 }
 
 /// Adds, replaces or removes the entry in one client's file, or says what
@@ -367,7 +394,22 @@ fn changed_text(change: Result<Change, String>) -> String {
 mod tests {
     use super::codex::Codex;
     use super::cursor::Cursor;
-    use super::{Mode, Target, backup_path, register_file, scratch};
+    use super::{Mode, Target, backup_path, register_file, scratch, stale};
+
+    /// A bare program name is found on `PATH`, as the client runs it; a
+    /// path, or a name nothing on `PATH` holds, is gone.
+    ///
+    /// # Panics
+    ///
+    /// When one reads otherwise.
+    #[test]
+    fn a_bare_command_is_looked_up_on_the_path() {
+        assert!(!stale("cargo"));
+        assert!(stale("borer-no-such-program-anywhere"));
+        assert!(stale("/no/such/dir/borer"));
+        let this = std::env::current_exe().expect("the test binary");
+        assert!(!stale(this.to_str().expect("utf-8")));
+    }
 
     /// A dry run writes nothing; an applied change keeps the old file as
     /// `.bak` byte for byte; a second run finds the entry and writes
