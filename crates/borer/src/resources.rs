@@ -459,6 +459,121 @@ impl BorerServer {
         self.with_program(|p| Ok(borer_engine::hashing::hashes_tsv(p)))
     }
 
+    /// The shortest byte signature that matches code once
+    /// ([`render::signature_tsv`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - A function's name or entry, or any code address.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, the target names nothing, or the image is
+    /// not x86 or x86-64 code.
+    pub(crate) fn sig_text(&self, target: &str) -> Result<String, ErrorData> {
+        self.with_analysis(Feature::Discover, |p, a, o| {
+            let va = borer_engine::analysis::resolve_suggesting(p, a, o, target)?;
+            render::signature_tsv(p, a, o, va)
+        })
+    }
+
+    /// A YARA rule from functions' signatures and the strings they
+    /// reference ([`render::yara_rule`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `list` - Functions by name or entry, comma-separated.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, a function names nothing, or nothing is
+    /// left to match on.
+    pub(crate) fn yara_text(&self, list: &str) -> Result<String, ErrorData> {
+        self.with_analysis(Feature::Discover, |p, a, o| {
+            let entries = list
+                .split(',')
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(|f| borer_engine::analysis::resolve_suggesting(p, a, o, f))
+                .collect::<Result<Vec<u64>, String>>()?;
+            render::yara_rule(p, a, o, &entries)
+        })
+    }
+
+    /// borer's names and comments as a script or database another tool
+    /// applies ([`render::names_export`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - `ida`, `ghidra`, `binja` or `x64dbg`.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded or the tool is not one of those.
+    pub(crate) fn names_text(&self, tool: &str) -> Result<String, ErrorData> {
+        let Some(tool) = render::Tool::parse(tool) else {
+            return Err(err_params(format!(
+                "unknown tool {}; use one of: {}",
+                borer_engine::text::quoted(tool),
+                render::Tool::NAMES
+            )));
+        };
+        self.with_analysis(Feature::Discover, |p, a, o| {
+            Ok(render::names_export(p, a, o, tool))
+        })
+    }
+
+    /// One place as virtual address, relative address, file offset,
+    /// section and function ([`borer_engine::fileinfo::locate`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `place` - A virtual address, `rva:<n>` or `off:<n>`.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or the place is not a number or maps to
+    /// nothing.
+    pub(crate) fn addr_text(&self, place: &str) -> Result<String, ErrorData> {
+        self.with_analysis(Feature::Discover, |p, a, o| {
+            borer_engine::fileinfo::locate(p, Some(a), o, place)
+        })
+    }
+
+    /// Base64 and hex strings that decode to text or a known file
+    /// ([`render::encoded_strings_tsv`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Text the decoded value must contain; empty for all.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded.
+    pub(crate) fn encoded_text(&self, filter: &str) -> Result<String, ErrorData> {
+        self.with_program(|p| Ok(render::encoded_strings_tsv(p, filter)))
+    }
+
+    /// Answers the resources that take a function, a tool or a place for
+    /// another tool: `sig`, `yara`, `names` and `addr`.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The resource's name.
+    /// * `arg` - Its argument.
+    ///
+    /// # Errors
+    ///
+    /// As the resource does.
+    pub(crate) fn handoff_text(&self, kind: &str, arg: &str) -> Result<String, ErrorData> {
+        match kind {
+            "sig" => self.sig_text(arg),
+            "yara" => self.yara_text(arg),
+            "names" => self.names_text(arg),
+            _ => self.addr_text(arg),
+        }
+    }
+
     /// Lists a .NET assembly's metadata: types, methods, P/Invokes,
     /// external members, references and user strings.
     ///

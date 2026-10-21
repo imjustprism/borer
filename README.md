@@ -223,8 +223,8 @@ Any address argument takes `0x` hex, decimal, or a name.
 
 Deeper analyses are `borer://` resources: taint, struct layout, emulation,
 input solving, unpacking, flattening, VM dispatch, devirtualization, binary
-diff, stack strings, decoded strings and IOCs. `borer://help` lists all of
-them. A client without resource support passes the same URI to `query`.
+diff, stack strings, decoded and encoded strings, IOCs, byte signatures and
+YARA rules. `borer://help` lists all of them. A client without resource support passes the same URI to `query`.
 
 ## Use it from the command line
 
@@ -251,6 +251,13 @@ companion PDB, and `--arch x86|x64|arm64` (with `--base`, `--entry` and
   in local `.borer` files, never in engine code. None ship with borer.
   `borer sigmake` builds a signature pack from static libraries you already
   have (COFF `.lib`, ELF `.a`, Rust `.rlib`).
+- **Other tools:** `borer sig` writes the shortest byte signature that finds
+  a function again (moving bytes wildcarded), `borer yara` a YARA rule from
+  functions' signatures and strings, and `borer names <bin> ida|ghidra|binja|x64dbg`
+  borer's names and comments as a script or database those tools apply.
+  `borer info` gives the MD5, SHA-256, imphash and TLSH, and what any data
+  appended past the last section is; `borer addr` converts between virtual
+  address, relative address and file offset.
 - **Scripting:** sandboxed [Rhai](https://rhai.rs/) scripts (no files, no
   network, an operation budget) through the `script` tool or `borer script`.
 - **Sizes:** every answer is capped at 72,000 bytes, cut at a line with a note

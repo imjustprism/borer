@@ -124,7 +124,7 @@ crates/borer-engine/src/analysis/render/runs/mod.rs::judge#1	202
 crates/borer-engine/src/analysis/render/runs/mod.rs::render_runs#1	120
 crates/borer-engine/src/analysis/render/summary.rs::summary_of#1	226
 crates/borer-engine/src/analysis/render/triage.rs::crypto_tsv#1	102
-crates/borer-engine/src/analysis/render/triage.rs::triage_tsv#1	194
+crates/borer-engine/src/analysis/render/triage.rs::triage_tsv#1	185
 crates/borer-engine/src/analysis/render/unpack.rs::devirtualize_tsv#1	202
 crates/borer-engine/src/analysis/render/unpack.rs::unpack_tsv#1	169
 crates/borer-engine/src/analysis/returns.rs	1620
@@ -161,9 +161,9 @@ crates/borer-engine/src/layout.rs::program#1	120
 crates/borer-engine/src/macho.rs::image#1	184
 crates/borer-engine/src/pdb.rs	1565
 crates/borer-engine/src/pdb.rs::gather#1	163
-crates/borer-engine/src/program/mod.rs	1703
+crates/borer-engine/src/program/mod.rs	1702
 crates/borer-engine/src/program/mod.rs::from_bytes_with#1	569
-crates/borer-engine/src/program/mod.rs::summary#1	165
+crates/borer-engine/src/program/mod.rs::summary#1	164
 crates/borer-engine/src/script.rs::register#1	302
 crates/borer-engine/src/unwind.rs::cxx4#1	109
 crates/borer-engine/tests/common/elfgen.rs::build#1	115
@@ -193,12 +193,12 @@ crates/borer-engine/tests/it/decompile.rs::a_scalar_lane_move_and_round_keeps_th
 crates/borer-engine/tests/it/elf.rs::elf_bytes#1	254
 crates/borer-engine/tests/it/objc.rs::image#1	182
 crates/borer-engine/tests/it/x86.rs	3378
-crates/borer/src/cli/mod.rs	1525
+crates/borer/src/cli/mod.rs	1517
 crates/borer/src/cli/mod.rs::cli#1	176
-crates/borer/src/cli/mod.rs::query#1	1065
+crates/borer/src/cli/mod.rs::query#1	1049
 crates/borer/src/index.rs	1610
 crates/borer/src/main.rs::call_tool#1	122
-crates/borer/src/main.rs::listing#1	135
+crates/borer/src/main.rs::listing#1	132
 crates/borer/src/recall.rs::line_delta#1	101
 crates/borer/src/resources.rs::an_argument_naming_nothing_is_an_invalid_params_error#1	115
 crates/borer/src/setup/mod.rs::register_file#1	104

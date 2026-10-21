@@ -116,6 +116,10 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
         "The content hashes a file is correlated by: imphash (Mandiant's dll.function MD5 as pefile and VirusTotal compute it: table order, dll lowercased with .dll/.ocx/.sys stripped, ordinals named as pefile names them), authentihash (SHA-256 with the checksum, security directory and certificate table excluded, so signing does not move it), tlsh (Trend Micro's TLSH, the T1 string public feeds carry; none under 50 bytes or for too little variety) and borer-lsh (borer's own locality-sensitive hash, matching only another borer-lsh)",
     ),
     (
+        "borer://encoded",
+        "Strings stored encoded: base64 and hex text whose decoded bytes are text or a known file (a URL, a config, an embedded archive), each with its address and the decoded value; borer://encoded/<filter> narrows by decoded text",
+    ),
+    (
         "borer://children",
         "Programs and containers embedded in the file, each found by its signature and kept only when its headers validate (PE, ELF, Mach-O, zip, gzip, xz, 7z, cab, squashfs, cpio, uImage, cramfs, Android boot image), with offset, size and a one-line identity, plus the high-entropy runs no header explains: packed, compressed or encrypted bytes. load_binary path=<file>@<off> opens a program row as a program of its own; containers are listed, not extracted",
     ),
@@ -185,6 +189,31 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://partial/{address}",
         "A counted loop comparing a few bits of a product to a byte table: the iterations, the bit window, the table and the loop-invariant multiplicand. That shape is a hidden-number problem, solved by lattice reduction and not by more samples",
         "borer://partial/{entry}",
+    ),
+    (
+        "borer://sig/{address}",
+        "The shortest byte signature that matches the code at a function or address exactly once, the bytes that move between builds (RIP-relative displacements, absolute addresses, branch offsets) wildcarded: the pattern, a C string with its mask, and whether it is unique",
+        "borer://sig/{entry}",
+    ),
+    (
+        "borer://yara/{functions}",
+        "A YARA rule that finds the functions again: each one's unique byte signature and the strings it references, under the file's magic; functions are names or entries, comma-separated",
+        "borer://yara/{entry}",
+    ),
+    (
+        "borer://names/{tool}",
+        "borer's names and comments for another tool to apply: tool is ida (an IDAPython script), ghidra (a Ghidra Python script), binja (a Binary Ninja script) or x64dbg (a database to load); scripts rebase to the tool's image base",
+        "borer://names/ida",
+    ),
+    (
+        "borer://addr/{place}",
+        "One place as virtual address, relative address, file offset, section and function: place is a virtual address, rva:<n> or off:<n>",
+        "borer://addr/{entry}",
+    ),
+    (
+        "borer://encoded/{filter}",
+        "Encoded strings whose decoded value contains {filter}",
+        "borer://encoded/http",
     ),
     (
         "borer://why/{address}",

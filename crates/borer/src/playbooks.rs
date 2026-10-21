@@ -216,6 +216,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "children",
             "hidden",
             "decoded",
+            "encoded",
             "stackstrings",
         ],
     ),
@@ -230,6 +231,9 @@ const INTENTS: &[(&str, &[&str])] = &[
             "changes",
             "fingerprint",
             "exportpack",
+            "sig",
+            "yara",
+            "names",
         ],
     ),
     (
@@ -256,7 +260,15 @@ const INTENTS: &[(&str, &[&str])] = &[
     ),
     (
         "code",
-        &["function", "decompile", "disasm", "grep", "index", "bench"],
+        &[
+            "function",
+            "decompile",
+            "disasm",
+            "grep",
+            "index",
+            "bench",
+            "addr",
+        ],
     ),
     ("session", &["session", "annotations", "packs", "script"]),
 ];

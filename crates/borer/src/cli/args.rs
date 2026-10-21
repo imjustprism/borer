@@ -196,8 +196,6 @@ pub(super) enum Query {
     Hidden,
     /// `read <address|name> [kind] [count]`: typed values.
     Read,
-    /// `fingerprint [out]`: one line per function, megabytes on a real client, so `out` writes the file beside a build that `borer://diff` reads.
-    Fingerprint,
     /// `export --c <out.c> [--library]`: every function as one C file, leaves first.
     Export,
     /// `export-pack <name> [project] [all]`: the names a project file gave as a pack that finds the same functions in another build.
@@ -212,6 +210,9 @@ pub(super) enum Query {
     Types,
     /// `set-type <project> struct <name> [size] <off:name:type>... | enum <name> [size] <name:value>... | typedef <name> <type> | apply <address|name> <type>`: define or apply a user type, written to the project.
     SetType,
+    /// The commands [`super::extras`] runs: `hashes`, `sig`, `yara`,
+    /// `names`, `diff`, `addr` and `encoded`.
+    Extra(super::extras::Extra),
     /// `verify [function|all] [limit] [seed] [text|mir]`: check the lifter, or with `text` the text's statements, against the emulator, with `mir` reading the lifted values through MIR; fails on any disagreement.
     Verify,
 }
@@ -283,7 +284,6 @@ impl Query {
             "run" => Self::Run,
             "hidden" => Self::Hidden,
             "read" => Self::Read,
-            "fingerprint" => Self::Fingerprint,
             "export" => Self::Export,
             "export-pack" => Self::ExportPack,
             "script" => Self::Script,
@@ -292,7 +292,7 @@ impl Query {
             "types" => Self::Types,
             "set-type" => Self::SetType,
             "verify" => Self::Verify,
-            _ => return None,
+            other => Self::Extra(super::extras::Extra::parse(other)?),
         })
     }
 
@@ -305,6 +305,7 @@ impl Query {
     pub(super) fn most_args(self) -> Option<usize> {
         Some(match self {
             Self::Info | Self::Index | Self::Crypto | Self::Qt | Self::Triage => 0,
+            Self::Extra(extra) => extra.most_args(),
             Self::Function
             | Self::Summary
             | Self::Entropy
@@ -331,8 +332,7 @@ impl Query {
             | Self::Oracle
             | Self::Emulate
             | Self::Run
-            | Self::Hidden
-            | Self::Fingerprint => 1,
+            | Self::Hidden => 1,
             Self::Hexdump
             | Self::Disasm
             | Self::Shape

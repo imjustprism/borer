@@ -52,6 +52,7 @@ macro_rules! eprintln {
 }
 
 mod args;
+mod extras;
 mod packs;
 mod session;
 
@@ -105,6 +106,13 @@ commands:
   callgraph <binary> <address|name> [callers|callees]  callgraph (mermaid, max 30); callers walks what reaches it
   strings <binary> [filter] [offset] [limit]    printable strings (100 a page, max 500; \"\" for no filter)
   crypto <binary>                          known crypto/hash constants
+  hashes <binary>                          md5, sha256, imphash, authentihash and tlsh: what malware feeds are searched by
+  sig <binary> <address|name>              the shortest byte signature matching the code once, its moving bytes wildcarded: pattern, code and mask
+  yara <binary> <function>[,<function>...]  a YARA rule from the functions' signatures and the strings they reference
+  names <binary> <ida|ghidra|binja|x64dbg> [out]  borer's names and comments as an IDAPython, Ghidra or Binary Ninja script or an x64dbg database
+  diff <binary> <other>                    the functions another build changed, added or removed (other may be a fingerprint sidecar)
+  addr <binary> <va|rva:<n>|off:<n>>       one place as virtual address, relative address, file offset, section and function
+  encoded <binary> [filter]                base64 and hex strings that decode to text or a known file
   qt <binary>                              Qt classes from moc metadata: signals, slots, properties
   triage <binary>                          one call: what it is, what it hides, where to read
   taint <binary> <addr>[,reg]              follow a value forward: what carries it, what it reaches
@@ -866,6 +874,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 strings_page(&s.program, rows, &filter, walk, window, false)
             );
         }
+        Query::Extra(extra) => extras::run(extra, args, s)?,
         Query::Crypto => {
             let a = s.analysis_or_empty();
             print!("{}", render::crypto_tsv(&s.program, &a, &s.overlay, 0, 200));
@@ -1052,23 +1061,6 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
             for v in &values {
                 println!("{:<12} {}", format!("{:#x}", v.at), v.text);
-            }
-        }
-        Query::Fingerprint => {
-            let a = s.analysis(Feature::Discover)?;
-            let text = render::fingerprint_tsv(&a);
-            match args.get(2) {
-                Some(out) => {
-                    write_file(out, text.as_bytes())?;
-                    println!(
-                        "wrote {} fingerprints to {} ({} bytes); borer://diff/{} reads it",
-                        a.functions.len(),
-                        short_path(out),
-                        text.len(),
-                        short_path(out)
-                    );
-                }
-                None => print!("{text}"),
             }
         }
         Query::Export => {
