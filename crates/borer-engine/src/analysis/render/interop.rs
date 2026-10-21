@@ -46,8 +46,8 @@ impl Tool {
     }
 }
 
-/// A string as a double-quoted literal both Python and JSON read: `\`, `"`
-/// and control characters escaped.
+/// A string as a double-quoted JSON literal: `\`, `"` and control
+/// characters escaped, the rest as UTF-8.
 ///
 /// # Arguments
 ///
@@ -68,6 +68,29 @@ fn quoted(s: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+/// A string as a Python unicode literal both Python 2 (Ghidra's Jython)
+/// and Python 3 read without a source encoding: `u"..."`, every character
+/// past ASCII as a `\u` or `\U` escape.
+///
+/// # Arguments
+///
+/// * `s` - The text.
+fn py_quoted(s: &str) -> String {
+    let mut out = String::from("u");
+    for c in quoted(s).chars() {
+        match u32::from(c) {
+            0..=0x7f => out.push(c),
+            n @ 0x80..=0xffff => {
+                let _ = write!(out, "\\u{n:04x}");
+            }
+            n => {
+                let _ = write!(out, "\\U{n:08x}");
+            }
+        }
+    }
     out
 }
 
@@ -180,10 +203,10 @@ pub fn names_export(p: &Program, a: &Analysis, o: &Overlay, tool: Tool) -> Strin
                 out.push('\n');
             }
             for (va, n) in &names {
-                let _ = writeln!(out, "n({va:#x}, {})", quoted(n));
+                let _ = writeln!(out, "n({va:#x}, {})", py_quoted(n));
             }
             for (va, c) in &comments {
-                let _ = writeln!(out, "c({va:#x}, {})", quoted(c));
+                let _ = writeln!(out, "c({va:#x}, {})", py_quoted(c));
             }
             let _ = writeln!(
                 out,
@@ -198,7 +221,21 @@ pub fn names_export(p: &Program, a: &Analysis, o: &Overlay, tool: Tool) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{Tool, quoted};
+    use super::{Tool, py_quoted, quoted};
+
+    /// Text past ASCII becomes `\u`/`\U` escapes in a `u"..."` literal, which
+    /// Python 2 and 3 both read.
+    ///
+    /// # Panics
+    ///
+    /// When the literal reads otherwise.
+    #[test]
+    fn python_literals_escape_past_ascii() {
+        assert_eq!(
+            py_quoted("na\u{ef}ve \u{1f600}"),
+            "u\"na\\u00efve \\U0001f600\""
+        );
+    }
 
     /// Quotes, backslashes and control characters are escaped for Python
     /// and JSON alike.
