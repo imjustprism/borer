@@ -782,7 +782,8 @@ impl Exec<'_, '_> {
     /// Recognizes the sign and magnitude masks scalar float code applies with
     /// `xorps`/`andps` on a constant: in memory, or loaded into another
     /// register first (`tanf` keeps its sign mask in `xmm5`), where only the
-    /// lanes the register is known to hold count.
+    /// lanes the register is known to hold count; a scalar load
+    /// (`movss`, `movsd`) cleared the lanes above it.
     ///
     /// # Arguments
     ///
@@ -810,12 +811,19 @@ impl Exec<'_, '_> {
             {
                 match self.env.vals.get(&self.canon(instr.op1_register()))? {
                     Expr::Const(c) => c.to_le_bytes().to_vec(),
-                    Expr::Deref(a, ty) => loaded(a, usize::from(ty.bits() / 8))?,
+                    Expr::Deref(a, ty) => {
+                        let mut b = loaded(a, usize::from(ty.bits() / 8))?;
+                        b.resize(16, 0);
+                        b
+                    }
                     _ => return None,
                 }
             }
             _ => return None,
         };
+        if bytes.len() < 8 {
+            return None;
+        }
         let lanes32: Vec<u32> = bytes
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))

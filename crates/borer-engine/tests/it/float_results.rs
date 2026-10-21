@@ -308,3 +308,20 @@ fn a_conversion_reads_integer_declared_bits_as_a_float() {
     assert!(text.contains("*(double*)&var"), "{text}");
     replays_clean(&p, &a, &[0x1_4000_1000]);
 }
+
+/// A single loaded into a register that is no sign mask leaves `xorps`
+/// to the vector code, and the decompiler does not fail on it.
+#[test]
+fn a_single_held_in_a_register_is_no_mask() {
+    let mut code = vec![
+        0xf3, 0x0f, 0x10, 0x0d, 0xf8, 0x00, 0x00, 0x00, // ASM: movss xmm1,[rip+0xf8]
+        0x0f, 0x57, 0xc1, // ASM: xorps xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x100, 0xcc);
+    code.extend_from_slice(&[0x00, 0x00, 0x80, 0x3f]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    assert!(decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).is_some());
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}
