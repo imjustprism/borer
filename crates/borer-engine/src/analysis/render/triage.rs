@@ -977,16 +977,7 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         out.push_str(INCOMPLETE_NOTE);
         out.push('\n');
     }
-    if !p.debug_functions.is_empty() {
-        let _ = writeln!(
-            out,
-            "# debug info: {} functions named by the compiler",
-            p.debug_functions.len()
-        );
-    }
-    if let Some(outcome) = &p.pdb {
-        let _ = writeln!(out, "# pdb: {}", outcome.render());
-    }
+    out.push_str(&crate::fileinfo::triage_lines(p));
     let mut phases = crate::timing::Phases::new();
     let protection = protection_tsv(p, a);
     let _ = writeln!(out, "# protection: {}", headline(&protection, "protection"));

@@ -33,6 +33,7 @@ mod dyld;
 mod eh_frame;
 pub mod emulate;
 pub mod entropy;
+pub mod fileinfo;
 pub mod fxmap;
 pub mod go;
 pub mod hashing;

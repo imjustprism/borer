@@ -1106,8 +1106,10 @@ pub fn hashes_tsv(program: &Program) -> String {
         )
     };
     let mut out = format!(
-        "# content hashes of {}\nimphash       {}\nauthentihash  {}\ntlsh          {}\nborer-lsh     {}\n",
+        "# content hashes of {}\nmd5           {}\nsha256        {}\nimphash       {}\nauthentihash  {}\ntlsh          {}\nborer-lsh     {}\n",
         program.path.display(),
+        hex(Some(md5(&program.bytes).as_slice())),
+        hex(Some(sha256(&program.bytes).as_slice())),
         hex(imphash(program).as_ref().map(|d| d.as_slice())),
         hex(authentihash(program).as_ref().map(|d| d.as_slice())),
         tlsh(&program.bytes).map_or_else(
