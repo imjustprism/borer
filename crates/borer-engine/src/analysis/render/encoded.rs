@@ -114,7 +114,11 @@ pub fn encoded_strings_tsv(p: &Program, filter: &str) -> String {
             let Some(value) = reading(&bytes) else {
                 continue;
             };
-            if !want.is_empty() && !value.to_lowercase().contains(&want) {
+            if !want.is_empty()
+                && !String::from_utf8_lossy(&bytes)
+                    .to_lowercase()
+                    .contains(&want)
+            {
                 continue;
             }
             total += 1;

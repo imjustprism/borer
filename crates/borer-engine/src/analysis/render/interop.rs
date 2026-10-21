@@ -148,7 +148,7 @@ pub fn names_export(p: &Program, a: &Analysis, o: &Overlay, tool: Tool) -> Strin
             );
         }
         Tool::Ida | Tool::Ghidra | Tool::BinaryNinja => {
-            let _ = writeln!(out, "# {head}");
+            let _ = writeln!(out, "# {}", head.escape_debug());
             let prelude = match tool {
                 Tool::Ida => {
                     "# File > Script file... with the database open.\nimport ida_name, idc\ndelta = idc.get_imagebase() - BASE\ndef n(ea, name):\n    ida_name.set_name(ea + delta, name, ida_name.SN_NOWARN | ida_name.SN_NOCHECK | ida_name.SN_FORCE)\ndef c(ea, text):\n    idc.set_cmt(ea + delta, text, 0)\n"
@@ -192,6 +192,26 @@ mod tests {
     #[test]
     fn names_are_quoted_for_python_and_json() {
         assert_eq!(quoted("a\"b\\c\nd\u{1}"), "\"a\\\"b\\\\c\\nd\\u0001\"");
+    }
+
+    /// A file name with a line break stays inside the script's header
+    /// comment: nothing in it runs.
+    ///
+    /// # Panics
+    ///
+    /// When the name reaches a line of its own.
+    #[test]
+    fn a_file_name_cannot_inject_code_into_a_script() {
+        use crate::analysis::{Analysis, Overlay};
+        use crate::program::{Arch, Program, Section};
+        let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
+        let mut p = Program::raw(vec![0xc3; 0x100], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        p.path = "x\n__import__('os').system('id')\n#.exe".into();
+        let script = super::names_export(&p, &Analysis::default(), &Overlay::default(), Tool::Ida);
+        assert!(
+            script.lines().all(|l| !l.starts_with("__import__")),
+            "{script}"
+        );
     }
 
     /// Each tool parses by its usual names.

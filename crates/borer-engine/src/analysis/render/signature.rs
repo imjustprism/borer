@@ -122,9 +122,9 @@ pub fn signature(p: &Program, va: u64) -> Result<Signature, String> {
             instr.flow_control(),
             FlowControl::Call | FlowControl::UnconditionalBranch | FlowControl::ConditionalBranch
         ) && instr.near_branch_target() != 0;
-        if offsets.has_immediate()
-            && (branch || (offsets.immediate_size() >= 4 && in_image(p, instr.immediate(0))))
-        {
+        let address = crate::analysis::sigs::immediate_operand(&instr)
+            .is_some_and(|op| offsets.immediate_size() >= 4 && in_image(p, instr.immediate(op)));
+        if offsets.has_immediate() && (branch || address) {
             mark(offsets.immediate_offset(), offsets.immediate_size());
         }
         let code = bytes.get(start..start + instr.len()).unwrap_or_default();
@@ -247,21 +247,19 @@ fn yara_string(p: &Program, a: &Analysis, target: u64) -> Option<(String, bool)>
     (text.chars().count() >= 4).then(|| (yara_quoted(&text), wide))
 }
 
-/// A YARA identifier from a file name: letters, digits and underscores,
-/// not starting with a digit.
+/// A YARA identifier from a file name: `borer_` and its letters, digits
+/// and underscores, so no name is a keyword (`rule`, `global`) or starts
+/// with a digit.
 ///
 /// # Arguments
 ///
 /// * `stem` - The file's name without its extension.
 fn rule_name(stem: &str) -> String {
-    let mut name: String = stem
+    let body: String = stem
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    if name.chars().next().is_none_or(|c| c.is_ascii_digit()) {
-        name.insert_str(0, "borer_");
-    }
-    name
+    format!("borer_{body}")
 }
 
 /// Writes a YARA rule that finds the given functions again: each one's
@@ -380,6 +378,28 @@ mod tests {
     use super::{rule_name, signature, yara_quoted};
     use crate::program::{Arch, Program, Section};
 
+    /// An absolute address in an immediate operand that is not the first
+    /// operand, `mov eax, <address>`, is wildcarded too.
+    ///
+    /// # Panics
+    ///
+    /// When the address bytes stay fixed.
+    #[test]
+    fn an_address_in_a_later_operand_is_wildcarded() {
+        let mut code = vec![0xcc_u8; 0x1000];
+        code[..10].copy_from_slice(&[0x55, 0x89, 0xe5, 0x53, 0x56, 0x57, 0xb8, 0x00, 0x18, 0x40]);
+        code[10..12].copy_from_slice(&[0x00, 0xc3]);
+        let text = Section::mapped(".text", 0x40_1000, 0, 0x1000, false, true);
+        let p = Program::raw(code, Arch::X86, 0x40_0000, Some(0x40_1000), vec![text]);
+        let sig = signature(&p, 0x40_1000).expect("a signature");
+        assert!(
+            sig.spaced().starts_with("55 89 E5 53 56 57"),
+            "{}",
+            sig.spaced()
+        );
+        assert!(!sig.spaced().contains("00 18 40 00"), "{}", sig.spaced());
+    }
+
     /// A signature grows past a prefix found twice, wildcarding the
     /// RIP-relative displacement it crosses, and stops once it is unique.
     ///
@@ -429,7 +449,8 @@ mod tests {
     /// When one is not.
     #[test]
     fn rule_names_are_identifiers() {
-        assert_eq!(rule_name("notepad"), "notepad");
+        assert_eq!(rule_name("notepad"), "borer_notepad");
+        assert_eq!(rule_name("rule"), "borer_rule");
         assert_eq!(rule_name("7z-setup.x64"), "borer_7z_setup_x64");
     }
 }

@@ -203,7 +203,7 @@ pub fn masked_bytes(program: &Program, analysis: &Analysis, entry: u64) -> Optio
 /// # Arguments
 ///
 /// * `instr` - The instruction.
-fn immediate_operand(instr: &Instruction) -> Option<u32> {
+pub(crate) fn immediate_operand(instr: &Instruction) -> Option<u32> {
     (0..instr.op_count()).find(|&i| is_imm(instr.op_kind(i)))
 }
 

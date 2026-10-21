@@ -199,8 +199,8 @@ fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
             &label(path),
         ),
         None => {
-            let (named, program) = open(&["diff".to_owned(), other.to_owned()], &[], true, None)?;
-            let theirs = Session::fit(program, &named, true, Overlay::default())
+            let (named, program) = open(&["diff".to_owned(), other.to_owned()], &s.loading)?;
+            let theirs = Session::fit(program, &named, Overlay::default(), s.loading.clone())
                 .analysis(Feature::Discover)?;
             render::diff_tsv(&a, &theirs, &label(&s.program.path), &label(path))
         }

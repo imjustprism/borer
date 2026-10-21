@@ -197,7 +197,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     let (args, raw) = RawFlags::split(args)?;
-    let (owned, pack_files, auto, pdb) = split_pack_args(&args)?;
+    let (owned, mut load) = split_pack_args(&args)?;
     let args = owned.as_slice();
     let Some(word) = args.first() else {
         bail!("an option was given but no command; `borer help` lists the commands");
@@ -245,7 +245,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         | Command::Update
         | Command::FetchPdb => (1, ""),
     };
-    let layout = raw.layout()?;
+    load.layout = raw.layout()?;
     let maps_a_binary = match command {
         Command::Query(_) | Command::Packs => true,
         Command::PackKeys
@@ -256,7 +256,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         | Command::Update
         | Command::FetchPdb => false,
     };
-    if layout.is_some() && !maps_a_binary {
+    if load.layout.is_some() && !maps_a_binary {
         bail!(
             "--arch, --base, --entry and --regions say how a query reads its binary; {word} maps none"
         );
@@ -290,8 +290,8 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         }
         Command::Sigmake => sigmake(args)?,
         Command::Packs => {
-            let (named, program) = open(args, &pack_files, pdb, layout.as_ref())?;
-            print!("{}", packs_report(&program, &named, auto));
+            let (named, program) = open(args, &load)?;
+            print!("{}", packs_report(&program, &named, load.auto));
         }
         Command::Doctor => {
             let offline = match args.get(1).map(String::as_str) {
@@ -355,12 +355,12 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
             println!("{said}");
         }
         Command::Query(q) => {
-            let (named, program) = open(args, &pack_files, pdb, layout.as_ref())?;
+            let (named, program) = open(args, &load)?;
             let overlay = match &raw.project {
                 Some(path) => project_overlay(path, &program)?,
                 None => Overlay::default(),
             };
-            query(q, args, &Session::fit(program, &named, auto, overlay))?;
+            query(q, args, &Session::fit(program, &named, overlay, load))?;
         }
     }
     Ok(())
@@ -1436,7 +1436,6 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use borer_engine::analysis::Overlay;
     use borer_engine::program::{Arch, Program, Section};
@@ -1477,17 +1476,14 @@ mod tests {
         code.push(0xc3); // ASM: ret
         let size = u64::try_from(code.len()).expect("fits");
         let text = Section::mapped(".text", 0x1000, 0, size, false, true);
-        Session {
-            program: Arc::new(Program::raw(
-                code,
-                Arch::X86_64,
-                0,
-                Some(0x1000),
-                vec![text],
-            )),
-            packs: Arc::default(),
-            overlay: Overlay::default(),
-        }
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let packs = borer_engine::pack::Packs::default();
+        Session::fit(
+            program,
+            &packs,
+            Overlay::default(),
+            super::session::Loading::default(),
+        )
     }
 
     /// A name nothing matches is answered with the CLI commands that list

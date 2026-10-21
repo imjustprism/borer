@@ -45,13 +45,9 @@ pub(super) fn needs_a_binary(word: &str) -> String {
 /// # Errors
 ///
 /// When a pack cannot be read, no binary is named, or it does not load.
-pub(super) fn open(
-    args: &[String],
-    pack_files: &[String],
-    apply_pdb: bool,
-    layout: Option<&Layout>,
-) -> anyhow::Result<(Arc<Packs>, Program)> {
-    let named = read_packs(pack_files)?;
+pub(super) fn open(args: &[String], load: &Loading) -> anyhow::Result<(Arc<Packs>, Program)> {
+    let (apply_pdb, layout) = (load.pdb, load.layout.as_ref());
+    let named = read_packs(&load.pack_files)?;
     let path = args
         .get(1)
         .with_context(|| needs_a_binary(args.first().map_or("", String::as_str)))?;
@@ -103,6 +99,20 @@ fn head_bytes(file: &std::path::Path) -> Vec<u8> {
     head
 }
 
+/// How the command line loaded the binary, so a command that loads a
+/// second one (`diff`) loads it the same way.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Loading {
+    /// The `--pack` files.
+    pub(super) pack_files: Vec<String>,
+    /// Whether the companion PDB is applied (`--no-pdb` turns it off).
+    pub(super) pdb: bool,
+    /// The raw layout `--arch` and its flags give, for a headerless file.
+    pub(super) layout: Option<Layout>,
+    /// Whether the pack directories' packs load by themselves.
+    pub(super) auto: bool,
+}
+
 /// A binary with the packs that fit it, as every query reads it.
 #[derive(Debug)]
 pub(super) struct Session {
@@ -113,6 +123,8 @@ pub(super) struct Session {
     pub(super) packs: Arc<Packs>,
     /// The names, comments and types: a `--project` file's, else none.
     pub(super) overlay: Overlay,
+    /// How the binary was loaded.
+    pub(super) loading: Loading,
 }
 
 /// Reads a project file into the overlay a query applies.
@@ -166,10 +178,11 @@ impl Session {
     ///
     /// * `program` - The loaded file.
     /// * `named` - The packs the command line and `BORER_PACKS` name.
-    /// * `auto` - Whether the pack directories' packs may load by themselves.
     /// * `overlay` - The names, comments and types to apply.
-    pub(super) fn fit(program: Program, named: &Packs, auto: bool, overlay: Overlay) -> Self {
-        let (packs, notes) = borer::packs::for_program(&program, named, auto);
+    /// * `loading` - How it was loaded: whether the pack directories' packs
+    ///   may load by themselves, and what a second file loads with.
+    pub(super) fn fit(program: Program, named: &Packs, overlay: Overlay, loading: Loading) -> Self {
+        let (packs, notes) = borer::packs::for_program(&program, named, loading.auto);
         for note in notes {
             eprintln!("borer: {note}");
         }
@@ -177,6 +190,7 @@ impl Session {
             program: Arc::new(program),
             packs,
             overlay,
+            loading,
         }
     }
 

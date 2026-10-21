@@ -763,16 +763,17 @@ pub(super) fn command_usage(usage: &str, cmd: &str) -> Option<String> {
 ///
 /// # Returns
 ///
-/// The other arguments in order, the pack files (`BORER_PACKS`'s first,
-/// then the command line's), whether the pack directories' packs may load
-/// by themselves, and whether a companion PDB may apply.
+/// The other arguments in order, and how the binary loads: the pack files
+/// (`BORER_PACKS`'s first, then the command line's), whether the pack
+/// directories' packs may load by themselves, and whether a companion PDB
+/// may apply; no raw layout, which the layout flags set.
 ///
 /// # Errors
 ///
 /// When `--pack` ends the line with no file after it.
 pub(super) fn split_pack_args(
     args: &[String],
-) -> anyhow::Result<(Vec<String>, Vec<String>, bool, bool)> {
+) -> anyhow::Result<(Vec<String>, super::session::Loading)> {
     let mut rest = Vec::with_capacity(args.len());
     let mut files = env_pack_files();
     let mut auto = borer::packs::auto_enabled();
@@ -794,7 +795,13 @@ pub(super) fn split_pack_args(
             rest.push(a.clone());
         }
     }
-    Ok((rest, files, auto, pdb))
+    let load = super::session::Loading {
+        pack_files: files,
+        pdb,
+        layout: None,
+        auto,
+    };
+    Ok((rest, load))
 }
 
 /// The raw layout and project flags of a command line, as given.
