@@ -436,3 +436,92 @@ fn a_reload_keeps_a_stated_layout() {
         "the reload mapped the file another way"
     );
 }
+
+/// A reload call the server refuses leaves the session served.
+///
+/// The relay passes nothing on after a `reload` call until the worker
+/// ends, and the worker ends once the call has scheduled its hand-over. A
+/// call refused before the tool runs (a `since` that is not a tag)
+/// scheduled none, so the worker never ended, the relay never passed
+/// another line, and every later request waited for good.
+#[test]
+fn a_refused_reload_leaves_the_session_served() {
+    // ASM: mov eax, 42; ret
+    const CODE: [u8; 6] = [0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3];
+    let path =
+        std::env::temp_dir().join(format!("borer-refused-reload-{}.bin", std::process::id()));
+    std::fs::write(&path, CODE).expect("the file is written");
+    let shown = path.display().to_string();
+    let mut client = Client::start(&shown);
+    let refused = client.tool("reload", r#"{"since":"not a tag"}"#);
+    assert!(refused.contains("is not a tag"), "{refused}");
+    client.id += 1;
+    let id = client.id;
+    client.write(&format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"binary_info","arguments":{{}}}}}}"#
+    ));
+    let answered = std::iter::from_fn(|| client.lines.recv_timeout(Duration::from_secs(30)).ok())
+        .any(|line| line.contains(&format!("\"id\":{id},")));
+    std::fs::remove_file(&path).expect("the file is removed");
+    assert!(
+        answered,
+        "no reply to a request sent after a refused reload"
+    );
+    client.finish();
+}
+
+/// An edit a request applied before the reload's hand-over survives it.
+///
+/// A script that applies a comment runs while the reload sent right behind
+/// it is answered; the hand-over waits for the script's reply, so the
+/// script's comment is applied and acknowledged before the worker ends,
+/// and the next worker must hold it.
+#[test]
+fn an_edit_answered_before_the_hand_over_survives_the_reload() {
+    // ASM: mov eax, 42; ret
+    const CODE: [u8; 6] = [0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3];
+    let path = std::env::temp_dir().join(format!("borer-late-edit-{}.bin", std::process::id()));
+    std::fs::write(&path, CODE).expect("the file is written");
+    let shown = path.display().to_string();
+    let mut client = Client::start(&shown);
+    let loaded = client.text(
+        "load_binary",
+        &format!(r#"{{"path":{shown:?},"arch":"x64","base":"0x10000"}}"#),
+    );
+    assert!(loaded.contains("entry: 0x10000"), "{loaded}");
+    client.id += 1;
+    let script_id = client.id;
+    client.id += 1;
+    let reload_id = client.id;
+    let code = r#"let n = 0; while n < 3000000 { n += 1; } comment(0x10000, \"late\");"#;
+    client.write(&format!(
+        r#"{{"jsonrpc":"2.0","id":{script_id},"method":"tools/call","params":{{"name":"script","arguments":{{"code":"{code}","dry_run":false}}}}}}
+{{"jsonrpc":"2.0","id":{reload_id},"method":"tools/call","params":{{"name":"reload","arguments":{{}}}}}}"#
+    ));
+    let mut applied = None;
+    let mut reloaded = false;
+    while applied.is_none() || !reloaded {
+        let line = client
+            .lines
+            .recv_timeout(Client::REPLY)
+            .expect("both replies arrive");
+        if line.contains(&format!("\"id\":{reload_id},")) {
+            reloaded = true;
+        } else if line.contains(&format!("\"id\":{script_id},")) {
+            applied = Some(line);
+        }
+    }
+    let applied = applied.unwrap_or_default();
+    assert!(applied.contains("comments at 1"), "{applied}");
+    client.next_with(
+        "notifications/tools/list_changed",
+        "tool list announced after the reload",
+    );
+    let notes = client.text("annotations", "{}");
+    client.finish();
+    std::fs::remove_file(&path).expect("the file is removed");
+    assert!(
+        notes.contains("late"),
+        "the comment the script applied before the hand-over is gone: {notes}"
+    );
+}

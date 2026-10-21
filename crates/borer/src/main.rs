@@ -75,7 +75,7 @@ use crate::params::{
 };
 use crate::recall::{Narrow, Recall, SINCE_ARG, Tag, budgeted};
 use crate::session::{EVIDENCE_URI, SESSION_URI};
-use crate::state::{RawLoad, lock, read_lock};
+use crate::state::{RawLoad, lock};
 use crate::tools::live::LiveSession;
 
 /// The MCP server state: one loaded program, its lazily computed analysis,
@@ -83,8 +83,8 @@ use crate::tools::live::LiveSession;
 ///
 /// Every field is shared behind a lock because rmcp clones the handler per
 /// request; a poisoned lock is recovered rather than propagated
-/// ([`read_lock`]). The default is a server with nothing loaded and no
-/// packs.
+/// ([`state::read_lock`]). The default is a server with nothing loaded and
+/// no packs.
 #[derive(Debug, Clone, Default)]
 struct BorerServer {
     /// What this session was last answered for each request, so an
@@ -223,6 +223,11 @@ impl ServerHandler for BorerServer {
         mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        let peer_info = context.peer.peer_info();
+        if request.name == "reload" {
+            self.hand_over
+                .schedule(self.resume_state(peer_info.as_deref()));
+        }
         let since = request
             .arguments
             .as_mut()
@@ -252,8 +257,6 @@ impl ServerHandler for BorerServer {
             borer_engine::text::one_line(format!("{} {args}", request.name).trim_end())
         );
         let remembered = request.name != "query";
-        let reloading = request.name == "reload";
-        let peer_info = context.peer.peer_info();
         let named = (request.name.clone(), request.arguments.clone());
         let known = Self::tool_router().has_route(&request.name);
         let ticker = context
@@ -279,21 +282,8 @@ impl ServerHandler for BorerServer {
         if let Some(ticker) = ticker {
             ticker.abort();
         }
-        if reloading {
-            self.hand_over.schedule(Resume {
-                peer_info: peer_info.as_deref().cloned(),
-                project: self.loaded().map(|p| {
-                    borer::project::ProjectFile::from_overlay(
-                        &p.path.display().to_string(),
-                        None,
-                        &read_lock(&self.overlay),
-                    )
-                }),
-                pdb: Some(*read_lock(&self.pdb_applied)),
-                entry_file_offset: *read_lock(&self.entry_file_offset),
-                raw: read_lock(&self.raw_load).clone(),
-            });
-        }
+        self.hand_over
+            .refresh(|| self.resume_state(peer_info.as_deref()));
         let mut response = match response {
             Ok(response) => response,
             Err(error) => errors::tool_failure(known, error)?,

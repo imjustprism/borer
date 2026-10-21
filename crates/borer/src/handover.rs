@@ -162,6 +162,21 @@ impl HandOver {
     pub(crate) fn schedule(&self, resume: Resume) {
         lock(&self.state).pending = Some(resume);
     }
+
+    /// Takes the state to hand over afresh when a hand-over is scheduled,
+    /// so it carries what a request answered after the reload call changed:
+    /// the hand-over waits for that request's reply, and the reply says the
+    /// change was made.
+    ///
+    /// # Arguments
+    ///
+    /// * `resume` - The session's state as it stands now.
+    pub(crate) fn refresh(&self, resume: impl FnOnce() -> Resume) {
+        let mut s = lock(&self.state);
+        if s.pending.is_some() {
+            s.pending = Some(resume());
+        }
+    }
 }
 
 /// The stdio transport with the hand-over wired in.
