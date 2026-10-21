@@ -433,6 +433,7 @@ assert uris == [
     "borer://clr",
     "borer://decoded",
     "borer://dynimports",
+    "borer://encoded",
     "borer://enums",
     "borer://fingerprint",
     "borer://flat",
