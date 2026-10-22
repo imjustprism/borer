@@ -244,6 +244,8 @@ getenv	c	char *	-	const char *name	-
 getgrgid	posix	struct group *	-	gid_t gid	-
 getgrnam	posix	struct group *	-	const char *name	-
 gethostbyname	posix	struct hostent *	-	const char *name	-
+getopt	posix	int	-	int argc|char *const *argv|const char *optstring	-
+getopt_long	posix	int	-	int argc|char *const *argv|const char *optstring|const struct option *longopts|int *longindex	-
 getpeername	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
 getpid	posix	pid_t	-	-	-
 getppid	posix	pid_t	-	-	-

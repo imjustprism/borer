@@ -2929,7 +2929,11 @@ POSIX: list[tuple[str, str, str | None, list[Param]]] = [
         "dcgettext",
         "char *",
         None,
-        [("const char *", "domainname", None), ("const char *", "msgid", None), ("int", "category", None)],
+        [
+            ("const char *", "domainname", None),
+            ("const char *", "msgid", None),
+            ("int", "category", None),
+        ],
     ),
     ("__errno_location", "int *", None, []),
     (
@@ -2997,6 +3001,28 @@ POSIX: list[tuple[str, str, str | None, list[Param]]] = [
         ],
     ),
     ("fputs_unlocked", "int", None, [("const char *", "s", None), ("FILE *", "stream", None)]),
+    (
+        "getopt",
+        "int",
+        None,
+        [
+            ("int", "argc", None),
+            ("char *const *", "argv", None),
+            ("const char *", "optstring", None),
+        ],
+    ),
+    (
+        "getopt_long",
+        "int",
+        None,
+        [
+            ("int", "argc", None),
+            ("char *const *", "argv", None),
+            ("const char *", "optstring", None),
+            ("const struct option *", "longopts", None),
+            ("int *", "longindex", None),
+        ],
+    ),
 ]
 
 # Pointer typedefs the declarations above use that `CTYPES` spells as plain
