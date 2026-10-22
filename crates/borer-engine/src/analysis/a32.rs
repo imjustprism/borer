@@ -14,7 +14,10 @@
 //! The entry point, the symbols and the calls miss what only a pointer
 //! names (an interrupt handler, a callback) and what nothing names; the
 //! [`guess`] module finds those from the image's words and from the gaps
-//! between the functions found.
+//! between the functions found. A straight run of instructions that
+//! returns, reached by one unconditional jump from a function that
+//! already stepped over another function, is that jump's target
+//! ([`outlines`]), not a block of the jumper.
 //!
 //! An instruction under a condition that moves control (`bxeq lr`,
 //! `popne {r4, pc}`, `blne f`) is a block of its own. When the block before
@@ -905,6 +908,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         guess::gaps(program, &mut walks);
         guess::drop_inner(program, &mut walks);
     }
+    outlines(&mut walks);
     let redo: Vec<u64> = walks
         .walked
         .iter()
@@ -956,6 +960,89 @@ pub(crate) fn discover(program: &Program) -> Analysis {
     analysis.functions = functions;
     analysis.finish_index(program);
     analysis
+}
+
+/// Promotes a tail call that was walked as a block of its caller.
+///
+/// The block is one straight run that returns. Nothing falls into it and
+/// nothing but a single unconditional jump reaches it, and another
+/// function already starts between the caller and the block, so the block
+/// was laid out with the functions rather than inside its caller. The
+/// caller is walked again and the jump becomes a tail call.
+///
+/// # Arguments
+///
+/// * `walks` - The walks, updated in place.
+fn outlines(walks: &mut Walks<'_>) {
+    let mut promote = Vec::new();
+    for (&entry, w) in &walks.walked {
+        for &t in &w.followed {
+            if t > entry
+                && !walks.starts.contains(&t)
+                && walks.starts.range((entry + 1)..t).next().is_some()
+                && straight_return(w, t)
+            {
+                promote.push(t);
+            }
+        }
+    }
+    promote.sort_unstable();
+    promote.dedup();
+    for t in promote {
+        walks.starts.insert(t);
+        walks.guessed.insert(t);
+    }
+}
+
+/// Tells whether `t` is a straight run of instructions that returns, with
+/// a single unconditional jump as its only way in.
+///
+/// # Arguments
+///
+/// * `w` - The walk that contains `t`.
+/// * `t` - The address the jump targets.
+fn straight_return(w: &Walked, t: u64) -> bool {
+    if !w.seen.contains_key(&t) {
+        return false;
+    }
+    let mut jumps = 0usize;
+    for i in w.seen.values() {
+        let hits = i.target() == Some(t) || (i.next() == t && i.flow() != Flow::Jump);
+        if !hits {
+            continue;
+        }
+        if i.flow() == Flow::Jump && i.target() == Some(t) {
+            jumps += 1;
+        } else {
+            return false;
+        }
+    }
+    if jumps != 1 {
+        return false;
+    }
+    let mut va = t;
+    let mut prev = None;
+    for _ in 0..w.seen.len() {
+        let Some(i) = w.seen.get(&va) else {
+            return false;
+        };
+        if let Some(p) = prev
+            && w.seen.values().any(|o| {
+                o.va != p && (o.target() == Some(va) || (o.next() == va && o.flow() != Flow::Jump))
+            })
+        {
+            return false;
+        }
+        match i.flow() {
+            Flow::Return => return true,
+            Flow::Next => {
+                prev = Some(i.va);
+                va = i.next();
+            }
+            Flow::Jump | Flow::CondJump | Flow::Call | Flow::Invalid => return false,
+        }
+    }
+    false
 }
 
 /// Most jumps on from function to function a float result is followed

@@ -109,8 +109,9 @@ fn opens_after_end(program: &Program, walks: &Walks<'_>, x: u64) -> bool {
 /// * `va` - The guessed start.
 /// * `min` - Fewest instructions the walk must decode.
 /// * `exits` - Whether a path must leave the function: a pointer is
-///   evidence enough for a handler that loops forever, the bytes after a
-///   gap are not.
+///   evidence enough for a handler that loops forever. So is a gap whose
+///   walk never leaves its own instructions ([`closed`]): the bytes after
+///   a gap are not, on their own.
 ///
 /// # Returns
 ///
@@ -133,7 +134,7 @@ fn try_seed(program: &Program, walks: &mut Walks<'_>, va: u64, min: usize, exits
             .collect();
         let plausible = !w.bad
             && entered.is_empty()
-            && (w.exits || !exits)
+            && (w.exits || !exits || closed(&w))
             && !dead_start(&w, va)
             && w.seen.len() >= min
             && w.seen.values().all(|i| free(i.next() - 1));
@@ -162,6 +163,52 @@ fn try_seed(program: &Program, walks: &mut Walks<'_>, va: u64, min: usize, exits
         more = Some(m);
     }
     false
+}
+
+/// Tells whether a walk never leaves its own instructions.
+///
+/// A handler that spins (`b .` after its prologue) has no return and no
+/// jump out, which is why a gap rejected it while a pointer to the same
+/// bytes was kept. A walk that falls off the end, or that returns, is not
+/// one of these.
+///
+/// # Arguments
+///
+/// * `w` - The walk.
+fn closed(w: &super::Walked) -> bool {
+    if w.bad || w.seen.is_empty() {
+        return false;
+    }
+    let mut branched = false;
+    for i in w.seen.values() {
+        match i.flow() {
+            Flow::Next | Flow::Call => {
+                if !w.seen.contains_key(&i.next()) {
+                    return false;
+                }
+            }
+            Flow::CondJump => {
+                let Some(t) = i.target() else {
+                    return false;
+                };
+                if !w.seen.contains_key(&t) || !w.seen.contains_key(&i.next()) {
+                    return false;
+                }
+                branched = true;
+            }
+            Flow::Jump => {
+                let Some(t) = i.target() else {
+                    return false;
+                };
+                if !w.seen.contains_key(&t) {
+                    return false;
+                }
+                branched = true;
+            }
+            Flow::Return | Flow::Invalid => return false,
+        }
+    }
+    branched
 }
 
 /// Tells whether a walk opens the way data read as code does.

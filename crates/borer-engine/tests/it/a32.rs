@@ -347,6 +347,53 @@ fn a_shared_tail_after_a_return_is_a_function() {
     assert_eq!(entries, [0, 0xa, 0xe, 0x14]);
 }
 
+/// A handler that only spins, and that nothing points at, is still a function.
+///
+/// The bytes after it that neither return nor branch stay data.
+#[test]
+fn a_closed_loop_in_a_gap_is_a_function() {
+    let text: [u16; 8] = [
+        0x2001, // ASM: movs r0, #1
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0x3001, // ASM: adds r0, #1
+        0xe7fe, // ASM: b .
+        0x2002, // ASM: movs r0, #2
+        0x2003, // ASM: movs r1, #3
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("loop.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 8]);
+}
+
+/// An unconditional jump over another function, into a straight run that
+/// returns, is a tail call. The run is its own function.
+#[test]
+fn a_jump_past_another_function_is_a_tail_call() {
+    let text: [u16; 8] = [
+        0xe004, // ASM: b .+12
+        0x2002, // ASM: movs r0, #2
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0x2003, // ASM: movs r0, #3
+        0x4770, // ASM: bx lr
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("out.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 2, 0xc]);
+    let jumper = a.function_at(ELF_TEXT).expect("the jump");
+    assert!(jumper.blocks.iter().all(|b| b.start != ELF_TEXT + 0xc));
+}
+
 /// One instruction's encoding in its instruction set.
 #[derive(Debug, Clone, Copy)]
 enum Enc {
