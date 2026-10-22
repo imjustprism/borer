@@ -63,7 +63,7 @@ pub(super) fn mapped_range(program: &Program) -> std::ops::Range<u64> {
 /// # Arguments
 ///
 /// * `name` - The section name.
-fn describes_addresses(name: &str) -> bool {
+pub(in crate::analysis) fn describes_addresses(name: &str) -> bool {
     matches!(
         name,
         ".pdata" | ".reloc" | ".eh_frame" | ".eh_frame_hdr" | ".dynamic" | ".dynsym" | ".symtab"

@@ -24,6 +24,49 @@ pub(super) struct Code<'a> {
     pub sections: &'a [Section],
 }
 
+/// Words of an M-profile vector table read: the initial stack pointer,
+/// the reset handler and the fourteen system exception handlers.
+const VECTORS: usize = 16;
+
+/// Tells whether the image opens with an M-profile vector table, whose
+/// processor runs T32 code alone.
+///
+/// The table fills the first words of the lowest read-only section: the
+/// initial stack pointer, no code address, then the reset handler and
+/// every system exception handler present, each an odd address of code.
+/// A Cortex-M image's entry point may be even all the same, and without
+/// this its code would be read as A32.
+///
+/// # Arguments
+///
+/// * `sections` - The sections.
+/// * `bytes` - The file.
+pub(super) fn vector_table(sections: &[Section], bytes: &[u8]) -> bool {
+    let executable = |va: u64| {
+        sections
+            .iter()
+            .any(|s| s.executable && va >= s.va.0 && va - s.va.0 < s.vsize)
+    };
+    let Some(s) = sections
+        .iter()
+        .filter(|s| !s.writable && s.file_size >= 8)
+        .min_by_key(|s| s.va.0)
+    else {
+        return false;
+    };
+    let Some(words) = usize::try_from(s.file_off.0)
+        .ok()
+        .and_then(|off| bytes.get(off..off.checked_add(4 * VECTORS)?))
+    else {
+        return false;
+    };
+    let word = |k: usize| crate::num::u32_le(words, 4 * k).map(u64::from);
+    let thumb = |v: u64| v & 1 == 1 && executable(v - 1);
+    word(0).is_some_and(|sp| !executable(sp))
+        && word(1).is_some_and(thumb)
+        && (2..VECTORS).filter_map(word).filter(|v| *v != 0).all(thumb)
+}
+
 /// Reads an ELF's mapping symbols: `$a` opens A32 code, `$t` T32 code
 /// (each also with a `.n` suffix); `$d` data, which names no instruction
 /// set.
@@ -58,14 +101,22 @@ pub(super) fn mapping_symbols(elf: &goblin::elf::Elf<'_>) -> Vec<(u64, Mode)> {
 ///
 /// An odd address in an executable section names T32 code at the address
 /// below it; an even one, A32 code, unless the mapping symbols already
-/// say. Code no mark covers is in `default`.
+/// say. Code no mark covers is in `default`. An image without marks
+/// that opens with an M-profile vector table ([`vector_table`]) is T32
+/// throughout.
 ///
 /// # Arguments
 ///
 /// * `code` - The addresses to settle.
 /// * `mapping` - The marks the file states outright, which win.
 /// * `default` - The instruction set of code nothing marks.
-pub(super) fn settle(code: &mut Code<'_>, mapping: &[(u64, Mode)], default: Mode) -> Modes {
+/// * `bytes` - The file.
+pub(super) fn settle(
+    code: &mut Code<'_>,
+    mapping: &[(u64, Mode)],
+    default: Mode,
+    bytes: &[u8],
+) -> Modes {
     let executable = |va: u64| {
         code.sections
             .iter()
@@ -95,6 +146,9 @@ pub(super) fn settle(code: &mut Code<'_>, mapping: &[(u64, Mode)], default: Mode
             r.0 -= 1;
             r.1 = r.1.saturating_sub(1);
         }
+    }
+    if mapping.is_empty() && vector_table(code.sections, bytes) {
+        return Modes::from_marks(vec![(0, Mode::Thumb)]);
     }
     let stated = marks.len() > 1;
     marks.extend(

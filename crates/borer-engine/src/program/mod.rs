@@ -1339,7 +1339,7 @@ impl Program {
                 ranges: &mut function_ranges,
                 sections: &sections,
             };
-            arm::settle(&mut code, &arm_marks, arm_default)
+            arm::settle(&mut code, &arm_marks, arm_default, &bytes)
         } else {
             crate::isa::a32::Modes::default()
         };

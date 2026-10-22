@@ -5,10 +5,16 @@
 //! it follows every branch, takes a `bl` or `blx` target as a new function
 //! and a jump into a known start as a tail call, ends a path at a call to
 //! a function named as never returning, and walks the cases of a jump
-//! table it can bound ([`table`]): a `tbb` or `tbh`, and the A32 `adr`,
-//! indexed load and `add pc` of a position-independent table. Each
-//! instruction is decoded in the instruction set the program says its
-//! address is in, an `IT` block's conditions carried along a fall-through.
+//! table it can bound ([`table`]): a `tbb` or `tbh`, the A32 `adr` and
+//! `add pc` of a position-independent table, and an indexed load of `pc`
+//! from a table after it or at an `adr`. Each instruction is decoded in
+//! the instruction set the program says its address is in, an `IT`
+//! block's conditions carried along a fall-through.
+//!
+//! The entry point, the symbols and the calls miss what only a pointer
+//! names (an interrupt handler, a callback) and what nothing names; the
+//! [`guess`] module finds those from the image's words and from the gaps
+//! between the functions found.
 //!
 //! An instruction under a condition that moves control (`bxeq lr`,
 //! `popne {r4, pc}`, `blne f`) is a block of its own. When the block before
@@ -22,16 +28,23 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod guess;
+mod returns;
+
 use super::functions::helpers::is_noreturn_name;
 use super::functions::{build_callers_and_names, fuel_for, mix, push_site};
 use super::{Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare_name, seeds};
 use crate::isa::a32::{self, Cond, DpKind, Flow, Index, Insn, ItState, Offset, Op, Operand, PC};
 use crate::program::{Program, SymbolKind};
 
-mod returns;
-
+/// Rounds of gap guessing: a guess the walks found after it show to be
+/// data is dropped, and the code it hid is guessed at again.
+const GAP_ROUNDS: usize = 2;
 /// Most instructions one walk decodes.
 const WALK_MAX: usize = 1 << 18;
+/// Most instructions one walk from a guess decodes: a guess into data can
+/// decode a long way, and nothing it decodes is kept when it is rejected.
+const GUESS_MAX: usize = 1 << 14;
 /// Most jump-table entries read for one dispatch.
 const TABLE_MAX: u64 = 1024;
 /// Instructions looked back over for a dispatch's bound and base.
@@ -161,6 +174,8 @@ struct Table {
     site: u64,
     /// The case targets, in table order.
     targets: Vec<u64>,
+    /// The bytes the table's entries occupy.
+    bytes: std::ops::Range<u64>,
 }
 
 /// The straight-line instructions before `at`, nearest first.
@@ -190,13 +205,21 @@ fn before(seen: &BTreeMap<u64, Insn>, at: u64) -> Vec<&Insn> {
 /// The guard is a `cmp` with an immediate followed by a `bhi` to the
 /// default or a return under `hi` (one more than the immediate) or the
 /// same under `hs` (the immediate), or an `and` with a mask one short of a
-/// power of two.
+/// power of two. A dispatch under `ls` or `lo` is its own guard: it runs
+/// only when the `cmp` admits the case.
 ///
 /// # Arguments
 ///
 /// * `older` - The instructions before the dispatch, nearest first.
-fn bound(older: &[&Insn]) -> Option<u64> {
-    let mut guard: Option<Cond> = None;
+/// * `own` - The dispatch's own condition.
+fn bound(older: &[&Insn], own: Cond) -> Option<u64> {
+    let mut guard = if own == Cond::Ls {
+        Some(Cond::Hi)
+    } else if own == Cond::Lo {
+        Some(Cond::Hs)
+    } else {
+        None
+    };
     for i in older {
         if matches!(i.flow(), Flow::CondJump | Flow::Jump | Flow::Return)
             && matches!(i.cond, Cond::Hi | Cond::Hs)
@@ -237,7 +260,7 @@ fn bound(older: &[&Insn]) -> Option<u64> {
 /// The table, or `None` when the jump is no dispatch the walk can bound.
 fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Table> {
     let older = before(seen, j.va);
-    let count = bound(&older)?.min(TABLE_MAX);
+    let count = bound(&older, j.cond)?.min(TABLE_MAX);
     let word = |at: u64, n: usize| -> Option<u64> {
         let b = program.read_va(at, n)?;
         Some(
@@ -257,15 +280,16 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
             }
         })
     };
-    let targets: Option<Vec<u64>> = if let Op::Tb { half, rn, .. } = j.op {
+    let (targets, bytes): (Option<Vec<u64>>, _) = if let Op::Tb { half, rn, .. } = j.op {
         let base = if rn == PC { j.pc() } else { adr(rn)? };
         let size = if half { 2 } else { 1 };
-        (0..count)
+        let targets = (0..count)
             .map(|k| {
                 let e = word(base + k * size, usize::try_from(size).ok()?)?;
                 Some((j.pc() + 2 * e) & 0xffff_ffff)
             })
-            .collect()
+            .collect();
+        (targets, base..base + count * size)
     } else if let Op::Dp {
         kind: DpKind::Add,
         rd: PC,
@@ -282,28 +306,31 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
             matches!(i.op, Op::Load { rt, addr: a32::Addr { base, offset: Offset::Reg { amount: 2, .. }, .. }, .. } if rt == re && base == rb)
         })?;
         let base = adr(rb)?;
-        (0..count)
+        let targets = (0..count)
             .map(|k| {
                 let e = word(base + k * 4, 4)?;
                 Some((base.wrapping_add(e) & 0xffff_ffff) & !1)
             })
-            .collect()
+            .collect();
+        (targets, base..base + count * 4)
     } else if let Op::Load {
         rt: PC,
         addr:
             a32::Addr {
-                base: PC,
+                base: rb,
                 offset: Offset::Reg { amount: 2, .. },
                 index: Index::Offset,
             },
         ..
     } = j.op
     {
-        (0..count)
-            .map(|k| word(j.pc() + k * 4, 4).map(|t| t & !1))
-            .collect()
+        let base = if rb == PC { j.pc() } else { adr(rb)? };
+        let targets = (0..count)
+            .map(|k| word(base + k * 4, 4).map(|t| t & !1))
+            .collect();
+        (targets, base..base + count * 4)
     } else {
-        None
+        return None;
     };
     let targets = targets?;
     targets
@@ -312,6 +339,7 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
         .then_some(Table {
             site: j.va,
             targets,
+            bytes,
         })
 }
 
@@ -325,9 +353,24 @@ struct Walked {
     followed: BTreeSet<u64>,
     /// The jump tables it resolved.
     tables: Vec<Table>,
+    /// Whether a path ran into bytes that decode to no instruction.
+    bad: bool,
+    /// Whether a path leaves the function: a return, a jump through a
+    /// register or to another function, or a call that does not return.
+    exits: bool,
+    /// The covered addresses a guessed walk ran into.
+    into: BTreeSet<u64>,
+    /// The known starts its jumps reach: tail calls.
+    tails: BTreeSet<u64>,
 }
 
 /// Walks one function from its entry.
+///
+/// A call falling through to a known start never returns: no function
+/// runs on into another's entry. A jump that always goes to an address
+/// below the entry is a tail call: a compiler lays a function's blocks
+/// out after its entry, and what it jumps back to is another function
+/// reached only that way (a `.cold` part among them).
 ///
 /// # Arguments
 ///
@@ -335,54 +378,83 @@ struct Walked {
 /// * `entry` - Where to start.
 /// * `starts` - Known function starts: a jump into one is a tail call.
 /// * `noreturn` - Functions that never return.
-fn walk(program: &Program, entry: u64, starts: &BTreeSet<u64>, noreturn: &BTreeSet<u64>) -> Walked {
-    let mut seen: BTreeMap<u64, Insn> = BTreeMap::new();
+/// * `guess` - The bytes already covered ([`Walks::covered`]) when
+///   nothing says code starts at `entry`: the walk then stops at the first
+///   word that decodes to no instruction or lies in them, and after
+///   [`GUESS_MAX`] instructions.
+fn walk(
+    program: &Program,
+    entry: u64,
+    starts: &BTreeSet<u64>,
+    noreturn: &BTreeSet<u64>,
+    guess: Option<&BTreeMap<u64, (u64, bool)>>,
+) -> Walked {
+    let mut w = Walked {
+        seen: BTreeMap::new(),
+        callees: BTreeSet::new(),
+        followed: BTreeSet::new(),
+        tables: Vec::new(),
+        bad: false,
+        exits: false,
+        into: BTreeSet::new(),
+        tails: BTreeSet::new(),
+    };
+    let limit = if guess.is_some() { GUESS_MAX } else { WALK_MAX };
     let mut pending: Vec<(u64, ItState)> = vec![(entry, ItState::default())];
-    let mut callees = BTreeSet::new();
-    let mut followed = BTreeSet::new();
-    let mut tables = Vec::new();
     let leaves = |t: u64| t != entry && starts.contains(&t);
     while let Some((va, mut it)) = pending.pop() {
-        if seen.contains_key(&va) || seen.len() >= WALK_MAX {
+        if w.seen.contains_key(&va)
+            || w.seen.len() >= limit
+            || (guess.is_some() && (w.bad || !w.into.is_empty()))
+        {
+            continue;
+        }
+        if guess.is_some_and(|c| guess::covers(c, va).is_some()) {
+            w.into.insert(va);
             continue;
         }
         let Some(i) = decode(program, va, &mut it).filter(|i| i.op != Op::Invalid) else {
+            w.bad = true;
             continue;
         };
-        seen.insert(va, i);
+        w.seen.insert(va, i);
         let next = i.next();
         let falls = guarded(&i);
+        let follow = |t: u64, w: &mut Walked, pending: &mut Vec<(u64, ItState)>| {
+            if leaves(t) {
+                w.callees.insert(t);
+                w.tails.insert(t);
+                w.exits = true;
+            } else {
+                w.followed.insert(t);
+                pending.push((t, ItState::default()));
+            }
+        };
         match i.flow() {
             Flow::Next => pending.push((next, it)),
             Flow::CondJump => {
                 if let Some(t) = i.target() {
-                    if leaves(t) {
-                        callees.insert(t);
-                    } else {
-                        followed.insert(t);
-                        pending.push((t, ItState::default()));
-                    }
+                    follow(t, &mut w, &mut pending);
                 }
                 pending.push((next, it));
             }
             Flow::Jump => {
                 match i.target() {
-                    Some(t) if leaves(t) => {
-                        callees.insert(t);
+                    Some(t) if t < entry && !falls => {
+                        w.callees.insert(t);
+                        w.exits = true;
                     }
-                    Some(t) => {
-                        followed.insert(t);
-                        pending.push((t, ItState::default()));
-                    }
-                    None => {
-                        if let Some(tab) = table(program, &seen, &i) {
+                    Some(t) => follow(t, &mut w, &mut pending),
+                    None => match table(program, &w.seen, &i) {
+                        Some(tab) => {
                             for &t in &tab.targets {
-                                followed.insert(t);
+                                w.followed.insert(t);
                                 pending.push((t, ItState::default()));
                             }
-                            tables.push(tab);
+                            w.tables.push(tab);
                         }
-                    }
+                        None => w.exits = true,
+                    },
                 }
                 if falls {
                     pending.push((next, it));
@@ -390,12 +462,16 @@ fn walk(program: &Program, entry: u64, starts: &BTreeSet<u64>, noreturn: &BTreeS
             }
             Flow::Call => {
                 let target = i.target().filter(|t| super::is_executable_va(program, *t));
-                callees.extend(target);
-                if falls || !target.is_some_and(|t| noreturn.contains(&t)) {
+                w.callees.extend(target);
+                let returns =
+                    !target.is_some_and(|t| noreturn.contains(&t)) && !starts.contains(&next);
+                if falls || returns {
                     pending.push((next, it));
                 }
+                w.exits |= !returns;
             }
             Flow::Return => {
+                w.exits = true;
                 if falls {
                     pending.push((next, it));
                 }
@@ -403,12 +479,7 @@ fn walk(program: &Program, entry: u64, starts: &BTreeSet<u64>, noreturn: &BTreeS
             Flow::Invalid => {}
         }
     }
-    Walked {
-        seen,
-        callees,
-        followed,
-        tables,
-    }
+    w
 }
 
 /// Finds the guarded instructions ([`guarded`]) whose condition the block
@@ -665,6 +736,137 @@ fn data_refs(program: &Program, w: &Walked, found: &mut dyn FnMut(u64, u64)) {
     }
 }
 
+/// Tells whether a function of this name never returns.
+///
+/// # Arguments
+///
+/// * `n` - The symbol's name, mangled or not.
+fn noreturn_name(n: &str) -> bool {
+    is_noreturn_name(bare_name(&crate::search::demangled_name(n)))
+}
+
+/// The functions walked so far and what their walks share.
+struct Walks<'a> {
+    /// Every known function start.
+    starts: BTreeSet<u64>,
+    /// The starts only a guess gave ([`guess`]).
+    guessed: BTreeSet<u64>,
+    /// Each jump target the walks followed, with the lowest entry of a
+    /// function that jumps to it.
+    labels: BTreeMap<u64, u64>,
+    /// The functions that never return.
+    noreturn: BTreeSet<u64>,
+    /// Each walked function's walk, by entry.
+    walked: BTreeMap<u64, Walked>,
+    /// The bytes the walks account for, by first address: the end, and
+    /// whether an instruction (rather than a literal or a jump table)
+    /// lies there.
+    covered: BTreeMap<u64, (u64, bool)>,
+    /// The literals and jump tables the walks read, by first address,
+    /// with the end; the same `false` value as in [`Walks::covered`].
+    data: BTreeMap<u64, (u64, bool)>,
+    /// Instructions left to decode.
+    fuel: u64,
+    /// Whether the fuel ran out.
+    incomplete: bool,
+    /// The imports by slot address.
+    imports: &'a BTreeMap<u64, &'a str>,
+}
+
+impl Walks<'_> {
+    /// Walks every queued entry not yet walked and every function those
+    /// walks call.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image.
+    /// * `queue` - The entries.
+    fn drain(&mut self, program: &Program, mut queue: Vec<u64>) {
+        while let Some(e) = queue.pop() {
+            if self.walked.contains_key(&e) {
+                continue;
+            }
+            if self.fuel == 0 {
+                self.incomplete = true;
+                break;
+            }
+            if let Some(slot) = stub_slot(program, e)
+                && self.imports.get(&slot).is_some_and(|n| noreturn_name(n))
+            {
+                self.noreturn.insert(e);
+            }
+            let w = walk(program, e, &self.starts, &self.noreturn, None);
+            self.keep(e, w, &mut queue);
+        }
+    }
+
+    /// Records a walk: spends its fuel, marks its bytes covered and queues
+    /// the functions it calls.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The walk's entry.
+    /// * `w` - The walk.
+    /// * `queue` - Takes the callees not yet walked.
+    fn keep(&mut self, e: u64, w: Walked, queue: &mut Vec<u64>) {
+        self.fuel = self
+            .fuel
+            .saturating_sub(crate::num::from_usize(w.seen.len()));
+        for &c in &w.callees {
+            if self.starts.insert(c) || !self.walked.contains_key(&c) {
+                queue.push(c);
+            }
+        }
+        for &t in &w.followed {
+            let low = self.labels.entry(t).or_insert(e);
+            *low = (*low).min(e);
+        }
+        Self::mark(&mut self.covered, &mut self.data, &w);
+        self.walked.insert(e, w);
+    }
+
+    /// Marks a walk's bytes covered: its instructions, the literals they
+    /// load and its jump tables, the last two also as data.
+    ///
+    /// # Arguments
+    ///
+    /// * `covered` - The covered stretches ([`Walks::covered`]).
+    /// * `data` - The data stretches ([`Walks::data`]).
+    /// * `w` - The walk.
+    fn mark(
+        covered: &mut BTreeMap<u64, (u64, bool)>,
+        data: &mut BTreeMap<u64, (u64, bool)>,
+        w: &Walked,
+    ) {
+        let mut stretches = Vec::new();
+        for i in w.seen.values() {
+            covered.insert(i.va, (i.next(), true));
+            if let Some(lit) = i.literal() {
+                let len = if matches!(i.op, Op::LoadDual { .. }) {
+                    8
+                } else {
+                    4
+                };
+                stretches.push(lit..lit + len);
+            }
+        }
+        stretches.extend(w.tables.iter().map(|t| t.bytes.clone()));
+        for r in stretches {
+            covered.entry(r.start).or_insert((r.end, false));
+            data.insert(r.start, (r.end, false));
+        }
+    }
+
+    /// Marks covered again what the walks hold, after some were dropped.
+    fn cover(&mut self) {
+        self.covered.clear();
+        self.data.clear();
+        for w in self.walked.values() {
+            Self::mark(&mut self.covered, &mut self.data, w);
+        }
+    }
+}
+
 /// Discovers an ARM32 program's functions, blocks, references and jump
 /// tables.
 ///
@@ -683,56 +885,46 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
         .map(|s| (s.addr, s.name.as_str()))
         .collect();
-    let noreturn_name = |n: &str| is_noreturn_name(bare_name(&crate::search::demangled_name(n)));
-    let mut noreturn: BTreeSet<u64> = program
-        .symbols
-        .iter()
-        .filter(|s| s.kind != SymbolKind::Import && s.addr != 0 && noreturn_name(&s.name))
-        .map(|s| s.addr)
-        .collect();
-    let mut starts: BTreeSet<u64> = seeds.iter().copied().collect();
-    let mut walked: BTreeMap<u64, Walked> = BTreeMap::new();
-    let mut fuel = fuel_for(program);
-    let mut incomplete = false;
-    let mut queue: Vec<u64> = seeds;
-    for round in 0..2 {
-        while let Some(e) = queue.pop() {
-            if walked.contains_key(&e) {
-                continue;
-            }
-            if fuel == 0 {
-                incomplete = true;
-                break;
-            }
-            if let Some(slot) = stub_slot(program, e)
-                && imports.get(&slot).is_some_and(|n| noreturn_name(n))
-            {
-                noreturn.insert(e);
-            }
-            let w = walk(program, e, &starts, &noreturn);
-            fuel = fuel.saturating_sub(crate::num::from_usize(w.seen.len()));
-            for &c in &w.callees {
-                if starts.insert(c) || !walked.contains_key(&c) {
-                    queue.push(c);
-                }
-            }
-            walked.insert(e, w);
-        }
-        if round == 0 {
-            let redo: Vec<u64> = walked
-                .iter()
-                .filter(|(e, w)| w.followed.iter().any(|t| t != *e && starts.contains(t)))
-                .map(|(e, _)| *e)
-                .collect();
-            if redo.is_empty() {
-                break;
-            }
-            for e in &redo {
-                walked.remove(e);
-            }
-            queue = redo;
-        }
+    let mut walks = Walks {
+        starts: seeds.iter().copied().collect(),
+        guessed: BTreeSet::new(),
+        labels: BTreeMap::new(),
+        noreturn: program
+            .symbols
+            .iter()
+            .filter(|s| s.kind != SymbolKind::Import && s.addr != 0 && noreturn_name(&s.name))
+            .map(|s| s.addr)
+            .collect(),
+        walked: BTreeMap::new(),
+        covered: BTreeMap::new(),
+        data: BTreeMap::new(),
+        fuel: fuel_for(program),
+        incomplete: false,
+        imports: &imports,
+    };
+    walks.drain(program, seeds);
+    guess::pointers(program, &mut walks);
+    for _ in 0..GAP_ROUNDS {
+        guess::gaps(program, &mut walks);
+        guess::drop_inner(program, &mut walks);
     }
+    let redo: Vec<u64> = walks
+        .walked
+        .iter()
+        .filter(|(e, w)| {
+            w.followed
+                .iter()
+                .any(|t| t != *e && walks.starts.contains(t))
+        })
+        .map(|(e, _)| *e)
+        .collect();
+    for e in &redo {
+        walks.walked.remove(e);
+    }
+    walks.drain(program, redo);
+    let Walks {
+        walked, incomplete, ..
+    } = walks;
     let mut analysis = Analysis {
         incomplete,
         ..Analysis::default()

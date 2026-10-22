@@ -39,7 +39,7 @@ use crate::program::Program;
 mod frame;
 mod guess;
 pub(super) mod helpers;
-mod seeds;
+pub(super) mod seeds;
 mod sets;
 pub(super) mod tables;
 mod walk;

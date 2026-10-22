@@ -271,6 +271,82 @@ fn an_armnt_pe_is_t32_from_its_entry() {
     assert_eq!(listed(&p, entry, 4), ["adds r0, r0, r1", "bx lr"]);
 }
 
+/// A Cortex-M image: a vector table, the reset handler calling through a
+/// literal pool's pointer, the callback it names, a function nothing
+/// names, the NMI handler only the table names, and a string.
+fn cortex_m() -> Vec<u8> {
+    let mut text = vec![0u8; 0x68];
+    put(&mut text, 0, 0x2000_1000, 4);
+    put(&mut text, 4, (ELF_TEXT + 0x40) | 1, 4);
+    put(&mut text, 8, (ELF_TEXT + 0x5a) | 1, 4);
+    let code: [(usize, u64); 12] = [
+        (0x40, 0xb510), // ASM: push {r4, lr}
+        (0x42, 0x4802), // ASM: ldr r0, [pc, #8]
+        (0x44, 0x4780), // ASM: blx r0
+        (0x46, 0xbd10), // ASM: pop {r4, pc}
+        (0x48, 0xbf00), // ASM: nop
+        (0x4a, 0xbf00), // ASM: nop
+        (0x50, 0x3001), // ASM: adds r0, #1
+        (0x52, 0x4770), // ASM: bx lr
+        (0x54, 0xb580), // ASM: push {r7, lr}
+        (0x56, 0x2000), // ASM: movs r0, #0
+        (0x58, 0xbd80), // ASM: pop {r7, pc}
+        (0x5a, 0xe7fe), // ASM: b 0x5a
+    ];
+    for (at, h) in code {
+        put(&mut text, at, h, 2);
+    }
+    put(&mut text, 0x4c, (ELF_TEXT + 0x50) | 1, 4);
+    text[0x5c..0x68].copy_from_slice(b"hello world\0");
+    elf32(&text, &[], ELF_TEXT + 0x40)
+}
+
+/// A stripped image that opens with an M-profile vector table is T32.
+///
+/// So is its even entry point, and discovery finds the functions only a
+/// pointer names (the callback in a literal pool, the
+/// handler in the table) and the one in the gap between them, but not the
+/// string after them.
+#[test]
+fn a_cortex_m_image_finds_its_unnamed_t32_functions() {
+    let p = Program::from_bytes(PathBuf::from("m.elf"), cortex_m()).expect("parses");
+    assert_eq!(p.modes.at(ELF_TEXT + 0x40), Mode::Thumb);
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0x40, 0x50, 0x54, 0x5a]);
+}
+
+/// A function another falls into after its own return is a start: the
+/// called stub jumping to it, and the unnamed one beside it, each
+/// tail-call it.
+#[test]
+fn a_shared_tail_after_a_return_is_a_function() {
+    let text: [u16; 16] = [
+        0xb510, // ASM: push {r4, lr}
+        0xf000, // ASM: bl 0xe
+        0xf804, // ASM: (bl, second half)
+        0xbd10, // ASM: pop {r4, pc}
+        0xbf00, // ASM: nop
+        0x0943, // ASM: lsrs r3, r0, #5
+        0x4770, // ASM: bx lr
+        0x2107, // ASM: movs r1, #7
+        0x201c, // ASM: movs r0, #0x1c
+        0xe7fa, // ASM: b 0xa
+        0x210c, // ASM: movs r1, #0xc
+        0x2026, // ASM: movs r0, #0x26
+        0xe7f7, // ASM: b 0xa
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("tail.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 0xa, 0xe, 0x14]);
+}
+
 /// One instruction's encoding in its instruction set.
 #[derive(Debug, Clone, Copy)]
 enum Enc {
