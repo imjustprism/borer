@@ -204,3 +204,26 @@ fn arm32_blocks_agree_with_the_machine() {
         assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
     }
 }
+
+/// A long run of flag-setting logical instructions decompiles promptly.
+///
+/// Each `movs` or `ands` keeps the carry and overflow the flags held
+/// before it, so a run of 120 of them would nest every earlier state twice
+/// over and the lift would never finish. The image is a `cmp r0, r1` that
+/// gives the flags a value, the run, `movs r0, r1` then `ands r2, r0`
+/// sixty times, and a jump through `r0`, which
+/// leaves the flags to code the walk cannot see.
+#[test]
+fn a_run_of_flag_setting_moves_lifts_in_bounded_time() {
+    let mut code: Vec<u16> = vec![0x4288];
+    code.extend([0x0008, 0x4002].repeat(60));
+    code.push(0x4700);
+    let bytes: Vec<u8> = code.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let len = u64::try_from(bytes.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE, 0, len, false, true);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text]);
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
+    assert!(out.contains("sub_40000"), "{out}");
+}

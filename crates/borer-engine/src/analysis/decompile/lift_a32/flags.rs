@@ -203,6 +203,10 @@ fn pack(n: Expr, z: Expr, c: Expr, v: Expr) -> Flags {
     ))
 }
 
+/// Most expression nodes the carry and overflow a logical instruction
+/// keeps may hold ([`logical`]).
+const KEPT_MAX: usize = 256;
+
 /// N and Z of a 32-bit result, as 1 or 0.
 ///
 /// # Arguments
@@ -220,6 +224,11 @@ fn nz(r: &Expr) -> (Expr, Expr) {
 }
 
 /// The flags a logical or shifting instruction leaves.
+///
+/// The carry and overflow it keeps are read out of the flags before it,
+/// so a run of such instructions nests every earlier state twice over.
+/// Past [`KEPT_MAX`] nodes the kept bits are unknown instead: a reader of
+/// them then stays as the instruction it is.
 ///
 /// # Arguments
 ///
@@ -246,6 +255,9 @@ pub(super) fn logical(r: Expr, carry: Option<Expr>, old: &Flags, asked: Option<C
     } else {
         bit(old, Cond::Vs)
     };
+    if c.size() + v.size() > KEPT_MAX {
+        return Flags::Unknown;
+    }
     let (n, z) = nz(&r);
     pack(n, z, c, v)
 }
