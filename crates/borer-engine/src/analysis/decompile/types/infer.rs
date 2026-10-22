@@ -194,6 +194,8 @@ const LOAD_TYPES: [(&str, usize); 11] = [
 /// parameter the index of an absolute address, not a pointer, and a
 /// parameter the body assigns, or casts to a narrow integer, is left as
 /// it is; a cast in front of `a2->field_0x10` casts the field, not `a2`.
+/// A load at the parameter plus a narrow integer, `*(T*)(a2 + local_10)`
+/// ([`indexed_by_int`]), indexes from it.
 /// The loads through a variable the parameter is copied into and that
 /// only steps from there ([`copies`]) count too, at offsets that say only
 /// that the pointer moved: bytes read through it make a byte pointer.
@@ -276,7 +278,9 @@ fn accesses(
                 } else if let Some(k) = field {
                     widths.insert(width);
                     offsets.insert(k);
-                } else if head.ends_with(&format!("(({ty}*)")) && tail.starts_with(")[") {
+                } else if (head.ends_with(&format!("(({ty}*)")) && tail.starts_with(")["))
+                    || (head.ends_with(&format!("*({ty}*)(")) && indexed_by_int(lines, tail))
+                {
                     widths.insert(width);
                     offsets.extend([0, 1]);
                 }
@@ -284,6 +288,27 @@ fn accesses(
         }
     }
     Some(())
+}
+
+/// Tells whether the text after a name adds a narrow integer to it.
+///
+/// ` + local_10)` with `local_10` declared an `int32_t`, or ` +
+/// (int64_t)(int32_t)i)`, adds an index no pointer is, so the name is the
+/// base of the address.
+///
+/// # Arguments
+///
+/// * `lines` - The function, declarations included.
+/// * `tail` - The text after the name.
+fn indexed_by_int(lines: &[String], tail: &str) -> bool {
+    let Some(rest) = tail.strip_prefix(" + ") else {
+        return false;
+    };
+    let index = rest.split(')').next().unwrap_or("");
+    rest.starts_with("(int64_t)")
+        || (is_ident(index)
+            && rest.get(index.len()..).is_some_and(|r| r.starts_with(')'))
+            && declared_scalar(lines, index).is_some())
 }
 
 /// The variables a parameter is copied into whole and that only step
@@ -472,9 +497,19 @@ fn assigned_width(lines: &[String], head: &str, tail: &str) -> Option<&'static s
         return None;
     }
     let dest = head.trim().strip_suffix(" =")?;
-    if !is_ident(dest) {
-        return None;
-    }
+    is_ident(dest)
+        .then(|| declared_scalar(lines, dest))
+        .flatten()
+}
+
+/// The narrow integer a declaration line gives a variable, as
+/// [`inferred_type`] spells it.
+///
+/// # Arguments
+///
+/// * `lines` - The function, declarations included.
+/// * `name` - The variable.
+fn declared_scalar(lines: &[String], name: &str) -> Option<&'static str> {
     lines.iter().find_map(|l| {
         let code = l
             .split(" //")
@@ -487,7 +522,7 @@ fn assigned_width(lines: &[String], head: &str, tail: &str) -> Option<&'static s
         }
         let mut names = code.split(", ");
         let (ty, first) = names.next()?.rsplit_once(' ')?;
-        (first == dest || names.any(|n| n == dest))
+        (first == name || names.any(|n| n == name))
             .then(|| scalar_width(ty.trim()))
             .flatten()
     })
