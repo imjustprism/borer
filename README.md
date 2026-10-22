@@ -24,55 +24,103 @@
   <a href="https://borer.lol/llms.txt">llms.txt</a>
 </p>
 
-A reverse-engineering engine built for AI agents. One Rust binary: an MCP
-server when run with no arguments, a command-line tool with them. No GUI, and
-no Ghidra, IDA or Binary Ninja underneath.
-
-- **Formats:** PE, ELF, Mach-O, raw code and memory dumps.
-- **Architectures:** x86, x86-64 and arm64: disassembly, decompilation and
-  emulation. 32-bit ARM (A32 and Thumb-2): disassembly and decompilation.
-- **Output:** plain-text tables sized for a context window, paged and capped,
-  identical bytes for the same question every time.
+borer is a reverse-engineering engine built for AI agents. It gives an agent
+what a human reverse engineer brings to a binary: it finds the code that
+matters, reads it as C, follows data through it and writes down what it
+learned. It is one Rust binary: an MCP server when run with no arguments, a
+command-line tool with them. There is no GUI, and no Ghidra, IDA or Binary
+Ninja underneath.
 
 > [!WARNING]
-> Version 0.2.1, beta. Tool names, output spelling and resource URIs can still
-> change. See [Limits](#limits).
+> borer is an early-stage project. Expect bugs and rough edges, and expect
+> tool names, output and resource URIs to change between releases. See
+> [Limits](#limits), and please report anything that looks wrong.
 
-## Why borer
+## Why borer exists
 
-| | borer | Ghidra 12.1.4 (headless) |
-| --- | --- | --- |
-| Load sqlite3.dll and list its functions, cold (Ghidra: import and auto-analysis) | 0.11 s | 54 s |
-| The same, analysis kept from an earlier run | 0.11 s | 3.7 s |
-| Decompile every function of sqlite3.dll (both on every core) | 0.96 s | 9.6 s |
-| Peak memory, sqlite3.dll | 78 MB | 1.7 GB |
-| Install | one file | 1.2 GB with its JDK |
+Most software that matters ships as binaries nobody can read: malware, closed
+firmware, game clients, drivers, the third-party libraries inside every
+product. Reading them takes reverse engineers, and there are far too few of
+them for the volume of code that needs reading. A malware analyst triages a
+handful of samples a day while millions arrive. A vulnerability researcher
+audits one component while the attack surface around it keeps growing.
 
-Speed is measured on notepad, msvcrt, sqlite3, ntdll and kernelbase, each
-tool as it ships, one after the other
-([numbers](scripts/run/vs_ghidra.json), [harness](scripts/run/vs_ghidra.py)).
-The rows above are borer 0.2.1's run of that harness. Listing functions is
-not decompiling them: borer analyzes on the first call that needs it, so its
-first decompile of a large binary pays for that analysis, while Ghidra's has
-paid already. One function
-at a time the two decompilers take about as long, a few milliseconds each;
-borer's time includes checking every block. Ghidra still prints fewer gotos
-and fewer width casts on large optimized functions.
+Agents can read code all day without tiring. What they lack is a tool made
+for them. The existing disassemblers were built for a person at a screen:
+interactive GUIs, state hidden in a project database, output sized for eyes
+rather than a context window, and answers an agent has no way to check.
 
-What makes it different:
+borer is that tool, designed from the start for a reader that is a program:
 
-- **Checked decompilation.** Every block of pseudo-C is run in an emulator
-  from three seeded states and compared with the machine. The header says how
-  many blocks agreed. Instructions it cannot model stay as `/* asm: ... */`
-  instead of a guess.
+- **Answers an agent can trust.** Every block of decompiled C is run in an
+  emulator from seeded states and compared with the machine code it came
+  from, and the output says how much was checked. Instructions it cannot
+  model stay as `/* asm: ... */` instead of a guess. An agent that knows
+  which lines are proven can build on them.
 - **Built for a context window.** Every list is filtered and paged on the
   server and says `# showing N of M`. A repeated request with `since=<tag>`
-  returns only what changed.
-- **Deterministic and hostile-input safe.** No clock, no random seed. Reads
-  are bounds-checked, scans capped, walks fuel-limited: a malformed file gets
-  an error, never a crash.
-- **Safe annotation.** Renames and comments are dry-run by default and go to a
-  separate project file. The binary is never modified.
+  returns only what changed. The same question gives the same bytes every
+  time.
+- **Fast enough to read everything.** A whole binary loads and decompiles in
+  seconds, so an agent can sweep every function instead of guessing where to
+  look.
+- **Safe on hostile input.** No clock, no random seed, bounds-checked reads,
+  capped scans and fuel-limited walks: a malformed or malicious file gets an
+  error, never a crash. The binary is never modified, and annotations are
+  dry-run by default.
+- **Its own engine.** The analysis, lifters, emulator, structurer and
+  decompiler are written from scratch in Rust for this purpose, so every
+  layer can be shaped around what an agent needs. Only instruction decoding
+  and file parsing come from standard crates.
+
+## What it is for
+
+- **Malware analysis.** Triage a sample in one call (what it is, how it is
+  packed or protected, where to start), then unpack it, decode its strings,
+  pull out its indicators, and write a YARA rule that finds its family
+  again.
+- **Vulnerability research.** Follow attacker-controlled data from an input
+  to where it is used with taint analysis, find the checks between them,
+  solve for inputs that reach a path, and diff a patched binary against the
+  old one to see what was fixed.
+- **Auditing what you ship.** Read the closed-source libraries, drivers and
+  firmware inside a product the same way you would read your own code.
+- **Understanding software.** Recover class layouts, protocols and message
+  formats, and read a running process's objects by their recovered layout.
+
+Formats: PE, ELF, Mach-O, raw code and memory dumps. Architectures: x86,
+x86-64 and arm64 for disassembly, decompilation and emulation. 32-bit ARM
+(A32 and Thumb-2) for disassembly and decompilation.
+
+## Where it is going
+
+The aim is an agent that takes a binary and returns what a skilled reverse
+engineer would: what it does, what is dangerous in it, and the evidence for
+each claim.
+
+borer is built to push every measure as far as it will go: faster analysis,
+less memory, more of the binary understood, more of the output proven, and
+decompiled code closer to the source. When it reaches a limit, the next
+step is to move that limit. Each step below moves borer toward that aim:
+
+1. **Decompiled C indistinguishable from source.** Natural loops and
+   conditions instead of gotos, recovered types and structures, and text that
+   compiles back to the same machine code, with the emulator check kept on
+   every line.
+2. **Whole-program reasoning.** Data flow, taint and value ranges across
+   every function and every call, so an agent asks "can this input reach that
+   copy unchecked?" and gets an answer with the path that proves it.
+3. **Findings.** Built-in detectors for memory-safety bugs,
+   unsafe API use, hard-coded secrets and known malware behaviors, each one
+   reported with its path and a proof or a reproducing input.
+4. **Scale.** Fleets of agents on huge codebases and sample feeds: shared
+   analysis caches, incremental re-analysis when a binary changes, and
+   results that diff cleanly between versions.
+5. **Every platform.** Wider architecture coverage (32-bit ARM emulation,
+   MIPS, RISC-V), managed code (.NET, Java) and firmware images.
+6. **Runtime alongside static.** Debugging, tracing and live memory on every
+   operating system, so a static claim can be confirmed against the running
+   program.
 
 ## Install
 
@@ -94,12 +142,13 @@ irm https://borer.lol/install.ps1 | iex
 `setup` finds Claude Code, Claude Desktop, Cursor, Windsurf, Devin Desktop, VS Code, VS Code Insiders, Gemini CLI, Antigravity, Codex CLI, Zed, OpenCode, pi, Copilot CLI, Grok Build, Cline, Roo Code, Kilo Code, Continue, Amp, Qwen Code, Kiro, Factory Droid, Kimi Code, Junie, Augment, Warp and LM Studio.
 It backs up each file it edits to `<file>.bak`, replaces an entry whose
 program no longer exists (`--replace` replaces any other), and ends by naming
-the clients to restart: none reads its configuration again while it runs
-(quit Claude Desktop from the tray; in Cursor, turn borer on under Settings >
-MCP; in pi, `/reload`). For Codex it also sets `tool_timeout_sec = 600`, and
-for pi `"timeout": 600`, since the first analysis of a large binary can take
-longer than their default minute; pi also gets `"exposure": "direct"`, so
-borer's tools are offered like built-in ones rather than only to codemode.
+the clients to restart, since none reads its configuration again while it
+runs. Quit Claude Desktop from the tray, turn borer on in Cursor under
+Settings > MCP, and run `/reload` in pi. For Codex it also sets
+`tool_timeout_sec = 600`, and for pi `"timeout": 600`, since the first
+analysis of a large binary can take longer than their default minute. pi
+also gets `"exposure": "direct"`, so borer's tools are offered like built-in
+ones rather than only to codemode.
 
 As a Claude Code plugin, which fetches the binary of the plugin's version
 when a session starts and replaces it when the plugin updates:
@@ -130,9 +179,9 @@ target/release/borer setup --apply
 
 To register it by hand, use an absolute path. Claude Desktop, Cursor,
 Windsurf, Gemini CLI, Antigravity, Qwen Code, Kimi Code, Junie, Augment,
-Warp, LM Studio and Factory Droid read `mcpServers` (Continue too, from a
-file of its own, `~/.continue/mcpServers/borer.json`; Amp under
-`amp.mcpServers`):
+Warp, LM Studio and Factory Droid read `mcpServers`. Continue reads it too,
+from a file of its own (`~/.continue/mcpServers/borer.json`), and Amp reads
+it under `amp.mcpServers`:
 
 ```json
 { "mcpServers": { "borer": { "command": "/path/to/borer", "args": [] } } }
@@ -172,8 +221,8 @@ tools named:
 ```
 
 Cline (`~/.cline/data/settings/cline_mcp_settings.json`), Roo Code and Kiro
-read `mcpServers` with a `timeout` (seconds; Kiro's in milliseconds), which
-`setup` raises for a first analysis.
+read `mcpServers` with a `timeout` (in seconds, or milliseconds for Kiro),
+which `setup` raises for a first analysis.
 
 Codex CLI (`~/.codex/config.toml`) and Grok Build (`~/.grok/config.toml`,
 which takes the same table without the timeouts):
@@ -187,7 +236,7 @@ tool_timeout_sec = 600
 ```
 
 To uninstall, `borer setup --apply --remove` takes borer out of every client
-(`borer setup --remove` shows what it would change); then delete the binary
+(`borer setup --remove` shows what it would change). Then delete the binary
 and its cache (`%LOCALAPPDATA%\borer`, or `~/.cache/borer`). The installers
 do all three:
 
@@ -233,7 +282,7 @@ borer triage    sample.exe
 borer functions sample.exe
 borer decompile sample.exe <address|name>
 borer xrefs     sample.exe <address|name>
-borer verify    sample.exe    # lifter vs emulator; fails on any disagreement
+borer verify    sample.exe    # lifter vs emulator, fails on any disagreement
 borer help                    # every command
 ```
 
@@ -256,14 +305,14 @@ companion PDB, and `--arch x86|x64|arm64` (with `--base`, `--entry` and
   functions' signatures and strings, and `borer names <bin> ida|ghidra|binja|x64dbg`
   borer's names and comments as a script or database those tools apply.
   `borer info` gives the MD5, SHA-256, imphash and TLSH, and what any data
-  appended past the last section is; `borer addr` converts between virtual
+  appended past the last section is. `borer addr` converts between virtual
   address, relative address and file offset.
 - **Scripting:** sandboxed [Rhai](https://rhai.rs/) scripts (no files, no
   network, an operation budget) through the `script` tool or `borer script`.
 - **Sizes:** every answer is capped at 72,000 bytes, cut at a line with a note
   on how to page the rest (`BORER_BUDGET` sets the cap in bytes, `0` lifts
   it). A file is read into memory whole, so one past 1 GiB is refused with a
-  message (`BORER_MAX_FILE`, in bytes or with `K`, `M` or `G`; `0` lifts it).
+  message (`BORER_MAX_FILE`, in bytes or with `K`, `M` or `G`, and `0` lifts it).
   A client that sends a progress token gets a progress notification every few
   seconds while a first analysis runs.
 
@@ -277,7 +326,7 @@ reporting. Three things reach the network:
   `https://github.com/imjustprism/borer/releases/latest` with the user agent
   `borer/<version>`, so GitHub sees your IP address, the version and the
   time. It never runs for the MCP server, under `CI`, or with stderr
-  redirected; `BORER_NO_UPDATE_CHECK=1` turns it off.
+  redirected, and `BORER_NO_UPDATE_CHECK=1` turns it off.
 - **`fetch_pdb`**, only when asked and dry-run by default, sends the PDB's
   name, GUID and age to the symbol server (Microsoft's unless configured).
   `borer doctor` checks that server is reachable unless run as
@@ -296,7 +345,7 @@ reporting. Three things reach the network:
 - DWARF supplies names and types, not line tables.
 - Embedded containers are listed (`borer://children`), not extracted.
 - Library signatures ship for three runtimes only (LLVM compiler-rt, the
-  Microsoft C++ standard library, the Rust standard library); any other
+  Microsoft C++ standard library, the Rust standard library). Any other
   library needs a pack built with `borer sigmake`.
 
 ## Workspace
@@ -322,8 +371,8 @@ commercial terms. The details are in [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 borer is free software under the [GNU Affero General Public License
-v3.0](LICENSE) (AGPL-3.0-only). Use it for anything, change it and share it;
-if you distribute borer or a modified version, or run one as a network
+v3.0](LICENSE) (AGPL-3.0-only). Use it for anything, change it and share it.
+If you distribute borer or a modified version, or run one as a network
 service, you must publish its complete source under the same license.
 Versions 0.1.0 and 0.1.1 were released under MIT. A commercial license, for
 uses the AGPL does not fit, is available: open an issue or reach out on
@@ -334,7 +383,7 @@ implementation, the library signature sets and the SDK type data, with their
 provenance) are in [NOTICE](NOTICE). Each release archive also carries
 THIRD-PARTY-LICENSES, the licenses of every crate and runtime the binary links.
 
-Ghidra is a project of the NSA; IDA and Hex-Rays are trademarks of Hex-Rays
-SA; Binary Ninja is a trademark of Vector 35; Claude is a trademark of
-Anthropic; other names are their owners' trademarks. borer is not affiliated
+Ghidra is a project of the NSA. IDA and Hex-Rays are trademarks of Hex-Rays
+SA, Binary Ninja is a trademark of Vector 35, and Claude is a trademark of
+Anthropic. Other names are their owners' trademarks. borer is not affiliated
 with or endorsed by any of them.
