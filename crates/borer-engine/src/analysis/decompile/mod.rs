@@ -660,58 +660,6 @@ fn decompile_afresh(
         .map(|d| finished(&d.text, program, analysis, overlay, entry))
 }
 
-/// Finishes a body for the tools.
-///
-/// The steps are [`polish`], then the tables it reads inline ([`tables::inline_tables`]), then the translation-unit closure
-/// ([`unit::close`]), then its vector declarations ([`vector::declare`])
-/// and its helper definitions ([`helper::declare`]), each step timed
-/// ([`crate::timing::Step`]), and last the structs and tables it names
-/// ([`defs::declare`]), each left out when the overlay's [`Passes`] say
-/// so.
-///
-/// # Arguments
-///
-/// * `text` - The plain or named decompilation.
-/// * `program` - The loaded image.
-/// * `analysis` - Discovery results, for the packs and the callees.
-/// * `overlay` - User names, and the passes left out.
-/// * `entry` - The function's entry address.
-///
-/// # Returns
-///
-/// The text the tools show.
-fn finished(
-    text: &str,
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
-) -> String {
-    use crate::timing::{Step, timed};
-    let bitness = program.arch.bitness().unwrap_or(64);
-    let skip = overlay.passes;
-    let text = timed(Step::Polish, || {
-        polish_skipping(text, bitness, &analysis.packs, skip)
-    });
-    let text = timed(Step::InlineTables, || {
-        skip.apply(Pass::InlineTables, text, |t| {
-            tables::inline_tables(t, program)
-        })
-    });
-    let text = timed(Step::UnitClosure, || {
-        skip.apply(Pass::UnitClosure, text, |t| {
-            unit::close(t, program, analysis, overlay, entry)
-        })
-    });
-    let text = timed(Step::Vectors, || {
-        skip.apply(Pass::VectorDeclare, text, |t| vector::declare(t, program))
-    });
-    let text = timed(Step::Helpers, || {
-        skip.apply(Pass::HelperDeclare, text, |t| helper::declare(t, program))
-    });
-    skip.apply(Pass::TypeDeclare, text, |t| defs::declare(t, program))
-}
-
 /// The source file and line each PDB-named function starts at, read once
 /// for the analysis's life.
 ///

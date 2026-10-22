@@ -671,11 +671,14 @@ fn defined_body(
     let d = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry);
     let bitness = program.arch.bitness().unwrap_or(64);
     let text = tables::inline_tables(
-        &polish_skipping(
+        &polish_at(
             &d.as_ref().as_ref()?.text,
             bitness,
             &analysis.packs,
             overlay.passes,
+            program,
+            analysis,
+            entry,
         ),
         program,
     );

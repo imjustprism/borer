@@ -4,8 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
+use crate::analysis::Analysis;
 use crate::num::from_usize;
+use crate::program::Program;
 
+mod callfmt;
 mod selects;
 
 /// The text passes every decompile ends with.
@@ -33,7 +36,34 @@ mod selects;
 /// types and byte offsets through typed pointers applied.
 #[must_use]
 pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
-    polish_skipping(text, bitness, packs, Passes::NONE)
+    polish_skipping(text, bitness, packs, Passes::NONE, None)
+}
+
+/// [`polish_skipping`] with the caller literals of `entry` in scope.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines first.
+/// * `bitness` - Decoder bitness of the program (32 or 64).
+/// * `packs` - The packs in force.
+/// * `skip` - The passes left out ([`Passes`]).
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The polished text.
+pub(super) fn polish_at(
+    text: &str,
+    bitness: u32,
+    packs: &crate::pack::Packs,
+    skip: Passes,
+    program: &Program,
+    analysis: &Analysis,
+    entry: u64,
+) -> String {
+    polish_skipping(text, bitness, packs, skip, Some((program, analysis, entry)))
 }
 
 /// [`polish`] with some of its passes left out.
@@ -44,6 +74,9 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
 /// * `bitness` - Decoder bitness of the program (32 or 64).
 /// * `packs` - The packs in force.
 /// * `skip` - The passes left out ([`Passes`]).
+/// * `callers` - The image, the analysis and the function, so a `gettext`
+///   of a parameter can take its type from the literals the callers pass.
+///   `None` leaves that evidence out.
 ///
 /// # Returns
 ///
@@ -53,6 +86,7 @@ pub(super) fn polish_skipping(
     bitness: u32,
     packs: &crate::pack::Packs,
     skip: Passes,
+    callers: Option<(&Program, &Analysis, u64)>,
 ) -> String {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
@@ -64,7 +98,9 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::ApplyLayouts, text, apply_layouts);
     let text = skip.apply(Pass::FloatLanes, text, float_lanes);
     let text = skip.apply(Pass::LaneLocals, text, lane_locals);
-    let text = skip.apply(Pass::TypeParameters, text, |t| type_parameters(t, word));
+    let text = skip.apply(Pass::TypeParameters, text, |t| {
+        type_parameters(&callfmt::noted(t, callers), word)
+    });
     let text = skip.apply(Pass::TypeLocals, text, type_locals);
     let text = skip.apply(Pass::ByteArithmetic, text, |t| byte_arithmetic(t, word));
     let text = skip.apply(Pass::NameVars, text, |t| {
@@ -98,6 +134,67 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::FloatBitCopies, text, float_bit_copies);
     let text = skip.apply(Pass::RefoldJumps, text, refold_jumps);
     skip.apply(Pass::SpellFloatRelations, text, spell_float_relations)
+}
+
+/// Finishes a body for the tools.
+///
+/// The steps are [`polish`], then the tables it reads inline ([`super::tables::inline_tables`]),
+/// then the translation-unit closure ([`super::unit::close`]), then its
+/// vector declarations ([`super::vector::declare`]) and its helper
+/// definitions ([`super::helper::declare`]), each step timed
+/// ([`crate::timing::Step`]), and last the structs and tables it names
+/// ([`super::defs::declare`]), each left out when the overlay's [`Passes`]
+/// say so.
+///
+/// # Arguments
+///
+/// * `text` - The plain or named decompilation.
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results, for the packs and the callees.
+/// * `overlay` - User names, and the passes left out.
+/// * `entry` - The function's entry address.
+///
+/// # Returns
+///
+/// The text the tools show.
+pub(super) fn finished(
+    text: &str,
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> String {
+    use crate::timing::{Step, timed};
+    let bitness = program.arch.bitness().unwrap_or(64);
+    let skip = overlay.passes;
+    let text = timed(Step::Polish, || {
+        polish_at(
+            text,
+            bitness,
+            &analysis.packs,
+            skip,
+            program,
+            analysis,
+            entry,
+        )
+    });
+    let text = timed(Step::InlineTables, || {
+        skip.apply(Pass::InlineTables, text, |t| {
+            tables::inline_tables(t, program)
+        })
+    });
+    let text = timed(Step::UnitClosure, || {
+        skip.apply(Pass::UnitClosure, text, |t| {
+            unit::close(t, program, analysis, overlay, entry)
+        })
+    });
+    let text = timed(Step::Vectors, || {
+        skip.apply(Pass::VectorDeclare, text, |t| vector::declare(t, program))
+    });
+    let text = timed(Step::Helpers, || {
+        skip.apply(Pass::HelperDeclare, text, |t| helper::declare(t, program))
+    });
+    skip.apply(Pass::TypeDeclare, text, |t| defs::declare(t, program))
 }
 
 /// Drops an assignment an `if` block opens with when the line before the
