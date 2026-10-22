@@ -987,7 +987,11 @@ fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
     let Some(ty) = decl_type(lines, temp).filter(|t| integer_type(t)) else {
         return false;
     };
-    if temp_lives(lines, k, temp) || base.contains('?') || mentions_ident(base, temp) {
+    if temp_lives(lines, k, temp)
+        || base.contains('?')
+        || mentions_ident(base, temp)
+        || address_taken(lines, temp)
+    {
         return false;
     }
     let pad = " ".repeat(indent_of(line));
@@ -1155,6 +1159,19 @@ fn any_assignment(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((left.trim(), right.trim()))
+}
+
+/// Tells whether some line has taken the address of a stack slot.
+///
+/// A later read can use the saved pointer and never write the slot's name.
+///
+/// # Arguments
+///
+/// * `lines` - The function.
+/// * `name` - The temporary.
+fn address_taken(lines: &[String], name: &str) -> bool {
+    (name.starts_with("local_") || name.starts_with("home_"))
+        && lines.iter().any(|l| l.contains(&format!("&{name}")))
 }
 
 /// Tells whether line `k` sits in a `while`, `for` or `do`.
@@ -1600,6 +1617,8 @@ return 0;
         assert_eq!(select_statements(spun), spun);
         let indexed = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? table[r3] & 0xffffefff : table[r3]) | 0x1000 : (a2 == 8 ? table[r3] & 0xffffefff : table[r3]));\ntable[r3] = r3;\n";
         assert_eq!(select_statements(indexed), indexed);
+        let escaped = "uint32_t local_c;\n\nescape(&local_c);\nlocal_c = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = local_c;\n";
+        assert_eq!(select_statements(escaped), escaped);
         let wide = "uint64_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
         assert_eq!(
             select_statements(wide),
