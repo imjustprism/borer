@@ -384,3 +384,27 @@ fn a_mixed_single_mask_over_a_double_is_no_negation() {
     assert!(!text.contains("= -"), "{text}");
     replays_clean(&p, &a, &[0x1_4000_1000]);
 }
+
+/// A single's broadcast sign mask over a double flips bit 31 and bit 63
+/// of the double's bits, an integer `^` over those bits: `^` over a
+/// `double` would not be C, and the store keeps the bits.
+#[test]
+fn a_single_sign_mask_over_a_double_xors_its_bits() {
+    let mut code = vec![
+        0xf2, 0x0f, 0x10, 0x01, // ASM: movsd xmm0,[rcx]
+        0x0f, 0x57, 0x05, 0xf5, 0x00, 0x00, 0x00, // ASM: xorps xmm0,[rip+0xf5]
+        0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x100, 0xcc);
+    code.extend_from_slice(&[0, 0, 0, 0x80].repeat(4));
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(
+        text.contains("*(uint64_t*)a2 = *(uint64_t*)a1 ^ 0x8000000080000000;"),
+        "{text}"
+    );
+    assert!(!text.contains("*(double*)"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}

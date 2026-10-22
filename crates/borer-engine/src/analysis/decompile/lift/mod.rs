@@ -1308,9 +1308,10 @@ const SIGN_ABOVE: u64 = 0x8000_0000_0000_0000;
 /// a scalar sign mask flips only bit 31 and leaves the high half, a
 /// broadcast sign mask flips bit 31 and bit 63, a scalar magnitude mask
 /// clears everything above the low lane, and a broadcast one clears both
-/// lanes' signs. Anything else stays the unary form: a mixed mask, a
-/// 64-bit lane mask, or a single whose bits above this function did not
-/// clear and does not hold as a double.
+/// lanes' signs: an integer operation over the double's bits, since `^`
+/// or `&` over a `double` would not be C. Anything else stays the unary
+/// form: a mixed mask, a 64-bit lane mask, or a single whose bits above
+/// this function did not clear and does not hold as a double.
 ///
 /// # Arguments
 ///
@@ -1342,7 +1343,11 @@ fn masked_lanes(abs: bool, ty: Ty, broadcast: Option<bool>, x: Expr) -> Expr {
     let Some((op, mask)) = lane_mask(abs, ty, Some(broadcast)) else {
         return plain;
     };
-    Expr::Bin(op, Box::new(x), Box::new(Expr::Const(mask)))
+    Expr::Bin(
+        op,
+        Box::new(bitcast(x, Ty::U64)),
+        Box::new(Expr::Const(mask)),
+    )
 }
 
 /// The bit operation a sign or magnitude mask applies to a register's low
@@ -1486,10 +1491,24 @@ fn sign_xor(v: &Expr) -> Option<(&Expr, u64)> {
     let Expr::Const(mask) = m.as_ref() else {
         return None;
     };
-    if !matches!(*mask, SIGN32 | SIGN32_SPLAT) || !x.is_float() {
+    if !matches!(*mask, SIGN32 | SIGN32_SPLAT) || !float_or_its_bits(x) {
         return None;
     }
     Some((x, *mask))
+}
+
+/// Tells whether a mask's operand is a float or a float's bits read as an
+/// integer of its width, the operand [`Exec::mask_write`] spells so that
+/// the mask's `^` or `&` is C.
+///
+/// # Arguments
+///
+/// * `x` - The operand.
+fn float_or_its_bits(x: &Expr) -> bool {
+    match x {
+        Expr::Bitcast(inner, Ty::U32 | Ty::U64) => inner.is_float(),
+        other => other.is_float(),
+    }
 }
 
 /// A double anded with a 32-bit magnitude mask, scalar or broadcast.
@@ -1504,13 +1523,16 @@ fn mag_and(v: &Expr) -> Option<(&Expr, u64)> {
     let Expr::Const(mask) = m.as_ref() else {
         return None;
     };
-    if !matches!(*mask, MAG32 | MAG32_SPLAT) || !x.is_float() {
+    if !matches!(*mask, MAG32 | MAG32_SPLAT) || !float_or_its_bits(x) {
         return None;
     }
     Some((x, *mask))
 }
 
 /// The low 32 bits of `v` as a float, without converting the number.
+///
+/// A float's bits read as an integer ([`float_or_its_bits`]) are cut as
+/// the float itself, the cut the cast reads as its encoding.
 ///
 /// # Arguments
 ///
@@ -1519,6 +1541,10 @@ fn low_single(v: Expr) -> Expr {
     if float_lane(&v) == Some(32) {
         return v;
     }
+    let v = match v {
+        Expr::Bitcast(inner, Ty::U32 | Ty::U64) if inner.is_float() => *inner,
+        other => other,
+    };
     Expr::Cast(
         Box::new(Expr::Bin(
             Op::And,
