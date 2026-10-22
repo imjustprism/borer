@@ -20,7 +20,9 @@ use super::*;
 /// ([`and_chain`]); an `else` that stores a default and then repeats the
 /// first arm under a second test is one `||` ([`or_default`]); an `if`
 /// whose arms store two different names is that choice ([`named_choice`]);
-/// and a byte-wide flag a chain compares with zero is the flag itself
+/// a select between a value and that value with one bit updated, under the
+/// opposite test, is the `if` of that bit ([`complement_bits`]); and a
+/// byte-wide flag a chain compares with zero is the flag itself
 /// ([`quiet_flags`]).
 ///
 /// # Arguments
@@ -47,7 +49,11 @@ pub(super) fn select_statements(text: &str) -> String {
             k += 3;
             continue;
         }
-        if and_chain(&mut lines, k) || or_default(&mut lines, k) || named_choice(&mut lines, k) {
+        if and_chain(&mut lines, k)
+            || or_default(&mut lines, k)
+            || named_choice(&mut lines, k)
+            || complement_bits(&mut lines, k)
+        {
             changed = true;
             continue;
         }
@@ -927,6 +933,253 @@ fn norm_ty(ty: &str) -> String {
         .join(" ")
 }
 
+/// A temporary that chooses a value or that value with one bit set or
+/// cleared, under the opposite comparison, is the `if` a source writes.
+///
+/// `r = (c != k ? (c == k ? base & ~bit : base) | bit : (c == k ? base &
+/// ~bit : base)); base = r;` is `if (c != k) { base |= bit; } else { base
+/// &= ~bit; }`. The mask may sit on the outside instead, `(c != k ? (c ==
+/// k ? base | bits : base) & ~bits : ...)`, which tests the other way. The
+/// temporary is dropped when no other line reads it.
+///
+/// # Arguments
+///
+/// * `lines` - The function.
+/// * `k` - Index of the temporary's assignment.
+///
+/// # Returns
+///
+/// Whether the two lines were replaced.
+fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(line) = lines.get(k) else {
+        return false;
+    };
+    if line.trim_start().starts_with("//") {
+        return false;
+    }
+    let Some((temp, rhs)) = plain_assignment(line) else {
+        return false;
+    };
+    let (cond, yes, no) = ternary(rhs).unwrap_or(("", "", ""));
+    let Some((or_out, extra, inner)) = outer_update(yes, no) else {
+        return false;
+    };
+    let Some((q, arm_a, arm_b)) = ternary(inner) else {
+        return false;
+    };
+    if invert_condition(cond) != q {
+        return false;
+    }
+    let Some((base, operand, inner_or)) = applied_arm(arm_a, arm_b) else {
+        return false;
+    };
+    let Some(store) = lines.get(k + 1).and_then(|l| any_assignment(l)) else {
+        return false;
+    };
+    if store.1 != temp || store.0 != base {
+        return false;
+    }
+    let (then_op, else_op, else_operand) = match (or_out, inner_or) {
+        (true, false) if complements(extra, operand) => ("|=", "&=", operand),
+        (false, true) if masked_not(extra, operand) => ("&=", "|=", operand),
+        _ => return false,
+    };
+    if temp_lives(lines, k, temp) || base.contains('?') {
+        return false;
+    }
+    let pad = " ".repeat(indent_of(line));
+    let body = format!("{pad}  ");
+    let then_s = format!("{base} {then_op} {extra};");
+    let else_s = format!("{base} {else_op} {else_operand};");
+    let rewritten = vec![
+        format!("{pad}if ({cond}) {{"),
+        format!("{body}{then_s}"),
+        format!("{pad}}} else {{"),
+        format!("{body}{else_s}"),
+        format!("{pad}}}"),
+    ];
+    lines.splice(k..=k + 1, rewritten);
+    true
+}
+
+/// The outer update of a complementary select: the inner choice, whether
+/// the true side applies `|`, and the operand it applies.
+///
+/// # Arguments
+///
+/// * `yes` - The true side of the outer choice.
+/// * `no` - The false side, which is the inner choice.
+fn outer_update<'a>(yes: &'a str, no: &'a str) -> Option<(bool, &'a str, &'a str)> {
+    if yes.is_empty() {
+        return None;
+    }
+    let bare = unparen(no);
+    for (op, is_or) in [(" | ", true), (" & ", false)] {
+        let Some((left, right)) = split_last_op(yes, op) else {
+            continue;
+        };
+        if unparen(left) == bare {
+            return Some((is_or, right, no));
+        }
+    }
+    None
+}
+
+/// The plain base and the bit operand when one arm is the other with `|`
+/// or `&` applied.
+///
+/// # Arguments
+///
+/// * `arm_a` - The true side of the inner choice.
+/// * `arm_b` - The false side.
+///
+/// # Returns
+///
+/// The base, the operand, and whether the true side is the updated one
+/// with `|` rather than `&`.
+fn applied_arm<'a>(arm_a: &'a str, arm_b: &'a str) -> Option<(&'a str, &'a str, bool)> {
+    let base = unparen(arm_b);
+    let (operand, is_or) = applied(arm_a, base)?;
+    Some((base, operand, is_or))
+}
+
+/// `base OP operand` when `expr` is that update of `base`.
+///
+/// # Arguments
+///
+/// * `expr` - One arm.
+/// * `base` - The plain value.
+///
+/// # Returns
+///
+/// The operand and whether the operator is `|`.
+fn applied<'a>(expr: &'a str, base: &str) -> Option<(&'a str, bool)> {
+    for (op, is_or) in [(" | ", true), (" & ", false)] {
+        if let Some((left, right)) = split_last_op(expr, op)
+            && unparen(left) == base
+        {
+            return Some((right, is_or));
+        }
+    }
+    None
+}
+
+/// Tells whether two constants are complements in 32 bits.
+///
+/// # Arguments
+///
+/// * `bit` - The bits the true side sets.
+/// * `mask` - The mask the false side keeps.
+fn complements(bit: &str, mask: &str) -> bool {
+    let Some(bit) = parse_const(bit) else {
+        return false;
+    };
+    let Some(mask) = parse_const(mask) else {
+        return false;
+    };
+    bit <= 0xffff_ffff && mask <= 0xffff_ffff && bit ^ mask == 0xffff_ffff
+}
+
+/// Tells whether `mask` is `bits` inverted in 32 bits, as `bits ^ 0xffffffff`.
+///
+/// # Arguments
+///
+/// * `mask` - The mask text.
+/// * `bits` - The bits the other side sets.
+fn masked_not(mask: &str, bits: &str) -> bool {
+    let mask = unparen(mask);
+    mask == format!("{bits} ^ 0xffffffff")
+}
+
+/// Strips one matching pair of parentheses, repeatedly.
+///
+/// # Arguments
+///
+/// * `expr` - An expression.
+fn unparen(expr: &str) -> &str {
+    let mut e = expr.trim();
+    while let Some(inner) = e.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+        if opening_paren(e, e.len() - 1) != Some(0) {
+            break;
+        }
+        e = inner.trim();
+    }
+    e
+}
+
+/// The rightmost `op` at bracket depth zero.
+///
+/// # Arguments
+///
+/// * `expr` - An expression.
+/// * `op` - The operator with its spaces, ` | ` or ` & `.
+fn split_last_op<'a>(expr: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut found: Option<usize> = None;
+    for (i, c) in expr.char_indices() {
+        if let Some(q) = quote {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                _ if c == q => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            _ if depth == 0 && expr.get(i..).is_some_and(|r| r.starts_with(op)) => found = Some(i),
+            _ => {}
+        }
+    }
+    let at = found?;
+    Some((expr.get(..at)?.trim(), expr.get(at + op.len()..)?.trim()))
+}
+
+/// An assignment whose left side may be a field, not only a name.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+fn any_assignment(line: &str) -> Option<(&str, &str)> {
+    let t = line.trim().strip_suffix(';')?;
+    let (left, right) = t.split_once(" = ")?;
+    if left.contains('=') || right.contains(" = ") {
+        return None;
+    }
+    Some((left.trim(), right.trim()))
+}
+
+/// Tells whether a line after the store reads `temp` before the next
+/// assignment of it.
+///
+/// # Arguments
+///
+/// * `lines` - The function.
+/// * `k` - Index of the temporary's assignment. The next line is its store.
+/// * `temp` - The temporary.
+fn temp_lives(lines: &[String], k: usize, temp: &str) -> bool {
+    for line in lines.iter().skip(k + 2) {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        if let Some((lhs, rhs)) = plain_assignment(line)
+            && lhs == temp
+            && !mentions_ident(rhs, temp)
+        {
+            return false;
+        }
+        if mentions_ident(line, temp) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Tells whether an expression calls nothing and does not read `var`.
 ///
 /// # Arguments
@@ -1168,5 +1421,24 @@ return 0;
         assert_eq!(select_statements(bare), bare);
         let expr = "uint32_t r1;\n\nif (a1 == 0) {\n  r1 = a1 + a2;\n} else {\n  r1 = a1 + a3;\n}\nreturn r1;\n";
         assert_eq!(select_statements(expr), expr);
+    }
+
+    /// A select between a field and that field with one bit updated, under
+    /// the opposite comparison, is the `if` of the bit. A later read of the
+    /// temporary keeps the select.
+    #[test]
+    fn a_complementary_bit_is_an_if() {
+        let text = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
+        assert_eq!(
+            select_statements(text),
+            "uint32_t r3;\n\nif (a2 != 8) {\n  a1->field_0xc |= 0x1000;\n} else {\n  a1->field_0xc &= 0xffffefff;\n}\n"
+        );
+        let clear = "uint32_t r1;\n\nr1 = (a2 != 1 ? (a2 == 1 ? a1->field_0x4 | a4 : a1->field_0x4) & (a4 ^ 0xffffffff) : (a2 == 1 ? a1->field_0x4 | a4 : a1->field_0x4));\na1->field_0x4 = r1;\nr1 = 0;\n";
+        assert_eq!(
+            select_statements(clear),
+            "uint32_t r1;\n\nif (a2 != 1) {\n  a1->field_0x4 &= (a4 ^ 0xffffffff);\n} else {\n  a1->field_0x4 |= a4;\n}\nr1 = 0;\n"
+        );
+        let live = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nreturn r3;\n";
+        assert_eq!(select_statements(live), live);
     }
 }
