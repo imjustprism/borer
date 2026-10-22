@@ -987,7 +987,7 @@ fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
     let Some(ty) = decl_type(lines, temp).filter(|t| integer_type(t)) else {
         return false;
     };
-    if temp_lives(lines, k, temp) || base.contains('?') {
+    if temp_lives(lines, k, temp) || base.contains('?') || mentions_ident(base, temp) {
         return false;
     }
     let pad = " ".repeat(indent_of(line));
@@ -1598,6 +1598,8 @@ return 0;
         assert_eq!(select_statements(called), called);
         let spun = "uint32_t r3;\n\nwhile (a3) {\n  consume(r3);\n  r3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\n  a1->field_0xc = r3;\n}\n";
         assert_eq!(select_statements(spun), spun);
+        let indexed = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? table[r3] & 0xffffefff : table[r3]) | 0x1000 : (a2 == 8 ? table[r3] & 0xffffefff : table[r3]));\ntable[r3] = r3;\n";
+        assert_eq!(select_statements(indexed), indexed);
         let wide = "uint64_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
         assert_eq!(
             select_statements(wide),
