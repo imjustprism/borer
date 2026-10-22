@@ -274,8 +274,10 @@ pub(super) fn try_compare_switch<L: Lifter>(
 /// other side: exactly what a `default:` the source wrote does. The
 /// guard qualifies when its other side is the dispatch block itself,
 /// entered from the guard alone and writing nothing before it jumps, the
-/// dispatch indexes with the value the guard compares, and the table has
-/// as many entries as the bound admits.
+/// default is entered only from the guard and the table, the dispatch
+/// indexes with the value the guard compares, and the table has as many
+/// entries as the bound admits. A default other code jumps into is shared
+/// code, and folding it into the switch costs that code a label.
 ///
 /// # Arguments
 ///
@@ -317,6 +319,7 @@ fn try_guarded_switch<L: Lifter>(
         || st.outside(d)
         || st.outside(default)
         || st.preds[d].as_slice() != [i]
+        || st.preds[default].iter().any(|&p| p != i && p != d)
         || st.loops.contains(&d)
     {
         return None;

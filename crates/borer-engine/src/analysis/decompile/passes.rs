@@ -141,7 +141,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 61] = [
         Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
