@@ -1637,17 +1637,11 @@ impl Exec<'_, '_> {
         if !matches!(self.flags, Flags::Cmp(..) | Flags::Test(..)) {
             return;
         }
-        let bitness = self.bitness();
-        let regs: Vec<Key> = (0..src.op_count())
-            .filter(|&i| src.op_kind(i) == OpKind::Register)
-            .map(|i| Key::Reg(canon(src.op_register(i), bitness)))
-            .collect();
+        let regs = self.compared_registers(src);
         let k = match how {
             Rebase::Registers => {
                 self.flags = Flags::Unknown;
-                for &r in &regs {
-                    self.materialize(r, &mut Vec::new(), None);
-                }
+                self.write_compared(src);
                 self.flags_needed = u32::MAX;
                 self.step(src);
                 return;
@@ -1671,6 +1665,37 @@ impl Exec<'_, '_> {
         self.flags = Flags::Unknown;
         self.materialize(k, &mut Vec::new(), None);
         self.flags = rebased;
+    }
+
+    /// The registers a comparison names.
+    ///
+    /// # Arguments
+    ///
+    /// * `src` - The comparison.
+    fn compared_registers(&self, src: &Instruction) -> Vec<Key> {
+        let bitness = self.bitness();
+        (0..src.op_count())
+            .filter(|&i| src.op_kind(i) == OpKind::Register)
+            .map(|i| Key::Reg(canon(src.op_register(i), bitness)))
+            .collect()
+    }
+
+    /// Writes out every register a comparison names, for
+    /// [`Rebase::Registers`], which lifts the comparison again over them.
+    ///
+    /// The block's end runs it before its phis are placed too: a phi
+    /// protects the readers of the register it writes, and forgets a
+    /// reader no successor reads, which a comparison register only the
+    /// join's flags read is; lifted again over the forgotten register, the
+    /// comparison would read the value it held before the block.
+    ///
+    /// # Arguments
+    ///
+    /// * `src` - The comparison that produced the flags.
+    pub(super) fn write_compared(&mut self, src: &Instruction) {
+        for r in self.compared_registers(src) {
+            self.materialize(r, &mut Vec::new(), None);
+        }
     }
 
     /// The word and bit a bit-string instruction (`bt [m], r`, `bts`,
