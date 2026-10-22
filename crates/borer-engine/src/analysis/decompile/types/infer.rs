@@ -1032,8 +1032,10 @@ fn format_slot(lines: &[String], line: &str, at: usize) -> Option<Slot> {
 /// argument `index`.
 ///
 /// A literal with no conversion at `index` says nothing. A positional
-/// conversion (`%2$s`), an integer conversion, or two pointers that
-/// disagree refuses the operand: an unknown message is not guessed.
+/// conversion (`%2$s`), an integer conversion, two pointers that
+/// disagree, or a message the body assigns refuses the operand: an
+/// unknown message is not guessed. An assignment moves the text the
+/// callers passed (`a1 += 3` makes `"%s %lu"` read `%lu`).
 ///
 /// # Arguments
 ///
@@ -1046,7 +1048,7 @@ fn format_slot(lines: &[String], line: &str, at: usize) -> Option<Slot> {
 ///
 /// The pointer slot, or `None` when the notes do not agree on one.
 fn agreed_slot(lines: &[String], msgid: &str, index: usize) -> Option<Slot> {
-    if !is_ident(msgid) {
+    if !is_ident(msgid) || assigned_values(lines, msgid) > 0 {
         return None;
     }
     let prefix = format!("// formats {msgid}:");
@@ -1321,6 +1323,13 @@ a2 = 0;",
 printf(format, a1);",
         );
         assert_eq!(api_pointer(&text, "a1"), None);
+        let text = lines(
+            "// formats a1: \"%s %lu\"
+a1 += 3;
+format = gettext(a1);
+error(0, 0, format, a2);",
+        );
+        assert_eq!(api_pointer(&text, "a2"), None);
         let typed = super::type_parameters(
             "// signature: void f(char *a1, uint64_t a2)\nformat = gettext(a1);\nerror(0, 0, format, a2);\n",
             "uint64_t",

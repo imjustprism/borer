@@ -2,13 +2,14 @@
 //!
 //! A `gettext` of a parameter does not show the format. The calls that
 //! reach this function do, when every one of them passes a string or a
-//! null and nothing else takes the function's address. The notes are
+//! null, nothing else takes the function's address, and the function is
+//! not exported. The notes are
 //! `// formats a1: "..." "..."` lines for the type pass to read and then drop.
 
 use super::super::line::is_ident;
 use crate::analysis::{Analysis, RefKind};
 use crate::isa::x86::{Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register};
-use crate::program::{BinaryFormat, Program};
+use crate::program::{BinaryFormat, Program, SymbolKind};
 use crate::strings::cstr_text_at;
 
 /// Writes the caller-format notes under the signature line.
@@ -71,9 +72,9 @@ enum Def {
 /// The `// formats` notes for parameters whose callers pass string literals.
 ///
 /// A parameter is named only when every direct call and tail jump passes
-/// a string or a null for it, and no other reference of the function
-/// exists. Anything else is left off, so a message whose text is not
-/// visible stays untyped.
+/// a string or a null for it, no other reference of the function exists,
+/// and the function is not exported. Anything else is left off, so a
+/// message whose text is not visible stays untyped.
 ///
 /// # Arguments
 ///
@@ -88,6 +89,9 @@ enum Def {
 /// text has no `gettext` or the callers do not agree on a visible literal.
 fn format_lines(text: &str, program: &Program, analysis: &Analysis, entry: u64) -> Vec<String> {
     if !text.contains("gettext") && !text.contains("_(") {
+        return Vec::new();
+    }
+    if exported(program, entry) {
         return Vec::new();
     }
     let Some(params) = parameters(text) else {
@@ -329,6 +333,26 @@ fn argument_literals(
         }
     }
     Some(lits)
+}
+
+/// Tells whether `entry` is a symbol another module can call.
+///
+/// A caller outside this image does not appear in the references, so the
+/// literals found here are not every value the parameter can hold.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// Whether an exported symbol is at `entry`.
+fn exported(program: &Program, entry: u64) -> bool {
+    program
+        .symbols
+        .iter()
+        .any(|s| s.kind == SymbolKind::Export && s.addr == entry)
 }
 
 /// Call and tail-jump sites, or `None` when any other reference exists.
