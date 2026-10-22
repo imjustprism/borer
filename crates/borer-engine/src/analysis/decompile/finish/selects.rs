@@ -1157,6 +1157,53 @@ fn any_assignment(line: &str) -> Option<(&str, &str)> {
     Some((left.trim(), right.trim()))
 }
 
+/// Tells whether line `k` sits in a `while`, `for` or `do`.
+///
+/// The next iteration can read a temporary the lines after this one never
+/// name. Dropping its assignment would change that read.
+///
+/// # Arguments
+///
+/// * `lines` - The function.
+/// * `k` - The line to place.
+fn inside_loop(lines: &[String], k: usize) -> bool {
+    let mut depth = 0i32;
+    let mut loops: Vec<(i32, bool)> = Vec::new();
+    for (i, line) in lines.iter().enumerate().take(k + 1) {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        if loop_header(line) {
+            loops.push((depth, false));
+        }
+        let next = depth + brace_delta(line);
+        for lp in &mut loops {
+            if next > lp.0 {
+                lp.1 = true;
+            }
+        }
+        depth = next;
+        if i == k {
+            break;
+        }
+        loops.retain(|lp| depth > lp.0 || !lp.1);
+    }
+    !loops.is_empty()
+}
+
+/// Tells whether a line opens a loop.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+fn loop_header(line: &str) -> bool {
+    let t = line.trim_start();
+    ["while", "for", "do"].iter().any(|word| {
+        t.strip_prefix(word)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(|c: char| !is_ident_char(c)))
+    })
+}
+
 /// How many braces a line opens minus how many it closes.
 ///
 /// Braces inside a string do not count.
@@ -1252,7 +1299,9 @@ fn cast_update(ty: &str, base: &str, op: &str, operand: &str) -> String {
 /// that every later path executes.
 ///
 /// An assignment inside a brace does not count. `if (a3) { r3 = a4; }`
-/// leaves `r3` holding the earlier value when `a3` is false.
+/// leaves `r3` holding the earlier value when `a3` is false. A line
+/// inside a loop counts too: the next iteration can read the temporary
+/// from above this assignment.
 ///
 /// # Arguments
 ///
@@ -1260,6 +1309,9 @@ fn cast_update(ty: &str, base: &str, op: &str, operand: &str) -> String {
 /// * `k` - Index of the temporary's assignment. The next line is its store.
 /// * `temp` - The temporary.
 fn temp_lives(lines: &[String], k: usize, temp: &str) -> bool {
+    if inside_loop(lines, k) {
+        return true;
+    }
     let mut depth = 0i32;
     for line in lines.iter().skip(k + 2) {
         if line.trim_start().starts_with("//") {
@@ -1544,6 +1596,8 @@ return 0;
         assert_eq!(select_statements(branched), branched);
         let called = "uint32_t r3;\n\nr3 = (next() != 8 ? (next() == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (next() == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
         assert_eq!(select_statements(called), called);
+        let spun = "uint32_t r3;\n\nwhile (a3) {\n  consume(r3);\n  r3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\n  a1->field_0xc = r3;\n}\n";
+        assert_eq!(select_statements(spun), spun);
         let wide = "uint64_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
         assert_eq!(
             select_statements(wide),
