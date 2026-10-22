@@ -4,20 +4,6 @@
 use super::*;
 use crate::analysis::decompile::frame::Access;
 
-/// Tells whether an address adds a sign-extended term to its base, an
-/// index that may be negative.
-///
-/// # Arguments
-///
-/// * `addr` - The address.
-fn signed_index(addr: &Expr) -> bool {
-    match addr {
-        Expr::Sext(..) => true,
-        Expr::Bin(Op::Add, l, r) => signed_index(l) || signed_index(r),
-        _ => false,
-    }
-}
-
 /// Tells whether a variable is a machine register whose pending value
 /// liveness may drop: an x86 register, or an arm64 general or `v`
 /// register (the stack pointer is tracked as an offset, not a value).
@@ -359,6 +345,9 @@ impl<'a> Exec<'_, 'a> {
                 self.assumed(Expr::Var(key))
             }
             other => {
+                let pending = self.pending_slots(&other);
+                let word = self.word_ty();
+                let other = self.hold_slot_reads(other, word, &pending);
                 self.settle_frame_region(&other, None, false, false);
                 Expr::deref(other, ty)
             }
@@ -892,6 +881,20 @@ impl<'a> Exec<'_, 'a> {
         }
     }
 
+    /// The slots with a store still pending that an access through `addr`
+    /// may write out ([`Exec::settle_frame_region`]): all of them for a
+    /// frame address, none for any other.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The access's address.
+    fn pending_slots(&self, addr: &Expr) -> Vec<i64> {
+        if Self::frame_base(addr).is_none() {
+            return Vec::new();
+        }
+        self.env.slot_bits.keys().copied().collect()
+    }
+
     /// Stores to a stack slot lazily.
     ///
     /// A partial overwrite of another known slot, or of this one's pending
@@ -966,9 +969,11 @@ impl<'a> Exec<'_, 'a> {
     /// and a value that reads a slot would read what the write left. A
     /// region at a known slot with a known length covers what it spans; any
     /// other may cover every slot from its base up, or, copying backward,
-    /// any slot at all. An arm64 address adding a sign-extended index to
-    /// its base may cover any slot as well: `va_arg` reads the register
-    /// save area below the `__gr_top` it adds a negative offset to. The
+    /// any slot at all. An address whose index may reach below its base
+    /// ([`Expr::reaches_below`]) may cover any slot as well: arm64
+    /// `va_arg` reads the register save area below the `__gr_top` it adds
+    /// a negative offset to, an x64 `movsxd` index may be negative, and a
+    /// word-wide index may wrap. The
     /// verifier's symbolic pass writes nothing out; it forgets what the
     /// written slots held.
     ///
@@ -995,8 +1000,7 @@ impl<'a> Exec<'_, 'a> {
             }
             _ => None,
         };
-        let below = backward
-            || (self.ctx.program.arch.isa() == Some(crate::isa::Isa::A64) && signed_index(addr));
+        let below = backward || addr.reaches_below();
         if !writes {
             let seen = match span {
                 Some((a, b)) => SlotUse::Window(a, b),
@@ -1098,6 +1102,10 @@ impl<'a> Exec<'_, 'a> {
         match addr {
             Expr::Sp(k) => self.slot_write(k, ty, v),
             other => {
+                let pending = self.pending_slots(&other);
+                let word = self.word_ty();
+                let other = self.hold_slot_reads(other, word, &pending);
+                let v = self.hold_slot_reads(v, ty, &pending);
                 self.settle_frame_region(&other, None, false, true);
                 match float_store(ty, &v) {
                     Some((fty, fv)) => self.emit_store(other, fty, &fv),

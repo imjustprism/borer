@@ -52,6 +52,55 @@ fn a_qword_move_between_vector_registers_clears_the_upper_lanes() {
     );
 }
 
+/// A frame read through a sign-extended index may read a slot below the
+/// array it indexes.
+///
+/// A store pending in that slot is written before the read, and a later
+/// store to it is not moved before the read.
+///
+/// `mov [rsp],rdx; mov [rsp+8],r8; movsxd rax,ecx; mov
+/// rax,[rsp+rax*8+8]; ...; mov [rsp],r9; mov [r9],rax`: an index of -1
+/// reads `[rsp]`, as `movsxd` indexing a local table may.
+#[test]
+fn a_signed_index_into_the_frame_may_read_a_slot_below_it() {
+    let code = [
+        0x48, 0x83, 0xec, 0x38, // ASM: sub rsp,0x38
+        0x48, 0x89, 0x14, 0x24, // ASM: mov [rsp],rdx
+        0x4c, 0x89, 0x44, 0x24, 0x08, // ASM: mov [rsp+8],r8
+        0x48, 0x63, 0xc1, // ASM: movsxd rax,ecx
+        0x48, 0x8b, 0x44, 0xc4, 0x08, // ASM: mov rax,[rsp+rax*8+8]
+        0x4d, 0x85, 0xc9, // ASM: test r9,r9
+        0x74, 0x05, // ASM: je +5
+        0x4c, 0x89, 0x0c, 0x24, 0x90, // ASM: mov [rsp],r9; nop
+        0x49, 0x89, 0x01, // ASM: mov [r9],rax
+        0x48, 0x8b, 0x04, 0x24, 0x90, // ASM: mov rax,[rsp]; nop
+        0x48, 0x83, 0xc4, 0x38, // ASM: add rsp,0x38
+        0xc3, // ASM: ret
+    ];
+    replayed(&program64(&code));
+}
+
+/// A frame read through an index that may wrap the address space reads
+/// whatever slot it lands on, so the store pending in a slot below the
+/// array is written before it.
+///
+/// `mov [rsp+0x10],rdx; sub rcx,1; mov [rsp],rcx; mov
+/// rax,[rsp+rcx*8+0x10]`, the pop of `qsort`'s explicit stack: an index
+/// of `2^63 - 2` reads `[rsp]`, the index itself.
+#[test]
+fn an_index_into_the_frame_that_wraps_reads_the_slot_it_lands_on() {
+    let code = [
+        0x48, 0x83, 0xec, 0x48, // ASM: sub rsp,0x48
+        0x48, 0x89, 0x54, 0x24, 0x10, // ASM: mov [rsp+0x10],rdx
+        0x48, 0x83, 0xe9, 0x01, // ASM: sub rcx,1
+        0x48, 0x89, 0x0c, 0x24, // ASM: mov [rsp],rcx
+        0x48, 0x8b, 0x44, 0xcc, 0x10, // ASM: mov rax,[rsp+rcx*8+0x10]
+        0x48, 0x83, 0xc4, 0x48, // ASM: add rsp,0x48
+        0xc3, // ASM: ret
+    ];
+    replayed(&program64(&code));
+}
+
 /// A dword stored over a slot whose wider store is still pending keeps
 /// the value it read from the slot before that store.
 ///
@@ -71,6 +120,26 @@ fn a_dword_merged_into_a_wider_slot_store_keeps_what_it_read() {
         0x0b, 0xca, // ASM: or ecx,edx
         0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8],ecx
         0x48, 0x8b, 0x44, 0x24, 0x08, // ASM: mov rax,[rsp+8]
+        0xc3, // ASM: ret
+    ];
+    replayed(&program64(&code));
+}
+
+/// A frame store through an index read from a slot keeps the index the
+/// slot held, though the store writes out a later store to that slot.
+///
+/// `mov rax,[rsp+0x30]; mov qword [rsp+0x30],0; mov [rsp+rax+0x40],cx`,
+/// the terminator a system library writes into a local buffer at the
+/// length a call left in a local it then clears.
+#[test]
+fn a_frame_store_through_an_index_read_from_a_slot_keeps_the_index() {
+    let code = [
+        0x48, 0x83, 0xec, 0x68, // ASM: sub rsp,0x68
+        0x48, 0x8b, 0x44, 0x24, 0x30, // ASM: mov rax,[rsp+0x30]
+        0x48, 0xc7, 0x44, 0x24, 0x30, 0x00, 0x00, 0x00, 0x00, // ASM: mov qword [rsp+0x30],0
+        0x66, 0x89, 0x4c, 0x04, 0x40, // ASM: mov [rsp+rax+0x40],cx
+        0x48, 0x8b, 0x44, 0x24, 0x40, // ASM: mov rax,[rsp+0x40]
+        0x48, 0x83, 0xc4, 0x68, // ASM: add rsp,0x68
         0xc3, // ASM: ret
     ];
     replayed(&program64(&code));

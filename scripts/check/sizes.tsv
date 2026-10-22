@@ -17,7 +17,7 @@ crates/borer-engine/src/analysis/decompile/ctext.rs::tokens#1	126
 crates/borer-engine/src/analysis/decompile/emit.rs::emit_block#1	446
 crates/borer-engine/src/analysis/decompile/emit.rs::try_loop#1	228
 crates/borer-engine/src/analysis/decompile/enums.rs::enum_table#1	141
-crates/borer-engine/src/analysis/decompile/expr.rs	5579
+crates/borer-engine/src/analysis/decompile/expr.rs	5537
 crates/borer-engine/src/analysis/decompile/expr.rs::builders#1	623
 crates/borer-engine/src/analysis/decompile/expr.rs::division_idiom#1	130
 crates/borer-engine/src/analysis/decompile/expr.rs::eval#1	109
