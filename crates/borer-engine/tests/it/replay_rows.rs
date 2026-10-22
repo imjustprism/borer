@@ -51,3 +51,25 @@ fn a_qword_move_between_vector_registers_clears_the_upper_lanes() {
         "{text}"
     );
 }
+
+/// A call into a thunk that jumps through `rax` reads `rax`, so the load
+/// into it before an intervening store is kept, not dropped as dead.
+///
+/// `mov rax,[rcx+0x38]; mov dword [rcx+0x20],0; call T; ret` with `T:
+/// jmp rax`, the control-flow-guard dispatch a generic table's delete
+/// makes to its free routine: the store once wrote out every value read
+/// from memory but forgot `rax`, which no instruction seemed to read, and
+/// the call went through a stale `rax`.
+#[test]
+fn a_call_through_a_dispatch_thunk_keeps_the_register_it_jumps_through() {
+    let mut code = vec![
+        0x48, 0x8b, 0x41, 0x38, // ASM: mov rax,[rcx+0x38]
+        0xc7, 0x41, 0x20, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rcx+0x20],0
+        0xe8, 0x30, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0xff, 0xe0]);
+    let text = replayed(&program64(&code));
+    assert!(text.contains("(a1 + 0x38)"), "{text}");
+}

@@ -39,7 +39,7 @@ crates/borer-engine/src/analysis/decompile/interp.rs::solve_for#1	177
 crates/borer-engine/src/analysis/decompile/interp.rs::unset_reads#1	140
 crates/borer-engine/src/analysis/decompile/ladder.rs::try_ladder#1	103
 crates/borer-engine/src/analysis/decompile/lanes.rs::uses#1	167
-crates/borer-engine/src/analysis/decompile/lift/calls.rs	2115
+crates/borer-engine/src/analysis/decompile/lift/calls.rs	2068
 crates/borer-engine/src/analysis/decompile/lift/calls.rs::args_for#1	156
 crates/borer-engine/src/analysis/decompile/lift/calls.rs::call#1	524
 crates/borer-engine/src/analysis/decompile/lift/effects.rs::leading_reads#1	126

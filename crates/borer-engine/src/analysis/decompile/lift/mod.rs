@@ -21,6 +21,7 @@ macro_rules! emit_line {
 
 mod calls;
 mod conv;
+mod dispatch;
 mod effects;
 mod float;
 mod kernel;
@@ -489,7 +490,7 @@ struct Virtual {
 }
 
 /// Where a call through a dispatch thunk or a read-only pointer goes
-/// ([`Exec::dispatch`]).
+/// ([`Ctx::dispatch`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dispatch {
     /// The thunk ends in a jump through this register: the call is a call

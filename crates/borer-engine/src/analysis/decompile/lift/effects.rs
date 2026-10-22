@@ -1258,7 +1258,8 @@ pub(in crate::analysis::decompile) fn sets_without_reading(instr: &Instruction) 
 /// register, so a need wider than the lane survives it; a high-byte write
 /// (`ah`) keeps bits on both sides and counts as a whole-register read that
 /// defines nothing. Calls read the argument registers, on 32-bit the
-/// callee's rather than the caller's, and write the volatile ones, rax
+/// callee's rather than the caller's, and the register a dispatch thunk
+/// jumps through ([`Ctx::jumps_through`]), and write the volatile ones, rax
 /// excepted for a callee that hands it back untouched; a return reads rax;
 /// a tail jump out of the function reads the argument registers.
 ///
@@ -1318,6 +1319,7 @@ pub(super) fn reg_effects(
             if crate::analysis::render::preserves_registers(ctx.analysis, ctx.overlay, instr) => {}
         FlowControl::Call | FlowControl::IndirectCall => {
             reads.extend(args());
+            reads.extend(ctx.jumps_through(instr));
             if ctx.bitness == 32 {
                 let sse = sse_callee(ctx, x87::named_target(instr));
                 reads.extend(sse_args(sse).map(|r| (Key::Reg(r), 64u8)));
