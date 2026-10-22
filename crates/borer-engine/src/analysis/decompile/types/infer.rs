@@ -1065,11 +1065,12 @@ fn format_slot(lines: &[String], line: &str, at: usize, before: usize) -> Option
 /// argument `index`.
 ///
 /// A literal with no conversion at `index` says nothing. A positional
-/// conversion (`%2$s`), a conversion this cannot read (`%I64u`), an
-/// integer conversion, two pointers that disagree, or a message the body
-/// assigns refuses the operand: an unknown message is not guessed. An
-/// assignment moves the text the callers passed (`a1 += 3` makes
-/// `"%s %lu"` read `%lu`).
+/// conversion (`%2$s`), a conversion this cannot read (`%I64u`), two
+/// pointers that disagree, or a message the body assigns refuses the
+/// operand. An integer conversion is returned, not dropped: another call
+/// in the same function must not type that operand as a pointer. An
+/// unknown message is not guessed. An assignment moves the text the
+/// callers passed (`a1 += 3` makes `"%s %lu"` read `%lu`).
 ///
 /// # Arguments
 ///
@@ -1100,7 +1101,7 @@ fn agreed_slot(lines: &[String], msgid: &str, index: usize) -> Option<Slot> {
                 }
                 found = Some(ty);
             }
-            Some(Slot::Narrow(_) | Slot::Other) => return None,
+            Some(slot @ (Slot::Narrow(_) | Slot::Other)) => return Some(slot),
         }
     }
     found.map(Slot::Pointer)
@@ -1463,6 +1464,23 @@ printf(format, a1);",
         );
         assert!(typed.contains("f(char *a1, char *a2)"), "{typed}");
         assert!(!typed.contains("// formats"), "{typed}");
+    }
+
+    /// An integer format on one call stops a pointer learned from another.
+    ///
+    /// `%u` is evidence. Dropping it lets the `%s` call type the shared
+    /// operand `char *`.
+    #[test]
+    fn an_integer_format_stops_a_pointer_from_another_call() {
+        let text = lines(
+            "// formats a1: \"%s\"
+// formats a2: \"%u\"
+f1 = gettext(a1);
+printf(f1, a3);
+f2 = gettext(a2);
+printf(f2, a3);",
+        );
+        assert_eq!(api_pointer(&text, "a3"), None);
     }
 
     /// A parameter only passed to `exit` and stored to a 32-bit global is
