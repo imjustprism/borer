@@ -771,6 +771,35 @@ fn conversion_slot(literal: &str, index: usize) -> Option<Slot> {
     None
 }
 
+/// Tells whether token `k` is an operand of an operator C allows only of
+/// an integer: `|`, `^`, `<<`, `>>`, `/`, `%` or `~` on either side, or a
+/// binary `&` or `*` after it.
+///
+/// # Arguments
+///
+/// * `l` - The line.
+/// * `k` - The token.
+fn bit_operand(l: &Line<'_>, k: usize) -> bool {
+    let text = |j: usize| {
+        l.toks
+            .get(j)
+            .and_then(|t| l.text.get(t.at..t.end))
+            .unwrap_or("")
+    };
+    let integer = |op: &str| {
+        matches!(
+            op.trim_end_matches('='),
+            "|" | "^" | "<<" | ">>" | "/" | "%"
+        )
+    };
+    let before = k.checked_sub(1).map_or("", text);
+    let after = text(k + 1);
+    integer(before)
+        || before == "~"
+        || integer(after)
+        || matches!(after.trim_end_matches('='), "&" | "*")
+}
+
 /// The pointer type the declared calls a parameter is passed to whole
 /// agree it is, when nothing else in the body says otherwise.
 ///
@@ -779,7 +808,9 @@ fn conversion_slot(literal: &str, index: usize) -> Option<Slot> {
 /// assigned or cast to a narrow integer. A `char *` takes any other use,
 /// since its arithmetic counts bytes as the text's does; any other type
 /// takes it only when every use hands the value on whole ([`whole_read`]),
-/// so no arithmetic or load reads it as something it is not. A call
+/// so no arithmetic or load reads it as something it is not. No type takes
+/// a value some use masks, shifts, multiplies or divides ([`bit_operand`]),
+/// which C allows of no pointer. A call
 /// passing a copy of the parameter that only steps from it ([`copies`])
 /// says the same of the parameter.
 ///
@@ -816,6 +847,9 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
                         toks: lex(line),
                     };
                     let k = l.toks.iter().position(|t| t.at == at);
+                    if k.is_some_and(|k| bit_operand(&l, k)) {
+                        return None;
+                    }
                     whole &= k.is_some_and(|k| whole_read(&l, k));
                 }
             }
@@ -884,6 +918,15 @@ mod tests {
             Some(Slot::Pointer("char *".to_owned()))
         );
         assert_eq!(slot_at(line, at("a2")), Some(Slot::Narrow("int32_t")));
+        let masked = lines(
+            "uint64_t var1;
+
+var1 = strlen(a1);
+if ((a1 & 7) == 0) {
+  return var1;
+}",
+        );
+        assert_eq!(api_pointer(&masked, "a1"), None);
         let positional = "printf(\"%1$s\", a1);";
         assert_eq!(
             slot_at(positional, positional.find("a1").unwrap_or(0)),

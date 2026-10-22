@@ -416,6 +416,7 @@ pub(super) fn infer(program: &Program, analysis: &mut Analysis) {
                 .sites
                 .iter()
                 .any(|s| matches!(s, Site::Dead | Site::Tail(_)))
+                && !f.sites.contains(&Site::Unknown)
             {
                 (!own).then_some(false)
             } else {
