@@ -115,6 +115,8 @@ pub enum Pass {
     CallablePointers,
     /// Reads a float stored as bits as a float.
     FloatBitReads,
+    /// Copies a float into or out of an integer local as its bits.
+    FloatBitCopies,
     /// Folds the jumps the typing passes leave foldable.
     RefoldJumps,
     /// Spells float relations as C operators.
@@ -135,7 +137,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 58] = [
+    pub const ALL: [Self; 59] = [
         Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
@@ -187,6 +189,7 @@ impl Pass {
         Self::StackArrays,
         Self::CallablePointers,
         Self::FloatBitReads,
+        Self::FloatBitCopies,
         Self::RefoldJumps,
         Self::SpellFloatRelations,
         Self::InlineTables,
@@ -251,6 +254,7 @@ impl Pass {
             Self::StackArrays => "stack_arrays",
             Self::CallablePointers => "callable_pointers",
             Self::FloatBitReads => "float_bit_reads",
+            Self::FloatBitCopies => "float_bit_copies",
             Self::RefoldJumps => "refold_jumps",
             Self::SpellFloatRelations => "spell_float_relations",
             Self::InlineTables => "inline_tables",

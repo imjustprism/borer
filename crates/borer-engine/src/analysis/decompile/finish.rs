@@ -1,7 +1,7 @@
 //! Final text passes: `x ?: y`, temporary names, float returns, and the source
 //! file a function cites.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::num::from_usize;
@@ -91,6 +91,7 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::StackArrays, text, stack_arrays);
     let text = skip.apply(Pass::CallablePointers, text, callable_pointers);
     let text = skip.apply(Pass::FloatBitReads, text, float_bit_reads);
+    let text = skip.apply(Pass::FloatBitCopies, text, float_bit_copies);
     let text = skip.apply(Pass::RefoldJumps, text, refold_jumps);
     skip.apply(Pass::SpellFloatRelations, text, spell_float_relations)
 }
@@ -358,6 +359,111 @@ pub(super) fn float_return(ret: &str) -> bool {
         ret.trim_start_matches("const ").trim(),
         "float" | "double" | "long double"
     )
+}
+
+/// The bits type of a scalar float type the text names, `float` or
+/// `double`, with its width.
+///
+/// # Arguments
+///
+/// * `ty` - A type as the text spells it.
+fn float_bits_type(ty: &str) -> Option<(&'static str, u8)> {
+    match ty.trim() {
+        "float" => Some(("uint32_t", 32)),
+        "double" => Some(("uint64_t", 64)),
+        _ => None,
+    }
+}
+
+/// Writes the copies between a float the signature declares and a local
+/// the text declares as an integer as the bits the machine copies.
+///
+/// A vector register the lifter declares as an integer, the bits a sign
+/// mask leaves, is still the register a plain `movaps` copies a float
+/// argument into and the register whose bits a float function hands back
+/// in `xmm0`. C converts on `var1 = a1` and on `return var1`: a number
+/// where the machine moved bits. A whole copy of a `float` parameter into
+/// a `uint32_t` or `uint64_t` local reads its bits, `*(uint32_t*)&a1`, a
+/// `double` one into a `uint64_t` local `*(uint64_t*)&a1`, and a `return`
+/// of a local at least as wide as the function's `float` or `double`
+/// result reads the local's low bytes as that result, `*(float*)&var1`.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines included.
+///
+/// # Returns
+///
+/// The text with those copies spelled as bit copies.
+pub(super) fn float_bit_copies(text: &str) -> String {
+    let Some(sig) = text.lines().find_map(|l| l.strip_prefix("// signature: ")) else {
+        return text.to_owned();
+    };
+    let Some((head, params)) = sig.split_once('(') else {
+        return text.to_owned();
+    };
+    let result = head
+        .trim()
+        .rsplit_once(' ')
+        .and_then(|(ty, _)| float_bits_type(ty))
+        .map(|(_, bits)| (if bits == 32 { "float" } else { "double" }, bits));
+    let floats: BTreeMap<&str, (&str, u8)> = params
+        .split([',', ')'])
+        .filter_map(|p| {
+            let (ty, name) = p.trim().rsplit_once(' ')?;
+            let bits = float_bits_type(ty)?;
+            is_param_name(name).then_some((name, bits))
+        })
+        .collect();
+    if floats.is_empty() && result.is_none() {
+        return text.to_owned();
+    }
+    let mut locals: BTreeMap<String, u8> = BTreeMap::new();
+    for line in text.lines() {
+        for (ty, bits) in [("uint32_t ", 32), ("uint64_t ", 64)] {
+            let Some(rest) = line.strip_prefix(ty).and_then(|r| r.strip_suffix(';')) else {
+                continue;
+            };
+            for name in rest.split(", ").map(str::trim) {
+                if is_ident(name) && !is_param_name(name) {
+                    locals.insert(name.to_owned(), bits);
+                }
+            }
+        }
+    }
+    if locals.is_empty() {
+        return text.to_owned();
+    }
+    let mut changed = false;
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    for line in lines.iter_mut().filter(|l| !l.starts_with("//")) {
+        let indent = " ".repeat(line.len() - line.trim_start().len());
+        let Some(body) = line.trim().strip_suffix(';') else {
+            continue;
+        };
+        let rewritten = if let Some(local) = body.strip_prefix("return ") {
+            result
+                .filter(|(_, bits)| locals.get(local).is_some_and(|w| w >= bits))
+                .map(|(ty, _)| format!("{indent}return *({ty}*)&{local};"))
+        } else if let Some((lhs, rhs)) = body.split_once(" = ") {
+            floats
+                .get(rhs)
+                .filter(|(_, bits)| locals.get(lhs).is_some_and(|w| w >= bits))
+                .map(|(ty, _)| format!("{indent}{lhs} = *({ty}*)&{rhs};"))
+        } else {
+            None
+        };
+        if let Some(new) = rewritten {
+            *line = new;
+            changed = true;
+        }
+    }
+    if !changed {
+        return text.to_owned();
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 /// Heads a function with the source file it came from.

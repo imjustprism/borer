@@ -66,9 +66,9 @@ impl Site {
     pub const fn kind(self) -> Kind {
         match self {
             Self::Slot(_)
-            | Self::Pass(Pass::FloatLanes | Pass::LaneLocals | Pass::FloatBitReads) => {
-                Kind::TypeConflict
-            }
+            | Self::Pass(
+                Pass::FloatLanes | Pass::LaneLocals | Pass::FloatBitReads | Pass::FloatBitCopies,
+            ) => Kind::TypeConflict,
             Self::Pass(Pass::ApplyLayouts | Pass::NameFields | Pass::NameOwnFields) => {
                 Kind::StructScalars
             }

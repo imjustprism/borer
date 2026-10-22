@@ -408,3 +408,38 @@ fn a_single_sign_mask_over_a_double_xors_its_bits() {
     assert!(!text.contains("*(double*)"), "{text}");
     replays_clean(&p, &a, &[0x1_4000_1000]);
 }
+
+/// A float copied into a register the text declares as an integer is
+/// copied as its bits, and returned as the result's bits.
+///
+/// A plain `movaps` copies the argument into the register whose bits a
+/// sign mask flips, and that register is handed back in `xmm0`: C would
+/// convert the number on both copies. [`ACOSF_FLIP`] copies a `float`
+/// argument, and the same shape ending in `cvtsd2ss xmm0,xmm4` copies a
+/// `double` one.
+#[test]
+fn a_float_copied_into_integer_bits_is_copied_as_its_bits() {
+    let mut code = ACOSF_FLIP.to_vec();
+    code.resize(0x100, 0xcc);
+    code.extend_from_slice(&[0, 0, 0, 0x80].repeat(4));
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("var1 = *(uint32_t*)&a1;"), "{text}");
+    assert!(!text.contains("return var1;"), "{text}");
+    assert!(text.contains("return *("), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+
+    let mut code = ACOSF_FLIP[..14].to_vec();
+    code.extend_from_slice(&[
+        0xf2, 0x0f, 0x5a, 0xc4, // ASM: cvtsd2ss xmm0,xmm4
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x100, 0xcc);
+    code.extend_from_slice(&[0, 0, 0, 0x80].repeat(4));
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("var1 = *(uint64_t*)&a1;"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}
