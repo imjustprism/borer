@@ -123,6 +123,10 @@ fn reads_first_argument(program: &Program, analysis: &Analysis, target: Option<u
 
 /// Classifies what the code after one call does with `r0`.
 ///
+/// A conditional call, return or jump may be skipped, so the path that
+/// skips it is followed too; a conditional write of `r0` leaves the value
+/// in place on the path that skips it, so it ends nothing.
+///
 /// # Arguments
 ///
 /// * `program` - The image.
@@ -153,6 +157,15 @@ fn classify(program: &Program, analysis: &Analysis, site: u64, from: Option<u64>
             let regs = i.registers();
             if regs.reads.contains(&Reg::R(0)) {
                 break Site::Used;
+            }
+            let ends = matches!(i.flow(), Flow::Call | Flow::Return | Flow::Jump);
+            if i.predicated() && ends {
+                if forks < PATHS_MAX {
+                    forks += 1;
+                    paths.push((i.next(), n));
+                } else {
+                    found.push(Site::Unknown);
+                }
             }
             match i.flow() {
                 Flow::Call => {
@@ -186,7 +199,7 @@ fn classify(program: &Program, analysis: &Analysis, site: u64, from: Option<u64>
                 }
                 Flow::Next => {}
             }
-            if regs.writes.contains(&Reg::R(0)) {
+            if regs.writes.contains(&Reg::R(0)) && !i.predicated() {
                 break Site::Dead;
             }
             at = i.next();
