@@ -53,10 +53,11 @@ fn a_rotated_scan_keeps_turning() {
     runs_agree(&program64(&code), 0x1_4000_1000);
 }
 
-/// A scan whose element register only the join's flags read, after a
-/// loop-carried pointer the block also steps, writes the element out
-/// before the comparison is lifted again over it: the loop's test reads
-/// the element just loaded, not the one before.
+/// A loop's test after a join on its compare reads the element just loaded.
+///
+/// The element register only the join's flags read, beside a loop-carried
+/// pointer the block also steps, is written out before the comparison is
+/// lifted again over it, not left at the element loaded before.
 #[test]
 fn a_join_compare_reads_the_fresh_element() {
     replayed(&[
@@ -148,10 +149,12 @@ fn a_narrowed_double_product_is_the_double_one() {
     replayed(&code);
 }
 
-/// A switch through a byte table whose compared register the dispatch
-/// block rewrites with the byte (`cmp eax, 3; ja D; cdqe; movzx eax, byte
-/// [r9+rax+B]`) switches on the index the cases number, not the byte: the
-/// slot the byte picks is the case's, as the machine jumps.
+/// A switch through a byte table switches on the index the cases number.
+///
+/// The dispatch block rewrites the compared register with the byte
+/// (`cmp eax, 3; ja D; cdqe; movzx eax, byte [r9+rax+B]`); the switch reads
+/// the index, not the byte, and the slot the byte picks is the case's, as
+/// the machine jumps.
 #[test]
 fn a_byte_table_switch_reads_the_index_the_compare_bounds() {
     let code = [
