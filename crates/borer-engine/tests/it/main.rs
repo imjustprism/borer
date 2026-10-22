@@ -60,6 +60,7 @@ mod protection;
 mod protos;
 mod regression;
 mod reloc;
+mod replayed;
 mod search;
 mod strings;
 mod structure;

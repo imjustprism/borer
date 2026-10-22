@@ -1446,7 +1446,12 @@ pub(super) const TWIN_MAX_INSTRS: usize = 4;
 /// they join where the source did. The same instructions sending each
 /// outcome to the same blocks compute the same thing from the same state,
 /// so the merge is exact. Pairs where one block's predecessor also reaches
-/// the other are left alone, so no branch gains two edges to one block.
+/// the other are left alone, so no branch gains two edges to one block,
+/// and so are pairs where the earlier block runs forward into a
+/// predecessor of the later one: there the later test is a rotated loop's
+/// own (`if (c) do { .. } while (c)`), and the merge would turn the loop's
+/// exit test into a jump back to its guard, a loop the structurer cannot
+/// read.
 ///
 /// # Arguments
 ///
@@ -1469,9 +1474,10 @@ pub(super) fn twin_tests<L: Lifter>(
             !twins.contains_key(&a)
                 && code.get(a).is_some_and(|other| L::same_test(other, instrs))
                 && preds.get(a).is_some_and(|pa| {
-                    preds
-                        .get(b)
-                        .is_some_and(|pb| pb.iter().all(|p| *p != a && !pa.contains(p)))
+                    preds.get(b).is_some_and(|pb| {
+                        pb.iter()
+                            .all(|p| *p != a && !pa.contains(p) && !runs_forward(preds, a, *p))
+                    })
                 })
         });
         if let Some(a) = first {
@@ -1479,6 +1485,31 @@ pub(super) fn twin_tests<L: Lifter>(
         }
     }
     twins
+}
+
+/// Tells whether block `from` reaches block `to` by edges that each go to
+/// a later block, the way straight-line code and the inside of one turn
+/// of a loop run.
+///
+/// # Arguments
+///
+/// * `preds` - Each block's predecessors.
+/// * `from` - The earlier block.
+/// * `to` - The later block.
+fn runs_forward(preds: &[Vec<usize>], from: usize, to: usize) -> bool {
+    let mut seen = vec![false; preds.len()];
+    let mut work = vec![to];
+    while let Some(b) = work.pop() {
+        if b == from {
+            return true;
+        }
+        for &p in preds.get(b).map_or(&[][..], Vec::as_slice) {
+            if p >= from && p < b && !std::mem::replace(&mut seen[p], true) {
+                work.push(p);
+            }
+        }
+    }
+    false
 }
 
 /// Tells whether two x86 blocks make the same test.
