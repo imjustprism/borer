@@ -163,12 +163,7 @@ pub(super) fn param_types(
                     }
                 }
             }
-            let float_bytes = match instr.memory_size() {
-                crate::isa::x86::MemorySize::Float32 => Some(4),
-                crate::isa::x86::MemorySize::Float64 => Some(8),
-                _ => None,
-            };
-            if let Some(bytes) = float_bytes
+            if let Some(bytes) = float_width(instr)
                 && direct
                 && info
                     .used_memory()
@@ -188,6 +183,7 @@ pub(super) fn param_types(
                     frame.remove(&r);
                 }
             }
+            drop_clobbered(ctx, instr, &mut holds);
             if let Some(d) = dst {
                 if let Some(moved) = carried.or(loaded.map(|p| (p, 0))) {
                     holds.insert(d, moved);
@@ -213,6 +209,43 @@ pub(super) fn param_types(
         types.entry(p).or_insert_with(|| ty.to_owned());
     }
     types
+}
+
+/// The width in bytes of the float an instruction's memory operand is.
+///
+/// # Arguments
+///
+/// * `instr` - The instruction.
+fn float_width(instr: &Instruction) -> Option<usize> {
+    match instr.memory_size() {
+        crate::isa::x86::MemorySize::Float32 => Some(4),
+        crate::isa::x86::MemorySize::Float64 => Some(8),
+        _ => None,
+    }
+}
+
+/// Forgets the parameters a call leaves in no register: the registers
+/// the convention does not preserve across one hold the callee's values
+/// after it, though no operand of the call names them.
+///
+/// # Arguments
+///
+/// * `ctx` - The rendering context, for the convention.
+/// * `instr` - The instruction.
+/// * `holds` - The registers holding a parameter, by register.
+fn drop_clobbered(
+    ctx: &Ctx<'_>,
+    instr: &Instruction,
+    holds: &mut BTreeMap<Register, (usize, i64)>,
+) {
+    if instr.mnemonic() == Mnemonic::Call {
+        holds.retain(|r, _| {
+            ctx.conv
+                .callee_saved
+                .iter()
+                .any(|s| lift::canon(*s, ctx.bitness) == *r)
+        });
+    }
 }
 
 /// The precision a scalar float instruction reads its vector registers at,
