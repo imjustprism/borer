@@ -589,7 +589,12 @@ fn readonly(program: &Program, addr: u64) -> bool {
     })
 }
 
-/// The quoted C literal at `addr`, when it sits in read-only memory and fits on one note.
+/// The quoted C literal at `addr`, when it sits in read-only memory, ends
+/// at a NUL, and fits on one note.
+///
+/// [`cstr_text_at`] also stops on a byte a C literal cannot hold. That
+/// prefix is not the caller's text: `"label é %lu"` would become
+/// `"label "` and drop the `%lu`.
 ///
 /// # Arguments
 ///
@@ -599,7 +604,7 @@ fn readonly(program: &Program, addr: u64) -> bool {
 /// # Returns
 ///
 /// `"text"` with quotes and backslashes escaped, or `None` when no short
-/// read-only string is there.
+/// read-only string ends there.
 fn literal(program: &Program, addr: u64) -> Option<String> {
     const CAP: usize = 512;
     if !readonly(program, addr) {
@@ -607,6 +612,10 @@ fn literal(program: &Program, addr: u64) -> Option<String> {
     }
     let (len, text) = cstr_text_at(program, addr, 1, CAP)?;
     if len > CAP {
+        return None;
+    }
+    let end = addr.checked_add(u64::try_from(len).ok()?)?;
+    if program.read_va(end, 1)? != b"\0" {
         return None;
     }
     let mut out = String::from("\"");
@@ -667,5 +676,17 @@ mod tests {
             Some(Register::RDI)
         );
         assert!(parameters("// signature: struct stat f(char *a1)\n").is_none());
+    }
+
+    /// A caller format is the whole C string. A non-ASCII byte stops the scan
+    /// the same way a NUL does, and the bytes before it are not the format.
+    #[test]
+    fn a_caller_string_must_end_at_a_nul() {
+        let whole = Program::raw_x64(b"%s\0");
+        assert_eq!(literal(&whole, 0x1000).as_deref(), Some("\"%s\""));
+        let cut = Program::raw_x64(b"label \xc3 %lu\0");
+        assert_eq!(literal(&cut, 0x1000), None);
+        let open = Program::raw_x64(b"%s");
+        assert_eq!(literal(&open, 0x1000), None);
     }
 }
