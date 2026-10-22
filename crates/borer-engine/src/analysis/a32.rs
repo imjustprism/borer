@@ -367,10 +367,9 @@ struct Walked {
 /// Walks one function from its entry.
 ///
 /// A call falling through to a known start never returns: no function
-/// runs on into another's entry. A jump that always goes to an address
-/// below the entry is a tail call: a compiler lays a function's blocks
-/// out after its entry, and what it jumps back to is another function
-/// reached only that way (a `.cold` part among them).
+/// runs on into another's entry. A jump below the entry stays inside the
+/// function unless it reaches a known start: a cold block laid out before
+/// the entry is still the function's own code.
 ///
 /// # Arguments
 ///
@@ -441,10 +440,6 @@ fn walk(
             }
             Flow::Jump => {
                 match i.target() {
-                    Some(t) if t < entry && !falls => {
-                        w.callees.insert(t);
-                        w.exits = true;
-                    }
                     Some(t) => follow(t, &mut w, &mut pending),
                     None => match table(program, &w.seen, &i) {
                         Some(tab) => {

@@ -113,7 +113,8 @@ fn byte_names(lines: &[String]) -> BTreeSet<String> {
 ///
 /// The two spellings test the same, and a flag a source tests in a chain
 /// is spelled bare there; compared with zero, each operand reads as a
-/// comparison of its own.
+/// comparison of its own. A line with a string or character literal is
+/// left alone, since the text inside the quotes is data, not a test.
 ///
 /// # Arguments
 ///
@@ -124,7 +125,7 @@ fn byte_names(lines: &[String]) -> BTreeSet<String> {
 ///
 /// The line rewritten, or `None` when no such test is in it.
 fn quiet_flags(line: &str, flags: &BTreeSet<String>) -> Option<String> {
-    if !(line.contains(" && ") || line.contains(" || ")) {
+    if !(line.contains(" && ") || line.contains(" || ")) || line.contains(['"', '\'']) {
         return None;
     }
     let mut out = line.to_owned();
@@ -701,6 +702,12 @@ mod tests {
         assert_eq!(select_statements(&read), read);
         let global = text.replace("local_18 = var1;", "g32_1000 = 1;");
         assert_eq!(select_statements(&global), global);
+        let quoted = "uint8_t g8_1000;
+
+puts(\"a && g8_1000 == 0 || b\");
+return 0;
+";
+        assert_eq!(select_statements(quoted), quoted);
         let pointed = format!(
             "sub_9(&local_18);
 {text}"
