@@ -38,8 +38,10 @@ use super::functions::{decode_at, decode_block};
 use super::typelib;
 use super::{Analysis, BlockTerm, Function, RefKind, is_imm, striped_with, x87};
 use crate::program::{Program, SymbolKind};
+use exits::Scan;
 use uses::{FloatUse, float_use};
 
+mod exits;
 mod uses;
 
 /// Fewest functions worth a worker each when the call sites are classified.
@@ -135,10 +137,15 @@ enum ResultReg {
 /// path to a `ret`, or the callee a tail jump hands over to.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Handed {
-    /// Some path from the entry reaches a `ret` without writing rax.
+    /// Some path from the entry reaches a `ret` without writing rax, or
+    /// through an idiom that says it holds no result ([`exits::scan`]).
     nothing: bool,
     /// Some path's last write of rax is the function's own instruction.
     own: bool,
+    /// Some path's last write of rax is the function's own instruction and
+    /// nothing after it on the way to the `ret` reads the value back: no
+    /// compare, store or copy took it as scratch.
+    bare: bool,
     /// The direct callees whose result some path hands back, by a call
     /// before a `ret` or by a jump into them, sorted.
     calls: Vec<u64>,
@@ -156,6 +163,7 @@ impl Handed {
     const UNKNOWN: Handed = Handed {
         nothing: false,
         own: false,
+        bare: false,
         calls: Vec::new(),
         unknown: true,
         float_bits: Vec::new(),
@@ -342,7 +350,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
             } else if f.sites.iter().any(|site| matches!(site, Site::Unknown)) {
                 Some(true)
             } else {
-                (!(h.own && h.calls.is_empty() && !h.unknown)).then_some(false)
+                (!(h.bare && h.calls.is_empty() && !h.unknown)).then_some(false)
             }
         })
         .collect();
@@ -544,7 +552,9 @@ enum Writer {
 /// target, whose result is then the function's. The frame idiom `mov rax,
 /// rsp` as the first instruction, rax standing in for the entry stack
 /// pointer while the callee-saved registers are stored to their home slots,
-/// is no write of a result. A lone `ret` is a stub that says nothing.
+/// is no write of a result. A lone `ret` is a stub that says nothing. The
+/// idioms of a path that holds no result, and the reads that make an own
+/// write scratch, are [`exits::scan`]'s.
 /// A float exit whose writes name no precision (`movaps xmm0, xmm1`,
 /// `xorps xmm0, xmm0`) takes the copy's source precision in the block
 /// ([`copied_bits`]), else the one precision every scalar instruction of
@@ -578,10 +588,10 @@ fn handed_back(
     };
     let preds = predecessors(f, &idx);
     let mut out = Handed::default();
-    let mut stack = Vec::new();
+    let mut stack: Vec<(usize, bool)> = Vec::new();
     for (b, blk) in f.blocks.iter().enumerate() {
         match blk.term {
-            BlockTerm::Ret => stack.push(b),
+            BlockTerm::Ret => stack.push((b, false)),
             BlockTerm::Jmp | BlockTerm::Cond | BlockTerm::Fall => {
                 for s in blk.successors.iter().filter(|s| !idx.contains_key(s)) {
                     if analysis.function(*s).is_some() {
@@ -608,45 +618,30 @@ fn handed_back(
             && i.op0_register() == Register::RAX
             && i.op1_register() == Register::RSP
     };
-    let mut seen = vec![false; f.blocks.len()];
-    while let Some(b) = stack.pop() {
+    let mut seen = vec![[false; 2]; f.blocks.len()];
+    while let Some((b, read)) = stack.pop() {
         let Some(blk) = f.blocks.get(b) else {
             continue;
         };
-        if std::mem::replace(&mut seen[b], true) {
+        if std::mem::replace(&mut seen[b][usize::from(read)], true) {
             continue;
         }
         let instrs = decode_block(program, bitness, blk);
         let skip = usize::from(b == entry && instrs.first().is_some_and(frame_idiom));
-        let last = instrs.iter().skip(skip).rev().find_map(|i| {
-            if !is_call(i) {
-                return match reg {
-                    ResultReg::Rax => rax_write(factory, i).map(|_| Writer::Own(None)),
-                    ResultReg::Rdx => None,
-                    ResultReg::Xmm0 => writes_xmm0(factory, i)
-                        .then(|| Writer::Own(float_bits(i).or_else(|| copied_bits(&instrs, i)))),
-                };
-            }
-            let direct = matches!(
-                i.op0_kind(),
-                OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
-            );
-            match i.near_branch_target() {
-                t if direct && preserves(t) => None,
-                t if direct => Some(Writer::Call(t)),
-                _ => Some(Writer::Indirect),
-            }
-        });
-        match last {
-            Some(Writer::Call(callee)) => out.calls.push(callee),
-            Some(Writer::Indirect) => out.unknown = true,
-            Some(Writer::Own(bits)) => {
+        let rest = instrs.get(skip..).unwrap_or_default();
+        match exits::scan(factory, rest, &instrs, reg, &preserves) {
+            Scan::Wrote(Writer::Call(callee), _) => out.calls.push(callee),
+            Scan::Wrote(Writer::Indirect, _) => out.unknown = true,
+            Scan::Wrote(Writer::Own(bits), later) => {
                 out.own = true;
+                out.bare |= !(read || later);
                 out.float_bits.extend(bits);
             }
-            None => {
+            Scan::Idle => out.nothing = true,
+            Scan::Open(later) => {
                 out.nothing |= b == entry;
-                stack.extend(preds.get(b).into_iter().flatten().copied());
+                let read = read || later;
+                stack.extend(preds.get(b).into_iter().flatten().map(|&p| (p, read)));
             }
         }
     }

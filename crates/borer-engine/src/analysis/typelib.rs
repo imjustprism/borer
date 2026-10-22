@@ -297,6 +297,39 @@ pub fn declared(name: &str, format: BinaryFormat) -> Option<&'static Decl> {
         .or_else(|| super::sdk::declared(name, |os| os.serves(format)))
 }
 
+/// Tells whether the import a linkage stub reaches takes an argument.
+///
+/// An import the library does not declare is taken to take one.
+///
+/// # Arguments
+///
+/// * `program` - The image, for its symbols and its format.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// `None` when the function is no stub ([`super::Function::thunk`]).
+pub(crate) fn stub_takes_arguments(
+    program: &crate::program::Program,
+    f: &super::Function,
+) -> Option<bool> {
+    let slot = f.thunk?;
+    let import = program
+        .symbols
+        .iter()
+        .find(|s| s.kind == crate::program::SymbolKind::Import && s.addr == slot);
+    Some(
+        import
+            .and_then(|s| {
+                declared(
+                    super::bare_name(&crate::search::demangled_name(&s.name)),
+                    program.format,
+                )
+            })
+            .is_none_or(|d| !d.params.is_empty() || d.variadic),
+    )
+}
+
 /// Returns what each function of a 64-bit program is declared to hand
 /// back in `xmm0`.
 ///

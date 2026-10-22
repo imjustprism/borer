@@ -159,7 +159,11 @@ pub(super) fn drop_returned_values(body: &str) -> String {
 ///
 /// The join before a shared epilogue needed the register on every path
 /// while the function's own result was unknown, and the return then found
-/// nothing to hand back: `rax = f(); return;` reads `f(); return;`.
+/// nothing to hand back: `rax = f(); return;` reads `f(); return;`. The
+/// `return;` that ends the body is the end of the function and goes too
+/// when it is the body's only return, unless a label before it would be
+/// left closing the body; beside an early return it stays, the one exit
+/// the paths that run to the end share.
 ///
 /// # Arguments
 ///
@@ -170,7 +174,17 @@ pub(super) fn drop_returned_values(body: &str) -> String {
 ///
 /// The body with the dead assignments dropped, newline-terminated.
 pub(super) fn drop_dead_results(body: &str, reg: &str) -> String {
-    let lines: Vec<&str> = body.lines().collect();
+    let mut lines: Vec<&str> = body.lines().collect();
+    if let [ref earlier @ .., before, last] = lines[..]
+        && last == "return;"
+        && !before.trim_end().ends_with(':')
+        && !earlier
+            .iter()
+            .chain([&before])
+            .any(|l| l.trim_start().starts_with("return"))
+    {
+        lines.pop();
+    }
     let mut out = String::with_capacity(body.len());
     let prefix = format!("{reg} = ");
     for (i, line) in lines.iter().enumerate() {

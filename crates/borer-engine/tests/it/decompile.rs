@@ -951,7 +951,7 @@ fn the_frame_idiom_returns_nothing() {
     assert_eq!(f, Some(Some(false)));
     let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
     assert!(!text.contains("retaddr"), "{text}");
-    assert!(text.contains("return;"), "{text}");
+    assert!(text.contains("// signature: void "), "{text}");
 }
 
 /// A call site's scan follows a jump within the caller.
@@ -2413,9 +2413,11 @@ fn string_literal_in_lea() {
     );
 }
 
-/// `H`: `if (ecx == 0) goto ret; *a2 = ecx; ret:`. The `ret` block has two
-/// predecessors, so it is the join, not the if-body: an inverted `if` with the
-/// store, and exactly one `return` after it.
+/// `H`: `if (ecx == 0) goto ret; *a2 = ecx; ret:`.
+///
+/// The `ret` block has two predecessors, so it is the join, not the
+/// if-body: an inverted `if` with the store, and no `return` in it: the
+/// function ends after it, so the one shared exit needs no statement.
 #[test]
 fn if_body_with_shared_join_is_not_swallowed() {
     let out = dc(0x1150);
@@ -2429,8 +2431,8 @@ fn if_body_with_shared_join_is_not_swallowed() {
     );
     assert_eq!(
         out.matches("return").count(),
-        1,
-        "return must appear once, after the if:\n{out}"
+        0,
+        "the if must end the function, no return in it:\n{out}"
     );
 }
 
@@ -2873,7 +2875,6 @@ fn inferred_names_render_in_headers_and_calls() {
 fn stale_return_register_no_caller_reads_is_void() {
     let out = dc(0x1600);
     assert!(out.contains("// signature: void exported_vd2("), "{out}");
-    assert!(out.contains("return;"), "{out}");
     assert!(!out.contains("return rax"), "{out}");
 }
 

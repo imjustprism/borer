@@ -28,6 +28,8 @@ use super::{Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare
 use crate::isa::a32::{self, Cond, DpKind, Flow, Index, Insn, ItState, Offset, Op, Operand, PC};
 use crate::program::{Program, SymbolKind};
 
+mod returns;
+
 /// Most instructions one walk decodes.
 const WALK_MAX: usize = 1 << 18;
 /// Most jump-table entries read for one dispatch.
@@ -821,9 +823,11 @@ fn last_write(i: &Insn) -> Option<Last> {
     }
 }
 
-/// Says which ARM32 functions hand back a float.
+/// Says which ARM32 functions hand back a result, and which a float.
 ///
-/// One does whose returning blocks last write `s0` or `d0` rather than
+/// Whether `r0` holds a result is [`returns::infer`]'s answer. A float
+/// result then makes the function return a value whatever that said: one
+/// does whose returning blocks last write `s0` or `d0` rather than
 /// `r0`, or, when no returning block writes either and none jumps on to
 /// another function, that writes `s0` or `d0` outside a call and never
 /// `r0`; one that only jumps on hands back what the function it jumps to
@@ -835,6 +839,7 @@ fn last_write(i: &Insn) -> Option<Last> {
 /// * `program` - The image.
 /// * `analysis` - The functions, updated in place.
 pub(crate) fn infer_returns(program: &Program, analysis: &mut Analysis) {
+    returns::infer(program, analysis);
     let float_of = |ls: &[Last]| {
         ls.iter().find_map(|l| {
             if let Last::Float(w) = l {

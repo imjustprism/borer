@@ -70,4 +70,5 @@ mod textcheck;
 mod typelib;
 mod types;
 mod unit;
+mod void_results;
 mod x86;

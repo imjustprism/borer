@@ -32,7 +32,7 @@
 
 use crate::analysis::{Analysis, BlockTerm, Function, RefKind, striped};
 use crate::isa::a64::{self, Flow, Insn, Reg};
-use crate::program::{Program, SymbolKind};
+use crate::program::Program;
 
 /// Longest run of instructions scanned along one path after a call.
 const SCAN_MAX: usize = 16;
@@ -101,21 +101,8 @@ fn reads_first_argument(program: &Program, analysis: &Analysis, target: Option<u
     else {
         return false;
     };
-    if f.thunk.is_some() {
-        let import = f.thunk.and_then(|slot| {
-            program
-                .symbols
-                .iter()
-                .find(|s| s.kind == SymbolKind::Import && s.addr == slot)
-        });
-        return import
-            .and_then(|s| {
-                crate::analysis::typelib::declared(
-                    crate::analysis::bare_name(&crate::search::demangled_name(&s.name)),
-                    program.format,
-                )
-            })
-            .is_none_or(|d| !d.params.is_empty() || d.variadic);
+    if let Some(takes) = crate::analysis::typelib::stub_takes_arguments(program, f) {
+        return takes;
     }
     let mut at = f.entry;
     for _ in 0..LEADING_MAX {
