@@ -426,6 +426,34 @@ fn a_pop_past_another_function_stays_with_its_caller() {
     assert_eq!(pop.term, BlockTerm::Ret);
 }
 
+/// A conditional return that falls into a block, and a jump to that same
+/// block, keep the block in the caller.
+#[test]
+fn a_conditional_return_into_a_block_keeps_it() {
+    let text: [u32; 8] = [
+        0xe350_0000, // ASM: cmp r0, #0
+        0x0a00_0002, // ASM: beq 0x14
+        0xea00_0002, // ASM: b 0x18
+        0xe3a0_0002, // ASM: mov r0, #2
+        0xe12f_ff1e, // ASM: bx lr
+        0x012f_ff1e, // ASM: bxeq lr
+        0xe3a0_0003, // ASM: mov r0, #3
+        0xe12f_ff1e, // ASM: bx lr
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("ceq.elf"), elf32(&bytes, &[], ELF_TEXT))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 0xc]);
+    let caller = a
+        .functions
+        .iter()
+        .find(|f| f.entry == ELF_TEXT)
+        .expect("the caller");
+    assert!(caller.blocks.iter().any(|b| b.start == ELF_TEXT + 0x18));
+}
+
 /// One instruction's encoding in its instruction set.
 #[derive(Debug, Clone, Copy)]
 enum Enc {

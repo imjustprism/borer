@@ -998,6 +998,9 @@ fn outlines(walks: &mut Walks<'_>) {
 /// The one instruction that falls or jumps to each address in a walk, or
 /// `None` at an address more than one instruction reaches.
 ///
+/// A conditional return or indirect jump still falls through
+/// ([`guarded`]), the same edge the walk follows.
+///
 /// # Arguments
 ///
 /// * `w` - The walk.
@@ -1008,7 +1011,7 @@ fn predecessors(w: &Walked) -> BTreeMap<u64, Option<u64>> {
             return;
         }
         pred.entry(to)
-            .and_modify(|from| *from = None)
+            .and_modify(|seen| *seen = None)
             .or_insert(Some(from));
     };
     for i in w.seen.values() {
@@ -1024,7 +1027,11 @@ fn predecessors(w: &Walked) -> BTreeMap<u64, Option<u64>> {
                 if let Some(t) = i.target() {
                     note(i.va, t);
                 }
+                if guarded(i) {
+                    note(i.va, i.next());
+                }
             }
+            Flow::Return if guarded(i) => note(i.va, i.next()),
             Flow::Return | Flow::Invalid => {}
         }
     }
