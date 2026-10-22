@@ -999,7 +999,8 @@ fn outlines(walks: &mut Walks<'_>) {
 /// `None` at an address more than one instruction reaches.
 ///
 /// A conditional return or indirect jump still falls through
-/// ([`guarded`]), the same edge the walk follows.
+/// ([`guarded`]), and a resolved jump table still reaches its cases,
+/// the same edges the walk follows.
 ///
 /// # Arguments
 ///
@@ -1033,6 +1034,11 @@ fn predecessors(w: &Walked) -> BTreeMap<u64, Option<u64>> {
             }
             Flow::Return if guarded(i) => note(i.va, i.next()),
             Flow::Return | Flow::Invalid => {}
+        }
+    }
+    for t in &w.tables {
+        for &target in &t.targets {
+            note(t.site, target);
         }
     }
     pred

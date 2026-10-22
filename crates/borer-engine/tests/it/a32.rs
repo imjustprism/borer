@@ -454,6 +454,38 @@ fn a_conditional_return_into_a_block_keeps_it() {
     assert!(caller.blocks.iter().any(|b| b.start == ELF_TEXT + 0x18));
 }
 
+/// A switch case that a jump also targets stays in the switch's function.
+#[test]
+fn a_jump_table_case_stays_in_its_caller() {
+    let text: [u16; 14] = [
+        0x2800, // ASM: cmp r0, #0
+        0xd003, // ASM: beq 0xc
+        0xe008, // ASM: b 0x18
+        0x2002, // ASM: movs r0, #2
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+        0x2800, // ASM: cmp r0, #0
+        0xd802, // ASM: bhi 0x16
+        0xe8df, 0xf000, // ASM: tbb [pc, r0]
+        0x0002, // ASM: .byte 2, 0
+        0x4770, // ASM: bx lr
+        0x2003, // ASM: movs r0, #3
+        0x4770, // ASM: bx lr
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("tbb.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 6]);
+    let caller = a
+        .functions
+        .iter()
+        .find(|f| f.entry == ELF_TEXT)
+        .expect("the caller");
+    assert!(caller.blocks.iter().any(|b| b.start == ELF_TEXT + 0x18));
+}
+
 /// One instruction's encoding in its instruction set.
 #[derive(Debug, Clone, Copy)]
 enum Enc {
