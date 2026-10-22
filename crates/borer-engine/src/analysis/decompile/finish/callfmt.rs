@@ -103,14 +103,14 @@ fn format_lines(text: &str, program: &Program, analysis: &Analysis, entry: u64) 
         if param.class != Some(Class::Int) {
             continue;
         }
-        let Some(lits) = argument_literals(program, analysis, entry, &classes, index) else {
+        let Some(list) = argument_literals(program, analysis, entry, &classes, index) else {
             continue;
         };
-        if lits.is_empty() {
+        if list.is_empty() {
             continue;
         }
         let mut line = format!("// formats {}:", param.name);
-        for lit in &lits {
+        for lit in &list {
             line.push(' ');
             line.push_str(lit);
         }
@@ -325,14 +325,14 @@ fn argument_literals(
         classes,
         index,
     )?;
-    let mut lits = Vec::new();
+    let mut list = Vec::new();
     for site in direct_calls(analysis, entry)? {
         match passed_at(program, analysis, site, reg)? {
-            Passed::Lit(text) => lits.push(text),
+            Passed::Lit(text) => list.push(text),
             Passed::Null => {}
         }
     }
-    Some(lits)
+    Some(list)
 }
 
 /// Tells whether `entry` is a symbol another module can call.
