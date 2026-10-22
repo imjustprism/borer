@@ -22,7 +22,9 @@ use crate::program::BinaryFormat;
 /// (`int total_stored`) when the type is a signed one, whose casts are
 /// all it drops. One the declared calls it is passed to agree is a pointer
 /// to a named type is that ([`api_pointer`]): `strlen(a1)` makes a word
-/// or a byte pointer a `char *`. One the body loads or stores through is
+/// or a byte pointer a `char *`. An operand whose format, or the
+/// `gettext` call that format was assigned from, reads as a string is
+/// one too. One the body loads or stores through is
 /// a pointer ([`pointed_at`]), and a `void *` the body reads only bytes
 /// through is a byte pointer. On a 32-bit target the word after a `double` is the
 /// double's high half, not a parameter ([`drop_high_halves`]).
@@ -800,11 +802,250 @@ fn bit_operand(l: &Line<'_>, k: usize) -> bool {
         || matches!(after.trim_end_matches('='), "&" | "*")
 }
 
+/// A printf format recovered from the call, or from the `gettext` the
+/// format variable was assigned.
+enum Resolved {
+    /// A string literal, quotes included, as [`conversion_slot`] reads it.
+    Literal(String),
+    /// `gettext` of a value. The message text is not in the function.
+    Message,
+}
+
+/// The source of argument `index` of the call whose `(` is token `open`.
+///
+/// # Arguments
+///
+/// * `l` - The line.
+/// * `open` - The call's `(` token.
+/// * `index` - The argument, from zero.
+///
+/// # Returns
+///
+/// The argument text, or `None` when the call has no such argument.
+fn argument_text<'a>(l: &Line<'a>, open: usize, index: usize) -> Option<&'a str> {
+    let (mut depth, mut commas) = (0usize, 0usize);
+    let mut start = None;
+    for k in open + 1..l.toks.len() {
+        if l.is(k, "(") || l.is(k, "[") {
+            depth += 1;
+        } else if l.is(k, ")") || l.is(k, "]") {
+            if depth == 0 {
+                return (commas == index).then(|| {
+                    let end = l.toks.get(k).map_or(l.text.len(), |t| t.at);
+                    l.text.get(start.unwrap_or(end)..end).unwrap_or("").trim()
+                });
+            }
+            depth -= 1;
+        } else if depth == 0 && l.is(k, ",") {
+            if commas == index {
+                let end = l.toks.get(k).map_or(l.text.len(), |t| t.at);
+                return Some(l.text.get(start.unwrap_or(end)..end).unwrap_or("").trim());
+            }
+            commas += 1;
+            start = None;
+            continue;
+        }
+        if depth == 0 && commas == index && start.is_none() {
+            start = Some(l.toks.get(k)?.at);
+        }
+    }
+    None
+}
+
+/// How many arguments the call whose `(` is token `open` passes.
+///
+/// # Arguments
+///
+/// * `l` - The line.
+/// * `open` - The call's `(` token.
+///
+/// # Returns
+///
+/// The count, or `None` when the call does not close.
+fn arg_count(l: &Line<'_>, open: usize) -> Option<usize> {
+    let (mut depth, mut commas, mut any) = (0usize, 0usize, false);
+    for k in open + 1..l.toks.len() {
+        if l.is(k, "(") || l.is(k, "[") {
+            depth += 1;
+        } else if l.is(k, ")") || l.is(k, "]") {
+            if depth == 0 {
+                return Some(usize::from(any) * commas.saturating_add(1));
+            }
+            depth -= 1;
+        } else if depth == 0 && l.is(k, ",") {
+            commas += 1;
+            any = true;
+        } else if depth == 0 {
+            any = true;
+        }
+    }
+    None
+}
+
+/// The message a `gettext`, `dgettext`, `dcgettext` or `_` call formats.
+///
+/// # Arguments
+///
+/// * `expr` - The call, as the text spells it.
+///
+/// # Returns
+///
+/// The literal message, [`Resolved::Message`] when the message is a value,
+/// or `None` when `expr` is not one of those calls.
+fn message_format(expr: &str) -> Option<Resolved> {
+    let l = Line {
+        text: expr,
+        toks: lex(expr),
+    };
+    if l.toks.len() < 3 || !l.is(1, "(") || l.toks.first()?.lex != Lex::Name {
+        return None;
+    }
+    let name = l.word(0);
+    let index = match name {
+        "gettext" | "_" => 0,
+        "dgettext" | "dcgettext" => 1,
+        _ => return None,
+    };
+    let msgid = argument_text(&l, 1, index)?;
+    msgid
+        .starts_with('"')
+        .then(|| Resolved::Literal(msgid.to_owned()))
+        .or(Some(Resolved::Message))
+}
+
+/// The one right-hand side assigned to `name`, when the text assigns it once.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `name` - The variable.
+///
+/// # Returns
+///
+/// The right-hand side, or `None` when `name` is assigned more than once
+/// or not at all.
+fn sole_rhs<'a>(lines: &'a [String], name: &str) -> Option<&'a str> {
+    let mut found = None;
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        let code = line.split("//").next().unwrap_or("").trim();
+        let Some(stmt) = code.strip_suffix(';') else {
+            continue;
+        };
+        let Some((lhs, rhs)) = stmt.split_once(" = ") else {
+            continue;
+        };
+        if lhs.trim() != name {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(rhs.trim());
+    }
+    found
+}
+
+/// The format string `expr` prints, following one assignment of a name.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `expr` - A format argument: a literal, a `gettext` call, or a name.
+/// * `depth` - Assignments already followed. Stops at 4.
+///
+/// # Returns
+///
+/// The format, or `None` when `expr` is not one of those.
+fn resolved_format(lines: &[String], expr: &str, depth: u8) -> Option<Resolved> {
+    if depth == 4 {
+        return None;
+    }
+    let expr = expr.trim();
+    if expr.starts_with('"') && expr.ends_with('"') {
+        return Some(Resolved::Literal(expr.to_owned()));
+    }
+    if let Some(got) = message_format(expr) {
+        return Some(got);
+    }
+    if !is_ident(expr) {
+        return None;
+    }
+    resolved_format(lines, sole_rhs(lines, expr)?, depth + 1)
+}
+
+/// What a variadic format argument is, when the format is not itself a
+/// literal on the call.
+///
+/// The format may be a `gettext` of a literal, or a variable assigned
+/// once from one: the conversion then says the operand's type, as
+/// [`slot_at`] does for a literal written on the call. A translated
+/// message whose text is not in the function types its one operand as
+/// `char *` and says nothing when the call passes more than one.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `line` - The line.
+/// * `at` - The byte the operand starts at.
+///
+/// # Returns
+///
+/// The slot, or `None` when the call shows none.
+fn format_slot(lines: &[String], line: &str, at: usize) -> Option<Slot> {
+    let l = Line {
+        text: line,
+        toks: lex(line),
+    };
+    let k = l.toks.iter().position(|t| t.at == at)?;
+    let (callee, index, open) = argument_of(&l, k)?;
+    if callee.contains("scanf") {
+        return None;
+    }
+    let posix = typelib::declared(callee, BinaryFormat::Elf);
+    let windows = typelib::declared(callee, BinaryFormat::Pe);
+    let decl = posix.or(windows)?;
+    if posix
+        .zip(windows)
+        .is_some_and(|(p, w)| p.variadic != w.variadic || p.params.len() != w.params.len())
+    {
+        return None;
+    }
+    let format = decl.params.len().checked_sub(1)?;
+    if !decl.variadic || decl.params.get(format)?.name != "format" || index < decl.params.len() {
+        return None;
+    }
+    let expr = argument_text(&l, open, format)?;
+    let variadic = index - decl.params.len();
+    let lone = variadic == 0 && arg_count(&l, open)? == decl.params.len() + 1;
+    match resolved_format(lines, expr, 0)? {
+        Resolved::Literal(lit) => conversion_slot(&lit, variadic),
+        Resolved::Message if lone => Some(Slot::Pointer("char *".to_owned())),
+        Resolved::Message => None,
+    }
+}
+
+/// [`slot_at`], and the format a `gettext` hides from it.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `line` - The line.
+/// * `at` - The byte the name starts at.
+///
+/// # Returns
+///
+/// The slot, or `None` when the name is not a whole argument of a
+/// declared call.
+fn known_slot(lines: &[String], line: &str, at: usize) -> Option<Slot> {
+    slot_at(line, at).or_else(|| format_slot(lines, line, at))
+}
+
 /// The pointer type the declared calls a parameter is passed to whole
 /// agree it is, when nothing else in the body says otherwise.
 ///
 /// Every call that passes the parameter whole as a pointer must name the
-/// same type ([`slot_at`]), none as an integer, and the parameter is never
+/// same type ([`slot_at`], or [`format_slot`] when a `gettext` holds the
+/// format), none as an integer, and the parameter is never
 /// assigned or cast to a narrow integer. A `char *` takes any other use,
 /// since its arithmetic counts bytes as the text's does; any other type
 /// takes it only when every use hands the value on whole ([`whole_read`]),
@@ -833,7 +1074,7 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
             if cast_before(line.get(..at).unwrap_or("")).is_some() {
                 return None;
             }
-            match slot_at(line, at) {
+            match known_slot(lines, line, at) {
                 Some(Slot::Narrow(_)) => return None,
                 Some(Slot::Pointer(t)) => {
                     if found.as_ref().is_some_and(|f| *f != t) {
@@ -858,7 +1099,7 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
     for copy in copies(lines, param) {
         for line in lines.iter().filter(|l| !l.starts_with("//")) {
             for at in word_positions(line, &copy) {
-                match slot_at(line, at) {
+                match known_slot(lines, line, at) {
                     Some(Slot::Narrow(_)) => return None,
                     Some(Slot::Pointer(t)) if found.as_ref().is_some_and(|f| *f != t) => {
                         return None;
@@ -932,6 +1173,45 @@ if ((a1 & 7) == 0) {
             slot_at(positional, positional.find("a1").unwrap_or(0)),
             None
         );
+    }
+
+    /// A format hidden in `gettext` types its operands from the literal,
+    /// and one operand of a translated value is a string.
+    #[test]
+    fn a_translated_format_types_its_operand() {
+        let text = lines(
+            "format = dcgettext(NULL, a1, 5);
+error(0, 0, format, a2);",
+        );
+        assert_eq!(api_pointer(&text, "a2"), Some("char *".to_owned()));
+        let text = lines(
+            "format = dcgettext(NULL, \"%s: pass %lu/%lu (%s)...\", 5);
+error(0, 0, format, a3, a7, a8, name);",
+        );
+        assert_eq!(api_pointer(&text, "a3"), Some("char *".to_owned()));
+        assert_eq!(api_pointer(&text, "a7"), None);
+        assert_eq!(api_pointer(&text, "a8"), None);
+        let text = lines(
+            "format = gettext(\"%d\");
+error(0, 0, format, a1);",
+        );
+        assert_eq!(api_pointer(&text, "a1"), None);
+        let text = lines(
+            "format = gettext(a1);
+error(0, 0, format, a2, a3);",
+        );
+        assert_eq!(api_pointer(&text, "a2"), None);
+        let text = lines(
+            "format = dcgettext(NULL, a1, 5);
+error(0, 0, format, a2);
+a2 = 0;",
+        );
+        assert_eq!(api_pointer(&text, "a2"), None);
+        let typed = super::type_parameters(
+            "// signature: void f(char *a1, uint64_t a2)\nformat = gettext(a1);\nerror(0, 0, format, a2);\n",
+            "uint64_t",
+        );
+        assert!(typed.contains("f(char *a1, char *a2)"), "{typed}");
     }
 
     /// A parameter only passed to `exit` and stored to a 32-bit global is
