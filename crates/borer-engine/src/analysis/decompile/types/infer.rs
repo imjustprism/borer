@@ -923,6 +923,8 @@ fn call_is_whole(l: &Line<'_>) -> bool {
 ///
 /// An assignment after the call does not reach it. A global (`// @`)
 /// can change between the assignment and the call, so it is not followed.
+/// A compound assignment or an increment before the use (`format += 3`)
+/// moves the text, so that name is not followed either.
 ///
 /// # Arguments
 ///
@@ -932,10 +934,10 @@ fn call_is_whole(l: &Line<'_>) -> bool {
 ///
 /// # Returns
 ///
-/// The right-hand side, or `None` when `name` is a global, is assigned
+/// The right-hand side, or `None` when `name` is a global, is written
 /// more than once before the use, or is not assigned before it.
 fn sole_rhs<'a>(lines: &'a [String], name: &str, before: usize) -> Option<&'a str> {
-    if global_name(lines, name) {
+    if global_name(lines, name) || assigned_values(&lines[..before], name) != 1 {
         return None;
     }
     let mut found = None;
@@ -1436,6 +1438,18 @@ g64_1000 = gettext(\"%s\");",
         let text = lines(
             "printf(format, a1);
 format = gettext(\"%s\");",
+        );
+        assert_eq!(api_pointer(&text, "a1"), None);
+        let text = lines(
+            "format = gettext(\"%s %lu\");
+format += 3;
+printf(format, a1);",
+        );
+        assert_eq!(api_pointer(&text, "a1"), None);
+        let text = lines(
+            "format = gettext(\"%s\");
+format++;
+printf(format, a1);",
         );
         assert_eq!(api_pointer(&text, "a1"), None);
         let typed = super::type_parameters(

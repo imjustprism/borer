@@ -538,13 +538,15 @@ fn same_reg(instr: &Instruction) -> bool {
 ///
 /// # Returns
 ///
-/// The definition, or [`Def::Unknown`] when the source is not a register,
-/// zero, or a string address.
+/// The definition, or [`Def::Unknown`] when the source is not a full
+/// register, zero, or a string address. A 32-bit copy does not keep the
+/// address: `mov edi, eax` passes the low half, zero-extended, not the
+/// value `rax` held.
 fn mov_def(program: &Program, instr: &Instruction) -> Def {
     match instr.op1_kind() {
         OpKind::Register => {
             let src = instr.op1_register();
-            if src.size() >= 4 && src.is_gpr() {
+            if src.size() >= 8 && src.is_gpr() {
                 Def::Follow(src.full_register())
             } else {
                 Def::Unknown
@@ -641,6 +643,7 @@ fn literal(program: &Program, addr: u64) -> Option<String> {
 )]
 mod tests {
     use super::*;
+    use crate::isa::x86::{Decoder, DecoderOptions};
 
     /// A float uses an xmm register. On System V the next integer stays in
     /// `rdi`; on Windows it takes the next slot. An unknown type is not counted.
@@ -688,5 +691,21 @@ mod tests {
         assert_eq!(literal(&cut, 0x1000), None);
         let open = Program::raw_x64(b"%s");
         assert_eq!(literal(&open, 0x1000), None);
+    }
+
+    /// A 32-bit copy is not the address the full register held. `mov edi, eax`
+    /// passes the low half, so the scan does not follow it back to `rax`.
+    #[test]
+    fn a_narrow_copy_is_not_the_full_address() {
+        let program = Program::raw_x64(&[]);
+        let mut narrow = Decoder::new(64, b"\x89\xc7", DecoderOptions::NONE);
+        let instr = narrow.decode();
+        assert!(matches!(mov_def(&program, &instr), Def::Unknown));
+        let mut wide = Decoder::new(64, b"\x48\x89\xc7", DecoderOptions::NONE);
+        let instr = wide.decode();
+        assert!(matches!(
+            mov_def(&program, &instr),
+            Def::Follow(Register::RAX)
+        ));
     }
 }
