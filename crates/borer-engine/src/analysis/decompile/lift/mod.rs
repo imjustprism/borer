@@ -1127,8 +1127,17 @@ fn call_through(target: &Expr, n: &Names<'_>) -> String {
 fn last_cmp_register(list: &[Instruction]) -> Option<Register> {
     list.iter()
         .rev()
-        .find(|i| i.mnemonic() == Mnemonic::Cmp && i.op0_kind() == OpKind::Register)
-        .map(|i| i.op0_register())
+        .find(|i| is_register_cmp(i))
+        .map(Instruction::op0_register)
+}
+
+/// Tells whether an instruction is a `cmp` of a register.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn is_register_cmp(i: &Instruction) -> bool {
+    i.mnemonic() == Mnemonic::Cmp && i.op0_kind() == OpKind::Register
 }
 
 /// Tells whether two stack accesses overlap.

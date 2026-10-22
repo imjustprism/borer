@@ -165,6 +165,10 @@ impl Exec<'_, '_> {
     /// expression a too-wide target was written out as), else the register
     /// compared by the nearest preceding `cmp` in this block or the previous
     /// one, else the target itself so the dispatch stays explicit.
+    /// A compared register the block rewrote before the jump holds the
+    /// byte its byte table gave (`cmp eax, 0x52; ja D; cdqe; movzx eax,
+    /// byte [r9+rax+B]`), and the index is read off that byte's address
+    /// ([`Exec::byte_table_index`]), as the case labels number it.
     ///
     /// # Arguments
     ///
@@ -192,10 +196,39 @@ impl Exec<'_, '_> {
         {
             return Some(self.byte_table_index(idx, jmp, instrs));
         }
-        if let Some(reg) = last_cmp_register(instrs).or_else(|| last_cmp_register(prev?)) {
-            return Some(self.reg_read(reg));
+        let compared = match instrs.iter().rposition(is_register_cmp) {
+            Some(at) => instrs
+                .get(at)
+                .map(|i| (i.op0_register(), instrs.get(at + 1..).unwrap_or(&[]))),
+            None => prev.and_then(last_cmp_register).map(|r| (r, instrs)),
+        };
+        if let Some((reg, after)) = compared {
+            let value = self.reg_read(reg);
+            let key = Key::Reg(canon(reg, self.bitness()));
+            if after.iter().any(|i| self.rewrites(i, key)) {
+                return Some(self.byte_table_index(value, jmp, instrs));
+            }
+            return Some(value);
         }
         target
+    }
+
+    /// Tells whether an instruction writes canonical register `key` in any
+    /// lane.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The instruction.
+    /// * `key` - The register.
+    fn rewrites(&mut self, instr: &Instruction, key: Key) -> bool {
+        let bitness = self.bitness();
+        self.info.info(instr).used_registers().iter().any(|ur| {
+            Key::Reg(canon(ur.register(), bitness)) == key
+                && matches!(
+                    ur.access(),
+                    OpAccess::Write | OpAccess::ReadWrite | OpAccess::ReadCondWrite
+                )
+        })
     }
 
     /// The index a byte table is read at, for a jump table reached through
@@ -246,18 +279,28 @@ impl Exec<'_, '_> {
                 },
             }
         });
-        match (base, addr.as_ref()) {
-            (Some(base), _) => fold(
+        let parts = match addr.as_ref() {
+            Expr::Bin(Op::Add, l, r) => match (l.as_ref(), r.as_ref()) {
+                (Expr::Const(c), other) | (other, Expr::Const(c)) => Some((*c, other)),
+                _ => None,
+            },
+            _ => None,
+        };
+        match (base, parts) {
+            (Some(base), Some((c, other))) => fold(
+                Op::Add,
+                other.clone(),
+                Expr::Const(c.wrapping_sub(base)),
+                64,
+            ),
+            (Some(base), None) => fold(
                 Op::Add,
                 (**addr).clone(),
                 Expr::Const(base.wrapping_neg()),
                 64,
             ),
-            (None, Expr::Bin(Op::Add, l, r)) => match (l.as_ref(), r.as_ref()) {
-                (Expr::Const(_), other) | (other, Expr::Const(_)) => other.clone(),
-                _ => idx,
-            },
-            (None, _) => idx,
+            (None, Some((_, other))) => other.clone(),
+            (None, None) => idx,
         }
     }
 

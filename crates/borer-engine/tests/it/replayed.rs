@@ -8,6 +8,7 @@
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::program::{Arch, BinaryFormat, Program, Section};
 
 use crate::decompiled::{program64, replays_clean, runs_agree};
 
@@ -145,4 +146,54 @@ fn a_narrowed_double_product_is_the_double_one() {
         0, 0, 0, 0x20, 0, 0, 0xf0, 0x3f, 0, 0, 0, 0xc0, 0xff, 0xff, 0xef, 0x3f,
     ]);
     replayed(&code);
+}
+
+/// A switch through a byte table whose compared register the dispatch
+/// block rewrites with the byte (`cmp eax, 3; ja D; cdqe; movzx eax, byte
+/// [r9+rax+B]`) switches on the index the cases number, not the byte: the
+/// slot the byte picks is the case's, as the machine jumps.
+#[test]
+fn a_byte_table_switch_reads_the_index_the_compare_bounds() {
+    let code = [
+        0x44, 0x0f, 0xbe, 0x5c, 0x11, 0x01, // ASM: movsx r11d,byte [rcx+rdx+1]
+        0x48, 0xff, 0xc2, // ASM: inc rdx
+        0x41, 0x8d, 0x43, 0xdb, // ASM: lea eax,[r11-0x25]
+        0x83, 0xf8, 0x03, // ASM: cmp eax,3
+        0x77, 0x2b, // ASM: ja default
+        0x48, 0x98, // ASM: cdqe
+        0x4c, 0x8d, 0x0d, 0xe5, 0xef, 0xff, 0xff, // ASM: lea r9,[rip-0x101b] (the image base)
+        0x41, 0x0f, 0xb6, 0x84, 0x01, 0x40, 0x10, 0x00,
+        0x00, // ASM: movzx eax,byte [r9+rax+0x1040]
+        0x41, 0x8b, 0x8c, 0x81, 0x44, 0x10, 0x00, 0x00, // ASM: mov ecx,[r9+rax*4+0x1044]
+        0x4c, 0x01, 0xc9, // ASM: add rcx,r9
+        0xff, 0xe1, // ASM: jmp rcx
+        0xb8, 0x0a, 0x00, 0x00, 0x00, // ASM: one: mov eax,10
+        0xc3, // ASM: ret
+        0xb8, 0x14, 0x00, 0x00, 0x00, // ASM: zero: mov eax,20
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: default: xor eax,eax
+        0xc3, // ASM: ret
+        0x01, 0x00, 0x02, 0x00, // ASM: the byte table, a slot per index
+        0x31, 0x10, 0x00, 0x00, 0x37, 0x10, 0x00, 0x00, 0x3d, 0x10, 0x00,
+        0x00, // ASM: the slots
+    ];
+    let mut bytes = vec![0u8; 0x2000];
+    bytes[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x1_4000_0000,
+        Some(0x1_4000_1000),
+        vec![Section::mapped(
+            ".text",
+            0x1_4000_0000,
+            0,
+            0x2000,
+            false,
+            true,
+        )],
+    );
+    p.format = BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    replays_clean(&p, &a, &[0x1_4000_1000]);
 }
