@@ -380,8 +380,9 @@ fn ternary(rhs: &str) -> Option<(&str, &str, &str)> {
 /// truth value compiles to a `setcc`, not to branches, so arms storing `1`
 /// and `0` behind one comparison are an `if` the source wrote. Statements
 /// both arms open with go in front of the `if` when they assign, without a
-/// call, a variable the test does not read: the test calls nothing and
-/// reads none of them, so running them first changes nothing it sees.
+/// call, a private variable ([`private`]) the test does not read: the test
+/// calls nothing and reads none of them, and no pointer it reads through
+/// reaches them, so running them first changes nothing it sees.
 ///
 /// # Arguments
 ///
@@ -421,7 +422,9 @@ fn truth_diamond(lines: &mut Vec<String>, k: usize) -> bool {
     let heads_hoist = t_head == o_head
         && t_head.iter().all(|l| {
             indent_of(l) == pad + 2
-                && plain_assignment(l).is_some_and(|(v, r)| !impure(r) && !mentions_ident(&cond, v))
+                && plain_assignment(l).is_some_and(|(v, r)| {
+                    private(lines, v) && !impure(r) && !mentions_ident(&cond, v)
+                })
         });
     let (Some((v, a)), Some((w, b))) = (plain_assignment(t_last), plain_assignment(o_last)) else {
         return false;
@@ -450,7 +453,8 @@ fn truth_diamond(lines: &mut Vec<String>, k: usize) -> bool {
 /// A compiler lays out `a && b` and an `if` nested in an `if` alike, and a
 /// value only the second test reads is loaded between the two tests either
 /// way; read back, the load is a statement that splits the chain. Each
-/// such statement assigns, without a call, a variable no other line reads
+/// such statement assigns, without a call, a private variable
+/// ([`private`]) no other line reads
 /// or writes and that no other such statement's value reads, so writing
 /// its value into the test in its place computes the same. With no such
 /// statement the nesting is the structurer's own choice, and kept; so is
@@ -504,7 +508,7 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
         .iter()
         .filter_map(|l| {
             plain_assignment(l)
-                .filter(|(_, r)| indent_of(l) == pad + 2 && !impure(r))
+                .filter(|(v, r)| indent_of(l) == pad + 2 && private(lines, v) && !impure(r))
                 .map(|(v, r)| (v.to_owned(), r.to_owned()))
         })
         .collect();
@@ -668,5 +672,42 @@ mod tests {
         assert_eq!(select_statements(lone), lone);
         let read = text.replace("local_18 = var1;", "a1 = var1;");
         assert_eq!(select_statements(&read), read);
+        let global = text.replace("local_18 = var1;", "g32_1000 = 1;");
+        assert_eq!(select_statements(&global), global);
+        let pointed = format!("sub_9(&local_18);
+{text}");
+        assert_eq!(select_statements(&pointed), pointed);
     }
+
+    /// A store to a global between two tests stays a store: another
+    /// function may read it, so it is no temporary to fold into the test.
+    #[test]
+    fn a_global_store_between_tests_stays() {
+        let text = "if (a1 != 0) {
+  g32_1000 = *(uint32_t*)a2;
+  if (g32_1000 == 61) {
+    sub_2();
+  }
+}
+return 0;
+";
+        assert_eq!(select_statements(text), text);
+    }
+}
+
+/// Tells whether a name is a value only this function's text holds: a
+/// numbered variable, a register, or a stack slot whose address no line
+/// takes. A global, a parameter or a slot something points at is storage
+/// another reader may see, so a rewrite that moves or drops a store to it
+/// can change what that reader sees.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `name` - The assigned name.
+fn private(lines: &[String], name: &str) -> bool {
+    let slot = name.starts_with("local_") || name.starts_with("home_");
+    vars::is_var_name(name)
+        || is_register_name(name)
+        || (slot && !lines.iter().any(|l| l.contains(&format!("&{name}"))))
 }
