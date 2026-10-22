@@ -16,7 +16,8 @@ Where the data comes from. Every row is authored here from the public API
 documentation: the Win32 reference on learn.microsoft.com (the parameter
 names and types each function page lists, and the documented values of the
 constants those pages name), the C standard library, and the POSIX
-specification and Linux man-pages for the POSIX rows, with the values glibc
+specification and Linux man-pages for the POSIX rows (the Linux Standard
+Base for glibc's `__*_chk` entry points), with the values glibc
 uses on Linux x86 and x86-64 (where the kernel and glibc agree; `O_*`,
 `MAP_*` and the signal numbers differ on other architectures). No header
 text is copied: each declaration is restated as a list of parameter types
@@ -2896,6 +2897,106 @@ POSIX: list[tuple[str, str, str | None, list[Param]]] = [
     ("pthread_join", "int", None, [("pthread_t", "thread", None), ("void **", "retval", None)]),
     ("pthread_mutex_lock", "int", None, [("pthread_mutex_t *", "mutex", None)]),
     ("pthread_mutex_unlock", "int", None, [("pthread_mutex_t *", "mutex", None)]),
+    ("getpwnam", "struct passwd *", None, [("const char *", "name", None)]),
+    ("getpwuid", "struct passwd *", None, [("uid_t", "uid", None)]),
+    ("getgrnam", "struct group *", None, [("const char *", "name", None)]),
+    ("getgrgid", "struct group *", None, [("gid_t", "gid", None)]),
+    ("gai_strerror", "const char *", None, [("int", "errcode", None)]),
+    ("strsignal", "char *", None, [("int", "sig", None)]),
+    ("stpcpy", "char *", None, [("char *", "dest", None), ("const char *", "src", None)]),
+    (
+        "stpncpy",
+        "char *",
+        None,
+        [("char *", "dest", None), ("const char *", "src", None), ("size_t", "n", None)],
+    ),
+    ("alarm", "unsigned int", None, [("unsigned int", "seconds", None)]),
+    (
+        "openlog",
+        "void",
+        None,
+        [("const char *", "ident", None), ("int", "option", None), ("int", "facility", None)],
+    ),
+    ("closelog", "void", None, []),
+    (
+        "syslog",
+        "void",
+        None,
+        [("int", "priority", None), ("const char *", "format", None), ("...", "", None)],
+    ),
+    ("gettext", "char *", None, [("const char *", "msgid", None)]),
+    (
+        "dcgettext",
+        "char *",
+        None,
+        [("const char *", "domainname", None), ("const char *", "msgid", None), ("int", "category", None)],
+    ),
+    ("__errno_location", "int *", None, []),
+    (
+        "error",
+        "void",
+        None,
+        [
+            ("int", "status", None),
+            ("int", "errnum", None),
+            ("const char *", "format", None),
+            ("...", "", None),
+        ],
+    ),
+    (
+        "__printf_chk",
+        "int",
+        None,
+        [("int", "flag", None), ("const char *", "format", None), ("...", "", None)],
+    ),
+    (
+        "__fprintf_chk",
+        "int",
+        None,
+        [
+            ("FILE *", "stream", None),
+            ("int", "flag", None),
+            ("const char *", "format", None),
+            ("...", "", None),
+        ],
+    ),
+    (
+        "__sprintf_chk",
+        "int",
+        None,
+        [
+            ("char *", "s", None),
+            ("int", "flag", None),
+            ("size_t", "slen", None),
+            ("const char *", "format", None),
+            ("...", "", None),
+        ],
+    ),
+    (
+        "__snprintf_chk",
+        "int",
+        None,
+        [
+            ("char *", "s", None),
+            ("size_t", "maxlen", None),
+            ("int", "flag", None),
+            ("size_t", "slen", None),
+            ("const char *", "format", None),
+            ("...", "", None),
+        ],
+    ),
+    (
+        "__syslog_chk",
+        "void",
+        None,
+        [
+            ("int", "priority", None),
+            ("int", "flag", None),
+            ("const char *", "format", None),
+            ("...", "", None),
+        ],
+    ),
+    ("fputs_unlocked", "int", None, [("const char *", "s", None), ("FILE *", "stream", None)]),
 ]
 
 # Pointer typedefs the declarations above use that `CTYPES` spells as plain

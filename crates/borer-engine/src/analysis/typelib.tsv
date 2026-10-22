@@ -189,25 +189,35 @@ WriteConsoleW	win	BOOL	-	HANDLE hConsoleOutput|LPCVOID lpBuffer|DWORD nNumberOfC
 WriteFile	win	BOOL	-	HANDLE hFile|LPCVOID lpBuffer|DWORD nNumberOfBytesToWrite|LPDWORD lpNumberOfBytesWritten|LPOVERLAPPED lpOverlapped	-
 WriteFileEx	win	BOOL	-	HANDLE hFile|LPCVOID lpBuffer|DWORD nNumberOfBytesToWrite|LPOVERLAPPED lpOverlapped|LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine	-
 WriteProcessMemory	win	BOOL	-	HANDLE hProcess|LPVOID lpBaseAddress|LPCVOID lpBuffer|SIZE_T nSize|SIZE_T *lpNumberOfBytesWritten	-
+__errno_location	posix	int *	-	-	-
+__fprintf_chk	posix	int	-	FILE *stream|int flag|const char *format|...	-
+__printf_chk	posix	int	-	int flag|const char *format|...	-
+__snprintf_chk	posix	int	-	char *s|size_t maxlen|int flag|size_t slen|const char *format|...	-
+__sprintf_chk	posix	int	-	char *s|int flag|size_t slen|const char *format|...	-
+__syslog_chk	posix	void	-	int priority|int flag|const char *format|...	-
 _exit	posix	void	-	int status	-
 abort	c	void	-	-	-
 accept	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
 access	posix	int	-	const char *pathname|int mode	-|access_mode
+alarm	posix	unsigned int	-	unsigned int seconds	-
 atoi	c	int	-	const char *nptr	-
 bind	posix	int	-	int sockfd|const struct sockaddr *addr|socklen_t addrlen	-
 calloc	c	void *	-	size_t nmemb|size_t size	-
 chmod	posix	int	-	const char *pathname|mode_t mode	-
 close	posix	int	-	int fd	-
 closedir	posix	int	-	DIR *dirp	-
+closelog	posix	void	-	-	-
 closesocket	win	int	-	SOCKET s	-
 connect	posix	int	-	int sockfd|const struct sockaddr *addr|socklen_t addrlen	-
 connect	win	int	-	SOCKET s|const struct sockaddr *name|int namelen	-
+dcgettext	posix	char *	-	const char *domainname|const char *msgid|int category	-
 dlclose	posix	int	-	void *handle	-
 dlerror	posix	char *	-	-	-
 dlopen	posix	void *	-	const char *filename|int flags	-|dlopen
 dlsym	posix	void *	-	void *handle|const char *symbol	dl_handle|-
 dup2	posix	int	-	int oldfd|int newfd	-
 dup3	posix	int	-	int oldfd|int newfd|int flags	-|-|open_flags
+error	posix	void	-	int status|int errnum|const char *format|...	-
 execve	posix	int	-	const char *pathname|char *const *argv|char *const *envp	-
 exit	c	void	-	int status	-
 fclose	c	int	-	FILE *stream	-
@@ -216,6 +226,7 @@ fdatasync	posix	int	-	int fd	-
 fopen	c	FILE *	-	const char *pathname|const char *mode	-
 fork	posix	pid_t	-	-	-
 fprintf	c	int	-	FILE *stream|const char *format|...	-
+fputs_unlocked	posix	int	-	const char *s|FILE *stream	-
 fread	c	size_t	-	void *ptr|size_t size|size_t nmemb|FILE *stream	-
 free	c	void	-	void *ptr	-
 freeaddrinfo	posix	void	-	struct addrinfo *res	-
@@ -226,15 +237,21 @@ fsync	posix	int	-	int fd	-
 ftell	c	long	-	FILE *stream	-
 ftruncate	posix	int	-	int fd|off_t length	-
 fwrite	c	size_t	-	const void *ptr|size_t size|size_t nmemb|FILE *stream	-
+gai_strerror	posix	const char *	-	int errcode	-
 getaddrinfo	posix	int	-	const char *node|const char *service|const struct addrinfo *hints|struct addrinfo **res	-
 getcwd	posix	char *	-	char *buf|size_t size	-
 getenv	c	char *	-	const char *name	-
+getgrgid	posix	struct group *	-	gid_t gid	-
+getgrnam	posix	struct group *	-	const char *name	-
 gethostbyname	posix	struct hostent *	-	const char *name	-
 getpeername	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
 getpid	posix	pid_t	-	-	-
 getppid	posix	pid_t	-	-	-
+getpwnam	posix	struct passwd *	-	const char *name	-
+getpwuid	posix	struct passwd *	-	uid_t uid	-
 getsockname	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
 getsockopt	posix	int	-	int sockfd|int level|int optname|void *optval|socklen_t *optlen	-
+gettext	posix	char *	-	const char *msgid	-
 getuid	posix	uid_t	-	-	-
 htonl	win	unsigned long	-	unsigned long hostlong	-
 htons	win	u_short	-	u_short hostshort	-
@@ -261,6 +278,7 @@ ntohs	win	u_short	-	u_short netshort	-
 open	posix	int	-	const char *pathname|int flags|...	-|open_flags|-
 openat	posix	int	-	int dirfd|const char *pathname|int flags|...	-|-|open_flags|-
 opendir	posix	DIR *	-	const char *name	-
+openlog	posix	void	-	const char *ident|int option|int facility	-
 pipe2	posix	int	-	int *pipefd|int flags	-|open_flags
 poll	posix	int	-	struct pollfd *fds|nfds_t nfds|int timeout	-
 ppoll	posix	int	-	struct pollfd *fds|nfds_t nfds|const struct timespec *tmo_p|const sigset_t *sigmask	-
@@ -300,6 +318,8 @@ socket	win	SOCKET	-	int af|int type|int protocol	af_win|sock_type_win|ipproto
 sprintf	c	int	-	char *str|const char *format|...	-
 srand	c	void	-	unsigned int seed	-
 stat	posix	int	-	const char *pathname|struct stat *statbuf	-
+stpcpy	posix	char *	-	char *dest|const char *src	-
+stpncpy	posix	char *	-	char *dest|const char *src|size_t n	-
 strcat	c	char *	-	char *dest|const char *src	-
 strchr	c	char *	-	const char *s|int c	-
 strcmp	c	int	-	const char *s1|const char *s2	-
@@ -307,8 +327,10 @@ strcpy	c	char *	-	char *dest|const char *src	-
 strlen	c	size_t	-	const char *s	-
 strncmp	c	int	-	const char *s1|const char *s2|size_t n	-
 strncpy	c	char *	-	char *dest|const char *src|size_t n	-
+strsignal	posix	char *	-	int sig	-
 strstr	c	char *	-	const char *haystack|const char *needle	-
 strtol	c	long	-	const char *nptr|char **endptr|int base	-
+syslog	posix	void	-	int priority|const char *format|...	-
 system	c	int	-	const char *command	-
 time	c	time_t	-	time_t *tloc	-
 truncate	posix	int	-	const char *path|off_t length	-
