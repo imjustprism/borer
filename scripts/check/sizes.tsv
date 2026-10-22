@@ -79,7 +79,7 @@ crates/borer-engine/src/analysis/decompile/replay/prove.rs::prove_or#1	313
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::step#1	254
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::successor_claims#1	159
 crates/borer-engine/src/analysis/decompile/traces.rs::included#1	106
-crates/borer-engine/src/analysis/decompile/types.rs	2848
+crates/borer-engine/src/analysis/decompile/types.rs	2752
 crates/borer-engine/src/analysis/decompile/types.rs::callable_pointers#1	116
 crates/borer-engine/src/analysis/decompile/types.rs::stack_arrays#1	127
 crates/borer-engine/src/analysis/decompile/vars.rs	2244

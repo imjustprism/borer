@@ -8,6 +8,158 @@ use super::*;
 use crate::analysis::typelib::{self, Pass};
 use crate::program::BinaryFormat;
 
+/// Types a parameter by how the body uses it, and drops the casts a
+/// declared type makes redundant.
+///
+/// A parameter the header declares `uint64_t` whose every use is a
+/// sign-extension from one width (`(int64_t)(int32_t)a2`, `(int32_t)a2`)
+/// or a mask to one width (`a3 & 0xff`) was that narrower type in the
+/// source: the header says so (`int32_t a2`, `uint8_t a3`) and the casts
+/// and masks go, as C promotes the declared type the same way. A parameter
+/// the header already declares narrow (`int a2` from an assert, `bool a3`)
+/// keeps its type and loses the casts and masks that agree with it
+/// ([`narrow_type`]), and so does one the debug information names
+/// (`int total_stored`) when the type is a signed one, whose casts are
+/// all it drops. One the declared calls it is passed to agree is a pointer
+/// to a named type is that ([`api_pointer`]): `strlen(a1)` makes a word
+/// or a byte pointer a `char *`. One the body loads or stores through is
+/// a pointer ([`pointed_at`]), and a `void *` the body reads only bytes
+/// through is a byte pointer. On a 32-bit target the word after a `double` is the
+/// double's high half, not a parameter ([`drop_high_halves`]).
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines first.
+/// * `word` - The type a parameter has when nothing declared one, the
+///   machine word (`uint32_t` on a 32-bit target): the one type that means
+///   "unknown" rather than "declared this wide".
+///
+/// # Returns
+///
+/// The text with the parameters typed.
+pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let Some(sig) = lines.iter().position(|l| l.starts_with("// signature: ")) else {
+        return text.to_owned();
+    };
+    if word == "uint32_t" {
+        drop_high_halves(&mut lines, sig);
+    }
+    let params: Vec<(String, String)> = lines[sig]
+        .split(['(', ',', ')'])
+        .filter_map(|p| {
+            let (ty, name) = p.trim().rsplit_once(' ')?;
+            let (ty, name) = match name.strip_prefix('*') {
+                Some(n) => (format!("{} *", ty.trim()), n),
+                None => (ty.trim().to_owned(), name),
+            };
+            let named_signed =
+                is_ident(name) && narrow_type(&ty).is_some_and(|(_, mask)| mask.is_none());
+            (is_param_name(name) || named_signed).then(|| (ty, name.to_owned()))
+        })
+        .collect();
+    for (declared, param) in params {
+        let bytes = matches!(declared.as_str(), "void *" | "uint8_t *");
+        if (bytes || declared == word)
+            && let Some(pointer) = api_pointer(&lines, &param)
+            && (!bytes || pointer == "char *")
+        {
+            retype(&mut lines[sig], &declared, &param, &pointer);
+            continue;
+        }
+        if declared == "void *" && pointed_at(&lines, &param) == Some("uint8_t *") {
+            retype(&mut lines[sig], &declared, &param, "uint8_t *");
+            continue;
+        }
+        let ty = if declared != word {
+            declared.as_str()
+        } else if let Some(found) = inferred_type(&lines, &param) {
+            found
+        } else if let Some(pointer) = pointed_at(&lines, &param) {
+            retype(&mut lines[sig], word, &param, pointer);
+            continue;
+        } else {
+            continue;
+        };
+        let Some((casts, mask)) = narrow_type(ty) else {
+            continue;
+        };
+        for line in lines.iter_mut().filter(|l| !l.starts_with("//")) {
+            *line = unwrap_parens(
+                &strip_casts(line, &param, casts, mask, word == "uint64_t"),
+                &param,
+            );
+        }
+        if declared == word {
+            retype(&mut lines[sig], word, &param, ty);
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Drops from a 32-bit signature the word after each `double` parameter
+/// when the body never names it.
+///
+/// A `double` on a 32-bit stack is two words, and the second is its high
+/// half, which every caller pushes as part of it: listed on its own, the
+/// header claims an argument no caller passes. A body that reads the half
+/// by itself (to test the sign or the exponent) keeps it.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `sig` - Index of the `// signature:` line.
+fn drop_high_halves(lines: &mut [String], sig: usize) {
+    let number = |name: &str| name.strip_prefix('a')?.parse::<u32>().ok();
+    let params: Vec<(String, String)> = lines[sig]
+        .split(['(', ',', ')'])
+        .filter_map(|p| {
+            let (ty, name) = p.trim().rsplit_once(' ')?;
+            is_param_name(name).then(|| (ty.trim().to_owned(), name.to_owned()))
+        })
+        .collect();
+    for pair in params.windows(2) {
+        let [(ty, name), (next_ty, next)] = pair else {
+            continue;
+        };
+        let follows = number(name)
+            .zip(number(next))
+            .is_some_and(|(n, m)| n.checked_add(1) == Some(m));
+        let named = lines
+            .iter()
+            .any(|l| !l.starts_with("//") && !word_positions(l, next).is_empty());
+        if ty != "double" || next_ty != "uint32_t" || !follows || named {
+            continue;
+        }
+        for end in [",", ")"] {
+            lines[sig] = lines[sig].replace(&format!(", uint32_t {next}{end}"), end);
+        }
+    }
+}
+
+/// Rewrites a parameter's type in the signature line from the one it is
+/// declared with to `ty`.
+///
+/// # Arguments
+///
+/// * `sig` - The `// signature:` line.
+/// * `word` - The type the parameter is declared with, the machine word
+///   or a pointer.
+/// * `param` - The parameter name.
+/// * `ty` - Its type; a pointer type takes the name without a space.
+fn retype(sig: &mut String, word: &str, param: &str, ty: &str) {
+    let spaced = |t: &str| if t.ends_with('*') { "" } else { " " };
+    let sep = spaced(ty);
+    for suffix in [",", ")"] {
+        let old = format!("{word}{}{param}{suffix}", spaced(word));
+        if sig.contains(&old) {
+            *sig = sig.replace(&old, &format!("{ty}{sep}{param}{suffix}"));
+        }
+    }
+}
+
 /// Largest offset from a parameter that reads as a field of what it points
 /// at; a load at a larger one indexes an absolute address by the parameter.
 const FIELD_OFFSET_MAX: u64 = 0x1_0000;
@@ -711,5 +863,8 @@ mod tests {
         assert_eq!(api_pointer(&text, "a1"), Some("char *".to_owned()));
         let text = lines("local_10 = a1;\nlocal_10 = 0;\nputs(local_10);");
         assert_eq!(api_pointer(&text, "a1"), None);
+        let text = "// signature: uint32_t f(void *a1)\nvar2 = a1;\nwhile (*(uint8_t*)var2 != 0) {\n  var2 += 1;\n}\n";
+        let typed = super::type_parameters(text, "uint64_t");
+        assert!(typed.contains("f(uint8_t *a1)"), "{typed}");
     }
 }
