@@ -145,6 +145,36 @@ fn a_frame_store_through_an_index_read_from_a_slot_keeps_the_index() {
     replayed(&program64(&code));
 }
 
+/// A frame store through an index computed from a register keeps the
+/// register's old value, though the store writes out the register's newer
+/// one, read from a slot the store may land on.
+///
+/// `call f; lea r8,[rax+2]; mov rax,[rsp+0x60]; mov byte
+/// [rsp+r8+0x86],0x7b`, a formatter writing a `{` into a local buffer: the
+/// write-out of `rax = local_60` once came before the store whose index
+/// reads the `rax` the call returned.
+#[test]
+fn a_frame_store_through_an_index_keeps_the_register_it_read() {
+    let mut code = vec![
+        0x48, 0x81, 0xec, 0x08, 0x01, 0x00, 0x00, // ASM: sub rsp,0x108
+        0xe8, 0x34, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0x4c, 0x8d, 0x40, 0x02, // ASM: lea r8,[rax+2]
+        0x48, 0x8b, 0x44, 0x24, 0x60, // ASM: mov rax,[rsp+0x60]
+        0x48, 0xc7, 0x84, 0x24, 0x88, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // ASM: mov qword [rsp+0x88],1
+        0x42, 0xc6, 0x84, 0x04, 0x86, 0x00, 0x00, 0x00,
+        0x7b, // ASM: mov byte [rsp+r8+0x86],0x7b
+        0x48, 0x03, 0x84, 0x24, 0x88, 0x00, 0x00, 0x00, // ASM: add rax,[rsp+0x88]
+        0x48, 0x81, 0xc4, 0x08, 0x01, 0x00, 0x00, // ASM: add rsp,0x108
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([
+        0x48, 0x8b, 0x01, // ASM: mov rax,[rcx]
+        0xc3, // ASM: ret
+    ]);
+    replayed(&program64(&code));
+}
+
 /// A call into a thunk that jumps through `rax` reads `rax`, so the load
 /// into it before an intervening store is kept, not dropped as dead.
 ///

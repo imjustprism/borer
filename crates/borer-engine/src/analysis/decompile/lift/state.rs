@@ -345,9 +345,8 @@ impl<'a> Exec<'_, 'a> {
                 self.assumed(Expr::Var(key))
             }
             other => {
-                let pending = self.pending_slots(&other);
-                let word = self.word_ty();
-                let other = self.hold_slot_reads(other, word, &pending);
+                let pending = self.pending(Self::frame_base(&other).is_some());
+                let other = self.hold_index(other, &pending);
                 self.settle_frame_region(&other, None, false, false);
                 Expr::deref(other, ty)
             }
@@ -861,38 +860,70 @@ impl<'a> Exec<'_, 'a> {
     }
 
     /// Copies an operand in flight into a temporary when it reads one of
-    /// `slots`, whose pending stores are about to be written out.
+    /// `keys`, variables whose pending values a write-out is about to put
+    /// in the text.
     ///
-    /// The operand was read before those stores, through the slot's text
-    /// variable or a computed frame address, so once they are in the text
-    /// it would read what they left (`mov ecx,[rsp+58h]; mov
+    /// The operand was read before those values, through the variable's
+    /// text name or, for a slot, a computed frame address, so once they are
+    /// written it would read what they left (`mov ecx,[rsp+58h]; mov
     /// [rsp+58h],rbx; ...; mov [rsp+58h],ecx`).
     ///
     /// # Arguments
     ///
     /// * `e` - The operand.
     /// * `ty` - Its type, the temporary's declaration.
-    /// * `slots` - The slots about to be written out.
-    fn hold_slot_reads(&mut self, e: Expr, ty: Ty, slots: &[i64]) -> Expr {
-        if slots.iter().any(|o| e.may_read(Key::Slot(*o))) {
+    /// * `keys` - The variables that may be written out ([`Exec::pending`]).
+    fn hold_pending_reads(&mut self, e: Expr, ty: Ty, keys: &[Key]) -> Expr {
+        if keys.iter().any(|k| e.may_read(*k)) {
             self.tmp_of(&e, ty)
         } else {
             e
         }
     }
 
-    /// The slots with a store still pending that an access through `addr`
-    /// may write out ([`Exec::settle_frame_region`]): all of them for a
-    /// frame address, none for any other.
+    /// Holds the terms of a frame address beside its frame base as
+    /// [`Exec::hold_pending_reads`] holds an operand, keeping the base, so
+    /// the access still names the frame it reaches into.
     ///
     /// # Arguments
     ///
-    /// * `addr` - The access's address.
-    fn pending_slots(&self, addr: &Expr) -> Vec<i64> {
-        if Self::frame_base(addr).is_none() {
+    /// * `addr` - The address.
+    /// * `keys` - The variables that may be written out.
+    fn hold_index(&mut self, addr: Expr, keys: &[Key]) -> Expr {
+        match addr {
+            Expr::Sp(_) => addr,
+            Expr::Bin(Op::Add, l, r)
+                if Self::frame_base(&l).is_some() || Self::frame_base(&r).is_some() =>
+            {
+                let l = self.hold_index(*l, keys);
+                let r = self.hold_index(*r, keys);
+                Expr::Bin(Op::Add, Box::new(l), Box::new(r))
+            }
+            other => {
+                let word = self.word_ty();
+                self.hold_pending_reads(other, word, keys)
+            }
+        }
+    }
+
+    /// The variables with a value still pending, which a write-out of
+    /// slots may put in the text, or none when `writes_out` is false.
+    ///
+    /// # Arguments
+    ///
+    /// * `writes_out` - Whether the access about to run writes slots out:
+    ///   a partial overwrite of a pending store, or an access through a
+    ///   computed frame address ([`Exec::settle_frame_region`]).
+    fn pending(&self, writes_out: bool) -> Vec<Key> {
+        if !writes_out {
             return Vec::new();
         }
-        self.env.slot_bits.keys().copied().collect()
+        self.env
+            .vals
+            .iter()
+            .filter(|(k, v)| **v != Expr::Var(**k))
+            .map(|(k, _)| *k)
+            .collect()
     }
 
     /// Stores to a stack slot lazily.
@@ -943,7 +974,8 @@ impl<'a> Exec<'_, 'a> {
             })
             .map(|(o, _)| *o)
             .collect();
-        let v = self.hold_slot_reads(v, ty, &overlapping);
+        let pending = self.pending(!overlapping.is_empty());
+        let v = self.hold_pending_reads(v, ty, &pending);
         for o in overlapping {
             self.materialize(Key::Slot(o), &mut Vec::new(), None);
             self.env.slot_bits.remove(&o);
@@ -1102,10 +1134,9 @@ impl<'a> Exec<'_, 'a> {
         match addr {
             Expr::Sp(k) => self.slot_write(k, ty, v),
             other => {
-                let pending = self.pending_slots(&other);
-                let word = self.word_ty();
-                let other = self.hold_slot_reads(other, word, &pending);
-                let v = self.hold_slot_reads(v, ty, &pending);
+                let pending = self.pending(Self::frame_base(&other).is_some());
+                let other = self.hold_index(other, &pending);
+                let v = self.hold_pending_reads(v, ty, &pending);
                 self.settle_frame_region(&other, None, false, true);
                 match float_store(ty, &v) {
                     Some((fty, fv)) => self.emit_store(other, fty, &fv),
