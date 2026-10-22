@@ -967,7 +967,7 @@ fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
     let Some((q, arm_a, arm_b)) = ternary(inner) else {
         return false;
     };
-    if invert_condition(cond) != q {
+    if invert_condition(cond) != q || changes_state(cond) {
         return false;
     }
     let Some((base, operand, inner_or)) = applied_arm(arm_a, arm_b) else {
@@ -984,13 +984,16 @@ fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
         (false, true) if masked_not(extra, operand) => ("&=", "|=", operand),
         _ => return false,
     };
+    let Some(ty) = decl_type(lines, temp).filter(|t| integer_type(t)) else {
+        return false;
+    };
     if temp_lives(lines, k, temp) || base.contains('?') {
         return false;
     }
     let pad = " ".repeat(indent_of(line));
     let body = format!("{pad}  ");
-    let then_s = format!("{base} {then_op} {extra};");
-    let else_s = format!("{base} {else_op} {else_operand};");
+    let then_s = cast_update(&ty, base, then_op, extra);
+    let else_s = cast_update(&ty, base, else_op, else_operand);
     let rewritten = vec![
         format!("{pad}if ({cond}) {{"),
         format!("{body}{then_s}"),
@@ -1183,6 +1186,66 @@ fn brace_delta(line: &str) -> i32 {
         }
     }
     depth
+}
+
+/// Tells whether evaluating `expr` can change state.
+///
+/// A call runs twice in the nested choice and once in the `if`. An
+/// increment does the same.
+///
+/// # Arguments
+///
+/// * `expr` - A condition.
+fn changes_state(expr: &str) -> bool {
+    impure(expr) || expr.contains("++") || expr.contains("--")
+}
+
+/// Tells whether `ty` is an integer a bit update can be stored as.
+///
+/// # Arguments
+///
+/// * `ty` - A declared type.
+fn integer_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "bool"
+            | "char"
+            | "signed char"
+            | "unsigned char"
+            | "int8_t"
+            | "uint8_t"
+            | "short"
+            | "unsigned short"
+            | "int16_t"
+            | "uint16_t"
+            | "int"
+            | "unsigned"
+            | "unsigned int"
+            | "long"
+            | "unsigned long"
+            | "int32_t"
+            | "uint32_t"
+            | "long long"
+            | "unsigned long long"
+            | "int64_t"
+            | "uint64_t"
+    )
+}
+
+/// One store that keeps the conversion the temporary's type applied.
+///
+/// `uint32_t r = base | bit; base = r` clears bits above 32. `base |= bit`
+/// keeps them.
+///
+/// # Arguments
+///
+/// * `ty` - The temporary's type.
+/// * `base` - The stored location.
+/// * `op` - `|=` or `&=`.
+/// * `operand` - The bit or the mask.
+fn cast_update(ty: &str, base: &str, op: &str, operand: &str) -> String {
+    let bin = if op == "|=" { "|" } else { "&" };
+    format!("{base} = ({ty})({base} {bin} {operand});")
 }
 
 /// Tells whether a line after the store reads `temp` before a replacement
@@ -1468,16 +1531,23 @@ return 0;
         let text = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
         assert_eq!(
             select_statements(text),
-            "uint32_t r3;\n\nif (a2 != 8) {\n  a1->field_0xc |= 0x1000;\n} else {\n  a1->field_0xc &= 0xffffefff;\n}\n"
+            "uint32_t r3;\n\nif (a2 != 8) {\n  a1->field_0xc = (uint32_t)(a1->field_0xc | 0x1000);\n} else {\n  a1->field_0xc = (uint32_t)(a1->field_0xc & 0xffffefff);\n}\n"
         );
         let clear = "uint32_t r1;\n\nr1 = (a2 != 1 ? (a2 == 1 ? a1->field_0x4 | a4 : a1->field_0x4) & (a4 ^ 0xffffffff) : (a2 == 1 ? a1->field_0x4 | a4 : a1->field_0x4));\na1->field_0x4 = r1;\nr1 = 0;\n";
         assert_eq!(
             select_statements(clear),
-            "uint32_t r1;\n\nif (a2 != 1) {\n  a1->field_0x4 &= (a4 ^ 0xffffffff);\n} else {\n  a1->field_0x4 |= a4;\n}\nr1 = 0;\n"
+            "uint32_t r1;\n\nif (a2 != 1) {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 & (a4 ^ 0xffffffff));\n} else {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 | a4);\n}\nr1 = 0;\n"
         );
         let live = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nreturn r3;\n";
         assert_eq!(select_statements(live), live);
         let branched = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nif (a3) {\n  r3 = a4;\n}\nreturn r3;\n";
         assert_eq!(select_statements(branched), branched);
+        let called = "uint32_t r3;\n\nr3 = (next() != 8 ? (next() == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (next() == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
+        assert_eq!(select_statements(called), called);
+        let wide = "uint64_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
+        assert_eq!(
+            select_statements(wide),
+            "uint64_t r3;\n\nif (a2 != 8) {\n  a1->field_0xc = (uint64_t)(a1->field_0xc | 0x1000);\n} else {\n  a1->field_0xc = (uint64_t)(a1->field_0xc & 0xffffefff);\n}\n"
+        );
     }
 }
