@@ -792,7 +792,7 @@ fn a_run_time_stack_drop_is_an_alloca() {
     let o = Overlay::default();
     let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
     assert!(
-        text.contains("var1 = alloca((int64_t)(int32_t)a1 * 4);"),
+        text.contains("var1 = alloca((int64_t)a1 * 4);") && text.contains("(int32_t a1)"),
         "{text}"
     );
     assert!(text.contains("((uint32_t*)var1)["), "{text}");

@@ -325,3 +325,41 @@ fn a_function_named_for_the_library_takes_its_prototype() {
         "{text}"
     );
 }
+
+/// A parameter passed whole as a declared API's `int` is an `int`, and one
+/// passed as its `const char *` is a `char *`, whatever byte store the
+/// body also makes through it.
+///
+/// `exit(a1)` reads only `edi`, so the `uint64_t` that said only how wide a
+/// register is was an `int32_t`; `strlen(a1)` followed by a store of the
+/// byte before the terminator makes `a1` a string. Both run against the
+/// binary the same way.
+#[test]
+fn declared_parameters_type_the_arguments_passed_to_them() {
+    let mut code = vec![0x48, 0x83, 0xec, 0x08]; // ASM: sub rsp, 8
+    let at = TEXT + u64::try_from(code.len()).expect("small");
+    code.extend_from_slice(&call_slot(at, RDATA));
+    code.extend_from_slice(&[
+        0x48, 0x83, 0xc4, 0x08, // ASM: add rsp, 8
+        0xc3, // ASM: ret
+    ]);
+    let p = image(BinaryFormat::Elf, &code, &[0u8; 8], &["exit"]);
+    let (text, _) = decompiled(&p);
+    assert!(text.contains("(int32_t a1)"), "{text}");
+    assert!(text.contains("exit(a1);"), "{text}");
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x48, 0x89, 0xfb, // ASM: mov rbx, rdi
+    ];
+    let at = TEXT + u64::try_from(code.len()).expect("small");
+    code.extend_from_slice(&call_slot(at, RDATA));
+    code.extend_from_slice(&[
+        0xc6, 0x44, 0x03, 0xff, 0x00, // ASM: mov byte [rbx+rax-1], 0
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ]);
+    let p = image(BinaryFormat::Elf, &code, &[0u8; 8], &["strlen"]);
+    let (text, header) = decompiled(&p);
+    assert!(text.contains("(char *a1)"), "{text}");
+    assert!(!header.contains("contradicted"), "{header}");
+}

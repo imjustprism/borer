@@ -3,6 +3,12 @@
 
 use super::*;
 
+mod infer;
+
+pub(super) use infer::{
+    api_pointer, inferred_type, inferred_type_on, scalar_width, signature_result,
+};
+
 /// Most singletons whose fields [`decompile_named`] names in one function.
 pub(super) const SINGLETONS_MAX: usize = 8;
 
@@ -361,8 +367,10 @@ pub(super) fn result_bindings(
 /// keeps its type and loses the casts and masks that agree with it
 /// ([`narrow_type`]), and so does one the debug information names
 /// (`int total_stored`) when the type is a signed one, whose casts are
-/// all it drops. One the body loads or stores through is a pointer
-/// ([`pointed_at`]). On a 32-bit target the word after a `double` is the
+/// all it drops. One the declared calls it is passed to agree is a pointer
+/// to a named type is that ([`api_pointer`]): `strlen(a1)` makes a word
+/// or a byte pointer a `char *`. One the body loads or stores through is
+/// a pointer ([`pointed_at`]). On a 32-bit target the word after a `double` is the
 /// double's high half, not a parameter ([`drop_high_halves`]).
 ///
 /// # Arguments
@@ -387,13 +395,24 @@ pub(super) fn type_parameters(text: &str, word: &str) -> String {
         .split(['(', ',', ')'])
         .filter_map(|p| {
             let (ty, name) = p.trim().rsplit_once(' ')?;
-            let ty = ty.trim();
+            let (ty, name) = match name.strip_prefix('*') {
+                Some(n) => (format!("{} *", ty.trim()), n),
+                None => (ty.trim().to_owned(), name),
+            };
             let named_signed =
-                is_ident(name) && narrow_type(ty).is_some_and(|(_, mask)| mask.is_none());
-            (is_param_name(name) || named_signed).then(|| (ty.to_owned(), name.to_owned()))
+                is_ident(name) && narrow_type(&ty).is_some_and(|(_, mask)| mask.is_none());
+            (is_param_name(name) || named_signed).then(|| (ty, name.to_owned()))
         })
         .collect();
     for (declared, param) in params {
+        let bytes = matches!(declared.as_str(), "void *" | "uint8_t *");
+        if (bytes || declared == word)
+            && let Some(pointer) = api_pointer(&lines, &param)
+            && (!bytes || pointer == "char *")
+        {
+            retype(&mut lines[sig], &declared, &param, &pointer);
+            continue;
+        }
         let ty = if declared != word {
             declared.as_str()
         } else if let Some(found) = inferred_type(&lines, &param) {
@@ -462,19 +481,21 @@ fn drop_high_halves(lines: &mut [String], sig: usize) {
     }
 }
 
-/// Rewrites a parameter's type in the signature line from the machine word
-/// to `ty`.
+/// Rewrites a parameter's type in the signature line from the one it is
+/// declared with to `ty`.
 ///
 /// # Arguments
 ///
 /// * `sig` - The `// signature:` line.
-/// * `word` - The machine word type the parameter is declared with.
+/// * `word` - The type the parameter is declared with, the machine word
+///   or a pointer.
 /// * `param` - The parameter name.
 /// * `ty` - Its type; a pointer type takes the name without a space.
 fn retype(sig: &mut String, word: &str, param: &str, ty: &str) {
-    let sep = if ty.ends_with('*') { "" } else { " " };
+    let spaced = |t: &str| if t.ends_with('*') { "" } else { " " };
+    let sep = spaced(ty);
     for suffix in [",", ")"] {
-        let old = format!("{word} {param}{suffix}");
+        let old = format!("{word}{}{param}{suffix}", spaced(word));
         if sig.contains(&old) {
             *sig = sig.replace(&old, &format!("{ty}{sep}{param}{suffix}"));
         }
@@ -2888,134 +2909,6 @@ pub(super) fn unwrap_parens(line: &str, name: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// The narrow type every use of a `uint64_t` variable agrees on, if any.
-///
-/// A variable's own assignment says nothing about its width, since the value
-/// is truncated to whatever the variable is declared as, so it is skipped.
-/// Storing it through a typed pointer is that pointee's width, and
-/// returning it from a function whose result is a narrow integer is that
-/// result's width. A postfix use (`a1->field_0x8`, `a1[i]`) binds before
-/// any cast in front of it, so it says the variable is no narrow integer.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `param` - The parameter name.
-pub(super) fn inferred_type(lines: &[String], param: &str) -> Option<&'static str> {
-    inferred_type_on(lines, lines.iter(), param)
-}
-
-/// [`inferred_type`] over only the lines that can name the variable.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `uses` - The lines of `lines` to read, in order: every line that
-///   names `param` must be among them.
-/// * `param` - The variable's name.
-///
-/// # Returns
-///
-/// The type every use agrees on, `None` when they disagree or say none.
-pub(super) fn inferred_type_on<'a>(
-    lines: &[String],
-    uses: impl Iterator<Item = &'a String>,
-    param: &str,
-) -> Option<&'static str> {
-    let mut ty: Option<&'static str> = None;
-    for line in uses.filter(|l| !l.starts_with("//")) {
-        for at in word_positions(line, param) {
-            let head = line.get(..at).unwrap_or("");
-            let tail = line.get(at + param.len()..).unwrap_or("");
-            if head.trim().is_empty() && tail.starts_with(" = ") {
-                continue;
-            }
-            if tail.starts_with("->") || tail.starts_with(['[', '.']) {
-                return None;
-            }
-            let t = if head.ends_with("(int32_t)") {
-                "int32_t"
-            } else if head.ends_with("(int16_t)") {
-                "int16_t"
-            } else if head.ends_with("(int8_t)") {
-                "int8_t"
-            } else if head.ends_with("(uint32_t)") {
-                "uint32_t"
-            } else if head.ends_with("(uint16_t)") {
-                "uint16_t"
-            } else if head.ends_with("(uint8_t)") {
-                "uint8_t"
-            } else if let Some(stored) = stored_width(head, tail) {
-                stored
-            } else if head.trim() == "return" && tail.trim_start().starts_with(';') {
-                scalar_width(signature_result(lines)?)?
-            } else {
-                match mask_width(tail)? {
-                    8 => "uint8_t",
-                    16 => "uint16_t",
-                    _ => "uint32_t",
-                }
-            };
-            if ty.is_some_and(|prev| prev != t) {
-                return None;
-            }
-            ty = Some(t);
-        }
-    }
-    ty
-}
-
-/// The integer width a store of exactly one name writes.
-///
-/// `*(uint32_t*)p = name` uses the low 32 bits and nothing above them.
-/// A store of a sum does not: the sum may have been computed at 64 bits.
-///
-/// # Arguments
-///
-/// * `head` - The line up to the name.
-/// * `tail` - The line after the name.
-fn stored_width(head: &str, tail: &str) -> Option<&'static str> {
-    if !tail.trim_start().starts_with(';') {
-        return None;
-    }
-    let dest = head.trim_end().strip_suffix(" =")?.trim();
-    let after = dest.strip_prefix("*(")?;
-    let ty = after.split_once("*)")?.0.trim();
-    scalar_width(ty)
-}
-
-/// The narrow integer a C type name denotes, as [`inferred_type`] spells it.
-///
-/// # Arguments
-///
-/// * `ty` - A type as a signature or a cast spells it.
-fn scalar_width(ty: &str) -> Option<&'static str> {
-    match ty {
-        "int32_t" | "int" | "long" | "INT" | "LONG" | "HRESULT" => Some("int32_t"),
-        "int16_t" | "short" | "SHORT" => Some("int16_t"),
-        "int8_t" | "char" | "signed char" => Some("int8_t"),
-        "uint8_t" | "bool" | "unsigned char" | "BYTE" | "BOOLEAN" => Some("uint8_t"),
-        "uint16_t" | "unsigned short" | "WORD" | "wchar_t" => Some("uint16_t"),
-        "uint32_t" | "unsigned int" | "unsigned" | "DWORD" | "unsigned long" | "ULONG" | "UINT" => {
-            Some("uint32_t")
-        }
-        _ => None,
-    }
-}
-
-/// The result type on the `// signature:` line.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-fn signature_result(lines: &[String]) -> Option<&str> {
-    let sig = lines.iter().find(|l| l.starts_with("// signature: "))?;
-    let rest = sig.get("// signature: ".len()..)?.trim();
-    let head = rest.split_once('(')?.0.trim();
-    let ty = head.rsplit_once(' ')?.0.trim();
-    (!ty.is_empty()).then_some(ty)
 }
 
 /// Drops a width cast from a zero test when the declaration already says it.

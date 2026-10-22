@@ -248,9 +248,10 @@ fn vector_read_bytes(instr: &Instruction) -> Option<usize> {
 
 /// Names what a pointer points at, from the accesses made through it.
 ///
-/// One width at offset zero is a pointer to a value of that width. Several
-/// widths, several offsets, or one offset away from the start is a
-/// structure, and `void *` says so without inventing a layout;
+/// One width at offset zero is a pointer to a value of that width, and
+/// bytes read from the start on are bytes, which a byte pointer's
+/// arithmetic counts as the text does. Several widths, several offsets,
+/// or one offset away from the start is a structure, and `void *` says so without inventing a layout;
 /// `borer://layout` proposes one from the same evidence. A `uint32_t *`
 /// read only at 0x14 would make the text's `*(uint32_t*)(a2 + 0x14)` read,
 /// in C, the element at byte 0x50.
@@ -266,7 +267,7 @@ fn vector_read_bytes(instr: &Instruction) -> Option<usize> {
 pub(super) fn pointee_type(widths: &BTreeSet<usize>, offsets: &BTreeSet<i64>) -> &'static str {
     let one = widths.iter().copied().next().filter(|_| widths.len() == 1);
     match (one, offsets.len() == 1 && offsets.contains(&0)) {
-        (Some(1), true) => "uint8_t *",
+        (Some(1), _) if offsets.contains(&0) => "uint8_t *",
         (Some(2), true) => "uint16_t *",
         (Some(4), true) => "uint32_t *",
         (Some(8), true) => "uint64_t *",

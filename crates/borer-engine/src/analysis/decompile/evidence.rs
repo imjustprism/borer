@@ -121,9 +121,10 @@ fn nameable(w: &str) -> bool {
 ///
 /// # Returns
 ///
-/// The callee's name and the argument's index from zero, or `None` when
-/// the token is not a whole argument of a call by a plain name.
-fn argument_of<'t>(l: &Line<'t>, k: usize) -> Option<(&'t str, usize)> {
+/// The callee's name, the argument's index from zero and the call's `(`
+/// token, or `None` when the token is not a whole argument of a call by a
+/// plain name.
+pub(super) fn argument_of<'t>(l: &Line<'t>, k: usize) -> Option<(&'t str, usize, usize)> {
     let prev = k.checked_sub(1)?;
     if !(l.is(prev, "(") || l.is(prev, ",")) || !(l.is(k + 1, ")") || l.is(k + 1, ",")) {
         return None;
@@ -148,7 +149,7 @@ fn argument_of<'t>(l: &Line<'t>, k: usize) -> Option<(&'t str, usize)> {
         .checked_sub(1)
         .is_some_and(|q| l.is(q, "::") || l.is(q, "->") || l.is(q, "."));
     (l.is(open, "(") && t.lex == Lex::Name && !qualified)
-        .then(|| (l.text.get(t.at..t.end).unwrap_or(""), commas))
+        .then(|| (l.text.get(t.at..t.end).unwrap_or(""), commas, open))
 }
 
 /// A whole-line assignment to one variable: `v = rhs;`.
@@ -307,7 +308,7 @@ fn retype(text: &str, word: u8) -> Option<String> {
 ///
 /// * `l` - The line.
 /// * `k` - The token.
-fn whole_read(l: &Line<'_>, k: usize) -> bool {
+pub(super) fn whole_read(l: &Line<'_>, k: usize) -> bool {
     const BEFORE: [&str; 11] = [
         "(", ",", "=", "==", "!=", "!", "&&", "||", "?", ":", "return",
     ];
@@ -368,7 +369,7 @@ fn name_constants(text: &str, word: u8) -> Option<String> {
             if k.checked_sub(1).is_some_and(|p| l.is(p, "-")) {
                 continue;
             }
-            let Some((callee, i)) = argument_of(&l, k) else {
+            let Some((callee, i, _)) = argument_of(&l, k) else {
                 continue;
             };
             let Some((d, format)) = any_decl(callee) else {
@@ -598,7 +599,7 @@ fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, 
             let Some(w) = l.text.get(tok.at..tok.end).filter(|w| is_var_name(w)) else {
                 continue;
             };
-            let Some((callee, i)) = argument_of(l, k) else {
+            let Some((callee, i, _)) = argument_of(l, k) else {
                 continue;
             };
             if let Some(param) = decl(callee).and_then(|d| d.params.get(i)) {

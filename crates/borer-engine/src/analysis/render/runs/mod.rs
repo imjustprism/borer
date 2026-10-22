@@ -1374,7 +1374,7 @@ mod tests {
             );
         }
         assert!(
-            out.contains("\nuint32_t sub_1000(uint8_t *a1, uint64_t a2);\n"),
+            out.contains("\nuint32_t sub_1000(uint8_t *a1, uint32_t a2);\n"),
             "{out}"
         );
         assert!(
