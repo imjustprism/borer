@@ -644,7 +644,8 @@ mod tests {
     ///
     /// # Panics
     ///
-    /// When a declaration is repeated, lost or miscounted.
+    /// When a declaration is repeated, lost or miscounted, or a grouped
+    /// local declaration is not written one local per line with its stars.
     #[test]
     fn shared_declarations_are_hoisted_once() {
         let mut h = Hoisted::new(["a", "b", "c"].map(str::to_owned).into());
@@ -670,6 +671,14 @@ mod tests {
         );
         assert!(body.contains("// d @ 0x30: does not decompile"), "{body}");
         assert_eq!((h.written, h.failed, h.conflicts), (3, 1, 1));
+        let mut grouped = Hoisted::new(["f"].map(str::to_owned).into());
+        let mut out = String::new();
+        let f = "// f @ 0x10\n// signature: void f(void)\nuint64_t a, *b, **c;\nuint8_t buf[4];\n\nreturn;\n";
+        grouped.add("f", 0x10, Some(f), &mut out);
+        assert!(
+            out.contains("  uint64_t a;\n  uint64_t *b;\n  uint64_t **c;\n  uint8_t buf[4];\n"),
+            "{out}"
+        );
         assert!(
             head.contains("\n// extern uint32_t c(uint64_t);\n"),
             "{head}"
