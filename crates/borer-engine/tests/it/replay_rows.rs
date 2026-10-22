@@ -52,6 +52,30 @@ fn a_qword_move_between_vector_registers_clears_the_upper_lanes() {
     );
 }
 
+/// A dword stored over a slot whose wider store is still pending keeps
+/// the value it read from the slot before that store.
+///
+/// `mov [rsp+8],rcx; mov ecx,[rsp+8]; mov [rsp+8],rdx; and ecx,0x100;
+/// btr edx,8; or ecx,edx; mov [rsp+8],ecx; mov rax,[rsp+8]`, how a
+/// feature toggle's flags merge one bit into a configuration word: the
+/// write-out of `[rsp+8] = rdx` once came before the merged value that
+/// reads the old `[rsp+8]`.
+#[test]
+fn a_dword_merged_into_a_wider_slot_store_keeps_what_it_read() {
+    let code = [
+        0x48, 0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8],rcx
+        0x8b, 0x4c, 0x24, 0x08, // ASM: mov ecx,[rsp+8]
+        0x48, 0x89, 0x54, 0x24, 0x08, // ASM: mov [rsp+8],rdx
+        0x81, 0xe1, 0x00, 0x01, 0x00, 0x00, // ASM: and ecx,0x100
+        0x0f, 0xba, 0xf2, 0x08, // ASM: btr edx,8
+        0x0b, 0xca, // ASM: or ecx,edx
+        0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8],ecx
+        0x48, 0x8b, 0x44, 0x24, 0x08, // ASM: mov rax,[rsp+8]
+        0xc3, // ASM: ret
+    ];
+    replayed(&program64(&code));
+}
+
 /// A call into a thunk that jumps through `rax` reads `rax`, so the load
 /// into it before an intervening store is kept, not dropped as dead.
 ///

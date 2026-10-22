@@ -871,13 +871,37 @@ impl<'a> Exec<'_, 'a> {
         self.ctx.escape_floor.is_some_and(|f| o >= f)
     }
 
+    /// Copies an operand in flight into a temporary when it reads one of
+    /// `slots`, whose pending stores are about to be written out.
+    ///
+    /// The operand was read before those stores, through the slot's text
+    /// variable or a computed frame address, so once they are in the text
+    /// it would read what they left (`mov ecx,[rsp+58h]; mov
+    /// [rsp+58h],rbx; ...; mov [rsp+58h],ecx`).
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The operand.
+    /// * `ty` - Its type, the temporary's declaration.
+    /// * `slots` - The slots about to be written out.
+    fn hold_slot_reads(&mut self, e: Expr, ty: Ty, slots: &[i64]) -> Expr {
+        if slots.iter().any(|o| e.may_read(Key::Slot(*o))) {
+            self.tmp_of(&e, ty)
+        } else {
+            e
+        }
+    }
+
     /// Stores to a stack slot lazily.
     ///
     /// A partial overwrite of another known slot, or of this one's pending
     /// store at a wider width, writes that store out first (its text
     /// variable must hold the bytes the new store keeps). Readers of the old
     /// slot value in the environment stay valid because the lazy store
-    /// changes nothing in the text yet.
+    /// changes nothing in the text yet; a stored value that reads a slot
+    /// written out so is copied into a temporary first, since it was read
+    /// before that store (`mov ecx,[rsp+58h]; mov [rsp+58h],rbx; ...; mov
+    /// [rsp+58h],ecx`).
     ///
     /// # Arguments
     ///
@@ -916,6 +940,7 @@ impl<'a> Exec<'_, 'a> {
             })
             .map(|(o, _)| *o)
             .collect();
+        let v = self.hold_slot_reads(v, ty, &overlapping);
         for o in overlapping {
             self.materialize(Key::Slot(o), &mut Vec::new(), None);
             self.env.slot_bits.remove(&o);
