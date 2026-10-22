@@ -8,6 +8,168 @@ use super::*;
 use crate::analysis::typelib::{self, Pass};
 use crate::program::BinaryFormat;
 
+/// Largest offset from a parameter that reads as a field of what it points
+/// at; a load at a larger one indexes an absolute address by the parameter.
+const FIELD_OFFSET_MAX: u64 = 0x1_0000;
+
+/// The value types a load through an address is cast to, with their widths
+/// in bytes.
+const LOAD_TYPES: [(&str, usize); 11] = [
+    ("uint8_t", 1),
+    ("uint16_t", 2),
+    ("uint32_t", 4),
+    ("uint64_t", 8),
+    ("uint128_t", 16),
+    ("int8_t", 1),
+    ("int16_t", 2),
+    ("int32_t", 4),
+    ("int64_t", 8),
+    ("float", 4),
+    ("double", 8),
+];
+
+/// The pointer type the body shows a parameter to be, when it loads or
+/// stores through it and never assigns it.
+///
+/// A load or store through the parameter, `*(T*)a2` or `*(T*)(a2 + 0x10)`,
+/// an element read `((T*)a2)[i]`, or a field the layout pass named on it,
+/// `a2->field_0x10`, uses its value as an address, which only a pointer
+/// is. The pointee follows the register scan's rule ([`pointee_type`]):
+/// one width at offset zero is a pointer to that width, anything else
+/// `void *`. Reading it off the text sees what the register scan cannot: an
+/// argument that arrives on the stack, as every 32-bit `cdecl` and
+/// `stdcall` one does. An offset past [`FIELD_OFFSET_MAX`] makes the
+/// parameter the index of an absolute address, not a pointer, and a
+/// parameter the body assigns, or casts to a narrow integer, is left as
+/// it is; a cast in front of `a2->field_0x10` casts the field, not `a2`.
+/// The loads through a variable the parameter is copied into and that
+/// only steps from there ([`copies`]) count too, at offsets that say only
+/// that the pointer moved: bytes read through it make a byte pointer.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `param` - The parameter name.
+///
+/// # Returns
+///
+/// The pointer type, or `None` when nothing in the body shows one.
+pub(in crate::analysis::decompile) fn pointed_at(
+    lines: &[String],
+    param: &str,
+) -> Option<&'static str> {
+    if assigned_values(lines, param) > 0 {
+        return None;
+    }
+    let mut widths: BTreeSet<usize> = BTreeSet::new();
+    let mut offsets: BTreeSet<i64> = BTreeSet::new();
+    accesses(lines, param, &mut widths, &mut offsets)?;
+    for copy in copies(lines, param) {
+        let mut moved: BTreeSet<i64> = BTreeSet::new();
+        accesses(lines, &copy, &mut widths, &mut moved)?;
+        if !moved.is_empty() {
+            offsets.extend([0, 1]);
+        }
+    }
+    (!offsets.is_empty()).then(|| pointee_type(&widths, &offsets))
+}
+
+/// Collects the widths and offsets of the loads and stores through one
+/// name, for [`pointed_at`].
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `name` - The name.
+/// * `widths` - Access widths in bytes, added to.
+/// * `offsets` - Offsets from the name, added to.
+///
+/// # Returns
+///
+/// `None` when a use casts the name to a narrow signed integer, which no
+/// pointer is.
+fn accesses(
+    lines: &[String],
+    name: &str,
+    widths: &mut BTreeSet<usize>,
+    offsets: &mut BTreeSet<i64>,
+) -> Option<()> {
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        for at in word_positions(line, name) {
+            let head = line.get(..at).unwrap_or("");
+            let tail = line.get(at + name.len()..).unwrap_or("");
+            if tail.starts_with("->") {
+                offsets.extend([0, 1]);
+                continue;
+            }
+            if ["(int8_t)", "(int16_t)", "(int32_t)"]
+                .iter()
+                .any(|c| head.ends_with(c))
+            {
+                return None;
+            }
+            for (ty, width) in LOAD_TYPES {
+                let field = head.strip_suffix(&format!("*({ty}*)(")).and_then(|_| {
+                    let (sign, rest) = if let Some(r) = tail.strip_prefix(" + ") {
+                        (1, r)
+                    } else {
+                        (-1, tail.strip_prefix(" - ")?)
+                    };
+                    let k = parse_const(rest.get(..rest.find(')')?)?)?;
+                    (k < FIELD_OFFSET_MAX).then(|| sign * i64::try_from(k).unwrap_or(i64::MAX))
+                });
+                if head.ends_with(&format!("*({ty}*)")) {
+                    widths.insert(width);
+                    offsets.insert(0);
+                } else if let Some(k) = field {
+                    widths.insert(width);
+                    offsets.insert(k);
+                } else if head.ends_with(&format!("(({ty}*)")) && tail.starts_with(")[") {
+                    widths.insert(width);
+                    offsets.extend([0, 1]);
+                }
+            }
+        }
+    }
+    Some(())
+}
+
+/// The variables a parameter is copied into whole and that only step
+/// from there: `local_10 = a1;` then `local_10 += 2;`, the home an
+/// unoptimized build keeps a parameter in.
+///
+/// A copy assigned anything else as well holds more than the parameter,
+/// so it is left out.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `param` - The parameter name.
+fn copies(lines: &[String], param: &str) -> Vec<String> {
+    let whole = format!(" = {param};");
+    let mut out: Vec<String> = Vec::new();
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        let Some(dest) = line.trim().strip_suffix(whole.as_str()) else {
+            continue;
+        };
+        if !is_ident(dest) || dest == param || out.iter().any(|c| c == dest) {
+            continue;
+        }
+        let writes = lines
+            .iter()
+            .filter(|l| {
+                l.trim()
+                    .strip_prefix(dest)
+                    .is_some_and(|r| r.starts_with(" = "))
+            })
+            .count();
+        if writes == 1 {
+            out.push(dest.to_owned());
+        }
+    }
+    out
+}
+
 /// The narrow type every use of a `uint64_t` variable agrees on, if any.
 ///
 /// A variable's own assignment says nothing about its width, since the value
@@ -414,7 +576,9 @@ fn conversion_slot(literal: &str, index: usize) -> Option<Slot> {
 /// assigned or cast to a narrow integer. A `char *` takes any other use,
 /// since its arithmetic counts bytes as the text's does; any other type
 /// takes it only when every use hands the value on whole ([`whole_read`]),
-/// so no arithmetic or load reads it as something it is not.
+/// so no arithmetic or load reads it as something it is not. A call
+/// passing a copy of the parameter that only steps from it ([`copies`])
+/// says the same of the parameter.
 ///
 /// # Arguments
 ///
@@ -454,6 +618,20 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
             }
         }
     }
+    for copy in copies(lines, param) {
+        for line in lines.iter().filter(|l| !l.starts_with("//")) {
+            for at in word_positions(line, &copy) {
+                match slot_at(line, at) {
+                    Some(Slot::Narrow(_)) => return None,
+                    Some(Slot::Pointer(t)) if found.as_ref().is_some_and(|f| *f != t) => {
+                        return None;
+                    }
+                    Some(Slot::Pointer(t)) => found = Some(t),
+                    Some(Slot::Other) | None => {}
+                }
+            }
+        }
+    }
     found.filter(|t| t == "char *" || whole)
 }
 
@@ -463,7 +641,7 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Slot, api_pointer, inferred_type, slot_at};
+    use super::{Slot, api_pointer, inferred_type, pointed_at, slot_at};
 
     /// Splits a text into owned lines.
     ///
@@ -519,6 +697,19 @@ mod tests {
         let text = lines("fputs(\"x\", a1);\nv = *(uint32_t*)(a1 + 8);");
         assert_eq!(api_pointer(&text, "a1"), None);
         let text = lines("strlen(a1);\nexit(a1);");
+        assert_eq!(api_pointer(&text, "a1"), None);
+    }
+
+    /// A parameter copied into the home an unoptimized build keeps it in
+    /// takes what the copy shows: bytes walked through it, or a string
+    /// passed on.
+    #[test]
+    fn copies_type_the_parameter_they_hold() {
+        let text = lines("local_10 = a1;\nwhile (*(uint8_t*)local_10 != 0) {\n  local_10 += 1;\n}");
+        assert_eq!(pointed_at(&text, "a1"), Some("uint8_t *"));
+        let text = lines("local_10 = a1;\nputs(local_10);");
+        assert_eq!(api_pointer(&text, "a1"), Some("char *".to_owned()));
+        let text = lines("local_10 = a1;\nlocal_10 = 0;\nputs(local_10);");
         assert_eq!(api_pointer(&text, "a1"), None);
     }
 }

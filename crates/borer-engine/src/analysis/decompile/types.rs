@@ -6,31 +6,11 @@ use super::*;
 mod infer;
 
 pub(super) use infer::{
-    api_pointer, inferred_type, inferred_type_on, scalar_width, signature_result,
+    api_pointer, inferred_type, inferred_type_on, pointed_at, scalar_width, signature_result,
 };
 
 /// Most singletons whose fields [`decompile_named`] names in one function.
 pub(super) const SINGLETONS_MAX: usize = 8;
-
-/// Largest offset from a parameter that reads as a field of what it points
-/// at; a load at a larger one indexes an absolute address by the parameter.
-const FIELD_OFFSET_MAX: u64 = 0x1_0000;
-
-/// The value types a load through an address is cast to, with their widths
-/// in bytes.
-const LOAD_TYPES: [(&str, usize); 11] = [
-    ("uint8_t", 1),
-    ("uint16_t", 2),
-    ("uint32_t", 4),
-    ("uint64_t", 8),
-    ("uint128_t", 16),
-    ("int8_t", 1),
-    ("int16_t", 2),
-    ("int32_t", 4),
-    ("int64_t", 8),
-    ("float", 4),
-    ("double", 8),
-];
 
 /// The classes whose static instance a function reads, in the order it
 /// first does.
@@ -500,75 +480,6 @@ fn retype(sig: &mut String, word: &str, param: &str, ty: &str) {
             *sig = sig.replace(&old, &format!("{ty}{sep}{param}{suffix}"));
         }
     }
-}
-
-/// The pointer type the body shows a parameter to be, when it loads or
-/// stores through it and never assigns it.
-///
-/// A load or store through the parameter, `*(T*)a2` or `*(T*)(a2 + 0x10)`,
-/// an element read `((T*)a2)[i]`, or a field the layout pass named on it,
-/// `a2->field_0x10`, uses its value as an address, which only a pointer
-/// is. The pointee follows the register scan's rule ([`pointee_type`]):
-/// one width at offset zero is a pointer to that width, anything else
-/// `void *`. Reading it off the text sees what the register scan cannot: an
-/// argument that arrives on the stack, as every 32-bit `cdecl` and
-/// `stdcall` one does. An offset past [`FIELD_OFFSET_MAX`] makes the
-/// parameter the index of an absolute address, not a pointer, and a
-/// parameter the body assigns, or casts to a narrow integer, is left as
-/// it is; a cast in front of `a2->field_0x10` casts the field, not `a2`.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `param` - The parameter name.
-///
-/// # Returns
-///
-/// The pointer type, or `None` when nothing in the body shows one.
-fn pointed_at(lines: &[String], param: &str) -> Option<&'static str> {
-    if assigned_values(lines, param) > 0 {
-        return None;
-    }
-    let mut widths: BTreeSet<usize> = BTreeSet::new();
-    let mut offsets: BTreeSet<i64> = BTreeSet::new();
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
-        for at in word_positions(line, param) {
-            let head = line.get(..at).unwrap_or("");
-            let tail = line.get(at + param.len()..).unwrap_or("");
-            if tail.starts_with("->") {
-                offsets.extend([0, 1]);
-                continue;
-            }
-            if ["(int8_t)", "(int16_t)", "(int32_t)"]
-                .iter()
-                .any(|c| head.ends_with(c))
-            {
-                return None;
-            }
-            for (ty, width) in LOAD_TYPES {
-                let field = head.strip_suffix(&format!("*({ty}*)(")).and_then(|_| {
-                    let (sign, rest) = if let Some(r) = tail.strip_prefix(" + ") {
-                        (1, r)
-                    } else {
-                        (-1, tail.strip_prefix(" - ")?)
-                    };
-                    let k = parse_const(rest.get(..rest.find(')')?)?)?;
-                    (k < FIELD_OFFSET_MAX).then(|| sign * i64::try_from(k).unwrap_or(i64::MAX))
-                });
-                if head.ends_with(&format!("*({ty}*)")) {
-                    widths.insert(width);
-                    offsets.insert(0);
-                } else if let Some(k) = field {
-                    widths.insert(width);
-                    offsets.insert(k);
-                } else if head.ends_with(&format!("(({ty}*)")) && tail.starts_with(")[") {
-                    widths.insert(width);
-                    offsets.extend([0, 1]);
-                }
-            }
-        }
-    }
-    (!offsets.is_empty()).then(|| pointee_type(&widths, &offsets))
 }
 
 /// The scalar pointees a load casts to by one name.
