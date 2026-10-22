@@ -1154,8 +1154,42 @@ fn any_assignment(line: &str) -> Option<(&str, &str)> {
     Some((left.trim(), right.trim()))
 }
 
-/// Tells whether a line after the store reads `temp` before the next
-/// assignment of it.
+/// How many braces a line opens minus how many it closes.
+///
+/// Braces inside a string do not count.
+///
+/// # Arguments
+///
+/// * `line` - One line.
+fn brace_delta(line: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in line.chars() {
+        if let Some(q) = quote {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                _ if c == q => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// Tells whether a line after the store reads `temp` before a replacement
+/// that every later path executes.
+///
+/// An assignment inside a brace does not count. `if (a3) { r3 = a4; }`
+/// leaves `r3` holding the earlier value when `a3` is false.
 ///
 /// # Arguments
 ///
@@ -1163,11 +1197,13 @@ fn any_assignment(line: &str) -> Option<(&str, &str)> {
 /// * `k` - Index of the temporary's assignment. The next line is its store.
 /// * `temp` - The temporary.
 fn temp_lives(lines: &[String], k: usize, temp: &str) -> bool {
+    let mut depth = 0i32;
     for line in lines.iter().skip(k + 2) {
         if line.trim_start().starts_with("//") {
             continue;
         }
-        if let Some((lhs, rhs)) = plain_assignment(line)
+        if depth == 0
+            && let Some((lhs, rhs)) = plain_assignment(line)
             && lhs == temp
             && !mentions_ident(rhs, temp)
         {
@@ -1176,6 +1212,7 @@ fn temp_lives(lines: &[String], k: usize, temp: &str) -> bool {
         if mentions_ident(line, temp) {
             return true;
         }
+        depth += brace_delta(line);
     }
     false
 }
@@ -1440,5 +1477,7 @@ return 0;
         );
         let live = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nreturn r3;\n";
         assert_eq!(select_statements(live), live);
+        let branched = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nif (a3) {\n  r3 = a4;\n}\nreturn r3;\n";
+        assert_eq!(select_statements(branched), branched);
     }
 }
