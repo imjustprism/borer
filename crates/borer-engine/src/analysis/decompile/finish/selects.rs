@@ -17,8 +17,11 @@ use super::*;
 /// short-circuit test whose arms store `1` and `0` in one variable is that
 /// variable set to the test ([`truth_diamond`]); an `if` nested alone in
 /// an `if` behind values only its test reads is one `&&` chain
-/// ([`and_chain`]); and a byte-wide flag a chain compares with zero is the
-/// flag itself ([`quiet_flags`]).
+/// ([`and_chain`]); an `else` that stores a default and then repeats the
+/// first arm under a second test is one `||` ([`or_default`]); an `if`
+/// whose arms store two different names is that choice ([`named_choice`]);
+/// and a byte-wide flag a chain compares with zero is the flag itself
+/// ([`quiet_flags`]).
 ///
 /// # Arguments
 ///
@@ -44,7 +47,7 @@ pub(super) fn select_statements(text: &str) -> String {
             k += 3;
             continue;
         }
-        if and_chain(&mut lines, k) {
+        if and_chain(&mut lines, k) || or_default(&mut lines, k) || named_choice(&mut lines, k) {
             changed = true;
             continue;
         }
@@ -576,6 +579,226 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
     true
 }
 
+/// Rewrites `if (a) { x = p; } else { x = q; if (b) { x = p; } }` at line
+/// `k` as `x = q; if (a || b) { x = p; }`.
+///
+/// A compiler lays that `||` out as the first test storing `p` and the
+/// miss storing `q` before the second test stores `p` again. `x` is
+/// private ([`unaliased`]), and `a`, `b`, `p` and `q` call nothing and do
+/// not read `x`, so storing `q` on the way into the test changes no value
+/// the test or `p` reads. A comment that names `&x` is not a use of that
+/// address.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the outer `if`.
+///
+/// # Returns
+///
+/// Whether the two tests became one.
+fn or_default(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some((pad, a, x, p, q, b)) = or_arms(lines, k) else {
+        return false;
+    };
+    if !readable(&a, &x) || !readable(&b, &x) || !readable(&p, &x) || !readable(&q, &x) {
+        return false;
+    }
+    let pad_s = " ".repeat(pad);
+    let term = |c: &str| {
+        if c.contains('?') {
+            format!("({c})")
+        } else {
+            c.to_owned()
+        }
+    };
+    let rewritten = [
+        format!("{pad_s}{x} = {q};"),
+        format!("{pad_s}if ({} || {}) {{", term(&a), term(&b)),
+        format!("{pad_s}  {x} = {p};"),
+        format!("{pad_s}}}"),
+    ];
+    let end = loops::closing(lines, k, pad).and_then(|mid| loops::closing(lines, mid, pad));
+    let Some(end) = end else {
+        return false;
+    };
+    lines.splice(k..=end, rewritten);
+    true
+}
+
+/// The pieces of an `if (a) { x = p; } else { x = q; if (b) { x = p; } }`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the outer `if`.
+///
+/// # Returns
+///
+/// The indentation, the two tests, the variable and the two values.
+fn or_arms(lines: &[String], k: usize) -> Option<(usize, String, String, String, String, String)> {
+    let open = lines.get(k)?;
+    let pad = indent_of(open);
+    let a = if_opener(open.trim())?.to_owned();
+    let mid = loops::closing(lines, k, pad)
+        .filter(|&m| lines.get(m).is_some_and(|l| l.trim() == "} else {"))?;
+    let end = loops::closing(lines, mid, pad)
+        .filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))?;
+    let (x, p) = only_assign(lines, k + 1..mid, pad + 2)?;
+    let inner = (mid + 1..end).find(|&j| {
+        lines
+            .get(j)
+            .is_some_and(|l| !l.trim().is_empty() && !l.trim().starts_with("//"))
+    })?;
+    let stored = lines.get(inner)?;
+    let (y, q) = plain_assignment(stored).filter(|_| indent_of(stored) == pad + 2)?;
+    if y != x {
+        return None;
+    }
+    let nxt = (inner + 1..end).find(|&j| {
+        lines
+            .get(j)
+            .is_some_and(|l| !l.trim().is_empty() && !l.trim().starts_with("//"))
+    })?;
+    let b = lines
+        .get(nxt)
+        .filter(|l| indent_of(l) == pad + 2)
+        .and_then(|l| if_opener(l.trim()))?
+        .to_owned();
+    if loops::closing(lines, nxt, pad + 2) != Some(end - 1) {
+        return None;
+    }
+    let (z, p2) = only_assign(lines, nxt + 1..end - 1, pad + 4)?;
+    if z != x || p2 != p || !unaliased(lines, &x) {
+        return None;
+    }
+    Some((pad, a, x, p, q.to_owned(), b))
+}
+
+/// Tells whether `name` is a value only this function stores, ignoring
+/// comments.
+///
+/// The same names as [`private`]. An escape note (`// note: &local_c
+/// escapes`) names the frame's floor slot even when no statement takes
+/// that address, and a comment is not a second reader of the store this
+/// fold moves. A code line that contains `&name` still keeps the `if`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `name` - The assigned name.
+fn unaliased(lines: &[String], name: &str) -> bool {
+    let slot = name.starts_with("local_") || name.starts_with("home_");
+    let needle = format!("&{name}");
+    let taken = lines.iter().any(|l| {
+        let t = l.trim_start();
+        !t.starts_with("//") && l.contains(&needle)
+    });
+    vars::is_var_name(name) || is_register_name(name) || (slot && !taken)
+}
+
+/// Rewrites `if (c) { x = a; } else { x = b; }` at line `k`, when `a` and
+/// `b` are names, as `x = c ? a : b;`.
+///
+/// The arms store nothing but a name, and `x` is private ([`private`]), so
+/// the choice and the two `if` arms write the same name into `x`. A test
+/// that calls something, or an arm that is not one name, stays an `if`:
+/// that is the shape a source wrote as a statement.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the `if`.
+///
+/// # Returns
+///
+/// Whether the `if` became a choice.
+fn named_choice(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(open) = lines.get(k) else {
+        return false;
+    };
+    let pad = indent_of(open);
+    let Some(cond) = if_opener(open.trim()) else {
+        return false;
+    };
+    if cond.contains('?') || cond.contains(',') || impure(cond) {
+        return false;
+    }
+    let Some(mid) = loops::closing(lines, k, pad)
+        .filter(|&m| lines.get(m).is_some_and(|l| l.trim() == "} else {"))
+    else {
+        return false;
+    };
+    let Some(end) =
+        loops::closing(lines, mid, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    let Some((x, a)) = only_assign(lines, k + 1..mid, pad + 2) else {
+        return false;
+    };
+    let Some((y, b)) = only_assign(lines, mid + 1..end, pad + 2) else {
+        return false;
+    };
+    let name =
+        |w: &str| w.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && is_ident(w);
+    if x != y
+        || !name(&a)
+        || !name(&b)
+        || a == b
+        || a == x
+        || b == x
+        || !private(lines, &x)
+        || mentions_ident(cond, &x)
+    {
+        return false;
+    }
+    let pad_s = " ".repeat(pad);
+    lines.splice(k..=end, [format!("{pad_s}{x} = {cond} ? {a} : {b};")]);
+    true
+}
+
+/// The one assignment at indentation `pad` in `span`, when the span holds
+/// nothing else.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `span` - The lines inside one arm.
+/// * `pad` - The indentation of that arm.
+///
+/// # Returns
+///
+/// The variable and the value, or `None` when the arm is not one assignment.
+fn only_assign(
+    lines: &[String],
+    span: std::ops::Range<usize>,
+    pad: usize,
+) -> Option<(String, String)> {
+    let mut found = None;
+    for line in lines.get(span)? {
+        if line.trim().is_empty() || line.trim().starts_with("//") {
+            continue;
+        }
+        let (v, r) = plain_assignment(line).filter(|_| indent_of(line) == pad)?;
+        if found.is_some() {
+            return None;
+        }
+        found = Some((v.to_owned(), r.to_owned()));
+    }
+    found
+}
+
+/// Tells whether an expression calls nothing and does not read `var`.
+///
+/// # Arguments
+///
+/// * `expr` - The expression.
+/// * `var` - The variable the rewrite stores early.
+fn readable(expr: &str, var: &str) -> bool {
+    !impure(expr) && !expr.contains('?') && !mentions_ident(expr, var)
+}
+
 /// Tells whether a line only declares names: a type and a list, no value,
 /// call or jump.
 ///
@@ -739,5 +962,44 @@ if (a2 != 0) {
 return 0;
 ";
         assert_eq!(select_statements(called), called);
+    }
+
+    /// An `else` that stores a default and then the first arm's value under
+    /// a second test is one `||`. A call in that default stays two tests,
+    /// because the call would then run when the first test is true.
+    #[test]
+    fn an_or_of_two_stores_is_one_test() {
+        let text = "uint32_t local_c;\n\nif (a1 == 0x40011000) {\n  local_c = g32_20000004;\n} else {\n  local_c = g32_20000000;\n  if (a1 == 0x40011400) {\n    local_c = g32_20000004;\n  }\n}\n*(uint32_t*)(a1 + 8) = local_c;\n";
+        assert_eq!(
+            select_statements(text),
+            "uint32_t local_c;\n\nlocal_c = g32_20000000;\nif (a1 == 0x40011000 || a1 == 0x40011400) {\n  local_c = g32_20000004;\n}\n*(uint32_t*)(a1 + 8) = local_c;\n"
+        );
+        let called = text.replace("local_c = g32_20000000;", "local_c = sub_1();");
+        assert_eq!(select_statements(&called), called);
+        let global = text.replace("local_c", "g32_10");
+        assert_eq!(select_statements(&global), global);
+        let noted = format!(
+            "// note: &local_c escapes; locals from there up are reloaded after calls\n{text}"
+        );
+        let noted_out = format!(
+            "// note: &local_c escapes; locals from there up are reloaded after calls\n{}",
+            select_statements(text)
+        );
+        assert_eq!(select_statements(&noted), noted_out);
+        let aliased = text.replace("uint32_t local_c;", "uint32_t local_c;\nsub_9(&local_c);");
+        assert_eq!(select_statements(&aliased), aliased);
+    }
+
+    /// Arms that store two different names are a choice. An arm that
+    /// computes a value stays an `if`, which is the statement a source wrote.
+    #[test]
+    fn two_names_in_an_if_are_a_choice() {
+        let text = "FILE *var1;\n\nif (a1 == 0) {\n  var1 = stdout;\n} else {\n  var1 = stderr;\n}\nfprintf(var1, s);\n";
+        assert_eq!(
+            select_statements(text),
+            "FILE *var1;\n\nvar1 = a1 == 0 ? stdout : stderr;\nfprintf(var1, s);\n"
+        );
+        let expr = "uint32_t r1;\n\nif (a1 == 0) {\n  r1 = a1 + a2;\n} else {\n  r1 = a1 + a3;\n}\nreturn r1;\n";
+        assert_eq!(select_statements(expr), expr);
     }
 }
