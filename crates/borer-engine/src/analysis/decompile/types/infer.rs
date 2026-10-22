@@ -1063,10 +1063,11 @@ fn format_slot(lines: &[String], line: &str, at: usize, before: usize) -> Option
 /// argument `index`.
 ///
 /// A literal with no conversion at `index` says nothing. A positional
-/// conversion (`%2$s`), an integer conversion, two pointers that
-/// disagree, or a message the body assigns refuses the operand: an
-/// unknown message is not guessed. An assignment moves the text the
-/// callers passed (`a1 += 3` makes `"%s %lu"` read `%lu`).
+/// conversion (`%2$s`), a conversion this cannot read (`%I64u`), an
+/// integer conversion, two pointers that disagree, or a message the body
+/// assigns refuses the operand: an unknown message is not guessed. An
+/// assignment moves the text the callers passed (`a1 += 3` makes
+/// `"%s %lu"` read `%lu`).
 ///
 /// # Arguments
 ///
@@ -1086,7 +1087,7 @@ fn agreed_slot(lines: &[String], msgid: &str, index: usize) -> Option<Slot> {
     let line = lines.iter().find(|l| l.starts_with(&prefix))?;
     let mut found = None;
     for lit in quoted(line.get(prefix.len()..)?)? {
-        if lit.contains('$') {
+        if lit.contains('$') || !caller_format_readable(&lit) {
             return None;
         }
         match conversion_slot(&lit, index) {
@@ -1101,6 +1102,56 @@ fn agreed_slot(lines: &[String], msgid: &str, index: usize) -> Option<Slot> {
         }
     }
     found.map(Slot::Pointer)
+}
+
+/// Whether every conversion in `literal` is one [`conversion_slot`] can count.
+///
+/// A caller note is evidence only when the whole format can be read. An
+/// unknown conversion (`%I64u`) is not "no argument": the arguments after
+/// it cannot be counted, so one readable sibling must not type the operand.
+///
+/// # Arguments
+///
+/// * `literal` - The format, quotes included, as the note spells it.
+///
+/// # Returns
+///
+/// `false` when a conversion is positional, truncated, or not in the set
+/// [`conversion_slot`] sizes. A format with no conversion is readable.
+fn caller_format_readable(literal: &str) -> bool {
+    let Some(body) = literal.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+        return false;
+    };
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            continue;
+        }
+        if chars.peek() == Some(&'%') {
+            chars.next();
+            continue;
+        }
+        while let Some(&c) = chars.peek() {
+            if c == '*' || "hlLqjzt".contains(c) || "-+ #0123456789.'".contains(c) {
+                chars.next();
+                continue;
+            }
+            if c == '$' {
+                return false;
+            }
+            break;
+        }
+        let Some(conv) = chars.next() else {
+            return false;
+        };
+        if conv == 'm' {
+            continue;
+        }
+        if !"diouxXcsfFeEgGaApn".contains(conv) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The quoted literals on a `// formats` note.
@@ -1325,6 +1376,12 @@ error(0, 0, format, a2);",
         assert_eq!(api_pointer(&text, "a2"), None);
         let text = lines(
             "// formats a1: \"%s\" \"%d\"
+format = gettext(a1);
+error(0, 0, format, a2);",
+        );
+        assert_eq!(api_pointer(&text, "a2"), None);
+        let text = lines(
+            "// formats a1: \"%s\" \"%I64u\"
 format = gettext(a1);
 error(0, 0, format, a2);",
         );
