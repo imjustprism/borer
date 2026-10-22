@@ -154,6 +154,11 @@ impl Exec<'_, '_> {
     /// declares as an integer (a sign mask's bits, [`Exec::stamp_reg_ty`],
     /// then the declaration the register keeps for every value it holds)
     /// would convert as that integer in C, so its bits are reinterpreted.
+    /// A float operation whose operands carry no width of their own (a
+    /// `mulsd` of two registers) is held at the width it read in a cast:
+    /// a cast over a bare operation otherwise names the operation's own
+    /// width, so `(float)(xmm0 * xmm1)` would read as the single product
+    /// and not the conversion of the double one.
     ///
     /// # Arguments
     ///
@@ -162,6 +167,9 @@ impl Exec<'_, '_> {
     /// * `from` - The float width it reads, [`Ty::F32`] or [`Ty::F64`].
     pub(super) fn float_source(&mut self, instr: &Instruction, k: u32, from: Ty) -> Expr {
         let lane = scalar_lane(self.val(instr, k), from);
+        if matches!(&lane, Expr::Bin(op, ..) if op.is_float()) && float_lane(&lane).is_none() {
+            return Expr::Cast(Box::new(lane), from);
+        }
         let Expr::Var(key) = lane else {
             return lane;
         };
