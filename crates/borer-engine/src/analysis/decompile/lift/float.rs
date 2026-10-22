@@ -44,6 +44,35 @@ impl Exec<'_, '_> {
                         .is_some_and(|ty| matches!(ty, Ty::F32 | Ty::F64)))
     }
 
+    /// The value a plain move of `v` leaves in operand 0: `v`, but only
+    /// its low qword for a `movq` between vector registers of an integer
+    /// value that may be wider ([`keeps_vector`], or a packed result), as
+    /// the move clears the bits above it.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The move.
+    /// * `v` - The value of its source.
+    pub(super) fn vector_qword(&self, instr: &Instruction, v: Expr) -> Expr {
+        let vector = |op: u32| {
+            instr.op_kind(op) == OpKind::Register && instr.op_register(op).is_vector_register()
+        };
+        let wide = keeps_vector(&v)
+            || matches!(&v, Expr::Call(name, _)
+                if !name.starts_with("__lane_")
+                    && crate::analysis::decompile::vector::packs(name));
+        if matches!(instr.mnemonic(), Mnemonic::Movq | Mnemonic::Vmovq)
+            && vector(0)
+            && vector(1)
+            && wide
+            && !self.holds_float(instr.op1_register(), &v)
+        {
+            Expr::Cast(Box::new(v), Ty::U64)
+        } else {
+            v
+        }
+    }
+
     /// Tells whether a value is a parameter the convention passes in a
     /// vector register: a float.
     ///

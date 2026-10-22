@@ -60,6 +60,7 @@ mod protection;
 mod protos;
 mod regression;
 mod reloc;
+mod replay_rows;
 mod replayed;
 mod search;
 mod strings;

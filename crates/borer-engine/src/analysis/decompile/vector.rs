@@ -1350,6 +1350,13 @@ fn operand(e: &Expr, want: Vt, n: &Names<'_>) -> String {
             e.render(n)
         }
         Expr::Var(Key::Reg(r)) if want.whole && r.is_xmm() => e.render(n),
+        Expr::Cast(x, ty @ (Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64)) => {
+            let x = match **x {
+                Expr::Var(_) | Expr::Deref(..) => x.render(n),
+                _ => format!("({})", x.render(n)),
+            };
+            format!("({word})({}){x}", ty.name())
+        }
         _ => match float_elem(e) {
             Some(elem) => {
                 let lanes = Vt {

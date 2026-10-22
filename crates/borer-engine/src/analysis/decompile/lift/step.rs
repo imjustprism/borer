@@ -491,7 +491,7 @@ impl Exec<'_, '_> {
                     {
                         mask(v, 0xffff_ffff)
                     }
-                    _ => v,
+                    _ => self.vector_qword(instr, v),
                 };
                 self.write_op0(instr, v);
             }
