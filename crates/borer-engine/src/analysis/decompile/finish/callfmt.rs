@@ -364,8 +364,13 @@ fn exported(program: &Program, entry: u64) -> bool {
 ///
 /// # Returns
 ///
-/// The sites, or `None` when the address is stored, indexed or tabulated.
+/// The sites, or `None` when the address is stored, indexed or tabulated,
+/// or discovery stopped before every caller was found. A caller that passes
+/// `"%lu"` may still be missing when one that passes `"%s"` was already recorded.
 fn direct_calls(analysis: &Analysis, entry: u64) -> Option<Vec<u64>> {
+    if analysis.incomplete {
+        return None;
+    }
     let mut calls = Vec::new();
     for site in analysis.xrefs_to(entry) {
         match site.kind {
@@ -707,5 +712,17 @@ mod tests {
             mov_def(&program, &instr),
             Def::Follow(Register::RAX)
         ));
+    }
+
+    /// Discovery that ran out of fuel has not seen every caller. Their
+    /// literals are not evidence.
+    #[test]
+    fn an_unfinished_discovery_has_no_caller_list() {
+        let program = Program::raw_x64(&[0xc3]);
+        let mut analysis = Analysis::compute(&program);
+        analysis.incomplete = true;
+        assert!(direct_calls(&analysis, 0x1000).is_none());
+        analysis.incomplete = false;
+        assert!(direct_calls(&analysis, 0x1000).is_some());
     }
 }
