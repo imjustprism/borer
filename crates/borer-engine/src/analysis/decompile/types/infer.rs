@@ -919,20 +919,27 @@ fn call_is_whole(l: &Line<'_>) -> bool {
     false
 }
 
-/// The one right-hand side assigned to `name`, when the text assigns it once.
+/// The one right-hand side assigned to `name` before line `before`.
+///
+/// An assignment after the call does not reach it. A global (`// @`)
+/// can change between the assignment and the call, so it is not followed.
 ///
 /// # Arguments
 ///
 /// * `lines` - The function, header lines included.
 /// * `name` - The variable.
+/// * `before` - The line index of the use. Earlier lines are the only ones read.
 ///
 /// # Returns
 ///
-/// The right-hand side, or `None` when `name` is assigned more than once
-/// or not at all.
-fn sole_rhs<'a>(lines: &'a [String], name: &str) -> Option<&'a str> {
+/// The right-hand side, or `None` when `name` is a global, is assigned
+/// more than once before the use, or is not assigned before it.
+fn sole_rhs<'a>(lines: &'a [String], name: &str, before: usize) -> Option<&'a str> {
+    if global_name(lines, name) {
+        return None;
+    }
     let mut found = None;
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+    for line in lines.iter().take(before).filter(|l| !l.starts_with("//")) {
         let code = line.split("//").next().unwrap_or("").trim();
         let Some(stmt) = code.strip_suffix(';') else {
             continue;
@@ -951,6 +958,28 @@ fn sole_rhs<'a>(lines: &'a [String], name: &str) -> Option<&'a str> {
     found
 }
 
+/// Tells whether `name` is a global the text locates with `// @`.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `name` - The variable.
+///
+/// # Returns
+///
+/// Whether a declaration of `name` carries an address comment.
+fn global_name(lines: &[String], name: &str) -> bool {
+    lines.iter().any(|l| {
+        let Some((code, note)) = l.split_once("//") else {
+            return false;
+        };
+        note.contains('@')
+            && code
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|w| w == name)
+    })
+}
+
 /// The format string `expr` prints, following one assignment of a name.
 ///
 /// # Arguments
@@ -958,11 +987,12 @@ fn sole_rhs<'a>(lines: &'a [String], name: &str) -> Option<&'a str> {
 /// * `lines` - The function, header lines included.
 /// * `expr` - A format argument: a literal, a `gettext` call, or a name.
 /// * `depth` - Assignments already followed. Stops at 4.
+/// * `before` - The line index of the use. Only an earlier assignment counts.
 ///
 /// # Returns
 ///
 /// The format, or `None` when `expr` is not one of those.
-fn resolved_format(lines: &[String], expr: &str, depth: u8) -> Option<Resolved> {
+fn resolved_format(lines: &[String], expr: &str, depth: u8, before: usize) -> Option<Resolved> {
     if depth == 4 {
         return None;
     }
@@ -976,7 +1006,7 @@ fn resolved_format(lines: &[String], expr: &str, depth: u8) -> Option<Resolved> 
     if !is_ident(expr) {
         return None;
     }
-    resolved_format(lines, sole_rhs(lines, expr)?, depth + 1)
+    resolved_format(lines, sole_rhs(lines, expr, before)?, depth + 1, before)
 }
 
 /// What a variadic format argument is, when the format is not itself a
@@ -993,11 +1023,12 @@ fn resolved_format(lines: &[String], expr: &str, depth: u8) -> Option<Resolved> 
 /// * `lines` - The function, header lines included.
 /// * `line` - The line.
 /// * `at` - The byte the operand starts at.
+/// * `before` - The index of `line`. Only an earlier assignment of the format counts.
 ///
 /// # Returns
 ///
 /// The slot, or `None` when the call shows none.
-fn format_slot(lines: &[String], line: &str, at: usize) -> Option<Slot> {
+fn format_slot(lines: &[String], line: &str, at: usize, before: usize) -> Option<Slot> {
     let l = Line {
         text: line,
         toks: lex(line),
@@ -1022,7 +1053,7 @@ fn format_slot(lines: &[String], line: &str, at: usize) -> Option<Slot> {
     }
     let expr = argument_text(&l, open, format)?;
     let variadic = index - decl.params.len();
-    match resolved_format(lines, expr, 0)? {
+    match resolved_format(lines, expr, 0, before)? {
         Resolved::Literal(lit) => conversion_slot(&lit, variadic),
         Resolved::Message(msgid) => agreed_slot(lines, msgid.trim(), variadic),
     }
@@ -1123,13 +1154,14 @@ fn quoted(rest: &str) -> Option<Vec<String>> {
 /// * `lines` - The function, header lines included.
 /// * `line` - The line.
 /// * `at` - The byte the name starts at.
+/// * `before` - The index of `line`.
 ///
 /// # Returns
 ///
 /// The slot, or `None` when the name is not a whole argument of a
 /// declared call.
-fn known_slot(lines: &[String], line: &str, at: usize) -> Option<Slot> {
-    slot_at(line, at).or_else(|| format_slot(lines, line, at))
+fn known_slot(lines: &[String], line: &str, at: usize, before: usize) -> Option<Slot> {
+    slot_at(line, at).or_else(|| format_slot(lines, line, at, before))
 }
 
 /// The pointer type the declared calls a parameter is passed to whole
@@ -1161,12 +1193,16 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
     }
     let mut found: Option<String> = None;
     let mut whole = true;
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+    for (before, line) in lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.starts_with("//"))
+    {
         for at in word_positions(line, param) {
             if cast_before(line.get(..at).unwrap_or("")).is_some() {
                 return None;
             }
-            match known_slot(lines, line, at) {
+            match known_slot(lines, line, at, before) {
                 Some(Slot::Narrow(_)) => return None,
                 Some(Slot::Pointer(t)) => {
                     if found.as_ref().is_some_and(|f| *f != t) {
@@ -1189,9 +1225,13 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
         }
     }
     for copy in copies(lines, param) {
-        for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        for (before, line) in lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.starts_with("//"))
+        {
             for at in word_positions(line, &copy) {
-                match known_slot(lines, line, at) {
+                match known_slot(lines, line, at, before) {
                     Some(Slot::Narrow(_)) => return None,
                     Some(Slot::Pointer(t)) if found.as_ref().is_some_and(|f| *f != t) => {
                         return None;
@@ -1330,6 +1370,17 @@ format = gettext(a1);
 error(0, 0, format, a2);",
         );
         assert_eq!(api_pointer(&text, "a2"), None);
+        let text = lines(
+            "uint64_t g64_1000; // @ 0x1000
+printf(g64_1000, a1);
+g64_1000 = gettext(\"%s\");",
+        );
+        assert_eq!(api_pointer(&text, "a1"), None);
+        let text = lines(
+            "printf(format, a1);
+format = gettext(\"%s\");",
+        );
+        assert_eq!(api_pointer(&text, "a1"), None);
         let typed = super::type_parameters(
             "// signature: void f(char *a1, uint64_t a2)\nformat = gettext(a1);\nerror(0, 0, format, a2);\n",
             "uint64_t",

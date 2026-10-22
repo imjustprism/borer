@@ -569,7 +569,27 @@ fn mov_def(program: &Program, instr: &Instruction) -> Def {
     }
 }
 
-/// The quoted C literal at `addr`, when the whole string fits on one note.
+/// Tells whether `addr` is in a section the image does not write.
+///
+/// A string in writable memory can be changed before the call, so the
+/// bytes in the file are not the text the call prints.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - The first byte of the string.
+///
+/// # Returns
+///
+/// Whether a non-writable section contains `addr`.
+fn readonly(program: &Program, addr: u64) -> bool {
+    program.sections.iter().any(|s| {
+        let start = s.va.0;
+        addr >= start && addr < start.saturating_add(s.vsize) && !s.writable
+    })
+}
+
+/// The quoted C literal at `addr`, when it sits in read-only memory and fits on one note.
 ///
 /// # Arguments
 ///
@@ -579,9 +599,12 @@ fn mov_def(program: &Program, instr: &Instruction) -> Def {
 /// # Returns
 ///
 /// `"text"` with quotes and backslashes escaped, or `None` when no short
-/// string is there.
+/// read-only string is there.
 fn literal(program: &Program, addr: u64) -> Option<String> {
     const CAP: usize = 512;
+    if !readonly(program, addr) {
+        return None;
+    }
     let (len, text) = cstr_text_at(program, addr, 1, CAP)?;
     if len > CAP {
         return None;
