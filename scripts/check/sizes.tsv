@@ -45,9 +45,9 @@ crates/borer-engine/src/analysis/decompile/lift/calls.rs::call#1	524
 crates/borer-engine/src/analysis/decompile/lift/effects.rs::leading_reads#1	126
 crates/borer-engine/src/analysis/decompile/lift/effects.rs::step#1	101
 crates/borer-engine/src/analysis/decompile/lift/float.rs::x87#1	257
-crates/borer-engine/src/analysis/decompile/lift/mod.rs::exec_block#1	163
+crates/borer-engine/src/analysis/decompile/lift/mod.rs::exec_block#1	159
 crates/borer-engine/src/analysis/decompile/lift/pack.rs::effects_unpack_as_they_were#1	120
-crates/borer-engine/src/analysis/decompile/lift/step.rs	1749
+crates/borer-engine/src/analysis/decompile/lift/step.rs	1692
 crates/borer-engine/src/analysis/decompile/lift/step.rs::step#1	1166
 crates/borer-engine/src/analysis/decompile/lift_a32/float.rs::vfp#1	230
 crates/borer-engine/src/analysis/decompile/lift_a32/mem.rs::memory#1	150

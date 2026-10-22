@@ -30,6 +30,7 @@ mod state;
 mod stated;
 mod step;
 mod strings;
+mod switch;
 
 pub(in crate::analysis::decompile) use conv::*;
 pub(in crate::analysis::decompile) use effects::*;
@@ -963,17 +964,7 @@ pub(super) fn exec_block(
         ex.flags = Flags::Unknown;
     }
     ex.flags_needed = u32::MAX;
-    if facts.rebase_flags == Some(Rebase::Registers)
-        && matches!(ex.flags, Flags::Cmp(..) | Flags::Test(..))
-        && let Some(src) = ex.flag_src
-    {
-        ex.write_compared(&src);
-    }
-    if let Some((phi, live)) = phi {
-        for k in phi(ex.env) {
-            ex.materialize_phi(k, live);
-        }
-    }
+    ex.place_phis(phi, facts.rebase_flags);
     let branch_flags = ex.flags.clone();
     if let Some(how) = facts.rebase_flags {
         let src = ex.flag_src;
