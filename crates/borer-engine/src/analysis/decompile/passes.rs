@@ -97,6 +97,8 @@ pub enum Pass {
     QuietZeroTests,
     /// Drops an assignment an `if` block repeats.
     DropRepeatedAssignments,
+    /// Writes conditional assignments as the statements a source spells.
+    SelectStatements,
     /// Writes `x = x op y` as `x op= y`.
     CompoundAssign,
     /// Writes `x != 0 ? x : y` as `x ?: y`.
@@ -182,6 +184,7 @@ impl Pass {
         Self::NormalizeTemps,
         Self::QuietZeroTests,
         Self::DropRepeatedAssignments,
+        Self::SelectStatements,
         Self::CompoundAssign,
         Self::Elvis,
         Self::SpellIndex,
@@ -248,6 +251,7 @@ impl Pass {
             Self::NormalizeTemps => "normalize_temps",
             Self::QuietZeroTests => "quiet_zero_tests",
             Self::DropRepeatedAssignments => "drop_repeated_assignments",
+            Self::SelectStatements => "selects::select_statements",
             Self::CompoundAssign => "compound_assign",
             Self::Elvis => "elvis",
             Self::SpellIndex => "spell_index",

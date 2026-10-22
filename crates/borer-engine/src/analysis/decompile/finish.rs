@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 use crate::num::from_usize;
 
+mod selects;
+
 /// The text passes every decompile ends with.
 ///
 /// The header lines the text's own calls give, one variable per register
@@ -75,6 +77,7 @@ pub(super) fn polish_skipping(
         text,
         drop_repeated_assignments,
     );
+    let text = skip.apply(Pass::SelectStatements, text, selects::select_statements);
     let mut out = String::with_capacity(text.len() + 1);
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
