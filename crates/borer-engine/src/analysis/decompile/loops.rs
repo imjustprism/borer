@@ -37,7 +37,7 @@ pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
     let mut changed = false;
     let mut k = 0;
     while k < lines.len() {
-        if guarded_loop(lines, k) || counted_while(lines, k) {
+        if guarded_loop(lines, k) || counted_while(lines, k) || exit_arm(lines, k) {
             changed = true;
             continue;
         }
@@ -218,6 +218,111 @@ fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
             .collect();
     lines.splice(k..=close, rewritten);
     true
+}
+
+/// Moves the statements an endless loop runs on its way out after it:
+/// `while (1) { A; if (C) { T; break; } B }` is `while (1) { A; if (C) {
+/// break; } B } T`.
+///
+/// The `break` is the loop's only one, so the line after the loop is
+/// reached only through it and `T` runs there exactly when it ran before.
+/// `T` may hold no label, `break`, `continue` or `case`, which would bind
+/// to something else once moved.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the `while (1) {`.
+///
+/// # Returns
+///
+/// Whether the exit's statements moved.
+fn exit_arm(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(open) = lines.get(k).filter(|l| l.trim() == "while (1) {") else {
+        return false;
+    };
+    let pad = indent_of(open);
+    let Some(close) =
+        closing(lines, k, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    let owned: Vec<usize> = (k + 1..close)
+        .filter(|&j| lines.get(j).is_some_and(|l| breaks(l.trim())) && breaks_loop(lines, k, j))
+        .collect();
+    let &[j] = owned.as_slice() else {
+        return false;
+    };
+    let at = |n: usize, text: &str, ind: usize| {
+        lines
+            .get(n)
+            .is_some_and(|l| l.trim() == text && indent_of(l) == ind)
+    };
+    if !at(j, "break;", pad + 4) || !at(j + 1, "}", pad + 2) {
+        return false;
+    }
+    let Some(o) = (k + 1..j)
+        .rev()
+        .find(|&o| lines.get(o).is_some_and(|l| indent_of(l) <= pad + 2))
+        .filter(|&o| lines.get(o).is_some_and(|l| if_opener(l.trim()).is_some()))
+    else {
+        return false;
+    };
+    let exit = lines.get(o + 1..j).unwrap_or(&[]);
+    if exit.is_empty()
+        || exit.iter().any(|l| {
+            let t = l.trim();
+            is_label(l) || t.contains("break;") || t.contains("continue;") || is_case(t)
+        })
+    {
+        return false;
+    }
+    let moved: Vec<String> = exit
+        .iter()
+        .map(|l| l.get(4..).unwrap_or(l.trim_start()).to_owned())
+        .collect();
+    lines.splice(close + 1..close + 1, moved);
+    lines.drain(o + 1..j);
+    true
+}
+
+/// Tells whether the `break` on line `j` leaves the loop opened on line
+/// `k`, not a loop or `switch` nested in it.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The loop's opening line.
+/// * `j` - The `break`'s line.
+fn breaks_loop(lines: &[String], k: usize, j: usize) -> bool {
+    let Some(line) = lines.get(j) else {
+        return false;
+    };
+    if is_case(line.trim()) {
+        return false;
+    }
+    let mut ind = indent_of(line);
+    for o in (k..j).rev() {
+        let Some(l) = lines.get(o).filter(|l| !l.trim().is_empty()) else {
+            continue;
+        };
+        if indent_of(l) >= ind {
+            continue;
+        }
+        if o == k {
+            return true;
+        }
+        ind = indent_of(l);
+        let t = l.trim();
+        if ["while (", "for (", "do {", "switch ("]
+            .iter()
+            .any(|p| t.starts_with(p))
+            || is_case(t)
+        {
+            return false;
+        }
+    }
+    false
 }
 
 /// Finds the line that closes the block opened on line `k`: the first
@@ -477,6 +582,23 @@ mod tests {
         );
         let read = text.replace("  rsi = 0;\n", "  sub_3(rsi);\n");
         assert_eq!(run(&read), read);
+    }
+
+    /// What an endless loop runs on its one way out moves after it; with a
+    /// second `break` out of the loop it stays, while a `break` out of a
+    /// nested `switch` does not count.
+    #[test]
+    fn an_exit_arm_moves_after_its_loop() {
+        let text = "while (1) {\n  rax = sub_1(rbx);\n  if (rax == 0) {\n    sub_2(rbx);\n    break;\n  }\n  switch (rax) {\n  case 1: break;\n  }\n}\nreturn 0;\n";
+        assert_eq!(
+            run(text),
+            "while (1) {\n  rax = sub_1(rbx);\n  if (rax == 0) {\n    break;\n  }\n  switch (rax) {\n  case 1: break;\n  }\n}\nsub_2(rbx);\nreturn 0;\n"
+        );
+        let two = text.replace(
+            "  case 1: break;\n",
+            "  case 1: break;\n  }\n  if (rax == 2) {\n    break;\n",
+        );
+        assert_eq!(run(&two), two);
     }
 
     /// A `while` whose variable is set right before it and stepped at the
