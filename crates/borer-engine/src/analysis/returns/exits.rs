@@ -28,10 +28,12 @@ pub(super) enum Scan {
 /// epilogue's unwinding of the frame (or by another such `nop`), which
 /// unoptimized GCC code puts at a `void` function's closing brace; a stack-cookie check run in rax (`sub rax, fs:[0x28]`), which
 /// a compiler places in the result register only when it holds nothing;
-/// and `xor eax, eax` within a run that also clears `ecx`, `esi`, `edi`
-/// or `r8d`-`r11d`, which no ABI returns in, the epilogue of code built to
-/// zero the registers it used (`-fzero-call-used-regs`), which leaves rax
-/// alone when it holds the result.
+/// and `xor eax, eax` within a run that also clears two or more of `ecx`,
+/// `esi`, `edi` and `r8d`-`r11d`, which no ABI returns in, each one read
+/// by nothing before the exit: the epilogue of code built to zero the
+/// registers it used (`-fzero-call-used-regs`), which leaves rax alone
+/// when it holds the result. A cleared register the exit path then reads
+/// (`xor ecx, ecx; mov [rdx], ecx`) is a value, not an epilogue.
 ///
 /// # Arguments
 ///
@@ -51,7 +53,7 @@ pub(super) fn scan(
 ) -> Scan {
     let rax = reg == ResultReg::Rax;
     let mut read = false;
-    let mut cleared = false;
+    let (mut cleared, mut used) = (0u8, 0u8);
     let mut after: Option<&Instruction> = None;
     for i in instrs.iter().rev() {
         let next = after.replace(i);
@@ -66,14 +68,23 @@ pub(super) fn scan(
                 return Scan::Idle;
             }
             if let Some(w) = wrote {
-                let idle = rax && (cookie_check(i) || (cleared && self_xor(i, Register::RAX)));
+                let idle = rax
+                    && (cookie_check(i)
+                        || (cleared.count_ones() >= 2 && self_xor(i, Register::RAX)));
                 return if idle {
                     Scan::Idle
                 } else {
                     Scan::Wrote(w, read)
                 };
             }
-            cleared |= SCRATCH.iter().any(|&r| self_xor(i, r));
+            if rax {
+                for (bit, &r) in SCRATCH.iter().enumerate() {
+                    if self_xor(i, r) && used & (1 << bit) == 0 {
+                        cleared |= 1 << bit;
+                    }
+                }
+                used |= scratch_reads(factory, i);
+            }
             read |= rax && reads_rax(factory, i);
             continue;
         }
@@ -152,6 +163,31 @@ fn cookie_check(i: &Instruction) -> bool {
     matches!(i.mnemonic(), Mnemonic::Sub | Mnemonic::Xor)
         && i.op1_kind() == OpKind::Memory
         && matches!(i.memory_segment(), Register::FS | Register::GS)
+}
+
+/// The [`SCRATCH`] registers an instruction reads, one bit each in their
+/// order.
+///
+/// # Arguments
+///
+/// * `factory` - Register-access facts.
+/// * `i` - The instruction.
+fn scratch_reads(factory: &mut InstructionInfoFactory, i: &Instruction) -> u8 {
+    let mut mask = 0;
+    for ur in factory.info(i).used_registers() {
+        let reads = matches!(
+            ur.access(),
+            OpAccess::Read | OpAccess::CondRead | OpAccess::ReadWrite | OpAccess::ReadCondWrite
+        );
+        if let Some(bit) = SCRATCH
+            .iter()
+            .position(|&r| r == ur.register().full_register())
+            && reads
+        {
+            mask |= 1 << bit;
+        }
+    }
+    mask
 }
 
 /// Tells whether an instruction reads rax at any width.

@@ -674,8 +674,10 @@ mod tests {
         assert_eq!(select_statements(&read), read);
         let global = text.replace("local_18 = var1;", "g32_1000 = 1;");
         assert_eq!(select_statements(&global), global);
-        let pointed = format!("sub_9(&local_18);
-{text}");
+        let pointed = format!(
+            "sub_9(&local_18);
+{text}"
+        );
         assert_eq!(select_statements(&pointed), pointed);
     }
 

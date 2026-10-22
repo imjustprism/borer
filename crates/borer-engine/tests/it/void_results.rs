@@ -82,10 +82,11 @@ fn a_cookie_check_in_rax_returns_nothing() {
 
 /// An epilogue clearing the scratch registers with rax returns nothing.
 ///
-/// `xor eax, eax` within a run that clears registers no ABI returns in is
-/// code zeroing the registers it used, which leaves rax alone when it
-/// holds the result; zeroing rax and rdx alone is a pair of zeros handed
-/// back.
+/// `xor eax, eax` within a run that clears two or more registers no ABI
+/// returns in is code zeroing the registers it used, which leaves rax
+/// alone when it holds the result; zeroing rax and rdx alone is a pair of
+/// zeros handed back, and a cleared register the exit then stores is a
+/// value, so a zero in rax beside it may be the result too.
 #[test]
 fn a_register_clearing_epilogue_returns_nothing() {
     let cleared = [
@@ -93,6 +94,7 @@ fn a_register_clearing_epilogue_returns_nothing() {
         0x31, 0xc0, // ASM: xor eax,eax
         0x31, 0xd2, // ASM: xor edx,edx
         0x31, 0xc9, // ASM: xor ecx,ecx
+        0x31, 0xf6, // ASM: xor esi,esi
         0xc3, // ASM: ret
     ];
     let p = program64(&cleared);
@@ -105,6 +107,16 @@ fn a_register_clearing_epilogue_returns_nothing() {
         0xc3, // ASM: ret
     ];
     let p = program64(&paired);
+    let a = Analysis::compute(&p);
+    assert_eq!(verdict(&a, X64), None);
+    let stored = [
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x31, 0xc9, // ASM: xor ecx,ecx
+        0x31, 0xf6, // ASM: xor esi,esi
+        0x89, 0x0a, // ASM: mov [rdx],ecx
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&stored);
     let a = Analysis::compute(&p);
     assert_eq!(verdict(&a, X64), None);
 }
