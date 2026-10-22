@@ -964,11 +964,11 @@ pub(crate) fn discover(program: &Program) -> Analysis {
 
 /// Promotes a tail call that was walked as a block of its caller.
 ///
-/// The block is one straight run that returns. Nothing falls into it and
-/// nothing but a single unconditional jump reaches it, and another
-/// function already starts between the caller and the block, so the block
-/// was laid out with the functions rather than inside its caller. The
-/// caller is walked again and the jump becomes a tail call.
+/// The block is one straight run that returns without touching the stack
+/// pointer, so it is not the caller's own epilogue. Nothing but one
+/// unconditional jump reaches it, and another function already starts
+/// between the caller and the block. The caller is walked again and the
+/// jump becomes a tail call.
 ///
 /// # Arguments
 ///
@@ -976,11 +976,12 @@ pub(crate) fn discover(program: &Program) -> Analysis {
 fn outlines(walks: &mut Walks<'_>) {
     let mut promote = Vec::new();
     for (&entry, w) in &walks.walked {
+        let pred = predecessors(w);
         for &t in &w.followed {
             if t > entry
                 && !walks.starts.contains(&t)
                 && walks.starts.range((entry + 1)..t).next().is_some()
-                && straight_return(w, t)
+                && straight_return(w, t, &pred)
             {
                 promote.push(t);
             }
@@ -994,30 +995,63 @@ fn outlines(walks: &mut Walks<'_>) {
     }
 }
 
-/// Tells whether `t` is a straight run of instructions that returns, with
-/// a single unconditional jump as its only way in.
+/// The one instruction that falls or jumps to each address in a walk, or
+/// `None` at an address more than one instruction reaches.
+///
+/// # Arguments
+///
+/// * `w` - The walk.
+fn predecessors(w: &Walked) -> BTreeMap<u64, Option<u64>> {
+    let mut pred = BTreeMap::new();
+    let mut note = |from: u64, to: u64| {
+        if !w.seen.contains_key(&to) {
+            return;
+        }
+        pred.entry(to)
+            .and_modify(|from| *from = None)
+            .or_insert(Some(from));
+    };
+    for i in w.seen.values() {
+        match i.flow() {
+            Flow::Next | Flow::Call => note(i.va, i.next()),
+            Flow::CondJump => {
+                if let Some(t) = i.target() {
+                    note(i.va, t);
+                }
+                note(i.va, i.next());
+            }
+            Flow::Jump => {
+                if let Some(t) = i.target() {
+                    note(i.va, t);
+                }
+            }
+            Flow::Return | Flow::Invalid => {}
+        }
+    }
+    pred
+}
+
+/// Tells whether `t` is a straight run that returns without using the
+/// stack pointer, reached by one unconditional jump.
+///
+/// A `pop` of the caller's saved registers is that caller's epilogue even
+/// when another function sits between them. A run that reads or writes
+/// `sp` stays in the caller.
 ///
 /// # Arguments
 ///
 /// * `w` - The walk that contains `t`.
 /// * `t` - The address the jump targets.
-fn straight_return(w: &Walked, t: u64) -> bool {
-    if !w.seen.contains_key(&t) {
+/// * `pred` - Each address's single predecessor ([`predecessors`]).
+fn straight_return(w: &Walked, t: u64, pred: &BTreeMap<u64, Option<u64>>) -> bool {
+    let Some(from) = pred.get(&t).copied().flatten() else {
         return false;
-    }
-    let mut jumps = 0usize;
-    for i in w.seen.values() {
-        let hits = i.target() == Some(t) || (i.next() == t && i.flow() != Flow::Jump);
-        if !hits {
-            continue;
-        }
-        if i.flow() == Flow::Jump && i.target() == Some(t) {
-            jumps += 1;
-        } else {
-            return false;
-        }
-    }
-    if jumps != 1 {
+    };
+    if !w
+        .seen
+        .get(&from)
+        .is_some_and(|i| i.flow() == Flow::Jump && i.target() == Some(t))
+    {
         return false;
     }
     let mut va = t;
@@ -1026,10 +1060,11 @@ fn straight_return(w: &Walked, t: u64) -> bool {
         let Some(i) = w.seen.get(&va) else {
             return false;
         };
+        if touches_sp(i) {
+            return false;
+        }
         if let Some(p) = prev
-            && w.seen.values().any(|o| {
-                o.va != p && (o.target() == Some(va) || (o.next() == va && o.flow() != Flow::Jump))
-            })
+            && pred.get(&va).copied().flatten() != Some(p)
         {
             return false;
         }
@@ -1043,6 +1078,16 @@ fn straight_return(w: &Walked, t: u64) -> bool {
         }
     }
     false
+}
+
+/// Tells whether an instruction reads or writes the stack pointer.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn touches_sp(i: &Insn) -> bool {
+    let regs = i.registers();
+    regs.reads.contains(&a32::SP) || regs.writes.contains(&a32::SP)
 }
 
 /// Most jumps on from function to function a float result is followed

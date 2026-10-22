@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use borer_engine::analysis::Analysis;
+use borer_engine::analysis::{Analysis, BlockTerm};
 use borer_engine::disasm;
 use borer_engine::isa::Isa;
 use borer_engine::isa::a32::{ItState, Mode, decode, text};
@@ -392,6 +392,38 @@ fn a_jump_past_another_function_is_a_tail_call() {
     assert_eq!(entries, [0, 2, 0xc]);
     let jumper = a.function_at(ELF_TEXT).expect("the jump");
     assert!(jumper.blocks.iter().all(|b| b.start != ELF_TEXT + 0xc));
+}
+
+/// A `pop` of the registers the caller pushed stays in that caller when
+/// the `pop` is laid out past another function.
+#[test]
+fn a_pop_past_another_function_stays_with_its_caller() {
+    let text: [u16; 7] = [
+        0xb510, // ASM: push {r4, lr}
+        0xe003, // ASM: b 0xc
+        0x2002, // ASM: movs r0, #2
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0xbd10, // ASM: pop {r4, pc}
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("epi.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 4]);
+    let caller = a
+        .functions
+        .iter()
+        .find(|f| f.entry == ELF_TEXT)
+        .expect("the caller");
+    let pop = caller
+        .blocks
+        .iter()
+        .find(|b| b.start == ELF_TEXT + 0xc)
+        .expect("the pop stays in the caller");
+    assert_eq!(pop.term, BlockTerm::Ret);
 }
 
 /// One instruction's encoding in its instruction set.
