@@ -1049,7 +1049,8 @@ fn predecessors(w: &Walked) -> BTreeMap<u64, Option<u64>> {
 ///
 /// A `pop` of the caller's saved registers is that caller's epilogue even
 /// when another function sits between them. A run that reads or writes
-/// `sp` stays in the caller.
+/// `sp` stays in the caller. A conditional return falls through, so it is
+/// not the end of the run.
 ///
 /// # Arguments
 ///
@@ -1082,7 +1083,7 @@ fn straight_return(w: &Walked, t: u64, pred: &BTreeMap<u64, Option<u64>>) -> boo
             return false;
         }
         match i.flow() {
-            Flow::Return => return true,
+            Flow::Return => return !guarded(i),
             Flow::Next => {
                 prev = Some(i.va);
                 va = i.next();

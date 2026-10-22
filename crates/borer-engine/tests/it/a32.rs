@@ -454,6 +454,31 @@ fn a_conditional_return_into_a_block_keeps_it() {
     assert!(caller.blocks.iter().any(|b| b.start == ELF_TEXT + 0x18));
 }
 
+/// A conditional return that falls through into a branch back stays with
+/// the caller. The return is not the end of that block.
+#[test]
+fn a_conditional_return_that_falls_back_stays_with_its_caller() {
+    let text: [u32; 5] = [
+        0xea00_0001, // ASM: b 0xc
+        0xe3a0_0002, // ASM: mov r0, #2
+        0xe12f_ff1e, // ASM: bx lr
+        0x012f_ff1e, // ASM: bxeq lr
+        0xeaff_fffa, // ASM: b 0
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("bxeq.elf"), elf32(&bytes, &[], ELF_TEXT))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 4]);
+    let caller = a
+        .functions
+        .iter()
+        .find(|f| f.entry == ELF_TEXT)
+        .expect("the caller");
+    assert!(caller.blocks.iter().any(|b| b.start == ELF_TEXT + 0xc));
+}
+
 /// A switch case that a jump also targets stays in the switch's function.
 #[test]
 fn a_jump_table_case_stays_in_its_caller() {
