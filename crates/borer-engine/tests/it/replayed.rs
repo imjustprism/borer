@@ -89,3 +89,23 @@ fn a_join_compare_reads_the_fresh_element() {
         0xc3, // ASM: ret
     ]);
 }
+
+/// A store to a local that a read through a choice of pointers may land
+/// on (`a1 ?: &local`) is written before the read: the read is the
+/// local's zero when the pointer is null.
+#[test]
+fn a_read_through_a_choice_of_a_local_sees_its_store() {
+    let text = replayed(&[
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xc6, 0x44, 0x24, 0x20, 0x00, // ASM: mov byte [rsp+0x20],0
+        0x48, 0x8d, 0x44, 0x24, 0x20, // ASM: lea rax,[rsp+0x20]
+        0x48, 0x85, 0xc9, // ASM: test rcx,rcx
+        0x48, 0x0f, 0x45, 0xc1, // ASM: cmovne rax,rcx
+        0x0f, 0xb6, 0x00, // ASM: movzx eax,byte [rax]
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ]);
+    let store = text.find(" = 0;").unwrap_or(usize::MAX);
+    let read = text.find("return ").unwrap_or(0);
+    assert!(store < read, "{text}");
+}

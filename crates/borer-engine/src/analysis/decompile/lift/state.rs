@@ -1083,8 +1083,9 @@ impl<'a> Exec<'_, 'a> {
     }
 
     /// The frame offset a computed address is based on: `Sp(k)` alone or
-    /// plus other terms (`&local_28 + (eax >> 5) * 4`), never a stack
-    /// address read out of memory.
+    /// plus other terms (`&local_28 + (eax >> 5) * 4`), or the lower of a
+    /// choice's two arms (`a2 ?: &local_58`, which is the slot when `a2` is
+    /// null), never a stack address read out of memory.
     ///
     /// # Arguments
     ///
@@ -1093,6 +1094,10 @@ impl<'a> Exec<'_, 'a> {
         match addr {
             Expr::Sp(k) => Some(*k),
             Expr::Bin(Op::Add, l, r) => Self::frame_base(l).or_else(|| Self::frame_base(r)),
+            Expr::Ternary(_, a, b) => match (Self::frame_base(a), Self::frame_base(b)) {
+                (Some(x), Some(y)) => Some(x.min(y)),
+                (x, y) => x.or(y),
+            },
             _ => None,
         }
     }
