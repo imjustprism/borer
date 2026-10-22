@@ -586,9 +586,11 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
 /// miss storing `q` before the second test stores `p` again. `x` is
 /// private ([`unaliased`]), and `a`, `b`, `p` and `q` call nothing and do
 /// not read `x`, so storing `q` on the way into the test changes no value
-/// the test or `p` reads. `q` is now read when `a` is true, so it cannot
-/// be a memory operand: that read used to sit on the path `a` skipped. A
-/// comment that names `&x` is not a use of that address.
+/// the test or `p` reads. `a`, `b`, `p` and `q` are plain values: no
+/// memory operand and no address. `q` now runs when `a` is true, and the
+/// store is visible to any later read of those bytes, including a test
+/// that reaches them through another slot's address. A comment that names
+/// `&x` is not a use of that address.
 ///
 /// # Arguments
 ///
@@ -606,9 +608,10 @@ fn or_default(lines: &mut Vec<String>, k: usize) -> bool {
         || !readable(&b, &x)
         || !readable(&p, &x)
         || !readable(&q, &x)
-        || q.contains('*')
-        || q.contains('[')
-        || q.contains("->")
+        || !plain_value(&a)
+        || !plain_value(&b)
+        || !plain_value(&p)
+        || !plain_value(&q)
     {
         return false;
     }
@@ -807,6 +810,19 @@ fn readable(expr: &str, var: &str) -> bool {
     !impure(expr) && !expr.contains('?') && !mentions_ident(expr, var)
 }
 
+/// Tells whether `expr` is a value the early default store cannot change
+/// and that cannot fault when moved ahead of its test.
+///
+/// A memory operand or an address can name the same bytes as the slot the
+/// fold stores, through another local. A plain value cannot.
+///
+/// # Arguments
+///
+/// * `expr` - One test or one stored value.
+fn plain_value(expr: &str) -> bool {
+    !expr.contains('*') && !expr.contains('[') && !expr.contains('&') && !expr.contains("->")
+}
+
 /// Tells whether a line only declares names: a type and a list, no value,
 /// call or jump.
 ///
@@ -998,6 +1014,8 @@ return 0;
         assert_eq!(select_statements(&aliased), aliased);
         let guarded = "uint32_t local_c;\n\nif (a1 == 0) {\n  local_c = 1;\n} else {\n  local_c = *(uint32_t*)a1;\n  if (a2 != 0) {\n    local_c = 1;\n  }\n}\nreturn local_c;\n";
         assert_eq!(select_statements(guarded), guarded);
+        let alias = "uint32_t local_c;\nuint32_t local_58;\n\nif (((uint32_t*)&local_58)[a1] == 1) {\n  local_c = 2;\n} else {\n  local_c = 0;\n  if (a2 != 0) {\n    local_c = 2;\n  }\n}\nreturn local_c;\n";
+        assert_eq!(select_statements(alias), alias);
     }
 
     /// Arms that store two different names are a choice. An arm that
