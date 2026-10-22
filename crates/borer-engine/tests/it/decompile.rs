@@ -18,7 +18,7 @@ use borer_engine::analysis::{
     },
 };
 use common::fixture;
-use decompiled::{decompiled, program64, replays_clean, runs_agree};
+use decompiled::{decompiled, program64, program64_with_data, replays_clean, runs_agree};
 use fixture_pack::fixture_pack;
 
 /// Three arms that name three literals under one value are a flag tested
@@ -2017,32 +2017,6 @@ fn a_frame_pointer_set_from_the_rax_alias_places_stack_arguments() {
     assert_eq!(stack_args, Some(1));
 }
 
-/// Builds a 64-bit program of `code` at 0x140001000 with `data` at
-/// 0x140002000, read-only, and no symbols.
-///
-/// # Arguments
-///
-/// * `code` - The bytes of `.text`, at most a page.
-/// * `data` - The bytes of `.rdata`, at most a page.
-fn program64_with_data(code: &[u8], data: &[u8]) -> borer_engine::program::Program {
-    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
-    let mut bytes = vec![0u8; 0x2000];
-    bytes[..code.len()].copy_from_slice(code);
-    bytes[0x1000..0x1000 + data.len()].copy_from_slice(data);
-    let mut p = Program::raw(
-        bytes,
-        Arch::X86_64,
-        0x1_4000_0000,
-        Some(0x1_4000_1000),
-        vec![
-            Section::mapped(".text", 0x1_4000_1000, 0, 0x1000, false, true),
-            Section::mapped(".rdata", 0x1_4000_2000, 0x1000, 0x1000, false, false),
-        ],
-    );
-    p.format = BinaryFormat::Pe;
-    p
-}
-
 /// A method returning by hidden pointer with three declared parameters
 /// needs five positions, one on the stack, so it has `this` though only
 /// four registers are read.
@@ -2221,7 +2195,7 @@ fn switch_function_cases() {
 {out}"
     );
     assert!(
-        out.contains("if ("),
+        out.contains("default: {"),
         "default bound-check lost:
 {out}"
     );

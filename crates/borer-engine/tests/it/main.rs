@@ -65,6 +65,7 @@ mod replay_rows;
 mod replayed;
 mod returns;
 mod search;
+mod shapes;
 mod strings;
 mod structure;
 mod syscalls;

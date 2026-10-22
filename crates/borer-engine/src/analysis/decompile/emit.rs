@@ -113,7 +113,7 @@ pub(super) fn emit_block<L: Lifter>(
                 let _ = writeln!(out, "{}", jump_to(st, t));
                 return i + 1;
             }
-            if let Some(next) = try_switch(ctx, st, i, idx_expr, out, depth) {
+            if let Some(next) = try_switch(ctx, st, i, idx_expr, None, out, depth) {
                 return next;
             }
             goto_switch(ctx, st, i, idx_expr, out);
@@ -166,7 +166,7 @@ pub(super) fn emit_block<L: Lifter>(
         let _ = writeln!(out, "{}", jump_to(st, br.fall));
         return i + 1;
     };
-    if let Some(next) = ladder::try_ladder(ctx, st, i, &br.cond, t, f, out, depth) {
+    if let Some(next) = ladder::try_compare_switch(ctx, st, i, &br.cond, t, f, out, depth) {
         return next;
     }
     let kept = call
@@ -1310,6 +1310,9 @@ pub(super) const SWITCH_VALUES_MAX: usize = 512;
 /// * `st` - Emission state.
 /// * `i` - The dispatch block.
 /// * `idx_expr` - The switch index expression.
+/// * `guard` - The block that bounds the index before the dispatch and the
+///   block every value past the table reaches, when the switch takes that
+///   bound in as its `default` ([`ladder::try_guarded_switch`]).
 /// * `out` - Receives the text.
 /// * `depth` - Structuring nesting depth.
 ///
@@ -1323,6 +1326,7 @@ pub(super) fn try_switch<L: Lifter>(
     st: &mut Emit<'_, L>,
     i: usize,
     idx_expr: &Expr,
+    guard: Option<(usize, usize)>,
     out: &mut String,
     depth: usize,
 ) -> Option<usize> {
@@ -1337,7 +1341,7 @@ pub(super) fn try_switch<L: Lifter>(
     if targets.is_empty() || targets.len() > SWITCH_VALUES_MAX {
         return None;
     }
-    let arms: Vec<Arm> = table_arms(targets)
+    let mut arms: Vec<Arm> = table_arms(targets)
         .into_iter()
         .filter_map(|(target, ns)| {
             Some(Arm {
@@ -1349,20 +1353,25 @@ pub(super) fn try_switch<L: Lifter>(
     if arms.len() > SWITCH_ARMS_MAX {
         return None;
     }
+    let mut default = guard.map(|(_, d)| d);
+    if let Some(arm) = arms.iter_mut().find(|a| Some(a.body) == default) {
+        arm.labels.push("default:".to_owned());
+        default = None;
+    }
     let names = ctx.names();
     let idx_expr = match idx_expr {
         Expr::Sext(e, _) => e.as_ref(),
         other => other,
     };
     let switch_expr = idx_expr.render(&names);
-    let headers: BTreeSet<usize> = [i].into_iter().collect();
+    let headers: BTreeSet<usize> = [i].into_iter().chain(guard.map(|(g, _)| g)).collect();
     Some(emit_switch(
         ctx,
         st,
         &headers,
         &switch_expr,
         &arms,
-        None,
+        default,
         out,
         depth,
     ))

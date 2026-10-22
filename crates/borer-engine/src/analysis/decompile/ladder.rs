@@ -230,3 +230,121 @@ pub(super) fn try_ladder<L: Lifter>(
         depth,
     ))
 }
+
+/// Writes the compare tree or the bounded jump table that block `i`'s
+/// branch heads as a `switch`: the bounded table first
+/// ([`try_guarded_switch`]), then the tree ([`try_ladder`]).
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state.
+/// * `st` - Emission state.
+/// * `i` - The block, whose statements are already written.
+/// * `cond` - Its branch condition.
+/// * `t` - Its branch target block.
+/// * `f` - Its fall-through block.
+/// * `out` - Receives the text.
+/// * `depth` - Structuring nesting depth.
+///
+/// # Returns
+///
+/// The block after the switch, or `None` when the branch heads neither.
+#[expect(clippy::too_many_arguments, reason = "the structurer's shape")]
+pub(super) fn try_compare_switch<L: Lifter>(
+    ctx: &mut Ctx<'_>,
+    st: &mut Emit<'_, L>,
+    i: usize,
+    cond: &expr::Cond,
+    t: usize,
+    f: usize,
+    out: &mut String,
+    depth: usize,
+) -> Option<usize> {
+    try_guarded_switch(ctx, st, i, cond, (t, f), out, depth)
+        .or_else(|| try_ladder(ctx, st, i, cond, t, f, out, depth))
+}
+
+/// Writes a jump table's bound check and dispatch as one `switch` whose
+/// `default` is where the check sends the values past the table.
+///
+/// A compiler guards a jump table with an unsigned compare of the index
+/// against the last entry (`cmp edi, 6; ja L_default`) before it indexes
+/// the table, so every value from `0` to the bound has an entry and every
+/// other one, a negative one read unsigned included, takes the guard's
+/// other side: exactly what a `default:` the source wrote does. The
+/// guard qualifies when its other side is the dispatch block itself,
+/// entered from the guard alone and writing nothing before it jumps, the
+/// dispatch indexes with the value the guard compares, and the table has
+/// as many entries as the bound admits.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state.
+/// * `st` - Emission state.
+/// * `i` - The guard block, whose statements are already written.
+/// * `cond` - Its branch condition.
+/// * `(t, f)` - Its branch target and fall-through blocks.
+/// * `out` - Receives the text.
+/// * `depth` - Structuring nesting depth.
+///
+/// # Returns
+///
+/// The block after the switch, or `None` when the branch is no such guard.
+fn try_guarded_switch<L: Lifter>(
+    ctx: &mut Ctx<'_>,
+    st: &mut Emit<'_, L>,
+    i: usize,
+    cond: &expr::Cond,
+    (t, f): (usize, usize),
+    out: &mut String,
+    depth: usize,
+) -> Option<usize> {
+    use crate::isa::x86::ConditionCode as C;
+    let Flags::Cmp(v, Expr::Const(k), _) = &cond.flags else {
+        return None;
+    };
+    let (d, default, len) = match cond.cc.0 {
+        C::a => (f, t, k.checked_add(1)?),
+        C::be => (t, f, k.checked_add(1)?),
+        C::ae => (f, t, *k),
+        C::b => (t, f, *k),
+        _ => return None,
+    };
+    if depth >= MAX_DEPTH
+        || d == default
+        || st.blocks[d].term != BlockTerm::Indirect
+        || st.emitted[d]
+        || st.outside(d)
+        || st.outside(default)
+        || st.preds[d].as_slice() != [i]
+        || st.loops.contains(&d)
+    {
+        return None;
+    }
+    let block = &st.blocks[d];
+    let (_, targets) = ctx
+        .analysis
+        .jump_tables
+        .range(block.start..block.end)
+        .next()?;
+    if u64::try_from(targets.len()).ok()? != len {
+        return None;
+    }
+    let dispatch = run_block(ctx, st, d);
+    let idx = dispatch.switch_idx.filter(|_| dispatch.lines.is_empty())?;
+    let bare = |mut e: &Expr| {
+        while let Expr::Sext(x, _) | Expr::Cast(x, _) = e {
+            e = x;
+        }
+        e.clone()
+    };
+    if bare(&idx) != bare(v) {
+        return None;
+    }
+    st.emitted[d] = true;
+    let next = try_switch(ctx, st, d, &idx, Some((i, default)), out, depth);
+    if next.is_none() {
+        st.emitted[d] = false;
+    }
+    next
+}
