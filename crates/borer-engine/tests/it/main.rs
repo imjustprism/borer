@@ -62,6 +62,7 @@ mod regression;
 mod reloc;
 mod replay_rows;
 mod replayed;
+mod returns;
 mod search;
 mod strings;
 mod structure;

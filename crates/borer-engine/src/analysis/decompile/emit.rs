@@ -361,7 +361,7 @@ pub(super) fn emit_block<L: Lifter>(
                 && !st.emitted[t];
             let then_is_copy = then.dups.contains(&t);
             let els_is_copy = els.dups.contains(&f);
-            let then_first = then_ok && !(then_is_copy && els_ok && !els_is_copy);
+            let then_first = target_first(st, ctx, (&then, t, then_ok), (&els, f, els_ok));
             if then_first {
                 let mut buf = String::new();
                 emit_run(ctx, st, &then, st.start_of(f), None, &mut buf, depth + 1);
@@ -512,6 +512,55 @@ pub(super) fn emit_block<L: Lifter>(
     );
     let _ = writeln!(out, "{}", goto(st.start(f)));
     i + 1
+}
+
+/// Tells whether a branch writes its jump target arm as the `if` body and
+/// the fall-through arm after it.
+///
+/// The target arm goes first when it stands alone, unless the fall-through
+/// arm stands alone too and reads better first: the target arm is a
+/// private copy and the fall-through arm is not (a shared tail reads
+/// better jumped to), or the fall-through arm ends only in calls that
+/// never return while the target arm can return, the guard clause
+/// `if (bad) { fail(); }`, whose text runs on into the code after it. When
+/// the arm that returns is a lone `ret` of a function that returns
+/// nothing, it is the guard instead, `if (ok) return;` before the failing
+/// code, whichever side it is on.
+///
+/// # Arguments
+///
+/// * `st` - Emission state.
+/// * `ctx` - Per-function state: whether the function returns nothing
+///   ([`Ctx::unused_result`]).
+/// * `then` - The target arm, its first block, and whether it stands alone.
+/// * `els` - The fall-through arm, its first block, and whether it stands
+///   alone.
+fn target_first<L: Lifter>(
+    st: &Emit<'_, L>,
+    ctx: &Ctx<'_>,
+    (then, t, then_ok): (&Region, usize, bool),
+    (els, f, els_ok): (&Region, usize, bool),
+) -> bool {
+    let dies = |r: &Region| {
+        let mut ends = r
+            .order
+            .iter()
+            .filter(|&&b| st.succs[b].is_empty())
+            .peekable();
+        r.exits.is_empty()
+            && ends.peek().is_some()
+            && ends.all(|&b| matches!(st.blocks[b].term, BlockTerm::Call | BlockTerm::Invalid))
+    };
+    let bare = |r: &Region| {
+        ctx.unused_result
+            && matches!(r.order.as_slice(), [b] if st.blocks[*b].term == BlockTerm::Ret
+                && st.succs[*b].is_empty()
+                && L::body_len(&st.code[*b]) == 0)
+    };
+    let fall_first = (then.dups.contains(&t) && !els.dups.contains(&f))
+        || (dies(els) && !dies(then) && !bare(then))
+        || (dies(then) && bare(els));
+    then_ok && !(els_ok && fall_first)
 }
 
 /// Tells whether a copy of block `b` goes on to its one successor with no
