@@ -586,8 +586,9 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
 /// miss storing `q` before the second test stores `p` again. `x` is
 /// private ([`unaliased`]), and `a`, `b`, `p` and `q` call nothing and do
 /// not read `x`, so storing `q` on the way into the test changes no value
-/// the test or `p` reads. A comment that names `&x` is not a use of that
-/// address.
+/// the test or `p` reads. `q` is now read when `a` is true, so it cannot
+/// be a memory operand: that read used to sit on the path `a` skipped. A
+/// comment that names `&x` is not a use of that address.
 ///
 /// # Arguments
 ///
@@ -601,7 +602,14 @@ fn or_default(lines: &mut Vec<String>, k: usize) -> bool {
     let Some((pad, a, x, p, q, b)) = or_arms(lines, k) else {
         return false;
     };
-    if !readable(&a, &x) || !readable(&b, &x) || !readable(&p, &x) || !readable(&q, &x) {
+    if !readable(&a, &x)
+        || !readable(&b, &x)
+        || !readable(&p, &x)
+        || !readable(&q, &x)
+        || q.contains('*')
+        || q.contains('[')
+        || q.contains("->")
+    {
         return false;
     }
     let pad_s = " ".repeat(pad);
@@ -988,6 +996,8 @@ return 0;
         assert_eq!(select_statements(&noted), noted_out);
         let aliased = text.replace("uint32_t local_c;", "uint32_t local_c;\nsub_9(&local_c);");
         assert_eq!(select_statements(&aliased), aliased);
+        let guarded = "uint32_t local_c;\n\nif (a1 == 0) {\n  local_c = 1;\n} else {\n  local_c = *(uint32_t*)a1;\n  if (a2 != 0) {\n    local_c = 1;\n  }\n}\nreturn local_c;\n";
+        assert_eq!(select_statements(guarded), guarded);
     }
 
     /// Arms that store two different names are a choice. An arm that
