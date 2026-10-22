@@ -153,8 +153,11 @@ fn self_xor(i: &Instruction, full: Register) -> bool {
         && i.op0_register().full_register() == full
 }
 
-/// Tells whether an instruction checks a stack cookie against the copy
-/// the thread block holds: `sub` or `xor` with an `fs:` or `gs:` operand.
+/// Tells whether an instruction checks a stack cookie in the thread block.
+///
+/// That is `sub` or `xor` with the cookie's own slot, `fs:[0x28]` or
+/// `gs:[0x14]`. Any other thread-local operand is a value the function may
+/// be computing its result from.
 ///
 /// # Arguments
 ///
@@ -162,8 +165,20 @@ fn self_xor(i: &Instruction, full: Register) -> bool {
 fn cookie_check(i: &Instruction) -> bool {
     matches!(i.mnemonic(), Mnemonic::Sub | Mnemonic::Xor)
         && i.op1_kind() == OpKind::Memory
-        && matches!(i.memory_segment(), Register::FS | Register::GS)
+        && i.memory_base() == Register::None
+        && i.memory_index() == Register::None
+        && matches!(
+            (i.memory_segment(), i.memory_displacement64()),
+            (Register::FS, COOKIE_FS) | (Register::GS, COOKIE_GS)
+        )
 }
+
+/// Where glibc keeps the stack cookie on x86-64, in the thread block `fs`
+/// points at.
+const COOKIE_FS: u64 = 0x28;
+
+/// Where glibc keeps it on i386, under `gs`.
+const COOKIE_GS: u64 = 0x14;
 
 /// The [`SCRATCH`] registers an instruction reads, one bit each in their
 /// order.

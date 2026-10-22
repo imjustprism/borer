@@ -454,7 +454,8 @@ fn truth_diamond(lines: &mut Vec<String>, k: usize) -> bool {
 /// value only the second test reads is loaded between the two tests either
 /// way; read back, the load is a statement that splits the chain. Each
 /// such statement assigns, without a call, a private variable
-/// ([`private`]) no other line reads
+/// ([`private`]) read by a second test that calls nothing, so the value
+/// cannot change between the two, and that no other line reads
 /// or writes and that no other such statement's value reads, so writing
 /// its value into the test in its place computes the same. With no such
 /// statement the nesting is the structurer's own choice, and kept; so is
@@ -521,7 +522,7 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
         ]
         .contains(&b)
     });
-    if temps.is_empty() || temps.len() != m - k - 1 || truth_of_temp {
+    if temps.is_empty() || temps.len() != m - k - 1 || truth_of_temp || impure(&b) {
         return false;
     }
     let only_here = temps.iter().all(|(v, _)| {
@@ -581,6 +582,24 @@ fn declares(line: &str) -> bool {
         && !["return", "goto ", "break", "continue"]
             .iter()
             .any(|w| t.starts_with(w))
+}
+
+/// Tells whether a name is a value only this function's text holds.
+///
+/// That is a numbered variable, a register, or a stack slot whose address
+/// no line takes. A global, a parameter or a slot something points at is
+/// storage another reader may see, so a rewrite that moves or drops a
+/// store to it can change what that reader sees.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `name` - The assigned name.
+fn private(lines: &[String], name: &str) -> bool {
+    let slot = name.starts_with("local_") || name.starts_with("home_");
+    vars::is_var_name(name)
+        || is_register_name(name)
+        || (slot && !lines.iter().any(|l| l.contains(&format!("&{name}"))))
 }
 
 #[cfg(test)]
@@ -694,22 +713,16 @@ mod tests {
 return 0;
 ";
         assert_eq!(select_statements(text), text);
-    }
-}
+        let called = "uint32_t var1;
 
-/// Tells whether a name is a value only this function's text holds: a
-/// numbered variable, a register, or a stack slot whose address no line
-/// takes. A global, a parameter or a slot something points at is storage
-/// another reader may see, so a rewrite that moves or drops a store to it
-/// can change what that reader sees.
-///
-/// # Arguments
-///
-/// * `lines` - The body lines.
-/// * `name` - The assigned name.
-fn private(lines: &[String], name: &str) -> bool {
-    let slot = name.starts_with("local_") || name.starts_with("home_");
-    vars::is_var_name(name)
-        || is_register_name(name)
-        || (slot && !lines.iter().any(|l| l.contains(&format!("&{name}"))))
+if (a2 != 0) {
+  var1 = *(uint32_t*)a1;
+  if (sub_3(a1) == var1) {
+    sub_2();
+  }
+}
+return 0;
+";
+        assert_eq!(select_statements(called), called);
+    }
 }
