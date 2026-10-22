@@ -56,6 +56,7 @@ mod negfields;
 mod next;
 mod noise;
 mod objc;
+mod param_types;
 mod protection;
 mod protos;
 mod regression;
