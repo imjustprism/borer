@@ -383,6 +383,9 @@ fn texty(program: &Program, va: u64) -> bool {
 /// instruction past each covered stretch and its padding, and every
 /// frame-opening instruction ([`opens_frame`]) after it.
 ///
+/// A section the walk budget runs out in before its end marks the
+/// discovery incomplete, so the lists say functions may be missing.
+///
 /// # Arguments
 ///
 /// * `program` - The image.
@@ -418,6 +421,9 @@ pub(super) fn gaps(program: &Program, walks: &mut Walks<'_>) {
             }
             fresh = false;
             va += unit;
+        }
+        if va < end && walks.fuel == 0 {
+            walks.incomplete = true;
         }
     }
 }

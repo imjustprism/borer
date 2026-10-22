@@ -582,7 +582,10 @@ pub(in crate::analysis::decompile) enum Slot {
 /// its type; a variadic argument of a `printf`-like function (one whose
 /// last fixed parameter is its `format`) says what the conversion the
 /// format literal gives it reads ([`conversion_slot`]). An integer type
-/// that the two platforms size differently (`long`) says nothing.
+/// that the two platforms size differently (`long`) says nothing, and so
+/// does a parameter the two declare with different types (`connect`
+/// takes an `int` socket on POSIX and a pointer-wide `SOCKET` on
+/// Windows): the text does not say which platform it is.
 ///
 /// # Arguments
 ///
@@ -600,10 +603,12 @@ pub(in crate::analysis::decompile) fn slot_at(line: &str, at: usize) -> Option<S
     };
     let k = l.toks.iter().position(|t| t.at == at)?;
     let (callee, index, open) = argument_of(&l, k)?;
-    let decl = typelib::declared(callee, BinaryFormat::Elf)
-        .or_else(|| typelib::declared(callee, BinaryFormat::Pe))?;
+    let posix = typelib::declared(callee, BinaryFormat::Elf);
+    let windows = typelib::declared(callee, BinaryFormat::Pe);
+    let decl = posix.or(windows)?;
     if let Some(p) = decl.params.get(index) {
-        return Some(slot_of(p.ty));
+        let other = posix.and(windows).and_then(|w| w.params.get(index));
+        return other.is_none_or(|o| o.ty == p.ty).then(|| slot_of(p.ty));
     }
     let format = decl.params.len().checked_sub(1)?;
     if !decl.variadic || decl.params.get(format)?.name != "format" || callee.contains("scanf") {
@@ -840,7 +845,8 @@ mod tests {
     }
 
     /// A whole argument takes the declared parameter's type, and a
-    /// `printf` argument the conversion's.
+    /// `printf` argument the conversion's; a parameter the two platforms
+    /// declare differently (`connect`'s socket) says nothing.
     #[test]
     fn declared_parameters_type_their_arguments() {
         assert_eq!(slot_at("exit(a1);", 5), Some(Slot::Narrow("int32_t")));
@@ -859,6 +865,7 @@ mod tests {
         assert_eq!(slot_at(line, at("a4")), Some(Slot::Other));
         assert_eq!(slot_at(line, at("a5")), Some(Slot::Narrow("uint32_t")));
         assert_eq!(slot_at("strlen(a1 + 1);", 7), None);
+        assert_eq!(slot_at("connect(a1, a2, a3);", 8), None);
     }
 
     /// A parameter only passed to `exit` and stored to a 32-bit global is
