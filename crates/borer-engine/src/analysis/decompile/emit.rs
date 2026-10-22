@@ -1312,7 +1312,7 @@ pub(super) const SWITCH_VALUES_MAX: usize = 512;
 /// * `idx_expr` - The switch index expression.
 /// * `guard` - The block that bounds the index before the dispatch and the
 ///   block every value past the table reaches, when the switch takes that
-///   bound in as its `default` ([`ladder::try_guarded_switch`]).
+///   bound in as its `default` ([`ladder::try_compare_switch`]).
 /// * `out` - Receives the text.
 /// * `depth` - Structuring nesting depth.
 ///
