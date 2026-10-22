@@ -1,5 +1,6 @@
 //! Guard clauses and returns: the arm that fails or returns early stays
-//! the `if` body.
+//! the `if` body, and the `return` statements a compiler merged into one
+//! exit are written in each arm again.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -7,6 +8,7 @@
 )]
 
 use borer_engine::analysis::Analysis;
+use borer_engine::analysis::decompile::polish;
 
 use crate::decompiled::{decompiled, program64, replays_clean};
 
@@ -68,4 +70,71 @@ fn a_guard_clause_keeps_its_failing_arm_in_the_if() {
     );
     let a = Analysis::compute(&p);
     replays_clean(&p, &a, &[0x1_4000_1000, 0x1_4000_1020]);
+}
+
+/// A `return` the arms of an `if` chain share, each arm setting the value
+/// it hands back, is split into each arm.
+///
+/// The compiler merged the source's `return` statements into one exit;
+/// the split text runs the same statements on every path. A returned
+/// frame slot keeps the shared `return`, since a source variable lives
+/// there, and so does a tail that calls, whose call would be copied.
+#[test]
+fn merged_returns_split_into_the_arms() {
+    let packs = borer_engine::pack::Packs::default();
+    let text = concat!(
+        "// signature: uint32_t f(uint32_t a1, uint32_t a2)\n",
+        "if (a1 == 0) {\n",
+        "  g(1);\n",
+        "  var1 = 0;\n",
+        "} else {\n",
+        "  g(2);\n",
+        "  var1 = 1;\n",
+        "}\n",
+        "return var1;\n",
+    );
+    let out = polish(text, 64, &packs);
+    assert!(
+        out.contains("if (a1 == 0) {\n  g(1);\n  return 0;\n}\ng(2);\nreturn 1;\n"),
+        "{out}"
+    );
+    assert_eq!(out.matches("return").count(), 2, "{out}");
+    let guard = concat!(
+        "// signature: uint32_t f(uint32_t a1, uint32_t a2)\n",
+        "var1 = 0;\n",
+        "if (a1 == 0) {\n",
+        "  var1 = g(a2);\n",
+        "}\n",
+        "return var1;\n",
+    );
+    let out = polish(guard, 64, &packs);
+    assert!(
+        out.contains("if (a1 == 0) {\n  return g(a2);\n}\nreturn var1;"),
+        "{out}"
+    );
+    let slot = concat!(
+        "// signature: uint32_t f(uint32_t a1, uint32_t a2)\n",
+        "if (a1 == 0) {\n",
+        "  local_14 = 3;\n",
+        "}\n",
+        "return local_14;\n",
+    );
+    let out = polish(slot, 64, &packs);
+    assert_eq!(out.matches("return").count(), 1, "{out}");
+    let call = concat!(
+        "// signature: uint32_t f(uint32_t a1, uint32_t a2)
+",
+        "if (a1 == 0) {
+",
+        "  var1 = 3;
+",
+        "}
+",
+        "h(a2);
+",
+        "return var1;
+",
+    );
+    let out = polish(call, 64, &packs);
+    assert_eq!(out.matches("h(a2);").count(), 1, "{out}");
 }

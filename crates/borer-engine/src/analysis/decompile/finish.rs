@@ -54,7 +54,8 @@ pub(super) fn polish_skipping(
 ) -> String {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
-    let text = skip.apply(Pass::NameOwnFields, text.to_owned(), name_own_fields);
+    let text = skip.apply(Pass::SplitReturns, text.to_owned(), split_returns);
+    let text = skip.apply(Pass::NameOwnFields, text, name_own_fields);
     let text = skip.apply(Pass::SourceFile, text, source_file);
     let text = skip.apply(Pass::WireFormat, text, |t| wire_format(t, &streams));
     let text = skip.apply(Pass::SplitWebs, text, vars::split_webs);
@@ -147,6 +148,154 @@ fn drop_repeated_assignments(text: &str) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Longest run of plain statements between an `if` chain and the `return`
+/// [`split_returns`] copies into its arms.
+const SPLIT_TAIL_MAX: usize = 3;
+
+/// Gives each arm of an `if` chain that ends by setting the value a
+/// `return v;` after the chain hands back its own copy of that `return`.
+///
+/// A compiler merges the `return` statements of a function into one exit
+/// block, each site setting the result register and jumping there, so
+/// `if (c) { ...; v = 1; } else { ...; v = 0; } return v;` is the text of
+/// `if (c) { ...; return 1; } ...; return 0;`. Every arm that falls out
+/// of the chain must end in an assignment to `v`, a register's or
+/// temporary's name (a frame slot or a global is a source variable the
+/// `return` reads, which stays shared); an arm that leaves (a `return`,
+/// `goto`, `break` or `continue`) keeps its text. The copy is the
+/// `return` and the at most [`SPLIT_TAIL_MAX`] plain statements, none of
+/// them a call, between the chain and it, so the text runs exactly as
+/// before. A final `else` that falls out loses its braces instead: its
+/// statements follow the chain and run on into the tail, as the source's
+/// last `return` did.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function.
+///
+/// # Returns
+///
+/// The text with the merged returns split.
+pub(super) fn split_returns(text: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let mut changed = false;
+    let mut r = lines.len();
+    while r > 0 {
+        r -= 1;
+        if let Some(at) = split_return_at(&mut lines, r) {
+            changed = true;
+            r = at.min(lines.len());
+        }
+    }
+    if !changed {
+        return text.to_owned();
+    }
+    merge_return_assignments(&mut lines);
+    rejoin(&lines, text)
+}
+
+/// Splits the merged `return` on line `r` into the arms of the `if` chain
+/// before it ([`split_returns`]).
+///
+/// # Arguments
+///
+/// * `lines` - The function's lines, rewritten in place.
+/// * `r` - The line of a `return v;`.
+///
+/// # Returns
+///
+/// The chain's first line when the `return` was split, else `None`.
+fn split_return_at(lines: &mut Vec<String>, r: usize) -> Option<usize> {
+    let ret = lines.get(r)?;
+    let v = ret.trim().strip_prefix("return ")?.strip_suffix(';')?;
+    if !is_plain_var(v) || v.starts_with("local_") || is_global_name(v) {
+        return None;
+    }
+    let ind = indent_of(ret);
+    let mut close = r.checked_sub(1)?;
+    while lines[close].trim() != "}" {
+        let t = lines[close].trim();
+        if indent_of(&lines[close]) != ind
+            || r - close > SPLIT_TAIL_MAX
+            || !t.ends_with(';')
+            || transfers(t)
+            || impure(t)
+            || t.contains('{')
+            || t.contains('}')
+            || is_case(t)
+        {
+            return None;
+        }
+        close = close.checked_sub(1)?;
+    }
+    if indent_of(&lines[close]) != ind {
+        return None;
+    }
+    let mut arms: Vec<usize> = vec![close];
+    let mut open = close;
+    let final_else = loop {
+        open = open.checked_sub(1)?;
+        let l = &lines[open];
+        if l.trim().is_empty() || indent_of(l) > ind {
+            continue;
+        }
+        let t = l.trim();
+        if indent_of(l) < ind {
+            return None;
+        }
+        if t.starts_with("if (") && t.ends_with(") {") {
+            break arms.len() > 1 && lines[arms[1]].trim() == "} else {";
+        }
+        if t != "} else {" && !(t.starts_with("} else if (") && t.ends_with(") {")) {
+            return None;
+        }
+        arms.push(open);
+    };
+    let ends: Vec<Option<usize>> = arms
+        .iter()
+        .map(|&end| {
+            (open + 1..end)
+                .rev()
+                .find(|&k| !lines[k].trim().is_empty())
+                .filter(|&k| indent_of(&lines[k]) == ind + 2)
+        })
+        .collect();
+    let mut into: Vec<usize> = Vec::new();
+    for (&end, last) in arms.iter().zip(&ends) {
+        let last = (*last).filter(|&k| k > open)?;
+        let t = lines[last].trim();
+        if transfers(t) {
+            continue;
+        }
+        if plain_assignment(t).is_none_or(|(lhs, _)| lhs != v) {
+            return None;
+        }
+        into.push(end);
+    }
+    if into.is_empty() {
+        return None;
+    }
+    let tail: Vec<String> = lines[close + 1..=r]
+        .iter()
+        .map(|l| format!("  {l}"))
+        .collect();
+    if final_else && into.first() == Some(&close) {
+        let other = arms[1];
+        for l in &mut lines[other + 1..close] {
+            if let Some(rest) = l.strip_prefix("  ") {
+                *l = rest.to_owned();
+            }
+        }
+        lines.remove(close);
+        lines[other] = format!("{}}}", " ".repeat(ind));
+        into.remove(0);
+    }
+    for end in into {
+        lines.splice(end..end, tail.iter().cloned());
+    }
+    Some(open)
 }
 
 /// Writes `(x != 0 ? x : y)` as `(x ?: y)` on one line.

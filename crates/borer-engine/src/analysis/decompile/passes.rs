@@ -67,6 +67,8 @@ pub enum Pass {
     UserEnums,
     /// Names the fields of class-typed objects.
     NameFields,
+    /// Splits a `return` the arms of an `if` chain share into each arm.
+    SplitReturns,
     /// Names the fields of the function's own object.
     NameOwnFields,
     /// Writes the source file a function cites.
@@ -165,6 +167,7 @@ impl Pass {
         Self::RenameTyped,
         Self::UserEnums,
         Self::NameFields,
+        Self::SplitReturns,
         Self::NameOwnFields,
         Self::SourceFile,
         Self::WireFormat,
@@ -230,6 +233,7 @@ impl Pass {
             Self::RenameTyped => "rename_typed",
             Self::UserEnums => "apply_user_enums",
             Self::NameFields => "name_fields",
+            Self::SplitReturns => "split_returns",
             Self::NameOwnFields => "name_own_fields",
             Self::SourceFile => "source_file",
             Self::WireFormat => "wire_format",
