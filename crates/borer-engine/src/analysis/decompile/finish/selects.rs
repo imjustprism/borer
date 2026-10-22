@@ -211,7 +211,8 @@ const FRAME: [&str; 3] = ["local_", "arg_", "home_"];
 /// x) << 28;` as `if (x < 2) { x = 2; } y = x << 28;`.
 ///
 /// That is a clamp a source wrote before the variable's one use. It holds
-/// when the variable is read nowhere but in the choice, so its new value
+/// when the variable is one the function declares, not a named constant
+/// such as `NAN`, and is read nowhere but in the choice, so its new value
 /// reaches no one else; the statement and the test call nothing, so the
 /// test runs as early unseen; no loop or label surrounds the line, so the
 /// test runs once, against what it saw before; and the variable is no
@@ -292,7 +293,8 @@ fn clamp_hoist(lines: &mut Vec<String>, k: usize) -> bool {
                             && !declares(l)
                             && !l.trim_start().starts_with("//")
                     });
-                (!elsewhere && plain_assignment(t).is_none_or(|(lhs, _)| lhs != v))
+                let declared = lines.iter().any(|l| declares(l) && mentions_ident(l, v));
+                (!elsewhere && declared && plain_assignment(t).is_none_or(|(lhs, _)| lhs != v))
                     .then(|| (open, close, cond, value.to_owned(), v.to_owned()))
             })
     else {
