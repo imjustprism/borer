@@ -865,7 +865,8 @@ fn argument_text<'a>(l: &Line<'a>, open: usize, index: usize) -> Option<&'a str>
 ///
 /// The literal message, [`Resolved::Message`] carrying the message
 /// expression when it is a value, or `None` when `expr` is not one of
-/// those calls.
+/// those calls. The call has to be the whole expression: `gettext("%s") + 3`
+/// starts at a different conversion, so it says nothing.
 fn message_format(expr: &str) -> Option<Resolved> {
     let l = Line {
         text: expr,
@@ -880,12 +881,42 @@ fn message_format(expr: &str) -> Option<Resolved> {
         "dgettext" | "dcgettext" => 1,
         _ => return None,
     };
+    if !call_is_whole(&l) {
+        return None;
+    }
     let msgid = argument_text(&l, 1, index)?;
     if msgid.starts_with('"') {
         Some(Resolved::Literal(msgid.to_owned()))
     } else {
         Some(Resolved::Message(msgid.to_owned()))
     }
+}
+
+/// Tells whether `l` is a call and nothing follows it.
+///
+/// # Arguments
+///
+/// * `l` - An expression whose second token is `(`.
+///
+/// # Returns
+///
+/// Whether the `)` that closes that call is the last token.
+fn call_is_whole(l: &Line<'_>) -> bool {
+    let mut depth = 0usize;
+    for k in 1..l.toks.len() {
+        if l.is(k, "(") {
+            depth += 1;
+        } else if l.is(k, ")") {
+            let Some(next) = depth.checked_sub(1) else {
+                return false;
+            };
+            depth = next;
+            if depth == 0 {
+                return k + 1 == l.toks.len();
+            }
+        }
+    }
+    false
 }
 
 /// The one right-hand side assigned to `name`, when the text assigns it once.
@@ -1285,6 +1316,11 @@ error(0, 0, format, a2);
 a2 = 0;",
         );
         assert_eq!(api_pointer(&text, "a2"), None);
+        let text = lines(
+            "format = gettext(\"%s %lu\") + 3;
+printf(format, a1);",
+        );
+        assert_eq!(api_pointer(&text, "a1"), None);
         let typed = super::type_parameters(
             "// signature: void f(char *a1, uint64_t a2)\nformat = gettext(a1);\nerror(0, 0, format, a2);\n",
             "uint64_t",

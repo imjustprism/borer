@@ -90,15 +90,22 @@ fn format_lines(text: &str, program: &Program, analysis: &Analysis, entry: u64) 
     if !text.contains("gettext") && !text.contains("_(") {
         return Vec::new();
     }
+    let Some(params) = parameters(text) else {
+        return Vec::new();
+    };
+    let classes: Vec<Option<Class>> = params.iter().map(|p| p.class).collect();
     let mut out = Vec::new();
-    for (index, name) in param_names(text).iter().enumerate() {
-        let Some(lits) = argument_literals(program, analysis, entry, index) else {
+    for (index, param) in params.iter().enumerate() {
+        if param.class != Some(Class::Int) {
+            continue;
+        }
+        let Some(lits) = argument_literals(program, analysis, entry, &classes, index) else {
             continue;
         };
         if lits.is_empty() {
             continue;
         }
-        let mut line = format!("// formats {name}:");
+        let mut line = format!("// formats {}:", param.name);
         for lit in &lits {
             line.push(' ');
             line.push_str(lit);
@@ -108,7 +115,38 @@ fn format_lines(text: &str, program: &Program, analysis: &Analysis, entry: u64) 
     out
 }
 
-/// Parameter names on the `// signature:` line, in argument order.
+/// How a parameter is passed on a 64-bit machine.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// An integer or a pointer, in an integer argument register.
+    Int,
+    /// A float, in an xmm register.
+    Float,
+}
+
+/// One parameter of the signature under inspection.
+struct Param {
+    /// The parameter's name.
+    name: String,
+    /// How it is passed. `None` is a type this does not place in a register.
+    class: Option<Class>,
+}
+
+/// One piece of a signature parameter list.
+enum Parsed {
+    /// `void`, `...`, or an empty piece: not a parameter.
+    Skip,
+    /// A parameter this can name.
+    One(Param),
+    /// A piece whose type or name this cannot place.
+    Bad,
+}
+
+/// Parameters of the `// signature:` line, when the return needs no hidden pointer.
+///
+/// An aggregate return, or a parameter that is not an integer, a pointer
+/// or a float, has no register this can name. The scan then writes no
+/// notes, rather than reading the wrong argument.
 ///
 /// # Arguments
 ///
@@ -116,26 +154,144 @@ fn format_lines(text: &str, program: &Program, analysis: &Analysis, entry: u64) 
 ///
 /// # Returns
 ///
-/// The names. Empty when the text has no signature.
-fn param_names(text: &str) -> Vec<String> {
-    let Some(sig) = text.lines().find(|l| l.starts_with("// signature: ")) else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
+/// The parameters in argument order, or `None` when the signature is
+/// missing or its layout is not one this can count.
+fn parameters(text: &str) -> Option<Vec<Param>> {
+    let sig = text
+        .lines()
+        .find_map(|l| l.strip_prefix("// signature: "))?;
+    if !return_supported(sig) {
+        return None;
+    }
+    let mut out = Vec::new();
     for piece in sig.split(['(', ',', ')']).skip(1) {
-        let piece = piece.trim();
-        if piece.is_empty() {
-            continue;
-        }
-        let Some((_, name)) = piece.rsplit_once(' ') else {
-            continue;
-        };
-        let name = name.strip_prefix('*').unwrap_or(name);
-        if is_ident(name) {
-            names.push(name.to_owned());
+        match parse_param(piece) {
+            Parsed::Skip => {}
+            Parsed::One(param) => out.push(param),
+            Parsed::Bad => return None,
         }
     }
-    names
+    Some(out)
+}
+
+/// Tells whether `sig`'s return value leaves the integer argument registers alone.
+///
+/// # Arguments
+///
+/// * `sig` - The text after `// signature: `.
+///
+/// # Returns
+///
+/// Whether the return is void, an integer, a pointer or a float. An
+/// aggregate would take a hidden pointer in the first integer register.
+fn return_supported(sig: &str) -> bool {
+    let head = sig.split('(').next().unwrap_or("").trim();
+    let mut words: Vec<&str> = head.split_whitespace().collect();
+    let Some(name) = words.pop() else {
+        return false;
+    };
+    let stars = name.chars().take_while(|&c| c == '*' || c == '&').count();
+    if !is_ident(&name[stars..]) {
+        return false;
+    }
+    if stars > 0 {
+        return true;
+    }
+    let ty = words.join(" ");
+    ty == "void" || scalar_class(&ty).is_some()
+}
+
+/// The parameter `piece` declares.
+///
+/// # Arguments
+///
+/// * `piece` - One parameter from the signature, commas already split.
+///
+/// # Returns
+///
+/// [`Parsed::Skip`] for `void` and `...`, [`Parsed::Bad`] when the piece
+/// is not a plain name, and the parameter otherwise.
+fn parse_param(piece: &str) -> Parsed {
+    let piece = piece.trim();
+    if piece.is_empty() || piece == "void" || piece == "..." {
+        return Parsed::Skip;
+    }
+    let Some((ty, name)) = piece.rsplit_once(' ') else {
+        return Parsed::Bad;
+    };
+    let stars = name.chars().take_while(|&c| c == '*' || c == '&').count();
+    if !is_ident(&name[stars..]) {
+        return Parsed::Bad;
+    }
+    let class = if stars > 0 {
+        Some(Class::Int)
+    } else {
+        scalar_class(ty)
+    };
+    Parsed::One(Param {
+        name: name[stars..].to_owned(),
+        class,
+    })
+}
+
+/// The register class of a scalar `ty`, ignoring a pointer star.
+///
+/// # Arguments
+///
+/// * `ty` - The type, as the signature spells it.
+///
+/// # Returns
+///
+/// The class, or `None` for a struct, a union, or a type this does not know.
+fn scalar_class(ty: &str) -> Option<Class> {
+    let mut bare = ty.trim();
+    while let Some(rest) = bare
+        .strip_prefix("const ")
+        .or_else(|| bare.strip_prefix("volatile "))
+    {
+        bare = rest.trim();
+    }
+    if matches!(bare, "float" | "double" | "long double") {
+        return Some(Class::Float);
+    }
+    if bare.starts_with("struct ") || bare.starts_with("union ") || bare.contains('[') {
+        return None;
+    }
+    if bare.starts_with("enum ") {
+        return Some(Class::Int);
+    }
+    if matches!(
+        bare,
+        "size_t"
+            | "ssize_t"
+            | "ptrdiff_t"
+            | "intptr_t"
+            | "uintptr_t"
+            | "wchar_t"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "bool"
+            | "_Bool"
+    ) {
+        return Some(Class::Int);
+    }
+    let words: Vec<&str> = bare.split_whitespace().collect();
+    if !words.is_empty()
+        && words.iter().all(|w| {
+            matches!(
+                *w,
+                "signed" | "unsigned" | "short" | "long" | "int" | "char" | "bool" | "_Bool"
+            )
+        })
+    {
+        return Some(Class::Int);
+    }
+    let digits = bare
+        .strip_prefix("uint")
+        .or_else(|| bare.strip_prefix("int"))
+        .and_then(|rest| rest.strip_suffix("_t"))?;
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then_some(Class::Int)
 }
 
 /// The quoted literals passed as argument `index`, when every caller shows one.
@@ -145,6 +301,7 @@ fn param_names(text: &str) -> Vec<String> {
 /// * `program` - The loaded image.
 /// * `analysis` - Discovery results.
 /// * `entry` - The callee.
+/// * `classes` - The parameter classes, in argument order.
 /// * `index` - The argument, from zero.
 ///
 /// # Returns
@@ -155,9 +312,15 @@ fn argument_literals(
     program: &Program,
     analysis: &Analysis,
     entry: u64,
+    classes: &[Option<Class>],
     index: usize,
 ) -> Option<Vec<String>> {
-    let reg = arg_register(program, index)?;
+    let reg = register_at(
+        program.format,
+        program.arch.bitness().unwrap_or(0),
+        classes,
+        index,
+    )?;
     let mut lits = Vec::new();
     for site in direct_calls(analysis, entry)? {
         match passed_at(program, analysis, site, reg)? {
@@ -189,18 +352,30 @@ fn direct_calls(analysis: &Analysis, entry: u64) -> Option<Vec<u64>> {
     Some(calls)
 }
 
-/// The register a 64-bit convention uses for argument `index`.
+/// The integer register argument `index` is passed in.
+///
+/// System V counts only integer and pointer parameters: a float before
+/// the argument does not move it to the next integer register. Windows
+/// counts every parameter, and a float still occupies its slot. A type
+/// this cannot place, at or before `index`, has no answer.
 ///
 /// # Arguments
 ///
-/// * `program` - The loaded image, for its format.
+/// * `format` - The image's binary format, which picks the convention.
+/// * `bitness` - Decoder bitness. Only 64 is counted.
+/// * `classes` - The parameter classes, in argument order.
 /// * `index` - The argument, from zero.
 ///
 /// # Returns
 ///
-/// The register, or `None` on a 32-bit target or once the arguments have
-/// moved to the stack.
-fn arg_register(program: &Program, index: usize) -> Option<Register> {
+/// The register, or `None` when the argument is a float, is past the
+/// integer registers, or the layout is not one this can count.
+fn register_at(
+    format: BinaryFormat,
+    bitness: u32,
+    classes: &[Option<Class>],
+    index: usize,
+) -> Option<Register> {
     const SYSV: [Register; 6] = [
         Register::RDI,
         Register::RSI,
@@ -210,14 +385,29 @@ fn arg_register(program: &Program, index: usize) -> Option<Register> {
         Register::R9,
     ];
     const WIN: [Register; 4] = [Register::RCX, Register::RDX, Register::R8, Register::R9];
-    if program.arch.bitness() != Some(64) {
+    if bitness != 64 || classes.get(index).copied() != Some(Some(Class::Int)) {
         return None;
     }
-    let regs: &[Register] = match program.format {
-        BinaryFormat::Elf | BinaryFormat::MachO => &SYSV,
-        BinaryFormat::Pe | BinaryFormat::Raw | BinaryFormat::Archive => &WIN,
-    };
-    regs.get(index).copied()
+    match format {
+        BinaryFormat::Elf | BinaryFormat::MachO => {
+            let mut slot = 0usize;
+            for (i, class) in classes.iter().enumerate() {
+                match class {
+                    Some(Class::Float) => {}
+                    Some(Class::Int) if i == index => return SYSV.get(slot).copied(),
+                    Some(Class::Int) => slot += 1,
+                    None => return None,
+                }
+            }
+            None
+        }
+        BinaryFormat::Pe | BinaryFormat::Raw | BinaryFormat::Archive => {
+            if classes.iter().take(index).any(Option::is_none) {
+                return None;
+            }
+            WIN.get(index).copied()
+        }
+    }
 }
 
 /// The literal or null in `reg` at `call`, from the straight-line block behind it.
@@ -386,4 +576,49 @@ fn literal(program: &Program, addr: u64) -> Option<String> {
     }
     out.push('"');
     Some(out)
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::*;
+
+    /// A float uses an xmm register. On System V the next integer stays in
+    /// `rdi`; on Windows it takes the next slot. An unknown type is not counted.
+    #[test]
+    fn a_float_does_not_shift_past_its_convention() {
+        let both = [Some(Class::Int), Some(Class::Int)];
+        assert_eq!(
+            register_at(BinaryFormat::Elf, 64, &both, 1),
+            Some(Register::RSI)
+        );
+        let shifted = [Some(Class::Float), Some(Class::Int), Some(Class::Int)];
+        assert_eq!(
+            register_at(BinaryFormat::Elf, 64, &shifted, 1),
+            Some(Register::RDI)
+        );
+        assert_eq!(
+            register_at(BinaryFormat::Elf, 64, &shifted, 2),
+            Some(Register::RSI)
+        );
+        assert_eq!(register_at(BinaryFormat::Elf, 64, &shifted, 0), None);
+        assert_eq!(
+            register_at(BinaryFormat::Pe, 64, &shifted, 1),
+            Some(Register::RDX)
+        );
+        let unknown = [None, Some(Class::Int)];
+        assert_eq!(register_at(BinaryFormat::Elf, 64, &unknown, 1), None);
+        assert_eq!(register_at(BinaryFormat::Elf, 32, &both, 0), None);
+        let text = "// signature: void f(float a1, char *a2, uint64_t a3)\n";
+        let params = parameters(text).unwrap_or_default();
+        let classes: Vec<Option<Class>> = params.iter().map(|p| p.class).collect();
+        assert_eq!(
+            register_at(BinaryFormat::Elf, 64, &classes, 1),
+            Some(Register::RDI)
+        );
+        assert!(parameters("// signature: struct stat f(char *a1)\n").is_none());
+    }
 }
