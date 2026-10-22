@@ -277,7 +277,9 @@ impl Hoisted {
     }
 
     /// Splits one function's finished text: hoists its file-scope
-    /// declarations and writes the rest as a C definition.
+    /// declarations and writes the rest as a C definition, one local per
+    /// declaration line (`T a;` and `T *b;` for `T a, *b;`), the form
+    /// tools that read the file one declaration at a time expect.
     ///
     /// # Arguments
     ///
@@ -314,7 +316,16 @@ impl Hoisted {
                 Some(kind) => self.hoist(kind, line),
                 None => {
                     locals = true;
-                    let _ = writeln!(out, "  {line}");
+                    match super::vars::declaration(line) {
+                        Some((ty, items)) if items.len() > 1 => {
+                            for (stars, name) in items {
+                                let _ = writeln!(out, "  {ty} {stars}{name};");
+                            }
+                        }
+                        _ => {
+                            let _ = writeln!(out, "  {line}");
+                        }
+                    }
                 }
             }
         }
