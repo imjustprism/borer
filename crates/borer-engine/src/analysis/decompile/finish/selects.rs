@@ -712,9 +712,11 @@ fn unaliased(lines: &[String], name: &str) -> bool {
 /// `b` are names, as `x = c ? a : b;`.
 ///
 /// The arms store nothing but a name, and `x` is private ([`private`]), so
-/// the choice and the two `if` arms write the same name into `x`. A test
-/// that calls something, or an arm that is not one name, stays an `if`:
-/// that is the shape a source wrote as a statement.
+/// the choice and the two `if` arms write the same name into `x`. The two
+/// names must be declared with one type: a `?:` converts its arms to a
+/// common type before the store, which is a different value when the arms
+/// differ. A test that calls something, or an arm that is not one name,
+/// stays an `if`: that is the shape a source wrote as a statement.
 ///
 /// # Arguments
 ///
@@ -753,12 +755,15 @@ fn named_choice(lines: &mut Vec<String>, k: usize) -> bool {
     };
     let name =
         |w: &str| w.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && is_ident(w);
+    let same_type =
+        decl_type(lines, &a).is_some_and(|ta| decl_type(lines, &b).as_ref() == Some(&ta));
     if x != y
         || !name(&a)
         || !name(&b)
         || a == b
         || a == x
         || b == x
+        || !same_type
         || !private(lines, &x)
         || mentions_ident(cond, &x)
     {
@@ -798,6 +803,128 @@ fn only_assign(
         found = Some((v.to_owned(), r.to_owned()));
     }
     found
+}
+
+/// The declared type of `name`, from a local line or a parameter.
+///
+/// `FILE *stdout` and `uint64_t var1, var2` both yield the type in front
+/// of the name. A `// signature:` line is read too, because a parameter
+/// often has no local declaration of its own. A list that puts a star on
+/// a later name is skipped, and so is a name with no declaration: the
+/// choice then stays an `if`. Two declarations that disagree also stay
+/// an `if`.
+///
+/// # Arguments
+///
+/// * `lines` - The function text.
+/// * `name` - The stored name.
+///
+/// # Returns
+///
+/// The type text, or `None` when no single declaration names it.
+fn decl_type(lines: &[String], name: &str) -> Option<String> {
+    let mut found = None;
+    for line in lines {
+        let trimmed = line.trim();
+        let raw = trimmed.strip_prefix("// signature:").map_or_else(
+            || trimmed.split("//").next().unwrap_or("").trim(),
+            str::trim,
+        );
+        if let Some(ty) = decl_type_on(raw, name) {
+            if found.as_ref().is_some_and(|got| got != &ty) {
+                return None;
+            }
+            found = Some(ty);
+        }
+    }
+    found
+}
+
+/// The type `raw` gives `name`, when `raw` is one declaration or the body
+/// of one signature.
+///
+/// # Arguments
+///
+/// * `raw` - One line. A comment is already removed, and a signature is
+///   the text after `// signature:`.
+/// * `name` - The name to look up.
+///
+/// # Returns
+///
+/// The type text, or `None` when this line does not declare `name`.
+fn decl_type_on(raw: &str, name: &str) -> Option<String> {
+    let sig = raw.trim();
+    if let (Some(open), Some(close)) = (sig.find('('), sig.rfind(')'))
+        && close > open
+    {
+        for param in sig[open + 1..close].split(',') {
+            if let Some(ty) = declarator_type(param.trim(), name) {
+                return Some(ty);
+            }
+        }
+        return None;
+    }
+    if !sig.ends_with(';') || sig.contains('=') || sig.contains('(') {
+        return None;
+    }
+    let body = sig.trim_end_matches(';').trim();
+    if body.contains(',') {
+        let mut parts = body.split(',');
+        let first = parts.next().unwrap_or("");
+        let ty = declarator_type(first.trim(), name);
+        let base = first.trim().rsplit_once(' ').map(|(h, _)| h.trim())?;
+        if !base.is_empty() && !base.contains('*') {
+            for extra in parts {
+                if extra.trim() == name {
+                    return Some(norm_ty(base));
+                }
+            }
+        }
+        return ty;
+    }
+    declarator_type(body, name)
+}
+
+/// The type in one declarator, when its last word is `name`.
+///
+/// # Arguments
+///
+/// * `piece` - One declarator, such as `FILE *stdout` or `int32_t a1`.
+/// * `name` - The name that must end the piece.
+///
+/// # Returns
+///
+/// The type text, or `None` when the piece does not end in `name`.
+fn declarator_type(piece: &str, name: &str) -> Option<String> {
+    let piece = piece.trim();
+    let name_at = piece
+        .rfind(|c: char| !is_ident_char(c))
+        .map_or(0, |i| i + 1);
+    if piece.get(name_at..)? != name {
+        return None;
+    }
+    let ty = norm_ty(piece[..name_at].trim());
+    (!ty.is_empty()).then_some(ty)
+}
+
+/// Collapses whitespace and the space before `*` so `FILE*`, `FILE *` and
+/// `FILE  *` match.
+///
+/// # Arguments
+///
+/// * `ty` - The type text.
+///
+/// # Returns
+///
+/// The type with one space between words and before every `*`.
+fn norm_ty(ty: &str) -> String {
+    ty.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('*', " *")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Tells whether an expression calls nothing and does not read `var`.
@@ -1018,15 +1145,27 @@ return 0;
         assert_eq!(select_statements(alias), alias);
     }
 
-    /// Arms that store two different names are a choice. An arm that
-    /// computes a value stays an `if`, which is the statement a source wrote.
+    /// Arms that store two different names of one type are a choice. An arm
+    /// that computes a value, or two names of different types, stays an
+    /// `if`, which is the statement a source wrote.
     #[test]
     fn two_names_in_an_if_are_a_choice() {
-        let text = "FILE *var1;\n\nif (a1 == 0) {\n  var1 = stdout;\n} else {\n  var1 = stderr;\n}\nfprintf(var1, s);\n";
+        let text = "uint64_t var1;\nFILE *stdout; // @ 0x7160\nFILE *stderr; // @ 0x71a0\n\nif (a1 == 0) {\n  var1 = stdout;\n} else {\n  var1 = stderr;\n}\nfprintf(var1, s);\n";
         assert_eq!(
             select_statements(text),
-            "FILE *var1;\n\nvar1 = a1 == 0 ? stdout : stderr;\nfprintf(var1, s);\n"
+            "uint64_t var1;\nFILE *stdout; // @ 0x7160\nFILE *stderr; // @ 0x71a0\n\nvar1 = a1 == 0 ? stdout : stderr;\nfprintf(var1, s);\n"
         );
+        let mixed = "uint64_t var1;\nint32_t narrow;\nuint32_t wide;\n\nif (c) {\n  var1 = narrow;\n} else {\n  var1 = wide;\n}\nreturn var1;\n";
+        assert_eq!(select_statements(mixed), mixed);
+        let mixed_sig = "// signature: void f(int32_t narrow, uint32_t wide)\nuint64_t var1;\n\nif (c) {\n  var1 = narrow;\n} else {\n  var1 = wide;\n}\nreturn var1;\n";
+        assert_eq!(select_statements(mixed_sig), mixed_sig);
+        let same_sig = "// signature: void f(FILE* stdout, FILE *stderr)\nuint64_t var1;\n\nif (a1 == 0) {\n  var1 = stdout;\n} else {\n  var1 = stderr;\n}\nreturn var1;\n";
+        assert_eq!(
+            select_statements(same_sig),
+            "// signature: void f(FILE* stdout, FILE *stderr)\nuint64_t var1;\n\nvar1 = a1 == 0 ? stdout : stderr;\nreturn var1;\n"
+        );
+        let bare = "\nif (a1 == 0) {\n  var1 = stdout;\n} else {\n  var1 = stderr;\n}\n";
+        assert_eq!(select_statements(bare), bare);
         let expr = "uint32_t r1;\n\nif (a1 == 0) {\n  r1 = a1 + a2;\n} else {\n  r1 = a1 + a3;\n}\nreturn r1;\n";
         assert_eq!(select_statements(expr), expr);
     }
