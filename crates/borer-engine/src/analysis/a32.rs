@@ -381,7 +381,8 @@ struct Walked {
 /// * `guess` - The bytes already covered ([`Walks::covered`]) when
 ///   nothing says code starts at `entry`: the walk then stops at the first
 ///   word that decodes to no instruction or lies in them, and after
-///   [`GUESS_MAX`] instructions.
+///   [`GUESS_MAX`] instructions, which rejects the guess: a function cut
+///   short would leave reachable code out.
 fn walk(
     program: &Program,
     entry: u64,
@@ -479,6 +480,7 @@ fn walk(
             Flow::Invalid => {}
         }
     }
+    w.bad |= guess.is_some() && w.seen.len() >= limit;
     w
 }
 

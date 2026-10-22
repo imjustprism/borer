@@ -704,7 +704,10 @@ fn argument_token(l: &Line<'_>, open: usize, index: usize) -> Option<usize> {
 /// modifier an integer conversion reads 32 bits (`%d` an `int`, `%u`,
 /// `%x` and `%c` an `unsigned int`), `hh` a `char` and `h` a `short`; `%s`
 /// reads a `char *`. Any other conversion (`%p`, `%f`, one with `l`, `z`
-/// or `j`) reads a word, a float or something this does not size.
+/// or `j`) reads a word, a float or something this does not size. glibc's
+/// `%m` reads none. A positional argument (`%2$s`) or a conversion this
+/// does not know says nothing, since the arguments after it can no longer
+/// be counted.
 ///
 /// # Arguments
 ///
@@ -739,12 +742,20 @@ fn conversion_slot(literal: &str, index: usize) -> Option<Slot> {
                 }
             } else if "hlLqjzt".contains(c) {
                 length.push(c);
+            } else if c == '$' {
+                return None;
             } else if !"-+ #0123456789.'".contains(c) {
                 break;
             }
             chars.next();
         }
         let conv = chars.next()?;
+        if conv == 'm' {
+            continue;
+        }
+        if !"diouxXcsfFeEgGaApn".contains(conv) {
+            return None;
+        }
         let signed = matches!(conv, 'd' | 'i');
         let slot = match (conv, length.as_str()) {
             ('d' | 'i' | 'u' | 'x' | 'X' | 'o' | 'c', "") => Slot::Narrow(int_name(32, signed)),
@@ -866,6 +877,18 @@ mod tests {
         assert_eq!(slot_at(line, at("a5")), Some(Slot::Narrow("uint32_t")));
         assert_eq!(slot_at("strlen(a1 + 1);", 7), None);
         assert_eq!(slot_at("connect(a1, a2, a3);", 8), None);
+        let line = "printf(\"%m %s %d\", a1, a2);";
+        let at = |w: &str| line.find(w).unwrap_or(0);
+        assert_eq!(
+            slot_at(line, at("a1")),
+            Some(Slot::Pointer("char *".to_owned()))
+        );
+        assert_eq!(slot_at(line, at("a2")), Some(Slot::Narrow("int32_t")));
+        let positional = "printf(\"%1$s\", a1);";
+        assert_eq!(
+            slot_at(positional, positional.find("a1").unwrap_or(0)),
+            None
+        );
     }
 
     /// A parameter only passed to `exit` and stored to a 32-bit global is

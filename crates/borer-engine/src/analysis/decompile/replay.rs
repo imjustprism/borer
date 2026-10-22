@@ -4271,7 +4271,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         if agree(tv, machine, bits, float) {
             return;
         }
-        let place = place();
+        let (place, expr) = (place(), expr());
         if !t.seen.insert((claim, place.clone())) {
             return;
         }
@@ -4284,8 +4284,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             text: tv & low(bits),
             machine: machine & low(bits),
             bits,
-            lane: claim == Claim::Narrow || (bits > 32 && (tv ^ machine) & low(32) == 0),
-            expr: expr(),
+            lane: report::lane_only(claim, bits, tv ^ machine, &expr),
+            expr,
         });
     }
 }

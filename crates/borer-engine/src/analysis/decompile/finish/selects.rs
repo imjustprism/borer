@@ -214,7 +214,9 @@ const FRAME: [&str; 3] = ["local_", "arg_", "home_"];
 /// when the variable is one the function declares, not a named constant
 /// such as `NAN`, and is read nowhere but in the choice, so its new value
 /// reaches no one else; the statement and the test call nothing, so the
-/// test runs as early unseen; no loop or label surrounds the line, so the
+/// test runs as early unseen; no `&&`, `||` or other choice before it in
+/// the statement can skip it, so hoisting it reads nothing the statement
+/// might not; no loop or label surrounds the line, so the
 /// test runs once, against what it saw before; and the variable is no
 /// frame slot of a function that takes a slot's address or calls anything
 /// after the line, since a slot whose address escapes can be read as part
@@ -294,8 +296,14 @@ fn clamp_hoist(lines: &mut Vec<String>, k: usize) -> bool {
                             && !l.trim_start().starts_with("//")
                     });
                 let declared = lines.iter().any(|l| declares(l) && mentions_ident(l, v));
-                (!elsewhere && declared && plain_assignment(t).is_none_or(|(lhs, _)| lhs != v))
-                    .then(|| (open, close, cond, value.to_owned(), v.to_owned()))
+                let guarded = t
+                    .get(..open)
+                    .is_some_and(|p| p.contains("&&") || p.contains("||") || p.contains('?'));
+                (!elsewhere
+                    && declared
+                    && !guarded
+                    && plain_assignment(t).is_none_or(|(lhs, _)| lhs != v))
+                .then(|| (open, close, cond, value.to_owned(), v.to_owned()))
             })
     else {
         return false;

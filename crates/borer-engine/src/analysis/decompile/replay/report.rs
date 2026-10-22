@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use super::{Claim, LISTED_MAX, Replayed};
+use super::{Claim, LISTED_MAX, Replayed, low};
 
 /// Renders a replay as a report.
 ///
@@ -76,4 +76,40 @@ pub fn replay_tsv(r: &Replayed) -> String {
         );
     }
     out
+}
+
+/// The width a byte or word write left of a register whose bits above it
+/// the expression keeps, when it is that merge.
+///
+/// `mov cx, [rsp+0x60]` keeps bits 16 to 63 of rcx, so the text spells
+/// the register as `(rcx & ~0xffff) | (word & 0xffff)`. Those kept bits are
+/// what the register held when the block began, which the replay seeds
+/// without the text's history, so a difference confined to them is a
+/// lane's, as a difference above bit 32 is.
+///
+/// # Arguments
+///
+/// * `expr` - The claim's expression as a row renders it.
+fn kept_above(expr: &str) -> Option<u8> {
+    let merge = expr.strip_prefix("Bin(Or, Bin(And, ")?;
+    [(!0xffu64, 8), (!0xffffu64, 16)]
+        .into_iter()
+        .find(|(mask, _)| merge.contains(&format!("Const({mask})")))
+        .map(|(_, w)| w)
+}
+
+/// Tells whether a disagreement is a lane's only: a narrowing claim, a
+/// difference above bit 32, or one confined to the bits a byte or word
+/// write kept ([`kept_above`]).
+///
+/// # Arguments
+///
+/// * `claim` - What kind of claim.
+/// * `bits` - The width compared.
+/// * `diff` - The text's value xor the machine's.
+/// * `expr` - The claim's expression as a row renders it.
+pub(super) fn lane_only(claim: Claim, bits: u8, diff: u64, expr: &str) -> bool {
+    claim == Claim::Narrow
+        || (bits > 32 && diff & low(32) == 0)
+        || kept_above(expr).is_some_and(|w| diff & low(w) == 0)
 }
