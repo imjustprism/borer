@@ -5,6 +5,7 @@
 //! are rendered, and the file is then written as the hoisted declarations
 //! followed by that part, so memory never holds the file.
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -74,6 +75,44 @@ pub fn write_c(
     out: &str,
     existing: Existing,
 ) -> anyhow::Result<Written> {
+    write_entries(program, analysis, overlay, library, None, out, existing)
+}
+
+/// Exports the entries in `only`, or every function when `only` is `None`.
+///
+/// The file is the same shape as [`write_c`]: declarations those functions
+/// hoist, then their bodies. An entry that is not a written function is
+/// skipped.
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names, types and comments to apply.
+/// * `library` - Whether library code is written.
+/// * `only` - Entries to write, or every function when `None`.
+/// * `out` - The C file to write.
+/// * `existing` - Whether a regular file already at `out` is replaced;
+///   a link there is never written through.
+///
+/// # Returns
+///
+/// What was written.
+///
+/// # Errors
+///
+/// When the file or its `.part` beside it cannot be written, or a file
+/// is at `out` and `existing` keeps it.
+pub fn write_entries(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    library: Library,
+    only: Option<&[u64]>,
+    out: &str,
+    existing: Existing,
+) -> anyhow::Result<Written> {
+    let set = only.map(|entries| entries.iter().copied().collect::<BTreeSet<_>>());
     let path = Path::new(out);
     if let Some(why) = borer_engine::program::unusable_path(path) {
         anyhow::bail!("{why}; nothing was written");
@@ -87,11 +126,18 @@ pub fn write_c(
     let mut bodies = std::io::BufWriter::new(
         create(part, Existing::Replace).with_context(|| format!("creating {shown}.part"))?,
     );
-    let hoisted = export(program, analysis, overlay, library, &mut |text| {
-        bodies
-            .write_all(text.as_bytes())
-            .with_context(|| format!("writing {shown}.part"))
-    })?;
+    let hoisted = export(
+        program,
+        analysis,
+        overlay,
+        library,
+        set.as_ref(),
+        &mut |text| {
+            bodies
+                .write_all(text.as_bytes())
+                .with_context(|| format!("writing {shown}.part"))
+        },
+    )?;
     bodies
         .flush()
         .with_context(|| format!("writing {shown}.part"))?;

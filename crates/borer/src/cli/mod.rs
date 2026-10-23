@@ -138,7 +138,7 @@ commands:
   pack <file>                              read a pack and report its name, its keys by section and what borer does not read
   pack-keys                                every key a pack can set, with its default and meaning
   packs <binary>                           the packs borer knows and whether each loads for the binary: the named ones, and every pack-directory pack whose [match] lines all hold
-  export <binary> --c <out.c> [--library]   every function as one C file: the includes, each type, prototype, table and global once at the top, then every body leaves first; library functions (a signature named them) are left out unless --library
+  export <binary> --c <out.c> [--library] [--only <addrs>]  every function, or the comma-separated entries after --only, as one C file: the includes, each type, prototype, table and global once at the top, then every body leaves first; library functions (a signature named them) are left out unless --library
   export-pack <binary> <name> [project] [all]the names a project file gave (and with all, the names borer recovered) as a pack that finds the same functions in another build by their first bytes
   sigmake <out> <name> <library>...         the functions of static libraries or objects (.lib, .obj, .a, .o, Rust .rlib) as a pack of signatures, the relocated bytes masked, that names them in any program linked with them; an <out> ending in .bsig is a compact set like the ones borer ships
   script <binary> <file> [args...]           run a Rhai script in a sandbox: it reads functions, strings, bytes and xrefs, prints, and proposes names and comments; --save <project> writes them for export-pack
@@ -1064,22 +1064,15 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
         }
         Query::Export => {
-            let (out, library) = export_args(args)?;
+            let (out, library, only) = export_args(args)?;
             writable(out)?;
             let a = s.analysis(Feature::Decompile)?;
-            crate::term::busy(
-                &format!(
-                    "decompiling {} functions into {}",
-                    a.functions.len(),
-                    short_path(out)
-                ),
-                &[],
-            );
-            let written = borer::export::write_c(
+            let written = borer::export::write_entries(
                 &s.program,
                 &a,
                 &s.overlay,
                 library,
+                only.as_deref(),
                 out,
                 borer::output::Existing::Replace,
             )?;
@@ -1564,8 +1557,8 @@ mod tests {
         }
     }
 
-    /// `export` reads `--c <out.c>` and `--library`, and refuses a line
-    /// without the file or with another word.
+    /// `export` reads `--c <out.c>`, `--library` and `--only`, and refuses
+    /// a line without the file or with another word.
     ///
     /// # Panics
     ///
@@ -1575,13 +1568,20 @@ mod tests {
         use super::export_args;
         use borer_engine::analysis::decompile::export::Library;
         assert_eq!(Query::parse("export"), Some(Query::Export));
+        assert_eq!(Query::Export.most_args(), Some(5));
         assert!(command_usage(USAGE, "export").is_some());
-        let both = line("export", &["--c", "a.c", "--library"]);
-        let (out, library) = export_args(&both).expect("reads");
-        assert_eq!((out, library), ("a.c", Library::Include));
+        let both = line(
+            "export",
+            &["--c", "a.c", "--library", "--only", "0x10,0x20"],
+        );
+        let (out, library, only) = export_args(&both).expect("reads");
+        assert_eq!(
+            (out, library, only.as_deref()),
+            ("a.c", Library::Include, Some(&[0x10, 0x20][..]))
+        );
         let plain = line("export", &["--c", "a.c"]);
-        let (_, library) = export_args(&plain).expect("reads");
-        assert_eq!(library, Library::Skip);
+        let (_, library, only) = export_args(&plain).expect("reads");
+        assert_eq!((library, only), (Library::Skip, None));
         let missing = export_args(&line("export", &["--library"])).expect_err("no file");
         assert!(missing.to_string().contains("--c <out.c>"), "{missing}");
         let other = export_args(&line("export", &["--c", "a.c", "b"])).expect_err("a stray word");

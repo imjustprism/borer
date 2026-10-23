@@ -196,7 +196,7 @@ pub(super) enum Query {
     Hidden,
     /// `read <address|name> [kind] [count]`: typed values.
     Read,
-    /// `export --c <out.c> [--library]`: every function as one C file, leaves first.
+    /// `export --c <out.c> [--library] [--only <addrs>]`: those functions, or every one, as one C file, leaves first.
     Export,
     /// `export-pack <name> [project] [all]`: the names a project file gave as a pack that finds the same functions in another build.
     ExportPack,
@@ -355,8 +355,8 @@ impl Query {
             | Self::Strings
             | Self::Symbols
             | Self::Read
-            | Self::Export
             | Self::ExportPack => 3,
+            Self::Export => 5,
             Self::Decompile | Self::Fieldrefs | Self::Grep | Self::Types | Self::Verify => 4,
             Self::Script | Self::SetType => return None,
         })
@@ -562,8 +562,9 @@ pub(super) fn path_arg<'a>(
     Ok(path)
 }
 
-/// Reads `export`'s arguments after the binary: `--c <out.c>`, and
-/// `--library` to write library code too.
+/// Reads `export`'s arguments after the binary: `--c <out.c>`,
+/// `--library` to write library code too, and `--only <addrs>` to write
+/// those entries.
 ///
 /// # Arguments
 ///
@@ -571,17 +572,24 @@ pub(super) fn path_arg<'a>(
 ///
 /// # Returns
 ///
-/// The C file to write, and whether library code goes into it.
+/// The C file to write, whether library code goes into it, and the
+/// entries `--only` names. `None` for that list writes every function.
 ///
 /// # Errors
 ///
-/// When `--c` is missing or has no path after it, or a word is neither.
+/// When `--c` is missing or has no path after it, `--only` has no
+/// address, an address does not parse, or a word is none of these.
 pub(super) fn export_args(
     args: &[String],
-) -> anyhow::Result<(&str, borer_engine::analysis::decompile::export::Library)> {
+) -> anyhow::Result<(
+    &str,
+    borer_engine::analysis::decompile::export::Library,
+    Option<Vec<u64>>,
+)> {
     use borer_engine::analysis::decompile::export::Library;
     let mut out = None;
     let mut library = Library::Skip;
+    let mut only = None;
     let mut rest = args.iter().skip(2);
     while let Some(word) = rest.next() {
         match word.as_str() {
@@ -594,13 +602,45 @@ pub(super) fn export_args(
                 );
             }
             "--library" => library = Library::Include,
+            "--only" => only = Some(only_addrs(rest.next())?),
             other => bail!(
-                "export takes --c <out.c> and --library, not {}",
+                "export takes --c <out.c>, --library and --only <addrs>, not {}",
                 quoted(other)
             ),
         }
     }
-    Ok((out.context("export needs --c <out.c>")?, library))
+    Ok((out.context("export needs --c <out.c>")?, library, only))
+}
+
+/// Reads the addresses after `--only`.
+///
+/// # Arguments
+///
+/// * `list` - The comma-separated addresses, when the flag has a word
+///   after it.
+///
+/// # Returns
+///
+/// The addresses, in the order given.
+///
+/// # Errors
+///
+/// When the word is missing or empty, or one address does not parse.
+fn only_addrs(list: Option<&String>) -> anyhow::Result<Vec<u64>> {
+    use borer_engine::analysis::parse_addr;
+    let list = list
+        .filter(|text| !text.is_empty())
+        .context("--only needs addresses")?;
+    let mut addrs = Vec::new();
+    for part in list.split(',') {
+        let addr = parse_addr(part)
+            .with_context(|| format!("--only address {} is not a number", quoted(part)))?;
+        addrs.push(addr);
+    }
+    if addrs.is_empty() {
+        bail!("--only needs addresses");
+    }
+    Ok(addrs)
 }
 
 /// Reads a CLI listing's `[limit]` argument.
@@ -929,4 +969,4 @@ pub(super) fn unknown_word(word: &str) -> String {
 /// The words beginning `--` that queries read themselves, beside the
 /// options [`split_pack_args`] takes off the line; `setup` and `doctor`
 /// refuse any other word with their own message.
-pub(super) const COMMAND_FLAGS: &[&str] = &["--help", "--save", "--c", "--library"];
+pub(super) const COMMAND_FLAGS: &[&str] = &["--help", "--save", "--c", "--library", "--only"];

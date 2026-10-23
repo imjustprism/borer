@@ -512,6 +512,9 @@ fn declared_name(line: &str) -> String {
 /// * `analysis` - Its analysis.
 /// * `overlay` - Names, types and comments to apply.
 /// * `library` - Whether library code is written.
+/// * `only` - Entries to write. `None` writes every function [`order`]
+///   keeps. An entry that is not one of those is skipped, and the
+///   declarations the written functions hoist are unchanged.
 /// * `sink` - Takes each run's definitions in order.
 ///
 /// # Returns
@@ -526,9 +529,15 @@ pub fn export(
     analysis: &Analysis,
     overlay: &Overlay,
     library: Library,
+    only: Option<&BTreeSet<u64>>,
     sink: &mut dyn FnMut(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<Hoisted> {
-    let entries = order(analysis, library);
+    let mut entries = order(analysis, library);
+    let left_out = analysis.functions.len().saturating_sub(entries.len());
+    if let Some(only) = only {
+        let arm = program.arch == crate::program::Arch::Arm;
+        entries.retain(|entry| only.contains(entry) || (arm && only.contains(&(entry | 1))));
+    }
     let mut hoisted = Hoisted::new(
         analysis
             .functions
@@ -536,7 +545,7 @@ pub fn export(
             .map(|f| super::expr_render::bare(&name_of(analysis, overlay, f.entry)).into_owned())
             .collect(),
     );
-    hoisted.left_out = analysis.functions.len().saturating_sub(entries.len());
+    hoisted.left_out = left_out;
     let run = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .saturating_mul(RUN_PER_CORE);

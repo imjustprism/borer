@@ -160,10 +160,17 @@ fn the_export_is_deterministic() {
     let file = || {
         let a = Analysis::compute(&p);
         let mut bodies = String::new();
-        let hoisted = export(&p, &a, &Overlay::default(), Library::Include, &mut |t| {
-            bodies.push_str(t);
-            Ok(())
-        })
+        let hoisted = export(
+            &p,
+            &a,
+            &Overlay::default(),
+            Library::Include,
+            None,
+            &mut |t| {
+                bodies.push_str(t);
+                Ok(())
+            },
+        )
         .expect("exports");
         format!("{}{bodies}", hoisted.head("t"))
     };
@@ -182,7 +189,7 @@ fn the_export_hoists_the_closure_and_defines_each_function_once() {
     let p = image();
     let a = Analysis::compute(&p);
     let mut bodies = String::new();
-    let hoisted = export(&p, &a, &Overlay::default(), Library::Skip, &mut |t| {
+    let hoisted = export(&p, &a, &Overlay::default(), Library::Skip, None, &mut |t| {
         bodies.push_str(t);
         Ok(())
     })
@@ -220,4 +227,67 @@ fn the_export_hoists_the_closure_and_defines_each_function_once() {
         "even's callee comes first: {file}"
     );
     assert_eq!(hoisted.written, 5, "{file}");
+}
+
+/// An export limited to one entry writes that body and not the others.
+///
+/// The body matches the whole-binary export. A callee the function still
+/// names stays a prototype, because the closure hoists it.
+///
+/// # Panics
+///
+/// When the limited export writes another body, or `even` differs.
+#[test]
+fn an_export_of_one_entry_writes_only_that_body() {
+    use std::collections::BTreeSet;
+
+    use borer_engine::analysis::decompile::export::{Library, export};
+    let p = image();
+    let a = Analysis::compute(&p);
+    let file = |only: Option<&BTreeSet<u64>>| {
+        let mut bodies = String::new();
+        let hoisted = export(
+            &p,
+            &a,
+            &Overlay::default(),
+            Library::Skip,
+            only,
+            &mut |text| {
+                bodies.push_str(text);
+                Ok(())
+            },
+        )
+        .expect("exports");
+        assert_eq!(hoisted.left_out, 0, "the limit is not a library skip");
+        format!("{}{bodies}", hoisted.head("t"))
+    };
+    let defines = |text: &str, name: &str| {
+        text.lines().any(|line| {
+            !line.ends_with(';') && !line.starts_with("//") && line.contains(&format!(" {name}("))
+        })
+    };
+    let body = |text: &str| {
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.contains(" even(") && !line.ends_with(';'))
+            .expect("even");
+        let end = lines
+            .iter()
+            .skip(start)
+            .position(|line| *line == "}")
+            .expect("the end of even");
+        lines[start..=start + end].join("\n")
+    };
+    let all = file(None);
+    let one = file(Some(&BTreeSet::from([TEXT])));
+    assert!(defines(&one, "even"), "{one}");
+    assert!(!defines(&one, "odd"), "{one}");
+    assert!(!defines(&one, "dispatch"), "{one}");
+    assert_eq!(body(&one), body(&all));
+    assert!(
+        one.lines()
+            .any(|line| line.contains(" odd(") && line.ends_with(';')),
+        "odd stays declared: {one}"
+    );
 }
