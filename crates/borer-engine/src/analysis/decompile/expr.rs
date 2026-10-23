@@ -3683,7 +3683,8 @@ fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 
 /// Builds `cond ? a : b` with the boolean idioms folded.
 ///
-/// A decidable condition picks its side; equal sides collapse; `c ? 1 : 0`
+/// A decidable condition, or one [`super::opaque::constant_outcome`] proves
+/// never varies, picks its side; equal sides collapse; `c ? 1 : 0`
 /// is `c` and `c ? 0 : 1` is `!c`; all ones on a carry over the product or
 /// sum that set it is the saturating operation ([`saturating`]); a
 /// full-width compare that selects one of its own operands is `min`,
@@ -3698,24 +3699,21 @@ fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// * `a` - Value when true.
 /// * `b` - Value when false.
 pub(super) fn ternary(cond: Cond, a: Expr, b: Expr) -> Expr {
-    match cond.eval() {
-        Some(true) => return a,
-        Some(false) => return b,
-        None => {}
+    if let Some(outcome) = cond.eval().or_else(|| {
+        super::opaque::constant_outcome(&cond)
+            .filter(|(_, ev)| *ev == Evidence::Proven)
+            .map(|(o, _)| o)
+    }) {
+        return if outcome { a } else { b };
     }
     if a == b {
         return a;
     }
-    if let Some(e) = saturating(&cond, &a, &b) {
-        return e;
-    }
-    if let Some(e) = extremum(&cond, &a, &b) {
-        return e;
-    }
-    if let Some(e) = absolute(&cond, &a, &b) {
-        return e;
-    }
-    if let Some(e) = saturating_sub(&cond, &a, &b) {
+    if let Some(e) = saturating(&cond, &a, &b)
+        .or_else(|| extremum(&cond, &a, &b))
+        .or_else(|| absolute(&cond, &a, &b))
+        .or_else(|| saturating_sub(&cond, &a, &b))
+    {
         return e;
     }
     match (&a, &b) {

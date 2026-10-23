@@ -1607,49 +1607,17 @@ impl Analysis {
     /// analysis when the address is not a clean gap on ARM32.
     pub fn start_gap_function(
         program: &Program,
-        mut analysis: Analysis,
+        analysis: Analysis,
         va: u64,
     ) -> Result<(Analysis, u64), Analysis> {
-        let Some((func, tables, sites)) = a32::function_at_gap(program, &analysis.functions, va)
-        else {
-            return Err(analysis);
-        };
-        let entry = func.entry;
-        let callees = func.callees.clone();
-        let pos = analysis.functions.partition_point(|f| f.entry < entry);
-        analysis.functions.insert(pos, func);
-        for (site, targets) in tables {
-            analysis.jump_tables.insert(site, targets);
-        }
-        analysis.entry_index.clear();
-        for (i, f) in analysis.functions.iter().enumerate() {
-            analysis.entry_index.insert(f.entry, i);
-        }
-        for callee in callees {
-            if let Some(f) = analysis.function_mut(callee)
-                && let Err(at) = f.callers.binary_search(&entry)
-            {
-                f.callers.insert(at, entry);
-            }
-        }
-        for (target, site, kind) in sites {
-            functions::push_site(&mut analysis.xrefs, target, site, kind, Some(entry));
-            if let Some(list) = analysis.xrefs.get_mut(&target) {
-                list.sort_by_key(|s| s.va);
-            }
-        }
-        analysis.index_refs();
-        if program.arch.isa() == Some(Isa::A32) {
-            a32::infer_returns(program, &mut analysis);
-        }
-        Ok((analysis, entry))
+        a32::start_gap_function(program, analysis, va)
     }
 
     /// Rebuilds [`Analysis::refs_by_function`] from [`Analysis::xrefs`].
     ///
     /// Each function's list is the targets it references, in site order,
     /// with the index of that site in the target's list.
-    fn index_refs(&mut self) {
+    pub(crate) fn index_refs(&mut self) {
         let mut by_function: BTreeMap<u64, Vec<(u64, u64, usize)>> = BTreeMap::new();
         for (&target, sites) in &self.xrefs {
             for (i, site) in sites.iter().enumerate() {

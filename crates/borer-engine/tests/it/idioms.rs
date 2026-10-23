@@ -323,3 +323,22 @@ fn a_full_width_compare_select_is_min_or_max() {
         assert!(!text.contains("min(") && !text.contains("max("), "{text}");
     }
 }
+
+/// A conditional move whose condition is proven constant by bit demand
+/// folds to the arm that runs.
+///
+/// `(x * x + x) & 1` is always 0, so `cmovne` on `test` of it never moves
+/// and `cmove` always moves.
+#[test]
+fn a_proven_constant_select_folds_to_the_arm_that_runs() {
+    let code: &[u8] = &[
+        0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+        0x48, 0x0f, 0xaf, 0xc1, // ASM: imul rax,rcx
+        0x48, 0x01, 0xc8, // ASM: add rax,rcx
+        0xa8, 0x01, // ASM: test al,1
+        0x48, 0x89, 0xd0, // ASM: mov rax,rdx
+        0x49, 0x0f, 0x45, 0xc0, // ASM: cmovne rax,r8
+        0xc3, // ASM: ret
+    ];
+    reads_as(code, "return a2;");
+}

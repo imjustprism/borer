@@ -7,7 +7,7 @@ use anyhow::{Context as _, bail};
 use borer_engine::analysis::{Analysis, Overlay, decompile, parse_addr, resolve_suggesting};
 use borer_engine::layout::Layout;
 use borer_engine::pack::Packs;
-use borer_engine::program::{Feature, Program};
+use borer_engine::program::{Arch, Feature, Program};
 use borer_engine::text::short_path;
 
 use super::USAGE;
@@ -322,7 +322,10 @@ impl Session {
 /// # Errors
 ///
 /// For a bad detail, offset or limit, a function argument that is missing
-/// or names no function, or a function that does not decompile.
+/// or names no function, or a function that does not decompile. An address
+/// inside a function's span but in none of its blocks is recovered when
+/// that walk is clean. Otherwise the function whose span holds it is
+/// decompiled.
 pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String> {
     let (detail, offset, limit) = decompile_args(args.get(3..).unwrap_or_default())?;
     if limit == Some(0) {
@@ -331,7 +334,11 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     let a = s.analysis(Feature::Decompile)?;
     let va = s.resolve(&a, arg(args, 2, "decompile needs an address or name")?)?;
     let (a, entry) = match entry_at(&s.program, &a, va) {
-        Ok(entry) => (a, entry),
+        Ok(entry) if block_holds(&s.program, &a, entry, va) => (a, entry),
+        Ok(entry) => match Analysis::start_gap_function(&s.program, a, va) {
+            Ok(started) => started,
+            Err(a) => (a, entry),
+        },
         Err(err) => match Analysis::start_gap_function(&s.program, a, va) {
             Ok(started) => started,
             Err(_) => return Err(err),
@@ -365,6 +372,30 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     };
     let text = decompile::with_header(&text, header.as_deref());
     Ok(window(&text, None, offset, limit))
+}
+
+/// Whether `va` lies in a decoded block of the function at `entry`.
+///
+/// [`Analysis::function_at`] accepts any address in the function's
+/// `[start, end)` span. A gap between its blocks is not that function's
+/// code. On ARM a Thumb bit on `va` is cleared, the same way the gap walk
+/// clears one.
+///
+/// # Arguments
+///
+/// * `program` - The image. ARM clears the Thumb bit.
+/// * `analysis` - The functions.
+/// * `entry` - The function [`entry_at`] named.
+/// * `va` - The address asked for.
+fn block_holds(program: &Program, analysis: &Analysis, entry: u64, va: u64) -> bool {
+    let va = if program.arch == Arch::Arm {
+        va & !1
+    } else {
+        va
+    };
+    analysis
+        .function(entry)
+        .is_some_and(|f| f.blocks.iter().any(|b| va >= b.start && va < b.end))
 }
 
 /// Says an engine message's listing hint in the CLI's syntax.

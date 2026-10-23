@@ -522,15 +522,12 @@ fn walk_gap(
         tails: BTreeSet::new(),
     };
     let mut pool: BTreeSet<u64> = BTreeSet::new();
-    let stops =
-        |va: u64, pool: &BTreeSet<u64>| pool.contains(&va) || guess::covers(covered, va).is_some();
     let mut pending: Vec<(u64, ItState)> = vec![(entry, ItState::default())];
-    let leaves = |t: u64| t != entry && starts.contains(&t);
     while let Some((va, mut it)) = pending.pop() {
         if w.seen.contains_key(&va) || w.seen.len() >= GUESS_MAX || w.bad {
             continue;
         }
-        if stops(va, &pool) {
+        if pool.contains(&va) || guess::covers(covered, va).is_some() {
             w.exits = true;
             continue;
         }
@@ -545,7 +542,7 @@ fn walk_gap(
         let next = i.next();
         let falls = guarded(&i);
         let follow = |t: u64, w: &mut Walked, pending: &mut Vec<(u64, ItState)>| {
-            if leaves(t) {
+            if t != entry && starts.contains(&t) {
                 w.callees.insert(t);
                 w.tails.insert(t);
                 w.exits = true;
@@ -599,20 +596,13 @@ fn walk_gap(
             Flow::Invalid => {}
         }
     }
-    loop {
-        let Some((next, pad)) = w
-            .seen
-            .last_key_value()
-            .map(|(_, insn)| (insn.next(), gap_padding(insn)))
-        else {
-            break;
-        };
-        if pad && !w.seen.contains_key(&next) {
-            w.seen.pop_last();
-            w.exits = true;
-        } else {
-            break;
-        }
+    while w
+        .seen
+        .last_key_value()
+        .is_some_and(|(_, i)| gap_padding(i) && !w.seen.contains_key(&i.next()))
+    {
+        w.seen.pop_last();
+        w.exits = true;
     }
     w.bad |= w.seen.len() >= GUESS_MAX;
     w
@@ -718,7 +708,7 @@ fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
 /// The sites are what discovery stores as references. Without them a
 /// callee whose other callers discard its result stays marked as
 /// returning nothing, and a call here loses the value.
-pub(crate) fn function_at_gap(
+fn function_at_gap(
     program: &Program,
     functions: &[Function],
     va: u64,
@@ -761,6 +751,56 @@ pub(crate) fn function_at_gap(
             .collect();
         (func, tables, sites)
     })
+}
+
+/// Adds a function at `va` to `analysis` when no discovered function
+/// contains it ([`Analysis::start_gap_function`]).
+///
+/// # Arguments
+///
+/// * `program` - The image the analysis was computed from.
+/// * `analysis` - That analysis.
+/// * `va` - The address asked for.
+///
+/// # Returns
+///
+/// The analysis with the new function, and its entry, or the unchanged
+/// analysis when `va` is not a clean ARM32 gap.
+pub(crate) fn start_gap_function(
+    program: &Program,
+    mut analysis: Analysis,
+    va: u64,
+) -> Result<(Analysis, u64), Analysis> {
+    let Some((func, tables, sites)) = function_at_gap(program, &analysis.functions, va) else {
+        return Err(analysis);
+    };
+    let entry = func.entry;
+    let callees = func.callees.clone();
+    let pos = analysis.functions.partition_point(|f| f.entry < entry);
+    analysis.functions.insert(pos, func);
+    for (site, targets) in tables {
+        analysis.jump_tables.insert(site, targets);
+    }
+    analysis.entry_index.clear();
+    for (i, f) in analysis.functions.iter().enumerate() {
+        analysis.entry_index.insert(f.entry, i);
+    }
+    for callee in callees {
+        if let Some(f) = analysis.function_mut(callee)
+            && let Err(at) = f.callers.binary_search(&entry)
+        {
+            f.callers.insert(at, entry);
+        }
+    }
+    for (target, site, kind) in sites {
+        push_site(&mut analysis.xrefs, target, site, kind, Some(entry));
+        if let Some(list) = analysis.xrefs.get_mut(&target) {
+            list.sort_by_key(|s| s.va);
+        }
+    }
+    analysis.index_refs();
+    infer_returns(program, &mut analysis);
+    Ok((analysis, entry))
 }
 
 /// Addresses a gap walk treats as never returning.
