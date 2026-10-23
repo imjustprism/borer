@@ -521,7 +521,7 @@ fn a_jump_table_case_stays_in_its_caller() {
 fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
     use borer_engine::analysis::Overlay;
     use borer_engine::analysis::decompile::decompile_named;
-    let text: [u16; 14] = [
+    let text: [u16; 16] = [
         0xb510, // ASM: push {r4, lr}
         0xf000, // ASM: bl 0xe
         0xf804, // ASM: (bl, second half)
@@ -531,11 +531,13 @@ fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
         0xbf00, // ASM: nop
         0x4770, // ASM: bx lr
         0xde00, // ASM: udf #0
-        0x2800, // ASM: cmp r0, #0
+        0x4902, // ASM: ldr r1, [pc, #8]
         0xf7ff, // ASM: bl 0xe
         0xfffb, // ASM: (bl, second half)
         0x3001, // ASM: adds r0, #1
         0x4770, // ASM: bx lr
+        0x0000, // ASM: .word 0
+        0x0000, // ASM: (.word, high half)
     ];
     let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
     let p = Program::from_bytes(PathBuf::from("thunk.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
@@ -546,6 +548,7 @@ fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
     let a = Analysis::start_gap_function(&p, a, ELF_TEXT).expect_err("entry block is owned");
     let (a, entry) = Analysis::start_gap_function(&p, a, ELF_TEXT + 0x12).expect("recovered");
     assert_eq!(entry, ELF_TEXT + 0x12);
+    assert_eq!(a.xrefs_to(ELF_TEXT + 0x1c).len(), 1);
     let after = decompile_named(&p, &a, &Overlay::default(), ELF_TEXT + 0xe).expect("decompiles");
     assert!(after.contains("// signature: uint32_t sub_"), "{after}");
 }

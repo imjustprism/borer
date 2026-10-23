@@ -743,7 +743,10 @@ fn function_at_gap(
             .values()
             .all(|i| free(i.va) && free(i.next().saturating_sub(1)));
     ok.then(|| {
-        let (func, sites) = assemble(va, &w);
+        let (func, mut sites) = assemble(va, &w);
+        data_refs(program, &w, &mut |t, site| {
+            sites.push((t, site, RefKind::Data));
+        });
         let tables = w
             .tables
             .iter()
