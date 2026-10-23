@@ -37,7 +37,11 @@ pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
     let mut changed = false;
     let mut k = 0;
     while k < lines.len() {
-        if guarded_loop(lines, k) || counted_while(lines, k) || exit_arm(lines, k) {
+        if guarded_loop(lines, k)
+            || counted_while(lines, k)
+            || returning_while(lines, k)
+            || exit_arm(lines, k)
+        {
             changed = true;
             continue;
         }
@@ -216,6 +220,113 @@ fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
             .chain(body.get(..body.len() - 1).unwrap_or(&[]).iter().cloned())
             .chain(std::iter::once(format!("{pad_s}}}")))
             .collect();
+    lines.splice(k..=close, rewritten);
+    true
+}
+
+/// Rewrites a two-return counted `while (1)` at line `k` as a `for` loop.
+///
+/// The counter initialized on line `k` and checked by an opening
+/// `if (C) return R;` and a second `if (C2) { return R; }` becomes a `for`
+/// loop with `if (C2) { break; }` and `return R;` after the loop.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the counter initialization.
+///
+/// # Returns
+///
+/// Whether the loop became a `for`.
+fn returning_while(lines: &mut Vec<String>, k: usize) -> bool {
+    let (Some(init), Some(head)) = (lines.get(k), lines.get(k + 1)) else {
+        return false;
+    };
+    let pad = indent_of(init);
+    if indent_of(head) != pad || head.trim() != "while (1) {" {
+        return false;
+    }
+    let Some((lhs_chain, value)) = init
+        .trim()
+        .strip_suffix(';')
+        .and_then(|s| s.rsplit_once(" = "))
+    else {
+        return false;
+    };
+    let (prefix, v) = match lhs_chain.rsplit_once(" = ") {
+        Some((p, v)) => (Some(p.trim().to_owned()), v.trim().to_owned()),
+        None => (None, lhs_chain.trim().to_owned()),
+    };
+    let value = value.trim().to_owned();
+    if !is_ident(&v)
+        || impure(&value)
+        || prefix
+            .as_ref()
+            .is_some_and(|p| !p.split(" = ").all(is_ident))
+    {
+        return false;
+    }
+    let Some(close) =
+        closing(lines, k + 1, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    if close < k + 7
+        || (k + 2..close).any(|j| {
+            lines.get(j).is_some_and(|l| is_label(l))
+                || (lines.get(j).is_some_and(|l| breaks(l.trim())) && breaks_loop(lines, k + 1, j))
+        })
+    {
+        return false;
+    }
+    let Some((exit_cond, ret)) = lines
+        .get(k + 2)
+        .filter(|l| indent_of(l) == pad + 2)
+        .and_then(|l| l.trim().strip_prefix("if (")?.split_once(") return "))
+        .and_then(|(c, r)| Some((c.to_owned(), r.strip_suffix(';')?.to_owned())))
+        .filter(|(c, _)| mentions_ident(c, &v) && !impure(c))
+    else {
+        return false;
+    };
+    let Some(c2) = lines
+        .get(k + 3)
+        .filter(|l| indent_of(l) == pad + 2)
+        .and_then(|l| if_opener(l.trim()))
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let same_ret = lines
+        .get(k + 4)
+        .is_some_and(|l| indent_of(l) == pad + 4 && l.trim() == format!("return {ret};"))
+        && lines
+            .get(k + 5)
+            .is_some_and(|l| indent_of(l) == pad + 2 && l.trim() == "}");
+    let Some(raw_step) = lines
+        .get(k + 6..close)
+        .filter(|_| same_ret)
+        .and_then(|b| step_of(b, pad + 2, &v))
+    else {
+        return false;
+    };
+    let step = if raw_step == format!("{v} = {v} + 1") {
+        format!("{v} += 1")
+    } else {
+        raw_step.to_owned()
+    };
+    let pad_s = " ".repeat(pad);
+    let cond = invert_condition(&exit_cond);
+    let mut rewritten: Vec<String> = Vec::new();
+    if let Some(p) = prefix {
+        rewritten.push(format!("{pad_s}{p} = {value};"));
+    }
+    rewritten.push(format!("{pad_s}for ({v} = {value}; {cond}; {step}) {{"));
+    rewritten.push(format!("{pad_s}  if ({c2}) {{"));
+    rewritten.push(format!("{pad_s}    break;"));
+    rewritten.push(format!("{pad_s}  }}"));
+    rewritten.extend(lines.get(k + 6..close - 1).unwrap_or(&[]).iter().cloned());
+    rewritten.push(format!("{pad_s}}}"));
+    rewritten.push(format!("{pad_s}return {ret};"));
     lines.splice(k..=close, rewritten);
     true
 }
@@ -613,5 +724,10 @@ mod tests {
         let labelled =
             "rcx = 0;\nwhile (rcx < a1) {\n  rax += rcx;\n  L_1:\n  rcx += 1;\n}\nreturn rax;\n";
         assert_eq!(run(labelled), labelled);
+        let returning = "rax = rcx = 0;\nwhile (1) {\n  if (rcx >= 7) return 0;\n  if (table[rcx] == a1) {\n    return 0;\n  }\n  sub_1(rcx);\n  rcx = rcx + 1;\n}\n";
+        assert_eq!(
+            run(returning),
+            "rax = 0;\nfor (rcx = 0; rcx < 7; rcx += 1) {\n  if (table[rcx] == a1) {\n    break;\n  }\n  sub_1(rcx);\n}\nreturn 0;\n"
+        );
     }
 }

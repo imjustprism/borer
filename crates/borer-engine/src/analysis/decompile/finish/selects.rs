@@ -49,12 +49,20 @@ pub(super) fn select_statements(text: &str) -> String {
             k += 3;
             continue;
         }
-        if and_chain(&mut lines, k)
+        if hoist_break_copy(&mut lines, k)
+            || and_chain(&mut lines, k)
+            || redundant_if_return(&mut lines, k)
+            || preassigned_if_else(&mut lines, k)
             || or_default(&mut lines, k)
             || named_choice(&mut lines, k)
             || complement_bits(&mut lines, k)
         {
             changed = true;
+            continue;
+        }
+        if dup_merge(&mut lines, k) {
+            changed = true;
+            k = k.saturating_sub(1);
             continue;
         }
         changed |= truth_diamond(&mut lines, k);
@@ -489,11 +497,10 @@ fn truth_diamond(lines: &mut Vec<String>, k: usize) -> bool {
 ///
 /// Whether the two tests became one.
 fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
-    let Some(open) = lines.get(k) else {
-        return false;
-    };
-    let pad = indent_of(open);
-    let Some(a) = if_opener(open.trim()).map(str::to_owned) else {
+    let Some((pad, a)) = lines
+        .get(k)
+        .and_then(|l| Some((indent_of(l), if_opener(l.trim())?.to_owned())))
+    else {
         return false;
     };
     let Some(close) =
@@ -527,7 +534,12 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
         .iter()
         .filter_map(|l| {
             plain_assignment(l)
-                .filter(|(v, r)| indent_of(l) == pad + 2 && private(lines, v) && !impure(r))
+                .filter(|(v, r)| {
+                    indent_of(l) == pad + 2
+                        && private(lines, v)
+                        && (!impure(r)
+                            || (*r == "__errno_location()" && word_positions(&b, v).len() == 1))
+                })
                 .map(|(v, r)| (v.to_owned(), r.to_owned()))
         })
         .collect();
@@ -557,32 +569,311 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
         return false;
     }
     let b = temps.iter().rev().fold(b, |b, (v, r)| {
-        let simple = r
-            .chars()
-            .all(|c| is_ident_char(c) || c == '-' || c == '>' || c == '.');
+        let simple = r == "__errno_location()"
+            || r.chars()
+                .all(|c| is_ident_char(c) || c == '-' || c == '>' || c == '.');
         rename_word(&b, v, &if simple { r.clone() } else { format!("({r})") })
     });
-    let term = |c: &str| {
+    let pad_s = " ".repeat(pad);
+    let [ta, tb] = [&a, &b].map(|c| {
         if c.contains(" || ") || c.contains(" ? ") {
             format!("({c})")
         } else {
-            c.to_owned()
+            c.clone()
         }
-    };
-    let pad_s = " ".repeat(pad);
-    let head = format!("{pad_s}if ({} && {}) {{", term(&a), term(&b));
-    let body: Vec<String> = lines
+    });
+    let head = format!("{pad_s}if ({ta} && {tb}) {{");
+    let body = lines
         .get(m + 1..close - 1)
         .unwrap_or(&[])
         .iter()
-        .map(|l| l.get(2..).unwrap_or(l.trim_start()).to_owned())
-        .collect();
+        .map(|l| l.get(2..).unwrap_or(l.trim_start()).to_owned());
     let rewritten: Vec<String> = std::iter::once(head)
         .chain(body)
         .chain(std::iter::once(format!("{pad_s}}}")))
         .collect();
     lines.splice(k..=close, rewritten);
     true
+}
+
+/// Hoists a plain copy out of `if (c) { x = y; break; } x = y;` so the copy
+/// runs once before `if (c) { break; }`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the `if`.
+///
+/// # Returns
+///
+/// Whether the copy was hoisted.
+fn hoist_break_copy(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(open) = lines.get(k) else {
+        return false;
+    };
+    let pad = indent_of(open);
+    let Some(cond) = if_opener(open.trim()).map(str::to_owned) else {
+        return false;
+    };
+    let Some((lhs, rhs)) = lines
+        .get(k + 1)
+        .filter(|l| indent_of(l) == pad + 2)
+        .and_then(|l| plain_assignment(l))
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+    else {
+        return false;
+    };
+    let matches_tail = lines
+        .get(k + 2)
+        .is_some_and(|l| indent_of(l) == pad + 2 && l.trim() == "break;")
+        && lines
+            .get(k + 3)
+            .is_some_and(|l| indent_of(l) == pad && l.trim() == "}")
+        && lines
+            .get(k + 4)
+            .is_some_and(|l| indent_of(l) == pad && l.trim() == format!("{lhs} = {rhs};"));
+    if !matches_tail
+        || !is_ident(&lhs)
+        || !is_ident(&rhs)
+        || lhs == rhs
+        || !private(lines, &lhs)
+        || changes_state(&cond)
+        || mentions_ident(&cond, &lhs)
+    {
+        return false;
+    }
+    let pad_s = " ".repeat(pad);
+    let rewritten = [
+        format!("{pad_s}{lhs} = {rhs};"),
+        format!("{pad_s}if ({cond}) {{"),
+        format!("{pad_s}  break;"),
+        format!("{pad_s}}}"),
+    ];
+    lines.splice(k..=k + 4, rewritten);
+    true
+}
+
+/// Drops a `return` at the end of an `if` block when the line right after
+/// the `if` is the identical `return`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the `if`.
+///
+/// # Returns
+///
+/// Whether the inner `return` was dropped.
+fn redundant_if_return(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(open) = lines.get(k) else {
+        return false;
+    };
+    let pad = indent_of(open);
+    if if_opener(open.trim()).is_none() {
+        return false;
+    }
+    let Some(close) =
+        loops::closing(lines, k, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    if close < k + 3 {
+        return false;
+    }
+    let Some(ret) = lines
+        .get(close - 1)
+        .filter(|l| {
+            indent_of(l) == pad + 2 && l.trim().starts_with("return ") && l.trim().ends_with(';')
+        })
+        .map(|l| l.trim().to_owned())
+    else {
+        return false;
+    };
+    let followed = lines
+        .get(close + 1)
+        .is_some_and(|l| indent_of(l) == pad && l.trim() == ret);
+    let plain_prefix = lines.get(k + 1..close - 1).is_some_and(|s| {
+        !s.is_empty()
+            && s.iter().all(|l| {
+                let t = l.trim();
+                indent_of(l) == pad + 2
+                    && !is_label(l)
+                    && !transfers(t)
+                    && !t.contains('{')
+                    && !t.contains('}')
+            })
+    });
+    if !followed || !plain_prefix {
+        return false;
+    }
+    lines.remove(close - 1);
+    true
+}
+
+/// Folds a default assignment `v = init;` before a multi-statement `if`
+/// whose body ends by overwriting `v = other;` into the `else` arm.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the initial assignment.
+///
+/// # Returns
+///
+/// Whether the assignment moved into an `else` arm.
+fn preassigned_if_else(lines: &mut Vec<String>, k: usize) -> bool {
+    let (Some(init_line), Some(if_line)) = (lines.get(k), lines.get(k + 1)) else {
+        return false;
+    };
+    let pad = indent_of(init_line);
+    if indent_of(if_line) != pad {
+        return false;
+    }
+    let Some((v, init)) = plain_assignment(init_line)
+        .filter(|(_, r)| !impure(r) && plain_value(r))
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+    else {
+        return false;
+    };
+    let local_unaliased = private(lines, &v)
+        || (lines
+            .iter()
+            .any(|l| declares(l) && !l.contains("//") && mentions_ident(l, &v))
+            && !lines
+                .iter()
+                .any(|l| !l.trim_start().starts_with("//") && l.contains(&format!("&{v}"))));
+    let Some(cond) = if_opener(if_line.trim()).map(str::to_owned) else {
+        return false;
+    };
+    let Some(close) = loops::closing(lines, k + 1, pad)
+        .filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    if !local_unaliased || close < k + 4 || changes_state(&cond) || mentions_ident(&cond, &v) {
+        return false;
+    }
+    let Some((v2, other)) = lines
+        .get(close - 1)
+        .filter(|l| indent_of(l) == pad + 2)
+        .and_then(|l| plain_assignment(l))
+    else {
+        return false;
+    };
+    let prefix_ok = v2 == v
+        && !mentions_ident(other, &v)
+        && lines.get(k + 2..close - 1).is_some_and(|s| {
+            !s.is_empty()
+                && s.iter().all(|l| {
+                    let t = l.trim();
+                    indent_of(l) == pad + 2
+                        && !is_label(l)
+                        && !transfers(t)
+                        && !t.contains('{')
+                        && !t.contains('}')
+                        && !mentions_ident(t, &v)
+                })
+        });
+    if !prefix_ok {
+        return false;
+    }
+    let pad_s = " ".repeat(pad);
+    let mut rewritten: Vec<String> = lines.get(k + 1..close).unwrap_or(&[]).to_vec();
+    rewritten.push(format!("{pad_s}}} else {{"));
+    rewritten.push(format!("{pad_s}  {v} = {init};"));
+    rewritten.push(format!("{pad_s}}}"));
+    lines.splice(k..=close, rewritten);
+    true
+}
+
+/// Merges a cloned arm of a nested `if`/`else` back into a short-circuit
+/// condition on the outer `if`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the outer `if`.
+///
+/// # Returns
+///
+/// Whether a cloned arm was merged.
+fn dup_merge(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(open) = lines.get(k) else {
+        return false;
+    };
+    let pad = indent_of(open);
+    let Some(a) = if_opener(open.trim()).map(str::to_owned) else {
+        return false;
+    };
+    let Some(mid) = loops::closing(lines, k, pad)
+        .filter(|&m| lines.get(m).is_some_and(|l| l.trim() == "} else {"))
+    else {
+        return false;
+    };
+    let Some(close) =
+        loops::closing(lines, mid, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    let pad_s = " ".repeat(pad);
+    let dedent = |s: &[String]| -> Vec<String> {
+        s.iter()
+            .map(|l| l.strip_prefix("  ").unwrap_or(l).to_owned())
+            .collect()
+    };
+    if let Some(b) = lines
+        .get(k + 1)
+        .filter(|l| indent_of(l) == pad + 2)
+        .and_then(|l| if_opener(l.trim()))
+        .map(str::to_owned)
+    {
+        let e = lines.get(mid + 1..close).unwrap_or(&[]);
+        if loops::closing(lines, k + 1, pad + 2) == Some(mid - 1)
+            && lines.get(mid - 1).is_some_and(|l| l.trim() == "}")
+            && same_arm_lines(lines.get(k + 2..mid - 1).unwrap_or(&[]), e)
+        {
+            let mut out = vec![format!("{pad_s}if (!({a}) || ({b})) {{")];
+            out.extend(e.iter().cloned());
+            out.push(format!("{pad_s}}}"));
+            lines.splice(k..=close, out);
+            return true;
+        }
+        if let Some(im) = loops::closing(lines, k + 1, pad + 2)
+            .filter(|&m| lines.get(m).is_some_and(|l| l.trim() == "} else {"))
+            && loops::closing(lines, im, pad + 2) == Some(mid - 1)
+            && lines.get(mid - 1).is_some_and(|l| l.trim() == "}")
+        {
+            let x = lines.get(k + 2..im).unwrap_or(&[]);
+            let y = lines.get(im + 1..mid - 1).unwrap_or(&[]);
+            if same_arm_lines(y, e) && !x.iter().any(|l| is_label(l)) {
+                let mut out = vec![format!("{pad_s}if (({a}) && ({b})) {{")];
+                out.extend(dedent(x));
+                out.push(format!("{pad_s}}} else {{"));
+                out.extend(e.iter().cloned());
+                out.push(format!("{pad_s}}}"));
+                lines.splice(k..=close, out);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Tells whether two arm slices hold the exact same statements, one nested
+/// two spaces deeper than the other, with no labels.
+///
+/// # Arguments
+///
+/// * `inner` - The arm of the inner `if`.
+/// * `outer` - The arm of the outer `if`.
+fn same_arm_lines(inner: &[String], outer: &[String]) -> bool {
+    !inner.is_empty()
+        && inner.len() == outer.len()
+        && !inner.iter().any(|l| is_label(l))
+        && inner
+            .iter()
+            .zip(outer)
+            .all(|(i, o)| indent_of(i) == indent_of(o) + 2 && i.trim() == o.trim())
 }
 
 /// Rewrites `if (a) { x = p; } else { x = q; if (b) { x = p; } }` at line
@@ -1623,6 +1914,32 @@ return 0;
         assert_eq!(
             select_statements(wide),
             "uint64_t r3;\n\nif (a2 != 8) {\n  a1->field_0xc = (uint64_t)(a1->field_0xc | 0x1000);\n} else {\n  a1->field_0xc = (uint64_t)(a1->field_0xc & 0xffffefff);\n}\n"
+        );
+    }
+
+    /// Break copies, redundant return guards, preassigned `if`/`else` stores,
+    /// and duplicated `else` arms fold into their single-statement forms.
+    #[test]
+    fn break_copies_and_split_branches_fold() {
+        let break_copy = "if (a1 == 0) {\n  var1 = a2;\n  break;\n}\nvar1 = a2;\n";
+        assert_eq!(
+            select_statements(break_copy),
+            "var1 = a2;\nif (a1 == 0) {\n  break;\n}\n"
+        );
+        let red_ret = "if (a1 != 0) {\n  sub_1(a1);\n  return 0;\n}\nreturn 0;\n";
+        assert_eq!(
+            select_statements(red_ret),
+            "if (a1 != 0) {\n  sub_1(a1);\n}\nreturn 0;\n"
+        );
+        let pre_if = "var1 = 0;\nif (a1 != 0) {\n  sub_1(a1);\n  var1 = a2;\n}\nreturn var1;\n";
+        assert_eq!(
+            select_statements(pre_if),
+            "if (a1 != 0) {\n  sub_1(a1);\n  var1 = a2;\n} else {\n  var1 = 0;\n}\nreturn var1;\n"
+        );
+        let dup = "if (a1 != 0) {\n  if (a2 > 0 && a2 < 9) {\n    g32_1000 = a2;\n  } else {\n    sub_1(a1);\n  }\n} else {\n  sub_1(a1);\n}\n";
+        assert_eq!(
+            select_statements(dup),
+            "if ((a1 != 0) && (a2 > 0 && a2 < 9)) {\n  g32_1000 = a2;\n} else {\n  sub_1(a1);\n}\n"
         );
     }
 }

@@ -161,9 +161,9 @@ pub(super) fn drop_returned_values(body: &str) -> String {
 /// while the function's own result was unknown, and the return then found
 /// nothing to hand back: `rax = f(); return;` reads `f(); return;`. The
 /// `return;` that ends the body is the end of the function and goes too
-/// when it is the body's only return, unless a label before it would be
-/// left closing the body; beside an early return it stays, the one exit
-/// the paths that run to the end share.
+/// unless a label before it would be left closing the body or the block
+/// right before it also ends in `return;`, and a final `default: {
+/// return; }` closing a `switch` at the end of the body goes with it.
 ///
 /// # Arguments
 ///
@@ -178,12 +178,19 @@ pub(super) fn drop_dead_results(body: &str, reg: &str) -> String {
     if let [ref earlier @ .., before, last] = lines[..]
         && last == "return;"
         && !before.trim_end().ends_with(':')
-        && !earlier
-            .iter()
-            .chain([&before])
-            .any(|l| l.trim_start().starts_with("return"))
+        && before.trim() != "return;"
+        && earlier.last().is_none_or(|l| l.trim() != "return;")
     {
         lines.pop();
+    }
+    if let [.., d_open, d_ret, d_close, sw_close] = lines[..]
+        && d_open.trim() == "default: {"
+        && d_ret.trim() == "return;"
+        && d_close.trim() == "}"
+        && sw_close == "}"
+    {
+        let n = lines.len();
+        lines.drain(n - 4..n - 1);
     }
     let mut out = String::with_capacity(body.len());
     let prefix = format!("{reg} = ");
@@ -717,15 +724,31 @@ pub(super) fn refold_jumps(text: &str) -> String {
         changed |= hoist_common_tails(&mut lines);
         changed |= loop_exits(&mut lines);
         changed |= drop_fallthrough_gotos(&mut lines);
-        let referenced: BTreeSet<String> = goto_index(&lines).into_keys().collect();
+        let handlers = handler_labels(&lines);
+        changed |= thread_label_gotos(&mut lines, &handlers);
+        let mut referenced: BTreeSet<String> = goto_index(&lines).into_keys().collect();
+        referenced.extend(handlers);
         let before = lines.len();
         lines.retain(|l| label_name(l).is_none_or(|name| referenced.contains(name)));
         changed |= lines.len() != before;
+        changed |= drop_unreachable_runs(&mut lines);
         changed |= absorb_else(&mut lines);
         changed |= fold_conditional_gotos(&mut lines, RunLabels::Forbidden);
         if !changed {
             break;
         }
+    }
+    if lines
+        .iter()
+        .take(5)
+        .any(|l| l.starts_with("// signature: void "))
+        && let [ref earlier @ .., ref before, ref last] = lines[..]
+        && last == "return;"
+        && !before.trim_end().ends_with(':')
+        && before.trim() != "return;"
+        && earlier.last().is_none_or(|l| l.trim() != "return;")
+    {
+        lines.pop();
     }
     let mut out = lines.join("\n");
     out.push('\n');
@@ -805,14 +828,16 @@ pub(super) fn cleanup_passes(
             merge_return_assignments,
         );
         changed |= round.run(Pass::UnnamedLabels, lines, |lines| {
+            let handlers = handler_labels(lines);
+            let threaded = thread_label_gotos(lines, &handlers);
             let mut referenced: BTreeSet<String> = goto_index(lines).into_keys().collect();
-            referenced.extend(handler_labels(lines));
+            referenced.extend(handlers);
             let before = lines.len();
             lines.retain(|l| match label_name(l) {
                 Some(name) => referenced.contains(name),
                 None => !l.trim().is_empty(),
             });
-            lines.len() != before
+            threaded || lines.len() != before
         });
         changed |= round.run(Pass::FlattenElseIf, lines, flatten_else_if);
         changed |= round.run(Pass::HoistCommonTails, lines, hoist_common_tails);
@@ -881,6 +906,53 @@ pub(super) fn handler_labels(lines: &[String]) -> BTreeSet<String> {
             format!("L_{hex}")
         })
         .collect()
+}
+
+/// Redirects `goto L_a;` to `L_b` when `L_a:` stands right before `goto L_b;`
+/// at the same indentation.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines, rewritten in place.
+/// * `keep` - Handler labels that may not be redirected.
+///
+/// # Returns
+///
+/// Whether any `goto` was redirected.
+fn thread_label_gotos(lines: &mut [String], keep: &BTreeSet<String>) -> bool {
+    let mut map: BTreeMap<String, String> = BTreeMap::new();
+    for w in lines.windows(2) {
+        if let Some(a) = label_name(&w[0]).filter(|a| !keep.contains(*a))
+            && indent_of(&w[0]) == indent_of(&w[1])
+            && let Some(b) = w[1]
+                .trim()
+                .strip_prefix("goto ")
+                .and_then(|r| r.strip_suffix(';'))
+            && a != b
+        {
+            map.insert(a.to_owned(), b.to_owned());
+        }
+    }
+    if map.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for l in lines.iter_mut() {
+        let t = l.trim();
+        let pad = pad_of(l);
+        if let Some(a) = t.strip_prefix("goto ").and_then(|r| r.strip_suffix(';'))
+            && let Some(b) = map.get(a)
+        {
+            *l = format!("{pad}goto {b};");
+            changed = true;
+        } else if let Some((cond, a)) = conditional_goto(t)
+            && let Some(b) = map.get(a)
+        {
+            *l = format!("{pad}if ({cond}) goto {b};");
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// The state of one run of [`cleanup_passes`]: which passes it leaves
@@ -1145,5 +1217,34 @@ mod refold_tests {
             ),
             "{out}"
         );
+    }
+
+    /// A label standing right before a `goto` threads its callers onto the
+    /// target label, and a trailing `return;` or empty `default` in a `void`
+    /// body is dropped.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_chained_label_threads_and_void_tail_return_drops() {
+        let lines = [
+            "if (a1 == 0) {",
+            "  if (a2 == 0) {",
+            "    sub_1(\"goto L_1;\");",
+            "    goto L_1;",
+            "  }",
+            "  L_1:",
+            "  goto L_2;",
+            "}",
+            "sub_2();",
+            "L_2:",
+            "return;",
+        ];
+        let out =
+            super::drop_dead_results(&super::cleanup_text(&lines.join("\n"), Some("void")), "rax");
+        assert!(out.contains("\"goto L_1;\""), "{out}");
+        assert!(!out.contains("L_1:"), "{out}");
+        assert!(!out.trim_end().ends_with("return;"), "{out}");
     }
 }
