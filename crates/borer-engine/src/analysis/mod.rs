@@ -1606,7 +1606,8 @@ impl Analysis {
     /// Thumb run nothing calls, a handler whose literal pool sits in a
     /// hole of a later function's span, or a body a later thunk entered
     /// by jumping backward. A decompile that names that address starts a
-    /// function there. Functions already found are not walked again.
+    /// function there and records the jump tables the walk resolved.
+    /// Functions already found are not walked again.
     ///
     /// # Arguments
     ///
@@ -1623,12 +1624,15 @@ impl Analysis {
         mut analysis: Analysis,
         va: u64,
     ) -> Result<(Analysis, u64), Analysis> {
-        let Some(func) = a32::function_at_gap(program, &analysis.functions, va) else {
+        let Some((func, tables)) = a32::function_at_gap(program, &analysis.functions, va) else {
             return Err(analysis);
         };
         let entry = func.entry;
         let pos = analysis.functions.partition_point(|f| f.entry < entry);
         analysis.functions.insert(pos, func);
+        for (site, targets) in tables {
+            analysis.jump_tables.insert(site, targets);
+        }
         analysis.entry_index.clear();
         for (i, f) in analysis.functions.iter().enumerate() {
             analysis.entry_index.insert(f.entry, i);

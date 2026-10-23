@@ -494,18 +494,21 @@ fn walk(
 /// same stop, so the bytes already found stay a function of their own.
 /// Padding that falls out of the walk, a `nop` before that pool or the
 /// next function, is dropped: a block ending on it would fall out of
-/// the function.
+/// the function. A call to a function that never returns ends the path,
+/// the same way [`walk`] ends one.
 ///
 /// # Arguments
 ///
 /// * `program` - The image.
 /// * `entry` - The requested address, even.
 /// * `starts` - Entries already discovered. A jump to one is a tail call.
+/// * `noreturn` - Functions that never return ([`gap_noreturn`]).
 /// * `covered` - Ranges those functions own.
 fn walk_gap(
     program: &Program,
     entry: u64,
     starts: &BTreeSet<u64>,
+    noreturn: &BTreeSet<u64>,
     covered: &BTreeMap<u64, (u64, bool)>,
 ) -> Walked {
     let mut w = Walked {
@@ -580,7 +583,8 @@ fn walk_gap(
             Flow::Call => {
                 let target = i.target().filter(|t| super::is_executable_va(program, *t));
                 w.callees.extend(target);
-                let returns = !starts.contains(&next);
+                let returns =
+                    !target.is_some_and(|t| noreturn.contains(&t)) && !starts.contains(&next);
                 if falls || returns {
                     pending.push((next, it));
                 }
@@ -685,7 +689,8 @@ fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
 /// The walk has to decode, leave (a return, a tail, or its own literal
 /// pool), and share no decoded byte with a function already found, except
 /// a block that starts at `va` and belongs to a later entry. Nothing here
-/// changes those functions: the caller adds this one beside them.
+/// changes those functions: the caller adds this one beside them, and
+/// records the jump tables the walk resolved.
 ///
 /// # Arguments
 ///
@@ -695,12 +700,15 @@ fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
 ///
 /// # Returns
 ///
-/// The function, or `None` when the address is not a clean ARM32 gap.
+/// The function and each resolved dispatch with its case targets, or
+/// `None` when the address is not a clean ARM32 gap. The targets are
+/// what discovery stores for a walk it keeps. A recovered `tbb` or `tbh`
+/// has no cases without them.
 pub(crate) fn function_at_gap(
     program: &Program,
     functions: &[Function],
     va: u64,
-) -> Option<Function> {
+) -> Option<(Function, Vec<(u64, Vec<u64>)>)> {
     let va = va & !1;
     if program.arch != crate::program::Arch::Arm {
         return None;
@@ -719,7 +727,8 @@ pub(crate) fn function_at_gap(
     }
     let covered = gap_covered(functions, va);
     let starts: BTreeSet<u64> = functions.iter().map(|f| f.entry).collect();
-    let w = walk_gap(program, va, &starts, &covered);
+    let noreturn = gap_noreturn(program, functions);
+    let w = walk_gap(program, va, &starts, &noreturn, &covered);
     let free = |a: u64| guess::covers(&covered, a).is_none();
     let ok = !w.bad
         && w.into.is_empty()
@@ -729,7 +738,51 @@ pub(crate) fn function_at_gap(
         && w.seen
             .values()
             .all(|i| free(i.va) && free(i.next().saturating_sub(1)));
-    ok.then(|| assemble(va, &w).0)
+    ok.then(|| {
+        let tables = w
+            .tables
+            .iter()
+            .map(|t| (t.site, t.targets.clone()))
+            .collect();
+        (assemble(va, &w).0, tables)
+    })
+}
+
+/// Addresses a gap walk treats as never returning.
+///
+/// Discovery walks with this same set: a symbol that is not an import and
+/// whose name never returns, a function already found with such a name,
+/// and an import thunk whose slot names one ([`stub_slot`]). A call to
+/// one of them ends the path.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `functions` - The functions discovery kept.
+fn gap_noreturn(program: &Program, functions: &[Function]) -> BTreeSet<u64> {
+    let mut noreturn: BTreeSet<u64> = program
+        .symbols
+        .iter()
+        .filter(|s| s.kind != SymbolKind::Import && s.addr != 0 && noreturn_name(&s.name))
+        .map(|s| s.addr)
+        .collect();
+    let imports: BTreeMap<u64, &str> = program
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
+        .map(|s| (s.addr, s.name.as_str()))
+        .collect();
+    for f in functions {
+        if f.name.as_deref().is_some_and(noreturn_name) {
+            noreturn.insert(f.entry);
+        }
+        if let Some(slot) = stub_slot(program, f.entry)
+            && imports.get(&slot).is_some_and(|n| noreturn_name(n))
+        {
+            noreturn.insert(f.entry);
+        }
+    }
+    noreturn
 }
 
 /// Finds the guarded instructions ([`guarded`]) whose condition the block
