@@ -514,30 +514,40 @@ fn a_jump_table_case_stays_in_its_caller() {
 /// A body a later thunk enters by jumping backward is recovered as its own
 /// function when `start_gap_function` is asked for its address, and an
 /// address inside a function's own entry block is refused.
+///
+/// Recovering a gap that reads a callee's result clears the derived cache so
+/// decompiling that callee again reflects the new caller.
 #[test]
 fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
-    let text: [u16; 5] = [
+    use borer_engine::analysis::Overlay;
+    use borer_engine::analysis::decompile::decompile_named;
+    let text: [u16; 14] = [
+        0xb510, // ASM: push {r4, lr}
+        0xf000, // ASM: bl 0xe
+        0xf804, // ASM: (bl, second half)
+        0x2000, // ASM: movs r0, #0
+        0xbd10, // ASM: pop {r4, pc}
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0x4770, // ASM: bx lr
+        0xde00, // ASM: udf #0
+        0x2800, // ASM: cmp r0, #0
+        0xf7ff, // ASM: bl 0xe
+        0xfffb, // ASM: (bl, second half)
         0x3001, // ASM: adds r0, #1
         0x4770, // ASM: bx lr
-        0xbf00, // ASM: nop
-        0x2107, // ASM: movs r1, #7
-        0xe7fb, // ASM: b 0
     ];
     let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
-    let p = Program::from_bytes(
-        PathBuf::from("thunk.elf"),
-        elf32(&bytes, &[], (ELF_TEXT + 6) | 1),
-    )
-    .expect("parses");
+    let p = Program::from_bytes(PathBuf::from("thunk.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
     let a = Analysis::compute(&p);
-    assert_eq!(
-        a.functions.iter().map(|f| f.entry).collect::<Vec<_>>(),
-        [ELF_TEXT + 6]
-    );
-    let a = Analysis::start_gap_function(&p, a, ELF_TEXT + 6).expect_err("entry block is owned");
-    let (a, entry) = Analysis::start_gap_function(&p, a, ELF_TEXT).expect("recovered");
-    assert_eq!(entry, ELF_TEXT);
-    assert!(a.function(ELF_TEXT).is_some());
+    let before = decompile_named(&p, &a, &Overlay::default(), ELF_TEXT + 0xe).expect("decompiles");
+    assert!(before.contains("// signature: void sub_"), "{before}");
+    let a = Analysis::start_gap_function(&p, a, ELF_TEXT).expect_err("entry block is owned");
+    let (a, entry) = Analysis::start_gap_function(&p, a, ELF_TEXT + 0x12).expect("recovered");
+    assert_eq!(entry, ELF_TEXT + 0x12);
+    let after = decompile_named(&p, &a, &Overlay::default(), ELF_TEXT + 0xe).expect("decompiles");
+    assert!(after.contains("// signature: uint32_t sub_"), "{after}");
 }
 
 /// One instruction's encoding in its instruction set.

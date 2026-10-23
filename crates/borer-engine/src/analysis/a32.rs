@@ -800,6 +800,7 @@ pub(crate) fn start_gap_function(
     }
     analysis.index_refs();
     infer_returns(program, &mut analysis);
+    analysis.derived.forget_all();
     Ok((analysis, entry))
 }
 
