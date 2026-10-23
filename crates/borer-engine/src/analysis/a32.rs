@@ -750,34 +750,49 @@ pub(crate) fn start_gap_function(
     analysis: &mut Analysis,
     va: u64,
 ) -> Option<u64> {
-    let va = va & !1;
-    let w = function_at_gap(program, &analysis.functions, va)?;
-    let (func, mut sites) = assemble(va, &w);
-    data_refs(program, &w, &mut |t, site| {
-        sites.push((t, site, RefKind::Data));
-    });
-    let entry = func.entry;
-    let callees = func.callees.clone();
-    let pos = analysis.functions.partition_point(|f| f.entry < entry);
-    analysis.functions.insert(pos, func);
-    for t in &w.tables {
-        analysis.jump_tables.insert(t.site, t.targets.clone());
+    let entry = va & !1;
+    let mut work = vec![entry];
+    let mut added = Vec::new();
+    while let Some(next) = work.pop() {
+        let Some(w) = function_at_gap(program, &analysis.functions, next) else {
+            if next == entry {
+                return None;
+            }
+            continue;
+        };
+        let (func, mut sites) = assemble(next, &w);
+        data_refs(program, &w, &mut |t, site| {
+            sites.push((t, site, RefKind::Data));
+        });
+        for &c in &func.callees {
+            if !analysis.functions.iter().any(|f| f.entry == c) {
+                work.push(c);
+            }
+        }
+        added.push((next, func.callees.clone()));
+        let pos = analysis.functions.partition_point(|f| f.entry < next);
+        analysis.functions.insert(pos, func);
+        for t in &w.tables {
+            analysis.jump_tables.insert(t.site, t.targets.clone());
+        }
+        for (target, site, kind) in sites {
+            push_site(&mut analysis.xrefs, target, site, kind, Some(next));
+            if let Some(list) = analysis.xrefs.get_mut(&target) {
+                list.sort_by_key(|s| s.va);
+            }
+        }
     }
     analysis.entry_index.clear();
     for (i, f) in analysis.functions.iter().enumerate() {
         analysis.entry_index.insert(f.entry, i);
     }
-    for callee in callees {
-        if let Some(f) = analysis.function_mut(callee)
-            && let Err(at) = f.callers.binary_search(&entry)
-        {
-            f.callers.insert(at, entry);
-        }
-    }
-    for (target, site, kind) in sites {
-        push_site(&mut analysis.xrefs, target, site, kind, Some(entry));
-        if let Some(list) = analysis.xrefs.get_mut(&target) {
-            list.sort_by_key(|s| s.va);
+    for (caller, callees) in added {
+        for callee in callees {
+            if let Some(f) = analysis.function_mut(callee)
+                && let Err(at) = f.callers.binary_search(&caller)
+            {
+                f.callers.insert(at, caller);
+            }
         }
     }
     analysis.index_refs();
