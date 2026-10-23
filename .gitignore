@@ -35,3 +35,6 @@ CLAUDE.local.md
 # Written by scripts/dev/licenses.py for a release archive
 /THIRD-PARTY-LICENSES
 /RUST-STD-COPYRIGHT.html
+
+# local secrets (scripts/dev/tdqs.py reads TDQS_API_KEY from it)
+.env.local
