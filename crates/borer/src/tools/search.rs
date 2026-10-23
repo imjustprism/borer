@@ -33,7 +33,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Crypto tables and constants (AES, SHA-1/2, MD5, CRC-32, ChaCha, Blowfish, RC5/6, xxHash/FNV/SipHash, Base64) in the file as `va section algorithm` rows (`off=<n>` if unmapped); then API hashes, 32-bit constants hashing an export name (ROR13 as block_api, djb2, FNV-1a, CRC-32) with the candidates, `corroborated` when a neighbour resolves alike. offset/limit (200, max 500).",
+        description = "Find crypto constants and tables (AES, SHA, MD5, CRC-32, ChaCha, Blowfish, FNV, Base64) and hashed API names as `va section algorithm` rows, paged. Use it to locate crypto code, then xrefs a hit; not for strings (use strings).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -68,7 +68,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Functions referencing strings containing `filter`: a `# showing N of M` header, a numbered `# strings:` legend, then `entry name: 1 2 5` rows; offset/limit page rows and legend (50, max 300).",
+        description = "Find the functions whose strings contain a text, case-insensitively: a numbered string legend, then `entry name: 1 2` rows, paged. Not for one function's strings (use function_strings).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -104,7 +104,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the encoding is unknown.
     #[tool(
-        description = "Printable ASCII/UTF-16LE strings as `va len enc \"text\"` rows; runs that are bytes of decoded instructions (prologues, nop padding) are left out.",
+        description = "List printable ASCII and UTF-16LE strings as `va len enc text` rows, paged, skipping bytes of code. Not for the code using one (use find_function_by_string).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -159,7 +159,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Imports/exports/forwards/locals/data as `kind addr name` rows under `# module:` lines, demangled (a forward ends `-> MODULE.name`); xrefs(import) lists its call sites.",
+        description = "List imports, exports, forwards, locals and data as demangled `kind addr name` rows by module, paged. Not for discovered code (use functions) or call sites (use xrefs).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -211,7 +211,7 @@ impl BorerServer {
     /// When no binary is loaded, the query is empty, the pattern does not
     /// parse, or the kind is unknown.
     #[tool(
-        description = "Search the whole file for bytes (AOB hex, ?? wildcards) or kind=text substring; hits as `function: va va ...` rows, `off=<n>` where unmapped; offset/limit (200, max 500).",
+        description = "Search every byte of the file for a hex pattern with ?? wildcards, or text with kind=text, as `function: va ...` rows, paged. Not for listing strings (use strings).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

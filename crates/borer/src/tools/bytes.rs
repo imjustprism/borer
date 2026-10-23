@@ -28,7 +28,7 @@ impl BorerServer {
     /// When no binary is loaded, the address does not resolve or is unmapped, or
     /// the architecture has no decoder.
     #[tool(
-        description = "Disassemble `count` instructions (default 32, max 256) at an address or name as `va text` rows (bytes=true adds bytes); whole functions: disassemble_function.",
+        description = "Disassemble count instructions from any address as `va text` rows. Use it for a few instructions or code outside functions; for a whole function use disassemble_function. Fails if unmapped.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -114,7 +114,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Disassemble a whole function block by block with `L_<addr>:` labels and named call/jmp targets (max_instrs default 400, max 2000).",
+        description = "Disassemble a whole function by blocks, with `L_<addr>:` labels and named call targets. Use it when exact instructions matter; for C use decompile, for a few instructions disassemble.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -158,7 +158,7 @@ impl BorerServer {
     /// both a kind and a type; internal error when the address does not
     /// resolve or the bytes are not mapped.
     #[tool(
-        description = "Read `count` values of `kind` (default one u64) as `va value` rows; pointers are named. `type` reads a user type instead: one row per field.",
+        description = "Read typed values (kind) as `va value` rows, or a user type (type) one row per field, pointers named; stops at the first unmapped byte. Not for raw bytes (use hexdump) or a live process (live_read).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -260,7 +260,7 @@ impl BorerServer {
     /// When no binary is loaded, the threshold is outside 0..8 or the
     /// limit is zero.
     #[tool(
-        description = "High-entropy regions (packed/encrypted data) as `off va len entropy` rows at or above threshold bits/byte under a `# showing N of M` header; the scan stops at 200 regions.",
+        description = "Find packed, compressed or encrypted data: chunks at or above threshold bits/byte, as `off va len entropy` rows, at most 200, paged. To name the packer query borer://protection instead.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -315,7 +315,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the range is not entirely mapped.
     #[tool(
-        description = "Hexdump `length` bytes (default 64, max 4096) at `address`.",
+        description = "Hexdump raw bytes at an address as `address hex |ascii|` rows; a range past mapped bytes shows what is there. Not for typed values (use read), text (use strings) or a live process (live_read).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

@@ -242,7 +242,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not inside a discovered function,
     /// or the decompiler produces nothing.
     #[tool(
-        description = "Pseudo-C with locals local_N/arg_N (N hex bytes below the entry sp: higher N, lower address), named calls, structured flow; /* asm */ marks unmodeled code, goto unproven flow. Line 2 says what the binary checked; a `// warn:` line names what is known wrong in the text (none: no check fired, not proof), `// next:` lines what to read next.",
+        description = "Decompile one function to pseudo-C. Locals are local_N/arg_N (N hex bytes below the entry sp: higher N, lower address); /* asm */ marks unmodeled code. Line 2 says what was checked, `// warn:` what is wrong. Not for a first look (use function_summary).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -294,7 +294,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Pseudo-C for many functions: filter on name or entry hex, max_functions (10, max 50); 6000 chars per function, 40000 total; out=<file.c> writes all of them uncapped, leaves first, under the output root (BORER_OUTPUT_DIR or the binary's project dir); overwrite=true replaces a file.",
+        description = "Decompile many functions matching a name filter, in parallel, 6000 chars each and 40000 in all; out=<file.c> writes all uncapped to a file under the output root, kept unless overwrite=true. For one use decompile.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

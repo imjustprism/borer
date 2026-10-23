@@ -268,8 +268,7 @@ impl From<RawArch> for program::Arch {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FetchPdbParams {
-    /// Preview only (default true); false fetches. The symbol server is the
-    /// Microsoft one, or the one `BORER_SYMBOL_SERVER` names.
+    /// Preview only (default true); false fetches from `BORER_SYMBOL_SERVER` or Microsoft's.
     pub(crate) dry_run: Option<bool>,
 }
 
@@ -564,9 +563,7 @@ pub(crate) struct DecompileBatchParams {
     pub(crate) filter: Option<String>,
     /// Maximum functions to decompile (default 10, max 50).
     pub(crate) max_functions: Option<u32>,
-    /// Write every function to this `.c` file instead, uncapped, leaves
-    /// first; not with `filter` or `max_functions`. Relative to the output
-    /// root, or absolute under it.
+    /// A `.c` file under the output root to write every function to; not with `filter` or `max_functions`.
     pub(crate) out: Option<String>,
     /// With out: also write library functions (default false).
     pub(crate) library: Option<bool>,
@@ -672,8 +669,7 @@ pub(crate) struct AnnotationsParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SaveProjectParams {
-    /// Output `.json` path, relative to the output root or absolute under
-    /// it.
+    /// Output `.json` path, relative to the output root or absolute under it.
     pub(crate) path: String,
     /// Replace an existing file (default false).
     pub(crate) overwrite: Option<bool>,

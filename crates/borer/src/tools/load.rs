@@ -146,7 +146,7 @@ impl BorerServer {
     /// not parse or the file cannot hold it, or `entry` and
     /// `entry_file_offset` are both given.
     #[tool(
-        description = "Load a PE, ELF or Mach-O file (a fat Mach-O: its x86-64 slice), or any other file as raw bytes, as the current program; returns its summary. pdb=false skips the companion PDB; entry_file_offset overrides the entry; arch maps raw code or a dump.",
+        description = "Load a PE, ELF or Mach-O file (or raw bytes with arch) as the program all tools read, returning its summary. Clears the session's names: save_project first. A refused load changes nothing.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -283,7 +283,7 @@ impl BorerServer {
     /// cache directory resolves, the name or server is refused, or the
     /// fetch or its validation fails.
     #[tool(
-        description = "Fetch the loaded PE's missing companion PDB over https from the symbol server (Microsoft's or BORER_SYMBOL_SERVER) into the cache; guid+age must match; dry-run unless dry_run=false; the next load_binary applies it.",
+        description = "Download the loaded PE's missing PDB over https into the cache, kept only if its GUID and age match. Use it when load_binary reports no PDB; dry run until dry_run=false, then load_binary again.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -335,7 +335,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Summary of the current program: format, arch, entry, sections with entropy, imports/exports.",
+        description = "Summarize the loaded program: format, arch, entry, sections with entropy, imports, exports. load_binary already returns it; for protection and where to start, query borer://triage. Fails if nothing is loaded.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -371,7 +371,7 @@ impl BorerServer {
     ///
     /// Never.
     #[tool(
-        description = "Restart the server on the binary at its path, keeping the session, the loaded file and its names and comments: use after rebuilding borer, instead of restarting the client.",
+        description = "Restart the borer server on its rebuilt binary, keeping the session, the loaded file and its annotations. Use it after rebuilding borer instead of restarting the client; live attaches end.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -408,7 +408,7 @@ impl BorerServer {
     /// the output root, not `.json`, or an existing file without
     /// `overwrite`); internal error when the file cannot be written.
     #[tool(
-        description = "Save the annotation overlay (names, comments, types) to a .json project file keyed by the binary's SHA-256, under the output root (BORER_OUTPUT_DIR or the binary's project dir); overwrite=true replaces a file.",
+        description = "Save the session's names, comments and types to a .json project under the output root, keyed by SHA-256. Restore with load_project; an existing file is kept unless overwrite=true.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -471,7 +471,7 @@ impl BorerServer {
     /// states something the overlay cannot hold, or it was saved for
     /// another binary and `force` is not set.
     #[tool(
-        description = "Load a JSON project file into the annotation overlay, replacing it. A project saved for another binary (by SHA-256) is refused unless force=true; names, comments and types at addresses no section holds, or blank, are skipped and listed.",
+        description = "Replace the session's names, comments and types with a saved .json project. Another binary's project (by SHA-256) is refused unless force=true; for a rebuild use borer://carry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

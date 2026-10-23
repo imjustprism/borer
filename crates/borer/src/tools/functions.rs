@@ -76,7 +76,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "One-call triage of a function: shape, loops, jump tables, callers/callees by name, strings and data it references; `# next:` lines name what to read next.",
+        description = "Triage one function in one call: shape, loops, jump tables, callers, callees, strings and data, then `# next:` lines. Use it before decompile; for the raw block table use function.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -106,7 +106,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "String literals a function references as `site string_va text` rows (max 100).",
+        description = "List the string literals one function references as `site string_va text` rows, at most 100. Not for finding a text's functions (use find_function_by_string).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -139,7 +139,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Discovered functions as `entry size blocks instrs callers callees src name` rows; filter on name or entry hex, sort=size for the largest first.",
+        description = "List discovered functions as `entry size blocks instrs callers callees src name` rows, paged; filter on name or entry hex, sort=size for the largest. Not for imports (use symbols).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -184,7 +184,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "One function's detail: name, range, counts, callers/callees and its basic-block table (`start size term successors`, 300 a page by offset).",
+        description = "Show one function's raw facts: range, counts, callers, callees and block table (`start size term successors`), 300 blocks a page. Not for a readable triage (use function_summary).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -223,7 +223,7 @@ impl BorerServer {
     /// When no binary is loaded or the target resolves to neither an address
     /// nor a class field.
     #[tool(
-        description = "References to an address or name, one `function: site kind, ...` row per referencing function, same-code functions folded; an import lists calls through its slot; `Class+0x24` lists who touches that field.",
+        description = "List references to an address or name, one row per function, paged; an import lists calls through its slot, `Class+0x24` who touches that field. Not for call paths (use reaches).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -299,7 +299,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not a class method, nothing
     /// belongs to the class, or the struct to apply is refused.
     #[tool(
-        description = "Class layout from its methods: field offset, width, reads/writes, methods, vftable; takes a class name or a method address; apply=Name defines it as a struct typing each method's object (dry-run unless dry_run=false).",
+        description = "Infer a C++ class's fields, methods and vftable from how its methods use the object: offset, width, reads, writes. Use it on an unknown class; for a known layout use set_type. apply=Name saves it as a struct (dry run until dry_run=false).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -355,7 +355,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Callgraph from a function as mermaid: callees (callers=true: what reaches it), six per function before the rest is shared out, imports as leaves; a trailing %% line counts what was hidden.",
+        description = "Draw a function's call graph as mermaid: callees, or callers with callers=true; imports are leaves and a %% line counts nodes cut by max_nodes. Not for one path (use reaches) or a caller list (use xrefs).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -404,7 +404,7 @@ impl BorerServer {
     /// When no binary is loaded, `from` is not inside a discovered function,
     /// or `to` is neither inside one nor an import.
     #[tool(
-        description = "Shortest call chain from one function to another (or to an import, called through its slot or a thunk), or that there is none and how far it looked.",
+        description = "Find the shortest call chain from one function to another or to an import, or say none exists within depth. Not for the whole neighbourhood (use callgraph) or direct callers (use xrefs).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -447,7 +447,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Control-flow graph of a function as mermaid: basic blocks (start, terminator) and successor edges, 300 blocks a page by offset; a trailing %% line says when blocks were cut.",
+        description = "Draw a function's control-flow graph as mermaid: blocks and successor edges, 300 blocks a page, a %% line when cut. Not for reading logic (use decompile) or a block table (use function).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

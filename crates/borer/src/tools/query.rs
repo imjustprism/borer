@@ -32,7 +32,7 @@ impl BorerServer {
     /// As `resources/read`: resource-not-found for an unknown URI, naming
     /// the resources nearest it; otherwise the resource's own error.
     #[tool(
-        description = "Read a borer:// resource as resources/read does, for hosts that cannot read resources (borer://triage, borer://scenarios/0x401000/a1=0..8); a template read bare says its grammar, !offset=N!limit=N page a listing, borer://help lists all.",
+        description = "Read a borer:// resource (triage, taint, emulate, solve, grep...) for hosts without MCP resources; same answer as resources/read. Use it for analyses no tool has; borer://help lists them, !offset=N!limit=N pages.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -69,7 +69,7 @@ impl BorerServer {
     /// When no binary is loaded or borer does not disassemble its
     /// architecture; a failing script is an answer, not an error.
     #[tool(
-        description = "Run a sandboxed Rhai script over the loaded program: what it printed, then the names and comments it proposed (dry-run unless dry_run=false). print(help()) lists every call; query(uri) reads any borer:// resource, rows(uri) its table.",
+        description = "Run a sandboxed Rhai script on a snapshot of the program: query(uri) and rows(uri) read any resource. Use it when no single tool answers. Proposed names apply only with dry_run=false; a failed script applies nothing.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

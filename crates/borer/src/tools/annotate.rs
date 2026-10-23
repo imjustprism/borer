@@ -131,7 +131,7 @@ impl BorerServer {
     /// is given, a name is not an identifier or is taken, an address does
     /// not resolve, or no section holds it.
     #[tool(
-        description = "Name a function (any address inside it) or a data global in the overlay, not the binary; names=[\"addr=name\",...] renames many. A name taken elsewhere needs force=true. Dry-run unless dry_run=false.",
+        description = "Name a function or data global in the session overlay, never the binary; names=[addr=name,...] renames many, checked first. A taken name needs force=true. Dry run until dry_run=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -276,7 +276,7 @@ impl BorerServer {
     /// When no binary is loaded, the address does not resolve, or no section
     /// holds it.
     #[tool(
-        description = "Comment an address in the overlay; dry-run unless dry_run=false.",
+        description = "Comment an address in the session overlay, never the binary; a comment opening with ? is an open question. To name it use set_name. Dry run until dry_run=false; save_project keeps it.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -341,7 +341,7 @@ impl BorerServer {
     /// or a variable is refused, or the address does not resolve or no
     /// section holds it.
     #[tool(
-        description = "Define or apply a user type: at a data global `type` types it (a `Player *` names the fields read through it); at a function it is the C prototype, or with `var` (a1, local_58) that variable's; `type` alone declares C types. Dry-run unless dry_run=false.",
+        description = "Define a struct, enum or typedef, or apply a type at an address so decompile names its fields; at a function, type sets the prototype. To infer a class use class_layout. Checked first; dry run until dry_run=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -678,7 +678,7 @@ impl BorerServer {
     ///
     /// When `limit` is zero.
     #[tool(
-        description = "List user-defined types and where they are applied; filter pages like every list.",
+        description = "List user-defined types and where each is applied, paged. Not for defining one (use set_type) or names and comments (use annotations).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -740,7 +740,7 @@ impl BorerServer {
     ///
     /// When `limit` is zero.
     #[tool(
-        description = "List the annotation overlay: names, findings and open questions (comments opening with ?); filter pages like every list.",
+        description = "List the names, findings and open questions (comments opening with ?) added this session, paged. Use it to resume work; not for binary symbols (use symbols) or user types (use types).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

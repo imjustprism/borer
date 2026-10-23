@@ -369,7 +369,7 @@ impl BorerServer {
     /// ([`runs_loaded`]) and the server was not started with
     /// `BORER_LIVE_ANY=1`.
     #[tool(
-        description = "Attach read-only to a running process (name or pid) running the loaded binary (any process with BORER_LIVE_ANY=1); maps the binary onto it so live tools take static addresses and names. Replaces an earlier attach.",
+        description = "Attach read-only to a running process (name or pid) of the loaded binary, so live tools take static addresses. Windows only; another binary needs BORER_LIVE_ANY=1. Replaces an attach; live_detach ends it.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -450,7 +450,7 @@ impl BorerServer {
     ///
     /// Never; detaching with nothing attached is a no-op.
     #[tool(
-        description = "Detach from the attached process and drop its watches.",
+        description = "Detach from the attached process and drop its watches; the process is untouched, and nothing attached is a no-op. Not needed before attaching elsewhere: live_attach replaces it.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -486,7 +486,7 @@ impl BorerServer {
     /// Invalid params for a zero limit, or when no process is attached or
     /// it has exited.
     #[tool(
-        description = "List the attached process's modules.",
+        description = "List the attached process's modules (base, size, name), paged. Not for the binary's imports (use symbols). Fails if nothing is attached.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -534,7 +534,7 @@ impl BorerServer {
     /// Invalid params for an unknown kind, or when no process is attached,
     /// the address does not resolve, or its first value does not read.
     #[tool(
-        description = "Read typed values from the attached process; pointers say what they point at.",
+        description = "Read typed values from the attached process; static addresses rebase onto it and pointers say what they point at. Not for the file on disk (use read) or an object (use live_object).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -612,7 +612,7 @@ impl BorerServer {
     /// When no process is attached or no binary is loaded, the address does
     /// not resolve, the class is unknown, or the object is not readable.
     #[tool(
-        description = "Read an object in the attached process as its class: each field's name, type, live value, and what pointers point at.",
+        description = "Read one object in the attached process as its class: each field's name, type and value, pointers resolved. Not for raw values (use live_read) or finding objects (use live_instances).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -647,7 +647,7 @@ impl BorerServer {
     /// When no process is attached or no binary is loaded, or the analysis
     /// knows no vtable for the class.
     #[tool(
-        description = "Find a class's live objects by vtable in the attached process's data; live_object reads one.",
+        description = "Find a class's live objects by scanning the attached process for its vtable, paged. Then read one with live_object. Fails if nothing is attached or no vtable is known.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -702,7 +702,7 @@ impl BorerServer {
     /// When no process is attached, the address does not resolve or is not
     /// readable, the class given is unknown, or no watch has the name.
     #[tool(
-        description = "Watch attached-process memory: with an address, keep its bytes under the name; without, list what changed, naming fields when the class is known.",
+        description = "Watch attached-process memory: with address, snapshot it under name; without, show what changed since the last look, fields named. For one snapshot use live_read.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
