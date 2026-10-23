@@ -72,28 +72,34 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
         let untyped_word = declared == word || declared == "uint32_t";
         if (bytes || untyped_word)
             && let Some(pointer) = api_pointer(&lines, &param)
-            && (!bytes || pointer == "char *")
+            && (!bytes || matches!(pointer.as_str(), "char *" | "char **"))
         {
             retype(&mut lines[sig], &declared, &param, &pointer);
             continue;
         }
-        let stack_byte_ptr = declared != word
+        let stack_copy_ptr = declared != word
             && untyped_word
             && copies(&lines, &param)
                 .iter()
                 .any(|c| c.starts_with("local_"));
-        if (declared == "void *" || stack_byte_ptr)
-            && pointed_at(&lines, &param) == Some("uint8_t *")
-        {
+        if declared == "void *" && pointed_at(&lines, &param) == Some("uint8_t *") {
             retype(&mut lines[sig], &declared, &param, "uint8_t *");
             continue;
         }
-        let byte_copy = param_count > 1
-            && declared == "uint32_t"
-            && !copies(&lines, &param).is_empty()
-            && inferred_type(&lines, &param) == Some("uint8_t");
-        let ty = if byte_copy {
-            "uint8_t"
+        if stack_copy_ptr
+            && let Some(ptr) = pointed_at(&lines, &param)
+                .filter(|&p| matches!(p, "uint8_t *" | "float *" | "double *"))
+        {
+            retype(&mut lines[sig], &declared, &param, ptr);
+            continue;
+        }
+        let narrow_copy =
+            (param_count > 1 && declared == "uint32_t" && !copies(&lines, &param).is_empty())
+                .then(|| inferred_type(&lines, &param))
+                .flatten()
+                .filter(|&t| matches!(t, "uint8_t" | "uint16_t" | "int8_t" | "int16_t"));
+        let ty = if let Some(narrow) = narrow_copy {
+            narrow
         } else if declared != word {
             declared.as_str()
         } else if let Some(found) = inferred_type(&lines, &param).filter(|&t| t != word) {
@@ -115,7 +121,7 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
                 &param,
             );
         }
-        if declared == word || byte_copy {
+        if declared == word || narrow_copy.is_some() {
             retype(&mut lines[sig], &declared, &param, ty);
         }
     }
@@ -255,9 +261,10 @@ pub(in crate::analysis::decompile) fn pointed_at(
     if offsets.is_empty() {
         return None;
     }
-    let ty = if widths == BTreeSet::from([4]) && types.contains("float") {
+    let has_copy = !copies(lines, param).is_empty();
+    let ty = if has_copy && widths == BTreeSet::from([4]) && types == BTreeSet::from(["float"]) {
         "float *"
-    } else if widths == BTreeSet::from([8]) && types.contains("double") {
+    } else if has_copy && widths == BTreeSet::from([8]) && types == BTreeSet::from(["double"]) {
         "double *"
     } else {
         pointee_type(&widths, &offsets)
@@ -669,8 +676,8 @@ fn assigned_width(lines: &[String], head: &str, tail: &str) -> Option<&'static s
     if !is_ident(dest) {
         return None;
     }
-    if !paren
-        && tail.trim_start().starts_with(';')
+    if ((!paren && tail.trim_start().starts_with(';'))
+        || (dest.starts_with('g') && is_offset_stmt_tail(tail, paren)))
         && let Some(w) = declared_scalar(lines, dest)
     {
         return Some(w);
@@ -1512,7 +1519,45 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
             }
         }
     }
-    found.filter(|t| t == "char *" || whole)
+    match found {
+        Some(t) => (t == "char *" || whole).then_some(t),
+        None => string_pointer_array(lines, param).then(|| "char **".to_owned()),
+    }
+}
+
+/// Tells whether `param`'s layout is a contiguous run of two or more `u64`
+/// fields from offset zero, each read as a string.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `param` - The parameter name.
+///
+/// # Returns
+///
+/// Whether `param` is an array of string pointers (`char **`).
+fn string_pointer_array(lines: &[String], param: &str) -> bool {
+    let prefix = format!("// layout {param}: ");
+    let Some(layout) = lines.iter().find_map(|l| l.strip_prefix(&prefix)) else {
+        return false;
+    };
+    let fields: Vec<&str> = layout.split(", ").collect();
+    if fields.len() < 2 {
+        return false;
+    }
+    fields.iter().enumerate().all(|(i, entry)| {
+        let off = i * 8;
+        if *entry != format!("0x{off:x} u64") {
+            return false;
+        }
+        let field = format!("{param}->field_0x{off:x}");
+        lines.iter().any(|l| {
+            !l.starts_with("//")
+                && (l.contains(&format!("strcmp({field},"))
+                    || l.contains(&format!("strrchr({field},"))
+                    || l.contains(&format!("*(uint8_t*){field}")))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1745,5 +1790,11 @@ printf(f2, a3);",
         let arm_ptr = "// signature: void f(uint32_t a1, uint32_t a2)\nuint32_t local_8;\nlocal_8 = a2;\ng(*(uint8_t*)local_8);\n";
         let typed = super::type_parameters(arm_ptr, "uint64_t");
         assert!(typed.contains("f(uint32_t a1, uint8_t *a2)"), "{typed}");
+        let argv = "// signature: uint32_t f(uint64_t a1, void *a2)\n// layout a2: 0x0 u64, 0x8 u64\nuint32_t g32_10; // @ 0x10\ng32_10 = a1 - 1;\nstrrchr(a2->field_0x0, 47);\nif ((int32_t)a1 > 1 && strcmp(a2->field_0x8, \"--help\") == 0) {\n  return 0;\n}\nreturn 1;\n";
+        let typed = super::type_parameters(argv, "uint64_t");
+        assert!(typed.contains("f(int32_t a1, char **a2)"), "{typed}");
+        let mixed_struct = "// signature: uint32_t f(void *a2)\n// layout a2: 0x0 u32, 0x8 u64\nif (strcmp(a2->field_0x8, \"--help\") == 0) {\n  return 0;\n}\nreturn 1;\n";
+        let typed = super::type_parameters(mixed_struct, "uint64_t");
+        assert!(typed.contains("f(void *a2)"), "{typed}");
     }
 }

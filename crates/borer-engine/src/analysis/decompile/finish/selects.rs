@@ -52,6 +52,7 @@ pub(super) fn select_statements(text: &str) -> String {
         if hoist_break_copy(&mut lines, k)
             || and_chain(&mut lines, k)
             || redundant_if_return(&mut lines, k)
+            || merge_shared_return(&mut lines, k)
             || preassigned_if_else(&mut lines, k)
             || or_default(&mut lines, k)
             || named_choice(&mut lines, k)
@@ -710,6 +711,82 @@ fn redundant_if_return(lines: &mut Vec<String>, k: usize) -> bool {
     true
 }
 
+/// Folds `if (c) { A; return r; } B; return r;` at the end of a block into
+/// `if (c) { A; } else { B; } return r;`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the `if`.
+///
+/// # Returns
+///
+/// Whether the shared `return` was hoisted after an `if`/`else`.
+fn merge_shared_return(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(open) = lines.get(k) else {
+        return false;
+    };
+    let pad = indent_of(open);
+    if pad > 2 || if_opener(open.trim()).is_none() {
+        return false;
+    }
+    let Some(close) =
+        loops::closing(lines, k, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    if !(k + 3..=k + 5).contains(&close) {
+        return false;
+    }
+    let Some(ret) = lines
+        .get(close - 1)
+        .filter(|l| {
+            indent_of(l) == pad + 2 && l.trim().starts_with("return ") && l.trim().ends_with(';')
+        })
+        .map(|l| l.trim().to_owned())
+    else {
+        return false;
+    };
+    let plain = |s: &[String], ind: usize| {
+        !s.is_empty()
+            && s.iter().all(|l| {
+                let t = l.trim();
+                indent_of(l) == ind
+                    && !is_label(l)
+                    && !transfers(t)
+                    && !t.contains('{')
+                    && !t.contains('}')
+            })
+    };
+    if !plain(lines.get(k + 1..close - 1).unwrap_or(&[]), pad + 2) {
+        return false;
+    }
+    let Some(end) = (close + 2..=close + 4).find(|&e| {
+        lines
+            .get(e)
+            .is_some_and(|l| indent_of(l) == pad && l.trim() == ret)
+    }) else {
+        return false;
+    };
+    let at_block_end = end + 1 == lines.len()
+        || lines
+            .get(end + 1)
+            .is_some_and(|l| indent_of(l) < pad && l.trim() == "}");
+    if !at_block_end || !plain(lines.get(close + 1..end).unwrap_or(&[]), pad) {
+        return false;
+    }
+    let pad_s = " ".repeat(pad);
+    let mut out: Vec<String> = lines.get(k..close - 1).unwrap_or(&[]).to_vec();
+    out.push(format!("{pad_s}}} else {{"));
+    for l in lines.get(close + 1..end).unwrap_or(&[]) {
+        out.push(format!("  {l}"));
+    }
+    out.push(format!("{pad_s}}}"));
+    out.push(format!("{pad_s}{ret}"));
+    lines.splice(k..=end, out);
+    true
+}
+
 /// Folds a default assignment `v = init;` before a multi-statement `if`
 /// whose body ends by overwriting `v = other;` into the `else` arm.
 ///
@@ -750,18 +827,48 @@ fn preassigned_if_else(lines: &mut Vec<String>, k: usize) -> bool {
     else {
         return false;
     };
-    if !local_unaliased || close < k + 4 || changes_state(&cond) || mentions_ident(&cond, &v) {
+    if !local_unaliased || close < k + 3 || changes_state(&cond) || mentions_ident(&cond, &v) {
         return false;
     }
     let Some((v2, other)) = lines
         .get(close - 1)
         .filter(|l| indent_of(l) == pad + 2)
         .and_then(|l| plain_assignment(l))
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
     else {
         return false;
     };
+    let pad_s = " ".repeat(pad);
+    let word_or_ptr =
+        |ty: &str| matches!(ty, "uint64_t" | "int64_t" | "uintptr_t") || ty.ends_with('*');
+    let same_width = (vars::is_var_name(&v) || is_register_name(&v))
+        && (is_param_name(&init) || vars::is_var_name(&init) || is_register_name(&init))
+        && decl_type(lines, &v)
+            .zip(decl_type(lines, &init))
+            .is_some_and(|(tv, ti)| tv == ti || (word_or_ptr(&tv) && word_or_ptr(&ti)));
+    if close == k + 3
+        && is_ident(&init)
+        && cond == format!("{init} != 0")
+        && v2 == v
+        && same_width
+        && impure(&other)
+    {
+        let rhs = rename_word(&other, &v, &init);
+        let rewritten = vec![
+            lines[k + 1].clone(),
+            format!("{pad_s}  {v} = {rhs};"),
+            format!("{pad_s}}} else {{"),
+            format!("{pad_s}  {v} = 0;"),
+            format!("{pad_s}}}"),
+        ];
+        lines.splice(k..=close, rewritten);
+        return true;
+    }
+    if close < k + 4 {
+        return false;
+    }
     let prefix_ok = v2 == v
-        && !mentions_ident(other, &v)
+        && !mentions_ident(&other, &v)
         && lines.get(k + 2..close - 1).is_some_and(|s| {
             !s.is_empty()
                 && s.iter().all(|l| {
@@ -777,7 +884,6 @@ fn preassigned_if_else(lines: &mut Vec<String>, k: usize) -> bool {
     if !prefix_ok {
         return false;
     }
-    let pad_s = " ".repeat(pad);
     let mut rewritten: Vec<String> = lines.get(k + 1..close).unwrap_or(&[]).to_vec();
     rewritten.push(format!("{pad_s}}} else {{"));
     rewritten.push(format!("{pad_s}  {v} = {init};"));
@@ -1161,7 +1267,7 @@ fn decl_type_on(raw: &str, name: &str) -> Option<String> {
         }
         return None;
     }
-    if !sig.ends_with(';') || sig.contains('=') || sig.contains('(') {
+    if !declares(sig) {
         return None;
     }
     let body = sig.trim_end_matches(';').trim();
@@ -1935,6 +2041,19 @@ return 0;
         assert_eq!(
             select_statements(pre_if),
             "if (a1 != 0) {\n  sub_1(a1);\n  var1 = a2;\n} else {\n  var1 = 0;\n}\nreturn var1;\n"
+        );
+        let pre_call = "// signature: uint64_t f(uint64_t a2)\nuint64_t var1;\n\nvar1 = a2;\nif (a2 != 0) {\n  var1 = sub_1(var1);\n}\nreturn var1;\n";
+        assert_eq!(
+            select_statements(pre_call),
+            "// signature: uint64_t f(uint64_t a2)\nuint64_t var1;\n\nif (a2 != 0) {\n  var1 = sub_1(a2);\n} else {\n  var1 = 0;\n}\nreturn var1;\n"
+        );
+        let narrow_call = "// signature: uint64_t f(uint64_t a2)\nuint8_t local_8;\n\nlocal_8 = a2;\nif (a2 != 0) {\n  local_8 = sub_1(local_8);\n}\nreturn local_8;\n";
+        assert_eq!(select_statements(narrow_call), narrow_call);
+        let shared_ret =
+            "if (a1 == 0) {\n  sub_1(a2);\n  return var1;\n}\nsub_2(a2);\nreturn var1;\n";
+        assert_eq!(
+            select_statements(shared_ret),
+            "if (a1 == 0) {\n  sub_1(a2);\n} else {\n  sub_2(a2);\n}\nreturn var1;\n"
         );
         let dup = "if (a1 != 0) {\n  if (a2 > 0 && a2 < 9) {\n    g32_1000 = a2;\n  } else {\n    sub_1(a1);\n  }\n} else {\n  sub_1(a1);\n}\n";
         assert_eq!(

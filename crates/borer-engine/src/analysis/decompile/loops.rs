@@ -38,6 +38,8 @@ pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
     let mut k = 0;
     while k < lines.len() {
         if guarded_loop(lines, k)
+            || positive_guarded_for(lines, k)
+            || counted_do_const(lines, k)
             || counted_while(lines, k)
             || returning_while(lines, k)
             || exit_arm(lines, k)
@@ -172,6 +174,179 @@ fn guarded_loop(lines: &mut Vec<String>, k: usize) -> bool {
         }
     };
     lines.splice(k..=close, rewritten);
+    true
+}
+
+/// Rewrites `if ((int32_t)n > 0) { v = 0; do { B; v += 1; } while ((uint32_t)n != v); }`
+/// at line `k` as `for (v = 0; (int32_t)v < (int32_t)n; v += 1) { B }`.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the `if`.
+///
+/// # Returns
+///
+/// Whether the guarded loop became a `for`.
+fn positive_guarded_for(lines: &mut Vec<String>, k: usize) -> bool {
+    let Some(open) = lines.get(k) else {
+        return false;
+    };
+    let pad = indent_of(open);
+    let Some(guard) = if_opener(open.trim()) else {
+        return false;
+    };
+    let Some(n) = guard
+        .strip_prefix("(int32_t)")
+        .and_then(|s| s.strip_suffix(" > 0"))
+        .filter(|s| is_param_name(s) || is_register_name(s) || vars::is_var_name(s))
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let inner = pad + 2;
+    let Some(close) =
+        closing(lines, k, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
+    else {
+        return false;
+    };
+    if close < k + 5 {
+        return false;
+    }
+    let Some((v, "0")) = lines
+        .get(k + 1)
+        .filter(|l| indent_of(l) == inner)
+        .and_then(|l| plain_assignment(l))
+        .filter(|(lhs, _)| is_register_name(lhs) || vars::is_var_name(lhs))
+    else {
+        return false;
+    };
+    let v = v.to_owned();
+    let do_ok = lines
+        .get(k + 2)
+        .is_some_and(|l| indent_of(l) == inner && l.trim() == "do {");
+    let latch = close - 1;
+    let Some(cond) = lines
+        .get(latch)
+        .filter(|_| do_ok)
+        .filter(|l| indent_of(l) == inner)
+        .and_then(|l| l.trim().strip_prefix("} while (")?.strip_suffix(");"))
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let matches_cond = [
+        format!("(uint32_t){n} != {v}"),
+        format!("{v} != (uint32_t){n}"),
+    ]
+    .contains(&cond);
+    let region = lines.get(k + 1..close).unwrap_or(&[]);
+    let body = lines.get(k + 3..latch).unwrap_or(&[]);
+    if !matches_cond
+        || v == n
+        || region.iter().any(|l| is_label(l))
+        || region
+            .iter()
+            .any(|l| l.contains(&format!("&{v}")) || l.contains(&format!("&{n}")))
+        || assigned_values(region, &n) > 0
+        || assigned_values(body, &v) != 1
+        || continues_at_top(body)
+        || breaks_at_top(body)
+        || !dead_after(lines, close + 1, pad, &v)
+    {
+        return false;
+    }
+    let Some(raw_step) = step_of(body, inner + 2, &v) else {
+        return false;
+    };
+    if raw_step != format!("{v} += 1") && raw_step != format!("{v} = {v} + 1") {
+        return false;
+    }
+    let pad_s = " ".repeat(pad);
+    let for_cond = format!("(int32_t){v} < (int32_t){n}");
+    let dedent = |l: &String| l.strip_prefix("  ").unwrap_or(l).to_owned();
+    let rewritten: Vec<String> =
+        std::iter::once(format!("{pad_s}for ({v} = 0; {for_cond}; {v} += 1) {{"))
+            .chain(body.get(..body.len() - 1).unwrap_or(&[]).iter().map(dedent))
+            .chain(std::iter::once(format!("{pad_s}}}")))
+            .collect();
+    lines.splice(k..=close, rewritten);
+    true
+}
+
+/// Rewrites `v = 0; do { B; step; } while (v != bound);` at line `k` as a `for`
+/// loop.
+///
+/// Matches when `bound` is a non-zero positive constant and `step` increments
+/// `v` by a positive constant at the end of the body.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the counter initialization.
+///
+/// # Returns
+///
+/// Whether the `do`/`while` loop became a `for`.
+fn counted_do_const(lines: &mut Vec<String>, k: usize) -> bool {
+    let (Some(init), Some(head)) = (lines.get(k), lines.get(k + 1)) else {
+        return false;
+    };
+    let pad = indent_of(init);
+    if pad != 0 || indent_of(head) != pad || head.trim() != "do {" {
+        return false;
+    }
+    let Some((v, "0")) =
+        plain_assignment(init).filter(|(lhs, _)| is_register_name(lhs) || vars::is_var_name(lhs))
+    else {
+        return false;
+    };
+    let v = v.to_owned();
+    let Some(latch) = closing(lines, k + 1, pad) else {
+        return false;
+    };
+    let Some(cond) = lines
+        .get(latch)
+        .and_then(|l| l.trim().strip_prefix("} while (")?.strip_suffix(");"))
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let bound_ok = cond
+        .strip_prefix(&format!("{v} != "))
+        .or_else(|| cond.strip_prefix(&format!("(uint32_t){v} != ")))
+        .and_then(parse_const)
+        .is_some_and(|c| c > 0 && (c & 0xffff_ffff) != 0);
+    let body = lines.get(k + 2..latch).unwrap_or(&[]);
+    if !bound_ok
+        || body.is_empty()
+        || body
+            .iter()
+            .any(|l| is_label(l) || l.contains(&format!("&{v}")))
+        || assigned_values(body, &v) != 1
+        || continues_at_top(body)
+        || breaks_at_top(body)
+    {
+        return false;
+    }
+    let Some(inc) = body.last().and_then(|l| {
+        if indent_of(l) != pad + 2 {
+            return None;
+        }
+        let s = l.trim().strip_suffix(';')?;
+        let inc = s
+            .strip_prefix(&format!("{v} += "))
+            .or_else(|| s.strip_prefix(&format!("{v} = {v} + ")))?;
+        parse_const(inc).filter(|&c| c > 0)?;
+        Some(inc.to_owned())
+    }) else {
+        return false;
+    };
+    let pad_s = " ".repeat(pad);
+    let mut rewritten = vec![format!("{pad_s}for ({v} = 0; {cond}; {v} += {inc}) {{")];
+    rewritten.extend(body.get(..body.len() - 1).unwrap_or(&[]).iter().cloned());
+    rewritten.push(format!("{pad_s}}}"));
+    lines.splice(k..=latch, rewritten);
     true
 }
 
@@ -728,6 +903,16 @@ mod tests {
         assert_eq!(
             run(returning),
             "rax = 0;\nfor (rcx = 0; rcx < 7; rcx += 1) {\n  if (table[rcx] == a1) {\n    break;\n  }\n  sub_1(rcx);\n}\nreturn 0;\n"
+        );
+        let pos_guard = "if ((int32_t)a1 > 0) {\n  rbx = 0;\n  do {\n    sub_1(rbx);\n    rbx = rbx + 1;\n  } while ((uint32_t)a1 != rbx);\n}\nreturn 0;\n";
+        assert_eq!(
+            run(pos_guard),
+            "for (rbx = 0; (int32_t)rbx < (int32_t)a1; rbx += 1) {\n  sub_1(rbx);\n}\nreturn 0;\n"
+        );
+        let do_const = "rax = 0;\ndo {\n  sub_1(rax);\n  rdx = rdx + 2;\n  rax = rax + 1;\n} while (rax != 0x100);\n";
+        assert_eq!(
+            run(do_const),
+            "for (rax = 0; rax != 0x100; rax += 1) {\n  sub_1(rax);\n  rdx = rdx + 2;\n}\n"
         );
     }
 }
