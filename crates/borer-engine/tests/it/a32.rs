@@ -542,11 +542,13 @@ fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
     let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
     let p = Program::from_bytes(PathBuf::from("thunk.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
         .expect("parses");
-    let a = Analysis::compute(&p);
+    let mut a = Analysis::compute(&p);
     let before = decompile_named(&p, &a, &Overlay::default(), ELF_TEXT + 0xe).expect("decompiles");
     assert!(before.contains("// signature: void sub_"), "{before}");
-    let a = Analysis::start_gap_function(&p, a, ELF_TEXT).expect_err("entry block is owned");
-    let (a, entry) = Analysis::start_gap_function(&p, a, ELF_TEXT + 0x12).expect("recovered");
+    assert_eq!(a.start_gap_function(&p, ELF_TEXT), None);
+    let entry = a
+        .start_gap_function(&p, ELF_TEXT + 0x12)
+        .expect("recovered");
     assert_eq!(entry, ELF_TEXT + 0x12);
     assert_eq!(a.xrefs_to(ELF_TEXT + 0x1c).len(), 1);
     let after = decompile_named(&p, &a, &Overlay::default(), ELF_TEXT + 0xe).expect("decompiles");

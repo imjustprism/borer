@@ -684,36 +684,24 @@ fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
         .collect()
 }
 
-/// A function starting at `va` when discovery left that address in a gap.
+/// Walks from `va` and returns the walk when it is a clean ARM32 gap.
 ///
-/// The walk has to decode, leave (a return, a tail, or its own literal
-/// pool), and share no decoded byte with a function already found, except
-/// the blocks of a later function that reached `va` by jumping backward,
-/// other than the block that holds that function's entry. Nothing here
-/// changes those functions: the caller adds this one beside them and
-/// records the jump tables and the call sites the walk resolved.
+/// The walk uses the same rules as [`guess::try_seed`] for a pointer seed:
+/// `va` is in an executable section, does not read as a string, is not inside
+/// an existing function's blocks, decodes without running into covered bytes
+/// or calling into the middle of a function, does not open like data, and
+/// either exits or is a closed loop.
 ///
 /// # Arguments
 ///
-/// * `program` - The image. Only ARM32 has this gap walk.
+/// * `program` - The loaded image.
 /// * `functions` - The functions discovery kept.
-/// * `va` - The address a decompile asked for. A Thumb bit is cleared.
+/// * `va` - The address a decompile asked for, with its Thumb bit cleared.
 ///
 /// # Returns
 ///
-/// The function, each resolved dispatch with its case targets, and the
-/// call and jump sites the walk decoded, or `None` when the address is
-/// not a clean ARM32 gap. The targets are what discovery stores for a
-/// walk it keeps. A recovered `tbb` or `tbh` has no cases without them.
-/// The sites are what discovery stores as references. Without them a
-/// callee whose other callers discard its result stays marked as
-/// returning nothing, and a call here loses the value.
-fn function_at_gap(
-    program: &Program,
-    functions: &[Function],
-    va: u64,
-) -> Option<(Function, Vec<(u64, Vec<u64>)>, Vec<(u64, u64, RefKind)>)> {
-    let va = va & !1;
+/// The walk, or `None` when `va` is not a clean ARM32 gap.
+fn function_at_gap(program: &Program, functions: &[Function], va: u64) -> Option<Walked> {
     if program.arch != crate::program::Arch::Arm {
         return None;
     }
@@ -742,18 +730,7 @@ fn function_at_gap(
         && w.seen
             .values()
             .all(|i| free(i.va) && free(i.next().saturating_sub(1)));
-    ok.then(|| {
-        let (func, mut sites) = assemble(va, &w);
-        data_refs(program, &w, &mut |t, site| {
-            sites.push((t, site, RefKind::Data));
-        });
-        let tables = w
-            .tables
-            .iter()
-            .map(|t| (t.site, t.targets.clone()))
-            .collect();
-        (func, tables, sites)
-    })
+    ok.then_some(w)
 }
 
 /// Adds a function at `va` to `analysis` when no discovered function
@@ -762,27 +739,29 @@ fn function_at_gap(
 /// # Arguments
 ///
 /// * `program` - The image the analysis was computed from.
-/// * `analysis` - That analysis.
+/// * `analysis` - That analysis, updated in place.
 /// * `va` - The address asked for.
 ///
 /// # Returns
 ///
-/// The analysis with the new function, and its entry, or the unchanged
-/// analysis when `va` is not a clean ARM32 gap.
+/// The new function's entry, or `None` when `va` is not a clean ARM32 gap.
 pub(crate) fn start_gap_function(
     program: &Program,
-    mut analysis: Analysis,
+    analysis: &mut Analysis,
     va: u64,
-) -> Result<(Analysis, u64), Analysis> {
-    let Some((func, tables, sites)) = function_at_gap(program, &analysis.functions, va) else {
-        return Err(analysis);
-    };
+) -> Option<u64> {
+    let va = va & !1;
+    let w = function_at_gap(program, &analysis.functions, va)?;
+    let (func, mut sites) = assemble(va, &w);
+    data_refs(program, &w, &mut |t, site| {
+        sites.push((t, site, RefKind::Data));
+    });
     let entry = func.entry;
     let callees = func.callees.clone();
     let pos = analysis.functions.partition_point(|f| f.entry < entry);
     analysis.functions.insert(pos, func);
-    for (site, targets) in tables {
-        analysis.jump_tables.insert(site, targets);
+    for t in &w.tables {
+        analysis.jump_tables.insert(t.site, t.targets.clone());
     }
     analysis.entry_index.clear();
     for (i, f) in analysis.functions.iter().enumerate() {
@@ -802,9 +781,9 @@ pub(crate) fn start_gap_function(
         }
     }
     analysis.index_refs();
-    infer_returns(program, &mut analysis);
+    infer_returns(program, analysis);
     analysis.derived.forget_all();
-    Ok((analysis, entry))
+    Some(entry)
 }
 
 /// Addresses a gap walk treats as never returning.

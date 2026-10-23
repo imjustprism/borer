@@ -1598,19 +1598,14 @@ impl Analysis {
     /// # Arguments
     ///
     /// * `program` - The image the analysis was computed from.
-    /// * `analysis` - That analysis.
     /// * `va` - The address asked for.
     ///
     /// # Returns
     ///
-    /// The analysis with the new function, and its entry. The same
-    /// analysis when the address is not a clean gap on ARM32.
-    pub fn start_gap_function(
-        program: &Program,
-        analysis: Analysis,
-        va: u64,
-    ) -> Result<(Analysis, u64), Analysis> {
-        a32::start_gap_function(program, analysis, va)
+    /// The new function's entry, or `None` when the address is not a clean
+    /// gap on ARM32.
+    pub fn start_gap_function(&mut self, program: &Program, va: u64) -> Option<u64> {
+        a32::start_gap_function(program, self, va)
     }
 
     /// Rebuilds [`Analysis::refs_by_function`] from [`Analysis::xrefs`].

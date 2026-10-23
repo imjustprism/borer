@@ -331,18 +331,12 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     if limit == Some(0) {
         bail!("{}", crate::tools::decompile::LIMIT_ZERO);
     }
-    let a = s.analysis(Feature::Decompile)?;
+    let mut a = s.analysis(Feature::Decompile)?;
     let va = s.resolve(&a, arg(args, 2, "decompile needs an address or name")?)?;
-    let (a, entry) = match entry_at(&s.program, &a, va) {
-        Ok(entry) if block_holds(&s.program, &a, entry, va) => (a, entry),
-        Ok(entry) => match Analysis::start_gap_function(&s.program, a, va) {
-            Ok(started) => started,
-            Err(a) => (a, entry),
-        },
-        Err(err) => match Analysis::start_gap_function(&s.program, a, va) {
-            Ok(started) => started,
-            Err(_) => return Err(err),
-        },
+    let entry = match entry_at(&s.program, &a, va) {
+        Ok(entry) if block_holds(&s.program, &a, entry, va) => entry,
+        Ok(entry) => a.start_gap_function(&s.program, va).unwrap_or(entry),
+        Err(err) => a.start_gap_function(&s.program, va).ok_or(err)?,
     };
     let raw = std::env::var_os("BORER_RAW").is_some();
     let (o, differs) = if raw {
