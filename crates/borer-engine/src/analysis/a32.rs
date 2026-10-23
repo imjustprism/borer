@@ -37,7 +37,9 @@ mod returns;
 use super::functions::helpers::is_noreturn_name;
 use super::functions::{build_callers_and_names, fuel_for, mix, push_site};
 use super::{Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare_name, seeds};
-use crate::isa::a32::{self, Cond, DpKind, Flow, Index, Insn, ItState, Offset, Op, Operand, PC};
+use crate::isa::a32::{
+    self, Cond, DpKind, Flow, Index, Insn, ItState, Mode, Offset, Op, Operand, PC,
+};
 use crate::program::{Program, SymbolKind};
 
 /// Rounds of gap guessing: a guess the walks found after it show to be
@@ -480,6 +482,254 @@ fn walk(
     }
     w.bad |= guess.is_some() && w.seen.len() >= limit;
     w
+}
+
+/// Walks from an address a caller asked for that no discovered function
+/// contains.
+///
+/// The same walk as [`walk`], with two stops a gap guess treats as
+/// failure. A fall into this walk's own literal pool, or into code
+/// another function already owns, ends the path: the pool is data, and
+/// the neighbor is not part of this function. A jump into either is the
+/// same stop, so the bytes already found stay a function of their own.
+/// Padding that falls out of the walk, a `nop` before that pool or the
+/// next function, is dropped: a block ending on it would fall out of
+/// the function.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `entry` - The requested address, even.
+/// * `starts` - Entries already discovered. A jump to one is a tail call.
+/// * `covered` - Ranges those functions own.
+fn walk_gap(
+    program: &Program,
+    entry: u64,
+    starts: &BTreeSet<u64>,
+    covered: &BTreeMap<u64, (u64, bool)>,
+) -> Walked {
+    let mut w = Walked {
+        seen: BTreeMap::new(),
+        callees: BTreeSet::new(),
+        followed: BTreeSet::new(),
+        tables: Vec::new(),
+        bad: false,
+        exits: false,
+        into: BTreeSet::new(),
+        tails: BTreeSet::new(),
+    };
+    let mut pool: BTreeSet<u64> = BTreeSet::new();
+    let stops =
+        |va: u64, pool: &BTreeSet<u64>| pool.contains(&va) || guess::covers(covered, va).is_some();
+    let mut pending: Vec<(u64, ItState)> = vec![(entry, ItState::default())];
+    let leaves = |t: u64| t != entry && starts.contains(&t);
+    while let Some((va, mut it)) = pending.pop() {
+        if w.seen.contains_key(&va) || w.seen.len() >= GUESS_MAX || w.bad {
+            continue;
+        }
+        if stops(va, &pool) {
+            w.exits = true;
+            continue;
+        }
+        let Some(i) = decode(program, va, &mut it).filter(|i| i.op != Op::Invalid) else {
+            w.bad = true;
+            continue;
+        };
+        if let Some(lit) = i.literal() {
+            pool.extend(lit..lit.saturating_add(4));
+        }
+        w.seen.insert(va, i);
+        let next = i.next();
+        let falls = guarded(&i);
+        let follow = |t: u64, w: &mut Walked, pending: &mut Vec<(u64, ItState)>| {
+            if leaves(t) {
+                w.callees.insert(t);
+                w.tails.insert(t);
+                w.exits = true;
+            } else {
+                w.followed.insert(t);
+                pending.push((t, ItState::default()));
+            }
+        };
+        match i.flow() {
+            Flow::Next => pending.push((next, it)),
+            Flow::CondJump => {
+                if let Some(t) = i.target() {
+                    follow(t, &mut w, &mut pending);
+                }
+                pending.push((next, it));
+            }
+            Flow::Jump => {
+                match i.target() {
+                    Some(t) => follow(t, &mut w, &mut pending),
+                    None => match table(program, &w.seen, &i) {
+                        Some(tab) => {
+                            for &t in &tab.targets {
+                                w.followed.insert(t);
+                                pending.push((t, ItState::default()));
+                            }
+                            w.tables.push(tab);
+                        }
+                        None => w.exits = true,
+                    },
+                }
+                if falls {
+                    pending.push((next, it));
+                }
+            }
+            Flow::Call => {
+                let target = i.target().filter(|t| super::is_executable_va(program, *t));
+                w.callees.extend(target);
+                let returns = !starts.contains(&next);
+                if falls || returns {
+                    pending.push((next, it));
+                }
+                w.exits |= !returns;
+            }
+            Flow::Return => {
+                w.exits = true;
+                if falls {
+                    pending.push((next, it));
+                }
+            }
+            Flow::Invalid => {}
+        }
+    }
+    loop {
+        let Some((next, pad)) = w
+            .seen
+            .last_key_value()
+            .map(|(_, insn)| (insn.next(), gap_padding(insn)))
+        else {
+            break;
+        };
+        if pad && !w.seen.contains_key(&next) {
+            w.seen.pop_last();
+            w.exits = true;
+        } else {
+            break;
+        }
+    }
+    w.bad |= w.seen.len() >= GUESS_MAX;
+    w
+}
+
+/// Whether an instruction is padding a compiler inserted between code and
+/// the bytes after it: zero, or a `nop` in either instruction set.
+///
+/// # Arguments
+///
+/// * `insn` - The instruction.
+fn gap_padding(insn: &Insn) -> bool {
+    match insn.mode {
+        Mode::Thumb => insn.len == 2 && matches!(insn.word & 0xffff, 0 | 0xbf00 | 0x46c0),
+        Mode::Arm => insn.len == 4 && matches!(insn.word, 0 | 0xe1a0_0000 | 0xe320_f000),
+    }
+}
+
+/// Whether a decoded block contains `va`.
+///
+/// A function's `[start, end)` is the lowest and highest byte it decoded,
+/// so a later entry that reached backward leaves a hole in that span.
+/// An address in the hole is not inside the function. One in a block is.
+///
+/// # Arguments
+///
+/// * `functions` - The functions discovery kept.
+/// * `va` - The address, even.
+/// * `earlier_only` - Count only a function whose entry is at or below `va`.
+fn gap_owned(functions: &[Function], va: u64, earlier_only: bool) -> bool {
+    functions.iter().any(|f| {
+        (!earlier_only || f.entry <= va) && f.blocks.iter().any(|b| va >= b.start && va < b.end)
+    })
+}
+
+/// The bytes discovery already decoded, merged, leaving out a block that
+/// starts at `va`.
+///
+/// That block is a body a later function entered by jumping backward (a
+/// one-instruction thunk in front of it). The walk claims it. Every other
+/// block stays covered, including the thunk itself, so the walk stops
+/// there.
+///
+/// # Arguments
+///
+/// * `functions` - The functions discovery kept.
+/// * `va` - The address the walk starts at.
+fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
+    let mut spans: Vec<(u64, u64)> = functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .filter(|b| b.end > b.start && b.start != va)
+        .map(|b| (b.start, b.end))
+        .collect();
+    spans.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in spans {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+            continue;
+        }
+        merged.push((start, end));
+    }
+    merged
+        .into_iter()
+        .map(|(start, end)| (start, (end, true)))
+        .collect()
+}
+
+/// A function starting at `va` when discovery left that address in a gap.
+///
+/// The walk has to decode, leave (a return, a tail, or its own literal
+/// pool), and share no decoded byte with a function already found, except
+/// a block that starts at `va` and belongs to a later entry. Nothing here
+/// changes those functions: the caller adds this one beside them.
+///
+/// # Arguments
+///
+/// * `program` - The image. Only ARM32 has this gap walk.
+/// * `functions` - The functions discovery kept.
+/// * `va` - The address a decompile asked for. A Thumb bit is cleared.
+///
+/// # Returns
+///
+/// The function, or `None` when the address is not a clean ARM32 gap.
+pub(crate) fn function_at_gap(
+    program: &Program,
+    functions: &[Function],
+    va: u64,
+) -> Option<Function> {
+    let va = va & !1;
+    if program.arch != crate::program::Arch::Arm {
+        return None;
+    }
+    if program.section_at(va).is_none_or(|s| !s.executable) || guess::texty(program, va) {
+        return None;
+    }
+    if gap_owned(functions, va, true) {
+        return None;
+    }
+    let opens_block = functions
+        .iter()
+        .any(|f| f.blocks.iter().any(|b| b.start == va));
+    if gap_owned(functions, va, false) && !opens_block {
+        return None;
+    }
+    let covered = gap_covered(functions, va);
+    let starts: BTreeSet<u64> = functions.iter().map(|f| f.entry).collect();
+    let w = walk_gap(program, va, &starts, &covered);
+    let free = |a: u64| guess::covers(&covered, a).is_none();
+    let ok = !w.bad
+        && w.into.is_empty()
+        && (w.exits || guess::closed(&w))
+        && !guess::dead_start(&w, va)
+        && !w.seen.is_empty()
+        && w.seen
+            .values()
+            .all(|i| free(i.va) && free(i.next().saturating_sub(1)));
+    ok.then(|| assemble(va, &w).0)
 }
 
 /// Finds the guarded instructions ([`guarded`]) whose condition the block

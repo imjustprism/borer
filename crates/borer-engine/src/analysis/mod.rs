@@ -1600,6 +1600,42 @@ impl Analysis {
         }
     }
 
+    /// Adds a function at `va` when no discovered function contains it.
+    ///
+    /// Discovery's own gap walk leaves some code unclaimed: a straight
+    /// Thumb run nothing calls, a handler whose literal pool sits in a
+    /// hole of a later function's span, or a body a later thunk entered
+    /// by jumping backward. A decompile that names that address starts a
+    /// function there. Functions already found are not walked again.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image the analysis was computed from.
+    /// * `analysis` - That analysis.
+    /// * `va` - The address asked for.
+    ///
+    /// # Returns
+    ///
+    /// The analysis with the new function, and its entry. The same
+    /// analysis when the address is not a clean gap on ARM32.
+    pub fn start_gap_function(
+        program: &Program,
+        mut analysis: Analysis,
+        va: u64,
+    ) -> Result<(Analysis, u64), Analysis> {
+        let Some(func) = a32::function_at_gap(program, &analysis.functions, va) else {
+            return Err(analysis);
+        };
+        let entry = func.entry;
+        let pos = analysis.functions.partition_point(|f| f.entry < entry);
+        analysis.functions.insert(pos, func);
+        analysis.entry_index.clear();
+        for (i, f) in analysis.functions.iter().enumerate() {
+            analysis.entry_index.insert(f.entry, i);
+        }
+        Ok((analysis, entry))
+    }
+
     /// Returns the symbol at `va`: the export, forwarder, local or data
     /// symbol there, else the import whose IAT or GOT slot it is.
     ///

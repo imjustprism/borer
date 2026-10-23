@@ -892,7 +892,10 @@ impl Expr {
     ///
     /// # Returns
     ///
-    /// `(text, precedence of the outermost operator)`.
+    /// `(text, precedence of the outermost operator)`. A ternary whose
+    /// condition [`super::opaque::constant_outcome`] proves never varies is
+    /// the arm that runs: the other arm is not code, and spelling the
+    /// select keeps a branch the program does not take.
     fn render_in(&self, n: &Names<'_>, hex: bool, address: bool, wide: bool) -> (String, u8) {
         match self {
             Expr::Const(v) => (
@@ -1151,15 +1154,25 @@ impl Expr {
                     (text, prec)
                 }
             },
-            Expr::Ternary(c, a, b) => (
-                format!(
-                    "({} ? {} : {})",
-                    c.render(n, false),
-                    a.render(n),
-                    b.render(n)
-                ),
-                ATOM,
-            ),
+            Expr::Ternary(c, a, b) => {
+                if c.eval().is_none()
+                    && let Some((outcome, super::opaque::Evidence::Proven)) =
+                        super::opaque::constant_outcome(c)
+                {
+                    let arm = if outcome { a.as_ref() } else { b.as_ref() };
+                    arm.render_in(n, hex, address, wide)
+                } else {
+                    (
+                        format!(
+                            "({} ? {} : {})",
+                            c.render(n, false),
+                            a.render(n),
+                            b.render(n)
+                        ),
+                        ATOM,
+                    )
+                }
+            }
             Expr::Sext(e, bits) => {
                 if let Expr::Deref(a, ty) = e.as_ref()
                     && matches!(ty, Ty::U8 | Ty::U16 | Ty::U32)

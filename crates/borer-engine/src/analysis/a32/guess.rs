@@ -175,7 +175,7 @@ fn try_seed(program: &Program, walks: &mut Walks<'_>, va: u64, min: usize, exits
 /// # Arguments
 ///
 /// * `w` - The walk.
-fn closed(w: &super::Walked) -> bool {
+pub(super) fn closed(w: &super::Walked) -> bool {
     if w.bad || w.seen.is_empty() {
         return false;
     }
@@ -222,7 +222,7 @@ fn closed(w: &super::Walked) -> bool {
 ///
 /// * `w` - The walk.
 /// * `entry` - Its entry.
-fn dead_start(w: &super::Walked, entry: u64) -> bool {
+pub(super) fn dead_start(w: &super::Walked, entry: u64) -> bool {
     let Some(a) = w.seen.get(&entry) else {
         return true;
     };
@@ -417,7 +417,7 @@ fn opens_frame(program: &Program, va: u64, mode: Mode) -> bool {
 ///
 /// * `program` - The image.
 /// * `va` - The address.
-fn texty(program: &Program, va: u64) -> bool {
+pub(super) fn texty(program: &Program, va: u64) -> bool {
     let bytes = program.read_va_upto(va, TEXT_RUN).unwrap_or_default();
     let run = bytes
         .iter()
