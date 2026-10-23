@@ -686,7 +686,7 @@ fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
 
 /// Walks from `va` and returns the walk when it is a clean ARM32 gap.
 ///
-/// The walk uses the same rules as [`guess::try_seed`] for a pointer seed:
+/// The walk uses the same rules as [`guess::pointers`] for a pointer seed:
 /// `va` is in an executable section, does not read as a string, is not inside
 /// an existing function's blocks, decodes without running into covered bytes
 /// or calling into the middle of a function, does not open like data, and
@@ -752,10 +752,11 @@ pub(crate) fn start_gap_function(
 ) -> Option<u64> {
     let entry = va & !1;
     let mut work = vec![entry];
+    let mut seen = BTreeSet::from([entry]);
     let mut added = Vec::new();
     while let Some(next) = work.pop() {
         let Some(w) = function_at_gap(program, &analysis.functions, next) else {
-            if next == entry {
+            if added.is_empty() {
                 return None;
             }
             continue;
@@ -765,7 +766,7 @@ pub(crate) fn start_gap_function(
             sites.push((t, site, RefKind::Data));
         });
         for &c in &func.callees {
-            if !analysis.functions.iter().any(|f| f.entry == c) {
+            if seen.insert(c) && !analysis.functions.iter().any(|f| f.entry == c) {
                 work.push(c);
             }
         }

@@ -521,7 +521,7 @@ fn a_jump_table_case_stays_in_its_caller() {
 fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
     use borer_engine::analysis::Overlay;
     use borer_engine::analysis::decompile::decompile_named;
-    let text: [u16; 20] = [
+    let text: [u16; 24] = [
         0xb510, // ASM: push {r4, lr}
         0xf000, // ASM: bl 0xe
         0xf804, // ASM: (bl, second half)
@@ -531,13 +531,17 @@ fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
         0xbf00, // ASM: nop
         0x4770, // ASM: bx lr
         0xde00, // ASM: udf #0
-        0x4903, // ASM: ldr r1, [pc, #12]
+        0x4905, // ASM: ldr r1, [pc, #20]
         0xf7ff, // ASM: bl 0xe
         0xfffb, // ASM: (bl, second half)
         0x3001, // ASM: adds r0, #1
-        0xf000, // ASM: bl 0x24
-        0xf803, // ASM: (bl, second half)
+        0xd001, // ASM: beq 0x20
+        0xf7ff, // ASM: bl 0x12
+        0xfff9, // ASM: (bl, second half)
+        0xf000, // ASM: bl 0x2c
+        0xf804, // ASM: (bl, second half)
         0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
         0x0000, // ASM: .word 0
         0x0000, // ASM: (.word, high half)
         0x2102, // ASM: movs r1, #2
@@ -554,8 +558,8 @@ fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
         .start_gap_function(&p, ELF_TEXT + 0x12)
         .expect("recovered");
     assert_eq!(entry, ELF_TEXT + 0x12);
-    assert_eq!(a.xrefs_to(ELF_TEXT + 0x20).len(), 1);
-    assert!(a.function(ELF_TEXT + 0x24).is_some());
+    assert_eq!(a.xrefs_to(ELF_TEXT + 0x28).len(), 1);
+    assert!(a.function(ELF_TEXT + 0x2c).is_some());
     let after = decompile_named(&p, &a, &Overlay::default(), ELF_TEXT + 0xe).expect("decompiles");
     assert!(after.contains("// signature: uint32_t sub_"), "{after}");
 }
