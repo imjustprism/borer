@@ -404,9 +404,7 @@ pub(super) fn byte_arithmetic(text: &str, word: &str) -> String {
         }
         *line = addresses_in(line, &bytes);
     }
-    let mut joined = out.join("\n");
-    joined.push('\n');
-    joined
+    out.join("\n") + "\n"
 }
 
 /// The parameters the signature declares as pointers to something wider
@@ -705,9 +703,12 @@ fn char_pointers(text: &str) -> BTreeMap<String, &'static str> {
         let ty = ty.trim();
         let ty = ty.strip_prefix("const ").unwrap_or(ty);
         for (stars, name) in items {
-            if stars == "*"
-                && let Some(r) = reads(ty)
-            {
+            let p = if stars == "*" {
+                Some(ty)
+            } else {
+                stars.is_empty().then(|| pointee_of(ty)).flatten()
+            };
+            if let Some(r) = p.and_then(reads) {
                 out.insert(name.to_owned(), r);
             }
         }
@@ -1222,9 +1223,7 @@ pub(super) fn stack_arrays(text: &str) -> String {
             }
         }
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    lines.join("\n") + "\n"
 }
 
 /// A slot's declared type, when it is one an array of slots is made of.
@@ -1558,9 +1557,7 @@ pub(super) fn callable_pointers(text: &str) -> String {
     if !changed {
         return text.to_owned();
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    lines.join("\n") + "\n"
 }
 
 /// Writes a bitwise operation on a float parameter as an operation on its
@@ -1620,9 +1617,7 @@ pub(super) fn float_bit_reads(text: &str) -> String {
     if !changed {
         return text.to_owned();
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    lines.join("\n") + "\n"
 }
 
 /// What joins the kept half of a scalar single's merge to its new low
@@ -1738,9 +1733,7 @@ pub(super) fn float_lanes(text: &str) -> String {
         }
     }
     redeclare(&mut lines, &typed);
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    lines.join("\n") + "\n"
 }
 
 /// Tells whether `name` appears in `expr` right after an integer cast,
@@ -1918,7 +1911,11 @@ pub(super) fn type_locals(text: &str) -> String {
     let signed = sign_signed_reads(&mut lines);
     let declared_narrow = narrow_declarations(&lines);
     if narrowed.is_empty() && declared_narrow.is_empty() && !signed {
-        return text.to_owned();
+        return if infer::refine_locals(&mut lines) {
+            lines.join("\n") + "\n"
+        } else {
+            text.to_owned()
+        };
     }
     strip_widths(&mut lines, &narrowed, |l| {
         !l.starts_with("//") && !l.starts_with("uint64_t ")
@@ -1952,9 +1949,8 @@ pub(super) fn type_locals(text: &str) -> String {
             }
         }
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    infer::refine_locals(&mut lines);
+    lines.join("\n") + "\n"
 }
 
 /// Declares a `uint32_t` local or global `int32_t` when the text reads it

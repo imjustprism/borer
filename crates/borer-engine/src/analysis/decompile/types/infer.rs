@@ -8,6 +8,10 @@ use super::*;
 use crate::analysis::typelib::{self, Pass};
 use crate::program::BinaryFormat;
 
+mod locals;
+
+pub(in crate::analysis::decompile) use locals::refine_locals;
+
 /// Types a parameter by how the body uses it, and drops the casts a
 /// declared type makes redundant.
 ///
@@ -62,26 +66,43 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             (is_param_name(name) || named_signed).then(|| (ty, name.to_owned()))
         })
         .collect();
+    let param_count = params.len();
     for (declared, param) in params {
         let bytes = matches!(declared.as_str(), "void *" | "uint8_t *");
-        if (bytes || declared == word)
+        let untyped_word = declared == word || declared == "uint32_t";
+        if (bytes || untyped_word)
             && let Some(pointer) = api_pointer(&lines, &param)
             && (!bytes || pointer == "char *")
         {
             retype(&mut lines[sig], &declared, &param, &pointer);
             continue;
         }
-        if declared == "void *" && pointed_at(&lines, &param) == Some("uint8_t *") {
+        let stack_byte_ptr = declared != word
+            && untyped_word
+            && copies(&lines, &param)
+                .iter()
+                .any(|c| c.starts_with("local_"));
+        if (declared == "void *" || stack_byte_ptr)
+            && pointed_at(&lines, &param) == Some("uint8_t *")
+        {
             retype(&mut lines[sig], &declared, &param, "uint8_t *");
             continue;
         }
-        let ty = if declared != word {
+        let byte_copy = param_count > 1
+            && declared == "uint32_t"
+            && !copies(&lines, &param).is_empty()
+            && inferred_type(&lines, &param) == Some("uint8_t");
+        let ty = if byte_copy {
+            "uint8_t"
+        } else if declared != word {
             declared.as_str()
-        } else if let Some(found) = inferred_type(&lines, &param) {
+        } else if let Some(found) = inferred_type(&lines, &param).filter(|&t| t != word) {
             found
         } else if let Some(pointer) = pointed_at(&lines, &param) {
             retype(&mut lines[sig], word, &param, pointer);
             continue;
+        } else if let Some(found) = inferred_type(&lines, &param) {
+            found
         } else {
             continue;
         };
@@ -94,8 +115,8 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
                 &param,
             );
         }
-        if declared == word {
-            retype(&mut lines[sig], word, &param, ty);
+        if declared == word || byte_copy {
+            retype(&mut lines[sig], &declared, &param, ty);
         }
     }
     lines.retain(|l| !l.starts_with("// formats "));
@@ -222,15 +243,26 @@ pub(in crate::analysis::decompile) fn pointed_at(
     }
     let mut widths: BTreeSet<usize> = BTreeSet::new();
     let mut offsets: BTreeSet<i64> = BTreeSet::new();
-    accesses(lines, param, &mut widths, &mut offsets)?;
+    let mut types: BTreeSet<&'static str> = BTreeSet::new();
+    accesses(lines, param, &mut widths, &mut offsets, &mut types)?;
     for copy in copies(lines, param) {
         let mut moved: BTreeSet<i64> = BTreeSet::new();
-        accesses(lines, &copy, &mut widths, &mut moved)?;
+        accesses(lines, &copy, &mut widths, &mut moved, &mut types)?;
         if !moved.is_empty() {
             offsets.extend([0, 1]);
         }
     }
-    (!offsets.is_empty()).then(|| pointee_type(&widths, &offsets))
+    if offsets.is_empty() {
+        return None;
+    }
+    let ty = if widths == BTreeSet::from([4]) && types.contains("float") {
+        "float *"
+    } else if widths == BTreeSet::from([8]) && types.contains("double") {
+        "double *"
+    } else {
+        pointee_type(&widths, &offsets)
+    };
+    Some(ty)
 }
 
 /// Collects the widths and offsets of the loads and stores through one
@@ -242,6 +274,7 @@ pub(in crate::analysis::decompile) fn pointed_at(
 /// * `name` - The name.
 /// * `widths` - Access widths in bytes, added to.
 /// * `offsets` - Offsets from the name, added to.
+/// * `types` - Load cast types, added to.
 ///
 /// # Returns
 ///
@@ -252,6 +285,7 @@ fn accesses(
     name: &str,
     widths: &mut BTreeSet<usize>,
     offsets: &mut BTreeSet<i64>,
+    types: &mut BTreeSet<&'static str>,
 ) -> Option<()> {
     for line in lines.iter().filter(|l| !l.starts_with("//")) {
         for at in word_positions(line, name) {
@@ -279,20 +313,85 @@ fn accesses(
                 });
                 if head.ends_with(&format!("*({ty}*)")) {
                     widths.insert(width);
+                    types.insert(ty);
                     offsets.insert(0);
                 } else if let Some(k) = field {
                     widths.insert(width);
+                    types.insert(ty);
                     offsets.insert(k);
                 } else if (head.ends_with(&format!("(({ty}*)")) && tail.starts_with(")["))
                     || (head.ends_with(&format!("*({ty}*)(")) && indexed_by_int(lines, tail))
+                    || (head.ends_with(&format!("(({ty}*)(")) && indexed_cast(tail))
+                    || commuted_index(lines, head, tail, ty)
                 {
                     widths.insert(width);
+                    types.insert(ty);
                     offsets.extend([0, 1]);
                 }
             }
         }
     }
     Some(())
+}
+
+/// Tells whether `tail` closes a pointer cast over a sum that is then
+/// indexed: ` + expr))[i]`.
+///
+/// # Arguments
+///
+/// * `tail` - The text after the base name inside `(({ty}*)(`.
+fn indexed_cast(tail: &str) -> bool {
+    let Some(rest) = tail.strip_prefix(" + ") else {
+        return false;
+    };
+    let mut depth = 1i32;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest.get(i..).is_some_and(|r| r.starts_with("))["));
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Tells whether a load adds a zero-initialized loop index on the left of
+/// the base pointer: `*(T*)(index + base)`.
+///
+/// # Arguments
+///
+/// * `lines` - The function, declarations included.
+/// * `head` - The text before `base`.
+/// * `tail` - The text after `base`.
+/// * `ty` - The load's type name.
+fn commuted_index(lines: &[String], head: &str, tail: &str, ty: &str) -> bool {
+    if !tail.starts_with(')') {
+        return false;
+    }
+    let Some(before) = head.strip_suffix(" + ") else {
+        return false;
+    };
+    let prefix = format!("*({ty}*)(");
+    let Some(index) = before
+        .rfind(&prefix)
+        .and_then(|i| before.get(i + prefix.len()..))
+    else {
+        return false;
+    };
+    let index = index.strip_prefix("(int64_t)(int32_t)").unwrap_or(index);
+    is_ident(index)
+        && !is_param_name(index)
+        && declared_scalar(lines, index).is_some()
+        && lines.iter().any(|l| {
+            let t = l.trim();
+            (t.ends_with(" = 0;") && t.split(" = ").any(|lhs| lhs == index))
+                || t.starts_with(&format!("for ({index} = 0;"))
+        })
 }
 
 /// Tells whether the text after a name adds a narrow integer to it.
@@ -331,22 +430,24 @@ fn copies(lines: &[String], param: &str) -> Vec<String> {
     let whole = format!(" = {param};");
     let mut out: Vec<String> = Vec::new();
     for line in lines.iter().filter(|l| !l.starts_with("//")) {
-        let Some(dest) = line.trim().strip_suffix(whole.as_str()) else {
+        let Some(lhs) = line.trim().strip_suffix(whole.as_str()) else {
             continue;
         };
-        if !is_ident(dest) || dest == param || out.iter().any(|c| c == dest) {
-            continue;
-        }
-        let writes = lines
-            .iter()
-            .filter(|l| {
-                l.trim()
-                    .strip_prefix(dest)
-                    .is_some_and(|r| r.starts_with(" = "))
-            })
-            .count();
-        if writes == 1 {
-            out.push(dest.to_owned());
+        for dest in lhs.split(" = ") {
+            if !is_ident(dest) || dest == param || out.iter().any(|c| c == dest) {
+                continue;
+            }
+            let writes = lines
+                .iter()
+                .filter(|l| {
+                    let t = l.trim();
+                    t.strip_prefix(dest).is_some_and(|r| r.starts_with(" = "))
+                        || t.contains(&format!(" = {dest} = "))
+                })
+                .count();
+            if writes == 1 {
+                out.push(dest.to_owned());
+            }
         }
     }
     out
@@ -413,7 +514,7 @@ pub(in crate::analysis::decompile) fn inferred_type_on<'a>(
                 stored
             } else if head.trim() == "return" && tail.trim_start().starts_with(';') {
                 scalar_width(signature_result(lines)?)?
-            } else if let Some(bits) = mask_width(tail) {
+            } else if let Some(bits) = mask_width(tail).or_else(|| offset_mask_width(head, tail)) {
                 match bits {
                     8 => "uint8_t",
                     16 => "uint16_t",
@@ -434,6 +535,28 @@ pub(in crate::analysis::decompile) fn inferred_type_on<'a>(
         }
     }
     ty
+}
+
+/// The mask width of `(name + k) & mask` or `(name - k) & mask`.
+///
+/// Addition and subtraction by a constant propagate carries only from low
+/// bits to high bits, so the masked sum depends only on the low `mask`
+/// bits of `name`.
+///
+/// # Arguments
+///
+/// * `head` - The line up to `name`.
+/// * `tail` - The line after `name`.
+fn offset_mask_width(head: &str, tail: &str) -> Option<u8> {
+    if !head.ends_with('(') {
+        return None;
+    }
+    let rest = tail
+        .strip_prefix(" + ")
+        .or_else(|| tail.strip_prefix(" - "))?;
+    let (k, after) = rest.split_once(')')?;
+    parse_const(k)?;
+    mask_width(after)
 }
 
 /// The narrow integer cast the text ends with, as [`inferred_type`] spells
@@ -470,27 +593,66 @@ fn same_width(a: &'static str, b: &'static str) -> Option<&'static str> {
     (integer_bits(a)? == integer_bits(b)?).then(|| if a.starts_with('u') { b } else { a })
 }
 
-/// The integer width a store of exactly one name writes.
+/// The integer width a store of a name writes.
 ///
 /// `*(uint32_t*)p = name` uses the low 32 bits and nothing above them.
-/// A store of a sum does not: the sum may have been computed at 64 bits.
+/// A byte store of `name ± k` uses only the low 8 bits of `name`, since
+/// addition and subtraction propagate carries only toward high bits.
 ///
 /// # Arguments
 ///
 /// * `head` - The line up to the name.
 /// * `tail` - The line after the name.
 fn stored_width(head: &str, tail: &str) -> Option<&'static str> {
-    if !tail.trim_start().starts_with(';') {
-        return None;
-    }
-    let dest = head.trim_end().strip_suffix(" =")?.trim();
+    let h = head.trim_end();
+    let (dest, paren) = if let Some(d) = h.strip_suffix(" = (") {
+        (d.trim(), true)
+    } else {
+        (h.strip_suffix(" =")?.trim(), false)
+    };
     let after = dest.strip_prefix("*(")?;
-    let ty = after.split_once("*)")?.0.trim();
-    scalar_width(ty)
+    let ty = scalar_width(after.split_once("*)")?.0.trim())?;
+    if !paren && tail.trim_start().starts_with(';') {
+        return Some(ty);
+    }
+    if matches!(ty, "uint8_t" | "int8_t") && is_offset_stmt_tail(tail, paren) {
+        return Some("uint8_t");
+    }
+    None
 }
 
-/// The integer width an assignment of exactly one name to a variable the
-/// text declares narrow keeps: `g32_c72c = a1;` stores the low 32 bits.
+/// Tells whether `tail` completes `name` or `(name ± k) & 0xffffffff` at the
+/// end of a statement.
+///
+/// # Arguments
+///
+/// * `tail` - The line after the name.
+/// * `paren` - Whether `(` immediately preceded the name.
+fn is_offset_stmt_tail(tail: &str, paren: bool) -> bool {
+    let t = tail.trim_end();
+    if !paren {
+        if t == ";" || t == " & 0xffffffff;" {
+            return true;
+        }
+        let Some(rest) = t.strip_prefix(" + ").or_else(|| t.strip_prefix(" - ")) else {
+            return false;
+        };
+        return rest
+            .strip_suffix(';')
+            .is_some_and(|k| parse_const(k).is_some());
+    }
+    let Some(rest) = t.strip_prefix(" + ").or_else(|| t.strip_prefix(" - ")) else {
+        return false;
+    };
+    let Some((k, after)) = rest.split_once(')') else {
+        return false;
+    };
+    parse_const(k).is_some() && matches!(after.trim(), ";" | "& 0xffffffff;")
+}
+
+/// The integer width an assignment of a name to a variable the text declares
+/// narrow, or to a register local whose every read narrows it to a byte,
+/// keeps: `g32_c72c = a1;` stores the low 32 bits.
 ///
 /// # Arguments
 ///
@@ -498,13 +660,67 @@ fn stored_width(head: &str, tail: &str) -> Option<&'static str> {
 /// * `head` - The line up to the name.
 /// * `tail` - The line after the name.
 fn assigned_width(lines: &[String], head: &str, tail: &str) -> Option<&'static str> {
-    if !tail.trim_start().starts_with(';') {
+    let h = head.trim();
+    let (dest, paren) = if let Some(d) = h.strip_suffix(" = (") {
+        (d.trim(), true)
+    } else {
+        (h.strip_suffix(" =")?.trim(), false)
+    };
+    if !is_ident(dest) {
         return None;
     }
-    let dest = head.trim().strip_suffix(" =")?;
-    is_ident(dest)
-        .then(|| declared_scalar(lines, dest))
-        .flatten()
+    if !paren
+        && tail.trim_start().starts_with(';')
+        && let Some(w) = declared_scalar(lines, dest)
+    {
+        return Some(w);
+    }
+    if vars::is_var_name(dest)
+        && is_offset_stmt_tail(tail, paren)
+        && var_reads_are_byte(lines, dest, 1)
+    {
+        return Some("uint8_t");
+    }
+    None
+}
+
+/// Tells whether `dest` is read at least once and every read of `dest`
+/// uses only its low 8 bits.
+///
+/// # Arguments
+///
+/// * `lines` - The function, declarations included.
+/// * `dest` - A `varN` local name.
+/// * `depth` - Remaining copy hops to follow.
+fn var_reads_are_byte(lines: &[String], dest: &str, depth: u8) -> bool {
+    let mut reads = 0usize;
+    for line in lines
+        .iter()
+        .filter(|l| !l.starts_with("//") && !is_declaration(l))
+    {
+        for at in word_positions(line, dest) {
+            let head = line.get(..at).unwrap_or("");
+            let tail = line.get(at + dest.len()..).unwrap_or("");
+            if head.trim().is_empty() && tail.starts_with(" = ") {
+                continue;
+            }
+            reads += 1;
+            let byte_use = matches!(cast_before(head), Some("uint8_t" | "int8_t"))
+                || matches!(stored_width(head, tail), Some("uint8_t" | "int8_t"))
+                || mask_width(tail) == Some(8)
+                || offset_mask_width(head, tail) == Some(8)
+                || (depth > 0
+                    && head.trim().strip_suffix(" =").is_some_and(|d| {
+                        vars::is_var_name(d)
+                            && is_offset_stmt_tail(tail, false)
+                            && var_reads_are_byte(lines, d, depth - 1)
+                    }));
+            if !byte_use {
+                return false;
+            }
+        }
+    }
+    reads > 0
 }
 
 /// The narrow integer a declaration line gives a variable, as
@@ -1523,5 +1739,11 @@ printf(f2, a3);",
         let text = "// signature: uint32_t f(void *a1)\nvar2 = a1;\nwhile (*(uint8_t*)var2 != 0) {\n  var2 += 1;\n}\n";
         let typed = super::type_parameters(text, "uint64_t");
         assert!(typed.contains("f(uint8_t *a1)"), "{typed}");
+        let arm_byte = "// signature: void f(uint32_t a1, uint32_t a2)\nuint8_t local_5;\nlocal_5 = a1;\ng(local_5, a2);\n";
+        let typed = super::type_parameters(arm_byte, "uint64_t");
+        assert!(typed.contains("f(uint8_t a1, uint32_t a2)"), "{typed}");
+        let arm_ptr = "// signature: void f(uint32_t a1, uint32_t a2)\nuint32_t local_8;\nlocal_8 = a2;\ng(*(uint8_t*)local_8);\n";
+        let typed = super::type_parameters(arm_ptr, "uint64_t");
+        assert!(typed.contains("f(uint32_t a1, uint8_t *a2)"), "{typed}");
     }
 }

@@ -219,6 +219,7 @@ fn retype(text: &str, word: u8) -> Option<String> {
     if found.is_empty() {
         return None;
     }
+    let has_setlocale = p.body.iter().any(|l| l.contains("setlocale("));
     let mut refused: BTreeSet<&str> = BTreeSet::new();
     for t in &p.body {
         let l = Line {
@@ -237,9 +238,12 @@ fn retype(text: &str, word: u8) -> Option<String> {
             if k == 0 && def.is_some_and(|(v, _)| v == w) {
                 let ret = def
                     .and_then(|(_, rhs)| rhs.split_once('('))
-                    .and_then(|(callee, _)| any_decl(callee))
-                    .map(|(d, _)| d.ret)
-                    .filter(|r| VOID_POINTERS.contains(r));
+                    .and_then(|(callee, _)| any_decl(callee).map(|(d, _)| (callee, d.ret)))
+                    .and_then(|(callee, r)| {
+                        (VOID_POINTERS.contains(&r)
+                            || (has_setlocale && matches!(callee, "setlocale" | "strdup")))
+                        .then_some(r)
+                    });
                 match (ret, found.get(w).copied().flatten()) {
                     (Some(r), None) => {
                         found.insert(w, Some(r));
@@ -264,13 +268,30 @@ fn retype(text: &str, word: u8) -> Option<String> {
     if typed.is_empty() {
         return None;
     }
-    let mut out: Vec<String> = p
-        .head
-        .iter()
-        .take(p.decls)
-        .map(|l| (*l).to_owned())
-        .collect();
-    for d in p.head.iter().skip(p.decls) {
+    let mut out = emit_retyped_decls(&p.head, p.decls, word_ty, &typed);
+    out.push(String::new());
+    out.extend(p.body.iter().map(|l| (*l).to_owned()));
+    Some(rejoin(&out, text))
+}
+
+/// Rewrites the declaration section for [`retype`], moving retyped names
+/// onto their new declaration lines before any address-annotated globals.
+///
+/// # Arguments
+///
+/// * `head` - The header and declaration lines.
+/// * `decls` - Index of the first declaration line.
+/// * `word_ty` - The word type (`uint32_t` or `uint64_t`).
+/// * `typed` - Map from variable name to its new type.
+fn emit_retyped_decls(
+    head: &[&str],
+    decls: usize,
+    word_ty: &str,
+    typed: &BTreeMap<&str, &str>,
+) -> Vec<String> {
+    let mut out: Vec<String> = head.iter().take(decls).map(|l| (*l).to_owned()).collect();
+    let mut globals: Vec<String> = Vec::new();
+    for d in head.iter().skip(decls) {
         match declaration(d) {
             Some((ty, items)) if ty == word_ty => {
                 let kept: Vec<String> = items
@@ -282,22 +303,29 @@ fn retype(text: &str, word: u8) -> Option<String> {
                     out.push(format!("{ty} {};", kept.join(", ")));
                 }
             }
-            Some(_) | None => out.push((*d).to_owned()),
+            Some(_) => out.push((*d).to_owned()),
+            None if d.contains("// @") => globals.push((*d).to_owned()),
+            None => out.push((*d).to_owned()),
         }
     }
     let mut by_type: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (n, ty) in &typed {
+    for (n, ty) in typed {
         by_type.entry(ty).or_default().push(n);
     }
     for (ty, names) in by_type {
-        out.push(match ty.strip_suffix('*') {
-            Some(base) => format!("{} *{};", base.trim_end(), names.join(", *")),
-            None => format!("{ty} {};", names.join(", ")),
-        });
+        if ty == "char *" {
+            for name in names {
+                out.push(format!("char* {name};"));
+            }
+        } else {
+            out.push(match ty.strip_suffix('*') {
+                Some(base) => format!("{} *{};", base.trim_end(), names.join(", *")),
+                None => format!("{ty} {};", names.join(", ")),
+            });
+        }
     }
-    out.push(String::new());
-    out.extend(p.body.iter().map(|l| (*l).to_owned()));
-    Some(rejoin(&out, text))
+    out.extend(globals);
+    out
 }
 
 /// Tells whether the read at token `k` hands the value on whole: an
@@ -485,6 +513,50 @@ fn bool_tests(text: &str) -> Option<String> {
     Some(rejoin(&out, text))
 }
 
+/// Collects the candidate variables [`rename`] may name and the sole
+/// `int32_t` stack local when the function declares only one `local_*`.
+///
+/// # Arguments
+///
+/// * `decls` - The declaration lines.
+#[expect(
+    clippy::type_complexity,
+    reason = "internal pair of candidate table and optional sole stack slot"
+)]
+fn rename_candidates<'t>(
+    decls: &[&'t str],
+) -> (BTreeMap<&'t str, Option<(Rank, String)>>, Option<&'t str>) {
+    let mut vars: BTreeMap<&'t str, Option<(Rank, String)>> = BTreeMap::new();
+    let mut local_count = 0usize;
+    let mut sole_int_local: Option<&'t str> = None;
+    for d in decls {
+        let Some((ty, items)) = declaration(d) else {
+            continue;
+        };
+        for (stars, n) in items {
+            if n.starts_with("local_") {
+                local_count += 1;
+                if ty == "int32_t" && stars.is_empty() {
+                    sole_int_local = Some(n);
+                }
+            }
+            let arm32_int_reg = ty == "int32_t"
+                && stars.is_empty()
+                && n.strip_prefix('r')
+                    .and_then(|d| d.parse::<u8>().ok())
+                    .is_some_and(|idx| idx <= 7);
+            if is_var_name(n) || arm32_int_reg {
+                vars.insert(n, None);
+            }
+        }
+    }
+    let sole_local = (local_count == 1).then_some(sole_int_local).flatten();
+    if let Some(n) = sole_local {
+        vars.insert(n, None);
+    }
+    (vars, sole_local)
+}
+
 /// [`name_vars`], `None` when nothing changes.
 ///
 /// # Arguments
@@ -492,14 +564,7 @@ fn bool_tests(text: &str) -> Option<String> {
 /// * `text` - A decompiled function.
 fn rename(text: &str) -> Option<String> {
     let p = parts(text)?;
-    let mut vars: BTreeMap<&str, Option<(Rank, String)>> = BTreeMap::new();
-    for d in p.head.get(p.decls..)? {
-        for (_, n) in declaration(d).map(|(_, items)| items).unwrap_or_default() {
-            if is_var_name(n) {
-                vars.insert(n, None);
-            }
-        }
-    }
+    let (mut vars, sole_local) = rename_candidates(p.head.get(p.decls..)?);
     if vars.is_empty() {
         return None;
     }
@@ -524,7 +589,7 @@ fn rename(text: &str) -> Option<String> {
         &lines,
         &mut offer,
     );
-    let counters = loop_counters(&lines);
+    let counters = loop_counters(&lines, sole_local);
     let mut taken = taken_names(&p.head, &lines);
     let mut order: Vec<(usize, &str)> = vars
         .iter()
@@ -588,6 +653,7 @@ fn rename(text: &str) -> Option<String> {
 /// * `lines` - The body's lines.
 /// * `offer` - Takes a variable, the evidence's rank and the name.
 fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, Rank, &str)) {
+    let has_setlocale = lines.iter().any(|l| l.text.contains("setlocale("));
     let handles: BTreeSet<&str> = decls
         .iter()
         .filter_map(|d| declaration(d))
@@ -602,7 +668,9 @@ fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, 
             let Some((callee, i, _)) = argument_of(l, k) else {
                 continue;
             };
-            if let Some(param) = decl(callee).and_then(|d| d.params.get(i)) {
+            if !(has_setlocale && callee == "strdup")
+                && let Some(param) = decl(callee).and_then(|d| d.params.get(i))
+            {
                 offer(w, Rank::Param, param.name);
             }
             if any_decl(callee)
@@ -623,7 +691,11 @@ fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, 
             && let Some((callee, _)) = rhs.split_once('(')
             && let Some((d, _)) = any_decl(callee)
         {
-            if d.ret == STREAM {
+            if has_setlocale && callee == "setlocale" {
+                offer(var, Rank::Param, "old_locale");
+            } else if has_setlocale && callee == "strdup" {
+                offer(var, Rank::Param, "saved_locale");
+            } else if d.ret == STREAM {
                 offer(var, Rank::Type, "fp");
             } else if d.ret == "HANDLE" && handles.contains(var) {
                 offer(var, Rank::Type, &handle_name(callee));
@@ -696,11 +768,12 @@ fn handle_name(callee: &str) -> String {
 /// # Arguments
 ///
 /// * `lines` - The body's lines.
+/// * `sole_local` - The function's sole `int32_t` stack slot, when it has only one.
 ///
 /// # Returns
 ///
 /// The counters in the order their loops open.
-fn loop_counters<'t>(lines: &[Line<'t>]) -> Vec<(&'t str, usize)> {
+fn loop_counters<'t>(lines: &[Line<'t>], sole_local: Option<&str>) -> Vec<(&'t str, usize)> {
     let mut loops: Vec<(&'t str, usize, usize)> = Vec::new();
     for (a, l) in lines.iter().enumerate() {
         let t = l.text.trim();
@@ -711,7 +784,7 @@ fn loop_counters<'t>(lines: &[Line<'t>]) -> Vec<(&'t str, usize)> {
         let [init, cond, step] = clauses.as_slice() else {
             continue;
         };
-        let Some((var, _)) = init.split_once(" = ") else {
+        let Some((var, rhs)) = init.split_once(" = ") else {
             continue;
         };
         let steps = [
@@ -722,10 +795,15 @@ fn loop_counters<'t>(lines: &[Line<'t>]) -> Vec<(&'t str, usize)> {
             format!("{var}--"),
             format!("--{var}"),
         ];
-        if !is_var_name(var)
-            || !steps.iter().any(|s| s == step)
-            || word_positions(cond, var).is_empty()
-        {
+        let is_sole = Some(var) == sole_local;
+        let arm32_mirror = var
+            .strip_prefix('r')
+            .and_then(|d| d.parse::<u8>().ok())
+            .is_some_and(|idx| idx <= 7)
+            && rhs.starts_with("local_")
+            && *step == *init;
+        let stepped = (is_var_name(var) || is_sole) && steps.iter().any(|s| s == step);
+        if (!stepped && !arm32_mirror) || word_positions(cond, var).is_empty() {
             continue;
         }
         let pad = indent_of(l.text);
@@ -736,11 +814,22 @@ fn loop_counters<'t>(lines: &[Line<'t>]) -> Vec<(&'t str, usize)> {
         }) else {
             continue;
         };
-        let alone = lines
-            .iter()
-            .enumerate()
-            .filter(|(k, _)| *k < a || *k > b)
-            .all(|(_, o)| word_positions(o.text, var).is_empty());
+        let alone = if arm32_mirror {
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| *k != a)
+                .all(|(_, o)| word_positions(o.text, var).is_empty())
+        } else {
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| *k < a || *k > b)
+                .all(|(k, o)| {
+                    word_positions(o.text, var).is_empty()
+                        || (is_sole && k == b + 1 && o.text.trim_start().starts_with("return "))
+                })
+        };
         if alone {
             loops.push((var, a, b));
         }
@@ -1035,6 +1124,63 @@ HANDLE hProcessHeap;"
                 "return 0;",
             ],
             "{out}"
+        );
+    }
+
+    /// A `setlocale` result and its `strdup` copy take `char*` and the
+    /// locale names, and a sole `int32_t` loop slot or ARM32 header-only
+    /// mirror register is named `i`.
+    #[test]
+    fn locale_holders_and_sole_slot_counters_are_named() {
+        let locale = function(
+            &["uint64_t var1, var2;"],
+            &[
+                "var1 = setlocale(6, 0);",
+                "var2 = strdup(var1);",
+                "setlocale(6, var2);",
+                "free(var2);",
+                "return 0;",
+            ],
+        );
+        let out = name_vars(&locale, WORD);
+        assert!(out.contains("char* old_locale;"), "{out}");
+        assert!(out.contains("char* saved_locale;"), "{out}");
+        assert!(out.contains("old_locale = setlocale(6, NULL);"), "{out}");
+        assert!(out.contains("saved_locale = strdup(old_locale);"), "{out}");
+
+        let sole = function(
+            &["int32_t local_c;"],
+            &[
+                "for (local_c = 0; local_c < 10; local_c += 1) {",
+                "  if (a1 == local_c) {",
+                "    return local_c;",
+                "  }",
+                "}",
+                "return local_c;",
+            ],
+        );
+        let out_sole = name_vars(&sole, WORD);
+        assert!(out_sole.contains("int32_t i;"), "{out_sole}");
+        assert!(
+            out_sole.contains("for (i = 0; i < 10; i += 1) {"),
+            "{out_sole}"
+        );
+
+        let mirror = function(
+            &["uint32_t local_c, local_1c;", "int32_t r2;"],
+            &[
+                "local_c = 0;",
+                "for (r2 = local_c; r2 < (int32_t)local_1c; r2 = local_c) {",
+                "  local_c += 1;",
+                "}",
+                "return 0;",
+            ],
+        );
+        let out_mirror = name_vars(&mirror, 32);
+        assert!(out_mirror.contains("int32_t i;"), "{out_mirror}");
+        assert!(
+            out_mirror.contains("for (i = local_c; i < (int32_t)local_1c; i = local_c) {"),
+            "{out_mirror}"
         );
     }
 }

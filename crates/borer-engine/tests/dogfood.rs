@@ -124,9 +124,9 @@ fn slots_of(t: &str, declared: &mut BTreeSet<String>, used: &mut BTreeSet<String
         })
     };
     let decl = matches!(
-        t.split_whitespace().next(),
-        Some(w) if w.starts_with("uint") || w.starts_with("int") || w == "float"
-            || w == "double" || w == "bool" || w == "char" || w == "void"
+        t.split_whitespace().next().map(|w| w.trim_end_matches('*')),
+        Some(w) if w.starts_with("uint") || w.starts_with("int")
+            || matches!(w, "float" | "double" | "bool" | "char" | "void" | "FILE")
     ) && t.ends_with(';')
         && !t.contains('=')
         && (!t.contains('(') || t.contains("(*"));
