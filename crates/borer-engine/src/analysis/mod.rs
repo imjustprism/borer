@@ -1492,25 +1492,7 @@ impl Analysis {
         phases.mark("analysis eh");
         analysis.crypto = crypto;
         phases.mark("analysis crypto");
-        let mut by_function: BTreeMap<u64, Vec<(u64, u64, usize)>> = BTreeMap::new();
-        for (&target, sites) in &analysis.xrefs {
-            for (i, site) in sites.iter().enumerate() {
-                if let Some(entry) = site.from_entry {
-                    by_function
-                        .entry(entry)
-                        .or_default()
-                        .push((site.va, target, i));
-                }
-            }
-        }
-        let by_function: BTreeMap<u64, Vec<(u64, usize)>> = by_function
-            .into_iter()
-            .map(|(entry, mut list)| {
-                list.sort_unstable();
-                (entry, list.into_iter().map(|(_, t, i)| (t, i)).collect())
-            })
-            .collect();
-        analysis.refs_by_function = by_function;
+        analysis.index_refs();
         phases.mark("analysis refs_by_function");
         let mut pack_names = sigs::find_pack_names(program, &analysis);
         sigs::apply_pack_names(&mut analysis, &mut pack_names);
@@ -1606,10 +1588,12 @@ impl Analysis {
     /// Thumb run nothing calls, a handler whose literal pool sits in a
     /// hole of a later function's span, or a body a later thunk entered
     /// by jumping backward. A decompile that names that address starts a
-    /// function there, records the jump tables the walk resolved, and
-    /// infers what that function returns, the same pass discovery runs.
-    /// A float left in `s0` or `d0` is then the result. Functions already
-    /// found are not walked again.
+    /// function there, records the jump tables and the call and jump
+    /// sites the walk resolved, and infers what that function returns,
+    /// the same pass discovery runs. Those sites are recorded first, so
+    /// a callee whose result this call reads is not left as returning
+    /// nothing. A float left in `s0` or `d0` is then the result.
+    /// Functions already found are not walked again.
     ///
     /// # Arguments
     ///
@@ -1626,10 +1610,12 @@ impl Analysis {
         mut analysis: Analysis,
         va: u64,
     ) -> Result<(Analysis, u64), Analysis> {
-        let Some((func, tables)) = a32::function_at_gap(program, &analysis.functions, va) else {
+        let Some((func, tables, sites)) = a32::function_at_gap(program, &analysis.functions, va)
+        else {
             return Err(analysis);
         };
         let entry = func.entry;
+        let callees = func.callees.clone();
         let pos = analysis.functions.partition_point(|f| f.entry < entry);
         analysis.functions.insert(pos, func);
         for (site, targets) in tables {
@@ -1639,10 +1625,52 @@ impl Analysis {
         for (i, f) in analysis.functions.iter().enumerate() {
             analysis.entry_index.insert(f.entry, i);
         }
+        for callee in callees {
+            if let Some(f) = analysis.function_mut(callee)
+                && let Err(at) = f.callers.binary_search(&entry)
+            {
+                f.callers.insert(at, entry);
+            }
+        }
+        for (target, site, kind) in sites {
+            functions::push_site(&mut analysis.xrefs, target, site, kind, Some(entry));
+            if let Some(list) = analysis.xrefs.get_mut(&target) {
+                list.sort_by_key(|s| s.va);
+            }
+        }
+        analysis.index_refs();
         if program.arch.isa() == Some(Isa::A32) {
             a32::infer_returns(program, &mut analysis);
         }
         Ok((analysis, entry))
+    }
+
+    /// Rebuilds [`Analysis::refs_by_function`] from [`Analysis::xrefs`].
+    ///
+    /// Each function's list is the targets it references, in site order,
+    /// with the index of that site in the target's list.
+    fn index_refs(&mut self) {
+        let mut by_function: BTreeMap<u64, Vec<(u64, u64, usize)>> = BTreeMap::new();
+        for (&target, sites) in &self.xrefs {
+            for (i, site) in sites.iter().enumerate() {
+                if let Some(entry) = site.from_entry {
+                    by_function
+                        .entry(entry)
+                        .or_default()
+                        .push((site.va, target, i));
+                }
+            }
+        }
+        self.refs_by_function = by_function
+            .into_iter()
+            .map(|(entry, mut list)| {
+                list.sort_unstable();
+                (
+                    entry,
+                    list.into_iter().map(|(_, target, i)| (target, i)).collect(),
+                )
+            })
+            .collect();
     }
 
     /// Returns the symbol at `va`: the export, forwarder, local or data

@@ -700,8 +700,8 @@ fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
 /// pool), and share no decoded byte with a function already found, except
 /// the blocks of a later function that reached `va` by jumping backward,
 /// other than the block that holds that function's entry. Nothing here
-/// changes those functions: the caller adds this one beside them, and
-/// records the jump tables the walk resolved.
+/// changes those functions: the caller adds this one beside them and
+/// records the jump tables and the call sites the walk resolved.
 ///
 /// # Arguments
 ///
@@ -711,15 +711,18 @@ fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
 ///
 /// # Returns
 ///
-/// The function and each resolved dispatch with its case targets, or
-/// `None` when the address is not a clean ARM32 gap. The targets are
-/// what discovery stores for a walk it keeps. A recovered `tbb` or `tbh`
-/// has no cases without them.
+/// The function, each resolved dispatch with its case targets, and the
+/// call and jump sites the walk decoded, or `None` when the address is
+/// not a clean ARM32 gap. The targets are what discovery stores for a
+/// walk it keeps. A recovered `tbb` or `tbh` has no cases without them.
+/// The sites are what discovery stores as references. Without them a
+/// callee whose other callers discard its result stays marked as
+/// returning nothing, and a call here loses the value.
 pub(crate) fn function_at_gap(
     program: &Program,
     functions: &[Function],
     va: u64,
-) -> Option<(Function, Vec<(u64, Vec<u64>)>)> {
+) -> Option<(Function, Vec<(u64, Vec<u64>)>, Vec<(u64, u64, RefKind)>)> {
     let va = va & !1;
     if program.arch != crate::program::Arch::Arm {
         return None;
@@ -750,12 +753,13 @@ pub(crate) fn function_at_gap(
             .values()
             .all(|i| free(i.va) && free(i.next().saturating_sub(1)));
     ok.then(|| {
+        let (func, sites) = assemble(va, &w);
         let tables = w
             .tables
             .iter()
             .map(|t| (t.site, t.targets.clone()))
             .collect();
-        (assemble(va, &w).0, tables)
+        (func, tables, sites)
     })
 }
 
