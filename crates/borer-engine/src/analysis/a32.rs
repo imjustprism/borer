@@ -648,25 +648,35 @@ fn gap_owned(functions: &[Function], va: u64, earlier_only: bool) -> bool {
     })
 }
 
-/// The bytes discovery already decoded, merged, leaving out a block that
-/// starts at `va`.
+/// The bytes discovery already decoded, merged, leaving out the body a
+/// later function entered by jumping backward.
 ///
-/// That block is a body a later function entered by jumping backward (a
-/// one-instruction thunk in front of it). The walk claims it. Every other
-/// block stays covered, including the thunk itself, so the walk stops
-/// there.
+/// A block that starts at `va` belongs to a function whose entry is after
+/// `va`: a thunk in front of that body. The walk claims that block and
+/// every other block of that function except the one that holds the
+/// thunk's entry, so a branch inside the body stays in the recovered
+/// function. The thunk's block stays covered, and so does every block of
+/// every other function.
 ///
 /// # Arguments
 ///
 /// * `functions` - The functions discovery kept.
 /// * `va` - The address the walk starts at.
 fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
-    let mut spans: Vec<(u64, u64)> = functions
-        .iter()
-        .flat_map(|f| f.blocks.iter())
-        .filter(|b| b.end > b.start && b.start != va)
-        .map(|b| (b.start, b.end))
-        .collect();
+    let mut spans: Vec<(u64, u64)> = Vec::new();
+    for f in functions {
+        let stolen = f.entry > va && f.blocks.iter().any(|b| b.start == va);
+        for b in &f.blocks {
+            if b.end <= b.start {
+                continue;
+            }
+            let thunk = b.start <= f.entry && f.entry < b.end;
+            if stolen && !thunk {
+                continue;
+            }
+            spans.push((b.start, b.end));
+        }
+    }
     spans.sort_unstable();
     let mut merged: Vec<(u64, u64)> = Vec::new();
     for (start, end) in spans {
@@ -688,7 +698,8 @@ fn gap_covered(functions: &[Function], va: u64) -> BTreeMap<u64, (u64, bool)> {
 ///
 /// The walk has to decode, leave (a return, a tail, or its own literal
 /// pool), and share no decoded byte with a function already found, except
-/// a block that starts at `va` and belongs to a later entry. Nothing here
+/// the blocks of a later function that reached `va` by jumping backward,
+/// other than the block that holds that function's entry. Nothing here
 /// changes those functions: the caller adds this one beside them, and
 /// records the jump tables the walk resolved.
 ///

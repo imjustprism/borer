@@ -1606,8 +1606,10 @@ impl Analysis {
     /// Thumb run nothing calls, a handler whose literal pool sits in a
     /// hole of a later function's span, or a body a later thunk entered
     /// by jumping backward. A decompile that names that address starts a
-    /// function there and records the jump tables the walk resolved.
-    /// Functions already found are not walked again.
+    /// function there, records the jump tables the walk resolved, and
+    /// infers what that function returns, the same pass discovery runs.
+    /// A float left in `s0` or `d0` is then the result. Functions already
+    /// found are not walked again.
     ///
     /// # Arguments
     ///
@@ -1636,6 +1638,9 @@ impl Analysis {
         analysis.entry_index.clear();
         for (i, f) in analysis.functions.iter().enumerate() {
             analysis.entry_index.insert(f.entry, i);
+        }
+        if program.arch.isa() == Some(Isa::A32) {
+            a32::infer_returns(program, &mut analysis);
         }
         Ok((analysis, entry))
     }
