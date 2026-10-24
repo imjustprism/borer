@@ -1066,10 +1066,10 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         Query::Export => {
             let (out, library, only) = export_args(args)?;
             writable(out)?;
-            let a = s.analysis(Feature::Decompile)?;
+            let mut a = s.analysis(Feature::Decompile)?;
             let written = borer::export::write_entries(
                 &s.program,
-                &a,
+                &mut a,
                 &s.overlay,
                 library,
                 only.as_deref(),

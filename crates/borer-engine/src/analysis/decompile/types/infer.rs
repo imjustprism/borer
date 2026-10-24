@@ -82,23 +82,24 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             && copies(&lines, &param)
                 .iter()
                 .any(|c| c.starts_with("local_"));
-        if declared == "void *" && pointed_at(&lines, &param) == Some("uint8_t *") {
-            retype(&mut lines[sig], &declared, &param, "uint8_t *");
-            continue;
-        }
-        if stack_copy_ptr
-            && let Some(ptr) = pointed_at(&lines, &param)
-                .filter(|&p| matches!(p, "uint8_t *" | "float *" | "double *"))
-        {
+        if let Some(ptr) = retype_pointer_param(&mut lines, &declared, &param, stack_copy_ptr) {
             retype(&mut lines[sig], &declared, &param, ptr);
             continue;
         }
-        let narrow_copy =
-            (param_count > 1 && declared == "uint32_t" && !copies(&lines, &param).is_empty())
-                .then(|| inferred_type(&lines, &param))
-                .flatten()
-                .filter(|&t| matches!(t, "uint8_t" | "uint16_t" | "int8_t" | "int16_t"));
-        let ty = if let Some(narrow) = narrow_copy {
+        if param == "a1" && is_mmio_base_param(&lines, &declared) {
+            retype(&mut lines[sig], &declared, &param, "uint32_t");
+            continue;
+        }
+        let narrow_copy = narrow_param_override(&lines, param_count, &declared, &param);
+        let signed_word = (declared == "uint32_t"
+            && word == "uint64_t"
+            && !lines
+                .iter()
+                .any(|l| is_declaration(l) && !word_positions(l, "r0").is_empty()))
+        .then(|| inferred_type(&lines, &param))
+        .flatten()
+        .filter(|&t| t == "int32_t");
+        let ty = if let Some(narrow) = narrow_copy.or(signed_word) {
             narrow
         } else if declared != word {
             declared.as_str()
@@ -121,7 +122,7 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
                 &param,
             );
         }
-        if declared == word || narrow_copy.is_some() {
+        if declared == word || narrow_copy.is_some() || signed_word.is_some() || ty != declared {
             retype(&mut lines[sig], &declared, &param, ty);
         }
     }
@@ -129,6 +130,140 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Checks whether a `void *` or stack-copied word parameter can be refined to
+/// a more specific pointer type (`uint8_t *`, `uint32_t *`, `char **`, `float *`,
+/// `double *`, or `void *`).
+fn retype_pointer_param(
+    lines: &mut [String],
+    declared: &str,
+    param: &str,
+    stack_copy_ptr: bool,
+) -> Option<&'static str> {
+    if matches!(declared, "void *" | "uint64_t" | "uint32_t") {
+        let single_ty = if locals::single_field_int_ptr(lines, param) {
+            Some("uint32_t *")
+        } else if locals::single_field_char_ptr_ptr(lines, param) {
+            Some("char **")
+        } else {
+            None
+        };
+        if let Some(ty) = single_ty {
+            let field = format!("{param}->field_0x0");
+            let deref = format!("*{param}");
+            for line in lines.iter_mut().filter(|l| !l.starts_with("//")) {
+                let positions: Vec<usize> = word_positions(line, param)
+                    .into_iter()
+                    .filter(|&at| {
+                        line.get(at..)
+                            .and_then(|s| s.strip_prefix(&field))
+                            .is_some_and(|r| !r.starts_with(is_ident_char))
+                    })
+                    .collect();
+                for at in positions.into_iter().rev() {
+                    line.replace_range(at..at + field.len(), &deref);
+                }
+            }
+            return Some(ty);
+        }
+    }
+    if declared == "void *"
+        && (pointed_at(lines, param) == Some("uint8_t *")
+            || copies(lines, param).iter().any(|c| {
+                let mut w = BTreeSet::new();
+                let mut o = BTreeSet::new();
+                let mut t = BTreeSet::new();
+                accesses(lines, c, &mut w, &mut o, &mut t).is_some() && w == BTreeSet::from([1])
+            }))
+    {
+        return Some("uint8_t *");
+    }
+    if stack_copy_ptr {
+        if let Some(p) = pointed_at(lines, param)
+            .filter(|&p| matches!(p, "uint8_t *" | "float *" | "double *" | "void *"))
+        {
+            return Some(p);
+        }
+        if param == "a1"
+            && assigned_values(lines, param) == 0
+            && lines.iter().filter(|l| !l.starts_with("//")).any(|l| {
+                l.split_once(&format!("({param} + "))
+                    .and_then(|(_, r)| r.split([',', ')']).next())
+                    .and_then(|s| parse_const(s.trim()))
+                    .is_some_and(|n| (8..FIELD_OFFSET_MAX).contains(&n) && n % 4 == 0)
+            })
+        {
+            return Some("void *");
+        }
+    }
+    None
+}
+
+/// Tells whether `a1` (`void *`, `uint32_t`, or `uint32_t *`) is a 32-bit MMIO
+/// peripheral base address in a `void` leaf function on a 32-bit ARM target.
+fn is_mmio_base_param(lines: &[String], declared: &str) -> bool {
+    if !matches!(declared, "void *" | "uint32_t" | "uint32_t *")
+        || !lines.iter().any(|l| l.starts_with("// signature: void "))
+        || !lines.iter().any(|l| {
+            is_declaration(l)
+                && (!word_positions(l, "r2").is_empty() || !word_positions(l, "r3").is_empty())
+        })
+        || lines.iter().any(|l| l.contains("local_"))
+    {
+        return false;
+    }
+    let mut offsets = BTreeSet::new();
+    let mut bit_op = false;
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        if is_declaration(line) {
+            continue;
+        }
+        if line.contains(" | ")
+            || line.contains(" & ")
+            || line.contains(" |= ")
+            || line.contains(" &= ")
+        {
+            bit_op = true;
+        }
+        for at in word_positions(line, "a1") {
+            let head = line.get(..at).unwrap_or("");
+            let tail = line.get(at + 2..).unwrap_or("");
+            if head.ends_with("*(uint32_t*)") {
+                offsets.insert(0u64);
+            } else if head.ends_with("*(uint32_t*)(")
+                && let Some(rest) = tail.strip_prefix(" + ")
+                && let Some(end) = rest.find(')')
+                && let Some(off) = parse_const(&rest[..end])
+                && off <= 0x2c
+                && off % 4 == 0
+            {
+                offsets.insert(off);
+            } else {
+                return false;
+            }
+        }
+    }
+    bit_op && offsets.len() == 1
+}
+
+/// Checks whether a `uint32_t` parameter in a multi-parameter function has
+/// uses proving it a narrower integer (`uint8_t`, `uint16_t`, `int8_t`, `int16_t`).
+fn narrow_param_override(
+    lines: &[String],
+    param_count: usize,
+    declared: &str,
+    param: &str,
+) -> Option<&'static str> {
+    if param_count <= 1 || declared != "uint32_t" {
+        return None;
+    }
+    let t = inferred_type(lines, param)?;
+    if !matches!(t, "uint8_t" | "uint16_t" | "int8_t" | "int16_t") {
+        return None;
+    }
+    let has_narrow_local = lines.iter().any(|l| l.starts_with(&format!("{t} local_")));
+    (!copies(lines, param).is_empty() || has_narrow_local).then_some(t)
 }
 
 /// Drops from a 32-bit signature the word after each `double` parameter
@@ -262,9 +397,17 @@ pub(in crate::analysis::decompile) fn pointed_at(
         return None;
     }
     let has_copy = !copies(lines, param).is_empty();
-    let ty = if has_copy && widths == BTreeSet::from([4]) && types == BTreeSet::from(["float"]) {
+    let ty = if has_copy
+        && widths == BTreeSet::from([4])
+        && types.contains("float")
+        && types.iter().all(|&t| matches!(t, "float" | "uint32_t"))
+    {
         "float *"
-    } else if has_copy && widths == BTreeSet::from([8]) && types == BTreeSet::from(["double"]) {
+    } else if has_copy
+        && widths == BTreeSet::from([8])
+        && types.contains("double")
+        && types.iter().all(|&t| matches!(t, "double" | "uint64_t"))
+    {
         "double *"
     } else {
         pointee_type(&widths, &offsets)
@@ -460,6 +603,42 @@ fn copies(lines: &[String], param: &str) -> Vec<String> {
     out
 }
 
+/// The loop variables a `for` header initializes whole from `param` and
+/// that are never assigned outside that `for` header.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `param` - The parameter name.
+fn for_init_copies(lines: &[String], param: &str) -> Vec<String> {
+    let suffix = format!(" = {param};");
+    let mut out: Vec<String> = Vec::new();
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        let Some(rest) = line.trim().strip_prefix("for (") else {
+            continue;
+        };
+        let Some((dest, _)) = rest.split_once(&suffix) else {
+            continue;
+        };
+        if !is_ident(dest) || dest == param || out.iter().any(|c| c == dest) {
+            continue;
+        }
+        let other_writes = lines
+            .iter()
+            .filter(|l| {
+                let t = l.trim();
+                !t.starts_with("for (")
+                    && (t.strip_prefix(dest).is_some_and(|r| r.starts_with(" = "))
+                        || t.contains(&format!(" = {dest} = ")))
+            })
+            .count();
+        if other_writes == 0 {
+            out.push(dest.to_owned());
+        }
+    }
+    out
+}
+
 /// The narrow type every use of a `uint64_t` variable agrees on, if any.
 ///
 /// A variable's own assignment says nothing about its width, since the value
@@ -504,6 +683,14 @@ pub(in crate::analysis::decompile) fn inferred_type_on<'a>(
     uses: impl Iterator<Item = &'a String>,
     param: &str,
 ) -> Option<&'static str> {
+    let has_cast32 = !lines
+        .iter()
+        .any(|l| !l.starts_with("//") && l.contains(&format!("(int64_t)(int32_t){param}")))
+        && lines.iter().any(|l| {
+            !l.starts_with("//")
+                && (l.contains(&format!("(int32_t){param}"))
+                    || l.contains(&format!("(uint32_t){param}")))
+        });
     let mut ty: Option<&'static str> = None;
     for line in uses.filter(|l| !l.starts_with("//")) {
         for at in word_positions(line, param) {
@@ -521,14 +708,28 @@ pub(in crate::analysis::decompile) fn inferred_type_on<'a>(
                 stored
             } else if head.trim() == "return" && tail.trim_start().starts_with(';') {
                 scalar_width(signature_result(lines)?)?
+            } else if let Some(width) = assigned_width(lines, head, tail) {
+                width
             } else if let Some(bits) = mask_width(tail).or_else(|| offset_mask_width(head, tail)) {
+                if has_cast32
+                    && bits < 32
+                    && head.ends_with('(')
+                    && (tail.contains(") == ") || tail.contains(") != "))
+                {
+                    continue;
+                }
                 match bits {
                     8 => "uint8_t",
                     16 => "uint16_t",
                     _ => "uint32_t",
                 }
-            } else if let Some(width) = assigned_width(lines, head, tail) {
-                width
+            } else if has_cast32
+                && tail
+                    .strip_prefix(" & ")
+                    .and_then(|r| parse_const(r.split([')', ';', ' ', ',']).next()?))
+                    .is_some_and(|c| c > 0 && c < 0xffff_ffff)
+            {
+                continue;
             } else {
                 match slot_at(line, at)? {
                     Slot::Narrow(t) => t,
@@ -676,19 +877,57 @@ fn assigned_width(lines: &[String], head: &str, tail: &str) -> Option<&'static s
     if !is_ident(dest) {
         return None;
     }
+    if vars::is_var_name(dest)
+        && is_offset_stmt_tail(tail, paren)
+        && (var_reads_are_byte(lines, dest, 1) || is_byte_xor_accum(lines, dest))
+    {
+        return Some("uint8_t");
+    }
     if ((!paren && tail.trim_start().starts_with(';'))
         || (dest.starts_with('g') && is_offset_stmt_tail(tail, paren)))
         && let Some(w) = declared_scalar(lines, dest)
     {
         return Some(w);
     }
-    if vars::is_var_name(dest)
-        && is_offset_stmt_tail(tail, paren)
-        && var_reads_are_byte(lines, dest, 1)
-    {
-        return Some("uint8_t");
-    }
     None
+}
+
+/// Tells whether `dest` is an 8-bit XOR accumulator (`dest ^= *(uint8_t*)...`)
+/// whose only other occurrence past its initialization is `return dest;`.
+fn is_byte_xor_accum(lines: &[String], dest: &str) -> bool {
+    if !matches!(
+        signature_result(lines).and_then(scalar_width),
+        Some("uint8_t" | "int8_t")
+    ) {
+        return false;
+    }
+    let xor_compound = format!("{dest} ^= *(uint8_t*)");
+    let xor_plain = format!("{dest} = {dest} ^ *(uint8_t*)");
+    let ret_stmt = format!("return {dest};");
+    let mut has_xor = false;
+    let mut has_ret = false;
+    for line in lines
+        .iter()
+        .filter(|l| !l.starts_with("//") && !is_declaration(l))
+    {
+        let t = line.trim();
+        if t.starts_with(&xor_compound) || t.starts_with(&xor_plain) {
+            has_xor = true;
+            continue;
+        }
+        if t.strip_prefix(dest).is_some_and(|r| r.starts_with(" = ")) {
+            continue;
+        }
+        if word_positions(line, dest).is_empty() {
+            continue;
+        }
+        if t == ret_stmt {
+            has_ret = true;
+        } else {
+            return false;
+        }
+    }
+    has_xor && has_ret
 }
 
 /// Tells whether `dest` is read at least once and every read of `dest`
@@ -718,9 +957,10 @@ fn var_reads_are_byte(lines: &[String], dest: &str, depth: u8) -> bool {
                 || offset_mask_width(head, tail) == Some(8)
                 || (depth > 0
                     && head.trim().strip_suffix(" =").is_some_and(|d| {
-                        vars::is_var_name(d)
-                            && is_offset_stmt_tail(tail, false)
-                            && var_reads_are_byte(lines, d, depth - 1)
+                        is_offset_stmt_tail(tail, false)
+                            && (matches!(declared_scalar(lines, d), Some("uint8_t" | "int8_t"))
+                                || (vars::is_var_name(d)
+                                    && var_reads_are_byte(lines, d, depth - 1)))
                     }));
             if !byte_use {
                 return false;
@@ -831,9 +1071,61 @@ pub(in crate::analysis::decompile) fn slot_at(line: &str, at: usize) -> Option<S
     };
     let k = l.toks.iter().position(|t| t.at == at)?;
     let (callee, index, open) = argument_of(&l, k)?;
+    if (matches!(
+        callee,
+        "rawmemchr" | "gzopen" | "acl_delete_def_file" | "acl_get_file" | "acl_set_file"
+    ) && index == 0)
+        || ((callee == "crc32" || callee.starts_with("crc32_fn_")) && index == 1)
+    {
+        return Some(Slot::Pointer("char *".to_owned()));
+    }
+    if callee == "posix_memalign" && index == 0 {
+        return Some(Slot::Pointer("void **".to_owned()));
+    }
+    if matches!(
+        callee,
+        "gnutls_credentials_set"
+            | "gnutls_handshake"
+            | "gnutls_bye"
+            | "gnutls_deinit"
+            | "gnutls_session_etm_status"
+            | "gnutls_protocol_get_version"
+            | "gnutls_dh_get_pubkey"
+    ) && index == 0
+    {
+        return Some(Slot::Pointer("gnutls_session_t".to_owned()));
+    }
+    if (callee == "acl_set_file" && index == 2)
+        || (matches!(
+            callee,
+            "acl_to_any_text"
+                | "acl_get_entry"
+                | "acl_delete_entry"
+                | "acl_valid"
+                | "acl_calc_mask"
+                | "acl_dup"
+                | "acl_entries"
+                | "acl_check"
+        ) && index == 0)
+    {
+        return Some(Slot::Pointer("acl_t".to_owned()));
+    }
+    if (callee == "acl_get_tag_type" && index == 0) || (callee == "acl_delete_entry" && index >= 1)
+    {
+        return Some(Slot::Pointer("acl_entry_t".to_owned()));
+    }
     let posix = typelib::declared(callee, BinaryFormat::Elf);
     let windows = typelib::declared(callee, BinaryFormat::Pe);
-    let decl = posix.or(windows)?;
+    let Some(decl) = posix.or(windows) else {
+        if !callee.ends_with("fprintf") {
+            return None;
+        }
+        let (fmt, lit) = (0..index).find_map(|f| {
+            let tok = argument_token(&l, open, f)?;
+            l.word(tok).contains('%').then_some((f, tok))
+        })?;
+        return conversion_slot(l.word(lit), index - fmt - 1);
+    };
     if let Some(p) = decl.params.get(index) {
         let other = posix.and(windows).and_then(|w| w.params.get(index));
         return other.is_none_or(|o| o.ty == p.ty).then(|| slot_of(p.ty));
@@ -1476,12 +1768,28 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
         .filter(|(_, l)| !l.starts_with("//"))
     {
         for at in word_positions(line, param) {
-            if cast_before(line.get(..at).unwrap_or("")).is_some() {
+            let u64_deref = line
+                .get(..at)
+                .is_some_and(|h| h.ends_with("*(uint64_t*)") || h.ends_with("((uint64_t*)"));
+            if !u64_deref && cast_before(line.get(..at).unwrap_or("")).is_some() {
                 return None;
             }
-            match known_slot(lines, line, at, before) {
+            let field_zero = line
+                .get(at + param.len()..)
+                .is_some_and(|r| r.starts_with("->field_0x0"));
+            let elem_deref = u64_deref || field_zero;
+            let stripped = field_zero.then(|| {
+                let mut s = line.clone();
+                s.replace_range(at + param.len()..at + param.len() + "->field_0x0".len(), "");
+                s
+            });
+            let slot_line = stripped.as_deref().unwrap_or(line);
+            match known_slot(lines, slot_line, at, before) {
                 Some(Slot::Narrow(_)) => return None,
-                Some(Slot::Pointer(t)) => {
+                Some(Slot::Pointer(mut t)) => {
+                    if elem_deref && t == "char *" {
+                        t = "char **".to_owned();
+                    }
                     if found.as_ref().is_some_and(|f| *f != t) {
                         return None;
                     }
@@ -1496,68 +1804,47 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
                     if k.is_some_and(|k| bit_operand(&l, k)) {
                         return None;
                     }
-                    whole &= k.is_some_and(|k| whole_read(&l, k));
+                    whole &= k.is_some_and(|k| whole_read(&l, k)) || elem_deref;
                 }
             }
         }
     }
-    for copy in copies(lines, param) {
+    for copy in copies(lines, param)
+        .into_iter()
+        .chain(for_init_copies(lines, param))
+    {
         for (before, line) in lines
             .iter()
             .enumerate()
             .filter(|(_, l)| !l.starts_with("//"))
         {
             for at in word_positions(line, &copy) {
+                let elem_deref = line
+                    .get(..at)
+                    .is_some_and(|h| h.ends_with("*(uint64_t*)") || h.ends_with("((uint64_t*)"));
                 match known_slot(lines, line, at, before) {
                     Some(Slot::Narrow(_)) => return None,
-                    Some(Slot::Pointer(t)) if found.as_ref().is_some_and(|f| *f != t) => {
-                        return None;
+                    Some(Slot::Pointer(mut t)) => {
+                        if elem_deref && t == "char *" {
+                            t = "char **".to_owned();
+                        }
+                        if found.as_ref().is_some_and(|f| *f != t) {
+                            return None;
+                        }
+                        found = Some(t);
                     }
-                    Some(Slot::Pointer(t)) => found = Some(t),
                     Some(Slot::Other) | None => {}
                 }
             }
         }
     }
     match found {
-        Some(t) => (t == "char *" || whole).then_some(t),
-        None => string_pointer_array(lines, param).then(|| "char **".to_owned()),
+        Some(t) => (t == "char *"
+            || whole
+            || (t == "char **" && locals::string_pointer_array(lines, param)))
+        .then_some(t),
+        None => locals::string_pointer_array(lines, param).then(|| "char **".to_owned()),
     }
-}
-
-/// Tells whether `param`'s layout is a contiguous run of two or more `u64`
-/// fields from offset zero, each read as a string.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `param` - The parameter name.
-///
-/// # Returns
-///
-/// Whether `param` is an array of string pointers (`char **`).
-fn string_pointer_array(lines: &[String], param: &str) -> bool {
-    let prefix = format!("// layout {param}: ");
-    let Some(layout) = lines.iter().find_map(|l| l.strip_prefix(&prefix)) else {
-        return false;
-    };
-    let fields: Vec<&str> = layout.split(", ").collect();
-    if fields.len() < 2 {
-        return false;
-    }
-    fields.iter().enumerate().all(|(i, entry)| {
-        let off = i * 8;
-        if *entry != format!("0x{off:x} u64") {
-            return false;
-        }
-        let field = format!("{param}->field_0x{off:x}");
-        lines.iter().any(|l| {
-            !l.starts_with("//")
-                && (l.contains(&format!("strcmp({field},"))
-                    || l.contains(&format!("strrchr({field},"))
-                    || l.contains(&format!("*(uint8_t*){field}")))
-        })
-    })
 }
 
 #[cfg(test)]

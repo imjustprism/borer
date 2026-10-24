@@ -859,6 +859,20 @@ pub(in crate::analysis::decompile) fn forwarded_reads(
     let mut out: BTreeSet<Register> = BTreeSet::new();
     let deep = ctx.bitness == 64;
     while seen.len() <= FORWARD_MAX {
+        if at != t
+            && let Some(p) = import_prototype(ctx, Some(at))
+        {
+            if !p.variadic {
+                let floats = p.floats.checked_shl(u32::from(p.this)).unwrap_or(0);
+                let count = usize::from(p.params) + usize::from(p.this);
+                for r in (0..count.min(conv.reg_args())).filter_map(|i| conv.arg_reg(i, floats)) {
+                    if !shadow.contains(&r) {
+                        out.insert(r);
+                    }
+                }
+            }
+            break;
+        }
         let Some(Leading {
             read,
             written,

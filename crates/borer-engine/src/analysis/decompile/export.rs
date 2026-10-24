@@ -554,11 +554,69 @@ pub fn export(
         let mut out = String::new();
         for (&entry, text) in chunk.iter().zip(&texts) {
             let name = name_of(analysis, overlay, entry);
-            hoisted.add(&name, entry, text.as_deref(), &mut out);
+            let rebased = text.as_deref().map(|t| match program.arch {
+                crate::program::Arch::X86_64 => rebase_locals(t, false),
+                crate::program::Arch::Arm => rebase_locals(t, true),
+                _ => std::borrow::Cow::Borrowed(t),
+            });
+            hoisted.add(&name, entry, rebased.as_deref(), &mut out);
         }
         sink(&out)?;
     }
     Ok(hoisted)
+}
+
+/// Rebases `local_<hex>` stack slot names so their displacements align with
+/// DWARF `DW_OP_fbreg` frame-base offsets.
+///
+/// Shifts by `off - 8` on x86-64 when every slot lies below `rbp`, or by
+/// `off + 0x100` on 32-bit ARM so positive and negative `DW_OP_fbreg + 16`
+/// offsets share one monotonic shift without colliding with unshifted slots.
+fn rebase_locals(text: &str, arm: bool) -> std::borrow::Cow<'_, str> {
+    let mut declared: BTreeSet<u64> = BTreeSet::new();
+    for line in text.lines() {
+        if line.starts_with("//") || !line.ends_with(';') || line.contains(['(', '=']) {
+            continue;
+        }
+        for tok in super::lexer::lex(line) {
+            if tok.lex == super::lexer::Lex::Name
+                && let Some(hex) = line[tok.at..tok.end].strip_prefix("local_")
+                && let Ok(off) = u64::from_str_radix(hex, 16)
+            {
+                if !arm && off <= 8 {
+                    return std::borrow::Cow::Borrowed(text);
+                }
+                declared.insert(off);
+            }
+        }
+    }
+    if declared.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if line.starts_with("//") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let mut last = 0usize;
+        for tok in super::lexer::lex(line) {
+            if tok.lex == super::lexer::Lex::Name
+                && let Some(hex) = line[tok.at..tok.end].strip_prefix("local_")
+                && let Ok(off) = u64::from_str_radix(hex, 16)
+                && declared.contains(&off)
+            {
+                out.push_str(&line[last..tok.at]);
+                let shifted = if arm { off + 0x100 } else { off - 8 };
+                let _ = write!(out, "local_{shifted:x}");
+                last = tok.end;
+            }
+        }
+        out.push_str(&line[last..]);
+        out.push('\n');
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 #[cfg(test)]

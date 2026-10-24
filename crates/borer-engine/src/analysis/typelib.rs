@@ -395,14 +395,17 @@ const GLIBC_DATA: [(&str, &str); 14] = [
 /// The type names the GNU C library's headers define that a text spells,
 /// with what each stands for on x86-64: a structure the text only points
 /// at stays opaque.
-const GLIBC_TYPES: [(&str, &str); 21] = [
+const GLIBC_TYPES: [(&str, &str); 24] = [
     ("DIR", "struct __dirstream"),
     ("FILE", "struct _IO_FILE"),
+    ("acl_entry_t", "struct __acl_entry_ext*"),
+    ("acl_t", "struct __acl_ext*"),
     ("blkcnt_t", "long"),
     ("blksize_t", "long"),
     ("clock_t", "long"),
     ("dev_t", "unsigned long"),
     ("gid_t", "unsigned int"),
+    ("gnutls_session_t", "struct gnutls_session_int*"),
     ("ino_t", "unsigned long"),
     ("mode_t", "unsigned int"),
     ("nlink_t", "unsigned long"),

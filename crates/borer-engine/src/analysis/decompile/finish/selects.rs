@@ -314,7 +314,8 @@ fn clamp_hoist(lines: &mut Vec<String>, k: usize) -> bool {
                             && !declares(l)
                             && !l.trim_start().starts_with("//")
                     });
-                let declared = lines.iter().any(|l| declares(l) && mentions_ident(l, v));
+                let declared =
+                    is_param_name(v) || lines.iter().any(|l| declares(l) && mentions_ident(l, v));
                 let guarded = t
                     .get(..open)
                     .is_some_and(|p| p.contains("&&") || p.contains("||") || p.contains('?'));

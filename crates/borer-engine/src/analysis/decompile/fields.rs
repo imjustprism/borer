@@ -434,21 +434,7 @@ pub(super) fn apply_layouts(text: &str) -> String {
                 .insert(letter);
             *counts.entry(base).or_default() += 1;
         }
-        let t = line.trim_start();
-        if let Some((lhs, _)) = t.split_once(" = ")
-            && is_ident(lhs)
-        {
-            *assigned.entry(lhs).or_default() += 1;
-        }
-        for op in [
-            " += ", " -= ", " |= ", " &= ", " ^= ", " <<= ", " >>= ", " *= ",
-        ] {
-            if let Some((lhs, _)) = t.split_once(op)
-                && is_ident(lhs)
-            {
-                *assigned.entry(lhs).or_default() += 1;
-            }
-        }
+        note_assigned_line(line.trim_start(), &mut assigned);
     }
     let mut headers: Vec<String> = Vec::new();
     let mut renames = Vec::new();
@@ -456,6 +442,7 @@ pub(super) fn apply_layouts(text: &str) -> String {
         if counts.get(base).copied().unwrap_or(0) < LAYOUT_MIN
             || assigned.get(base).copied().unwrap_or(0) > 1
             || matches!(*base, "gs" | "fs")
+            || is_single_offset_mmio_param(&lines, base, offsets.len())
         {
             continue;
         }
@@ -538,6 +525,42 @@ pub(super) fn apply_layouts(text: &str) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Tells whether `base` is `a1` accessed at a single offset in a `void`
+/// function with no stack locals.
+fn is_single_offset_mmio_param(lines: &[String], base: &str, offsets_len: usize) -> bool {
+    base == "a1"
+        && offsets_len == 1
+        && !lines.iter().any(|l| l.contains("local_"))
+        && lines.iter().any(|l| l.starts_with("// signature: void "))
+}
+
+/// Counts assignments to identifiers in one trimmed line, including `for (` headers.
+fn note_assigned_line<'a>(t: &'a str, assigned: &mut BTreeMap<&'a str, usize>) {
+    if let Some(inner) = t.strip_prefix("for (").and_then(|s| s.strip_suffix(") {")) {
+        for part in inner.split("; ") {
+            if let Some((lhs, _)) = part.split_once(" = ")
+                && is_ident(lhs)
+            {
+                *assigned.entry(lhs).or_default() += 1;
+            }
+        }
+    }
+    if let Some((lhs, _)) = t.split_once(" = ")
+        && is_ident(lhs)
+    {
+        *assigned.entry(lhs).or_default() += 1;
+    }
+    for op in [
+        " += ", " -= ", " |= ", " &= ", " ^= ", " <<= ", " >>= ", " *= ",
+    ] {
+        if let Some((lhs, _)) = t.split_once(op)
+            && is_ident(lhs)
+        {
+            *assigned.entry(lhs).or_default() += 1;
+        }
+    }
 }
 
 /// Rewrites `*(T*)base` (no offset) in one line as `base->name`.

@@ -638,8 +638,8 @@ impl Lifter for A32 {
         lift_a32::body_len(instrs)
     }
 
-    fn same_test(_a: &[a32::Insn], _b: &[a32::Insn]) -> bool {
-        false
+    fn same_test(a: &[a32::Insn], b: &[a32::Insn]) -> bool {
+        lift_a32::same_test(a, b)
     }
 
     fn seh_frame(_ctx: &Ctx<'_>, _code: &[Vec<a32::Insn>]) -> bool {

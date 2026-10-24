@@ -265,6 +265,71 @@ pub(in crate::analysis::decompile) fn body_len(instrs: &[Insn]) -> usize {
     instrs.iter().filter(|i| !quiet(i)).count()
 }
 
+/// Tells whether two ARM32 blocks make the same test.
+///
+/// They hold the same instructions up to a conditional branch at the end
+/// of each, the branches sending each outcome to the same address (the
+/// same condition and targets, or the opposite condition with the taken
+/// and fall-through sides swapped).
+///
+/// # Arguments
+///
+/// * `a` - One block's instructions.
+/// * `b` - The other's.
+pub(in crate::analysis::decompile) fn same_test(a: &[Insn], b: &[Insn]) -> bool {
+    let (Some((ja, ha)), Some((jb, hb))) = (a.split_last(), b.split_last()) else {
+        return false;
+    };
+    if ha.len() != hb.len()
+        || ja.va & SKIP != 0
+        || jb.va & SKIP != 0
+        || ja.flow() != Flow::CondJump
+        || jb.flow() != Flow::CondJump
+    {
+        return false;
+    }
+    let same_body = ha.iter().zip(hb).all(|(x, y)| {
+        x.va & SKIP == 0
+            && y.va & SKIP == 0
+            && x.cond == y.cond
+            && x.sets == y.sets
+            && x.op == y.op
+            && (!x.registers().reads.contains(&PC)
+                || x.pc() == y.pc()
+                || x.literal().zip(y.literal()).is_some_and(|(a, b)| a == b))
+    });
+    if !same_body {
+        return false;
+    }
+    let (Some(ta), Some(tb)) = (ja.target(), jb.target()) else {
+        return false;
+    };
+    let (fa, fb) = (ja.next() & !SKIP, jb.next() & !SKIP);
+    let (same_dir, opp_dir) = match (ja.op, jb.op) {
+        (AOp::B { .. }, AOp::B { .. }) => (
+            ja.cond == jb.cond,
+            ja.cond != a32::Cond::Al && a32::invert(ja.cond) == jb.cond,
+        ),
+        (
+            AOp::Cbz {
+                rn: r1,
+                nonzero: n1,
+                ..
+            },
+            AOp::Cbz {
+                rn: r2,
+                nonzero: n2,
+                ..
+            },
+        ) => (
+            ja.cond == jb.cond && r1 == r2 && n1 == n2,
+            ja.cond == a32::Cond::Al && jb.cond == a32::Cond::Al && r1 == r2 && n1 != n2,
+        ),
+        _ => (false, false),
+    };
+    (same_dir && ta == tb && fa == fb) || (opp_dir && ta == fb && fa == tb)
+}
+
 /// One block's lifting over the shared executor.
 struct Lift<'c, 'a> {
     /// The executor: the environment, the function's state and the lines.

@@ -69,8 +69,8 @@ pub(super) fn is_temp_name(w: &str) -> bool {
 /// Tells whether a name is one of the machine's registers or a temporary.
 ///
 /// The names are the ones the lifters give their registers: x64's `rax`
-/// to `r15` and `xmm<n>`, x86's `eax` to `edi`, and arm64's `x0` to `x30`
-/// and `v0` to `v31`.
+/// to `r15` and `xmm<n>`, x86's `eax` to `edi`, arm32's `lr` and `s1` to
+/// `s31`, and arm64's `x0` to `x30` and `v0` to `v31`.
 ///
 /// # Arguments
 ///
@@ -78,7 +78,7 @@ pub(super) fn is_temp_name(w: &str) -> bool {
 pub(super) fn is_register_name(name: &str) -> bool {
     if !matches!(
         name.as_bytes().first(),
-        Some(b'r' | b'e' | b'x' | b'v' | b't')
+        Some(b'r' | b'e' | b'x' | b'v' | b't' | b's' | b'l')
     ) {
         return false;
     }
@@ -103,7 +103,9 @@ pub(super) fn is_register_name(name: &str) -> bool {
             | "edi"
             | "ebp"
             | "esp"
+            | "lr"
     ) || register_number(name, 'r').is_some_and(|n| (8..=15).contains(&n))
+        || register_number(name, 's').is_some_and(|n| (1..=31).contains(&n))
         || register_number(name, 'x').is_some_and(|n| n <= 30)
         || register_number(name, 'v').is_some_and(|n| n <= 31)
 }

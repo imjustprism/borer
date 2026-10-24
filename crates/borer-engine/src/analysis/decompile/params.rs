@@ -5,6 +5,17 @@ use super::*;
 use crate::analysis::protos::CallConv;
 use crate::analysis::typelib::Pass;
 
+/// Accesses through one parameter: the widths and offsets seen.
+#[derive(Default)]
+struct Seen {
+    /// Access widths, in bytes.
+    widths: BTreeSet<usize>,
+    /// Displacements from the pointer.
+    offsets: BTreeSet<i64>,
+    /// The register was used as an address at all.
+    addressed: bool,
+}
+
 /// Infers which parameters are pointers, from the function dereferencing
 /// them, and which parameters are floating point, from the function
 /// reading them as such.
@@ -58,16 +69,6 @@ pub(super) fn param_types(
     succs: &[Vec<usize>],
     entry: usize,
 ) -> BTreeMap<usize, String> {
-    /// Accesses through one parameter: the widths and offsets seen.
-    #[derive(Default)]
-    struct Seen {
-        /// Access widths, in bytes.
-        widths: BTreeSet<usize>,
-        /// Displacements from the pointer.
-        offsets: BTreeSet<i64>,
-        /// The register was used as an address at all.
-        addressed: bool,
-    }
     let word = ctx.conv.word;
     let first = word + ctx.conv.shadow;
     let position_of = |o: i64| {
@@ -195,6 +196,18 @@ pub(super) fn param_types(
             sp = sp.zip(moved).map(|(s, m)| s + m);
         }
     }
+    finish_param_types(ctx, code, entry, seen, floats)
+}
+
+/// Assembles the parameter type map from pointer accesses, float lane widths,
+/// and 64-bit 4-byte prologue frame spills.
+fn finish_param_types(
+    ctx: &Ctx<'_>,
+    code: &[Vec<Instruction>],
+    entry: usize,
+    seen: BTreeMap<usize, Seen>,
+    floats: BTreeMap<usize, BTreeSet<usize>>,
+) -> BTreeMap<usize, String> {
     let mut types: BTreeMap<usize, String> = seen
         .into_iter()
         .filter(|(_, s)| s.addressed)
@@ -208,7 +221,101 @@ pub(super) fn param_types(
         };
         types.entry(p).or_insert_with(|| ty.to_owned());
     }
+    for p in spilled_u32_params(ctx, code, entry) {
+        types.entry(p).or_insert_with(|| "uint32_t".to_owned());
+    }
     types
+}
+
+/// Integer parameters on a 64-bit target whose incoming register is read
+/// only by a 4-byte store in the entry block before it is overwritten or
+/// clobbered by a call.
+fn spilled_u32_params(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) -> BTreeSet<usize> {
+    if ctx.bitness != 64
+        || ctx.conv.shadow != 0
+        || (code.len() == 1
+            && code
+                .first()
+                .is_some_and(|c| !c.iter().any(|i| i.mnemonic() == Mnemonic::Call)))
+    {
+        return BTreeSet::new();
+    }
+    let mut factory = InstructionInfoFactory::new();
+    let mut out = BTreeSet::new();
+    for &r in &ctx.params {
+        let Some(pos) = ctx.conv.param_pos(r, &ctx.params) else {
+            continue;
+        };
+        let canon = lift::canon(r, 64);
+        let Some(entry_code) = code.get(entry) else {
+            continue;
+        };
+        let (mut spilled, mut bad) = (false, false);
+        for instr in entry_code {
+            let is_spill = instr.mnemonic() == Mnemonic::Mov
+                && instr.op0_kind() == OpKind::Memory
+                && instr.op1_kind() == OpKind::Register
+                && instr.memory_size().size() == 4
+                && lift::canon(instr.op1_register(), 64) == canon;
+            let info = factory.info(instr);
+            let reads = info.used_registers().iter().any(|u| {
+                lift::canon(u.register(), 64) == canon
+                    && matches!(u.access(), OpAccess::Read | OpAccess::ReadWrite)
+            });
+            let kills = info.used_registers().iter().any(|u| {
+                lift::canon(u.register(), 64) == canon
+                    && u.register().size() >= 4
+                    && u.access() == OpAccess::Write
+            });
+            if reads {
+                if is_spill && !spilled {
+                    spilled = true;
+                } else {
+                    bad = true;
+                    break;
+                }
+            }
+            if kills || instr.mnemonic() == Mnemonic::Call {
+                break;
+            }
+        }
+        if !spilled || bad {
+            continue;
+        }
+        let other_read = code.iter().enumerate().any(|(idx, instrs)| {
+            idx != entry && block_reads_before_kill(&mut factory, instrs, canon)
+        });
+        if !other_read {
+            out.insert(pos);
+        }
+    }
+    out
+}
+
+/// Tells whether `instrs` reads `canon` before overwriting it or calling.
+fn block_reads_before_kill(
+    factory: &mut InstructionInfoFactory,
+    instrs: &[Instruction],
+    canon: Register,
+) -> bool {
+    for instr in instrs {
+        let info = factory.info(instr);
+        if info.used_registers().iter().any(|u| {
+            lift::canon(u.register(), 64) == canon
+                && matches!(u.access(), OpAccess::Read | OpAccess::ReadWrite)
+        }) {
+            return true;
+        }
+        if info.used_registers().iter().any(|u| {
+            lift::canon(u.register(), 64) == canon
+                && u.register().size() >= 4
+                && u.access() == OpAccess::Write
+        }) || instr.mnemonic() == Mnemonic::Call
+        {
+            return false;
+        }
+    }
+    false
 }
 
 /// The width in bytes of the float an instruction's memory operand is.

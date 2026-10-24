@@ -146,6 +146,8 @@ struct Handed {
     /// nothing after it on the way to the `ret` reads the value back: no
     /// compare, store or copy took it as scratch.
     bare: bool,
+    /// Some path is a dedicated immediate-return block (`mov eax, imm; jmp/ret`).
+    const_exit: bool,
     /// The direct callees whose result some path hands back, by a call
     /// before a `ret` or by a jump into them, sorted.
     calls: Vec<u64>,
@@ -164,6 +166,7 @@ impl Handed {
         nothing: false,
         own: false,
         bare: false,
+        const_exit: false,
         calls: Vec::new(),
         unknown: true,
         float_bits: Vec::new(),
@@ -350,7 +353,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
             } else if f.sites.iter().any(|site| matches!(site, Site::Unknown)) {
                 Some(true)
             } else {
-                (!(h.bare && h.calls.is_empty() && !h.unknown)).then_some(false)
+                (!(h.bare && (h.calls.is_empty() || h.const_exit) && !h.unknown)).then_some(false)
             }
         })
         .collect();
@@ -635,6 +638,11 @@ fn handed_back(
             Scan::Wrote(Writer::Own(bits), later) => {
                 out.own = true;
                 out.bare |= !(read || later);
+                out.const_exit |= !(read || later)
+                    && rest.len() <= 2
+                    && rest
+                        .first()
+                        .is_some_and(|i| i.mnemonic() == Mnemonic::Mov && is_imm(i.op1_kind()));
                 out.float_bits.extend(bits);
             }
             Scan::Idle => out.nothing = true,
@@ -1261,15 +1269,15 @@ fn produces_nothing(
     let declared = |j: usize| {
         analysis
             .functions
-            .get(j)
-            .and_then(|f| f.signature.as_ref())
+            .get(j)?
+            .signature
+            .as_ref()
             .map(|s| s.ret == "void")
     };
-    let open: Vec<bool> = facts
-        .iter()
-        .zip(read)
-        .zip(floats)
-        .map(|((facts, &read), float)| !read && !facts.preserves && float.is_none())
+    let open: Vec<bool> = (0..facts.len())
+        .map(|i| {
+            !read[i] && (!facts[i].preserves || !handed[i].calls.is_empty()) && floats[i].is_none()
+        })
         .collect();
     let mut nothing: Vec<bool> = open
         .iter()

@@ -1555,9 +1555,14 @@ pub(crate) fn infer_returns(program: &Program, analysis: &mut Analysis) {
                 };
                 if let Some(l) = last_write(&i) {
                     in_block = Some(l);
-                    any.push(l);
+                    if l == Last::Int {
+                        any.push(l);
+                    }
                 }
                 va = i.next();
+            }
+            if b.term != BlockTerm::Call {
+                any.extend(in_block);
             }
             if b.term == BlockTerm::Ret {
                 at_return.extend(in_block);

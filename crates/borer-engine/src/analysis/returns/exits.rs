@@ -119,6 +119,17 @@ fn closing_nop(i: &Instruction) -> bool {
 fn unwinds(i: &Instruction) -> bool {
     match i.mnemonic() {
         Mnemonic::Leave | Mnemonic::Pop => true,
+        Mnemonic::Mov
+            if i.op0_kind() == OpKind::Register
+                && i.op1_kind() == OpKind::Memory
+                && matches!(i.memory_base(), Register::RBP | Register::EBP)
+                && matches!(
+                    i.op0_register().full_register(),
+                    Register::RBX | Register::R12 | Register::R13 | Register::R14 | Register::R15
+                ) =>
+        {
+            true
+        }
         Mnemonic::Mov | Mnemonic::Add | Mnemonic::Lea => {
             i.op0_kind() == OpKind::Register && i.op0_register().full_register() == Register::RSP
         }

@@ -21,6 +21,7 @@ use crate::program::BinaryFormat;
 /// Whether any local declaration changed.
 pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> bool {
     let mut ptrs: Vec<(String, &'static str)> = Vec::new();
+    let mut arrays: Vec<(String, u64)> = Vec::new();
     let mut bools: Vec<String> = Vec::new();
     for line in lines.iter() {
         if line.contains("//") {
@@ -32,10 +33,12 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
             .and_then(|r| r.strip_suffix(';'))
         {
             for name in names.split(", ").map(str::trim) {
-                if name.starts_with("local_")
-                    && let Some(ty) = local_api_pointer(lines, name)
-                {
-                    ptrs.push((name.to_owned(), ty));
+                if name.starts_with("local_") {
+                    if let Some(ty) = local_api_pointer(lines, name) {
+                        ptrs.push((name.to_owned(), ty));
+                    } else if let Some(span) = byte_buffer_local_span(lines, name) {
+                        arrays.push((name.to_owned(), span));
+                    }
                 }
             }
         } else if let Some(names) = line
@@ -49,6 +52,7 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
             }
         }
     }
+    let sig_changed = propagate_char_ptr_params(lines, &ptrs);
     for line in lines.iter() {
         if line.contains("//") {
             continue;
@@ -63,18 +67,36 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
         for name in names.split(", ").map(str::trim) {
             if name.starts_with("local_")
                 && !ptrs.iter().any(|(n, _)| n == name)
-                && let Some(ty) = local_copy_pointer(lines, name, &ptrs)
+                && !arrays.iter().any(|(n, _)| n == name)
+                && let Some(ty) = local_copy_pointer(lines, name, &ptrs).or_else(|| {
+                    sig_changed
+                        .then(|| local_api_pointer(lines, name))
+                        .flatten()
+                })
             {
                 ptrs.push((name.to_owned(), ty));
             }
         }
     }
-    if ptrs.is_empty() && bools.is_empty() {
-        return false;
+    if ptrs.is_empty() && arrays.is_empty() && bools.is_empty() {
+        return sig_changed;
     }
+    rewrite_local_declarations(lines, &ptrs, &arrays, &bools);
+    true
+}
+
+/// Replaces refined local variable names in declaration lines and splices their
+/// new declarations directly after the last modified declaration line.
+fn rewrite_local_declarations(
+    lines: &mut Vec<String>,
+    ptrs: &[(String, &'static str)],
+    arrays: &[(String, u64)],
+    bools: &[String],
+) {
     let taken: BTreeSet<&str> = ptrs
         .iter()
         .map(|(n, _)| n.as_str())
+        .chain(arrays.iter().map(|(n, _)| n.as_str()))
         .chain(bools.iter().map(String::as_str))
         .collect();
     let mut at = None;
@@ -103,6 +125,11 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
         let mut added: Vec<String> = ptrs
             .iter()
             .map(|(name, ty)| format!("{ty} {name};"))
+            .chain(
+                arrays
+                    .iter()
+                    .map(|(name, span)| format!("uint8_t {name}[{span}];")),
+            )
             .collect();
         if !bools.is_empty() {
             added.push(format!("bool {};", bools.join(", ")));
@@ -110,7 +137,117 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
         lines.splice(i + 1..i + 1, added);
     }
     lines.retain(|l| l != "\u{0}");
-    true
+}
+
+/// Retypes an untyped word parameter in `// signature:` to `char *` when it is
+/// copied into a `char*` stack local and only used in byte-offset sums.
+fn propagate_char_ptr_params(lines: &mut [String], ptrs: &[(String, &'static str)]) -> bool {
+    let Some(sig_idx) = lines.iter().position(|l| l.starts_with("// signature: ")) else {
+        return false;
+    };
+    let mut changed = false;
+    for (local, ty) in ptrs {
+        if *ty != "char*" {
+            continue;
+        }
+        let prefix = format!("{local} = ");
+        let Some(param) = lines.iter().find_map(|l| {
+            let p = l.trim().strip_prefix(&prefix)?.strip_suffix(';')?;
+            is_param_name(p).then(|| p.to_owned())
+        }) else {
+            continue;
+        };
+        if assigned_values(lines, &param) > 0 {
+            continue;
+        }
+        let copy_stmt = format!("{local} = {param};");
+        let valid_uses = lines
+            .iter()
+            .filter(|l| !l.starts_with("//") && !is_declaration(l))
+            .all(|l| {
+                if l.trim() == copy_stmt {
+                    return true;
+                }
+                word_positions(l, &param).into_iter().all(|at| {
+                    let head = l.get(..at).unwrap_or("");
+                    let tail = l.get(at + param.len()..).unwrap_or("");
+                    cast_before(head).is_none()
+                        && (head.ends_with(" + ") || tail.starts_with(" + "))
+                })
+            });
+        if !valid_uses {
+            continue;
+        }
+        for word in ["uint64_t ", "uint32_t "] {
+            for suf in [",", ")"] {
+                let old = format!("{word}{param}{suf}");
+                if lines[sig_idx].contains(&old) {
+                    lines[sig_idx] = lines[sig_idx].replace(&old, &format!("char *{param}{suf}"));
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Returns the stack byte span of `name` when it is an address-only stack buffer
+/// passed to a call alongside a buffer length fitting its stack span.
+fn byte_buffer_local_span(lines: &[String], name: &str) -> Option<u64> {
+    let base = name
+        .strip_prefix("local_")
+        .and_then(|s| u64::from_str_radix(s, 16).ok())?;
+    let top = lines
+        .iter()
+        .filter(|l| is_declaration(l))
+        .flat_map(|l| {
+            l.trim_end_matches(';')
+                .split_once(' ')
+                .map_or("", |(_, names)| names)
+                .split(", ")
+                .filter_map(|n| {
+                    n.trim()
+                        .trim_start_matches('*')
+                        .split('[')
+                        .next()?
+                        .strip_prefix("local_")
+                        .and_then(|s| u64::from_str_radix(s, 16).ok())
+                })
+        })
+        .filter(|&d| d < base)
+        .max()
+        .unwrap_or(0);
+    let span = base.saturating_sub(top);
+    if span < 16 {
+        return None;
+    }
+    let mut sized_call = false;
+    let mut seen = false;
+    for line in lines
+        .iter()
+        .filter(|l| !l.starts_with("//") && !is_declaration(l))
+    {
+        for at in word_positions(line, name) {
+            seen = true;
+            let head = line.get(..at).unwrap_or("");
+            let tail = line.get(at + name.len()..).unwrap_or("");
+            let before_amp = head.strip_suffix('&')?;
+            if !(before_amp.ends_with('(') || before_amp.ends_with(", "))
+                || !(tail.starts_with(", ") || tail.starts_with(')'))
+            {
+                return None;
+            }
+            if let Some(arg) = tail
+                .strip_prefix(", ")
+                .and_then(|r| r.split([',', ')']).next())
+                && let Some(n) = parse_const(arg.trim())
+                && (16..=span).contains(&n)
+            {
+                sized_call = true;
+            }
+        }
+    }
+    (seen && sized_call).then_some(span)
 }
 
 /// The library pointer type (`char*`, `FILE*`, `struct group*`,
@@ -122,14 +259,18 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
 /// * `lines` - The function, header lines included.
 /// * `name` - The stack local's name.
 fn local_api_pointer(lines: &[String], name: &str) -> Option<&'static str> {
-    if lines
-        .iter()
-        .any(|l| !l.starts_with("//") && l.contains(&format!("&{name}")))
-    {
-        return None;
-    }
     let mut found: Option<&'static str> = None;
     let mut byte_step = false;
+    let amp = format!("&{name}");
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        if line.contains(&amp) {
+            if line.contains("acl_get_entry(") && line.contains(&format!(", &{name})")) {
+                found = Some("acl_entry_t");
+            } else {
+                return None;
+            }
+        }
+    }
     for (before, line) in lines
         .iter()
         .enumerate()
@@ -152,10 +293,32 @@ fn local_api_pointer(lines: &[String], name: &str) -> Option<&'static str> {
         {
             return None;
         }
+        for part in line
+            .trim()
+            .strip_prefix("for (")
+            .and_then(|s| s.strip_suffix(") {"))
+            .into_iter()
+            .flat_map(|s| s.split("; "))
+        {
+            if let Some((lhs, rhs)) = part.split_once(" = ")
+                && lhs.trim() == name
+                && !check_chain_write(lines, name, rhs.trim(), before, &mut found, &mut byte_step)
+            {
+                return None;
+            }
+        }
         for at in word_positions(line, name) {
             let head = line.get(..at).unwrap_or("");
             let tail = line.get(at + name.len()..).unwrap_or("");
+            if head.ends_with('&') && line.contains("acl_get_entry(") {
+                continue;
+            }
             if is_chain_write && (tail.starts_with(" = ") || head.ends_with(" = ")) {
+                continue;
+            }
+            if (head.trim_end().ends_with("for (") || head.ends_with("; "))
+                && tail.starts_with(" = ")
+            {
                 continue;
             }
             if !check_pointer_read(
@@ -171,6 +334,16 @@ fn local_api_pointer(lines: &[String], name: &str) -> Option<&'static str> {
                 return None;
             }
         }
+    }
+    if found.is_none()
+        && byte_step
+        && lines.iter().any(|l| {
+            !l.starts_with("//")
+                && (l.contains(&format!("*(uint8_t*){name}"))
+                    || l.contains(&format!("*(int8_t*){name}")))
+        })
+    {
+        found = Some("char*");
     }
     found.filter(|&f| !byte_step || f == "char*")
 }
@@ -202,14 +375,40 @@ fn check_pointer_read(
     found: &mut Option<&'static str>,
     byte_step: &mut bool,
 ) -> bool {
-    if head.ends_with(" = ") && tail.starts_with(" + ") {
+    if head.ends_with(" = ") && (tail.starts_with(" + ") || tail.starts_with(" - ")) {
+        *byte_step = true;
+        return true;
+    }
+    if (head.ends_with("*(uint8_t*)(") || head.ends_with("*(int8_t*)("))
+        && (tail.starts_with(" + ") || tail.starts_with(" - "))
+    {
         *byte_step = true;
         return true;
     }
     if head.trim().is_empty()
         && let Some(rest) = tail.strip_prefix(" += ")
         && let Some(rhs) = rest.trim().strip_suffix(';')
-        && (parse_const(rhs).is_some() || is_ident(rhs) || rhs.starts_with("*(uint8_t*)"))
+        && (parse_const(rhs).is_some()
+            || is_ident(rhs)
+            || rhs.starts_with("*(uint8_t*)")
+            || rhs.contains(" == ")
+            || rhs.contains(" != "))
+    {
+        *byte_step = true;
+        return true;
+    }
+    if head.ends_with("*(uint8_t*)") || head.ends_with("*(int8_t*)") {
+        *byte_step = true;
+        return true;
+    }
+    if tail
+        .strip_prefix(" - ")
+        .and_then(|r| r.split([';', ')', ',']).next())
+        .is_some_and(|rhs| is_ident(rhs.trim()))
+        || head
+            .strip_suffix(" - ")
+            .and_then(|h| h.rsplit(['(', ',', ' ']).next())
+            .is_some_and(|lhs| is_ident(lhs.trim()))
     {
         *byte_step = true;
         return true;
@@ -221,16 +420,13 @@ fn check_pointer_read(
     {
         return false;
     }
-    if head.ends_with("*(uint8_t*)") || head.ends_with("*(int8_t*)") {
-        *byte_step = true;
-        return true;
-    }
     match known_slot(lines, line, at, before) {
         Some(Slot::Narrow(_)) => false,
         Some(Slot::Pointer(t)) => {
             let mapped = match t.as_str() {
                 "char *" => "char*",
-                "FILE *" => "FILE*",
+                "acl_t" => "acl_t",
+                "acl_entry_t" => "acl_entry_t",
                 _ => return false,
             };
             if found.is_some_and(|f| f != mapped) {
@@ -271,7 +467,9 @@ fn check_chain_write(
     found: &mut Option<&'static str>,
     byte_step: &mut bool,
 ) -> bool {
-    if let Some(rest) = rhs.strip_prefix(&format!("{name} + "))
+    if let Some(rest) = rhs
+        .strip_prefix(&format!("{name} + "))
+        .or_else(|| rhs.strip_prefix(&format!("{name} - ")))
         && (parse_const(rest.trim()).is_some() || is_ident(rest.trim()))
     {
         *byte_step = true;
@@ -328,33 +526,44 @@ fn classify_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsTyp
         return RhsType::Known("char*");
     }
     if is_ident(rhs) {
-        for line in lines {
-            if let Some(sig) = line.strip_prefix("// signature: ") {
-                for p in sig.split(['(', ',', ')']).map(str::trim) {
-                    if p == format!("char *{rhs}") || p == format!("const char *{rhs}") {
-                        return RhsType::Known("char*");
-                    }
-                    if p == format!("FILE *{rhs}") {
-                        return RhsType::Known("FILE*");
-                    }
-                    if let Some((ty, n)) = p.rsplit_once(' ')
-                        && n == rhs
-                        && narrow_type(ty.trim()).is_some()
-                    {
-                        return RhsType::NonPointer;
-                    }
-                }
-            }
-        }
-        if let Some(src) = sole_rhs(lines, rhs, before) {
-            return classify_rhs(lines, src, depth + 1, before);
-        }
-        return RhsType::Neutral;
+        return classify_ident_rhs(lines, rhs, depth, before);
+    }
+    if let Some(param) = rhs
+        .strip_suffix("->field_0x0")
+        .or_else(|| rhs.strip_prefix('*'))
+        .filter(|p| is_ident(p))
+        && lines.iter().any(|l| {
+            l.strip_prefix("// signature: ").is_some_and(|sig| {
+                sig.split(['(', ',', ')'])
+                    .map(str::trim)
+                    .any(|p| p == format!("char **{param}") || p == format!("const char **{param}"))
+            })
+        })
+    {
+        return RhsType::Known("char*");
+    }
+    if let Some(base) = rhs
+        .strip_prefix("((uint64_t*)")
+        .and_then(|r| r.split_once(")["))
+        .map(|(b, _)| b)
+        .filter(|b| is_ident(b) && rhs.ends_with(']'))
+        && matches!(
+            classify_ident_rhs(lines, base, depth + 1, before),
+            RhsType::Known("char**")
+        )
+    {
+        return RhsType::Known("char*");
     }
     if l.toks.len() >= 3 && l.is(1, "(") && l.toks[0].lex == Lex::Name && call_is_whole(&l) {
         let callee = l.word(0);
         if matches!(callee, "getlogin" | "ttyname" | "strsignal" | "rawmemchr") {
             return RhsType::Known("char*");
+        }
+        if matches!(
+            callee,
+            "acl_get_file" | "acl_init" | "acl_dup" | "acl_from_text"
+        ) {
+            return RhsType::Known("acl_t");
         }
         let Some(decl) = typelib::declared(callee, BinaryFormat::Elf)
             .or_else(|| typelib::declared(callee, BinaryFormat::Pe))
@@ -363,7 +572,6 @@ fn classify_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsTyp
         };
         return match decl.ret {
             "char *" | "const char *" => RhsType::Known("char*"),
-            "FILE *" => RhsType::Known("FILE*"),
             "void *" => RhsType::Neutral,
             _ => RhsType::NonPointer,
         };
@@ -379,7 +587,168 @@ fn classify_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsTyp
             (RhsType::Neutral, RhsType::Neutral) => RhsType::Neutral,
         };
     }
+    if let Some((a, b)) = rhs.split_once(" + ")
+        && !a.contains('(')
+        && !b.contains(')')
+        && (matches!(
+            classify_rhs(lines, a, depth + 1, before),
+            RhsType::Known("char*")
+        ) || matches!(
+            classify_rhs(lines, b, depth + 1, before),
+            RhsType::Known("char*")
+        ))
+    {
+        return RhsType::Known("char*");
+    }
     RhsType::NonPointer
+}
+
+/// Classifies an identifier right-hand side against signature parameters
+/// and single-assignment definitions.
+fn classify_ident_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsType {
+    for line in lines {
+        if let Some(sig) = line.strip_prefix("// signature: ") {
+            for p in sig.split(['(', ',', ')']).map(str::trim) {
+                if ["char *", "const char *", "uint8_t *", "int8_t *"]
+                    .iter()
+                    .any(|t| p == format!("{t}{rhs}"))
+                {
+                    return RhsType::Known("char*");
+                }
+                if p == format!("void **{rhs}") {
+                    return RhsType::Known("void**");
+                }
+                if p == format!("char **{rhs}") || p == format!("const char **{rhs}") {
+                    return RhsType::Known("char**");
+                }
+                if let Some((ty, n)) = p.rsplit_once(' ')
+                    && n == rhs
+                    && narrow_type(ty.trim()).is_some()
+                {
+                    return RhsType::NonPointer;
+                }
+            }
+        }
+    }
+    if let Some(src) = sole_rhs(lines, rhs, before) {
+        return classify_rhs(lines, src, depth + 1, before);
+    }
+    RhsType::Neutral
+}
+
+/// Tells whether `param`'s layout is a contiguous run of two or more `u64`
+/// fields from offset zero, read as strings or passed to calls.
+pub(super) fn string_pointer_array(lines: &[String], param: &str) -> bool {
+    let prefix = format!("// layout {param}: ");
+    let Some(layout) = lines.iter().find_map(|l| l.strip_prefix(&prefix)) else {
+        return false;
+    };
+    let fields: Vec<&str> = layout.split(", ").collect();
+    if fields.len() < 2 {
+        return false;
+    }
+    let mut any_str = false;
+    for (i, entry) in fields.iter().enumerate() {
+        let off = i * 8;
+        if *entry != format!("0x{off:x} u64") {
+            return false;
+        }
+        let field = format!("{param}->field_0x{off:x}");
+        let is_str = lines.iter().any(|l| {
+            !l.starts_with("//")
+                && (l.contains(&format!("strcmp({field},"))
+                    || l.contains(&format!("strrchr({field},"))
+                    || l.contains(&format!("*(uint8_t*){field}")))
+        });
+        let is_call = lines.iter().any(|l| {
+            !l.starts_with("//")
+                && (l.contains(&format!("({field})")) || l.contains(&format!("({field},")))
+        });
+        if !is_str && !is_call {
+            return false;
+        }
+        any_str |= is_str;
+    }
+    any_str
+}
+
+/// Tells whether `param`'s layout is a single `0x0 u32` field copied to or
+/// from a stack local and never used otherwise.
+pub(super) fn single_field_int_ptr(lines: &[String], param: &str) -> bool {
+    if !lines
+        .iter()
+        .any(|l| l == &format!("// layout {param}: 0x0 u32"))
+    {
+        return false;
+    }
+    let field = format!("{param}->field_0x0");
+    let mut local_copy = false;
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        for at in word_positions(line, param) {
+            if line
+                .get(at + param.len()..)
+                .and_then(|t| t.strip_prefix("->field_0x0"))
+                .is_none_or(|r| r.starts_with(is_ident_char))
+            {
+                return false;
+            }
+        }
+        if let Some((lhs, rhs)) = line
+            .trim()
+            .strip_suffix(';')
+            .and_then(|s| s.split_once(" = "))
+            && ((lhs == field && rhs.starts_with("local_"))
+                || (rhs == field && lhs.starts_with("local_")))
+        {
+            local_copy = true;
+        }
+    }
+    local_copy
+}
+
+/// Tells whether `param`'s layout is a single `0x0 u64` field copied into a
+/// stack local that steps by bytes (`local_N += 1` or `*(uint8_t*)local_N`).
+pub(super) fn single_field_char_ptr_ptr(lines: &[String], param: &str) -> bool {
+    if !lines
+        .iter()
+        .any(|l| l == &format!("// layout {param}: 0x0 u64"))
+    {
+        return false;
+    }
+    let field = format!("{param}->field_0x0");
+    let mut copied_local = None;
+    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+        for at in word_positions(line, param) {
+            if line
+                .get(at + param.len()..)
+                .and_then(|t| t.strip_prefix("->field_0x0"))
+                .is_none_or(|r| r.starts_with(is_ident_char))
+            {
+                return false;
+            }
+        }
+        if let Some((lhs, rhs)) = line
+            .trim()
+            .strip_suffix(';')
+            .and_then(|s| s.split_once(" = "))
+            && rhs == field
+            && lhs.starts_with("local_")
+        {
+            copied_local = Some(lhs.to_owned());
+        }
+    }
+    let Some(local) = copied_local else {
+        return false;
+    };
+    lines.iter().any(|l| {
+        !l.starts_with("//")
+            && (l.contains(&format!("*(uint8_t*){local}"))
+                || l.contains(&format!("*(int8_t*){local}")))
+    }) && lines.iter().any(|l| {
+        !l.starts_with("//")
+            && (l.trim().starts_with(&format!("{local} += "))
+                || l.trim().starts_with(&format!("{local} = {local} + ")))
+    })
 }
 
 /// Splits a top-level ternary expression into its two arms.
@@ -433,8 +802,21 @@ fn local_copy_pointer(
         .filter(|(_, l)| !l.starts_with("//") && !is_declaration(l))
     {
         let stmt = line.trim().strip_suffix(';').unwrap_or("");
-        if let Some((lhs, rhs)) = stmt.split_once(" = ") {
-            if lhs == name {
+        let parts: Vec<&str> = stmt.split(" = ").collect();
+        let is_chain_write = parts.len() >= 2
+            && parts[..parts.len() - 1].iter().all(|p| is_ident(p))
+            && parts[..parts.len() - 1].contains(&name);
+        if is_chain_write {
+            let rhs = parts[parts.len() - 1].trim();
+            if let Some((_, ty)) = parts[..parts.len() - 1]
+                .iter()
+                .find_map(|&lhs| ptrs.iter().find(|(n, _)| n == lhs))
+            {
+                if found.is_some_and(|f| f != *ty) {
+                    return None;
+                }
+                found = Some(*ty);
+            } else {
                 let (base, stepped) = match rhs.split_once(" + ") {
                     Some((b, step)) => {
                         let step = step.trim();
@@ -446,7 +828,7 @@ fn local_copy_pointer(
                         }
                         (b.trim(), true)
                     }
-                    None => (rhs.trim(), false),
+                    None => (rhs, false),
                 };
                 if let Some((_, ty)) = ptrs.iter().find(|(n, _)| n == base) {
                     if found.is_some_and(|f| f != *ty) {
@@ -454,22 +836,29 @@ fn local_copy_pointer(
                     }
                     found = Some(*ty);
                     byte_step |= stepped;
-                } else if !matches!(rhs, "0" | "NULL" | "nullptr") {
+                } else if !matches!(rhs, "0" | "NULL" | "nullptr")
+                    && !matches!(classify_rhs(lines, rhs, 0, before), RhsType::Neutral)
+                {
                     return None;
                 }
-            } else if rhs.split(" + ").next().unwrap_or("") == name
-                && let Some((_, ty)) = ptrs.iter().find(|(n, _)| n == lhs)
-            {
-                if found.is_some_and(|f| f != *ty) {
-                    return None;
-                }
-                found = Some(*ty);
             }
+        } else if let Some((lhs, rhs)) = stmt.split_once(" = ").or_else(|| {
+            line.trim()
+                .strip_prefix("for (")
+                .and_then(|s| s.split_once("; "))
+                .and_then(|(init, _)| init.split_once(" = "))
+        }) && rhs.split(" + ").next().unwrap_or("") == name
+            && let Some((_, ty)) = ptrs.iter().find(|(n, _)| n == lhs)
+        {
+            if found.is_some_and(|f| f != *ty) {
+                return None;
+            }
+            found = Some(*ty);
         }
         for at in word_positions(line, name) {
             let head = line.get(..at).unwrap_or("");
             let tail = line.get(at + name.len()..).unwrap_or("");
-            if head.trim().is_empty() && tail.starts_with(" = ") {
+            if is_chain_write && (tail.starts_with(" = ") || head.ends_with(" = ")) {
                 continue;
             }
             if !check_pointer_read(
@@ -554,7 +943,13 @@ fn is_bool_local(lines: &[String], name: &str) -> bool {
             all_reads_zero_test &= z;
         }
     }
-    (rel_write && (zero || one || reads > 0)) || (zero && one && reads > 0 && all_reads_zero_test)
+    (rel_write && (zero || one || reads > 0))
+        || (zero && one && reads > 0 && all_reads_zero_test)
+        || (!zero
+            && !one
+            && !rel_write
+            && reads == 0
+            && lines.iter().any(|l| l.trim().ends_with(" ^ 1) & 1;")))
 }
 
 /// Tells whether `rhs` is a relational or boolean expression at top level.

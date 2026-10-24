@@ -796,10 +796,11 @@ fn loop_counters<'t>(lines: &[Line<'t>], sole_local: Option<&str>) -> Vec<(&'t s
             format!("--{var}"),
         ];
         let is_sole = Some(var) == sole_local;
-        let arm32_mirror = var
-            .strip_prefix('r')
-            .and_then(|d| d.parse::<u8>().ok())
-            .is_some_and(|idx| idx <= 7)
+        let arm32_mirror = (is_var_name(var)
+            || var
+                .strip_prefix('r')
+                .and_then(|d| d.parse::<u8>().ok())
+                .is_some_and(|idx| idx <= 7))
             && rhs.starts_with("local_")
             && *step == *init;
         let stepped = (is_var_name(var) || is_sole) && steps.iter().any(|s| s == step);

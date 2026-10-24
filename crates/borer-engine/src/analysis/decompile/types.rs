@@ -1268,7 +1268,8 @@ fn slot_size(ty: &str) -> u64 {
 ///
 /// * `name` - A variable name.
 fn slot_offset(name: &str) -> Option<u64> {
-    u64::from_str_radix(name.strip_prefix("local_")?, 16).ok()
+    let base = name.split('[').next()?;
+    u64::from_str_radix(base.strip_prefix("local_")?, 16).ok()
 }
 
 /// The names the text reads through `&name` at an offset it computes: an
@@ -2263,7 +2264,10 @@ pub(super) fn is_declaration(line: &str) -> bool {
         && !t.contains('(')
         && t.split_once(' ').is_some_and(|(head, _)| {
             narrow_type(head).is_some()
-                || matches!(head, "uint64_t" | "uint128_t" | "float" | "double")
+                || matches!(
+                    head,
+                    "uint64_t" | "uint128_t" | "float" | "double" | "acl_t" | "acl_entry_t"
+                )
         })
 }
 

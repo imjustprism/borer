@@ -296,12 +296,18 @@ fn counted_do_const(lines: &mut Vec<String>, k: usize) -> bool {
     if pad != 0 || indent_of(head) != pad || head.trim() != "do {" {
         return false;
     }
-    let Some((v, "0")) =
+    let Some((v, start)) =
         plain_assignment(init).filter(|(lhs, _)| is_register_name(lhs) || vars::is_var_name(lhs))
     else {
         return false;
     };
+    let start_val = parse_const(start);
+    let start_addr = start.starts_with('&') && is_ident(start.get(1..).unwrap_or(""));
+    if start_val.is_none() && !start_addr {
+        return false;
+    }
     let v = v.to_owned();
+    let start = start.to_owned();
     let Some(latch) = closing(lines, k + 1, pad) else {
         return false;
     };
@@ -312,11 +318,14 @@ fn counted_do_const(lines: &mut Vec<String>, k: usize) -> bool {
     else {
         return false;
     };
-    let bound_ok = cond
+    let Some(bound_val) = cond
         .strip_prefix(&format!("{v} != "))
         .or_else(|| cond.strip_prefix(&format!("(uint32_t){v} != ")))
         .and_then(parse_const)
-        .is_some_and(|c| c > 0 && (c & 0xffff_ffff) != 0);
+    else {
+        return false;
+    };
+    let bound_ok = bound_val > 0 && (bound_val & 0xffff_ffff) != 0;
     let body = lines.get(k + 2..latch).unwrap_or(&[]);
     if !bound_ok
         || body.is_empty()
@@ -329,25 +338,62 @@ fn counted_do_const(lines: &mut Vec<String>, k: usize) -> bool {
     {
         return false;
     }
-    let Some(inc) = body.last().and_then(|l| {
-        if indent_of(l) != pad + 2 {
-            return None;
-        }
-        let s = l.trim().strip_suffix(';')?;
-        let inc = s
-            .strip_prefix(&format!("{v} += "))
-            .or_else(|| s.strip_prefix(&format!("{v} = {v} + ")))?;
-        parse_const(inc).filter(|&c| c > 0)?;
-        Some(inc.to_owned())
-    }) else {
+    let Some((step_idx, inc, inc_val)) = find_do_const_step(body, pad, &v) else {
         return false;
     };
+    let start_ok = match start_val {
+        Some(0) => true,
+        Some(sv) => {
+            sv >= 0x1000 && bound_val > sv && (bound_val - sv) % inc_val == 0 && inc_val == 4
+        }
+        None => start_addr && inc_val == 4,
+    };
+    if !start_ok {
+        return false;
+    }
     let pad_s = " ".repeat(pad);
-    let mut rewritten = vec![format!("{pad_s}for ({v} = 0; {cond}; {v} += {inc}) {{")];
-    rewritten.extend(body.get(..body.len() - 1).unwrap_or(&[]).iter().cloned());
+    let mut rewritten = vec![format!(
+        "{pad_s}for ({v} = {start}; {cond}; {v} += {inc}) {{"
+    )];
+    for (idx, line) in body.iter().enumerate() {
+        if idx != step_idx {
+            rewritten.push(line.clone());
+        }
+    }
     rewritten.push(format!("{pad_s}}}"));
     lines.splice(k..=latch, rewritten);
     true
+}
+
+/// Finds the trailing positive-constant step of `v` in a `do` loop body.
+fn find_do_const_step(body: &[String], pad: usize, v: &str) -> Option<(usize, String, u64)> {
+    (body.len().saturating_sub(2)..body.len())
+        .rev()
+        .find_map(|idx| {
+            let l = body.get(idx)?;
+            if indent_of(l) != pad + 2 {
+                return None;
+            }
+            if idx + 1 < body.len() {
+                let tail = body.last()?;
+                let tail_lhs = plain_assignment(tail)
+                    .or_else(|| tail.trim().strip_suffix(';')?.split_once(" += "))
+                    .map(|(lhs, _)| lhs);
+                let tail_ok = indent_of(tail) == pad + 2
+                    && !mentions_ident(tail, v)
+                    && !impure(tail)
+                    && tail_lhs.is_some_and(|lhs| is_register_name(lhs) || vars::is_var_name(lhs));
+                if !tail_ok {
+                    return None;
+                }
+            }
+            let s = l.trim().strip_suffix(';')?;
+            let inc = s
+                .strip_prefix(&format!("{v} += "))
+                .or_else(|| s.strip_prefix(&format!("{v} = {v} + ")))?;
+            let inc_val = parse_const(inc).filter(|&c| c > 0)?;
+            Some((idx, inc.to_owned(), inc_val))
+        })
 }
 
 /// Rewrites the `v = init; while (C) { B; step }` at line `k` as a `for`.
@@ -365,14 +411,34 @@ fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
         return false;
     };
     let pad = indent_of(init);
-    let Some((v, value)) = plain_assignment(init).filter(|(_, r)| !impure(r)) else {
+    let Some((lhs_chain, value)) = init
+        .trim()
+        .strip_suffix(';')
+        .and_then(|s| s.rsplit_once(" = "))
+    else {
         return false;
     };
+    let (prefix, v) = match lhs_chain.rsplit_once(" = ") {
+        Some((p, v)) => (Some(p.trim().to_owned()), v.trim().to_owned()),
+        None => (None, lhs_chain.trim().to_owned()),
+    };
+    let value = value.trim().to_owned();
+    if !is_ident(&v)
+        || impure(&value)
+        || prefix.as_ref().is_some_and(|p| {
+            !p.split(" = ")
+                .all(|lhs| is_ident(lhs) && !mentions_ident(&value, lhs))
+                || mentions_ident(&value, &v)
+        })
+    {
+        return false;
+    }
     let Some(cond) = head
         .trim()
         .strip_prefix("while (")
         .and_then(|r| r.strip_suffix(") {"))
-        .filter(|c| indent_of(head) == pad && mentions_ident(c, v))
+        .filter(|c| indent_of(head) == pad && mentions_ident(c, &v))
+        .map(str::to_owned)
     else {
         return false;
     };
@@ -386,15 +452,17 @@ fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
     if body.iter().any(|l| is_label(l)) {
         return false;
     }
-    let Some(step) = step_of(body, pad + 2, v) else {
+    let Some(step) = step_of(body, pad + 2, &v).map(str::to_owned) else {
         return false;
     };
     let pad_s = " ".repeat(pad);
-    let rewritten: Vec<String> =
-        std::iter::once(format!("{pad_s}for ({v} = {value}; {cond}; {step}) {{"))
-            .chain(body.get(..body.len() - 1).unwrap_or(&[]).iter().cloned())
-            .chain(std::iter::once(format!("{pad_s}}}")))
-            .collect();
+    let mut rewritten: Vec<String> = Vec::new();
+    if let Some(p) = prefix {
+        rewritten.push(format!("{pad_s}{p} = {value};"));
+    }
+    rewritten.push(format!("{pad_s}for ({v} = {value}; {cond}; {step}) {{"));
+    rewritten.extend(body.get(..body.len() - 1).unwrap_or(&[]).iter().cloned());
+    rewritten.push(format!("{pad_s}}}"));
     lines.splice(k..=close, rewritten);
     true
 }

@@ -125,6 +125,8 @@ pub enum Pass {
     RefoldJumps,
     /// Spells float relations as C operators.
     SpellFloatRelations,
+    /// Normalizes structured control-flow idioms after text passes.
+    NormalizeStructure,
     /// Writes the read-only tables the text indexes.
     InlineTables,
     /// Declares the functions and function tables the text uses
@@ -141,7 +143,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 62] = [
         Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
@@ -198,6 +200,7 @@ impl Pass {
         Self::FloatBitCopies,
         Self::RefoldJumps,
         Self::SpellFloatRelations,
+        Self::NormalizeStructure,
         Self::InlineTables,
         Self::UnitClosure,
         Self::VectorDeclare,
@@ -265,6 +268,7 @@ impl Pass {
             Self::FloatBitCopies => "float_bit_copies",
             Self::RefoldJumps => "refold_jumps",
             Self::SpellFloatRelations => "spell_float_relations",
+            Self::NormalizeStructure => "normalize_structure",
             Self::InlineTables => "inline_tables",
             Self::UnitClosure => "unit::close",
             Self::VectorDeclare => "vector::declare",

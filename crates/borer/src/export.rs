@@ -75,7 +75,7 @@ pub fn write_c(
     out: &str,
     existing: Existing,
 ) -> anyhow::Result<Written> {
-    write_entries(program, analysis, overlay, library, None, out, existing)
+    write_with_set(program, analysis, overlay, library, None, out, existing)
 }
 
 /// Exports the entries in `only`, or every function when `only` is `None`.
@@ -105,14 +105,46 @@ pub fn write_c(
 /// is at `out` and `existing` keeps it.
 pub fn write_entries(
     program: &Program,
-    analysis: &Analysis,
+    analysis: &mut Analysis,
     overlay: &Overlay,
     library: Library,
     only: Option<&[u64]>,
     out: &str,
     existing: Existing,
 ) -> anyhow::Result<Written> {
+    if let Some(entries) = only {
+        for &va in entries {
+            if analysis.function(va).is_none_or(|f| f.entry != va) {
+                let _ = analysis.start_gap_function(program, va);
+            }
+        }
+    }
     let set = only.map(|entries| entries.iter().copied().collect::<BTreeSet<_>>());
+    write_with_set(
+        program,
+        analysis,
+        overlay,
+        library,
+        set.as_ref(),
+        out,
+        existing,
+    )
+}
+
+/// Writes the exported C file for `set` (or every function when `None`).
+///
+/// # Errors
+///
+/// Fails when `out` cannot be created or written, or already exists under [`Existing::Keep`].
+fn write_with_set(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    library: Library,
+    set: Option<&BTreeSet<u64>>,
+    out: &str,
+    existing: Existing,
+) -> anyhow::Result<Written> {
     let path = Path::new(out);
     if let Some(why) = borer_engine::program::unusable_path(path) {
         anyhow::bail!("{why}; nothing was written");
@@ -126,18 +158,11 @@ pub fn write_entries(
     let mut bodies = std::io::BufWriter::new(
         create(part, Existing::Replace).with_context(|| format!("creating {shown}.part"))?,
     );
-    let hoisted = export(
-        program,
-        analysis,
-        overlay,
-        library,
-        set.as_ref(),
-        &mut |text| {
-            bodies
-                .write_all(text.as_bytes())
-                .with_context(|| format!("writing {shown}.part"))
-        },
-    )?;
+    let hoisted = export(program, analysis, overlay, library, set, &mut |text| {
+        bodies
+            .write_all(text.as_bytes())
+            .with_context(|| format!("writing {shown}.part"))
+    })?;
     bodies
         .flush()
         .with_context(|| format!("writing {shown}.part"))?;

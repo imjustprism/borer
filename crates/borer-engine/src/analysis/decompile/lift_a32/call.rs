@@ -262,10 +262,34 @@ impl Lift<'_, '_> {
         let regs = self
             .callee_args(target, reached)
             .unwrap_or_else(|| self.written_since_call(tail));
-        let out: Vec<(ArgAt, Expr)> = regs
+        let mut out: Vec<(ArgAt, Expr)> = regs
             .into_iter()
             .map(|r| (ArgAt::A32(r), self.arg_value(r)))
             .collect();
+        let stack_args = target
+            .and_then(|t| {
+                super::shape::callee_shape(self.ex.ctx, abi::reached(self.ex.ctx.analysis, t))
+            })
+            .map_or(0, |s| i64::from(s.stack));
+        if stack_args > 0
+            && let Some(sp) = self.ex.env.sp
+        {
+            for n in 0..stack_args {
+                let o = sp + 4 * n;
+                let k = Key::Slot(o);
+                if !self.ex.slot_def.contains_key(&o) {
+                    *self.ex.slot_use.entry(o).or_default() = 32;
+                }
+                let v = self
+                    .ex
+                    .env
+                    .vals
+                    .get(&k)
+                    .cloned()
+                    .unwrap_or_else(|| self.ex.env.get(k));
+                out.push((ArgAt::Stack(4 * n, 32), self.ex.assumed(v)));
+            }
+        }
         for (_, e) in &out {
             self.ex.note_escape(e);
         }
@@ -289,6 +313,17 @@ impl Lift<'_, '_> {
         if target.is_none() && through.is_none() {
             return self.unmodeled(i);
         }
+        let stack_args = target
+            .and_then(|t| {
+                super::shape::callee_shape(self.ex.ctx, abi::reached(self.ex.ctx.analysis, t))
+            })
+            .map_or(0, |s| i64::from(s.stack));
+        let stack_arg_slot = |k: &Key| {
+            matches!(
+                (k, self.ex.env.sp),
+                (Key::Slot(o), Some(sp)) if *o >= sp && *o < sp + 4 * stack_args
+            )
+        };
         let dying: Vec<Key> = a32_abi::clobbered().map(Key::A32).collect();
         let outlives: Vec<Key> = self
             .ex
@@ -297,7 +332,7 @@ impl Lift<'_, '_> {
             .iter()
             .filter(|(k, v)| {
                 !dying.contains(k)
-                    && (matches!(k, Key::Slot(_))
+                    && ((!stack_arg_slot(k) && matches!(k, Key::Slot(_)))
                         || v.mem_dependent()
                         || v.any_var(&|x| dying.contains(&x)))
             })

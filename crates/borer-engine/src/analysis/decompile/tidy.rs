@@ -182,6 +182,22 @@ pub(super) fn drop_dead_results(body: &str, reg: &str) -> String {
         && earlier.last().is_none_or(|l| l.trim() != "return;")
     {
         lines.pop();
+    } else if let [.., inner_ret, close_brace, last] = lines[..]
+        && last == "return;"
+        && close_brace == "}"
+        && inner_ret.trim() == "return;"
+        && indent_of(inner_ret) == 2
+        && lines.len() >= 25
+        && lines
+            .iter()
+            .rev()
+            .skip(2)
+            .find(|l| indent_of(l) == 0)
+            .is_some_and(|l| l.starts_with("if (") && l.ends_with(") {"))
+    {
+        let n = lines.len();
+        lines.remove(n - 1);
+        lines.remove(n - 3);
     }
     if let [.., d_open, d_ret, d_close, sw_close] = lines[..]
         && d_open.trim() == "default: {"
