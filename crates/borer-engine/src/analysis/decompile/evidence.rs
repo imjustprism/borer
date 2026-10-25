@@ -772,7 +772,7 @@ fn loop_counters<'t>(lines: &[Line<'t>], sole_local: Option<&str>) -> Vec<(&'t s
         let [init, cond, step] = clauses.as_slice() else {
             continue;
         };
-        let Some((var, rhs)) = init.split_once(" = ") else {
+        let Some((var, _)) = init.split_once(" = ") else {
             continue;
         };
         let steps = [
@@ -784,15 +784,8 @@ fn loop_counters<'t>(lines: &[Line<'t>], sole_local: Option<&str>) -> Vec<(&'t s
             format!("--{var}"),
         ];
         let is_sole = Some(var) == sole_local;
-        let arm32_mirror = (is_var_name(var)
-            || var
-                .strip_prefix('r')
-                .and_then(|d| d.parse::<u8>().ok())
-                .is_some_and(|idx| idx <= 7))
-            && rhs.starts_with("local_")
-            && *step == *init;
         let stepped = (is_var_name(var) || is_sole) && steps.iter().any(|s| s == step);
-        if (!stepped && !arm32_mirror) || word_positions(cond, var).is_empty() {
+        if !stepped || word_positions(cond, var).is_empty() {
             continue;
         }
         let pad = indent_of(l.text);
@@ -803,22 +796,14 @@ fn loop_counters<'t>(lines: &[Line<'t>], sole_local: Option<&str>) -> Vec<(&'t s
         }) else {
             continue;
         };
-        let alone = if arm32_mirror {
-            lines
-                .iter()
-                .enumerate()
-                .filter(|(k, _)| *k != a)
-                .all(|(_, o)| word_positions(o.text, var).is_empty())
-        } else {
-            lines
-                .iter()
-                .enumerate()
-                .filter(|(k, _)| *k < a || *k > b)
-                .all(|(k, o)| {
-                    word_positions(o.text, var).is_empty()
-                        || (is_sole && k == b + 1 && o.text.trim_start().starts_with("return "))
-                })
-        };
+        let alone = lines
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| *k < a || *k > b)
+            .all(|(k, o)| {
+                word_positions(o.text, var).is_empty()
+                    || (is_sole && k == b + 1 && o.text.trim_start().starts_with("return "))
+            });
         if alone {
             loops.push((var, a, b));
         }
@@ -1116,8 +1101,8 @@ HANDLE hProcessHeap;"
         );
     }
 
-    /// A sole `int32_t` loop slot or ARM32 header-only mirror register is
-    /// named `i`.
+    /// A sole `int32_t` loop slot is named `i`; a register that only mirrors
+    /// the real counter in a loop header is not.
     #[test]
     fn sole_slot_counters_are_named() {
         let sole = function(
@@ -1149,10 +1134,6 @@ HANDLE hProcessHeap;"
             ],
         );
         let out_mirror = name_vars(&mirror, 32);
-        assert!(out_mirror.contains("int32_t i;"), "{out_mirror}");
-        assert!(
-            out_mirror.contains("for (i = local_c; i < (int32_t)local_1c; i = local_c) {"),
-            "{out_mirror}"
-        );
+        assert!(!out_mirror.contains("int32_t i;"), "{out_mirror}");
     }
 }
