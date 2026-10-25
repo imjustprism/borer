@@ -13,7 +13,9 @@
 //! it calls, a call cycle in entry order. Library code (a library or pack
 //! signature matched it, or it is a runtime helper) is left out unless
 //! asked for, and an import thunk or a linkage stub always is, being an
-//! import rather than code of the program's own.
+//! import rather than code of the program's own. A function over
+//! [`BUDGET_BLOCKS`] is not decompiled: a comment saying it was cut
+//! stands in its place, and the rest of the file is written whole.
 //!
 //! [`export`] renders a bounded run of functions at a time across the
 //! cores and hands each finished definition to a sink in order, so memory
@@ -47,6 +49,18 @@ const RUN_PER_CORE: usize = 32;
 
 /// Most declarations stated two ways the head of the file names.
 const CONFLICTS_SHOWN: usize = 8;
+
+/// Most basic blocks a function may hold for the export to decompile it.
+///
+/// Decompiling costs far more than linearly in a function's blocks (a
+/// branchy function of 4000 blocks took 4 s, of 8000 blocks 22 s, of 16000
+/// blocks 15 minutes; a straight run of 64000 instructions under half a
+/// second), so one huge function could hold up a whole binary's export.
+/// The bound counts what discovery already measured, never time, so a
+/// binary's file is the same bytes at any thread count. It is about twice
+/// the largest function of the corpus (`notepad.exe`'s `NPInit`, 2197
+/// blocks); `decompile` still writes a cut function alone.
+pub const BUDGET_BLOCKS: usize = 4096;
 
 /// Whether library code goes into the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -220,6 +234,9 @@ pub struct Hoisted {
     pub written: usize,
     /// Functions that did not decompile, written as a comment.
     pub failed: usize,
+    /// Functions over [`BUDGET_BLOCKS`], written as a comment without
+    /// being decompiled.
+    pub cut: usize,
     /// Functions left out ([`left_out`]).
     pub left_out: usize,
 }
@@ -274,6 +291,23 @@ impl Hoisted {
         if self.conflicting.len() < CONFLICTS_SHOWN {
             self.conflicting.push(line.to_owned());
         }
+    }
+
+    /// Writes the comment that stands for a function over
+    /// [`BUDGET_BLOCKS`], which the export does not decompile.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The function's name.
+    /// * `entry` - Its entry.
+    /// * `blocks` - Its basic block count.
+    /// * `out` - Where the comment goes.
+    fn cut(&mut self, name: &str, entry: u64, blocks: usize, out: &mut String) {
+        self.cut += 1;
+        let _ = writeln!(
+            out,
+            "// {name} @ {entry:#x}: cut, not decompiled: its {blocks} blocks are over the export's budget of {BUDGET_BLOCKS} blocks a function; `decompile` writes it alone\n"
+        );
     }
 
     /// Splits one function's finished text: hoists its file-scope
@@ -357,8 +391,16 @@ impl Hoisted {
     /// The text the function definitions follow.
     #[must_use]
     pub fn head(&self, binary: &str) -> String {
+        let cut = if self.cut == 0 {
+            String::new()
+        } else {
+            format!(
+                ", {} cut over the budget of {BUDGET_BLOCKS} blocks a function",
+                self.cut
+            )
+        };
         let mut out = format!(
-            "/* {binary}: {} functions decompiled by borer, leaves first; {} did not decompile, {} library functions and stubs left out.\n   Rough pseudo-C: it says what the binary does, and is not the source it was built from. */\n",
+            "/* {binary}: {} functions decompiled by borer, leaves first; {} did not decompile{cut}, {} library functions and stubs left out.\n   Rough pseudo-C: it says what the binary does, and is not the source it was built from. */\n",
             self.written, self.failed, self.left_out
         );
         out.push_str(PRELUDE);
@@ -549,12 +591,26 @@ pub fn export(
     let run = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .saturating_mul(RUN_PER_CORE);
+    let over = |entry: u64| {
+        analysis
+            .function(entry)
+            .map(|f| f.blocks.len())
+            .filter(|&n| n > BUDGET_BLOCKS)
+    };
     for chunk in entries.chunks(run) {
-        let texts = decompile_named_all(program, analysis, overlay, chunk);
+        let kept: Vec<u64> = chunk
+            .iter()
+            .copied()
+            .filter(|&e| over(e).is_none())
+            .collect();
+        let mut texts = decompile_named_all(program, analysis, overlay, &kept).into_iter();
         let mut out = String::new();
-        for (&entry, text) in chunk.iter().zip(&texts) {
+        for &entry in chunk {
             let name = name_of(analysis, overlay, entry);
-            hoisted.add(&name, entry, text.as_deref(), &mut out);
+            match over(entry) {
+                Some(blocks) => hoisted.cut(&name, entry, blocks, &mut out),
+                None => hoisted.add(&name, entry, texts.next().flatten().as_deref(), &mut out),
+            }
         }
         sink(&out)?;
     }
@@ -563,7 +619,47 @@ pub fn export(
 
 #[cfg(test)]
 mod tests {
-    use super::{BTreeSet, Hoisted, Kind, classify, declared_name};
+    use super::{BTreeSet, BUDGET_BLOCKS, Hoisted, Kind, Library, classify, declared_name, export};
+    use crate::analysis::{Analysis, Overlay};
+    use crate::program::{Arch, Program, Section};
+
+    /// A function over the budget is cut to a comment, and the functions
+    /// around it, its callees, are still written whole.
+    ///
+    /// # Panics
+    ///
+    /// When the large function is decompiled, or a neighbour is not.
+    #[test]
+    fn a_function_over_the_budget_is_cut_and_its_neighbours_written() {
+        let mut code = vec![0xccu8; 0x20];
+        code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 1; ret
+        code[0x10..0x16].copy_from_slice(&[0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 2; ret
+        code.extend([0xe8, 0xdb, 0xff, 0xff, 0xff]); // ASM: call 0x1000
+        code.extend([0xe8, 0xe6, 0xff, 0xff, 0xff]); // ASM: call 0x1010
+        for _ in 0..BUDGET_BLOCKS / 2 + 1 {
+            code.extend([0x85, 0xc0, 0x74, 0x02, 0xff, 0xc1, 0xff, 0xc0]); // ASM: test eax, eax; je +2; inc ecx; inc eax
+        }
+        code.push(0xc3); // ASM: ret
+        let len = u64::try_from(code.len()).expect("a small image");
+        let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+        let p = Program::raw(code, Arch::X86_64, 0, Some(0x1020), vec![text]);
+        let a = Analysis::compute(&p);
+        let mut c = String::new();
+        let h = export(&p, &a, &Overlay::default(), Library::Skip, None, &mut |t| {
+            c.push_str(t);
+            Ok(())
+        })
+        .expect("the sink takes everything");
+        assert_eq!((h.written, h.cut, h.failed), (2, 1, 0), "{c}");
+        let blocks = a.function(0x1020).map_or(0, |f| f.blocks.len());
+        assert!(blocks > BUDGET_BLOCKS);
+        let note = format!("// sub_1020 @ 0x1020: cut, not decompiled: its {blocks} blocks");
+        assert!(c.contains(&note), "{c}");
+        assert!(!c.contains("sub_1020()\n{"), "{c}");
+        assert!(c.contains(" sub_1000()\n{\n  return 1;\n}"), "{c}");
+        assert!(c.contains(" sub_1010()\n{\n  return 2;\n}"), "{c}");
+        assert!(h.head("t").contains("1 cut over the budget"), "{c}");
+    }
 
     /// Each kind of file-scope line names what it declares.
     ///

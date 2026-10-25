@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::Context as _;
-use borer_engine::analysis::decompile::export::{Hoisted, Library, export};
+use borer_engine::analysis::decompile::export::{BUDGET_BLOCKS, Hoisted, Library, export};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::Program;
 use borer_engine::text::short_path;
@@ -37,6 +37,14 @@ impl Written {
     #[must_use]
     pub fn line(&self, out: &str) -> String {
         let h = &self.hoisted;
+        let cut = if h.cut == 0 {
+            String::new()
+        } else {
+            format!(
+                ", {} cut over the budget of {BUDGET_BLOCKS} blocks a function",
+                h.cut
+            )
+        };
         let missed = if self.unmatched.is_empty() {
             String::new()
         } else {
@@ -44,7 +52,7 @@ impl Written {
             format!("; no function starts at {}", list.join(", "))
         };
         format!(
-            "wrote {} functions to {} ({} bytes); {} did not decompile, {} library functions and stubs left out, {} declarations stated two ways kept the first",
+            "wrote {} functions to {} ({} bytes); {} did not decompile{cut}, {} library functions and stubs left out, {} declarations stated two ways kept the first",
             h.written,
             short_path(out),
             self.bytes,
