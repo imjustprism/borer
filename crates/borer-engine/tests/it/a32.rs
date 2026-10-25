@@ -564,6 +564,40 @@ fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
     assert!(after.contains("// signature: uint32_t sub_"), "{after}");
 }
 
+/// `entry_or_gap` answers an address its function's blocks hold with that
+/// function, and starts a function at a gap only in the copy it is handed:
+/// the analysis cloned from is left as it was.
+#[test]
+fn a_gap_is_recovered_into_a_clone_of_the_analysis() {
+    use borer_engine::analysis::{entry_or_gap, in_blocks};
+    let text: [u16; 12] = [
+        0xb510, // ASM: push {r4, lr}
+        0xf000, // ASM: bl 0xe
+        0xf804, // ASM: (bl, second half)
+        0x2000, // ASM: movs r0, #0
+        0xbd10, // ASM: pop {r4, pc}
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0x4770, // ASM: bx lr
+        0xde00, // ASM: udf #0
+        0x2001, // ASM: movs r0, #1
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("gap.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let gap = ELF_TEXT + 0x12;
+    assert!(a.function(gap).is_none());
+    let mut grown = a.clone();
+    assert_eq!(entry_or_gap(&p, &mut grown, ELF_TEXT + 2), Ok(ELF_TEXT));
+    assert_eq!(entry_or_gap(&p, &mut grown, gap | 1), Ok(gap));
+    assert!(in_blocks(&p, &grown, gap, gap));
+    assert!(a.function(gap).is_none());
+    assert_eq!(grown.functions.len(), a.functions.len() + 1);
+}
+
 /// One instruction's encoding in its instruction set.
 #[derive(Debug, Clone, Copy)]
 enum Enc {

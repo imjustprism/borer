@@ -733,6 +733,60 @@ fn function_at_gap(program: &Program, functions: &[Function], va: u64) -> Option
     ok.then_some(w)
 }
 
+/// Returns the entry of the function to decompile for an address, starting
+/// one there when it lies in no discovered function's blocks.
+///
+/// [`Analysis::function_at`] accepts any address in a function's span, but a
+/// gap between its blocks is not that function's code. An address there, or
+/// in no function at all, starts a function when the ARM32 gap walk is clean
+/// ([`Analysis::start_gap_function`]); otherwise the function whose span
+/// holds it answers.
+///
+/// # Arguments
+///
+/// * `program` - The image the analysis was computed from.
+/// * `analysis` - The functions; a recovered one is added in place.
+/// * `va` - The address asked for.
+///
+/// # Returns
+///
+/// The entry of the function to decompile.
+///
+/// # Errors
+///
+/// As [`super::function_entry`], when no function holds `va` and none starts there.
+pub fn entry_or_gap(program: &Program, analysis: &mut Analysis, va: u64) -> Result<u64, String> {
+    let found = super::function_entry(program, analysis, va);
+    if found
+        .as_ref()
+        .is_ok_and(|&entry| in_blocks(program, analysis, entry, va))
+    {
+        return found;
+    }
+    analysis.start_gap_function(program, va).map_or(found, Ok)
+}
+
+/// Tells whether an address lies in one of a function's blocks, not only in
+/// its span.
+///
+/// # Arguments
+///
+/// * `program` - The image. On ARM a Thumb bit on `va` is cleared, the same
+///   way the gap walk clears one.
+/// * `analysis` - The functions.
+/// * `entry` - The function's entry.
+/// * `va` - The address.
+pub fn in_blocks(program: &Program, analysis: &Analysis, entry: u64, va: u64) -> bool {
+    let va = if program.arch == crate::program::Arch::Arm {
+        va & !1
+    } else {
+        va
+    };
+    analysis
+        .function(entry)
+        .is_some_and(|f| f.blocks.iter().any(|b| va >= b.start && va < b.end))
+}
+
 /// Most functions one gap recovery adds, the asked one and the callees it
 /// reaches: a hostile image of chained gaps must not run on unbounded.
 const GAP_CHAIN_MAX: usize = 64;

@@ -7,7 +7,7 @@ use anyhow::{Context as _, bail};
 use borer_engine::analysis::{Analysis, Overlay, decompile, parse_addr, resolve_suggesting};
 use borer_engine::layout::Layout;
 use borer_engine::pack::Packs;
-use borer_engine::program::{Arch, Feature, Program};
+use borer_engine::program::{Feature, Program};
 use borer_engine::text::short_path;
 
 use super::USAGE;
@@ -333,11 +333,8 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     }
     let mut a = s.analysis(Feature::Decompile)?;
     let va = s.resolve(&a, arg(args, 2, "decompile needs an address or name")?)?;
-    let entry = match entry_at(&s.program, &a, va) {
-        Ok(entry) if block_holds(&s.program, &a, entry, va) => entry,
-        Ok(entry) => a.start_gap_function(&s.program, va).unwrap_or(entry),
-        Err(err) => a.start_gap_function(&s.program, va).ok_or(err)?,
-    };
+    let entry =
+        borer_engine::analysis::entry_or_gap(&s.program, &mut a, va).map_err(anyhow::Error::msg)?;
     let raw = std::env::var_os("BORER_RAW").is_some();
     let (o, differs) = if raw {
         (s.overlay.clone(), None)
@@ -366,30 +363,6 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     };
     let text = decompile::with_header(&text, header.as_deref());
     Ok(window(&text, None, offset, limit))
-}
-
-/// Whether `va` lies in a decoded block of the function at `entry`.
-///
-/// [`Analysis::function_at`] accepts any address in the function's
-/// `[start, end)` span. A gap between its blocks is not that function's
-/// code. On ARM a Thumb bit on `va` is cleared, the same way the gap walk
-/// clears one.
-///
-/// # Arguments
-///
-/// * `program` - The image. ARM clears the Thumb bit.
-/// * `analysis` - The functions.
-/// * `entry` - The function [`entry_at`] named.
-/// * `va` - The address asked for.
-fn block_holds(program: &Program, analysis: &Analysis, entry: u64, va: u64) -> bool {
-    let va = if program.arch == Arch::Arm {
-        va & !1
-    } else {
-        va
-    };
-    analysis
-        .function(entry)
-        .is_some_and(|f| f.blocks.iter().any(|b| va >= b.start && va < b.end))
 }
 
 /// Says an engine message's listing hint in the CLI's syntax.

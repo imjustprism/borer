@@ -6,6 +6,7 @@
 //! function of the program bytes: same input, same output, byte-identical.
 
 mod a32;
+pub use a32::{entry_or_gap, in_blocks};
 mod a64;
 pub mod about;
 pub mod anchors;
@@ -842,6 +843,18 @@ impl<K: Hash + Eq + Send + 'static, T: Send + Sync + 'static> Kind for Cells<K, 
     }
 }
 
+impl Clone for Derived {
+    /// Returns an empty store with the same item budget: every result is
+    /// built again, byte for byte, when it is asked for.
+    fn clone(&self) -> Self {
+        let fresh = Self::default();
+        fresh
+            .budget
+            .store(self.budget.load(Ordering::Relaxed), Ordering::Relaxed);
+        fresh
+    }
+}
+
 impl std::fmt::Debug for Derived {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let held: usize = self
@@ -1266,7 +1279,11 @@ fn in_force(overlay: &Overlay) -> [u64; 4] {
 }
 
 /// Derived analysis results: computed once per [`Program`] and shared.
-#[derive(Debug, Default)]
+///
+/// A clone holds the same facts and an empty [`Derived`], which builds each
+/// result again when asked: a copy to change, such as one a recovered
+/// function is added to ([`Analysis::start_gap_function`]).
+#[derive(Debug, Default, Clone)]
 pub struct Analysis {
     /// Functions sorted by entry address.
     pub functions: Vec<Function>,
@@ -1363,7 +1380,7 @@ pub struct Analysis {
 /// references, jump tables. These come from the class model a C++
 /// program carries (constructors, vtables, RTTI) and the registrations an
 /// engine's conventions add on top of it, which packs name ([`crate::pack`]).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ClassFacts {
     /// Classes whose constructors were found, by qualified name
     /// ([`vtables`]).

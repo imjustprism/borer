@@ -255,6 +255,9 @@ impl BorerServer {
     /// analysis is kept only when the program it was computed for is still
     /// the one loaded, checked under the program's lock, which
     /// `load_binary` takes to replace the program and drop its analysis.
+    /// When another request stored an analysis of the same program first,
+    /// that one is kept and returned, so a function it recovered
+    /// ([`Self::decompile_entry`]) is not dropped.
     ///
     /// # Errors
     ///
@@ -274,7 +277,11 @@ impl BorerServer {
             .as_ref()
             .is_some_and(|now| Arc::ptr_eq(now, &program))
         {
-            *write_lock(&self.analysis) = Some(a.clone());
+            let mut slot = write_lock(&self.analysis);
+            if let Some(kept) = slot.as_ref() {
+                return Ok(Arc::clone(kept));
+            }
+            *slot = Some(a.clone());
         }
         Ok(a)
     }
@@ -467,6 +474,68 @@ impl BorerServer {
             &self.overlay(),
             text,
         )
+    }
+
+    /// Resolves an argument to the function to decompile, starting one at an
+    /// ARM32 address no discovered function's blocks hold.
+    ///
+    /// The analysis is shared, so a recovered function goes into a copy of
+    /// it ([`borer_engine::analysis::entry_or_gap`]) that replaces the stored
+    /// one. Recoveries run one at a time under the analysis's write lock and
+    /// start from the analysis stored then, so one recovered by a request
+    /// that ran first is kept; the program cannot change meanwhile, as the
+    /// tool body holds its read lock. A request already holding the old
+    /// analysis keeps it. The code index `grep` reads is built from what
+    /// discovery found ([`crate::index::load_or_build`]), as the CLI's is, so
+    /// it does not hold a function recovered here.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The loaded program.
+    /// * `a` - Its analysis.
+    /// * `text` - Address or name (see [`Self::addr`]).
+    ///
+    /// # Returns
+    ///
+    /// The analysis that holds the function, and the function's entry.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::function_entry`], when no function holds the address and
+    /// none starts there.
+    pub(crate) fn decompile_entry(
+        &self,
+        p: &Program,
+        a: Arc<Analysis>,
+        text: &str,
+    ) -> Result<(Arc<Analysis>, u64), String> {
+        let va = self.addr(p, text)?;
+        let held = borer_engine::analysis::function_entry(p, &a, va)
+            .ok()
+            .filter(|&e| borer_engine::analysis::in_blocks(p, &a, e, va));
+        if let Some(entry) = held {
+            return Ok((a, entry));
+        }
+        if p.arch == borer_engine::program::Arch::Arm {
+            let mut slot = write_lock(&self.analysis);
+            let base = slot.clone().unwrap_or_else(|| Arc::clone(&a));
+            let held = borer_engine::analysis::function_entry(p, &base, va)
+                .ok()
+                .filter(|&e| borer_engine::analysis::in_blocks(p, &base, e, va));
+            if let Some(entry) = held {
+                return Ok((base, entry));
+            }
+            let mut grown = (*base).clone();
+            if let Ok(entry) = borer_engine::analysis::entry_or_gap(p, &mut grown, va)
+                && grown.functions.len() > base.functions.len()
+            {
+                let grown = Arc::new(grown);
+                *slot = Some(Arc::clone(&grown));
+                return Ok((grown, entry));
+            }
+        }
+        let entry = self.function_entry(p, &a, text)?;
+        Ok((a, entry))
     }
 
     /// Resolves an argument to the entry of the discovered function containing it.

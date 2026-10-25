@@ -268,8 +268,7 @@ impl BorerServer {
             if let Some(why) = p.refuses(Feature::Decompile) {
                 return Err(why);
             }
-            let a = self.ensure_analysis()?;
-            let entry = self.function_entry(p, &a, &address)?;
+            let (a, entry) = self.decompile_entry(p, self.ensure_analysis()?, &address)?;
             let (o, differs) = render::answered_flagged(p, &a, &self.overlay(), entry);
             let header = decompile_header(p, &a, &o, entry, differs.as_deref());
             let text = decompile::decompile_named(p, &a, &o, entry)
