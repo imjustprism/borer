@@ -247,17 +247,33 @@ impl Graph {
     /// # Returns
     ///
     /// Where each node now leads: itself, or the first node past its chain
-    /// of single steps (a chain that cycles stops on the cycle).
+    /// of single steps. A chain that cycles stops on the cycle's lowest
+    /// node, so every chain into one cycle (a `b .` hang reached through
+    /// a label) stops on the same node.
     fn compress(&mut self) -> Vec<u32> {
         let n = self.nodes.len();
+        let one = |g: &Graph, x: u32| match g.node(NodeIx(x)) {
+            Some(Node::Go(to)) if to.len() == 1 => to.first().copied(),
+            _ => None,
+        };
         let past = |g: &Graph, mut x: u32| {
             for _ in 0..n {
-                match g.node(NodeIx(x)).unwrap_or(&Node::Halt) {
-                    Node::Go(to) if to.len() == 1 => x = to[0],
+                let Some(y) = one(g, x) else {
+                    return x;
+                };
+                x = y;
+            }
+            let (start, mut low) = (x, x);
+            for _ in 0..n {
+                match one(g, x) {
+                    Some(y) if y != start => {
+                        low = low.min(y);
+                        x = y;
+                    }
                     _ => break,
                 }
             }
-            x
+            low
         };
         let to: Vec<u32> = (0..n)
             .map(|i| past(self, u32::try_from(i).unwrap_or(u32::MAX)))
@@ -1991,5 +2007,35 @@ mod tests {
         assert_eq!(calls_in("return _set_app_type(a1);", &names), vec![k]);
         assert!(calls_in("return my_set_app_type(a1);", &names).is_empty());
         assert!(calls_in("return x__imp__set_app_type(a1);", &names).is_empty());
+    }
+
+    /// Every chain of silent steps into one cycle stops on the same node.
+    ///
+    /// A `b .` hang is a block whose head goes to its jump, which goes back
+    /// to the head. A call before it reached the hang one step before the
+    /// head, so after a fixed count of steps it stopped on the jump while
+    /// the head stopped on itself, and a text going through the hang's
+    /// label read as a place the binary could not be.
+    ///
+    /// # Panics
+    ///
+    /// When the chains stop apart.
+    #[test]
+    fn chains_into_one_cycle_stop_on_one_node() {
+        let mut g = Graph::default();
+        let jump = g.add(Node::Halt, 0);
+        let head = g.add(Node::Go(vec![jump]), 0);
+        g.set_go(NodeIx(jump), vec![head]);
+        let into = g.add(Node::Go(vec![head]), 0);
+        let call = g.add(Node::Call(Callee::Named(0), into), 0);
+        let to = g.compress();
+        let at = |x: u32| to.get(NodeIx(x).pos()).copied();
+        assert_eq!(at(head), Some(jump));
+        assert_eq!(at(jump), Some(jump));
+        assert_eq!(at(into), Some(jump));
+        assert_eq!(
+            g.node(NodeIx(call)),
+            Some(&Node::Call(Callee::Named(0), jump))
+        );
     }
 }
