@@ -835,13 +835,11 @@ fn preassigned_if_else(lines: &mut Vec<String>, k: usize) -> bool {
         return false;
     };
     let pad_s = " ".repeat(pad);
-    let word_or_ptr =
-        |ty: &str| matches!(ty, "uint64_t" | "int64_t" | "uintptr_t") || ty.ends_with('*');
     let same_width = (vars::is_var_name(&v) || is_register_name(&v))
         && (is_param_name(&init) || vars::is_var_name(&init) || is_register_name(&init))
         && decl_type(lines, &v)
             .zip(decl_type(lines, &init))
-            .is_some_and(|(tv, ti)| tv == ti || (word_or_ptr(&tv) && word_or_ptr(&ti)));
+            .is_some_and(|(tv, ti)| tv == ti && !matches!(tv.as_str(), "float" | "double"));
     if close == k + 3
         && is_ident(&init)
         && cond == format!("{init} != 0")
@@ -2045,6 +2043,10 @@ return 0;
         );
         let narrow_call = "// signature: uint64_t f(uint64_t a2)\nuint8_t local_8;\n\nlocal_8 = a2;\nif (a2 != 0) {\n  local_8 = sub_1(local_8);\n}\nreturn local_8;\n";
         assert_eq!(select_statements(narrow_call), narrow_call);
+        let pointer_call = "// signature: uint64_t f(uint64_t a2)\nchar *var1;\n\nvar1 = a2;\nif (a2 != 0) {\n  var1 = sub_1(var1);\n}\nreturn var1;\n";
+        assert_eq!(select_statements(pointer_call), pointer_call);
+        let float_call = "// signature: double f(double a2)\ndouble var1;\n\nvar1 = a2;\nif (a2 != 0) {\n  var1 = sub_1(var1);\n}\nreturn var1;\n";
+        assert_eq!(select_statements(float_call), float_call);
         let shared_ret =
             "if (a1 == 0) {\n  sub_1(a2);\n  return var1;\n}\nsub_2(a2);\nreturn var1;\n";
         assert_eq!(
