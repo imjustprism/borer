@@ -10,7 +10,6 @@ use crate::program::Program;
 
 mod callfmt;
 mod selects;
-mod structure_norm;
 
 /// The text passes every decompile ends with.
 ///
@@ -134,10 +133,7 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::FloatBitReads, text, float_bit_reads);
     let text = skip.apply(Pass::FloatBitCopies, text, float_bit_copies);
     let text = skip.apply(Pass::RefoldJumps, text, refold_jumps);
-    let text = skip.apply(Pass::SpellFloatRelations, text, spell_float_relations);
-    skip.apply(Pass::NormalizeStructure, text, |t| {
-        structure_norm::normalize_structure(t.to_owned())
-    })
+    skip.apply(Pass::SpellFloatRelations, text, spell_float_relations)
 }
 
 /// Finishes a body for the tools.
