@@ -387,6 +387,37 @@ fn find_do_const_step(body: &[String], pad: usize, v: &str) -> Option<(usize, St
         })
 }
 
+/// Splits a loop counter's initialization, `a = b = v = value;`, into the
+/// earlier targets (`a = b`), the counter and its value.
+///
+/// A chain whose value reads any of its own targets is refused: rewritten
+/// apart, `rax = rcx = rax + 1;` would give `rcx` the new `rax` plus one.
+///
+/// # Arguments
+///
+/// * `init` - The initialization line.
+///
+/// # Returns
+///
+/// The earlier targets (if any), the counter and its value, or `None` for
+/// a line that is no pure assignment chain of names.
+fn counter_init(init: &str) -> Option<(Option<String>, String, String)> {
+    let (chain, value) = init.trim().strip_suffix(';')?.rsplit_once(" = ")?;
+    let value = value.trim().to_owned();
+    let (prefix, v) = match chain.rsplit_once(" = ") {
+        Some((p, v)) => (Some(p.trim().to_owned()), v.trim().to_owned()),
+        None => (None, chain.trim().to_owned()),
+    };
+    let clean = is_ident(&v)
+        && !impure(&value)
+        && prefix.as_ref().is_none_or(|p| {
+            !mentions_ident(&value, &v)
+                && p.split(" = ")
+                    .all(|lhs| is_ident(lhs) && !mentions_ident(&value, lhs))
+        });
+    clean.then_some((prefix, v, value))
+}
+
 /// Rewrites the `v = init; while (C) { B; step }` at line `k` as a `for`.
 ///
 /// # Arguments
@@ -402,28 +433,9 @@ fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
         return false;
     };
     let pad = indent_of(init);
-    let Some((lhs_chain, value)) = init
-        .trim()
-        .strip_suffix(';')
-        .and_then(|s| s.rsplit_once(" = "))
-    else {
+    let Some((prefix, v, value)) = counter_init(init) else {
         return false;
     };
-    let (prefix, v) = match lhs_chain.rsplit_once(" = ") {
-        Some((p, v)) => (Some(p.trim().to_owned()), v.trim().to_owned()),
-        None => (None, lhs_chain.trim().to_owned()),
-    };
-    let value = value.trim().to_owned();
-    if !is_ident(&v)
-        || impure(&value)
-        || prefix.as_ref().is_some_and(|p| {
-            !p.split(" = ")
-                .all(|lhs| is_ident(lhs) && !mentions_ident(&value, lhs))
-                || mentions_ident(&value, &v)
-        })
-    {
-        return false;
-    }
     let Some(cond) = head
         .trim()
         .strip_prefix("while (")
@@ -480,26 +492,9 @@ fn returning_while(lines: &mut Vec<String>, k: usize) -> bool {
     if indent_of(head) != pad || head.trim() != "while (1) {" {
         return false;
     }
-    let Some((lhs_chain, value)) = init
-        .trim()
-        .strip_suffix(';')
-        .and_then(|s| s.rsplit_once(" = "))
-    else {
+    let Some((prefix, v, value)) = counter_init(init) else {
         return false;
     };
-    let (prefix, v) = match lhs_chain.rsplit_once(" = ") {
-        Some((p, v)) => (Some(p.trim().to_owned()), v.trim().to_owned()),
-        None => (None, lhs_chain.trim().to_owned()),
-    };
-    let value = value.trim().to_owned();
-    if !is_ident(&v)
-        || impure(&value)
-        || prefix
-            .as_ref()
-            .is_some_and(|p| !p.split(" = ").all(is_ident))
-    {
-        return false;
-    }
     let Some(close) =
         closing(lines, k + 1, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
     else {
@@ -959,6 +954,10 @@ mod tests {
             "rcx = 0;\nwhile (rcx < a1) {\n  rax += rcx;\n  L_1:\n  rcx += 1;\n}\nreturn rax;\n";
         assert_eq!(run(labelled), labelled);
         let returning = "rax = rcx = 0;\nwhile (1) {\n  if (rcx >= 7) return 0;\n  if (table[rcx] == a1) {\n    return 0;\n  }\n  sub_1(rcx);\n  rcx = rcx + 1;\n}\n";
+        let reads_itself = "rax = rcx = rax + 1;\nwhile (1) {\n  if (rcx >= 7) return rax;\n  if (table[rcx] == a1) {\n    return rax;\n  }\n  sub_1(rcx);\n  rcx = rcx + 1;\n}\n";
+        assert_eq!(run(reads_itself), reads_itself);
+        let counted_reads_itself = "rax = rcx = rax + 1;\nwhile (rcx < a1) {\n  rbx += rcx;\n  rcx += 1;\n}\nreturn rbx;\n";
+        assert_eq!(run(counted_reads_itself), counted_reads_itself);
         assert_eq!(
             run(returning),
             "rax = 0;\nfor (rcx = 0; rcx < 7; rcx += 1) {\n  if (table[rcx] == a1) {\n    break;\n  }\n  sub_1(rcx);\n}\nreturn 0;\n"
