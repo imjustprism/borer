@@ -119,19 +119,8 @@ pub(super) fn slot_types(
         .collect()
 }
 
-/// Collects the declared stack slots and records a single 64-bit `-16` slot
-/// when a single-block leaf stores only there.
-pub(super) fn collect_slots(
-    declared: &mut BTreeMap<Key, Ty>,
-    single_block_store_neg16: bool,
-) -> Vec<(i64, Ty)> {
-    if single_block_store_neg16
-        && !declared
-            .keys()
-            .any(|k| matches!(k, Key::Slot(o) if *o < -8))
-    {
-        declared.insert(Key::Slot(-16), Ty::U64);
-    }
+/// Returns the declared stack slots, by frame offset, with their types.
+pub(super) fn collect_slots(declared: &BTreeMap<Key, Ty>) -> Vec<(i64, Ty)> {
     declared
         .iter()
         .filter_map(|(k, t)| match k {
@@ -144,40 +133,6 @@ pub(super) fn collect_slots(
             | Key::A32(_) => None,
         })
         .collect()
-}
-
-/// Tells whether a lifted variable or non-overlapping ARM frame home slot
-/// belongs in the header declarations.
-pub(super) fn keep_decl(
-    arch: crate::program::Arch,
-    k: Key,
-    ty: Ty,
-    name: &str,
-    used: &BTreeSet<&str>,
-    names: &Names<'_>,
-    slots: &[(i64, Ty)],
-) -> bool {
-    if used.contains(name) {
-        return true;
-    }
-    let Key::Slot(o) = k else {
-        return false;
-    };
-    let local_slots = slots.iter().filter(|(o2, _)| *o2 < -8).count();
-    if local_slots == 1
-        && ((o == -9 && ty == Ty::U8 && used.contains("strcmp") && used.contains("0xff"))
-            || (o == -16 && ty == Ty::U64 && used.len() == 2 && used.contains("169")))
-    {
-        return true;
-    }
-    arch == crate::program::Arch::Arm
-        && o < -8
-        && slots.iter().any(|(o2, _)| {
-            *o2 < -8 && names.stack_param(*o2).is_none() && used.contains(names.slot(*o2).as_str())
-        })
-        && !slots
-            .iter()
-            .any(|(o2, t2)| *o2 != o && overlaps(o, ty.bits(), *o2, t2.bits()))
 }
 
 /// The typed pointers among a function's parameters and locals, with the

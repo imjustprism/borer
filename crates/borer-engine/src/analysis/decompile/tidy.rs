@@ -187,7 +187,6 @@ pub(super) fn drop_dead_results(body: &str, reg: &str) -> String {
         && close_brace == "}"
         && inner_ret.trim() == "return;"
         && indent_of(inner_ret) == 2
-        && lines.len() >= 25
         && lines
             .iter()
             .rev()

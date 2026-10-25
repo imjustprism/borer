@@ -536,12 +536,7 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
         .iter()
         .filter_map(|l| {
             plain_assignment(l)
-                .filter(|(v, r)| {
-                    indent_of(l) == pad + 2
-                        && private(lines, v)
-                        && (!impure(r)
-                            || (*r == "__errno_location()" && word_positions(&b, v).len() == 1))
-                })
+                .filter(|(v, r)| indent_of(l) == pad + 2 && private(lines, v) && !impure(r))
                 .map(|(v, r)| (v.to_owned(), r.to_owned()))
         })
         .collect();
@@ -571,9 +566,9 @@ fn and_chain(lines: &mut Vec<String>, k: usize) -> bool {
         return false;
     }
     let b = temps.iter().rev().fold(b, |b, (v, r)| {
-        let simple = r == "__errno_location()"
-            || r.chars()
-                .all(|c| is_ident_char(c) || c == '-' || c == '>' || c == '.');
+        let simple = r
+            .chars()
+            .all(|c| is_ident_char(c) || c == '-' || c == '>' || c == '.');
         rename_word(&b, v, &if simple { r.clone() } else { format!("({r})") })
     });
     let pad_s = " ".repeat(pad);

@@ -442,7 +442,6 @@ pub(super) fn apply_layouts(text: &str) -> String {
         if counts.get(base).copied().unwrap_or(0) < LAYOUT_MIN
             || assigned.get(base).copied().unwrap_or(0) > 1
             || matches!(*base, "gs" | "fs")
-            || is_single_offset_mmio_param(&lines, base, offsets.len())
         {
             continue;
         }
@@ -525,15 +524,6 @@ pub(super) fn apply_layouts(text: &str) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
-}
-
-/// Tells whether `base` is `a1` accessed at a single offset in a `void`
-/// function with no stack locals.
-fn is_single_offset_mmio_param(lines: &[String], base: &str, offsets_len: usize) -> bool {
-    base == "a1"
-        && offsets_len == 1
-        && !lines.iter().any(|l| l.contains("local_"))
-        && lines.iter().any(|l| l.starts_with("// signature: void "))
 }
 
 /// Counts assignments to identifiers in one trimmed line, including `for (` headers.

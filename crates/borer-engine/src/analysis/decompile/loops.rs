@@ -301,11 +301,9 @@ fn counted_do_const(lines: &mut Vec<String>, k: usize) -> bool {
     else {
         return false;
     };
-    let start_val = parse_const(start);
-    let start_addr = start.starts_with('&') && is_ident(start.get(1..).unwrap_or(""));
-    if start_val.is_none() && !start_addr {
+    let Some(start_val) = parse_const(start) else {
         return false;
-    }
+    };
     let v = v.to_owned();
     let start = start.to_owned();
     let Some(latch) = closing(lines, k + 1, pad) else {
@@ -341,14 +339,7 @@ fn counted_do_const(lines: &mut Vec<String>, k: usize) -> bool {
     let Some((step_idx, inc, inc_val)) = find_do_const_step(body, pad, &v) else {
         return false;
     };
-    let start_ok = match start_val {
-        Some(0) => true,
-        Some(sv) => {
-            sv >= 0x1000 && bound_val > sv && (bound_val - sv) % inc_val == 0 && inc_val == 4
-        }
-        None => start_addr && inc_val == 4,
-    };
-    if !start_ok {
+    if inc_val == 0 || bound_val <= start_val || (bound_val - start_val) % inc_val != 0 {
         return false;
     }
     let pad_s = " ".repeat(pad);

@@ -2274,13 +2274,7 @@ fn decompile_in<L: Lifter>(
         );
     }
     let used: BTreeSet<&str> = tokens(&body).collect();
-    let slots = declared::collect_slots(
-        &mut ctx.declared,
-        n == 1
-            && recorded
-                .first()
-                .is_some_and(|r| r.stores.get(&-16) == Some(&64)),
-    );
+    let slots = declared::collect_slots(&ctx.declared);
     let mut by_type: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
     let result_typed = typed_results(&body, &ctx.result_types);
@@ -2290,7 +2284,7 @@ fn decompile_in<L: Lifter>(
             continue;
         }
         let name = names.key(*k);
-        if !declared::keep_decl(program.arch, *k, *ty, &name, &used, &names, &slots) {
+        if !used.contains(name.as_str()) {
             continue;
         }
         if let Key::Slot(o) = k {

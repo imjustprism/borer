@@ -948,13 +948,7 @@ fn is_bool_local(lines: &[String], name: &str) -> bool {
             all_reads_zero_test &= z;
         }
     }
-    (rel_write && (zero || one || reads > 0))
-        || (zero && one && reads > 0 && all_reads_zero_test)
-        || (!zero
-            && !one
-            && !rel_write
-            && reads == 0
-            && lines.iter().any(|l| l.trim().ends_with(" ^ 1) & 1;")))
+    (rel_write && (zero || one || reads > 0)) || (zero && one && reads > 0 && all_reads_zero_test)
 }
 
 /// Tells whether `rhs` is a relational or boolean expression at top level.

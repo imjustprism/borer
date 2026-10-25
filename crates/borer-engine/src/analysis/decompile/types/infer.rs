@@ -66,7 +66,6 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             (is_param_name(name) || named_signed).then(|| (ty, name.to_owned()))
         })
         .collect();
-    let param_count = params.len();
     for (declared, param) in params {
         let bytes = matches!(declared.as_str(), "void *" | "uint8_t *");
         let untyped_word = declared == word || declared == "uint32_t";
@@ -86,11 +85,7 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             retype(&mut lines[sig], &declared, &param, ptr);
             continue;
         }
-        if param == "a1" && is_mmio_base_param(&lines, &declared) {
-            retype(&mut lines[sig], &declared, &param, "uint32_t");
-            continue;
-        }
-        let narrow_copy = narrow_param_override(&lines, param_count, &declared, &param);
+        let narrow_copy = narrow_param_override(&lines, &declared, &param);
         let signed_word = (declared == "uint32_t"
             && word == "uint64_t"
             && !lines
@@ -180,90 +175,21 @@ fn retype_pointer_param(
         return Some("uint8_t *");
     }
     if stack_copy_ptr {
-        if let Some(p) = pointed_at(lines, param)
-            .filter(|&p| matches!(p, "uint8_t *" | "float *" | "double *" | "void *"))
-        {
-            return Some(p);
-        }
-        if param == "a1"
-            && assigned_values(lines, param) == 0
-            && lines.iter().filter(|l| !l.starts_with("//")).any(|l| {
-                l.split_once(&format!("({param} + "))
-                    .and_then(|(_, r)| r.split([',', ')']).next())
-                    .and_then(|s| parse_const(s.trim()))
-                    .is_some_and(|n| (8..FIELD_OFFSET_MAX).contains(&n) && n % 4 == 0)
-            })
-        {
-            return Some("void *");
-        }
+        return pointed_at(lines, param)
+            .filter(|&p| matches!(p, "uint8_t *" | "float *" | "double *" | "void *"));
     }
     None
 }
 
-/// Tells whether `a1` (`void *`, `uint32_t`, or `uint32_t *`) is a 32-bit MMIO
-/// peripheral base address in a `void` leaf function on a 32-bit ARM target.
-fn is_mmio_base_param(lines: &[String], declared: &str) -> bool {
-    if !matches!(declared, "void *" | "uint32_t" | "uint32_t *")
-        || !lines.iter().any(|l| l.starts_with("// signature: void "))
-        || !lines.iter().any(|l| {
-            is_declaration(l)
-                && (!word_positions(l, "r2").is_empty() || !word_positions(l, "r3").is_empty())
-        })
-        || lines.iter().any(|l| l.contains("local_"))
-    {
-        return false;
-    }
-    let mut offsets = BTreeSet::new();
-    let mut bit_op = false;
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
-        if is_declaration(line) {
-            continue;
-        }
-        if line.contains(" | ")
-            || line.contains(" & ")
-            || line.contains(" |= ")
-            || line.contains(" &= ")
-        {
-            bit_op = true;
-        }
-        for at in word_positions(line, "a1") {
-            let head = line.get(..at).unwrap_or("");
-            let tail = line.get(at + 2..).unwrap_or("");
-            if head.ends_with("*(uint32_t*)") {
-                offsets.insert(0u64);
-            } else if head.ends_with("*(uint32_t*)(")
-                && let Some(rest) = tail.strip_prefix(" + ")
-                && let Some(end) = rest.find(')')
-                && let Some(off) = parse_const(&rest[..end])
-                && off <= 0x2c
-                && off % 4 == 0
-            {
-                offsets.insert(off);
-            } else {
-                return false;
-            }
-        }
-    }
-    bit_op && offsets.len() == 1
-}
-
-/// Checks whether a `uint32_t` parameter in a multi-parameter function has
-/// uses proving it a narrower integer (`uint8_t`, `uint16_t`, `int8_t`, `int16_t`).
-fn narrow_param_override(
-    lines: &[String],
-    param_count: usize,
-    declared: &str,
-    param: &str,
-) -> Option<&'static str> {
-    if param_count <= 1 || declared != "uint32_t" {
+/// Checks whether a `uint32_t` parameter that is copied has uses proving it a
+/// narrower integer (`uint8_t`, `uint16_t`, `int8_t`, `int16_t`).
+fn narrow_param_override(lines: &[String], declared: &str, param: &str) -> Option<&'static str> {
+    if declared != "uint32_t" {
         return None;
     }
     let t = inferred_type(lines, param)?;
-    if !matches!(t, "uint8_t" | "uint16_t" | "int8_t" | "int16_t") {
-        return None;
-    }
-    let has_narrow_local = lines.iter().any(|l| l.starts_with(&format!("{t} local_")));
-    (!copies(lines, param).is_empty() || has_narrow_local).then_some(t)
+    (matches!(t, "uint8_t" | "uint16_t" | "int8_t" | "int16_t") && !copies(lines, param).is_empty())
+        .then_some(t)
 }
 
 /// Drops from a 32-bit signature the word after each `double` parameter
@@ -884,7 +810,7 @@ fn assigned_width(lines: &[String], head: &str, tail: &str) -> Option<&'static s
         return Some("uint8_t");
     }
     if ((!paren && tail.trim_start().starts_with(';'))
-        || (dest.starts_with('g') && is_offset_stmt_tail(tail, paren)))
+        || (global_name(lines, dest) && is_offset_stmt_tail(tail, paren)))
         && let Some(w) = declared_scalar(lines, dest)
     {
         return Some(w);

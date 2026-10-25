@@ -219,7 +219,6 @@ fn retype(text: &str, word: u8) -> Option<String> {
     if found.is_empty() {
         return None;
     }
-    let has_setlocale = p.body.iter().any(|l| l.contains("setlocale("));
     let mut refused: BTreeSet<&str> = BTreeSet::new();
     for t in &p.body {
         let l = Line {
@@ -238,12 +237,8 @@ fn retype(text: &str, word: u8) -> Option<String> {
             if k == 0 && def.is_some_and(|(v, _)| v == w) {
                 let ret = def
                     .and_then(|(_, rhs)| rhs.split_once('('))
-                    .and_then(|(callee, _)| any_decl(callee).map(|(d, _)| (callee, d.ret)))
-                    .and_then(|(callee, r)| {
-                        (VOID_POINTERS.contains(&r)
-                            || (has_setlocale && matches!(callee, "setlocale" | "strdup")))
-                        .then_some(r)
-                    });
+                    .and_then(|(callee, _)| any_decl(callee).map(|(d, _)| d.ret))
+                    .filter(|r| VOID_POINTERS.contains(r));
                 match (ret, found.get(w).copied().flatten()) {
                     (Some(r), None) => {
                         found.insert(w, Some(r));
@@ -653,7 +648,6 @@ fn rename(text: &str) -> Option<String> {
 /// * `lines` - The body's lines.
 /// * `offer` - Takes a variable, the evidence's rank and the name.
 fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, Rank, &str)) {
-    let has_setlocale = lines.iter().any(|l| l.text.contains("setlocale("));
     let handles: BTreeSet<&str> = decls
         .iter()
         .filter_map(|d| declaration(d))
@@ -668,9 +662,7 @@ fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, 
             let Some((callee, i, _)) = argument_of(l, k) else {
                 continue;
             };
-            if !(has_setlocale && callee == "strdup")
-                && let Some(param) = decl(callee).and_then(|d| d.params.get(i))
-            {
+            if let Some(param) = decl(callee).and_then(|d| d.params.get(i)) {
                 offer(w, Rank::Param, param.name);
             }
             if any_decl(callee)
@@ -691,11 +683,7 @@ fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, 
             && let Some((callee, _)) = rhs.split_once('(')
             && let Some((d, _)) = any_decl(callee)
         {
-            if has_setlocale && callee == "setlocale" {
-                offer(var, Rank::Param, "old_locale");
-            } else if has_setlocale && callee == "strdup" {
-                offer(var, Rank::Param, "saved_locale");
-            } else if d.ret == STREAM {
+            if d.ret == STREAM {
                 offer(var, Rank::Type, "fp");
             } else if d.ret == "HANDLE" && handles.contains(var) {
                 offer(var, Rank::Type, &handle_name(callee));
@@ -1128,27 +1116,10 @@ HANDLE hProcessHeap;"
         );
     }
 
-    /// A `setlocale` result and its `strdup` copy take `char*` and the
-    /// locale names, and a sole `int32_t` loop slot or ARM32 header-only
-    /// mirror register is named `i`.
+    /// A sole `int32_t` loop slot or ARM32 header-only mirror register is
+    /// named `i`.
     #[test]
-    fn locale_holders_and_sole_slot_counters_are_named() {
-        let locale = function(
-            &["uint64_t var1, var2;"],
-            &[
-                "var1 = setlocale(6, 0);",
-                "var2 = strdup(var1);",
-                "setlocale(6, var2);",
-                "free(var2);",
-                "return 0;",
-            ],
-        );
-        let out = name_vars(&locale, WORD);
-        assert!(out.contains("char* old_locale;"), "{out}");
-        assert!(out.contains("char* saved_locale;"), "{out}");
-        assert!(out.contains("old_locale = setlocale(6, NULL);"), "{out}");
-        assert!(out.contains("saved_locale = strdup(old_locale);"), "{out}");
-
+    fn sole_slot_counters_are_named() {
         let sole = function(
             &["int32_t local_c;"],
             &[
