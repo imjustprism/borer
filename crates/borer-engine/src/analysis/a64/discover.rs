@@ -48,11 +48,14 @@ use crate::analysis::{
 };
 use crate::fxmap::FxHashSet;
 use crate::isa::a64::{self, Flow, Insn, Mode, Op, Opnd};
-use crate::num::from_usize;
+use crate::num::{from_usize, lo32};
 use crate::program::{Program, SymbolKind};
 
 /// Bytes from one instruction to the next: [`a64::INSN_LEN`].
 const STEP: u64 = 4;
+/// Most instructions read back from a call for the status it passes
+/// ([`Known::exits_with_status`]).
+const STATUS_RUN_MAX: usize = 32;
 /// Most instructions one walk from a fact decodes: a quarter of a million,
 /// past any function a compiler emits, so a walk through a sled of
 /// hostile words ends.
@@ -148,6 +151,9 @@ struct Known<'a> {
     import_slots: &'a FxHashSet<u64>,
     /// The slots of the imports named as never returning.
     noreturn_slots: &'a FxHashSet<u64>,
+    /// Where calls reach glibc's `error`, which never returns for a nonzero
+    /// status ([`crate::analysis::functions::helpers::status_exits`]).
+    status_exits: &'a FxHashSet<u64>,
     /// Function starts known when the wave began.
     starts: &'a FxHashSet<u64>,
     /// Functions known never to return when the wave began.
@@ -262,6 +268,95 @@ impl Known<'_> {
             .is_some_and(|s| self.noreturn_slots.contains(&s))
     }
 
+    /// Tells whether the call `insn` never returns.
+    ///
+    /// Its callee is known never to return, it reaches an import named so
+    /// ([`Known::noreturn_import`]), or glibc's `error` with a nonzero
+    /// status ([`Known::exits_with_status`]). The last is tentative: the
+    /// call and the addresses a way in would break it at go to
+    /// `status_ends` until the walk has every branch ([`reopen`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `insn` - The call.
+    /// * `callee` - Its direct target in the code, when it has one.
+    /// * `seen` - The addresses the walk decoded so far.
+    /// * `followed` - The branch targets inside the function so far.
+    /// * `status_ends` - The calls ended for their status so far.
+    fn call_ends(
+        &self,
+        insn: &Insn,
+        callee: Option<u64>,
+        seen: &FxHashSet<u64>,
+        followed: &BTreeSet<u64>,
+        status_ends: &mut Vec<(u64, Vec<u64>)>,
+    ) -> bool {
+        if callee.is_some_and(|t| self.noreturn.contains(&t))
+            || self.noreturn_import(insn, insn.target())
+        {
+            return true;
+        }
+        let Some(ways) = self.exits_with_status(insn, seen, followed) else {
+            return false;
+        };
+        status_ends.push((insn.va, ways));
+        true
+    }
+
+    /// Reads whether the call `insn` reaches glibc's `error` (or
+    /// `error_at_line`) with a nonzero status in `w0`.
+    ///
+    /// The callee is the import a stub at its target loads, or the slot its
+    /// register was loaded from, never a function the program defines. The
+    /// walk back follows the straight line the walk decoded before the
+    /// call to the last write of `x0`, which must be a `movz` whose low 32
+    /// bits, the `int` status, are not zero ([`refs::constant_in`]); a
+    /// branch target on the way is a way in. Anything else stays a call
+    /// that returns.
+    ///
+    /// # Arguments
+    ///
+    /// * `insn` - The call.
+    /// * `seen` - The addresses the walk decoded so far.
+    /// * `followed` - The branch targets inside the function so far.
+    ///
+    /// # Returns
+    ///
+    /// The addresses from the call back to just past the write, where a
+    /// branch found later would be a way in; `None` when the call returns.
+    fn exits_with_status(
+        &self,
+        insn: &Insn,
+        seen: &FxHashSet<u64>,
+        followed: &BTreeSet<u64>,
+    ) -> Option<Vec<u64>> {
+        if self.status_exits.is_empty() {
+            return None;
+        }
+        let hit = |s: u64| self.status_exits.contains(&s);
+        let reaches = insn.target().map_or_else(
+            || stubs::slot_call(self.text, insn).is_some_and(hit),
+            |t| stubs::slot(self.text, t).is_some_and(hit),
+        );
+        let mut ways = Vec::new();
+        let mut at = insn.va;
+        while reaches && ways.len() < STATUS_RUN_MAX && !followed.contains(&at) {
+            ways.push(at);
+            let p = at.checked_sub(STEP).filter(|p| seen.contains(p))?;
+            let prev = self
+                .text
+                .word(p)
+                .map(|w| a64::decode(w, p))
+                .filter(|i| i.flow == Flow::Next)?;
+            if refs::writes(&prev) & 1 != 0 {
+                let status = refs::constant_in(&[prev], 0);
+                return status.filter(|&v| lo32(v) != 0).map(|_| ways);
+            }
+            at = p;
+        }
+        None
+    }
+
     /// Tells whether a branch from the function at `entry` to `t` leaves
     /// it: `t` is a known start or a stub after an import, lies outside the
     /// extent the file declares for the function, or, where it declares
@@ -293,6 +388,30 @@ enum Jump {
     /// which a function that shrink-wraps its frame also does before
     /// jumping back to the tail its other paths share.
     Unless,
+}
+
+/// Takes back the first call ended for its status that a branch found
+/// since enters on the way from the status to the call.
+///
+/// The walk asks each time its queue runs dry, so the calls still ended
+/// when it finishes were checked against every branch of the function;
+/// each call is taken back at most once, so the asking ends.
+///
+/// # Arguments
+///
+/// * `status_ends` - The calls ended for their status, each with the
+///   addresses a way in breaks it at ([`Known::exits_with_status`]).
+/// * `followed` - The branch targets inside the function so far.
+///
+/// # Returns
+///
+/// The address after the call taken back, for the walk to follow.
+fn reopen(status_ends: &mut Vec<(u64, Vec<u64>)>, followed: &BTreeSet<u64>) -> Option<(u64, Via)> {
+    let at = status_ends
+        .iter()
+        .position(|(_, ways)| ways.iter().any(|w| followed.contains(w)))?;
+    let (call, _) = status_ends.remove(at);
+    Some((call.wrapping_add(STEP), Via::Fall))
 }
 
 /// How a pending address was reached.
@@ -427,6 +546,7 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
     let mut after_calls: BTreeSet<u64> = BTreeSet::new();
     let mut found_noreturn: BTreeSet<u64> = BTreeSet::new();
     let mut unless_reached: Vec<u64> = Vec::new();
+    let mut ends: Vec<(u64, Vec<u64>)> = Vec::new();
     let (mut junk, mut terminated, mut fell_into_start, mut bad_entry, mut overlong) =
         (false, false, false, false, false);
     let mut enters_covered = false;
@@ -434,7 +554,7 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
     let mut tables: Vec<Table> = Vec::new();
     let mut rounds = 0;
     loop {
-        while let Some((va, via)) = pending.pop() {
+        while let Some((va, via)) = pending.pop().or_else(|| reopen(&mut ends, &followed)) {
             if seen.contains(&va) {
                 continue;
             }
@@ -524,9 +644,7 @@ fn walk(known: &Known<'_>, entry: u64, cap: u64, guess: bool) -> Walked {
                     if next != entry && known.start_at(next) {
                         found_noreturn.extend(callee);
                         terminated = true;
-                    } else if callee.is_some_and(|t| known.noreturn.contains(&t))
-                        || known.noreturn_import(&insn, insn.target())
-                    {
+                    } else if known.call_ends(&insn, callee, &seen, &followed, &mut ends) {
                         terminated = true;
                     } else {
                         followed_calls.extend(callee);
@@ -926,6 +1044,8 @@ struct Discovery<'a> {
     import_slots: &'a FxHashSet<u64>,
     /// The slots of the imports named as never returning.
     noreturn_slots: &'a FxHashSet<u64>,
+    /// Where calls reach glibc's `error` ([`Known::status_exits`]).
+    status_exits: &'a FxHashSet<u64>,
     /// Callees another function's start followed, held until the round
     /// ends ([`Discovery::promote_noreturn`]).
     claimed: BTreeSet<u64>,
@@ -1023,6 +1143,7 @@ impl Discovery<'_> {
                 text,
                 import_slots: self.import_slots,
                 noreturn_slots: self.noreturn_slots,
+                status_exits: self.status_exits,
                 starts: &starts,
                 noreturn: &noreturn,
                 declared: &program.function_ranges,
@@ -1264,6 +1385,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         .filter(|s| is_noreturn_name(bare_name(&crate::search::demangled_name(&s.name))))
         .map(|s| s.addr)
         .collect();
+    let status_exits = crate::analysis::functions::helpers::status_exits(program);
     let throw_sites = crate::lsda::throw_sites(program);
     let pads: BTreeMap<u64, Vec<u64>> = throw_sites
         .iter()
@@ -1278,6 +1400,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         noreturn,
         import_slots: &import_slots,
         noreturn_slots: &noreturn_slots,
+        status_exits: &status_exits,
         claimed: BTreeSet::new(),
         queue: seeds,
         done: FxHashSet::default(),

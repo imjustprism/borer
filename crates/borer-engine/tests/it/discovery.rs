@@ -376,3 +376,96 @@ fn a_bound_check_in_the_block_before_the_dispatch_is_found() {
         "a case is not a block of the function"
     );
 }
+
+/// A call to glibc's `error` with a nonzero constant status ends its path,
+/// and one with status zero, or with a way in past the status, returns.
+///
+/// `error(status, ...)` calls `exit(status)` when `status` is not zero, so
+/// gcc lays unrelated code after `error(1, ...)`: that code is no part of
+/// the caller. `f1` calls through the PLT thunk, `f3` through the GOT
+/// slot; `f2` passes zero, and `f4` jumps straight to its call past the
+/// `mov edi, 1`, so neither status is known nonzero. `f5` calls the
+/// program's own `error`, a reporter that returns: only glibc's import
+/// exits. `f6` reaches its call by falling through `mov edi, 1` or from a
+/// later block that sets `edi` to zero and jumps back to the call, a way
+/// in the walk finds only after the call: its continuation stays.
+#[test]
+fn error_with_a_nonzero_status_ends_its_path() {
+    use borer_engine::analysis::Overlay;
+    use borer_engine::analysis::decompile::decompile;
+    use borer_engine::program::{BinaryFormat, Symbol, SymbolKind};
+    let mut code = vec![0xccu8; 0x110];
+    let mut put = |at: usize, bytes: &[u8]| code[at..at + bytes.len()].copy_from_slice(bytes);
+    put(0x00, &[0xbf, 0x01, 0x00, 0x00, 0x00]); // ASM: f1: mov edi, 1
+    put(0x05, &[0xe8, 0xf6, 0x00, 0x00, 0x00]); // ASM: call error@plt
+    put(0x0a, &[0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 2; ret
+    put(0x20, &[0x31, 0xff]); // ASM: f2: xor edi, edi
+    put(0x22, &[0xe8, 0xd9, 0x00, 0x00, 0x00]); // ASM: call error@plt
+    put(0x27, &[0xb8, 0x03, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 3; ret
+    put(0x40, &[0xbf, 0x02, 0x00, 0x00, 0x00]); // ASM: f3: mov edi, 2
+    put(0x45, &[0xff, 0x15, 0xb5, 0x0f, 0x00, 0x00]); // ASM: call [rip+0xfb5], the GOT slot
+    put(0x4b, &[0xb8, 0x04, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 4; ret
+    put(0x60, &[0x85, 0xf6, 0x75, 0x05]); // ASM: f4: test esi, esi; jne 0x401069
+    put(0x64, &[0xbf, 0x01, 0x00, 0x00, 0x00]); // ASM: mov edi, 1
+    put(0x69, &[0xe8, 0x92, 0x00, 0x00, 0x00]); // ASM: call error@plt
+    put(0x6e, &[0xb8, 0x05, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 5; ret
+    put(0x80, &[0xbf, 0x01, 0x00, 0x00, 0x00]); // ASM: f5: mov edi, 1
+    put(0x85, &[0xe8, 0x16, 0x00, 0x00, 0x00]); // ASM: call 0x4010a0, the local error
+    put(0x8a, &[0xb8, 0x06, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 6; ret
+    put(0xa0, &[0x31, 0xc0, 0xc3]); // ASM: error: xor eax, eax; ret
+    put(0xc0, &[0x85, 0xf6, 0x75, 0x10]); // ASM: f6: test esi, esi; jne 0x4010d4
+    put(0xc4, &[0xbf, 0x01, 0x00, 0x00, 0x00]); // ASM: mov edi, 1
+    put(0xc9, &[0xe8, 0x32, 0x00, 0x00, 0x00]); // ASM: call error@plt
+    put(0xce, &[0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 7; ret
+    put(0xd4, &[0x31, 0xff, 0xeb, 0xf1]); // ASM: xor edi, edi; jmp 0x4010c9
+    put(0x100, &[0xff, 0x25, 0xfa, 0x0e, 0x00, 0x00]); // ASM: error@plt: jmp [rip+0xefa]
+    let mut p = raw::image(Arch::X86_64, &code, &[0u8; 8]);
+    p.format = BinaryFormat::Elf;
+    p.symbols.push(Symbol {
+        name: "error".to_owned(),
+        addr: 0x402000,
+        kind: SymbolKind::Import,
+    });
+    let names = ["f1", "f2", "f3", "f4", "f5", "error", "f6"];
+    for (name, at) in names
+        .into_iter()
+        .zip([0x00, 0x20, 0x40, 0x60, 0x80, 0xa0, 0xc0])
+    {
+        p.symbols.push(Symbol {
+            name: name.to_owned(),
+            addr: TEXT + at,
+            kind: SymbolKind::Local,
+        });
+    }
+    let a = Analysis::compute(&p);
+    let reaches = |entry: u64, va: u64| {
+        a.function(entry)
+            .is_some_and(|f| f.blocks.iter().any(|b| b.start <= va && va < b.end))
+    };
+    assert!(
+        !reaches(TEXT, TEXT + 0x0a),
+        "error(1) by the thunk returned"
+    );
+    assert!(reaches(TEXT + 0x20, TEXT + 0x27), "error(0) did not return");
+    assert!(
+        !reaches(TEXT + 0x40, TEXT + 0x4b),
+        "error(2) by the slot returned"
+    );
+    assert!(
+        reaches(TEXT + 0x60, TEXT + 0x6e),
+        "a way in past the status ended it"
+    );
+    assert!(
+        reaches(TEXT + 0x80, TEXT + 0x8a),
+        "the program's own error(1) ended the path"
+    );
+    assert!(
+        reaches(TEXT + 0xc0, TEXT + 0xce),
+        "a way in found after the call ended it"
+    );
+    let text = |entry| decompile(&p, &a, &Overlay::default(), entry).unwrap_or_default();
+    let f1 = text(TEXT);
+    assert!(!f1.contains("return 2") && !f1.contains("goto"), "{f1}");
+    let f2 = text(TEXT + 0x20);
+    assert!(f2.contains("return 3"), "{f2}");
+}

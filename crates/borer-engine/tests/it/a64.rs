@@ -2149,3 +2149,83 @@ fn hostile_jump_tables_resolve_to_nothing() {
         assert_eq!(shape(&a), shape(&Analysis::compute(&p)));
     }
 }
+
+/// A call to glibc's `error` with `w0` a nonzero constant ends its path on
+/// arm64, and one with `w0` zero, or with a way in past the `mov`,
+/// returns.
+///
+/// `f1` calls through the PLT stub with status 1 and `f3` through the GOT
+/// slot it loads; `f2` passes zero, and `f4` branches straight to its call
+/// past the `mov w0, #1`. `f5` reaches its call by falling through
+/// `mov w0, #1` or from a later block that sets `w0` to zero and branches
+/// back to the call, a way in the walk finds only after the call: its
+/// continuation stays.
+#[test]
+fn error_with_a_nonzero_status_ends_its_path_on_arm64() {
+    let code = [
+        0x5280_0020, // ASM: mov w0, #1 (f1, 0x00)
+        0x9400_000f, // ASM: bl 0x401040
+        0x5280_0040, // ASM: mov w0, #2
+        0xd65f_03c0, // ASM: ret
+        0x5280_0000, // ASM: mov w0, #0 (f2, 0x10)
+        0x9400_000b, // ASM: bl 0x401040
+        0x5280_0060, // ASM: mov w0, #3
+        0xd65f_03c0, // ASM: ret
+        0x5280_0020, // ASM: mov w0, #1 (f3, 0x20)
+        0xb000_0008, // ASM: adrp x8, 0x402000
+        0xf940_0108, // ASM: ldr x8, [x8]
+        0xd63f_0100, // ASM: blr x8
+        0x5280_0080, // ASM: mov w0, #4
+        0xd65f_03c0, // ASM: ret
+        0xd420_0000, // ASM: brk #0
+        0xd420_0000, // ASM: brk #0
+        0xb000_0010, // ASM: adrp x16, 0x402000 (error@plt, 0x40)
+        0xf940_0211, // ASM: ldr x17, [x16]
+        0x9100_0210, // ASM: add x16, x16, #0
+        0xd61f_0220, // ASM: br x17
+        0xb500_0041, // ASM: cbnz x1, 0x401058 (f4, 0x50)
+        0x5280_0020, // ASM: mov w0, #1
+        0x97ff_fffa, // ASM: bl 0x401040
+        0x5280_00a0, // ASM: mov w0, #5
+        0xd65f_03c0, // ASM: ret
+        0xb500_0081, // ASM: cbnz x1, 0x401074 (f5, 0x64)
+        0x5280_0020, // ASM: mov w0, #1
+        0x97ff_fff5, // ASM: bl 0x401040
+        0xd65f_03c0, // ASM: ret
+        0x5280_0000, // ASM: mov w0, #0
+        0x17ff_fffd, // ASM: b 0x40106c
+    ];
+    let mut p = crate::raw::image(Arch::Arm64, &le_words(&code), &[0u8; 8]);
+    p.format = BinaryFormat::Elf;
+    p.symbols.push(Symbol {
+        name: "error".to_owned(),
+        addr: 0x40_2000,
+        kind: SymbolKind::Import,
+    });
+    for (i, at) in [0x00, 0x10, 0x20, 0x50, 0x64].into_iter().enumerate() {
+        p.symbols.push(Symbol {
+            name: format!("f{}", i + 1),
+            addr: TEXT + at,
+            kind: SymbolKind::Local,
+        });
+    }
+    let a = Analysis::compute(&p);
+    let reaches = |entry: u64, va: u64| {
+        a.function(entry)
+            .is_some_and(|f| f.blocks.iter().any(|b| b.start <= va && va < b.end))
+    };
+    assert!(!reaches(TEXT, TEXT + 0x08), "error(1) by the stub returned");
+    assert!(reaches(TEXT + 0x10, TEXT + 0x18), "error(0) did not return");
+    assert!(
+        !reaches(TEXT + 0x20, TEXT + 0x30),
+        "error(1) by the slot returned"
+    );
+    assert!(
+        reaches(TEXT + 0x50, TEXT + 0x5c),
+        "a way in past the status ended it"
+    );
+    assert!(
+        reaches(TEXT + 0x64, TEXT + 0x70),
+        "a way in found after the call ended it"
+    );
+}

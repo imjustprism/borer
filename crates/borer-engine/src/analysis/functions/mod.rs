@@ -45,11 +45,11 @@ pub(super) mod tables;
 mod walk;
 
 use frame::moves_rsp_by_imm;
-use guess::{int3_end, plausible_entry, slot_jump};
+use guess::{int3_end, plausible_entry};
 use helpers::{
     COOKIE_CHECK_INSTRS_MAX, EPILOG_INSTRS_MAX, PANIC_INSTRS_MAX, cookie_check_name,
-    epilog_helper_name, frame_helper_name, is_noreturn_name, panic_helper_name,
-    prints_assert_banner, refcount_helper_name,
+    epilog_helper_name, exits_on_status_name, frame_helper_name, is_noreturn_name,
+    panic_helper_name, prints_assert_banner, refcount_helper_name,
 };
 use seeds::{got_base, mapped_range, pointer_seeds, record_table_refs, reloc_seeds};
 use sets::{AddrSet, Covered};
@@ -201,6 +201,11 @@ struct Recorded {
     /// By the address a near branch names: the last decoded conditional or
     /// unconditional branch to it.
     last_branch_to: FxHashMap<u64, u64>,
+    /// Calls ended for the status they pass glibc's `error`, each with the
+    /// address after it and the addresses between the status and the call,
+    /// held until the walk has all the function's branches
+    /// ([`helpers::exits_with_status`]).
+    status_ends: Vec<(u64, u64, Vec<u64>)>,
 }
 
 /// The records whose instruction falls through to one address.
@@ -497,8 +502,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     let noreturn_slots: FxHashSet<u64> = program
         .symbols
         .iter()
-        .filter(|s| s.kind == crate::program::SymbolKind::Import)
-        .filter(named_noreturn)
+        .filter(|s| s.kind == crate::program::SymbolKind::Import && named_noreturn(s))
         .map(|s| s.addr)
         .collect();
     let import_slots: FxHashSet<u64> = program
@@ -544,6 +548,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         learned_noreturn: BTreeMap::new(),
         noreturn: Arc::new(noreturn),
         noreturn_slots: Arc::new(noreturn_slots),
+        status_exits: Arc::new(helpers::status_exits(program)),
         import_slots,
         claimed_noreturn: BTreeSet::new(),
         handlers: FxHashSet::default(),
@@ -960,6 +965,8 @@ struct Shared {
     noreturn: Arc<AddrSet>,
     /// Import slots of functions that never return.
     noreturn_slots: Arc<FxHashSet<u64>>,
+    /// Where calls reach glibc's `error` ([`helpers::status_exits`]).
+    status_exits: Arc<FxHashSet<u64>>,
     /// Code each function owns that its instructions do not reach, by
     /// entry.
     extra_roots: Arc<FxHashMap<u64, Vec<u64>>>,
@@ -981,6 +988,7 @@ impl Shared {
             starts,
             noreturn: &self.noreturn,
             noreturn_slots: &self.noreturn_slots,
+            status_exits: &self.status_exits,
             extra_roots: &self.extra_roots,
             reloc_sites: self.reloc_sites.as_deref(),
             guessed: &self.guessed,
@@ -1566,8 +1574,9 @@ pub(crate) fn decode_block(program: &Program, bitness: u32, blk: &BasicBlock) ->
 /// what follows it is padding (`int3`, `ud2`, bytes that do not decode,
 /// Rust's `call; ud2` after a panic), another function's entry, or when the
 /// callee, or the import it jumps or calls through, is a function that never
-/// returns by name ([`is_noreturn_name`]) or one discovery found never
-/// returns ([`Analysis::noreturn`]).
+/// returns by name ([`is_noreturn_name`]), one discovery found never
+/// returns ([`Analysis::noreturn`]), or glibc's `error` called with a
+/// nonzero status ([`calls_noreturn`]).
 ///
 /// # Arguments
 ///
@@ -1596,11 +1605,16 @@ pub(crate) fn call_ends_path(program: &Program, analysis: &Analysis, b: &BasicBl
 }
 
 /// Tells whether the last instruction of a block calls a function that
-/// never returns by name.
+/// never returns.
+///
+/// That is one discovery found never returns, one named so
+/// ([`is_noreturn_name`]), or glibc's imported `error` or `error_at_line`
+/// when the block sets the status to a nonzero constant before the call
+/// ([`helpers::sets_nonzero_status`]).
 ///
 /// The callee is a direct one, the import a thunk it reaches jumps
-/// through (past the `endbr64` a CET stub opens with), or the import slot
-/// it calls through.
+/// through, or the import slot it calls through ([`helpers::calls_named`]);
+/// glibc's `error` is only ever an import ([`helpers::calls_import`]).
 ///
 /// # Arguments
 ///
@@ -1609,44 +1623,15 @@ pub(crate) fn call_ends_path(program: &Program, analysis: &Analysis, b: &BasicBl
 /// * `bitness` - 32 or 64.
 /// * `b` - The block.
 fn calls_noreturn(program: &Program, analysis: &Analysis, bitness: u32, b: &BasicBlock) -> bool {
-    let Some(call) = decode_block(program, bitness, b).pop() else {
+    let mut instrs = decode_block(program, bitness, b);
+    let Some(call) = instrs.pop() else {
         return false;
     };
-    let named =
-        |name: &str| is_noreturn_name(super::bare_name(&crate::search::demangled_name(name)));
-    let import = |slot: u64| {
-        program.symbols.iter().any(|s| {
-            s.kind == crate::program::SymbolKind::Import && s.addr == slot && named(&s.name)
-        })
-    };
-    match call.op0_kind() {
-        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
-            let t = call.near_branch_target();
-            analysis.noreturn.contains(&t)
-                || analysis
-                    .function(t)
-                    .filter(|g| g.entry == t)
-                    .and_then(|g| g.name.as_deref())
-                    .is_some_and(named)
-                || decode_at(program, bitness, t)
-                    .and_then(|i| {
-                        if matches!(i.mnemonic(), Mnemonic::Endbr64 | Mnemonic::Endbr32) {
-                            decode_at(program, bitness, i.next_ip())
-                        } else {
-                            Some(i)
-                        }
-                    })
-                    .and_then(|i| slot_jump(&i))
-                    .is_some_and(import)
-        }
-        OpKind::Memory
-            if matches!(call.memory_base(), Register::None | Register::RIP)
-                && call.memory_index() == Register::None =>
-        {
-            import(call.memory_displacement64())
-        }
-        _ => false,
-    }
+    near_target(&call).is_some_and(|t| analysis.noreturn.contains(&t))
+        || helpers::calls_named(program, analysis, bitness, &call, is_noreturn_name)
+        || (program.format == crate::program::BinaryFormat::Elf
+            && helpers::calls_import(program, bitness, &call, exits_on_status_name)
+            && helpers::sets_nonzero_status(program, bitness, &instrs, |_| false))
 }
 
 /// Tells whether an instruction tears the frame down: `pop ebp`, `leave`,

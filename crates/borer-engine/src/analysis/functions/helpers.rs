@@ -2,10 +2,17 @@
 //! frame, epilog, cookie-check, refcount, assert-banner and panic helpers,
 //! and the names of functions that never return.
 
-use super::decode_at;
-use crate::analysis::Function;
-use crate::isa::x86::{ConditionCode, FlowControl, Instruction, Mnemonic, OpKind, Register};
-use crate::program::Program;
+use super::guess::{slot_jump, thunk_slot};
+use super::walk::Via;
+use super::{Cursors, Recorded, decode_at, near_target, straight_line_before};
+use crate::analysis::{Analysis, Function, bare_name, is_imm};
+use crate::fxmap::FxHashSet;
+use crate::isa::x86::{
+    ConditionCode, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind,
+    Register,
+};
+use crate::num::lo32;
+use crate::program::{BinaryFormat, Program, SymbolKind};
 
 /// Most instructions in an MSVC epilogue helper: the unlink, the pops, the
 /// frame's release and the return.
@@ -143,6 +150,255 @@ pub(crate) fn is_noreturn_name(name: &str) -> bool {
         || name.starts_with("std::panicking::begin_panic")
         || name.starts_with("std::__throw_")
         || name.ends_with("::unwrap_failed")
+}
+
+/// Bare names of functions that never return when their first argument is
+/// nonzero: glibc's `error` and `error_at_line` call `exit(status)` then.
+const EXIT_ON_STATUS_NAMES: [&str; 2] = ["error", "error_at_line"];
+
+/// Tells whether a (bare, demangled) name is a function that never returns
+/// when its first argument is nonzero ([`EXIT_ON_STATUS_NAMES`]).
+///
+/// # Arguments
+///
+/// * `name` - The name, without a `dll!` prefix.
+pub(super) fn exits_on_status_name(name: &str) -> bool {
+    EXIT_ON_STATUS_NAMES.contains(&name)
+}
+
+/// Returns the import slots of glibc's `error` and `error_at_line`.
+///
+/// Only the imports are glibc's: a function the program defines under
+/// either name is its own reporter, which may well return, so a call to it
+/// stays a call (a statically linked glibc's is missed, not guessed at).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+///
+/// # Returns
+///
+/// The slots, empty for an image other than ELF, where the names are not
+/// glibc's.
+pub(crate) fn status_exits(program: &Program) -> FxHashSet<u64> {
+    if program.format != BinaryFormat::Elf {
+        return FxHashSet::default();
+    }
+    program
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
+        .filter(|s| exits_on_status_name(bare_name(&crate::search::demangled_name(&s.name))))
+        .map(|s| s.addr)
+        .collect()
+}
+
+/// Returns the slot a `call [slot]` reads its target from, with an absolute
+/// or rip-relative operand.
+///
+/// # Arguments
+///
+/// * `call` - The call.
+pub(super) fn call_slot(call: &Instruction) -> Option<u64> {
+    (call.op0_kind() == OpKind::Memory
+        && matches!(call.memory_base(), Register::None | Register::RIP)
+        && call.memory_index() == Register::None)
+        .then(|| call.memory_displacement64())
+}
+
+/// Tells whether the instructions before a call set its first argument
+/// register to a definite nonzero constant.
+///
+/// The last instruction that writes the register decides: a `mov` of an
+/// immediate whose low 32 bits, the `int` status, are not zero. Any other
+/// write, a way in between that write and the call, or no write at all
+/// says no, so an unknown status stays a call that returns.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, for the calling convention.
+/// * `bitness` - 32 or 64.
+/// * `before` - The straight-line run before the call, in order.
+/// * `entered` - Whether control can come in at an address other than
+///   by falling through from the instruction before it; asked of each
+///   address from the call back to the write that decides, in that order.
+pub(super) fn sets_nonzero_status(
+    program: &Program,
+    bitness: u32,
+    before: &[Instruction],
+    mut entered: impl FnMut(u64) -> bool,
+) -> bool {
+    let Some(&first) = crate::analysis::decompile::abi::conv(program, bitness)
+        .args
+        .first()
+    else {
+        return false;
+    };
+    let mut info = InstructionInfoFactory::new();
+    for i in before.iter().rev() {
+        if entered(i.next_ip()) {
+            return false;
+        }
+        let writes = info.info(i).used_registers().iter().any(|u| {
+            u.register().full_register() == first
+                && matches!(
+                    u.access(),
+                    OpAccess::Write
+                        | OpAccess::ReadWrite
+                        | OpAccess::CondWrite
+                        | OpAccess::ReadCondWrite
+                )
+        });
+        if writes {
+            return i.mnemonic() == Mnemonic::Mov
+                && i.op0_kind() == OpKind::Register
+                && is_imm(i.op1_kind())
+                && lo32(i.immediate(1)) != 0;
+        }
+    }
+    false
+}
+
+/// Tells whether a call the walk decodes never returns for its status.
+///
+/// That is a call to glibc's `error` or `error_at_line` with a nonzero
+/// status ([`sets_nonzero_status`]) over the run the walk recorded before
+/// it, where a branch decoded to an address inside the run is a way in.
+/// The callee is the import a thunk it reaches jumps through, or the
+/// import slot it calls through, never a function the program defines.
+/// The answer is tentative: the call waits in [`Recorded::status_ends`]
+/// until the walk has every branch of the function, and
+/// [`Recorded::reopen`] takes it back if one enters the run.
+///
+/// # Arguments
+///
+/// * `cursors` - The walk's decoders.
+/// * `status_exits` - The addresses [`status_exits`] lists.
+/// * `call` - The call.
+/// * `recorded` - What the walk decoded so far.
+pub(super) fn exits_with_status(
+    cursors: &mut Cursors<'_>,
+    status_exits: &FxHashSet<u64>,
+    call: &Instruction,
+    recorded: &mut Recorded,
+) -> bool {
+    if status_exits.is_empty() {
+        return false;
+    }
+    let hit = |a: u64| status_exits.contains(&a);
+    let reaches = match near_target(call) {
+        Some(t) => thunk_slot(cursors, t).is_some_and(hit),
+        None => call_slot(call).is_some_and(hit),
+    };
+    if !reaches {
+        return false;
+    }
+    let (program, bitness) = (cursors.program, cursors.bitness);
+    let before = straight_line_before(program, bitness, call.ip(), recorded);
+    let mut ways = Vec::new();
+    let ends = sets_nonzero_status(program, bitness, &before, |va| {
+        ways.push(va);
+        recorded.last_branch_to.contains_key(&va)
+    });
+    if ends {
+        recorded.status_ends.push((call.ip(), call.next_ip(), ways));
+    }
+    ends
+}
+
+impl Recorded {
+    /// Takes back the first call ended for its status that a branch decoded
+    /// since now enters, between the status and the call.
+    ///
+    /// The walk asks each time its queue runs dry, so the calls still ended
+    /// when it finishes were checked against every branch of the function;
+    /// each call is taken back at most once, so the asking ends.
+    ///
+    /// # Arguments
+    ///
+    /// * `ended` - The call sites the walk ended paths at; the call taken
+    ///   back leaves it.
+    ///
+    /// # Returns
+    ///
+    /// The address after the call taken back, for the walk to follow, or
+    /// `None` when every such call still holds.
+    pub(super) fn reopen(&mut self, ended: &mut Vec<u64>) -> Option<(u64, Via)> {
+        let at = self.status_ends.iter().position(|(_, _, ways)| {
+            ways.iter().any(|w| {
+                self.last_branch_to.contains_key(w)
+                    || self.by_next.get(w).is_some_and(|f| f.count > 1)
+            })
+        })?;
+        let (call, next, _) = self.status_ends.remove(at);
+        ended.retain(|&e| e != call);
+        Some((next, Via::Fall))
+    }
+}
+
+/// Tells whether a call reaches a function a name test accepts.
+///
+/// The callee is a direct one or an import ([`calls_import`]).
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - The functions, for the callee's name.
+/// * `bitness` - 32 or 64.
+/// * `call` - The call.
+/// * `test` - The test, on a bare, demangled name.
+pub(super) fn calls_named(
+    program: &Program,
+    analysis: &Analysis,
+    bitness: u32,
+    call: &Instruction,
+    test: fn(&str) -> bool,
+) -> bool {
+    near_target(call)
+        .and_then(|t| analysis.function(t).filter(|g| g.entry == t))
+        .and_then(|g| g.name.as_deref())
+        .is_some_and(|name| test(bare_name(&crate::search::demangled_name(name))))
+        || calls_import(program, bitness, call, test)
+}
+
+/// Tells whether a call reaches an import a name test accepts.
+///
+/// That is through the import slot it calls through, or the one a thunk it
+/// reaches jumps through (past the `endbr64` a CET stub opens with).
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `bitness` - 32 or 64.
+/// * `call` - The call.
+/// * `test` - The test, on a bare, demangled name.
+pub(super) fn calls_import(
+    program: &Program,
+    bitness: u32,
+    call: &Instruction,
+    test: fn(&str) -> bool,
+) -> bool {
+    let import = |slot: u64| {
+        program.symbols.iter().any(|s| {
+            s.kind == SymbolKind::Import
+                && s.addr == slot
+                && test(bare_name(&crate::search::demangled_name(&s.name)))
+        })
+    };
+    if let Some(slot) = call_slot(call) {
+        return import(slot);
+    }
+    near_target(call)
+        .and_then(|t| decode_at(program, bitness, t))
+        .and_then(|i| {
+            if matches!(i.mnemonic(), Mnemonic::Endbr64 | Mnemonic::Endbr32) {
+                decode_at(program, bitness, i.next_ip())
+            } else {
+                Some(i)
+            }
+        })
+        .and_then(|i| slot_jump(&i))
+        .is_some_and(import)
 }
 
 /// Names the reference-counting helper a function is, when it is one.

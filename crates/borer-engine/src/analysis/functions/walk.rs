@@ -10,7 +10,9 @@ use super::guess::{
     odd_instruction, opens_a_function, opens_on_frame, plausible_entry, prologue_like, slot_jump,
     thunk_slot,
 };
-use super::helpers::{CHKSTK_X86, epilog_helper_name, frame_helper_name};
+use super::helpers::{
+    CHKSTK_X86, call_slot, epilog_helper_name, exits_with_status, frame_helper_name,
+};
 use super::seeds::{DataRef, record_data_refs};
 use super::sets::{AddrSet, Covered};
 use super::tables::{ResolvedTable, resolve_jump_table};
@@ -218,6 +220,9 @@ pub(super) struct WalkState<'a> {
     pub(super) extra_roots: Arc<FxHashMap<u64, Vec<u64>>>,
     /// IAT and GOT slots of imports that never return.
     pub(super) noreturn_slots: Arc<FxHashSet<u64>>,
+    /// Where calls reach glibc's `error`, which never returns for a
+    /// nonzero status ([`super::helpers::status_exits`]).
+    pub(super) status_exits: Arc<FxHashSet<u64>>,
     /// IAT and GOT slots of every import: `jmp [slot]` through one is the
     /// linker's thunk for calls to that import.
     pub(super) import_slots: FxHashSet<u64>,
@@ -375,6 +380,7 @@ impl WalkState<'_> {
         Shared {
             noreturn: Arc::clone(&self.noreturn),
             noreturn_slots: Arc::clone(&self.noreturn_slots),
+            status_exits: Arc::clone(&self.status_exits),
             extra_roots: Arc::clone(&self.extra_roots),
             reloc_sites: self.relocatable.then(|| Arc::clone(&self.reloc_sites)),
             guessed: Arc::clone(&self.guessed),
@@ -935,6 +941,8 @@ pub(super) struct Known<'a> {
     pub(super) noreturn: &'a AddrSet,
     /// Import slots of functions that never return.
     pub(super) noreturn_slots: &'a FxHashSet<u64>,
+    /// Where calls reach glibc's `error` ([`super::helpers::status_exits`]).
+    pub(super) status_exits: &'a FxHashSet<u64>,
     /// Code each function owns that its instructions do not reach, by
     /// entry.
     pub(super) extra_roots: &'a FxHashMap<u64, Vec<u64>>,
@@ -1037,6 +1045,7 @@ pub(super) fn walk_function(
         starts,
         noreturn,
         noreturn_slots,
+        status_exits,
         reloc_sites,
         ..
     } = *known;
@@ -1089,7 +1098,7 @@ pub(super) fn walk_function(
     let mut in_handlers = false;
 
     loop {
-        while let Some((addr, via)) = pending.pop() {
+        while let Some((addr, via)) = pending.pop().or_else(|| recorded.reopen(&mut ended)) {
             if visited.contains(addr) || *fuel == 0 {
                 continue;
             }
@@ -1339,7 +1348,8 @@ pub(super) fn walk_function(
                         found_noreturn_weak.insert(t);
                     }
                     let known = noreturn.contains(t)
-                        || thunk_slot(cursors, t).is_some_and(|s| noreturn_slots.contains(&s));
+                        || thunk_slot(cursors, t).is_some_and(|s| noreturn_slots.contains(&s))
+                        || exits_with_status(cursors, status_exits, &instr, &mut recorded);
                     if ends_here || known {
                         terminated = true;
                         ended.push(addr);
@@ -1352,11 +1362,9 @@ pub(super) fn walk_function(
                     }
                 }
                 FlowControl::IndirectCall => {
-                    let slot = (instr.op0_kind() == OpKind::Memory
-                        && matches!(instr.memory_base(), Register::None | Register::RIP)
-                        && instr.memory_index() == Register::None)
-                        .then(|| instr.memory_displacement64());
-                    if slot.is_some_and(|s| noreturn_slots.contains(&s)) {
+                    if call_slot(&instr).is_some_and(|s| noreturn_slots.contains(&s))
+                        || exits_with_status(cursors, status_exits, &instr, &mut recorded)
+                    {
                         terminated = true;
                         ended.push(addr);
                         if unwind_nop(cursors, next) {
