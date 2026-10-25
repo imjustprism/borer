@@ -7,7 +7,7 @@
 )]
 
 use borer_engine::analysis::decompile::decompile;
-use borer_engine::analysis::decompile::replay::{Replayed, replay, replay_tsv};
+use borer_engine::analysis::decompile::replay::{Claim, Replayed, replay, replay_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, BinaryFormat, Program, Section};
 
@@ -291,4 +291,77 @@ fn a_pointer_parameter_never_points_at_the_callee_arguments() {
         0xc3, // ASM: ret
     ]);
     checks_every_block(&p, &Analysis::compute(&p), 0x1_4000_1000);
+}
+
+/// A switch on a class picked by conditional moves switches on the class,
+/// though its table's first bytes read as a string.
+///
+/// The table in read-only data starts `65 00 ff ff`, so the lift reads
+/// its address as the string "e"; the index is still the one the table is
+/// read at, the class the moves chose (`cmove r12d, edi; cmp r14, rsi;
+/// cmove r12d, r15d; movzx esi, r12b`), not the register the last compare
+/// read, which only picks one of the classes.
+#[test]
+fn a_switch_through_a_table_that_reads_as_a_string_reads_its_index() {
+    let mut code = vec![
+        0x48, 0xbe, 0, 0, 0, 0, 0, 0, 0xf0, 0x7f, // ASM: mov rsi,0x7ff0000000000000
+        0x49, 0x89, 0xce, // ASM: mov r14,rcx
+        0x49, 0x21, 0xf6, // ASM: and r14,rsi
+        0x45, 0x31, 0xff, // ASM: xor r15d,r15d
+        0x48, 0x85, 0xd2, // ASM: test rdx,rdx
+        0x41, 0x0f, 0x94, 0xc7, // ASM: sete r15b
+        0x44, 0x89, 0xff, // ASM: mov edi,r15d
+        0x40, 0x80, 0xf7, 0x03, // ASM: xor dil,3
+        0x40, 0x0f, 0xb6, 0xff, // ASM: movzx edi,dil
+        0x4d, 0x85, 0xf6, // ASM: test r14,r14
+        0x41, 0xbc, 0x04, 0x00, 0x00, 0x00, // ASM: mov r12d,4
+        0x44, 0x0f, 0x44, 0xe7, // ASM: cmove r12d,edi
+        0x49, 0x39, 0xf6, // ASM: cmp r14,rsi
+        0x45, 0x0f, 0x44, 0xe7, // ASM: cmove r12d,r15d
+        0x41, 0x0f, 0xb6, 0xf4, // ASM: movzx esi,r12b
+        0x48, 0x8d, 0x3d, 0xbc, 0xff, 0x00, 0x00, // ASM: lea rdi,[rip+0xffbc] (the table)
+        0x48, 0x63, 0x34, 0xb7, // ASM: movsxd rsi,[rdi+rsi*4]
+        0x48, 0x01, 0xfe, // ASM: add rsi,rdi
+        0xff, 0xe6, // ASM: jmp rsi
+    ];
+    code.resize(0x65, 0xcc);
+    for class in 10..15 {
+        code.extend_from_slice(&[0xb8, class, 0, 0, 0, 0xc3]); // ASM: mov eax,class; ret
+    }
+    let mut bytes = vec![0u8; 0x12000];
+    bytes[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    for (slot, at) in (0x11000..).step_by(4).take(5).enumerate() {
+        let offset = 0xffff_0065_u32 + 6 * u32::try_from(slot).unwrap_or(0);
+        bytes[at..at + 4].copy_from_slice(&offset.to_le_bytes());
+    }
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x1_4000_0000,
+        Some(0x1_4000_1000),
+        vec![
+            Section::mapped(".text", 0x1_4000_1000, 0x1000, 0x1000, false, true),
+            Section::mapped(".rdata", 0x1_4001_1000, 0x11000, 0x1000, false, false),
+        ],
+    );
+    p.format = BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).expect("decompiles");
+    let class = text
+        .lines()
+        .find(|l| l.starts_with("var1 = "))
+        .expect("the class is assigned");
+    assert!(
+        class.contains("== 0x7ff0000000000000 ? a2 == 0 :") && class.ends_with(": 4));"),
+        "{text}"
+    );
+    assert!(text.contains("switch (var1) {"), "{text}");
+    for (case, value) in (0..5).zip(10..15) {
+        let arm = format!("case {case}: {{\n  return {value};\n}}");
+        assert!(text.contains(&arm), "{text}");
+    }
+    for r in checks_every_block(&p, &a, 0x1_4000_1000) {
+        let switches = r.compared.get(&Claim::Switch).copied().unwrap_or(0);
+        assert!(switches > 0, "{}", replay_tsv(&r));
+    }
 }

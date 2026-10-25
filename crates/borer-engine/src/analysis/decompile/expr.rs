@@ -3091,6 +3091,9 @@ fn rotl(v: u64, n: u32, bits: u8) -> u64 {
 
 /// Finds the index expression inside a jump-table address.
 ///
+/// The table is a constant address, or one the lift reads as a string
+/// literal because the table's first bytes print (`65 00 94 ff` is "e").
+///
 /// # Arguments
 ///
 /// * `e` - An address expression, searched anywhere for `table + x * 4` or `* 8`.
@@ -3107,12 +3110,12 @@ pub(super) fn table_index(e: &Expr) -> Option<Expr> {
                 }
                 _ => None,
             };
-            if matches!(**a, Expr::Const(_))
+            if matches!(**a, Expr::Const(_) | Expr::Str(_))
                 && let Some(x) = scaled(b)
             {
                 return Some(x);
             }
-            if matches!(**b, Expr::Const(_))
+            if matches!(**b, Expr::Const(_) | Expr::Str(_))
                 && let Some(x) = scaled(a)
             {
                 return Some(x);
