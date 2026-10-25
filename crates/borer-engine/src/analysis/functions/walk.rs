@@ -186,6 +186,8 @@ pub(super) struct WalkState<'a> {
     pub(super) followed: BTreeMap<u64, BTreeSet<u64>>,
     /// Per walked function, the call targets whose fall-through it followed.
     pub(super) followed_calls: BTreeMap<u64, BTreeSet<u64>>,
+    /// What the split rounds read to find the functions to walk again.
+    pub(super) split: SplitWatch,
     /// Entries of the walked functions with a `ret`, kept as functions are
     /// committed and forgotten.
     pub(super) returning: FxHashSet<u64>,
@@ -245,6 +247,34 @@ pub(super) struct WalkState<'a> {
     /// fact about the same address - a call to it found later - still walks
     /// it; a rejected guess is only a guess not worth making twice.
     pub(super) rejected: AddrSet,
+}
+
+/// What the split rounds of [`WalkState::run`] read to find the functions
+/// to walk again without a pass over every function: who followed into
+/// what, and what changed since they last looked.
+///
+/// A function needs walking again only once a target it followed into
+/// becomes a start or a callee whose fall-through it followed proves never
+/// to return; one checked at the last look can only have become one through
+/// a start or a callee found since, so those and the functions committed
+/// since are all a look checks.
+#[derive(Default)]
+pub(super) struct SplitWatch {
+    /// Per jump target, the functions whose walk followed into it, the
+    /// reverse of [`WalkState::followed`]. Entries of a function since
+    /// walked again or dropped stay, and are checked against
+    /// [`WalkState::followed`] before they count.
+    followers: FxHashMap<u64, Vec<u64>>,
+    /// Per call target, the functions whose walk followed its fall-through,
+    /// the reverse of [`WalkState::followed_calls`], stale entries kept as
+    /// in `followers`.
+    call_followers: FxHashMap<u64, Vec<u64>>,
+    /// Entries committed since the last look.
+    entries: FxHashSet<u64>,
+    /// Starts added since the last look.
+    starts: Vec<u64>,
+    /// Callees found never to return since the last look.
+    noreturn: Vec<u64>,
 }
 
 impl WalkState<'_> {
@@ -438,20 +468,7 @@ impl WalkState<'_> {
             if round + 1 == SPLIT_ROUNDS_MAX {
                 break;
             }
-            let split: Vec<u64> = self
-                .functions
-                .iter()
-                .map(|f| f.entry)
-                .filter(|e| {
-                    self.followed
-                        .get(e)
-                        .is_some_and(|ts| ts.iter().any(|&t| self.starts.contains(t)))
-                        || self
-                            .followed_calls
-                            .get(e)
-                            .is_some_and(|ts| ts.iter().any(|&t| self.noreturn.contains(t)))
-                })
-                .collect();
+            let split = self.splits_due();
             if split.is_empty() {
                 break;
             }
@@ -485,7 +502,7 @@ impl WalkState<'_> {
             .into_iter()
             .filter(|&t| !self.noreturn.contains(t) && !self.can_return(t))
             .collect();
-        Arc::make_mut(&mut self.noreturn).extend(claimed);
+        self.mark_noreturn(claimed);
         let promoted: Vec<u64> = self
             .learned_noreturn
             .keys()
@@ -496,7 +513,7 @@ impl WalkState<'_> {
                     && !self.can_return(t)
             })
             .collect();
-        Arc::make_mut(&mut self.noreturn).extend(promoted);
+        self.mark_noreturn(promoted);
         let ending: Vec<u64> = self
             .functions
             .iter()
@@ -507,7 +524,53 @@ impl WalkState<'_> {
             })
             .map(|f| f.entry)
             .collect();
-        Arc::make_mut(&mut self.noreturn).extend(ending);
+        self.mark_noreturn(ending);
+    }
+
+    /// Adds callees found never to return, noting them for the next split
+    /// round.
+    ///
+    /// # Arguments
+    ///
+    /// * `found` - The callees, none of them known never to return yet.
+    fn mark_noreturn(&mut self, found: Vec<u64>) {
+        Arc::make_mut(&mut self.noreturn).extend(found.iter().copied());
+        self.split.noreturn.extend(found);
+    }
+
+    /// Lists the walked functions to walk again, in function order: those
+    /// whose walk followed a jump into what has since proven a function
+    /// start, or the fall-through of a call since proven never to return.
+    ///
+    /// Only the functions [`SplitWatch`] names are checked.
+    ///
+    /// # Returns
+    ///
+    /// The entries, in the order of [`Self::functions`].
+    fn splits_due(&mut self) -> Vec<u64> {
+        let watch = &mut self.split;
+        let mut candidates = std::mem::take(&mut watch.entries);
+        for t in std::mem::take(&mut watch.starts) {
+            candidates.extend(watch.followers.get(&t).into_iter().flatten());
+        }
+        for t in std::mem::take(&mut watch.noreturn) {
+            candidates.extend(watch.call_followers.get(&t).into_iter().flatten());
+        }
+        self.functions
+            .iter()
+            .map(|f| f.entry)
+            .filter(|e| {
+                candidates.contains(e)
+                    && (self
+                        .followed
+                        .get(e)
+                        .is_some_and(|ts| ts.iter().any(|&t| self.starts.contains(t)))
+                        || self
+                            .followed_calls
+                            .get(e)
+                            .is_some_and(|ts| ts.iter().any(|&t| self.noreturn.contains(t))))
+            })
+            .collect()
     }
 
     /// Tells whether a walked function's own code never returns: no block
@@ -960,7 +1023,7 @@ impl WalkState<'_> {
         }
         self.handlers.extend(near_handlers);
         self.done.insert(entry);
-        self.track(entry, &func);
+        self.track(entry, &func, &followed, &followed_calls);
         self.followed.insert(entry, followed);
         self.followed_anywhere
             .extend(followed_calls.iter().copied());
@@ -1019,19 +1082,39 @@ impl WalkState<'_> {
         self.functions.push(func);
     }
 
-    /// Notes a function being committed where the later rounds look:
-    /// whether it has a `ret`, the starts its calls add, and its blocks in
-    /// the covered index.
+    /// Notes a function being committed where the later rounds look: what
+    /// its walk followed into, whether it has a `ret`, the starts its calls
+    /// add, and its blocks in the covered index.
     ///
     /// # Arguments
     ///
     /// * `entry` - The function's entry.
     /// * `func` - The function.
-    fn track(&mut self, entry: u64, func: &Function) {
+    /// * `followed` - The jump targets its walk followed into.
+    /// * `followed_calls` - The call targets whose fall-through it followed.
+    fn track(
+        &mut self,
+        entry: u64,
+        func: &Function,
+        followed: &BTreeSet<u64>,
+        followed_calls: &BTreeSet<u64>,
+    ) {
+        for &t in followed {
+            self.split.followers.entry(t).or_default().push(entry);
+        }
+        for &t in followed_calls {
+            self.split.call_followers.entry(t).or_default().push(entry);
+        }
+        self.split.entries.insert(entry);
         if func.blocks.iter().any(|b| b.term == BlockTerm::Ret) {
             self.returning.insert(entry);
         }
-        self.starts.extend(func.callees.iter().copied());
+        for &c in &func.callees {
+            if !self.starts.contains(c) {
+                self.starts.insert(c);
+                self.split.starts.push(c);
+            }
+        }
         if self.covered.as_mut().is_some_and(|c| !c.add(&func.blocks)) {
             self.covered = None;
         }

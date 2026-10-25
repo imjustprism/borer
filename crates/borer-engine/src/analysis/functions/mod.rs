@@ -54,7 +54,7 @@ use helpers::{
 use seeds::{got_base, mapped_range, pointer_seeds, record_table_refs, reloc_seeds};
 use sets::{AddrSet, Covered};
 use tables::ResolvedTable;
-use walk::{Known, WalkState, Walked, Worker, walk_capped};
+use walk::{Known, SplitWatch, WalkState, Walked, Worker, walk_capped};
 
 /// Smallest instruction budget for one full analysis pass.
 const FUEL_MIN: u64 = 2_000_000;
@@ -544,6 +544,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         frame_helpers: BTreeSet::new(),
         followed: BTreeMap::new(),
         followed_calls: BTreeMap::new(),
+        split: SplitWatch::default(),
         returning: FxHashSet::default(),
         covered: None,
         followed_anywhere: BTreeSet::new(),
