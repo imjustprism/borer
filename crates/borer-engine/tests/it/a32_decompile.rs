@@ -227,3 +227,64 @@ fn a_run_of_flag_setting_moves_lifts_in_bounded_time() {
     let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
     assert!(out.contains("sub_40000"), "{out}");
 }
+
+/// A loop that walks a stack buffer through a pointer takes no stack
+/// parameter.
+///
+/// The pointer starts at the buffer, 16 bytes below the entry stack
+/// pointer, and steps 4 bytes a turn. Followed turn by turn, it reaches the
+/// entry stack pointer and above, where incoming stack arguments live, but
+/// what it reads there is the walk's own drift, not an argument any caller
+/// passes. A32, hand-assembled.
+#[test]
+fn a_pointer_walking_a_stack_buffer_is_no_stack_parameter() {
+    let words: [u32; 10] = [
+        0xe24d_d010, // ASM: sub sp, sp, #16
+        0xe1a0_300d, // ASM: mov r3, sp
+        0xe3a0_2000, // ASM: mov r2, #0
+        0xe493_1004, // ASM: ldr r1, [r3], #4
+        0xe082_2001, // ASM: add r2, r2, r1
+        0xe250_0001, // ASM: subs r0, r0, #1
+        0x1aff_fffb, // ASM: bne 0x4000c
+        0xe1a0_0002, // ASM: mov r0, r2
+        0xe28d_d010, // ASM: add sp, sp, #16
+        0xe12f_ff1e, // ASM: bx lr
+    ];
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let len = u64::try_from(bytes.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE, 0, len, false, true);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text]);
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Arm)]);
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
+    let sig = out
+        .lines()
+        .find(|l| l.starts_with("// signature:"))
+        .expect("a signature line");
+    assert!(!sig.contains("arg_") && !sig.contains("a4"), "{out}");
+}
+
+/// A stack word one path writes and the other only reads is still an
+/// incoming argument: the join keeps the stack pointer. A32, hand-assembled.
+#[test]
+fn a_stack_word_read_on_one_path_of_a_join_is_an_argument() {
+    let words: [u32; 5] = [
+        0xe350_0000, // ASM: cmp r0, #0
+        0x0a00_0000, // ASM: beq 0x4000c
+        0xe58d_1000, // ASM: str r1, [sp]
+        0xe59d_0000, // ASM: ldr r0, [sp]
+        0xe12f_ff1e, // ASM: bx lr
+    ];
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let len = u64::try_from(bytes.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE, 0, len, false, true);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text]);
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Arm)]);
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
+    let sig = out
+        .lines()
+        .find(|l| l.starts_with("// signature:"))
+        .expect("a signature line");
+    assert!(sig.contains("a5"), "{out}");
+}

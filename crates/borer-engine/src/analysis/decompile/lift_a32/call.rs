@@ -275,10 +275,11 @@ impl Lift<'_, '_> {
             && let Some(sp) = self.ex.env.sp
         {
             for n in 0..stack_args {
-                let o = sp + 4 * n;
+                let o = sp.saturating_add(4 * n);
                 let k = Key::Slot(o);
                 if !self.ex.slot_def.contains_key(&o) {
-                    *self.ex.slot_use.entry(o).or_default() = 32;
+                    let width = self.ex.slot_use.entry(o).or_default();
+                    *width = (*width).max(32);
                 }
                 let v = self
                     .ex
@@ -321,7 +322,7 @@ impl Lift<'_, '_> {
         let stack_arg_slot = |k: &Key| {
             matches!(
                 (k, self.ex.env.sp),
-                (Key::Slot(o), Some(sp)) if *o >= sp && *o < sp + 4 * stack_args
+                (Key::Slot(o), Some(sp)) if *o >= sp && *o < sp.saturating_add(4 * stack_args)
             )
         };
         let dying: Vec<Key> = a32_abi::clobbered().map(Key::A32).collect();

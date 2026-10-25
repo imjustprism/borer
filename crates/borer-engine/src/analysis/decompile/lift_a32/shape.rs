@@ -405,6 +405,16 @@ type BlockState = (u8, u8, u32, BTreeMap<Reg, OffsetSet>);
 /// Counts stack parameter words at `[sp_entry + 4 * k]` read before being
 /// written on any path from `entry`.
 ///
+/// A loop's head reached again over its back edge with a register at
+/// other offsets than on its first visit drops that register: a pointer
+/// stepped by a loop drifts on every turn, and followed turn by turn it
+/// would read past the frame into the caller's arguments, which is the
+/// walk's drift, not a parameter. Ordinary joins keep every register.
+///
+/// The walk cannot bound a loop, so one that steps through incoming stack
+/// words counts only the word its first turn reads: missing those arguments
+/// is the price of never inventing them from a local buffer's walk.
+///
 /// # Arguments
 ///
 /// * `code` - Each block's instructions.
@@ -415,8 +425,26 @@ fn stack_params_read(code: &[Vec<Insn>], succs: &[Vec<usize>], entry: usize) -> 
     type SeenState = (usize, u32, Vec<(Reg, OffsetSet)>);
     let mut max_slot: Option<u8> = None;
     let mut seen: BTreeSet<SeenState> = BTreeSet::new();
-    let mut work = vec![(entry, 0u32, BTreeMap::from([(SP, OffsetSet::single(0))]))];
-    while let Some((b, written, frame)) = work.pop() {
+    let back = back_edges(succs, entry);
+    let mut first: BTreeMap<usize, BTreeMap<Reg, OffsetSet>> = BTreeMap::new();
+    let mut work = vec![(
+        entry,
+        0u32,
+        BTreeMap::from([(SP, OffsetSet::single(0))]),
+        false,
+    )];
+    while let Some((b, written, mut frame, looped)) = work.pop() {
+        match first.get(&b) {
+            Some(seen_first) if looped => frame.retain(|r, o| {
+                seen_first
+                    .get(r)
+                    .is_some_and(|f| f.offsets == o.offsets && f.span == o.span)
+            }),
+            Some(_) => {}
+            None => {
+                first.insert(b, frame.clone());
+            }
+        }
         let key: Vec<(Reg, OffsetSet)> = frame.iter().map(|(&r, d)| (r, d.clone())).collect();
         if seen.len() >= PATHS_MAX || !seen.insert((b, written, key)) {
             continue;
@@ -443,11 +471,49 @@ fn stack_params_read(code: &[Vec<Insn>], succs: &[Vec<usize>], entry: usize) -> 
         }
         for &s in succs.get(b).into_iter().flatten() {
             for (_, _, w, f) in &states {
-                work.push((s, *w, f.clone()));
+                work.push((s, *w, f.clone(), back.contains(&(b, s))));
             }
         }
     }
     max_slot.unwrap_or(0)
+}
+
+/// Returns the edges that close a loop: from a block to one still open on
+/// the depth-first path from `entry`.
+///
+/// # Arguments
+///
+/// * `succs` - Successor block indices per block.
+/// * `entry` - Index of the entry block.
+fn back_edges(succs: &[Vec<usize>], entry: usize) -> BTreeSet<(usize, usize)> {
+    let mut open = vec![false; succs.len()];
+    let mut done = vec![false; succs.len()];
+    let mut back = BTreeSet::new();
+    let mut stack = vec![(entry, 0usize)];
+    if let Some(o) = open.get_mut(entry) {
+        *o = true;
+    }
+    while let Some((b, k)) = stack.pop() {
+        let Some(&s) = succs.get(b).and_then(|v| v.get(k)) else {
+            if let Some(o) = open.get_mut(b) {
+                *o = false;
+            }
+            if let Some(d) = done.get_mut(b) {
+                *d = true;
+            }
+            continue;
+        };
+        stack.push((b, k + 1));
+        if open.get(s).copied().unwrap_or(false) {
+            back.insert((b, s));
+        } else if !done.get(s).copied().unwrap_or(true) {
+            if let Some(o) = open.get_mut(s) {
+                *o = true;
+            }
+            stack.push((s, 0));
+        }
+    }
+    back
 }
 
 /// Merges multiple intra-block states into one conservative state without
@@ -582,14 +648,6 @@ fn apply_mem(
             for &base in &offs.offsets {
                 let at = base.saturating_add(r_off);
                 mark_load(at, at.saturating_add(1), *written, max_slot);
-            }
-            if let Some((lo, hi)) = offs.span {
-                mark_load(
-                    lo.saturating_add(r_off),
-                    hi.saturating_add(r_off).saturating_add(1),
-                    *written,
-                    max_slot,
-                );
             }
         }
     } else {
