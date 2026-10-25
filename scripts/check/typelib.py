@@ -2903,6 +2903,15 @@ POSIX: list[tuple[str, str, str | None, list[Param]]] = [
     ("getgrgid", "struct group *", None, [("gid_t", "gid", None)]),
     ("gai_strerror", "const char *", None, [("int", "errcode", None)]),
     ("strsignal", "char *", None, [("int", "sig", None)]),
+    ("getlogin", "char *", None, []),
+    ("ttyname", "char *", None, [("int", "fd", None)]),
+    ("rawmemchr", "void *", None, [("const void *", "s", None), ("int", "c", None)]),
+    (
+        "posix_memalign",
+        "int",
+        None,
+        [("void **", "memptr", None), ("size_t", "alignment", None), ("size_t", "size", None)],
+    ),
     ("stpcpy", "char *", None, [("char *", "dest", None), ("const char *", "src", None)]),
     (
         "stpncpy",

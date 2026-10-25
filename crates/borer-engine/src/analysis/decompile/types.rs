@@ -2264,10 +2264,7 @@ pub(super) fn is_declaration(line: &str) -> bool {
         && !t.contains('(')
         && t.split_once(' ').is_some_and(|(head, _)| {
             narrow_type(head).is_some()
-                || matches!(
-                    head,
-                    "uint64_t" | "uint128_t" | "float" | "double" | "acl_t" | "acl_entry_t"
-                )
+                || matches!(head, "uint64_t" | "uint128_t" | "float" | "double")
         })
 }
 

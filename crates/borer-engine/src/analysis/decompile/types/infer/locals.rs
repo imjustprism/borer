@@ -264,11 +264,7 @@ fn local_api_pointer(lines: &[String], name: &str) -> Option<&'static str> {
     let amp = format!("&{name}");
     for line in lines.iter().filter(|l| !l.starts_with("//")) {
         if line.contains(&amp) {
-            if line.contains("acl_get_entry(") && line.contains(&format!(", &{name})")) {
-                found = Some("acl_entry_t");
-            } else {
-                return None;
-            }
+            return None;
         }
     }
     for (before, line) in lines
@@ -310,9 +306,6 @@ fn local_api_pointer(lines: &[String], name: &str) -> Option<&'static str> {
         for at in word_positions(line, name) {
             let head = line.get(..at).unwrap_or("");
             let tail = line.get(at + name.len()..).unwrap_or("");
-            if head.ends_with('&') && line.contains("acl_get_entry(") {
-                continue;
-            }
             if is_chain_write && (tail.starts_with(" = ") || head.ends_with(" = ")) {
                 continue;
             }
@@ -426,8 +419,6 @@ fn check_pointer_read(
             let mapped = match t.as_str() {
                 "char *" => "char*",
                 "FILE *" => "FILE*",
-                "acl_t" => "acl_t",
-                "acl_entry_t" => "acl_entry_t",
                 _ => return false,
             };
             if found.is_some_and(|f| f != mapped) {
@@ -557,15 +548,6 @@ fn classify_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsTyp
     }
     if l.toks.len() >= 3 && l.is(1, "(") && l.toks[0].lex == Lex::Name && call_is_whole(&l) {
         let callee = l.word(0);
-        if matches!(callee, "getlogin" | "ttyname" | "strsignal" | "rawmemchr") {
-            return RhsType::Known("char*");
-        }
-        if matches!(
-            callee,
-            "acl_get_file" | "acl_init" | "acl_dup" | "acl_from_text"
-        ) {
-            return RhsType::Known("acl_t");
-        }
         let Some(decl) = typelib::declared(callee, BinaryFormat::Elf)
             .or_else(|| typelib::declared(callee, BinaryFormat::Pe))
         else {

@@ -997,61 +997,9 @@ pub(in crate::analysis::decompile) fn slot_at(line: &str, at: usize) -> Option<S
     };
     let k = l.toks.iter().position(|t| t.at == at)?;
     let (callee, index, open) = argument_of(&l, k)?;
-    if (matches!(
-        callee,
-        "rawmemchr" | "gzopen" | "acl_delete_def_file" | "acl_get_file" | "acl_set_file"
-    ) && index == 0)
-        || ((callee == "crc32" || callee.starts_with("crc32_fn_")) && index == 1)
-    {
-        return Some(Slot::Pointer("char *".to_owned()));
-    }
-    if callee == "posix_memalign" && index == 0 {
-        return Some(Slot::Pointer("void **".to_owned()));
-    }
-    if matches!(
-        callee,
-        "gnutls_credentials_set"
-            | "gnutls_handshake"
-            | "gnutls_bye"
-            | "gnutls_deinit"
-            | "gnutls_session_etm_status"
-            | "gnutls_protocol_get_version"
-            | "gnutls_dh_get_pubkey"
-    ) && index == 0
-    {
-        return Some(Slot::Pointer("gnutls_session_t".to_owned()));
-    }
-    if (callee == "acl_set_file" && index == 2)
-        || (matches!(
-            callee,
-            "acl_to_any_text"
-                | "acl_get_entry"
-                | "acl_delete_entry"
-                | "acl_valid"
-                | "acl_calc_mask"
-                | "acl_dup"
-                | "acl_entries"
-                | "acl_check"
-        ) && index == 0)
-    {
-        return Some(Slot::Pointer("acl_t".to_owned()));
-    }
-    if (callee == "acl_get_tag_type" && index == 0) || (callee == "acl_delete_entry" && index >= 1)
-    {
-        return Some(Slot::Pointer("acl_entry_t".to_owned()));
-    }
     let posix = typelib::declared(callee, BinaryFormat::Elf);
     let windows = typelib::declared(callee, BinaryFormat::Pe);
-    let Some(decl) = posix.or(windows) else {
-        if !callee.ends_with("fprintf") {
-            return None;
-        }
-        let (fmt, lit) = (0..index).find_map(|f| {
-            let tok = argument_token(&l, open, f)?;
-            l.word(tok).contains('%').then_some((f, tok))
-        })?;
-        return conversion_slot(l.word(lit), index - fmt - 1);
-    };
+    let decl = posix.or(windows)?;
     if let Some(p) = decl.params.get(index) {
         let other = posix.and(windows).and_then(|w| w.params.get(index));
         return other.is_none_or(|o| o.ty == p.ty).then(|| slot_of(p.ty));

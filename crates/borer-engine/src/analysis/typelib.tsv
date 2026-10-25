@@ -244,6 +244,7 @@ getenv	c	char *	-	const char *name	-
 getgrgid	posix	struct group *	-	gid_t gid	-
 getgrnam	posix	struct group *	-	const char *name	-
 gethostbyname	posix	struct hostent *	-	const char *name	-
+getlogin	posix	char *	-	-	-
 getopt	posix	int	-	int argc|char *const *argv|const char *optstring	-
 getopt_long	posix	int	-	int argc|char *const *argv|const char *optstring|const struct option *longopts|int *longindex	-
 getpeername	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
@@ -283,6 +284,7 @@ opendir	posix	DIR *	-	const char *name	-
 openlog	posix	void	-	const char *ident|int option|int facility	-
 pipe2	posix	int	-	int *pipefd|int flags	-|open_flags
 poll	posix	int	-	struct pollfd *fds|nfds_t nfds|int timeout	-
+posix_memalign	posix	int	-	void **memptr|size_t alignment|size_t size	-
 ppoll	posix	int	-	struct pollfd *fds|nfds_t nfds|const struct timespec *tmo_p|const sigset_t *sigmask	-
 prctl	posix	int	-	int option|...	prctl|-
 printf	c	int	-	const char *format|...	-
@@ -295,6 +297,7 @@ putchar	c	int	-	int c	-
 puts	c	int	-	const char *s	-
 raise	posix	int	-	int sig	signal
 rand	c	int	-	-	-
+rawmemchr	posix	void *	-	const void *s|int c	-
 read	posix	ssize_t	-	int fd|void *buf|size_t count	-
 readdir	posix	struct dirent *	-	DIR *dirp	-
 realloc	c	void *	-	void *ptr|size_t size	-
@@ -336,6 +339,7 @@ syslog	posix	void	-	int priority|const char *format|...	-
 system	c	int	-	const char *command	-
 time	c	time_t	-	time_t *tloc	-
 truncate	posix	int	-	const char *path|off_t length	-
+ttyname	posix	char *	-	int fd	-
 unlink	posix	int	-	const char *pathname	-
 usleep	posix	int	-	useconds_t usec	-
 waitpid	posix	pid_t	-	pid_t pid|int *wstatus|int options	-|-|wait_options
