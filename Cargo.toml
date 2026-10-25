@@ -164,6 +164,14 @@ debug = "line-tables-only"
 opt-level = 2
 debug = false
 
+# iced-x86 1.21 measures an instruction's length as the difference of two
+# pointers cut to u32 (decoder.rs:1421). A buffer that crosses a 4 GiB address
+# boundary makes that subtraction wrap: the wrapped value is the right length,
+# but debug overflow checks panic on it, so a large binary's decode failed or
+# not by where its bytes happened to be allocated.
+[profile.dev.package.iced-x86]
+overflow-checks = false
+
 [profile.dev.package.borer-engine]
 debug = "full"
 
@@ -186,6 +194,9 @@ debug = "full"
 [profile.corpus.package."*"]
 opt-level = 0
 debug = "full"
+
+[profile.corpus.package.iced-x86]
+overflow-checks = false
 
 # the shipped server is the release binary: whole-program optimization is
 # worth the longer build (decompile-all on a 25k-function PE runs ~2x faster)
