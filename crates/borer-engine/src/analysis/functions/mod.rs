@@ -544,6 +544,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         frame_helpers: BTreeSet::new(),
         followed: BTreeMap::new(),
         followed_calls: BTreeMap::new(),
+        returning: FxHashSet::default(),
         covered: None,
         followed_anywhere: BTreeSet::new(),
         learned_noreturn: BTreeMap::new(),

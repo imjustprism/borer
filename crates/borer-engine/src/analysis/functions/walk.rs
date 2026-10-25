@@ -186,6 +186,9 @@ pub(super) struct WalkState<'a> {
     pub(super) followed: BTreeMap<u64, BTreeSet<u64>>,
     /// Per walked function, the call targets whose fall-through it followed.
     pub(super) followed_calls: BTreeMap<u64, BTreeSet<u64>>,
+    /// Entries of the walked functions with a `ret`, kept as functions are
+    /// committed and forgotten.
+    pub(super) returning: FxHashSet<u64>,
     /// The index of the walked functions' blocks, kept current as functions
     /// are committed, so a seed round does not index millions of blocks
     /// again; dropped when a function is forgotten or a block does not fit
@@ -478,15 +481,9 @@ impl WalkState<'_> {
     /// whose fall-through some walk followed returns; the rest, seen only
     /// ever followed by padding, do not.
     pub(super) fn promote_noreturn(&mut self) {
-        let returning: FxHashSet<u64> = self
-            .functions
-            .iter()
-            .filter(|f| f.blocks.iter().any(|b| b.term == BlockTerm::Ret))
-            .map(|f| f.entry)
-            .collect();
         let claimed: Vec<u64> = std::mem::take(&mut self.claimed_noreturn)
             .into_iter()
-            .filter(|&t| !self.noreturn.contains(t) && !self.can_return(t, &returning))
+            .filter(|&t| !self.noreturn.contains(t) && !self.can_return(t))
             .collect();
         Arc::make_mut(&mut self.noreturn).extend(claimed);
         let promoted: Vec<u64> = self
@@ -496,14 +493,18 @@ impl WalkState<'_> {
             .filter(|&t| {
                 !self.followed_anywhere.contains(&t)
                     && !self.noreturn.contains(t)
-                    && !self.can_return(t, &returning)
+                    && !self.can_return(t)
             })
             .collect();
         Arc::make_mut(&mut self.noreturn).extend(promoted);
         let ending: Vec<u64> = self
             .functions
             .iter()
-            .filter(|f| !self.noreturn.contains(f.entry) && self.ends_every_path(f))
+            .filter(|f| {
+                !self.returning.contains(&f.entry)
+                    && !self.noreturn.contains(f.entry)
+                    && self.ends_every_path(f)
+            })
             .map(|f| f.entry)
             .collect();
         Arc::make_mut(&mut self.noreturn).extend(ending);
@@ -607,15 +608,14 @@ impl WalkState<'_> {
     /// # Arguments
     ///
     /// * `t` - The callee.
-    /// * `returning` - Entries of walked functions with a `ret`.
-    pub(super) fn can_return(&self, t: u64, returning: &FxHashSet<u64>) -> bool {
+    pub(super) fn can_return(&self, t: u64) -> bool {
         /// Most jumps followed through a thunk chain.
         const CHAIN_MAX: usize = 4;
         let program = self.worker.cursors.program;
         let bitness = self.worker.cursors.bitness;
         let mut va = t;
         for _ in 0..CHAIN_MAX {
-            if returning.contains(&va) {
+            if self.returning.contains(&va) {
                 return true;
             }
             let Some(i) = decode_at(program, bitness, va) else {
@@ -770,6 +770,7 @@ impl WalkState<'_> {
         )]
         for e in &set {
             self.done.remove(*e);
+            self.returning.remove(e);
             self.followed.remove(e);
             self.followed_calls.remove(e);
             self.accepted_guesses.remove(e);
@@ -959,7 +960,7 @@ impl WalkState<'_> {
         }
         self.handlers.extend(near_handlers);
         self.done.insert(entry);
-        self.track(&func);
+        self.track(entry, &func);
         self.followed.insert(entry, followed);
         self.followed_anywhere
             .extend(followed_calls.iter().copied());
@@ -1018,13 +1019,18 @@ impl WalkState<'_> {
         self.functions.push(func);
     }
 
-    /// Notes a function being committed where the later rounds look: the
-    /// starts its calls add, and its blocks in the covered index.
+    /// Notes a function being committed where the later rounds look:
+    /// whether it has a `ret`, the starts its calls add, and its blocks in
+    /// the covered index.
     ///
     /// # Arguments
     ///
+    /// * `entry` - The function's entry.
     /// * `func` - The function.
-    fn track(&mut self, func: &Function) {
+    fn track(&mut self, entry: u64, func: &Function) {
+        if func.blocks.iter().any(|b| b.term == BlockTerm::Ret) {
+            self.returning.insert(entry);
+        }
         self.starts.extend(func.callees.iter().copied());
         if self.covered.as_mut().is_some_and(|c| !c.add(&func.blocks)) {
             self.covered = None;
