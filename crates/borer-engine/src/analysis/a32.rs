@@ -733,8 +733,15 @@ fn function_at_gap(program: &Program, functions: &[Function], va: u64) -> Option
     ok.then_some(w)
 }
 
+/// Most functions one gap recovery adds, the asked one and the callees it
+/// reaches: a hostile image of chained gaps must not run on unbounded.
+const GAP_CHAIN_MAX: usize = 64;
+
 /// Adds a function at `va` to `analysis` when no discovered function
 /// contains it ([`Analysis::start_gap_function`]).
+///
+/// Its direct callees no function contains are recovered with it, up to
+/// [`GAP_CHAIN_MAX`] functions in all.
 ///
 /// # Arguments
 ///
@@ -755,6 +762,9 @@ pub(crate) fn start_gap_function(
     let mut seen = BTreeSet::from([entry]);
     let mut added = Vec::new();
     while let Some(next) = work.pop() {
+        if added.len() >= GAP_CHAIN_MAX {
+            break;
+        }
         let Some(w) = function_at_gap(program, &analysis.functions, next) else {
             if added.is_empty() {
                 return None;
@@ -777,6 +787,13 @@ pub(crate) fn start_gap_function(
             analysis.jump_tables.insert(t.site, t.targets.clone());
         }
         for (target, site, kind) in sites {
+            if analysis
+                .xrefs
+                .get(&target)
+                .is_some_and(|l| l.iter().any(|s| s.va == site && s.kind == kind))
+            {
+                continue;
+            }
             push_site(&mut analysis.xrefs, target, site, kind, Some(next));
             if let Some(list) = analysis.xrefs.get_mut(&target) {
                 list.sort_by_key(|s| s.va);

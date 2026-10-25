@@ -24,6 +24,8 @@ pub struct Written {
     pub hoisted: Hoisted,
     /// Bytes in the file.
     pub bytes: u64,
+    /// Requested entries no function starts at, even after gap recovery.
+    pub unmatched: Vec<u64>,
 }
 
 impl Written {
@@ -35,6 +37,12 @@ impl Written {
     #[must_use]
     pub fn line(&self, out: &str) -> String {
         let h = &self.hoisted;
+        let missed = if self.unmatched.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = self.unmatched.iter().map(|va| format!("{va:#x}")).collect();
+            format!("; no function starts at {}", list.join(", "))
+        };
         format!(
             "wrote {} functions to {} ({} bytes); {} did not decompile, {} library functions and stubs left out, {} declarations stated two ways kept the first",
             h.written,
@@ -43,7 +51,7 @@ impl Written {
             h.failed,
             h.left_out,
             h.conflicts
-        )
+        ) + missed.as_str()
     }
 }
 
@@ -112,15 +120,21 @@ pub fn write_entries(
     out: &str,
     existing: Existing,
 ) -> anyhow::Result<Written> {
+    let mut unmatched = Vec::new();
     if let Some(entries) = only {
-        for &va in entries {
-            if analysis.function(va).is_none_or(|f| f.entry != va) {
-                let _ = analysis.start_gap_function(program, va);
+        let sorted: BTreeSet<u64> = entries.iter().copied().collect();
+        for va in sorted {
+            let thumb = (program.arch == borer_engine::program::Arch::Arm)
+                .then(|| analysis.function(va & !1))
+                .flatten();
+            let known = analysis.function(va).or(thumb);
+            if known.is_none() && analysis.start_gap_function(program, va).is_none() {
+                unmatched.push(va);
             }
         }
     }
     let set = only.map(|entries| entries.iter().copied().collect::<BTreeSet<_>>());
-    write_with_set(
+    let mut written = write_with_set(
         program,
         analysis,
         overlay,
@@ -128,7 +142,9 @@ pub fn write_entries(
         set.as_ref(),
         out,
         existing,
-    )
+    )?;
+    written.unmatched = unmatched;
+    Ok(written)
 }
 
 /// Writes the exported C file for `set` (or every function when `None`).
@@ -181,12 +197,16 @@ fn write_with_set(
     let bytes = std::fs::metadata(path)
         .with_context(|| format!("reading {shown}"))?
         .len();
-    Ok(Written { hoisted, bytes })
+    Ok(Written {
+        hoisted,
+        bytes,
+        unmatched: Vec::new(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Existing, Library, write_c};
+    use super::{Existing, Library, write_c, write_entries};
     use borer_engine::analysis::{Analysis, Overlay};
     use borer_engine::program::{Arch, Program, Section};
 
@@ -236,5 +256,41 @@ mod tests {
         let caller = c.find(" sub_1010()\n{").unwrap_or_else(|| panic!("{c}"));
         assert!(leaf < leaf_def && leaf_def < caller, "{c}");
         assert_eq!(c.matches("\nuint32_t leaf_one();").count(), 1, "{c}");
+    }
+
+    /// An `--only` entry no function starts at, even after gap recovery, is
+    /// named in the summary rather than dropped without a word.
+    ///
+    /// # Panics
+    ///
+    /// When the summary does not name it.
+    #[test]
+    fn an_only_entry_no_function_starts_at_is_named() {
+        let mut code = vec![0xccu8; 0x10];
+        code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 1; ret
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let mut a = Analysis::compute(&p);
+        let dir = std::env::temp_dir().join(format!("borer-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let out = dir.join("o.c").display().to_string();
+        let only = [0x1000, 0x1008];
+        let w = write_entries(
+            &p,
+            &mut a,
+            &Overlay::default(),
+            Library::Skip,
+            Some(&only),
+            &out,
+            Existing::Replace,
+        )
+        .expect("writes");
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        assert_eq!(w.unmatched, vec![0x1008]);
+        assert!(
+            w.line(&out).contains("no function starts at 0x1008"),
+            "{}",
+            w.line(&out)
+        );
     }
 }
