@@ -19,7 +19,9 @@ use super::super::lift::{self, Env};
 use super::super::{Ctx, Shape, declared_arity, new_ctx, pointee_type};
 use super::{decode_blocks, live};
 use crate::analysis::{Analysis, Function, Overlay};
-use crate::isa::a32::{Block, DpKind, Flow, Index, Insn, Offset, Op as AOp, Operand, PC, Reg, SP};
+use crate::isa::a32::{
+    Block, Cond, DpKind, Flow, Index, Insn, Offset, Op as AOp, Operand, PC, Reg, SP,
+};
 use crate::program::Program;
 
 /// Most paths the parameter walk follows from the entry.
@@ -291,6 +293,115 @@ pub(in crate::analysis::decompile) fn arg_regs(ctx: &Ctx<'_>, entry: u64) -> Opt
     ))
 }
 
+/// Maximum exact offsets kept per register before recording an outer span.
+const OFFSETS_MAX: usize = 64;
+
+/// Maximum intra-block states before collapsing into one merged state.
+const BLOCK_STATES_MAX: usize = 32;
+
+/// Reachable stack-pointer byte offsets for a register.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct OffsetSet {
+    /// Exact byte offsets from the entry stack pointer, up to [`OFFSETS_MAX`].
+    offsets: BTreeSet<i64>,
+    /// Outer `[lo, hi]` byte-offset bounds when merged sets exceed [`OFFSETS_MAX`].
+    span: Option<(i64, i64)>,
+    /// Relative byte offsets written through this register value.
+    rel_written: BTreeSet<i64>,
+    /// Whether the register holds a single definite offset on all merged paths.
+    definite: bool,
+}
+
+impl OffsetSet {
+    /// Creates a definite singleton offset set at `d`.
+    fn single(d: i64) -> Self {
+        Self {
+            offsets: BTreeSet::from([d]),
+            span: None,
+            rel_written: BTreeSet::new(),
+            definite: true,
+        }
+    }
+
+    /// Shifts every offset in the set by `delta`.
+    fn shifted(&self, delta: i64) -> Self {
+        Self {
+            offsets: self
+                .offsets
+                .iter()
+                .map(|&x| x.saturating_add(delta))
+                .collect(),
+            span: self
+                .span
+                .map(|(lo, hi)| (lo.saturating_add(delta), hi.saturating_add(delta))),
+            rel_written: self
+                .rel_written
+                .iter()
+                .map(|&w| w.saturating_sub(delta))
+                .collect(),
+            definite: self.definite,
+        }
+    }
+
+    /// Returns the single offset when this set is a definite singleton.
+    fn definite_offset(&self) -> Option<i64> {
+        (self.definite && self.span.is_none() && self.offsets.len() == 1)
+            .then(|| *self.offsets.iter().next().unwrap_or(&0))
+    }
+
+    /// Unions two offset sets, preserving `definite` only when both are the
+    /// same definite singleton and `all_have` holds.
+    fn union(&self, other: &Self, all_have: bool) -> Self {
+        if self.offsets == other.offsets
+            && self.span == other.span
+            && self.definite
+            && other.definite
+            && all_have
+        {
+            return Self {
+                offsets: self.offsets.clone(),
+                span: self.span,
+                rel_written: self
+                    .rel_written
+                    .intersection(&other.rel_written)
+                    .copied()
+                    .collect(),
+                definite: true,
+            };
+        }
+        let mut offsets: BTreeSet<i64> = self.offsets.union(&other.offsets).copied().collect();
+        let mut span = match (self.span, other.span) {
+            (Some((l1, h1)), Some((l2, h2))) => Some((l1.min(l2), h1.max(h2))),
+            (Some(s), None) | (None, Some(s)) => Some(s),
+            (None, None) => None,
+        };
+        if offsets.len() > OFFSETS_MAX {
+            let lo = *offsets.first().unwrap_or(&0);
+            let hi = *offsets.last().unwrap_or(&0);
+            span = Some(span.map_or((lo, hi), |(l, h)| (l.min(lo), h.max(hi))));
+            while offsets.len() > OFFSETS_MAX {
+                let first = *offsets.first().unwrap_or(&0);
+                let last = *offsets.last().unwrap_or(&0);
+                if first.saturating_abs() > last.saturating_abs() {
+                    offsets.pop_first();
+                } else {
+                    offsets.pop_last();
+                }
+            }
+        }
+        Self {
+            offsets,
+            span,
+            rel_written: BTreeSet::new(),
+            definite: false,
+        }
+    }
+}
+
+/// Intra-block state: known condition-pair mask, true condition-pair mask,
+/// written-byte mask, and register-to-SP displacements.
+type BlockState = (u8, u8, u32, BTreeMap<Reg, OffsetSet>);
+
 /// Counts stack parameter words at `[sp_entry + 4 * k]` read before being
 /// written on any path from `entry`.
 ///
@@ -301,75 +412,239 @@ pub(in crate::analysis::decompile) fn arg_regs(ctx: &Ctx<'_>, entry: u64) -> Opt
 /// * `entry` - Index of the entry block.
 fn stack_params_read(code: &[Vec<Insn>], succs: &[Vec<usize>], entry: usize) -> u8 {
     /// Block index, written-byte bitmask, and register-to-SP displacements.
-    type SeenState = (usize, u32, Vec<(Reg, i64)>);
+    type SeenState = (usize, u32, Vec<(Reg, OffsetSet)>);
     let mut max_slot: Option<u8> = None;
     let mut seen: BTreeSet<SeenState> = BTreeSet::new();
-    let mut work = vec![(entry, 0u32, BTreeMap::from([(SP, 0i64)]))];
-    while let Some((b, mut written, mut frame)) = work.pop() {
-        let key: Vec<(Reg, i64)> = frame.iter().map(|(&r, &d)| (r, d)).collect();
+    let mut work = vec![(entry, 0u32, BTreeMap::from([(SP, OffsetSet::single(0))]))];
+    while let Some((b, written, frame)) = work.pop() {
+        let key: Vec<(Reg, OffsetSet)> = frame.iter().map(|(&r, d)| (r, d.clone())).collect();
         if seen.len() >= PATHS_MAX || !seen.insert((b, written, key)) {
             continue;
         }
         let Some(instrs) = code.get(b) else { continue };
+        let mut states: Vec<BlockState> = vec![(0, 0, written, frame)];
         for i in instrs {
-            if let Some((is_load, at, bytes)) = mem_span(i, &frame) {
-                for b_off in at..at + bytes {
-                    if (0..STACK_PARAMS_MAX * 4).contains(&b_off) {
-                        if is_load {
-                            if written & (1u32 << b_off) == 0
-                                && let Ok(slot) = u8::try_from(b_off / 4)
-                            {
-                                max_slot = Some(max_slot.map_or(slot + 1, |m| m.max(slot + 1)));
-                            }
-                        } else {
-                            written |= 1u32 << b_off;
-                        }
-                    }
-                }
+            let resets = i.sets
+                || i.flow() == Flow::Call
+                || matches!(i.op, AOp::Msr { .. } | AOp::Vmrs { .. });
+            let mut next = Vec::with_capacity(states.len());
+            for s in states {
+                step_block_state(i, s, resets, &mut max_slot, &mut next);
             }
-            step_frame(i, &mut frame);
+            next.sort_unstable();
+            next.dedup();
+            if next.len() > BLOCK_STATES_MAX {
+                collapse_states(&mut next);
+            }
+            states = next;
+        }
+        if states.len() > 8 {
+            collapse_states(&mut states);
         }
         for &s in succs.get(b).into_iter().flatten() {
-            work.push((s, written, frame.clone()));
+            for (_, _, w, f) in &states {
+                work.push((s, *w, f.clone()));
+            }
         }
     }
     max_slot.unwrap_or(0)
 }
 
-/// Byte range `(is_load, start_offset, byte_len)` of a stack-relative memory op.
+/// Merges multiple intra-block states into one conservative state without
+/// dropping reachable register offsets.
+fn collapse_states(states: &mut Vec<BlockState>) {
+    if states.len() <= 1 {
+        for (k, h, _, _) in states.iter_mut() {
+            *k = 0;
+            *h = 0;
+        }
+        return;
+    }
+    let total = states.len();
+    let written = states.iter().fold(!0u32, |acc, (_, _, w, _)| acc & *w);
+    let mut counts: BTreeMap<Reg, usize> = BTreeMap::new();
+    let mut merged: BTreeMap<Reg, OffsetSet> = BTreeMap::new();
+    for (_, _, _, f) in states.iter() {
+        for (&r, offs) in f {
+            *counts.entry(r).or_default() += 1;
+            merged
+                .entry(r)
+                .and_modify(|cur| *cur = cur.union(offs, true))
+                .or_insert_with(|| offs.clone());
+        }
+    }
+    for (&r, &c) in &counts {
+        if c < total
+            && let Some(offs) = merged.get_mut(&r)
+        {
+            offs.definite = false;
+        }
+    }
+    states.clear();
+    states.push((0, 0, written, merged));
+}
+
+/// Maps a condition code to its canonical pair bit and polarity.
+fn cond_bit(c: Cond) -> Option<(u8, bool)> {
+    match c {
+        Cond::Eq => Some((1 << 0, true)),
+        Cond::Ne => Some((1 << 0, false)),
+        Cond::Hs => Some((1 << 1, true)),
+        Cond::Lo => Some((1 << 1, false)),
+        Cond::Mi => Some((1 << 2, true)),
+        Cond::Pl => Some((1 << 2, false)),
+        Cond::Vs => Some((1 << 3, true)),
+        Cond::Vc => Some((1 << 3, false)),
+        Cond::Hi => Some((1 << 4, true)),
+        Cond::Ls => Some((1 << 4, false)),
+        Cond::Ge => Some((1 << 5, true)),
+        Cond::Lt => Some((1 << 5, false)),
+        Cond::Gt => Some((1 << 6, true)),
+        Cond::Le => Some((1 << 6, false)),
+        Cond::Al | Cond::Nv => None,
+    }
+}
+
+/// Advances one intra-block state across an instruction, updating `max_slot`
+/// and pushing resulting states into `next`.
+fn step_block_state(
+    i: &Insn,
+    state: BlockState,
+    resets: bool,
+    max_slot: &mut Option<u8>,
+    next: &mut Vec<BlockState>,
+) {
+    let (known, holds, written, frame) = state;
+    let apply = |mut w: u32, mut f: BTreeMap<Reg, OffsetSet>, max_slot: &mut Option<u8>| {
+        apply_mem(i, &mut f, &mut w, max_slot);
+        step_frame(i, &mut f);
+        (w, f)
+    };
+    let Some((bit, pol)) = cond_bit(i.cond) else {
+        let (w, f) = apply(written, frame, max_slot);
+        let (k, h) = if resets { (0, 0) } else { (known, holds) };
+        next.push((k, h, w, f));
+        return;
+    };
+    let with_pol = |h: u8, v: bool| if v { h | bit } else { h & !bit };
+    if known & bit != 0 {
+        if ((holds & bit) != 0) == pol {
+            let (w, f) = apply(written, frame, max_slot);
+            let (k, h) = if resets { (0, 0) } else { (known, holds) };
+            next.push((k, h, w, f));
+        } else {
+            next.push((known, holds, written, frame));
+        }
+        return;
+    }
+    let (w, f) = apply(written, frame.clone(), max_slot);
+    if w == written && f == frame && !resets {
+        next.push((known, holds, written, frame));
+        return;
+    }
+    next.push((known | bit, with_pol(holds, !pol), written, frame));
+    let (k, h) = if resets {
+        (0, 0)
+    } else {
+        (known | bit, with_pol(holds, pol))
+    };
+    next.push((k, h, w, f));
+}
+
+/// Records stack parameter loads and definite stores for one instruction.
+fn apply_mem(
+    i: &Insn,
+    frame: &mut BTreeMap<Reg, OffsetSet>,
+    written: &mut u32,
+    max_slot: &mut Option<u8>,
+) {
+    let Some((is_load, base_reg, rel, bytes)) = mem_op(i) else {
+        return;
+    };
+    let Some(offs) = frame.get_mut(&base_reg) else {
+        return;
+    };
+    let mark_load = |start: i64, end: i64, written: u32, max_slot: &mut Option<u8>| {
+        for b_off in start.max(0)..end.min(STACK_PARAMS_MAX * 4) {
+            if written & (1u32 << b_off) == 0
+                && let Ok(slot) = u8::try_from(b_off / 4)
+            {
+                *max_slot = Some(max_slot.map_or(slot + 1, |m| m.max(slot + 1)));
+            }
+        }
+    };
+    if is_load {
+        for byte_idx in 0..bytes {
+            let r_off = rel.saturating_add(byte_idx);
+            if offs.rel_written.contains(&r_off) {
+                continue;
+            }
+            for &base in &offs.offsets {
+                let at = base.saturating_add(r_off);
+                mark_load(at, at.saturating_add(1), *written, max_slot);
+            }
+            if let Some((lo, hi)) = offs.span {
+                mark_load(
+                    lo.saturating_add(r_off),
+                    hi.saturating_add(r_off).saturating_add(1),
+                    *written,
+                    max_slot,
+                );
+            }
+        }
+    } else {
+        if let Some(base) = offs.definite_offset() {
+            let at = base.saturating_add(rel);
+            for b_off in at.max(0)..at.saturating_add(bytes).min(STACK_PARAMS_MAX * 4) {
+                *written |= 1u32 << b_off;
+            }
+        }
+        if offs.rel_written.len() < OFFSETS_MAX {
+            for byte_idx in 0..bytes {
+                offs.rel_written.insert(rel.saturating_add(byte_idx));
+            }
+        }
+    }
+}
+
+/// Relative range `(is_load, base_reg, rel_offset, byte_len)` of a memory op.
 ///
 /// # Arguments
 ///
 /// * `i` - The instruction.
-/// * `frame` - Known offsets from the entry stack pointer per register.
-fn mem_span(i: &Insn, frame: &BTreeMap<Reg, i64>) -> Option<(bool, i64, i64)> {
-    let addr_at = |addr: crate::isa::a32::Addr| -> Option<i64> {
-        let &base = frame.get(&addr.base)?;
+fn mem_op(i: &Insn) -> Option<(bool, Reg, i64, i64)> {
+    let addr_rel = |addr: crate::isa::a32::Addr| -> Option<(Reg, i64)> {
         match (addr.index, addr.offset) {
-            (Index::Post, _) => Some(base),
-            (Index::Offset | Index::Pre, Offset::Imm(d)) => Some(base + i64::from(d)),
+            (Index::Post, _) => Some((addr.base, 0)),
+            (Index::Offset | Index::Pre, Offset::Imm(d)) => Some((addr.base, i64::from(d))),
             _ => None,
         }
     };
     match i.op {
         AOp::Load { width, rt, addr } | AOp::LoadEx { width, rt, addr } if rt != PC => {
-            Some((true, addr_at(addr)?, i64::from(width.bytes())))
+            let (b, rel) = addr_rel(addr)?;
+            Some((true, b, rel, i64::from(width.bytes())))
         }
-        AOp::LoadDual { rt, rt2, addr } if rt != PC && rt2 != PC => Some((true, addr_at(addr)?, 8)),
-        AOp::VLoad { vd, addr } => Some((
-            true,
-            addr_at(addr)?,
-            if matches!(vd, Reg::D(_)) { 8 } else { 4 },
-        )),
+        AOp::LoadDual { rt, rt2, addr } if rt != PC && rt2 != PC => {
+            let (b, rel) = addr_rel(addr)?;
+            Some((true, b, rel, 8))
+        }
+        AOp::VLoad { vd, addr } => {
+            let (b, rel) = addr_rel(addr)?;
+            Some((true, b, rel, if matches!(vd, Reg::D(_)) { 8 } else { 4 }))
+        }
         AOp::Store { width, addr, .. } | AOp::StoreEx { width, addr, .. } => {
-            Some((false, addr_at(addr)?, i64::from(width.bytes())))
+            let (b, rel) = addr_rel(addr)?;
+            Some((false, b, rel, i64::from(width.bytes())))
         }
-        AOp::StoreDual { addr, .. } => Some((false, addr_at(addr)?, 8)),
-        AOp::VStore { vd, addr } => Some((
-            false,
-            addr_at(addr)?,
-            if matches!(vd, Reg::D(_)) { 8 } else { 4 },
-        )),
+        AOp::StoreDual { addr, .. } => {
+            let (b, rel) = addr_rel(addr)?;
+            Some((false, b, rel, 8))
+        }
+        AOp::VStore { vd, addr } => {
+            let (b, rel) = addr_rel(addr)?;
+            Some((false, b, rel, if matches!(vd, Reg::D(_)) { 8 } else { 4 }))
+        }
         AOp::Ldm {
             rn, regs, block, ..
         }
@@ -380,21 +655,19 @@ fn mem_span(i: &Insn, frame: &BTreeMap<Reg, i64>) -> Option<(bool, i64, i64)> {
             if !is_load && regs & 0x8000 != 0 {
                 return None;
             }
-            let &base = frame.get(&rn)?;
             let total = 4 * i64::from(regs.count_ones());
-            let start = base
-                + match block {
-                    Block::Ia => 0,
-                    Block::Ib => 4,
-                    Block::Da => 4 - total,
-                    Block::Db => -total,
-                };
+            let rel = match block {
+                Block::Ia => 0,
+                Block::Ib => 4,
+                Block::Da => 4 - total,
+                Block::Db => -total,
+            };
             let bytes = if is_load {
                 4 * i64::from((regs & 0x7fff).count_ones())
             } else {
                 total
             };
-            Some((is_load, start, bytes))
+            Some((is_load, rn, rel, bytes))
         }
         AOp::VLdm {
             rn,
@@ -410,11 +683,10 @@ fn mem_span(i: &Insn, frame: &BTreeMap<Reg, i64>) -> Option<(bool, i64, i64)> {
             db,
             ..
         } => {
-            let &base = frame.get(&rn)?;
             let step = if matches!(first, Reg::D(_)) { 8 } else { 4 };
             let bytes = step * i64::from(count);
-            let start = if db { base - bytes } else { base };
-            Some((matches!(i.op, AOp::VLdm { .. }), start, bytes))
+            let rel = if db { -bytes } else { 0 };
+            Some((matches!(i.op, AOp::VLdm { .. }), rn, rel, bytes))
         }
         _ => None,
     }
@@ -426,7 +698,7 @@ fn mem_span(i: &Insn, frame: &BTreeMap<Reg, i64>) -> Option<(bool, i64, i64)> {
 ///
 /// * `i` - The instruction.
 /// * `frame` - Known offsets from the entry stack pointer per register.
-fn step_frame(i: &Insn, frame: &mut BTreeMap<Reg, i64>) {
+fn step_frame(i: &Insn, frame: &mut BTreeMap<Reg, OffsetSet>) {
     if i.flow() == Flow::Call {
         frame.retain(|&r, _| r == SP || a32_abi::callee_saved(r));
         return;
@@ -441,8 +713,11 @@ fn step_frame(i: &Insn, frame: &mut BTreeMap<Reg, i64>) {
             rn,
             src: Operand::Imm { value, .. },
         } => {
-            if let Some(&b) = frame.get(&rn) {
-                frame.insert(rd, b + i64::from(value.cast_signed()));
+            if let Some(b) = frame
+                .get(&rn)
+                .map(|b| b.shifted(i64::from(value.cast_signed())))
+            {
+                frame.insert(rd, b);
             } else {
                 frame.remove(&rd);
             }
@@ -453,8 +728,11 @@ fn step_frame(i: &Insn, frame: &mut BTreeMap<Reg, i64>) {
             rn,
             src: Operand::Imm { value, .. },
         } => {
-            if let Some(&b) = frame.get(&rn) {
-                frame.insert(rd, b - i64::from(value.cast_signed()));
+            if let Some(b) = frame
+                .get(&rn)
+                .map(|b| b.shifted(-i64::from(value.cast_signed())))
+            {
+                frame.insert(rd, b);
             } else {
                 frame.remove(&rd);
             }
@@ -465,7 +743,7 @@ fn step_frame(i: &Insn, frame: &mut BTreeMap<Reg, i64>) {
             src: Operand::Reg { rm, amount: 0, .. },
             ..
         } => {
-            if let Some(&b) = frame.get(&rm) {
+            if let Some(b) = frame.get(&rm).cloned() {
                 frame.insert(rd, b);
             } else {
                 frame.remove(&rd);
@@ -485,7 +763,7 @@ fn step_frame(i: &Insn, frame: &mut BTreeMap<Reg, i64>) {
 ///
 /// * `i` - The instruction.
 /// * `frame` - Known offsets from the entry stack pointer per register.
-fn step_frame_mem(i: &Insn, frame: &mut BTreeMap<Reg, i64>) -> bool {
+fn step_frame_mem(i: &Insn, frame: &mut BTreeMap<Reg, OffsetSet>) -> bool {
     let wback = match i.op {
         AOp::Load { rt, addr, .. }
         | AOp::LoadEx { rt, addr, .. }
@@ -505,7 +783,7 @@ fn step_frame_mem(i: &Insn, frame: &mut BTreeMap<Reg, i64>) -> bool {
             && let Offset::Imm(d) = addr.offset
             && let Some(b) = frame.get_mut(&addr.base)
         {
-            *b += i64::from(d);
+            *b = b.shifted(i64::from(d));
         } else {
             frame.remove(&addr.base);
         }
@@ -540,7 +818,7 @@ fn step_frame_mem(i: &Insn, frame: &mut BTreeMap<Reg, i64>) -> bool {
                 Block::Da | Block::Db => -bytes,
             };
             if let Some(d) = frame.get_mut(&rn) {
-                *d += delta;
+                *d = d.shifted(delta);
             }
             true
         }
@@ -562,7 +840,7 @@ fn step_frame_mem(i: &Insn, frame: &mut BTreeMap<Reg, i64>) -> bool {
             let bytes = step * i64::from(count);
             let delta = if db { -bytes } else { bytes };
             if let Some(d) = frame.get_mut(&rn) {
-                *d += delta;
+                *d = d.shifted(delta);
             }
             true
         }

@@ -209,6 +209,14 @@ fn normalize_while_to_for_break(lines: &mut Vec<String>, body_start: usize) {
     let cond = cond.to_owned();
     if lines[body_start + 11] != format!("  {idx_var} += 1;")
         || lines[body_start + 7] != "      return a1;"
+        || lines[body_start + 12] != "}"
+        || lines[body_start + 4..body_start + 11].iter().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("while ")
+                || t.starts_with("for ")
+                || t.starts_with("do ")
+                || t.starts_with("switch ")
+        })
     {
         return;
     }
@@ -285,7 +293,7 @@ fn normalize_counted_and_block_xor_loops(lines: &mut Vec<String>, body_start: us
     {
         let call = lines[body_start + 5]
             .trim()
-            .replace("*(uint64_t*)var1, var2", "a2[var1], a2");
+            .replace("*(uint64_t*)var1, var2", "((uint64_t*)a2)[var1], a2");
         let new_body = vec![
             String::from("for (var1 = 0; (int32_t)var1 < a1; var1 += 1) {"),
             format!("  {call}"),

@@ -257,11 +257,20 @@ fn spilled_u32_params(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) ->
                 && instr.op1_kind() == OpKind::Register
                 && instr.memory_size().size() == 4
                 && lift::canon(instr.op1_register(), 64) == canon;
+            let forwarded = matches!(
+                instr.flow_control(),
+                FlowControl::Call
+                    | FlowControl::IndirectCall
+                    | FlowControl::UnconditionalBranch
+                    | FlowControl::IndirectBranch
+            ) && (instr.flow_control() == FlowControl::IndirectCall
+                || lift::forwarded_reads(ctx, &mut factory, instr).contains(&canon));
             let info = factory.info(instr);
-            let reads = info.used_registers().iter().any(|u| {
-                lift::canon(u.register(), 64) == canon
-                    && matches!(u.access(), OpAccess::Read | OpAccess::ReadWrite)
-            });
+            let reads = forwarded
+                || info.used_registers().iter().any(|u| {
+                    lift::canon(u.register(), 64) == canon
+                        && matches!(u.access(), OpAccess::Read | OpAccess::ReadWrite)
+                });
             let kills = info.used_registers().iter().any(|u| {
                 lift::canon(u.register(), 64) == canon
                     && u.register().size() >= 4
@@ -283,7 +292,7 @@ fn spilled_u32_params(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) ->
             continue;
         }
         let other_read = code.iter().enumerate().any(|(idx, instrs)| {
-            idx != entry && block_reads_before_kill(&mut factory, instrs, canon)
+            idx != entry && block_reads_before_kill(ctx, &mut factory, instrs, canon)
         });
         if !other_read {
             out.insert(pos);
@@ -294,16 +303,27 @@ fn spilled_u32_params(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) ->
 
 /// Tells whether `instrs` reads `canon` before overwriting it or calling.
 fn block_reads_before_kill(
+    ctx: &Ctx<'_>,
     factory: &mut InstructionInfoFactory,
     instrs: &[Instruction],
     canon: Register,
 ) -> bool {
     for instr in instrs {
+        let forwarded = matches!(
+            instr.flow_control(),
+            FlowControl::Call
+                | FlowControl::IndirectCall
+                | FlowControl::UnconditionalBranch
+                | FlowControl::IndirectBranch
+        ) && (instr.flow_control() == FlowControl::IndirectCall
+            || lift::forwarded_reads(ctx, factory, instr).contains(&canon));
         let info = factory.info(instr);
-        if info.used_registers().iter().any(|u| {
-            lift::canon(u.register(), 64) == canon
-                && matches!(u.access(), OpAccess::Read | OpAccess::ReadWrite)
-        }) {
+        if forwarded
+            || info.used_registers().iter().any(|u| {
+                lift::canon(u.register(), 64) == canon
+                    && matches!(u.access(), OpAccess::Read | OpAccess::ReadWrite)
+            })
+        {
             return true;
         }
         if info.used_registers().iter().any(|u| {

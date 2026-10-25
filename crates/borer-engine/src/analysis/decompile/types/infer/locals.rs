@@ -425,6 +425,7 @@ fn check_pointer_read(
         Some(Slot::Pointer(t)) => {
             let mapped = match t.as_str() {
                 "char *" => "char*",
+                "FILE *" => "FILE*",
                 "acl_t" => "acl_t",
                 "acl_entry_t" => "acl_entry_t",
                 _ => return false,
@@ -572,6 +573,7 @@ fn classify_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsTyp
         };
         return match decl.ret {
             "char *" | "const char *" => RhsType::Known("char*"),
+            "FILE *" => RhsType::Known("FILE*"),
             "void *" => RhsType::Neutral,
             _ => RhsType::NonPointer,
         };
@@ -620,6 +622,9 @@ fn classify_ident_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> 
                 }
                 if p == format!("char **{rhs}") || p == format!("const char **{rhs}") {
                     return RhsType::Known("char**");
+                }
+                if p == format!("FILE *{rhs}") {
+                    return RhsType::Known("FILE*");
                 }
                 if let Some((ty, n)) = p.rsplit_once(' ')
                     && n == rhs
