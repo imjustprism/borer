@@ -441,7 +441,7 @@ impl Lifter for A64 {
     type Insn = a64::Insn;
 
     fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<a64::Insn>> {
-        lift_a64::decode_blocks(ctx, f)
+        lift_a64::decode_blocks(ctx.program, f)
     }
 
     fn start(i: &a64::Insn) -> u64 {
@@ -577,7 +577,7 @@ impl Lifter for A32 {
     type Insn = a32::Insn;
 
     fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<a32::Insn>> {
-        lift_a32::decode_blocks(ctx, f)
+        lift_a32::decode_blocks(ctx.program, f)
     }
 
     fn start(i: &a32::Insn) -> u64 {

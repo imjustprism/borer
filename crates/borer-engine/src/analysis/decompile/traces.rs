@@ -26,9 +26,10 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use crate::isa::x86::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind};
+use crate::isa::{Isa, a32, a64};
 
 use super::expr_render::bare;
-use super::{decompile_plain_full, lift, matching_paren, name_fields};
+use super::{decompile_plain_full, lift, lift_a32, lift_a64, matching_paren, name_fields};
 use crate::analysis::render::{epilog_helper, frame_helper};
 use crate::analysis::{
     Analysis, BlockTerm, Function, Overlay, decompiled_cached, is_executable_va, name_of, striped,
@@ -391,26 +392,173 @@ fn quiet(notes: &[&str], name: &str) -> Quiet {
     Quiet::Shown
 }
 
-/// Decodes the instructions of one block.
+/// Where a call or jump of the binary goes, as the check reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dest {
+    /// A direct target.
+    Near(u64),
+    /// The address of the slot it reads its target from.
+    Slot(u64),
+    /// A register or memory no constant names.
+    Unknown,
+}
+
+/// A call in a block, as the check reads it.
+#[derive(Debug, Clone, Copy)]
+struct Site {
+    /// Where it goes.
+    dest: Dest,
+    /// Its address.
+    at: u64,
+    /// Whether it goes to a frame helper, which builds or tears down the
+    /// caller's frame and which the text writes as no call at all.
+    helper: bool,
+    /// Whether it runs only under a condition no block of the graph tests
+    /// (an ARM32 predicated `bl`), so the text may write it or not.
+    guarded: bool,
+}
+
+/// What the check reads of one block: its calls, in order, and its last
+/// instruction's address and, for a jump, where it goes.
+#[derive(Debug, Default)]
+struct BlockCode {
+    /// The calls.
+    calls: Vec<Site>,
+    /// The last instruction, `None` when nothing decodes.
+    last: Option<(u64, Dest)>,
+}
+
+/// Decodes every block of a function for the check, in block order and in
+/// the program's instruction set.
+///
+/// An x86 call or jump goes near, through a slot, or through a register;
+/// an arm64 or ARM32 one goes near or through a register. The ARM blocks
+/// are the lifter's ([`lift_a32::decode_blocks`]), so an `IT` block's
+/// conditions carry across blocks and a guarded instruction behind the
+/// test its block was split off at runs unconditionally.
 ///
 /// # Arguments
 ///
 /// * `program` - The image.
-/// * `bitness` - 32 or 64.
+/// * `analysis` - The functions, for the frame helpers' names.
+/// * `overlay` - The names in force.
+/// * `f` - The function.
+fn function_code(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    f: &Function,
+) -> Vec<BlockCode> {
+    match program.arch.isa() {
+        Some(Isa::X86 { bits }) => f
+            .blocks
+            .iter()
+            .map(|b| x86_block(program, analysis, overlay, bits, b.start, b.end))
+            .collect(),
+        Some(Isa::A64) => arm_code(&lift_a64::decode_blocks(program, f), |i| {
+            (i.va, i.target(), i.flow == a64::Flow::Call, false)
+        }),
+        Some(Isa::A32) => arm_code(&lift_a32::decode_blocks(program, f), |i| {
+            (
+                i.va & !a32::SKIP,
+                i.target(),
+                i.flow() == a32::Flow::Call,
+                i.predicated(),
+            )
+        }),
+        None => f.blocks.iter().map(|_| BlockCode::default()).collect(),
+    }
+}
+
+/// Reads decoded ARM blocks for the check.
+///
+/// # Arguments
+///
+/// * `blocks` - Each block's instructions.
+/// * `read` - An instruction's address, direct target, whether it calls
+///   and whether it runs under a condition.
+fn arm_code<I>(
+    blocks: &[Vec<I>],
+    read: impl Fn(&I) -> (u64, Option<u64>, bool, bool),
+) -> Vec<BlockCode> {
+    blocks
+        .iter()
+        .map(|v| {
+            let mut out = BlockCode::default();
+            for i in v {
+                let (at, target, call, guarded) = read(i);
+                let dest = target.map_or(Dest::Unknown, Dest::Near);
+                if call {
+                    out.calls.push(Site {
+                        dest,
+                        at,
+                        helper: false,
+                        guarded,
+                    });
+                }
+                out.last = Some((at, dest));
+            }
+            out
+        })
+        .collect()
+}
+
+/// Decodes one x86 block for the check.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - The functions, for the frame helpers' names.
+/// * `overlay` - The names in force.
+/// * `bits` - 32 or 64.
 /// * `start` - The block's first address.
 /// * `end` - The address past its last instruction.
-fn block_code(program: &Program, bitness: u32, start: u64, end: u64) -> Vec<Instruction> {
+fn x86_block(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    bits: u32,
+    start: u64,
+    end: u64,
+) -> BlockCode {
+    let mut out = BlockCode::default();
     let len = usize::try_from(end.saturating_sub(start)).unwrap_or(0);
     let Some(bytes) = program
         .read_va_upto(start, len)
         .filter(|_| is_executable_va(program, start))
     else {
-        return Vec::new();
+        return out;
     };
-    Decoder::with_ip(bitness, bytes, start, DecoderOptions::NONE)
+    let dest = |i: &Instruction| {
+        if matches!(
+            i.op0_kind(),
+            OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+        ) {
+            Dest::Near(i.near_branch_target())
+        } else {
+            lift::static_target(i).map_or(Dest::Unknown, Dest::Slot)
+        }
+    };
+    let mut last = None;
+    for i in Decoder::with_ip(bits, bytes, start, DecoderOptions::NONE)
         .into_iter()
         .take_while(|i| !i.is_invalid())
-        .collect()
+    {
+        if matches!(
+            i.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            out.calls.push(Site {
+                dest: dest(&i),
+                at: i.ip(),
+                helper: frame_helper(analysis, overlay, &i) || epilog_helper(analysis, overlay, &i),
+                guarded: false,
+            });
+        }
+        last = Some(i);
+    }
+    out.last = last.map(|i| (i.ip(), dest(&i)));
+    out
 }
 
 /// The name of the import a slot holds, as the lifter writes it.
@@ -432,9 +580,6 @@ fn import_at(program: &Program, analysis: &Analysis, slot: u64) -> Option<String
 
 /// What a call or jump out of the function reaches, as a callee.
 ///
-/// A frame helper's call builds or tears down the caller's frame, which
-/// the text writes as no call at all.
-///
 /// # Arguments
 ///
 /// * `program` - The image.
@@ -442,7 +587,8 @@ fn import_at(program: &Program, analysis: &Analysis, slot: u64) -> Option<String
 /// * `overlay` - The names in force.
 /// * `notes` - The text's header notes.
 /// * `names` - The names met so far, and what each target read as.
-/// * `i` - The call or jump.
+/// * `dest` - Where the call or jump goes.
+/// * `helper` - Whether it is a frame helper's call ([`Site::helper`]).
 ///
 /// # Returns
 ///
@@ -456,27 +602,21 @@ fn callee(
     overlay: &Overlay,
     notes: &[&str],
     names: &mut Names,
-    i: &Instruction,
+    dest: Dest,
+    helper: bool,
 ) -> Option<Callee> {
-    let near = matches!(
-        i.op0_kind(),
-        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
-    );
-    let key = if near {
-        (true, i.near_branch_target())
-    } else {
-        let Some(slot) = lift::static_target(i) else {
-            return Some(Callee::Maybe(None));
-        };
-        (false, slot)
+    let key = match dest {
+        Dest::Near(t) => (true, t),
+        Dest::Slot(slot) => (false, slot),
+        Dest::Unknown => return Some(Callee::Maybe(None)),
     };
     if let Some(c) = names.seen.get(&key) {
         return *c;
     }
-    let c = if !near {
+    let c = if !key.0 {
         let import = import_at(program, analysis, key.1);
         Some(import.map_or(Callee::Maybe(None), |n| Callee::Named(names.intern(&n))))
-    } else if frame_helper(analysis, overlay, i) || epilog_helper(analysis, overlay, i) {
+    } else if helper {
         None
     } else {
         let full = name_of(analysis, overlay, key.1);
@@ -526,7 +666,6 @@ fn binary_graph(
     notes: &[&str],
     names: &mut Names,
 ) -> (Graph, Vec<u32>) {
-    let bitness = program.arch.bitness().unwrap_or(64);
     let mut g = Graph::default();
     let halt = g.add(Node::Halt, f.entry);
     let heads: Vec<u32> = f
@@ -534,19 +673,28 @@ fn binary_graph(
         .iter()
         .map(|b| g.add(Node::Go(Vec::new()), b.start))
         .collect();
+    let code = function_code(program, analysis, overlay, f);
     for (k, b) in f.blocks.iter().enumerate() {
-        let code = block_code(program, bitness, b.start, b.end);
+        let (sites, last) = code.get(k).map_or((&[][..], None), |c| (&*c.calls, c.last));
         let mut calls: Vec<(Callee, u64)> = Vec::new();
-        for i in &code {
-            if matches!(
-                i.flow_control(),
-                FlowControl::Call | FlowControl::IndirectCall
-            ) && let Some(c) = callee(program, analysis, overlay, notes, names, i)
-            {
-                calls.push((c, i.ip()));
+        for site in sites {
+            let c = callee(
+                program,
+                analysis,
+                overlay,
+                notes,
+                names,
+                site.dest,
+                site.helper,
+            );
+            let c = match c {
+                Some(Callee::Named(n)) if site.guarded => Some(Callee::Maybe(Some(n))),
+                c => c,
+            };
+            if let Some(c) = c {
+                calls.push((c, site.at));
             }
         }
-        let last = code.last();
         let succs = live.succs.get(k).map_or(&[][..], Vec::as_slice);
         let mut next: Vec<u32> = succs
             .iter()
@@ -558,11 +706,13 @@ fn binary_graph(
             .any(|s| f.blocks.binary_search_by_key(s, |b| b.start).is_err())
             || (b.term == BlockTerm::Fall && b.successors.is_empty());
         let end = match b.term {
-            BlockTerm::Ret => g.add(Node::Ret, last.map_or(b.start, Instruction::ip)),
+            BlockTerm::Ret => g.add(Node::Ret, last.map_or(b.start, |(at, _)| at)),
             BlockTerm::Invalid => halt,
             BlockTerm::Jmp | BlockTerm::Indirect if next.is_empty() => {
-                let out = last.and_then(|i| callee(program, analysis, overlay, notes, names, i));
-                let at = last.map_or(b.start, Instruction::ip);
+                let out = last.and_then(|(_, dest)| {
+                    callee(program, analysis, overlay, notes, names, dest, false)
+                });
+                let at = last.map_or(b.start, |(at, _)| at);
                 match out {
                     Some(Callee::Maybe(Some(k))) if names.dropped.contains(&k) => halt,
                     Some(c) => {

@@ -15,8 +15,9 @@
 
 use borer_engine::analysis::decompile::{cleanup, decompile, decompile_raw};
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::isa::a32::{Mode, Modes};
 use borer_engine::num::{from_usize, lo32, saturating_usize};
-use borer_engine::program::{Arch, Program, Section};
+use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 use std::collections::BTreeSet;
 
 /// Where the generated function starts.
@@ -1785,4 +1786,132 @@ fn a_cleanup_tail_that_calls_keeps_its_goto() {
         panic!("the fixture did not decompile");
     };
     assert_eq!(out.matches("sub_1100();").count(), 1, "{out}");
+}
+
+/// Returns a raw ARM image of `code` at [`CODE`], with `names` at their
+/// offsets.
+///
+/// # Arguments
+///
+/// * `code` - The instructions' bytes.
+/// * `arch` - [`Arch::Arm64`] or [`Arch::Arm`].
+/// * `mode` - The ARM32 instruction set of the whole image, `None` for
+///   arm64.
+/// * `names` - Each function's name and offset from [`CODE`].
+fn arm_image(code: Vec<u8>, arch: Arch, mode: Option<Mode>, names: &[(&str, u64)]) -> Program {
+    let len = from_usize(code.len());
+    let text = Section::mapped(".text", CODE, 0, len, false, true);
+    let mut p = Program::raw(code, arch, 0, Some(CODE), vec![text]);
+    p.symbols = names
+        .iter()
+        .map(|&(name, off)| Symbol {
+            name: name.to_owned(),
+            addr: CODE + off,
+            kind: SymbolKind::Local,
+        })
+        .collect();
+    if let Some(mode) = mode {
+        p.modes = Modes::from_marks(vec![(CODE, mode)]);
+    }
+    p
+}
+
+/// Checks that the text of the function at [`CODE`] agrees with its graph,
+/// and that the same text without the line calling `dropped` does not.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `dropped` - A callee the function calls on one path only.
+fn agrees_until_a_call_is_dropped(p: &Program, dropped: &str) {
+    use borer_engine::analysis::decompile::traces::{Side, Structure, check_structure};
+    let a = Analysis::compute(p);
+    let o = Overlay::default();
+    let out = decompile(p, &a, &o, CODE).unwrap_or_default();
+    let call = format!("{dropped}(");
+    assert!(out.contains(&call), "{out}");
+    assert_eq!(
+        check_structure(p, &a, &o, CODE, &out),
+        Structure::Agrees,
+        "{out}"
+    );
+    let broken: String = out
+        .lines()
+        .filter(|l| !l.contains(&call))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let verdict = check_structure(p, &a, &o, CODE, &broken);
+    assert!(
+        matches!(&verdict, Structure::Disagrees(d) if d.side == Side::Binary),
+        "{verdict:?}\n{broken}"
+    );
+}
+
+/// The structure check reads arm64 code as arm64.
+///
+/// It decoded every block as x86, so an arm64 function's calls were
+/// whatever the bytes said as x86. `f` calls `first_step` when `x0` is
+/// not zero, then `second_step`: the text agrees, and loses the agreement
+/// when its call to `first_step` is gone.
+#[test]
+fn the_structure_check_reads_arm64_calls() {
+    let words: [u32; 11] = [
+        0xa9bf_7bfd, // ASM: stp x29, x30, [sp, #-16]!
+        0x9100_03fd, // ASM: mov x29, sp
+        0xb400_0040, // ASM: cbz x0, 0x1010
+        0x9400_0004, // ASM: bl first_step
+        0x9400_0004, // ASM: bl second_step
+        0xa8c1_7bfd, // ASM: ldp x29, x30, [sp], #16
+        0xd65f_03c0, // ASM: ret
+        0x9100_0400, // ASM: add x0, x0, #1 (first_step)
+        0xd65f_03c0, // ASM: ret
+        0x9100_0800, // ASM: add x0, x0, #2 (second_step)
+        0xd65f_03c0, // ASM: ret
+    ];
+    let code = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let names = [("f", 0), ("first_step", 0x1c), ("second_step", 0x24)];
+    agrees_until_a_call_is_dropped(&arm_image(code, Arch::Arm64, None, &names), "first_step");
+}
+
+/// The structure check reads ARM32 code as ARM32, a predicated call
+/// among it.
+///
+/// `blne first_step` runs under the compare before it: in A32 by its
+/// condition field, in T32 by the `IT` block the instruction after the
+/// `it` is split off from. Either way the text calls `first_step` under
+/// the `if` the graph tests, and loses the agreement without that call.
+#[test]
+fn the_structure_check_reads_arm32_predicated_calls() {
+    let arm: [u32; 9] = [
+        0xe92d_4010, // ASM: push {r4, lr}
+        0xe350_0000, // ASM: cmp r0, #0
+        0x1b00_0001, // ASM: blne first_step
+        0xeb00_0002, // ASM: bl second_step
+        0xe8bd_8010, // ASM: pop {r4, pc}
+        0xe280_0001, // ASM: add r0, r0, #1 (first_step)
+        0xe12f_ff1e, // ASM: bx lr
+        0xe280_0002, // ASM: add r0, r0, #2 (second_step)
+        0xe12f_ff1e, // ASM: bx lr
+    ];
+    let code = arm.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let names = [("f", 0), ("first_step", 0x14), ("second_step", 0x1c)];
+    let p = arm_image(code, Arch::Arm, Some(Mode::Arm), &names);
+    agrees_until_a_call_is_dropped(&p, "first_step");
+    let thumb: [u16; 13] = [
+        0xb510, // ASM: push {r4, lr}
+        0x2800, // ASM: cmp r0, #0
+        0xbf18, // ASM: it ne
+        0xf000, 0xf803, // ASM: blne first_step
+        0xf000, 0xf803, // ASM: bl second_step
+        0xbd10, // ASM: pop {r4, pc}
+        0x3001, // ASM: adds r0, #1 (first_step)
+        0x4770, // ASM: bx lr
+        0x3002, // ASM: adds r0, #2 (second_step)
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+    ];
+    let code = thumb.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let names = [("f", 0), ("first_step", 0x10), ("second_step", 0x14)];
+    let p = arm_image(code, Arch::Arm, Some(Mode::Thumb), &names);
+    agrees_until_a_call_is_dropped(&p, "first_step");
 }

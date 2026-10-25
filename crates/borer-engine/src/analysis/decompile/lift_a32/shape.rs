@@ -930,7 +930,7 @@ fn graph(ctx: &Ctx<'_>, f: &Function) -> (Vec<Vec<Insn>>, Vec<Vec<usize>>, usize
         })
         .collect();
     (
-        decode_blocks(ctx, f),
+        decode_blocks(ctx.program, f),
         succs,
         idx.get(&f.entry).copied().unwrap_or(0),
     )

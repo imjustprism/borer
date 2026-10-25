@@ -46,6 +46,7 @@ use crate::analysis::a32::{decode as decode_at, guarded, skip};
 use crate::analysis::{BlockTerm, Function};
 use crate::fxmap::FxHashMap;
 use crate::isa::a32::{self, Flow, Insn, ItState, Op as AOp, PC, Reg, SKIP, SP};
+use crate::program::Program;
 use flags::Test;
 
 /// The bits of a word.
@@ -61,9 +62,12 @@ const WORD: u64 = 0xffff_ffff;
 ///
 /// # Arguments
 ///
-/// * `ctx` - The function's context, for the image.
+/// * `program` - The image.
 /// * `f` - The function.
-pub(in crate::analysis::decompile) fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<Insn>> {
+pub(in crate::analysis::decompile) fn decode_blocks(
+    program: &Program,
+    f: &Function,
+) -> Vec<Vec<Insn>> {
     let mut order: Vec<usize> = (0..f.blocks.len()).collect();
     order.sort_by_key(|&k| f.blocks.get(k).map_or(0, |b| b.start));
     let ends: std::collections::BTreeMap<u64, u64> =
@@ -81,7 +85,7 @@ pub(in crate::analysis::decompile) fn decode_blocks(ctx: &Ctx<'_>, f: &Function)
         let mut v = Vec::new();
         let mut va = b.start;
         while va < b.end {
-            let Some(mut i) = decode_at(ctx.program, va, &mut it) else {
+            let Some(mut i) = decode_at(program, va, &mut it) else {
                 break;
             };
             if held && i.predicated() {
@@ -92,8 +96,7 @@ pub(in crate::analysis::decompile) fn decode_blocks(ctx: &Ctx<'_>, f: &Function)
         }
         if b.term == BlockTerm::Cond
             && v.last().is_some_and(|l| l.flow() == Flow::Next)
-            && let Some(first) =
-                decode_at(ctx.program, b.end, &mut it.clone()).filter(Insn::predicated)
+            && let Some(first) = decode_at(program, b.end, &mut it.clone()).filter(Insn::predicated)
             && let Some(&run_end) = ends.get(&b.end)
         {
             v.push(skip(&first, run_end));

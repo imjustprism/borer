@@ -154,7 +154,7 @@ fn graph(ctx: &Ctx<'_>, f: &Function) -> Graph {
         })
         .collect();
     Graph {
-        code: decode_blocks(ctx, f),
+        code: decode_blocks(ctx.program, f),
         succs,
         entry: idx.get(&f.entry).copied().unwrap_or(0),
         starts: idx.keys().copied().collect(),
@@ -583,16 +583,19 @@ pub(in crate::analysis::decompile) fn built(
 ///
 /// # Arguments
 ///
-/// * `ctx` - The function's context, for the image.
+/// * `program` - The image.
 /// * `f` - The function.
-pub(in crate::analysis::decompile) fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<Insn>> {
+pub(in crate::analysis::decompile) fn decode_blocks(
+    program: &Program,
+    f: &Function,
+) -> Vec<Vec<Insn>> {
     f.blocks
         .iter()
         .map(|b| {
             let mut v = Vec::new();
             let mut va = b.start;
             while va < b.end {
-                let Some(i) = decode(ctx.program, va) else {
+                let Some(i) = decode(program, va) else {
                     break;
                 };
                 va = va.wrapping_add(crate::num::from_usize(a64::INSN_LEN));

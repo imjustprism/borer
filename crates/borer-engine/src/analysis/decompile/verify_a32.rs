@@ -160,7 +160,7 @@ fn verify_some(program: &Program, analysis: &Analysis, entries: &[u64], seed: u6
         };
         out.functions += 1;
         let mut ctx = function_ctx(program, analysis, &overlay, f);
-        let code = decode_blocks(&ctx, f);
+        let code = decode_blocks(program, f);
         for (block, instrs) in f.blocks.iter().zip(&code) {
             out.blocks += 1;
             match run(
