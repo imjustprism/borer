@@ -232,6 +232,36 @@ impl Covered {
         )
     }
 
+    /// Adds a function's blocks to the bits.
+    ///
+    /// # Arguments
+    ///
+    /// * `blocks` - The blocks.
+    ///
+    /// # Returns
+    ///
+    /// `false` when the index cannot take them, as it was built would not
+    /// have: it holds sorted spans, or a block is empty or reaches past the
+    /// bits. The index is then partly updated and must be built again.
+    pub(super) fn add(&mut self, blocks: &[BasicBlock]) -> bool {
+        if !self.spans.is_empty() {
+            return false;
+        }
+        let len = from_usize(self.bits.len()).saturating_mul(64);
+        for b in blocks {
+            let (Some(lo), Some(hi)) =
+                (b.start.checked_sub(self.base), b.end.checked_sub(self.base))
+            else {
+                return false;
+            };
+            if hi <= lo || hi > len {
+                return false;
+            }
+            set_range(&mut self.bits, lo, hi);
+        }
+        true
+    }
+
     /// Builds the index from spans in any order, as bits when every span is
     /// non-empty and all of them fit [`ADDR_BITS_MAX`] bytes, else as the
     /// sorted spans.
@@ -439,6 +469,7 @@ fn set_range(bits: &mut [u64], lo: u64, hi: u64) {
 #[cfg(test)]
 mod tests {
     use super::{Covered, Span};
+    use crate::analysis::{BasicBlock, BlockTerm};
 
     /// Returns the spans of a small fixed pseudo-random set, some
     /// overlapping, some nested, some touching.
@@ -549,5 +580,51 @@ mod tests {
                 end: 0x1010
             }]
         );
+    }
+
+    /// Blocks added to the bits answer as the bits built over every block
+    /// at once, and a block the bits cannot take is refused.
+    ///
+    /// # Panics
+    ///
+    /// When the added index disagrees with the built one, or takes a block
+    /// past its bits.
+    #[test]
+    fn added_blocks_answer_as_a_fresh_index() {
+        let spans = sample();
+        let (first, rest) = spans.split_at(120);
+        let block = |s: &Span| BasicBlock {
+            start: s.start,
+            end: s.end,
+            term: BlockTerm::Fall,
+            successors: Vec::new(),
+        };
+        let mut grown = Covered::from_spans(first.iter().copied());
+        let top = first.iter().map(|s| s.end).max().unwrap_or(0);
+        let rest: Vec<BasicBlock> = rest
+            .iter()
+            .filter(|s| s.start >= grown.base && s.end <= top)
+            .map(block)
+            .collect();
+        assert!(!rest.is_empty());
+        assert!(grown.add(&rest));
+        let all: Vec<Span> = first
+            .iter()
+            .copied()
+            .chain(rest.iter().map(|b| Span {
+                start: b.start,
+                end: b.end,
+            }))
+            .collect();
+        let fresh = Covered::from_spans(all.iter().copied());
+        assert_eq!(
+            grown.uncovered(0x800, 0x3400),
+            fresh.uncovered(0x800, 0x3400)
+        );
+        let far = Span {
+            start: 1 << 40,
+            end: (1 << 40) + 1,
+        };
+        assert!(!grown.add(&[block(&far)]));
     }
 }

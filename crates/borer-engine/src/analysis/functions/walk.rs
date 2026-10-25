@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use super::frame::{FrameFacts, FrameStep, frame_step};
 use super::guess::{
-    after_padding, byte_add, declared_interior, is_padding, misplaced_site, mnemonic_name,
-    odd_instruction, opens_a_function, opens_on_frame, plausible_entry, prologue_like, slot_jump,
-    thunk_slot,
+    after_padding, byte_add, declared_interior, int3_end, is_padding, misplaced_site,
+    mnemonic_name, odd_instruction, opens_a_function, opens_on_frame, plausible_entry,
+    prologue_like, slot_jump, thunk_slot,
 };
 use super::helpers::{
     CHKSTK_X86, call_slot, epilog_helper_name, exits_with_status, frame_helper_name,
@@ -20,8 +20,8 @@ use super::{
     ArgConst, Cursors, FINALLY_CALL_REACH, FINALLY_REACH, GAP_INSTRS_MIN, GUESS_WALK_MAX,
     HANDLER_REACH, InstrRec, Lanes, PARAM_VALUES_MAX, Recorded, Registration, SEEDS_MAX,
     SPLIT_ROUNDS_MAX, Seed, Shared, WAVE_BATCH, WAVE_MIN, build_blocks, call_arg_consts,
-    class_registration, decode_at, fingerprint, handler_lands_near, mix, near_target, push_site,
-    seh_scope_roots, tears_frame_down, trace_seeds, unwind_nop,
+    class_registration, decode_at, fingerprint, handler_lands_near, mix, near_target, padding_end,
+    push_site, seh_scope_roots, tears_frame_down, trace_seeds, unwind_nop,
 };
 use crate::analysis::{BlockTerm, Function, NameSource, RefKind, RefSite, dedup_sorted, is_imm};
 use crate::fxmap::{FxHashMap, FxHashSet};
@@ -186,6 +186,11 @@ pub(super) struct WalkState<'a> {
     pub(super) followed: BTreeMap<u64, BTreeSet<u64>>,
     /// Per walked function, the call targets whose fall-through it followed.
     pub(super) followed_calls: BTreeMap<u64, BTreeSet<u64>>,
+    /// The index of the walked functions' blocks, kept current as functions
+    /// are committed, so a seed round does not index millions of blocks
+    /// again; dropped when a function is forgotten or a block does not fit
+    /// it, and built again when next taken ([`WalkState::take_covered`]).
+    pub(super) covered: Option<Covered>,
     /// Every call target some walk followed the fall-through of: evidence
     /// that it returns, which no single site can outweigh.
     pub(super) followed_anywhere: BTreeSet<u64>,
@@ -648,7 +653,7 @@ impl WalkState<'_> {
         let program = self.worker.cursors.program;
         let mut incomplete = false;
         for _ in 0..SPLIT_ROUNDS_MAX {
-            let covered = Covered::new(&self.functions);
+            let covered = self.take_covered();
             let seeds: Vec<u64> = self
                 .xrefs
                 .iter()
@@ -661,12 +666,93 @@ impl WalkState<'_> {
                 })
                 .take(SEEDS_MAX)
                 .collect();
+            self.covered = Some(covered);
             if seeds.is_empty() {
                 break;
             }
             incomplete |= self.run_guesses(seeds, Seed::Pointer);
         }
         incomplete
+    }
+
+    /// Scans the executable bytes no block covers for one gap round's
+    /// seeds: the first instruction after each run of padding, and, when
+    /// `guess_gaps`, each aligned first instruction of a gap between
+    /// functions.
+    ///
+    /// # Arguments
+    ///
+    /// * `guess_gaps` - Whether a bare gap start is a seed: the file
+    ///   declared too little of its code to say where its functions are.
+    ///
+    /// # Returns
+    ///
+    /// The padding seeds and the gap seeds, each sorted and unique, at most
+    /// [`SEEDS_MAX`] between them.
+    pub(super) fn gap_seeds(&mut self, guess_gaps: bool) -> (Vec<u64>, Vec<u64>) {
+        let program = self.worker.cursors.program;
+        let bitness = self.worker.cursors.bitness;
+        let blocks = self.take_covered();
+        let ranges = Covered::ranges(&self.functions);
+        let mut pad_seeds: Vec<u64> = Vec::new();
+        let mut gap_seeds: Vec<u64> = Vec::new();
+        'sec: for s in &program.sections {
+            if !s.executable || s.file_size == 0 {
+                continue;
+            }
+            for gap in blocks.uncovered(s.va.0, s.va.0 + s.file_size) {
+                let between_functions = !ranges.contains(gap.start);
+                let mut va = gap.start;
+                let hi = gap.end;
+                let mut gap_open = between_functions;
+                while va < hi {
+                    let Some(&b) = program.read_va(va, 1).and_then(<[u8]>::first) else {
+                        break;
+                    };
+                    let run_end = match b {
+                        0xcc => int3_end(program, va, hi),
+                        0x90 | 0x66 | 0x0f | 0x2e | 0x8d if between_functions => {
+                            padding_end(program, bitness, va, hi)
+                        }
+                        _ => va,
+                    };
+                    if run_end > va {
+                        if run_end < hi && self.fresh(run_end) {
+                            pad_seeds.push(run_end);
+                        }
+                        va = run_end;
+                    } else {
+                        if guess_gaps && gap_open && va % 16 == 0 && self.fresh(va) {
+                            gap_seeds.push(va);
+                        }
+                        va = decode_at(program, bitness, va)
+                            .filter(|i| i.code() != Code::INVALID && i.next_ip() > va)
+                            .map_or(va + 1, |i| i.next_ip().min(hi));
+                    }
+                    gap_open = false;
+                    if pad_seeds.len() + gap_seeds.len() >= SEEDS_MAX {
+                        break 'sec;
+                    }
+                }
+            }
+        }
+        self.covered = Some(blocks);
+        dedup_sorted(&mut pad_seeds);
+        dedup_sorted(&mut gap_seeds);
+        (pad_seeds, gap_seeds)
+    }
+
+    /// Takes the index of the walked functions' blocks, building it when it
+    /// is not kept; a caller puts it back in [`Self::covered`] before the
+    /// next walk, which keeps it current.
+    ///
+    /// # Returns
+    ///
+    /// The index, as [`Covered::new`] would build it now.
+    pub(super) fn take_covered(&mut self) -> Covered {
+        self.covered
+            .take()
+            .unwrap_or_else(|| Covered::new(&self.functions))
     }
 
     /// Drops functions and everything their walks recorded so they can be walked again.
@@ -677,6 +763,7 @@ impl WalkState<'_> {
     pub(super) fn forget(&mut self, entries: &[u64]) {
         let set: FxHashSet<u64> = entries.iter().copied().collect();
         self.functions.retain(|f| !set.contains(&f.entry));
+        self.covered = None;
         #[expect(
             clippy::iter_over_hash_type,
             reason = "each entry is removed on its own"
@@ -872,6 +959,7 @@ impl WalkState<'_> {
         }
         self.handlers.extend(near_handlers);
         self.done.insert(entry);
+        self.track(&func);
         self.followed.insert(entry, followed);
         self.followed_anywhere
             .extend(followed_calls.iter().copied());
@@ -926,9 +1014,21 @@ impl WalkState<'_> {
             }
         }
 
-        self.starts.extend(func.callees.iter().copied());
         self.queue.extend(func.callees.iter().copied());
         self.functions.push(func);
+    }
+
+    /// Notes a function being committed where the later rounds look: the
+    /// starts its calls add, and its blocks in the covered index.
+    ///
+    /// # Arguments
+    ///
+    /// * `func` - The function.
+    fn track(&mut self, func: &Function) {
+        self.starts.extend(func.callees.iter().copied());
+        if self.covered.as_mut().is_some_and(|c| !c.add(&func.blocks)) {
+            self.covered = None;
+        }
     }
 }
 

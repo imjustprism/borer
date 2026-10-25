@@ -45,7 +45,7 @@ pub(super) mod tables;
 mod walk;
 
 use frame::moves_rsp_by_imm;
-use guess::{int3_end, plausible_entry};
+use guess::plausible_entry;
 use helpers::{
     COOKIE_CHECK_INSTRS_MAX, EPILOG_INSTRS_MAX, PANIC_INSTRS_MAX, cookie_check_name,
     epilog_helper_name, exits_on_status_name, frame_helper_name, is_noreturn_name,
@@ -544,6 +544,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         frame_helpers: BTreeSet::new(),
         followed: BTreeMap::new(),
         followed_calls: BTreeMap::new(),
+        covered: None,
         followed_anywhere: BTreeSet::new(),
         learned_noreturn: BTreeMap::new(),
         noreturn: Arc::new(noreturn),
@@ -563,7 +564,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     let mut incomplete = st.run();
     phases.mark("discover run facts");
 
-    let covered = Covered::new(&st.functions);
+    let covered = st.take_covered();
     let mut ptr_seeds: Vec<u64> = pointer_seeds(
         program,
         (!relocated_all.is_empty()).then_some(&relocated_all),
@@ -571,15 +572,17 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     .into_iter()
     .filter(|&p| !covered.contains(p) && st.fresh(p))
     .collect();
+    st.covered = Some(covered);
     dedup_sorted(&mut ptr_seeds);
     incomplete |= st.run_guesses(ptr_seeds, Seed::Pointer);
     phases.mark("discover pointer seeds");
-    let covered = Covered::new(&st.functions);
+    let covered = st.take_covered();
     let spans = Covered::ranges(&st.functions);
     let mut reloc: Vec<u64> = reloc_seeds(program, &covered)
         .into_iter()
         .filter(|&p| !spans.contains(p) && st.fresh(p))
         .collect();
+    st.covered = Some(covered);
     dedup_sorted(&mut reloc);
     incomplete |= st.run_guesses(reloc, Seed::Reloc);
 
@@ -599,52 +602,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         .sum();
     let guess_gaps = declared.saturating_mul(4) < code;
     for round in 0..GAP_ROUNDS_MAX {
-        let blocks = Covered::new(&st.functions);
-        let ranges = Covered::ranges(&st.functions);
-        let mut pad_seeds: Vec<u64> = Vec::new();
-        let mut gap_seeds: Vec<u64> = Vec::new();
-        'sec: for s in &program.sections {
-            if !s.executable || s.file_size == 0 {
-                continue;
-            }
-            for gap in blocks.uncovered(s.va.0, s.va.0 + s.file_size) {
-                let between_functions = !ranges.contains(gap.start);
-                let mut va = gap.start;
-                let hi = gap.end;
-                let mut gap_open = between_functions;
-                while va < hi {
-                    let Some(&b) = program.read_va(va, 1).and_then(<[u8]>::first) else {
-                        break;
-                    };
-                    let run_end = match b {
-                        0xcc => int3_end(program, va, hi),
-                        0x90 | 0x66 | 0x0f | 0x2e | 0x8d if between_functions => {
-                            padding_end(program, bitness, va, hi)
-                        }
-                        _ => va,
-                    };
-                    if run_end > va {
-                        if run_end < hi && st.fresh(run_end) {
-                            pad_seeds.push(run_end);
-                        }
-                        va = run_end;
-                    } else {
-                        if guess_gaps && gap_open && va % 16 == 0 && st.fresh(va) {
-                            gap_seeds.push(va);
-                        }
-                        va = decode_at(program, bitness, va)
-                            .filter(|i| i.code() != Code::INVALID && i.next_ip() > va)
-                            .map_or(va + 1, |i| i.next_ip().min(hi));
-                    }
-                    gap_open = false;
-                    if pad_seeds.len() + gap_seeds.len() >= SEEDS_MAX {
-                        break 'sec;
-                    }
-                }
-            }
-        }
-        dedup_sorted(&mut pad_seeds);
-        dedup_sorted(&mut gap_seeds);
+        let (pad_seeds, gap_seeds) = st.gap_seeds(guess_gaps);
         if pad_seeds.is_empty() && gap_seeds.is_empty() {
             break;
         }
