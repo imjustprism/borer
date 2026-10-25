@@ -288,3 +288,24 @@ fn a_stack_word_read_on_one_path_of_a_join_is_an_argument() {
         .expect("a signature line");
     assert!(sig.contains("a5"), "{out}");
 }
+
+/// A division helper's call is a step the text may write as its operator.
+///
+/// `a_divmod` calls `__aeabi_idivmod`, which the text writes as `/`. The
+/// structure check took the call for one the text must write, so every
+/// function that divides through the helper disagreed with its own text
+/// (37 of u-boot's 2015 functions).
+#[test]
+fn the_structure_check_reads_a_division_helper_as_its_operator() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+    let p = image();
+    let a = Analysis::compute(&p);
+    let out = text(&p, &a, "a_divmod");
+    assert!(!out.contains("__aeabi_idivmod("), "{out}");
+    let o = Overlay::default();
+    assert_eq!(
+        check_structure(&p, &a, &o, BASE + 0x68, &out),
+        Structure::Agrees,
+        "{out}"
+    );
+}

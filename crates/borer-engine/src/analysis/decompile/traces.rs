@@ -28,6 +28,7 @@ use std::rc::Rc;
 use crate::isa::x86::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind};
 use crate::isa::{Isa, a32, a64};
 
+use super::abi::runtime::Runtime;
 use super::expr_render::bare;
 use super::{decompile_plain_full, lift, lift_a32, lift_a64, matching_paren, name_fields};
 use crate::analysis::render::{epilog_helper, frame_helper};
@@ -595,7 +596,9 @@ fn import_at(program: &Program, analysis: &Analysis, slot: u64) -> Option<String
 /// The callee, or `None` for a frame helper's call, which the text never
 /// writes. A call the header says the text leaves out is one it may still
 /// write, where it could not fold the check around it, so it is a step
-/// the text may take or not, under the name it would write.
+/// the text may take or not, under the name it would write. So is a call
+/// to a run-time helper the text writes as its operator where it can
+/// ([`Runtime`]: `__aeabi_idivmod` is `/` or `%`).
 fn callee(
     program: &Program,
     analysis: &Analysis,
@@ -621,6 +624,9 @@ fn callee(
     } else {
         let full = name_of(analysis, overlay, key.1);
         match quiet(notes, &full) {
+            Quiet::Shown if Runtime::named(&bare(&full)).is_some() => {
+                Some(Callee::Maybe(Some(names.intern(&bare(&full)))))
+            }
             Quiet::Shown => Some(Callee::Named(names.intern(&bare(&full)))),
             Quiet::Dropped => {
                 let k = names.intern(&bare(&full));
