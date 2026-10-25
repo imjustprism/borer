@@ -36,10 +36,10 @@ use crate::isa::x86::{
 
 use super::functions::{decode_at, decode_block};
 use super::typelib;
-use super::{Analysis, BlockTerm, Function, RefKind, is_imm, striped_with, x87};
+use super::{Analysis, BasicBlock, BlockTerm, Function, RefKind, is_imm, striped_with, x87};
 use crate::program::{Program, SymbolKind};
 use exits::Scan;
-use uses::{FloatUse, float_use};
+use uses::{FloatUse, block_holding, block_starting, blocks_ordered, float_use};
 
 mod exits;
 mod uses;
@@ -2031,7 +2031,8 @@ fn classify(
     let Some(call) = decode_at(program, bitness, call_va) else {
         return Site::Unknown;
     };
-    let in_caller = |va: u64| caller.blocks.iter().any(|b| b.start == va);
+    let ordered = blocks_ordered(&caller.blocks);
+    let in_caller = |va: u64| block_starting(&caller.blocks, va, ordered).is_some();
     let mut used: Option<u8> = None;
     let mut unknown = false;
     let mut tail = false;
@@ -2046,11 +2047,7 @@ fn classify(
             break;
         }
         entered.push(start);
-        let Some(mut block) = caller
-            .blocks
-            .iter()
-            .find(|b| b.start <= start && start < b.end)
-        else {
+        let Some(mut block) = block_holding(&caller.blocks, start, ordered) else {
             unknown = true;
             continue;
         };
@@ -2058,7 +2055,7 @@ fn classify(
         let mut ended = false;
         for _ in 0..SCAN_MAX {
             if va >= block.end {
-                let Some(next) = caller.blocks.iter().find(|b| b.start == va) else {
+                let Some(next) = block_starting(&caller.blocks, va, ordered) else {
                     break;
                 };
                 block = next;

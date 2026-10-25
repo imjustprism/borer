@@ -80,7 +80,8 @@ pub(super) fn float_use(
     let Some(call) = decode_at(program, bitness, call_va) else {
         return FloatUse::Dropped;
     };
-    let within = |va: u64| caller.blocks.iter().any(|b| b.start <= va && va < b.end);
+    let ordered = blocks_ordered(&caller.blocks);
+    let within = |va: u64| block_holding(&caller.blocks, va, ordered).is_some();
     let preserves = |target: u64| {
         analysis
             .entry_index
@@ -134,5 +135,103 @@ pub(super) fn float_use(
         (Some(bits), _) => FloatUse::Read(bits),
         (None, true) => FloatUse::Tail(caller.entry),
         (None, false) => FloatUse::Dropped,
+    }
+}
+
+/// Tells whether blocks are in address order, none empty and none reaching
+/// into the next, as discovery builds a function's: then a block is found
+/// by bisection ([`block_holding`]).
+///
+/// # Arguments
+///
+/// * `blocks` - A function's blocks.
+pub(super) fn blocks_ordered(blocks: &[BasicBlock]) -> bool {
+    blocks.iter().all(|b| b.start < b.end) && blocks.windows(2).all(|w| w[0].end <= w[1].start)
+}
+
+/// Returns the first of a function's blocks, in list order, that holds
+/// `va`.
+///
+/// A function with thousands of blocks, asked once per instruction of every
+/// call site's path, made a scan quadratic in the blocks.
+///
+/// # Arguments
+///
+/// * `blocks` - A function's blocks.
+/// * `va` - Any address.
+/// * `ordered` - What [`blocks_ordered`] says of the blocks: bisected when
+///   `true`, scanned when `false`.
+///
+/// # Returns
+///
+/// The block, or `None` when no block holds `va`.
+pub(super) fn block_holding(blocks: &[BasicBlock], va: u64, ordered: bool) -> Option<&BasicBlock> {
+    if !ordered {
+        return blocks.iter().find(|b| b.start <= va && va < b.end);
+    }
+    let i = blocks.partition_point(|b| b.start <= va).checked_sub(1)?;
+    blocks.get(i).filter(|b| va < b.end)
+}
+
+/// Returns the first of a function's blocks, in list order, that starts at
+/// `va`.
+///
+/// # Arguments
+///
+/// * `blocks` - A function's blocks.
+/// * `va` - Any address.
+/// * `ordered` - As for [`block_holding`].
+///
+/// # Returns
+///
+/// The block, or `None` when none starts at `va`.
+pub(super) fn block_starting(blocks: &[BasicBlock], va: u64, ordered: bool) -> Option<&BasicBlock> {
+    if !ordered {
+        return blocks.iter().find(|b| b.start == va);
+    }
+    let i = blocks.binary_search_by_key(&va, |b| b.start).ok()?;
+    blocks.get(i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{block_holding, block_starting, blocks_ordered};
+    use crate::analysis::{BasicBlock, BlockTerm};
+
+    /// Returns blocks over the given spans.
+    fn blocks(spans: &[(u64, u64)]) -> Vec<BasicBlock> {
+        spans
+            .iter()
+            .map(|&(start, end)| BasicBlock {
+                start,
+                end,
+                term: BlockTerm::Fall,
+                successors: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Bisection finds the block a scan finds, and a list it cannot bisect
+    /// is scanned.
+    ///
+    /// # Panics
+    ///
+    /// When a lookup disagrees with the scan.
+    #[test]
+    fn bisected_blocks_are_the_scanned_ones() {
+        let ordered = blocks(&[(0x10, 0x18), (0x18, 0x20), (0x30, 0x34)]);
+        let overlapping = blocks(&[(0x10, 0x20), (0x14, 0x18), (0x30, 0x34)]);
+        assert!(blocks_ordered(&ordered));
+        assert!(!blocks_ordered(&overlapping));
+        for b in [&ordered, &overlapping] {
+            let o = blocks_ordered(b);
+            for va in 0x08..0x40 {
+                let scanned = b.iter().position(|x| x.start <= va && va < x.end);
+                let started = b.iter().position(|x| x.start == va);
+                let at = |x: &BasicBlock| b.iter().position(|y| std::ptr::eq(x, y));
+                assert_eq!(block_holding(b, va, o).and_then(at), scanned, "{va:#x}");
+                assert_eq!(block_starting(b, va, o).and_then(at), started, "{va:#x}");
+            }
+        }
     }
 }
