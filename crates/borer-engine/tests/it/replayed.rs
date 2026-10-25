@@ -7,6 +7,7 @@
 )]
 
 use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::decompile::replay::{Replayed, replay, replay_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, BinaryFormat, Program, Section};
 
@@ -199,4 +200,95 @@ fn a_byte_table_switch_reads_the_index_the_compare_bounds() {
     p.format = BinaryFormat::Pe;
     let a = Analysis::compute(&p);
     replays_clean(&p, &a, &[0x1_4000_1000]);
+}
+
+/// Replays a function from four seeds and requires that every block was
+/// compared, none refuted and no value wrong.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis.
+/// * `entry` - The function.
+///
+/// # Returns
+///
+/// Each seed's replay, for a test to assert on.
+fn checks_every_block(p: &Program, a: &Analysis, entry: u64) -> Vec<Replayed> {
+    (1..=4)
+        .map(|seed| {
+            let r = replay(p, a, &[entry], seed);
+            let tsv = replay_tsv(&r);
+            assert_eq!(r.functions, 1, "seed {seed}:\n{tsv}");
+            assert!(r.blocks > 0 && r.checked == r.blocks, "seed {seed}:\n{tsv}");
+            assert!(r.refuted.is_empty(), "seed {seed}:\n{tsv}");
+            assert!(r.wrong().is_empty(), "seed {seed}:\n{tsv}");
+            r
+        })
+        .collect()
+}
+
+/// A read through a pointer parameter beside the function's own stack
+/// writes is not refuted by a pointer into that frame.
+///
+/// The frame's addresses are constants of the proof's terms, so its search
+/// once started `a1` just below the stack pointer, where `*(a1 + 2)` reads
+/// the locals the machine wrote and the text keeps as their own variables.
+/// No caller can pass the address of a frame allocated after the call.
+#[test]
+fn a_pointer_parameter_never_points_into_the_callee_frame() {
+    let p = program64(&[
+        0x48, 0x83, 0xec, 0x18, // ASM: sub rsp,0x18
+        0x48, 0x8b, 0x05, 0x75, 0x00, 0x00, 0x00, // ASM: mov rax,[rip+0x75]
+        0x48, 0x33, 0xc4, // ASM: xor rax,rsp
+        0x48, 0x89, 0x44, 0x24, 0x08, // ASM: mov [rsp+8],rax
+        0x45, 0x33, 0xc0, // ASM: xor r8d,r8d
+        0x66, 0xc7, 0x44, 0x24, 0x04, 0x00, 0x13, // ASM: mov word [rsp+4],0x1300
+        0x80, 0x79, 0x01, 0x02, // ASM: cmp byte [rcx+1],2
+        0x44, 0x89, 0x04, 0x24, // ASM: mov [rsp],r8d
+        0x75, 0x1c, // ASM: jne fail
+        0x80, 0x39, 0x01, // ASM: cmp byte [rcx],1
+        0x75, 0x17, // ASM: jne fail
+        0x8b, 0x51, 0x02, // ASM: mov edx,[rcx+2]
+        0x41, 0x2b, 0xd0, // ASM: sub edx,r8d
+        0x75, 0x0b, // ASM: jne test
+        0x0f, 0xb7, 0x51, 0x06, // ASM: movzx edx,word [rcx+6]
+        0x0f, 0xb7, 0x44, 0x24, 0x04, // ASM: movzx eax,word [rsp+4]
+        0x2b, 0xd0, // ASM: sub edx,eax
+        0x85, 0xd2, // ASM: test: test edx,edx
+        0x74, 0x04, // ASM: je ok
+        0x32, 0xc0, // ASM: fail: xor al,al
+        0xeb, 0x02, // ASM: jmp out
+        0xb0, 0x01, // ASM: ok: mov al,1
+        0x48, 0x8b, 0x4c, 0x24, 0x08, // ASM: out: mov rcx,[rsp+8]
+        0x48, 0x33, 0xcc, // ASM: xor rcx,rsp
+        0x48, 0x83, 0xc4, 0x18, // ASM: add rsp,0x18
+        0xc3, // ASM: ret
+    ]);
+    checks_every_block(&p, &Analysis::compute(&p), 0x1_4000_1000);
+}
+
+/// A read through a pointer parameter beside a stack argument is not
+/// refuted by a pointer at that argument.
+///
+/// The return address, the shadow space and the stack arguments above
+/// them are the callee's: the text names the fifth argument `a5`, and no
+/// caller passes a pointer to the arguments it hands over.
+#[test]
+fn a_pointer_parameter_never_points_at_the_callee_arguments() {
+    let p = program64(&[
+        0x4c, 0x89, 0x4c, 0x24, 0x20, // ASM: mov [rsp+0x20],r9
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x85, 0xd2, // ASM: test edx,edx
+        0x74, 0x11, // ASM: je out
+        0x48, 0x8b, 0x4c, 0x24, 0x50, // ASM: mov rcx,[rsp+0x50]
+        0x41, 0x0f, 0xb7, 0x00, // ASM: movzx eax,word [r8]
+        0x48, 0x01, 0xc8, // ASM: add rax,rcx
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: out: xor eax,eax
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ]);
+    checks_every_block(&p, &Analysis::compute(&p), 0x1_4000_1000);
 }

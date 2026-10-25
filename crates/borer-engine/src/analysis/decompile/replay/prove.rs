@@ -43,7 +43,7 @@ use super::super::verify::{
 };
 use super::super::{Ctx, new_ctx};
 use super::term::{
-    self, EQ, GT, LT, Logic, Point, Pred, Term, UN, float_rel, ite, narrow, not, truth, zero,
+    self, EQ, GT, LT, Logic, Pred, Term, UN, float_rel, ite, narrow, not, truth, zero,
 };
 use super::{
     Bench, Code, End, Function, Replay, Transfer, covering, floating, frame_base,
@@ -52,10 +52,10 @@ use super::{
 use crate::analysis::BasicBlock;
 use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::num::from_usize;
+use search::{Owned, search};
 
-/// States tried per claim whose two sides differ, looking for one that
-/// tells them apart.
-const SEARCH_POINTS: u64 = 192;
+mod search;
+
 /// Most bytes written over memory a read through an address the state
 /// picks is modeled over.
 const OVERRIDES_MAX: usize = 128;
@@ -74,11 +74,6 @@ pub(super) const PROOF_NODES: usize = 1 << 20;
 const SPENT: &str = "the function's proof budget spent";
 /// Claims a block's search looks at before it stops.
 const SEARCHED_CLAIMS: usize = 4;
-/// What the search adds to a value it starts from: nothing, or the sign
-/// bit of a byte, a word, a doubleword or a quadword, so a value that
-/// agrees with a constant only in its low bits is tried too.
-const SIGNS: [u64; 6] = [0, 0, 1 << 7, 1 << 15, 1 << 31, 1 << 63];
-
 /// What a block's proof found.
 #[derive(Debug)]
 pub(super) enum Proof {
@@ -1543,81 +1538,14 @@ struct Claimed {
     bits: u8,
 }
 
-/// Looks for a state in which two terms differ in their low bits.
-///
-/// The variables start next to the constants the terms are built with,
-/// at zero, one and the signed and unsigned limits, or at random.
-///
-/// # Arguments
-///
-/// * `c` - The claim.
-/// * `width` - The register width.
-///
-/// # Returns
-///
-/// The variables' values in such a state, if one is found.
-fn search(c: &Claimed, width: u8) -> Option<FxHashMap<Key, u64>> {
-    let mut inputs = BTreeMap::new();
-    c.text.inputs(&mut inputs);
-    c.machine.inputs(&mut inputs);
-    let mut consts = Vec::new();
-    c.text.constants(&mut consts);
-    c.machine.constants(&mut consts);
-    let mut near: Vec<u64> = vec![0, 1, u64::MAX, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff];
-    for k in consts {
-        near.extend([k, k.wrapping_add(1), k.wrapping_sub(1), k.wrapping_neg()]);
-    }
-    near.sort_unstable();
-    near.dedup();
-    let len = from_usize(near.len()).max(1);
-    for p in 0..SEARCH_POINTS {
-        let ins: FxHashMap<Key, u64> = inputs
-            .iter()
-            .zip(0u64..)
-            .map(|((k, bits), j)| {
-                let h = splitmix(p.wrapping_mul(0x9e37) ^ j.rotate_left(17));
-                let v = if p > 0 && h & 3 == 0 {
-                    h
-                } else {
-                    near[usize::try_from((h >> 2) % len).unwrap_or(0)]
-                };
-                let lift = SIGNS[usize::try_from((h >> 3) % from_usize(SIGNS.len())).unwrap_or(0)];
-                (*k, v.wrapping_add(lift) & low(*bits))
-            })
-            .collect();
-        let at = Point {
-            ins: &ins,
-            seed: splitmix(p),
-            width,
-        };
-        if let (Some(x), Some(y)) = (term::value(&c.text, &at), term::value(&c.machine, &at))
-            && (x ^ y) & low(c.bits) != 0
-        {
-            return Some(ins);
-        }
-    }
-    None
-}
-
-/// Mixes bits for the search's draws.
-///
-/// # Arguments
-///
-/// * `x` - The input.
-fn splitmix(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
-}
-
 /// Decides a block from its claims.
 ///
 /// # Arguments
 ///
 /// * `claims` - Every claim the block makes.
 /// * `width` - The register width.
-fn decide(claims: &[Claimed], width: u8) -> Proof {
+/// * `owned` - The function's own frame, where no variable starts.
+fn decide(claims: &[Claimed], width: u8, owned: Owned) -> Proof {
     let mut lacking = false;
     let mut differ: Vec<Claimed> = Vec::new();
     for c in claims {
@@ -1639,7 +1567,7 @@ fn decide(claims: &[Claimed], width: u8) -> Proof {
         let found: Vec<FxHashMap<Key, u64>> = differ
             .iter()
             .take(SEARCHED_CLAIMS)
-            .filter_map(|c| search(c, width))
+            .filter_map(|c| search(c, width, owned))
             .collect();
         return if found.is_empty() {
             Proof::Unknown("a claim whose two sides the normal form does not equate")
@@ -2009,7 +1937,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             spend(&self.proof_nodes, &c.text)?;
             spend(&self.proof_nodes, &c.machine)?;
         }
-        Ok(decide(&claims, width))
+        Ok(decide(&claims, width, Owned::of(rsp, sp0, w, mask)))
     }
 
     /// Runs a block through the lifter and reads where its run stops.
