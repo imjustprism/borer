@@ -13,7 +13,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-borer-engine = { version = "0.2.2", path = "../borer-engine" }
+borer-engine = { version = "0.2.3", path = "../borer-engine" }
 # the allocator borer links (through mimalloc): its `mi_collect` hands free
 # memory back ([`release_free_memory`])
 libmimalloc-sys = "0.1.49"

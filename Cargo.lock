@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "borer"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "borer-engine",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "borer-engine"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "cpp_demangle",
@@ -106,11 +106,11 @@ dependencies = [
 
 [[package]]
 name = "borer-fixtures"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "borer-live"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "borer-engine",
  "libmimalloc-sys",

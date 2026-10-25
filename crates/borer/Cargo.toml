@@ -14,8 +14,8 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-borer-engine = { version = "0.2.2", path = "../borer-engine" }
-borer-live = { version = "0.2.2", path = "../borer-live" }
+borer-engine = { version = "0.2.3", path = "../borer-engine" }
+borer-live = { version = "0.2.3", path = "../borer-live" }
 mimalloc = "0.1.52"
 rayon = "1.12.0"
 regex = "1.13.1"
