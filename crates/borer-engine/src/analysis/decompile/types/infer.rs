@@ -1957,5 +1957,8 @@ printf(f2, a3);",
         let mixed_struct = "// signature: uint32_t f(void *a2)\n// layout a2: 0x0 u32, 0x8 u64\nif (strcmp(a2->field_0x8, \"--help\") == 0) {\n  return 0;\n}\nreturn 1;\n";
         let typed = super::type_parameters(mixed_struct, "uint64_t");
         assert!(typed.contains("f(void *a2)"), "{typed}");
+        let call_only_field = "// signature: uint32_t f(void *a2)\n// layout a2: 0x0 u64, 0x8 u64\nfclose(a2->field_0x8);\nif (strcmp(a2->field_0x0, \"x\") == 0) {\n  return 0;\n}\nreturn 1;\n";
+        let typed = super::type_parameters(call_only_field, "uint64_t");
+        assert!(!typed.contains("char **a2"), "{typed}");
     }
 }

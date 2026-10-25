@@ -178,13 +178,11 @@ fn propagate_char_ptr_params(lines: &mut [String], ptrs: &[(String, &'static str
         if !valid_uses {
             continue;
         }
-        for word in ["uint64_t ", "uint32_t "] {
-            for suf in [",", ")"] {
-                let old = format!("{word}{param}{suf}");
-                if lines[sig_idx].contains(&old) {
-                    lines[sig_idx] = lines[sig_idx].replace(&old, &format!("char *{param}{suf}"));
-                    changed = true;
-                }
+        for suf in [",", ")"] {
+            let old = format!("uint64_t {param}{suf}");
+            if lines[sig_idx].contains(&old) {
+                lines[sig_idx] = lines[sig_idx].replace(&old, &format!("char *{param}{suf}"));
+                changed = true;
             }
         }
     }
@@ -381,11 +379,7 @@ fn check_pointer_read(
     if head.trim().is_empty()
         && let Some(rest) = tail.strip_prefix(" += ")
         && let Some(rhs) = rest.trim().strip_suffix(';')
-        && (parse_const(rhs).is_some()
-            || is_ident(rhs)
-            || rhs.starts_with("*(uint8_t*)")
-            || rhs.contains(" == ")
-            || rhs.contains(" != "))
+        && (parse_const(rhs).is_some() || is_ident(rhs) || rhs.starts_with("*(uint8_t*)"))
     {
         *byte_step = true;
         return true;
@@ -624,7 +618,7 @@ fn classify_ident_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> 
 }
 
 /// Tells whether `param`'s layout is a contiguous run of two or more `u64`
-/// fields from offset zero, read as strings or passed to calls.
+/// fields from offset zero, every one of them read as a string.
 pub(super) fn string_pointer_array(lines: &[String], param: &str) -> bool {
     let prefix = format!("// layout {param}: ");
     let Some(layout) = lines.iter().find_map(|l| l.strip_prefix(&prefix)) else {
@@ -634,7 +628,6 @@ pub(super) fn string_pointer_array(lines: &[String], param: &str) -> bool {
     if fields.len() < 2 {
         return false;
     }
-    let mut any_str = false;
     for (i, entry) in fields.iter().enumerate() {
         let off = i * 8;
         if *entry != format!("0x{off:x} u64") {
@@ -647,16 +640,11 @@ pub(super) fn string_pointer_array(lines: &[String], param: &str) -> bool {
                     || l.contains(&format!("strrchr({field},"))
                     || l.contains(&format!("*(uint8_t*){field}")))
         });
-        let is_call = lines.iter().any(|l| {
-            !l.starts_with("//")
-                && (l.contains(&format!("({field})")) || l.contains(&format!("({field},")))
-        });
-        if !is_str && !is_call {
+        if !is_str {
             return false;
         }
-        any_str |= is_str;
     }
-    any_str
+    true
 }
 
 /// Tells whether `param`'s layout is a single `0x0 u32` field copied to or
