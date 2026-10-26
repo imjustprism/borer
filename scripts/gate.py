@@ -30,8 +30,10 @@ the log prints a line as a step starts and ends, a step's `[skip]` lines,
 and the whole output of the step that failed. The first failure stops the
 run: the steps still running are killed, and the exit status is non-zero.
 Tools that are not installed are reported and skipped, never silently
-passed. A machine with fewer than eight cores (a CI runner) runs one step at
-a time, in the order the plan lists them.
+passed. At most two of the steps that hold every core for minutes (the
+tests, the sweeps and smoke) run at once (`HEAVY_MAX`). A machine with
+fewer than eight cores (a CI runner) runs one step at a time, in the order
+the plan lists them.
 
 Steps that share a cargo profile directory wait for each other, as cargo
 would make them (its lock is per profile directory). Side by side, clippy
@@ -112,6 +114,11 @@ EVERYTHING = ("",)
 WIDE_CORES = 8
 """Cores a machine needs for the gate to run its steps side by side."""
 
+HEAVY_MAX = 2
+"""Heavy steps run side by side at most. Each holds most of the cores on
+its own; all of them at once (the tests, three sweeps and smoke) ran each
+two to six times slower than alone, the text replay most."""
+
 
 @dataclasses.dataclass(frozen=True)
 class Step:
@@ -133,6 +140,8 @@ class Step:
     """Steps that must pass before it starts; one the plan left out is not waited for."""
     rewrites: bool = False
     """Whether it rewrites files it reads (fmt), so its key is taken after it runs."""
+    heavy: bool = False
+    """Whether it runs work that holds every core for minutes (`HEAVY_MAX`)."""
 
 
 class Runner:
@@ -506,6 +515,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             ["cargo", "test", "--workspace", "--lib", "--bins", "--tests"],
             inputs=RUST,
             needs=("build",),
+            heavy=True,
         ),
         # Beside the tests, not after them: cargo holds the profile's lock
         # while it builds, not while the test binaries run.
@@ -557,6 +567,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             {"BORER_DOGFOOD": dogfood},
             inputs=RUST,
             needs=("build corpus", "build sweep"),
+            heavy=True,
         ),
         # The text check alone: its replay takes 35 s by itself and 409 s
         # beside the sweeps above, which hold every core as it does.
@@ -572,6 +583,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             {"BORER_DOGFOOD": dogfood},
             inputs=RUST,
             needs=("dogfood",),
+            heavy=True,
         ),
     ]
     # The corpus is x86-64 only. A 32-bit binary with x87 math catches what
@@ -592,6 +604,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
                 inputs=RUST,
                 extra=(x86,),
                 needs=("build sweep", "dogfood text"),
+                heavy=True,
             )
         )
     else:
@@ -645,6 +658,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             [py, os.path.join("scripts", "run", "smoke.py"), server, dogfood],
             inputs=RUST + SCRIPTS,
             needs=("build", "build corpus"),
+            heavy=True,
         ),
         # Seconds: the tasks replay on the crackme the examples step built.
         Step(
@@ -662,8 +676,9 @@ def schedule(steps: list[Step], runner: Runner, cache: Cache, inputs: Inputs, wi
     the name of the first that failed, empty when none did.
 
     A step that passed before over the same inputs is `[cache]`d and counts
-    as passed. `wide` starts every step that may start; otherwise one runs
-    at a time, in the order of `steps`.
+    as passed. `wide` starts every step that may start, but no more than
+    `HEAVY_MAX` heavy ones; otherwise one runs at a time, in the order of
+    `steps`.
     An interrupt (Ctrl-C) kills the running steps before it returns: a step
     in its own process group does not see it.
     """
@@ -680,11 +695,14 @@ def schedule(steps: list[Step], runner: Runner, cache: Cache, inputs: Inputs, wi
                         break
                     if any(n in planned and n not in passed for n in s.needs):
                         continue
-                    pending.remove(s)
                     if cache.hit(s.name, inputs.key(s)):
                         print(f"[cache] {s.name}", flush=True)
+                        pending.remove(s)
                         passed.add(s.name)
                         continue
+                    if s.heavy and sum(r.heavy for r in running.values()) >= HEAVY_MAX:
+                        continue
+                    pending.remove(s)
                     running[pool.submit(runner.run, s)] = s
                 if not running:
                     break
