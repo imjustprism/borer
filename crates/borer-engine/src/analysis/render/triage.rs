@@ -770,9 +770,9 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: 
     let mut owned: BTreeSet<(&str, u64)> = BTreeSet::new();
     let mut page: Vec<crate::crypto::CryptoHit> = Vec::new();
     let mut total = 0usize;
-    crate::crypto::scan(p, |h| {
+    each_crypto_hit(p, a, |h| {
         if total >= offset && page.len() < limit {
-            page.push(h.kept());
+            page.push(h.clone());
         }
         total += 1;
         let family = h.name.split_whitespace().next().unwrap_or(h.name);
@@ -801,10 +801,9 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: 
                 slot.owners.push(entry);
             }
         }
-        if inside.is_none() && !slot.sections.iter().any(|s| s == h.section) {
-            slot.sections.push(h.section.to_owned());
+        if inside.is_none() && !slot.sections.contains(&h.section) {
+            slot.sections.push(h.section.clone());
         }
-        std::ops::ControlFlow::Continue(())
     });
     let api = crate::analysis::apihash::api_hashes_tsv(
         &crate::analysis::apihash::find_api_hashes(p, a),
@@ -1031,7 +1030,7 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
             entry.push(format!("builds {:?}", g.text));
         }
     }
-    for hit in crate::crypto::find_crypto_constants(p) {
+    for hit in crypto_hits(p, a).hits.iter().take(crate::crypto::HITS_MAX) {
         if let Some(f) = hit.va.and_then(|va| a.function_at(va)) {
             let entry = reasons.entry(f.entry).or_default();
             let note = format!("holds {}{}", hit.name, hit.storage);

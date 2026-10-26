@@ -222,6 +222,78 @@ pub(super) fn recovered_strings(p: &Program, a: &Analysis) -> Arc<Recovery> {
         .get_or_build("generated_strings", (), || generated_strings(p, a, ""))
 }
 
+/// Most crypto constant hits [`crypto_hits`] keeps; an image with more is
+/// scanned again by every reader, so a hostile file cannot make the memo
+/// outgrow its bytes.
+const CRYPTO_KEPT_MAX: usize = 1 << 16;
+
+/// The crypto constant hits of an image in scan order, as
+/// [`crate::crypto::scan`] finds them.
+pub(super) struct CryptoHits {
+    /// The hits, at most [`CRYPTO_KEPT_MAX`].
+    pub(super) hits: Vec<crate::crypto::CryptoHit>,
+    /// Whether `hits` is every hit the image holds.
+    pub(super) complete: bool,
+}
+
+/// Returns the crypto constant hits of the image, scanned once per
+/// analysis.
+///
+/// The scan reads every byte of the file against every signature, and
+/// `find_crypto_constants` and `triage` each asked for it on every call.
+/// The hits depend on the bytes alone, so they are kept in
+/// [`Analysis::derived`].
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, whose memo holds the hits.
+///
+/// # Returns
+///
+/// The hits, shared; at least the first [`crate::crypto::HITS_MAX`] of
+/// them whether or not they are complete.
+pub(super) fn crypto_hits(p: &Program, a: &Analysis) -> Arc<CryptoHits> {
+    a.derived.get_or_build("crypto_hits", (), || {
+        let mut hits = Vec::new();
+        let mut complete = true;
+        crate::crypto::scan(p, |h| {
+            if hits.len() >= CRYPTO_KEPT_MAX {
+                complete = false;
+                return std::ops::ControlFlow::Break(());
+            }
+            hits.push(h.kept());
+            std::ops::ControlFlow::Continue(())
+        });
+        CryptoHits { hits, complete }
+    })
+}
+
+/// Hands every crypto constant hit of the image to `visit`, in scan
+/// order: from the memo ([`crypto_hits`]) when it holds them all, else
+/// from a fresh scan.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, whose memo holds the hits.
+/// * `visit` - Called once per hit.
+pub(super) fn each_crypto_hit(
+    p: &Program,
+    a: &Analysis,
+    mut visit: impl FnMut(&crate::crypto::CryptoHit),
+) {
+    let held = crypto_hits(p, a);
+    if held.complete {
+        held.hits.iter().for_each(visit);
+        return;
+    }
+    crate::crypto::scan(p, |h| {
+        visit(&h.kept());
+        std::ops::ControlFlow::Continue(())
+    });
+}
+
 /// Resolves a spec's address token: `0x`-hex, decimal, or a function name.
 ///
 /// A name wins over bare text that also reads as a number, as in
