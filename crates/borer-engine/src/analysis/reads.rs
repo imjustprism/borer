@@ -660,19 +660,24 @@ pub(crate) fn unnoted<R>(f: impl FnOnce() -> R) -> R {
     within(Shared::default(), f)
 }
 
-/// The build running on one thread, for a thread it spawns to note its
-/// reads into.
+/// The build running on one thread and the cancel flag in force there
+/// ([`crate::cancel::Cancel`]), for a thread it spawns to note its reads
+/// into and to stop with.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Handle(Option<Shared>);
+pub(crate) struct Handle(Option<Shared>, Option<crate::cancel::Cancel>);
 
 impl Handle {
-    /// Returns the build running on this thread, if any.
+    /// Returns the build running on this thread, if any, and the cancel
+    /// flag in force on it.
     pub(crate) fn here() -> Self {
-        Self(FRAMES.with(|frames| frames.borrow().last().cloned()))
+        Self(
+            FRAMES.with(|frames| frames.borrow().last().cloned()),
+            crate::cancel::Cancel::current(),
+        )
     }
 
     /// Runs `f`, on whatever thread, noting its reads into the build this
-    /// handle names.
+    /// handle names, under the cancel flag it carries.
     ///
     /// # Arguments
     ///
@@ -682,10 +687,11 @@ impl Handle {
     ///
     /// What `f` returned.
     pub(crate) fn enter<R>(self, f: impl FnOnce() -> R) -> R {
-        match self.0 {
+        let Self(frame, cancel) = self;
+        crate::cancel::Cancel::carried(cancel.as_ref(), || match frame {
             Some(frame) => within(frame, f),
             None => f(),
-        }
+        })
     }
 }
 

@@ -1,18 +1,21 @@
-//! A caller's request that the emulation running for it stop.
+//! A caller's request that the work running for it stop.
 //!
 //! The engine answers the same bytes for the same question, and nothing in
 //! it reads the clock. A server still has to answer within a time its
 //! client waits, so it hands the engine a [`Cancel`] it raises when that
-//! time has passed: every emulator built while the flag is in force
-//! ([`Cancel::within`]) checks it every [`crate::emulate::CANCEL_EVERY`]
-//! steps and, raised, stops at that step boundary with
-//! [`crate::emulate::Limit::Time`]. The flag is the one input that is not
-//! the question, so a result built after it was raised is not memoized
-//! ([`crate::analysis::Derived`]): the next request builds it whole.
+//! time has passed. While the flag is in force ([`Cancel::within`]) every
+//! emulator checks it every [`crate::emulate::CANCEL_EVERY`] steps and,
+//! raised, stops at that step boundary with [`crate::emulate::Limit::Time`];
+//! the decompile pipeline checks it at its passes and fixpoint rounds and,
+//! raised, answers one line saying it stopped; and the sweeps over callers
+//! and decoders take no further item. The flag is the one input that is
+//! not the question, so a result built after it was raised is not memoized
+//! ([`crate::analysis::Derived`]) nor stored ([`Cancel::whole`]): the next
+//! request builds it whole, and a flag never raised changes no answer.
 //!
 //! The flag in force is per thread, the way the read-set frames are
-//! ([`crate::analysis::reads`]), and the engine's stripes take it along to
-//! the threads they spread to.
+//! ([`crate::analysis::reads`]), and every thread the engine spawns takes
+//! both along ([`crate::analysis::reads::Handle`]).
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -23,7 +26,7 @@ thread_local! {
     static IN_FORCE: RefCell<Option<Cancel>> = const { RefCell::new(None) };
 }
 
-/// A flag a caller raises to stop the emulation running under it.
+/// A flag a caller raises to stop the work running under it.
 #[derive(Debug, Clone, Default)]
 pub struct Cancel(Arc<AtomicBool>);
 
@@ -87,6 +90,31 @@ impl Cancel {
     #[must_use]
     pub fn raised() -> bool {
         IN_FORCE.with(|c| c.borrow().as_ref().is_some_and(Self::is_raised))
+    }
+
+    /// Hands back a result only when the flag in force was not raised
+    /// while it was made, for a caller about to keep it past the request.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The result, just made.
+    ///
+    /// # Returns
+    ///
+    /// The result, whole.
+    ///
+    /// # Errors
+    ///
+    /// When the flag in force was raised: the result may be partial, and
+    /// the message says it was not kept.
+    pub fn whole<T>(value: T) -> Result<T, String> {
+        if Self::raised() {
+            return Err(
+                "the request's deadline passed before the result was whole, so it was not kept"
+                    .to_owned(),
+            );
+        }
+        Ok(value)
     }
 
     /// Runs `f` under a flag taken from another thread, or under none.

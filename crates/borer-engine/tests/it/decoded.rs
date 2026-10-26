@@ -3,7 +3,8 @@
 //! A single-byte XOR decoder and a rolling-key decoder, each called from
 //! five sites with planted ciphertext, recover all ten strings with their
 //! sites; a `memcpy`-like copier called the same way yields nothing; and a
-//! decoder fed a runaway length is stopped by the step budget.
+//! decoder fed a runaway length is stopped by the step budget; a read past
+//! its request's deadline runs none and keeps nothing.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -13,6 +14,7 @@
 
 use borer_engine::analysis::render::decoded_tsv;
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::cancel::Cancel;
 use borer_engine::program::{Arch, Program, Section};
 
 /// Where data is linked.
@@ -298,4 +300,27 @@ fn a_runaway_length_is_bounded_by_the_budget() {
     let o = Overlay::default();
     let out = decoded_tsv(&p, &a, &o, "").expect("decoded");
     assert!(out.contains("# 0 decoded strings"), "{out}");
+}
+
+/// A read whose request's deadline has passed runs no decoder and keeps
+/// nothing: the same analysis then recovers every string, as a fresh one
+/// does.
+#[test]
+fn a_cancelled_read_recovers_nothing_and_keeps_nothing() {
+    let p = decoders_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let flag = Cancel::new();
+    flag.raise();
+    let cut = flag.within(|| decoded_tsv(&p, &a, &o, "").expect("decoded"));
+    assert!(
+        cut.starts_with("# 0 decoded strings from 0 decoders"),
+        "{cut}"
+    );
+    let whole = decoded_tsv(&p, &a, &o, "").expect("decoded");
+    assert!(whole.contains("# 10 decoded strings"), "{whole}");
+    assert_eq!(
+        whole,
+        decoded_tsv(&p, &Analysis::compute(&p), &o, "").expect("decoded")
+    );
 }

@@ -292,7 +292,10 @@ impl BorerServer {
     /// `load_binary` takes to replace the program and drop its analysis.
     /// When another request stored an analysis of the same program first,
     /// that one is kept and returned, so a function it recovered
-    /// ([`Self::decompile_entry`]) is not dropped.
+    /// ([`Self::decompile_entry`]) is not dropped. The analysis is computed
+    /// under a cancel flag of its own that nothing raises: it is kept for
+    /// every later request, so the deadline of the request that happened
+    /// to compute it must not cut it short.
     ///
     /// # Errors
     ///
@@ -306,7 +309,9 @@ impl BorerServer {
             return Err(why);
         }
         let packs = Arc::clone(&read_lock(&self.program_packs));
-        let a = Arc::new(Analysis::compute_with(&program, packs));
+        let a = Arc::new(
+            borer_engine::cancel::Cancel::new().within(|| Analysis::compute_with(&program, packs)),
+        );
         let loaded = read_lock(&self.program);
         if loaded
             .as_ref()

@@ -1379,7 +1379,7 @@ pub fn virtual_callees(
 }
 
 /// What one decompilation produced.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Decompiled {
     /// The pseudo-C text.
     pub(crate) text: String,
@@ -1422,6 +1422,23 @@ impl Decompiled {
             + self.virtual_callees.capacity() * size_of::<u64>()
             + self.live.bytes()
             + self.effects.bytes()
+    }
+
+    /// Returns the decompilation of a function the caller's cancel flag
+    /// stopped ([`crate::cancel::Cancel`]): one line saying so, no body,
+    /// never a partial text that reads as whole.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The function's entry address.
+    fn stopped(entry: u64) -> Decompiled {
+        let text = format!(
+            "// stopped: time limit: the request's deadline passed before the function at {entry:#x} finished decompiling\n"
+        );
+        Decompiled {
+            text,
+            ..Decompiled::default()
+        }
     }
 }
 
@@ -1516,19 +1533,32 @@ fn decompile_with(
 /// * `assume` - Parameter slots a scenario fixes, and their values.
 /// * `witness` - Keep what the lifter knew about each block beside the
 ///   text, for [`replay`].
+///
+/// # Returns
+///
+/// The decompilation, [`Decompiled::stopped`] when the caller's cancel
+/// flag was raised before or while it was built, or `None` when there is
+/// no such function or no lifter.
 fn decompile_in_run(
     run: (&Program, &Analysis, &Overlay, u64),
     cleanup: bool,
     assume: &[(u8, u64)],
     witness: bool,
 ) -> Option<Decompiled> {
-    match run.0.arch.isa()? {
+    if crate::cancel::Cancel::raised() {
+        return run.1.function(run.3).map(|_| Decompiled::stopped(run.3));
+    }
+    let done = match run.0.arch.isa()? {
         crate::isa::Isa::X86 { bits } => {
             decompile_in::<arch::X86>(run, bits, cleanup, assume, witness)
         }
         crate::isa::Isa::A64 => decompile_in::<arch::A64>(run, 64, cleanup, assume, witness),
         crate::isa::Isa::A32 => decompile_in::<arch::A32>(run, 32, cleanup, assume, witness),
+    };
+    if crate::cancel::Cancel::raised() {
+        return done.map(|_| Decompiled::stopped(run.3));
     }
+    done
 }
 
 /// [`decompile_with`] for one instruction set's lifter.

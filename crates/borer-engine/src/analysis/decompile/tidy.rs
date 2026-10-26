@@ -826,7 +826,7 @@ pub(super) fn cleanup_passes(
         idle: Passes::NONE,
         churn: Vec::new(),
     };
-    while passes < fuel {
+    while passes < fuel && !crate::cancel::Cancel::raised() {
         passes += 1;
         round.churn.clear();
         let mut changed = round.run(Pass::MergeChains, lines, merge_chains);
@@ -979,7 +979,8 @@ struct Round {
 }
 
 impl Round {
-    /// Runs one pass unless it is left out or idle, and records what it did.
+    /// Runs one pass unless it is left out or idle, or the caller's cancel
+    /// flag was raised ([`crate::cancel::Cancel`]), and records what it did.
     ///
     /// # Arguments
     ///
@@ -996,7 +997,7 @@ impl Round {
         lines: &mut Vec<String>,
         f: impl FnOnce(&mut Vec<String>) -> bool,
     ) -> bool {
-        if !self.skip.runs(pass) || !self.idle.runs(pass) {
+        if !self.skip.runs(pass) || !self.idle.runs(pass) || crate::cancel::Cancel::raised() {
             return false;
         }
         let did = f(lines);

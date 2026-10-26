@@ -652,7 +652,9 @@ thread_local! {
 /// lost or changed stays unknown there, every IN only loses facts, the
 /// iteration ends, and each fact kept is one every incoming edge
 /// re-establishes, never the leftover of an oscillation the pass budget
-/// cut short. A function that converges sooner is not touched.
+/// cut short. A function that converges sooner is not touched. A raised
+/// cancel flag ([`crate::cancel::Cancel`]) ends the iteration at the next
+/// pass; the decompile then answers that it stopped.
 ///
 /// PERF: `IN[b]` reads only its predecessors (their OUT, record, flag
 /// rebase and whether they ran) and the IN of their other successors
@@ -697,7 +699,7 @@ pub(super) fn dataflow<L: Lifter>(
     let mut met: Vec<Option<u64>> = vec![None; n];
     loop {
         passes += 1;
-        if passes > MAX_PASSES {
+        if passes > MAX_PASSES || crate::cancel::Cancel::raised() {
             #[cfg(test)]
             CAPPED.with(|c| c.set(c.get() + 1));
             break;

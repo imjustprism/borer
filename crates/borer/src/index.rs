@@ -908,7 +908,9 @@ fn prune(dir: &Path, kept: &str, program: u64, cap: u64) {
 ///
 /// # Errors
 ///
-/// When the index had to be built and the file cannot be written.
+/// When the index had to be built and the file cannot be written, or the
+/// request's deadline passed while it was built: a partial index is never
+/// stored ([`borer_engine::cancel::Cancel::whole`]).
 fn load_or_build_in(
     dir: &Path,
     program: &Program,
@@ -918,8 +920,8 @@ fn load_or_build_in(
     if let Some((index, path)) = memo::held(dir, program, analysis) {
         return Ok((index, path, false));
     }
-    let (index, path) = save_in(dir, build(program, analysis, &Overlay::default()), cap)?;
-    Ok((std::sync::Arc::new(index), path, true))
+    let built = borer_engine::cancel::Cancel::whole(build(program, analysis, &Overlay::default()))?;
+    save_in(dir, built, cap).map(|(index, path)| (std::sync::Arc::new(index), path, true))
 }
 
 /// Reads the index for `program` from the cache, or builds and stores it

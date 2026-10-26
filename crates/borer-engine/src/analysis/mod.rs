@@ -546,24 +546,20 @@ pub(crate) fn striped_with<T: Sync, S, R: Send>(
     let init = &init;
     let f = &f;
     let here = reads::Handle::here();
-    let cancel = crate::cancel::Cancel::current();
     let stripes: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 let here = here.clone();
-                let cancel = cancel.clone();
                 scope.spawn(move || {
-                    crate::cancel::Cancel::carried(cancel.as_ref(), || {
-                        here.enter(|| {
-                            let state = init();
-                            items
-                                .iter()
-                                .enumerate()
-                                .skip(t)
-                                .step_by(threads)
-                                .map(|(i, x)| (i, f(&state, x)))
-                                .collect::<Vec<_>>()
-                        })
+                    here.enter(|| {
+                        let state = init();
+                        items
+                            .iter()
+                            .enumerate()
+                            .skip(t)
+                            .step_by(threads)
+                            .map(|(i, x)| (i, f(&state, x)))
+                            .collect::<Vec<_>>()
                     })
                 })
             })

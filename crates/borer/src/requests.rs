@@ -1,5 +1,5 @@
 //! Running one request off the transport's threads, a few at a time, under
-//! the deadline its emulation stops at.
+//! the deadline it stops at.
 //!
 //! A tool or a resource read is synchronous engine work that can take
 //! minutes, so it runs on a blocking thread, and at most
@@ -7,10 +7,11 @@
 //! instead of each taking a core and memory. Each runs with a
 //! [`Cancel`] the gate raises when the request's deadline passes
 //! (`BORER_DEADLINE_SECS`, [`DEADLINE_DEFAULT`] unless set, `0` for none);
-//! the emulators the request runs then stop at their next step boundary
-//! with `stopped: time limit`, and the answer says so. Only emulation
-//! stops: the deadline is the one input to an answer that is not the
-//! question, and every other cap is a count.
+//! the engine's long loops (the decompile pipeline, the emulators, the
+//! sweeps over callers and decoders) then stop at their next check, and
+//! the answer ends with [`Gate::note`] saying it is partial. The deadline
+//! only decides whether an answer finishes, never what a finished one
+//! says: every other cap is a count.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +36,7 @@ const REQUESTS_MAX: usize = 2;
 pub(crate) struct Gate {
     /// One permit per request running.
     permits: Arc<Semaphore>,
-    /// How long a request's emulation runs, `None` for no limit.
+    /// How long a request runs, `None` for no limit.
     deadline: Option<Duration>,
 }
 
@@ -51,8 +52,8 @@ impl Default for Gate {
 pub(crate) struct Ran<R> {
     /// The request's own answer.
     pub(crate) answer: R,
-    /// Whether the deadline passed while it ran, so an emulation in it
-    /// may have stopped at the time limit.
+    /// Whether the deadline passed while it ran, so its answer may be
+    /// partial.
     pub(crate) cut: bool,
 }
 
@@ -61,8 +62,7 @@ impl Gate {
     ///
     /// # Arguments
     ///
-    /// * `deadline` - How long a request's emulation runs, `None` for no
-    ///   limit.
+    /// * `deadline` - How long a request runs, `None` for no limit.
     ///
     /// # Returns
     ///
@@ -107,7 +107,7 @@ impl Gate {
     pub(crate) fn note(&self) -> String {
         let secs = self.deadline.map_or(0, |d| d.as_secs());
         format!(
-            "# stopped: time limit: the request ran past {secs}s and its emulation stopped there; {DEADLINE_ENV} sets the limit"
+            "# stopped: time limit: the request ran past {secs}s and stopped there, so the answer above is partial; ask for less (one function, a filter, a page) or raise {DEADLINE_ENV}"
         )
     }
 
@@ -194,5 +194,65 @@ mod tests {
         assert!(gate.note().starts_with("# stopped: time limit"));
         let quick = gate.run(|| 7).await.expect("the request answers");
         assert_eq!((quick.answer, quick.cut), (7, false));
+    }
+
+    /// Returns a server holding one function at `0x1000`, `mov eax, 1; ret`.
+    fn one_function() -> crate::BorerServer {
+        let code = vec![0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+        let text = Section::mapped(".text", 0x1000, 0, 6, false, true);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        crate::BorerServer {
+            program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                program,
+            )))),
+            pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+            ..crate::BorerServer::default()
+        }
+    }
+
+    /// Reads whose deadline passes before they decompile answer promptly
+    /// that the decompile stopped and end with the note, and leave nothing
+    /// behind: the next read answers whole, as a fresh server does.
+    ///
+    /// The work waits for the gate's flag before it reads, so the deadline
+    /// has passed whatever the machine's speed.
+    ///
+    /// # Panics
+    ///
+    /// When the cut answer lacks the stop or the note, or the next read
+    /// differs from a fresh server's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_past_its_deadline_says_it_stopped_and_keeps_nothing() {
+        let server = one_function();
+        let gate = Gate::with_deadline(Some(Duration::ZERO));
+        let reader = server.clone();
+        let ran = gate
+            .run(move || {
+                while !borer_engine::cancel::Cancel::raised() {
+                    std::thread::yield_now();
+                }
+                ["function", "decompile"].map(|r| reader.read_uri(&format!("borer://{r}/0x1000")))
+            })
+            .await
+            .expect("the request answers");
+        assert!(ran.cut);
+        let [summary, text] = ran.answer.map(|read| read.expect("the read answers").1);
+        assert!(text.contains("// stopped: time limit"), "{text}");
+        for cut in [summary, text] {
+            assert!(
+                cut.contains("# stopped: time limit: the request ran past"),
+                "{cut}"
+            );
+        }
+        let whole = server
+            .resource_text("borer://function/0x1000")
+            .expect("reads");
+        assert!(!whole.contains("stopped"), "{whole}");
+        assert_eq!(
+            whole,
+            one_function()
+                .resource_text("borer://function/0x1000")
+                .expect("reads")
+        );
     }
 }

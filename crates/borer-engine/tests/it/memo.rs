@@ -8,9 +8,53 @@
 
 use crate::common::fixture;
 
-use borer_engine::analysis::decompile::decompile_named;
+use borer_engine::analysis::classes::fields_tsv;
+use borer_engine::analysis::decompile::{decompile, decompile_named, enum_tables};
+use borer_engine::analysis::render::function_summary;
 use borer_engine::analysis::{Analysis, Derived, Overlay};
 use borer_engine::cancel::Cancel;
+
+/// A request whose deadline passes between two decompiles keeps the one it
+/// finished, answers the other as stopped, and keeps nothing it read after.
+///
+/// The flag is raised by the test, not by a clock: whatever the request
+/// reads once it is up says it stopped, and the same analysis then answers
+/// every read exactly as a fresh one does.
+#[test]
+fn a_read_past_the_deadline_says_it_stopped_and_keeps_nothing() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    let [first, second, ..] = entries[..] else {
+        panic!("the fixture has two functions")
+    };
+    let flag = Cancel::new();
+    let (kept, stopped) = flag.within(|| {
+        let kept = decompile(&p, &a, &o, first);
+        flag.raise();
+        function_summary(&p, &a, &o, second);
+        fields_tsv(&p, &a, &o, second);
+        enum_tables(&p, &a, &o);
+        (kept, decompile(&p, &a, &o, second))
+    });
+    let stopped = stopped.unwrap_or_default();
+    assert!(stopped.starts_with("// stopped: time limit"), "{stopped}");
+    let fresh = Analysis::compute(&p);
+    assert_eq!(kept, decompile(&p, &fresh, &o, first));
+    let whole = decompile(&p, &fresh, &o, second);
+    assert!(whole.as_ref().is_some_and(|t| !t.contains("stopped")));
+    assert_eq!(decompile(&p, &a, &o, second), whole);
+    assert_eq!(
+        function_summary(&p, &a, &o, second),
+        function_summary(&p, &fresh, &o, second)
+    );
+    assert_eq!(
+        fields_tsv(&p, &a, &o, second),
+        fields_tsv(&p, &fresh, &o, second)
+    );
+    assert_eq!(enum_tables(&p, &a, &o), enum_tables(&p, &fresh, &o));
+}
 
 /// A result one request's deadline cut short reaches no other request.
 ///

@@ -15,6 +15,7 @@ use super::calls::{gather, listed_args, reach_of};
 use super::literals::written_text;
 use super::*;
 use crate::analysis::decompile::CallArg;
+use crate::cancel::Cancel;
 
 /// Most rows one read lists; the rest page with `offset=`.
 pub const DECODED_PAGE: usize = 200;
@@ -130,7 +131,8 @@ fn already_stored(p: &Program, text: &str) -> bool {
 /// backs faults and ends that run, so a wrong pointer stops rather than
 /// invents. The printable runs the decoder wrote ([`written_text`]) are its
 /// output, less any the image already stores and any longer than
-/// [`TEXT_MAX`] (a runaway length).
+/// [`TEXT_MAX`] (a runaway length). A raised cancel flag
+/// ([`Cancel`]) runs no further site.
 ///
 /// # Arguments
 ///
@@ -151,7 +153,8 @@ fn run_sites(
 ) -> usize {
     let mut run = 0usize;
     let mut seen: BTreeSet<(u64, String)> = BTreeSet::new();
-    for (at, caller, args) in sites.iter().take(SITES_MAX.min(budget)) {
+    let sites = sites.iter().take(SITES_MAX.min(budget));
+    for (at, caller, args) in sites.take_while(|_| !Cancel::raised()) {
         let Some(mut emu) = Emulator::new(p, BUDGET) else {
             break;
         };
@@ -187,7 +190,9 @@ fn run_sites(
 /// read through [`gather`] for its sites and their arguments; a candidate
 /// no site passes a data pointer to is not a decoder and is skipped. The
 /// rest are run at each site ([`run_sites`]) and the recovered strings
-/// sorted by text so the listing is deterministic.
+/// sorted by text so the listing is deterministic. A raised cancel flag
+/// ([`Cancel`]) examines no further candidate; the request's answer then
+/// says it stopped, and the memo does not keep what was found.
 ///
 /// # Arguments
 ///
@@ -223,7 +228,7 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Decoded {
     let mut rows: Vec<DecodedRow> = Vec::new();
     let mut examined = 0usize;
     let mut sites_run = 0usize;
-    for (_, decoder) in candidates {
+    for (_, decoder) in candidates.into_iter().take_while(|_| !Cancel::raised()) {
         let Ok(reach) = reach_of(p, a, o, decoder) else {
             continue;
         };

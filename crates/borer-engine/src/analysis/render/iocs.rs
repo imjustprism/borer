@@ -5,6 +5,7 @@
 use super::calls::{Reach, gather, listed_args};
 use super::*;
 use crate::analysis::decompile::CallArg;
+use crate::cancel::Cancel;
 use crate::ioc::{Indicator, Kind, classify, named};
 
 /// Most rows one read lists; the rest page with `offset=`.
@@ -365,11 +366,12 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
 /// # Returns
 ///
 /// The functions calling a naming API, and how many of them were
-/// decompiled ([`IOC_CALLERS_MAX`] in all).
+/// decompiled ([`IOC_CALLERS_MAX`] in all); a raised cancel flag
+/// ([`Cancel`]) reads no further API.
 fn call_arguments(p: &Program, a: &Analysis, o: &Overlay, rows: &mut Vec<Row>) -> (usize, usize) {
     let mut callers = 0usize;
     let mut read = 0usize;
-    for &(api, pos, kind) in NAMING_APIS {
+    for &(api, pos, kind) in NAMING_APIS.iter().take_while(|_| !Cancel::raised()) {
         let Some(sym) = p
             .symbols
             .iter()

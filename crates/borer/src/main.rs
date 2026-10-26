@@ -580,11 +580,19 @@ impl BorerServer {
     /// # Errors
     ///
     /// Resource-not-found for an unknown URI; invalid-params for a suffix
-    /// that does not read; otherwise the handler's error.
+    /// that does not read; otherwise the handler's error, which ends with
+    /// the same line when the request ran past its deadline.
     pub(crate) fn read_uri(&self, uri: &str) -> Result<(String, String), ErrorData> {
         let asked = paging::Asked::read(uri).map_err(err_params)?;
-        let mut text = self.listing(&asked)?;
-        if borer_engine::cancel::Cancel::raised() {
+        let listed = self.listing(&asked);
+        let cut = borer_engine::cancel::Cancel::raised();
+        let mut text = listed.map_err(|mut e| {
+            if cut {
+                e.message = format!("{}\n{}", e.message, self.gate.note()).into();
+            }
+            e
+        })?;
+        if cut {
             text = format!("{}\n{}\n", text.trim_end(), self.gate.note());
         }
         let key = asked.key();
