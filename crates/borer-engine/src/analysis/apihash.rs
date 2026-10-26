@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use super::Analysis;
 use crate::fxmap::FxHashMap;
@@ -268,9 +268,28 @@ fn plausible(program: &Program, v: u32) -> bool {
 ///
 /// The hits by address, at most [`HITS_MAX`]: every resolving immediate of
 /// an x86 or x64 function, and every corroborated word of the data
-/// sections. None for other machines' code.
+/// sections. None for other machines' code. Decoding every function is
+/// the cost and the hits are facts of the image, so they are found once
+/// per analysis ([`Analysis::derived`]) and shared.
 #[must_use]
-pub fn find_api_hashes(program: &Program, analysis: &Analysis) -> Vec<ApiHash> {
+pub fn find_api_hashes(program: &Program, analysis: &Analysis) -> Arc<Vec<ApiHash>> {
+    analysis
+        .derived
+        .get_or_build("api_hashes", (), || scan(program, analysis))
+}
+
+/// Finds the constants that hash a known API name, as
+/// [`find_api_hashes`] shares them.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its functions.
+///
+/// # Returns
+///
+/// The hits by address, as [`find_api_hashes`] describes them.
+fn scan(program: &Program, analysis: &Analysis) -> Vec<ApiHash> {
     let Some(bitness) = program.arch.bitness() else {
         return Vec::new();
     };

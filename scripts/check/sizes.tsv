@@ -5,7 +5,7 @@ crates/borer-engine/src/analysis/a64/discover.rs::walk#1	184
 crates/borer-engine/src/analysis/a64/refs.rs::data#1	132
 crates/borer-engine/src/analysis/a64/refs.rs::writes#1	130
 crates/borer-engine/src/analysis/a64/switch.rs::copied_from#1	114
-crates/borer-engine/src/analysis/apihash.rs::find_api_hashes#1	109
+crates/borer-engine/src/analysis/apihash.rs::scan#1	109
 crates/borer-engine/src/analysis/attributes.rs::catalog#1	109
 crates/borer-engine/src/analysis/attributes.rs::catalog_tsv#1	166
 crates/borer-engine/src/analysis/cdecl.rs::lex#1	112
