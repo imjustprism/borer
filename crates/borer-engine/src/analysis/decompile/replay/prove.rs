@@ -1992,7 +1992,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             }
             End::Fall(_) => code,
         };
-        let start = Run {
+        let start = || Run {
             regs: regs.clone(),
             known: FxHashMap::default(),
             sp: rsp,
@@ -2005,11 +2005,11 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             lost: lost.union(hidden).copied().collect(),
             hidden: hidden.clone(),
         };
-        let mut run = start.clone();
+        let mut run = start();
         match self.step(lifted_code, &mut run, true, branches) {
             Ok(()) => {}
             Err(why) if why == STALE || why == BESIDE => {
-                run = start;
+                run = start();
                 let last = lifted_code.len().saturating_sub(1);
                 for (n, i) in lifted_code.iter().enumerate() {
                     self.step(
