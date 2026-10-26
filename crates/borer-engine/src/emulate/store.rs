@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
-use crate::num::{from_usize, lo8};
+use crate::num::{from_usize, lo8, saturating_usize};
 
 /// Eight neighbouring bytes: the addresses that agree in all but the low
 /// three bits.
@@ -227,8 +227,9 @@ impl Store {
     ///
     /// A store that holds none of its own yet (a clone of a frozen machine,
     /// as a replay sets up every trial) builds its layer from the run in
-    /// one pass, reading the shared chunks the run covers in one walk:
-    /// a lookup and an insert per chunk was most of a trial's setup.
+    /// one pass, reading the shared chunks the run covers in one walk and
+    /// copying the run eight bytes at a time: a lookup and an insert per
+    /// chunk, then a step per byte, was most of a trial's setup.
     ///
     /// # Arguments
     ///
@@ -244,27 +245,31 @@ impl Store {
         let (first, _) = place(at);
         let (last, _) = place(end - 1);
         let mut shared = self.base.range(first..=last).peekable();
-        let mut fresh: Vec<(u64, Chunk)> = Vec::new();
-        for (&v, i) in bytes.iter().zip(0u64..) {
-            let (key, k) = place(at + i);
-            if fresh.last().is_none_or(|(held, _)| *held != key) {
-                while shared.next_if(|(s, _)| **s < key).is_some() {}
-                let c = shared
-                    .next_if(|(s, _)| **s == key)
-                    .map_or_else(Chunk::default, |(_, c)| *c);
-                fresh.push((key, c));
+        let mut fresh: Vec<(u64, Chunk)> = Vec::with_capacity(bytes.len() / 8 + 2);
+        let (mut a, mut rest) = (at, bytes);
+        while !rest.is_empty() {
+            let (key, k) = place(a);
+            let from = usize::from(k);
+            let n = rest.len().min(8 - from);
+            let (now, later) = rest.split_at(n);
+            while shared.next_if(|(s, _)| **s < key).is_some() {}
+            let mut c = shared
+                .next_if(|(s, _)| **s == key)
+                .map_or_else(Chunk::default, |(_, c)| *c);
+            let bits = lo8(((1u64 << n) - 1) << from);
+            let new = bits & !c.held;
+            let under = self.split.saturating_sub(address(key, 0)).min(8);
+            let below = lo8((1u64 << under) - 1);
+            self.len += saturating_usize(u64::from(new.count_ones()));
+            self.below += saturating_usize(u64::from((new & below).count_ones()));
+            c.held |= bits;
+            c.patched |= bits;
+            if let Some(dst) = c.bytes.get_mut(from..from + n) {
+                dst.copy_from_slice(now);
             }
-            let Some((_, c)) = fresh.last_mut() else {
-                continue;
-            };
-            let bit = 1 << k;
-            if c.held & bit == 0 {
-                self.len += 1;
-                self.below += usize::from(at + i < self.split);
-            }
-            c.held |= bit;
-            c.patched |= bit;
-            c.bytes[usize::from(k)] = v;
+            fresh.push((key, c));
+            a = a.wrapping_add(from_usize(n));
+            rest = later;
         }
         self.chunks = fresh.into_iter().collect();
     }
@@ -521,6 +526,32 @@ mod tests {
         assert_eq!(copy.held_below(split), 22);
         assert_eq!(walked_copy.held_below(split), 22);
         assert_eq!(copy.held_below(0x6100), walked_copy.held_below(0x6100));
+    }
+
+    /// A run poked whole holds what poking its bytes one by one holds.
+    ///
+    /// The bytes, the count and the count below the split, in a clone of a
+    /// frozen store, from an unaligned start over chunks the frozen layer
+    /// half holds.
+    #[test]
+    fn a_poked_run_holds_what_poking_each_byte_holds() {
+        let split = 0x7013;
+        let mut frozen = Store::split_at(split);
+        frozen.plant(0x7006, [9, 8, 7]);
+        frozen.set(0x701a, 3, true);
+        frozen.freeze();
+        let run: Vec<u8> = (0..37u8).map(|v| v.wrapping_mul(7)).collect();
+        let (mut whole, mut each) = (frozen.clone(), frozen.clone());
+        whole.poke_run(0x7005, &run);
+        for (a, &v) in (0x7005u64..).zip(&run) {
+            each.poke(a, v);
+        }
+        assert_eq!(whole.len(), each.len());
+        assert_eq!(whole.held_below(split), each.held_below(split));
+        for a in 0x7000..0x7040 {
+            assert_eq!(whole.get(a), each.get(a), "{a:#x}");
+            assert_eq!(whole.is_dirty(a), each.is_dirty(a), "{a:#x}");
+        }
     }
 
     /// The written bytes come out in address order, a window finds one
