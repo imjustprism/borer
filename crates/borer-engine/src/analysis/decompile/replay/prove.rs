@@ -2612,15 +2612,15 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 .zip(0..n)
                 .map(|(i, _)| (o + i, a.wrapping_add_signed(i) & mask))
                 .filter(|&(off, x)| {
-                    let texted = text.mem.contains_key(&x)
-                        || (pending.contains(&x)
-                            && !overwritten_first(next, off)
-                            && pending_live(x));
                     off >= floor
-                        && (texted || (machine.written.contains(&x) && defined(off)))
                         && !covered
                             .iter()
                             .any(|&(c, len)| x.wrapping_sub(c) & mask < len)
+                        && (text.mem.contains_key(&x)
+                            || (pending.contains(&x)
+                                && pending_live(x)
+                                && !overwritten_first(next, off))
+                            || (machine.written.contains(&x) && defined(off)))
                 })
                 .map(|(_, x)| x)
                 .collect();

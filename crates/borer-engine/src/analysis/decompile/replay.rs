@@ -3974,7 +3974,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             let held = sin.vals.get(&k);
             let float = held.and_then(|e| t.text.float_bits(e));
             let narrow = sin.narrow.get(&k).copied();
-            let shown = held.map_or_else(|| "(its own variable)".to_owned(), |e| format!("{e:?}"));
+            let shown = || held.map_or("(its own variable)".to_owned(), |e| format!("{e:?}"));
             let (text, at) = t.text.held_value(sin, k, at);
             if float.is_none() {
                 let whole = match held {
@@ -3995,7 +3995,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                             low64(machine),
                             nb,
                             false,
-                            || shown.clone(),
+                            shown,
                         );
                         continue;
                     }
@@ -4010,7 +4010,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         low64(machine),
                         64,
                         false,
-                        || shown.clone(),
+                        shown,
                     );
                     self.compare(
                         t,
@@ -4023,7 +4023,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         low64(machine >> 64),
                         64,
                         false,
-                        || shown.clone(),
+                        shown,
                     );
                     continue;
                 }
@@ -4045,7 +4045,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 machine,
                 bits,
                 float.is_some(),
-                || shown,
+                shown,
             );
         }
         if t.called {
@@ -4135,15 +4135,15 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 .zip(0..n)
                 .map(|(i, _)| (o + i, a.wrapping_add_signed(i) & mask))
                 .filter(|&(off, x)| {
-                    let text = t.text.mem.contains_key(&x)
-                        || (t.pending.contains(&x)
-                            && !overwritten_first(next, off)
-                            && pending_live(x));
                     off >= floor
-                        && (text || (t.written.contains(&x) && defined(off)))
                         && !covered
                             .iter()
                             .any(|&(c, len)| x.wrapping_sub(c) & mask < len)
+                        && (t.text.mem.contains_key(&x)
+                            || (t.pending.contains(&x)
+                                && pending_live(x)
+                                && !overwritten_first(next, off))
+                            || (t.written.contains(&x) && defined(off)))
                 })
                 .map(|(_, x)| x)
                 .collect();
