@@ -12,19 +12,31 @@ table, the commit messages, or a comment drifts. `run` drives a built server.
 `dev` installs the server a local client launches. `harness` is the shared
 root path and MCP client. This file is the only command CI runs.
 
-The run is ordered for the fastest answer. The checks that take seconds go
-first, side by side: the unpushed commits' messages (scripts/check/commits.py),
-then cargo fmt, then typos, the comment check, ruff check and format, the
-type library (scripts/check/typelib.py --check), the size budgets
-(scripts/check/sizes.py) and the duplicate scan (jscpd) together. The builds and the
-long checks follow one at a time: cargo clippy -D warnings, cargo test,
-the dogfood sweeps over real binaries, the readability benchmark against its
-baseline (scripts/run/readability.py), the golden diff of the `index` output
-(scripts/run/golden.py), cargo doc with warnings as errors
-(private items included), cargo deny (offline subset), scripts/run/smoke.py
-and scripts/run/agent_eval.py. The first failure stops the run and the exit
-status is non-zero. Tools that are not installed are reported and skipped,
-never silently passed.
+The run is ordered for the fastest answer. The unpushed commits' messages
+(scripts/check/commits.py) and cargo fmt go first, alone, since fmt rewrites
+what the rest reads. Every other step then starts as soon as the steps it
+needs have passed, side by side with the rest: the checks that take
+seconds (typos, the comment check, ruff check and format, the type library
+(scripts/check/typelib.py --check), the size budgets (scripts/check/sizes.py),
+the duplicate scan (jscpd) and cargo deny (offline subset)); cargo clippy -D
+warnings and then cargo doc with warnings as errors (private items
+included); the debug build, cargo test and the doctests; the corpus and
+sweep builds, then the dogfood sweeps over real binaries; and, once the
+builds they drive are done, the readability benchmark against its baseline
+(scripts/run/readability.py), the golden diff of the `index` output
+(scripts/run/golden.py), scripts/run/smoke.py and scripts/run/agent_eval.py.
+Each step's output goes to `gate-logs/<step>.log` in the target directory;
+the log prints a line as a step starts and ends, a step's `[skip]` lines,
+and the whole output of the step that failed. The first failure stops the
+run: the steps still running are killed, and the exit status is non-zero.
+Tools that are not installed are reported and skipped, never silently
+passed. A machine with fewer than eight cores (a CI runner) runs one step at
+a time, in the order the plan lists them.
+
+Steps that share a cargo profile directory wait for each other, as cargo
+would make them (its lock is per profile directory). Side by side, clippy
+and doc build in a target directory of their own (`<target>/clippy`), so
+the lint pass overlaps the test build instead of queueing behind it.
 
 A step that passed is remembered by the hash of what it reads: the contents
 of the tracked and untracked files under its inputs, its command, its
@@ -63,9 +75,11 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -92,6 +106,9 @@ SCRIPTS = ("scripts/", "ruff.toml")
 EVERYTHING = ("",)
 """Every file in the checkout."""
 
+WIDE_CORES = 8
+"""Cores a machine needs for the gate to run its steps side by side."""
+
 
 @dataclasses.dataclass(frozen=True)
 class Step:
@@ -109,56 +126,102 @@ class Step:
     """Path prefixes the step reads; `None` never caches it."""
     extra: tuple[str, ...] = ()
     """Files outside the checkout it reads, keyed by size and modification time."""
+    needs: tuple[str, ...] = ()
+    """Steps that must pass before it starts; one the plan left out is not waited for."""
+    rewrites: bool = False
+    """Whether it rewrites files it reads (fmt), so its key is taken after it runs."""
 
 
-def run(step: Step, strict: bool, capture: bool) -> tuple[bool, str]:
-    """Run one step from the repo root.
+class Runner:
+    """Runs steps as child processes, each with its output in a log file."""
 
-    A step whose tool is not installed is skipped locally, and fails when
-    `strict` (the `--check` form CI runs): there a missing tool is a broken
-    setup, and a skip would pass a check nobody ran. With `capture` the
-    output is returned instead of streamed, for steps run side by side.
+    def __init__(self, logs: Path, strict: bool) -> None:
+        self.logs = logs
+        self.strict = strict
+        self.procs: dict[str, subprocess.Popen] = {}
+        self.lock = threading.Lock()
+        self.stopped = False
+        logs.mkdir(parents=True, exist_ok=True)
 
-    Returns whether it passed and what it printed when captured.
-    """
-    if step.tool and shutil.which(step.tool) is None:
-        if strict:
-            print(f"[FAIL] {step.name}: `{step.tool}` is not installed", flush=True)
-            return False, ""
-        print(f"[skip] {step.name}: `{step.tool}` is not installed", flush=True)
-        return True, ""
-    t0 = time.time()
-    if not capture:
+    def log(self, step: Step) -> Path:
+        """The file a step's output goes to."""
+        return self.logs / (step.name.replace(" ", "-") + ".log")
+
+    def run(self, step: Step) -> bool:
+        """Runs one step from the repo root and tells whether it passed.
+
+        A step whose tool is not installed is skipped locally, and fails
+        when `strict` (the `--check` form CI runs): there a missing tool is
+        a broken setup, and a skip would pass a check nobody ran.
+        """
+        if step.tool and shutil.which(step.tool) is None:
+            if self.strict:
+                print(f"[FAIL] {step.name}: `{step.tool}` is not installed", flush=True)
+                return False
+            print(f"[skip] {step.name}: `{step.tool}` is not installed", flush=True)
+            return True
+        t0 = time.time()
         print(f"[run ] {step.name}: {' '.join(step.cmd)}", flush=True)
-    env = dict(os.environ)
-    env.update(step.env or {})
-    proc = subprocess.run(
-        step.cmd,
-        cwd=ROOT,
-        env=env,
-        capture_output=capture,
-        text=capture,
-        encoding="utf-8" if capture else None,
-        errors="replace" if capture else None,
-        **below_normal(),
-    )
-    status = "ok  " if proc.returncode == 0 else "FAIL"
-    print(f"[{status}] {step.name} ({time.time() - t0:.1f}s)", flush=True)
-    out = (proc.stdout or "") + (proc.stderr or "") if capture else ""
-    return proc.returncode == 0, out
+        env = dict(os.environ)
+        env.update(step.env or {})
+        with open(self.log(step), "wb") as out, self.lock:
+            if self.stopped:
+                return False
+            proc = subprocess.Popen(
+                step.cmd,
+                cwd=ROOT,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                **spawn_flags(),
+            )
+            self.procs[step.name] = proc
+        code = proc.wait()
+        with self.lock:
+            del self.procs[step.name]
+            if self.stopped:
+                return False
+        status = "ok  " if code == 0 else "FAIL"
+        print(f"[{status}] {step.name} ({time.time() - t0:.1f}s)", flush=True)
+        text = self.log(step).read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            if line.lstrip().startswith("[skip]"):
+                print(f"       {line.strip()}", flush=True)
+        if code != 0:
+            print(text.rstrip("\n"), flush=True)
+        return code == 0
+
+    def stop(self) -> None:
+        """Kills every step still running, with the processes each started."""
+        with self.lock:
+            self.stopped = True
+            procs = list(self.procs.values())
+        for proc in procs:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    capture_output=True,
+                )
+            else:
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
 
 
-def below_normal() -> dict:
-    """Popen arguments that start a step below normal priority.
+def spawn_flags() -> dict:
+    """Popen arguments that start a step below normal priority, in a group
+    of its own.
 
     A step's builds and tests use every core for minutes; at normal priority
     they starved the desktop. Cargo, rustc and the borer processes a
     step starts inherit the class, so the whole tree yields to interactive
-    work and still takes every idle cycle.
+    work and still takes every idle cycle. The group (a session on POSIX, a
+    process tree Windows' taskkill follows) lets a failure elsewhere kill
+    the step with everything it started.
     """
     if sys.platform == "win32":
         return {"creationflags": subprocess.BELOW_NORMAL_PRIORITY_CLASS}
-    return {"preexec_fn": lambda: os.nice(10)}
+    return {"preexec_fn": lambda: os.nice(10), "start_new_session": True}
 
 
 @contextlib.contextmanager
@@ -314,15 +377,21 @@ def dogfood_skips(*names: str) -> list[str]:
     return out
 
 
-def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[Step], list[Step]]:
-    """The gate's steps: the first one alone, the ones side by side, then the rest in order."""
+def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[Step], list[Step]]:
+    """The gate's steps: the ones run alone first, then the rest, listed in
+    an order that starts no step before the steps it needs. `wide` plans
+    them to run side by side."""
     py = sys.executable
     fmt = ["cargo", "fmt", "--all"] + (["--check"] if check_only else [])
     first = [
         Step("commits", [py, os.path.join("scripts", "check", "commits.py")]),
-        Step("fmt", fmt, inputs=RUST),
+        Step("fmt", fmt, inputs=RUST, rewrites=not check_only),
     ]
-    side = [
+    # Side by side, clippy and doc check where the test build does not: in a
+    # directory of their own they hold no lock the test build waits on, and
+    # doc reads the dependencies' metadata clippy left there.
+    lint = {"CARGO_TARGET_DIR": os.path.join(target, "clippy")} if wide else {}
+    rest = [
         Step("typos", ["typos"], tool="typos", inputs=EVERYTHING),
         Step(
             "comments",
@@ -344,30 +413,39 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
             tool="npx",
             inputs=("crates/", ".jscpd.json"),
         ),
-    ]
-    rest = [
-        Step("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]),
+        Step(
+            "clippy",
+            ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+            lint,
+        ),
         # The crackme the ground-truth test decompiles is an example; the
         # engine's own examples are left to clippy, which compiles them
         # (--all-targets), since linking them in the test build bought
         # nothing but three more executables.
         Step("examples", ["cargo", "build", "-p", "borer-fixtures", "--examples"]),
-        Step("test", ["cargo", "test", "--workspace", "--lib", "--bins", "--tests"], inputs=RUST),
-        Step("doctest", ["cargo", "test", "--workspace", "--doc"], inputs=RUST),
+        # `cargo test` builds no binary in a tree that has not been built
+        # before (a fresh worktree), and the steps that drive the server
+        # load one; built before the tests, they run while the tests do.
+        Step("build", ["cargo", "build", "-p", "borer"], needs=("examples",)),
+        Step(
+            "test",
+            ["cargo", "test", "--workspace", "--lib", "--bins", "--tests"],
+            inputs=RUST,
+            needs=("build",),
+        ),
+        # Beside the tests, not after them: cargo holds the profile's lock
+        # while it builds, not while the test binaries run.
+        Step("doctest", ["cargo", "test", "--workspace", "--doc"], inputs=RUST, needs=("build",)),
     ]
     if fast:
-        return first, side, rest
+        return first, rest
     # Named by platform, not by presence: the build step before the sweep
     # makes it, so it does not exist yet when this list is built.
     exe = "borer.exe" if sys.platform == "win32" else "borer"
     server = os.path.join(target, "debug", exe)
     dogfood = os.path.join(target, "corpus", exe)
-    sweep = ["cargo", "test", "-p", "borer-engine", "--profile", "sweep", "--test", "dogfood", "--"]
+    sweep = ["cargo", "test", "-p", "borer-engine", "--profile", "sweep", "--test", "dogfood"]
     rest += [
-        # `cargo test` builds no binary in a tree that has not been built
-        # before (a fresh worktree), and the dogfood sweep and the smoke
-        # test both load one.
-        Step("build", ["cargo", "build", "-p", "borer"]),
         # link.exe, not the rust-lld .cargo/config.toml names: the binary
         # the sweep reads stays linked as it always was.
         Step(
@@ -375,10 +453,10 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
             ["cargo", "build", "-p", "borer", "--profile", "corpus"],
             {"CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER": "link.exe"},
         ),
+        Step("build sweep", [*sweep, "--no-run"]),
         Step(
             "dogfood",
-            sweep
-            + ["--ignored"]
+            [*sweep, "--", "--ignored"]
             + dogfood_skips(
                 # The text check runs in a step of its own below.
                 "the_text_agrees_with_the_emulator_on_every_block",
@@ -404,14 +482,22 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
             ),
             {"BORER_DOGFOOD": dogfood},
             inputs=RUST,
+            needs=("build corpus", "build sweep"),
         ),
         # The text check alone: its replay takes 35 s by itself and 409 s
         # beside the sweeps above, which hold every core as it does.
         Step(
             "dogfood text",
-            sweep + ["--ignored", "--exact", "the_text_agrees_with_the_emulator_on_every_block"],
+            [
+                *sweep,
+                "--",
+                "--ignored",
+                "--exact",
+                "the_text_agrees_with_the_emulator_on_every_block",
+            ],
             {"BORER_DOGFOOD": dogfood},
             inputs=RUST,
+            needs=("dogfood",),
         ),
     ]
     # The corpus is x86-64 only. A 32-bit binary with x87 math catches what
@@ -422,8 +508,7 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
         rest.append(
             Step(
                 "dogfood x86",
-                sweep
-                + ["--ignored"]
+                [*sweep, "--", "--ignored"]
                 + dogfood_skips(
                     "the_final_text_agrees_with_the_emulator_on_small_functions",
                     "every_value_the_text_reads_is_set_or_an_input",
@@ -432,6 +517,7 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
                 {"BORER_DOGFOOD": x86},
                 inputs=RUST,
                 extra=(x86,),
+                needs=("build sweep", "dogfood text"),
             )
         )
     else:
@@ -454,6 +540,7 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
                 "--quiet",
             ],
             inputs=RUST + SCRIPTS,
+            needs=("build",),
         ),
         # Every function's `index` text over the notepad, msvcrt32 and
         # sqlite3 corpus against the hashes in scripts/run/golden.tsv
@@ -464,12 +551,14 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
             "golden",
             [py, os.path.join("scripts", "run", "golden.py"), "check", server, "--quiet"],
             inputs=RUST + SCRIPTS,
+            needs=("build",),
         ),
         Step(
             "doc",
             ["cargo", "doc", "--workspace", "--no-deps", "--document-private-items"],
-            {"RUSTDOCFLAGS": "-D warnings"},
+            {**lint, "RUSTDOCFLAGS": "-D warnings"},
             inputs=RUST,
+            needs=("clippy",),
         ),
         Step(
             "deny",
@@ -481,15 +570,68 @@ def plan(check_only: bool, fast: bool, target: str) -> tuple[list[Step], list[St
             "smoke",
             [py, os.path.join("scripts", "run", "smoke.py"), server, dogfood],
             inputs=RUST + SCRIPTS,
+            needs=("build", "build corpus"),
         ),
         # Seconds: the tasks replay on the crackme the examples step built.
         Step(
             "agent eval",
             [py, os.path.join("scripts", "run", "agent_eval.py"), server],
             inputs=RUST + SCRIPTS,
+            needs=("examples", "build"),
         ),
     ]
-    return first, side, rest
+    return first, rest
+
+
+def schedule(steps: list[Step], runner: Runner, cache: Cache, inputs: Inputs, wide: bool) -> str:
+    """Runs `steps`, each once the steps it needs have passed, and returns
+    the name of the first that failed, empty when none did.
+
+    A step that passed before over the same inputs is `[cache]`d and counts
+    as passed. `wide` starts every step that may start; otherwise one runs
+    at a time, in the order of `steps`.
+    An interrupt (Ctrl-C) kills the running steps before it returns: a step
+    in its own process group does not see it.
+    """
+    planned = {s.name for s in steps}
+    passed: set[str] = set()
+    pending = list(steps)
+    running: dict[concurrent.futures.Future, Step] = {}
+    failed = ""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(steps)) as pool:
+        try:
+            while not failed and (pending or running):
+                for s in list(pending):
+                    if running and not wide:
+                        break
+                    if any(n in planned and n not in passed for n in s.needs):
+                        continue
+                    pending.remove(s)
+                    if cache.hit(s.name, inputs.key(s)):
+                        print(f"[cache] {s.name}", flush=True)
+                        passed.add(s.name)
+                        continue
+                    running[pool.submit(runner.run, s)] = s
+                if not running:
+                    break
+                # A timeout, so that Windows delivers Ctrl-C to this wait.
+                done, _ = concurrent.futures.wait(
+                    running, timeout=1, return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                for f in done:
+                    s = running.pop(f)
+                    if f.result():
+                        passed.add(s.name)
+                        cache.record(s.name, (Inputs() if s.rewrites else inputs).key(s))
+                    elif not failed:
+                        failed = s.name
+                        runner.stop()
+        except BaseException:
+            runner.stop()
+            raise
+    if pending and not failed:
+        raise SystemExit(f"gate.py: {pending[0].name} needs a step that never ran")
+    return failed
 
 
 def main(argv: list[str]) -> int:
@@ -504,51 +646,26 @@ def main(argv: list[str]) -> int:
         print(f"[info] linked worktree: building in {shared}", flush=True)
     # The build lands where cargo puts it: CARGO_TARGET_DIR when set.
     target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")
-    first, side, rest = plan(check_only, fast, target)
+    wide = (os.cpu_count() or 1) >= WIDE_CORES
+    first, rest = plan(check_only, fast, target, wide)
     cache = Cache(os.path.join(target, "gate-cache.json"), use_cache)
+    runner = Runner(Path(target) / "gate-logs", check_only)
     t0 = time.time()
 
-    def finish(ok: bool, name: str = "") -> int:
+    def finish(failed: str) -> int:
         took = time.time() - t0
-        if ok:
+        if not failed:
             print(f"\nGATE OK ({took:.0f}s)")
             return 0
-        print(f"\nGATE FAILED at: {name} ({took:.0f}s)")
+        print(f"\nGATE FAILED at: {failed} ({took:.0f}s); every step's log is in {runner.logs}")
         return 1
 
-    # fmt rewrites files, so the checks that read them start once it is done.
+    # fmt rewrites files, so each first step's inputs are read after the one
+    # before it, and the rest's after them all.
     for s in first:
-        inputs = Inputs()
-        key = inputs.key(s)
-        if cache.hit(s.name, key):
-            print(f"[cache] {s.name}", flush=True)
-            continue
-        ok, _ = run(s, check_only, capture=False)
-        if not ok:
-            return finish(False, s.name)
-        cache.record(s.name, Inputs().key(s))
-    inputs = Inputs()
-    todo = [s for s in side if not cache.hit(s.name, inputs.key(s))]
-    for s in side:
-        if s not in todo:
-            print(f"[cache] {s.name}", flush=True)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(todo))) as pool:
-        results = list(pool.map(lambda s: (s, *run(s, check_only, capture=True)), todo))
-    for s, ok, out in results:
-        if not ok:
-            sys.stdout.write(out)
-            return finish(False, s.name)
-        cache.record(s.name, inputs.key(s))
-    for s in rest:
-        key = inputs.key(s)
-        if cache.hit(s.name, key):
-            print(f"[cache] {s.name}", flush=True)
-            continue
-        ok, _ = run(s, check_only, capture=False)
-        if not ok:
-            return finish(False, s.name)
-        cache.record(s.name, key)
-    return finish(True)
+        if failed := schedule([s], runner, cache, Inputs(), wide):
+            return finish(failed)
+    return finish(schedule(rest, runner, cache, Inputs(), wide))
 
 
 if __name__ == "__main__":
