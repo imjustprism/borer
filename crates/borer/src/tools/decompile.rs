@@ -11,6 +11,7 @@ use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
 use crate::params::{DecompileBatchParams, DecompileParams, Detail, Filter, count_param, to_usize};
+use crate::safety::{Effect, effects};
 
 /// Lines of pseudo-C one `decompile` answer holds unless a limit says
 /// otherwise.
@@ -294,6 +295,7 @@ impl BorerServer {
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
         description = "Decompile many functions matching a name filter, in parallel, 6000 chars each and 40000 in all; out=<file.c> writes all uncapped to a file under the output root, kept unless overwrite=true. For one use decompile.",
+        meta = effects(&[Effect::WritesFiles]),
         annotations(
             read_only_hint = false,
             destructive_hint = true,

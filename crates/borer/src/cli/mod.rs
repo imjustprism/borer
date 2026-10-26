@@ -141,6 +141,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
     let (first, after) = match command {
         Command::Query(_) => (2, " after the binary"),
         Command::PackKeys
+        | Command::Tools
         | Command::Pack
         | Command::Sigmake
         | Command::Packs
@@ -150,17 +151,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         | Command::FetchPdb => (1, ""),
     };
     load.layout = raw.layout()?;
-    let maps_a_binary = match command {
-        Command::Query(_) | Command::Packs => true,
-        Command::PackKeys
-        | Command::Pack
-        | Command::Sigmake
-        | Command::Doctor
-        | Command::Setup
-        | Command::Update
-        | Command::FetchPdb => false,
-    };
-    if load.layout.is_some() && !maps_a_binary {
+    if load.layout.is_some() && !command.maps_a_binary() {
         bail!(
             "--arch, --base, --entry and --regions say how a query reads its binary; {word} maps none"
         );
@@ -184,6 +175,10 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
     }
     match command {
         Command::PackKeys => print!("{}", borer_engine::pack::keys_tsv()),
+        Command::Tools => println!(
+            "{}",
+            crate::safety::manifest(&crate::BorerServer::tool_router().list_all())?
+        ),
         Command::Pack => {
             let file = arg(args, 1, "pack needs a file")?;
             let text = std::fs::read_to_string(file)

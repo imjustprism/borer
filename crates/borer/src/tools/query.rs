@@ -12,6 +12,7 @@ use crate::BorerServer;
 use crate::errors::err_params;
 use crate::paging;
 use crate::params::{Annotation, QueryParams, ScriptParams, must_be_in_a_section, must_fit_a_row};
+use crate::safety::{Effect, effects};
 
 #[tool_router(router = query_tools, vis = "pub(crate)")]
 impl BorerServer {
@@ -33,6 +34,7 @@ impl BorerServer {
     /// the resources nearest it; otherwise the resource's own error.
     #[tool(
         description = "Read a borer:// resource (triage, taint, emulate, solve, grep...) for hosts without MCP resources; same answer as resources/read. Use it for analyses no tool has; borer://help lists them, !offset=N!limit=N pages.",
+        meta = effects(&[Effect::ReadsFiles]),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -70,6 +72,7 @@ impl BorerServer {
     /// architecture; a failing script is an answer, not an error.
     #[tool(
         description = "Run a sandboxed Rhai script on a snapshot of the program: query(uri) and rows(uri) read any resource. Use it when no single tool answers. Proposed names apply only with dry_run=false; a failed script applies nothing.",
+        meta = effects(&[Effect::ReadsFiles, Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
             destructive_hint = false,

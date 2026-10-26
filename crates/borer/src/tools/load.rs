@@ -16,6 +16,7 @@ use crate::BorerServer;
 use crate::catalog::template_names;
 use crate::errors::{err_internal, err_params};
 use crate::params::{FetchPdbParams, LoadBinaryParams, LoadProjectParams, SaveProjectParams};
+use crate::safety::{Effect, effects};
 use crate::state::{RawLoad, fault_text, lock, read_lock};
 use crate::symsrv;
 
@@ -147,6 +148,7 @@ impl BorerServer {
     /// `entry_file_offset` are both given.
     #[tool(
         description = "Load a PE, ELF or Mach-O file (or raw bytes with arch) as the program all tools read, returning its summary. Clears the session's names: save_project first. A refused load changes nothing.",
+        meta = effects(&[Effect::ReadsFiles, Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -284,6 +286,7 @@ impl BorerServer {
     /// fetch or its validation fails.
     #[tool(
         description = "Download the loaded PE's missing PDB over https into the cache, kept only if its GUID and age match. Use it when load_binary reports no PDB; dry run until dry_run=false, then load_binary again.",
+        meta = effects(&[Effect::Network, Effect::WritesFiles]),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -372,6 +375,7 @@ impl BorerServer {
     /// Never.
     #[tool(
         description = "Restart the borer server on its rebuilt binary, keeping the session, the loaded file and its annotations. Use it after rebuilding borer instead of restarting the client; live attaches end.",
+        meta = effects(&[Effect::RestartsServer]),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -409,6 +413,7 @@ impl BorerServer {
     /// `overwrite`); internal error when the file cannot be written.
     #[tool(
         description = "Save the session's names, comments and types to a .json project under the output root, keyed by SHA-256. Restore with load_project; an existing file is kept unless overwrite=true.",
+        meta = effects(&[Effect::WritesFiles]),
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -472,6 +477,7 @@ impl BorerServer {
     /// another binary and `force` is not set.
     #[tool(
         description = "Replace the session's names, comments and types with a saved .json project. Another binary's project (by SHA-256) is refused unless force=true; for a rebuild use borer://carry.",
+        meta = effects(&[Effect::ReadsFiles, Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
             destructive_hint = true,

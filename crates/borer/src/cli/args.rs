@@ -81,6 +81,7 @@ commands:
   setup [--apply] [--replace|--remove]     register this binary as the MCP server borer with every agent client installed (Claude Code, Claude Desktop, Cursor, Windsurf, Devin Desktop, VS Code and Insiders, Gemini CLI, Antigravity, Codex CLI, Zed, OpenCode, pi, Copilot CLI, Grok Build, Cline, Roo Code, Kilo Code, Continue, Amp, Qwen Code, Kiro, Factory Droid, Kimi Code, Junie, Augment, Warp, LM Studio); an entry whose program is gone is replaced, --replace replaces any other, --remove takes borer out; a dry run that shows each file and entry unless --apply, which keeps a .bak of each file it changes
   update [--check]                         install the latest release over this binary, checked against its SHA256SUMS; --check only says whether one is out (a command line run at a terminal also checks once a day and says so on stderr; not under CI, and BORER_NO_UPDATE_CHECK=1 turns it off)
   version                                  print the version (also --version, -V)
+  tools                                    every MCP tool with its four annotation hints and what it touches (files, network, another process, the session), as JSON: the facts guard and registry entries are generated from
   fetch-pdb <binary> [server]              fetch the companion PDB the debug record names over https from a public symbol server (default msdl, or BORER_SYMBOL_SERVER) into the local cache, kept only if its guid+age match; reload to apply
   pack <file>                              read a pack and report its name, its keys by section and what borer does not read
   pack-keys                                every key a pack can set, with its default and meaning
@@ -112,6 +113,8 @@ no arguments starts the MCP stdio server";
 pub(super) enum Command {
     /// `pack-keys`: every key a pack can set; no binary.
     PackKeys,
+    /// `tools`: every MCP tool's safety facts as JSON; no binary.
+    Tools,
     /// `pack <file>`: a pack's report for its author; no binary.
     Pack,
     /// `sigmake <out> <name> <library>...`: a signature pack from libraries; no binary.
@@ -145,6 +148,7 @@ impl Command {
     pub(super) fn parse(word: &str) -> Option<Self> {
         Some(match word {
             "pack-keys" => Self::PackKeys,
+            "tools" => Self::Tools,
             "pack" => Self::Pack,
             "sigmake" => Self::Sigmake,
             "packs" => Self::Packs,
@@ -169,11 +173,27 @@ impl Command {
     /// (`sigmake`, `script`, `set-type`).
     pub(super) fn most_args(self) -> Option<usize> {
         match self {
-            Self::PackKeys => Some(0),
+            Self::PackKeys | Self::Tools => Some(0),
             Self::Pack | Self::Packs | Self::Doctor | Self::Setup | Self::Update => Some(1),
             Self::FetchPdb => Some(2),
             Self::Sigmake => None,
             Self::Query(q) => q.most_args(),
+        }
+    }
+
+    /// Whether the command reads a binary that `--arch`, `--base`,
+    /// `--entry` and `--regions` could say how to map.
+    pub(super) const fn maps_a_binary(self) -> bool {
+        match self {
+            Self::Query(_) | Self::Packs => true,
+            Self::PackKeys
+            | Self::Tools
+            | Self::Pack
+            | Self::Sigmake
+            | Self::Doctor
+            | Self::Setup
+            | Self::Update
+            | Self::FetchPdb => false,
         }
     }
 }

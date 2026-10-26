@@ -14,6 +14,7 @@ use crate::params::{
     Annotation, AnnotationsParams, Filter, Page, SetCommentParams, SetNameParams, SetTypeParams,
     TypesParams, frame_words, must_be_a_name, must_be_in_a_section, must_fit_a_row, plan_var,
 };
+use crate::safety::{Effect, effects};
 use crate::state::{read_lock, write_lock};
 
 /// Splits one `offset:name:type` field statement.
@@ -132,6 +133,7 @@ impl BorerServer {
     /// not resolve, or no section holds it.
     #[tool(
         description = "Name a function or data global in the session overlay, never the binary; names=[addr=name,...] renames many, checked first. A taken name needs force=true. Dry run until dry_run=false.",
+        meta = effects(&[Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -277,6 +279,7 @@ impl BorerServer {
     /// holds it.
     #[tool(
         description = "Comment an address in the session overlay, never the binary; a comment opening with ? is an open question. To name it use set_name. Dry run until dry_run=false; save_project keeps it.",
+        meta = effects(&[Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -342,6 +345,7 @@ impl BorerServer {
     /// section holds it.
     #[tool(
         description = "Define a struct, enum or typedef, or apply a type at an address so decompile names its fields; at a function, type sets the prototype. To infer a class use class_layout. Checked first; dry run until dry_run=false.",
+        meta = effects(&[Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
             destructive_hint = false,

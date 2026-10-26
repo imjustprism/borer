@@ -193,7 +193,7 @@ crates/borer-engine/tests/it/decompile.rs::a_scalar_lane_move_and_round_keeps_th
 crates/borer-engine/tests/it/elf.rs::elf_bytes#1	254
 crates/borer-engine/tests/it/objc.rs::image#1	182
 crates/borer-engine/tests/it/x86.rs	3378
-crates/borer/src/cli/mod.rs::cli#1	176
+crates/borer/src/cli/mod.rs::cli#1	171
 crates/borer/src/cli/mod.rs::query#1	1049
 crates/borer/src/index.rs	1581
 crates/borer/src/main.rs::call_tool#1	112

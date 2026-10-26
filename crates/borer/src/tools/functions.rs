@@ -11,6 +11,7 @@ use crate::params::{
     CallgraphParams, CfgParams, ClassLayoutParams, FunctionDetailParams, FunctionParams,
     FunctionsParams, Page, ReachesParams, XrefsParams, count_param, to_usize,
 };
+use crate::safety::{Effect, effects};
 use crate::state::write_lock;
 
 impl BorerServer {
@@ -300,6 +301,7 @@ impl BorerServer {
     /// belongs to the class, or the struct to apply is refused.
     #[tool(
         description = "Infer a C++ class's fields, methods and vftable from how its methods use the object: offset, width, reads, writes. Use it on an unknown class; for a known layout use set_type. apply=Name saves it as a struct (dry run until dry_run=false).",
+        meta = effects(&[Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
