@@ -24,21 +24,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from harness.client import Client  # noqa: E402
-from harness.root import ROOT  # noqa: E402
-
-
-def pick_exe(args: list[str]) -> str:
-    if "--exe" in args:
-        i = args.index("--exe")
-        exe = args[i + 1]
-        del args[i : i + 2]
-        return exe
-    for profile in ("release", "debug"):
-        p = os.path.join(ROOT, "target", profile, "borer.exe")
-        if os.path.exists(p):
-            return p
-    raise SystemExit("no borer.exe built; run `cargo build --release`")
+from harness.client import Client, pick_exe  # noqa: E402
 
 
 def typed(value: str) -> Any:

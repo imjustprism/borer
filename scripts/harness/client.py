@@ -13,7 +13,25 @@ import os
 import subprocess
 from typing import Any
 
+from .root import ROOT
+
 PROTOCOL = "2025-11-25"
+
+
+def pick_exe(args: list[str]) -> str:
+    """Returns the server binary `--exe PATH` names, taking both out of
+    `args`, else the release build's, else the debug build's."""
+    if "--exe" in args:
+        i = args.index("--exe")
+        exe = args[i + 1]
+        del args[i : i + 2]
+        return exe
+    name = "borer.exe" if os.name == "nt" else "borer"
+    for profile in ("release", "debug"):
+        p = os.path.join(ROOT, "target", profile, name)
+        if os.path.exists(p):
+            return p
+    raise SystemExit(f"no {name} built; run `cargo build --release`")
 
 
 class Client:
