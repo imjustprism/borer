@@ -19,9 +19,9 @@ use super::tables::{ResolvedTable, resolve_jump_table};
 use super::{
     ArgConst, Cursors, FINALLY_CALL_REACH, FINALLY_REACH, GAP_INSTRS_MIN, GUESS_WALK_MAX,
     HANDLER_REACH, InstrRec, Lanes, PARAM_VALUES_MAX, Recorded, Registration, SEEDS_MAX,
-    SPLIT_ROUNDS_MAX, Seed, Shared, WAVE_BATCH, WAVE_MIN, build_blocks, call_arg_consts,
+    SPLIT_ROUNDS_MAX, Seed, Shared, WAVE_BATCH, WAVE_MIN, add_site, build_blocks, call_arg_consts,
     class_registration, decode_at, fingerprint, handler_lands_near, mix, near_target, padding_end,
-    push_site, seh_scope_roots, tears_frame_down, trace_seeds, unwind_nop,
+    seh_scope_roots, tears_frame_down, trace_seeds, unwind_nop,
 };
 use crate::analysis::{BlockTerm, Function, NameSource, RefKind, RefSite, dedup_sorted, is_imm};
 use crate::fxmap::{FxHashMap, FxHashSet};
@@ -164,8 +164,10 @@ pub(super) struct WalkState<'a> {
     pub(super) done: AddrSet,
     /// Functions found so far, in discovery order.
     pub(super) functions: Vec<Function>,
-    /// Target address to its reference sites.
-    pub(super) xrefs: BTreeMap<u64, Vec<RefSite>>,
+    /// Target address to its reference sites, hashed while the walks add
+    /// millions of them one commit at a time; every reader that cares for
+    /// order sorts what it takes.
+    pub(super) xrefs: FxHashMap<u64, Vec<RefSite>>,
     /// Indirect-jump site to resolved targets.
     pub(super) jump_tables: BTreeMap<u64, Vec<u64>>,
     /// Sites whose table a byte index table expanded.
@@ -717,11 +719,15 @@ impl WalkState<'_> {
         let mut incomplete = false;
         for _ in 0..SPLIT_ROUNDS_MAX {
             let covered = self.take_covered();
-            let seeds: Vec<u64> = self
+            let mut targets: Vec<u64> = self
                 .xrefs
                 .iter()
                 .filter(|(_, sites)| sites.iter().any(|s| s.kind != RefKind::Index))
                 .map(|(&t, _)| t)
+                .collect();
+            targets.sort_unstable();
+            let seeds: Vec<u64> = targets
+                .into_iter()
                 .filter(|&t| {
                     crate::analysis::is_executable_va(program, t)
                         && !covered.contains(t)
@@ -838,6 +844,10 @@ impl WalkState<'_> {
             self.followed_calls.remove(e);
             self.accepted_guesses.remove(e);
         }
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "each target's list is filtered on its own"
+        )]
         for sites in self.xrefs.values_mut() {
             sites.retain(|s| !s.from_entry.is_some_and(|f| set.contains(&f)));
         }
@@ -1059,10 +1069,10 @@ impl WalkState<'_> {
                 | FlowControl::Exception
                 | FlowControl::XbeginXabortXend => continue,
             };
-            push_site(&mut self.xrefs, target, *va, kind, from);
+            self.record_site(target, *va, kind, from);
         }
         for r in data_refs {
-            push_site(&mut self.xrefs, r.target, r.va, r.kind, from);
+            self.record_site(r.target, r.va, r.kind, from);
         }
         for t in tables {
             self.jump_tables.insert(t.site, t.targets);
@@ -1080,6 +1090,22 @@ impl WalkState<'_> {
 
         self.queue.extend(func.callees.iter().copied());
         self.functions.push(func);
+    }
+
+    /// Appends one reference site to [`Self::xrefs`] ([`add_site`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The referenced address.
+    /// * `va` - Address of the referencing instruction.
+    /// * `kind` - How the site uses the target.
+    /// * `from` - Entry of the function containing `va`.
+    fn record_site(&mut self, target: u64, va: u64, kind: RefKind, from: Option<u64>) {
+        let sites = self
+            .xrefs
+            .entry(target)
+            .or_insert_with(|| Vec::with_capacity(1));
+        add_site(sites, va, kind, from);
     }
 
     /// Notes a function being committed where the later rounds look: what

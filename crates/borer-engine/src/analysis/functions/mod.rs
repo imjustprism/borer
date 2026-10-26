@@ -535,7 +535,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         queue: seeds,
         done: AddrSet::new(program),
         functions: Vec::new(),
-        xrefs: BTreeMap::new(),
+        xrefs: FxHashMap::default(),
         jump_tables: BTreeMap::new(),
         indexed_tables: BTreeSet::new(),
         param_values: BTreeMap::new(),
@@ -668,19 +668,16 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     st.functions.retain(|f| f.instr_count > 0);
     st.functions.shrink_to_fit();
     let entries: BTreeSet<u64> = st.functions.iter().map(|f| f.entry).collect();
-    record_table_refs(
-        program,
-        &entries,
-        &Covered::new(&st.functions),
-        &mut st.xrefs,
-    );
+    let mut xrefs: BTreeMap<u64, Vec<RefSite>> =
+        std::mem::take(&mut st.xrefs).into_iter().collect();
+    record_table_refs(program, &entries, &Covered::new(&st.functions), &mut xrefs);
     analysis.noreturn = entries
         .iter()
         .copied()
         .filter(|&e| st.noreturn.contains(e))
         .collect();
     analysis.functions = st.functions;
-    analysis.xrefs = st.xrefs;
+    analysis.xrefs = xrefs;
     analysis.jump_tables = st.jump_tables;
     analysis.indexed_tables = st.indexed_tables;
     analysis.throw_sites = throw_sites;
@@ -2041,7 +2038,24 @@ pub(super) fn push_site(
     kind: RefKind,
     from_entry: Option<u64>,
 ) {
-    let sites = map.entry(target).or_insert_with(|| Vec::with_capacity(1));
+    add_site(
+        map.entry(target).or_insert_with(|| Vec::with_capacity(1)),
+        va,
+        kind,
+        from_entry,
+    );
+}
+
+/// Appends one reference site to a target's list, unless the list holds
+/// [`XREF_SITES_PER_TARGET`] already.
+///
+/// # Arguments
+///
+/// * `sites` - The target's sites.
+/// * `va` - Address of the referencing instruction.
+/// * `kind` - How the site uses the target.
+/// * `from_entry` - Entry of the function containing `va`.
+pub(super) fn add_site(sites: &mut Vec<RefSite>, va: u64, kind: RefKind, from_entry: Option<u64>) {
     if sites.len() < XREF_SITES_PER_TARGET {
         sites.push(RefSite {
             va,
