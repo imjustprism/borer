@@ -899,8 +899,28 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: 
 ///
 /// # Returns
 ///
-/// A report of a dozen lines, then the functions to read first.
+/// A report of a dozen lines, then the functions to read first. Every
+/// section reads the whole program, so the report is built once per set
+/// of names ([`Analysis::derived`]).
 pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
+    a.derived
+        .get_or_build_named("triage", o.fingerprint(), (), || triage_of(p, a, o))
+        .as_ref()
+        .clone()
+}
+
+/// Builds the report [`triage_tsv`] memoizes.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+///
+/// # Returns
+///
+/// As [`triage_tsv`].
+fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
     /// Functions listed to read first.
     const READ_MAX: usize = 10;
     /// Imports whose use marks a function as the program's own logic rather

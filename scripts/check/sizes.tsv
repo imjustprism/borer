@@ -124,7 +124,7 @@ crates/borer-engine/src/analysis/render/runs/mod.rs::judge#1	202
 crates/borer-engine/src/analysis/render/runs/mod.rs::render_runs#1	120
 crates/borer-engine/src/analysis/render/summary.rs::summary_of#1	226
 crates/borer-engine/src/analysis/render/triage.rs::crypto_tsv#1	102
-crates/borer-engine/src/analysis/render/triage.rs::triage_tsv#1	185
+crates/borer-engine/src/analysis/render/triage.rs::triage_of#1	185
 crates/borer-engine/src/analysis/render/unpack.rs::devirtualize_tsv#1	202
 crates/borer-engine/src/analysis/render/unpack.rs::unpack_tsv#1	169
 crates/borer-engine/src/analysis/returns.rs	1541
