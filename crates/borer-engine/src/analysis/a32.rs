@@ -1633,58 +1633,11 @@ fn last_write(i: &Insn) -> Option<Last> {
 /// * `analysis` - The functions, updated in place.
 pub(crate) fn infer_returns(program: &Program, analysis: &mut Analysis) {
     returns::infer(program, analysis);
-    let float_of = |ls: &[Last]| {
-        ls.iter().find_map(|l| {
-            if let Last::Float(w) = l {
-                Some(*w)
-            } else {
-                None
-            }
-        })
-    };
+    let found = super::striped(&analysis.functions, |f| float_result(program, f));
     let mut onward: Vec<(usize, u64)> = Vec::new();
-    for (k, f) in analysis.functions.iter_mut().enumerate() {
-        let mut at_return: Vec<Last> = Vec::new();
-        let mut any: Vec<Last> = Vec::new();
-        for b in &f.blocks {
-            let mut it = ItState::default();
-            let mut va = b.start;
-            let mut in_block = None;
-            while va < b.end {
-                let Some(i) = decode(program, va, &mut it) else {
-                    break;
-                };
-                if let Some(l) = last_write(&i) {
-                    in_block = Some(l);
-                    if l == Last::Int {
-                        any.push(l);
-                    }
-                }
-                va = i.next();
-            }
-            if b.term != BlockTerm::Call {
-                any.extend(in_block);
-            }
-            if b.term == BlockTerm::Ret {
-                at_return.extend(in_block);
-            }
-        }
-        let inside = |t: &u64| f.blocks.iter().any(|x| x.start == *t);
-        let tail = f
-            .blocks
-            .iter()
-            .find(|b| b.term == BlockTerm::Jmp && !b.successors.iter().any(inside));
-        if at_return.is_empty()
-            && let Some(&t) = tail.and_then(|b| b.successors.first())
-        {
-            onward.push((k, t));
-        }
-        let tail = tail.is_some();
-        let float = if at_return.is_empty() {
-            float_of(&any).filter(|_| !tail && !any.contains(&Last::Int))
-        } else {
-            float_of(&at_return).filter(|_| !at_return.contains(&Last::Int))
-        };
+    for (k, (f, r)) in analysis.functions.iter_mut().zip(found).enumerate() {
+        let Some((float, tail)) = r else { continue };
+        onward.extend(tail.map(|t| (k, t)));
         if float.is_some() {
             f.ret_float = float;
             f.returns_value = Some(true);
@@ -1705,4 +1658,70 @@ pub(crate) fn infer_returns(program: &Program, analysis: &mut Analysis) {
             }
         }
     }
+}
+
+/// Returns the float result one ARM32 function's own blocks hand back, and
+/// the function it jumps on to when no returning block writes a result.
+///
+/// The rules are [`infer_returns`]'s.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// The float result's width in bits, if any, and the entry of the
+/// function a block without a return jumps on to, if any.
+fn float_result(program: &Program, f: &Function) -> (Option<u8>, Option<u64>) {
+    let float_of = |ls: &[Last]| {
+        ls.iter().find_map(|l| {
+            if let Last::Float(w) = l {
+                Some(*w)
+            } else {
+                None
+            }
+        })
+    };
+    let mut at_return: Vec<Last> = Vec::new();
+    let mut any: Vec<Last> = Vec::new();
+    for b in &f.blocks {
+        let mut it = ItState::default();
+        let mut va = b.start;
+        let mut in_block = None;
+        while va < b.end {
+            let Some(i) = decode(program, va, &mut it) else {
+                break;
+            };
+            if let Some(l) = last_write(&i) {
+                in_block = Some(l);
+                if l == Last::Int {
+                    any.push(l);
+                }
+            }
+            va = i.next();
+        }
+        if b.term != BlockTerm::Call {
+            any.extend(in_block);
+        }
+        if b.term == BlockTerm::Ret {
+            at_return.extend(in_block);
+        }
+    }
+    let inside = |t: &u64| f.blocks.iter().any(|x| x.start == *t);
+    let tail = f
+        .blocks
+        .iter()
+        .find(|b| b.term == BlockTerm::Jmp && !b.successors.iter().any(inside));
+    let onward = tail
+        .and_then(|b| b.successors.first().copied())
+        .filter(|_| at_return.is_empty());
+    let tail = tail.is_some();
+    let float = if at_return.is_empty() {
+        float_of(&any).filter(|_| !tail && !any.contains(&Last::Int))
+    } else {
+        float_of(&at_return).filter(|_| !at_return.contains(&Last::Int))
+    };
+    (float, onward)
 }
