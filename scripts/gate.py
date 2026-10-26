@@ -52,6 +52,9 @@ beside the main checkout unless `CARGO_TARGET_DIR` says otherwise
 (`shared_target`): two checkouts of one workspace write the same artifact
 names, so sharing the main `target` would link one checkout's crates into
 the other. The machine lock below keeps two gates from building at once.
+A worktree's first gate copies the dependencies another worktree's gate
+built into its own directory (`seed`), so it builds only the workspace's
+own crates.
 
 The sweep decompiles every function of the workspace's own server binary
 built with the `corpus` profile (unoptimized throughout, the debug codegen
@@ -289,6 +292,77 @@ def shared_target() -> str | None:
     if not git_dir or not common or Path(git_dir) == Path(common):
         return None
     return str(Path(common).parent / "target-worktrees" / ROOT.name)
+
+
+SEEDED = ("debug", "corpus", "sweep", os.path.join("clippy", "debug"))
+"""The profile directories, under a target directory, a fresh worktree seeds."""
+
+
+def workspace_names() -> set[str]:
+    """The names the workspace's own packages and targets give their build units."""
+    proc = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    names: set[str] = set()
+    if proc.returncode != 0:
+        return names
+    for package in json.loads(proc.stdout)["packages"]:
+        names.add(package["name"])
+        for target in package["targets"]:
+            names.add(target["name"])
+            names.add(target["name"].replace("-", "_"))
+    return names
+
+
+def seed(target: str) -> None:
+    """Copies the dependencies another worktree's gate built into this
+    worktree's target directory, for each profile it has not built yet.
+
+    A fresh worktree's first gate built every dependency four times over
+    (debug, clippy, corpus, sweep) before its own crates. Another gate's
+    directory (`gate-cache.json` marks one, and the machine lock keeps it
+    still while this gate holds the lock) holds the same units under the
+    same names: a unit's name hashes its package, version, features,
+    profile and compiler, and cargo reruns a build script whose output names
+    the directory it moved from. The workspace's own units are left behind:
+    their freshness is judged by file times, and the other worktree's
+    sources are not these. Cargo then builds only those, and any dependency
+    the other directory lacks.
+    """
+    here = Path(target)
+    if not here.parent.is_dir():
+        return
+    donors = [d for d in here.parent.iterdir() if d != here and (d / "gate-cache.json").is_file()]
+    todo = [p for p in SEEDED if not (here / p / ".fingerprint").exists()]
+    if not donors or not todo:
+        return
+    own = workspace_names()
+    if not own:
+        return
+    for profile in todo:
+        built = [d / profile for d in donors if (d / profile / ".fingerprint").is_dir()]
+        if not built:
+            continue
+        src = max(built, key=lambda d: (d / ".fingerprint").stat().st_mtime)
+        t0 = time.time()
+        for sub in (".fingerprint", "build", "deps"):
+            if not (src / sub).is_dir():
+                continue
+            (here / profile / sub).mkdir(parents=True, exist_ok=True)
+            for entry in (src / sub).iterdir():
+                unit = entry.name.split(".")[0].rpartition("-")[0]
+                if not unit or unit in own or unit.removeprefix("lib") in own:
+                    continue
+                dest = here / profile / sub / entry.name
+                if entry.is_dir():
+                    shutil.copytree(entry, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(entry, dest)
+        units = sum(1 for _ in (here / profile / ".fingerprint").iterdir())
+        print(f"[seed] {profile}: {units} dependency units from {src} ({time.time() - t0:.1f}s)")
 
 
 class Inputs:
@@ -644,6 +718,7 @@ def main(argv: list[str]) -> int:
     if not os.environ.get("CARGO_TARGET_DIR") and (shared := shared_target()):
         os.environ["CARGO_TARGET_DIR"] = shared
         print(f"[info] linked worktree: building in {shared}", flush=True)
+        seed(shared)
     # The build lands where cargo puts it: CARGO_TARGET_DIR when set.
     target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")
     wide = (os.cpu_count() or 1) >= WIDE_CORES
