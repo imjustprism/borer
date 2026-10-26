@@ -139,6 +139,7 @@ pub fn flattening_tsv(
     let Some(f) = a.function(entry) else {
         return Ok(out);
     };
+    let leads = reaching(f, head);
     for (n, t) in targets.iter().enumerate().take(CASES_MAX) {
         let block = f.blocks.iter().find(|b| b.start == *t);
         let instrs = block.map_or(0, |b| {
@@ -159,7 +160,7 @@ pub fn flattening_tsv(
             | BlockTerm::Call
             | BlockTerm::Indirect
             | BlockTerm::Fall
-                if *t == head || reaches(f, *t, head) =>
+                if leads.contains(t) =>
             {
                 "back to the dispatch"
             }
@@ -222,9 +223,10 @@ pub(super) fn flattened(a: &Analysis, site: u64, cases: &[u64]) -> Option<Dispat
         .iter()
         .find(|b| b.start <= site && site < b.end)?
         .start;
+    let leads = reaching(f, head);
     let back = cases
         .iter()
-        .filter(|t| **t != head && reaches(f, **t, head))
+        .filter(|t| **t != head && leads.contains(*t))
         .count();
     (back * 2 > cases.len()).then_some(Dispatcher {
         site,
@@ -376,7 +378,8 @@ pub(super) fn dispatch_loops_in(p: &Program, a: &Analysis, f: &Function) -> Vec<
         if handlers.len() < VM_MIN_FETCHED {
             continue;
         }
-        let back = handlers.iter().filter(|t| reaches(f, **t, b.start)).count();
+        let leads = reaching(f, b.start);
+        let back = handlers.iter().filter(|t| leads.contains(*t)).count();
         if back * 2 < handlers.len() {
             continue;
         }
@@ -987,29 +990,41 @@ pub(super) fn virtual_pointer(p: &Program, f: &Function) -> Option<VirtualPointe
     Some(VirtualPointer { register, stored })
 }
 
-/// Tells whether `from` leads back to `to` inside one function.
+/// Returns what leads to `to` inside one function: `to` itself and every
+/// block with a path of successor edges to it.
+///
+/// One walk back from `to` over the edges answers every case of a table,
+/// where a walk forward from each case looked each block up by a scan of
+/// the function and took seconds on a dispatcher of a thousand blocks. A
+/// block start the function lists twice is the first such block, as a
+/// lookup by start finds it.
 ///
 /// # Arguments
 ///
 /// * `f` - The function whose blocks are walked.
-/// * `from` - The block to start at.
 /// * `to` - The block looked for.
-pub(super) fn reaches(f: &Function, from: u64, to: u64) -> bool {
-    let mut seen: BTreeSet<u64> = BTreeSet::new();
-    let mut work = vec![from];
-    while let Some(at) = work.pop() {
-        if at == to {
-            return true;
+///
+/// # Returns
+///
+/// The block starts that reach `to`, and `to`.
+pub(super) fn reaching(f: &Function, to: u64) -> BTreeSet<u64> {
+    let mut starts: BTreeSet<u64> = BTreeSet::new();
+    let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for b in f.blocks.iter().filter(|b| starts.insert(b.start)) {
+        for s in &b.successors {
+            preds.entry(*s).or_default().push(b.start);
         }
-        if !seen.insert(at) {
-            continue;
-        }
-        let Some(b) = f.blocks.iter().find(|b| b.start == at) else {
-            continue;
-        };
-        work.extend(b.successors.iter().copied());
     }
-    false
+    let mut seen: BTreeSet<u64> = BTreeSet::from([to]);
+    let mut work = vec![to];
+    while let Some(at) = work.pop() {
+        for &pred in preds.get(&at).map_or(&[][..], Vec::as_slice) {
+            if seen.insert(pred) {
+                work.push(pred);
+            }
+        }
+    }
+    seen
 }
 
 /// Most blocks walked backwards from a dispatch looking for its fetch.
