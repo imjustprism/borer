@@ -262,7 +262,27 @@ pub(super) struct Check {
 /// # Returns
 ///
 /// The listing as text, the functions with the most telling constants first.
+/// It reads every referenced string and decompiles the input readers, so
+/// it is built once per set of names ([`Analysis::derived`]).
 pub fn license_checks_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
+    a.derived
+        .get_or_build_named("license_checks", o.fingerprint(), (), || checks_of(p, a, o))
+        .as_ref()
+        .clone()
+}
+
+/// Builds the listing [`license_checks_tsv`] memoizes.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: cross-references, functions, blocks.
+/// * `o` - User names.
+///
+/// # Returns
+///
+/// As [`license_checks_tsv`].
+fn checks_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let mut found: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
     for (target, lit) in literal_targets(p, a).iter() {
         let sites = a.xrefs_to(*target);

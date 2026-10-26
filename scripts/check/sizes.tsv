@@ -117,7 +117,7 @@ crates/borer-engine/src/analysis/render/literals.rs::functions_by_string_tsv#1	1
 crates/borer-engine/src/analysis/render/obfuscation.rs::decode_shape#1	186
 crates/borer-engine/src/analysis/render/obfuscation.rs::flattening_tsv#1	130
 crates/borer-engine/src/analysis/render/oracle.rs::solve_tsv#1	138
-crates/borer-engine/src/analysis/render/protection.rs::license_checks_tsv#1	108
+crates/borer-engine/src/analysis/render/protection.rs::checks_of#1	108
 crates/borer-engine/src/analysis/render/protection.rs::protection_tsv#1	147
 crates/borer-engine/src/analysis/render/runs/diff.rs::run_diff_tsv#1	126
 crates/borer-engine/src/analysis/render/runs/mod.rs::judge#1	202
