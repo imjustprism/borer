@@ -1195,18 +1195,31 @@ pub fn hashes_tsv(program: &Program) -> String {
             |d| d.iter().map(|b| format!("{b:02x}")).collect::<String>(),
         )
     };
+    let bytes = &program.bytes;
+    let len = bytes.len();
+    let ((md5_sum, sha_sum), (auth_sum, (tlsh_sum, lsh_sum))) = paired(
+        len,
+        || paired(len, || md5(bytes), || sha256(bytes)),
+        || {
+            paired(
+                len,
+                || authentihash(program),
+                || paired(len, || tlsh(bytes), || borer_lsh(bytes)),
+            )
+        },
+    );
     let mut out = format!(
         "# content hashes of {}\nmd5           {}\nsha256        {}\nimphash       {}\nauthentihash  {}\ntlsh          {}\nborer-lsh     {}\n",
         program.path.display(),
-        hex(Some(md5(&program.bytes).as_slice())),
-        hex(Some(sha256(&program.bytes).as_slice())),
+        hex(Some(md5_sum.as_slice())),
+        hex(Some(sha_sum.as_slice())),
         hex(imphash(program).as_ref().map(|d| d.as_slice())),
-        hex(authentihash(program).as_ref().map(|d| d.as_slice())),
-        tlsh(&program.bytes).map_or_else(
+        hex(auth_sum.as_ref().map(|d| d.as_slice())),
+        tlsh_sum.map_or_else(
             || format!("- (TLSH needs {TLSH_MIN} bytes or more, of enough variety)"),
             |t| t.hex()
         ),
-        borer_lsh(&program.bytes).map_or_else(|| "-".to_owned(), |t| t.hex()),
+        lsh_sum.map_or_else(|| "-".to_owned(), |t| t.hex()),
     );
     out.push_str(
         "# tlsh is Trend Micro's TLSH (128 buckets, 1-byte checksum, T1), the string public feeds carry; borer-lsh is borer's own and matches only another borer-lsh\n",

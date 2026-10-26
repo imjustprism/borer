@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use crate::hashing::{imphash, md5, sha256, tlsh};
+use crate::hashing::{imphash, md5, paired, sha256, tlsh};
 use crate::program::Program;
 
 /// Lowercase hex of a digest.
@@ -38,15 +38,17 @@ pub fn hashes_line(program: &Program) -> String {
             HASH_FILE_MAX >> 20
         );
     }
-    let mut out = format!(
-        "hashes:  md5 {}  sha256 {}",
-        hex(&md5(&program.bytes)),
-        hex(&sha256(&program.bytes))
+    let bytes = &program.bytes;
+    let ((md5_sum, sha_sum), tlsh_sum) = paired(
+        bytes.len(),
+        || paired(bytes.len(), || md5(bytes), || sha256(bytes)),
+        || tlsh(bytes),
     );
+    let mut out = format!("hashes:  md5 {}  sha256 {}", hex(&md5_sum), hex(&sha_sum));
     if let Some(imp) = imphash(program) {
         let _ = write!(out, "  imphash {}", hex(&imp));
     }
-    if let Some(t) = tlsh(&program.bytes) {
+    if let Some(t) = tlsh_sum {
         let _ = write!(out, "  tlsh {}", t.hex());
     }
     out
