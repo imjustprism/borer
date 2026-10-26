@@ -279,8 +279,16 @@ fn drop_once(program: &Program, walks: &mut Walks<'_>) -> bool {
     let mut held: BTreeMap<u64, usize> = BTreeMap::new();
     let mut owners: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for (&e, w) in &walks.walked {
-        for va in w.seen.keys() {
-            *held.entry(*va).or_default() += 1;
+        if let (Some((&lo, _)), Some((&hi, _))) =
+            (w.seen.first_key_value(), w.seen.last_key_value())
+        {
+            for g in walks
+                .guessed
+                .range(lo..=hi)
+                .filter(|g| w.seen.contains_key(g))
+            {
+                *held.entry(*g).or_default() += 1;
+            }
         }
         let end = w.seen.values().next_back().map_or(e, |i| i.next());
         for &t in w.tails.iter().filter(|t| (e + 1..=end).contains(*t)) {
