@@ -318,7 +318,10 @@ fn ascii_hits(data: &[u8], needle: &[u8], out: &mut Vec<u64>) {
         needle.len(),
         folded_pair(first),
         |w| w.eq_ignore_ascii_case(needle),
-        out,
+        |i| {
+            out.push(i);
+            false
+        },
     );
 }
 
@@ -341,12 +344,39 @@ fn wide_hits(data: &[u8], wide: &[u8], out: &mut Vec<u64>) {
         wide.len(),
         first,
         |w| utf16le_eq_ignore_ascii_case(w, wide),
-        out,
+        |i| {
+            out.push(i);
+            false
+        },
     );
 }
 
-/// Collects the offsets of every window of `data` that `matches` accepts,
-/// testing only the windows whose first byte is one of `first`.
+/// Tells whether `data` holds `needle` verbatim somewhere.
+///
+/// The candidate scan of [`candidate_hits`], stopped at the first match,
+/// where a window-by-window compare took a tenth of a second per needle on
+/// a hundred-megabyte file.
+///
+/// # Arguments
+///
+/// * `data` - The bytes searched.
+/// * `needle` - The bytes sought; an empty one is never held.
+pub(crate) fn holds(data: &[u8], needle: &[u8]) -> bool {
+    let Some(&first) = needle.first() else {
+        return false;
+    };
+    candidate_hits(
+        data,
+        needle.len(),
+        (first, first),
+        |w| w == needle,
+        |_| true,
+    )
+}
+
+/// Hands `hit` the offset of each window of `data` that `matches` accepts,
+/// in ascending order until it says stop, testing only the windows whose
+/// first byte is one of `first`.
 ///
 /// The first byte picks the positions the full compare runs at: a text
 /// search tests every byte offset of every section, and the compare at
@@ -359,16 +389,20 @@ fn wide_hits(data: &[u8], wide: &[u8], out: &mut Vec<u64>) {
 /// * `n` - The window length.
 /// * `first` - The two spellings of the window's first byte.
 /// * `matches` - The full compare of one window.
-/// * `out` - Where the matching offsets go, ascending.
+/// * `hit` - Called with each matching offset; `true` ends the scan.
+///
+/// # Returns
+///
+/// Whether `hit` ended the scan.
 fn candidate_hits(
     data: &[u8],
     n: usize,
     first: (u8, u8),
     matches: impl Fn(&[u8]) -> bool,
-    out: &mut Vec<u64>,
-) {
+    mut hit: impl FnMut(u64) -> bool,
+) -> bool {
     let Some(last) = data.len().checked_sub(n) else {
-        return;
+        return false;
     };
     let (lo, hi) = first;
     let (words, _tail) = data.as_chunks::<8>();
@@ -378,17 +412,18 @@ fn candidate_hits(
         while m != 0 {
             let i = k * 8 + crate::num::saturating_usize(u64::from(m.trailing_zeros() / 8));
             m &= m - 1;
-            if i <= last && matches(&data[i..i + n]) {
-                out.push(crate::num::from_usize(i));
+            if i <= last && matches(&data[i..i + n]) && hit(crate::num::from_usize(i)) {
+                return true;
             }
         }
     }
     for i in words.len() * 8..=last {
         let b = data[i];
-        if (b == lo || b == hi) && matches(&data[i..i + n]) {
-            out.push(crate::num::from_usize(i));
+        if (b == lo || b == hi) && matches(&data[i..i + n]) && hit(crate::num::from_usize(i)) {
+            return true;
         }
     }
+    false
 }
 
 /// A `u64` of `0x01` bytes, the subtrahend of the byte-equal test.
@@ -647,4 +682,29 @@ fn demangle(name: &str, keep: Demangled) -> String {
         return format!("{text}{suffix}");
     }
     name.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::holds;
+
+    /// A needle is found wherever it sits: at the start, across a word
+    /// boundary, in the tail the word scan leaves, and among many copies;
+    /// an absent, empty or longer needle is not.
+    ///
+    /// # Panics
+    ///
+    /// When a needle is found or missed wrongly.
+    #[test]
+    fn holds_finds_a_needle_anywhere_and_nothing_else() {
+        let data = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        assert!(holds(data, b"abc"), "at the start");
+        assert!(holds(data, b"ghijk"), "across a word boundary");
+        assert!(holds(data, b"6789"), "in the tail");
+        assert!(holds(data, data), "the whole");
+        assert!(holds(&[b'x'; 4096], b"xxxx"), "among many copies");
+        assert!(!holds(data, b"abx"), "a near miss");
+        assert!(!holds(data, b""), "an empty needle");
+        assert!(!holds(b"abc", b"abcd"), "a needle longer than the bytes");
+    }
 }

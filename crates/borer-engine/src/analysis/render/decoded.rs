@@ -119,7 +119,7 @@ fn in_data(p: &Program, va: u64) -> bool {
 /// `true` when the image's bytes contain the text verbatim.
 fn already_stored(p: &Program, text: &str) -> bool {
     let needle = text.as_bytes();
-    needle.len() >= 2 && p.bytes.windows(needle.len()).any(|window| window == needle)
+    needle.len() >= 2 && crate::search::holds(&p.bytes, needle)
 }
 
 /// The call sites of one decoder, emulated, with the plaintext each wrote.
