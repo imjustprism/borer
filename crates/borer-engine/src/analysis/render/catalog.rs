@@ -120,10 +120,8 @@ pub(super) struct Asserted {
 pub fn asserted_fields_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> String {
     let want = filter.to_lowercase();
     let mut fields: BTreeMap<String, Asserted> = BTreeMap::new();
-    for (target, sites) in &a.xrefs {
-        let Some((_, lit)) = string_literal(p, *target, STRING_MATCH_CAP) else {
-            continue;
-        };
+    for (target, lit) in literal_targets(p, a).iter() {
+        let sites = a.xrefs_to(*target);
         let mut rest = lit.as_str();
         while let Some(at) = rest.find("this->") {
             let tail = rest.get(at + 6..).unwrap_or("");
@@ -245,10 +243,8 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
     ];
     let want = filter.to_lowercase();
     let mut files: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
-    for (target, sites) in &a.xrefs {
-        let Some((_, lit)) = string_literal(p, *target, STRING_MATCH_CAP) else {
-            continue;
-        };
+    for (target, lit) in literal_targets(p, a).iter() {
+        let sites = a.xrefs_to(*target);
         let Some(path) = lit.strip_prefix('"').and_then(|t| t.strip_suffix('"')) else {
             continue;
         };

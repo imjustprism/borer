@@ -64,16 +64,13 @@ pub fn functions_by_string_tsv(
     let shown_filter = crate::text::quoted(filter);
     let mut texts: BTreeMap<u64, String> = BTreeMap::new();
     let mut by_function: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
-    for (target, sites) in &a.xrefs {
-        let Some((start, lit)) = referenced_literal(p, a, *target, STRING_MATCH_CAP) else {
-            continue;
-        };
-        if !unquoted(&lit).to_lowercase().contains(&q) {
+    for r in referenced_strings(p, a).iter() {
+        if !r.folded.contains(&q) {
             continue;
         }
-        for e in sites.iter().filter_map(|s| s.from_entry) {
-            by_function.entry(e).or_default().insert(start);
-            texts.entry(start).or_insert_with(|| shown_text(&lit));
+        for e in a.xrefs_to(r.target).iter().filter_map(|s| s.from_entry) {
+            by_function.entry(e).or_default().insert(r.start);
+            texts.entry(r.start).or_insert_with(|| shown_text(&r.lit));
         }
     }
     let pairs: usize = by_function.values().map(BTreeSet::len).sum();
@@ -185,6 +182,81 @@ fn unquoted(lit: &str) -> &str {
         .or_else(|| lit.strip_prefix('"'))
         .and_then(|body| body.strip_suffix('"'))
         .unwrap_or(lit)
+}
+
+/// Returns every referenced address outside code that holds a string
+/// literal, with the literal as [`string_literal`] reads it at
+/// [`STRING_MATCH_CAP`], in address order, read once per analysis.
+///
+/// The asserts, sources and checks catalogs each read the literal behind
+/// every referenced address on every call; it depends on the image and its
+/// references alone.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, whose references are read.
+///
+/// # Returns
+///
+/// `(target, literal)` pairs, shared.
+pub(super) fn literal_targets(p: &Program, a: &Analysis) -> Arc<Vec<(u64, String)>> {
+    a.derived.get_or_build("literal_targets", (), || {
+        a.xrefs
+            .keys()
+            .filter_map(|&target| {
+                string_literal(p, target, STRING_MATCH_CAP).map(|(_, lit)| (target, lit))
+            })
+            .collect()
+    })
+}
+
+/// A string literal some code references, as [`functions_by_string_tsv`]
+/// matches it.
+pub(super) struct ReferencedString {
+    /// The address the code references.
+    pub(super) target: u64,
+    /// The literal's first byte, at or before `target`.
+    pub(super) start: u64,
+    /// The literal as `string_literal` quotes it, at most
+    /// [`STRING_MATCH_CAP`] characters.
+    pub(super) lit: String,
+    /// Its text unquoted and lower-cased, what a filter is matched against.
+    pub(super) folded: String,
+}
+
+/// Returns every referenced address that holds a string literal, in
+/// address order, read once per analysis.
+///
+/// Reading the literal behind every referenced address is most of what a
+/// `find_function_by_string` call cost, and it depends on the image and
+/// its references alone, so it is kept in [`Analysis::derived`] and each
+/// call only matches the folded texts.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, whose references are read.
+///
+/// # Returns
+///
+/// The literals, shared.
+pub(super) fn referenced_strings(p: &Program, a: &Analysis) -> Arc<Vec<ReferencedString>> {
+    a.derived.get_or_build("referenced_strings", (), || {
+        a.xrefs
+            .keys()
+            .filter_map(|&target| {
+                let (start, lit) = referenced_literal(p, a, target, STRING_MATCH_CAP)?;
+                let folded = unquoted(&lit).to_lowercase();
+                Some(ReferencedString {
+                    target,
+                    start,
+                    lit,
+                    folded,
+                })
+            })
+            .collect()
+    })
 }
 
 /// Writes `# N more <what>; offset=K for the next page` when a page did not

@@ -240,10 +240,8 @@ pub(super) struct Check {
 /// The listing as text, the functions with the most telling constants first.
 pub fn license_checks_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let mut found: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
-    for (target, sites) in &a.xrefs {
-        let Some((_, lit)) = string_literal(p, *target, STRING_MATCH_CAP) else {
-            continue;
-        };
+    for (target, lit) in literal_targets(p, a).iter() {
+        let sites = a.xrefs_to(*target);
         let low = lit.to_lowercase();
         let matched: Vec<&str> = CHECK_PHRASES
             .iter()
