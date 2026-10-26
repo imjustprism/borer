@@ -46,6 +46,65 @@ fn xmm0_read_bits(i: &Instruction) -> Option<u8> {
     }
 }
 
+/// What the scans after a call read.
+///
+/// The image, the functions, and per function whether its blocks are in
+/// order ([`blocks_ordered`]), worked out once rather than at each of a
+/// large caller's thousands of call sites.
+#[derive(Clone, Copy)]
+pub(super) struct Sites<'a> {
+    /// The image.
+    pub(super) program: &'a Program,
+    /// The functions and their cross-references.
+    pub(super) analysis: &'a Analysis,
+    /// Decoder bitness.
+    pub(super) bitness: u32,
+    /// Per function, in order, whether its blocks are in order; empty to
+    /// work it out at each call.
+    pub(super) ordered: &'a [bool],
+}
+
+impl<'a> Sites<'a> {
+    /// Returns the scans' inputs with no order worked out ahead, for a
+    /// caller that asks about a few call sites.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image.
+    /// * `analysis` - The functions and their cross-references.
+    /// * `bitness` - Decoder bitness.
+    pub(super) fn unordered(program: &'a Program, analysis: &'a Analysis, bitness: u32) -> Self {
+        Sites {
+            program,
+            analysis,
+            bitness,
+            ordered: &[],
+        }
+    }
+
+    /// Returns the function holding `va` and whether its blocks are in
+    /// order.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The call site.
+    ///
+    /// # Returns
+    ///
+    /// The caller and its order, or `None` when no function holds `va`.
+    pub(super) fn caller(&self, va: u64) -> Option<(&'a Function, bool)> {
+        let f = self.analysis.function_at(va)?;
+        let ordered = self
+            .analysis
+            .entry_index
+            .get(&f.entry)
+            .and_then(|&i| self.ordered.get(i))
+            .copied()
+            .unwrap_or_else(|| blocks_ordered(&f.blocks));
+        Some((f, ordered))
+    }
+}
+
 /// Classifies what the code after the call at `call_va` does with xmm0.
 ///
 /// The scan follows the return address, jumps within the caller, both
@@ -59,28 +118,24 @@ fn xmm0_read_bits(i: &Instruction) -> Option<u8> {
 ///
 /// # Arguments
 ///
-/// * `program` - The image.
-/// * `analysis` - For the caller's blocks.
+/// * `sites` - The image and the callers' blocks.
 /// * `factory` - Reused instruction-info factory.
-/// * `bitness` - Decoder bitness.
 /// * `call_va` - Address of the call instruction.
 /// * `preserving` - Per function, in order, whether it hands xmm0 back
 ///   untouched.
 pub(super) fn float_use(
-    program: &Program,
-    analysis: &Analysis,
+    sites: &Sites<'_>,
     factory: &mut InstructionInfoFactory,
-    bitness: u32,
     call_va: u64,
     preserving: &[bool],
 ) -> FloatUse {
-    let Some(caller) = analysis.function_at(call_va) else {
+    let (program, analysis, bitness) = (sites.program, sites.analysis, sites.bitness);
+    let Some((caller, ordered)) = sites.caller(call_va) else {
         return FloatUse::Dropped;
     };
     let Some(call) = decode_at(program, bitness, call_va) else {
         return FloatUse::Dropped;
     };
-    let ordered = blocks_ordered(&caller.blocks);
     let within = |va: u64| block_holding(&caller.blocks, va, ordered).is_some();
     let preserves = |target: u64| {
         analysis

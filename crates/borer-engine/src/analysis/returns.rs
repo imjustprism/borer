@@ -36,10 +36,12 @@ use crate::isa::x86::{
 
 use super::functions::{decode_at, decode_block};
 use super::typelib;
-use super::{Analysis, BasicBlock, BlockTerm, Function, RefKind, is_imm, striped_with, x87};
+use super::{
+    Analysis, BasicBlock, BlockTerm, Function, RefKind, is_imm, striped, striped_with, x87,
+};
 use crate::program::{Program, SymbolKind};
 use exits::Scan;
-use uses::{FloatUse, block_holding, block_starting, blocks_ordered, float_use};
+use uses::{FloatUse, Sites, block_holding, block_starting, blocks_ordered, float_use};
 
 mod exits;
 mod uses;
@@ -200,6 +202,16 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     .into_iter()
     .map(|r| r.unwrap_or(false))
     .collect();
+    let ordered: Vec<bool> = striped(&shared.functions, |f| blocks_ordered(&f.blocks))
+        .into_iter()
+        .map(|o| o.unwrap_or(false))
+        .collect();
+    let callers = Sites {
+        program,
+        analysis: shared,
+        bitness,
+        ordered: &ordered,
+    };
     let facts: Vec<Facts> = striped_with(
         &shared.functions,
         CLASSIFY_MIN,
@@ -210,15 +222,9 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 .xrefs_to(f.entry)
                 .iter()
                 .filter_map(|s| match s.kind {
-                    RefKind::Call => Some(classify(
-                        program,
-                        shared,
-                        factory,
-                        bitness,
-                        s.va,
-                        Register::RAX,
-                        &rdx_args,
-                    )),
+                    RefKind::Call => {
+                        Some(classify(&callers, factory, s.va, Register::RAX, &rdx_args))
+                    }
                     RefKind::Jmp => match s.from_entry {
                         Some(from) if from == f.entry => None,
                         Some(from) => Some(Site::Tail(from)),
@@ -231,15 +237,9 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 .xrefs_to(f.entry)
                 .iter()
                 .filter_map(|s| match s.kind {
-                    RefKind::Call => Some(classify(
-                        program,
-                        shared,
-                        factory,
-                        bitness,
-                        s.va,
-                        Register::RDX,
-                        &rdx_args,
-                    )),
+                    RefKind::Call => {
+                        Some(classify(&callers, factory, s.va, Register::RDX, &rdx_args))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -304,14 +304,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                     .xrefs_to(f.entry)
                     .iter()
                     .filter_map(|s| match s.kind {
-                        RefKind::Call => Some(float_use(
-                            program,
-                            shared,
-                            factory,
-                            bitness,
-                            s.va,
-                            &preserving,
-                        )),
+                        RefKind::Call => Some(float_use(&callers, factory, s.va, &preserving)),
                         RefKind::Jmp => s
                             .from_entry
                             .filter(|&from| from != f.entry)
@@ -1672,7 +1665,12 @@ pub(crate) fn sse_call(program: &Program, analysis: &Analysis, f: &Function) -> 
             .filter(|s| s.kind == RefKind::Call)
             .any(|s| {
                 matches!(
-                    float_use(program, analysis, &mut factory, bitness, s.va, &[]),
+                    float_use(
+                        &Sites::unordered(program, analysis, bitness),
+                        &mut factory,
+                        s.va,
+                        &[]
+                    ),
                     FloatUse::Read(_)
                 )
             });
@@ -2003,10 +2001,8 @@ pub(super) fn lane_before(
 ///
 /// # Arguments
 ///
-/// * `program` - The image.
-/// * `analysis` - For the caller's block bounds.
+/// * `sites` - The image and the callers' block bounds.
 /// * `factory` - Reused instruction-info factory.
-/// * `bitness` - Decoder bitness.
 /// * `call_va` - Address of the call instruction.
 /// * `reg` - The result register the caller's use of is classified, `rax`
 ///   or `rdx`.
@@ -2017,21 +2013,19 @@ pub(super) fn lane_before(
 /// else [`Site::Unknown`] when some path could not be followed, else
 /// [`Site::Tail`] when some path returns it, else [`Site::Dead`].
 fn classify(
-    program: &Program,
-    analysis: &Analysis,
+    sites: &Sites<'_>,
     factory: &mut InstructionInfoFactory,
-    bitness: u32,
     call_va: u64,
     reg: Register,
     rdx_args: &[bool],
 ) -> Site {
-    let Some(caller) = analysis.function_at(call_va) else {
+    let (program, analysis, bitness) = (sites.program, sites.analysis, sites.bitness);
+    let Some((caller, ordered)) = sites.caller(call_va) else {
         return Site::Unknown;
     };
     let Some(call) = decode_at(program, bitness, call_va) else {
         return Site::Unknown;
     };
-    let ordered = blocks_ordered(&caller.blocks);
     let in_caller = |va: u64| block_starting(&caller.blocks, va, ordered).is_some();
     let mut used: Option<u8> = None;
     let mut unknown = false;
