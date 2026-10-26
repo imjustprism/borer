@@ -41,7 +41,7 @@ use super::{
 };
 use crate::program::{Program, SymbolKind};
 use exits::Scan;
-use uses::{FloatUse, Sites, block_holding, block_starting, blocks_ordered, float_use};
+use uses::{Decoded, FloatUse, Sites, block_holding, block_starting, blocks_ordered, float_use};
 
 mod exits;
 mod uses;
@@ -103,8 +103,6 @@ struct Facts {
     /// The function hands rdx back untouched ([`preserves`]), so a caller
     /// reading it after the call reads its own value, not a second result.
     preserves_rdx: bool,
-    /// The function hands xmm0 back untouched ([`preserves`]).
-    preserves_float: bool,
     /// The writes nearest the exits leave a float in xmm0 ([`float_last`]).
     float_last: bool,
 }
@@ -119,7 +117,6 @@ impl Facts {
         body_write: 64,
         preserves: false,
         preserves_rdx: false,
-        preserves_float: false,
         float_last: false,
     };
 }
@@ -212,61 +209,47 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         bitness,
         ordered: &ordered,
     };
-    let facts: Vec<Facts> = striped_with(
+    let preserving_float: Vec<bool> = striped_with(
+        &shared.functions,
+        CLASSIFY_MIN,
+        || RefCell::new(InstructionInfoFactory::new()),
+        |factory, f| {
+            preserves(
+                program,
+                &mut factory.borrow_mut(),
+                bitness,
+                f,
+                ResultReg::Xmm0,
+            )
+        },
+    )
+    .into_iter()
+    .map(|p| p.unwrap_or(false))
+    .collect();
+    let (facts, uses): (Vec<Facts>, Vec<Vec<FloatUse>>) = striped_with(
         &shared.functions,
         CLASSIFY_MIN,
         || RefCell::new(InstructionInfoFactory::new()),
         |factory, f| {
             let factory = &mut *factory.borrow_mut();
-            let sites = shared
-                .xrefs_to(f.entry)
-                .iter()
-                .filter_map(|s| match s.kind {
-                    RefKind::Call => {
-                        Some(classify(&callers, factory, s.va, Register::RAX, &rdx_args))
-                    }
-                    RefKind::Jmp => match s.from_entry {
-                        Some(from) if from == f.entry => None,
-                        Some(from) => Some(Site::Tail(from)),
-                        None => Some(Site::Unknown),
-                    },
-                    RefKind::Data | RefKind::Index | RefKind::Table | RefKind::Ptr => None,
-                })
-                .collect();
-            let sites_rdx = shared
-                .xrefs_to(f.entry)
-                .iter()
-                .filter_map(|s| match s.kind {
-                    RefKind::Call => {
-                        Some(classify(&callers, factory, s.va, Register::RDX, &rdx_args))
-                    }
-                    _ => None,
-                })
-                .collect();
-            Facts {
+            let (sites, sites_rdx, uses) =
+                call_sites(&callers, factory, f, &rdx_args, &preserving_float);
+            let facts = Facts {
                 sites,
                 sites_rdx,
                 body_lane: body_lane(program, factory, bitness, f),
                 body_write: body_write(program, factory, bitness, f),
                 preserves: preserves(program, factory, bitness, f, ResultReg::Rax),
                 preserves_rdx: preserves(program, factory, bitness, f, ResultReg::Rdx),
-                preserves_float: preserves(program, factory, bitness, f, ResultReg::Xmm0),
                 float_last: bitness == 64 && float_last(program, factory, bitness, f),
-            }
+            };
+            (facts, uses)
         },
     )
     .into_iter()
-    .map(|f| f.unwrap_or(Facts::NONE))
-    .collect();
-    let hand_back = |reg: ResultReg| -> Vec<Handed> {
-        let preserving: Vec<bool> = facts
-            .iter()
-            .map(|f| match reg {
-                ResultReg::Rax => f.preserves,
-                ResultReg::Rdx => false,
-                ResultReg::Xmm0 => f.preserves_float,
-            })
-            .collect();
+    .map(|f| f.unwrap_or((Facts::NONE, Vec::new())))
+    .unzip();
+    let hand_back = |preserving: &[bool], reg: ResultReg| -> Vec<Handed> {
         striped_with(
             &shared.functions,
             CLASSIFY_MIN,
@@ -278,7 +261,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                     &mut factory.borrow_mut(),
                     bitness,
                     f,
-                    &preserving,
+                    preserving,
                     reg,
                 )
             },
@@ -287,42 +270,19 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .map(|h| h.unwrap_or(Handed::UNKNOWN))
         .collect()
     };
-    let handed = hand_back(ResultReg::Rax);
+    let preserving_rax: Vec<bool> = facts.iter().map(|f| f.preserves).collect();
+    let handed = hand_back(&preserving_rax, ResultReg::Rax);
     let read: Vec<bool> = facts
         .iter()
         .map(|f| f.sites.iter().any(|site| matches!(site, Site::Used(_))))
         .collect();
     let floats = if bitness == 64 {
-        let preserving: Vec<bool> = facts.iter().map(|f| f.preserves_float).collect();
-        let uses: Vec<Vec<FloatUse>> = striped_with(
-            &shared.functions,
-            CLASSIFY_MIN,
-            || RefCell::new(InstructionInfoFactory::new()),
-            |factory, f| {
-                let factory = &mut *factory.borrow_mut();
-                shared
-                    .xrefs_to(f.entry)
-                    .iter()
-                    .filter_map(|s| match s.kind {
-                        RefKind::Call => Some(float_use(&callers, factory, s.va, &preserving)),
-                        RefKind::Jmp => s
-                            .from_entry
-                            .filter(|&from| from != f.entry)
-                            .map(FloatUse::Tail),
-                        RefKind::Data | RefKind::Index | RefKind::Table | RefKind::Ptr => None,
-                    })
-                    .collect()
-            },
-        )
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect();
         let last: Vec<bool> = facts.iter().map(|f| f.float_last).collect();
         float_results(
             program,
             analysis,
             &uses,
-            &hand_back(ResultReg::Xmm0),
+            &hand_back(&preserving_float, ResultReg::Xmm0),
             &read,
             &last,
         )
@@ -413,6 +373,74 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 .any(|site| matches!(site, Site::Used(_)));
         f.ret_float = float;
     }
+}
+
+/// What the code after each call of `f` does with its result registers,
+/// and what a jump into it hands on.
+///
+/// Each call site is scanned for rax, for rdx and, on a 64-bit target,
+/// for xmm0 ([`classify`], [`float_use`]), the three scans sharing what
+/// they decode.
+///
+/// # Arguments
+///
+/// * `callers` - The image and the callers' blocks.
+/// * `factory` - Reused instruction-info factory.
+/// * `f` - The callee.
+/// * `rdx_args` - Per function, in order, whether it reads `rdx` as an
+///   argument ([`reads_rdx_arg`]).
+/// * `preserving` - Per function, in order, whether it hands xmm0 back
+///   untouched.
+///
+/// # Returns
+///
+/// The sites for rax, for rdx and for xmm0 (none on a 32-bit target), in
+/// the order of the references to `f`.
+fn call_sites(
+    callers: &Sites<'_>,
+    factory: &mut InstructionInfoFactory,
+    f: &Function,
+    rdx_args: &[bool],
+    preserving: &[bool],
+) -> (Vec<Site>, Vec<Site>, Vec<FloatUse>) {
+    let wide = callers.bitness == 64;
+    let (mut rax, mut rdx, mut xmm0) = (Vec::new(), Vec::new(), Vec::new());
+    for s in callers.analysis.xrefs_to(f.entry) {
+        match (s.kind, s.from_entry) {
+            (RefKind::Call, _) => {
+                let code = &mut Decoded::default();
+                rax.push(classify(
+                    callers,
+                    factory,
+                    code,
+                    s.va,
+                    Register::RAX,
+                    rdx_args,
+                ));
+                rdx.push(classify(
+                    callers,
+                    factory,
+                    code,
+                    s.va,
+                    Register::RDX,
+                    rdx_args,
+                ));
+                if wide {
+                    xmm0.push(float_use(callers, factory, code, s.va, preserving));
+                }
+            }
+            (RefKind::Jmp, Some(from)) if from == f.entry => {}
+            (RefKind::Jmp, Some(from)) => {
+                rax.push(Site::Tail(from));
+                if wide {
+                    xmm0.push(FloatUse::Tail(from));
+                }
+            }
+            (RefKind::Jmp, None) => rax.push(Site::Unknown),
+            (RefKind::Data | RefKind::Index | RefKind::Table | RefKind::Ptr, _) => {}
+        }
+    }
+    (rax, rdx, xmm0)
 }
 
 /// Block start to its index in the function's blocks.
@@ -1668,6 +1696,7 @@ pub(crate) fn sse_call(program: &Program, analysis: &Analysis, f: &Function) -> 
                     float_use(
                         &Sites::unordered(program, analysis, bitness),
                         &mut factory,
+                        &mut Decoded::default(),
                         s.va,
                         &[]
                     ),
@@ -2003,6 +2032,7 @@ pub(super) fn lane_before(
 ///
 /// * `sites` - The image and the callers' block bounds.
 /// * `factory` - Reused instruction-info factory.
+/// * `code` - What the site's other scans decoded.
 /// * `call_va` - Address of the call instruction.
 /// * `reg` - The result register the caller's use of is classified, `rax`
 ///   or `rdx`.
@@ -2015,15 +2045,16 @@ pub(super) fn lane_before(
 fn classify(
     sites: &Sites<'_>,
     factory: &mut InstructionInfoFactory,
+    code: &mut Decoded,
     call_va: u64,
     reg: Register,
     rdx_args: &[bool],
 ) -> Site {
-    let (program, analysis, bitness) = (sites.program, sites.analysis, sites.bitness);
+    let (analysis, bitness) = (sites.analysis, sites.bitness);
     let Some((caller, ordered)) = sites.caller(call_va) else {
         return Site::Unknown;
     };
-    let Some(call) = decode_at(program, bitness, call_va) else {
+    let Some(call) = code.at(sites, call_va) else {
         return Site::Unknown;
     };
     let in_caller = |va: u64| block_starting(&caller.blocks, va, ordered).is_some();
@@ -2054,7 +2085,7 @@ fn classify(
                 };
                 block = next;
             }
-            let Some(instr) = decode_at(program, bitness, va) else {
+            let Some(instr) = code.at(sites, va) else {
                 break;
             };
             let mut read = None;

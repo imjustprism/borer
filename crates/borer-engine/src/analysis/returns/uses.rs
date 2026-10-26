@@ -105,6 +105,31 @@ impl<'a> Sites<'a> {
     }
 }
 
+/// The instructions the scans after one call site decoded, by address, so
+/// its scans for rax, rdx and xmm0 decode each instruction once.
+///
+/// Keyed by address, so a branch-heavy scan's lookups stay constant time;
+/// it is only read by key, never walked, so its order never reaches an
+/// answer.
+#[derive(Default)]
+pub(super) struct Decoded(crate::fxmap::FxHashMap<u64, Option<Instruction>>);
+
+impl Decoded {
+    /// Returns the instruction at `va` ([`decode_at`]), decoded the first
+    /// time it is asked for.
+    ///
+    /// # Arguments
+    ///
+    /// * `sites` - The image.
+    /// * `va` - The instruction's address.
+    pub(super) fn at(&mut self, sites: &Sites<'_>, va: u64) -> Option<Instruction> {
+        *self
+            .0
+            .entry(va)
+            .or_insert_with(|| decode_at(sites.program, sites.bitness, va))
+    }
+}
+
 /// Classifies what the code after the call at `call_va` does with xmm0.
 ///
 /// The scan follows the return address, jumps within the caller, both
@@ -120,20 +145,22 @@ impl<'a> Sites<'a> {
 ///
 /// * `sites` - The image and the callers' blocks.
 /// * `factory` - Reused instruction-info factory.
+/// * `code` - What the site's other scans decoded.
 /// * `call_va` - Address of the call instruction.
 /// * `preserving` - Per function, in order, whether it hands xmm0 back
 ///   untouched.
 pub(super) fn float_use(
     sites: &Sites<'_>,
     factory: &mut InstructionInfoFactory,
+    code: &mut Decoded,
     call_va: u64,
     preserving: &[bool],
 ) -> FloatUse {
-    let (program, analysis, bitness) = (sites.program, sites.analysis, sites.bitness);
+    let analysis = sites.analysis;
     let Some((caller, ordered)) = sites.caller(call_va) else {
         return FloatUse::Dropped;
     };
-    let Some(call) = decode_at(program, bitness, call_va) else {
+    let Some(call) = code.at(sites, call_va) else {
         return FloatUse::Dropped;
     };
     let within = |va: u64| block_holding(&caller.blocks, va, ordered).is_some();
@@ -149,7 +176,7 @@ pub(super) fn float_use(
     while let Some((mut va, mut walked)) = paths.pop() {
         while walked < SCAN_MAX && within(va) && seen.insert(va) {
             walked += 1;
-            let Some(instr) = decode_at(program, bitness, va) else {
+            let Some(instr) = code.at(sites, va) else {
                 break;
             };
             if reads_vector(factory, &instr, Register::ZMM0) {
