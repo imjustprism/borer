@@ -7,7 +7,7 @@
 //! mermaid graph, so it stays one); the same request with
 //! the tag passed back ([`SINCE_ARG`] on a tool call, [`SINCE_SUFFIX`] on a
 //! resource URI) is answered by a one-line note when nothing changed, or by
-//! the lines that differ ([`Recall`]). [`budgeted`] caps what goes out.
+//! the lines that differ and the new answer's tag ([`Recall`]). [`budgeted`] caps what goes out.
 //! The session's evidence line ([`crate::session`]) is appended after all
 //! of this, so it is the answer's last line, whatever else it carries.
 
@@ -143,8 +143,8 @@ pub(crate) fn tagged_uri(uri: &str, tag: Tag) -> String {
 /// saving.
 #[derive(Debug, Default)]
 pub(crate) struct Recall {
-    /// Per request: the last answer sent whole, when short enough to diff
-    /// the next one against.
+    /// Per request: the last answer sent, whole or as a delta, when short
+    /// enough to diff the next one against.
     texts: HashMap<String, Held>,
     /// Bytes of text in `texts`.
     bytes: usize,
@@ -294,11 +294,17 @@ fn line_delta(old: &str, new: &str) -> Option<String> {
 impl Recall {
     /// The answer to send for `request`: `text` with its tag line, a note
     /// when `since` is the tag of `text`, or the lines that changed when
-    /// `since` is the tag of the text last sent whole and the two differ by
+    /// `since` is the tag of the text last sent and the two differ by
     /// little.
     ///
     /// A note or a delta stands in for the text, so it names the way to get
-    /// the text whole: `again`, the request without the tag.
+    /// the text whole: `again`, the request without the tag. A delta ends
+    /// with the tag of the text it makes, and that text becomes the one the
+    /// next delta is taken from: a reader that applied it passes the new
+    /// tag and rolls forward, while one passing the old tag is sent the
+    /// text whole. A delta goes out only whole: one the byte budget would
+    /// cut, or one whose text is longer than a kept answer may be, is sent
+    /// as the text instead, so no reader holds a tag for lines it lacks.
     ///
     /// # Arguments
     ///
@@ -329,16 +335,32 @@ impl Recall {
         let asked = self.asked;
         if let Some(held) = self.texts.get_mut(request)
             && since == Some(held.tag)
+            && text.len() <= DELTA_TEXT_MAX
             && let Some(d) = line_delta(&held.text, &text)
                 .filter(|d| d.len() * DELTA_SHARE.1 <= text.len() * DELTA_SHARE.0)
         {
-            held.used = asked;
-            return format!(
-                "# changed since the answer tagged {}: {} lines, {} bytes now; the lines that differ from that answer follow, and {again} returns it in full\n{d}",
+            let note = format!(
+                "# changed since the answer tagged {}: {} lines, {} bytes now; the lines that differ from that answer follow, then the tag of the answer they make, and {again} returns it in full\n{d}# {SINCE_ARG}={tag}\n",
                 held.tag,
                 text.lines().count(),
                 text.len()
             );
+            if !over_budget(note.len()) {
+                let freed = std::mem::replace(
+                    held,
+                    Held {
+                        tag,
+                        text,
+                        used: asked,
+                    },
+                )
+                .text
+                .len();
+                let kept = held.text.len();
+                self.bytes = self.bytes + kept - freed;
+                self.keep_within(TEXTS_BUDGET);
+                return note;
+            }
         }
         if let Some(old) = self.texts.remove(request) {
             self.bytes -= old.text.len();
@@ -621,14 +643,14 @@ mod tests {
     /// A changed answer goes to the reader holding the old one's tag as the
     /// lines that differ, placed where they sit.
     ///
-    /// It does as often as the reader asks with that tag; once a whole text
-    /// has gone out since, the old tag gets the text and the new one the
-    /// note.
+    /// The delta ends with the tag of the text it makes, so a reader that
+    /// applied it rolls forward: that tag gets the note, a further change
+    /// goes as a delta from it, and the old tag gets the text whole.
     ///
     /// # Panics
     ///
-    /// When a delta differs from the change, or an answer is not the one
-    /// the tag passed calls for.
+    /// When a delta differs from the change, carries no new tag, or an
+    /// answer is not the one the tag passed calls for.
     #[test]
     fn a_changed_answer_is_sent_as_its_delta() {
         let old = "a\nb\nc\nd\n";
@@ -653,19 +675,72 @@ mod tests {
             "{sent}"
         );
         assert!(
-            sent.contains("; the lines that differ from that answer follow, and calling f {} returns it in full\n"),
+            sent.contains("; the lines that differ from that answer follow, then the tag of the answer they make, and calling f {} returns it in full\n"),
             "{sent}"
         );
         assert!(sent.contains("-line 150\n+renamed 150\n"), "{sent}");
-        assert_eq!(r.answer("k", Some(held), AGAIN, renamed.clone()), sent);
-        let whole = r.answer("k", None, AGAIN, renamed.clone());
-        assert!(whole.starts_with("line 0\n"), "{whole}");
-        let now = tag_line(&whole);
+        let now = tag_line(&sent);
+        assert_eq!(now, Tag::of(&renamed), "the delta names the text it makes");
         assert!(
             r.answer("k", Some(now), AGAIN, renamed.clone())
                 .starts_with("# unchanged since")
         );
-        assert_eq!(r.answer("k", Some(held), AGAIN, renamed), whole);
+        let again = renamed.replace("line 151", "renamed 151");
+        let next = r.answer("k", Some(now), AGAIN, again.clone());
+        assert!(
+            next.starts_with(&format!("# changed since the answer tagged {now}: ")),
+            "{next}"
+        );
+        assert!(next.contains("-line 151\n+renamed 151\n"), "{next}");
+        assert!(
+            !next.contains("line 150"),
+            "the delta rolls forward from the text it made"
+        );
+        let whole = r.answer("k", Some(held), AGAIN, again.clone());
+        assert!(whole.starts_with("line 0\n"), "{whole}");
+        assert_eq!(tag_line(&whole), Tag::of(&again));
+    }
+
+    /// A delta the byte budget would cut, or one whose new text is longer
+    /// than a kept answer may be, goes out as the whole text instead, so a
+    /// reader never holds a tag for lines it lacks.
+    ///
+    /// # Panics
+    ///
+    /// When either change is sent as a delta.
+    #[test]
+    fn a_delta_goes_out_only_whole() {
+        let mut r = Recall::default();
+        let pad = "x".repeat(90);
+        if let Some(limit) = super::budget() {
+            let body: String = (0..3000).map(|i| format!("line {i:05} {pad}\n")).collect();
+            let held = tag_line(&r.answer("big", None, AGAIN, body.clone()));
+            let changed = (0..limit / 150).fold(body, |b, i| {
+                b.replace(
+                    &format!("line {:05} ", 1000 + i),
+                    &format!("edit {:05} ", 1000 + i),
+                )
+            });
+            let sent = r.answer("big", Some(held), AGAIN, changed);
+            assert!(sent.starts_with("line 00000 "), "a cut delta went out");
+        }
+        let near: String = (0..10_200)
+            .map(|i| format!("line {i:05} {pad}\n"))
+            .collect();
+        assert!(near.len() <= super::DELTA_TEXT_MAX);
+        let held = tag_line(&r.answer("near", None, AGAIN, near.clone()));
+        let grown = format!(
+            "{near}{}",
+            (0..100)
+                .map(|i| format!("more {i:05} {pad}\n"))
+                .collect::<String>()
+        );
+        assert!(grown.len() > super::DELTA_TEXT_MAX);
+        let sent = r.answer("near", Some(held), AGAIN, grown);
+        assert!(
+            sent.starts_with("line 00000 "),
+            "a text past the kept size went out as a delta"
+        );
     }
 
     /// The texts kept to diff against stay within a byte budget, least
