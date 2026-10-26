@@ -79,12 +79,7 @@ pub fn flattening_tsv(
     } else {
         Some(locate(a, o, filter).ok_or_else(|| unresolved(filter))?)
     };
-    let mut found: Vec<Dispatcher> = a
-        .jump_tables
-        .iter()
-        .filter_map(|(site, cases)| flattened(a, *site, cases))
-        .collect();
-    found.sort_by(|l, r| r.cases.cmp(&l.cases).then(l.site.cmp(&r.site)));
+    let found = dispatchers(a);
     let Some(target) = wanted else {
         if found.is_empty() {
             return Ok(String::from(
@@ -199,6 +194,31 @@ pub fn flattening_tsv(
         }
     }
     Ok(out)
+}
+
+/// Returns every flattening dispatcher of the program, the most cases
+/// first, judged once per analysis.
+///
+/// Each read of `borer://flat` judged every jump table again; they are
+/// facts of the code alone, so they are kept in [`Analysis::derived`].
+///
+/// # Arguments
+///
+/// * `a` - The analysis: functions, blocks and resolved jump tables.
+///
+/// # Returns
+///
+/// The dispatchers ([`flattened`]), by case count down then site.
+fn dispatchers(a: &Analysis) -> Arc<Vec<Dispatcher>> {
+    a.derived.get_or_build("flat_dispatchers", (), || {
+        let mut found: Vec<Dispatcher> = a
+            .jump_tables
+            .iter()
+            .filter_map(|(site, cases)| flattened(a, *site, cases))
+            .collect();
+        found.sort_by(|l, r| r.cases.cmp(&l.cases).then(l.site.cmp(&r.site)));
+        found
+    })
 }
 
 /// Judges one resolved jump table as [`flattening_tsv`] does: a switch of
