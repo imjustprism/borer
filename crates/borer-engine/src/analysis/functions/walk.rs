@@ -27,6 +27,7 @@ use crate::analysis::{BlockTerm, Function, NameSource, RefKind, RefSite, dedup_s
 use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::isa::x86::{Code, FlowControl, Mnemonic, OpKind, Register};
 use crate::program::Program;
+use smallvec::SmallVec;
 
 /// Everything one [`walk_function`] produced.
 pub(super) struct Walked {
@@ -265,12 +266,14 @@ pub(super) struct SplitWatch {
     /// Per jump target, the functions whose walk followed into it, the
     /// reverse of [`WalkState::followed`]. Entries of a function since
     /// walked again or dropped stay, and are checked against
-    /// [`WalkState::followed`] before they count.
-    followers: FxHashMap<u64, Vec<u64>>,
+    /// [`WalkState::followed`] before they count. Nearly every branch
+    /// target of a large program has one follower, held in place rather
+    /// than in a list of its own.
+    followers: FxHashMap<u64, SmallVec<[u64; 1]>>,
     /// Per call target, the functions whose walk followed its fall-through,
     /// the reverse of [`WalkState::followed_calls`], stale entries kept as
     /// in `followers`.
-    call_followers: FxHashMap<u64, Vec<u64>>,
+    call_followers: FxHashMap<u64, SmallVec<[u64; 1]>>,
     /// Entries committed since the last look.
     entries: FxHashSet<u64>,
     /// Starts added since the last look.
