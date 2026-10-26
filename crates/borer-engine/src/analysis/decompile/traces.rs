@@ -30,7 +30,7 @@ use crate::isa::{Isa, a32, a64};
 
 use super::abi::runtime::Runtime;
 use super::expr_render::bare;
-use super::{decompile_plain_full, lift, lift_a32, lift_a64, matching_paren, name_fields};
+use super::{lift, lift_a32, lift_a64, matching_paren};
 use crate::analysis::render::{epilog_helper, frame_helper};
 use crate::analysis::{
     Analysis, BlockTerm, Function, Overlay, decompiled_cached, is_executable_va, name_of, striped,
@@ -1922,38 +1922,6 @@ pub fn check_structure(
     }
 }
 
-/// Decompiles many functions as [`decompile_named_all`](super::decompile_named_all)
-/// does, each with the graph its structurer was handed, one stripe of them
-/// per core.
-///
-/// # Arguments
-///
-/// * `program` - The image.
-/// * `analysis` - Its functions.
-/// * `overlay` - The names to apply.
-/// * `entries` - Function entries, in any order.
-///
-/// # Returns
-///
-/// One result per entry, in order: the text and its graph, or `None` where
-/// the function does not decompile.
-#[must_use]
-pub fn decompile_with_cfg_all(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entries: &[u64],
-) -> Vec<Option<(String, LiveCfg)>> {
-    striped(entries, |&e| {
-        let d = decompile_plain_full(program, analysis, overlay, e)?;
-        let text = name_fields(program, analysis, overlay, e, &d.text)?;
-        Some((text, d.live))
-    })
-    .into_iter()
-    .map(Option::flatten)
-    .collect()
-}
-
 /// Checks many functions' texts, one stripe of them per core.
 ///
 /// # Arguments
@@ -1963,7 +1931,7 @@ pub fn decompile_with_cfg_all(
 /// * `overlay` - The names the texts were written under.
 /// * `entries` - The functions' entries.
 /// * `texts` - Each one's text and graph, as
-///   [`decompile_with_cfg_all`] returns them.
+///   [`super::decompile_swept_all`] returns them ([`super::Swept::fields`]).
 ///
 /// # Returns
 ///
@@ -1974,13 +1942,10 @@ pub fn check_all(
     analysis: &Analysis,
     overlay: &Overlay,
     entries: &[u64],
-    texts: &[Option<(String, LiveCfg)>],
+    texts: &[Option<&(String, LiveCfg)>],
 ) -> Vec<Option<Structure>> {
-    let items: Vec<(u64, Option<&(String, LiveCfg)>)> = entries
-        .iter()
-        .copied()
-        .zip(texts.iter().map(Option::as_ref))
-        .collect();
+    let items: Vec<(u64, Option<&(String, LiveCfg)>)> =
+        entries.iter().copied().zip(texts.iter().copied()).collect();
     striped(&items, |(e, t)| {
         t.map(|(text, live)| check(program, analysis, overlay, *e, text, live))
     })

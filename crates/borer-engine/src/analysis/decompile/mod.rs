@@ -447,10 +447,30 @@ pub fn decompile_all(
     render_all(program, analysis, overlay, entries, decompile_afresh)
 }
 
-/// [`decompile_all`], each text with how its cleanup passes ended.
+/// One function's texts as the whole-binary sweeps read them, from one
+/// decompile ([`decompile_swept_all`]).
+#[derive(Debug, Clone)]
+pub struct Swept {
+    /// The text [`decompile_all`] renders.
+    pub text: String,
+    /// How its cleanup passes ended; a sweep finds a function whose passes
+    /// spent their budget without settling by it, which no text shows.
+    pub settle: Settle,
+    /// The text [`decompile_named_all`] renders; `None` where it renders none.
+    pub named: Option<String>,
+    /// The text with its fields named, before the finishing passes, and the
+    /// graph its structurer was handed, which [`traces::check`] holds the
+    /// text to; `None` where naming the fields fails.
+    pub fields: Option<(String, traces::LiveCfg)>,
+}
+
+/// Decompiles many functions once each and renders each as
+/// [`decompile_all`], [`decompile_named_all`] and the structure check
+/// ([`traces::check_all`]) read it.
 ///
-/// A sweep reads the [`Settle`] to find a function whose passes spent
-/// their budget without settling, which no rendering shows.
+/// A sweep that checks all three lifts and cleans each function up once
+/// instead of three times. A named text that naming left as it was is the
+/// plain text, as [`decompile_named`] answers it.
 ///
 /// # Arguments
 ///
@@ -462,14 +482,29 @@ pub fn decompile_all(
 /// # Returns
 ///
 /// One result per entry, `None` where [`decompile`] returns `None`.
-pub fn decompile_all_settled(
+pub fn decompile_swept_all(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     entries: &[u64],
-) -> Vec<Option<(String, Settle)>> {
+) -> Vec<Option<Swept>> {
     render_all(program, analysis, overlay, entries, |p, a, o, e| {
-        decompile_plain_full(p, a, o, e).map(|d| (finished(&d.text, p, a, o, e), d.settle))
+        let d = decompile_plain_full(p, a, o, e)?;
+        let text = finished(&d.text, p, a, o, e);
+        let fields = name_fields(p, a, o, e, &d.text);
+        let named = fields.as_ref().map(|f| {
+            if *f == d.text {
+                text.clone()
+            } else {
+                finished(f, p, a, o, e)
+            }
+        });
+        Some(Swept {
+            text,
+            settle: d.settle,
+            named,
+            fields: fields.map(|f| (f, d.live)),
+        })
     })
 }
 

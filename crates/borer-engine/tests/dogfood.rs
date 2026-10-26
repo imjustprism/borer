@@ -22,12 +22,15 @@
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::decompile::verify::Verified;
 use borer_engine::analysis::{
-    Analysis, Overlay, decompile::decompile, decompile::decompile_all,
-    decompile::decompile_all_settled, decompile::decompile_named_all, name_of, render,
+    Analysis, Overlay,
+    decompile::{Swept, decompile, decompile_all, decompile_named_all, decompile_swept_all},
+    name_of, render,
 };
 use borer_engine::program::Program;
 use std::collections::BTreeSet;
+use std::sync::{LazyLock, OnceLock};
 
 mod common;
 #[path = "common/gotos.rs"]
@@ -246,15 +249,88 @@ fn missing_calls(
     out
 }
 
-/// Decompiles every function of the `BORER_DOGFOOD` binary, prints timings
-/// and the first failures, and requires zero failures and well-formed text.
+/// The `BORER_DOGFOOD` binary, loaded and analyzed once for every sweep
+/// over it, with what more than one sweep reads built once on first use.
+///
+/// The sweeps run side by side in one process; each of them loading,
+/// analyzing and decompiling the binary afresh did the same work up to
+/// three times over, which no sweep checks.
+struct Corpus {
+    /// The binary's path, as the variable names it.
+    path: String,
+    /// The binary.
+    program: Program,
+    /// Its analysis.
+    analysis: Analysis,
+    /// How long the analysis took.
+    took: std::time::Duration,
+    /// Every function's texts ([`decompile_swept_all`]), in function order.
+    swept: OnceLock<Vec<Option<Swept>>>,
+    /// The lifter checked against the emulator on every block.
+    verified: OnceLock<Verified>,
+}
+
+impl Corpus {
+    /// Returns every function's entry, in address order.
+    fn entries(&self) -> Vec<u64> {
+        self.analysis.functions.iter().map(|f| f.entry).collect()
+    }
+
+    /// Returns every function's texts, decompiling them on the first call.
+    fn swept(&self) -> &[Option<Swept>] {
+        self.swept.get_or_init(|| {
+            decompile_swept_all(
+                &self.program,
+                &self.analysis,
+                &Overlay::default(),
+                &self.entries(),
+            )
+        })
+    }
+
+    /// Returns the lifter's check against the emulator on every block,
+    /// running it on the first call.
+    fn verified(&self) -> &Verified {
+        self.verified.get_or_init(|| {
+            borer_engine::analysis::decompile::verify::verify(
+                &self.program,
+                &self.analysis,
+                &self.entries(),
+                1,
+            )
+        })
+    }
+}
+
+/// The `BORER_DOGFOOD` binary, read on first use.
+#[expect(
+    clippy::expect_used,
+    reason = "a sweep whose binary does not load has nothing to check"
+)]
+static CORPUS: LazyLock<Corpus> = LazyLock::new(|| {
+    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
+    let started = std::time::Instant::now();
+    let program = Program::load_with(std::path::Path::new(&path), false).expect("load");
+    let analysis = Analysis::compute(&program);
+    Corpus {
+        path,
+        program,
+        analysis,
+        took: started.elapsed(),
+        swept: OnceLock::new(),
+        verified: OnceLock::new(),
+    }
+});
+
+/// Analyzes the `BORER_DOGFOOD` binary a second time and requires every
+/// renderer to answer the same bytes from both analyses.
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn the_same_binary_answers_the_same_bytes_twice() {
-    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
-    let first = Analysis::compute(&p);
-    let second = Analysis::compute(&p);
+    let c = &*CORPUS;
+    let p = &c.program;
+    let first = &c.analysis;
+    let second = &Analysis::compute(p);
     let o = Overlay::default();
     assert_eq!(
         first.functions.len(),
@@ -268,55 +344,55 @@ fn the_same_binary_answers_the_same_bytes_twice() {
         ("binary_info", p.summary(), p.summary()),
         (
             "functions",
-            render::functions_tsv(&first, &o, None, render::FunctionOrder::Address, 0, 100).2,
-            render::functions_tsv(&second, &o, None, render::FunctionOrder::Address, 0, 100).2,
+            render::functions_tsv(first, &o, None, render::FunctionOrder::Address, 0, 100).2,
+            render::functions_tsv(second, &o, None, render::FunctionOrder::Address, 0, 100).2,
         ),
         (
             "crypto",
-            render::crypto_tsv(&p, &first, &o, 0, 200),
-            render::crypto_tsv(&p, &second, &o, 0, 200),
+            render::crypto_tsv(p, first, &o, 0, 200),
+            render::crypto_tsv(p, second, &o, 0, 200),
         ),
         (
             "decompile",
-            decompile(&p, &first, &o, entry).unwrap_or_default(),
-            decompile(&p, &second, &o, entry).unwrap_or_default(),
+            decompile(p, first, &o, entry).unwrap_or_default(),
+            decompile(p, second, &o, entry).unwrap_or_default(),
         ),
         (
             "why",
-            render::why_tsv(&p, &first, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
-            render::why_tsv(&p, &second, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
+            render::why_tsv(p, first, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
+            render::why_tsv(p, second, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
         ),
         (
             "layout",
-            render::layout_tsv(&p, &first, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
-            render::layout_tsv(&p, &second, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
+            render::layout_tsv(p, first, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
+            render::layout_tsv(p, second, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
         ),
         (
             "taint",
-            render::taint_tsv(&p, &first, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
-            render::taint_tsv(&p, &second, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
+            render::taint_tsv(p, first, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
+            render::taint_tsv(p, second, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
         ),
         (
             "oracle",
-            render::oracle_tsv(&p, &first, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
-            render::oracle_tsv(&p, &second, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
+            render::oracle_tsv(p, first, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
+            render::oracle_tsv(p, second, &o, &format!("{entry:#x}")).unwrap_or_else(|e| e),
         ),
         (
             "emulate",
-            render::emulate_tsv(&p, &first, &o, &format!("{entry:#x},steps=20000"))
+            render::emulate_tsv(p, first, &o, &format!("{entry:#x},steps=20000"))
                 .unwrap_or_else(|e| e),
-            render::emulate_tsv(&p, &second, &o, &format!("{entry:#x},steps=20000"))
+            render::emulate_tsv(p, second, &o, &format!("{entry:#x},steps=20000"))
                 .unwrap_or_else(|e| e),
         ),
         (
             "hidden",
-            render::hidden_strings_tsv(&p, &first, &o, ""),
-            render::hidden_strings_tsv(&p, &second, &o, ""),
+            render::hidden_strings_tsv(p, first, &o, ""),
+            render::hidden_strings_tsv(p, second, &o, ""),
         ),
         (
             "triage",
-            render::triage_tsv(&p, &first, &o),
-            render::triage_tsv(&p, &second, &o),
+            render::triage_tsv(p, first, &o),
+            render::triage_tsv(p, second, &o),
         ),
     ];
     for (name, one, two) in cases {
@@ -342,19 +418,18 @@ fn the_same_binary_answers_the_same_bytes_twice() {
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn decompile_every_function() {
-    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    let t0 = std::time::Instant::now();
-    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
-    let a = Analysis::compute(&p);
-    let analysis_t = t0.elapsed();
+    let c = &*CORPUS;
+    let (path, a, analysis_t) = (&c.path, &c.analysis, c.took);
     let t1 = std::time::Instant::now();
 
     let (mut ok, mut empty, mut failed) = (0usize, 0usize, 0usize);
     let mut first_failures: Vec<u64> = Vec::new();
     let mut malformed: Vec<String> = Vec::new();
     let mut unsettled: Vec<String> = Vec::new();
-    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
-    let texts = decompile_all_settled(&p, &a, &Overlay::default(), &entries);
+    let texts = c
+        .swept()
+        .iter()
+        .map(|s| s.as_ref().map(|s| (&s.text, &s.settle)));
     for (f, r) in a.functions.iter().zip(texts) {
         if let Some((_, settle)) = &r
             && settle.spent()
@@ -368,12 +443,12 @@ fn decompile_every_function() {
         match r.map(|(t, _)| t) {
             Some(t) if t.lines().count() > 2 => {
                 ok += 1;
-                let missing = dangling_gotos(&t);
-                let depth = brace_imbalance(&t);
-                let calls = missing_calls(&a, &Overlay::default(), f, &t);
-                let undeclared = undeclared_slots(&t);
-                let leaked = leaked_temps(&t);
-                let glued = glued_names(&t);
+                let missing = dangling_gotos(t);
+                let depth = brace_imbalance(t);
+                let calls = missing_calls(a, &Overlay::default(), f, t);
+                let undeclared = undeclared_slots(t);
+                let leaked = leaked_temps(t);
+                let glued = glued_names(t);
                 if (!missing.is_empty()
                     || depth != 0
                     || !calls.is_empty()
@@ -615,13 +690,14 @@ fn the_arm32_text_agrees_with_the_machine_on_every_block() {
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn decompile_every_function_named() {
-    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
-    let a = Analysis::compute(&p);
+    let c = &*CORPUS;
+    let (path, a) = (&c.path, &c.analysis);
     let o = Overlay::default();
     let t1 = std::time::Instant::now();
-    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
-    let texts = decompile_named_all(&p, &a, &o, &entries);
+    let texts = c
+        .swept()
+        .iter()
+        .map(|s| s.as_ref().and_then(|s| s.named.as_ref()));
     let (mut ok, mut failed) = (0usize, 0usize);
     let mut malformed: Vec<String> = Vec::new();
     for (f, r) in a.functions.iter().zip(texts) {
@@ -630,12 +706,12 @@ fn decompile_every_function_named() {
             continue;
         };
         ok += 1;
-        let missing = dangling_gotos(&t);
-        let depth = brace_imbalance(&t);
-        let calls = missing_calls(&a, &o, f, &t);
-        let undeclared = undeclared_slots(&t);
-        let leaked = leaked_temps(&t);
-        let glued = glued_names(&t);
+        let missing = dangling_gotos(t);
+        let depth = brace_imbalance(t);
+        let calls = missing_calls(a, &o, f, t);
+        let undeclared = undeclared_slots(t);
+        let leaked = leaked_temps(t);
+        let glued = glued_names(t);
         let quoted = t
             .lines()
             .find(|l| l.trim_start().starts_with("//") && l.contains('"'))
@@ -754,15 +830,11 @@ fn integrity_helpers_catch_the_known_shapes() {
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn the_lifter_agrees_with_the_emulator_on_every_block() {
-    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
-    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
-    let a = Analysis::compute(&p);
-    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+    use borer_engine::analysis::decompile::verify::verify_tsv;
     let started = std::time::Instant::now();
-    let v = verify(&p, &a, &entries, 1);
+    let v = CORPUS.verified();
     let took = started.elapsed();
-    let text = verify_tsv(&v);
+    let text = verify_tsv(v);
     for line in text.lines().take_while(|l| l.starts_with('#')) {
         eprintln!("{line}");
     }
@@ -813,21 +885,14 @@ fn the_arm64_lifter_agrees_with_the_emulator_on_every_block() {
 fn the_mir_agrees_with_the_emulator_as_the_expressions_do() {
     use borer_engine::analysis::decompile::{verify, verify_a64};
     use borer_engine::isa::Isa;
-    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
-    let a = Analysis::compute(&p);
-    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
-    let a64 = p.arch.isa() == Some(Isa::A64);
-    let (expr, mir) = if a64 {
-        (
-            verify_a64::verify(&p, &a, &entries, 1),
-            verify_a64::verify_mir(&p, &a, &entries, 1),
-        )
+    let c = &*CORPUS;
+    let (p, a, entries) = (&c.program, &c.analysis, c.entries());
+    let a64;
+    let (expr, mir) = if p.arch.isa() == Some(Isa::A64) {
+        a64 = verify_a64::verify(p, a, &entries, 1);
+        (&a64, verify_a64::verify_mir(p, a, &entries, 1))
     } else {
-        (
-            verify::verify(&p, &a, &entries, 1),
-            verify::verify_mir(&p, &a, &entries, 1),
-        )
+        (c.verified(), verify::verify_mir(p, a, &entries, 1))
     };
     let text = verify::verify_tsv(&mir);
     for line in text.lines().take_while(|l| l.starts_with('#')) {
@@ -855,13 +920,12 @@ fn the_mir_agrees_with_the_emulator_as_the_expressions_do() {
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn the_text_agrees_with_the_emulator_on_every_block() {
     use borer_engine::analysis::decompile::replay::{Replayed, replay_function, replay_tsv};
-    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
     let seed: u64 = std::env::var("BORER_DOGFOOD_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
-    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
-    let a = Analysis::compute(&p);
+    let c = &*CORPUS;
+    let (path, p, a) = (&c.path, &c.program, &c.analysis);
     let entries: Vec<u64> = a
         .functions
         .iter()
@@ -1195,25 +1259,25 @@ texts read {read} of {}; lines reading an unset value {} in {} functions; check 
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn the_structure_agrees_with_the_cfg_on_every_function() {
-    use borer_engine::analysis::decompile::traces::{
-        Structure, check, check_all, decompile_with_cfg_all,
-    };
-    let path = std::env::var("BORER_DOGFOOD").expect("BORER_DOGFOOD env var");
-    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
-    let a = Analysis::compute(&p);
+    use borer_engine::analysis::decompile::traces::{Structure, check, check_all};
+    let c = &*CORPUS;
+    let (path, p, a, entries) = (&c.path, &c.program, &c.analysis, c.entries());
     let o = Overlay::default();
-    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
     let t0 = std::time::Instant::now();
-    let texts = decompile_with_cfg_all(&p, &a, &o, &entries);
+    let texts: Vec<_> = c
+        .swept()
+        .iter()
+        .map(|s| s.as_ref().and_then(|s| s.fields.as_ref()))
+        .collect();
     let decompiled = t0.elapsed();
     let t1 = std::time::Instant::now();
-    let verdicts = check_all(&p, &a, &o, &entries, &texts);
+    let verdicts = check_all(p, a, &o, &entries, &texts);
     let checked = t1.elapsed();
     let mut each: Vec<(std::time::Duration, u64)> = Vec::new();
     for ((e, t), v) in entries.iter().zip(&texts).zip(&verdicts) {
         let Some((text, live)) = t else { continue };
         let t2 = std::time::Instant::now();
-        let again = check(&p, &a, &o, *e, text, live);
+        let again = check(p, a, &o, *e, text, live);
         each.push((t2.elapsed(), *e));
         assert_eq!(Some(&again), v.as_ref(), "{e:#x}: a second check disagrees");
     }
