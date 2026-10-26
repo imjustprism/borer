@@ -934,21 +934,21 @@ fn the_text_agrees_with_the_emulator_on_every_block() {
         .collect();
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let started = std::time::Instant::now();
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let mut each: Vec<(u64, std::time::Duration, Replayed)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
-            .map(|t| {
-                let (p, a, entries) = (&p, &a, &entries);
+            .map(|_| {
+                let (p, a, entries, next) = (&p, &a, &entries, &next);
                 scope.spawn(move || {
-                    entries
-                        .iter()
-                        .skip(t)
-                        .step_by(threads)
-                        .map(|&e| {
-                            let t0 = std::time::Instant::now();
-                            let r = replay_function(p, a, e, seed);
-                            (e, t0.elapsed(), r)
-                        })
-                        .collect::<Vec<_>>()
+                    let mut done = Vec::new();
+                    while let Some(&e) =
+                        entries.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                    {
+                        let t0 = std::time::Instant::now();
+                        let r = replay_function(p, a, e, seed);
+                        done.push((e, t0.elapsed(), r));
+                    }
+                    done
                 })
             })
             .collect();
