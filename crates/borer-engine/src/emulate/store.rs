@@ -9,7 +9,7 @@
 //! as the per-byte map's was.
 
 use std::collections::BTreeMap;
-use std::ops::{Range, RangeBounds};
+use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 
 use crate::num::{from_usize, lo8, saturating_usize};
@@ -41,13 +41,22 @@ struct Chunk {
 /// for every trial of every block, and copying the planted loader each
 /// time cost more than the trial. A chunk the run changes is copied up
 /// into the store's own layer first, which then hides the shared one.
+/// The run a fresh clone is poked with ([`Store::poke_run`], a trial's
+/// seeded stack) is held in place, its chunks side by side, rather than
+/// as map entries.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Store {
     /// Chunks by address shifted right three bits, shared between clones;
-    /// a key in [`Store::chunks`] hides the one here.
+    /// a key in [`Store::chunks`] or [`Store::run`] hides the one here.
     base: Arc<BTreeMap<u64, Chunk>>,
-    /// Chunks by address shifted right three bits, this store's own.
+    /// Chunks by address shifted right three bits, this store's own; never
+    /// one of a key [`Store::run`] holds.
     chunks: BTreeMap<u64, Chunk>,
+    /// The key of the first chunk of [`Store::run`].
+    run_first: u64,
+    /// This store's own chunks of consecutive keys from
+    /// [`Store::run_first`], one per key.
+    run: Vec<Chunk>,
     /// Bytes held: the set `held` bits of every chunk either layer shows.
     len: usize,
     /// The address the bytes held below are counted at as they are held
@@ -74,6 +83,66 @@ fn place(a: u64) -> (u64, u8) {
 /// * `k` - The byte's position, 0 to 7.
 fn address(key: u64, k: u8) -> u64 {
     (key << 3) | u64::from(k)
+}
+
+/// The index in a store's run of length `len` from `first` of the chunk
+/// at `key`, `None` when the run does not hold that key.
+///
+/// # Arguments
+///
+/// * `first` - The run's first key.
+/// * `len` - Its chunks.
+/// * `key` - The chunk key.
+fn run_slot(first: u64, len: usize, key: u64) -> Option<usize> {
+    let i = usize::try_from(key.checked_sub(first)?).ok()?;
+    (i < len).then_some(i)
+}
+
+/// The store's own chunk at `key` to change: the run's, else the map's,
+/// copied up from the shared layer, or a fresh one, when it has none.
+///
+/// # Arguments
+///
+/// * `layers` - The shared layer and the store's own map.
+/// * `run` - The run's first key and its chunks.
+/// * `key` - The chunk key.
+fn own_chunk<'s>(
+    (base, chunks): (&Arc<BTreeMap<u64, Chunk>>, &'s mut BTreeMap<u64, Chunk>),
+    (first, run): (u64, &'s mut [Chunk]),
+    key: u64,
+) -> &'s mut Chunk {
+    match run_slot(first, run.len(), key).and_then(|i| run.get_mut(i)) {
+        Some(c) => c,
+        None => chunks
+            .entry(key)
+            .or_insert_with(|| base.get(&key).copied().unwrap_or_default()),
+    }
+}
+
+/// Merges two key-ordered walks of chunks, the upper one's chunk winning
+/// where both hold a key.
+///
+/// # Arguments
+///
+/// * `under` - The lower layer's chunks, in key order.
+/// * `upper` - The upper layer's chunks, in key order.
+fn over<'c>(
+    under: impl Iterator<Item = (u64, &'c Chunk)>,
+    upper: impl Iterator<Item = (u64, &'c Chunk)>,
+) -> impl Iterator<Item = (u64, &'c Chunk)> {
+    let (mut under, mut upper) = (under.peekable(), upper.peekable());
+    std::iter::from_fn(move || match (under.peek(), upper.peek()) {
+        (Some(s), Some(o)) => match s.0.cmp(&o.0) {
+            std::cmp::Ordering::Less => under.next(),
+            std::cmp::Ordering::Greater => upper.next(),
+            std::cmp::Ordering::Equal => {
+                under.next();
+                upper.next()
+            }
+        },
+        (Some(_), None) => under.next(),
+        (None, _) => upper.next(),
+    })
 }
 
 impl Store {
@@ -118,7 +187,10 @@ impl Store {
     ///
     /// * `key` - The chunk's key.
     fn chunk(&self, key: u64) -> Option<&Chunk> {
-        self.chunks.get(&key).or_else(|| self.base.get(&key))
+        match run_slot(self.run_first, self.run.len(), key) {
+            Some(i) => self.run.get(i),
+            None => self.chunks.get(&key).or_else(|| self.base.get(&key)),
+        }
     }
 
     /// The chunks at `keys` as the store shows them, in key order.
@@ -127,29 +199,34 @@ impl Store {
     ///
     /// * `keys` - The chunk keys.
     fn shown(&self, keys: impl RangeBounds<u64> + Clone) -> impl Iterator<Item = (u64, &Chunk)> {
-        let mut shared = self.base.range(keys.clone()).peekable();
-        let mut own = self.chunks.range(keys).peekable();
-        std::iter::from_fn(move || {
-            let next = match (shared.peek(), own.peek()) {
-                (Some(s), Some(o)) => match s.0.cmp(o.0) {
-                    std::cmp::Ordering::Less => shared.next(),
-                    std::cmp::Ordering::Greater => own.next(),
-                    std::cmp::Ordering::Equal => {
-                        shared.next();
-                        own.next()
-                    }
-                },
-                (Some(_), None) => shared.next(),
-                (None, _) => own.next(),
-            };
-            next.map(|(&key, c)| (key, c))
-        })
+        let shared = self.base.range(keys.clone()).map(|(&key, c)| (key, c));
+        let own = self.chunks.range(keys.clone()).map(|(&key, c)| (key, c));
+        let first = match keys.start_bound() {
+            Bound::Included(&k) => Some(k),
+            Bound::Excluded(&k) => k.checked_add(1),
+            Bound::Unbounded => Some(0),
+        };
+        let past = match keys.end_bound() {
+            Bound::Included(&k) => k.checked_add(1),
+            Bound::Excluded(&k) => Some(k),
+            Bound::Unbounded => None,
+        };
+        let from = first.map_or(self.run.len(), |k| {
+            saturating_usize(k.saturating_sub(self.run_first)).min(self.run.len())
+        });
+        let to = past.map_or(self.run.len(), |k| {
+            saturating_usize(k.saturating_sub(self.run_first)).min(self.run.len())
+        });
+        let run = (self.run_first.saturating_add(from_usize(from))..)
+            .zip(self.run.get(from..to.max(from)).unwrap_or_default());
+        over(over(shared, own), run)
     }
 
     /// Moves every chunk into the layer clones share, so a clone copies
     /// none of them until it changes one.
     pub(super) fn freeze(&mut self) {
-        let own = std::mem::take(&mut self.chunks);
+        let mut own = std::mem::take(&mut self.chunks);
+        own.extend((self.run_first..).zip(std::mem::take(&mut self.run)));
         if self.base.is_empty() {
             self.base = Arc::new(own);
         } else {
@@ -179,11 +256,11 @@ impl Store {
     pub(super) fn set(&mut self, a: u64, v: u8, dirty: bool) {
         let (key, k) = place(a);
         let bit = 1 << k;
-        let base = &self.base;
-        let c = self
-            .chunks
-            .entry(key)
-            .or_insert_with(|| base.get(&key).copied().unwrap_or_default());
+        let c = own_chunk(
+            (&self.base, &mut self.chunks),
+            (self.run_first, &mut self.run),
+            key,
+        );
         if c.held & bit == 0 {
             self.len += 1;
             self.below += usize::from(a < self.split);
@@ -238,14 +315,15 @@ impl Store {
     /// * `bytes` - The bytes, in address order.
     pub(super) fn poke_run(&mut self, at: u64, bytes: &[u8]) {
         let end = at.checked_add(from_usize(bytes.len()));
-        let (Some(end), true, false) = (end, self.chunks.is_empty(), bytes.is_empty()) else {
+        let fresh = self.chunks.is_empty() && self.run.is_empty();
+        let (Some(end), true, false) = (end, fresh, bytes.is_empty()) else {
             self.plant_marked(at, bytes.iter().copied(), true);
             return;
         };
         let (first, _) = place(at);
         let (last, _) = place(end - 1);
         let mut shared = self.base.range(first..=last).peekable();
-        let mut fresh: Vec<(u64, Chunk)> = Vec::with_capacity(bytes.len() / 8 + 2);
+        let mut run: Vec<Chunk> = Vec::with_capacity(bytes.len() / 8 + 2);
         let (mut a, mut rest) = (at, bytes);
         while !rest.is_empty() {
             let (key, k) = place(a);
@@ -267,11 +345,12 @@ impl Store {
             if let Some(dst) = c.bytes.get_mut(from..from + n) {
                 dst.copy_from_slice(now);
             }
-            fresh.push((key, c));
+            run.push(c);
             a = a.wrapping_add(from_usize(n));
             rest = later;
         }
-        self.chunks = fresh.into_iter().collect();
+        self.run_first = first;
+        self.run = run;
     }
 
     /// Holds a run of bytes unmarked as written, marked patched when
@@ -287,6 +366,8 @@ impl Store {
         let Self {
             base,
             chunks,
+            run_first,
+            run,
             len,
             split,
             below,
@@ -297,12 +378,7 @@ impl Store {
             let (key, k) = place(a);
             a = a.wrapping_add(1);
             if slot.as_ref().is_none_or(|(held, _)| *held != key) {
-                slot = Some((
-                    key,
-                    chunks
-                        .entry(key)
-                        .or_insert_with(|| base.get(&key).copied().unwrap_or_default()),
-                ));
+                slot = Some((key, own_chunk((base, chunks), (*run_first, run), key)));
             }
             let Some((_, c)) = slot.as_mut() else {
                 continue;
@@ -528,17 +604,18 @@ mod tests {
         assert_eq!(copy.held_below(0x6100), walked_copy.held_below(0x6100));
     }
 
-    /// A run poked whole holds what poking its bytes one by one holds.
+    /// A run poked whole answers as poking its bytes one by one does.
     ///
-    /// The bytes, the count and the count below the split, in a clone of a
-    /// frozen store, from an unaligned start over chunks the frozen layer
-    /// half holds.
+    /// In a clone of a frozen store, from an unaligned start over chunks
+    /// the frozen layer half holds, through writes inside the run and
+    /// beside it, and frozen again and cloned.
     #[test]
-    fn a_poked_run_holds_what_poking_each_byte_holds() {
+    fn a_poked_run_answers_as_poking_each_byte_does() {
         let split = 0x7013;
         let mut frozen = Store::split_at(split);
         frozen.plant(0x7006, [9, 8, 7]);
         frozen.set(0x701a, 3, true);
+        frozen.set(0x7100, 4, true);
         frozen.freeze();
         let run: Vec<u8> = (0..37u8).map(|v| v.wrapping_mul(7)).collect();
         let (mut whole, mut each) = (frozen.clone(), frozen.clone());
@@ -546,12 +623,34 @@ mod tests {
         for (a, &v) in (0x7005u64..).zip(&run) {
             each.poke(a, v);
         }
-        assert_eq!(whole.len(), each.len());
-        assert_eq!(whole.held_below(split), each.held_below(split));
-        for a in 0x7000..0x7040 {
-            assert_eq!(whole.get(a), each.get(a), "{a:#x}");
-            assert_eq!(whole.is_dirty(a), each.is_dirty(a), "{a:#x}");
+        for s in [&mut whole, &mut each] {
+            s.set(0x7010, 1, true);
+            s.set(0x7003, 2, true);
+            s.set(0x7040, 5, false);
+            s.plant(0x7028, [1, 2, 3, 4, 5, 6]);
+            s.poke(0x7001, 6);
         }
+        let agree = |x: &Store, y: &Store| {
+            assert_eq!(x.len(), y.len());
+            assert_eq!(x.dirty().collect::<Vec<_>>(), y.dirty().collect::<Vec<_>>());
+            for limit in [split, 0x7000, 0x7008, 0x7029, 0x7200, u64::MAX] {
+                assert_eq!(x.held_below(limit), y.held_below(limit), "{limit:#x}");
+            }
+            for a in 0x6ff8..0x7108 {
+                assert_eq!(x.get(a), y.get(a), "{a:#x}");
+                assert_eq!(x.is_dirty(a), y.is_dirty(a), "{a:#x}");
+                assert_eq!(x.any_dirty(a..a + 9), y.any_dirty(a..a + 9), "{a:#x}");
+                assert_eq!(x.any_patched(a..a + 3), y.any_patched(a..a + 3), "{a:#x}");
+            }
+        };
+        agree(&whole, &each);
+        whole.freeze();
+        each.freeze();
+        agree(&whole, &each);
+        let (mut whole, mut each) = (whole.clone(), each.clone());
+        whole.poke_run(0x7030, &run);
+        each.poke_run(0x7030, &run);
+        agree(&whole, &each);
     }
 
     /// The written bytes come out in address order, a window finds one
