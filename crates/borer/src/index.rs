@@ -27,6 +27,7 @@ use borer_engine::table::Window;
 use rayon::prelude::*;
 
 mod key;
+mod memo;
 pub use key::index_key;
 
 /// Magic bytes opening an index file.
@@ -913,13 +914,12 @@ fn load_or_build_in(
     program: &Program,
     analysis: &Analysis,
     cap: u64,
-) -> Result<(CodeIndex, PathBuf, bool), String> {
-    let key = index_key(program, &analysis.packs);
-    if let Some(index) = load_in(dir, key) {
-        return Ok((index, dir.join(key.file_name()), false));
+) -> Result<(std::sync::Arc<CodeIndex>, PathBuf, bool), String> {
+    if let Some((index, path)) = memo::held(dir, program, analysis) {
+        return Ok((index, path, false));
     }
     let (index, path) = save_in(dir, build(program, analysis, &Overlay::default()), cap)?;
-    Ok((index, path, true))
+    Ok((std::sync::Arc::new(index), path, true))
 }
 
 /// Reads the index for `program` from the cache, or builds and stores it
@@ -945,7 +945,7 @@ fn load_or_build_in(
 pub fn load_or_build(
     program: &Program,
     analysis: &Analysis,
-) -> Result<(CodeIndex, PathBuf, bool), String> {
+) -> Result<(std::sync::Arc<CodeIndex>, PathBuf, bool), String> {
     load_or_build_in(&require_cache_dir()?, program, analysis, CACHE_MAX)
 }
 
