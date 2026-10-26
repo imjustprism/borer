@@ -72,26 +72,12 @@ const CRT_IMPORTS: [&str; 5] = [
 /// The techniques present, each with where they are, the instruction ones
 /// first.
 pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
-    let mut sites: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
-    if let Some(bits) = p.arch.bitness() {
-        for f in &a.functions {
-            let mut after = FlowControl::Next;
-            each_instruction(p, f, bits, |i| {
-                let trap = i.mnemonic() == Mnemonic::Int3 && after != FlowControl::Next;
-                if let Some(tag) = anti_instruction(i).filter(|_| !trap) {
-                    sites.entry(tag).or_default().push(i.ip());
-                }
-                if i.mnemonic() != Mnemonic::Nop {
-                    after = i.flow_control();
-                }
-            });
-        }
-    }
+    let sites = anti_sites(p, a);
     let mut out = String::new();
     let weak = |tag: &str| tag.starts_with("cpuid") || tag.starts_with("rdtsc");
     let strong = sites.keys().filter(|tag| !weak(tag)).count();
     let instr_count: usize = sites.values().map(Vec::len).sum();
-    for (tag, at) in &sites {
+    for (tag, at) in sites.iter() {
         let shown: Vec<String> = at
             .iter()
             .take(ANTI_SITES_MAX)
@@ -141,6 +127,44 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         "a few anti-analysis tells, within what ordinary code uses"
     };
     format!("# {verdict}\n# technique                       sites  where\n{out}")
+}
+
+/// Returns the sites of each anti-analysis instruction in the program's
+/// functions, found once per analysis.
+///
+/// Every instruction of every function is decoded for them, and they are
+/// facts of the code alone, so they are kept in [`Analysis::derived`]
+/// rather than decoded again on every `antianalysis` and `triage` read.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: functions and their blocks.
+///
+/// # Returns
+///
+/// Each technique's label and its instruction addresses, in function
+/// then address order; empty for an architecture with no x86 decoder.
+fn anti_sites(p: &Program, a: &Analysis) -> Arc<BTreeMap<&'static str, Vec<u64>>> {
+    a.derived.get_or_build("anti_sites", (), || {
+        let mut sites: BTreeMap<&'static str, Vec<u64>> = BTreeMap::new();
+        let Some(bits) = p.arch.bitness() else {
+            return sites;
+        };
+        for f in &a.functions {
+            let mut after = FlowControl::Next;
+            each_instruction(p, f, bits, |i| {
+                let trap = i.mnemonic() == Mnemonic::Int3 && after != FlowControl::Next;
+                if let Some(tag) = anti_instruction(i).filter(|_| !trap) {
+                    sites.entry(tag).or_default().push(i.ip());
+                }
+                if i.mnemonic() != Mnemonic::Nop {
+                    after = i.flow_control();
+                }
+            });
+        }
+        sites
+    })
 }
 
 /// The anti-analysis technique an instruction is, if any.
