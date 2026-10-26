@@ -585,7 +585,73 @@ pub(in crate::analysis::decompile) fn inferred_type(
     lines: &[String],
     param: &str,
 ) -> Option<&'static str> {
-    inferred_type_on(lines, lines.iter(), param)
+    inferred_type_on(lines, &Casts::of(lines), lines.iter(), param)
+}
+
+/// The words a 32-bit cast stands right in front of, on the lines that
+/// are not comments, read once for every variable of a text.
+///
+/// [`inferred_type_on`] asks of each variable whether the text casts it
+/// to 32 bits and never widens it back, which a search of every line for
+/// each variable answered at the cost of the text times its variables.
+#[derive(Debug, Default)]
+pub(in crate::analysis::decompile) struct Casts<'a> {
+    /// The word after each `(int64_t)(int32_t)`.
+    widened: BTreeSet<&'a str>,
+    /// The word after each `(int32_t)` and `(uint32_t)`.
+    narrowed: BTreeSet<&'a str>,
+}
+
+impl<'a> Casts<'a> {
+    /// Reads the casts of a text.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The function, header lines included.
+    pub(in crate::analysis::decompile) fn of(lines: &'a [String]) -> Self {
+        let mut casts = Self::default();
+        let words = |line: &'a str, cast: &'static str| {
+            line.match_indices(cast).filter_map(move |(at, _)| {
+                let rest = line.get(at + cast.len()..)?;
+                let end = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
+                rest.get(..end).filter(|w| !w.is_empty())
+            })
+        };
+        for line in lines.iter().filter(|l| !l.starts_with("//")) {
+            casts.widened.extend(words(line, "(int64_t)(int32_t)"));
+            casts.narrowed.extend(words(line, "(int32_t)"));
+            casts.narrowed.extend(words(line, "(uint32_t)"));
+        }
+        casts
+    }
+
+    /// Tells whether the text casts `param` to 32 bits and never sign
+    /// extends it back to 64: some line not a comment holds `(int32_t)` or
+    /// `(uint32_t)` right before the text `param`, and none
+    /// `(int64_t)(int32_t)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The lines the casts were read from.
+    /// * `param` - The variable's name.
+    fn cast32(&self, lines: &[String], param: &str) -> bool {
+        if param.is_empty() || !param.chars().all(is_ident_char) {
+            let on = |cast: &str| {
+                let text = format!("{cast}{param}");
+                lines
+                    .iter()
+                    .any(|l| !l.starts_with("//") && l.contains(&text))
+            };
+            return !on("(int64_t)(int32_t)") && (on("(int32_t)") || on("(uint32_t)"));
+        }
+        let starts = |words: &BTreeSet<&str>| {
+            words
+                .range(param..)
+                .next()
+                .is_some_and(|w| w.starts_with(param))
+        };
+        !starts(&self.widened) && starts(&self.narrowed)
+    }
 }
 
 /// [`inferred_type`] over only the lines that can name the variable.
@@ -597,6 +663,7 @@ pub(in crate::analysis::decompile) fn inferred_type(
 /// # Arguments
 ///
 /// * `lines` - The function, header lines included.
+/// * `casts` - The casts of `lines` ([`Casts::of`]).
 /// * `uses` - The lines of `lines` to read, in order: every line that
 ///   names `param` must be among them.
 /// * `param` - The variable's name.
@@ -606,17 +673,11 @@ pub(in crate::analysis::decompile) fn inferred_type(
 /// The type every use agrees on, `None` when they disagree or say none.
 pub(in crate::analysis::decompile) fn inferred_type_on<'a>(
     lines: &[String],
+    casts: &Casts<'_>,
     uses: impl Iterator<Item = &'a String>,
     param: &str,
 ) -> Option<&'static str> {
-    let has_cast32 = !lines
-        .iter()
-        .any(|l| !l.starts_with("//") && l.contains(&format!("(int64_t)(int32_t){param}")))
-        && lines.iter().any(|l| {
-            !l.starts_with("//")
-                && (l.contains(&format!("(int32_t){param}"))
-                    || l.contains(&format!("(uint32_t){param}")))
-        });
+    let has_cast32 = casts.cast32(lines, param);
     let mut ty: Option<&'static str> = None;
     for line in uses.filter(|l| !l.starts_with("//")) {
         for at in word_positions(line, param) {
@@ -1727,7 +1788,42 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Slot, api_pointer, inferred_type, pointed_at, slot_at};
+    use super::{Casts, Slot, api_pointer, inferred_type, pointed_at, slot_at};
+
+    /// The casts read once say of each name what a search of every line
+    /// for it says: the text right after a cast, a longer name's included,
+    /// comment lines left out.
+    ///
+    /// # Panics
+    ///
+    /// When the two disagree on a name.
+    #[test]
+    fn casts_read_once_agree_with_a_search_per_name() {
+        let text: Vec<String> = [
+            "// (int32_t)var3",
+            "uint64_t var1, var10, var2, var3;",
+            "x = (int32_t)var10;",
+            "y = (uint32_t)(var2) + (uint32_t)var2;",
+            "z = (int64_t)(int32_t)var20;",
+            "w = (int32_t)var2;",
+        ]
+        .map(str::to_owned)
+        .into();
+        let casts = Casts::of(&text);
+        let searched = |name: &str| {
+            let on = |cast: &str| {
+                let t = format!("{cast}{name}");
+                text.iter().any(|l| !l.starts_with("//") && l.contains(&t))
+            };
+            !on("(int64_t)(int32_t)") && (on("(int32_t)") || on("(uint32_t)"))
+        };
+        for name in [
+            "var1", "var10", "var2", "var20", "var3", "var", "v", "va r", "",
+        ] {
+            assert_eq!(casts.cast32(&text, name), searched(name), "{name}");
+        }
+        assert!(casts.cast32(&text, "var1") && !casts.cast32(&text, "var2"));
+    }
 
     /// Splits a text into owned lines.
     ///

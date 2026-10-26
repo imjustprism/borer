@@ -5,7 +5,7 @@ use super::*;
 
 mod infer;
 
-pub(super) use infer::{inferred_type_on, scalar_width, signature_result, type_parameters};
+pub(super) use infer::{Casts, inferred_type_on, scalar_width, signature_result, type_parameters};
 
 /// Most singletons whose fields [`decompile_named`] names in one function.
 pub(super) const SINGLETONS_MAX: usize = 8;
@@ -1885,6 +1885,7 @@ pub(super) fn type_locals(text: &str) -> String {
         .cloned()
         .collect();
     let uses = word_lines(&body);
+    let casts = Casts::of(&body);
     let mut narrowed: Vec<(String, &'static str)> = Vec::new();
     for line in &lines {
         let Some(names) = line
@@ -1903,7 +1904,7 @@ pub(super) fn type_locals(text: &str) -> String {
         for name in names {
             let rows = uses.get(name.as_str()).map_or(&[][..], Vec::as_slice);
             let on = rows.iter().filter_map(|k| body.get(*k));
-            if let Some(ty) = inferred_type_on(&body, on, &name) {
+            if let Some(ty) = inferred_type_on(&body, &casts, on, &name) {
                 narrowed.push((name, ty));
             }
         }

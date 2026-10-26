@@ -51,6 +51,7 @@ pub(super) fn lane_locals(text: &str) -> String {
             .filter(|(_, ty)| narrow_type(ty).is_some_and(|(_, mask)| mask.is_some()))
             .map(|(n, _)| n.as_str()),
     );
+    let casts = Casts::of(&lines);
     let typed: Vec<(String, &'static str)> = declared
         .into_iter()
         .filter_map(|name| {
@@ -59,7 +60,7 @@ pub(super) fn lane_locals(text: &str) -> String {
                 .iter()
                 .filter_map(|&k| lines.get(k))
                 .filter(|l| !is_declaration(l));
-            if inferred_type_on(&lines, reads, &name)
+            if inferred_type_on(&lines, &casts, reads, &name)
                 .and_then(integer_bits)
                 .is_some_and(|bits| bits < 32)
             {
@@ -70,6 +71,7 @@ pub(super) fn lane_locals(text: &str) -> String {
                 .map(|ty| (name, ty))
         })
         .collect();
+    drop(casts);
     drop(held);
     drop(sinks);
     drop(uses);
