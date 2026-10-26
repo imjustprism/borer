@@ -621,9 +621,7 @@ impl Lifter for A32 {
         instrs: &[a32::Insn],
         out: &FxHashMap<Key, u8>,
     ) -> Vec<FxHashMap<Key, u8>> {
-        let effects: Vec<lift::Effects> =
-            instrs.iter().map(|i| lift_a32::effects(ctx, i)).collect();
-        lift::need_from(&effects, out)
+        lift_a32::need_after(ctx, instrs, out)
     }
 
     fn after(_code: &[Vec<a32::Insn>], _s: usize) -> Option<Instruction> {

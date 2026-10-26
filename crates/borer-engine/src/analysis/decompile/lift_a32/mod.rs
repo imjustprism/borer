@@ -156,10 +156,10 @@ pub(in crate::analysis::decompile) fn exec_block_a32(
             lift.ex.lines.push(format!("// {c}"));
         }
         lift.ex.flags_needed = live.get(idx).copied().unwrap_or(u32::MAX);
-        lift.ex.regs_needed = facts
-            .need
-            .and_then(|n| n.get(idx))
-            .map(|after| needed_by(&*lift.ex.ctx, i, after));
+        match facts.need.and_then(|n| n.get(idx)) {
+            Some(need) => lift.ex.regs_needed.get_or_insert_default().clone_from(need),
+            None => lift.ex.regs_needed = None,
+        }
         let later = instrs.get(idx + 1..).unwrap_or(&[]);
         if guarded(i) && idx != 0 {
             lift.unmodeled(i);
@@ -225,19 +225,30 @@ pub(in crate::analysis::decompile) fn flags_read(i: &Insn) -> bool {
     flags::reads(i).is_some()
 }
 
-/// The registers needed while an instruction is lifted: those some later
-/// instruction reads, and those it reads itself.
+/// Returns the registers needed while each instruction of a block is
+/// lifted: those some later instruction reads, and those it reads itself.
 ///
 /// # Arguments
 ///
 /// * `ctx` - Per-function state.
-/// * `i` - The instruction.
-/// * `after` - The registers read after it, with their lanes.
-fn needed_by(ctx: &Ctx<'_>, i: &Insn, after: &FxHashMap<Key, u8>) -> FxHashMap<Key, u8> {
-    let mut need = after.clone();
-    for (k, lane) in effects(ctx, i).0 {
-        let held = need.entry(k).or_insert(lane);
-        *held = (*held).max(lane);
+/// * `instrs` - The block's instructions.
+/// * `out` - The registers read after the block, with their lanes.
+///
+/// # Returns
+///
+/// One map per instruction, of each needed register's lane.
+pub(in crate::analysis::decompile) fn need_after(
+    ctx: &Ctx<'_>,
+    instrs: &[Insn],
+    out: &FxHashMap<Key, u8>,
+) -> Vec<FxHashMap<Key, u8>> {
+    let effects: Vec<super::lift::Effects> = instrs.iter().map(|i| effects(ctx, i)).collect();
+    let mut need = super::lift::need_from(&effects, out);
+    for (n, (reads, _)) in need.iter_mut().zip(&effects) {
+        for &(k, lane) in reads {
+            let held = n.entry(k).or_insert(lane);
+            *held = (*held).max(lane);
+        }
     }
     need
 }
