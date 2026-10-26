@@ -767,6 +767,88 @@ fn pearson(salt: u8, a: u8, b: u8, c: u8) -> u8 {
     PEARSON[usize::from(PEARSON[usize::from(PEARSON[usize::from(salt ^ a)] ^ b)] ^ c)]
 }
 
+/// Window starts one stripe of [`striped_counts`] counts.
+const COUNT_STRIPE: usize = 1 << 20;
+
+/// Counts a histogram of every window over `data`, the windows in
+/// stripes across the cores.
+///
+/// Each stripe hands `count` the bytes of its windows, the `reach` bytes
+/// past its last start included, and the stripes' histograms are summed,
+/// so the answer is the one a single pass over `data` counts, at any
+/// thread count.
+///
+/// # Arguments
+///
+/// * `data` - The bytes counted.
+/// * `reach` - Bytes a window spans past its start; a window starts at
+///   every offset up to `data.len() - reach`.
+/// * `count` - Adds every whole window of a slice to a histogram.
+///
+/// # Returns
+///
+/// The histogram.
+fn striped_counts<const N: usize>(
+    data: &[u8],
+    reach: usize,
+    count: impl Fn(&[u8], &mut [u64; N]) + Sync,
+) -> [u64; N] {
+    let starts = data.len().saturating_sub(reach);
+    let stripes: Vec<usize> = (0..starts).step_by(COUNT_STRIPE).collect();
+    let one = |&from: &usize| {
+        let mut hist = [0u64; N];
+        let to = from
+            .saturating_add(COUNT_STRIPE)
+            .min(starts)
+            .saturating_add(reach);
+        count(data.get(from..to).unwrap_or_default(), &mut hist);
+        hist
+    };
+    let counted = crate::analysis::striped_with(&stripes, 2, || (), |(), s| one(s));
+    let mut total = [0u64; N];
+    for (from, hist) in stripes.iter().zip(counted) {
+        for (t, h) in total.iter_mut().zip(hist.unwrap_or_else(|| one(from))) {
+            *t = t.saturating_add(h);
+        }
+    }
+    total
+}
+
+/// Fewest bytes worth a second thread in [`paired`]: below it the passes
+/// take less time than the threads do to start.
+///
+/// Measured on `borer://hashes` over the first bytes of mshtml.dll: on
+/// threads 310 us against 205 us inline at 16 KiB, 355 us against 800 us
+/// at 64 KiB.
+const PAIRED_MIN: usize = 64 << 10;
+
+/// Runs two passes over the same bytes at once, `side` on a thread of its
+/// own ([`crate::analysis::beside`]), or one after the other on this thread
+/// when the bytes are fewer than [`PAIRED_MIN`].
+///
+/// # Arguments
+///
+/// * `len` - How many bytes the passes read.
+/// * `main` - The pass this thread runs.
+/// * `side` - The other pass; it runs here after `main` when its thread
+///   fails.
+///
+/// # Returns
+///
+/// Both passes' results.
+pub(crate) fn paired<M, S: Send>(
+    len: usize,
+    main: impl FnOnce() -> M,
+    side: impl Fn() -> S + Sync,
+) -> (M, S) {
+    if len < PAIRED_MIN {
+        let m = main();
+        return (m, side());
+    }
+    let (m, s) = crate::analysis::beside(main, &side);
+    (m, s.unwrap_or_else(&side))
+}
+
 /// The TLSH digest of a byte stream, as the reference computes it.
 ///
 /// Every five-byte window adds one to six of 256 buckets, picked by
@@ -791,24 +873,30 @@ pub fn tlsh(data: &[u8]) -> Option<Tlsh> {
         return None;
     }
     let len = u32::try_from(data.len()).ok()?;
-    let mut buckets = [0u64; 256];
-    let mut checksum = 0u8;
-    for window in data.windows(5) {
-        let &[a0, a1, a2, a3, a4] = window else {
-            continue;
-        };
-        checksum = pearson(1, a4, a3, checksum);
-        for (salt, b, c) in [
-            (49, a3, a2),
-            (12, a3, a1),
-            (178, a2, a1),
-            (166, a2, a0),
-            (84, a3, a0),
-            (230, a1, a0),
-        ] {
-            buckets[usize::from(pearson(salt, a4, b, c))] += 1;
+    let windows = |chunk: &[u8], buckets: &mut [u64; 256]| {
+        for window in chunk.windows(5) {
+            let &[a0, a1, a2, a3, a4] = window else {
+                continue;
+            };
+            for (salt, b, c) in [
+                (49, a3, a2),
+                (12, a3, a1),
+                (178, a2, a1),
+                (166, a2, a0),
+                (84, a3, a0),
+                (230, a1, a0),
+            ] {
+                buckets[usize::from(pearson(salt, a4, b, c))] += 1;
+            }
         }
-    }
+    };
+    let chained = || {
+        data.windows(5).fold(0u8, |checksum, window| match *window {
+            [_, _, _, a3, a4] => pearson(1, a4, a3, checksum),
+            _ => checksum,
+        })
+    };
+    let (buckets, checksum) = paired(data.len(), || striped_counts(data, 4, windows), chained);
     let counts = buckets.first_chunk::<128>()?;
     let mut sorted = *counts;
     sorted.sort_unstable();
@@ -999,17 +1087,19 @@ pub fn borer_lsh(data: &[u8]) -> Option<BorerLsh> {
     if data.is_empty() {
         return None;
     }
-    let mut checksum = 0u8;
-    for &b in data {
-        checksum = BUCKETS[usize::from(checksum ^ b)];
-    }
-    let mut counts = [0usize; 128];
-    let end = data.len().saturating_sub(3);
-    for (i, &left) in data.iter().enumerate().take(end) {
-        for salt in 1u8..=3 {
-            counts[bucket(salt, left, data[i + usize::from(salt)])] += 1;
+    let pairs = |chunk: &[u8], counts: &mut [u64; 128]| {
+        let end = chunk.len().saturating_sub(3);
+        for (i, &left) in chunk.iter().enumerate().take(end) {
+            for salt in 1u8..=3 {
+                counts[bucket(salt, left, chunk[i + usize::from(salt)])] += 1;
+            }
         }
-    }
+    };
+    let chained = || {
+        data.iter()
+            .fold(0u8, |checksum, &b| BUCKETS[usize::from(checksum ^ b)])
+    };
+    let (counts, checksum) = paired(data.len(), || striped_counts(data, 3, pairs), chained);
     let mut sorted = counts;
     sorted.sort_unstable();
     let (q1, q2, q3) = (sorted[32], sorted[64], sorted[96]);
@@ -1029,8 +1119,8 @@ pub fn borer_lsh(data: &[u8]) -> Option<BorerLsh> {
     Some(BorerLsh {
         checksum,
         len_bucket: u8::try_from(usize::BITS - 1 - data.len().leading_zeros()).unwrap_or(u8::MAX),
-        q1: u8::try_from(q1.min(usize::from(u8::MAX))).unwrap_or(u8::MAX),
-        q3: u8::try_from(q3.min(usize::from(u8::MAX))).unwrap_or(u8::MAX),
+        q1: u8::try_from(q1.min(u64::from(u8::MAX))).unwrap_or(u8::MAX),
+        q3: u8::try_from(q3.min(u64::from(u8::MAX))).unwrap_or(u8::MAX),
         levels,
     })
 }
@@ -1347,5 +1437,38 @@ mod tests {
         assert!(tlsh(&SMALL[..50]).is_some());
         assert!(tlsh(&[0u8; 4096]).is_none());
         assert!(tlsh(&b"ab".repeat(2048)).is_none());
+    }
+
+    /// Passes over fewer than [`PAIRED_MIN`] bytes both run on the calling
+    /// thread, with no thread started for them.
+    #[test]
+    fn small_inputs_are_paired_on_this_thread() {
+        let here = std::thread::current().id();
+        let (a, b) = paired(PAIRED_MIN - 1, || 1, || std::thread::current().id());
+        assert_eq!((a, b), (1, here));
+    }
+
+    /// A histogram counted in stripes is the one a single pass counts,
+    /// windows straddling every stripe boundary included.
+    #[test]
+    fn striped_counts_match_one_pass() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let data: Vec<u8> = (0..COUNT_STRIPE * 3 + 17)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x.to_le_bytes()[0]
+            })
+            .collect();
+        let pairs = |chunk: &[u8], hist: &mut [u64; 256]| {
+            for w in chunk.windows(3) {
+                hist[usize::from(w[0] ^ w[2])] += 1;
+            }
+        };
+        let mut one = [0u64; 256];
+        pairs(&data, &mut one);
+        assert_eq!(striped_counts(&data, 2, pairs), one);
+        assert_eq!(striped_counts(&data[..2], 2, pairs), [0; 256]);
     }
 }
