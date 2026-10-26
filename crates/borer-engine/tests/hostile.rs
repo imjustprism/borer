@@ -956,3 +956,40 @@ fn loading_a_real_binary_takes_heap_bounded_by_its_size() {
         "a {size} byte file took {extra} bytes of heap to load"
     );
 }
+
+/// Most heap an entropy scan of [`an_entropy_scan_stops_at_its_cap`]'s
+/// range may take: a few batches of windows, never one entry per window.
+const ENTROPY_SCAN_HEAP: usize = 8 << 20;
+
+/// An entropy scan of a long range stops at the region cap with bounded heap.
+///
+/// Every other 64-byte window of 32 MiB is random. The scan measured every
+/// window of the range before it applied the cap, so it took tens of
+/// megabytes to report the first 200 regions.
+#[test]
+fn an_entropy_scan_stops_at_its_cap() {
+    let _one = serial();
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let mut bytes = vec![0u8; 32 << 20];
+    for window in bytes.chunks_mut(128) {
+        for b in window.iter_mut().take(64) {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = x.to_le_bytes()[0];
+        }
+    }
+    let p = Program::raw(
+        bytes,
+        borer_engine::program::Arch::Unknown,
+        0,
+        None,
+        Vec::new(),
+    );
+    let (regions, extra) = measured(|| borer_engine::entropy::high_entropy_regions(&p, 64, 4.5));
+    assert_eq!(regions.len(), borer_engine::entropy::REGIONS_MAX);
+    assert!(
+        extra <= ENTROPY_SCAN_HEAP,
+        "the scan took {extra} bytes of heap to find its first regions"
+    );
+}

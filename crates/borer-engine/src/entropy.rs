@@ -89,6 +89,8 @@ pub struct Region {
     pub encoding: Option<Encoding>,
 }
 
+/// Bytes of windows one batch of [`scan`] measures before it merges them.
+const BATCH_BYTES: usize = 1 << 22;
 /// Hard cap on the number of regions [`high_entropy_regions`] reports.
 pub const REGIONS_MAX: usize = 200;
 /// Smallest window accepted by [`high_entropy_regions`], in bytes.
@@ -347,6 +349,11 @@ pub(crate) fn decode(text: &[u8], encoding: Encoding, mut emit: impl FnMut(u8)) 
 
 /// Scans one run of file bytes and appends its high-entropy regions.
 ///
+/// The chunks' entropies are measured across the cores a batch of
+/// [`BATCH_BYTES`] at a time, then merged in order, so the regions are the
+/// ones a single pass finds, and a run that reaches [`REGIONS_MAX`] early
+/// measures at most one batch past it.
+///
 /// The bytes after the last whole window are a chunk of their own, judged
 /// over the last `window` bytes of the run (the whole run when it is
 /// shorter), so their entropy is measured on as many samples as a whole
@@ -377,24 +384,35 @@ fn scan(
     let whole = data.chunks_exact(window);
     let cut = whole.remainder().len();
     let last = (cut > 0).then(|| (cut, &data[data.len().saturating_sub(window)..]));
+    let mut windows = whole.map(|c| (window, c)).chain(last);
+    let per = (BATCH_BYTES / window).max(1);
     let mut open: Option<(u64, u64, f64, u32)> = None;
-    for (i, (len, chunk)) in (0u64..).zip(whole.map(|c| (window, c)).chain(last)) {
-        let e = shannon(chunk);
-        let len = from_usize(len);
-        if e >= threshold {
-            match open.as_mut() {
-                Some((_, total, sum, n)) => {
-                    *total += len;
-                    *sum += e;
-                    *n += 1;
+    let mut i = 0u64;
+    loop {
+        let batch: Vec<(usize, &[u8])> = windows.by_ref().take(per).collect();
+        if batch.is_empty() {
+            break;
+        }
+        let measured = crate::analysis::striped(&batch, |&(_, chunk)| shannon(chunk));
+        for (&(len, chunk), e) in batch.iter().zip(measured) {
+            let e = e.unwrap_or_else(|| shannon(chunk));
+            let len = from_usize(len);
+            if e >= threshold {
+                match open.as_mut() {
+                    Some((_, total, sum, n)) => {
+                        *total += len;
+                        *sum += e;
+                        *n += 1;
+                    }
+                    None => open = Some((off + i * step, len, e, 1)),
                 }
-                None => open = Some((off + i * step, len, e, 1)),
+            } else if let Some(r) = open.take() {
+                regions.push(close(r, &va_of));
+                if regions.len() >= REGIONS_MAX {
+                    return true;
+                }
             }
-        } else if let Some(r) = open.take() {
-            regions.push(close(r, &va_of));
-            if regions.len() >= REGIONS_MAX {
-                return true;
-            }
+            i += 1;
         }
     }
     if let Some(r) = open {
