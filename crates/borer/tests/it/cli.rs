@@ -8,13 +8,18 @@
 use std::process::{Command, Output};
 use std::sync::{Condvar, Mutex, PoisonError};
 
-/// Children the tests run at once.
+/// Returns how many children the tests run at once: one per four cores,
+/// at least two.
 ///
-/// Most commands analyze borer's own debug build: about 400 MB and every
-/// core for a few seconds each. Cargo runs the tests on as many threads as
-/// the machine has cores, so without a bound a 16-core machine ran sixteen
-/// such children at once, and two gates side by side stalled it.
-const CHILDREN_MAX: usize = 2;
+/// Most commands analyze borer's own debug build: about 400 MB and four
+/// cores for a few seconds each. Cargo runs the tests on as many threads
+/// as the machine has cores, so without a bound a 16-core machine ran
+/// sixteen such children at once, and two gates side by side stalled it;
+/// the gate now runs one at a time on a machine, and a bound of two left
+/// half of a 16-core machine idle for the minutes these tests take.
+fn children_max() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| (n.get() / 4).max(2))
+}
 
 /// How many children are running now.
 static RUNNING: Mutex<usize> = Mutex::new(0);
@@ -26,7 +31,7 @@ static FINISHED: Condvar = Condvar::new();
 struct Slot;
 
 impl Slot {
-    /// Waits until fewer than [`CHILDREN_MAX`] children run, then takes a
+    /// Waits until fewer than [`children_max`] children run, then takes a
     /// permit.
     ///
     /// # Returns
@@ -34,7 +39,8 @@ impl Slot {
     /// The permit; hold it until the child has exited.
     fn take() -> Slot {
         let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
-        while *running >= CHILDREN_MAX {
+        let most = children_max();
+        while *running >= most {
             running = FINISHED
                 .wait(running)
                 .unwrap_or_else(PoisonError::into_inner);
