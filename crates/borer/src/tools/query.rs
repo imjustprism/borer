@@ -247,6 +247,14 @@ mod tests {
     /// one build must not land at the same addresses of the next one,
     /// where other code sits.
     ///
+    /// The threads meet through the server's own locks, never a clock. The
+    /// test holds the overlay's write lock, so the script, once it holds the
+    /// first program (its count of holders rises), waits to snapshot the
+    /// overlay; the second load then takes the program's write lock and
+    /// waits for the overlay too. Letting go of the overlay lets both on:
+    /// the script's run ends whichever goes first, and its edit reads the
+    /// program after the load has put the second one in place.
+    ///
     /// # Panics
     ///
     /// When the new program's overlay holds the script's name.
@@ -263,19 +271,33 @@ mod tests {
         let server = crate::BorerServer::default();
         let load = |path: &std::path::Path| load_raw(&server, path, "0x10000");
         load(&one).expect("the first program loads");
+        let first = server
+            .require_loaded()
+            .expect("the first program is loaded");
+        let holders = std::sync::Arc::strong_count(&first);
+        let held = crate::state::write_lock(&server.overlay);
         std::thread::scope(|s| {
             let ran = s.spawn(|| {
                 server.script(Parameters(ScriptParams {
-                    code:
-                        r#"let n = 0; while n < 3000000 { n += 1; } rename(0x10000, "from_one");"#
-                            .to_owned(),
+                    code: r#"rename(0x10000, "from_one");"#.to_owned(),
                     dry_run: Some(false),
                 }))
             });
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            load(&two).expect("the second program loads");
+            while std::sync::Arc::strong_count(&first) <= holders && !ran.is_finished() {
+                std::thread::yield_now();
+            }
+            let loads = s.spawn(|| load(&two));
+            while server.program.try_read().is_ok() && !loads.is_finished() {
+                std::thread::yield_now();
+            }
+            drop(held);
+            loads
+                .join()
+                .expect("the load ends")
+                .expect("the second program loads");
             let said = ran.join().expect("the script ends").expect("it answers");
             assert!(said.contains("from_one"), "{said}");
+            assert!(said.contains("no longer the loaded binary"), "{said}");
         });
         let names = crate::state::read_lock(&server.overlay).names.clone();
         std::fs::remove_dir_all(&dir).expect("cleans up");
