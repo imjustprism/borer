@@ -719,22 +719,19 @@ impl WalkState<'_> {
         let mut incomplete = false;
         for _ in 0..SPLIT_ROUNDS_MAX {
             let covered = self.take_covered();
-            let mut targets: Vec<u64> = self
+            let mut seeds: Vec<u64> = self
                 .xrefs
                 .iter()
                 .filter(|(_, sites)| sites.iter().any(|s| s.kind != RefKind::Index))
                 .map(|(&t, _)| t)
-                .collect();
-            targets.sort_unstable();
-            let seeds: Vec<u64> = targets
-                .into_iter()
                 .filter(|&t| {
                     crate::analysis::is_executable_va(program, t)
                         && !covered.contains(t)
                         && self.fresh(t)
                 })
-                .take(SEEDS_MAX)
                 .collect();
+            seeds.sort_unstable();
+            seeds.truncate(SEEDS_MAX);
             self.covered = Some(covered);
             if seeds.is_empty() {
                 break;
