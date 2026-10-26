@@ -1024,8 +1024,9 @@ impl<'scope> Lanes<'scope> {
         lanes
     }
 
-    /// Walks a batch across the first `threads` lanes, lane `t` taking the
-    /// entries at `t`, `t + threads`, and so on, each from `budget`.
+    /// Hands a batch to the first `threads` lanes, lane `t` taking the
+    /// entries at `t`, `t + threads`, and so on, each from `budget`; a lane
+    /// still walking an earlier batch takes it up when that one is done.
     ///
     /// # Arguments
     ///
@@ -1035,11 +1036,9 @@ impl<'scope> Lanes<'scope> {
     ///
     /// # Returns
     ///
-    /// One walk per entry, `None` where a lane failed, and the budget the
-    /// lanes spent.
-    fn walk(&self, batch: &[u64], threads: usize, budget: u64) -> (Vec<Option<Walked>>, u64) {
-        let sent: Vec<bool> = self
-            .lanes
+    /// Per lane, whether it took its stripe.
+    fn send(&self, batch: &[u64], threads: usize, budget: u64) -> Vec<bool> {
+        self.lanes
             .iter()
             .take(threads)
             .enumerate()
@@ -1047,14 +1046,35 @@ impl<'scope> Lanes<'scope> {
                 let entries = batch.iter().copied().skip(t).step_by(threads).collect();
                 lane.stripe.send((entries, budget)).is_ok()
             })
-            .collect();
-        let mut slots: Vec<Option<Walked>> = (0..batch.len()).map(|_| None).collect();
-        let mut spent = 0u64;
-        for ((t, lane), sent) in self.lanes.iter().enumerate().zip(sent) {
+            .collect()
+    }
+
+    /// Takes back the walks of the batch [`Lanes::send`] handed out longest
+    /// ago.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` - The batch's length.
+    /// * `threads` - The lanes it went to.
+    /// * `sent` - Per lane, whether it took its stripe.
+    ///
+    /// # Returns
+    ///
+    /// One walk per entry, `None` where a lane failed, and per lane the
+    /// budget it spent, `None` for one that failed.
+    fn recv(
+        &self,
+        len: usize,
+        threads: usize,
+        sent: &[bool],
+    ) -> (Vec<Option<Walked>>, Vec<Option<u64>>) {
+        let mut slots: Vec<Option<Walked>> = (0..len).map(|_| None).collect();
+        let mut spent = vec![None; sent.len()];
+        for ((t, lane), &sent) in self.lanes.iter().enumerate().zip(sent) {
             let Some(Ok((walked, used))) = sent.then(|| lane.walked.recv()) else {
                 continue;
             };
-            spent = spent.saturating_add(used);
+            spent[t] = Some(used);
             for (slot, w) in slots.iter_mut().skip(t).step_by(threads).zip(walked) {
                 *slot = Some(w);
             }
@@ -2300,6 +2320,75 @@ mod tests {
             );
             assert_eq!(leaf.callers, [0x1000]);
         }
+    }
+
+    /// A batch the lanes walk while the one before still commits gets the
+    /// budget that one left, not the one it was handed.
+    ///
+    /// Three hundred leaves each jump into one shared run of thirty
+    /// thousand `nop`s, so every walk decodes it again and the first batch
+    /// spends all but eighty thousand of the two million instructions: each
+    /// lane of the second batch then walks two leaves whole and a third in
+    /// part, and the batches after it nothing. A lane that spent the budget
+    /// it was handed would walk its whole stripe.
+    ///
+    /// # Panics
+    ///
+    /// When the second batch walks more or less than its due.
+    #[test]
+    fn a_batch_walked_ahead_spends_only_what_is_left() {
+        /// Leaves the entry calls.
+        const LEAVES: u32 = 300;
+        /// Where the first leaf starts; each is one five-byte `jmp`.
+        const LEAF_BASE: u32 = 0x1800;
+        /// Where the shared run of `nop`s starts.
+        const SLED: u32 = 0x2000;
+        /// `nop`s in the run.
+        const NOPS: usize = 30_000;
+        let lanes = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if !(2..=21).contains(&lanes) {
+            return;
+        }
+        let mut code = Vec::new();
+        for i in 0..LEAVES {
+            let next = 0x1000 + 5 * (i + 1);
+            code.push(0xe8); // ASM: call leaf
+            code.extend_from_slice(&(LEAF_BASE + 5 * i).wrapping_sub(next).to_le_bytes());
+        }
+        code.push(0xc3); // ASM: ret
+        code.resize(usize::try_from(LEAF_BASE - 0x1000).expect("fits"), 0xcc);
+        for i in 0..LEAVES {
+            code.push(0xe9); // ASM: jmp sled
+            code.extend_from_slice(&SLED.wrapping_sub(LEAF_BASE + 5 * (i + 1)).to_le_bytes());
+        }
+        code.resize(usize::try_from(SLED - 0x1000).expect("fits"), 0xcc);
+        code.resize(code.len() + NOPS, 0x90); // ASM: nop
+        code.push(0xc3); // ASM: ret
+        let size = u64::try_from(code.len()).expect("fits");
+        let mut bytes = vec![0u8; 0x1000];
+        bytes.extend_from_slice(&code);
+        let text = Section::mapped(".text", 0x1000, 0x1000, size, false, true);
+        let a = Analysis::compute(&Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![text],
+        ));
+        let leaf = |f: &&crate::analysis::Function| {
+            (u64::from(LEAF_BASE)..u64::from(LEAF_BASE + 5 * LEAVES)).contains(&f.entry)
+        };
+        let whole = a
+            .functions
+            .iter()
+            .filter(leaf)
+            .filter(|f| f.instr_count == NOPS + 2);
+        let part = a
+            .functions
+            .iter()
+            .filter(leaf)
+            .filter(|f| f.instr_count < NOPS + 2);
+        assert_eq!((whole.count(), part.count()), (64 + 2 * lanes, lanes));
     }
 
     /// Discovery's lists hold what they hold and no spare room.
