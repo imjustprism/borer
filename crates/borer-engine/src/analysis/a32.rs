@@ -1266,32 +1266,54 @@ impl Walks<'_> {
         data: &mut BTreeMap<u64, (u64, bool)>,
         w: &Walked,
     ) {
-        let mut stretches = Vec::new();
         for i in w.seen.values() {
             covered.insert(i.va, (i.next(), true));
-            if let Some(lit) = i.literal() {
-                let len = if matches!(i.op, Op::LoadDual { .. }) {
-                    8
-                } else {
-                    4
-                };
-                stretches.push(lit..lit + len);
-            }
         }
-        stretches.extend(w.tables.iter().map(|t| t.bytes.clone()));
-        for r in stretches {
+        for r in Self::stretches(w) {
             covered.entry(r.start).or_insert((r.end, false));
             data.insert(r.start, (r.end, false));
         }
     }
 
+    /// Returns the data a walk reads: the literals its instructions load,
+    /// in address order, then its jump tables.
+    ///
+    /// # Arguments
+    ///
+    /// * `w` - The walk.
+    fn stretches(w: &Walked) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
+        w.seen
+            .values()
+            .filter_map(|i| {
+                let len = if matches!(i.op, Op::LoadDual { .. }) {
+                    8
+                } else {
+                    4
+                };
+                i.literal().map(|lit| lit..lit + len)
+            })
+            .chain(w.tables.iter().map(|t| t.bytes.clone()))
+    }
+
     /// Marks covered again what the walks hold, after some were dropped.
+    ///
+    /// The maps come out as [`Walks::mark`] over every walk in entry order
+    /// leaves them, built in one pass: at an address an instruction lies
+    /// at, the last walk's instruction; elsewhere the first literal or
+    /// table; in [`Walks::data`], the last.
     fn cover(&mut self) {
-        self.covered.clear();
-        self.data.clear();
+        let mut insns: Vec<(u64, (u64, bool))> = Vec::new();
+        let mut stretches: Vec<(u64, (u64, bool))> = Vec::new();
         for w in self.walked.values() {
-            Self::mark(&mut self.covered, &mut self.data, w);
+            insns.extend(w.seen.values().map(|i| (i.va, (i.next(), true))));
+            stretches.extend(Self::stretches(w).map(|r| (r.start, (r.end, false))));
         }
+        let mut first = stretches.clone();
+        first.sort_by_key(|s| s.0);
+        first.dedup_by_key(|s| s.0);
+        first.extend(insns);
+        self.covered = first.into_iter().collect();
+        self.data = stretches.into_iter().collect();
     }
 }
 
