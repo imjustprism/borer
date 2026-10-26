@@ -23,6 +23,7 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
     let mut ptrs: Vec<(String, &'static str)> = Vec::new();
     let mut arrays: Vec<(String, u64)> = Vec::new();
     let mut bools: Vec<String> = Vec::new();
+    let index = LocalLines::of(lines);
     for line in lines.iter() {
         if line.contains("//") {
             continue;
@@ -34,9 +35,10 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
         {
             for name in names.split(", ").map(str::trim) {
                 if name.starts_with("local_") {
-                    if let Some(ty) = local_api_pointer(lines, name) {
+                    let at = index.on(lines, name);
+                    if let Some(ty) = local_api_pointer(lines, &at, name) {
                         ptrs.push((name.to_owned(), ty));
-                    } else if let Some(span) = byte_buffer_local_span(lines, name) {
+                    } else if let Some(span) = byte_buffer_local_span(lines, &index, &at, name) {
                         arrays.push((name.to_owned(), span));
                     }
                 }
@@ -46,7 +48,7 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
             .and_then(|r| r.strip_suffix(';'))
         {
             for name in names.split(", ").map(str::trim) {
-                if is_bool_local(lines, name) {
+                if is_bool_local(lines, &index.on(lines, name), name) {
                     bools.push(name.to_owned());
                 }
             }
@@ -68,11 +70,14 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
             if name.starts_with("local_")
                 && !ptrs.iter().any(|(n, _)| n == name)
                 && !arrays.iter().any(|(n, _)| n == name)
-                && let Some(ty) = local_copy_pointer(lines, name, &ptrs).or_else(|| {
-                    sig_changed
-                        .then(|| local_api_pointer(lines, name))
-                        .flatten()
-                })
+                && let Some(ty) = {
+                    let at = index.on(lines, name);
+                    local_copy_pointer(lines, &at, name, &ptrs).or_else(|| {
+                        sig_changed
+                            .then(|| local_api_pointer(lines, &at, name))
+                            .flatten()
+                    })
+                }
             {
                 ptrs.push((name.to_owned(), ty));
             }
@@ -83,6 +88,94 @@ pub(in crate::analysis::decompile) fn refine_locals(lines: &mut Vec<String>) -> 
     }
     rewrite_local_declarations(lines, &ptrs, &arrays, &bools);
     true
+}
+
+/// Where the stack locals of a text appear, read once for all of them.
+///
+/// [`refine_locals`] reads every line that names each `local_` variable,
+/// which a scan of the whole text for each found at the cost of the text
+/// times its locals. Every line holding the text `local_x` holds it as
+/// the start of a run of identifier characters after a `local_`, so the
+/// lines of every such run beginning with `local_x` are all the lines that
+/// hold it, words or not.
+#[derive(Debug, Default)]
+struct LocalLines {
+    /// Each run of identifier characters starting at a `local_`, with the
+    /// lines it is on, ascending.
+    runs: BTreeMap<String, Vec<usize>>,
+    /// The frame offset of each `local_<hex>` the declarations declare,
+    /// ascending.
+    declared: Vec<u64>,
+}
+
+impl LocalLines {
+    /// Indexes a text.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The function, header lines included.
+    fn of(lines: &[String]) -> Self {
+        let mut index = Self::default();
+        for (k, line) in lines.iter().enumerate() {
+            for (at, _) in line.match_indices("local_") {
+                let rest = line.get(at..).unwrap_or_default();
+                let end = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
+                let on = index
+                    .runs
+                    .entry(rest.get(..end).unwrap_or(rest).to_owned())
+                    .or_default();
+                if on.last() != Some(&k) {
+                    on.push(k);
+                }
+            }
+        }
+        index.declared = lines
+            .iter()
+            .filter(|l| is_declaration(l))
+            .flat_map(|l| {
+                l.trim_end_matches(';')
+                    .split_once(' ')
+                    .map_or("", |(_, names)| names)
+                    .split(", ")
+                    .filter_map(|n| {
+                        n.trim()
+                            .trim_start_matches('*')
+                            .split('[')
+                            .next()?
+                            .strip_prefix("local_")
+                            .and_then(|s| u64::from_str_radix(s, 16).ok())
+                    })
+            })
+            .collect();
+        index.declared.sort_unstable();
+        index
+    }
+
+    /// The lines that hold `name` anywhere in their text.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The lines indexed.
+    /// * `name` - A variable's name.
+    ///
+    /// # Returns
+    ///
+    /// Their indices, ascending; every line's when `name` is not a
+    /// `local_` identifier.
+    fn on(&self, lines: &[String], name: &str) -> Vec<usize> {
+        if !name.starts_with("local_") || !name.chars().all(is_ident_char) {
+            return (0..lines.len()).collect();
+        }
+        let mut at: Vec<usize> = self
+            .runs
+            .range::<str, _>((std::ops::Bound::Included(name), std::ops::Bound::Unbounded))
+            .take_while(|(run, _)| run.starts_with(name))
+            .flat_map(|(_, on)| on.iter().copied())
+            .collect();
+        at.sort_unstable();
+        at.dedup();
+        at
+    }
 }
 
 /// Replaces refined local variable names in declaration lines and splices their
@@ -191,29 +284,20 @@ fn propagate_char_ptr_params(lines: &mut [String], ptrs: &[(String, &'static str
 
 /// Returns the stack byte span of `name` when it is an address-only stack buffer
 /// passed to a call alongside a buffer length fitting its stack span.
-fn byte_buffer_local_span(lines: &[String], name: &str) -> Option<u64> {
+fn byte_buffer_local_span(
+    lines: &[String],
+    index: &LocalLines,
+    at: &[usize],
+    name: &str,
+) -> Option<u64> {
     let base = name
         .strip_prefix("local_")
         .and_then(|s| u64::from_str_radix(s, 16).ok())?;
-    let top = lines
-        .iter()
-        .filter(|l| is_declaration(l))
-        .flat_map(|l| {
-            l.trim_end_matches(';')
-                .split_once(' ')
-                .map_or("", |(_, names)| names)
-                .split(", ")
-                .filter_map(|n| {
-                    n.trim()
-                        .trim_start_matches('*')
-                        .split('[')
-                        .next()?
-                        .strip_prefix("local_")
-                        .and_then(|s| u64::from_str_radix(s, 16).ok())
-                })
-        })
-        .filter(|&d| d < base)
-        .max()
+    let below = index.declared.partition_point(|&d| d < base);
+    let top = below
+        .checked_sub(1)
+        .and_then(|k| index.declared.get(k))
+        .copied()
         .unwrap_or(0);
     let span = base.saturating_sub(top);
     if span < 16 {
@@ -221,8 +305,9 @@ fn byte_buffer_local_span(lines: &[String], name: &str) -> Option<u64> {
     }
     let mut sized_call = false;
     let mut seen = false;
-    for line in lines
+    for line in at
         .iter()
+        .filter_map(|&k| lines.get(k))
         .filter(|l| !l.starts_with("//") && !is_declaration(l))
     {
         for at in word_positions(line, name) {
@@ -255,21 +340,19 @@ fn byte_buffer_local_span(lines: &[String], name: &str) -> Option<u64> {
 /// # Arguments
 ///
 /// * `lines` - The function, header lines included.
+/// * `at` - The lines that hold `name` ([`LocalLines::on`]).
 /// * `name` - The stack local's name.
-fn local_api_pointer(lines: &[String], name: &str) -> Option<&'static str> {
+fn local_api_pointer(lines: &[String], at: &[usize], name: &str) -> Option<&'static str> {
     let mut found: Option<&'static str> = None;
     let mut byte_step = false;
     let amp = format!("&{name}");
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
+    let on = || at.iter().filter_map(|&k| Some((k, lines.get(k)?)));
+    for (_, line) in on().filter(|(_, l)| !l.starts_with("//")) {
         if line.contains(&amp) {
             return None;
         }
     }
-    for (before, line) in lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| !l.starts_with("//") && !is_declaration(l))
-    {
+    for (before, line) in on().filter(|(_, l)| !l.starts_with("//") && !is_declaration(l)) {
         let stmt = line.trim().strip_suffix(';').unwrap_or("");
         let parts: Vec<&str> = stmt.split(" = ").collect();
         let is_chain_write = parts.len() >= 2
@@ -328,7 +411,7 @@ fn local_api_pointer(lines: &[String], name: &str) -> Option<&'static str> {
     }
     if found.is_none()
         && byte_step
-        && lines.iter().any(|l| {
+        && on().any(|(_, l)| {
             !l.starts_with("//")
                 && (l.contains(&format!("*(uint8_t*){name}"))
                     || l.contains(&format!("*(int8_t*){name}")))
@@ -760,22 +843,17 @@ fn ternary_arms<'a>(l: &Line<'a>) -> Option<(&'a str, &'a str)> {
 /// * `ptrs` - Stack locals already resolved to library pointer types.
 fn local_copy_pointer(
     lines: &[String],
+    at: &[usize],
     name: &str,
     ptrs: &[(String, &'static str)],
 ) -> Option<&'static str> {
-    if lines
-        .iter()
-        .any(|l| !l.starts_with("//") && l.contains(&format!("&{name}")))
-    {
+    let on = || at.iter().filter_map(|&k| Some((k, lines.get(k)?)));
+    if on().any(|(_, l)| !l.starts_with("//") && l.contains(&format!("&{name}"))) {
         return None;
     }
     let mut found: Option<&'static str> = None;
     let mut byte_step = false;
-    for (before, line) in lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| !l.starts_with("//") && !is_declaration(l))
-    {
+    for (before, line) in on().filter(|(_, l)| !l.starts_with("//") && !is_declaration(l)) {
         let stmt = line.trim().strip_suffix(';').unwrap_or("");
         let parts: Vec<&str> = stmt.split(" = ").collect();
         let is_chain_write = parts.len() >= 2
@@ -859,14 +937,15 @@ fn local_copy_pointer(
 ///
 /// * `lines` - The function, header lines included.
 /// * `name` - The local's name.
-fn is_bool_local(lines: &[String], name: &str) -> bool {
+fn is_bool_local(lines: &[String], at: &[usize], name: &str) -> bool {
     if !name.starts_with("local_") {
         return false;
     }
     let (mut zero, mut one, mut rel_write, mut reads) = (false, false, false, 0usize);
     let mut all_reads_zero_test = true;
-    for line in lines
+    for line in at
         .iter()
+        .filter_map(|&k| lines.get(k))
         .filter(|l| !l.starts_with("//") && !is_declaration(l))
     {
         let positions = word_positions(line, name);
@@ -970,7 +1049,41 @@ fn is_bool_expr(rhs: &str) -> bool {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::refine_locals;
+    use super::{LocalLines, refine_locals};
+
+    /// A stack local is indexed on every line that holds its name.
+    ///
+    /// That is inside a longer word too, and on no other line; a name that
+    /// is no `local_` identifier gets every line, and the declared offsets
+    /// are read in order.
+    #[test]
+    fn a_local_is_found_on_every_line_that_holds_it() {
+        let text: Vec<String> = [
+            "uint64_t local_10, local_18;",
+            "local_10 = 1;",
+            "x = mylocal_10 + local_100;",
+            "y = local_18;",
+            "// local_1",
+            "z = &local_1;",
+        ]
+        .map(str::to_owned)
+        .into();
+        let index = LocalLines::of(&text);
+        for name in [
+            "local_1",
+            "local_10",
+            "local_18",
+            "local_100",
+            "local_2",
+            "local_1 0",
+        ] {
+            let all: Vec<usize> = (0..text.len())
+                .filter(|&k| name.contains(' ') || text[k].contains(name))
+                .collect();
+            assert_eq!(index.on(&text, name), all, "{name}");
+        }
+        assert_eq!(index.declared, [0x10, 0x18]);
+    }
 
     /// Stack locals take `bool` and `char*` when their writes and reads
     /// agree, cyclic copy chains stop at a bounded depth, and integer reads,
