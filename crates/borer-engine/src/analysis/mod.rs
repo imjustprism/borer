@@ -1632,26 +1632,18 @@ impl Analysis {
     /// Each function's list is the targets it references, in site order,
     /// with the index of that site in the target's list.
     pub(crate) fn index_refs(&mut self) {
-        let mut by_function: BTreeMap<u64, Vec<(u64, u64, usize)>> = BTreeMap::new();
-        for (&target, sites) in &self.xrefs {
-            for (i, site) in sites.iter().enumerate() {
-                if let Some(entry) = site.from_entry {
-                    by_function
-                        .entry(entry)
-                        .or_default()
-                        .push((site.va, target, i));
-                }
-            }
-        }
-        self.refs_by_function = by_function
-            .into_iter()
-            .map(|(entry, mut list)| {
-                list.sort_unstable();
-                (
-                    entry,
-                    list.into_iter().map(|(_, target, i)| (target, i)).collect(),
-                )
+        let mut all: Vec<(u64, u64, u64, usize)> = self
+            .xrefs
+            .iter()
+            .flat_map(|(&target, sites)| {
+                let from = move |(i, s): (usize, &RefSite)| Some((s.from_entry?, s.va, target, i));
+                sites.iter().enumerate().filter_map(from)
             })
+            .collect();
+        all.sort_unstable();
+        self.refs_by_function = all
+            .chunk_by(|a, b| a.0 == b.0)
+            .filter_map(|run| Some((run.first()?.0, run.iter().map(|r| (r.2, r.3)).collect())))
             .collect();
     }
 
