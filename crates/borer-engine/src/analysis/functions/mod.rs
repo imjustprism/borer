@@ -1861,7 +1861,7 @@ fn build_blocks(
                 start: addr,
                 end: rec.next,
                 term: BlockTerm::Fall,
-                successors: Vec::new(),
+                successors: smallvec::SmallVec::new(),
             });
         }
         let Some(block) = current.as_mut() else {
@@ -1870,7 +1870,7 @@ fn build_blocks(
         block.end = rec.next;
         match rec.flow {
             FlowControl::Next if tail_nops.contains(&addr) => {
-                block.successors.retain(|&s| s != addr);
+                block.successors.retain(|s| *s != addr);
             }
             FlowControl::Next => {}
             FlowControl::ConditionalBranch => {
@@ -2314,7 +2314,10 @@ mod tests {
         assert_eq!(entry.blocks.len(), 4, "{:?}", entry.blocks);
         assert_eq!(entry.blocks.capacity(), entry.blocks.len());
         for b in &entry.blocks {
-            assert_eq!(b.successors.capacity(), b.successors.len(), "{b:?}");
+            assert!(
+                !b.successors.spilled() || b.successors.capacity() == b.successors.len(),
+                "{b:?}"
+            );
         }
         let sites = a.xrefs.get(&0x1010).expect("the callee is referenced");
         assert_eq!((sites.len(), sites.capacity()), (1, 1));

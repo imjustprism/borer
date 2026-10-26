@@ -597,7 +597,7 @@ mod tests {
             start: s.start,
             end: s.end,
             term: BlockTerm::Fall,
-            successors: Vec::new(),
+            successors: smallvec::SmallVec::new(),
         };
         let mut grown = Covered::from_spans(first.iter().copied());
         let top = first.iter().map(|s| s.end).max().unwrap_or(0);

@@ -1358,7 +1358,7 @@ mod tests {
             start,
             end,
             term: BlockTerm::Ret,
-            successors: Vec::new(),
+            successors: smallvec::SmallVec::new(),
         };
         let mut main = bare(0x1000, None);
         main.blocks = vec![block(0x1000, 0x1008)];

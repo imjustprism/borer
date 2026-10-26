@@ -2821,16 +2821,16 @@ fn main_blocks_and_terminators() {
     assert_eq!(starts, vec![0x1000, 0x1005, 0x1009, 0x100e]);
 
     assert_eq!(main.blocks[0].term.name(), "call");
-    assert_eq!(main.blocks[0].successors, vec![0x1005]);
+    assert_eq!(main.blocks[0].successors[..], [0x1005]);
 
     let b1 = &main.blocks[1];
     assert_eq!(b1.term.name(), "cond");
-    let mut succ: Vec<u64> = b1.successors.clone();
+    let mut succ: Vec<u64> = b1.successors.to_vec();
     succ.sort_unstable();
     assert_eq!(succ, vec![0x1009, 0x100e]);
 
     assert_eq!(main.blocks[2].term.name(), "call");
-    assert_eq!(main.blocks[2].successors, vec![0x100e]);
+    assert_eq!(main.blocks[2].successors[..], [0x100e]);
     assert_eq!(main.blocks[3].term.name(), "ret");
     assert!(main.blocks[3].successors.is_empty());
     assert_eq!(main.instr_count, 6);

@@ -206,7 +206,7 @@ mod tests {
                 start,
                 end,
                 term: BlockTerm::Fall,
-                successors: Vec::new(),
+                successors: smallvec::SmallVec::new(),
             })
             .collect()
     }

@@ -874,7 +874,7 @@ fn blocks(
                 start: i.va,
                 end: next,
                 term: BlockTerm::Fall,
-                successors: Vec::new(),
+                successors: smallvec::SmallVec::new(),
             });
         }
         let Some(b) = current.as_mut() else {

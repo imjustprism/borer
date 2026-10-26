@@ -2087,7 +2087,7 @@ fn jump_tables_of_three_styles_have_their_cases_walked() {
         .find(|b| b.end == TEXT + 0xf0)
         .expect("the dispatch block");
     assert_eq!(
-        (dispatch.term, dispatch.successors.clone()),
+        (dispatch.term, dispatch.successors.to_vec()),
         (BlockTerm::Indirect, at(&[0xf0, 0xf8, 0x100, 0x108]))
     );
     assert!(

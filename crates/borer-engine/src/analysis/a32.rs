@@ -1039,7 +1039,7 @@ fn assemble(entry: u64, w: &Walked) -> (Function, Vec<(u64, u64, RefKind)>) {
             succs.push(next);
         }
         b.term = term;
-        b.successors = succs;
+        b.successors = succs.into();
         blocks.push(b.clone());
     };
     for i in &insns {
@@ -1054,7 +1054,7 @@ fn assemble(entry: u64, w: &Walked) -> (Function, Vec<(u64, u64, RefKind)>) {
                 start: i.va,
                 end: i.next(),
                 term: BlockTerm::Fall,
-                successors: Vec::new(),
+                successors: smallvec::SmallVec::new(),
             });
         }
         if let Some(b) = current.as_mut() {

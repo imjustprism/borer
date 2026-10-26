@@ -110,8 +110,10 @@ pub struct BasicBlock {
     pub end: u64,
     /// How the block ends.
     pub term: BlockTerm,
-    /// Start addresses of successor blocks.
-    pub successors: Vec<u64>,
+    /// Start addresses of successor blocks, held in the block for up to
+    /// two: all but a switch's have at most two, and a heap list each cost
+    /// more than the block on a binary of millions of blocks.
+    pub successors: smallvec::SmallVec<[u64; 2]>,
 }
 
 /// Where a function's name came from.
