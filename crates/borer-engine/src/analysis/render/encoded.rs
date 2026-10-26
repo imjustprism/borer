@@ -80,19 +80,39 @@ fn reading(bytes: &[u8]) -> Option<String> {
     ))
 }
 
-/// Lists the base64 and hexadecimal strings in the image whose decoded
+/// One base64 or hexadecimal string of the image whose decoded bytes are
+/// text or a known file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedString {
+    /// Address of its first character.
+    pub va: u64,
+    /// The encoding its shape fits.
+    pub encoding: Encoding,
+    /// Its length in characters.
+    pub len: usize,
+    /// What the decoded bytes read as, as a row shows it.
+    pub value: String,
+    /// The decoded bytes as text, lower-cased: what a filter is matched
+    /// against.
+    pub folded: String,
+}
+
+/// Finds the base64 and hexadecimal strings in the image whose decoded
 /// bytes are text or a known file.
+///
+/// A filter is applied to them afterwards ([`encoded_strings_tsv`]), so
+/// the walk over every section is done once whatever the filter.
 ///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
-/// * `filter` - Text the decoded value must contain, ignoring case; empty
-///   keeps every row.
+///
+/// # Returns
+///
+/// The strings in section then address order.
 #[must_use]
-pub fn encoded_strings_tsv(p: &Program, filter: &str) -> String {
-    let want = filter.to_lowercase();
-    let mut rows: Vec<String> = Vec::new();
-    let mut total = 0usize;
+pub fn encoded_strings(p: &Program) -> Vec<EncodedString> {
+    let mut found = Vec::new();
     for s in &p.sections {
         let Some(data) = p.section_bytes(s) else {
             continue;
@@ -116,22 +136,47 @@ pub fn encoded_strings_tsv(p: &Program, filter: &str) -> String {
             let Some(value) = reading(&bytes) else {
                 continue;
             };
-            if !want.is_empty()
-                && !String::from_utf8_lossy(&bytes)
-                    .to_lowercase()
-                    .contains(&want)
-            {
-                continue;
-            }
-            total += 1;
-            if rows.len() < ROWS_MAX {
-                let va = s.va.0 + hit.off;
-                rows.push(format!(
-                    "{va:<#14x} {:<8} {:<6} {value}",
-                    encoding.name(),
-                    hit.len
-                ));
-            }
+            found.push(EncodedString {
+                va: s.va.0 + hit.off,
+                encoding,
+                len: hit.len,
+                value,
+                folded: String::from_utf8_lossy(&bytes).to_lowercase(),
+            });
+        }
+    }
+    found
+}
+
+/// Lists the encoded strings a filter keeps.
+///
+/// # Arguments
+///
+/// * `found` - The image's encoded strings ([`encoded_strings`]).
+/// * `filter` - Text the decoded value must contain, ignoring case; empty
+///   keeps every row.
+///
+/// # Returns
+///
+/// A header counting the strings kept, then at most [`ROWS_MAX`] rows.
+#[must_use]
+pub fn encoded_strings_tsv(found: &[EncodedString], filter: &str) -> String {
+    let want = filter.to_lowercase();
+    let mut rows: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for e in found
+        .iter()
+        .filter(|e| want.is_empty() || e.folded.contains(&want))
+    {
+        total += 1;
+        if rows.len() < ROWS_MAX {
+            rows.push(format!(
+                "{:<#14x} {:<8} {:<6} {}",
+                e.va,
+                e.encoding.name(),
+                e.len,
+                e.value
+            ));
         }
     }
     let mut out = format!(
@@ -151,7 +196,7 @@ pub fn encoded_strings_tsv(p: &Program, filter: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encoded_strings_tsv, reading, shape};
+    use super::{encoded_strings, encoded_strings_tsv, reading, shape};
     use crate::entropy::Encoding;
     use crate::program::{Arch, Program, Section};
 
@@ -167,11 +212,17 @@ mod tests {
         data[0x10..0x10 + encoded.len()].copy_from_slice(encoded);
         let rdata = Section::mapped(".rdata", 0x2000, 0, 0x100, false, false);
         let p = Program::raw(data, Arch::X86_64, 0, None, vec![rdata]);
-        let out = encoded_strings_tsv(&p, "");
+        let found = encoded_strings(&p);
+        let out = encoded_strings_tsv(&found, "");
         assert!(out.starts_with("# 1 encoded string decode"), "{out}");
         assert!(out.contains("0x2010"), "{out}");
         assert!(out.contains("\"https://borer.lol/docs\""), "{out}");
-        assert!(encoded_strings_tsv(&p, "nothing-like-it").starts_with("# 0 "));
+        assert_eq!(
+            encoded_strings_tsv(&found, "BORER.lol"),
+            out,
+            "a filter ignores case"
+        );
+        assert!(encoded_strings_tsv(&found, "nothing-like-it").starts_with("# 0 "));
     }
 
     /// Base64 and hex shapes are told apart, and identifiers are neither.

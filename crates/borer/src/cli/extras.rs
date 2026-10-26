@@ -161,7 +161,10 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
         }
         Extra::Encoded => {
             let filter = args.get(2).map_or("", String::as_str);
-            print!("{}", render::encoded_strings_tsv(&s.program, filter));
+            print!(
+                "{}",
+                render::encoded_strings_tsv(&render::encoded_strings(&s.program), filter)
+            );
         }
     }
     Ok(())

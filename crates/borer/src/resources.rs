@@ -456,7 +456,11 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     pub(crate) fn hashes_text(&self) -> Result<String, ErrorData> {
-        self.with_program(|p| Ok(borer_engine::hashing::hashes_tsv(p)))
+        self.file_fact(
+            "file_hashes",
+            borer_engine::hashing::hashes_tsv,
+            String::clone,
+        )
     }
 
     /// The shortest byte signature that matches code once
@@ -551,7 +555,9 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     pub(crate) fn encoded_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.with_program(|p| Ok(render::encoded_strings_tsv(p, filter)))
+        self.file_fact("file_encoded", render::encoded_strings, |found| {
+            render::encoded_strings_tsv(found, filter)
+        })
     }
 
     /// Answers the resources that take a function, a tool or a place for
@@ -596,7 +602,11 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     pub(crate) fn children_text(&self) -> Result<String, ErrorData> {
-        self.with_program(|p| Ok(borer_engine::carve::children_tsv(p)))
+        self.file_fact(
+            "file_children",
+            borer_engine::carve::children_tsv,
+            String::clone,
+        )
     }
 
     /// Compares the loaded binary against another version and reports the diff.

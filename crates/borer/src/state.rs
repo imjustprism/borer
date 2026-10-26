@@ -228,6 +228,41 @@ impl BorerServer {
         self.ensure_analysis().unwrap_or_default()
     }
 
+    /// Returns an answer drawn from facts of the loaded file, the facts kept
+    /// in the memo of its analysis ([`Analysis::derived`]) once the
+    /// analysis is held.
+    ///
+    /// Some answers read the file's bytes alone, hashing, carving or
+    /// decoding all of them, which took a second on every read of a
+    /// hundred-megabyte file. The facts are kept once, whatever the
+    /// question, and `answer` reads each question off them. They do not
+    /// wait for an analysis that is not there yet: without one the facts
+    /// are worked out each time, as before.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - What the facts are, as a fixed name.
+    /// * `make` - Works the facts out from the program.
+    /// * `answer` - Renders the answer from the facts.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded.
+    pub(crate) fn file_fact<T: Send + Sync + 'static>(
+        &self,
+        kind: &'static str,
+        make: impl FnOnce(&Program) -> T,
+        answer: impl FnOnce(&T) -> String,
+    ) -> Result<String, ErrorData> {
+        self.with_program(|p| {
+            let held = read_lock(&self.analysis).clone();
+            Ok(match held {
+                Some(a) => answer(&a.derived.get_or_build(kind, (), || make(p))),
+                None => answer(&make(p)),
+            })
+        })
+    }
+
     /// Names the loaded file when its analysis has not been computed yet,
     /// so the next call that reads code will pay for all of it.
     ///
