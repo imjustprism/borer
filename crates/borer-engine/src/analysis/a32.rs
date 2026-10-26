@@ -1380,18 +1380,26 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         incomplete,
         ..Analysis::default()
     };
-    let mut functions = Vec::with_capacity(walked.len());
-    for (&entry, w) in &walked {
-        if w.seen.is_empty() {
-            continue;
-        }
+    let kept: Vec<(u64, &Walked)> = walked
+        .iter()
+        .filter(|(_, w)| !w.seen.is_empty())
+        .map(|(&e, w)| (e, w))
+        .collect();
+    let built = super::striped(&kept, |&(entry, w)| {
         let (f, sites) = assemble(entry, w);
+        let mut data = Vec::new();
+        data_refs(program, w, &mut |t, va| data.push((t, va)));
+        (f, sites, data)
+    });
+    let mut functions = Vec::with_capacity(kept.len());
+    for ((entry, w), r) in kept.iter().zip(built) {
+        let Some((f, sites, data)) = r else { continue };
         for (t, va, kind) in sites {
-            push_site(&mut analysis.xrefs, t, va, kind, Some(entry));
+            push_site(&mut analysis.xrefs, t, va, kind, Some(*entry));
         }
-        data_refs(program, w, &mut |t, va| {
-            push_site(&mut analysis.xrefs, t, va, RefKind::Data, Some(entry));
-        });
+        for (t, va) in data {
+            push_site(&mut analysis.xrefs, t, va, RefKind::Data, Some(*entry));
+        }
         for t in &w.tables {
             analysis.jump_tables.insert(t.site, t.targets.clone());
         }
