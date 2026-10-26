@@ -57,108 +57,12 @@ mod packs;
 mod session;
 
 use args::{
-    COMMAND_FLAGS, Command, Direction, Query, RawFlags, SlotQuery, arg, cli_limit, cli_page,
+    COMMAND_FLAGS, Command, Direction, Query, RawFlags, SlotQuery, USAGE, arg, cli_limit, cli_page,
     command_usage, entry_at, export_args, filter_limit, num_arg, path_arg, search_args,
     split_pack_args, unknown_word,
 };
 use packs::{pack_report, packs_report, sigmake, writable, write_file};
 use session::{Session, decompiled, needs_a_binary, open, project_overlay};
-
-/// Usage text printed by `help` and on argument errors.
-const USAGE: &str = "usage: borer <command> <binary> [args...]
-commands:
-  info <binary>                            summary: format, arch, sections, symbols
-  functions <binary> [filter] [offset] [limit]  discovered functions (100 a page, max 300; \"\" for no filter)
-  function <binary> <address|name>         one function's ranges, blocks and edges
-  summary <binary> <address|name>          one-call function triage
-  symbols <binary> [filter] [offset] [limit]  imports, exports and locals (50 a page, max 1000)
-  hexdump <binary> <address|name> [length]  bytes at a virtual address or name, or at off:<n> in the file (default 64, max 4096)
-  entropy <binary> [threshold]             high-entropy regions (default 7.2)
-  search <binary> <pattern> [text] [offset]  AOB hex with ?? wildcards, or a substring; 500 a page
-  fstrings <binary> <address|name>         string literals one function references
-  findstr <binary> <filter>                functions referencing a matching string
-  disasm <binary> <address|name> [count]   disassemble at a virtual address or name (default 32, max 256)
-  disasmfn <binary> <address|name>         a whole function, block by block
-  decompile <binary> <address|name> [skeleton|full] [offset] [limit]  structured pseudo-C (skeleton: flow and calls only); 300 lines a page, a limit past the last line for all
-  class <binary> <class|method address>    class layout from its methods' field accesses
-  fieldrefs <binary> <offset> [filter] [skip] [limit]  every instruction touching [reg+offset]; filter names the function (100 a page, max 500)
-  vslot <binary> <slot> [filter] [limit]   classes whose virtual at a slot returns a constant (a wire id, a type tag); filter names the class (max 2000)
-  index <binary>                           decompile every function once into the cache that grep reads
-  grep <binary> <text> [filter] [offset] [limit]  pseudo-C lines containing the text program-wide, or matching it when written re:<expression> ((?i) inside ignores case); filter names the function (100 a page, max 500)
-  schema <binary> <function|class>         the record a deserializer reads off its stream: fields, widths, nesting, repeats
-  schemas <binary> <slot> [filter] [limit]  every class with a constant at a slot and the record it decodes: a protocol as one table (max 2000)
-  encode <binary> <function|class>         what a serializer writes onto its stream: fields in wire order, widths, the object field each came from
-  encodes <binary> <slot> [filter] [limit]  every class with a constant at a slot and what it encodes: the outbound protocol as one table (max 2000)
-  senders <binary> <slot> [filter] [limit]  every class with a constant at a slot and the functions constructing it: who sends each command (max 2000)
-  protocol <binary> <slot> [filter] [limit]  every class with a constant at a slot with its senders, its handler, what it encodes and what it decodes on one row (max 2000)
-  hooks <binary> <slot> [filter] [limit]   every class with a constant at a slot with the addresses a binding hooks: encoder, decoder, handler, send call sites (max 2000)
-  shape <binary> <function> [limit]        every function running the same code over other operands, with the strings and data that differ (max 2000)
-  messages <binary> [filter] [limit]       every class that registered a wire id, with its named fields and the functions testing for the id (max 200)
-  about <binary> <name>                    everything known about one name from every table: attribute, class, message routes, wire, function
-  snapshot <binary> <out>                  write the program's commands, packet layouts, attributes, message routes and ids by stable name to a file
-  changes <binary> <snapshot>              what changed since a snapshot: commands, layouts, attributes, routes and ids added, removed or changed
-  map <binary> [namespace] [limit]         the program's namespaces with their classes by role (pack [roles] lines, else role words in class names); a namespace lists its classes (max 5000)
-  attrs <binary> [filter] [limit]          every typed attribute the program registers (a pack names the registrar): code, name, type, access, default, users; one exact match lists every user with the definition global (max 200)
-  ports <binary> [filter] [limit]          every message every port accepts and the function it is dispatched to (a pack names the accept helpers); filter names the component or the message (max 5000)
-  anchors <binary> <manifest>              re-derive every pinned fact in a manifest (field, vconst, function, encode, decode lines) and report held, moved, changed or gone; fails unless all held
-  xrefs <binary> <address|name>            cross-references to an address
-  cfg <binary> <address|name>              function control-flow graph (mermaid)
-  callgraph <binary> <address|name> [callers|callees]  callgraph (mermaid, max 30); callers walks what reaches it
-  strings <binary> [filter] [offset] [limit]    printable strings (100 a page, max 500; \"\" for no filter)
-  crypto <binary>                          known crypto/hash constants
-  hashes <binary>                          md5, sha256, imphash, authentihash and tlsh: what malware feeds are searched by
-  sig <binary> <address|name>              the shortest byte signature matching the code once, its moving bytes wildcarded: pattern, code and mask
-  yara <binary> <function>[,<function>...]  a YARA rule from the functions' signatures and the strings they reference
-  names <binary> <ida|ghidra|binja|x64dbg> [out]  borer's names and comments as an IDAPython, Ghidra or Binary Ninja script or an x64dbg database
-  diff <binary> <other>                    the functions another build changed, added or removed (other may be a fingerprint sidecar)
-  addr <binary> <va|rva:<n>|off:<n>>       one place as virtual address, relative address, file offset, section and function
-  encoded <binary> [filter]                base64 and hex strings that decode to text or a known file
-  qt <binary>                              Qt classes from moc metadata: signals, slots, properties
-  triage <binary>                          one call: what it is, what it hides, where to read
-  taint <binary> <addr>[,reg]              follow a value forward: what carries it, what it reaches
-  layout <binary> <addr>[,reg]             propose a struct from what a function does through a pointer
-  why <binary> <address|name>              what is at an address, and where each fact came from
-  solve <binary> <addr>[,aN]               find an argument value that changes the answer
-  partial <binary> <address>               a counted loop comparing a few bits of a product: lattice, not more samples
-  flat <binary> [address]                  functions whose control flow was flattened into a switch
-  vm <binary> [address]                    find the VM dispatch loops, or describe one's handlers
-  devirt <binary> <address>[,budget=N,...]  run a virtualized function and recover its virtual program; budget=N pushes past a long bootstrap
-  unpack <binary> <address>[,budget=N] [out]  run the unpacker; with out, write the materialized image
-  oracle <binary> <address|name>           run a checksum on the standard probe and name it
-  emulate <binary> <spec>                  run code and read it back; spec: addr[,reg=v,aN=v,w<addr>=<hex>,stop=<addr>,steps=<n>,trace=<n>,origin=<v>,dump=<addr>:<len>]; aN is the decompiler's aN, a1 the first
-  run <binary> <function>[,steps=N]/<input>[;<input>...]  call a function on typed inputs (each: comma-separated 5, -1, \"text\", hex:0102, out:16) and check its decompiled text gives the same
-  hidden <binary> [filter]                 strings the program generates instead of storing
-  read <binary> <address|name> [kind] [count]  typed values (u8..u64, f32, f64, ptr, cstr, wstr; default 1, max 256); off:<n> reads by file offset
-  fingerprint <binary> [out]               function fingerprints; with out, write the sidecar borer://diff reads
-  doctor [offline]                         the local setup, one line each: version and commit, toolchain, symbol cache and server (offline skips the server), index cache, .mcp.json
-  setup [--apply] [--replace|--remove]     register this binary as the MCP server borer with every agent client installed (Claude Code, Claude Desktop, Cursor, Windsurf, Devin Desktop, VS Code and Insiders, Gemini CLI, Antigravity, Codex CLI, Zed, OpenCode, pi, Copilot CLI, Grok Build, Cline, Roo Code, Kilo Code, Continue, Amp, Qwen Code, Kiro, Factory Droid, Kimi Code, Junie, Augment, Warp, LM Studio); an entry whose program is gone is replaced, --replace replaces any other, --remove takes borer out; a dry run that shows each file and entry unless --apply, which keeps a .bak of each file it changes
-  update [--check]                         install the latest release over this binary, checked against its SHA256SUMS; --check only says whether one is out (a command line run at a terminal also checks once a day and says so on stderr; not under CI, and BORER_NO_UPDATE_CHECK=1 turns it off)
-  version                                  print the version (also --version, -V)
-  fetch-pdb <binary> [server]              fetch the companion PDB the debug record names over https from a public symbol server (default msdl, or BORER_SYMBOL_SERVER) into the local cache, kept only if its guid+age match; reload to apply
-  pack <file>                              read a pack and report its name, its keys by section and what borer does not read
-  pack-keys                                every key a pack can set, with its default and meaning
-  packs <binary>                           the packs borer knows and whether each loads for the binary: the named ones, and every pack-directory pack whose [match] lines all hold
-  export <binary> --c <out.c> [--library] [--only <addrs>]  every function, or the comma-separated entries after --only, as one C file: the includes, each type, prototype, table and global once at the top, then every body leaves first; library functions (a signature named them) are left out unless --library; a function over 4096 basic blocks is written as a comment saying it was cut
-  export-pack <binary> <name> [project] [all]the names a project file gave (and with all, the names borer recovered) as a pack that finds the same functions in another build by their first bytes
-  sigmake <out> <name> <library>...         the functions of static libraries or objects (.lib, .obj, .a, .o, Rust .rlib) as a pack of signatures, the relocated bytes masked, that names them in any program linked with them; an <out> ending in .bsig is a compact set like the ones borer ships
-  script <binary> <file> [args...]           run a Rhai script in a sandbox: it reads functions, strings, bytes and xrefs, prints, and proposes names and comments; --save <project> writes them for export-pack
-  scenario <binary> <function> <a2=5,...>    decompile under assumptions: branches and switches on the fixed parameters fold and only the code that can run is written
-  scenarios <binary> <function> <a2=0..32>   a scenario per value of one parameter (a range, or values joined by |), the ones that behave alike grouped with their calls and returns
-  types <binary> [project] [filter] [offset] [limit]  user-defined types a project states and where each is applied (50 a page, max 500; \"\" for no filter)
-  set-type <binary> <project> struct <name> [size] <off:name:type>...  define a struct in the project; or set-type <binary> <project> enum <name> [size] <name:value>...; or set-type <binary> <project> typedef <name> <type>; or set-type <binary> <project> apply <address|name> <type>, so decompile names that global's fields or constants
-  verify <binary> [function|all] [limit] [seed]check the lifter against the emulator (arm64 code against the arm64 machine) block by block from seeded states; lists every register, stack slot, store and branch they disagree on and fails if any (default all, 2000 functions)
-  verify <binary> <function|all> <limit> <seed> text  check the text's statements instead (x86 and x64 only): each block's, replayed under the lifter's witness, against the emulator from three seeded states; lists every claim the machine does not bear out and fails on any but lane roughness
-  verify <binary> <function|all> <limit> <seed> mir  the same check as the first form, every lifted value read through MIR: lowered to width-explicit ops and run by the MIR evaluator
-options:
-  --pack <file>                            run the analysis with a pack (repeatable; BORER_PACKS lists more, for the MCP server too)
-  --no-auto-packs                          load only the packs --pack and BORER_PACKS name, not the pack directories' (BORER_AUTO_PACKS=0 does the same)
-  --no-pdb                                 do not apply the companion PDB the debug record names, where one is on disk
-  --project <file>                         apply a project file's names, comments and types, as save_project writes it (refused when saved for another build)
-  --arch <x86|x64|arm64>                   read the binary as raw code or a memory dump of that architecture, its headers unread
-  --base <address>                         with --arch: where the file's first byte maps (default 0)
-  --entry <address>                        with --arch: the entry (default the first executable byte)
-  --regions <va@off:len[:rwx],...>         with --arch, instead of --base: map these parts of the file at these addresses (max 256)
-no arguments starts the MCP stdio server";
 
 /// The cap on rows that list classes: every class a program has fits.
 const CLASS_ROWS: usize = 2000;
