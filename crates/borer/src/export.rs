@@ -81,8 +81,10 @@ impl Written {
 ///
 /// # Errors
 ///
-/// When the file or its `.part` beside it cannot be written, or a file
-/// is at `out` and `existing` keeps it.
+/// When the file or its `.part` beside it cannot be written, a file is
+/// at `out` and `existing` keeps it, or the request's deadline passed while
+/// the functions were decompiled ([`borer_engine::cancel::Cancel`]): then
+/// the `.part` is removed and whatever is at `out` stays untouched.
 pub fn write_c(
     program: &Program,
     analysis: &Analysis,
@@ -191,6 +193,12 @@ fn write_with_set(
         .flush()
         .with_context(|| format!("writing {shown}.part"))?;
     drop(bodies);
+    if borer_engine::cancel::Cancel::raised() {
+        std::fs::remove_file(part).with_context(|| format!("removing {shown}.part"))?;
+        anyhow::bail!(
+            "the request's deadline passed before every function was decompiled, so {shown} was left as it was; export fewer functions (a filter or a list) or raise BORER_DEADLINE_SECS"
+        );
+    }
     let binary = short_path(&program.path.display().to_string());
     let mut file = std::io::BufWriter::new(
         create(path, existing).with_context(|| format!("creating {shown}"))?,
@@ -300,5 +308,48 @@ mod tests {
             "{}",
             w.line(&out)
         );
+    }
+
+    /// An export whose request's deadline has passed refuses to write.
+    ///
+    /// The file already at `out` stays as it was even when `existing` would
+    /// replace it, no `.part` is left, and the error says how to narrow it.
+    ///
+    /// The flag is raised before the export runs, so every decompile in it
+    /// answers that it stopped, whatever the machine's speed.
+    ///
+    /// # Panics
+    ///
+    /// When the export succeeds, touches the file or leaves the `.part`.
+    #[test]
+    fn an_export_past_the_deadline_leaves_the_file_as_it_was() {
+        let mut code = vec![0xccu8; 0x10];
+        code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax, 1; ret
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let a = Analysis::compute(&p);
+        let dir = std::env::temp_dir().join(format!("borer-cut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let out = dir.join("c.c").display().to_string();
+        std::fs::write(&out, "complete export").expect("writes");
+        let flag = borer_engine::cancel::Cancel::new();
+        flag.raise();
+        let cut = flag.within(|| {
+            write_c(
+                &p,
+                &a,
+                &Overlay::default(),
+                Library::Skip,
+                &out,
+                Existing::Replace,
+            )
+        });
+        let kept = std::fs::read_to_string(&out).expect("reads");
+        let part_left = std::path::Path::new(&format!("{out}.part")).exists();
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        let why = format!("{:#}", cut.expect_err("a cut export is refused"));
+        assert!(why.contains("BORER_DEADLINE_SECS"), "{why}");
+        assert_eq!(kept, "complete export");
+        assert!(!part_left);
     }
 }
