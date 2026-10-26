@@ -1,7 +1,7 @@
 //! Shannon entropy and windowed high-entropy region scanning, the packer and
 //! embedded-payload heuristic.
 
-use crate::num::{from_usize, usize_f64};
+use crate::num::{from_usize, saturating_usize, usize_f64};
 use crate::program::Program;
 
 /// Computes the Shannon entropy of `data` in bits per byte.
@@ -173,6 +173,10 @@ pub fn high_entropy_regions(program: &Program, window: usize, threshold: f64) ->
 /// decode to fewer than [`ENCODED_MIN`] bytes are skipped. One pass over
 /// the file, and no run is decoded twice.
 ///
+/// The pass finds the runs of alphabet characters and line breaks eight
+/// bytes at a time, and only a run long enough to hold such text is
+/// looked at byte by byte ([`encoded_run`]).
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image whose bytes are scanned.
@@ -182,58 +186,112 @@ pub fn high_entropy_regions(program: &Program, window: usize, threshold: f64) ->
 fn encoded_regions(program: &Program, window: usize, threshold: f64, regions: &mut Vec<Region>) {
     let bytes = &program.bytes;
     let margin = ceiling(window) - threshold;
-    let mut i = 0;
-    while i < bytes.len() && regions.len() < REGIONS_MAX {
-        if sextet(bytes[i]).is_none() {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        let mut end = i;
-        while let Some(&b) = bytes.get(i)
-            && (sextet(b).is_some() || b == b'\r' || b == b'\n')
-        {
-            i += 1;
-            if b != b'\r' && b != b'\n' {
-                end = i;
-            }
-        }
-        let text = &bytes[start..end];
-        if text.len() * 3 < ENCODED_MIN * 4 {
-            continue;
-        }
-        let pad = bytes[end..]
-            .iter()
-            .take(2)
-            .take_while(|&&b| b == b'=')
-            .count();
-        i = i.max(end + pad);
-        let encoding = if text
-            .iter()
-            .all(|b| b.is_ascii_hexdigit() || *b == b'\r' || *b == b'\n')
-        {
-            Encoding::Hex
-        } else {
-            Encoding::Base64
-        };
-        let mut counts = [0usize; 256];
-        let mut n = 0usize;
-        decode(text, encoding, |b| {
-            counts[usize::from(b)] += 1;
-            n += 1;
+    let text_byte: [bool; 256] = std::array::from_fn(|b| {
+        u8::try_from(b).is_ok_and(|b| sextet(b).is_some() || b == b'\r' || b == b'\n')
+    });
+    let mut judge = |from: usize, to: usize| {
+        to.saturating_sub(from).saturating_mul(3) >= ENCODED_MIN * 4
+            && encoded_run(program, from, to, margin, regions)
+    };
+    let mut from = 0;
+    let (words, tail) = bytes.as_chunks::<8>();
+    for (k, w) in words.iter().enumerate() {
+        let seps = (0..8).fold(0u32, |m, j| {
+            m | (u32::from(!text_byte[usize::from(w[j])]) << j)
         });
-        let e = of_counts(&counts, n);
-        if n >= ENCODED_MIN && e >= ceiling(n) - margin {
-            let off = from_usize(start);
-            regions.push(Region {
-                off,
-                va: program.offset_to_va(off),
-                len: from_usize(end + pad - start),
-                entropy: e,
-                encoding: Some(encoding),
-            });
+        if seps == 0 {
+            continue;
+        }
+        let at = 8 * k;
+        if judge(
+            from,
+            at + saturating_usize(u64::from(seps.trailing_zeros())),
+        ) {
+            return;
+        }
+        from = at + saturating_usize(u64::from(u32::BITS - seps.leading_zeros()));
+    }
+    for (j, &b) in tail.iter().enumerate() {
+        if !text_byte[usize::from(b)] {
+            let at = 8 * words.len() + j;
+            if judge(from, at) {
+                return;
+            }
+            from = at + 1;
         }
     }
+    judge(from, bytes.len());
+}
+
+/// Judges one maximal run of alphabet characters and line breaks, and
+/// appends it as a region when its decoded bytes are high-entropy.
+///
+/// The text is the run without the line breaks it starts or ends with,
+/// followed by up to two `=` of padding; it is hex when every character
+/// is a hex digit, base64 otherwise.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `from` / `to` - The run's file offsets, `to` one past its last byte.
+/// * `margin` - How far below its ceiling ([`ceiling`]) the decoded bytes
+///   may read.
+/// * `regions` - The list the region is appended to.
+///
+/// # Returns
+///
+/// Whether `regions` reached [`REGIONS_MAX`], which ends the scan.
+fn encoded_run(
+    program: &Program,
+    from: usize,
+    to: usize,
+    margin: f64,
+    regions: &mut Vec<Region>,
+) -> bool {
+    let bytes = &program.bytes;
+    let run = bytes.get(from..to).unwrap_or_default();
+    let (Some(first), Some(last)) = (
+        run.iter().position(|&b| sextet(b).is_some()),
+        run.iter().rposition(|&b| sextet(b).is_some()),
+    ) else {
+        return false;
+    };
+    let (start, end) = (from + first, from + last + 1);
+    let text = &bytes[start..end];
+    if text.len() * 3 < ENCODED_MIN * 4 {
+        return false;
+    }
+    let pad = bytes[end..]
+        .iter()
+        .take(2)
+        .take_while(|&&b| b == b'=')
+        .count();
+    let encoding = if text
+        .iter()
+        .all(|b| b.is_ascii_hexdigit() || *b == b'\r' || *b == b'\n')
+    {
+        Encoding::Hex
+    } else {
+        Encoding::Base64
+    };
+    let mut counts = [0usize; 256];
+    let mut n = 0usize;
+    decode(text, encoding, |b| {
+        counts[usize::from(b)] += 1;
+        n += 1;
+    });
+    let e = of_counts(&counts, n);
+    if n >= ENCODED_MIN && e >= ceiling(n) - margin {
+        let off = from_usize(start);
+        regions.push(Region {
+            off,
+            va: program.offset_to_va(off),
+            len: from_usize(end + pad - start),
+            entropy: e,
+            encoding: Some(encoding),
+        });
+    }
+    regions.len() >= REGIONS_MAX
 }
 
 /// Returns the 6-bit value of a base64 character of either alphabet.
@@ -773,6 +831,33 @@ mod tests {
         assert_eq!(decoded(b"-_8", Encoding::Base64), [0xfb, 0xff]);
         assert_eq!(decoded(b"+/8", Encoding::Base64), [0xfb, 0xff]);
         assert_eq!(decoded(b"4D5a\n90", Encoding::Hex), [0x4d, 0x5a, 0x90]);
+    }
+
+    /// Encoded text is found wherever it sits against the scan's words.
+    ///
+    /// The line breaks before and after it are left out, its padding is
+    /// kept, and a run reaching the file's last byte counts.
+    #[test]
+    fn encoded_text_is_found_at_every_alignment() {
+        for b64 in [base64(&noise(300)), base64(&noise(301))] {
+            for shift in 0..16 {
+                for tail in [&b""[..], b"\r\n", b"\r\n\0\0\0"] {
+                    let mut bytes = vec![0u8; shift];
+                    bytes.extend_from_slice(b"\n\r");
+                    let at = from_usize(bytes.len());
+                    bytes.extend_from_slice(&b64);
+                    bytes.extend_from_slice(tail);
+                    let p = Program::raw(bytes, Arch::Unknown, 0, None, Vec::new());
+                    let found: Vec<(u64, u64, Option<Encoding>)> =
+                        high_entropy_regions(&p, 1024, 7.2)
+                            .iter()
+                            .map(|r| (r.off, r.len, r.encoding))
+                            .collect();
+                    let want = (at, from_usize(b64.len()), Some(Encoding::Base64));
+                    assert_eq!(found, [want], "shift {shift}, tail {tail:?}");
+                }
+            }
+        }
     }
 
     /// Random bytes stored as base64 or hex text read about 6 and 4 bits per
