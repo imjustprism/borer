@@ -1426,12 +1426,12 @@ pub(crate) fn discover(program: &Program) -> Analysis {
 fn outlines(walks: &mut Walks<'_>) {
     let mut promote = Vec::new();
     for (&entry, w) in &walks.walked {
-        let pred = predecessors(w);
+        let mut pred = None;
         for &t in &w.followed {
             if t > entry
                 && !walks.starts.contains(&t)
                 && walks.starts.range((entry + 1)..t).next().is_some()
-                && straight_return(w, t, &pred)
+                && straight_return(w, t, pred.get_or_insert_with(|| predecessors(w)))
             {
                 promote.push(t);
             }
