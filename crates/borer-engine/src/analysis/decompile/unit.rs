@@ -54,7 +54,7 @@ const DEFINITION_WEIGHT: usize = 8 * 1024;
 const BODIES_MAX: usize = 8;
 
 /// Most instructions a function may have for a unit to try defining it.
-const BODY_INSTRUCTIONS_MAX: usize = 32;
+pub(super) const BODY_INSTRUCTIONS_MAX: usize = 32;
 
 /// The C keywords and constants a defined body may use besides its types.
 const C_WORDS: [&str; 16] = [

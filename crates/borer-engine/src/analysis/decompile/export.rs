@@ -608,7 +608,7 @@ pub fn export(
     let render = |entry: u64| {
         over(entry)
             .is_none()
-            .then(|| super::decompile_named_afresh(program, analysis, overlay, entry))
+            .then(|| named(program, analysis, overlay, entry))
             .flatten()
     };
     let mut out = String::new();
@@ -632,6 +632,42 @@ pub fn export(
     })?;
     sink(&out)?;
     Ok(hoisted)
+}
+
+/// Renders one function as [`super::decompile_named_afresh`] does, the
+/// same text, but reads a small function's plain text through the memo.
+///
+/// The unit of each caller defines its small callees
+/// ([`super::unit::BODY_INSTRUCTIONS_MAX`] instructions at most) from
+/// their plain text through the memo ([`crate::analysis::decompiled_cached`]);
+/// the export reading such a text through it too decompiles each small
+/// function once instead of twice. Any other function's text is built
+/// afresh, so the memo does not fill with the whole binary.
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+/// * `analysis` - Its analysis, holding the memo.
+/// * `overlay` - Names, types and comments to apply.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The text, `None` when the function does not decompile.
+fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) -> Option<String> {
+    let small = analysis.function(entry)?.instr_count <= super::unit::BODY_INSTRUCTIONS_MAX;
+    let text = if small {
+        let key = overlay.fingerprint();
+        crate::analysis::decompiled_cached(program, analysis, overlay, key, entry)
+            .as_ref()
+            .as_ref()?
+            .text
+            .clone()
+    } else {
+        super::decompile_plain_full(program, analysis, overlay, entry)?.text
+    };
+    super::name_fields(program, analysis, overlay, entry, &text)
+        .map(|out| super::finished(&out, program, analysis, overlay, entry))
 }
 
 /// What the functions rendered but not yet taken, and how far the taking
