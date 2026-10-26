@@ -517,6 +517,7 @@ pub(super) fn flatten_early_exits(lines: &mut Vec<String>) -> bool {
     /// Longest tail moved into the early arm.
     const EARLY_TAIL_MAX: usize = 3;
     let terminal = |t: &str| is_return(t) || is_goto(t) || t == "break;" || t == "continue;";
+    let mut nest: Option<Nest> = None;
     let mut i = 0;
     while i < lines.len() {
         let Some((cond, ind)) = lines
@@ -526,19 +527,12 @@ pub(super) fn flatten_early_exits(lines: &mut Vec<String>) -> bool {
             i += 1;
             continue;
         };
-        let mut close = None;
-        for j in i + 1..lines.len() {
-            let Some(l) = lines.get(j) else { break };
-            if l.trim().is_empty() {
-                continue;
-            }
-            if indent_of(l) <= ind {
-                if l.trim() == "}" && indent_of(l) == ind {
-                    close = Some(j);
-                }
-                break;
-            }
-        }
+        let closer = nest.get_or_insert_with(|| Nest::of(lines));
+        let close = closer.closer.get(i).copied().flatten().filter(|&j| {
+            lines
+                .get(j)
+                .is_some_and(|l| l.trim() == "}" && indent_of(l) == ind)
+        });
         let Some(close) = close else {
             i += 1;
             continue;
@@ -1076,7 +1070,58 @@ fn note(churn: &mut Vec<&'static str>, name: &'static str, did: bool) -> bool {
 
 #[cfg(test)]
 mod fuel_tests {
-    use super::{Pass, Passes, Round, cleanup_passes};
+    use super::{Pass, Passes, Round, cleanup_passes, flatten_early_exits};
+
+    /// An `if` whose body never falls out turns into an early exit across
+    /// blank lines and nested blocks, and one whose block goes on into an
+    /// `else` stays.
+    ///
+    /// # Panics
+    ///
+    /// When a block is flattened otherwise.
+    #[test]
+    fn an_if_that_never_falls_out_becomes_an_early_exit() {
+        let text = [
+            "if (a1 == 0) {",
+            "  if (a2 == 0) {",
+            "    x = 1;",
+            "  }",
+            "",
+            "  y = 2;",
+            "  return 1;",
+            "}",
+            "return 0;",
+        ];
+        let mut lines: Vec<String> = text.map(str::to_owned).into();
+        assert!(flatten_early_exits(&mut lines));
+        assert_eq!(
+            lines,
+            [
+                "if (a1 != 0) {",
+                "  return 0;",
+                "}",
+                "if (a2 == 0) {",
+                "  x = 1;",
+                "}",
+                "",
+                "y = 2;",
+                "return 1;",
+            ]
+        );
+        let mut kept: Vec<String> = [
+            "if (a1 == 0) {",
+            "  x = 1;",
+            "  y = 2;",
+            "  z = 3;",
+            "  return 1;",
+            "} else {",
+            "  return 0;",
+            "}",
+        ]
+        .map(str::to_owned)
+        .into();
+        assert!(!flatten_early_exits(&mut kept));
+    }
 
     /// A pass that changed nothing is not run again until another pass
     /// changes the text, and one left out never runs.

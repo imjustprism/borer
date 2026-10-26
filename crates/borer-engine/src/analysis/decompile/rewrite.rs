@@ -333,11 +333,11 @@ pub(super) fn flatten_else_if(lines: &mut Vec<String>) -> bool {
 /// included. A walk with three stacks of indentations finds them all,
 /// where a scan per line would cost a pass over the text each.
 #[derive(Debug, Default)]
-struct Nest {
+pub(super) struct Nest {
     /// The opener of each line's block.
     opener: Vec<Option<usize>>,
     /// The first later line not deeper than each line.
-    closer: Vec<Option<usize>>,
+    pub(super) closer: Vec<Option<usize>>,
     /// The last earlier line not deeper than each line.
     above: Vec<Option<usize>>,
 }
@@ -348,7 +348,7 @@ impl Nest {
     /// # Arguments
     ///
     /// * `lines` - The body lines.
-    fn of(lines: &[String]) -> Self {
+    pub(super) fn of(lines: &[String]) -> Self {
         let mut nest = Self {
             opener: vec![None; lines.len()],
             closer: vec![None; lines.len()],
