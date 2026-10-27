@@ -260,7 +260,7 @@ fn index_body(
     let read = p
         .read_va_upto(va, BODY_READ)
         .ok_or_else(|| format!("the IL body at {va:#x} is not in the file"))
-        .and_then(il::body);
+        .and_then(il::header);
     let (body, code) = match read {
         Ok(b) => b,
         Err(why) => {

@@ -589,11 +589,33 @@ fn sections(bytes: &[u8], from: usize) -> Result<Vec<Clause>, String> {
 ///
 /// # Errors
 ///
-/// When the format bits name neither header, the header or code runs past
-/// `bytes` or past [`CODE_MAX`], or a data section does not read.
+/// As [`header`], or when a data section does not read.
 pub fn body(bytes: &[u8]) -> Result<(MethodBody, &[u8]), String> {
+    let (mut b, code) = header(bytes)?;
+    if b.fat && u16_le(bytes, 0).is_some_and(|f| f & MORE_SECTS != 0) {
+        b.clauses = sections(bytes, b.header_len + b.code_len)?;
+    }
+    Ok((b, code))
+}
+
+/// Reads a method body's header and finds its code, its exception clauses
+/// unread.
+///
+/// # Arguments
+///
+/// * `bytes` - The body from its first byte; it may run on past the body.
+///
+/// # Returns
+///
+/// The header, its clauses empty, and the code.
+///
+/// # Errors
+///
+/// When the format bits name neither header, or the header or code runs
+/// past `bytes` or past [`CODE_MAX`].
+pub fn header(bytes: &[u8]) -> Result<(MethodBody, &[u8]), String> {
     let first = *bytes.first().ok_or("the body is empty")?;
-    let (mut b, code_at) = match first & 0x3 {
+    let (b, code_at) = match first & 0x3 {
         TINY => (
             MethodBody {
                 fat: false,
@@ -647,9 +669,6 @@ pub fn body(bytes: &[u8]) -> Result<(MethodBody, &[u8]), String> {
             bytes.len()
         )
     })?;
-    if b.fat && u16_le(bytes, 0).is_some_and(|f| f & MORE_SECTS != 0) {
-        b.clauses = sections(bytes, end)?;
-    }
     Ok((b, code))
 }
 
