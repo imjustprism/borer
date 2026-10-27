@@ -230,7 +230,7 @@ impl BorerServer {
     /// When no binary is loaded or the target resolves to neither an address
     /// nor a class field.
     #[tool(
-        description = "List references to an address or name, one row per function, paged; an import lists calls through its slot, `Class+0x24` who touches that field, a .NET member (token or Type::Member) the IL methods using it. Not for call paths (use reaches).",
+        description = "List references to an address or name, one row per function, paged; an import lists calls through its slot, `Class+0x24` who touches that field. Not for call paths (use reaches).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

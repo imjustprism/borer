@@ -114,7 +114,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Disassemble a whole function by blocks, with `L_<addr>:` labels and named call targets; a .NET method (token or Type::Method) as CIL, tokens named. Use it when exact instructions matter; for C use decompile, for a few instructions disassemble.",
+        description = "Disassemble a whole function by blocks, with `L_<addr>:` labels and named call targets, CIL for .NET. Use it when exact instructions matter; for C use decompile, for a few instructions disassemble.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
