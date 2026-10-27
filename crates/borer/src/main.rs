@@ -696,6 +696,7 @@ impl BorerServer {
             ("emulate", Some(address)) => self.emulate_text(&address)?,
             ("patch", Some(spec)) => self.patch_text(&spec)?,
             ("taint", Some(spec)) => self.taint_text(&spec)?,
+            ("livepath", Some(spec)) => self.livepath_text(&asked.spec_words(&spec))?,
             ("layout", Some(spec)) => self.layout_text(&spec)?,
             ("why", Some(target)) => self.why_text(&target)?,
             ("solve", Some(spec)) => self.solve_text(&spec)?,

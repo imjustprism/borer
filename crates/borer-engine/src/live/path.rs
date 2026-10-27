@@ -35,6 +35,92 @@ pub const CHAINS_MAX: usize = 4096;
 /// Most pointers one level collects before it stops looking.
 pub const CANDIDATES_MAX: usize = 1 << 20;
 
+/// Most pointer reads a chain may take.
+pub const DEPTH_MAX: usize = 6;
+
+/// Largest offset a chain may add after a read, in bytes.
+pub const OFFSET_MAX: u64 = 0x1_0000;
+
+/// Most chains one page shows.
+pub const PAGE_MAX: usize = 200;
+
+/// A pointer search as `borer://livepath/{spec}` asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathSpec {
+    /// The target as given: a live or static address, or a name.
+    pub address: String,
+    /// Most pointer reads per chain, 1 to [`DEPTH_MAX`].
+    pub depth: usize,
+    /// Largest offset added after a read, at most [`OFFSET_MAX`].
+    pub max_offset: u64,
+    /// The one module chains may start in; `None` for any base.
+    pub module: Option<String>,
+    /// Chains to skip.
+    pub offset: usize,
+    /// Most chains shown, 1 to [`PAGE_MAX`].
+    pub limit: usize,
+    /// The header alone.
+    pub count_only: bool,
+}
+
+impl PathSpec {
+    /// Reads `<address>[,depth=<n>][,max_offset=<n>][,module=<name>]
+    /// [,offset=<n>][,limit=<n>][,count_only]`; numbers are decimal or `0x`
+    /// hex. Defaults: depth 4, `max_offset` 0x1000, limit 20.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The text after `borer://livepath/`.
+    ///
+    /// # Errors
+    ///
+    /// When the address is missing, a word is unknown, or a number does
+    /// not read or is out of its range; the message gives the form.
+    pub fn parse(spec: &str) -> Result<PathSpec, String> {
+        let form = "<address>[,depth=1..6][,max_offset=0..0x10000][,module=<name>][,offset=<n>][,limit=1..200][,count_only]";
+        let mut words = spec.split(',').map(str::trim);
+        let address = words
+            .next()
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| format!("livepath takes {form}"))?;
+        let mut out = PathSpec {
+            address: address.to_owned(),
+            depth: 4,
+            max_offset: 0x1000,
+            module: None,
+            offset: 0,
+            limit: 20,
+            count_only: false,
+        };
+        for word in words {
+            let (key, value) = word.split_once('=').unwrap_or((word, ""));
+            let number = || {
+                crate::analysis::parse_addr(value)
+                    .ok_or_else(|| format!("{word}: {key} takes a number; livepath takes {form}"))
+            };
+            let usize_of = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+            match key {
+                "depth" => out.depth = usize_of(number()?),
+                "max_offset" => out.max_offset = number()?,
+                "module" if !value.is_empty() => out.module = Some(value.to_owned()),
+                "offset" => out.offset = usize_of(number()?),
+                "limit" => out.limit = usize_of(number()?),
+                "count_only" if value.is_empty() => out.count_only = true,
+                _ => return Err(format!("{word} is not a livepath word; it takes {form}")),
+            }
+        }
+        if !(1..=DEPTH_MAX).contains(&out.depth)
+            || out.max_offset > OFFSET_MAX
+            || !(1..=PAGE_MAX).contains(&out.limit)
+        {
+            return Err(format!(
+                "{spec}: a number is out of its range; livepath takes {form}"
+            ));
+        }
+        Ok(out)
+    }
+}
+
 /// A fixed place a chain may start at: a module, or a singleton's slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Base {
@@ -586,6 +672,43 @@ mod tests {
         mem.put(0x40_0300, &0x11000u64.to_le_bytes());
         let found = paths(&mem, 0x11010, &game(), 1, 0x100, 8);
         assert_eq!(spell(&found.chains[0], &game()), "[game.exe+0x300]+0x10");
+    }
+
+    /// A livepath spec reads its address and words, with defaults for the
+    /// words left out, and refuses a word or a number it does not take.
+    #[test]
+    fn a_path_spec_reads_its_words() {
+        let plain = PathSpec::parse("0x1000").expect("an address alone");
+        assert_eq!(
+            (plain.depth, plain.max_offset, plain.limit),
+            (4, 0x1000, 20)
+        );
+        let full = PathSpec::parse(
+            "Hero::hp, depth=2,max_offset=0x80,module=game.exe,offset=3,limit=5,count_only",
+        )
+        .expect("every word");
+        assert_eq!(
+            full,
+            PathSpec {
+                address: "Hero::hp".to_owned(),
+                depth: 2,
+                max_offset: 0x80,
+                module: Some("game.exe".to_owned()),
+                offset: 3,
+                limit: 5,
+                count_only: true,
+            }
+        );
+        for bad in [
+            "",
+            "0x10,depth=7",
+            "0x10,limit=0",
+            "0x10,max_offset=0x10001",
+            "0x10,colour=red",
+            "0x10,depth=x",
+        ] {
+            assert!(PathSpec::parse(bad).is_err(), "{bad}");
+        }
     }
 
     /// A 32-bit process's pointers are four bytes wide.

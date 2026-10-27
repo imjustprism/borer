@@ -207,7 +207,6 @@ mod tests {
                 "live_instances",
                 "live_modules",
                 "live_object",
-                "live_path",
                 "live_read",
                 "live_scan",
                 "live_watch",
