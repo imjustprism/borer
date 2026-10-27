@@ -8,7 +8,7 @@
 //! untrusted blobs: each read is bounds-checked, nesting is capped at
 //! [`DEPTH_MAX`] and a rendered name at [`super::QUALIFIED_MAX`] bytes.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 
 use super::{
     Clr, Coded, FIELD, MEMBER_REF, METHOD_DEF, METHOD_SPEC, STAND_ALONE_SIG, TYPE_DEF, TYPE_REF,
@@ -113,6 +113,9 @@ pub(crate) struct Meta<'a> {
     /// Types one name may still read ([`TYPE_FUEL`] at each public call),
     /// so a signature whose types refer back to it costs a bounded amount.
     fuel: Cell<u32>,
+    /// Each type's first `Field` row, by type row less one, read on first
+    /// use ([`Meta::field_owner`]).
+    field_starts: OnceCell<Vec<u32>>,
 }
 
 impl<'a> Meta<'a> {
@@ -143,6 +146,7 @@ impl<'a> Meta<'a> {
             strings: o.streams.strings,
             blob: o.streams.blob,
             fuel: Cell::new(TYPE_FUEL),
+            field_starts: OnceCell::new(),
         })
     }
 
@@ -357,26 +361,25 @@ impl<'a> Meta<'a> {
     /// the type whose field list holds it.
     #[must_use]
     pub(crate) fn fields(&self) -> Vec<(u32, String)> {
-        let types = self.t.readable(TYPE_DEF);
-        let starts: Vec<u32> = (1..=types)
-            .map(|ty| self.cell(TYPE_DEF, ty, 4).unwrap_or(u32::MAX))
-            .collect();
-        let mut ty = 0usize;
         (1..=self.t.readable(FIELD))
-            .map(|row| {
-                while starts.get(ty + 1).is_some_and(|next| *next <= row) {
-                    ty += 1;
-                }
-                let owner = starts.get(ty).filter(|first| **first <= row).map_or_else(
-                    || "?".to_owned(),
-                    |_| self.type_row(TYPE_DEF, u32::try_from(ty + 1).unwrap_or(0), 0),
-                );
-                (
-                    0x0400_0000 | row,
-                    format!("{owner}::{}", self.field_simple(row)),
-                )
-            })
+            .map(|row| (0x0400_0000 | row, self.field_name(row)))
             .collect()
+    }
+
+    /// The type whose field list holds a `Field` row, by a search of the
+    /// types' first fields, read once.
+    ///
+    /// # Returns
+    ///
+    /// The type's one-based row, `None` for a field before every list.
+    fn field_owner(&self, row: u32) -> Option<u32> {
+        let starts = self.field_starts.get_or_init(|| {
+            (1..=self.t.readable(TYPE_DEF))
+                .map(|ty| self.cell(TYPE_DEF, ty, 4).unwrap_or(u32::MAX))
+                .collect()
+        });
+        let before = starts.partition_point(|first| *first <= row);
+        u32::try_from(before).ok().filter(|n| *n > 0)
     }
 
     /// A field's own name from its row, `?` when it does not read.
@@ -423,15 +426,10 @@ impl<'a> Meta<'a> {
     /// A field's `Owner::name`; its owner is the type whose field list
     /// holds the row.
     fn field_name(&self, row: u32) -> String {
-        let name = self.field_simple(row);
-        let owner = (1..=self.t.readable(TYPE_DEF))
-            .take_while(|ty| {
-                self.cell(TYPE_DEF, *ty, 4)
-                    .is_some_and(|first| first <= row)
-            })
-            .last()
+        let owner = self
+            .field_owner(row)
             .map_or_else(|| "?".to_owned(), |ty| self.type_row(TYPE_DEF, ty, 0));
-        format!("{owner}::{name}")
+        format!("{owner}::{}", self.field_simple(row))
     }
 
     /// A token as a CIL listing shows it: a type's name, a method as
