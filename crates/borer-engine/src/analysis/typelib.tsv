@@ -205,10 +205,12 @@ abort	c	void	-	-	-
 accept	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
 access	posix	int	-	const char *pathname|int mode	-|access_mode
 alarm	posix	unsigned int	-	unsigned int seconds	-
+asctime	c	char *	-	const struct tm *tm	-
 atoi	c	int	-	const char *nptr	-
 bind	posix	int	-	int sockfd|const struct sockaddr *addr|socklen_t addrlen	-
 calloc	c	void *	-	size_t nmemb|size_t size	-
 chmod	posix	int	-	const char *pathname|mode_t mode	-
+clock_gettime	posix	int	-	clockid_t clockid|struct timespec *tp	-
 close	posix	int	-	int fd	-
 closedir	posix	int	-	DIR *dirp	-
 closelog	posix	void	-	-	-
@@ -216,6 +218,15 @@ closesocket	win	int	-	SOCKET s	-
 connect	posix	int	-	int sockfd|const struct sockaddr *addr|socklen_t addrlen	-
 connect	win	int	-	SOCKET s|const struct sockaddr *name|int namelen	-
 dcgettext	posix	char *	-	const char *domainname|const char *msgid|int category	-
+deflate	c	int	-	struct z_stream_s *strm|int flush	-
+deflateBound	c	unsigned long	-	struct z_stream_s *strm|unsigned long sourceLen	-
+deflateEnd	c	int	-	struct z_stream_s *strm	-
+deflateInit2_	c	int	-	struct z_stream_s *strm|int level|int method|int windowBits|int memLevel|int strategy|const char *version|int stream_size	-
+deflateInit_	c	int	-	struct z_stream_s *strm|int level|const char *version|int stream_size	-
+deflateParams	c	int	-	struct z_stream_s *strm|int level|int strategy	-
+deflatePrime	c	int	-	struct z_stream_s *strm|int bits|int value	-
+deflateReset	c	int	-	struct z_stream_s *strm	-
+deflateSetDictionary	c	int	-	struct z_stream_s *strm|const unsigned char *dictionary|unsigned int dictLength	-
 dlclose	posix	int	-	void *handle	-
 dlerror	posix	char *	-	-	-
 dlopen	posix	void *	-	const char *filename|int flags	-|dlopen
@@ -260,14 +271,34 @@ getpwuid	posix	struct passwd *	-	uid_t uid	-
 getsockname	posix	int	-	int sockfd|struct sockaddr *addr|socklen_t *addrlen	-
 getsockopt	posix	int	-	int sockfd|int level|int optname|void *optval|socklen_t *optlen	-
 gettext	posix	char *	-	const char *msgid	-
+gettimeofday	posix	int	-	struct timeval *tv|struct timezone *tz	-
 getuid	posix	uid_t	-	-	-
+getutent	posix	struct utmp *	-	-	-
+getutid	posix	struct utmp *	-	const struct utmp *ut	-
+getutline	posix	struct utmp *	-	const struct utmp *ut	-
+gmtime	c	struct tm *	-	const time_t *timep	-
+gmtime_r	posix	struct tm *	-	const time_t *timep|struct tm *result	-
 htonl	win	unsigned long	-	unsigned long hostlong	-
 htons	win	u_short	-	u_short hostshort	-
 inet_addr	win	in_addr_t	-	PCSTR cp	-
 inet_ntoa	win	LPSTR	-	in_addr in	-
+inflate	c	int	-	struct z_stream_s *strm|int flush	-
+inflateEnd	c	int	-	struct z_stream_s *strm	-
+inflateGetDictionary	c	int	-	struct z_stream_s *strm|unsigned char *dictionary|unsigned int *dictLength	-
+inflateInit2_	c	int	-	struct z_stream_s *strm|int windowBits|const char *version|int stream_size	-
+inflateInit_	c	int	-	struct z_stream_s *strm|const char *version|int stream_size	-
+inflateMark	c	long	-	struct z_stream_s *strm	-
+inflatePrime	c	int	-	struct z_stream_s *strm|int bits|int value	-
+inflateReset	c	int	-	struct z_stream_s *strm	-
+inflateReset2	c	int	-	struct z_stream_s *strm|int windowBits	-
+inflateSetDictionary	c	int	-	struct z_stream_s *strm|const unsigned char *dictionary|unsigned int dictLength	-
+inflateSync	c	int	-	struct z_stream_s *strm	-
+inflateValidate	c	int	-	struct z_stream_s *strm|int check	-
 keybd_event	win	void	-	BYTE bVk|BYTE bScan|DWORD dwFlags|ULONG_PTR dwExtraInfo	-
 kill	posix	int	-	pid_t pid|int sig	-|signal
 listen	posix	int	-	int sockfd|int backlog	-
+localtime	c	struct tm *	-	const time_t *timep	-
+localtime_r	posix	struct tm *	-	const time_t *timep|struct tm *result	-
 lseek	posix	off_t	-	int fd|off_t offset|int whence	-|-|seek
 lstat	posix	int	-	const char *pathname|struct stat *statbuf	-
 lstrlenA	win	int	-	LPCSTR lpString	-
@@ -278,9 +309,11 @@ memcpy	c	void *	-	void *dest|const void *src|size_t n	-
 memmove	c	void *	-	void *dest|const void *src|size_t n	-
 memset	c	void *	-	void *s|int c|size_t n	-
 mkdir	posix	int	-	const char *pathname|mode_t mode	-
+mktime	c	time_t	-	struct tm *tm	-
 mmap	posix	void *	map_result	void *addr|size_t length|int prot|int flags|int fd|off_t offset	-|-|prot|map_flags|-|-
 mprotect	posix	int	-	void *addr|size_t len|int prot	-|-|prot
 munmap	posix	int	-	void *addr|size_t length	-
+nanosleep	posix	int	-	const struct timespec *req|struct timespec *rem	-
 ntohl	win	unsigned long	-	unsigned long netlong	-
 ntohs	win	u_short	-	u_short netshort	-
 open	posix	int	-	const char *pathname|int flags|...	-|open_flags|-
@@ -300,6 +333,7 @@ pthread_mutex_unlock	posix	int	-	pthread_mutex_t *mutex	-
 ptrace	posix	long	-	int request|pid_t pid|void *addr|void *data	ptrace|-|-|-
 putchar	c	int	-	int c	-
 puts	c	int	-	const char *s	-
+pututline	posix	struct utmp *	-	const struct utmp *ut	-
 raise	posix	int	-	int sig	signal
 rand	c	int	-	-	-
 rawmemchr	posix	void *	-	const void *s|int c	-
@@ -334,6 +368,7 @@ strcat	c	char *	-	char *dest|const char *src	-
 strchr	c	char *	-	const char *s|int c	-
 strcmp	c	int	-	const char *s1|const char *s2	-
 strcpy	c	char *	-	char *dest|const char *src	-
+strftime	c	size_t	-	char *s|size_t max|const char *format|const struct tm *tm	-
 strlen	c	size_t	-	const char *s	-
 strncmp	c	int	-	const char *s1|const char *s2|size_t n	-
 strncpy	c	char *	-	char *dest|const char *src|size_t n	-

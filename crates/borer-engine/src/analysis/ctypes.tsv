@@ -131,6 +131,7 @@ _Bool	u8
 __int64	i64
 bool	u8
 char	char
+clockid_t	i32
 double	f64
 float	f32
 gid_t	u32

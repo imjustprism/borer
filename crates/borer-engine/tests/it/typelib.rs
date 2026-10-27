@@ -363,3 +363,40 @@ fn declared_parameters_type_the_arguments_passed_to_them() {
     assert!(text.contains("(char *a1)"), "{text}");
     assert!(!header.contains("contradicted"), "{header}");
 }
+
+/// A parameter passed whole as a library function's structure pointer
+/// takes that pointer type.
+///
+/// `inflateEnd(a1)` hands the parameter on as zlib's stream, a
+/// `struct z_stream_s *`; `mov rsi, rdi; xor edi, edi` then
+/// `clock_gettime(0, a1)` hands it on as a `struct timespec *`. Both read
+/// `void *` or `uint64_t` before, which said only how wide.
+#[test]
+fn a_parameter_passed_as_a_library_structure_takes_its_type() {
+    let mut code = vec![0x48, 0x83, 0xec, 0x08]; // ASM: sub rsp, 8
+    let at = TEXT + u64::try_from(code.len()).expect("small");
+    code.extend_from_slice(&call_slot(at, RDATA));
+    code.extend_from_slice(&[
+        0x48, 0x83, 0xc4, 0x08, // ASM: add rsp, 8
+        0xc3, // ASM: ret
+    ]);
+    let p = image(BinaryFormat::Elf, &code, &[0u8; 8], &["inflateEnd"]);
+    let (text, header) = decompiled(&p);
+    assert!(text.contains("(struct z_stream_s *a1)"), "{text}");
+    assert!(!header.contains("contradicted"), "{header}");
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x08, // ASM: sub rsp, 8
+        0x48, 0x89, 0xfe, // ASM: mov rsi, rdi
+        0x31, 0xff, // ASM: xor edi, edi
+    ];
+    let at = TEXT + u64::try_from(code.len()).expect("small");
+    code.extend_from_slice(&call_slot(at, RDATA));
+    code.extend_from_slice(&[
+        0x48, 0x83, 0xc4, 0x08, // ASM: add rsp, 8
+        0xc3, // ASM: ret
+    ]);
+    let p = image(BinaryFormat::Elf, &code, &[0u8; 8], &["clock_gettime"]);
+    let (text, header) = decompiled(&p);
+    assert!(text.contains("(struct timespec *a1)"), "{text}");
+    assert!(!header.contains("contradicted"), "{header}");
+}

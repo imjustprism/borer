@@ -5,7 +5,7 @@
 //! [`prototypes`](super::prototypes) knows the arity of eight thousand SDK
 //! functions and nothing of their types. This is the typed layer over the
 //! ones that matter most to a reader (files, memory, processes, the
-//! registry, sockets, the C library, POSIX): a call to `CreateFileW` passes
+//! registry, sockets, the C library, POSIX, zlib): a call to `CreateFileW` passes
 //! `GENERIC_READ`, not `0x80000000`, a `void` API leaves no result for the
 //! caller to bind, and `mmap(.., 3, ..)` protects `PROT_READ | PROT_WRITE`.
 //!
@@ -26,7 +26,7 @@ use crate::program::BinaryFormat;
 /// The platform whose rows a declaration belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Os {
-    /// The C standard library, which every platform has.
+    /// The C standard library and zlib, which every platform has.
     C,
     /// POSIX and Linux: what an ELF or a Mach-O calls.
     Posix,

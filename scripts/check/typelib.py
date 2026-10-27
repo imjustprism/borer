@@ -17,7 +17,8 @@ documentation: the Win32 reference on learn.microsoft.com (the parameter
 names and types each function page lists, and the documented values of the
 constants those pages name), the C standard library, and the POSIX
 specification and Linux man-pages for the POSIX rows (the Linux Standard
-Base for glibc's `__*_chk` entry points), with the values glibc
+Base for glibc's `__*_chk` entry points), the zlib manual for zlib's stream
+functions, with the values glibc
 uses on Linux x86 and x86-64 (where the kernel and glibc agree; `O_*`,
 `MAP_*` and the signal numbers differ on other architectures). No header
 text is copied: each declaration is restated as a list of parameter types
@@ -32,7 +33,7 @@ functions an agent reads most (files, memory, processes, the registry,
 sockets, libc), and a function it covers takes its arity from here too.
 
 `os` is `win` for the Windows API, `posix` for POSIX and Linux, and `c` for
-the C standard library, which both have: a PE reads the `win` and `c` rows,
+the C standard library and zlib, which both have: a PE reads the `win` and `c` rows,
 an ELF or Mach-O the `posix` and `c` rows, so `socket` can name the address
 families each platform numbers its own way.
 
@@ -107,6 +108,7 @@ CTYPES: dict[str, str] = {
     "nfds_t": "ulong",
     "useconds_t": "u32",
     "time_t": "i64",
+    "clockid_t": "i32",
     "pthread_t": "word",
     "sighandler_t": "ptr",
     "FILE": "word",
@@ -2556,6 +2558,145 @@ C: list[tuple[str, str, str | None, list[Param]]] = [
     ("rand", "int", None, []),
     ("srand", "void", None, [("unsigned int", "seed", None)]),
     ("time", "time_t", None, [("time_t *", "tloc", None)]),
+    ("localtime", "struct tm *", None, [("const time_t *", "timep", None)]),
+    ("gmtime", "struct tm *", None, [("const time_t *", "timep", None)]),
+    ("mktime", "time_t", None, [("struct tm *", "tm", None)]),
+    ("asctime", "char *", None, [("const struct tm *", "tm", None)]),
+    (
+        "strftime",
+        "size_t",
+        None,
+        [
+            ("char *", "s", None),
+            ("size_t", "max", None),
+            ("const char *", "format", None),
+            ("const struct tm *", "tm", None),
+        ],
+    ),
+    # zlib's stream functions, whose first parameter is the stream
+    # (`z_streamp`, a pointer to `struct z_stream_s`); `uInt`, `uLong` and
+    # `Bytef` are spelled as the C types they name.
+    (
+        "deflateInit_",
+        "int",
+        None,
+        [
+            ("struct z_stream_s *", "strm", None),
+            ("int", "level", None),
+            ("const char *", "version", None),
+            ("int", "stream_size", None),
+        ],
+    ),
+    (
+        "deflateInit2_",
+        "int",
+        None,
+        [
+            ("struct z_stream_s *", "strm", None),
+            ("int", "level", None),
+            ("int", "method", None),
+            ("int", "windowBits", None),
+            ("int", "memLevel", None),
+            ("int", "strategy", None),
+            ("const char *", "version", None),
+            ("int", "stream_size", None),
+        ],
+    ),
+    ("deflate", "int", None, [("struct z_stream_s *", "strm", None), ("int", "flush", None)]),
+    ("deflateEnd", "int", None, [("struct z_stream_s *", "strm", None)]),
+    ("deflateReset", "int", None, [("struct z_stream_s *", "strm", None)]),
+    (
+        "deflateSetDictionary",
+        "int",
+        None,
+        [
+            ("struct z_stream_s *", "strm", None),
+            ("const unsigned char *", "dictionary", None),
+            ("unsigned int", "dictLength", None),
+        ],
+    ),
+    (
+        "deflateParams",
+        "int",
+        None,
+        [("struct z_stream_s *", "strm", None), ("int", "level", None), ("int", "strategy", None)],
+    ),
+    (
+        "deflateBound",
+        "unsigned long",
+        None,
+        [("struct z_stream_s *", "strm", None), ("unsigned long", "sourceLen", None)],
+    ),
+    (
+        "deflatePrime",
+        "int",
+        None,
+        [("struct z_stream_s *", "strm", None), ("int", "bits", None), ("int", "value", None)],
+    ),
+    (
+        "inflateInit_",
+        "int",
+        None,
+        [
+            ("struct z_stream_s *", "strm", None),
+            ("const char *", "version", None),
+            ("int", "stream_size", None),
+        ],
+    ),
+    (
+        "inflateInit2_",
+        "int",
+        None,
+        [
+            ("struct z_stream_s *", "strm", None),
+            ("int", "windowBits", None),
+            ("const char *", "version", None),
+            ("int", "stream_size", None),
+        ],
+    ),
+    ("inflate", "int", None, [("struct z_stream_s *", "strm", None), ("int", "flush", None)]),
+    ("inflateEnd", "int", None, [("struct z_stream_s *", "strm", None)]),
+    ("inflateReset", "int", None, [("struct z_stream_s *", "strm", None)]),
+    (
+        "inflateReset2",
+        "int",
+        None,
+        [("struct z_stream_s *", "strm", None), ("int", "windowBits", None)],
+    ),
+    (
+        "inflateSetDictionary",
+        "int",
+        None,
+        [
+            ("struct z_stream_s *", "strm", None),
+            ("const unsigned char *", "dictionary", None),
+            ("unsigned int", "dictLength", None),
+        ],
+    ),
+    (
+        "inflateGetDictionary",
+        "int",
+        None,
+        [
+            ("struct z_stream_s *", "strm", None),
+            ("unsigned char *", "dictionary", None),
+            ("unsigned int *", "dictLength", None),
+        ],
+    ),
+    ("inflateSync", "int", None, [("struct z_stream_s *", "strm", None)]),
+    (
+        "inflatePrime",
+        "int",
+        None,
+        [("struct z_stream_s *", "strm", None), ("int", "bits", None), ("int", "value", None)],
+    ),
+    ("inflateMark", "long", None, [("struct z_stream_s *", "strm", None)]),
+    (
+        "inflateValidate",
+        "int",
+        None,
+        [("struct z_stream_s *", "strm", None), ("int", "check", None)],
+    ),
 ]
 
 POSIX: list[tuple[str, str, str | None, list[Param]]] = [
@@ -2635,6 +2776,40 @@ POSIX: list[tuple[str, str, str | None, list[Param]]] = [
     ("unlink", "int", None, [("const char *", "pathname", None)]),
     ("mkdir", "int", None, [("const char *", "pathname", None), ("mode_t", "mode", None)]),
     ("rmdir", "int", None, [("const char *", "pathname", None)]),
+    (
+        "localtime_r",
+        "struct tm *",
+        None,
+        [("const time_t *", "timep", None), ("struct tm *", "result", None)],
+    ),
+    (
+        "gmtime_r",
+        "struct tm *",
+        None,
+        [("const time_t *", "timep", None), ("struct tm *", "result", None)],
+    ),
+    (
+        "nanosleep",
+        "int",
+        None,
+        [("const struct timespec *", "req", None), ("struct timespec *", "rem", None)],
+    ),
+    (
+        "clock_gettime",
+        "int",
+        None,
+        [("clockid_t", "clockid", None), ("struct timespec *", "tp", None)],
+    ),
+    (
+        "gettimeofday",
+        "int",
+        None,
+        [("struct timeval *", "tv", None), ("struct timezone *", "tz", None)],
+    ),
+    ("getutent", "struct utmp *", None, []),
+    ("getutid", "struct utmp *", None, [("const struct utmp *", "ut", None)]),
+    ("getutline", "struct utmp *", None, [("const struct utmp *", "ut", None)]),
+    ("pututline", "struct utmp *", None, [("const struct utmp *", "ut", None)]),
     ("opendir", "DIR *", None, [("const char *", "name", None)]),
     ("readdir", "struct dirent *", None, [("DIR *", "dirp", None)]),
     ("closedir", "int", None, [("DIR *", "dirp", None)]),
