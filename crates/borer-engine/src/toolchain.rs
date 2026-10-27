@@ -629,7 +629,11 @@ fn msvc(rich: &[(u16, u16, u32)]) -> Option<Finding> {
         .iter()
         .filter(|(id, _)| *id >= 0x103)
         .filter_map(|&(id, name)| {
-            let n: u32 = rich.iter().filter(|e| e.0 == id).map(|e| e.2).sum();
+            let n: u64 = rich
+                .iter()
+                .filter(|e| e.0 == id)
+                .map(|e| u64::from(e.2))
+                .sum();
             (n > 0).then(|| format!("{name} {n}"))
         })
         .collect();
@@ -966,6 +970,8 @@ mod tests {
         assert_eq!(f.confidence, Confidence::High);
         assert_eq!(f.evidence[1], "objects by language: C 30, C++ 200");
         assert!(msvc(&[(1, 0, 10)]).is_none());
+        let big = msvc(&[(0x105, 1, u32::MAX), (0x105, 2, 1)]).expect("an MSVC finding");
+        assert_eq!(big.evidence[1], "objects by language: C++ 4294967296");
     }
 
     /// Older toolsets are named by their one build, 50727 by its product
