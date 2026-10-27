@@ -77,14 +77,31 @@ pub(crate) fn number(s: &str) -> Option<(u64, usize)> {
     Some((v, lead + prefix + len))
 }
 
-/// Returns the value of `s` when the whole of it is a decimal or `0x`
-/// hexadecimal number: `33` is, `a2` and `12 + a2` are not.
+/// Strips leading casts: `(uint8_t)local_c` is `local_c`.
+///
+/// # Arguments
+///
+/// * `s` - The expression.
+pub(crate) fn strip_casts(mut s: &str) -> &str {
+    while let Some(rest) = s.strip_prefix('(')
+        && let Some(close) = rest.find(')')
+        && let ty = rest[..close].trim()
+        && (ty.ends_with("_t") || ty.ends_with('*') || ty == "char" || ty == "int")
+    {
+        s = rest[close + 1..].trim_start();
+    }
+    s.trim()
+}
+
+/// Returns the value of `s` when the whole of it, casts stripped, is a
+/// decimal or `0x` hexadecimal number: `33` and `(uint8_t)0x21` are, `a2`
+/// and `12 + a2` are not.
 ///
 /// # Arguments
 ///
 /// * `s` - The text.
 pub(crate) fn literal(s: &str) -> Option<u64> {
-    let s = s.trim();
+    let s = strip_casts(s);
     number(s).and_then(|(v, len)| (len == s.len()).then_some(v))
 }
 

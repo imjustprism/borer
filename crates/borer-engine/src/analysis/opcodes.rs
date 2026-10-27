@@ -15,7 +15,7 @@
 
 use std::fmt::Write as _;
 
-use super::encode::{Encoding, compact_writes, encoding_through, literal};
+use super::encode::{Encoding, compact_writes, encoding_through, literal, strip_casts};
 use super::schema::{
     Call, Field, calls_in_order, compact_fields, declared_names, ident_char, is_call_of, reads_in,
     returned_bytes, schema_of, signature_line,
@@ -144,22 +144,6 @@ pub struct OpcodeSend {
 /// * `s` - The text.
 fn is_ident(s: &str) -> bool {
     s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && s.chars().all(ident_char)
-}
-
-/// Strips leading casts: `(uint8_t)local_c` is `local_c`.
-///
-/// # Arguments
-///
-/// * `s` - The expression.
-fn strip_casts(mut s: &str) -> &str {
-    while let Some(rest) = s.strip_prefix('(')
-        && let Some(close) = rest.find(')')
-        && let ty = rest[..close].trim()
-        && (ty.ends_with("_t") || ty.ends_with('*') || ty == "char" || ty == "int")
-    {
-        s = rest[close + 1..].trim_start();
-    }
-    s.trim()
 }
 
 /// Returns the net braces a line opens, outside string and character
@@ -634,7 +618,7 @@ pub fn dispatch_of(
 fn spell_labels(labels: &[String]) -> String {
     labels
         .iter()
-        .map(|l| literal(strip_casts(l)).map_or_else(|| l.clone(), |v| format!("{v:#x}")))
+        .map(|l| literal(l).map_or_else(|| l.clone(), |v| format!("{v:#x}")))
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -901,7 +885,7 @@ pub fn send_of(
         let [stream, value] = first.args.as_slice() else {
             return None;
         };
-        let opcode = literal(strip_casts(value)).filter(|_| is_ident(stream))?;
+        let opcode = literal(value).filter(|_| is_ident(stream))?;
         let earlier = calls[..at].iter().any(|c| c.args.first() == Some(stream));
         let writer = resolve(program, analysis, overlay, &first.callee).ok()?;
         if earlier || analysis.function(writer).is_none_or(|f| f.thunk.is_some()) {
@@ -1022,7 +1006,7 @@ mod tests {
         assert_eq!(braces("} else {"), 0);
         assert_eq!(strip_casts("(uint8_t)local_c"), "local_c");
         assert_eq!(strip_casts("(a1 + 1)"), "(a1 + 1)");
-        assert_eq!(literal(strip_casts("(uint8_t)0x21")), Some(0x21));
+        assert_eq!(literal("(uint8_t)0x21"), Some(0x21));
         assert_eq!(literal("33"), Some(33));
         assert_eq!(literal("a2"), None);
         assert_eq!(literal("12 + a2"), None);
