@@ -872,12 +872,12 @@ fn cli_messages_lists_registered_classes() {
 )]
 fn cli_anchors_judges_a_manifest() {
     let exe = env!("CARGO_BIN_EXE_borer");
-    let (ok, fns) = run(&["functions", exe, "", "0", "1"]);
+    let (ok, fns) = run(&["functions", exe, "", "0", "100"]);
     assert!(ok, "{fns}");
     let row = fns
         .lines()
-        .find(|l| l.starts_with("0x"))
-        .expect("one function");
+        .find(|l| l.starts_with("0x") && !l.contains('<'))
+        .expect("a function whose name has no spaces");
     let mut cols = row.split_whitespace();
     let entry = cols.next().expect("entry");
     let name = cols.last().expect("name");
@@ -1405,12 +1405,12 @@ fn cli_about_answers_one_name() {
     let (ok, out) = run(&["about", exe, "no_such_name_xyz"]);
     assert!(ok, "about failed:\n{out}");
     assert!(out.starts_with("# nothing is named"), "{out}");
-    let (ok, fns) = run(&["functions", exe, "", "0", "1"]);
+    let (ok, fns) = run(&["functions", exe, "", "0", "100"]);
     assert!(ok, "{fns}");
     let row = fns
         .lines()
-        .find(|l| l.starts_with("0x"))
-        .expect("one function");
+        .find(|l| l.starts_with("0x") && !l.contains('<'))
+        .expect("a function whose name has no spaces");
     let name = row.split_whitespace().last().expect("name");
     let (ok, out) = run(&["about", exe, name]);
     assert!(ok, "{out}");
