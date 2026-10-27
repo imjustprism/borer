@@ -873,6 +873,26 @@ pub(crate) struct LiveScanParams {
     pub(crate) count_only: Option<bool>,
 }
 
+/// Parameters for `live_path`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LivePathParams {
+    /// Target address: live, static, or a name.
+    pub(crate) address: String,
+    /// Most pointer reads per chain (default 4, max 6).
+    pub(crate) depth: Option<u32>,
+    /// Largest offset added after a read, in bytes (default 4096, max 65536).
+    pub(crate) max_offset: Option<u32>,
+    /// Start chains only in this module (default: any module).
+    pub(crate) module: Option<String>,
+    /// Chains to skip.
+    pub(crate) offset: Option<u32>,
+    /// Max chains (default 20, max 200).
+    pub(crate) limit: Option<u32>,
+    /// Header line only.
+    pub(crate) count_only: Option<bool>,
+}
+
 /// Widens a count parameter to the index type.
 ///
 /// A `u32` fits a 32-bit or wider `usize`, so nothing is lost on any

@@ -168,7 +168,8 @@ const LIVE: &str = "Live: {live_attach}(process) opens the running program read-
      {live_instances} finds a class's objects by vtable, {live_read} reads typed values, \
      {live_watch}(name, address) then {live_watch}(name) shows what changed, \
      {live_scan}(name, value) finds the addresses holding a value and narrows them as it \
-     changes; every live address may be a static address or a name. ";
+     changes, and {live_path}(address) finds pointer chains from a module's globals to \
+     one; every live address may be a static address or a name. ";
 
 /// The instructions' last sentence: the reload.
 const RELOAD: &str = "After a rebuild of borer, {reload} restarts the server in place.";

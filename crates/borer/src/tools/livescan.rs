@@ -1,20 +1,27 @@
 //! The live search tools: finding the addresses in the attached process
-//! that hold a value.
+//! that hold a value, and the pointer chains that reach an address.
 
 use std::fmt::Write as _;
 
 use borer_engine::live::Memory as _;
+use borer_engine::live::path::{self, Base};
 use borer_engine::live::scan::{self, Compare, Found, Needle, Scope};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
-use crate::params::{Annotation, LiveScanParams, Page, ScanCompare, ScanScope, must_fit_a_row};
+use crate::params::{
+    Annotation, LivePathParams, LiveScanParams, Page, ScanCompare, ScanScope, count_param,
+    must_fit_a_row,
+};
 use crate::safety::{Effect, effects};
 use crate::tools::live::LiveSession;
 
 /// Most result sets a session holds.
 pub(crate) const SETS_MAX: usize = 8;
+
+/// The largest `max_offset` a pointer search takes, in bytes.
+const MAX_OFFSET_CAP: u32 = 0x1_0000;
 
 /// A value scan's result set, as the session keeps it under its name.
 #[derive(Debug, Clone)]
@@ -149,7 +156,7 @@ fn compare_word(compare: ScanCompare) -> &'static str {
 fn next_hint(name: &str, hits: usize) -> String {
     match hits {
         0 => format!("next: no hit is left; live_scan(name=\"{name}\", value=...) starts over\n"),
-        1..=8 => "next: live_read(address) or live_watch(name, address) on a hit\n".to_owned(),
+        1..=8 => "next: live_read(address) or live_watch(name, address) on a hit; live_path(address) for a pointer chain that finds it after a restart\n".to_owned(),
         _ => format!(
             "next: change the value in the program, then live_scan(name=\"{name}\", compare=changed|unchanged|increased|decreased|equal)\n"
         ),
@@ -270,6 +277,107 @@ impl BorerServer {
         })
         .map(|text| page.limit.noted(text))
     }
+
+    /// Finds pointer chains from fixed places to an address of the process.
+    ///
+    /// # Arguments
+    ///
+    /// * `LivePathParams` - Destructured tool parameters (see its field docs).
+    ///
+    /// # Errors
+    ///
+    /// Invalid params when no process is attached, the address does not
+    /// resolve, the module is unknown, or a count is zero.
+    #[tool(
+        description = "Find pointer chains to an address in the attached process, the CE pointer scan (read-only): [[base+off]+o1]+o2 = address, where base is a module (any, or `module`) or a thread-local singleton slot of the mapped binary. depth reads per chain (default 4, max 6), each offset 0..max_offset (default 4096, max 65536). Shortest first; every chain is walked again before it is shown; a base in the binary is labelled with its static address and singleton or name. Rough past 4096 addresses per level, and says so. Paged (default 20, max 200).",
+        meta = effects(&[Effect::ReadsProcessMemory]),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    pub(crate) fn live_path(
+        &self,
+        Parameters(LivePathParams {
+            address,
+            depth,
+            max_offset,
+            module,
+            offset,
+            limit,
+            count_only,
+        }): Parameters<LivePathParams>,
+    ) -> Result<String, ErrorData> {
+        let page = Page::new(offset, limit, count_only, 20, 200)?;
+        let depth = count_param(depth, 4, 6, "depth")?;
+        let asked = max_offset.unwrap_or(0x1000);
+        let max_off = u64::from(asked.min(MAX_OFFSET_CAP));
+        let program = self.loaded();
+        let overlay = self.overlay();
+        self.with_live(|s| {
+            let target = self.live_addr(s, &address)?;
+            let modules = s.process.modules();
+            let to_base = |m: &borer_engine::live::Module| Base {
+                name: m.name.clone(),
+                start: m.base,
+                len: m.size,
+            };
+            let mut bases: Vec<Base> = match &module {
+                Some(m) => vec![to_base(scan::module_named(&modules, m)?)],
+                None => modules.iter().map(to_base).collect(),
+            };
+            let analysis = match (&program, s.rebase.is_ok()) {
+                (Some(_), true) => self.ensure_analysis().ok(),
+                _ => None,
+            };
+            if let (None, Some(block), Some(a)) = (&module, s.tls_block, &analysis) {
+                for (off, class) in &a.classes.tls_slots {
+                    bases.push(Base {
+                        name: format!("{class}::instance"),
+                        start: block.saturating_add(*off),
+                        len: borer_engine::num::from_usize(s.word),
+                    });
+                }
+            }
+            let mut found = path::paths(&s.process, target, &bases, depth.n, max_off, s.word);
+            path::verify(&s.process, &mut found, target, s.word);
+            let label = |at: u64| match (&program, &analysis, &s.rebase) {
+                (Some(p), Some(a), Ok(r)) => path::base_label(r, p, a, &overlay, at),
+                _ => None,
+            };
+            let mut notes = format!(
+                "# target {target:#x}; {} levels searched, offsets 0..={max_off:#x}, {} bases\n",
+                found.levels,
+                bases.len()
+            );
+            notes.push_str(&found.swept.line(s.process.unreadable_regions()));
+            notes.push_str(&scan::stop_line(found.swept.stop, &format!("{} chains", path::CHAINS_MAX)));
+            let mut out = path::paths_page(
+                &found,
+                &bases,
+                &label,
+                &notes,
+                page.offset,
+                page.limit.n,
+                page.count_only,
+            );
+            if found.chains.is_empty() && !page.count_only {
+                out.push_str("next: no chain within these limits; raise depth or max_offset, or the value may sit on a thread's stack, which no base covers\n");
+            }
+            Ok(out)
+        })
+        .map(|text| {
+            let text = page.limit.noted(text);
+            let text = depth.noted(text);
+            if asked > MAX_OFFSET_CAP {
+                format!("# max_offset {asked} capped at {MAX_OFFSET_CAP}\n{text}")
+            } else {
+                text
+            }
+        })
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -278,7 +386,9 @@ mod tests {
 
     use rmcp::handler::server::wrapper::Parameters;
 
-    use crate::params::{LiveAttachParams, LiveScanParams, ScanCompare, ScanKind, ScanScope};
+    use crate::params::{
+        LiveAttachParams, LivePathParams, LiveScanParams, ScanCompare, ScanKind, ScanScope,
+    };
 
     /// A scan's parameters with only the name set.
     fn scan(name: &str) -> LiveScanParams {
@@ -297,11 +407,12 @@ mod tests {
     }
 
     /// A value planted on this process's heap is found by a first scan,
-    /// kept by the next scans as it rises and when it equals a value.
+    /// kept by the next scans as it rises and when it equals a value, and
+    /// reached by a pointer chain from a global of this executable.
     ///
     /// # Panics
     ///
-    /// When the planted value is not found, or a wrong call is
+    /// When the planted value or the chain is not found, or a wrong call is
     /// taken.
     #[test]
     fn a_planted_value_is_scanned_narrowed_and_reached() {
@@ -368,6 +479,31 @@ mod tests {
         ] {
             server.live_scan(Parameters(wrong)).expect_err("refused");
         }
+        let chains = server
+            .live_path(Parameters(LivePathParams {
+                address: target,
+                depth: Some(2),
+                max_offset: Some(0x100),
+                module: None,
+                offset: None,
+                limit: Some(200),
+                count_only: None,
+            }))
+            .expect("the chains");
+        let root = format!("{:#x}", core::ptr::from_ref(&ROOT) as usize);
+        let held = server
+            .live_scan(Parameters(LiveScanParams {
+                value: Some(format!("{:#x}", outer.as_ptr() as usize)),
+                kind: Some(ScanKind::U64),
+                ..scan("root")
+            }))
+            .expect("a scan for the pointer to outer");
+        assert!(
+            chains.contains("]+0x10]+0x28"),
+            "{chains}\nROOT {root} outer {:p}\n{held}",
+            outer.as_ptr()
+        );
+        assert!(chains.starts_with("# showing "), "{chains}");
         server.live_detach().expect("detach");
         drop((inner, outer));
     }

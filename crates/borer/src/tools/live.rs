@@ -416,7 +416,7 @@ impl BorerServer {
                 modules.len() - ATTACH_MODULES
             );
         }
-        out.push_str("next: live_object(address or singleton name), live_instances(class), live_read(address, kind), live_watch(name, address), live_scan(name, value)\n");
+        out.push_str("next: live_object(address or singleton name), live_instances(class), live_read(address, kind), live_watch(name, address), live_scan(name, value), live_path(address)\n");
         if let Some(was) = lock(&self.live).replace(session) {
             let _ = write!(
                 out,
