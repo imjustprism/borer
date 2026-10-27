@@ -11,10 +11,12 @@
 //! instances of a class are found by the vtable the analysis knows
 //! ([`instances`]), and a [`Snapshot`] of memory diffs against a later
 //! read. A value is found by scanning for it and narrowing what was found
-//! ([`scan`]). The process itself sits behind
+//! ([`scan`]), and a heap address is reached from a module's globals by the
+//! pointer chains [`path`] finds. The process itself sits behind
 //! [`Memory`], which the server implements over the operating system and
 //! the tests over a buffer, so nothing here opens a handle.
 
+pub mod path;
 pub mod scan;
 
 use std::borrow::Cow;
