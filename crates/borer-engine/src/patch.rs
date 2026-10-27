@@ -422,9 +422,9 @@ fn plan_detour(
         Ok(out)
     };
     let avoid = (at, back);
-    let caves = find_caves(program, at, avoid);
     let fits = |c: &Cave| body(c.va).is_ok_and(|b| b.len() <= c.len);
-    let cave = choose_cave(program, analysis, overlay, &caves, cave_opt, avoid, fits)?;
+    let caves = find_caves(program, at, avoid, fits);
+    let cave = choose_cave(program, analysis, overlay, &caves, cave_opt, avoid)?;
     let code = body(cave.va)?;
     if code.len() > cave.len {
         return Err(format!(
@@ -503,25 +503,22 @@ fn near_jmp(bits: u32, target: u64) -> Result<Instruction, String> {
 }
 
 /// Picks the cave to detour into: the one the caller named, else the first
-/// listed run that fits.
+/// listed run.
 ///
 /// # Arguments
 ///
 /// * `program` - The image, for a named cave's section and run.
 /// * `analysis` - For resolving a named cave.
 /// * `overlay` - For a user name.
-/// * `caves` - The usable runs, longest first.
+/// * `caves` - The runs the detour encodes at and fits in, longest first.
 /// * `named` - A cave address or name the caller gave, or `None`.
 /// * `avoid` - The `[start, end)` the trampoline overwrites, which a cave must
 ///   not touch.
-/// * `fits` - Whether the detour encodes at a listed cave and fits in it;
-///   the longest run may be out of reach of an operand the new code reads.
 ///
 /// # Errors
 ///
 /// When a named cave does not resolve, is out of a jump's reach or is not a
-/// padding run in executable code, or when no listed run holds and encodes
-/// the detour. [`plan_detour`] checks a named cave's length and overlap
+/// padding run in executable code, or when no run is listed. [`plan_detour`] checks a named cave's length and overlap
 /// against the code it encodes there.
 fn choose_cave(
     program: &Program,
@@ -530,7 +527,6 @@ fn choose_cave(
     caves: &[Cave],
     named: Option<&str>,
     avoid: (u64, u64),
-    fits: impl Fn(&Cave) -> bool,
 ) -> Result<Cave, String> {
     if let Some(text) = named {
         let va = resolve_suggesting(program, analysis, overlay, text)?;
@@ -549,8 +545,7 @@ fn choose_cave(
         return Ok(Cave { va, off, len, byte });
     }
     caves
-        .iter()
-        .find(|c| fits(c))
+        .first()
         .copied()
         .ok_or_else(|| "no code cave holds the detour and encodes it; free a larger run".to_owned())
 }
@@ -587,7 +582,9 @@ fn padding_run(program: &Program, va: u64) -> Option<(usize, u8)> {
 ///
 /// A cave is a run of a single padding byte (`00`, `cc` or `90`) at least
 /// [`CAVE_MIN`] long inside an executable section, in reach of a relative jump
-/// from `at` and clear of the bytes the trampoline overwrites. These are
+/// from `at`, clear of the bytes the trampoline overwrites and holding the
+/// detour as it encodes there (the longest run may be out of reach of an
+/// operand the new code reads, so this is checked before the cap). These are
 /// candidates, not proven-free space: a run of `90` or `00` can be real
 /// instructions on a path the plan has not ruled out, so the caller confirms a
 /// cave before trusting it.
@@ -597,11 +594,17 @@ fn padding_run(program: &Program, va: u64) -> Option<(usize, u8)> {
 /// * `program` - The image.
 /// * `at` - The patch site, for the reachability filter.
 /// * `avoid` - The `[start, end)` the trampoline overwrites.
+/// * `fits` - Whether the detour encodes at a run and fits in it.
 ///
 /// # Returns
 ///
 /// Up to [`MAX_CAVES`] caves, longest first, then by address.
-fn find_caves(program: &Program, at: u64, avoid: (u64, u64)) -> Vec<Cave> {
+fn find_caves(
+    program: &Program,
+    at: u64,
+    avoid: (u64, u64),
+    fits: impl Fn(&Cave) -> bool,
+) -> Vec<Cave> {
     let mut caves = Vec::new();
     for s in program.sections.iter().filter(|s| s.executable) {
         let Some(bytes) = program.section_bytes(s) else {
@@ -622,12 +625,15 @@ fn find_caves(program: &Program, at: u64, avoid: (u64, u64)) -> Vec<Cave> {
                 && reachable(program, at, va)
                 && !overlaps((va, end), avoid)
             {
-                caves.push(Cave {
+                let cave = Cave {
                     va,
                     off: s.file_off.0.saturating_add(crate::num::from_usize(i)),
                     len,
                     byte,
-                });
+                };
+                if fits(&cave) {
+                    caves.push(cave);
+                }
                 if caves.len() >= MAX_CAVES * 2 {
                     keep_best(&mut caves);
                 }
@@ -649,8 +655,9 @@ fn keep_best(caves: &mut Vec<Cave>) {
     caves.truncate(MAX_CAVES);
 }
 
-/// Tells whether a relative jump reaches from `at` to `va`: in 32-bit code
-/// the displacement wraps, so every address does.
+/// Tells whether the trampoline's relative jump at `at` reaches `va`: its
+/// displacement counts from the jump's end, and in 32-bit code it wraps, so
+/// every address does.
 ///
 /// # Arguments
 ///
@@ -658,7 +665,8 @@ fn keep_best(caves: &mut Vec<Cave>) {
 /// * `at` - The jump's address.
 /// * `va` - The target.
 fn reachable(program: &Program, at: u64, va: u64) -> bool {
-    let delta = i128::from(va) - i128::from(at);
+    let end = at.wrapping_add(crate::num::from_usize(TRAMPOLINE_LEN));
+    let delta = i128::from(va) - i128::from(end);
     program.arch.bitness() == Some(32) || i32::try_from(delta).is_ok()
 }
 
