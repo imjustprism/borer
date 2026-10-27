@@ -1253,9 +1253,9 @@ pub fn schema_of(
     Ctx::new(program, analysis, overlay).schema(entry, None)
 }
 
-/// Returns every read a fragment of pseudo-C makes off `stream`, each
-/// reader followed as [`schema_of`] follows it: the reads of one case of
-/// a dispatcher, or of the line reading its opcode.
+/// Returns every read `calls` of a fragment of pseudo-C make off `stream`,
+/// each reader followed as [`schema_of`] follows it: the reads of one case
+/// of a dispatcher, or of the call reading its opcode.
 ///
 /// Besides readers handed an out pointer, a fragment may read values its
 /// readers return, `v = read(stream);`, each as wide as [`returned_bytes`]
@@ -1266,13 +1266,16 @@ pub fn schema_of(
 /// * `program` - The loaded image.
 /// * `analysis` - Discovery results.
 /// * `overlay` - Names in force.
-/// * `text` - The fragment.
+/// * `text` - The fragment, for where a packed read's parts go.
+/// * `calls` - The calls to read, as [`calls_in_order`] found them in it,
+///   each with the loop bound it repeats under.
 /// * `stream` - The stream's identifier in it.
 pub(crate) fn reads_in(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     text: &str,
+    calls: &[Call],
     stream: &str,
 ) -> Vec<Field> {
     let ctx = Ctx::new(program, analysis, overlay);
@@ -1296,7 +1299,7 @@ pub(crate) fn reads_in(
             name: String::new(),
         })
     };
-    calls_in_order(text)
+    calls
         .iter()
         .flat_map(|c| {
             returned(c).map_or_else(

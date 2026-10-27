@@ -439,7 +439,14 @@ fn case_of(
     {
         let input = handler_input(program, analysis, overlay, handler, one, stream);
         let direct = input.as_ref().map_or_else(Vec::new, |(text, param)| {
-            reads_in(program, analysis, overlay, text, param)
+            reads_in(
+                program,
+                analysis,
+                overlay,
+                text,
+                &calls_in_order(text),
+                param,
+            )
         });
         let schema = schema_of(program, analysis, overlay, handler).filter(|s| sized(&s.fields));
         if sized(&direct) || schema.is_some() {
@@ -462,19 +469,31 @@ fn case_of(
             };
         }
     }
-    let lines: Vec<&str> = text.lines().collect();
     let fields = passing
         .iter()
         .flat_map(|c| {
             if c.args.first().is_some_and(|a| a == stream) {
-                let line = c.line.checked_sub(1).and_then(|i| lines.get(i)).copied();
-                return reads_in(program, analysis, overlay, line.unwrap_or_default(), stream);
+                return reads_in(
+                    program,
+                    analysis,
+                    overlay,
+                    &text,
+                    std::slice::from_ref(*c),
+                    stream,
+                );
             }
             resolve(program, analysis, overlay, &c.callee)
                 .ok()
                 .and_then(|h| handler_input(program, analysis, overlay, h, c, stream))
                 .map_or_else(Vec::new, |(text, param)| {
-                    reads_in(program, analysis, overlay, &text, &param)
+                    reads_in(
+                        program,
+                        analysis,
+                        overlay,
+                        &text,
+                        &calls_in_order(&text),
+                        &param,
+                    )
                 })
         })
         .collect();
@@ -549,10 +568,17 @@ pub fn dispatch_of(
         let kind = if returned {
             returned_bytes(program, analysis, overlay, &read.callee).map(|b| format!("u{}", b * 8))
         } else {
-            reads_in(program, analysis, overlay, lines[read.line - 1], stream)
-                .first()
-                .map(|f| f.kind.clone())
-                .filter(|k| k != "?")
+            reads_in(
+                program,
+                analysis,
+                overlay,
+                &text,
+                std::slice::from_ref(read),
+                stream,
+            )
+            .first()
+            .map(|f| f.kind.clone())
+            .filter(|k| k != "?")
         };
         let Some(kind) = kind else {
             continue;

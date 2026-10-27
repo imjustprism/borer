@@ -234,7 +234,8 @@ fn loop_bounds(lines: &[&str]) -> Vec<Option<String>> {
 /// * `streams` - Text a stream class contains, from `[types] stream`.
 /// * `seed` - An identifier known to be the stream though no type names
 ///   it, whose copies are followed as an accessor's are; given one, no
-///   other object counts as a stream.
+///   other object counts as a stream, and a copy also assigned anything
+///   else is not followed.
 ///
 /// # Returns
 ///
@@ -298,6 +299,17 @@ fn stream_vars(
         {
             vars.push(lhs.trim().to_owned());
         }
+    }
+    if seed.is_some() {
+        let copies = vars.clone();
+        vars.retain(|v| {
+            Some(v.as_str()) == seed
+                || !lines.iter().any(|l| {
+                    l.split_once(" = ").is_some_and(|(lhs, rhs)| {
+                        lhs.trim() == v && !copies.iter().any(|c| c == rhs.trim_end_matches(';'))
+                    })
+                })
+        });
     }
     (vars, param)
 }
@@ -1786,7 +1798,7 @@ sub_140cca7cc(rax, this + 0x20);
     /// When a copy is missed or a write miscounted.
     #[test]
     fn a_seeded_stream_is_followed_through_its_copies() {
-        let text = "write(a1, 33);\nwrite(a1, a2->field_0x8);\nrbx = a1;\nwrite(rbx, a2->field_0xc);\nwrite(rbx, a4);\na3->vtable[3](a3, &local_10, 8);\nwrite(a3, a2->field_0x10);\n";
+        let text = "write(a1, 33);\nwrite(a1, a2->field_0x8);\nrbx = a1;\nwrite(rbx, a2->field_0xc);\nwrite(rbx, a4);\na3->vtable[3](a3, &local_10, 8);\nwrite(a3, a2->field_0x10);\nrcx = a1;\nrcx = a3;\nwrite(rcx, a2->field_0x20);\n";
         let (sites, streams, param) = sites_in(text, &[], Some("a1"));
         assert_eq!(streams, ["a1", "rbx"]);
         assert_eq!(param.as_deref(), Some("a1"));
