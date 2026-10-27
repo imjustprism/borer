@@ -1,7 +1,7 @@
 //! .NET obfuscator markers, each with its evidence.
 //!
-//! The markers are an obfuscator's own type or attribute names, renamed symbols, a module initializer, bodies
-//! that do not decode, call proxies, and the string decryptor's shape (a
+//! The markers are an obfuscator's own type or attribute names, renamed
+//! symbols, a module initializer, bodies that do not decode, call proxies, and the string decryptor's shape (a
 //! static method taking integers or strings and returning a string, called
 //! right after a constant at most of its many call sites).
 //!
@@ -57,12 +57,14 @@ const PROXIES: usize = 10;
 /// Most samples one row's evidence names.
 const SAMPLES: usize = 3;
 
-/// Whether a simple name is not what a compiler emits: a character that is
-/// not a printable ASCII identifier's (a C# or VB name, or a compiler's
-/// `<>`, `$`, `` ` `` and `.` names).
+/// Whether a simple name is not what a compiler emits.
+///
+/// Such a name has a character that is neither a letter or digit in any
+/// script (C# and VB take Unicode identifiers) nor one of a compiler's
+/// `<>`, `$`, `` ` `` and `.` names: an invisible or control character.
 fn renamed(name: &str) -> bool {
     !name.chars().all(|c| {
-        c.is_ascii_alphanumeric()
+        c.is_alphanumeric()
             || matches!(c, '_' | '<' | '>' | '$' | '`' | '.' | '-' | '=' | '|' | '@')
     })
 }
