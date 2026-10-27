@@ -7,18 +7,7 @@ use std::fmt::Write as _;
 
 use crate::hashing::{imphash, md5, paired, sha256, tlsh};
 use crate::program::Program;
-
-/// Lowercase hex of a digest.
-///
-/// # Arguments
-///
-/// * `digest` - The bytes.
-fn hex(digest: &[u8]) -> String {
-    digest.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
-}
+use crate::text::hex;
 
 /// Largest file [`hashes_line`] hashes: a summary of a bigger one stays
 /// quick, and `borer://hashes` hashes it on request.

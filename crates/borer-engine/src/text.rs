@@ -15,6 +15,8 @@
 //! ([`nearest`]), so a miss teaches the right name instead of costing a
 //! listing to find it.
 
+use std::fmt::Write as _;
+
 /// Longest run of outside text any single row or message keeps.
 ///
 /// Set above the longest name real binaries carry: a demangled C++ method with
@@ -300,6 +302,21 @@ impl Count for usize {
 #[must_use]
 pub(crate) fn plural(n: impl Count) -> &'static str {
     if n.count() == 1 { "" } else { "s" }
+}
+
+/// Returns bytes as lowercase hex with no separators.
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes.
+#[must_use]
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// Reads whitespace-tolerant pairs of hex digits into bytes.

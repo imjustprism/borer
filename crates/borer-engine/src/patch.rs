@@ -27,6 +27,7 @@ use crate::isa::x86::{
     InstructionBlock, OpKind,
 };
 use crate::program::Program;
+use crate::text::hex;
 
 /// Most replacement bytes a plan accepts: a patch is small, and a larger
 /// request is a mistake worth refusing rather than a cave to detour into.
@@ -765,19 +766,6 @@ fn patch_file(program: &Program, regions: &[Region]) -> String {
         );
     }
     out
-}
-
-/// Renders bytes as lowercase hex with no separators.
-///
-/// # Arguments
-///
-/// * `bytes` - The bytes.
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 /// Emulates the planned bytes in place from `at` and reports whether the
