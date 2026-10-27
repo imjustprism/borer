@@ -302,6 +302,28 @@ pub(crate) fn plural(n: impl Count) -> &'static str {
     if n.count() == 1 { "" } else { "s" }
 }
 
+/// Reads whitespace-tolerant pairs of hex digits into bytes.
+///
+/// # Arguments
+///
+/// * `text` - The hex, with spaces allowed between pairs.
+///
+/// # Returns
+///
+/// The bytes, or `None` when a character is not a hex digit or the count of
+/// digits is odd.
+#[must_use]
+pub fn parse_hex_bytes(text: &str) -> Option<Vec<u8>> {
+    let clean: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if clean.is_empty() || !clean.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..clean.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(clean.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

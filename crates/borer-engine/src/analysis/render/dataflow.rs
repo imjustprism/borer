@@ -1452,25 +1452,7 @@ impl ExperimentSpec {
     }
 }
 
-/// Parses a run of hex byte pairs, spaces allowed, into bytes.
-///
-/// # Arguments
-///
-/// * `text` - Hex digits, optionally space-separated (`90 90` or `9090`).
-///
-/// # Returns
-///
-/// The bytes, or `None` when a character is not hex or the digit count is odd.
-pub(super) fn parse_hex_bytes(text: &str) -> Option<Vec<u8>> {
-    let clean: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    if clean.is_empty() || !clean.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..clean.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(clean.get(i..i + 2)?, 16).ok())
-        .collect()
-}
+pub(super) use crate::text::parse_hex_bytes;
 
 #[cfg(test)]
 mod tests {
