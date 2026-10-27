@@ -20,6 +20,7 @@ use std::ops::ControlFlow;
 use super::scan::{Stop, Swept, sweep};
 use super::{Memory, Rebase, SCAN_MAX};
 use crate::analysis::{Analysis, Overlay};
+use crate::cancel::Cancel;
 use crate::memory::le_word;
 use crate::num::from_usize;
 use crate::program::Program;
@@ -283,6 +284,9 @@ pub fn follow(mem: &dyn Memory, chain: &Chain, word: usize) -> Option<u64> {
 /// Walks every chain again and drops those that no longer reach the
 /// target, counting them in [`Paths::dropped`].
 ///
+/// When the request's deadline passes, the chains not yet walked are
+/// dropped too, never shown unchecked, and the search says it stopped.
+///
 /// # Arguments
 ///
 /// * `mem` - The process.
@@ -290,11 +294,19 @@ pub fn follow(mem: &dyn Memory, chain: &Chain, word: usize) -> Option<u64> {
 /// * `target` - The address the chains must reach.
 /// * `word` - The pointer width in bytes.
 pub fn verify(mem: &dyn Memory, paths: &mut Paths, target: u64, word: usize) {
-    let before = paths.chains.len();
-    paths
-        .chains
-        .retain(|c| follow(mem, c, word) == Some(target));
-    paths.dropped += before - paths.chains.len();
+    let mut kept = Vec::with_capacity(paths.chains.len());
+    for chain in std::mem::take(&mut paths.chains) {
+        if Cancel::raised() {
+            paths.swept.stop = Some(Stop::Deadline);
+            break;
+        }
+        if follow(mem, &chain, word) == Some(target) {
+            kept.push(chain);
+        } else {
+            paths.dropped += 1;
+        }
+    }
+    paths.chains = kept;
 }
 
 /// Spells a chain the way Cheat Engine's pointer notation does:
@@ -465,6 +477,12 @@ mod tests {
         let mut found = paths(&mem, target, &bases, 3, 0x100, 8);
         verify(&mem, &mut found, target, 8);
         assert_eq!(found.dropped, 0);
+        let mut late = paths(&mem, target, &bases, 3, 0x100, 8);
+        let flag = Cancel::new();
+        flag.raise();
+        flag.within(|| verify(&mem, &mut late, target, 8));
+        assert!(late.chains.is_empty(), "nothing unchecked is shown");
+        assert_eq!(late.swept.stop, Some(Stop::Deadline));
         assert!(paths(&mem, target, &bases, 1, 0x100, 8).chains.is_empty());
         let label = |at: u64| (at == 0x40_0100).then(|| "g_world".to_owned());
         let page = paths_page(&found, &bases, &label, "", 0, 1, false);
