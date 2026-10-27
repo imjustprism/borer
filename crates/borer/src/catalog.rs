@@ -129,7 +129,7 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://children",
-        "Programs and containers embedded in the file, each found by its signature and kept only when its headers validate (PE, ELF, Mach-O, zip, gzip, xz, 7z, cab, squashfs, cpio, uImage, cramfs, Android boot image), with offset, size and a one-line identity, plus the high-entropy runs no header explains: packed, compressed or encrypted bytes. load_binary path=<file>@<off> opens a program row as a program of its own; containers are listed, not extracted",
+        "Programs and containers embedded in the file, each found by its signature and kept only when its headers validate (PE, ELF, Mach-O, zip, gzip, xz, 7z, cab, squashfs, cpio, uImage, cramfs, Android boot image), with offset, size and a one-line identity, plus the high-entropy runs no header explains: packed, compressed or encrypted bytes, then each wrapper payload's entries with offset and size (PyInstaller, .NET single-file bundle, NSIS, Inno Setup, AutoIt, py2exe). load_binary path=<file>@<off> opens a program row as a program of its own; containers are listed, not extracted",
     ),
     (
         "borer://asserts",
