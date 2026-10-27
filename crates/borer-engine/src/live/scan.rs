@@ -189,8 +189,9 @@ pub enum Needle {
 impl Needle {
     /// Parses a value of a kind as an agent typed it.
     ///
-    /// An integer is decimal (a sign for a signed kind) or `0x` hex, and
-    /// must fit the kind. A float's tolerance, when none is given, is half
+    /// An integer is decimal (a sign for a signed kind) or `0x` hex (its
+    /// bits as they are, so `i32` `0xffffffff` is -1), and must fit the
+    /// kind. A float's tolerance, when none is given, is half
     /// a unit of its last digit (`100` matches 99.5 to 100.5, `1.25` 1.245
     /// to 1.255), as a game shows a value rounded. A string is matched as
     /// its bytes, case and all.
@@ -212,39 +213,14 @@ impl Needle {
             return Err("tolerance applies to f32 and f64 only".to_owned());
         }
         match kind {
-            Kind::U8 | Kind::U16 | Kind::U32 | Kind::U64 => {
-                let t = text.trim();
-                let v = t
-                    .strip_prefix("0x")
-                    .or_else(|| t.strip_prefix("0X"))
-                    .map_or_else(|| t.parse::<u64>(), |h| u64::from_str_radix(h, 16))
-                    .map_err(|_| format!("{t} is not an unsigned integer (decimal or 0x hex)"))?;
-                let bits = 8 * kind.size(8);
-                if bits < 64 && v >> bits != 0 {
-                    return Err(format!("{t} does not fit {bits} bits"));
-                }
-                Ok(Needle::Int { kind, bits: v })
-            }
-            Kind::I8 | Kind::I16 | Kind::I32 | Kind::I64 => {
-                let t = text.trim();
-                let v = t
-                    .parse::<i64>()
-                    .map_err(|_| format!("{t} is not a signed decimal integer"))?;
-                let bits = 8 * kind.size(8);
-                let lo = i64::MIN >> (64 - bits);
-                if v < lo || v > !lo {
-                    return Err(format!("{t} does not fit a signed {bits}-bit integer"));
-                }
-                let mask = if bits == 64 {
-                    u64::MAX
-                } else {
-                    (1 << bits) - 1
-                };
-                Ok(Needle::Int {
-                    kind,
-                    bits: v.cast_unsigned() & mask,
-                })
-            }
+            Kind::U8
+            | Kind::U16
+            | Kind::U32
+            | Kind::U64
+            | Kind::I8
+            | Kind::I16
+            | Kind::I32
+            | Kind::I64 => int_needle(kind, text.trim()),
             Kind::F32 | Kind::F64 => float_needle(kind, text.trim(), tolerance),
             Kind::CStr | Kind::WStr => {
                 let bytes: Vec<u8> = if kind == Kind::CStr {
@@ -399,6 +375,39 @@ impl Needle {
     }
 }
 
+/// Parses an integer needle: decimal, signed for a signed kind, or `0x`
+/// hex taken as the value's bits.
+///
+/// # Arguments
+///
+/// * `kind` - An integer kind.
+/// * `t` - The value, trimmed.
+///
+/// # Errors
+///
+/// When the text is not a number of that form or does not fit the kind.
+fn int_needle(kind: Kind, t: &str) -> Result<Needle, String> {
+    let width = 8 * kind.size(8);
+    let mask = u64::MAX >> (64 - width);
+    let signed = matches!(kind, Kind::I8 | Kind::I16 | Kind::I32 | Kind::I64);
+    let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X"));
+    let bits = match hex {
+        Some(h) => u64::from_str_radix(h, 16).ok().filter(|v| v & !mask == 0),
+        None if signed => t.parse::<i64>().ok().and_then(|v| {
+            let lo = i64::MIN >> (64 - width);
+            (lo..=!lo).contains(&v).then_some(v.cast_unsigned() & mask)
+        }),
+        None => t.parse::<u64>().ok().filter(|v| v & !mask == 0),
+    };
+    let bits = bits.ok_or_else(|| {
+        format!(
+            "{t} is not a {} (decimal or 0x hex, within {width} bits)",
+            kind_name(kind)
+        )
+    })?;
+    Ok(Needle::Int { kind, bits })
+}
+
 /// Parses a float needle, with the tolerance its digits imply when none is
 /// given.
 ///
@@ -424,9 +433,11 @@ fn float_needle(kind: Kind, t: &str, tolerance: Option<f64>) -> Result<Needle, S
         Some(tol) if tol >= 0.0 && tol.is_finite() => tol,
         Some(tol) => return Err(format!("tolerance {tol} must be a number at least 0")),
         None => {
-            let mantissa = t.split(['e', 'E']).next().unwrap_or(t);
+            let (mantissa, exponent) = t.split_once(['e', 'E']).unwrap_or((t, "0"));
             let digits = mantissa.split_once('.').map_or(0, |(_, f)| f.len());
-            0.5 / 10f64.powi(i32::try_from(digits).unwrap_or(i32::MAX))
+            let digits = i32::try_from(digits).unwrap_or(i32::MAX);
+            let exponent = exponent.parse::<i32>().unwrap_or(0);
+            0.5 * 10f64.powi(exponent.saturating_sub(digits))
         }
     };
     Ok(Needle::Float {
@@ -1069,6 +1080,18 @@ pub(crate) mod tests {
         }
         assert!(Needle::parse(Kind::U32, "1", Some(0.5)).is_err());
         assert!(Needle::parse(Kind::Ptr, "1", None).is_err());
+        mem.put(0x10100, &(-1i32).to_le_bytes());
+        let hex = Needle::parse(Kind::I32, "0xffffffff", None).expect("i32 by its bits");
+        assert_eq!(scan_all(&mem, hex).hits, vec![0x10100]);
+        assert!(Needle::parse(Kind::I8, "0x100", None).is_err());
+        let tiny = Needle::parse(Kind::F64, "1.25e-3", None).expect("f64");
+        assert!(tiny.matches(&0.001_25f64.to_le_bytes()));
+        assert!(
+            !tiny.matches(&0.0f64.to_le_bytes()),
+            "+- 0.000005, not 0.005"
+        );
+        let big = Needle::parse(Kind::F64, "2e3", None).expect("f64");
+        assert!(big.matches(&2000.4f64.to_le_bytes()), "+- 500");
     }
 
     /// A string and a byte pattern match at any address, wildcards match
