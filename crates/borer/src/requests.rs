@@ -34,6 +34,9 @@ const DEADLINE_DEFAULT: Duration = Duration::from_mins(5);
 /// Most requests the engine works on at once.
 const REQUESTS_MAX: usize = 2;
 
+/// What a request the client cancelled answers, which rmcp drops.
+const CALLED_OFF: &str = "the client cancelled the request, so it stopped and answers nothing";
+
 /// The permits requests run under, and the deadline each is given.
 #[derive(Debug, Clone)]
 pub(crate) struct Gate {
@@ -116,7 +119,8 @@ impl Gate {
 
     /// Runs one request on a blocking thread once a permit is free, with
     /// its cancel flag raised when the deadline passes or the client
-    /// cancels it.
+    /// cancels it; a request the client cancels while it waits for its
+    /// permit never runs.
     ///
     /// # Arguments
     ///
@@ -138,11 +142,14 @@ impl Gate {
         stop: impl Future<Output = ()> + Send + 'static,
         work: impl FnOnce() -> R + Send + 'static,
     ) -> Result<Ran<R>, ErrorData> {
-        let _permit = self
-            .permits
-            .acquire()
-            .await
-            .map_err(|e| err_internal(format!("the request queue closed: {e}")))?;
+        let mut stop = Box::pin(stop);
+        let _permit = tokio::select! {
+            biased;
+            () = &mut stop => return Err(err_internal(CALLED_OFF)),
+            permit = self.permits.acquire() => {
+                permit.map_err(|e| err_internal(format!("the request queue closed: {e}")))?
+            }
+        };
         let cancel = Cancel::new();
         let timer = self.deadline.map(|after| {
             let cancel = cancel.clone();
@@ -167,9 +174,7 @@ impl Gate {
         }
         watch.abort();
         if called_off.is_raised() {
-            return Err(err_internal(
-                "the client cancelled the request, so it stopped and answers nothing",
-            ));
+            return Err(err_internal(CALLED_OFF));
         }
         let answer = answer.map_err(|e| err_internal(format!("the request faulted: {e}")))?;
         Ok(Ran {
@@ -259,6 +264,51 @@ mod tests {
             .expect("the request ends")
             .expect_err("a cancelled request answers nothing");
         assert!(refused.message.contains("client cancelled"), "{refused:?}");
+    }
+
+    /// A request the client cancels while it waits for a permit never
+    /// runs, so a cancelled edit changes nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the cancelled request runs or answers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_cancelled_in_the_queue_never_runs() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let gate = Gate::with_deadline(None);
+        let (free, freed) = tokio::sync::watch::channel(false);
+        let busy: Vec<_> = (0..super::REQUESTS_MAX)
+            .map(|_| {
+                let (gate, mut freed) = (gate.clone(), freed.clone());
+                tokio::spawn(async move {
+                    gate.run(std::future::pending(), move || {
+                        tokio::runtime::Handle::current()
+                            .block_on(freed.wait_for(|f| *f))
+                            .map(|_| ())
+                    })
+                    .await
+                })
+            })
+            .collect();
+        while gate.permits.available_permits() > 0 {
+            tokio::task::yield_now().await;
+        }
+        let ran = Arc::new(AtomicBool::new(false));
+        let edit = Arc::clone(&ran);
+        let refused = gate
+            .run(std::future::ready(()), move || {
+                edit.store(true, Ordering::SeqCst);
+            })
+            .await
+            .expect_err("a cancelled request answers nothing");
+        assert!(refused.message.contains("client cancelled"), "{refused:?}");
+        assert!(!ran.load(Ordering::SeqCst), "the cancelled request ran");
+        free.send(true).expect("the busy requests wait");
+        for request in busy {
+            let done = request.await.expect("the busy request ends");
+            assert!(done.is_ok_and(|r| r.answer.is_ok()));
+        }
     }
 
     /// Returns a server holding one function at `0x1000`, `mov eax, 1; ret`.
