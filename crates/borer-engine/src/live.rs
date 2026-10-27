@@ -10,13 +10,17 @@
 //! named fields the analysis recovered for its class ([`object`]), the
 //! instances of a class are found by the vtable the analysis knows
 //! ([`instances`]), and a [`Snapshot`] of memory diffs against a later
-//! read. The process itself sits behind [`Memory`], which the server
-//! implements over the operating system and the tests over a buffer, so
-//! nothing here opens a handle.
+//! read. A value is found by scanning for it and narrowing what was found
+//! ([`scan`]). The process itself sits behind
+//! [`Memory`], which the server implements over the operating system and
+//! the tests over a buffer, so nothing here opens a handle.
+
+pub mod scan;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 
 use crate::analysis::classes::class_layout;
 use crate::analysis::{Analysis, Overlay, name_of};
@@ -809,42 +813,31 @@ pub fn modules_page(
 /// * `word` - The word width in bytes.
 /// * `limit` - Most hits to collect.
 pub fn find_words(mem: &dyn Memory, targets: &[u64], word: usize, limit: usize) -> Scan {
-    let mut scan = Scan::default();
     let mask = if word == 8 { u64::MAX } else { 0xffff_ffff };
-    'regions: for region in mem.regions() {
-        if !region.writable || region.executable {
-            continue;
-        }
-        scan.regions += 1;
-        let mut at = region.base;
-        let end = region.base.saturating_add(region.size);
-        while at < end {
-            if scan.bytes >= SCAN_MAX {
-                scan.truncated = true;
-                break 'regions;
-            }
-            let len = usize::try_from(end - at).unwrap_or(CHUNK).min(CHUNK);
-            let Some(bytes) = mem.read(at, len).filter(|b| !b.is_empty()) else {
-                at = (at | (PAGE - 1)).saturating_add(1);
-                continue;
-            };
-            scan.bytes += from_usize(bytes.len());
-            let mut off = 0usize;
-            while off + word <= bytes.len() {
-                let v = le_word(&bytes[off..off + word]) & mask;
-                if targets.contains(&v) {
-                    scan.hits.push(at + from_usize(off));
-                    if scan.hits.len() >= limit {
-                        scan.truncated = true;
-                        break 'regions;
-                    }
+    let ranges: Vec<(u64, u64)> = mem
+        .regions()
+        .iter()
+        .filter(|r| r.writable && !r.executable)
+        .map(|r| (r.base, r.base.saturating_add(r.size)))
+        .collect();
+    let mut hits = Vec::new();
+    let swept = scan::sweep(mem, &ranges, 0, |at, bytes, own| {
+        for (i, w) in bytes[..own].chunks_exact(word).enumerate() {
+            if targets.contains(&(le_word(w) & mask)) {
+                hits.push(at + from_usize(i * word));
+                if hits.len() >= limit {
+                    return ControlFlow::Break(());
                 }
-                off += word;
             }
-            at = at.saturating_add(from_usize(bytes.len()));
         }
+        ControlFlow::Continue(())
+    });
+    Scan {
+        hits,
+        bytes: swept.bytes,
+        regions: swept.regions,
+        truncated: swept.stop.is_some(),
     }
-    scan
 }
 
 /// A field of the object a watch holds: what a diff names a change by,
