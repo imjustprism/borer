@@ -219,7 +219,8 @@ fn returning_reader() -> Vec<u8> {
 
 /// Assembles a dispatcher on the value `reader` returns.
 ///
-/// Case 1 stores a second returned value at object offset 4, case 2 calls
+/// Case 1 reads a `u32` into object offset 0x20 and stores a second
+/// returned value at offset 4, both in its record in order; case 2 calls
 /// [`H_A`] with the object where the stream belongs, case 3 calls [`H_B`]
 /// as it expects.
 ///
@@ -244,6 +245,11 @@ fn returned_dispatcher(at: u64, reader: u64) -> Vec<u8> {
         }
         a.jmp(done).expect("jmp");
         a.set_label(&mut cases[0]).expect("label");
+        a.lea(eax, dword_ptr(edi + 0x20)).expect("lea");
+        a.push(eax).expect("push");
+        a.push(esi).expect("push");
+        a.call(READ_U32).expect("call");
+        a.add(esp, 8).expect("add");
         a.push(esi).expect("push");
         a.call(reader).expect("call");
         a.add(esp, 4).expect("add");
@@ -559,7 +565,7 @@ fn a_returned_opcode_and_returned_reads_are_read_and_a_misfed_handler_is_not() {
     let d = opcodes::dispatch_of(&p, &a, &o, RETURNED_DISPATCH).expect("a dispatcher");
     assert!(d.returned, "{d:?}");
     assert_eq!(d.kind, "u16", "{d:?}");
-    assert_eq!(d.cases[0].fields[0].kind, "u16", "{d:?}");
+    assert_eq!(d.cases[0].fields[1].kind, "u16", "{d:?}");
     assert_eq!(d.reader, "sub_401480");
     let rows: Vec<(String, Option<u64>, Vec<&str>)> = d
         .cases
@@ -576,7 +582,7 @@ fn a_returned_opcode_and_returned_reads_are_read_and_a_misfed_handler_is_not() {
     assert_eq!(
         rows,
         [
-            ("1".to_owned(), None, vec!["sub_401480"]),
+            ("1".to_owned(), None, vec!["sub_401060", "sub_401480"]),
             ("2".to_owned(), Some(H_A), vec![]),
             ("3".to_owned(), Some(H_B), vec!["sub_401060"]),
         ],

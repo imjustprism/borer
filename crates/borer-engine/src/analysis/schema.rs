@@ -1257,9 +1257,9 @@ pub fn schema_of(
 /// reader followed as [`schema_of`] follows it: the reads of one case of
 /// a dispatcher, or of the line reading its opcode.
 ///
-/// A fragment handing the stream to no reader with an out pointer may
-/// still read values its readers return, `v = read(stream);`, each as
-/// wide as its reader's signature returns.
+/// Besides readers handed an out pointer, a fragment may read values its
+/// readers return, `v = read(stream);`, each as wide as [`returned_bytes`]
+/// says; both kinds come out in call order.
 ///
 /// # Arguments
 ///
@@ -1275,36 +1275,37 @@ pub(crate) fn reads_in(
     text: &str,
     stream: &str,
 ) -> Vec<Field> {
-    let calls = calls_in_order(text);
-    let fields = Ctx::new(program, analysis, overlay).reads_of(
-        text,
-        &calls,
-        stream,
-        None,
-        &ObjectNames::None,
-        DEPTH_MAX,
-    );
-    if !fields.is_empty() {
-        return fields;
-    }
+    let ctx = Ctx::new(program, analysis, overlay);
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
-    calls
+    let returned = |c: &Call| {
+        let [arg] = c.args.as_slice() else {
+            return None;
+        };
+        (arg == stream).then_some(())?;
+        let (lhs, rhs) = lines.get(c.line.checked_sub(1)?)?.split_once(" = ")?;
+        rhs.starts_with(c.callee.as_str()).then_some(())?;
+        let bytes = returned_bytes(program, analysis, overlay, &c.callee)?;
+        Some(Field {
+            order: String::new(),
+            dest: lhs.trim().to_owned(),
+            kind: format!("u{}", bytes * 8),
+            bytes,
+            via: c.callee.clone(),
+            repeat: c.repeat.clone(),
+            children: Vec::new(),
+            name: String::new(),
+        })
+    };
+    calls_in_order(text)
         .iter()
-        .filter(|c| c.args.len() == 1 && c.args[0] == stream)
-        .filter_map(|c| {
-            let (lhs, rhs) = lines.get(c.line.checked_sub(1)?)?.split_once(" = ")?;
-            rhs.starts_with(c.callee.as_str()).then_some(())?;
-            let bytes = returned_bytes(program, analysis, overlay, &c.callee)?;
-            Some(Field {
-                order: String::new(),
-                dest: lhs.trim().to_owned(),
-                kind: format!("u{}", bytes * 8),
-                bytes,
-                via: c.callee.clone(),
-                repeat: c.repeat.clone(),
-                children: Vec::new(),
-                name: String::new(),
-            })
+        .flat_map(|c| {
+            returned(c).map_or_else(
+                || {
+                    let one = std::slice::from_ref(c);
+                    ctx.reads_of(text, one, stream, None, &ObjectNames::None, DEPTH_MAX)
+                },
+                |f| vec![f],
+            )
         })
         .take(FIELDS_MAX)
         .collect()
