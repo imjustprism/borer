@@ -1319,9 +1319,11 @@ pub(crate) fn reads_in(
 /// the width of the scalar its signature returns.
 ///
 /// Only a function that moves its stream counts: one of its lines adds to
-/// something reached through its first parameter, so a predicate over the
-/// stream is not a read. The step is preferred to the return type, which
-/// is as wide as the register the value is returned in.
+/// something reached through its first parameter that another line reads,
+/// the cursor the value is loaded through, so a predicate over the stream
+/// is not a read and a counter bumped beside the cursor is not its step.
+/// The step is preferred to the return type, which is as wide as the
+/// register the value is returned in.
 ///
 /// # Arguments
 ///
@@ -1344,13 +1346,7 @@ pub(crate) fn returned_bytes(
     let text = plain_text_cached(program, analysis, overlay, overlay.fingerprint(), entry)?;
     let sig = signature_line(&text)?;
     let stream = declared_names(sig).into_iter().next()?;
-    let step = text
-        .lines()
-        .filter_map(|l| l.trim().split_once(" += "))
-        .find(|(lhs, _)| has_word(lhs, &stream))?
-        .1
-        .trim_end_matches(';');
-    if let Some(n) = literal(step)
+    if let Some(n) = literal(cursor_step(&text, &stream)?)
         && let Ok(n) = usize::try_from(n)
         && [1, 2, 4, 8].contains(&n)
     {
@@ -1359,6 +1355,25 @@ pub(crate) fn returned_bytes(
     let head = sig.split('(').next()?;
     let (ty, _) = head.trim().rsplit_once(' ')?;
     scalar_bytes(ty.trim())
+}
+
+/// Returns what a reader adds to its cursor: the right side of the first
+/// `+=` onto something reached through `stream` that another line reads.
+///
+/// # Arguments
+///
+/// * `text` - The reader's pseudo-C.
+/// * `stream` - Its stream parameter.
+fn cursor_step<'t>(text: &'t str, stream: &str) -> Option<&'t str> {
+    text.lines()
+        .filter_map(|l| l.trim().split_once(" += "))
+        .find(|(lhs, _)| {
+            has_word(lhs, stream)
+                && text
+                    .lines()
+                    .any(|l| !l.contains(" += ") && l.contains(lhs.trim()))
+        })
+        .map(|(_, step)| step.trim_end_matches(';'))
 }
 
 /// How many reads a schema holds that came to something, nested ones
@@ -1765,6 +1780,19 @@ return 0;
         let wire = crate::pack::defaults("types", "wire");
         assert!(is_wire("a2 (Network::SafeBitReader)", wire));
         assert!(!is_wire("a2 (IO::BinaryReader)", wire));
+    }
+
+    /// A reader's step is what it adds to the cursor it loads through, not
+    /// to a counter beside it.
+    ///
+    /// # Panics
+    ///
+    /// When the counter's step is taken.
+    #[test]
+    fn a_cursor_step_is_the_one_the_load_goes_through() {
+        let text = "*(uint32_t*)(a1 + 8) += 1;\nax = *(uint16_t*)*(uint32_t*)a1;\n*(uint32_t*)a1 += 2;\nreturn ax;\n";
+        assert_eq!(cursor_step(text, "a1"), Some("2"));
+        assert_eq!(cursor_step("*(uint32_t*)(a1 + 8) += 1;\n", "a1"), None);
     }
 
     /// Calls come out in order with their arguments split at top-level

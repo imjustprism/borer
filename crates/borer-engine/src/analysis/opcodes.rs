@@ -371,6 +371,21 @@ fn sized(fields: &[Field]) -> bool {
     fields.iter().any(|f| f.bytes > 0 || f.kind != "?")
 }
 
+/// Returns a handler's record as its caller reads it: every top-level
+/// field not repeated in the handler repeats under the loop around the
+/// call.
+///
+/// # Arguments
+///
+/// * `fields` - The handler's record.
+/// * `repeat` - The loop bound the call sits under, when it does.
+fn repeated(mut fields: Vec<Field>, repeat: Option<&String>) -> Vec<Field> {
+    for f in fields.iter_mut().filter(|f| f.repeat.is_none()) {
+        f.repeat = repeat.cloned();
+    }
+    fields
+}
+
 /// Returns a handler's text and the parameter `call` hands it `stream` in.
 ///
 /// # Arguments
@@ -465,7 +480,7 @@ fn case_of(
             return Case {
                 labels,
                 handler: Some(handler),
-                fields,
+                fields: repeated(fields, one.repeat.as_ref()),
             };
         }
     }
@@ -486,14 +501,15 @@ fn case_of(
                 .ok()
                 .and_then(|h| handler_input(program, analysis, overlay, h, c, stream))
                 .map_or_else(Vec::new, |(text, param)| {
-                    reads_in(
+                    let reads = reads_in(
                         program,
                         analysis,
                         overlay,
                         &text,
                         &calls_in_order(&text),
                         &param,
-                    )
+                    );
+                    repeated(reads, c.repeat.as_ref())
                 })
         })
         .collect();
@@ -1038,6 +1054,13 @@ mod tests {
         assert_eq!(read("f(a1, &v);\nh(&v);\nswitch (v) {"), None);
         assert!(!case(vec![field("?", 0)]).reads());
         assert!(case(vec![field("?", 0), field("u16", 2)]).reads());
+        let inner = Field {
+            repeat: Some("m".to_owned()),
+            ..field("u8", 1)
+        };
+        let looped = repeated(vec![field("u16", 2), inner], Some(&"n".to_owned()));
+        let repeats: Vec<Option<&str>> = looped.iter().map(|f| f.repeat.as_deref()).collect();
+        assert_eq!(repeats, [Some("n"), Some("m")]);
         let lines = [
             "switch (v) {",
             "case 1: {",
