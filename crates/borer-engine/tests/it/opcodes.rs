@@ -45,7 +45,8 @@ const WRITE_U32: u64 = 0x4013a0;
 const SENDER: u64 = 0x4013c0;
 /// A serializer writing no constant first: not a sender.
 const NOT_SENDER: u64 = 0x401400;
-/// A sender of opcode `0x22` whose first call hands its object a constant.
+/// A sender of opcode `0x22`, handed as `0x122` to a byte writer, whose
+/// first call hands its object a constant.
 const SETUP_SENDER: u64 = 0x401440;
 /// `read_u16(stream)`: returns the word at the cursor and steps past it.
 const READ_RET: u64 = 0x401480;
@@ -496,7 +497,7 @@ fn program() -> Program {
     put(NOT_SENDER, &serializer(NOT_SENDER, None, false));
     put(
         SETUP_SENDER,
-        &serializer(SETUP_SENDER, Some((0x22, WRITE_U8)), true),
+        &serializer(SETUP_SENDER, Some((0x122, WRITE_U8)), true),
     );
     put(READ_RET, &returning_reader());
     put(H_RET, &returning_handler());

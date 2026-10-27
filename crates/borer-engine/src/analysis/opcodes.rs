@@ -126,7 +126,7 @@ impl Dispatch {
 pub struct OpcodeSend {
     /// The function.
     pub entry: u64,
-    /// The opcode it writes first.
+    /// The opcode it writes first, cut to the width its writer stores.
     pub opcode: u64,
     /// The writer it hands the opcode, as the text names it.
     pub writer: String,
@@ -913,9 +913,14 @@ pub fn send_of(
                 .is_some_and(|w| w.via == first.callee && w.kind != "?")
                 && e.fields.iter().skip(1).any(|w| w.kind != "?")
         })?;
+        let bits = u32::try_from(encoding.fields.first()?.bits).ok()?;
+        let wire = opcode
+            & u64::MAX
+                .checked_shr(64u32.saturating_sub(bits))
+                .unwrap_or(u64::MAX);
         Some(OpcodeSend {
             entry,
-            opcode,
+            opcode: wire,
             writer: first.callee.clone(),
             write_at: first_call(program, analysis, overlay, entry, &first.callee),
             encoding,
