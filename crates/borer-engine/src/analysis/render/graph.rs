@@ -97,7 +97,7 @@ pub fn call_path(
             label(from),
             label(to),
             seen.len(),
-            unseen_line(a, Reach::Walked(&seen), "#").unwrap_or_default()
+            unseen_line(p, a, Reach::Walked(&seen), "#").unwrap_or_default()
         );
     }
     let mut chain = vec![to];
@@ -311,7 +311,7 @@ pub fn callgraph(
         g.nodes.len(),
         g.imports.len()
     );
-    out.push_str(&unseen::graph_line(a, walk, targets_of(root).len(), &drawn));
+    unseen::graph_line(&mut out, p, a, walk, targets_of(root).len(), &drawn);
     out
 }
 

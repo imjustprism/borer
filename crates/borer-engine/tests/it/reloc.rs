@@ -152,7 +152,7 @@ fn a_relative_slot_reads_as_its_target_and_names_it() {
         "{:#x?}",
         a.functions.iter().map(|f| f.entry).collect::<Vec<_>>()
     );
-    let xrefs = xrefs_tsv(&a, &Overlay::default(), TABLED, 0, 50, false);
+    let xrefs = xrefs_tsv(&p, &a, &Overlay::default(), TABLED, 0, 50, false);
     assert!(xrefs.contains(&format!("-: {SLOT:#x} ")), "{xrefs}");
     let summary = p.summary();
     assert!(

@@ -402,7 +402,7 @@ fn the_xrefs_header_counts_the_rows_it_prints() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let out = borer_engine::analysis::render::xrefs_tsv(&a, &o, 0x2040, 0, 60, false);
+    let out = borer_engine::analysis::render::xrefs_tsv(&p, &a, &o, 0x2040, 0, 60, false);
     let head = out.lines().next().unwrap_or_default();
     let rows = out
         .lines()
@@ -425,7 +425,7 @@ fn an_xrefs_count_only_answer_is_one_line() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let out =
-        borer_engine::analysis::render::xrefs_tsv(&a, &Overlay::default(), 0x2040, 0, 60, true);
+        borer_engine::analysis::render::xrefs_tsv(&p, &a, &Overlay::default(), 0x2040, 0, 60, true);
     assert_eq!(out.lines().count(), 1, "{out}");
     assert!(out.contains("xrefs to 0x2040"), "{out}");
     assert!(!out.contains("showing"), "a count states no page: {out}");
@@ -2613,9 +2613,9 @@ fn calls_through_an_import_slot_keep_their_kind() {
 /// always printed, so a typed kind changes no answer.
 #[test]
 fn an_xrefs_row_spells_each_site_kind() {
-    let a = Analysis::compute(&fixture());
-    let out =
-        borer_engine::analysis::render::xrefs_tsv(&a, &Overlay::default(), 0x2050, 0, 60, false);
+    let (p, o) = (fixture(), Overlay::default());
+    let a = Analysis::compute(&p);
+    let out = borer_engine::analysis::render::xrefs_tsv(&p, &a, &o, 0x2050, 0, 60, false);
     assert!(out.contains("0x1230 call"), "{out}");
     assert!(out.contains("0x1210 jmp"), "{out}");
 }
@@ -3158,7 +3158,7 @@ fn folded_rows_name_the_functions_they_stand_for() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let refs = xrefs_tsv(&a, &o, 0x2040, 0, 60, false);
+    let refs = xrefs_tsv(&p, &a, &o, 0x2040, 0, 60, false);
     let by_string = functions_by_string_tsv(&p, &a, &o, "BORER", 0, 10);
     assert!(
         refs.contains(
@@ -3197,7 +3197,7 @@ fn refs_from_and_summary() {
     assert!(summary.contains("\"hello, borer world\""), "{summary}");
     let strings = function_strings_tsv(&p, &a, &o, 0x1200).unwrap();
     assert!(strings.contains("0x2040"), "{strings}");
-    let refs = xrefs_tsv(&a, &o, 0x2040, 0, 60, false);
+    let refs = xrefs_tsv(&p, &a, &o, 0x2040, 0, 60, false);
     assert!(
         refs.contains("(+1 function running the same code)"),
         "the registration pair was listed twice: {refs}"

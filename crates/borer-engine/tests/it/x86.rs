@@ -790,7 +790,7 @@ fn an_indexed_table_read_is_a_reference_to_the_table() {
         &[0u8; 16],
     );
     let a = Analysis::compute(&p);
-    let refs = xrefs_tsv(&a, &Overlay::default(), 0x402000, 0, 60, false);
+    let refs = xrefs_tsv(&p, &a, &Overlay::default(), 0x402000, 0, 60, false);
     assert!(refs.contains("# 1 xrefs to 0x402000"), "{refs}");
     assert!(refs.contains("sub_401000: 0x401000 index\n"), "{refs}");
 }
@@ -805,10 +805,10 @@ fn a_conditional_tail_call_is_a_reference() {
     use borer_engine::analysis::render::xrefs_tsv;
     let mut code = vec![0xe8, 0x0b, 0x00, 0x00, 0x00, 0x85, 0xc9, 0x75, 0x07, 0xc3];
     code.extend_from_slice(&[0xcc; 6]);
-    code.extend_from_slice(&[0x31, 0xc0, 0xc3]);
-    let a = Analysis::compute(&image(&code));
+    let p = image(&[code, vec![0x31, 0xc0, 0xc3]].concat());
+    let a = Analysis::compute(&p);
     assert!(a.function(0x401010).is_some(), "the callee is missing");
-    let refs = xrefs_tsv(&a, &Overlay::default(), 0x401010, 0, 60, false);
+    let refs = xrefs_tsv(&p, &a, &Overlay::default(), 0x401010, 0, 60, false);
     assert!(
         refs.contains("0x401000 call, 0x401007 jmp"),
         "the conditional tail call is missing: {refs}"
@@ -831,7 +831,7 @@ fn an_operand_naming_the_headers_is_a_reference() {
     );
     p.format = BinaryFormat::Pe;
     let a = Analysis::compute(&p);
-    let refs = xrefs_tsv(&a, &Overlay::default(), 0x400000, 0, 60, false);
+    let refs = xrefs_tsv(&p, &a, &Overlay::default(), 0x400000, 0, 60, false);
     assert!(
         refs.contains("sub_401000: 0x401000 imm/mem"),
         "the header reference is missing: {refs}"
@@ -1003,7 +1003,7 @@ fn a_pointer_to_data_in_an_executable_section_is_a_reference() {
     let p = image_with_data(&[0xc3], &[0x00, 0x11, 0x40, 0x00]);
     let a = Analysis::compute(&p);
     assert!(a.function_at(0x401100).is_none(), "the data became code");
-    let refs = xrefs_tsv(&a, &Overlay::default(), 0x401100, 0, 60, false);
+    let refs = xrefs_tsv(&p, &a, &Overlay::default(), 0x401100, 0, 60, false);
     assert!(
         refs.contains("-: 0x402000 ptr"),
         "the pointer is missing: {refs}"
@@ -1024,7 +1024,7 @@ fn two_reads_from_one_function_are_two_reference_rows() {
         &[0u8; 16],
     );
     let a = Analysis::compute(&p);
-    let refs = xrefs_tsv(&a, &Overlay::default(), 0x402000, 0, 60, false);
+    let refs = xrefs_tsv(&p, &a, &Overlay::default(), 0x402000, 0, 60, false);
     assert!(
         refs.contains("sub_401000: 0x401000 index, 0x401007 index\n"),
         "{refs}"

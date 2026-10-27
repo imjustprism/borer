@@ -276,6 +276,7 @@ impl BorerServer {
                 }
             };
             Ok(render::xrefs_tsv(
+                p,
                 a,
                 o,
                 va,

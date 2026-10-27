@@ -735,7 +735,15 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let va = s.resolve(&a, arg(args, 2, "xrefs needs an address")?)?;
             print!(
                 "{}",
-                render::xrefs_tsv(&a, &s.overlay, va, 0, render::XREF_ROWS_DEFAULT, false)
+                render::xrefs_tsv(
+                    &s.program,
+                    &a,
+                    &s.overlay,
+                    va,
+                    0,
+                    render::XREF_ROWS_DEFAULT,
+                    false
+                )
             );
         }
         Query::Cfg => {

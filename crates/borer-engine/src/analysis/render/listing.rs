@@ -584,6 +584,7 @@ pub enum XrefView {
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded image, for its imports.
 /// * `a` - The analysis.
 /// * `o` - User names for the containing functions.
 /// * `target` - The referenced address.
@@ -595,6 +596,7 @@ pub enum XrefView {
 ///
 /// As [`xrefs`].
 pub fn xrefs_tsv(
+    p: &Program,
     a: &Analysis,
     o: &Overlay,
     target: u64,
@@ -607,7 +609,7 @@ pub fn xrefs_tsv(
     } else {
         XrefView::Page { offset, limit }
     };
-    xrefs(a, o, target, view)
+    xrefs(p, a, o, target, view)
 }
 
 /// Renders the cross-references to one address, one row per function
@@ -630,6 +632,7 @@ pub fn xrefs_tsv(
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded image, for its imports.
 /// * `a` - The analysis.
 /// * `o` - User names for the containing functions.
 /// * `target` - The referenced address.
@@ -642,7 +645,7 @@ pub fn xrefs_tsv(
 /// page, ending with how many more functions run the same code when the
 /// group folds several; a pointer stored in data is in function `-`. The
 /// count-only view is the first line alone.
-pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
+pub fn xrefs(p: &Program, a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
     let sites = a.xrefs_to(target);
     let mut by_function: BTreeMap<Option<u64>, Vec<&RefSite>> = BTreeMap::new();
     for s in sites {
@@ -687,7 +690,7 @@ pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
     let callers = sites.iter().filter(|s| s.is_branch()).count();
     let short = callers < unseen::SHORT_CALLERS && (callers > 0 || a.function_at(target).is_some());
     let unseen = short
-        .then(|| unseen_line(a, Reach::Program, "#"))
+        .then(|| unseen_line(p, a, Reach::Program, "#"))
         .flatten()
         .unwrap_or_default();
     let incomplete = if a.incomplete {
@@ -1196,20 +1199,27 @@ mod tests {
         );
         a.xrefs.insert(0x3000, vec![site(0x4000)]);
         let o = Overlay::default();
+        let p = Program::raw(
+            Vec::new(),
+            crate::program::Arch::X86_64,
+            0,
+            None,
+            Vec::new(),
+        );
         let page = XrefView::Page {
             offset: 0,
             limit: 1,
         };
-        let capped = xrefs(&a, &o, 0x1000, page);
+        let capped = xrefs(&p, &a, &o, 0x1000, page);
         assert!(
             capped.starts_with(&format!("# {cap}+ (capped: ")),
             "{capped}"
         );
-        let short = xrefs(&a, &o, 0x3000, page);
+        let short = xrefs(&p, &a, &o, 0x3000, page);
         assert!(short.starts_with("# 1 xrefs to 0x3000"), "{short}");
         assert!(!short.contains(INCOMPLETE_NOTE), "{short}");
         a.incomplete = true;
-        let cut = xrefs(&a, &o, 0x3000, XrefView::Count);
+        let cut = xrefs(&p, &a, &o, 0x3000, XrefView::Count);
         assert!(
             cut.ends_with(&format!(
                 "{INCOMPLETE_NOTE}
