@@ -202,7 +202,7 @@ impl BorerServer {
     /// does not read, the set named does not exist, or the session holds
     /// [`SETS_MAX`] sets and the name is new.
     #[tool(
-        description = "Find addresses in the attached process holding a value, read-only. First scan: value, kind, scope. The hits are kept as set `name` (8 sets, 2M hits each); name + compare re-reads only them; name alone pages them. Rows: address value module+offset, paged.",
+        description = "Find addresses in the attached process holding a value. First scan: value, kind, scope; hits kept as set `name` (8 sets). Next scan: name + compare re-reads them; name alone pages them.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,

@@ -697,9 +697,9 @@ pub(crate) struct LiveAttachParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LiveReadParams {
-    /// Live or static address, or a name; `live:0x..` is never rebased.
+    /// Address or name; `live:0x..` is not rebased.
     pub(crate) address: String,
-    /// What to decode the bytes as (default u64).
+    /// Default u64.
     pub(crate) kind: Option<ReadKind>,
     /// Values (default 1, max 256).
     pub(crate) count: Option<u32>,
@@ -709,9 +709,9 @@ pub(crate) struct LiveReadParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LiveObjectParams {
-    /// Object address: live, static, or a name.
+    /// Address or name.
     pub(crate) address: String,
-    /// Class; default: the one its vtable names.
+    /// Default: by its vtable.
     pub(crate) class: Option<String>,
 }
 
@@ -749,11 +749,11 @@ pub(crate) struct LiveModulesParams {
 pub(crate) struct LiveWatchParams {
     /// Watch name.
     pub(crate) name: String,
-    /// Address to start watching; omit to diff.
+    /// Start a watch here; omit to diff.
     pub(crate) address: Option<String>,
-    /// Bytes (default: the class's size, else 256; max 65536).
+    /// Bytes (default: class size or 256; max 65536).
     pub(crate) length: Option<u32>,
-    /// Class naming the fields (default: from the vtable).
+    /// Default: by its vtable.
     pub(crate) class: Option<String>,
 }
 
@@ -853,15 +853,15 @@ pub(crate) enum ScanScope {
 pub(crate) struct LiveScanParams {
     /// Result set name.
     pub(crate) name: String,
-    /// Value; with compare=equal, the new one.
+    /// With compare=equal: the new value.
     pub(crate) value: Option<String>,
-    /// Default u32; bytes is hex, ?? a wildcard.
+    /// Default u32; bytes: hex, ?? wildcard.
     pub(crate) kind: Option<ScanKind>,
-    /// Float match range (default: half the last digit).
+    /// Float range (default: half the last digit).
     pub(crate) tolerance: Option<f64>,
     /// Narrow set `name`.
     pub(crate) compare: Option<ScanCompare>,
-    /// First scan's regions (default all).
+    /// Default all.
     pub(crate) scope: Option<ScanScope>,
     /// For scope=module.
     pub(crate) module: Option<String>,

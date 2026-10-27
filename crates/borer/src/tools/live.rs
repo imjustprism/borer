@@ -374,7 +374,7 @@ impl BorerServer {
     /// ([`runs_loaded`]) and the server was not started with
     /// `BORER_LIVE_ANY=1`.
     #[tool(
-        description = "Attach read-only to a running process (name or pid) of the loaded binary, so live tools take static addresses. Windows only; another binary needs BORER_LIVE_ANY=1. Replaces an attach; live_detach ends it.",
+        description = "Attach read-only to a process (name or pid) running the loaded binary (any with BORER_LIVE_ANY=1); live tools then take static addresses. Windows only.",
         meta = effects(&[Effect::ReadsProcessMemory, Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
@@ -465,7 +465,7 @@ impl BorerServer {
     ///
     /// Never; detaching with nothing attached is a no-op.
     #[tool(
-        description = "Detach from the attached process and drop its watches; the process is untouched, and nothing attached is a no-op. Not needed before attaching elsewhere: live_attach replaces it.",
+        description = "Detach from the attached process, dropping its watches and scan sets.",
         meta = effects(&[Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
@@ -502,7 +502,7 @@ impl BorerServer {
     /// Invalid params for a zero limit, or when no process is attached or
     /// it has exited.
     #[tool(
-        description = "List the attached process's modules (base, size, name), paged. Not for the binary's imports (use symbols). Fails if nothing is attached.",
+        description = "List the attached process's modules (base, size, name), paged.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
@@ -551,7 +551,7 @@ impl BorerServer {
     /// Invalid params for an unknown kind, or when no process is attached,
     /// the address does not resolve, or its first value does not read.
     #[tool(
-        description = "Read typed values from the attached process; static addresses rebase onto it and pointers say what they point at. Not for the file on disk (use read) or an object (use live_object).",
+        description = "Read typed values from the attached process; pointers say what they point at.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
@@ -630,7 +630,7 @@ impl BorerServer {
     /// When no process is attached or no binary is loaded, the address does
     /// not resolve, the class is unknown, or the object is not readable.
     #[tool(
-        description = "Read one object in the attached process as its class: each field's name, type and value, pointers resolved. Not for raw values (use live_read) or finding objects (use live_instances).",
+        description = "Read an object in the attached process as its class: fields named and typed, pointers resolved.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
@@ -666,7 +666,7 @@ impl BorerServer {
     /// When no process is attached or no binary is loaded, or the analysis
     /// knows no vtable for the class.
     #[tool(
-        description = "Find a class's live objects by scanning the attached process for its vtable, paged. Then read one with live_object. Fails if nothing is attached or no vtable is known.",
+        description = "Find a class's objects in the attached process by its vtable, paged.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
@@ -722,7 +722,7 @@ impl BorerServer {
     /// When no process is attached, the address does not resolve or is not
     /// readable, the class given is unknown, or no watch has the name.
     #[tool(
-        description = "Watch attached-process memory: with address, snapshot it under name; without, show what changed since the last look, fields named. For one snapshot use live_read.",
+        description = "With address, snapshot attached-process memory as name; without, show what changed since, fields named.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
