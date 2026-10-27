@@ -195,163 +195,9 @@ pub(crate) fn forward(mark: &[u8]) -> Vec<u8> {
     mark.iter().rev().copied().collect()
 }
 
-/// A language, runtime or packager that leaves marks in the bytes it
-/// builds, and what to reach for when it is found.
-struct Toolchain {
-    /// What built the file.
-    name: &'static str,
-    /// Marks, each back to front ([`reversed`]).
-    marks: &'static [&'static [u8]],
-    /// How many of the marks a file must carry.
-    need: usize,
-    /// What an analyst does next.
-    hint: &'static str,
-}
-
-/// The toolchains [`toolchains`] reads by their marks alone; Go, Rust and
-/// `PyInstaller` are read from structure instead.
-const TOOLCHAINS: [Toolchain; 6] = [
-    Toolchain {
-        name: "Nuitka-compiled Python",
-        marks: &[
-            &reversed(b"__nuitka_version__"),
-            &reversed(b"nuitka-onefile"),
-        ],
-        need: 1,
-        hint: "Python compiled to C: the module code is native, the constants are in the data",
-    },
-    Toolchain {
-        name: "compiled AutoIt script",
-        marks: &[&reversed(b"AU3!EA06"), &reversed(b">>>AUTOIT SCRIPT<<<")],
-        need: 1,
-        hint: "the script is an encrypted resource: extract it with an AutoIt decompiler rather than reading the interpreter",
-    },
-    Toolchain {
-        name: "Electron app",
-        marks: &[
-            &reversed(b"ELECTRON_RUN_AS_NODE"),
-            &reversed(b"electron.asar"),
-        ],
-        need: 2,
-        hint: "the logic is JavaScript in resources/app.asar beside the executable, not in this binary",
-    },
-    Toolchain {
-        name: "Nim",
-        marks: &[&reversed(b"@NimMain"), &reversed(b"fatal.nim")],
-        need: 1,
-        hint: "Nim compiles through C: NimMain is the program's real entry",
-    },
-    Toolchain {
-        name: "Delphi or C++Builder",
-        marks: &[
-            &reversed(b"Embarcadero"),
-            &reversed(b"Borland"),
-            &reversed(b"TObject"),
-        ],
-        need: 2,
-        hint: "a VCL program: forms are RCDATA resources and the RTTI names the classes",
-    },
-    Toolchain {
-        name: "MinGW-w64 / GCC",
-        marks: &[
-            &reversed(b"Mingw-w64 runtime failure"),
-            &reversed(b"libgcc_s_"),
-        ],
-        need: 1,
-        hint: "GCC-built: the CRT is MinGW's, not MSVC's",
-    },
-];
-
-/// The `PyInstaller` archive cookie, back to front.
-const PYINSTALLER_COOKIE: [u8; 8] = reversed(b"MEI\x0c\x0b\x0a\x0b\x0e");
-
-/// The Go build information header, back to front.
-const GO_BUILDINFO: [u8; 14] = reversed(b"\xff Go buildinf:");
-
-/// The path rustc embeds before its commit hash, back to front.
-const RUSTC_PATH: [u8; 7] = reversed(b"/rustc/");
-
-/// Whether the file carries a path rustc embeds in its panics,
-/// `/rustc/<40 hex digits>/`, which only a Rust build holds.
-///
-/// # Arguments
-///
-/// * `bytes` - The file.
-fn rust_built(bytes: &[u8]) -> bool {
-    let prefix: Vec<u8> = RUSTC_PATH.iter().rev().copied().collect();
-    bytes.windows(prefix.len() + 41).any(|w| {
-        w.starts_with(&prefix)
-            && w[prefix.len()..prefix.len() + 40]
-                .iter()
-                .all(u8::is_ascii_hexdigit)
-            && w[prefix.len() + 40] == b'/'
-    })
-}
-
-/// The languages, runtimes and packagers that built the file, with what to
-/// do about each.
-///
-/// Go is read from its pclntab, Rust from the commit path rustc embeds, a
-/// `PyInstaller` bundle from the cookie that ends its archive; the rest from
-/// marks their runtimes carry.
-///
-/// # Arguments
-///
-/// * `program` - The loaded file.
-///
-/// # Returns
-///
-/// One line per toolchain found, `name: hint`; empty when none is.
-#[must_use]
-pub fn toolchains(program: &Program) -> Vec<String> {
-    let bytes = program.bytes.as_slice();
-    let mut found = Vec::new();
-    let tail = bytes
-        .get(bytes.len().saturating_sub(0x1000)..)
-        .unwrap_or(bytes);
-    if has_mark(tail, &PYINSTALLER_COOKIE) {
-        found.push("PyInstaller bundle: the Python code is in the appended archive: extract it with pyinstxtractor, then decompile the .pyc".to_owned());
-    }
-    if program.go.is_some() || has_mark(bytes, &GO_BUILDINFO) {
-        found.push(format!(
-            "Go{}: names and types come from the pclntab and type links; expect a large runtime around little user code",
-            go_version(bytes).map_or_else(String::new, |v| format!(" ({v})"))
-        ));
-    }
-    if rust_built(bytes) {
-        found.push("Rust: monomorphized generics and inlined iterators: read the panic locations' file paths for the crate layout".to_owned());
-    }
-    for t in &TOOLCHAINS {
-        if t.marks.iter().filter(|m| has_mark(bytes, m)).count() >= t.need {
-            found.push(format!("{}: {}", t.name, t.hint));
-        }
-    }
-    found
-}
-
-/// The Go release a binary's build information names, `go1.22.3`.
-///
-/// # Arguments
-///
-/// * `bytes` - The file.
-fn go_version(bytes: &[u8]) -> Option<String> {
-    let mark: Vec<u8> = GO_BUILDINFO.iter().rev().copied().collect();
-    let at = bytes
-        .windows(mark.len())
-        .position(|w| w == mark.as_slice())?;
-    let window = bytes.get(at..bytes.len().min(at + 0x200))?;
-    let start = window.windows(4).position(|w| w == b"go1.")?;
-    let text: String = window
-        .get(start..)?
-        .iter()
-        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'.')
-        .map(|&b| char::from(b))
-        .collect();
-    (text.len() > 4).then_some(text)
-}
-
-/// The lines a file summary adds after its headers: what each appended
-/// run is ([`appended_lines`]) and the hashes ([`hashes_line`]).
+/// The lines a file summary adds after its headers: what built and wraps
+/// it ([`crate::toolchain::lines`]), what each appended run is
+/// ([`appended_lines`]) and the hashes ([`hashes_line`]).
 ///
 /// # Arguments
 ///
@@ -359,8 +205,9 @@ fn go_version(bytes: &[u8]) -> Option<String> {
 #[must_use]
 pub fn summary_lines(program: &Program) -> String {
     let mut out = String::new();
-    for line in appended_lines(program)
+    for line in crate::toolchain::lines(program, false)
         .into_iter()
+        .chain(appended_lines(program))
         .chain([hashes_line(program)])
     {
         out.push_str(&line);
@@ -370,8 +217,8 @@ pub fn summary_lines(program: &Program) -> String {
 }
 
 /// The `#` lines a triage gives about the file before its code: the
-/// debug information applied, the toolchains that built it
-/// ([`toolchains`]) and what each appended run is.
+/// debug information applied, what built and wraps it
+/// ([`crate::toolchain::lines`]) and what each appended run is.
 ///
 /// # Arguments
 ///
@@ -389,8 +236,8 @@ pub fn triage_lines(program: &Program) -> String {
     if let Some(outcome) = &program.pdb {
         let _ = writeln!(out, "# pdb: {}", outcome.render());
     }
-    for built in toolchains(program) {
-        let _ = writeln!(out, "# built with: {built}");
+    for built in crate::toolchain::lines(program, true) {
+        let _ = writeln!(out, "# {built}");
     }
     for overlay in appended_lines(program) {
         let _ = writeln!(out, "# {overlay}");
@@ -484,7 +331,7 @@ pub fn locate(
 
 #[cfg(test)]
 mod tests {
-    use super::{RUSTC_PATH, has_mark, locate, reversed, rust_built};
+    use super::{has_mark, locate, reversed};
     use crate::analysis::Overlay;
     use crate::program::{Arch, Program, Section};
 
@@ -500,19 +347,6 @@ mod tests {
         assert_eq!(&mark, b"cba");
         assert!(has_mark(b"xxabcxx", &mark));
         assert!(!has_mark(b"xxcbaxx", &mark));
-        assert_eq!(&RUSTC_PATH, b"/ctsur/");
-    }
-
-    /// Only a rustc commit path marks a Rust build, not the bare prefix.
-    ///
-    /// # Panics
-    ///
-    /// When either reads otherwise.
-    #[test]
-    fn a_rust_build_is_told_by_its_commit_path() {
-        let path = b"panicked at /rustc/0123456789abcdef0123456789abcdef01234567/library/core";
-        assert!(rust_built(path));
-        assert!(!rust_built(b"see /rustc/ for the compiler"));
     }
 
     /// A virtual address, a relative one and a file offset name the same

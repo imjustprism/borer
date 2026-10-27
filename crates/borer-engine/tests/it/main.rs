@@ -74,6 +74,7 @@ mod strings;
 mod structure;
 mod syscalls;
 mod textcheck;
+mod toolchain;
 mod typelib;
 mod types;
 mod unit;

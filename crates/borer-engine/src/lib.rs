@@ -63,5 +63,6 @@ pub mod strings;
 pub mod table;
 pub mod text;
 pub(crate) mod timing;
+pub mod toolchain;
 pub mod unwind;
 pub mod winconst;

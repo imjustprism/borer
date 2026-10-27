@@ -1051,10 +1051,16 @@ fn wrapper_tables_past_the_file_are_bounded() {
     bytes.extend_from_slice(&[0, 0, 0, 0, 0xef, 0xbe, 0xad, 0xde]);
     bytes.extend_from_slice(b"NullsoftInst");
     let p = load(bytes);
-    let (table, extra) = measured(|| borer_engine::bundle::bundles_tsv(&p));
+    let ((table, lines), extra) = measured(|| {
+        (
+            borer_engine::bundle::bundles_tsv(&p),
+            borer_engine::toolchain::lines(&p, true),
+        )
+    });
     assert!(
         extra <= TOOLCHAIN_HEAP,
         "the read took {extra} bytes of heap"
     );
     assert!(table.lines().count() < 64, "{table}");
+    assert!(lines.len() < 16, "{lines:?}");
 }
