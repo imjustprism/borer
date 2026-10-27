@@ -115,6 +115,9 @@ pub(super) fn export(args: &[String], s: &Session) -> anyhow::Result<()> {
             replace,
         )?;
         println!("{}", written.line(out));
+        if let Some(steps) = borer_engine::analysis::decompile::step_times() {
+            eprint!("{steps}");
+        }
     }
     Ok(())
 }
