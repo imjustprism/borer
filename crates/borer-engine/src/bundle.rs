@@ -26,6 +26,8 @@ const SCAN_MAX: usize = 256 << 20;
 const COOKIE_TAIL: usize = 1 << 20;
 /// Longest entry name read.
 const NAME_MAX: usize = 512;
+/// Bytes at the start of a script resource the `AU3!` record is looked for in.
+const AU3_HEAD: usize = 64;
 /// Rows a listing shows before the rest are counted.
 const ROWS_SHOWN: usize = 200;
 
@@ -427,8 +429,9 @@ fn inno(bytes: &[u8]) -> Option<Bundle> {
     })
 }
 
-/// The payloads resources carry: an `AutoIt` script and py2exe's script
-/// and Python library.
+/// The payloads resources carry: an `AutoIt` script, an RCDATA `SCRIPT`
+/// whose first bytes hold an `AU3!` record, and py2exe's script and Python
+/// library.
 ///
 /// # Arguments
 ///
@@ -443,16 +446,19 @@ fn in_resources(bytes: &[u8], res: &[Resource]) -> Vec<Bundle> {
         unpacked: None,
     };
     let mut out = Vec::new();
-    if let Some(r) = res.iter().find(|r| r.kind == RCDATA && r.name == "SCRIPT") {
-        let head = bytes.get(saturating_usize(r.off)..).unwrap_or_default();
-        let marked = find(head.get(..head.len().min(64)).unwrap_or_default(), b"AU3!").is_some();
+    let script = res.iter().find(|r| {
+        r.kind == RCDATA && r.name == "SCRIPT" && {
+            let start = saturating_usize(r.off);
+            let len = saturating_usize(r.len).min(AU3_HEAD);
+            bytes
+                .get(start..start.saturating_add(len))
+                .is_some_and(|head| find(head, b"AU3!").is_some())
+        }
+    });
+    if let Some(r) = script {
         out.push(Bundle {
             wrapper: "AutoIt",
-            about: Some(if marked {
-                "an AU3! script record, encrypted".to_owned()
-            } else {
-                "no AU3! record in its first bytes".to_owned()
-            }),
+            about: Some("an AU3! script record, encrypted".to_owned()),
             off: r.off,
             entries: vec![entry(r, "script")],
             declared: None,

@@ -270,7 +270,8 @@ pub(crate) fn with_resources(items: &[(&str, &[u8])]) -> Vec<u8> {
     b
 }
 
-/// An `AutoIt` script resource is a payload entry at its file offset.
+/// An `AutoIt` script resource is a payload entry at its file offset; a
+/// `SCRIPT` resource with no `AU3!` record is not `AutoIt`'s.
 #[test]
 fn an_autoit_script_resource_is_a_payload() {
     let mut script = vec![0xa3; 16];
@@ -278,6 +279,8 @@ fn an_autoit_script_resource_is_a_payload() {
     let table = bundles_tsv(&load(with_resources(&[("SCRIPT", &script)])));
     assert!(table.contains("AutoIt payload at 0x"), "{table}");
     assert!(table.contains("\t0x18\t-\tscript\t10/SCRIPT"), "{table}");
+    let other = bundles_tsv(&load(with_resources(&[("SCRIPT", b"var x = 1;")])));
+    assert!(other.is_empty(), "{other}");
 }
 
 /// No payload is listed for a plain image.
