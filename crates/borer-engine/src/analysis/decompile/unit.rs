@@ -159,6 +159,31 @@ fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index
         })
 }
 
+/// Returns the entry of the function a text names `name`, under the names
+/// in force ([`Index`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its functions.
+/// * `overlay` - User names.
+/// * `name` - The name as the text spells it.
+///
+/// # Returns
+///
+/// The lowest entry of the functions so named, or `None`.
+pub(super) fn function_named(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    name: &str,
+) -> Option<u64> {
+    index(program, analysis, overlay)
+        .functions
+        .get(name)
+        .copied()
+}
+
 /// One function the unit declares: its prototype and, when the unit
 /// defines it, its body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,15 +694,13 @@ fn defined_body(
     name: &str,
 ) -> Option<Declared> {
     let d = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry);
-    let bitness = program.arch.bitness().unwrap_or(64);
     let text = tables::inline_tables(
         &polish_at(
             &d.as_ref().as_ref()?.text,
-            bitness,
-            &analysis.packs,
             overlay.passes,
             program,
             analysis,
+            overlay,
             entry,
         ),
         program,

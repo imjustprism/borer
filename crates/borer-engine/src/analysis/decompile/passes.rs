@@ -83,6 +83,9 @@ pub enum Pass {
     FloatLanes,
     /// Types locals by the lanes they hold.
     LaneLocals,
+    /// Notes the pointer types the functions a parameter is passed to give
+    /// their own parameters.
+    CalleeTypes,
     /// Types the parameters.
     TypeParameters,
     /// Types the locals.
@@ -141,7 +144,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 62] = [
         Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
@@ -177,6 +180,7 @@ impl Pass {
         Self::ApplyLayouts,
         Self::FloatLanes,
         Self::LaneLocals,
+        Self::CalleeTypes,
         Self::TypeParameters,
         Self::TypeLocals,
         Self::ByteArithmetic,
@@ -244,6 +248,7 @@ impl Pass {
             Self::ApplyLayouts => "apply_layouts",
             Self::FloatLanes => "float_lanes",
             Self::LaneLocals => "lane_locals",
+            Self::CalleeTypes => "callee::noted",
             Self::TypeParameters => "type_parameters",
             Self::TypeLocals => "type_locals",
             Self::ByteArithmetic => "byte_arithmetic",

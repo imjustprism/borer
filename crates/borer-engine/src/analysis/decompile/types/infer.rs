@@ -121,7 +121,7 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             retype(&mut lines[sig], &declared, &param, ty);
         }
     }
-    lines.retain(|l| !l.starts_with("// formats "));
+    lines.retain(|l| !l.starts_with("// formats ") && !l.starts_with("// callee "));
     let mut out = lines.join("\n");
     out.push('\n');
     out
@@ -1651,7 +1651,8 @@ fn quoted(rest: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// [`slot_at`], and the format a `gettext` hides from it.
+/// [`slot_at`], the callee notes ([`callee_slot`]), and the format a
+/// `gettext` hides from it.
 ///
 /// # Arguments
 ///
@@ -1665,7 +1666,36 @@ fn quoted(rest: &str) -> Option<Vec<String>> {
 /// The slot, or `None` when the name is not a whole argument of a
 /// declared call.
 fn known_slot(lines: &[String], line: &str, at: usize, before: usize) -> Option<Slot> {
-    slot_at(line, at).or_else(|| format_slot(lines, line, at, before))
+    slot_at(line, at)
+        .or_else(|| callee_slot(lines, line, at))
+        .or_else(|| format_slot(lines, line, at, before))
+}
+
+/// Returns what a `// callee` note says of the name at byte `at` of
+/// `line`: the pointer type the function it is passed to whole gives that
+/// parameter in its own text.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines and notes included.
+/// * `line` - The line.
+/// * `at` - The byte the name starts at.
+///
+/// # Returns
+///
+/// The slot, or `None` when the name is no whole argument of a call a
+/// note names, or the note gives that parameter no type.
+fn callee_slot(lines: &[String], line: &str, at: usize) -> Option<Slot> {
+    let l = Line {
+        text: line,
+        toks: lex(line),
+    };
+    let k = l.toks.iter().position(|t| t.at == at)?;
+    let (callee, index, _) = argument_of(&l, k)?;
+    let head = format!("// callee {callee}: ");
+    let types = lines.iter().find_map(|n| n.strip_prefix(head.as_str()))?;
+    let ty = types.split('|').nth(index)?;
+    (ty != "-").then(|| slot_of(ty))
 }
 
 /// The pointer type the declared calls a parameter is passed to whole
@@ -1725,10 +1755,7 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
                     if elem_deref && t == "char *" {
                         t = "char **".to_owned();
                     }
-                    if found.as_ref().is_some_and(|f| *f != t) {
-                        return None;
-                    }
-                    found = Some(t);
+                    found = Some(agreed(found.as_deref(), t)?);
                 }
                 Some(Slot::Other) | None => {
                     let l = Line {
@@ -1763,10 +1790,7 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
                         if elem_deref && t == "char *" {
                             t = "char **".to_owned();
                         }
-                        if found.as_ref().is_some_and(|f| *f != t) {
-                            return None;
-                        }
-                        found = Some(t);
+                        found = Some(agreed(found.as_deref(), t)?);
                     }
                     Some(Slot::Other) | None => {}
                 }
@@ -1779,6 +1803,28 @@ pub(in crate::analysis::decompile) fn api_pointer(lines: &[String], param: &str)
             || (t == "char **" && locals::string_pointer_array(lines, param)))
         .then_some(t),
         None => locals::string_pointer_array(lines, param).then(|| "char **".to_owned()),
+    }
+}
+
+/// Returns the pointer type two pieces of evidence agree on: the same
+/// type, or `char *` where the other is a byte pointer (`uint8_t *`),
+/// which reads the same bytes.
+///
+/// # Arguments
+///
+/// * `found` - The type the earlier evidence gave, if any.
+/// * `t` - The type this evidence gives.
+///
+/// # Returns
+///
+/// The agreed type, or `None` when the two disagree.
+fn agreed(found: Option<&str>, t: String) -> Option<String> {
+    match found {
+        None => Some(t),
+        Some(f) if f == t => Some(t),
+        Some("uint8_t *") if t == "char *" => Some(t),
+        Some("char *") if t == "uint8_t *" => Some("char *".to_owned()),
+        Some(_) => None,
     }
 }
 
@@ -2024,6 +2070,20 @@ printf(f2, a3);",
         let text = lines("fputs(\"x\", a1);\nv = *(uint32_t*)(a1 + 8);");
         assert_eq!(api_pointer(&text, "a1"), None);
         let text = lines("strlen(a1);\nexit(a1);");
+        assert_eq!(api_pointer(&text, "a1"), None);
+    }
+
+    /// A callee note types what is passed whole where it says, and says
+    /// nothing at a `-`; a byte pointer it names agrees with a library's
+    /// `char *`, and another pointer does not.
+    #[test]
+    fn callee_notes_type_parameters() {
+        let text = lines("// callee sub_10: FILE *|-\nsub_10(a1, a2);");
+        assert_eq!(api_pointer(&text, "a1"), Some("FILE *".to_owned()));
+        assert_eq!(api_pointer(&text, "a2"), None);
+        let text = lines("// callee sub_10: uint8_t *\nsub_10(a1);\nstrlen(a1);");
+        assert_eq!(api_pointer(&text, "a1"), Some("char *".to_owned()));
+        let text = lines("// callee sub_10: FILE *\nsub_10(a1);\nstrlen(a1);");
         assert_eq!(api_pointer(&text, "a1"), None);
     }
 

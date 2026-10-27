@@ -8,6 +8,7 @@ use crate::analysis::Analysis;
 use crate::num::from_usize;
 use crate::program::Program;
 
+mod callee;
 mod callfmt;
 mod selects;
 
@@ -39,16 +40,17 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
     polish_skipping(text, bitness, packs, Passes::NONE, None)
 }
 
-/// [`polish_skipping`] with the caller literals of `entry` in scope.
+/// [`polish_skipping`] with the caller literals and the callees of `entry`
+/// in scope.
 ///
 /// # Arguments
 ///
 /// * `text` - A decompiled function, header lines first.
-/// * `bitness` - Decoder bitness of the program (32 or 64).
-/// * `packs` - The packs in force.
 /// * `skip` - The passes left out ([`Passes`]).
-/// * `program` - The loaded image.
-/// * `analysis` - Discovery results.
+/// * `program` - The loaded image, for its bitness.
+/// * `analysis` - Discovery results, holding the packs in force.
+/// * `overlay` - The names in force, which the callees' texts are built
+///   under.
 /// * `entry` - The function's entry.
 ///
 /// # Returns
@@ -56,14 +58,19 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
 /// The polished text.
 pub(super) fn polish_at(
     text: &str,
-    bitness: u32,
-    packs: &crate::pack::Packs,
     skip: Passes,
     program: &Program,
     analysis: &Analysis,
+    overlay: &Overlay,
     entry: u64,
 ) -> String {
-    polish_skipping(text, bitness, packs, skip, Some((program, analysis, entry)))
+    polish_skipping(
+        text,
+        program.arch.bitness().unwrap_or(64),
+        &analysis.packs,
+        skip,
+        Some((program, analysis, overlay, entry)),
+    )
 }
 
 /// [`polish`] with some of its passes left out.
@@ -74,8 +81,10 @@ pub(super) fn polish_at(
 /// * `bitness` - Decoder bitness of the program (32 or 64).
 /// * `packs` - The packs in force.
 /// * `skip` - The passes left out ([`Passes`]).
-/// * `callers` - The image, the analysis and the function, so a `gettext`
-///   of a parameter can take its type from the literals the callers pass.
+/// * `callers` - The image, the analysis, the names in force and the
+///   function, so a `gettext` of a parameter can take its type from the
+///   literals the callers pass, and a parameter passed whole to another
+///   function the type that function's text gives it ([`callee::noted`]).
 ///   `None` leaves that evidence out.
 ///
 /// # Returns
@@ -86,7 +95,7 @@ pub(super) fn polish_skipping(
     bitness: u32,
     packs: &crate::pack::Packs,
     skip: Passes,
-    callers: Option<(&Program, &Analysis, u64)>,
+    callers: Option<callee::Scope<'_>>,
 ) -> String {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
@@ -98,7 +107,9 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::ApplyLayouts, text, apply_layouts);
     let text = skip.apply(Pass::FloatLanes, text, float_lanes);
     let text = skip.apply(Pass::LaneLocals, text, lane_locals);
+    let text = skip.apply(Pass::CalleeTypes, text, |t| callee::noted(t, word, callers));
     let text = skip.apply(Pass::TypeParameters, text, |t| {
+        let callers = callers.map(|(program, analysis, _, entry)| (program, analysis, entry));
         type_parameters(&callfmt::noted(t, callers), word)
     });
     let text = skip.apply(Pass::TypeLocals, text, type_locals);
@@ -165,18 +176,9 @@ pub(super) fn finished(
     entry: u64,
 ) -> String {
     use crate::timing::{Step, timed};
-    let bitness = program.arch.bitness().unwrap_or(64);
     let skip = overlay.passes;
     let text = timed(Step::Polish, || {
-        polish_at(
-            text,
-            bitness,
-            &analysis.packs,
-            skip,
-            program,
-            analysis,
-            entry,
-        )
+        polish_at(text, skip, program, analysis, overlay, entry)
     });
     let text = timed(Step::InlineTables, || {
         skip.apply(Pass::InlineTables, text, |t| {

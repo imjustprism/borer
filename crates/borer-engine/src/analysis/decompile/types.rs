@@ -430,7 +430,7 @@ fn typed_pointers(text: &str) -> Vec<(String, String)> {
 /// # Returns
 ///
 /// `(name, type)` per parameter, in order; empty without a signature.
-fn signature_params(text: &str) -> Vec<(String, String)> {
+pub(super) fn signature_params(text: &str) -> Vec<(String, String)> {
     let Some(sig) = text.lines().find_map(|l| l.strip_prefix("// signature: ")) else {
         return Vec::new();
     };
