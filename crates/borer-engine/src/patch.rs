@@ -628,13 +628,25 @@ fn find_caves(program: &Program, at: u64, avoid: (u64, u64)) -> Vec<Cave> {
                     len,
                     byte,
                 });
+                if caves.len() >= MAX_CAVES * 2 {
+                    keep_best(&mut caves);
+                }
             }
             i = j;
         }
     }
+    keep_best(&mut caves);
+    caves
+}
+
+/// Keeps the [`MAX_CAVES`] longest caves, ties by address.
+///
+/// # Arguments
+///
+/// * `caves` - The caves found so far.
+fn keep_best(caves: &mut Vec<Cave>) {
     caves.sort_by(|a, b| b.len.cmp(&a.len).then(a.va.cmp(&b.va)));
     caves.truncate(MAX_CAVES);
-    caves
 }
 
 /// Tells whether a relative jump reaches from `at` to `va`: in 32-bit code
