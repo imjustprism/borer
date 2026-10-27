@@ -270,6 +270,63 @@ fn a_upx_mark_in_the_headers_names_upx_and_its_version() {
     );
 }
 
+/// An x86 `SteamStub` before 3.x is named by its stub, entered in `.bind`.
+#[test]
+fn an_early_steamstub_is_named_by_its_stub_in_bind() {
+    let mut code = vec![0xcc; 0x200];
+    code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let mut stub = vec![0xcc; 0x200];
+    stub[..25].copy_from_slice(&[
+        0x60, 0x81, 0xec, 0x00, 0x10, 0x00, 0x00, 0xbe, 0x0c, 0xd6, 0xc6, 0x00, 0xb9, 0x6b, 0x00,
+        0x00, 0x00, 0x8d, 0xbd, 0x10, 0xfc, 0xff, 0xff, 0xf3, 0xa5,
+    ]);
+    let out = report(pe(
+        &[sec(".text", 0x1000, code), sec(".bind", 0x2000, stub)],
+        0x2000,
+    ));
+    assert!(out.contains("# protected: SteamStub"), "{out}");
+    assert!(
+        out.contains("an x86 SteamStub before 3.x); entry point in .bind"),
+        "{out}"
+    );
+}
+
+/// An x64 `SteamStub` 3.1 header before the entry point decodes to the app
+/// id, the original entry point and whether the code is encrypted.
+#[test]
+fn a_steamstub_31_header_is_decoded() {
+    let mut fields = [0u32; 60];
+    fields[1] = 0xc0de_c0df;
+    fields[0x20 / 4] = 0x1264;
+    fields[0x38 / 4] = 4_001_890;
+    for (flags, says) in [
+        (0, "the code section is encrypted"),
+        (4, "the code section is not encrypted"),
+    ] {
+        fields[0x3c / 4] = flags;
+        let mut encoded = vec![0xb499_437d_u32];
+        for f in &fields[1..] {
+            let last = *encoded.last().expect("the key");
+            encoded.push(f ^ last);
+        }
+        let mut bind: Vec<u8> = encoded.iter().flat_map(|w| w.to_le_bytes()).collect();
+        bind.extend_from_slice(&[0xe8, 0, 0, 0, 0, 0x50, 0x53, 0x51, 0x52, 0x56, 0x57, 0x55]);
+        bind.extend_from_slice(&[0x41, 0x50, 0x41, 0x51]);
+        bind.resize(0x200, 0xcc);
+        let out = report(pe(
+            &[
+                sec(".text", 0x1000, vec![0xc3; 0x200]),
+                sec(".bind", 0x2000, bind),
+            ],
+            0x20f0,
+        ));
+        assert!(
+            out.contains(&format!("SteamStub 3.1 header at 0x140002000, decoded: Steam app id 4001890, original entry point 0x140001264, {says}")),
+            "{out}"
+        );
+    }
+}
+
 /// `MPRESS` names its sections with a leading dot, and they name it.
 #[test]
 fn dotted_mpress_sections_name_mpress() {

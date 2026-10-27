@@ -1067,7 +1067,18 @@ pub(super) struct EntrySig {
 
 /// Entry stubs a packer writes, as `??`-wildcard patterns read at the entry
 /// point. Each entry's [`EntrySig::stub`] line is its documentation.
-pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 3] = [
+pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 5] = [
+    EntrySig {
+        packer: "SteamStub",
+        pattern: "60 81 EC 00 10 00 00 BE ?? ?? ?? ?? B9 ?? ?? ?? ?? 8D BD ?? ?? ?? ?? F3 A5",
+        stub: "pushad; sub esp, 0x1000; mov esi, imm32; mov ecx, imm32; lea \
+               edi, [ebp+disp32]; rep movsd: an x86 SteamStub before 3.x",
+    },
+    EntrySig {
+        packer: "SteamStub",
+        pattern: "E8 00 00 00 00 50 53 51 52 56 57 55 41 50 41 51",
+        stub: "call $+5; push rax..rbp; push r8; push r9: an x64 SteamStub 3.x",
+    },
     EntrySig {
         packer: "UPX",
         pattern: "60 BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? 57 83 CD FF EB",
@@ -1089,14 +1100,85 @@ pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 3] = [
 
 /// Bytes read at the entry point when matching [`PACKER_ENTRY_SIGS`], enough
 /// for the longest stub and no more.
-pub(super) const ENTRY_STUB_MAX: usize = 17;
+pub(super) const ENTRY_STUB_MAX: usize = 25;
 
 /// Sections whose holding the entry point is itself a protector's mark, and
 /// the family that places one there.
-pub(super) const ENTRY_SECTION_MARKS: [(&str, &str); 2] = [
+pub(super) const ENTRY_SECTION_MARKS: [(&str, &str); 3] = [
     (".boot", "Themida/WinLicense"),
     (".init", "Themida/WinLicense"),
+    (".bind", "SteamStub"),
 ];
+
+/// The signatures a `SteamStub` 3.x header decodes to, and the variant each
+/// names.
+const STEAMSTUB_SIGNATURES: [(u32, &str); 2] = [(0xc0de_c0de, "3.0"), (0xc0de_c0df, "3.1")];
+/// The lengths a `SteamStub` 3.x header has, by variant and width; it ends
+/// where the stub's entry point begins.
+const STEAMSTUB_HEADERS: [usize; 3] = [0xf0, 0xd0, 0xb0];
+/// The x64 `SteamStub` 3.1 header's length, the one layout whose fields are
+/// read.
+const STEAMSTUB_X64_31: usize = 0xf0;
+/// The `SteamStub` flag that leaves the code section unencrypted.
+const STEAMSTUB_NO_ENCRYPTION: u32 = 0x4;
+
+/// The `SteamStub` 3.x header that ends at the entry point, decoded.
+///
+/// Each word decodes by XOR with the encoded word before it, the first being
+/// the key. For the x64 3.1 layout the header also gives the Steam app id, the
+/// original entry point and whether the code section is encrypted.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+///
+/// # Returns
+///
+/// What the header says, or `None` when no length before the entry point
+/// decodes to a `SteamStub` signature.
+pub(super) fn steamstub_header(p: &Program) -> Option<String> {
+    let entry = p.entry?;
+    STEAMSTUB_HEADERS.iter().find_map(|&len| {
+        let start = entry.checked_sub(from_usize(len))?;
+        let words: Vec<u32> = p
+            .read_va(start, len)?
+            .chunks_exact(4)
+            .filter_map(|w| crate::num::u32_le(w, 0))
+            .collect();
+        let mut key = *words.first()?;
+        let decoded: Vec<u32> = words
+            .iter()
+            .skip(1)
+            .map(|&w| {
+                let d = w ^ key;
+                key = w;
+                d
+            })
+            .collect();
+        let (_, variant) = STEAMSTUB_SIGNATURES
+            .iter()
+            .find(|s| decoded.first() == Some(&s.0))?;
+        let field = |off: usize| decoded.get(off / 4 - 1).copied();
+        let mut text = format!("SteamStub {variant} header at {start:#x}, decoded");
+        if p.is_64
+            && *variant == "3.1"
+            && len == STEAMSTUB_X64_31
+            && let (Some(oep), Some(app), Some(flags)) = (field(0x20), field(0x38), field(0x3c))
+        {
+            let _ = write!(
+                text,
+                ": Steam app id {app}, original entry point {:#x}, {}",
+                p.image_base.saturating_add(u64::from(oep)),
+                if flags & STEAMSTUB_NO_ENCRYPTION == 0 {
+                    "the code section is encrypted"
+                } else {
+                    "the code section is not encrypted"
+                }
+            );
+        }
+        Some(text)
+    })
+}
 
 /// ASCII markers a protector rebuilds into the DOS header, and their family.
 pub(super) const HEADER_MARKS: [(&str, &str); 1] = [("tELock", "tELock")];
@@ -1211,6 +1293,9 @@ pub fn packer_marks(p: &Program) -> BTreeMap<&'static str, Vec<String>> {
                     .push(format!("entry point in {}", sec.name));
             }
         }
+    }
+    if let Some(header) = steamstub_header(p) {
+        names.entry("SteamStub").or_default().push(header);
     }
     if let Some(first) = p
         .sections

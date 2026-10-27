@@ -830,9 +830,11 @@ fn by_bundles(bundles: &[Bundle], out: &mut Vec<Finding>) {
     }
 }
 
-/// The packers [`crate::analysis::render::packer_marks`] names: sure when
-/// an entry stub or a header mark says so, less when only a section name
-/// does, which anyone can write.
+/// The packers [`crate::analysis::render::packer_marks`] names.
+///
+/// A finding is sure when an entry stub or a header mark says so, less when
+/// only a section name, which anyone can write, or the section the entry
+/// point sits in does.
 ///
 /// # Arguments
 ///
@@ -840,8 +842,9 @@ fn by_bundles(bundles: &[Bundle], out: &mut Vec<Finding>) {
 /// * `out` - The findings so far.
 fn by_packer_marks(p: &Program, out: &mut Vec<Finding>) {
     for (name, marks) in crate::analysis::render::packer_marks(p) {
-        let by_section = marks.iter().filter(|m| m.ends_with(" section")).count();
-        let renamed = name == "UPX" && by_section == 0;
+        let named = |m: &&String| m.ends_with(" section") || m.starts_with("entry point in ");
+        let by_name = marks.iter().filter(named).count();
+        let renamed = name == "UPX" && !marks.iter().any(|m| m.ends_with(" section"));
         add(
             out,
             Finding {
@@ -849,7 +852,7 @@ fn by_packer_marks(p: &Program, out: &mut Vec<Finding>) {
                 name,
                 version: renamed
                     .then(|| "sections renamed: a modified or hand-edited UPX".to_owned()),
-                confidence: if by_section < marks.len() {
+                confidence: if by_name < marks.len() {
                     Confidence::High
                 } else {
                     Confidence::Medium
