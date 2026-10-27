@@ -4,7 +4,9 @@
 //! module, or a thread's singleton slot, reaches it through a fixed walk:
 //! read the pointer at the base, add an offset, read again, and so on
 //! until the address. This finds such walks backwards from the address,
-//! one level per sweep of the process's writable memory: the words that
+//! one level per sweep of the process's writable memory and its modules'
+//! read-only data (a table protected once filled), not its code nor the
+//! read-only files it maps (a game's asset archives): the words that
 //! point at most `max_offset` bytes below an address of the level are the
 //! next level's addresses, and one inside a base ends a chain. A level
 //! keeps at most [`FRONTIER_MAX`] addresses, smallest offset first, and
@@ -129,7 +131,7 @@ pub fn paths(
     let ranges: Vec<(u64, u64)> = mem
         .regions()
         .iter()
-        .filter(|r| r.writable)
+        .filter(|r| r.writable || (r.image && !r.executable))
         .map(|r| (r.base, r.base.saturating_add(r.size)))
         .collect();
     let mask = if word == 8 { u64::MAX } else { 0xffff_ffff };
@@ -486,6 +488,19 @@ mod tests {
         assert_eq!(label(0x7000_2040).as_deref(), Some("static 0x2040 g_state"));
         assert_eq!(label(0x7000_2050).as_deref(), Some("static 0x2050"));
         assert_eq!(label(0x10), None);
+    }
+
+    /// A pointer in a module's read-only data starts a chain too, as a
+    /// table the module protected once filled does.
+    #[test]
+    fn a_read_only_module_pointer_starts_a_chain() {
+        let mut mem = process(0x2000);
+        if let Some(image) = mem.regions.get_mut(1) {
+            image.2 = false;
+        }
+        mem.put(0x40_0300, &0x11000u64.to_le_bytes());
+        let found = paths(&mem, 0x11010, &game(), 1, 0x100, 8);
+        assert_eq!(spell(&found.chains[0], &game()), "[game.exe+0x300]+0x10");
     }
 
     /// A 32-bit process's pointers are four bytes wide.
