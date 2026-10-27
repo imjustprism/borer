@@ -55,7 +55,10 @@ pub(super) fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option
 /// longer still, which is the only shape where a narrow reading carries less
 /// than the bytes hold. Both readings run over the tab, newline and carriage
 /// return a literal escapes, so `L"%ws%ws %ws:\n"` keeps its newline and
-/// is not cut to the narrow `"%"`. A literal that does not read back to the
+/// is not cut to the narrow `"%"`. A lone terminator reads as `""` only
+/// beside another literal: right after one, or right before a run of text
+/// that ends in its own terminator, not before one printable byte and
+/// binary (a jump table's first entry). A literal that does not read back to the
 /// image's bytes through the text's own tokenizer ([`round_trips`]) is not
 /// printed.
 fn string_at(program: &Program, addr: u64) -> Option<String> {
@@ -71,8 +74,15 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     if section.executable {
         return None;
     }
+    let terminated_at = |at: u64, len: usize| {
+        len >= CAP
+            || u64::try_from(len)
+                .ok()
+                .and_then(|n| program.read_va_upto(at.wrapping_add(n), 1))
+                .is_some_and(|b| b.first() == Some(&0))
+    };
     if !section.writable
-        && let Some(head) = program.read_va_upto(addr, 2)
+        && let Some(head) = program.read_va_upto(addr, 1)
         && head.first() == Some(&0)
     {
         let after_a_literal = addr
@@ -81,19 +91,13 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
             .is_some_and(|b| {
                 b.first().is_some_and(|c| (0x20..0x7f).contains(c)) && b.get(1) == Some(&0)
             });
-        let before_a_literal = head
-            .get(1)
-            .is_some_and(|b| crate::strings::literal_byte(*b));
+        let next = addr.wrapping_add(1);
+        let before_a_literal =
+            cstr_text_at(program, next, 1, CAP).is_some_and(|(len, _)| terminated_at(next, len));
         return (before_a_literal || after_a_literal).then(|| String::from("\"\""));
     }
     let min = if section.writable { MIN } else { MIN_RODATA };
-    let terminated = |len: usize| {
-        len >= CAP
-            || u64::try_from(len)
-                .ok()
-                .and_then(|n| program.read_va_upto(addr.wrapping_add(n), 1))
-                .is_some_and(|b| b.first() == Some(&0))
-    };
+    let terminated = |len: usize| terminated_at(addr, len);
     let sanitize = |t: String| crate::strings::escape_text(&t);
     let narrow = cstr_text_at(program, addr, min, CAP).filter(|&(len, _)| terminated(len));
     if narrow.as_ref().is_some_and(|(len, _)| *len < MIN)
@@ -233,8 +237,10 @@ mod tests {
     /// A zero byte is the empty string only beside another literal.
     ///
     /// The last byte of a pointer followed by a bytecode table (`00 03 00
-    /// 5a`) is no string pool, so it keeps its address; a terminator the
-    /// next literal follows (`00 "AB" 00`) or the previous one ends is `""`.
+    /// 5a`) is no string pool, so it keeps its address, nor is a jump
+    /// table whose first offset reads `00 '0'` and then binary (`00 30 98
+    /// ff`); a terminator the next literal follows (`00 "AB" 00`) or the
+    /// previous one ends is `""`.
     #[test]
     fn a_zero_before_a_table_is_no_empty_string() {
         use crate::program::{Arch, Program, Section};
@@ -242,10 +248,12 @@ mod tests {
         bytes[0x10..0x14].copy_from_slice(&[0x00, 0x03, 0x00, 0x5a]);
         bytes[0x20..0x24].copy_from_slice(b"\0AB\0");
         bytes[0x30..0x34].copy_from_slice(b"AB\0\0");
+        bytes[0x40..0x44].copy_from_slice(&[0x00, 0x30, 0x98, 0xff]);
         let rdata = Section::mapped(".rdata", 0x2000, 0, 0x1000, false, false);
         let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
         assert_eq!(super::string_at(&p, 0x2010), None);
         assert_eq!(super::string_at(&p, 0x2020).as_deref(), Some("\"\""));
         assert_eq!(super::string_at(&p, 0x2033).as_deref(), Some("\"\""));
+        assert_eq!(super::string_at(&p, 0x2040), None);
     }
 }
