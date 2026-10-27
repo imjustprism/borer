@@ -305,11 +305,7 @@ impl Emulator<'_> {
     /// would have let it read, and the call it computes lands where the
     /// emulator services it.
     pub(super) fn plant_loader(&mut self) {
-        let layout = if self.bitness == 32 {
-            LAYOUT_32
-        } else {
-            LAYOUT_64
-        };
+        let layout = self.layout();
         let base = if self.bitness == 32 {
             LOADER_BASE_32
         } else {
@@ -354,6 +350,7 @@ impl Emulator<'_> {
             entries.push(entry);
             let start = align16(at);
             let end = self.plant_dll_image(start, m, &layout);
+            self.modules.insert(start, m.dll.clone());
             self.plant(entry + layout.dll_base, start, word);
             self.plant(
                 entry + layout.image_size,
@@ -376,6 +373,69 @@ impl Emulator<'_> {
         self.link_list(base + layout.memory_list, &entries, layout.entry_memory);
         self.link_list(base + layout.init_list, &entries, layout.entry_init);
         self.plant(peb + layout.peb_ldr, base, word);
+    }
+
+    /// The loader structures' offsets at the target's width.
+    fn layout(&self) -> Layout {
+        if self.bitness == 32 {
+            LAYOUT_32
+        } else {
+            LAYOUT_64
+        }
+    }
+
+    /// Answers `LoadLibrary` or `GetModuleHandle` for a dll name: the base
+    /// of the dll's planted image, so the handle names its module.
+    ///
+    /// A dll the loader did not plant is planted on demand, an image with
+    /// headers and an empty export directory in a fresh allocation, the way
+    /// the OS maps a library the program loads by name; `GetProcAddress`
+    /// against it still answers a stub of that dll's. Names match without
+    /// case, a path's directories and a missing `.dll` suffix, as the
+    /// loader's own lookup does.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The dll name the call passed.
+    ///
+    /// # Returns
+    ///
+    /// The module's base, or zero, the failed load, when no allocation is
+    /// left to plant it in.
+    pub(super) fn module_handle(&mut self, name: &str) -> u64 {
+        let file = name.rsplit(['\\', '/']).next().unwrap_or(name).trim();
+        let dll = if file.contains('.') {
+            file.to_owned()
+        } else {
+            format!("{file}.dll")
+        };
+        if let Some((&base, _)) = self
+            .modules
+            .iter()
+            .find(|(_, m)| m.eq_ignore_ascii_case(&dll))
+        {
+            return base;
+        }
+        let at = self.allocate();
+        if at != 0 {
+            let module = Module {
+                dll,
+                exports: Vec::new(),
+            };
+            let layout = self.layout();
+            self.plant_dll_image(at, &module, &layout);
+            self.modules.insert(at, module.dll);
+        }
+        at
+    }
+
+    /// The dll a module handle stands for, as its imports spell it.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - A base [`Emulator::module_handle`] answered.
+    pub(super) fn module_named(&self, handle: u64) -> Option<&str> {
+        self.modules.get(&handle).map(String::as_str)
     }
 
     /// Writes a `UNICODE_STRING` and its text, returning the cursor after
@@ -746,6 +806,73 @@ mod tests {
             run.stop,
             run.steps
         );
+    }
+
+    /// `LoadLibraryA` answers a handle of the dll it names, and
+    /// `GetProcAddress` against it names its stub after that dll and the
+    /// export, by name and by ordinal.
+    ///
+    /// The stub loads `user32` (no suffix, as callers often write it),
+    /// resolves `MessageBoxA` and ordinal 5 and stores both. Before, every
+    /// handle was the image base and both stubs were named
+    /// `KERNEL32.dll!GetProcAddress:resolved`, so neither the dll nor the
+    /// export the program asked for survived the run.
+    ///
+    /// # Panics
+    ///
+    /// When a stored stub is not named after its dll and export, or the
+    /// handle is not a planted image.
+    #[test]
+    fn get_proc_address_names_the_dll_and_export_it_resolves() {
+        const CODE: [u8; 0x45] = [
+            0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+            0x48, 0x8d, 0x0d, 0x75, 0x00, 0x00, 0x00, // ASM: lea rcx,[rip+0x75] (0x1080)
+            0xff, 0x15, 0xef, 0x00, 0x00,
+            0x00, // ASM: call [rip+0xef] (LoadLibraryA at 0x1100)
+            0x48, 0x89, 0xc3, // ASM: mov rbx,rax
+            0x48, 0x89, 0xc1, // ASM: mov rcx,rax
+            0x48, 0x8d, 0x15, 0x72, 0x00, 0x00, 0x00, // ASM: lea rdx,[rip+0x72] (0x1090)
+            0xff, 0x15, 0xe4, 0x00, 0x00,
+            0x00, // ASM: call [rip+0xe4] (GetProcAddress at 0x1108)
+            0x48, 0x89, 0x05, 0xe5, 0x00, 0x00, 0x00, // ASM: mov [rip+0xe5],rax (0x1110)
+            0x48, 0x89, 0xd9, // ASM: mov rcx,rbx
+            0xba, 0x05, 0x00, 0x00, 0x00, // ASM: mov edx,5
+            0xff, 0x15, 0xcf, 0x00, 0x00,
+            0x00, // ASM: call [rip+0xcf] (GetProcAddress at 0x1108)
+            0x48, 0x89, 0x05, 0xd8, 0x00, 0x00, 0x00, // ASM: mov [rip+0xd8],rax (0x1118)
+            0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+            0xc3, // ASM: ret
+        ];
+        let (base, entry) = (0x1_4000_0000, 0x1_4000_1000);
+        let mut bytes = vec![0u8; 0x200];
+        bytes[..CODE.len()].copy_from_slice(&CODE);
+        bytes[0x80..0x87].copy_from_slice(b"user32\0");
+        bytes[0x90..0x9c].copy_from_slice(b"MessageBoxA\0");
+        let text = Section::mapped(".text", entry, 0, 0x200, true, true);
+        let mut p = Program::raw(bytes, Arch::X86_64, base, Some(entry), vec![text]);
+        for (name, slot) in [("LoadLibraryA", 0x100), ("GetProcAddress", 0x108)] {
+            p.symbols.push(Symbol {
+                name: format!("KERNEL32.dll!{name}"),
+                addr: entry + slot,
+                kind: SymbolKind::Import,
+            });
+        }
+        let mut emu = Emulator::new(&p, 1000).expect("x64 emulates");
+        emu.install_imports();
+        let run = emu.run(entry);
+        let by_name = planted(&emu, entry + 0x110, 8);
+        let by_ordinal = planted(&emu, entry + 0x118, 8);
+        assert_eq!(
+            emu.api_at(by_name),
+            Some("user32.dll!MessageBoxA"),
+            "{} after {} steps",
+            run.stop,
+            run.steps
+        );
+        assert_eq!(emu.api_at(by_ordinal), Some("user32.dll!#5"));
+        let handle = emu.register("rbx").unwrap_or_default();
+        assert_ne!(handle, base, "the handle is the dll's, not the image's");
+        assert_eq!(planted(&emu, handle, 2), 0x5a4d, "the handle is an image");
     }
 
     /// A hand-assembled 32-bit walk that resolves `VirtualAlloc` through

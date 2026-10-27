@@ -199,6 +199,8 @@ pub(crate) struct Planted {
     mem: Store,
     /// The stub cells, by address, with the API each stands for.
     apis: std::sync::Arc<BTreeMap<u64, String>>,
+    /// The planted dll images, by base, with the dll each stands for.
+    modules: BTreeMap<u64, String>,
 }
 
 /// A step-bounded machine over one program image.
@@ -323,6 +325,10 @@ pub struct Emulator<'a> {
     /// The stub each `GetProcAddress` name was handed, so asking for one
     /// name again answers the same stub instead of adding another.
     resolved: BTreeMap<String, u64>,
+    /// The dll images planted in memory, by base (the handle `LoadLibrary`
+    /// answers), with the dll's name as the image's imports spell it, so a
+    /// `GetProcAddress` names the module its handle stands for.
+    modules: BTreeMap<u64, String>,
     /// Synthetic stub address to imported API name. The import table is
     /// prefilled so each slot holds its stub; a call to a stub is modeled as
     /// that API rather than executed, the way the OS would service it.
@@ -704,47 +710,6 @@ impl<'a> Emulator<'a> {
         Some(emu)
     }
 
-    /// What this machine was set up with before any run: the memory and
-    /// the stubs it planted, a function of the image alone.
-    ///
-    /// # Returns
-    ///
-    /// The planted state, which [`Emulator::with_planted`] builds a
-    /// machine over without planting again.
-    #[must_use]
-    pub(crate) fn planted(&self) -> Planted {
-        Planted {
-            mem: self.mem.clone(),
-            apis: std::sync::Arc::clone(&self.apis),
-        }
-    }
-
-    /// Builds an emulator as the machine `planted` was read from was set
-    /// up, over the memory and stubs it planted.
-    ///
-    /// # Arguments
-    ///
-    /// * `program` - The image whose bytes back unwritten memory; the one
-    ///   `planted` was read from.
-    /// * `budget` - Most instructions to run before stopping.
-    /// * `planted` - What [`Emulator::planted`] read from a machine that
-    ///   had not run.
-    ///
-    /// # Returns
-    ///
-    /// The machine, or `None` when the image's bitness is unknown.
-    #[must_use]
-    pub(crate) fn with_planted(
-        program: &'a Program,
-        budget: usize,
-        planted: &Planted,
-    ) -> Option<Self> {
-        let mut emu = Self::bare(program, budget)?;
-        emu.mem = planted.mem.clone();
-        emu.apis = std::sync::Arc::clone(&planted.apis);
-        Some(emu)
-    }
-
     /// Builds an emulator with nothing planted: zeroed registers but the
     /// scratch stack pointer, and empty memory.
     ///
@@ -796,6 +761,7 @@ impl<'a> Emulator<'a> {
             last_ip: 0,
             apis: std::sync::Arc::default(),
             resolved: BTreeMap::new(),
+            modules: BTreeMap::new(),
             cancel: crate::cancel::Cancel::current(),
             calls: Vec::new(),
             alloc_next,

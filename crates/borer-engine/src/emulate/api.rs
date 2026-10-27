@@ -2,7 +2,7 @@
 //! results, allocations, and Linux system calls.
 
 use super::calls::ApiCall;
-use super::{Emulator, Stop, image_byte};
+use super::{Emulator, Planted, Stop, image_byte};
 use crate::analysis::Analysis;
 use crate::analysis::decompile::abi;
 use crate::analysis::syscalls::linux_syscall_name;
@@ -78,6 +78,49 @@ impl<'a> Emulator<'a> {
             Some(emu.planted())
         });
         Self::with_planted(program, budget, planted.as_ref().as_ref()?)
+    }
+
+    /// What this machine was set up with before any run: the memory and
+    /// the stubs it planted, a function of the image alone.
+    ///
+    /// # Returns
+    ///
+    /// The planted state, which [`Emulator::with_planted`] builds a
+    /// machine over without planting again.
+    #[must_use]
+    pub(crate) fn planted(&self) -> Planted {
+        Planted {
+            mem: self.mem.clone(),
+            apis: std::sync::Arc::clone(&self.apis),
+            modules: self.modules.clone(),
+        }
+    }
+
+    /// Builds an emulator as the machine `planted` was read from was set
+    /// up, over the memory and stubs it planted.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image whose bytes back unwritten memory; the one
+    ///   `planted` was read from.
+    /// * `budget` - Most instructions to run before stopping.
+    /// * `planted` - What [`Emulator::planted`] read from a machine that
+    ///   had not run.
+    ///
+    /// # Returns
+    ///
+    /// The machine, or `None` when the image's bitness is unknown.
+    #[must_use]
+    pub(crate) fn with_planted(
+        program: &'a Program,
+        budget: usize,
+        planted: &Planted,
+    ) -> Option<Self> {
+        let mut emu = Self::bare(program, budget)?;
+        emu.mem = planted.mem.clone();
+        emu.apis = std::sync::Arc::clone(&planted.apis);
+        emu.modules.clone_from(&planted.modules);
+        Some(emu)
     }
 }
 
@@ -247,20 +290,12 @@ impl Emulator<'_> {
         let void = super::calls::returns_void(api, format);
         let rcx = self.api_arg(0);
         let rv: u64 = if api.starts_with("GetModuleHandle") || api.starts_with("LoadLibrary") {
-            self.program.image_base
-        } else if api.starts_with("GetProcAddress") {
-            let asked = self.api_arg(1);
-            let key = self
-                .read_memory_text(asked, false)
-                .unwrap_or_else(|| format!("#{asked:#x}"));
-            if let Some(&stub) = self.resolved.get(&key) {
-                stub
-            } else {
-                let next = self.api_stub(self.apis.len());
-                std::sync::Arc::make_mut(&mut self.apis).insert(next, format!("{full}:resolved"));
-                self.resolved.insert(key, next);
-                next
+            match self.read_memory_text(rcx, api.ends_with('W')) {
+                Some(name) => self.module_handle(&name),
+                None => self.program.image_base,
             }
+        } else if api == "GetProcAddress" {
+            self.resolve_export(rcx, self.api_arg(1))
         } else if api.starts_with("VirtualAlloc") || api == "HeapAlloc" || api == "malloc" {
             let requested = match api {
                 "VirtualAlloc" => rcx,
@@ -321,6 +356,66 @@ impl Emulator<'_> {
             self.set_reg(Register::RSP, sp);
         }
         Ok(ret)
+    }
+
+    /// Answers `GetProcAddress`: the stub of the export asked for, named
+    /// `<dll>!<name>` (`<dll>!#<ordinal>` for an ordinal) after the module
+    /// its handle stands for.
+    ///
+    /// An export the image already has a stub for (an import slot, a cell
+    /// of a planted export directory) answers that stub, as the real call
+    /// answers the one address the loader bound; asking again answers the
+    /// stub the first call handed out. A handle no planted module has (the
+    /// image's own base) leaves the name without a module.
+    ///
+    /// # Arguments
+    ///
+    /// * `module` - The module handle the call passed.
+    /// * `asked` - The name pointer, or an ordinal below `0x10000`.
+    ///
+    /// # Returns
+    ///
+    /// The stub address.
+    fn resolve_export(&mut self, module: u64, asked: u64) -> u64 {
+        let export = if asked >> 16 == 0 {
+            format!("#{asked}")
+        } else {
+            self.read_memory_text(asked, false)
+                .unwrap_or_else(|| format!("#{asked:#x}"))
+        };
+        let full = self
+            .module_named(module)
+            .map_or_else(|| export.clone(), |dll| format!("{dll}!{export}"));
+        let key = full.to_lowercase();
+        if let Some(&stub) = self.resolved.get(&key) {
+            return stub;
+        }
+        let stub = match self
+            .apis
+            .iter()
+            .find(|(_, n)| n.eq_ignore_ascii_case(&full))
+        {
+            Some((&stub, _)) => stub,
+            None => {
+                let next = self.api_stub(self.apis.len());
+                std::sync::Arc::make_mut(&mut self.apis).insert(next, full);
+                next
+            }
+        };
+        self.resolved.insert(key, stub);
+        stub
+    }
+
+    /// The API a stub address stands for, as `<dll>!<name>`, a bare name
+    /// where the module is not known, or `None` for an address that is no
+    /// stub.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address, such as a word read from an import slot.
+    #[must_use]
+    pub fn api_at(&self, addr: u64) -> Option<&str> {
+        self.apis.get(&addr).map(String::as_str)
     }
 
     /// Hands out the region a modeled allocator returns.
