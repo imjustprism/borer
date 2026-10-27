@@ -31,7 +31,7 @@ pub const FRONTIER_MAX: usize = 4096;
 pub const CHAINS_MAX: usize = 4096;
 
 /// Most pointers one level collects before it stops looking.
-const CANDIDATES_MAX: usize = 1 << 20;
+pub const CANDIDATES_MAX: usize = 1 << 20;
 
 /// A fixed place a chain may start at: a module, or a singleton's slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +152,7 @@ pub fn paths(
             sorted[sorted.len() - 1].0,
         );
         let mut found: Vec<(u64, u64, usize)> = Vec::new();
-        let swept = sweep(mem, &ranges, 0, |at, bytes, own| {
+        let mut swept = sweep(mem, &ranges, 0, |at, bytes, own| {
             for (i, w) in bytes[..own].chunks_exact(word).enumerate() {
                 let v = le_word(w) & mask;
                 if v < lo || v > hi {
@@ -172,6 +172,9 @@ pub fn paths(
             }
             ControlFlow::Continue(())
         });
+        if swept.stop == Some(Stop::Full) {
+            swept.stop = Some(Stop::Crowded);
+        }
         out.swept.add(swept);
         found.sort_unstable();
         let mut next = Vec::new();

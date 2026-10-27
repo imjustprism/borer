@@ -36,6 +36,9 @@ const GAP: u64 = 0x1000;
 pub enum Stop {
     /// It collected as many hits as it keeps.
     Full,
+    /// One level of a pointer search found more pointers than it keeps
+    /// ([`super::path::CANDIDATES_MAX`]).
+    Crowded,
     /// It read [`SCAN_MAX`] bytes.
     Budget,
     /// The request's deadline passed.
@@ -954,6 +957,10 @@ pub fn stop_line(stop: Option<Stop>, cap: &str) -> String {
                 "# stopped: full at {cap}; what lies past it is not kept, so narrow the search\n"
             )
         }
+        Some(Stop::Crowded) => format!(
+            "# stopped: one level found over {} pointers into the addresses before it, so deeper levels were not searched; lower max_offset or depth\n",
+            super::path::CANDIDATES_MAX
+        ),
         Some(Stop::Budget) => format!(
             "# stopped: read {} GiB, the most one search reads; narrow it\n",
             SCAN_MAX >> 30
