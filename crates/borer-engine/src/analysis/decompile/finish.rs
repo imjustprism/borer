@@ -107,10 +107,12 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::ApplyLayouts, text, apply_layouts);
     let text = skip.apply(Pass::FloatLanes, text, float_lanes);
     let text = skip.apply(Pass::LaneLocals, text, lane_locals);
-    let text = skip.apply(Pass::CalleeTypes, text, |t| callee::noted(t, word, callers));
     let text = skip.apply(Pass::TypeParameters, text, |t| {
+        let t = skip.apply(Pass::CalleeTypes, t.to_owned(), |t| {
+            callee::noted(t, word, callers)
+        });
         let callers = callers.map(|(program, analysis, _, entry)| (program, analysis, entry));
-        type_parameters(&callfmt::noted(t, callers), word)
+        type_parameters(&callfmt::noted(&t, callers), word)
     });
     let text = skip.apply(Pass::TypeLocals, text, type_locals);
     let text = skip.apply(Pass::ByteArithmetic, text, |t| byte_arithmetic(t, word));
