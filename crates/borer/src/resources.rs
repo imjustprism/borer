@@ -1541,6 +1541,84 @@ impl BorerServer {
         })
     }
 
+    /// Lists the functions switching on an opcode read off a stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Substring of the dispatcher's name; empty for all.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded.
+    pub(crate) fn dispatchers_text(&self, filter: &str) -> Result<String, ErrorData> {
+        self.with_analysis(Feature::Decompile, |p, a, o| {
+            Ok(borer_engine::analysis::opcodes::dispatchers_tsv(
+                p,
+                a,
+                o,
+                filter.trim(),
+                SLOT_PAGE,
+            ))
+        })
+    }
+
+    /// Renders one dispatcher's opcodes with their handlers and records.
+    ///
+    /// A function that switches on no opcode is an answer, not a fault, as
+    /// for [`Self::schema_text`].
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - `<function>[,<filter>]`: the dispatcher by address or
+    ///   name, and a substring of the opcode or the handler's name.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded or the function does not resolve.
+    pub(crate) fn opcodes_text(&self, spec: &str) -> Result<String, ErrorData> {
+        let (what, filter) = spec.split_once(',').unwrap_or((spec, ""));
+        self.with_analysis(Feature::Decompile, |p, a, o| {
+            let entry = self.function_entry(p, a, what.trim())?;
+            Ok(borer_engine::analysis::opcodes::dispatch_tsv(
+                p,
+                a,
+                o,
+                entry,
+                filter.trim(),
+                SLOT_PAGE,
+            )
+            .unwrap_or_else(|| {
+                format!(
+                    "# {} switches on no value read off a stream that its cases read on from: not a dispatcher\n",
+                    borer_engine::analysis::name_of(a, o, entry)
+                )
+            }))
+        })
+    }
+
+    /// Lists the functions writing a constant opcode first and then fields
+    /// through the same writer.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Substring of the opcode, the sender's or the writer's
+    ///   name; empty for all.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded.
+    pub(crate) fn opsends_text(&self, filter: &str) -> Result<String, ErrorData> {
+        self.with_analysis(Feature::Decompile, |p, a, o| {
+            Ok(borer_engine::analysis::opcodes::sends_tsv(
+                p,
+                a,
+                o,
+                filter.trim(),
+                SLOT_PAGE,
+            ))
+        })
+    }
+
     /// Lists every class with a constant at a vtable slot and the functions
     /// constructing it.
     ///

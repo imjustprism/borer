@@ -39,6 +39,9 @@ commands:
   senders <binary> <slot> [filter] [limit]  every class with a constant at a slot and the functions constructing it: who sends each command (max 2000)
   protocol <binary> <slot> [filter] [limit]  every class with a constant at a slot with its senders, its handler, what it encodes and what it decodes on one row (max 2000)
   hooks <binary> <slot> [filter] [limit]   every class with a constant at a slot with the addresses a binding hooks: encoder, decoder, handler, send call sites (max 2000)
+  dispatchers <binary> [filter] [limit]    functions switching on an opcode read off a stream (jump table or compare chain) with two or more cases reading on from it; decompiles at most 4000 candidates (max 2000)
+  opcodes <binary> <function> [filter] [limit]  one dispatcher's opcodes: each handler and the record it reads, the instruction reading the opcode, how the case is picked, what is unsure (max 2000)
+  opsends <binary> [filter] [limit]        functions writing a constant opcode first and then fields through the same writer, with what they write after it; decompiles at most 4000 candidates (max 2000)
   shape <binary> <function> [limit]        every function running the same code over other operands, with the strings and data that differ (max 2000)
   messages <binary> [filter] [limit]       every class that registered a wire id, with its named fields and the functions testing for the id (max 200)
   about <binary> <name>                    everything known about one name from every table: attribute, class, message routes, wire, function

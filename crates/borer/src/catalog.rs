@@ -92,6 +92,14 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
         "Every class that registered a four-character wire id, with its named fields and the functions that test for the id (the handlers), 200 rows a page, a function named in several cells numbered once in a # functions: legend; borer://messages/<filter> narrows by class name",
     ),
     (
+        "borer://dispatchers",
+        "Functions that read an opcode off a stream and switch on it (jump table or compare chain) with two or more cases reading on from the stream: cases, cases read, the reader and its call site, how the case is picked; decompiles at most 4000 candidates and says how many; borer://dispatchers/<filter> narrows by name, borer://opcodes/<function> lists one's opcodes",
+    ),
+    (
+        "borer://opsends",
+        "Functions that hand a writer a constant opcode first and then fields through the same stream, by opcode, with the writer, its call site and what is written after the opcode (kind@source); decompiles at most 4000 candidates and says how many; borer://opsends/<filter> narrows by opcode, sender or writer",
+    ),
+    (
         "borer://index",
         "Builds the decompilation index of the loaded program (every function's pseudo-C, cached on disk for borer://grep) and reports its size",
     ),
@@ -449,6 +457,21 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
                      who constructs it, the handler receiving it, what it writes onto the wire \
                      and what it reads back: the whole protocol as one table; `slot[,class-filter]`",
         "borer://protocol/3",
+    ),
+    (
+        "borer://dispatchers/{filter}",
+        "Functions switching on an opcode read off a stream whose name contains the filter, as borer://dispatchers lists them (2000 rows at most)",
+        "borer://dispatchers/packet",
+    ),
+    (
+        "borer://opcodes/{function}",
+        "One dispatcher's opcode table: per opcode the handler the case hands the stream to (or inline) and the record it reads (kind@offset, as borer://schema), with the instruction that read the opcode, how the case is picked and what is unsure; `function[,filter]`, the filter naming an opcode or a handler (2000 rows at most)",
+        "borer://opcodes/{entry}",
+    ),
+    (
+        "borer://opsends/{filter}",
+        "Functions writing a constant opcode first, as borer://opsends lists them, whose opcode, name or writer contains the filter (2000 rows at most)",
+        "borer://opsends/0x21",
     ),
     (
         "borer://senders/{slot}",

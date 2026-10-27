@@ -1,12 +1,14 @@
 //! The commands that read a wire protocol: the record a decoder reads and
-//! an encoder writes per message class, and who sends each.
+//! an encoder writes, per message class or per opcode a dispatcher
+//! switches on, and who sends each.
 
 use anyhow::Context as _;
-use borer_engine::analysis::{Analysis, Overlay, encode, protocol, schema, senders};
+use borer_engine::analysis::{Analysis, Overlay, encode, opcodes, protocol, schema, senders};
 use borer_engine::program::{Feature, Program};
 use borer_engine::text::{one_line, quoted};
 
-use super::args::{SlotQuery, arg, entry_at};
+use super::CLASS_ROWS;
+use super::args::{SlotQuery, arg, cli_limit, entry_at, filter_limit};
 use super::session::Session;
 
 /// A command [`run`] answers.
@@ -26,6 +28,12 @@ pub(super) enum Wire {
     Protocol,
     /// `hooks <slot> [filter] [limit]`: every class with a constant at a slot with the addresses a binding hooks.
     Hooks,
+    /// `dispatchers [filter] [limit]`: the functions switching on an opcode read off a stream.
+    Dispatchers,
+    /// `opcodes <function> [filter] [limit]`: one dispatcher's opcodes, handlers and records.
+    Opcodes,
+    /// `opsends [filter] [limit]`: the functions writing a constant opcode first, with what follows it.
+    Opsends,
 }
 
 impl Wire {
@@ -47,6 +55,9 @@ impl Wire {
             "senders" => Self::Senders,
             "protocol" => Self::Protocol,
             "hooks" => Self::Hooks,
+            "dispatchers" => Self::Dispatchers,
+            "opcodes" => Self::Opcodes,
+            "opsends" => Self::Opsends,
             _ => return None,
         })
     }
@@ -55,7 +66,13 @@ impl Wire {
     pub(super) fn most_args(self) -> usize {
         match self {
             Self::Schema | Self::Encode => 1,
-            Self::Schemas | Self::Encodes | Self::Senders | Self::Protocol | Self::Hooks => 3,
+            Self::Dispatchers | Self::Opsends => 2,
+            Self::Schemas
+            | Self::Encodes
+            | Self::Senders
+            | Self::Protocol
+            | Self::Hooks
+            | Self::Opcodes => 3,
         }
     }
 }
@@ -174,6 +191,26 @@ pub(super) fn run(cmd: Wire, args: &[String], s: &Session) -> anyhow::Result<()>
             "hooks needs the vtable slot the id sits in",
             protocol::hooks_tsv,
         )?,
+        Wire::Dispatchers => {
+            let (filter, limit) = filter_limit(args, CLASS_ROWS)?;
+            opcodes::dispatchers_tsv(p, &a, o, filter, limit)
+        }
+        Wire::Opsends => {
+            let (filter, limit) = filter_limit(args, CLASS_ROWS)?;
+            opcodes::sends_tsv(p, &a, o, filter, limit)
+        }
+        Wire::Opcodes => {
+            let what = arg(args, 2, "opcodes needs a dispatcher (address or name)")?;
+            let entry = entry_at(p, &a, s.resolve(&a, what)?)?;
+            let filter = args.get(3).map_or("", String::as_str);
+            let limit = cli_limit(args, 4, CLASS_ROWS, CLASS_ROWS)?;
+            opcodes::dispatch_tsv(p, &a, o, entry, filter, limit).with_context(|| {
+                format!(
+                    "{} switches on no value read off a stream that its cases read on from",
+                    one_line(what)
+                )
+            })?
+        }
     };
     print!("{text}");
     Ok(())

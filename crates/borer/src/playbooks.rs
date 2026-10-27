@@ -38,7 +38,11 @@ pub(crate) const PROTOCOL: &str = "Map the loaded client's protocol with the bor
      code only where a table leaves a question.\n \
      1. borer://vslot/<slot> lists every class whose virtual at that slot returns a \
      constant; a command class answers its wire id that way, so try the low slots \
-     (3 is common) and keep the one whose values look like an id space.\n \
+     (3 is common) and keep the one whose values look like an id space. A program \
+     with no class per message reads an opcode and switches on it instead: \
+     borer://dispatchers finds those switches, borer://opcodes/<function> lists one's \
+     opcodes with each handler and the record it reads, and borer://opsends lists the \
+     functions writing a constant opcode first with what they write after it.\n \
      2. borer://protocol/<slot> puts every class on one row with who sends it, the \
      handler that receives it, what it writes and what it reads; the rest of these \
      steps are its columns in full. \
@@ -243,8 +247,20 @@ const INTENTS: &[(&str, &[&str])] = &[
     (
         "protocol",
         &[
-            "vslot", "schema", "schemas", "encode", "encodes", "senders", "hooks", "protocol",
-            "messages", "ports", "attrs",
+            "vslot",
+            "schema",
+            "schemas",
+            "encode",
+            "encodes",
+            "senders",
+            "hooks",
+            "protocol",
+            "dispatchers",
+            "opcodes",
+            "opsends",
+            "messages",
+            "ports",
+            "attrs",
         ],
     ),
     (
