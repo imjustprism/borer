@@ -313,6 +313,60 @@ fn parses_own_pe() {
     assert!(s.contains("libraries ("), "{s}");
 }
 
+/// A copy of the test binary renamed together with its PDB finds the
+/// PDB by the binary's own name and is named by it.
+///
+/// The copy's record has one letter of its file name changed, so
+/// neither the recorded path nor the recorded name beside the copy is
+/// a file; its GUID and age are the PDB's.
+///
+/// A build without a PDB on disk (a release profile) has nothing to
+/// rename, and nothing is asserted.
+///
+/// # Panics
+///
+/// When the renamed PDB is not applied, or the temporary copies cannot
+/// be made.
+#[test]
+fn a_renamed_copy_finds_its_pdb_by_its_own_name() {
+    use borer_engine::pdb::{Outcome, resolved};
+    use borer_engine::program::Program;
+    let exe = std::env::current_exe().expect("the test binary has a path");
+    let Ok(program) = Program::load(&exe) else {
+        return;
+    };
+    let (Some(record), Some(Outcome::Applied { .. })) =
+        (program.pdb_record.as_ref(), program.pdb.as_ref())
+    else {
+        return;
+    };
+    let pdb = resolved(&exe, record, None).expect("an applied PDB resolves");
+    let dir = std::env::temp_dir().join(format!("borer-pdb-stem-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the temporary directory is made");
+    let (copy, renamed) = (dir.join("cm.exe"), dir.join("cm.pdb"));
+    let mut bytes = std::fs::read(&exe).expect("the test binary is readable");
+    let path = record.path.as_bytes();
+    let at = bytes
+        .windows(path.len())
+        .position(|w| w == path)
+        .expect("the image holds its record's path");
+    let first = at + record.path.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    let byte = bytes.get_mut(first).expect("the file name is in the image");
+    *byte = if *byte == b'x' { b'y' } else { b'x' };
+    std::fs::write(&copy, &bytes).expect("the renamed copy is written");
+    if std::fs::hard_link(&pdb, &renamed).is_err() {
+        std::fs::copy(&pdb, &renamed).expect("the PDB is copied");
+    }
+    let loaded = Program::load(&copy);
+    std::fs::remove_dir_all(&dir).expect("the temporary directory is removed");
+    let loaded = loaded.expect("the renamed copy loads");
+    assert!(
+        matches!(loaded.pdb, Some(Outcome::Applied { named, .. }) if named > 0),
+        "the renamed PDB was not applied: {:?}",
+        loaded.pdb
+    );
+}
+
 /// Builds a raw x86-64 program with `.text` at 0x1000 and `.data` at 0x2000.
 ///
 /// `.data` has a 0x100-byte zero-filled tail beyond its file bytes.

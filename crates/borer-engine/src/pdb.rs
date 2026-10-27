@@ -183,12 +183,16 @@ impl Outcome {
 
 /// The paths a record's PDB may be at, in try order.
 ///
-/// Three places: the recorded path when it is absolute (the linker's own
+/// Four places: the recorded path when it is absolute (the linker's own
 /// machine, so a build tree that still exists names its PDB wherever it
 /// sits), the recorded file name beside the loaded binary (a PDB shipped
-/// next to its image), and the `{name}/{guid+age}/{name}` entry a symbol
-/// server client caches under a root the caller names, last, so a build
-/// tree or a shipped file always wins over a download. Nothing relative to
+/// next to its image), the binary's own name with `.pdb` beside it (a copy
+/// renamed together with its PDB, `cm.exe` and `cm.pdb`, whose record
+/// still names the file the linker wrote), and the
+/// `{name}/{guid+age}/{name}` entry a symbol server client caches under a
+/// root the caller names, last, so a build tree or a shipped file always
+/// wins over a download. A candidate applies only when it names the
+/// record's GUID and age. Nothing relative to
 /// the working directory is tried, which would make the answer depend on
 /// where the engine was run from. The file name is what follows the last
 /// `\` or `/`, since a record written on Windows names a Windows path that
@@ -199,7 +203,8 @@ impl Outcome {
 /// share, a device; [`crate::program::unusable_path`]) is never tried,
 /// since only asking whether it exists would connect to the named host,
 /// and a file name holding a `:` (a drive-relative path or a stream) or
-/// naming a device names no candidate at all.
+/// naming a device names no candidate: only the binary's own name is
+/// tried then.
 ///
 /// # Arguments
 ///
@@ -219,16 +224,14 @@ fn candidates(record: &Record, binary: &Path, symsrv: Option<&Path>) -> Vec<Path
         out.push(recorded.to_path_buf());
     }
     let name = record.path.rsplit(['/', '\\']).next().unwrap_or_default();
-    if !matches!(name, "" | "." | "..")
+    let named = !matches!(name, "" | "." | "..")
         && !name.contains(':')
-        && crate::program::unusable_path(Path::new(name)).is_none()
-    {
-        if let Some(dir) = binary.parent() {
-            out.push(dir.join(name));
-        }
-        if let Some(root) = symsrv {
-            out.push(root.join(name).join(record.symsrv_key()).join(name));
-        }
+        && crate::program::unusable_path(Path::new(name)).is_none();
+    out.extend(binary.parent().filter(|_| named).map(|dir| dir.join(name)));
+    out.push(binary.with_extension("pdb"));
+    out.dedup();
+    if let Some(root) = symsrv.filter(|_| named) {
+        out.push(root.join(name).join(record.symsrv_key()).join(name));
     }
     out
 }
@@ -1564,18 +1567,19 @@ mod tests {
         Some(pdb::TypeIndex(index))
     }
 
-    /// The recorded path, the binary's directory and the cache are the
-    /// candidates, in that order.
+    /// The recorded path, its file name beside the binary, the binary's own
+    /// name beside it and the cache are the candidates, in that order.
     ///
     /// A recorded Windows path is absolute only where Windows reads it, and
-    /// the sibling takes its file name from it on every host.
+    /// the sibling takes its file name from it on every host. A record
+    /// naming no usable file leaves the binary's own name alone.
     ///
     /// # Panics
     ///
     /// When the order differs or a working-directory-relative path sneaks
     /// in.
     #[test]
-    fn the_record_names_three_places_and_no_others() {
+    fn the_record_and_the_binary_name_four_places_and_no_others() {
         let bin = Path::new("bin").join("app.exe");
         for remote in [
             r"\\attacker\share\app.pdb",
@@ -1602,7 +1606,7 @@ mod tests {
                 age: 1,
             };
             let tried = candidates(&record, &bin, Some(Path::new("cache")));
-            assert!(tried.is_empty(), "{hostile} names no candidate: {tried:?}");
+            assert_eq!(tried, [bin.with_extension("pdb")], "{hostile}");
         }
         let dir = Path::new("bin");
         let binary = dir.join("app.exe");
@@ -1630,6 +1634,8 @@ mod tests {
                     .join("app.pdb"),
             ]
         );
+        let renamed = candidates(&relative, &dir.join("cm.exe"), None);
+        assert_eq!(renamed, [dir.join("app.pdb"), dir.join("cm.pdb")]);
     }
 
     /// The key spells the GUID and age the way the store's paths do.
