@@ -134,7 +134,6 @@ pub fn paths(
         .filter(|r| r.writable || (r.image && !r.executable))
         .map(|r| (r.base, r.base.saturating_add(r.size)))
         .collect();
-    let mask = if word == 8 { u64::MAX } else { 0xffff_ffff };
     let mut nodes = vec![Node {
         at: target,
         next: None,
@@ -148,37 +147,9 @@ pub fn paths(
         out.levels = level;
         let mut sorted: Vec<(u64, usize)> = frontier.iter().map(|&n| (nodes[n].at, n)).collect();
         sorted.sort_unstable();
-        let (lo, hi) = (
-            sorted[0].0.saturating_sub(max_offset),
-            sorted[sorted.len() - 1].0,
-        );
-        let mut found: Vec<(u64, u64, usize)> = Vec::new();
         let budget = SCAN_MAX.saturating_sub(out.swept.bytes);
-        let mut swept = sweep(mem, &ranges, 0, budget, |at, bytes, own| {
-            for (i, w) in bytes[..own].chunks_exact(word).enumerate() {
-                let v = le_word(w) & mask;
-                if v < lo || v > hi {
-                    continue;
-                }
-                let loc = at.saturating_add(from_usize(i * word));
-                let first = sorted.partition_point(|(a, _)| *a < v);
-                for &(a, n) in sorted[first..]
-                    .iter()
-                    .take_while(|(a, _)| a - v <= max_offset)
-                {
-                    found.push((a - v, loc, n));
-                    if found.len() >= CANDIDATES_MAX {
-                        return ControlFlow::Break(());
-                    }
-                }
-            }
-            ControlFlow::Continue(())
-        });
-        if swept.stop == Some(Stop::Full) {
-            swept.stop = Some(Stop::Crowded);
-        }
+        let (found, swept) = pointers_to(mem, &ranges, &sorted, max_offset, word, budget);
         out.swept.add(swept);
-        found.sort_unstable();
         let mut next = Vec::new();
         let mut aside = 0usize;
         for (offset, loc, n) in found {
@@ -215,6 +186,62 @@ pub fn paths(
         key(a).cmp(&key(b)).then_with(|| a.offsets.cmp(&b.offsets))
     });
     out
+}
+
+/// Sweeps the ranges once for the words that point at most `max_offset`
+/// bytes below an address of a level.
+///
+/// # Arguments
+///
+/// * `mem` - The process.
+/// * `ranges` - Where pointers are looked for.
+/// * `level` - The level's `(address, node)` pairs, sorted, at least one.
+/// * `max_offset` - Largest offset added after a read.
+/// * `word` - The pointer width in bytes.
+/// * `budget` - Most bytes the sweep reads.
+///
+/// # Returns
+///
+/// `(offset, pointer address, node)` for each pointer and address it
+/// reaches, sorted, and what the sweep read; a sweep that collected
+/// [`CANDIDATES_MAX`] stops as [`Stop::Crowded`].
+fn pointers_to(
+    mem: &dyn Memory,
+    ranges: &[(u64, u64)],
+    level: &[(u64, usize)],
+    max_offset: u64,
+    word: usize,
+    budget: u64,
+) -> (Vec<(u64, u64, usize)>, Swept) {
+    let mask = if word == 8 { u64::MAX } else { 0xffff_ffff };
+    let lo = level.first().map_or(0, |l| l.0.saturating_sub(max_offset));
+    let hi = level.last().map_or(0, |l| l.0);
+    let mut found: Vec<(u64, u64, usize)> = Vec::new();
+    let mut swept = sweep(mem, ranges, 0, budget, |at, bytes, own| {
+        for (i, w) in bytes[..own].chunks_exact(word).enumerate() {
+            let v = le_word(w) & mask;
+            if v < lo || v > hi {
+                continue;
+            }
+            let loc = at.saturating_add(from_usize(i * word));
+            let first = level.partition_point(|(a, _)| *a < v);
+            for &(a, n) in level[first..]
+                .iter()
+                .take_while(|(a, _)| a - v <= max_offset)
+            {
+                found.push((a - v, loc, n));
+                if found.len() >= CANDIDATES_MAX {
+                    return ControlFlow::Break(());
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    });
+    if swept.stop == Some(Stop::Full) {
+        swept.stop = Some(Stop::Crowded);
+    }
+    found.sort_unstable();
+    (found, swept)
 }
 
 /// Whether an address is already on the way from a node to the target,
