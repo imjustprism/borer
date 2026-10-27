@@ -785,7 +785,8 @@ pub fn dispatchers_tsv(
 
 /// Reads `entry` as a sender that writes a constant opcode first.
 ///
-/// Its first call handing a stream on passes a constant and nothing else,
+/// Its first call handing a stream on passes a constant and nothing else
+/// to a writer that stores it at a width borer reads,
 /// a later call hands the same stream a value that is not a constant, and
 /// one of the later writes has a kind [`encoding_through`] can tell: a
 /// call passing a handle and a command code, whose callee stores neither,
@@ -828,8 +829,12 @@ pub fn send_of(
         if earlier || !later || analysis.function(writer).is_none_or(|f| f.thunk.is_some()) {
             return None;
         }
-        let encoding = encoding_through(program, analysis, overlay, entry, stream)
-            .filter(|e| e.fields.iter().skip(1).any(|w| w.kind != "?"))?;
+        let encoding = encoding_through(program, analysis, overlay, entry, stream).filter(|e| {
+            e.fields
+                .first()
+                .is_some_and(|w| w.via == first.callee && w.kind != "?")
+                && e.fields.iter().skip(1).any(|w| w.kind != "?")
+        })?;
         Some(OpcodeSend {
             entry,
             opcode,

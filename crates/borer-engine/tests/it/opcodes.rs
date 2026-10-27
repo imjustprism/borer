@@ -57,6 +57,9 @@ const RETURNED_DISPATCH: u64 = 0x4014c0;
 const GET_MODE: u64 = 0x401540;
 /// [`RETURNED_DISPATCH`]'s code switching on [`GET_MODE`]: not a dispatcher.
 const MODE_SWITCH: u64 = 0x401560;
+/// A serializer handing [`GET_MODE`], which stores nothing, a constant
+/// before its writes: not a sender.
+const CONFIG_SENDER: u64 = 0x401600;
 /// The jump table's address in `.rdata`.
 const TABLE: u64 = 0x402000;
 
@@ -294,9 +297,10 @@ fn chain_dispatcher() -> Vec<u8> {
 /// # Arguments
 ///
 /// * `at` - Where it sits.
-/// * `opcode` - The constant written first, if any.
+/// * `opcode` - The constant written first and the function handed it, if
+///   any.
 /// * `setup` - Whether a call passing the object and 0 comes first.
-fn serializer(at: u64, opcode: Option<i32>, setup: bool) -> Vec<u8> {
+fn serializer(at: u64, opcode: Option<(i32, u64)>, setup: bool) -> Vec<u8> {
     asm(at, |a| {
         a.push(esi).expect("push");
         a.push(edi).expect("push");
@@ -308,10 +312,10 @@ fn serializer(at: u64, opcode: Option<i32>, setup: bool) -> Vec<u8> {
             a.call(H_B).expect("call");
             a.add(esp, 8).expect("add");
         }
-        if let Some(op) = opcode {
+        if let Some((op, writer)) = opcode {
             a.push(op).expect("push");
             a.push(esi).expect("push");
-            a.call(WRITE_U8).expect("call");
+            a.call(writer).expect("call");
             a.add(esp, 8).expect("add");
         }
         for (writer, off) in [(WRITE_U32, 8), (WRITE_U8, 0xc)] {
@@ -346,6 +350,7 @@ fn program() -> Program {
             SETUP_SENDER,
             RETURNED_DISPATCH,
             MODE_SWITCH,
+            CONFIG_SENDER,
         ] {
             a.call(f).expect("call");
         }
@@ -399,9 +404,12 @@ fn program() -> Program {
     let (td, cases) = table_dispatcher();
     put(TABLE_DISPATCH, &td);
     put(CHAIN_DISPATCH, &chain_dispatcher());
-    put(SENDER, &serializer(SENDER, Some(0x21), false));
+    put(SENDER, &serializer(SENDER, Some((0x21, WRITE_U8)), false));
     put(NOT_SENDER, &serializer(NOT_SENDER, None, false));
-    put(SETUP_SENDER, &serializer(SETUP_SENDER, Some(0x22), true));
+    put(
+        SETUP_SENDER,
+        &serializer(SETUP_SENDER, Some((0x22, WRITE_U8)), true),
+    );
     put(READ_RET, &returning_reader());
     put(
         RETURNED_DISPATCH,
@@ -415,6 +423,10 @@ fn program() -> Program {
     });
     put(GET_MODE, &mode);
     put(MODE_SWITCH, &returned_dispatcher(MODE_SWITCH, GET_MODE));
+    put(
+        CONFIG_SENDER,
+        &serializer(CONFIG_SENDER, Some((7, GET_MODE)), false),
+    );
     let table: Vec<u8> = cases
         .iter()
         .flat_map(|&c| u32::try_from(c).expect("32-bit").to_le_bytes())
@@ -506,8 +518,11 @@ fn a_compare_chain_dispatcher_maps_each_opcode_to_its_handler() {
 }
 
 /// A sender hands its writer the opcode as a constant first and fields
-/// after it, a call handing something else a constant before it
-/// notwithstanding; a serializer writing no constant first is not one.
+/// after it.
+///
+/// A call handing something else a constant before it does not hide it;
+/// a serializer writing no constant first, or handing its first constant
+/// to a function that stores nothing, is not one.
 #[test]
 fn a_sender_writes_its_opcode_first_and_then_its_fields() {
     let p = program();
@@ -525,6 +540,7 @@ fn a_sender_writes_its_opcode_first_and_then_its_fields() {
         .collect();
     assert_eq!(writes, [("u8", "33"), ("u32", "a2+0x8"), ("u8", "a2+0xc")]);
     assert!(opcodes::send_of(&p, &a, &o, NOT_SENDER).is_none());
+    assert!(opcodes::send_of(&p, &a, &o, CONFIG_SENDER).is_none());
     let setup = opcodes::send_of(&p, &a, &o, SETUP_SENDER).expect("a sender after a setup call");
     assert_eq!(setup.opcode, 0x22);
     assert!(opcodes::send_of(&p, &a, &o, H_A).is_none());
