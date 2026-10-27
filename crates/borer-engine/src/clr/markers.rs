@@ -217,6 +217,7 @@ fn bodies(meta: &Meta<'_>, index: &Managed, rows: &mut Vec<(String, &'static str
         .iter()
         .filter(|r| is_proxy(r))
         .filter_map(|r| r.sites.first().and_then(|s| meta.member_name(s.token)))
+        .filter(|callee| !callee.ends_with("::.ctor"))
         .collect();
     if proxies.len() >= PROXIES {
         rows.push((
