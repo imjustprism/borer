@@ -9,6 +9,7 @@
 //! [`DEPTH_MAX`] and a rendered name at [`super::QUALIFIED_MAX`] bytes.
 
 use std::cell::{Cell, OnceCell};
+use std::collections::BTreeMap;
 
 use super::{
     Clr, Coded, FIELD, MEMBER_REF, METHOD_DEF, METHOD_SPEC, STAND_ALONE_SIG, TYPE_DEF, TYPE_REF,
@@ -17,6 +18,10 @@ use super::{
 
 use crate::num::saturating_usize;
 use crate::program::Program;
+
+/// `FieldPtr`, table `0x03`: the indirection an uncompressed (`#-`)
+/// stream lists fields through (II.22).
+const FIELD_PTR: u8 = 0x03;
 
 /// `CustomAttribute`, table `0x0c` (II.22.10).
 const CUSTOM_ATTRIBUTE: u8 = 0x0c;
@@ -113,9 +118,10 @@ pub(crate) struct Meta<'a> {
     /// Types one name may still read ([`TYPE_FUEL`] at each public call),
     /// so a signature whose types refer back to it costs a bounded amount.
     fuel: Cell<u32>,
-    /// Each type's first `Field` row, by type row less one, read on first
-    /// use ([`Meta::field_owner`]).
-    field_starts: OnceCell<Vec<u32>>,
+    /// Each type's first field list position, by type row less one, and
+    /// each `Field` row's position in `FieldPtr` (empty without one), read
+    /// on first use ([`Meta::field_owner`]).
+    field_starts: OnceCell<(Vec<u32>, BTreeMap<u32, u32>)>,
 }
 
 impl<'a> Meta<'a> {
@@ -367,18 +373,28 @@ impl<'a> Meta<'a> {
     }
 
     /// The type whose field list holds a `Field` row, by a search of the
-    /// types' first fields, read once.
+    /// types' first fields, read once; through `FieldPtr` when the stream
+    /// lists fields through it (an uncompressed `#-` stream).
     ///
     /// # Returns
     ///
     /// The type's one-based row, `None` for a field before every list.
     fn field_owner(&self, row: u32) -> Option<u32> {
-        let starts = self.field_starts.get_or_init(|| {
-            (1..=self.t.readable(TYPE_DEF))
+        let (starts, slots) = self.field_starts.get_or_init(|| {
+            let starts = (1..=self.t.readable(TYPE_DEF))
                 .map(|ty| self.cell(TYPE_DEF, ty, 4).unwrap_or(u32::MAX))
-                .collect()
+                .collect();
+            let slots = (1..=self.t.readable(FIELD_PTR))
+                .filter_map(|slot| Some((self.cell(FIELD_PTR, slot, 0)?, slot)))
+                .collect();
+            (starts, slots)
         });
-        let before = starts.partition_point(|first| *first <= row);
+        let at = if slots.is_empty() {
+            row
+        } else {
+            *slots.get(&row)?
+        };
+        let before = starts.partition_point(|first| *first <= at);
         u32::try_from(before).ok().filter(|n| *n > 0)
     }
 
