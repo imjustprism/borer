@@ -357,6 +357,10 @@ impl BorerServer {
                 (Some(_), true) => self.ensure_analysis().ok(),
                 _ => None,
             };
+            let still = |p: &std::sync::Arc<borer_engine::program::Program>| {
+                self.loaded().is_some_and(|now| std::sync::Arc::ptr_eq(&now, p))
+            };
+            let analysis = analysis.filter(|_| program.as_ref().is_some_and(still));
             if let (None, Some(block), Some(a)) = (&module, s.tls_block, &analysis) {
                 for (off, class) in &a.classes.tls_slots {
                     bases.push(Base {
