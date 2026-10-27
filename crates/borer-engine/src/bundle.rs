@@ -263,6 +263,10 @@ pub fn dotnet_marker(bytes: &[u8]) -> Option<(usize, u64)> {
 /// Reads a .NET single-file bundle's manifest: the bundle format version
 /// and every file in it.
 ///
+/// An entry cut off by the file's end ends the list there; the entries
+/// read before it are kept and `declared` says how many the manifest
+/// promised.
+///
 /// # Arguments
 ///
 /// * `bytes` - The file.
@@ -277,8 +281,7 @@ fn dotnet_bundle(bytes: &[u8]) -> Option<Bundle> {
     let count = u32_le(bytes, at + 8)?;
     let (id, next) = dotnet_string(bytes, at + 12)?;
     at = next + if major >= 2 { 40 } else { 0 };
-    let mut entries = Vec::new();
-    for _ in 0..saturating_usize(u64::from(count)).min(ENTRIES_MAX) {
+    let entry_at = |at: usize| -> Option<(Entry, usize)> {
         let off = u64_le(bytes, at)?;
         let size = u64_le(bytes, at + 8)?;
         let (packed, rest) = if major >= 6 {
@@ -288,14 +291,22 @@ fn dotnet_bundle(bytes: &[u8]) -> Option<Bundle> {
         };
         let kind = net_kind(*bytes.get(rest)?);
         let (name, next) = dotnet_string(bytes, rest + 1)?;
-        at = next;
-        entries.push(Entry {
+        let entry = Entry {
             name,
             kind,
             off,
             size: if packed == 0 { size } else { packed },
             unpacked: (packed != 0).then_some(size),
-        });
+        };
+        Some((entry, next))
+    };
+    let mut entries = Vec::new();
+    for _ in 0..saturating_usize(u64::from(count)).min(ENTRIES_MAX) {
+        let Some((entry, next)) = entry_at(at) else {
+            break;
+        };
+        at = next;
+        entries.push(entry);
     }
     let runtime = match major {
         1 => ".NET Core 3",

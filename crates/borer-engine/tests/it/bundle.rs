@@ -113,9 +113,11 @@ fn net_string(text: &str) -> Vec<u8> {
     s
 }
 
-/// A .NET single-file bundle's manifest is read to each file it carries,
-/// compressed ones with both sizes; a name is escaped onto its row, and an
-/// entry whose bytes the file does not hold says so.
+/// A .NET single-file bundle's manifest is read to each file it carries.
+///
+/// Compressed files carry both sizes; a name is escaped onto its row, an
+/// entry whose bytes the file does not hold says so, and a manifest cut off
+/// mid-entry keeps the entries read before the cut.
 #[test]
 fn a_dotnet_bundle_lists_its_files() {
     let mut marker = vec![0u8; 0x200];
@@ -140,6 +142,12 @@ fn a_dotnet_bundle_lists_its_files() {
         m.push(kind);
         m.extend(net_string(name));
     }
+    let cut = bundles_tsv(&load(image(marker.clone(), &m[..m.len() - 5])));
+    assert!(
+        cut.contains("app.dll") && cut.contains("native.dll"),
+        "{cut}"
+    );
+    assert!(cut.contains("2 entries of 3 declared"), "{cut}");
     let table = bundles_tsv(&load(image(marker.clone(), &m)));
     assert!(
         table.contains("manifest 6.0 (.NET 6 or later), bundle id abc123"),
