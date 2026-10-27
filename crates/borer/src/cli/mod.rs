@@ -7,9 +7,8 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, anyhow, bail};
 use borer_engine::analysis::{
-    Overlay, about, anchors, attributes, classes, decompile, encode, fieldrefs, map, messages,
-    name_of, parse_addr, parse_off, ports, protocol, render, schema, senders, sigs, snapshot,
-    utypes, vtables,
+    Overlay, about, anchors, attributes, classes, decompile, fieldrefs, map, messages, name_of,
+    parse_addr, parse_off, ports, render, sigs, snapshot, utypes, vtables,
 };
 use borer_engine::isa::Isa;
 use borer_engine::pack::Pack;
@@ -55,6 +54,7 @@ mod args;
 mod extras;
 mod packs;
 mod session;
+mod wire;
 
 use args::{
     COMMAND_FLAGS, Command, Direction, Query, RawFlags, SlotQuery, USAGE, arg, cli_limit, cli_page,
@@ -561,93 +561,6 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .map_err(anyhow::Error::msg)?
             );
         }
-        Query::Schema => {
-            let a = s.analysis(Feature::Decompile)?;
-            let what = arg(
-                args,
-                2,
-                "schema needs a function (address or name) or a class name",
-            )?;
-            let text = match s.resolve(&a, what) {
-                Ok(va) => {
-                    schema::schema_tsv(&s.program, &a, &s.overlay, entry_at(&s.program, &a, va)?)
-                        .with_context(|| {
-                            format!("{} hands no stream to its calls", one_line(what))
-                        })?
-                }
-                Err(_) => schema::class_schema_tsv(&s.program, &a, &s.overlay, what).with_context(
-                    || {
-                        format!(
-                            "{} is neither a function nor a class whose virtuals read a stream",
-                            quoted(what)
-                        )
-                    },
-                )?,
-            };
-            print!("{text}");
-        }
-        Query::Schemas => {
-            let a = s.analysis(Feature::Decompile)?;
-            let q = SlotQuery::parse(args, "schemas needs the vtable slot the id sits in")?;
-            print!(
-                "{}",
-                schema::schemas_tsv(&s.program, &a, &s.overlay, q.slot, q.filter, q.limit)
-            );
-        }
-        Query::Encode => {
-            let a = s.analysis(Feature::Decompile)?;
-            let what = arg(
-                args,
-                2,
-                "encode needs a function (address or name) or a class name",
-            )?;
-            let text = match s.resolve(&a, what) {
-                Ok(va) => {
-                    encode::encoding_tsv(&s.program, &a, &s.overlay, entry_at(&s.program, &a, va)?)
-                        .with_context(|| format!("{} hands its stream nothing", one_line(what)))?
-                }
-                Err(_) => encode::class_encoding_tsv(&s.program, &a, &s.overlay, what)
-                    .with_context(|| {
-                        format!(
-                            "{} is neither a function nor a class whose virtuals write a stream",
-                            quoted(what)
-                        )
-                    })?,
-            };
-            print!("{text}");
-        }
-        Query::Encodes => {
-            let a = s.analysis(Feature::Decompile)?;
-            let q = SlotQuery::parse(args, "encodes needs the vtable slot the id sits in")?;
-            print!(
-                "{}",
-                encode::encodings_tsv(&s.program, &a, &s.overlay, q.slot, q.filter, q.limit)
-            );
-        }
-        Query::Senders => {
-            let a = s.analysis(Feature::Decompile)?;
-            let q = SlotQuery::parse(args, "senders needs the vtable slot the id sits in")?;
-            print!(
-                "{}",
-                senders::senders_tsv(&s.program, &a, &s.overlay, q.slot, q.filter, q.limit)
-            );
-        }
-        Query::Protocol => {
-            let a = s.analysis(Feature::Decompile)?;
-            let q = SlotQuery::parse(args, "protocol needs the vtable slot the id sits in")?;
-            print!(
-                "{}",
-                protocol::protocol_tsv(&s.program, &a, &s.overlay, q.slot, q.filter, q.limit)
-            );
-        }
-        Query::Hooks => {
-            let a = s.analysis(Feature::Decompile)?;
-            let q = SlotQuery::parse(args, "hooks needs the vtable slot the id sits in")?;
-            print!(
-                "{}",
-                protocol::hooks_tsv(&s.program, &a, &s.overlay, q.slot, q.filter, q.limit)
-            );
-        }
         Query::Shape => {
             let (a, entry) =
                 s.function_arg(args, 2, "shape needs a function", Feature::Discover)?;
@@ -782,6 +695,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Extra(extra) => extras::run(extra, args, s)?,
+        Query::Wire(cmd) => wire::run(cmd, args, s)?,
         Query::Crypto => {
             let a = s.analysis_or_empty();
             print!("{}", render::crypto_tsv(&s.program, &a, &s.overlay, 0, 200));

@@ -239,20 +239,6 @@ pub(super) enum Query {
     Index,
     /// `grep <text> [filter] [offset] [limit]`: pseudo-C lines containing the text program-wide.
     Grep,
-    /// `schema <function|class>`: the record a deserializer reads off its stream.
-    Schema,
-    /// `schemas <slot> [filter] [limit]`: every class with a constant at a slot and the record it decodes.
-    Schemas,
-    /// `encode <function|class>`: what a serializer writes onto its stream.
-    Encode,
-    /// `encodes <slot> [filter] [limit]`: every class with a constant at a slot and what it encodes.
-    Encodes,
-    /// `senders <slot> [filter] [limit]`: every class with a constant at a slot and the functions constructing it.
-    Senders,
-    /// `protocol <slot> [filter] [limit]`: every class with a constant at a slot with its senders, handler, encoding and decoding.
-    Protocol,
-    /// `hooks <slot> [filter] [limit]`: every class with a constant at a slot with the addresses a binding hooks.
-    Hooks,
     /// `shape <function> [limit]`: every function running the same code over other operands.
     Shape,
     /// `messages [filter] [limit]`: every class that registered a wire id.
@@ -330,6 +316,9 @@ pub(super) enum Query {
     /// The commands [`super::extras`] runs: `hashes`, `sig`, `yara`,
     /// `names`, `diff`, `addr` and `encoded`.
     Extra(super::extras::Extra),
+    /// The commands [`super::wire`] runs: the record a decoder reads and an
+    /// encoder writes, per message class or per opcode, and who sends each.
+    Wire(super::wire::Wire),
     /// `verify [function|all] [limit] [seed] [text|mir]`: check the lifter, or with `text` the text's statements, against the emulator, with `mir` reading the lifted values through MIR; fails on any disagreement.
     Verify,
 }
@@ -364,13 +353,6 @@ impl Query {
             "vslot" => Self::Vslot,
             "index" => Self::Index,
             "grep" => Self::Grep,
-            "schema" => Self::Schema,
-            "schemas" => Self::Schemas,
-            "encode" => Self::Encode,
-            "encodes" => Self::Encodes,
-            "senders" => Self::Senders,
-            "protocol" => Self::Protocol,
-            "hooks" => Self::Hooks,
             "shape" => Self::Shape,
             "messages" => Self::Messages,
             "about" => Self::About,
@@ -409,7 +391,9 @@ impl Query {
             "types" => Self::Types,
             "set-type" => Self::SetType,
             "verify" => Self::Verify,
-            other => Self::Extra(super::extras::Extra::parse(other)?),
+            other => super::wire::Wire::parse(other)
+                .map(Self::Wire)
+                .or_else(|| super::extras::Extra::parse(other).map(Self::Extra))?,
         })
     }
 
@@ -423,6 +407,7 @@ impl Query {
         Some(match self {
             Self::Info | Self::Index | Self::Crypto | Self::Qt | Self::Triage => 0,
             Self::Extra(extra) => extra.most_args(),
+            Self::Wire(cmd) => cmd.most_args(),
             Self::Function
             | Self::Summary
             | Self::Entropy
@@ -430,8 +415,6 @@ impl Query {
             | Self::Findstr
             | Self::Disasmfn
             | Self::Class
-            | Self::Schema
-            | Self::Encode
             | Self::About
             | Self::Snapshot
             | Self::Changes
@@ -464,11 +447,6 @@ impl Query {
             Self::Functions
             | Self::Search
             | Self::Vslot
-            | Self::Schemas
-            | Self::Encodes
-            | Self::Senders
-            | Self::Protocol
-            | Self::Hooks
             | Self::Strings
             | Self::Symbols
             | Self::Read
