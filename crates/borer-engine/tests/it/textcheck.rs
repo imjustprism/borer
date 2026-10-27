@@ -10,7 +10,7 @@
 
 use borer_engine::analysis::decompile::{Site, checked_header, decompile_named, unset_reads};
 use borer_engine::analysis::render::{
-    Budget, Evidence, Repair, Verdict, answered, answered_flagged, check_generated,
+    Budget, Evidence, Repair, Verdict, answered, answered_flagged, blame_tsv, check_generated,
     check_generated_iso, repair_iso,
 };
 use borer_engine::analysis::{Analysis, Overlay};
@@ -687,6 +687,67 @@ fn the_repair_search_masks_a_signed_quotient_to_its_lane() {
         o.fingerprint(),
         "the replay bears every statement out, so an answer runs no search"
     );
+}
+
+/// Blame lays a text that differs to a pass, or to what the passes were
+/// handed, and blames nothing in a text that agrees.
+///
+/// A spec it cannot read, or a target that is no function, is refused
+/// with the reason.
+#[test]
+fn blame_names_what_breaks_the_text_or_says_nothing_does() {
+    let mut code = vec![
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0xb9, 0xfb, 0xff, 0xff, 0xff, // ASM: mov ecx,0xfffffffb
+        0x99, // ASM: cdq
+        0xf7, 0xf9, // ASM: idiv ecx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0x48, 0x89, 0xc8, 0xc3]); // ASM: mov rax,rcx; ret
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let agrees = blame_tsv(&p, &a, &o, "0x1040,count=8").expect("blames");
+    assert!(agrees.starts_with("# blame for "), "{agrees}");
+    assert!(
+        agrees.contains(
+            "
+agrees	"
+        ),
+        "{agrees}"
+    );
+    let broke = blame_tsv(&p, &a, &o, "0x1000").expect("blames");
+    assert!(
+        broke.contains(
+            "
+pass	"
+        ) || broke.contains(
+            "
+before-passes	"
+        ),
+        "{broke}"
+    );
+    assert!(
+        broke.contains(
+            "
+differs	"
+        ),
+        "{broke}"
+    );
+    assert_eq!(
+        blame_tsv(&p, &a, &o, "0x1000"),
+        Ok(broke),
+        "the same question answers the same bytes"
+    );
+    for (spec, why) in [
+        ("0x1000,count=0", "count is 1 to"),
+        ("0x1000,seed=2", "cannot read seed=2"),
+        ("nosuch", "nosuch"),
+    ] {
+        let refused = blame_tsv(&p, &a, &o, spec).expect_err(spec);
+        assert!(refused.contains(why), "{spec}: {refused}");
+    }
 }
 
 /// A 32-bit hash the function keeps in a 64-bit register is a `uint32_t`.

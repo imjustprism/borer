@@ -9,11 +9,13 @@ use crate::emulate::a64::Machine as A64Machine;
 use crate::emulate::calls::ApiCall;
 use crate::isa::Isa;
 
+mod blame;
 mod diff;
 mod repair;
 mod spec;
 mod vectors;
 
+pub use blame::blame_tsv;
 pub use diff::run_diff_tsv;
 pub use repair::{
     Budget, Evidence, Repair, Tried, answered, answered_flagged, repair_iso, repaired,

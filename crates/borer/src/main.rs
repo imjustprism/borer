@@ -702,6 +702,7 @@ impl BorerServer {
             ("run", Some(spec)) => self.run_text(&spec)?,
             ("diverge", Some(spec)) => self.diverge_text(&spec)?,
             ("vectors", Some(spec)) => self.vectors_text(&spec)?,
+            ("blame", Some(spec)) => self.blame_text(&spec)?,
             ("diff", Some(other)) => self.diff_text(&other)?,
             ("difffn", Some(spec)) => self.diff_function_text(&spec)?,
             ("migrate", Some(spec)) => self.migrate_text(&spec)?,
@@ -737,8 +738,7 @@ impl BorerServer {
             ("about", Some(name)) => self.about_text(&name)?,
             ("changes", Some(path)) => self.changes_text(&path)?,
             ("map", Some(namespace)) => self.map_text(&namespace)?,
-            ("ports", None) => self.ports_text("")?,
-            ("ports", Some(filter)) => self.ports_text(&filter)?,
+            ("ports", filter) => self.ports_text(filter.as_deref().unwrap_or(""))?,
             ("attrs", Some(filter)) => return self.attrs_text(&filter, asked),
             ("messages", Some(filter)) => return self.messages_text(&filter, asked),
             ("anchors", Some(path)) => self.anchors_text(&path)?,
@@ -1348,6 +1348,48 @@ mod tests {
             refused
                 .message
                 .contains("oracle runs x86 and x86-64 code only for now"),
+            "{}",
+            refused.message
+        );
+    }
+
+    /// `borer://blame` reaches the client: a text that agrees with the
+    /// binary blames no pass, and an arm64 function is refused with why.
+    ///
+    /// # Panics
+    ///
+    /// When the answer or the refusal is otherwise.
+    #[test]
+    fn blame_answers_over_the_resource() {
+        use borer_engine::program::{Arch, Program, Section};
+        let server = |code: Vec<u8>, arch| {
+            let len = u64::try_from(code.len()).expect("a short routine");
+            let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+            let program = Program::raw(code, arch, 0, Some(0x1000), vec![text]);
+            super::BorerServer {
+                program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
+                    program,
+                )))),
+                pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
+                ..super::BorerServer::default()
+            }
+        };
+        let x64 = server(vec![0x8d, 0x41, 0x01, 0xc3], Arch::X86_64); // ASM: lea eax,[rcx+1]; ret
+        let out = x64
+            .resource_text("borer://blame/0x1000,count=8")
+            .expect("blames");
+        assert!(
+            out.starts_with("# blame for sub_1000 (0x1000)") && out.contains("\nagrees\t"),
+            "{out}"
+        );
+        let arm = server(vec![0xc0, 0x03, 0x5f, 0xd6], Arch::Arm64); // ASM: ret
+        let refused = arm
+            .resource_text("borer://blame/0x1000")
+            .expect_err("blame runs the x86 check");
+        assert!(
+            refused
+                .message
+                .contains("blame runs x86 and x86-64 code only"),
             "{}",
             refused.message
         );

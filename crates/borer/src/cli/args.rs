@@ -74,6 +74,7 @@ commands:
   oracle <binary> <address|name>           run a checksum on the standard probe and name it
   emulate <binary> <spec>                  run code and read it back; spec: addr[,reg=v,aN=v,w<addr>=<hex>,stop=<addr>,steps=<n>,trace=<n>,origin=<v>,dump=<addr>:<len>]; aN is the decompiler's aN, a1 the first
   run <binary> <function>[,steps=N]/<input>[;<input>...]  call a function on typed inputs (each: comma-separated 5, -1, \"text\", hex:0102, out:16) and check its decompiled text gives the same
+  blame <binary> <function>[,count=N][,steps=N]  the first text cleanup pass that breaks a function: the input it differs on and whether leaving it out alone repairs it
   hidden <binary> [filter]                 strings the program generates instead of storing
   read <binary> <address|name> [kind] [count]  typed values (u8..u64, f32, f64, ptr, cstr, wstr; default 1, max 256); off:<n> reads by file offset
   fingerprint <binary> [out]               function fingerprints; with out, write the sidecar borer://diff reads

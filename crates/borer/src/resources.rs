@@ -324,6 +324,22 @@ impl BorerServer {
         })
     }
 
+    /// Names the first text cleanup pass that breaks a function, the input
+    /// it differs on and whether leaving it out alone repairs it, the
+    /// CLI's `blame`.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - `<function>[,count=N][,steps=N]`.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, it is not x86, or the spec, the function
+    /// or its signature is refused.
+    pub(crate) fn blame_text(&self, spec: &str) -> Result<String, ErrorData> {
+        self.refusing(Feature::Emulate, |p, a, o| render::blame_tsv(p, a, o, spec))
+    }
+
     /// Recovers the strings the program generates at run time, the CLI's
     /// `hidden`.
     ///

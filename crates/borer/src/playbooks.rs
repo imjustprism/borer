@@ -183,6 +183,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "run",
             "diverge",
             "vectors",
+            "blame",
             "solve",
             "partial",
             "scenario",

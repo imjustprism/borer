@@ -2,7 +2,8 @@
 //!
 //! They give its hashes, a code signature, a YARA rule, names for a
 //! disassembler, its fingerprints and a diff against another build, an
-//! address in every form, and encoded strings.
+//! address in every form, encoded strings, and the cleanup pass that
+//! breaks a function's text.
 
 use anyhow::Context as _;
 use borer_engine::analysis::Overlay;
@@ -33,6 +34,8 @@ pub(super) enum Extra {
     Encoded,
     /// `fingerprint [out]`: function fingerprints; with out, the sidecar `diff` reads.
     Fingerprint,
+    /// `blame <function>[,count=N][,steps=N]`: the first text cleanup pass that breaks a function.
+    Blame,
 }
 
 impl Extra {
@@ -55,6 +58,7 @@ impl Extra {
             "addr" => Self::Addr,
             "encoded" => Self::Encoded,
             "fingerprint" => Self::Fingerprint,
+            "blame" => Self::Blame,
             _ => return None,
         })
     }
@@ -68,7 +72,8 @@ impl Extra {
             | Self::Diff
             | Self::Addr
             | Self::Encoded
-            | Self::Fingerprint => 1,
+            | Self::Fingerprint
+            | Self::Blame => 1,
             Self::Names => 2,
         }
     }
@@ -197,6 +202,14 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
                 "{}",
                 borer_engine::fileinfo::locate(&s.program, Some(&a), &s.overlay, what)
                     .map_err(anyhow::Error::msg)?
+            );
+        }
+        Extra::Blame => {
+            let a = s.analysis(Feature::Emulate)?;
+            let spec = arg(args, 2, "blame needs <function>[,count=N][,steps=N]")?;
+            print!(
+                "{}",
+                render::blame_tsv(&s.program, &a, &s.overlay, spec).map_err(anyhow::Error::msg)?
             );
         }
         Extra::Encoded => {
