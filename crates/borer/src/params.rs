@@ -851,19 +851,19 @@ pub(crate) enum ScanScope {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LiveScanParams {
-    /// Result set name; a first scan replaces a set of that name.
+    /// Result set name.
     pub(crate) name: String,
-    /// Number, text, or hex bytes (?? wildcard); with compare=equal, the new value.
+    /// Value; with compare=equal, the new one.
     pub(crate) value: Option<String>,
-    /// Value type (default u32); a next scan keeps the set's.
+    /// Default u32; bytes is hex, ?? a wildcard.
     pub(crate) kind: Option<ScanKind>,
-    /// Float tolerance (default: half a unit of the last digit given).
+    /// Float match range (default: half the last digit).
     pub(crate) tolerance: Option<f64>,
-    /// Narrow the named set instead of scanning anew.
+    /// Narrow set `name`.
     pub(crate) compare: Option<ScanCompare>,
-    /// Where a first scan reads (default all).
+    /// First scan's regions (default all).
     pub(crate) scope: Option<ScanScope>,
-    /// Module name, for scope=module.
+    /// For scope=module.
     pub(crate) module: Option<String>,
     /// Hits to skip.
     pub(crate) offset: Option<u32>,
@@ -877,13 +877,13 @@ pub(crate) struct LiveScanParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LivePathParams {
-    /// Target address: live, static, or a name.
+    /// Target: live, static or a name.
     pub(crate) address: String,
-    /// Most pointer reads per chain (default 4, max 6).
+    /// Reads per chain (default 4, max 6).
     pub(crate) depth: Option<u32>,
-    /// Largest offset added after a read, in bytes (default 4096, max 65536).
+    /// Largest offset per read (default 4096, max 65536).
     pub(crate) max_offset: Option<u32>,
-    /// Start chains only in this module (default: any module).
+    /// Start only in this module.
     pub(crate) module: Option<String>,
     /// Chains to skip.
     pub(crate) offset: Option<u32>,

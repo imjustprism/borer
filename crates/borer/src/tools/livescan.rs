@@ -207,7 +207,7 @@ impl BorerServer {
     /// does not read, the set named does not exist, or the session holds
     /// [`SETS_MAX`] sets and the name is new.
     #[tool(
-        description = "Find addresses in the attached process holding a value (CE-style first and next scan; read-only). First scan: value with kind u8..u64, i8..i64, f32/f64 (tolerance default: half the last digit), string, wstring or bytes (hex, ?? wildcard); scope all (default), main, module (+module) or heap. The hits are kept as result set `name` (8 sets, 2M hits each). Next scan: same name with compare=changed|unchanged|increased|decreased|equal(+value) re-reads only the set's hits; name alone pages the set without reading. Rows: address, value, module+offset, by address; the header says MiB read and regions skipped. Paged (default 50, max 500).",
+        description = "Find addresses in the attached process holding a value, read-only. First scan: value, kind, scope. The hits are kept as set `name` (8 sets, 2M hits each); name + compare re-reads only them; name alone pages them. Rows: address value module+offset, paged.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
@@ -314,7 +314,7 @@ impl BorerServer {
     /// Invalid params when no process is attached, the address does not
     /// resolve, the module is unknown, or a count is zero.
     #[tool(
-        description = "Find pointer chains to an address in the attached process, the CE pointer scan (read-only): [[base+off]+o1]+o2 = address, where base is a module (any, or `module`) or a thread-local singleton slot of the mapped binary. depth reads per chain (default 4, max 6), each offset 0..max_offset (default 4096, max 65536). Shortest first; every chain is walked again before it is shown; a base in the binary is labelled with its static address and singleton or name. Rough past 4096 addresses per level, and says so. Paged (default 20, max 200).",
+        description = "Find pointer chains [[base+off]+o1]+o2.. to an address in the attached process, read-only; bases are modules and the binary's thread-local singletons. Shortest first, each re-read, a base labelled by its static name; rough past 4096 addresses per level and says so. Paged.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
