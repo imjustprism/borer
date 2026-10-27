@@ -534,7 +534,7 @@ fn choose_cave(
 ) -> Result<Cave, String> {
     if let Some(text) = named {
         let va = resolve_suggesting(program, analysis, overlay, text)?;
-        if !reachable(avoid.0, va) {
+        if !reachable(program, avoid.0, va) {
             return Err(format!(
                 "the cave {va:#x} is too far from {:#x} for a relative jump",
                 avoid.0
@@ -619,7 +619,7 @@ fn find_caves(program: &Program, at: u64, avoid: (u64, u64)) -> Vec<Cave> {
             let end = s.va.0.saturating_add(crate::num::from_usize(j));
             if matches!(byte, 0x00 | 0xcc | NOP)
                 && len >= CAVE_MIN
-                && reachable(at, va)
+                && reachable(program, at, va)
                 && !overlaps((va, end), avoid)
             {
                 caves.push(Cave {
@@ -637,15 +637,17 @@ fn find_caves(program: &Program, at: u64, avoid: (u64, u64)) -> Vec<Cave> {
     caves
 }
 
-/// Tells whether a relative jump reaches from `at` to `va`.
+/// Tells whether a relative jump reaches from `at` to `va`: in 32-bit code
+/// the displacement wraps, so every address does.
 ///
 /// # Arguments
 ///
+/// * `program` - The image, for its bitness.
 /// * `at` - The jump's address.
 /// * `va` - The target.
-fn reachable(at: u64, va: u64) -> bool {
+fn reachable(program: &Program, at: u64, va: u64) -> bool {
     let delta = i128::from(va) - i128::from(at);
-    i32::try_from(delta).is_ok()
+    program.arch.bitness() == Some(32) || i32::try_from(delta).is_ok()
 }
 
 /// Tells whether two `[start, end)` ranges share a byte.
@@ -936,6 +938,33 @@ mod tests {
         .expect("a plan");
         assert!(
             out.contains("# fit: detour to a cave at 0x10000000"),
+            "{out}"
+        );
+    }
+
+    /// In 32-bit code a jump's displacement wraps, so a cave at the top of
+    /// the address space is in reach of a patch at its bottom.
+    ///
+    /// # Panics
+    ///
+    /// When the far cave is refused.
+    #[test]
+    fn a_32_bit_detour_reaches_across_the_address_space() {
+        let mut bytes = vec![0xcc; 0x200];
+        bytes[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax,1 ; ret
+        let site = Section::mapped(".text", 0x1000, 0, 0x6, false, true);
+        let top = Section::mapped(".top", 0xffff_0000, 0x100, 0x40, false, true);
+        let p = Program::raw(bytes, Arch::X86, 0, Some(0x1000), vec![site, top]);
+        let a = Analysis::compute(&p);
+        let out = plan_tsv(
+            &p,
+            &a,
+            &Overlay::default(),
+            "0x1000/90,detour,cave=0xffff0000",
+        )
+        .expect("a plan");
+        assert!(
+            out.contains("# fit: detour to a cave at 0xffff0000"),
             "{out}"
         );
     }
