@@ -222,6 +222,20 @@ impl Session {
         ))
     }
 
+    /// Says why the engine cannot discover the program's functions, for a
+    /// command that read managed code through an empty analysis
+    /// ([`Self::analysis_or_empty`]) and found none to answer from.
+    ///
+    /// # Errors
+    ///
+    /// When the engine does not disassemble the architecture.
+    fn discovers(&self) -> anyhow::Result<()> {
+        match self.program.refuses(Feature::Discover) {
+            Some(why) => bail!("{why}"),
+            None => Ok(()),
+        }
+    }
+
     /// Computes the analysis, or returns an empty one when borer cannot
     /// discover the architecture's functions.
     ///
@@ -263,11 +277,12 @@ impl Session {
     /// When the argument is missing, does not resolve, or names no function.
     pub(super) fn function_text(&self, args: &[String]) -> anyhow::Result<String> {
         let text = arg(args, 2, "function needs an address or name")?;
-        let a = self.analysis(Feature::Discover)?;
+        let a = self.analysis_or_empty();
         let va = self.resolve(&a, text).ok();
         if let Some(token) = managed::il_method_named(&self.program, text, va) {
             return managed::detail(&self.program, &a, token, 0).map_err(anyhow::Error::msg);
         }
+        self.discovers()?;
         let entry = entry_at(&self.program, &a, self.resolve(&a, text)?)?;
         render::function_detail(&a, &self.overlay, entry, 0).context("no function at address")
     }
@@ -284,11 +299,12 @@ impl Session {
     /// When the argument is missing, does not resolve, or names no function.
     pub(super) fn disasmfn_text(&self, args: &[String]) -> anyhow::Result<String> {
         let text = arg(args, 2, "disasmfn needs an address or name")?;
-        let a = self.analysis(Feature::Discover)?;
+        let a = self.analysis_or_empty();
         let va = self.resolve(&a, text).ok();
         if let Some(token) = managed::il_method_named(&self.program, text, va) {
             return managed::listing(&self.program, token, 400).map_err(anyhow::Error::msg);
         }
+        self.discovers()?;
         let entry = entry_at(&self.program, &a, self.resolve(&a, text)?)?;
         render::disasm_function(&self.program, &a, &self.overlay, entry, 400, false)
             .context("no function at address")
@@ -308,7 +324,7 @@ impl Session {
     /// .NET member.
     pub(super) fn xrefs_text(&self, args: &[String]) -> anyhow::Result<String> {
         let text = arg(args, 2, "xrefs needs an address")?;
-        let a = self.analysis(Feature::Discover)?;
+        let a = self.analysis_or_empty();
         let va = self.resolve(&a, text).ok();
         if let Some(targets) = managed::named(&self.program, text, va) {
             return managed::xrefs_tsv(
@@ -321,6 +337,7 @@ impl Session {
             )
             .map_err(anyhow::Error::msg);
         }
+        self.discovers()?;
         let va = self.resolve(&a, text)?;
         Ok(render::xrefs_tsv(
             &self.program,

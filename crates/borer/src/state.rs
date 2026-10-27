@@ -526,6 +526,7 @@ impl BorerServer {
     /// * `p` - The loaded program.
     /// * `text` - The argument as the agent passed it.
     pub(crate) fn managed_targets(&self, p: &Program, text: &str) -> Option<BTreeSet<u32>> {
+        p.clr()?;
         managed::named(p, text, self.addr(p, text).ok())
     }
 
@@ -536,7 +537,69 @@ impl BorerServer {
     /// * `p` - The loaded program.
     /// * `text` - The argument as the agent passed it.
     pub(crate) fn il_method(&self, p: &Program, text: &str) -> Option<u32> {
+        p.clr()?;
         managed::il_method_named(p, text, self.addr(p, text).ok())
+    }
+
+    /// Answers a request about managed code with the program and its
+    /// analysis, or an empty analysis when the machine has no native
+    /// discovery: .NET metadata and IL read the same on any machine.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The answer.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or `f`'s error.
+    pub(crate) fn with_managed(
+        &self,
+        f: impl FnOnce(&Program, &Analysis) -> Result<String, String>,
+    ) -> Result<String, ErrorData> {
+        let a = self.analysis_or_empty();
+        self.with_program(|p| f(p, &a))
+    }
+
+    /// Answers a request naming .NET members ([`Self::managed_targets`])
+    /// through [`Self::with_managed`].
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The argument as the agent passed it.
+    /// * `f` - The answer for the tokens it names.
+    ///
+    /// # Returns
+    ///
+    /// The answer, `None` when the argument names no managed code and the
+    /// caller answers it natively.
+    pub(crate) fn managed_answer(
+        &self,
+        text: &str,
+        f: impl FnOnce(&Program, &Analysis, &BTreeSet<u32>) -> Result<String, String>,
+    ) -> Option<Result<String, ErrorData>> {
+        let targets = self.managed_targets(&*self.loaded()?, text)?;
+        Some(self.with_managed(|p, a| f(p, a, &targets)))
+    }
+
+    /// Answers a request naming an IL method ([`Self::il_method`]) through
+    /// [`Self::with_managed`].
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The argument as the agent passed it.
+    /// * `f` - The answer for the method's token.
+    ///
+    /// # Returns
+    ///
+    /// The answer, `None` when the argument names no IL method and the
+    /// caller answers it natively.
+    pub(crate) fn il_answer(
+        &self,
+        text: &str,
+        f: impl FnOnce(&Program, &Analysis, u32) -> Result<String, String>,
+    ) -> Option<Result<String, ErrorData>> {
+        let token = self.il_method(&*self.loaded()?, text)?;
+        Some(self.with_managed(|p, a| f(p, a, token)))
     }
 
     /// Resolves an argument to the function to decompile, starting one at an

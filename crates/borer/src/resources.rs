@@ -630,12 +630,12 @@ impl BorerServer {
     pub(crate) fn clr_text(&self, spec: &str) -> Result<String, ErrorData> {
         let (head, rest) = spec.split_once([',', '/']).unwrap_or((spec, ""));
         match head.trim() {
-            "methods" => self.with_analysis(Feature::Discover, |p, a, _| {
-                borer_engine::clr::managed::methods_tsv(p, a, rest)
-            }),
-            "markers" => self.with_analysis(Feature::Discover, |p, a, _| {
-                borer_engine::clr::markers::markers_tsv(p, a, rest)
-            }),
+            "methods" => {
+                self.with_managed(|p, a| borer_engine::clr::managed::methods_tsv(p, a, rest))
+            }
+            "markers" => {
+                self.with_managed(|p, a| borer_engine::clr::markers::markers_tsv(p, a, rest))
+            }
             _ => self
                 .with_program(|p| borer_engine::clr::clr_tsv(p, spec).map_err(|e| e.to_string())),
         }

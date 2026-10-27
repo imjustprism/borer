@@ -22,7 +22,7 @@ use borer_engine::analysis::Analysis;
 use borer_engine::clr::il;
 use borer_engine::clr::managed::{self, Managed};
 use borer_engine::clr::markers::markers_tsv;
-use borer_engine::program::Program;
+use borer_engine::program::{Feature, Program};
 
 /// Where the CLR header sits; the bodies and the metadata follow it.
 const TEXT_RVA: u32 = 0x1000;
@@ -516,6 +516,36 @@ fn a_self_referring_type_renders_bounded() {
         "{again}"
     );
     assert!(again.len() < 8192, "{} bytes", again.len());
+}
+
+/// An IA64 assembly answers every managed view with an empty analysis.
+///
+/// borer cannot disassemble the machine, so a server falls back to an
+/// empty analysis; the metadata and IL still read whole.
+#[test]
+fn managed_views_need_no_native_discovery() {
+    let mut bytes = image(None);
+    bytes[PE_AT + 4..PE_AT + 6].copy_from_slice(&0x0200u16.to_le_bytes());
+    let p = Program::from_bytes(PathBuf::from("ia64.exe"), bytes).expect("the PE loads");
+    assert!(
+        p.refuses(Feature::Discover).is_some(),
+        "IA64 has no native discovery"
+    );
+    let a = Analysis::default();
+    let text = managed::listing(&p, MAIN, 100).expect("Main lists");
+    assert!(
+        text.contains("IL_0028: ldstr \"http://evil.test/a\""),
+        "{text}"
+    );
+    let token = managed::il_method_named(&p, "Ns.Program::Main", None);
+    assert_eq!(token, Some(MAIN));
+    let load = managed::named(&p, "Assembly::Load", None).expect("a member");
+    let xrefs = managed::xrefs_tsv(&p, &a, &load, 0, 50, false).expect("xrefs");
+    assert!(xrefs.contains("0x06000001\t"), "{xrefs}");
+    let net = managed::methods_tsv(&p, &a, "net").expect("methods");
+    assert!(net.contains("Ns.Program::Download\t"), "{net}");
+    let markers = markers_tsv(&p, &a, "").expect("markers");
+    assert!(markers.contains("confuserex\tstrong\t"), "{markers}");
 }
 
 /// No byte of a body set to anything makes reading, listing or indexing

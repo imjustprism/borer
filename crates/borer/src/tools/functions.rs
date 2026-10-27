@@ -119,10 +119,10 @@ impl BorerServer {
         &self,
         Parameters(FunctionParams { address }): Parameters<FunctionParams>,
     ) -> Result<String, ErrorData> {
+        if let Some(answer) = self.il_answer(&address, borer_engine::clr::managed::strings_tsv) {
+            return answer;
+        }
         self.with_analysis(Feature::Discover, |p, a, o| {
-            if let Some(token) = self.il_method(p, &address) {
-                return borer_engine::clr::managed::strings_tsv(p, a, token);
-            }
             let entry = self.function_entry(p, a, &address)?;
             render::function_strings_tsv(p, a, o, entry)
                 .ok_or_else(|| format!("no function at {entry:#x}"))
@@ -201,10 +201,12 @@ impl BorerServer {
         Parameters(FunctionDetailParams { address, offset }): Parameters<FunctionDetailParams>,
     ) -> Result<String, ErrorData> {
         let offset = to_usize(offset.unwrap_or(0));
+        if let Some(answer) = self.il_answer(&address, |p, a, token| {
+            borer_engine::clr::managed::detail(p, a, token, offset)
+        }) {
+            return answer;
+        }
         self.with_analysis(Feature::Discover, |p, a, o| {
-            if let Some(token) = self.il_method(p, &address) {
-                return borer_engine::clr::managed::detail(p, a, token, offset);
-            }
             let entry = self.function_entry(p, a, &address)?;
             render::function_detail(a, o, entry, offset)
                 .ok_or_else(|| format!("no function at {entry:#x}"))
@@ -254,17 +256,19 @@ impl BorerServer {
             render::XREF_ROWS_DEFAULT,
             render::XREF_ROWS_MAX,
         )?;
+        if let Some(answer) = self.managed_answer(&address, |p, a, targets| {
+            borer_engine::clr::managed::xrefs_tsv(
+                p,
+                a,
+                targets,
+                page.offset,
+                page.limit.n,
+                page.count_only,
+            )
+        }) {
+            return answer.map(|text| page.limit.noted(text));
+        }
         self.with_analysis(Feature::Discover, |p, a, o| {
-            if let Some(targets) = self.managed_targets(p, &address) {
-                return borer_engine::clr::managed::xrefs_tsv(
-                    p,
-                    a,
-                    &targets,
-                    page.offset,
-                    page.limit.n,
-                    page.count_only,
-                );
-            }
             let va = match self.addr(p, &address) {
                 Ok(va) => va,
                 Err(unknown) => {
