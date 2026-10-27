@@ -95,8 +95,7 @@ crates/borer-engine/src/analysis/decompile/verify.rs::stores#1	118
 crates/borer-engine/src/analysis/decompile/verify_a32.rs::run#2	105
 crates/borer-engine/src/analysis/decompile/verify_a64.rs::run#2	106
 crates/borer-engine/src/analysis/decompile/verify_lanes.rs::packed#1	103
-crates/borer-engine/src/analysis/encode.rs	1561
-crates/borer-engine/src/analysis/encode.rs::writes_of#1	139
+crates/borer-engine/src/analysis/encode/mod.rs::writes_of#1	139
 crates/borer-engine/src/analysis/functions/mod.rs::build_blocks#1	112
 crates/borer-engine/src/analysis/functions/mod.rs::discover#1	309
 crates/borer-engine/src/analysis/functions/tables.rs::read_jump_table#1	123
