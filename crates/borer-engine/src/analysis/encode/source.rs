@@ -143,15 +143,15 @@ pub(super) fn field_tokens(expr: &str) -> Vec<String> {
     out
 }
 
-/// Returns a helper's argument as the source of its write: a number as
-/// written, else the field [`field_of`] reads in it.
+/// Returns a helper's argument as the source of its write: a number or a
+/// bare parameter as written, else the field [`field_of`] reads in it.
 ///
 /// # Arguments
 ///
 /// * `arg` - The argument.
 pub(super) fn constant_or_field(arg: &str) -> Option<String> {
-    literal(arg)
-        .map(|_| arg.trim().to_owned())
+    let bare = literal(arg).is_some() || BASES.contains(&arg.trim());
+    bare.then(|| arg.trim().to_owned())
         .or_else(|| field_of(arg))
 }
 

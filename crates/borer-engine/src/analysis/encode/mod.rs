@@ -346,7 +346,9 @@ fn classify(args: &[String]) -> Option<Raw> {
 ///
 /// * `line` - The trimmed line.
 /// * `streams` - The stream variables.
-fn writes_on_line(line: &str, streams: &[String], constants: bool) -> Vec<Raw> {
+/// * `seeded` - The stream was named by the caller: a number or a bare
+///   parameter handed it is a value written, as a field is.
+fn writes_on_line(line: &str, streams: &[String], seeded: bool) -> Vec<Raw> {
     let mut out = Vec::new();
     let is_stream = |a: &str| streams.iter().any(|s| s == a.trim());
     if let Some(pos) = line.find("->vtable[")
@@ -399,7 +401,7 @@ fn writes_on_line(line: &str, streams: &[String], constants: bool) -> Vec<Raw> {
             !field_tokens(a).is_empty()
                 || a.starts_with('&')
                 || identifiers(a).iter().any(|w| is_carrier(w))
-                || constants && literal(a).is_some()
+                || seeded && (literal(a).is_some() || BASES.contains(&a.trim()))
         });
         if let Some((index, arg)) = member {
             out.push(Raw::Helper {
@@ -1768,10 +1770,10 @@ sub_140cca7cc(rax, this + 0x20);
     /// When a copy is missed or a write miscounted.
     #[test]
     fn a_seeded_stream_is_followed_through_its_copies() {
-        let text = "write(a1, 33);\nwrite(a1, a2->field_0x8);\nrbx = a1;\nwrite(rbx, a2->field_0xc);\na3->vtable[3](a3, &local_10, 8);\nwrite(a3, a2->field_0x10);\n";
+        let text = "write(a1, 33);\nwrite(a1, a2->field_0x8);\nrbx = a1;\nwrite(rbx, a2->field_0xc);\nwrite(rbx, a4);\na3->vtable[3](a3, &local_10, 8);\nwrite(a3, a2->field_0x10);\n";
         let (sites, streams, param) = sites_in(text, &[], Some("a1"));
         assert_eq!(streams, ["a1", "rbx"]);
         assert_eq!(param.as_deref(), Some("a1"));
-        assert_eq!(sites.len(), 3, "{sites:?}");
+        assert_eq!(sites.len(), 4, "{sites:?}");
     }
 }
