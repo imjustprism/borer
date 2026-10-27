@@ -31,6 +31,11 @@ D3D11CreateDeviceAndSwapChain	win	HRESULT	-	IDXGIAdapter *pAdapter|D3D_DRIVER_TY
 DeleteCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
 DeleteFileA	win	BOOL	-	LPCSTR lpFileName	-
 DeleteFileW	win	BOOL	-	LPCWSTR lpFileName	-
+DirectDrawCreate	win	HRESULT	-	GUID *lpGUID|IDirectDraw **lplpDD|IUnknown *pUnkOuter	-
+DirectDrawCreateEx	win	HRESULT	-	GUID *lpGuid|LPVOID *lplpDD|REFIID iid|IUnknown *pUnkOuter	-
+DirectInput8Create	win	HRESULT	-	HINSTANCE hinst|DWORD dwVersion|REFIID riidltf|LPVOID *ppvOut|LPUNKNOWN punkOuter	-
+DirectSoundCreate	win	HRESULT	-	const GUID *pcGuidDevice|IDirectSound **ppDS|LPUNKNOWN pUnkOuter	-
+DirectSoundCreate8	win	HRESULT	-	const GUID *pcGuidDevice|IDirectSound8 **ppDS8|LPUNKNOWN pUnkOuter	-
 DuplicateHandle	win	BOOL	-	HANDLE hSourceProcessHandle|HANDLE hSourceHandle|HANDLE hTargetProcessHandle|LPHANDLE lpTargetHandle|DWORD dwDesiredAccess|BOOL bInheritHandle|DWORD dwOptions	-|-|-|-|-|bool|duplicate
 EnterCriticalSection	win	void	-	LPCRITICAL_SECTION lpCriticalSection	-
 EqualSid	win	BOOL	-	PSID pSid1|PSID pSid2	-

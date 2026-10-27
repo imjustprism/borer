@@ -2380,6 +2380,61 @@ WIN: list[tuple[str, str, str | None, list[Param]]] = [
         None,
         [("REFIID", "riid", None), ("void **", "ppFactory", None)],
     ),
+    # DirectDraw, DirectInput and DirectSound creation: the interface each
+    # hands back types the calls made through it.
+    (
+        "DirectDrawCreate",
+        "HRESULT",
+        None,
+        [
+            ("GUID *", "lpGUID", None),
+            ("IDirectDraw **", "lplpDD", None),
+            ("IUnknown *", "pUnkOuter", None),
+        ],
+    ),
+    (
+        "DirectDrawCreateEx",
+        "HRESULT",
+        None,
+        [
+            ("GUID *", "lpGuid", None),
+            ("LPVOID *", "lplpDD", None),
+            ("REFIID", "iid", None),
+            ("IUnknown *", "pUnkOuter", None),
+        ],
+    ),
+    (
+        "DirectInput8Create",
+        "HRESULT",
+        None,
+        [
+            ("HINSTANCE", "hinst", None),
+            ("DWORD", "dwVersion", None),
+            ("REFIID", "riidltf", None),
+            ("LPVOID *", "ppvOut", None),
+            ("LPUNKNOWN", "punkOuter", None),
+        ],
+    ),
+    (
+        "DirectSoundCreate",
+        "HRESULT",
+        None,
+        [
+            ("const GUID *", "pcGuidDevice", None),
+            ("IDirectSound **", "ppDS", None),
+            ("LPUNKNOWN", "pUnkOuter", None),
+        ],
+    ),
+    (
+        "DirectSoundCreate8",
+        "HRESULT",
+        None,
+        [
+            ("const GUID *", "pcGuidDevice", None),
+            ("IDirectSound8 **", "ppDS8", None),
+            ("LPUNKNOWN", "pUnkOuter", None),
+        ],
+    ),
 ]
 
 C: list[tuple[str, str, str | None, list[Param]]] = [
