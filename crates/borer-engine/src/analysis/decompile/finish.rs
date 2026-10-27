@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 use crate::analysis::Analysis;
 use crate::num::from_usize;
-use crate::program::Program;
+use crate::program::{BinaryFormat, Program};
 
 mod callee;
 mod callfmt;
@@ -117,7 +117,16 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::TypeLocals, text, type_locals);
     let text = skip.apply(Pass::ByteArithmetic, text, |t| byte_arithmetic(t, word));
     let text = skip.apply(Pass::NameVars, text, |t| {
-        evidence::name_vars(t, u8::try_from(bitness).unwrap_or(64))
+        evidence::name_vars(
+            t,
+            u8::try_from(bitness).unwrap_or(64),
+            callers.map(|(program, ..)| program.format).filter(|f| {
+                matches!(
+                    f,
+                    BinaryFormat::Pe | BinaryFormat::Elf | BinaryFormat::MachO
+                )
+            }),
+        )
     });
     let text = skip.apply(Pass::NormalizeTemps, text, normalize_temps);
     let text = skip.apply(Pass::QuietZeroTests, text, quiet_zero_tests);

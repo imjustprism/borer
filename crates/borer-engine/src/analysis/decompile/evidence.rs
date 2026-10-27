@@ -63,16 +63,21 @@ const RESERVED: [&str; 34] = [
     "size_t", "bool", "true", "false",
 ];
 
-/// The declaration of a function the text calls: a Windows binary's row,
-/// else a POSIX one's. The C library's rows name their parameters `s` and
-/// `n`, which tell a reader nothing, so they give no names.
+/// The formats whose rows a text of unknown platform reads, in order: a
+/// Windows binary's, else a POSIX one's.
+const ANY_FORMAT: [BinaryFormat; 2] = [BinaryFormat::Pe, BinaryFormat::Elf];
+
+/// The declaration of a function the text calls, whose parameter names
+/// name what it is passed. The C library's rows name their parameters `s`
+/// and `n`, which tell a reader nothing, so they give no names.
 ///
 /// # Arguments
 ///
 /// * `name` - The callee's name.
-fn decl(name: &str) -> Option<&'static Decl> {
-    typelib::declared(name, BinaryFormat::Pe)
-        .or_else(|| typelib::declared(name, BinaryFormat::Elf))
+/// * `formats` - The formats whose rows to read, first match wins.
+fn decl(name: &str, formats: &[BinaryFormat]) -> Option<&'static Decl> {
+    any_decl(name, formats)
+        .map(|(d, _)| d)
         .filter(|d| d.os != Os::C)
 }
 
@@ -82,10 +87,11 @@ fn decl(name: &str) -> Option<&'static Decl> {
 /// # Arguments
 ///
 /// * `name` - The callee's name.
-fn any_decl(name: &str) -> Option<(&'static Decl, BinaryFormat)> {
-    typelib::declared(name, BinaryFormat::Pe)
-        .map(|d| (d, BinaryFormat::Pe))
-        .or_else(|| typelib::declared(name, BinaryFormat::Elf).map(|d| (d, BinaryFormat::Elf)))
+/// * `formats` - The formats whose rows to read, first match wins.
+fn any_decl(name: &str, formats: &[BinaryFormat]) -> Option<(&'static Decl, BinaryFormat)> {
+    formats
+        .iter()
+        .find_map(|&f| typelib::declared(name, f).map(|d| (d, f)))
 }
 
 /// Tells whether a word can name a variable: an identifier no pass reads
@@ -174,15 +180,21 @@ fn assignment<'t>(l: &Line<'t>) -> Option<(&'t str, &'t str)> {
 ///
 /// * `text` - A decompiled function after the webs pass and the typing.
 /// * `word` - The machine word in bits (32 or 64).
+/// * `format` - The binary's format, whose platform's declarations the
+///   calls read (a POSIX `write` names no Windows parameters); `None`, for
+///   a text of no known platform (a raw image's), reads a Windows row,
+///   else a POSIX one.
 ///
 /// # Returns
 ///
 /// The text renamed, or unchanged when no evidence says anything.
-pub(super) fn name_vars(text: &str, word: u8) -> String {
-    let typed = retype(text, word).unwrap_or_else(|| text.to_owned());
-    let named = rename(&typed).unwrap_or(typed);
-    let constants = name_constants(&named, word).unwrap_or(named);
-    bool_tests(&constants).unwrap_or(constants)
+pub(super) fn name_vars(text: &str, word: u8, format: Option<BinaryFormat>) -> String {
+    let one = format.map(|f| [f]);
+    let formats = one.as_ref().map_or(&ANY_FORMAT[..], |f| &f[..]);
+    let typed = retype(text, word, formats).unwrap_or_else(|| text.to_owned());
+    let named = rename(&typed, formats).unwrap_or(typed);
+    let constants = name_constants(&named, word, formats).unwrap_or(named);
+    bool_tests(&constants, formats).unwrap_or(constants)
 }
 
 /// Types the variables whose every value is a handle or pointer API's
@@ -199,11 +211,13 @@ pub(super) fn name_vars(text: &str, word: u8) -> String {
 ///
 /// * `text` - A decompiled function.
 /// * `word` - The machine word in bits.
+/// * `formats` - The formats whose declarations the calls read, first
+///   match wins ([`any_decl`]).
 ///
 /// # Returns
 ///
 /// The text retyped, or `None` when nothing changes.
-fn retype(text: &str, word: u8) -> Option<String> {
+fn retype(text: &str, word: u8, formats: &[BinaryFormat]) -> Option<String> {
     let word_ty = if word == 32 { "uint32_t" } else { "uint64_t" };
     let p = parts(text)?;
     let mut found: BTreeMap<&str, Option<&'static str>> = BTreeMap::new();
@@ -237,7 +251,7 @@ fn retype(text: &str, word: u8) -> Option<String> {
             if k == 0 && def.is_some_and(|(v, _)| v == w) {
                 let ret = def
                     .and_then(|(_, rhs)| rhs.split_once('('))
-                    .and_then(|(callee, _)| any_decl(callee).map(|(d, _)| d.ret))
+                    .and_then(|(callee, _)| any_decl(callee, formats).map(|(d, _)| d.ret))
                     .filter(|r| VOID_POINTERS.contains(r));
                 match (ret, found.get(w).copied().flatten()) {
                     (Some(r), None) => {
@@ -360,11 +374,13 @@ pub(super) fn whole_read(l: &Line<'_>, k: usize) -> bool {
 ///
 /// * `text` - A decompiled function.
 /// * `word` - The machine word in bits.
+/// * `formats` - The formats whose declarations the calls read, first
+///   match wins ([`any_decl`]).
 ///
 /// # Returns
 ///
 /// The text with the constants named, or `None` when none changes.
-fn name_constants(text: &str, word: u8) -> Option<String> {
+fn name_constants(text: &str, word: u8, formats: &[BinaryFormat]) -> Option<String> {
     let mut changed = false;
     let mut out: Vec<String> = Vec::new();
     let mut in_body = false;
@@ -395,7 +411,7 @@ fn name_constants(text: &str, word: u8) -> Option<String> {
             let Some((callee, i, _)) = argument_of(&l, k) else {
                 continue;
             };
-            let Some((d, format)) = any_decl(callee) else {
+            let Some((d, format)) = any_decl(callee, formats) else {
                 continue;
             };
             let Some(param) = d.params.get(i) else {
@@ -440,11 +456,13 @@ fn name_constants(text: &str, word: u8) -> Option<String> {
 /// # Arguments
 ///
 /// * `text` - A decompiled function.
+/// * `formats` - The formats whose declarations the calls read, first
+///   match wins ([`any_decl`]).
 ///
 /// # Returns
 ///
 /// The text respelled, or `None` when it holds no such test.
-fn bool_tests(text: &str) -> Option<String> {
+fn bool_tests(text: &str, formats: &[BinaryFormat]) -> Option<String> {
     let mut changed = false;
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -465,7 +483,7 @@ fn bool_tests(text: &str) -> Option<String> {
             if !l.is(c + 1, "(") {
                 continue;
             }
-            let yes_no = any_decl(l.word(c))
+            let yes_no = any_decl(l.word(c), formats)
                 .is_some_and(|(d, _)| matches!(d.ret, "BOOL" | "BOOLEAN" | "bool"));
             let Some(close) = l.closing(c + 1).filter(|_| yes_no) else {
                 continue;
@@ -557,7 +575,9 @@ fn rename_candidates<'t>(
 /// # Arguments
 ///
 /// * `text` - A decompiled function.
-fn rename(text: &str) -> Option<String> {
+/// * `formats` - The formats whose declarations the calls read, first
+///   match wins ([`any_decl`]).
+fn rename(text: &str, formats: &[BinaryFormat]) -> Option<String> {
     let p = parts(text)?;
     let (mut vars, sole_local) = rename_candidates(p.head.get(p.decls..)?);
     if vars.is_empty() {
@@ -582,6 +602,7 @@ fn rename(text: &str) -> Option<String> {
     offer_names(
         p.head.get(p.decls..).unwrap_or_default(),
         &lines,
+        formats,
         &mut offer,
     );
     let counters = loop_counters(&lines, sole_local);
@@ -646,8 +667,15 @@ fn rename(text: &str) -> Option<String> {
 ///
 /// * `decls` - The declaration lines.
 /// * `lines` - The body's lines.
+/// * `formats` - The formats whose declarations the calls read, first
+///   match wins ([`any_decl`]).
 /// * `offer` - Takes a variable, the evidence's rank and the name.
-fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, Rank, &str)) {
+fn offer_names(
+    decls: &[&str],
+    lines: &[Line<'_>],
+    formats: &[BinaryFormat],
+    offer: &mut impl FnMut(&str, Rank, &str),
+) {
     let handles: BTreeSet<&str> = decls
         .iter()
         .filter_map(|d| declaration(d))
@@ -662,10 +690,10 @@ fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, 
             let Some((callee, i, _)) = argument_of(l, k) else {
                 continue;
             };
-            if let Some(param) = decl(callee).and_then(|d| d.params.get(i)) {
+            if let Some(param) = decl(callee, formats).and_then(|d| d.params.get(i)) {
                 offer(w, Rank::Param, param.name);
             }
-            if any_decl(callee)
+            if any_decl(callee, formats)
                 .and_then(|(d, _)| d.params.get(i))
                 .is_some_and(|param| param.ty == STREAM)
             {
@@ -681,7 +709,7 @@ fn offer_names(decls: &[&str], lines: &[Line<'_>], offer: &mut impl FnMut(&str, 
         }
         if let Some((var, rhs)) = assignment(l).filter(|(_, rhs)| lone_call(rhs))
             && let Some((callee, _)) = rhs.split_once('(')
-            && let Some((d, _)) = any_decl(callee)
+            && let Some((d, _)) = any_decl(callee, formats)
         {
             if d.ret == STREAM {
                 offer(var, Rank::Type, "fp");
@@ -827,6 +855,7 @@ fn loop_counters<'t>(lines: &[Line<'t>], sole_local: Option<&str>) -> Vec<(&'t s
 )]
 mod tests {
     use super::name_vars;
+    use crate::program::BinaryFormat;
 
     /// The machine word the tests read as.
     const WORD: u8 = 64;
@@ -857,6 +886,34 @@ mod tests {
         text.lines().skip_while(|l| !l.is_empty()).skip(1).collect()
     }
 
+    /// A call reads its own platform's declaration.
+    ///
+    /// On an ELF, `write` is POSIX's (`fd`, `buf`, `count`), not the
+    /// Windows C runtime's (`FileHandle`, `Buf`, `MaxCharCount`), which a
+    /// text of unknown platform still reads first.
+    #[test]
+    fn a_call_reads_the_binarys_own_platform() {
+        let t = function(
+            &["uint64_t var1, var2;"],
+            &[
+                "var1 = sub_1(a1);",
+                "var2 = strlen(var1);",
+                "write(2, var1, var2);",
+            ],
+        );
+        let elf = name_vars(&t, WORD, Some(BinaryFormat::Elf));
+        assert_eq!(
+            body(&elf),
+            [
+                "buf = sub_1(a1);",
+                "count = strlen(buf);",
+                "write(2, buf, count);"
+            ]
+        );
+        let unknown = name_vars(&t, WORD, None);
+        assert!(unknown.contains("MaxCharCount"), "{unknown}");
+    }
+
     /// A variable passed whole to a declared API takes the parameter's
     /// name. A handle result is named for what its API opens; a length
     /// keeps its number.
@@ -873,7 +930,7 @@ mod tests {
                 "return 0;",
             ],
         );
-        let out = name_vars(&t, WORD);
+        let out = name_vars(&t, WORD, None);
         assert_eq!(
             body(&out),
             [
@@ -914,7 +971,7 @@ HANDLE hProcessHeap;"
                 "return 0;",
             ],
         );
-        let out = name_vars(&t, WORD);
+        let out = name_vars(&t, WORD, None);
         assert_eq!(
             body(&out),
             [
@@ -956,7 +1013,7 @@ HANDLE hProcessHeap;"
                 "return var4;",
             ],
         );
-        let out = name_vars(&t, WORD);
+        let out = name_vars(&t, WORD, None);
         assert_eq!(
             body(&out),
             [
@@ -993,7 +1050,7 @@ HANDLE hProcessHeap;"
                 "return var1;",
             ],
         );
-        let out = name_vars(&t, WORD);
+        let out = name_vars(&t, WORD, None);
         assert!(out.contains("fp = fopen(a1, \"r\");"), "{out}");
         assert!(out.contains("fclose(fp2);"), "{out}");
         assert!(out.contains("hFile = CreateFileW("), "{out}");
@@ -1013,7 +1070,7 @@ HANDLE hProcessHeap;"
                 "return len;",
             ],
         );
-        let out = name_vars(&t, WORD);
+        let out = name_vars(&t, WORD, None);
         assert_eq!(
             body(&out),
             [
@@ -1041,7 +1098,7 @@ HANDLE hProcessHeap;"
                 "return 0;",
             ],
         );
-        let out = name_vars(&t, WORD);
+        let out = name_vars(&t, WORD, None);
         assert!(out.contains("uint64_t var2;\nHANDLE hProcess;"), "{out}");
         assert!(!out.contains("HANDLE Process;"), "{out}");
     }
@@ -1058,7 +1115,7 @@ HANDLE hProcessHeap;"
                 "return 0;",
             ],
         );
-        let out = name_vars(&t, WORD);
+        let out = name_vars(&t, WORD, None);
         assert_eq!(
             body(&out),
             [
@@ -1085,7 +1142,7 @@ HANDLE hProcessHeap;"
                 "return 0;",
             ],
         );
-        let out = name_vars(&t, WORD);
+        let out = name_vars(&t, WORD, None);
         assert_eq!(
             body(&out),
             [
@@ -1116,7 +1173,7 @@ HANDLE hProcessHeap;"
                 "return local_c;",
             ],
         );
-        let out_sole = name_vars(&sole, WORD);
+        let out_sole = name_vars(&sole, WORD, None);
         assert!(out_sole.contains("int32_t i;"), "{out_sole}");
         assert!(
             out_sole.contains("for (i = 0; i < 10; i += 1) {"),
@@ -1133,7 +1190,7 @@ HANDLE hProcessHeap;"
                 "return 0;",
             ],
         );
-        let out_mirror = name_vars(&mirror, 32);
+        let out_mirror = name_vars(&mirror, 32, None);
         assert!(!out_mirror.contains("int32_t i;"), "{out_mirror}");
     }
 }

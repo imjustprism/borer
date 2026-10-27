@@ -192,19 +192,21 @@ fn int_0x80_and_svc_are_tagged_by_their_tables() {
 /// The kernel leaves the argument registers alone, so `connect` and
 /// `execve` still read the `1` and `0` set for `socket`, and both read the
 /// descriptor `socket` returned. A number copied from `edi` is named by no
-/// table and stays the C library's `syscall(nr, ...)`.
+/// table and stays the C library's `syscall(nr, ...)`. The variables take
+/// POSIX's parameter names (`sockfd`, `pathname`), not the Windows C
+/// runtime's (`s`, `FileName`), as the image is an ELF.
 #[test]
 fn syscalls_decompile_as_the_calls_they_name() {
     let p = static_x64();
     let a = Analysis::compute(&p);
     let out = decompile(&p, &a, &Overlay::default(), 0x1000).expect("the entry decompiles");
     assert!(
-        out.contains("s = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);"),
+        out.contains("sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);"),
         "{out}"
     );
-    assert!(out.contains("connect(s, 1, 0);"), "{out}");
-    assert!(out.contains("execve(FileName, 1, NULL);"), "{out}");
-    assert!(out.contains("return syscall(FileName);"), "{out}");
+    assert!(out.contains("connect(sockfd, 1, 0);"), "{out}");
+    assert!(out.contains("execve(pathname, 1, NULL);"), "{out}");
+    assert!(out.contains("return syscall(pathname);"), "{out}");
     assert!(!out.contains("undeclared"), "{out}");
     let header = checked_header(&p, &a, &Overlay::default(), 0x1000).unwrap_or_default();
     assert!(header.contains("checked vs binary"), "{header}");
