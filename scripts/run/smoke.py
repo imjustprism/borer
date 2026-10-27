@@ -407,11 +407,11 @@ assert "format:" in after, "server did not survive an erroring tool call"
 print("post-error call OK (server alive)")
 
 # 9. protocol surface: the tool list stays lean (every session pays for it:
-#    41 tools at about 680 bytes each, paging on every list tool, the live
-#    family, query and script included), discover answers, resources and
-#    argument completion work
+#    42 tools at about 680 bytes each, paging on every list tool, the live
+#    family with live_scan, query and script included), discover answers,
+#    resources and argument completion work
 raw_tools = json.dumps(tools)
-assert len(raw_tools) < 28000, (
+assert len(raw_tools) < 29000, (
     f"tools/list is {len(raw_tools)} bytes; keep descriptions and schemas lean"
 )
 for t in tools["tools"]:
