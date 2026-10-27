@@ -188,6 +188,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "scenario",
             "scenarios",
             "oracle",
+            "patch",
         ],
     ),
     (
