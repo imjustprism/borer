@@ -123,7 +123,7 @@ fn a_dotnet_bundle_lists_its_files() {
     marker[8..40].copy_from_slice(&NET_BUNDLE);
     marker[..8].copy_from_slice(&manifest_at.to_le_bytes());
     let mut m = Vec::new();
-    for v in [6u32, 0, 2] {
+    for v in [6u32, 0, 3] {
         m.extend_from_slice(&v.to_le_bytes());
     }
     m.extend(net_string("abc123"));
@@ -131,6 +131,7 @@ fn a_dotnet_bundle_lists_its_files() {
     for (off, size, packed, kind, name) in [
         (0x1000u64, 0x400u64, 0u64, 1u8, "app.dll"),
         (0x1400, 0x900, 0x300, 2, "native.dll"),
+        (0x1d00, 0x10, 0, 0, "a\tb\nfake row"),
     ] {
         for v in [off, size, packed] {
             m.extend_from_slice(&v.to_le_bytes());
@@ -149,6 +150,10 @@ fn a_dotnet_bundle_lists_its_files() {
     );
     assert!(
         table.contains("0x1400\t0x300\t0x900\tnative binary\tnative.dll"),
+        "{table}"
+    );
+    assert!(
+        table.contains("0x1d00\t0x10\t-\tother\ta\\x09b\\x0afake row\n"),
         "{table}"
     );
 }

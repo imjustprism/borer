@@ -919,7 +919,7 @@ pub fn lines(p: &Program, triage: bool) -> Vec<String> {
             f.name,
             f.version
                 .as_ref()
-                .map_or_else(String::new, |v| format!(", {v}")),
+                .map_or_else(String::new, |v| format!(", {}", crate::text::one_line(v))),
             f.confidence.word(),
             f.evidence.join("; ")
         );

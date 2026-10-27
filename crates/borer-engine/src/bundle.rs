@@ -15,6 +15,7 @@ use crate::fileinfo::{find, forward, reversed};
 use crate::num::{from_usize, saturating_usize, u32_le, u64_le};
 use crate::program::Program;
 use crate::rsrc::{RCDATA, Resource};
+use crate::text::one_line;
 
 /// Most entries one table is read for.
 const ENTRIES_MAX: usize = 1 << 14;
@@ -543,7 +544,7 @@ fn headline(b: &Bundle) -> String {
         b.off,
         b.about
             .as_ref()
-            .map_or_else(String::new, |a| format!(" ({a})")),
+            .map_or_else(String::new, |a| format!(" ({})", one_line(a))),
         entry_count(b)
     )
 }
@@ -579,7 +580,7 @@ pub fn bundles_tsv(p: &Program) -> String {
                 e.unpacked
                     .map_or_else(|| "-".to_owned(), |u| format!("{u:#x}")),
                 e.kind,
-                e.name
+                one_line(&e.name)
             );
         }
     }
