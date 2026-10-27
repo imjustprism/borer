@@ -1,6 +1,8 @@
 //! The modeled outside world: imported API stubs, their arguments and
 //! results, allocations, and Linux system calls.
 
+use std::collections::BTreeMap;
+
 use super::calls::ApiCall;
 use super::{Emulator, Planted, Stop, image_byte};
 use crate::analysis::Analysis;
@@ -183,10 +185,23 @@ impl Emulator<'_> {
             .filter(|s| s.kind == crate::program::SymbolKind::Import && s.addr != 0)
             .map(|s| (s.addr, s.name.clone()))
             .collect();
+        let mut bound: BTreeMap<String, u64> = BTreeMap::new();
+        for (&a, n) in self.apis.iter() {
+            bound.entry(n.clone()).or_insert(a);
+        }
+        let mut next = 0;
         for (slot, name) in slots {
-            let cell = self.apis.iter().find(|(_, n)| **n == name).map(|(&a, _)| a);
-            let stub = cell.unwrap_or_else(|| self.free_stub());
+            let stub = match bound.get(&name) {
+                Some(&a) => a,
+                None => {
+                    while self.apis.contains_key(&self.api_stub(next)) {
+                        next += 1;
+                    }
+                    self.api_stub(next)
+                }
+            };
             self.plant(slot, stub, self.word);
+            bound.insert(name.clone(), stub);
             std::sync::Arc::make_mut(&mut self.apis).insert(stub, name);
         }
     }
