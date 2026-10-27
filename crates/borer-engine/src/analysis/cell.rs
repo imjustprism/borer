@@ -38,7 +38,7 @@ impl<T> Default for Cell<T> {
 /// That is a build that ended after its caller's cancel flag was raised
 /// ([`crate::cancel::Cancel`]), so an emulation in it may have been cut
 /// short, or one that unwound; such a cell is let go at once.
-pub(super) type Shared<T> = Option<(Arc<T>, reads::Reads)>;
+pub(super) type Shared<T> = Option<(Arc<T>, Arc<reads::Reads>)>;
 
 /// Hands a build's result to the threads waiting on its cell, when the
 /// build returns, is cut short, or unwinds.

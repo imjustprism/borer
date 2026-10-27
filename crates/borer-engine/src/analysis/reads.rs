@@ -30,7 +30,10 @@
 //!
 //! A read-set holds its keys sorted, as a byte string of variable-length
 //! gaps between them ([`Reads::keys`]): an address a few bytes past the one
-//! before it costs one or two bytes. Keys that are not addresses (a type's
+//! before it costs one or two bytes. A large read-set another build takes
+//! (a whole-program index reads every function's name) is not copied into
+//! it but held by reference ([`SHARED_KEYS_MIN`]), so taking it costs a
+//! handle, not its keys again. Keys that are not addresses (a type's
 //! name, a class) are folded to 64 bits by a seedless hash, so two
 //! keys may share a fact; that only lets go of a result that did not need
 //! to go.
@@ -348,6 +351,14 @@ fn take_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
     }
 }
 
+/// Keys a read-set must name for a build that takes it to hold it by
+/// reference instead of copying its keys ([`absorb`]).
+///
+/// The read-set of an index over every function names one key a function,
+/// tens of thousands on a large binary; copied into each result that took
+/// it, it outweighed the result and was hashed and sorted again per build.
+const SHARED_KEYS_MIN: usize = 256;
+
 /// The overlay facts one result read: frozen from a [`Frame`] when its
 /// build ends.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -367,26 +378,47 @@ pub struct Reads {
     /// Bytes of the bodies the build itself noted, not those it took with
     /// another result, which that result counts.
     own_texts: usize,
+    /// The large read-sets of results the build took, held whole instead of
+    /// copied into `keys` ([`SHARED_KEYS_MIN`]); their whole fields and
+    /// bodies are in `whole` and `texts` already.
+    shared: Box<[Arc<Reads>]>,
 }
 
 impl Reads {
     /// Returns the heap bytes the read-set holds of its own: its keys, the
-    /// handles of its bodies, and the bodies its build noted itself.
+    /// handles of its bodies and shared read-sets, and the bodies its build
+    /// noted itself. A shared read-set counts with the result that built it,
+    /// so once that result is let go a result still holding it is charged
+    /// less than it keeps alive. Charging each holder the keys instead was
+    /// what made a text weigh its whole index and the memo let texts go
+    /// that callers then built again.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        self.keys.len() + size_of_val(&*self.texts) + self.own_texts
+        self.keys.len() + size_of_val(&*self.texts) + size_of_val(&*self.shared) + self.own_texts
     }
 
-    /// Returns how many keys the read-set names.
+    /// Returns how many keys the read-set names, its own and its shared
+    /// read-sets' (a key two of them name counts twice).
     #[must_use]
-    pub const fn len(&self) -> usize {
-        self.len
+    pub fn len(&self) -> usize {
+        self.shared
+            .iter()
+            .fold(self.len, |n, s| n.saturating_add(s.len()))
+    }
+
+    /// Tells whether the read-set or one it holds shared names `key`.
+    ///
+    /// # Arguments
+    ///
+    /// * `hit` - Tells whether a key is one sought.
+    fn any_key(&self, hit: &dyn Fn(&(Field, u64)) -> bool) -> bool {
+        self.keys().any(|k| hit(&k)) || self.shared.iter().any(|s| s.any_key(hit))
     }
 
     /// Tells whether the read-set names no key, no whole field and no body.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.whole == 0 && self.len == 0 && self.texts.is_empty()
+        self.whole == 0 && self.len == 0 && self.texts.is_empty() && self.shared.is_empty()
     }
 
     /// Tells whether `field` was read whole.
@@ -399,7 +431,8 @@ impl Reads {
         self.whole & field.bit() != 0
     }
 
-    /// Returns the keys read, sorted by field then key.
+    /// Returns the keys read, sorted by field then key, but not those of
+    /// the read-sets held shared.
     ///
     /// # Returns
     ///
@@ -469,6 +502,8 @@ struct Frame {
     texts: Vec<Arc<str>>,
     /// Bytes of the bodies the build itself noted.
     own_texts: usize,
+    /// Large read-sets taken, each once ([`SHARED_KEYS_MIN`]).
+    shared: Vec<Arc<Reads>>,
 }
 
 impl Frame {
@@ -500,6 +535,19 @@ impl Frame {
             keys: keys.into_boxed_slice(),
             texts: self.texts.into_boxed_slice(),
             own_texts: self.own_texts,
+            shared: self.shared.into_boxed_slice(),
+        }
+    }
+
+    /// Holds a large read-set by reference, unless the frame holds it
+    /// already.
+    ///
+    /// # Arguments
+    ///
+    /// * `reads` - The read-set.
+    fn add_shared(&mut self, reads: &Arc<Reads>) {
+        if !self.shared.iter().any(|s| Arc::ptr_eq(s, reads)) {
+            self.shared.push(Arc::clone(reads));
         }
     }
 
@@ -584,18 +632,29 @@ pub(crate) fn note_body(body: &Arc<str>) {
 /// Adds what a result read to the build running on this thread, which
 /// took that result.
 ///
+/// A read-set of [`SHARED_KEYS_MIN`] keys or more is held by reference;
+/// a smaller one's keys are copied, and the read-sets it holds shared are
+/// held by reference too.
+///
 /// # Arguments
 ///
 /// * `reads` - What the result read.
-pub(crate) fn absorb(reads: &Reads) {
+pub(crate) fn absorb(reads: &Arc<Reads>) {
     if reads.is_empty() {
         return;
     }
     with_top(|frame| {
         frame.whole |= reads.whole;
-        frame.keys.extend(reads.keys());
         for text in &reads.texts {
             frame.add_text(text);
+        }
+        if reads.len >= SHARED_KEYS_MIN {
+            frame.add_shared(reads);
+            return;
+        }
+        frame.keys.extend(reads.keys());
+        for s in &reads.shared {
+            frame.add_shared(s);
         }
     });
 }
@@ -636,11 +695,11 @@ fn within<R>(frame: Shared, f: impl FnOnce() -> R) -> R {
 ///
 /// What `make` returned, and the overlay facts it and every result it took
 /// read.
-pub(crate) fn recording<R>(make: impl FnOnce() -> R) -> (R, Reads) {
+pub(crate) fn recording<R>(make: impl FnOnce() -> R) -> (R, Arc<Reads>) {
     let frame = Shared::default();
     let value = within(Arc::clone(&frame), make);
     let frame = std::mem::take(&mut *frame.lock().unwrap_or_else(PoisonError::into_inner));
-    (value, frame.freeze())
+    (value, Arc::new(frame.freeze()))
 }
 
 /// Runs `f` without noting what it reads into the build running on this
@@ -757,7 +816,7 @@ impl Edit {
     #[must_use]
     pub fn touches(&self, reads: &Reads) -> bool {
         reads.whole & self.fields != 0
-            || reads.keys().any(|k| self.keys.contains(&k))
+            || reads.any_key(&|k| self.keys.contains(k))
             || reads
                 .texts
                 .iter()
@@ -820,8 +879,11 @@ impl Edit {
 
 #[cfg(test)]
 mod tests {
-    use super::{FactKey, Field, Handle, absorb, note_body, note_class, recording, unnoted};
-    use crate::analysis::Overlay;
+    use super::{
+        Edit, FactKey, Field, Handle, SHARED_KEYS_MIN, absorb, note_body, note_class, recording,
+        unnoted,
+    };
+    use crate::analysis::{Analysis, Overlay};
     use std::sync::Arc;
 
     /// A build's reads come back as it made them, in order.
@@ -875,5 +937,39 @@ mod tests {
             outer.bytes() + body.len(),
             "the body counts once"
         );
+    }
+
+    /// A large read-set a build takes is held by reference.
+    ///
+    /// The build's read-set weighs a handle rather than its keys, still
+    /// names them, and an edit of one of them lets the build go, through a
+    /// build that took the build too.
+    ///
+    /// # Panics
+    ///
+    /// When the keys are copied, lost, or an edit of one misses the builds.
+    #[test]
+    fn a_large_read_set_is_held_by_reference() {
+        let o = Overlay::default();
+        let wide = u64::try_from(SHARED_KEYS_MIN).expect("a small count");
+        let ((), index) = recording(|| (0..wide).for_each(|k| _ = o.names.get(&(k * 0x10))));
+        let ((), inner) = recording(|| {
+            absorb(&index);
+            absorb(&index);
+            o.comments.get(&7);
+        });
+        let ((), outer) = recording(|| absorb(&inner));
+        assert_eq!(inner.len(), SHARED_KEYS_MIN + 1);
+        assert_eq!(outer.len(), inner.len());
+        assert!(outer.bytes() < 64, "{} bytes", outer.bytes());
+        assert!(index.bytes() >= SHARED_KEYS_MIN);
+        let mut after = o.clone();
+        after.names.insert(0x20, "renamed".to_owned());
+        let edit = Edit::between(&Analysis::default(), &o, &after).expect("same tables");
+        assert!(edit.touches(&inner) && edit.touches(&outer));
+        let mut away = o.clone();
+        away.names.insert(0x18, "between".to_owned());
+        let edit = Edit::between(&Analysis::default(), &o, &away).expect("same tables");
+        assert!(!edit.touches(&outer));
     }
 }
