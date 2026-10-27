@@ -49,6 +49,9 @@ const MODULES_MAX: usize = 64;
 /// this keeps its first names, in the order the symbols hold.
 const EXPORTS_MAX: usize = 256;
 
+/// Offset of a planted dll image's export directory from its base.
+const EXPORT_AT: u64 = 0x100;
+
 /// Names `kernel32.dll` exports even when the image imports none of them.
 ///
 /// A protector with no import table hashes these out of the export
@@ -387,7 +390,8 @@ impl Emulator<'_> {
     /// Answers `LoadLibrary` or `GetModuleHandle` for a dll name: the base
     /// of the dll's planted image, so the handle names its module.
     ///
-    /// A dll the loader did not plant is planted on demand, an image with
+    /// The executable's own name answers the image base, as the loader's
+    /// first entry does. A dll the loader did not plant is planted on demand, an image with
     /// headers and an empty export directory in a fresh allocation, the way
     /// the OS maps a library the program loads by name; `GetProcAddress`
     /// against it still answers a stub of that dll's. Names match without
@@ -409,6 +413,10 @@ impl Emulator<'_> {
         } else {
             format!("{file}.dll")
         };
+        let image = image_name(self.program);
+        if file.eq_ignore_ascii_case(&image) || dll.eq_ignore_ascii_case(&image) {
+            return self.program.image_base;
+        }
         if let Some((&base, _)) = self
             .modules
             .iter()
@@ -436,6 +444,33 @@ impl Emulator<'_> {
     /// * `handle` - A base [`Emulator::module_handle`] answered.
     pub(super) fn module_named(&self, handle: u64) -> Option<&str> {
         self.modules.get(&handle).map(String::as_str)
+    }
+
+    /// The name a planted module exports at an ordinal, read from its export
+    /// directory in memory, so `GetProcAddress` by ordinal answers the same
+    /// cell a lookup by name does.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - The module's base.
+    /// * `ordinal` - The ordinal asked for, the directory's base included.
+    ///
+    /// # Returns
+    ///
+    /// The export's name, or `None` for a handle no planted module has or
+    /// an ordinal outside its directory.
+    pub(super) fn export_by_ordinal(&self, handle: u64, ordinal: u64) -> Option<String> {
+        self.modules.get(&handle)?;
+        let export = handle.checked_add(EXPORT_AT)?;
+        let index = ordinal.checked_sub(self.load(export + 0x10, 4).ok()?)?;
+        if index >= self.load(export + 0x18, 4).ok()? {
+            return None;
+        }
+        let names = handle.checked_add(self.load(export + 0x20, 4).ok()?)?;
+        let rva = self
+            .load(names.checked_add(index.checked_mul(4)?)?, 4)
+            .ok()?;
+        self.read_memory_text(handle.checked_add(rva)?, false)
     }
 
     /// Writes a `UNICODE_STRING` and its text, returning the cursor after
@@ -513,7 +548,7 @@ impl Emulator<'_> {
             (0x8664, 0x20b)
         };
         let opt = at + 0x58;
-        let export = at + 0x100;
+        let export = at + EXPORT_AT;
         let funcs = align16(export + 0x28);
         let names = align16(funcs + 4 * from_usize(m.exports.len().max(1)));
         let ords = align16(names + 4 * from_usize(m.exports.len().max(1)));
@@ -873,6 +908,46 @@ mod tests {
         let handle = emu.register("rbx").unwrap_or_default();
         assert_ne!(handle, base, "the handle is the dll's, not the image's");
         assert_eq!(planted(&emu, handle, 2), 0x5a4d, "the handle is an image");
+    }
+
+    /// An export answers one address however it is reached.
+    ///
+    /// Its import slot, `GetProcAddress` by name and by ordinal all hand
+    /// back the cell the loader bound; a name differing only in case is
+    /// another export; the executable's own name is the image, not a new
+    /// module.
+    ///
+    /// # Panics
+    ///
+    /// When two ways to one export answer different addresses, a case
+    /// variant answers the same one, or the executable's name answers a
+    /// module other than the image.
+    #[test]
+    fn an_export_answers_one_address_however_it_is_reached() {
+        let (base, entry) = (0x1_4000_0000, 0x1_4000_1000);
+        let mut bytes = vec![0u8; 0x200];
+        bytes[0x80..0x86].copy_from_slice(b"Sleep ");
+        bytes[0x90..0x96].copy_from_slice(b"sleep ");
+        let text = Section::mapped(".text", entry, 0, 0x200, true, true);
+        let mut p = Program::raw(bytes, Arch::X86_64, base, Some(entry), vec![text]);
+        p.symbols.push(Symbol {
+            name: "KERNEL32.dll!Sleep".to_owned(),
+            addr: entry + 0x100,
+            kind: SymbolKind::Import,
+        });
+        let mut emu = Emulator::new(&p, 1000).expect("x64 emulates");
+        emu.install_imports();
+        let slot = planted(&emu, entry + 0x100, 8);
+        let kernel32 = emu.module_handle("KERNEL32");
+        assert_eq!(emu.resolve_export(kernel32, entry + 0x80), slot);
+        let ordinal = (1..=EXPORTS_MAX as u64)
+            .find(|&n| emu.export_by_ordinal(kernel32, n).as_deref() == Some("Sleep"))
+            .expect("Sleep has an ordinal");
+        assert_eq!(emu.resolve_export(kernel32, ordinal), slot);
+        let lower = emu.resolve_export(kernel32, entry + 0x90);
+        assert_ne!(lower, slot, "sleep is not Sleep");
+        assert_eq!(emu.api_at(lower), Some("KERNEL32.dll!sleep"));
+        assert_eq!(emu.module_handle(&image_name(&p)), base);
     }
 
     /// A hand-assembled 32-bit walk that resolves `VirtualAlloc` through

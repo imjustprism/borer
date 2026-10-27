@@ -184,7 +184,8 @@ impl Emulator<'_> {
             .map(|s| (s.addr, s.name.clone()))
             .collect();
         for (i, (slot, name)) in slots.into_iter().enumerate() {
-            let stub = self.api_stub(i);
+            let cell = self.apis.iter().find(|(_, n)| **n == name).map(|(&a, _)| a);
+            let stub = cell.unwrap_or_else(|| self.api_stub(i));
             self.plant(slot, stub, self.word);
             std::sync::Arc::make_mut(&mut self.apis).insert(stub, name);
         }
@@ -249,7 +250,7 @@ impl Emulator<'_> {
     ///
     /// The text, or `None` when the address is zero, nothing is mapped, or
     /// no printable character is there ([`super::calls::read_text`]).
-    fn read_memory_text(&self, addr: u64, wide: bool) -> Option<String> {
+    pub(super) fn read_memory_text(&self, addr: u64, wide: bool) -> Option<String> {
         super::calls::read_text(addr, wide, super::calls::TEXT_MAX, |a| self.byte_at(a))
     }
 
@@ -376,25 +377,34 @@ impl Emulator<'_> {
     /// # Returns
     ///
     /// The stub address.
-    fn resolve_export(&mut self, module: u64, asked: u64) -> u64 {
+    pub(super) fn resolve_export(&mut self, module: u64, asked: u64) -> u64 {
         let export = if asked >> 16 == 0 {
             format!("#{asked}")
         } else {
             self.read_memory_text(asked, false)
                 .unwrap_or_else(|| format!("#{asked:#x}"))
         };
-        let full = self
-            .module_named(module)
-            .map_or_else(|| export.clone(), |dll| format!("{dll}!{export}"));
-        let key = full.to_lowercase();
+        let export = match asked {
+            n @ 1..=0xffff => self.export_by_ordinal(module, n).unwrap_or(export),
+            _ => export,
+        };
+        let dll = self.module_named(module).map(str::to_owned);
+        let full = dll
+            .as_deref()
+            .map_or_else(|| export.clone(), |d| format!("{d}!{export}"));
+        let key = dll.as_deref().map_or_else(
+            || export.clone(),
+            |d| format!("{}!{export}", d.to_lowercase()),
+        );
         if let Some(&stub) = self.resolved.get(&key) {
             return stub;
         }
-        let stub = match self
-            .apis
-            .iter()
-            .find(|(_, n)| n.eq_ignore_ascii_case(&full))
-        {
+        let same = |n: &str| {
+            n.split_once('!').map_or(n == full, |(d, e)| {
+                e == export && dll.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(d))
+            })
+        };
+        let stub = match self.apis.iter().find(|(_, n)| same(n)) {
             Some((&stub, _)) => stub,
             None => {
                 let next = self.api_stub(self.apis.len());
