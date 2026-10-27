@@ -829,6 +829,8 @@ pub(crate) enum ScanCompare {
     Decreased,
     /// The value now equals `value`.
     Equal,
+    /// No set: the pointer chains to the address `value` names.
+    Path,
 }
 
 /// Where a first `live_scan` reads.
@@ -853,7 +855,7 @@ pub(crate) enum ScanScope {
 pub(crate) struct LiveScanParams {
     /// Result set name.
     pub(crate) name: String,
-    /// With compare=equal: the new value.
+    /// compare=equal: the new value; path: address[,depth=1..6][,max_offset=n].
     pub(crate) value: Option<String>,
     /// Default u32; bytes: hex, ?? wildcard.
     pub(crate) kind: Option<ScanKind>,
@@ -863,7 +865,7 @@ pub(crate) struct LiveScanParams {
     pub(crate) compare: Option<ScanCompare>,
     /// Default all.
     pub(crate) scope: Option<ScanScope>,
-    /// For scope=module.
+    /// For scope=module or compare=path.
     pub(crate) module: Option<String>,
     /// Hits to skip.
     pub(crate) offset: Option<u32>,

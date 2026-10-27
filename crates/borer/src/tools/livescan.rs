@@ -124,6 +124,9 @@ fn compare_of(
             let v = value.ok_or("compare=equal needs value=...")?;
             Compare::Equal(needle_of(set.needle.kind(), v, tolerance)?)
         }
+        ScanCompare::Path => {
+            return Err("compare=path finds pointer chains and narrows no set".to_owned());
+        }
     })
 }
 
@@ -139,6 +142,7 @@ fn compare_word(compare: ScanCompare) -> &'static str {
         ScanCompare::Increased => "increased",
         ScanCompare::Decreased => "decreased",
         ScanCompare::Equal => "equal",
+        ScanCompare::Path => "path",
     }
 }
 
@@ -151,7 +155,7 @@ fn compare_word(compare: ScanCompare) -> &'static str {
 fn next_hint(name: &str, hits: usize) -> String {
     match hits {
         0 => format!("next: no hit is left; live_scan(name=\"{name}\", value=...) starts over\n"),
-        1..=8 => "next: live_read(address) or live_watch(name, address) on a hit; borer://livepath/<address> for a pointer chain that finds it after a restart\n".to_owned(),
+        1..=8 => "next: live_read(address) or live_watch(name, address) on a hit; live_scan(compare=path, value=address) for a pointer chain that finds it after a restart\n".to_owned(),
         _ => format!(
             "next: change the value in the program, then live_scan(name=\"{name}\", compare=changed|unchanged|increased|decreased|equal)\n"
         ),
@@ -202,7 +206,7 @@ impl BorerServer {
     /// does not read, the set named does not exist, or the session holds
     /// [`SETS_MAX`] sets and the name is new.
     #[tool(
-        description = "Find addresses in the attached process holding a value. First scan: value, kind, scope; hits kept as set `name` (8 sets). Next scan: name + compare re-reads them; name alone pages them.",
+        description = "Find addresses in the attached process holding a value. First scan: value, kind, scope; hits kept as set `name` (8 sets). Next scan: name + compare re-reads them; name alone pages them. compare=path: pointer chains [[module+off]+o1]+o2 to the address in value.",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
@@ -228,6 +232,25 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         must_fit_a_row(&name, Annotation::Name)?;
         let page = Page::new(offset, limit, count_only, 50, 500)?;
+        if compare == Some(ScanCompare::Path) {
+            if kind.is_some() || tolerance.is_some() || scope.is_some() {
+                return Err(err_params(
+                    "compare=path takes value, module and paging, not kind, tolerance or scope",
+                ));
+            }
+            let mut spec = value.ok_or_else(|| {
+                err_params("compare=path needs value=<address>[,depth=1..6][,max_offset=..0x10000]")
+            })?;
+            if let Some(m) = module {
+                spec.push_str(&format!(",module={m}"));
+            }
+            let rows = page.limit.n.min(path::PAGE_MAX);
+            spec.push_str(&format!(",offset={},limit={rows}", page.offset));
+            if page.count_only {
+                spec.push_str(",count_only");
+            }
+            return self.livepath_text(&spec);
+        }
         self.with_live(|s| {
             if compare.is_none() && value.is_none() {
                 let set = s.scans.get(&name).ok_or_else(|| {
@@ -301,7 +324,7 @@ impl BorerServer {
 
 impl BorerServer {
     /// Finds pointer chains from fixed places to an address of the
-    /// attached process: `borer://livepath/{spec}`.
+    /// attached process, for `live_scan(compare=path)`.
     ///
     /// # Arguments
     ///
@@ -311,7 +334,7 @@ impl BorerServer {
     ///
     /// Invalid params when the spec does not read, no process is attached,
     /// the address does not resolve, or the module is unknown.
-    pub(crate) fn livepath_text(&self, spec: &str) -> Result<String, ErrorData> {
+    fn livepath_text(&self, spec: &str) -> Result<String, ErrorData> {
         let spec = PathSpec::parse(spec).map_err(err_params)?;
         let program = self.loaded();
         let overlay = self.overlay();
@@ -480,8 +503,20 @@ mod tests {
             server.live_scan(Parameters(wrong)).expect_err("refused");
         }
         let chains = server
-            .livepath_text(&format!("{target},depth=2,max_offset=0x100,limit=200"))
+            .live_scan(Parameters(LiveScanParams {
+                compare: Some(ScanCompare::Path),
+                value: Some(format!("{target},depth=2,max_offset=0x100")),
+                limit: Some(200),
+                ..scan("chains")
+            }))
             .expect("the chains");
+        let mixed = server.live_scan(Parameters(LiveScanParams {
+            compare: Some(ScanCompare::Path),
+            value: Some(target),
+            kind: Some(ScanKind::U64),
+            ..scan("chains")
+        }));
+        mixed.expect_err("a path takes no kind");
         let root = format!("{:#x}", core::ptr::from_ref(&ROOT) as usize);
         let held = server
             .live_scan(Parameters(LiveScanParams {

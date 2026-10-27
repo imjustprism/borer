@@ -168,8 +168,8 @@ const LIVE: &str = "Live: {live_attach}(process) opens the running program read-
      {live_instances} finds a class's objects by vtable, {live_read} reads typed values, \
      {live_watch}(name, address) then {live_watch}(name) shows what changed, \
      {live_scan}(name, value) finds the addresses holding a value and narrows them as it \
-     changes, and borer://livepath/<address> finds pointer chains from a module's globals to \
-     one; every live address may be a static address or a name. ";
+     changes, and {live_scan}(compare=path, value=address) finds pointer chains to \
+     one from a module's globals; every live address may be a static address or a name. ";
 
 /// The instructions' last sentence: the reload.
 const RELOAD: &str = "After a rebuild of borer, {reload} restarts the server in place.";
@@ -196,15 +196,7 @@ const INTENTS: &[(&str, &[&str])] = &[
     ),
     (
         "data flow",
-        &[
-            "taint",
-            "layout",
-            "fields",
-            "fieldrefs",
-            "calls",
-            "why",
-            "livepath",
-        ],
+        &["taint", "layout", "fields", "fieldrefs", "calls", "why"],
     ),
     (
         "protection",

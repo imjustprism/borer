@@ -44,7 +44,7 @@ pub const OFFSET_MAX: u64 = 0x1_0000;
 /// Most chains one page shows.
 pub const PAGE_MAX: usize = 200;
 
-/// A pointer search as `borer://livepath/{spec}` asks for it.
+/// A pointer search as `live_scan(compare=path)` asks for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathSpec {
     /// The target as given: a live or static address, or a name.
@@ -70,7 +70,7 @@ impl PathSpec {
     ///
     /// # Arguments
     ///
-    /// * `spec` - The text after `borer://livepath/`.
+    /// * `spec` - The value, with the paging and module words added.
     ///
     /// # Errors
     ///
@@ -82,7 +82,7 @@ impl PathSpec {
         let address = words
             .next()
             .filter(|a| !a.is_empty())
-            .ok_or_else(|| format!("livepath takes {form}"))?;
+            .ok_or_else(|| format!("compare=path takes {form}"))?;
         let mut out = PathSpec {
             address: address.to_owned(),
             depth: 4,
@@ -95,8 +95,9 @@ impl PathSpec {
         for word in words {
             let (key, value) = word.split_once('=').unwrap_or((word, ""));
             let number = || {
-                crate::analysis::parse_addr(value)
-                    .ok_or_else(|| format!("{word}: {key} takes a number; livepath takes {form}"))
+                crate::analysis::parse_addr(value).ok_or_else(|| {
+                    format!("{word}: {key} takes a number; compare=path takes {form}")
+                })
             };
             let usize_of = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
             match key {
@@ -106,7 +107,11 @@ impl PathSpec {
                 "offset" => out.offset = usize_of(number()?),
                 "limit" => out.limit = usize_of(number()?),
                 "count_only" if value.is_empty() => out.count_only = true,
-                _ => return Err(format!("{word} is not a livepath word; it takes {form}")),
+                _ => {
+                    return Err(format!(
+                        "{word} is not a compare=path word; it takes {form}"
+                    ));
+                }
             }
         }
         if !(1..=DEPTH_MAX).contains(&out.depth)
@@ -114,7 +119,7 @@ impl PathSpec {
             || !(1..=PAGE_MAX).contains(&out.limit)
         {
             return Err(format!(
-                "{spec}: a number is out of its range; livepath takes {form}"
+                "{spec}: a number is out of its range; compare=path takes {form}"
             ));
         }
         Ok(out)
@@ -674,7 +679,7 @@ mod tests {
         assert_eq!(spell(&found.chains[0], &game()), "[game.exe+0x300]+0x10");
     }
 
-    /// A livepath spec reads its address and words, with defaults for the
+    /// A path spec reads its address and words, with defaults for the
     /// words left out, and refuses a word or a number it does not take.
     #[test]
     fn a_path_spec_reads_its_words() {

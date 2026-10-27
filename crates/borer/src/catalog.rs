@@ -226,11 +226,6 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://layout/{entry},rcx",
     ),
     (
-        "borer://livepath/{spec}",
-        "Pointer chains [[base+off]+o1]+o2 to an address of the process live_attach opened, read-only: spec is <address>[,depth=1..6 (default 4)][,max_offset=<bytes, at most 0x10000; default 0x1000>][,module=<name>][,count_only]. Bases are modules (or the one named) and the loaded binary's thread-local singleton slots; chains are shortest first, each walked again before it is shown, a base in the binary labelled with its static address and the singleton or name the analysis has there. Rough past 4096 addresses per level and says so; 20 chains a page, !offset/!limit page it",
-        "borer://livepath/{entry},depth=3",
-    ),
-    (
         "borer://taint/{spec}",
         "Follow a value forward through its function: spec is <address>[,<register>] (a register, or aN for the argument the decompiler names aN; default rax, where a call leaves its result). Reports the instructions that carry it, the calls it is passed to and as which argument, the memory it is stored into, and where it still is at the end",
         "borer://taint/{entry},rax",
