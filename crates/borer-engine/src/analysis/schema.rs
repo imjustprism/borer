@@ -1259,7 +1259,8 @@ pub fn schema_of(
 ///
 /// Besides readers handed an out pointer, a fragment may read values its
 /// readers return, `v = read(stream);`, each as wide as [`returned_bytes`]
-/// says; both kinds come out in call order.
+/// says, with `-` for its destination when the value is not stored whole
+/// (`if (read(stream) != 0)`); both kinds come out in call order.
 ///
 /// # Arguments
 ///
@@ -1285,12 +1286,15 @@ pub(crate) fn reads_in(
             return None;
         };
         (arg == stream).then_some(())?;
-        let (lhs, rhs) = lines.get(c.line.checked_sub(1)?)?.split_once(" = ")?;
-        rhs.starts_with(c.callee.as_str()).then_some(())?;
         let bytes = returned_bytes(program, analysis, overlay, &c.callee)?;
+        let dest = lines
+            .get(c.line.checked_sub(1)?)
+            .and_then(|l| l.split_once(" = "))
+            .filter(|(_, rhs)| is_call_of(rhs, &c.callee))
+            .map_or("-", |(lhs, _)| lhs.trim());
         Some(Field {
             order: String::new(),
-            dest: lhs.trim().to_owned(),
+            dest: dest.to_owned(),
             kind: format!("u{}", bytes * 8),
             bytes,
             via: c.callee.clone(),
@@ -1312,6 +1316,32 @@ pub(crate) fn reads_in(
         })
         .take(FIELDS_MAX)
         .collect()
+}
+
+/// Tells whether `expr` is one call of `callee` and nothing else: `f(a1)`,
+/// not `f(a1) ^ 1`.
+///
+/// # Arguments
+///
+/// * `expr` - The expression, a trailing `;` allowed.
+/// * `callee` - The callee's name.
+pub(crate) fn is_call_of(expr: &str, callee: &str) -> bool {
+    let Some(rest) = expr.trim().trim_end_matches(';').strip_prefix(callee) else {
+        return false;
+    };
+    let mut depth = 0i32;
+    for (i, b) in rest.bytes().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if i == 0 => return false,
+            _ => {}
+        }
+        if depth == 0 {
+            return i + 1 == rest.len();
+        }
+    }
+    false
 }
 
 /// Returns the bytes a reader that returns its value takes off the stream:
@@ -1790,6 +1820,10 @@ return 0;
     /// When the counter's step is taken.
     #[test]
     fn a_cursor_step_is_the_one_the_load_goes_through() {
+        assert!(is_call_of("f(a1);", "f"));
+        assert!(is_call_of("f(g(a1), 2)", "f"));
+        assert!(!is_call_of("f(a1) ^ 1", "f"));
+        assert!(!is_call_of("ff(a1)", "f"));
         let text = "*(uint32_t*)(a1 + 8) += 1;\nax = *(uint16_t*)*(uint32_t*)a1;\n*(uint32_t*)a1 += 2;\nreturn ax;\n";
         assert_eq!(cursor_step(text, "a1"), Some("2"));
         assert_eq!(cursor_step("*(uint32_t*)(a1 + 8) += 1;\n", "a1"), None);

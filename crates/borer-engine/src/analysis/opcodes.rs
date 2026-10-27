@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 
 use super::encode::{Encoding, compact_writes, encoding_through, literal};
 use super::schema::{
-    Call, Field, calls_in_order, compact_fields, declared_names, ident_char, reads_in,
+    Call, Field, calls_in_order, compact_fields, declared_names, ident_char, is_call_of, reads_in,
     returned_bytes, schema_of, signature_line,
 };
 use super::{Analysis, Overlay, RefKind, name_of, plain_text_cached, resolve};
@@ -328,7 +328,7 @@ fn opcode_read<'c>(
         return calls
             .iter()
             .filter(on_line)
-            .find(|c| rhs.starts_with(c.callee.as_str()))
+            .find(|c| is_call_of(rhs, &c.callee))
             .map(|c| (c, true));
     }
     None
@@ -569,7 +569,7 @@ pub fn dispatch_of(
         let var = strip_casts(inner);
         let direct = calls
             .iter()
-            .find(|c| c.line == i + 1 && var.starts_with(c.callee.as_str()) && var.ends_with(')'));
+            .find(|c| c.line == i + 1 && is_call_of(var, &c.callee));
         let found_read = match direct {
             Some(c) => Some((c, true)),
             None if is_ident(var) => opcode_read(&lines, &calls, i, var),
@@ -1055,6 +1055,7 @@ mod tests {
             Some(("g".to_owned(), true))
         );
         assert_eq!(read("f(a1, &v);\nv ^= 1;\nswitch (v) {"), None);
+        assert_eq!(read("v = g(a1) ^ 1;\nswitch (v) {"), None);
         assert_eq!(read("f(a1, &v);\nv++;\nswitch (v) {"), None);
         assert_eq!(read("f(a1, &v);\nh(&v);\nswitch (v) {"), None);
         assert!(!case(vec![field("?", 0)]).reads());
