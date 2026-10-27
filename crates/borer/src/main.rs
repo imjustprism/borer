@@ -216,9 +216,13 @@ impl ServerHandler for BorerServer {
     /// message as the text ([`errors::tool_failure`]), so the agent reads
     /// it; only a request the server cannot run is a protocol error.
     ///
+    /// A call the client cancels (`notifications/cancelled`) stops where
+    /// the deadline would stop it and answers nothing ([`requests::Gate::run`]).
+    ///
     /// # Errors
     ///
-    /// When the tool is unknown or `since` is not a tag.
+    /// When the tool is unknown, `since` is not a tag, or the client
+    /// cancelled the call.
     async fn call_tool(
         &self,
         mut request: CallToolRequestParams,
@@ -273,16 +277,15 @@ impl ServerHandler for BorerServer {
         let server = self.clone();
         let ran = self
             .gate
-            .run(move || {
+            .run(context.ct.clone().cancelled_owned(), move || {
                 let call =
                     rmcp::handler::server::tool::ToolCallContext::new(&server, request, context);
                 tokio::runtime::Handle::current().block_on(Self::tool_router().call(call))
             })
-            .await?;
+            .await;
+        ticker.iter().for_each(tokio::task::JoinHandle::abort);
+        let ran = ran?;
         let response = ran.answer;
-        if let Some(ticker) = ticker {
-            ticker.abort();
-        }
         self.hand_over
             .refresh(|| self.resume_state(peer_info.as_deref()));
         let mut response = match response {
@@ -440,18 +443,23 @@ impl ServerHandler for BorerServer {
     /// # Arguments
     ///
     /// * `request` - The resource URI.
-    /// * `_context` - Request context (unused).
+    /// * `context` - Request context, whose token the client's cancel ends.
     ///
     /// # Errors
     ///
-    /// Resource-not-found for an unknown URI; otherwise the delegated tool's error.
+    /// Resource-not-found for an unknown URI; when the client cancelled
+    /// the read; otherwise the delegated tool's error.
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let server = self.clone();
-        let ran = self.gate.run(move || server.read_uri(&request.uri)).await?;
+        let stop = context.ct.cancelled_owned();
+        let ran = self
+            .gate
+            .run(stop, move || server.read_uri(&request.uri))
+            .await?;
         let (uri, text) = ran.answer?;
         Ok(ReadResourceResult::new(vec![ResourceContents::text(text, uri)]).into())
     }

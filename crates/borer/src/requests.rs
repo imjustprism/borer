@@ -11,8 +11,11 @@
 //! sweeps over callers and decoders) then stop at their next check, and
 //! the answer ends with [`Gate::note`] saying it is partial. The deadline
 //! only decides whether an answer finishes, never what a finished one
-//! says: every other cap is a count.
+//! says: every other cap is a count. The client's cancel
+//! (`notifications/cancelled`) raises the same flag, and a request it
+//! stops answers nothing: no partial text goes out as an answer.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -112,10 +115,13 @@ impl Gate {
     }
 
     /// Runs one request on a blocking thread once a permit is free, with
-    /// its cancel flag raised when the deadline passes.
+    /// its cancel flag raised when the deadline passes or the client
+    /// cancels it.
     ///
     /// # Arguments
     ///
+    /// * `stop` - Ends when the client cancels the request (the request
+    ///   context's token, `RequestContext::ct`).
     /// * `work` - The request.
     ///
     /// # Returns
@@ -124,10 +130,12 @@ impl Gate {
     ///
     /// # Errors
     ///
-    /// Internal error when the permits are closed or the work panicked
-    /// past every guard.
+    /// Internal error when the client cancelled the request, so its
+    /// answer, whole or not, is dropped; when the permits are closed; or
+    /// when the work panicked past every guard.
     pub(crate) async fn run<R: Send + 'static>(
         &self,
+        stop: impl Future<Output = ()> + Send + 'static,
         work: impl FnOnce() -> R + Send + 'static,
     ) -> Result<Ran<R>, ErrorData> {
         let _permit = self
@@ -143,10 +151,25 @@ impl Gate {
                 cancel.raise();
             })
         });
+        let called_off = Cancel::new();
+        let watch = {
+            let (cancel, called_off) = (cancel.clone(), called_off.clone());
+            tokio::spawn(async move {
+                stop.await;
+                called_off.raise();
+                cancel.raise();
+            })
+        };
         let flag = cancel.clone();
         let answer = tokio::task::spawn_blocking(move || flag.within(work)).await;
         if let Some(timer) = timer {
             timer.abort();
+        }
+        watch.abort();
+        if called_off.is_raised() {
+            return Err(err_internal(
+                "the client cancelled the request, so it stopped and answers nothing",
+            ));
         }
         let answer = answer.map_err(|e| err_internal(format!("the request faulted: {e}")))?;
         Ok(Ran {
@@ -187,13 +210,55 @@ mod tests {
             }
         };
         let gate = Gate::with_deadline(Some(Duration::from_millis(50)));
-        let ran = gate.run(spin()).await.expect("the request answers");
+        let ran = gate
+            .run(std::future::pending(), spin())
+            .await
+            .expect("the request answers");
         assert_eq!(ran.answer, Stop::Limit(Limit::Time));
         assert_eq!(ran.answer.to_string(), "stopped: time limit");
         assert!(ran.cut);
         assert!(gate.note().starts_with("# stopped: time limit"));
-        let quick = gate.run(|| 7).await.expect("the request answers");
+        let quick = gate
+            .run(std::future::pending(), || 7)
+            .await
+            .expect("the request answers");
         assert_eq!((quick.answer, quick.cut), (7, false));
+    }
+
+    /// A request the client cancels while it runs answers an error, not
+    /// what it had so far.
+    ///
+    /// Its emulation stops at the check the deadline stops it at, though
+    /// the gate gives it no deadline.
+    ///
+    /// # Panics
+    ///
+    /// When the cancelled request answers, or runs to its budget.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_the_client_cancels_stops_and_answers_nothing() {
+        let text = Section::mapped(".text", 0x1000, 0, 2, false, true);
+        let p = Program::raw(vec![0xeb, 0xfe], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let (began, started) = tokio::sync::oneshot::channel();
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let gate = Gate::with_deadline(None);
+        let stop = async move {
+            let _ = cancelled.await;
+        };
+        let ran = tokio::spawn(async move {
+            gate.run(stop, move || {
+                let mut emu = Emulator::new(&p, usize::MAX).expect("an emulator");
+                let _ = began.send(());
+                emu.run(0x1000).stop
+            })
+            .await
+        });
+        started.await.expect("the request starts");
+        cancel.send(()).expect("the request waits");
+        let refused = ran
+            .await
+            .expect("the request ends")
+            .expect_err("a cancelled request answers nothing");
+        assert!(refused.message.contains("client cancelled"), "{refused:?}");
     }
 
     /// Returns a server holding one function at `0x1000`, `mov eax, 1; ret`.
@@ -227,7 +292,7 @@ mod tests {
         let gate = Gate::with_deadline(Some(Duration::ZERO));
         let reader = server.clone();
         let ran = gate
-            .run(move || {
+            .run(std::future::pending(), move || {
                 while !borer_engine::cancel::Cancel::raised() {
                     std::thread::yield_now();
                 }

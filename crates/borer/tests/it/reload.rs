@@ -28,7 +28,7 @@ pub(crate) struct Client {
     lines: Receiver<String>,
     /// The lines read while waiting for a reply that were not it:
     /// notifications and other replies.
-    passed: Vec<String>,
+    pub(crate) passed: Vec<String>,
     /// The last request id used.
     id: u64,
 }
@@ -85,7 +85,7 @@ impl Client {
     /// # Arguments
     ///
     /// * `lines` - JSON-RPC messages, one a line, without the last newline.
-    fn write(&mut self, lines: &str) {
+    pub(crate) fn write(&mut self, lines: &str) {
         self.stdin
             .write_all(format!("{lines}\n").as_bytes())
             .expect("the server reads");
