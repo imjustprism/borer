@@ -1,12 +1,13 @@
 //! Loads arbitrary bytes, analyzes what loads and decompiles its first
-//! functions, and for a .NET assembly lists its first IL methods and
-//! its method list: the path every agent request takes after a load.
+//! functions, and for a .NET assembly lists its first IL methods and its
+//! obfuscator markers: the path every agent request takes after a load.
 
 #![no_main]
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::clr::managed::{self, Managed};
+use borer_engine::clr::markers::markers_tsv;
 use borer_engine::program::Program;
 use libfuzzer_sys::fuzz_target;
 
@@ -26,5 +27,6 @@ fuzz_target!(|data: &[u8]| {
         _ = managed::listing(&program, m.token, usize::MAX);
         _ = managed::detail(&program, &analysis, m.token);
     }
+    _ = markers_tsv(&program, &analysis);
     _ = managed::methods_tsv(&program, &analysis, "");
 });

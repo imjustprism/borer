@@ -37,7 +37,7 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://clr",
-        "A .NET assembly's metadata: its types, its methods with each body's address (disassemble_function shows a method's CIL; a mixed-mode image's native methods analyze as usual), P/Invokes as dll!export, the external members it uses, referenced assemblies and its user strings, 200 rows a page; borer://clr/<filter> narrows by kind (type, method, pinvoke, memberref, asmref, moduleref, string) or text; borer://clr/methods lists IL methods by the APIs they call (tags load, net, process, crypto, registry, pinvoke...) and strings they load",
+        "A .NET assembly's metadata: its types, its methods with each body's address (disassemble_function shows a method's CIL; a mixed-mode image's native methods analyze as usual), P/Invokes as dll!export, the external members it uses, referenced assemblies and its user strings, 200 rows a page; borer://clr/<filter> narrows by kind (type, method, pinvoke, memberref, asmref, moduleref, string) or text; borer://clr/methods lists IL methods by the APIs they call (tags load, net, process, crypto, registry, pinvoke...) and strings they load; borer://clr/markers lists obfuscator markers with evidence",
     ),
     (
         "borer://hidden",
@@ -385,7 +385,7 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://clr/{filter}",
-        "A .NET assembly's metadata rows of one kind (type, method, pinvoke, memberref, asmref, moduleref, string) or whose name or detail contains the text, comma-separated; offset=<n> for the next page. methods,<tag or text> lists IL methods calling such APIs or loading such strings",
+        "A .NET assembly's metadata rows of one kind (type, method, pinvoke, memberref, asmref, moduleref, string) or whose name or detail contains the text, comma-separated; offset=<n> for the next page. methods,<tag or text> lists IL methods calling such APIs or loading such strings; markers lists obfuscator markers",
         "borer://clr/pinvoke",
     ),
     (

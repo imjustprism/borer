@@ -31,6 +31,7 @@ use crate::text::one_line;
 
 pub mod il;
 pub mod managed;
+pub mod markers;
 mod meta;
 
 /// Bytes of the CLR header (`IMAGE_COR20_HEADER`).
@@ -619,7 +620,7 @@ impl Clr {
             .filter(|m| m.body == Body::Native)
             .count();
         format!(
-            ".net:    {what}, runtime {}.{}, metadata {}, {}; entry {}; types {}, methods {} (native {natives}), pinvokes {}, assembly refs {}, user strings {}{}; IL is not decompiled, disassemble_function shows a method's CIL, borer://clr lists them\n",
+            ".net:    {what}, runtime {}.{}, metadata {}, {}; entry {}; types {}, methods {} (native {natives}), pinvokes {}, assembly refs {}, user strings {}{}; IL is not decompiled, disassemble_function shows a method's CIL, borer://clr lists them and borer://clr/markers its obfuscator markers\n",
             self.runtime.0,
             self.runtime.1,
             self.version,

@@ -15,6 +15,9 @@ use super::{
 use crate::num::saturating_usize;
 use crate::program::Program;
 
+/// `CustomAttribute`, table `0x0c` (II.22.10).
+const CUSTOM_ATTRIBUTE: u8 = 0x0c;
+
 /// Deepest a signature's types nest before the rest reads `...`.
 const DEPTH_MAX: u8 = 16;
 
@@ -46,6 +49,17 @@ pub(crate) struct MethodSig {
     pub ret: String,
     /// The parameter types, `...` marking a vararg call's extra ones.
     pub params: Vec<String>,
+}
+
+/// A custom attribute on some metadata row (II.22.10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Attribute {
+    /// The token of the row it sits on.
+    pub parent: u32,
+    /// The attribute's type, by its full name.
+    pub class: String,
+    /// The first constructor argument when it is a string (II.23.3).
+    pub arg: Option<String>,
 }
 
 /// A cursor over one blob.
@@ -434,6 +448,29 @@ impl<'a> Meta<'a> {
             .ok()
             .and_then(|i| all.get(i))
     }
+
+    /// Every custom attribute, in table order, at most the rows the load
+    /// reads of a table.
+    #[must_use]
+    pub(crate) fn attributes(&self) -> Vec<Attribute> {
+        (1..=self.t.readable(CUSTOM_ATTRIBUTE))
+            .filter_map(|r| {
+                let (pt, prow) =
+                    Coded::HasCustomAttribute.split(self.cell(CUSTOM_ATTRIBUTE, r, 0)?)?;
+                let (ct, crow) =
+                    Coded::CustomAttributeType.split(self.cell(CUSTOM_ATTRIBUTE, r, 1)?)?;
+                let ctor = self.member_name((u32::from(ct) << 24) | crow)?;
+                let class = ctor.rsplit_once("::").map_or(ctor.as_str(), |(c, _)| c);
+                Some(Attribute {
+                    parent: (u32::from(pt) << 24) | prow,
+                    class: class.to_owned(),
+                    arg: self
+                        .blob_at(CUSTOM_ATTRIBUTE, r, 2)
+                        .and_then(|b| ser_string(b.b)),
+                })
+            })
+            .collect()
+    }
 }
 
 /// Splits a token into its table and row.
@@ -446,4 +483,18 @@ fn split(token: u32) -> (u8, u32) {
 /// A signature as `ret name(params)`.
 fn sig_text(s: &MethodSig, name: &str) -> String {
     format!("{} {name}({})", s.ret, s.params.join(", "))
+}
+
+/// The first argument of a custom attribute's value when it is a string:
+/// the prolog `0x0001`, then a `SerString`, a compressed length and that
+/// many UTF-8 bytes (II.23.3).
+fn ser_string(value: &[u8]) -> Option<String> {
+    if value.get(..2)? != [1, 0] {
+        return None;
+    }
+    let (len, head) = compressed(value, 2)?;
+    let start = 2 + head;
+    let bytes = value.get(start..start.checked_add(saturating_usize(u64::from(len)))?)?;
+    let text = std::str::from_utf8(bytes).ok()?;
+    (!text.is_empty() && !text.chars().any(char::is_control)).then(|| crate::text::one_line(text))
 }

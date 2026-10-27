@@ -615,12 +615,13 @@ impl BorerServer {
     /// Lists a .NET assembly's metadata: types, methods, P/Invokes,
     /// external members, references and user strings; with `methods` first
     /// its IL methods by the APIs they call and the strings they load
-    /// ([`borer_engine::clr::managed::methods_tsv`]).
+    /// ([`borer_engine::clr::managed::methods_tsv`]), with `markers` its
+    /// obfuscator markers ([`borer_engine::clr::markers::markers_tsv`]).
     ///
     /// # Arguments
     ///
     /// * `spec` - Kinds and texts to keep, and the page, comma-separated;
-    ///   or `methods` and its words.
+    ///   or `methods` or `markers` and their words.
     ///
     /// # Errors
     ///
@@ -631,6 +632,9 @@ impl BorerServer {
         match head.trim() {
             "methods" => self.with_analysis(Feature::Discover, |p, a, _| {
                 borer_engine::clr::managed::methods_tsv(p, a, rest)
+            }),
+            "markers" => self.with_analysis(Feature::Discover, |p, a, _| {
+                borer_engine::clr::markers::markers_tsv(p, a)
             }),
             _ => self
                 .with_program(|p| borer_engine::clr::clr_tsv(p, spec).map_err(|e| e.to_string())),

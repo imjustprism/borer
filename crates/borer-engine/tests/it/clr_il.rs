@@ -5,7 +5,8 @@
 //! assembly from bytes, inside a try with a catch; `Ns.Crypt::Decrypt`
 //! calls a P/Invoke and reads a field. The assembly carries `ConfuserEx`'s
 //! `ConfusedByAttribute`. The listing names every token, the index answers
-//! callers, strings and APIs, and no byte of a body makes it panic.
+//! callers, strings and APIs, the markers name `ConfuserEx` and the
+//! decryptor with their evidence, and no byte of a body makes it panic.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -20,6 +21,7 @@ use crate::protection::{PE_AT, pe, sec};
 use borer_engine::analysis::Analysis;
 use borer_engine::clr::il;
 use borer_engine::clr::managed::{self, Managed};
+use borer_engine::clr::markers::markers_tsv;
 use borer_engine::program::Program;
 
 /// Where the CLR header sits; the bodies and the metadata follow it.
@@ -408,6 +410,29 @@ fn the_index_answers_callers_strings_and_apis() {
     assert_eq!(tokens, BTreeSet::from([0x0a00_0003]));
 }
 
+/// The markers name `ConfuserEx` by its attribute and argument, and the
+/// decryptor by its shape, each with its evidence.
+#[test]
+fn the_markers_name_confuserex_and_the_decryptor() {
+    let p = load(None);
+    let a = Analysis::compute(&p);
+    let text = markers_tsv(&p, &a).expect("markers");
+    assert!(text.contains("confuserex\tstrong\t"), "{text}");
+    assert!(
+        text.contains("ConfusedByAttribute(\"ConfuserEx v1.0.0\") on 0x20000001"),
+        "{text}"
+    );
+    assert!(
+        text.contains("string-decryptor\tmedium\tstring Ns.Crypt::Decrypt(int) 0x06000004: 5 calls from 1 methods, 100% right after a constant"),
+        "{text}"
+    );
+    assert_eq!(
+        text,
+        markers_tsv(&p, &Analysis::compute(&p)).expect("again"),
+        "deterministic"
+    );
+}
+
 /// No byte of a body set to anything makes reading, listing or indexing
 /// panic.
 #[test]
@@ -419,7 +444,7 @@ fn no_byte_of_a_body_makes_the_il_view_panic() {
                 let _ = managed::listing(&p, token, 1000);
             }
             let a = Analysis::compute(&p);
-            assert!(managed::methods_tsv(&p, &a, "").is_ok());
+            assert!(markers_tsv(&p, &a).is_ok());
             assert!(Managed::build(&p).methods.len() <= 4);
         }
     }
