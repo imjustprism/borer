@@ -22,6 +22,9 @@
 //!   structure by value), the structure under it and the pointers over it.
 //! * `structs.tsv` - a tag, its size on x64 and on x86, then
 //!   `name.type.off64.off32` per field.
+//! * `interfaces.tsv` - a COM interface of the DirectX headers, its IID,
+//!   then its methods in vtable slot order, inherited ones first, each with
+//!   the interface it hands back through a parameter ([`Out`]).
 
 use std::collections::BTreeMap;
 use std::sync::{LazyLock, OnceLock};
@@ -296,6 +299,152 @@ static STRUCTS: LazyLock<BTreeMap<&'static str, Struct>> = LazyLock::new(|| {
         .collect()
 });
 
+/// The interface a parameter hands back an object of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Out {
+    /// This interface: the parameter is an `Iface **`.
+    Iface(&'static str),
+    /// The one the IID at this parameter position names: a `void **`.
+    ByIid(usize),
+}
+
+/// One method of a COM interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Method {
+    /// The method's name.
+    pub name: &'static str,
+    /// What its parameters hand back, by position counted after `this`.
+    pub outs: Vec<(usize, Out)>,
+}
+
+/// A COM interface: its IID and its vtable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Interface {
+    /// The interface's name (`IDirect3D9`).
+    pub name: &'static str,
+    /// Its IID as the 16 bytes a binary holds, `None` when the headers
+    /// define none.
+    pub iid: Option<[u8; 16]>,
+    /// Its methods by vtable slot.
+    pub methods: Vec<Method>,
+}
+
+/// Reads a GUID in registry form as the bytes a binary holds.
+///
+/// # Arguments
+///
+/// * `text` - `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+fn guid(text: &str) -> Option<[u8; 16]> {
+    let hex: String = text.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut b = u128::from_str_radix(&hex, 16).ok()?.to_be_bytes();
+    b.get_mut(..4)?.reverse();
+    b.get_mut(4..6)?.reverse();
+    b.get_mut(6..8)?.reverse();
+    Some(b)
+}
+
+/// Reads one method column of `interfaces.tsv`: `Name`, then `:k=Iface`
+/// or `:k=?j` per parameter that hands back an object.
+///
+/// # Arguments
+///
+/// * `col` - The column.
+fn method_of(col: &'static str) -> Option<Method> {
+    let mut parts = col.split(':');
+    let name = parts.next()?;
+    let outs = parts
+        .map(|p| {
+            let (k, v) = p.split_once('=')?;
+            let out = match v.strip_prefix('?') {
+                Some(j) => Out::ByIid(j.parse().ok()?),
+                None => Out::Iface(v),
+            };
+            Some((k.parse().ok()?, out))
+        })
+        .collect::<Option<_>>()?;
+    Some(Method { name, outs })
+}
+
+/// The COM interfaces, by name (`interfaces.tsv`).
+static INTERFACES: LazyLock<BTreeMap<&'static str, Interface>> = LazyLock::new(|| {
+    include_str!("sdk/interfaces.tsv")
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split('\t');
+            let name = cols.next()?;
+            let iid = cols.next()?;
+            let methods = cols.map(method_of).collect::<Option<_>>()?;
+            let iid = if iid == "-" { None } else { Some(guid(iid)?) };
+            Some((name, Interface { name, iid, methods }))
+        })
+        .collect()
+});
+
+/// Returns a COM interface by name.
+///
+/// # Arguments
+///
+/// * `name` - The interface's name (`IDirect3DDevice9`).
+#[must_use]
+pub fn interface(name: &str) -> Option<&'static Interface> {
+    INTERFACES.get(name)
+}
+
+/// Returns the COM interface an IID names.
+///
+/// # Arguments
+///
+/// * `iid` - The 16 bytes the binary holds.
+#[must_use]
+pub fn interface_of_iid(iid: &[u8]) -> Option<&'static Interface> {
+    INTERFACES
+        .values()
+        .find(|i| i.iid.is_some_and(|b| b.as_slice() == iid))
+}
+
+/// Returns the COM interface a type points at through `depth` pointers.
+///
+/// # Arguments
+///
+/// * `spelled` - The type (`IDirect3D9 *`, `LPDIRECTSOUND8 *`).
+/// * `depth` - 1 for an interface pointer, 2 for an out-parameter.
+#[must_use]
+pub fn pointed_interface(spelled: &str, depth: usize) -> Option<&'static Interface> {
+    let (base, stars) = super::typelib::base_of(spelled);
+    let (tag, under) = match TYPES.get(base.as_str()) {
+        Some(t) => (t.tag?, t.stars),
+        None => (base.as_str(), 0),
+    };
+    (stars + under == depth).then(|| interface(tag)).flatten()
+}
+
+/// Returns what a function's parameters hand back: an `Iface **`, or the
+/// `void **` beside the function's one `REFIID`.
+///
+/// # Arguments
+///
+/// * `types` - The parameter types as spelled, in order.
+#[must_use]
+pub fn outs_of(types: &[&str]) -> Vec<(usize, Out)> {
+    let riid = types
+        .iter()
+        .position(|t| *t == "REFIID")
+        .filter(|_| types.iter().filter(|t| **t == "REFIID").count() == 1);
+    types
+        .iter()
+        .enumerate()
+        .filter_map(|(k, t)| match pointed_interface(t, 2) {
+            Some(i) => Some((k, Out::Iface(i.name))),
+            None => {
+                matches!(*t, "void **" | "LPVOID *" | "PVOID *").then_some((k, Out::ByIid(riid?)))
+            }
+        })
+        .collect()
+}
+
 /// Returns the SDK declaration of a function a binary of a platform calls.
 ///
 /// # Arguments
@@ -427,7 +576,8 @@ fn declarator(ty: &str, n: &str) -> String {
 )]
 mod tests {
     use super::{
-        DECLS, NAMES, STRUCTS, TYPES, WORDS, decl, declared, pointee, spell, structure, typedef,
+        DECLS, INTERFACES, NAMES, Out, STRUCTS, TYPES, WORDS, decl, declared, interface,
+        interface_of_iid, outs_of, pointed_interface, pointee, spell, structure, typedef,
     };
     use crate::analysis::typelib::{Conv, Os};
 
@@ -506,6 +656,79 @@ mod tests {
         assert_eq!(find(&at32, "hStdError"), Some(64));
         assert_eq!(typedef("SIZE_T").and_then(|t| t.pass), Some("word"));
         assert!(structure("_RTL_CRITICAL_SECTION").is_some());
+    }
+
+    /// Every interface row parses, every interface a method hands back is
+    /// one of the table, and a method's slot is its place in the header's
+    /// vtable, inherited methods first.
+    #[test]
+    fn interfaces_carry_their_slots_and_iids() {
+        assert_eq!(
+            INTERFACES.len(),
+            include_str!("sdk/interfaces.tsv").lines().count()
+        );
+        for i in INTERFACES.values() {
+            for (_, out) in i.methods.iter().flat_map(|m| &m.outs) {
+                if let Out::Iface(n) = out {
+                    assert!(interface(n).is_some(), "{} hands back {n}", i.name);
+                }
+            }
+        }
+        let d3d = interface("IDirect3D9").expect("d3d9.h");
+        let names: Vec<&str> = d3d.methods.iter().map(|m| m.name).collect();
+        assert_eq!(
+            names.get(..3),
+            Some(["QueryInterface", "AddRef", "Release"].as_slice())
+        );
+        let create = d3d.methods.get(16).expect("slot 16");
+        assert_eq!(create.name, "CreateDevice");
+        assert_eq!(create.outs, [(5, Out::Iface("IDirect3DDevice9"))]);
+        assert_eq!(
+            d3d.methods.first().map(|m| m.outs.clone()),
+            Some(vec![(1, Out::ByIid(0))])
+        );
+        let iid = [
+            0xca, 0xcb, 0xbd, 0x81, 0xd4, 0x64, 0x6d, 0x42, 0xae, 0x8d, 0xad, 0x01, 0x47, 0xf4,
+            0x27, 0x5c,
+        ];
+        assert_eq!(d3d.iid, Some(iid));
+        assert_eq!(interface_of_iid(&iid).map(|i| i.name), Some("IDirect3D9"));
+        let device = interface("IDirect3DDevice9").expect("d3d9.h");
+        assert_eq!(device.methods.get(41).map(|m| m.name), Some("BeginScene"));
+        assert!(interface("IDirectInputDevice8A").is_some());
+        assert!(interface("IDirectSoundBuffer8").is_some());
+    }
+
+    /// A pointer type reaches its interface through a typedef or a name,
+    /// and a declaration's out-parameters name what they hand back.
+    #[test]
+    fn declarations_name_the_interfaces_they_hand_back() {
+        assert_eq!(
+            pointed_interface("IDirect3D9 *", 1).map(|i| i.name),
+            Some("IDirect3D9")
+        );
+        assert_eq!(
+            pointed_interface("LPUNKNOWN", 1).map(|i| i.name),
+            Some("IUnknown")
+        );
+        assert!(pointed_interface("IDirect3D9 *", 2).is_none());
+        assert!(pointed_interface("DWORD *", 1).is_none());
+        let cocreate = ["REFCLSID", "LPUNKNOWN", "DWORD", "REFIID", "LPVOID *"];
+        assert_eq!(outs_of(&cocreate), [(4, Out::ByIid(3))]);
+        let device = [
+            "IDXGIAdapter *",
+            "UINT",
+            "ID3D11Device **",
+            "ID3D11DeviceContext **",
+        ];
+        assert_eq!(
+            outs_of(&device),
+            [
+                (2, Out::Iface("ID3D11Device")),
+                (3, Out::Iface("ID3D11DeviceContext"))
+            ]
+        );
+        assert!(outs_of(&["void **", "UINT"]).is_empty());
     }
 
     /// A declaration spells as C with the name shielded from macros and a

@@ -25,6 +25,16 @@ used first.
                  structure it names or points at, with the pointer count
   structs.tsv    a structure's tag, its size on x64 and on x86 (`-` when x86
                  lacks it), then `name.word.off64.off32` per field
+  interfaces.tsv a COM interface of the DirectX headers (`COM_HEADERS`, and
+                 `IUnknown`), its IID (`-` when the headers give none), then
+                 its methods in slot order, inherited ones first, as the C
+                 vtable structure declares them; a method that hands back an
+                 interface writes `:k=Iface` for its parameter `k` (counted
+                 after `this`) of type `Iface **` (not an input array
+                 `Iface *const *`, nor one of `COM_INPUT_ARRAYS`), and
+                 `:k=?j` for a `void **` whose
+                 interface the `REFIID` parameter `j` names; d3d11.h brings
+                 the D3D10 headers in, so their interfaces are kept too
 
 Where the data comes from. clang parses the SDK headers (`um`, `shared`,
 `ucrt` and, in a translation unit of its own, `km`) with
@@ -194,6 +204,20 @@ UM_HEADERS = [
 ]
 
 KM_HEADERS = ["ntifs.h", "fltKernel.h", "ntstrsafe.h", "wdmsec.h", "aux_klib.h"]
+
+COM_HEADERS = ["d3d9.h", "d3d11.h", "dxgi.h", "ddraw.h", "d3d.h", "dinput.h", "dsound.h"]
+COM_DEFINES = DEFINES + ["DIRECTINPUT_VERSION=0x0800"]
+
+COM_INPUT_ARRAYS = {
+    "CheckResourceResidency",
+    "SetDepthStencilArray",
+    "SetRenderTargetArray",
+    "SetResourceArray",
+}
+"""The COM methods whose `Iface **` parameter is an input array, not an
+out-parameter: the headers mark that only with SAL (`_In_reads_`), which
+clang does not keep, or in the documentation (d3d9.h's
+`CheckResourceResidency`)."""
 
 C_STANDARD_NAMES = """
 abort abs acos acosf acosh acoshf acoshl acosl asctime asin asinf asinh asinhf
@@ -660,6 +684,104 @@ def b36(n: int) -> str:
             return out
 
 
+def guid_of(node: dict) -> str | None:
+    """Return a GUID initializer's value in registry form, or None."""
+    vals: list[int] = []
+
+    def walk(n: dict) -> None:
+        if n.get("kind") == "IntegerLiteral":
+            vals.append(int(n["value"]))
+        for c in n.get("inner", []):
+            walk(c)
+
+    walk(node)
+    if len(vals) != 11:
+        return None
+    d4 = "".join(f"{b:02x}" for b in vals[3:])
+    return f"{vals[0]:08x}-{vals[1]:04x}-{vals[2]:04x}-{d4[:4]}-{d4[4:]}"
+
+
+def fn_params(qual: str) -> list[str]:
+    """Return the parameter types of a function pointer type, in order."""
+    t = ATTR.sub("", qual).strip()
+    at = t.find("(*)(")
+    if at < 0 or not t.endswith(")"):
+        return []
+    body = t[at + 4 : -1]
+    out, depth, cur = [], 0, ""
+    for c in body:
+        depth += (c == "(") - (c == ")")
+        if c == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += c
+    return out + [cur.strip()] if cur.strip() else out
+
+
+def base_of(t: str, typedefs: dict[str, str]) -> tuple[str, int]:
+    """Return a type's tag or name under its typedefs, and its pointer count."""
+    stars = 0
+    for _ in range(32):
+        t = strip_quals(ATTR.sub("", t))
+        stars += t.count("*")
+        t = t.replace("*", "").strip()
+        if t.startswith(("struct ", "union ")):
+            return t.split(" ", 1)[1], stars
+        if t not in typedefs:
+            return t, stars
+        t = typedefs[t]
+    return t, stars
+
+
+def interfaces(dirs: list[str]) -> list[str]:
+    """Return the rows of `interfaces.tsv`: each COM interface of
+    `COM_HEADERS` (one with an IID there) and `IUnknown`, read from the C
+    vtable structures and the `DEFINE_GUID` values."""
+    headers = ["windows.h", "initguid.h"] + COM_HEADERS
+    ast = json.loads(
+        run_unit(
+            headers, "x86_64-pc-windows-msvc", dirs, COM_DEFINES, ["-Xclang", "-ast-dump=json"]
+        )
+    )
+    typedefs: dict[str, str] = {}
+    iids: dict[str, str] = {}
+    vtbls: dict[str, list[tuple[str, list[str]]]] = {}
+    for node in ast.get("inner", []):
+        name, kind = node.get("name", ""), node.get("kind")
+        if kind == "TypedefDecl":
+            typedefs.setdefault(name, node["type"]["qualType"])
+        elif kind == "VarDecl" and name.startswith("IID_") and node.get("init"):
+            guid = guid_of(node)
+            if guid:
+                iids[name[4:]] = guid
+        elif kind == "RecordDecl" and name.endswith("Vtbl") and node.get("completeDefinition"):
+            vtbls[name[:-4]] = [
+                (f["name"], fn_params(f["type"]["qualType"]))
+                for f in node.get("inner", [])
+                if f.get("kind") == "FieldDecl"
+            ]
+    kept = sorted(n for n in vtbls if n in iids or n == "IUnknown")
+    rows = []
+    for name in kept:
+        cols = [name, iids.get(name, "-")]
+        for method, params in vtbls[name]:
+            args = params[1:]
+            riid = [j for j, p in enumerate(args) if strip_quals(p) == "IID*"]
+            outs = ""
+            for k, p in enumerate(args):
+                base, stars = base_of(p, typedefs)
+                if "*const*" in p.replace(" ", "") or method in COM_INPUT_ARRAYS:
+                    continue
+                if stars == 2 and base in kept:
+                    outs += f":{k}={base}"
+                elif stars == 2 and base == "void" and len(riid) == 1:
+                    outs += f":{k}=?{riid[0]}"
+            cols.append(method + outs)
+        rows.append("\t".join(cols))
+    return rows
+
+
 def write(path: Path, rows: list[str]) -> int:
     """Write rows as lines and return the byte count."""
     text = "".join(r + "\n" for r in rows)
@@ -818,6 +940,7 @@ def main(argv: list[str]) -> int:
         for fname, ftype, off, o32 in fields:
             cols.append(f"{ni[fname]}.{wi[ftype]}.{off}.{'-' if o32 is None else o32}")
         struct_rows.append("\t".join(cols))
+    com_rows = interfaces(um_dirs)
     type_text = sorted("\t".join([n, w, t or "-", str(s)]) for n, w, t, s in type_rows)
     sizes = {
         "functions.tsv": write(OUT / "functions.tsv", rows),
@@ -825,6 +948,7 @@ def main(argv: list[str]) -> int:
         "names.tsv": write(OUT / "names.tsv", names),
         "types.tsv": write(OUT / "types.tsv", type_text),
         "structs.tsv": write(OUT / "structs.tsv", struct_rows),
+        "interfaces.tsv": write(OUT / "interfaces.tsv", com_rows),
     }
     version_line = subprocess.run([clang(), "--version"], capture_output=True, check=False)
     clang_version = version_line.stdout.decode().splitlines()[0]
@@ -834,6 +958,7 @@ def main(argv: list[str]) -> int:
         "names.tsv": len(names),
         "types.tsv": len(type_text),
         "structs.tsv": len(struct_rows),
+        "interfaces.tsv": len(com_rows),
     }
     origins = {o: sum(1 for d in decls if d[2] == o) for o in sorted(ORIGIN)}
     wdk = f"Windows Driver Kit {version} (km headers)" if km else "-"
@@ -848,6 +973,7 @@ def main(argv: list[str]) -> int:
         "# targets\tx86_64-pc-windows-msvc, i686-pc-windows-msvc (structure offsets)",
         f"# um\t{' '.join(um)}",
         f"# km\t{' '.join(km)}",
+        f"# com\t{' '.join(COM_HEADERS)} (C vtables, DIRECTINPUT_VERSION 0x0800)",
         "# refused\t" + (" ".join(sorted(refused)) or "-"),
         "# origins\t" + " ".join(f"{o}={n}" for o, n in origins.items()),
         "file\trows\tbytes",

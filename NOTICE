@@ -104,9 +104,11 @@ and the row counts.
 
 What is embedded is facts about the interface programs compile against: a
 function's name, calling convention and parameter types and names, a
-type's representation, a structure's field names, types and offsets, and
-a constant's name and value. No header text, comment or code is copied,
-as MinGW-w64 and Wine restate the same interface. The same rule decides
+type's representation, a structure's field names, types and offsets, a
+COM interface's IID and its method names in vtable slot order (read from
+the DirectX headers' C vtable structures), and a constant's name and
+value. No header text, comment or code is copied, as MinGW-w64 and Wine
+restate the same interface. The same rule decides
 what the signature sets may read: declarations ship as facts, compiled
 library code only under a license that allows it. Microsoft, Windows and
 Visual Studio are trademarks of the Microsoft group of companies.
