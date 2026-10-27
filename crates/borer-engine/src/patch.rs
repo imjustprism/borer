@@ -421,12 +421,10 @@ fn plan_detour(
         out.extend_from_slice(&assemble(&[near_jmp(bits, back)?], before_jmp, bits)?);
         Ok(out)
     };
-    let estimate = body(at.saturating_add(crate::num::from_usize(covered)))?.len();
     let avoid = (at, back);
     let caves = find_caves(program, at, avoid);
-    let cave = choose_cave(
-        program, analysis, overlay, &caves, cave_opt, estimate, avoid,
-    )?;
+    let fits = |c: &Cave| body(c.va).is_ok_and(|b| b.len() <= c.len);
+    let cave = choose_cave(program, analysis, overlay, &caves, cave_opt, avoid, fits)?;
     let code = body(cave.va)?;
     if code.len() > cave.len {
         return Err(format!(
@@ -514,23 +512,25 @@ fn near_jmp(bits: u32, target: u64) -> Result<Instruction, String> {
 /// * `overlay` - For a user name.
 /// * `caves` - The usable runs, longest first.
 /// * `named` - A cave address or name the caller gave, or `None`.
-/// * `need` - Bytes the detour needs.
 /// * `avoid` - The `[start, end)` the trampoline overwrites, which a cave must
 ///   not touch.
+/// * `fits` - Whether the detour encodes at a listed cave and fits in it;
+///   the longest run may be out of reach of an operand the new code reads.
 ///
 /// # Errors
 ///
-/// When a named cave does not resolve, is not a padding run in executable
-/// code, overlaps the patch site, or is too short, or when no run is long
-/// enough.
+/// When a named cave does not resolve, is out of a jump's reach or is not a
+/// padding run in executable code, or when no listed run holds and encodes
+/// the detour. [`plan_detour`] checks a named cave's length and overlap
+/// against the code it encodes there.
 fn choose_cave(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     caves: &[Cave],
     named: Option<&str>,
-    need: usize,
     avoid: (u64, u64),
+    fits: impl Fn(&Cave) -> bool,
 ) -> Result<Cave, String> {
     if let Some(text) = named {
         let va = resolve_suggesting(program, analysis, overlay, text)?;
@@ -543,13 +543,6 @@ fn choose_cave(
         let (len, byte) = padding_run(program, va).ok_or_else(|| {
             format!("the cave {va:#x} is not a run of padding (00, cc or 90) in executable code")
         })?;
-        let end = va.saturating_add(crate::num::from_usize(need));
-        if overlaps((va, end), avoid) {
-            return Err(format!(
-                "the cave {va:#x} overlaps the bytes the jump at {:#x} overwrites",
-                avoid.0
-            ));
-        }
         let off = program
             .va_to_offset(va)
             .ok_or_else(|| format!("the cave {va:#x} has no file offset"))?;
@@ -557,9 +550,9 @@ fn choose_cave(
     }
     caves
         .iter()
-        .find(|c| c.len >= need)
+        .find(|c| fits(c))
         .copied()
-        .ok_or_else(|| format!("no code cave holds the {need}-byte detour; free a larger run"))
+        .ok_or_else(|| "no code cave holds the detour and encodes it; free a larger run".to_owned())
 }
 
 /// Measures the run of a single padding byte (`00`, `cc` or `90`) starting at
@@ -914,6 +907,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("overlap"), "{err}");
+    }
+
+    /// A detour skips a longer cave its new code cannot encode at and takes
+    /// the next listed one that holds it.
+    ///
+    /// The `rip`-relative load reads `0x17fffffff`: from the longest run at
+    /// `0x80001000` that is past a 32-bit displacement, from the run beside
+    /// the site it is not.
+    ///
+    /// # Panics
+    ///
+    /// When the plan is refused or picks the far cave.
+    #[test]
+    fn a_detour_skips_a_cave_its_code_cannot_encode_at() {
+        let mut bytes = vec![0xcc; 0x200];
+        bytes[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax,1 ; ret
+        let site = Section::mapped(".text", 0x1_0000_0000, 0, 0x40, false, true);
+        let far = Section::mapped(".far", 0x8000_1000, 0x100, 0x100, false, true);
+        let p = Program::raw(bytes, Arch::X86_64, 0, Some(0x1_0000_0000), vec![site, far]);
+        let a = Analysis::compute(&p);
+        let out = plan_tsv(
+            &p,
+            &a,
+            &Overlay::default(),
+            "0x100000000/488b05f8ffff7f,detour", // ASM: mov rax,[rip+0x7ffffff8]
+        )
+        .expect("a plan");
+        assert!(
+            out.contains("# fit: detour to a cave at 0x10000000"),
+            "{out}"
+        );
     }
 
     /// A request to place a cave by address encodes the body there.
