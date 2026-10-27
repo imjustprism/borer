@@ -102,3 +102,20 @@ fn a_upx_header_mark_names_a_renamed_upx() {
         "{out}"
     );
 }
+
+/// A raw image, a dump with no headers, is still read for the marks in its
+/// bytes, and says nothing of a compiler it cannot see.
+#[test]
+fn a_raw_image_keeps_its_marks() {
+    use borer_engine::program::{Arch, Program};
+    let mut bytes = vec![0u8; 0x100];
+    bytes.extend_from_slice(b"\xff Go buildinf:\x08\x02go1.22.3\0");
+    let raw = Program::raw(bytes, Arch::X86_64, 0, None, Vec::new());
+    let out = lines(&raw, false).join("\n");
+    assert!(
+        out.contains("built:   Go, go1.22.3 (high: build information at 0x100)"),
+        "{out}"
+    );
+    let empty = Program::raw(vec![0; 0x100], Arch::X86_64, 0, None, Vec::new());
+    assert!(lines(&empty, false).is_empty());
+}

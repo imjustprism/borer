@@ -883,8 +883,8 @@ pub fn identify(p: &Program, bundles: &[Bundle]) -> Vec<Finding> {
 /// The lines a file summary or a triage shows about what built the file.
 ///
 /// One per finding (the role, the name and version, the confidence and the
-/// evidence) and one per payload; a file whose compiler nothing names says
-/// it is unknown.
+/// evidence) and one per payload; a file with headers whose compiler nothing
+/// names says it is unknown, while a raw file, with none to read, says nothing.
 ///
 /// # Arguments
 ///
@@ -893,9 +893,6 @@ pub fn identify(p: &Program, bundles: &[Bundle]) -> Vec<Finding> {
 ///   hint after it.
 #[must_use]
 pub fn lines(p: &Program, triage: bool) -> Vec<String> {
-    if p.format == BinaryFormat::Raw {
-        return Vec::new();
-    }
     let label = |role: Role| match (role, triage) {
         (Role::Compiler, false) => "built:   ",
         (Role::Packer, false) => "packer:  ",
@@ -906,7 +903,7 @@ pub fn lines(p: &Program, triage: bool) -> Vec<String> {
     let bundles = bundle::bundles(p);
     let found = identify(p, &bundles);
     let mut out: Vec<String> = Vec::new();
-    if !found.iter().any(|f| f.role == Role::Compiler) {
+    if p.format != BinaryFormat::Raw && !found.iter().any(|f| f.role == Role::Compiler) {
         out.push(format!(
             "{}unknown: no Rich header, compiler text or runtime mark{}",
             label(Role::Compiler),
