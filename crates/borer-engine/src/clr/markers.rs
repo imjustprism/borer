@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use super::METHOD_DEF;
 use super::managed::{LDSTR, Managed, NOT_INDEXED, Refs};
 use super::meta::Meta;
 use crate::analysis::Analysis;
@@ -239,8 +240,12 @@ fn is_proxy(r: &Refs) -> bool {
     r.forwards && r.instrs <= 8
 }
 
-/// String decryptors: static methods returning a string from integer or
-/// string parameters, called often and mostly right after a constant.
+/// Finds string decryptors.
+///
+/// A decryptor is a static method the assembly defines, returning a string
+/// from integer or string parameters, called often and mostly right after
+/// a constant; a framework method such as `Convert::ToString(int)` is
+/// never one.
 fn decryptors(meta: &Meta<'_>, index: &Managed, rows: &mut Vec<(String, &'static str, String)>) {
     let mut calls: BTreeMap<u32, (usize, usize, Vec<u32>)> = BTreeMap::new();
     let mut loads = 0usize;
@@ -262,7 +267,8 @@ fn decryptors(meta: &Meta<'_>, index: &Managed, rows: &mut Vec<(String, &'static
         if n < DECRYPTOR_CALLS || constant * 100 < n * DECRYPTOR_CONSTANT_PCT {
             continue;
         }
-        let Some(sig) = meta.sig(token) else {
+        let defined = meta.generic_of(token).unwrap_or(token) >> 24 == u32::from(METHOD_DEF);
+        let Some(sig) = meta.sig(token).filter(|_| defined) else {
             continue;
         };
         let text = meta.token(token);
