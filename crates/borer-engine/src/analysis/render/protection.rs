@@ -1010,7 +1010,7 @@ mod tests {
 }
 
 /// Section names a packer or protector writes, and what it is called.
-pub(super) const PACKER_SECTIONS: [(&str, &str); 38] = [
+pub(super) const PACKER_SECTIONS: [(&str, &str); 40] = [
     ("UPX0", "UPX"),
     ("UPX1", "UPX"),
     ("UPX2", "UPX"),
@@ -1029,6 +1029,8 @@ pub(super) const PACKER_SECTIONS: [(&str, &str); 38] = [
     (".enigma2", "Enigma"),
     ("MPRESS1", "MPRESS"),
     ("MPRESS2", "MPRESS"),
+    (".MPRESS1", "MPRESS"),
+    (".MPRESS2", "MPRESS"),
     (".petite", "Petite"),
     ("PEC2", "PECompact"),
     ("pec1", "PECompact"),
@@ -1148,27 +1150,41 @@ pub(super) const THIN_IMPORTS: usize = 12;
 /// function, and a packer leaves one stub in front of megabytes.
 pub(super) const SPARSE_CODE: u64 = 2048;
 
-/// Reports the marks a packer or protector leaves.
+/// The `UPX!` mark UPX writes into the headers of what it packs, back to
+/// front ([`crate::fileinfo::reversed`]) so borer's own binary does not
+/// carry it.
+const UPX_MARK: [u8; 4] = crate::fileinfo::reversed(b"UPX!");
+
+/// Where UPX's `UPX!` mark sits in the PE headers and the UPX version
+/// written just before it (`4.22`), when it is printable.
 ///
-/// Nothing here decrypts anything: it says what the image looks like before
-/// it unpacks itself, which is what decides whether reading the static text
-/// is worth anything. The name comes from the entry stub a packer writes, a
-/// marker rebuilt into the DOS header, the section a protector is known to
-/// write, and where the entry point sits; the rest is evidence any packer
-/// leaves whatever its name: a high-entropy body, an import table too thin
-/// to run the program, a section that is both writable and executable, an
-/// entry point outside the code, an entry point in writable memory, and
-/// executable bytes with almost no code found in them.
+/// # Arguments
+///
+/// * `header` - The bytes before the first section.
+pub(super) fn upx_header(header: &[u8]) -> Option<(usize, Option<String>)> {
+    let at = crate::fileinfo::find(header, &crate::fileinfo::forward(&UPX_MARK))?;
+    let before = header.get(at.saturating_sub(6)..at.saturating_sub(1))?;
+    let digits = before
+        .iter()
+        .rev()
+        .take_while(|b| b.is_ascii_digit() || **b == b'.')
+        .count();
+    let version = String::from_utf8_lossy(before.get(before.len() - digits..)?).into_owned();
+    Some((at, version.contains('.').then_some(version)))
+}
+
+/// The packers and protectors the image names by a mark only they leave:
+/// a section they write, their entry stub, where the entry point sits, or a
+/// marker in the headers.
 ///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
-/// * `a` - The analysis, for how much code was found.
 ///
 /// # Returns
 ///
-/// The verdict, the evidence and the section table.
-pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
+/// Each family found with its marks, by family name.
+pub fn packer_marks(p: &Program) -> BTreeMap<&'static str, Vec<String>> {
     let mut names: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for s in &p.sections {
         for (mark, name) in PACKER_SECTIONS {
@@ -1196,10 +1212,14 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
             }
         }
     }
-    if let Some(first) = p.sections.first() {
-        let header_end = usize::try_from(first.file_off.0)
-            .unwrap_or(0)
-            .min(p.bytes.len());
+    if let Some(first) = p
+        .sections
+        .iter()
+        .filter(|s| s.file_size > 0)
+        .map(|s| s.file_off.0)
+        .min()
+    {
+        let header_end = usize::try_from(first).unwrap_or(0).min(p.bytes.len());
         if let Some(header) = p.bytes.get(..header_end) {
             for (needle, family) in HEADER_MARKS {
                 let bytes = needle.as_bytes();
@@ -1210,8 +1230,38 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
                         .push(format!("{needle} marker in the DOS header"));
                 }
             }
+            if let Some((at, version)) = upx_header(header) {
+                names.entry("UPX").or_default().push(format!(
+                    "UPX! mark at {at:#x} in the headers{}",
+                    version.map_or_else(String::new, |v| format!(", written by UPX {v}"))
+                ));
+            }
         }
     }
+    names
+}
+
+/// Reports the marks a packer or protector leaves.
+///
+/// Nothing here decrypts anything: it says what the image looks like before
+/// it unpacks itself, which is what decides whether reading the static text
+/// is worth anything. The name comes from [`packer_marks`]; the rest is
+/// evidence any packer leaves whatever its name: a high-entropy body, an
+/// import table too thin to run the program, a section that is both
+/// writable and executable, an entry point outside the code, an entry point
+/// in writable memory, and executable bytes with almost no code found in
+/// them.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for how much code was found.
+///
+/// # Returns
+///
+/// The verdict, the evidence and the section table.
+pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
+    let names = packer_marks(p);
     let mut evidence: Vec<String> = Vec::new();
     let mut rows = String::new();
     let mut packed_bytes = 0u64;

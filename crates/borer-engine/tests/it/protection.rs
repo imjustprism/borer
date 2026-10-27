@@ -254,6 +254,40 @@ fn telock_marker_in_the_dos_header_names_telock() {
     assert!(out.contains("tELock marker in the DOS header"), "{out}");
 }
 
+/// The `UPX!` mark UPX writes into the headers names UPX and the version
+/// written before it, whatever the sections are called.
+#[test]
+fn a_upx_mark_in_the_headers_names_upx_and_its_version() {
+    let mut code = vec![0xcc; 0x200];
+    code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let mut bytes = pe(&[sec(".text", 0x1000, code)], 0x1000);
+    bytes[0x3d0..0x3d9].copy_from_slice(b"4.22\0UPX!");
+    let out = report(bytes);
+    assert!(out.contains("# protected: UPX"), "{out}");
+    assert!(
+        out.contains("UPX! mark at 0x3d5 in the headers, written by UPX 4.22"),
+        "{out}"
+    );
+}
+
+/// `MPRESS` names its sections with a leading dot, and they name it.
+#[test]
+fn dotted_mpress_sections_name_mpress() {
+    let mut code = vec![0xcc; 0x200];
+    code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let out = report(pe(
+        &[
+            sec(".MPRESS1", 0x1000, code),
+            sec(".MPRESS2", 0x2000, vec![0; 0x200]),
+        ],
+        0x1000,
+    ));
+    assert!(
+        out.contains("# - MPRESS: .MPRESS1 section; .MPRESS2 section"),
+        "{out}"
+    );
+}
+
 /// An entry whose first byte is off by one matches no stub and stays plain,
 /// so one wrong byte cannot name a packer.
 #[test]
