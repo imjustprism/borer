@@ -29,6 +29,8 @@ use crate::program::{Program, Symbol, SymbolKind};
 use crate::strings::{Encoding, StringHit};
 use crate::text::one_line;
 
+pub mod il;
+
 /// Bytes of the CLR header (`IMAGE_COR20_HEADER`).
 const COR20_LEN: usize = 72;
 

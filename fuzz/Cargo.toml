@@ -30,4 +30,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "il"
+path = "fuzz_targets/il.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

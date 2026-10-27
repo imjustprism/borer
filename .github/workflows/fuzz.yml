@@ -48,7 +48,7 @@ jobs:
       - name: fuzz
         working-directory: fuzz
         run: |
-          for target in load analyze; do
+          for target in load analyze il; do
             cargo +"$NIGHTLY" fuzz run "$target" -- \
               -max_total_time="$SECONDS_PER_TARGET" -timeout=10 -rss_limit_mb=2048
           done
