@@ -86,7 +86,7 @@ commands:
   pack <file>                              read a pack and report its name, its keys by section and what borer does not read
   pack-keys                                every key a pack can set, with its default and meaning
   packs <binary>                           the packs borer knows and whether each loads for the binary: the named ones, and every pack-directory pack whose [match] lines all hold
-  export <binary> --c <out.c> [--library] [--only <addrs>]  every function, or the comma-separated entries after --only, as one C file: the includes, each type, prototype, table and global once at the top, then every body leaves first; library functions (a signature named them) are left out unless --library; a function over 4096 basic blocks is written as a comment saying it was cut
+  export <binary> [--c <out.c> [--library] [--only <addrs>]] [--h <out.h>] [--ct <out.ct>] [--rcnet <out.rcnet>]  --c: every function, or the comma-separated entries after --only, as one C file: the includes, each type, prototype, table and global once at the top, then every body leaves first; library functions (a signature named them) are left out unless --library; a function over 4096 basic blocks is written as a comment saying it was cut. --h, --ct, --rcnet: the mod SDK (vtable and RTTI classes with the fields their methods access, the overlay's structs, singletons, named globals and functions) as a C++ header with offset asserts and image-relative addresses, a Cheat Engine table of the globals and their fields, a ReClass.NET project of the layouts; each guessed field says it is unsure
   export-pack <binary> <name> [project] [all]the names a project file gave (and with all, the names borer recovered) as a pack that finds the same functions in another build by their first bytes
   sigmake <out> <name> <library>...         the functions of static libraries or objects (.lib, .obj, .a, .o, Rust .rlib) as a pack of signatures, the relocated bytes masked, that names them in any program linked with them; an <out> ending in .bsig is a compact set like the ones borer ships
   script <binary> <file> [args...]           run a Rhai script in a sandbox: it reads functions, strings, bytes and xrefs, prints, and proposes names and comments; --save <project> writes them for export-pack
@@ -312,7 +312,7 @@ pub(super) enum Query {
     Hidden,
     /// `read <address|name> [kind] [count]`: typed values.
     Read,
-    /// `export --c <out.c> [--library] [--only <addrs>]`: those functions, or every one, as one C file, leaves first.
+    /// `export [--c <out.c> [--library] [--only <addrs>]] [--h|--ct|--rcnet <out>]`: those functions, or every one, as one C file, leaves first; the mod SDK as a C++ header, Cheat Engine table or ReClass.NET project.
     Export,
     /// `export-pack <name> [project] [all]`: the names a project file gave as a pack that finds the same functions in another build.
     ExportPack,
@@ -472,7 +472,7 @@ impl Query {
             | Self::Symbols
             | Self::Read
             | Self::ExportPack => 3,
-            Self::Export => 5,
+            Self::Export => 11,
             Self::Decompile | Self::Fieldrefs | Self::Grep | Self::Types | Self::Verify => 4,
             Self::Script | Self::SetType => return None,
         })
@@ -678,9 +678,24 @@ pub(super) fn path_arg<'a>(
     Ok(path)
 }
 
-/// Reads `export`'s arguments after the binary: `--c <out.c>`,
-/// `--library` to write library code too, and `--only <addrs>` to write
-/// those entries.
+/// What `export` was asked to write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExportArgs<'a> {
+    /// The C file of every function, from `--c`.
+    pub(super) c: Option<&'a str>,
+    /// The mod files, from `--h`, `--ct` and `--rcnet`, in the order given.
+    pub(super) mods: Vec<(borer::export::ModFile, &'a str)>,
+    /// Whether library code goes into the C file (`--library`).
+    pub(super) library: borer_engine::analysis::decompile::export::Library,
+    /// The entries `--only` names; `None` writes every function.
+    pub(super) only: Option<Vec<u64>>,
+}
+
+/// Reads `export`'s arguments after the binary.
+///
+/// They are `--c <out.c>` with `--library` to write library code too and
+/// `--only <addrs>` to write those entries, and the mod files
+/// `--h <out.h>`, `--ct <out.ct>` and `--rcnet <out.rcnet>`.
 ///
 /// # Arguments
 ///
@@ -688,44 +703,77 @@ pub(super) fn path_arg<'a>(
 ///
 /// # Returns
 ///
-/// The C file to write, whether library code goes into it, and the
-/// entries `--only` names. `None` for that list writes every function.
+/// The files to write and how.
 ///
 /// # Errors
 ///
-/// When `--c` is missing or has no path after it, `--only` has no
-/// address, an address does not parse, or a word is none of these.
-pub(super) fn export_args(
-    args: &[String],
-) -> anyhow::Result<(
-    &str,
-    borer_engine::analysis::decompile::export::Library,
-    Option<Vec<u64>>,
-)> {
+/// When no file is named, a file flag has no path after it, `--library`
+/// or `--only` comes without `--c`, `--only` has no address, an address
+/// does not parse, a word is none of these, or two flags name one file.
+pub(super) fn export_args(args: &[String]) -> anyhow::Result<ExportArgs<'_>> {
+    use borer::export::ModFile;
     use borer_engine::analysis::decompile::export::Library;
-    let mut out = None;
-    let mut library = Library::Skip;
-    let mut only = None;
+    let mut out = ExportArgs {
+        c: None,
+        mods: Vec::new(),
+        library: Library::Skip,
+        only: None,
+    };
     let mut rest = args.iter().skip(2);
     while let Some(word) = rest.next() {
-        match word.as_str() {
-            "--c" => {
-                out = Some(
-                    rest.next()
-                        .filter(|p| !p.is_empty())
-                        .context("--c needs the C file to write")?
-                        .as_str(),
-                );
-            }
-            "--library" => library = Library::Include,
-            "--only" => only = Some(only_addrs(rest.next())?),
+        let flag = word.as_str();
+        if let Some((kind, _)) = ModFile::ALL
+            .iter()
+            .find(|(_, ext)| flag.strip_prefix("--") == Some(ext))
+        {
+            out.mods.push((*kind, file_after(rest.next(), flag)?));
+            continue;
+        }
+        match flag {
+            "--library" => out.library = Library::Include,
+            "--only" => out.only = Some(only_addrs(rest.next())?),
+            "--c" => out.c = Some(file_after(rest.next(), flag)?),
             other => bail!(
-                "export takes --c <out.c>, --library and --only <addrs>, not {}",
+                "export takes --c <out.c> (with --library and --only <addrs>), --h <out.h>, --ct <out.ct> and --rcnet <out.rcnet>, not {}",
                 quoted(other)
             ),
         }
     }
-    Ok((out.context("export needs --c <out.c>")?, library, only))
+    if out.c.is_none() {
+        if out.mods.is_empty() {
+            bail!("export needs --c <out.c>, --h <out.h>, --ct <out.ct> or --rcnet <out.rcnet>");
+        }
+        if out.only.is_some() || out.library == Library::Include {
+            bail!("--library and --only choose what --c writes; name --c <out.c> with them");
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for path in out.c.iter().chain(out.mods.iter().map(|(_, path)| path)) {
+        if !seen.insert(path.to_lowercase()) {
+            bail!(
+                "{} is named twice; give each file its own path",
+                quoted(path)
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Reads the path after a file flag.
+///
+/// # Arguments
+///
+/// * `path` - The word after the flag, if any.
+/// * `flag` - The flag, for the error.
+///
+/// # Errors
+///
+/// When the word is missing, empty, or another flag (a file named like one
+/// is written `./--name`).
+fn file_after<'a>(path: Option<&'a String>, flag: &str) -> anyhow::Result<&'a str> {
+    path.filter(|p| !p.is_empty() && !p.starts_with("--"))
+        .map(String::as_str)
+        .with_context(|| format!("{flag} needs the file to write"))
 }
 
 /// Reads the addresses after `--only`.
@@ -1085,4 +1133,13 @@ pub(super) fn unknown_word(word: &str) -> String {
 /// The words beginning `--` that queries read themselves, beside the
 /// options [`split_pack_args`] takes off the line; `setup` and `doctor`
 /// refuse any other word with their own message.
-pub(super) const COMMAND_FLAGS: &[&str] = &["--help", "--save", "--c", "--library", "--only"];
+pub(super) const COMMAND_FLAGS: &[&str] = &[
+    "--help",
+    "--save",
+    "--c",
+    "--library",
+    "--only",
+    "--h",
+    "--ct",
+    "--rcnet",
+];

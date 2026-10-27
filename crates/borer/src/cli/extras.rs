@@ -74,6 +74,46 @@ impl Extra {
     }
 }
 
+/// Runs `export`: the C file of every function and the mod files, for a
+/// compiler, Cheat Engine and ReClass.NET.
+///
+/// # Arguments
+///
+/// * `args` - The command line, the command first and the binary second.
+/// * `s` - The binary with its packs.
+///
+/// # Errors
+///
+/// For a bad argument, a path that names a device, an engine refusal or
+/// a write that fails.
+pub(super) fn export(args: &[String], s: &Session) -> anyhow::Result<()> {
+    let asked = super::args::export_args(args)?;
+    for out in asked.c.iter().chain(asked.mods.iter().map(|(_, out)| out)) {
+        super::packs::writable(out)?;
+    }
+    let mut a = s.analysis(Feature::Decompile)?;
+    let replace = borer::output::Existing::Replace;
+    if !asked.mods.is_empty() {
+        let said =
+            borer::export::write_mod_files(&s.program, &a, &s.overlay, &asked.mods, replace)?;
+        println!("{said}");
+    }
+    if let Some(out) = asked.c {
+        let only = asked.only.as_deref();
+        let written = borer::export::write_entries(
+            &s.program,
+            &mut a,
+            &s.overlay,
+            asked.library,
+            only,
+            out,
+            replace,
+        )?;
+        println!("{}", written.line(out));
+    }
+    Ok(())
+}
+
 /// Runs one of these commands against an open binary.
 ///
 /// # Arguments

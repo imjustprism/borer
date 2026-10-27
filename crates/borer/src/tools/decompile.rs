@@ -319,24 +319,7 @@ impl BorerServer {
                     "out writes every function; leave filter and max_functions out with it",
                 ));
             }
-            let library = if library.unwrap_or(false) {
-                borer_engine::analysis::decompile::export::Library::Include
-            } else {
-                borer_engine::analysis::decompile::export::Library::Skip
-            };
-            return self.with_program(|p| {
-                if let Some(why) = p.refuses(Feature::Decompile) {
-                    return Err(why);
-                }
-                let existing = borer::output::Existing::from_flag(overwrite);
-                let dest = borer::output::for_program(p, &out, &["c"], existing)?;
-                let dest = dest.display().to_string();
-                let a = self.ensure_analysis()?;
-                let o = self.overlay();
-                borer::export::write_c(p, &a, &o, library, &dest, existing)
-                    .map(|w| w.line(&dest))
-                    .map_err(|e| format!("{e:#}"))
-            });
+            return self.write_whole(&out, library.unwrap_or(false), overwrite);
         }
         /// Longest text kept per function.
         const PER_FN: usize = 6_000;
@@ -453,6 +436,60 @@ impl BorerServer {
             Ok(out)
         })
         .map(|text| cap.noted(text))
+    }
+}
+
+impl BorerServer {
+    /// Writes `decompile_batch(out=)`'s file: every function for a `.c`,
+    /// the mod SDK for a `.h`, `.ct` or `.rcnet`.
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - The file under the output root.
+    /// * `library` - A `.c` file also holds library functions.
+    /// * `overwrite` - A file already there is replaced.
+    ///
+    /// # Returns
+    ///
+    /// What was written.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, it refuses decompiling, the path is not a
+    /// file of those kinds under the root, `library` comes with a mod file,
+    /// or the write fails.
+    fn write_whole(
+        &self,
+        out: &str,
+        library: bool,
+        overwrite: Option<bool>,
+    ) -> Result<String, ErrorData> {
+        use borer_engine::analysis::decompile::export::Library;
+        let library = if library {
+            Library::Include
+        } else {
+            Library::Skip
+        };
+        self.with_program(|p| {
+            if let Some(why) = p.refuses(Feature::Decompile) {
+                return Err(why);
+            }
+            let existing = borer::output::Existing::from_flag(overwrite);
+            let dest = borer::output::for_program(p, out, &["c", "h", "ct", "rcnet"], existing)?;
+            let dest = dest.display().to_string();
+            let a = self.ensure_analysis()?;
+            let o = self.overlay();
+            if let Some(kind) = borer::export::ModFile::of_path(&dest) {
+                if library == Library::Include {
+                    return Err("library chooses what a .c out writes".to_owned());
+                }
+                return borer::export::write_mod_files(p, &a, &o, &[(kind, &dest)], existing)
+                    .map_err(|e| format!("{e:#}"));
+            }
+            borer::export::write_c(p, &a, &o, library, &dest, existing)
+                .map(|w| w.line(&dest))
+                .map_err(|e| format!("{e:#}"))
+        })
     }
 }
 
@@ -612,6 +649,45 @@ mod tests {
             "the last store is written: {c}"
         );
         assert!(!c.contains("// truncated"), "{c}");
+    }
+
+    /// A batch with a `.h` out writes the mod SDK header under the output
+    /// root, and refuses `library`, which only a `.c` file reads.
+    ///
+    /// # Panics
+    ///
+    /// When the header is not written or `library` is taken.
+    #[test]
+    fn a_batch_with_a_header_out_writes_the_mod_sdk() {
+        use crate::params::DecompileBatchParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = raw_server();
+        let out = format!("batch-sdk-{}/game.h", std::process::id());
+        let batch = |library: Option<bool>| {
+            server.decompile_batch(Parameters(DecompileBatchParams {
+                filter: None,
+                max_functions: None,
+                out: Some(out.clone()),
+                library,
+                overwrite: Some(true),
+            }))
+        };
+        let refused = batch(Some(true)).expect_err("library with a header");
+        assert!(refused.message.contains(".c out"), "{refused:?}");
+        let said = batch(None).expect("writes");
+        let written = said
+            .strip_prefix("wrote the mod SDK header to ")
+            .and_then(|rest| rest.split(" (").next())
+            .unwrap_or_else(|| panic!("{said}"));
+        let h = std::fs::read_to_string(written).expect("reads");
+        if let Some(dir) = std::path::Path::new(written).parent() {
+            std::fs::remove_dir_all(dir).expect("cleans up");
+        }
+        assert!(said.contains("0 classes"), "{said}");
+        assert!(
+            h.contains("#pragma once") && h.contains("namespace rva {"),
+            "{h}"
+        );
     }
 
     /// A function a batch cuts at its share ends with a note whose offset,

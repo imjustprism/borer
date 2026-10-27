@@ -1,11 +1,13 @@
-//! Writing a whole-binary export ([`borer_engine::analysis::decompile::export`])
-//! to a C file, for the `export` command and the `export_c` tool.
+//! Writing the whole-binary exports, for `export` and `decompile_batch(out=)`.
 //!
-//! The function definitions stream to a sibling `.part` file while they
+//! [`borer_engine::analysis::decompile::export`] goes to a C file, the mod
+//! SDK ([`borer_engine::analysis::modsdk`]) to a C++ header, a Cheat
+//! Engine table and a ReClass.NET project. The function definitions stream to a sibling `.part` file while they
 //! are rendered, and the file is then written as the hoisted declarations
 //! followed by that part, so memory never holds the file.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -220,6 +222,148 @@ fn write_with_set(
     })
 }
 
+/// A file a mod author loads, written from the program's mod SDK
+/// ([`borer_engine::analysis::modsdk`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModFile {
+    /// A C++ header: classes, offsets, vtables and addresses (`.h`).
+    Header,
+    /// A Cheat Engine table of the globals and their fields (`.ct`).
+    CheatTable,
+    /// A ReClass.NET project of the class layouts (`.rcnet`).
+    ReClass,
+}
+
+impl ModFile {
+    /// Every mod file, with the extension that names it.
+    pub const ALL: [(ModFile, &'static str); 3] = [
+        (ModFile::Header, "h"),
+        (ModFile::CheatTable, "ct"),
+        (ModFile::ReClass, "rcnet"),
+    ];
+
+    /// Returns the mod file a path's extension names.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The file to write; its extension in any case.
+    ///
+    /// # Returns
+    ///
+    /// The kind, or `None` for another extension (a `.c` export).
+    #[must_use]
+    pub fn of_path(path: &str) -> Option<Self> {
+        let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+        Self::ALL
+            .iter()
+            .find(|(_, e)| *e == ext)
+            .map(|(kind, _)| *kind)
+    }
+
+    /// Returns what the file holds, for the line saying it was written.
+    fn what(self) -> &'static str {
+        match self {
+            ModFile::Header => "mod SDK header",
+            ModFile::CheatTable => "Cheat Engine table",
+            ModFile::ReClass => "ReClass.NET project",
+        }
+    }
+}
+
+/// Writes the program's mod SDK as each file asked for.
+///
+/// The SDK is gathered once and every file rendered before any is
+/// written, so a request whose deadline passes writes nothing.
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names and types, which win over what is recovered.
+/// * `files` - Each file to write and its kind.
+/// * `existing` - Whether a regular file already at a path is replaced;
+///   a link there is never written through.
+///
+/// # Returns
+///
+/// One line per file written, and one saying what the SDK holds.
+///
+/// # Errors
+///
+/// When a path is unusable, a file is there and `existing` keeps it, a
+/// write fails, or the request's deadline passed while the classes were
+/// read ([`borer_engine::cancel::Cancel`]); the files written before a
+/// failed write stay.
+pub fn write_mod_files(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    files: &[(ModFile, &str)],
+    existing: Existing,
+) -> anyhow::Result<String> {
+    use borer_engine::analysis::modsdk::{self, Evidence};
+    for (_, out) in files {
+        if let Some(why) = borer_engine::program::unusable_path(Path::new(out)) {
+            anyhow::bail!("{why}; nothing was written");
+        }
+        if existing == Existing::Keep && std::fs::symlink_metadata(out).is_ok() {
+            anyhow::bail!("{} exists; nothing was written", short_path(out));
+        }
+    }
+    let cut = || {
+        borer_engine::cancel::Cancel::raised().then(|| {
+            anyhow::anyhow!(
+                "the request's deadline passed before the mod files were ready, so nothing was written; raise BORER_DEADLINE_SECS"
+            )
+        })
+    };
+    let sdk = modsdk::build(program, analysis, overlay);
+    if let Some(why) = cut() {
+        return Err(why);
+    }
+    let mut rendered = Vec::with_capacity(files.len());
+    for &(kind, out) in files {
+        let bytes = match kind {
+            ModFile::Header => modsdk::header::header(&sdk).into_bytes(),
+            ModFile::CheatTable => modsdk::cheat::cheat_table(&sdk).into_bytes(),
+            ModFile::ReClass => modsdk::reclass::reclass(&sdk)?,
+        };
+        rendered.push((kind, out, bytes));
+    }
+    if let Some(why) = cut() {
+        return Err(why);
+    }
+    let mut lines = String::new();
+    for (kind, out, bytes) in rendered {
+        let shown = short_path(out);
+        let mut file =
+            create(Path::new(out), existing).with_context(|| format!("creating {shown}"))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("writing {shown}"))?;
+        let _ = writeln!(
+            lines,
+            "wrote the {} to {shown} ({} bytes)",
+            kind.what(),
+            bytes.len()
+        );
+    }
+    let fields = sdk.classes.iter().flat_map(|c| &c.fields);
+    let unsure = fields
+        .clone()
+        .filter(|f| matches!(f.evidence, Evidence::Unsure(_)))
+        .count();
+    let _ = write!(
+        lines,
+        "{} classes, {} fields ({unsure} unsure), {} globals, {} thread-local singletons, {} named functions",
+        sdk.classes.len(),
+        fields.count(),
+        sdk.globals.len(),
+        sdk.tls.len(),
+        sdk.functions.len()
+    );
+    Ok(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Existing, Library, write_c, write_entries};
@@ -351,5 +495,184 @@ mod tests {
         assert!(why.contains("BORER_DEADLINE_SECS"), "{why}");
         assert_eq!(kept, "complete export");
         assert!(!part_left);
+    }
+
+    /// Mod files whose request's deadline has passed are refused, and none
+    /// is written.
+    ///
+    /// # Panics
+    ///
+    /// When the files are written or the error does not say why.
+    #[test]
+    fn mod_files_past_the_deadline_are_not_written() {
+        use super::{ModFile, write_mod_files};
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let a = Analysis::compute(&p);
+        let dir = std::env::temp_dir().join(format!("borer-mod-cut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let h = dir.join("cut.h").display().to_string();
+        let flag = borer_engine::cancel::Cancel::new();
+        flag.raise();
+        let files = [(ModFile::Header, h.as_str())];
+        let cut =
+            flag.within(|| write_mod_files(&p, &a, &Overlay::default(), &files, Existing::Replace));
+        let written = std::path::Path::new(&h).exists();
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        let why = format!("{:#}", cut.expect_err("a cut export is refused"));
+        assert!(why.contains("BORER_DEADLINE_SECS"), "{why}");
+        assert!(!written);
+    }
+
+    /// Checks a C++17 file with a compiler, warnings as errors.
+    ///
+    /// # Arguments
+    ///
+    /// * `cxx` - The compiler.
+    /// * `file` - The file.
+    ///
+    /// # Returns
+    ///
+    /// What the compiler said, or `None` when it does not run.
+    fn syntax_check(cxx: &std::path::Path, file: &std::path::Path) -> Option<std::process::Output> {
+        std::process::Command::new(cxx)
+            .args(["-std=c++17", "-fsyntax-only", "-Wall", "-Werror"])
+            .arg(file)
+            .output()
+            .ok()
+    }
+
+    /// The C++ compiler this machine has with its standard library.
+    ///
+    /// The first of `$CXX`, `c++`, `clang++` or `g++` on the path, and
+    /// LLVM's clang++ where Windows installs it, that compiles the two
+    /// headers the mod SDK includes.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - A scratch directory for the probe.
+    ///
+    /// # Returns
+    ///
+    /// The compiler, or `None` when none does.
+    fn cxx(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        let probe = dir.join("probe.cpp");
+        std::fs::write(&probe, "#include <cstddef>\n#include <cstdint>\n").ok()?;
+        let named = std::env::var_os("CXX").map(std::path::PathBuf::from);
+        let llvm = std::path::PathBuf::from(r"C:\Program Files\LLVM\bin\clang++.exe");
+        named
+            .into_iter()
+            .chain(["c++", "clang++", "g++"].map(std::path::PathBuf::from))
+            .chain([llvm])
+            .find(|c| syntax_check(c, &probe).is_some_and(|o| o.status.success()))
+    }
+
+    /// The mod files of a class with a vtable, a stated struct and a
+    /// global singleton are written, and the header compiles as C++17:
+    /// its `static_assert`s on every offset and size hold.
+    ///
+    /// A member of the struct is spelled like the class a later member
+    /// points at, which the header's qualified pointer types keep apart;
+    /// two are spelled like the macros `<cstddef>` and `<cstdint>` define.
+    ///
+    /// Where no C++ compiler runs, the header is only checked for its
+    /// asserts and the test says so on stderr.
+    ///
+    /// # Panics
+    ///
+    /// When a file is not written, the header lacks its asserts, or the
+    /// compiler rejects it.
+    #[test]
+    fn the_mod_files_are_written_and_the_header_compiles() {
+        use super::{ModFile, write_mod_files};
+        use borer_engine::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
+        use borer_engine::analysis::vtables::ClassInfo;
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let mut a = Analysis::compute(&p);
+        a.classes.by_name.insert(
+            "Game::Player".to_owned(),
+            ClassInfo {
+                name: "Game::Player".to_owned(),
+                vtable: Some(0x5000),
+                slots: vec![0x1000, 0],
+                parent: None,
+                ctors: Vec::new(),
+                creators: Vec::new(),
+            },
+        );
+        a.classes
+            .global_hints
+            .insert(0x6000, "Game::Player".to_owned());
+        let mut o = Overlay::default();
+        let field = |name: &str, ty| UserField {
+            name: name.to_owned(),
+            ty,
+        };
+        let fields = [
+            (0, field("hp", TypeExpr::I32)),
+            (4, field("pos", TypeExpr::Array(Box::new(TypeExpr::F32), 3))),
+            (0x10, field("Game_Player", TypeExpr::U8)),
+            (0x11, field("NULL", TypeExpr::U8)),
+            (0x12, field("INT16_MAX", TypeExpr::U16)),
+            (
+                0x18,
+                field(
+                    "owner",
+                    TypeExpr::Ptr(Box::new(TypeExpr::Named("Game::Player".to_owned()))),
+                ),
+            ),
+        ];
+        o.types.insert(
+            "Stats".to_owned(),
+            UserType::Struct(UserStruct {
+                size: 0x28,
+                fields: fields.into_iter().collect(),
+            }),
+        );
+        let dir = std::env::temp_dir().join(format!("borer-mod-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = |name: &str| dir.join(name).display().to_string();
+        let (h, ct, rc) = (path("sdk.h"), path("t.CT"), path("t.rcnet"));
+        let files = [
+            (ModFile::of_path(&h).expect("h"), h.as_str()),
+            (ModFile::of_path(&ct).expect("ct"), ct.as_str()),
+            (ModFile::of_path(&rc).expect("rcnet"), rc.as_str()),
+        ];
+        let said = write_mod_files(&p, &a, &o, &files, Existing::Keep).expect("writes");
+        assert!(
+            said.contains("2 classes, 7 fields (0 unsure), 1 globals"),
+            "{said}"
+        );
+        assert!(
+            write_mod_files(&p, &a, &o, &files, Existing::Keep).is_err(),
+            "a second write keeps the files"
+        );
+        let header = std::fs::read_to_string(&h).expect("reads");
+        let table = std::fs::read_to_string(&ct).expect("reads");
+        let zip = std::fs::read(&rc).expect("reads");
+        assert!(
+            header.contains("static_assert(offsetof(Stats, owner) == 0x18"),
+            "{header}"
+        );
+        assert!(
+            table.contains("<Address>\"module\"+6000</Address>"),
+            "{table}"
+        );
+        assert!(zip.starts_with(b"PK\x03\x04"));
+        let cpp = dir.join("use.cpp");
+        std::fs::write(&cpp, "#include \"sdk.h\"\nint main() { return 0; }\n").expect("writes");
+        let compiled = cxx(&dir).map(|c| syntax_check(&c, &cpp).expect("runs"));
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        match compiled {
+            Some(out) => assert!(
+                out.status.success(),
+                "{}\n{header}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            None => {
+                eprintln!("no C++ compiler runs here; the header was checked for its asserts only");
+            }
+        }
     }
 }

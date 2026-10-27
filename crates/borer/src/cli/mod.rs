@@ -58,8 +58,8 @@ mod session;
 
 use args::{
     COMMAND_FLAGS, Command, Direction, Query, RawFlags, SlotQuery, USAGE, arg, cli_limit, cli_page,
-    command_usage, entry_at, export_args, filter_limit, num_arg, path_arg, search_args,
-    split_pack_args, unknown_word,
+    command_usage, entry_at, filter_limit, num_arg, path_arg, search_args, split_pack_args,
+    unknown_word,
 };
 use packs::{pack_report, packs_report, sigmake, writable, write_file};
 use session::{Session, decompiled, needs_a_binary, open, project_overlay};
@@ -962,21 +962,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 println!("{:<12} {}", format!("{:#x}", v.at), v.text);
             }
         }
-        Query::Export => {
-            let (out, library, only) = export_args(args)?;
-            writable(out)?;
-            let mut a = s.analysis(Feature::Decompile)?;
-            let written = borer::export::write_entries(
-                &s.program,
-                &mut a,
-                &s.overlay,
-                library,
-                only.as_deref(),
-                out,
-                borer::output::Existing::Replace,
-            )?;
-            println!("{}", written.line(out));
-        }
+        Query::Export => extras::export(args, s)?,
         Query::ExportPack => {
             let name = args
                 .get(2)
@@ -1456,33 +1442,62 @@ mod tests {
         }
     }
 
-    /// `export` reads `--c <out.c>`, `--library` and `--only`, and refuses
-    /// a line without the file or with another word.
+    /// `export` reads `--c <out.c>`, `--library` and `--only`, and the
+    /// mod files `--h`, `--ct` and `--rcnet`; it refuses a line without a
+    /// file, `--library` or `--only` without `--c`, and another word.
     ///
     /// # Panics
     ///
     /// When a line reads otherwise.
     #[test]
-    fn export_reads_its_file_and_library_flag() {
-        use super::export_args;
+    fn export_reads_its_files_and_library_flag() {
+        use super::args::export_args;
+        use borer::export::ModFile;
         use borer_engine::analysis::decompile::export::Library;
         assert_eq!(Query::parse("export"), Some(Query::Export));
-        assert_eq!(Query::Export.most_args(), Some(5));
+        assert_eq!(Query::Export.most_args(), Some(11));
         assert!(command_usage(USAGE, "export").is_some());
         let both = line(
             "export",
             &["--c", "a.c", "--library", "--only", "0x10,0x20"],
         );
-        let (out, library, only) = export_args(&both).expect("reads");
+        let asked = export_args(&both).expect("reads");
         assert_eq!(
-            (out, library, only.as_deref()),
-            ("a.c", Library::Include, Some(&[0x10, 0x20][..]))
+            (asked.c, asked.library, asked.only.as_deref()),
+            (Some("a.c"), Library::Include, Some(&[0x10, 0x20][..]))
         );
         let plain = line("export", &["--c", "a.c"]);
-        let (_, library, only) = export_args(&plain).expect("reads");
-        assert_eq!((library, only), (Library::Skip, None));
+        let asked = export_args(&plain).expect("reads");
+        assert_eq!(
+            (asked.library, asked.only, asked.mods),
+            (Library::Skip, None, vec![])
+        );
+        let mods = line(
+            "export",
+            &["--rcnet", "a.rcnet", "--h", "a.h", "--ct", "a.CT"],
+        );
+        let asked = export_args(&mods).expect("reads");
+        assert_eq!(asked.c, None);
+        assert_eq!(
+            asked.mods,
+            [
+                (ModFile::ReClass, "a.rcnet"),
+                (ModFile::Header, "a.h"),
+                (ModFile::CheatTable, "a.CT")
+            ]
+        );
         let missing = export_args(&line("export", &["--library"])).expect_err("no file");
         assert!(missing.to_string().contains("--c <out.c>"), "{missing}");
+        let alone = export_args(&line("export", &["--h", "a.h", "--only", "0x10"]))
+            .expect_err("--only without --c");
+        assert!(alone.to_string().contains("--only"), "{alone}");
+        let empty = export_args(&line("export", &["--ct"])).expect_err("no path");
+        assert!(empty.to_string().contains("--ct needs"), "{empty}");
+        let flag = export_args(&line("export", &["--h", "--ct"])).expect_err("a flag for a path");
+        assert!(flag.to_string().contains("--h needs"), "{flag}");
+        let twice = export_args(&line("export", &["--h", "sdk.h", "--ct", "SDK.h"]))
+            .expect_err("one file named twice");
+        assert!(twice.to_string().contains("named twice"), "{twice}");
         let other = export_args(&line("export", &["--c", "a.c", "b"])).expect_err("a stray word");
         assert!(other.to_string().contains("'b'"), "{other}");
     }

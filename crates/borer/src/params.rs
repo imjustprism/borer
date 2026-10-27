@@ -563,7 +563,7 @@ pub(crate) struct DecompileBatchParams {
     pub(crate) filter: Option<String>,
     /// Maximum functions to decompile (default 10, max 50).
     pub(crate) max_functions: Option<u32>,
-    /// A `.c` file under the output root to write every function to; not with `filter` or `max_functions`. A function over 4096 basic blocks is written as a comment saying it was cut.
+    /// A file under the output root, not with filter or a max: .c every function (over 4096 blocks: cut); .h, .ct, .rcnet the mod SDK as C++ header, Cheat Engine table, ReClass.NET.
     pub(crate) out: Option<String>,
     /// With out: also write library functions (default false).
     pub(crate) library: Option<bool>,
