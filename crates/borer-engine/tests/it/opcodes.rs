@@ -52,16 +52,20 @@ const READ_RET: u64 = 0x401480;
 /// A dispatcher on a returned opcode: one case reads a returned value
 /// itself, one hands the stream to a handler in the wrong argument, one
 /// to a handler in the right one.
-const RETURNED_DISPATCH: u64 = 0x4014c0;
+const RETURNED_DISPATCH: u64 = 0x401740;
 /// `get_mode(object)`: returns a saved setting and moves nothing.
 const GET_MODE: u64 = 0x401540;
 /// [`RETURNED_DISPATCH`]'s code switching on [`GET_MODE`]: not a dispatcher.
-const MODE_SWITCH: u64 = 0x401560;
+const MODE_SWITCH: u64 = 0x401800;
 /// A serializer handing [`GET_MODE`], which stores nothing, a constant
 /// before its writes: not a sender.
 const CONFIG_SENDER: u64 = 0x401600;
 /// Handler storing a word [`READ_RET`] returns at object offset 0x30.
 const H_RET: u64 = 0x401640;
+/// Handler `h(object, stream)` reading a `u32` into object offset 0x40.
+const H_SWAP: u64 = 0x401680;
+/// A sender of opcode `0x23` whose fields [`NOT_SENDER`] writes.
+const PAIR_SENDER: u64 = 0x401700;
 /// The jump table's address in `.rdata`.
 const TABLE: u64 = 0x402000;
 
@@ -233,6 +237,43 @@ fn returning_handler() -> Vec<u8> {
     .0
 }
 
+/// Assembles [`H_SWAP`]: `read_u32(stream, object + 0x40)` with the object
+/// first and the stream second.
+fn swapped_handler() -> Vec<u8> {
+    asm(H_SWAP, |a| {
+        a.mov(eax, dword_ptr(esp + 4)).expect("mov");
+        a.add(eax, 0x40).expect("add");
+        a.push(eax).expect("push");
+        a.push(dword_ptr(esp + 12)).expect("push");
+        a.call(READ_U32).expect("call");
+        a.add(esp, 8).expect("add");
+        a.ret().expect("ret");
+        Vec::new()
+    })
+    .0
+}
+
+/// Assembles [`PAIR_SENDER`]: `write_u8(stream, 0x23)`, then
+/// [`NOT_SENDER`] handed the stream and the object.
+fn pair_sender() -> Vec<u8> {
+    asm(PAIR_SENDER, |a| {
+        a.push(esi).expect("push");
+        a.push(edi).expect("push");
+        a.mov(esi, dword_ptr(esp + 12)).expect("mov");
+        a.mov(edi, dword_ptr(esp + 16)).expect("mov");
+        a.push(0x23).expect("push");
+        a.push(esi).expect("push");
+        a.call(WRITE_U8).expect("call");
+        a.add(esp, 8).expect("add");
+        pass_on(a, NOT_SENDER);
+        a.pop(edi).expect("pop");
+        a.pop(esi).expect("pop");
+        a.ret().expect("ret");
+        Vec::new()
+    })
+    .0
+}
+
 /// Assembles [`GET_MODE`]: returns the word at offset 8 of its argument.
 fn mode_getter() -> Vec<u8> {
     asm(GET_MODE, |a| {
@@ -249,7 +290,7 @@ fn mode_getter() -> Vec<u8> {
 /// Case 1 reads a `u32` into object offset 0x20 and stores a second
 /// returned value at offset 4, both in its record in order; case 2 calls
 /// [`H_A`] with the object where the stream belongs, case 3 calls [`H_B`]
-/// as it expects, case 4 calls [`H_RET`].
+/// as it expects, case 4 calls [`H_RET`], case 5 calls [`H_SWAP`] twice.
 ///
 /// # Arguments
 ///
@@ -257,7 +298,7 @@ fn mode_getter() -> Vec<u8> {
 /// * `reader` - The function returning the switched value.
 fn returned_dispatcher(at: u64, reader: u64) -> Vec<u8> {
     asm(at, |a| {
-        let mut cases: Vec<CodeLabel> = (0..4).map(|_| a.create_label()).collect();
+        let mut cases: Vec<CodeLabel> = (0..5).map(|_| a.create_label()).collect();
         let mut done = a.create_label();
         a.push(esi).expect("push");
         a.push(edi).expect("push");
@@ -266,7 +307,7 @@ fn returned_dispatcher(at: u64, reader: u64) -> Vec<u8> {
         a.push(esi).expect("push");
         a.call(reader).expect("call");
         a.add(esp, 4).expect("add");
-        for (label, op) in cases.iter().zip([1, 2, 3, 4]) {
+        for (label, op) in cases.iter().zip([1, 2, 3, 4, 5]) {
             a.cmp(eax, op).expect("cmp");
             a.je(*label).expect("je");
         }
@@ -293,6 +334,14 @@ fn returned_dispatcher(at: u64, reader: u64) -> Vec<u8> {
         a.jmp(done).expect("jmp");
         a.set_label(&mut cases[3]).expect("label");
         pass_on(a, H_RET);
+        a.jmp(done).expect("jmp");
+        a.set_label(&mut cases[4]).expect("label");
+        for _ in 0..2 {
+            a.push(esi).expect("push");
+            a.push(edi).expect("push");
+            a.call(H_SWAP).expect("call");
+            a.add(esp, 8).expect("add");
+        }
         a.set_label(&mut done).expect("label");
         a.pop(edi).expect("pop");
         a.pop(esi).expect("pop");
@@ -389,6 +438,7 @@ fn program() -> Program {
             RETURNED_DISPATCH,
             MODE_SWITCH,
             CONFIG_SENDER,
+            PAIR_SENDER,
         ] {
             a.call(f).expect("call");
         }
@@ -450,6 +500,8 @@ fn program() -> Program {
     );
     put(READ_RET, &returning_reader());
     put(H_RET, &returning_handler());
+    put(H_SWAP, &swapped_handler());
+    put(PAIR_SENDER, &pair_sender());
     put(
         RETURNED_DISPATCH,
         &returned_dispatcher(RETURNED_DISPATCH, READ_RET),
@@ -574,6 +626,10 @@ fn a_sender_writes_its_opcode_first_and_then_its_fields() {
     assert_eq!(writes, [("u8", "33"), ("u32", "a2+0x8"), ("u8", "a2+0xc")]);
     assert!(opcodes::send_of(&p, &a, &o, NOT_SENDER).is_none());
     assert!(opcodes::send_of(&p, &a, &o, CONFIG_SENDER).is_none());
+    let pair = opcodes::send_of(&p, &a, &o, PAIR_SENDER).expect("a sender through a helper");
+    let helper = pair.encoding.fields.get(1).expect("the helper's write");
+    let inner: Vec<&str> = helper.children.iter().map(|w| w.kind.as_str()).collect();
+    assert_eq!(inner, ["u32", "u8"], "{pair:?}");
     let setup = opcodes::send_of(&p, &a, &o, SETUP_SENDER).expect("a sender after a setup call");
     assert_eq!(setup.opcode, 0x22);
     assert!(opcodes::send_of(&p, &a, &o, H_A).is_none());
@@ -613,6 +669,7 @@ fn a_returned_opcode_and_returned_reads_are_read_and_a_misfed_handler_is_not() {
             ("2".to_owned(), Some(H_A), vec![]),
             ("3".to_owned(), Some(H_B), vec!["sub_401060"]),
             ("4".to_owned(), Some(H_RET), vec!["sub_401480"]),
+            ("5".to_owned(), None, vec!["sub_401060", "sub_401060"]),
         ],
         "{d:?}"
     );
@@ -636,7 +693,7 @@ fn searches_find_the_dispatchers_and_the_senders() {
     );
     assert!(found.contains("sub_401280\t0x401280\t3\t3\t"), "{found}");
     let sends = opcodes::sends_tsv(&p, &a, &o, "", 10);
-    assert!(sends.starts_with("# 2 functions write"), "{sends}");
+    assert!(sends.starts_with("# 3 functions write"), "{sends}");
     assert!(sends.contains("0x22\tsub_401440\t"), "{sends}");
     assert!(
         sends.contains("0x21\tsub_4013c0\t0x4013c0\tsub_401380\t"),

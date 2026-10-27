@@ -400,9 +400,12 @@ fn handler_input(
     Some((text, param))
 }
 
-/// Reads one case: the handler it hands the stream to with what that
-/// handler reads off the parameter it receives the stream in, or else the
-/// reads the case makes off the stream itself.
+/// Reads one case's record off the stream.
+///
+/// A case handing the stream to one handler has that handler's reads off
+/// the parameter it receives the stream in; any other case has, in call
+/// order, the reads it makes off the stream itself and those of each
+/// function it hands the stream to in another argument.
 ///
 /// The handler's record is its reads off that parameter, returned reads
 /// included; failing those, its [`schema_of`] when that schema's stream is
@@ -459,10 +462,26 @@ fn case_of(
             };
         }
     }
+    let lines: Vec<&str> = text.lines().collect();
+    let fields = passing
+        .iter()
+        .flat_map(|c| {
+            if c.args.first().is_some_and(|a| a == stream) {
+                let line = c.line.checked_sub(1).and_then(|i| lines.get(i)).copied();
+                return reads_in(program, analysis, overlay, line.unwrap_or_default(), stream);
+            }
+            resolve(program, analysis, overlay, &c.callee)
+                .ok()
+                .and_then(|h| handler_input(program, analysis, overlay, h, c, stream))
+                .map_or_else(Vec::new, |(text, param)| {
+                    reads_in(program, analysis, overlay, &text, &param)
+                })
+        })
+        .collect();
     Case {
         labels,
         handler: None,
-        fields: reads_in(program, analysis, overlay, &text, stream),
+        fields,
     }
 }
 

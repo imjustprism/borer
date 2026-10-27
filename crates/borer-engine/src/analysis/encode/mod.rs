@@ -528,6 +528,9 @@ struct Ctx<'a> {
     overlay_key: u64,
     /// Helpers followed so far, by callee and member index.
     memo: RefCell<FxHashMap<(String, usize), Vec<Write>>>,
+    /// The caller named the stream: a helper no stream type reaches writes
+    /// through the parameter it is handed the stream in, the first.
+    seeded: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -545,6 +548,7 @@ impl<'a> Ctx<'a> {
             overlay,
             overlay_key: overlay.fingerprint(),
             memo: RefCell::new(FxHashMap::default()),
+            seeded: false,
         }
     }
 
@@ -788,7 +792,15 @@ impl<'a> Ctx<'a> {
         ) else {
             return Vec::new();
         };
-        let (sites, _, _) = sites_in(&text, &self.analysis.packs.list("types", "stream"), None);
+        let types = self.analysis.packs.list("types", "stream");
+        let (mut sites, _, _) = sites_in(&text, &types, None);
+        if sites.is_empty()
+            && self.seeded
+            && let Some(first) =
+                signature_line(&text).and_then(|s| declared_names(s).into_iter().next())
+        {
+            sites = sites_in(&text, &types, Some(&first)).0;
+        }
         if sites.is_empty() {
             return Vec::new();
         }
@@ -1055,7 +1067,11 @@ pub fn encoding_through(
     entry: u64,
     stream: &str,
 ) -> Option<Encoding> {
-    Ctx::new(program, analysis, overlay).encoding(entry, None, Some(stream))
+    let ctx = Ctx {
+        seeded: true,
+        ..Ctx::new(program, analysis, overlay)
+    };
+    ctx.encoding(entry, None, Some(stream))
 }
 
 /// The virtual of `class` that writes the most onto a stream, with what
