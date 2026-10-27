@@ -585,6 +585,33 @@ pub fn export(
     only: Option<&BTreeSet<u64>>,
     sink: &mut dyn FnMut(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<Hoisted> {
+    export_on(cores(), program, analysis, overlay, library, only, sink)
+}
+
+/// Exports as [`export`] does, rendering on at most `cores` workers.
+///
+/// # Arguments
+///
+/// * `cores` - Most workers; the file is the same bytes for any count.
+/// * `program`, `analysis`, `overlay`, `library`, `only`, `sink` - As for
+///   [`export`].
+///
+/// # Returns
+///
+/// The hoisted declarations and the counts.
+///
+/// # Errors
+///
+/// The first error `sink` returns, which stops the export.
+fn export_on(
+    cores: usize,
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    library: Library,
+    only: Option<&BTreeSet<u64>>,
+    sink: &mut dyn FnMut(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<Hoisted> {
     let mut entries = order(analysis, library);
     let left_out = analysis.functions.len().saturating_sub(entries.len());
     if let Some(only) = only {
@@ -616,7 +643,7 @@ pub fn export(
         Some(_) => 0,
         None => analysis.function(entry).map_or(0, |f| f.blocks.len()),
     };
-    let window = Window::export(entries.len());
+    let window = Window::export(cores, entries.len());
     in_order(&entries, window, &cost, &render, &mut |entry, text| {
         let name = name_of(analysis, overlay, entry);
         match over(entry) {
@@ -699,17 +726,21 @@ struct Window {
     heavy: usize,
 }
 
+/// Returns the cores this process may run on, at least one.
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
 impl Window {
     /// Returns the export's window: one worker a core, at most one an
     /// entry, [`AHEAD_PER_CORE`], [`HELD_BYTES`] and [`HEAVY_PER_CORE`].
     ///
     /// # Arguments
     ///
+    /// * `cores` - The cores to render on.
     /// * `entries` - How many functions are rendered.
-    fn export(entries: usize) -> Self {
-        let threads = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .min(entries);
+    fn export(cores: usize, entries: usize) -> Self {
+        let threads = cores.min(entries);
         Self {
             threads,
             ahead: threads.saturating_mul(AHEAD_PER_CORE),
@@ -849,8 +880,8 @@ fn in_order(
 #[cfg(test)]
 mod tests {
     use super::{
-        BTreeSet, BUDGET_BLOCKS, Hoisted, Kind, Library, Window, classify, declared_name, export,
-        in_order,
+        BTreeSet, BUDGET_BLOCKS, Hoisted, Kind, Library, Window, classify, cores, declared_name,
+        export, export_on, in_order,
     };
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{Arch, Program, Section};
@@ -895,6 +926,85 @@ mod tests {
         assert!(h.head("t").contains("1 cut over the budget"), "{c}");
     }
 
+    /// Exports a fresh analysis of `p` on `cores` workers.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The image.
+    /// * `cores` - Most workers.
+    ///
+    /// # Returns
+    ///
+    /// The whole file, its head over its definitions, and the functions
+    /// written with a body.
+    ///
+    /// # Panics
+    ///
+    /// When the sink refuses, which this one never does.
+    fn exported(p: &Program, cores: usize) -> (String, usize) {
+        let a = Analysis::compute(p);
+        let mut body = String::new();
+        let h = export_on(
+            cores,
+            p,
+            &a,
+            &Overlay::default(),
+            Library::Include,
+            None,
+            &mut |t| {
+                body.push_str(t);
+                Ok(())
+            },
+        )
+        .expect("the sink takes everything");
+        (h.head("t") + body.as_str(), h.written)
+    }
+
+    /// One worker and many write the same file, head and conflict list
+    /// included, every time.
+    ///
+    /// Twenty-four functions that call each other in a ring, each reading
+    /// a byte through its parameter, so each text declares its callees and
+    /// the workers finish them in no fixed order.
+    ///
+    /// # Panics
+    ///
+    /// When a many-worker file differs from the one-worker file.
+    #[test]
+    fn one_worker_and_many_write_the_same_file() {
+        const N: u64 = 24;
+        const SIZE: u64 = 0x40;
+        let call = |from: u64, to: u64| -> [u8; 5] {
+            let rel = i32::try_from(to.wrapping_sub(from + 5).cast_signed()).expect("near");
+            let mut c = [0xe8, 0, 0, 0, 0]; // ASM: call rel32
+            c[1..].copy_from_slice(&rel.to_le_bytes());
+            c
+        };
+        let mut code = Vec::new();
+        for i in 0..N {
+            let at = 0x1000 + i * SIZE;
+            let mut f = vec![0x53, 0x48, 0x89, 0xfb]; // ASM: push rbx; mov rbx, rdi
+            for to in [(i + 1) % N, (i + 5) % N] {
+                f.extend([0x48, 0x89, 0xdf]); // ASM: mov rdi, rbx
+                let from = at + u64::try_from(f.len()).expect("small");
+                f.extend(call(from, 0x1000 + to * SIZE));
+            }
+            f.extend([0x0f, 0xb6, 0x03, 0x83, 0xc0]); // ASM: movzx eax, byte [rbx]; add eax, imm8
+            f.push(u8::try_from(i).expect("small"));
+            f.extend([0x5b, 0xc3]); // ASM: pop rbx; ret
+            f.resize(usize::try_from(SIZE).expect("small"), 0xcc);
+            code.extend(f);
+        }
+        let len = u64::try_from(code.len()).expect("a small image");
+        let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+        let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let (one, written) = exported(&p, 1);
+        assert_eq!(written, 24, "{one}");
+        for _ in 0..4 {
+            assert_eq!(exported(&p, 8).0, one);
+        }
+    }
+
     /// The texts come to the taker in the order of the entries, however the
     /// workers finish, and an error from the taker stops the rendering and
     /// is returned.
@@ -910,7 +1020,7 @@ mod tests {
         let mut seen = Vec::new();
         in_order(
             &entries,
-            Window::export(entries.len()),
+            Window::export(cores(), entries.len()),
             &|e| usize::try_from(e % 97).unwrap_or(0),
             &render,
             &mut |e, text| {
@@ -922,7 +1032,7 @@ mod tests {
         .expect("the taker takes everything");
         assert_eq!(seen, entries);
         let mut taken = 0;
-        let window = Window::export(entries.len());
+        let window = Window::export(cores(), entries.len());
         let stopped = in_order(&entries, window, &|_| 0, &render, &mut |_, _| {
             taken += 1;
             if taken == 5_000 {
