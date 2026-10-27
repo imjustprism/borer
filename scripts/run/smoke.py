@@ -432,6 +432,7 @@ assert uris == [
     "borer://classes",
     "borer://clr",
     "borer://decoded",
+    "borer://dispatchers",
     "borer://dynimports",
     "borer://encoded",
     "borer://enums",
@@ -446,6 +447,7 @@ assert uris == [
     "borer://map",
     "borer://messages",
     "borer://objc",
+    "borer://opsends",
     "borer://packs",
     "borer://ports",
     "borer://protection",
@@ -638,6 +640,15 @@ assert any(t["uriTemplate"] == "borer://unpack/{address}" for t in tmpl["resourc
 unp = wait_for(send("resources/read", {"uri": "borer://unpack/entry_thunk"}))["contents"][0]["text"]
 assert "emulated unpacking" in unp, unp[:200]
 print("unpack resource OK:", unp.splitlines()[0][:70])
+disp = wait_for(send("resources/read", {"uri": "borer://dispatchers"}))["contents"][0]["text"]
+assert "switch on an opcode read off a stream" in disp, disp[:200]
+sends = wait_for(send("resources/read", {"uri": "borer://opsends"}))["contents"][0]["text"]
+assert "write a constant opcode first" in sends, sends[:200]
+ops = wait_for(send("resources/read", {"uri": "borer://opcodes/entry_thunk"}))["contents"][0][
+    "text"
+]
+assert ops.startswith("# "), ops[:200]
+print("opcode resources OK:", disp.splitlines()[0][:70])
 assert any(t["uriTemplate"] == "borer://diff/{path}" for t in tmpl["resourceTemplates"]), tmpl
 dif = wait_for(
     send("resources/read", {"uri": "borer://diff/" + os.path.abspath(TARGET).replace("\\", "/")})
