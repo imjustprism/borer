@@ -113,6 +113,22 @@ fn net_string(text: &str) -> Vec<u8> {
     s
 }
 
+/// A `PyInstaller` table whose last record runs past its end keeps the
+/// records before it and says the list is incomplete.
+#[test]
+fn a_cut_pyinstaller_table_says_it_is_incomplete() {
+    let mut pkg = pyinstaller_archive();
+    let field = pkg.len() - 88 + 16;
+    let short = u32::from_be_bytes(pkg[field..field + 4].try_into().expect("4 bytes")) - 8;
+    pkg[field..field + 4].copy_from_slice(&short.to_be_bytes());
+    let table = bundles_tsv(&load(image(vec![0; 0x200], &pkg)));
+    assert!(table.contains("table ends mid-entry"), "{table}");
+    assert!(
+        table.contains("main") && !table.contains("PYZ-00.pyz"),
+        "{table}"
+    );
+}
+
 /// A .NET single-file bundle's manifest is read to each file it carries.
 ///
 /// Compressed files carry both sizes; a name is escaped onto its row, an

@@ -132,6 +132,9 @@ fn pyi_kind(c: u8) -> &'static str {
 /// Reads a `PyInstaller` archive from the cookie that ends it: the Python
 /// version, the library it loads, and every table entry.
 ///
+/// An entry whose record runs past the table's end is left out, and the
+/// archive's description says the list is incomplete.
+///
 /// # Arguments
 ///
 /// * `bytes` - The file.
@@ -155,9 +158,14 @@ fn pyinstaller(bytes: &[u8]) -> Option<Bundle> {
         bytes.get(start.checked_add(toc)?..start.checked_add(toc)?.checked_add(toc_len)?)?;
     let mut entries = Vec::new();
     let mut pos = 0usize;
+    let mut cut = false;
     while pos + TOC_HEAD <= table.len() && entries.len() < ENTRIES_MAX {
         let len = saturating_usize(u64::from(u32_be(table, pos)?));
         if len < TOC_HEAD {
+            break;
+        }
+        if pos.saturating_add(len) > table.len() {
+            cut = true;
             break;
         }
         let data = start.saturating_add(saturating_usize(u64::from(u32_be(table, pos + 4)?)));
@@ -179,11 +187,14 @@ fn pyinstaller(bytes: &[u8]) -> Option<Bundle> {
     } else {
         (pyvers / 10, pyvers % 10)
     };
-    let about = if new {
+    let mut about = if new {
         format!("Python {major}.{minor}, loads {lib}")
     } else {
         format!("Python {major}.{minor}, a PyInstaller 2.0 cookie")
     };
+    if cut {
+        about.push_str("; its table ends mid-entry, so the list is incomplete");
+    }
     Some(Bundle {
         wrapper: "PyInstaller",
         about: Some(about),
