@@ -120,6 +120,9 @@ impl BorerServer {
         Parameters(FunctionParams { address }): Parameters<FunctionParams>,
     ) -> Result<String, ErrorData> {
         self.with_analysis(Feature::Discover, |p, a, o| {
+            if let Some(token) = self.il_method(p, &address) {
+                return borer_engine::clr::managed::strings_tsv(p, a, token);
+            }
             let entry = self.function_entry(p, a, &address)?;
             render::function_strings_tsv(p, a, o, entry)
                 .ok_or_else(|| format!("no function at {entry:#x}"))
@@ -199,6 +202,9 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let offset = to_usize(offset.unwrap_or(0));
         self.with_analysis(Feature::Discover, |p, a, o| {
+            if let Some(token) = self.il_method(p, &address) {
+                return borer_engine::clr::managed::detail(p, a, token);
+            }
             let entry = self.function_entry(p, a, &address)?;
             render::function_detail(a, o, entry, offset)
                 .ok_or_else(|| format!("no function at {entry:#x}"))
@@ -224,7 +230,7 @@ impl BorerServer {
     /// When no binary is loaded or the target resolves to neither an address
     /// nor a class field.
     #[tool(
-        description = "List references to an address or name, one row per function, paged; an import lists calls through its slot, `Class+0x24` who touches that field. Not for call paths (use reaches).",
+        description = "List references to an address or name, one row per function, paged; an import lists calls through its slot, `Class+0x24` who touches that field, a .NET member (token or Type::Member) the IL methods using it. Not for call paths (use reaches).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -249,6 +255,16 @@ impl BorerServer {
             render::XREF_ROWS_MAX,
         )?;
         self.with_analysis(Feature::Discover, |p, a, o| {
+            if let Some(targets) = self.managed_targets(p, &address) {
+                return borer_engine::clr::managed::xrefs_tsv(
+                    p,
+                    a,
+                    &targets,
+                    page.offset,
+                    page.limit.n,
+                    page.count_only,
+                );
+            }
             let va = match self.addr(p, &address) {
                 Ok(va) => va,
                 Err(unknown) => {

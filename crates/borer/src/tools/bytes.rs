@@ -114,7 +114,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the address is not inside a discovered function.
     #[tool(
-        description = "Disassemble a whole function by blocks, with `L_<addr>:` labels and named call targets. Use it when exact instructions matter; for C use decompile, for a few instructions disassemble.",
+        description = "Disassemble a whole function by blocks, with `L_<addr>:` labels and named call targets; a .NET method (token or Type::Method) as CIL, tokens named. Use it when exact instructions matter; for C use decompile, for a few instructions disassemble.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -132,6 +132,9 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let max = count_param(max_instrs, 400, 2000, "max_instrs")?;
         self.with_analysis(Feature::Discover, |p, a, o| {
+            if let Some(token) = self.il_method(p, &address) {
+                return borer_engine::clr::managed::listing(p, token, max.n);
+            }
             let entry = self.function_entry(p, a, &address)?;
             render::disasm_function(p, a, o, entry, max.n, bytes.unwrap_or(false))
                 .ok_or_else(|| format!("no function at {entry:#x}"))

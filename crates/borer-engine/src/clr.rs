@@ -30,6 +30,8 @@ use crate::strings::{Encoding, StringHit};
 use crate::text::one_line;
 
 pub mod il;
+pub mod managed;
+mod meta;
 
 /// Bytes of the CLR header (`IMAGE_COR20_HEADER`).
 const COR20_LEN: usize = 72;
@@ -522,8 +524,8 @@ pub struct Clr {
     pub pinvokes: Vec<PInvoke>,
     /// Every external member, in table order.
     pub member_refs: Vec<MemberRef>,
-    /// How many types it references (`TypeRef` rows read).
-    pub type_refs: usize,
+    /// Every referenced type's full name, by `TypeRef` row less one.
+    pub type_refs: Vec<String>,
     /// Every referenced assembly, in table order.
     pub assembly_refs: Vec<AssemblyRef>,
     /// Every native module the P/Invokes name, in table order.
@@ -617,7 +619,7 @@ impl Clr {
             .filter(|m| m.body == Body::Native)
             .count();
         format!(
-            ".net:    {what}, runtime {}.{}, metadata {}, {}; entry {}; types {}, methods {} (native {natives}), pinvokes {}, assembly refs {}, user strings {}{}; IL is not decompiled, borer://clr lists them\n",
+            ".net:    {what}, runtime {}.{}, metadata {}, {}; entry {}; types {}, methods {} (native {natives}), pinvokes {}, assembly refs {}, user strings {}{}; IL is not decompiled, disassemble_function shows a method's CIL, borer://clr lists them\n",
             self.runtime.0,
             self.runtime.1,
             self.version,
@@ -850,6 +852,8 @@ struct Streams<'a> {
     strings: &'a [u8],
     /// `#US`, and its offset in the metadata.
     us: Option<(usize, &'a [u8])>,
+    /// `#Blob`.
+    blob: &'a [u8],
 }
 
 /// Reads one `#Strings` entry, made safe for a row ([`one_line`]).
@@ -904,28 +908,14 @@ fn string(heap: &[u8], idx: u32, what: &dyn Fn() -> String) -> Result<String, St
 fn user_strings(heap: &[u8], file_off: u64) -> (Vec<UserString>, bool) {
     let mut out = Vec::new();
     let mut pos = 0usize;
-    while let Some(&b0) = heap.get(pos) {
+    while heap.get(pos).is_some() {
         if out.len() >= STRINGS_MAX {
             return (out, true);
         }
-        let (len, head) = if b0 & 0x80 == 0 {
-            (usize::from(b0), 1)
-        } else if b0 & 0xc0 == 0x80 {
-            let Some(&b1) = heap.get(pos + 1) else {
-                break;
-            };
-            ((usize::from(b0 & 0x3f) << 8) | usize::from(b1), 2)
-        } else if b0 & 0xe0 == 0xc0 {
-            let Some(rest) = heap.get(pos + 1..pos + 4) else {
-                break;
-            };
-            let len = rest
-                .iter()
-                .fold(usize::from(b0 & 0x1f), |n, b| (n << 8) | usize::from(*b));
-            (len, 4)
-        } else {
+        let Some((len, head)) = compressed(heap, pos) else {
             break;
         };
+        let len = saturating_usize(u64::from(len));
         let start = pos + head;
         let Some(body) = heap.get(start..start.saturating_add(len)) else {
             break;
@@ -952,6 +942,33 @@ fn user_strings(heap: &[u8], file_off: u64) -> (Vec<UserString>, bool) {
         pos = start + len;
     }
     (out, false)
+}
+
+/// Reads a compressed unsigned integer (ECMA-335 II.23.2): one, two or
+/// four big-endian bytes, the top bits of the first saying which.
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes.
+/// * `at` - Where the integer starts.
+///
+/// # Returns
+///
+/// The value and the bytes it took, or `None` when the first byte names no
+/// width or the integer runs past `bytes`.
+pub(crate) fn compressed(bytes: &[u8], at: usize) -> Option<(u32, usize)> {
+    let b0 = *bytes.get(at)?;
+    let (first, len) = match b0 {
+        _ if b0 & 0x80 == 0 => (b0, 1),
+        _ if b0 & 0xc0 == 0x80 => (b0 & 0x3f, 2),
+        _ if b0 & 0xe0 == 0xc0 => (b0 & 0x1f, 4),
+        _ => return None,
+    };
+    let rest = bytes.get(at + 1..at.checked_add(len)?)?;
+    let v = rest
+        .iter()
+        .fold(u32::from(first), |n, b| (n << 8) | u32::from(*b));
+    Some((v, len))
 }
 
 /// Reads the metadata root and finds its streams.
@@ -1017,6 +1034,7 @@ fn root(meta: &[u8]) -> Result<(String, Streams<'_>), String> {
             "#~" | "#-" if streams.tables.is_none() => streams.tables = Some(body),
             "#Strings" if streams.strings.is_empty() => streams.strings = body,
             "#US" if streams.us.is_none() => streams.us = Some((start, body)),
+            "#Blob" if streams.blob.is_empty() => streams.blob = body,
             _ => {}
         }
     }
@@ -1112,6 +1130,68 @@ fn qualified(namespace: &str, name: &str) -> String {
     }
 }
 
+/// The CLR header's fields and the metadata it points at, its root read
+/// and its table stream located.
+#[derive(Debug, Clone)]
+struct Opened<'a> {
+    /// The runtime version the header states.
+    runtime: (u16, u16),
+    /// `COMIMAGE_FLAGS_*`.
+    flags: u32,
+    /// The entry point's token or native RVA.
+    entry: u32,
+    /// The metadata root's address.
+    meta_va: u64,
+    /// The root's version string.
+    version: String,
+    /// The streams.
+    streams: Streams<'a>,
+    /// The table stream.
+    tables: Tables<'a>,
+}
+
+/// Reads the CLR header at `at` and opens the metadata it points at.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `at` - The CLR header's address.
+///
+/// # Errors
+///
+/// When the header or the metadata is not in the file, the header is
+/// short, or the root or the table stream does not read.
+fn open(p: &Program, at: u64) -> Result<Opened<'_>, String> {
+    let head = p
+        .read_va(at, COR20_LEN)
+        .ok_or_else(|| format!("the CLR header at {at:#x} is not in the file"))?;
+    let field = |o: usize| u32_le(head, o).unwrap_or(0);
+    let cb = field(0);
+    if saturating_usize(u64::from(cb)) < COR20_LEN {
+        return Err(format!(
+            "the CLR header states {cb} bytes, fewer than its {COR20_LEN}"
+        ));
+    }
+    let meta_va = p.image_base.saturating_add(u64::from(field(8)));
+    let want = saturating_usize(u64::from(field(12))).min(META_MAX);
+    let meta = p
+        .read_va_upto(meta_va, want)
+        .ok_or_else(|| format!("the metadata at {meta_va:#x} is not in the file"))?;
+    let (version, streams) = root(meta)?;
+    let data = streams
+        .tables
+        .ok_or("the metadata has no table stream (#~ or #-)")?;
+    Ok(Opened {
+        runtime: (u16_le(head, 4).unwrap_or(0), u16_le(head, 6).unwrap_or(0)),
+        flags: field(16),
+        entry: field(20),
+        meta_va,
+        version,
+        streams,
+        tables: Tables::read(data)?,
+    })
+}
+
 /// Reads the CLR header and the metadata of a PE that has one.
 ///
 /// # Arguments
@@ -1129,30 +1209,15 @@ fn qualified(namespace: &str, name: &str) -> String {
 /// does not hold: the reason, naming the stream, table, row or index.
 pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
     let at = p.image_base.saturating_add(u64::from(dir.0));
-    let head = p
-        .read_va(at, COR20_LEN)
-        .ok_or_else(|| format!("the CLR header at {at:#x} is not in the file"))?;
-    let field = |o: usize| u32_le(head, o).unwrap_or(0);
-    let cb = field(0);
-    if saturating_usize(u64::from(cb)) < COR20_LEN {
-        return Err(format!(
-            "the CLR header states {cb} bytes, fewer than its {COR20_LEN}"
-        ));
-    }
-    let runtime = (u16_le(head, 4).unwrap_or(0), u16_le(head, 6).unwrap_or(0));
-    let (meta_rva, meta_size) = (field(8), field(12));
-    let flags = field(16);
-    let entry = field(20);
-    let meta_va = p.image_base.saturating_add(u64::from(meta_rva));
-    let want = saturating_usize(u64::from(meta_size)).min(META_MAX);
-    let meta = p
-        .read_va_upto(meta_va, want)
-        .ok_or_else(|| format!("the metadata at {meta_va:#x} is not in the file"))?;
-    let (version, streams) = root(meta)?;
-    let data = streams
-        .tables
-        .ok_or("the metadata has no table stream (#~ or #-)")?;
-    let t = Tables::read(data)?;
+    let Opened {
+        runtime,
+        flags,
+        entry,
+        meta_va,
+        version,
+        streams,
+        tables: t,
+    } = open(p, at)?;
     let heap = streams.strings;
     let mut capped = TABLES_READ.iter().any(|table| t.count(*table) > ROWS_MAX);
 
@@ -1424,7 +1489,7 @@ pub(crate) fn read(p: &Program, dir: (u32, u32)) -> Result<Clr, String> {
         methods,
         pinvokes,
         member_refs,
-        type_refs: names.type_refs.len(),
+        type_refs: names.type_refs,
         assembly_refs,
         module_refs: names.modules,
         user_strings: strings,
@@ -1689,7 +1754,7 @@ pub fn clr_tsv(p: &Program, spec: &str) -> anyhow::Result<String> {
         clr.entry_text(base)
     );
     out.push_str(
-        "# IL is not decompiled: an il method's va is its IL body, a data symbol; a native method (mixed-mode) is code, analyzed as usual\n",
+        "# IL is not decompiled: an il method's va is its IL body, a data symbol, which disassemble_function shows as CIL; a native method (mixed-mode) is code, analyzed as usual\n",
     );
     let counts: Vec<String> = KINDS
         .iter()
@@ -1699,7 +1764,7 @@ pub fn clr_tsv(p: &Program, spec: &str) -> anyhow::Result<String> {
         out,
         "# {}; type refs {}{}",
         counts.join(", "),
-        clr.type_refs,
+        clr.type_refs.len(),
         if clr.capped {
             "; capped: a table or #US held more than was read"
         } else {

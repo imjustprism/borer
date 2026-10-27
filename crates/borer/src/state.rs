@@ -1,10 +1,12 @@
 //! The server's state: what is loaded, its analysis and names, the locks
 //! around them, and how a server starts or resumes.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, parse_addr};
+use borer_engine::clr::managed;
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
 use rmcp::ErrorData;
@@ -514,6 +516,49 @@ impl BorerServer {
             &self.overlay(),
             text,
         )
+    }
+
+    /// The .NET members an argument names, when it names managed code: an IL
+    /// body's address or name, or, when the argument is no mapped address,
+    /// a token or a method's or field's name
+    /// ([`borer_engine::clr::managed::targets`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The loaded program.
+    /// * `text` - The argument as the agent passed it.
+    ///
+    /// # Returns
+    ///
+    /// The tokens, `None` for a program with no .NET metadata or an
+    /// argument naming native code or nothing managed.
+    pub(crate) fn managed_targets(&self, p: &Program, text: &str) -> Option<BTreeSet<u32>> {
+        p.clr()?;
+        if let Ok(va) = self.addr(p, text) {
+            if let Some(token) = managed::il_method(p, va) {
+                return Some(BTreeSet::from([token]));
+            }
+            if p.read_va(va, 1).is_some() {
+                return None;
+            }
+        }
+        managed::targets(p, text)
+    }
+
+    /// The IL method an argument names ([`Self::managed_targets`]): the
+    /// first `MethodDef` with an IL body among the names it stands for.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The loaded program.
+    /// * `text` - The argument as the agent passed it.
+    pub(crate) fn il_method(&self, p: &Program, text: &str) -> Option<u32> {
+        let clr = p.clr()?;
+        self.managed_targets(p, text)?.into_iter().find(|t| {
+            clr.methods
+                .iter()
+                .any(|m| m.token == *t && m.body == borer_engine::clr::Body::Il)
+        })
     }
 
     /// Resolves an argument to the function to decompile, starting one at an

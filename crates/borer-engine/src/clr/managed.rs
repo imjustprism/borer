@@ -1,0 +1,847 @@
+//! Managed code: IL methods disassembled and their references indexed.
+//!
+//! Each IL method's body is disassembled with its tokens named, and the
+//! references every body makes (calls, `ldstr`, fields, types) are indexed
+//! once per analysis, so callers, callees, string loads and the APIs a
+//! method uses answer as they do for native code.
+//!
+//! A method is named by its `MethodDef` token or by its IL body's address,
+//! which carries the method's name as a data symbol. The index is built on
+//! first use and memoized in [`crate::analysis::Derived`].
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::sync::Arc;
+
+use super::il::{self, Instr, Operand};
+use super::meta::Meta;
+use super::{Body, Clr};
+use crate::analysis::Analysis;
+use crate::program::Program;
+
+/// Most reference sites the index keeps across every body; past it the
+/// index says it is capped.
+const SITES_MAX: usize = 1 << 21;
+
+/// Bytes read for one body: the largest code [`il::CODE_MAX`] allows and
+/// room for its header and clauses.
+const BODY_READ: usize = il::CODE_MAX * 2;
+
+/// Rows one table of callers, callees or strings shows.
+pub const ROWS_MAX: usize = 300;
+
+/// `ldstr`.
+pub const LDSTR: u16 = 0x72;
+
+/// `ret`.
+const RET: u16 = 0x2a;
+
+/// No instruction before a site: the site is the body's first.
+const NO_OP: u16 = u16::MAX;
+
+/// The opcodes that call or name a method to call: `jmp`, `call`,
+/// `callvirt`, `newobj`, `ldftn`, `ldvirtftn`.
+const CALLS: [u16; 6] = [0x27, 0x28, 0x6f, 0x73, 0xfe06, 0xfe07];
+
+/// One instruction that names a token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Site {
+    /// Its offset in the code.
+    pub off: u32,
+    /// Its opcode.
+    pub op: u16,
+    /// The opcode of the instruction before it, [`NO_OP`] for none.
+    pub prev: u16,
+    /// The token it names.
+    pub token: u32,
+}
+
+impl Site {
+    /// Whether the site calls or names a method to call.
+    #[must_use]
+    pub fn is_call(&self) -> bool {
+        CALLS.contains(&self.op)
+    }
+
+    /// Whether the instruction before it pushes a constant: an `ldc.*` or
+    /// an `ldstr`.
+    #[must_use]
+    pub fn after_constant(&self) -> bool {
+        matches!(self.prev, 0x15..=0x23 | LDSTR)
+    }
+}
+
+/// One IL method's references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refs {
+    /// The method's `MethodDef` token.
+    pub token: u32,
+    /// Its IL body's address.
+    pub va: u64,
+    /// Bytes of code.
+    pub code_len: usize,
+    /// Instructions decoded.
+    pub instrs: usize,
+    /// Its sites, in code order.
+    pub sites: Vec<Site>,
+    /// Why the body did not read or decoding stopped early.
+    pub stop: Option<String>,
+    /// The body only loads arguments, makes one call (not `newobj`) and
+    /// returns: a proxy forwarding to its callee.
+    pub forwards: bool,
+}
+
+/// Every IL method's references, in table order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Managed {
+    /// The methods with IL bodies.
+    pub methods: Vec<Refs>,
+    /// More than [`SITES_MAX`] sites were there and the rest were not kept.
+    pub capped: bool,
+}
+
+impl Managed {
+    /// Reads every IL body of a program and indexes its references.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The program.
+    #[must_use]
+    pub fn build(p: &Program) -> Self {
+        let mut out = Managed::default();
+        let Some(clr) = p.clr() else {
+            return out;
+        };
+        let mut left = SITES_MAX;
+        for m in clr.methods.iter().filter(|m| m.body == Body::Il) {
+            let va = p.image_base.saturating_add(u64::from(m.rva));
+            let mut r = Refs {
+                token: m.token,
+                va,
+                code_len: 0,
+                instrs: 0,
+                sites: Vec::new(),
+                stop: None,
+                forwards: false,
+            };
+            match read(p, va) {
+                Ok((body, instrs, stop)) => {
+                    r.code_len = body.code_len;
+                    r.instrs = instrs.len();
+                    r.forwards = stop.is_none() && forwards(&instrs);
+                    r.stop = stop;
+                    let mut prev = NO_OP;
+                    for i in &instrs {
+                        if let Operand::Token(token) = i.operand {
+                            if left == 0 {
+                                out.capped = true;
+                                break;
+                            }
+                            left -= 1;
+                            r.sites.push(Site {
+                                off: i.off,
+                                op: i.op,
+                                prev,
+                                token,
+                            });
+                        }
+                        prev = i.op;
+                    }
+                }
+                Err(why) => r.stop = Some(why),
+            }
+            out.methods.push(r);
+        }
+        out
+    }
+
+    /// The index of a program, built once per analysis.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The program.
+    /// * `a` - Its analysis, which keeps the index.
+    #[must_use]
+    pub fn of(p: &Program, a: &Analysis) -> Arc<Self> {
+        a.derived.get_or_build("clr_managed", (), || Self::build(p))
+    }
+
+    /// One method's references, by its token.
+    #[must_use]
+    pub fn method(&self, token: u32) -> Option<&Refs> {
+        self.methods
+            .binary_search_by_key(&token, |m| m.token)
+            .ok()
+            .and_then(|i| self.methods.get(i))
+    }
+
+    /// Every site naming one of `targets`, by the method holding it.
+    ///
+    /// # Arguments
+    ///
+    /// * `targets` - The tokens.
+    #[must_use]
+    pub fn sites_of(&self, targets: &BTreeSet<u32>) -> Vec<(&Refs, Vec<Site>)> {
+        self.methods
+            .iter()
+            .filter_map(|m| {
+                let hits: Vec<Site> = m
+                    .sites
+                    .iter()
+                    .filter(|s| targets.contains(&s.token))
+                    .copied()
+                    .collect();
+                (!hits.is_empty()).then_some((m, hits))
+            })
+            .collect()
+    }
+}
+
+/// Whether a body only loads arguments, makes one call that is not a
+/// `newobj`, and returns.
+///
+/// # Arguments
+///
+/// * `instrs` - The body's instructions.
+fn forwards(instrs: &[Instr]) -> bool {
+    let Some((last, rest)) = instrs.split_last() else {
+        return false;
+    };
+    let calls = rest
+        .iter()
+        .filter(|i| i.op != 0x73 && CALLS.contains(&i.op))
+        .count();
+    last.op == RET
+        && calls == 1
+        && rest
+            .iter()
+            .all(|i| CALLS.contains(&i.op) || matches!(i.op, 0x02..=0x05 | 0x0e | 0xfe09))
+}
+
+/// Reads and decodes one body.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `va` - The body's address.
+///
+/// # Errors
+///
+/// When the body is not in the file or its header does not read.
+fn read(p: &Program, va: u64) -> Result<(il::MethodBody, Vec<Instr>, Option<String>), String> {
+    let bytes = p
+        .read_va_upto(va, BODY_READ)
+        .ok_or_else(|| format!("the IL body at {va:#x} is not in the file"))?;
+    let (body, code) = il::body(bytes)?;
+    let (instrs, stop) = il::decode(code);
+    Ok((body, instrs, stop))
+}
+
+/// The IL method whose body starts at an address.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `va` - The address.
+///
+/// # Returns
+///
+/// The method's `MethodDef` token, `None` when no IL body starts there.
+#[must_use]
+pub fn il_method(p: &Program, va: u64) -> Option<u32> {
+    p.clr()?
+        .method_at(p.image_base, va)
+        .filter(|m| m.body == Body::Il)
+        .map(|m| m.token)
+}
+
+/// Returns the tokens a name or token text stands for.
+///
+/// The text is a token in hex whose table a CIL instruction names
+/// (`0x0a00001c`), or a method's full name
+/// (`System.Reflection.Assembly::Load`) or its end after a dot
+/// (`Assembly::Load`), every overload.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `text` - The name or token.
+///
+/// # Returns
+///
+/// The tokens in table order; `None` for no .NET assembly or no match.
+#[must_use]
+pub fn targets(p: &Program, text: &str) -> Option<BTreeSet<u32>> {
+    let meta = Meta::open(p).ok()?;
+    let text = text.trim();
+    if let Some(token) = crate::analysis::parse_addr(text)
+        .filter(|_| crate::analysis::hex_prefixed(text))
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|t| !meta.token(*t).ends_with('?'))
+    {
+        return Some(BTreeSet::from([token]));
+    }
+    let tail = format!(".{text}");
+    let fits = |name: &str| name == text || (text.contains("::") && name.ends_with(&tail));
+    let clr = meta.clr;
+    let found: BTreeSet<u32> = clr
+        .methods
+        .iter()
+        .filter(|m| fits(&m.name))
+        .map(|m| m.token)
+        .chain(
+            (1..=u32::try_from(clr.member_refs.len()).unwrap_or(0))
+                .map(|r| 0x0a00_0000 | r)
+                .filter(|t| meta.member_name(*t).is_some_and(|n| fits(&n))),
+        )
+        .collect();
+    (!found.is_empty()).then_some(found)
+}
+
+/// A method's header lines: its name and signature, body header, locals
+/// and exception clauses.
+fn header(meta: &Meta<'_>, r: &Refs, body: &il::MethodBody) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# .NET method {:#010x} {}, IL body at {:#x}",
+        r.token,
+        meta.token(r.token),
+        r.va
+    );
+    let locals = if body.locals == 0 {
+        "no locals".to_owned()
+    } else {
+        meta.token(body.locals)
+    };
+    let _ = writeln!(
+        out,
+        "# {} header, {} bytes of code, max stack {}, {locals}{}; {} exception clauses",
+        if body.fat { "fat" } else { "tiny" },
+        body.code_len,
+        body.max_stack,
+        if body.init_locals {
+            ", init locals"
+        } else {
+            ""
+        },
+        body.clauses.len()
+    );
+    for c in &body.clauses {
+        let extra = match c.kind {
+            il::ClauseKind::Catch => format!(" {}", meta.token(c.extra)),
+            il::ClauseKind::Filter => format!(" filter IL_{:04x}", c.extra),
+            il::ClauseKind::Finally | il::ClauseKind::Fault => String::new(),
+        };
+        let _ = writeln!(
+            out,
+            "# .try IL_{:04x}..IL_{:04x} {}{extra} handler IL_{:04x}..IL_{:04x}",
+            c.try_start,
+            c.try_end,
+            c.kind.word(),
+            c.handler_start,
+            c.handler_end
+        );
+    }
+    out
+}
+
+/// A branch target as a label.
+fn label(t: i64) -> String {
+    if t >= 0 {
+        format!("IL_{t:04x}")
+    } else {
+        format!("IL_-{:x}", t.unsigned_abs())
+    }
+}
+
+/// One instruction's operand as a listing shows it.
+fn operand_text(meta: &Meta<'_>, o: &Operand) -> String {
+    match o {
+        Operand::None => String::new(),
+        Operand::Int(v) => v.to_string(),
+        Operand::Var(v) => v.to_string(),
+        Operand::Real(v) => v.to_string(),
+        Operand::Token(t) => meta.token(*t),
+        Operand::Target(t) => label(*t),
+        Operand::Switch(ts) => {
+            let shown: Vec<String> = ts.iter().take(64).map(|t| label(*t)).collect();
+            let more = if ts.len() > 64 { ", ..." } else { "" };
+            format!("({}{more})", shown.join(", "))
+        }
+    }
+}
+
+/// Disassembles one IL method, every token named.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `token` - The method's `MethodDef` token.
+/// * `max` - Most instructions shown.
+///
+/// # Returns
+///
+/// Header lines (signature, body header, locals, exception clauses), then
+/// `IL_<offset>: <op> <operand>` rows; a branch's operand is the label of
+/// its target's row.
+///
+/// # Errors
+///
+/// When the program is no .NET assembly, the token names no IL method, or
+/// its body does not read.
+pub fn listing(p: &Program, token: u32, max: usize) -> Result<String, String> {
+    let meta = Meta::open(p)?;
+    let r = il_refs(meta.clr, p, token)?;
+    let (body, instrs, stop) = read(p, r.va)?;
+    let mut out = header(&meta, &r, &body);
+    for i in instrs.iter().take(max) {
+        let operand = operand_text(&meta, &i.operand);
+        let _ = writeln!(
+            out,
+            "IL_{:04x}: {}{}{operand}",
+            i.off,
+            i.name(),
+            if operand.is_empty() { "" } else { " " }
+        );
+    }
+    if instrs.len() > max {
+        let _ = writeln!(
+            out,
+            "# showing {max} of {} instructions; max_instrs shows more",
+            instrs.len()
+        );
+    }
+    if let Some(why) = stop {
+        let _ = writeln!(out, "# decoding stopped: {why}");
+    }
+    Ok(out)
+}
+
+/// The index entry of an IL method, its references unread.
+///
+/// # Errors
+///
+/// When the token names no method with an IL body.
+fn il_refs(clr: &Clr, p: &Program, token: u32) -> Result<Refs, String> {
+    let m = clr
+        .methods
+        .iter()
+        .find(|m| m.token == token)
+        .ok_or_else(|| format!("{token:#010x} is no method of this assembly"))?;
+    if m.body != Body::Il {
+        return Err(format!(
+            "{token:#010x} {} has no IL body: it is {}",
+            m.name,
+            m.body.word()
+        ));
+    }
+    Ok(Refs {
+        token,
+        va: p.image_base.saturating_add(u64::from(m.rva)),
+        code_len: 0,
+        instrs: 0,
+        sites: Vec::new(),
+        stop: None,
+        forwards: false,
+    })
+}
+
+/// An IL method's index entry.
+///
+/// # Errors
+///
+/// When the token names no method with an IL body.
+fn indexed<'i>(index: &'i Managed, clr: &Clr, p: &Program, token: u32) -> Result<&'i Refs, String> {
+    if let Some(r) = index.method(token) {
+        return Ok(r);
+    }
+    il_refs(clr, p, token)?;
+    Err(format!("{token:#010x}: its IL body was not indexed"))
+}
+
+/// The user strings one IL method loads, as `site token text` rows.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis, which keeps the index.
+/// * `token` - The method's `MethodDef` token.
+///
+/// # Errors
+///
+/// When the token names no IL method.
+pub fn strings_tsv(p: &Program, a: &Analysis, token: u32) -> Result<String, String> {
+    let meta = Meta::open(p)?;
+    let index = Managed::of(p, a);
+    let r = indexed(&index, meta.clr, p, token)?;
+    let loads: Vec<&Site> = r.sites.iter().filter(|s| s.op == LDSTR).collect();
+    let mut out = format!(
+        "# {} user strings loaded by {:#010x} {} (ldstr), showing {} of {}\nsite\ttoken\ttext\n",
+        loads.len(),
+        token,
+        meta.member_name(token).unwrap_or_default(),
+        loads.len().min(ROWS_MAX),
+        loads.len()
+    );
+    for s in loads.iter().take(ROWS_MAX) {
+        let _ = writeln!(
+            out,
+            "IL_{:04x}\t{:#010x}\t{}",
+            s.off,
+            s.token,
+            meta.token(s.token)
+        );
+    }
+    Ok(out)
+}
+
+/// One IL method's facts: its body, and who calls it, what it calls and
+/// what else it names, as `rel token sites name` rows.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis, which keeps the index.
+/// * `token` - The method's `MethodDef` token.
+///
+/// # Errors
+///
+/// When the token names no IL method or its body does not read.
+pub fn detail(p: &Program, a: &Analysis, token: u32) -> Result<String, String> {
+    let meta = Meta::open(p)?;
+    let index = Managed::of(p, a);
+    let r = indexed(&index, meta.clr, p, token)?;
+    let (body, _, _) = read(p, r.va)?;
+    let mut out = header(&meta, r, &body);
+    let mut rows: Vec<(&str, u32, usize)> = Vec::new();
+    for (m, hits) in index.sites_of(&BTreeSet::from([token])) {
+        rows.push(("caller", m.token, hits.len()));
+    }
+    let mut named: BTreeMap<(u8, u32), usize> = BTreeMap::new();
+    for s in &r.sites {
+        let rank = if s.is_call() {
+            0
+        } else if s.op == LDSTR {
+            2
+        } else {
+            1
+        };
+        *named.entry((rank, s.token)).or_default() += 1;
+    }
+    for ((rank, t), n) in named {
+        let rel = ["callee", "uses", "string"]
+            .get(usize::from(rank))
+            .copied()
+            .unwrap_or("uses");
+        rows.push((rel, t, n));
+    }
+    let _ = writeln!(
+        out,
+        "# {} instructions, {} callers, tags {}; showing {} of {} rows{}",
+        r.instrs,
+        rows.iter().filter(|x| x.0 == "caller").count(),
+        tags_text(&tags(&meta, r)),
+        rows.len().min(ROWS_MAX),
+        rows.len(),
+        r.stop
+            .as_ref()
+            .map_or_else(String::new, |w| format!("; decoding stopped: {w}"))
+    );
+    out.push_str("rel\ttoken\tsites\tname\n");
+    for (rel, t, n) in rows.iter().take(ROWS_MAX) {
+        let _ = writeln!(out, "{rel}\t{t:#010x}\t{n}\t{}", meta.token(*t));
+    }
+    Ok(out)
+}
+
+/// The methods referencing any of `targets`, one row per method, paged.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis, which keeps the index.
+/// * `targets` - The tokens ([`targets`]).
+/// * `offset` - Rows skipped.
+/// * `limit` - Most rows shown.
+/// * `count_only` - Only the header line.
+///
+/// # Errors
+///
+/// When the program is no .NET assembly.
+pub fn xrefs_tsv(
+    p: &Program,
+    a: &Analysis,
+    targets: &BTreeSet<u32>,
+    offset: usize,
+    limit: usize,
+    count_only: bool,
+) -> Result<String, String> {
+    let meta = Meta::open(p)?;
+    let index = Managed::of(p, a);
+    let hits = index.sites_of(targets);
+    let names: Vec<String> = targets.iter().take(4).map(|t| meta.token(*t)).collect();
+    let total_sites: usize = hits.iter().map(|(_, s)| s.len()).sum();
+    let start = offset.min(hits.len());
+    let page = hits.iter().skip(start).take(limit);
+    let mut out = format!(
+        "# {total_sites} IL references to {}{} from {} methods; showing {} of {} from {start}\n",
+        names.join(" | "),
+        if targets.len() > 4 { " | ..." } else { "" },
+        hits.len(),
+        hits.len().saturating_sub(start).min(limit),
+        hits.len()
+    );
+    if count_only || hits.is_empty() {
+        return Ok(out);
+    }
+    out.push_str("method\tva\tsites\tname\n");
+    for (m, sites) in page {
+        let at: Vec<String> = sites
+            .iter()
+            .take(4)
+            .map(|s| format!("IL_{:04x} {}", s.off, il::name(s.op).unwrap_or("?")))
+            .collect();
+        let more = if sites.len() > 4 { ", ..." } else { "" };
+        let _ = writeln!(
+            out,
+            "{:#010x}\t{:#x}\t{}{more}\t{}",
+            m.token,
+            m.va,
+            at.join(", "),
+            meta.member_name(m.token).unwrap_or_default()
+        );
+    }
+    Ok(out)
+}
+
+/// What a called API says about a method, by the prefix of the called
+/// member's `Owner::Name`.
+pub const API_TAGS: [(&str, &str); 27] = [
+    ("load", "System.Reflection.Assembly::Load"),
+    ("load", "System.Reflection.Assembly::UnsafeLoadFrom"),
+    ("load", "System.AppDomain::Load"),
+    ("reflect", "System.Reflection.MethodBase::Invoke"),
+    ("reflect", "System.Type::InvokeMember"),
+    ("reflect", "System.Type::GetMethod"),
+    ("reflect", "System.Activator::CreateInstance"),
+    ("reflect", "System.Delegate::DynamicInvoke"),
+    ("emit", "System.Reflection.Emit."),
+    ("process", "System.Diagnostics.Process::"),
+    ("process", "System.Diagnostics.ProcessStartInfo::"),
+    ("net", "System.Net."),
+    ("registry", "Microsoft.Win32.Registry"),
+    ("crypto", "System.Security.Cryptography."),
+    ("file", "System.IO.File::"),
+    ("file", "System.IO.Directory::"),
+    ("file", "System.IO.FileStream::"),
+    ("decode", "System.Convert::FromBase64"),
+    ("compress", "System.IO.Compression."),
+    (
+        "resource",
+        "System.Reflection.Assembly::GetManifestResource",
+    ),
+    ("resource", "System.Resources.ResourceManager::"),
+    ("env", "System.Environment::GetFolderPath"),
+    ("env", "System.Environment::GetEnvironmentVariable"),
+    ("screen", "System.Drawing.Graphics::CopyFromScreen"),
+    ("clipboard", "System.Windows.Forms.Clipboard::"),
+    ("wmi", "System.Management."),
+    ("marshal", "System.Runtime.InteropServices.Marshal::"),
+];
+
+/// The word tagging a call to a P/Invoke.
+pub const PINVOKE_TAG: &str = "pinvoke";
+
+/// The tags a method's calls earn, each with the APIs that earned it, in
+/// tag order.
+///
+/// # Arguments
+///
+/// * `meta` - The metadata.
+/// * `r` - The method's references.
+fn tags(meta: &Meta<'_>, r: &Refs) -> BTreeMap<&'static str, BTreeSet<String>> {
+    let pinvokes: BTreeMap<u32, String> = meta
+        .clr
+        .pinvokes
+        .iter()
+        .map(|pi| (pi.token, format!("{}!{}", pi.dll, pi.entry)))
+        .collect();
+    let mut out: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
+    let called: BTreeSet<u32> = r
+        .sites
+        .iter()
+        .filter(|s| s.is_call())
+        .map(|s| s.token)
+        .collect();
+    for t in called {
+        if let Some(native) = pinvokes.get(&t) {
+            out.entry(PINVOKE_TAG).or_default().insert(native.clone());
+            continue;
+        }
+        let Some(name) = meta.member_name(t) else {
+            continue;
+        };
+        for (tag, prefix) in API_TAGS {
+            if name.starts_with(prefix) {
+                out.entry(tag).or_default().insert(name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Tags as a comma-separated list, `-` for none.
+fn tags_text(tags: &BTreeMap<&'static str, BTreeSet<String>>) -> String {
+    if tags.is_empty() {
+        "-".to_owned()
+    } else {
+        tags.keys().copied().collect::<Vec<_>>().join(",")
+    }
+}
+
+/// What earns a method its row: the APIs of the tags asked for, then its
+/// other APIs; or, with texts, its APIs and loaded strings containing one.
+///
+/// # Arguments
+///
+/// * `meta` - The metadata.
+/// * `r` - The method's references.
+/// * `t` - Its tags ([`tags`]).
+/// * `name` - Its name.
+/// * `want_tags` - The tags asked for.
+/// * `texts` - The texts asked for, lowercased.
+///
+/// # Returns
+///
+/// The evidence, `None` when a text is in neither the name, an API nor a
+/// string.
+fn evidence(
+    meta: &Meta<'_>,
+    r: &Refs,
+    t: &BTreeMap<&'static str, BTreeSet<String>>,
+    name: &str,
+    want_tags: &[&str],
+    texts: &[String],
+) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    if texts.is_empty() {
+        for api in want_tags
+            .iter()
+            .filter_map(|w| t.get(w))
+            .chain(t.values())
+            .flatten()
+        {
+            if !out.contains(api) {
+                out.push(api.clone());
+            }
+        }
+        return Some(out);
+    }
+    let lower = name.to_lowercase();
+    let mut said: Vec<String> = t.values().flatten().cloned().collect();
+    said.extend(
+        r.sites
+            .iter()
+            .filter(|s| s.op == LDSTR)
+            .map(|s| meta.token(s.token)),
+    );
+    let all_hit = texts.iter().all(|x| {
+        lower.contains(x.as_str()) || said.iter().any(|s| s.to_lowercase().contains(x.as_str()))
+    });
+    all_hit.then(|| {
+        said.into_iter()
+            .filter(|s| texts.iter().any(|x| s.to_lowercase().contains(x.as_str())))
+            .collect()
+    })
+}
+
+/// Lists IL methods with what they call and load: `token va code tags
+/// name evidence` rows, narrowed by tags and texts.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis, which keeps the index.
+/// * `spec` - Comma-separated tags ([`API_TAGS`], `pinvoke`), which a
+///   method must all have, texts its name, a string it loads or an API it
+///   calls contains, `offset=<n>` and `limit=<n>`.
+///
+/// # Errors
+///
+/// When the program is no .NET assembly or the page does not read.
+pub fn methods_tsv(p: &Program, a: &Analysis, spec: &str) -> Result<String, String> {
+    let meta = Meta::open(p)?;
+    let index = Managed::of(p, a);
+    let (mut want_tags, mut texts, mut offset, mut limit) =
+        (Vec::new(), Vec::new(), 0, super::CLR_PAGE);
+    for word in spec.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        if let Some(n) = word.strip_prefix("offset=") {
+            offset = crate::table::row_offset(n)?;
+        } else if let Some(n) = word.strip_prefix("limit=") {
+            limit = crate::table::row_limit(n)?.min(super::CLR_PAGE);
+        } else if word == PINVOKE_TAG || API_TAGS.iter().any(|(t, _)| *t == word) {
+            want_tags.push(word);
+        } else {
+            texts.push(word.to_lowercase());
+        }
+    }
+    let mut rows = Vec::new();
+    for r in &index.methods {
+        let t = tags(&meta, r);
+        if !want_tags.iter().all(|w| t.contains_key(w)) {
+            continue;
+        }
+        let name = meta.member_name(r.token).unwrap_or_default();
+        let Some(evidence) = evidence(&meta, r, &t, &name, &want_tags, &texts) else {
+            continue;
+        };
+        let shown: Vec<String> = evidence.iter().take(3).cloned().collect();
+        let more = if evidence.len() > 3 {
+            format!("; +{}", evidence.len() - 3)
+        } else {
+            String::new()
+        };
+        rows.push(format!(
+            "{:#010x}\t{:#x}\t{}\t{}\t{name}\t{}{more}",
+            r.token,
+            r.va,
+            r.code_len,
+            tags_text(&t),
+            if shown.is_empty() {
+                "-".to_owned()
+            } else {
+                shown.join("; ")
+            }
+        ));
+    }
+    let start = offset.min(rows.len());
+    let page: Vec<&String> = rows.iter().skip(start).take(limit).collect();
+    let mut out = format!(
+        "# IL methods by what they call and load: tags {} {PINVOKE_TAG}; {} of {} methods match{}\n# showing {} of {} from {start}; borer://clr/methods,<tag or text> narrows, offset=<n> pages; disassemble_function <token or name> lists a method's IL\n",
+        API_TAGS
+            .iter()
+            .map(|(t, _)| *t)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" "),
+        rows.len(),
+        index.methods.len(),
+        if index.capped {
+            "; capped: more references than were indexed"
+        } else {
+            ""
+        },
+        page.len(),
+        rows.len()
+    );
+    if !page.is_empty() {
+        out.push_str("token\tva\tcode\ttags\tname\tevidence\n");
+        for row in page {
+            out.push_str(row);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}

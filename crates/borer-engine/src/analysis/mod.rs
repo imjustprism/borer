@@ -2298,7 +2298,7 @@ pub fn function_entry(program: &Program, analysis: &Analysis, va: u64) -> Result
         .filter(|m| m.body == crate::clr::Body::Il)
     {
         return Err(format!(
-            "{va:#x} is the IL body of .NET method {:#010x} {}: borer does not decompile or disassemble IL; borer://clr lists the methods",
+            "{va:#x} is the IL body of .NET method {:#010x} {}: borer does not decompile IL; disassemble_function, function, function_strings and xrefs on it read its CIL; borer://clr lists the methods",
             m.token, m.name
         ));
     }

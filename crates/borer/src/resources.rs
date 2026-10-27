@@ -613,18 +613,28 @@ impl BorerServer {
     }
 
     /// Lists a .NET assembly's metadata: types, methods, P/Invokes,
-    /// external members, references and user strings.
+    /// external members, references and user strings; with `methods` first
+    /// its IL methods by the APIs they call and the strings they load
+    /// ([`borer_engine::clr::managed::methods_tsv`]).
     ///
     /// # Arguments
     ///
-    /// * `spec` - Kinds and texts to keep, and the page, comma-separated.
+    /// * `spec` - Kinds and texts to keep, and the page, comma-separated;
+    ///   or `methods` and its words.
     ///
     /// # Errors
     ///
     /// When no binary is loaded, its metadata was refused, or the page
     /// does not read.
     pub(crate) fn clr_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.with_program(|p| borer_engine::clr::clr_tsv(p, spec).map_err(|e| e.to_string()))
+        let (head, rest) = spec.split_once([',', '/']).unwrap_or((spec, ""));
+        match head.trim() {
+            "methods" => self.with_analysis(Feature::Discover, |p, a, _| {
+                borer_engine::clr::managed::methods_tsv(p, a, rest)
+            }),
+            _ => self
+                .with_program(|p| borer_engine::clr::clr_tsv(p, spec).map_err(|e| e.to_string())),
+        }
     }
 
     /// Lists the programs and containers embedded in the loaded file, and
