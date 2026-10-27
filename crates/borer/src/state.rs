@@ -518,10 +518,10 @@ impl BorerServer {
         )
     }
 
-    /// The .NET members an argument names, when it names managed code: an IL
-    /// body's address or name, or, when the argument is no mapped address,
-    /// a token or a method's or field's name
-    /// ([`borer_engine::clr::managed::targets`]).
+    /// The .NET members an argument names, when it names managed code: a
+    /// method's or field's declared name, every overload, unless one is a
+    /// native method ([`borer_engine::clr::managed::targets`]); else an IL
+    /// body's address, or a token when the argument is no mapped address.
     ///
     /// # Arguments
     ///
@@ -533,7 +533,18 @@ impl BorerServer {
     /// The tokens, `None` for a program with no .NET metadata or an
     /// argument naming native code or nothing managed.
     pub(crate) fn managed_targets(&self, p: &Program, text: &str) -> Option<BTreeSet<u32>> {
-        p.clr()?;
+        let clr = p.clr()?;
+        if !borer_engine::analysis::hex_prefixed(text)
+            && let Some(named) = managed::targets(p, text).filter(|t| {
+                !t.iter().any(|token| {
+                    clr.methods
+                        .iter()
+                        .any(|m| m.token == *token && m.body == borer_engine::clr::Body::Native)
+                })
+            })
+        {
+            return Some(named);
+        }
         if let Ok(va) = self.addr(p, text) {
             if let Some(token) = managed::il_method(p, va) {
                 return Some(BTreeSet::from([token]));
