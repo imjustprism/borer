@@ -594,11 +594,12 @@ pub fn strings_tsv(p: &Program, a: &Analysis, token: u32) -> Result<String, Stri
 /// * `p` - The program.
 /// * `a` - Its analysis, which keeps the index.
 /// * `token` - The method's `MethodDef` token.
+/// * `offset` - Rows skipped.
 ///
 /// # Errors
 ///
 /// When the token names no IL method or its body does not read.
-pub fn detail(p: &Program, a: &Analysis, token: u32) -> Result<String, String> {
+pub fn detail(p: &Program, a: &Analysis, token: u32, offset: usize) -> Result<String, String> {
     let meta = Meta::open(p)?;
     let index = Managed::of(p, a);
     let r = indexed(&index, meta.clr, p, token)?;
@@ -626,20 +627,21 @@ pub fn detail(p: &Program, a: &Analysis, token: u32) -> Result<String, String> {
             .unwrap_or("uses");
         rows.push((rel, t, n));
     }
+    let start = offset.min(rows.len());
     let _ = writeln!(
         out,
-        "# {} instructions, {} callers, tags {}; showing {} of {} rows{}",
+        "# {} instructions, {} callers, tags {}; showing {} of {} rows from {start}{}",
         r.instrs,
         rows.iter().filter(|x| x.0 == "caller").count(),
         tags_text(&tags(&meta, r, &pinvoke_names(&meta))),
-        rows.len().min(ROWS_MAX),
+        rows.len().saturating_sub(start).min(ROWS_MAX),
         rows.len(),
         r.stop
             .as_ref()
             .map_or_else(String::new, |w| format!("; decoding stopped: {w}"))
     );
     out.push_str("rel\ttoken\tsites\tname\n");
-    for (rel, t, n) in rows.iter().take(ROWS_MAX) {
+    for (rel, t, n) in rows.iter().skip(start).take(ROWS_MAX) {
         let _ = writeln!(out, "{rel}\t{t:#010x}\t{n}\t{}", meta.token(*t));
     }
     Ok(out)

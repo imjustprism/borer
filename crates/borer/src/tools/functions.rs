@@ -203,7 +203,7 @@ impl BorerServer {
         let offset = to_usize(offset.unwrap_or(0));
         self.with_analysis(Feature::Discover, |p, a, o| {
             if let Some(token) = self.il_method(p, &address) {
-                return borer_engine::clr::managed::detail(p, a, token);
+                return borer_engine::clr::managed::detail(p, a, token, offset);
             }
             let entry = self.function_entry(p, a, &address)?;
             render::function_detail(a, o, entry, offset)

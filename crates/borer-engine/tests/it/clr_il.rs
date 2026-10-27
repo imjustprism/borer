@@ -447,9 +447,12 @@ fn the_index_answers_callers_strings_and_apis() {
         strings.contains("IL_0028\t0x70000001\t\"http://evil.test/a\""),
         "{strings}"
     );
-    let detail = managed::detail(&p, &a, 0x0600_0004).expect("detail");
+    let detail = managed::detail(&p, &a, 0x0600_0004, 0).expect("detail");
     assert!(detail.contains("caller\t0x06000001\t5\t"), "{detail}");
     assert!(detail.contains("tags pinvoke"), "{detail}");
+    let paged = managed::detail(&p, &a, 0x0600_0004, 1).expect("detail");
+    assert!(paged.contains("rows from 1"), "{paged}");
+    assert!(!paged.contains("caller	0x06000001"), "{paged}");
     let net = managed::methods_tsv(&p, &a, "net").expect("methods");
     assert!(
         net.contains("Ns.Program::Download\tSystem.Net.WebClient::.ctor"),
