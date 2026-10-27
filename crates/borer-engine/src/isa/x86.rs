@@ -51,18 +51,20 @@
 //!   second architecture will have to replace rather than re-implement;
 //! * synthesis: `Instruction::default` as the `decode_out` target, and
 //!   `Instruction::with_branch`/`with1` building the call a thunk would
-//!   have made in the lifter's call analysis.
-//!
-//! The engine never encodes bytes: patching rewrites existing encodings in
-//! place through `constant_offsets`, and the synthetic instructions above
-//! exist to be classified, not emitted.
+//!   have made in the lifter's call analysis;
+//! * encoding: [`BlockEncoder`] over an [`InstructionBlock`], with
+//!   [`BlockEncoderOptions`], is how [`crate::patch`] re-encodes a run of
+//!   instructions at a new address and fixes its relative branches and
+//!   RIP-relative operands up. It is the one place the engine emits bytes;
+//!   everywhere else `constant_offsets` rewrites an existing encoding in
+//!   place and the synthetic instructions above exist to be classified.
 
 mod regbank;
 
 pub use iced_x86::{
-    Code, ConditionCode, ConstantOffsets, Decoder, DecoderOptions, FlowControl, Formatter,
-    Instruction, InstructionInfoFactory, MemorySize, Mnemonic, NasmFormatter, OpAccess, OpKind,
-    Register, RflagsBits,
+    BlockEncoder, BlockEncoderOptions, Code, ConditionCode, ConstantOffsets, Decoder,
+    DecoderOptions, FlowControl, Formatter, Instruction, InstructionBlock, InstructionInfoFactory,
+    MemorySize, Mnemonic, NasmFormatter, OpAccess, OpKind, Register, RflagsBits,
 };
 pub(crate) use regbank::{
     as_xmm, gpr_bank_index, sized_register, st_depth, st_depth_mod8, st_register, xmm_slot,

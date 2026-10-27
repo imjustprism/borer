@@ -51,6 +51,7 @@ pub mod memory;
 mod minidump;
 pub mod num;
 pub mod pack;
+pub mod patch;
 pub mod pdb;
 pub mod program;
 pub mod reloc;

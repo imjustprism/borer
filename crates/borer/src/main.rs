@@ -686,6 +686,7 @@ impl BorerServer {
             ("stackstrings", None) => self.stack_strings_text("")?,
             ("stackstrings", Some(filter)) => self.stack_strings_text(&filter)?,
             ("emulate", Some(address)) => self.emulate_text(&address)?,
+            ("patch", Some(spec)) => self.patch_text(&spec)?,
             ("taint", Some(spec)) => self.taint_text(&spec)?,
             ("layout", Some(spec)) => self.layout_text(&spec)?,
             ("why", Some(target)) => self.why_text(&target)?,
@@ -705,8 +706,7 @@ impl BorerServer {
             ("difffn", Some(spec)) => self.diff_function_text(&spec)?,
             ("migrate", Some(spec)) => self.migrate_text(&spec)?,
             ("carry", Some(path)) => self.carry_text(&path)?,
-            ("vm", None) => self.vm_text("")?,
-            ("vm", Some(address)) => self.vm_text(&address)?,
+            ("vm", filter) => self.vm_text(filter.as_deref().unwrap_or(""))?,
             ("asserts", filter) => self.asserts_text(filter.as_deref().unwrap_or(""))?,
             ("sources", filter) => self.sources_text(filter.as_deref().unwrap_or(""))?,
             ("classes", filter) => self.classes_text(filter.as_deref().unwrap_or(""))?,
@@ -1351,6 +1351,27 @@ mod tests {
             "{}",
             refused.message
         );
+    }
+
+    /// `borer://patch` plans a dry-run patch over a loaded image: the fit,
+    /// the emulator check and the patch file reach the client.
+    ///
+    /// # Panics
+    ///
+    /// When the plan is missing a section or does not read.
+    #[test]
+    fn patch_plans_a_dry_run_over_a_loaded_image() {
+        let server = raw_server();
+        let out = server
+            .resource_text("borer://patch/0x1000/9090c3")
+            .expect("a patch plan");
+        assert!(out.contains("# fit: in place"), "{out}");
+        assert!(out.contains("0x0 c3c3c3 9090c3"), "{out}");
+        assert!(out.contains("# verify: emulated"), "{out}");
+        let refused = server
+            .resource_text("borer://patch/0x1000/zz")
+            .expect_err("bad hex");
+        assert!(refused.message.contains("hex"), "{}", refused.message);
     }
 
     /// Page one and page two of a listing hold its first rows, in order.

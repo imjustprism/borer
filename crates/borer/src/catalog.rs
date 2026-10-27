@@ -231,6 +231,11 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://taint/{entry},rax",
     ),
     (
+        "borer://patch/{spec}",
+        "Plan a dry-run patch; borer never writes the file. Replace the whole instructions at an address with new machine code: spec is <at>/<hexbytes>[,detour][,cave=<addr>], at an address or name, hexbytes the replacement as pairs of hex digits (x86/x64 machine code written as if it sits at <at>; borer re-encodes it at its destination through iced, fixing relative branches and RIP-relative operands). Returns the new code and its position-dependent references, the whole original instructions it overwrites with the nop padding named, whether it fits in place or needs a code cave and the usable padding runs (00, cc or 90) in executable sections with their sizes, an emulator check of the planned bytes, and a borer-patch-v1 file (one line per region: file-offset, old-bytes, new-bytes, all hex and equal length, old verified before new is written) a separate tool applies. detour forces a jmp-to-cave trampoline even when the bytes would fit in place; cave=<addr> places the detour at that cave instead of searching",
+        "borer://patch/{entry}/9090c3",
+    ),
+    (
         "borer://emulate/{address}",
         "Run code and read the result. The address carries an experiment: comma-separated reg=val, aN=val (the argument the decompiler names aN; a1 is the first), w<addr>=<hexbytes> (set data or patch code), stop=<addr>, steps=<n> (at most 20000000), trace=<n> (what each of the last n instructions changed; a small steps= watches the start instead), origin=<v> (the instruction that first put the value v in a register or in memory), profile=<n> (the n most-run addresses and most-read pages, where the steps went; at most 64), dump=<addr>:<len> (at most 4096 bytes, ?? where nothing is mapped). Reports final registers, the imported APIs and syscalls it serviced as api(args) -> ret with each argument decoded (a string as text, a flag or handle named, an unknown pointer as ptr 0x...), decoded text and each dump.",
         "borer://emulate/{entry},a1=5,steps=10000",

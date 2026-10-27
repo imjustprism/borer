@@ -246,6 +246,22 @@ impl BorerServer {
         })
     }
 
+    /// Plans a dry-run patch: the bytes to write to replace the instructions
+    /// at an address, the code cave a detour needs, and a patch file.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - `<at>/<hexbytes>[,detour][,cave=<addr>]`.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or the spec is refused.
+    pub(crate) fn patch_text(&self, spec: &str) -> Result<String, ErrorData> {
+        self.refusing(Feature::Disasm, |p, a, o| {
+            borer_engine::patch::plan_tsv(p, a, o, spec)
+        })
+    }
+
     /// Runs a function over a probe string in every argument shape and
     /// reports what it does with it, the CLI's `oracle`.
     ///
