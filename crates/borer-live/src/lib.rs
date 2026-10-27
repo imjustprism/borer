@@ -644,6 +644,80 @@ mod os {
             };
             if ok == 0 { 0 } else { got.min(buf.len()) }
         }
+
+        /// Committed regions that cannot be read: guard pages and no-access
+        /// pages, which [`Memory::regions`] leaves out and a scan says it
+        /// left out.
+        #[must_use]
+        pub fn unreadable_regions(&self) -> usize {
+            self.walk().1
+        }
+
+        /// Walks the address space region by region.
+        ///
+        /// # Returns
+        ///
+        /// The committed, readable regions in address order, and how many
+        /// committed regions are not readable.
+        fn walk(&self) -> (Vec<Region>, usize) {
+            let mut out = Vec::new();
+            let mut unreadable = 0usize;
+            let mut at: u64 = 0;
+            while let Ok(here) = usize::try_from(at) {
+                // SAFETY: MEMORY_BASIC_INFORMATION is plain data; every
+                // field is valid as zero.
+                let mut info: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+                // SAFETY: `info` is a properly sized buffer that outlives the
+                // call and the handle is open with QUERY_INFORMATION.
+                let n = unsafe {
+                    VirtualQueryEx(
+                        self.handle.0,
+                        here as *const c_void,
+                        &raw mut info,
+                        size_of::<MEMORY_BASIC_INFORMATION>(),
+                    )
+                };
+                if n == 0 {
+                    break;
+                }
+                let base = info.BaseAddress as usize as u64;
+                let size = info.RegionSize as u64;
+                let readable = info.Protect & PAGE_GUARD == 0
+                    && info.Protect & PAGE_NOACCESS == 0
+                    && info.Protect != 0;
+                if info.State == MEM_COMMIT && !readable {
+                    unreadable += 1;
+                }
+                if info.State == MEM_COMMIT && readable {
+                    let p = info.Protect;
+                    out.push(Region {
+                        base,
+                        size,
+                        writable: p
+                            & (PAGE_READWRITE
+                                | PAGE_WRITECOPY
+                                | PAGE_EXECUTE_READWRITE
+                                | PAGE_EXECUTE_WRITECOPY)
+                            != 0,
+                        executable: p
+                            & (PAGE_EXECUTE
+                                | PAGE_EXECUTE_READ
+                                | PAGE_EXECUTE_READWRITE
+                                | PAGE_EXECUTE_WRITECOPY)
+                            != 0,
+                        image: info.Type == MEM_IMAGE,
+                    });
+                }
+                let Some(next) = base.checked_add(size) else {
+                    break;
+                };
+                if next <= at {
+                    break;
+                }
+                at = next;
+            }
+            (out, unreadable)
+        }
     }
 
     impl Memory for Process {
@@ -676,60 +750,7 @@ mod os {
         }
 
         fn regions(&self) -> Vec<Region> {
-            let mut out = Vec::new();
-            let mut at: u64 = 0;
-            while let Ok(here) = usize::try_from(at) {
-                // SAFETY: MEMORY_BASIC_INFORMATION is plain data; every
-                // field is valid as zero.
-                let mut info: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-                // SAFETY: `info` is a properly sized buffer that outlives the
-                // call and the handle is open with QUERY_INFORMATION.
-                let n = unsafe {
-                    VirtualQueryEx(
-                        self.handle.0,
-                        here as *const c_void,
-                        &raw mut info,
-                        size_of::<MEMORY_BASIC_INFORMATION>(),
-                    )
-                };
-                if n == 0 {
-                    break;
-                }
-                let base = info.BaseAddress as usize as u64;
-                let size = info.RegionSize as u64;
-                let readable = info.State == MEM_COMMIT
-                    && info.Protect & PAGE_GUARD == 0
-                    && info.Protect & PAGE_NOACCESS == 0
-                    && info.Protect != 0;
-                if readable {
-                    let p = info.Protect;
-                    out.push(Region {
-                        base,
-                        size,
-                        writable: p
-                            & (PAGE_READWRITE
-                                | PAGE_WRITECOPY
-                                | PAGE_EXECUTE_READWRITE
-                                | PAGE_EXECUTE_WRITECOPY)
-                            != 0,
-                        executable: p
-                            & (PAGE_EXECUTE
-                                | PAGE_EXECUTE_READ
-                                | PAGE_EXECUTE_READWRITE
-                                | PAGE_EXECUTE_WRITECOPY)
-                            != 0,
-                        image: info.Type == MEM_IMAGE,
-                    });
-                }
-                let Some(next) = base.checked_add(size) else {
-                    break;
-                };
-                if next <= at {
-                    break;
-                }
-                at = next;
-            }
-            out
+            self.walk().0
         }
 
         fn modules(&self) -> Vec<Module> {
@@ -830,6 +851,12 @@ mod os {
             size_of::<usize>()
         }
 
+        /// Committed regions that cannot be read; none off Windows.
+        #[must_use]
+        pub fn unreadable_regions(&self) -> usize {
+            0
+        }
+
         /// The process's exit code; none is known off Windows.
         #[must_use]
         pub fn exit_code(&self) -> Option<u32> {
@@ -889,7 +916,12 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use borer_engine::live::path::{self, Base};
+    use borer_engine::live::scan::{self, Compare, Needle, Scope};
     use borer_engine::live::{Memory, find_words};
+    use borer_engine::memory::Kind;
 
     use windows_sys::Win32::System::Threading::{
         BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetPriorityClass,
@@ -1132,5 +1164,57 @@ mod tests {
         let teb = me.teb_of(threads[0]).expect("the TEB of a thread");
         assert!(teb > 0x1_0000, "{teb:#x}");
         assert!(me.read(teb, 8).is_some(), "the TEB is readable");
+    }
+
+    /// A value planted on this process's heap is found by a scan of the
+    /// heaps and kept by a next scan once it rises; a pointer chain from a
+    /// global of this executable through a heap object reaches it.
+    #[test]
+    fn the_current_process_finds_its_own_values_and_chains() {
+        /// The global the chain starts at.
+        static ROOT: AtomicUsize = AtomicUsize::new(0);
+        const PLANTED: u64 = 0x7a7a_5151_9393_0001;
+        let inner: Box<[AtomicU64; 8]> = Box::new(std::array::from_fn(|_| AtomicU64::new(0)));
+        inner[5].store(PLANTED, Ordering::SeqCst);
+        let outer: Box<[AtomicUsize; 4]> = Box::new(std::array::from_fn(|_| AtomicUsize::new(0)));
+        outer[2].store(inner.as_ptr() as usize, Ordering::SeqCst);
+        ROOT.store(outer.as_ptr() as usize, Ordering::SeqCst);
+        let target = inner.as_ptr() as usize as u64 + 0x28;
+        let me = Process::attach(&std::process::id().to_string()).expect("attach to self");
+        let heap = scan::ranges(&me, &Scope::Heap).expect("the heaps");
+        let needle = Needle::parse(Kind::U64, &format!("{PLANTED:#x}"), None).expect("u64");
+        let found = scan::scan(&me, needle, &heap);
+        assert!(
+            found.hits.contains(&target),
+            "{target:#x}: {:?}",
+            found.hits
+        );
+        inner[5].store(PLANTED + 1, Ordering::SeqCst);
+        let rose = scan::narrow(&me, &found, &Compare::Increased).expect("narrowed");
+        assert!(rose.found.hits.contains(&target));
+        let exe = me
+            .modules()
+            .into_iter()
+            .find(|m| m.name.to_lowercase().ends_with(".exe"))
+            .expect("this executable");
+        let bases = vec![Base {
+            name: exe.name.clone(),
+            start: exe.base,
+            len: exe.size,
+        }];
+        let root = core::ptr::from_ref(&ROOT) as usize as u64;
+        let chains = path::paths(&me, target, &bases, 2, 0x100, 8);
+        let chain = chains
+            .chains
+            .iter()
+            .find(|c| c.at == root)
+            .expect("a chain from ROOT");
+        assert_eq!(chain.offsets, vec![0x10, 0x28]);
+        assert_eq!(path::follow(&me, chain, 8), Some(target));
+        assert!(
+            me.unreadable_regions() > 0,
+            "a thread stack has a guard page"
+        );
+        drop((inner, outer));
     }
 }
