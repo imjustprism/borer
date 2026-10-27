@@ -209,11 +209,9 @@ impl<'a> Meta<'a> {
     /// Reads one type from a signature (II.23.2.12), rendered the way C#
     /// spells the built-in ones; `?` where the blob ends or names no type.
     fn ty(&self, b: &mut Blob<'_>, depth: u8) -> String {
-        let fuel = self.fuel.get();
-        if depth > DEPTH_MAX || fuel == 0 {
+        if depth > DEPTH_MAX || self.spend().is_none() {
             return "...".to_owned();
         }
-        self.fuel.set(fuel - 1);
         let d = depth.saturating_add(1);
         let Some(et) = b.byte() else {
             return "?".to_owned();
@@ -261,13 +259,26 @@ impl<'a> Meta<'a> {
         cut(text.unwrap_or_else(|| "?".to_owned()))
     }
 
-    /// Reads a general array's shape after its element type (II.23.2.13).
+    /// Takes one read out of the fuel ([`TYPE_FUEL`]).
+    ///
+    /// # Returns
+    ///
+    /// `None` once the fuel is spent.
+    fn spend(&self) -> Option<()> {
+        let fuel = self.fuel.get().checked_sub(1)?;
+        self.fuel.set(fuel);
+        Some(())
+    }
+
+    /// Reads a general array's shape after its element type (II.23.2.13),
+    /// each size and bound taking fuel.
     fn array(&self, b: &mut Blob<'_>, depth: u8) -> Option<String> {
         let elem = self.ty(b, depth);
         let rank = b.uint()?;
         for _ in 0..2 {
             let n = b.uint()?;
             for _ in 0..n {
+                self.spend()?;
                 b.uint()?;
             }
         }
