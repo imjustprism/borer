@@ -14,7 +14,6 @@
 //! claims one it did not read; every chain is walked again before it is
 //! shown ([`follow`]).
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
@@ -141,7 +140,6 @@ pub fn paths(
         offset: 0,
     }];
     let mut frontier = vec![0usize];
-    let mut seen: BTreeSet<u64> = BTreeSet::from([target]);
     for level in 1..=depth {
         if frontier.is_empty() || out.swept.stop.is_some() {
             break;
@@ -189,7 +187,7 @@ pub fn paths(
                 }
                 continue;
             }
-            if level == depth || !seen.insert(loc) {
+            if level == depth || on_path(&nodes, n, loc) {
                 continue;
             }
             if next.len() >= FRONTIER_MAX {
@@ -216,6 +214,28 @@ pub fn paths(
         key(a).cmp(&key(b)).then_with(|| a.offsets.cmp(&b.offsets))
     });
     out
+}
+
+/// Whether an address is already on the way from a node to the target,
+/// so going on from it would walk a cycle.
+///
+/// An address may stand on several routes, one node each, so a pointer
+/// that reaches two addresses of a level at two offsets starts two chains.
+///
+/// # Arguments
+///
+/// * `nodes` - The nodes reached.
+/// * `n` - The node the address's pointer leads to.
+/// * `at` - The address.
+fn on_path(nodes: &[Node], n: usize, at: u64) -> bool {
+    let mut here = Some(n);
+    while let Some(i) = here {
+        if nodes[i].at == at {
+            return true;
+        }
+        here = nodes[i].next;
+    }
+    false
 }
 
 /// Builds the chain that starts at a pointer in a base and goes on through
@@ -489,6 +509,25 @@ mod tests {
         assert_eq!(label(0x7000_2040).as_deref(), Some("static 0x2040 g_state"));
         assert_eq!(label(0x7000_2050).as_deref(), Some("static 0x2050"));
         assert_eq!(label(0x10), None);
+    }
+
+    /// A heap pointer that reaches two addresses of a level, at two
+    /// offsets, leads to a chain through each.
+    #[test]
+    fn a_pointer_on_two_routes_starts_both_chains() {
+        let mem = process(0x4000);
+        mem.put(0x11020, &0x12000u64.to_le_bytes());
+        mem.put(0x11028, &0x12008u64.to_le_bytes());
+        mem.put(0x13000, &0x11000u64.to_le_bytes());
+        mem.put(0x40_0100, &0x13000u64.to_le_bytes());
+        let found = paths(&mem, 0x12018, &game(), 3, 0x100, 8);
+        let spelled: Vec<String> = found.chains.iter().map(|c| spell(c, &game())).collect();
+        for want in [
+            "[[[game.exe+0x100]+0x0]+0x20]+0x18",
+            "[[[game.exe+0x100]+0x0]+0x28]+0x10",
+        ] {
+            assert!(spelled.iter().any(|s| s == want), "{want}: {spelled:?}");
+        }
     }
 
     /// A pointer in a module's read-only data starts a chain too, as a
