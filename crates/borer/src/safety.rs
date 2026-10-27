@@ -208,6 +208,7 @@ mod tests {
                 "live_modules",
                 "live_object",
                 "live_read",
+                "live_scan",
                 "live_watch",
             ]
         } else {

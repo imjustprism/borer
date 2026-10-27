@@ -141,7 +141,7 @@ impl BorerServer {
     /// off Windows they are left out rather than listed and always refused.
     fn tool_router() -> ToolRouter<Self> {
         let live = if cfg!(windows) {
-            Self::live_tools()
+            Self::live_tools() + Self::live_scan_tools()
         } else {
             ToolRouter::new()
         };

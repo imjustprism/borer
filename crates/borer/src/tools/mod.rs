@@ -6,6 +6,7 @@ pub(crate) mod bytes;
 pub(crate) mod decompile;
 pub(crate) mod functions;
 pub(crate) mod live;
+pub(crate) mod livescan;
 pub(crate) mod load;
 pub(crate) mod query;
 pub(crate) mod search;

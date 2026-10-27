@@ -267,7 +267,7 @@ Any address argument takes `0x` hex, decimal, or a name.
 | Read code | `function_summary`, `function_strings`, `decompile`, `decompile_batch`, `disassemble`, `disassemble_function`, `cfg`, `callgraph`, `reaches`, `xrefs`, `class_layout` |
 | Read data | `read`, `hexdump` |
 | Annotate | `set_name`, `set_comment`, `set_type`, `types`, `annotations`, `save_project`, `load_project` |
-| Live process (Windows only) | `live_attach`, `live_detach`, `live_modules`, `live_read`, `live_object`, `live_instances`, `live_watch` |
+| Live process (Windows only) | `live_attach`, `live_detach`, `live_modules`, `live_read`, `live_object`, `live_instances`, `live_watch`, `live_scan` |
 | Anything else | `query`, `script` |
 
 Deeper analyses are `borer://` resources: taint, struct layout, emulation,
@@ -294,8 +294,10 @@ companion PDB, and `--arch x86|x64|arm64` (with `--base`, `--entry` and
 
 - **Live processes (Windows only):** `live_attach` opens a running process
   read-only (`PROCESS_VM_READ`) and maps the loaded binary onto it. The live
-  tools then read objects by their recovered class layout and watch fields
-  change. Some anti-cheat software flags any foreign handle, read-only or not.
+  tools then read objects by their recovered class layout, watch fields
+  change, find the addresses holding a value and narrow them as it changes
+  (`live_scan`), the Cheat Engine workflows without ever writing the target.
+  Some anti-cheat software flags any foreign handle, read-only or not.
 - **Packs:** target knowledge (one engine's class names, message ports) lives
   in local `.borer` files, never in engine code. None ship with borer.
   `borer sigmake` builds a signature pack from static libraries you already

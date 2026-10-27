@@ -757,6 +757,122 @@ pub(crate) struct LiveWatchParams {
     pub(crate) class: Option<String>,
 }
 
+/// What `live_scan` looks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(transform = names_only)]
+pub(crate) enum ScanKind {
+    /// One unsigned byte.
+    U8,
+    /// An unsigned 16-bit word.
+    U16,
+    /// An unsigned 32-bit word.
+    #[default]
+    U32,
+    /// An unsigned 64-bit word.
+    U64,
+    /// A signed byte.
+    I8,
+    /// A signed 16-bit word.
+    I16,
+    /// A signed 32-bit word.
+    I32,
+    /// A signed 64-bit word.
+    I64,
+    /// A single-precision float.
+    F32,
+    /// A double-precision float.
+    F64,
+    /// A UTF-8 string, no terminator.
+    String,
+    /// A UTF-16LE string, no terminator.
+    Wstring,
+    /// Hex bytes with `??` wildcards.
+    #[serde(alias = "aob")]
+    Bytes,
+}
+
+impl ScanKind {
+    /// The engine kind values of this scan read as; `None` for bytes.
+    pub(crate) fn kind(self) -> Option<borer_engine::memory::Kind> {
+        use borer_engine::memory::Kind;
+        Some(match self {
+            Self::U8 => Kind::U8,
+            Self::U16 => Kind::U16,
+            Self::U32 => Kind::U32,
+            Self::U64 => Kind::U64,
+            Self::I8 => Kind::I8,
+            Self::I16 => Kind::I16,
+            Self::I32 => Kind::I32,
+            Self::I64 => Kind::I64,
+            Self::F32 => Kind::F32,
+            Self::F64 => Kind::F64,
+            Self::String => Kind::CStr,
+            Self::Wstring => Kind::WStr,
+            Self::Bytes => return None,
+        })
+    }
+}
+
+/// How a next `live_scan` narrows a result set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(transform = names_only)]
+pub(crate) enum ScanCompare {
+    /// The bytes differ from the last scan.
+    Changed,
+    /// The bytes are the same as at the last scan.
+    Unchanged,
+    /// The number is larger than at the last scan.
+    Increased,
+    /// The number is smaller than at the last scan.
+    Decreased,
+    /// The value now equals `value`.
+    Equal,
+}
+
+/// Where a first `live_scan` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(transform = names_only)]
+pub(crate) enum ScanScope {
+    /// Every readable region.
+    #[default]
+    All,
+    /// The process's main module.
+    Main,
+    /// The module `module` names.
+    Module,
+    /// Writable memory no module maps: heaps, stacks.
+    Heap,
+}
+
+/// Parameters for `live_scan`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveScanParams {
+    /// Result set name; a first scan replaces a set of that name.
+    pub(crate) name: String,
+    /// Number, text, or hex bytes (?? wildcard); with compare=equal, the new value.
+    pub(crate) value: Option<String>,
+    /// Value type (default u32); a next scan keeps the set's.
+    pub(crate) kind: Option<ScanKind>,
+    /// Float tolerance (default: half a unit of the last digit given).
+    pub(crate) tolerance: Option<f64>,
+    /// Narrow the named set instead of scanning anew.
+    pub(crate) compare: Option<ScanCompare>,
+    /// Where a first scan reads (default all).
+    pub(crate) scope: Option<ScanScope>,
+    /// Module name, for scope=module.
+    pub(crate) module: Option<String>,
+    /// Hits to skip.
+    pub(crate) offset: Option<u32>,
+    /// Max rows (default 50, max 500).
+    pub(crate) limit: Option<u32>,
+    /// Header line only.
+    pub(crate) count_only: Option<bool>,
+}
+
 /// Widens a count parameter to the index type.
 ///
 /// A `u32` fits a 32-bit or wider `usize`, so nothing is lost on any

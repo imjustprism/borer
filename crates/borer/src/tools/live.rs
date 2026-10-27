@@ -87,6 +87,9 @@ pub(crate) struct LiveSession {
     pub(crate) rebase: Result<Rebase, String>,
     /// Watches by name, so a diff names the fields that changed.
     pub(crate) snapshots: std::collections::BTreeMap<String, Watch>,
+    /// Value scans' result sets by name, which a next scan narrows
+    /// ([`crate::tools::livescan`]).
+    pub(crate) scans: std::collections::BTreeMap<String, crate::tools::livescan::ScanSet>,
     /// The main thread's block of the image's thread-local storage, where
     /// the singletons the analysis placed at TLS offsets live; `None` when
     /// the image has no TLS or the block could not be read.
@@ -108,6 +111,7 @@ impl LiveSession {
             process,
             rebase: Err(NO_BINARY.to_owned()),
             snapshots: std::collections::BTreeMap::new(),
+            scans: std::collections::BTreeMap::new(),
             tls_block: None,
         }
     }
@@ -412,7 +416,7 @@ impl BorerServer {
                 modules.len() - ATTACH_MODULES
             );
         }
-        out.push_str("next: live_object(address or singleton name), live_instances(class), live_read(address, kind), live_watch(name, address)\n");
+        out.push_str("next: live_object(address or singleton name), live_instances(class), live_read(address, kind), live_watch(name, address), live_scan(name, value)\n");
         if let Some(was) = lock(&self.live).replace(session) {
             let _ = write!(
                 out,
@@ -440,6 +444,15 @@ impl BorerServer {
                     } else {
                         String::new()
                     }
+                );
+            }
+            if !was.scans.is_empty() {
+                let names: Vec<&str> = was.scans.keys().map(String::as_str).collect();
+                let _ = writeln!(
+                    out,
+                    "note: its {} result set(s) are dropped: {}",
+                    names.len(),
+                    names.join(", ")
                 );
             }
         }
