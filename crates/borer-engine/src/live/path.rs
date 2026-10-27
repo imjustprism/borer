@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 use super::scan::{Stop, Swept, sweep};
-use super::{Memory, Rebase};
+use super::{Memory, Rebase, SCAN_MAX};
 use crate::analysis::{Analysis, Overlay};
 use crate::memory::le_word;
 use crate::num::from_usize;
@@ -154,7 +154,8 @@ pub fn paths(
             sorted[sorted.len() - 1].0,
         );
         let mut found: Vec<(u64, u64, usize)> = Vec::new();
-        let mut swept = sweep(mem, &ranges, 0, |at, bytes, own| {
+        let budget = SCAN_MAX.saturating_sub(out.swept.bytes);
+        let mut swept = sweep(mem, &ranges, 0, budget, |at, bytes, own| {
             for (i, w) in bytes[..own].chunks_exact(word).enumerate() {
                 let v = le_word(w) & mask;
                 if v < lo || v > hi {

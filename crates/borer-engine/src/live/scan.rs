@@ -101,14 +101,16 @@ impl Swept {
 ///
 /// Each piece is at most [`CHUNK`] bytes plus `overlap`, so a value that
 /// starts in one piece and ends in the next is whole in the first; a page
-/// that does not read is stepped over. The sweep stops at [`SCAN_MAX`]
-/// bytes, when the request's deadline passes, or when `visit` breaks.
+/// that does not read is stepped over. The sweep stops at `budget` bytes,
+/// when the request's deadline passes, or when `visit` breaks.
 ///
 /// # Arguments
 ///
 /// * `mem` - The process.
 /// * `ranges` - `(start, end)` address ranges, in address order.
 /// * `overlap` - Bytes read past each piece: the needle's width less one.
+/// * `budget` - Most bytes read: [`SCAN_MAX`], less what earlier sweeps of
+///   the same search read.
 /// * `visit` - Called with each piece's address, its bytes, and how many
 ///   of its first bytes are its own (a value starting past them belongs to
 ///   the next piece); breaking stops the sweep as full.
@@ -116,6 +118,7 @@ pub(crate) fn sweep(
     mem: &dyn Memory,
     ranges: &[(u64, u64)],
     overlap: usize,
+    budget: u64,
     mut visit: impl FnMut(u64, &[u8], usize) -> ControlFlow<()>,
 ) -> Swept {
     let mut swept = Swept::default();
@@ -127,7 +130,7 @@ pub(crate) fn sweep(
                 swept.stop = Some(Stop::Deadline);
                 break 'ranges;
             }
-            if swept.bytes >= SCAN_MAX {
+            if swept.bytes >= budget {
                 swept.stop = Some(Stop::Budget);
                 break 'ranges;
             }
@@ -694,51 +697,57 @@ pub fn scan(mem: &dyn Memory, needle: Needle, ranges: &[(u64, u64)]) -> Found {
     let anchor = found.needle.anchor();
     let needle = found.needle.clone();
     let (mut hits, mut values) = (Vec::new(), Vec::new());
-    let swept = sweep(mem, ranges, w.saturating_sub(1), |at, bytes, own| {
-        let mut take = |off: usize| {
-            let Some(b) = bytes.get(off..off.saturating_add(w)) else {
-                return ControlFlow::Continue(());
+    let swept = sweep(
+        mem,
+        ranges,
+        w.saturating_sub(1),
+        SCAN_MAX,
+        |at, bytes, own| {
+            let mut take = |off: usize| {
+                let Some(b) = bytes.get(off..off.saturating_add(w)) else {
+                    return ControlFlow::Continue(());
+                };
+                if needle.matches(b) {
+                    hits.push(at.saturating_add(from_usize(off)));
+                    values.extend_from_slice(b);
+                    if hits.len() >= cap {
+                        return ControlFlow::Break(());
+                    }
+                }
+                ControlFlow::Continue(())
             };
-            if needle.matches(b) {
-                hits.push(at.saturating_add(from_usize(off)));
-                values.extend_from_slice(b);
-                if hits.len() >= cap {
-                    return ControlFlow::Break(());
+            match anchor {
+                Some((i, b)) => {
+                    let mut from = 0usize;
+                    while from < own {
+                        let lo = from.saturating_add(i);
+                        let hi = own.saturating_add(i).min(bytes.len());
+                        let Some(p) = bytes
+                            .get(lo..hi)
+                            .and_then(|s| s.iter().position(|x| *x == b))
+                        else {
+                            break;
+                        };
+                        let start = from + p;
+                        take(start)?;
+                        from = start + 1;
+                    }
                 }
-            }
-            ControlFlow::Continue(())
-        };
-        match anchor {
-            Some((i, b)) => {
-                let mut from = 0usize;
-                while from < own {
-                    let lo = from.saturating_add(i);
-                    let hi = own.saturating_add(i).min(bytes.len());
-                    let Some(p) = bytes
-                        .get(lo..hi)
-                        .and_then(|s| s.iter().position(|x| *x == b))
-                    else {
-                        break;
-                    };
-                    let start = from + p;
-                    take(start)?;
-                    from = start + 1;
-                }
-            }
-            None => {
-                let skew = usize::try_from(at % from_usize(align)).unwrap_or(0);
-                let first = (align - skew) % align;
-                let end = own.saturating_add(align - 1).min(bytes.len());
-                let starts_here = bytes.get(first..end).unwrap_or_default();
-                for (k, value) in starts_here.chunks_exact(align).enumerate() {
-                    if needle.matches(value) {
-                        take(first + k * align)?;
+                None => {
+                    let skew = usize::try_from(at % from_usize(align)).unwrap_or(0);
+                    let first = (align - skew) % align;
+                    let end = own.saturating_add(align - 1).min(bytes.len());
+                    let starts_here = bytes.get(first..end).unwrap_or_default();
+                    for (k, value) in starts_here.chunks_exact(align).enumerate() {
+                        if needle.matches(value) {
+                            take(first + k * align)?;
+                        }
                     }
                 }
             }
-        }
-        ControlFlow::Continue(())
-    });
+            ControlFlow::Continue(())
+        },
+    );
     found.hits = hits;
     found.values = values;
     found.swept = swept;
@@ -1145,6 +1154,19 @@ pub(crate) mod tests {
         );
         let none = ranges(&mem, &Scope::Module("x.dll".to_owned())).expect_err("unknown");
         assert!(none.contains("among them game.exe"), "{none}");
+    }
+
+    /// A sweep stops at the budget it is given, which a search of several
+    /// sweeps shares out, and says so.
+    #[test]
+    fn a_sweep_stops_at_its_budget() {
+        let mem = process(CHUNK * 2);
+        let all = ranges(&mem, &Scope::Heap).expect("heap");
+        let swept = sweep(&mem, &all, 0, from_usize(CHUNK), |_, _, _| {
+            ControlFlow::Continue(())
+        });
+        assert_eq!(swept.bytes, from_usize(CHUNK));
+        assert_eq!(swept.stop, Some(Stop::Budget));
     }
 
     /// Two regions that touch read as one range, so a pattern across their

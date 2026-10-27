@@ -823,7 +823,7 @@ pub fn find_words(mem: &dyn Memory, targets: &[u64], word: usize, limit: usize) 
         .map(|r| (r.base, r.base.saturating_add(r.size)))
         .collect();
     let mut hits = Vec::new();
-    let swept = scan::sweep(mem, &ranges, 0, |at, bytes, own| {
+    let swept = scan::sweep(mem, &ranges, 0, SCAN_MAX, |at, bytes, own| {
         for (i, w) in bytes[..own].chunks_exact(word).enumerate() {
             if targets.contains(&(le_word(w) & mask)) {
                 hits.push(at + from_usize(i * word));
