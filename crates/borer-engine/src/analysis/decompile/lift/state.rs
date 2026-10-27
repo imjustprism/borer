@@ -957,6 +957,9 @@ impl<'a> Exec<'_, 'a> {
             _ => Access::StoreInt(ty),
         };
         self.ctx.frame.note(k, access);
+        if matches!(access, Access::StoreInt(_)) {
+            self.forget_interface(k);
+        }
         let (ty, v) = self.ctx.frame.store(k, ty, v);
         self.note_slot(k, ty);
         let widest = self.slot_def.entry(k).or_default();
@@ -1046,6 +1049,16 @@ impl<'a> Exec<'_, 'a> {
             Some((a, b)) => o < b && a < end,
             None => below || end > lo,
         };
+        if writes {
+            let word = self.ctx.conv.word;
+            let held: Vec<i64> = self.env.slot_types.keys().copied().collect();
+            for o in held
+                .into_iter()
+                .filter(|o| covers(*o, o.saturating_add(word)))
+            {
+                self.forget_interface(o);
+            }
+        }
         let stores: Vec<i64> = self
             .env
             .slot_bits

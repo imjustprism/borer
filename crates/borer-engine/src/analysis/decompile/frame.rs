@@ -56,6 +56,8 @@ struct Votes {
     float: bool,
     /// Some access read an integer, or stored one that is no constant.
     int: bool,
+    /// Some access stored a value that is no constant.
+    stored: bool,
 }
 
 /// The frame's slots, their votes and, once solved, their types.
@@ -65,6 +67,10 @@ pub(super) struct Frame {
     votes: BTreeMap<i64, Votes>,
     /// The solved float slots and their types, once [`Frame::solve`] ran.
     solved: Option<BTreeMap<i64, Ty>>,
+    /// The COM interface pointer type each slot a call hands an object
+    /// back through holds (`IDirect3DDevice9 *`), `None` where two calls
+    /// disagree.
+    held: BTreeMap<i64, Option<String>>,
 }
 
 impl Frame {
@@ -82,7 +88,8 @@ impl Frame {
         v.widths.insert(access.bits());
         match access {
             Access::Load(Ty::F32 | Ty::F64) | Access::StoreFloat(_) => v.float = true,
-            Access::Load(_) | Access::StoreInt(_) => v.int = true,
+            Access::Load(_) => v.int = true,
+            Access::StoreInt(_) => (v.int, v.stored) = (true, true),
             Access::StoreConst(_) => {}
         }
     }
@@ -119,6 +126,42 @@ impl Frame {
             })
             .collect();
         self.solved = Some(solved);
+    }
+
+    /// Records that a call hands an object of a COM interface back through
+    /// a slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The slot's offset.
+    /// * `ty` - The interface pointer type (`IDirect3DDevice9 *`).
+    pub(super) fn hold(&mut self, k: i64, ty: &str) {
+        let held = self.held.entry(k).or_insert_with(|| Some(ty.to_owned()));
+        if held.as_deref() != Some(ty) {
+            *held = None;
+        }
+    }
+
+    /// Records that a slot may hold another object than the COM interface
+    /// a call handed back through it.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The slot's offset.
+    pub(super) fn unhold(&mut self, k: i64) {
+        self.held.insert(k, None);
+    }
+
+    /// Returns the COM interface pointer type a slot holds: calls hand it
+    /// back through the slot, they agree on its interface, and the code
+    /// itself stores nothing there but constants.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The slot's offset.
+    pub(super) fn held(&self, k: i64) -> Option<&String> {
+        let stored = self.votes.get(&k).is_some_and(|v| v.stored);
+        self.held.get(&k)?.as_ref().filter(|_| !stored)
     }
 
     /// Returns the offsets of the slots solved as floats, in order.

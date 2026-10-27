@@ -110,7 +110,7 @@ impl Exec<'_, '_> {
         if self.bitness() == 32 {
             let regs32 = match prototype {
                 Some(p) => usize::from(p.this),
-                None => cap.unwrap_or(usize::from(target.is_none() || method)),
+                None => cap.unwrap_or(self.this_in_ecx(target, method)),
             };
             let known = cap.is_some() || prototype.is_some();
             let regs = FASTCALL_X86.args.get(..regs32).unwrap_or(FASTCALL_X86.args);
@@ -2044,6 +2044,7 @@ impl Exec<'_, '_> {
             None => None,
         };
         let (mut args, mut rendered, mut values) = self.args_for(reached);
+        let outputs = self.com_outputs(instr, reached);
         if let x87::Call::Helper(e) = x87 {
             let n = self.names();
             args = (0..usize::from(e.takes))
@@ -2178,18 +2179,14 @@ impl Exec<'_, '_> {
                     if args.first() == Some(&rendered) {
                         args.remove(0);
                     }
-                    if self.ctx.analysis.classes.dtor_slots.contains(&slot) && args == ["1"] {
-                        args = vec![rendered];
-                        "delete".to_owned()
-                    } else {
-                        format!("{shown}->vtable[{slot}]")
-                    }
+                    self.slot_callee(&recv, slot, &shown, rendered, &mut args)
                 }
                 None => self
                     .callee(instr)
                     .unwrap_or_else(|| "(*unknown)".to_owned()),
             },
         };
+        self.type_com_outputs(&outputs);
         self.enter_call(preserves, &held);
         let rax = self.canon(self.rax());
         let xmm0 = Key::Reg(Register::XMM0);
@@ -2332,7 +2329,7 @@ impl Exec<'_, '_> {
                     _ => format!("{} = {call};", n.key(rax)),
                 }
             );
-            match target.and_then(|t| self.returned_class(t, arg0_class.as_deref())) {
+            match self.result_class(target, reached, arg0_class.as_deref()) {
                 Some(c) => {
                     self.env.classes.insert(rax, c);
                 }
@@ -2798,7 +2795,7 @@ impl Exec<'_, '_> {
     pub(super) fn class_of_expr(&self, e: &Expr) -> Option<String> {
         match e {
             Expr::Var(k) => self.class_of_key(*k).or_else(|| match k {
-                Key::Slot(o) => smart_pointee(self.env.slot_types.get(o)?).map(str::to_owned),
+                Key::Slot(o) => self.held_class(*o),
                 _ => None,
             }),
             Expr::Sp(k) => self.env.slot_types.get(k).cloned(),
@@ -2815,7 +2812,7 @@ impl Exec<'_, '_> {
                 _ => None,
             },
             Expr::Deref(inner, _) => match &**inner {
-                Expr::Sp(k) => smart_pointee(self.env.slot_types.get(k)?).map(str::to_owned),
+                Expr::Sp(k) => self.held_class(*k),
                 Expr::Var(k) => {
                     let c = self.class_of_key(*k)?;
                     smart_pointee(&c)

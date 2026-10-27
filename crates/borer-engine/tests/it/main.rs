@@ -32,6 +32,7 @@ mod analysis;
 mod calls;
 mod carve;
 mod clr;
+mod com;
 mod decoded;
 mod decompile;
 mod discovery;

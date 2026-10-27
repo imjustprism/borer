@@ -24,6 +24,7 @@ mod conv;
 mod dispatch;
 mod effects;
 mod float;
+mod interfaces;
 mod kernel;
 mod pack;
 mod record;

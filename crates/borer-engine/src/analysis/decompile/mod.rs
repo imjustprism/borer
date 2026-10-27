@@ -2368,7 +2368,7 @@ fn decompile_in<L: Lifter>(
         }
         let stated = match k {
             Key::Reg(_) | Key::A64(_) | Key::A32(_) => result_typed.get(&name).cloned(),
-            Key::Slot(o) => slot_stated.get(o).cloned(),
+            Key::Slot(o) => slot_stated.get(o).or_else(|| ctx.frame.held(*o)).cloned(),
             Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
         };
         by_type
