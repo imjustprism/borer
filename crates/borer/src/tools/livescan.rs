@@ -163,6 +163,36 @@ fn next_hint(name: &str, hits: usize) -> String {
     }
 }
 
+/// Renders a page of a result set, its hint after it.
+///
+/// # Arguments
+///
+/// * `set` - The set.
+/// * `name` - Its name.
+/// * `notes` - Lines after the header: what was read or kept.
+/// * `modules` - The process's modules, to place each hit.
+/// * `page` - Which rows.
+fn set_page(
+    set: &ScanSet,
+    name: &str,
+    notes: &str,
+    modules: &[borer_engine::live::Module],
+    page: Page,
+) -> String {
+    let title = format!("in \"{name}\": {}", set.history);
+    let mut out = scan::found_page(
+        &set.found,
+        &title,
+        notes,
+        modules,
+        page.offset,
+        page.limit.n,
+        page.count_only,
+    );
+    out.push_str(&next_hint(name, set.found.hits.len()));
+    out
+}
+
 #[tool_router(router = live_scan_tools, vis = "pub(crate)")]
 impl BorerServer {
     /// Scans the attached process for a value, or narrows a result set.
@@ -177,7 +207,7 @@ impl BorerServer {
     /// does not read, the set named does not exist, or the session holds
     /// [`SETS_MAX`] sets and the name is new.
     #[tool(
-        description = "Find addresses in the attached process holding a value (CE-style first and next scan; read-only). First scan: value with kind u8..u64, i8..i64, f32/f64 (tolerance default: half the last digit), string, wstring or bytes (hex, ?? wildcard); scope all (default), main, module (+module) or heap. The hits are kept as result set `name` (8 sets, 2M hits each). Next scan: same name with compare=changed|unchanged|increased|decreased|equal(+value) re-reads only the set's hits. Rows: address, value, module+offset, by address; the header says MiB read and regions skipped. Paged (default 50, max 500).",
+        description = "Find addresses in the attached process holding a value (CE-style first and next scan; read-only). First scan: value with kind u8..u64, i8..i64, f32/f64 (tolerance default: half the last digit), string, wstring or bytes (hex, ?? wildcard); scope all (default), main, module (+module) or heap. The hits are kept as result set `name` (8 sets, 2M hits each). Next scan: same name with compare=changed|unchanged|increased|decreased|equal(+value) re-reads only the set's hits; name alone pages the set without reading. Rows: address, value, module+offset, by address; the header says MiB read and regions skipped. Paged (default 50, max 500).",
         meta = effects(&[Effect::ReadsProcessMemory]),
         annotations(
             read_only_hint = true,
@@ -204,12 +234,17 @@ impl BorerServer {
         must_fit_a_row(&name, Annotation::Name)?;
         let page = Page::new(offset, limit, count_only, 50, 500)?;
         self.with_live(|s| {
+            if compare.is_none() && value.is_none() {
+                let set = s.scans.get(&name).ok_or_else(|| {
+                    format!("no result set is named {name}; a first scan passes value=...")
+                })?;
+                let notes = "# the set as last read; nothing was read now\n";
+                return Ok(set_page(set, &name, notes, &s.process.modules(), page));
+            }
             let left_out = s.process.unreadable_regions();
             let (set, notes) = match compare {
                 None => {
-                    let value = value.ok_or(
-                        "a first scan needs value=...; to narrow a set pass compare=... with its name",
-                    )?;
+                    let value = value.ok_or("a first scan needs value=...")?;
                     if !s.scans.contains_key(&name) && s.scans.len() >= SETS_MAX {
                         let names: Vec<&str> = s.scans.keys().map(String::as_str).collect();
                         return Err(format!(
@@ -261,17 +296,7 @@ impl BorerServer {
                     )
                 }
             };
-            let title = format!("in \"{name}\": {}", set.history);
-            let mut out = scan::found_page(
-                &set.found,
-                &title,
-                &notes,
-                &s.process.modules(),
-                page.offset,
-                page.limit.n,
-                page.count_only,
-            );
-            out.push_str(&next_hint(&name, set.found.hits.len()));
+            let out = set_page(&set, &name, &notes, &s.process.modules(), page);
             s.scans.insert(name.clone(), set);
             Ok(out)
         })
@@ -461,6 +486,12 @@ mod tests {
             }))
             .expect("an equal scan");
         assert!(equal.contains(&format!("\n{target} ")), "{equal}");
+        inner[5].store(PLANTED, Ordering::SeqCst);
+        let paged = server
+            .live_scan(Parameters(scan("v")))
+            .expect("the set, paged");
+        assert!(paged.contains("nothing was read now"), "{paged}");
+        assert!(paged.contains(&format!("\n{target} ")), "{paged}");
         for wrong in [
             LiveScanParams {
                 compare: Some(ScanCompare::Changed),
