@@ -338,7 +338,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded.
     #[tool(
-        description = "Summarize the loaded program: format, arch, entry, sections with entropy, imports, exports, compiler, wrapper and packer with evidence. load_binary already returns it; for protection and where to start, query borer://triage. Fails if nothing is loaded.",
+        description = "Summarize the loaded program: format, arch, entry, sections with entropy, imports, exports. load_binary already returns it; for protection and where to start, query borer://triage. Fails if nothing is loaded.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
