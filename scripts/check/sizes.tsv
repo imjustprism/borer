@@ -137,7 +137,7 @@ crates/borer-engine/src/analysis/vtables/mod.rs::infer#1	898
 crates/borer-engine/src/analysis/vtables/scan.rs::step#1	364
 crates/borer-engine/src/carve.rs::elf#1	105
 crates/borer-engine/src/clr.rs::clr_tsv#1	134
-crates/borer-engine/src/clr.rs::read#2	295
+crates/borer-engine/src/clr.rs::read#2	280
 crates/borer-engine/src/crypto.rs::scan#1	152
 crates/borer-engine/src/dwarf.rs	1670
 crates/borer-engine/src/dwarf.rs::read_in#1	375
@@ -193,7 +193,7 @@ crates/borer-engine/tests/it/elf.rs::elf_bytes#1	254
 crates/borer-engine/tests/it/objc.rs::image#1	182
 crates/borer-engine/tests/it/x86.rs	3378
 crates/borer/src/cli/mod.rs::cli#1	171
-crates/borer/src/cli/mod.rs::query#1	1049
+crates/borer/src/cli/mod.rs::query#1	997
 crates/borer/src/index.rs	1581
 crates/borer/src/main.rs::call_tool#1	112
 crates/borer/src/main.rs::listing#1	132

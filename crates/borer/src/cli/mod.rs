@@ -299,19 +299,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
             print!("{text}");
         }
-        Query::Function => {
-            let (a, entry) = s.function_arg(
-                args,
-                2,
-                "function needs an address or name",
-                Feature::Discover,
-            )?;
-            print!(
-                "{}",
-                render::function_detail(&a, &s.overlay, entry, 0)
-                    .context("no function at address")?
-            );
-        }
+        Query::Function => print!("{}", s.function_text(args)?),
         Query::Summary => {
             let (a, entry) = s.function_arg(
                 args,
@@ -441,19 +429,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
             print!("{}", disasm::render(&lines, true));
         }
-        Query::Disasmfn => {
-            let (a, entry) = s.function_arg(
-                args,
-                2,
-                "disasmfn needs an address or name",
-                Feature::Discover,
-            )?;
-            print!(
-                "{}",
-                render::disasm_function(&s.program, &a, &s.overlay, entry, 400, false)
-                    .context("no function at address")?
-            );
-        }
+        Query::Disasmfn => print!("{}", s.disasmfn_text(args)?),
         Query::Decompile => {
             print!("{}", decompiled(args, s)?);
             if let Some(steps) = decompile::step_times() {
@@ -643,22 +619,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 bail!("anchors moved, changed or gone; see the table above");
             }
         }
-        Query::Xrefs => {
-            let a = s.analysis(Feature::Discover)?;
-            let va = s.resolve(&a, arg(args, 2, "xrefs needs an address")?)?;
-            print!(
-                "{}",
-                render::xrefs_tsv(
-                    &s.program,
-                    &a,
-                    &s.overlay,
-                    va,
-                    0,
-                    render::XREF_ROWS_DEFAULT,
-                    false
-                )
-            );
-        }
+        Query::Xrefs => print!("{}", s.xrefs_text(args)?),
         Query::Cfg => {
             let (a, entry) =
                 s.function_arg(args, 2, "cfg/callgraph needs an address", Feature::Discover)?;

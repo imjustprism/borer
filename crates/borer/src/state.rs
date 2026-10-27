@@ -518,58 +518,25 @@ impl BorerServer {
         )
     }
 
-    /// The .NET members an argument names, when it names managed code: a
-    /// method's or field's declared name, every overload, unless one is a
-    /// native method ([`borer_engine::clr::managed::targets`]); else an IL
-    /// body's address, or a token when the argument is no mapped address.
+    /// The .NET members an argument names, when it names managed code
+    /// ([`managed::named`]).
     ///
     /// # Arguments
     ///
     /// * `p` - The loaded program.
     /// * `text` - The argument as the agent passed it.
-    ///
-    /// # Returns
-    ///
-    /// The tokens, `None` for a program with no .NET metadata or an
-    /// argument naming native code or nothing managed.
     pub(crate) fn managed_targets(&self, p: &Program, text: &str) -> Option<BTreeSet<u32>> {
-        let clr = p.clr()?;
-        if !borer_engine::analysis::hex_prefixed(text)
-            && let Some(named) = managed::targets(p, text).filter(|t| {
-                !t.iter().any(|token| {
-                    clr.methods
-                        .iter()
-                        .any(|m| m.token == *token && m.body == borer_engine::clr::Body::Native)
-                })
-            })
-        {
-            return Some(named);
-        }
-        if let Ok(va) = self.addr(p, text) {
-            if let Some(token) = managed::il_method(p, va) {
-                return Some(BTreeSet::from([token]));
-            }
-            if p.read_va(va, 1).is_some() {
-                return None;
-            }
-        }
-        managed::targets(p, text)
+        managed::named(p, text, self.addr(p, text).ok())
     }
 
-    /// The IL method an argument names ([`Self::managed_targets`]): the
-    /// first `MethodDef` with an IL body among the names it stands for.
+    /// The IL method an argument names ([`managed::il_method_named`]).
     ///
     /// # Arguments
     ///
     /// * `p` - The loaded program.
     /// * `text` - The argument as the agent passed it.
     pub(crate) fn il_method(&self, p: &Program, text: &str) -> Option<u32> {
-        let clr = p.clr()?;
-        self.managed_targets(p, text)?.into_iter().find(|t| {
-            clr.methods
-                .iter()
-                .any(|m| m.token == *t && m.body == borer_engine::clr::Body::Il)
-        })
+        managed::il_method_named(p, text, self.addr(p, text).ok())
     }
 
     /// Resolves an argument to the function to decompile, starting one at an

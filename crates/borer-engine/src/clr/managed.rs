@@ -385,6 +385,67 @@ pub fn targets(p: &Program, text: &str) -> Option<BTreeSet<u32>> {
     (!found.is_empty()).then_some(found)
 }
 
+/// The .NET members an argument names, when it names managed code.
+///
+/// A method's or field's declared name comes first, every overload,
+/// unless one of them is a native method ([`targets`]); else the address
+/// the argument resolved to when an IL body starts there; else, when that
+/// address is not mapped, a token or name.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `text` - The argument.
+/// * `va` - The address the argument resolved to, `None` for none.
+///
+/// # Returns
+///
+/// The tokens, `None` for a program with no .NET metadata or an argument
+/// naming native code or nothing managed.
+#[must_use]
+pub fn named(p: &Program, text: &str, va: Option<u64>) -> Option<BTreeSet<u32>> {
+    let clr = p.clr()?;
+    let native = |t: &BTreeSet<u32>| {
+        t.iter().any(|token| {
+            clr.methods
+                .iter()
+                .any(|m| m.token == *token && m.body == Body::Native)
+        })
+    };
+    if !crate::analysis::hex_prefixed(text)
+        && let Some(found) = targets(p, text).filter(|t| !native(t))
+    {
+        return Some(found);
+    }
+    if let Some(va) = va {
+        if let Some(token) = il_method(p, va) {
+            return Some(BTreeSet::from([token]));
+        }
+        if p.read_va(va, 1).is_some() {
+            return None;
+        }
+    }
+    targets(p, text)
+}
+
+/// The IL method an argument names ([`named`]): the first `MethodDef`
+/// with an IL body among the names it stands for.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `text` - The argument.
+/// * `va` - The address the argument resolved to, `None` for none.
+#[must_use]
+pub fn il_method_named(p: &Program, text: &str, va: Option<u64>) -> Option<u32> {
+    let clr = p.clr()?;
+    named(p, text, va)?.into_iter().find(|t| {
+        clr.methods
+            .iter()
+            .any(|m| m.token == *t && m.body == Body::Il)
+    })
+}
+
 /// A method's header lines: its name and signature, body header, locals
 /// and exception clauses.
 fn header(meta: &Meta<'_>, r: &Refs, body: &il::MethodBody) -> String {

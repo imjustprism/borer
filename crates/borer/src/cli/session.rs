@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
-use borer_engine::analysis::{Analysis, Overlay, decompile, parse_addr, resolve_suggesting};
+use borer_engine::analysis::{
+    Analysis, Overlay, decompile, parse_addr, render, resolve_suggesting,
+};
+use borer_engine::clr::managed;
 use borer_engine::layout::Layout;
 use borer_engine::pack::Packs;
 use borer_engine::program::{Feature, Program};
@@ -247,6 +250,89 @@ impl Session {
             .map_err(|e| anyhow::Error::msg(cli_hint(&e)))
     }
 
+    /// Answers `function <binary> <address|name>`: a function's facts and
+    /// blocks, or a .NET method's body, callers and callees
+    /// ([`managed::detail`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The command line, the command first and the binary second.
+    ///
+    /// # Errors
+    ///
+    /// When the argument is missing, does not resolve, or names no function.
+    pub(super) fn function_text(&self, args: &[String]) -> anyhow::Result<String> {
+        let text = arg(args, 2, "function needs an address or name")?;
+        let a = self.analysis(Feature::Discover)?;
+        let va = self.resolve(&a, text).ok();
+        if let Some(token) = managed::il_method_named(&self.program, text, va) {
+            return managed::detail(&self.program, &a, token, 0).map_err(anyhow::Error::msg);
+        }
+        let entry = entry_at(&self.program, &a, self.resolve(&a, text)?)?;
+        render::function_detail(&a, &self.overlay, entry, 0).context("no function at address")
+    }
+
+    /// Answers `disasmfn <binary> <address|name>`: a function by blocks,
+    /// or a .NET method's CIL ([`managed::listing`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The command line, the command first and the binary second.
+    ///
+    /// # Errors
+    ///
+    /// When the argument is missing, does not resolve, or names no function.
+    pub(super) fn disasmfn_text(&self, args: &[String]) -> anyhow::Result<String> {
+        let text = arg(args, 2, "disasmfn needs an address or name")?;
+        let a = self.analysis(Feature::Discover)?;
+        let va = self.resolve(&a, text).ok();
+        if let Some(token) = managed::il_method_named(&self.program, text, va) {
+            return managed::listing(&self.program, token, 400).map_err(anyhow::Error::msg);
+        }
+        let entry = entry_at(&self.program, &a, self.resolve(&a, text)?)?;
+        render::disasm_function(&self.program, &a, &self.overlay, entry, 400, false)
+            .context("no function at address")
+    }
+
+    /// Answers `xrefs <binary> <address|name>`: the references to an
+    /// address, or the IL methods naming a .NET member
+    /// ([`managed::xrefs_tsv`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The command line, the command first and the binary second.
+    ///
+    /// # Errors
+    ///
+    /// When the argument is missing or names neither an address nor a
+    /// .NET member.
+    pub(super) fn xrefs_text(&self, args: &[String]) -> anyhow::Result<String> {
+        let text = arg(args, 2, "xrefs needs an address")?;
+        let a = self.analysis(Feature::Discover)?;
+        let va = self.resolve(&a, text).ok();
+        if let Some(targets) = managed::named(&self.program, text, va) {
+            return managed::xrefs_tsv(
+                &self.program,
+                &a,
+                &targets,
+                0,
+                render::XREF_ROWS_DEFAULT,
+                false,
+            )
+            .map_err(anyhow::Error::msg);
+        }
+        let va = self.resolve(&a, text)?;
+        Ok(render::xrefs_tsv(
+            &self.program,
+            &a,
+            &self.overlay,
+            va,
+            0,
+            render::XREF_ROWS_DEFAULT,
+            false,
+        ))
+    }
+
     /// Resolves an address argument as the MCP tools do: `0x`-hex text
     /// at once, anything else as a name first (through the analysis when
     /// the architecture has one, else the symbols), then as a number.
@@ -339,7 +425,7 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     let (o, differs) = if raw {
         (s.overlay.clone(), None)
     } else {
-        borer_engine::analysis::render::answered_flagged(&s.program, &a, &s.overlay, entry)
+        render::answered_flagged(&s.program, &a, &s.overlay, entry)
     };
     let header = (!raw)
         .then(|| decompile::checked_header(&s.program, &a, &o, entry))
