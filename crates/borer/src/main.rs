@@ -668,6 +668,7 @@ impl BorerServer {
             Some((k, a)) => (k, Some(percent_decode(a))),
             None => (path, None),
         };
+        let all = arg.clone().unwrap_or_default();
         let text = match (kind, arg) {
             ("info", None) => self.binary_info()?,
             ("annotations", None) => self.annotations(Parameters(AnnotationsParams::default()))?,
@@ -676,8 +677,7 @@ impl BorerServer {
             ("checks", None) => self.checks_text()?,
             ("antianalysis", None) => self.anti_analysis_text()?,
             ("protection", None) => self.protection_text()?,
-            ("iocs", None) => return self.iocs_text(&asked.spec_words("")),
-            ("iocs", Some(filter)) => return self.iocs_text(&asked.spec_words(&filter)),
+            ("iocs", _) => return self.iocs_text(&asked.spec_words(&all)),
             ("calls", Some(spec)) => return self.calls_text(&asked.spec_words(&spec)),
             ("triage", None) => self.triage_text()?,
             ("fingerprint", None) => self.fingerprint_text()?,
@@ -704,8 +704,7 @@ impl BorerServer {
             ("devirt", Some(address)) => self.devirtualize_text(&address)?,
             ("unpack", Some(address)) => self.unpack_text(&address)?,
             ("hidden", filter) => self.hidden_text(filter.as_deref().unwrap_or(""))?,
-            ("decoded", None) => return self.decoded_text(&asked.spec_words("")),
-            ("decoded", Some(filter)) => return self.decoded_text(&asked.spec_words(&filter)),
+            ("decoded", _) => return self.decoded_text(&asked.spec_words(&all)),
             ("oracle", Some(address)) => self.oracle_text(&address)?,
             ("run", Some(spec)) => self.run_text(&spec)?,
             ("diverge", Some(spec)) => self.diverge_text(&spec)?,
