@@ -21,8 +21,8 @@ use crate::analysis::typelib;
 const CALLEES_MAX: usize = 8;
 
 /// Most instructions a callee may have for its own text to be built for a
-/// caller's notes.
-const CALLEE_INSTRUCTIONS_MAX: usize = 1024;
+/// caller's notes, through the memo ([`decompiled_cached`]).
+pub(in crate::analysis::decompile) const CALLEE_INSTRUCTIONS_MAX: usize = 1024;
 
 /// The keywords that open a tagged type's spelling.
 const TAGS: [&str; 3] = ["struct", "union", "enum"];

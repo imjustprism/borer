@@ -662,14 +662,17 @@ fn export_on(
 }
 
 /// Renders one function as [`super::decompile_named_afresh`] does, the
-/// same text, but reads a small function's plain text through the memo.
+/// same text, but reads the plain text of a function a caller may read
+/// too through the memo.
 ///
-/// The unit of each caller defines its small callees
-/// ([`super::unit::BODY_INSTRUCTIONS_MAX`] instructions at most) from
-/// their plain text through the memo ([`crate::analysis::decompiled_cached`]);
-/// the export reading such a text through it too decompiles each small
-/// function once instead of twice. Any other function's text is built
-/// afresh, so the memo does not fill with the whole binary.
+/// A caller reads a callee's plain text through the memo
+/// ([`crate::analysis::decompiled_cached`]) to type the parameters it
+/// passes on ([`super::finish::CALLEE_INSTRUCTIONS_MAX`] instructions at
+/// most), and its unit defines its small callees from that text too; the
+/// export reading such a text through the memo decompiles each of those
+/// functions once instead of twice, the callee first, as [`order`] writes
+/// leaves first. A larger function's text is built afresh, so the memo
+/// does not fill with texts no caller reads.
 ///
 /// # Arguments
 ///
@@ -682,8 +685,8 @@ fn export_on(
 ///
 /// The text, `None` when the function does not decompile.
 fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) -> Option<String> {
-    let small = analysis.function(entry)?.instr_count <= super::unit::BODY_INSTRUCTIONS_MAX;
-    let text = if small {
+    let read = analysis.function(entry)?.instr_count <= super::finish::CALLEE_INSTRUCTIONS_MAX;
+    let text = if read {
         let key = overlay.fingerprint();
         crate::analysis::decompiled_cached(program, analysis, overlay, key, entry)
             .as_ref()
