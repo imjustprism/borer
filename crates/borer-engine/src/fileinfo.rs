@@ -73,22 +73,28 @@ const APPENDED_MARKS: [(&[u8], &str); 9] = [
     (&reversed(b"7z\xbc\xaf\x27\x1c"), "7-Zip archive"),
 ];
 
-/// Whether `needle` occurs in `hay`.
+/// Where `needle` first occurs in `hay`.
 ///
 /// # Arguments
 ///
 /// * `hay` - The bytes searched.
-/// * `needle` - The bytes looked for, not empty.
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    let Some((&first, rest)) = needle.split_first() else {
-        return false;
-    };
-    hay.iter().enumerate().any(|(i, &b)| {
-        b == first
-            && hay
-                .get(i + 1..i + 1 + rest.len())
-                .is_some_and(|tail| tail == rest)
-    })
+/// * `needle` - The bytes looked for.
+///
+/// # Returns
+///
+/// The offset of the first occurrence; `None` when there is none or the
+/// needle is empty.
+pub(crate) fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    let (&first, rest) = needle.split_first()?;
+    let mut from = 0;
+    while let Some(i) = hay.get(from..)?.iter().position(|&b| b == first) {
+        let at = from + i;
+        if hay.get(at + 1..)?.starts_with(rest) {
+            return Some(at);
+        }
+        from = at + 1;
+    }
+    None
 }
 
 /// The runs of bytes appended past a PE file's last section, outside the
@@ -160,7 +166,7 @@ pub fn appended_lines(program: &Program) -> Vec<String> {
 /// # Arguments
 ///
 /// * `mark` - The bytes as they appear in a file.
-const fn reversed<const N: usize>(mark: &[u8; N]) -> [u8; N] {
+pub(crate) const fn reversed<const N: usize>(mark: &[u8; N]) -> [u8; N] {
     let mut out = [0u8; N];
     let mut i = 0;
     while i < N {
@@ -177,8 +183,16 @@ const fn reversed<const N: usize>(mark: &[u8; N]) -> [u8; N] {
 /// * `hay` - The bytes searched.
 /// * `mark` - The mark, back to front.
 fn has_mark(hay: &[u8], mark: &[u8]) -> bool {
-    let forward: Vec<u8> = mark.iter().rev().copied().collect();
-    contains(hay, &forward)
+    find(hay, &forward(mark)).is_some()
+}
+
+/// A reversed mark ([`reversed`]) turned back the way a file spells it.
+///
+/// # Arguments
+///
+/// * `mark` - The mark, back to front.
+pub(crate) fn forward(mark: &[u8]) -> Vec<u8> {
+    mark.iter().rev().copied().collect()
 }
 
 /// A language, runtime or packager that leaves marks in the bytes it

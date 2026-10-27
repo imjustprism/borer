@@ -23,6 +23,7 @@
 //! ```
 
 pub mod analysis;
+pub mod bundle;
 pub mod cancel;
 pub mod carve;
 pub mod clr;
@@ -55,6 +56,7 @@ pub mod patch;
 pub mod pdb;
 pub mod program;
 pub mod reloc;
+pub mod rsrc;
 pub mod script;
 pub mod search;
 pub mod strings;

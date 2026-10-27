@@ -29,6 +29,7 @@ mod a64_emulate;
 mod a64_lift;
 mod abi;
 mod analysis;
+mod bundle;
 mod calls;
 mod carve;
 mod clr;

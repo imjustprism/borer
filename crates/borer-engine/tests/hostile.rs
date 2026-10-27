@@ -993,3 +993,68 @@ fn an_entropy_scan_stops_at_its_cap() {
         "the scan took {extra} bytes of heap to find its first regions"
     );
 }
+
+/// The resource directory's slot.
+const RESOURCE_DIR: usize = 2;
+/// Most heap reading what built a hostile image may take.
+const TOOLCHAIN_HEAP: usize = 16 << 20;
+
+/// A resource tree whose every subdirectory is the root again, each level
+/// declaring the most entries a directory can, is walked in bounded time
+/// and heap and yields nothing.
+#[test]
+fn a_resource_tree_that_loops_stays_small() {
+    let _one = serial();
+    let mut tree = vec![0u8; 16 + 0xffff * 8];
+    put16(&mut tree, 12, 0x7fff);
+    put16(&mut tree, 14, 0x8000);
+    for i in 0..0xffff {
+        put32(&mut tree, 16 + i * 8, 0x8000_0000);
+        put32(&mut tree, 20 + i * 8, 0x8000_0000);
+    }
+    let len = u32::try_from(tree.len()).expect("fits");
+    let p = load(pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rsrc", 0x2000, tree, DATA),
+        ],
+        &[(RESOURCE_DIR, 0x2000, len)],
+    ));
+    let (res, extra) = measured(|| borer_engine::rsrc::resources(&p));
+    assert!(res.len() <= 4096, "{} leaves", res.len());
+    assert!(
+        extra <= TOOLCHAIN_HEAP,
+        "the walk took {extra} bytes of heap"
+    );
+}
+
+/// Wrapper tables whose counts and offsets point past the file, a cookie
+/// whose lengths overflow, and markers cut off by the end of the file are
+/// read for what fits, or not at all, and never panic.
+#[test]
+fn wrapper_tables_past_the_file_are_bounded() {
+    let _one = serial();
+    let mut bytes = pe(&[Sec::sound(".text", 0x1000, text(), CODE)], &[]);
+    bytes.extend_from_slice(b"rDlPtS\xcd\xe6\xd7\x7b\x0b\x2a");
+    bytes.extend_from_slice(&[0xff; 32]);
+    let manifest = from_usize(bytes.len() + 8 + 32 + 4);
+    bytes.extend_from_slice(&manifest.to_le_bytes());
+    bytes.extend_from_slice(&[
+        0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38, 0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0,
+        0x32, 0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18, 0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3,
+        0x6a, 0xae,
+    ]);
+    bytes.extend_from_slice(&[0xff; 4]);
+    bytes.extend_from_slice(&[6, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0x80]);
+    bytes.extend_from_slice(b"MEI\x0c\x0b\x0a\x0b\x0e");
+    bytes.extend_from_slice(&[0xff; 16]);
+    bytes.extend_from_slice(&[0, 0, 0, 0, 0xef, 0xbe, 0xad, 0xde]);
+    bytes.extend_from_slice(b"NullsoftInst");
+    let p = load(bytes);
+    let (table, extra) = measured(|| borer_engine::bundle::bundles_tsv(&p));
+    assert!(
+        extra <= TOOLCHAIN_HEAP,
+        "the read took {extra} bytes of heap"
+    );
+    assert!(table.lines().count() < 64, "{table}");
+}

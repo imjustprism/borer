@@ -1225,7 +1225,8 @@ impl Row {
 ///
 /// A header saying what was found and how to open a program row, the
 /// column names, then at most [`ROWS_SHOWN`] rows by offset under a
-/// `# showing N of M` line when there are more.
+/// `# showing N of M` line when there are more, then the entries of each
+/// wrapper payload ([`crate::bundle::bundles_tsv`]).
 #[must_use]
 pub fn children_tsv(program: &Program) -> String {
     let bytes = &program.bytes;
@@ -1307,6 +1308,7 @@ pub fn children_tsv(program: &Program) -> String {
             ),
         };
     }
+    out.push_str(&crate::bundle::bundles_tsv(program));
     out
 }
 
