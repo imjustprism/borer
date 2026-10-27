@@ -24,6 +24,9 @@ const CALLEES_MAX: usize = 8;
 /// caller's notes.
 const CALLEE_INSTRUCTIONS_MAX: usize = 1024;
 
+/// The keywords that open a tagged type's spelling.
+const TAGS: [&str; 3] = ["struct", "union", "enum"];
+
 /// Bytes a callee's parameter types are charged in the memo.
 const TYPES_WEIGHT: usize = 256;
 
@@ -135,6 +138,108 @@ fn callee_lines(text: &str, word: &str, scope: Scope<'_>) -> Vec<String> {
                     types.iter().map(|t| t.as_deref().unwrap_or("-")).collect();
                 format!("// callee {name}: {}", spelled.join("|"))
             })
+        })
+        .collect()
+}
+
+/// Returns the pointer types the functions of the image a text passes its
+/// own parameters to agree on with it, for the unit to declare them with
+/// ([`super::super::unit::close`]).
+///
+/// `sub_6346(char *a1)` calls `sub_621f(a1, ..)`; when `sub_621f`'s own
+/// text also reads its first parameter as `char *`, the declaration
+/// `extern uint64_t sub_621f(char *, uint64_t);` states what both texts
+/// show, where its ABI facts said only `uint64_t`. A slot takes the type
+/// only when every call in the text passes it a parameter of that type:
+/// one call passing anything else (a variable, an expression), a callee
+/// text that types the slot otherwise or not at all, keeps its ABI type.
+/// Nor does a pointer to a tagged type (`struct z_stream_s *`): a tag a
+/// prototype names first is scoped to that prototype, so the caller's
+/// pointer would not be the type it declares.
+///
+/// # Arguments
+///
+/// * `text` - The finished function, signature line included.
+/// * `scope` - The image, the analysis, the names in force and the
+///   function.
+///
+/// # Returns
+///
+/// Per callee name, its parameter slots (from zero) and their types; at
+/// most [`CALLEES_MAX`] callees, none the type library declares, no
+/// runtime helper and not the function itself.
+pub(in crate::analysis::decompile) fn agreed_params(
+    text: &str,
+    scope: Scope<'_>,
+) -> BTreeMap<String, BTreeMap<usize, String>> {
+    let (program, analysis, overlay, entry) = scope;
+    let typed: Vec<(String, String)> = signature_params(text)
+        .into_iter()
+        .filter(|(_, ty)| {
+            named_pointer(ty).is_some() && !ty.split_whitespace().any(|w| TAGS.contains(&w))
+        })
+        .collect();
+    if typed.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut passed: BTreeMap<String, BTreeMap<usize, Vec<Option<&str>>>> = BTreeMap::new();
+    for line in text.lines().filter(|l| !l.starts_with("//")) {
+        let l = Line {
+            text: line,
+            toks: lex(line),
+        };
+        for c in 0..l.toks.len() {
+            if l.toks.get(c).is_none_or(|t| t.lex != Lex::Name) || !l.is(c + 1, "(") {
+                continue;
+            }
+            let Some(close) = l.closing(c + 1) else {
+                continue;
+            };
+            let slots = passed.entry(l.word(c).to_owned()).or_default();
+            let (mut slot, mut from, mut depth) = (0usize, c + 2, 0usize);
+            for k in c + 2..=close {
+                if l.is(k, "(") || l.is(k, "[") {
+                    depth += 1;
+                } else if (l.is(k, ")") || l.is(k, "]")) && k != close {
+                    depth = depth.saturating_sub(1);
+                } else if depth == 0 && (l.is(k, ",") || k == close) {
+                    let whole = (k == from + 1).then(|| l.word(from));
+                    let ty = whole.and_then(|w| typed.iter().find(|(p, _)| p == w));
+                    slots
+                        .entry(slot)
+                        .or_default()
+                        .push(ty.map(|(_, t)| t.as_str()));
+                    slot += 1;
+                    from = k + 1;
+                }
+            }
+        }
+    }
+    passed
+        .into_iter()
+        .filter(|(_, slots)| slots.values().flatten().any(Option::is_some))
+        .filter(|(callee, _)| {
+            typelib::declared(callee, program.format).is_none()
+                && crate::analysis::runtime::helper(callee).is_none()
+        })
+        .filter_map(|(callee, slots)| {
+            let g = unit::function_named(program, analysis, overlay, &callee)
+                .filter(|&g| g != entry)?;
+            Some((callee, g, slots))
+        })
+        .take(CALLEES_MAX)
+        .map(|(callee, g, slots)| {
+            let own = pointer_params(program, analysis, overlay, g);
+            let agreed = slots
+                .into_iter()
+                .filter_map(|(i, tys)| {
+                    let first = (*tys.first()?)?;
+                    let same = tys.iter().all(|t| *t == Some(first));
+                    let theirs = own.get(i)?.as_deref()?;
+                    (same && theirs == first).then(|| (i, first.to_owned()))
+                })
+                .collect();
+            (callee, agreed)
         })
         .collect()
 }

@@ -9,6 +9,7 @@ use crate::num::from_usize;
 use crate::program::{BinaryFormat, Program};
 
 mod callee;
+pub(super) use callee::agreed_params;
 mod callfmt;
 mod selects;
 

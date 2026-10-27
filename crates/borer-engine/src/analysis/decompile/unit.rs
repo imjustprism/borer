@@ -205,6 +205,32 @@ struct Declared {
     body: Option<cir::Body>,
 }
 
+/// Gives each function the unit declares outside it the pointer types
+/// the text and the function's own text agree on ([`agreed_params`]).
+///
+/// # Arguments
+///
+/// * `decls` - The functions the unit declares, by name.
+/// * `text` - The finished function.
+/// * `scope` - The image, the analysis, the names in force and the
+///   function.
+fn retype_callees(
+    decls: &mut BTreeMap<String, Declared>,
+    text: &str,
+    scope: (&Program, &Analysis, &Overlay, u64),
+) {
+    for (name, slots) in agreed_params(text, scope) {
+        let Some(d) = decls.get_mut(&name).filter(|d| d.body.is_none()) else {
+            continue;
+        };
+        for (i, ty) in slots {
+            if let Some(p) = d.proto.params.get_mut(i) {
+                p.0 = CTy::parse(&ty);
+            }
+        }
+    }
+}
+
 /// A table of function addresses the text indexes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Table {
@@ -261,6 +287,7 @@ pub(super) fn close(
     }
     let calls = identifier_arities(text, |w| decls.contains_key(w));
     decls.retain(|name, d| called_as_declared(text, &calls, name, &d.proto));
+    retype_callees(&mut decls, text, (program, analysis, overlay, entry));
     let own_proto = text
         .lines()
         .find_map(|l| l.strip_prefix("// signature: "))
