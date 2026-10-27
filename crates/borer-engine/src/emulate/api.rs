@@ -183,9 +183,9 @@ impl Emulator<'_> {
             .filter(|s| s.kind == crate::program::SymbolKind::Import && s.addr != 0)
             .map(|s| (s.addr, s.name.clone()))
             .collect();
-        for (i, (slot, name)) in slots.into_iter().enumerate() {
+        for (slot, name) in slots {
             let cell = self.apis.iter().find(|(_, n)| **n == name).map(|(&a, _)| a);
-            let stub = cell.unwrap_or_else(|| self.api_stub(i));
+            let stub = cell.unwrap_or_else(|| self.free_stub());
             self.plant(slot, stub, self.word);
             std::sync::Arc::make_mut(&mut self.apis).insert(stub, name);
         }
@@ -204,6 +204,19 @@ impl Emulator<'_> {
             API_STUB_BASE
         };
         base.wrapping_add(from_usize(index) * 8)
+    }
+
+    /// The first API stub address no API holds yet.
+    ///
+    /// Repeated import names share one stub and planted export cells sit
+    /// in the same map, so the count of named APIs is no free index; the
+    /// search steps past every taken stub from the first. Of the first
+    /// `len + 1` stubs at least one is free, so the search is bounded.
+    fn free_stub(&self) -> u64 {
+        (0..=self.apis.len())
+            .map(|i| self.api_stub(i))
+            .find(|a| !self.apis.contains_key(a))
+            .unwrap_or_else(|| self.api_stub(self.apis.len()))
     }
 
     /// The imported APIs and syscalls the run serviced, in order, each with
@@ -407,7 +420,7 @@ impl Emulator<'_> {
         let stub = match self.apis.iter().find(|(_, n)| same(n)) {
             Some((&stub, _)) => stub,
             None => {
-                let next = self.api_stub(self.apis.len());
+                let next = self.free_stub();
                 std::sync::Arc::make_mut(&mut self.apis).insert(next, full);
                 next
             }

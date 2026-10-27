@@ -926,8 +926,8 @@ mod tests {
     fn an_export_answers_one_address_however_it_is_reached() {
         let (base, entry) = (0x1_4000_0000, 0x1_4000_1000);
         let mut bytes = vec![0u8; 0x200];
-        bytes[0x80..0x86].copy_from_slice(b"Sleep ");
-        bytes[0x90..0x96].copy_from_slice(b"sleep ");
+        bytes[0x80..0x86].copy_from_slice(b"Sleep\0");
+        bytes[0x90..0x96].copy_from_slice(b"sleep\0");
         let text = Section::mapped(".text", entry, 0, 0x200, true, true);
         let mut p = Program::raw(bytes, Arch::X86_64, base, Some(entry), vec![text]);
         p.symbols.push(Symbol {
