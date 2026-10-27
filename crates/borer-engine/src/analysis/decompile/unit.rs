@@ -107,6 +107,8 @@ struct Index {
     /// Each function's name as the text spells it, to its entry; the
     /// lowest entry of several that share a name.
     functions: BTreeMap<String, u64>,
+    /// The names more than one function is spelled as.
+    shared: BTreeSet<String>,
     /// The addresses the binary exports a symbol at.
     exported: BTreeSet<u64>,
     /// Each data symbol's name as the text spells it, to its address.
@@ -135,7 +137,14 @@ fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index
             let mut ix = Index::default();
             for f in &analysis.functions {
                 let name = expr::bare(&name_of(analysis, overlay, f.entry)).into_owned();
-                ix.functions.entry(name).or_insert(f.entry);
+                match ix.functions.entry(name) {
+                    std::collections::btree_map::Entry::Occupied(e) => {
+                        ix.shared.insert(e.key().clone());
+                    }
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(f.entry);
+                    }
+                }
             }
             for s in &program.symbols {
                 match s.kind {
@@ -171,17 +180,19 @@ fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index
 ///
 /// # Returns
 ///
-/// The lowest entry of the functions so named, or `None`.
+/// The entry of the one function so named, or `None` when none or
+/// several are.
 pub(super) fn function_named(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     name: &str,
 ) -> Option<u64> {
-    index(program, analysis, overlay)
-        .functions
-        .get(name)
-        .copied()
+    let ix = index(program, analysis, overlay);
+    if ix.shared.contains(name) {
+        return None;
+    }
+    ix.functions.get(name).copied()
 }
 
 /// One function the unit declares: its prototype and, when the unit
