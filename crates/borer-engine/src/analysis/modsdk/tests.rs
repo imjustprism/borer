@@ -50,13 +50,13 @@ fn sample() -> Sdk {
         methods: 2,
     };
     let player = Class {
-        name: "Game::Player".to_owned(),
+        name: "Demo::Player".to_owned(),
         size: Size::AtLeast(0x30),
-        parent: Some("Game::Actor".to_owned()),
+        parent: Some("Demo::Actor".to_owned()),
         vtable: Some(0x1_4010_0000),
         slots: vec![
-            (0x1_4000_1000, "Game::Player::~Player".to_owned()),
-            (0x1_4000_1100, "Game::Player::Update".to_owned()),
+            (0x1_4000_1000, "Demo::Player::~Player".to_owned()),
+            (0x1_4000_1100, "Demo::Player::Update".to_owned()),
             (0, "data".to_owned()),
         ],
         fields: vec![
@@ -83,14 +83,14 @@ fn sample() -> Sdk {
             field(
                 0x28,
                 "weapon",
-                Ty::Ptr(Some("Game::Weapon".to_owned())),
+                Ty::Ptr(Some("Demo::Weapon".to_owned())),
                 seen,
             ),
         ],
         notes: vec!["0x18 is only addressed".to_owned()],
     };
     let weapon = Class {
-        name: "Game::Weapon".to_owned(),
+        name: "Demo::Weapon".to_owned(),
         size: Size::Stated(0x18),
         parent: None,
         vtable: None,
@@ -122,19 +122,19 @@ fn sample() -> Sdk {
         globals: vec![
             Global {
                 va: 0x1_4020_0000,
-                name: "g_Game::Player".to_owned(),
-                ty: Ty::Ptr(Some("Game::Player".to_owned())),
+                name: "g_Demo::Player".to_owned(),
+                ty: Ty::Ptr(Some("Demo::Player".to_owned())),
                 evidence: Evidence::Unsure("a constructor stores its object here".to_owned()),
             },
             Global {
                 va: 0x1_4020_0010,
                 name: "spare".to_owned(),
-                ty: Ty::Bytes(0x18, "Game::Weapon".to_owned()),
+                ty: Ty::Bytes(0x18, "Demo::Weapon".to_owned()),
                 evidence: Evidence::Stated,
             },
         ],
-        tls: vec![(0x10, "Game::World".to_owned())],
-        functions: vec![(0x1_4000_1100, "Game::Player::Update".to_owned())],
+        tls: vec![(0x10, "Demo::World".to_owned())],
+        functions: vec![(0x1_4000_1100, "Demo::Player::Update".to_owned())],
     }
 }
 
@@ -151,10 +151,10 @@ fn sample() -> Sdk {
 #[test]
 fn a_recovered_layout_keeps_one_field_per_offset_with_its_evidence() {
     let (_, mut a) = tiny();
-    let name = "Game::Player";
+    let name = "Demo::Player";
     a.classes
         .field_hints
-        .insert((name.to_owned(), 0x28), "Game::Weapon".to_owned());
+        .insert((name.to_owned(), 0x28), "Demo::Weapon".to_owned());
     a.classes
         .field_types
         .insert((name.to_owned(), 0x30), "Util::Array".to_owned());
@@ -183,7 +183,7 @@ fn a_recovered_layout_keeps_one_field_per_offset_with_its_evidence() {
         name: name.to_owned(),
         vtable: Some(0x5000),
         slots: vec![0x1000],
-        parent: Some("Game::Actor".to_owned()),
+        parent: Some("Demo::Actor".to_owned()),
         ctors: Vec::new(),
         creators: Vec::new(),
     };
@@ -203,7 +203,7 @@ fn a_recovered_layout_keeps_one_field_per_offset_with_its_evidence() {
             (0, "vftable", &Ty::VTable),
             (0x10, "f_10", &u(4)),
             (0x14, "f_14", &u(4)),
-            (0x28, "f_28", &Ty::Ptr(Some("Game::Weapon".to_owned()))),
+            (0x28, "f_28", &Ty::Ptr(Some("Demo::Weapon".to_owned()))),
             (0x30, "f_30", &u(8)),
         ]
     );
@@ -236,7 +236,7 @@ fn a_recovered_layout_keeps_one_field_per_offset_with_its_evidence() {
         c.notes
     );
     assert_eq!(c.size, Size::AtLeast(0x38));
-    assert_eq!(c.parent.as_deref(), Some("Game::Actor"));
+    assert_eq!(c.parent.as_deref(), Some("Demo::Actor"));
     assert_eq!(c.slots, [(0x1000, "sub_1000".to_owned())]);
 }
 
@@ -358,12 +358,12 @@ fn the_header_lays_classes_out_with_asserts_and_addresses() {
     let mut odd = sample();
     odd.module = "a\"b*/c.exe".to_owned();
     if let Some(slot) = odd.classes.get_mut(0).and_then(|c| c.slots.get_mut(2)) {
-        slot.1 = "Game_Player_vftable".to_owned();
+        slot.1 = "Demo_Player_vftable".to_owned();
     }
     let h = header(&odd);
     assert!(h.contains(" * Mod SDK for a\"b* /c.exe (64-bit)"), "{h}");
     assert!(
-        h.contains("    void* Game_Player_vftable_2; /* [2]"),
+        h.contains("    void* Demo_Player_vftable_2; /* [2]"),
         "a slot is not named like its struct: {h}"
     );
     assert_eq!(
@@ -375,20 +375,20 @@ fn the_header_lays_classes_out_with_asserts_and_addresses() {
     for line in [
         "#pragma once",
         "static_assert(sizeof(void*) == 8, \"the module is a 64-bit image\");",
-        "struct Game_Player;\nstruct Game_Player_vftable;\nstruct Game_Weapon;\n",
+        "struct Demo_Player;\nstruct Demo_Player_vftable;\nstruct Demo_Weapon;\n",
         "#pragma pack(push, 1)",
-        "struct Game_Player_vftable {\n    void* Player; /* [0] rva 0x1000 Game::Player::~Player */\n    void* Update; /* [1] rva 0x1100 Game::Player::Update */\n    void* data; /* [2] a data word, not a function */\n};",
-        "/* Game::Player; parent Game::Actor; vtable rva 0x100000; size at least 0x30 (the end of the last field seen)\n   note: 0x18 is only addressed */",
-        "struct Game_Player {\n    ::sdk::Game_Player_vftable* vftable; /* +0x0 */\n    std::uint8_t pad_8[0x8];\n    std::uint32_t health; /* +0x10 recovered: reads 2, writes 1, methods 2 */\n    float speed; /* +0x14 recovered: reads 2, writes 1, methods 2 */\n    std::uint8_t pad_18[0x8];\n    std::uint32_t f_20; /* +0x20 unsure: accessed 8 and 32 bits wide; the widest is kept */\n    std::uint8_t pad_24[0x4];\n    ::sdk::Game_Weapon* weapon; /* +0x28 recovered: reads 2, writes 1, methods 2 */\n};",
-        "static_assert(offsetof(Game_Player, weapon) == 0x28, \"Game_Player::weapon\");",
-        "static_assert(sizeof(Game_Player) == 0x30, \"Game_Player size\");",
-        "struct Game_Weapon {\n    std::int32_t ammo; /* +0x0 */\n    std::uint8_t name[0x10]; /* +0x4 char[16] */\n    std::uint8_t pad_14[0x4];\n};",
-        "static_assert(sizeof(Game_Weapon) == 0x18, \"Game_Weapon size\");",
+        "struct Demo_Player_vftable {\n    void* Player; /* [0] rva 0x1000 Demo::Player::~Player */\n    void* Update; /* [1] rva 0x1100 Demo::Player::Update */\n    void* data; /* [2] a data word, not a function */\n};",
+        "/* Demo::Player; parent Demo::Actor; vtable rva 0x100000; size at least 0x30 (the end of the last field seen)\n   note: 0x18 is only addressed */",
+        "struct Demo_Player {\n    ::sdk::Demo_Player_vftable* vftable; /* +0x0 */\n    std::uint8_t pad_8[0x8];\n    std::uint32_t health; /* +0x10 recovered: reads 2, writes 1, methods 2 */\n    float speed; /* +0x14 recovered: reads 2, writes 1, methods 2 */\n    std::uint8_t pad_18[0x8];\n    std::uint32_t f_20; /* +0x20 unsure: accessed 8 and 32 bits wide; the widest is kept */\n    std::uint8_t pad_24[0x4];\n    ::sdk::Demo_Weapon* weapon; /* +0x28 recovered: reads 2, writes 1, methods 2 */\n};",
+        "static_assert(offsetof(Demo_Player, weapon) == 0x28, \"Demo_Player::weapon\");",
+        "static_assert(sizeof(Demo_Player) == 0x30, \"Demo_Player size\");",
+        "struct Demo_Weapon {\n    std::int32_t ammo; /* +0x0 */\n    std::uint8_t name[0x10]; /* +0x4 char[16] */\n    std::uint8_t pad_14[0x4];\n};",
+        "static_assert(sizeof(Demo_Weapon) == 0x18, \"Demo_Weapon size\");",
         "#pragma pack(pop)",
-        "namespace rva {\nconstexpr std::uintptr_t Game_Player_vftable = 0x100000;\nconstexpr std::uintptr_t Game_Player_Update = 0x1100; /* Game::Player::Update */\n}",
-        "constexpr std::uintptr_t g_Game_Player = 0x200000; /* Game::Player *: unsure: a constructor stores its object here */",
-        "constexpr std::uintptr_t spare = 0x200010; /* Game::Weapon: stated */",
-        "constexpr std::uintptr_t Game_World = 0x10;",
+        "namespace rva {\nconstexpr std::uintptr_t Demo_Player_vftable = 0x100000;\nconstexpr std::uintptr_t Demo_Player_Update = 0x1100; /* Demo::Player::Update */\n}",
+        "constexpr std::uintptr_t g_Demo_Player = 0x200000; /* Demo::Player *: unsure: a constructor stores its object here */",
+        "constexpr std::uintptr_t spare = 0x200010; /* Demo::Weapon: stated */",
+        "constexpr std::uintptr_t Demo_World = 0x10;",
         "} // namespace sdk\n",
     ] {
         assert!(h.contains(line), "missing {line:?} in\n{h}");
@@ -402,7 +402,7 @@ fn the_header_lays_classes_out_with_asserts_and_addresses() {
 /// When the sample's weapon is not the two fields the tests read.
 fn sdk_checked() -> Sdk {
     let s = sample();
-    assert_eq!(s.class("Game::Weapon").map(|c| c.fields.len()), Some(2));
+    assert_eq!(s.class("Demo::Weapon").map(|c| c.fields.len()), Some(2));
     s
 }
 
@@ -421,16 +421,16 @@ fn the_cheat_table_follows_singletons_into_their_fields() {
     let t = cheat_table(&sample());
     assert!(t.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<CheatTable CheatEngineTableVersion=\"45\">"), "{t}");
     for part in [
-        "<ID>0</ID>\n      <Description>\"g_Game::Player -&gt; Game::Player [unsure: a constructor stores its object here]\"</Description>\n      <Options moHideChildren=\"1\"/>\n      <GroupHeader>1</GroupHeader>\n      <Address>\"game.exe\"+200000</Address>\n      <Offsets>\n        <Offset>0</Offset>\n      </Offsets>",
+        "<ID>0</ID>\n      <Description>\"g_Demo::Player -&gt; Demo::Player [unsure: a constructor stores its object here]\"</Description>\n      <Options moHideChildren=\"1\"/>\n      <GroupHeader>1</GroupHeader>\n      <Address>\"game.exe\"+200000</Address>\n      <Offsets>\n        <Offset>0</Offset>\n      </Offsets>",
         "<ID>1</ID>\n          <Description>\"vftable\"</Description>\n          <VariableType>8 Bytes</VariableType>\n          <ShowAsHex>1</ShowAsHex>\n          <Address>+0</Address>",
         "<Description>\"health\"</Description>\n          <VariableType>4 Bytes</VariableType>\n          <Address>+10</Address>",
         "<Description>\"speed\"</Description>\n          <VariableType>Float</VariableType>\n          <Address>+14</Address>",
         "<Description>\"f_20 [unsure: accessed 8 and 32 bits wide; the widest is kept]\"</Description>",
-        "<Description>\"weapon -&gt; Game::Weapon\"</Description>\n          <VariableType>8 Bytes</VariableType>\n          <ShowAsHex>1</ShowAsHex>\n          <Address>+28</Address>",
-        "<Description>\"spare (Game::Weapon)\"</Description>\n      <Options moHideChildren=\"1\"/>\n      <GroupHeader>1</GroupHeader>\n      <Address>\"game.exe\"+200010</Address>\n      <CheatEntries>",
+        "<Description>\"weapon -&gt; Demo::Weapon\"</Description>\n          <VariableType>8 Bytes</VariableType>\n          <ShowAsHex>1</ShowAsHex>\n          <Address>+28</Address>",
+        "<Description>\"spare (Demo::Weapon)\"</Description>\n      <Options moHideChildren=\"1\"/>\n      <GroupHeader>1</GroupHeader>\n      <Address>\"game.exe\"+200010</Address>\n      <CheatEntries>",
         "<Description>\"ammo\"</Description>\n          <VariableType>4 Bytes</VariableType>\n          <ShowAsSigned>1</ShowAsSigned>\n          <Address>+0</Address>",
         "<Description>\"name (char[16])\"</Description>\n          <VariableType>Array of byte</VariableType>\n          <ByteLength>16</ByteLength>\n          <Address>+4</Address>",
-        "Thread-local singleton Game::World: offset 0x10",
+        "Thread-local singleton Demo::World: offset 0x10",
         "</Comments>\n</CheatTable>\n",
     ] {
         assert!(t.contains(part), "missing {part:?} in\n{t}");
@@ -457,15 +457,15 @@ fn the_cheat_table_follows_singletons_into_their_fields() {
 #[test]
 fn the_reclass_project_places_fields_by_the_nodes_before_them() {
     let x = data_xml(&sample());
-    let weapon = uuid("Game::Weapon");
+    let weapon = uuid("Demo::Weapon");
     for part in [
         "<reclass version=\"65537\" type=\"x64\">\n  <classes>\n".to_owned(),
-        format!("<class uuid=\"{}\" name=\"Game::Player\" comment=\"parent Game::Actor (its fields are flattened in); size at least 0x30; 0x18 is only addressed\" address=\"[&lt;game.exe&gt; + 200000]\">", uuid("Game::Player")),
-        "<node type=\"VirtualMethodTableNode\" name=\"vftable\" comment=\"\" hidden=\"false\">\n        <method name=\"Game::Player::~Player\" comment=\"\" hidden=\"false\" />\n        <method name=\"Game::Player::Update\" comment=\"\" hidden=\"false\" />\n        <method name=\"data\" comment=\"\" hidden=\"false\" />\n      </node>\n      <node type=\"Hex64Node\" name=\"\" comment=\"\" hidden=\"false\" />\n      <node type=\"UInt32Node\" name=\"health\"".to_owned(),
+        format!("<class uuid=\"{}\" name=\"Demo::Player\" comment=\"parent Demo::Actor (its fields are flattened in); size at least 0x30; 0x18 is only addressed\" address=\"[&lt;game.exe&gt; + 200000]\">", uuid("Demo::Player")),
+        "<node type=\"VirtualMethodTableNode\" name=\"vftable\" comment=\"\" hidden=\"false\">\n        <method name=\"Demo::Player::~Player\" comment=\"\" hidden=\"false\" />\n        <method name=\"Demo::Player::Update\" comment=\"\" hidden=\"false\" />\n        <method name=\"data\" comment=\"\" hidden=\"false\" />\n      </node>\n      <node type=\"Hex64Node\" name=\"\" comment=\"\" hidden=\"false\" />\n      <node type=\"UInt32Node\" name=\"health\"".to_owned(),
         "<node type=\"FloatNode\" name=\"speed\"".to_owned(),
         "<node type=\"UInt32Node\" name=\"f_20\" comment=\"unsure: accessed 8 and 32 bits wide; the widest is kept\" hidden=\"false\" />\n      <node type=\"Hex32Node\" name=\"\" comment=\"\" hidden=\"false\" />\n      <node type=\"PointerNode\" name=\"weapon\"".to_owned(),
         format!("<node type=\"ClassInstanceNode\" name=\"\" comment=\"\" hidden=\"false\" reference=\"{weapon}\" />"),
-        format!("<class uuid=\"{weapon}\" name=\"Game::Weapon\" comment=\"size 0x18 (stated)\" address=\"&lt;game.exe&gt; + 200010\">\n      <node type=\"Int32Node\" name=\"ammo\" comment=\"\" hidden=\"false\" />\n      <node type=\"Hex64Node\" name=\"name\" comment=\"char[16]\" hidden=\"false\" />\n      <node type=\"Hex64Node\" name=\"\" comment=\"\" hidden=\"false\" />\n      <node type=\"Hex32Node\" name=\"\" comment=\"\" hidden=\"false\" />\n    </class>"),
+        format!("<class uuid=\"{weapon}\" name=\"Demo::Weapon\" comment=\"size 0x18 (stated)\" address=\"&lt;game.exe&gt; + 200010\">\n      <node type=\"Int32Node\" name=\"ammo\" comment=\"\" hidden=\"false\" />\n      <node type=\"Hex64Node\" name=\"name\" comment=\"char[16]\" hidden=\"false\" />\n      <node type=\"Hex64Node\" name=\"\" comment=\"\" hidden=\"false\" />\n      <node type=\"Hex32Node\" name=\"\" comment=\"\" hidden=\"false\" />\n    </class>"),
     ] {
         assert!(x.contains(&part), "missing {part:?} in\n{x}");
     }
@@ -529,9 +529,9 @@ fn the_reclass_file_is_a_stored_zip_of_data_xml() {
 /// When a uuid repeats or is misspelled.
 #[test]
 fn a_class_uuid_is_its_names_and_spelled_as_a_guid() {
-    let a = uuid("Game::Player");
-    assert_eq!(a, uuid("Game::Player"));
-    assert_ne!(a, uuid("Game::Weapon"));
+    let a = uuid("Demo::Player");
+    assert_eq!(a, uuid("Demo::Player"));
+    assert_ne!(a, uuid("Demo::Weapon"));
     let groups: Vec<usize> = a.split('-').map(str::len).collect();
     assert_eq!(groups, [8, 4, 4, 4, 12], "{a}");
     assert_eq!(a.as_bytes()[14], b'5', "version 5: {a}");
@@ -547,8 +547,8 @@ fn a_class_uuid_is_its_names_and_spelled_as_a_guid() {
 #[test]
 fn names_become_distinct_cpp_identifiers() {
     assert_eq!(
-        ident("Util::Array<Core::Ptr<UI::Icon> >"),
-        "Util_Array_Core_Ptr_UI_Icon"
+        ident("Util::Array<Lib::Ref<UI::Icon> >"),
+        "Util_Array_Lib_Ref_UI_Icon"
     );
     assert_eq!(ident("`vftable'"), "vftable");
     assert_eq!(ident("~Player"), "Player");

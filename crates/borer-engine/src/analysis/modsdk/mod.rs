@@ -94,7 +94,7 @@ impl Size {
 /// One class: its layout and its virtual table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Class {
-    /// The name as the program spells it (`Game::Player`).
+    /// The name as the program spells it (`Demo::Player`).
     pub name: String,
     /// Its size.
     pub size: Size,
@@ -661,7 +661,7 @@ pub fn xml(text: &str) -> String {
 ///
 /// # Arguments
 ///
-/// * `name` - Any name (`Game::Player`, `Util::Array<int>`).
+/// * `name` - Any name (`Demo::Player`, `Util::Array<int>`).
 #[must_use]
 pub fn ident(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
