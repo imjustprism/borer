@@ -8,10 +8,13 @@
 //! untrusted blobs: each read is bounds-checked, nesting is capped at
 //! [`DEPTH_MAX`] and a rendered name at [`super::QUALIFIED_MAX`] bytes.
 
+use std::cell::Cell;
+
 use super::{
     Clr, Coded, FIELD, MEMBER_REF, METHOD_DEF, METHOD_SPEC, STAND_ALONE_SIG, TYPE_DEF, TYPE_REF,
     TYPE_SPEC, Tables, UserString, compressed, open, string,
 };
+
 use crate::num::saturating_usize;
 use crate::program::Program;
 
@@ -20,6 +23,10 @@ const CUSTOM_ATTRIBUTE: u8 = 0x0c;
 
 /// Deepest a signature's types nest before the rest reads `...`.
 const DEPTH_MAX: u8 = 16;
+
+/// Types one name reads before the rest reads `...`, however its
+/// signatures refer to each other.
+const TYPE_FUEL: u32 = 1024;
 
 /// Most parameters a rendered signature lists.
 const PARAMS_MAX: usize = 32;
@@ -103,6 +110,9 @@ pub(crate) struct Meta<'a> {
     strings: &'a [u8],
     /// `#Blob`.
     blob: &'a [u8],
+    /// Types one name may still read ([`TYPE_FUEL`] at each public call),
+    /// so a signature whose types refer back to it costs a bounded amount.
+    fuel: Cell<u32>,
 }
 
 impl<'a> Meta<'a> {
@@ -132,7 +142,13 @@ impl<'a> Meta<'a> {
             t: o.tables,
             strings: o.streams.strings,
             blob: o.streams.blob,
+            fuel: Cell::new(TYPE_FUEL),
         })
+    }
+
+    /// Gives the next name its whole [`TYPE_FUEL`].
+    fn refuel(&self) {
+        self.fuel.set(TYPE_FUEL);
     }
 
     /// Reads one cell, `None` for a row or column not in the table.
@@ -183,9 +199,11 @@ impl<'a> Meta<'a> {
     /// Reads one type from a signature (II.23.2.12), rendered the way C#
     /// spells the built-in ones; `?` where the blob ends or names no type.
     fn ty(&self, b: &mut Blob<'_>, depth: u8) -> String {
-        if depth > DEPTH_MAX {
+        let fuel = self.fuel.get();
+        if depth > DEPTH_MAX || fuel == 0 {
             return "...".to_owned();
         }
+        self.fuel.set(fuel - 1);
         let d = depth.saturating_add(1);
         let Some(et) = b.byte() else {
             return "?".to_owned();
@@ -230,7 +248,7 @@ impl<'a> Meta<'a> {
             0x45 => Some(format!("pinned {}", self.ty(b, d))),
             _ => None,
         };
-        text.unwrap_or_else(|| "?".to_owned())
+        cut(text.unwrap_or_else(|| "?".to_owned()))
     }
 
     /// Reads a general array's shape after its element type (II.23.2.13).
@@ -302,6 +320,7 @@ impl<'a> Meta<'a> {
     /// a blob that does not read as a method's.
     #[must_use]
     pub(crate) fn sig(&self, token: u32) -> Option<MethodSig> {
+        self.refuel();
         let (table, row) = split(token);
         let mut b = match table {
             METHOD_DEF => self.blob_at(METHOD_DEF, row, 4)?,
@@ -312,6 +331,53 @@ impl<'a> Meta<'a> {
         (b.peek()? != FIELD_SIG)
             .then(|| self.method_sig(&mut b, 0))
             .flatten()
+    }
+
+    /// The generic method a `MethodSpec` token instantiates.
+    ///
+    /// # Returns
+    ///
+    /// Its `MethodDef` or `MemberRef` token, `None` for another token or a
+    /// row that does not read.
+    #[must_use]
+    pub(crate) fn generic_of(&self, token: u32) -> Option<u32> {
+        let (table, row) = split(token);
+        (table == METHOD_SPEC)
+            .then(|| self.spec_method(row))
+            .flatten()
+    }
+
+    /// Every field's token and `Owner::name`, in table order, each owned by
+    /// the type whose field list holds it.
+    #[must_use]
+    pub(crate) fn fields(&self) -> Vec<(u32, String)> {
+        let types = self.t.readable(TYPE_DEF);
+        let starts: Vec<u32> = (1..=types)
+            .map(|ty| self.cell(TYPE_DEF, ty, 4).unwrap_or(u32::MAX))
+            .collect();
+        let mut ty = 0usize;
+        (1..=self.t.readable(FIELD))
+            .map(|row| {
+                while starts.get(ty + 1).is_some_and(|next| *next <= row) {
+                    ty += 1;
+                }
+                let owner = starts.get(ty).filter(|first| **first <= row).map_or_else(
+                    || "?".to_owned(),
+                    |_| self.type_row(TYPE_DEF, u32::try_from(ty + 1).unwrap_or(0), 0),
+                );
+                (
+                    0x0400_0000 | row,
+                    format!("{owner}::{}", self.field_simple(row)),
+                )
+            })
+            .collect()
+    }
+
+    /// A field's own name from its row, `?` when it does not read.
+    fn field_simple(&self, row: u32) -> String {
+        self.cell(FIELD, row, 1)
+            .and_then(|i| string(self.strings, i, &String::new).ok())
+            .unwrap_or_else(|| "?".to_owned())
     }
 
     /// The generic method a `MethodSpec` row instantiates, as a token.
@@ -327,6 +393,7 @@ impl<'a> Meta<'a> {
     /// The name, `None` for a token naming no method or field this reads.
     #[must_use]
     pub(crate) fn member_name(&self, token: u32) -> Option<String> {
+        self.refuel();
         let (table, row) = split(token);
         let i = saturating_usize(u64::from(row.checked_sub(1)?));
         match table {
@@ -350,10 +417,7 @@ impl<'a> Meta<'a> {
     /// A field's `Owner::name`; its owner is the type whose field list
     /// holds the row.
     fn field_name(&self, row: u32) -> String {
-        let name = self
-            .cell(FIELD, row, 1)
-            .and_then(|i| string(self.strings, i, &|| String::new()).ok())
-            .unwrap_or_else(|| "?".to_owned());
+        let name = self.field_simple(row);
         let owner = (1..=self.t.readable(TYPE_DEF))
             .take_while(|ty| {
                 self.cell(TYPE_DEF, *ty, 4)
@@ -377,6 +441,7 @@ impl<'a> Meta<'a> {
     /// The text; the token in hex with `?` when it names no row this reads.
     #[must_use]
     pub(crate) fn token(&self, token: u32) -> String {
+        self.refuel();
         let (table, row) = split(token);
         let text = match table {
             TYPE_DEF | TYPE_REF | TYPE_SPEC => Some(self.type_row(table, row, 0)),
@@ -403,8 +468,7 @@ impl<'a> Meta<'a> {
                 .map(|s| format!("\"{}\"", s.hit().text)),
             _ => None,
         };
-        let mut left = usize::MAX;
-        super::kept(&mut left, text.unwrap_or_else(|| format!("{token:#010x}?")))
+        cut(text.unwrap_or_else(|| format!("{token:#010x}?")))
     }
 
     /// A method token as `ret Owner::Name(params)`, a `MethodSpec` with
@@ -471,6 +535,12 @@ impl<'a> Meta<'a> {
             })
             .collect()
     }
+}
+
+/// A name cut to [`super::QUALIFIED_MAX`] bytes, ending in `...` when cut.
+fn cut(name: String) -> String {
+    let mut left = usize::MAX;
+    super::kept(&mut left, name)
 }
 
 /// Splits a token into its table and row.

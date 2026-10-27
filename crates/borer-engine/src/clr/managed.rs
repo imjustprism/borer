@@ -27,6 +27,12 @@ const SITES_MAX: usize = 1 << 21;
 /// room for its header and clauses.
 const BODY_READ: usize = il::CODE_MAX * 2;
 
+/// Most bytes of code the index decodes across every body.
+const CODE_TOTAL_MAX: usize = 1 << 26;
+
+/// Why a body has no references: the index's caps were spent before it.
+const NOT_INDEXED: &str = "not indexed: the index's caps on code and references were spent";
+
 /// Rows one table of callers, callees or strings shows.
 pub const ROWS_MAX: usize = 300;
 
@@ -54,6 +60,9 @@ pub struct Site {
     pub prev: u16,
     /// The token it names.
     pub token: u32,
+    /// The method it names: a `MethodSpec`'s generic method, else
+    /// [`Site::token`].
+    pub method: u32,
 }
 
 impl Site {
@@ -103,56 +112,59 @@ pub struct Managed {
 impl Managed {
     /// Reads every IL body of a program and indexes its references.
     ///
+    /// Methods sharing a body share its entry, read once; past
+    /// [`CODE_TOTAL_MAX`] bytes of code or [`SITES_MAX`] sites the rest is
+    /// not indexed and the index says it is capped.
+    ///
     /// # Arguments
     ///
     /// * `p` - The program.
     #[must_use]
     pub fn build(p: &Program) -> Self {
         let mut out = Managed::default();
-        let Some(clr) = p.clr() else {
+        let Ok(meta) = Meta::open(p) else {
             return out;
         };
-        let mut left = SITES_MAX;
-        for m in clr.methods.iter().filter(|m| m.body == Body::Il) {
+        let mut budget = (SITES_MAX, CODE_TOTAL_MAX);
+        let mut seen: BTreeMap<u64, usize> = BTreeMap::new();
+        for m in meta.clr.methods.iter().filter(|m| m.body == Body::Il) {
             let va = p.image_base.saturating_add(u64::from(m.rva));
-            let mut r = Refs {
-                token: m.token,
-                va,
-                code_len: 0,
-                instrs: 0,
-                sites: Vec::new(),
-                stop: None,
-                forwards: false,
-            };
-            match read(p, va) {
-                Ok((body, instrs, stop)) => {
-                    r.code_len = body.code_len;
-                    r.instrs = instrs.len();
-                    r.forwards = stop.is_none() && forwards(&instrs);
-                    r.stop = stop;
-                    let mut prev = NO_OP;
-                    for i in &instrs {
-                        if let Operand::Token(token) = i.operand {
-                            if left == 0 {
-                                out.capped = true;
-                                break;
-                            }
-                            left -= 1;
-                            r.sites.push(Site {
-                                off: i.off,
-                                op: i.op,
-                                prev,
-                                token,
-                            });
-                        }
-                        prev = i.op;
+            let shared = seen.get(&va).and_then(|i| out.methods.get(*i));
+            let r = match shared {
+                Some(first) if first.sites.len() <= budget.0 => {
+                    budget.0 -= first.sites.len();
+                    Refs {
+                        token: m.token,
+                        ..first.clone()
                     }
                 }
-                Err(why) => r.stop = Some(why),
-            }
+                _ => {
+                    seen.insert(va, out.methods.len());
+                    index_body(p, &meta, m.token, va, &mut budget)
+                }
+            };
+            out.capped |= r.stop.as_deref() == Some(NOT_INDEXED);
             out.methods.push(r);
         }
         out
+    }
+
+    /// Says when the index misses references: bodies that did not decode
+    /// whole, or the caps spent.
+    #[must_use]
+    pub fn partial(&self) -> String {
+        let broken = self.methods.iter().filter(|m| m.stop.is_some()).count();
+        if broken == 0 {
+            return String::new();
+        }
+        format!(
+            "; partial: {broken} bodies did not decode whole{}, so references in them may be missing",
+            if self.capped {
+                " or were past the index's caps"
+            } else {
+                ""
+            }
+        )
     }
 
     /// The index of a program, built once per analysis.
@@ -188,7 +200,7 @@ impl Managed {
                 let hits: Vec<Site> = m
                     .sites
                     .iter()
-                    .filter(|s| targets.contains(&s.token))
+                    .filter(|s| targets.contains(&s.token) || targets.contains(&s.method))
                     .copied()
                     .collect();
                 (!hits.is_empty()).then_some((m, hits))
@@ -216,6 +228,74 @@ fn forwards(instrs: &[Instr]) -> bool {
         && rest
             .iter()
             .all(|i| CALLS.contains(&i.op) || matches!(i.op, 0x02..=0x05 | 0x0e | 0xfe09))
+}
+
+/// Reads one body and indexes its references within the budget left.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `meta` - The metadata, which names a `MethodSpec`'s generic method.
+/// * `token` - The method's token.
+/// * `va` - The body's address.
+/// * `budget` - Sites and bytes of code the index may still take, lowered
+///   by what this body takes.
+fn index_body(
+    p: &Program,
+    meta: &Meta<'_>,
+    token: u32,
+    va: u64,
+    budget: &mut (usize, usize),
+) -> Refs {
+    let mut r = Refs {
+        token,
+        va,
+        code_len: 0,
+        instrs: 0,
+        sites: Vec::new(),
+        stop: None,
+        forwards: false,
+    };
+    let read = p
+        .read_va_upto(va, BODY_READ)
+        .ok_or_else(|| format!("the IL body at {va:#x} is not in the file"))
+        .and_then(il::body);
+    let (body, code) = match read {
+        Ok(b) => b,
+        Err(why) => {
+            r.stop = Some(why);
+            return r;
+        }
+    };
+    r.code_len = body.code_len;
+    let Some(left) = budget.1.checked_sub(code.len()) else {
+        r.stop = Some(NOT_INDEXED.to_owned());
+        return r;
+    };
+    budget.1 = left;
+    let (instrs, stop) = il::decode(code);
+    r.instrs = instrs.len();
+    r.forwards = stop.is_none() && forwards(&instrs);
+    r.stop = stop;
+    let mut prev = NO_OP;
+    for i in &instrs {
+        if let Operand::Token(t) = i.operand {
+            if budget.0 == 0 {
+                r.stop = Some(NOT_INDEXED.to_owned());
+                break;
+            }
+            budget.0 -= 1;
+            r.sites.push(Site {
+                off: i.off,
+                op: i.op,
+                prev,
+                token: t,
+                method: meta.generic_of(t).unwrap_or(t),
+            });
+        }
+        prev = i.op;
+    }
+    r
 }
 
 /// Reads and decodes one body.
@@ -258,7 +338,7 @@ pub fn il_method(p: &Program, va: u64) -> Option<u32> {
 /// Returns the tokens a name or token text stands for.
 ///
 /// The text is a token in hex whose table a CIL instruction names
-/// (`0x0a00001c`), or a method's full name
+/// (`0x0a00001c`), or a method's or field's full name
 /// (`System.Reflection.Assembly::Load`) or its end after a dot
 /// (`Assembly::Load`), every overload.
 ///
@@ -284,6 +364,11 @@ pub fn targets(p: &Program, text: &str) -> Option<BTreeSet<u32>> {
     let tail = format!(".{text}");
     let fits = |name: &str| name == text || (text.contains("::") && name.ends_with(&tail));
     let clr = meta.clr;
+    let fields = if text.contains("::") {
+        meta.fields()
+    } else {
+        Vec::new()
+    };
     let found: BTreeSet<u32> = clr
         .methods
         .iter()
@@ -294,6 +379,7 @@ pub fn targets(p: &Program, text: &str) -> Option<BTreeSet<u32>> {
                 .map(|r| 0x0a00_0000 | r)
                 .filter(|t| meta.member_name(*t).is_some_and(|n| fits(&n))),
         )
+        .chain(fields.into_iter().filter(|(_, n)| fits(n)).map(|(t, _)| t))
         .collect();
     (!found.is_empty()).then_some(found)
 }
@@ -477,12 +563,15 @@ pub fn strings_tsv(p: &Program, a: &Analysis, token: u32) -> Result<String, Stri
     let r = indexed(&index, meta.clr, p, token)?;
     let loads: Vec<&Site> = r.sites.iter().filter(|s| s.op == LDSTR).collect();
     let mut out = format!(
-        "# {} user strings loaded by {:#010x} {} (ldstr), showing {} of {}\nsite\ttoken\ttext\n",
+        "# {} user strings loaded by {:#010x} {} (ldstr), showing {} of {}{}\nsite\ttoken\ttext\n",
         loads.len(),
         token,
         meta.member_name(token).unwrap_or_default(),
         loads.len().min(ROWS_MAX),
-        loads.len()
+        loads.len(),
+        r.stop.as_ref().map_or_else(String::new, |why| format!(
+            "; partial, the body stopped: {why}"
+        ))
     );
     for s in loads.iter().take(ROWS_MAX) {
         let _ = writeln!(
@@ -585,10 +674,11 @@ pub fn xrefs_tsv(
     let start = offset.min(hits.len());
     let page = hits.iter().skip(start).take(limit);
     let mut out = format!(
-        "# {total_sites} IL references to {}{} from {} methods; showing {} of {} from {start}\n",
+        "# {total_sites} IL references to {}{} from {} methods{}; showing {} of {} from {start}\n",
         names.join(" | "),
         if targets.len() > 4 { " | ..." } else { "" },
         hits.len(),
+        index.partial(),
         hits.len().saturating_sub(start).min(limit),
         hits.len()
     );
@@ -739,7 +829,17 @@ fn evidence(
         return Some(out);
     }
     let lower = name.to_lowercase();
-    let mut said: Vec<String> = t.values().flatten().cloned().collect();
+    let called: BTreeSet<u32> = r
+        .sites
+        .iter()
+        .filter(|s| s.is_call())
+        .map(|s| s.token)
+        .collect();
+    let mut said: Vec<String> = called
+        .into_iter()
+        .filter_map(|c| meta.member_name(c))
+        .collect();
+    said.extend(t.get(PINVOKE_TAG).into_iter().flatten().cloned());
     said.extend(
         r.sites
             .iter()

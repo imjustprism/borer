@@ -189,6 +189,12 @@ fn bodies(url: u32) -> Vec<(u32, Vec<u8>)> {
             ],
         ),
         (0xe0, vec![0x06, 0x2a]),
+        (
+            0xf0,
+            vec![
+                0x3a, 0x17, 0x28, 1, 0, 0, 0x2b, 0x26, 0xd0, 1, 0, 0, 0x1b, 0x26, 0x2a,
+            ],
+        ),
     ]
 }
 
@@ -221,7 +227,7 @@ fn tables(a: &mut Asm) {
     let (key, key_sig) = (a.s("key"), a.b(&[0x06, 0x0e]));
     a.row(0x04, &[c2(0x16), key, key_sig]);
     let at = |off: u32| c4(TEXT_RVA + off);
-    let defs: [MethodRow<'_>; 5] = [
+    let defs: [MethodRow<'_>; 7] = [
         (at(0x50), 0, 0x16, "Main", &[0, 0, 1]),
         (at(0xb0), 0, 0x16, "Download", &[0, 1, 0x0e, 0x0e]),
         (
@@ -233,6 +239,8 @@ fn tables(a: &mut Asm) {
         ),
         (at(0xc0), 0, 0x16, "Decrypt", &[0, 1, 0x0e, 0x08]),
         (at(0xe0), 0, 0x1886, ".ctor", &[0x20, 1, 1, 0x0e]),
+        (at(0xf0), 0, 0x16, "Generic", &[0, 0, 1]),
+        (at(0xb0), 0, 0x16, "Again", &[0, 1, 0x0e, 0x0e]),
     ];
     for (rva, implf, flags, name, sig) in defs {
         let (n, s) = (a.s(name), a.b(sig));
@@ -252,6 +260,7 @@ fn tables(a: &mut Asm) {
     value.extend_from_slice(&[0, 0]);
     let value = a.b(&value);
     a.row(0x0c, &[c2((1 << 5) | 14), c2((5 << 3) | 2), value]);
+    generics(a);
     let locals = a.b(&[0x07, 2, 0x0e, 0x12, 9]);
     a.row(0x11, &[locals]);
     let kernel = a.s("kernel32.dll");
@@ -287,6 +296,19 @@ fn tables(a: &mut Asm) {
             c2(0),
         ],
     );
+}
+
+/// A `TypeSpec` whose 32 type arguments are itself, and a `MethodSpec`
+/// instantiating `Decrypt` with `string`.
+fn generics(a: &mut Asm) {
+    let mut bomb = vec![0x15, 0x12, 5, 32];
+    for _ in 0..32 {
+        bomb.extend_from_slice(&[0x12, 6]);
+    }
+    let bomb = a.b(&bomb);
+    a.row(0x1b, &[bomb]);
+    let inst = a.b(&[0x0a, 1, 0x0e]);
+    a.row(0x2b, &[c2(4 << 1), inst]);
 }
 
 /// The image's bytes, with `patch` applied to `.text` (its offset and
@@ -386,7 +408,25 @@ fn the_index_answers_callers_strings_and_apis() {
     assert!(xrefs.contains("0x06000001\t"), "{xrefs}");
     let decrypt = managed::targets(&p, "Ns.Crypt::Decrypt").expect("a name");
     let xrefs = managed::xrefs_tsv(&p, &a, &decrypt, 0, 50, false).expect("xrefs");
-    assert!(xrefs.starts_with("# 5 IL references"), "{xrefs}");
+    assert!(xrefs.starts_with("# 6 IL references"), "{xrefs}");
+    assert!(
+        xrefs.contains("IL_0001 call\tConfusedByAttribute::Generic"),
+        "{xrefs}"
+    );
+    let key = managed::targets(&p, "Ns.Program::key").expect("a field");
+    assert_eq!(key, BTreeSet::from([0x0400_0001]));
+    let xrefs = managed::xrefs_tsv(&p, &a, &key, 0, 50, false).expect("xrefs");
+    assert!(
+        xrefs.contains("IL_000a ldsfld\tNs.Crypt::Decrypt"),
+        "{xrefs}"
+    );
+    let index = Managed::build(&p);
+    let shared = |t: u32| index.method(t).map(|m| m.sites.clone());
+    assert_eq!(
+        shared(0x0600_0007),
+        shared(0x0600_0002),
+        "a shared body reads once"
+    );
     let strings = managed::strings_tsv(&p, &a, MAIN).expect("strings");
     assert!(
         strings.contains("IL_0028\t0x70000001\t\"http://evil.test/a\""),
@@ -433,6 +473,23 @@ fn the_markers_name_confuserex_and_the_decryptor() {
     );
 }
 
+/// A type whose arguments refer back to itself renders bounded, and a
+/// generic instantiation of a method names its type arguments.
+#[test]
+fn a_self_referring_type_renders_bounded() {
+    let p = load(None);
+    let text = managed::listing(&p, 0x0600_0006, 100).expect("Generic lists");
+    assert!(
+        text.contains("call string Ns.Crypt::Decrypt<string>(int)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("ldtoken System.Object<System.Object<"),
+        "{text}"
+    );
+    assert!(text.len() < 8192, "{} bytes", text.len());
+}
+
 /// No byte of a body set to anything makes reading, listing or indexing
 /// panic.
 #[test]
@@ -445,7 +502,7 @@ fn no_byte_of_a_body_makes_the_il_view_panic() {
             }
             let a = Analysis::compute(&p);
             assert!(markers_tsv(&p, &a).is_ok());
-            assert!(Managed::build(&p).methods.len() <= 4);
+            assert!(Managed::build(&p).methods.len() <= 6);
         }
     }
 }
