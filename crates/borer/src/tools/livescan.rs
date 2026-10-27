@@ -467,6 +467,7 @@ mod tests {
                 value: Some(format!("{PLANTED:#x}")),
                 kind: Some(ScanKind::U64),
                 scope: Some(ScanScope::Heap),
+                limit: Some(200),
                 ..scan("v")
             }))
             .expect("a first scan");
