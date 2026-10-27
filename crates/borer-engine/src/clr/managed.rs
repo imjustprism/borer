@@ -31,7 +31,8 @@ const BODY_READ: usize = il::CODE_MAX * 2;
 const CODE_TOTAL_MAX: usize = 1 << 26;
 
 /// Why a body has no references: the index's caps were spent before it.
-const NOT_INDEXED: &str = "not indexed: the index's caps on code and references were spent";
+pub(crate) const NOT_INDEXED: &str =
+    "not indexed: the index's caps on code and references were spent";
 
 /// Rows one table of callers, callees or strings shows.
 pub const ROWS_MAX: usize = 300;
@@ -630,7 +631,7 @@ pub fn detail(p: &Program, a: &Analysis, token: u32) -> Result<String, String> {
         "# {} instructions, {} callers, tags {}; showing {} of {} rows{}",
         r.instrs,
         rows.iter().filter(|x| x.0 == "caller").count(),
-        tags_text(&tags(&meta, r)),
+        tags_text(&tags(&meta, r, &pinvoke_names(&meta))),
         rows.len().min(ROWS_MAX),
         rows.len(),
         r.stop
@@ -750,13 +751,11 @@ pub const PINVOKE_TAG: &str = "pinvoke";
 ///
 /// * `meta` - The metadata.
 /// * `r` - The method's references.
-fn tags(meta: &Meta<'_>, r: &Refs) -> BTreeMap<&'static str, BTreeSet<String>> {
-    let pinvokes: BTreeMap<u32, String> = meta
-        .clr
-        .pinvokes
-        .iter()
-        .map(|pi| (pi.token, format!("{}!{}", pi.dll, pi.entry)))
-        .collect();
+fn tags(
+    meta: &Meta<'_>,
+    r: &Refs,
+    pinvokes: &BTreeMap<u32, String>,
+) -> BTreeMap<&'static str, BTreeSet<String>> {
     let mut out: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
     let called: BTreeSet<u32> = r
         .sites
@@ -779,6 +778,15 @@ fn tags(meta: &Meta<'_>, r: &Refs) -> BTreeMap<&'static str, BTreeSet<String>> {
         }
     }
     out
+}
+
+/// Each P/Invoke's `dll!export`, by its method's token.
+fn pinvoke_names(meta: &Meta<'_>) -> BTreeMap<u32, String> {
+    meta.clr
+        .pinvokes
+        .iter()
+        .map(|pi| (pi.token, format!("{}!{}", pi.dll, pi.entry)))
+        .collect()
 }
 
 /// Tags as a comma-separated list, `-` for none.
@@ -886,9 +894,10 @@ pub fn methods_tsv(p: &Program, a: &Analysis, spec: &str) -> Result<String, Stri
             texts.push(word.to_lowercase());
         }
     }
+    let pinvokes = pinvoke_names(&meta);
     let mut rows = Vec::new();
     for r in &index.methods {
-        let t = tags(&meta, r);
+        let t = tags(&meta, r, &pinvokes);
         if !want_tags.iter().all(|w| t.contains_key(w)) {
             continue;
         }

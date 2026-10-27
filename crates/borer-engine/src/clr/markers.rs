@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use super::managed::{LDSTR, Managed, Refs};
+use super::managed::{LDSTR, Managed, NOT_INDEXED, Refs};
 use super::meta::Meta;
 use crate::analysis::Analysis;
 use crate::program::Program;
@@ -192,7 +192,7 @@ fn bodies(meta: &Meta<'_>, index: &Managed, rows: &mut Vec<(String, &'static str
         .methods
         .iter()
         .filter_map(|r| {
-            let why = r.stop.as_ref()?;
+            let why = r.stop.as_ref().filter(|w| *w != NOT_INDEXED)?;
             Some(format!(
                 "{:#010x} {}: {why}",
                 r.token,
@@ -313,10 +313,15 @@ pub fn markers_tsv(p: &Program, a: &Analysis) -> Result<String, String> {
     bodies(&meta, &index, &mut rows);
     decryptors(&meta, &index, &mut rows);
     let mut out = format!(
-        "# .NET obfuscator markers: {} found over {} types and {} IL methods; a marker is a hint with its evidence, not a verdict\n",
+        "# .NET obfuscator markers: {} found over {} types and {} IL methods{}; a marker is a hint with its evidence, not a verdict\n",
         rows.len(),
         meta.clr.types.len(),
-        index.methods.len()
+        index.methods.len(),
+        if index.capped {
+            "; capped: some bodies were past the index's caps and were not read, so a marker may be missing"
+        } else {
+            ""
+        }
     );
     if rows.is_empty() {
         out.push_str("# no marker: no obfuscator's names, renaming, undecodable bodies, proxies or string decryptor seen\n");
