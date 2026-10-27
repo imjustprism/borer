@@ -399,13 +399,32 @@ impl BorerServer {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg(windows)]
 mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use rmcp::handler::server::wrapper::Parameters;
 
     use crate::params::{LiveAttachParams, LiveScanParams, ScanCompare, ScanKind, ScanScope};
+
+    /// A server attached to this test process, whatever binary is loaded.
+    ///
+    /// # Panics
+    ///
+    /// When the attach is refused.
+    fn attached_to_self() -> crate::BorerServer {
+        let server = crate::BorerServer {
+            live_any: true,
+            ..crate::BorerServer::default()
+        };
+        server
+            .live_attach(Parameters(LiveAttachParams {
+                process: std::process::id().to_string(),
+            }))
+            .expect("attach to self");
+        server
+    }
 
     /// A scan's parameters with only the name set.
     fn scan(name: &str) -> LiveScanParams {
@@ -442,15 +461,7 @@ mod tests {
         outer[2].store(inner.as_ptr() as usize, Ordering::SeqCst);
         ROOT.store(outer.as_ptr() as usize, Ordering::SeqCst);
         let target = format!("{:#x}", inner.as_ptr() as usize + 0x28);
-        let server = crate::BorerServer {
-            live_any: true,
-            ..crate::BorerServer::default()
-        };
-        server
-            .live_attach(Parameters(LiveAttachParams {
-                process: std::process::id().to_string(),
-            }))
-            .expect("attach to self");
+        let server = attached_to_self();
         let first = server
             .live_scan(Parameters(LiveScanParams {
                 value: Some(format!("{PLANTED:#x}")),
@@ -499,6 +510,12 @@ mod tests {
                 scope: Some(ScanScope::Module),
                 ..scan("w")
             },
+            LiveScanParams {
+                compare: Some(ScanCompare::Path),
+                value: Some("0x10".to_owned()),
+                kind: Some(ScanKind::U64),
+                ..scan("c")
+            },
         ] {
             server.live_scan(Parameters(wrong)).expect_err("refused");
         }
@@ -510,13 +527,6 @@ mod tests {
                 ..scan("chains")
             }))
             .expect("the chains");
-        let mixed = server.live_scan(Parameters(LiveScanParams {
-            compare: Some(ScanCompare::Path),
-            value: Some(target),
-            kind: Some(ScanKind::U64),
-            ..scan("chains")
-        }));
-        mixed.expect_err("a path takes no kind");
         let root = format!("{:#x}", core::ptr::from_ref(&ROOT) as usize);
         let held = server
             .live_scan(Parameters(LiveScanParams {
