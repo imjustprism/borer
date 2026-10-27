@@ -837,6 +837,12 @@ pub fn narrow(mem: &dyn Memory, found: &Found, compare: &Compare) -> Result<Narr
             let now = match bytes.get(off..off.saturating_add(w)) {
                 Some(now) => now,
                 None => {
+                    if Cancel::raised() {
+                        return Err(format!(
+                            "the request's deadline passed while re-reading the {} hits; the set is kept as it was",
+                            hits.len()
+                        ));
+                    }
                     alone = mem.read(hit, w).filter(|b| b.len() == w);
                     let Some(now) = alone.as_deref() else {
                         unreadable += 1;
@@ -1171,6 +1177,13 @@ pub(crate) mod tests {
         let kept = narrow(&mem, &sevens, &Compare::Unchanged).expect("narrowed");
         assert_eq!(kept.found.hits, vec![0x10ff0, 0x12010]);
         assert_eq!(kept.unreadable, 1);
+        let late = Cancel::new();
+        late.raise();
+        let refused = late.within(|| narrow(&mem, &sevens, &Compare::Unchanged));
+        assert!(
+            refused.is_err_and(|e| e.contains("the set is kept as it was")),
+            "past the deadline nothing is narrowed"
+        );
     }
 
     /// A next scan keeps the hits whose value changed, stayed, rose, fell,
