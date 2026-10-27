@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::classes::{class_of, deref_call, field_names};
-use super::encode::packed_components;
+use super::encode::{literal, packed_components};
 use super::{Analysis, Overlay, name_of, plain_text_cached, resolve};
 use crate::fxmap::FxHashMap;
 use crate::program::Program;
@@ -643,7 +643,7 @@ fn stream_origin(text: &str, stream: &str) -> String {
 /// # Arguments
 ///
 /// * `text` - The function's pseudo-C.
-fn signature_line(text: &str) -> Option<&str> {
+pub(crate) fn signature_line(text: &str) -> Option<&str> {
     text.lines()
         .find_map(|l| l.trim().strip_prefix("// signature: "))
 }
@@ -717,6 +717,26 @@ pub(crate) fn declared_names(sig: &str) -> Vec<String> {
         .collect()
 }
 
+/// The bytes a scalar type the pseudo-C spells takes: `uint16_t` is 2.
+///
+/// # Arguments
+///
+/// * `ty` - The type, trimmed.
+///
+/// # Returns
+///
+/// The width, or `None` for a pointer, a struct or any other type.
+pub(crate) fn scalar_bytes(ty: &str) -> Option<usize> {
+    Some(match ty {
+        "uint8_t" | "int8_t" => 1,
+        "uint16_t" | "int16_t" => 2,
+        "uint32_t" | "int32_t" | "float" => 4,
+        "uint64_t" | "int64_t" | "double" => 8,
+        "uint128_t" => 16,
+        _ => return None,
+    })
+}
+
 /// `(offset, width)` of a `*(uintN_t*)(param + off) = ...` or `*(T*)param = ...`
 /// store on a line, when the line stores through `param`.
 ///
@@ -729,14 +749,7 @@ fn store_through(line: &str, param: &str) -> Option<(usize, usize)> {
     let lhs = lhs.trim();
     let rest = lhs.strip_prefix("*(")?;
     let (ty, target) = rest.split_once("*)")?;
-    let width = match ty.trim() {
-        "uint8_t" | "int8_t" => 1,
-        "uint16_t" | "int16_t" => 2,
-        "uint32_t" | "int32_t" | "float" => 4,
-        "uint64_t" | "int64_t" | "double" => 8,
-        "uint128_t" => 16,
-        _ => return None,
-    };
+    let width = scalar_bytes(ty.trim())?;
     let target = target
         .trim()
         .trim_start_matches('(')
@@ -1238,6 +1251,110 @@ pub fn schema_of(
     entry: u64,
 ) -> Option<Schema> {
     Ctx::new(program, analysis, overlay).schema(entry, None)
+}
+
+/// Returns every read a fragment of pseudo-C makes off `stream`, each
+/// reader followed as [`schema_of`] follows it: the reads of one case of
+/// a dispatcher, or of the line reading its opcode.
+///
+/// A fragment handing the stream to no reader with an out pointer may
+/// still read values its readers return, `v = read(stream);`, each as
+/// wide as its reader's signature returns.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results.
+/// * `overlay` - Names in force.
+/// * `text` - The fragment.
+/// * `stream` - The stream's identifier in it.
+pub(crate) fn reads_in(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    text: &str,
+    stream: &str,
+) -> Vec<Field> {
+    let calls = calls_in_order(text);
+    let fields = Ctx::new(program, analysis, overlay).reads_of(
+        text,
+        &calls,
+        stream,
+        None,
+        &ObjectNames::None,
+        DEPTH_MAX,
+    );
+    if !fields.is_empty() {
+        return fields;
+    }
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    calls
+        .iter()
+        .filter(|c| c.args.len() == 1 && c.args[0] == stream)
+        .filter_map(|c| {
+            let (lhs, rhs) = lines.get(c.line.checked_sub(1)?)?.split_once(" = ")?;
+            rhs.starts_with(c.callee.as_str()).then_some(())?;
+            let bytes = returned_bytes(program, analysis, overlay, &c.callee)?;
+            Some(Field {
+                order: String::new(),
+                dest: lhs.trim().to_owned(),
+                kind: format!("u{}", bytes * 8),
+                bytes,
+                via: c.callee.clone(),
+                repeat: c.repeat.clone(),
+                children: Vec::new(),
+                name: String::new(),
+            })
+        })
+        .take(FIELDS_MAX)
+        .collect()
+}
+
+/// Returns the bytes a reader that returns its value takes off the stream:
+/// the constant it moves the stream by (`*(uint32_t*)a1 += 2;` is 2), else
+/// the width of the scalar its signature returns.
+///
+/// Only a function that moves its stream counts: one of its lines adds to
+/// something reached through its first parameter, so a predicate over the
+/// stream is not a read. The step is preferred to the return type, which
+/// is as wide as the register the value is returned in.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results.
+/// * `overlay` - Names in force.
+/// * `reader` - The reader as the text names it.
+///
+/// # Returns
+///
+/// The width, or `None` when the reader does not resolve, returns no
+/// scalar or moves no stream.
+pub(crate) fn returned_bytes(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    reader: &str,
+) -> Option<usize> {
+    let entry = resolve(program, analysis, overlay, reader).ok()?;
+    let text = plain_text_cached(program, analysis, overlay, overlay.fingerprint(), entry)?;
+    let sig = signature_line(&text)?;
+    let stream = declared_names(sig).into_iter().next()?;
+    let step = text
+        .lines()
+        .filter_map(|l| l.trim().split_once(" += "))
+        .find(|(lhs, _)| has_word(lhs, &stream))?
+        .1
+        .trim_end_matches(';');
+    if let Some(n) = literal(step)
+        && let Ok(n) = usize::try_from(n)
+        && [1, 2, 4, 8].contains(&n)
+    {
+        return Some(n);
+    }
+    let head = sig.split('(').next()?;
+    let (ty, _) = head.trim().rsplit_once(' ')?;
+    scalar_bytes(ty.trim())
 }
 
 /// How many reads a schema holds that came to something, nested ones

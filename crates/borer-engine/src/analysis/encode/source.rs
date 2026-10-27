@@ -60,7 +60,7 @@ pub(super) fn identifiers(expr: &str) -> Vec<&str> {
 /// # Returns
 ///
 /// The value and the bytes it took, `0x` included, or `None`.
-pub(super) fn number(s: &str) -> Option<(u64, usize)> {
+pub(crate) fn number(s: &str) -> Option<(u64, usize)> {
     let t = s.trim_start();
     let lead = s.len() - t.len();
     let (digits, radix, prefix) = match t.strip_prefix("0x") {
@@ -75,6 +75,17 @@ pub(super) fn number(s: &str) -> Option<(u64, usize)> {
     }
     let v = u64::from_str_radix(&digits[..len], radix).ok()?;
     Some((v, lead + prefix + len))
+}
+
+/// Returns the value of `s` when the whole of it is a decimal or `0x`
+/// hexadecimal number: `33` is, `a2` and `12 + a2` are not.
+///
+/// # Arguments
+///
+/// * `s` - The text.
+pub(crate) fn literal(s: &str) -> Option<u64> {
+    let s = s.trim();
+    number(s).and_then(|(v, len)| (len == s.len()).then_some(v))
 }
 
 /// Spells an offset as the tables do.
@@ -130,6 +141,18 @@ pub(super) fn field_tokens(expr: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Returns a helper's argument as the source of its write: a number as
+/// written, else the field [`field_of`] reads in it.
+///
+/// # Arguments
+///
+/// * `arg` - The argument.
+pub(super) fn constant_or_field(arg: &str) -> Option<String> {
+    literal(arg)
+        .map(|_| arg.trim().to_owned())
+        .or_else(|| field_of(arg))
 }
 
 /// The one field `expr` amounts to, when it does.

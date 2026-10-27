@@ -17,7 +17,8 @@ use std::fmt::Write as _;
 
 use super::classes::{FieldLabel, deref_pointee, field_labels};
 use super::schema::{
-    args_at, closing_bound, header_bound, ident_char, is_loop_header, mirror_names, param_class,
+    args_at, closing_bound, declared_names, has_word, header_bound, ident_char, is_loop_header,
+    mirror_names, param_class, scalar_bytes, signature_line,
 };
 use super::{Analysis, Overlay, name_of, plain_text_cached, resolve};
 use crate::fxmap::FxHashMap;
@@ -25,6 +26,7 @@ use crate::program::Program;
 
 mod source;
 use source::*;
+pub(crate) use source::{literal, number};
 
 /// Helpers followed below the encoder itself.
 const DEPTH_MAX: usize = 6;
@@ -230,18 +232,27 @@ fn loop_bounds(lines: &[&str]) -> Vec<Option<String>> {
 ///
 /// * `lines` - The function's lines, trimmed.
 /// * `streams` - Text a stream class contains, from `[types] stream`.
+/// * `seed` - An identifier known to be the stream though no type names
+///   it, whose copies are followed as an accessor's are; given one, no
+///   other object counts as a stream.
 ///
 /// # Returns
 ///
-/// The stream variables, and the parameter the accessor took when one did.
-fn stream_vars(lines: &[&str], streams: &[&str]) -> (Vec<String>, Option<String>) {
-    let mut vars: Vec<String> = Vec::new();
-    let mut param = None;
+/// The stream variables, and the parameter the accessor took when one did,
+/// else the seed.
+fn stream_vars(
+    lines: &[&str],
+    streams: &[&str],
+    seed: Option<&str>,
+) -> (Vec<String>, Option<String>) {
+    let mut vars: Vec<String> = seed.into_iter().map(str::to_owned).collect();
+    let mut param = seed.map(str::to_owned);
     for line in lines {
         if line.starts_with("//") {
             continue;
         }
-        if let Some(class) = deref_pointee(line)
+        if seed.is_none()
+            && let Some(class) = deref_pointee(line)
             && streams.iter().any(|t| class.contains(t))
         {
             if class.contains(READER_MARK) {
@@ -263,7 +274,8 @@ fn stream_vars(lines: &[&str], streams: &[&str]) -> (Vec<String>, Option<String>
             }
             continue;
         }
-        if let Some(pos) = line.find("->vtable[")
+        if seed.is_none()
+            && let Some(pos) = line.find("->vtable[")
             && let Some(open) = line[pos..].find("](").map(|p| p + pos + 1)
             && args_at(line, open).is_some_and(|args| classify(&args).is_some())
         {
@@ -334,7 +346,7 @@ fn classify(args: &[String]) -> Option<Raw> {
 ///
 /// * `line` - The trimmed line.
 /// * `streams` - The stream variables.
-fn writes_on_line(line: &str, streams: &[String]) -> Vec<Raw> {
+fn writes_on_line(line: &str, streams: &[String], constants: bool) -> Vec<Raw> {
     let mut out = Vec::new();
     let is_stream = |a: &str| streams.iter().any(|s| s == a.trim());
     if let Some(pos) = line.find("->vtable[")
@@ -387,6 +399,7 @@ fn writes_on_line(line: &str, streams: &[String]) -> Vec<Raw> {
             !field_tokens(a).is_empty()
                 || a.starts_with('&')
                 || identifiers(a).iter().any(|w| is_carrier(w))
+                || constants && literal(a).is_some()
         });
         if let Some((index, arg)) = member {
             out.push(Raw::Helper {
@@ -406,20 +419,26 @@ fn writes_on_line(line: &str, streams: &[String]) -> Vec<Raw> {
 ///
 /// * `text` - The pseudo-C.
 /// * `stream_types` - Text a stream class contains, from `[types] stream`.
+/// * `seed` - An identifier known to be the stream though no type names
+///   it: the one a caller saw handed an opcode first.
 ///
 /// # Returns
 ///
 /// The writes, the stream variables, and the parameter the stream came in.
-fn sites_in(text: &str, stream_types: &[&str]) -> (Vec<Site>, Vec<String>, Option<String>) {
+fn sites_in(
+    text: &str,
+    stream_types: &[&str],
+    seed: Option<&str>,
+) -> (Vec<Site>, Vec<String>, Option<String>) {
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
-    let (streams, param) = stream_vars(&lines, stream_types);
+    let (streams, param) = stream_vars(&lines, stream_types, seed);
     let bounds = loop_bounds(&lines);
     let mut sites = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        if line.starts_with("//") {
+        if line.starts_with("//") || seed.is_some() && !streams.iter().any(|s| has_word(line, s)) {
             continue;
         }
-        for raw in writes_on_line(line, &streams) {
+        for raw in writes_on_line(line, &streams, seed.is_some()) {
             sites.push(Site {
                 line: i,
                 raw,
@@ -533,7 +552,8 @@ impl<'a> Ctx<'a> {
     ///
     /// * `entry` - The encoder's entry.
     /// * `class` - The object's class when known, for field names.
-    fn encoding(&self, entry: u64, class: Option<&str>) -> Option<Encoding> {
+    /// * `seed` - The stream's identifier when the caller knows it.
+    fn encoding(&self, entry: u64, class: Option<&str>, seed: Option<&str>) -> Option<Encoding> {
         let text = plain_text_cached(
             self.program,
             self.analysis,
@@ -541,7 +561,7 @@ impl<'a> Ctx<'a> {
             self.overlay_key,
             entry,
         )?;
-        let (sites, _, param) = sites_in(&text, &self.analysis.packs.list("types", "stream"));
+        let (sites, _, param) = sites_in(&text, &self.analysis.packs.list("types", "stream"), seed);
         if sites.is_empty() {
             return None;
         }
@@ -677,7 +697,7 @@ impl<'a> Ctx<'a> {
                     }]
                 }
                 Raw::Helper { callee, index, arg } => {
-                    let source = field_of(arg)
+                    let source = constant_or_field(arg)
                         .or_else(|| {
                             let var = arg.trim_start_matches('&');
                             source_of(lines, site.line, var)
@@ -694,7 +714,7 @@ impl<'a> Ctx<'a> {
                         self.follow(callee, *index, depth - 1)
                     };
                     let (kind, bits) = match children.as_slice() {
-                        [] => ("?".to_owned(), 0),
+                        [] => self.param_kind(callee, *index),
                         [one] if one.repeat.is_none() => (one.kind.clone(), one.bits),
                         [len, run] if is_string(len, run) => ("string".to_owned(), 0),
                         _ => ("struct".to_owned(), 0),
@@ -766,7 +786,7 @@ impl<'a> Ctx<'a> {
         ) else {
             return Vec::new();
         };
-        let (sites, _, _) = sites_in(&text, &self.analysis.packs.list("types", "stream"));
+        let (sites, _, _) = sites_in(&text, &self.analysis.packs.list("types", "stream"), None);
         if sites.is_empty() {
             return Vec::new();
         }
@@ -779,6 +799,46 @@ impl<'a> Ctx<'a> {
         writes
     }
 
+    /// Returns the kind and bits a primitive writer puts its value parameter
+    /// on the wire at: the width of a store of the parameter in its text.
+    ///
+    /// A writer that hands nothing on to a stream of its own stores the
+    /// value it is given itself; a helper that only computes with it
+    /// stores nothing, and its width is not taken from its signature.
+    ///
+    /// # Arguments
+    ///
+    /// * `callee` - The writer as the text names it.
+    /// * `index` - The value's argument index.
+    ///
+    /// # Returns
+    ///
+    /// `?` and no bits when the writer does not resolve or stores the
+    /// parameter nowhere at a scalar width.
+    fn param_kind(&self, callee: &str, index: usize) -> (String, u64) {
+        let width = || {
+            let entry = resolve(self.program, self.analysis, self.overlay, callee).ok()?;
+            let text = plain_text_cached(
+                self.program,
+                self.analysis,
+                self.overlay,
+                self.overlay_key,
+                entry,
+            )?;
+            let name = declared_names(signature_line(&text)?)
+                .into_iter()
+                .nth(index)?;
+            text.lines().find_map(|line| {
+                let (lhs, rhs) = line.trim().split_once(" = ")?;
+                (rhs.trim_end_matches(';') == name).then_some(())?;
+                let (ty, _) = lhs.strip_prefix("*(")?.split_once("*)")?;
+                let bits = u64::try_from(scalar_bytes(ty.trim())?).ok()? * 8;
+                Some((fixed_kind(bits, Some(ty.trim())), bits))
+            })
+        };
+        width().unwrap_or_else(|| ("?".to_owned(), 0))
+    }
+
     /// The virtual of a class that writes the most, with its encoding.
     ///
     /// # Arguments
@@ -788,7 +848,7 @@ impl<'a> Ctx<'a> {
         let info = self.analysis.classes.by_name.get(class)?;
         let mut best: Option<((usize, usize), (u64, Encoding))> = None;
         for &entry in &info.slots {
-            let Some(e) = self.encoding(entry, Some(class)) else {
+            let Some(e) = self.encoding(entry, Some(class), None) else {
                 continue;
             };
             let score = weight(&e.fields);
@@ -966,7 +1026,34 @@ pub fn encoding_of(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<Encoding> {
-    Ctx::new(program, analysis, overlay).encoding(entry, None)
+    Ctx::new(program, analysis, overlay).encoding(entry, None, None)
+}
+
+/// Returns what `entry` writes onto `stream`, an identifier its text hands
+/// the writes first though no stream type names it: a plain writer called
+/// as `write(stream, value)`.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results.
+/// * `overlay` - Names in force.
+/// * `entry` - The encoder's entry.
+/// * `stream` - The stream's identifier in the encoder's text.
+///
+/// # Returns
+///
+/// The encoding, or `None` when the function does not decompile or hands
+/// the stream nothing.
+#[must_use]
+pub fn encoding_through(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    stream: &str,
+) -> Option<Encoding> {
+    Ctx::new(program, analysis, overlay).encoding(entry, None, Some(stream))
 }
 
 /// The virtual of `class` that writes the most onto a stream, with what
@@ -1382,7 +1469,8 @@ return;
     /// When a write disagrees with the text.
     #[test]
     fn a_string_encoder_lists_length_bytes_and_flag() {
-        let (sites, streams, param) = sites_in(UNLOCK, crate::pack::defaults("types", "stream"));
+        let (sites, streams, param) =
+            sites_in(UNLOCK, crate::pack::defaults("types", "stream"), None);
         assert_eq!(param.as_deref(), Some("a2"));
         assert!(streams.iter().any(|s| s == "rbx"), "{streams:?}");
         let raws: Vec<&Raw> = sites.iter().map(|s| &s.raw).collect();
@@ -1426,7 +1514,7 @@ return;
     /// When a component disagrees with the text.
     #[test]
     fn a_packed_buffer_is_split_into_its_locals() {
-        let (sites, _, _) = sites_in(MOVE, crate::pack::defaults("types", "stream"));
+        let (sites, _, _) = sites_in(MOVE, crate::pack::defaults("types", "stream"), None);
         assert_eq!(sites.len(), 1, "{sites:?}");
         let Raw::Bits { bits, buffer } = &sites[0].raw else {
             panic!("a bits write");
@@ -1455,7 +1543,7 @@ return;
             Some("this->endTick - this->startTick"),
             "the clamp to 0xffff is not where the value came from"
         );
-        let (sites, _, _) = sites_in(COPIED, crate::pack::defaults("types", "stream"));
+        let (sites, _, _) = sites_in(COPIED, crate::pack::defaults("types", "stream"), None);
         assert_eq!(sites.len(), 1, "{sites:?}");
         let lines: Vec<&str> = COPIED.lines().map(str::trim).collect();
         assert_eq!(
@@ -1472,7 +1560,8 @@ return;
     /// When a write disagrees with the text.
     #[test]
     fn an_array_helper_writes_a_count_and_repeats() {
-        let (sites, streams, param) = sites_in(ARRAY, crate::pack::defaults("types", "stream"));
+        let (sites, streams, param) =
+            sites_in(ARRAY, crate::pack::defaults("types", "stream"), None);
         assert_eq!(param, None);
         assert_eq!(streams, ["a1"]);
         assert_eq!(sites.len(), 2, "{sites:?}");
@@ -1523,7 +1612,8 @@ rax = Core::Ptr<Network::SafeBitReader>::operator ->(a2);
 sub_140cca7cc(rax, this + 0x20);
 (a1->field_0x30)->vtable[5](this, rax);
 ";
-        let (sites, streams, param) = sites_in(decoder, crate::pack::defaults("types", "stream"));
+        let (sites, streams, param) =
+            sites_in(decoder, crate::pack::defaults("types", "stream"), None);
         assert!(sites.is_empty(), "{sites:?}");
         assert!(streams.is_empty(), "{streams:?}");
         assert_eq!(param, None);
@@ -1565,7 +1655,7 @@ sub_140cca7cc(rax, this + 0x20);
     /// When a source disagrees with the text.
     #[test]
     fn an_atom_written_as_a_string_names_the_atom() {
-        let (sites, _, _) = sites_in(ATOM, crate::pack::defaults("types", "stream"));
+        let (sites, _, _) = sites_in(ATOM, crate::pack::defaults("types", "stream"), None);
         assert_eq!(sites.len(), 2, "{sites:?}");
         assert_eq!(
             sites[1].raw,
@@ -1617,7 +1707,7 @@ sub_140cca7cc(rax, this + 0x20);
     /// When a source disagrees with the text.
     #[test]
     fn a_dictionary_pair_and_its_member_name_the_container() {
-        let (sites, _, _) = sites_in(PAIRS, crate::pack::defaults("types", "stream"));
+        let (sites, _, _) = sites_in(PAIRS, crate::pack::defaults("types", "stream"), None);
         assert_eq!(sites.len(), 3, "{sites:?}");
         let lines: Vec<&str> = PAIRS.lines().map(str::trim).collect();
         assert_eq!(
@@ -1667,5 +1757,21 @@ sub_140cca7cc(rax, this + 0x20);
         );
         assert_eq!(count(&fields), 6);
         assert_eq!(fixed_bits(&fields), 32 + 64 + 8);
+    }
+
+    /// A stream no type names, given by the caller, is followed through its
+    /// copies as an accessor's stream is; a constant handed it is a write as
+    /// any value is, and writes into another object are not its.
+    ///
+    /// # Panics
+    ///
+    /// When a copy is missed or a write miscounted.
+    #[test]
+    fn a_seeded_stream_is_followed_through_its_copies() {
+        let text = "write(a1, 33);\nwrite(a1, a2->field_0x8);\nrbx = a1;\nwrite(rbx, a2->field_0xc);\na3->vtable[3](a3, &local_10, 8);\nwrite(a3, a2->field_0x10);\n";
+        let (sites, streams, param) = sites_in(text, &[], Some("a1"));
+        assert_eq!(streams, ["a1", "rbx"]);
+        assert_eq!(param.as_deref(), Some("a1"));
+        assert_eq!(sites.len(), 3, "{sites:?}");
     }
 }

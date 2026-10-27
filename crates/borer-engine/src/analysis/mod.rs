@@ -29,6 +29,7 @@ pub mod messages;
 pub mod modsdk;
 mod naming;
 pub mod objc;
+pub mod opcodes;
 pub mod ports;
 pub mod protocol;
 pub mod protos;
