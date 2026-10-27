@@ -26,6 +26,7 @@ pub(crate) mod guards;
 pub mod libnames;
 pub mod map;
 pub mod messages;
+pub mod modsdk;
 mod naming;
 pub mod objc;
 pub mod ports;

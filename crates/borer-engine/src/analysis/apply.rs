@@ -215,6 +215,47 @@ pub fn from_class(
     layout: &ClassLayout,
     name: &str,
 ) -> Result<Plan, String> {
+    let (stated, mut notes) = scalar_fields(layout);
+    if stated.is_empty() {
+        return Err(format!(
+            "class {}'s methods access no field at a width a field takes; no struct to apply",
+            layout.name
+        ));
+    }
+    let word: u64 = if p.is_64 { 8 } else { 4 };
+    let ty = build_struct(name, None, &stated, &o.types, word).map_err(|e| e.to_string())?;
+    let mut prototypes: Vec<(u64, Proto)> = Vec::new();
+    for &entry in layout.methods.iter().take(super::classes::METHODS_MAX) {
+        match typed(p, a, o, entry, 0, name) {
+            Ok(proto) => prototypes.push((entry, proto)),
+            Err(why) => notes.push(format!("{} left untyped: {why}", name_of(a, o, entry))),
+        }
+    }
+    check_room(o, prototypes.len())?;
+    Ok(Plan {
+        name: name.to_owned(),
+        ty,
+        prototypes,
+        notes,
+    })
+}
+
+/// Returns the fields a class layout states as scalars, in offset order,
+/// and a note for each offset left out.
+///
+/// Each field takes the widest access seen at its offset, named by the
+/// member name the class's asserts give it or `f_<offset>`; an offset of
+/// no scalar width, one only addressed, and one overlapping the field
+/// before it are left out.
+///
+/// # Arguments
+///
+/// * `layout` - The class's recovered layout.
+///
+/// # Returns
+///
+/// The `(offset, name, type)` fields and the notes.
+pub(crate) fn scalar_fields(layout: &ClassLayout) -> (Vec<(u64, String, TypeExpr)>, Vec<String>) {
     let mut notes: Vec<String> = Vec::new();
     let mut stated: Vec<(u64, String, TypeExpr)> = Vec::new();
     let mut taken: BTreeMap<String, u64> = BTreeMap::new();
@@ -248,28 +289,7 @@ pub fn from_class(
         end = off.saturating_add(u64::from(bits / 8));
         stated.push((off, label, ty));
     }
-    if stated.is_empty() {
-        return Err(format!(
-            "class {}'s methods access no field at a width a field takes; no struct to apply",
-            layout.name
-        ));
-    }
-    let word: u64 = if p.is_64 { 8 } else { 4 };
-    let ty = build_struct(name, None, &stated, &o.types, word).map_err(|e| e.to_string())?;
-    let mut prototypes: Vec<(u64, Proto)> = Vec::new();
-    for &entry in layout.methods.iter().take(super::classes::METHODS_MAX) {
-        match typed(p, a, o, entry, 0, name) {
-            Ok(proto) => prototypes.push((entry, proto)),
-            Err(why) => notes.push(format!("{} left untyped: {why}", name_of(a, o, entry))),
-        }
-    }
-    check_room(o, prototypes.len())?;
-    Ok(Plan {
-        name: name.to_owned(),
-        ty,
-        prototypes,
-        notes,
-    })
+    (stated, notes)
 }
 
 /// The scalar of a field's width.
