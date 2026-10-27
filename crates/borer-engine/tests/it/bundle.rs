@@ -93,7 +93,7 @@ fn a_pyinstaller_archive_lists_its_entries() {
     );
     assert!(
         table.contains(&format!(
-            "{:#x}\t0x20\t0x80\tpyz archive\tPYZ-00.pyz",
+            "{:#x}\t0x20\t0x80\tpyz archive\tPYZ-00.pyz\n",
             start + 11
         )),
         "{table}"
@@ -114,7 +114,8 @@ fn net_string(text: &str) -> Vec<u8> {
 }
 
 /// A .NET single-file bundle's manifest is read to each file it carries,
-/// compressed ones with both sizes.
+/// compressed ones with both sizes; a name is escaped onto its row, and an
+/// entry whose bytes the file does not hold says so.
 #[test]
 fn a_dotnet_bundle_lists_its_files() {
     let mut marker = vec![0u8; 0x200];
@@ -153,7 +154,9 @@ fn a_dotnet_bundle_lists_its_files() {
         "{table}"
     );
     assert!(
-        table.contains("0x1d00\t0x10\t-\tother\ta\\x09b\\x0afake row\n"),
+        table.contains(
+            "0x1d00\t0x10\t-\tother\ta\\x09b\\x0afake row [its bytes run past the end of the file]\n"
+        ),
         "{table}"
     );
 }

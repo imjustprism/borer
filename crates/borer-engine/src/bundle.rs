@@ -568,6 +568,7 @@ fn headline(b: &Bundle) -> String {
 /// [`ROWS_SHOWN`] rows with `showing N of M`; empty when there are none.
 #[must_use]
 pub fn bundles_tsv(p: &Program) -> String {
+    let file = from_usize(p.bytes.len());
     let mut out = String::new();
     for b in bundles(p) {
         let _ = writeln!(
@@ -578,15 +579,21 @@ pub fn bundles_tsv(p: &Program) -> String {
             b.entries.len()
         );
         for e in b.entries.iter().take(ROWS_SHOWN) {
+            let missing = e.off.checked_add(e.size).is_none_or(|end| end > file);
             let _ = writeln!(
                 out,
-                "{:#x}\t{:#x}\t{}\t{}\t{}",
+                "{:#x}\t{:#x}\t{}\t{}\t{}{}",
                 e.off,
                 e.size,
                 e.unpacked
                     .map_or_else(|| "-".to_owned(), |u| format!("{u:#x}")),
                 e.kind,
-                one_line(&e.name)
+                one_line(&e.name),
+                if missing {
+                    " [its bytes run past the end of the file]"
+                } else {
+                    ""
+                }
             );
         }
     }
