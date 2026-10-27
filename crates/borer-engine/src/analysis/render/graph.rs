@@ -93,10 +93,11 @@ pub fn call_path(
     }
     if !found {
         return format!(
-            "# {} does not reach {} within {levels} call(s); {} function(s) looked at\n",
+            "# {} does not reach {} within {levels} call(s); {} function(s) looked at\n{}",
             label(from),
             label(to),
-            seen.len()
+            seen.len(),
+            unseen_line(a, Reach::Walked(&seen), "#").unwrap_or_default()
         );
     }
     let mut chain = vec![to];
@@ -295,18 +296,14 @@ pub fn callgraph(
             let _ = writeln!(out, "  n{i} --> n{j}");
         }
     }
+    let (what, dir) = match walk {
+        Walk::Callers => ("callers", "callers of the root, transitively"),
+        Walk::Callees => ("callees", "callees of the root"),
+    };
     let spill = if hidden.is_empty() {
         String::new()
     } else {
-        let what = match walk {
-            Walk::Callers => "callers",
-            Walk::Callees => "callees",
-        };
         format!(", {} {what} not shown", hidden.len())
-    };
-    let dir = match walk {
-        Walk::Callers => "callers of the root, transitively",
-        Walk::Callees => "callees of the root",
     };
     let _ = writeln!(
         out,
@@ -314,6 +311,7 @@ pub fn callgraph(
         g.nodes.len(),
         g.imports.len()
     );
+    out.push_str(&unseen::graph_line(a, walk, targets_of(root).len(), &drawn));
     out
 }
 

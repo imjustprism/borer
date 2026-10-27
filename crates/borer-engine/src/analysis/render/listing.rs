@@ -684,10 +684,16 @@ pub fn xrefs(a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
     } else {
         sites.len().to_string()
     };
+    let callers = sites.iter().filter(|s| s.is_branch()).count();
+    let short = callers < unseen::SHORT_CALLERS && (callers > 0 || a.function_at(target).is_some());
+    let unseen = short
+        .then(|| unseen_line(a, Reach::Program, "#"))
+        .flatten()
+        .unwrap_or_default();
     let incomplete = if a.incomplete {
-        format!("{INCOMPLETE_NOTE}\n")
+        format!("{INCOMPLETE_NOTE}\n{unseen}")
     } else {
-        String::new()
+        unseen
     };
     let XrefView::Page { offset, limit } = view else {
         return format!(
