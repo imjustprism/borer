@@ -79,6 +79,9 @@ fn landings(
 /// Whether a block's call or jump reaches no target discovery resolved:
 /// none leaves it, or each it has lands nowhere or in a trampoline.
 ///
+/// A direct jump is blind only when it lands in a trampoline: a tail jump
+/// into the dispatcher.
+///
 /// # Arguments
 ///
 /// * `a` - The analysis.
@@ -91,18 +94,14 @@ fn blind(
     lands: &BTreeMap<u64, Vec<u64>>,
     through: &BTreeSet<u64>,
 ) -> bool {
-    let reaches = lands
-        .range(b.start..b.end)
-        .flat_map(|(_, t)| t)
-        .any(|t| !through.contains(t));
+    let mut to = lands.range(b.start..b.end).flat_map(|(_, t)| t).peekable();
+    let some = to.peek().is_some();
+    let reaches = to.any(|t| !through.contains(t));
     match b.term {
         BlockTerm::Call => !reaches,
         BlockTerm::Indirect => !reaches && a.jump_tables.range(b.start..b.end).next().is_none(),
-        BlockTerm::Ret
-        | BlockTerm::Jmp
-        | BlockTerm::Cond
-        | BlockTerm::Fall
-        | BlockTerm::Invalid => false,
+        BlockTerm::Jmp => some && !reaches,
+        BlockTerm::Ret | BlockTerm::Cond | BlockTerm::Fall | BlockTerm::Invalid => false,
     }
 }
 
@@ -153,18 +152,7 @@ fn unresolved(p: &Program, a: &Analysis) -> Arc<Unresolved> {
         for _ in 0..=TRAMPOLINE_HOPS {
             let next: BTreeSet<u64> = lone
                 .iter()
-                .filter(|(_, b, lands)| match b.term {
-                    BlockTerm::Jmp => {
-                        let mut to = lands.values().flatten().peekable();
-                        to.peek().is_some() && to.all(|t| through.contains(t))
-                    }
-                    BlockTerm::Ret
-                    | BlockTerm::Cond
-                    | BlockTerm::Call
-                    | BlockTerm::Indirect
-                    | BlockTerm::Fall
-                    | BlockTerm::Invalid => blind(a, b, lands, &through),
-                })
+                .filter(|(_, b, lands)| blind(a, b, lands, &through))
                 .map(|(e, _, _)| *e)
                 .collect();
             if next == through {
@@ -412,5 +400,34 @@ mod tests {
         let a = Analysis::compute(&p);
         let line = unseen_line(&p, &a, Reach::Program, "#").unwrap_or_default();
         assert!(line.starts_with("# not seen: 1 indirect call"), "{line}");
+    }
+
+    /// A tail jump into a trampoline is unresolved, as the call into it is.
+    ///
+    /// # Panics
+    ///
+    /// When the tail jump is not counted.
+    #[test]
+    fn a_tail_jump_into_a_trampoline_is_unresolved() {
+        let mut code = vec![
+            0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+            0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x1020
+            0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+            0x85, 0xc9, // ASM: test ecx,ecx
+            0x74, 0x05, // ASM: je 0x1016
+            0xe9, 0x0a, 0x00, 0x00, 0x00, // ASM: jmp 0x1020
+            0xc3, // ASM: ret
+        ];
+        code.resize(0x20, 0xcc);
+        code.extend([0xff, 0xe0]); // ASM: jmp rax
+        let len = u64::try_from(code.len()).unwrap_or(0);
+        let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+        let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let a = Analysis::compute(&p);
+        let line = unseen_line(&p, &a, Reach::Program, "#").unwrap_or_default();
+        assert!(
+            line.starts_with("# not seen: 2 indirect calls or jumps in 1 function in"),
+            "{line}"
+        );
     }
 }
