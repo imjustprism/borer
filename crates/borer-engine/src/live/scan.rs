@@ -47,7 +47,8 @@ pub enum Stop {
 pub struct Swept {
     /// Bytes read.
     pub bytes: u64,
-    /// Ranges (regions, or their part in a module) read.
+    /// Ranges read: regions, or their part in a module, those that touch
+    /// counted as one.
     pub regions: usize,
     /// Pages listed readable that did not read when the sweep came to them.
     pub unread_pages: u64,
@@ -546,6 +547,10 @@ pub enum Scope {
 
 /// The address ranges a scope covers, in address order.
 ///
+/// Regions that touch are one range, so a value that starts in one and
+/// ends in the next (two pages of one heap with different protections) is
+/// read whole.
+///
 /// # Arguments
 ///
 /// * `mem` - The process.
@@ -558,7 +563,7 @@ pub enum Scope {
 pub fn ranges(mem: &dyn Memory, scope: &Scope) -> Result<Vec<(u64, u64)>, String> {
     let regions = mem.regions();
     let span = |r: &super::Region| (r.base, r.base.saturating_add(r.size));
-    Ok(match scope {
+    let spans: Vec<(u64, u64)> = match scope {
         Scope::All => regions.iter().map(span).collect(),
         Scope::Heap => regions
             .iter()
@@ -576,7 +581,15 @@ pub fn ranges(mem: &dyn Memory, scope: &Scope) -> Result<Vec<(u64, u64)>, String
                 .map(|(s, e)| (s.max(m.base), e.min(end)))
                 .collect()
         }
-    })
+    };
+    let mut joined: Vec<(u64, u64)> = Vec::with_capacity(spans.len());
+    for (s, e) in spans {
+        match joined.last_mut() {
+            Some(last) if last.1 == s => last.1 = e,
+            _ => joined.push((s, e)),
+        }
+    }
+    Ok(joined)
 }
 
 /// The module with a file name, case ignored and the extension optional.
@@ -806,9 +819,17 @@ pub fn narrow(mem: &dyn Memory, found: &Found, compare: &Compare) -> Result<Narr
         let bytes = mem.read(start, len).unwrap_or_default();
         for (k, &hit) in hits.iter().enumerate().take(j).skip(i) {
             let off = usize::try_from(hit - start).unwrap_or(usize::MAX);
-            let Some(now) = bytes.get(off..off.saturating_add(w)) else {
-                unreadable += 1;
-                continue;
+            let alone;
+            let now = match bytes.get(off..off.saturating_add(w)) {
+                Some(now) => now,
+                None => {
+                    alone = mem.read(hit, w).filter(|b| b.len() == w);
+                    let Some(now) = alone.as_deref() else {
+                        unreadable += 1;
+                        continue;
+                    };
+                    now
+                }
             };
             if keeps(&found.needle, compare, found.value(k), now) {
                 out.hits.push(hit);
@@ -970,9 +991,16 @@ pub(crate) mod tests {
 
     impl Memory for Pages {
         fn read(&self, va: u64, len: usize) -> Option<Vec<u8>> {
-            let (data, off) = self.at(va)?;
-            let data = data.borrow();
-            Some(data[off..off.saturating_add(len).min(data.len())].to_vec())
+            let mut out = Vec::new();
+            while out.len() < len {
+                let Some((data, off)) = self.at(va + from_usize(out.len())) else {
+                    break;
+                };
+                let data = data.borrow();
+                let take = (len - out.len()).min(data.len() - off);
+                out.extend_from_slice(&data[off..off + take]);
+            }
+            (!out.is_empty()).then_some(out)
         }
 
         fn regions(&self) -> Vec<Region> {
@@ -1081,6 +1109,38 @@ pub(crate) mod tests {
         );
         let none = ranges(&mem, &Scope::Module("x.dll".to_owned())).expect_err("unknown");
         assert!(none.contains("among them game.exe"), "{none}");
+    }
+
+    /// Two regions that touch read as one range, so a pattern across their
+    /// border is found.
+    ///
+    /// A next scan whose piece stops short at a page that no longer reads
+    /// reads the hits past it on their own rather than dropping them.
+    #[test]
+    fn regions_that_touch_read_as_one() {
+        let page = |base: u64, writable| (base, RefCell::new(vec![0; 0x1000]), writable, false);
+        let mut mem = Pages {
+            regions: vec![
+                page(0x10000, true),
+                page(0x11000, false),
+                page(0x12000, true),
+            ],
+            modules: Vec::new(),
+        };
+        mem.put(0x10ffe, b"ab");
+        mem.put(0x11000, b"cd");
+        let across = scan_all(&mem, Needle::parse(Kind::CStr, "abcd", None).expect("text"));
+        assert_eq!(across.hits, vec![0x10ffe]);
+        assert_eq!(across.swept.regions, 1);
+        for at in [0x10ff0, 0x11800, 0x12010] {
+            mem.put(at, &7u32.to_le_bytes());
+        }
+        let sevens = scan_all(&mem, Needle::parse(Kind::U32, "7", None).expect("u32"));
+        assert_eq!(sevens.hits, vec![0x10ff0, 0x11800, 0x12010]);
+        mem.regions.remove(1);
+        let kept = narrow(&mem, &sevens, &Compare::Unchanged).expect("narrowed");
+        assert_eq!(kept.found.hits, vec![0x10ff0, 0x12010]);
+        assert_eq!(kept.unreadable, 1);
     }
 
     /// A next scan keeps the hits whose value changed, stayed, rose, fell,
