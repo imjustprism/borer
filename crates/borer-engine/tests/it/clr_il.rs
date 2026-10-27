@@ -474,8 +474,11 @@ fn the_index_answers_callers_strings_and_apis() {
 fn the_markers_name_confuserex_and_the_decryptor() {
     let p = load(None);
     let a = Analysis::compute(&p);
-    let text = markers_tsv(&p, &a).expect("markers");
+    let text = markers_tsv(&p, &a, "").expect("markers");
     assert!(text.contains("confuserex\tstrong\t"), "{text}");
+    let second = markers_tsv(&p, &a, "offset=1,limit=1").expect("a page");
+    assert!(second.contains("# showing 1 of 2 from 1"), "{second}");
+    assert!(!second.contains("confuserex\t"), "{second}");
     assert!(
         text.contains("ConfusedByAttribute(\"ConfuserEx v1.0.0\") on 0x20000001"),
         "{text}"
@@ -486,7 +489,7 @@ fn the_markers_name_confuserex_and_the_decryptor() {
     );
     assert_eq!(
         text,
-        markers_tsv(&p, &Analysis::compute(&p)).expect("again"),
+        markers_tsv(&p, &Analysis::compute(&p), "").expect("again"),
         "deterministic"
     );
 }
@@ -526,7 +529,7 @@ fn no_byte_of_a_body_makes_the_il_view_panic() {
                 let _ = managed::listing(&p, token, 1000);
             }
             let a = Analysis::compute(&p);
-            assert!(markers_tsv(&p, &a).is_ok());
+            assert!(markers_tsv(&p, &a, "").is_ok());
             assert!(Managed::build(&p).methods.len() <= 6);
         }
     }
@@ -545,7 +548,8 @@ fn a_tiny_body_decodes_with_its_branch_target() {
     assert_eq!(instrs[1].operand, il::Operand::Target(4));
 }
 
-/// A fat body reads its flags, locals token and a finally clause.
+/// A fat body reads its flags, locals token and a finally clause; its
+/// header alone leaves the clauses unread.
 #[test]
 fn a_fat_body_reads_its_clauses() {
     let mut bytes = vec![0x1b, 0x30, 2, 0, 4, 0, 0, 0, 1, 0, 0, 0x11];
@@ -556,6 +560,9 @@ fn a_fat_body_reads_its_clauses() {
     assert_eq!(b.locals, 0x1100_0001);
     assert_eq!(code.len(), 4);
     assert_eq!(b.clauses.len(), 1);
+    let (head, head_code) = il::header(&bytes).expect("its header");
+    assert!(head.clauses.is_empty(), "the header alone reads no clause");
+    assert_eq!(head_code, code);
     assert_eq!(b.clauses[0].kind, il::ClauseKind::Finally);
     assert_eq!((b.clauses[0].try_start, b.clauses[0].try_end), (0, 1));
     let (instrs, _) = il::decode(code);

@@ -27,6 +27,6 @@ fuzz_target!(|data: &[u8]| {
         _ = managed::listing(&program, m.token, usize::MAX);
         _ = managed::detail(&program, &analysis, m.token, 0);
     }
-    _ = markers_tsv(&program, &analysis);
+    _ = markers_tsv(&program, &analysis, "");
     _ = managed::methods_tsv(&program, &analysis, "");
 });

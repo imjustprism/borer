@@ -296,6 +296,8 @@ fn decryptors(meta: &Meta<'_>, index: &Managed, rows: &mut Vec<(String, &'static
 ///
 /// * `p` - The program.
 /// * `a` - Its analysis, which keeps the IL index.
+/// * `spec` - `offset=<n>` and `limit=<n>`, comma-separated; empty for the
+///   first [`super::CLR_PAGE`] rows.
 ///
 /// # Returns
 ///
@@ -304,8 +306,21 @@ fn decryptors(meta: &Meta<'_>, index: &Managed, rows: &mut Vec<(String, &'static
 ///
 /// # Errors
 ///
-/// When the program is no .NET assembly or its metadata was refused.
-pub fn markers_tsv(p: &Program, a: &Analysis) -> Result<String, String> {
+/// When the program is no .NET assembly, its metadata was refused, or the
+/// page does not read.
+pub fn markers_tsv(p: &Program, a: &Analysis, spec: &str) -> Result<String, String> {
+    let (mut offset, mut limit) = (0, super::CLR_PAGE);
+    for word in spec.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        if let Some(n) = word.strip_prefix("offset=") {
+            offset = crate::table::row_offset(n)?;
+        } else if let Some(n) = word.strip_prefix("limit=") {
+            limit = crate::table::row_limit(n)?.min(super::CLR_PAGE);
+        } else {
+            return Err(format!(
+                "borer://clr/markers takes offset= and limit=, not {word}"
+            ));
+        }
+    }
     let meta = Meta::open(p)?;
     let index = Managed::of(p, a);
     let mut rows = Vec::new();
@@ -328,8 +343,15 @@ pub fn markers_tsv(p: &Program, a: &Analysis) -> Result<String, String> {
         out.push_str("# no marker: no obfuscator's names, renaming, undecodable bodies, proxies or string decryptor seen\n");
         return Ok(out);
     }
+    let start = offset.min(rows.len());
+    let _ = writeln!(
+        out,
+        "# showing {} of {} from {start}",
+        rows.len().saturating_sub(start).min(limit),
+        rows.len()
+    );
     out.push_str("marker\tstrength\tevidence\n");
-    for (marker, strength, evidence) in rows {
+    for (marker, strength, evidence) in rows.into_iter().skip(start).take(limit) {
         let _ = writeln!(out, "{marker}\t{strength}\t{evidence}");
     }
     Ok(out)
