@@ -869,7 +869,7 @@ pub(crate) struct LiveScanParams {
     pub(crate) module: Option<String>,
     /// Hits to skip.
     pub(crate) offset: Option<u32>,
-    /// Max rows (default 50, max 500).
+    /// Max rows (default 50, max 500; path 20, 200).
     pub(crate) limit: Option<u32>,
     /// Header line only.
     pub(crate) count_only: Option<bool>,

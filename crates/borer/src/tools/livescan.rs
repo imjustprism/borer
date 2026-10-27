@@ -231,8 +231,8 @@ impl BorerServer {
         }): Parameters<LiveScanParams>,
     ) -> Result<String, ErrorData> {
         must_fit_a_row(&name, Annotation::Name)?;
-        let page = Page::new(offset, limit, count_only, 50, 500)?;
         if compare == Some(ScanCompare::Path) {
+            let page = Page::new(offset, limit, count_only, 20, path::PAGE_MAX)?;
             if kind.is_some() || tolerance.is_some() || scope.is_some() {
                 return Err(err_params(
                     "compare=path takes value, module and paging, not kind, tolerance or scope",
@@ -244,13 +244,13 @@ impl BorerServer {
             if let Some(m) = module {
                 spec.push_str(&format!(",module={m}"));
             }
-            let rows = page.limit.n.min(path::PAGE_MAX);
-            spec.push_str(&format!(",offset={},limit={rows}", page.offset));
+            spec.push_str(&format!(",offset={},limit={}", page.offset, page.limit.n));
             if page.count_only {
                 spec.push_str(",count_only");
             }
-            return self.livepath_text(&spec);
+            return self.livepath_text(&spec).map(|text| page.limit.noted(text));
         }
+        let page = Page::new(offset, limit, count_only, 50, 500)?;
         self.with_live(|s| {
             if compare.is_none() && value.is_none() {
                 let set = s.scans.get(&name).ok_or_else(|| {
@@ -506,7 +506,7 @@ mod tests {
             .live_scan(Parameters(LiveScanParams {
                 compare: Some(ScanCompare::Path),
                 value: Some(format!("{target},depth=2,max_offset=0x100")),
-                limit: Some(200),
+                limit: Some(500),
                 ..scan("chains")
             }))
             .expect("the chains");
@@ -530,7 +530,10 @@ mod tests {
             "{chains}\nROOT {root} outer {:p}\n{held}",
             outer.as_ptr()
         );
-        assert!(chains.starts_with("# showing "), "{chains}");
+        assert!(
+            chains.starts_with("# limit 500 capped at 200\n# showing "),
+            "{chains}"
+        );
         server.live_detach().expect("detach");
         drop((inner, outer));
     }
