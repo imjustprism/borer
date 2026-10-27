@@ -556,8 +556,35 @@ impl BorerServer {
         &self,
         f: impl FnOnce(&Program, &Analysis) -> Result<String, String>,
     ) -> Result<String, ErrorData> {
-        let a = self.analysis_or_empty();
-        self.with_program(|p| f(p, &a))
+        self.with_program(|p| f(p, &self.analysis_or_empty()))
+    }
+
+    /// Answers through [`Self::with_managed`] with what `pick` read off the
+    /// program loaded now, refusing when another binary was loaded between
+    /// the pick and the answer, so no token meets another file.
+    ///
+    /// # Arguments
+    ///
+    /// * `pick` - What the request names, `None` when it names no managed
+    ///   code.
+    /// * `f` - The answer for what was picked.
+    ///
+    /// # Returns
+    ///
+    /// The answer, `None` when nothing is loaded or `pick` found nothing.
+    fn managed_pick<T>(
+        &self,
+        pick: impl FnOnce(&Program) -> Option<T>,
+        f: impl FnOnce(&Program, &Analysis, T) -> Result<String, String>,
+    ) -> Option<Result<String, ErrorData>> {
+        let picked_from = self.loaded()?;
+        let picked = pick(&picked_from)?;
+        Some(self.with_managed(|p, a| {
+            if !std::ptr::eq(p, Arc::as_ptr(&picked_from)) {
+                return Err("another binary was loaded during the request; ask again".to_owned());
+            }
+            f(p, a, picked)
+        }))
     }
 
     /// Answers a request naming .NET members ([`Self::managed_targets`])
@@ -577,8 +604,10 @@ impl BorerServer {
         text: &str,
         f: impl FnOnce(&Program, &Analysis, &BTreeSet<u32>) -> Result<String, String>,
     ) -> Option<Result<String, ErrorData>> {
-        let targets = self.managed_targets(&*self.loaded()?, text)?;
-        Some(self.with_managed(|p, a| f(p, a, &targets)))
+        self.managed_pick(
+            |p| self.managed_targets(p, text),
+            |p, a, targets| f(p, a, &targets),
+        )
     }
 
     /// Answers a request naming an IL method ([`Self::il_method`]) through
@@ -598,8 +627,7 @@ impl BorerServer {
         text: &str,
         f: impl FnOnce(&Program, &Analysis, u32) -> Result<String, String>,
     ) -> Option<Result<String, ErrorData>> {
-        let token = self.il_method(&*self.loaded()?, text)?;
-        Some(self.with_managed(|p, a| f(p, a, token)))
+        self.managed_pick(|p| self.il_method(p, text), f)
     }
 
     /// Resolves an argument to the function to decompile, starting one at an
