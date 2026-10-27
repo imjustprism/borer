@@ -275,7 +275,8 @@ impl<'a> Meta<'a> {
     }
 
     /// Reads `n` types, at most [`PARAMS_MAX`] of them kept, `None` when
-    /// the blob ends first.
+    /// the blob ends first; a type that reads no byte (the fuel or depth
+    /// spent) ends the list with `...`.
     fn types(&self, b: &mut Blob<'_>, n: u32, depth: u8) -> Option<Vec<String>> {
         let mut out = Vec::new();
         for i in 0..n {
@@ -284,7 +285,12 @@ impl<'a> Meta<'a> {
                 b.byte();
                 out.push("...".to_owned());
             }
+            let at = b.at;
             let t = self.ty(b, depth);
+            if b.at == at {
+                out.push("...".to_owned());
+                break;
+            }
             if saturating_usize(u64::from(i)) < PARAMS_MAX {
                 out.push(t);
             }

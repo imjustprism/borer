@@ -226,26 +226,7 @@ fn tables(a: &mut Asm) {
     }
     let (key, key_sig) = (a.s("key"), a.b(&[0x06, 0x0e]));
     a.row(0x04, &[c2(0x16), key, key_sig]);
-    let at = |off: u32| c4(TEXT_RVA + off);
-    let defs: [MethodRow<'_>; 7] = [
-        (at(0x50), 0, 0x16, "Main", &[0, 0, 1]),
-        (at(0xb0), 0, 0x16, "Download", &[0, 1, 0x0e, 0x0e]),
-        (
-            c4(0),
-            0x80,
-            0x2016,
-            "VirtualAlloc",
-            &[0, 4, 0x18, 0x18, 0x19, 0x09, 0x09],
-        ),
-        (at(0xc0), 0, 0x16, "Decrypt", &[0, 1, 0x0e, 0x08]),
-        (at(0xe0), 0, 0x1886, ".ctor", &[0x20, 1, 1, 0x0e]),
-        (at(0xf0), 0, 0x16, "Generic", &[0, 0, 1]),
-        (at(0xb0), 0, 0x16, "Again", &[0, 1, 0x0e, 0x0e]),
-    ];
-    for (rva, implf, flags, name, sig) in defs {
-        let (n, s) = (a.s(name), a.b(sig));
-        a.row(0x06, &[rva, c2(implf), c2(flags), n, s, c2(1)]);
-    }
+    methods(a);
     let refs: [(u16, &str, &[u8]); 3] = [
         (2, ".ctor", &[0x20, 0, 1]),
         (2, "DownloadString", &[0x20, 1, 0x0e, 0x0e]),
@@ -296,6 +277,40 @@ fn tables(a: &mut Asm) {
             c2(0),
         ],
     );
+}
+
+/// Adds the `MethodDef` rows.
+///
+/// They are `Main`, `Download`, the `VirtualAlloc` P/Invoke, `Decrypt`, the
+/// attribute's constructor, `Generic` and `Again`, which shares
+/// `Download`'s body under a signature stating half a billion parameters.
+fn methods(a: &mut Asm) {
+    let at = |off: u32| c4(TEXT_RVA + off);
+    let defs: [MethodRow<'_>; 7] = [
+        (at(0x50), 0, 0x16, "Main", &[0, 0, 1]),
+        (at(0xb0), 0, 0x16, "Download", &[0, 1, 0x0e, 0x0e]),
+        (
+            c4(0),
+            0x80,
+            0x2016,
+            "VirtualAlloc",
+            &[0, 4, 0x18, 0x18, 0x19, 0x09, 0x09],
+        ),
+        (at(0xc0), 0, 0x16, "Decrypt", &[0, 1, 0x0e, 0x08]),
+        (at(0xe0), 0, 0x1886, ".ctor", &[0x20, 1, 1, 0x0e]),
+        (at(0xf0), 0, 0x16, "Generic", &[0, 0, 1]),
+        (
+            at(0xb0),
+            0,
+            0x16,
+            "Again",
+            &[0, 0xdf, 0xff, 0xff, 0xff, 1, 0x12, 6, 0x08],
+        ),
+    ];
+    for (rva, implf, flags, name, sig) in defs {
+        let (n, s) = (a.s(name), a.b(sig));
+        a.row(0x06, &[rva, c2(implf), c2(flags), n, s, c2(1)]);
+    }
 }
 
 /// A `TypeSpec` whose 32 type arguments are itself, and a `MethodSpec`
@@ -473,8 +488,9 @@ fn the_markers_name_confuserex_and_the_decryptor() {
     );
 }
 
-/// A type whose arguments refer back to itself renders bounded, and a
-/// generic instantiation of a method names its type arguments.
+/// A type whose arguments refer back to itself renders bounded, as does a
+/// signature stating half a billion parameters, and a generic
+/// instantiation of a method names its type arguments.
 #[test]
 fn a_self_referring_type_renders_bounded() {
     let p = load(None);
@@ -488,6 +504,12 @@ fn a_self_referring_type_renders_bounded() {
         "{text}"
     );
     assert!(text.len() < 8192, "{} bytes", text.len());
+    let again = managed::listing(&p, 0x0600_0007, 100).expect("Again lists");
+    assert!(
+        again.contains("ConfusedByAttribute::Again(System.Object<"),
+        "{again}"
+    );
+    assert!(again.len() < 8192, "{} bytes", again.len());
 }
 
 /// No byte of a body set to anything makes reading, listing or indexing
