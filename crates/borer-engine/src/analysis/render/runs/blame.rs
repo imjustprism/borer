@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 
 use super::vectors::VERIFY_SEED;
 use super::{BUDGET_MAX, Bisected, INPUTS_MAX, bisect_iso, within_total};
+use crate::analysis::decompile::Pass;
 use crate::analysis::render::diff::{DIFF_FN_MAX_LINES, line_diff, render_collapsed};
 use crate::analysis::render::*;
 use crate::text::one_line;
@@ -17,6 +18,14 @@ const BLAME_STEPS: usize = 20_000;
 
 /// Lines of the before-and-after diff a blame shows.
 const BLAME_DIFF_LINES: usize = 60;
+
+/// Most times a bisection runs its inputs: the full text, the text with
+/// no pass, one probe per halving of [`Pass::ALL`], and the full text
+/// with the blamed pass alone left out.
+fn bisect_runs() -> usize {
+    let halvings = Pass::ALL.len().next_power_of_two().trailing_zeros();
+    3usize.saturating_add(usize::try_from(halvings).unwrap_or(usize::MAX))
+}
 
 /// Names the first text cleanup pass that breaks a function, the input it
 /// differs on, and whether leaving that pass out alone repairs it.
@@ -33,7 +42,9 @@ const BLAME_DIFF_LINES: usize = 60;
 /// * `o` - User names, types and passes.
 /// * `spec` - `<function>[,count=N][,steps=N]`: the function by address or
 ///   name, how many inputs (1 to 64, 64 by default) and the steps each run
-///   is given (20000 by default).
+///   is given (20000 by default). The bisection runs the inputs up to
+///   [`bisect_runs`] times, and all of them together must stay within the
+///   steps one request runs.
 ///
 /// # Returns
 ///
@@ -42,9 +53,9 @@ const BLAME_DIFF_LINES: usize = 60;
 ///
 /// # Errors
 ///
-/// For an arm program, a spec that does not read, a target that names no
-/// function, or a function whose text does not decompile or whose
-/// signature types no inputs.
+/// For an arm program, a spec that does not read or asks for more steps
+/// than one request runs, a target that names no function, or a function
+/// whose text does not decompile or whose signature types no inputs.
 pub fn blame_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     x86_only(p, "blame")?;
     let (target, rest) = spec_head(spec);
@@ -74,7 +85,12 @@ pub fn blame_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             }
         }
     }
-    within_total(count, budget)?;
+    within_total(count.saturating_mul(bisect_runs()), budget).map_err(|_| {
+        format!(
+            "blame runs its {count} inputs up to {} times while it bisects, past the steps one request runs at {budget} steps each; lower steps= or count=",
+            bisect_runs()
+        )
+    })?;
     let name = name_of(a, o, entry);
     let found = bisect_iso(p, a, o, entry, count, VERIFY_SEED, budget)
         .map_err(|why| format!("blame cannot check {name} ({entry:#x}): {why}"))?;
@@ -125,6 +141,12 @@ fn blame_report(name: &str, entry: u64, count: usize, budget: usize, found: &Bis
             });
             let before: Vec<&str> = texts.0.lines().take(DIFF_FN_MAX_LINES).collect();
             let after: Vec<&str> = texts.1.lines().take(DIFF_FN_MAX_LINES).collect();
+            if texts.0.lines().count().max(texts.1.lines().count()) > DIFF_FN_MAX_LINES {
+                let _ = writeln!(
+                    out,
+                    "# the texts run past {DIFF_FN_MAX_LINES} lines and only those are compared, so a change past them is not shown"
+                );
+            }
             let mut diff = String::new();
             render_collapsed(&mut diff, &line_diff(&before, &after));
             let total = diff.lines().count();
@@ -249,5 +271,37 @@ c;
         assert!(text.contains("repairs	no"), "{text}");
         assert!(text.contains("(showing 60 of 400 lines)"), "{text}");
         assert!(text.lines().count() < 70, "{text}");
+    }
+
+    /// Texts longer than the diff compares say that a change past the
+    /// compared lines is not shown.
+    ///
+    /// # Panics
+    ///
+    /// When the note is missing.
+    #[test]
+    fn a_text_past_the_compared_lines_says_so() {
+        let long: String = (0..1600)
+            .map(|k| {
+                format!(
+                    "x{k};
+"
+                )
+            })
+            .collect();
+        let found = Bisected::Broke {
+            pass: Pass::FoldJumps,
+            at: at(),
+            alone: true,
+            texts: (
+                long.clone(),
+                format!(
+                    "{long}y;
+"
+                ),
+            ),
+        };
+        let text = blame_report("f", 0x1000, 8, 100, &found);
+        assert!(text.contains("# the texts run past 1500 lines"), "{text}");
     }
 }

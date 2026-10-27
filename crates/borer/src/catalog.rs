@@ -292,7 +292,7 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://blame/{spec}",
-        "Which text cleanup pass breaks a function: <function>[,count=N][,steps=N]. Its text is run as ISO C beside the binary on inputs drawn from its signature (64 by default, at most 64; 20000 steps each by default) and the passes are bisected: `pass` names the first one whose text differs, with the input and line it differs on, whether leaving it out alone repairs the function and the lines it changed (at most 60); `agrees` when no input differs; `before-passes` when the text differs with every pass left out. x86 and x64 only; refused, with the reason, when the text does not read or its signature types no inputs",
+        "Which text cleanup pass breaks a function: <function>[,count=N][,steps=N]. Its text is run as ISO C beside the binary on inputs drawn from its signature (64 by default, at most 64; 20000 steps each by default) and the passes are bisected, running the inputs up to 9 times, together within the 100000000 steps one request runs: `pass` names the first one whose text differs, with the input and line it differs on, whether leaving it out alone repairs the function and the lines it changed (at most 60); `agrees` when no input differs; `before-passes` when the text differs with every pass left out. x86 and x64 only; refused, with the reason, when the text does not read or its signature types no inputs",
         "borer://blame/{entry}",
     ),
     (
