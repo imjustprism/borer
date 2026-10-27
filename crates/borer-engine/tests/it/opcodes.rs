@@ -60,6 +60,8 @@ const MODE_SWITCH: u64 = 0x401560;
 /// A serializer handing [`GET_MODE`], which stores nothing, a constant
 /// before its writes: not a sender.
 const CONFIG_SENDER: u64 = 0x401600;
+/// Handler storing a word [`READ_RET`] returns at object offset 0x30.
+const H_RET: u64 = 0x401640;
 /// The jump table's address in `.rdata`.
 const TABLE: u64 = 0x402000;
 
@@ -217,12 +219,37 @@ fn returning_reader() -> Vec<u8> {
     .0
 }
 
+/// Assembles [`H_RET`]: `object->field_0x30 = read_u16(stream)`.
+fn returning_handler() -> Vec<u8> {
+    asm(H_RET, |a| {
+        a.push(dword_ptr(esp + 4)).expect("push");
+        a.call(READ_RET).expect("call");
+        a.add(esp, 4).expect("add");
+        a.mov(ecx, dword_ptr(esp + 8)).expect("mov");
+        a.mov(dword_ptr(ecx + 0x30), eax).expect("mov");
+        a.ret().expect("ret");
+        Vec::new()
+    })
+    .0
+}
+
+/// Assembles [`GET_MODE`]: returns the word at offset 8 of its argument.
+fn mode_getter() -> Vec<u8> {
+    asm(GET_MODE, |a| {
+        a.mov(eax, dword_ptr(esp + 4)).expect("mov");
+        a.mov(eax, dword_ptr(eax + 8)).expect("mov");
+        a.ret().expect("ret");
+        Vec::new()
+    })
+    .0
+}
+
 /// Assembles a dispatcher on the value `reader` returns.
 ///
 /// Case 1 reads a `u32` into object offset 0x20 and stores a second
 /// returned value at offset 4, both in its record in order; case 2 calls
 /// [`H_A`] with the object where the stream belongs, case 3 calls [`H_B`]
-/// as it expects.
+/// as it expects, case 4 calls [`H_RET`].
 ///
 /// # Arguments
 ///
@@ -230,7 +257,7 @@ fn returning_reader() -> Vec<u8> {
 /// * `reader` - The function returning the switched value.
 fn returned_dispatcher(at: u64, reader: u64) -> Vec<u8> {
     asm(at, |a| {
-        let mut cases: Vec<CodeLabel> = (0..3).map(|_| a.create_label()).collect();
+        let mut cases: Vec<CodeLabel> = (0..4).map(|_| a.create_label()).collect();
         let mut done = a.create_label();
         a.push(esi).expect("push");
         a.push(edi).expect("push");
@@ -239,7 +266,7 @@ fn returned_dispatcher(at: u64, reader: u64) -> Vec<u8> {
         a.push(esi).expect("push");
         a.call(reader).expect("call");
         a.add(esp, 4).expect("add");
-        for (label, op) in cases.iter().zip([1, 2, 3]) {
+        for (label, op) in cases.iter().zip([1, 2, 3, 4]) {
             a.cmp(eax, op).expect("cmp");
             a.je(*label).expect("je");
         }
@@ -263,6 +290,9 @@ fn returned_dispatcher(at: u64, reader: u64) -> Vec<u8> {
         a.jmp(done).expect("jmp");
         a.set_label(&mut cases[2]).expect("label");
         pass_on(a, H_B);
+        a.jmp(done).expect("jmp");
+        a.set_label(&mut cases[3]).expect("label");
+        pass_on(a, H_RET);
         a.set_label(&mut done).expect("label");
         a.pop(edi).expect("pop");
         a.pop(esi).expect("pop");
@@ -345,7 +375,9 @@ fn program() -> Program {
     let mut code = vec![0xccu8; 0x1000];
     let mut put = |at: u64, bytes: &[u8]| {
         let off = usize::try_from(at - START).expect("offset");
-        code[off..off + bytes.len()].copy_from_slice(bytes);
+        let room = &mut code[off..off + bytes.len()];
+        assert!(room.iter().all(|&b| b == 0xcc), "{at:#x} overlaps");
+        room.copy_from_slice(bytes);
     };
     let (start, _) = asm(START, |a| {
         for f in [
@@ -417,17 +449,12 @@ fn program() -> Program {
         &serializer(SETUP_SENDER, Some((0x22, WRITE_U8)), true),
     );
     put(READ_RET, &returning_reader());
+    put(H_RET, &returning_handler());
     put(
         RETURNED_DISPATCH,
         &returned_dispatcher(RETURNED_DISPATCH, READ_RET),
     );
-    let (mode, _) = asm(GET_MODE, |a| {
-        a.mov(eax, dword_ptr(esp + 4)).expect("mov");
-        a.mov(eax, dword_ptr(eax + 8)).expect("mov");
-        a.ret().expect("ret");
-        Vec::new()
-    });
-    put(GET_MODE, &mode);
+    put(GET_MODE, &mode_getter());
     put(MODE_SWITCH, &returned_dispatcher(MODE_SWITCH, GET_MODE));
     put(
         CONFIG_SENDER,
@@ -585,6 +612,7 @@ fn a_returned_opcode_and_returned_reads_are_read_and_a_misfed_handler_is_not() {
             ("1".to_owned(), None, vec!["sub_401060", "sub_401480"]),
             ("2".to_owned(), Some(H_A), vec![]),
             ("3".to_owned(), Some(H_B), vec!["sub_401060"]),
+            ("4".to_owned(), Some(H_RET), vec!["sub_401480"]),
         ],
         "{d:?}"
     );

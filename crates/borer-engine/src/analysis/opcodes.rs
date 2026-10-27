@@ -108,7 +108,7 @@ impl Case {
     /// stream that write nothing borer sees.
     #[must_use]
     pub fn reads(&self) -> bool {
-        self.fields.iter().any(|f| f.bytes > 0 || f.kind != "?")
+        sized(&self.fields)
     }
 }
 
@@ -360,8 +360,18 @@ fn first_call(
         .min()
 }
 
-/// Tells whether `handler` reads its schema off the argument `call` hands
-/// it `stream` in: the schema's stream is the parameter at that position.
+/// Tells whether a record holds a read borer can size: a field of known
+/// kind or width, not only calls handed the stream that write nothing
+/// borer sees.
+///
+/// # Arguments
+///
+/// * `fields` - The record.
+fn sized(fields: &[Field]) -> bool {
+    fields.iter().any(|f| f.bytes > 0 || f.kind != "?")
+}
+
+/// Returns a handler's text and the parameter `call` hands it `stream` in.
 ///
 /// # Arguments
 ///
@@ -369,37 +379,35 @@ fn first_call(
 /// * `analysis` - Discovery results.
 /// * `overlay` - Names in force.
 /// * `handler` - The handler's entry.
-/// * `read_from` - The schema's stream, as [`super::schema::Schema::stream`]
-///   spells it: the parameter first.
 /// * `call` - The case's call of the handler.
 /// * `stream` - The dispatcher's stream.
-fn fed_by(
+///
+/// # Returns
+///
+/// `None` when the handler does not decompile or declares no parameter at
+/// the stream's position.
+fn handler_input(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     handler: u64,
-    read_from: &str,
     call: &Call,
     stream: &str,
-) -> bool {
-    let Some(text) = plain_text_cached(program, analysis, overlay, overlay.fingerprint(), handler)
-    else {
-        return false;
-    };
-    let param = read_from.split(' ').next().unwrap_or_default();
-    signature_line(&text)
-        .map(declared_names)
-        .and_then(|names| names.iter().position(|n| n == param))
-        .and_then(|k| call.args.get(k))
-        .is_some_and(|a| a == stream)
+) -> Option<(String, String)> {
+    let text = plain_text_cached(program, analysis, overlay, overlay.fingerprint(), handler)?;
+    let at = call.args.iter().position(|a| a == stream)?;
+    let param = declared_names(signature_line(&text)?).into_iter().nth(at)?;
+    Some((text, param))
 }
 
-/// Reads one case: the handler it hands the stream to with that handler's
-/// schema, or else the reads the case makes off the stream itself.
+/// Reads one case: the handler it hands the stream to with what that
+/// handler reads off the parameter it receives the stream in, or else the
+/// reads the case makes off the stream itself.
 ///
-/// A handler whose schema reads a parameter other than the one the case
-/// hands the stream in has no record here: its reads are off another
-/// input.
+/// The handler's record is its reads off that parameter, returned reads
+/// included; failing those, its [`schema_of`] when that schema's stream is
+/// the same parameter. A handler that reads only another input has no
+/// record here.
 ///
 /// # Arguments
 ///
@@ -425,15 +433,31 @@ fn case_of(
         .collect();
     if let [one] = passing.as_slice()
         && let Ok(handler) = resolve(program, analysis, overlay, &one.callee)
-        && let Some(s) = schema_of(program, analysis, overlay, handler)
-        && !s.fields.is_empty()
     {
-        let fed = fed_by(program, analysis, overlay, handler, &s.stream, one, stream);
-        return Case {
-            labels,
-            handler: Some(handler),
-            fields: if fed { s.fields } else { Vec::new() },
-        };
+        let input = handler_input(program, analysis, overlay, handler, one, stream);
+        let direct = input.as_ref().map_or_else(Vec::new, |(text, param)| {
+            reads_in(program, analysis, overlay, text, param)
+        });
+        let schema = schema_of(program, analysis, overlay, handler).filter(|s| sized(&s.fields));
+        if sized(&direct) || schema.is_some() {
+            let fields = if sized(&direct) {
+                direct
+            } else {
+                schema
+                    .filter(|s| {
+                        input
+                            .as_ref()
+                            .is_some_and(|(_, p)| s.stream.split(' ').next() == Some(p.as_str()))
+                    })
+                    .map(|s| s.fields)
+                    .unwrap_or_default()
+            };
+            return Case {
+                labels,
+                handler: Some(handler),
+                fields,
+            };
+        }
     }
     Case {
         labels,
@@ -818,15 +842,8 @@ pub fn send_of(
         };
         let opcode = literal(strip_casts(value)).filter(|_| is_ident(stream))?;
         let earlier = calls[..at].iter().any(|c| c.args.first() == Some(stream));
-        let later = calls[at + 1..].iter().any(|c| {
-            c.args.first() == Some(stream)
-                && c.args
-                    .iter()
-                    .skip(1)
-                    .any(|a| literal(strip_casts(a)).is_none())
-        });
         let writer = resolve(program, analysis, overlay, &first.callee).ok()?;
-        if earlier || !later || analysis.function(writer).is_none_or(|f| f.thunk.is_some()) {
+        if earlier || analysis.function(writer).is_none_or(|f| f.thunk.is_some()) {
             return None;
         }
         let encoding = encoding_through(program, analysis, overlay, entry, stream).filter(|e| {

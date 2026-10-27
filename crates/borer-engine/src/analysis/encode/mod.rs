@@ -800,7 +800,8 @@ impl<'a> Ctx<'a> {
     }
 
     /// Returns the kind and bits a primitive writer puts its value parameter
-    /// on the wire at: the width of a store of the parameter in its text.
+    /// on the wire at: the width of a store of it through the stream, the
+    /// first parameter, in its text.
     ///
     /// A writer that hands nothing on to a stream of its own stores the
     /// value it is given itself; a helper that only computes with it
@@ -825,12 +826,11 @@ impl<'a> Ctx<'a> {
                 self.overlay_key,
                 entry,
             )?;
-            let name = declared_names(signature_line(&text)?)
-                .into_iter()
-                .nth(index)?;
+            let names = declared_names(signature_line(&text)?);
+            let (stream, name) = (names.first()?, names.get(index)?);
             text.lines().find_map(|line| {
                 let (lhs, rhs) = line.trim().split_once(" = ")?;
-                (rhs.trim_end_matches(';') == name).then_some(())?;
+                (rhs.trim_end_matches(';') == name && has_word(lhs, stream)).then_some(())?;
                 let (ty, _) = lhs.strip_prefix("*(")?.split_once("*)")?;
                 let bits = u64::try_from(scalar_bytes(ty.trim())?).ok()? * 8;
                 Some((fixed_kind(bits, Some(ty.trim())), bits))
