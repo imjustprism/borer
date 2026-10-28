@@ -191,7 +191,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked -p borer-engine -p borer-live -p borer
 
-  # npm: borer-re and its four platform packages (scripts/dev/packages.py).
+  # npm: @imjustprism/borer and its four platform packages (scripts/dev/packages.py).
   # The Linux pair is installed and run before anything is published; a
   # package whose version npm already has (a rerun) is left alone.
   npm:
@@ -214,15 +214,15 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           npm init -y > /dev/null
-          npm pack "$GITHUB_WORKSPACE/npm/borer-re" "$GITHUB_WORKSPACE/npm/borer-re-linux-x64"
-          npm install --no-audit --no-fund ./borer-re-*.tgz
-          npx --no-install borer-re --version
+          npm pack "$GITHUB_WORKSPACE/npm/@imjustprism/borer" "$GITHUB_WORKSPACE/npm/@imjustprism/borer-linux-x64"
+          npm install --no-audit --no-fund ./imjustprism-borer-*.tgz
+          npx --no-install borer --version
       - name: publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           echo "//registry.npmjs.org/:_authToken=\${NODE_AUTH_TOKEN}" > ~/.npmrc
-          for dir in npm/borer-re-*/ npm/borer-re/; do
+          for dir in npm/@imjustprism/borer-*/ npm/@imjustprism/borer/; do
             spec=$(node -p "const p = require('./${dir}package.json'); p.name + '@' + p.version")
             if npm view "$spec" version > /dev/null 2>&1; then
               echo "$spec is already published"

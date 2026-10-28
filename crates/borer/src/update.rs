@@ -266,16 +266,16 @@ fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<String> {
     } else if has("/scoop/apps/") {
         "scoop update borer"
     } else if has("/_npx/") {
-        "npx -y borer-re@latest"
+        "npx -y @imjustprism/borer@latest"
     } else if has("/npm/node_modules/") || has("/lib/node_modules/") {
-        "npm install -g borer-re@latest"
+        "npm install -g @imjustprism/borer@latest"
     } else if has("/node_modules/") {
         let project = exe
             .ancestors()
             .find(|a| a.file_name().is_some_and(|n| n == "node_modules"))
             .and_then(Path::parent)?;
         return Some(format!(
-            "npm install borer-re@latest --prefix \"{}\"",
+            "npm install @imjustprism/borer@latest --prefix \"{}\"",
             shown(project)
         ));
     } else if in_cargo || has("/.cargo/bin/") {
@@ -725,20 +725,20 @@ mod tests {
                 Some("scoop update borer"),
             ),
             (
-                "/home/a/.npm/_npx/1f2e/node_modules/borer-re-linux-x64/bin/borer",
-                Some("npx -y borer-re@latest"),
+                "/home/a/.npm/_npx/1f2e/node_modules/@imjustprism/borer-linux-x64/bin/borer",
+                Some("npx -y @imjustprism/borer@latest"),
             ),
             (
-                "/usr/lib/node_modules/borer-re-linux-x64/bin/borer",
-                Some("npm install -g borer-re@latest"),
+                "/usr/lib/node_modules/@imjustprism/borer-linux-x64/bin/borer",
+                Some("npm install -g @imjustprism/borer@latest"),
             ),
             (
-                r"C:\Users\a\AppData\Roaming\npm\node_modules\borer-re-win32-x64\bin\borer.exe",
-                Some("npm install -g borer-re@latest"),
+                r"C:\Users\a\AppData\Roaming\npm\node_modules\@imjustprism\borer-win32-x64\bin\borer.exe",
+                Some("npm install -g @imjustprism/borer@latest"),
             ),
             (
-                "/home/a/proj/node_modules/borer-re-linux-x64/bin/borer",
-                Some("npm install borer-re@latest --prefix \"/home/a/proj\""),
+                "/home/a/proj/node_modules/@imjustprism/borer-linux-x64/bin/borer",
+                Some("npm install @imjustprism/borer@latest --prefix \"/home/a/proj\""),
             ),
             ("/home/a/.cargo/bin/borer", Some("cargo install borer")),
             (

@@ -7,8 +7,9 @@ credential exists. Nothing here is set up yet. Do the steps in order; each
 ends with one command that shows it worked. GitHub secrets and variables go
 under the borer repository's Settings > Secrets and variables > Actions.
 
-All names below are free as of 2026-10-28 (`borer` is taken on npm, hence
-`borer-re`).
+All names below are free as of 2026-10-28. `borer` is taken on npm, so the
+npm packages live under the scope `@imjustprism`, which is the npm user
+named `imjustprism`.
 
 ## 1. crates.io: `cargo install borer`, `cargo binstall borer`
 
@@ -26,10 +27,10 @@ version fails that job (crates.io refuses a version twice) and nothing else.
 Verify: `cargo binstall borer --no-confirm` (it takes the release archive
 named in `[package.metadata.binstall]` of `crates/borer/Cargo.toml`).
 
-## 2. npm: `npm install -g borer-re`, `npx -y borer-re`
+## 2. npm: `npm install -g @imjustprism/borer`, `npx -y @imjustprism/borer`
 
-1. Create an account at https://www.npmjs.com and turn on two-factor
-   authentication.
+1. Create the account `imjustprism` at https://www.npmjs.com (its name is
+   the scope) and turn on two-factor authentication.
 2. Access Tokens > Generate New Token > Granular Access Token: name
    `borer release`, Packages and scopes: Read and write, All packages (the
    five names do not exist yet, so they cannot be picked one by one), and
@@ -38,14 +39,15 @@ named in `[package.metadata.binstall]` of `crates/borer/Cargo.toml`).
    fails the npm job until it is replaced.
 3. Add it as the secret `NPM_TOKEN`.
 
-The next tag publishes `borer-re-win32-x64`, `borer-re-linux-x64`,
-`borer-re-darwin-x64`, `borer-re-darwin-arm64` and then `borer-re`, each
-with provenance. After the first publish, the token can be narrowed to those
+The next tag publishes `@imjustprism/borer-win32-x64`,
+`@imjustprism/borer-linux-x64`, `@imjustprism/borer-darwin-x64`,
+`@imjustprism/borer-darwin-arm64` and then `@imjustprism/borer`, each
+public and with provenance. After the first publish, the token can be narrowed to those
 five packages, or replaced by npm trusted publishing (each package's
 Settings > Trusted Publisher: GitHub Actions, `imjustprism/borer`,
 workflow `release.yml`), which needs no secret but a change to the npm job.
 
-Verify: `npx -y borer-re --version`
+Verify: `npx -y @imjustprism/borer --version`
 
 ## 3. PyPI: `pipx install borer`, `uvx borer`
 
