@@ -284,6 +284,8 @@ fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<String> {
         "pipx upgrade borer"
     } else if has("/uv/tools/") {
         "uv tool upgrade borer"
+    } else if has("/uv/cache/") || has("/.cache/uv/") {
+        "uvx borer@latest"
     } else if from_wheel(exe) {
         let python = exe.with_file_name(if cfg!(windows) {
             "python.exe"
@@ -302,18 +304,23 @@ fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<String> {
 
 /// A program's path as the first word of a command a person pastes.
 ///
-/// It is bare when it has no space, so any shell runs it, else quoted, and
-/// on Windows behind PowerShell's `&`, which a quoted program needs there.
+/// It is bare when every character is one no shell reads specially, so any
+/// shell runs it; else on Windows it is double-quoted behind PowerShell's
+/// `&`, which a quoted program needs there, and elsewhere single-quoted, a
+/// `'` inside written `'\''`.
 ///
 /// # Arguments
 ///
 /// * `path` - The program.
 fn program(path: &Path) -> String {
     let text = shown(path);
-    match (text.contains(' '), cfg!(windows)) {
-        (false, _) => text,
-        (true, true) => format!("& \"{text}\""),
-        (true, false) => format!("\"{text}\""),
+    let plain = text
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/\\._-:+@".contains(c));
+    match (plain, cfg!(windows)) {
+        (true, _) => text,
+        (false, true) => format!("& \"{text}\""),
+        (false, false) => format!("'{}'", text.replace('\'', r"'\''")),
     }
 }
 
@@ -330,7 +337,8 @@ fn shown(path: &Path) -> String {
 }
 
 /// Whether a wheel put this binary where it runs: its scripts folder sits
-/// beside a `site-packages` holding a `borer-*.dist-info`.
+/// beside a `site-packages` (Debian's `dist-packages`) holding a
+/// `borer-*.dist-info`.
 ///
 /// # Arguments
 ///
@@ -344,7 +352,9 @@ fn from_wheel(exe: &Path) -> bool {
         root.join("site-packages"),
         root.join("Lib").join("site-packages"),
     ];
-    sites.extend(lib("lib").map(|d| d.path().join("site-packages")));
+    for dir in lib("lib") {
+        sites.extend(["site-packages", "dist-packages"].map(|s| dir.path().join(s)));
+    }
     sites.iter().any(|site| {
         site.read_dir().into_iter().flatten().flatten().any(|e| {
             let name = e.file_name();
@@ -749,6 +759,14 @@ mod tests {
                 "/home/a/.local/share/uv/tools/borer/bin/borer",
                 Some("uv tool upgrade borer"),
             ),
+            (
+                "/home/a/.cache/uv/archive-v0/x1/bin/borer",
+                Some("uvx borer@latest"),
+            ),
+            (
+                r"C:\Users\a\AppData\Local\uv\cache\archive-v0\x1\Scripts\borer.exe",
+                Some("uvx borer@latest"),
+            ),
             ("/home/a/bin/borer", None),
         ];
         for (path, want) in cases {
@@ -779,10 +797,13 @@ mod tests {
         );
         std::fs::remove_dir_all(site.join("borer-0.2.5.dist-info")).expect("removed");
         assert_eq!(manager(&exe, None), None);
+        let debian = venv.join("lib").join("python3.11").join("dist-packages");
+        std::fs::create_dir_all(debian.join("borer-0.2.5.dist-info")).expect("dist-packages");
+        assert!(manager(&exe, None).is_some_and(|c| c.ends_with("-m pip install -U borer")));
         let _ = std::fs::remove_dir_all(&venv);
     }
 
-    /// A program path is bare without spaces and quoted with them, behind
+    /// A program path is bare when plain and quoted when not, behind
     /// PowerShell's `&` on Windows.
     ///
     /// # Panics
@@ -791,13 +812,17 @@ mod tests {
     #[test]
     fn a_program_path_is_quoted_only_when_it_must_be() {
         assert_eq!(program(Path::new("/v/bin/python")), "/v/bin/python");
-        let spaced = program(Path::new("/my env/bin/python"));
-        let want = if cfg!(windows) {
-            "& \"/my env/bin/python\""
-        } else {
-            "\"/my env/bin/python\""
-        };
-        assert_eq!(spaced, want);
+        for odd in ["/my env/bin/python", "/env(test)/bin/python", "/a$b/python"] {
+            let want = if cfg!(windows) {
+                format!("& \"{odd}\"")
+            } else {
+                format!("'{odd}'")
+            };
+            assert_eq!(program(Path::new(odd)), want);
+        }
+        if !cfg!(windows) {
+            assert_eq!(program(Path::new("/it's/python")), r"'/it'\''s/python'");
+        }
     }
 
     /// `SHA256SUMS` lines are read with or without the binary-mode star.
