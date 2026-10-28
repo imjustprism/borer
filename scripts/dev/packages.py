@@ -4,6 +4,7 @@
     gh release download v0.2.5 -R imjustprism/borer -D dist
     python scripts/dev/packages.py manifests dist [OUT]
     python scripts/dev/packages.py npm dist OUT
+    python scripts/dev/packages.py wheels dist OUT
 
 `manifests` writes the Homebrew formula and the Scoop manifest
 (`OUT/homebrew/borer.rb`, `OUT/scoop/borer.json`, `OUT` being `packaging/`
@@ -12,8 +13,11 @@ per npm package under `OUT`: `borer-mcp`, whose `borer-mcp` and `borer`
 commands run packaging/npm/borer-mcp.js, and `borer-mcp-<os>-<cpu>` per
 target, holding only that target's binary, its licenses and a package.json
 whose `os` and `cpu` let npm install it on that platform alone; `borer-mcp`
-names them all as optionalDependencies (the esbuild pattern). Every archive
-is checked against SHA256SUMS before it is read.
+names them all as optionalDependencies (the esbuild pattern). `wheels`
+writes one PyPI wheel of `borer` per target into `OUT`, the binary as the
+wheel's script so pip puts a `borer` command on PATH (the ruff and uv
+pattern), tagged with the platform the binary itself requires. Every
+archive is checked against SHA256SUMS before it is read.
 
 Nothing is published: the release workflow copies what this writes into the
 tap and bucket and publishes the packages.
@@ -21,10 +25,12 @@ tap and bucket and publishes the packages.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
 import re
+import struct
 import sys
 import tarfile
 import zipfile
@@ -274,6 +280,97 @@ def npm(assets: Path, out: Path) -> None:
     print(f"wrote {launcher}")
 
 
+def platform_tag(target: str, exe: bytes) -> str:
+    """Returns the wheel platform tag `target`'s binary requires.
+
+    On Linux that is the newest glibc symbol version the binary links
+    (`manylinux_2_<n>_x86_64`), on macOS the minimum system version its
+    `LC_BUILD_VERSION` or `LC_VERSION_MIN_MACOSX` load command names.
+
+    Args:
+        target: The Rust target the binary is built for.
+        exe: The binary.
+
+    Returns:
+        The tag. Exits when the binary does not name what the tag needs.
+    """
+    if "windows" in target:
+        return "win_amd64"
+    if "linux" in target:
+        minors = [int(m.group(1)) for m in re.finditer(rb"GLIBC_2\.(\d+)", exe)]
+        if not minors:
+            raise SystemExit(f"{target}: the binary names no glibc version")
+        return f"manylinux_2_{max(minors)}_x86_64"
+    arch = "arm64" if target.startswith("aarch64") else "x86_64"
+    magic, ncmds = struct.unpack_from("<I12xI", exe)
+    if magic != 0xFEEDFACF:
+        raise SystemExit(f"{target}: the binary is not a 64-bit little-endian Mach-O")
+    off = 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", exe, off)
+        if cmd in (0x32, 0x24):
+            minos = struct.unpack_from("<II", exe, off + 8)[cmd == 0x32]
+            return f"macosx_{minos >> 16}_{(minos >> 8) & 0xFF}_{arch}"
+        off += size
+    raise SystemExit(f"{target}: the binary names no minimum macOS version")
+
+
+def wheel(version: str, target: str, files: dict[str, bytes], out: Path) -> Path:
+    """Writes the `borer` wheel for one target and returns its path.
+
+    Args:
+        version: The release version, a plain PEP 440 release (`0.2.5`).
+        target: The Rust target.
+        files: The target's archive, from [`unpack`].
+        out: The directory to write the wheel into.
+    """
+    exe = files[binary(target)]
+    dist = f"borer-{version}"
+    info = f"{dist}.dist-info"
+    metadata = (
+        "Metadata-Version: 2.4\n"
+        f"Name: borer\nVersion: {version}\nSummary: {DESCRIPTION}\n"
+        f"License-Expression: {LICENSE}\n"
+        + "".join(f"License-File: {n}\n" for n in NOTICES)
+        + f"Project-URL: Source, {REPO}\n"
+        "Description-Content-Type: text/markdown\n\n" + ABOUT
+    )
+    tag = f"py3-none-{platform_tag(target, exe)}"
+    entries = [
+        (f"{dist}.data/scripts/{binary(target)}", exe, 0o755),
+        *((f"{info}/licenses/{n}", files[n], 0o644) for n in NOTICES),
+        (f"{info}/METADATA", metadata.encode(), 0o644),
+        (
+            f"{info}/WHEEL",
+            f"Wheel-Version: 1.0\nGenerator: borer packages.py\n"
+            f"Root-Is-Purelib: false\nTag: {tag}\n".encode(),
+            0o644,
+        ),
+    ]
+    record = ""
+    for name, data, _ in entries:
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
+        record += f"{name},sha256={digest},{len(data)}\n"
+    entries.append((f"{info}/RECORD", f"{record}{info}/RECORD,,\n".encode(), 0o644))
+    path = out / f"{dist}-{tag}.whl"
+    out.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data, mode in entries:
+            entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            entry.external_attr = (0o100000 | mode) << 16
+            z.writestr(entry, data, zipfile.ZIP_DEFLATED)
+    return path
+
+
+def wheels(assets: Path, out: Path) -> None:
+    """Writes the `borer` wheel of every target into `out`."""
+    version, archives = release(assets)
+    if not re.fullmatch(r"\d+(\.\d+)*", version):
+        raise SystemExit(f"version {version} is not a plain PEP 440 release; spell it for PyPI")
+    for target in TARGETS:
+        print(f"wrote {wheel(version, target, unpack(assets, *archives[target]), out)}")
+
+
 def main() -> None:
     """Runs the command the arguments name."""
     args = sys.argv[1:]
@@ -281,6 +378,8 @@ def main() -> None:
         manifests(Path(args[1]), Path(args[2]) if len(args) == 3 else ROOT / "packaging")
     elif len(args) == 3 and args[0] == "npm":
         npm(Path(args[1]), Path(args[2]))
+    elif len(args) == 3 and args[0] == "wheels":
+        wheels(Path(args[1]), Path(args[2]))
     else:
         raise SystemExit(__doc__)
 
